@@ -446,7 +446,9 @@ class Store:
         """Create a copy of ITEM in DESTINATION, then delete the original.
 
         When either step fails, the copy is deleted again, so the item stays
-        in VAULT and nothing is left behind in DESTINATION.
+        in VAULT and nothing is left behind in DESTINATION. A failed delete
+        that removed the item anyway still counts as a move. When the move
+        can't tell whether the delete happened, it keeps the copy.
 
         Raises:
             SecretsError: The move failed. The message says whether a copy
@@ -465,10 +467,28 @@ class Store:
         copy["vault"] = {"id": dst_id}
         try:
             created = self._backend.create(dst_id, copy)
-            self._backend.delete(src_id, item_id)
         except SecretsError:
             self._discard(dst_id, dst, title)
             raise
+        try:
+            self._backend.delete(src_id, item_id)
+        except SecretsError:
+            # A delete can fail after Connect has done it, and the copy is
+            # then the only one left.
+            try:
+                # By id alone: another item may have this id as its title.
+                listed = self._backend.items(src_id)
+                kept = any(_text(entry, "id") == item_id for entry in listed)
+            except SecretsError as exc:
+                message = (
+                    f"the move couldn't tell whether it deleted item {item!r}"
+                    f" from vault {vault!r}, so it kept the copy in vault"
+                    f" {destination!r}"
+                )
+                raise SecretsError(message) from exc
+            if kept:
+                self._discard(dst_id, dst, title)
+                raise
         return self._item(dst_id, dst, created)
 
     def _discard(self, vault_id: str, vault: str, title: str) -> None:
