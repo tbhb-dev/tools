@@ -21,8 +21,8 @@ failure prints as `path:line: problem`, and the exit code is 1 when there is
 any.
 
 ``check`` validates the frontmatter against the schema, requires a title that
-``cog verify`` accepts and that fits 72 characters (a squash merge turns it into
-a commit header), checks the H2 sections against
+``cog verify`` accepts and that fits 64 characters (a squash merge appends
+`` (#N)`` and the commit header must fit 72), checks the H2 sections against
 .github/pull-request-sections.toml (names, order, required, word limits), rejects
 leftover HTML comments and bare ``#N`` references, and lints the description
 with vale, cspell and rumdl under the repository's own configs.
@@ -77,7 +77,9 @@ SCHEMA = Path(".github") / "schemas" / "pull-request-draft.schema.json"
 SECTIONS = Path(".github") / "pull-request-sections.toml"
 # Config files each linter reads, mirrored into the temp tree by symlink.
 CONFIGS = (".vale.ini", ".vale", ".cspell.jsonc", ".cspell-words.txt", ".rumdl.toml")
-MAX_TITLE = 72
+# A squash merge appends " (#N)" and the header must fit 72; 64 leaves room
+# for a pull request number of up to four digits.
+MAX_TITLE = 72 - len(" (#9999)")
 GH = "gh"
 CLAUDE = "claude"
 CODEX = "codex"
@@ -500,11 +502,11 @@ def run(
     )
 
 
-def title_problems(title: str) -> list[str]:
-    """Why a title is not a Conventional Commit header that fits 72 characters."""
+def title_problems(title: str, limit: int = MAX_TITLE) -> list[str]:
+    """Why a title is not a Conventional Commit header that fits limit."""
     problems = []
-    if len(title) > MAX_TITLE:
-        problems.append(f"title is {len(title)} characters; the limit is {MAX_TITLE}")
+    if len(title) > limit:
+        problems.append(f"title is {len(title)} characters; the limit is {limit}")
     done = run([find_tool(COG), "verify", "--file", "-"], cwd=root(), stdin=title)
     if done.returncode != 0:
         why = " ".join(done.stderr.split())

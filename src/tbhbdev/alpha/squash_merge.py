@@ -357,7 +357,7 @@ def build_message(title: str, number: int, body: str) -> Message:
             or the trailer block does not survive git.
     """
     subject = f"{title} (#{number})"
-    if problems := pr.title_problems(subject):
+    if problems := pr.title_problems(subject, WIDTH):
         stop(f"the squash subject {subject!r} fails: {'; '.join(problems)}")
     lines, _ = pr.scan(body.splitlines(), 1)
     _, unclosed = pr.fence_flags(body.splitlines())
