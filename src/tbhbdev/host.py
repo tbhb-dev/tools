@@ -2274,7 +2274,11 @@ def cmd_exec(args: argparse.Namespace) -> int:
     this = socket.gethostname().split(".")[0].lower()
     if host is not None and host.lower() != this:
         argv = [*SSH, host, shlex.join(argv)]
-    return subprocess.call(argv)  # nosec B603
+    try:
+        return subprocess.call(argv)  # nosec B603
+    except FileNotFoundError:
+        message = f"{argv[0]}: command not found"
+        raise HostError(message) from None
 
 
 def _targets(parser: argparse.ArgumentParser) -> None:

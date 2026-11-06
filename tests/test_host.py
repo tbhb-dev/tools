@@ -1474,6 +1474,13 @@ def test_exec_operator_refuses_off_macos(
     assert world.stubs.calls() == []
 
 
+def test_exec_operator_reports_a_missing_command(
+    world: World, capfd: pytest.CaptureFixture[str]
+) -> None:
+    assert run(world, capfd, "exec", "--operator", "--", "no-such-command") == 1
+    assert world.err == f"{PROG}: no-such-command: command not found\n"
+
+
 @pytest.mark.parametrize(
     ("argv", "error"),
     [
