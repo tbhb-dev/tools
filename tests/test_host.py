@@ -2488,10 +2488,12 @@ def test_upgrade_again_changes_nothing(
     ready: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
     before = len(ready.stubs.calls())
+    checks = len(ready.checked)
     assert run(ready, capfd, "upgrade") == 0
     assert ready.out.splitlines()[0] == (
         f"host-b: clone example/app: ok: up to date at {sha('a1')[:12]}"
     )
+    assert ready.checked[checks:] == [ENDPOINTS] * (BOOTSTRAP_CHECKS - 1)
     calls = ready.stubs.calls()[before:]
     tools = {c["tool"] for c in calls}
     assert not tools & {"swift", "op", "dscl", "chmod", "install", "sudo-prompt"}
