@@ -774,6 +774,15 @@ def test_the_user_store_is_private(repo: Path, tmp_path: Path) -> None:
     assert sorted(p.name for p in user.iterdir()) == ["aaaaaaaaaaaaaaaa.json", "lock"]
 
 
+def test_a_user_store_it_cant_write_keeps_the_repository_record(repo: Path) -> None:
+    ai.user_store().parent.mkdir(parents=True)
+    ai.user_store().write_text("not a directory")
+    ai.write_record(ROOT, {"model": "m"}, repo)
+    path = repo / ".git" / "tbhb-alpha" / "sessions" / f"{'a' * 16}.json"
+    assert loaded(path) == {"model": "m"}
+    assert ai.user_store().read_text() == "not a directory"
+
+
 def test_the_user_store_follows_xdg_state_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2009,6 +2018,14 @@ def test_cmd_record_agy_edit(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert rec["harness"] == "antigravity"
     assert rec["model"] == "gemini-3.8-flash-low"
     assert rec["brain_root"] == str(brain)
+    name = f"{ai.hx(ai.sha256_64(CONV))}.json"
+    expected = {
+        "harness": "antigravity",
+        "model": "gemini-3.8-flash-low",
+        "brain_root": str(brain),
+    }
+    assert loaded(ai.user_store() / name) == expected
+    assert loaded(repo / ".git" / "tbhb-alpha" / "sessions" / name) == expected
     (got,) = receipts_of(repo, ai.sha256_64(CONV))
     assert (got["path"], got["effort"], got["surface"]) == ("hello.txt", "low", "cli")
     assert got["model"] == "gcp.gemini:gemini-3.8-flash"

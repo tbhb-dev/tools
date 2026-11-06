@@ -545,7 +545,7 @@ def write_record(sid_hash: str, updates: Json, cwd: Path | None = None) -> None:
     """Merge the non-empty ``updates`` into an agent's session record.
 
     The record goes to the store of the worktree containing ``cwd`` and to
-    the user's store, a 0700 directory of 0600 files.
+    the user's store.
     """
     state = state_dir(cwd)
     if not state:
@@ -558,16 +558,28 @@ def write_record(sid_hash: str, updates: Json, cwd: Path | None = None) -> None:
         rec = read_record(path)
         rec.update(known)
         write_json(path, rec)
+    write_user_record(sid_hash, known)
+
+
+def write_user_record(sid_hash: str, updates: Json) -> None:
+    """Merge ``updates`` into the user's store, a 0700 directory of 0600 files.
+
+    A store the hook can't write, such as one outside a sandbox, is skipped,
+    since the repository's store already holds the record.
+    """
     user = user_store()
-    # The chmod below sets the mode whatever this one was, so the pragma hides
-    # equivalent mutants. It's needed for a directory that already exists.
-    user.mkdir(mode=0o700, parents=True, exist_ok=True)  # pragma: no mutate
-    user.chmod(0o700)
     path = user / f"{hx(sid_hash)}.json"
-    with locked(user):
-        rec = read_record(path)
-        rec.update(known)
-        write_private_json(path, rec)
+    try:
+        # The chmod below sets the mode whatever this one was, so the pragma
+        # hides equivalent mutants. It's needed for a directory that exists.
+        user.mkdir(mode=0o700, parents=True, exist_ok=True)  # pragma: no mutate
+        user.chmod(0o700)
+        with locked(user):
+            rec = read_record(path)
+            rec.update(updates)
+            write_private_json(path, rec)
+    except OSError:
+        return
 
 
 def load_record(hashed: str, cwd: Path | None = None) -> Json:
@@ -1339,6 +1351,7 @@ def cmd_record(harness: str, env: Mapping[str, str]) -> int:
         if brain:
             rec["brain_root"] = str(Path(brain).parent)
         write_json(path, rec)
+    write_user_record(sha256_64(sid), rec)
     record_agy(sid, data, rec, env)
     return 0
 
