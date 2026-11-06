@@ -2,7 +2,8 @@
 
 The file is `tbhbdev/config.toml` in `$XDG_CONFIG_HOME`, which defaults to
 `.config` in the home directory. It names the 1Password account, the Connect
-server and endpoints, the agent hosts' tag and the vaults. The code has no
+server and endpoints, the agent hosts' tag, the vaults and the owners whose
+private repositories the gitleaks config covers. The code has no
 defaults for any of them: a missing file, key or value fails with a message
 that names the file and the `[table] key`.
 
@@ -33,13 +34,13 @@ def path() -> Path:
     return Path(base) / "tbhbdev" / "config.toml"
 
 
-def _load(table: str, key: str) -> dict[str, object]:
-    """The parsed file, which is read for [TABLE] KEY."""
+def _load(wanted: str) -> dict[str, object]:
+    """The parsed file, which is read for WANTED, such as `[table] key`."""
     where = path()
     try:
         text = where.read_bytes().decode()
     except FileNotFoundError as exc:
-        message = f"{where} doesn't exist; create it and set [{table}] {key}"
+        message = f"{where} doesn't exist; create it and set {wanted}"
         raise ConfigError(message) from exc
     try:
         return tomllib.loads(text)
@@ -50,12 +51,28 @@ def _load(table: str, key: str) -> dict[str, object]:
 
 def _value(table: str, key: str) -> object:
     where = path()
-    section = _load(table, key).get(table)
+    section = _load(f"[{table}] {key}").get(table)
     value = section.get(key) if isinstance(section, dict) else None
     if value is None:
         message = f"{where} sets no [{table}] {key}"
         raise ConfigError(message)
     return value
+
+
+def table(name: str) -> dict[str, object] | None:
+    """The config's [NAME] table, or None when the file has none.
+
+    Raises:
+        ConfigError: The file is missing or isn't TOML, or NAME isn't a table.
+    """
+    section = _load(f"[{name}]").get(name)
+    if section is None:
+        return None
+    if not isinstance(section, dict):
+        message = f"{path()}: {name} must be a table"
+        raise ConfigError(message)
+    values: dict[str, object] = section
+    return values
 
 
 def string(table: str, key: str) -> str:
@@ -120,7 +137,7 @@ def render(table: str, key: str, value: list[str]) -> str:
         ConfigError: The file is missing or isn't TOML, or holds a value
             outside a table or other than a string or a list of strings.
     """
-    data = _load(table, key)
+    data = _load(f"[{table}] {key}")
     data.setdefault(table, {})
     lines: list[str] = []
     for name, section in data.items():
