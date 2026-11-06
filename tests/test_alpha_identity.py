@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -80,6 +81,7 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_bin: Path) ->
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     for who in ("AUTHOR", "COMMITTER"):
@@ -725,14 +727,78 @@ def test_records_honor_the_cwd_argument(repo: Path, plain: Path) -> None:
     # `plain` is the working directory; `repo` is only reachable by argument.
     ai.write_record(ROOT, {"model": "m"}, repo)
     assert ai.load_record(ROOT, repo) == {"model": "m"}
-    assert ai.load_record(ROOT) == {}
+    assert loaded(repo / ".git" / "tbhb-alpha" / "sessions" / f"{'a' * 16}.json")
     assert list(plain.iterdir()) == []
+
+
+def test_a_session_is_known_in_another_clone(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ai.write_record(ROOT, {"model": "m", "effort": "low"}, repo)
+    other = init_repo(tmp_path / "other")
+    monkeypatch.chdir(other)
+    assert ai.load_record(ROOT) == {"model": "m", "effort": "low"}
+    assert ai.load_record(ROOT, other) == {"model": "m", "effort": "low"}
+    assert not (other / ".git" / "tbhb-alpha").exists()
+
+
+def test_the_repository_record_outranks_the_user_store(repo: Path) -> None:
+    ai.user_store().mkdir(parents=True)
+    ai.write_private_json(
+        ai.user_store() / f"{'a' * 16}.json", {"model": "u", "effort": "high"}
+    )
+    ai.write_json(
+        repo / ".git" / "tbhb-alpha" / "sessions" / f"{'a' * 16}.json", {"model": "m"}
+    )
+    assert ai.load_record(ROOT) == {"model": "m", "effort": "high"}
+
+
+def test_the_user_store_is_private(repo: Path, tmp_path: Path) -> None:
+    user = ai.user_store()
+    assert user == tmp_path / "home" / ".local" / "state" / "tbhbdev" / "tbhb-alpha"
+    user.mkdir(parents=True, mode=0o755)
+    user.chmod(0o755)
+    leftover = user / f"{'a' * 16}.json.{os.getpid()}.tmp"
+    leftover.write_text("")
+    leftover.chmod(0o644)
+    old = os.umask(0)
+    try:
+        ai.write_record(ROOT, {"model": "m"}, repo)
+        ai.write_record(ROOT, {"effort": "low"}, repo)
+    finally:
+        os.umask(old)
+    record = user / f"{'a' * 16}.json"
+    assert stat.S_IMODE(user.stat().st_mode) == 0o700
+    assert stat.S_IMODE(record.stat().st_mode) == 0o600
+    assert loaded(record) == {"model": "m", "effort": "low"}
+    assert sorted(p.name for p in user.iterdir()) == ["aaaaaaaaaaaaaaaa.json", "lock"]
+
+
+def test_a_user_store_it_cant_write_keeps_the_repository_record(repo: Path) -> None:
+    ai.user_store().parent.mkdir(parents=True)
+    ai.user_store().write_text("not a directory")
+    ai.write_record(ROOT, {"model": "m"}, repo)
+    path = repo / ".git" / "tbhb-alpha" / "sessions" / f"{'a' * 16}.json"
+    assert loaded(path) == {"model": "m"}
+    assert ai.user_store().read_text() == "not a directory"
+
+
+def test_the_user_store_follows_xdg_state_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    assert ai.user_store() == tmp_path / "state" / "tbhbdev" / "tbhb-alpha"
+    monkeypatch.setenv("XDG_STATE_HOME", "")
+    assert (
+        ai.user_store() == Path.home() / ".local" / "state" / "tbhbdev" / "tbhb-alpha"
+    )
 
 
 def test_records_outside_a_repository_are_noops(plain: Path) -> None:
     ai.write_record(ROOT, {"model": "m"})
     assert ai.load_record(ROOT) == {}
     assert list(plain.iterdir()) == []
+    assert not ai.user_store().exists()
 
 
 # ------------------------------------------------------------------ Claude
@@ -1952,6 +2018,14 @@ def test_cmd_record_agy_edit(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert rec["harness"] == "antigravity"
     assert rec["model"] == "gemini-3.8-flash-low"
     assert rec["brain_root"] == str(brain)
+    name = f"{ai.hx(ai.sha256_64(CONV))}.json"
+    expected = {
+        "harness": "antigravity",
+        "model": "gemini-3.8-flash-low",
+        "brain_root": str(brain),
+    }
+    assert loaded(ai.user_store() / name) == expected
+    assert loaded(repo / ".git" / "tbhb-alpha" / "sessions" / name) == expected
     (got,) = receipts_of(repo, ai.sha256_64(CONV))
     assert (got["path"], got["effort"], got["surface"]) == ("hello.txt", "low", "cli")
     assert got["model"] == "gcp.gemini:gemini-3.8-flash"
@@ -3784,7 +3858,10 @@ def test_store_is_read_from_the_same_names(
 
     monkeypatch.setattr(ai, "read_record", spy)
     ai.load_record(ROOT)
-    assert paths == [store / "sessions" / f"{ai.hx(ROOT)}.json"]
+    assert paths == [
+        ai.user_store() / f"{ai.hx(ROOT)}.json",
+        store / "sessions" / f"{ai.hx(ROOT)}.json",
+    ]
 
 
 def test_cmd_record_writes_the_sessions_directory(

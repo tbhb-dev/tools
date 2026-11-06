@@ -37,6 +37,7 @@ execv
 fakehost
 fakeop
 fakeoperator
+fchmod
 flatmap
 frontmatter
 genrule
@@ -136,6 +137,7 @@ worktrees
 writeattr
 writeextattr
 writesecurity
+wronly
 xdist
 xgenerated
 xgpt
