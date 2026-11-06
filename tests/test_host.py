@@ -2186,6 +2186,58 @@ def test_bootstrap_opens_the_workspace_to_devel_on_linux(
     assert f"host-c: created {root}" not in world.out
 
 
+@pytest.mark.parametrize(
+    ("missing", "named"),
+    [
+        (("setfacl",), "setfacl"),
+        (("getfacl",), "getfacl"),
+        (("getfacl", "setfacl"), "getfacl or setfacl"),
+    ],
+)
+def test_bootstrap_refuses_a_linux_host_without_the_acl_tools(
+    world: World,
+    config_file: Path,
+    capfd: pytest.CaptureFixture[str],
+    missing: tuple[str, ...],
+    named: str,
+) -> None:
+    with_workspace(config_file)
+    for tool in missing:
+        (world.stubs.bin / tool).unlink()
+    assert run(world, capfd, "bootstrap", "--host", "host-c") == 1
+    assert world.err == (
+        f"host-c: no {named}; install the acl package\n"
+        f"{PROG}: bootstrap failed on host-c\n"
+    )
+    assert world.root_scripts() == []
+    assert not (world.operator_home("host-c") / "Code").exists()
+    assert world.installed("host-c") is None
+
+
+def test_bootstrap_refuses_a_linux_host_whose_acl_check_fails(
+    world: World, config_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    with_workspace(config_file)
+    (world.stubs.bin / "setfacl").unlink()
+    (world.stubs.bin / "setfacl").write_text("#!/bin/sh\necho broken >&2\nexit 2\n")
+    (world.stubs.bin / "setfacl").chmod(0o755)
+    assert run(world, capfd, "bootstrap", "--host", "host-c") == 1
+    assert world.err == (
+        "host-c: cannot check for setfacl: broken\n"
+        f"{PROG}: bootstrap failed on host-c\n"
+    )
+    assert world.root_scripts() == []
+    assert not (world.operator_home("host-c") / "Code").exists()
+
+
+def test_bootstrap_without_a_workspace_needs_no_acl_tools(
+    world: World, capfd: pytest.CaptureFixture[str]
+) -> None:
+    for tool in host_tool.ACL_TOOLS:
+        (world.stubs.bin / tool).unlink()
+    assert run(world, capfd, "bootstrap", "--host", "host-c") == 0
+
+
 @pytest.mark.parametrize("host", ["host-a", "host-c"])
 def test_present_entries_are_not_added_again(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str], host: str

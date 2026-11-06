@@ -585,6 +585,9 @@ def ls(args: list[str]) -> None:
 
 
 def getfacl(args: list[str]) -> None:
+    if args == ["--version"]:
+        sys.stdout.write("getfacl 2.3.2\n")
+        return
     state = load()
     if "getfacl_error" in state:
         fail(f"getfacl: {state['getfacl_error']}")
@@ -611,6 +614,9 @@ def setfacl_one(acls: dict[str, list[str]], path: Path, spec: str) -> None:
 
 
 def setfacl(args: list[str]) -> None:
+    if args == ["--version"]:
+        sys.stdout.write("setfacl 2.3.2\n")
+        return
     need_root("setfacl")
     spec, paths = flag(args, "-m"), args[args.index("-m") + 2 :]
     state = load()
