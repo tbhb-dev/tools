@@ -1,0 +1,158 @@
+# Review edits to this file as security policy. Start from gitleaks' default
+# rules and allowlist only what is justified, each with a reason.
+[extend]
+useDefault = true
+
+# `gitleaks dir` walks the working directory without reading .gitignore, so
+# the build output and tool caches that a local checkout holds would be
+# scanned too. None of them is authored content, and none is tracked by git,
+# so the history scan never sees them either.
+[[allowlists]]
+description = "Untracked build output, tool caches, and scratch space"
+paths = [
+  '''^\.venv/''',
+  '''^bazel-[^/]+/''',
+  '''^\.bazel-[^/]+/''',
+  '''^\.mise/''',
+  '''^\.vale/(Google|write-good|proselint|ai-tells[^/]*)/''',
+  '''^tmp/''',
+  '''^\.worktrees/''',
+  '''^mutants/''',
+  '''(^|/)__pycache__/''',
+  '''^\.(ruff|pytest|hypothesis|rumdl)_cache/''',
+]
+
+# Nothing in this repository is exposed publicly, and no public IP address
+# appears in a commit: hosts are named, and reached over the tailnet. The rule
+# matches any IPv4 literal outside the private, loopback, link-local, CGNAT
+# (tailnet), documentation, and multicast ranges. A letter before the digits
+# (v1.2.3.4) marks a version, and the generated lockfiles are skipped: they
+# carry four-part versions in registry URLs and no hand-written addresses.
+[[rules]]
+id = "public-ipv4"
+description = "Public IPv4 address literal"
+regex = '''(?:^|[^0-9A-Za-z.])((?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3})(?:[^0-9.]|$)'''
+secretGroup = 1
+keywords = ["."]
+
+[[rules.allowlists]]
+description = "Generated lockfiles"
+paths = ['''^(MODULE\.bazel|uv|mise)\.lock$''']
+
+[[rules.allowlists]]
+description = "Non-public ranges: private, loopback, link-local, CGNAT, documentation, benchmarking, multicast and reserved"
+regexTarget = "secret"
+regexes = [
+  '''^(?:0|10|127|22[4-9]|23[0-9]|24[0-9]|25[0-5])\.''',
+  '''^100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.''',
+  '''^169\.254\.''',
+  '''^172\.(?:1[6-9]|2[0-9]|3[01])\.''',
+  '''^192\.168\.''',
+  '''^192\.0\.2\.''',
+  '''^198\.(?:1[89])\.''',
+  '''^198\.51\.100\.''',
+  '''^203\.0\.113\.''',
+]
+
+# The side-repo leak scan's rules, carried over when this repository moved
+# to the Bazel gates. Several overlap gitleaks' defaults; these keep the
+# side repos' coverage exactly.
+[[rules]]
+id = "private-key-block"
+description = "PEM private key block"
+regex = '''-----BEGIN (?:[A-Z0-9 ]* )?PRIVATE KEY-----'''
+keywords = ["private key"]
+
+[[rules]]
+id = "github-token"
+description = "GitHub token"
+regex = '''(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})'''
+keywords = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"]
+
+[[rules]]
+id = "anthropic-token"
+description = "Anthropic API key"
+regex = '''sk-ant-[A-Za-z0-9_-]{8,}'''
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "api-key"
+description = "sk- style API key"
+regex = '''\bsk-[A-Za-z0-9_-]{8,}'''
+keywords = ["sk-"]
+
+[[rules]]
+id = "aws-access-key"
+description = "AWS access key ID"
+regex = '''\bAKIA[A-Z0-9]{12,}'''
+keywords = ["akia"]
+
+[[rules]]
+id = "slack-token"
+description = "Slack token"
+regex = '''\bxox[bap]-[A-Za-z0-9-]{8,}'''
+keywords = ["xoxb-", "xoxa-", "xoxp-"]
+
+[[rules]]
+id = "jwt"
+description = "JSON Web Token"
+regex = '''\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'''
+keywords = ["eyj"]
+
+[[rules]]
+id = "service-account-env"
+description = "1Password service account token variable"
+regex = '''\bOP_SERVICE_ACCOUNT_TOKEN\b'''
+keywords = ["op_service_account_token"]
+
+[[rules]]
+id = "claude-oauth-env"
+description = "Claude Code OAuth token variable"
+regex = '''\bCLAUDE_CODE_OAUTH_TOKEN\b'''
+keywords = ["claude_code_oauth_token"]
+
+[[rules]]
+id = "bearer-header"
+description = "Authorization bearer header"
+regex = '''(?i)Authorization["']?\s*:\s*["']?Bearer'''
+keywords = ["bearer"]
+
+[[rules]]
+id = "overlay-auth-key"
+description = "Tailscale or Headscale auth key"
+regex = '''\b(?:tskey-|hskey-)[A-Za-z0-9_-]{8,}'''
+keywords = ["tskey-", "hskey-"]
+
+[[rules]]
+id = "sensitive-assignment"
+description = "Long literal assigned to a secret-sounding name"
+regex = '''(?i)(?:[\w-]{0,80}(?:token|secret|key|password|credential)[\w-]{0,80})["']?\s*[:=]\s*["']?[A-Za-z0-9_+/=-]{24,}'''
+keywords = ["token", "secret", "key", "password", "credential"]
+
+[[rules.allowlists]]
+description = "Generated lockfiles: package names and digests, not secrets"
+paths = ['''^(MODULE\.bazel|uv|mise)\.lock$''']
+
+[[rules]]
+id = "onepassword-item-id"
+description = "1Password item ID in an op:// reference"
+regex = '''op://[^\s/"']+/[a-z0-9]{26}/'''
+keywords = ["op://"]
+
+[[rules]]
+id = "credential-absolute-path"
+description = "Absolute path into a credential or agent configuration directory"
+regex = '''(?:[A-Za-z]:[\\/]|/|~/)(?:[^\s"'`<>]{0,500}[\\/])?(?:\.config|\.ssh|\.aws|\.gnupg|\.codex|\.claude)(?:[\\/][^\s"'`<>]{0,500})?'''
+keywords = [".config", ".ssh", ".aws", ".gnupg", ".codex", ".claude"]
+
+[[rules.allowlists]]
+description = "The awrel MCP server reads its connect token from a file; .mcp.json names the file, not the token"
+paths = ['''^\.mcp\.json$''']
+regexTarget = "line"
+regexes = ['''"AWREL_CONNECT_TOKEN_FILE": "\$\{HOME\}/\.config/awrel/prd-connect-token"''']
+
+[[rules.allowlists]]
+description = "The alpha agent identity hook finds Codex's session logs under CODEX_HOME, defaulting to Codex's own home directory; it names the directory, not a credential"
+paths = ['''^src/tbhbdev/alpha/identity\.py$''']
+regexTarget = "line"
+regexes = ['''^    return Path\(env\.get\("CODEX_HOME"\) or Path\("~/\.codex"\)\.expanduser\(\)\)$''']

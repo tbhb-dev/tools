@@ -1,0 +1,15 @@
+[Ff]rontmatter
+[Rr]unbooks?
+agy
+ascm
+Bazel
+(?:ci|CI)
+gitleaks
+prek
+scp
+subcommands?
+tailnet
+tbhbdev
+tmux
+uv
+worktrees?

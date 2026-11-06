@@ -1,0 +1,24 @@
+{
+  "language": "en",
+  "ignorePaths": [
+    ".mise/**/*",
+    ".rumdl_cache/**/*",
+    ".vale/**/*",
+    ".venv/**/*",
+    "bazel-*/**/*",
+    ".bazel-*/**/*",
+    "coverage.xml",
+    "MODULE.bazel.lock",
+    "mise.lock",
+    "tmp/**/*",
+    "uv.lock"
+  ],
+  "dictionaryDefinitions": [
+    {
+      "name": "tbhbdev",
+      "path": "./.cspell-words.txt",
+      "addWords": true
+    }
+  ],
+  "dictionaries": ["tbhbdev", "python"]
+}

@@ -1,0 +1,117 @@
+# Shared tbhb-dev tools
+
+This private repository holds shared tools for tbhb-dev work: commands that more than one repository or session uses and that no one repository owns. Every tool is a subcommand of one Python package, `tbhbdev`.
+
+## Running a tool
+
+```sh
+uv run tbhbdev <tool> [args...]
+```
+
+`tbhbdev` with no arguments lists the tools. After the tool's name come that tool's own arguments, and it exits with its own codes.
+
+To put `tbhbdev` on PATH, which the `alpha` harness and git hooks need, install it as a uv tool:
+
+```sh
+uv tool install git+https://github.com/tbhb-dev/tools
+```
+
+`uv tool upgrade tbhbdev` updates it.
+
+## Tools
+
+- `secret` reads and manages 1Password items through the `tbhbdev.secrets` library.
+- `host` manages agent hosts from the operator's Mac.
+- `alpha` holds the interim agent tools from ascm's `tools/interim`. They may change or go away without notice.
+
+## Config
+
+The values of one deployment come from the user config at `$XDG_CONFIG_HOME/tbhbdev/config.toml`, where `XDG_CONFIG_HOME` defaults to `.config` in the home directory. The package has no defaults for them, and no environment variable or plugin overrides them. When the file or a key is missing, the command fails, and its error gives the file's path and the `[table] key`. `tbhbdev` reads the file only when a command first needs a value, so `--help` works without it.
+
+```toml
+[op]
+account = "example.1password.com"
+
+[connect]
+server = "example-connect"
+server_hosts = ["nas-a", "nas-b"]
+token_prefix = "example-host"
+
+[agent]
+host_tag = "tag:example-agents"
+
+[vaults]
+all = "vault-all"
+host_prefix = "vault-"
+```
+
+Each `[connect] server_hosts` entry must be a DNS label of at most 63 characters. Letters and digits make up the label, and a hyphen may appear only between them. A bad entry fails with its position in the list, not its value.
+
+That's the operator's file. On each agent host, `tbhbdev host bootstrap` installs a copy that adds `[connect] endpoints`, computed from the tailnet as [Agent hosts](#agent-hosts) describes.
+
+## Secrets
+
+Tools get secrets only from `tbhbdev.secrets`. It's the one module that talks to 1Password Connect or `op` at runtime, so a fallback for hosts off the tailnet can go there later. `secrets.read("vault/item/field")` returns one value, and also takes the `op://vault/item/field` form. `secrets.Store` covers item management: get, list, create, edit, delete, and move.
+
+The library reads the Connect token from the current user's keychain: the agent keychain on macOS, and `secret-tool` on Linux. It tries the config's `[connect] endpoints` in order, the list bootstrap writes into an agent host's copy. A connection error or a 5xx answer moves it to the next endpoint, while a 4xx answer stops it.
+
+Tests set the `TBHBDEV_TEST_TOKEN` environment variable, and the library then uses its value in place of the keychain token. Production code leaves it unset.
+
+`tbhbdev secret read REF` prints exactly one value, for `$(tbhbdev secret read ...)`. `get` prints the item's metadata and field labels, adding values with `--reveal`. `create` and `edit` read the fields as a JSON object of label to value from stdin or `--file`, never from the command line. `delete` asks for `--yes`.
+
+## Agent hosts
+
+`tbhbdev host` runs on the operator's Mac, which has 1Password Desktop and the `op` command-line tool. A tag marks the agent hosts on the tailnet. The config's `[agent] host_tag` names it. Each host gets a token for its own vault, `[vaults] host_prefix` followed by the host's name, and for `[vaults] all`, plus any the operator grants, stored in the `agent` account's keychain on that host. Every `op` call names the config's `[op] account`.
+
+- `bootstrap [--host H ... | --all] [VAULT ...]` sets up the Connect server, the vaults, the server's vault access, the agent keychain, the agent's copy of the config, and a current token. A second run leaves current tokens alone. Bootstrap sends each host a copy of the operator's config on stdin and installs it as the `agent` user's `tbhbdev/config.toml`, mode 0600 in a 0700 directory. It reports `ok` when the copy already matches and `changed` otherwise, and never prints the file or a diff.
+- `grant` and `revoke` take `[--host H ... | --all] VAULT ...` and swap the host's token for one with the new vault set. `revoke` refuses to take a host's own vault or `[vaults] all` from it.
+- `status` reports each host's token name, vaults, and expiry, whether its keychain entry exists, and whether its copy of the config matches yours. It never prints the token.
+- `exec [--host H] [--operator] -- CMD ...` runs a command on a host as the `agent` user. With `--operator` it runs the command as you, after a Touch ID check.
+
+Bootstrap's copy sets `[connect] endpoints` to `https://<host>.<suffix>` for each of `[connect] server_hosts`, in order. Its suffix is the tailnet's MagicDNS suffix, the `MagicDNSSuffix` that `tailscale status --json` reports, so these commands need `tailscale` on the operator's Mac. That suffix stays out of every argument and message, and lives only in each host's 0600 copy. When `tailscale` is missing, fails, or doesn't report a suffix, bootstrap doesn't write a copy on any host. Any endpoints in the operator's own file give way to the computed list. The copy keeps values but drops comments and layout, so the file can contain only tables of strings and lists of strings. Grant and revoke check a new token against the same endpoints, and `status` compares each host's file with the same copy.
+
+Without `--host` or `--all`, a command acts on this machine. Bootstrap, grant, and revoke create a new token when the host has none or its token covers other vaults. They also replace a token that expires within 14 days, or that the host's keychain lacks. The tool passes a token to other programs only on stdin. It never puts one in `argv`, a file, or a log.
+
+## Alpha commands
+
+`tbhbdev alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`:
+
+- `identity` records which agent and model made each edit and writes the `Generated-by` trailers.
+- `guard-gh-pr` is a PreToolUse hook that blocks `gh pr create`, `gh pr edit` and `gh pr merge`.
+- `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it. `mise run pr` runs it.
+- `merge` squash-merges an approved pull request. `mise run merge` runs it.
+- `install` installs the git hooks and the user-level harness hooks.
+
+Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does two things:
+
+- It installs that clone's git hooks into `$(git rev-parse --git-common-dir)/hooks`, which every worktree of the clone shares. prek runs pre-commit and pre-push, and three shims run `tbhbdev alpha identity` for prepare-commit-msg, commit-msg and post-commit. Without `tbhbdev` on PATH, the shims block a commit in a tbhb-dev repository and do nothing elsewhere.
+- It merges the hooks into each harness's user-level config: `settings.json` in `$CLAUDE_CONFIG_DIR` or `.claude` in `$HOME` for Claude Code, `hooks.json` in `$CODEX_HOME` or `.codex` in `$HOME` for Codex, and `.gemini/config/hooks.json` in `$HOME` for Antigravity.
+
+Each hook command it writes ends in `# tbhbdev alpha install`. A rerun replaces only those entries, and keeps everything else in place. Before it changes a config, it saves the old one beside it as `<name>.tbhbdev-backup.<time>`. `--dry-run` prints the changes without writing them, and `--harness claude|codex|antigravity` limits the merge to one harness. Codex asks you to trust new hooks with `/hooks`.
+
+The hooks are user level, and the harness runs them in every repository. Each one first checks that the repository's `origin` is a tbhb-dev repository on GitHub, and does nothing otherwise. Claude Code's SessionStart hook runs `tbhbdev alpha install --hook`, which reinstalls the git hooks of the worktree the session starts in.
+
+The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, and each worktree has its own pull request draft, so sessions in two worktrees of one clone don't overwrite each other.
+
+## Plugins
+
+Another installed package can add commands and config through an entry point in the `tbhbdev.plugins` group. The entry point resolves to a module or other object with either or both of:
+
+- `TOOLS: dict[str, Tool]`, extra commands. A name that's already taken is an error, never a silent override.
+- `config(name: str) -> str | None`, the text of a named config file, or `None`. The package doesn't include a config file of its own, so there's no default for a plugin's file to replace. The built-in tools read deployment values from the user config alone, never from a plugin.
+
+Plugins load on first use. When one fails to import, `tbhbdev` names it and the error on stderr, and the built-in commands keep working. To run `tbhbdev` with a plugin, install both in one environment:
+
+```sh
+uvx --from git+https://github.com/tbhb-dev/tools --with <plugin package> tbhbdev <tool> [args...]
+```
+
+## Layout
+
+- `src/tbhbdev/` is the package. Each tool is a module there, registered in `cli.py`.
+- `src/tbhbdev/alpha/` is the `alpha` package, one module for each alpha command.
+- `tests/` holds the tests, one `test_<tool>.py` for each tool and `test_alpha_<command>.py` for each alpha command.
+
+## Checks
+
+Bazel runs every gate from tbhb-dev/rules: `bazelisk test //...`. See [AGENTS.md](AGENTS.md) for the setup and the workflow.

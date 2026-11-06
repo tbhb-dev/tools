@@ -1,0 +1,322 @@
+# The tbhbdev package: every tool behind the `tbhbdev` command, with its
+# tests under tests/. This file also owns the gate configuration.
+[project]
+name = "tbhbdev"
+version = "0"
+description = "Shared tools for tbhb-dev work"
+requires-python = ">=3.15"
+dependencies = [
+  "httpx>=0.28.1",
+  # tbhbdev alpha pr validates the pull request draft's YAML frontmatter
+  # against a JSON schema.
+  "jsonschema[format]>=4.26.0",
+  "onepasswordconnectsdk>=2.1.1",
+  "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+tbhbdev = "tbhbdev.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14"]
+build-backend = "uv_build"
+
+[dependency-groups]
+# The test group stands alone so a test run can sync it without the lint
+# tools.
+test = [
+  "hypothesis>=6.170.14",
+  "pytest>=9.2.0",
+  "pytest-cov>=7.1.0",
+  "pytest-xdist>=3.8.0",
+]
+dev = [
+  { include-group = "test" },
+  "bandit>=1.9.4",
+  "complexipy>=8.3.0",
+  "deptry>=0.25.1",
+  "mutmut>=3.8.1",
+  "pip-audit>=2.10.1",
+  "pylint>=4.1.3",
+  "pyrefly>=1.4.0",
+  "ruff>=0.17.3",
+  "types-jsonschema>=4.26.0.20261006",
+  "types-pyyaml>=6.0.12.20261030",
+  "vulture>=2.16",
+]
+
+[tool.uv]
+# mise pins uv in [tools], but that pin binds only where mise resolves
+# PATH. This range is uv refusing to run rather than another minor line
+# rewriting uv.lock. Move it with the mise pin.
+required-version = ">=0.13.0,<0.14"
+
+[tool.complexipy]
+paths = ["src"]
+# Sonar's default cognitive complexity ceiling.
+max-complexity-allowed = 15
+
+[tool.pylint.main]
+recursive = true
+
+[tool.pylint."messages control"]
+# pylint serves one purpose here: its similarities checker, the cross-file
+# copy-paste detector nothing else in the toolchain provides.
+disable = ["all"]
+enable = ["duplicate-code"]
+
+[tool.pylint.similarities]
+min-similarity-lines = 4
+ignore-imports = true
+ignore-docstrings = true
+
+[tool.pyrefly]
+project-includes = ["src", "tests"]
+# Tests name the fakes in tests/conftest.py in their annotations.
+search-path = ["tests"]
+# The strict preset, with every error kind below pinned to error on top.
+preset = "strict"
+
+[tool.pyrefly.errors]
+abstract-method-call = "error"
+assert-type = "error"
+bad-argument-count = "error"
+bad-argument-type = "error"
+bad-assignment = "error"
+bad-class-definition = "error"
+bad-context-manager = "error"
+bad-dunder-all = "error"
+bad-function-definition = "error"
+bad-index = "error"
+bad-instantiation = "error"
+bad-keyword-argument = "error"
+bad-match = "error"
+bad-override = "error"
+bad-override-mutable-attribute = "error"
+bad-override-param-name = "error"
+bad-param-name-override = "error"
+bad-raise = "error"
+bad-return = "error"
+bad-singledispatch-register = "error"
+bad-specialization = "error"
+bad-typed-dict = "error"
+bad-typed-dict-key = "error"
+bad-unpacking = "error"
+column-type-mismatch = "error"
+coverage-missing = "error"
+coverage-partial = "error"
+deprecated = "error"
+direct-abstract-base-instantiation = "error"
+division-by-zero = "error"
+empty-body = "error"
+explicit-any = "error"
+implicit-abstract-class = "error"
+implicit-any = "error"
+implicit-any-attribute = "error"
+implicit-any-empty-container = "error"
+implicit-any-lambda = "error"
+implicit-any-parameter = "error"
+implicit-any-type-argument = "error"
+# Off, deliberately. This one is a style opinion rather than a type
+# error: it rejects `if not lines` and `x if match else y`, the
+# truthiness idiom PEP 8 endorses and ruff's own SIM rules push code
+# toward. Honoring it would mean spelling every emptiness check as an
+# explicit length or None comparison, which reads worse.
+implicit-bool = "ignore"
+implicit-import = "error"
+implicit-reexport = "error"
+implicitly-defined-attribute = "error"
+incompatible-comparison = "error"
+incompatible-overload-residual = "error"
+inconsistent-inheritance = "error"
+inconsistent-overload = "error"
+inconsistent-overload-default = "error"
+internal-error = "error"
+invalid-abstract-method = "error"
+invalid-annotation = "error"
+invalid-argument = "error"
+invalid-cast = "error"
+invalid-decorator = "error"
+invalid-inheritance = "error"
+invalid-literal = "error"
+invalid-overload = "error"
+invalid-param-spec = "error"
+invalid-pattern = "error"
+invalid-self-type = "error"
+invalid-sentinel = "error"
+invalid-super-call = "error"
+invalid-syntax = "error"
+invalid-type-alias = "error"
+invalid-type-checking-constant = "error"
+invalid-type-var = "error"
+invalid-type-var-tuple = "error"
+invalid-variance = "error"
+invalid-yield = "error"
+misplaced-ignore = "error"
+missing-argument = "error"
+missing-attribute = "error"
+missing-import = "error"
+missing-module-attribute = "error"
+missing-override-decorator = "error"
+missing-source = "error"
+missing-source-for-stubs = "error"
+missing-super-call = "error"
+name-mismatch = "error"
+no-access = "error"
+no-any-return = "error"
+no-any-return-explicit = "error"
+no-any-return-implicit = "error"
+no-matching-overload = "error"
+non-convergent-recursion = "error"
+non-exhaustive-match = "error"
+not-a-type = "error"
+not-async = "error"
+not-callable = "error"
+not-iterable = "error"
+not-required-key-access = "error"
+open-unpacking = "error"
+parse-error = "error"
+potential-bad-keyword-argument = "error"
+protocol-implicitly-defined-attribute = "error"
+pytorch-efficiency-lint-cuda-call = "error"
+pytorch-efficiency-lint-item-call = "error"
+pytorch-efficiency-lint-print-tensor = "error"
+pytorch-efficiency-lint-redundant-to-call = "error"
+read-only = "error"
+redefinition = "error"
+redundant-cast = "error"
+redundant-condition = "error"
+reveal-type = "error"
+string-as-iterable = "error"
+unannotated-attribute = "error"
+unannotated-parameter = "error"
+unannotated-protocol-member = "error"
+unannotated-return = "error"
+unbound-name = "error"
+unexpected-keyword = "error"
+unexpected-positional-argument = "error"
+unimported-directive = "error"
+unknown-argument-type = "error"
+unknown-attribute-type = "error"
+unknown-column = "error"
+unknown-name = "error"
+unknown-variable-type = "error"
+unnecessary-comparison = "error"
+unnecessary-type-conversion = "error"
+unreachable = "error"
+unreachable-match-case = "error"
+unresolvable-dunder-all = "error"
+unsafe-overlap = "error"
+unsupported = "error"
+unsupported-delete = "error"
+unsupported-dynamic-base = "error"
+unsupported-operation = "error"
+untyped-class-decorator = "error"
+untyped-function-decorator = "error"
+untyped-import = "error"
+# Off, deliberately. Discarding a return value is how large parts of the
+# standard library are meant to be used -- argparse's add_argument
+# returns an Action nobody keeps. Assigning each one to `_` would add
+# noise at every call site to satisfy a rule that catches nothing here.
+unused-call-result = "ignore"
+unused-coroutine = "error"
+unused-ignore = "error"
+unused-type-ignore = "error"
+useless-overload-body = "error"
+variance-mismatch = "error"
+
+[tool.coverage.run]
+# Branch coverage, not just line coverage.
+branch = true
+relative_files = true
+# Most tests run a tool as its own process, the way people call it, so
+# coverage follows Python subprocesses too.
+patch = ["subprocess"]
+
+[tool.coverage.report]
+# Anything genuinely unreachable belongs in exclude_also with a reason, not
+# behind a lowered threshold.
+fail_under = 100
+show_missing = true
+exclude_also = [
+  # Bodies guarded by TYPE_CHECKING run only under a type checker.
+  "if TYPE_CHECKING:",
+  # The module-level entry guard fires only when a file runs as a script.
+  "if __name__ == \"__main__\":",
+]
+
+[tool.pytest]
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+  "--import-mode=importlib",
+]
+# The alpha tests share fake_tool.py.
+pythonpath = ["tests"]
+testpaths = ["tests"]
+
+[tool.mutmut]
+source_paths = ["src"]
+do_not_mutate = ["tests/*"]
+# The alpha pr tests read the repository's own PR template, schemas and lint
+# configs, which mutmut doesn't copy into mutants/ by itself.
+also_copy = [
+  ".cspell-words.txt",
+  ".cspell.jsonc",
+  ".github",
+  ".rumdl.toml",
+  ".vale.ini",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py315"
+
+[tool.ruff.lint]
+select = ["ALL"]
+# vulture's codes, which its `# noqa` comments name.
+external = ["V"]
+ignore = [
+  # COM812 and ISC001 conflict with the formatter.
+  "COM812",
+  "ISC001",
+  # Docstrings belong where they carry signal, not on every definition.
+  "D100",
+  "D101",
+  "D102",
+  "D103",
+  "D104",
+  "D105",
+  "D106",
+  "D107",
+  # REUSE.toml licenses every file; no per-file headers.
+  "CPY",
+  "TD002",
+  "TD003",
+  "FIX002",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.per-file-ignores]
+# S101: asserts are pytest's API. PLR2004: literal expected values read
+# better in tests. INP001: tests/ has no __init__.py under importlib mode.
+# FBT001: a parametrized expected value is data. S603 and S607: the tests
+# drive the tools as processes, since their contract is the command line.
+"tests/*.py" = ["S101", "PLR2004", "INP001", "FBT001", "S603", "S607"]
+# The tools are command-line programs: they print, and they run ssh, git and
+# the other tools by bare name from PATH.
+"src/tbhbdev/**/*.py" = ["T201", "S603", "S607"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tbhbdev"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.vulture]
+paths = ["src", "tests"]
+# pytest calls fixtures by name, which vulture cannot see.
+ignore_decorators = ["@pytest.fixture"]

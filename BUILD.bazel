@@ -1,0 +1,405 @@
+load("@bazel_env.bzl", "bazel_env")
+load("@bazelrc-preset.bzl", "bazelrc_preset")
+load("@buildifier_prebuilt//:rules.bzl", "buildifier", "buildifier_test")
+load("@tbhb_rules//format:defs.bzl", "format", "format_test")
+load(
+    "@tbhb_rules//lint:defs.bzl",
+    "actionlint_test",
+    "codeowners_test",
+    "cspell_test",
+    "editorconfig_checker_test",
+    "gitleaks_history",
+    "gitleaks_test",
+    "reuse_test",
+    "rumdl_test",
+    "ryl_test",
+    "shellcheck_test",
+    "shfmt_test",
+    "tombi_test",
+    "vale_sync",
+    "vale_test",
+    "zizmor_test",
+)
+load("@tbhb_rules//repo:defs.bzl", "repo_files", "repo_layout_test")
+load("@tbhb_rules//testing:defs.bzl", "expect_failure_test")
+load(
+    "@tbhb_rules_python//:defs.bzl",
+    "bandit_test",
+    "complexipy_test",
+    "deptry_test",
+    "mutmut_test",
+    "pip_audit",
+    "pip_audit_test",
+    "pylint_test",
+    "pyrefly_test",
+    "pytest_test",
+    "python_tool",
+    "ruff_test",
+    "vulture_test",
+)
+
+# Every file of the repository, for the whole-tree checks below. Ignored
+# directories are listed in REPO.bazel; these are the gitignored files that
+# can sit at the root of a working checkout.
+repo_files(
+    exclude = [
+        ".DS_Store",
+        "**/.DS_Store",
+        ".bazelrc.user",
+        ".coverage*",
+        ".env*",
+        ".github/PULL_REQUEST_DRAFT.md",
+        "coverage.*",
+        "mise.local.toml",
+    ],
+)
+
+# Generates preset.bazelrc, which .bazelrc imports. The content depends on the
+# Bazel version that runs the generator; the committed copy matches
+# .bazelversion, and `preset.update_test` fails when it is stale.
+bazelrc_preset(
+    name = "preset",
+)
+
+# buildifier: `//:buildifier` formats and applies lint fixes in place,
+# `//:buildifier.check` fails on any formatting or lint difference, and the
+# test below makes `bazel test //...` fail on the same findings. Every
+# available warning is on. `bazel-*` convenience symlinks, agent worktrees,
+# and the Python and tool caches hold no Starlark that this repository owns.
+BUILDIFIER_EXCLUDES = [
+    "./.git/*",
+    "./.venv/*",
+    "./.mise/*",
+    "./bazel-*",
+    "./.bazel-*",
+    "./.worktrees/*",
+    "./tmp/*",
+]
+
+buildifier(
+    name = "buildifier",
+    exclude_patterns = BUILDIFIER_EXCLUDES,
+    lint_mode = "fix",
+    lint_warnings = ["all"],
+    mode = "fix",
+)
+
+buildifier(
+    name = "buildifier.check",
+    exclude_patterns = BUILDIFIER_EXCLUDES,
+    lint_mode = "warn",
+    lint_warnings = ["all"],
+    mode = "diff",
+)
+
+buildifier_test(
+    name = "buildifier_test",
+    exclude_patterns = BUILDIFIER_EXCLUDES,
+    lint_mode = "warn",
+    lint_warnings = ["all"],
+    no_sandbox = True,
+    workspace = "//:MODULE.bazel",
+)
+
+# The repository's shape. Only these top-level directories may exist; add a
+# new one here in the change that first uses it.
+repo_layout_test(
+    name = "repo_layout_test",
+    srcs = [":repo_files"],
+    top_level_dirs = [
+        ".claude",
+        ".codex",
+        ".github",
+        ".vale",
+        "LICENSES",
+        "src",
+        "tests",
+    ],
+)
+
+# Scans the git history: `bazel run //:gitleaks_history`, which CI runs.
+# The working tree is //:gitleaks_test's job.
+gitleaks_history(
+    name = "gitleaks_history",
+    config = ".gitleaks.toml",
+)
+
+# This repository's gates, from @tbhb_rules. Each one checks the whole tree.
+gitleaks_test(
+    name = "gitleaks_test",
+    srcs = [":repo_files"],
+    config = ".gitleaks.toml",
+)
+
+# Python gates over the tbhbdev package and its tests.
+ruff_test(
+    name = "ruff_test",
+    srcs = [":repo_files"],
+)
+
+# pyrefly's verdict depends on --python-platform, not the host. The tools
+# drive ssh, tmux and POSIX process groups and run on macOS and Linux only,
+# so there is no win32 check.
+pyrefly_test(
+    name = "pyrefly_test",
+    srcs = [":repo_files"],
+    args = [
+        "--python-platform",
+        "linux",
+    ],
+)
+
+pylint_test(
+    name = "pylint_test",
+    srcs = [":repo_files"],
+)
+
+vulture_test(
+    name = "vulture_test",
+    srcs = [":repo_files"],
+)
+
+complexipy_test(
+    name = "complexipy_test",
+    srcs = [":repo_files"],
+)
+
+# B101 flags every assert, and asserts are pytest's API.
+bandit_test(
+    name = "bandit_test",
+    srcs = [":repo_files"],
+    exclude = ["tests/*"],
+)
+
+# deptry checks pyproject.toml's dependencies against the Python under src.
+deptry_test(
+    name = "deptry_test",
+    srcs = [":repo_files"],
+    roots = ["src"],
+)
+
+pytest_test(
+    name = "pytest_test",
+    srcs = [":repo_files"],
+    args = [
+        "-n",
+        "auto",
+    ],
+    coverage = ["src/tbhbdev"],
+    # The alpha pr and merge tests run cog.
+    path_tools = ["@tbhb_rules_cog//:cog"],
+)
+
+# The advisory database changes without any input changing: pip_audit_test
+# is the cached check, and CI runs //:pip_audit for a fresh answer.
+pip_audit(
+    name = "pip_audit",
+)
+
+pip_audit_test(
+    name = "pip_audit_test",
+    srcs = [":repo_files"],
+)
+
+# ruff from the locked environment, for the bazel_env shim the git hooks
+# call.
+python_tool(
+    name = "ruff",
+    tool = "ruff",
+)
+
+# Mutation testing for the package. Every mutant must be killed; an
+# equivalent one takes `# pragma: no mutate` with a reason.
+# Manual for now: a full run reports 1029 mutants in agent, secret, secrets
+# and runner as segfaults, and 6 in the Linux keyring paths survive. It
+# becomes part of `bazel test //...` once both are fixed.
+mutmut_test(
+    name = "mutmut_test",
+    srcs = [":repo_files"],
+    cpus = 4,
+    tags = ["manual"],
+)
+
+# Copyright and licensing information on every file (REUSE.toml, LICENSES/).
+reuse_test(
+    name = "reuse_test",
+    srcs = [":repo_files"],
+)
+
+ryl_test(
+    name = "ryl_test",
+    srcs = [":repo_files"],
+    config = ".ryl.toml",
+)
+
+tombi_test(
+    name = "tombi_test",
+    srcs = [":repo_files"],
+    config = "tombi.toml",
+    schemas = {
+        "https://www.schemastore.org/partial-pytest.json": "@schemastore_partial_pytest//file",
+        "https://www.schemastore.org/ruff.json": "@schemastore_ruff//file",
+        "https://www.schemastore.org/uv.json": "@schemastore_uv//file",
+    },
+)
+
+rumdl_test(
+    name = "rumdl_test",
+    srcs = [":repo_files"],
+    config = ".rumdl.toml",
+)
+
+editorconfig_checker_test(
+    name = "editorconfig_checker_test",
+    srcs = [":repo_files"],
+    config = ".editorconfig-checker.json",
+)
+
+actionlint_test(
+    name = "actionlint_test",
+    srcs = [":repo_files"],
+)
+
+zizmor_test(
+    name = "zizmor_test",
+    srcs = [":repo_files"],
+    config = ".github/zizmor.yml",
+)
+
+# Shell scripts are selected by extension and by shebang. shfmt reads its
+# style from .editorconfig.
+shellcheck_test(
+    name = "shellcheck_test",
+    srcs = [":repo_files"],
+)
+
+shfmt_test(
+    name = "shfmt_test",
+    srcs = [":repo_files"],
+)
+
+codeowners_test(
+    name = "codeowners_test",
+    srcs = [":repo_files"],
+)
+
+cspell_test(
+    name = "cspell_test",
+    srcs = [":repo_files"],
+    config = ".cspell.jsonc",
+    data = [".cspell-words.txt"],
+)
+
+# The packages .vale.ini lists, pinned in MODULE.bazel, in the config's
+# order. `bazel run //:vale_sync` writes them into .vale/ for editors.
+VALE_PACKAGES = {
+    "Google": "@vale_google//file",
+    "ai-tells": "@vale_ai_tells//file",
+    "ai-tells-experimental": "@vale_ai_tells_experimental//file",
+    "proselint": "@vale_proselint//file",
+    "write-good": "@vale_write_good//file",
+}
+
+vale_test(
+    name = "vale_test",
+    srcs = [":repo_files"],
+    config = ".vale.ini",
+    packages = VALE_PACKAGES,
+)
+
+vale_sync(
+    name = "vale_sync",
+    config = ".vale.ini",
+    packages = VALE_PACKAGES,
+)
+
+# Formatting: `bazel run //:format` rewrites, `bazel run //:format.check`
+# checks the working tree, and format_test is the cached check in `bazel
+# test //...`.
+FORMATTERS = [
+    "@tbhb_rules//format:buildifier",
+    "@tbhb_rules//format:rumdl",
+    "@tbhb_rules//format:ryl",
+    "@tbhb_rules//format:shfmt",
+    "@tbhb_rules//format:tombi",
+    "@tbhb_rules_python//:ruff",
+]
+
+# Test fixtures hold deliberately malformed files, which no formatter may
+# fix.
+FORMAT_EXCLUDE = ["*/testdata/*"]
+
+format(
+    name = "format",
+    exclude = FORMAT_EXCLUDE,
+    formatters = FORMATTERS,
+)
+
+format_test(
+    name = "format_test",
+    srcs = [":repo_files"],
+    exclude = FORMAT_EXCLUDE,
+    formatters = FORMATTERS,
+)
+
+# Proof that the public-ipv4 rule in .gitleaks.toml fires, and that it leaves
+# non-public ranges alone. The addresses are assembled at build time, so no
+# public literal sits in a tracked file.
+genrule(
+    name = "planted_public_ipv4",
+    outs = ["proofs/public_ipv4/hosts.txt"],
+    cmd = "printf 'resolver %s.%s.%s.%s\\n' 8 8 4 4 > $@",
+)
+
+gitleaks_test(
+    name = "proof_public_ipv4",
+    srcs = [
+        ".gitleaks.toml",
+        ":planted_public_ipv4",
+    ],
+    config = ".gitleaks.toml",
+    tags = ["manual"],
+)
+
+expect_failure_test(
+    name = "public_ipv4_is_found",
+    pattern = "public-ipv4",
+    test = ":proof_public_ipv4",
+)
+
+genrule(
+    name = "planted_private_ipv4",
+    outs = ["proofs/private_ipv4/hosts.txt"],
+    cmd = "printf '%s\\n' 10.0.0.1 100.64.0.1 127.0.0.1 169.254.0.1 172.16.0.1 192.168.1.1 192.0.2.1 198.51.100.1 203.0.113.1 255.255.255.255 v1.2.3.4 > $@",
+)
+
+gitleaks_test(
+    name = "private_ipv4_is_allowed",
+    srcs = [
+        ".gitleaks.toml",
+        ":planted_private_ipv4",
+    ],
+    config = ".gitleaks.toml",
+)
+
+# `bazel run //:bazel_env` puts shims for the Bazel-pinned tools in
+# .bazel_env/bin, which mise adds to PATH. Git hooks call them directly, so
+# a commit never waits on the Bazel server.
+bazel_env(
+    name = "bazel_env",
+    tools = {
+        "actionlint": "@tbhb_rules_actionlint//:actionlint",
+        "buildifier": "@buildifier_prebuilt//:buildifier",
+        "cog": "@tbhb_rules_cog//:cog",
+        "editorconfig-checker": "@tbhb_rules_editorconfig_checker//:editorconfig-checker",
+        "gitleaks": "@tbhb_rules_gitleaks//:gitleaks",
+        "ruff": ":ruff",
+        "rumdl": "@tbhb_rules_rumdl//:rumdl",
+        "ryl": "@tbhb_rules_ryl//:ryl",
+        "shellcheck": "@tbhb_rules_shellcheck//:shellcheck",
+        "shfmt": "@tbhb_rules_shfmt//:shfmt",
+        "tombi": "@tbhb_rules_tombi//:tombi",
+        "vale": "@tbhb_rules_vale//:vale",
+        "zizmor": "@tbhb_rules_zizmor//:zizmor",
+    },
+)

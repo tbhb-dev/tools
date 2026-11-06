@@ -1,0 +1,59 @@
+# Metadata, regenerable caches and build output.
+.DS_Store
+._*
+__pycache__/
+*.pyc
+.cache/
+cache/
+node_modules/
+target/
+/build/
+/dist/
+# Credential stores are never opened or committed.
+auth.json
+oauth-token
+signing.env
+credentials.json
+*.env
+.config/
+id_rsa
+id_ed25519
+# Git cannot ignore by size. Add exact paths for any oversized artifacts;
+# size-check.sh rejects all candidates and indexed blobs over 20000000 bytes.
+# Obsidian vault settings, from opening the repository as a vault.
+.obsidian/
+
+# Local Python environments and test caches.
+/.venv/
+/.pytest_cache/
+
+# Bazel's convenience links and bazel_env's shims, local Bazel flags and
+# coverage output.
+/bazel-*
+/.bazel-*
+.bazel_env
+.bazelrc.user
+.coverage*
+coverage.*
+mise.local.toml
+.claude/settings.local.json
+.claude/worktrees/
+tmp/
+# Drafted pull request bodies, read when the pull request is opened.
+.github/PULL_REQUEST_DRAFT.md
+.ruff_cache/
+.rumdl_cache/
+.hypothesis/
+
+# vale sync writes the synced style packages under .vale/; only the
+# project's own style and vocabulary are tracked.
+.vale/*
+!.vale/project/
+!.vale/config/
+.vale/config/*
+!.vale/config/vocabularies/
+.vale/config/vocabularies/*
+!.vale/config/vocabularies/project/
+
+# A global ignore may cover .mcp.json; this repository's MCP config is shared.
+!.mcp.json

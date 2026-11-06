@@ -1,0 +1,10 @@
+version = 1
+
+# tbhb-dev/tools is Apache-2.0: every file is Apache-2.0 unless
+# its own header says otherwise. A few tool configs copied from tbhb-dev
+# repositories keep their Apache-2.0 headers, so LICENSES/ holds that text
+# too.
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "Tony Burns"
+SPDX-License-Identifier = "Apache-2.0"

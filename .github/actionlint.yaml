@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright Tony Burns
+
+---
+# GitHub's hosted ubuntu-26.04 runner, which every job runs on. This
+# actionlint release predates the label, so it's listed here.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

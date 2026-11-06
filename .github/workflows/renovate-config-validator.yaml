@@ -1,0 +1,22 @@
+---
+# PR gate for the Renovate config: strict validation plus a check that the
+# pinned preset references resolve.
+name: Validate Renovate configuration
+
+on:
+  pull_request:
+    paths:
+      - ".github/renovate.json5"
+      - ".github/workflows/renovate-config-validator.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    # yamllint disable-line rule:line-length
+    uses: tbhb-dev/renovate-config/.github/workflows/renovate-config-validator.yaml@3dc999ec98ebbb56f94b281c73b7cf54ecd0509a  # main
+    with:
+      # Public repositories run on GitHub's hosted runners.
+      runs_on: ubuntu-26.04
+      configs: .github/renovate.json5

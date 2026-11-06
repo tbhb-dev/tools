@@ -1,0 +1,5 @@
+# D2 renders are generated beside their sources; regenerate them rather than
+# merging them by hand.
+*.d2.svg linguist-generated
+*.d2.png linguist-generated binary
+*.d2.sha256 linguist-generated

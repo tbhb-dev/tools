@@ -1,0 +1,20 @@
+# History findings that aren't leaks, by gitleaks fingerprint. All are in the
+# retired side-repo leak scanner, which the move to Bazel deleted.
+# leak_public_ip.py: the IANA special-purpose IPv4 ranges it exempted, and a
+# documentation URL naming a public resolver.
+e06e121c5e1b9c5905a4539caf29c78d81cf7993:leak_public_ip.py:public-ipv4:15
+e06e121c5e1b9c5905a4539caf29c78d81cf7993:leak_public_ip.py:public-ipv4:16
+e06e121c5e1b9c5905a4539caf29c78d81cf7993:leak_public_ip.py:public-ipv4:16
+e06e121c5e1b9c5905a4539caf29c78d81cf7993:leak_public_ip.py:public-ipv4:16
+e06e121c5e1b9c5905a4539caf29c78d81cf7993:leak_public_ip.py:public-ipv4:17
+e06e121c5e1b9c5905a4539caf29c78d81cf7993:leak_public_ip.py:public-ipv4:29
+# leak-rules.json: the credential-path rule's own regular expression.
+e06e121c5e1b9c5905a4539caf29c78d81cf7993:leak-rules.json:credential-absolute-path:15
+# peer_agent.py, removed: its host-side refresh named gh-agent's configuration
+# directory, not a credential.
+0be2cc134e8abf470ccce4db757f58ad125927f2:py/peer_agent/peer_agent.py:credential-absolute-path:95
+ad1b863a9427e1c5949bd9887fe0d8b497fb34cf:src/tbhbdev/peer_agent.py:credential-absolute-path:198
+bb9789020ee052d485c98315c3dab6794fa33902:src/tbhbdev/peer_agent.py:credential-absolute-path:198
+# agent_identity.py, moved to src/tbhbdev/alpha/identity.py: CODEX_HOME's
+# default directory, not a credential.
+c81a4c5066738fe30bf0ff7b47f7731b4b52495d:tools/interim/agent_identity.py:credential-absolute-path:899
