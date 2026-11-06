@@ -1,6 +1,6 @@
 # Agent instructions
 
-This is tbhb-dev/tools, the private repository of shared tools for tbhb-dev work. Every tool is a subcommand of the `tbhbdev` Python package.
+This is tbhb-dev/tools, the public repository of shared tools for tbhb-dev work. Every tool is a subcommand of the `tbhbdev` Python package.
 
 ## Standing rules
 

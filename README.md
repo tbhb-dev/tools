@@ -1,6 +1,6 @@
 # Shared tbhb-dev tools
 
-This private repository holds shared tools for tbhb-dev work: commands that more than one repository or session uses and that no one repository owns. Every tool is a subcommand of one Python package, `tbhbdev`.
+This repository holds shared tools for tbhb-dev work: commands that more than one repository or session uses and that no one repository owns. Every tool is a subcommand of one Python package, `tbhbdev`.
 
 ## Running a tool
 
@@ -26,7 +26,7 @@ uv tool install git+https://github.com/tbhb-dev/tools
 
 ## Config
 
-The values of one deployment come from the user config at `$XDG_CONFIG_HOME/tbhbdev/config.toml`, where `XDG_CONFIG_HOME` defaults to `.config` in the home directory. The package has no defaults for them, and no environment variable or plugin overrides them. When the file or a key is missing, the command fails, and its error gives the file's path and the `[table] key`. `tbhbdev` reads the file only when a command first needs a value, so `--help` works without it.
+The values of one deployment come from the user config at `$XDG_CONFIG_HOME/tbhbdev/config.toml`, where `XDG_CONFIG_HOME` defaults to `.config` in the home directory. The package has no defaults for them, and no environment variable or plugin overrides them. When the file or a required key is missing, the command fails, and its error gives the file's path and the `[table] key`. Only the `[workspace]` table and `[gitleaks] session_sockets` are optional. `tbhbdev` reads the file only when a command first needs a value, so `--help` works without it.
 
 ```toml
 [op]
@@ -47,6 +47,10 @@ host_prefix = "vault-"
 [gitleaks]
 owners = ["example-org", "example-user"]
 session_sockets = ["/tmp/example-socks/"]
+
+[workspace]
+root = "src"
+repos = ["example-org/app"]
 ```
 
 Each `[connect] server_hosts` entry must be a DNS label of at most 63 characters. Letters and digits make up the label, and a hyphen may appear only between them. A bad entry fails with its position in the list, not its value.
@@ -67,6 +71,7 @@ Tests set the `TBHBDEV_TEST_TOKEN` environment variable, and the library then us
 
 `tbhbdev host` runs on the operator's Mac, which has 1Password Desktop and the `op` command-line tool. A tag marks the agent hosts on the tailnet. The config's `[agent] host_tag` names it. Each host gets a token for its own vault, `[vaults] host_prefix` followed by the host's name, and for `[vaults] all`, plus any the operator grants, stored in the `agent` account's keychain on that host. Every `op` call names the config's `[op] account`.
 
+- `list` prints each agent host on the tailnet with its OS, and marks this machine.
 - `bootstrap [--host H ... | --all] [--repair-acl] [VAULT ...]` does a host's one-time, privileged setup, then runs `upgrade` on the same hosts. It sets up the Connect server and its vaults, the `devel` group and the `agent` user, workspace access, the agent keychain, the agent's copy of the config, and a current token. Bootstrap sends each host a copy of the operator's config on stdin and installs it as the `agent` user's `tbhbdev/config.toml`, mode 0600 in a 0700 directory. It reports `ok` when the copy already matches and `changed` otherwise, and never prints the file or a diff. Before the upgrade, it generates the private gitleaks config from the private repositories of each `[gitleaks] owners` entry, the tailnet, the vaults, the Connect endpoints, the operator's account names and each path in the optional `[gitleaks] session_sockets`, and publishes it to the `config` field of the item `gitleaks-private` in the vault `[vaults] all`, reporting `ok` or `changed`. A source that fails stops bootstrap before it writes anything. A second run doesn't change anything.
 - `upgrade [--host H ... | --all]` brings a bootstrapped host up to date. It doesn't need a terminal, Touch ID, `op`, or a sudo password, so agents run it. Each step reports `ok`, `changed`, or `failed`. It clones the workspace repositories as the agent's GitHub account and fast-forwards clean clones on their default branch. Then it runs `mise install` at the workspace root and checks that the host's token still reaches its vaults through Connect. Last, the `gitleaks-config` step reads the private gitleaks config from that field through Connect with the host's own token. If the text extends `.gitleaks.toml` and defines the `tbhb-private-canary` rule, the step installs it as `.config/gitleaks/private.toml` in the agent's home and in the operator's: each a 0600 file in a 0700 directory, replaced atomically. Otherwise it fails without writing anything.
 - `grant` and `revoke` take `[--host H ... | --all] VAULT ...` and swap the host's token for one with the new vault set. `revoke` refuses to take a host's own vault or `[vaults] all` from it.
