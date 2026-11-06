@@ -57,8 +57,13 @@ def test_in_tbhb_dev(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_in_tbhb_dev_in_a_linked_worktree(tmp_path: Path) -> None:
     ours = init(tmp_path / "ours", "git@github.com:tbhb-dev/x.git")
+    # -c outranks the config files and any GIT_CONFIG_* the session sets, so
+    # a host that signs commits with a key this test can't reach still passes.
     subprocess.run(
-        ["git", "-C", str(ours), "commit", "-q", "--allow-empty", "-m", "x"],
+        [
+            *("git", "-C", str(ours), "-c", "commit.gpgsign=false"),
+            *("commit", "-q", "--allow-empty", "-m", "x"),
+        ],
         check=True,
     )
     tree = tmp_path / "tree"
