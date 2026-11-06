@@ -993,9 +993,16 @@ class Platform(ABC):
     @abstractmethod
     def full(self, root: PurePosixPath) -> tuple[str, ...]: ...
 
+    @abstractmethod
+    def check_tools(self) -> None:
+        """Refuse the host if it lacks a tool that the workspace ACLs need."""
+
 
 class MacOS(Platform):
     """Local directory records through dscl, and ACLs through chmod and ls."""
+
+    def check_tools(self) -> None:
+        """Every macOS install has chmod and ls."""
 
     def _record(self, path: str) -> dict[str, list[str]] | None:
         done = self.read(f"dscl . -read {shlex.quote(path)}")
@@ -1127,6 +1134,12 @@ class MacOS(Platform):
         return tuple(commands)
 
 
+# The POSIX ACL tools, from the acl package, which a minimal install leaves out.
+ACL_TOOLS = ("getfacl", "setfacl")
+# The exit status the shell at the other end of ssh gives a command it can't find.
+COMMAND_NOT_FOUND = 127
+
+
 class Linux(Platform):
     """Accounts through getent and the shadow tools, and POSIX ACLs."""
 
@@ -1173,6 +1186,21 @@ class Linux(Platform):
 
     def add_member(self, user: str) -> tuple[str, ...]:
         return (f"usermod --append --groups {GROUP} {shlex.quote(user)}",)
+
+    def check_tools(self) -> None:
+        missing: list[str] = []
+        for tool in ACL_TOOLS:
+            done = _over(self.host, [tool, "--version"])
+            if done.returncode == COMMAND_NOT_FOUND:
+                missing.append(tool)
+            elif done.returncode != 0:
+                message = f"{self.host.name}: cannot check for {tool}: {_why(done)}"
+                raise HostError(message)
+        if missing:
+            message = (
+                f"{self.host.name}: no {' or '.join(missing)}; install the acl package"
+            )
+            raise HostError(message)
 
     def _acl(self, path: PurePosixPath) -> dict[str, str]:
         done = self.read(
@@ -1381,6 +1409,8 @@ def set_up(host: Host, ws: Workspace | None, *, repair: bool) -> str:
     """
     system = platform_for(host)
     operator, home = identity(host)
+    if ws is not None:
+        system.check_tools()
     changes = plan_accounts(host, system, operator)
     if ws is not None:
         changes += plan_access(host, system, home, ws, repair=repair)
