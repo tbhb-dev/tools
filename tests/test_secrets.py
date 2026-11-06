@@ -334,6 +334,160 @@ def test_no_endpoint_answering_fails(connect: Callable[[], FakeConnect]) -> None
         backend.vaults()
 
 
+# The endpoint that fails_at makes fail before it sends a request.
+FIRST = f"https://nas-a.{SUFFIX}"
+POSTED = ("POST", "/v1/vaults/v1/items")
+
+
+def fail_at(monkeypatch: pytest.MonkeyPatch, error: type[Exception]) -> None:
+    """Make every request to FIRST raise `error`."""
+
+    class Failing(Client):
+        @override
+        def build_request(
+            self, method: str, path: str, body: object = None
+        ) -> httpx.Response:
+            if self.url == FIRST:
+                message = "fake"
+                raise error(message)
+            return super().build_request(method, path, body)
+
+    monkeypatch.setattr(secrets, "Client", Failing)
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ConnectTimeout])
+def test_a_post_moves_on_when_it_cant_connect(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeConnect, error: type[Exception]
+) -> None:
+    fail_at(monkeypatch, error)
+    backend = secrets.Connect(fake.token, [FIRST, fake.url])
+    assert backend.create("v1", {"title": "x"})["title"] == "x"
+    assert fake.requests == [POSTED]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.ReadError,
+        httpx.WriteError,
+        httpx.RemoteProtocolError,
+    ],
+)
+def test_a_post_an_endpoint_may_have_done_is_final(
+    monkeypatch: pytest.MonkeyPatch,
+    fake: FakeConnect,
+    error: type[Exception],
+) -> None:
+    fail_at(monkeypatch, error)
+    backend = secrets.Connect(fake.token, [FIRST, fake.url])
+    with pytest.raises(secrets.SecretsError) as caught:
+        backend.create("v1", {"title": "x"})
+    assert str(caught.value) == (
+        f"Connect may have done POST /v1/vaults/v1/items: {error.__name__}"
+    )
+    assert fake.requests == []
+
+
+def test_a_post_with_a_5xx_is_final(
+    connect: Callable[[], FakeConnect], fake: FakeConnect
+) -> None:
+    broken = connect()
+    broken.status = 500
+    backend = secrets.Connect(fake.token, [broken.url, fake.url])
+    with pytest.raises(secrets.SecretsError) as caught:
+        backend.create("v1", {"title": "x"})
+    assert str(caught.value) == "Connect failed POST /v1/vaults/v1/items: HTTP 500"
+    assert broken.requests == [POSTED]
+    assert fake.requests == []
+
+
+def first_fails(
+    how: str, monkeypatch: pytest.MonkeyPatch, connect: Callable[[], FakeConnect]
+) -> str:
+    """The URL of an endpoint that times out reading or answers HTTP 503."""
+    if how == "timeout":
+        fail_at(monkeypatch, httpx.ReadTimeout)
+        return FIRST
+    broken = connect()
+    broken.status = 503
+    return broken.url
+
+
+@pytest.mark.parametrize("how", ["timeout", "5xx"])
+def test_a_put_or_delete_moves_on_when_an_endpoint_may_have_done_it(
+    monkeypatch: pytest.MonkeyPatch,
+    connect: Callable[[], FakeConnect],
+    fake: FakeConnect,
+    how: str,
+) -> None:
+    first = first_fails(how, monkeypatch, connect)
+    backend = secrets.Connect(fake.token, [first, fake.url])
+    assert backend.update("v1", "i1", {"title": "x"})["title"] == "x"
+    backend.delete("v1", "i1")
+    assert fake.requests == [
+        ("PUT", "/v1/vaults/v1/items/i1"),
+        ("DELETE", "/v1/vaults/v1/items/i1"),
+    ]
+    assert fake.items["v1"] == {}
+
+
+@pytest.mark.parametrize("how", ["timeout", "5xx"])
+def test_a_delete_that_finds_nothing_after_moving_on_has_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+    connect: Callable[[], FakeConnect],
+    fake: FakeConnect,
+    how: str,
+) -> None:
+    first = first_fails(how, monkeypatch, connect)
+    backend = secrets.Connect(fake.token, [first, fake.url])
+    backend.delete("v1", "i9")
+    assert fake.requests == [("DELETE", "/v1/vaults/v1/items/i9")]
+
+
+def test_a_delete_that_finds_nothing_after_a_refused_connection_fails(
+    fake: FakeConnect,
+) -> None:
+    backend = secrets.Connect(fake.token, [closed_url(), fake.url])
+    with pytest.raises(secrets.SecretsError) as caught:
+        backend.delete("v1", "i9")
+    assert (
+        str(caught.value) == "Connect refused DELETE /v1/vaults/v1/items/i9: HTTP 404"
+    )
+
+
+@pytest.mark.parametrize(
+    ("call", "sent", "status"),
+    [
+        (
+            functools.partial(
+                secrets.Connect.update, vault_id="v1", item_id="i9", item={}
+            ),
+            "PUT /v1/vaults/v1/items/i9",
+            404,
+        ),
+        (
+            functools.partial(secrets.Connect.delete, vault_id="v9", item_id="i1"),
+            "DELETE /v1/vaults/v9/items/i1",
+            403,
+        ),
+    ],
+)
+def test_only_a_delete_that_finds_nothing_after_moving_on_succeeds(
+    connect: Callable[[], FakeConnect],
+    fake: FakeConnect,
+    call: Callable[[secrets.Connect], object],
+    sent: str,
+    status: int,
+) -> None:
+    broken = connect()
+    broken.status = 503
+    with pytest.raises(secrets.SecretsError) as caught:
+        call(secrets.Connect(fake.token, [broken.url, fake.url]))
+    assert str(caught.value) == f"Connect refused {sent}: HTTP {status}"
+
+
 @pytest.mark.parametrize(
     ("call", "sent"),
     [

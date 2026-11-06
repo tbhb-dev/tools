@@ -49,7 +49,11 @@ TEST_TOKEN_ENV = "TBHBDEV_TEST_TOKEN"  # noqa: S105  # nosec B105
 
 TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 CLIENT_ERROR = 400
+NOT_FOUND = 404
 SERVER_ERROR = 500
+# The methods a second endpoint may repeat after the first may have received
+# them. Any other, such as POST, could make a second item.
+IDEMPOTENT = frozenset({"GET", "PUT", "DELETE"})
 REF_PARTS = 3
 
 # Connect assigns these when it stores an item; a copy for another vault
@@ -176,8 +180,11 @@ def _text(value: Json, key: str) -> str:
 class Connect:
     """The Connect API at each endpoint in turn, through 1Password's SDK.
 
-    A connection error or a 5xx answer moves on to the next endpoint; a 4xx
-    answer is final. The endpoint that last answered is tried first. Neither
+    A failure to connect moves on to the next endpoint. So does any other
+    connection error or a 5xx answer to a GET, PUT or DELETE, but not to a
+    POST, which the endpoint may have done already. A 4xx answer is final,
+    except that a DELETE that finds nothing once an endpoint may have done it
+    has succeeded. The endpoint that last answered is tried first. Neither
     its repr nor its errors show a URL, which holds the tailnet's suffix.
     """
 
@@ -198,25 +205,54 @@ class Connect:
             self._clients[url] = Client(url, self._token, config)
         return self._clients[url]
 
+    def _send(
+        self, url: str, method: str, path: str, body: Json | None
+    ) -> tuple[httpx.Response | None, bool]:
+        """The endpoint's answer, or None to move on to the next one.
+
+        The flag says whether the endpoint may have done the request already.
+        """
+        try:
+            response = self._client(url).build_request(method, path, body)
+        except httpx.ConnectError, httpx.ConnectTimeout:
+            return None, False
+        except httpx.TransportError as exc:
+            if method in IDEMPOTENT:
+                return None, True
+            kind = type(exc).__name__
+            message = f"Connect may have done {method} {path}: {kind}"
+            raise SecretsError(message) from None
+        # Any other failure to build or send the request is final. Its
+        # message can hold the URL, so neither it nor its traceback shows.
+        except (
+            httpx.HTTPError,
+            httpx.InvalidURL,
+            httpx.StreamError,
+            UnicodeError,
+        ) as exc:
+            message = f"Connect can't send {method} {path}: {type(exc).__name__}"
+            raise SecretsError(message) from None
+        status = response.status_code
+        if status < SERVER_ERROR:
+            return response, False
+        if method in IDEMPOTENT:
+            return None, True
+        message = f"Connect failed {method} {path}: HTTP {status}"
+        raise SecretsError(message)
+
     def _call(self, method: str, path: str, body: Json | None = None) -> object:
+        # Whether an endpoint passed over may have done the request already.
+        # None is false as well, so the pragma hides an equivalent mutant.
+        repeated = False  # pragma: no mutate
         for url in list(self._urls):
-            try:
-                response = self._client(url).build_request(method, path, body)
-            except httpx.TransportError:
+            response, done = self._send(url, method, path, body)
+            repeated = repeated or done
+            if response is None:
                 continue
-            # Any other failure to build or send the request is final. Its
-            # message can hold the URL, so neither it nor its traceback shows.
-            except (
-                httpx.HTTPError,
-                httpx.InvalidURL,
-                httpx.StreamError,
-                UnicodeError,
-            ) as exc:
-                message = f"Connect can't send {method} {path}: {type(exc).__name__}"
-                raise SecretsError(message) from None
             status = response.status_code
-            if status >= SERVER_ERROR:
-                continue
+            # A DELETE an endpoint passed over may have done finds nothing.
+            if repeated and method == "DELETE" and status == NOT_FOUND:
+                return None
             if status >= CLIENT_ERROR:
                 message = f"Connect refused {method} {path}: HTTP {status}"
                 raise SecretsError(message)
