@@ -667,9 +667,10 @@ def test_title_cog_failure_is_reported(world: World) -> None:
 
 @pytest.mark.usefixtures("world")
 def test_title_length() -> None:
-    assert pr.title_problems("feat: " + "x" * 66) == []
-    assert pr.title_problems("feat: " + "x" * 67) == [
-        "title is 73 characters; the limit is 72"
+    assert pr.MAX_TITLE == 64
+    assert pr.title_problems("feat: " + "x" * 58) == []
+    assert pr.title_problems("feat: " + "x" * 59) == [
+        "title is 65 characters; the limit is 64"
     ]
 
 
