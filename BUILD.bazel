@@ -138,8 +138,7 @@ ruff_test(
 )
 
 # pyrefly's verdict depends on --python-platform, not the host. The tools
-# drive ssh, tmux and POSIX process groups and run on macOS and Linux only,
-# so there is no win32 check.
+# drive ssh and run on macOS and Linux only, so there is no win32 check.
 pyrefly_test(
     name = "pyrefly_test",
     srcs = [":repo_files"],
@@ -214,8 +213,8 @@ python_tool(
 
 # Mutation testing for the package. Every mutant must be killed; an
 # equivalent one takes `# pragma: no mutate` with a reason.
-# Manual for now: a full run reports 1029 mutants in agent, secret, secrets
-# and runner as segfaults, and 6 in the Linux keyring paths survive. It
+# Manual for now: a full run reports mutants in secret, secrets and runner
+# as segfaults, and 6 in the Linux keyring paths survive. It
 # becomes part of `bazel test //...` once both are fixed.
 mutmut_test(
     name = "mutmut_test",
