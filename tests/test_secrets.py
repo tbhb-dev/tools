@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from conftest import FakeConnect, Installed, Stubs
+    from conftest import FakeConnect, Installed, Json, Stubs
     from onepasswordconnectsdk.config import ClientConfig
 
 VALUE = "plain-value-never-shown"
@@ -650,12 +650,68 @@ def test_a_failed_move_leaves_nothing_behind(
     assert VALUE not in str(caught.value)
 
 
+def test_a_delete_that_fails_after_deleting_keeps_the_copy(
+    fake: FakeConnect,
+) -> None:
+    fake.fail_after = {"DELETE": 500}
+    moved = store(fake).move("ops", "db", "spare")
+    assert fake.items["v1"] == {}
+    assert fake.items["v2"][moved.id]["title"] == "db"
+
+
+def test_a_title_like_the_items_id_does_not_count_as_the_item(
+    fake: FakeConnect,
+) -> None:
+    fake.item("v1", "i1")
+    fake.fail_after = {"DELETE": 500}
+    moved = store(fake).move("ops", "db", "spare")
+    assert "i1" not in fake.items["v1"]
+    assert fake.items["v2"][moved.id]["title"] == "db"
+
+
+def test_a_failed_check_after_a_failed_delete_keeps_the_copy(
+    fake: FakeConnect,
+) -> None:
+    fake.fail = {"DELETE": 503}
+    real = fake.handle
+
+    def handle(method: str, path: str, auth: str, body: Json | None) -> object:
+        # The check after the failed delete is the first GET of vault v1's items
+        # that follows a DELETE.
+        if (method, path) == ("GET", "/v1/vaults/v1/items") and any(
+            m == "DELETE" for m, _ in fake.requests
+        ):
+            fake.requests.append((method, path))
+            return 503
+        return real(method, path, auth, body)
+
+    fake.handle = handle  # type: ignore[method-assign]
+    with pytest.raises(secrets.SecretsError) as caught:
+        store(fake).move("ops", "db", "spare")
+    assert str(caught.value) == (
+        "the move couldn't tell whether it deleted item 'db' from vault 'ops',"
+        " so it kept the copy in vault 'spare'"
+    )
+    assert fake.items["v1"]["i1"]["title"] == "db"
+    assert [i["title"] for i in fake.items["v2"].values()] == ["db"]
+
+
 def test_a_failed_cleanup_says_a_copy_may_remain(fake: FakeConnect) -> None:
     fake.fail_after = {"POST": 500}
     fake.fail = {"DELETE": 403}
     with pytest.raises(secrets.SecretsError, match="may remain in vault 'spare'"):
         store(fake).move("ops", "db", "spare")
     assert fake.items["v1"]["i1"]["title"] == "db"
+
+
+def test_a_failed_cleanup_after_a_failed_delete_says_a_copy_may_remain(
+    fake: FakeConnect,
+) -> None:
+    fake.fail = {"DELETE": 403}
+    with pytest.raises(secrets.SecretsError, match="may remain in vault 'spare'"):
+        store(fake).move("ops", "db", "spare")
+    assert fake.items["v1"]["i1"]["title"] == "db"
+    assert [i["title"] for i in fake.items["v2"].values()] == ["db"]
 
 
 def test_move_refuses_an_item_with_files(fake: FakeConnect) -> None:
