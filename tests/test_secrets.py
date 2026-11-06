@@ -237,6 +237,27 @@ def test_token_on_linux_without_an_entry_fails(
     ]
 
 
+@pytest.mark.parametrize(
+    ("system", "tool"), [("Darwin", "security"), ("Linux", "dbus-run-session")]
+)
+def test_token_without_the_keychain_tool_fails(
+    stubs: Stubs,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    system: str,
+    tool: str,
+) -> None:
+    monkeypatch.setattr(secrets.platform, "system", lambda: system)
+    (tmp_path / "empty").mkdir()
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    with pytest.raises(secrets.SecretsError) as caught:
+        secrets.token()
+    assert str(caught.value) == (
+        f"can't read the Connect token: {tool} isn't installed"
+    )
+    assert stubs.calls() == []
+
+
 def fake_runs(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     """Every command token runs, each printing a fake token and succeeding."""
     commands: list[list[str]] = []

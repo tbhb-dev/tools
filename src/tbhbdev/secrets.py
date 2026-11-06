@@ -77,38 +77,42 @@ def token() -> str:
     """The Connect token in the current user's keychain.
 
     Raises:
-        SecretsError: The keychain has no token.
+        SecretsError: The keychain has no token, or its tool isn't installed.
     """
     override = os.environ.get(TEST_TOKEN_ENV)
     if override:
         return override
-    if platform.system() == "Darwin":
-        # The keychain has no password, so unlocking it is idempotent and
-        # holds no secret. It is locked again after every restart.
-        subprocess.run(  # nosec B603 B607
-            ["security", "unlock-keychain", "-p", "", KEYCHAIN],
+    try:
+        if platform.system() == "Darwin":
+            # The keychain has no password, so unlocking it is idempotent and
+            # holds no secret. It is locked again after every restart.
+            subprocess.run(  # nosec B603 B607
+                ["security", "unlock-keychain", "-p", "", KEYCHAIN],
+                capture_output=True,
+                # False is the default, written out for ruff. The pragma hides the
+                # equivalent check=None and dropped-check mutants, not check=True.
+                check=(  # pragma: no mutate
+                    False
+                ),
+            )
+            argv = ["security", "find-generic-password", "-s", SERVICE, "-a", ACCOUNT]
+            argv += ["-w", KEYCHAIN]
+        else:
+            lookup = ["secret-tool", "lookup", "service", SERVICE, "account", ACCOUNT]
+            argv = linux_keyring(shlex.join(lookup))
+        done = subprocess.run(  # nosec B603
+            argv,
             capture_output=True,
+            text=True,
             # False is the default, written out for ruff. The pragma hides the
             # equivalent check=None and dropped-check mutants, not check=True.
             check=(  # pragma: no mutate
                 False
             ),
         )
-        argv = ["security", "find-generic-password", "-s", SERVICE, "-a", ACCOUNT]
-        argv += ["-w", KEYCHAIN]
-    else:
-        lookup = ["secret-tool", "lookup", "service", SERVICE, "account", ACCOUNT]
-        argv = linux_keyring(shlex.join(lookup))
-    done = subprocess.run(  # nosec B603
-        argv,
-        capture_output=True,
-        text=True,
-        # False is the default, written out for ruff. The pragma hides the
-        # equivalent check=None and dropped-check mutants, not check=True.
-        check=(  # pragma: no mutate
-            False
-        ),
-    )
+    except FileNotFoundError as exc:
+        message = f"can't read the Connect token: {exc.filename} isn't installed"
+        raise SecretsError(message) from None
     value = done.stdout.rstrip("\n")
     if done.returncode != 0 or not value:
         message = (
