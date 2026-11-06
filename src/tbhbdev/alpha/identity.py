@@ -519,26 +519,65 @@ def transcript_model(path: object) -> str | None:
 # --------------------------------------------------------- records and commands
 
 
+def user_store() -> Path:
+    """The user's own store, which every clone's commits can read.
+
+    A session's hooks write to the store of its project's repository, but it
+    may commit in another clone. This store keeps its record for those.
+    """
+    state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(state) / "tbhbdev" / STORE
+
+
+def write_private_json(path: Path, obj: Json) -> None:
+    """Write JSON atomically as a 0600 file."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    # The fchmod below sets the mode whatever this one was, so the pragma hides
+    # equivalent mutants. This mode only keeps the empty file private sooner.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # pragma: no mutate
+    os.fchmod(fd, 0o600)  # O_CREAT's mode is ignored for a leftover temp file
+    with os.fdopen(fd, "w") as handle:
+        handle.write(json.dumps(obj))
+    tmp.replace(path)
+
+
 def write_record(sid_hash: str, updates: Json, cwd: Path | None = None) -> None:
-    """Merge the non-empty ``updates`` into an agent's session record."""
+    """Merge the non-empty ``updates`` into an agent's session record.
+
+    The record goes to the store of the worktree containing ``cwd`` and to
+    the user's store, a 0700 directory of 0600 files.
+    """
     state = state_dir(cwd)
     if not state:
         return
+    known = {
+        k: v for k, v in updates.items() if v
+    }  # never overwrite known with missing
     path = state / "sessions" / f"{hx(sid_hash)}.json"
     with locked(state):
         rec = read_record(path)
-        rec.update(
-            {k: v for k, v in updates.items() if v}
-        )  # never overwrite known with missing
+        rec.update(known)
         write_json(path, rec)
+    user = user_store()
+    # The chmod below sets the mode whatever this one was, so the pragma hides
+    # equivalent mutants. It's needed for a directory that already exists.
+    user.mkdir(mode=0o700, parents=True, exist_ok=True)  # pragma: no mutate
+    user.chmod(0o700)
+    path = user / f"{hx(sid_hash)}.json"
+    with locked(user):
+        rec = read_record(path)
+        rec.update(known)
+        write_private_json(path, rec)
 
 
 def load_record(hashed: str, cwd: Path | None = None) -> Json:
     """An agent's session record, merged across worktrees; an empty dict if none.
 
-    The record in the worktree containing ``cwd`` wins, field by field.
+    The record in the worktree containing ``cwd`` wins, field by field, and
+    the user's store fills in the rest, for a session that commits in another
+    clone.
     """
-    merged: Json = {}
+    merged = read_record(user_store() / f"{hx(hashed)}.json")
     for store in stores(cwd):
         merged.update(read_record(store / "sessions" / f"{hx(hashed)}.json"))
     return merged
