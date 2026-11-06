@@ -5,16 +5,17 @@ stub plugins in their place. `config_file` is the user config in a temporary
 XDG_CONFIG_HOME, which no test has until it writes one, and `config` writes
 one of example values there. `connect` starts in-memory 1Password Connect APIs
 on 127.0.0.1, and `stubs` makes PATH hold only stub op, ssh, sudo, security,
-secret-tool, tailscale and friends (see stubtool.py), and the system tools the
-host scripts use, with HOME in tmp_path. `plain`
-turns argparse color off for the tests that compare help and usage exactly.
-No test reaches 1Password, a keychain, the tailnet or a host.
+secret-tool, tailscale, dscl, chmod, git and friends (see stubtool.py), and
+the system tools the host scripts use, with HOME in tmp_path. `plain` turns
+argparse color off for the tests that compare help and usage exactly. No test
+reaches 1Password, a keychain, the tailnet, a host, an account or an ACL.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import sys
 import threading
@@ -36,24 +37,38 @@ type Json = dict[str, object]
 
 STUBTOOL = Path(__file__).resolve().parent / "stubtool.py"
 STUB_TOOLS = (
+    "chmod",
     "dbus-run-session",
+    "dscl",
+    "getent",
+    "getfacl",
+    "gh",
+    "git",
     "gnome-keyring-daemon",
+    "groupadd",
+    "id",
+    "install",
+    "ls",
+    "mise",
     "op",
     "secret-tool",
     "security",
+    "setfacl",
     "ssh",
     "sudo",
     "swift",
     "tailscale",
+    "useradd",
+    "usermod",
 )
 # The system tools the host scripts, the stubs and the exec tests run, linked
 # beside the stubs so PATH holds nothing else, and no real tailscale, op or
-# ssh can run.
+# ssh can run. The chmod stub runs the real chmod for a plain mode change.
 SYSTEM_TOOLS = (
     "cat",
-    "chmod",
     "cmp",
     "echo",
+    "find",
     "mkdir",
     "mktemp",
     "mv",
@@ -307,6 +322,8 @@ def example_config(urls: list[str] | None = None) -> str:
             'token_prefix = "example-host"\n'
             '[agent]\nhost_tag = "tag:example-agents"\n'
             '[vaults]\nall = "vault-all"\nhost_prefix = "vault-"\n'
+            '[gitleaks]\nowners = ["example-org", "example-user"]\n'
+            'session_sockets = ["/tmp/example-socks/"]\n'
         )
     )
 
@@ -362,6 +379,26 @@ class Stubs:
         return self.dir / "homes" / host / "agent"
 
 
+def write_stub(launcher: Path, tool: str) -> None:
+    """Write an executable that runs stubtool.main(tool, argv) under -I.
+
+    The launcher is a /bin/sh script that execs the interpreter, because
+    Linux refuses a script whose first line passes 256 bytes, and a
+    `#!{sys.executable}` line does in a deep sandbox.
+    """
+    code = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(STUBTOOL.parent)!r})\n"
+        "import stubtool\n"
+        f"stubtool.main({tool!r}, sys.argv[1:])\n"
+    )
+    launcher.write_text(
+        "#!/bin/sh\n"
+        f'exec {shlex.quote(sys.executable)} -I -c {shlex.quote(code)} "$@"\n'
+    )
+    launcher.chmod(0o755)
+
+
 @pytest.fixture
 def stubs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Stubs:
     """Stub tools alone on PATH, HOME in tmp_path, and no token override."""
@@ -369,15 +406,7 @@ def stubs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Stubs:
     bin_dir = stub_dir / "bin"
     bin_dir.mkdir(parents=True)
     for tool in STUB_TOOLS:
-        launcher = bin_dir / tool
-        launcher.write_text(
-            f"#!{sys.executable} -I\n"
-            "import sys\n"
-            f"sys.path.insert(0, {str(STUBTOOL.parent)!r})\n"
-            "import stubtool\n"
-            f"stubtool.main({tool!r}, sys.argv[1:])\n"
-        )
-        launcher.chmod(0o755)
+        write_stub(bin_dir / tool, tool)
     for tool in SYSTEM_TOOLS:
         found = shutil.which(tool, path=f"/usr/bin{os.pathsep}/bin")
         assert found is not None, tool

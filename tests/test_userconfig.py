@@ -107,6 +107,31 @@ def test_a_list_of_the_wrong_type_is_an_error(config_file: Path, value: str) -> 
     )
 
 
+def test_a_table_is_read_whole(config_file: Path) -> None:
+    config_file.write_text('[workspace]\nroot = "Code"\nrepos = ["a/b"]\n')
+    assert userconfig.table("workspace") == {"root": "Code", "repos": ["a/b"]}
+
+
+def test_a_missing_table_is_none(config_file: Path) -> None:
+    config_file.write_text('[op]\naccount = "x"\n')
+    assert userconfig.table("workspace") is None
+
+
+def test_a_table_that_is_a_value_is_an_error(config_file: Path) -> None:
+    config_file.write_text('workspace = "Code"\n')
+    with pytest.raises(userconfig.ConfigError) as caught:
+        userconfig.table("workspace")
+    assert str(caught.value) == f"{config_file}: workspace must be a table"
+
+
+def test_a_table_needs_the_file(config_file: Path) -> None:
+    with pytest.raises(userconfig.ConfigError) as caught:
+        userconfig.table("workspace")
+    assert str(caught.value) == (
+        f"{config_file} doesn't exist; create it and set [workspace]"
+    )
+
+
 def test_a_file_of_bad_toml_is_an_error(config_file: Path) -> None:
     config_file.write_text("[op\n")
     with pytest.raises(userconfig.ConfigError) as caught:

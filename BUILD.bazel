@@ -186,8 +186,12 @@ pytest_test(
         "auto",
     ],
     coverage = ["src/tbhbdev"],
-    # The alpha pr and merge tests run cog.
-    path_tools = ["@tbhb_rules_cog//:cog"],
+    # The alpha pr and merge tests run cog, and the private gitleaks config's
+    # tests run the pinned gitleaks.
+    path_tools = [
+        "@tbhb_rules_cog//:cog",
+        "@tbhb_rules_gitleaks//:gitleaks",
+    ],
 )
 
 # The advisory database changes without any input changing: pip_audit_test
