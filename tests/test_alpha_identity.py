@@ -84,9 +84,10 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_bin: Path) ->
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    # The agent identity, which commit-msg requires of a commit in a harness.
     for who in ("AUTHOR", "COMMITTER"):
-        monkeypatch.setenv(f"GIT_{who}_NAME", "Test")
-        monkeypatch.setenv(f"GIT_{who}_EMAIL", "test@example.invalid")
+        monkeypatch.setenv(f"GIT_{who}_NAME", "tbhb.dev Agent")
+        monkeypatch.setenv(f"GIT_{who}_EMAIL", "agent@tonyburns.net")
 
 
 def run_git(repo: Path, *args: str) -> str:
@@ -3119,17 +3120,17 @@ def test_check_value_order_property(keys: list[str]) -> None:
 
 def test_cmd_check(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     good = msg_file(tmp_path, f"s\n\nGenerated-by: LLM {GOOD}\n")
-    assert ai.cmd_check(str(good)) == 0
+    assert ai.cmd_check(str(good), {}) == 0
     assert capsys.readouterr().err == ""
     bad = msg_file(tmp_path, "s\n\nGenerated-by: nope\nSigned-off-by: A <a@x>\n")
-    assert ai.cmd_check(str(bad)) == 1
+    assert ai.cmd_check(str(bad), {}) == 1
     assert capsys.readouterr().err == (
         "tbhbdev alpha identity: Generated-by: nope: must start with literal LLM\n"
     )
     signed = msg_file(
         tmp_path, f"s\n\nGenerated-by: LLM {GOOD}\nSigned-off-by: A <a@x>\n"
     )
-    assert ai.cmd_check(str(signed)) == 0
+    assert ai.cmd_check(str(signed), {}) == 0
     assert capsys.readouterr().err == ""
 
 
@@ -3415,7 +3416,7 @@ def test_e2e_human_commit_is_untouched(wired: Path) -> None:
     stage(wired, "h.txt")
     done = git_commit(wired, "human work", None, "-s")
     assert done.returncode == 0, done.stderr
-    assert "Signed-off-by: Test <test@example.invalid>" in last_message(wired)
+    assert "Signed-off-by: tbhb.dev Agent <agent@tonyburns.net>" in last_message(wired)
     assert trailers(wired) == []
 
 
@@ -3457,7 +3458,99 @@ def test_e2e_signoff_passes_the_check_for_everyone(
     stage(wired, "a.txt")
     done = git_commit(wired, "feat: a", env, "-s")
     assert done.returncode == 0, done.stderr
-    assert "Signed-off-by: Test <test@example.invalid>" in last_message(wired)
+    assert "Signed-off-by: tbhb.dev Agent <agent@tonyburns.net>" in last_message(wired)
+
+
+NOREPLY = "tbhb.dev Agent <334376894+tbhb-agent@users.noreply.github.com>"
+
+
+@needs_prek
+def test_e2e_an_agent_commit_as_the_agent_identity_passes(wired: Path) -> None:
+    stage(wired, "a.txt")
+    done = git_commit(wired, "feat: a", CLAUDE_E2E)
+    assert done.returncode == 0, done.stderr
+    who = run_git(wired, "log", "-1", "--format=%an <%ae>%n%cn <%ce>")
+    assert who == f"{ai.AGENT_IDENT}\n{ai.AGENT_IDENT}\n"
+
+
+@needs_prek
+@pytest.mark.parametrize(
+    ("flags", "extra", "role", "who"),
+    [
+        ([f"--author={NOREPLY}"], {}, "author", NOREPLY),
+        (
+            [],
+            {"GIT_COMMITTER_EMAIL": "c@example.invalid"},
+            "committer",
+            "tbhb.dev Agent <c@example.invalid>",
+        ),
+    ],
+    ids=["noreply-author", "wrong-committer"],
+)
+def test_e2e_an_agent_commit_with_another_identity_fails(
+    wired: Path, flags: list[str], extra: dict[str, str], role: str, who: str
+) -> None:
+    stage(wired, "a.txt")
+    done = git_commit(wired, "feat: a", {**CLAUDE_E2E, **extra}, *flags)
+    assert done.returncode != 0
+    assert (
+        f"tbhbdev alpha identity: {role} is {who!r}; "
+        f"an agent commit must use {ai.AGENT_IDENT}"
+    ) in done.stderr
+    assert run_git(wired, "log", "-1", "--format=%s") == "init\n"
+
+
+@needs_prek
+def test_e2e_an_agent_amend_keeps_a_wrong_author_and_fails(wired: Path) -> None:
+    stage(wired, "a.txt")
+    run_git(wired, "commit", "-q", "--no-verify", f"--author={NOREPLY}", "-m", "a")
+    done = git_commit(wired, "feat: a", CLAUDE_E2E, "--amend")
+    assert done.returncode != 0
+    assert f"author is {NOREPLY!r}" in done.stderr
+
+
+@needs_prek
+def test_e2e_a_human_commit_keeps_its_own_identity(wired: Path) -> None:
+    stage(wired, "a.txt")
+    human = {"GIT_AUTHOR_NAME": "Human", "GIT_AUTHOR_EMAIL": "h@example.invalid"}
+    done = git_commit(wired, "feat: a", human)
+    assert done.returncode == 0, done.stderr
+    assert run_git(wired, "log", "-1", "--format=%ae") == "h@example.invalid\n"
+    assert trailers(wired) == []
+
+
+def test_ident_problems_accepts_the_agent_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def agent(*_: str, **__: object) -> tuple[int, str]:
+        return 0, f"{ai.AGENT_IDENT} 1794020000 -0500"
+
+    monkeypatch.setattr(ai, "git", agent)
+    assert ai.ident_problems({"CLAUDE_CODE_SESSION_ID": "s"}) == []
+
+
+@pytest.mark.parametrize("stamp", [" 1794020000 +0000", " 1794020000 -0500"])
+def test_ident_date_strips_only_the_timestamp(stamp: str) -> None:
+    assert ai.IDENT_DATE.sub("", f"A <a@b> 7 x{stamp}") == "A <a@b> 7 x"
+
+
+def test_ident_problems_refuses_an_identity_git_cannot_give(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[tuple[str, ...]] = []
+
+    def failing(*args: str, **_: object) -> tuple[int, str]:
+        asked.append(args)
+        return 128, ""
+
+    monkeypatch.setattr(ai, "git", failing)
+    must = f"an agent commit must use {ai.AGENT_IDENT}"
+    assert ai.ident_problems({"CODEX_SESSION_ID": "s"}) == [
+        f"author is ''; {must}",
+        f"committer is ''; {must}",
+    ]
+    assert asked == [("var", "GIT_AUTHOR_IDENT"), ("var", "GIT_COMMITTER_IDENT")]
+    assert ai.ident_problems({}) == []
 
 
 @needs_prek

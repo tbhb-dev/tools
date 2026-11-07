@@ -11,7 +11,8 @@ those records into trailers and validate them:
                                        (exits 0 at once outside a tbhb-dev repo)
     trailer <msgfile> [source]         prepare-commit-msg: stamp the trailers
     consume                            post-commit: consume the credited receipts
-    check <msgfile>                    commit-msg and CI: validate the trailers
+    check <msgfile>                    commit-msg: validate the trailers, and
+                                       an agent commit's author and committer
     stamp-docs                         pre-commit: stamp staged Markdown frontmatter
 
 The trailer grammar is a subset of the ascm design's, with optional fields
@@ -2102,6 +2103,10 @@ def cmd_stamp_docs(env: Mapping[str, str]) -> int:
 # ------------------------------------------------------------------------- check
 
 LINE = re.compile(r"^(Generated-by|Assisted-by):\s*(.*)$")
+# The one identity every agent commit is authored and committed as.
+AGENT_IDENT = "tbhb.dev Agent <agent@tonyburns.net>"
+# The timestamp and zone at the end of ``git var GIT_*_IDENT``.
+IDENT_DATE = re.compile(r" [0-9]+ [-+][0-9]{4}$")
 PAIR = re.compile(r"[a-z]+=[^\s;,]+")
 
 
@@ -2157,10 +2162,29 @@ def check_message(text: str) -> list[str]:
     return errs
 
 
-def cmd_check(msgfile: str) -> int:
-    """commit-msg and CI: validate the LLM trailers, the same for every committer."""
+def ident_problems(env: Mapping[str, str]) -> list[str]:
+    """Why a commit made in an agent harness has the wrong author or committer.
+
+    Every agent commit is authored and committed as ``AGENT_IDENT``. ``git var``
+    gives the identities this commit records, including ``--author``, the
+    author ``--amend`` keeps, and ``GIT_*`` overrides. A human's commit, outside
+    any harness, isn't checked, even when its trailers credit an agent's edits.
+    """
+    if detect(env) is None:
+        return []
+    errs = []
+    for role in ("author", "committer"):
+        _, out = git("var", f"GIT_{role.upper()}_IDENT")
+        who = IDENT_DATE.sub("", out)
+        if who != AGENT_IDENT:
+            errs.append(f"{role} is {who!r}; an agent commit must use {AGENT_IDENT}")
+    return errs
+
+
+def cmd_check(msgfile: str, env: Mapping[str, str]) -> int:
+    """commit-msg: validate the LLM trailers and an agent commit's identity."""
     text = Path(msgfile).read_text()
-    errs = check_message(text)
+    errs = check_message(text) + ident_problems(env)
     for err in errs:
         print(f"{PROG}: {err}", file=sys.stderr)
     return 1 if errs else 0
@@ -2184,7 +2208,7 @@ def main(argv: list[str], env: Mapping[str, str]) -> int:
         case ["stamp-docs", *_]:
             return cmd_stamp_docs(env)
         case ["check", msgfile, *_]:
-            return cmd_check(msgfile)
+            return cmd_check(msgfile, env)
         case _:
             print(USAGE, file=sys.stderr)
             return 2
