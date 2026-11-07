@@ -14,7 +14,7 @@ from typing import cast
 
 import pytest
 from fake_tool import link_git, pythonpath, write_fake
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 from tbhbdev.alpha import identity as agent_identity
@@ -256,9 +256,32 @@ def test_a_table_keeps_its_rows_unwrapped() -> None:
 
 
 def test_a_table_ends_a_list_and_a_fence_keeps_its_bars() -> None:
-    body = "## Why\n\nLead.\n\n- a\n| x |\n| z |\n- b\n\n```\n| y |\n```\n"
+    body = "## Why\n\nLead.\n\n- a\n| x |\n|---|\n| z |\n- b\n\n```\n| y |\n```\n"
     assert message_of(body) == (
-        "fix: x (#7)\n\nWhy\nLead.\n\n- a\n\n| x |\n| z |\n\n- b\n\n    | y |\n"
+        "fix: x (#7)\n\nWhy\nLead.\n\n- a\n\n| x |\n|---|\n| z |\n\n- b\n\n    | y |\n"
+    )
+
+
+def test_a_delimiter_row_needs_no_outer_bars() -> None:
+    body = "## Why\n\n| a | b |\n:--- | ---:\n| 1 | 2 |\n"
+    assert message_of(body) == "fix: x (#7)\n\nWhy\n| a | b |\n:--- | ---:\n| 1 | 2 |\n"
+
+
+def test_a_table_may_end_on_its_delimiter_row() -> None:
+    lines = [
+        pr.Line(1, "| a |", "| a |", code=False),
+        pr.Line(2, "|-|", "|-|", code=False),
+    ]
+    assert sm.render(lines, {}) == ["| a |\n|-|"]
+
+
+def test_a_bar_line_without_a_delimiter_row_is_prose() -> None:
+    body = f"## Why\n\n- a\n| {LONG_CELL}\n|\n| x |\n\n| y |\n|---|\nz\n| w |\n"
+    assert message_of(body) == (
+        "fix: x (#7)\n\nWhy\n"
+        "- a | the check ran again ran again ran again ran again ran again ran\n"
+        "  again ran again ran again ran again ran again and passed | | x |\n\n"
+        "| y |\n|---|\n\nz | w |\n"
     )
 
 
@@ -293,6 +316,9 @@ def test_an_empty_body_is_a_subject_only() -> None:
 
 
 @given(text=TEXT)
+@example(
+    text="|0 00000000000 00000000000 00000000000 000000000000000 0000000000000000 0"
+)
 def test_rendered_prose_is_within_the_limit(text: str) -> None:
     text = text.replace("\\", "").replace("*", "").replace("_", "").replace("[", "")
     out = sm.render([pr.Line(1, text, text, code=False)], {})
