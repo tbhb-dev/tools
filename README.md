@@ -116,6 +116,17 @@ The hooks are user level, and the harness runs them in every repository. Each on
 
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, and each worktree has its own pull request draft, so sessions in two worktrees of one clone don't overwrite each other.
 
+### No self-approval
+
+A session can't approve a pull request that it, or one of its subagents, opened. The rule compares root session hashes, the `session=` value in the trailers, which a subagent shares with its root.
+
+- `tbhbdev alpha pr create` writes `Opened-by: LLM …` as the first line of the body's trailer paragraph. It holds the opener's root identity, with no `subagent=`. `pr edit` copies the line from the live body unchanged, `pr check` rejects a draft that contains one, and `tbhbdev alpha merge` drops it from the squash commit. When the tool can't find an agent's root, as for an Antigravity child with no brain directory, it doesn't write the line. It also skips the line and the ledger entry, with a warning, when the root's value fails the trailer check, such as one without `model=`. The merge refuses a body with an `Opened-by` line anywhere outside the final trailer paragraph, fenced code included.
+- Once `gh` opens the pull request, `pr create` adds `owner/repo#N` to the opener's ledger, `opened/<root hex>.json` in `$XDG_STATE_HOME/tbhbdev/tbhb-alpha`, which defaults to `~/.local/state/tbhbdev/tbhb-alpha`.
+- `guard-gh-pr` denies `gh pr review N --approve`, a `gh api` POST to `repos/O/R/pulls/N/reviews` with `event=APPROVE`, and `tbhb-approve REPO N SHA` when the caller's ledger lists that pull request. Without `-R`, the repository comes from a `GH_REPO=` prefix, else the origin of the hook's directory. After a `cd`, `pushd`, `popd` or `git -C` in the same command line, that origin is unknown. An unreadable ledger, a session it can't identify, or, for a session that opened anything, a pull request it can't name denies too. A session with no ledger file opened nothing and may approve.
+- `tbhbdev alpha pr backfill-opened OWNER` covers the pull requests opened before the ledger existed. It reads every pull request, open, closed and merged, in every repository of the owner, and adds each one to the ledger of every `session=` its `Generated-by`, `Assisted-by` and `Opened-by` lines name. Run it once on each host. A rerun doesn't change anything. It warns when a listing reaches its `--limit`.
+
+The guard reads only this host's ledger and sees only the commands it scans, so this isn't a security boundary.
+
 ## Plugins
 
 Another installed package can add commands and config through an entry point in the `tbhbdev.plugins` group. The entry point resolves to a module or other object with either or both of:

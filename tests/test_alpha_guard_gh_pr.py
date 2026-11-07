@@ -19,7 +19,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from tbhbdev.alpha import guard_gh_pr as guard
-from tbhbdev.alpha import install
+from tbhbdev.alpha import identity as ai
+from tbhbdev.alpha import install, opened
 
 DATA = Path(__file__).parent / "testdata" / "alpha"
 SRC = Path(guard.__file__).parents[2]
@@ -518,3 +519,752 @@ def test_every_harness_config_runs_the_guard(
     assert group["matcher"] == matcher
     (handler,) = cast("list[dict[str, str]]", group["hooks"])
     assert handler["command"] == "tbhbdev alpha guard-gh-pr # tbhbdev alpha install"
+
+
+# --- no self-approval ------------------------------------------------------
+
+ROOT = ai.sha256_64("session-raw")
+RULE = "A session can't approve a pull request it or its subagents opened"
+TARGET = "tbhb-dev/tools#7"
+ROUTES = [
+    ("gh pr review 7 --approve -R tbhb-dev/tools", "`gh pr review --approve`"),
+    (
+        "gh api -X POST repos/tbhb-dev/tools/pulls/7/reviews -f event=APPROVE",
+        "a `gh api` APPROVE review",
+    ),
+    ("tbhb-approve tools 7 abc123", "`tbhb-approve`"),
+]
+CLAUDE_CHILD = json.loads((DATA / "claude-pretooluse-bash-child.json").read_text())
+
+
+@pytest.fixture(autouse=True)
+def state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """A temp user store, and no harness variables in the guard's environment."""
+    prefixes = ("CLAUDE", "CODEX", "ANTIGRAVITY", "ASCM_")
+    list(map(monkeypatch.delenv, [n for n in os.environ if n.startswith(prefixes)]))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    return tmp_path / "state" / "tbhbdev" / "tbhb-alpha" / "opened"
+
+
+def reason(out: str) -> str | None:
+    """The deny reason of a Claude or Codex decision; None for silence."""
+    if not out:
+        return None
+    output = json.loads(out)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    return cast("str", output["permissionDecisionReason"])
+
+
+def guard_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    payload: dict[str, object],
+    text: str,
+) -> str | None:
+    code, out, err = run_main(
+        monkeypatch, capsys, json.dumps(with_command(payload, text))
+    )
+    assert (code, err) == (0, "")
+    return reason(out)
+
+
+OPENED = f"{RULE}: this session opened {TARGET}, so it can't approve it."
+
+
+@pytest.mark.parametrize(("text", "route"), ROUTES)
+@pytest.mark.parametrize("payload", [CLAUDE_PAYLOAD, CLAUDE_CHILD, CODEX_PAYLOAD])
+def test_the_opener_and_its_subagents_cant_approve(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    payload: dict[str, object],
+    text: str,
+    route: str,
+) -> None:
+    del route
+    opened.record_opened(ROOT, ["tbhb-dev/other#7", TARGET])
+    assert guard_reason(monkeypatch, capsys, payload, text) == OPENED
+
+
+@pytest.mark.parametrize(("text", "route"), ROUTES)
+def test_another_root_may_approve(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    text: str,
+    route: str,
+) -> None:
+    del route
+    opened.record_opened(ai.sha256_64("other-raw"), [TARGET])
+    opened.record_opened(ROOT, ["tbhb-dev/tools#8"])
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) is None
+
+
+@pytest.mark.parametrize(("text", "route"), ROUTES)
+def test_no_ledger_allows(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state: Path,
+    text: str,
+    route: str,
+) -> None:
+    del route
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) is None
+    assert not state.exists()
+
+
+@pytest.mark.parametrize(("text", "route"), ROUTES)
+def test_a_corrupt_ledger_denies(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state: Path,
+    text: str,
+    route: str,
+) -> None:
+    path = state / f"{ai.hx(ROOT)}.json"
+    state.mkdir(parents=True)
+    path.write_text("{")
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) == (
+        f"{RULE}, and the guard can't read this session's ledger, "
+        f"so it refuses {route}: {path} is not JSON"
+    )
+
+
+@pytest.mark.parametrize(("text", "route"), ROUTES)
+def test_an_unresolvable_root_denies(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    text: str,
+    route: str,
+) -> None:
+    payload = {k: v for k, v in CLAUDE_PAYLOAD.items() if k != "session_id"}
+    assert guard_reason(monkeypatch, capsys, payload, text) == (
+        f"{RULE}, and the guard can't tell which session this is, "
+        f"so it refuses {route}."
+    )
+
+
+@pytest.mark.parametrize(("text", "route"), ROUTES)
+def test_antigravity_without_a_brain_denies(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    text: str,
+    route: str,
+) -> None:
+    stdin = json.dumps(with_command(AGY_PAYLOAD, text))
+    code, out, err = run_main(monkeypatch, capsys, stdin)
+    assert (code, err) == (0, "")
+    assert json.loads(out) == {
+        "decision": "deny",
+        "reason": (
+            f"{RULE}, and the guard can't tell which session this is, "
+            f"so it refuses {route}."
+        ),
+    }
+
+
+@pytest.mark.parametrize(("text", "route"), ROUTES)
+def test_an_antigravity_child_of_the_opener_cant_approve(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    text: str,
+    route: str,
+) -> None:
+    del route
+    brain = tmp_path / "brain"
+    folder = brain / "child-raw" / ".system_generated" / "messages"
+    folder.mkdir(parents=True)
+    (brain / "conv-raw").mkdir()
+    tool = {"toolCall": {"name": "invoke_subagent"}}
+    message = {"recipient": "child-raw", "sender": "conv-raw"}
+    (folder / "1.json").write_text(
+        json.dumps(message | {"sourceMetadata": {"tool": tool}})
+    )
+    opened.record_opened(ai.sha256_64("conv-raw"), [TARGET])
+    payload = {
+        **with_command(AGY_PAYLOAD, text),
+        "conversationId": "child-raw",
+        "artifactDirectoryPath": str(brain / "child-raw"),
+    }
+    code, out, _ = run_main(monkeypatch, capsys, json.dumps(payload))
+    assert code == 0
+    assert json.loads(out) == {"decision": "deny", "reason": OPENED}
+
+
+def test_a_crash_while_checking_an_approval_denies(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def boom(_root: str) -> set[str]:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(guard, "read_ledger", boom)
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, ROUTES[2][0]) == (
+        f"{RULE}, and the guard failed while checking, "
+        "so it refuses `tbhb-approve`: boom"
+    )
+
+
+def test_a_crash_while_matching_an_approval_fails_open(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def boom(_text: str, _cwd: Path | None) -> list[guard.Approval]:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(guard, "approvals", boom)
+    opened.record_opened(ROOT, [TARGET])
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, ROUTES[2][0]) is None
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, "gh pr merge 1") == (
+        MERGE.format(n=1)
+    )
+
+
+def test_approval_rules_apply_outside_tbhb_dev(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def in_tbhb_dev(_cwd: Path | None) -> bool:
+        return False
+
+    monkeypatch.setattr(guard, "in_tbhb_dev", in_tbhb_dev)
+    opened.record_opened(ROOT, [TARGET])
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, ROUTES[2][0]) == OPENED
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, "gh pr merge 1") is None
+
+
+def test_the_ledger_comparison_ignores_case(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    opened.record_opened(ROOT, ["TBHB-dev/Tools#7"])
+    text = "gh pr review 7 -a -R tbhb-dev/tools"
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) == OPENED
+
+
+def test_the_first_approval_it_refuses_is_named(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    opened.record_opened(ROOT, [TARGET])
+    text = "tbhb-approve tools 6 abc && tbhb-approve tools 7 abc"
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) == OPENED
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "gh pr review 7 -R tbhb-dev/tools",
+        "gh pr review 7 -R tbhb-dev/tools --comment -b ok",
+        "gh pr review 7 -R tbhb-dev/tools -b -a",
+        "gh pr review 7 -R tbhb-dev/tools -ba",
+        "gh pr review 7 -R tbhb-dev/tools --request-changes -b no",
+        "gh pr view 7 -R tbhb-dev/tools",
+        "gh api repos/tbhb-dev/tools/pulls/7/reviews",
+        "gh api -X GET repos/tbhb-dev/tools/pulls/7/reviews -f event=APPROVE",
+        "gh api --method=GET repos/tbhb-dev/tools/pulls/7/reviews -F event=APPROVE",
+        "gh api -X POST repos/tbhb-dev/tools/pulls/7/reviews -f event=COMMENT",
+        "gh api repos/tbhb-dev/tools/pulls/7/reviews -f body=APPROVE",
+        "gh api repos/tbhb-dev/tools/pulls/7/reviews -f event",
+        "gh api -X POST repos/tbhb-dev/tools/pulls/7/reviews --input f.json",
+        "gh api repos/tbhb-dev/tools/pulls/7/comments -f event=APPROVE",
+        "gh api repos/tbhb-dev/tools/pulls/7/merge -X PUT -f event=APPROVE",
+        "gh api repos/tbhb-dev/tools/issues/7/reviews -f event=APPROVE",
+        "gh api graphql -f query=addPullRequestReview",
+        "gh -R tbhb-dev/tools api -f event=APPROVE",
+        "tbhb-approve tools",
+        "tbhb-approve tools seven abc",
+        "tbhb-approve",
+        "echo 'tbhb-approve tools 7 abc'",
+        "git commit -m 'gh pr review 7 --approve -R tbhb-dev/tools'",
+        "gh issue view 7",
+        "gh pr",
+    ],
+)
+def test_other_review_calls_pass(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], text: str
+) -> None:
+    opened.record_opened(ROOT, [TARGET])
+    assert guard.approvals(text, None) == []
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) is None
+
+
+A_REVIEW = "`gh pr review --approve`"
+AN_API = "a `gh api` APPROVE review"
+SCRIPT = "`tbhb-approve`"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("gh pr review 7 --approve -R tbhb-dev/tools", (A_REVIEW, TARGET)),
+        ("gh pr review 7 -a --repo tbhb-dev/tools", (A_REVIEW, TARGET)),
+        ("gh pr review 7 -a --repo=tbhb-dev/tools", (A_REVIEW, TARGET)),
+        ("gh -R tbhb-dev/tools pr review '#7' --approve", (A_REVIEW, TARGET)),
+        ("gh --repo github.com/tbhb-dev/tools pr review 7 -a", (A_REVIEW, TARGET)),
+        ("gh -R x/y pr review -R tbhb-dev/tools 7 -a", (A_REVIEW, TARGET)),
+        ("gh pr review -b ok -a 7 -R tbhb-dev/tools", (A_REVIEW, TARGET)),
+        ("gh pr review --body-file f -a 7 -R tbhb-dev/tools", (A_REVIEW, TARGET)),
+        ("gh pr review -F f --approve=true 7 -R tbhb-dev/tools", (A_REVIEW, TARGET)),
+        ("gh pr review -ab ok 7 -R tbhb-dev/tools", (A_REVIEW, TARGET)),
+        (
+            "gh pr review https://github.com/tbhb-dev/tools/pull/7 --approve",
+            (A_REVIEW, TARGET),
+        ),
+        (
+            "gh pr review -R x/y https://github.com/tbhb-dev/tools/pull/7/files -a",
+            (A_REVIEW, TARGET),
+        ),
+        ("gh pr review --approve -R tbhb-dev/tools", (A_REVIEW, None)),
+        ("gh pr review my-branch --approve -R tbhb-dev/tools", (A_REVIEW, None)),
+        ("gh pr review 7 --approve -R tools", (A_REVIEW, None)),
+        (
+            "gh api -X POST repos/tbhb-dev/tools/pulls/7/reviews -f event=APPROVE",
+            (AN_API, TARGET),
+        ),
+        (
+            "gh api /repos/tbhb-dev/tools/pulls/7/reviews -F event=APPROVE",
+            (AN_API, TARGET),
+        ),
+        (
+            "gh api repos/tbhb-dev/tools/pulls/7/reviews --field=event=approve",
+            (AN_API, TARGET),
+        ),
+        (
+            "gh api repos/tbhb-dev/tools/pulls/7/reviews --raw-field 'event = APPROVE'",
+            (AN_API, TARGET),
+        ),
+        (
+            'gh api repos/tbhb-dev/tools/pulls/7/reviews -f"event=APPROVE" -XPOST',
+            (AN_API, TARGET),
+        ),
+        (
+            (
+                "gh api --method post -H x "
+                "repos/tbhb-dev/tools/pulls/7/reviews/9/events"
+                " -f event=APPROVE"
+            ),
+            (AN_API, TARGET),
+        ),
+        (
+            (
+                "gh api https://api.github.com/repos/tbhb-dev/tools/pulls/7/reviews/"
+                " -f body=x -f event=APPROVE"
+            ),
+            (AN_API, TARGET),
+        ),
+        (
+            "gh api 'repos/tbhb-dev/tools/pulls/7/reviews?x=1' -f event=APPROVE",
+            (AN_API, TARGET),
+        ),
+        (
+            "gh api -X POST repos/tbhb-dev/tools/pulls/$N/reviews -f event=APPROVE",
+            (AN_API, None),
+        ),
+        ("tbhb-approve tools 7 abc123", (SCRIPT, TARGET)),
+        ("/usr/local/bin/tbhb-approve tools 7", (SCRIPT, TARGET)),
+        ("bash -c 'cd x && tbhb-approve tools 7 abc'", (SCRIPT, TARGET)),
+        ("eval tbhb-approve tools 7 abc", (SCRIPT, TARGET)),
+        ("env A=b sudo gh pr review 7 -a -R tbhb-dev/tools", (A_REVIEW, TARGET)),
+        ('echo "$(gh pr review 7 -a -R tbhb-dev/tools)"', (A_REVIEW, TARGET)),
+    ],
+)
+def test_approval_routes_and_targets(
+    text: str, expected: tuple[str, str | None]
+) -> None:
+    assert guard.approvals(text, None) == [guard.Approval(*expected)]
+
+
+def test_the_repository_comes_from_the_hook_cwd_origin(tmp_path: Path) -> None:
+    repo = origin_repo(tmp_path / "repo", "git@github.com:tbhb-dev/tools.git")
+    assert guard.approvals("gh pr review 7 -a", repo) == [
+        guard.Approval(A_REVIEW, TARGET)
+    ]
+    text = "gh api repos/{owner}/{repo}/pulls/7/reviews -f event=APPROVE"
+    assert guard.approvals(text, repo) == [guard.Approval(AN_API, TARGET)]
+    text = "gh api repos/{owner}/tools/pulls/7/reviews -f event=APPROVE"
+    assert guard.approvals(text, repo) == [guard.Approval(AN_API, TARGET)]
+    text = "gh api repos/tbhb-dev/{repo}/pulls/7/reviews -f event=APPROVE"
+    assert guard.approvals(text, repo) == [guard.Approval(AN_API, TARGET)]
+    assert guard.approvals("gh pr review 7 -a -R o/r", repo) == [
+        guard.Approval(A_REVIEW, "o/r#7")
+    ]
+    https = origin_repo(tmp_path / "https", "https://github.com/tbhb-dev/tools/\n")
+    assert guard.origin_repo(https) == "tbhb-dev/tools"
+
+
+def test_without_an_origin_the_target_is_unknown(tmp_path: Path) -> None:
+    (tmp_path / "plain").mkdir()
+    assert guard.origin_repo(tmp_path / "plain") is None
+    assert guard.approvals("gh pr review 7 -a", tmp_path / "plain") == [
+        guard.Approval(A_REVIEW, None)
+    ]
+    text = "gh api repos/{owner}/{repo}/pulls/7/reviews -f event=APPROVE"
+    assert guard.approvals(text, tmp_path / "plain") == [guard.Approval(AN_API, None)]
+
+
+def test_an_unknown_target_denies_only_a_root_that_opened_something(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    text = "gh pr review --approve -R tbhb-dev/tools"
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) is None
+    opened.record_opened(ROOT, ["tbhb-dev/elsewhere#1"])
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) == (
+        f"{RULE}, and the guard can't tell which pull request "
+        f"{A_REVIEW} approves. Name it as OWNER/REPO and number."
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "name"),
+    [
+        ("o/r", "o/r"),
+        ("github.com/o/r", "o/r"),
+        ("https://github.com/o/r.git/", "o/r"),
+        ("r", None),
+        ("o/", None),
+        ("/r", None),
+        ("", None),
+    ],
+)
+def test_repo_name(value: str, name: str | None) -> None:
+    assert guard.repo_name(value) == name
+
+
+@pytest.mark.parametrize(
+    ("words", "values"),
+    [
+        (["-X", "POST"], ["POST"]),
+        (["-XPOST"], ["POST"]),
+        (["--method", "POST"], ["POST"]),
+        (["--method=POST"], ["POST"]),
+        (["--methods=POST"], []),
+        (["--method"], []),
+        (["-X", "a", "x", "-X", "b"], ["a", "b"]),
+    ],
+)
+def test_flag_values(words: list[str], values: list[str]) -> None:
+    assert guard.flag_values(words, {"-X", "--method"}, {"-X", "--method"}) == values
+
+
+@pytest.mark.parametrize(
+    ("word", "approve"),
+    [
+        ("--approve", True),
+        ("--approve=false", True),
+        ("--approved", False),
+        ("-a", True),
+        ("-ca", True),
+        ("-ba", False),
+        ("-Fa", False),
+        ("-Ra", False),
+        ("-c", False),
+        ("--a", False),
+        ("a", False),
+    ],
+)
+def test_approves(word: str, *, approve: bool) -> None:
+    assert guard.approves(word) is approve
+
+
+def test_split_args_drops_flag_values() -> None:
+    words = ["-b", "x", "--body=y", "7", "-a", "-R", "o/r", "-ab", "v", "-bz", "z"]
+    assert guard.split_args(words, guard.REVIEW_VALUE_FLAGS) == (
+        ["-b", "--body=y", "-a", "-R", "-ab", "-bz"],
+        ["7", "z"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("word", "takes"),
+    [
+        ("-b", True),
+        ("--body", True),
+        ("--body=x", False),
+        ("--body-x", False),
+        ("-ab", True),
+        ("-ba", False),
+        ("-Rx/b", False),
+        ("-ca", False),
+        ("-", False),
+    ],
+)
+def test_takes_value(word: str, *, takes: bool) -> None:
+    assert guard.takes_value(word, guard.REVIEW_VALUE_FLAGS) is takes
+
+
+def test_only_gh_itself_is_matched() -> None:
+    assert guard.find("echo pr create x") is None
+    assert guard.find("/usr/bin/gh pr create x") == guard.Match("create", ["x"])
+
+
+@pytest.mark.parametrize(
+    ("value", "name"), [("o/repoX", "o/repoX"), ("/o/r", "o/r"), ("h/o/r", "o/r")]
+)
+def test_repo_name_keeps_the_last_two_parts(value: str, name: str) -> None:
+    assert guard.repo_name(value) == name
+
+
+def test_a_failing_git_gives_no_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    def failing(*_args: str, cwd: Path | None = None) -> tuple[int, str]:
+        del cwd
+        return 1, "o/r\n"
+
+    monkeypatch.setattr(guard, "git", failing)
+    assert guard.origin_repo(None) is None
+
+
+def test_a_long_flag_never_takes_a_short_flags_value() -> None:
+    assert guard.takes_value("--xb", guard.REVIEW_VALUE_FLAGS) is False
+
+
+def test_split_args_with_a_value_flag_last() -> None:
+    assert guard.split_args(["7", "-b"], guard.REVIEW_VALUE_FLAGS) == (["-b"], ["7"])
+
+
+def no_repo() -> str | None:
+    return None
+
+
+@pytest.mark.parametrize(
+    ("rest", "expected"),
+    [
+        (["--help"], None),
+        (
+            ["-x", "pr", "review", "7", "-a", "-R", "o/r"],
+            guard.Approval(A_REVIEW, "o/r#7"),
+        ),
+        (
+            ["-x", "-R", "o/r", "pr", "review", "7", "-a"],
+            guard.Approval(A_REVIEW, "o/r#7"),
+        ),
+        (
+            ["pr", "review", "7", "-a", "--repo", "o/r"],
+            guard.Approval(A_REVIEW, "o/r#7"),
+        ),
+    ],
+)
+def test_gh_approval_skips_global_flags(
+    rest: list[str], expected: guard.Approval | None
+) -> None:
+    assert guard.gh_approval(rest, no_repo) == expected
+
+
+def test_one_placeholder_takes_only_its_own_part_from_origin(tmp_path: Path) -> None:
+    repo = origin_repo(tmp_path / "repo", "git@github.com:tbhb-dev/tools.git")
+    text = "gh api repos/other/{repo}/pulls/7/reviews -f event=APPROVE"
+    assert guard.approvals(text, repo) == [guard.Approval(AN_API, "other/tools#7")]
+    text = "gh api repos/{owner}/x/pulls/7/reviews -f event=APPROVE"
+    assert guard.approvals(text, repo) == [guard.Approval(AN_API, "tbhb-dev/x#7")]
+
+
+def test_the_guard_reads_the_payloads_cwd_and_environment(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    repo = origin_repo(tmp_path / "repo", "git@github.com:o/r.git")
+    (tmp_path / "plain").mkdir()
+    monkeypatch.chdir(tmp_path / "plain")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    opened.record_opened(ROOT, ["o/r#7"])
+    payload = {**CLAUDE_PAYLOAD, "cwd": str(repo)}
+    assert guard_reason(monkeypatch, capsys, payload, "gh pr review 7 -a") == (
+        f"{RULE}: this session opened o/r#7, so it can't approve it."
+    )
+    (tmp_path / "brain" / "conv-raw").mkdir(parents=True)
+    monkeypatch.setenv("ANTIGRAVITY_APP_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ANTIGRAVITY_CONVERSATION_ID", "conv-raw")
+    opened.record_opened(ai.sha256_64("conv-raw"), [TARGET])
+    agy = with_command(AGY_PAYLOAD, ROUTES[2][0])
+    del agy["conversationId"], agy["artifactDirectoryPath"]
+    code, out, _ = run_main(monkeypatch, capsys, json.dumps(agy))
+    assert code == 0
+    assert json.loads(out) == {"decision": "deny", "reason": OPENED}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "gh pr review 007 -a -R tbhb-dev/tools",
+        "gh pr review '#07' -a -R tbhb-dev/tools",
+        "gh pr review https://github.com/tbhb-dev/tools/pull/007 -a",
+        "gh api repos/tbhb-dev/tools/pulls/007/reviews -f event=APPROVE",
+        "tbhb-approve tools 007 abc",
+    ],
+)
+def test_leading_zeros_are_the_same_pr(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], text: str
+) -> None:
+    opened.record_opened(ROOT, [TARGET])
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) == OPENED
+
+
+@pytest.mark.parametrize(
+    "text", ["tbhb-approve tools \u00b2 abc", "tbhb-approve tools 7a abc"]
+)
+def test_a_pr_number_must_be_decimal(text: str) -> None:
+    assert guard.approvals(text, None) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("gh pr review 7 -a -b -Rx/y -R tbhb-dev/tools", (A_REVIEW, TARGET)),
+        ("gh pr review 7 -a --body --repo=o/r -R tbhb-dev/tools", (A_REVIEW, TARGET)),
+        ("gh pr review 7 -a -R tbhb-dev/tools -b -Ro/r", (A_REVIEW, TARGET)),
+        ("gh pr review 7 -aR tbhb-dev/tools", (A_REVIEW, TARGET)),
+        (
+            "gh api repos/tbhb-dev/tools/pulls/7/reviews -f event=APPROVE -q -X GET",
+            (AN_API, TARGET),
+        ),
+        (
+            "gh api repos/o/r/pulls/7/reviews -f event=APPROVE -H --method=GET",
+            (AN_API, "o/r#7"),
+        ),
+        (
+            "gh api repos/tbhb-dev/tools/pulls/7/reviews -f body -f event=APPROVE",
+            (AN_API, TARGET),
+        ),
+    ],
+)
+def test_a_flags_value_is_never_read_as_a_flag(
+    text: str, expected: tuple[str, str | None]
+) -> None:
+    assert guard.approvals(text, None) == [guard.Approval(*expected)]
+
+
+def test_a_value_word_that_looks_like_a_field_is_not_one() -> None:
+    text = "gh api repos/tbhb-dev/tools/pulls/7/reviews -H -f event=APPROVE -X POST"
+    assert guard.approvals(text, None) == []
+
+
+def test_a_value_word_hides_the_repo_flag(tmp_path: Path) -> None:
+    repo = origin_repo(tmp_path / "repo", "git@github.com:tbhb-dev/tools.git")
+    text = "gh pr review 7 -a -b -Rx/y"
+    assert guard.approvals(text, repo) == [guard.Approval(A_REVIEW, TARGET)]
+
+
+@pytest.mark.parametrize(
+    ("words", "values"),
+    [
+        (["-X", "-f", "x"], ["-f"]),
+        (["-f", "-X", "POST"], []),
+        (["-H", "-Xv", "-Xw"], ["w"]),
+        (["-aX", "GET"], ["GET"]),
+        (["-aXv"], ["v"]),
+        (["--method=", "x"], [""]),
+        (["--method", "--x"], ["--x"]),
+        (["--other", "-Xv"], ["v"]),
+        (["x", "-", "-Xv"], ["v"]),
+        (["-X"], []),
+        (["aX", "v"], []),
+    ],
+)
+def test_flag_values_skip_other_flags_values(
+    words: list[str], values: list[str]
+) -> None:
+    flags = {"-X", "-f", "-H", "--method"}
+    assert guard.flag_values(words, {"-X", "--method"}, flags) == values
+
+
+@pytest.mark.parametrize(
+    ("word", "found"),
+    [
+        ("--body", ("--body", None)),
+        ("--body=", ("--body", "")),
+        ("--body=x=y", ("--body", "x=y")),
+        ("--body-x", None),
+        ("-b", ("-b", None)),
+        ("-bx", ("-b", "x")),
+        ("-ab", ("-b", None)),
+        ("-abR", ("-b", "R")),
+        ("-a", None),
+        ("-", None),
+    ],
+)
+def test_flag_word(word: str, found: tuple[str, str | None] | None) -> None:
+    assert guard.flag_word(word, guard.REVIEW_VALUE_FLAGS) == found
+
+
+def test_gh_repo_names_the_repository(tmp_path: Path) -> None:
+    repo = origin_repo(tmp_path / "repo", "git@github.com:o/r.git")
+    assert guard.approvals("GH_REPO=tbhb-dev/tools gh pr review 7 -a", repo) == [
+        guard.Approval(A_REVIEW, TARGET)
+    ]
+    text = "GH_REPO=x/y env GH_REPO=tbhb-dev/tools gh pr review 7 -a"
+    assert guard.approvals(text, repo) == [guard.Approval(A_REVIEW, TARGET)]
+    text = "GH_REPO=tbhb-dev/tools bash -c 'gh pr review 7 -a'"
+    assert guard.approvals(text, repo) == [guard.Approval(A_REVIEW, TARGET)]
+    text = "GH_REPO=x/y gh pr review 7 -a -R tbhb-dev/tools"
+    assert guard.approvals(text, repo) == [guard.Approval(A_REVIEW, TARGET)]
+    text = "GH_REPO=tools gh pr review 7 -a"
+    assert guard.approvals(text, repo) == [guard.Approval(A_REVIEW, None)]
+    text = (
+        "GH_REPO=tbhb-dev/tools "
+        "gh api repos/{owner}/{repo}/pulls/7/reviews -f event=APPROVE"
+    )
+    assert guard.approvals(text, repo) == [guard.Approval(AN_API, TARGET)]
+    text = "gh pr review 7 -a GH_REPO=a/b"
+    assert guard.approvals(text, repo) == [guard.Approval(A_REVIEW, "o/r#7")]
+    text = "GH_REPO_X=a/b gh pr review 7 -a"
+    assert guard.approvals(text, repo) == [guard.Approval(A_REVIEW, "o/r#7")]
+    text = "export GH_REPO=a/b; gh pr review 7 -a"
+    assert guard.approvals(text, repo) == [guard.Approval(A_REVIEW, "o/r#7")]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "cd ../other && gh pr review 7 -a",
+        "pushd ../other; gh pr review 7 -a",
+        "popd; gh pr review 7 -a",
+        "git -C ../other status; gh pr review 7 -a",
+        "bash -c 'cd x' ; gh pr review 7 -a",
+        "cd x; gh api repos/{owner}/{repo}/pulls/7/reviews -f event=APPROVE",
+    ],
+)
+def test_a_directory_change_makes_the_origin_unknown(tmp_path: Path, text: str) -> None:
+    repo = origin_repo(tmp_path / "repo", "git@github.com:tbhb-dev/tools.git")
+    (found,) = guard.approvals(text, repo)
+    assert found.target is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "gh pr review 7 -a; cd x",
+        "git status; gh pr review 7 -a",
+        "git commit -m x; gh pr review 7 -a",
+        "cd x; gh pr review 7 -a -R tbhb-dev/tools",
+        "cd x; GH_REPO=tbhb-dev/tools gh pr review 7 -a",
+        "cd x; gh pr review https://github.com/tbhb-dev/tools/pull/7 -a",
+        "cd x; tbhb-approve tools 7 abc",
+    ],
+)
+def test_the_target_stays_known_without_a_move_or_with_a_named_repo(
+    tmp_path: Path, text: str
+) -> None:
+    repo = origin_repo(tmp_path / "repo", "git@github.com:tbhb-dev/tools.git")
+    (found,) = guard.approvals(text, repo)
+    assert found.target == TARGET
+
+
+def test_after_a_cd_the_unknown_target_denies_a_root_that_opened_something(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    repo = origin_repo(tmp_path / "repo", "git@github.com:tbhb-dev/tools.git")
+    payload = {**CLAUDE_PAYLOAD, "cwd": str(repo)}
+    text = "cd ../other && gh pr review 7 -a"
+    assert guard_reason(monkeypatch, capsys, payload, text) is None
+    opened.record_opened(ROOT, ["o/r#1"])
+    assert guard_reason(monkeypatch, capsys, payload, text) == (
+        f"{RULE}, and the guard can't tell which pull request "
+        f"{A_REVIEW} approves. Name it as OWNER/REPO and number."
+    )
+
+
+def test_a_non_utf8_ledger_denies(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], state: Path
+) -> None:
+    state.mkdir(parents=True)
+    path = state / f"{ai.hx(ROOT)}.json"
+    path.write_bytes(b'{"prs": ["\xff"]}')
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, ROUTES[2][0]) == (
+        f"{RULE}, and the guard can't read this session's ledger, "
+        f"so it refuses `tbhb-approve`: {path} is not UTF-8"
+    )

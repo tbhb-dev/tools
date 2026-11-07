@@ -23,6 +23,7 @@ from hypothesis import strategies as st
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import identity as agent_identity
+from tbhbdev.alpha import opened
 from tbhbdev.alpha import pull_request as pr
 
 # mutmut runs the tests from a copy of the source tree, so everything resolves
@@ -54,6 +55,9 @@ FAKE = """import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 name = os.path.basename(__file__).removesuffix(".py")
 spec = json.load(open(os.path.join(here, name + ".spec")))
+called = " ".join(sys.argv[1:])
+cases = spec.get("cases", {{}})
+spec = next((v for k, v in cases.items() if called.startswith(k)), spec)
 draft = ".github/PULL_REQUEST_DRAFT.md"
 record = {{
     "argv": sys.argv[1:],
@@ -79,10 +83,17 @@ class World:
     bin: Path
 
     def fake(
-        self, name: str, *, rc: int = 0, stdout: str = "", stderr: str = ""
+        self,
+        name: str,
+        *,
+        rc: int = 0,
+        stdout: str = "",
+        stderr: str = "",
+        cases: dict[str, dict[str, object]] | None = None,
     ) -> None:
+        """A fake tool; ``cases`` answers the calls whose words start with a key."""
         write_fake(self.bin / name, FAKE.format())
-        spec = {"rc": rc, "stdout": stdout, "stderr": stderr}
+        spec = {"rc": rc, "stdout": stdout, "stderr": stderr, "cases": cases or {}}
         (self.bin / f"{name}.spec").write_text(json.dumps(spec))
 
     def calls(self, name: str) -> list[dict[str, object]]:
@@ -114,6 +125,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     list(map(monkeypatch.delenv, [n for n in os.environ if n.startswith(prefixes)]))
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     for who in ("AUTHOR", "COMMITTER"):
         monkeypatch.setenv(f"GIT_{who}_NAME", "T")
         monkeypatch.setenv(f"GIT_{who}_EMAIL", "t@example.com")
@@ -134,7 +146,11 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     made.fake("vale", stdout="{}")
     made.fake("cspell")
     made.fake("rumdl")
-    made.fake("gh", stdout="https://github.com/tbhb-dev/ascm/pull/1\n")
+    made.fake(
+        "gh",
+        stdout="https://github.com/tbhb-dev/ascm/pull/1\n",
+        cases={"pr view": {"rc": 0, "stdout": '{"body": ""}', "stderr": ""}},
+    )
     return made
 
 
@@ -955,6 +971,16 @@ POSTING = (
     "LLM effort=high;harness=claude-code:2.1.0;model=anthropic:claude-opus-5-5;"
     f"session={agent_identity.sha256_64('raw-session')};surface=cli"
 )
+ROOT = agent_identity.sha256_64("raw-session")
+OPENER = (
+    "Opened-by: LLM harness=claude-code:2.1.0;model=anthropic:claude-opus-5-5;"
+    f"session={ROOT};surface=cli"
+)
+
+
+def ledgers(world: World) -> Path:
+    """The directory of opened ledgers in the world's user store."""
+    return world.root.parent / "state" / "tbhbdev" / "tbhb-alpha" / "opened"
 
 
 def no_ancestry(*_args: object, **_kwargs: object) -> list[str]:
@@ -1106,7 +1132,7 @@ def test_the_posting_session_dedupes_against_its_commit_trailer(
     (call,) = world.calls("gh")
     session = f"session={agent_identity.sha256_64('raw-session')}"
     lines = [line for line in str(call["stdin"]).splitlines() if session in line]
-    assert lines == [f"Generated-by: {trailer}"]
+    assert lines == [OPENER, f"Generated-by: {trailer}"]
 
 
 @pytest.mark.parametrize("argv", [["create"], ["edit", "--pr", "7"]])
@@ -1121,7 +1147,9 @@ def test_an_unresolved_posting_model_fails_without_posting(
     with pytest.raises(SystemExit) as info:
         run_main(*argv, env=agent)
     assert info.value.code == f"invalid LLM trailer: {posting}: model required"
-    assert world.calls("gh") == []
+    # edit reads the live body first, for its Opened-by line; nothing is posted.
+    reads = [["pr", "view", "7", "--json", "body"]] if argv[0] == "edit" else []
+    assert [call["argv"] for call in world.calls("gh")] == reads
 
 
 def test_description_uses_the_frontmatter_base(world: World) -> None:
@@ -1273,8 +1301,9 @@ def test_dry_run_prints_argv_and_body(
     assert out == (
         "gh pr create --title 'fix: x' --body-file - --base main --label bug\n\n"
         "## Why\n\nw\n\n## Behavior change\n\nb\n\n## Verification\n\nv\n\n"
-        f"Assisted-by: {POSTING}\n"
+        f"{OPENER}\nAssisted-by: {POSTING}\n"
     )
+    assert not ledgers(world).exists()
 
 
 def test_create_needs_gh(world: World) -> None:
@@ -1289,7 +1318,7 @@ def test_edit(world: World, capsys: pytest.CaptureFixture[str]) -> None:
         world, "---\nlabels: [bug, docs]\ndraft: true\nbase: main\n---\n" + BASE
     )
     assert run_main("edit", "--pr", "7") == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert call["argv"] == [
         "pr", "edit", "7", "--title", "fix: x", "--body-file", "-",
         "--add-label", "bug", "--add-label", "docs",
@@ -1306,7 +1335,7 @@ def test_edit_without_labels_and_with_agent(
 ) -> None:
     write_draft(world)
     assert run_main("edit", "--pr", "7", env=agent) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert call["argv"] == ["pr", "edit", "7", "--title", "fix: x", "--body-file", "-"]
     assert str(call["stdin"]).endswith(f"v\n\nAssisted-by: {POSTING}\n")
 
@@ -2033,3 +2062,406 @@ def test_rumdl_line_length_is_off_for_drafts() -> None:
     assert (
         "MD013" in (REAL / ".rumdl.toml").read_text().split("disable")[1].split("]")[0]
     )
+
+
+# ------------------------------------------------------------ opened by
+
+
+def test_create_writes_opened_by_first_and_the_ledger(
+    world: World, agent: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.git("switch", "-q", "-c", "topic")
+    world.commit(f"one\n\nGenerated-by: {GEN}")
+    write_draft(world)
+    assert run_main("create", env=agent) == 0
+    (call,) = world.calls("gh")
+    assert str(call["stdin"]).endswith(
+        f"\nv\n\n{OPENER}\nGenerated-by: {GEN}\nAssisted-by: {POSTING}\n"
+    )
+    assert "subagent=" not in OPENER
+    path = ledgers(world) / f"{agent_identity.hx(ROOT)}.json"
+    assert json.loads(path.read_text()) == {"prs": ["tbhb-dev/ascm#1"]}
+    assert capsys.readouterr() == ("https://github.com/tbhb-dev/ascm/pull/1\n", "")
+    world.fake("gh", stdout="Created\nhttps://github.com/tbhb-dev/ascm/pull/12\n")
+    assert run_main("create", env=agent) == 0
+    assert json.loads(path.read_text()) == {
+        "prs": ["tbhb-dev/ascm#1", "tbhb-dev/ascm#12"]
+    }
+
+
+def test_a_subagent_opens_under_its_root(world: World, agent: dict[str, str]) -> None:
+    write_draft(world)
+    child = agent_identity.sha256_64("agent-raw")
+    agent_identity.write_user_record(child, {"root": ROOT, "model": "claude-x"})
+    assert run_main("create", env={**agent, "ASCM_AGENT_ID": child}) == 0
+    (call,) = world.calls("gh")
+    assert str(call["stdin"]).endswith(
+        f"\n\n{OPENER}\nAssisted-by: LLM harness=claude-code:2.1.0;"
+        f"model=anthropic:claude-x;session={ROOT};subagent={child};surface=cli\n"
+    )
+    assert opened.read_ledger(ROOT) == {"tbhb-dev/ascm#1"}
+
+
+@pytest.mark.parametrize(
+    "env", [{}, {"ANTIGRAVITY_CONVERSATION_ID": "conv-raw"}], ids=["human", "agy"]
+)
+def test_no_root_means_no_line_and_no_ledger(world: World, env: dict[str, str]) -> None:
+    write_draft(world)
+    conv = agent_identity.sha256_64("conv-raw")
+    agent_identity.write_user_record(conv, {"model": "gemini-x"})
+    assert run_main("create", env=env) == 0
+    (call,) = world.calls("gh")
+    assert "Opened-by" not in str(call["stdin"])
+    assert not ledgers(world).exists()
+
+
+def test_a_failed_create_records_nothing(
+    world: World, agent: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.fake("gh", rc=1, stdout="https://github.com/tbhb-dev/ascm/pull/1\n")
+    write_draft(world)
+    assert run_main("create", env=agent) == 1
+    assert not ledgers(world).exists()
+    assert capsys.readouterr().err == ""
+
+
+def test_create_without_a_url_records_nothing(
+    world: World, agent: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.fake("gh", stdout="https://github.com/tbhb-dev/ascm/issues/1\n")
+    write_draft(world)
+    assert run_main("create", env=agent) == 1
+    assert capsys.readouterr().err == (
+        "gh printed no pull request URL; nothing was recorded\n"
+    )
+    assert not ledgers(world).exists()
+
+
+def test_create_with_a_corrupt_ledger_reports_it(
+    world: World, agent: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = ledgers(world) / f"{agent_identity.hx(ROOT)}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("[]")
+    write_draft(world)
+    assert run_main("create", env=agent) == 0
+    assert capsys.readouterr().err == (
+        "warning: the PR is open, but the ledger was not updated: "
+        f"{path} holds no list of pull requests\n"
+    )
+    assert path.read_text() == "[]"
+
+
+LIVE = "Opened-by: LLM harness=codex;session=sha-256-64:cccccccccccccccc"
+
+
+def live_body(body: object, rc: int = 0, stderr: str = "") -> dict[str, object]:
+    """The fake gh answer to ``gh pr view N --json body``."""
+    stdout = json.dumps({"body": body}) if rc == 0 else ""
+    return {"rc": rc, "stdout": stdout, "stderr": stderr}
+
+
+@pytest.mark.parametrize(
+    ("body", "kept"),
+    [
+        (f"## Why\n\nw\n\n{LIVE}\n{GEN_LINE}\n", LIVE),
+        (f"## Why\r\n\r\nw\r\n\r\n{LIVE}\r\n{GEN_LINE}\r\n\r\n  \n", LIVE),
+        (f"{GEN_LINE}\n{LIVE}\n", LIVE),
+        (f"## Why\n\n{LIVE}\n\nw\n\n{GEN_LINE}\n", None),
+        (f"## Why\n\nw\n\n{GEN_LINE}\n", None),
+        (f"## Why\n\nw\n\n {LIVE}\n", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_edit_copies_the_live_opened_by_line(
+    world: World, agent: dict[str, str], body: object, kept: str | None
+) -> None:
+    world.fake("gh", cases={"pr view": live_body(body)})
+    write_draft(world)
+    assert run_main("edit", "--pr", "7", env=agent) == 0
+    view, edit = world.calls("gh")
+    assert view["argv"] == ["pr", "view", "7", "--json", "body"]
+    assert cast("list[str]", edit["argv"])[:3] == ["pr", "edit", "7"]
+    opened_by = f"{kept}\n" if kept else ""
+    assert str(edit["stdin"]).endswith(f"\nv\n\n{opened_by}Assisted-by: {POSTING}\n")
+    assert not ledgers(world).exists()
+
+
+@pytest.mark.parametrize(
+    ("answer", "why"),
+    [
+        (live_body("", rc=1, stderr="no pull\nrequest"), "no pull request"),
+        ({"rc": 0, "stdout": "not json", "stderr": ""}, "not json"),
+        ({"rc": 0, "stdout": "[]", "stderr": ""}, "[]"),
+    ],
+)
+def test_edit_stops_when_it_cant_read_the_live_body(
+    world: World, answer: dict[str, object], why: str
+) -> None:
+    world.fake("gh", cases={"pr view": answer})
+    write_draft(world)
+    message = f"cannot read the body of PR 7 to keep its Opened-by: {why}"
+    with pytest.raises(SystemExit, match=f"^{re.escape(message)}$"):
+        run_main("edit", "--pr", "7")
+    argvs = [cast("list[str]", call["argv"]) for call in world.calls("gh")]
+    assert [argv[:2] for argv in argvs] == [["pr", "view"]]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Opened-by: LLM harness=codex",
+        "opened-by: x",
+        "  Opened-By : x",
+        "OPENED-BY:",
+    ],
+)
+def test_check_rejects_an_opened_by_line(line: str) -> None:
+    assert structure(BASE + f"\n{line}\n") == [(15, pr.OPENED_MESSAGE)]
+
+
+def test_check_rejects_opened_by_in_code_too() -> None:
+    text = BASE + "\n```text\nOpened-by: x\n```\n"
+    assert structure(text) == [(16, pr.OPENED_MESSAGE)]
+    assert structure(BASE + "\nSee the Opened-by: line.\n") == []
+
+
+R1 = agent_identity.sha256_64("r1")
+R2 = agent_identity.sha256_64("r2")
+R3 = agent_identity.sha256_64("r3")
+SUB = agent_identity.sha256_64("sub")
+
+
+def gh_list(items: list[dict[str, object]], rc: int = 0) -> dict[str, object]:
+    return {"rc": rc, "stdout": json.dumps(items), "stderr": ""}
+
+
+BACKFILL_CASES: dict[str, dict[str, object]] = {
+    "repo list tbhb-dev": gh_list(
+        [{"nameWithOwner": "tbhb-dev/b"}, {"nameWithOwner": "tbhb-dev/a"}]
+    ),
+    "pr list -R tbhb-dev/a": gh_list(
+        [
+            {
+                "number": 1,
+                "body": (
+                    f"x\n\nGenerated-by: LLM harness=claude-code;session={R1}\n"
+                    f"Assisted-by: LLM harness=codex;session={R2};subagent={SUB}\n"
+                ),
+            },
+            {"number": 2, "body": f"Opened-by: LLM harness=codex;session={R3}\n"},
+            {"number": 3, "body": None},
+            {
+                "number": 4,
+                "body": (
+                    f"session={R1}\nGenerated-by: LLM xsession={R2}\n"
+                    f"Generated-by: LLM session={R3}x\nGenerated-by: x session={R3}\n"
+                    f"Reviewed-by: LLM session={R3}\n"
+                ),
+            },
+        ]
+    ),
+    "pr list -R tbhb-dev/b": gh_list(
+        [{"number": 5, "body": f"  Generated-by:  LLM model=m;session={R1}  \n"}]
+    ),
+}
+
+
+def test_backfill_records_every_session_on_every_pr(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.fake("gh", cases=BACKFILL_CASES)
+    for _ in range(2):
+        assert run_main("backfill-opened", "tbhb-dev") == 0
+        assert capsys.readouterr().out == (
+            "tbhb-dev/a: 2 of 4 pull requests recorded\n"
+            "tbhb-dev/b: 1 of 1 pull requests recorded\n"
+        )
+        assert opened.read_ledger(R1) == {"tbhb-dev/a#1", "tbhb-dev/b#5"}
+        assert opened.read_ledger(R2) == {"tbhb-dev/a#1"}
+        assert opened.read_ledger(R3) == {"tbhb-dev/a#2"}
+        assert sorted(p.name for p in ledgers(world).glob("*.json")) == sorted(
+            f"{agent_identity.hx(r)}.json" for r in (R1, R2, R3)
+        )
+    calls = [call["argv"] for call in world.calls("gh")][:3]
+    assert calls == [
+        ["repo", "list", "tbhb-dev", "--limit", "1000", "--json", "nameWithOwner"],
+        ["pr", "list", "-R", "tbhb-dev/a", "--state", "all", "--limit", "10000",
+         "--json", "number,body"],
+        ["pr", "list", "-R", "tbhb-dev/b", "--state", "all", "--limit", "10000",
+         "--json", "number,body"],
+    ]  # fmt: skip
+
+
+def test_backfill_with_no_repositories_prints_nothing(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.fake("gh", stdout="[]")
+    assert run_main("backfill-opened", "nobody") == 0
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    ("answer", "why"),
+    [
+        ({"rc": 1, "stdout": "", "stderr": "HTTP\n404"}, "HTTP 404"),
+        ({"rc": 1, "stdout": "partial", "stderr": ""}, "partial"),
+        ({"rc": 0, "stdout": "{}", "stderr": ""}, "{}"),
+        ({"rc": 0, "stdout": "nope", "stderr": ""}, "nope"),
+    ],
+)
+def test_backfill_stops_when_gh_fails(
+    world: World, answer: dict[str, object], why: str
+) -> None:
+    world.fake("gh", cases={"repo list": answer})
+    with pytest.raises(SystemExit, match=f"^gh repo list failed: {why}$"):
+        run_main("backfill-opened", "tbhb-dev")
+
+
+def test_backfill_stops_at_a_corrupt_ledger(world: World) -> None:
+    world.fake("gh", cases=BACKFILL_CASES)
+    path = ledgers(world) / f"{agent_identity.hx(R1)}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{")
+    with pytest.raises(SystemExit, match=f"^{re.escape(str(path))} is not JSON$"):
+        run_main("backfill-opened", "tbhb-dev")
+    assert path.read_text() == "{"
+
+
+def test_backfill_needs_an_owner() -> None:
+    with pytest.raises(SystemExit) as info:
+        run_main("backfill-opened")
+    assert info.value.code == 2
+
+
+def test_an_opened_by_line_does_not_hide_later_trailers() -> None:
+    assert structure(BASE + "\nOpened-by: x\nGenerated-by: LLM x\n") == [
+        (15, pr.OPENED_MESSAGE),
+        (16, "the script writes Generated-by and Assisted-by; remove this line"),
+    ]
+
+
+def test_edit_stops_when_gh_fails_with_a_body(world: World) -> None:
+    answer: dict[str, object] = {"rc": 1, "stdout": '{"body": ""}', "stderr": ""}
+    world.fake("gh", cases={"pr view": answer})
+    write_draft(world)
+    message = 'cannot read the body of PR 7 to keep its Opened-by: {"body": ""}'
+    with pytest.raises(SystemExit, match=f"^{re.escape(message)}$"):
+        run_main("edit", "--pr", "7")
+
+
+def test_backfill_stops_when_gh_fails_with_a_list(world: World) -> None:
+    world.fake("gh", cases={"repo list": gh_list([], rc=1)})
+    with pytest.raises(SystemExit, match=r"^gh repo list failed: \[\]$"):
+        run_main("backfill-opened", "tbhb-dev")
+
+
+def test_every_invalid_trailer_is_joined_by_semicolons(world: World) -> None:
+    world.git("switch", "-q", "-c", "topic")
+    world.commit("one\n\nGenerated-by: LLM model=a:m\nAssisted-by: LLM model=b:m")
+    with pytest.raises(SystemExit) as info:
+        pr.description(checked_for(), {})
+    assert str(info.value) == (
+        "invalid LLM trailer: LLM model=a:m: harness required; "
+        "LLM model=b:m: harness required"
+    )
+
+
+def test_a_dry_run_reports_success_and_no_output(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert pr.invoke_gh(["gh", "pr"], "b\n", dry_run=True) == (0, "")
+    assert capsys.readouterr().out == "gh pr\n\nb\n"
+
+
+def test_help_uses_the_program_name(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        pr.main(["--help"], {}, prog="tbhbdev alpha pr")
+    assert capsys.readouterr().out.startswith("usage: tbhbdev alpha pr ")
+
+
+@pytest.mark.parametrize("make", ["file", "bytes"])
+def test_create_warns_when_the_ledger_cant_be_written(
+    world: World,
+    agent: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    make: str,
+) -> None:
+    store = ledgers(world)
+    store.mkdir(parents=True)
+    path = store / f"{agent_identity.hx(ROOT)}.json"
+    if make == "file":
+        # A directory where the ledger file goes: the write fails with OSError.
+        path.mkdir()
+        why = f"cannot read {path}: Is a directory"
+    else:
+        path.write_bytes(b'{"prs": ["\xff"]}')
+        why = f"{path} is not UTF-8"
+    write_draft(world)
+    assert run_main("create", env=agent) == 0
+    out, err = capsys.readouterr()
+    assert out == "https://github.com/tbhb-dev/ascm/pull/1\n"
+    assert err == f"warning: the PR is open, but the ledger was not updated: {why}\n"
+
+
+def test_create_warns_when_the_write_fails(
+    world: World,
+    agent: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def full(*_args: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(opened, "write_private_json", full)
+    write_draft(world)
+    assert run_main("create", env=agent) == 0
+    assert capsys.readouterr().err == (
+        "warning: the PR is open, but the ledger was not updated: "
+        "[Errno 28] No space left on device\n"
+    )
+
+
+def test_an_opener_without_a_model_gets_no_line_and_no_ledger(
+    world: World, agent: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    child = agent_identity.sha256_64("agent-raw")
+    agent_identity.write_user_record(child, {"root": ROOT, "model": "claude-x"})
+    seed_session(world, None)
+    write_draft(world)
+    assert run_main("create", env={**agent, "ASCM_AGENT_ID": child}) == 0
+    (call,) = world.calls("gh")
+    assert "Opened-by" not in str(call["stdin"])
+    assert not ledgers(world).exists()
+    value = f"LLM harness=claude-code:2.1.0;session={ROOT};surface=cli"
+    assert capsys.readouterr().err == (
+        f"warning: no Opened-by line or ledger entry: {value}: model required\n"
+    )
+
+
+def test_backfill_warns_at_each_limit(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr, "REPO_LIMIT", 2)
+    monkeypatch.setattr(pr, "PR_LIMIT", 4)
+    world.fake("gh", cases=BACKFILL_CASES)
+    assert run_main("backfill-opened", "tbhb-dev") == 0
+    assert capsys.readouterr().err == (
+        "warning: gh repo list tbhb-dev stopped at its limit of 2; "
+        "some may be missing\n"
+        "warning: gh pr list -R tbhb-dev/a stopped at its limit of 4; "
+        "some may be missing\n"
+    )
+    argvs = [cast("list[str]", call["argv"]) for call in world.calls("gh")]
+    assert [argv[argv.index("--limit") + 1] for argv in argvs] == ["2", "4", "4"]
+
+
+def test_backfill_is_quiet_below_the_limits(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.fake("gh", cases=BACKFILL_CASES)
+    assert run_main("backfill-opened", "tbhb-dev") == 0
+    assert capsys.readouterr().err == ""

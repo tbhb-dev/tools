@@ -25,7 +25,9 @@ fit 72 characters, or the script stops. The body comes from the PR body:
   the spec the sentence points at, and a commit message cannot hold a link.
 - The PR body's final Generated-by and Assisted-by paragraph becomes the
   commit's trailer block, as written and never wrapped. The script checks that
-  ``git interpret-trailers --parse`` reads it back unchanged.
+  ``git interpret-trailers --parse`` reads it back unchanged. Its
+  ``Opened-by`` line, which ``tbhbdev alpha pr create`` writes for the guard,
+  is dropped first: the commit-msg check doesn't accept that key.
 
 The script never adds Signed-off-by or Co-authored-by, and it refuses a PR body
 that already holds one, whoever runs it.
@@ -49,6 +51,7 @@ import re
 import shlex
 import sys
 from dataclasses import dataclass
+from itertools import takewhile
 from typing import TYPE_CHECKING, NoReturn, cast
 
 from tbhbdev.alpha import identity as agent_identity
@@ -274,6 +277,32 @@ def render(lines: Sequence[pr.Line], refs: dict[str, int]) -> list[str]:
     return renderer.blocks
 
 
+def drop_opened(lines: Sequence[pr.Line]) -> list[pr.Line]:
+    """The lines without the ``Opened-by`` line of the final trailer paragraph.
+
+    The paragraph is the trailing run of LLM trailer and ``Opened-by`` lines
+    after a blank line. Anywhere else, ``Opened-by`` stays for
+    ``check_trailers`` to refuse.
+    """
+    end = len(lines)
+    while end and pr.is_blank(lines[end - 1]):
+        end -= 1
+    run = takewhile(
+        lambda line: (
+            agent_identity.LINE.match(line.text) or pr.OPENED_LINE.match(line.text)
+        ),
+        reversed(lines[:end]),
+    )
+    start = end - len(list(run))
+    if start and not pr.is_blank(lines[start - 1]):
+        return list(lines)
+    return [
+        line
+        for index, line in enumerate(lines)
+        if not (start <= index and pr.OPENED_LINE.match(line.text))
+    ]
+
+
 def split_trailers(lines: Sequence[pr.Line]) -> tuple[list[pr.Line], list[str]]:
     """Split off the body's final paragraph when it is all LLM trailers."""
     end = len(lines)
@@ -380,13 +409,13 @@ def build_message(title: str, number: int, body: str) -> Message:
     subject = f"{title} (#{number})"
     if problems := pr.title_problems(subject, WIDTH):
         stop(f"the squash subject {subject!r} fails: {'; '.join(problems)}")
-    lines, _ = pr.scan(body.splitlines(), 1)
+    lines, _ = pr.scan(body.splitlines(), 1)  # pragma: no mutate -- numbers unused
     _, unclosed = pr.fence_flags(body.splitlines())
     if unclosed is not None:
         stop(
             f"the PR body is malformed: line {unclosed + 1}: code fence is never closed"
         )
-    rest, trailers = split_trailers(lines)
+    rest, trailers = split_trailers(drop_opened(lines))
     check_trailers(trailers, rest)
     refs: dict[str, int] = {}
     parts = body_blocks(rest, refs)

@@ -25,8 +25,10 @@ Alpha commands are interim: they may change or go away without notice.
 commands:
   identity     agent identity: record <harness> | trailer MSGFILE [SOURCE]
                | consume | check MSGFILE | stamp-docs
-  guard-gh-pr  PreToolUse hook: block gh pr create|edit|merge
+  guard-gh-pr  PreToolUse hook: block gh pr create|edit|merge and
+               a session's approval of a pull request it opened
   pr           check | create | edit | hook: the pull request draft
+               | backfill-opened OWNER: the opened ledgers
   merge        squash-merge an approved pull request
   install      install the git hooks and the user-level harness hooks
 """

@@ -82,11 +82,13 @@ onepassword
 onepasswordconnectsdk
 oxipng
 passwordless
+popd
 posttooluse
 pousr
 ppid
 prek
 pretooluse
+pushd
 readattr
 readextattr
 readsecurity
