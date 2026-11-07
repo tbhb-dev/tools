@@ -13,6 +13,7 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr create [DRAFT] [--dry-run]
     tbhbdev alpha pr edit [DRAFT] --pr N
     tbhbdev alpha pr hook claude|codex|antigravity
+    tbhbdev alpha pr backfill-opened OWNER
 
 The repository is the worktree the command runs in: its schema, section
 scheme and lint configs are the ones checked against. DRAFT defaults to that
@@ -40,6 +41,23 @@ machine-written: a draft that contains one fails ``check``, because a person
 cannot compute the session hashes by hand and a stripped line would hide what
 the author thought they had written. Nothing is pushed: when the branch is not
 on the remote, gh's own error is passed through.
+
+``create`` also writes ``Opened-by: LLM ...`` as the first line of that
+paragraph: the posting agent's root identity, with no ``subagent=``. Once gh
+has opened the pull request, it adds ``owner/repo#N`` to that root's opened
+ledger (see ``tbhbdev.alpha.opened``), which the guard reads to refuse the
+session's own approval. An agent whose root can't be resolved, or a human,
+gets neither, and so does a root whose value fails the trailer grammar (no
+model, say), with a warning. A ledger that can't be written after the pull
+request exists only warns. ``edit`` copies the live body's ``Opened-by`` line unchanged,
+and adds none when the live body has none. ``check`` rejects a draft that
+contains one.
+
+``backfill-opened OWNER`` reads the body of every pull request, open or not,
+in every repository of OWNER, and adds each one to the ledger of every
+``session=`` its Generated-by, Assisted-by or Opened-by lines name. It prints
+a count per repository and is safe to run again. It warns when a list
+reaches gh's ``--limit``, since the rest may be missing.
 """
 
 import argparse
@@ -60,6 +78,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import identity as agent_identity
+from tbhbdev.alpha import opened
 from tbhbdev.alpha.repo import git, hook_cwd, in_tbhb_dev, read_hook_stdin
 
 if TYPE_CHECKING:
@@ -104,6 +123,16 @@ URL = re.compile(r"<?https?://[^\s>]*>?")
 RUMDL_LINE = re.compile(r"\S+?:(\d+):\d+: (.+)")
 CSPELL_LINE = re.compile(r"\S+?:(\d+):\d+ - (.+)")
 HUMAN_TRAILER = re.compile(r"(?:Signed-off-by|Co-authored-by):", re.IGNORECASE)
+OPENED_KEY = "Opened-by"
+# The line create writes, and any spelling of the key in a draft.
+OPENED_LINE = re.compile(rf"{OPENED_KEY}: ")
+DRAFT_OPENED = re.compile(r"\s*opened-by\s*:", re.IGNORECASE)
+OPENED_MESSAGE = "the script writes Opened-by; remove this line"
+PR_URL = re.compile(r"https://[^/\s]+/([^/\s]+/[^/\s]+)/pull/(\d+)")
+REPO_LIMIT = 1000
+PR_LIMIT = 10000
+BACKFILL_KEYS = re.compile(r"(?:Generated-by|Assisted-by|Opened-by):\s*(LLM\b.*)")
+SESSION_ATTR = re.compile(r"(?<![^\s;])session=(sha-256-64:[0-9a-f]{16})(?![^\s;])")
 LIST_ITEM = re.compile(r" *(?:[-*+]|\d+[.)]) +\S")
 # A ``#N`` that GitHub links to this repository's issue or pull request N. One
 # written ``owner/repo#N`` has a name character before the ``#``.
@@ -420,6 +449,9 @@ def trailer_problems(lines: Sequence[Line]) -> list[Problem]:
     """
     problems: list[Problem] = []
     for line in lines:
+        if DRAFT_OPENED.match(line.raw):
+            problems.append((line.no, OPENED_MESSAGE))
+            continue
         if line.code:
             continue
         if agent_identity.LINE.match(line.text):
@@ -727,8 +759,44 @@ def base_of(meta: Mapping[str, object]) -> str:
     return str(meta.get("base", schema_default(load_schema(), "base")))
 
 
-def description(checked: Checked, env: Mapping[str, str]) -> str:
+def gh_data(done: subprocess.CompletedProcess[str]) -> object:
+    """The JSON that gh printed, or None when gh failed or printed none."""
+    if done.returncode != 0:
+        return None
+    try:
+        return json.loads(done.stdout)
+    except ValueError:
+        return None
+
+
+def live_opened_line(number: int) -> str | None:
+    """The ``Opened-by`` line of PR N's final paragraph on GitHub, or None.
+
+    Raises:
+        SystemExit: gh can't read the body, so the line can't be kept.
+    """
+    done = run([find_tool(GH), "pr", "view", str(number), "--json", "body"])
+    data = gh_data(done)
+    if not isinstance(data, dict):
+        why = " ".join((done.stderr or done.stdout).split())
+        message = f"cannot read the body of PR {number} to keep its Opened-by: {why}"
+        raise SystemExit(message)
+    paragraph: list[str] = []
+    body = str(data.get("body") or "")  # pragma: no mutate -- no body, no line
+    for line in reversed(body.splitlines()):
+        if line.strip():
+            paragraph.append(line)
+        elif paragraph:
+            break
+    return next((line for line in paragraph if OPENED_LINE.match(line)), None)
+
+
+def description(
+    checked: Checked, env: Mapping[str, str], opened_by: str | None = None
+) -> str:
     """The final body: the description plus the trailers as its last paragraph.
+
+    ``opened_by``, when given, is the paragraph's first line.
 
     Raises:
         SystemExit: A trailer, or the posting agent's, fails the commit-trailer
@@ -744,11 +812,12 @@ def description(checked: Checked, env: Mapping[str, str]) -> str:
     ]
     if errors:
         raise SystemExit("invalid LLM trailer: " + "; ".join(errors))
-    merged = merge_trailers(found, posting)
+    merged = [f"{key}: {value}" for key, value in merge_trailers(found, posting)]
+    trailers = ([opened_by] if opened_by else []) + merged
     body = body_of(checked.rendered)
-    if not merged:
+    if not trailers:
         return body
-    return body + "\n" + "\n".join(f"{key}: {value}" for key, value in merged) + "\n"
+    return body + "\n" + "\n".join(trailers) + "\n"
 
 
 def gh_args(meta: Mapping[str, object]) -> list[str]:
@@ -785,18 +854,114 @@ def read_checked(path: Path) -> Checked:
     return checked
 
 
-def invoke_gh(argv: list[str], body: str, *, dry_run: bool = False) -> int:
-    """Run gh, or show what would run. gh's output and errors pass through."""
+def invoke_gh(argv: list[str], body: str, *, dry_run: bool = False) -> tuple[int, str]:
+    """Run gh, or show what would run. gh's output and errors pass through.
+
+    Returns gh's exit code and its standard output.
+    """
     if dry_run:
         print(shlex.join(argv))
         print()
         print(body, end="")
-        return 0
+        return 0, ""
     argv[0] = find_tool(GH)
     done = run(argv, stdin=body)
     print(done.stdout, end="")
     print(done.stderr, end="", file=sys.stderr)
-    return done.returncode
+    return done.returncode, done.stdout
+
+
+def record_created(root: str, stdout: str) -> int:
+    """Add the PR that gh printed to the opener's ledger; the exit code.
+
+    Once the PR exists, a ledger that can't be written only warns.
+    """
+    found = PR_URL.search(stdout)
+    if found is None:
+        print("gh printed no pull request URL; nothing was recorded", file=sys.stderr)
+        return 1
+    try:
+        opened.record_opened(root, [f"{found[1]}#{found[2]}"])
+    except (opened.LedgerError, OSError) as exc:
+        message = f"warning: the PR is open, but the ledger was not updated: {exc}"
+        print(message, file=sys.stderr)
+    return 0
+
+
+def gh_json(argv: Sequence[str]) -> list[dict[str, object]]:
+    """A gh command's JSON list output.
+
+    Raises:
+        SystemExit: gh fails or prints something other than a JSON list.
+    """
+    done = run([find_tool(GH), *argv])
+    data = gh_data(done)
+    if not isinstance(data, list):
+        why = " ".join((done.stderr or done.stdout).split())
+        message = f"gh {' '.join(argv[:2])} failed: {why}"
+        raise SystemExit(message)
+    return cast("list[dict[str, object]]", data)  # pragma: no mutate
+
+
+def body_roots(body: str) -> set[str]:
+    """Every ``session=`` root hash on a body's LLM trailer lines."""
+    found = (BACKFILL_KEYS.fullmatch(line.strip()) for line in body.splitlines())
+    return {
+        attr[1] for line in found if line for attr in SESSION_ATTR.finditer(line[1])
+    }
+
+
+def warn_at_limit(count: int, limit: int, what: str) -> None:
+    """Warn on stderr that a gh list may have stopped at its ``--limit``."""
+    if count == limit:
+        message = (
+            f"warning: {what} stopped at its limit of {limit}; some may be missing"
+        )
+        print(message, file=sys.stderr)
+
+
+def backfill(owner: str) -> int:
+    """Add every PR of OWNER's repositories to the ledgers its trailers name."""
+    repos = gh_json(
+        ["repo", "list", owner, "--limit", str(REPO_LIMIT), "--json", "nameWithOwner"]
+    )
+    warn_at_limit(len(repos), REPO_LIMIT, f"gh repo list {owner}")
+    for repo in sorted(str(entry["nameWithOwner"]) for entry in repos):
+        pulls = gh_json(
+            ["pr", "list", "-R", repo, "--state", "all", "--limit", str(PR_LIMIT),
+             "--json", "number,body"]
+        )  # fmt: skip
+        warn_at_limit(len(pulls), PR_LIMIT, f"gh pr list -R {repo}")
+        by_root: dict[str, set[str]] = {}
+        for pull in pulls:
+            body = str(pull.get("body") or "")  # pragma: no mutate -- no roots
+            for root in body_roots(body):
+                by_root.setdefault(root, set()).add(f"{repo}#{pull['number']}")
+        try:
+            for root, refs in sorted(by_root.items()):
+                opened.record_opened(root, refs)
+        except opened.LedgerError as exc:
+            raise SystemExit(str(exc)) from exc
+        recorded = set().union(*by_root.values())
+        print(f"{repo}: {len(recorded)} of {len(pulls)} pull requests recorded")
+    return 0
+
+
+def opened_by(env: Mapping[str, str]) -> tuple[str | None, str | None]:
+    """The opener's root hash and ``Opened-by`` line, or (None, None).
+
+    An opener whose value fails the trailer grammar, such as one without a
+    model, gets a warning and neither.
+    """
+    ident = opened.opener(env)
+    if ident is None:
+        return None, None
+    value = agent_identity.format_value(ident.attrs())
+    if why := agent_identity.check_value(value):
+        message = f"warning: no {OPENED_KEY} line or ledger entry: {value}: {why}"
+        print(message, file=sys.stderr)
+        return None, None
+    return ident.root, f"{OPENED_KEY}: {value}"
 
 
 def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
@@ -807,11 +972,16 @@ def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     if args.command == "check":
         print("OK: the draft conforms")
         return 0
-    body = description(checked, env)
     if args.command == "create":
+        root, line = opened_by(env)
+        body = description(checked, env, line)
         argv = [GH, "pr", "create", "--title", checked.title, "--body-file", "-"]
         argv += gh_args(checked.meta)
-        return invoke_gh(argv, body, dry_run=args.dry_run)
+        code, stdout = invoke_gh(argv, body, dry_run=args.dry_run)
+        if code or args.dry_run or root is None:
+            return code
+        return record_created(root, stdout)
+    body = description(checked, env, live_opened_line(args.pr))
     argv = [
         GH,
         "pr",
@@ -825,7 +995,7 @@ def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     labels = cast("list[str]", checked.meta.get("labels", []))  # pragma: no mutate
     for label in labels:
         argv += ["--add-label", label]
-    return invoke_gh(argv, body)
+    return invoke_gh(argv, body)[0]
 
 
 def touched_paths(harness: str, data: agent_identity.Json) -> list[str]:
@@ -879,6 +1049,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("hook").add_argument("harness", choices=[CLAUDE, CODEX, ANTIGRAVITY])
+    sub.add_parser("backfill-opened").add_argument("owner")
     for name in ("check", "create", "edit"):
         one = sub.add_parser(name)
         one.add_argument("draft", nargs="?", type=Path, default=DRAFT)
@@ -899,4 +1070,6 @@ def main(
     env = os.environ if env is None else env
     if args.command == "hook":
         return hook(args.harness)
+    if args.command == "backfill-opened":
+        return backfill(args.owner)
     return command(args, env)

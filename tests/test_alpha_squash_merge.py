@@ -10,6 +10,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fake_tool import link_git, pythonpath, write_fake
@@ -721,3 +722,76 @@ def test_one_line_paragraphs_still_wrap_at_72() -> None:
     assert all(len(line) <= sm.WIDTH for line in out)
     assert out[3].startswith("word word")
     assert any(line.startswith("  word") for line in out)
+
+
+# ------------------------------------------------------------------ opened by
+
+OPENED = "Opened-by: LLM harness=claude-code:2.1.0;session=sha-256-64:aaaaaaaaaaaaaaaa"
+
+
+@pytest.mark.parametrize("tail", ["\n", "\n\n\n", "\n  \n"])
+def test_the_opened_by_line_is_dropped_and_the_trailers_still_checked(
+    tail: str,
+) -> None:
+    message = message_of(f"## Why\n\nw\n\n{OPENED}\n{GEN}\n{ASSIST}{tail}")
+    assert message == f"fix: x (#7)\n\nWhy\nw\n\n{GEN}\n{ASSIST}\n"
+    assert read_back(message) == f"{GEN}\n{ASSIST}\n"
+
+
+def test_an_opened_by_line_anywhere_in_the_trailer_paragraph_is_dropped() -> None:
+    message = message_of(f"## Why\n\nw\n\n{GEN}\n{OPENED}\n{ASSIST}\n")
+    assert message == f"fix: x (#7)\n\nWhy\nw\n\n{GEN}\n{ASSIST}\n"
+
+
+def test_an_opened_by_line_alone_leaves_no_trailer_block() -> None:
+    assert message_of(f"## Why\n\nw\n\n{OPENED}\n") == "fix: x (#7)\n\nWhy\nw\n"
+    assert message_of(f"{OPENED}\n{GEN}\n") == f"fix: x (#7)\n\n{GEN}\n"
+
+
+def test_an_invalid_trailer_after_opened_by_is_still_refused() -> None:
+    with pytest.raises(SystemExit, match="invalid trailer"):
+        message_of(f"## Why\n\nw\n\n{OPENED}\nGenerated-by: nonsense\n")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"## Why\n\n{OPENED}\n\nw\n\n{GEN}\n",
+        f"## Why\n\nw\n{OPENED}\n{GEN}\n",
+        f"## Why\n\n```\n{OPENED}\n```\n\n{GEN}\n",
+        f"## Why\n\n```\n{OPENED}\n```\n",
+    ],
+)
+def test_an_opened_by_line_outside_the_trailer_paragraph_is_refused(
+    body: str,
+) -> None:
+    with pytest.raises(SystemExit, match="the script writes Opened-by"):
+        message_of(body)
+
+
+def test_a_body_with_opened_by_merges_without_it(tools: Tools) -> None:
+    tools.view(body=f"## Why\n\nw\n\n{OPENED}\n{GEN}\n")
+    assert sm.main(["7"]) == 0
+    merge = tools.calls()[-1]
+    assert cast("list[str]", merge["argv"])[:2] == ["pr", "merge"]
+    assert merge["stdin"] == f"Why\nw\n\n{GEN}\n"
+
+
+@pytest.mark.usefixtures("tools")
+def test_every_subject_problem_is_listed() -> None:
+    title = "BAD " + "a" * 72
+    with pytest.raises(SystemExit) as info:
+        sm.build_message(title, 5, "")
+    assert str(info.value) == (
+        f"the squash subject '{title} (#5)' fails: title is 81 characters; "
+        "the limit is 72; title is not a Conventional Commit header (cog verify): "
+        "not conventional"
+    )
+
+
+def test_an_unclosed_fence_names_its_line() -> None:
+    with pytest.raises(SystemExit) as info:
+        message_of("## Why\n\n```\ncode\n")
+    assert str(info.value) == (
+        "the PR body is malformed: line 3: code fence is never closed"
+    )
