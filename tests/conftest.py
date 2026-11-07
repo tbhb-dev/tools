@@ -321,6 +321,7 @@ def example_config(urls: list[str] | None = None) -> str:
             'server_hosts = ["nas-a", "nas-b"]\n'
             'token_prefix = "example-host"\n'
             '[agent]\nhost_tag = "tag:example-agents"\n'
+            'ops_user = "example-ops"\nowner = "example-owner"\n'
             '[vaults]\nall = "vault-all"\nhost_prefix = "vault-"\n'
             '[gitleaks]\nowners = ["example-org", "example-user"]\n'
             'session_sockets = ["/tmp/example-socks/"]\n'

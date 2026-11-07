@@ -39,6 +39,8 @@ token_prefix = "example-host"
 
 [agent]
 host_tag = "tag:example-agents"
+ops_user = "example-ops"
+owner = "example-owner"
 
 [vaults]
 all = "vault-all"
@@ -54,6 +56,8 @@ repos = ["example-org/app"]
 ```
 
 Each `[connect] server_hosts` entry must be a DNS label of at most 63 characters. Letters and digits make up the label, and a hyphen may appear only between them. A bad entry fails with its position in the list, not its value.
+
+`[agent] ops_user` and `[agent] owner` name accounts on the agent hosts, as [Agent hosts](#agent-hosts) describes. Each must be a portable user name: letters, digits, `.`, `_` and `-`, starting with a letter or `_`. A bad name fails with its `[table] key`, not its value.
 
 That's the operator's file. On each agent host, `tbhbdev host bootstrap` installs a copy that adds `[connect] endpoints`, computed from the tailnet as [Agent hosts](#agent-hosts) describes.
 
@@ -71,12 +75,19 @@ Tests set the `TBHBDEV_TEST_TOKEN` environment variable, and the library then us
 
 `tbhbdev host` runs on the operator's Mac, which has 1Password Desktop and the `op` command-line tool. A tag marks the agent hosts on the tailnet. The config's `[agent] host_tag` names it. Each host gets a token for its own vault, `[vaults] host_prefix` followed by the host's name, and for `[vaults] all`, plus any the operator grants, stored in the `agent` account's keychain on that host. Every `op` call names the config's `[op] account`.
 
+Besides `agent`, each host has these accounts:
+
+- The ops account, `[agent] ops_user`, is the one `tbhbdev host` connects as. It needs passwordless sudo on every host. Every command on a host runs as `ssh -o BatchMode=yes -o IdentitiesOnly=yes -l <ops_user> <host>`, even when the host is the machine `tbhbdev` runs on. `tbhbdev` never handles a key. Your ssh config names the key for `ops_user` on each host, and ssh doesn't offer any other key from the agent. The ops account does the root setup and the reads, and runs commands as `agent` with `sudo -n -u agent -H`.
+- The owner, `[agent] owner`, is your own account on the hosts. It joins the `devel` group, the workspace root is below its home, and the clones, the tools and its copy of the private gitleaks config belong to it. Commands run as the owner through the ops account with `sudo -n -u <owner> -H`.
+
+The subcommands:
+
 - `list` prints each agent host on the tailnet with its OS, and marks this machine.
-- `bootstrap [--host H ... | --all] [--repair-acl] [VAULT ...]` does a host's one-time, privileged setup, then runs `upgrade` on the same hosts. It sets up the Connect server and its vaults, the `devel` group and the `agent` user, workspace access, the agent keychain, the agent's copy of the config, and a current token. Bootstrap sends each host a copy of the operator's config on stdin and installs it as the `agent` user's `tbhbdev/config.toml`, mode 0600 in a 0700 directory. It reports `ok` when the copy already matches and `changed` otherwise, and never prints the file or a diff. Before the upgrade, it generates the private gitleaks config from the private repositories of each `[gitleaks] owners` entry, the tailnet, the vaults, the Connect endpoints, the operator's account names and each path in the optional `[gitleaks] session_sockets`, and publishes it to the `config` field of the item `gitleaks-private` in the vault `[vaults] all`, reporting `ok` or `changed`. A source that fails stops bootstrap before it writes anything. A second run doesn't change anything.
-- `upgrade [--host H ... | --all]` brings a bootstrapped host up to date. It doesn't need a terminal, Touch ID, `op`, or a sudo password, so agents run it. Each step reports `ok`, `changed`, or `failed`. It clones the workspace repositories as the agent's GitHub account and fast-forwards clean clones on their default branch. Then it runs `mise install` at the workspace root and checks that the host's token still reaches its vaults through Connect. Last, the `gitleaks-config` step reads the private gitleaks config from that field through Connect with the host's own token. If the text extends `.gitleaks.toml` and defines the `tbhb-private-canary` rule, the step installs it as `.config/gitleaks/private.toml` in the agent's home and in the operator's: each a 0600 file in a 0700 directory, replaced atomically. Otherwise it fails without writing anything.
+- `bootstrap [--host H ... | --all] [--repair-acl] [VAULT ...]` does a host's one-time, privileged setup, then runs `upgrade` on the same hosts. It sets up the Connect server and its vaults, the `devel` group and the `agent` user, workspace access, the agent keychain, the agent's copy of the config, and a current token. Bootstrap sends each host a copy of the operator's config on stdin and installs it as the `agent` user's `tbhbdev/config.toml`, mode 0600 in a 0700 directory. It reports `ok` when the copy already matches and `changed` otherwise, and never prints the file or a diff. Before the upgrade, it generates the private gitleaks config from the private repositories of each `[gitleaks] owners` entry, the tailnet, the vaults, the Connect endpoints, the names of the owner, the ops account and `agent`, and each path in the optional `[gitleaks] session_sockets`, and publishes it to the `config` field of the item `gitleaks-private` in the vault `[vaults] all`, reporting `ok` or `changed`. A source that fails stops bootstrap before it writes anything. A second run doesn't change anything.
+- `upgrade [--host H ... | --all]` brings a bootstrapped host up to date. It doesn't need a terminal, Touch ID, `op`, or a sudo password, so agents run it. Each step reports `ok`, `changed`, or `failed`. As the owner, it clones the workspace repositories with the agent's GitHub account and fast-forwards clean clones on their default branch. Then it runs `mise install` at the workspace root and checks that the host's token still reaches its vaults through Connect. Last, the `gitleaks-config` step reads the private gitleaks config from that field through Connect with the host's own token. If the text extends `.gitleaks.toml` and defines the `tbhb-private-canary` rule, the step installs it as `.config/gitleaks/private.toml` in the agent's home and in the owner's: each a 0600 file in a 0700 directory, replaced atomically. Otherwise it fails without writing anything.
 - `grant` and `revoke` take `[--host H ... | --all] VAULT ...` and swap the host's token for one with the new vault set. `revoke` refuses to take a host's own vault or `[vaults] all` from it.
 - `status` reports each host's token name, vaults, and expiry, whether its keychain entry exists, whether its copy of the config matches yours, and whether `devel` has its workspace access. It never prints the token.
-- `exec [--host H] [--operator] -- CMD ...` runs a command on a host as the `agent` user. With `--operator` it runs the command as you, after a Touch ID check.
+- `exec [--host H] [--operator] -- CMD ...` runs a command on a host as the `agent` user, through the ops account. With `--operator` it runs the command as the owner, after a Touch ID check.
 
 Bootstrap's copy sets `[connect] endpoints` to `https://<host>.<suffix>` for each of `[connect] server_hosts`, in order. Its suffix is the tailnet's MagicDNS suffix, the `MagicDNSSuffix` that `tailscale status --json` reports, so these commands need `tailscale` on the operator's Mac. That suffix stays out of every argument and message, and lives only in each host's 0600 copy. When `tailscale` is missing, fails, or doesn't report a suffix, bootstrap doesn't write a copy on any host. Any endpoints in the operator's own file give way to the computed list. The copy keeps values but drops comments and layout, so the file can contain only tables of strings and lists of strings. Grant and revoke check a new token against the same endpoints, and `status` compares each host's file with the same copy.
 
@@ -84,9 +95,9 @@ Without `--host` or `--all`, a command acts on this machine. Bootstrap, grant, a
 
 Bootstrap, grant, and revoke start with a Touch ID check.
 
-Bootstrap creates the group `devel` with group ID 33835 and the user `agent` with user ID 24368, with `devel` as its primary group, no password login, and a home of mode 0700. On macOS it uses `dscl .` and hides the user from the login window. On Linux it uses `groupadd` and `useradd` and locks the password. It never changes an existing account, and an account with other IDs stops that host with an error, as does a user or group ID that another name already uses. Bootstrap runs its root steps with `sudo -n`. When sudo needs a password, it runs them through `ssh -t`, so sudo asks once per host.
+Bootstrap creates the group `devel` with group ID 33835 and the user `agent` with user ID 24368, with `devel` as its primary group, no password login, and a home of mode 0700. On macOS it uses `dscl .` and hides the user from the login window. On Linux it uses `groupadd` and `useradd` and locks the password. It never changes an existing account, and an account with other IDs stops that host with an error, as does a user or group ID that another name already uses. Bootstrap runs its root steps as the ops account with `sudo -n`, and never asks for a password. When `sudo -n true` fails on a host, bootstrap stops there with an error that the ops account needs passwordless sudo, and runs nothing as root.
 
-The user config's `[workspace]` table names the workspace with `[workspace] root`, a path below the operator's home, and `repos`, a list of `owner/name`. With one, bootstrap:
+The user config's `[workspace]` table names the workspace with `[workspace] root`, a path below the owner's home, and `repos`, a list of `owner/name`. With one, bootstrap:
 
 - lets `devel` traverse each directory from the home down to the root
 - gives `devel` inheritable read, write, and create access on the root and everything below it

@@ -84,15 +84,19 @@ def host_key() -> str:
 
 
 def ssh(args: list[str]) -> None:
-    while args and args[0] in {"-o", "-t"}:
-        if args[0] == "-t":
-            os.environ["STUB_TTY"] = "1"
-        args = args[2:] if args[0] == "-o" else args[1:]
+    """As `-l USER` on the host, with HOME at homes/HOST/USER."""
+    user = ""
+    while args and args[0] in {"-o", "-l"}:
+        if args[0] == "-l":
+            user = args[1]
+        args = args[2:]
+    if not user:
+        fail("ssh stub: no -l user")
     host, command = args[0], " ".join(args[1:])
     if host in cast("list[str]", load().get("ssh_down", [])):
         fail(f"ssh: connect to host {host}: Network is unreachable", 255)
     os.environ["STUB_HOST"] = host
-    home = stub_dir() / "homes" / host / "operator"
+    home = stub_dir() / "homes" / host / user
     home.mkdir(parents=True, exist_ok=True)
     os.environ["HOME"] = str(home)
     os.execvp("sh", ["sh", "-c", command])  # noqa: S606
@@ -104,28 +108,22 @@ def as_root(argv: list[str]) -> NoReturn:
 
 
 def sudo(args: list[str]) -> None:
-    """As the agent with -n -u agent -H, or as root with -n or a password."""
-    if args[:4] == ["-n", "-u", "agent", "-H"]:
-        home = stub_dir() / "homes" / host_key() / "agent"
+    """As USER with -n -u USER -H, or as root with -n, never with a password."""
+    if args[:2] == ["-n", "-u"] and args[3:4] == ["-H"]:
+        user = args[2]
+        home = stub_dir() / "homes" / host_key() / user
         home.mkdir(parents=True, exist_ok=True)
         os.environ["HOME"] = str(home)
-        os.environ["STUB_AGENT"] = "1"
-        # sudo resets the environment, so the agent has no XDG_CONFIG_HOME.
+        if user == "agent":
+            os.environ["STUB_AGENT"] = "1"
+        # sudo resets the environment, so the user has no XDG_CONFIG_HOME.
         os.environ.pop("XDG_CONFIG_HOME", None)
         os.execvp(args[4], args[4:])  # noqa: S606
-    state = load()
-    if args[:1] == ["-n"]:
-        if state.get("sudo_password"):
-            fail("sudo: a password is required")
-        as_root(args[1:])
-    if args[:1] != ["sh"]:
+    if args[:1] != ["-n"]:
         fail(f"sudo stub: unexpected options {args[:1]}")
-    if host_key() != "local" and not os.environ.get("STUB_TTY"):
-        fail("sudo: a terminal is required to read the password")
-    log("sudo-prompt", [host_key()])
-    if state.get("sudo_wrong_password"):
-        fail("sudo: 3 incorrect password attempts")
-    as_root(args)
+    if load().get("sudo_password"):
+        fail("sudo: a password is required")
+    as_root(args[1:])
 
 
 def need_root(tool: str) -> None:

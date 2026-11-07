@@ -5,13 +5,23 @@ These commands run on the operator's Mac, which has 1Password Desktop and the
 userconfig.py): every `op` call names its `[op] account`, and agent hosts are
 the tailnet nodes tagged with its `[agent] host_tag`.
 
+Every command on a host goes over ssh as the ops account, `[agent] ops_user`,
+which has passwordless sudo there, even when the host is this machine. ssh
+offers only the key the operator's ssh config names for that host and
+account (`IdentitiesOnly=yes`); this module never handles a key. The
+ops account does the root setup and the reads, and runs commands as the
+`agent` user through sudo. The owner, `[agent] owner`, is the person's own
+account on the hosts: it belongs to `devel`, the workspace root is below its
+home, and the clones, the tools and its copy of the private gitleaks config
+are its own. Commands run as the owner through the same sudo.
+
 The work splits along one line. `bootstrap` does everything that needs root
 or the operator's 1Password: the `devel` group and the `agent` user, the
 workspace ACLs, the Connect server and vaults, and each host's token. Only
 the operator runs it, after a Touch ID check, as `grant` and `revoke` do.
 `upgrade` does what is safe to repeat unattended: the clones, the tools, a
-check of the token, and the private gitleaks config. It needs no Touch ID, no
-`op` and no sudo password, so agents run it, and bootstrap ends by running it.
+check of the token, and the private gitleaks config. It needs no Touch ID and
+no `op`, so agents run it, and bootstrap ends by running it.
 The user config's optional `[workspace]` names the workspace root and its
 clones.
 
@@ -21,14 +31,14 @@ through Connect with the host's own token, as the token check reaches the
 agent keychain. It checks the text before writing anything: the config must
 extend `.gitleaks.toml` and define the `tbhb-private-canary` rule. It then
 installs `private.toml` in `.config/gitleaks` under the agent's home and
-under the operator's, each a 0600 file in a 0700 directory, written to a
+under the owner's, each a 0600 file in a 0700 directory, written to a
 temporary file there and renamed into place. The text goes to each account
 only on stdin, and no message ever quotes it.
 
 Bootstrap writes that field before its upgrade. It generates the config from
 live sources: each owner's private repositories from gh, the tailnet from
-`tailscale status`, the vaults, the Connect endpoints, the operator's user
-names on the hosts it set up, and fixed patterns. Each rule's id is its
+`tailscale status`, the vaults, the Connect endpoints, the account names on
+the hosts, and fixed patterns. Each rule's id is its
 category and a number, so no id holds a value, and the config reaches op only
 on stdin. A source that fails or finds nothing stops bootstrap before it
 writes. It creates the item when it's missing and edits it only when the text
@@ -97,7 +107,12 @@ TOKEN_SHAPE = re.compile(r"[A-Za-z0-9._-]+\Z")
 # What each of `[connect] server_hosts` must be, so that its endpoint's host
 # is that one label under the tailnet's suffix.
 DNS_LABEL = re.compile(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
-SSH = ("ssh", "-o", "BatchMode=yes")
+# What `[agent] ops_user` and `[agent] owner` must be: a portable POSIX user
+# name, which starts with a letter or an underscore.
+USER_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9._-]*")
+# ssh offers only the key the operator's ssh config names for each host and
+# account; tbhbdev never handles a key itself.
+SSH = ("ssh", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes")
 TOUCH_ID_UNAVAILABLE = 2
 
 # The agent account, with the same ids on every host. Bootstrap creates them
@@ -188,7 +203,7 @@ GITLEAKS_RULES = {
     "tailnet-stem": "The stem a family of tailnet host names shares",
     "tailnet-ipv4": "A tailnet IPv4 address",
     "tailnet-ipv6": "A tailnet IPv6 address",
-    "home-path": "A path into the operator's or the agent's home",
+    "home-path": "A path into the home of an account on the hosts",
     "checkout-path": "A path into the workspace checkouts",
     "tool-dir": "A path into a directory the tools write",
     "private-ipv4": "A private IPv4 address",
@@ -196,7 +211,7 @@ GITLEAKS_RULES = {
     "mac-address": "A MAC address",
     "op-reference": "A 1Password secret reference",
     "session-socket": "A session socket path",
-    "account-name": "An operator's account name",
+    "account-name": "The name of an account on the hosts",
     "op-account": "The 1Password account",
     "op-vault": "A 1Password vault name",
     "op-item": "The name of a 1Password item the tools read",
@@ -352,9 +367,31 @@ def server_hosts() -> list[str]:
     return names
 
 
+def account(key: str) -> str:
+    """`[agent] KEY`, an account name on every host.
+
+    A message names a bad value by its key, never by its value.
+    """
+    name = setting("agent", key)
+    if not USER_NAME.fullmatch(name):
+        message = f"{userconfig.path()}: [agent] {key} isn't a POSIX user name"
+        raise HostError(message)
+    return name
+
+
+def ops_user() -> str:
+    """The account ssh connects as on every host, with passwordless sudo."""
+    return account("ops_user")
+
+
+def owner() -> str:
+    """The person's account on the hosts, which owns the workspace."""
+    return account("owner")
+
+
 @dataclass(frozen=True)
 class Workspace:
-    """The workspace root, relative to the operator's home, and its clones."""
+    """The workspace root, relative to the owner's home, and its clones."""
 
     root: PurePosixPath
     repos: tuple[str, ...]
@@ -684,10 +721,8 @@ def _token_stdin(host: Host, value: str) -> str:
 
 
 def _over(host: Host, argv: list[str], stdin: str | None = None) -> Done:
-    """Run ARGV on HOST, over ssh unless HOST is this one."""
-    if not host.local:
-        argv = [*SSH, host.name, shlex.join(argv)]
-    return _run(argv, stdin=stdin)
+    """Run ARGV on HOST as the ops account, over ssh even when HOST is this one."""
+    return _run([*SSH, "-l", ops_user(), host.name, shlex.join(argv)], stdin=stdin)
 
 
 def on_host(host: Host, script: str, stdin: str | None = None) -> Done:
@@ -695,9 +730,14 @@ def on_host(host: Host, script: str, stdin: str | None = None) -> Done:
     return _over(host, ["sudo", "-n", "-u", AGENT, "-H", "sh", "-c", script], stdin)
 
 
-def as_operator(host: Host, script: str, stdin: str | None = None) -> Done:
-    """Run SCRIPT as the operator, the user ssh connects as, on HOST."""
+def as_ops(host: Host, script: str, stdin: str | None = None) -> Done:
+    """Run SCRIPT as the ops account, the user ssh connects as, on HOST."""
     return _over(host, ["sh", "-c", script], stdin)
+
+
+def as_owner(host: Host, script: str, stdin: str | None = None) -> Done:
+    """Run SCRIPT as the owner on HOST, through the ops account's sudo."""
+    return _over(host, ["sudo", "-n", "-u", owner(), "-H", "sh", "-c", script], stdin)
 
 
 def _script(host: Host, step: str) -> str:
@@ -887,17 +927,17 @@ def _plans(
     return plans
 
 
-# The agent account and the operator's membership of devel.
+# The agent account and the owner's membership of devel.
 
 
-def identity(host: Host) -> tuple[str, PurePosixPath]:
-    """The operator's user name and home on HOST."""
-    done = as_operator(host, 'id -un && printf "%s\\n" "$HOME"')
+def owner_home(host: Host) -> PurePosixPath:
+    """The owner's home on HOST."""
+    done = as_owner(host, 'printf "%s\\n" "$HOME"')
     lines = done.stdout.splitlines()
-    if done.returncode != 0 or len(lines) != 2 or not lines[1].startswith("/"):  # noqa: PLR2004
-        message = f"{host.name}: cannot find out who you are there: {_why(done)}"
+    if done.returncode != 0 or len(lines) != 1 or not lines[0].startswith("/"):
+        message = f"{host.name}: cannot find the owner's home there: {_why(done)}"
         raise HostError(message)
-    return lines[0], PurePosixPath(lines[1])
+    return PurePosixPath(lines[0])
 
 
 def agent_home(host: Host) -> str:
@@ -948,13 +988,13 @@ _MAC_FILE_RIGHTS = (
 
 
 class Platform(ABC):
-    """How one OS reads and makes accounts and ACLs. Reads run as the operator."""
+    """How one OS reads and makes accounts and ACLs. Reads run as ops."""
 
     def __init__(self, host: Host) -> None:
         self.host = host
 
     def read(self, script: str) -> Done:
-        return as_operator(self.host, script)
+        return as_ops(self.host, script)
 
     def fail(self, what: str, done: Done) -> NoReturn:
         message = f"{self.host.name}: cannot read {what}: {_why(done)}"
@@ -1296,8 +1336,10 @@ def _plan_user(host: Host, system: Platform) -> tuple[str, list[Change]]:
     return user.home, []
 
 
-def plan_accounts(host: Host, system: Platform, operator: str) -> list[Change]:
+def plan_accounts(host: Host, system: Platform, member: str) -> list[Change]:
     """The changes that give HOST the devel group and the agent user.
+
+    MEMBER, the owner, joins devel.
 
     Every check runs before any change, so a host with a wrong id is left
     as it was.
@@ -1305,13 +1347,13 @@ def plan_accounts(host: Host, system: Platform, operator: str) -> list[Change]:
     group, changes = _plan_group(host, system)
     home, made = _plan_user(host, system)
     changes += made
-    if group is not None and operator in group.members:
-        print(f"{host.name}: {operator} is already in the group {GROUP}")
+    if group is not None and member in group.members:
+        print(f"{host.name}: {member} is already in the group {GROUP}")
     else:
-        what = f"added {operator} to the group {GROUP}"
-        changes.append(Change(what, system.add_member(operator)))
+        what = f"added {member} to the group {GROUP}"
+        changes.append(Change(what, system.add_member(member)))
     where = shlex.quote(home)
-    if as_operator(host, f"[ -e {where} ]").returncode == 0:
+    if as_ops(host, f"[ -e {where} ]").returncode == 0:
         print(f"{host.name}: the agent's home {home} already exists")
     else:
         command = f"install -d -o {AGENT_UID} -g {GID} -m 0700 {where}"
@@ -1342,7 +1384,7 @@ def plan_access(
     """The changes that give devel the workspace, creating its root first."""
     root = home / ws.root
     where = shlex.quote(str(root))
-    done = as_operator(host, f"[ -d {where} ] || {{ mkdir -p {where} && echo made; }}")
+    done = as_owner(host, f"[ -d {where} ] || {{ mkdir -p {where} && echo made; }}")
     if done.returncode != 0:
         message = f"{host.name}: cannot create {root}: {_why(done)}"
         raise HostError(message)
@@ -1359,29 +1401,22 @@ def plan_access(
 
 
 def privileged(host: Host, changes: list[Change]) -> None:
-    """Make CHANGES as root on HOST, in one script.
+    """Make CHANGES as root on HOST, in one script, through the ops account.
 
-    With passwordless sudo the script runs unattended. Otherwise sudo asks
-    for the operator's password once, on this terminal or over `ssh -t`.
-    The password goes only to sudo.
+    The ops account needs passwordless sudo: nothing asks for a password.
     """
     if not changes:
         return
     script = "\n".join(["set -eu", *(c for change in changes for c in change.commands)])
-    if _over(host, ["sudo", "-n", "true"]).returncode == 0:
-        done = _over(host, ["sudo", "-n", "sh", "-c", script])
-        if done.returncode != 0:
-            message = f"{host.name}: the setup as root failed: {_why(done)}"
-            raise HostError(message)
-    else:
-        print(f"{host.name}: sudo needs your password", file=sys.stderr)
-        argv = ["sudo", "sh", "-c", script]
-        if not host.local:
-            argv = [*SSH, "-t", host.name, shlex.join(argv)]
-        code = subprocess.call(argv)  # nosec B603
-        if code != 0:
-            message = f"{host.name}: the setup as root failed (exit {code})"
-            raise HostError(message)
+    if _over(host, ["sudo", "-n", "true"]).returncode != 0:
+        message = (
+            f"{host.name}: the ops account {ops_user()} needs passwordless sudo there"
+        )
+        raise HostError(message)
+    done = _over(host, ["sudo", "-n", "sh", "-c", script])
+    if done.returncode != 0:
+        message = f"{host.name}: the setup as root failed: {_why(done)}"
+        raise HostError(message)
     for change in changes:
         print(f"{host.name}: {change.what}")
 
@@ -1402,22 +1437,18 @@ def probe(host: Host, root: PurePosixPath) -> None:
     print(f"{host.name}: the agent can read and write {root}")
 
 
-def set_up(host: Host, ws: Workspace | None, *, repair: bool) -> str:
-    """HOST's accounts and workspace access, ending with the agent's probe.
-
-    Returns the operator's user name there.
-    """
+def set_up(host: Host, ws: Workspace | None, *, repair: bool) -> None:
+    """HOST's accounts and workspace access, ending with the agent's probe."""
     system = platform_for(host)
-    operator, home = identity(host)
+    home = owner_home(host)
     if ws is not None:
         system.check_tools()
-    changes = plan_accounts(host, system, operator)
+    changes = plan_accounts(host, system, owner())
     if ws is not None:
         changes += plan_access(host, system, home, ws, repair=repair)
     privileged(host, changes)
     if ws is not None:
         probe(host, home / ws.root)
-    return operator
 
 
 # Upgrade: steps that are safe to repeat, each reporting ok, changed or failed.
@@ -1446,7 +1477,7 @@ def _bootstrap_hint(host: Host) -> str:
 
 
 def _git(target: Target, path: str, *args: str) -> Done:
-    return as_operator(target.host, f"git -C {path} {shlex.join(args)}")
+    return as_owner(target.host, f"git -C {path} {shlex.join(args)}")
 
 
 def _left_alone(target: Target, path: str, default: str) -> Result | None:
@@ -1484,12 +1515,12 @@ def clone(repo: str, target: Target) -> Result:
     """Clone REPO as the agent's GitHub identity, or fast-forward a clean clone."""
     full = target.root / repo
     path = shlex.quote(str(full))
-    if as_operator(target.host, f"[ -e {path} ]").returncode != 0:
+    if as_owner(target.host, f"[ -e {path} ]").returncode != 0:
         script = (
             f"mkdir -p {shlex.quote(str(full.parent))} && "
             f"{GH_AGENT} gh repo clone {shlex.quote(repo)} {path} -- --quiet"
         )
-        done = as_operator(target.host, script)
+        done = as_owner(target.host, script)
         if done.returncode != 0:
             return Result(FAILED, f"the clone failed: {_why(done)}")
         return Result(CHANGED, f"cloned into {full}")
@@ -1501,7 +1532,7 @@ def clone(repo: str, target: Target) -> Result:
     if held is not None:
         return held
     helper = shlex.quote("credential.helper=!gh auth git-credential")
-    fetch = as_operator(
+    fetch = as_owner(
         target.host,
         f"{GH_AGENT} git -C {path} -c credential.helper= -c {helper} "
         "fetch --quiet origin",
@@ -1515,14 +1546,11 @@ def tools(target: Target) -> Result:
     """Install the tools the workspace root's mise config names."""
     root = f"cd {shlex.quote(str(target.root))}"
     found = " || ".join(f"[ -e {shlex.quote(c)} ]" for c in MISE_CONFIGS)
-    if as_operator(target.host, f"{root} && {{ {found}; }}").returncode != 0:
+    if as_owner(target.host, f"{root} && {{ {found}; }}").returncode != 0:
         return Result(OK, f"no mise config in {target.root}")
-    if (
-        as_operator(target.host, f"{root} && mise install --dry-run-code").returncode
-        == 0
-    ):
+    if as_owner(target.host, f"{root} && mise install --dry-run-code").returncode == 0:
         return Result(OK, "every tool is installed")
-    done = as_operator(target.host, f"{root} && mise install")
+    done = as_owner(target.host, f"{root} && mise install")
     if done.returncode != 0:
         return Result(FAILED, f"mise install failed: {_why(done)}")
     return Result(CHANGED, "installed the missing tools")
@@ -1618,7 +1646,7 @@ def upgrade_steps(ws: Workspace | None) -> list[tuple[str, Step]]:
     steps.append(("token", token_health))
     steps += [
         ("gitleaks-config agent", functools.partial(gitleaks_config, on_host)),
-        ("gitleaks-config operator", functools.partial(gitleaks_config, as_operator)),
+        ("gitleaks-config owner", functools.partial(gitleaks_config, as_owner)),
     ]
     return steps
 
@@ -1630,7 +1658,7 @@ def upgrade(chosen: list[Host], ws: Workspace | None, urls: list[str]) -> list[s
     for host in chosen:
         try:
             platform_for(host)
-            _, home = identity(host)
+            home = owner_home(host)
         except HostError as exc:
             _report(host, exc)
             failed.append(host.name)
@@ -1654,9 +1682,9 @@ def access_state(host: Host, ws: Workspace | None) -> str:
     if ws is None:
         return "not configured"
     system = platform_for(host)
-    _, home = identity(host)
+    home = owner_home(host)
     root = home / ws.root
-    if as_operator(host, f"[ -d {shlex.quote(str(root))} ]").returncode != 0:
+    if as_owner(host, f"[ -d {shlex.quote(str(root))} ]").returncode != 0:
         return f"{root} doesn't exist"
     blocked, lacking = access_gaps(system, home, ws)
     missing = [*blocked, *([root] if lacking else [])]
@@ -1687,7 +1715,7 @@ class Facts:
     repos: tuple[tuple[str, str], ...]
     tailnet: Tailnet
     words: frozenset[str]
-    operators: tuple[str, ...]
+    accounts: tuple[str, ...]
     checkout: PurePosixPath | None
     vaults: tuple[str, ...]
     items: tuple[str, ...]
@@ -1802,13 +1830,10 @@ def endpoint_hosts(urls: list[str]) -> list[str]:
     return sorted({str(urlsplit(url).hostname) for url in urls})
 
 
-def gitleaks_facts(
-    operators: Iterable[str], ws: Workspace | None, urls: list[str]
-) -> Facts:
+def gitleaks_facts(ws: Workspace | None, urls: list[str]) -> Facts:
     """What the config keeps out, from each source in turn.
 
-    OPERATORS are the operator's user names on the hosts bootstrap set up, and
-    URLS the Connect endpoints.
+    URLS are the Connect endpoints.
     """
     vaults = vault_names() - {""}
     if not vaults:
@@ -1818,7 +1843,7 @@ def gitleaks_facts(
         repos=tuple(private_repos()),
         tailnet=tailnet_facts(),
         words=common_words(),
-        operators=tuple(sorted(set(operators))),
+        accounts=tuple(sorted({owner(), ops_user(), AGENT})),
         checkout=ws.root if ws is not None else None,
         vaults=tuple(sorted(vaults)),
         items=(GITLEAKS_ITEM,),
@@ -1920,7 +1945,7 @@ def gitleaks_rules(facts: Facts) -> tuple[list[Rule], dict[str, int]]:
     rules += [Rule("tailnet-ipv6", r"(?i)\bfd7a:115c:a1e0:[0-9a-f:]*")]
     rules += [
         Rule("home-path", f"/(?:Users|home)/{re.escape(name)}{_bound(name, -1)}")
-        for name in sorted({*facts.operators, AGENT})
+        for name in facts.accounts
     ]
     if facts.checkout is not None:
         root = str(facts.checkout)
@@ -1949,9 +1974,7 @@ def gitleaks_rules(facts: Facts) -> tuple[list[Rule], dict[str, int]]:
     if "session_sockets" in (userconfig.table("gitleaks") or {}):
         sockets = userconfig.strings("gitleaks", "session_sockets")
         rules += [Rule("session-socket", re.escape(path)) for path in sockets]
-    found, omitted["account-name"] = _named(
-        "account-name", facts.operators, facts.words
-    )
+    found, omitted["account-name"] = _named("account-name", facts.accounts, facts.words)
     rules += [*found, Rule("op-account", _literal(setting("op", "account")))]
     for category, values in (
         ("op-vault", facts.vaults),
@@ -2032,9 +2055,9 @@ def publish_gitleaks(text: str) -> Result:
 
 
 def _generated(
-    operators: Iterable[str], ws: Workspace | None, urls: list[str]
+    ws: Workspace | None, urls: list[str]
 ) -> tuple[str, list[Rule], dict[str, int]]:
-    rules, omitted = gitleaks_rules(gitleaks_facts(operators, ws, urls))
+    rules, omitted = gitleaks_rules(gitleaks_facts(ws, urls))
     text = render_gitleaks(rules)
     problem = gitleaks_problem(text)
     if problem is not None:
@@ -2042,12 +2065,10 @@ def _generated(
     return text, rules, omitted
 
 
-def gitleaks_generate(
-    operators: Iterable[str], ws: Workspace | None, urls: list[str]
-) -> None:
+def gitleaks_generate(ws: Workspace | None, urls: list[str]) -> None:
     """Generate the private gitleaks config and publish it to gitleaks_ref()."""
     try:
-        text, rules, omitted = _generated(operators, ws, urls)
+        text, rules, omitted = _generated(ws, urls)
         result = publish_gitleaks(text)
     except HostError as exc:
         message = f"the private gitleaks config: {exc}; wrote nothing"
@@ -2096,25 +2117,6 @@ def _supported(chosen: list[Host], failed: list[str]) -> list[Host]:
     return kept
 
 
-def _operators(known: dict[str, str]) -> list[str] | None:
-    """The operator's name on every tagged host, or None if one can't be found.
-
-    KNOWN maps host names to the names already found; the other hosts are asked.
-    """
-    found: list[str] = []
-    for host in hosts(host_tag()):
-        if host.name in known:
-            found.append(known[host.name])
-            continue
-        try:
-            found.append(identity(host)[0])
-        except HostError as exc:
-            _report(host, exc)
-            print("keeping the published private gitleaks config")
-            return None
-    return found
-
-
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     touch_id("bootstrap")
     named = _check_vaults(args.vaults)
@@ -2131,10 +2133,9 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     if ws is None:
         print(NO_WORKSPACE)
     ready: list[Host] = []
-    operators: dict[str, str] = {}
     for host in chosen:
         try:
-            operators[host.name] = set_up(host, ws, repair=args.repair_acl)
+            set_up(host, ws, repair=args.repair_acl)
             ensure_keychain(host)
             print(f"{host.name}: config.toml {agent_config(host, 'install', copy)}")
             refresh(account, host, plans[host], urls)
@@ -2143,12 +2144,7 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             failed.append(host.name)
             continue
         ready.append(host)
-    # The operator's names come from the hosts, so with none ready, or one
-    # whose operator is unknown, the config would lose them: keep the one in
-    # 1Password instead.
-    every = _operators(operators) if ready else None
-    if every is not None:
-        gitleaks_generate(every, ws, urls)
+    gitleaks_generate(ws, urls)
     failed += upgrade(ready, ws, urls)
     if failed:
         message = f"bootstrap failed on {', '.join(failed)}"
@@ -2270,10 +2266,10 @@ def cmd_exec(args: argparse.Namespace) -> int:
         raise HostError(message)
     if args.operator:
         touch_id("--operator")
-    argv = command if args.operator else ["sudo", "-n", "-u", AGENT, "-H", *command]
-    this = socket.gethostname().split(".")[0].lower()
-    if host is not None and host.lower() != this:
-        argv = [*SSH, host, shlex.join(argv)]
+    user = owner() if args.operator else AGENT
+    where = host or socket.gethostname().split(".")[0].lower()
+    remote = ["sudo", "-n", "-u", user, "-H", *command]
+    argv = [*SSH, "-l", ops_user(), where, shlex.join(remote)]
     try:
         return subprocess.call(argv)  # nosec B603
     except FileNotFoundError:

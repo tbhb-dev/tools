@@ -79,9 +79,12 @@ REPOS = {
     "example-org": ["fake-widget", "gadgets", ".fake-dotrepo"],
     "example-user": ["zq"],
 }
-WORDS = "Host\ngadget\nbox\nwidget\noperator\n"
-# Stub ssh names a remote host's home after it; this machine's is "local".
-HOME_KEY = {"host-a": "host-a", "host-b": "local", "host-c": "host-c"}
+WORDS = "Host\ngadget\nbox\nwidget\noperator\nagent\n"
+# Every command reaches a host, this machine included, over ssh as the ops
+# account, and stub ssh keeps each host's homes under its name.
+OPS = "example-ops"
+OWNER = "example-owner"
+SSH_OPS = ["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-l", OPS]
 GID = str(host_tool.GID)
 UID = str(host_tool.AGENT_UID)
 MAC_DIR = (
@@ -131,7 +134,7 @@ class World:
 
     def installed(self, host: str) -> str | None:
         """The token in HOST's agent keychain, or None."""
-        home = self.stubs.home(HOME_KEY[host])
+        home = self.stubs.home(host)
         if host == "host-c":
             path = home / ".local" / "share" / "keyrings" / "stub.json"
             key = f"service {secrets.SERVICE} account {secrets.ACCOUNT}"
@@ -145,12 +148,12 @@ class World:
         value = items.get(key)
         return value if isinstance(value, str) else None
 
-    def operator_home(self, host: str) -> Path:
-        return self.stubs.dir / "homes" / HOME_KEY[host] / "operator"
+    def owner_home(self, host: str) -> Path:
+        return self.stubs.dir / "homes" / host / OWNER
 
     def accounts(self, host: str) -> Json:
         hosts = cast("Json", self.stubs.state().get("directory", {}))
-        return cast("Json", hosts.get(HOME_KEY[host], {"Users": {}, "Groups": {}}))
+        return cast("Json", hosts.get(host, {"Users": {}, "Groups": {}}))
 
     def seed(
         self,
@@ -160,7 +163,7 @@ class World:
     ) -> None:
         """Give HOST these account records before a test runs."""
         hosts = cast("Json", self.stubs.state().get("directory", {}))
-        hosts[HOME_KEY[host]] = {"Users": users or {}, "Groups": groups or {}}
+        hosts[host] = {"Users": users or {}, "Groups": groups or {}}
         self.stubs.set(directory=hosts)
 
     def acl(self, host: str, path: Path) -> list[str]:
@@ -169,10 +172,8 @@ class World:
         return acls.get(str(path.resolve()), [])
 
     def root_scripts(self) -> list[str]:
-        """The scripts bootstrap ran as root, unattended or after a password."""
-        return [
-            a[-1] for a in self.stubs.argvs("sudo") if a[:2] in (["-n", "sh"], ["sh"])
-        ]
+        """The scripts bootstrap ran as root."""
+        return [a[-1] for a in self.stubs.argvs("sudo") if a[:2] == ["-n", "sh"]]
 
     def op_calls(self) -> list[str]:
         """Each op call's command, such as `connect token create`."""
@@ -232,7 +233,7 @@ def world(
     monkeypatch.setenv("HOME", str(operator))
 
     def agent_home(host: host_tool.Host) -> str:
-        return str(stubs.home(HOME_KEY[host.name]))
+        return str(stubs.home(host.name))
 
     monkeypatch.setattr(host_tool, "agent_home", agent_home)
     words = stubs.dir / "words"
@@ -300,13 +301,68 @@ def test_tailnet_looks_tailscale_up_by_name(monkeypatch: pytest.MonkeyPatch) -> 
     assert asked == ["tailscale"]
 
 
-def test_on_host_runs_sh_as_the_agent_through_sudo(stubs: Stubs) -> None:
-    here = host_tool.Host("host-b", "macOS", local=True)
+@pytest.mark.parametrize(
+    ("key", "value", "error"),
+    [
+        ("ops_user", None, "{path} sets no [agent] ops_user"),
+        ("owner", None, "{path} sets no [agent] owner"),
+        ("ops_user", '""', "{path}: [agent] ops_user must be a non-empty string"),
+        ("owner", "7", "{path}: [agent] owner must be a non-empty string"),
+        ("ops_user", '"-oProxyCommand=x"', "{path}: [agent] ops_user isn't a POSIX"),
+        ("owner", '"bad name"', "{path}: [agent] owner isn't a POSIX user name"),
+        ("owner", '"9lives"', "{path}: [agent] owner isn't a POSIX user name"),
+        ("ops_user", '"sneaky\\n"', "{path}: [agent] ops_user isn't a POSIX"),
+        ("owner", '"x;rm"', "{path}: [agent] owner isn't a POSIX user name"),
+    ],
+)
+def test_the_ops_user_and_owner_come_from_the_config(
+    world: World,
+    capfd: pytest.CaptureFixture[str],
+    key: str,
+    value: str | None,
+    error: str,
+) -> None:
+    default = {"ops_user": OPS, "owner": OWNER}[key]
+    line = f'{key} = "{default}"\n'
+    edit_config(line, "" if value is None else f"{key} = {value}\n")
+    assert run(world, capfd, "upgrade") == 1
+    assert world.err.startswith(f"host-b: {error.format(path=userconfig.path())}")
+    assert world.err.endswith(f"{PROG}: upgrade failed on host-b\n")
+    if "POSIX" in error:
+        bad = str(tomllib.loads(f"v = {value}")["v"])
+        assert bad not in world.err + world.out
+    assert world.stubs.calls("ssh") == []
+
+
+@pytest.mark.usefixtures("configured")
+@pytest.mark.parametrize("name", ["_svc", "a.b-c_1", "Ops9"])
+def test_a_posix_user_name_passes(name: str) -> None:
+    edit_config(f'owner = "{OWNER}"', f'owner = "{name}"')
+    assert host_tool.owner() == name
+
+
+@pytest.mark.usefixtures("configured")
+@pytest.mark.parametrize("local", [True, False])
+def test_on_host_runs_sh_as_the_agent_through_ops_over_ssh(
+    stubs: Stubs, *, local: bool
+) -> None:
+    here = host_tool.Host("host-b", "macOS", local=local)
     done = host_tool.on_host(here, "echo hi")
     assert isinstance(done, subprocess.CompletedProcess)
     assert done.stdout == "hi\n"
-    assert done.args == ["sudo", "-n", "-u", "agent", "-H", "sh", "-c", "echo hi"]
+    remote = "sudo -n -u agent -H sh -c 'echo hi'"
+    assert done.args == ["ssh", *SSH_OPS, "host-b", remote]
+    assert stubs.argvs("ssh") == [[*SSH_OPS, "host-b", remote]]
     assert stubs.argvs("sudo") == [["-n", "-u", "agent", "-H", "sh", "-c", "echo hi"]]
+
+
+@pytest.mark.usefixtures("configured")
+def test_as_owner_runs_sh_as_the_owner_through_ops(stubs: Stubs) -> None:
+    there = host_tool.Host("host-a", "macOS", local=False)
+    done = host_tool.as_owner(there, 'echo "$HOME"')
+    assert done.stdout == f"{stubs.dir / 'homes' / 'host-a' / OWNER}\n"
+    remote = f"sudo -n -u {OWNER} -H sh -c 'echo \"$HOME\"'"
+    assert stubs.argvs("ssh") == [[*SSH_OPS, "host-a", remote]]
 
 
 def test_list_names_hosts_by_their_dns_name(
@@ -756,7 +812,7 @@ def test_a_failed_check_keeps_the_urls_out_of_the_error(
 
 def copy_of(world: World, host: str) -> Path:
     """HOST's agent copy of the user config."""
-    return world.stubs.home(HOME_KEY[host]) / ".config" / "tbhbdev" / "config.toml"
+    return world.stubs.home(host) / ".config" / "tbhbdev" / "config.toml"
 
 
 def agent_copy_text() -> str:
@@ -767,7 +823,8 @@ def agent_copy_text() -> str:
         'server_hosts = ["nas-a", "nas-b"]\n'
         'token_prefix = "example-host"\n'
         f'endpoints = ["https://nas-a.{SUFFIX}", "https://nas-b.{SUFFIX}"]\n\n'
-        '[agent]\nhost_tag = "tag:example-agents"\n\n'
+        '[agent]\nhost_tag = "tag:example-agents"\n'
+        'ops_user = "example-ops"\nowner = "example-owner"\n\n'
         '[vaults]\nall = "vault-all"\nhost_prefix = "vault-"\n\n'
         '[gitleaks]\nowners = ["example-org", "example-user"]\n'
         'session_sockets = ["/tmp/example-socks/"]\n'
@@ -818,7 +875,8 @@ def test_the_copy_replaces_the_operators_endpoints(
         f'endpoints = ["https://nas-a.{SUFFIX}", "https://nas-b.{SUFFIX}"]\n'
         'server_hosts = ["nas-a", "nas-b"]\n'
         'token_prefix = "example-host"\n\n'
-        '[agent]\nhost_tag = "tag:example-agents"\n\n'
+        '[agent]\nhost_tag = "tag:example-agents"\n'
+        'ops_user = "example-ops"\nowner = "example-owner"\n\n'
         '[vaults]\nall = "vault-all"\nhost_prefix = "vault-"\n\n'
         '[gitleaks]\nowners = ["example-org", "example-user"]\n'
         'session_sockets = ["/tmp/example-socks/"]\n'
@@ -1008,7 +1066,7 @@ def test_a_failed_check_deletes_the_new_token(
         ),
         (
             {"ssh_down": ["host-a"]},
-            "host-a: cannot find out who you are there: ssh: connect",
+            "host-a: cannot find the owner's home there: ssh: connect",
         ),
         ({"op_raw": {"vault list": "oops"}}, "op vault list printed something other"),
         (
@@ -1402,23 +1460,22 @@ def test_linux_scripts_run_in_a_private_keyring_session() -> None:
 # exec.
 
 
-def test_exec_runs_here_as_the_agent_by_default(
+def test_exec_runs_here_as_the_agent_through_ops_by_default(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
     assert run(world, capfd, "exec", "--", "sh", "-c", 'echo "$HOME"; exit 7') == 7
-    assert world.out == f"{world.stubs.home()}\n"
-    assert world.stubs.argvs("sudo") == [
-        ["-n", "-u", "agent", "-H", "sh", "-c", 'echo "$HOME"; exit 7']
+    assert world.out == f"{world.stubs.home('host-b')}\n"
+    assert world.stubs.argvs("ssh") == [
+        [*SSH_OPS, "host-b", "sudo -n -u agent -H sh -c 'echo \"$HOME\"; exit 7'"]
     ]
-    assert world.stubs.calls("ssh") == []
 
 
 @pytest.mark.parametrize("host", ["host-b", "HOST-B"])
-def test_exec_on_this_machine_by_name_runs_here(
+def test_exec_on_this_machine_by_name_still_goes_over_ssh(
     world: World, capfd: pytest.CaptureFixture[str], host: str
 ) -> None:
     assert run(world, capfd, "exec", "--host", host, "--", "true") == 0
-    assert world.stubs.calls("ssh") == []
+    assert world.stubs.argvs("ssh") == [[*SSH_OPS, host, "sudo -n -u agent -H true"]]
 
 
 def test_exec_on_another_host_goes_over_ssh(
@@ -1428,24 +1485,23 @@ def test_exec_on_another_host_goes_over_ssh(
         run(world, capfd, "exec", "--host", "host-a", "--", "sh", "-c", "exit 3") == 3
     )
     assert world.stubs.argvs("ssh") == [
-        ["-o", "BatchMode=yes", "host-a", "sudo -n -u agent -H sh -c 'exit 3'"]
+        [*SSH_OPS, "host-a", "sudo -n -u agent -H sh -c 'exit 3'"]
     ]
 
 
 @pytest.mark.parametrize("host", [None, "host-a"])
-def test_exec_operator_runs_as_the_operator_after_touch_id(
+def test_exec_operator_runs_as_the_owner_after_touch_id(
     world: World, capfd: pytest.CaptureFixture[str], host: str | None
 ) -> None:
     where: list[str] = [] if host is None else ["--host", host]
-    assert run(world, capfd, "exec", *where, "--operator", "--", "echo", "hi") == 0
-    assert world.out == "hi\n"
-    assert world.stubs.calls("sudo") == []
+    argv = ["sh", "-c", 'echo "$HOME"']
+    assert run(world, capfd, "exec", *where, "--operator", "--", *argv) == 0
+    assert world.out == f"{world.owner_home(host or 'host-b')}\n"
+    assert world.stubs.argvs("sudo") == [["-n", "-u", OWNER, "-H", *argv]]
     swift = world.stubs.calls("swift")
     assert [(c["argv"], c["stdin"]) for c in swift] == [(["-"], host_tool.TOUCH_ID)]
-    if host is not None:
-        assert world.stubs.argvs("ssh") == [
-            ["-o", "BatchMode=yes", "host-a", "echo hi"]
-        ]
+    remote = f"sudo -n -u {OWNER} -H sh -c 'echo \"$HOME\"'"
+    assert world.stubs.argvs("ssh") == [[*SSH_OPS, host or "host-b", remote]]
 
 
 @pytest.mark.parametrize(
@@ -1474,11 +1530,12 @@ def test_exec_operator_refuses_off_macos(
     assert world.stubs.calls() == []
 
 
-def test_exec_operator_reports_a_missing_command(
+def test_exec_reports_a_missing_ssh(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(world, capfd, "exec", "--operator", "--", "no-such-command") == 1
-    assert world.err == f"{PROG}: no-such-command: command not found\n"
+    (world.stubs.bin / "ssh").unlink()
+    assert run(world, capfd, "exec", "--", "true") == 1
+    assert world.err == f"{PROG}: ssh: command not found\n"
 
 
 @pytest.mark.parametrize(
@@ -1772,7 +1829,7 @@ def test_a_new_mac_host_gets_a_hidden_agent_without_a_password(
             "PrimaryGroupID": [GID],
             "RealName": ["devel"],
             "Password": ["*"],
-            "GroupMembership": ["operator"],
+            "GroupMembership": [OWNER],
         }
     }
     assert accounts["Users"] == {
@@ -1806,7 +1863,7 @@ def test_a_new_mac_host_gets_a_hidden_agent_without_a_password(
                     "Password '*'",
                     "IsHidden 1",
                 ),
-                "dscl . -append /Groups/devel GroupMembership operator",
+                f"dscl . -append /Groups/devel GroupMembership {OWNER}",
                 f"install -d -o {UID} -g {GID} -m 0700 {home}",
             ]
         )
@@ -1818,7 +1875,7 @@ def test_a_new_mac_host_gets_a_hidden_agent_without_a_password(
         [
             "host-a: created the group devel with gid 33835",
             "host-a: created the user agent with uid 24368 and gid 33835",
-            "host-a: added operator to the group devel",
+            f"host-a: added {OWNER} to the group devel",
             f"host-a: created the agent's home {home}",
         ],
     )
@@ -1827,12 +1884,11 @@ def test_a_new_mac_host_gets_a_hidden_agent_without_a_password(
 def test_a_new_linux_host_gets_a_locked_agent(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    world.stubs.set(operators={"host-c": "someone"})
     assert run(world, capfd, "bootstrap", "--host", "host-c") == 0
     home = world.stubs.home("host-c")
     accounts = world.accounts("host-c")
     assert accounts["Groups"] == {
-        "devel": {"PrimaryGroupID": [GID], "GroupMembership": ["someone"]}
+        "devel": {"PrimaryGroupID": [GID], "GroupMembership": [OWNER]}
     }
     assert accounts["Users"] == {
         "agent": {
@@ -1850,7 +1906,7 @@ def test_a_new_linux_host_gets_a_locked_agent(
             f"useradd --uid {UID} --gid {GID} --create-home --home-dir {home} "
             "--shell /bin/bash agent\n"
             "usermod --lock agent\n"
-            "usermod --append --groups devel someone\n"
+            f"usermod --append --groups devel {OWNER}\n"
             f"install -d -o {UID} -g {GID} -m 0700 {home}"
         )
     ]
@@ -1861,12 +1917,12 @@ def test_a_new_linux_host_gets_a_locked_agent(
 def test_accounts_with_the_right_ids_are_left_alone(
     world: World, capfd: pytest.CaptureFixture[str], host: str
 ) -> None:
-    home = world.stubs.home(HOME_KEY[host])
+    home = world.stubs.home(host)
     home.mkdir(parents=True)
     home.chmod(0o750)
     seeded = (
         {"agent": user(home=str(home)), "other": user("501", "20")},
-        {"devel": group(GID, "someone", "operator"), "staff": group("20")},
+        {"devel": group(GID, "someone", OWNER), "staff": group("20")},
     )
     world.seed(host, *seeded)
     world.stubs.set(dscl_preamble=True)
@@ -1876,33 +1932,34 @@ def test_accounts_with_the_right_ids_are_left_alone(
         [
             f"{host}: the group devel already has gid 33835",
             f"{host}: the user agent already has uid 24368 and gid 33835",
-            f"{host}: operator is already in the group devel",
+            f"{host}: {OWNER} is already in the group devel",
             f"{host}: the agent's home {home} already exists",
         ],
     )
     assert world.accounts(host) == {"Users": seeded[0], "Groups": seeded[1]}
     assert home.stat().st_mode & 0o777 == 0o750
-    assert all(a[:4] == ["-n", "-u", "agent", "-H"] for a in world.stubs.argvs("sudo"))
+    assert world.root_scripts() == []
 
 
 @pytest.mark.parametrize(
     ("host", "command"),
     [
-        ("host-a", "dscl . -append /Groups/devel GroupMembership operator"),
-        ("host-c", "usermod --append --groups devel operator"),
+        ("host-a", f"dscl . -append /Groups/devel GroupMembership {OWNER}"),
+        ("host-c", f"usermod --append --groups devel {OWNER}"),
     ],
 )
-def test_the_operator_joins_devel(
+def test_the_owner_not_ops_joins_devel(
     world: World, capfd: pytest.CaptureFixture[str], host: str, command: str
 ) -> None:
-    home = world.stubs.home(HOME_KEY[host])
+    home = world.stubs.home(host)
     home.mkdir(parents=True)
     world.seed(host, {"agent": user(home=str(home))}, {"devel": group(GID, "x")})
     assert run(world, capfd, "bootstrap", "--host", host) == 0
     assert world.root_scripts() == [f"set -eu\n{command}"]
     devel = cast("Json", cast("Json", world.accounts(host)["Groups"])["devel"])
-    assert devel["GroupMembership"] == ["x", "operator"]
-    assert f"{host}: added operator to the group devel" in world.out
+    assert devel["GroupMembership"] == ["x", OWNER]
+    assert f"{host}: added {OWNER} to the group devel" in world.out
+    assert OPS not in world.root_scripts()[0]
 
 
 @pytest.mark.parametrize(
@@ -2054,7 +2111,7 @@ def test_unreadable_accounts_stop_that_host(
     case: tuple[str, Json, dict[str, Json], str],
 ) -> None:
     host, state, users, error = case
-    world.seed(host, users, {"devel": group(GID, "operator")})
+    world.seed(host, users, {"devel": group(GID, OWNER)})
     world.stubs.set(**state)
     assert run(world, capfd, "bootstrap", "--host", host) == 1
     assert world.err.startswith(f"{host}: {error}")
@@ -2062,35 +2119,21 @@ def test_unreadable_accounts_stop_that_host(
 
 
 @pytest.mark.parametrize("host", ["host-a", "host-b"])
-def test_sudo_asks_for_the_password_once_per_host(
+def test_without_passwordless_sudo_nothing_runs_as_root(
     world: World, capfd: pytest.CaptureFixture[str], host: str
 ) -> None:
     world.stubs.set(sudo_password=True)
-    assert run(world, capfd, "bootstrap", "--host", host) == 0
-    assert f"{host}: sudo needs your password\n" in world.err
-    assert world.stubs.argvs("sudo-prompt") == [[HOME_KEY[host]]]
-    assert world.accounts(host)["Users"] != {}
-    if host == "host-a":
-        tty = [a for a in world.stubs.argvs("ssh") if "-t" in a]
-        assert len(tty) == 1
-        assert tty[0][:4] == ["-o", "BatchMode=yes", "-t", "host-a"]
-        assert tty[0][4].startswith("sudo sh -c 'set -eu\n")
-    for argv in world.stubs.argvs("sudo"):
-        assert not {"-S", "--stdin", "-A", "--askpass"} & set(argv)
-    assert run(world, capfd, "bootstrap", "--host", host) == 0
-    assert len(world.stubs.argvs("sudo-prompt")) == 1
-
-
-def test_a_wrong_sudo_password_stops_that_host(
-    world: World, capfd: pytest.CaptureFixture[str]
-) -> None:
-    world.stubs.set(sudo_password=True, sudo_wrong_password=True)
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 1
+    assert run(world, capfd, "bootstrap", "--host", host) == 1
     assert world.err.endswith(
-        "host-a: the setup as root failed (exit 1)\n"
-        f"{PROG}: bootstrap failed on host-a\n"
+        f"{host}: the ops account {OPS} needs passwordless sudo there\n"
+        f"{PROG}: bootstrap failed on {host}\n"
     )
-    assert world.accounts("host-a")["Users"] == {}
+    root = [a for a in world.stubs.argvs("sudo") if a[:2] != ["-n", "-u"]]
+    assert root == [["-n", "true"]]
+    assert world.root_scripts() == []
+    assert world.accounts(host)["Users"] == {}
+    for argv in world.stubs.argvs("ssh"):
+        assert argv[: len(SSH_OPS) + 1] == [*SSH_OPS, host]
 
 
 def test_a_failed_root_script_stops_that_host(
@@ -2127,7 +2170,7 @@ def test_bootstrap_opens_the_workspace_to_devel_on_macos(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     with_workspace(config_file, "src/work")
-    home = world.operator_home("host-a")
+    home = world.owner_home("host-a")
     root = home / "src" / "work"
     (root / "repo" / "sub").mkdir(parents=True)
     (root / "repo" / "file").write_text("x")
@@ -2169,7 +2212,7 @@ def test_bootstrap_opens_the_workspace_to_devel_on_linux(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     with_workspace(config_file)
-    home = world.operator_home("host-c")
+    home = world.owner_home("host-c")
     root = home / "Code"
     (root / "sub").mkdir(parents=True)
     (root / "plain").write_text("x")
@@ -2217,7 +2260,7 @@ def test_bootstrap_refuses_a_linux_host_without_the_acl_tools(
         f"{PROG}: bootstrap failed on host-c\n"
     )
     assert world.root_scripts() == []
-    assert not (world.operator_home("host-c") / "Code").exists()
+    assert not (world.owner_home("host-c") / "Code").exists()
     assert world.installed("host-c") is None
 
 
@@ -2234,7 +2277,7 @@ def test_bootstrap_refuses_a_linux_host_whose_acl_check_fails(
         f"{PROG}: bootstrap failed on host-c\n"
     )
     assert world.root_scripts() == []
-    assert not (world.operator_home("host-c") / "Code").exists()
+    assert not (world.owner_home("host-c") / "Code").exists()
 
 
 def test_bootstrap_without_a_workspace_needs_no_acl_tools(
@@ -2250,7 +2293,7 @@ def test_present_entries_are_not_added_again(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str], host: str
 ) -> None:
     with_workspace(config_file)
-    root = world.operator_home(host) / "Code"
+    root = world.owner_home(host) / "Code"
     assert run(world, capfd, "bootstrap", "--host", host) == 0
     assert f"{host}: created {root}" in world.out
     before = world.stubs.state()
@@ -2269,7 +2312,7 @@ def test_repair_acl_reapplies_below_the_root_without_duplicates(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str], host: str
 ) -> None:
     with_workspace(config_file)
-    root = world.operator_home(host) / "Code"
+    root = world.owner_home(host) / "Code"
     (root / "old").mkdir(parents=True)
     assert run(world, capfd, "bootstrap", "--host", host) == 0
     (root / "new").write_text("x")
@@ -2290,7 +2333,7 @@ def test_an_inherited_entry_counts_as_present(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     with_workspace(config_file)
-    home = world.operator_home("host-a")
+    home = world.owner_home("host-a")
     root = home / "Code"
     root.mkdir(parents=True)
     world.stubs.set(
@@ -2308,7 +2351,7 @@ def test_rights_split_across_entries_count_together(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     with_workspace(config_file)
-    home = world.operator_home("host-a")
+    home = world.owner_home("host-a")
     root = home / "Code"
     root.mkdir(parents=True)
     inherit = ",file_inherit,directory_inherit"
@@ -2326,7 +2369,7 @@ def test_a_partial_root_entry_is_completed(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     with_workspace(config_file)
-    home = world.operator_home("host-a")
+    home = world.owner_home("host-a")
     root = home / "Code"
     root.mkdir(parents=True)
     partial = "group:devel allow list,search"
@@ -2362,7 +2405,7 @@ def test_workspace_failures_stop_that_host(
     with_workspace(config_file)
     world.stubs.set(**state)
     assert run(world, capfd, "bootstrap", "--host", host) == 1
-    home = world.operator_home(host)
+    home = world.owner_home(host)
     assert world.err == (
         f"{host}: {error.format(home=home)}\n{PROG}: bootstrap failed on {host}\n"
     )
@@ -2374,7 +2417,7 @@ def test_a_root_that_cannot_be_made_stops_that_host(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     with_workspace(config_file)
-    home = world.operator_home("host-a")
+    home = world.owner_home("host-a")
     home.mkdir(parents=True)
     (home / "Code").write_text("not a directory")
     assert run(world, capfd, "bootstrap", "--host", "host-a") == 1
@@ -2439,7 +2482,7 @@ def test_status_shows_workspace_access(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str], host: str
 ) -> None:
     with_workspace(config_file, "src/work")
-    home = world.operator_home(host)
+    home = world.owner_home(host)
     root = home / "src" / "work"
     assert run(world, capfd, "status", "--host", host) == 0
     assert world.out.endswith(f"{host}: workspace access {root} doesn't exist\n")
@@ -2460,12 +2503,7 @@ def test_status_shows_workspace_access(
 
 
 def token_name_file(world: World, host: str) -> Path:
-    return (
-        world.stubs.home(HOME_KEY[host])
-        / ".config"
-        / "tbhbdev"
-        / ("connect-token-name")
-    )
+    return world.stubs.home(host) / ".config" / "tbhbdev" / ("connect-token-name")
 
 
 @pytest.mark.parametrize(
@@ -2506,7 +2544,7 @@ def remote(world: World, repo: str, *labels: str, default: str = "main") -> None
 
 
 def clone_of(world: World, host: str, repo: str) -> Path:
-    return world.operator_home(host) / "Code" / repo / ".git"
+    return world.owner_home(host) / "Code" / repo / ".git"
 
 
 def change_clone(world: World, host: str, repo: str, **values: object) -> None:
@@ -2528,7 +2566,7 @@ def ready(world: World, config_file: Path, capfd: pytest.CaptureFixture[str]) ->
 
 
 def test_bootstrap_ends_by_upgrading(ready: World) -> None:
-    root = ready.operator_home("host-b") / "Code"
+    root = ready.owner_home("host-b") / "Code"
     assert upgrade_lines(ready)[-5:] == [
         f"host-b: clone example/app: changed: cloned into {root / 'example/app'}",
         f"host-b: tools: ok: no mise config in {root}",
@@ -2537,10 +2575,31 @@ def test_bootstrap_ends_by_upgrading(ready: World) -> None:
             "it expires 2027-02-02"
         ),
         f"host-b: gitleaks-config agent: changed: wrote {PRIVATE}",
-        f"host-b: gitleaks-config operator: changed: wrote {PRIVATE}",
+        f"host-b: gitleaks-config owner: changed: wrote {PRIVATE}",
     ]
     clone = json.loads(clone_of(ready, "host-b", "example/app").read_text())
     assert clone["head"] == sha("a1")
+
+
+def test_the_owner_makes_the_root_and_runs_the_clone_git_and_mise(
+    ready: World, capfd: pytest.CaptureFixture[str]
+) -> None:
+    assert run(ready, capfd, "upgrade") == 0
+    root = shlex.quote(str(ready.owner_home("host-b") / "Code"))
+    remote = [a[-1] for a in ready.stubs.argvs("ssh")]
+    owner_side = [
+        r
+        for r in remote
+        if f"mkdir -p {root}" in r
+        or "git -C" in r
+        or "gh repo clone" in r
+        or "mise" in r
+    ]
+    kinds = {"mkdir", "git -C", "gh repo clone", "mise"}
+    assert {k for k in kinds if any(k in r for r in owner_side)} == kinds
+    for command in owner_side:
+        assert command.startswith(f"sudo -n -u {OWNER} -H sh -c "), command
+    assert ready.owner_home("host-b") != ready.stubs.dir / "homes" / "host-b" / OPS
 
 
 def test_upgrade_again_changes_nothing(
@@ -2555,12 +2614,14 @@ def test_upgrade_again_changes_nothing(
     assert ready.checked[checks:] == [ENDPOINTS] * (BOOTSTRAP_CHECKS - 1)
     calls = ready.stubs.calls()[before:]
     tools = {c["tool"] for c in calls}
-    assert not tools & {"swift", "op", "dscl", "chmod", "install", "sudo-prompt"}
+    assert not tools & {"swift", "op", "dscl", "chmod", "install"}
     for call in calls:
         argv = cast("list[str]", call["argv"])
         if call["tool"] == "sudo":
-            assert argv[:4] == ["-n", "-u", "agent", "-H"]
-        assert "-t" not in argv or call["tool"] != "ssh"
+            assert argv[:2] == ["-n", "-u"]
+            assert argv[2:4] in (["agent", "-H"], [OWNER, "-H"])
+        if call["tool"] == "ssh":
+            assert argv[: len(SSH_OPS) + 1] == [*SSH_OPS, "host-b"]
     ready.assert_no_token_leaks()
 
 
@@ -2632,7 +2693,7 @@ def test_upgrade_reports_a_failed_clone(
     with_workspace(config_file, repos=("example/app", "example/gone", "example/dir"))
     remote(world, "example/app", "a1")
     remote(world, "example/dir", "d1")
-    (world.operator_home("host-b") / "Code" / "example" / "dir").mkdir(parents=True)
+    (world.owner_home("host-b") / "Code" / "example" / "dir").mkdir(parents=True)
     assert run(world, capfd, "bootstrap", "--host", "host-b") == 1
     lines = upgrade_lines(world)
     assert lines[-7].startswith("host-b: clone example/app: changed: cloned into")
@@ -2646,7 +2707,7 @@ def test_upgrade_reports_a_failed_clone(
     )
     assert world.err == f"{PROG}: bootstrap failed on host-b\n"
     world.stubs.set(clone_fail=True)
-    shutil.rmtree(world.operator_home("host-b") / "Code" / "example" / "app")
+    shutil.rmtree(world.owner_home("host-b") / "Code" / "example" / "app")
     assert run(world, capfd, "upgrade") == 1
     assert upgrade_lines(world)[0] == (
         "host-b: clone example/app: failed: the clone failed: "
@@ -2679,7 +2740,7 @@ def test_upgrade_installs_the_workspace_tools(
     state: Json,
     line: str,
 ) -> None:
-    root = ready.operator_home("host-b") / "Code"
+    root = ready.owner_home("host-b") / "Code"
     if mise_config is not None:
         (root / mise_config).parent.mkdir(parents=True, exist_ok=True)
         (root / mise_config).write_text("")
@@ -2706,7 +2767,7 @@ def test_upgrade_reports_an_unhealthy_token(
     fault: str,
 ) -> None:
     name = name_for("host-b")
-    keychain = ready.stubs.home() / "Library" / "Keychains"
+    keychain = ready.stubs.home("host-b") / "Library" / "Keychains"
     message = {
         "no entry": f"the agent keychain has no token; {HINT}",
         "no name": f"the keychain's token has no recorded name; {HINT}",
@@ -2774,7 +2835,7 @@ def test_upgrade_carries_on_past_an_unreachable_host(
     world.stubs.set(ssh_down=["host-a", "host-c"])
     assert run(world, capfd, "upgrade", "--all") == 1
     assert world.err.startswith(
-        "host-a: cannot find out who you are there: ssh: connect to host host-a"
+        "host-a: cannot find the owner's home there: ssh: connect to host host-a"
     )
     assert world.err.endswith(f"{PROG}: upgrade failed on host-a, host-c\n")
     assert [line.split(": ")[0] for line in world.out.splitlines()] == [
@@ -2811,7 +2872,7 @@ def test_a_step_that_raises_fails_alone(
             "it expires 2027-02-02"
         ),
         f"host-b: gitleaks-config agent: ok: {PRIVATE} is current",
-        f"host-b: gitleaks-config operator: ok: {PRIVATE} is current",
+        f"host-b: gitleaks-config owner: ok: {PRIVATE} is current",
     ]
 
 
@@ -2820,8 +2881,8 @@ def test_a_second_bootstrap_and_upgrade_change_nothing_anywhere(
 ) -> None:
     with_workspace(config_file, repos=("example/app",))
     remote(world, "example/app", "a1")
-    (world.operator_home("host-b") / "Code").mkdir(parents=True)
-    (world.operator_home("host-b") / "Code" / "mise.toml").write_text("")
+    (world.owner_home("host-b") / "Code").mkdir(parents=True)
+    (world.owner_home("host-b") / "Code" / "mise.toml").write_text("")
     world.stubs.set(mise_missing=True)
     assert run(world, capfd, "bootstrap", "--all") == 0
     first = world.out
@@ -2847,7 +2908,7 @@ def test_a_second_bootstrap_and_upgrade_change_nothing_anywhere(
 def test_a_keychain_that_cannot_be_made_stops_that_host(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    home = world.stubs.home("local")
+    home = world.stubs.home("host-b")
     home.mkdir(parents=True)
     (home / "Library").write_text("not a directory")
     assert run(world, capfd, "bootstrap", "--host", "host-b") == 1
@@ -2856,19 +2917,29 @@ def test_a_keychain_that_cannot_be_made_stops_that_host(
 
 
 @pytest.mark.parametrize(
-    "state",
-    [
-        {"operators": {"local": "two\nlines"}},
-        {"operators": {"local": "three\n/lines"}},
-        {"operators": {"local": "op\n/home"}, "id_fails": True},
-    ],
+    ("code", "stdout"), [(0, "/a\n/b\n"), (0, "relative\n"), (1, "/home/x\n")]
 )
-def test_an_odd_answer_to_who_am_i_stops_that_host(
-    world: World, capfd: pytest.CaptureFixture[str], state: Json
+def test_an_odd_owner_home_stops_that_host(
+    world: World,
+    capfd: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    code: int,
+    stdout: str,
 ) -> None:
-    world.stubs.set(**state)
+    def as_owner(_: host_tool.Host, script: str) -> host_tool.Done:
+        return subprocess.CompletedProcess(script, code, stdout, "")
+
+    monkeypatch.setattr(host_tool, "as_owner", as_owner)
     assert run(world, capfd, "upgrade", "--host", "host-b") == 1
-    assert world.err.startswith("host-b: cannot find out who you are there")
+    assert world.err.startswith("host-b: cannot find the owner's home there")
+
+
+def test_the_owner_home_comes_from_the_owners_sudo(world: World) -> None:
+    here = host_tool.Host("host-b", "macOS", local=True)
+    assert host_tool.owner_home(here) == PurePosixPath(world.owner_home("host-b"))
+    assert world.stubs.argvs("ssh") == [
+        [*SSH_OPS, "host-b", f'sudo -n -u {OWNER} -H sh -c \'printf "%s\\n" "$HOME"\'']
+    ]
 
 
 def test_status_refuses_a_host_with_another_os(
@@ -2897,7 +2968,7 @@ def configured(config: Callable[[list[str] | None], None]) -> None:
     config(None)
 
 
-ACCOUNTS = ("agent", "operator")
+ACCOUNTS = ("agent", "owner")
 REF = "op://vault-all/gitleaks-private/config"
 CANARY_WHY = f"{REF} has no rule with the id tbhb-private-canary"
 EXTEND_WHY = f'{REF} has no [extend] path = ".gitleaks.toml"'
@@ -2907,8 +2978,8 @@ WROTE = f"changed: wrote {PRIVATE}"
 
 def private_config(world: World, account: str, host: str = "host-b") -> Path:
     if account == "agent":
-        return world.stubs.home(HOME_KEY[host]) / PRIVATE
-    return world.operator_home(host) / PRIVATE
+        return world.stubs.home(host) / PRIVATE
+    return world.owner_home(host) / PRIVATE
 
 
 def private_fields(world: World) -> list[Json]:
@@ -2951,16 +3022,16 @@ def test_upgrade_installs_the_private_gitleaks_config_for_both_accounts(
         assert gitleaks_lines(world, host) == dict.fromkeys(ACCOUNTS, WROTE)
         for account in ACCOUNTS:
             assert_installed(world, account, host)
-        agent, operator = (private_config(world, a, host) for a in ACCOUNTS)
-        assert not agent.samefile(operator)
-    # The operator's copy goes over ssh to a plain sh, the agent's through sudo.
+        agent, owner = (private_config(world, a, host) for a in ACCOUNTS)
+        assert not agent.samefile(owner)
+    # Each copy goes over ssh as ops, then through sudo to its account.
     sh = ["sh", "-c", host_tool.GITLEAKS_INSTALL]
-    commands = (shlex.join(["sudo", "-n", "-u", "agent", "-H", *sh]), shlex.join(sh))
+    commands = [
+        shlex.join(["sudo", "-n", "-u", u, "-H", *sh]) for u in ("agent", OWNER)
+    ]
     installs = [a for a in world.stubs.argvs("ssh") if a[-1] in commands]
     assert sorted(installs) == sorted(
-        ["-o", "BatchMode=yes", host, command]
-        for host in ("host-a", "host-c")
-        for command in commands
+        [*SSH_OPS, host, command] for host in HOSTS for command in commands
     )
     assert run(world, capfd, "upgrade", "--all") == 0
     for host in HOSTS:
@@ -3046,17 +3117,17 @@ def test_the_private_config_check(text: str, why: str | None) -> None:
 def test_a_config_that_fails_its_check_is_not_written(
     ready: World, capfd: pytest.CaptureFixture[str], text: str, why: str
 ) -> None:
-    agent, operator = (private_config(ready, a) for a in ACCOUNTS)
+    agent, owner = (private_config(ready, a) for a in ACCOUNTS)
     shutil.rmtree(agent.parent)
-    operator.write_text("older\n")
+    owner.write_text("older\n")
     private_fields(ready)[0]["value"] = text
     assert run(ready, capfd, "upgrade") == 1
     assert gitleaks_lines(ready) == dict.fromkeys(
         ACCOUNTS, f"failed: {why}; wrote nothing"
     )
     assert not agent.parent.exists()
-    assert operator.read_text() == "older\n"
-    assert [p.name for p in operator.parent.iterdir()] == ["private.toml"]
+    assert owner.read_text() == "older\n"
+    assert [p.name for p in owner.parent.iterdir()] == ["private.toml"]
     assert ready.err == f"{PROG}: upgrade failed on host-b\n"
     assert_no_config_leaks(ready)
 
@@ -3082,7 +3153,7 @@ def test_a_config_that_cannot_be_read_is_not_written(
     elif fault == "no field":
         private_fields(ready)[0]["label"] = "other"
     else:
-        keychain = ready.stubs.home() / "Library" / "Keychains"
+        keychain = ready.stubs.home("host-b") / "Library" / "Keychains"
         (keychain / f"{secrets.KEYCHAIN}-db").unlink()
     if fault == "stray name":
         # A read that fails after printing more than the name has no token.
@@ -3095,7 +3166,7 @@ def test_a_config_that_cannot_be_read_is_not_written(
         ACCOUNTS, f"failed: {why}; wrote nothing"
     )
     assert agent.read_text() == "older\n"
-    assert private_config(ready, "operator").read_text() == GITLEAKS
+    assert private_config(ready, "owner").read_text() == GITLEAKS
     assert_no_config_leaks(ready)
 
 
@@ -3108,7 +3179,7 @@ def test_a_copy_that_cannot_be_installed_fails_alone(
     assert run(ready, capfd, "upgrade") == 1
     lines = gitleaks_lines(ready)
     assert lines["agent"].startswith(f"failed: cannot install {PRIVATE}: mkdir: ")
-    assert lines["operator"] == CURRENT
+    assert lines["owner"] == CURRENT
     assert directory.read_text() == "not a directory\n"
     assert_no_config_leaks(ready)
 
@@ -3131,8 +3202,8 @@ FACTS = host_tool.Facts(
         "Fake Tailnet (example)",
         ("box", "fakehost-01", "fakehost-02", "lone-node"),
     ),
-    words=frozenset({"box", "gadget", "host", "operator", "widget"}),
-    operators=("fakeop", "operator"),
+    words=frozenset({"agent", "box", "gadget", "host", "operator", "widget"}),
+    accounts=("agent", "fakeop", "operator"),
     checkout=PurePosixPath("Fake/checkouts"),
     vaults=("vault-all", "host-fake", "box"),
     items=("gitleaks-private",),
@@ -3156,7 +3227,7 @@ COUNTS = {
     "mac-address": (1, 0),
     "op-reference": (1, 0),
     "session-socket": (1, 0),
-    "account-name": (1, 1),
+    "account-name": (1, 2),
     "op-account": (1, 0),
     "op-vault": (2, 1),
     "op-item": (1, 0),
@@ -3300,7 +3371,7 @@ def test_a_word_boundary_follows_the_first_and_last_characters() -> None:
         FACTS,
         repos=(("example-org", "a-fake-x"),),
         tailnet=host_tool.Tailnet("example.ts.net", "A-fake", ("a-boxcar", "a-boxing")),
-        operators=("a-op-x",),
+        accounts=("a-op-x", "agent"),
         checkout=PurePosixPath("a-fake/b-x"),
     )
     rules, _ = host_tool.gitleaks_rules(facts)
@@ -3608,7 +3679,7 @@ def test_gitleaks_facts_gathers_every_source(world: World) -> None:
         }
     )
     ws = host_tool.Workspace(PurePosixPath("Fake/checkouts"), ())
-    facts = host_tool.gitleaks_facts(["fakeop", "fakeop"], ws, ENDPOINTS)
+    facts = host_tool.gitleaks_facts(ws, ENDPOINTS)
     assert facts == host_tool.Facts(
         repos=(
             ("example-org", "fake-widget"),
@@ -3618,20 +3689,20 @@ def test_gitleaks_facts_gathers_every_source(world: World) -> None:
         ),
         tailnet=host_tool.tailnet_facts(),
         words=host_tool.common_words(),
-        operators=("fakeop",),
+        accounts=("agent", OPS, OWNER),
         checkout=PurePosixPath("Fake/checkouts"),
         vaults=("vault-all",),
         items=("gitleaks-private",),
         endpoints=(f"nas-a.{SUFFIX}", f"nas-b.{SUFFIX}"),
         names=("example-connect", secrets.SERVICE, secrets.KEYCHAIN),
     )
-    assert host_tool.gitleaks_facts([], None, ENDPOINTS).checkout is None
+    assert host_tool.gitleaks_facts(None, ENDPOINTS).checkout is None
 
 
 @pytest.mark.usefixtures("world")
 def test_gitleaks_facts_needs_a_vault() -> None:
     with pytest.raises(host_tool.HostError) as caught:
-        host_tool.gitleaks_facts(["fakeop"], None, ENDPOINTS)
+        host_tool.gitleaks_facts(None, ENDPOINTS)
     assert str(caught.value) == "op vault list listed no vaults"
 
 
@@ -3788,7 +3859,6 @@ def test_bootstrap_publishes_the_generated_config(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     with_workspace(config_file, "Fake/checkouts")
-    world.stubs.set(operators={"host-a": "fakeop"})
     assert run(world, capfd, "bootstrap", "--all") == 0
     lines = [
         line.removeprefix("gitleaks-generate: ")
@@ -3811,7 +3881,7 @@ def test_bootstrap_publishes_the_generated_config(
         "mac-address: 1 rule(s)",
         "op-reference: 1 rule(s)",
         "session-socket: 1 rule(s)",
-        "account-name: 1 rule(s), 1 too common or short to match alone",
+        "account-name: 2 rule(s), 1 too common or short to match alone",
         "op-account: 1 rule(s)",
         "op-vault: 4 rule(s)",
         "op-item: 1 rule(s)",
@@ -3846,30 +3916,16 @@ def test_a_failed_source_stops_bootstrap_before_it_writes(
     assert ": token: " not in world.out
 
 
-def test_a_single_host_bootstrap_keeps_the_other_hosts_operators(
+def test_the_generated_config_names_the_owner_and_ops_from_the_config(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    world.stubs.set(operators={"host-a": "fakeop", "host-c": "fakeoperator"})
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
-    assert "gitleaks-generate: account-name: 2 rule(s), 1 too common" in world.out
-    assert "fakeoperator" in published(world)
-
-
-def test_bootstrap_keeps_the_published_config_without_every_operator(
-    world: World, capfd: pytest.CaptureFixture[str]
-) -> None:
-    world.stubs.set(id_fails=["host-c"])
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
-    assert "host-c: cannot find out who you are there" in world.err
-    assert "keeping the published private gitleaks config\n" in world.out
-    assert "gitleaks-generate" not in world.out
-    assert not items(world)
-
-
-def test_bootstrap_with_no_host_ready_keeps_the_published_config(
-    world: World, capfd: pytest.CaptureFixture[str]
-) -> None:
-    world.stubs.set(id_fails=True)
-    assert run(world, capfd, "bootstrap", "--all") == 1
-    assert "gitleaks-generate" not in world.out
-    assert "item" not in " ".join(world.op_calls())
+    world.stubs.set(ssh_down=["host-a"])
+    assert run(world, capfd, "bootstrap", "--host", "host-a") == 1
+    text = published(world)
+    # Neither name depends on a host: host-a was unreachable.
+    for name in (OWNER, OPS):
+        for regex in (
+            rf"(?i)\b{re.escape(name)}\b",
+            f"/(?:Users|home)/{re.escape(name)}",
+        ):
+            assert json.dumps(regex)[1:-1] in text
