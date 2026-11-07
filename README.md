@@ -101,8 +101,8 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 
 - `identity` records which agent and model made each edit and writes the `Generated-by` trailers.
 - `guard-gh-pr` is a PreToolUse hook that blocks `gh pr create`, `gh pr edit` and `gh pr merge`.
-- `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it. `mise run pr` runs it.
-- `merge` squash-merges an approved pull request. `mise run merge` runs it.
+- `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
+- `merge` squash-merges an approved pull request.
 - `install` installs the git hooks and the user-level harness hooks.
 
 Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does two things:

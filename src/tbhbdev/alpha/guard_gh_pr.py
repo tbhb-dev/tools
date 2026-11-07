@@ -4,14 +4,14 @@
 
 A PreToolUse hook, ported from ascm's interim tools. Outside a tbhb-dev
 repository only the approval rules below apply. Inside one, agents open, edit
-and merge pull requests through the mise tasks
-(`mise run pr`, `mise run merge`), which add the machine-written trailers and
+and merge pull requests through `tbhbdev alpha pr` and
+`tbhbdev alpha merge`, which add the machine-written trailers and
 the plain-text squash message. This hook blocks the direct `gh` call and names
 the command to run instead:
 
-    gh pr create  ->  mise run pr -- check, then mise run pr -- create
-    gh pr edit    ->  mise run pr -- edit --pr N
-    gh pr merge   ->  mise run merge -- N   (--dry-run previews)
+    gh pr create  ->  tbhbdev alpha pr check, then tbhbdev alpha pr create
+    gh pr edit    ->  tbhbdev alpha pr edit --pr N
+    gh pr merge   ->  tbhbdev alpha merge N   (--dry-run previews)
 
 It reads the hook payload on stdin and takes no arguments. The payload shape
 alone picks the output contract, so the hook behaves the same whoever runs it:
@@ -609,14 +609,14 @@ def hint(found: Match) -> str:
     if found.sub == "create":
         return (
             f"{blocked} Write {DRAFT} from {TEMPLATE}, check it with "
-            "`mise run pr -- check`, then open the PR with `mise run pr -- create`."
+            "`tbhbdev alpha pr check`, then open the PR with `tbhbdev alpha pr create`."
         )
     if found.sub == "edit":
         return (
-            f"{blocked} Update {DRAFT}, then run `mise run pr -- edit --pr {number}`."
+            f"{blocked} Update {DRAFT}, then run `tbhbdev alpha pr edit --pr {number}`."
         )
     return (
-        f"{blocked} Once the PR is approved, run `mise run merge -- {number}` "
+        f"{blocked} Once the PR is approved, run `tbhbdev alpha merge {number}` "
         "(add `--dry-run` to preview the squash message first)."
     )
 

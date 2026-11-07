@@ -27,16 +27,16 @@ SRC = Path(guard.__file__).parents[2]
 
 CREATE = (
     "`gh pr create` is blocked. Write .github/PULL_REQUEST_DRAFT.md from "
-    ".github/PULL_REQUEST_TEMPLATE.md, check it with `mise run pr -- check`, "
-    "then open the PR with `mise run pr -- create`."
+    ".github/PULL_REQUEST_TEMPLATE.md, check it with `tbhbdev alpha pr check`, "
+    "then open the PR with `tbhbdev alpha pr create`."
 )
 EDIT = (
     "`gh pr edit` is blocked. Update .github/PULL_REQUEST_DRAFT.md, "
-    "then run `mise run pr -- edit --pr {n}`."
+    "then run `tbhbdev alpha pr edit --pr {n}`."
 )
 MERGE = (
     "`gh pr merge` is blocked. Once the PR is approved, run "
-    "`mise run merge -- {n}` (add `--dry-run` to preview the squash message first)."
+    "`tbhbdev alpha merge {n}` (add `--dry-run` to preview the squash message first)."
 )
 
 BLOCKED = [

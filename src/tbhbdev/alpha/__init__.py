@@ -1,7 +1,8 @@
 """`tbhbdev alpha`: interim agent tools, ported from ascm's tools/interim.
 
 Alpha commands are interim. They may change or go away without notice, and
-nothing outside the tbhb-dev harness hooks and mise tasks should call them.
+only the tbhb-dev harness hooks and agents in tbhb-dev repositories should
+call them.
 
 The harness hooks run on every tool call, so this module imports pr and merge,
 which load yaml and jsonschema, only when one of them runs.
