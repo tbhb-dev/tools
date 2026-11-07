@@ -3588,7 +3588,7 @@ def test_ident_problems_refuses_another_agent_signoff(
     ],
     ids=["agent", "human", "co-author", "mid-line"],
 )
-def test_ident_problems_accepts_other_signoffs(
+def test_ident_problems_accepts_other_sign_offs(
     monkeypatch: pytest.MonkeyPatch, line: str
 ) -> None:
     monkeypatch.setattr(ai, "git", agent_git)
