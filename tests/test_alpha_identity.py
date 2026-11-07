@@ -3522,11 +3522,8 @@ def test_e2e_a_human_commit_keeps_its_own_identity(wired: Path) -> None:
 def test_ident_problems_accepts_the_agent_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def agent(*_: str, **__: object) -> tuple[int, str]:
-        return 0, f"{ai.AGENT_IDENT} 1794020000 -0500"
-
-    monkeypatch.setattr(ai, "git", agent)
-    assert ai.ident_problems({"CLAUDE_CODE_SESSION_ID": "s"}) == []
+    monkeypatch.setattr(ai, "git", agent_git)
+    assert ai.ident_problems("", {"CLAUDE_CODE_SESSION_ID": "s"}) == []
 
 
 @pytest.mark.parametrize("stamp", [" 1794020000 +0000", " 1794020000 -0500"])
@@ -3545,12 +3542,82 @@ def test_ident_problems_refuses_an_identity_git_cannot_give(
 
     monkeypatch.setattr(ai, "git", failing)
     must = f"an agent commit must use {ai.AGENT_IDENT}"
-    assert ai.ident_problems({"CODEX_SESSION_ID": "s"}) == [
+    assert ai.ident_problems("", {"CODEX_SESSION_ID": "s"}) == [
         f"author is ''; {must}",
         f"committer is ''; {must}",
     ]
     assert asked == [("var", "GIT_AUTHOR_IDENT"), ("var", "GIT_COMMITTER_IDENT")]
-    assert ai.ident_problems({}) == []
+    assert ai.ident_problems("", {}) == []
+
+
+def agent_git(*_: str, **__: object) -> tuple[int, str]:
+    return 0, f"{ai.AGENT_IDENT} 1794020000 -0500"
+
+
+@pytest.mark.parametrize(
+    ("line", "who"),
+    [
+        (f"Signed-off-by: {NOREPLY}", NOREPLY),
+        (f"signed-off-by:\t{NOREPLY} ", NOREPLY),
+        (
+            "Signed-off-by: TBHB.DEV agent <a@example.invalid>",
+            "TBHB.DEV agent <a@example.invalid>",
+        ),
+    ],
+    ids=["noreply", "lowercase-key", "case"],
+)
+def test_ident_problems_refuses_another_agent_signoff(
+    monkeypatch: pytest.MonkeyPatch, line: str, who: str
+) -> None:
+    monkeypatch.setattr(ai, "git", agent_git)
+    text = f"feat: a\n\nbody\n\n{line}\nSigned-off-by: {ai.AGENT_IDENT}\n"
+    must = f"an agent commit must use {ai.AGENT_IDENT}"
+    assert ai.ident_problems(text, {"CODEX_SESSION_ID": "s"}) == [
+        f"Signed-off-by is {who!r}; {must}"
+    ]
+    assert ai.ident_problems(text, {}) == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f"Signed-off-by: {ai.AGENT_IDENT}",
+        "Signed-off-by: Human <h@example.invalid>",
+        f"Co-authored-by: {NOREPLY}",
+        f"See Signed-off-by: {NOREPLY}",
+    ],
+    ids=["agent", "human", "co-author", "mid-line"],
+)
+def test_ident_problems_accepts_other_signoffs(
+    monkeypatch: pytest.MonkeyPatch, line: str
+) -> None:
+    monkeypatch.setattr(ai, "git", agent_git)
+    assert ai.ident_problems(f"feat: a\n\n{line}\n", {"CODEX_SESSION_ID": "s"}) == []
+
+
+CODEX_E2E = {"CODEX_SESSION_ID": ROOT_THREAD, "CODEX_VERSION": "0.166.0"}
+
+
+@needs_prek
+def test_e2e_a_codex_commit_with_a_noreply_signoff_fails(wired: Path) -> None:
+    stage(wired, "a.txt")
+    done = git_commit(wired, f"feat: a\n\nSigned-off-by: {NOREPLY}", CODEX_E2E)
+    assert done.returncode != 0
+    assert (
+        f"tbhbdev alpha identity: Signed-off-by is {NOREPLY!r}; "
+        f"an agent commit must use {ai.AGENT_IDENT}"
+    ) in done.stderr
+    assert run_git(wired, "log", "-1", "--format=%s") == "init\n"
+
+
+@needs_prek
+def test_e2e_a_codex_commit_as_the_agent_passes(wired: Path) -> None:
+    stage(wired, "a.txt")
+    done = git_commit(wired, "feat: a", CODEX_E2E, "-s")
+    assert done.returncode == 0, done.stderr
+    who = run_git(wired, "log", "-1", "--format=%an <%ae>%n%cn <%ce>")
+    assert who == f"{ai.AGENT_IDENT}\n{ai.AGENT_IDENT}\n"
+    assert f"Signed-off-by: {ai.AGENT_IDENT}" in last_message(wired)
 
 
 @needs_prek
