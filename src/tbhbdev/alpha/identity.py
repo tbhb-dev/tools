@@ -675,10 +675,24 @@ def record_command(
     state = state_dir(cwd)
     if not state or not isinstance(cmd, str):
         return
-    write_json(
-        state / "cmds" / hx(root) / f"{uuid.uuid4().hex}.json",
-        {"agent": agent, "cmd": cmd_hashes(cmd), "ts": time.time(), "done": None},
-    )
+    name = f"{uuid.uuid4().hex}.json"
+    rec: Json = {
+        "agent": agent,
+        "cmd": cmd_hashes(cmd),
+        "ts": time.time(),
+        "done": None,
+    }
+    write_json(state / "cmds" / hx(root) / name, rec)
+    # A copy in the user's store lets a commit in another clone find the agent.
+    try:
+        user_cmds = user_store() / "cmds" / hx(root)
+        # The chmod below sets the mode whatever this one was, so the pragma
+        # hides equivalent mutants.
+        user_cmds.mkdir(mode=0o700, parents=True, exist_ok=True)  # pragma: no mutate
+        user_store().chmod(0o700)
+        write_private_json(user_cmds / name, rec)
+    except OSError:
+        return
 
 
 def finish_command(
@@ -691,17 +705,21 @@ def finish_command(
     state = state_dir(cwd)
     if not state or not isinstance(cmd, str):
         return
-    hashes = set(cmd_hashes(cmd))
-    with locked(state):
-        candidates = [
-            (path, rec)
-            for path, rec in command_records(state, root)
-            if rec.get("agent") == agent and hashes & rec_hashes(rec)
-        ]
-        best = max(candidates, key=lambda item: rec_ts(item[1]), default=None)
-        if best:
-            best[1]["done"] = time.time()
-            write_json(*best)
+    hashes, done = set(cmd_hashes(cmd)), time.time()
+    for store, write in ((state, write_json), (user_store(), write_private_json)):
+        try:
+            with locked(store):
+                candidates = [
+                    (path, rec)
+                    for path, rec in command_records(store, root)
+                    if rec.get("agent") == agent and hashes & rec_hashes(rec)
+                ]
+                best = max(candidates, key=lambda item: rec_ts(item[1]), default=None)
+                if best:
+                    best[1]["done"] = done
+                    write(*best)
+        except OSError:
+            continue
 
 
 def ps_row(pid: str) -> tuple[str, str] | None:
@@ -768,7 +786,7 @@ def match_command_agent(
 
     None means the main agent (or no match).
     """
-    found = stores(cwd)
+    found = [*stores(cwd), user_store()]
     now = now or time.time()
     hashes = {
         h
