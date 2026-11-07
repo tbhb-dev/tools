@@ -18,7 +18,8 @@ fit 72 characters, or the script stops. The body comes from the PR body:
   a blank line separates every block (paragraph, list, code, section).
 - Prose wraps at 72 columns. A list item keeps its marker and gets a hanging
   indent. A fenced code block loses its fences, is indented by four spaces, and
-  is never wrapped. Nothing breaks inside a word, an inline code span, or a URL.
+  is never wrapped. A table keeps each row on its own line, as written and
+  never wrapped. Nothing breaks inside a word, an inline code span, or a URL.
 - Emphasis markers go. Link text stays and its URL moves to a numbered
   reference list after the last section, because the URL usually is the issue or
   the spec the sentence points at, and a commit message cannot hold a link.
@@ -198,6 +199,8 @@ class Renderer:
     # The last block is a list item with no blank line after it, so the next
     # item joins that block instead of starting one.
     in_list: bool = False
+    # The last line taken was a table row, so the next row joins its block.
+    in_table: bool = False
 
     def flush(self) -> None:
         """End the paragraph or list item being collected."""
@@ -220,18 +223,36 @@ class Renderer:
         else:
             code.append(CODE_INDENT + line.raw if line.raw.strip() else "")
 
+    def feed_row(self, row: str) -> None:
+        """Take a table row: add it to the table's block, as written."""
+        self.flush()
+        self.in_list = False  # pragma: no mutate -- None is as falsy
+        if self.in_table:
+            self.blocks[-1] += "\n" + row
+        else:
+            self.blocks.append(row)
+
     def feed(self, line: pr.Line) -> None:
         """Take the next line of the section."""
+        row = self.code is None and line.text.strip().startswith("|")
+        if row:
+            self.feed_row(line.text.strip())
+        else:
+            self.feed_other(line)
+        self.in_table = row
+
+    def feed_other(self, line: pr.Line) -> None:
+        """Take a line that is not a table row."""
         if self.code is not None:
             self.feed_code(line, self.code)
         elif line.code:
             self.flush()
-            self.in_list = False
+            self.in_list = False  # pragma: no mutate -- None is as falsy
             self.marker = pr.FENCE.findall(line.raw)[0]  # line.code opens a fence
             self.code = []
         elif pr.is_blank(line):
             self.flush()
-            self.in_list = False
+            self.in_list = False  # pragma: no mutate -- None is as falsy
         elif item := ITEM.fullmatch(line.text):
             self.flush()
             prefix = f"{item[1]}{item[2]} "

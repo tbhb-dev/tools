@@ -237,6 +237,30 @@ def test_other_fence_characters_do_not_close() -> None:
     assert message_of(body) == "fix: x (#7)\n\nWhy\n    ```\n"
 
 
+LONG_CELL = "the check " + "ran again " * 10 + "and passed"
+
+
+def test_a_table_keeps_its_rows_unwrapped() -> None:
+    body = (
+        "## Verification\n\nChecks:\n"
+        "| Check | Result |\n|---|---|\n"
+        f"| `uv run pytest` | {LONG_CELL} |\n  | b | **c** |  \n"
+        "Then prose.\n\n| x |\n\n| y |\n"
+    )
+    assert message_of(body) == (
+        "fix: x (#7)\n\nVerification\nChecks:\n\n"
+        f"| Check | Result |\n|---|---|\n| `uv run pytest` | {LONG_CELL} |\n"
+        "| b | **c** |\n\nThen prose.\n\n| x |\n\n| y |\n"
+    )
+
+
+def test_a_table_ends_a_list_and_a_fence_keeps_its_bars() -> None:
+    body = "## Why\n\nLead.\n\n- a\n| x |\n| z |\n- b\n\n```\n| y |\n```\n"
+    assert message_of(body) == (
+        "fix: x (#7)\n\nWhy\nLead.\n\n- a\n\n| x |\n| z |\n\n- b\n\n    | y |\n"
+    )
+
+
 def test_links_become_numbered_references() -> None:
     body = (
         "## Why\n\nSee [the issue](https://x.test/1) and "
