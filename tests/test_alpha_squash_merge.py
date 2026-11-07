@@ -255,9 +255,9 @@ def test_a_table_keeps_its_rows_unwrapped() -> None:
 
 
 def test_a_table_ends_a_list_and_a_fence_keeps_its_bars() -> None:
-    body = "## Why\n\n- a\n| x |\n- b\n\n```\n| y |\n```\n"
+    body = "## Why\n\nLead.\n\n- a\n| x |\n| z |\n- b\n\n```\n| y |\n```\n"
     assert message_of(body) == (
-        "fix: x (#7)\n\nWhy\n- a\n\n| x |\n\n- b\n\n    | y |\n"
+        "fix: x (#7)\n\nWhy\nLead.\n\n- a\n\n| x |\n| z |\n\n- b\n\n    | y |\n"
     )
 
 

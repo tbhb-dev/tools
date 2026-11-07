@@ -226,7 +226,7 @@ class Renderer:
     def feed_row(self, row: str) -> None:
         """Take a table row: add it to the table's block, as written."""
         self.flush()
-        self.in_list = False
+        self.in_list = False  # pragma: no mutate -- None is as falsy
         if self.in_table:
             self.blocks[-1] += "\n" + row
         else:
@@ -247,12 +247,12 @@ class Renderer:
             self.feed_code(line, self.code)
         elif line.code:
             self.flush()
-            self.in_list = False
+            self.in_list = False  # pragma: no mutate -- None is as falsy
             self.marker = pr.FENCE.findall(line.raw)[0]  # line.code opens a fence
             self.code = []
         elif pr.is_blank(line):
             self.flush()
-            self.in_list = False
+            self.in_list = False  # pragma: no mutate -- None is as falsy
         elif item := ITEM.fullmatch(line.text):
             self.flush()
             prefix = f"{item[1]}{item[2]} "
