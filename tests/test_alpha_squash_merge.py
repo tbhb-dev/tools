@@ -706,7 +706,7 @@ def test_runs_as_tbhbdev_alpha_merge(tmp_path: Path) -> None:
 def test_the_fallback_identity_block_is_kept_and_passes_the_check() -> None:
     block = (
         "Generated-by: LLM effort=medium;harness=claude-code:2.1.316;"
-        "session=sha-256-64:71c761039ac2c7f9;surface=cli"
+        "model=anthropic:m;session=sha-256-64:71c761039ac2c7f9;surface=cli"
     )
     message = message_of(f"## Why\n\nw\n\n{block}\n")
     assert message.endswith(f"\n\n{block}\n")

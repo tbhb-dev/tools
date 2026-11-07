@@ -198,6 +198,7 @@ def test_claude_hooks() -> None:
             },
         ],
         "PostToolUseFailure": [{"matcher": "Bash", "hooks": [record]}],
+        "PostModelSwitch": [{"hooks": [record]}],
     }
 
 

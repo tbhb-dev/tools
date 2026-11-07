@@ -210,9 +210,25 @@ def root(cwd: Path | None = None) -> Path:
     return Path(out) if code == 0 else (cwd or Path.cwd())
 
 
+def read_baseline(path: Path) -> str:
+    """Read one of the shared baseline files from the worktree.
+
+    Raises:
+        SystemExit: The file is missing.
+    """
+    try:
+        return (root() / path).read_text()
+    except FileNotFoundError:
+        message = (
+            f"{path} is missing: this repository needs the shared baseline"
+            " from tbhb-dev/rules"
+        )
+        raise SystemExit(message) from None
+
+
 def load_sections() -> list[Section]:
     """Read the section scheme."""
-    data = tomllib.loads((root() / SECTIONS).read_text())
+    data = tomllib.loads(read_baseline(SECTIONS))
     rows = cast("list[dict[str, object]]", data["section"])  # pragma: no mutate
     return [
         Section(
@@ -226,7 +242,7 @@ def load_sections() -> list[Section]:
 
 def load_schema() -> dict[str, object]:
     """Read the frontmatter schema."""
-    text = (root() / SCHEMA).read_text()
+    text = read_baseline(SCHEMA)
     return cast("dict[str, object]", json.loads(text))  # pragma: no mutate
 
 
@@ -715,11 +731,12 @@ def description(checked: Checked, env: Mapping[str, str]) -> str:
     """The final body: the description plus the trailers as its last paragraph.
 
     Raises:
-        SystemExit: A trailer fails the commit-trailer grammar.
+        SystemExit: A trailer, or the posting agent's, fails the commit-trailer
+            grammar.
     """
     found = branch_trailers(base_of(checked.meta))
     posting = posting_value(env)
-    values = [value for _, value in found]
+    values = [value for _, value in found] + ([posting] if posting else [])
     errors = [
         f"{value}: {why}"
         for value in values

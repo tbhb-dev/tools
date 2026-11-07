@@ -185,6 +185,7 @@ def claude_hooks() -> dict[str, list[Json]]:
             group("Write|Edit|MultiEdit", handler("pr hook claude")),
         ],
         "PostToolUseFailure": [group("Bash", record)],
+        "PostModelSwitch": [group(None, record)],
     }
 
 

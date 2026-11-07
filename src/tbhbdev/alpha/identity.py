@@ -120,6 +120,8 @@ EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 EDITS = "edits"
 CLAIMS = "claims"
 ATTR_ORDER = ["effort", "harness", "model", "session", "subagent", "surface"]
+# Attributes every trailer value needs, in the order a missing one is reported.
+REQUIRED = ("harness", "model")
 BAD_VALUE = re.compile(r"[\s;,]")
 SURFACE_VALUE = re.compile(r"[^\s;,=]+")
 HASH_RE = re.compile(r"sha-256-64:[0-9a-f]{16}")
@@ -137,6 +139,8 @@ REWRITE_FLAG = "ASCM_AGENT_REWRITE"
 SOURCE_ENV = "PRE_COMMIT_COMMIT_MSG_SOURCE"
 
 CLAUDE_EDIT_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+# The Claude Code event after a /model switch, with the new model as to_model.
+SWITCH = "PostModelSwitch"
 # agy 1.4.12 -p (verified live) uses write_file and edit_file with the path in
 # args.Path. The other names are the documented IDE-era tools, kept in case
 # another mode uses them.
@@ -510,15 +514,56 @@ def parse_line(line: str) -> Json | None:
         return None
 
 
-def transcript_model(path: object) -> str | None:
-    """Claude: the last real assistant ``message.model`` in a transcript tail."""
+def real_model(value: object) -> str | None:
+    """A model name; None when it is empty or a ``<...>`` one, like ``<synthetic>``."""
+    model = as_str(value)
+    return model if model and not model.startswith("<") else None
+
+
+def entry_time(value: object) -> float:
+    """A transcript ``timestamp`` in seconds; 0 when it is missing or unreadable."""
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def transcript_entry(path: object) -> tuple[str, float] | None:
+    """Claude: the last real assistant model in a transcript tail, and its time."""
     lines = read_tail(Path(path), CLAUDE_TAIL) if isinstance(path, str) else None
     for line in reversed(lines or []):
-        message = as_dict((parse_line(line) or {}).get("message"))
-        model = as_str(message.get("model")) if message else None
-        if model and not model.startswith("<"):
-            return model
+        entry = parse_line(line) or {}
+        message = as_dict(entry.get("message"))
+        model = real_model(message.get("model")) if message else None
+        if model:
+            return model, entry_time(entry.get("timestamp"))
     return None
+
+
+def transcript_model(path: object) -> str | None:
+    """Claude: the last real assistant ``message.model`` in a transcript tail."""
+    found = transcript_entry(path)
+    return found[0] if found else None
+
+
+def main_model(rec: Json) -> str | None:
+    """The Claude main agent's model now, from its session record.
+
+    In order: the newer of the last ``/model`` switch and the transcript's last
+    real assistant entry (the transcript wins a tie, and an entry without a
+    readable time counts as older); else that entry; else the model a hook last
+    read from the transcript, for a transcript gone since; else a model a hook
+    payload carried; else None. The transcript is read now, because a commit's
+    first turn has no entry until after its hooks ran, and a switch has none
+    until the next reply.
+    """
+    found = transcript_entry(rec.get("transcript"))
+    switched, when = as_str(rec.get("switch_model")), rec.get("switch_at")
+    if switched and isinstance(when, float) and not (found and found[1] >= when):
+        return switched
+    if found:
+        return found[0]
+    return first_str(rec, "model", "payload_model")
 
 
 # --------------------------------------------------------- records and commands
@@ -592,11 +637,24 @@ def load_record(hashed: str, cwd: Path | None = None) -> Json:
 
     The record in the worktree containing ``cwd`` wins, field by field, and
     the user's store fills in the rest, for a session that commits in another
-    clone.
+    clone. A ``/model`` switch is the exception: its model and time come as a
+    pair from whichever store has the latest one, because the session may have
+    switched again while its hooks ran in another worktree.
     """
-    merged = read_record(user_store() / f"{hx(hashed)}.json")
-    for store in stores(cwd):
-        merged.update(read_record(store / "sessions" / f"{hx(hashed)}.json"))
+    records = [read_record(user_store() / f"{hx(hashed)}.json")]
+    records += [
+        read_record(store / "sessions" / f"{hx(hashed)}.json") for store in stores(cwd)
+    ]
+    merged: Json = {}
+    for rec in records:
+        merged.update(rec)
+    switches = [
+        (at, rec.get("switch_model"))
+        for rec in records
+        if isinstance(at := rec.get("switch_at"), float)
+    ]
+    if switches:
+        merged["switch_at"], merged["switch_model"] = max(switches, key=lambda s: s[0])
     return merged
 
 
@@ -987,6 +1045,9 @@ def handle_claude(data: Json, env: Mapping[str, str]) -> None:
     if data.get("agent_id"):
         agent = record_child(data, effort)
     else:
+        # A switch is kept apart from the transcript's model, which trails it
+        # until the next reply, so a later hook never overwrites it.
+        switched = real_model(data.get("to_model")) if event == SWITCH else None
         write_record(
             sha256_64(data["session_id"]),
             {
@@ -994,6 +1055,10 @@ def handle_claude(data: Json, env: Mapping[str, str]) -> None:
                 "version": version(CLAUDE, env),
                 "model": transcript_model(data.get("transcript_path")),
                 "effort": effort,
+                "transcript": as_str(data.get("transcript_path")),
+                "payload_model": real_model(first_str(data, "model", "modelName")),
+                "switch_model": switched,
+                "switch_at": time.time() if switched else None,
             },
             hook_cwd(data),
         )
@@ -1414,18 +1479,19 @@ def claude_committer(
     if sub and child_rec.get("root") != root:
         # Unknown or foreign agent record: treat as the main agent.
         sub, child_rec = None, dict[str, object]()
+    model = main_model(root_rec)
     root_ident = make_ident(
-        CLAUDE, root, Seen(ver, root_rec.get("model"), root_rec.get("effort"), surf)
+        CLAUDE, root, Seen(ver, model, root_rec.get("effort"), surf)
     )
     if sub:
         # Re-read the transcript at commit time: it can trail the hook that recorded it.
-        model = child_rec.get("model") or transcript_model(child_rec.get("transcript"))
+        child = child_rec.get("model") or transcript_model(child_rec.get("transcript"))
         ident = make_ident(
-            CLAUDE, root, Seen(ver, model, child_rec.get("effort"), surf), sub
+            CLAUDE, root, Seen(ver, child, child_rec.get("effort"), surf), sub
         )
     else:
         effort = env.get("CLAUDE_EFFORT") or root_rec.get("effort")
-        ident = make_ident(CLAUDE, root, Seen(ver, root_rec.get("model"), effort, surf))
+        ident = make_ident(CLAUDE, root, Seen(ver, model, effort, surf))
     return Committer(CLAUDE, ident, root_ident)
 
 
@@ -1985,7 +2051,7 @@ def delegating_root(
     record = load_record(who.root, base)
     seen = Seen(
         record.get("version") or who.harness.partition(":")[2],
-        record.get("model"),
+        main_model(record),
         record.get("effort"),
         who.surface,
     )
@@ -2150,23 +2216,28 @@ def check_pair(pair: str) -> str | None:
     return problem
 
 
+def check_blob(blob: str) -> str | None:
+    """Why a trailer value's ``k=v;...`` attribute blob is invalid, or None."""
+    pairs = blob.split(";")
+    keys = [pair.partition("=")[0] for pair in pairs]
+    problem = next(filter(None, map(check_pair, pairs)), None)
+    missing = [key for key in REQUIRED if key not in keys]
+    if problem is None and missing:
+        problem = f"{missing[0]} required"
+    elif problem is None and (keys != sorted(keys) or len(set(keys)) != len(keys)):
+        problem = "attributes out of order or duplicated"
+    return problem
+
+
 def check_value(value: str) -> str | None:
     """Why a trailer value is invalid under the grammar, or None."""
     tokens = value.split()
     blobs = [t for t in tokens[1:] if "=" in t]
     if not tokens or tokens[0] != "LLM":
-        problem = "must start with literal LLM"
-    elif len(blobs) != 1:
-        problem = "need exactly one attribute blob"
-    else:
-        pairs = blobs[0].split(";")
-        keys = [pair.partition("=")[0] for pair in pairs]
-        problem = next(filter(None, map(check_pair, pairs)), None)
-        if problem is None and "harness" not in keys:
-            problem = "harness required"
-        elif problem is None and (keys != sorted(keys) or len(set(keys)) != len(keys)):
-            problem = "attributes out of order or duplicated"
-    return problem
+        return "must start with literal LLM"
+    if len(blobs) != 1:
+        return "need exactly one attribute blob"
+    return check_blob(blobs[0])
 
 
 def check_message(text: str) -> list[str]:
