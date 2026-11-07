@@ -112,7 +112,7 @@ Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev reposi
 
 Each hook command it writes ends in `# tbhbdev alpha install`. A rerun replaces only those entries, and keeps everything else in place. Before it changes a config, it saves the old one beside it as `<name>.tbhbdev-backup.<time>`. `--dry-run` prints the changes without writing them, and `--harness claude|codex|antigravity` limits the merge to one harness. Codex asks you to trust new hooks with `/hooks`.
 
-The hooks are user level, and the harness runs them in every repository. Each one first checks that the repository's `origin` is a tbhb-dev repository on GitHub, and does nothing otherwise. Claude Code's SessionStart hook runs `tbhbdev alpha install --hook`, which reinstalls the git hooks of the worktree the session starts in.
+The hooks are user level, and the harness runs them in every repository. Each one first checks that the repository's `origin` is a tbhb-dev repository on GitHub, and does nothing otherwise. Claude Code's SessionStart hook runs `tbhbdev alpha install --hook`, which reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, and each worktree has its own pull request draft, so sessions in two worktrees of one clone don't overwrite each other.
 

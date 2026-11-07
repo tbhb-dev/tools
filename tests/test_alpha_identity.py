@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -560,10 +561,12 @@ harnesses = st.sampled_from(sorted(ai.SLUGS.values())).flatmap(
 )
 hashes = st.from_regex(r"sha-256-64:[0-9a-f]{16}", fullmatch=True)
 attr_sets = st.fixed_dictionaries(
-    {"harness": harnesses},
+    {
+        "harness": harnesses,
+        "model": st.from_regex(r"[a-z0-9][a-z0-9.:_-]{0,20}", fullmatch=True),
+    },
     optional={
         "effort": st.sampled_from(sorted(ai.EFFORTS)),
-        "model": st.from_regex(r"[a-z0-9][a-z0-9.:_-]{0,20}", fullmatch=True),
         "session": hashes,
         "subagent": hashes,
         "surface": st.from_regex(r"[A-Za-z0-9_-]{1,10}", fullmatch=True),
@@ -1469,6 +1472,7 @@ def test_main_agent_events_record_the_session_and_commands(
         "version": "2.1.316",
         "model": "claude-opus-5-5",
         "effort": "high",
+        "transcript": str(repo / "session-raw.jsonl"),
     }
     (rec,) = pending(repo)
     assert (rec["agent"], rec["done"]) == (None, None)
@@ -3036,14 +3040,14 @@ GOOD = f"harness=claude-code:2.1;model=anthropic:m;session={ROOT}"
 @pytest.mark.parametrize(
     "value",
     [
-        "LLM harness=claude-code",
+        "LLM harness=claude-code;model=anthropic:m",
         (
             "LLM effort=max;harness=codex:1;model=openai:gpt-5;"
             f"session={ROOT};subagent={CHILD};surface=cli"
         ),
         f"LLM {GOOD}",
-        "LLM harness=antigravity;surface=cli",
-        "LLM harness=codex some prose",
+        "LLM harness=antigravity;model=gcp.gemini:m;surface=cli",
+        "LLM harness=codex;model=openai:m some prose",
     ],
 )
 def test_check_value_accepts(value: str) -> None:
@@ -3067,7 +3071,16 @@ def test_check_value_accepts(value: str) -> None:
         ("LLM harness=cursor", "unknown harness cursor"),
         ("LLM effort=low", "harness required"),
         ("LLM model=a:b;harness=codex", "attributes out of order or duplicated"),
-        ("LLM harness=codex;harness=codex", "attributes out of order or duplicated"),
+        ("LLM harness=codex;harness=codex", "model required"),
+        (
+            "LLM harness=codex;harness=codex;model=a:b",
+            "attributes out of order or duplicated",
+        ),
+        ("LLM harness=claude-code", "model required"),
+        ("LLM harness=claude-code:2.1;surface=cli", "model required"),
+        ("LLM harness=codex:1;surface=cli", "model required"),
+        ("LLM harness=antigravity", "model required"),
+        ("LLM harness=codex;model=", "bad attribute 'model='"),
     ],
 )
 def test_check_value_rejects(value: str, problem: str) -> None:
@@ -3104,7 +3117,7 @@ def test_check_message_orders_and_signoff() -> None:
         )
         == []
     )
-    assert ai.check_message("Generated-by:LLM harness=codex\n") == []
+    assert ai.check_message("Generated-by:LLM harness=codex;model=m\n") == []
     assert ai.check_message("  Generated-by: nope\n") == []
     assert ai.check_message("") == []
 
@@ -3129,10 +3142,14 @@ def test_check_value_order_property(keys: list[str]) -> None:
     }
     ordered = [k for k in ai.ATTR_ORDER if k in keys]
     value = "LLM " + ";".join(f"{k}={samples[k]}" for k in ordered)
-    expected = None if "harness" in keys else "harness required"
+    expected = None
+    if "harness" not in keys:
+        expected = "harness required"
+    elif "model" not in keys:
+        expected = "model required"
     assert ai.check_value(value) == expected
     shuffled = "LLM " + ";".join(f"{k}={samples[k]}" for k in reversed(ordered))
-    if len(ordered) > 1 and "harness" in keys:
+    if len(ordered) > 1 and {"harness", "model"} <= set(keys):
         assert ai.check_value(shuffled) == "attributes out of order or duplicated"
 
 
@@ -3410,12 +3427,30 @@ CLAUDE_E2E = {
 }
 
 
+def claude_turn(repo: Path) -> None:
+    """A main-agent turn: its transcript has an opus reply, and a hook saw it."""
+    (repo / "t.jsonl").write_text(
+        json.dumps({"message": {"model": "claude-opus-5-5"}}) + "\n", encoding="utf-8"
+    )
+    data = stdin_fixture(
+        "claude-pretooluse-bash-main.json",
+        cwd=str(repo),
+        transcript_path=str(repo / "t.jsonl"),
+    )
+    record(repo, "claude", data, CLAUDE_E2E)
+
+
 def claude_write(
     repo: Path, name: str, content: str | None = None, **kw: object
 ) -> None:
     (repo / "t.jsonl").write_text(
         json.dumps({"message": {"model": "claude-opus-5-5"}}) + "\n", encoding="utf-8"
     )
+    if "agent_id" in kw:
+        write_transcript(
+            repo / "t" / "subagents" / f"agent-{kw['agent_id']}.jsonl",
+            {"message": {"model": "claude-haiku-5-5"}},
+        )
     data = stdin_fixture(
         "claude-posttooluse-write.json",
         cwd=str(repo),
@@ -3461,6 +3496,7 @@ def test_e2e_claude_edit_then_commit(wired: Path) -> None:
 
 @needs_prek
 def test_e2e_hook_works_from_a_subdirectory(wired: Path) -> None:
+    claude_turn(wired)
     stage(wired, "sub/x.txt")
     done = git_commit(wired, "feat: x", CLAUDE_E2E, cwd=wired / "sub")
     assert done.returncode == 0, done.stderr
@@ -3473,6 +3509,7 @@ def test_e2e_signoff_passes_the_check_for_everyone(
     wired: Path, env: dict[str, str] | None
 ) -> None:
     """`git commit -s` passes, human or agent: sign-off is not checked."""
+    claude_turn(wired)
     stage(wired, "a.txt")
     done = git_commit(wired, "feat: a", env, "-s")
     assert done.returncode == 0, done.stderr
@@ -3484,6 +3521,7 @@ NOREPLY = "tbhb.dev Agent <334376894+tbhb-agent@users.noreply.github.com>"
 
 @needs_prek
 def test_e2e_an_agent_commit_as_the_agent_identity_passes(wired: Path) -> None:
+    claude_turn(wired)
     stage(wired, "a.txt")
     done = git_commit(wired, "feat: a", CLAUDE_E2E)
     assert done.returncode == 0, done.stderr
@@ -3642,8 +3680,10 @@ def test_e2e_a_codex_commit_with_a_noreply_signoff_fails(wired: Path) -> None:
 
 @needs_prek
 def test_e2e_a_codex_commit_as_the_agent_passes(wired: Path) -> None:
+    home = wired.parent / "codex"
+    write_rollout(home, ROOT_THREAD, [meta(id=ROOT_THREAD), turn("gpt-5.6-sol", None)])
     stage(wired, "a.txt")
-    done = git_commit(wired, "feat: a", CODEX_E2E, "-s")
+    done = git_commit(wired, "feat: a", {**CODEX_E2E, "CODEX_HOME": str(home)}, "-s")
     assert done.returncode == 0, done.stderr
     who = run_git(wired, "log", "-1", "--format=%an <%ae>%n%cn <%ce>")
     assert who == f"{ai.AGENT_IDENT}\n{ai.AGENT_IDENT}\n"
@@ -3685,6 +3725,10 @@ def test_e2e_claude_subagent_commits_its_parents_edit(wired: Path) -> None:
         "claude-pretooluse-bash-child.json",
         cwd=str(wired),
         transcript_path=str(wired / "t.jsonl"),
+    )
+    write_transcript(
+        wired / "t" / "subagents" / "agent-agent-raw.jsonl",
+        {"message": {"model": "claude-haiku-5-5"}},
     )
     record(wired, "claude", child_data, CLAUDE_E2E)
     run_git(wired, "add", "a.txt")
@@ -3855,6 +3899,7 @@ def test_e2e_a_formatter_rewrite_keeps_the_subagent_trailer(wired: Path) -> None
     )
     config.write_text(yaml.safe_dump(loaded_config), encoding="utf-8")
     run_git(wired, "add", ".pre-commit-config.yaml")
+    claude_turn(wired)
     claude_write(wired, "b.txt", "sub   \n", agent_id="agent-raw")
     run_git(wired, "add", "b.txt")
     failed = git_commit(wired, "feat: b", CLAUDE_E2E)
@@ -3908,6 +3953,7 @@ def test_e2e_amend_keeps_the_subagent_trailer(
 
 @needs_prek
 def test_e2e_amend_with_new_root_edit_orders_generated_first(wired: Path) -> None:
+    claude_turn(wired)
     claude_write(wired, "b.txt", agent_id="agent-raw")
     run_git(wired, "add", "b.txt")
     assert git_commit(wired, "feat: b", CLAUDE_E2E).returncode == 0
@@ -4516,7 +4562,7 @@ def test_check_value_splits_keys_at_the_first_equals_sign() -> None:
     # Splitting at the last "=" would read these keys as surface=a and
     # surface=b and miss the duplicate.
     assert (
-        ai.check_value("LLM harness=codex;surface=a=1;surface=b=1")
+        ai.check_value("LLM harness=codex;model=m;surface=a=1;surface=b=1")
         == "attributes out of order or duplicated"
     )
 
@@ -4524,7 +4570,7 @@ def test_check_value_splits_keys_at_the_first_equals_sign() -> None:
 def test_check_messages_are_exact() -> None:
     for line in ("Signed-off-by: A <a@b.c>", "Co-authored-by: A <a@b.c>"):
         assert ai.check_message(f"{line}\n") == []
-    assert ai.check_value("LLM harness=codex") is None
+    assert ai.check_value("LLM harness=codex;model=m") is None
 
 
 @pytest.mark.usefixtures("repo")
@@ -5344,7 +5390,9 @@ def test_delegating_root_rebuilds_a_claude_root_from_its_record(repo: Path) -> N
 def test_delegating_root_reads_the_record_in_the_given_directory(
     repo: Path, plain: Path
 ) -> None:
-    ai.write_record(SESSION_HASH, {"version": "3.1"}, repo)
+    # Only the repository's store has the record, not the user's.
+    sessions = repo / ".git" / "tbhb-alpha" / "sessions"
+    ai.write_json(sessions / f"{ai.hx(SESSION_HASH)}.json", {"version": "3.1"})
     got = ai.delegating_root(WRITER, None, repo)
     assert got is not None
     assert got.harness == "claude-code:3.1"
@@ -5872,7 +5920,7 @@ def test_check_message_orders_attributes_alphabetically() -> None:
         + SESSION_HASH
     )
     assert ai.check_value(ok.removeprefix("Generated-by: ")) is None
-    swapped = "LLM harness=codex;effort=high"
+    swapped = "LLM harness=codex;effort=high;model=m"
     assert ai.check_value(swapped) == "attributes out of order or duplicated"
 
 
@@ -6315,3 +6363,333 @@ def test_codex_hooks_use_the_hook_cwd_not_the_process_cwd(
         "root.txt"
     ]
     assert (store_of(repo) / "sessions").is_dir()
+
+
+# ------------------------------------------------- Claude main model at commit
+
+
+OPUS, SONNET, HAIKU = "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"
+EARLIER = "2026-11-06T10:00:00.000Z"
+EARLIER_TS = 1_793_959_200.0  # EARLIER in seconds
+
+
+def reply(model: str, timestamp: str | None = EARLIER) -> Json:
+    entry: Json = {"type": "assistant", "message": {"model": model}}
+    if timestamp is not None:
+        entry["timestamp"] = timestamp
+    return entry
+
+
+def test_real_model() -> None:
+    assert ai.real_model(OPUS) == OPUS
+    assert ai.real_model("<synthetic>") is None
+    assert ai.real_model("<other>") is None
+    assert ai.real_model("") is None
+    assert ai.real_model(None) is None
+    assert ai.real_model(3) is None
+
+
+def test_entry_time() -> None:
+    assert ai.entry_time(EARLIER) == EARLIER_TS
+    assert ai.entry_time("2026-11-06T10:00:00.500+00:00") == EARLIER_TS + 0.5
+    assert ai.entry_time(None) == 0.0
+    assert ai.entry_time("yesterday") == 0.0
+    assert ai.entry_time("") == 0.0
+
+
+def test_transcript_entry_reads_the_last_real_reply_and_its_time(
+    tmp_path: Path,
+) -> None:
+    path = write_transcript(
+        tmp_path / "t.jsonl",
+        reply(OPUS, "2026-11-06T09:00:00Z"),
+        reply(SONNET),
+        reply("<synthetic>", "2026-11-06T11:00:00Z"),
+        {"type": "system", "timestamp": "2026-11-06T12:00:00Z"},
+    )
+    assert ai.transcript_entry(str(path)) == (SONNET, EARLIER_TS)
+    no_time = write_transcript(tmp_path / "u.jsonl", reply(OPUS, None))
+    assert ai.transcript_entry(str(no_time)) == (OPUS, 0.0)
+    assert ai.transcript_entry(str(tmp_path / "missing")) is None
+    assert ai.transcript_entry(None) is None
+    empty = write_transcript(tmp_path / "e.jsonl", {"type": "user"})
+    assert ai.transcript_entry(str(empty)) is None
+
+
+def test_main_model_order(tmp_path: Path) -> None:
+    transcript = str(write_transcript(tmp_path / "t.jsonl", reply(OPUS)))
+    switch: Json = {"switch_model": SONNET, "switch_at": EARLIER_TS + 1}
+    # The newer of the switch and the transcript's last reply.
+    assert ai.main_model({"transcript": transcript, **switch}) == SONNET
+    older = {"switch_model": SONNET, "switch_at": EARLIER_TS - 1}
+    assert ai.main_model({"transcript": transcript, **older}) == OPUS
+    tie = {"switch_model": SONNET, "switch_at": EARLIER_TS}
+    assert ai.main_model({"transcript": transcript, **tie}) == OPUS
+    # A switch without a usable time doesn't count.
+    assert ai.main_model({"transcript": transcript, "switch_model": SONNET}) == OPUS
+    int_time = {"switch_model": SONNET, "switch_at": 1}
+    assert ai.main_model({"transcript": transcript, **int_time}) == OPUS
+    # A reply without a readable time is older than any switch.
+    bare = str(write_transcript(tmp_path / "b.jsonl", reply(OPUS, None)))
+    assert ai.main_model({"transcript": bare, **switch}) == SONNET
+    # Only a switch, then the transcript, then what hooks recorded.
+    assert ai.main_model(switch) == SONNET
+    assert ai.main_model({"transcript": transcript, "model": HAIKU}) == OPUS
+    gone = str(tmp_path / "gone.jsonl")
+    hooks: Json = {"transcript": gone, "model": HAIKU, "payload_model": SONNET}
+    assert ai.main_model(hooks) == HAIKU
+    assert ai.main_model({"transcript": gone, "payload_model": SONNET}) == SONNET
+    assert ai.main_model({"transcript": gone}) is None
+    assert ai.main_model({}) is None
+
+
+def switch_data(repo: Path, to_model: object = SONNET) -> Json:
+    return claude_data(
+        repo,
+        hook_event_name="PostModelSwitch",
+        tool_name=None,
+        tool_input=None,
+        from_model=OPUS,
+        to_model=to_model,
+    )
+
+
+def test_a_model_switch_is_recorded_with_its_time(repo: Path) -> None:
+    before = time.time()
+    ai.handle_claude(switch_data(repo), CLAUDE_HOOK_ENV)
+    after = time.time()
+    rec = ai.load_record(SESSION_HASH)
+    assert rec["switch_model"] == SONNET
+    assert isinstance(rec["switch_at"], float)
+    assert before <= rec["switch_at"] <= after
+    assert rec["model"] == OPUS
+    # A later hook reads the stale transcript, and leaves the switch alone.
+    ai.handle_claude(
+        claude_data(repo, "claude-posttooluse-write.json"), CLAUDE_HOOK_ENV
+    )
+    assert ai.load_record(SESSION_HASH)["switch_model"] == SONNET
+    assert ai.load_record(SESSION_HASH)["switch_at"] == rec["switch_at"]
+    assert pending(repo) == []
+
+
+@pytest.mark.parametrize(
+    ("event", "to_model"),
+    [("PreModelSwitch", SONNET), ("PostModelSwitch", "<synthetic>")],
+)
+def test_only_a_real_post_switch_is_recorded(
+    repo: Path, event: str, to_model: str
+) -> None:
+    data = {**switch_data(repo, to_model), "hook_event_name": event}
+    ai.handle_claude(data, CLAUDE_HOOK_ENV)
+    rec = ai.load_record(SESSION_HASH)
+    assert "switch_model" not in rec
+    assert "switch_at" not in rec
+    assert "payload_model" not in rec
+
+
+def test_a_payload_model_is_recorded_apart_from_a_switch(repo: Path) -> None:
+    start = claude_data(
+        repo, hook_event_name="SessionStart", tool_name=None, model=HAIKU
+    )
+    ai.handle_claude(start, CLAUDE_HOOK_ENV)
+    rec = ai.load_record(SESSION_HASH)
+    assert rec["payload_model"] == HAIKU
+    assert "switch_model" not in rec
+    named = claude_data(repo, hook_event_name="SessionStart", modelName=SONNET)
+    ai.handle_claude(named, CLAUDE_HOOK_ENV)
+    assert ai.load_record(SESSION_HASH)["payload_model"] == SONNET
+    fake = claude_data(repo, hook_event_name="SessionStart", model="<synthetic>")
+    ai.handle_claude(fake, CLAUDE_HOOK_ENV)
+    assert ai.load_record(SESSION_HASH)["payload_model"] == SONNET
+
+
+def test_claude_committer_takes_the_main_model_at_commit_time(repo: Path) -> None:
+    transcript = write_transcript(repo / "t.jsonl", reply(OPUS))
+    ai.write_record(
+        SESSION_HASH,
+        {"transcript": str(transcript), "model": HAIKU, "switch_model": SONNET},
+        repo,
+    )
+    got = ai.committer_identity(CLAUDE_COMMIT_ENV, [])
+    assert got is not None
+    assert got.ident.model == got.root_ident.model == "anthropic:" + OPUS
+    ai.write_record(SESSION_HASH, {"switch_at": time.time()}, repo)
+    got = ai.committer_identity(CLAUDE_COMMIT_ENV, [])
+    assert got is not None
+    assert got.ident.model == got.root_ident.model == "anthropic:" + SONNET
+
+
+def test_delegating_root_takes_the_main_model_at_commit_time(repo: Path) -> None:
+    transcript = write_transcript(repo / "t.jsonl", reply(OPUS))
+    ai.write_record(
+        SESSION_HASH,
+        {"transcript": str(transcript), "model": HAIKU, "version": "3.1"},
+        repo,
+    )
+    got = ai.delegating_root(WRITER, None, repo)
+    assert got is not None
+    assert got.model == "anthropic:" + OPUS
+
+
+def main_hook(repo: Path, event: str, transcript: Path, **kw: object) -> Json:
+    """A main-agent hook payload without a model, as Claude Code sends."""
+    return stdin_fixture(
+        "claude-pretooluse-bash-main.json",
+        cwd=str(repo),
+        transcript_path=str(transcript),
+        hook_event_name=event,
+        **kw,
+    )
+
+
+@needs_prek
+def test_e2e_a_headless_first_turn_commit_gets_the_transcript_model(
+    wired: Path,
+) -> None:
+    transcript = wired.parent / "session.jsonl"
+    write_transcript(transcript, {"type": "user", "message": {"content": "go"}})
+    for event in ("SessionStart", "UserPromptSubmit", "PreToolUse"):
+        record(wired, "claude", main_hook(wired, event, transcript), CLAUDE_E2E)
+    assert "model" not in ai.load_record(SESSION_HASH, wired)
+    # The reply that runs the Bash call lands before its git hooks run.
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(reply(OPUS)) + "\n")
+    stage(wired, "a.txt")
+    done = git_commit(wired, "feat: a", CLAUDE_E2E)
+    assert done.returncode == 0, done.stderr
+    (line,) = trailers(wired)
+    assert f";model=anthropic:{OPUS};" in line
+
+
+def switch_then_turn(wired: Path, transcript: Path) -> None:
+    """The measured /model sequence: a switch, then a turn the transcript trails."""
+    write_transcript(transcript, reply(OPUS))
+    record(wired, "claude", main_hook(wired, "SessionStart", transcript), CLAUDE_E2E)
+    for event in ("PreModelSwitch", "PostModelSwitch"):
+        data = main_hook(wired, event, transcript, from_model=OPUS, to_model=SONNET)
+        record(wired, "claude", data, CLAUDE_E2E)
+    for event in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse"):
+        record(wired, "claude", main_hook(wired, event, transcript), CLAUDE_E2E)
+
+
+@needs_prek
+def test_e2e_a_commit_after_a_model_switch_gets_the_new_model(wired: Path) -> None:
+    transcript = wired.parent / "session.jsonl"
+    switch_then_turn(wired, transcript)
+    assert ai.transcript_model(str(transcript)) == OPUS
+    stage(wired, "a.txt")
+    done = git_commit(wired, "feat: a", CLAUDE_E2E)
+    assert done.returncode == 0, done.stderr
+    (line,) = trailers(wired)
+    assert f";model=anthropic:{SONNET};" in line
+
+
+@needs_prek
+def test_e2e_a_reply_newer_than_the_switch_wins(wired: Path) -> None:
+    transcript = wired.parent / "session.jsonl"
+    switch_then_turn(wired, transcript)
+    later = datetime.fromtimestamp(time.time() + 60, UTC).isoformat()
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(reply(HAIKU, later)) + "\n")
+    stage(wired, "a.txt")
+    done = git_commit(wired, "feat: a", CLAUDE_E2E)
+    assert done.returncode == 0, done.stderr
+    (line,) = trailers(wired)
+    assert f";model=anthropic:{HAIKU};" in line
+
+
+@needs_prek
+def test_e2e_a_commit_without_any_model_fails(wired: Path) -> None:
+    transcript = wired.parent / "session.jsonl"
+    write_transcript(transcript, {"type": "user", "message": {"content": "go"}})
+    record(wired, "claude", main_hook(wired, "SessionStart", transcript), CLAUDE_E2E)
+    stage(wired, "a.txt")
+    done = git_commit(wired, "feat: a", CLAUDE_E2E)
+    assert done.returncode != 0
+    assert ": model required" in done.stderr
+    assert run_git(wired, "log", "-1", "--format=%s") == "init\n"
+
+
+def session_file(store: Path) -> Path:
+    return store / "sessions" / f"{ai.hx(SESSION_HASH)}.json"
+
+
+def test_load_record_takes_the_latest_switch_as_a_pair(
+    repo: Path, tmp_path: Path
+) -> None:
+    tree = add_worktree(repo, tmp_path / "wt")
+    user = ai.user_store() / f"{ai.hx(SESSION_HASH)}.json"
+    ai.write_json(user, {"switch_model": "u", "switch_at": 5.0, "version": "u"})
+    ai.write_json(
+        session_file(repo / ".git" / "tbhb-alpha"),
+        {"switch_model": "main", "switch_at": 9.0, "version": "main"},
+    )
+    own = session_file(repo / ".git" / "worktrees" / "wt" / "tbhb-alpha")
+    ai.write_json(own, {"switch_model": "own", "switch_at": 7.0, "version": "own"})
+    # Other fields: the committing worktree wins. The switch: the latest wins.
+    assert ai.load_record(SESSION_HASH, tree) == {
+        "switch_model": "main",
+        "switch_at": 9.0,
+        "version": "own",
+    }
+    # A switch time that isn't a float is not a switch.
+    ai.write_json(own, {"switch_model": "own", "switch_at": 99, "version": "own"})
+    got = ai.load_record(SESSION_HASH, tree)
+    assert (got["switch_model"], got["switch_at"]) == ("main", 9.0)
+    # The user's store can hold the latest switch too, and a tie keeps the first.
+    # "a" sorts before "main", so a tie is never settled by the model name.
+    ai.write_json(user, {"switch_model": "a", "switch_at": 9.0})
+    got = ai.load_record(SESSION_HASH, tree)
+    assert (got["switch_model"], got["switch_at"]) == ("a", 9.0)
+    ai.write_json(user, {"switch_model": "u", "switch_at": 10.0})
+    got = ai.load_record(SESSION_HASH, tree)
+    assert (got["switch_model"], got["switch_at"]) == ("u", 10.0)
+
+
+def test_load_record_without_a_switch_adds_none(repo: Path) -> None:
+    ai.write_record(SESSION_HASH, {"version": "1"}, repo)
+    assert ai.load_record(SESSION_HASH, repo) == {"version": "1"}
+    assert ai.load_record(OTHER, repo) == {}
+
+
+def test_a_newer_switch_in_another_worktree_wins(repo: Path, tmp_path: Path) -> None:
+    """Switch to A in W1, to B in W2, commit from W1: the commit gets B."""
+    tree = add_worktree(repo, tmp_path / "wt")
+    transcript = write_transcript(tmp_path / "t.jsonl", reply(OPUS))
+    for where, model in ((repo, HAIKU), (tree, SONNET)):
+        data = {
+            **switch_data(repo, model),
+            "cwd": str(where),
+            "transcript_path": str(transcript),
+        }
+        ai.handle_claude(data, CLAUDE_HOOK_ENV)
+    assert (
+        ai.read_record(session_file(repo / ".git" / "tbhb-alpha"))["switch_model"]
+        == HAIKU
+    )
+    got = ai.committer_identity(CLAUDE_COMMIT_ENV, [])
+    assert got is not None
+    assert got.ident.model == "anthropic:" + SONNET
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected"),
+    [(EARLIER, OPUS), ("not a time", SONNET)],
+    ids=["tie-goes-to-the-transcript", "unreadable-time-lets-the-switch-win"],
+)
+def test_a_commit_compares_the_switch_with_the_transcript_time(
+    repo: Path, timestamp: str, expected: str
+) -> None:
+    transcript = write_transcript(repo / "t.jsonl", reply(OPUS, timestamp))
+    ai.write_record(
+        SESSION_HASH,
+        {
+            "transcript": str(transcript),
+            "switch_model": SONNET,
+            "switch_at": EARLIER_TS,
+        },
+        repo,
+    )
+    got = ai.committer_identity(CLAUDE_COMMIT_ENV, [])
+    assert got is not None
+    assert got.ident.model == "anthropic:" + expected

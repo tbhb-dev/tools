@@ -952,7 +952,7 @@ AGENT = {
     "CLAUDE_EFFORT": "high",
 }
 POSTING = (
-    "LLM effort=high;harness=claude-code:2.1.0;"
+    "LLM effort=high;harness=claude-code:2.1.0;model=anthropic:claude-opus-5-5;"
     f"session={agent_identity.sha256_64('raw-session')};surface=cli"
 )
 
@@ -961,9 +961,22 @@ def no_ancestry(*_args: object, **_kwargs: object) -> list[str]:
     return []
 
 
+def seed_session(world: World, model: str | None = "claude-opus-5-5") -> None:
+    """The posting session's record, with a transcript that has one reply."""
+    transcript = world.root.parent / "session.jsonl"
+    message = {"model": model} if model else {"content": "x"}
+    transcript.write_text(json.dumps({"message": message}) + "\n")
+    agent_identity.write_record(
+        agent_identity.sha256_64("raw-session"),
+        {"transcript": str(transcript)},
+        world.root,
+    )
+
+
 @pytest.fixture
-def agent(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+def agent(world: World, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     monkeypatch.setattr(agent_identity, "ancestry", no_ancestry)
+    seed_session(world)
     return AGENT
 
 
@@ -1057,6 +1070,58 @@ def test_posting_agent_already_on_the_branch_is_not_repeated(
     world.commit(f"one\n\nGenerated-by: {POSTING}")
     got = pr.description(checked_for(), agent)
     assert got.endswith(f"v\n\nGenerated-by: {POSTING}\n")
+
+
+def test_a_resolved_posting_value_is_one_line_with_its_commit_trailer(
+    world: World, agent: dict[str, str]
+) -> None:
+    """The session's posting value has model=, so it matches its own commit."""
+    assert "model=anthropic:claude-opus-5-5" in POSTING
+    world.git("switch", "-q", "-c", "topic")
+    world.commit(f"one\n\nGenerated-by: {POSTING}")
+    got = pr.description(checked_for(), agent)
+    session = f"session={agent_identity.sha256_64('raw-session')}"
+    lines = [line for line in got.splitlines() if session in line]
+    assert lines == [f"Generated-by: {POSTING}"]
+    assert "Assisted-by" not in got
+    assert pr.posting_value(agent) == POSTING
+
+
+def test_the_posting_session_dedupes_against_its_commit_trailer(
+    world: World, agent: dict[str, str]
+) -> None:
+    """Regression: a posting value without model= added a second line."""
+    write_draft(world)
+    world.git("switch", "-q", "-c", "topic")
+    # The trailer the session's commit got, from the same commit-time source.
+    committed = agent_identity.committer_identity(agent, [])
+    assert committed is not None
+    trailer = agent_identity.format_value(committed.ident.attrs())
+    assert "model=anthropic:claude-opus-5-5" in trailer
+    world.commit(f"one\n\nGenerated-by: {trailer}")
+    assert pr.posting_value(agent) == trailer
+    merged = pr.merge_trailers(pr.branch_trailers("main"), pr.posting_value(agent))
+    assert merged == [("Generated-by", trailer)]
+    assert run_main("create", env=agent) == 0
+    (call,) = world.calls("gh")
+    session = f"session={agent_identity.sha256_64('raw-session')}"
+    lines = [line for line in str(call["stdin"]).splitlines() if session in line]
+    assert lines == [f"Generated-by: {trailer}"]
+
+
+@pytest.mark.parametrize("argv", [["create"], ["edit", "--pr", "7"]])
+def test_an_unresolved_posting_model_fails_without_posting(
+    world: World, agent: dict[str, str], argv: list[str]
+) -> None:
+    write_draft(world)
+    seed_session(world, None)
+    world.git("switch", "-q", "-c", "topic")
+    world.commit(f"one\n\nGenerated-by: {GEN}")
+    posting = POSTING.replace("model=anthropic:claude-opus-5-5;", "")
+    with pytest.raises(SystemExit) as info:
+        run_main(*argv, env=agent)
+    assert info.value.code == f"invalid LLM trailer: {posting}: model required"
+    assert world.calls("gh") == []
 
 
 def test_description_uses_the_frontmatter_base(world: World) -> None:
@@ -1391,6 +1456,71 @@ def test_posting_agent_is_added_to_an_empty_branch(
     world.git("switch", "-q", "-c", "topic")
     got = pr.description(checked_for(), agent)
     assert got.endswith(f"v\n\nAssisted-by: {POSTING}\n")
+
+
+def test_a_posting_value_without_a_model_is_rejected(
+    world: World, agent: dict[str, str]
+) -> None:
+    seed_session(world, None)
+    world.git("switch", "-q", "-c", "topic")
+    world.commit(f"one\n\nGenerated-by: {GEN}")
+    posting = POSTING.replace("model=anthropic:claude-opus-5-5;", "")
+    assert pr.posting_value(agent) == posting
+    with pytest.raises(SystemExit) as info:
+        pr.description(checked_for(), agent)
+    assert str(info.value) == f"invalid LLM trailer: {posting}: model required"
+
+
+def test_a_bad_branch_trailer_and_posting_value_are_both_listed(
+    world: World, agent: dict[str, str]
+) -> None:
+    seed_session(world, None)
+    world.git("switch", "-q", "-c", "topic")
+    world.commit("one\n\nGenerated-by: LLM harness=nope")
+    posting = POSTING.replace("model=anthropic:claude-opus-5-5;", "")
+    with pytest.raises(SystemExit) as info:
+        pr.description(checked_for(), agent)
+    assert str(info.value) == (
+        "invalid LLM trailer: LLM harness=nope: unknown harness nope; "
+        f"{posting}: model required"
+    )
+
+
+@pytest.mark.parametrize("missing", [pr.SCHEMA, pr.SECTIONS])
+@pytest.mark.parametrize(
+    "argv", [["check"], ["create", "--dry-run"], ["edit", "--pr", "3"]]
+)
+def test_a_missing_baseline_file_names_it(
+    world: World, missing: Path, argv: list[str]
+) -> None:
+    write_draft(world)
+    (world.root / missing).rename(world.root.parent / missing.name)
+    with pytest.raises(SystemExit) as info:
+        run_main(*argv)
+    assert info.value.code == (
+        f"{missing} is missing: this repository needs the shared baseline"
+        " from tbhb-dev/rules"
+    )
+
+
+def test_a_missing_baseline_file_exits_without_a_traceback(world: World) -> None:
+    write_draft(world)
+    (world.root / pr.SECTIONS).rename(world.root.parent / "sections.toml")
+    env = {**os.environ, "PYTHONPATH": pythonpath(SRC)}
+    env.pop("MUTANT_UNDER_TEST", None)
+    done = subprocess.run(
+        [sys.executable, "-m", "tbhbdev", "alpha", "pr", "check"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=world.root,
+        env=env,
+    )
+    assert (done.returncode, done.stdout) == (1, "")
+    assert done.stderr == (
+        f"{pr.SECTIONS} is missing: this repository needs the shared baseline"
+        " from tbhb-dev/rules\n"
+    )
 
 
 def test_every_invalid_trailer_is_listed(world: World) -> None:
