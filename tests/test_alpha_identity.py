@@ -616,12 +616,17 @@ def test_command_candidates_recover_eval_operand(parts: list[str]) -> None:
 
 
 @given(st.text(max_size=40))
-def test_cmd_hashes_cover_trimmed_form(cmd: str) -> None:
+def test_cmd_hashes_cover_trimmed_and_flat_forms(cmd: str) -> None:
     got = ai.cmd_hashes(cmd)
-    assert got == sorted(set(got))
-    assert hashlib.sha256(cmd.encode()).hexdigest() in got
-    assert hashlib.sha256(cmd.strip().encode()).hexdigest() in got
-    assert len(got) == (1 if cmd == cmd.strip() else 2)
+    forms = {cmd, cmd.strip(), ai.flat(cmd), ai.flat(cmd).strip()}
+    assert got == sorted(hashlib.sha256(f.encode()).hexdigest() for f in forms)
+
+
+def test_flat_turns_control_characters_and_their_escapes_into_spaces() -> None:
+    assert ai.flat("a\nb\tc\x00d\x1fe\x7ff") == "a b c d e f"
+    assert ai.flat(r"a\012b\011c\000d\037e\177f") == "a b c d e f"
+    assert ai.flat(r"a\040b\08c\400d\12e") == r"a\040b\08c\400d\12e"
+    assert ai.flat("a b~") == "a b~"
 
 
 def test_command_candidates_from_real_shape() -> None:
@@ -972,6 +977,19 @@ def test_match_command_agent_window_and_defaults(
     assert ai.match_command_agent(ROOT, [line], repo) == (None, False)
     monkeypatch.chdir(plain)
     assert ai.match_command_agent(ROOT, [line]) == (None, False)
+
+
+def test_a_multi_line_command_matches_the_ps_line_on_macos_and_linux(
+    repo: Path,
+) -> None:
+    cmd = "cd x &&\n\tgit commit -m 'a b'\n"
+    ai.record_command(ROOT, CHILD, cmd, repo)
+    quoted = cmd.replace("'", "'\\''")
+    macos = quoted.replace("\n", r"\012").replace("\t", r"\011")
+    linux = quoted.replace("\n", " ").replace("\t", " ")
+    for shown in (macos, linux):
+        line = f"/bin/zsh -c source s.sh && eval '{shown}' < /dev/null && pwd -P"
+        assert ai.match_command_agent(ROOT, [line], repo) == (CHILD, False)
 
 
 def test_a_commit_in_another_clone_finds_the_agent(repo: Path, tmp_path: Path) -> None:
@@ -4000,6 +4018,45 @@ def test_claude_events_follow_the_hook_cwd_not_the_process_cwd(
     ai.handle_claude(done, CLAUDE_HOOK_ENV)
     assert isinstance(pending(repo)[0]["done"], float)
     assert plain.is_dir()
+
+
+# PostToolUse tool_response for a Bash call moved to the background, as
+# Claude Code 2.1.318 sends it: with run_in_background, and past its timeout.
+MOVED_TO_BACKGROUND = (
+    {
+        "stdout": "",
+        "stderr": "",
+        "interrupted": False,
+        "isImage": False,
+        "noOutputExpected": False,
+        "backgroundTaskId": "b1234567",
+    },
+    {
+        "stdout": "",
+        "stderr": "",
+        "interrupted": False,
+        "isImage": False,
+        "noOutputExpected": False,
+        "backgroundTaskId": "b7654321",
+        "timedOutAfterMs": 3000,
+    },
+)
+
+
+@pytest.mark.parametrize("response", MOVED_TO_BACKGROUND)
+def test_a_command_moved_to_the_background_stays_pending(
+    repo: Path, response: Json
+) -> None:
+    child = claude_data(repo, "claude-pretooluse-bash-child.json")
+    ai.handle_claude(child, CLAUDE_HOOK_ENV)
+    post = {**child, "hook_event_name": "PostToolUse", "tool_response": response}
+    ai.handle_claude(post, CLAUDE_HOOK_ENV)
+    assert [rec["done"] for rec in pending(repo)] == [None]
+    line = "sh -c eval 'cd x && git commit -m m'"
+    assert ai.match_command_agent(SESSION_HASH, [line], repo) == (AGENT, False)
+    finished = {**post, "tool_response": {**response, "backgroundTaskId": ""}}
+    ai.handle_claude(finished, CLAUDE_HOOK_ENV)
+    assert isinstance(pending(repo)[0]["done"], float)
 
 
 def test_claude_main_events_follow_the_hook_cwd(repo: Path, plain: Path) -> None:
