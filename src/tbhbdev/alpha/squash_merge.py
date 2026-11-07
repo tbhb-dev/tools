@@ -76,6 +76,8 @@ FAILED_CONCLUSIONS = frozenset(
 FAILED_STATES = frozenset({"FAILURE", "ERROR"})
 TOKEN = re.compile(r"(?:(`+).+?\1|\S)+")
 ITEM = re.compile(r"( *)([-*+]|\d+[.)]) +(\S.*)")
+# A table's delimiter row, such as ``|---|:--:|`` or ``--- | ---``.
+DELIMITER = re.compile(r"\|?(?: *:?-+:? *\|)* *:?-+:? *\|?")
 MD_LINK = re.compile(r"(!?)\[([^\]]*)\]\(([^)\s]+)(?: +\"[^\"]*\")?\)")
 AUTOLINK = re.compile(r"<(https?://[^>\s]+)>")
 STRONG = re.compile(r"(\*\*|__)(?=\S)(.+?)(?<=\S)\1")
@@ -235,9 +237,8 @@ class Renderer:
         else:
             self.blocks.append(row)
 
-    def feed(self, line: pr.Line) -> None:
-        """Take the next line of the section."""
-        row = self.code is None and line.text.strip().startswith("|")
+    def feed(self, line: pr.Line, row: bool) -> None:  # noqa: FBT001
+        """Take the next line of the section; ``row`` marks a table row."""
         if row:
             self.feed_row(line.text.strip())
         else:
@@ -268,11 +269,33 @@ class Renderer:
             self.pending.parts.append(line.text.strip())
 
 
+def table_rows(lines: Sequence[pr.Line]) -> list[bool]:
+    """Flag each line that is a row of a Markdown table.
+
+    A table is a ``|`` header row, then a delimiter row such as ``|---|``,
+    then the ``|`` body rows up to the first other line. Any other line that
+    starts with ``|`` is prose. Lines inside a fence have no text, so they are
+    never rows.
+    """
+    texts = [line.text.strip() for line in lines]
+    rows = [False] * len(texts)
+    for index, text in enumerate(texts):
+        if not text.startswith("|"):
+            continue
+        # At index 0, rows[-1] is still False: no later line is flagged yet.
+        if rows[index - 1]:
+            rows[index] = True
+        elif index + 1 < len(texts) and DELIMITER.fullmatch(texts[index + 1]):
+            rows[index] = rows[index + 1] = True
+    return rows
+
+
 def render(lines: Sequence[pr.Line], refs: dict[str, int]) -> list[str]:
     """Render section lines as blocks of plain text, one string per block."""
     renderer = Renderer(refs, [])
-    for line in lines:
-        renderer.feed(line)
+    rows = table_rows(lines)
+    for index, line in enumerate(lines):
+        renderer.feed(line, rows[index])
     renderer.flush()
     return renderer.blocks
 
