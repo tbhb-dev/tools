@@ -974,6 +974,66 @@ def test_match_command_agent_window_and_defaults(
     assert ai.match_command_agent(ROOT, [line]) == (None, False)
 
 
+def test_a_commit_in_another_clone_finds_the_agent(repo: Path, tmp_path: Path) -> None:
+    line = "sh -c eval 'git commit -m x'"
+    other = init_repo(tmp_path / "other")
+    ai.record_command(ROOT, CHILD, "git commit -m x", repo)
+    assert ai.match_command_agent(ROOT, [line], other) == (CHILD, False)
+    ai.finish_command(ROOT, "git commit -m x", CHILD, repo)
+    assert ai.match_command_agent(ROOT, [line], other) == (None, False)
+    assert not (other / ".git" / "tbhb-alpha").exists()
+
+
+def test_the_user_store_keeps_commands_private(repo: Path) -> None:
+    old = os.umask(0)
+    try:
+        ai.record_command(ROOT, CHILD, "ls", repo)
+        user = ai.user_store()
+        assert "cmds" in {child.name for child in user.iterdir()}
+        (path,) = (user / "cmds" / ("a" * 16)).glob("*.json")
+        assert stat.S_IMODE(user.stat().st_mode) == 0o700
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        (rec,) = pending(repo)
+        assert loaded(path) == rec
+        assert (
+            path.name
+            == next((repo / ".git" / "tbhb-alpha" / "cmds").rglob("*.json")).name
+        )
+        ai.finish_command(ROOT, "ls", CHILD, repo)
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert loaded(path)["done"] is not None
+
+
+def test_a_repository_store_it_cant_lock_still_finishes_the_user_copy(
+    repo: Path,
+) -> None:
+    ai.record_command(ROOT, CHILD, "ls", repo)
+    (repo / ".git" / "tbhb-alpha" / "lock").mkdir()
+    ai.finish_command(ROOT, "ls", CHILD, repo)
+    (rec,) = pending(repo)
+    assert rec["done"] is None
+    (path,) = (ai.user_store() / "cmds" / ("a" * 16)).glob("*.json")
+    assert loaded(path)["done"] is not None
+
+
+def test_a_user_store_it_cant_write_keeps_the_command_records(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ai.user_store().parent.mkdir(parents=True)
+    ai.user_store().write_text("not a directory")
+    ai.record_command(ROOT, CHILD, "ls", repo)
+    monkeypatch.chdir(tmp_path)
+    assert ai.match_command_agent(ROOT, ["sh -c eval 'ls'"], repo) == (CHILD, False)
+    ai.finish_command(ROOT, "ls", CHILD, repo)
+    (rec,) = pending(repo)
+    assert rec["agent"] == CHILD
+    assert rec["done"] is not None
+    assert ai.user_store().read_text() == "not a directory"
+
+
 def time_of(repo: Path) -> float:
     (path,) = (repo / ".git" / "tbhb-alpha" / "cmds" / ("a" * 16)).glob("*.json")
     return float(cast("float", loaded(path)["ts"]))
@@ -1007,7 +1067,7 @@ def test_record_command_ignores_nonstrings_and_missing_repos(
 def test_finish_command_marks_only_the_newest_match(
     repo: Path, plain: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    clock = iter([100.0, 200.0, 300.0, 400.0, 500.0, 600.0])
+    clock = itertools.count(100.0, 100.0)
     monkeypatch.setattr(ai.time, "time", lambda: next(clock))
     ai.record_command(ROOT, CHILD, "ls", repo)  # ts 100
     ai.record_command(ROOT, CHILD, "ls", repo)  # ts 200
