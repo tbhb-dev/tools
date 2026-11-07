@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   renovate:
-    uses: tbhb-dev/renovate-config/.github/workflows/renovate.yaml@3dc999ec98ebbb56f94b281c73b7cf54ecd0509a  # main
+    uses: tbhb-dev/renovate-config/.github/workflows/renovate.yaml@a475723d9575aa4300f46570c7a9faf0092a252b  # main
     with:
       # Public repositories run on GitHub's hosted runners.
       runs_on: ubuntu-26.04
