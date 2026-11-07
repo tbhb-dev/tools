@@ -3595,6 +3595,18 @@ def test_ident_problems_accepts_other_sign_offs(
     assert ai.ident_problems(f"feat: a\n\n{line}\n", {"CODEX_SESSION_ID": "s"}) == []
 
 
+def test_cmd_check_reads_the_signoff_from_the_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(ai, "git", agent_git)
+    msg = tmp_path / "msg"
+    msg.write_text(f"feat: a\n\nSigned-off-by: {NOREPLY}\n")
+    assert ai.cmd_check(str(msg), {"CODEX_SESSION_ID": "s"}) == 1
+    assert f"Signed-off-by is {NOREPLY!r}" in capsys.readouterr().err
+
+
 CODEX_E2E = {"CODEX_SESSION_ID": ROOT_THREAD, "CODEX_VERSION": "0.166.0"}
 
 
