@@ -730,9 +730,9 @@ def on_host(host: Host, script: str, stdin: str | None = None) -> Done:
     return _over(host, ["sudo", "-n", "-u", AGENT, "-H", "sh", "-c", script], stdin)
 
 
-def as_ops(host: Host, script: str, stdin: str | None = None) -> Done:
+def as_ops(host: Host, script: str) -> Done:
     """Run SCRIPT as the ops account, the user ssh connects as, on HOST."""
-    return _over(host, ["sh", "-c", script], stdin)
+    return _over(host, ["sh", "-c", script])
 
 
 def as_owner(host: Host, script: str, stdin: str | None = None) -> Done:

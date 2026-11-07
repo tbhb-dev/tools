@@ -365,6 +365,14 @@ def test_as_owner_runs_sh_as_the_owner_through_ops(stubs: Stubs) -> None:
     assert stubs.argvs("ssh") == [[*SSH_OPS, "host-a", remote]]
 
 
+@pytest.mark.usefixtures("configured")
+def test_as_ops_runs_sh_as_the_ssh_user(stubs: Stubs) -> None:
+    there = host_tool.Host("host-a", "macOS", local=False)
+    done = host_tool.as_ops(there, 'echo "$HOME"')
+    assert done.stdout == f"{stubs.dir / 'homes' / 'host-a' / OPS}\n"
+    assert stubs.argvs("ssh") == [[*SSH_OPS, "host-a", "sh -c 'echo \"$HOME\"'"]]
+
+
 def test_list_names_hosts_by_their_dns_name(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
