@@ -122,6 +122,8 @@ SURFACE_VALUE = re.compile(r"[^\s;,=]+")
 HASH_RE = re.compile(r"sha-256-64:[0-9a-f]{16}")
 CODEX_MODEL = re.compile(r"(gpt-|o\d|codex-)")
 THREAD_ID = re.compile(r"[0-9a-fA-F-]{8,64}")
+# A control character, or the octal escape macOS ps writes for one.
+CONTROL = re.compile(r"\\(?:0[0-3][0-7]|177)|[\x00-\x1f\x7f]")
 
 # Only used by the optional rewrite path, which stays off unless
 # ASCM_AGENT_REWRITE=1 is set at hook time (it costs a permission prompt).
@@ -643,9 +645,19 @@ def record_child(data: Json, effort: str | None) -> str:
     return agent
 
 
+def flat(cmd: str) -> str:
+    r"""A command with each control character, or ps's octal escape of one, as a space.
+
+    ps shows a multi-line command differently by platform: macOS writes a
+    newline as ``\012`` and Linux writes it as a space. Both reduce to this.
+    """
+    return CONTROL.sub(" ", cmd)
+
+
 def cmd_hashes(cmd: str) -> list[str]:
-    """SHA-256 of a command as given and stripped (the harness may trim it)."""
-    return sorted({hashlib.sha256(c.encode()).hexdigest() for c in (cmd, cmd.strip())})
+    """SHA-256 of a command as given, stripped (the harness may trim it) and flat."""
+    forms = (cmd, cmd.strip(), flat(cmd), flat(cmd).strip())
+    return sorted({hashlib.sha256(c.encode()).hexdigest() for c in forms})
 
 
 def rec_ts(rec: Json) -> float:
@@ -951,7 +963,11 @@ def handle_claude_bash(
             if out:
                 print(json.dumps(out))
         return
-    finish_command(root, cmd, agent, cwd)
+    response = data.get("tool_response")
+    # A command moved to the background (run_in_background, or past its
+    # timeout) is still running, and no later event says when it ends.
+    if not (isinstance(response, dict) and response.get("backgroundTaskId")):
+        finish_command(root, cmd, agent, cwd)
     if event == "PostToolUse":
         paths = edit_paths_from_bash(data.get("tool_response"))
         if paths:
