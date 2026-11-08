@@ -168,6 +168,7 @@ CMD_WINDOW = 2 * 3600
 ANCESTRY_LIMIT = 16
 CLAUDE_TAIL = 256 * 1024
 CODEX_TAIL = 1024 * 1024
+CODEX_HEAD = 1024 * 1024
 CODEX_MAX_AGE = 3 * 86400
 
 # Antigravity model keys -> (provider, canonical model id, effort).
@@ -1182,12 +1183,26 @@ def codex_rollout(thread_id: str, env: Mapping[str, str]) -> Path | None:
 
 
 def rollout_turn_context(path: Path) -> tuple[str | None, str | None]:
-    """(model, effort) from the latest ``turn_context`` record in the rollout tail."""
+    """(model, effort) from the tail, falling back to the first turn context."""
     for line in reversed(read_tail(path, CODEX_TAIL) or []):
         record = parse_line(line) or {}
         payload = as_dict(record.get("payload"))
         if record.get("type") == "turn_context" and payload is not None:
             return as_str(payload.get("model")), as_str(payload.get("effort"))
+    try:
+        with path.open("rb") as handle:
+            remaining = CODEX_HEAD
+            while remaining:
+                raw = handle.readline(remaining)
+                if not raw:
+                    break
+                remaining -= len(raw)
+                record = parse_line(raw.decode(errors="replace")) or {}
+                payload = as_dict(record.get("payload"))
+                if record.get("type") == "turn_context" and payload is not None:
+                    return as_str(payload.get("model")), as_str(payload.get("effort"))
+    except OSError:
+        pass
     return None, None
 
 
