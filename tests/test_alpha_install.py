@@ -173,12 +173,16 @@ def test_every_command_is_marked_and_runs_tbhbdev_alpha_from_path() -> None:
 
 def test_claude_hooks() -> None:
     record = {"type": "command", "command": marked("identity record claude")}
+    guard = {"type": "command", "command": marked("state-guard"), "timeout": 10}
+    context = {"type": "command", "command": marked("session-context"), "timeout": 10}
     assert install.claude_hooks() == {
         "SessionStart": [
             {
                 "hooks": [
                     {"type": "command", "command": marked("install --hook")},
                     record,
+                    guard,
+                    context,
                 ]
             }
         ],
@@ -189,7 +193,9 @@ def test_claude_hooks() -> None:
                 "matcher": "Bash",
                 "hooks": [{"type": "command", "command": marked("guard-gh-pr")}],
             },
+            {"matcher": "Bash|SendMessage|Write|Edit", "hooks": [guard]},
         ],
+        "Stop": [{"hooks": [guard]}],
         "PostToolUse": [
             {"matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash", "hooks": [record]},
             {
@@ -200,6 +206,25 @@ def test_claude_hooks() -> None:
         "PostToolUseFailure": [{"matcher": "Bash", "hooks": [record]}],
         "PostModelSwitch": [{"hooks": [record]}],
     }
+
+
+def test_the_harness_guards_are_ours_and_a_rerun_replaces_them() -> None:
+    desired = install.claude_hooks()
+    theirs = {"type": "command", "command": "theirs"}
+    old: Json = {"hooks": {"Stop": [{"hooks": [theirs]}]}}
+    once = install.merge_events(old, desired)
+    assert install.merge_events(once, desired) == once
+    events = cast("dict[str, list[Json]]", once["hooks"])
+    assert events["Stop"] == [{"hooks": [theirs]}, *desired["Stop"]]
+    guards = [
+        h
+        for groups in events.values()
+        for g in groups
+        for h in cast("list[Json]", g["hooks"])
+        if cast("str", h["command"]).startswith("tbhbdev alpha state-guard")
+    ]
+    assert len(guards) == 3
+    assert all(install.ours(h) and h["timeout"] == 10 for h in guards)
 
 
 def test_codex_hooks() -> None:
@@ -604,7 +629,10 @@ def test_install_config_keeps_the_users_settings_and_backs_up(
     assert json.loads(backup.read_text()) == old
     assert json.loads(path.read_text()) == {
         "model": "opus",
-        "hooks": {"Stop": [{"hooks": [THEIRS]}], **install.claude_hooks()},
+        "hooks": {
+            **install.claude_hooks(),
+            "Stop": [{"hooks": [THEIRS]}, *install.claude_hooks()["Stop"]],
+        },
     }
 
 

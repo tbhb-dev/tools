@@ -238,3 +238,38 @@ def test_help_works_without_the_file(
     assert not config_file.exists()
     assert cli.main(argv) == 0
     assert "usage:" in capsys.readouterr().out
+
+
+def test_the_optional_readers_return_none_without_a_file_table_or_key(
+    config_file: Path,
+) -> None:
+    assert userconfig.optional_table("harness") is None
+    assert userconfig.optional_string("harness", "rule") is None
+    assert userconfig.optional_strings("harness", "hosts") is None
+    config_file.write_text("[other]\nkey = 'x'\n")
+    assert userconfig.optional_table("harness") is None
+    assert userconfig.optional_string("harness", "rule") is None
+    assert userconfig.optional_strings("harness", "hosts") is None
+    config_file.write_text("[harness]\nother = 'x'\n")
+    assert userconfig.optional_table("harness") == {"other": "x"}
+    assert userconfig.optional_string("harness", "rule") is None
+    assert userconfig.optional_strings("harness", "hosts") is None
+
+
+def test_the_optional_readers_return_a_value_the_file_sets(config_file: Path) -> None:
+    config_file.write_text("[harness]\nrule = 'r'\nhosts = ['a=b', 'c']\n")
+    assert userconfig.optional_string("harness", "rule") == "r"
+    assert userconfig.optional_strings("harness", "hosts") == ["a=b", "c"]
+
+
+def test_the_optional_readers_reject_a_bad_value_and_a_bad_table(
+    config_file: Path,
+) -> None:
+    config_file.write_text("[harness]\nrule = ''\nhosts = [1]\n")
+    with pytest.raises(userconfig.ConfigError, match=r"\[harness\] rule must be"):
+        userconfig.optional_string("harness", "rule")
+    with pytest.raises(userconfig.ConfigError, match=r"\[harness\] hosts must be"):
+        userconfig.optional_strings("harness", "hosts")
+    config_file.write_text("harness = 'x'\n")
+    with pytest.raises(userconfig.ConfigError, match="harness must be a table"):
+        userconfig.optional_string("harness", "rule")

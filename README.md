@@ -101,6 +101,8 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 
 - `identity` records which agent and model made each edit and writes the `Generated-by` trailers.
 - `guard-gh-pr` is a PreToolUse hook that blocks `gh pr create`, `gh pr edit` and `gh pr merge`.
+- `state-guard` is a Claude Code hook that blocks a status claim with no evidence in a SendMessage call or a final reply, and a `git commit` that adds a sign-off or co-author trailer.
+- `session-context` is a Claude Code SessionStart hook that reports the host, its role, the other hosts, and the local time.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
 - `merge` squash-merges an approved pull request.
 - `install` installs the git hooks and the user-level harness hooks.
@@ -112,7 +114,21 @@ Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev reposi
 
 Each hook command it writes ends in `# tbhbdev alpha install`. A rerun replaces only those entries, and keeps everything else in place. Before it changes a config, it saves the old one beside it as `<name>.tbhbdev-backup.<time>`. `--dry-run` prints the changes without writing them, and `--harness claude|codex|antigravity` limits the merge to one harness. Codex asks you to trust new hooks with `/hooks`.
 
-The hooks are user level, and the harness runs them in every repository. Each one first checks that the repository's `origin` is a tbhb-dev repository on GitHub, and does nothing otherwise. The one exception is the record hook run outside any repository, which writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Claude Code's SessionStart hook runs `tbhbdev alpha install --hook`, which reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
+For Claude Code it also installs `state-guard` (PreToolUse for Bash, SendMessage, Write and Edit, plus Stop and SessionStart) and `session-context` (SessionStart), each with a 10 second timeout. Their private values come from an optional `[harness]` table in the user config, and a missing table or key turns off the check that needs it, never blocks:
+
+```toml
+[harness]
+rule = "Example rule: a status claim carries its evidence."   # SessionStart text
+decisions_dir = "/example/decisions"   # the path the open-note block names
+open_note = "/example/Open.md"         # a path suffix; a new item needs "Decisions checked:"
+hosts = ["example-a=peer Mac", "example-b=Linux VM", "example-c"]   # "name=role"
+```
+
+Commit and claim checks run without config. For commits, the command guard checks arguments for trailers and sign-off flags. Message bodies in here documents or `-F` files pass this guard. The commit-msg identity check catches trailers in those bodies.
+
+Evidence can be a `#N` reference or a commit hash of 7 to 40 hex characters. Hashes must contain a digit and a letter from a to f. A log path or inline code can supply evidence as well, as can command output. Claims can attribute a result with `says` or `reports`, or mark it `unverified`.
+
+These user-level hooks run in every repository. Before acting, the identity, pull request, approval guard, and install hooks check that `origin` names a tbhb-dev repository on GitHub. Outside a repository, the identity record hook still writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Both `state-guard` and `session-context` run regardless of origin. At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, reinstalling the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, and each worktree has its own pull request draft, so sessions in two worktrees of one clone don't overwrite each other.
 
