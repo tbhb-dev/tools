@@ -1657,6 +1657,22 @@ def test_segment_kind_names_each_kind(segment: str, kind: str) -> None:
     assert ai.segment_kind(segment) == kind
 
 
+@pytest.mark.parametrize(
+    ("words", "verb"),
+    [
+        (["git", "--no-pager", "log"], "log"),
+        (["git", "-c", "a=b", "status"], "status"),
+        (["git", "-C", ".", "--no-pager", "diff"], "diff"),
+        (["git", "-C", "."], ""),
+        (["git", "-C"], ""),
+        (["git", "--no-pager"], ""),
+        (["git"], ""),
+    ],
+)
+def test_git_verb_skips_global_options(words: list[str], verb: str) -> None:
+    assert ai.git_verb(words) == verb
+
+
 def test_edit_tools_become_receipts(repo: Path) -> None:
     for name in ("a.txt", "b.ipynb", "c.txt"):
         (repo / name).write_text("x\n", encoding="utf-8")
