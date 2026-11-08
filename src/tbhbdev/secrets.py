@@ -93,7 +93,7 @@ def _linux_token() -> str:
     directories and later permission changes are outside these checks.
     """
     path = Path.home() / LINUX_TOKEN_FILE
-    fix = "run `tbhbdev host bootstrap` for this host"
+    fix = "have configuration management install it"
     try:
         directory = os.open(
             path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC

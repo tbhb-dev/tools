@@ -75,7 +75,7 @@ Tests set the `TBHBDEV_TEST_TOKEN` environment variable, and the library then us
 
 ## Agent hosts
 
-The maintainers froze `tbhbdev host` and are retiring it. On Linux, tbhbdev reads the token file. Configuration management is its only writer. Bootstrap, upgrade, and token installation refuse Linux hosts before any 1Password work. A Linux host without the file loses token access when this change merges.
+The maintainers froze `tbhbdev host` and are retiring it. On Linux, tbhbdev reads the token file. Configuration management is its only writer. Bootstrap, upgrade, grant, revoke, and token installation refuse Linux hosts before any 1Password work. A Linux host without the file loses token access when this change merges.
 
 `tbhbdev host` runs on the operator's Mac, which has 1Password Desktop and the `op` command-line tool. A tag marks the agent hosts on the tailnet. The config's `[agent] host_tag` names it. Each host gets a token for its own vault, `[vaults] host_prefix` followed by the host's name, and for `[vaults] all`, plus any the operator grants, stored in the `agent` account's keychain on that host. Every `op` call names the config's `[op] account`.
 

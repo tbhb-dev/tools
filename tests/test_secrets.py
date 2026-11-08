@@ -200,7 +200,7 @@ def test_token_strips_only_the_newline_security_adds(
     assert secrets.token() == value
 
 
-HINT = "run `tbhbdev host bootstrap` for this host"
+HINT = "have configuration management install it"
 
 
 @pytest.fixture
