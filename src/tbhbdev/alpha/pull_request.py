@@ -145,6 +145,7 @@ OPENED_MESSAGE = "the script writes Opened-by; remove this line"
 PR_URL = re.compile(r"https://[^/\s]+/([^/\s]+/[^/\s]+)/pull/(\d+)")
 REPO_LIMIT = 1000
 PR_LIMIT = 10000
+EDIT_DRAFT = "run `tbhbdev alpha pr edit --pr {number}` to apply the draft"
 BACKFILL_KEYS = re.compile(r"(?:Generated-by|Assisted-by|Opened-by):\s*(LLM\b.*)")
 SESSION_ATTR = re.compile(r"(?<![^\s;])session=(sha-256-64:[0-9a-f]{16})(?![^\s;])")
 LIST_ITEM = re.compile(r" *(?:[-*+]|\d+[.)]) +\S")
@@ -930,6 +931,53 @@ def invoke_gh(argv: list[str], body: str, *, dry_run: bool = False) -> tuple[int
     return done.returncode, done.stdout
 
 
+def create_pr(argv: list[str], body: str, root: str | None, *, dry_run: bool) -> int:
+    """Refuse an existing open PR, including a race reported by gh create."""
+    done = run([find_tool(GH), "pr", "view", "--json", "number,state,url"])
+    data = gh_data(done)
+    if isinstance(data, dict) and all(
+        type(data.get(key)) is kind
+        for key, kind in (("state", str), ("number", int), ("url", str))
+    ):
+        data = cast("dict[str, object]", data)  # pragma: no mutate
+        if data["state"] == "OPEN":
+            message = (
+                f"error: PR {data['number']} ({data['url']}) is already open; "
+                + EDIT_DRAFT.format(number=data["number"])
+            )
+            print(message, file=sys.stderr)
+            return 1
+    elif not (done.returncode and "no pull requests found" in done.stderr.lower()):
+        output = (done.stderr or done.stdout).rstrip("\n")
+        print(
+            f"cannot check for an open PR: {output}",
+            file=sys.stderr,
+        )
+        return 1
+    if dry_run:
+        return invoke_gh(argv, body, dry_run=True)[0]
+    argv[0] = find_tool(GH)
+    done = run(argv, stdin=body)
+    output = "\n".join(
+        filter(None, (done.stdout.rstrip("\n"), done.stderr.rstrip("\n")))
+    )
+    if done.returncode or "already exists" in output.lower():
+        print(output, file=sys.stderr)
+        if "already exists" in output.lower():
+            found = PR_URL.search(output)
+            number = found[2] if found else "<n>"
+            print(
+                "gh pr create failed; " + EDIT_DRAFT.format(number=number),
+                file=sys.stderr,
+            )
+        return 1
+    print(done.stdout, end="")
+    print(done.stderr, end="", file=sys.stderr)
+    if root is None:
+        return 0
+    return record_created(root, done.stdout)
+
+
 def record_created(root: str, stdout: str) -> int:
     """Add the PR that gh printed to the opener's ledger; the exit code.
 
@@ -1036,10 +1084,7 @@ def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
         body = description(checked, env, line)
         argv = [GH, "pr", "create", "--title", checked.title, "--body-file", "-"]
         argv += gh_args(checked.meta)
-        code, stdout = invoke_gh(argv, body, dry_run=args.dry_run)
-        if code or args.dry_run or root is None:
-            return code
-        return record_created(root, stdout)
+        return create_pr(argv, body, root, dry_run=args.dry_run)
     body = description(checked, env, live_opened_line(args.pr))
     argv = [
         GH,
