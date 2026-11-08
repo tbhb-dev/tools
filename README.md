@@ -26,7 +26,7 @@ uv tool install git+https://github.com/tbhb-dev/tools
 
 ## Config
 
-The values of one deployment come from the user config at `$XDG_CONFIG_HOME/tbhbdev/config.toml`, where `XDG_CONFIG_HOME` defaults to `.config` in the home directory. The package has no defaults for them, and no environment variable or plugin overrides them. When the file or a required key is missing, the command fails, and its error gives the file's path and the `[table] key`. Only the `[workspace]` table and `[gitleaks] session_sockets` are optional. `tbhbdev` reads the file only when a command first needs a value, so `--help` works without it.
+The values of one deployment come from the user config at `$XDG_CONFIG_HOME/tbhbdev/config.toml`, where `XDG_CONFIG_HOME` defaults to `.config` in the home directory. The package has no defaults for them, and no environment variable or plugin overrides them. When the file or a required key is missing, the command fails, and its error gives the file's path and the `[table] key`. Optional settings include the `[workspace]`, `[harness]`, and `[loop]` tables and `[gitleaks] session_sockets`. Calling `alpha loop` requires its settings in `[loop]`. `tbhbdev` reads the file only when a command first needs a value, so `--help` works without it.
 
 ```toml
 [op]
@@ -105,6 +105,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `session-context` is a Claude Code SessionStart hook that reports the host, its role, the other hosts, and the local time.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
 - `merge` squash-merges an approved pull request.
+- `loop` validates its user configuration and refuses to run until a later slice adds the shadow runner.
 - `install` installs the git hooks and the user-level harness hooks.
 
 Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does two things:
@@ -131,6 +132,32 @@ Evidence can be a `#N` reference or a commit hash of 7 to 40 hex characters. Has
 These user-level hooks run in every repository. Before acting, the identity, pull request, approval guard, and install hooks check that `origin` names a tbhb-dev repository on GitHub. Outside a repository, the identity record hook still writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Both `state-guard` and `session-context` run regardless of origin. At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, reinstalling the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, and each worktree has its own pull request draft, so sessions in two worktrees of one clone don't overwrite each other.
+
+### Loop configuration
+
+`tbhbdev alpha loop` reads the optional `[loop]` table from the user config. Calling this command requires the settings shown below. A missing file, table, or key, or an invalid value, fails with the path and `[loop] key`. `--help` works without config.
+
+```toml
+[loop]
+repositories = ["example-org/example-repo"]
+approval_command = ["example-approve", "--quiet"]
+store_path = "/example/state/loop.sqlite3"
+reconcile_interval_minutes = 5
+spawn_cap_total = 4
+spawn_cap_per_host = 2
+daily_spawn_cap = 20
+hosts = ["example-host-a", "example-host-b"]
+```
+
+The settings have these constraints:
+
+- `repositories` lists `owner/name` strings.
+- `approval_command` lists the approval program followed by its arguments, preserving arguments with spaces. The loop doesn't store a token.
+- `hosts` lists host strings. These three lists must contain at least one entry, and entries must be non-blank strings.
+- `store_path` is a non-blank path string without a null byte. Relative paths refer to the working directory.
+- The interval and caps are positive integers. Booleans and fractional values fail. The spawn caps cover the total and each host, and the daily cap covers spawns per day.
+
+This slice only validates configuration. Even with valid settings, the command exits with status 1 and reports that the shadow runner isn't available. It doesn't create a store or execute an approval or other action.
 
 ### No self-approval
 
