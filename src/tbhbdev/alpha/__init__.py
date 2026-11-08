@@ -46,6 +46,8 @@ commands:
                SessionStart hook: name the host, the other hosts and the time
   pr           check | create | edit | hook: the pull request draft
                | backfill-opened OWNER: the opened ledgers
+               | close N --reason TEXT: close a pull request
+  issue        close N --reason completed|not-planned: close an issue
   merge        squash-merge an approved pull request
   install      install the git hooks and the user-level harness hooks
 """
@@ -68,9 +70,19 @@ def session_context_command(_argv: list[str], _prog: str) -> int:
 
 
 def pr(argv: list[str], prog: str) -> int:
+    if argv[:1] == ["close"]:
+        from tbhbdev.alpha import close  # noqa: PLC0415 -- see the docstring
+
+        return close.main(["pr", *argv], prog=prog)
     from tbhbdev.alpha import pull_request  # noqa: PLC0415 -- see the docstring
 
     return pull_request.main(argv, prog=prog)
+
+
+def issue(argv: list[str], prog: str) -> int:
+    from tbhbdev.alpha import close  # noqa: PLC0415 -- see the docstring
+
+    return close.main(["issue", *argv], prog=prog)
 
 
 def merge(argv: list[str], prog: str) -> int:
@@ -89,6 +101,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "state-guard": state_guard_command,
     "session-context": session_context_command,
     "pr": pr,
+    "issue": issue,
     "merge": merge,
     "install": install_command,
 }
