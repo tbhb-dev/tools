@@ -32,5 +32,5 @@ _.path = [".bazel_env/bin"]
 # bazelisk runs the Bazel gates, and prek and uv run the commit hooks. The
 # hooks' lint tools come from Bazel's pins in .bazel_env/bin.
 bazelisk = "1.30.0"
-uv = "0.13.6"
+uv = "0.13.7"
 prek = "0.5.9"
