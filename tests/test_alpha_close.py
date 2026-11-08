@@ -45,6 +45,8 @@ class Gh:
     close_rc: int = 0
     delete_rc: int = 0
     delete_stderr: str = "denied\n"
+    list_out: str = "[]"
+    list_rc: int = 0
     calls: list[list[str]] = field(default_factory=list)
 
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -52,6 +54,10 @@ class Gh:
         if argv[1] == "view":
             out = json.dumps(self.view) if self.view_rc == 0 else ""
             return subprocess.CompletedProcess(argv, self.view_rc, out, "no view")
+        if argv[1] == "list":
+            return subprocess.CompletedProcess(
+                argv, self.list_rc, self.list_out, "no list"
+            )
         if argv[0] == "api":
             return subprocess.CompletedProcess(
                 argv, self.delete_rc, "", self.delete_stderr
@@ -342,7 +348,7 @@ PR_ARGS = ["pr", "close", "7", "--reason", "r", "--delete-branch"]
 def test_delete_branch_deletes_the_same_repo_head_after_closing(gh: Gh) -> None:
     opened.record_opened(root(), ["tbhb-dev/ascm#7"])
     assert close.main(PR_ARGS, env=ENV) == 0
-    assert [call[0] for call in gh.calls] == ["pr", "pr", "api"]
+    assert [call[0] for call in gh.calls] == ["pr", "pr", "pr", "api"]
     assert gh.calls[-2][:2] == ["pr", "close"]
     assert gh.calls[-1] == DELETE
 
@@ -360,7 +366,7 @@ def test_dry_run_says_it_would_delete_the_branch(
     gh: Gh, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert close.main([*PR_ARGS, "--dry-run"], env=ENV) == 0
-    assert [call[1] for call in gh.calls] == ["view"]
+    assert [call[1] for call in gh.calls] == ["view", "list"]
     out = capsys.readouterr().out
     assert "would delete branch feat/x y: gh api -X DELETE repos/tbhb-dev/ascm" in out
 
@@ -409,6 +415,70 @@ def test_issue_close_has_no_delete_branch_flag(gh: Gh) -> None:
         close.main(argv, env=ENV)
     assert exc.value.code == 2
     assert gh.calls == []
+
+
+LIST = [
+    "pr", "list", "--repo", "tbhb-dev/ascm", "--base", "feat/x y",
+    "--state", "open", "--json", "number",
+]  # fmt: skip
+
+
+def test_delete_branch_lists_open_prs_on_the_head_with_exact_argv(gh: Gh) -> None:
+    assert close.main(PR_ARGS, env=ENV) == 0
+    assert gh.calls[1] == LIST
+    assert gh.calls[2][:2] == ["pr", "close"]
+
+
+@pytest.mark.parametrize("dry", [[], ["--dry-run"]])
+def test_open_dependents_refuse_before_anything_is_posted(
+    gh: Gh, dry: list[str]
+) -> None:
+    gh.list_out = '[{"number": 15}, {"number": 12}]'
+    with pytest.raises(SystemExit) as exc:
+        close.main([*PR_ARGS, *dry], env=ENV)
+    assert exc.value.code == "not closing: open PRs target branch feat/x y: #12, #15"
+    assert [call[1] for call in gh.calls] == ["view", "list"]
+
+
+def test_dry_run_without_dependents_reports_as_before(
+    gh: Gh, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert close.main([*PR_ARGS, "--dry-run"], env=ENV) == 0
+    assert "would delete branch feat/x y" in capsys.readouterr().out
+    assert [call[1] for call in gh.calls] == ["view", "list"]
+
+
+def test_a_failed_list_refuses(gh: Gh) -> None:
+    gh.list_rc = 1
+    with pytest.raises(SystemExit) as exc:
+        close.main(PR_ARGS, env=ENV)
+    assert exc.value.code == (
+        "not closing: cannot list open PRs targeting feat/x y: no list"
+    )
+    assert [call[1] for call in gh.calls] == ["view", "list"]
+
+
+@pytest.mark.parametrize(
+    "out", ["not json", "{}", "[1]", '[{"id": 3}]', '[{"number": "3"}]']
+)
+def test_unparseable_list_output_refuses(gh: Gh, out: str) -> None:
+    gh.list_out = out
+    with pytest.raises(SystemExit, match="cannot list open PRs"):
+        close.main(PR_ARGS, env=ENV)
+    assert [call[1] for call in gh.calls] == ["view", "list"]
+
+
+def test_a_fork_skips_the_dependents_check(gh: Gh) -> None:
+    gh.view["isCrossRepository"] = True
+    gh.list_rc = 1
+    assert close.main(PR_ARGS, env=ENV) == 0
+    assert all(call[1] != "list" for call in gh.calls)
+
+
+def test_without_the_flag_no_list_is_read(gh: Gh) -> None:
+    gh.list_rc = 1
+    assert close.main(["pr", "close", "7", "--reason", "r"], env=ENV) == 0
+    assert all(call[1] != "list" for call in gh.calls)
 
 
 def test_the_refusal_messages_are_exact(gh: Gh) -> None:

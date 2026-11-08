@@ -142,6 +142,39 @@ def delete_branch(data: Mapping[str, object], *, dry_run: bool) -> int:
     return done.returncode
 
 
+def check_dependents(data: Mapping[str, object]) -> None:
+    """Refuse when open pull requests target the head branch about to go.
+
+    A branch on a fork isn't deleted, so it isn't checked.
+
+    Raises:
+        SystemExit: Open pull requests target the branch, or gh can't say.
+    """
+    if data["isCrossRepository"]:
+        return
+    branch = str(data["headRefName"])
+    repo = ref_of(str(data["url"])).split("#")[0]
+    words = ["pr", "list", "--repo", repo, "--base", branch, "--state", "open"]
+    done = gh([*words, "--json", "number"])
+    found = pr.gh_data(done)
+    numbers: list[int] = []
+    if isinstance(found, list):
+        items: list[object] = found
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("number"), int):
+                found = None
+                break
+            numbers.append(item["number"])
+    if not isinstance(found, list):
+        why = " ".join((done.stderr or done.stdout).split())
+        message = f"not closing: cannot list open PRs targeting {branch}: {why}"
+        raise SystemExit(message)
+    if numbers:
+        refs = ", ".join(f"#{number}" for number in sorted(numbers))
+        message = f"not closing: open PRs target branch {branch}: {refs}"
+        raise SystemExit(message)
+
+
 def non_blank(text: str) -> str:
     """The text as given, unless it is empty or only whitespace.
 
@@ -184,6 +217,8 @@ def main(
     if args.kind == "pr":
         data = view("pr", args.number)
         text = close_comment(args.reason, opener_note(data, env), line)
+        if args.delete_branch:
+            check_dependents(data)
         words = ["pr", "close", str(args.number), "--comment", text]
     else:
         data = view("issue", args.number)
