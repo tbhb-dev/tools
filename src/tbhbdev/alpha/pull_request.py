@@ -931,7 +931,10 @@ def create_pr(argv: list[str], body: str, root: str | None, *, dry_run: bool) ->
     """Refuse an existing open PR, including a race reported by gh create."""
     done = run([find_tool(GH), "pr", "view", "--json", "number,state,url"])
     data = gh_data(done)
-    if isinstance(data, dict):
+    if isinstance(data, dict) and all(
+        type(data.get(key)) is kind
+        for key, kind in (("state", str), ("number", int), ("url", str))
+    ):
         data = cast("dict[str, object]", data)  # pragma: no mutate
         if data["state"] == "OPEN":
             message = (
@@ -941,8 +944,9 @@ def create_pr(argv: list[str], body: str, root: str | None, *, dry_run: bool) ->
             print(message, file=sys.stderr)
             return 1
     elif not (done.returncode and "no pull requests found" in done.stderr.lower()):
+        output = (done.stderr or done.stdout).rstrip("\n")
         print(
-            f"cannot check for an open PR: {done.stderr or done.stdout}",
+            f"cannot check for an open PR: {output}",
             file=sys.stderr,
         )
         return 1
@@ -950,14 +954,18 @@ def create_pr(argv: list[str], body: str, root: str | None, *, dry_run: bool) ->
         return invoke_gh(argv, body, dry_run=True)[0]
     argv[0] = find_tool(GH)
     done = run(argv, stdin=body)
-    output = done.stdout + done.stderr
+    output = "\n".join(
+        filter(None, (done.stdout.rstrip("\n"), done.stderr.rstrip("\n")))
+    )
     if done.returncode or "already exists" in output.lower():
-        print(output, end="", file=sys.stderr)
-        found = PR_URL.search(output)
-        number = found[2] if found else "<n>"
-        print(
-            "gh pr create failed; " + EDIT_DRAFT.format(number=number), file=sys.stderr
-        )
+        print(output, file=sys.stderr)
+        if "already exists" in output.lower():
+            found = PR_URL.search(output)
+            number = found[2] if found else "<n>"
+            print(
+                "gh pr create failed; " + EDIT_DRAFT.format(number=number),
+                file=sys.stderr,
+            )
         return 1
     print(done.stdout, end="")
     print(done.stderr, end="", file=sys.stderr)

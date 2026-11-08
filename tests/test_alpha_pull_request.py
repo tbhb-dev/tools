@@ -1383,18 +1383,16 @@ def test_create_defaults(world: World) -> None:
     ]
 
 
+@pytest.mark.parametrize("ending", ["", "\n", "\n\n"])
 def test_create_passes_gh_errors_through(
-    world: World, capsys: pytest.CaptureFixture[str]
+    world: World, capsys: pytest.CaptureFixture[str], ending: str
 ) -> None:
-    message = "aborted: you must first push the current branch to a remote\n"
+    message = "aborted: you must first push the current branch to a remote" + ending
     world.fake("gh", rc=1, stderr=message)
     write_draft(world)
     assert run_main("create") == 1
     captured = capsys.readouterr()
-    assert captured.err == (
-        message + "gh pr create failed; run `tbhbdev alpha pr edit --pr <n>` "
-        "to apply the draft\n"
-    )
+    assert captured.err == message.rstrip("\n") + "\n"
     assert captured.out == ""
     assert len(world.calls("gh")) == 2
     assert world.git("status", "--porcelain", "--ignored").count("push") == 0
@@ -2239,10 +2237,7 @@ def test_a_failed_create_records_nothing(
     write_draft(world)
     assert run_main("create", env=agent) == 1
     assert not ledgers(world).exists()
-    assert capsys.readouterr().err == (
-        "https://github.com/tbhb-dev/example/pull/1\n"
-        "gh pr create failed; run `tbhbdev alpha pr edit --pr 1` to apply the draft\n"
-    )
+    assert capsys.readouterr().err == ("https://github.com/tbhb-dev/example/pull/1\n")
 
 
 def test_create_without_a_url_records_nothing(
@@ -2648,6 +2643,45 @@ def test_create_after_a_finished_pr(world: World, state: str) -> None:
         (1, "", "authentication failed"),
         (0, "not JSON", ""),
         (0, "[]", ""),
+        (0, "{}", ""),
+        *[
+            (
+                0,
+                json.dumps({"state": "OPEN", "number": 17, "url": "old", key: value}),
+                "",
+            )
+            for key in ("state", "number", "url")
+            for value in (None, [1], {"value": 1}, True, 1.5)
+        ],
+        *[
+            (
+                0,
+                json.dumps(
+                    {
+                        key: value
+                        for key, value in {
+                            "state": "OPEN",
+                            "number": 17,
+                            "url": "old",
+                        }.items()
+                        if key != missing
+                    }
+                ),
+                "",
+            )
+            for missing in ("state", "number", "url")
+        ],
+        *[
+            (
+                0,
+                json.dumps({"state": "OPEN", "number": 17, "url": "old", key: value}),
+                "",
+            )
+            for key, value in (("state", 17), ("number", "17"), ("url", 17))
+        ],
+        (1, "", "authentication failed\n\n"),
+        (1, "", "authentication failed \n"),
+        (1, "", "authentication error X\n"),
         (0, "", "no pull requests found"),
     ],
 )
@@ -2668,22 +2702,25 @@ def test_create_stops_when_the_lookup_fails(
     assert run_main("create") == 1
     assert capsys.readouterr() == (
         "",
-        f"cannot check for an open PR: {stderr or stdout}\n",
+        f"cannot check for an open PR: {(stderr or stdout).rstrip(chr(10))}\n",
     )
     assert len(world.calls("gh")) == 1
 
 
-@pytest.mark.parametrize("rc", [0, 1])
+@pytest.mark.parametrize(
+    "result", [(rc, ending) for rc in (0, 1) for ending in ("", "\n", "\n\n")]
+)
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
 @pytest.mark.parametrize("url", ["", "https://github.com/tbhb-dev/example/pull/17"])
 def test_create_rejects_already_exists(
     world: World,
     capsys: pytest.CaptureFixture[str],
-    rc: int,
+    result: tuple[int, str],
     stream: str,
     url: str,
 ) -> None:
-    output = f"a pull request Already Exists {url}\n"
+    rc, ending = result
+    output = f"a pull request Already Exists {url}{ending}"
     answer: dict[str, object] = {"rc": rc, "stdout": "", "stderr": "", stream: output}
     world.fake("gh", cases={"pr create": answer})
     write_draft(world)
@@ -2691,7 +2728,8 @@ def test_create_rejects_already_exists(
     number = "17" if url else "<n>"
     assert capsys.readouterr() == (
         "",
-        output
+        output.rstrip("\n")
+        + "\n"
         + (
             f"gh pr create failed; run `tbhbdev alpha pr edit --pr {number}` "
             "to apply the draft\n"
@@ -2707,3 +2745,49 @@ def test_create_passes_success_stderr_through(
     write_draft(world)
     assert run_main("create") == 0
     assert capsys.readouterr() == ("created\n", "warning\n")
+
+
+@pytest.mark.parametrize("ending", ["", "\n", "\n\n"])
+def test_create_joins_error_streams(
+    world: World, capsys: pytest.CaptureFixture[str], ending: str
+) -> None:
+    world.fake(
+        "gh",
+        cases={
+            "pr create": {
+                "rc": 1,
+                "stdout": "request failed" + ending,
+                "stderr": "connection lost" + ending,
+            }
+        },
+    )
+    write_draft(world)
+    assert run_main("create") == 1
+    assert capsys.readouterr() == ("", "request failed\nconnection lost\n")
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    [
+        ("request failed\n", "\n\n", "request failed\n"),
+        ("\n\n", "connection lost\n", "connection lost\n"),
+        (
+            "request failed \n",
+            "connection lost \n",
+            "request failed \nconnection lost \n",
+        ),
+        ("request X\n", "connection X\n", "request X\nconnection X\n"),
+        ("", "", "\n"),
+    ],
+)
+def test_create_normalizes_empty_error_streams(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    stdout: str,
+    stderr: str,
+    expected: str,
+) -> None:
+    world.fake("gh", cases={"pr create": {"rc": 1, "stdout": stdout, "stderr": stderr}})
+    write_draft(world)
+    assert run_main("create") == 1
+    assert capsys.readouterr() == ("", expected)
