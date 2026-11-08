@@ -101,7 +101,8 @@ def write_config(where: Path, text: str) -> None:
 def set_origin(monkeypatch: pytest.MonkeyPatch, code: int, url: str) -> None:
 
     def fake(*args: str, **kwargs: object) -> tuple[int, str]:
-        del args, kwargs
+        del kwargs
+        assert args == ("config", "--get", "remote.origin.url")
         return code, url
 
     monkeypatch.setattr(pn, "git", fake)
@@ -165,6 +166,14 @@ def test_private_origin_skips_the_check(
     write_config(home, '[pr_check]\nprivate_repos = ["example-lab"]\n')
     assert pn.private_names() is None
     assert pn.draft_problems(["example-private"], 1) == []
+
+
+def test_origin_name_keeps_a_trailing_capital_x(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_origin(monkeypatch, 0, "git@github.com:org/example-labX")
+    write_config(home, '[pr_check]\nprivate_repos = ["example-lab"]\n')
+    assert pn.private_names() == ["example-lab"]
 
 
 @pytest.mark.parametrize(("code", "url"), [(1, ""), (128, "x"), (0, ""), (0, "/")])
