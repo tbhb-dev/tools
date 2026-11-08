@@ -1,4 +1,7 @@
-"""`tbhbdev host`: set up agent hosts, keep them current, and run commands on them.
+"""`tbhbdev host`: frozen host commands, being retired.
+
+On Linux, configuration management alone writes the token file; this module
+only checks and reads it. Bootstrap and upgrade refuse Linux hosts.
 
 These commands run on the operator's Mac, which has 1Password Desktop and the
 `op` CLI. The deployment's values come from the user config (see
@@ -36,8 +39,9 @@ changed.
 
 Each host gets its own Connect token for its own vault, `[vaults] host_prefix`
 and the host's name, the vault `[vaults] all`, and any others the operator
-names, in the `agent` account's keychain, or on Linux its token file. A
-token's vaults can't change, so a change is a new token: create it, install
+names, in the `agent` account's macOS keychain. Linux token files come from
+configuration management. A token's vaults can't change, so a change is a
+new token: create it, install
 it, check that it reaches its vaults, then delete the old one. A token's name
 records its host, creation time and vaults, so `op connect token list` alone
 tells what each token reaches and when it expires. The agent's home records
@@ -45,9 +49,9 @@ the installed token's name too, which is how `upgrade` knows its vaults and
 expiry without `op`.
 
 A token travels only on stdin and stdout: from `op` to this process, then
-over ssh into `security` or a script that writes the agent's 0600 token file
-on Linux, and back out for `upgrade`'s check. It never sits in argv or a log
-line, and on Linux the token file is the only file that holds it. Bootstrap
+over ssh into `security`, and back out for `upgrade`'s check. It never sits
+in argv or a log line. Linux readers use the token file written only by
+configuration management, with no Linux writer in this module. Bootstrap
 sends each host the agent's copy of the config the same way, and never prints
 it. The copy is the operator's config with `[connect] endpoints` set to
 `https://<host>.<suffix>` for each of `[connect] server_hosts`, where the
@@ -628,30 +632,17 @@ _MAC_UNLOCK = f'security unlock-keychain -p "" {_KC}'
 _MAC_FIND = f"security find-generic-password {_ITEM} {_KC} >/dev/null 2>&1"
 _SECRETS = f'"$HOME/{secrets.LINUX_TOKEN_FILE.parent}"'
 _TOKEN_FILE = f'"$HOME/{secrets.LINUX_TOKEN_FILE}"'
-_LINUX_DIRS = (
-    f"umask 077 && mkdir -p {AGENT_CONFIG} {_SECRETS} && "
-    f"[ ! -L {_SECRETS} ] && chmod 0700 {_SECRETS}"
-)
-# mktemp creates the file exclusively with mode 0600, and mv replaces the
-# token in one step, so a reader never sees half a token.
-_LINUX_INSTALL = (
-    f"{_LINUX_DIRS} && tmp=$(mktemp {_SECRETS}/.connect-token.XXXXXX) && "
-    'trap \'status=$?; if [ "$status" -ne 0 ]; then '
-    ': >"$tmp"; mv -f "$tmp" "$tmp.trash"; fi; exit "$status"\' 0 && '
-    "trap 'exit 1' HUP INT TERM && "
-    f'cat >"$tmp" && mv -f "$tmp" {_TOKEN_FILE} && [ -s {_TOKEN_FILE} ]'
-)
-
 _LINUX_PRIVATE_FILE = (
+    f"[ ! -L {_SECRETS} ] && [ -d {_SECRETS} ] && "
+    f'[ "$(stat -c \'%u:%a\' {_SECRETS})" = "$(id -u):700" ] && '
     f"[ ! -L {_TOKEN_FILE} ] && [ -f {_TOKEN_FILE} ] && [ -s {_TOKEN_FILE} ] && "
     f'[ "$(stat -c \'%u:%a\' {_TOKEN_FILE})" = "$(id -u):600" ]'
 )
 
 
-# For each OS: set up the keychain; install the token from stdin; print
-# `present` and the recorded token name, or `absent`; and print the recorded
-# name and then the token. The install scripts end by checking the entry is
-# there.
+# macOS sets up the keychain and installs the token from stdin. Both OSes
+# can print `present` and the recorded token name, or `absent`, and read the
+# recorded name and token. Linux has no setup or installation script.
 SCRIPTS: dict[str, dict[str, str]] = {
     "macOS": {
         "ensure": (
@@ -675,8 +666,6 @@ SCRIPTS: dict[str, dict[str, str]] = {
         ),
     },
     "linux": {
-        "ensure": _LINUX_DIRS,
-        "install": _LINUX_INSTALL,
         "held": (
             f"if {_LINUX_PRIVATE_FILE}; then echo present; "
             f"cat {TOKEN_NAME_FILE} 2>/dev/null || :; else echo absent; fi"
@@ -687,12 +676,6 @@ SCRIPTS: dict[str, dict[str, str]] = {
         ),
     },
 }
-
-
-def _token_stdin(host: Host, value: str) -> str:
-    if host.os == "linux":
-        return value
-    return f"add-generic-password -U {_ITEM} -T /usr/bin/security -w {value} {_KC}\n"
 
 
 def _over(host: Host, argv: list[str], stdin: str | None = None) -> Done:
@@ -720,7 +703,17 @@ def _script(host: Host, step: str) -> str:
     return scripts[step]
 
 
+def _require_keychain_writer(host: Host) -> None:
+    if host.os == "linux":
+        message = (
+            f"{host.name}: Linux hosts get the Connect token file from "
+            "configuration management, not tbhbdev host"
+        )
+        raise HostError(message)
+
+
 def ensure_keychain(host: Host) -> None:
+    _require_keychain_writer(host)
     done = on_host(host, _script(host, "ensure"))
     if done.returncode != 0:
         message = (
@@ -744,12 +737,14 @@ def keychain_held(host: Host) -> str | None:
 
 def install(host: Host, value: str, name: str) -> None:
     """Put the token VALUE in HOST's agent keychain, and record its NAME."""
+    _require_keychain_writer(host)
     record = (
         f"mkdir -p {AGENT_CONFIG} && "
         f"printf '%s\\n' {shlex.quote(name)} >{TOKEN_NAME_FILE}"
     )
     script = f"{_script(host, 'install')} && {record}"
-    done = on_host(host, script, _token_stdin(host, value))
+    stdin = f"add-generic-password -U {_ITEM} -T /usr/bin/security -w {value} {_KC}\n"
+    done = on_host(host, script, stdin)
     if done.returncode != 0:
         message = f"{host.name}: installing the token failed (exit {done.returncode})"
         raise HostError(message)
@@ -2128,10 +2123,13 @@ def _operators(known: dict[str, str]) -> list[str] | None:
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
+    chosen = select(args.host, every=args.all)
+    for host in chosen:
+        _require_keychain_writer(host)
     touch_id("bootstrap")
     named = _check_vaults(args.vaults)
     failed: list[str] = []
-    chosen = _supported(select(args.host, every=args.all), failed)
+    chosen = _supported(chosen, failed)
     urls = endpoints()
     copy = agent_copy(urls)
     ws = workspace()
@@ -2170,6 +2168,8 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 def cmd_upgrade(args: argparse.Namespace) -> int:
     chosen = select(args.host, every=args.all)
+    for host in chosen:
+        _require_keychain_writer(host)
     urls = endpoints()
     ws = workspace()
     if ws is None:
