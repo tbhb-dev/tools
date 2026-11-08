@@ -5,7 +5,7 @@ stub plugins in their place. `config_file` is the user config in a temporary
 XDG_CONFIG_HOME, which no test has until it writes one, and `config` writes
 one of example values there. `connect` starts in-memory 1Password Connect APIs
 on 127.0.0.1, and `stubs` makes PATH hold only stub op, ssh, sudo, security,
-secret-tool, tailscale, dscl, chmod, git and friends (see stubtool.py), and
+tailscale, dscl, chmod, git and friends (see stubtool.py), and
 the system tools the host scripts use, with HOME in tmp_path. `plain` turns
 argparse color off for the tests that compare help and usage exactly. No test
 reaches 1Password, a keychain, the tailnet, a host, an account or an ACL.
@@ -38,20 +38,17 @@ type Json = dict[str, object]
 STUBTOOL = Path(__file__).resolve().parent / "stubtool.py"
 STUB_TOOLS = (
     "chmod",
-    "dbus-run-session",
     "dscl",
     "getent",
     "getfacl",
     "gh",
     "git",
-    "gnome-keyring-daemon",
     "groupadd",
     "id",
     "install",
     "ls",
     "mise",
     "op",
-    "secret-tool",
     "security",
     "setfacl",
     "ssh",
@@ -439,6 +436,5 @@ def stubs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Stubs:
     monkeypatch.setattr(host, "TAILSCALE_APP", str(stub_dir / "no-tailscale-app"))
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("STUB_DIR", str(stub_dir))
-    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
     monkeypatch.delenv(secrets.TEST_TOKEN_ENV, raising=False)
     return Stubs(stub_dir, bin_dir)
