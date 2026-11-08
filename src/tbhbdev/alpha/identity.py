@@ -595,20 +595,19 @@ def write_private_json(path: Path, obj: Json) -> None:
 def write_record(sid_hash: str, updates: Json, cwd: Path | None = None) -> None:
     """Merge the non-empty ``updates`` into an agent's session record.
 
-    The record goes to the store of the worktree containing ``cwd`` and to
-    the user's store.
+    The record goes to the store of the worktree containing ``cwd``, if any,
+    and to the user's store.
     """
-    state = state_dir(cwd)
-    if not state:
-        return
     known = {
         k: v for k, v in updates.items() if v
     }  # never overwrite known with missing
-    path = state / "sessions" / f"{hx(sid_hash)}.json"
-    with locked(state):
-        rec = read_record(path)
-        rec.update(known)
-        write_json(path, rec)
+    state = state_dir(cwd)
+    if state:
+        path = state / "sessions" / f"{hx(sid_hash)}.json"
+        with locked(state):
+            rec = read_record(path)
+            rec.update(known)
+            write_json(path, rec)
     write_user_record(sid_hash, known)
 
 
@@ -1437,7 +1436,11 @@ def cmd_record(harness: str, env: Mapping[str, str]) -> int:
     if harness not in SLUGS:
         return 0
     data = read_hook_stdin()
-    if not in_tbhb_dev(hook_cwd(data)):
+    cwd = hook_cwd(data)
+    # A session started outside any repository, such as in the directory that
+    # holds the clones, can still commit in a tbhb-dev clone, so it keeps a
+    # record in the user's store. Another owner's repository gets none.
+    if state_dir(cwd) and not in_tbhb_dev(cwd):
         return 0
     if harness == CODEX:
         handle_codex(data, env)
