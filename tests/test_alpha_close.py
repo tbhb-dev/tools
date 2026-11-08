@@ -15,6 +15,7 @@ from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha import pull_request as pr
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
 ENV = {"CLAUDE_CODE_SESSION_ID": "raw-session"}
@@ -50,7 +51,11 @@ class Gh:
 def gh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Gh:
     stub = Gh()
     monkeypatch.setattr(close, "gh", stub)
-    monkeypatch.setattr(pr, "posting_value", lambda env: POSTING if env else None)
+
+    def posting_value(env: Mapping[str, str]) -> str | None:
+        return POSTING if env else None
+
+    monkeypatch.setattr(pr, "posting_value", posting_value)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     return stub
@@ -111,14 +116,17 @@ def test_an_unreadable_pr_is_refused(gh: Gh) -> None:
 
 
 def test_a_caller_that_is_not_an_agent_is_refused(gh: Gh) -> None:
-    with pytest.raises(SystemExit, match="isn't a recognised agent session"):
+    with pytest.raises(SystemExit, match="isn't a recognized agent session"):
         close.main(["pr", "close", "7", "--reason", "x"], env={})
     assert gh.calls == []
 
 
 @pytest.mark.usefixtures("gh")
 def test_an_invalid_trailer_value_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(pr, "posting_value", lambda _env: "not llm")
+    def posting_value(_env: Mapping[str, str]) -> str | None:
+        return "not llm"
+
+    monkeypatch.setattr(pr, "posting_value", posting_value)
     with pytest.raises(SystemExit, match="invalid LLM trailer: not llm: "):
         close.main(["pr", "close", "7", "--reason", "x"], env=ENV)
 
@@ -203,7 +211,10 @@ def test_the_real_gh_runs_through_pr_run(monkeypatch: pytest.MonkeyPatch) -> Non
         seen.append(argv)
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    monkeypatch.setattr(pr, "find_tool", lambda name: f"/bin/{name}")
+    def find_tool(name: str) -> str:
+        return f"/bin/{name}"
+
+    monkeypatch.setattr(pr, "find_tool", find_tool)
     monkeypatch.setattr(pr, "run", fake_run)
     assert close.gh(["pr", "view"]).returncode == 0
     assert seen == [["/bin/gh", "pr", "view"]]
@@ -231,7 +242,8 @@ def test_the_parser_requires_a_reason(
 
 
 def test_the_parser_requires_a_kind_and_a_verb() -> None:
-    for argv in ([], ["pr"], ["issue"]):
+    cases: tuple[list[str], ...] = ([], ["pr"], ["issue"])
+    for argv in cases:
         with pytest.raises(SystemExit):
             close.build_parser("p").parse_args(argv)
 
@@ -263,8 +275,8 @@ def test_the_parser_reads_the_issue_options() -> None:
 
 def test_main_names_the_prog_in_usage(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
-        close.main(["--help"], prog="myprog", env=ENV)
-    assert capsys.readouterr().out.startswith("usage: myprog ")
+        close.main(["--help"], prog="prog", env=ENV)
+    assert capsys.readouterr().out.startswith("usage: prog ")
 
 
 def test_main_reads_the_process_environment_by_default(
@@ -291,4 +303,4 @@ def test_the_refusal_messages_are_exact(gh: Gh) -> None:
     )
     with pytest.raises(SystemExit) as exc:
         close.main(["pr", "close", "7", "--reason", "x"], env={})
-    assert exc.value.code == "not closing: the caller isn't a recognised agent session"
+    assert exc.value.code == "not closing: the caller isn't a recognized agent session"

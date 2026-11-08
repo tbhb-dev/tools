@@ -5,7 +5,7 @@
 Both close through the agent's own ``gh``, as the agent's GitHub account, and
 leave a final comment that holds the reason and the posting agent's
 ``Generated-by`` trailer. Each refuses anything that isn't open, and an
-invoker that isn't a recognised agent session, because the trailer names one.
+invoker that isn't a recognized agent session, because the trailer names one.
 
 Provisional, until @tbhb decides open question 11 of the alpha-review
 proposal: a session closes a pull request it opened freely, which the opened
@@ -26,7 +26,7 @@ from tbhbdev.alpha import opened
 from tbhbdev.alpha import pull_request as pr
 
 if TYPE_CHECKING:
-    import subprocess
+    import subprocess  # nosec B404
     from collections.abc import Mapping, Sequence
 
 REASONS = {"completed": "completed", "not-planned": "not planned"}
@@ -63,7 +63,7 @@ def trailer(env: Mapping[str, str]) -> str:
     """
     value = pr.posting_value(env)
     if value is None:
-        message = "not closing: the caller isn't a recognised agent session"
+        message = "not closing: the caller isn't a recognized agent session"
         raise SystemExit(message)
     if why := agent_identity.check_value(value):
         message = f"invalid LLM trailer: {value}: {why}"
