@@ -2105,7 +2105,9 @@ def test_a_subagent_opens_under_its_root(world: World, agent: dict[str, str]) ->
 @pytest.mark.parametrize(
     "env", [{}, {"ANTIGRAVITY_CONVERSATION_ID": "conv-raw"}], ids=["human", "agy"]
 )
-def test_no_root_means_no_line_and_no_ledger(world: World, env: dict[str, str]) -> None:
+def test_no_root_means_no_line_and_no_ledger(
+    world: World, env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
     write_draft(world)
     conv = agent_identity.sha256_64("conv-raw")
     agent_identity.write_user_record(conv, {"model": "gemini-x"})
@@ -2113,6 +2115,12 @@ def test_no_root_means_no_line_and_no_ledger(world: World, env: dict[str, str]) 
     (call,) = world.calls("gh")
     assert "Opened-by" not in str(call["stdin"])
     assert not ledgers(world).exists()
+    expected = (
+        "warning: no Opened-by line or ledger entry: cannot resolve the root session\n"
+        if env
+        else ""
+    )
+    assert capsys.readouterr().err == expected
 
 
 def test_a_failed_create_records_nothing(
