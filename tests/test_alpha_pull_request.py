@@ -2444,6 +2444,27 @@ def test_backfill_stops_at_a_corrupt_ledger(world: World) -> None:
     assert path.read_text() == "{"
 
 
+def test_ready_marks_the_pull_request_ready(world: World) -> None:
+    assert run_main("ready", "--pr", "45") == 0
+    (call,) = world.calls("gh")
+    assert call["argv"] == ["pr", "ready", "45"]
+
+
+def test_ready_passes_gh_output_and_exit_code_through(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.fake("gh", rc=3, stdout="out\n", stderr="err\n")
+    assert run_main("ready", "--pr", "45") == 3
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("out\n", "err\n")
+
+
+def test_ready_requires_a_pr_number() -> None:
+    with pytest.raises(SystemExit) as info:
+        run_main("ready")
+    assert info.value.code == 2
+
+
 def test_backfill_needs_an_owner() -> None:
     with pytest.raises(SystemExit) as info:
         run_main("backfill-opened")
