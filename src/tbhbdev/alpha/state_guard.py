@@ -67,7 +67,9 @@ HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(?:'([^']*)'|\"([^\"]*)\"|([A-Za-z0-9_]
 OPEN_ITEM = re.compile(r"(?m)^- \*\*.*$")
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n")
 SEPARATORS = frozenset("&|;\n(){}`")
-GIT_OPTIONS = frozenset({"-C", "-c"})
+GIT_OPTIONS = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+)
 WRAPPERS = frozenset({"env", "command", "exec"})
 VALUE_FLAGS = frozenset(
     {
@@ -126,6 +128,32 @@ def without_heredocs(command: str) -> str:
     return "\n".join(kept)
 
 
+def quoted_substitution(command: str, start: int) -> tuple[str, int]:
+    """The script and next position of a substitution inside double quotes."""
+    backtick = command[start] == "`"
+    begin = start + (1 if backtick else 2)
+    depth = 1
+    quote = ""
+    i = begin
+    while i < len(command):
+        char = command[i]
+        if char == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            quote = "" if char == quote else quote
+        elif char == "`" and backtick:
+            return command[begin:i], i + 1
+        elif char in "'\"":
+            quote = char
+        elif not backtick:
+            depth += (char == "(") - (char == ")")
+            if depth == 0:
+                return command[begin:i], i + 1
+        i += 1
+    return command[begin:], i
+
+
 def simple_commands(command: str) -> list[str]:
     """COMMAND split at the separators that sit outside quotes."""
     found: list[str] = []
@@ -137,6 +165,10 @@ def simple_commands(command: str) -> list[str]:
         if char == "\\" and quote != "'":
             current.append(command[i : i + 2])
             i += 2
+            continue
+        if quote == '"' and (char == "`" or command.startswith("$(", i)):
+            script, i = quoted_substitution(command, i)
+            found.extend(simple_commands(script))
             continue
         if quote:
             quote = "" if char == quote else quote
@@ -154,14 +186,47 @@ def simple_commands(command: str) -> list[str]:
     return found
 
 
+def unwrap_command(words: list[str]) -> list[str]:
+    """Skip command wrappers, env options and environment assignments."""
+    while words:
+        word = words[0]
+        if word == "env":
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                option = words[0]
+                words = (
+                    words[2:]
+                    if option in {"-u", "--unset", "-C", "--chdir"}
+                    else words[1:]
+                )
+        elif word in WRAPPERS or ASSIGNMENT.match(word):
+            words = words[1:]
+        else:
+            break
+    return words
+
+
+def shell_script(simple: str) -> str | None:
+    """The script argument of a shell's -c invocation, if present."""
+    try:
+        words = unwrap_command(shlex.split(simple))
+    except ValueError:
+        return None
+    if not words or words[0].split("/")[-1] not in {"bash", "sh", "zsh"}:
+        return None
+    for index, word in enumerate(words[1:], start=1):
+        if word == "-c" and index + 1 < len(words):
+            return words[index + 1]
+    return None
+
+
 def commit_arguments(simple: str) -> list[str] | None:
     """The arguments after `commit` when SIMPLE is a `git commit`, else None."""
     try:
         words = shlex.split(simple)
     except ValueError:
         return None
-    while words and (words[0] in WRAPPERS or ASSIGNMENT.match(words[0])):
-        words.pop(0)
+    words = unwrap_command(words)
     if not words or words[0].split("/")[-1] != "git":
         return None
     rest = words[1:]
@@ -207,6 +272,11 @@ def signs_off(arguments: list[str]) -> bool:
 def commit_trailer_reason(command: str) -> str | None:
     """Why COMMAND, a `git commit` that adds a sign-off trailer, is blocked."""
     for simple in simple_commands(without_heredocs(command)):
+        script = shell_script(simple)
+        if script is not None:
+            reason = commit_trailer_reason(script)
+            if reason:
+                return reason
         arguments = commit_arguments(simple)
         if arguments is not None and signs_off(arguments):
             return (

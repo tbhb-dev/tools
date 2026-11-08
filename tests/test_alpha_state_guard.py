@@ -638,3 +638,64 @@ def test_optional_short_values_do_not_consume_the_next_word(run: Runner) -> None
     assert run(bash("git commit -u -s"))[0] == 2
     assert run(bash("git commit -mfixes")) == (0, "", "")
     assert state_guard.short_signoff("-") == (False, False)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -u NAME X=1 git commit -s",
+        "env --unset NAME git commit -s",
+        "env -i --unset=NAME git commit -s",
+        "env -C path git commit -s",
+        "env --chdir path git commit -s",
+        "env -- git commit -s",
+        "git --git-dir x commit -s",
+        "git --work-tree x commit -s",
+        "git --namespace x commit -s",
+        "git --config-env x commit -s",
+        'bash -c "git commit -s"',
+        "sh -c 'git commit -s'",
+        "zsh -c 'git commit -s'",
+        "env -u NAME /bin/bash -c 'git commit -s'",
+        'echo "$(git commit -s)"',
+        'echo "`git commit -s`"',
+        'echo "$(echo $(git commit -s))"',
+    ],
+)
+def test_wrappers_options_and_quoted_scripts_are_checked(
+    run: Runner, command: str
+) -> None:
+    assert run(bash(command)) == (2, "", TRAILER_MESSAGE)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -u NAME",
+        "env -i",
+        "bash -c",
+        "sh -x",
+        "zsh -c 'git status'",
+        "echo '$(git commit -s)'",
+        "echo '`git commit -s`'",
+        r'echo "\$(git commit -s)"',
+        "bash -c 'echo \"git commit -s\"'",
+    ],
+)
+def test_noncommands_inside_quotes_stay_allowed(run: Runner, command: str) -> None:
+    assert run(bash(command)) == (0, "", "")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('$(echo "a)b")tail', ('echo "a)b"', 13)),
+        ("$(echo 'a)b')tail", ("echo 'a)b'", 13)),
+        (r"$(echo a\)b)tail", (r"echo a\)b", 12)),
+        ("$(echo x", ("echo x", 8)),
+        ("`echo x", ("echo x", 7)),
+        ("`echo (x)`tail", ("echo (x)", 10)),
+    ],
+)
+def test_quoted_substitution_boundaries(text: str, expected: tuple[str, int]) -> None:
+    assert state_guard.quoted_substitution(text, 0) == expected
