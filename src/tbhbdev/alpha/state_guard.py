@@ -53,11 +53,11 @@ CLAIM = re.compile(
     r"\b(?:is|are|was|were|now|already|has been|have been)\s+"
     r"(?:done|applied|merged|shipped|deployed|live|fixed|complete|completed|"
     r"installed|running|verified|in place|started)\b"
-    r"|\b(?:shipped|merged|applied|deployed|landed|rolled out)\b",
+    r"|\b(?:shipped|merged|applied|deployed|landed(?!\s+on\b)|rolled out)\b",
     re.IGNORECASE,
 )
 EVIDENCE = re.compile(
-    r"\b[0-9a-f]{7,40}\b|#\d+|\bsays\b|\bsaid\b|\breports?\b|\.log\b|`[^`]+`"
+    r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b|#\d+|\bsays\b|\bsaid\b|\breports?\b|\.log\b|`[^`]+`"
     r"|\boutput\b|\bread-back\b|\bunverified\b|\bnot (?:done|applied|merged)\b",
     re.IGNORECASE,
 )

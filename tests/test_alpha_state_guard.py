@@ -699,3 +699,39 @@ def test_noncommands_inside_quotes_stay_allowed(run: Runner, command: str) -> No
 )
 def test_quoted_substitution_boundaries(text: str, expected: tuple[str, int]) -> None:
     assert state_guard.quoted_substitution(text, 0) == expected
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["I landed on this design.", "We LANDED ON a design.", "I landed\ton this design."],
+)
+def test_landed_on_is_not_a_status_claim(run: Runner, message: str) -> None:
+    assert run(send(message)) == (0, "", "")
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "1234567",
+        "12345678901234567890",
+        "abcdefa",
+        "deadbeef",
+        "a12345",
+        "a" + "1" * 40,
+        "ga123456",
+        "a123456g",
+    ],
+)
+def test_evidence_requires_a_bounded_mixed_hex_hash(
+    run: Runner, candidate: str
+) -> None:
+    assert run(send(f"It was merged in {candidate}."))[0] == 2
+
+
+@pytest.mark.parametrize(
+    "candidate", ["a123456", "123456a", "A123456", "123456A", "a" + "1" * 39]
+)
+def test_hash_evidence_accepts_both_cases_and_length_limits(
+    run: Runner, candidate: str
+) -> None:
+    assert run(send(f"It was merged in {candidate}.")) == (0, "", "")
