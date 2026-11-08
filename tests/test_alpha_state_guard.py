@@ -452,3 +452,137 @@ def test_stop_resets_at_a_new_prompt_and_tolerates_a_missing_transcript(
     assert run(stop(transcript_path=path)) == (0, "", "")
     assert run(stop(transcript_path=str(tmp_path / "none.jsonl"))) == (0, "", "")
     assert run(stop()) == (0, "", "")
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (r"echo a\;b; git commit -s", [r"echo a\;b", " git commit -s"]),
+        (r"echo a\&b && git commit -s", [r"echo a\&b ", "", " git commit -s"]),
+        ("echo 'a\\'; git commit -s", ["echo 'a\\'", " git commit -s"]),
+        ("echo X; git commit -s", ["echo X", " git commit -s"]),
+        ("echo \\'", ["echo \\'"]),
+        ("echo \\", ["echo \\"]),
+    ],
+)
+def test_shell_splitting_preserves_escaped_text(
+    command: str, expected: list[str]
+) -> None:
+    assert state_guard.simple_commands(command) == expected
+
+
+def test_a_trailer_can_span_argument_boundaries() -> None:
+    assert state_guard.signs_off(["Signed-off-by", ": Example"])
+
+
+@pytest.mark.usefixtures("_configured")
+def test_write_does_not_treat_old_string_as_existing_content() -> None:
+    assert (
+        state_guard.open_note_reason(
+            "Write",
+            {
+                "file_path": "/example/Open.md",
+                "content": "- **new** x",
+                "old_string": "- **new** x",
+            },
+        )
+        is not None
+    )
+
+
+@pytest.mark.parametrize("suffix", ["None", "XXXX"])
+def test_a_missing_note_path_cannot_match_a_configured_suffix(
+    config_file: Path, suffix: str
+) -> None:
+    config_file.write_text(
+        f'[harness]\nopen_note = "{suffix}"\ndecisions_dir = "/example/decisions"\n'
+    )
+    assert state_guard.open_note_reason("Write", {"content": "- **new** x"}) is None
+
+
+@pytest.mark.parametrize("tool", ["Bash", "SendMessage"])
+@pytest.mark.parametrize("raw", [None, "invalid", []])
+def test_invalid_tool_input_reaches_checks_as_empty_text(
+    monkeypatch: pytest.MonkeyPatch, tool: str, raw: object
+) -> None:
+    values: list[str] = []
+
+    def command(text: str) -> None:
+        values.append(text)
+
+    def message(text: str) -> list[str]:
+        values.append(text)
+        return []
+
+    monkeypatch.setattr(state_guard, "commit_trailer_reason", command)
+    monkeypatch.setattr(state_guard, "unevidenced", message)
+    assert state_guard.pre_tool_reason({"tool_name": tool, "tool_input": raw}) is None
+    assert values == [""]
+
+
+def test_empty_and_missing_transcripts_have_no_reply(tmp_path: Path) -> None:
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("")
+    assert state_guard.last_assistant_text(str(empty)) == ""
+    assert state_guard.last_assistant_text(str(tmp_path / "missing.jsonl")) == ""
+
+
+def test_a_malformed_transcript_line_does_not_hide_the_next_reply(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "reply.jsonl"
+    path.write_text(
+        'not json\n{"type":"assistant","message":{"content":'
+        '[{"type":"text","text":"reply"}]}}\n'
+    )
+    assert state_guard.last_assistant_text(str(path)) == "reply"
+
+
+def test_a_new_prompt_or_empty_text_block_clears_the_previous_reply() -> None:
+    assert (
+        state_guard.entry_text(
+            {"type": "user", "message": {"content": "new prompt"}}, "old reply"
+        )
+        == ""
+    )
+    assert (
+        state_guard.entry_text(
+            {"type": "assistant", "message": {"content": [{"type": "text"}]}},
+            "old reply",
+        )
+        == ""
+    )
+
+
+def test_a_missing_transcript_path_does_not_read_a_default_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    for name in ("None", "XXXX"):
+        (tmp_path / name).write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": UNEVIDENCED}]},
+                }
+            )
+            + "\n"
+        )
+    assert state_guard.stop_reason({}) is None
+
+
+def test_transcript_text_uses_utf8_even_when_the_locale_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "unicode.jsonl"
+    path.write_text(
+        '{"type":"assistant","message":{"content":'
+        '[{"type":"text","text":"caf\u00e9"}]}}\n',
+        encoding="utf-8",
+    )
+
+    def open_ascii(filename: str, *, encoding: str | None = None) -> object:
+        return Path(filename).open(encoding=encoding or "ascii")
+
+    monkeypatch.setattr(state_guard, "open", open_ascii, raising=False)
+    assert state_guard.last_assistant_text(str(path)) == "caf\u00e9"
