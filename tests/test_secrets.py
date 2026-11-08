@@ -12,10 +12,11 @@ import gc
 import json
 import os
 import socket
+import stat
 import subprocess
 import traceback
-from pathlib import Path
 from typing import TYPE_CHECKING, override
+lazy from pathlib import Path
 
 import httpx
 import pytest
@@ -233,8 +234,9 @@ def test_the_linux_token_path_is_under_home() -> None:
     [
         ("fake-linux-token\n", "fake-linux-token"),
         ("fake-linux-token", "fake-linux-token"),
-        ("fake-linux-token\n\n", "fake-linux-token\n"),
-        ("fake-linux-token ", "fake-linux-token "),
+        ("fake-linux-token\n\n", "fake-linux-token"),
+        ("fake-linux-token ", "fake-linux-token"),
+        (" \t\r\nfake-linux-token \r\n", "fake-linux-token"),
     ],
 )
 def test_token_on_linux_reads_the_file(linux_home: Path, text: str, value: str) -> None:
@@ -273,7 +275,7 @@ def test_token_on_linux_without_a_directory_fails(
         secrets.token()
 
 
-@pytest.mark.parametrize("text", ["", "\n"])
+@pytest.mark.parametrize("text", ["", "\n", " \t\r\n"])
 def test_token_on_linux_with_an_empty_file_fails(linux_home: Path, text: str) -> None:
     path = token_file(linux_home, text)
     with pytest.raises(secrets.SecretsError) as caught:
@@ -304,8 +306,8 @@ def test_token_on_linux_refuses_a_directory_open_to_others(
             secrets.token()
     finally:
         path.parent.chmod(0o700)
-    assert str(caught.value) == refused(
-        path, "is in a directory accessible to its group or others"
+    assert str(caught.value) == (
+        f"the Connect token directory {path.parent} is unsafe; {HINT}"
     )
 
 
@@ -327,7 +329,7 @@ def test_token_on_linux_refuses_a_symlinked_directory(linux_home: Path) -> None:
     path.parent.symlink_to(moved)
     with pytest.raises(secrets.SecretsError) as caught:
         secrets.token()
-    assert str(caught.value) == refused(path, "is in something other than a directory")
+    assert "can't be opened" in str(caught.value)
 
 
 def test_token_on_linux_refuses_a_file_that_is_not_regular(linux_home: Path) -> None:
@@ -342,8 +344,16 @@ def test_token_on_linux_refuses_a_file_another_user_owns(
     linux_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = token_file(linux_home)
-    other = os.geteuid() + 1
-    monkeypatch.setattr(secrets.os, "geteuid", lambda: other)
+    real_stat = os.fstat
+
+    def fstat(fd: int) -> os.stat_result:
+        found = real_stat(fd)
+        values = list(found)
+        if stat.S_ISREG(found.st_mode):
+            values[4] += 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr(secrets.os, "fstat", fstat)
     with pytest.raises(secrets.SecretsError) as caught:
         secrets.token()
     assert str(caught.value) == refused(path, "isn't owned by this user")
@@ -354,20 +364,29 @@ def test_token_on_linux_refuses_a_directory_another_user_owns(
 ) -> None:
     path = token_file(linux_home)
     me = os.geteuid()
-    real_stat = Path.lstat
+    real_stat = os.fstat
 
-    def lstat(self: Path) -> os.stat_result:
-        found = real_stat(self)
-        if self == path.parent:
+    def fstat(fd: int) -> os.stat_result:
+        found = real_stat(fd)
+        if stat.S_ISDIR(found.st_mode):
             values = list(found)
             values[4] = me + 1
             return os.stat_result(values)
         return found
 
-    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(secrets.os, "fstat", fstat)
     with pytest.raises(secrets.SecretsError) as caught:
         secrets.token()
-    assert str(caught.value) == refused(path, "is in a directory this user doesn't own")
+    assert str(caught.value) == (
+        f"the Connect token directory {path.parent} is unsafe; {HINT}"
+    )
+
+
+def test_token_on_linux_refuses_a_fifo(linux_home: Path) -> None:
+    path = token_file(linux_home, None)
+    os.mkfifo(path, 0o600)
+    with pytest.raises(secrets.SecretsError, match="isn't a regular file"):
+        secrets.token()
 
 
 def test_token_without_the_keychain_tool_fails(
@@ -1050,3 +1069,77 @@ def test_linux_replaces_invalid_utf8(linux_home: Path) -> None:
     path = token_file(linux_home)
     path.write_bytes(b"fake-\xff-token\n")
     assert secrets.token() == "fake-\ufffd-token"
+
+
+@pytest.mark.parametrize("fail", ["directory", "file", "read", "none"])
+def test_linux_token_descriptors_are_checked_and_closed(
+    linux_home: Path, monkeypatch: pytest.MonkeyPatch, fail: str
+) -> None:
+    path = token_file(linux_home)
+    real_open, real_fstat, real_read = os.open, os.fstat, os.read
+    opened: list[int] = []
+    failed = False
+
+    def open_checked(name: str | Path, flags: int, **kwargs: int) -> int:
+        if not opened:
+            assert name == path.parent
+            assert flags == os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+            assert kwargs == {}
+        else:
+            assert name == "connect-token"
+            assert flags == os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            assert kwargs == {"dir_fd": opened[0]}
+            moved = linux_home / "moved"
+            path.parent.rename(moved)
+            path.parent.mkdir()
+            token_file(linux_home, "replacement")
+        fd = real_open(name, flags, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def fstat_checked(fd: int) -> os.stat_result:
+        nonlocal failed
+        if (
+            fd in opened
+            and not failed
+            and fail == ("directory" if fd == opened[0] else "file")
+        ):
+            failed = True
+            message = "stat failed"
+            raise OSError(message)
+        return real_fstat(fd)
+
+    def read_checked(fd: int, count: int) -> bytes:
+        assert count == secrets.MAX_TOKEN_FILE + 1
+        if fail == "read":
+            message = "read failed"
+            raise OSError(message)
+        return real_read(fd, count)
+
+    monkeypatch.setattr(secrets.os, "open", open_checked)
+    monkeypatch.setattr(secrets.os, "fstat", fstat_checked)
+    monkeypatch.setattr(secrets.os, "read", read_checked)
+    if fail == "none":
+        assert secrets.token() == "fake-linux-token"
+    else:
+        with pytest.raises(secrets.SecretsError, match="can't be opened"):
+            secrets.token()
+    for fd in opened:
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            real_fstat(fd)
+
+
+@pytest.mark.parametrize(
+    "size",
+    [secrets.MAX_TOKEN_FILE - 1, secrets.MAX_TOKEN_FILE, secrets.MAX_TOKEN_FILE + 1],
+)
+def test_linux_token_size_limit(linux_home: Path, size: int) -> None:
+    path = token_file(linux_home, "x" * size)
+    if size > secrets.MAX_TOKEN_FILE:
+        with pytest.raises(secrets.SecretsError) as caught:
+            secrets.token()
+        assert str(caught.value) == refused(
+            path, f"exceeds {secrets.MAX_TOKEN_FILE} bytes"
+        )
+    else:
+        assert secrets.token() == "x" * size

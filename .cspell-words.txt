@@ -72,6 +72,7 @@ llmx
 lockfiles
 mcpjson
 mdfile
+mkfifo
 msgfile
 mutmut
 nbbbb
@@ -85,6 +86,8 @@ nonstrings
 norc
 noremote
 nosandbox
+O_CLOEXEC
+O_NONBLOCK
 onepassword
 onepasswordconnectsdk
 oxipng

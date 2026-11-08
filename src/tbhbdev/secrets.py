@@ -75,22 +75,13 @@ class SecretsError(Exception):
     """A secrets operation failed. The message never holds a value or token."""
 
 
-def _unsafe(directory: os.stat_result, found: os.stat_result) -> str | None:
-    """What is wrong with the token file FOUND in DIRECTORY, or None."""
+def _unsafe(found: os.stat_result) -> str | None:
+    """What is wrong with the open token file FOUND, or None."""
     uid = os.geteuid()
     checks = (
         (not stat.S_ISREG(found.st_mode), "isn't a regular file"),
         (found.st_uid != uid, "isn't owned by this user"),
         (bool(found.st_mode & 0o077), "is accessible to its group or others"),
-        (
-            not stat.S_ISDIR(directory.st_mode),
-            "is in something other than a directory",
-        ),
-        (directory.st_uid != uid, "is in a directory this user doesn't own"),
-        (
-            bool(directory.st_mode & 0o077),
-            "is in a directory accessible to its group or others",
-        ),
     )
     return next((problem for bad, problem in checks if bad), None)
 
@@ -98,28 +89,44 @@ def _unsafe(directory: os.stat_result, found: os.stat_result) -> str | None:
 def _linux_token() -> str:
     """The Connect token in the current user's 0600 file.
 
-    The file opens without following a symlink, and the checks run on the
-    open descriptor, so they can't race the read.
+    The final directory and file components cannot be symlinks. Ancestor
+    directories and later permission changes are outside these checks.
     """
     path = Path.home() / LINUX_TOKEN_FILE
     fix = "run `tbhbdev host bootstrap` for this host"
     try:
-        directory = path.parent.lstat()
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        directory = os.open(
+            path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+        try:
+            found = os.fstat(directory)
+            if found.st_uid != os.geteuid() or found.st_mode & 0o077:
+                message = f"the Connect token directory {path.parent} is unsafe; {fix}"
+                raise SecretsError(message)
+            fd = os.open(
+                path.name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                dir_fd=directory,
+            )
+            try:
+                problem = _unsafe(os.fstat(fd))
+                if problem:
+                    message = f"the Connect token file {path} {problem}; {fix}"
+                    raise SecretsError(message)
+                data = os.read(fd, MAX_TOKEN_FILE + 1)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(directory)
     except OSError as exc:
         message = (
             f"the Connect token file {path} can't be opened: {exc.strerror}; {fix}"
         )
         raise SecretsError(message) from None
-    try:
-        problem = _unsafe(directory, os.fstat(fd))
-        if problem:
-            message = f"the Connect token file {path} {problem}; {fix}"
-            raise SecretsError(message)
-        data = os.read(fd, MAX_TOKEN_FILE)
-    finally:
-        os.close(fd)
-    value = data.decode(errors="replace").removesuffix("\n")
+    if len(data) > MAX_TOKEN_FILE:
+        message = f"the Connect token file {path} exceeds {MAX_TOKEN_FILE} bytes; {fix}"
+        raise SecretsError(message)
+    value = data.decode(errors="replace").strip()
     if not value:
         message = f"the Connect token file {path} is empty; {fix}"
         raise SecretsError(message)
