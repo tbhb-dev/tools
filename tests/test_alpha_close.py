@@ -33,10 +33,17 @@ class Gh:
     """A stub gh: canned view output, and a record of what ran."""
 
     view: dict[str, object] = field(
-        default_factory=lambda: {"state": "OPEN", "url": URL, "body": BODY}
+        default_factory=lambda: {
+            "state": "OPEN",
+            "url": URL,
+            "body": BODY,
+            "headRefName": "feat/x y",
+            "isCrossRepository": False,
+        }
     )
     view_rc: int = 0
     close_rc: int = 0
+    delete_rc: int = 0
     calls: list[list[str]] = field(default_factory=list)
 
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -44,6 +51,8 @@ class Gh:
         if argv[1] == "view":
             out = json.dumps(self.view) if self.view_rc == 0 else ""
             return subprocess.CompletedProcess(argv, self.view_rc, out, "no view")
+        if argv[0] == "api":
+            return subprocess.CompletedProcess(argv, self.delete_rc, "", "denied\n")
         return subprocess.CompletedProcess(argv, self.close_rc, "closed\n", "warn\n")
 
 
@@ -290,8 +299,80 @@ def test_main_reads_the_process_environment_by_default(
 
 
 def test_view_asks_gh_for_the_state_url_and_body(gh: Gh) -> None:
+    close.view("issue", 7)
+    assert gh.calls == [["issue", "view", "7", "--json", "state,url,body"]]
+
+
+def test_view_of_a_pr_also_asks_for_the_head_branch(gh: Gh) -> None:
     close.view("pr", 7)
-    assert gh.calls == [["pr", "view", "7", "--json", "state,url,body"]]
+    fields = "state,url,body,headRefName,isCrossRepository"
+    assert gh.calls == [["pr", "view", "7", "--json", fields]]
+
+
+DELETE = ["api", "-X", "DELETE", "repos/tbhb-dev/ascm/git/refs/heads/feat/x%20y"]
+PR_ARGS = ["pr", "close", "7", "--reason", "r", "--delete-branch"]
+
+
+def test_delete_branch_deletes_the_same_repo_head_after_closing(gh: Gh) -> None:
+    opened.record_opened(root(), ["tbhb-dev/ascm#7"])
+    assert close.main(PR_ARGS, env=ENV) == 0
+    assert [call[0] for call in gh.calls] == ["pr", "pr", "api"]
+    assert gh.calls[-2][:2] == ["pr", "close"]
+    assert gh.calls[-1] == DELETE
+
+
+def test_delete_branch_skips_a_fork_with_a_note(
+    gh: Gh, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh.view["isCrossRepository"] = True
+    assert close.main(PR_ARGS, env=ENV) == 0
+    assert gh.calls[-1][:2] == ["pr", "close"]
+    assert "not deleting branch feat/x y: it is on a fork" in capsys.readouterr().out
+
+
+def test_dry_run_says_it_would_delete_the_branch(
+    gh: Gh, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert close.main([*PR_ARGS, "--dry-run"], env=ENV) == 0
+    assert [call[1] for call in gh.calls] == ["view"]
+    out = capsys.readouterr().out
+    assert "would delete branch feat/x y: gh api -X DELETE repos/tbhb-dev/ascm" in out
+
+
+def test_dry_run_says_it_would_skip_a_fork(
+    gh: Gh, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh.view["isCrossRepository"] = True
+    assert close.main([*PR_ARGS, "--dry-run"], env=ENV) == 0
+    assert [call[1] for call in gh.calls] == ["view"]
+    assert "not deleting branch feat/x y: it is on a fork" in capsys.readouterr().out
+
+
+def test_without_the_flag_no_branch_is_deleted(gh: Gh) -> None:
+    assert close.main(["pr", "close", "7", "--reason", "r"], env=ENV) == 0
+    assert all(call[0] != "api" for call in gh.calls)
+
+
+def test_a_failed_delete_returns_gh_exit_code(
+    gh: Gh, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh.delete_rc = 1
+    assert close.main(PR_ARGS, env=ENV) == 1
+    assert "denied" in capsys.readouterr().err
+
+
+def test_a_failed_close_skips_the_delete(gh: Gh) -> None:
+    gh.close_rc = 4
+    assert close.main(PR_ARGS, env=ENV) == 4
+    assert all(call[0] != "api" for call in gh.calls)
+
+
+def test_issue_close_has_no_delete_branch_flag(gh: Gh) -> None:
+    argv = ["issue", "close", "3", "--reason", "completed", "--delete-branch"]
+    with pytest.raises(SystemExit) as exc:
+        close.main(argv, env=ENV)
+    assert exc.value.code == 2
+    assert gh.calls == []
 
 
 def test_the_refusal_messages_are_exact(gh: Gh) -> None:

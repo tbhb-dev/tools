@@ -19,6 +19,7 @@ import argparse
 import os
 import shlex
 import sys
+import urllib.parse
 from typing import TYPE_CHECKING
 
 from tbhbdev.alpha import identity as agent_identity
@@ -40,10 +41,15 @@ def gh(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
 def view(kind: str, number: int) -> dict[str, object]:
     """The ``state``, ``url`` and ``body`` of a pull request or an issue.
 
+    A pull request also reports ``headRefName`` and ``isCrossRepository``.
+
     Raises:
         SystemExit: gh can't read it, or it isn't open.
     """
-    done = gh([kind, "view", str(number), "--json", "state,url,body"])
+    fields = "state,url,body"
+    if kind == "pr":
+        fields += ",headRefName,isCrossRepository"
+    done = gh([kind, "view", str(number), "--json", fields])
     data = pr.gh_data(done)
     if not isinstance(data, dict):
         why = " ".join((done.stderr or done.stdout).split())
@@ -116,6 +122,26 @@ def run_close(argv: list[str], *, dry_run: bool) -> int:
     return done.returncode
 
 
+def delete_branch(data: Mapping[str, object], *, dry_run: bool) -> int:
+    """Delete the head branch of a closed pull request; the exit code.
+
+    A branch on a fork is left alone, with a note.
+    """
+    branch = str(data["headRefName"])
+    if data["isCrossRepository"]:
+        print(f"not deleting branch {branch}: it is on a fork")
+        return 0
+    ref = urllib.parse.quote(branch)
+    path = f"repos/{ref_of(str(data['url'])).split('#')[0]}/git/refs/heads/{ref}"
+    words = ["api", "-X", "DELETE", path]
+    if dry_run:
+        print(f"would delete branch {branch}: {shlex.join(['gh', *words])}")
+        return 0
+    done = gh(words)
+    print(done.stderr, end="", file=sys.stderr)
+    return done.returncode
+
+
 def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     """The command line."""
     parser = argparse.ArgumentParser(prog=prog, description="Close a PR or issue.")
@@ -127,6 +153,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         closing.add_argument("--dry-run", action="store_true")
         if kind == "pr":
             closing.add_argument("--reason", required=True)
+            closing.add_argument("--delete-branch", action="store_true")
         else:
             closing.add_argument("--reason", required=True, choices=sorted(REASONS))
             closing.add_argument("--comment")
@@ -147,9 +174,12 @@ def main(
         text = close_comment(args.reason, opener_note(data, env), line)
         words = ["pr", "close", str(args.number), "--comment", text]
     else:
-        view("issue", args.number)
+        data = view("issue", args.number)
         text = close_comment(args.comment or "Closed.", "", line)
         reason = REASONS[args.reason]
         words = ["issue", "close", str(args.number), "--reason", reason]
         words += ["--comment", text]
-    return run_close(words, dry_run=args.dry_run)
+    code = run_close(words, dry_run=args.dry_run)
+    if args.kind == "pr" and args.delete_branch and code == 0:
+        return delete_branch(data, dry_run=args.dry_run)
+    return code
