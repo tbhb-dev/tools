@@ -44,6 +44,7 @@ class Gh:
     view_rc: int = 0
     close_rc: int = 0
     delete_rc: int = 0
+    delete_stderr: str = "denied\n"
     calls: list[list[str]] = field(default_factory=list)
 
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -52,7 +53,9 @@ class Gh:
             out = json.dumps(self.view) if self.view_rc == 0 else ""
             return subprocess.CompletedProcess(argv, self.view_rc, out, "no view")
         if argv[0] == "api":
-            return subprocess.CompletedProcess(argv, self.delete_rc, "", "denied\n")
+            return subprocess.CompletedProcess(
+                argv, self.delete_rc, "", self.delete_stderr
+            )
         return subprocess.CompletedProcess(argv, self.close_rc, "closed\n", "warn\n")
 
 
@@ -359,6 +362,16 @@ def test_a_failed_delete_returns_gh_exit_code(
     gh.delete_rc = 1
     assert close.main(PR_ARGS, env=ENV) == 1
     assert "denied" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("text", ["boom", "boom\n", ""])
+def test_a_failed_delete_passes_gh_stderr_through_unchanged(
+    gh: Gh, capsys: pytest.CaptureFixture[str], text: str
+) -> None:
+    gh.delete_rc = 1
+    gh.delete_stderr = text
+    assert close.main(PR_ARGS, env=ENV) == 1
+    assert capsys.readouterr().err == "warn\n" + text
 
 
 def test_a_failed_close_skips_the_delete(gh: Gh) -> None:
