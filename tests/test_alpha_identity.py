@@ -1624,6 +1624,39 @@ def test_moves_work_tree_ignores_a_command_that_is_not_text() -> None:
     assert ai.moves_work_tree("git checkout a")
 
 
+def test_moves_work_tree_strips_harmless_redirects_before_splitting() -> None:
+    # Without the strip, the ``&`` of ``2>&1`` splits the line mid-redirect.
+    assert ai.moves_work_tree("git checkout a 2>&1")
+    assert ai.moves_work_tree("git checkout a >/dev/null 2>&1")
+    # The strip leaves nothing behind, so it cannot glue onto the verb.
+    assert ai.moves_work_tree("git checkout>/dev/null")
+    assert not ai.moves_work_tree("git checkout a > out.txt")
+
+
+@pytest.mark.parametrize(
+    ("segment", "kind"),
+    [
+        ("echo hi > out.txt", "other"),
+        ("echo 'unbalanced", "other"),
+        ("", "quiet"),
+        ("FOO=1 BAR=2", "quiet"),
+        ("ls -l", "quiet"),
+        ("FOO=1 cat x", "quiet"),
+        ("rm x", "other"),
+        ("git checkout a", "move"),
+        ("git rebase main", "move"),
+        ("git rebase --exec make main", "other"),
+        ("git rebase -x make main", "other"),
+        ("git status", "quiet"),
+        ("git -C . log", "quiet"),
+        ("git commit -m x", "other"),
+        ("git", "other"),
+    ],
+)
+def test_segment_kind_names_each_kind(segment: str, kind: str) -> None:
+    assert ai.segment_kind(segment) == kind
+
+
 def test_edit_tools_become_receipts(repo: Path) -> None:
     for name in ("a.txt", "b.ipynb", "c.txt"):
         (repo / name).write_text("x\n", encoding="utf-8")
