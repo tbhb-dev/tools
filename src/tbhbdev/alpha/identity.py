@@ -93,7 +93,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from itertools import islice, takewhile
+from itertools import dropwhile, islice, takewhile
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
@@ -998,9 +998,15 @@ MOVING_GIT = frozenset(
 # Commands that write no work-tree content, so they cannot hide an edit.
 QUIET_GIT = frozenset({"branch", "diff", "fetch", "log", "rev-parse", "show", "status"})
 QUIET_TOOLS = frozenset(
-    {"cat", "echo", "grep", "head", "ls", "pwd", "rg", "tail", "true", "wc"}
+    {"cat", "cd", "echo", "grep", "head", "ls", "pwd", "rg", "tail", "true", "wc"}
 )
-SEGMENT_BREAKS = re.compile(r"&&|\|\||[;|\n]")
+SEGMENT_BREAKS = re.compile(r"&&|\|\||[;|&\n]")
+# A command or process substitution can run any command.
+SUBSTITUTION = re.compile(r"\$\(|`|[<>]\(")
+# Leading ``VAR=value`` words only set the environment.
+ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
+# ``git rebase --exec`` runs arbitrary commands between the replayed commits.
+EXEC_FLAGS = frozenset({"-x", "--exec"})
 # Redirects that write nothing: ``2>&1`` and ``>/dev/null``.
 HARMLESS_REDIRECT = re.compile(r"\d*>&\d+|\d*>>?\s*/dev/null")
 
@@ -1021,14 +1027,15 @@ def segment_kind(segment: str) -> str:
         words = shlex.split(segment)
     except ValueError:
         return "other"
+    words = list(dropwhile(ASSIGNMENT.match, words))
     if not words:
         return "quiet"
-    if words[0] == "git":
-        verb = git_verb(words)
-        return (
-            "move" if verb in MOVING_GIT else "quiet" if verb in QUIET_GIT else "other"
-        )
-    return "quiet" if words[0] in QUIET_TOOLS else "other"
+    if words[0] != "git":
+        return "quiet" if words[0] in QUIET_TOOLS else "other"
+    verb = git_verb(words)
+    if verb == "rebase" and EXEC_FLAGS.intersection(words):
+        return "other"
+    return "move" if verb in MOVING_GIT else "quiet" if verb in QUIET_GIT else "other"
 
 
 def moves_work_tree(cmd: object) -> bool:
@@ -1040,7 +1047,10 @@ def moves_work_tree(cmd: object) -> bool:
     """
     if not isinstance(cmd, str):
         return False
-    kinds = {segment_kind(s) for s in SEGMENT_BREAKS.split(cmd)}
+    if SUBSTITUTION.search(cmd):
+        return False
+    plain = HARMLESS_REDIRECT.sub("", cmd)
+    kinds = {segment_kind(s) for s in SEGMENT_BREAKS.split(plain)}
     return "move" in kinds and "other" not in kinds
 
 
