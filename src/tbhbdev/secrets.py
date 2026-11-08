@@ -113,12 +113,15 @@ def _linux_token() -> str:
         raise SecretsError(message) from None
     try:
         problem = _unsafe(directory, os.fstat(fd))
-        data = b"" if problem else os.read(fd, MAX_TOKEN_FILE)
+        if problem:
+            message = f"the Connect token file {path} {problem}; {fix}"
+            raise SecretsError(message)
+        data = os.read(fd, MAX_TOKEN_FILE)
     finally:
         os.close(fd)
-    value = data.decode("utf-8", "replace").removesuffix("\n")
-    if problem or not value:
-        message = f"the Connect token file {path} {problem or 'is empty'}; {fix}"
+    value = data.decode(errors="replace").removesuffix("\n")
+    if not value:
+        message = f"the Connect token file {path} is empty; {fix}"
         raise SecretsError(message)
     return value
 

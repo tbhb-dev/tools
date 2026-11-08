@@ -180,8 +180,12 @@ def test_token_on_macos_without_an_entry_fails(
     monkeypatch.setattr(secrets.platform, "system", lambda: "Darwin")
     if make:
         mac_keychain(stubs, tmp_path / "home", None)
-    with pytest.raises(secrets.SecretsError, match="no Connect token"):
+    with pytest.raises(secrets.SecretsError) as caught:
         secrets.token()
+    assert str(caught.value) == (
+        "no Connect token in this user's keychain; "
+        "run `tbhbdev host bootstrap` for this host"
+    )
     # Not even security's own complaint about a missing keychain.
     assert capfd.readouterr() == ("", "")
 
@@ -1022,3 +1026,27 @@ def test_store_defaults_to_connect_with_the_keychain_token(
     monkeypatch.setenv(secrets.TEST_TOKEN_ENV, fake.token)
     assert secrets.Store().get("ops", "db").title == "db"
     assert "Authorization" not in repr(secrets.connect())
+
+
+@pytest.mark.parametrize(("returncode", "stdout"), [(0, ""), (1, "fake-token\n")])
+def test_macos_rejects_empty_or_failed_keychain_reads(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str
+) -> None:
+    monkeypatch.setattr(secrets.platform, "system", lambda: "Darwin")
+
+    def run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+    monkeypatch.setattr(secrets.subprocess, "run", run)
+    with pytest.raises(secrets.SecretsError) as caught:
+        secrets.token()
+    assert str(caught.value) == (
+        "no Connect token in this user's keychain; "
+        "run `tbhbdev host bootstrap` for this host"
+    )
+
+
+def test_linux_replaces_invalid_utf8(linux_home: Path) -> None:
+    path = token_file(linux_home)
+    path.write_bytes(b"fake-\xff-token\n")
+    assert secrets.token() == "fake-\ufffd-token"
