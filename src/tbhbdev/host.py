@@ -36,20 +36,22 @@ changed.
 
 Each host gets its own Connect token for its own vault, `[vaults] host_prefix`
 and the host's name, the vault `[vaults] all`, and any others the operator
-names, in the `agent` account's keychain. A token's vaults can't change, so a
-change is a new token: create it, install it, check that it reaches its
-vaults, then delete the old one. A token's name records its host, creation
-time and vaults, so `op connect token list` alone tells what each token
-reaches and when it expires. The agent's home records the installed token's
-name too, which is how `upgrade` knows its vaults and expiry without `op`.
+names, in the `agent` account's keychain, or on Linux its token file. A
+token's vaults can't change, so a change is a new token: create it, install
+it, check that it reaches its vaults, then delete the old one. A token's name
+records its host, creation time and vaults, so `op connect token list` alone
+tells what each token reaches and when it expires. The agent's home records
+the installed token's name too, which is how `upgrade` knows its vaults and
+expiry without `op`.
 
 A token travels only on stdin and stdout: from `op` to this process, then
-over ssh into `security` or `secret-tool`, and back out for `upgrade`'s
-check. It never sits in argv, a file or a log line. Bootstrap sends each host
-the agent's copy of the config the same way, and never prints it. The copy is
-the operator's config with `[connect] endpoints` set to `https://<host>.<suffix>`
-for each of `[connect] server_hosts`, where the suffix is the tailnet's
-MagicDNS suffix from `tailscale status`.
+over ssh into `security` or a script that writes the agent's 0600 token file
+on Linux, and back out for `upgrade`'s check. It never sits in argv or a log
+line, and on Linux the token file is the only file that holds it. Bootstrap
+sends each host the agent's copy of the config the same way, and never prints
+it. The copy is the operator's config with `[connect] endpoints` set to
+`https://<host>.<suffix>` for each of `[connect] server_hosts`, where the
+suffix is the tailnet's MagicDNS suffix from `tailscale status`.
 """
 
 from __future__ import annotations
@@ -624,13 +626,17 @@ _KC = secrets.KEYCHAIN
 _ITEM = f"-s {secrets.SERVICE} -a {secrets.ACCOUNT}"
 _MAC_UNLOCK = f'security unlock-keychain -p "" {_KC}'
 _MAC_FIND = f"security find-generic-password {_ITEM} {_KC} >/dev/null 2>&1"
-_LOOKUP = f"secret-tool lookup service {secrets.SERVICE} account {secrets.ACCOUNT}"
-
-
-def _linux(command: str) -> str:
-    # Only the import-time SCRIPTS table calls this, before mutmut can switch
-    # in a mutant, so its mutants can never run.
-    return shlex.join(secrets.linux_keyring(command))  # pragma: no mutate
+_SECRETS = f'"$HOME/{secrets.LINUX_TOKEN_FILE.parent}"'
+_TOKEN_FILE = f'"$HOME/{secrets.LINUX_TOKEN_FILE}"'
+_LINUX_DIRS = (
+    f"umask 077 && mkdir -p {AGENT_CONFIG} {_SECRETS} && chmod 0700 {_SECRETS}"
+)
+# mktemp creates the file exclusively with mode 0600, and mv replaces the
+# token in one step, so a reader never sees half a token.
+_LINUX_INSTALL = (
+    f"{_LINUX_DIRS} && tmp=$(mktemp {_SECRETS}/.connect-token.XXXXXX) && "
+    f'cat >"$tmp" && mv -f "$tmp" {_TOKEN_FILE} && [ -s {_TOKEN_FILE} ]'
+)
 
 
 # For each OS: set up the keychain; install the token from stdin; print
@@ -660,18 +666,14 @@ SCRIPTS: dict[str, dict[str, str]] = {
         ),
     },
     "linux": {
-        "ensure": _linux("true"),
-        "install": _linux(
-            f"secret-tool store --label='tbhbdev Connect token' "
-            f"service {secrets.SERVICE} account {secrets.ACCOUNT} && "
-            f"{_LOOKUP} >/dev/null"
-        ),
-        "held": _linux(
-            f"if {_LOOKUP} >/dev/null; then echo present; "
+        "ensure": _LINUX_DIRS,
+        "install": _LINUX_INSTALL,
+        "held": (
+            f"if [ -s {_TOKEN_FILE} ]; then echo present; "
             f"cat {TOKEN_NAME_FILE} 2>/dev/null || :; else echo absent; fi"
         ),
-        "read": _linux(
-            f"{{ cat {TOKEN_NAME_FILE} 2>/dev/null || echo; }} && {_LOOKUP}"
+        "read": (
+            f"{{ cat {TOKEN_NAME_FILE} 2>/dev/null || echo; }} && cat {_TOKEN_FILE}"
         ),
     },
 }

@@ -1,7 +1,7 @@
 """Tests for `tbhbdev host`.
 
-They run against stub op, tailscale, ssh, sudo, security, secret-tool,
-dbus-run-session, gnome-keyring-daemon and swift executables, and a fake
+They run against stub op, tailscale, ssh, sudo, security
+and swift executables, and a fake
 Connect API on 127.0.0.1 (see conftest.py). The stub ssh runs the remote
 command here with HOME under tmp_path, so each host's agent keychain is a file
 in the test's scratch directory.
@@ -133,11 +133,10 @@ class World:
         """The token in HOST's agent keychain, or None."""
         home = self.stubs.home(HOME_KEY[host])
         if host == "host-c":
-            path = home / ".local" / "share" / "keyrings" / "stub.json"
-            key = f"service {secrets.SERVICE} account {secrets.ACCOUNT}"
-        else:
-            path = home / "Library" / "Keychains" / f"{secrets.KEYCHAIN}-db"
-            key = f"{secrets.SERVICE}/{secrets.ACCOUNT}"
+            path = home / secrets.LINUX_TOKEN_FILE
+            return path.read_text() if path.exists() else None
+        path = home / "Library" / "Keychains" / f"{secrets.KEYCHAIN}-db"
+        key = f"{secrets.SERVICE}/{secrets.ACCOUNT}"
         if not path.exists():
             return None
         data = cast("Json", json.loads(path.read_text()))
@@ -194,10 +193,7 @@ class World:
             assert not any(v in text for v in values), call
             if any(v in str(call.get("stdin", "")) for v in values):
                 argv = cast("list[str]", call["argv"])
-                assert (call["tool"], argv[0]) in {
-                    ("security", "-i"),
-                    ("secret-tool", "store"),
-                }
+                assert (call["tool"], argv[0]) == ("security", "-i")
         for stream in (self.out, self.err):
             assert not any(v in stream for v in values)
 
@@ -609,6 +605,37 @@ def test_wrong_vaults_get_a_new_token_and_the_old_one_goes(
     world.assert_no_token_leaks()
 
 
+def test_bootstrap_writes_the_linux_token_to_a_private_file(
+    world: World, capfd: pytest.CaptureFixture[str]
+) -> None:
+    assert run(world, capfd, "bootstrap", "--host", "host-c") == 0
+    home = world.stubs.home(HOME_KEY["host-c"])
+    path = home / secrets.LINUX_TOKEN_FILE
+    assert path.read_text() == world.token_of("host-c")["token"]
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+    assert [p.name for p in path.parent.iterdir()] == ["connect-token"]
+    world.assert_no_token_leaks()
+
+
+def test_bootstrap_replaces_an_existing_linux_token(
+    world: World, capfd: pytest.CaptureFixture[str]
+) -> None:
+    home = world.stubs.home(HOME_KEY["host-c"])
+    path = home / secrets.LINUX_TOKEN_FILE
+    path.parent.mkdir(parents=True)
+    path.parent.chmod(0o755)
+    path.write_text("stale-token")
+    path.chmod(0o644)
+    inode = path.stat().st_ino
+    assert run(world, capfd, "bootstrap", "--host", "host-c") == 0
+    assert path.read_text() == world.token_of("host-c")["token"]
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+    assert path.stat().st_ino != inode
+    assert [p.name for p in path.parent.iterdir()] == ["connect-token"]
+
+
 @pytest.mark.parametrize(("days", "renewed"), [(75, False), (76, True), (91, True)])
 def test_a_token_near_expiry_is_renewed(
     world: World,
@@ -795,6 +822,7 @@ def test_bootstrap_installs_the_config_on_each_host(
         assert sorted(p.name for p in copy.parent.iterdir()) == [
             "config.toml",
             "connect-token-name",
+            *(["secrets"] if host == "host-c" else []),
         ]
     for call in world.stubs.calls():
         assert "[connect]" not in json.dumps(call["argv"])
@@ -1390,13 +1418,6 @@ def test_status_fails_on_an_unexpected_keychain_check(
     monkeypatch.setitem(host_tool.SCRIPTS["macOS"], "held", script)
     assert run(world, capfd, "status") == 1
     assert world.err == f"{PROG}: host-b: cannot check the agent keychain: \n"
-
-
-def test_linux_scripts_run_in_a_private_keyring_session() -> None:
-    assert host_tool._linux("echo hi") == (  # noqa: SLF001
-        'dbus-run-session -- sh -c \'printf "" | gnome-keyring-daemon --unlock '
-        "--components=secrets >/dev/null && echo hi'"
-    )
 
 
 # exec.
