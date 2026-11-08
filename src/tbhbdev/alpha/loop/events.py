@@ -71,7 +71,7 @@ REPOSITORY = (
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}"
 )
 SHA = r"[0-9a-f]{40}"
-CHECK_NAME = r"[A-Za-z0-9_][A-Za-z0-9 _.,/():+\[\]-]{0,199}"
+CHECK_NAME = r"[A-Za-z0-9_][A-Za-z0-9 _.,/():+=@#~'*&\[\]-]{0,199}"
 DELIVERY = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
 
 

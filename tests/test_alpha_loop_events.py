@@ -277,6 +277,42 @@ def test_invalid_body_fields(
 
 
 @pytest.mark.parametrize(
+    "name", ["test (python=3.12)", "a" * 200, *(f"test {c}" for c in "=@,+#~'*&")]
+)
+def test_check_name_punctuation_and_length(name: str) -> None:
+    attributes, body = fixture("check_run")
+    cast("dict[str, object]", body["check_run"])["name"] = name
+    result = parse_event(attributes, json.dumps(body), WATCH)
+    assert isinstance(result, Event)
+    assert result.check_name == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "test\n",
+        "test\nsecond line",
+        "test\ttab",
+        "test\rcarriage",
+        "test\vvertical",
+        "test\fform",
+        "test\x00",
+        "test\x1f",
+        "test\x7f",
+        "t\u00e9st",
+        "test\u00a0space",
+        "a" * 201,
+    ],
+)
+def test_check_name_rejects_controls_non_ascii_and_long_names(name: str) -> None:
+    attributes, body = fixture("check_run")
+    cast("dict[str, object]", body["check_run"])["name"] = name
+    assert parse_event(attributes, json.dumps(body), WATCH) == Rejection(
+        "check_run.name", "pattern"
+    )
+
+
+@pytest.mark.parametrize(
     ("kind", "path"),
     [
         ("check_suite", "check_suite.head_sha"),
