@@ -95,7 +95,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from itertools import islice, takewhile
+from itertools import dropwhile, islice, takewhile
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
@@ -990,6 +990,82 @@ def edit_paths_from_bash(resp: object) -> list[str]:
     return [p for p in dict.fromkeys(walk_paths(diff)) if p != "/dev/null"]
 
 
+# Git commands that rewrite work-tree files from a commit or the stash.
+MOVING_GIT = frozenset(
+    {
+        "am",
+        "checkout",
+        "cherry-pick",
+        "merge",
+        "pull",
+        "rebase",
+        "reset",
+        "restore",
+        "revert",
+        "stash",
+        "switch",
+    }
+)
+# Commands that write no work-tree content, so they cannot hide an edit.
+QUIET_GIT = frozenset({"branch", "diff", "fetch", "log", "rev-parse", "show", "status"})
+QUIET_TOOLS = frozenset(
+    {"cat", "cd", "echo", "grep", "head", "ls", "pwd", "rg", "tail", "true", "wc"}
+)
+SEGMENT_BREAKS = re.compile(r"&&|\|\||[;|&\n]")
+# A command or process substitution can run any command.
+SUBSTITUTION = re.compile(r"\$\(|`|[<>]\(")
+# Leading ``VAR=value`` words only set the environment.
+ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
+# ``git rebase --exec`` runs arbitrary commands between the replayed commits.
+EXEC_FLAGS = frozenset({"-x", "--exec"})
+# Redirects that write nothing: ``2>&1`` and ``>/dev/null``.
+HARMLESS_REDIRECT = re.compile(r"\d*>&\d+|\d*>>?\s*/dev/null")
+
+
+def git_verb(words: list[str]) -> str:
+    """The subcommand of ``git``, skipping its global options."""
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] in {"-C", "-c"} else 1
+    return words[i] if i < len(words) else ""
+
+
+def segment_kind(segment: str) -> str:
+    """``move``, ``quiet`` or ``other`` for one simple command."""
+    # The replacement text never holds ">", so mutating it cannot change the result.
+    if ">" in HARMLESS_REDIRECT.sub("", segment):  # pragma: no mutate
+        return "other"
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        return "other"
+    words = list(dropwhile(ASSIGNMENT.match, words))
+    if not words:
+        return "quiet"
+    if words[0] != "git":
+        return "quiet" if words[0] in QUIET_TOOLS else "other"
+    verb = git_verb(words)
+    if verb == "rebase" and EXEC_FLAGS.intersection(words):
+        return "other"
+    return "move" if verb in MOVING_GIT else "quiet" if verb in QUIET_GIT else "other"
+
+
+def moves_work_tree(cmd: object) -> bool:
+    """Whether a command only moves the work tree with git.
+
+    True when it runs a work-tree-moving git command and every other part is
+    read-only. Any other command could have written content, so a line that
+    mixes the two keeps its receipts.
+    """
+    if not isinstance(cmd, str):
+        return False
+    if SUBSTITUTION.search(cmd):
+        return False
+    plain = HARMLESS_REDIRECT.sub("", cmd)
+    kinds = {segment_kind(s) for s in SEGMENT_BREAKS.split(plain)}
+    return "move" in kinds and "other" not in kinds
+
+
 def load_edits(repo: Repo, root: str) -> list[tuple[Path, Json]]:
     """Unconsumed edit receipts for a root session."""
     out = []
@@ -1021,6 +1097,17 @@ def tool_input_of(data: Json) -> Json:
     return as_dict(data.get("tool_input")) or {}
 
 
+def write_bash_edits(
+    data: Json, env: Mapping[str, str], cmd: object, cwd: Path | None
+) -> None:
+    """Edit receipts for the paths in a Bash result, unless git only moved them."""
+    paths = edit_paths_from_bash(data.get("tool_response"))
+    if paths and not moves_work_tree(cmd):
+        ident = claude_ident(data, env)
+        for path in paths:
+            write_edit(ident, path, cwd)
+
+
 def handle_claude_bash(
     event: str, data: Json, env: Mapping[str, str], agent: str | None
 ) -> None:
@@ -1041,11 +1128,7 @@ def handle_claude_bash(
     if not (isinstance(response, dict) and response.get("backgroundTaskId")):
         finish_command(root, cmd, agent, cwd)
     if event == "PostToolUse":
-        paths = edit_paths_from_bash(data.get("tool_response"))
-        if paths:
-            ident = claude_ident(data, env)
-            for path in paths:
-                write_edit(ident, path, cwd)
+        write_bash_edits(data, env, cmd, cwd)
 
 
 def handle_claude(data: Json, env: Mapping[str, str]) -> None:
