@@ -162,7 +162,9 @@ def check_dependents(data: Mapping[str, object]) -> None:
         items: list[object] = found
         for item in items:
             if not isinstance(item, dict) or not isinstance(item.get("number"), int):
-                found = None
+                # Any non-list value sends this to the refusal below, so
+                # None and "" are equivalent here.
+                found = None  # pragma: no mutate
                 break
             numbers.append(item["number"])
     if not isinstance(found, list):

@@ -236,7 +236,8 @@ def test_a_blank_reason_or_comment_is_a_usage_error(
     with pytest.raises(SystemExit) as exc:
         close.main([*argv, blank], env=ENV)
     assert exc.value.code == 2
-    assert "must not be blank" in capsys.readouterr().err
+    last = capsys.readouterr().err.strip().splitlines()[-1]
+    assert last.endswith(f"argument {argv[-1]}: must not be blank")
     assert gh.calls == []
 
 
@@ -461,7 +462,7 @@ def test_a_failed_list_refuses(gh: Gh) -> None:
 @pytest.mark.parametrize(
     "out", ["not json", "{}", "[1]", '[{"id": 3}]', '[{"number": "3"}]']
 )
-def test_unparseable_list_output_refuses(gh: Gh, out: str) -> None:
+def test_malformed_list_output_refuses(gh: Gh, out: str) -> None:
     gh.list_out = out
     with pytest.raises(SystemExit, match="cannot list open PRs"):
         close.main(PR_ARGS, env=ENV)
