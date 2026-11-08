@@ -26,7 +26,7 @@ uv tool install git+https://github.com/tbhb-dev/tools
 
 ## Config
 
-The values of one deployment come from the user config at `$XDG_CONFIG_HOME/tbhbdev/config.toml`, where `XDG_CONFIG_HOME` defaults to `.config` in the home directory. The package has no defaults for them, and no environment variable or plugin overrides them. When the file or a required key is missing, the command fails, and its error gives the file's path and the `[table] key`. Optional settings include the `[workspace]`, `[harness]`, and `[loop]` tables and `[gitleaks] session_sockets`. Calling `alpha loop` requires its settings in `[loop]`. `tbhbdev` reads the file only when a command first needs a value, so `--help` works without it.
+The values of one deployment come from the user config at `$XDG_CONFIG_HOME/tbhbdev/config.toml`, where `XDG_CONFIG_HOME` defaults to `.config` in the home directory. The package has no defaults for them, and no environment variable or plugin overrides them. When the file or a required key is missing, the command fails, and its error gives the file's path and the `[table] key`. Optional settings include the `[workspace]` and `[loop]` tables and `[gitleaks] session_sockets`. Calling `alpha loop` requires its settings in `[loop]`. `tbhbdev` reads the file only when a command first needs a value, so `--help` works without it.
 
 ```toml
 [op]
@@ -135,7 +135,7 @@ The alpha commands write each worktree's state under `$(git rev-parse --git-dir)
 
 ### Loop configuration
 
-`tbhbdev alpha loop` reads the optional `[loop]` table from the user config. Calling this command requires the settings shown below. A missing file, table, or key, or an invalid value, fails with the path and `[loop] key`. `--help` works without config.
+`tbhbdev alpha loop` reads the optional `[loop]` table from the user config. Calling this command requires the settings shown below. An unreadable or invalid config file fails with its path. A missing table or key, an unknown key, or an invalid setting fails with the path and `[loop] key`. `--help` works without config.
 
 ```toml
 [loop]
@@ -151,11 +151,11 @@ hosts = ["example-host-a", "example-host-b"]
 
 The settings have these constraints:
 
-- `repositories` lists `owner/name` strings.
+- `repositories` lists unique `owner/name` strings.
 - `approval_command` lists the approval program followed by its arguments, preserving arguments with spaces. The loop doesn't store a token.
-- `hosts` lists host strings. These three lists must contain at least one entry, and entries must be non-blank strings.
-- `store_path` is a non-blank path string without a null byte. Relative paths refer to the working directory.
-- The interval and caps are positive integers. Booleans and fractional values fail. The spawn caps cover the total and each host, and the daily cap covers spawns per day.
+- `hosts` lists unique host strings. These three lists must contain at least one entry, and entries must be non-blank strings.
+- `store_path` is a non-blank path string without a null byte. After expanding `~`, it must be absolute.
+- The interval and caps are positive integers. Booleans and fractional values fail. The spawn caps cover the total and each host. `spawn_cap_per_host` must not exceed `spawn_cap_total`. The daily cap covers spawns per day.
 
 This slice only validates configuration. Even with valid settings, the command exits with status 1 and reports that the shadow runner isn't available. It doesn't create a store or execute an approval or other action.
 

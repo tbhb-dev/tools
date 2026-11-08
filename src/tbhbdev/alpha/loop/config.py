@@ -7,7 +7,7 @@ does not open the store, contact a host or execute the approval command.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 from tbhbdev import userconfig
@@ -54,12 +54,23 @@ def _positive_int(settings: dict[str, object], key: str) -> int:
     return value
 
 
+def _unique_strings(settings: dict[str, object], key: str) -> tuple[str, ...]:
+    entries = _strings(settings, key)
+    if len(set(entries)) != len(entries):
+        raise _error(key, "must not contain duplicates")
+    return entries
+
+
 def _store_path(settings: dict[str, object]) -> Path:
     value = _value(settings, "store_path")
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         error = _error("store_path", "must be a non-blank path string without NUL")
         raise error
-    return Path(value)
+    store = Path(value).expanduser()
+    if not store.is_absolute():
+        error = _error("store_path", "must be an absolute path")
+        raise error
+    return store
 
 
 def load() -> LoopConfig:
@@ -71,16 +82,21 @@ def load() -> LoopConfig:
     try:
         settings = userconfig.table("loop")
     except (userconfig.ConfigError, OSError, UnicodeError) as exc:
-        error = _error("repositories", f"cannot be read: {exc}")
+        error = userconfig.ConfigError(
+            f"{userconfig.path()}: config cannot be read: {exc}"
+        )
         raise error from exc
     if settings is None:
         error = _error("repositories", "is required")
         raise error
-    repositories = _strings(settings, "repositories")
+    unknown = settings.keys() - {field.name for field in fields(LoopConfig)}
+    if unknown:
+        raise _error(", ".join(sorted(unknown)), "not recognized")
+    repositories = _unique_strings(settings, "repositories")
     if not all(_REPOSITORY.fullmatch(repo) for repo in repositories):
         error = _error("repositories", "must list owner/name strings")
         raise error
-    return LoopConfig(
+    loaded = LoopConfig(
         repositories=repositories,
         approval_command=_strings(settings, "approval_command"),
         store_path=_store_path(settings),
@@ -90,5 +106,9 @@ def load() -> LoopConfig:
         spawn_cap_total=_positive_int(settings, "spawn_cap_total"),
         spawn_cap_per_host=_positive_int(settings, "spawn_cap_per_host"),
         daily_spawn_cap=_positive_int(settings, "daily_spawn_cap"),
-        hosts=_strings(settings, "hosts"),
+        hosts=_unique_strings(settings, "hosts"),
     )
+    if loaded.spawn_cap_per_host > loaded.spawn_cap_total:
+        error = _error("spawn_cap_per_host", "must not exceed spawn_cap_total")
+        raise error
+    return loaded

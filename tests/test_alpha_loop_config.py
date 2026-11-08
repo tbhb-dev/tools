@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 SETTINGS: dict[str, object] = {
     "repositories": ["example-org/example-repo", "example-org/another_repo.name"],
     "approval_command": ["example-approve", "--message", "two words", "$(literal)"],
-    "store_path": "example-state/loop.sqlite3",
+    "store_path": "/example-state/loop.sqlite3",
     "reconcile_interval_minutes": 7,
     "spawn_cap_total": 8,
     "spawn_cap_per_host": 3,
@@ -48,7 +48,7 @@ def test_loads_all_settings_without_defaults(config_file: Path) -> None:
     assert config.load() == config.LoopConfig(
         repositories=("example-org/example-repo", "example-org/another_repo.name"),
         approval_command=("example-approve", "--message", "two words", "$(literal)"),
-        store_path=Path("example-state/loop.sqlite3"),
+        store_path=Path("/example-state/loop.sqlite3"),
         reconcile_interval_minutes=7,
         spawn_cap_total=8,
         spawn_cap_per_host=3,
@@ -64,7 +64,7 @@ def test_result_is_frozen(config_file: Path) -> None:
         setattr(loaded, "daily_spawn_cap", 1)  # noqa: B010 -- test frozen assignment
 
 
-def test_preserves_approval_arguments_and_relative_store_path(
+def test_preserves_approval_arguments_and_absolute_store_path(
     config_file: Path,
 ) -> None:
     write_settings(config_file, SETTINGS)
@@ -75,7 +75,7 @@ def test_preserves_approval_arguments_and_relative_store_path(
         "two words",
         "$(literal)",
     )
-    assert loaded.store_path == Path("example-state/loop.sqlite3")
+    assert loaded.store_path == Path("/example-state/loop.sqlite3")
 
 
 @pytest.mark.parametrize("key", SETTINGS)
@@ -96,43 +96,69 @@ def test_absent_table_is_optional_until_the_loop_needs_it(
     assert str(caught.value) == f"{config_file}: [loop] repositories is required"
 
 
-def test_missing_file_names_the_file_and_key(config_file: Path) -> None:
+def test_missing_file_names_the_config(config_file: Path) -> None:
     with pytest.raises(userconfig.ConfigError) as caught:
         config.load()
     assert str(caught.value) == (
-        f"{config_file}: [loop] repositories cannot be read: "
+        f"{config_file}: config cannot be read: "
         f"{config_file} doesn't exist; create it and set [loop]"
     )
     assert not config_file.exists()
 
 
-def test_bad_table_names_the_file_and_key(config_file: Path) -> None:
+def test_bad_table_names_the_config(config_file: Path) -> None:
     config_file.write_text('loop = "invalid"\n')
     with pytest.raises(userconfig.ConfigError) as caught:
         config.load()
     assert str(caught.value) == (
-        f"{config_file}: [loop] repositories cannot be read: "
-        f"{config_file}: loop must be a table"
+        f"{config_file}: config cannot be read: {config_file}: loop must be a table"
     )
 
 
 @pytest.mark.parametrize("text", [b"[loop", b"\xff"])
 def test_invalid_file_is_a_configuration_error(config_file: Path, text: bytes) -> None:
     config_file.write_bytes(text)
-    with pytest.raises(
-        userconfig.ConfigError, match=r"\[loop\] repositories"
-    ) as caught:
+    with pytest.raises(userconfig.ConfigError) as caught:
         config.load()
-    assert str(config_file) in str(caught.value)
+    assert str(caught.value).startswith(f"{config_file}: config cannot be read: ")
+    assert "repositories" not in str(caught.value)
 
 
 def test_unreadable_file_is_a_configuration_error(config_file: Path) -> None:
     config_file.mkdir()
-    with pytest.raises(
-        userconfig.ConfigError, match=r"\[loop\] repositories"
-    ) as caught:
+    with pytest.raises(userconfig.ConfigError) as caught:
         config.load()
-    assert str(config_file) in str(caught.value)
+    assert str(caught.value).startswith(f"{config_file}: config cannot be read: ")
+    assert "repositories" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("key", "entry"),
+    [("repositories", "example-org/example-repo"), ("hosts", "example-host-a")],
+)
+def test_repositories_and_hosts_reject_duplicates(
+    config_file: Path, key: str, entry: str
+) -> None:
+    write_settings(config_file, {**SETTINGS, key: [entry] * 2})
+    with pytest.raises(userconfig.ConfigError) as caught:
+        config.load()
+    assert (
+        str(caught.value) == f"{config_file}: [loop] {key} must not contain duplicates"
+    )
+
+
+@pytest.mark.parametrize(
+    "unknown", [{"spawn_cap_totals": 8}, {"z_unknown": 1, "a_unknown": 2}]
+)
+def test_unknown_keys_name_each_key(
+    config_file: Path, unknown: dict[str, object]
+) -> None:
+    write_settings(config_file, {**SETTINGS, **unknown})
+    with pytest.raises(userconfig.ConfigError) as caught:
+        config.load()
+    assert str(caught.value) == (
+        f"{config_file}: [loop] {', '.join(sorted(unknown))} not recognized"
+    )
 
 
 @pytest.mark.parametrize("key", LIST_KEYS)
@@ -196,6 +222,15 @@ def test_one_is_a_valid_interval_and_cap(config_file: Path) -> None:
     assert loaded.daily_spawn_cap == 1
 
 
+def test_per_host_cap_cannot_exceed_total(config_file: Path) -> None:
+    write_settings(config_file, {**SETTINGS, "spawn_cap_per_host": 9})
+    with pytest.raises(userconfig.ConfigError) as caught:
+        config.load()
+    assert str(caught.value) == (
+        f"{config_file}: [loop] spawn_cap_per_host must not exceed spawn_cap_total"
+    )
+
+
 @pytest.mark.parametrize("value", [1, [], {}, "", " \t", "example\u0000path"])
 def test_store_path_requires_a_path_string(config_file: Path, value: object) -> None:
     write_settings(config_file, {**SETTINGS, "store_path": value})
@@ -209,16 +244,40 @@ def test_store_path_requires_a_path_string(config_file: Path, value: object) -> 
 def test_load_reads_the_user_config_once(
     monkeypatch: pytest.MonkeyPatch, config_file: Path
 ) -> None:
-    calls: list[str] = []
+    write_settings(config_file, SETTINGS)
+    calls: list[Path] = []
+    read_bytes = Path.read_bytes
 
-    def table(name: str) -> dict[str, object]:
-        calls.append(name)
-        return SETTINGS.copy()
+    def read(path: Path) -> bytes:
+        calls.append(path)
+        return read_bytes(path)
 
-    monkeypatch.setattr(userconfig, "table", table)
+    monkeypatch.setattr(Path, "read_bytes", read)
     config.load()
-    assert calls == ["loop"]
-    assert not config_file.exists()
+    assert calls == [config_file]
+
+
+def test_store_path_expands_home(
+    config_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    write_settings(
+        config_file, {**SETTINGS, "store_path": "~/example-state/loop.sqlite3"}
+    )
+    assert config.load().store_path == tmp_path / "example-state" / "loop.sqlite3"
+
+
+@pytest.mark.parametrize(
+    "value", ["example-state/loop.sqlite3", ".", "../loop.sqlite3"]
+)
+def test_store_path_rejects_relative_input(config_file: Path, value: str) -> None:
+    write_settings(config_file, {**SETTINGS, "store_path": value})
+    with pytest.raises(userconfig.ConfigError) as caught:
+        config.load()
+    assert (
+        str(caught.value)
+        == f"{config_file}: [loop] store_path must be an absolute path"
+    )
 
 
 def test_loop_is_registered_in_usage_and_dispatch() -> None:
@@ -236,7 +295,7 @@ def test_command_refuses_missing_configuration(
     out = capsys.readouterr()
     assert out.out == ""
     assert str(config_file) in out.err
-    assert "[loop] repositories" in out.err
+    assert "config cannot be read" in out.err
 
 
 def test_command_only_loads_configuration(
