@@ -1558,7 +1558,7 @@ REAL_BASH_EDIT_DIFF = {
     [
         "git checkout other",
         "git switch -q main && git status -sb | head -2",
-        "git pull --ff-only -q && git log --oneline -1 && git status --short | head",
+        "git pull --ff-only -q && git log -1 && git status --short | head",
         "git -C sub reset --hard HEAD 2>&1",
         "git -c core.x=1 stash pop >/dev/null",
         "git stash pop\ngrep -n a x.txt",

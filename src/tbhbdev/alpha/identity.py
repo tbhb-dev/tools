@@ -1075,6 +1075,17 @@ def tool_input_of(data: Json) -> Json:
     return as_dict(data.get("tool_input")) or {}
 
 
+def write_bash_edits(
+    data: Json, env: Mapping[str, str], cmd: object, cwd: Path
+) -> None:
+    """Edit receipts for the paths in a Bash result, unless git only moved them."""
+    paths = edit_paths_from_bash(data.get("tool_response"))
+    if paths and not moves_work_tree(cmd):
+        ident = claude_ident(data, env)
+        for path in paths:
+            write_edit(ident, path, cwd)
+
+
 def handle_claude_bash(
     event: str, data: Json, env: Mapping[str, str], agent: str | None
 ) -> None:
@@ -1095,11 +1106,7 @@ def handle_claude_bash(
     if not (isinstance(response, dict) and response.get("backgroundTaskId")):
         finish_command(root, cmd, agent, cwd)
     if event == "PostToolUse":
-        paths = edit_paths_from_bash(data.get("tool_response"))
-        if paths and not moves_work_tree(cmd):
-            ident = claude_ident(data, env)
-            for path in paths:
-                write_edit(ident, path, cwd)
+        write_bash_edits(data, env, cmd, cwd)
 
 
 def handle_claude(data: Json, env: Mapping[str, str]) -> None:
