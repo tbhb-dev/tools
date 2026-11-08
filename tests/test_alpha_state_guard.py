@@ -619,3 +619,22 @@ def test_transcript_text_uses_utf8_even_when_the_locale_does_not(
 
     monkeypatch.setattr(state_guard, "open", open_ascii, raising=False)
     assert state_guard.last_assistant_text(str(path)) == "caf\u00e9"
+
+
+@pytest.mark.parametrize("flag", ["m", "F", "C", "c", "t", "U", "S", "u"])
+def test_short_values_hide_the_rest_of_the_cluster(run: Runner, flag: str) -> None:
+    assert run(bash(f"git commit -a{flag}fixes")) == (0, "", "")
+    assert run(bash(f"git commit -as{flag}fixes")) == (2, "", TRAILER_MESSAGE)
+
+
+@pytest.mark.parametrize("flag", sorted(state_guard.SHORT_VALUES))
+def test_short_cluster_consumes_a_separate_value(run: Runner, flag: str) -> None:
+    assert run(bash(f"git commit -a{flag} -s")) == (0, "", "")
+    assert run(bash(f"git commit -a{flag} -s -s"))[0] == 2
+
+
+def test_optional_short_values_do_not_consume_the_next_word(run: Runner) -> None:
+    assert run(bash("git commit -S -s"))[0] == 2
+    assert run(bash("git commit -u -s"))[0] == 2
+    assert run(bash("git commit -mfixes")) == (0, "", "")
+    assert state_guard.short_signoff("-") == (False, False)

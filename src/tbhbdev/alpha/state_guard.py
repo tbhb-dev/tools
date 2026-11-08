@@ -62,7 +62,6 @@ EVIDENCE = re.compile(
     re.IGNORECASE,
 )
 TRAILER = re.compile(r"(?i)(signed-off-by|co-authored-by)\s*:")
-SHORT_FLAG = re.compile(r"-[a-zA-Z]*s[a-zA-Z]*")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(?:'([^']*)'|\"([^\"]*)\"|([A-Za-z0-9_]+))")
 OPEN_ITEM = re.compile(r"(?m)^- \*\*.*$")
@@ -70,7 +69,24 @@ SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n")
 SEPARATORS = frozenset("&|;\n(){}`")
 GIT_OPTIONS = frozenset({"-C", "-c"})
 WRAPPERS = frozenset({"env", "command", "exec"})
-VALUE_FLAGS = frozenset({"-m", "-F", "-t", "-C", "-c", "--message", "--file"})
+VALUE_FLAGS = frozenset(
+    {
+        "--message",
+        "--file",
+        "--template",
+        "--reuse-message",
+        "--reedit-message",
+        "--author",
+        "--date",
+        "--cleanup",
+        "--trailer",
+        "--fixup",
+        "--squash",
+        "--pathspec-from-file",
+    }
+)
+SHORT_VALUES = frozenset("mFCctU")
+SHORT_OPTIONAL_VALUES = frozenset("Su")
 MAX_QUOTED = 160
 MAX_LISTED = 3
 
@@ -156,6 +172,20 @@ def commit_arguments(simple: str) -> list[str] | None:
     return rest[1:]
 
 
+def short_signoff(word: str) -> tuple[bool, bool]:
+    """Whether WORD signs off, and whether its next argument is a value."""
+    if not word.startswith("-") or word.startswith("--"):
+        return False, False
+    for index, flag in enumerate(word[1:], start=1):
+        if flag == "s":
+            return True, False
+        if flag in SHORT_VALUES:
+            return False, index == len(word) - 1
+        if flag in SHORT_OPTIONAL_VALUES:
+            return False, False
+    return False, False
+
+
 def signs_off(arguments: list[str]) -> bool:
     """Whether a `git commit`'s ARGUMENTS add a sign-off or co-author trailer."""
     if TRAILER.search(" ".join(arguments)):
@@ -164,10 +194,13 @@ def signs_off(arguments: list[str]) -> bool:
     for word in arguments:
         if skip:
             skip = False  # pragma: no mutate -- None also means no value to skip
-        elif word == "--signoff" or SHORT_FLAG.fullmatch(word):
+            continue
+        if word == "--signoff":
             return True
-        elif word in VALUE_FLAGS:
-            skip = True
+        signed, skip = short_signoff(word)
+        if signed:
+            return True
+        skip = skip or word in VALUE_FLAGS
     return False
 
 
