@@ -7,10 +7,10 @@ value; `Store` gets, lists, creates, edits, deletes and moves items.
 The Connect token comes from the current user's own store: on macOS the
 dedicated agent keychain, on Linux the file `.config/tbhbdev/secrets/
 connect-token` (LINUX_TOKEN_FILE, under `Path.home()`, never XDG_CONFIG_HOME,
-because a configuration-management role writes to that fixed path). The
+because configuration management writes to that fixed path). The
 file is mode 0600 in a mode 0700 directory, both owned by the user, and a
-token that fails any of those checks is refused. `tbhbdev host bootstrap`
-puts the token there. The endpoints come from the user
+token that fails any of those checks is refused. Configuration management
+is the only writer of the Linux token file. The endpoints come from the user
 config's `[connect] endpoints` (see userconfig.py), which bootstrap writes on
 each agent host, and are tried in order.
 
