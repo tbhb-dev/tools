@@ -71,6 +71,7 @@ SYSTEM_TOOLS = (
     "mv",
     "rm",
     "sh",
+    "stat",
     "true",
 )
 # The fake Connect API's own token, which reaches every vault.
