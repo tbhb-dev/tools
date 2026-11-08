@@ -1533,6 +1533,86 @@ def test_bash_edit_diffs_become_receipts(repo: Path) -> None:
     assert len(receipts_of(repo, SESSION_HASH)) == 1
 
 
+REAL_BASH_EDIT_DIFF = {
+    "files": [
+        {
+            "filePath": "x.txt",
+            "hunks": [
+                {
+                    "oldStart": 1,
+                    "oldLines": 1,
+                    "newStart": 1,
+                    "newLines": 1,
+                    "lines": ["-a", "+b"],
+                }
+            ],
+        }
+    ],
+    "moreFiles": 0,
+    "shared": True,
+}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git checkout other",
+        "git switch -q main && git status -sb | head -2",
+        "git pull --ff-only -q && git log --oneline -1 && git status --short | head",
+        "git -C sub reset --hard HEAD 2>&1",
+        "git -c core.x=1 stash pop >/dev/null",
+        "git stash pop\ngrep -n a x.txt",
+    ],
+)
+def test_git_work_tree_moves_write_no_receipt(repo: Path, command: str) -> None:
+    (repo / "x.txt").write_text("x\n", encoding="utf-8")
+    base = claude_data(repo)
+    pre = {**base, "tool_input": {"command": command}}
+    ai.handle_claude(pre, CLAUDE_HOOK_ENV)
+    post = {
+        **pre,
+        "hook_event_name": "PostToolUse",
+        "tool_response": {"bashEditDiff": REAL_BASH_EDIT_DIFF},
+    }
+    ai.handle_claude(post, CLAUDE_HOOK_ENV)
+    assert receipts_of(repo, SESSION_HASH) == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed -i s/a/b/ x.txt",
+        "ruff format x.txt",
+        "printf b > x.txt",
+        "git checkout other && sed -i s/a/b/ x.txt",
+        "git checkout other && ruff format x.txt",
+        "git checkout other > x.txt",
+        "git status",
+        "git",
+        "git -C",
+        "echo 'unclosed",
+        "",
+    ],
+)
+def test_other_bash_writes_still_get_a_receipt(repo: Path, command: str) -> None:
+    (repo / "x.txt").write_text("x\n", encoding="utf-8")
+    base = claude_data(repo)
+    post = {
+        **base,
+        "hook_event_name": "PostToolUse",
+        "tool_input": {"command": command},
+        "tool_response": {"bashEditDiff": REAL_BASH_EDIT_DIFF},
+    }
+    ai.handle_claude(post, CLAUDE_HOOK_ENV)
+    assert [r["path"] for r in receipts_of(repo, SESSION_HASH)] == ["x.txt"]
+
+
+def test_moves_work_tree_ignores_a_command_that_is_not_text() -> None:
+    assert not ai.moves_work_tree(None)
+    assert not ai.moves_work_tree(["git", "checkout"])
+    assert ai.moves_work_tree("git checkout a")
+
+
 def test_edit_tools_become_receipts(repo: Path) -> None:
     for name in ("a.txt", "b.ipynb", "c.txt"):
         (repo / name).write_text("x\n", encoding="utf-8")
