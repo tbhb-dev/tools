@@ -57,7 +57,11 @@ name = os.path.basename(__file__).removesuffix(".py")
 spec = json.load(open(os.path.join(here, name + ".spec")))
 called = " ".join(sys.argv[1:])
 cases = spec.get("cases", {{}})
-spec = next((v for k, v in cases.items() if called.startswith(k)), spec)
+if called == "pr view --json number,state,url":
+    missing = {{"rc": 1, "stdout": "", "stderr": "No Pull Requests Found"}}
+    spec = cases.get(called, missing)
+else:
+    spec = next((v for k, v in cases.items() if called.startswith(k)), spec)
 draft = ".github/PULL_REQUEST_DRAFT.md"
 record = {{
     "argv": sys.argv[1:],
@@ -1240,7 +1244,7 @@ def test_the_posting_session_dedupes_against_its_commit_trailer(
     merged = pr.merge_trailers(pr.branch_trailers("main"), pr.posting_value(agent))
     assert merged == [("Generated-by", trailer)]
     assert run_main("create", env=agent) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     session = f"session={agent_identity.sha256_64('raw-session')}"
     lines = [line for line in str(call["stdin"]).splitlines() if session in line]
     assert lines == [OPENER, f"Generated-by: {trailer}"]
@@ -1347,7 +1351,7 @@ def test_create_runs_gh_with_the_frontmatter(
     world.git("branch", "dev")
     write_draft(world, meta + BASE)
     assert run_main("create") == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert call["argv"] == [
         "pr", "create", "--title", "fix: x", "--body-file", "-",
         "--base", "dev", "--draft",
@@ -1366,7 +1370,7 @@ def test_create_runs_gh_with_the_frontmatter(
 def test_create_defaults(world: World) -> None:
     write_draft(world)
     assert run_main("create") == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert call["argv"] == [
         "pr",
         "create",
@@ -1387,9 +1391,12 @@ def test_create_passes_gh_errors_through(
     write_draft(world)
     assert run_main("create") == 1
     captured = capsys.readouterr()
-    assert captured.err == message
+    assert captured.err == (
+        message + "gh pr create failed; run `tbhbdev alpha pr edit --pr <n>` "
+        "to apply the draft\n"
+    )
     assert captured.out == ""
-    assert len(world.calls("gh")) == 1
+    assert len(world.calls("gh")) == 2
     assert world.git("status", "--porcelain", "--ignored").count("push") == 0
 
 
@@ -1405,7 +1412,6 @@ def test_create_stops_on_problems(
 def test_dry_run_prints_argv_and_body(
     world: World, capsys: pytest.CaptureFixture[str], agent: dict[str, str]
 ) -> None:
-    (world.bin / "gh").unlink()
     write_draft(world, "---\nlabels: [bug]\n---\n" + BASE)
     assert run_main("create", "--dry-run", env=agent) == 0
     out = capsys.readouterr().out
@@ -2185,7 +2191,7 @@ def test_create_writes_opened_by_first_and_the_ledger(
     world.commit(f"one\n\nGenerated-by: {GEN}")
     write_draft(world)
     assert run_main("create", env=agent) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert str(call["stdin"]).endswith(
         f"\nv\n\n{OPENER}\nGenerated-by: {GEN}\nAssisted-by: {POSTING}\n"
     )
@@ -2205,7 +2211,7 @@ def test_a_subagent_opens_under_its_root(world: World, agent: dict[str, str]) ->
     child = agent_identity.sha256_64("agent-raw")
     agent_identity.write_user_record(child, {"root": ROOT, "model": "claude-x"})
     assert run_main("create", env={**agent, "ASCM_AGENT_ID": child}) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert str(call["stdin"]).endswith(
         f"\n\n{OPENER}\nAssisted-by: LLM harness=claude-code:2.1.0;"
         f"model=anthropic:claude-x;session={ROOT};subagent={child};surface=cli\n"
@@ -2221,7 +2227,7 @@ def test_no_root_means_no_line_and_no_ledger(world: World, env: dict[str, str]) 
     conv = agent_identity.sha256_64("conv-raw")
     agent_identity.write_user_record(conv, {"model": "gemini-x"})
     assert run_main("create", env=env) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert "Opened-by" not in str(call["stdin"])
     assert not ledgers(world).exists()
 
@@ -2229,11 +2235,14 @@ def test_no_root_means_no_line_and_no_ledger(world: World, env: dict[str, str]) 
 def test_a_failed_create_records_nothing(
     world: World, agent: dict[str, str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    world.fake("gh", rc=1, stdout="https://github.com/tbhb-dev/ascm/pull/1\n")
+    world.fake("gh", rc=1, stdout="https://github.com/tbhb-dev/example/pull/1\n")
     write_draft(world)
     assert run_main("create", env=agent) == 1
     assert not ledgers(world).exists()
-    assert capsys.readouterr().err == ""
+    assert capsys.readouterr().err == (
+        "https://github.com/tbhb-dev/example/pull/1\n"
+        "gh pr create failed; run `tbhbdev alpha pr edit --pr 1` to apply the draft\n"
+    )
 
 
 def test_create_without_a_url_records_nothing(
@@ -2542,7 +2551,7 @@ def test_an_opener_without_a_model_gets_no_line_and_no_ledger(
     seed_session(world, None)
     write_draft(world)
     assert run_main("create", env={**agent, "ASCM_AGENT_ID": child}) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert "Opened-by" not in str(call["stdin"])
     assert not ledgers(world).exists()
     value = f"LLM harness=claude-code:2.1.0;session={ROOT};surface=cli"
@@ -2576,3 +2585,125 @@ def test_backfill_is_quiet_below_the_limits(
     world.fake("gh", cases=BACKFILL_CASES)
     assert run_main("backfill-opened", "tbhb-dev") == 0
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_create_refuses_an_open_pr(
+    world: World, capsys: pytest.CaptureFixture[str], dry_run: bool
+) -> None:
+    world.fake(
+        "gh",
+        cases={
+            "pr view --json number,state,url": {
+                "rc": 0,
+                "stdout": json.dumps(
+                    {
+                        "number": 17,
+                        "state": "OPEN",
+                        "url": "https://github.com/tbhb-dev/example/pull/17",
+                    }
+                ),
+                "stderr": "",
+            }
+        },
+    )
+    write_draft(world)
+    assert run_main("create", *(["--dry-run"] if dry_run else [])) == 1
+    assert capsys.readouterr() == (
+        "",
+        (
+            "error: PR 17 (https://github.com/tbhb-dev/example/pull/17) "
+            "is already open; "
+            "run `tbhbdev alpha pr edit --pr 17` to apply the draft\n"
+        ),
+    )
+    assert [call["argv"] for call in world.calls("gh")] == [
+        ["pr", "view", "--json", "number,state,url"]
+    ]
+
+
+@pytest.mark.parametrize("state", ["CLOSED", "MERGED"])
+def test_create_after_a_finished_pr(world: World, state: str) -> None:
+    world.fake(
+        "gh",
+        stdout="https://github.com/tbhb-dev/example/pull/18\n",
+        cases={
+            "pr view --json number,state,url": {
+                "rc": 0,
+                "stdout": json.dumps({"number": 17, "state": state, "url": "old"}),
+                "stderr": "",
+            }
+        },
+    )
+    write_draft(world)
+    assert run_main("create") == 0
+    view, create = world.calls("gh")
+    assert view["stdin"] == ""
+    assert cast("list[str]", create["argv"])[:2] == ["pr", "create"]
+
+
+@pytest.mark.parametrize(
+    ("rc", "stdout", "stderr"),
+    [
+        (1, "", "authentication failed"),
+        (0, "not JSON", ""),
+        (0, "[]", ""),
+        (0, "", "no pull requests found"),
+    ],
+)
+def test_create_stops_when_the_lookup_fails(
+    world: World, capsys: pytest.CaptureFixture[str], rc: int, stdout: str, stderr: str
+) -> None:
+    world.fake(
+        "gh",
+        cases={
+            "pr view --json number,state,url": {
+                "rc": rc,
+                "stdout": stdout,
+                "stderr": stderr,
+            }
+        },
+    )
+    write_draft(world)
+    assert run_main("create") == 1
+    assert capsys.readouterr() == (
+        "",
+        f"cannot check for an open PR: {stderr or stdout}\n",
+    )
+    assert len(world.calls("gh")) == 1
+
+
+@pytest.mark.parametrize("rc", [0, 1])
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.parametrize("url", ["", "https://github.com/tbhb-dev/example/pull/17"])
+def test_create_rejects_already_exists(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    rc: int,
+    stream: str,
+    url: str,
+) -> None:
+    output = f"a pull request Already Exists {url}\n"
+    answer: dict[str, object] = {"rc": rc, "stdout": "", "stderr": "", stream: output}
+    world.fake("gh", cases={"pr create": answer})
+    write_draft(world)
+    assert run_main("create") == 1
+    number = "17" if url else "<n>"
+    assert capsys.readouterr() == (
+        "",
+        output
+        + (
+            f"gh pr create failed; run `tbhbdev alpha pr edit --pr {number}` "
+            "to apply the draft\n"
+        ),
+    )
+    assert not ledgers(world).exists()
+
+
+def test_create_passes_success_stderr_through(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.fake("gh", stdout="created\n", stderr="warning\n")
+    write_draft(world)
+    assert run_main("create") == 0
+    assert capsys.readouterr() == ("created\n", "warning\n")
