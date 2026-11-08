@@ -108,7 +108,7 @@ def claim_reason(who: str, bad: list[str]) -> str:
     return (
         f"state-guard: {who} makes a status claim without evidence. Add the "
         "PR number and sha, the merge sha, command output or a log path, "
-        "attribute it ('ops says ...'), or say it is unverified. Offending: "
+        "attribute it ('the reviewer says ...'), or say it is unverified. Offending: "
         + " | ".join(bad[:MAX_LISTED])
     )
 

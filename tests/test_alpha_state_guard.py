@@ -154,7 +154,7 @@ def test_an_unsupported_claims_claim_is_blocked(run: Runner) -> None:
     assert err == (
         "state-guard: this message makes a status claim without evidence. Add "
         "the PR number and sha, the merge sha, command output or a log path, "
-        "attribute it ('ops says ...'), or say it is unverified. Offending: "
+        "attribute it ('the reviewer says ...'), or say it is unverified. Offending: "
         f"{UNSUPPORTED_CLAIM}\n"
     )
 
@@ -177,8 +177,8 @@ def test_at_most_three_offenders_are_listed_and_each_is_cut(run: Runner) -> None
         "It was merged in a1b2c3d.",
         "It was merged in 0123456789abcdef0123456789abcdef01234567.",
         "PR #12 was merged.",
-        "Ops says it was applied.",
-        "Ops said it was applied.",
+        "The reviewer says it was applied.",
+        "The reviewer said it was applied.",
         "The host reports it was applied.",
         "It was applied; see run.log for details.",
         "It was applied, as `make check` shows.",
@@ -322,8 +322,8 @@ def test_other_commands_pass(run: Runner, command: str) -> None:
     assert run(bash(command)) == (0, "", "")
 
 
-C = "git" + " commit"  # the live hook's own test table, as vectors
-LIVE_TABLE = {
+C = "git" + " commit"  # the shared command-matching table
+COMMAND_TABLE = {
     f"{C} -s -m x": 2,
     f"cd r && {C} -s -m x": 2,
     "git -C repo commit --signoff -m x": 2,
@@ -338,8 +338,8 @@ LIVE_TABLE = {
 }
 
 
-@pytest.mark.parametrize(("command", "status"), LIVE_TABLE.items())
-def test_the_port_agrees_with_the_live_hooks_table(
+@pytest.mark.parametrize(("command", "status"), COMMAND_TABLE.items())
+def test_the_shared_command_matching_table(
     run: Runner, command: str, status: int
 ) -> None:
     assert run(bash(command))[0] == status
