@@ -63,6 +63,12 @@ records are read from every worktree's store, with the committing worktree's
 own record winning. Edit receipts and claims are only ever read from the
 committing worktree's own store.
 
+Command hooks also register their store under ``cmd-stores/<root-hex>/`` in
+the user's private store. Readers follow those references for commits in
+another clone, even when its command copy is missing from the user's store.
+Claude commits also search the root session's project stores, so existing
+records remain discoverable when user-state writes failed.
+
 Codex rollout scan offsets belong to the rollout, not a worktree, so they live
 in the store every worktree shares, ``$(git rev-parse --git-common-dir)/tbhb-alpha/``:
 
@@ -634,18 +640,42 @@ def write_user_record(sid_hash: str, updates: Json) -> None:
         return
 
 
-def load_record(hashed: str, cwd: Path | None = None) -> Json:
+def session_stores(
+    root: str, cwd: Path | None = None, *, project: Path | None = None
+) -> list[Path]:
+    """The root project's stores and registered stores, with this clone last."""
+    local = stores(cwd)
+    registered = (
+        [store for store in stores(project) if store not in local] if project else []
+    )
+    for path in (user_store() / "cmd-stores" / hx(root)).glob("*.json"):
+        store = as_str(read_record(path).get("store"))
+        if store and Path(store) not in local and Path(store) not in registered:
+            registered.append(Path(store))
+    return [*registered, *local]
+
+
+def load_record(
+    hashed: str,
+    cwd: Path | None = None,
+    *,
+    root: str | None = None,
+    project: Path | None = None,
+) -> Json:
     """An agent's session record, merged across worktrees; an empty dict if none.
 
     The record in the worktree containing ``cwd`` wins, field by field, and
     the user's store fills in the rest, for a session that commits in another
-    clone. A ``/model`` switch is the exception: its model and time come as a
-    pair from whichever store has the latest one, because the session may have
-    switched again while its hooks ran in another worktree.
+    clone. Registered command stores are also searched; ``root`` names the
+    owning session when loading a child. A ``/model`` switch is the exception:
+    its model and time come as a pair from whichever store has the latest one,
+    because the session may have switched again while its hooks ran in another
+    worktree.
     """
     records = [read_record(user_store() / f"{hx(hashed)}.json")]
     records += [
-        read_record(store / "sessions" / f"{hx(hashed)}.json") for store in stores(cwd)
+        read_record(store / "sessions" / f"{hx(hashed)}.json")
+        for store in session_stores(root or hashed, cwd, project=project)
     ]
     merged: Json = {}
     for rec in records:
@@ -765,6 +795,11 @@ def record_command(
         # hides equivalent mutants.
         user_cmds.mkdir(mode=0o700, parents=True, exist_ok=True)  # pragma: no mutate
         user_store().chmod(0o700)
+        references = user_store() / "cmd-stores" / hx(root)
+        references.mkdir(mode=0o700, parents=True, exist_ok=True)
+        write_private_json(
+            references / f"{hx(sha256_64(str(state)))}.json", {"store": str(state)}
+        )
         write_private_json(user_cmds / name, rec)
     except OSError:
         return
@@ -860,32 +895,55 @@ def command_candidates(cmdline: str) -> list[str]:
     return [tokens[i + 1] for i, tok in enumerate(tokens[:-1]) if tok == "eval"]
 
 
-def match_command_agent(
+class AttributionError(Exception):
+    """A plausible child committer could not be identified safely."""
+
+
+def recent_commands(
+    root: str, cwd: Path | None, now: float, *, project: Path | None = None
+) -> list[Json]:
+    """Pending commands for this root that overlap the attribution window."""
+    return [
+        rec
+        for store in [*session_stores(root, cwd, project=project), user_store()]
+        for _, rec in command_records(store, root)
+        if 0 <= now - rec_ts(rec) < CMD_WINDOW
+    ]
+
+
+def match_command_agent(  # noqa: PLR0913 -- lookup inputs and commit policy
     root: str,
     command_lines: list[str],
     cwd: Path | None = None,
     now: float | None = None,
+    *,
+    strict: bool = False,
+    project: Path | None = None,
 ) -> tuple[str | None, bool]:
-    """Match the process ancestry to a recorded command: (agent hash, ambiguous).
+    """Match ancestry to a recorded command: (agent hash, ambiguous).
 
-    None means the main agent (or no match).
+    None means the main agent (or no match). Strict commit-time matching refuses
+    an unresolved identity while a child command overlaps the time window.
     """
-    found = [*stores(cwd), user_store()]
-    now = now or time.time()
+    records = recent_commands(
+        root, cwd, time.time() if now is None else now, project=project
+    )
     hashes = {
         h
         for line in command_lines
         for cand in command_candidates(line)
         for h in cmd_hashes(cand)
     }
-    agents = {
-        as_str(rec.get("agent"))
-        for store in found
-        for _, rec in command_records(store, root)
-        if now - rec_ts(rec) < CMD_WINDOW and hashes & rec_hashes(rec)
-    }
+    agents = {as_str(rec.get("agent")) for rec in records if hashes & rec_hashes(rec)}
     if len(agents) == 1:
         return agents.pop(), False
+    if strict and any(as_str(rec.get("agent")) for rec in records):
+        message = (
+            "Attribution couldn't be resolved for a commit made while a subagent "
+            "was active. Retry the commit from the main session after the "
+            "subagent's command finishes."
+        )
+        raise AttributionError(message)
     return None, bool(agents)  # exactly one agent returned above
 
 
@@ -1481,16 +1539,21 @@ def claude_committer(
 ) -> Committer:
     """The Claude agent running git commit, found by process-ancestry matching."""
     root = sha256_64(raw)
-    root_rec = load_record(root)
+    project_path = env.get("CLAUDE_PROJECT_DIR")
+    project = Path(project_path) if project_path else None
+    root_rec = load_record(root, project=project)
     ver = version(CLAUDE, env) or root_rec.get("version")
     surf = surface(CLAUDE, env)
     if env.get(AGENT_ENV) and HASH_RE.fullmatch(env[AGENT_ENV]):
         sub = env[AGENT_ENV]  # rewrite path (comparison only)
     else:
         sub, _ambiguous = match_command_agent(
-            root, ancestry() if command_lines is None else command_lines
+            root,
+            ancestry() if command_lines is None else command_lines,
+            strict=True,
+            project=project,
         )
-    child_rec: Json = load_record(sub) if sub else {}
+    child_rec: Json = load_record(sub, root=root, project=project) if sub else {}
     if sub and child_rec.get("root") != root:
         # Unknown or foreign agent record: treat as the main agent.
         sub, child_rec = None, dict[str, object]()
@@ -2339,6 +2402,9 @@ def run(argv: list[str], env: Mapping[str, str]) -> int:
     """
     try:
         return main(argv, env)
+    except AttributionError as exc:
+        print(f"{PROG}: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:  # noqa: BLE001 -- every failure becomes one clear line
         where = traceback.extract_tb(exc.__traceback__)[-1]
         print(
