@@ -89,3 +89,16 @@ def test_guard_runs_from_the_top(
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({})))
     assert cli.main(["alpha", "guard-gh-pr"]) == 0
     assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("command", ["state-guard", "session-context"])
+def test_harness_hooks_run_from_the_top_without_config(
+    command: str,
+    config_file: object,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert config_file is not None
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({})))
+    assert cli.main(["alpha", command]) == 0
+    assert capsys.readouterr() == ("", "")
