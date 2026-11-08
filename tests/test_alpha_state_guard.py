@@ -759,3 +759,49 @@ def test_claim_and_signoff_checks_run_outside_a_repository_without_config(
     assert run(bash("git commit -s")) == (2, "", TRAILER_MESSAGE)
     assert run(stop(last_assistant_message=UNSUPPORTED_CLAIM))[1] != ""
     assert run({"hook_event_name": "SessionStart"}) == (0, "", "")
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("bash -c", None),
+        ('bash -x "git commit -s"', None),
+        ('bash -x -c "git commit -s"', "git commit -s"),
+    ],
+)
+def test_shell_script_requires_c_and_a_following_argument(
+    command: str, expected: str | None
+) -> None:
+    assert state_guard.shell_script(command) == expected
+
+
+@pytest.mark.parametrize(
+    ("word", "expected"),
+    [
+        ("-s", (True, False)),
+        ("message", (False, False)),
+        ("--amend", (False, False)),
+        ("-m", (False, True)),
+        ("-mfixes", (False, False)),
+        ("-S", (False, False)),
+    ],
+)
+def test_short_option_parser_reports_value_consumption(
+    word: str, expected: tuple[bool, bool]
+) -> None:
+    assert state_guard.short_signoff(word) == expected
+
+
+@pytest.mark.parametrize("script", ["echo X", "echo (x)", r"echo '\'", r"echo \)"])
+def test_substitution_closes_after_literal_characters(script: str) -> None:
+    text = f"$({script})tail"
+    assert state_guard.quoted_substitution(text, 0) == (script, len(script) + 3)
+
+
+def test_scanning_continues_after_a_quoted_substitution(run: Runner) -> None:
+    assert run(bash('echo "$(git status)"; git commit -s')) == (2, "", TRAILER_MESSAGE)
+    assert run(bash('echo "$(git status) $(git commit -s)"')) == (
+        2,
+        "",
+        TRAILER_MESSAGE,
+    )

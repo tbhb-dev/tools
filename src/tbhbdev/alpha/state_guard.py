@@ -129,24 +129,29 @@ def without_heredocs(command: str) -> str:
     return "\n".join(kept)
 
 
+def shell_quote(quote: str, char: str) -> str:
+    """The quote state after CHAR opens, closes or continues a quoted word."""
+    if quote:
+        return "" if char == quote else quote
+    return char
+
+
 def quoted_substitution(command: str, start: int) -> tuple[str, int]:
     """The script and next position of a substitution inside double quotes."""
     backtick = command[start] == "`"
     begin = start + (1 if backtick else 2)
     depth = 1
-    quote = ""
+    quote = ""  # pragma: no mutate -- None has the same initial quote state
     i = begin
     while i < len(command):
         char = command[i]
         if char == "\\" and quote != "'":
             i += 2
             continue
-        if quote:
-            quote = "" if char == quote else quote
+        if quote or char in "'\"":
+            quote = shell_quote(quote, char)
         elif char == "`" and backtick:
             return command[begin:i], i + 1
-        elif char in "'\"":
-            quote = char
         elif not backtick:
             depth += (char == "(") - (char == ")")
             if depth == 0:
@@ -171,11 +176,8 @@ def simple_commands(command: str) -> list[str]:
             script, i = quoted_substitution(command, i)
             found.extend(simple_commands(script))
             continue
-        if quote:
-            quote = "" if char == quote else quote
-            current.append(char)
-        elif char in "'\"":
-            quote = char
+        if quote or char in "'\"":
+            quote = shell_quote(quote, char)
             current.append(char)
         elif char in SEPARATORS:
             found.append("".join(current))
