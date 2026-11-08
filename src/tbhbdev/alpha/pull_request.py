@@ -26,7 +26,11 @@ any.
 `` (#N)`` and the commit header must fit 72), checks the H2 sections against
 .github/pull-request-sections.toml (names, order, required, word limits), rejects
 leftover HTML comments and bare ``#N`` references, and lints the description
-with vale, cspell and rumdl under the repository's own configs.
+with vale, cspell and rumdl under the repository's own configs. The vale
+style packages under .vale/ are gitignored, so a fresh worktree lacks them:
+when a style that .vale.ini's ``BasedOnStyles`` names is missing, ``check``
+runs the repository's pinned ``bazelisk run //:vale_sync`` once, and reports
+one problem instead of linting with vale if the styles are still missing.
 
 ``hook`` is the harnesses' PostToolUse entry point (payload on stdin). Outside
 a tbhb-dev repository it exits 0 at once. When the tool call wrote the draft of
@@ -61,6 +65,7 @@ reaches gh's ``--limit``, since the rest may be missing.
 """
 
 import argparse
+import configparser
 import json
 import os
 import re
@@ -99,6 +104,10 @@ CONFIGS = (".vale.ini", ".vale", ".cspell.jsonc", ".cspell-words.txt", ".rumdl.t
 # A squash merge appends " (#N)" and the header must fit 72; 64 leaves room
 # for a pull request number of up to four digits.
 MAX_TITLE = 72 - len(" (#9999)")
+BAZEL = "bazelisk"
+VALE_SYNC = "//:vale_sync"
+# Vale's built-in style, which no package provides.
+BUILTIN_STYLE = "Vale"
 GH = "gh"
 CLAUDE = "claude"
 CODEX = "codex"
@@ -600,6 +609,39 @@ LINTERS: tuple[tuple[str, tuple[str, ...], Callable[[str], list[Problem]]], ...]
 )
 
 
+def vale_styles(top: Path) -> list[str]:
+    """The styles .vale.ini's ``BasedOnStyles`` names, in any section."""
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    # Vale's global keys come before any section header.
+    parser.read_string("[global]\n" + (top / ".vale.ini").read_text())
+    named = (
+        name.strip()
+        for section in parser.values()
+        for name in section.get("basedonstyles", "").split(",")
+    )
+    return sorted({name for name in named if name and name != BUILTIN_STYLE})
+
+
+def missing_styles(top: Path) -> list[str]:
+    """The named styles with no directory under .vale/."""
+    return [name for name in vale_styles(top) if not (top / ".vale" / name).is_dir()]
+
+
+def style_problem(top: Path) -> str | None:
+    """Sync missing vale styles once; why vale can't run, or None."""
+    if not missing_styles(top):
+        return None
+    done = run([find_tool(BAZEL), "run", VALE_SYNC], cwd=top)
+    still = missing_styles(top)
+    if not still:
+        return None
+    why = " ".join((done.stderr or done.stdout).split())
+    return (
+        f"vale styles missing from .vale/: {', '.join(still)}; "
+        f"`{BAZEL} run {VALE_SYNC}` exited {done.returncode}: {why}"
+    )
+
+
 def lint(rendered: Sequence[str], first: int) -> list[Problem]:
     """Lint the title and description with the repository's own configs.
 
@@ -613,6 +655,7 @@ def lint(rendered: Sequence[str], first: int) -> list[Problem]:
         if not (top / name).exists():
             message = f"missing lint config {name} in {top}"
             raise SystemExit(message)
+    styles = style_problem(top)
     problems: list[Problem] = []
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
@@ -621,6 +664,9 @@ def lint(rendered: Sequence[str], first: int) -> list[Problem]:
         (work / DRAFT).parent.mkdir()
         (work / DRAFT).write_text("\n".join(rendered) + "\n")
         for name, exe, args, parse in tools:
+            if name == "vale" and styles:
+                problems.append((first, f"vale: {styles}"))
+                continue
             done = run([exe, *args, str(DRAFT)], cwd=work)
             found = parse(done.stdout)
             # Exit 1 means findings in all three tools; anything else, or
