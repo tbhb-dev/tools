@@ -207,3 +207,88 @@ def test_the_real_gh_runs_through_pr_run(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(pr, "run", fake_run)
     assert close.gh(["pr", "view"]).returncode == 0
     assert seen == [["/bin/gh", "pr", "view"]]
+
+
+def test_the_parser_describes_itself_and_names_its_prog(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = close.build_parser("p")
+    assert parser.prog == "p"
+    assert parser.description == "Close a PR or issue."
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
+    assert "Close a PR or issue." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kind", ["pr", "issue"])
+def test_the_parser_requires_a_reason(
+    kind: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        close.build_parser("p").parse_args([kind, "close", "3"])
+    assert exc.value.code == 2
+    assert "--reason" in capsys.readouterr().err
+
+
+def test_the_parser_requires_a_kind_and_a_verb() -> None:
+    for argv in ([], ["pr"], ["issue"]):
+        with pytest.raises(SystemExit):
+            close.build_parser("p").parse_args(argv)
+
+
+def test_the_parser_reads_the_pr_options() -> None:
+    args = close.build_parser("p").parse_args(
+        ["pr", "close", "3", "--reason", "r", "--dry-run"]
+    )
+    assert (args.kind, args.verb, args.number, args.reason, args.dry_run) == (
+        "pr",
+        "close",
+        3,
+        "r",
+        True,
+    )
+
+
+def test_the_parser_reads_the_issue_options() -> None:
+    args = close.build_parser("p").parse_args(
+        ["issue", "close", "3", "--reason", "completed", "--comment", "c"]
+    )
+    assert (args.kind, args.reason, args.comment, args.dry_run) == (
+        "issue",
+        "completed",
+        "c",
+        False,
+    )
+
+
+def test_main_names_the_prog_in_usage(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        close.main(["--help"], prog="myprog", env=ENV)
+    assert capsys.readouterr().out.startswith("usage: myprog ")
+
+
+def test_main_reads_the_process_environment_by_default(
+    gh: Gh, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh.view = {"state": "OPEN", "url": "x"}
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "raw-session")
+    argv = ["issue", "close", "3", "--reason", "completed", "--dry-run"]
+    assert close.main(argv) == 0
+    assert capsys.readouterr().out.startswith("gh issue close 3 ")
+
+
+def test_view_asks_gh_for_the_state_url_and_body(gh: Gh) -> None:
+    close.view("pr", 7)
+    assert gh.calls == [["pr", "view", "7", "--json", "state,url,body"]]
+
+
+def test_the_refusal_messages_are_exact(gh: Gh) -> None:
+    gh.view["body"] = "Why.\n"
+    with pytest.raises(SystemExit) as exc:
+        close.main(["pr", "close", "7", "--reason", "x"], env=ENV)
+    assert exc.value.code == (
+        "not closing: the pull request has no Opened-by line (a human's?)"
+    )
+    with pytest.raises(SystemExit) as exc:
+        close.main(["pr", "close", "7", "--reason", "x"], env={})
+    assert exc.value.code == "not closing: the caller isn't a recognised agent session"
