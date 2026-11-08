@@ -1850,16 +1850,60 @@ def test_rollout_turn_context_takes_the_latest(tmp_path: Path) -> None:
     assert ai.rollout_turn_context(path) == (None, None)
 
 
-def test_rollout_turn_context_reads_one_megabyte(
+def test_rollout_turn_context_falls_back_to_the_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = write_rollout(tmp_path, CHILD_THREAD, [turn("old", "low"), "x" * 200])
     assert ai.rollout_turn_context(path) == ("old", "low")
     monkeypatch.setattr(ai, "CODEX_TAIL", 100)
-    assert ai.rollout_turn_context(path) == (None, None)
+    assert ai.rollout_turn_context(path) == ("old", "low")
     assert ai.CODEX_TAIL == 100
     monkeypatch.undo()
     assert ai.CODEX_TAIL == 1024 * 1024
+
+
+@pytest.mark.parametrize("later", [False, True])
+def test_rollout_turn_context_long_rollout(tmp_path: Path, *, later: bool) -> None:
+    records: list[object] = [turn("first", "high"), "x" * (1024 * 1024 + 100)]
+    if later:
+        records.append(turn("latest", "low"))
+    path = write_rollout(tmp_path, CHILD_THREAD, records)
+    assert ai.rollout_turn_context(path) == (
+        ("latest", "low") if later else ("first", "high")
+    )
+
+
+def test_rollout_turn_context_forward_scan_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert ai.CODEX_HEAD == 1024 * 1024
+    monkeypatch.setattr(ai, "CODEX_TAIL", 1)
+    monkeypatch.setattr(ai, "CODEX_HEAD", 100)
+    path = write_rollout(
+        tmp_path, CHILD_THREAD, ["x" * 80, "x" * 80, turn("late", "low")]
+    )
+    assert ai.rollout_turn_context(path) == (None, None)
+    path = write_rollout(tmp_path, CHILD_THREAD, ["x" * 99, turn("late", "low")])
+    assert ai.rollout_turn_context(path) == (None, None)
+    path = write_rollout(
+        tmp_path,
+        CHILD_THREAD,
+        [
+            "not json",
+            {"type": "other", "payload": {"model": "wrong"}},
+            {"type": "turn_context", "payload": "invalid"},
+            turn("first", "high"),
+            turn("second", "low"),
+        ],
+    )
+    monkeypatch.setattr(ai, "CODEX_HEAD", 1024)
+    assert ai.rollout_turn_context(path) == ("first", "high")
+    path.write_bytes(b"\xff\n" + json.dumps(turn("first", "high")).encode() + b"\n")
+    assert ai.rollout_turn_context(path) == ("first", "high")
+    path = write_rollout(
+        tmp_path, CHILD_THREAD, [{"type": "turn_context", "payload": {}}]
+    )
+    assert ai.rollout_turn_context(path) == (None, None)
 
 
 def test_rollout_meta(tmp_path: Path) -> None:
@@ -3929,15 +3973,19 @@ def test_e2e_claude_subagent_commits_its_parents_edit(wired: Path) -> None:
 
 
 @needs_prek
-def test_e2e_codex_rollout_edit_then_commit(wired: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("long_rollout", [False, True])
+def test_e2e_codex_rollout_edit_then_commit(
+    wired: Path, tmp_path: Path, *, long_rollout: bool
+) -> None:
     home = tmp_path / "codex"
     write_rollout(
         home,
         ROOT_THREAD,
         [
-            meta(id=ROOT_THREAD, cwd=str(wired)),
+            meta(id=ROOT_THREAD, cwd=str(wired), source="exec"),
             turn("gpt-5.6-sol", "high"),
             patch_call("c.txt"),
+            "x" * (1024 * 1024 + 100) if long_rollout else "",
         ],
     )
     stage(wired, "c.txt")
@@ -3952,7 +4000,7 @@ def test_e2e_codex_rollout_edit_then_commit(wired: Path, tmp_path: Path) -> None
     assert trailers(wired) == [
         (
             "Generated-by: LLM effort=high;harness=codex:0.166.0;"
-            f"model=openai:gpt-5.6-sol;session={session}"
+            f"model=openai:gpt-5.6-sol;session={session};surface=exec"
         )
     ]
 
