@@ -124,6 +124,15 @@ open_note = "/example/Open.md"         # a path suffix; a new item needs "Decisi
 hosts = ["example-a=peer Mac", "example-b=Linux VM", "example-c"]   # "name=role"
 ```
 
+`tbhbdev alpha pr check` reads one more optional table. `private_repos` lists private repository names that must not appear in a public repository's draft:
+
+```toml
+[pr_check]
+private_repos = ["example-lab", "example-notes"]   # optional
+```
+
+The check flags a whole repository-name token in the title and body that equals a listed name, and any token ending in `-private`, such as `example-private`. The suffix rule works without config. It matches case-sensitively and ignores substrings of longer names. It skips a working repository whose own name ends in `-private` or appears in the list. If `origin` is unreadable, the check runs. It covers the title and body only, not commit messages.
+
 Commit and claim checks run without config. For commits, the command guard checks arguments for trailers and sign-off flags. Message bodies in here documents or `-F` files pass this guard. The commit-msg identity check catches trailers in those bodies.
 
 Evidence can be a `#N` reference or a commit hash of 7 to 40 hex characters. Hashes must contain a digit and a letter from a to f. A log path or inline code can supply evidence as well, as can command output. Claims can attribute a result with `says` or `reports`, or mark it `unverified`.

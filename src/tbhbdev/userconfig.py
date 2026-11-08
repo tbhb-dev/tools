@@ -22,6 +22,11 @@ and claim checks run without configuration.
     open_note     path suffix of the note it holds to the item rule
     hosts         `["name=role", ...]`, which `alpha session-context` lists;
                   a name alone, with no `=`, has no role
+
+The optional `[pr_check]` table has one key, `private_repos`, a list of private
+repository names that `tbhbdev alpha pr check` flags in a draft's title and
+body. A missing file, table or key means no configured names, and the
+`-private` suffix rule still applies.
 """
 
 from __future__ import annotations
