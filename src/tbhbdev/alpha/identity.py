@@ -1076,7 +1076,7 @@ def tool_input_of(data: Json) -> Json:
 
 
 def write_bash_edits(
-    data: Json, env: Mapping[str, str], cmd: object, cwd: Path
+    data: Json, env: Mapping[str, str], cmd: object, cwd: Path | None
 ) -> None:
     """Edit receipts for the paths in a Bash result, unless git only moved them."""
     paths = edit_paths_from_bash(data.get("tool_response"))
