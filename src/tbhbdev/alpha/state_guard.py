@@ -8,7 +8,9 @@ SessionStart. It reads the hook payload on stdin.
 - PreToolUse on SendMessage blocks a message that claims a status (done,
   merged, deployed and so on) with no evidence, by exiting 2 with the reason on
   stderr. On Bash it blocks a `git commit` that adds a Signed-off-by or
-  Co-authored-by trailer or the `-s` or `--signoff` flag. Neither needs the
+  Co-authored-by trailer visible in its arguments, or the `-s` or `--signoff`
+  flag. Heredoc and `-F` file message bodies pass this command check; the
+  commit-msg identity check catches trailers there. Neither check needs the
   user config.
 - Stop blocks a final reply with the same claims by printing
   `{"decision": "block", ...}`. A Stop that the hook itself caused
@@ -21,17 +23,16 @@ SessionStart. It reads the hook payload on stdin.
   can't gain a `- **item**` line unless the text holds `Decisions checked:`,
   and the block names `decisions_dir`. Without either key it does nothing.
 
-Evidence is a git sha (7 to 40 hex digits), a PR or issue number, a log path,
-inline code, "output" or "read-back", or attribution ("says", "said",
-"reports"). A claim marked "unverified", or "not done", also passes.
+Evidence is a git sha (7 to 40 hex characters, with a digit and a letter), a
+PR or issue number, a log path, inline code, "output" or "read-back", or
+attribution ("says", "said", "reports"). A claim marked "unverified", or "not
+done", also passes.
 
 A command is a `git commit` only when one of its simple commands is one. The
-scan drops heredoc bodies, then splits the text at `&&`, `||`, `;`, `|`, `&`,
-newlines, parentheses, braces and backticks outside quotes, so `$(...)`
-counts and a quoted string belongs to its own simple command. A simple
-command is a commit when, after `env`, `command`, `exec` and `NAME=value`
-words, it is `git`, any `-C PATH`, `-c NAME=VALUE` and `--option` words,
-then `commit`.
+scan drops heredoc bodies and splits shell commands outside quotes. It also
+checks shell `-c` scripts and substitutions inside double quotes. Single
+quotes hold literal text. Before matching `git commit`, it skips command
+wrappers, environment assignments and options, and Git global option values.
 
 The hook never blocks for lack of config, and any crash or invalid config
 allows the call: a broken hook must not stop the agent's work.

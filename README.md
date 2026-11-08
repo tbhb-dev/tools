@@ -124,7 +124,7 @@ open_note = "/example/Open.md"         # a path suffix; a new item needs "Decisi
 hosts = ["example-a=peer Mac", "example-b=Linux VM", "example-c"]   # "name=role"
 ```
 
-The commit and claim checks run without config. Evidence includes a commit hash or a `#N` reference. A claim can also cite a log path or include inline code or command output. It can also attribute the result with `says` or `reports`, or mark it `unverified`.
+The commit and claim checks run without config. The command guard checks commit arguments for trailers and sign-off flags. Trailers in heredoc or `-F` file message bodies pass this guard; the commit-msg identity check catches them. Evidence includes a commit hash with 7 to 40 hex characters, at least one digit and at least one letter, or a `#N` reference. A claim can also cite a log path or include inline code or command output. It can also attribute the result with `says` or `reports`, or mark it `unverified`.
 
 The hooks are user level, and the harness runs them in every repository. Each one first checks that the repository's `origin` is a tbhb-dev repository on GitHub, and does nothing otherwise. The one exception is the record hook run outside any repository, which writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Claude Code's SessionStart hook runs `tbhbdev alpha install --hook`, which reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 

@@ -735,3 +735,17 @@ def test_hash_evidence_accepts_both_cases_and_length_limits(
     run: Runner, candidate: str
 ) -> None:
     assert run(send(f"It was merged in {candidate}.")) == (0, "", "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git commit -F message.txt",
+        "git commit -F - <<'EOF'\nSigned-off-by: Example\nEOF",
+        "git commit -F - <<EOF\nCo-authored-by: Example\nEOF",
+    ],
+)
+def test_message_bodies_are_left_to_the_commit_message_check(
+    run: Runner, command: str
+) -> None:
+    assert run(bash(command)) == (0, "", "")
