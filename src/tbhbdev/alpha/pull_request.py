@@ -781,8 +781,12 @@ def live_opened_line(number: int) -> str | None:
         why = " ".join((done.stderr or done.stdout).split())
         message = f"cannot read the body of PR {number} to keep its Opened-by: {why}"
         raise SystemExit(message)
+    return opened_line(str(data.get("body") or ""))  # pragma: no mutate -- no line
+
+
+def opened_line(body: str) -> str | None:
+    """The ``Opened-by`` line of a PR body's final paragraph, or None."""
     paragraph: list[str] = []
-    body = str(data.get("body") or "")  # pragma: no mutate -- no body, no line
     for line in reversed(body.splitlines()):
         if line.strip():
             paragraph.append(line)
