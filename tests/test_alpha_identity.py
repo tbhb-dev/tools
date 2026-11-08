@@ -2324,12 +2324,11 @@ def test_claude_committer_child_model_from_transcript(repo: Path) -> None:
 def test_claude_committer_rejects_foreign_agent_records(repo: Path) -> None:
     seed_claude(repo)
     ai.write_record(AGENT, {"root": OTHER, "model": "claude-haiku-5-5"}, repo)
-    got = ai.committer_identity({**CLAUDE_COMMIT_ENV, ai.AGENT_ENV: AGENT}, [])
-    assert got is not None
-    assert got.ident.subagent is None
-    assert got.ident.model == "anthropic:claude-opus-5-5"
-    # An unknown agent id is treated the same way; a malformed one is ignored.
-    for bad in (CHILD, "not-a-hash", ""):
+    for bad in (AGENT, CHILD):
+        with pytest.raises(ai.AttributionError):
+            ai.committer_identity({**CLAUDE_COMMIT_ENV, ai.AGENT_ENV: bad}, [])
+    # A malformed agent id is ignored.
+    for bad in ("not-a-hash", ""):
         got = ai.committer_identity({**CLAUDE_COMMIT_ENV, ai.AGENT_ENV: bad}, [])
         assert got is not None
         assert got.ident.subagent is None
@@ -6848,6 +6847,22 @@ def test_ambiguous_child_commit_is_refused(repo: Path, agent: str | None) -> Non
     ai.record_command(SESSION_HASH, agent, "git commit -m x", repo)
     with pytest.raises(ai.AttributionError):
         ai.committer_identity(CLAUDE_COMMIT_ENV, ["sh -c eval 'git commit -m x'"])
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+def test_matched_child_requires_a_session_record_for_its_root(
+    repo: Path, foreign: bool
+) -> None:
+    seed_claude(repo)
+    ai.record_command(SESSION_HASH, AGENT, "git commit -m x", repo)
+    if foreign:
+        ai.write_record(AGENT, {"root": OTHER, "model": "claude-haiku-5-5"}, repo)
+    with pytest.raises(ai.AttributionError) as info:
+        ai.committer_identity(CLAUDE_COMMIT_ENV, ["sh -c eval 'git commit -m x'"])
+    assert str(info.value) == (
+        "The subagent's session record is missing or belongs to another root. "
+        "Retry after the subagent's session record is restored."
+    )
 
 
 def test_command_window_includes_its_start_and_an_explicit_zero(repo: Path) -> None:

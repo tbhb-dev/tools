@@ -14,7 +14,7 @@ from contextlib import chdir
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 from fake_tool import link_git, pythonpath, write_fake
@@ -2087,6 +2087,34 @@ def test_create_writes_opened_by_first_and_the_ledger(
     assert json.loads(path.read_text()) == {
         "prs": ["tbhb-dev/ascm#1", "tbhb-dev/ascm#12"]
     }
+
+
+@pytest.mark.parametrize("site", ["opener", "create-description", "edit-description"])
+def test_pr_commands_report_unresolved_attribution(
+    world: World,
+    agent: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    site: str,
+) -> None:
+    write_draft(world)
+    agent_identity.record_command(ROOT, SUBAGENT, "background command", world.root)
+    if site == "create-description":
+        monkeypatch.setattr(pr, "opened_by", Mock(return_value=(None, None)))
+    argv = ("edit", "--pr", "1") if site == "edit-description" else ("create",)
+    assert run_main(*argv, env=agent) == 1
+    assert capsys.readouterr() == (
+        "",
+        (
+            "tbhbdev alpha pr: Attribution couldn't be resolved. Retry the pull "
+            "request command from the main session after the subagent's command "
+            "finishes and its session record is available.\n"
+        ),
+    )
+    assert all(
+        call["argv"] == ["pr", "view", "1", "--json", "body"]
+        for call in world.calls("gh")
+    )
 
 
 def test_a_subagent_opens_under_its_root(world: World, agent: dict[str, str]) -> None:

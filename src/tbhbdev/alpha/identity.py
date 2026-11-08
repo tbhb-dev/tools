@@ -1555,8 +1555,11 @@ def claude_committer(
         )
     child_rec: Json = load_record(sub, root=root, project=project) if sub else {}
     if sub and child_rec.get("root") != root:
-        # Unknown or foreign agent record: treat as the main agent.
-        sub, child_rec = None, dict[str, object]()
+        message = (
+            "The subagent's session record is missing or belongs to another root. "
+            "Retry after the subagent's session record is restored."
+        )
+        raise AttributionError(message)
     model = main_model(root_rec)
     root_ident = make_ident(
         CLAUDE, root, Seen(ver, model, root_rec.get("effort"), surf)

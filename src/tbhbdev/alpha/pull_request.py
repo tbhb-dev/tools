@@ -1072,4 +1072,13 @@ def main(
         return hook(args.harness)
     if args.command == "backfill-opened":
         return backfill(args.owner)
-    return command(args, env)
+    try:
+        return command(args, env)
+    except agent_identity.AttributionError:
+        print(
+            "tbhbdev alpha pr: Attribution couldn't be resolved. Retry the pull "
+            "request command from the main session after the subagent's command "
+            "finishes and its session record is available.",
+            file=sys.stderr,
+        )
+        return 1
