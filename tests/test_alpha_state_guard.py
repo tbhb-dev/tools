@@ -31,17 +31,17 @@ type Runner = Callable[[object], Result]
 def _bounded_hook() -> Iterator[None]:
     """A small hook payload must finish within its execution budget."""
 
-    def expired(_signum: int, _frame: object) -> None:
+    def expired(_number: int, _frame: object) -> None:
         message = "hook exceeded its execution budget"
         raise TimeoutError(message)
 
-    previous = signal.signal(signal.SIGALRM, expired)
-    signal.setitimer(signal.ITIMER_REAL, 0.5)
+    previous = signal.signal(signal.Signals(14), expired)
+    signal.alarm(1)
     try:
         yield
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        signal.alarm(0)
+        signal.signal(signal.Signals(14), previous)
 
 
 @pytest.fixture
