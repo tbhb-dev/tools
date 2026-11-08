@@ -749,3 +749,13 @@ def test_message_bodies_are_left_to_the_commit_message_check(
     run: Runner, command: str
 ) -> None:
     assert run(bash(command)) == (0, "", "")
+
+
+def test_claim_and_signoff_checks_run_outside_a_repository_without_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run: Runner
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert run(send(UNSUPPORTED_CLAIM))[0] == 2
+    assert run(bash("git commit -s")) == (2, "", TRAILER_MESSAGE)
+    assert run(stop(last_assistant_message=UNSUPPORTED_CLAIM))[1] != ""
+    assert run({"hook_event_name": "SessionStart"}) == (0, "", "")

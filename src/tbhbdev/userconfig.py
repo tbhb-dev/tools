@@ -14,7 +14,8 @@ value set, for the copy `tbhbdev host bootstrap` installs on each agent host.
 The optional `[harness]` table configures the user-level Claude Code hooks that
 `tbhbdev alpha install` writes. Every key is a string or a list of strings,
 since `render` keeps nothing else. A missing file, table or key is not an error
-for these hooks: they do nothing without it.
+for these hooks: checks that need a setting do nothing without it. Sign-off
+and claim checks run without configuration.
 
     rule          text `alpha state-guard` prints at session start
     decisions_dir path its block messages cite as the place to check first

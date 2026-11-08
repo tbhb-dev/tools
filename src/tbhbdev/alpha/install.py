@@ -37,10 +37,12 @@ hooks"; Codex runs a new hook only after `/hooks` trusts it), and
 https://antigravity.google/docs/hooks?tab=cli for Antigravity ("hooks.json
 File Locations").
 
-Claude Code also gets two hooks that do nothing without a `[harness]` table in
-the tbhbdev user config (see tbhbdev.userconfig): `alpha state-guard`, on
+Claude Code also gets two hooks with optional `[harness]` settings in the
+tbhbdev user config (see tbhbdev.userconfig): `alpha state-guard`, on
 PreToolUse for Bash, SendMessage, Write and Edit, on Stop and on SessionStart,
 and `alpha session-context`, on SessionStart. Both run with a 10 second timeout.
+Sign-off and claim checks run without config. Only checks that need a setting
+are silent when it is absent. Both hooks run regardless of repository origin.
 
 Every command it writes ends in the shell comment `# tbhbdev alpha install`,
 which marks it as this command's. A rerun replaces its own entries where they

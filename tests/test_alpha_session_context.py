@@ -136,3 +136,18 @@ def test_os_name_on_linux_without_an_os_release(
     assert session_context.os_name() == "Linux"
     monkeypatch.setattr(platform, "freedesktop_os_release", dict)
     assert session_context.os_name() == "Linux "
+
+
+@pytest.mark.usefixtures("_fixed")
+def test_context_runs_outside_a_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config_file: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_file.write_text('[harness]\nhosts = ["example-a"]\n')
+    monkeypatch.chdir(tmp_path)
+    assert session_context.main() == 0
+    assert capsys.readouterr().out.startswith(
+        "Session host: this session runs on example-a, "
+    )
