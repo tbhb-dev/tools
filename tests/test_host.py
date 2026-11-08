@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
@@ -3894,3 +3895,143 @@ def test_bootstrap_with_no_host_ready_keeps_the_published_config(
     assert run(world, capfd, "bootstrap", "--all") == 1
     assert "gitleaks-generate" not in world.out
     assert "item" not in " ".join(world.op_calls())
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o400, 0o640, 0o644, 0o700])
+def test_linux_held_and_read_require_private_file_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / secrets.LINUX_TOKEN_FILE
+    path.parent.mkdir(parents=True)
+    path.write_text("fake-token")
+    path.chmod(mode)
+    held = subprocess.run(
+        ["sh", "-c", host_tool.SCRIPTS["linux"]["held"]],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    read = subprocess.run(
+        ["sh", "-c", host_tool.SCRIPTS["linux"]["read"]],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert held.returncode == 0
+    assert held.stdout == ("present\n" if mode == 0o600 else "absent\n")
+    assert read.returncode == (0 if mode == 0o600 else 1)
+    assert read.stdout == ("\nfake-token" if mode == 0o600 else "")
+
+
+@pytest.mark.parametrize(
+    "kind", ["symlink", "directory", "fifo", "owner", "empty", "missing"]
+)
+def test_linux_held_and_read_refuse_invalid_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / secrets.LINUX_TOKEN_FILE
+    path.parent.mkdir(parents=True)
+    if kind == "symlink":
+        target = tmp_path / "target"
+        target.write_text("fake-token")
+        target.chmod(0o600)
+        path.symlink_to(target)
+    elif kind == "directory":
+        path.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(path, 0o600)
+    elif kind != "missing":
+        path.write_text("" if kind == "empty" else "fake-token")
+        path.chmod(0o600)
+    if kind == "owner":
+        commands = tmp_path / "commands"
+        commands.mkdir()
+        command = commands / "id"
+        command.write_text("#!/bin/sh\necho -1\n")
+        command.chmod(0o700)
+        monkeypatch.setenv("PATH", f"{commands}:/usr/bin:/bin")
+    for step in ("held", "read"):
+        done = subprocess.run(
+            ["sh", "-c", host_tool.SCRIPTS["linux"][step]],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        assert done.returncode == (0 if step == "held" else 1)
+        assert done.stdout == ("absent\n" if step == "held" else "")
+
+
+def test_linux_install_truncates_failed_partial_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    command = commands / "cat"
+    command.write_text("#!/bin/sh\nprintf partial-token\nexit 9\n")
+    command.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{commands}:/usr/bin:/bin")
+    path = tmp_path / secrets.LINUX_TOKEN_FILE
+    path.parent.mkdir(parents=True)
+    path.write_text("old-token")
+    done = subprocess.run(
+        ["sh", "-c", host_tool.SCRIPTS["linux"]["install"]],
+        input="fake-token",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 9
+    assert path.read_text() == "old-token"
+    trash = list(path.parent.glob(".connect-token.*"))
+    assert len(trash) == 1
+    assert trash[0].suffix == ".trash"
+    assert trash[0].read_bytes() == b""
+
+
+def test_linux_install_refuses_symlinked_directory_before_chmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    target = tmp_path / "target"
+    target.mkdir(mode=0o755)
+    target.chmod(0o755)
+    path = tmp_path / secrets.LINUX_TOKEN_FILE
+    path.parent.parent.mkdir(parents=True)
+    path.parent.symlink_to(target)
+    done = subprocess.run(
+        ["sh", "-c", host_tool.SCRIPTS["linux"]["install"]],
+        input="fake-token",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 1
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+    assert list(target.iterdir()) == []
+
+
+def test_linux_read_strips_surrounding_whitespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / secrets.LINUX_TOKEN_FILE
+    path.parent.mkdir(parents=True)
+    path.write_text(" \t\r\nfake-token \r\n")
+    path.chmod(0o600)
+
+    def local_script(
+        _host: host_tool.Host, script: str
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["sh", "-c", script], capture_output=True, text=True, check=False
+        )
+
+    monkeypatch.setattr(host_tool, "on_host", local_script)
+    assert host_tool._keychain_token(host_tool.Host("test", "linux", local=True)) == (  # noqa: SLF001
+        "",
+        "fake-token",
+    )

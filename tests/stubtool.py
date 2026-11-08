@@ -475,6 +475,9 @@ def shadow(tool: str, args: list[str]) -> None:
 
 
 def id_(args: list[str]) -> None:
+    if args == ["-u"]:
+        sys.stdout.write(f"{os.geteuid()}\n")
+        return
     if args != ["-un"]:
         fail(f"id stub: unexpected arguments {args}")
     state = load()

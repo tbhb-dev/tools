@@ -629,13 +629,22 @@ _MAC_FIND = f"security find-generic-password {_ITEM} {_KC} >/dev/null 2>&1"
 _SECRETS = f'"$HOME/{secrets.LINUX_TOKEN_FILE.parent}"'
 _TOKEN_FILE = f'"$HOME/{secrets.LINUX_TOKEN_FILE}"'
 _LINUX_DIRS = (
-    f"umask 077 && mkdir -p {AGENT_CONFIG} {_SECRETS} && chmod 0700 {_SECRETS}"
+    f"umask 077 && mkdir -p {AGENT_CONFIG} {_SECRETS} && "
+    f"[ ! -L {_SECRETS} ] && chmod 0700 {_SECRETS}"
 )
 # mktemp creates the file exclusively with mode 0600, and mv replaces the
 # token in one step, so a reader never sees half a token.
 _LINUX_INSTALL = (
     f"{_LINUX_DIRS} && tmp=$(mktemp {_SECRETS}/.connect-token.XXXXXX) && "
+    'trap \'status=$?; if [ "$status" -ne 0 ]; then '
+    ': >"$tmp"; mv -f "$tmp" "$tmp.trash"; fi; exit "$status"\' 0 && '
+    "trap 'exit 1' HUP INT TERM && "
     f'cat >"$tmp" && mv -f "$tmp" {_TOKEN_FILE} && [ -s {_TOKEN_FILE} ]'
+)
+
+_LINUX_PRIVATE_FILE = (
+    f"[ ! -L {_TOKEN_FILE} ] && [ -f {_TOKEN_FILE} ] && [ -s {_TOKEN_FILE} ] && "
+    f'[ "$(stat -c \'%u:%a\' {_TOKEN_FILE})" = "$(id -u):600" ]'
 )
 
 
@@ -669,10 +678,11 @@ SCRIPTS: dict[str, dict[str, str]] = {
         "ensure": _LINUX_DIRS,
         "install": _LINUX_INSTALL,
         "held": (
-            f"if [ -s {_TOKEN_FILE} ]; then echo present; "
+            f"if {_LINUX_PRIVATE_FILE}; then echo present; "
             f"cat {TOKEN_NAME_FILE} 2>/dev/null || :; else echo absent; fi"
         ),
         "read": (
+            f"{_LINUX_PRIVATE_FILE} && "
             f"{{ cat {TOKEN_NAME_FILE} 2>/dev/null || echo; }} && cat {_TOKEN_FILE}"
         ),
     },
