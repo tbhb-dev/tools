@@ -41,6 +41,7 @@ import json
 import re
 import shlex
 import sys
+from typing import cast
 
 from tbhbdev import userconfig
 from tbhbdev.alpha.repo import read_hook_stdin
@@ -74,7 +75,7 @@ MAX_QUOTED = 160
 MAX_LISTED = 3
 
 
-def unevidenced(text: str) -> list[str]:
+def unsupported_claims(text: str) -> list[str]:
     """The sentences or lines of TEXT with a status claim and no evidence."""
     return [
         chunk.strip()[:MAX_QUOTED]
@@ -84,7 +85,7 @@ def unevidenced(text: str) -> list[str]:
 
 
 def claim_reason(who: str, bad: list[str]) -> str:
-    """The block message for the unevidenced claims BAD that WHO made."""
+    """The block message for the unsupported_claims claims BAD that WHO made."""
     return (
         f"state-guard: {who} makes a status claim without evidence. Add the "
         "PR number and sha, the merge sha, command output or a log path, "
@@ -209,7 +210,7 @@ def pre_tool_reason(data: Json) -> str | None:
     if tool == "Bash":
         return commit_trailer_reason(str(tool_input.get("command", "")))
     if tool == "SendMessage":
-        bad = unevidenced(str(tool_input.get("message", "")))
+        bad = unsupported_claims(str(tool_input.get("message", "")))
         return claim_reason("this message", bad) if bad else None
     if tool in {"Write", "Edit"}:
         return open_note_reason(str(tool), tool_input)
@@ -242,9 +243,11 @@ def entry_text(entry: object, text: str) -> str:
         return ""
     if entry.get("type") != "assistant" or not isinstance(content, list):
         return text
-    for block in content:
+    blocks = cast("list[object]", content)  # pragma: no mutate -- a runtime no-op
+    for block in blocks:
         if isinstance(block, dict) and block.get("type") == "text":
-            text = str(block.get("text", ""))
+            fields = cast("Json", block)  # pragma: no mutate -- a runtime no-op
+            text = str(fields.get("text", ""))
     return text
 
 
@@ -255,7 +258,7 @@ def stop_reason(data: Json) -> str | None:
     message = data.get("last_assistant_message")
     if not message:
         message = last_assistant_text(str(data.get("transcript_path", "")))
-    bad = unevidenced(str(message))
+    bad = unsupported_claims(str(message))
     return claim_reason("your reply", bad) if bad else None
 
 

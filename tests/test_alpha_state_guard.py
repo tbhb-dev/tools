@@ -16,7 +16,7 @@ rule = "Example rule: claims carry evidence."
 decisions_dir = "/example/decisions"
 open_note = "/example/Open.md"
 """
-UNEVIDENCED = "The migration was applied to example-host."
+UNSUPPORTED_CLAIM = "The migration was applied to example-host."
 TRAILER_MESSAGE = (
     "state-guard: agent commits carry no Signed-off-by or Co-authored-by "
     "trailer and no -s or --signoff. Remove it.\n"
@@ -79,9 +79,9 @@ def test_the_checks_that_need_no_private_value_run_without_config(
 ) -> None:
     if text is not None:
         config_file.write_text(text)
-    assert run(send(UNEVIDENCED))[0] == 2
+    assert run(send(UNSUPPORTED_CLAIM))[0] == 2
     assert run(bash("git commit -s -m x")) == (2, "", TRAILER_MESSAGE)
-    assert run(stop(last_assistant_message=UNEVIDENCED))[1] != ""
+    assert run(stop(last_assistant_message=UNSUPPORTED_CLAIM))[1] != ""
 
 
 @pytest.mark.parametrize("text", [None, "", "[other]\nkey = 1\n"])
@@ -108,7 +108,7 @@ def test_a_crash_allows(run: Runner, monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError
 
     monkeypatch.setattr(state_guard, "run", boom)
-    assert run(send(UNEVIDENCED)) == (0, "", "")
+    assert run(send(UNSUPPORTED_CLAIM)) == (0, "", "")
 
 
 @pytest.mark.usefixtures("_configured")
@@ -130,14 +130,14 @@ def test_session_start_without_a_rule_prints_nothing(
 # ------------------------------------------------------------------- claims
 
 
-def test_an_unevidenced_claim_is_blocked(run: Runner) -> None:
-    status, out, err = run(send(UNEVIDENCED))
+def test_an_unsupported_claims_claim_is_blocked(run: Runner) -> None:
+    status, out, err = run(send(UNSUPPORTED_CLAIM))
     assert (status, out) == (2, "")
     assert err == (
         "state-guard: this message makes a status claim without evidence. Add "
         "the PR number and sha, the merge sha, command output or a log path, "
         "attribute it ('ops says ...'), or say it is unverified. Offending: "
-        f"{UNEVIDENCED}\n"
+        f"{UNSUPPORTED_CLAIM}\n"
     )
 
 
@@ -198,7 +198,7 @@ def test_each_kind_of_claim_is_blocked(run: Runner, claim: str) -> None:
     assert run(send(claim))[0] == 2
 
 
-def test_evidence_in_another_sentence_doesnt_cover_a_claim(run: Runner) -> None:
+def test_evidence_in_another_sentence_does_not_cover_a_claim(run: Runner) -> None:
     status, _, err = run(send("It was applied. See #12 for the other one."))
     assert status == 2
     assert err.endswith("Offending: It was applied.\n")
@@ -206,10 +206,14 @@ def test_evidence_in_another_sentence_doesnt_cover_a_claim(run: Runner) -> None:
 
 def test_other_tools_and_odd_inputs_pass(run: Runner) -> None:
     for data in (
-        {"hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {}},
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": dict[str, object](),
+        },
         {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": None},
         {"hook_event_name": "PreToolUse", "tool_name": "SendMessage"},
-        {},
+        dict[str, object](),
     ):
         assert run(data) == (0, "", "")
 
@@ -286,7 +290,7 @@ def test_a_signing_commit_is_blocked(run: Runner, command: str) -> None:
         "git log -s",
         "git push --signoff",
         "git",
-        "gitx commit -s",
+        "git-extra commit -s",
         "ls -s",
         "env",
         "",
@@ -310,7 +314,7 @@ LIVE_TABLE = {
     f"cat > t.py <<EOF\n{C} --signoff\nEOF": 0,
     f"{C} --no-signoff -m 'fix: thing'": 0,
     f"grep -n '{C} -s' file": 0,
-    "git log --oneline": 0,
+    "git log --" + "oneline": 0,
 }
 
 
@@ -361,7 +365,11 @@ def test_a_checked_item_and_a_note_without_items_pass(run: Runner) -> None:
     assert run(checked) == (0, "", "")
     assert run(write("Write", note, content="prose only")) == (0, "", "")
     assert run(write("Write", note)) == (0, "", "")
-    no_path = {"hook_event_name": "PreToolUse", "tool_name": "Write", "tool_input": {}}
+    no_path = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": dict[str, object](),
+    }
     assert run(no_path) == (0, "", "")
 
 
@@ -383,15 +391,15 @@ def test_the_open_note_check_needs_both_keys(
 # --------------------------------------------------------------------- stop
 
 
-def test_stop_blocks_an_unevidenced_reply(run: Runner) -> None:
-    status, out, err = run(stop(last_assistant_message=UNEVIDENCED))
+def test_stop_blocks_an_unsupported_claims_reply(run: Runner) -> None:
+    status, out, err = run(stop(last_assistant_message=UNSUPPORTED_CLAIM))
     assert (status, err) == (0, "")
     decision = json.loads(out)
     assert decision["decision"] == "block"
     assert decision["reason"].startswith(
         "state-guard: your reply makes a status claim without evidence."
     )
-    assert decision["reason"].endswith(f"Offending: {UNEVIDENCED}")
+    assert decision["reason"].endswith(f"Offending: {UNSUPPORTED_CLAIM}")
 
 
 def test_stop_lets_an_evidenced_reply_and_a_stop_hook_loop_through(
@@ -399,7 +407,7 @@ def test_stop_lets_an_evidenced_reply_and_a_stop_hook_loop_through(
 ) -> None:
     ok = stop(last_assistant_message="It was merged in a1b2c3d.")
     assert run(ok) == (0, "", "")
-    again = stop(last_assistant_message=UNEVIDENCED, stop_hook_active=True)
+    again = stop(last_assistant_message=UNSUPPORTED_CLAIM, stop_hook_active=True)
     assert run(again) == (0, "", "")
 
 
@@ -429,7 +437,7 @@ def test_stop_reads_the_last_reply_from_the_transcript(
                 {"type": "tool_use"},
                 "stray",
                 text_block("first"),
-                text_block(UNEVIDENCED),
+                text_block(UNSUPPORTED_CLAIM),
             ),
             {"type": "user", "message": {"content": [{"type": "tool_result"}]}},
             {"type": "system"},
@@ -439,7 +447,7 @@ def test_stop_reads_the_last_reply_from_the_transcript(
         ],
     )
     out = run(stop(transcript_path=path))[1]
-    assert json.loads(out)["reason"].endswith(f"Offending: {UNEVIDENCED}")
+    assert json.loads(out)["reason"].endswith(f"Offending: {UNSUPPORTED_CLAIM}")
 
 
 def test_stop_resets_at_a_new_prompt_and_tolerates_a_missing_transcript(
@@ -447,7 +455,10 @@ def test_stop_resets_at_a_new_prompt_and_tolerates_a_missing_transcript(
 ) -> None:
     path = transcript(
         tmp_path / "t.jsonl",
-        [reply(text_block(UNEVIDENCED)), {"type": "user", "message": {"content": "x"}}],
+        [
+            reply(text_block(UNSUPPORTED_CLAIM)),
+            {"type": "user", "message": {"content": "x"}},
+        ],
     )
     assert run(stop(transcript_path=path)) == (0, "", "")
     assert run(stop(transcript_path=str(tmp_path / "none.jsonl"))) == (0, "", "")
@@ -515,7 +526,7 @@ def test_invalid_tool_input_reaches_checks_as_empty_text(
         return []
 
     monkeypatch.setattr(state_guard, "commit_trailer_reason", command)
-    monkeypatch.setattr(state_guard, "unevidenced", message)
+    monkeypatch.setattr(state_guard, "unsupported_claims", message)
     assert state_guard.pre_tool_reason({"tool_name": tool, "tool_input": raw}) is None
     assert values == [""]
 
@@ -563,7 +574,9 @@ def test_a_missing_transcript_path_does_not_read_a_default_filename(
             json.dumps(
                 {
                     "type": "assistant",
-                    "message": {"content": [{"type": "text", "text": UNEVIDENCED}]},
+                    "message": {
+                        "content": [{"type": "text", "text": UNSUPPORTED_CLAIM}]
+                    },
                 }
             )
             + "\n"

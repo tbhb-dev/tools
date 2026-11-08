@@ -102,7 +102,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `identity` records which agent and model made each edit and writes the `Generated-by` trailers.
 - `guard-gh-pr` is a PreToolUse hook that blocks `gh pr create`, `gh pr edit` and `gh pr merge`.
 - `state-guard` is a Claude Code hook that blocks a status claim with no evidence in a SendMessage call or a final reply, and a `git commit` that adds a sign-off or co-author trailer.
-- `session-context` is a Claude Code SessionStart hook that names the host, its role, the other hosts and the local time.
+- `session-context` is a Claude Code SessionStart hook that reports the host, its role, the other hosts, and the local time.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
 - `merge` squash-merges an approved pull request.
 - `install` installs the git hooks and the user-level harness hooks.
@@ -124,7 +124,7 @@ open_note = "/example/Open.md"         # a path suffix; a new item needs "Decisi
 hosts = ["example-a=peer Mac", "example-b=Linux VM", "example-c"]   # "name=role"
 ```
 
-The commit check and the claim check need no config. A claim counts as evidenced by a git sha, a `#N` number, a log path, inline code, "output", attribution ("says", "reports") or the word "unverified".
+The commit and claim checks run without config. A claim can cite a Git SHA, a `#N` number, a log path, inline code, or command output. It can also attribute the result with `says` or `reports`, or mark it `unverified`.
 
 The hooks are user level, and the harness runs them in every repository. Each one first checks that the repository's `origin` is a tbhb-dev repository on GitHub, and does nothing otherwise. The one exception is the record hook run outside any repository, which writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Claude Code's SessionStart hook runs `tbhbdev alpha install --hook`, which reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 
