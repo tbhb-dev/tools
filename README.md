@@ -102,6 +102,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `identity` records which agent and model made each edit and writes the `Generated-by` trailers.
 - `guard-gh-pr` is a PreToolUse hook that blocks `gh pr create`, `gh pr edit` and `gh pr merge`.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
+- `review` drafts and checks a pull request review.
 - `merge` squash-merges an approved pull request.
 - `install` installs the git hooks and the user-level harness hooks.
 
@@ -126,6 +127,14 @@ A session can't approve a pull request that it, or one of its subagents, opened.
 - `tbhbdev alpha pr backfill-opened OWNER` covers the pull requests opened before the ledger existed. It reads every pull request, open, closed and merged, in every repository of the owner, and adds each one to the ledger of every `session=` its `Generated-by`, `Assisted-by` and `Opened-by` lines name. Run it once on each host. A rerun doesn't change anything. It warns when a listing reaches its `--limit`.
 
 The guard reads only this host's ledger and sees only the commands it scans, so this isn't a security boundary.
+
+### Review drafts
+
+`tbhbdev alpha review draft N` reads the PR's head through `gh` and writes a skeleton to `$(git rev-parse --git-dir)/tbhb-alpha/review-N.md`. It prints the path and keeps an existing draft unchanged. `--force` refreshes only `commit_id`. It keeps the body and the other metadata. Each worktree and PR has its own file.
+
+Pick `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` in the draft's `event` field. The required frontmatter also holds `pr`, which must match N, and a 40-hex `commit_id`. Reviews have no H1 title. Fill Verdict and Verification, then remove the guidance comments and any unused optional sections. Findings holds blocking issues, one list item each with `path:line` and what must change. A request for changes needs findings. Suggestions holds non-blocking improvements.
+
+`tbhbdev alpha review check N` checks the draft locally, including its frontmatter, section order, word limits, prose wrapping, references, trailers, and the repository's Markdown, spelling, and prose rules. It prints each problem as `path:line: problem` on stderr and exits 1 on failure or 0 on success. The check reads local files and runs local linters. Write plain prose, one line per paragraph, cite code as `path:line`, and leave trailers out.
 
 ## Plugins
 
