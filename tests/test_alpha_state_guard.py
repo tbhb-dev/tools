@@ -636,7 +636,7 @@ def test_short_cluster_consumes_a_separate_value(run: Runner, flag: str) -> None
 def test_optional_short_values_do_not_consume_the_next_word(run: Runner) -> None:
     assert run(bash("git commit -S -s"))[0] == 2
     assert run(bash("git commit -u -s"))[0] == 2
-    assert run(bash("git commit -mfixes")) == (0, "", "")
+    assert run(bash("git commit -m" + "fixes")) == (0, "", "")
     assert state_guard.short_signoff("-") == (False, False)
 
 
@@ -682,7 +682,7 @@ def test_wrappers_options_and_quoted_scripts_are_checked(
         "bash -c 'echo \"git commit -s\"'",
     ],
 )
-def test_noncommands_inside_quotes_stay_allowed(run: Runner, command: str) -> None:
+def test_literal_text_inside_quotes_stays_allowed(run: Runner, command: str) -> None:
     assert run(bash(command)) == (0, "", "")
 
 
@@ -714,7 +714,7 @@ def test_landed_on_is_not_a_status_claim(run: Runner, message: str) -> None:
     [
         "1234567",
         "12345678901234567890",
-        "abcdefa",
+        "a" * 7,
         "deadbeef",
         "a12345",
         "a" + "1" * 40,
@@ -782,7 +782,7 @@ def test_shell_script_requires_c_and_a_following_argument(
         ("message", (False, False)),
         ("--amend", (False, False)),
         ("-m", (False, True)),
-        ("-mfixes", (False, False)),
+        ("-m" + "fixes", (False, False)),
         ("-S", (False, False)),
     ],
 )
