@@ -883,9 +883,13 @@ def test_synced_styles_need_no_sync(world: World) -> None:
     assert len(world.calls("vale")) == 1
 
 
-def test_missing_styles_sync_once_then_lint(world: World) -> None:
+def test_missing_styles_sync_once_then_lint(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
     styled(world, "project")
     write_fake(world.bin / "bazelisk", SYNCS.replace("SYNCED", SYNCED))
+    (world.root / "sub").mkdir()
+    monkeypatch.chdir(world.root / "sub")  # the sync runs at the top, not here
     assert lint_checked(world, BASE) == []
     log = (world.bin / "bazelisk.log").read_text().splitlines()
     assert log == [f"run //:vale_sync|{world.root.resolve()}"]

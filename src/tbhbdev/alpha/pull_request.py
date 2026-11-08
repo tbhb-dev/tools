@@ -65,7 +65,6 @@ reaches gh's ``--limit``, since the rest may be missing.
 """
 
 import argparse
-import configparser
 import json
 import os
 import re
@@ -105,6 +104,10 @@ CONFIGS = (".vale.ini", ".vale", ".cspell.jsonc", ".cspell-words.txt", ".rumdl.t
 # for a pull request number of up to four digits.
 MAX_TITLE = 72 - len(" (#9999)")
 BAZEL = "bazelisk"
+# Module constants, not literals in the functions: macOS file systems ignore
+# case, so a mutant that uppercases a path there would pass every test.
+VALE_INI = ".vale.ini"
+STYLES = ".vale"
 VALE_SYNC = "//:vale_sync"
 # Vale's built-in style, which no package provides.
 BUILTIN_STYLE = "Vale"
@@ -610,21 +613,18 @@ LINTERS: tuple[tuple[str, tuple[str, ...], Callable[[str], list[Problem]]], ...]
 
 
 def vale_styles(top: Path) -> list[str]:
-    """The styles .vale.ini's ``BasedOnStyles`` names, in any section."""
-    parser = configparser.ConfigParser(interpolation=None, strict=False)
-    # Vale's global keys come before any section header.
-    parser.read_string("[global]\n" + (top / ".vale.ini").read_text())
-    named = (
-        name.strip()
-        for section in parser.values()
-        for name in section.get("basedonstyles", "").split(",")
-    )
+    """The styles .vale.ini's ``BasedOnStyles`` lines name, in any section."""
+    named: list[str] = []
+    for line in (top / VALE_INI).read_text().splitlines():
+        key, _, value = line.partition("=")
+        if key.strip().lower() == "basedonstyles":
+            named += (name.strip() for name in value.split(","))
     return sorted({name for name in named if name and name != BUILTIN_STYLE})
 
 
 def missing_styles(top: Path) -> list[str]:
     """The named styles with no directory under .vale/."""
-    return [name for name in vale_styles(top) if not (top / ".vale" / name).is_dir()]
+    return [name for name in vale_styles(top) if not (top / STYLES / name).is_dir()]
 
 
 def style_problem(top: Path) -> str | None:
