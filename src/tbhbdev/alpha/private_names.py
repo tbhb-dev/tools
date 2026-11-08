@@ -4,8 +4,9 @@
 digits, `_` and `-`, joined by single dots, that no such character or dot
 touches on either side, so `example-private-tools` doesn't match
 `example-private` and a sentence-ending dot isn't part of the token. The check
-is case-sensitive. It flags a token that ends in `-private` and a token that
-equals a configured name.
+ignores case and a trailing `.git`, so clone URLs match. It flags a token that
+ends in `-private` and doesn't start with `-`, and a token that equals a
+configured name.
 
 `draft_problems` adds the configuration: the optional `[pr_check]` table of
 the user config, key `private_repos`. It skips the check in a private working
@@ -37,20 +38,28 @@ def private_name_problems(
 
     LINES start at line number FIRST. NAMES are the configured private
     repository names; a token that ends in `-private` is flagged without one.
+    Matching ignores case.
     """
+    wanted = {name.lower() for name in names}
     return [
         (number, MESSAGE.format(token))
         for number, line in enumerate(lines, first)
         for token in dict.fromkeys(TOKEN.findall(line))
-        if token.endswith(SUFFIX) or token in names
+        if _is_private(token, wanted)
     ]
+
+
+def _is_private(token: str, wanted: set[str]) -> bool:
+    """Whether TOKEN, minus a trailing `.git`, is a private name."""
+    name = token.lower().removesuffix(".git")
+    return (name.endswith(SUFFIX) and not name.startswith("-")) or name in wanted
 
 
 def _configured() -> list[str]:
     """The configured private names; none when the config can't supply them."""
     try:
         return userconfig.optional_strings("pr_check", "private_repos") or []
-    except userconfig.ConfigError:
+    except userconfig.ConfigError, OSError, UnicodeDecodeError:
         return []
 
 
@@ -60,7 +69,7 @@ def _origin_name() -> str | None:
     if code != 0:
         return None
     name = re.split(r"[/:]", url.strip().rstrip("/"))[-1].removesuffix(".git")
-    return name or None
+    return name.lower() or None
 
 
 def private_names() -> list[str] | None:
@@ -72,7 +81,9 @@ def private_names() -> list[str] | None:
     """
     names = _configured()
     origin = _origin_name()
-    if origin is not None and (origin.endswith(SUFFIX) or origin in names):
+    if origin is not None and (
+        origin.endswith(SUFFIX) or origin in {name.lower() for name in names}
+    ):
         return None
     return names
 

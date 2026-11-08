@@ -45,12 +45,14 @@ def test_message_says_private_and_generic() -> None:
         "example-labs",
         "example_example-lab",
         "example.example-lab",
-        "example-Private",
-        "Example-lab",
         "example-privately",
+        "--private",
+        "-private",
+        "the -private suffix",
+        "example-private.git.x",
     ],
 )
-def test_longer_tokens_and_other_case_are_not_flagged(line: str) -> None:
+def test_longer_tokens_and_leading_hyphens_are_not_flagged(line: str) -> None:
     assert tokens([line], NAMES) == []
 
 
@@ -65,6 +67,23 @@ def test_longer_tokens_and_other_case_are_not_flagged(line: str) -> None:
     ],
 )
 def test_punctuation_bounds_a_token(line: str, found: list[str]) -> None:
+    assert tokens([line], NAMES) == found
+
+
+@pytest.mark.parametrize(
+    ("line", "found"),
+    [
+        ("Example-Private", ["Example-Private"]),
+        ("example-PRIVATE", ["example-PRIVATE"]),
+        ("see Example-Lab", ["Example-Lab"]),
+        ("example-private.git", ["example-private.git"]),
+        ("git@host:o/example-private.git", ["example-private.git"]),
+        ("clone example-lab.git now", ["example-lab.git"]),
+        ("non-private semi-private", ["non-private", "semi-private"]),
+        ("x--private _-private", ["x--private", "_-private"]),
+    ],
+)
+def test_case_and_git_suffix_are_ignored(line: str, found: list[str]) -> None:
     assert tokens([line], NAMES) == found
 
 
@@ -106,6 +125,19 @@ def set_origin(monkeypatch: pytest.MonkeyPatch, code: int, url: str) -> None:
         return code, url
 
     monkeypatch.setattr(pn, "git", fake)
+
+
+def test_unreadable_config_falls_back_to_the_suffix_rule(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_origin(monkeypatch, 0, "git@github.com:org/example-public.git")
+    home.parent.mkdir(parents=True, exist_ok=True)
+    home.write_bytes(b"\xff\xfe")
+    assert pn.private_names() == []
+    home.unlink()
+    home.mkdir()
+    assert pn.private_names() == []
+    assert len(pr.check_text("# t\n\nexample-private\n").problems) >= 1
 
 
 def test_no_config_gives_no_names(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,6 +189,8 @@ def test_bad_config_falls_back_to_the_suffix_rule(
         "https://github.com/org/example-private/",
         "https://github.com/org/example-lab",
         "  git@github.com:org/example-lab.git\n",
+        "git@github.com:org/Example-Private.git",
+        "https://github.com/org/Example-LAB",
     ],
 )
 def test_private_origin_skips_the_check(
