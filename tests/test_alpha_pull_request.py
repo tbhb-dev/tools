@@ -838,6 +838,117 @@ def test_lint_needs_every_tool_and_config(world: World) -> None:
         lint_checked(world, BASE)
 
 
+VALE_INI = """StylesPath = .vale
+Packages = https://example.com/Google.zip, \\
+  https://example.com/write-good.zip
+
+[*.md]
+BasedOnStyles = Vale, Google,  write-good, project
+
+[tmp/**]
+BasedOnStyles =
+
+[*.txt]
+BasedOnStyles = Google, extra
+"""
+
+
+def styled(world: World, *present: str) -> None:
+    """A .vale.ini naming four styles, with only ``present`` synced."""
+    (world.root / ".vale.ini").write_text(VALE_INI)
+    (world.root / ".vale").unlink()
+    for name in present:
+        (world.root / ".vale" / name).mkdir(parents=True)
+
+
+SYNCED = '("Google", "write-good", "extra")'
+SYNCS = """import os, sys
+open(os.path.join(os.path.dirname(__file__), "bazelisk.log"), "a").write(
+    " ".join(sys.argv[1:]) + "|" + os.getcwd() + "\\n"
+)
+for name in SYNCED:
+    os.makedirs(os.path.join(".vale", name), exist_ok=True)
+"""
+
+
+def test_vale_styles_names_each_style_once(world: World) -> None:
+    styled(world)
+    assert pr.vale_styles(world.root) == ["Google", "extra", "project", "write-good"]
+
+
+def test_vale_styles_split_at_the_first_equals(world: World) -> None:
+    # Vale's ini parser splits a key from its value at the first "=".
+    (world.root / ".vale.ini").write_text("BasedOnStyles = odd=name\n")
+    assert pr.vale_styles(world.root) == ["odd=name"]
+
+
+def test_synced_styles_need_no_sync(world: World) -> None:
+    styled(world, "Google", "extra", "project", "write-good")
+    assert lint_checked(world, BASE) == []
+    assert not (world.bin / "bazelisk.log").exists()
+    assert len(world.calls("vale")) == 1
+
+
+def test_missing_styles_sync_once_then_lint(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    styled(world, "project")
+    write_fake(world.bin / "bazelisk", SYNCS.replace("SYNCED", SYNCED))
+    (world.root / "sub").mkdir()
+    monkeypatch.chdir(world.root / "sub")  # the sync runs at the top, not here
+    assert lint_checked(world, BASE) == []
+    log = (world.bin / "bazelisk.log").read_text().splitlines()
+    assert log == [f"run //:vale_sync|{world.root.resolve()}"]
+    assert len(world.calls("vale")) == 1
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "why"),
+    [("out", "no  such target", "no such target"), ("out  text", "", "out text")],
+)
+def test_failed_sync_is_one_problem(
+    world: World, stdout: str, stderr: str, why: str
+) -> None:
+    styled(world, "project", "extra")
+    world.fake("bazelisk", rc=3, stdout=stdout, stderr=stderr)
+    found = lint_checked(world, BASE)
+    assert found == [
+        (
+            1,
+            (
+                "vale: vale styles missing from .vale/: Google, write-good; "
+                f"`bazelisk run //:vale_sync` exited 3: {why}"
+            ),
+        )
+    ]
+    (call,) = world.calls("bazelisk")
+    assert call["argv"] == ["run", "//:vale_sync"]
+    assert world.calls("vale") == []
+    assert len(world.calls("cspell")) == 1
+
+
+def test_sync_that_leaves_styles_missing_is_a_problem(world: World) -> None:
+    styled(world, "project")
+    # Exit 0, but it only syncs Google.
+    write_fake(world.bin / "bazelisk", SYNCS.replace("SYNCED", '("Google",)'))
+    found = lint_checked(world, BASE)
+    assert found == [
+        (
+            1,
+            (
+                "vale: vale styles missing from .vale/: extra, write-good; "
+                "`bazelisk run //:vale_sync` exited 0: "
+            ),
+        )
+    ]
+
+
+def test_missing_bazelisk_stops_the_check(world: World) -> None:
+    styled(world, "project")
+    with pytest.raises(SystemExit, match="bazelisk not found"):
+        lint_checked(world, BASE)
+
+
 def test_lint_skipped_without_a_title(world: World) -> None:
     assert lint_checked(world, "## Why\n\nw\n")
     assert world.calls("vale") == []
