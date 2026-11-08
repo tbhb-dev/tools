@@ -64,7 +64,7 @@ EVIDENCE = re.compile(
 TRAILER = re.compile(r"(?i)(signed-off-by|co-authored-by)\s*:")
 SHORT_FLAG = re.compile(r"-[a-zA-Z]*s[a-zA-Z]*")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
-HEREDOC = re.compile(r"<<-?\s*(?:'([^']*)'|\"([^\"]*)\"|([A-Za-z0-9_]+))")
+HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(?:'([^']*)'|\"([^\"]*)\"|([A-Za-z0-9_]+))")
 OPEN_ITEM = re.compile(r"(?m)^- \*\*.*$")
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n")
 SEPARATORS = frozenset("&|;\n(){}`")

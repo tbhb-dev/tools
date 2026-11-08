@@ -272,6 +272,8 @@ def test_other_tools_and_odd_inputs_pass(run: Runner) -> None:
         'echo "a;b" && git commit -s',
         "echo \\' && git commit -s",
         "cat <<EOF\nhi\nEOF\ngit commit -s",
+        'grep a <<< "x"\ngit commit -s -m y',
+        'grep a <<<< "x"\ngit commit -s -m y',
         "git commit -m x <<EOF\nEOF\ngit commit -s",
     ],
 )
