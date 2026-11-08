@@ -59,7 +59,7 @@ and adds none when the live body has none. ``check`` rejects a draft that
 contains one.
 
 ``ready --pr N`` marks pull request N ready for review with ``gh pr ready``. It
-reads no draft.
+doesn't read a draft.
 
 ``backfill-opened OWNER`` reads the body of every pull request, open or not,
 in every repository of OWNER, and adds each one to the ledger of every
