@@ -8,7 +8,9 @@ working (session, model, effort) and which files they edit. Git hooks turn
 those records into trailers and validate them:
 
     record <claude|codex|antigravity>  harness hook: reads hook JSON on stdin
-                                       (exits 0 at once outside a tbhb-dev repo)
+                                       (a no-op in another owner's repository;
+                                       outside any repository it keeps only
+                                       the user's record)
     trailer <msgfile> [source]         prepare-commit-msg: stamp the trailers
     consume                            post-commit: consume the credited receipts
     check <msgfile>                    commit-msg: validate the trailers, and

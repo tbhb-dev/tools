@@ -701,6 +701,7 @@ def test_record_outside_tbhb_dev_is_a_silent_no_op(
     assert ai.cmd_record(harness, {"CODEX_SESSION_ID": "s"}) == 0
     assert capsys.readouterr() == ("", "")
     assert not (repo / ".git" / "tbhb-alpha").exists()
+    assert not (ai.user_store() / f"{ai.hx(ai.sha256_64('s'))}.json").exists()
 
 
 def test_a_session_from_the_main_checkout_is_known_in_a_worktree(
@@ -2175,6 +2176,29 @@ def test_cmd_record_claude_outside_a_repository_keeps_a_user_record(
     assert ai.cmd_record("claude", {}) == 0
     assert list(plain.iterdir()) == []
     assert ai.load_record(ai.sha256_64("s"))["payload_model"] == "m"
+
+
+def test_cmd_record_uses_the_hook_cwd_outside_a_repository(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    feed(monkeypatch, {"session_id": "s", "model": "m", "cwd": str(outside)})
+    assert ai.cmd_record("claude", {}) == 0
+    assert not (repo / ".git" / "tbhb-alpha" / "sessions").exists()
+    assert (ai.user_store() / f"{ai.hx(ai.sha256_64('s'))}.json").is_file()
+
+
+def test_cmd_record_uses_the_hook_cwd_in_another_owners_repository(
+    plain: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    foreign = init_repo(tmp_path / "foreign")
+    run_git(foreign, "remote", "set-url", "origin", "git@github.com:someone/x.git")
+    feed(monkeypatch, {"session_id": "s", "model": "m", "cwd": str(foreign)})
+    assert ai.cmd_record("claude", {}) == 0
+    assert not (foreign / ".git" / "tbhb-alpha").exists()
+    assert not (ai.user_store() / f"{ai.hx(ai.sha256_64('s'))}.json").exists()
+    assert list(plain.iterdir()) == []
 
 
 @pytest.mark.usefixtures("repo")
