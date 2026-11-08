@@ -105,12 +105,14 @@ CONFIGS = (".vale.ini", ".vale", ".cspell.jsonc", ".cspell-words.txt", ".rumdl.t
 MAX_TITLE = 72 - len(" (#9999)")
 BAZEL = "bazelisk"
 # Module constants, not literals in the functions: macOS file systems ignore
-# case, so a mutant that uppercases a path there would pass every test.
+# case, so a mutant that changes a path's case there would pass every test.
 VALE_INI = ".vale.ini"
 STYLES = ".vale"
 VALE_SYNC = "//:vale_sync"
 # Vale's built-in style, which no package provides.
 BUILTIN_STYLE = "Vale"
+# The .vale.ini key that names styles, compared without regard to case.
+BASED_ON = "BasedOnStyles"
 GH = "gh"
 CLAUDE = "claude"
 CODEX = "codex"
@@ -617,7 +619,7 @@ def vale_styles(top: Path) -> list[str]:
     named: list[str] = []
     for line in (top / VALE_INI).read_text().splitlines():
         key, _, value = line.partition("=")
-        if key.strip().lower() == "basedonstyles":
+        if key.strip().lower() == BASED_ON.lower():
             named += (name.strip() for name in value.split(","))
     return sorted({name for name in named if name and name != BUILTIN_STYLE})
 
@@ -667,19 +669,26 @@ def lint(rendered: Sequence[str], first: int) -> list[Problem]:
             if name == "vale" and styles:
                 problems.append((first, f"vale: {styles}"))
                 continue
-            done = run([exe, *args, str(DRAFT)], cwd=work)
-            found = parse(done.stdout)
-            # Exit 1 means findings in all three tools; anything else, or
-            # exit 1 with nothing parsed, is the tool failing.
-            if done.returncode not in {0, 1} or (done.returncode == 1 and not found):
-                why = " ".join((done.stderr or done.stdout).split())
-                found = [(1, f"{name} failed (exit {done.returncode}): {why}")]
             problems.extend(
                 (first + line - 1, text)
-                for line, text in found
+                for line, text in run_linter(name, [exe, *args], parse, work)
                 if (line, text.split(":")[0]) != TITLE_ALERT
             )
     return problems
+
+
+def run_linter(
+    name: str, argv: list[str], parse: Callable[[str], list[Problem]], work: Path
+) -> list[Problem]:
+    """Run one linter on the draft in ``work``; its findings, or why it failed."""
+    done = run([*argv, str(DRAFT)], cwd=work)
+    found = parse(done.stdout)
+    # Exit 1 means findings in all three tools; anything else, or
+    # exit 1 with nothing parsed, is the tool failing.
+    if done.returncode not in {0, 1} or (done.returncode == 1 and not found):
+        why = " ".join((done.stderr or done.stdout).split())
+        found = [(1, f"{name} failed (exit {done.returncode}): {why}")]
+    return found
 
 
 def body_problems(lines: Sequence[Line], title: Line) -> list[Problem]:
