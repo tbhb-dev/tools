@@ -1,7 +1,7 @@
 """`tbhbdev host`: frozen host commands, being retired.
 
 On Linux, configuration management alone writes the token file; this module
-only checks and reads it. Bootstrap and upgrade refuse Linux hosts.
+only checks and reads it. Bootstrap, upgrade, grant, and revoke refuse Linux hosts.
 
 These commands run on the operator's Mac, which has 1Password Desktop and the
 `op` CLI. The deployment's values come from the user config (see
@@ -856,6 +856,7 @@ def refresh(
 
     The new token's check reaches Connect at URLS.
     """
+    _require_keychain_writer(host)
     mine = [t for t in account.tokens if t.host == host.name]
     current = account.current(host)
     why = problem(current, vaults, account.when, held=keychain_held(host))
@@ -2182,9 +2183,11 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
 
 
 def cmd_grant(args: argparse.Namespace) -> int:
+    chosen = select(args.host, every=args.all)
+    for host in chosen:
+        _require_keychain_writer(host)
     touch_id("grant")
     named = _check_vaults(args.vaults)
-    chosen = select(args.host, every=args.all)
     urls = endpoints()
     account = Account.load(need_server())
     plans = _plans(account, chosen, lambda held: held | named)
@@ -2200,9 +2203,11 @@ def cmd_grant(args: argparse.Namespace) -> int:
 
 
 def cmd_revoke(args: argparse.Namespace) -> int:
+    chosen = select(args.host, every=args.all)
+    for host in chosen:
+        _require_keychain_writer(host)
     touch_id("revoke")
     named = _check_vaults(args.vaults)
-    chosen = select(args.host, every=args.all)
     for host in chosen:
         kept = sorted(named & base_vaults(host))
         if kept:

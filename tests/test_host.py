@@ -1205,7 +1205,7 @@ def test_vault_names_are_checked(
 ) -> None:
     assert run(world, capfd, "grant", "--all", vault) == 1
     assert "a vault name can't be empty or hold a comma" in world.err
-    assert [c["tool"] for c in world.stubs.calls()] == ["swift"]
+    assert [c["tool"] for c in world.stubs.calls()] == ["tailscale", "swift"]
 
 
 @pytest.mark.parametrize("vault", ["vault-all", "vault-host-a"])
@@ -1729,7 +1729,7 @@ def test_touch_id_guards_bootstrap_grant_and_revoke(
     monkeypatch.setattr(host_tool.platform, "system", lambda: system)
     assert run(world, capfd, *command, "--all") == 1
     assert world.err == f"{PROG}: {error.format(command[0])}\n"
-    expected = ["tailscale"] if command == ["bootstrap"] else []
+    expected = ["tailscale"]
     if system == "Darwin":
         expected.append("swift")
     assert [c["tool"] for c in world.stubs.calls()] == expected
@@ -4011,14 +4011,15 @@ def test_linux_writers_refuse_before_running_commands(world: World, step: str) -
     assert path.parent.stat() == directory
 
 
-@pytest.mark.parametrize("command", ["bootstrap", "upgrade"])
+@pytest.mark.parametrize("command", ["bootstrap", "upgrade", "grant", "revoke"])
 def test_linux_commands_refuse_before_onepassword_or_host_writes(
     world: World, capfd: pytest.CaptureFixture[str], command: str
 ) -> None:
     tailnet = json.loads(json.dumps(TAILNET))
     tailnet["Peer"]["n2"]["OS"] = "linux"
     world.stubs.set(tailscale=tailnet)
-    assert run(world, capfd, command, "--host", "host-c") == 1
+    vaults = ("x",) if command in {"grant", "revoke"} else ()
+    assert run(world, capfd, command, "--host", "host-c", *vaults) == 1
     assert world.err == (
         f"{PROG}: host-c: Linux hosts get the Connect token file from "
         "configuration management, not tbhbdev host\n"
@@ -4028,6 +4029,15 @@ def test_linux_commands_refuse_before_onepassword_or_host_writes(
     assert world.stubs.argvs("ssh") == []
     assert world.stubs.argvs("sudo") == []
     assert world.checked == []
+    assert not world.stubs.home("host-c").exists()
+
+
+def test_refresh_refuses_linux_before_onepassword_or_host_writes(world: World) -> None:
+    host = host_tool.Host("host-c", "linux", local=False)
+    account = host_tool.Account("srv-1", T0, [])
+    with pytest.raises(host_tool.HostError, match="configuration management"):
+        host_tool.refresh(account, host, frozenset({"x"}), ENDPOINTS)
+    assert world.stubs.calls() == []
     assert not world.stubs.home("host-c").exists()
 
 
