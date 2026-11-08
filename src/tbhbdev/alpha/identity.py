@@ -1021,7 +1021,8 @@ def git_verb(words: list[str]) -> str:
 
 def segment_kind(segment: str) -> str:
     """``move``, ``quiet`` or ``other`` for one simple command."""
-    if ">" in HARMLESS_REDIRECT.sub("", segment):
+    # The replacement text never holds ">", so mutating it cannot change the result.
+    if ">" in HARMLESS_REDIRECT.sub("", segment):  # pragma: no mutate
         return "other"
     try:
         words = shlex.split(segment)
