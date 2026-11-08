@@ -27,6 +27,7 @@ cuda
 cwds
 dbus
 delenv
+demilestoned
 deptry
 docstrings
 dotrepo
@@ -70,6 +71,7 @@ llmx
 lockfiles
 mcpjson
 mdfile
+milestoned
 msgfile
 mutmut
 nbbbb
@@ -102,6 +104,7 @@ readattr
 readextattr
 readsecurity
 regenerable
+rerequested
 resvg
 riscv
 rollouts
