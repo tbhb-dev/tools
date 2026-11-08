@@ -97,6 +97,7 @@ from itertools import islice, takewhile
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
+from tbhbdev.alpha.process import process_row
 from tbhbdev.alpha.repo import git, hook_cwd, in_tbhb_dev, read_hook_stdin
 
 if TYPE_CHECKING:
@@ -795,11 +796,11 @@ def finish_command(
             continue
 
 
-def ps_row(pid: str) -> tuple[str, str] | None:
-    """(parent PID, command line) of a process, or None if it is gone.
+def run_ps(pid: str) -> tuple[str, str] | None:
+    """(parent PID, command line) of a process from ``ps``, or None.
 
-    Also None when ps can't run at all: a sandbox can deny starting it, not
-    just its process lookup.
+    None when the process is gone, and also when ps can't run at all: a sandbox
+    can deny starting it, not just its process lookup.
     """
     try:
         result = subprocess.run(  # nosec B603 B607
@@ -815,6 +816,15 @@ def ps_row(pid: str) -> tuple[str, str] | None:
         return None
     ppid, _, cmd = line.partition(" ")
     return ppid.strip(), cmd.strip()
+
+
+def ps_row(pid: str) -> tuple[str, str] | None:
+    """(parent PID, command line) of a process, or None if it is gone.
+
+    Read from /proc or libproc first, which a Codex sandbox allows; ps is the
+    fallback for a platform or a denial that leaves those empty.
+    """
+    return process_row(pid) or run_ps(pid)
 
 
 def ancestry(pid: int | None = None, limit: int = ANCESTRY_LIMIT) -> list[str]:

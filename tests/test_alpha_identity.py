@@ -1145,7 +1145,7 @@ class FakeRun:
         self.stdout = stdout
 
 
-def test_ps_row_parses_parent_and_command(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_ps_parses_parent_and_command(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
     def fake(argv: list[str], **kwargs: object) -> FakeRun:
@@ -1154,25 +1154,39 @@ def test_ps_row_parses_parent_and_command(monkeypatch: pytest.MonkeyPatch) -> No
         return FakeRun(0, "  42 /bin/zsh -c  eval x \n")
 
     monkeypatch.setattr(ai.subprocess, "run", fake)
-    assert ai.ps_row("7") == ("42", "/bin/zsh -c  eval x")
+    assert ai.run_ps("7") == ("42", "/bin/zsh -c  eval x")
     assert calls == [["ps", "-ww", "-o", "ppid=,command=", "-p", "7"]]
 
 
-def test_ps_row_none_when_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_ps_none_when_gone(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ai.subprocess, "run", returning(FakeRun(1, "1 x\n")))
-    assert ai.ps_row("7") is None
+    assert ai.run_ps("7") is None
     monkeypatch.setattr(ai.subprocess, "run", returning(FakeRun(0, "\n")))
-    assert ai.ps_row("7") is None
+    assert ai.run_ps("7") is None
     monkeypatch.setattr(ai.subprocess, "run", returning(FakeRun(1, "")))
-    assert ai.ps_row("7") is None
+    assert ai.run_ps("7") is None
 
 
-def test_ps_row_none_when_ps_is_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_ps_none_when_ps_is_denied(monkeypatch: pytest.MonkeyPatch) -> None:
     def denied(argv: list[str], **_: object) -> FakeRun:
         raise PermissionError(argv[0])
 
     monkeypatch.setattr(ai.subprocess, "run", denied)
-    assert ai.ps_row("7") is None
+    assert ai.run_ps("7") is None
+
+
+def ps_command(pid: int) -> str:
+    """What ps reports for a process; skips the test where a sandbox denies ps."""
+    try:
+        done = subprocess.run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except PermissionError:
+        pytest.skip("this sandbox denies ps")
+    return done.stdout.strip()
 
 
 def test_ps_row_on_real_processes() -> None:
@@ -1181,13 +1195,7 @@ def test_ps_row_on_real_processes() -> None:
     assert row[0].isdigit()
     # pytest-xdist retitles its workers ("[pytest-xdist running] ..."), so
     # check the command against what ps itself reports rather than "python".
-    listed = subprocess.run(
-        ["ps", "-ww", "-o", "command=", "-p", str(os.getpid())],
-        capture_output=True,
-        check=True,
-        text=True,
-    ).stdout.strip()
-    assert row[1] == listed
+    assert row[1] == ps_command(os.getpid())
     assert ai.ps_row("999999999") is None
 
 
@@ -1238,16 +1246,6 @@ def test_ancestry_stops_at_init_and_gaps_and_limit(
     assert ai.ancestry(50, limit=3) == ["e", "f", "e"]
     assert ai.ancestry(50, limit=0) == []
     assert len(ai.ancestry(50)) == ai.ANCESTRY_LIMIT
-
-
-def ps_command(pid: int) -> str:
-    done = subprocess.run(
-        ["ps", "-ww", "-o", "command=", "-p", str(pid)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return done.stdout.strip()
 
 
 def test_ancestry_defaults_to_this_process() -> None:
