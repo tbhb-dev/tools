@@ -4,7 +4,8 @@
 
 import io
 import json
-from collections.abc import Callable
+import signal
+from collections.abc import Callable, Iterator
 lazy from pathlib import Path
 
 import pytest
@@ -24,6 +25,23 @@ TRAILER_MESSAGE = (
 
 type Result = tuple[int, str, str]
 type Runner = Callable[[object], Result]
+
+
+@pytest.fixture(autouse=True)
+def _bounded_hook() -> Iterator[None]:
+    """A small hook payload must finish within its execution budget."""
+
+    def expired(_signum: int, _frame: object) -> None:
+        message = "hook exceeded its execution budget"
+        raise TimeoutError(message)
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, 0.5)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 @pytest.fixture
@@ -314,7 +332,7 @@ LIVE_TABLE = {
     f"cat > t.py <<EOF\n{C} --signoff\nEOF": 0,
     f"{C} --no-signoff -m 'fix: thing'": 0,
     f"grep -n '{C} -s' file": 0,
-    "git log --" + "oneline": 0,
+    "git log --max-count=1": 0,
 }
 
 

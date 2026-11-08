@@ -97,7 +97,7 @@ def claim_reason(who: str, bad: list[str]) -> str:
 def without_heredocs(command: str) -> str:
     """COMMAND without its heredoc bodies, which are data, not commands."""
     kept: list[str] = []
-    ends: list[str] = []
+    ends: list[str] = []  # pragma: no mutate -- None is also false before assignment
     for line in command.split("\n"):
         if ends:
             if line.strip() == ends[0]:
@@ -114,11 +114,11 @@ def simple_commands(command: str) -> list[str]:
     """COMMAND split at the separators that sit outside quotes."""
     found: list[str] = []
     current: list[str] = []
-    quote = ""
+    quote = ""  # pragma: no mutate -- None has the same initial quote state
     i = 0
     while i < len(command):
         char = command[i]
-        if char == "\\" and quote != "'" and i + 1 < len(command):
+        if char == "\\" and quote != "'":
             current.append(command[i : i + 2])
             i += 2
             continue
@@ -146,7 +146,7 @@ def commit_arguments(simple: str) -> list[str] | None:
         return None
     while words and (words[0] in WRAPPERS or ASSIGNMENT.match(words[0])):
         words.pop(0)
-    if not words or words[0].rsplit("/", 1)[-1] != "git":
+    if not words or words[0].split("/")[-1] != "git":
         return None
     rest = words[1:]
     while rest and (rest[0] in GIT_OPTIONS or rest[0].startswith("--")):
@@ -160,10 +160,10 @@ def signs_off(arguments: list[str]) -> bool:
     """Whether a `git commit`'s ARGUMENTS add a sign-off or co-author trailer."""
     if TRAILER.search(" ".join(arguments)):
         return True
-    skip = False
+    skip = False  # pragma: no mutate -- None also means no value to skip
     for word in arguments:
         if skip:
-            skip = False
+            skip = False  # pragma: no mutate -- None also means no value to skip
         elif word == "--signoff" or SHORT_FLAG.fullmatch(word):
             return True
         elif word in VALUE_FLAGS:
@@ -191,8 +191,8 @@ def open_note_reason(tool: str, tool_input: Json) -> str | None:
     if not open_note or not decisions or not path.endswith(open_note):
         return None
     new = tool_input.get("content" if tool == "Write" else "new_string")
-    text = str(new or "")
-    old = str(tool_input.get("old_string", "")) if tool == "Edit" else ""
+    text = str(new)
+    old = str(tool_input.get("old_string")) if tool == "Edit" else str(None)
     added = [item for item in OPEN_ITEM.findall(text) if item not in old]
     if added and "Decisions checked:" not in text:
         return (
@@ -221,7 +221,7 @@ def last_assistant_text(transcript: str) -> str:
     """The last assistant text since the last user prompt in a JSONL transcript."""
     text = ""
     try:
-        with open(transcript, encoding="utf-8") as lines:  # noqa: PTH123
+        with open(transcript, encoding="utf-8") as lines:  # noqa: PTH123  # pragma: no mutate -- encoding names ignore case
             for line in lines:
                 try:
                     entry = json.loads(line)
