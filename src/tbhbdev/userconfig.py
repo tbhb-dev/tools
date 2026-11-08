@@ -10,6 +10,17 @@ that names the file and the `[table] key`.
 The file is read when a value is first needed, so a command that needs none,
 such as `--help`, works without it. `render` writes the file back out with one
 value set, for the copy `tbhbdev host bootstrap` installs on each agent host.
+
+The optional `[harness]` table configures the user-level Claude Code hooks that
+`tbhbdev alpha install` writes. Every key is a string or a list of strings,
+since `render` keeps nothing else. A missing file, table or key is not an error
+for these hooks: they do nothing without it.
+
+    rule          text `alpha state-guard` prints at session start
+    decisions_dir path its block messages cite as the place to check first
+    open_note     path suffix of the note it holds to the item rule
+    hosts         `["name=role", ...]`, which `alpha session-context` lists;
+                  a name alone, with no `=`, has no role
 """
 
 from __future__ import annotations
@@ -86,6 +97,38 @@ def string(table: str, key: str) -> str:
         message = f"{path()}: [{table}] {key} must be a non-empty string"
         raise ConfigError(message)
     return value
+
+
+def optional_table(name: str) -> dict[str, object] | None:
+    """The config's [NAME] table, or None when the file or the table is missing.
+
+    Raises:
+        ConfigError: The file isn't TOML, or NAME isn't a table.
+    """
+    return table(name) if path().exists() else None
+
+
+def optional_string(table: str, key: str) -> str | None:
+    """KEY in the config's [TABLE], or None when the file, table or key is missing.
+
+    Raises:
+        ConfigError: KEY isn't a non-empty string.
+    """
+    return string(table, key) if _present(table, key) else None
+
+
+def optional_strings(table: str, key: str) -> list[str] | None:
+    """KEY in the config's [TABLE], or None when the file, table or key is missing.
+
+    Raises:
+        ConfigError: KEY isn't a non-empty list of non-empty strings.
+    """
+    return strings(table, key) if _present(table, key) else None
+
+
+def _present(name: str, key: str) -> bool:
+    section = optional_table(name)
+    return section is not None and key in section
 
 
 def strings(table: str, key: str) -> list[str]:

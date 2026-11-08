@@ -37,6 +37,11 @@ hooks"; Codex runs a new hook only after `/hooks` trusts it), and
 https://antigravity.google/docs/hooks?tab=cli for Antigravity ("hooks.json
 File Locations").
 
+Claude Code also gets two hooks that do nothing without a `[harness]` table in
+the tbhbdev user config (see tbhbdev.userconfig): `alpha state-guard`, on
+PreToolUse for Bash, SendMessage, Write and Edit, on Stop and on SessionStart,
+and `alpha session-context`, on SessionStart. Both run with a 10 second timeout.
+
 Every command it writes ends in the shell comment `# tbhbdev alpha install`,
 which marks it as this command's. A rerun replaces its own entries where they
 stand and never removes or reorders anyone else's. A config whose content
@@ -119,6 +124,7 @@ AGY_EDITS = (
 )
 AGY_TIMEOUT = 30
 AGY_PR_TIMEOUT = 120
+HARNESS_TIMEOUT = 10
 
 # Without tbhbdev on PATH, a shim blocks the commit only when origin is a
 # tbhb-dev repository, by the same pattern as repo.is_tbhb_dev_url. A newline
@@ -173,13 +179,24 @@ def group(matcher: str | None, *handlers: Json) -> Json:
 def claude_hooks() -> dict[str, list[Json]]:
     """Claude Code's hooks, the ones the tbhb-dev repositories used to carry."""
     record = handler("identity record claude")
+    guard = handler("state-guard", HARNESS_TIMEOUT)
     return {
-        "SessionStart": [group(None, handler("install --hook"), record)],
+        "SessionStart": [
+            group(
+                None,
+                handler("install --hook"),
+                record,
+                guard,
+                handler("session-context", HARNESS_TIMEOUT),
+            )
+        ],
         "SubagentStart": [group(None, record)],
         "PreToolUse": [
             group("Bash|Agent", record),
             group("Bash", handler("guard-gh-pr")),
+            group("Bash|SendMessage|Write|Edit", guard),
         ],
+        "Stop": [group(None, guard)],
         "PostToolUse": [
             group("Write|Edit|MultiEdit|NotebookEdit|Bash", record),
             group("Write|Edit|MultiEdit", handler("pr hook claude")),

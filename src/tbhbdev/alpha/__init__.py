@@ -12,12 +12,25 @@ import os
 import sys
 from typing import TYPE_CHECKING
 
-from tbhbdev.alpha import guard_gh_pr, identity, install
+from tbhbdev.alpha import (
+    guard_gh_pr,
+    identity,
+    install,
+    session_context,
+    state_guard,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-__all__ = ["guard_gh_pr", "identity", "install", "main"]
+__all__ = [
+    "guard_gh_pr",
+    "identity",
+    "install",
+    "main",
+    "session_context",
+    "state_guard",
+]
 
 USAGE = """usage: {prog} <command> [args...]
 
@@ -28,6 +41,9 @@ commands:
                | consume | check MSGFILE | stamp-docs
   guard-gh-pr  PreToolUse hook: block gh pr create|edit|merge and
                a session's approval of a pull request it opened
+  state-guard  Claude Code hook: block status claims that carry no evidence
+  session-context
+               SessionStart hook: name the host, the other hosts and the time
   pr           check | create | edit | hook: the pull request draft
                | backfill-opened OWNER: the opened ledgers
   merge        squash-merge an approved pull request
@@ -41,6 +57,14 @@ def identity_command(argv: list[str], _prog: str) -> int:
 
 def guard_command(_argv: list[str], _prog: str) -> int:
     return guard_gh_pr.main()
+
+
+def state_guard_command(_argv: list[str], _prog: str) -> int:
+    return state_guard.main()
+
+
+def session_context_command(_argv: list[str], _prog: str) -> int:
+    return session_context.main()
 
 
 def pr(argv: list[str], prog: str) -> int:
@@ -62,6 +86,8 @@ def install_command(argv: list[str], prog: str) -> int:
 COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "identity": identity_command,
     "guard-gh-pr": guard_command,
+    "state-guard": state_guard_command,
+    "session-context": session_context_command,
     "pr": pr,
     "merge": merge,
     "install": install_command,

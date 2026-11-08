@@ -1,0 +1,290 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright Tony Burns
+"""`tbhbdev alpha state-guard`: block status claims that carry no evidence.
+
+A Claude Code hook for PreToolUse (Bash, SendMessage, Write and Edit), Stop and
+SessionStart. It reads the hook payload on stdin.
+
+- PreToolUse on SendMessage blocks a message that claims a status (done,
+  merged, deployed and so on) with no evidence, by exiting 2 with the reason on
+  stderr. On Bash it blocks a `git commit` that adds a Signed-off-by or
+  Co-authored-by trailer or the `-s` or `--signoff` flag. Neither needs the
+  user config.
+- Stop blocks a final reply with the same claims by printing
+  `{"decision": "block", ...}`. A Stop that the hook itself caused
+  (`stop_hook_active`) passes, so the model can't loop.
+- SessionStart prints `[harness] rule` from the user config (see
+  tbhbdev.userconfig), which Claude Code adds to the model's context. Without
+  that key it prints nothing.
+- PreToolUse on Write and Edit, when both `[harness] open_note` and
+  `[harness] decisions_dir` are set: a file whose path ends in `open_note`
+  can't gain a `- **item**` line unless the text holds `Decisions checked:`,
+  and the block names `decisions_dir`. Without either key it does nothing.
+
+Evidence is a git sha (7 to 40 hex digits), a PR or issue number, a log path,
+inline code, "output" or "read-back", or attribution ("says", "said",
+"reports"). A claim marked "unverified", or "not done", also passes.
+
+A command is a `git commit` only when one of its simple commands is one. The
+scan drops heredoc bodies, then splits the text at `&&`, `||`, `;`, `|`, `&`,
+newlines, parentheses, braces and backticks outside quotes, so `$(...)`
+counts and a quoted string belongs to its own simple command. A simple
+command is a commit when, after `env`, `command`, `exec` and `NAME=value`
+words, it is `git`, any `-C PATH`, `-c NAME=VALUE` and `--option` words,
+then `commit`.
+
+The hook never blocks for lack of config, and any crash or invalid config
+allows the call: a broken hook must not stop the agent's work.
+"""
+
+import json
+import re
+import shlex
+import sys
+
+from tbhbdev import userconfig
+from tbhbdev.alpha.repo import read_hook_stdin
+
+type Json = dict[str, object]
+
+TABLE = "harness"
+CLAIM = re.compile(
+    r"\b(?:is|are|was|were|now|already|has been|have been)\s+"
+    r"(?:done|applied|merged|shipped|deployed|live|fixed|complete|completed|"
+    r"installed|running|verified|in place|started)\b"
+    r"|\b(?:shipped|merged|applied|deployed|landed|rolled out)\b",
+    re.IGNORECASE,
+)
+EVIDENCE = re.compile(
+    r"\b[0-9a-f]{7,40}\b|#\d+|\bsays\b|\bsaid\b|\breports?\b|\.log\b|`[^`]+`"
+    r"|\boutput\b|\bread-back\b|\bunverified\b|\bnot (?:done|applied|merged)\b",
+    re.IGNORECASE,
+)
+TRAILER = re.compile(r"(?i)(signed-off-by|co-authored-by)\s*:")
+SHORT_FLAG = re.compile(r"-[a-zA-Z]*s[a-zA-Z]*")
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+HEREDOC = re.compile(r"<<-?\s*(?:'([^']*)'|\"([^\"]*)\"|([A-Za-z0-9_]+))")
+OPEN_ITEM = re.compile(r"(?m)^- \*\*.*$")
+SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n")
+SEPARATORS = frozenset("&|;\n(){}`")
+GIT_OPTIONS = frozenset({"-C", "-c"})
+WRAPPERS = frozenset({"env", "command", "exec"})
+VALUE_FLAGS = frozenset({"-m", "-F", "-t", "-C", "-c", "--message", "--file"})
+MAX_QUOTED = 160
+MAX_LISTED = 3
+
+
+def unevidenced(text: str) -> list[str]:
+    """The sentences or lines of TEXT with a status claim and no evidence."""
+    return [
+        chunk.strip()[:MAX_QUOTED]
+        for chunk in SENTENCE_END.split(text)
+        if CLAIM.search(chunk) and not EVIDENCE.search(chunk)
+    ]
+
+
+def claim_reason(who: str, bad: list[str]) -> str:
+    """The block message for the unevidenced claims BAD that WHO made."""
+    return (
+        f"state-guard: {who} makes a status claim without evidence. Add the "
+        "PR number and sha, the merge sha, command output or a log path, "
+        "attribute it ('ops says ...'), or say it is unverified. Offending: "
+        + " | ".join(bad[:MAX_LISTED])
+    )
+
+
+def without_heredocs(command: str) -> str:
+    """COMMAND without its heredoc bodies, which are data, not commands."""
+    kept: list[str] = []
+    ends: list[str] = []
+    for line in command.split("\n"):
+        if ends:
+            if line.strip() == ends[0]:
+                ends.pop(0)
+            continue
+        kept.append(line)
+        ends = [
+            next(g for g in m.groups() if g is not None) for m in HEREDOC.finditer(line)
+        ]
+    return "\n".join(kept)
+
+
+def simple_commands(command: str) -> list[str]:
+    """COMMAND split at the separators that sit outside quotes."""
+    found: list[str] = []
+    current: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(command):
+        char = command[i]
+        if char == "\\" and quote != "'" and i + 1 < len(command):
+            current.append(command[i : i + 2])
+            i += 2
+            continue
+        if quote:
+            quote = "" if char == quote else quote
+            current.append(char)
+        elif char in "'\"":
+            quote = char
+            current.append(char)
+        elif char in SEPARATORS:
+            found.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+        i += 1
+    found.append("".join(current))
+    return found
+
+
+def commit_arguments(simple: str) -> list[str] | None:
+    """The arguments after `commit` when SIMPLE is a `git commit`, else None."""
+    try:
+        words = shlex.split(simple)
+    except ValueError:
+        return None
+    while words and (words[0] in WRAPPERS or ASSIGNMENT.match(words[0])):
+        words.pop(0)
+    if not words or words[0].rsplit("/", 1)[-1] != "git":
+        return None
+    rest = words[1:]
+    while rest and (rest[0] in GIT_OPTIONS or rest[0].startswith("--")):
+        rest = rest[2:] if rest[0] in GIT_OPTIONS else rest[1:]
+    if not rest or rest[0] != "commit":
+        return None
+    return rest[1:]
+
+
+def signs_off(arguments: list[str]) -> bool:
+    """Whether a `git commit`'s ARGUMENTS add a sign-off or co-author trailer."""
+    if TRAILER.search(" ".join(arguments)):
+        return True
+    skip = False
+    for word in arguments:
+        if skip:
+            skip = False
+        elif word == "--signoff" or SHORT_FLAG.fullmatch(word):
+            return True
+        elif word in VALUE_FLAGS:
+            skip = True
+    return False
+
+
+def commit_trailer_reason(command: str) -> str | None:
+    """Why COMMAND, a `git commit` that adds a sign-off trailer, is blocked."""
+    for simple in simple_commands(without_heredocs(command)):
+        arguments = commit_arguments(simple)
+        if arguments is not None and signs_off(arguments):
+            return (
+                "state-guard: agent commits carry no Signed-off-by or "
+                "Co-authored-by trailer and no -s or --signoff. Remove it."
+            )
+    return None
+
+
+def open_note_reason(tool: str, tool_input: Json) -> str | None:
+    """Why a Write or Edit of the open note that adds an unchecked item is blocked."""
+    open_note = userconfig.optional_string(TABLE, "open_note")
+    decisions = userconfig.optional_string(TABLE, "decisions_dir")
+    path = str(tool_input.get("file_path", ""))
+    if not open_note or not decisions or not path.endswith(open_note):
+        return None
+    new = tool_input.get("content" if tool == "Write" else "new_string")
+    text = str(new or "")
+    old = str(tool_input.get("old_string", "")) if tool == "Edit" else ""
+    added = [item for item in OPEN_ITEM.findall(text) if item not in old]
+    if added and "Decisions checked:" not in text:
+        return (
+            "state-guard: a new open item needs 'Decisions checked: <grep "
+            f"terms>', showing you searched {decisions} first."
+        )
+    return None
+
+
+def pre_tool_reason(data: Json) -> str | None:
+    """Why the PreToolUse call DATA describes is blocked, or None."""
+    tool = data.get("tool_name")
+    raw = data.get("tool_input")
+    tool_input: Json = raw if isinstance(raw, dict) else {}
+    if tool == "Bash":
+        return commit_trailer_reason(str(tool_input.get("command", "")))
+    if tool == "SendMessage":
+        bad = unevidenced(str(tool_input.get("message", "")))
+        return claim_reason("this message", bad) if bad else None
+    if tool in {"Write", "Edit"}:
+        return open_note_reason(str(tool), tool_input)
+    return None
+
+
+def last_assistant_text(transcript: str) -> str:
+    """The last assistant text since the last user prompt in a JSONL transcript."""
+    text = ""
+    try:
+        with open(transcript, encoding="utf-8") as lines:  # noqa: PTH123
+            for line in lines:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                text = entry_text(entry, text)
+    except OSError:
+        return ""
+    return text
+
+
+def entry_text(entry: object, text: str) -> str:
+    """TEXT after the transcript line ENTRY: reset by a prompt, set by a reply."""
+    if not isinstance(entry, dict):
+        return text
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if entry.get("type") == "user" and isinstance(content, str):
+        return ""
+    if entry.get("type") != "assistant" or not isinstance(content, list):
+        return text
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = str(block.get("text", ""))
+    return text
+
+
+def stop_reason(data: Json) -> str | None:
+    """Why the final reply DATA describes is blocked, or None."""
+    if data.get("stop_hook_active"):
+        return None
+    message = data.get("last_assistant_message")
+    if not message:
+        message = last_assistant_text(str(data.get("transcript_path", "")))
+    bad = unevidenced(str(message))
+    return claim_reason("your reply", bad) if bad else None
+
+
+def run(data: Json) -> int:
+    """Handle one hook payload; the exit status."""
+    event = data.get("hook_event_name")
+    if event == "SessionStart":
+        rule = userconfig.optional_string(TABLE, "rule")
+        if rule:
+            print(rule)
+        return 0
+    if event == "Stop":
+        reason = stop_reason(data)
+        if reason:
+            print(json.dumps({"decision": "block", "reason": reason}))
+        return 0
+    reason = pre_tool_reason(data)
+    if reason:
+        print(reason, file=sys.stderr)
+        return 2
+    return 0
+
+
+def main() -> int:
+    """Read the payload on stdin and run it; never fail for a crash or bad config."""
+    try:
+        return run(read_hook_stdin())
+    except userconfig.ConfigError as exc:
+        print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
+    except Exception:  # noqa: BLE001  # fail open on any crash
+        return 0
+    return 0

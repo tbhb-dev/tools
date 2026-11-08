@@ -101,6 +101,8 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 
 - `identity` records which agent and model made each edit and writes the `Generated-by` trailers.
 - `guard-gh-pr` is a PreToolUse hook that blocks `gh pr create`, `gh pr edit` and `gh pr merge`.
+- `state-guard` is a Claude Code hook that blocks a status claim with no evidence in a SendMessage call or a final reply, and a `git commit` that adds a sign-off or co-author trailer.
+- `session-context` is a Claude Code SessionStart hook that names the host, its role, the other hosts and the local time.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
 - `merge` squash-merges an approved pull request.
 - `install` installs the git hooks and the user-level harness hooks.
@@ -111,6 +113,18 @@ Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev reposi
 - It merges the hooks into each harness's user-level config: `settings.json` in `$CLAUDE_CONFIG_DIR` or `.claude` in `$HOME` for Claude Code, `hooks.json` in `$CODEX_HOME` or `.codex` in `$HOME` for Codex, and `.gemini/config/hooks.json` in `$HOME` for Antigravity.
 
 Each hook command it writes ends in `# tbhbdev alpha install`. A rerun replaces only those entries, and keeps everything else in place. Before it changes a config, it saves the old one beside it as `<name>.tbhbdev-backup.<time>`. `--dry-run` prints the changes without writing them, and `--harness claude|codex|antigravity` limits the merge to one harness. Codex asks you to trust new hooks with `/hooks`.
+
+For Claude Code it also installs `state-guard` (PreToolUse for Bash, SendMessage, Write and Edit, plus Stop and SessionStart) and `session-context` (SessionStart), each with a 10 second timeout. Their private values come from an optional `[harness]` table in the user config, and a missing table or key turns off the check that needs it, never blocks:
+
+```toml
+[harness]
+rule = "Example rule: a status claim carries its evidence."   # SessionStart text
+decisions_dir = "/example/decisions"   # the path the open-note block names
+open_note = "/example/Open.md"         # a path suffix; a new item needs "Decisions checked:"
+hosts = ["example-a=peer Mac", "example-b=Linux VM", "example-c"]   # "name=role"
+```
+
+The commit check and the claim check need no config. A claim counts as evidenced by a git sha, a `#N` number, a log path, inline code, "output", attribution ("says", "reports") or the word "unverified".
 
 The hooks are user level, and the harness runs them in every repository. Each one first checks that the repository's `origin` is a tbhb-dev repository on GitHub, and does nothing otherwise. The one exception is the record hook run outside any repository, which writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Claude Code's SessionStart hook runs `tbhbdev alpha install --hook`, which reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 
