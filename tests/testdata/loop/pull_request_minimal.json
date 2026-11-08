@@ -1,0 +1,8 @@
+{
+  "number": 7,
+  "action": "opened",
+  "pull_request": {
+    "head": {"sha": "0123456789abcdef0123456789abcdef01234567"}
+  },
+  "sender": {"login": "example-user"}
+}
