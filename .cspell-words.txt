@@ -41,8 +41,10 @@ fakeoperator
 fchmod
 flatmap
 frontmatter
+fstat
 genrule
 getent
+geteuid
 getfacl
 getfixturevalue
 gethostname
@@ -98,6 +100,7 @@ prek
 pretooluse
 procargs
 pushd
+rdonly
 readattr
 readextattr
 readsecurity
