@@ -16,6 +16,7 @@ from tbhbdev.alpha import (
     guard_gh_pr,
     identity,
     install,
+    loop,
     session_context,
     state_guard,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "guard_gh_pr",
     "identity",
     "install",
+    "loop",
     "main",
     "session_context",
     "state_guard",
@@ -49,6 +51,7 @@ commands:
                | close N --reason TEXT: close a pull request
   issue        close N --reason completed|not-planned: close an issue
   merge        squash-merge an approved pull request
+  loop         validate loop configuration (runner not yet available)
   install      install the git hooks and the user-level harness hooks
 """
 
@@ -104,6 +107,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "issue": issue,
     "merge": merge,
     "install": install_command,
+    "loop": loop.main,
 }
 
 
