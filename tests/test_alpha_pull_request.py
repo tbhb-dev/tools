@@ -876,6 +876,12 @@ def test_vale_styles_names_each_style_once(world: World) -> None:
     assert pr.vale_styles(world.root) == ["Google", "extra", "project", "write-good"]
 
 
+def test_vale_styles_split_at_the_first_equals(world: World) -> None:
+    # Vale's ini parser splits a key from its value at the first "=".
+    (world.root / ".vale.ini").write_text("BasedOnStyles = odd=name\n")
+    assert pr.vale_styles(world.root) == ["odd=name"]
+
+
 def test_synced_styles_need_no_sync(world: World) -> None:
     styled(world, "Google", "extra", "project", "write-good")
     assert lint_checked(world, BASE) == []
