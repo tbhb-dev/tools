@@ -142,6 +142,18 @@ def delete_branch(data: Mapping[str, object], *, dry_run: bool) -> int:
     return done.returncode
 
 
+def non_blank(text: str) -> str:
+    """The text as given, unless it is empty or only whitespace.
+
+    Raises:
+        argparse.ArgumentTypeError: The text is blank.
+    """
+    if not text.strip():
+        message = "must not be blank"
+        raise argparse.ArgumentTypeError(message)
+    return text
+
+
 def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     """The command line."""
     parser = argparse.ArgumentParser(prog=prog, description="Close a PR or issue.")
@@ -152,11 +164,11 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         closing.add_argument("number", type=int)
         closing.add_argument("--dry-run", action="store_true")
         if kind == "pr":
-            closing.add_argument("--reason", required=True)
+            closing.add_argument("--reason", required=True, type=non_blank)
             closing.add_argument("--delete-branch", action="store_true")
         else:
             closing.add_argument("--reason", required=True, choices=sorted(REASONS))
-            closing.add_argument("--comment")
+            closing.add_argument("--comment", type=non_blank)
     return parser
 
 

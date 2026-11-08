@@ -216,6 +216,29 @@ def test_an_unknown_issue_reason_is_a_usage_error(gh: Gh) -> None:
     assert gh.calls == []
 
 
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["pr", "close", "7", "--reason"],
+        ["issue", "close", "3", "--reason", "completed", "--comment"],
+    ],
+)
+def test_a_blank_reason_or_comment_is_a_usage_error(
+    gh: Gh, capsys: pytest.CaptureFixture[str], argv: list[str], blank: str
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        close.main([*argv, blank], env=ENV)
+    assert exc.value.code == 2
+    assert "must not be blank" in capsys.readouterr().err
+    assert gh.calls == []
+
+
+def test_a_non_blank_reason_is_kept_as_given(gh: Gh) -> None:
+    assert close.main(["pr", "close", "7", "--reason", "  why  "], env=ENV) == 0
+    assert "  why  \n" in gh.calls[-1][-1]
+
+
 def test_the_real_gh_runs_through_pr_run(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[list[str]] = []
 
