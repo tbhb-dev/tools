@@ -10,6 +10,7 @@ awrel
 bazelisk
 bazelrc
 bazelversion
+bsdinfo
 buildcop
 buildifier
 bxox
@@ -61,6 +62,9 @@ hskey
 keepalive
 keepends
 keyrings
+kworker
+libc
+libproc
 listy
 llmx
 lockfiles
@@ -70,6 +74,7 @@ msgfile
 mutmut
 nbbbb
 ncccc
+newlen
 nobuild
 nocache
 noexperimental
@@ -82,12 +87,16 @@ onepassword
 onepasswordconnectsdk
 oxipng
 passwordless
+pidinfo
+pidpath
+pidtbsdinfo
 popd
 posttooluse
 pousr
 ppid
 prek
 pretooluse
+procargs
 pushd
 readattr
 readextattr
@@ -113,6 +122,7 @@ strerror
 stubtool
 subagentstart
 surrogateescape
+syslimits
 tailnet
 tbhb
 tbhbdev
