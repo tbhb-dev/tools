@@ -2,7 +2,7 @@
 
 The macOS keychain tests run a stub security executable with HOME in
 tmp_path (see conftest.py); the Linux token file tests use a real file under a
-monkeypatched home.
+test home.
 """
 
 from __future__ import annotations
