@@ -117,6 +117,17 @@ def write_config(where: Path, text: str) -> None:
     where.write_text(text)
 
 
+@pytest.fixture(autouse=True)
+def no_lint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The linters need vale and the like, which a sandbox may lack."""
+
+    def fake(rendered: object, first: int) -> list[pr.Problem]:
+        del rendered, first
+        return []
+
+    monkeypatch.setattr(pr, "lint", fake)
+
+
 def set_origin(monkeypatch: pytest.MonkeyPatch, code: int, url: str) -> None:
 
     def fake(*args: str, **kwargs: object) -> tuple[int, str]:
