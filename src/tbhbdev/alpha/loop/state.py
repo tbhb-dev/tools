@@ -7,9 +7,15 @@ precedence over every other state, including merged and closed.
 
 Review outcomes are ordered oldest to newest: latest means the last element
 of ``review_runs_at_head``. Any live run takes precedence over that outcome.
-Only reviews and the required CI check at the current head belong in facts;
-the intake layer selects that check and computes scope from structured reads.
-Unknown signature validity is exposed even when signatures are not required.
+The intake or read layer supplies head-scoped counts: approvals at the current
+head only, excluding dismissed reviews and any reviewer whose latest review
+there is CHANGES_REQUESTED. It selects the required CI check at that head by
+its configured name and owner login, and computes scope from structured reads.
+This module does not select checks or count reviews.
+
+An unknown signature requirement is treated as required. Unknown signature
+validity holds the request after confirmed blockers and before CI, unless
+signatures are explicitly not required.
 """
 
 # cspell:words unreviewed
@@ -27,6 +33,7 @@ class State(StrEnum):
     UNVERIFIED = "unverified"
     DRAFT = "draft"
     BLOCKED = "blocked"
+    SIGNATURE_PENDING = "signature_pending"
     CI_PENDING = "ci_pending"
     CI_RED = "ci_red"
     GREEN_UNREVIEWED = "green_unreviewed"
@@ -48,7 +55,6 @@ class BlockedReason(StrEnum):
 @dataclass(frozen=True)
 class CIObservation:
     status: CIStatus
-    conclusion: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,24 +87,20 @@ class PullRequestFacts:
 class PullRequestState:
     state: State
     blocked_reason: BlockedReason | None = None
-    signature_unknown: bool = False
 
 
 def _blocked_reason(facts: PullRequestFacts) -> BlockedReason | None:
-    if facts.signatures_required and facts.head_signature_valid is False:
+    if facts.signatures_required is not False and facts.head_signature_valid is False:
         return BlockedReason.UNSIGNED
-    if facts.merge_state == "dirty":
+    if facts.merge_state.lower() == "dirty":
         return BlockedReason.DIRTY
-    if facts.merge_state == "behind":
+    if facts.merge_state.lower() == "behind":
         return BlockedReason.BEHIND
     return None
 
 
 def _green_state(facts: PullRequestFacts) -> State:
-    if (
-        facts.approvals_at_head >= facts.required_approvals
-        and facts.required_approvals > 0
-    ):
+    if facts.approvals_at_head >= facts.required_approvals:
         return State.APPROVED
     if "live" in facts.review_runs_at_head:
         return State.REVIEW_RUNNING
@@ -120,13 +122,15 @@ def _classify(  # noqa: PLR0911 -- one return per precedence row
         return State.MERGED, None
     if facts.lifecycle == "closed":
         return State.CLOSED, None
-    if not facts.in_scope:
+    if not facts.in_scope or facts.required_approvals == 0:
         return State.OUT_OF_SCOPE, None
     if facts.is_draft:
         return State.DRAFT, None
     reason = _blocked_reason(facts)
     if reason is not None:
         return State.BLOCKED, reason
+    if facts.signatures_required is not False and facts.head_signature_valid is None:
+        return State.SIGNATURE_PENDING, None
     if facts.ci.status in {"absent", "pending"}:
         return State.CI_PENDING, None
     if facts.ci.status == "failure":
@@ -135,6 +139,6 @@ def _classify(  # noqa: PLR0911 -- one return per precedence row
 
 
 def derive(facts: PullRequestFacts) -> PullRequestState:
-    """Apply the first matching state row; unknown signatures need a read."""
+    """Apply the first matching state row, holding unknown required signatures."""
     state, reason = _classify(facts)
-    return PullRequestState(state, reason, facts.head_signature_valid is None)
+    return PullRequestState(state, reason)
