@@ -1315,4 +1315,13 @@ def main(
         # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
         # empty body: no test can tell `None` from `""`.
         return invoke_gh([GH, "pr", "ready", str(args.pr)], "")[0]  # pragma: no mutate
-    return command(args, env)
+    try:
+        return command(args, env)
+    except agent_identity.AttributionError:
+        print(
+            "tbhbdev alpha pr: Attribution couldn't be resolved. Retry the pull "
+            "request command from the main session after the subagent's command "
+            "finishes and its session record is available.",
+            file=sys.stderr,
+        )
+        return 1

@@ -1016,6 +1016,8 @@ def test_the_user_store_keeps_commands_private(repo: Path) -> None:
         assert "cmds" in {child.name for child in user.iterdir()}
         (path,) = (user / "cmds" / ("a" * 16)).glob("*.json")
         assert stat.S_IMODE(user.stat().st_mode) == 0o700
+        references = user / "cmd-stores" / ai.hx(ROOT)
+        assert stat.S_IMODE(references.stat().st_mode) == 0o700
         assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         (rec,) = pending(repo)
@@ -2541,12 +2543,11 @@ def test_claude_committer_child_model_from_transcript(repo: Path) -> None:
 def test_claude_committer_rejects_foreign_agent_records(repo: Path) -> None:
     seed_claude(repo)
     ai.write_record(AGENT, {"root": OTHER, "model": "claude-haiku-5-5"}, repo)
-    got = ai.committer_identity({**CLAUDE_COMMIT_ENV, ai.AGENT_ENV: AGENT}, [])
-    assert got is not None
-    assert got.ident.subagent is None
-    assert got.ident.model == "anthropic:claude-opus-5-5"
-    # An unknown agent id is treated the same way; a malformed one is ignored.
-    for bad in (CHILD, "not-a-hash", ""):
+    for bad in (AGENT, CHILD):
+        with pytest.raises(ai.AttributionError):
+            ai.committer_identity({**CLAUDE_COMMIT_ENV, ai.AGENT_ENV: bad}, [])
+    # A malformed agent id is ignored.
+    for bad in ("not-a-hash", ""):
         got = ai.committer_identity({**CLAUDE_COMMIT_ENV, ai.AGENT_ENV: bad}, [])
         assert got is not None
         assert got.ident.subagent is None
@@ -7015,3 +7016,192 @@ def test_a_commit_compares_the_switch_with_the_transcript_time(
     got = ai.committer_identity(CLAUDE_COMMIT_ENV, [])
     assert got is not None
     assert got.ident.model == "anthropic:" + expected
+
+
+def test_command_store_references_follow_the_root_and_keep_local_precedence(
+    repo: Path, tmp_path: Path
+) -> None:
+    other = init_repo(tmp_path / "other clone")
+    ai.record_command(ROOT, CHILD, "ls", other)
+    ai.record_command(ROOT, CHILD, "pwd", repo)
+    references = ai.user_store() / "cmd-stores" / ai.hx(ROOT)
+    ai.write_json(references / "invalid.json", {"store": 5})
+    ai.write_json(references / "empty.json", {})
+    remote = other / ".git" / ai.STORE
+    local = repo / ".git" / ai.STORE
+    assert ai.session_stores(ROOT, repo) == [remote, local]
+    assert ai.session_stores(OTHER, repo) == [local]
+    assert set(ai.session_stores(ROOT, tmp_path)) == {remote, local}
+    for store in (remote, local):
+        reference = references / f"{ai.hx(ai.sha256_64(str(store)))}.json"
+        assert loaded(reference) == {"store": str(store)}
+        assert stat.S_IMODE(reference.stat().st_mode) == 0o600
+    assert stat.S_IMODE(references.stat().st_mode) == 0o700
+
+
+def test_claude_committer_finds_records_only_in_another_clone(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = init_repo(tmp_path / "other clone")
+    seed_claude(other)
+    data = claude_data(other, "claude-pretooluse-bash-child.json")
+    data["tool_input"] = {"command": "git commit -m x"}
+    ai.handle_claude(data, CLAUDE_HOOK_ENV)
+    ai.write_record(AGENT, {"model": "claude-haiku-5-5"}, other)
+    user = ai.user_store()
+    (user / "cmds").rename(tmp_path / "saved-commands")
+    (user / f"{ai.hx(AGENT)}.json").rename(tmp_path / "saved-child.json")
+    (user / f"{ai.hx(SESSION_HASH)}.json").rename(tmp_path / "saved-root.json")
+    assert not (repo / ".git" / ai.STORE / "cmds").exists()
+    monkeypatch.setattr(ai, "ancestry", lambda: ["sh -c eval 'git commit -m x'"])
+    got = ai.committer_identity(CLAUDE_COMMIT_ENV)
+    assert got is not None
+    assert got.ident.subagent == AGENT
+    assert got.ident.effort == "high"
+    assert got.ident.model == "anthropic:claude-haiku-5-5"
+    assert got.root_ident.model == "anthropic:claude-opus-5-5"
+    assert ai.load_record(AGENT, root=SESSION_HASH)["root"] == SESSION_HASH
+    ai.finish_command(SESSION_HASH, "git commit -m x", AGENT, other)
+    assert ai.match_command_agent(SESSION_HASH, ai.ancestry(), strict=True) == (
+        None,
+        False,
+    )
+
+
+@pytest.mark.parametrize("command", ["trailer", "stamp-docs"])
+def test_unresolved_child_commit_is_blocked_with_exact_recovery_message(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    seed_claude(repo)
+    stage(repo, "f.txt")
+    ai.record_command(SESSION_HASH, AGENT, "git commit -m x", repo)
+    monkeypatch.setattr(ai, "ancestry", lambda: ["unmatched"])
+    message = msg_file(tmp_path, "fix: example\n")
+    assert ai.run([command, str(message)], CLAUDE_COMMIT_ENV) == 1
+    assert capsys.readouterr() == (
+        "",
+        (
+            "tbhbdev alpha identity: Attribution couldn't be resolved for a commit "
+            "made while a subagent was active. Retry the commit from the main "
+            "session after the subagent's command finishes.\n"
+        ),
+    )
+    assert message.read_text() == "fix: example\n"
+    assert not (repo / ".git" / ai.STORE / "claims").exists()
+
+
+@pytest.mark.parametrize(
+    "kind", ["none", "session", "done", "expired", "future", "main", "foreign"]
+)
+def test_unmatched_commit_keeps_main_identity_without_overlapping_child_command(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    seed_claude(repo)
+    monkeypatch.setattr(ai.time, "time", lambda: 10000.0)
+    if kind == "session":
+        ai.write_record(AGENT, {"root": SESSION_HASH}, repo)
+    elif kind != "none":
+        root = OTHER if kind == "foreign" else SESSION_HASH
+        agent = None if kind == "main" else AGENT
+        ai.record_command(root, agent, "ls", repo)
+        if kind == "done":
+            ai.finish_command(root, "ls", agent, repo)
+        elif kind == "expired":
+            monkeypatch.setattr(ai.time, "time", lambda: 10000.0 + ai.CMD_WINDOW)
+        elif kind == "future":
+            monkeypatch.setattr(ai.time, "time", lambda: 9999.0)
+    got = ai.committer_identity(CLAUDE_COMMIT_ENV, ["unmatched"])
+    assert got is not None
+    assert got.ident.subagent is None
+    assert got.ident.model == "anthropic:claude-opus-5-5"
+
+
+def test_matching_main_command_is_safe_while_a_child_command_overlaps(
+    repo: Path,
+) -> None:
+    seed_claude(repo)
+    ai.record_command(SESSION_HASH, AGENT, "ls", repo)
+    ai.record_command(SESSION_HASH, None, "git commit -m x", repo)
+    got = ai.committer_identity(CLAUDE_COMMIT_ENV, ["sh -c eval 'git commit -m x'"])
+    assert got is not None
+    assert got.ident.subagent is None
+    assert got.ident.model == "anthropic:claude-opus-5-5"
+
+
+@pytest.mark.parametrize("agent", [None, OTHER])
+def test_ambiguous_child_commit_is_refused(repo: Path, agent: str | None) -> None:
+    ai.record_command(SESSION_HASH, AGENT, "git commit -m x", repo)
+    ai.record_command(SESSION_HASH, agent, "git commit -m x", repo)
+    with pytest.raises(ai.AttributionError):
+        ai.committer_identity(CLAUDE_COMMIT_ENV, ["sh -c eval 'git commit -m x'"])
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+def test_matched_child_requires_a_session_record_for_its_root(
+    repo: Path, foreign: bool
+) -> None:
+    seed_claude(repo)
+    ai.record_command(SESSION_HASH, AGENT, "git commit -m x", repo)
+    if foreign:
+        ai.write_record(AGENT, {"root": OTHER, "model": "claude-haiku-5-5"}, repo)
+    with pytest.raises(ai.AttributionError) as info:
+        ai.committer_identity(CLAUDE_COMMIT_ENV, ["sh -c eval 'git commit -m x'"])
+    assert str(info.value) == (
+        "The subagent's session record is missing or belongs to another root. "
+        "Retry after the subagent's session record is restored."
+    )
+
+
+def test_command_window_includes_its_start_and_an_explicit_zero(repo: Path) -> None:
+    record: Json = {"agent": CHILD, "cmd": ai.cmd_hashes("ls"), "ts": 0.0}
+    ai.write_json(repo / ".git" / ai.STORE / "cmds" / ai.hx(ROOT) / "x.json", record)
+    assert ai.recent_commands(ROOT, repo, 0.0) == [record]
+    assert ai.match_command_agent(ROOT, ["sh -c eval 'ls'"], repo, now=0.0) == (
+        CHILD,
+        False,
+    )
+    assert ai.recent_commands(ROOT, repo, ai.CMD_WINDOW - 1) == [record]
+    assert ai.recent_commands(ROOT, repo, ai.CMD_WINDOW) == []
+    assert ai.recent_commands(ROOT, repo, -1.0) == []
+
+
+def test_claude_committer_reads_the_root_project_when_user_state_writes_fail(
+    repo: Path, tmp_path: Path
+) -> None:
+    other = init_repo(tmp_path / "root project")
+    ai.user_store().parent.mkdir(parents=True)
+    ai.user_store().write_text("not a directory")
+    seed_claude(other)
+    data = claude_data(other, "claude-pretooluse-bash-child.json")
+    data["tool_input"] = {"command": "git commit -m x"}
+    ai.handle_claude(data, CLAUDE_HOOK_ENV)
+    ai.write_record(AGENT, {"model": "claude-haiku-5-5"}, other)
+    env = {**CLAUDE_COMMIT_ENV, "CLAUDE_PROJECT_DIR": str(other)}
+    got = ai.committer_identity(env, ["sh -c eval 'git commit -m x'"])
+    assert got is not None
+    assert got.ident.subagent == AGENT
+    assert got.ident.model == "anthropic:claude-haiku-5-5"
+    assert got.root_ident.model == "anthropic:claude-opus-5-5"
+    with pytest.raises(ai.AttributionError):
+        ai.committer_identity(env, ["unmatched"])
+    assert ai.user_store().read_text() == "not a directory"
+    assert not (repo / ".git" / ai.STORE).exists()
+
+
+def test_project_store_search_keeps_current_records_last_and_reads_each_store_once(
+    repo: Path, tmp_path: Path
+) -> None:
+    other = init_repo(tmp_path / "root project")
+    ai.record_command(ROOT, CHILD, "ls", other)
+    local = repo / ".git" / ai.STORE
+    remote = other / ".git" / ai.STORE
+    assert ai.session_stores(ROOT, project=other) == [remote, local]
+    assert ai.session_stores(ROOT, project=repo) == [remote, local]
+    assert ai.session_stores(ROOT, other) == [remote]
+    ai.write_record(ROOT, {"model": "main"}, repo)
+    ai.write_record(ROOT, {"model": "project"}, other)
+    assert ai.load_record(ROOT, project=other)["model"] == "main"
