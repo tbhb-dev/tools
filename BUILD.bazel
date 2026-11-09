@@ -179,6 +179,8 @@ deptry_test(
 
 pytest_test(
     name = "pytest_test",
+    # The suite runs near the medium test's 300 s limit on CI runners.
+    timeout = "long",
     srcs = [":repo_files"],
     args = [
         "-n",

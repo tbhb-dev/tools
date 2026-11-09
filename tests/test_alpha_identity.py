@@ -701,6 +701,7 @@ def test_record_outside_tbhb_dev_is_a_silent_no_op(
     assert ai.cmd_record(harness, {"CODEX_SESSION_ID": "s"}) == 0
     assert capsys.readouterr() == ("", "")
     assert not (repo / ".git" / "tbhb-alpha").exists()
+    assert not (ai.user_store() / f"{ai.hx(ai.sha256_64('s'))}.json").exists()
 
 
 def test_a_session_from_the_main_checkout_is_known_in_a_worktree(
@@ -803,11 +804,11 @@ def test_the_user_store_follows_xdg_state_home(
     )
 
 
-def test_records_outside_a_repository_are_noops(plain: Path) -> None:
+def test_records_outside_a_repository_go_to_the_user_store(plain: Path) -> None:
     ai.write_record(ROOT, {"model": "m"})
-    assert ai.load_record(ROOT) == {}
+    assert ai.load_record(ROOT) == {"model": "m"}
     assert list(plain.iterdir()) == []
-    assert not ai.user_store().exists()
+    assert (ai.user_store() / f"{ai.hx(ROOT)}.json").is_file()
 
 
 # ------------------------------------------------------------------ Claude
@@ -1145,7 +1146,7 @@ class FakeRun:
         self.stdout = stdout
 
 
-def test_ps_row_parses_parent_and_command(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_ps_parses_parent_and_command(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
     def fake(argv: list[str], **kwargs: object) -> FakeRun:
@@ -1154,25 +1155,39 @@ def test_ps_row_parses_parent_and_command(monkeypatch: pytest.MonkeyPatch) -> No
         return FakeRun(0, "  42 /bin/zsh -c  eval x \n")
 
     monkeypatch.setattr(ai.subprocess, "run", fake)
-    assert ai.ps_row("7") == ("42", "/bin/zsh -c  eval x")
+    assert ai.run_ps("7") == ("42", "/bin/zsh -c  eval x")
     assert calls == [["ps", "-ww", "-o", "ppid=,command=", "-p", "7"]]
 
 
-def test_ps_row_none_when_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_ps_none_when_gone(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ai.subprocess, "run", returning(FakeRun(1, "1 x\n")))
-    assert ai.ps_row("7") is None
+    assert ai.run_ps("7") is None
     monkeypatch.setattr(ai.subprocess, "run", returning(FakeRun(0, "\n")))
-    assert ai.ps_row("7") is None
+    assert ai.run_ps("7") is None
     monkeypatch.setattr(ai.subprocess, "run", returning(FakeRun(1, "")))
-    assert ai.ps_row("7") is None
+    assert ai.run_ps("7") is None
 
 
-def test_ps_row_none_when_ps_is_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_ps_none_when_ps_is_denied(monkeypatch: pytest.MonkeyPatch) -> None:
     def denied(argv: list[str], **_: object) -> FakeRun:
         raise PermissionError(argv[0])
 
     monkeypatch.setattr(ai.subprocess, "run", denied)
-    assert ai.ps_row("7") is None
+    assert ai.run_ps("7") is None
+
+
+def ps_command(pid: int) -> str:
+    """What ps reports for a process; skips the test where a sandbox denies ps."""
+    try:
+        done = subprocess.run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except PermissionError:
+        pytest.skip("this sandbox denies ps")
+    return done.stdout.strip()
 
 
 def test_ps_row_on_real_processes() -> None:
@@ -1181,13 +1196,7 @@ def test_ps_row_on_real_processes() -> None:
     assert row[0].isdigit()
     # pytest-xdist retitles its workers ("[pytest-xdist running] ..."), so
     # check the command against what ps itself reports rather than "python".
-    listed = subprocess.run(
-        ["ps", "-ww", "-o", "command=", "-p", str(os.getpid())],
-        capture_output=True,
-        check=True,
-        text=True,
-    ).stdout.strip()
-    assert row[1] == listed
+    assert row[1] == ps_command(os.getpid())
     assert ai.ps_row("999999999") is None
 
 
@@ -1238,16 +1247,6 @@ def test_ancestry_stops_at_init_and_gaps_and_limit(
     assert ai.ancestry(50, limit=3) == ["e", "f", "e"]
     assert ai.ancestry(50, limit=0) == []
     assert len(ai.ancestry(50)) == ai.ANCESTRY_LIMIT
-
-
-def ps_command(pid: int) -> str:
-    done = subprocess.run(
-        ["ps", "-ww", "-o", "command=", "-p", str(pid)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return done.stdout.strip()
 
 
 def test_ancestry_defaults_to_this_process() -> None:
@@ -1533,6 +1532,146 @@ def test_bash_edit_diffs_become_receipts(repo: Path) -> None:
     assert len(receipts_of(repo, SESSION_HASH)) == 1
 
 
+REAL_BASH_EDIT_DIFF = {
+    "files": [
+        {
+            "filePath": "x.txt",
+            "hunks": [
+                {
+                    "oldStart": 1,
+                    "oldLines": 1,
+                    "newStart": 1,
+                    "newLines": 1,
+                    "lines": ["-a", "+b"],
+                }
+            ],
+        }
+    ],
+    "moreFiles": 0,
+    "shared": True,
+}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git checkout other",
+        "git switch -q main && git status -sb | head -2",
+        "git pull --ff-only -q && git log -1 && git status --short | head",
+        "git -C sub reset --hard HEAD 2>&1",
+        "git -c core.x=1 stash pop >/dev/null",
+        "git stash pop\ngrep -n a x.txt",
+        "cd sub && git pull",
+        "FOO=1 BAR=2 git checkout other",
+        "git pull 2>&1 | tail -3",
+        "git checkout main & git status",
+    ],
+)
+def test_git_work_tree_moves_write_no_receipt(repo: Path, command: str) -> None:
+    (repo / "x.txt").write_text("x\n", encoding="utf-8")
+    base = claude_data(repo)
+    pre = {**base, "tool_input": {"command": command}}
+    ai.handle_claude(pre, CLAUDE_HOOK_ENV)
+    post = {
+        **pre,
+        "hook_event_name": "PostToolUse",
+        "tool_response": {"bashEditDiff": REAL_BASH_EDIT_DIFF},
+    }
+    ai.handle_claude(post, CLAUDE_HOOK_ENV)
+    assert receipts_of(repo, SESSION_HASH) == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed -i s/a/b/ x.txt",
+        "ruff format x.txt",
+        "printf b > x.txt",
+        "git checkout other && sed -i s/a/b/ x.txt",
+        "git checkout other && ruff format x.txt",
+        "git checkout other > x.txt",
+        "git checkout main & sed -i s/a/b/ x.txt",
+        "git checkout $(sed -i s/a/b/ x.txt; echo main)",
+        "git checkout `sed -i s/a/b/ x.txt`",
+        "git checkout main <(sed -i s/a/b/ x.txt)",
+        "git rebase -x 'sed -i s/a/b/ x.txt' main",
+        "git rebase --exec 'ruff format x.txt' main",
+        "FOO=1 sed -i s/a/b/ x.txt",
+        "git status",
+        "git",
+        "git -C",
+        "echo 'unclosed",
+        "",
+    ],
+)
+def test_other_bash_writes_still_get_a_receipt(repo: Path, command: str) -> None:
+    (repo / "x.txt").write_text("x\n", encoding="utf-8")
+    base = claude_data(repo)
+    post = {
+        **base,
+        "hook_event_name": "PostToolUse",
+        "tool_input": {"command": command},
+        "tool_response": {"bashEditDiff": REAL_BASH_EDIT_DIFF},
+    }
+    ai.handle_claude(post, CLAUDE_HOOK_ENV)
+    assert [r["path"] for r in receipts_of(repo, SESSION_HASH)] == ["x.txt"]
+
+
+def test_moves_work_tree_ignores_a_command_that_is_not_text() -> None:
+    assert not ai.moves_work_tree(None)
+    assert not ai.moves_work_tree(["git", "checkout"])
+    assert ai.moves_work_tree("git checkout a")
+
+
+def test_moves_work_tree_strips_harmless_redirects_before_splitting() -> None:
+    # Without the strip, the ``&`` of ``2>&1`` splits the line mid-redirect.
+    assert ai.moves_work_tree("git checkout a 2>&1")
+    assert ai.moves_work_tree("git checkout a >/dev/null 2>&1")
+    # The strip leaves nothing behind, so it cannot glue onto the verb.
+    assert ai.moves_work_tree("git checkout>/dev/null")
+    assert not ai.moves_work_tree("git checkout a > out.txt")
+
+
+@pytest.mark.parametrize(
+    ("segment", "kind"),
+    [
+        ("echo hi > out.txt", "other"),
+        ("echo 'unbalanced", "other"),
+        ("", "quiet"),
+        ("FOO=1 BAR=2", "quiet"),
+        ("ls -l", "quiet"),
+        ("FOO=1 cat x", "quiet"),
+        ("rm x", "other"),
+        ("git checkout a", "move"),
+        ("git rebase main", "move"),
+        ("git rebase --exec make main", "other"),
+        ("git rebase -x make main", "other"),
+        ("git status", "quiet"),
+        ("git -C . log", "quiet"),
+        ("git commit -m x", "other"),
+        ("git", "other"),
+    ],
+)
+def test_segment_kind_names_each_kind(segment: str, kind: str) -> None:
+    assert ai.segment_kind(segment) == kind
+
+
+@pytest.mark.parametrize(
+    ("words", "verb"),
+    [
+        (["git", "--no-pager", "log"], "log"),
+        (["git", "-c", "a=b", "status"], "status"),
+        (["git", "-C", ".", "--no-pager", "diff"], "diff"),
+        (["git", "-C", "."], ""),
+        (["git", "-C"], ""),
+        (["git", "--no-pager"], ""),
+        (["git"], ""),
+    ],
+)
+def test_git_verb_skips_global_options(words: list[str], verb: str) -> None:
+    assert ai.git_verb(words) == verb
+
+
 def test_edit_tools_become_receipts(repo: Path) -> None:
     for name in ("a.txt", "b.ipynb", "c.txt"):
         (repo / name).write_text("x\n", encoding="utf-8")
@@ -1711,16 +1850,60 @@ def test_rollout_turn_context_takes_the_latest(tmp_path: Path) -> None:
     assert ai.rollout_turn_context(path) == (None, None)
 
 
-def test_rollout_turn_context_reads_one_megabyte(
+def test_rollout_turn_context_falls_back_to_the_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = write_rollout(tmp_path, CHILD_THREAD, [turn("old", "low"), "x" * 200])
     assert ai.rollout_turn_context(path) == ("old", "low")
     monkeypatch.setattr(ai, "CODEX_TAIL", 100)
-    assert ai.rollout_turn_context(path) == (None, None)
+    assert ai.rollout_turn_context(path) == ("old", "low")
     assert ai.CODEX_TAIL == 100
     monkeypatch.undo()
     assert ai.CODEX_TAIL == 1024 * 1024
+
+
+@pytest.mark.parametrize("later", [False, True])
+def test_rollout_turn_context_long_rollout(tmp_path: Path, *, later: bool) -> None:
+    records: list[object] = [turn("first", "high"), "x" * (1024 * 1024 + 100)]
+    if later:
+        records.append(turn("latest", "low"))
+    path = write_rollout(tmp_path, CHILD_THREAD, records)
+    assert ai.rollout_turn_context(path) == (
+        ("latest", "low") if later else ("first", "high")
+    )
+
+
+def test_rollout_turn_context_forward_scan_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert ai.CODEX_HEAD == 1024 * 1024
+    monkeypatch.setattr(ai, "CODEX_TAIL", 1)
+    monkeypatch.setattr(ai, "CODEX_HEAD", 100)
+    path = write_rollout(
+        tmp_path, CHILD_THREAD, ["x" * 80, "x" * 80, turn("late", "low")]
+    )
+    assert ai.rollout_turn_context(path) == (None, None)
+    path = write_rollout(tmp_path, CHILD_THREAD, ["x" * 99, turn("late", "low")])
+    assert ai.rollout_turn_context(path) == (None, None)
+    path = write_rollout(
+        tmp_path,
+        CHILD_THREAD,
+        [
+            "not json",
+            {"type": "other", "payload": {"model": "wrong"}},
+            {"type": "turn_context", "payload": "invalid"},
+            turn("first", "high"),
+            turn("second", "low"),
+        ],
+    )
+    monkeypatch.setattr(ai, "CODEX_HEAD", 1024)
+    assert ai.rollout_turn_context(path) == ("first", "high")
+    path.write_bytes(b"\xff\n" + json.dumps(turn("first", "high")).encode() + b"\n")
+    assert ai.rollout_turn_context(path) == ("first", "high")
+    path = write_rollout(
+        tmp_path, CHILD_THREAD, [{"type": "turn_context", "payload": {}}]
+    )
+    assert ai.rollout_turn_context(path) == (None, None)
 
 
 def test_rollout_meta(tmp_path: Path) -> None:
@@ -2167,6 +2350,38 @@ def test_cmd_record_outside_a_repository(
 ) -> None:
     feed(monkeypatch, {"session_id": "s", "model": "m"})
     assert ai.cmd_record("antigravity", {}) == 0
+    assert list(plain.iterdir()) == []
+
+
+def test_cmd_record_claude_outside_a_repository_keeps_a_user_record(
+    plain: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    feed(monkeypatch, {"session_id": "s", "model": "m", "cwd": str(plain)})
+    assert ai.cmd_record("claude", {}) == 0
+    assert list(plain.iterdir()) == []
+    assert ai.load_record(ai.sha256_64("s"))["payload_model"] == "m"
+
+
+def test_cmd_record_uses_the_hook_cwd_outside_a_repository(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    feed(monkeypatch, {"session_id": "s", "model": "m", "cwd": str(outside)})
+    assert ai.cmd_record("claude", {}) == 0
+    assert not (repo / ".git" / "tbhb-alpha" / "sessions").exists()
+    assert (ai.user_store() / f"{ai.hx(ai.sha256_64('s'))}.json").is_file()
+
+
+def test_cmd_record_uses_the_hook_cwd_in_another_owners_repository(
+    plain: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    foreign = init_repo(tmp_path / "foreign")
+    run_git(foreign, "remote", "set-url", "origin", "git@github.com:someone/x.git")
+    feed(monkeypatch, {"session_id": "s", "model": "m", "cwd": str(foreign)})
+    assert ai.cmd_record("claude", {}) == 0
+    assert not (foreign / ".git" / "tbhb-alpha").exists()
+    assert not (ai.user_store() / f"{ai.hx(ai.sha256_64('s'))}.json").exists()
     assert list(plain.iterdir()) == []
 
 
@@ -3504,16 +3719,13 @@ def test_e2e_hook_works_from_a_subdirectory(wired: Path) -> None:
 
 
 @needs_prek
-@pytest.mark.parametrize("env", [None, CLAUDE_E2E], ids=["human", "agent"])
-def test_e2e_signoff_passes_the_check_for_everyone(
-    wired: Path, env: dict[str, str] | None
-) -> None:
-    """`git commit -s` passes, human or agent: sign-off is not checked."""
+def test_e2e_an_agent_signoff_fails_the_check(wired: Path) -> None:
+    """`git commit -s` by an agent is rejected; the operator signs off."""
     claude_turn(wired)
     stage(wired, "a.txt")
-    done = git_commit(wired, "feat: a", env, "-s")
-    assert done.returncode == 0, done.stderr
-    assert "Signed-off-by: tbhb.dev Agent <agent@tonyburns.net>" in last_message(wired)
+    done = git_commit(wired, "feat: a", CLAUDE_E2E, "-s")
+    assert done.returncode != 0
+    assert SIGNOFF_BASE in done.stderr
 
 
 NOREPLY = "tbhb.dev Agent <334376894+tbhb-agent@users.noreply.github.com>"
@@ -3610,45 +3822,63 @@ def agent_git(*_: str, **__: object) -> tuple[int, str]:
     return 0, f"{ai.AGENT_IDENT} 1794020000 -0500"
 
 
-@pytest.mark.parametrize(
-    ("line", "who"),
-    [
-        (f"Signed-off-by: {NOREPLY}", NOREPLY),
-        (f"signed-off-by:\t{NOREPLY} ", NOREPLY),
-        (
-            "Signed-off-by: TBHB.DEV agent <a@example.invalid>",
-            "TBHB.DEV agent <a@example.invalid>",
-        ),
-    ],
-    ids=["noreply", "lowercase-key", "case"],
+SIGNOFF_BASE = (
+    "agent commits carry no Signed-off-by or Co-authored-by; the operator signs off"
 )
-def test_ident_problems_refuses_another_agent_signoff(
-    monkeypatch: pytest.MonkeyPatch, line: str, who: str
-) -> None:
-    monkeypatch.setattr(ai, "git", agent_git)
-    text = f"feat: a\n\nbody\n\n{line}\nSigned-off-by: {ai.AGENT_IDENT}\n"
-    must = f"an agent commit must use {ai.AGENT_IDENT}"
-    assert ai.ident_problems(text, {"CODEX_SESSION_ID": "s"}) == [
-        f"Signed-off-by is {who!r}; {must}"
-    ]
-    assert ai.ident_problems(text, {}) == []
 
 
 @pytest.mark.parametrize(
     "line",
     [
         f"Signed-off-by: {ai.AGENT_IDENT}",
+        f"Signed-off-by: {NOREPLY}",
         "Signed-off-by: Human <h@example.invalid>",
-        f"Co-authored-by: {NOREPLY}",
-        f"See Signed-off-by: {NOREPLY}",
+        "Co-authored-by: Human <h@example.invalid>",
+        "signed-off-by: Human <h@example.invalid>",
+        "CO-AUTHORED-BY: Human <h@example.invalid>",
+        "Signed-off-by : Human <h@example.invalid>",
     ],
-    ids=["agent", "human", "co-author", "mid-line"],
+    ids=["agent", "noreply", "human", "co-author", "lowercase", "uppercase", "space"],
 )
-def test_ident_problems_accepts_other_sign_offs(
+def test_ident_problems_refuses_a_signoff_or_co_author(
     monkeypatch: pytest.MonkeyPatch, line: str
 ) -> None:
     monkeypatch.setattr(ai, "git", agent_git)
-    assert ai.ident_problems(f"feat: a\n\n{line}\n", {"CODEX_SESSION_ID": "s"}) == []
+    text = f"feat: a\n\nbody\n\n{line}\n"
+    assert ai.ident_problems(text, {"CODEX_SESSION_ID": "s"}) == [SIGNOFF_BASE]
+    assert ai.ident_problems(text, {}) == []
+
+
+def test_ident_problems_reports_the_trailers_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ai, "git", agent_git)
+    text = "feat: a\n\nSigned-off-by: A <a@x>\nCo-authored-by: B <b@x>\n"
+    assert ai.ident_problems(text, {"CODEX_SESSION_ID": "s"}) == [SIGNOFF_BASE]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "feat: a\n",
+        "feat: a\n\nGenerated-by: LLM x\n",
+        f"feat: a\n\nSee Signed-off-by: {NOREPLY}\n",
+    ],
+    ids=["none", "other-trailer", "mid-line"],
+)
+def test_ident_problems_accepts_a_message_without_the_trailers(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    monkeypatch.setattr(ai, "git", agent_git)
+    assert ai.ident_problems(text, {"CODEX_SESSION_ID": "s"}) == []
+
+
+def test_ident_problems_ignores_trailers_outside_a_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ai, "git", agent_git)
+    text = "feat: a\n\nSigned-off-by: A <a@x>\nCo-authored-by: B <b@x>\n"
+    assert ai.ident_problems(text, {}) == []
 
 
 def test_cmd_check_reads_the_signoff_from_the_message(
@@ -3660,7 +3890,7 @@ def test_cmd_check_reads_the_signoff_from_the_message(
     msg = tmp_path / "msg"
     msg.write_text(f"feat: a\n\nSigned-off-by: {NOREPLY}\n")
     assert ai.cmd_check(str(msg), {"CODEX_SESSION_ID": "s"}) == 1
-    assert f"Signed-off-by is {NOREPLY!r}" in capsys.readouterr().err
+    assert capsys.readouterr().err == f"tbhbdev alpha identity: {SIGNOFF_BASE}\n"
 
 
 CODEX_E2E = {"CODEX_SESSION_ID": ROOT_THREAD, "CODEX_VERSION": "0.166.0"}
@@ -3671,10 +3901,7 @@ def test_e2e_a_codex_commit_with_a_noreply_signoff_fails(wired: Path) -> None:
     stage(wired, "a.txt")
     done = git_commit(wired, f"feat: a\n\nSigned-off-by: {NOREPLY}", CODEX_E2E)
     assert done.returncode != 0
-    assert (
-        f"tbhbdev alpha identity: Signed-off-by is {NOREPLY!r}; "
-        f"an agent commit must use {ai.AGENT_IDENT}"
-    ) in done.stderr
+    assert f"tbhbdev alpha identity: {SIGNOFF_BASE}" in done.stderr
     assert run_git(wired, "log", "-1", "--format=%s") == "init\n"
 
 
@@ -3683,11 +3910,11 @@ def test_e2e_a_codex_commit_as_the_agent_passes(wired: Path) -> None:
     home = wired.parent / "codex"
     write_rollout(home, ROOT_THREAD, [meta(id=ROOT_THREAD), turn("gpt-5.6-sol", None)])
     stage(wired, "a.txt")
-    done = git_commit(wired, "feat: a", {**CODEX_E2E, "CODEX_HOME": str(home)}, "-s")
+    done = git_commit(wired, "feat: a", {**CODEX_E2E, "CODEX_HOME": str(home)})
     assert done.returncode == 0, done.stderr
     who = run_git(wired, "log", "-1", "--format=%an <%ae>%n%cn <%ce>")
     assert who == f"{ai.AGENT_IDENT}\n{ai.AGENT_IDENT}\n"
-    assert f"Signed-off-by: {ai.AGENT_IDENT}" in last_message(wired)
+    assert "Signed-off-by" not in last_message(wired)
 
 
 @needs_prek
@@ -3746,15 +3973,19 @@ def test_e2e_claude_subagent_commits_its_parents_edit(wired: Path) -> None:
 
 
 @needs_prek
-def test_e2e_codex_rollout_edit_then_commit(wired: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("long_rollout", [False, True])
+def test_e2e_codex_rollout_edit_then_commit(
+    wired: Path, tmp_path: Path, *, long_rollout: bool
+) -> None:
     home = tmp_path / "codex"
     write_rollout(
         home,
         ROOT_THREAD,
         [
-            meta(id=ROOT_THREAD, cwd=str(wired)),
+            meta(id=ROOT_THREAD, cwd=str(wired), source="exec"),
             turn("gpt-5.6-sol", "high"),
             patch_call("c.txt"),
+            "x" * (1024 * 1024 + 100) if long_rollout else "",
         ],
     )
     stage(wired, "c.txt")
@@ -3769,7 +4000,7 @@ def test_e2e_codex_rollout_edit_then_commit(wired: Path, tmp_path: Path) -> None
     assert trailers(wired) == [
         (
             "Generated-by: LLM effort=high;harness=codex:0.166.0;"
-            f"model=openai:gpt-5.6-sol;session={session}"
+            f"model=openai:gpt-5.6-sol;session={session};surface=exec"
         )
     ]
 

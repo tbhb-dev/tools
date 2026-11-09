@@ -57,7 +57,11 @@ name = os.path.basename(__file__).removesuffix(".py")
 spec = json.load(open(os.path.join(here, name + ".spec")))
 called = " ".join(sys.argv[1:])
 cases = spec.get("cases", {{}})
-spec = next((v for k, v in cases.items() if called.startswith(k)), spec)
+if called == "pr view --json number,state,url":
+    missing = {{"rc": 1, "stdout": "", "stderr": "No Pull Requests Found"}}
+    spec = cases.get(called, missing)
+else:
+    spec = next((v for k, v in cases.items() if called.startswith(k)), spec)
 draft = ".github/PULL_REQUEST_DRAFT.md"
 record = {{
     "argv": sys.argv[1:],
@@ -841,6 +845,117 @@ def test_lint_needs_every_tool_and_config(world: World) -> None:
         lint_checked(world, BASE)
 
 
+VALE_INI = """StylesPath = .vale
+Packages = https://example.com/Google.zip, \\
+  https://example.com/write-good.zip
+
+[*.md]
+BasedOnStyles = Vale, Google,  write-good, project
+
+[tmp/**]
+BasedOnStyles =
+
+[*.txt]
+BasedOnStyles = Google, extra
+"""
+
+
+def styled(world: World, *present: str) -> None:
+    """A .vale.ini naming four styles, with only ``present`` synced."""
+    (world.root / ".vale.ini").write_text(VALE_INI)
+    (world.root / ".vale").unlink()
+    for name in present:
+        (world.root / ".vale" / name).mkdir(parents=True)
+
+
+SYNCED = '("Google", "write-good", "extra")'
+SYNCS = """import os, sys
+open(os.path.join(os.path.dirname(__file__), "bazelisk.log"), "a").write(
+    " ".join(sys.argv[1:]) + "|" + os.getcwd() + "\\n"
+)
+for name in SYNCED:
+    os.makedirs(os.path.join(".vale", name), exist_ok=True)
+"""
+
+
+def test_vale_styles_names_each_style_once(world: World) -> None:
+    styled(world)
+    assert pr.vale_styles(world.root) == ["Google", "extra", "project", "write-good"]
+
+
+def test_vale_styles_split_at_the_first_equals(world: World) -> None:
+    # Vale's ini parser splits a key from its value at the first "=".
+    (world.root / ".vale.ini").write_text("BasedOnStyles = odd=name\n")
+    assert pr.vale_styles(world.root) == ["odd=name"]
+
+
+def test_synced_styles_need_no_sync(world: World) -> None:
+    styled(world, "Google", "extra", "project", "write-good")
+    assert lint_checked(world, BASE) == []
+    assert not (world.bin / "bazelisk.log").exists()
+    assert len(world.calls("vale")) == 1
+
+
+def test_missing_styles_sync_once_then_lint(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    styled(world, "project")
+    write_fake(world.bin / "bazelisk", SYNCS.replace("SYNCED", SYNCED))
+    (world.root / "sub").mkdir()
+    monkeypatch.chdir(world.root / "sub")  # the sync runs at the top, not here
+    assert lint_checked(world, BASE) == []
+    log = (world.bin / "bazelisk.log").read_text().splitlines()
+    assert log == [f"run //:vale_sync|{world.root.resolve()}"]
+    assert len(world.calls("vale")) == 1
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "why"),
+    [("out", "no  such target", "no such target"), ("out  text", "", "out text")],
+)
+def test_failed_sync_is_one_problem(
+    world: World, stdout: str, stderr: str, why: str
+) -> None:
+    styled(world, "project", "extra")
+    world.fake("bazelisk", rc=3, stdout=stdout, stderr=stderr)
+    found = lint_checked(world, BASE)
+    assert found == [
+        (
+            1,
+            (
+                "vale: vale styles missing from .vale/: Google, write-good; "
+                f"`bazelisk run //:vale_sync` exited 3: {why}"
+            ),
+        )
+    ]
+    (call,) = world.calls("bazelisk")
+    assert call["argv"] == ["run", "//:vale_sync"]
+    assert world.calls("vale") == []
+    assert len(world.calls("cspell")) == 1
+
+
+def test_sync_that_leaves_styles_missing_is_a_problem(world: World) -> None:
+    styled(world, "project")
+    # Exit 0, but it only syncs Google.
+    write_fake(world.bin / "bazelisk", SYNCS.replace("SYNCED", '("Google",)'))
+    found = lint_checked(world, BASE)
+    assert found == [
+        (
+            1,
+            (
+                "vale: vale styles missing from .vale/: extra, write-good; "
+                "`bazelisk run //:vale_sync` exited 0: "
+            ),
+        )
+    ]
+
+
+def test_missing_bazelisk_stops_the_check(world: World) -> None:
+    styled(world, "project")
+    with pytest.raises(SystemExit, match="bazelisk not found"):
+        lint_checked(world, BASE)
+
+
 def test_lint_skipped_without_a_title(world: World) -> None:
     assert lint_checked(world, "## Why\n\nw\n")
     assert world.calls("vale") == []
@@ -1132,7 +1247,7 @@ def test_the_posting_session_dedupes_against_its_commit_trailer(
     merged = pr.merge_trailers(pr.branch_trailers("main"), pr.posting_value(agent))
     assert merged == [("Generated-by", trailer)]
     assert run_main("create", env=agent) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     session = f"session={agent_identity.sha256_64('raw-session')}"
     lines = [line for line in str(call["stdin"]).splitlines() if session in line]
     assert lines == [OPENER, f"Generated-by: {trailer}"]
@@ -1239,7 +1354,7 @@ def test_create_runs_gh_with_the_frontmatter(
     world.git("branch", "dev")
     write_draft(world, meta + BASE)
     assert run_main("create") == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert call["argv"] == [
         "pr", "create", "--title", "fix: x", "--body-file", "-",
         "--base", "dev", "--draft",
@@ -1258,7 +1373,7 @@ def test_create_runs_gh_with_the_frontmatter(
 def test_create_defaults(world: World) -> None:
     write_draft(world)
     assert run_main("create") == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert call["argv"] == [
         "pr",
         "create",
@@ -1271,17 +1386,18 @@ def test_create_defaults(world: World) -> None:
     ]
 
 
+@pytest.mark.parametrize("ending", ["", "\n", "\n\n"])
 def test_create_passes_gh_errors_through(
-    world: World, capsys: pytest.CaptureFixture[str]
+    world: World, capsys: pytest.CaptureFixture[str], ending: str
 ) -> None:
-    message = "aborted: you must first push the current branch to a remote\n"
+    message = "aborted: you must first push the current branch to a remote" + ending
     world.fake("gh", rc=1, stderr=message)
     write_draft(world)
     assert run_main("create") == 1
     captured = capsys.readouterr()
-    assert captured.err == message
+    assert captured.err == message.rstrip("\n") + "\n"
     assert captured.out == ""
-    assert len(world.calls("gh")) == 1
+    assert len(world.calls("gh")) == 2
     assert world.git("status", "--porcelain", "--ignored").count("push") == 0
 
 
@@ -1297,7 +1413,6 @@ def test_create_stops_on_problems(
 def test_dry_run_prints_argv_and_body(
     world: World, capsys: pytest.CaptureFixture[str], agent: dict[str, str]
 ) -> None:
-    (world.bin / "gh").unlink()
     write_draft(world, "---\nlabels: [bug]\n---\n" + BASE)
     assert run_main("create", "--dry-run", env=agent) == 0
     out = capsys.readouterr().out
@@ -2145,7 +2260,7 @@ def test_create_writes_opened_by_first_and_the_ledger(
     world.commit(f"one\n\nGenerated-by: {GEN}")
     write_draft(world)
     assert run_main("create", env=agent) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert str(call["stdin"]).endswith(
         f"\nv\n\n{OPENER}\nGenerated-by: {GEN}\nAssisted-by: {POSTING}\n"
     )
@@ -2165,7 +2280,7 @@ def test_a_subagent_opens_under_its_root(world: World, agent: dict[str, str]) ->
     child = agent_identity.sha256_64("agent-raw")
     agent_identity.write_user_record(child, {"root": ROOT, "model": "claude-x"})
     assert run_main("create", env={**agent, "ASCM_AGENT_ID": child}) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert str(call["stdin"]).endswith(
         f"\n\n{OPENER}\nAssisted-by: LLM harness=claude-code:2.1.0;"
         f"model=anthropic:claude-x;session={ROOT};subagent={child};surface=cli\n"
@@ -2181,7 +2296,7 @@ def test_no_root_means_no_line_and_no_ledger(world: World, env: dict[str, str]) 
     conv = agent_identity.sha256_64("conv-raw")
     agent_identity.write_user_record(conv, {"model": "gemini-x"})
     assert run_main("create", env=env) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert "Opened-by" not in str(call["stdin"])
     assert not ledgers(world).exists()
 
@@ -2189,11 +2304,11 @@ def test_no_root_means_no_line_and_no_ledger(world: World, env: dict[str, str]) 
 def test_a_failed_create_records_nothing(
     world: World, agent: dict[str, str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    world.fake("gh", rc=1, stdout="https://github.com/tbhb-dev/ascm/pull/1\n")
+    world.fake("gh", rc=1, stdout="https://github.com/tbhb-dev/example/pull/1\n")
     write_draft(world)
     assert run_main("create", env=agent) == 1
     assert not ledgers(world).exists()
-    assert capsys.readouterr().err == ""
+    assert capsys.readouterr().err == ("https://github.com/tbhb-dev/example/pull/1\n")
 
 
 def test_create_without_a_url_records_nothing(
@@ -2400,6 +2515,34 @@ def test_backfill_stops_at_a_corrupt_ledger(world: World) -> None:
     assert path.read_text() == "{"
 
 
+def test_ready_marks_the_pull_request_ready(world: World) -> None:
+    assert run_main("ready", "--pr", "45") == 0
+    (call,) = world.calls("gh")
+    assert call["argv"] == ["pr", "ready", "45"]
+    assert call["stdin"] == ""
+
+
+def test_ready_passes_gh_output_and_exit_code_through(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.fake("gh", rc=3, stdout="out\n", stderr="err\n")
+    assert run_main("ready", "--pr", "45") == 3
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("out\n", "err\n")
+
+
+def test_ready_requires_a_pr_number() -> None:
+    with pytest.raises(SystemExit) as info:
+        run_main("ready")
+    assert info.value.code == 2
+
+
+def test_ready_rejects_a_pr_that_is_not_a_number() -> None:
+    with pytest.raises(SystemExit) as info:
+        run_main("ready", "--pr", "abc")
+    assert info.value.code == 2
+
+
 def test_backfill_needs_an_owner() -> None:
     with pytest.raises(SystemExit) as info:
         run_main("backfill-opened")
@@ -2502,7 +2645,7 @@ def test_an_opener_without_a_model_gets_no_line_and_no_ledger(
     seed_session(world, None)
     write_draft(world)
     assert run_main("create", env={**agent, "ASCM_AGENT_ID": child}) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert "Opened-by" not in str(call["stdin"])
     assert not ledgers(world).exists()
     value = f"LLM harness=claude-code:2.1.0;session={ROOT};surface=cli"
@@ -2536,3 +2679,214 @@ def test_backfill_is_quiet_below_the_limits(
     world.fake("gh", cases=BACKFILL_CASES)
     assert run_main("backfill-opened", "tbhb-dev") == 0
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_create_refuses_an_open_pr(
+    world: World, capsys: pytest.CaptureFixture[str], dry_run: bool
+) -> None:
+    world.fake(
+        "gh",
+        cases={
+            "pr view --json number,state,url": {
+                "rc": 0,
+                "stdout": json.dumps(
+                    {
+                        "number": 17,
+                        "state": "OPEN",
+                        "url": "https://github.com/tbhb-dev/example/pull/17",
+                    }
+                ),
+                "stderr": "",
+            }
+        },
+    )
+    write_draft(world)
+    assert run_main("create", *(["--dry-run"] if dry_run else [])) == 1
+    assert capsys.readouterr() == (
+        "",
+        (
+            "error: PR 17 (https://github.com/tbhb-dev/example/pull/17) "
+            "is already open; "
+            "run `tbhbdev alpha pr edit --pr 17` to apply the draft\n"
+        ),
+    )
+    assert [call["argv"] for call in world.calls("gh")] == [
+        ["pr", "view", "--json", "number,state,url"]
+    ]
+
+
+@pytest.mark.parametrize("state", ["CLOSED", "MERGED"])
+def test_create_after_a_finished_pr(world: World, state: str) -> None:
+    world.fake(
+        "gh",
+        stdout="https://github.com/tbhb-dev/example/pull/18\n",
+        cases={
+            "pr view --json number,state,url": {
+                "rc": 0,
+                "stdout": json.dumps({"number": 17, "state": state, "url": "old"}),
+                "stderr": "",
+            }
+        },
+    )
+    write_draft(world)
+    assert run_main("create") == 0
+    view, create = world.calls("gh")
+    assert view["stdin"] == ""
+    assert cast("list[str]", create["argv"])[:2] == ["pr", "create"]
+
+
+@pytest.mark.parametrize(
+    ("rc", "stdout", "stderr"),
+    [
+        (1, "", "authentication failed"),
+        (0, "not JSON", ""),
+        (0, "[]", ""),
+        (0, "{}", ""),
+        *[
+            (
+                0,
+                json.dumps({"state": "OPEN", "number": 17, "url": "old", key: value}),
+                "",
+            )
+            for key in ("state", "number", "url")
+            for value in (None, [1], {"value": 1}, True, 1.5)
+        ],
+        *[
+            (
+                0,
+                json.dumps(
+                    {
+                        key: value
+                        for key, value in {
+                            "state": "OPEN",
+                            "number": 17,
+                            "url": "old",
+                        }.items()
+                        if key != missing
+                    }
+                ),
+                "",
+            )
+            for missing in ("state", "number", "url")
+        ],
+        *[
+            (
+                0,
+                json.dumps({"state": "OPEN", "number": 17, "url": "old", key: value}),
+                "",
+            )
+            for key, value in (("state", 17), ("number", "17"), ("url", 17))
+        ],
+        (1, "", "authentication failed\n\n"),
+        (1, "", "authentication failed \n"),
+        (1, "", "authentication error X\n"),
+        (0, "", "no pull requests found"),
+    ],
+)
+def test_create_stops_when_the_lookup_fails(
+    world: World, capsys: pytest.CaptureFixture[str], rc: int, stdout: str, stderr: str
+) -> None:
+    world.fake(
+        "gh",
+        cases={
+            "pr view --json number,state,url": {
+                "rc": rc,
+                "stdout": stdout,
+                "stderr": stderr,
+            }
+        },
+    )
+    write_draft(world)
+    assert run_main("create") == 1
+    assert capsys.readouterr() == (
+        "",
+        f"cannot check for an open PR: {(stderr or stdout).rstrip(chr(10))}\n",
+    )
+    assert len(world.calls("gh")) == 1
+
+
+@pytest.mark.parametrize(
+    "result", [(rc, ending) for rc in (0, 1) for ending in ("", "\n", "\n\n")]
+)
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.parametrize("url", ["", "https://github.com/tbhb-dev/example/pull/17"])
+def test_create_rejects_already_exists(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    result: tuple[int, str],
+    stream: str,
+    url: str,
+) -> None:
+    rc, ending = result
+    output = f"a pull request Already Exists {url}{ending}"
+    answer: dict[str, object] = {"rc": rc, "stdout": "", "stderr": "", stream: output}
+    world.fake("gh", cases={"pr create": answer})
+    write_draft(world)
+    assert run_main("create") == 1
+    number = "17" if url else "<n>"
+    assert capsys.readouterr() == (
+        "",
+        output.rstrip("\n")
+        + "\n"
+        + (
+            f"gh pr create failed; run `tbhbdev alpha pr edit --pr {number}` "
+            "to apply the draft\n"
+        ),
+    )
+    assert not ledgers(world).exists()
+
+
+def test_create_passes_success_stderr_through(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.fake("gh", stdout="created\n", stderr="warning\n")
+    write_draft(world)
+    assert run_main("create") == 0
+    assert capsys.readouterr() == ("created\n", "warning\n")
+
+
+@pytest.mark.parametrize("ending", ["", "\n", "\n\n"])
+def test_create_joins_error_streams(
+    world: World, capsys: pytest.CaptureFixture[str], ending: str
+) -> None:
+    world.fake(
+        "gh",
+        cases={
+            "pr create": {
+                "rc": 1,
+                "stdout": "request failed" + ending,
+                "stderr": "connection lost" + ending,
+            }
+        },
+    )
+    write_draft(world)
+    assert run_main("create") == 1
+    assert capsys.readouterr() == ("", "request failed\nconnection lost\n")
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    [
+        ("request failed\n", "\n\n", "request failed\n"),
+        ("\n\n", "connection lost\n", "connection lost\n"),
+        (
+            "request failed \n",
+            "connection lost \n",
+            "request failed \nconnection lost \n",
+        ),
+        ("request X\n", "connection X\n", "request X\nconnection X\n"),
+        ("", "", "\n"),
+    ],
+)
+def test_create_normalizes_empty_error_streams(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    stdout: str,
+    stderr: str,
+    expected: str,
+) -> None:
+    world.fake("gh", cases={"pr create": {"rc": 1, "stdout": stdout, "stderr": stderr}})
+    write_draft(world)
+    assert run_main("create") == 1
+    assert capsys.readouterr() == ("", expected)

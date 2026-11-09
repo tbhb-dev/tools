@@ -12,6 +12,7 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr check [DRAFT]
     tbhbdev alpha pr create [DRAFT] [--dry-run]
     tbhbdev alpha pr edit [DRAFT] --pr N
+    tbhbdev alpha pr ready --pr N
     tbhbdev alpha pr hook claude|codex|antigravity
     tbhbdev alpha pr backfill-opened OWNER
 
@@ -26,7 +27,11 @@ any.
 `` (#N)`` and the commit header must fit 72), checks the H2 sections against
 .github/pull-request-sections.toml (names, order, required, word limits), rejects
 leftover HTML comments and bare ``#N`` references, and lints the description
-with vale, cspell and rumdl under the repository's own configs.
+with vale, cspell and rumdl under the repository's own configs. The vale
+style packages under .vale/ are gitignored, so a fresh worktree lacks them:
+when a style that .vale.ini's ``BasedOnStyles`` names is missing, ``check``
+runs the repository's pinned ``bazelisk run //:vale_sync`` once, and reports
+one problem instead of linting with vale if the styles are still missing.
 
 ``hook`` is the harnesses' PostToolUse entry point (payload on stdin). Outside
 a tbhb-dev repository it exits 0 at once. When the tool call wrote the draft of
@@ -56,6 +61,9 @@ request exists only warns. ``edit`` copies the live body's ``Opened-by`` line un
 and adds none when the live body has none. ``check`` rejects a draft that
 contains one.
 
+``ready --pr N`` marks pull request N ready for review with ``gh pr ready``. It
+doesn't read a draft.
+
 ``backfill-opened OWNER`` reads the body of every pull request, open or not,
 in every repository of OWNER, and adds each one to the ledger of every
 ``session=`` its Generated-by, Assisted-by or Opened-by lines name. It prints
@@ -81,7 +89,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import identity as agent_identity
-from tbhbdev.alpha import opened, secret_scan
+from tbhbdev.alpha import opened, private_names, secret_scan
 from tbhbdev.alpha.repo import git, hook_cwd, in_tbhb_dev, read_hook_stdin
 
 if TYPE_CHECKING:
@@ -102,6 +110,16 @@ CONFIGS = (".vale.ini", ".vale", ".cspell.jsonc", ".cspell-words.txt", ".rumdl.t
 # A squash merge appends " (#N)" and the header must fit 72; 64 leaves room
 # for a pull request number of up to four digits.
 MAX_TITLE = 72 - len(" (#9999)")
+BAZEL = "bazelisk"
+# Module constants, not literals in the functions: macOS file systems ignore
+# case, so a mutant that changes a path's case there would pass every test.
+VALE_INI = ".vale.ini"
+STYLES = ".vale"
+VALE_SYNC = "//:vale_sync"
+# Vale's built-in style, which no package provides.
+BUILTIN_STYLE = "Vale"
+# The .vale.ini key that names styles, compared without regard to case.
+BASED_ON = "BasedOnStyles"
 GH = "gh"
 CLAUDE = "claude"
 CODEX = "codex"
@@ -135,6 +153,7 @@ OPENED_MESSAGE = "the script writes Opened-by; remove this line"
 PR_URL = re.compile(r"https://[^/\s]+/([^/\s]+/[^/\s]+)/pull/(\d+)")
 REPO_LIMIT = 1000
 PR_LIMIT = 10000
+EDIT_DRAFT = "run `tbhbdev alpha pr edit --pr {number}` to apply the draft"
 BACKFILL_KEYS = re.compile(r"(?:Generated-by|Assisted-by|Opened-by):\s*(LLM\b.*)")
 SESSION_ATTR = re.compile(r"(?<![^\s;])session=(sha-256-64:[0-9a-f]{16})(?![^\s;])")
 LIST_ITEM = re.compile(r" *(?:[-*+]|\d+[.)]) +\S")
@@ -604,6 +623,36 @@ LINTERS: tuple[tuple[str, tuple[str, ...], Callable[[str], list[Problem]]], ...]
 )
 
 
+def vale_styles(top: Path) -> list[str]:
+    """The styles .vale.ini's ``BasedOnStyles`` lines name, in any section."""
+    named: list[str] = []
+    for line in (top / VALE_INI).read_text().splitlines():
+        key, _, value = line.partition("=")
+        if key.strip().lower() == BASED_ON.lower():
+            named += (name.strip() for name in value.split(","))
+    return sorted({name for name in named if name and name != BUILTIN_STYLE})
+
+
+def missing_styles(top: Path) -> list[str]:
+    """The named styles with no directory under .vale/."""
+    return [name for name in vale_styles(top) if not (top / STYLES / name).is_dir()]
+
+
+def style_problem(top: Path) -> str | None:
+    """Sync missing vale styles once; why vale can't run, or None."""
+    if not missing_styles(top):
+        return None
+    done = run([find_tool(BAZEL), "run", VALE_SYNC], cwd=top)
+    still = missing_styles(top)
+    if not still:
+        return None
+    why = " ".join((done.stderr or done.stdout).split())
+    return (
+        f"vale styles missing from .vale/: {', '.join(still)}; "
+        f"`{BAZEL} run {VALE_SYNC}` exited {done.returncode}: {why}"
+    )
+
+
 def lint(rendered: Sequence[str], first: int) -> list[Problem]:
     """Lint the title and description with the repository's own configs.
 
@@ -617,6 +666,7 @@ def lint(rendered: Sequence[str], first: int) -> list[Problem]:
         if not (top / name).exists():
             message = f"missing lint config {name} in {top}"
             raise SystemExit(message)
+    styles = style_problem(top)
     problems: list[Problem] = []
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
@@ -625,19 +675,29 @@ def lint(rendered: Sequence[str], first: int) -> list[Problem]:
         (work / DRAFT).parent.mkdir()
         (work / DRAFT).write_text("\n".join(rendered) + "\n")
         for name, exe, args, parse in tools:
-            done = run([exe, *args, str(DRAFT)], cwd=work)
-            found = parse(done.stdout)
-            # Exit 1 means findings in all three tools; anything else, or
-            # exit 1 with nothing parsed, is the tool failing.
-            if done.returncode not in {0, 1} or (done.returncode == 1 and not found):
-                why = " ".join((done.stderr or done.stdout).split())
-                found = [(1, f"{name} failed (exit {done.returncode}): {why}")]
+            if name == "vale" and styles:
+                problems.append((first, f"vale: {styles}"))
+                continue
             problems.extend(
                 (first + line - 1, text)
-                for line, text in found
+                for line, text in run_linter(name, [exe, *args], parse, work)
                 if (line, text.split(":")[0]) != TITLE_ALERT
             )
     return problems
+
+
+def run_linter(
+    name: str, argv: list[str], parse: Callable[[str], list[Problem]], work: Path
+) -> list[Problem]:
+    """Run one linter on the draft in ``work``; its findings, or why it failed."""
+    done = run([*argv, str(DRAFT)], cwd=work)
+    found = parse(done.stdout)
+    # Exit 1 means findings in all three tools; anything else, or
+    # exit 1 with nothing parsed, is the tool failing.
+    if done.returncode not in {0, 1} or (done.returncode == 1 and not found):
+        why = " ".join((done.stderr or done.stdout).split())
+        found = [(1, f"{name} failed (exit {done.returncode}): {why}")]
+    return found
 
 
 def body_problems(lines: Sequence[Line], title: Line) -> list[Problem]:
@@ -687,6 +747,7 @@ def check_text(text: str) -> Checked:
     problems += ref_problems(lines[start:])
     rendered = [line.raw for line in lines[start:]]
     problems += lint(rendered, title.no)
+    problems += private_names.draft_problems(rendered, title.no)
     return Checked(sorted(set(problems)), found[1], rendered, meta)
 
 
@@ -785,8 +846,12 @@ def live_opened_line(number: int) -> str | None:
         why = " ".join((done.stderr or done.stdout).split())
         message = f"cannot read the body of PR {number} to keep its Opened-by: {why}"
         raise SystemExit(message)
+    return opened_line(str(data.get("body") or ""))  # pragma: no mutate -- no line
+
+
+def opened_line(body: str) -> str | None:
+    """The ``Opened-by`` line of a PR body's final paragraph, or None."""
     paragraph: list[str] = []
-    body = str(data.get("body") or "")  # pragma: no mutate -- no body, no line
     for line in reversed(body.splitlines()):
         if line.strip():
             paragraph.append(line)
@@ -883,6 +948,53 @@ def invoke_gh(argv: list[str], body: str, *, dry_run: bool = False) -> tuple[int
     print(done.stdout, end="")
     print(done.stderr, end="", file=sys.stderr)
     return done.returncode, done.stdout
+
+
+def create_pr(argv: list[str], body: str, root: str | None, *, dry_run: bool) -> int:
+    """Refuse an existing open PR, including a race reported by gh create."""
+    done = run([find_tool(GH), "pr", "view", "--json", "number,state,url"])
+    data = gh_data(done)
+    if isinstance(data, dict) and all(
+        type(data.get(key)) is kind
+        for key, kind in (("state", str), ("number", int), ("url", str))
+    ):
+        data = cast("dict[str, object]", data)  # pragma: no mutate
+        if data["state"] == "OPEN":
+            message = (
+                f"error: PR {data['number']} ({data['url']}) is already open; "
+                + EDIT_DRAFT.format(number=data["number"])
+            )
+            print(message, file=sys.stderr)
+            return 1
+    elif not (done.returncode and "no pull requests found" in done.stderr.lower()):
+        output = (done.stderr or done.stdout).rstrip("\n")
+        print(
+            f"cannot check for an open PR: {output}",
+            file=sys.stderr,
+        )
+        return 1
+    if dry_run:
+        return invoke_gh(argv, body, dry_run=True)[0]
+    argv[0] = find_tool(GH)
+    done = run(argv, stdin=body)
+    output = "\n".join(
+        filter(None, (done.stdout.rstrip("\n"), done.stderr.rstrip("\n")))
+    )
+    if done.returncode or "already exists" in output.lower():
+        print(output, file=sys.stderr)
+        if "already exists" in output.lower():
+            found = PR_URL.search(output)
+            number = found[2] if found else "<n>"
+            print(
+                "gh pr create failed; " + EDIT_DRAFT.format(number=number),
+                file=sys.stderr,
+            )
+        return 1
+    print(done.stdout, end="")
+    print(done.stderr, end="", file=sys.stderr)
+    if root is None:
+        return 0
+    return record_created(root, done.stdout)
 
 
 def record_created(root: str, stdout: str) -> int:
@@ -992,10 +1104,7 @@ def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
         post_text(checked.title, body)
         argv = [GH, "pr", "create", "--title", checked.title, "--body-file", "-"]
         argv += gh_args(checked.meta)
-        code, stdout = invoke_gh(argv, body, dry_run=args.dry_run)
-        if code or args.dry_run or root is None:
-            return code
-        return record_created(root, stdout)
+        return create_pr(argv, body, root, dry_run=args.dry_run)
     body = description(checked, env, live_opened_line(args.pr))
     post_text(checked.title, body)
     argv = [
@@ -1066,6 +1175,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("hook").add_argument("harness", choices=[CLAUDE, CODEX, ANTIGRAVITY])
     sub.add_parser("backfill-opened").add_argument("owner")
+    sub.add_parser("ready").add_argument("--pr", type=int, required=True)
     for name in ("check", "create", "edit"):
         one = sub.add_parser(name)
         one.add_argument("draft", nargs="?", type=Path, default=DRAFT)
@@ -1088,4 +1198,8 @@ def main(
         return hook(args.harness)
     if args.command == "backfill-opened":
         return backfill(args.owner)
+    if args.command == "ready":
+        # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
+        # empty body: no test can tell `None` from `""`.
+        return invoke_gh([GH, "pr", "ready", str(args.pr)], "")[0]  # pragma: no mutate
     return command(args, env)

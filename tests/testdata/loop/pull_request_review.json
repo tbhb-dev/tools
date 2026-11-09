@@ -1,0 +1,9 @@
+{
+  "action": "submitted",
+  "review": {
+    "state": "approved",
+    "commit_id": "0123456789abcdef0123456789abcdef01234567"
+  },
+  "pull_request": {"number": 7},
+  "sender": {"login": "example-user"}
+}
