@@ -142,6 +142,8 @@ def test_a_report_that_is_not_a_clean_scan_is_refused(
 def test_gitleaks_runs_from_the_root_with_the_private_config(
     root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The scan must set NO_COLOR itself, not inherit it from the test runner.
+    monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("SECRET_SCAN_PASSED", "yes")
     fake = tmp_path / "gitleaks"
     log = tmp_path / "log"
