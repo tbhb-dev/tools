@@ -3890,6 +3890,10 @@ def test_bootstrap_with_no_host_ready_keeps_the_published_config(
     assert "item" not in " ".join(world.op_calls())
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="runs the Linux host script, which needs GNU stat",
+)
 @pytest.mark.parametrize("mode", [0o600, 0o400, 0o640, 0o644, 0o700])
 def test_linux_held_and_read_require_private_file_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
@@ -3917,6 +3921,10 @@ def test_linux_held_and_read_require_private_file_mode(
     assert read.stdout == ("\nfake-token" if mode == 0o600 else "")
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="runs the Linux host script, which needs GNU stat",
+)
 @pytest.mark.parametrize(
     "kind", ["symlink", "directory", "fifo", "owner", "empty", "missing"]
 )
@@ -3960,6 +3968,10 @@ def test_linux_held_and_read_refuse_invalid_files(
         assert done.stdout == ("absent\n" if step == "held" else "")
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="runs the Linux host script, which needs GNU stat",
+)
 def test_linux_read_strips_surrounding_whitespace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4041,6 +4053,10 @@ def test_refresh_refuses_linux_before_onepassword_or_host_writes(world: World) -
     assert not world.stubs.home("host-c").exists()
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="runs the Linux host script, which needs GNU stat",
+)
 @pytest.mark.parametrize("kind", ["mode", "owner", "symlink", "file"])
 def test_linux_held_and_read_refuse_invalid_directories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
