@@ -71,7 +71,9 @@ record = {{
     "draft": open(draft).read() if os.path.exists(draft) else None,
     "links": {{n: os.readlink(n) for n in os.listdir(".") if os.path.islink(n)}},
 }}
-with open(os.path.join(here, name + ".log"), "a") as log:
+# The visibility read has its own log, so it never shifts the other gh calls.
+repo = ".repo" if called.startswith("repo view") else ""
+with open(os.path.join(here, name + repo + ".log"), "a") as log:
     log.write(json.dumps(record) + "\\n")
 sys.stdout.write(spec["stdout"])
 sys.stderr.write(spec["stderr"])
@@ -156,7 +158,10 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     made.fake(
         "gh",
         stdout="https://github.com/tbhb-dev/ascm/pull/1\n",
-        cases={"pr view": {"rc": 0, "stdout": '{"body": ""}', "stderr": ""}},
+        cases={
+            "pr view": {"rc": 0, "stdout": '{"body": ""}', "stderr": ""},
+            "repo view": {"rc": 0, "stdout": "PUBLIC\\n", "stderr": ""},
+        },
     )
     return made
 
@@ -1520,10 +1525,68 @@ def test_a_missing_private_config_stops_before_gh(world: World) -> None:
     assert world.calls("gh") == []
 
 
-def test_check_does_not_scan(world: World) -> None:
+def test_check_does_not_scan_or_read_the_visibility(world: World) -> None:
     write_draft(world)
     assert run_main("check") == 0
     assert world.calls("gitleaks") == []
+    assert world.calls("gh.repo") == []
+
+
+def visibility_case(stdout: str, rc: int = 0) -> dict[str, dict[str, object]]:
+    return {
+        "pr view": {"rc": 0, "stdout": '{"body": ""}', "stderr": ""},
+        "repo view": {"rc": rc, "stdout": stdout, "stderr": "boom" if rc else ""},
+    }
+
+
+@pytest.mark.parametrize(
+    ("stdout", "rc", "want"),
+    [("PRIVATE\n", 0, "PRIVATE"), ("", 0, ""), ("PRIVATE\n", 1, ""), ("", 1, "")],
+)
+def test_the_visibility_read_is_empty_when_it_fails(
+    world: World, stdout: str, rc: int, want: str
+) -> None:
+    world.fake("gh", cases=visibility_case(stdout, rc))
+    assert pr.repo_visibility() == want
+
+
+def scan_config(world: World) -> str:
+    """The config the one gitleaks call ran under."""
+    (call,) = world.calls("gitleaks")
+    argv = cast("list[str]", call["argv"])
+    return argv[argv.index("--config") + 1]
+
+
+@pytest.mark.parametrize(
+    "argv", [("create",), ("create", "--dry-run"), ("edit", "--pr", "7")]
+)
+@pytest.mark.parametrize(
+    ("stdout", "rc", "reduced"),
+    [
+        ("PRIVATE\n", 0, True),
+        ("PUBLIC\n", 0, False),
+        ("INTERNAL\n", 0, False),
+        ("", 0, False),
+        ("weird\n", 0, False),
+        ("PRIVATE\n", 1, False),
+    ],
+)
+def test_the_visibility_is_read_once_and_picks_the_config(
+    world: World,
+    argv: tuple[str, ...],
+    stdout: str,
+    rc: int,
+    reduced: bool,
+) -> None:
+    world.fake("gh", stdout="u\n", cases=visibility_case(stdout, rc))
+    write_draft(world)
+    assert run_main(*argv) == 0
+    (read,) = world.calls("gh.repo")
+    assert " ".join(cast("list[str]", read["argv"])) == (
+        "repo view --json visibility --jq .visibility"
+    )
+    full = str(Path.home() / ".config" / "gitleaks" / "private.toml")
+    assert (scan_config(world) != full) is reduced
 
 
 def test_edit_requires_a_pr_number(world: World) -> None:

@@ -46,6 +46,13 @@ finding, a missing config or a missing gitleaks stops the command. The message
 is built from the PR's current body, so this catches a body edited after
 ``tbhbdev alpha pr`` last scanned it.
 
+As in ``tbhbdev alpha pr``, a private repository's message skips the private
+config's name rules, read live with ``gh repo view`` once per run. This matches
+the rules' gates, which apply the private config only to a repository that sets
+the flag. The ``op-*`` rules, the address, MAC, endpoint and keychain rules, the
+canary and .gitleaks.toml still apply, and any other visibility, an empty value
+or a failed read scans under the full private config.
+
 A pull request from the Renovate app is the exception to the body rule: its
 release notes and configuration notes are dropped, and the body is one line
 per update from Renovate's update table.

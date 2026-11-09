@@ -50,6 +50,15 @@ private config (see ``tbhbdev.alpha.secret_scan``), and a finding, a missing
 config or a missing gitleaks stops the command. Nothing is pushed: when the
 branch is not on the remote, gh's own error is passed through.
 
+In a private repository, read live with ``gh repo view`` once per command, that
+scan skips the private config's name rules (the ``NAME_RULES`` families). This
+matches the rules' gates, which apply the private config only to a repository
+that sets the flag, so text that names the repository's own subject passes.
+The ``op-*`` rules, the address, MAC, endpoint and keychain rules, the canary
+and .gitleaks.toml still apply. Any visibility but ``PRIVATE``, an empty value
+or a failed read scans under the full private config, so the read alone never
+refuses a command. ``check`` makes no gh calls and doesn't scan.
+
 ``create`` also writes ``Opened-by: LLM ...`` as the first line of that
 paragraph: the posting agent's root identity, with no ``subagent=``. Once gh
 has opened the pull request, it adds ``owner/repo#N`` to that root's opened
@@ -889,9 +898,38 @@ def description(
     return body + "\n" + "\n".join(trailers) + "\n"
 
 
+def repo_visibility() -> str:
+    """The repository's visibility as gh reports it, or "" if the read fails.
+
+    gh resolves the repository from the working directory, as in the other gh
+    calls here. An empty value scans under the full private config.
+    """
+    argv = [
+        find_tool(GH),
+        "repo",
+        "view",
+        "--json",
+        "visibility",
+        "--jq",
+        ".visibility",
+    ]
+    done = run(argv)
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
 def scan_secrets(text: str, what: str) -> None:
-    """Refuse text that gitleaks flags; see ``tbhbdev.alpha.secret_scan``."""
-    secret_scan.scan(text, what, root=root(), gitleaks=find_tool(GITLEAKS))
+    """Refuse text that gitleaks flags; see ``tbhbdev.alpha.secret_scan``.
+
+    It reads the repository's visibility once per call, which each command
+    makes once.
+    """
+    secret_scan.scan(
+        text,
+        what,
+        root=root(),
+        gitleaks=find_tool(GITLEAKS),
+        visibility=repo_visibility(),
+    )
 
 
 def post_text(title: str, body: str) -> None:

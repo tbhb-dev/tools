@@ -36,8 +36,10 @@ ASSIST = "Assisted-by: LLM harness=codex;model=openai:gpt-6.1-sol"
 GH = """import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 spec = json.load(open(os.path.join(here, "gh.spec")))
-kind = sys.argv[2] if sys.argv[1] == "pr" else "?"
-with open(os.path.join(here, "gh.log"), "a") as log:
+repo = sys.argv[1] == "repo"
+kind = "repo" if repo else sys.argv[2]
+# The visibility read has its own log, so it never shifts the other gh calls.
+with open(os.path.join(here, "gh.repo.log" if repo else "gh.log"), "a") as log:
     log.write(json.dumps({{"argv": sys.argv[1:], "stdin": sys.stdin.read()}}) + "\\n")
 sys.stdout.write(spec[kind + "_out"])
 sys.stderr.write(spec[kind + "_err"])
@@ -48,7 +50,8 @@ here = os.path.dirname(os.path.abspath(__file__))
 spec = os.path.join(here, "gitleaks.spec")
 rc, out = json.load(open(spec)) if os.path.exists(spec) else (0, "[]")
 with open(os.path.join(here, "gitleaks.log"), "a") as log:
-    log.write(json.dumps({{"cwd": os.getcwd(), "stdin": sys.stdin.read()}}) + "\\n")
+    entry = {{"cwd": os.getcwd(), "stdin": sys.stdin.read(), "argv": sys.argv[1:]}}
+    log.write(json.dumps(entry) + "\\n")
 sys.stdout.write(out)
 sys.exit(rc)
 """
@@ -74,6 +77,9 @@ class Tools:
             "merge_rc": 0,
             "merge_out": "merged\n",
             "merge_err": "",
+            "repo_rc": 0,
+            "repo_out": "PUBLIC\\n",
+            "repo_err": "",
         }
         (self.bin / "gh.spec").write_text(json.dumps(full | spec))
 
@@ -510,9 +516,12 @@ def test_merge_scans_the_final_message(tools: Tools, tmp_path: Path) -> None:
     assert run_main("12")[0] == 0
     merge = tools.calls()[1]
     subject = "feat(cli): add the stamp subcommand (#12)"
-    assert tools.scanned() == [
-        {"cwd": str(tmp_path / "repo"), "stdin": f"{subject}\n\n{merge['stdin']}"}
-    ]
+    (scanned,) = tools.scanned()
+    assert scanned["cwd"] == str(tmp_path / "repo")
+    assert scanned["stdin"] == f"{subject}\n\n{merge['stdin']}"
+    assert scanned["argv"][scanned["argv"].index("--config") + 1] == str(  # type: ignore[index]
+        tmp_path / ".config" / "gitleaks" / "private.toml"
+    )
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
@@ -885,3 +894,39 @@ def test_an_unclosed_fence_names_its_line() -> None:
     assert str(info.value) == (
         "the PR body is malformed: line 3: code fence is never closed"
     )
+
+
+def repo_reads(tools: Tools) -> list[dict[str, object]]:
+    log = tools.bin / "gh.repo.log"
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+@pytest.mark.parametrize("argv", [("12",), ("12", "--dry-run")])
+@pytest.mark.parametrize(
+    ("out", "rc", "reduced"),
+    [
+        ("PRIVATE\n", 0, True),
+        ("PUBLIC\n", 0, False),
+        ("INTERNAL\n", 0, False),
+        ("", 0, False),
+        ("weird\n", 0, False),
+        ("PRIVATE\n", 1, False),
+    ],
+)
+def test_the_visibility_is_read_once_and_picks_the_config(
+    tools: Tools, argv: tuple[str, ...], out: str, rc: int, reduced: bool
+) -> None:
+    spec = tools.bin / "gh.spec"
+    answer = {"repo_out": out, "repo_rc": rc, "repo_err": "boom" if rc else ""}
+    spec.write_text(json.dumps(json.loads(spec.read_text()) | answer))
+    assert run_main(*argv)[0] == 0
+    (read,) = repo_reads(tools)
+    assert " ".join(cast("list[str]", read["argv"])) == (
+        "repo view --json visibility --jq .visibility"
+    )
+    (scanned,) = tools.scanned()
+    config = scanned["argv"][scanned["argv"].index("--config") + 1]  # type: ignore[index]
+    full = str(Path.home() / ".config" / "gitleaks" / "private.toml")
+    assert (config != full) is reduced
