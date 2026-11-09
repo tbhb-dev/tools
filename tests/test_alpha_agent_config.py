@@ -1,0 +1,633 @@
+"""Agent config parsing is a table over literal values, with no file read."""
+
+from __future__ import annotations
+
+import copy
+import dataclasses
+from typing import cast
+
+import pytest
+
+from tbhbdev.alpha.agent import model
+from tbhbdev.alpha.agent.decisions import config
+from tbhbdev.alpha.agent.model import Invalid
+
+type Table = dict[str, object]
+
+MISSING = object()
+EMPTY: list[str] = []
+REFERENCE_KEYS = [
+    f.name for f in dataclasses.fields(model.Credentials) if f.name != "account"
+]
+NAME_RULE = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
+HOST_RULE = "[A-Za-z0-9][A-Za-z0-9._-]{0,62}"
+REFERENCE = "must be a vault/item/field reference"
+PATHS = "must not contain a NUL or '..' part"
+NON_BLANK = "must be a non-blank string"
+STRINGS = "must be a non-empty list of non-blank strings"
+POSITIVE = "must be a positive integer"
+DURATION = "must be bare seconds or a number ending in s, m or h"
+
+GOOD: Table = {
+    "launch_wait_seconds": 120,
+    "agy_timeout": "900s",
+    "kill_grace_seconds": 10,
+    "max_run_minutes": 120,
+    "sockets_dir": "/example/sockets",
+    "sandbox": {
+        "write_roots": [".cache", ".local/share/mise", ".local/state"],
+        "audit_dir": ".local/state/example-audit",
+        "denied_home_paths": [".claude"],
+        "path": {
+            "linux": [".local/share/mise/shims", "/usr/local/bin", "/usr/bin"],
+            "macos": [".local/share/mise/shims", "/opt/homebrew/bin", "/usr/bin"],
+        },
+        "agy": {
+            "review_read": [".config/example-gh", ".config/mise"],
+            "build_read": [".config/example-tools"],
+            "build_write": [".local/state/mise", ".local/share/mise"],
+        },
+    },
+    "codex": {"web_search": {"build": "cached", "review": "disabled"}},
+    "credentials": {
+        "agent": {
+            "gh": "example-vault/example-gh/token",
+            "docker": "example-vault/example-docker/config",
+            "reviews_app_id": "example-vault/example-app/app_id",
+            "reviews_app_client_id": "example-vault/example-app/client_id",
+            "reviews_app_pem": "example-vault/example-app/private_key",
+            "signing": "example-vault/example-signing/private_key",
+        }
+    },
+    "claude": {
+        "default_profile": "primary",
+        "profiles": {
+            "primary": {"token": "example/primary/token"},
+            "secondary": {
+                "token": "example/secondary/token",
+                "expires": "example/secondary/expires",
+            },
+        },
+    },
+    "host": [
+        {
+            "name": "example-linux",
+            "os": "linux",
+            "shell": "bash",
+            "account": "agent",
+            "unsandboxed": False,
+            "accounts": ["agent", "ops"],
+        }
+    ],
+}
+
+EXPECTED = model.Settings(
+    launch_wait_seconds=120,
+    agy_timeout_seconds=900,
+    kill_grace_seconds=10,
+    max_run_minutes=120,
+    sockets_dir="/example/sockets",
+    sandbox=model.Sandbox(
+        write_roots=(".cache", ".local/share/mise", ".local/state"),
+        audit_dir=".local/state/example-audit",
+        denied_home_paths=(".claude",),
+        path=model.SandboxPath(
+            linux=(".local/share/mise/shims", "/usr/local/bin", "/usr/bin"),
+            macos=(".local/share/mise/shims", "/opt/homebrew/bin", "/usr/bin"),
+        ),
+        agy=model.AgySandbox(
+            review_read=(".config/example-gh", ".config/mise"),
+            build_read=(".config/example-tools",),
+            build_write=(".local/state/mise", ".local/share/mise"),
+        ),
+    ),
+    codex=model.Codex(model.WebSearch.CACHED, model.WebSearch.DISABLED),
+    credentials=(
+        model.Credentials(
+            account="agent",
+            gh="example-vault/example-gh/token",
+            docker="example-vault/example-docker/config",
+            reviews_app_id="example-vault/example-app/app_id",
+            reviews_app_client_id="example-vault/example-app/client_id",
+            reviews_app_pem="example-vault/example-app/private_key",
+            signing="example-vault/example-signing/private_key",
+        ),
+    ),
+    claude=model.Claude(
+        default_profile="primary",
+        profiles=(
+            model.ClaudeProfile("primary", "example/primary/token", None),
+            model.ClaudeProfile(
+                "secondary", "example/secondary/token", "example/secondary/expires"
+            ),
+        ),
+    ),
+    hosts=(
+        model.Host(  # noqa: S604 -- a config key, not a subprocess flag
+            name="example-linux",
+            os=model.Os.LINUX,
+            shell="bash",
+            account="agent",
+            unsandboxed=False,
+            accounts=("agent", "ops"),
+        ),
+    ),
+)
+
+
+def edited(*path: str | int, value: object = MISSING) -> Table:
+    """GOOD with the value at PATH replaced, or removed when VALUE is MISSING."""
+    table = copy.deepcopy(GOOD)
+    node: object = table
+    for step in path[:-1]:
+        node = cast("dict[str | int, object]", node)[step]
+    holder = cast("dict[str | int, object]", node)
+    if value is MISSING:
+        del holder[path[-1]]
+    else:
+        holder[path[-1]] = value
+    return table
+
+
+def refused(table: Table) -> str:
+    with pytest.raises(Invalid) as caught:
+        config.parse(table)
+    return str(caught.value)
+
+
+def test_parses_every_key() -> None:
+    assert config.parse(GOOD) == EXPECTED
+
+
+def test_settings_expose_every_value() -> None:
+    parsed = config.parse(GOOD)
+    sandbox = parsed.sandbox
+    assert sandbox.write_roots == (".cache", ".local/share/mise", ".local/state")
+    assert sandbox.audit_dir == ".local/state/example-audit"
+    assert sandbox.denied_home_paths == (".claude",)
+    assert sandbox.agy.review_read == (".config/example-gh", ".config/mise")
+    assert sandbox.agy.build_read == (".config/example-tools",)
+    assert sandbox.agy.build_write == (".local/state/mise", ".local/share/mise")
+    assert parsed.codex.web_search_build is model.WebSearch.CACHED
+    assert parsed.codex.web_search_review is model.WebSearch.DISABLED
+    account = parsed.credentials[0]
+    assert account.reviews_app_id == "example-vault/example-app/app_id"
+    assert account.reviews_app_client_id == "example-vault/example-app/client_id"
+    assert account.signing == "example-vault/example-signing/private_key"
+    assert parsed.sockets_dir == "/example/sockets"
+
+
+def test_input_is_not_modified() -> None:
+    table = copy.deepcopy(GOOD)
+    config.parse(table)
+    assert table == GOOD
+
+
+def test_result_is_frozen() -> None:
+    assert hash(config.parse(GOOD)) == hash(EXPECTED)
+
+
+def test_optional_keys_may_be_absent() -> None:
+    table = edited("max_run_minutes")
+    del table["codex"]
+    del cast(
+        "Table", cast("Table", cast("Table", table["claude"])["profiles"])["secondary"]
+    )["expires"]
+    del cast("Table", cast("Table", table["credentials"])["agent"])["docker"]
+    parsed = config.parse(table)
+    assert parsed.max_run_minutes is None
+    assert parsed.codex == model.Codex(model.WebSearch.LIVE, model.WebSearch.LIVE)
+    assert parsed.claude.profiles[1].expires is None
+    assert parsed.credentials[0].docker is None
+
+
+@pytest.mark.parametrize(
+    ("codex", "build", "review"),
+    [
+        ({}, "live", "live"),
+        ({"web_search": {}}, "live", "live"),
+        ({"web_search": {"build": "disabled"}}, "disabled", "live"),
+        ({"web_search": {"review": "cached"}}, "live", "cached"),
+        ({"web_search": {"build": "live", "review": "live"}}, "live", "live"),
+        ({"web_search": {"build": "cached", "review": "cached"}}, "cached", "cached"),
+    ],
+)
+def test_codex_web_search_defaults_to_live_and_may_narrow(
+    codex: Table, build: str, review: str
+) -> None:
+    parsed = config.parse(edited("codex", value=codex))
+    assert parsed.codex == model.Codex(model.WebSearch(build), model.WebSearch(review))
+
+
+def test_minimal_values_are_valid() -> None:
+    table = edited("launch_wait_seconds", value=1)
+    table["kill_grace_seconds"] = 1
+    table["max_run_minutes"] = 1
+    table["agy_timeout"] = 1
+    parsed = config.parse(table)
+    assert (parsed.launch_wait_seconds, parsed.kill_grace_seconds) == (1, 1)
+    assert (parsed.max_run_minutes, parsed.agy_timeout_seconds) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    ("value", "seconds"),
+    [
+        (900, 900),
+        (1, 1),
+        ("900", 900),
+        ("900s", 900),
+        ("1s", 1),
+        ("15m", 900),
+        ("1h", 3600),
+        ("2h", 7200),
+        ("007", 7),
+        ("0", None),
+        ("0s", None),
+        ("0h", None),
+        (0, None),
+        (-1, None),
+        (True, None),
+        (1.5, None),
+        (None, None),
+        ([5], None),
+        ("", None),
+        ("s", None),
+        ("-5", None),
+        ("5d", None),
+        ("5S", None),
+        ("1 h", None),
+        (" 5", None),
+        ("5\n", None),
+        ("1h30m", None),
+        ("\uff11\uff10", None),
+        ("1.5h", None),
+    ],
+)
+def test_parse_duration(value: object, seconds: int | None) -> None:
+    assert config.parse_duration(value) == seconds
+
+
+@pytest.mark.parametrize(
+    ("name", "found"),
+    [
+        ("primary", "primary"),
+        ("Primary", "primary"),
+        ("PRIMARY", "primary"),
+        ("secondary", "secondary"),
+        ("tertiary", None),
+        ("", None),
+    ],
+)
+def test_find_profile_ignores_case(name: str, found: str | None) -> None:
+    profile = config.find_profile(EXPECTED.claude.profiles, name)
+    assert (profile.name if profile else None) == found
+
+
+def test_find_profile_ignores_the_case_config_spells() -> None:
+    profiles = (model.ClaudeProfile("Primary", "a/b/c", None),)
+    found = config.find_profile(profiles, "primary")
+    assert found is not None
+    assert found.name == "Primary"
+
+
+def test_default_profile_resolves_to_the_name_config_spells() -> None:
+    table = edited("claude", "default_profile", value="PRIMARY")
+    assert config.parse(table).claude.default_profile == "primary"
+    claude = cast("Table", table["claude"])
+    claude["profiles"] = {
+        "Primary": {"token": "e/p/t"},
+        "Secondary": {"token": "e/s/t"},
+    }
+    claude["default_profile"] = "secondary"
+    parsed = config.parse(table).claude
+    assert parsed.default_profile == "Secondary"
+    assert [p.name for p in parsed.profiles] == ["Primary", "Secondary"]
+
+
+type Case = tuple[tuple[str | int, ...], object, str]
+
+
+def _add(
+    cases: list[Case], path: tuple[str | int, ...], value: object, why: str, label: str
+) -> None:
+    cases.append((path, value, f"{label} {path[-1]} {why}"))
+
+
+def _root_errors() -> list[Case]:
+    cases: list[Case] = []
+    root = "[agent]"
+    for key in ("launch_wait_seconds", "kill_grace_seconds", "max_run_minutes"):
+        for bad in (0, -1, True, "5", 1.5, None, [5]):
+            _add(cases, (key,), bad, POSITIVE, root)
+    for bad in (0, "0", "0s", "abc", "", "5d", True, 1.5, [5], None):
+        _add(cases, ("agy_timeout",), bad, DURATION, root)
+    for key in ("launch_wait_seconds", "agy_timeout", "kill_grace_seconds"):
+        _add(cases, (key,), MISSING, "is required", root)
+    _add(cases, ("sockets_dir",), MISSING, "is required", root)
+    for bad in ("", "  ", 5, None, ["x"]):
+        _add(cases, ("sockets_dir",), bad, NON_BLANK, root)
+    for bad in ("/a/../b", "a\x00b", ".."):
+        _add(cases, ("sockets_dir",), bad, PATHS, root)
+    for key in ("sandbox", "credentials", "claude", "host"):
+        _add(cases, (key,), MISSING, "is required", root)
+    for key in ("sandbox", "credentials", "claude", "codex"):
+        _add(cases, (key,), 5, "must be a table", root)
+    return cases
+
+
+def _sandbox_errors() -> list[Case]:
+    cases: list[Case] = []
+    sandbox = "[agent.sandbox]"
+    for key in ("path", "agy"):
+        _add(cases, ("sandbox", key), MISSING, "is required", sandbox)
+        _add(cases, ("sandbox", key), [], "must be a table", sandbox)
+    _add(cases, ("sandbox", "audit_dir"), MISSING, "is required", sandbox)
+    for bad in ("", " ", 5):
+        _add(cases, ("sandbox", "audit_dir"), bad, NON_BLANK, sandbox)
+    for bad in ("../x", "a/../b", "a\x00"):
+        _add(cases, ("sandbox", "audit_dir"), bad, PATHS, sandbox)
+    lists = (
+        ("sandbox", "write_roots", sandbox),
+        ("sandbox", "denied_home_paths", sandbox),
+        ("sandbox", "path", "linux", "[agent.sandbox.path]"),
+        ("sandbox", "path", "macos", "[agent.sandbox.path]"),
+        ("sandbox", "agy", "review_read", "[agent.sandbox.agy]"),
+        ("sandbox", "agy", "build_read", "[agent.sandbox.agy]"),
+        ("sandbox", "agy", "build_write", "[agent.sandbox.agy]"),
+    )
+    for *path, label in lists:
+        where = tuple(path)
+        _add(cases, where, MISSING, "is required", label)
+        for bad in (EMPTY, [""], [" "], [5], "text", ["ok", None], None):
+            _add(cases, where, bad, STRINGS, label)
+        for bad in (["../x"], ["ok", "a/../b"], ["a\x00"], [".."]):
+            _add(cases, where, bad, PATHS, label)
+    return cases
+
+
+def _codex_errors() -> list[Case]:
+    cases: list[Case] = []
+    codex = "[agent.codex]"
+    _add(cases, ("codex", "web_search"), 5, "must be a table", codex)
+    for bad in ("bad", "Live", 5, True, None, ["live"], ""):
+        _add(
+            cases,
+            ("codex", "web_search", "build"),
+            bad,
+            "must be one of live, cached, disabled",
+            "[agent.codex.web_search]",
+        )
+        _add(
+            cases,
+            ("codex", "web_search", "review"),
+            bad,
+            "must be one of live, cached, disabled",
+            "[agent.codex.web_search]",
+        )
+    return cases
+
+
+def _credential_errors() -> list[Case]:
+    cases: list[Case] = []
+    account = "[agent.credentials.agent]"
+    for key in REFERENCE_KEYS:
+        if key == "docker":
+            continue
+        _add(cases, ("credentials", "agent", key), MISSING, "is required", account)
+    for key in REFERENCE_KEYS:
+        for bad in ("a/b", "a/b/c/d", "a//c", "a/ /c", "", 5, None, "op://a/b/c"):
+            _add(cases, ("credentials", "agent", key), bad, REFERENCE, account)
+    return cases
+
+
+def _claude_errors() -> list[Case]:
+    cases: list[Case] = []
+    claude = "[agent.claude]"
+    _add(cases, ("claude", "default_profile"), MISSING, "is required", claude)
+    for bad in ("", " ", 5):
+        _add(cases, ("claude", "default_profile"), bad, NON_BLANK, claude)
+    _add(cases, ("claude", "profiles"), MISSING, "is required", claude)
+    _add(cases, ("claude", "profiles"), "x", "must be a table", claude)
+    for key in ("token",):
+        _add(
+            cases,
+            ("claude", "profiles", "primary", key),
+            MISSING,
+            "is required",
+            "[agent.claude.profiles.primary]",
+        )
+    for key in ("token", "expires"):
+        for bad in ("a/b", "", 5, "a/b/c/d"):
+            _add(
+                cases,
+                ("claude", "profiles", "primary", key),
+                bad,
+                REFERENCE,
+                "[agent.claude.profiles.primary]",
+            )
+    _add(
+        cases,
+        ("claude", "profiles", "primary"),
+        5,
+        "must be a table",
+        "[agent.claude.profiles]",
+    )
+    return cases
+
+
+def _host_errors() -> list[Case]:
+    cases: list[Case] = []
+    host = "[[agent.host]]"
+    for key in ("name", "os", "shell", "account", "unsandboxed", "accounts"):
+        _add(cases, ("host", 0, key), MISSING, "is required", host)
+    for bad in ("", " ", 5):
+        _add(cases, ("host", 0, "name"), bad, NON_BLANK, host)
+        _add(cases, ("host", 0, "shell"), bad, NON_BLANK, host)
+        _add(cases, ("host", 0, "account"), bad, NON_BLANK, host)
+    for bad in ("-x", "a b", "a" * 64, ".a", "a/b", "é"):
+        _add(cases, ("host", 0, "name"), bad, f"must match {HOST_RULE}", host)
+    for bad in ("windows", "Linux", "", 5, None, ["linux"]):
+        _add(cases, ("host", 0, "os"), bad, "must be one of linux, macos", host)
+    for bad in ("Bash", "1sh", "a" * 33, "a b", "bash\n", "a.b"):
+        _add(cases, ("host", 0, "shell"), bad, "must match [a-z][a-z0-9_-]{0,31}", host)
+    for bad in ("-x", "a b", "a" * 65, "a.b"):
+        _add(cases, ("host", 0, "account"), bad, f"must match {NAME_RULE}", host)
+    for bad in ("yes", 1, 0, None, "true"):
+        _add(cases, ("host", 0, "unsandboxed"), bad, "must be true or false", host)
+    for bad in (EMPTY, [""], [5], "agent", None):
+        _add(cases, ("host", 0, "accounts"), bad, STRINGS, host)
+    for bad in (["a b"], ["agent", "-x"], ["a" * 65]):
+        _add(
+            cases,
+            ("host", 0, "accounts"),
+            bad,
+            f"must list names matching {NAME_RULE}",
+            host,
+        )
+    _add(
+        cases,
+        ("host", 0, "accounts"),
+        ["agent", "agent"],
+        "must not contain duplicates",
+        host,
+    )
+    cases.append(
+        (("host", 0, "accounts"), ["ops"], f"{host} account must be one of accounts")
+    )
+    return cases
+
+
+def _errors() -> list[Case]:
+    return [
+        *_root_errors(),
+        *_sandbox_errors(),
+        *_codex_errors(),
+        *_credential_errors(),
+        *_claude_errors(),
+        *_host_errors(),
+    ]
+
+
+@pytest.mark.parametrize(("path", "value", "message"), _errors())
+def test_refuses(path: tuple[str | int, ...], value: object, message: str) -> None:
+    assert refused(edited(*path, value=value)) == message
+
+
+def test_one_valid_account_name_per_table_key() -> None:
+    table = edited("credentials", value={"bad name": GOOD_ACCOUNT})
+    assert refused(table) == f"[agent.credentials] bad name must match {NAME_RULE}"
+
+
+GOOD_ACCOUNT = cast("Table", cast("Table", GOOD["credentials"])["agent"])
+
+
+def test_credentials_need_an_account() -> None:
+    assert refused(edited("credentials", value={})) == (
+        "[agent.credentials] account is required"
+    )
+
+
+def test_credentials_account_must_be_a_table() -> None:
+    assert refused(edited("credentials", value={"agent": 5})) == (
+        "[agent.credentials] agent must be a table"
+    )
+
+
+def test_each_account_has_its_own_table_label() -> None:
+    table = edited("credentials", value={"agent": GOOD_ACCOUNT, "ops": {}})
+    assert refused(table) == "[agent.credentials.ops] gh is required"
+    table = edited("credentials", value={"agent": GOOD_ACCOUNT, "ops": GOOD_ACCOUNT})
+    assert [c.account for c in config.parse(table).credentials] == ["agent", "ops"]
+
+
+def test_profiles_need_one() -> None:
+    assert refused(edited("claude", "profiles", value={})) == (
+        "[agent.claude.profiles] profile is required"
+    )
+
+
+@pytest.mark.parametrize("name", ["-x", "a b", "a" * 65, "a.b", ""])
+def test_profile_names_must_match_the_name_rule(name: str) -> None:
+    table = edited("claude", "profiles", value={name: {"token": "a/b/c"}})
+    assert refused(table) == f"[agent.claude.profiles] {name} must match {NAME_RULE}"
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("Primary", "primary"), ("primary", "PRIMARY"), ("aB", "Ab")],
+)
+def test_profiles_differing_only_in_case_fail(first: str, second: str) -> None:
+    profiles = {first: {"token": "a/b/c"}, second: {"token": "a/b/d"}}
+    table = edited("claude", "profiles", value=profiles)
+    assert refused(table) == (
+        f"[agent.claude.profiles] {second} differs from {first} only in case"
+    )
+
+
+def test_default_profile_must_name_a_profile() -> None:
+    table = edited("claude", "default_profile", value="tertiary")
+    assert refused(table) == (
+        "[agent.claude] default_profile names no profile in [agent.claude.profiles]"
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "label"),
+    [
+        ((), "[agent]"),
+        (("sandbox",), "[agent.sandbox]"),
+        (("sandbox", "path"), "[agent.sandbox.path]"),
+        (("sandbox", "agy"), "[agent.sandbox.agy]"),
+        (("codex",), "[agent.codex]"),
+        (("codex", "web_search"), "[agent.codex.web_search]"),
+        (("credentials", "agent"), "[agent.credentials.agent]"),
+        (("claude",), "[agent.claude]"),
+        (("claude", "profiles", "primary"), "[agent.claude.profiles.primary]"),
+        (("host", 0), "[[agent.host]]"),
+    ],
+)
+def test_unknown_keys_name_the_full_table_and_each_key(
+    path: tuple[str | int, ...], label: str
+) -> None:
+    table = copy.deepcopy(GOOD)
+    node: object = table
+    for step in path:
+        node = cast("dict[str | int, object]", node)[step]
+    cast("Table", node).update({"zeta": 1, "alpha": 2})
+    assert refused(table) == f"{label} alpha, zeta not recognized"
+
+
+def test_credentials_is_not_a_host_key() -> None:
+    table = edited("host", 0, "credentials", value="connect")
+    assert refused(table) == "[[agent.host]] credentials not recognized"
+
+
+@pytest.mark.parametrize("value", [[], 5, "x", [5], ["x"], [None]])
+def test_host_must_be_a_non_empty_array_of_tables(value: object) -> None:
+    assert refused(edited("host", value=value)) == (
+        "[agent] host must be a non-empty array of tables"
+    )
+
+
+def test_hosts_keep_their_order_and_refuse_a_repeated_name() -> None:
+    second = {**cast("Table", cast("list[object]", GOOD["host"])[0]), "name": "other"}
+    first = cast("list[object]", GOOD["host"])[0]
+    table = edited("host", value=[first, second])
+    assert [h.name for h in config.parse(table).hosts] == ["example-linux", "other"]
+    table = edited("host", value=[first, first])
+    assert refused(table) == "[[agent.host]] name 'example-linux' is defined twice"
+
+
+def test_a_host_may_run_on_macos_with_a_dotted_name() -> None:
+    first = cast("Table", cast("list[object]", GOOD["host"])[0])
+    table = edited(
+        "host",
+        value=[{**first, "name": "example.mac-1", "os": "macos", "shell": "zsh"}],
+    )
+    host = config.parse(table).hosts[0]
+    assert (host.name, host.os, host.shell) == (
+        "example.mac-1",
+        model.Os.MACOS,
+        "zsh",
+    )
+    assert host.unsandboxed is False
+
+
+def test_unsandboxed_is_read_as_given() -> None:
+    assert (
+        config.parse(edited("host", 0, "unsandboxed", value=True)).hosts[0].unsandboxed
+    )
+
+
+def test_name_limits() -> None:
+    first = cast("Table", cast("list[object]", GOOD["host"])[0])
+    table = edited(
+        "host",
+        value=[
+            {**first, "name": "a" * 63, "account": "b" * 64, "accounts": ["b" * 64]}
+        ],
+    )
+    host = config.parse(table).hosts[0]
+    assert (len(host.name), len(host.account)) == (63, 64)
+    table = edited("host", value=[{**first, "shell": "a" * 32}])
+    assert len(config.parse(table).hosts[0].shell) == 32

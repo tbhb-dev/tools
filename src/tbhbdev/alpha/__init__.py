@@ -13,6 +13,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from tbhbdev.alpha import (
+    agent,
     guard_gh_pr,
     guard_op,
     identity,
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 __all__ = [
+    "agent",
     "guard_gh_pr",
     "guard_op",
     "identity",
@@ -55,6 +57,7 @@ commands:
   issue        close N --reason completed|not-planned: close an issue
   merge        squash-merge an approved pull request
   loop         validate loop configuration (runner not yet available)
+  agent        validate agent configuration (runs not yet available)
   install      install the git hooks and the user-level harness hooks
 """
 
@@ -116,6 +119,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "merge": merge,
     "install": install_command,
     "loop": loop.main,
+    "agent": agent.main,
 }
 
 
