@@ -443,38 +443,43 @@ PRIVATE_FILES = (
 )
 
 
+def install_private_file(name: str, relative: Path, *, dry_run: bool) -> int:
+    """Write one file a plugin supplies into HOME; do nothing when none does."""
+    path = Path.home() / relative
+    try:
+        text = plugins.supplied(name)
+        if text is None:
+            return 0
+        old = path.read_text() if path.exists() else None
+        if old == text:
+            print(f"{name}: {path} is up to date")
+            return 0
+        if dry_run:
+            before = [] if old is None else old.splitlines(keepends=True)
+            diff = difflib.unified_diff(
+                before, text.splitlines(keepends=True), str(path), str(path)
+            )
+            print("".join(diff), end="")
+            return 0
+        backup = write_config(path, old, text)
+        path.chmod(0o600)
+    except (plugins.PluginError, InstallError, OSError) as exc:
+        print(f"{PROG}: {name}: cannot install {path}: {exc}", file=sys.stderr)
+        return 1
+    saved = f"; the old one is {backup}" if backup else ""
+    print(f"{name}: wrote {path}{saved}")
+    return 0
+
+
 def install_private_files(*, dry_run: bool) -> int:
     """Write each file a plugin supplies into HOME, leaving the rest alone.
 
     The names come from this list, and the text from the plugin at run time,
-    so nothing private lives in this package.
+    so the package never holds private content.
     """
     status = 0
     for name, relative in PRIVATE_FILES:
-        path = Path.home() / relative
-        try:
-            text = plugins.supplied(name)
-            if text is None:
-                continue
-            old = path.read_text() if path.exists() else None
-            if old == text:
-                print(f"{name}: {path} is up to date")
-                continue
-            if dry_run:
-                before = [] if old is None else old.splitlines(keepends=True)
-                diff = difflib.unified_diff(
-                    before, text.splitlines(keepends=True), str(path), str(path)
-                )
-                print("".join(diff), end="")
-                continue
-            backup = write_config(path, old, text)
-            path.chmod(0o600)
-        except (plugins.PluginError, InstallError, OSError) as exc:
-            print(f"{PROG}: {name}: cannot install {path}: {exc}", file=sys.stderr)
-            status = 1
-            continue
-        saved = f"; the old one is {backup}" if backup else ""
-        print(f"{name}: wrote {path}{saved}")
+        status |= install_private_file(name, relative, dry_run=dry_run)
     return status
 
 

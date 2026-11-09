@@ -113,6 +113,14 @@ def make_repo(path: Path, origin: str | None = ORIGIN) -> Path:
     return path.resolve()
 
 
+def no_plugin(_name: str) -> None:
+    return None
+
+
+def private_files_fail(**_kw: object) -> int:
+    return 1
+
+
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     prefixes = ("CLAUDE", "CODEX", "ANTIGRAVITY", "GIT_", "PREK", "TBHB_")
@@ -136,7 +144,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     repo = make_repo(tmp_path / "repo")
     monkeypatch.chdir(repo)
     # No plugin supplies private files unless a test says so.
-    monkeypatch.setattr(install.plugins, "supplied", lambda _name: None)
+    monkeypatch.setattr(install.plugins, "supplied", no_plugin)
     return World(home.resolve(), bin_dir, repo)
 
 
@@ -1738,9 +1746,11 @@ def test_private_files_dry_run_prints_a_diff_and_writes_nothing(
     supply(monkeypatch, {"claude-private.md": "new\n", "mise-private.toml": "x\n"})
     assert install.install_private_files(dry_run=True) == 0
     out = capsys.readouterr().out
-    assert f"--- {path}\n+++ {path}\n" in out
-    assert "-old\n+new\n" in out
-    assert "+x\n" in out
+    other = world.home / ".config" / "mise" / "conf.d" / "private.toml"
+    assert out == (
+        f"--- {path}\n+++ {path}\n@@ -1 +1 @@\n-old\n+new\n"
+        f"--- {other}\n+++ {other}\n@@ -0,0 +1 @@\n+x\n"
+    )
     assert path.read_text() == "old\n"
     assert not (world.home / ".config").exists()
 
@@ -1784,5 +1794,26 @@ def test_main_installs_private_files(
 def test_main_status_includes_a_private_file_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(install, "install_private_files", lambda **_kw: 1)
+    monkeypatch.setattr(install, "install_private_files", private_files_fail)
     assert install.main(["--harness", "claude"], "tbhbdev alpha install") == 1
+
+
+def test_private_files_up_to_date_first_still_writes_the_second(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = world.home / ".claude" / "CLAUDE.private.md"
+    claude.parent.mkdir()
+    claude.write_text("# P\n")
+    supply(monkeypatch, {"claude-private.md": "# P\n", "mise-private.toml": "x\n"})
+    assert install.install_private_files(dry_run=False) == 0
+    assert (world.home / ".config" / "mise" / "conf.d" / "private.toml").exists()
+
+
+def test_main_dry_run_leaves_private_files_unwritten(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supply(monkeypatch, {"claude-private.md": "# P\n"})
+    assert (
+        install.main(["--dry-run", "--harness", "claude"], "tbhbdev alpha install") == 0
+    )
+    assert not (world.home / ".claude" / "CLAUDE.private.md").exists()
