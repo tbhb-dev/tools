@@ -5,11 +5,20 @@
     tbhbdev alpha gh-app APP --cooldown-status
 
 A mint reads the App's `app_id` and `private_key` from the `github-app-APP` item
-through `secrets.Store`, signs a JWT with `openssl`, and exchanges it for an
-installation token. It writes a `hosts.yml` in gh's layout under
-`$XDG_STATE_HOME/gh-app` and prints that directory. Nothing here reads a
-service account or runs `op`. The token, the key and the JWT never reach
-stdout, stderr, an exception message or a repr.
+through one `secrets.Store`, checks that the key is an RSA key, signs a JWT
+with `openssl`, and exchanges it for an installation token. It writes a
+`hosts.yml` in gh's layout under
+`$XDG_STATE_HOME/gh-app/VAULT/APP/OWNER/REPO`, or `.../OWNER/+all` with
+`--all-repos`, and prints that directory. No GitHub repository can be named
+`+all`, and each vault has its own tree, so no two requests share a token. A
+cached token with more than ten minutes left is reused, even during a
+cooldown, because reuse calls neither GitHub nor the vault. A cooldown
+refuses every other mint. Each file is synced to disk, then renamed into
+place, and the directory is synced after. The installation lookup falls
+through from the repository to its owner on a 404 only, and any other
+refusal is an error. Nothing here reads a service account or runs `op`. The
+token, the key and the JWT never reach stdout, stderr, an exception message or
+a repr.
 
 The functions down to `Env` are pure. `Env` holds the seams the rest uses: the
 clock, the state root, the secret store, the openssl runner and the HTTP
@@ -57,6 +66,13 @@ REUSE_MARGIN = 600
 JWT_BACKDATE = 60
 JWT_LIFETIME = 540
 PEM_WIDTH = 64
+# The text of `openssl pkey -noout -text` for an RSA key. Older OpenSSL builds
+# put "RSA " before the header.
+# cspell:words RDONLY
+RSA_HEADER = re.compile(rb"\A(?:RSA )?Private-Key: \(")
+RSA_MODULUS = re.compile(rb"^modulus:", re.MULTILINE)
+ALL_REPOS_DIR = "+all"
+NOT_A_PART = (".", "..")
 # mutmut changes only function bodies, so these file names, which mint and
 # store_token share and the filesystem may match in any case, are constants.
 HOSTS_FILE = "hosts.yml"
@@ -167,8 +183,11 @@ def parse_args(argv: Sequence[str]) -> Args:
     elif ns.repo is None:
         message = "OWNER/REPO is required"
         raise UsageError(message)
-    elif not REPO_PATTERN.fullmatch(ns.repo) or ".." in ns.repo.split("/"):
+    elif not valid_repo(ns.repo):
         message = f"repository {ns.repo!r} must be OWNER/REPO"
+        raise UsageError(message)
+    if not valid_vault(ns.vault):
+        message = f"vault {ns.vault!r} cannot be a directory name"
         raise UsageError(message)
     return Args(
         ns.app,
@@ -182,6 +201,17 @@ def parse_args(argv: Sequence[str]) -> Args:
     )
 
 
+def valid_repo(repo: str) -> bool:
+    """Whether REPO is OWNER/REPO, with no part that climbs or stays in a path."""
+    parts = repo.split("/")
+    return REPO_PATTERN.fullmatch(repo) is not None and not set(parts) & set(NOT_A_PART)
+
+
+def valid_vault(vault: str) -> bool:
+    """Whether VAULT can be one component of a path."""
+    return vault not in ("", *NOT_A_PART) and "/" not in vault and "\0" not in vault
+
+
 def state_root(environ: dict[str, str], home: Path) -> Path:
     base = environ.get("XDG_STATE_HOME") or str(home / ".local" / "state")
     return Path(base) / "gh-app"
@@ -192,9 +222,15 @@ def split_repo(repo: str) -> tuple[str, str]:
     return owner, name
 
 
-def out_dir(state: Path, app: str, repo: str, *, all_repos: bool) -> Path:
-    owner, name = split_repo(repo)
-    return state / app / owner / ("_all-repos" if all_repos else name)
+def out_dir(state: Path, args: Args) -> Path:
+    owner, name = split_repo(args.repo)
+    return (
+        state
+        / args.vault
+        / args.app
+        / owner
+        / (ALL_REPOS_DIR if args.all_repos else name)
+    )
 
 
 def cooldown_path(state: Path, app: str) -> Path:
@@ -272,6 +308,12 @@ def json_object(response: httpx.Response) -> Json:
     return payload if isinstance(payload, dict) else {}
 
 
+def detail(payload: Json) -> str:
+    """GitHub's own `message` field, which is all a failure here quotes."""
+    reason = payload.get("message")
+    return reason if isinstance(reason, str) and reason else "no message"
+
+
 def installation_id(response: httpx.Response) -> int | None:
     found = json_object(response).get("id")
     if response.status_code != httpx.codes.OK or not isinstance(found, int):
@@ -301,9 +343,7 @@ def parse_token(payload: Json) -> Minted:
     epoch = expiry(payload.get("expires_at"))
     if isinstance(token, str) and TOKEN_PATTERN.fullmatch(token) and epoch is not None:
         return Minted(token, epoch)
-    reason = payload.get("message")
-    detail = reason if isinstance(reason, str) and reason else "no message"
-    message = f"GitHub did not return a token: {detail}"
+    message = f"GitHub did not return a token: {detail(payload)}"
     raise GhAppError(message)
 
 
@@ -367,14 +407,27 @@ def write_file(path: Path, text: str) -> None:
     try:
         fill(handle, text)
         Path(temp).replace(path)
+        sync_dir(path.parent)
     except BaseException:
-        Path(temp).unlink()
+        # After the rename the temp file is gone, and a failed cleanup must not
+        # hide the error that brought us here.
+        Path(temp).unlink(missing_ok=True)
         raise
 
 
 def fill(handle: int, text: str) -> None:
     with os.fdopen(handle, "wb") as stream:
         stream.write(text.encode())
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def sync_dir(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def make_dir(path: Path) -> None:
@@ -382,16 +435,33 @@ def make_dir(path: Path) -> None:
     path.chmod(0o700)
 
 
-def read_field(env: Env, args: Args, name: str) -> str:
-    item = f"github-app-{args.app}"
+def unreadable(args: Args, name: str) -> GhAppError:
+    return GhAppError(f"cannot read {name} from {args.vault}/github-app-{args.app}")
+
+
+def read_field(store: Reader, args: Args, name: str) -> str:
     try:
-        value = env.store().read(f"op://{args.vault}/{item}/{name}")
+        value = store.read(f"op://{args.vault}/github-app-{args.app}/{name}")
     except secrets.SecretsError:
         value = ""
     if not value.strip():
-        message = f"cannot read {name} from {args.vault}/{item}"
-        raise GhAppError(message)
+        raise unreadable(args, name)
     return value
+
+
+def read_fields(env: Env, args: Args) -> tuple[str, str]:
+    """The App's id and its PEM key, both read through one store."""
+    try:
+        store = env.store()
+    except secrets.SecretsError:
+        raise unreadable(args, "app_id") from None
+    app_id = read_field(store, args, "app_id").strip()
+    return app_id, rebuild_pem(read_field(store, args, "private_key"))
+
+
+def is_rsa(text: bytes) -> bool:
+    """Whether TEXT, from `openssl pkey -noout -text`, describes an RSA key."""
+    return RSA_HEADER.match(text) is not None and RSA_MODULUS.search(text) is not None
 
 
 def sign(env: Env, app_id: str, key: str) -> str:
@@ -400,8 +470,12 @@ def sign(env: Env, app_id: str, key: str) -> str:
         # mkstemp creates the file 0600, before anything is written to it.
         handle, keyfile = tempfile.mkstemp(dir=directory)
         fill(handle, key)
-        if env.openssl(["pkey", "-in", keyfile, "-noout"]).returncode:
+        described = env.openssl(["pkey", "-in", keyfile, "-noout", "-text"])
+        if described.returncode:
             message = "private_key does not parse"
+            raise GhAppError(message)
+        if not is_rsa(described.stdout):
+            message = "the app private key is not an RSA key"
             raise GhAppError(message)
         data = signing_input(app_id, env.now())
         done = env.openssl(["dgst", "-sha256", "-sign", keyfile], data)
@@ -412,11 +486,25 @@ def sign(env: Env, app_id: str, key: str) -> str:
 
 
 def find_installation(client: httpx.Client, repo: str) -> int | None:
-    """The installation of the repository, or else of its owner."""
+    """The installation of the repository, or else of its owner.
+
+    Only a 404 moves on to the owner.
+
+    Raises:
+        GhAppError: GitHub answered a lookup with anything else but an id.
+    """
     for path in lookup_paths(repo):
-        ident = installation_id(client.get(path))
-        if ident is not None:
-            return ident
+        response = client.get(path)
+        if response.status_code == httpx.codes.NOT_FOUND:
+            continue
+        ident = installation_id(response)
+        if ident is None:
+            message = (
+                f"the installation lookup failed with status {response.status_code}: "
+                f"{detail(json_object(response))}"
+            )
+            raise GhAppError(message)
+        return ident
     return None
 
 
@@ -457,12 +545,9 @@ def store_token(args: Args, out: Path, minted: Minted) -> None:
 
 
 def mint(args: Args, env: Env) -> int:
-    out = out_dir(env.state, args.app, args.repo, all_repos=args.all_repos)
+    out = out_dir(env.state, args)
     now = env.now()
-    until = cooldown_until(read_text(cooldown_path(env.state, args.app)), now)
-    if until is not None:
-        sys.stderr.write(f"{cooldown_message(until)}\n")
-        return EXIT_COOLDOWN
+    # Reuse calls neither GitHub nor the vault, so a cooldown doesn't stop it.
     if (
         not args.dry_run
         and (out / HOSTS_FILE).is_file()
@@ -470,8 +555,11 @@ def mint(args: Args, env: Env) -> int:
     ):
         sys.stdout.write(f"{out}\n")
         return 0
-    app_id = read_field(env, args, "app_id").strip()
-    key = rebuild_pem(read_field(env, args, "private_key"))
+    until = cooldown_until(read_text(cooldown_path(env.state, args.app)), now)
+    if until is not None:
+        sys.stderr.write(f"{cooldown_message(until)}\n")
+        return EXIT_COOLDOWN
+    app_id, key = read_fields(env, args)
     jwt = sign(env, app_id, key)
     if args.dry_run:
         sys.stdout.write(
@@ -526,5 +614,6 @@ def main(argv: list[str], prog: str, *, env: Env | None = None) -> int:
     except OSError as exc:
         # An exception raised while writing state holds a path and a reason,
         # never a value.
-        sys.stderr.write(f"cannot write {exc.filename}: {exc.strerror}\n")
+        where = "" if exc.filename is None else f"cannot write {exc.filename}: "
+        sys.stderr.write(f"{where}{exc.strerror}\n")
         return EXIT_FAILURE

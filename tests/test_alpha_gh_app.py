@@ -2,8 +2,12 @@
 # Copyright Tony Burns
 """Tests for tbhbdev alpha gh-app, with fakes for the clock, Connect and GitHub."""
 
+# cspell:words EROFS RDONLY paramgen
+
 import base64
+import errno
 import json
+import os
 import re
 import stat
 import subprocess
@@ -60,6 +64,16 @@ def rsa(tmp_path_factory: pytest.TempPathFactory) -> Key:
         check=True,
     )
     return Key(private, public)
+
+
+@pytest.fixture(scope="module")
+def ec_key(tmp_path_factory: pytest.TempPathFactory) -> Key:
+    """A real EC key, which openssl parses and the App can't use."""
+    directory = tmp_path_factory.mktemp("ec")
+    private = directory / "private.pem"
+    genpkey = ["openssl", "genpkey", "-algorithm", "EC", "-out", str(private)]
+    subprocess.run([*genpkey, "-pkeyopt", "ec_paramgen_curve:P-256"], check=True)
+    return Key(private, directory / "unused.pem")
 
 
 @pytest.fixture(autouse=True)
@@ -154,8 +168,8 @@ def run(
     return code, out, err
 
 
-def out_path(tmp_path: Path, *parts: str) -> Path:
-    return tmp_path.joinpath("state", "bot", "acme", *parts)
+def out_path(tmp_path: Path, *parts: str, vault: str = "tbhb-dev") -> Path:
+    return tmp_path.joinpath("state", vault, "bot", "acme", *parts)
 
 
 def mode(path: Path) -> int:
@@ -201,7 +215,8 @@ def test_a_good_app_parses(app: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "repo", ["acme", "a/b/c", "../r", "o/..", "o/r r", "o/r;x", "/r", "o/", ""]
+    "repo",
+    ["acme", "a/b/c", "../r", "o/..", "./r", "o/.", "o/r r", "o/r;x", "/r", "o/", ""],
 )
 def test_a_bad_repo_is_a_usage_error(repo: str) -> None:
     with pytest.raises(gh_app.UsageError, match="OWNER/REPO"):
@@ -210,6 +225,24 @@ def test_a_bad_repo_is_a_usage_error(repo: str) -> None:
 
 def test_dots_are_fine_inside_a_repo_name() -> None:
     assert gh_app.parse_args(["bot", "a.b/c..d"]).repo == "a.b/c..d"
+    assert gh_app.parse_args(["bot", ".a/b."]).repo == ".a/b."
+
+
+@pytest.mark.parametrize("vault", ["", ".", "..", "a/b", "../x", "/", "a\0b"])
+def test_a_vault_that_cannot_be_one_path_component_is_a_usage_error(
+    vault: str,
+) -> None:
+    assert not gh_app.valid_vault(vault)
+    with pytest.raises(gh_app.UsageError, match="cannot be a directory name"):
+        gh_app.parse_args(["bot", REPO, "--vault", vault])
+    with pytest.raises(gh_app.UsageError, match="cannot be a directory name"):
+        gh_app.parse_args(["bot", "--cooldown-status", "--vault", vault])
+
+
+@pytest.mark.parametrize("vault", ["tbhb-dev", "My Vault", "a.b", "..a", "a..", "+"])
+def test_any_other_vault_is_one_path_component(vault: str) -> None:
+    assert gh_app.valid_vault(vault)
+    assert gh_app.parse_args(["bot", REPO, "--vault", vault]).vault == vault
 
 
 @pytest.mark.parametrize(
@@ -272,11 +305,15 @@ def test_state_root() -> None:
 
 def test_layout() -> None:
     state = Path("/s")
-    assert gh_app.out_dir(state, "bot", "o/r", all_repos=False) == Path("/s/bot/o/r")
-    assert gh_app.out_dir(state, "bot", "o/r", all_repos=True) == Path(
-        "/s/bot/o/_all-repos"
+    args = replace(BASE, repo="o/r")
+    assert gh_app.out_dir(state, args) == Path("/s/tbhb-dev/bot/o/r")
+    assert gh_app.out_dir(state, replace(args, all_repos=True)) == Path(
+        "/s/tbhb-dev/bot/o/+all"
     )
+    assert gh_app.out_dir(state, replace(args, vault="v")) == Path("/s/v/bot/o/r")
     assert gh_app.cooldown_path(state, "bot") == Path("/s/cooldown/bot")
+    # GitHub can't name a repository `+all`, so it never shares a directory.
+    assert not gh_app.REPO_PATTERN.fullmatch("o/+all")
 
 
 @pytest.mark.parametrize(
@@ -368,8 +405,8 @@ def test_the_owner_is_what_precedes_the_first_slash() -> None:
     assert gh_app.split_repo("a/b/c") == ("a", "b/c")
     assert gh_app.lookup_paths("a/b/c")[1] == "/orgs/a/installation"
     assert gh_app.token_body("a/b/c", all_repos=False) == {"repositories": ["b/c"]}
-    assert gh_app.out_dir(Path("/s"), "bot", "a/b", all_repos=False) == Path(
-        "/s/bot/a/b"
+    assert gh_app.out_dir(Path("/s"), replace(BASE, repo="a/b")) == Path(
+        "/s/tbhb-dev/bot/a/b"
     )
 
 
@@ -379,6 +416,9 @@ def test_the_owner_is_what_precedes_the_first_slash() -> None:
         (["Bad_App", REPO], "app 'Bad_App' must match [a-z0-9][a-z0-9-]*[a-z0-9]"),
         (["bot", "nope"], "repository 'nope' must be OWNER/REPO"),
         (["bot", "o/.."], "repository 'o/..' must be OWNER/REPO"),
+        (["bot", "./r"], "repository './r' must be OWNER/REPO"),
+        (["bot", "o/.", "--vault", "v"], "repository 'o/.' must be OWNER/REPO"),
+        (["bot", REPO, "--vault", ".."], "vault '..' cannot be a directory name"),
         (["bot"], "OWNER/REPO is required"),
         (
             ["bot", "--cooldown-until", "x"],
@@ -467,6 +507,45 @@ def test_parse_token_quotes_only_the_message_from_github(
     with pytest.raises(gh_app.GhAppError) as caught:
         gh_app.parse_token(payload)
     assert str(caught.value) == f"GitHub did not return a token: {detail}"
+
+
+@pytest.mark.parametrize(
+    ("payload", "text"),
+    [
+        ({"message": "Bad credentials"}, "Bad credentials"),
+        ({"message": ""}, "no message"),
+        ({"message": 5}, "no message"),
+        ({}, "no message"),
+    ],
+)
+def test_detail(payload: gh_app.Json, text: str) -> None:
+    assert gh_app.detail(payload) == text
+
+
+RSA_TEXT = (
+    b"Private-Key: (2048 bit, 2 primes)\nmodulus:\n    00:aa\npublicExponent: 65537\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "rsa_key"),
+    [
+        (RSA_TEXT, True),
+        (b"RSA " + RSA_TEXT, True),
+        (b"Private-Key: (256 bit)\npriv:\n    01\nmodulus:\n", True),
+        (b"Private-Key: (256 bit)\npriv:\n    01\npub:\n    04\n", False),
+        (b"Private-Key: (2048 bit)\nP:\n    01\nGenerator: 2\n", False),
+        (b"Public-Key: (2048 bit)\nmodulus:\n    00\n", False),
+        (b"x\n" + RSA_TEXT, False),
+        (b" " + RSA_TEXT, False),
+        (b"Private-Key: (256 bit)\npriv:\n  modulus:\n", False),
+        (b"Private-Key: (256 bit)\nthe modulus:\n", False),
+        (b"Private-Key:(2048 bit)\nmodulus:\n", False),
+        (b"", False),
+    ],
+)
+def test_is_rsa(text: bytes, rsa_key: bool) -> None:
+    assert gh_app.is_rsa(text) is rsa_key
 
 
 def test_render_hosts() -> None:
@@ -708,7 +787,7 @@ def test_the_key_never_reaches_argv_and_its_file_is_private_and_gone(
     env = env_for(tmp_path, app_store(rsa.pem), Github(), openssl=spy)
     assert run(capsys, env, "bot", REPO)[0] == 0
     assert [argv[:2] for argv, _ in calls] == [["pkey", "-in"], ["dgst", "-sha256"]]
-    assert calls[0][0][3:] == ["-noout"]
+    assert calls[0][0][3:] == ["-noout", "-text"]
     assert calls[1][0][2] == "-sign"
     assert len({k.parent for k in keyfiles}) == 1
     assert not keyfiles[0].parent.exists()
@@ -746,7 +825,7 @@ def test_a_failed_signature_is_an_error(
         argv: list[str], _data: bytes | None = None
     ) -> subprocess.CompletedProcess[bytes]:
         if argv[0] == "pkey":
-            return subprocess.CompletedProcess(argv, 0, b"", b"")
+            return subprocess.CompletedProcess(argv, 0, RSA_TEXT, b"")
         return subprocess.CompletedProcess(argv, returncode, stdout, b"")
 
     github = Github()
@@ -764,6 +843,52 @@ def test_openssl_missing_is_an_error(
     monkeypatch.setenv("PATH", str(tmp_path))
     env = env_for(tmp_path, app_store(rsa.pem), Github())
     assert run(capsys, env, "bot", REPO) == (1, "", "openssl isn't installed\n")
+
+
+def test_an_ec_key_is_refused_before_any_signature_or_request(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, ec_key: Key
+) -> None:
+    assert ec_key.pem.startswith("-----BEGIN " + "PRIVATE KEY-----")
+    calls: list[str] = []
+
+    def spy(
+        argv: list[str], data: bytes | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append(argv[0])
+        return gh_app.run_openssl(argv, data)
+
+    github = Github()
+    env = env_for(tmp_path, app_store(ec_key.pem), github, openssl=spy)
+    code, out, err = run(capsys, env, "bot", REPO)
+    assert (code, out, err) == (1, "", "the app private key is not an RSA key\n")
+    assert calls == ["pkey"]
+    assert github.requests == []
+    assert ec_key.body[:30] not in err
+    assert not out_path(tmp_path).exists()
+    dry = run(capsys, env, "bot", REPO, "--dry-run")
+    assert dry == (1, "", "the app private key is not an RSA key\n")
+
+
+def test_one_store_serves_both_fields_of_a_mint(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, rsa: Key
+) -> None:
+    store = app_store(rsa.pem)
+    assert run(capsys, env_for(tmp_path, store, Github()), "bot", REPO)[0] == 0
+    assert store.created == 1
+    assert len(store.reads) == 2
+
+
+def test_a_store_that_cannot_be_built_is_an_unreadable_field(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    def broken() -> Store:
+        message = "no token"
+        raise secrets.SecretsError(message)
+
+    env = replace(env_for(tmp_path, app_store("k"), Github()), store=broken)
+    code, out, err = run(capsys, env, "bot", REPO)
+    assert (code, out) == (1, "")
+    assert err == "cannot read app_id from tbhb-dev/github-app-bot\n"
 
 
 @pytest.mark.parametrize("missing", ["app_id", "private_key"])
@@ -801,6 +926,24 @@ def test_the_vault_can_be_overridden(
     assert (code, err) == (1, "cannot read app_id from tbhb-dev/github-app-bot\n")
 
 
+def test_two_vaults_never_share_a_token(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, rsa: Key
+) -> None:
+    store = app_store(rsa.pem, vault="a")
+    store.values.update(app_store(rsa.pem, vault="b").values)
+    github = Github()
+    env = env_for(tmp_path, store, github)
+    code_a, out_a, _ = run(capsys, env, "bot", REPO, "--vault", "a")
+    assert (code_a, out_a) == (0, f"{out_path(tmp_path, 'widget', vault='a')}\n")
+    assert len(github.requests) == 2
+    # A cached token under `a` is no answer for `b`.
+    code_b, out_b, _ = run(capsys, env, "bot", REPO, "--vault", "b")
+    assert (code_b, out_b) == (0, f"{out_path(tmp_path, 'widget', vault='b')}\n")
+    assert len(github.requests) == 4
+    assert run(capsys, env, "bot", REPO, "--vault", "a")[1] == out_a
+    assert len(github.requests) == 4
+
+
 def test_the_installation_falls_back_from_the_repo_to_the_org(
     capsys: pytest.CaptureFixture[str], tmp_path: Path, rsa: Key
 ) -> None:
@@ -817,6 +960,74 @@ def test_the_installation_falls_back_from_the_repo_to_the_org(
         ("GET", "/orgs/acme/installation"),
         ("POST", "/app/installations/9/access_tokens"),
     ]
+
+
+def lookup_routes(
+    repo: httpx.Response, org: httpx.Response | None = None
+) -> dict[tuple[str, str], httpx.Response]:
+    routes = {("GET", f"/repos/{REPO}/installation"): repo}
+    if org is not None:
+        routes[("GET", "/orgs/acme/installation")] = org
+    return routes
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (
+            httpx.Response(401, json={"message": "Bad credentials", "x": TOKEN}),
+            "401: Bad credentials",
+        ),
+        (httpx.Response(403, json={"message": "Rate limited"}), "403: Rate limited"),
+        (
+            httpx.Response(301, json={"message": "Moved Permanently"}),
+            "301: Moved Permanently",
+        ),
+        (httpx.Response(500, content=b"<html>oops"), "500: no message"),
+        (httpx.Response(429, json={"message": ""}), "429: no message"),
+        (httpx.Response(200, json={"id": "7"}), "200: no message"),
+        (httpx.Response(200, content=b"junk"), "200: no message"),
+    ],
+)
+@pytest.mark.parametrize("where", ["repo", "org"])
+def test_any_lookup_failure_but_a_404_is_an_error(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    rsa: Key,
+    case: tuple[httpx.Response, str],
+    where: str,
+) -> None:
+    reply, expected = case
+    routes = (
+        lookup_routes(reply)
+        if where == "repo"
+        else lookup_routes(httpx.Response(404, json={"message": "Not Found"}), reply)
+    )
+    github = Github(routes)
+    code, out, err = run(
+        capsys, env_for(tmp_path, app_store(rsa.pem), github), "bot", REPO
+    )
+    assert (code, out) == (1, "")
+    assert err == f"the installation lookup failed with status {expected}\n"
+    assert [r.method for r in github.requests] == ["GET"] * (
+        1 if where == "repo" else 2
+    )
+    assert not out_path(tmp_path).exists()
+    assert TOKEN not in err
+
+
+def test_a_404_on_the_repo_falls_through_to_the_org(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, rsa: Key
+) -> None:
+    routes = lookup_routes(
+        httpx.Response(404, json={"message": "Not Found"}),
+        httpx.Response(200, json={"id": 9}),
+    )
+    routes.update({k: v for k, v in ok_routes(9).items() if k[0] == "POST"})
+    code, _, _ = run(
+        capsys, env_for(tmp_path, app_store(rsa.pem), Github(routes)), "bot", REPO
+    )
+    assert code == 0
 
 
 def test_no_installation_is_an_error(
@@ -844,9 +1055,9 @@ def test_all_repos_asks_for_every_repo_and_uses_its_own_dir(
         "--all-repos",
     )
     assert code == 0
-    assert out == f"{out_path(tmp_path, '_all-repos')}\n"
+    assert out == f"{out_path(tmp_path, '+all')}\n"
     assert json.loads(github.requests[-1].content) == {}
-    assert (out_path(tmp_path, "_all-repos") / "hosts.yml").is_file()
+    assert (out_path(tmp_path, "+all") / "hosts.yml").is_file()
     assert not out_path(tmp_path, "widget").exists()
 
 
@@ -1036,6 +1247,81 @@ def test_the_state_file_is_replaced_atomically(
     assert replaced[0][2] == "github.com:"
 
 
+def test_each_file_is_synced_before_and_its_directory_after_the_rename(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    rsa: Key,
+) -> None:
+    out_dir = seed(tmp_path, b"0")
+    events: list[str] = []
+    synced: list[int] = []
+    real_fsync, real_replace = os.fsync, Path.replace
+
+    def fsync(descriptor: int) -> None:
+        kind = "dir" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+        events.append(f"fsync {kind}")
+        synced.append(descriptor)
+        real_fsync(descriptor)
+
+    def replace(self: Path, target: Path) -> Path:
+        events.append(f"replace {Path(target).name}")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(Path, "replace", replace)
+    env = env_for(tmp_path, app_store(rsa.pem), Github())
+    assert run(capsys, env, "bot", REPO)[0] == 0
+    # The first sync is the key file's, which no rename follows.
+    writes = events[events.index("replace hosts.yml") - 1 :]
+    assert writes == [
+        "fsync file",
+        "replace hosts.yml",
+        "fsync dir",
+        "fsync file",
+        "replace app-slug",
+        "fsync dir",
+        "fsync file",
+        "replace expires-at",
+        "fsync dir",
+    ]
+    assert (out_dir / "expires-at").read_text() == f"{EXPIRES_EPOCH}\n"
+    for descriptor in synced:
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(descriptor)
+
+
+def test_a_directory_sync_failure_still_closes_the_directory(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    opened: list[int] = []
+    real_open, real_fsync = os.open, os.fsync
+
+    def spy_open(path: Path, flags: int, *rest: int) -> int:
+        descriptor = real_open(path, flags, *rest)
+        if flags == os.O_RDONLY:
+            opened.append(descriptor)
+        return descriptor
+
+    def fsync(descriptor: int) -> None:
+        if descriptor in opened:
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "fsync", fsync)
+    env = env_for(tmp_path, app_store("k"), Github())
+    code, _, err = run(capsys, env, "bot", "--cooldown-until", "5")
+    assert (code, err) == (1, "Input/output error\n")
+    assert len(opened) == 1
+    with pytest.raises(OSError, match="Bad file descriptor"):
+        os.fstat(opened[0])
+    leftovers = [p.name for p in (tmp_path / "state" / "cooldown").iterdir()]
+    assert leftovers == ["bot"]
+
+
 def test_a_failed_write_leaves_the_old_file_and_no_temp_file(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -1057,6 +1343,39 @@ def test_a_failed_write_leaves_the_old_file_and_no_temp_file(
     assert TOKEN not in err
 
 
+def test_the_original_error_survives_a_temp_file_that_is_already_gone(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def vanish(self: Path, target: Path) -> Path:
+        self.unlink()
+        raise OSError(errno.EROFS, "Read-only file system", str(target))
+
+    monkeypatch.setattr(Path, "replace", vanish)
+    env = env_for(tmp_path, app_store("k"), Github())
+    code, _, err = run(capsys, env, "bot", "--cooldown-until", "5")
+    path = tmp_path / "state" / "cooldown" / "bot"
+    assert (code, err) == (1, f"cannot write {path}: Read-only file system\n")
+
+
+def test_an_error_with_no_file_name_prints_its_reason_alone(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fail(_descriptor: int) -> None:
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(os, "fsync", fail)
+    env = env_for(tmp_path, app_store("k"), Github())
+    assert run(capsys, env, "bot", "--cooldown-until", "5") == (
+        1,
+        "",
+        "Input/output error\n",
+    )
+
+
 def test_cooldown_until_writes_one_epoch_atomically(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
@@ -1073,19 +1392,26 @@ def test_cooldown_until_writes_one_epoch_atomically(
     assert (store.created, github.requests) == (0, [])
 
 
-def test_an_active_cooldown_refuses_every_mint_before_any_read(
+def test_a_cooldown_serves_a_cached_token_and_refuses_any_other_mint(
     capsys: pytest.CaptureFixture[str], tmp_path: Path, rsa: Key
 ) -> None:
     store, github = app_store(rsa.pem), Github()
     env = env_for(tmp_path, store, github)
-    seed(tmp_path, f"{NOW + 9999}".encode())
+    out_dir = seed(tmp_path, f"{NOW + 601}".encode())
     run(capsys, env, "bot", "--cooldown-until", str(NOW + 1))
-    extras: list[list[str]] = [[], ["--fresh"], ["--dry-run"], ["--all-repos"]]
-    for extra in extras:
-        code, out, err = run(capsys, env, "bot", REPO, *extra)
-        assert (code, out) == (75, "")
-        assert err == f"cooldown until {gh_app.utc(NOW + 1)}\n"
+    # Reuse calls neither the vault nor GitHub, so the cooldown lets it through.
+    assert run(capsys, env, "bot", REPO) == (0, f"{out_dir}\n", "")
     assert (store.created, store.reads, github.requests) == (0, [], [])
+    # Every other mint, a --fresh one included, stops before any read.
+    refused = f"cooldown until {gh_app.utc(NOW + 1)}\n"
+    extras: list[list[str]] = [["--fresh"], ["--dry-run"], ["--all-repos"]]
+    for extra in extras:
+        assert run(capsys, env, "bot", REPO, *extra) == (75, "", refused)
+    # A cached token with 600 s left or fewer is no answer either.
+    (out_dir / "expires-at").write_text(f"{NOW + 600}\n")
+    assert run(capsys, env, "bot", REPO) == (75, "", refused)
+    assert (store.created, store.reads, github.requests) == (0, [], [])
+    assert (out_dir / "hosts.yml").read_text() == "old\n"
 
 
 def test_a_cooldown_belongs_to_one_app(
