@@ -1182,5 +1182,7 @@ def main(
     if args.command == "backfill-opened":
         return backfill(args.owner)
     if args.command == "ready":
-        return invoke_gh([GH, "pr", "ready", str(args.pr)], "")[0]
+        # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
+        # empty body: no test can tell `None` from `""`.
+        return invoke_gh([GH, "pr", "ready", str(args.pr)], "")[0]  # pragma: no mutate
     return command(args, env)
