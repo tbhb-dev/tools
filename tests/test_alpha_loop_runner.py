@@ -1,6 +1,6 @@
 """Synthetic event sequences and read snapshots; all effects are recording fakes."""
 
-# cspell:words unreviewed
+# cspell:words unreviewed unscored
 
 from __future__ import annotations
 
@@ -18,7 +18,9 @@ from test_alpha_loop_rules import (
     DECLINED,
     HEAD,
     MERGED,
+    PASSED,
     PR,
+    RED,
     REPO,
     RUN,
     SWEEP,
@@ -625,4 +627,73 @@ def test_keyless_decline_is_an_observation_on_each_pass() -> None:
     subject.reconcile(reader, SWEEP, 1)
     subject.reconcile(reader, SWEEP, 2)
     assert [line["rule"] for line in lines(subject)] == ["R0", "R3", "R10", "R3"]
+    db.close()
+
+
+@pytest.mark.parametrize(
+    ("off_rule", "off_pr", "off_key"),
+    [
+        ("R2", PASSED, f"approve:{REPO}#7@{HEAD}"),
+        ("R10", RED, f"notify:{REPO}#7@{HEAD}:ci_red"),
+    ],
+)
+def test_off_rule_filter_preserves_active_intents(
+    off_rule: rules.Rule, off_pr: rules.PullRequest, off_key: str
+) -> None:
+    db = store.Store(":memory:")
+    loaded = replace(
+        settings(),
+        rule_modes=tuple(
+            replace(mode, mode="off") if mode.rule == off_rule else mode
+            for mode in settings().rule_modes
+        ),
+    )
+    subject = make_runner(db, loaded)
+    active_pr = replace(PR, number=8)
+    snapshot = runner.Snapshot(BUDGET, (off_pr, active_pr))
+    baseline = rules.decide(rules.Inputs(BUDGET, snapshot.pull_requests))
+    assert {intent.rule for intent in baseline} == {off_rule, "R1"}
+    item = delivery(off_pr)
+    subject.intake(
+        replace(
+            item,
+            receipt=replace(item.receipt, event=replace(EVENT, pr_numbers=(7, 8))),
+            snapshot=snapshot,
+        )
+    )
+    active_key = f"review:{REPO}#8@{HEAD}"
+    assert db.action(off_key) is None
+    assert db.shadow_intents() == (store.ShadowIntent(active_key, REPO, "R1"),)
+    assert db.action(active_key) == store.Action(
+        active_key, store.ActionState.SHADOW, 10, None, None, None
+    )
+    assert lines(subject) == [
+        {
+            "source": "example-delivery",
+            "state": "green_unreviewed",
+            "rule": "R1",
+            "action_key": active_key,
+            "action_kind": "spawn",
+            "outcome": "shadow",
+        }
+    ]
+    db.close()
+
+
+def test_future_row_is_scored_by_later_sweep_on_same_runner() -> None:
+    db = store.Store(":memory:")
+    subject = make_runner(db)
+    key = f"review:{REPO}#7@{HEAD}"
+    assert db.record_shadow(store.ShadowIntent(key, REPO, "R1"), 20)
+    pending = store.Action(key, store.ActionState.SHADOW, 20, None, None, None)
+    reader = Reader(runner.Snapshot(BUDGET, (APPROVED,)))
+    assert subject.reconcile(reader, SWEEP, 19)
+    assert db.action(key) == pending
+    assert next(c for c in subject.report().counts if c.rule == "R1").unscored == 1
+    assert subject.reconcile(reader, replace(SWEEP, time_slot=13), 25)
+    assert db.action(key) == store.Action(
+        key, store.ActionState.SHADOW, 20, None, 25, store.Result.AGREE
+    )
+    assert next(c for c in subject.report().counts if c.rule == "R1").agree == 1
+    assert reader.calls == [(REPO,), (REPO,)]
     db.close()

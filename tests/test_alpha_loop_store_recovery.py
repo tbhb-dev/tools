@@ -485,3 +485,20 @@ def test_prior_schema_requires_explicit_rebuild(tmp_path: Path, version: int) ->
     assert path.read_bytes() == before
     assert not Path(f"{path}-wal").exists()
     assert not Path(f"{path}-shm").exists()
+
+
+def test_refused_wal_schema_preserves_database_and_sidecars(tmp_path: Path) -> None:
+    path = tmp_path / "example.sqlite3"
+    database = Store(path, mode=OpenMode.CREATE)
+    database.close()
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("PRAGMA journal_mode = WAL").fetchone() == ("wal",)
+        connection.execute("PRAGMA user_version = 2")
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    files = (path, Path(f"{path}-wal"), Path(f"{path}-shm"))
+    before = {file: file.read_bytes() for file in files if file.exists()}
+    with pytest.raises(StoreError) as error:
+        Store(path)
+    assert error.value.code == ErrorCode.SCHEMA_VERSION
+    assert str(error.value) == "schema version 2; rebuild required"
+    assert {file: file.read_bytes() for file in files if file.exists()} == before
