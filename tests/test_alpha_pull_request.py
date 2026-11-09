@@ -2448,6 +2448,7 @@ def test_ready_marks_the_pull_request_ready(world: World) -> None:
     assert run_main("ready", "--pr", "45") == 0
     (call,) = world.calls("gh")
     assert call["argv"] == ["pr", "ready", "45"]
+    assert call["stdin"] == ""
 
 
 def test_ready_passes_gh_output_and_exit_code_through(
@@ -2462,6 +2463,12 @@ def test_ready_passes_gh_output_and_exit_code_through(
 def test_ready_requires_a_pr_number() -> None:
     with pytest.raises(SystemExit) as info:
         run_main("ready")
+    assert info.value.code == 2
+
+
+def test_ready_rejects_a_pr_that_is_not_a_number() -> None:
+    with pytest.raises(SystemExit) as info:
+        run_main("ready", "--pr", "abc")
     assert info.value.code == 2
 
 
