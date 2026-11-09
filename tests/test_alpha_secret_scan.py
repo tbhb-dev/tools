@@ -22,9 +22,7 @@ regex = '''committed-secret-[0-9]{8}'''
 """
 CANARY_HIT = "test-canary-0123456789abcdef"
 COMMITTED_HIT = "committed-secret-12345678"
-FIX = (
-    "Install it with the host's provisioning tooling; operators: see your ops runbook."
-)
+FIX = "Install it with the host's provisioning tooling."
 
 
 @pytest.fixture

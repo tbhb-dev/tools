@@ -28,9 +28,7 @@ from typing import cast
 from tbhbdev.host import CANARY, GITLEAKS_CANARY, GITLEAKS_EXTENDS, GITLEAKS_FILE
 
 # The remedy for a missing private config: the host's provisioning installs it.
-FETCH = (
-    "Install it with the host's provisioning tooling; operators: see your ops runbook."
-)
+FETCH = "Install it with the host's provisioning tooling."
 
 
 def private_config() -> Path:
