@@ -168,6 +168,10 @@ The settings have these constraints:
 
 This slice only validates configuration. Even with valid settings, the command exits with status 1 and reports that the shadow runner isn't available. It doesn't create a store or execute an approval or other action.
 
+### Secret scan
+
+`tbhbdev alpha pr create` and `pr edit` scan the final title and body, trailers included, and `tbhbdev alpha merge` scans the squash message, with `gitleaks stdin --redact` before `gh` runs. The scan uses the host's private config, `.config/gitleaks/private.toml` in the home directory, which `host upgrade` installs and which extends the repository's `.gitleaks.toml`. It fails closed: a missing or unreadable private config, one without the `tbhb-private-canary` rule, a missing `.gitleaks.toml`, a finding or a gitleaks error stops the command. A finding is reported by rule ID and line only. `pr check` and the draft hook don't scan.
+
 ### No self-approval
 
 A session can't approve a pull request that it, or one of its subagents, opened. The rule compares root session hashes, the `session=` value in the trailers, which a subagent shares with its root.
