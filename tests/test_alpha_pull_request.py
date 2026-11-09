@@ -1466,7 +1466,7 @@ def test_create_scans_the_final_title_and_body(
     (call,) = world.calls("gitleaks")
     assert cast("list[str]", call["argv"])[:3] == ["stdin", "--redact", "--no-banner"]
     assert call["cwd"] == str(world.root)
-    (gh,) = world.calls("gh")
+    _, gh = world.calls("gh")
     assert call["stdin"] == f"fix: x\n\n{gh['stdin']}"
     assert str(call["stdin"]).endswith(f"Assisted-by: {POSTING}\n")
 
