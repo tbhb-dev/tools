@@ -178,7 +178,9 @@ def _agy(  # noqa: PLR0913, PLR0917 -- one value per fact agy's argv depends on
     # agy's model once ran commands in a credential directory, so a build's
     # brief starts by naming the worktree.
     text = (
-        brief if review else f"{_AGY_BUILD_NOTE.format(worktree=worktree)}\n\n{brief}"
+        f"\n{brief}"
+        if review
+        else f"{_AGY_BUILD_NOTE.format(worktree=worktree)}\n\n{brief}"
     )
     return (*argv, "--print-timeout", f"{request.timeout}s", "--print", text)
 

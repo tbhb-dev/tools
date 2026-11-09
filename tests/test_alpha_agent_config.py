@@ -209,6 +209,30 @@ def test_input_is_not_modified() -> None:
     assert table == GOOD
 
 
+@pytest.mark.parametrize("key", ["write_roots", "denied_home_paths"])
+@pytest.mark.parametrize(
+    "path", ["/", "/etc", ".", "./", "././", "~", "~/x", "~user/x"]
+)
+def test_sandbox_home_paths_stay_below_home(key: str, path: str) -> None:
+    table = edited("sandbox", key, value=["safe", path])
+    assert refused(table) == (
+        f"[agent.sandbox] {key} must be paths below home without a leading '/' or '~'"
+    )
+
+
+@pytest.mark.parametrize("key", ["write_roots", "denied_home_paths"])
+@pytest.mark.parametrize("path", ["x", "./x", ".hidden", "x~", "x/y"])
+def test_sandbox_home_paths_keep_relative_entries(key: str, path: str) -> None:
+    parsed = config.parse(edited("sandbox", key, value=[path]))
+    assert getattr(parsed.sandbox, key) == (path,)
+
+
+@pytest.mark.parametrize("os", ["linux", "macos"])
+def test_search_path_still_accepts_absolute_entries(os: str) -> None:
+    parsed = config.parse(edited("sandbox", "path", os, value=["/usr/bin"]))
+    assert getattr(parsed.sandbox.path, os) == ("/usr/bin",)
+
+
 def test_result_is_frozen() -> None:
     assert hash(config.parse(GOOD)) == hash(EXPECTED)
 

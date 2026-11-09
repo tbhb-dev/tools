@@ -373,6 +373,7 @@ def agy_expected(profile: Profile, account: str) -> tuple[str, ...]:
         *handoff,
         f"write_file({worktree})",
         f"write_file({worktree}/.git)",
+        f"write_file({tmp})",
         f"write_file({home}/.local/state/mise)",
         f"write_file({home}/.local/share/mise)",
     )
@@ -384,6 +385,57 @@ def agy_expected(profile: Profile, account: str) -> tuple[str, ...]:
 def test_agy_grants(os: Os, profile: Profile, account: str) -> None:
     result = made(os, profile, Harness.AGY, account)
     assert result.detail == model.AgyPolicy(agy_expected(profile, account))
+
+
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize("profile", Profile)
+def test_write_roots_keep_the_first_occurrence(os: Os, profile: Profile) -> None:
+    run = paths("agent")
+    sandbox = dataclasses.replace(
+        SANDBOX,
+        write_roots=(
+            ".local/state/example-runs/run1.tmp",
+            ".cache",
+            "Code/example.com/example-org/example-repo",
+            ".cache",
+        ),
+    )
+    result = policy.build(
+        settings(sandbox=sandbox),
+        HOSTS[os],
+        harness=Harness.CODEX,
+        profile=profile,
+        account="agent",
+        unsandboxed=False,
+        paths=dataclasses.replace(run, audit_dir=run.tmpdir),
+    )
+    assert isinstance(result.detail, model.CodexPolicy)
+    assert result.detail.write_roots == (
+        (run.worktree, run.tmpdir, f"{run.home}/.cache")
+        if profile is Profile.BUILD
+        else (run.tmpdir,)
+    )
+
+
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize("profile", Profile)
+def test_denied_paths_keep_the_first_occurrence(os: Os, profile: Profile) -> None:
+    sandbox = dataclasses.replace(
+        SANDBOX, denied_home_paths=(DENIED, TOKEN_DIR, DENIED)
+    )
+    config = dataclasses.replace(
+        settings(sandbox=sandbox), sockets_dir=f"/example/home/agent/{DENIED}"
+    )
+    result = made(os, profile, Harness.CODEX, "agent", config=config)
+    home = "/example/home/agent"
+    expected = (
+        (f"{home}/{TOKEN_DIR}", f"{home}/{DENIED}")
+        if os is Os.LINUX
+        else (f"{home}/{DENIED}", f"{home}/{TOKEN_DIR}")
+    )
+    assert result.deny == expected
+    assert isinstance(result.detail, model.CodexPolicy)
+    assert result.detail.deny == expected
 
 
 @pytest.mark.parametrize(

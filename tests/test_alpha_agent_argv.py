@@ -214,7 +214,7 @@ def expected(harness: Harness, kind: RunKind, profile: Profile) -> tuple[str, ..
     if not headless:
         return (*head, "--prompt-interactive", POINTER)
     note = f"Run shell commands in {WORKTREE} unless the task names another directory."
-    text = BRIEF if review else f"{note}\n\n{BRIEF}"
+    text = f"\n{BRIEF}" if review else f"{note}\n\n{BRIEF}"
     return (*head, "--print-timeout", "900s", "--print", text)
 
 
@@ -325,6 +325,53 @@ def test_the_brief_is_one_argument_after_print() -> None:
         assert result[-2] == "--print"
         assert BRIEF in result[-1]
         assert sum(BRIEF in a for a in result) == 1
+
+
+@pytest.mark.parametrize("brief", ["- item", "--- front matter", "--project", ""])
+@pytest.mark.parametrize("profile", Profile)
+def test_agy_brief_cannot_be_a_flag(brief: str, profile: Profile) -> None:
+    result = argv.harness(
+        request(Harness.AGY, RunKind.EXEC, profile),
+        policy_for(Harness.AGY, profile),
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+        agy_project=PROJECT,
+        agy_brief=brief,
+    )
+    note = f"Run shell commands in {WORKTREE} unless the task names another directory."
+    assert result[-2:] == (
+        "--print",
+        f"\n{brief}" if profile is Profile.REVIEW else f"{note}\n\n{brief}",
+    )
+
+
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize("profile", Profile)
+def test_codex_tables_have_no_repeated_paths(os: Os, profile: Profile) -> None:
+    original = settings()
+    sandbox = dataclasses.replace(
+        original.sandbox,
+        denied_home_paths=(DENIED, TOKEN_DIR, DENIED),
+        write_roots=(".local/state/example-runs/run1.tmp", ".cache", ".cache"),
+    )
+    config = dataclasses.replace(
+        original, sandbox=sandbox, sockets_dir=f"{HOME}/{DENIED}"
+    )
+    result = built(Harness.CODEX, RunKind.EXEC, profile, os=os, config=config)
+    flag = f"permissions.{profile.value}="
+    value = next(a for a in result if a.startswith(flag)).removeprefix(flag)
+    fs = tomllib.loads(f"profile = {value}")["profile"]["filesystem"]
+    deny = (
+        [f"{HOME}/{TOKEN_DIR}", f"{HOME}/{DENIED}"]
+        if os is Os.LINUX
+        else [f"{HOME}/{DENIED}", f"{HOME}/{TOKEN_DIR}"]
+    )
+    assert [p for p, mode in fs.items() if mode == "none"] == deny
+    assert [p for p, mode in fs.items() if mode == "write"] == (
+        [WORKTREE, TMP, f"{HOME}/.cache"]
+        if profile is Profile.BUILD
+        else [TMP, f"{HOME}/.local/state/example-audit"]
+    )
 
 
 def test_agy_timeout_is_whole_seconds() -> None:

@@ -87,7 +87,9 @@ def denied_paths(settings: Settings, host: Host, home: str) -> tuple[str, ...]:
     # resolves, so no macOS output denies the Connect token store yet.
     paths.append(resolve(home, settings.sockets_dir))
     paths.extend(resolve(home, p) for p in settings.sandbox.denied_home_paths)
-    return tuple(alias for path in paths for alias in _with_aliases(host.os, path))
+    return tuple(
+        dict.fromkeys(alias for path in paths for alias in _with_aliases(host.os, path))
+    )
 
 
 def environment(
@@ -117,9 +119,9 @@ def _write_roots(
     settings: Settings, profile: Profile, paths: RunPaths
 ) -> tuple[str, ...]:
     if profile is Profile.REVIEW:
-        return (paths.tmpdir, paths.audit_dir)
+        return tuple(dict.fromkeys((paths.tmpdir, paths.audit_dir)))
     roots = (resolve(paths.home, r) for r in settings.sandbox.write_roots)
-    return (paths.worktree, paths.tmpdir, *roots)
+    return tuple(dict.fromkeys((paths.worktree, paths.tmpdir, *roots)))
 
 
 def _codex(
@@ -192,12 +194,14 @@ def _agy(
     home = paths.home
     if profile is Profile.REVIEW:
         reads = [resolve(home, p) for p in agy.review_read]
+        # Reviews only produce audit output, so they need no TMPDIR write grant.
         writes = [paths.audit_dir]
     else:
         reads = [resolve(home, p) for p in agy.build_read]
         writes = [
             paths.worktree,
             resolve(paths.worktree, ".git"),
+            paths.tmpdir,
             *(resolve(home, p) for p in agy.build_write),
         ]
     reads += [env["GH_CONFIG_DIR"], env["DOCKER_CONFIG"]]
