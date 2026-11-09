@@ -17,7 +17,7 @@ from typing import cast
 from unittest.mock import patch
 
 import pytest
-from fake_tool import link_git, pythonpath, write_fake
+from fake_tool import link_git, pythonpath, write_fake, write_private_config
 from hypothesis import given
 from hypothesis import strategies as st
 from jsonschema import Draft202012Validator
@@ -57,7 +57,11 @@ name = os.path.basename(__file__).removesuffix(".py")
 spec = json.load(open(os.path.join(here, name + ".spec")))
 called = " ".join(sys.argv[1:])
 cases = spec.get("cases", {{}})
-spec = next((v for k, v in cases.items() if called.startswith(k)), spec)
+if called == "pr view --json number,state,url":
+    missing = {{"rc": 1, "stdout": "", "stderr": "No Pull Requests Found"}}
+    spec = cases.get(called, missing)
+else:
+    spec = next((v for k, v in cases.items() if called.startswith(k)), spec)
 draft = ".github/PULL_REQUEST_DRAFT.md"
 record = {{
     "argv": sys.argv[1:],
@@ -67,12 +71,39 @@ record = {{
     "draft": open(draft).read() if os.path.exists(draft) else None,
     "links": {{n: os.readlink(n) for n in os.listdir(".") if os.path.islink(n)}},
 }}
-with open(os.path.join(here, name + ".log"), "a") as log:
+# The visibility read has its own log, so it never shifts the other gh calls.
+repo = ".repo" if called.startswith("repo view") else ""
+with open(os.path.join(here, name + repo + ".log"), "a") as log:
     log.write(json.dumps(record) + "\\n")
 sys.stdout.write(spec["stdout"])
 sys.stderr.write(spec["stderr"])
 sys.exit(spec["rc"])
 """
+
+
+TARGET = "tbhb-dev/public-target"
+
+
+def pr_page(repo: str, number: int = 7) -> str:
+    return f"https://github.com/{repo}/pull/{number}"
+
+
+def view_case(url: object, body: object = "") -> dict[str, object]:
+    """The fake gh answer to ``gh pr view N --json body,url``; no ``url`` omits it."""
+    data: dict[str, object] = {"body": body}
+    if url is not None:
+        data["url"] = url
+    return {"rc": 0, "stdout": json.dumps(data), "stderr": ""}
+
+
+def base_case(name: object, visibility: object, rc: int = 0) -> dict[str, object]:
+    """The fake gh answer to ``gh repo view --json nameWithOwner,visibility``."""
+    data = {"nameWithOwner": name, "visibility": visibility}
+    return {
+        "rc": rc,
+        "stdout": json.dumps(data) if rc == 0 else "",
+        "stderr": "boom" if rc else "",
+    }
 
 
 @dataclass
@@ -135,6 +166,8 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     shutil.copy(REAL / pr.SECTIONS, root / pr.SECTIONS)
     for name in pr.CONFIGS:
         (root / name).write_text("")
+    (root / ".gitleaks.toml").write_text("")
+    write_private_config(tmp_path)
     # The script runs inside the repository whose branch it posts.
     monkeypatch.chdir(root)
     made = World(root, tools_dir)
@@ -146,10 +179,15 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     made.fake("vale", stdout="{}")
     made.fake("cspell")
     made.fake("rumdl")
+    made.fake("gitleaks", stdout="[]")
     made.fake(
         "gh",
         stdout="https://github.com/tbhb-dev/ascm/pull/1\n",
-        cases={"pr view": {"rc": 0, "stdout": '{"body": ""}', "stderr": ""}},
+        cases={
+            "pr view": view_case(pr_page(TARGET)),
+            f"repo view {TARGET}": {"rc": 0, "stdout": "PUBLIC\\n", "stderr": ""},
+            "repo view --json": base_case(TARGET, "PUBLIC"),
+        },
     )
     return made
 
@@ -838,6 +876,117 @@ def test_lint_needs_every_tool_and_config(world: World) -> None:
         lint_checked(world, BASE)
 
 
+VALE_INI = """StylesPath = .vale
+Packages = https://example.com/Google.zip, \\
+  https://example.com/write-good.zip
+
+[*.md]
+BasedOnStyles = Vale, Google,  write-good, project
+
+[tmp/**]
+BasedOnStyles =
+
+[*.txt]
+BasedOnStyles = Google, extra
+"""
+
+
+def styled(world: World, *present: str) -> None:
+    """A .vale.ini naming four styles, with only ``present`` synced."""
+    (world.root / ".vale.ini").write_text(VALE_INI)
+    (world.root / ".vale").unlink()
+    for name in present:
+        (world.root / ".vale" / name).mkdir(parents=True)
+
+
+SYNCED = '("Google", "write-good", "extra")'
+SYNCS = """import os, sys
+open(os.path.join(os.path.dirname(__file__), "bazelisk.log"), "a").write(
+    " ".join(sys.argv[1:]) + "|" + os.getcwd() + "\\n"
+)
+for name in SYNCED:
+    os.makedirs(os.path.join(".vale", name), exist_ok=True)
+"""
+
+
+def test_vale_styles_names_each_style_once(world: World) -> None:
+    styled(world)
+    assert pr.vale_styles(world.root) == ["Google", "extra", "project", "write-good"]
+
+
+def test_vale_styles_split_at_the_first_equals(world: World) -> None:
+    # Vale's ini parser splits a key from its value at the first "=".
+    (world.root / ".vale.ini").write_text("BasedOnStyles = odd=name\n")
+    assert pr.vale_styles(world.root) == ["odd=name"]
+
+
+def test_synced_styles_need_no_sync(world: World) -> None:
+    styled(world, "Google", "extra", "project", "write-good")
+    assert lint_checked(world, BASE) == []
+    assert not (world.bin / "bazelisk.log").exists()
+    assert len(world.calls("vale")) == 1
+
+
+def test_missing_styles_sync_once_then_lint(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    styled(world, "project")
+    write_fake(world.bin / "bazelisk", SYNCS.replace("SYNCED", SYNCED))
+    (world.root / "sub").mkdir()
+    monkeypatch.chdir(world.root / "sub")  # the sync runs at the top, not here
+    assert lint_checked(world, BASE) == []
+    log = (world.bin / "bazelisk.log").read_text().splitlines()
+    assert log == [f"run //:vale_sync|{world.root.resolve()}"]
+    assert len(world.calls("vale")) == 1
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "why"),
+    [("out", "no  such target", "no such target"), ("out  text", "", "out text")],
+)
+def test_failed_sync_is_one_problem(
+    world: World, stdout: str, stderr: str, why: str
+) -> None:
+    styled(world, "project", "extra")
+    world.fake("bazelisk", rc=3, stdout=stdout, stderr=stderr)
+    found = lint_checked(world, BASE)
+    assert found == [
+        (
+            1,
+            (
+                "vale: vale styles missing from .vale/: Google, write-good; "
+                f"`bazelisk run //:vale_sync` exited 3: {why}"
+            ),
+        )
+    ]
+    (call,) = world.calls("bazelisk")
+    assert call["argv"] == ["run", "//:vale_sync"]
+    assert world.calls("vale") == []
+    assert len(world.calls("cspell")) == 1
+
+
+def test_sync_that_leaves_styles_missing_is_a_problem(world: World) -> None:
+    styled(world, "project")
+    # Exit 0, but it only syncs Google.
+    write_fake(world.bin / "bazelisk", SYNCS.replace("SYNCED", '("Google",)'))
+    found = lint_checked(world, BASE)
+    assert found == [
+        (
+            1,
+            (
+                "vale: vale styles missing from .vale/: extra, write-good; "
+                "`bazelisk run //:vale_sync` exited 0: "
+            ),
+        )
+    ]
+
+
+def test_missing_bazelisk_stops_the_check(world: World) -> None:
+    styled(world, "project")
+    with pytest.raises(SystemExit, match="bazelisk not found"):
+        lint_checked(world, BASE)
+
+
 def test_lint_skipped_without_a_title(world: World) -> None:
     assert lint_checked(world, "## Why\n\nw\n")
     assert world.calls("vale") == []
@@ -1129,7 +1278,7 @@ def test_the_posting_session_dedupes_against_its_commit_trailer(
     merged = pr.merge_trailers(pr.branch_trailers("main"), pr.posting_value(agent))
     assert merged == [("Generated-by", trailer)]
     assert run_main("create", env=agent) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     session = f"session={agent_identity.sha256_64('raw-session')}"
     lines = [line for line in str(call["stdin"]).splitlines() if session in line]
     assert lines == [OPENER, f"Generated-by: {trailer}"]
@@ -1148,7 +1297,7 @@ def test_an_unresolved_posting_model_fails_without_posting(
         run_main(*argv, env=agent)
     assert info.value.code == f"invalid LLM trailer: {posting}: model required"
     # edit reads the live body first, for its Opened-by line; nothing is posted.
-    reads = [["pr", "view", "7", "--json", "body"]] if argv[0] == "edit" else []
+    reads = [["pr", "view", "7", "--json", "body,url"]] if argv[0] == "edit" else []
     assert [call["argv"] for call in world.calls("gh")] == reads
 
 
@@ -1236,7 +1385,7 @@ def test_create_runs_gh_with_the_frontmatter(
     world.git("branch", "dev")
     write_draft(world, meta + BASE)
     assert run_main("create") == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert call["argv"] == [
         "pr", "create", "--title", "fix: x", "--body-file", "-",
         "--base", "dev", "--draft",
@@ -1255,7 +1404,7 @@ def test_create_runs_gh_with_the_frontmatter(
 def test_create_defaults(world: World) -> None:
     write_draft(world)
     assert run_main("create") == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert call["argv"] == [
         "pr",
         "create",
@@ -1268,17 +1417,18 @@ def test_create_defaults(world: World) -> None:
     ]
 
 
+@pytest.mark.parametrize("ending", ["", "\n", "\n\n"])
 def test_create_passes_gh_errors_through(
-    world: World, capsys: pytest.CaptureFixture[str]
+    world: World, capsys: pytest.CaptureFixture[str], ending: str
 ) -> None:
-    message = "aborted: you must first push the current branch to a remote\n"
+    message = "aborted: you must first push the current branch to a remote" + ending
     world.fake("gh", rc=1, stderr=message)
     write_draft(world)
     assert run_main("create") == 1
     captured = capsys.readouterr()
-    assert captured.err == message
+    assert captured.err == message.rstrip("\n") + "\n"
     assert captured.out == ""
-    assert len(world.calls("gh")) == 1
+    assert len(world.calls("gh")) == 2
     assert world.git("status", "--porcelain", "--ignored").count("push") == 0
 
 
@@ -1294,7 +1444,6 @@ def test_create_stops_on_problems(
 def test_dry_run_prints_argv_and_body(
     world: World, capsys: pytest.CaptureFixture[str], agent: dict[str, str]
 ) -> None:
-    (world.bin / "gh").unlink()
     write_draft(world, "---\nlabels: [bug]\n---\n" + BASE)
     assert run_main("create", "--dry-run", env=agent) == 0
     out = capsys.readouterr().out
@@ -1338,6 +1487,344 @@ def test_edit_without_labels_and_with_agent(
     _, call = world.calls("gh")
     assert call["argv"] == ["pr", "edit", "7", "--title", "fix: x", "--body-file", "-"]
     assert str(call["stdin"]).endswith(f"v\n\nAssisted-by: {POSTING}\n")
+
+
+def test_create_scans_the_final_title_and_body(
+    world: World, agent: dict[str, str]
+) -> None:
+    write_draft(world)
+    assert run_main("create", env=agent) == 0
+    (call,) = world.calls("gitleaks")
+    assert cast("list[str]", call["argv"])[:3] == ["stdin", "--redact", "--no-banner"]
+    assert call["cwd"] == str(world.root)
+    _, gh = world.calls("gh")
+    assert call["stdin"] == f"fix: x\n\n{gh['stdin']}"
+    assert str(call["stdin"]).endswith(f"Assisted-by: {POSTING}\n")
+
+
+def test_edit_scans_the_final_title_and_body(world: World) -> None:
+    write_draft(world)
+    assert run_main("edit", "--pr", "7") == 0
+    (call,) = world.calls("gitleaks")
+    _, gh = world.calls("gh")
+    assert call["stdin"] == f"fix: x\n\n{gh['stdin']}"
+
+
+FINDING = '[{"RuleID": "some-rule", "StartLine": 9}]'
+
+
+@pytest.mark.parametrize(
+    "argv", [("create",), ("create", "--dry-run"), ("edit", "--pr", "7")]
+)
+def test_a_finding_stops_before_gh(
+    world: World, capsys: pytest.CaptureFixture[str], argv: tuple[str, ...]
+) -> None:
+    world.fake("gitleaks", rc=1, stdout=FINDING)
+    write_draft(world)
+    with pytest.raises(SystemExit) as info:
+        run_main(*argv)
+    assert str(info.value) == (
+        "refusing the PR title and body: gitleaks finds a secret: "
+        "rule some-rule on line 9"
+    )
+    assert [call["argv"][:2] for call in world.calls("gh")] in ([], [["pr", "view"]])  # type: ignore[index]
+    assert "gh pr" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argv", [("create",), ("edit", "--pr", "7")])
+def test_a_missing_gitleaks_stops_before_gh(
+    world: World, argv: tuple[str, ...]
+) -> None:
+    (world.bin / "gitleaks").unlink()
+    write_draft(world)
+    with pytest.raises(SystemExit, match="gitleaks not found on PATH"):
+        run_main(*argv)
+    assert [call["argv"][:2] for call in world.calls("gh")] in ([], [["pr", "view"]])  # type: ignore[index]
+
+
+def test_a_missing_private_config_stops_before_gh(world: World) -> None:
+    (Path.home() / ".config" / "gitleaks" / "private.toml").unlink()
+    write_draft(world)
+    with pytest.raises(SystemExit, match=r"private\.toml cannot be read"):
+        run_main("create")
+    assert world.calls("gitleaks") == []
+    assert world.calls("gh") == []
+
+
+def test_check_does_not_scan_or_read_the_visibility(world: World) -> None:
+    write_draft(world)
+    assert run_main("check") == 0
+    assert world.calls("gitleaks") == []
+    assert world.calls("gh.repo") == []
+
+
+def edit_cases(
+    url: object, stdout: str = "PUBLIC\n", rc: int = 0
+) -> dict[str, dict[str, object]]:
+    """The PR's page is ``url``; its repository reads ``stdout``.
+
+    The working directory's repository, which a read with no repository
+    argument would name, is PRIVATE, so a command that reads it gets that.
+    """
+    return {
+        "pr view": view_case(url),
+        f"repo view {TARGET}": {
+            "rc": rc,
+            "stdout": stdout,
+            "stderr": "boom" if rc else "",
+        },
+        "repo view --json": {"rc": 0, "stdout": "PRIVATE\n", "stderr": ""},
+    }
+
+
+VISIBILITY_READ = ["--json", "visibility", "--jq", ".visibility"]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "rc", "want"),
+    [("PRIVATE\n", 0, "PRIVATE"), ("", 0, ""), ("PRIVATE\n", 1, ""), ("", 1, "")],
+)
+def test_the_visibility_read_names_the_target_and_is_empty_when_it_fails(
+    world: World, stdout: str, rc: int, want: str
+) -> None:
+    world.fake("gh", cases=edit_cases(None, stdout, rc))
+    assert pr.repo_visibility(TARGET) == want
+    (read,) = world.calls("gh.repo")
+    assert read["argv"] == ["repo", "view", TARGET, *VISIBILITY_READ]
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["tbhb-dev/tools", "A1-b/.github", "o/a.b_c-d", "o/..a", "o/x", "9/9"],
+)
+def test_a_well_formed_target_is_read(world: World, target: str) -> None:
+    answer: dict[str, object] = {"rc": 0, "stdout": "PRIVATE\n", "stderr": ""}
+    world.fake("gh", cases={"repo view": answer})
+    assert pr.repo_visibility(target) == "PRIVATE"
+    (read,) = world.calls("gh.repo")
+    assert read["argv"] == ["repo", "view", target, *VISIBILITY_READ]
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "",
+        "tools",
+        "o/",
+        "/x",
+        "o/n/extra",
+        "-o/x",
+        "o/.",
+        "o/..",
+        "o/x y",
+        "o/x\n",
+        "\no/x",
+        "o/é",
+        "é/x",
+        "o x/y",
+        "o/x;y",
+    ],
+)
+def test_a_malformed_target_is_empty_without_a_gh_call(
+    world: World, target: str
+) -> None:
+    answer: dict[str, object] = {"rc": 0, "stdout": "PRIVATE\n", "stderr": ""}
+    world.fake("gh", cases={"repo view": answer})
+    assert pr.repo_visibility(target) == ""
+    assert world.calls("gh.repo") == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/tbhb-dev/tools/pull/12",
+        "https://github.com/o/n/pull/0",
+        "https://github.com/A1-b/.github/pull/123456",
+    ],
+)
+def test_a_pr_url_names_its_repository(url: str) -> None:
+    assert (
+        pr.target_of_pr(url)
+        == url.removeprefix("https://github.com/").split("/pull/")[0]
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        None,
+        7,
+        ["https://github.com/o/n/pull/1"],
+        "",
+        "not a url",
+        "http://github.com/o/n/pull/1",
+        "https://gitlab.com/o/n/pull/1",
+        "https://githubXcom/o/n/pull/1",
+        "https://github.com.evil.example/o/n/pull/1",
+        "https://www.github.com/o/n/pull/1",
+        "https://user@github.com/o/n/pull/1",
+        "https://github.com:443/o/n/pull/1",
+        "xhttps://github.com/o/n/pull/1",
+        "https://github.com/o/n/pull/",
+        "https://github.com/o/n/pull/x",
+        "https://github.com/o/n/pull/1x",
+        "https://github.com/o/n/pull/\u0661",
+        "https://github.com/o/n/issues/1",
+        "https://github.com/o/n/pulls/1",
+        "https://github.com/o/n/pull/1/files",
+        "https://github.com/o/n/pull/1?x=1",
+        "https://github.com/o/n/pull/1#c",
+        "https://github.com/o/n/pull/1\n",
+        " https://github.com/o/n/pull/1",
+        "https://github.com/o/../pull/1",
+        "https://github.com/o/./pull/1",
+        "https://github.com/o//pull/1",
+        "https://github.com//n/pull/1",
+        "https://github.com/pull/1",
+        "https://github.com/-o/n/pull/1",
+        "https://github.com/o/n/x/pull/1",
+        "https://github.com/https://github.com/o/n/pull/1",
+    ],
+)
+def test_a_url_that_is_not_a_github_pr_page_names_nothing(url: object) -> None:
+    assert pr.target_of_pr(url) == ""
+
+
+@pytest.mark.parametrize(
+    ("answer", "want"),
+    [
+        (base_case(TARGET, "PRIVATE"), "PRIVATE"),
+        (base_case(TARGET, "PUBLIC"), "PUBLIC"),
+        (base_case(TARGET, ""), ""),
+        (base_case(TARGET, None), ""),
+        (base_case(TARGET, "PRIVATE", rc=1), ""),
+        (base_case("", "PRIVATE"), ""),
+        (base_case(None, "PRIVATE"), ""),
+        (base_case(7, "PRIVATE"), ""),
+        (base_case("a/b/c", "PRIVATE"), ""),
+        (base_case("not a name", "PRIVATE"), ""),
+        (base_case("o/..", "PRIVATE"), ""),
+        ({"rc": 0, "stdout": "[]", "stderr": ""}, ""),
+        ({"rc": 0, "stdout": "PRIVATE\n", "stderr": ""}, ""),
+        ({"rc": 0, "stdout": '{"visibility": "PRIVATE"}', "stderr": ""}, ""),
+        ({"rc": 0, "stdout": '{"nameWithOwner": "o/n"}', "stderr": ""}, ""),
+    ],
+)
+def test_the_base_visibility_counts_only_with_a_parsed_name(
+    world: World, answer: dict[str, object], want: str
+) -> None:
+    world.fake("gh", cases={"repo view": answer})
+    assert pr.base_visibility() == want
+    (read,) = world.calls("gh.repo")
+    assert read["argv"] == ["repo", "view", "--json", "nameWithOwner,visibility"]
+
+
+def scan_config(world: World) -> str:
+    """The config the one gitleaks call ran under."""
+    (call,) = world.calls("gitleaks")
+    argv = cast("list[str]", call["argv"])
+    return argv[argv.index("--config") + 1]
+
+
+def full_config() -> str:
+    """The private config, under the test's HOME."""
+    return str(Path.home() / ".config" / "gitleaks" / "private.toml")
+
+
+VISIBILITIES = [
+    ("PRIVATE\n", 0, True),
+    ("PUBLIC\n", 0, False),
+    ("INTERNAL\n", 0, False),
+    ("", 0, False),
+    ("weird\n", 0, False),
+    ("PRIVATE\n", 1, False),
+]
+
+
+@pytest.mark.parametrize("argv", [("create",), ("create", "--dry-run")])
+@pytest.mark.parametrize(("stdout", "rc", "reduced"), VISIBILITIES)
+def test_create_reads_the_base_repository_once_and_picks_the_config(
+    world: World, argv: tuple[str, ...], stdout: str, rc: int, reduced: bool
+) -> None:
+    cases = {"repo view": base_case(TARGET, stdout.strip(), rc)}
+    world.fake("gh", stdout="u\n", cases=cases)
+    write_draft(world)
+    assert run_main(*argv) == 0
+    (read,) = world.calls("gh.repo")
+    assert read["argv"] == ["repo", "view", "--json", "nameWithOwner,visibility"]
+    assert (scan_config(world) != full_config()) is reduced
+
+
+@pytest.mark.parametrize("name", ["", None, "o/..", "a/b/c", 5, "not a name"])
+def test_create_without_a_parsed_base_repository_uses_the_full_config(
+    world: World, name: object
+) -> None:
+    world.fake("gh", stdout="u\n", cases={"repo view": base_case(name, "PRIVATE")})
+    write_draft(world)
+    assert run_main("create") == 0
+    assert len(world.calls("gh.repo")) == 1
+    assert scan_config(world) == full_config()
+
+
+@pytest.mark.parametrize("stdout", ["not json", "[]"])
+def test_create_with_an_unreadable_base_repository_uses_the_full_config(
+    world: World, stdout: str
+) -> None:
+    answer: dict[str, object] = {"rc": 0, "stdout": stdout, "stderr": ""}
+    world.fake("gh", stdout="u\n", cases={"repo view": answer})
+    write_draft(world)
+    assert run_main("create") == 0
+    assert len(world.calls("gh.repo")) == 1
+    assert scan_config(world) == full_config()
+
+
+@pytest.mark.parametrize(("stdout", "rc", "reduced"), VISIBILITIES)
+def test_edit_reads_the_prs_repository_once_and_picks_the_config(
+    world: World, stdout: str, rc: int, reduced: bool
+) -> None:
+    world.fake("gh", stdout="u\n", cases=edit_cases(pr_page(TARGET), stdout, rc))
+    write_draft(world)
+    assert run_main("edit", "--pr", "7") == 0
+    (read,) = world.calls("gh.repo")
+    assert read["argv"] == ["repo", "view", TARGET, *VISIBILITY_READ]
+    assert (scan_config(world) != full_config()) is reduced
+
+
+def test_a_private_working_directory_posting_to_a_public_repo_gets_the_full_config(
+    world: World,
+) -> None:
+    other = "tbhb-dev/elsewhere"
+    cases = edit_cases(pr_page(other))
+    cases[f"repo view {other}"] = {"rc": 0, "stdout": "PUBLIC\n", "stderr": ""}
+    world.fake("gh", stdout="u\n", cases=cases)
+    write_draft(world)
+    assert run_main("edit", "--pr", "7") == 0
+    (read,) = world.calls("gh.repo")
+    assert read["argv"] == ["repo", "view", other, *VISIBILITY_READ]
+    assert scan_config(world) == full_config()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        None,
+        "",
+        7,
+        "not a url",
+        "https://github.com/o/n/pull/x",
+        "http://github.com/o/n/pull/1",
+        "https://gitlab.com/o/n/pull/1",
+        "https://github.com/o/n/issues/1",
+    ],
+)
+def test_edit_with_an_unresolved_target_uses_the_full_config_and_reads_nothing(
+    world: World, url: object
+) -> None:
+    world.fake("gh", stdout="u\n", cases=edit_cases(url, "PRIVATE\n"))
+    write_draft(world)
+    assert run_main("edit", "--pr", "7") == 0
+    assert world.calls("gh.repo") == []
+    assert scan_config(world) == full_config()
 
 
 def test_edit_requires_a_pr_number(world: World) -> None:
@@ -2074,7 +2561,7 @@ def test_create_writes_opened_by_first_and_the_ledger(
     world.commit(f"one\n\nGenerated-by: {GEN}")
     write_draft(world)
     assert run_main("create", env=agent) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert str(call["stdin"]).endswith(
         f"\nv\n\n{OPENER}\nGenerated-by: {GEN}\nAssisted-by: {POSTING}\n"
     )
@@ -2094,7 +2581,7 @@ def test_a_subagent_opens_under_its_root(world: World, agent: dict[str, str]) ->
     child = agent_identity.sha256_64("agent-raw")
     agent_identity.write_user_record(child, {"root": ROOT, "model": "claude-x"})
     assert run_main("create", env={**agent, "ASCM_AGENT_ID": child}) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert str(call["stdin"]).endswith(
         f"\n\n{OPENER}\nAssisted-by: LLM harness=claude-code:2.1.0;"
         f"model=anthropic:claude-x;session={ROOT};subagent={child};surface=cli\n"
@@ -2110,7 +2597,7 @@ def test_no_root_means_no_line_and_no_ledger(world: World, env: dict[str, str]) 
     conv = agent_identity.sha256_64("conv-raw")
     agent_identity.write_user_record(conv, {"model": "gemini-x"})
     assert run_main("create", env=env) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert "Opened-by" not in str(call["stdin"])
     assert not ledgers(world).exists()
 
@@ -2118,11 +2605,11 @@ def test_no_root_means_no_line_and_no_ledger(world: World, env: dict[str, str]) 
 def test_a_failed_create_records_nothing(
     world: World, agent: dict[str, str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    world.fake("gh", rc=1, stdout="https://github.com/tbhb-dev/ascm/pull/1\n")
+    world.fake("gh", rc=1, stdout="https://github.com/tbhb-dev/example/pull/1\n")
     write_draft(world)
     assert run_main("create", env=agent) == 1
     assert not ledgers(world).exists()
-    assert capsys.readouterr().err == ""
+    assert capsys.readouterr().err == ("https://github.com/tbhb-dev/example/pull/1\n")
 
 
 def test_create_without_a_url_records_nothing(
@@ -2156,9 +2643,10 @@ LIVE = "Opened-by: LLM harness=codex;session=sha-256-64:cccccccccccccccc"
 
 
 def live_body(body: object, rc: int = 0, stderr: str = "") -> dict[str, object]:
-    """The fake gh answer to ``gh pr view N --json body``."""
-    stdout = json.dumps({"body": body}) if rc == 0 else ""
-    return {"rc": rc, "stdout": stdout, "stderr": stderr}
+    """The fake gh answer to ``gh pr view N --json body,url``."""
+    if rc == 0:
+        return view_case(pr_page(TARGET), body)
+    return {"rc": rc, "stdout": "", "stderr": stderr}
 
 
 @pytest.mark.parametrize(
@@ -2181,7 +2669,7 @@ def test_edit_copies_the_live_opened_by_line(
     write_draft(world)
     assert run_main("edit", "--pr", "7", env=agent) == 0
     view, edit = world.calls("gh")
-    assert view["argv"] == ["pr", "view", "7", "--json", "body"]
+    assert view["argv"] == ["pr", "view", "7", "--json", "body,url"]
     assert cast("list[str]", edit["argv"])[:3] == ["pr", "edit", "7"]
     opened_by = f"{kept}\n" if kept else ""
     assert str(edit["stdin"]).endswith(f"\nv\n\n{opened_by}Assisted-by: {POSTING}\n")
@@ -2329,6 +2817,34 @@ def test_backfill_stops_at_a_corrupt_ledger(world: World) -> None:
     assert path.read_text() == "{"
 
 
+def test_ready_marks_the_pull_request_ready(world: World) -> None:
+    assert run_main("ready", "--pr", "45") == 0
+    (call,) = world.calls("gh")
+    assert call["argv"] == ["pr", "ready", "45"]
+    assert call["stdin"] == ""
+
+
+def test_ready_passes_gh_output_and_exit_code_through(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.fake("gh", rc=3, stdout="out\n", stderr="err\n")
+    assert run_main("ready", "--pr", "45") == 3
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("out\n", "err\n")
+
+
+def test_ready_requires_a_pr_number() -> None:
+    with pytest.raises(SystemExit) as info:
+        run_main("ready")
+    assert info.value.code == 2
+
+
+def test_ready_rejects_a_pr_that_is_not_a_number() -> None:
+    with pytest.raises(SystemExit) as info:
+        run_main("ready", "--pr", "abc")
+    assert info.value.code == 2
+
+
 def test_backfill_needs_an_owner() -> None:
     with pytest.raises(SystemExit) as info:
         run_main("backfill-opened")
@@ -2431,7 +2947,7 @@ def test_an_opener_without_a_model_gets_no_line_and_no_ledger(
     seed_session(world, None)
     write_draft(world)
     assert run_main("create", env={**agent, "ASCM_AGENT_ID": child}) == 0
-    (call,) = world.calls("gh")
+    _, call = world.calls("gh")
     assert "Opened-by" not in str(call["stdin"])
     assert not ledgers(world).exists()
     value = f"LLM harness=claude-code:2.1.0;session={ROOT};surface=cli"
@@ -2465,3 +2981,214 @@ def test_backfill_is_quiet_below_the_limits(
     world.fake("gh", cases=BACKFILL_CASES)
     assert run_main("backfill-opened", "tbhb-dev") == 0
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_create_refuses_an_open_pr(
+    world: World, capsys: pytest.CaptureFixture[str], dry_run: bool
+) -> None:
+    world.fake(
+        "gh",
+        cases={
+            "pr view --json number,state,url": {
+                "rc": 0,
+                "stdout": json.dumps(
+                    {
+                        "number": 17,
+                        "state": "OPEN",
+                        "url": "https://github.com/tbhb-dev/example/pull/17",
+                    }
+                ),
+                "stderr": "",
+            }
+        },
+    )
+    write_draft(world)
+    assert run_main("create", *(["--dry-run"] if dry_run else [])) == 1
+    assert capsys.readouterr() == (
+        "",
+        (
+            "error: PR 17 (https://github.com/tbhb-dev/example/pull/17) "
+            "is already open; "
+            "run `tbhbdev alpha pr edit --pr 17` to apply the draft\n"
+        ),
+    )
+    assert [call["argv"] for call in world.calls("gh")] == [
+        ["pr", "view", "--json", "number,state,url"]
+    ]
+
+
+@pytest.mark.parametrize("state", ["CLOSED", "MERGED"])
+def test_create_after_a_finished_pr(world: World, state: str) -> None:
+    world.fake(
+        "gh",
+        stdout="https://github.com/tbhb-dev/example/pull/18\n",
+        cases={
+            "pr view --json number,state,url": {
+                "rc": 0,
+                "stdout": json.dumps({"number": 17, "state": state, "url": "old"}),
+                "stderr": "",
+            }
+        },
+    )
+    write_draft(world)
+    assert run_main("create") == 0
+    view, create = world.calls("gh")
+    assert view["stdin"] == ""
+    assert cast("list[str]", create["argv"])[:2] == ["pr", "create"]
+
+
+@pytest.mark.parametrize(
+    ("rc", "stdout", "stderr"),
+    [
+        (1, "", "authentication failed"),
+        (0, "not JSON", ""),
+        (0, "[]", ""),
+        (0, "{}", ""),
+        *[
+            (
+                0,
+                json.dumps({"state": "OPEN", "number": 17, "url": "old", key: value}),
+                "",
+            )
+            for key in ("state", "number", "url")
+            for value in (None, [1], {"value": 1}, True, 1.5)
+        ],
+        *[
+            (
+                0,
+                json.dumps(
+                    {
+                        key: value
+                        for key, value in {
+                            "state": "OPEN",
+                            "number": 17,
+                            "url": "old",
+                        }.items()
+                        if key != missing
+                    }
+                ),
+                "",
+            )
+            for missing in ("state", "number", "url")
+        ],
+        *[
+            (
+                0,
+                json.dumps({"state": "OPEN", "number": 17, "url": "old", key: value}),
+                "",
+            )
+            for key, value in (("state", 17), ("number", "17"), ("url", 17))
+        ],
+        (1, "", "authentication failed\n\n"),
+        (1, "", "authentication failed \n"),
+        (1, "", "authentication error X\n"),
+        (0, "", "no pull requests found"),
+    ],
+)
+def test_create_stops_when_the_lookup_fails(
+    world: World, capsys: pytest.CaptureFixture[str], rc: int, stdout: str, stderr: str
+) -> None:
+    world.fake(
+        "gh",
+        cases={
+            "pr view --json number,state,url": {
+                "rc": rc,
+                "stdout": stdout,
+                "stderr": stderr,
+            }
+        },
+    )
+    write_draft(world)
+    assert run_main("create") == 1
+    assert capsys.readouterr() == (
+        "",
+        f"cannot check for an open PR: {(stderr or stdout).rstrip(chr(10))}\n",
+    )
+    assert len(world.calls("gh")) == 1
+
+
+@pytest.mark.parametrize(
+    "result", [(rc, ending) for rc in (0, 1) for ending in ("", "\n", "\n\n")]
+)
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.parametrize("url", ["", "https://github.com/tbhb-dev/example/pull/17"])
+def test_create_rejects_already_exists(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    result: tuple[int, str],
+    stream: str,
+    url: str,
+) -> None:
+    rc, ending = result
+    output = f"a pull request Already Exists {url}{ending}"
+    answer: dict[str, object] = {"rc": rc, "stdout": "", "stderr": "", stream: output}
+    world.fake("gh", cases={"pr create": answer})
+    write_draft(world)
+    assert run_main("create") == 1
+    number = "17" if url else "<n>"
+    assert capsys.readouterr() == (
+        "",
+        output.rstrip("\n")
+        + "\n"
+        + (
+            f"gh pr create failed; run `tbhbdev alpha pr edit --pr {number}` "
+            "to apply the draft\n"
+        ),
+    )
+    assert not ledgers(world).exists()
+
+
+def test_create_passes_success_stderr_through(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.fake("gh", stdout="created\n", stderr="warning\n")
+    write_draft(world)
+    assert run_main("create") == 0
+    assert capsys.readouterr() == ("created\n", "warning\n")
+
+
+@pytest.mark.parametrize("ending", ["", "\n", "\n\n"])
+def test_create_joins_error_streams(
+    world: World, capsys: pytest.CaptureFixture[str], ending: str
+) -> None:
+    world.fake(
+        "gh",
+        cases={
+            "pr create": {
+                "rc": 1,
+                "stdout": "request failed" + ending,
+                "stderr": "connection lost" + ending,
+            }
+        },
+    )
+    write_draft(world)
+    assert run_main("create") == 1
+    assert capsys.readouterr() == ("", "request failed\nconnection lost\n")
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "expected"),
+    [
+        ("request failed\n", "\n\n", "request failed\n"),
+        ("\n\n", "connection lost\n", "connection lost\n"),
+        (
+            "request failed \n",
+            "connection lost \n",
+            "request failed \nconnection lost \n",
+        ),
+        ("request X\n", "connection X\n", "request X\nconnection X\n"),
+        ("", "", "\n"),
+    ],
+)
+def test_create_normalizes_empty_error_streams(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    stdout: str,
+    stderr: str,
+    expected: str,
+) -> None:
+    world.fake("gh", cases={"pr create": {"rc": 1, "stdout": stdout, "stderr": stderr}})
+    write_draft(world)
+    assert run_main("create") == 1
+    assert capsys.readouterr() == ("", expected)

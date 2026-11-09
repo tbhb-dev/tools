@@ -27,9 +27,9 @@ unconsumed edit receipt for a staged path, or to the committer when no receipt
 matches. ``Assisted-by`` goes to the committer or the root agent when they
 wrote none of the staged content. ``check`` validates the ``LLM``
 trailers, the same for every committer. In an agent harness it also requires
-``AGENT_IDENT`` as the author, the committer and any ``tbhb.dev Agent``
-``Signed-off-by``. Other ``Signed-off-by`` and ``Co-authored-by`` lines are not
-checked (agents don't add them as a norm; the operator may sign off).
+``AGENT_IDENT`` as the author and the committer, and rejects any
+``Signed-off-by`` or ``Co-authored-by`` line: the operator signs off, not the
+agent. A human's commit, outside any harness, is not checked for either.
 
 ``stamp-docs`` sets the ``generated`` list of each staged document's frontmatter
 (see docs/schemas/frontmatter.schema.json) to the same identities, from the same
@@ -95,7 +95,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from itertools import islice, takewhile
+from itertools import dropwhile, islice, takewhile
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
@@ -168,6 +168,7 @@ CMD_WINDOW = 2 * 3600
 ANCESTRY_LIMIT = 16
 CLAUDE_TAIL = 256 * 1024
 CODEX_TAIL = 1024 * 1024
+CODEX_HEAD = 1024 * 1024
 CODEX_MAX_AGE = 3 * 86400
 
 # Antigravity model keys -> (provider, canonical model id, effort).
@@ -990,6 +991,82 @@ def edit_paths_from_bash(resp: object) -> list[str]:
     return [p for p in dict.fromkeys(walk_paths(diff)) if p != "/dev/null"]
 
 
+# Git commands that rewrite work-tree files from a commit or the stash.
+MOVING_GIT = frozenset(
+    {
+        "am",
+        "checkout",
+        "cherry-pick",
+        "merge",
+        "pull",
+        "rebase",
+        "reset",
+        "restore",
+        "revert",
+        "stash",
+        "switch",
+    }
+)
+# Commands that write no work-tree content, so they cannot hide an edit.
+QUIET_GIT = frozenset({"branch", "diff", "fetch", "log", "rev-parse", "show", "status"})
+QUIET_TOOLS = frozenset(
+    {"cat", "cd", "echo", "grep", "head", "ls", "pwd", "rg", "tail", "true", "wc"}
+)
+SEGMENT_BREAKS = re.compile(r"&&|\|\||[;|&\n]")
+# A command or process substitution can run any command.
+SUBSTITUTION = re.compile(r"\$\(|`|[<>]\(")
+# Leading ``VAR=value`` words only set the environment.
+ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
+# ``git rebase --exec`` runs arbitrary commands between the replayed commits.
+EXEC_FLAGS = frozenset({"-x", "--exec"})
+# Redirects that write nothing: ``2>&1`` and ``>/dev/null``.
+HARMLESS_REDIRECT = re.compile(r"\d*>&\d+|\d*>>?\s*/dev/null")
+
+
+def git_verb(words: list[str]) -> str:
+    """The subcommand of ``git``, skipping its global options."""
+    i = 1
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] in {"-C", "-c"} else 1
+    return words[i] if i < len(words) else ""
+
+
+def segment_kind(segment: str) -> str:
+    """``move``, ``quiet`` or ``other`` for one simple command."""
+    # The replacement text never holds ">", so mutating it cannot change the result.
+    if ">" in HARMLESS_REDIRECT.sub("", segment):  # pragma: no mutate
+        return "other"
+    try:
+        words = shlex.split(segment)
+    except ValueError:
+        return "other"
+    words = list(dropwhile(ASSIGNMENT.match, words))
+    if not words:
+        return "quiet"
+    if words[0] != "git":
+        return "quiet" if words[0] in QUIET_TOOLS else "other"
+    verb = git_verb(words)
+    if verb == "rebase" and EXEC_FLAGS.intersection(words):
+        return "other"
+    return "move" if verb in MOVING_GIT else "quiet" if verb in QUIET_GIT else "other"
+
+
+def moves_work_tree(cmd: object) -> bool:
+    """Whether a command only moves the work tree with git.
+
+    True when it runs a work-tree-moving git command and every other part is
+    read-only. Any other command could have written content, so a line that
+    mixes the two keeps its receipts.
+    """
+    if not isinstance(cmd, str):
+        return False
+    if SUBSTITUTION.search(cmd):
+        return False
+    plain = HARMLESS_REDIRECT.sub("", cmd)
+    kinds = {segment_kind(s) for s in SEGMENT_BREAKS.split(plain)}
+    return "move" in kinds and "other" not in kinds
+
+
 def load_edits(repo: Repo, root: str) -> list[tuple[Path, Json]]:
     """Unconsumed edit receipts for a root session."""
     out = []
@@ -1008,17 +1085,32 @@ def claude_ident(data: Json, env: Mapping[str, str]) -> Ident:
     root = sha256_64(data["session_id"])
     agent = data.get("agent_id")
     effort = parse_stdin(data)[2]
+    rec = load_record(root, hook_cwd(data))
     if agent:
         model, sub = transcript_model(child_transcript(data)), sha256_64(agent)
     else:
-        model, sub = transcript_model(data.get("transcript_path")), None
-    ver = version(CLAUDE, env) or load_record(root, hook_cwd(data)).get("version")
+        # The transcript tail can hold no assistant entry (after a large tool
+        # result), so the main agent falls back to its session record.
+        model = transcript_model(data.get("transcript_path")) or main_model(rec)
+        sub = None
+    ver = version(CLAUDE, env) or rec.get("version")
     return make_ident(CLAUDE, root, Seen(ver, model, effort, surface(CLAUDE, env)), sub)
 
 
 def tool_input_of(data: Json) -> Json:
     """The hook's ``tool_input`` object, or an empty dict."""
     return as_dict(data.get("tool_input")) or {}
+
+
+def write_bash_edits(
+    data: Json, env: Mapping[str, str], cmd: object, cwd: Path | None
+) -> None:
+    """Edit receipts for the paths in a Bash result, unless git only moved them."""
+    paths = edit_paths_from_bash(data.get("tool_response"))
+    if paths and not moves_work_tree(cmd):
+        ident = claude_ident(data, env)
+        for path in paths:
+            write_edit(ident, path, cwd)
 
 
 def handle_claude_bash(
@@ -1041,11 +1133,7 @@ def handle_claude_bash(
     if not (isinstance(response, dict) and response.get("backgroundTaskId")):
         finish_command(root, cmd, agent, cwd)
     if event == "PostToolUse":
-        paths = edit_paths_from_bash(data.get("tool_response"))
-        if paths:
-            ident = claude_ident(data, env)
-            for path in paths:
-                write_edit(ident, path, cwd)
+        write_bash_edits(data, env, cmd, cwd)
 
 
 def handle_claude(data: Json, env: Mapping[str, str]) -> None:
@@ -1099,12 +1187,26 @@ def codex_rollout(thread_id: str, env: Mapping[str, str]) -> Path | None:
 
 
 def rollout_turn_context(path: Path) -> tuple[str | None, str | None]:
-    """(model, effort) from the latest ``turn_context`` record in the rollout tail."""
+    """(model, effort) from the tail, falling back to the first turn context."""
     for line in reversed(read_tail(path, CODEX_TAIL) or []):
         record = parse_line(line) or {}
         payload = as_dict(record.get("payload"))
         if record.get("type") == "turn_context" and payload is not None:
             return as_str(payload.get("model")), as_str(payload.get("effort"))
+    try:
+        with path.open("rb") as handle:
+            remaining = CODEX_HEAD
+            while remaining:
+                raw = handle.readline(remaining)
+                if not raw:
+                    break
+                remaining -= len(raw)
+                record = parse_line(raw.decode(errors="replace")) or {}
+                payload = as_dict(record.get("payload"))
+                if record.get("type") == "turn_context" and payload is not None:
+                    return as_str(payload.get("model")), as_str(payload.get("effort"))
+    except OSError:
+        pass
     return None, None
 
 
@@ -1609,7 +1711,9 @@ def enrich(ident: Ident, committer: Committer) -> Ident:
     the committer of the same harness. A Claude child's model and effort come
     from its record, because the child transcript can trail the first
     PostToolUse. Surface is per session, and an edit hook env may not expose it
-    (agy). Never inherits a model from another agent.
+    (agy). A main agent's identity stored without a model or effort takes them
+    from the committer's root identity when that is the same agent. Never
+    inherits a model from another agent.
     """
     slug = ident.harness.partition(":")[0]
     committer_harness = committer.ident.harness
@@ -1633,6 +1737,14 @@ def enrich(ident: Ident, committer: Committer) -> Ident:
             ident = replace(
                 ident, model=ident.model or model, effort=ident.effort or effort
             )
+    root_ident = committer.root_ident
+    # The root identity has no subagent, so a match is the main agent itself.
+    if committer.key == CLAUDE and ident.agent_key() == root_ident.agent_key():
+        ident = replace(
+            ident,
+            model=ident.model or root_ident.model,
+            effort=ident.effort or root_ident.effort,
+        )
     return ident
 
 
@@ -1786,7 +1898,9 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
     present = [*llm_trailers(path.read_text()), *kept]
     if not edits and any(key == KEY_GEN for key, _ in present):
         gen, assisted = list[Ident](), list[Ident]()
-    add_trailers(path, [enrich(i, committer) for i in gen], assisted, kept)
+    # Enriching can make two identities of one agent equal, so deduplicate again.
+    gen = list(dict.fromkeys(enrich(i, committer) for i in gen))
+    add_trailers(path, gen, assisted, kept)
     write_claim(repo, committer.ident.root, [p for p, _ in edits])
     return 0
 
@@ -2206,10 +2320,12 @@ LINE = re.compile(r"^(Generated-by|Assisted-by):\s*(.*)$")
 AGENT_IDENT = "tbhb.dev Agent <agent@tonyburns.net>"
 # The timestamp and zone at the end of ``git var GIT_*_IDENT``.
 IDENT_DATE = re.compile(r" [0-9]+ [-+][0-9]{4}$")
-# A Signed-off-by naming the agent, whatever address follows; git matches
-# trailer keys without regard to case.
-AGENT_SIGNOFF = re.compile(
-    r"^Signed-off-by:[ \t]*(tbhb\.dev Agent <.*>)[ \t]*$", re.IGNORECASE | re.MULTILINE
+# A sign-off or co-author line; git matches trailer keys without regard to case.
+SIGNOFF = re.compile(
+    r"^(?:Signed-off-by|Co-authored-by)[ \t]*:", re.IGNORECASE | re.MULTILINE
+)
+SIGNOFF_ERROR = (
+    "agent commits carry no Signed-off-by or Co-authored-by; the operator signs off"
 )
 PAIR = re.compile(r"[a-z]+=[^\s;,]+")
 
@@ -2274,11 +2390,12 @@ def check_message(text: str) -> list[str]:
 def ident_problems(text: str, env: Mapping[str, str]) -> list[str]:
     """Why a commit made in an agent harness has the wrong identity.
 
-    Every agent commit is authored and committed as ``AGENT_IDENT``, and a
-    ``Signed-off-by`` naming the agent in ``text`` must use it too. ``git var``
-    gives the identities this commit records, including ``--author``, the
-    author ``--amend`` keeps, and ``GIT_*`` overrides. A human's commit, outside
-    any harness, isn't checked, even when its trailers credit an agent's edits.
+    Every agent commit is authored and committed as ``AGENT_IDENT``, and
+    ``text`` carries no ``Signed-off-by`` or ``Co-authored-by`` line, whoever it
+    names; the operator signs off. ``git var`` gives the identities this commit
+    records, including ``--author``, the author ``--amend`` keeps, and ``GIT_*``
+    overrides. A human's commit, outside any harness, isn't checked, even when
+    its trailers credit an agent's edits.
     """
     if detect(env) is None:
         return []
@@ -2288,11 +2405,8 @@ def ident_problems(text: str, env: Mapping[str, str]) -> list[str]:
         who = IDENT_DATE.sub("", out)
         if who != AGENT_IDENT:
             errs.append(f"{role} is {who!r}; an agent commit must use {AGENT_IDENT}")
-    errs.extend(
-        f"Signed-off-by is {who!r}; an agent commit must use {AGENT_IDENT}"
-        for who in AGENT_SIGNOFF.findall(text)
-        if who != AGENT_IDENT
-    )
+    if SIGNOFF.search(text):
+        errs.append(SIGNOFF_ERROR)
     return errs
 
 

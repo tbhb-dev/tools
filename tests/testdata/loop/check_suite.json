@@ -1,0 +1,13 @@
+{
+  "action": "completed",
+  "check_suite": {
+    "id": 101,
+    "head_branch": "example-branch",
+    "head_sha": "0123456789abcdef0123456789abcdef01234567",
+    "status": "completed",
+    "conclusion": "success",
+    "pull_requests": [{"number": 7}],
+    "app": {"slug": "example-app"}
+  },
+  "sender": {"login": "example-user"}
+}
