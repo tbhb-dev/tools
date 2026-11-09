@@ -306,7 +306,10 @@ def test_command_only_loads_configuration(
     assert loop.main([], "example loop") == 1
     assert capsys.readouterr() == (
         "",
-        "example loop: configuration valid; shadow runner is not implemented\n",
+        (
+            "example loop: configuration valid; shadow runner exists; "
+            "live intake is not wired yet\n"
+        ),
     )
     assert not store.parent.exists()
 
@@ -321,7 +324,7 @@ def test_command_help_needs_no_configuration(
     assert capsys.readouterr() == (
         (
             "usage: example loop [-h]\n\n"
-            "Validate loop configuration; the runner is not available.\n\n"
+            "Validate loop configuration; live intake is not wired yet.\n\n"
             "options:\n"
             "  -h, --help  show this help message and exit\n"
         ),
@@ -340,3 +343,69 @@ def test_command_refuses_arguments_before_loading_config(
     assert out.out == ""
     assert "example loop: error: unrecognized arguments: start" in out.err
     assert str(config_file) not in out.err
+
+
+@pytest.mark.parametrize("value", [False, True])
+def test_retry_flag(config_file: Path, value: bool) -> None:
+    write_settings(config_file, {**SETTINGS, "allow_claude_retry": value})
+    assert config.load().allow_claude_retry is value
+
+
+@pytest.mark.parametrize("value", [0, 1, "false", [], {}])
+def test_retry_flag_rejects_non_boolean(config_file: Path, value: object) -> None:
+    write_settings(config_file, {**SETTINGS, "allow_claude_retry": value})
+    with pytest.raises(userconfig.ConfigError) as caught:
+        config.load()
+    assert (
+        str(caught.value)
+        == f"{config_file}: [loop] allow_claude_retry must be a boolean"
+    )
+
+
+@pytest.mark.parametrize("mode", ["off", "shadow", "on"])
+def test_per_repository_modes(config_file: Path, mode: config.Mode) -> None:
+    write_settings(config_file, SETTINGS)
+    with config_file.open("a") as stream:
+        stream.write(
+            '\n[loop.rule_modes."example-org/example-repo"]\n'
+            f'R0 = "{mode}"\nR11 = "{mode}"\n'
+        )
+    assert config.load().rule_modes == (
+        config.RuleMode("example-org/example-repo", "R0", mode),
+        config.RuleMode("example-org/example-repo", "R11", mode),
+    )
+
+
+@pytest.mark.parametrize(
+    ("suffix", "why"),
+    [
+        ("rule_modes = 1", "must be a repository table"),
+        (
+            'rule_modes = {"example-org/unknown" = {}}',
+            "must contain configured repository tables",
+        ),
+        (
+            'rule_modes = {"example-org/example-repo" = 1}',
+            "must contain configured repository tables",
+        ),
+        (
+            'rule_modes = {"example-org/example-repo" = {R12 = "off"}}',
+            "must contain R0-R11 modes off, shadow or on",
+        ),
+        (
+            'rule_modes = {"example-org/example-repo" = {R1 = []}}',
+            "must contain R0-R11 modes off, shadow or on",
+        ),
+        (
+            'rule_modes = {"example-org/example-repo" = {R1 = true}}',
+            "must contain R0-R11 modes off, shadow or on",
+        ),
+    ],
+)
+def test_invalid_rule_modes(config_file: Path, suffix: str, why: str) -> None:
+    write_settings(config_file, SETTINGS)
+    with config_file.open("a") as stream:
+        stream.write(suffix + "\n")
+    with pytest.raises(userconfig.ConfigError) as caught:
+        config.load()
+    assert str(caught.value) == f"{config_file}: [loop] rule_modes {why}"

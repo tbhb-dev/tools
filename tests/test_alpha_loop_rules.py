@@ -619,7 +619,7 @@ def test_r11_all_failures_must_be_transient(
     ],
 )
 def test_run_rules(run: Run, expected: tuple[Intent, ...]) -> None:
-    assert decide(Inputs(BUDGET, runs=(run,))) == expected
+    assert decide(Inputs(BUDGET, allow_claude_retry=True, runs=(run,))) == expected
 
 
 @pytest.mark.parametrize(
@@ -627,7 +627,7 @@ def test_run_rules(run: Run, expected: tuple[Intent, ...]) -> None:
 )
 def test_r9_retry_failure_stops_run(state: RunState) -> None:
     run = replace(RUN, state=state, retries=1, age=1801, action_failures=(3,))
-    assert decide(Inputs(BUDGET, runs=(run,))) == (
+    assert decide(Inputs(BUDGET, allow_claude_retry=True, runs=(run,))) == (
         Intent(
             "R9",
             "fixed",
@@ -670,13 +670,17 @@ def test_spawn_budget_guards(budget: SpawnBudget) -> None:
 
 def test_retry_stop_is_not_blocked_by_capacity() -> None:
     assert decide(
-        Inputs(replace(BUDGET, total_cap=0), runs=(replace(RUN, state="unknown"),))
+        Inputs(
+            replace(BUDGET, total_cap=0),
+            allow_claude_retry=True,
+            runs=(replace(RUN, state="unknown"),),
+        )
     ) == (Intent("R8", "fixed", "stop:example-run", RunArguments("example-run")),)
 
 
 def test_stop_receipt_leaves_retry_available() -> None:
     run = replace(RUN, state="unknown")
-    inputs = Inputs(replace(BUDGET, total_cap=0), runs=(run,))
+    inputs = Inputs(replace(BUDGET, total_cap=0), allow_claude_retry=True, runs=(run,))
     stop = decide(inputs)
     assert stop == (
         Intent("R8", "fixed", "stop:example-run", RunArguments("example-run")),
@@ -962,3 +966,62 @@ def test_argument_fields_are_structured() -> None:
 def test_all_boundary_values_are_frozen(observation: object, field: str) -> None:
     with pytest.raises(FrozenInstanceError):
         setattr(observation, field, None)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("harness", ["codex", "claude"])
+def test_retry_swap_is_opt_in(
+    enabled: bool, harness: Literal["codex", "claude"]
+) -> None:
+    run = replace(RUN, state="unknown", harness=harness)
+    target = CLAUDE if enabled and harness == "codex" else CODEX
+    assert decide(Inputs(BUDGET, runs=(run,), allow_claude_retry=enabled)) == (
+        Intent("R8", "fixed", "retry:example-run", RunArguments("example-run", target)),
+    )
+
+
+def test_disabled_spawn_rules_do_not_reserve_capacity() -> None:
+    merged = replace(
+        MERGED,
+        verification_passed=True,
+        policy=replace(PR.policy, follow_up_steps=("publish",)),
+    )
+    assert decide(
+        Inputs(BUDGET, (PR, merged), disabled_rules=frozenset({(REPO, "R1")}))
+    ) == (
+        R5,
+        Intent(
+            "R6",
+            "spawn",
+            f"follow:{BASE}:publish",
+            SpawnArguments(ARGS, CODEX, "publish"),
+        ),
+    )
+    assert decide(
+        Inputs(BUDGET, (merged,), disabled_rules=frozenset({(REPO, "R6")}))
+    ) == (R5,)
+    run = replace(RUN, state="unknown")
+    assert decide(
+        Inputs(BUDGET, (PR,), (run,), disabled_rules=frozenset({(RUN.name, "R8")}))
+    ) == (R1,)
+
+
+def test_disabled_escalation_does_not_stop_other_rules() -> None:
+    assert decide(
+        Inputs(
+            BUDGET,
+            (replace(APPROVED, state_age=901),),
+            disabled_rules=frozenset({(REPO, "R9")}),
+        )
+    ) == (R4,)
+    run = replace(RUN, state="finished", action_failures=(3,))
+    assert decide(
+        Inputs(BUDGET, runs=(run,), disabled_rules=frozenset({(run.name, "R9")}))
+    ) == (Intent("R7", "fixed", "collect:example-run", RunArguments("example-run")),)
+
+
+def test_disabled_rerun_leaves_notice_available() -> None:
+    candidate = replace(RED, failed_jobs=(FailedJob(HEAD, "cancelled", 10),))
+    assert decide(
+        Inputs(BUDGET, (candidate,), disabled_rules=frozenset({(REPO, "R11")}))
+    ) == (Intent("R10", "fixed", notice("ci_red"), replace(ARGS, reason="ci_red")),)

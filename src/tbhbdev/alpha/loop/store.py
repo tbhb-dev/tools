@@ -25,6 +25,8 @@ from tbhbdev.alpha.loop import events
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterable
 
+    from tbhbdev.alpha.loop.rules import Rule
+
 
 class ErrorCode(StrEnum):
     MISSING = "missing"
@@ -152,7 +154,11 @@ CREATE TABLE escalations (
     key TEXT PRIMARY KEY REFERENCES actions(key), marker TEXT UNIQUE NOT NULL,
     time INTEGER NOT NULL
 ) STRICT;
-PRAGMA user_version = 2;
+CREATE TABLE shadow_intents (
+    key TEXT NOT NULL REFERENCES actions(key),
+    repository TEXT NOT NULL, rule TEXT NOT NULL, PRIMARY KEY (key, repository)
+) STRICT;
+PRAGMA user_version = 3;
 """
 # Keep SQL beside the schema. SQLite keywords and identifiers ignore case.
 _SQL = {
@@ -171,6 +177,16 @@ _SQL = {
     "transition": (
         "UPDATE actions SET state = ?, started_time = ?, finished_time = ?, "
         "result = ? WHERE key = ? AND state = ?"
+    ),
+    "shadow_intent": (
+        "INSERT INTO shadow_intents SELECT ?, ?, ? WHERE EXISTS "
+        "(SELECT 1 FROM actions WHERE key = ? AND state = 'shadow') "
+        "ON CONFLICT(key, repository) DO NOTHING"
+    ),
+    "shadow_records": (
+        "SELECT shadow_intents.key, repository, rule FROM shadow_intents "
+        "JOIN actions USING (key) WHERE actions.state = 'shadow' "
+        "ORDER BY key, repository"
     ),
     "crashed": (
         "SELECT key FROM actions WHERE state = 'intent' "
@@ -215,6 +231,7 @@ _TABLE_CHECKS = (
     ),
     "SELECT name, host, harness, model, key, outcome FROM runs LIMIT 0",
     "SELECT key, marker, time FROM escalations LIMIT 0",
+    "SELECT key, repository, rule FROM shadow_intents LIMIT 0",
 )
 type _ActionRow = tuple[str, str, int, int | None, int | None, str | None]
 
@@ -278,6 +295,13 @@ class Action:
 
 
 @dataclass(frozen=True)
+class ShadowIntent:
+    key: str
+    repository: str
+    rule: Rule
+
+
+@dataclass(frozen=True)
 class RunRecord:
     name: str
     host: str
@@ -317,7 +341,10 @@ def count_rows(
     actions: Iterable[tuple[str, str]],
     runs: Iterable[tuple[str, str]],
 ) -> Counts:
-    """Aggregate validated action and run rows without reading the store."""
+    """Aggregate validated action and run rows without reading the store.
+
+    retries is a presence flag: unique action keys allow retry:<object> once.
+    """
     failures: dict[str, int] = {}
     for key, state in actions:
         family = _family(key)
@@ -406,7 +433,7 @@ class Store:
                     raise StoreError(ErrorCode.CORRUPT)  # noqa: TRY301 -- close on every failed open
                 if path == ":memory:" or mode != OpenMode.OPEN:
                     db.executescript(_SCHEMA)
-                if db.execute(_SQL["version"]).fetchone() != (2,):
+                if db.execute(_SQL["version"]).fetchone() != (3,):
                     raise StoreError(ErrorCode.CORRUPT)  # noqa: TRY301 -- close on every failed open
                 for statement in _TABLE_CHECKS:
                     db.execute(statement)
@@ -579,6 +606,53 @@ class Store:
             )
             if updated.rowcount != 1:
                 raise TransitionError
+
+    def record_shadow(self, intent: ShadowIntent, time: int) -> bool:
+        """Atomically claim an intent and its report dimensions, without PR state."""
+        _text(intent.key, _KEY)
+        _text(intent.repository, events.REPOSITORY)
+        _text(intent.rule, r"R(?:[0-9]|1[01])")
+        _time(time)
+        with self._transaction(immediate=True) as db:
+            claimed = db.execute(_SQL["intent"], (intent.key, ActionState.SHADOW, time))
+            db.execute(
+                _SQL["shadow_intent"],
+                (intent.key, intent.repository, intent.rule, intent.key),
+            )
+            return claimed.rowcount == 1
+
+    def shadow_intents(self) -> tuple[ShadowIntent, ...]:
+        with self._transaction() as db:
+            return tuple(
+                ShadowIntent(*row) for row in db.execute(_SQL["shadow_records"])
+            )
+
+    def score_shadow(self, key: str, time: int, result: Result) -> bool:
+        """Score once; no_change stays provisional for a later reconcile read.
+
+        The read and conditional update share an immediate transaction, as in
+        transition. Final scores cannot be overwritten or counted twice.
+        """
+        _text(key, _KEY)
+        _time(time)
+        _enum(result, Result)
+        if result not in {Result.AGREE, Result.DISAGREE, Result.NO_CHANGE}:
+            raise TransitionError
+        with self._transaction(immediate=True) as db:
+            previous = self._action(db, key)
+            if previous is None or previous.state != ActionState.SHADOW:
+                raise TransitionError
+            if time < max(previous.intent_time, previous.finished_time or 0):
+                raise TransitionError
+            if previous.result in {Result.AGREE, Result.DISAGREE}:
+                return False
+            updated = db.execute(
+                _SQL["transition"],
+                (ActionState.SHADOW, None, time, result, key, ActionState.SHADOW),
+            )
+            if updated.rowcount != 1:
+                raise TransitionError
+            return True
 
     def crashed_intents(self) -> tuple[str, ...]:
         with self._transaction() as db:

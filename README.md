@@ -106,7 +106,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `session-context` is a Claude Code SessionStart hook that reports the host, its role, the other hosts, and the local time.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
 - `merge` squash-merges an approved pull request.
-- `loop` validates its user configuration and refuses to run until a later slice adds the shadow runner. The package includes pure state derivation and rules that produce typed shadow intents with action keys and spawn budgets. A SQLite store records receipts, action keys, runs, and escalation markers.
+- `loop` validates its user configuration and refuses live intake until adapters connect the runner to its sources. Its shadow runner accepts typed event and reconcile interfaces for simulation. The package includes pure state derivation and rules that produce typed shadow intents with action keys and spawn budgets. A SQLite store records receipts, action keys, runs, and escalation markers.
 - `install` installs the git hooks and the user-level harness hooks.
 
 Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does three things:
@@ -158,6 +158,14 @@ spawn_cap_total = 4
 spawn_cap_per_host = 2
 daily_spawn_cap = 20
 hosts = ["example-host-a", "example-host-b"]
+allow_claude_retry = false
+
+[loop.rule_modes."example-org/example-repo"]
+R0 = "shadow"
+R1 = "shadow"
+R2 = "shadow"
+R4 = "shadow"
+R9 = "shadow"
 ```
 
 The settings have these constraints:
@@ -168,17 +176,23 @@ The settings have these constraints:
 - `store_path` is a non-blank path string without a null byte. After expanding `~`, it must be absolute.
 - The interval and caps are positive integers. Booleans and fractional values fail. The spawn caps cover the total and each host. `spawn_cap_per_host` must not exceed `spawn_cap_total`. The daily cap covers spawns per day.
 
-This slice only validates configuration. Even with valid settings, the command exits with status 1 and reports that the shadow runner isn't available. It doesn't create a store or execute an approval or other action.
+`allow_claude_retry` is an optional boolean, defaulting to false. R8 retries on Codex unless this flag permits a timed-out or unknown Codex run to retry on Claude. It still needs configured host and harness capacity. `rule_modes` is an optional table of configured repositories, each containing R0 through R11 with values `off`, `shadow`, or `on`. Unlisted rules are off. The runner rejects every `on` mode with `LiveModeError` at startup. Live execution isn't implemented.
 
-The store API takes the configured `store_path` with no default. `Store(path)` opens an existing database. Use `OpenMode.CREATE` for a new one. One connection uses write-ahead logging, full synchronization, a five-second busy timeout, and owner-only file permissions. The parent directory must be private and must not be a symlink. A sibling `<store_path>.lock` file excludes a second opener for the store's lifetime, including during a rebuild. `:memory:` supports isolated tests. Only the future runner writes through this API. No table stores pull request state.
+Even with valid settings, the command exits with status 1 and reports that the shadow runner exists but live intake isn't wired yet. It doesn't create a store or execute an approval or other action. The Python runner accepts `EventSource`, `ReconcileReader`, `PeerAgent`, `GitHubWriter`, and `Approval` protocols, with fakes in the tests. Intake supplies validated receipts and immutable observations from each delivered event and verified context. Reconcile reads supply fresh facts and typed evidence of completed effects.
+
+`Runner.run` reconciles before consuming deliveries. R0 gates reconcile reads by rule mode, schedule, and quota reserve. The runner records each intent with state `shadow` and appends a JSON line with the receipt or sweep identifier, derived state, rule, key, kind, and outcome. Replayed deliveries and restarts use the same keys, while fresh observations supply PR state. The runner never calls an effect interface.
+
+Each sweep compares prior intents with head-bound approvals, merges, reviewer runs, and typed effect observations. `score_shadow` records `agree`, `disagree`, or `no_change` in an immediate transaction. Final comparisons are immutable. A later sweep can replace `no_change` with a final score. `Runner.report()` returns counts by rule and repository, plus the count of R9 items it would have written. Twenty final scores make a rule eligible for promotion review. Provisional `no_change` scores don't count. Disagreements still need explanation before promotion, and Phase 0 rejects live modes regardless of score.
+
+The store API takes the configured `store_path` with no default. `Store(path)` opens an existing database. Use `OpenMode.CREATE` for a new one. One connection uses write-ahead logging, full synchronization, a five-second busy timeout, and owner-only file permissions. The parent directory must be private and must not be a symlink. A sibling `<store_path>.lock` file excludes a second opener for the store's lifetime, including during a rebuild. `:memory:` supports isolated tests. Only the runner writes through this API. No table stores pull request state.
 
 `record_intent(key, time)` claims a new key and returns false when a live key already exists. A live intent replaces an existing shadow row. Promotion resets its timestamps and result. `existing_keys()` excludes shadow rows. `shadow_keys()` supplies them separately. An action advances from `intent` to `started`, then `done` or `failed`. The store serializes transition reads and writes in one transaction. Invalid transitions and state/result pairs raise `TransitionError`. Done actions require `ok`. Failed actions require `error`, `timeout`, or `refused`. A shadow row can persist a runner-supplied `agree`, `disagree`, or `no_change` result without becoming live. The store doesn't compute shadow scores.
 
 Receipts and identifiers reject values outside their patterns. Duplicate delivery ids return `duplicate` without replacing the first receipt: this means seen, not processed. `crashed_intents()` supplies keys that have no start. `unfinished_starts()` supplies started keys without a terminal result. Both need recovery reads before a retry. `record_escalation()` returns the marker and whether it created the row. `stopped_objects()` derives the rules' stopped objects from live escalation and stop keys.
 
-`counts(object_key)` returns failure totals by key family across heads. Families keep the action kind, object, and any step or reason. Review totals include every verdict. The runner combines them with approvals from reads to fill the rules' `reviewer_runs_without_approval` input. Retry counts use recorded runs under `retry:<run>`. Shadow keys contribute neither failures nor run counts. The counts and existing keys feed the rules without changing their input types.
+`counts(object_key)` returns failure totals by key family across heads. Families keep the action kind, object, and any step or reason. Review totals include every verdict. The runner combines them with approvals from reads to fill the rules' `reviewer_runs_without_approval` input. Retry counts use recorded runs under `retry:<run>`. This count is a presence flag because action keys are unique. Shadow keys contribute neither failures nor run counts. The counts and existing keys feed the rules without changing their input types.
 
-`StoreError` reports a missing, corrupt, or locked database. Schema version 2 adds state and result constraints. Older stores require an explicit rebuild. To rebuild it, stop the loop and open the store with `OpenMode.REBUILD`. Rebuilding discards the database and its sidecars. The lock remains acquired throughout the rebuild. `Recovery.KEYS_LOST` tells the runner that it no longer has previous action keys. The runner must reconcile before taking more work. Database errors fail the operation and close unreadable or damaged connections before another operation can use them.
+`StoreError` reports a missing, corrupt, or locked database. Schema version 3 adds shadow intent dimensions for reports. Older stores require an explicit rebuild. To rebuild it, stop the loop and open the store with `OpenMode.REBUILD`. Rebuilding discards the database and its sidecars. The lock remains acquired throughout the rebuild. `Recovery.KEYS_LOST` tells the runner that it no longer has previous action keys. The runner must reconcile before taking more work. Database errors fail the operation and close unreadable or damaged connections before another operation can use them.
 
 The pure rules table requires a spawned reviewer's approval at the current green head and a complete diff read. Mechanical approval is undecided and defaults off in `RepositoryPolicy.mechanical_approval`. An explicit opt-in permits only an agent-opened PR with an exact configured template match. PRs opened by the loop process remain excluded. R1 skips loop-origin PRs that the loop can't approve. The caller must recompute `mechanical_template_matches`, `verification_passed`, and all other head-bound observations for the current head. Until the caller verifies the base repository, the rules skip the PR, including escalation. Pending signatures and pending CI have no rule or age timeout in this slice. R8 uses `stop:<run>` when capacity can't supply a retry target and reserves `retry:<run>` for a retry with a target. Escalation emits at most one intent per object per call and skips stopped objects.
 
