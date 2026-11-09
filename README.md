@@ -100,6 +100,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 `tbhbdev alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`:
 
 - `identity` records which agent and model made each edit and writes the `Generated-by` trailers.
+- `guard-op` requires the configured `[op] account` flag on shell calls and proposed writes in every directory. `PreToolUse` covers Claude `Bash` and `Write|Edit|MultiEdit|NotebookEdit`, Codex `Bash`/`apply_patch` and Antigravity `run_command`/edit tools. The guard scans shell files, Markdown shell fences, Python command expressions, notebook code cells, and YAML command fields. It allows unrelated edits to existing offenders. `OP_ACCOUNT` alone doesn't pass the guard. Known gaps include script files run by path, variable or alias indirection, `python -c` and other wrappers.
 - `guard-gh-pr` is a PreToolUse hook that blocks `gh pr create`, `gh pr edit` and `gh pr merge`.
 - `state-guard` is a Claude Code hook that blocks a status claim with no evidence in a SendMessage call or a final reply, and a `git commit` that adds a sign-off or co-author trailer.
 - `session-context` is a Claude Code SessionStart hook that reports the host, its role, the other hosts, and the local time.

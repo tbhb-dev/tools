@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from tbhbdev.alpha import (
     guard_gh_pr,
+    guard_op,
     identity,
     install,
     loop,
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "guard_gh_pr",
+    "guard_op",
     "identity",
     "install",
     "loop",
@@ -43,6 +45,7 @@ commands:
                | consume | check MSGFILE | stamp-docs
   guard-gh-pr  PreToolUse hook: block gh pr create|edit|merge and
                a session's approval of a pull request it opened
+  guard-op     PreToolUse hook: require the configured 1Password account
   state-guard  Claude Code hook: block status claims that carry no evidence
   session-context
                SessionStart hook: name the host, the other hosts and the time
@@ -62,6 +65,10 @@ def identity_command(argv: list[str], _prog: str) -> int:
 
 def guard_command(_argv: list[str], _prog: str) -> int:
     return guard_gh_pr.main()
+
+
+def guard_op_command(_argv: list[str], _prog: str) -> int:
+    return guard_op.main()
 
 
 def state_guard_command(_argv: list[str], _prog: str) -> int:
@@ -101,6 +108,7 @@ def install_command(argv: list[str], prog: str) -> int:
 COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "identity": identity_command,
     "guard-gh-pr": guard_command,
+    "guard-op": guard_op_command,
     "state-guard": state_guard_command,
     "session-context": session_context_command,
     "pr": pr,

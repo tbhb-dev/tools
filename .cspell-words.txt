@@ -33,6 +33,7 @@ docstrings
 dotrepo
 drwx
 dunder
+elts
 enoexec
 execpath
 execv
@@ -87,6 +88,7 @@ noremote
 nosandbox
 onepassword
 onepasswordconnectsdk
+opam
 oxipng
 passwordless
 pidinfo
