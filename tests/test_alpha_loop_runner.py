@@ -519,3 +519,110 @@ def test_delivery_identity_cannot_generate_new_keys_on_replay() -> None:
     assert db.shadow_keys() == frozenset({f"review:{REPO}#7@{HEAD}"})
     assert len(lines(subject)) == 1
     db.close()
+
+
+@pytest.mark.parametrize(
+    ("intent_time", "finished_time", "time"),
+    [
+        (20, None, 19),
+        (10, 20, 19),
+        (10, None, 10),
+        (10, 20, 20),
+    ],
+)
+def test_future_shadow_rows_do_not_block_reconcile(
+    intent_time: int,
+    finished_time: int | None,
+    time: int,
+) -> None:
+    db = store.Store(":memory:")
+    subject = make_runner(db)
+    key = f"review:{REPO}#7@{HEAD}"
+    assert db.record_shadow(store.ShadowIntent(key, REPO, "R1"), intent_time)
+    if finished_time is not None:
+        assert db.score_shadow(key, finished_time, store.Result.NO_CHANGE)
+    before = db.action(key)
+    assert subject.reconcile(Reader(runner.Snapshot(BUDGET, (APPROVED,))), SWEEP, time)
+    assert [line["rule"] for line in lines(subject)] == ["R0", "R4"]
+    if time < (finished_time or intent_time):
+        assert db.action(key) == before
+    else:
+        assert db.action(key) == store.Action(
+            key,
+            store.ActionState.SHADOW,
+            intent_time,
+            None,
+            time,
+            store.Result.AGREE,
+        )
+    db.close()
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        store.Result.OK,
+        store.Result.ERROR,
+        store.Result.TIMEOUT,
+        store.Result.REFUSED,
+        "agree",
+        "untrusted",
+        None,
+    ],
+)
+@pytest.mark.parametrize("intake", [False, True])
+def test_invalid_effect_results_fail_before_any_write(
+    result: object, intake: bool
+) -> None:
+    db = store.Store(":memory:")
+    subject = make_runner(db)
+    key = f"review:{REPO}#7@{HEAD}"
+    assert db.record_shadow(store.ShadowIntent(key, REPO, "R1"), 1)
+    snapshot = runner.Snapshot(
+        BUDGET, (PR,), effects=(runner.Effect(key, cast("store.Result", result)),)
+    )
+    if intake:
+        with pytest.raises(runner.ObservationError, match=r"^invalid_observation$"):
+            subject.intake(replace(delivery(), snapshot=snapshot))
+    else:
+        with pytest.raises(runner.ObservationError, match=r"^invalid_observation$"):
+            subject.reconcile(Reader(snapshot), SWEEP, 2)
+    assert lines(subject) == []
+    assert db.action(key) == store.Action(
+        key, store.ActionState.SHADOW, 1, None, None, None
+    )
+    assert db.shadow_keys() == frozenset({key})
+    assert db.record_receipt(delivery().receipt) == store.DeliveryStatus.RECORDED
+    db.close()
+
+
+def test_reconcile_recovers_intake_interrupted_after_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = store.Store(":memory:")
+    subject = make_runner(db)
+
+    def interrupted(_snapshot: runner.Snapshot, _source: str, _time: int) -> None:
+        message = "synthetic interruption"
+        raise RuntimeError(message)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subject, "_decide", interrupted)
+        with pytest.raises(RuntimeError, match="synthetic interruption"):
+            subject.intake(delivery())
+    assert db.shadow_keys() == frozenset()
+    subject.intake(delivery())
+    assert lines(subject) == []
+    assert subject.reconcile(Reader(runner.Snapshot(BUDGET, (PR,))), SWEEP, 11)
+    assert [line["rule"] for line in lines(subject)] == ["R0", "R1"]
+    db.close()
+
+
+def test_keyless_decline_is_an_observation_on_each_pass() -> None:
+    db = store.Store(":memory:")
+    subject = make_runner(db)
+    reader = Reader(runner.Snapshot(BUDGET, (DECLINED,)))
+    subject.reconcile(reader, SWEEP, 1)
+    subject.reconcile(reader, SWEEP, 2)
+    assert [line["rule"] for line in lines(subject)] == ["R0", "R3", "R10", "R3"]
+    db.close()

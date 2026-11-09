@@ -33,6 +33,7 @@ class ErrorCode(StrEnum):
     EXISTS = "exists"
     IO = "io"
     CORRUPT = "corrupt"
+    SCHEMA_VERSION = "schema_version"
     CLOSED = "closed"
     INVALID = "invalid"
     TRANSITION = "transition"
@@ -48,6 +49,12 @@ class StoreError(Exception):
 class TransitionError(StoreError):
     def __init__(self) -> None:
         super().__init__(ErrorCode.TRANSITION)
+
+
+class SchemaVersionError(StoreError):
+    def __init__(self, found: int) -> None:
+        super().__init__(ErrorCode.SCHEMA_VERSION)
+        self.args = (f"schema version {found}; rebuild required",)
 
 
 class OpenMode(StrEnum):
@@ -188,6 +195,11 @@ _SQL = {
         "JOIN actions USING (key) WHERE actions.state = 'shadow' "
         "ORDER BY key, repository"
     ),
+    "shadow_results": (
+        "SELECT shadow_intents.key, repository, rule, actions.result "
+        "FROM shadow_intents JOIN actions USING (key) "
+        "WHERE actions.state = 'shadow' ORDER BY key, repository"
+    ),
     "crashed": (
         "SELECT key FROM actions WHERE state = 'intent' "
         "AND started_time IS NULL ORDER BY key"
@@ -219,6 +231,7 @@ _SETTINGS = (
     "PRAGMA foreign_keys = ON",
     "PRAGMA synchronous = FULL",
 )
+_SCHEMA_VERSION = 3
 _TABLE_CHECKS = (
     (
         "SELECT delivery_id, time, event, repository, action, sender_login, "
@@ -249,6 +262,16 @@ def _time(value: int) -> None:
 def _enum(value: object, kind: type[StrEnum]) -> None:
     if not isinstance(value, kind):
         raise StoreError(ErrorCode.INVALID)
+
+
+def _shadow_result(value: str | None) -> Result | None:
+    try:
+        result = None if value is None else Result(value)
+    except ValueError:
+        raise StoreError(ErrorCode.CORRUPT) from None
+    if result not in _RESULTS[ActionState.SHADOW]:
+        raise StoreError(ErrorCode.CORRUPT)
+    return result
 
 
 def _family(key: str) -> str:
@@ -427,14 +450,16 @@ class Store:
         try:
             self._open(path, mode)
             with self._transaction() as db:
+                if path != ":memory:" and mode == OpenMode.OPEN:
+                    found = db.execute(_SQL["version"]).fetchone()[0]
+                    if found != _SCHEMA_VERSION:
+                        raise SchemaVersionError(found)
                 for statement in _SETTINGS:
                     db.execute(statement)
                 if db.execute(_SQL["integrity"]).fetchall() != [("ok",)]:
                     raise StoreError(ErrorCode.CORRUPT)  # noqa: TRY301 -- close on every failed open
                 if path == ":memory:" or mode != OpenMode.OPEN:
                     db.executescript(_SCHEMA)
-                if db.execute(_SQL["version"]).fetchone() != (3,):
-                    raise StoreError(ErrorCode.CORRUPT)  # noqa: TRY301 -- close on every failed open
                 for statement in _TABLE_CHECKS:
                     db.execute(statement)
         except FileNotFoundError:
@@ -627,11 +652,23 @@ class Store:
                 ShadowIntent(*row) for row in db.execute(_SQL["shadow_records"])
             )
 
+    def shadow_results(self) -> tuple[tuple[ShadowIntent, Result | None], ...]:
+        """Read report dimensions and scores from one SQLite snapshot."""
+        with self._transaction() as db:
+            return tuple(
+                (
+                    ShadowIntent(key, repo, rule),
+                    _shadow_result(result),
+                )
+                for key, repo, rule, result in db.execute(_SQL["shadow_results"])
+            )
+
     def score_shadow(self, key: str, time: int, result: Result) -> bool:
         """Score once; no_change stays provisional for a later reconcile read.
 
         The read and conditional update share an immediate transaction, as in
         transition. Final scores cannot be overwritten or counted twice.
+        A clock behind a stored timestamp leaves the row unchanged for a later sweep.
         """
         _text(key, _KEY)
         _time(time)
@@ -643,7 +680,7 @@ class Store:
             if previous is None or previous.state != ActionState.SHADOW:
                 raise TransitionError
             if time < max(previous.intent_time, previous.finished_time or 0):
-                raise TransitionError
+                return False
             if previous.result in {Result.AGREE, Result.DISAGREE}:
                 return False
             updated = db.execute(

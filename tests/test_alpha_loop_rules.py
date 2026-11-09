@@ -15,6 +15,7 @@ from tbhbdev.alpha.loop.rules import (
     PRArguments,
     PullRequest,
     RepositoryPolicy,
+    Rule,
     Run,
     RunArguments,
     RunState,
@@ -1025,3 +1026,27 @@ def test_disabled_rerun_leaves_notice_available() -> None:
     assert decide(
         Inputs(BUDGET, (candidate,), disabled_rules=frozenset({(REPO, "R11")}))
     ) == (Intent("R10", "fixed", notice("ci_red"), replace(ARGS, reason="ci_red")),)
+
+
+@pytest.mark.parametrize("off", ["R2", "R3", "R4", "R5", "R7", "R10"])
+def test_off_fixed_intents_cannot_suppress_active_rules(off: Rule) -> None:
+    # Fixed-rule keys are disjoint, and keyless R3 never deduplicates another
+    # intent. Filtering these modes at the runner leaves active decisions intact.
+    prs = (
+        PASSED,
+        DECLINED,
+        APPROVED,
+        replace(
+            MERGED,
+            verification_passed=True,
+            policy=replace(PR.policy, follow_up_steps=("publish",)),
+        ),
+    )
+    inputs = Inputs(BUDGET, prs, (replace(RUN, state="finished"),))
+    baseline = decide(inputs)
+    disabled = frozenset({(REPO, off), (RUN.name, off)})
+    result = decide(replace(inputs, disabled_rules=disabled))
+    assert any(intent.rule == off for intent in baseline)
+    assert tuple(intent for intent in result if intent.rule != off) == tuple(
+        intent for intent in baseline if intent.rule != off
+    )

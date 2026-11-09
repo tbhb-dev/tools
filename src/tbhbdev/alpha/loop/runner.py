@@ -121,6 +121,13 @@ class Runner:
         )
 
     def _validate(self, snapshot: Snapshot) -> None:
+        if any(
+            not isinstance(effect.result, store.Result)
+            or effect.result
+            not in {store.Result.AGREE, store.Result.DISAGREE, store.Result.NO_CHANGE}
+            for effect in snapshot.effects
+        ):
+            raise ObservationError
         repositories = {pr.repository for pr in snapshot.pull_requests} | {
             observed.repository for observed in snapshot.runs
         }
@@ -249,8 +256,9 @@ class Runner:
             or delivery.snapshot.runs
         ):
             raise ObservationError
-        # Reconcile recovers partial intake. A redelivery cannot replace the
-        # first receipt's identity or generate keys from different observations.
+        # A receipt means seen, not processed. Reconcile can recover decisions
+        # still supported by fresh facts, when R0 is enabled for this repository.
+        # A redelivery cannot replace the first receipt's identity.
         if self.database.record_receipt(receipt) == store.DeliveryStatus.DUPLICATE:
             return
         self._decide(delivery.snapshot, receipt.delivery_id, receipt.time)

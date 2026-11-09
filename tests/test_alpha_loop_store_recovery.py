@@ -451,7 +451,7 @@ os._exit(0)
     Path(f"{path}-shm").unlink()
     with pytest.raises(StoreError) as error:
         Store(path)
-    assert error.value.code == ErrorCode.CORRUPT
+    assert error.value.code == ErrorCode.SCHEMA_VERSION
     rebuilt = Store(path, mode=OpenMode.REBUILD)
     try:
         assert rebuilt.existing_keys() == frozenset()
@@ -469,12 +469,19 @@ def test_shadow_result_cannot_reverse_finished_time(database: Store) -> None:
     )
 
 
-def test_prior_schema_requires_explicit_rebuild(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [0, 1, 2, 4])
+def test_prior_schema_requires_explicit_rebuild(tmp_path: Path, version: int) -> None:
     path = tmp_path / "example.sqlite3"
     database = Store(path, mode=OpenMode.CREATE)
     database.close()
     with closing(sqlite3.connect(path)) as connection:
-        connection.execute("PRAGMA user_version = 1")
+        connection.execute("PRAGMA journal_mode = DELETE")
+        connection.execute(f"PRAGMA user_version = {version}")
+    before = path.read_bytes()
     with pytest.raises(StoreError) as error:
         Store(path)
-    assert error.value.code == ErrorCode.CORRUPT
+    assert error.value.code == ErrorCode.SCHEMA_VERSION
+    assert str(error.value) == f"schema version {version}; rebuild required"
+    assert path.read_bytes() == before
+    assert not Path(f"{path}-wal").exists()
+    assert not Path(f"{path}-shm").exists()

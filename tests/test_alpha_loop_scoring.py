@@ -32,7 +32,13 @@ from tbhbdev.alpha.loop import runner, scoring, store
             "R1",
             f"review:{REPO}#7@{HEAD}",
             replace(PR, head_sha="b" * 40),
-            store.Result.DISAGREE,
+            store.Result.NO_CHANGE,
+        ),
+        (
+            "R2",
+            f"approve:{REPO}#7@{HEAD}",
+            replace(APPROVED, head_sha="b" * 40),
+            store.Result.NO_CHANGE,
         ),
         (
             "R4",
@@ -96,21 +102,69 @@ def test_report_groups_rules_and_repositories_without_counting_no_change_as_fina
     db.close()
 
 
-def test_missing_action_fails_report_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    db = store.Store(":memory:")
-    assert db.record_shadow(store.ShadowIntent(f"merge:{REPO}#7@{HEAD}", REPO, "R4"), 1)
-
-    def missing(_key: str) -> None:
-        return None
-
-    monkeypatch.setattr(db, "action", missing)
-    with pytest.raises(store.StoreError) as caught:
-        scoring.summarize(db)
-    assert caught.value.code == store.ErrorCode.CORRUPT
-    db.close()
-
-
 def test_scoring_searches_past_unrelated_objects() -> None:
     intent = store.ShadowIntent(f"merge:{REPO}#7@{HEAD}", REPO, "R4")
     snapshot = runner.Snapshot(BUDGET, (replace(PR, number=8), MERGED))
     assert scoring.score(intent, snapshot) == store.Result.AGREE
+
+
+@pytest.mark.parametrize(
+    ("agree", "disagree", "eligible", "review"),
+    [
+        (20, 0, True, False),
+        (19, 0, False, False),
+        (0, 20, True, True),
+        (19, 1, True, True),
+        (20, 1, True, True),
+    ],
+)
+def test_promotion_requires_separate_disagreement_review(
+    agree: int,
+    disagree: int,
+    eligible: bool,
+    review: bool,
+) -> None:
+    counts = scoring.RuleCounts(REPO, "R2", agree + disagree, agree, disagree, 0, 0)
+    assert counts.eligible is eligible
+    assert counts.needs_review is review
+
+
+def test_empty_report() -> None:
+    db = store.Store(":memory:")
+    assert scoring.summarize(db) == scoring.Summary((), 0)
+    db.close()
+
+
+def test_report_sorts_repository_ties_then_natural_rule_order() -> None:
+    db = store.Store(":memory:")
+    for repo in ("example-org/z-repo", REPO):
+        for rule, key in (
+            ("R10", f"notify:{repo}#1@{HEAD}:ci_red"),
+            ("R2", f"approve:{repo}#1@{HEAD}"),
+        ):
+            assert db.record_shadow(store.ShadowIntent(key, repo, rule), 1)
+    assert [(row.repository, row.rule) for row in scoring.summarize(db).counts] == [
+        (REPO, "R2"),
+        (REPO, "R10"),
+        ("example-org/z-repo", "R2"),
+        ("example-org/z-repo", "R10"),
+    ]
+    db.close()
+
+
+def test_summary_reads_one_statement_snapshot() -> None:
+    trace: list[str] = []
+    db = store.Store(":memory:")
+    connection = db._connection  # noqa: SLF001 -- trace SQL at the report boundary
+    assert connection is not None
+    connection.set_trace_callback(trace.append)
+    for number in (1, 2):
+        key = f"approve:{REPO}#{number}@{HEAD}"
+        assert db.record_shadow(store.ShadowIntent(key, REPO, "R2"), 1)
+    trace.clear()
+    assert scoring.summarize(db).counts == (
+        scoring.RuleCounts(REPO, "R2", 2, 0, 0, 0, 2),
+    )
+    assert len(trace) == 1
+    assert "JOIN actions" in trace[0]
+    db.close()

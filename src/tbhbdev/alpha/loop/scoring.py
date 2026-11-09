@@ -1,4 +1,9 @@
-"""Pure comparisons and typed shadow counts; no cached object state."""
+"""Phase 0 comparisons and shadow counts; no cached object state.
+
+PR facts can establish AGREE only for R1, R2, R4 and R5; R0 agrees on a sweep.
+R6 through R11 need explicit effect evidence to reach AGREE. A PR absent from
+the snapshot stays NO_CHANGE, as does an intent superseded by a new head.
+"""
 
 # cspell:words unscored
 
@@ -7,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from tbhbdev.alpha.loop import store
+from tbhbdev.alpha.loop import rules, store
 
 if TYPE_CHECKING:
     from tbhbdev.alpha.loop.rules import PullRequest, Rule
@@ -28,6 +33,10 @@ class RuleCounts:
     def eligible(self) -> bool:
         return eligible(self.agree + self.disagree)
 
+    @property
+    def needs_review(self) -> bool:
+        return self.disagree > 0
+
 
 @dataclass(frozen=True)
 class Summary:
@@ -42,7 +51,8 @@ def eligible(scored_intents: int) -> bool:
     """Twenty final comparisons qualify for review; disagreements need explanation.
 
     no_change is provisional and does not count toward promotion. This predicate
-    grants no authority to enable a rule; Phase 0 still refuses every on mode.
+    is necessary, not sufficient: disagreements need review. It grants no
+    authority to enable a rule; Phase 0 still refuses every on mode.
     """
     return scored_intents >= MIN_SCORED_INTENTS
 
@@ -59,7 +69,7 @@ def score(intent: store.ShadowIntent, snapshot: Snapshot) -> store.Result:
         if obj.split("@")[0] != base:
             continue
         if "@" in obj and obj.split("@")[1] != pr.head_sha:
-            return store.Result.DISAGREE
+            return store.Result.NO_CHANGE
         return _score_pr(intent.rule, pr)
     return store.Result.NO_CHANGE
 
@@ -78,11 +88,8 @@ def _score_pr(rule: Rule, pr: PullRequest) -> store.Result:
 
 def summarize(database: store.Store) -> Summary:
     groups: dict[tuple[str, Rule], list[store.Result | None]] = {}
-    for intent in database.shadow_intents():
-        action = database.action(intent.key)
-        if action is None:
-            raise store.StoreError(store.ErrorCode.CORRUPT)
-        groups.setdefault((intent.repository, intent.rule), []).append(action.result)
+    for intent, result in database.shadow_results():
+        groups.setdefault((intent.repository, intent.rule), []).append(result)
     counts = tuple(
         RuleCounts(
             repo,
@@ -93,6 +100,9 @@ def summarize(database: store.Store) -> Summary:
             results.count(store.Result.NO_CHANGE),
             results.count(None),
         )
-        for (repo, rule), results in sorted(groups.items())
+        for repo, rule in sorted(
+            groups, key=lambda group: (group[0], rules.RULES.index(group[1]))
+        )
+        for results in (groups[repo, rule],)
     )
     return Summary(counts, sum(item.intents for item in counts if item.rule == "R9"))
