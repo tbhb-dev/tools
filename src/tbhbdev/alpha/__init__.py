@@ -4,7 +4,7 @@ Alpha commands are interim. They may change or go away without notice, and
 only the tbhb-dev harness hooks and agents in tbhb-dev repositories should
 call them.
 
-The harness hooks run on every tool call, so this module imports pr and merge,
+The harness hooks run on every tool call, so this module imports pr, review and merge,
 which load yaml and jsonschema, only when one of them runs.
 """
 
@@ -61,6 +61,7 @@ commands:
   pr           check | create | edit | hook: the pull request draft
                | backfill-opened OWNER: the opened ledgers
                | close N --reason TEXT: close a pull request
+  review       draft N [--force] | check N: the review draft
   issue        close N --reason completed|not-planned: close an issue
   repo         bootstrap [--dry-run] [--create --private|--public] ORG/REPO:
                apply the standard repository settings
@@ -105,6 +106,12 @@ def pr(argv: list[str], prog: str) -> int:
     return pull_request.main(argv, prog=prog)
 
 
+def review_command(argv: list[str], prog: str) -> int:
+    from tbhbdev.alpha import review  # noqa: PLC0415 -- see the docstring
+
+    return review.main(argv, prog=prog)
+
+
 def issue(argv: list[str], prog: str) -> int:
     from tbhbdev.alpha import close  # noqa: PLC0415 -- see the docstring
 
@@ -137,6 +144,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "gh-shim": gh_shim.main,
     "agent-env": gh_shim.agent_env,
     "pr": pr,
+    "review": review_command,
     "issue": issue,
     "repo": repo_command,
     "merge": merge,
