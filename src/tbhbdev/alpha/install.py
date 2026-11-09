@@ -33,9 +33,17 @@ The paths and hook formats come from each harness's documentation:
 https://code.claude.com/docs/en/settings and
 https://code.claude.com/docs/en/hooks for Claude Code,
 https://learn.chatgpt.com/docs/hooks for Codex ("Where Codex looks for
-hooks"; Codex runs a new hook only after `/hooks` trusts it), and
+hooks"; Codex runs a hook only when `config.toml` trusts its hash), and
 https://antigravity.google/docs/hooks?tab=cli for Antigravity ("hooks.json
 File Locations").
+
+Codex runs a hook only when `config.toml` holds a trusted hash for it, so
+after the Codex merge this command sets `[hooks.state."<key>"].trusted_hash`
+there for each Codex hook it wrote, and for no other hook (see codex_trust). The
+file is backed up and replaced like the other configs, a new one is private
+(mode 0600), an invalid one is reported and left alone, and a run that changes
+nothing writes nothing. Each Codex hook has an explicit timeout, so the hash
+covers what is on disk.
 
 Claude Code also gets two hooks with optional `[harness]` settings in the
 tbhbdev user config (see tbhbdev.userconfig): `alpha state-guard`, on
@@ -77,6 +85,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from tbhbdev import plugins
+from tbhbdev.alpha import codex_trust
 from tbhbdev.alpha.identity import codex_home
 from tbhbdev.alpha.repo import (
     TBHB_DEV_ORIGIN_ERE,
@@ -129,6 +138,9 @@ AGY_EDITS = (
 AGY_TIMEOUT = 30
 AGY_PR_TIMEOUT = 120
 HARNESS_TIMEOUT = 10
+# Codex's documented default hook timeout, written out so the trusted hash covers
+# exactly what is on disk.
+CODEX_TIMEOUT = 600
 
 # Without tbhbdev on PATH, a shim blocks the commit only when origin is a
 # tbhb-dev repository, by the same pattern as repo.is_tbhb_dev_url. A newline
@@ -214,18 +226,18 @@ def claude_hooks() -> dict[str, list[Json]]:
 
 def codex_hooks() -> dict[str, list[Json]]:
     """Codex's hooks, the ones the tbhb-dev repositories used to carry."""
-    record = handler("identity record codex")
+    record = handler("identity record codex", CODEX_TIMEOUT)
     return {
         "SessionStart": [group(None, record)],
         "SubagentStart": [group(None, record)],
         "PostToolUse": [
             group("apply_patch", record),
-            group("apply_patch", handler("pr hook codex")),
+            group("apply_patch", handler("pr hook codex", CODEX_TIMEOUT)),
         ],
         "PreToolUse": [
-            group("^Bash$", handler("guard-gh-pr")),
-            group("^(Bash|shell)$", handler("guard-op")),
-            group("apply_patch", handler("guard-op")),
+            group("^Bash$", handler("guard-gh-pr", CODEX_TIMEOUT)),
+            group("^(Bash|shell)$", handler("guard-op", CODEX_TIMEOUT)),
+            group("apply_patch", handler("guard-op", CODEX_TIMEOUT)),
         ],
     }
 
@@ -344,18 +356,25 @@ def merged_config(harness: str, config: Json) -> Json:
     return merge_groups(config, agy_hooks())
 
 
+def read_text(path: Path) -> str | None:
+    """A config's text, None when it is missing."""
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        message = f"it cannot be read ({exc})"
+        raise InstallError(message) from exc
+
+
 def read_config(path: Path) -> tuple[str | None, Json]:
     """A config's text (None when missing) and its object.
 
     An empty or whitespace-only config is the empty object.
     """
-    try:
-        text = path.read_text()
-    except FileNotFoundError:
+    text = read_text(path)
+    if text is None:
         return None, {}
-    except (OSError, UnicodeDecodeError) as exc:
-        message = f"it cannot be read ({exc})"
-        raise InstallError(message) from exc
     if not text.strip():
         return text, {}
     try:
@@ -435,8 +454,68 @@ def write_config(
     return backup
 
 
+def print_diff(path: Path, old: str | None, new: str) -> None:
+    """Print the unified diff from OLD (None when missing) to NEW."""
+    before = [] if old is None else old.splitlines(keepends=True)
+    diff = difflib.unified_diff(
+        before, new.splitlines(keepends=True), str(path), str(path)
+    )
+    print("".join(diff), end="")
+
+
+def write_merged(
+    harness: str, path: Path, old: str | None, merged: Json, *, dry_run: bool
+) -> int:
+    """Write a harness's merged config, or print its diff on a dry run."""
+    new = json.dumps(merged, indent=2) + "\n"
+    if dry_run:
+        print_diff(path, old, new)
+        return 0
+    try:
+        backup = write_config(path, old, new)
+    except InstallError as exc:
+        print(f"{PROG}: {harness}: cannot write {path}: {exc}", file=sys.stderr)
+        return 1
+    saved = f"; the old one is {backup}" if backup else ""
+    print(f"{harness}: wrote {path}{saved}")
+    return 0
+
+
+def trust_codex_hooks(
+    hooks_path: Path, merged: Json, env: Mapping[str, str], *, dry_run: bool
+) -> int:
+    """Trust each Codex hook of ours in `config.toml`, and only those.
+
+    Codex runs a hook only when `config.toml` holds its hash. A new file is
+    private; an existing one keeps its mode. Any failure leaves it as it was.
+    """
+    path = codex_home(env) / "config.toml"
+    hooks = hooks_path.absolute()
+    wanted = codex_trust.our_hashes(hooks, merged, ours)
+    try:
+        old = read_text(path)
+        new = codex_trust.trusted_text(old, hooks, wanted)
+        if old == new:
+            print(f"codex: {len(wanted)} hooks already trusted in {path}")
+            return 0
+        if dry_run:
+            print_diff(path, old, new)
+            return 0
+        backup = write_config(path, old, new, 0o600 if old is None else None)
+    except (InstallError, ValueError) as exc:
+        print(f"{PROG}: codex: cannot trust hooks in {path}: {exc}", file=sys.stderr)
+        return 1
+    saved = f"; the old one is {backup}" if backup else ""
+    print(f"codex: trusted {len(wanted)} hooks in {path}{saved}")
+    return 0
+
+
 def install_config(harness: str, env: Mapping[str, str], *, dry_run: bool) -> int:
-    """Merge one harness's hooks into its user-level config."""
+    """Merge one harness's hooks into its user-level config.
+
+    Codex's hooks are then trusted in its `config.toml`, whether or not
+    `hooks.json` changed.
+    """
     path = config_path(harness, env)
     try:
         old, config = read_config(path)
@@ -446,25 +525,12 @@ def install_config(harness: str, env: Mapping[str, str], *, dry_run: bool) -> in
         return 1
     if old is not None and merged == config:
         print(f"{harness}: {path} is up to date")
-        return 0
-    new = json.dumps(merged, indent=2) + "\n"
-    if dry_run:
-        before = [] if old is None else old.splitlines(keepends=True)
-        diff = difflib.unified_diff(
-            before, new.splitlines(keepends=True), str(path), str(path)
-        )
-        print("".join(diff), end="")
-        return 0
-    try:
-        backup = write_config(path, old, new)
-    except InstallError as exc:
-        print(f"{PROG}: {harness}: cannot write {path}: {exc}", file=sys.stderr)
-        return 1
-    saved = f"; the old one is {backup}" if backup else ""
-    print(f"{harness}: wrote {path}{saved}")
-    if harness == CODEX:
-        print("codex: review and trust the new hooks with /hooks in Codex")
-    return 0
+        status = 0
+    else:
+        status = write_merged(harness, path, old, merged, dry_run=dry_run)
+    if harness == CODEX and status == 0:
+        status = trust_codex_hooks(path, merged, env, dry_run=dry_run)
+    return status
 
 
 # ------------------------------------------------------------ private files
@@ -488,11 +554,7 @@ def install_private_file(name: str, relative: Path, *, dry_run: bool) -> int:
             print(f"{name}: {path} is up to date")
             return 0
         if dry_run:
-            before = [] if old is None else old.splitlines(keepends=True)
-            diff = difflib.unified_diff(
-                before, text.splitlines(keepends=True), str(path), str(path)
-            )
-            print("".join(diff), end="")
+            print_diff(path, old, text)
             return 0
         backup = write_config(path, old, text, 0o600)
     except (plugins.PluginError, InstallError, OSError) as exc:
