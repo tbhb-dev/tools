@@ -1817,3 +1817,59 @@ def test_main_dry_run_leaves_private_files_unwritten(
         install.main(["--dry-run", "--harness", "claude"], "tbhbdev alpha install") == 0
     )
     assert not (world.home / ".claude" / "CLAUDE.private.md").exists()
+
+
+def test_private_file_backup_is_private_even_when_the_old_file_was_not(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(install, "stamp", lambda: "T")
+    path = world.home / ".claude" / "CLAUDE.private.md"
+    path.parent.mkdir()
+    path.write_text("old\n")
+    path.chmod(0o644)
+    supply(monkeypatch, {"claude-private.md": "new\n"})
+    previous = os.umask(0)
+    try:
+        assert install.install_private_files(dry_run=False) == 0
+    finally:
+        os.umask(previous)
+    backup = path.with_name("CLAUDE.private.md.tbhbdev-backup.T")
+    assert backup.read_text() == "old\n"
+    assert backup.stat().st_mode & 0o777 == 0o600
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_private_file_is_private_from_creation_under_a_loose_umask(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    modes: list[int] = []
+    real_replace = Path.replace
+
+    def spy(self: Path, target: Path) -> Path:
+        modes.append(self.stat().st_mode & 0o777)
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", spy)
+    previous = os.umask(0)
+    try:
+        supply(monkeypatch, {"claude-private.md": "# P\n"})
+        assert install.install_private_files(dry_run=False) == 0
+    finally:
+        os.umask(previous)
+    assert modes == [0o600]
+    assert (
+        world.home / ".claude" / "CLAUDE.private.md"
+    ).stat().st_mode & 0o777 == 0o600
+
+
+def test_write_config_without_a_mode_keeps_the_old_mode_and_its_backup(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(install, "stamp", lambda: "T")
+    path = world.home / "c.json"
+    path.write_text("old\n")
+    path.chmod(0o640)
+    backup = install.write_config(path, "old\n", "new\n")
+    assert backup is not None
+    assert path.stat().st_mode & 0o777 == 0o640
+    assert backup.stat().st_mode & 0o777 == 0o640

@@ -88,6 +88,7 @@ from tbhbdev.alpha.repo import (
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Mapping
+    from typing import IO
 
 type Json = dict[str, object]
 
@@ -371,11 +372,31 @@ def free_name(path: Path) -> Path:
     return found
 
 
-def write_config(path: Path, old: str | None, new: str) -> Path | None:
+def copy_backup(target: Path, backup: Path, mode: int | None) -> None:
+    """Copy TARGET to BACKUP with its mode, or with MODE from the first byte."""
+    if mode is None:
+        shutil.copy2(target, backup)
+        return
+    backup.touch(mode=mode)
+    shutil.copyfile(target, backup)
+
+
+def open_tmp(tmp: Path, mode: int | None) -> IO[str]:
+    """Open the temporary file for writing, created with MODE when given."""
+    if mode is None:
+        return tmp.open("w")
+    return os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode), "w")
+
+
+def write_config(
+    path: Path, old: str | None, new: str, mode: int | None = None
+) -> Path | None:
     """Replace a config atomically, backing up the old one; return the backup.
 
     The new text is synced to disk before it replaces the old. On any failure
-    the temporary file goes, and the OSError becomes an InstallError.
+    the temporary file goes, and the OSError becomes an InstallError. A MODE
+    sets the permissions of the new file and the backup from creation on;
+    without one, both keep the old file's.
     """
     target = path.resolve()
     tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
@@ -385,12 +406,12 @@ def write_config(path: Path, old: str | None, new: str) -> Path | None:
         if old is not None:
             name = f"{target.name}.tbhbdev-backup.{stamp()}"
             backup = free_name(target.with_name(name))
-            shutil.copy2(target, backup)
-        with tmp.open("w") as out:
+            copy_backup(target, backup, mode)
+        with open_tmp(tmp, mode) as out:
             out.write(new)
             out.flush()
             os.fsync(out.fileno())
-        if old is not None:
+        if old is not None and mode is None:
             shutil.copymode(target, tmp)
         tmp.replace(target)
     except OSError as exc:
@@ -461,8 +482,7 @@ def install_private_file(name: str, relative: Path, *, dry_run: bool) -> int:
             )
             print("".join(diff), end="")
             return 0
-        backup = write_config(path, old, text)
-        path.chmod(0o600)
+        backup = write_config(path, old, text, 0o600)
     except (plugins.PluginError, InstallError, OSError) as exc:
         print(f"{PROG}: {name}: cannot install {path}: {exc}", file=sys.stderr)
         return 1
