@@ -42,6 +42,7 @@ execdir
 execpath
 executescript
 execv
+execve
 fakehost
 fakeop
 fakeoperator
