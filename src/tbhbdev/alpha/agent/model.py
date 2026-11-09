@@ -17,8 +17,9 @@ REQUEST_VERSION = 1
 # An identifier that reaches a file name, a tmux session name or an argv: run
 # names, accounts, profiles and the run's class, variant and role.
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
-# A host name, which may be a dotted ssh name.
-HOST_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
+# A host name, which may be a dotted ssh name: lower-case labels joined by dots.
+_HOST_LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+HOST_NAME = re.compile(rf"(?=.{{1,63}}\Z){_HOST_LABEL}(?:\.{_HOST_LABEL})*")
 
 
 class Invalid(ValueError):  # noqa: N818 -- the message names the invalid value

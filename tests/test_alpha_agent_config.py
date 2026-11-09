@@ -20,13 +20,39 @@ REFERENCE_KEYS = [
     f.name for f in dataclasses.fields(model.Credentials) if f.name != "account"
 ]
 NAME_RULE = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
-HOST_RULE = "[A-Za-z0-9][A-Za-z0-9._-]{0,62}"
+HOST_RULE = (
+    r"(?=.{1,63}\Z)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*"
+)
 REFERENCE = "must be a vault/item/field reference"
 PATHS = "must not contain a NUL or '..' part"
 NON_BLANK = "must be a non-blank string"
 STRINGS = "must be a non-empty list of non-blank strings"
 POSITIVE = "must be a positive integer"
-DURATION = "must be bare seconds or a number ending in s, m or h"
+DURATION = "must be bare seconds or a number ending in s, m or h, up to 7 days"
+
+UNSAFE_REFERENCES = [
+    "a b/c/d",
+    "a/b c/d",
+    "a/b/c d",
+    "a/b/c\t",
+    "a/b/c\n",
+    "a/b?x/c",
+    "a/b/c?x",
+    "?a/b/c",
+    "a=1/b/c",
+    "a/b/c=1",
+    "a/b/c\x01",
+    "a/\x7fb/c",
+    "a/b/c\x00",
+    "/b/c",
+    "a/b/",
+    "-a/b/c",
+    "a/.b/c",
+    "a/b/_c",
+    "a/b/é",
+    "a/b/c\uff11",
+]
 
 GOOD: Table = {
     "launch_wait_seconds": 120,
@@ -76,7 +102,7 @@ GOOD: Table = {
             "shell": "bash",
             "account": "agent",
             "unsandboxed": False,
-            "accounts": ["agent", "ops"],
+            "accounts": ["agent"],
         }
     ],
 }
@@ -129,7 +155,7 @@ EXPECTED = model.Settings(
             shell="bash",
             account="agent",
             unsandboxed=False,
-            accounts=("agent", "ops"),
+            accounts=("agent",),
         ),
     ),
 )
@@ -240,6 +266,16 @@ def test_minimal_values_are_valid() -> None:
         ("15m", 900),
         ("1h", 3600),
         ("2h", 7200),
+        (604800, 604800),
+        ("604800", 604800),
+        ("604800s", 604800),
+        ("10080m", 604800),
+        ("168h", 604800),
+        (604801, None),
+        ("604801", None),
+        ("10081m", None),
+        ("169h", None),
+        ("99999999999999h", None),
         ("007", 7),
         ("0", None),
         ("0s", None),
@@ -319,7 +355,7 @@ def _root_errors() -> list[Case]:
     for key in ("launch_wait_seconds", "kill_grace_seconds", "max_run_minutes"):
         for bad in (0, -1, True, "5", 1.5, None, [5]):
             _add(cases, (key,), bad, POSITIVE, root)
-    for bad in (0, "0", "0s", "abc", "", "5d", True, 1.5, [5], None):
+    for bad in (0, "0", "0s", "abc", "", "5d", True, 1.5, [5], None, 604801, "169h"):
         _add(cases, ("agy_timeout",), bad, DURATION, root)
     for key in ("launch_wait_seconds", "agy_timeout", "kill_grace_seconds"):
         _add(cases, (key,), MISSING, "is required", root)
@@ -397,6 +433,8 @@ def _credential_errors() -> list[Case]:
     for key in REFERENCE_KEYS:
         for bad in ("a/b", "a/b/c/d", "a//c", "a/ /c", "", 5, None, "op://a/b/c"):
             _add(cases, ("credentials", "agent", key), bad, REFERENCE, account)
+        for bad in UNSAFE_REFERENCES:
+            _add(cases, ("credentials", "agent", key), bad, REFERENCE, account)
     return cases
 
 
@@ -417,7 +455,7 @@ def _claude_errors() -> list[Case]:
             "[agent.claude.profiles.primary]",
         )
     for key in ("token", "expires"):
-        for bad in ("a/b", "", 5, "a/b/c/d"):
+        for bad in ("a/b", "", 5, "a/b/c/d", *UNSAFE_REFERENCES):
             _add(
                 cases,
                 ("claude", "profiles", "primary", key),
@@ -444,12 +482,28 @@ def _host_errors() -> list[Case]:
         _add(cases, ("host", 0, "name"), bad, NON_BLANK, host)
         _add(cases, ("host", 0, "shell"), bad, NON_BLANK, host)
         _add(cases, ("host", 0, "account"), bad, NON_BLANK, host)
-    for bad in ("-x", "a b", "a" * 64, ".a", "a/b", "é"):
+    names = (
+        "-x",
+        "a b",
+        "a" * 64,
+        ".a",
+        "a.",
+        "a..b",
+        "a.-b",
+        "a-.b",
+        "a.b-",
+        "a/b",
+        "é",
+        "A",
+        "a_b",
+        "a.b\n",
+    )
+    for bad in names:
         _add(cases, ("host", 0, "name"), bad, f"must match {HOST_RULE}", host)
     for bad in ("windows", "Linux", "", 5, None, ["linux"]):
         _add(cases, ("host", 0, "os"), bad, "must be one of linux, macos", host)
-    for bad in ("Bash", "1sh", "a" * 33, "a b", "bash\n", "a.b"):
-        _add(cases, ("host", 0, "shell"), bad, "must match [a-z][a-z0-9_-]{0,31}", host)
+    for bad in ("Bash", "sh", "fish", "a" * 33, "a b", "bash\n", "bash ", "zsh5"):
+        _add(cases, ("host", 0, "shell"), bad, "must be one of bash, zsh", host)
     for bad in ("-x", "a b", "a" * 65, "a.b"):
         _add(cases, ("host", 0, "account"), bad, f"must match {NAME_RULE}", host)
     for bad in ("yes", 1, 0, None, "true"):
@@ -473,6 +527,14 @@ def _host_errors() -> list[Case]:
     )
     cases.append(
         (("host", 0, "accounts"), ["ops"], f"{host} account must be one of accounts")
+    )
+    cases.extend(
+        (
+            ("host", 0, "accounts"),
+            accounts,
+            f"{host} accounts names ops, which has no [agent.credentials.ops]",
+        )
+        for accounts in (["agent", "ops"], ["agent", "ops", "other"])
     )
     return cases
 
@@ -627,7 +689,56 @@ def test_name_limits() -> None:
             {**first, "name": "a" * 63, "account": "b" * 64, "accounts": ["b" * 64]}
         ],
     )
+    table["credentials"] = {"b" * 64: GOOD_ACCOUNT}
     host = config.parse(table).hosts[0]
     assert (len(host.name), len(host.account)) == (63, 64)
-    table = edited("host", value=[{**first, "shell": "a" * 32}])
-    assert len(config.parse(table).hosts[0].shell) == 32
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+def test_a_host_runs_bash_or_zsh(shell: str) -> None:
+    assert config.parse(edited("host", 0, "shell", value=shell)).hosts[0].shell == shell
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "a",
+        "0",
+        "a-b",
+        "a.b",
+        "a.b.c",
+        "example.tail-1234.ts.net",
+        "a-b.c-d",
+        "9.9",
+        "a" * 63,
+        f"{'a' * 30}.{'b' * 32}",
+    ],
+)
+def test_host_names_are_dot_separated_labels(name: str) -> None:
+    table = edited("host", 0, "name", value=name)
+    assert config.parse(table).hosts[0].name == name
+
+
+def test_a_host_may_list_accounts_that_have_credentials() -> None:
+    table = edited("host", 0, "accounts", value=["agent", "ops"])
+    table["credentials"] = {"agent": GOOD_ACCOUNT, "ops": GOOD_ACCOUNT}
+    assert config.parse(table).hosts[0].accounts == ("agent", "ops")
+
+
+def test_every_host_account_needs_credentials() -> None:
+    first = cast("Table", cast("list[object]", GOOD["host"])[0])
+    second = {**first, "name": "other", "account": "ops", "accounts": ["ops", "more"]}
+    table = edited("host", value=[first, second])
+    assert refused(table) == (
+        "[[agent.host]] accounts names ops, which has no [agent.credentials.ops]"
+    )
+    table["credentials"] = {"agent": GOOD_ACCOUNT, "ops": GOOD_ACCOUNT}
+    assert refused(table) == (
+        "[[agent.host]] accounts names more, which has no [agent.credentials.more]"
+    )
+
+
+def test_reference_parts_may_hold_dots_underscores_and_hyphens() -> None:
+    reference = "v-1/i.t_2/F-3.x"
+    table = edited("claude", "profiles", "primary", "token", value=reference)
+    assert config.parse(table).claude.profiles[0].token == reference

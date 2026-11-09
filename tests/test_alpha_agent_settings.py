@@ -63,7 +63,7 @@ os = "linux"
 shell = "bash"
 account = "agent"
 unsandboxed = false
-accounts = ["agent", "ops"]
+accounts = ["agent"]
 
 [[agent.host]]
 name = "example-macos"

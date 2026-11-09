@@ -32,7 +32,8 @@ def parts(argument: str) -> tuple[str, str, str]:
     Raises:
         Invalid: ARGUMENT is absolute, has an empty part or a `..` part, isn't
             `org/repo` or `<git host>/<org>/<repo>`, or has a part that
-            GitHub's name rules or the host name rules refuse.
+            GitHub's name rules or the host name rules refuse, or a repo name
+            is `.` or ends in `.git`.
     """
     if argument.startswith("/"):
         message = f"repo {argument!r} must not be an absolute path"
@@ -59,6 +60,9 @@ def parts(argument: str) -> tuple[str, str, str]:
         if not pattern.fullmatch(text) or text == ".":
             message = f"repo {argument!r} has an invalid {what} {text!r}"
             raise Invalid(message)
+    if name.lower().endswith(".git"):
+        message = f"repo {argument!r} has an invalid name {name!r}"
+        raise Invalid(message)
     return git_host, owner, name
 
 

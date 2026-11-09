@@ -32,25 +32,27 @@ from tbhbdev.alpha.agent.model import (
 
 _DURATION = re.compile(r"([0-9]+)([smh]?)")
 _UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600}
-_PROGRAM = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+_MAX_SECONDS = 7 * 24 * 3600
+_REFERENCE_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _REFERENCE_PARTS = 3
+_PROGRAMS = ("bash", "zsh")
 
 
 def parse_duration(value: object) -> int | None:
-    """The seconds in VALUE, or None when it isn't a positive duration.
+    """The seconds in VALUE, or None when it isn't a duration of 1 s to 7 days.
 
     VALUE is bare seconds, as an integer or a string, or a string such as
     `900s`, `15m` or `1h`.
     """
     if type(value) is int:
-        return value if value > 0 else None
+        return value if 0 < value <= _MAX_SECONDS else None
     if not isinstance(value, str):
         return None
     found = _DURATION.fullmatch(value)
     if found is None:
         return None
     seconds = int(found[1]) * _UNIT_SECONDS[found[2]]
-    return seconds if seconds > 0 else None
+    return seconds if 0 < seconds <= _MAX_SECONDS else None
 
 
 def find_profile(
@@ -122,7 +124,7 @@ class _Table:
     def duration(self, key: str) -> int:
         seconds = parse_duration(self.value(key))
         if seconds is None:
-            why = "must be bare seconds or a number ending in s, m or h"
+            why = "must be bare seconds or a number ending in s, m or h, up to 7 days"
             self.fail(key, why)
         return seconds
 
@@ -135,7 +137,9 @@ class _Table:
     def reference(self, key: str) -> str:
         value = self.value(key)
         parts = value.split("/") if isinstance(value, str) else []
-        if len(parts) != _REFERENCE_PARTS or not all(p.strip() for p in parts):
+        if len(parts) != _REFERENCE_PARTS or not all(
+            _REFERENCE_PART.fullmatch(p) for p in parts
+        ):
             self.fail(key, "must be a vault/item/field reference")
         return str(value)
 
@@ -273,7 +277,9 @@ def _host(table: _Table) -> Host:
     table.only("name", "os", "shell", "account", "unsandboxed", "accounts")
     name = _check_name(table, "name", table.text("name"), HOST_NAME)
     os = table.choice("os", Os)
-    shell = _check_name(table, "shell", table.text("shell"), _PROGRAM)
+    shell = table.text("shell")
+    if shell not in _PROGRAMS:
+        table.fail("shell", f"must be one of {', '.join(_PROGRAMS)}")
     account = _check_name(table, "account", table.text("account"), NAME)
     unsandboxed = table.flag("unsandboxed")
     accounts = table.strings("accounts")
@@ -284,6 +290,18 @@ def _host(table: _Table) -> Host:
     if account not in accounts:
         table.fail("account", "must be one of accounts")
     return Host(name, os, shell, account, unsandboxed, accounts)
+
+
+def _check_host_accounts(settings: Settings) -> None:
+    known = {c.account for c in settings.credentials}
+    for host in settings.hosts:
+        for account in host.accounts:
+            if account not in known:
+                message = (
+                    f"[[agent.host]] accounts names {account}, "
+                    f"which has no [agent.credentials.{account}]"
+                )
+                raise Invalid(message)
 
 
 def parse(agent: dict[str, object]) -> Settings:
@@ -306,7 +324,7 @@ def parse(agent: dict[str, object]) -> Settings:
         "claude",
         "host",
     )
-    return Settings(
+    settings = Settings(
         launch_wait_seconds=root.integer("launch_wait_seconds"),
         agy_timeout_seconds=root.duration("agy_timeout"),
         kill_grace_seconds=root.integer("kill_grace_seconds"),
@@ -320,3 +338,5 @@ def parse(agent: dict[str, object]) -> Settings:
         claude=_claude(root.table("claude")),
         hosts=_hosts(root),
     )
+    _check_host_accounts(settings)
+    return settings
