@@ -12,6 +12,7 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr check [DRAFT]
     tbhbdev alpha pr create [DRAFT] [--dry-run]
     tbhbdev alpha pr edit [DRAFT] --pr N
+    tbhbdev alpha pr ready --pr N
     tbhbdev alpha pr hook claude|codex|antigravity
     tbhbdev alpha pr backfill-opened OWNER
 
@@ -56,6 +57,9 @@ model, say), with a warning. A ledger that can't be written after the pull
 request exists only warns. ``edit`` copies the live body's ``Opened-by`` line unchanged,
 and adds none when the live body has none. ``check`` rejects a draft that
 contains one.
+
+``ready --pr N`` marks pull request N ready for review with ``gh pr ready``. It
+doesn't read a draft.
 
 ``backfill-opened OWNER`` reads the body of every pull request, open or not,
 in every repository of OWNER, and adds each one to the ledger of every
@@ -1154,6 +1158,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("hook").add_argument("harness", choices=[CLAUDE, CODEX, ANTIGRAVITY])
     sub.add_parser("backfill-opened").add_argument("owner")
+    sub.add_parser("ready").add_argument("--pr", type=int, required=True)
     for name in ("check", "create", "edit"):
         one = sub.add_parser(name)
         one.add_argument("draft", nargs="?", type=Path, default=DRAFT)
@@ -1176,4 +1181,8 @@ def main(
         return hook(args.harness)
     if args.command == "backfill-opened":
         return backfill(args.owner)
+    if args.command == "ready":
+        # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
+        # empty body: no test can tell `None` from `""`.
+        return invoke_gh([GH, "pr", "ready", str(args.pr)], "")[0]  # pragma: no mutate
     return command(args, env)
