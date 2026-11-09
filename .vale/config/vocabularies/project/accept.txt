@@ -2,6 +2,7 @@
 [Rr]unbooks?
 agy
 ascm
+awrel
 Bazel
 (?:ci|CI)
 gitleaks

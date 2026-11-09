@@ -1082,6 +1082,7 @@ dependencies = [
     { name = "jsonschema", extra = ["format"] },
     { name = "onepasswordconnectsdk" },
     { name = "pyyaml" },
+    { name = "tomlkit" },
 ]
 
 [package.dev-dependencies]
@@ -1115,6 +1116,7 @@ requires-dist = [
     { name = "jsonschema", extras = ["format"], specifier = ">=4.26.0" },
     { name = "onepasswordconnectsdk", specifier = ">=2.1.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "tomlkit", specifier = ">=0.13.3" },
 ]
 
 [package.metadata.requires-dev]
