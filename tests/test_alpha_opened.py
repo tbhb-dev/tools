@@ -3,19 +3,17 @@
 
 """Tests for the opened ledger and the root session behind a caller."""
 
+import fcntl
 import json
 import os
 import stat
 import subprocess
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
 from tbhbdev.alpha import identity as ai
 from tbhbdev.alpha import opened
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 ROOT = ai.sha256_64("session-raw")
 OTHER = ai.sha256_64("other-raw")
@@ -52,6 +50,82 @@ def test_record_sorts_deduplicates_and_keeps_entries(state: Path) -> None:
     assert opened.read_ledger(ROOT) == {"o/a#1", "o/a#9", "o/b#2"}
     assert opened.read_ledger(OTHER) == set()
     assert (state / "lock").exists()
+
+
+@pytest.mark.parametrize("xdg", [None, ""])
+def test_record_uses_the_home_state_directory_when_xdg_is_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, xdg: str | None
+) -> None:
+    if xdg is None:
+        monkeypatch.delenv("XDG_STATE_HOME")
+    else:
+        monkeypatch.setenv("XDG_STATE_HOME", xdg)
+    opened.record_opened(ROOT, ["o/a#1"])
+    path = (
+        tmp_path
+        / "home"
+        / ".local"
+        / "state"
+        / "tbhbdev"
+        / "tbhb-alpha"
+        / "opened"
+        / f"{ai.hx(ROOT)}.json"
+    )
+    assert json.loads(path.read_text()) == {"prs": ["o/a#1"]}
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_record_replaces_the_whole_ledger_under_the_lock(
+    state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened.record_opened(ROOT, ["o/a#1"])
+    path = opened.ledger_path(ROOT)
+    before = path.read_bytes()
+    replace = Path.replace
+    replaced: list[Path] = []
+
+    def observe(temp: Path, target: Path) -> Path:
+        assert target == path
+        assert temp != path
+        assert temp.parent == path.parent
+        assert stat.S_IMODE(temp.stat().st_mode) == 0o600
+        assert path.read_bytes() == before
+        assert json.loads(temp.read_text()) == {"prs": ["o/a#1", "o/b#2"]}
+        with (
+            (state / "lock").open("a") as handle,
+            pytest.raises(BlockingIOError),
+        ):
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        replaced.append(temp)
+        return replace(temp, target)
+
+    monkeypatch.setattr(Path, "replace", observe)
+    opened.record_opened(ROOT, ["o/b#2"])
+    assert len(replaced) == 1
+    assert not replaced[0].exists()
+    assert json.loads(path.read_text()) == {"prs": ["o/a#1", "o/b#2"]}
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_a_failed_replace_preserves_the_ledger_and_releases_the_lock(
+    state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened.record_opened(ROOT, ["o/a#1"])
+    path = opened.ledger_path(ROOT)
+    before = path.read_bytes()
+
+    def fail(_temp: Path, _target: Path) -> Path:
+        raise OSError(28, "No space left on device")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", fail)
+        with pytest.raises(OSError, match="No space left on device"):
+            opened.record_opened(ROOT, ["o/b#2"])
+    assert path.read_bytes() == before
+    with (state / "lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    opened.record_opened(ROOT, ["o/c#3"])
+    assert json.loads(path.read_text()) == {"prs": ["o/a#1", "o/c#3"]}
 
 
 @pytest.mark.parametrize(

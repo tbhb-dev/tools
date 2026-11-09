@@ -1187,6 +1187,12 @@ def opened_by(env: Mapping[str, str]) -> tuple[str | None, str | None]:
     """
     ident = opened.opener(env)
     if ident is None:
+        if agent_identity.detect(env) is not None:
+            message = (
+                f"warning: no {OPENED_KEY} line or ledger entry: "
+                "cannot resolve the root session"
+            )
+            print(message, file=sys.stderr)
         return None, None
     value = agent_identity.format_value(ident.attrs())
     if why := agent_identity.check_value(value):
