@@ -20,6 +20,7 @@ capfd
 capsys
 cgnat
 checkpointed
+claudecode
 complexipy
 conftest
 cpus
@@ -84,6 +85,7 @@ msgfile
 mutmut
 nbbbb
 ncccc
+nenv
 newlen
 nobuild
 nocache
@@ -92,6 +94,7 @@ nohup
 nonblock
 nonregular
 nonstrings
+noprofile
 norc
 noremote
 nosandbox
@@ -100,6 +103,7 @@ onepasswordconnectsdk
 opam
 oxipng
 passwordless
+pgrep
 pidinfo
 pidpath
 pidtbsdinfo
@@ -159,6 +163,7 @@ uncomparables
 unkeyed
 unmatch
 unmutated
+unsets
 unstampable
 unvalidated
 usefixtures
