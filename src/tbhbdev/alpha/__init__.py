@@ -4,8 +4,9 @@ Alpha commands are interim. They may change or go away without notice, and
 only the tbhb-dev harness hooks and agents in tbhb-dev repositories should
 call them.
 
-The harness hooks run on every tool call, so this module imports pr, review and merge,
-which load yaml and jsonschema, only when one of them runs.
+The harness hooks run on every tool call, so this module imports pr, review,
+gh_app and merge, which load yaml, jsonschema and the Connect client, only when
+one of them runs.
 """
 
 import os
@@ -63,6 +64,9 @@ commands:
                | close N --reason TEXT: close a pull request
   review       draft N [--force] | check N: the review draft
   issue        close N --reason completed|not-planned: close an issue
+  gh-app       APP OWNER/REPO [--fresh] [--dry-run] [--all-repos]: mint a GitHub
+               App installation token through Connect | APP --cooldown-until
+               EPOCH | APP --cooldown-status
   repo         bootstrap [--dry-run] [--create --private|--public] ORG/REPO:
                apply the standard repository settings
   merge        squash-merge an approved pull request
@@ -118,6 +122,12 @@ def issue(argv: list[str], prog: str) -> int:
     return close.main(["issue", *argv], prog=prog)
 
 
+def gh_app_command(argv: list[str], prog: str) -> int:
+    from tbhbdev.alpha import gh_app  # noqa: PLC0415 -- see the docstring
+
+    return gh_app.main(argv, prog)
+
+
 def repo_command(argv: list[str], prog: str) -> int:
     from tbhbdev.alpha import repo_bootstrap  # noqa: PLC0415 -- see the docstring
 
@@ -146,6 +156,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "pr": pr,
     "review": review_command,
     "issue": issue,
+    "gh-app": gh_app_command,
     "repo": repo_command,
     "merge": merge,
     "install": install_command,

@@ -115,6 +115,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `agent-env` runs Codex or Antigravity with the `gh` shim first on PATH.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
 - `review` drafts and checks a pull request review.
+- `gh-app` requests a GitHub App installation token, reading the App's id and RSA key through Connect, and keeps it under `$XDG_STATE_HOME/gh-app/VAULT/APP`. The command serves a cached token with more than ten minutes left, even during a cooldown, and a cooldown refuses any other request. Only a 404 sends the installation lookup from the repository to its owner. The command syncs each file to disk before it replaces the old one.
 - `repo` holds repository commands. `repo bootstrap` applies the standard repository settings.
 - `merge` squash-merges an approved pull request.
 - `loop` validates its user configuration and refuses live intake until adapters connect the runner to its sources. Its shadow runner accepts typed event and reconcile interfaces for simulation. The package includes pure state derivation and rules that produce typed shadow intents with action keys and spawn budgets. A SQLite store records receipts, action keys, runs, and escalation markers.
