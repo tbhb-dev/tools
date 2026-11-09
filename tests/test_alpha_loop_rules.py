@@ -1,6 +1,7 @@
 """Synthetic table rows and individual guard flips for shadow decisions."""
 
 from dataclasses import FrozenInstanceError, replace
+from typing import Literal
 
 import pytest
 
@@ -112,15 +113,15 @@ def notice(reason: str) -> str:
             (),
         ),
         (replace(PASSED, facts=replace(PASSED.facts, approvals_at_head=1)), (R4,)),
-        (replace(PR, opened_by="loop_agent", mechanical_template_matches=True), (R2,)),
+        (replace(PR, opened_by="loop_agent", mechanical_template_matches=True), ()),
         (
             replace(PASSED, opened_by="loop_agent", mechanical_template_matches=True),
-            (R2,),
+            (),
         ),
-        (replace(PR, opened_by="loop_agent", mechanical_template_matches=False), (R1,)),
+        (replace(PR, opened_by="loop_agent", mechanical_template_matches=False), ()),
         (
             replace(PR, opened_by="loop_process", mechanical_template_matches=True),
-            (R1,),
+            (),
         ),
         (replace(PR, mechanical_template_matches=True), (R1,)),
         (
@@ -189,6 +190,181 @@ def test_pr_rule_table(pr: PullRequest, expected: tuple[Intent, ...]) -> None:
     inputs = Inputs(BUDGET, (pr,))
     assert decide(inputs) == expected
     assert decide(inputs) == expected
+
+
+@pytest.mark.parametrize("pr", [PR, PASSED])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("matches", [False, True])
+@pytest.mark.parametrize("opener", ["external", "loop_agent", "loop_process"])
+def test_mechanical_policy_gate(
+    pr: PullRequest,
+    enabled: bool,
+    matches: bool,
+    opener: Literal["external", "loop_agent", "loop_process"],
+) -> None:
+    candidate = replace(
+        pr,
+        policy=replace(pr.policy, mechanical_approval=enabled),
+        opened_by=opener,
+        mechanical_template_matches=matches,
+    )
+    if opener == "external":
+        expected = (R1,) if pr == PR else (R2,)
+    elif opener == "loop_agent" and enabled and matches:
+        expected = (R2,)
+    else:
+        expected = ()
+    assert decide(Inputs(BUDGET, (candidate,))) == expected
+
+
+def test_mechanical_approval_defaults_off() -> None:
+    assert PR.policy.mechanical_approval is False
+
+
+@pytest.mark.parametrize("pr", [PASSED, APPROVED], ids=["R2", "R4"])
+@pytest.mark.parametrize(
+    ("facts", "expected"),
+    [
+        (
+            replace(FACTS, ci=CIObservation("failure")),
+            (Intent("R10", "fixed", notice("ci_red"), replace(ARGS, reason="ci_red")),),
+        ),
+        (replace(FACTS, ci=CIObservation("pending")), ()),
+        (replace(FACTS, is_draft=True), ()),
+        (
+            replace(FACTS, merge_state="dirty"),
+            (
+                Intent(
+                    "R10",
+                    "fixed",
+                    notice("dirty"),
+                    replace(ARGS, reason=BlockedReason.DIRTY),
+                ),
+            ),
+        ),
+        (
+            replace(FACTS, merge_state="behind"),
+            (
+                Intent(
+                    "R10",
+                    "fixed",
+                    notice("behind"),
+                    replace(ARGS, reason=BlockedReason.BEHIND),
+                ),
+            ),
+        ),
+        (
+            replace(FACTS, signatures_required=True, head_signature_valid=False),
+            (
+                Intent(
+                    "R10",
+                    "fixed",
+                    notice("unsigned"),
+                    replace(ARGS, reason=BlockedReason.UNSIGNED),
+                ),
+            ),
+        ),
+        (replace(FACTS, base_repo_verified=False), ()),
+    ],
+    ids=[
+        "ci_failure",
+        "ci_pending",
+        "draft",
+        "blocked_dirty",
+        "behind",
+        "unsigned",
+        "unverified",
+    ],
+)
+def test_approval_and_merge_safety_gates(
+    pr: PullRequest, facts: PullRequestFacts, expected: tuple[Intent, ...]
+) -> None:
+    candidate = replace(
+        pr,
+        facts=replace(
+            facts,
+            review_runs_at_head=pr.facts.review_runs_at_head,
+            approvals_at_head=pr.facts.approvals_at_head,
+        ),
+    )
+    assert decide(Inputs(BUDGET, (candidate,))) == expected
+
+
+@pytest.mark.parametrize(
+    ("pr", "expected"),
+    [
+        (
+            DECLINED,
+            (
+                R3,
+                Intent(
+                    "R10",
+                    "fixed",
+                    notice("review_declined"),
+                    replace(ARGS, reason="review_declined"),
+                ),
+            ),
+        ),
+        (replace(PR, facts=replace(FACTS, review_runs_at_head=("live",))), ()),
+        (replace(PR, facts=replace(FACTS, ci=CIObservation("pending"))), ()),
+        (DRAFT, ()),
+        (
+            replace(PR, facts=replace(FACTS, merge_state="dirty")),
+            (
+                Intent(
+                    "R10",
+                    "fixed",
+                    notice("dirty"),
+                    replace(ARGS, reason=BlockedReason.DIRTY),
+                ),
+            ),
+        ),
+        (replace(PR, policy=replace(PR.policy, requires_approval=False)), ()),
+    ],
+    ids=[
+        "declined",
+        "review_running",
+        "ci_pending",
+        "draft",
+        "blocked",
+        "no_approval_required",
+    ],
+)
+def test_mechanical_approval_negative_rows(
+    pr: PullRequest, expected: tuple[Intent, ...]
+) -> None:
+    candidate = replace(
+        pr,
+        policy=replace(pr.policy, mechanical_approval=True),
+        opened_by="loop_agent",
+        mechanical_template_matches=True,
+    )
+    assert decide(Inputs(BUDGET, (candidate,))) == expected
+
+
+@pytest.mark.parametrize("pr", [PR, PASSED, APPROVED, MERGED, RED, DRAFT, DECLINED])
+def test_unverified_is_inert_even_with_failures(pr: PullRequest) -> None:
+    candidate = replace(
+        pr,
+        facts=replace(pr.facts, base_repo_verified=False),
+        action_failures=(3,),
+        state_age=100000,
+        green_age=100000,
+        verification_passed=True,
+        policy=replace(pr.policy, follow_up_steps=("publish",)),
+    )
+    assert decide(Inputs(BUDGET, (candidate,))) == ()
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        replace(FACTS, signatures_required=True),
+        replace(FACTS, ci=CIObservation("pending")),
+    ],
+)
+def test_pending_has_no_rule_or_age_timeout(facts: PullRequestFacts) -> None:
+    assert decide(Inputs(BUDGET, (replace(PR, facts=facts, state_age=100000),))) == ()
 
 
 @pytest.mark.parametrize(
@@ -495,7 +671,28 @@ def test_spawn_budget_guards(budget: SpawnBudget) -> None:
 def test_retry_stop_is_not_blocked_by_capacity() -> None:
     assert decide(
         Inputs(replace(BUDGET, total_cap=0), runs=(replace(RUN, state="unknown"),))
-    ) == (Intent("R8", "fixed", "retry:example-run", RunArguments("example-run")),)
+    ) == (Intent("R8", "fixed", "stop:example-run", RunArguments("example-run")),)
+
+
+def test_stop_receipt_leaves_retry_available() -> None:
+    run = replace(RUN, state="unknown")
+    inputs = Inputs(replace(BUDGET, total_cap=0), runs=(run,))
+    stop = decide(inputs)
+    assert stop == (
+        Intent("R8", "fixed", "stop:example-run", RunArguments("example-run")),
+    )
+    recorded = replace(inputs, existing_keys=frozenset({stop[0].key}))
+    assert decide(recorded) == ()
+    retry = decide(replace(recorded, budget=BUDGET))
+    assert retry == (
+        Intent("R8", "fixed", "retry:example-run", RunArguments("example-run", CLAUDE)),
+    )
+    assert (
+        decide(
+            replace(recorded, budget=BUDGET, existing_keys=frozenset({retry[0].key}))
+        )
+        == ()
+    )
 
 
 @pytest.mark.parametrize(
@@ -625,6 +822,106 @@ def test_stopped_objects_do_not_act() -> None:
         stopped_objects=frozenset({OBJECT, "example-run"}),
     )
     assert decide(inputs) == ()
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("stopped", [False, True])
+@pytest.mark.parametrize("recorded", [False, True])
+def test_one_pr_escalation_per_object(
+    reverse: bool, stopped: bool, recorded: bool
+) -> None:
+    observations = (
+        replace(PR, state_age=1801),
+        replace(PR, action_failures=(3,)),
+    )
+    if reverse:
+        observations = observations[::-1]
+    reason = "action_failed" if reverse else "age"
+    first = Intent(
+        "R9",
+        "fixed",
+        f"escalate:{OBJECT}:{reason}",
+        EscalationArguments(OBJECT, reason),
+    )
+    inputs = Inputs(
+        BUDGET,
+        observations,
+        existing_keys=frozenset({first.key}) if recorded else frozenset(),
+        stopped_objects=frozenset({OBJECT}) if stopped else frozenset(),
+    )
+    assert decide(inputs) == (() if stopped or recorded else (first,))
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("stopped", [False, True])
+def test_one_run_escalation_per_object(reverse: bool, stopped: bool) -> None:
+    observations = (
+        replace(RUN, action_failures=(3,)),
+        replace(RUN, state="failed", retries=1),
+    )
+    if reverse:
+        observations = observations[::-1]
+    reason = "retry_failed" if reverse else "action_failed"
+    expected = Intent(
+        "R9",
+        "fixed",
+        f"escalate:example-run:{reason}",
+        EscalationArguments("example-run", reason),
+    )
+    inputs = Inputs(
+        BUDGET,
+        runs=observations,
+        stopped_objects=frozenset({RUN.name}) if stopped else frozenset(),
+    )
+    assert decide(inputs) == (() if stopped else (expected,))
+
+
+def test_distinct_objects_each_escalate() -> None:
+    inputs = Inputs(
+        BUDGET,
+        (replace(PR, action_failures=(3,)),),
+        (replace(RUN, action_failures=(3,)),),
+    )
+    assert decide(inputs) == (
+        Intent(
+            "R9",
+            "fixed",
+            "escalate:example-run:action_failed",
+            EscalationArguments("example-run", "action_failed"),
+        ),
+        Intent(
+            "R9",
+            "fixed",
+            f"escalate:{OBJECT}:action_failed",
+            EscalationArguments(OBJECT, "action_failed"),
+        ),
+    )
+
+
+def test_duplicate_escalation_keeps_later_objects() -> None:
+    next_pr = replace(PR, number=8)
+    inputs = Inputs(
+        BUDGET,
+        (replace(PR, state_age=1801), replace(PR, action_failures=(3,)), next_pr),
+        (replace(RUN, action_failures=(3,)), replace(RUN, state="failed", retries=1)),
+    )
+    assert decide(inputs) == (
+        Intent(
+            "R9",
+            "fixed",
+            "escalate:example-run:action_failed",
+            EscalationArguments("example-run", "action_failed"),
+        ),
+        Intent(
+            "R9", "fixed", f"escalate:{OBJECT}:age", EscalationArguments(OBJECT, "age")
+        ),
+        Intent(
+            "R1",
+            "spawn",
+            f"review:{REPO}#8@{HEAD}",
+            SpawnArguments(replace(ARGS, number=8), CODEX),
+        ),
+    )
 
 
 def test_empty_and_duplicate_inputs() -> None:
