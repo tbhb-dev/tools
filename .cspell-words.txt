@@ -35,6 +35,7 @@ drwx
 dunder
 enoexec
 execpath
+executescript
 execv
 fakehost
 fakeop
@@ -42,6 +43,7 @@ fakeoperator
 fchmod
 flatmap
 frontmatter
+fstat
 genrule
 getent
 getfacl
