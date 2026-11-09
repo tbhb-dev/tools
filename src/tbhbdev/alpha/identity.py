@@ -1900,6 +1900,22 @@ def amended_trailers(top: Path) -> list[Trailer]:
     return llm_trailers(msg)
 
 
+def rebasing() -> bool:
+    """Whether a rebase is in progress; its replays set ``CHERRY_PICK_HEAD`` too."""
+    # ``--git-path`` prints each path relative to the cwd, which is where Path looks.
+    _, out = git(
+        "rev-parse", "--git-path", "rebase-merge", "--git-path", "rebase-apply"
+    )
+    return any(Path(line).is_dir() for line in out.splitlines())
+
+
+def pick_head(*, replaying: bool) -> str:
+    """The commit ``CHERRY_PICK_HEAD`` names; empty without one or in a replay."""
+    return (
+        "" if replaying else git("rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD")[1]
+    )
+
+
 def pick_source(head: str | None, text: str) -> str | None:
     """The picked commit: ``CHERRY_PICK_HEAD``, else the last ``-x`` line."""
     found = PICKED_FROM.findall(text)
@@ -2026,8 +2042,12 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
     ``--edit``, so a pick in progress is not a merge and the early return below
     leaves it alone. The ``-x`` line is the fallback for a missing
     ``CHERRY_PICK_HEAD``.
+
+    A rebase also sets ``CHERRY_PICK_HEAD`` for each commit it replays, so while
+    one is in progress nothing is a pick and the commit is handled as it always was.
     """
-    head = git("rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD")[1] or None
+    replaying = rebasing()
+    head = pick_head(replaying=replaying)
     if source in {"merge", "squash"} and not head:
         return 0
     repo = repo_info()
@@ -2041,7 +2061,7 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
             add_trailers(path, [], [], kept)
         return 0
     text = path.read_text()
-    picked = picked_commit(head, text, repo.top)
+    picked = None if replaying else picked_commit(head, text, repo.top)
     problem = picked and pick_refusal(picked, text, repo.top)
     if problem:
         print(problem, file=sys.stderr)

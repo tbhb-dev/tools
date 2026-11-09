@@ -7637,6 +7637,143 @@ def test_cmd_trailer_pick_asks_git_in_the_repository_top(
     monkeypatch.setattr(ai, "git", spy)
     path = msg_file(tmp_path, "hand\n")
     assert ai.cmd_trailer(str(path), "message", CLAUDE_COMMIT_ENV) == 0
-    assert calls[0] == (("rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"), None)
+    assert calls[1] == (("rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"), None)
     anchored = [cwd for args, cwd in calls if args[0] in {"log", "var"}]
     assert anchored == [repo, repo, repo]  # amend's HEAD, the source, the committer
+
+
+ISOLATED_GIT = {"GIT_CONFIG_GLOBAL": "/dev/null"}
+
+
+def moved_on(repo: Path, message: str) -> str:
+    """A `side` commit by our own identity, checked out, with main a commit ahead."""
+    sha = side_commit(repo, message)
+    stage(repo, "m.txt")
+    run_git(repo, "commit", "-q", "--no-verify", "-m", "main moves on")
+    run_git(repo, "switch", "-q", "side")
+    return sha
+
+
+@needs_prek
+@pytest.mark.parametrize(("backend", "added"), [("--merge", True), ("--apply", False)])
+def test_e2e_rebase_replays_are_not_picks(
+    wired: Path, backend: str, added: bool
+) -> None:
+    """Git sets CHERRY_PICK_HEAD for each commit a merge-backend rebase replays.
+
+    The trailers are those the hook gave a replayed commit before it knew about
+    picks: the committer's fallback line from the merge backend, which runs the
+    hook, and nothing from the apply backend, which doesn't.
+    """
+    base = run_git(wired, "branch", "--show-current").strip()
+    moved_on(wired, "feat: s")
+    main = run_git(wired, "rev-parse", base).strip()
+    done = git_run(wired, "rebase", backend, base, extra=ISOLATED_GIT)
+    assert done.returncode == 0, done.stderr
+    assert "cherry-pick" not in done.stderr
+    assert run_git(wired, "rev-parse", "HEAD~1").strip() == main
+    session = ai.sha256_64("session-raw")
+    assert trailers(wired) == (
+        [f"Generated-by: LLM harness=claude-code:2.1.316;session={session};surface=cli"]
+        if added
+        else []
+    )
+
+
+@needs_prek
+@pytest.mark.parametrize("backend", ["--merge", "--apply"])
+def test_e2e_rebase_continues_after_a_conflict(wired: Path, backend: str) -> None:
+    base = run_git(wired, "branch", "--show-current").strip()
+    conflicting_source(wired, "feat: s")
+    run_git(wired, "switch", "-q", "side")
+    assert git_run(wired, "rebase", backend, base, extra=ISOLATED_GIT).returncode != 0
+    resolve(wired)
+    done = git_run(wired, "rebase", "--continue", extra=ISOLATED_GIT)
+    assert done.returncode == 0, done.stderr
+    assert "cherry-pick" not in done.stderr
+    assert run_git(wired, "show", "HEAD:base.txt") == "resolved\n"
+
+
+@needs_prek
+def test_e2e_the_rebased_commit_is_still_refused_as_a_pick(wired: Path) -> None:
+    base = run_git(wired, "branch", "--show-current").strip()
+    sha = moved_on(wired, "feat: s")
+    assert git_run(wired, "rebase", base, extra=ISOLATED_GIT).returncode == 0
+    run_git(wired, "switch", "-q", base)
+    before = run_git(wired, "rev-parse", "HEAD")
+    done = git_run(wired, "cherry-pick", sha, extra=ISOLATED_GIT)
+    assert done.returncode != 0
+    assert refusal(sha) in done.stderr.splitlines()
+    assert run_git(wired, "rev-parse", "HEAD") == before
+
+
+@pytest.mark.parametrize("name", ["rebase-merge", "rebase-apply"])
+@pytest.mark.parametrize("cwd", ["", "sub"])
+def test_rebasing_sees_either_rebase_directory(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, name: str, cwd: str
+) -> None:
+    (repo / "sub").mkdir()
+    monkeypatch.chdir(repo / cwd)
+    assert not ai.rebasing()
+    (repo / ".git" / name).mkdir()
+    assert ai.rebasing()
+
+
+def test_rebasing_asks_git_for_the_exact_directory_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact names: a case-insensitive file system finds a directory in any case."""
+    asked: list[tuple[str, ...]] = []
+
+    def spy(*args: str, **_: object) -> tuple[int, str]:
+        asked.append(args)
+        return 0, ""
+
+    monkeypatch.setattr(ai, "git", spy)
+    assert not ai.rebasing()
+    assert asked == [
+        ("rev-parse", "--git-path", "rebase-merge", "--git-path", "rebase-apply")
+    ]
+
+
+@pytest.mark.usefixtures("plain")
+def test_rebasing_outside_a_repository_is_false() -> None:
+    assert not ai.rebasing()
+
+
+def test_rebasing_in_a_linked_worktree_reads_its_own_state(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = add_worktree(repo, tmp_path / "linked")
+    monkeypatch.chdir(tree)
+    assert not ai.rebasing()
+    (repo / ".git" / "rebase-merge").mkdir()  # the main work tree's rebase
+    assert not ai.rebasing()
+    git_dir = Path(run_git(tree, "rev-parse", "--absolute-git-dir").strip())
+    (git_dir / "rebase-merge").mkdir()
+    assert ai.rebasing()
+
+
+@pytest.mark.parametrize("name", ["rebase-merge", "rebase-apply"])
+@pytest.mark.parametrize("source", ["message", "merge"])
+def test_cmd_trailer_in_a_rebase_is_never_a_pick(
+    repo: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+    source: str,
+) -> None:
+    """Our agent's commit with no trailer, replayed: no refusal, no pick handling."""
+    sha = picking(repo, "s")
+    (repo / ".git" / name).mkdir()
+    text = f"s\n\n(cherry picked from commit {sha})\n"
+    path = msg_file(tmp_path, text)
+    assert ai.cmd_trailer(str(path), source, CLAUDE_COMMIT_ENV) == 0
+    assert capsys.readouterr().err == ""
+    after = path.read_text(encoding="utf-8")
+    if source == "merge":  # the early return, as without any pick
+        assert after == text
+    else:  # the committer's fallback, as for any commit
+        (line,) = ai.llm_trailers(after)
+        assert line[0] == ai.KEY_GEN
+        assert claims_of(repo)
