@@ -9,10 +9,25 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, fields
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal, cast
 
 from tbhbdev import userconfig
+from tbhbdev.alpha.loop.rules import RULES
+
+if TYPE_CHECKING:
+    from tbhbdev.alpha.loop.rules import Rule
 
 _REPOSITORY = re.compile(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+")
+
+
+type Mode = Literal["off", "shadow", "on"]
+
+
+@dataclass(frozen=True)
+class RuleMode:
+    repository: str
+    rule: Rule
+    mode: Mode
 
 
 @dataclass(frozen=True)
@@ -27,6 +42,8 @@ class LoopConfig:
     spawn_cap_per_host: int
     daily_spawn_cap: int
     hosts: tuple[str, ...]
+    allow_claude_retry: bool = False
+    rule_modes: tuple[RuleMode, ...] = ()
 
 
 def _error(key: str, why: str) -> userconfig.ConfigError:
@@ -73,6 +90,46 @@ def _store_path(settings: dict[str, object]) -> Path:
     return store
 
 
+def _retry_flag(settings: dict[str, object]) -> bool:
+    flag = settings.get("allow_claude_retry", False)
+    if type(flag) is not bool:
+        error = _error("allow_claude_retry", "must be a boolean")
+        raise error
+    return flag
+
+
+def _modes(
+    settings: dict[str, object], repositories: tuple[str, ...]
+) -> tuple[RuleMode, ...]:
+    value = settings.get("rule_modes", {})
+    if not isinstance(value, dict):
+        error = _error("rule_modes", "must be a repository table")
+        raise error
+    modes: list[RuleMode] = []
+    typed = cast("dict[str, object]", value)  # pragma: no mutate (typing only)
+    for repository, entries in typed.items():
+        if repository not in repositories or not isinstance(entries, dict):
+            error = _error("rule_modes", "must contain configured repository tables")
+            raise error
+        typed_entries = cast(
+            "dict[str, object]",  # pragma: no mutate (typing only)
+            entries,
+        )
+        for rule, mode in typed_entries.items():
+            if rule not in RULES or mode not in (
+                "off",
+                "shadow",
+                "on",
+            ):
+                error = _error(
+                    "rule_modes", "must contain R0-R11 modes off, shadow or on"
+                )
+                raise error
+            typed_mode = cast("Mode", mode)  # pragma: no mutate (typing only)
+            modes.append(RuleMode(repository, rule, typed_mode))
+    return tuple(modes)
+
+
 def load() -> LoopConfig:
     """Read and validate every setting, with no deployment defaults.
 
@@ -107,6 +164,8 @@ def load() -> LoopConfig:
         spawn_cap_per_host=_positive_int(settings, "spawn_cap_per_host"),
         daily_spawn_cap=_positive_int(settings, "daily_spawn_cap"),
         hosts=_unique_strings(settings, "hosts"),
+        allow_claude_retry=_retry_flag(settings),
+        rule_modes=_modes(settings, repositories),
     )
     if loaded.spawn_cap_per_host > loaded.spawn_cap_total:
         error = _error("spawn_cap_per_host", "must not exceed spawn_cap_total")

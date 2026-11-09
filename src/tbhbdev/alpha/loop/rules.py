@@ -24,6 +24,9 @@ UNVERIFIED PRs are inert: every PR rule, including escalation, is skipped.
 R9 takes precedence and stops the object, with one escalation per object per call.
 Other rules retain table order. R8 requests a stop with a stop:<run> key when no
 retry target is available, leaving retry:<run> available for later capacity.
+R8 uses Codex unless allow_claude_retry enables a Codex-to-Claude retry.
+The caller marks disabled_rules by (repository, rule) for PRs and (name, rule)
+for runs, so off rules cannot reserve capacity or suppress an active rule.
 All returned actions are shadow intents; this module performs no I/O.
 """
 
@@ -42,6 +45,21 @@ type Harness = Literal["codex", "claude"]
 type Rule = Literal[
     "R0", "R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11"
 ]
+RULES: tuple[Rule, ...] = (
+    "R0",
+    "R1",
+    "R2",
+    "R3",
+    "R4",
+    "R5",
+    "R6",
+    "R7",
+    "R8",
+    "R9",
+    "R10",
+    "R11",
+)
+
 type Reason = (
     BlockedReason
     | Literal[
@@ -185,6 +203,8 @@ class Inputs:
     sweep: Sweep | None = None
     existing_keys: frozenset[str] = frozenset()
     stopped_objects: frozenset[str] = frozenset()
+    allow_claude_retry: bool = False
+    disabled_rules: frozenset[tuple[str, Rule]] = frozenset()
 
 
 class _Capacity:
@@ -307,7 +327,8 @@ def _pr_actions(pr: PullRequest, inputs: Inputs, capacity: _Capacity) -> list[In
     intents: list[Intent] = []
     review_key = f"review:{obj}"
     if (
-        state == State.GREEN_UNREVIEWED
+        (pr.repository, "R1") not in inputs.disabled_rules
+        and state == State.GREEN_UNREVIEWED
         and pr.policy.requires_approval
         and pr.reviewer_runs_without_approval < REVIEW_LIMIT
         and pr.opened_by == "external"
@@ -327,7 +348,9 @@ def _pr_actions(pr: PullRequest, inputs: Inputs, capacity: _Capacity) -> list[In
         intents.append(Intent("R4", "fixed", f"merge:{obj}", args))
     intents.extend(_merge_intents(pr, state, inputs, capacity))
     rerun_key = f"rerun:{obj}"
-    rerun = _can_rerun(pr, rerun_key, inputs.existing_keys)
+    rerun = (pr.repository, "R11") not in inputs.disabled_rules and _can_rerun(
+        pr, rerun_key, inputs.existing_keys
+    )
     reason = _notice(pr, state, rerun=rerun)
     if reason is not None:
         intents.append(
@@ -361,7 +384,7 @@ def _merge_intents(
     base = f"{pr.repository}#{pr.number}"
     args = PRArguments(pr.repository, pr.number, pr.head_sha)
     intents = [Intent("R5", "fixed", f"verify:{base}", args)]
-    if pr.verification_passed:
+    if pr.verification_passed and (pr.repository, "R6") not in inputs.disabled_rules:
         for step in pr.policy.follow_up_steps:
             key = f"follow:{base}:{step}"
             if key in inputs.existing_keys:
@@ -382,7 +405,7 @@ def _pr_intents(pr: PullRequest, inputs: Inputs, capacity: _Capacity) -> list[In
     if reason is None and _aged(pr, derive(pr.facts).state):
         reason = "age"
     escalation = _escalation(obj, reason)
-    if escalation is not None:
+    if escalation is not None and (pr.repository, "R9") not in inputs.disabled_rules:
         return [escalation]
     return _pr_actions(pr, inputs, capacity)
 
@@ -396,13 +419,25 @@ def _run_intents(run: Run, inputs: Inputs, capacity: _Capacity) -> list[Intent]:
     )
     reason = "retry_failed" if retry_failed else _failure_reason(run.action_failures)
     escalation = _escalation(run.name, reason)
-    if escalation is not None:
+    if escalation is not None and (run.name, "R9") not in inputs.disabled_rules:
         return [escalation]
     if run.state == "finished":
         return [Intent("R7", "fixed", f"collect:{run.name}", RunArguments(run.name))]
+    return _retry_intents(run, inputs, capacity, timed_out=timed_out)
+
+
+def _retry_intents(
+    run: Run, inputs: Inputs, capacity: _Capacity, *, timed_out: bool
+) -> list[Intent]:
     key = f"retry:{run.name}"
+    if (run.name, "R8") in inputs.disabled_rules:
+        return []
     if (timed_out or run.state == "unknown") and key not in inputs.existing_keys:
-        harness: Harness = "claude" if run.harness == "codex" else "codex"
+        harness: Harness = (
+            "claude"
+            if inputs.allow_claude_retry and run.harness == "codex"
+            else "codex"
+        )
         target = capacity.take(harness)
         if target is None:
             key = f"stop:{run.name}"
