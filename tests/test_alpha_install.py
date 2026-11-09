@@ -203,6 +203,14 @@ def test_claude_hooks() -> None:
                 "matcher": "Bash",
                 "hooks": [{"type": "command", "command": marked("guard-gh-pr")}],
             },
+            {
+                "matcher": "Bash",
+                "hooks": [{"type": "command", "command": marked("guard-op")}],
+            },
+            {
+                "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+                "hooks": [{"type": "command", "command": marked("guard-op")}],
+            },
             {"matcher": "Bash|SendMessage|Write|Edit", "hooks": [guard]},
         ],
         "Stop": [{"hooks": [guard]}],
@@ -253,7 +261,15 @@ def test_codex_hooks() -> None:
             {
                 "matcher": "^Bash$",
                 "hooks": [{"type": "command", "command": marked("guard-gh-pr")}],
-            }
+            },
+            {
+                "matcher": "^(Bash|shell)$",
+                "hooks": [{"type": "command", "command": marked("guard-op")}],
+            },
+            {
+                "matcher": "apply_patch",
+                "hooks": [{"type": "command", "command": marked("guard-op")}],
+            },
         ],
     }
 
@@ -275,6 +291,21 @@ def test_agy_hooks() -> None:
             ],
             "PreToolUse": [{"matcher": "run_command", "hooks": [record]}],
             "PostToolUse": [{"matcher": edits, "hooks": [record]}],
+        },
+        "tbhbdev-alpha-op-account": {
+            "PreToolUse": [
+                {
+                    "matcher": matcher,
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": marked("guard-op"),
+                            "timeout": 30,
+                        }
+                    ],
+                }
+                for matcher in ("run_command", edits)
+            ],
         },
         "tbhbdev-alpha-pull-request": {
             "PreToolUse": [

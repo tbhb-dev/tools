@@ -30,11 +30,14 @@ dbus
 delenv
 demilestoned
 deptry
+doas
 docstrings
 dotrepo
 drwx
 dunder
+elts
 enoexec
+execdir
 execpath
 executescript
 execv
@@ -63,6 +66,7 @@ hermeticity
 hostnames
 hprof
 hskey
+ionice
 keepalive
 keepends
 keyrings
@@ -93,6 +97,7 @@ noremote
 nosandbox
 onepassword
 onepasswordconnectsdk
+opam
 oxipng
 passwordless
 pidinfo
@@ -110,6 +115,7 @@ rdwr
 readattr
 readextattr
 readsecurity
+redirections
 regenerable
 rerequested
 resvg
@@ -119,10 +125,12 @@ rollup
 rumdl
 runfile
 runfiles
+runuser
 rylignore
 sandboxed
 sessionstart
 setopt
+setsid
 shellcheck
 shfmt
 srcs

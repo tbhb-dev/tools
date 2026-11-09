@@ -198,6 +198,8 @@ def claude_hooks() -> dict[str, list[Json]]:
         "PreToolUse": [
             group("Bash|Agent", record),
             group("Bash", handler("guard-gh-pr")),
+            group("Bash", handler("guard-op")),
+            group("Write|Edit|MultiEdit|NotebookEdit", handler("guard-op")),
             group("Bash|SendMessage|Write|Edit", guard),
         ],
         "Stop": [group(None, guard)],
@@ -220,7 +222,11 @@ def codex_hooks() -> dict[str, list[Json]]:
             group("apply_patch", record),
             group("apply_patch", handler("pr hook codex")),
         ],
-        "PreToolUse": [group("^Bash$", handler("guard-gh-pr"))],
+        "PreToolUse": [
+            group("^Bash$", handler("guard-gh-pr")),
+            group("^(Bash|shell)$", handler("guard-op")),
+            group("apply_patch", handler("guard-op")),
+        ],
     }
 
 
@@ -232,6 +238,12 @@ def agy_hooks() -> Json:
             "SessionStart": [handler("identity record antigravity")],
             "PreToolUse": [group("run_command", record)],
             "PostToolUse": [group(AGY_EDITS, record)],
+        },
+        "tbhbdev-alpha-op-account": {
+            "PreToolUse": [
+                group("run_command", handler("guard-op", AGY_TIMEOUT)),
+                group(AGY_EDITS, handler("guard-op", AGY_TIMEOUT)),
+            ],
         },
         "tbhbdev-alpha-pull-request": {
             "PreToolUse": [group("run_command", handler("guard-gh-pr", AGY_TIMEOUT))],
