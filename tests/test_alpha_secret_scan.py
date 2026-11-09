@@ -22,7 +22,7 @@ regex = '''committed-secret-[0-9]{8}'''
 """
 CANARY_HIT = "test-canary-0123456789abcdef"
 COMMITTED_HIT = "committed-secret-12345678"
-FIX = "Run `tbhbdev host upgrade` (step gitleaks-config), which writes it."
+FIX = "Install it with the host's provisioning tooling."
 
 
 @pytest.fixture

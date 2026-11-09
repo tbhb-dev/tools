@@ -10,7 +10,7 @@ extends the repository's .gitleaks.toml. That is the combination
 tbhb_rules' ``gitleaks_test`` uses for its private config: the private file
 begins with ``[extend] path = ".gitleaks.toml"``, gitleaks runs from the
 repository root so the path resolves, and the private file must define the
-``tbhb-private-canary`` rule. ``tbhbdev host upgrade`` installs that file.
+``tbhb-private-canary`` rule. The host's provisioning tooling installs that file.
 
 There is no public-only fallback. A missing or unreadable private config, one
 without the canary rule, or a missing .gitleaks.toml stops the command, and so
@@ -27,9 +27,8 @@ from typing import cast
 
 from tbhbdev.host import CANARY, GITLEAKS_CANARY, GITLEAKS_EXTENDS, GITLEAKS_FILE
 
-# The host step that writes the private config. Agents run upgrade, which
-# refreshes it on every run.
-FETCH = "Run `tbhbdev host upgrade` (step gitleaks-config), which writes it."
+# The remedy for a missing private config: the host's provisioning installs it.
+FETCH = "Install it with the host's provisioning tooling."
 
 
 def private_config() -> Path:

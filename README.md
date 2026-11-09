@@ -202,7 +202,7 @@ The pure rules table requires a spawned reviewer's approval at the current green
 
 ### Secret scan
 
-`tbhbdev alpha pr create` and `pr edit` scan the final title and body, trailers included, and `tbhbdev alpha merge` scans the squash message, with `gitleaks stdin --redact` before `gh` runs. The scan uses the host's private config, `.config/gitleaks/private.toml` in the home directory, which `host upgrade` installs and which extends the repository's `.gitleaks.toml`. It fails closed. The command stops on a private config that's missing, unreadable or lacks the `tbhb-private-canary` rule. A missing `.gitleaks.toml`, a gitleaks failure, or any finding stops it too. Findings appear by rule ID and line only. `pr check` and the draft hook don't scan.
+`tbhbdev alpha pr create` and `pr edit` scan the final title and body, trailers included, and `tbhbdev alpha merge` scans the squash message, with `gitleaks stdin --redact` before `gh` runs. The scan uses the host's private config, `.config/gitleaks/private.toml` in the home directory, which the host's provisioning tooling installs and which extends the repository's `.gitleaks.toml`. It fails closed. The command stops on a private config that's missing, unreadable or lacks the `tbhb-private-canary` rule. A missing `.gitleaks.toml`, a gitleaks failure, or any finding stops it too. Findings appear by rule ID and line only. `pr check` and the draft hook don't scan.
 
 ### No self-approval
 
