@@ -86,7 +86,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import identity as agent_identity
-from tbhbdev.alpha import opened
+from tbhbdev.alpha import opened, private_names
 from tbhbdev.alpha.repo import git, hook_cwd, in_tbhb_dev, read_hook_stdin
 
 if TYPE_CHECKING:
@@ -743,6 +743,7 @@ def check_text(text: str) -> Checked:
     problems += ref_problems(lines[start:])
     rendered = [line.raw for line in lines[start:]]
     problems += lint(rendered, title.no)
+    problems += private_names.draft_problems(rendered, title.no)
     return Checked(sorted(set(problems)), found[1], rendered, meta)
 
 
