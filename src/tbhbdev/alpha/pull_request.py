@@ -12,6 +12,7 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr check [DRAFT]
     tbhbdev alpha pr create [DRAFT] [--dry-run]
     tbhbdev alpha pr edit [DRAFT] --pr N
+    tbhbdev alpha pr ready --pr N
     tbhbdev alpha pr hook claude|codex|antigravity
     tbhbdev alpha pr backfill-opened OWNER
 
@@ -26,7 +27,11 @@ any.
 `` (#N)`` and the commit header must fit 72), checks the H2 sections against
 .github/pull-request-sections.toml (names, order, required, word limits), rejects
 leftover HTML comments and bare ``#N`` references, and lints the description
-with vale, cspell and rumdl under the repository's own configs.
+with vale, cspell and rumdl under the repository's own configs. The vale
+style packages under .vale/ are gitignored, so a fresh worktree lacks them:
+when a style that .vale.ini's ``BasedOnStyles`` names is missing, ``check``
+runs the repository's pinned ``bazelisk run //:vale_sync`` once, and reports
+one problem instead of linting with vale if the styles are still missing.
 
 ``hook`` is the harnesses' PostToolUse entry point (payload on stdin). Outside
 a tbhb-dev repository it exits 0 at once. When the tool call wrote the draft of
@@ -39,8 +44,27 @@ them into the commit. They are the LLM trailers of the commits on the branch,
 deduplicated by identity, plus the posting agent as ``Assisted-by``. They are
 machine-written: a draft that contains one fails ``check``, because a person
 cannot compute the session hashes by hand and a stripped line would hide what
-the author thought they had written. Nothing is pushed: when the branch is not
-on the remote, gh's own error is passed through.
+the author thought they had written. Before gh runs, and in a dry run too, the
+final title and body, trailers included, go through gitleaks under the host's
+private config (see ``tbhbdev.alpha.secret_scan``), and a finding, a missing
+config or a missing gitleaks stops the command. Nothing is pushed: when the
+branch is not on the remote, gh's own error is passed through.
+
+In a private repository, read live with ``gh repo view`` once per command, that
+scan skips the private config's name rules (the ``NAME_RULES`` families). This
+matches the rules' gates, which apply the private config only to a repository
+that sets the flag, so text that names the repository's own subject passes.
+The visibility is that of the repository the text is posted to, not the
+working directory's. ``edit`` takes that repository from the pull request's
+own ``url`` and reads its visibility with ``gh repo view <owner/name>``.
+``create`` has no pull request yet, so it reads ``gh repo view`` for the base
+repository, which is gh's own resolution and the one ``gh pr create`` uses. A
+target that can't be resolved, such as a URL that isn't a github.com pull
+request page, scans under the full private config. The ``op-*`` rules, the
+address, MAC, endpoint and keychain rules, the canary and .gitleaks.toml still
+apply. Any visibility but ``PRIVATE``, an empty value or a failed read scans
+under the full private config, so the read alone never refuses a command.
+``check`` makes no gh calls and doesn't scan.
 
 ``create`` also writes ``Opened-by: LLM ...`` as the first line of that
 paragraph: the posting agent's root identity, with no ``subagent=``. Once gh
@@ -52,6 +76,9 @@ model, say), with a warning. A ledger that can't be written after the pull
 request exists only warns. ``edit`` copies the live body's ``Opened-by`` line unchanged,
 and adds none when the live body has none. ``check`` rejects a draft that
 contains one.
+
+``ready --pr N`` marks pull request N ready for review with ``gh pr ready``. It
+doesn't read a draft.
 
 ``backfill-opened OWNER`` reads the body of every pull request, open or not,
 in every repository of OWNER, and adds each one to the ledger of every
@@ -78,7 +105,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import identity as agent_identity
-from tbhbdev.alpha import opened
+from tbhbdev.alpha import opened, private_names, secret_scan
 from tbhbdev.alpha.repo import git, hook_cwd, in_tbhb_dev, read_hook_stdin
 
 if TYPE_CHECKING:
@@ -99,6 +126,16 @@ CONFIGS = (".vale.ini", ".vale", ".cspell.jsonc", ".cspell-words.txt", ".rumdl.t
 # A squash merge appends " (#N)" and the header must fit 72; 64 leaves room
 # for a pull request number of up to four digits.
 MAX_TITLE = 72 - len(" (#9999)")
+BAZEL = "bazelisk"
+# Module constants, not literals in the functions: macOS file systems ignore
+# case, so a mutant that changes a path's case there would pass every test.
+VALE_INI = ".vale.ini"
+STYLES = ".vale"
+VALE_SYNC = "//:vale_sync"
+# Vale's built-in style, which no package provides.
+BUILTIN_STYLE = "Vale"
+# The .vale.ini key that names styles, compared without regard to case.
+BASED_ON = "BasedOnStyles"
 GH = "gh"
 CLAUDE = "claude"
 CODEX = "codex"
@@ -107,6 +144,7 @@ AGY_EDITS = agent_identity.AGY_EDIT_TOOLS
 # The exit code that makes a harness feed a PostToolUse hook's stderr to the agent.
 HOOK_FEEDBACK = 2
 COG = "cog"
+GITLEAKS = "gitleaks"
 MISE = "mise"
 # The title is a commit header, so the sentence-case heading rule does not apply
 # to line 1: a finding on it reads (1, "vale project.HeadingTitleCase: ...").
@@ -129,8 +167,15 @@ OPENED_LINE = re.compile(rf"{OPENED_KEY}: ")
 DRAFT_OPENED = re.compile(r"\s*opened-by\s*:", re.IGNORECASE)
 OPENED_MESSAGE = "the script writes Opened-by; remove this line"
 PR_URL = re.compile(r"https://[^/\s]+/([^/\s]+/[^/\s]+)/pull/(\d+)")
+# A repository as ``owner/name``: GitHub's characters for each part, and a name
+# that is not "." or "..". The owner can't begin with "-", so gh can't read it
+# as a flag.
+REPO = r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.+(?:/|\Z))[A-Za-z0-9_.-]+"
+NAME_WITH_OWNER = re.compile(REPO)
+PR_PAGE = re.compile(rf"https://github\.com/({REPO})/pull/[0-9]+")
 REPO_LIMIT = 1000
 PR_LIMIT = 10000
+EDIT_DRAFT = "run `tbhbdev alpha pr edit --pr {number}` to apply the draft"
 BACKFILL_KEYS = re.compile(r"(?:Generated-by|Assisted-by|Opened-by):\s*(LLM\b.*)")
 SESSION_ATTR = re.compile(r"(?<![^\s;])session=(sha-256-64:[0-9a-f]{16})(?![^\s;])")
 LIST_ITEM = re.compile(r" *(?:[-*+]|\d+[.)]) +\S")
@@ -600,6 +645,36 @@ LINTERS: tuple[tuple[str, tuple[str, ...], Callable[[str], list[Problem]]], ...]
 )
 
 
+def vale_styles(top: Path) -> list[str]:
+    """The styles .vale.ini's ``BasedOnStyles`` lines name, in any section."""
+    named: list[str] = []
+    for line in (top / VALE_INI).read_text().splitlines():
+        key, _, value = line.partition("=")
+        if key.strip().lower() == BASED_ON.lower():
+            named += (name.strip() for name in value.split(","))
+    return sorted({name for name in named if name and name != BUILTIN_STYLE})
+
+
+def missing_styles(top: Path) -> list[str]:
+    """The named styles with no directory under .vale/."""
+    return [name for name in vale_styles(top) if not (top / STYLES / name).is_dir()]
+
+
+def style_problem(top: Path) -> str | None:
+    """Sync missing vale styles once; why vale can't run, or None."""
+    if not missing_styles(top):
+        return None
+    done = run([find_tool(BAZEL), "run", VALE_SYNC], cwd=top)
+    still = missing_styles(top)
+    if not still:
+        return None
+    why = " ".join((done.stderr or done.stdout).split())
+    return (
+        f"vale styles missing from .vale/: {', '.join(still)}; "
+        f"`{BAZEL} run {VALE_SYNC}` exited {done.returncode}: {why}"
+    )
+
+
 def lint(rendered: Sequence[str], first: int) -> list[Problem]:
     """Lint the title and description with the repository's own configs.
 
@@ -613,6 +688,7 @@ def lint(rendered: Sequence[str], first: int) -> list[Problem]:
         if not (top / name).exists():
             message = f"missing lint config {name} in {top}"
             raise SystemExit(message)
+    styles = style_problem(top)
     problems: list[Problem] = []
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
@@ -621,19 +697,29 @@ def lint(rendered: Sequence[str], first: int) -> list[Problem]:
         (work / DRAFT).parent.mkdir()
         (work / DRAFT).write_text("\n".join(rendered) + "\n")
         for name, exe, args, parse in tools:
-            done = run([exe, *args, str(DRAFT)], cwd=work)
-            found = parse(done.stdout)
-            # Exit 1 means findings in all three tools; anything else, or
-            # exit 1 with nothing parsed, is the tool failing.
-            if done.returncode not in {0, 1} or (done.returncode == 1 and not found):
-                why = " ".join((done.stderr or done.stdout).split())
-                found = [(1, f"{name} failed (exit {done.returncode}): {why}")]
+            if name == "vale" and styles:
+                problems.append((first, f"vale: {styles}"))
+                continue
             problems.extend(
                 (first + line - 1, text)
-                for line, text in found
+                for line, text in run_linter(name, [exe, *args], parse, work)
                 if (line, text.split(":")[0]) != TITLE_ALERT
             )
     return problems
+
+
+def run_linter(
+    name: str, argv: list[str], parse: Callable[[str], list[Problem]], work: Path
+) -> list[Problem]:
+    """Run one linter on the draft in ``work``; its findings, or why it failed."""
+    done = run([*argv, str(DRAFT)], cwd=work)
+    found = parse(done.stdout)
+    # Exit 1 means findings in all three tools; anything else, or
+    # exit 1 with nothing parsed, is the tool failing.
+    if done.returncode not in {0, 1} or (done.returncode == 1 and not found):
+        why = " ".join((done.stderr or done.stdout).split())
+        found = [(1, f"{name} failed (exit {done.returncode}): {why}")]
+    return found
 
 
 def body_problems(lines: Sequence[Line], title: Line) -> list[Problem]:
@@ -683,6 +769,7 @@ def check_text(text: str) -> Checked:
     problems += ref_problems(lines[start:])
     rendered = [line.raw for line in lines[start:]]
     problems += lint(rendered, title.no)
+    problems += private_names.draft_problems(rendered, title.no)
     return Checked(sorted(set(problems)), found[1], rendered, meta)
 
 
@@ -769,20 +856,29 @@ def gh_data(done: subprocess.CompletedProcess[str]) -> object:
         return None
 
 
-def live_opened_line(number: int) -> str | None:
-    """The ``Opened-by`` line of PR N's final paragraph on GitHub, or None.
+def live_pr(number: int) -> tuple[str | None, object]:
+    """PR N's ``Opened-by`` line on GitHub, or None, and its ``url``.
+
+    The line is the one in the body's final paragraph. The URL is whatever gh
+    reports, None when it reports none; ``target_of_pr`` takes it as it is.
 
     Raises:
         SystemExit: gh can't read the body, so the line can't be kept.
     """
-    done = run([find_tool(GH), "pr", "view", str(number), "--json", "body"])
+    argv = [find_tool(GH), "pr", "view", str(number), "--json", "body,url"]
+    done = run(argv)
     data = gh_data(done)
     if not isinstance(data, dict):
         why = " ".join((done.stderr or done.stdout).split())
         message = f"cannot read the body of PR {number} to keep its Opened-by: {why}"
         raise SystemExit(message)
+    line = opened_line(str(data.get("body") or ""))  # pragma: no mutate -- no line
+    return line, data.get("url")
+
+
+def opened_line(body: str) -> str | None:
+    """The ``Opened-by`` line of a PR body's final paragraph, or None."""
     paragraph: list[str] = []
-    body = str(data.get("body") or "")  # pragma: no mutate -- no body, no line
     for line in reversed(body.splitlines()):
         if line.strip():
             paragraph.append(line)
@@ -818,6 +914,81 @@ def description(
     if not trailers:
         return body
     return body + "\n" + "\n".join(trailers) + "\n"
+
+
+def target_of_pr(url: object) -> str:
+    """The ``owner/name`` in a pull request's github.com URL, or "".
+
+    The URL must be a string of exactly
+    ``https://github.com/<owner>/<name>/pull/<digits>``; anything else, a
+    missing URL included, names nothing.
+    """
+    found = PR_PAGE.fullmatch(url) if isinstance(url, str) else None
+    return found[1] if found else ""
+
+
+def repo_visibility(target: str) -> str:
+    """The visibility of ``target``, an ``owner/name``, as gh reports it.
+
+    This is the visibility of the repository the text is posted to, not the
+    working directory's. An empty, missing or malformed target returns ""
+    without a gh call, and so does a failed read. An empty value scans under the
+    full private config.
+    """
+    if not NAME_WITH_OWNER.fullmatch(target):
+        return ""
+    argv = [
+        find_tool(GH),
+        "repo",
+        "view",
+        target,
+        "--json",
+        "visibility",
+        "--jq",
+        ".visibility",
+    ]
+    done = run(argv)
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def base_visibility() -> str:
+    """The visibility of the repository ``gh pr create`` will post to, or "".
+
+    No pull request exists yet, so this is the base repository. gh resolves it
+    for ``gh repo view`` with no argument the same way it does for
+    ``gh pr create``, so one read of ``nameWithOwner`` and ``visibility`` gives
+    both. The visibility counts only if ``nameWithOwner`` parses as
+    ``owner/name``; a failed or malformed read returns "".
+    """
+    done = run([find_tool(GH), "repo", "view", "--json", "nameWithOwner,visibility"])
+    data = gh_data(done)
+    if not isinstance(data, dict):
+        return ""
+    name = data.get("nameWithOwner")
+    if not (isinstance(name, str) and NAME_WITH_OWNER.fullmatch(name)):
+        return ""
+    return str(data.get("visibility") or "")
+
+
+def scan_secrets(text: str, what: str, visibility: str) -> None:
+    """Refuse text that gitleaks flags; see ``tbhbdev.alpha.secret_scan``.
+
+    ``visibility`` is that of the repository the text is posted to, which the
+    caller reads once per command, with ``repo_visibility`` or
+    ``base_visibility``.
+    """
+    secret_scan.scan(
+        text,
+        what,
+        root=root(),
+        gitleaks=find_tool(GITLEAKS),
+        visibility=visibility,
+    )
+
+
+def post_text(title: str, body: str, visibility: str) -> None:
+    """Scan the PR title and body as gh would post them."""
+    scan_secrets(f"{title}\n\n{body}", "the PR title and body", visibility)
 
 
 def gh_args(meta: Mapping[str, object]) -> list[str]:
@@ -869,6 +1040,53 @@ def invoke_gh(argv: list[str], body: str, *, dry_run: bool = False) -> tuple[int
     print(done.stdout, end="")
     print(done.stderr, end="", file=sys.stderr)
     return done.returncode, done.stdout
+
+
+def create_pr(argv: list[str], body: str, root: str | None, *, dry_run: bool) -> int:
+    """Refuse an existing open PR, including a race reported by gh create."""
+    done = run([find_tool(GH), "pr", "view", "--json", "number,state,url"])
+    data = gh_data(done)
+    if isinstance(data, dict) and all(
+        type(data.get(key)) is kind
+        for key, kind in (("state", str), ("number", int), ("url", str))
+    ):
+        data = cast("dict[str, object]", data)  # pragma: no mutate
+        if data["state"] == "OPEN":
+            message = (
+                f"error: PR {data['number']} ({data['url']}) is already open; "
+                + EDIT_DRAFT.format(number=data["number"])
+            )
+            print(message, file=sys.stderr)
+            return 1
+    elif not (done.returncode and "no pull requests found" in done.stderr.lower()):
+        output = (done.stderr or done.stdout).rstrip("\n")
+        print(
+            f"cannot check for an open PR: {output}",
+            file=sys.stderr,
+        )
+        return 1
+    if dry_run:
+        return invoke_gh(argv, body, dry_run=True)[0]
+    argv[0] = find_tool(GH)
+    done = run(argv, stdin=body)
+    output = "\n".join(
+        filter(None, (done.stdout.rstrip("\n"), done.stderr.rstrip("\n")))
+    )
+    if done.returncode or "already exists" in output.lower():
+        print(output, file=sys.stderr)
+        if "already exists" in output.lower():
+            found = PR_URL.search(output)
+            number = found[2] if found else "<n>"
+            print(
+                "gh pr create failed; " + EDIT_DRAFT.format(number=number),
+                file=sys.stderr,
+            )
+        return 1
+    print(done.stdout, end="")
+    print(done.stderr, end="", file=sys.stderr)
+    if root is None:
+        return 0
+    return record_created(root, done.stdout)
 
 
 def record_created(root: str, stdout: str) -> int:
@@ -955,6 +1173,12 @@ def opened_by(env: Mapping[str, str]) -> tuple[str | None, str | None]:
     """
     ident = opened.opener(env)
     if ident is None:
+        if agent_identity.detect(env) is not None:
+            message = (
+                f"warning: no {OPENED_KEY} line or ledger entry: "
+                "cannot resolve the root session"
+            )
+            print(message, file=sys.stderr)
         return None, None
     value = agent_identity.format_value(ident.attrs())
     if why := agent_identity.check_value(value):
@@ -975,13 +1199,13 @@ def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     if args.command == "create":
         root, line = opened_by(env)
         body = description(checked, env, line)
+        post_text(checked.title, body, base_visibility())
         argv = [GH, "pr", "create", "--title", checked.title, "--body-file", "-"]
         argv += gh_args(checked.meta)
-        code, stdout = invoke_gh(argv, body, dry_run=args.dry_run)
-        if code or args.dry_run or root is None:
-            return code
-        return record_created(root, stdout)
-    body = description(checked, env, live_opened_line(args.pr))
+        return create_pr(argv, body, root, dry_run=args.dry_run)
+    line, url = live_pr(args.pr)
+    body = description(checked, env, line)
+    post_text(checked.title, body, repo_visibility(target_of_pr(url)))
     argv = [
         GH,
         "pr",
@@ -1050,6 +1274,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("hook").add_argument("harness", choices=[CLAUDE, CODEX, ANTIGRAVITY])
     sub.add_parser("backfill-opened").add_argument("owner")
+    sub.add_parser("ready").add_argument("--pr", type=int, required=True)
     for name in ("check", "create", "edit"):
         one = sub.add_parser(name)
         one.add_argument("draft", nargs="?", type=Path, default=DRAFT)
@@ -1072,6 +1297,10 @@ def main(
         return hook(args.harness)
     if args.command == "backfill-opened":
         return backfill(args.owner)
+    if args.command == "ready":
+        # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
+        # empty body: no test can tell `None` from `""`.
+        return invoke_gh([GH, "pr", "ready", str(args.pr)], "")[0]  # pragma: no mutate
     try:
         return command(args, env)
     except agent_identity.AttributionError:

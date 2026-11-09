@@ -1,0 +1,11 @@
+{
+  "number": 7,
+  "action": "opened",
+  "pull_request": {
+    "head": {"sha": "0123456789abcdef0123456789abcdef01234567"},
+    "draft": false,
+    "merged": false,
+    "state": "open"
+  },
+  "sender": {"login": "example-user"}
+}

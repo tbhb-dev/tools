@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from fake_tool import link_git, pythonpath, write_fake
+from fake_tool import link_git, pythonpath, write_fake, write_private_config
 from hypothesis import example, given
 from hypothesis import strategies as st
 
@@ -31,17 +31,34 @@ GEN = (
     "Generated-by: LLM harness=claude-code:2.1.0;model=anthropic:m1;"
     "session=sha-256-64:aaaaaaaaaaaaaaaa"
 )
+TARGET = "tbhb-dev/public-target"
 ASSIST = "Assisted-by: LLM harness=codex;model=openai:gpt-6.1-sol"
 
 GH = """import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 spec = json.load(open(os.path.join(here, "gh.spec")))
-kind = sys.argv[2] if sys.argv[1] == "pr" else "?"
-with open(os.path.join(here, "gh.log"), "a") as log:
+repo = sys.argv[1] == "repo"
+# A read with no repository argument names the working directory's repository.
+if repo:
+    kind = "cwd" if sys.argv[2].startswith("-") else "repo"
+else:
+    kind = sys.argv[2] if sys.argv[1] == "pr" else "?"
+# The visibility read has its own log, so it never shifts the other gh calls.
+with open(os.path.join(here, "gh.repo.log" if repo else "gh.log"), "a") as log:
     log.write(json.dumps({{"argv": sys.argv[1:], "stdin": sys.stdin.read()}}) + "\\n")
 sys.stdout.write(spec[kind + "_out"])
 sys.stderr.write(spec[kind + "_err"])
 sys.exit(spec[kind + "_rc"])
+"""
+GITLEAKS = """import json, os, sys
+here = os.path.dirname(os.path.abspath(__file__))
+spec = os.path.join(here, "gitleaks.spec")
+rc, out = json.load(open(spec)) if os.path.exists(spec) else (0, "[]")
+with open(os.path.join(here, "gitleaks.log"), "a") as log:
+    entry = {{"cwd": os.getcwd(), "stdin": sys.stdin.read(), "argv": sys.argv[1:]}}
+    log.write(json.dumps(entry) + "\\n")
+sys.stdout.write(out)
+sys.exit(rc)
 """
 COG = """import sys
 text = sys.stdin.read()
@@ -65,6 +82,12 @@ class Tools:
             "merge_rc": 0,
             "merge_out": "merged\n",
             "merge_err": "",
+            "repo_rc": 0,
+            "repo_out": "PUBLIC\\n",
+            "repo_err": "",
+            "cwd_rc": 0,
+            "cwd_out": "PRIVATE\\n",
+            "cwd_err": "",
         }
         (self.bin / "gh.spec").write_text(json.dumps(full | spec))
 
@@ -78,8 +101,15 @@ class Tools:
             "mergeable": "MERGEABLE",
             "mergeStateStatus": "CLEAN",
             "statusCheckRollup": [],
+            "url": f"https://github.com/{TARGET}/pull/12",
         }
         self.gh(view_out=json.dumps(data | fields))
+
+    def scanned(self) -> list[dict[str, object]]:
+        log = self.bin / "gitleaks.log"
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_text().splitlines()]
 
     def calls(self) -> list[dict[str, object]]:
         log = self.bin / "gh.log"
@@ -92,7 +122,7 @@ def tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Tools:
     bin_dir.mkdir()
     git_dir = tmp_path / "git"
     link_git(git_dir)
-    for name, body in (("gh", GH), ("cog", COG)):
+    for name, body in (("gh", GH), ("cog", COG), ("gitleaks", GITLEAKS)):
         write_fake(bin_dir / name, body.format())
     # One statement, not a loop: under Bazel's clean environment there is
     # nothing to remove, and a loop body that never runs is a missed branch.
@@ -101,6 +131,13 @@ def tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Tools:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{git_dir}")
+    # The scan runs from the repository root, which outside a git worktree is
+    # the current directory, and needs the committed and private configs.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".gitleaks.toml").write_text("")
+    monkeypatch.chdir(repo)
+    write_private_config(tmp_path)
     made = Tools(bin_dir)
     made.view()
     return made
@@ -484,6 +521,51 @@ def test_merge_passes_subject_body_and_head(tools: Tools) -> None:
     )
 
 
+def test_merge_scans_the_final_message(tools: Tools, tmp_path: Path) -> None:
+    assert run_main("12")[0] == 0
+    merge = tools.calls()[1]
+    subject = "feat(cli): add the stamp subcommand (#12)"
+    (scanned,) = tools.scanned()
+    assert scanned["cwd"] == str(tmp_path / "repo")
+    assert scanned["stdin"] == f"{subject}\n\n{merge['stdin']}"
+    assert scanned["argv"][scanned["argv"].index("--config") + 1] == str(  # type: ignore[index]
+        tmp_path / ".config" / "gitleaks" / "private.toml"
+    )
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_a_finding_in_the_current_body_stops_the_merge(
+    tools: Tools,
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+) -> None:
+    finding = '[{"RuleID": "some-rule", "StartLine": 3}]'
+    (tools.bin / "gitleaks.spec").write_text(json.dumps([1, finding]))
+    argv = ["12", "--dry-run"] if dry_run else ["12"]
+    code, _ = run_main(*argv)
+    assert code == (
+        "refusing the squash message for PR #12: gitleaks finds a secret: "
+        "rule some-rule on line 3"
+    )
+    assert [call["argv"][1] for call in tools.calls()] == ["view"]  # type: ignore[index]
+    assert "gh pr merge" not in capsys.readouterr().out
+
+
+def test_a_missing_gitleaks_stops_the_merge(tools: Tools) -> None:
+    (tools.bin / "gitleaks").unlink()
+    code, _ = run_main("12")
+    assert str(code).startswith("gitleaks not found on PATH")
+    assert [call["argv"][1] for call in tools.calls()] == ["view"]  # type: ignore[index]
+
+
+def test_a_missing_private_config_stops_the_merge(tools: Tools, tmp_path: Path) -> None:
+    (tmp_path / ".config" / "gitleaks" / "private.toml").unlink()
+    code, _ = run_main("12")
+    assert "private.toml cannot be read" in str(code)
+    assert tools.scanned() == []
+    assert [call["argv"][1] for call in tools.calls()] == ["view"]  # type: ignore[index]
+
+
 def test_merge_reports_gh_output_and_exit_code(
     tools: Tools, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -723,7 +805,7 @@ def test_runs_as_tbhbdev_alpha_merge(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         check=False,
-        cwd=tmp_path,
+        cwd=tmp_path / "repo",
         env=env,
     )
     assert done.returncode == 0
@@ -821,3 +903,87 @@ def test_an_unclosed_fence_names_its_line() -> None:
     assert str(info.value) == (
         "the PR body is malformed: line 3: code fence is never closed"
     )
+
+
+def repo_reads(tools: Tools) -> list[dict[str, object]]:
+    log = tools.bin / "gh.repo.log"
+    if not log.exists():
+        return []
+    return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def scan_config(tools: Tools) -> str:
+    """The config the one gitleaks call ran under."""
+    (scanned,) = tools.scanned()
+    argv = cast("list[str]", scanned["argv"])
+    return argv[argv.index("--config") + 1]
+
+
+def full_config() -> str:
+    """The private config, under the test's HOME."""
+    return str(Path.home() / ".config" / "gitleaks" / "private.toml")
+
+
+@pytest.mark.parametrize("argv", [("12",), ("12", "--dry-run")])
+@pytest.mark.parametrize(
+    ("out", "rc", "reduced"),
+    [
+        ("PRIVATE\n", 0, True),
+        ("PUBLIC\n", 0, False),
+        ("INTERNAL\n", 0, False),
+        ("", 0, False),
+        ("weird\n", 0, False),
+        ("PRIVATE\n", 1, False),
+    ],
+)
+def test_the_visibility_is_read_once_and_picks_the_config(
+    tools: Tools, argv: tuple[str, ...], out: str, rc: int, reduced: bool
+) -> None:
+    spec = tools.bin / "gh.spec"
+    answer = {"repo_out": out, "repo_rc": rc, "repo_err": "boom" if rc else ""}
+    spec.write_text(json.dumps(json.loads(spec.read_text()) | answer))
+    assert run_main(*argv)[0] == 0
+    (read,) = repo_reads(tools)
+    assert read["argv"] == [
+        "repo", "view", TARGET, "--json", "visibility", "--jq", ".visibility"
+    ]  # fmt: skip
+    assert (scan_config(tools) != full_config()) is reduced
+
+
+def test_a_private_working_directory_merging_into_a_public_repo_gets_the_full_config(
+    tools: Tools,
+) -> None:
+    other = "tbhb-dev/elsewhere"
+    tools.view(url=f"https://github.com/{other}/pull/12")
+    assert run_main("12")[0] == 0
+    (read,) = repo_reads(tools)
+    assert read["argv"][2] == other  # type: ignore[index]
+    assert scan_config(tools) == full_config()
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {},
+        {"url": ""},
+        {"url": 7},
+        {"url": "not a url"},
+        {"url": "https://github.com/o/n/pull/x"},
+        {"url": "http://github.com/o/n/pull/12"},
+        {"url": "https://gitlab.com/o/n/pull/12"},
+        {"url": "https://github.com/o/n/issues/12"},
+    ],
+)
+def test_an_unresolved_target_uses_the_full_config_and_reads_nothing(
+    tools: Tools, fields: dict[str, object]
+) -> None:
+    data = json.loads(json.loads((tools.bin / "gh.spec").read_text())["view_out"])
+    data.pop("url")
+    tools.gh(view_out=json.dumps(data | fields), repo_out="PRIVATE\n")
+    assert run_main("12")[0] == 0
+    assert repo_reads(tools) == []
+    assert scan_config(tools) == full_config()
+
+
+def test_the_view_reads_the_url() -> None:
+    assert "url" in sm.VIEW_FIELDS.split(",")

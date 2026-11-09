@@ -1,0 +1,15 @@
+{
+  "action": "completed",
+  "check_run": {
+    "id": 102,
+    "name": "example check (linux)",
+    "head_sha": "0123456789abcdef0123456789abcdef01234567",
+    "html_url": "https://example.invalid/example-org/example-repo/checks/102",
+    "status": "completed",
+    "conclusion": "failure",
+    "check_suite": {"id": 101},
+    "app": {"slug": "example-app"},
+    "pull_requests": []
+  },
+  "sender": {"login": "example-user"}
+}

@@ -3,6 +3,7 @@
 
 """Tests for tbhbdev alpha identity, the agent-identity hooks."""
 
+import dataclasses
 import hashlib
 import io
 import itertools
@@ -1446,6 +1447,40 @@ def test_claude_ident_main_and_child(repo: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("recorded", "expected"),
+    [
+        ({"model": "claude-sonnet-5-5"}, "anthropic:claude-sonnet-5-5"),
+        ({"payload_model": "claude-haiku-5-5"}, "anthropic:claude-haiku-5-5"),
+        ({"version": "9.9.9"}, None),
+    ],
+    ids=["record-model", "payload-model", "none-anywhere"],
+)
+def test_claude_ident_main_falls_back_to_the_record_model(
+    repo: Path, recorded: Json, expected: str | None
+) -> None:
+    data = claude_data(repo)
+    # A transcript tail with no assistant entry, such as after a large tool result.
+    (repo / "session-raw.jsonl").write_text(
+        json.dumps({"type": "user", "message": {"content": "x"}}) + "\n",
+        encoding="utf-8",
+    )
+    ai.write_record(SESSION_HASH, recorded, repo)
+    assert ai.claude_ident(data, CLAUDE_HOOK_ENV).model == expected
+
+
+def test_claude_ident_main_prefers_the_transcript_model(repo: Path) -> None:
+    ai.write_record(SESSION_HASH, {"model": "claude-sonnet-5-5"}, repo)
+    got = ai.claude_ident(claude_data(repo), CLAUDE_HOOK_ENV)
+    assert got.model == "anthropic:claude-opus-5-5"
+
+
+def test_claude_ident_child_never_takes_the_main_record_model(repo: Path) -> None:
+    ai.write_record(SESSION_HASH, {"model": "claude-sonnet-5-5"}, repo)
+    child = claude_data(repo, "claude-pretooluse-bash-child.json")
+    assert ai.claude_ident(child, CLAUDE_HOOK_ENV).model is None
+
+
 def test_claude_ident_falls_back_to_the_recorded_version(repo: Path) -> None:
     ai.write_record(SESSION_HASH, {"version": "9.9.9"}, repo)
     got = ai.claude_ident(claude_data(repo), {})
@@ -1532,6 +1567,146 @@ def test_bash_edit_diffs_become_receipts(repo: Path) -> None:
         ai.handle_claude({**post, "hook_event_name": event}, CLAUDE_HOOK_ENV)
     ai.handle_claude({**post, "tool_response": {"x": 1}}, CLAUDE_HOOK_ENV)
     assert len(receipts_of(repo, SESSION_HASH)) == 1
+
+
+REAL_BASH_EDIT_DIFF = {
+    "files": [
+        {
+            "filePath": "x.txt",
+            "hunks": [
+                {
+                    "oldStart": 1,
+                    "oldLines": 1,
+                    "newStart": 1,
+                    "newLines": 1,
+                    "lines": ["-a", "+b"],
+                }
+            ],
+        }
+    ],
+    "moreFiles": 0,
+    "shared": True,
+}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git checkout other",
+        "git switch -q main && git status -sb | head -2",
+        "git pull --ff-only -q && git log -1 && git status --short | head",
+        "git -C sub reset --hard HEAD 2>&1",
+        "git -c core.x=1 stash pop >/dev/null",
+        "git stash pop\ngrep -n a x.txt",
+        "cd sub && git pull",
+        "FOO=1 BAR=2 git checkout other",
+        "git pull 2>&1 | tail -3",
+        "git checkout main & git status",
+    ],
+)
+def test_git_work_tree_moves_write_no_receipt(repo: Path, command: str) -> None:
+    (repo / "x.txt").write_text("x\n", encoding="utf-8")
+    base = claude_data(repo)
+    pre = {**base, "tool_input": {"command": command}}
+    ai.handle_claude(pre, CLAUDE_HOOK_ENV)
+    post = {
+        **pre,
+        "hook_event_name": "PostToolUse",
+        "tool_response": {"bashEditDiff": REAL_BASH_EDIT_DIFF},
+    }
+    ai.handle_claude(post, CLAUDE_HOOK_ENV)
+    assert receipts_of(repo, SESSION_HASH) == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed -i s/a/b/ x.txt",
+        "ruff format x.txt",
+        "printf b > x.txt",
+        "git checkout other && sed -i s/a/b/ x.txt",
+        "git checkout other && ruff format x.txt",
+        "git checkout other > x.txt",
+        "git checkout main & sed -i s/a/b/ x.txt",
+        "git checkout $(sed -i s/a/b/ x.txt; echo main)",
+        "git checkout `sed -i s/a/b/ x.txt`",
+        "git checkout main <(sed -i s/a/b/ x.txt)",
+        "git rebase -x 'sed -i s/a/b/ x.txt' main",
+        "git rebase --exec 'ruff format x.txt' main",
+        "FOO=1 sed -i s/a/b/ x.txt",
+        "git status",
+        "git",
+        "git -C",
+        "echo 'unclosed",
+        "",
+    ],
+)
+def test_other_bash_writes_still_get_a_receipt(repo: Path, command: str) -> None:
+    (repo / "x.txt").write_text("x\n", encoding="utf-8")
+    base = claude_data(repo)
+    post = {
+        **base,
+        "hook_event_name": "PostToolUse",
+        "tool_input": {"command": command},
+        "tool_response": {"bashEditDiff": REAL_BASH_EDIT_DIFF},
+    }
+    ai.handle_claude(post, CLAUDE_HOOK_ENV)
+    assert [r["path"] for r in receipts_of(repo, SESSION_HASH)] == ["x.txt"]
+
+
+def test_moves_work_tree_ignores_a_command_that_is_not_text() -> None:
+    assert not ai.moves_work_tree(None)
+    assert not ai.moves_work_tree(["git", "checkout"])
+    assert ai.moves_work_tree("git checkout a")
+
+
+def test_moves_work_tree_strips_harmless_redirects_before_splitting() -> None:
+    # Without the strip, the ``&`` of ``2>&1`` splits the line mid-redirect.
+    assert ai.moves_work_tree("git checkout a 2>&1")
+    assert ai.moves_work_tree("git checkout a >/dev/null 2>&1")
+    # The strip leaves nothing behind, so it cannot glue onto the verb.
+    assert ai.moves_work_tree("git checkout>/dev/null")
+    assert not ai.moves_work_tree("git checkout a > out.txt")
+
+
+@pytest.mark.parametrize(
+    ("segment", "kind"),
+    [
+        ("echo hi > out.txt", "other"),
+        ("echo 'unbalanced", "other"),
+        ("", "quiet"),
+        ("FOO=1 BAR=2", "quiet"),
+        ("ls -l", "quiet"),
+        ("FOO=1 cat x", "quiet"),
+        ("rm x", "other"),
+        ("git checkout a", "move"),
+        ("git rebase main", "move"),
+        ("git rebase --exec make main", "other"),
+        ("git rebase -x make main", "other"),
+        ("git status", "quiet"),
+        ("git -C . log", "quiet"),
+        ("git commit -m x", "other"),
+        ("git", "other"),
+    ],
+)
+def test_segment_kind_names_each_kind(segment: str, kind: str) -> None:
+    assert ai.segment_kind(segment) == kind
+
+
+@pytest.mark.parametrize(
+    ("words", "verb"),
+    [
+        (["git", "--no-pager", "log"], "log"),
+        (["git", "-c", "a=b", "status"], "status"),
+        (["git", "-C", ".", "--no-pager", "diff"], "diff"),
+        (["git", "-C", "."], ""),
+        (["git", "-C"], ""),
+        (["git", "--no-pager"], ""),
+        (["git"], ""),
+    ],
+)
+def test_git_verb_skips_global_options(words: list[str], verb: str) -> None:
+    assert ai.git_verb(words) == verb
 
 
 def test_edit_tools_become_receipts(repo: Path) -> None:
@@ -1712,16 +1887,60 @@ def test_rollout_turn_context_takes_the_latest(tmp_path: Path) -> None:
     assert ai.rollout_turn_context(path) == (None, None)
 
 
-def test_rollout_turn_context_reads_one_megabyte(
+def test_rollout_turn_context_falls_back_to_the_first(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = write_rollout(tmp_path, CHILD_THREAD, [turn("old", "low"), "x" * 200])
     assert ai.rollout_turn_context(path) == ("old", "low")
     monkeypatch.setattr(ai, "CODEX_TAIL", 100)
-    assert ai.rollout_turn_context(path) == (None, None)
+    assert ai.rollout_turn_context(path) == ("old", "low")
     assert ai.CODEX_TAIL == 100
     monkeypatch.undo()
     assert ai.CODEX_TAIL == 1024 * 1024
+
+
+@pytest.mark.parametrize("later", [False, True])
+def test_rollout_turn_context_long_rollout(tmp_path: Path, *, later: bool) -> None:
+    records: list[object] = [turn("first", "high"), "x" * (1024 * 1024 + 100)]
+    if later:
+        records.append(turn("latest", "low"))
+    path = write_rollout(tmp_path, CHILD_THREAD, records)
+    assert ai.rollout_turn_context(path) == (
+        ("latest", "low") if later else ("first", "high")
+    )
+
+
+def test_rollout_turn_context_forward_scan_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert ai.CODEX_HEAD == 1024 * 1024
+    monkeypatch.setattr(ai, "CODEX_TAIL", 1)
+    monkeypatch.setattr(ai, "CODEX_HEAD", 100)
+    path = write_rollout(
+        tmp_path, CHILD_THREAD, ["x" * 80, "x" * 80, turn("late", "low")]
+    )
+    assert ai.rollout_turn_context(path) == (None, None)
+    path = write_rollout(tmp_path, CHILD_THREAD, ["x" * 99, turn("late", "low")])
+    assert ai.rollout_turn_context(path) == (None, None)
+    path = write_rollout(
+        tmp_path,
+        CHILD_THREAD,
+        [
+            "not json",
+            {"type": "other", "payload": {"model": "wrong"}},
+            {"type": "turn_context", "payload": "invalid"},
+            turn("first", "high"),
+            turn("second", "low"),
+        ],
+    )
+    monkeypatch.setattr(ai, "CODEX_HEAD", 1024)
+    assert ai.rollout_turn_context(path) == ("first", "high")
+    path.write_bytes(b"\xff\n" + json.dumps(turn("first", "high")).encode() + b"\n")
+    assert ai.rollout_turn_context(path) == ("first", "high")
+    path = write_rollout(
+        tmp_path, CHILD_THREAD, [{"type": "turn_context", "payload": {}}]
+    )
+    assert ai.rollout_turn_context(path) == (None, None)
 
 
 def test_rollout_meta(tmp_path: Path) -> None:
@@ -2557,11 +2776,14 @@ def test_enrich_fills_harness_version_and_surface_from_the_committer() -> None:
         ai.Ident(ROOT, "claude-code:2.1", None, "anthropic:m", None, "cli")
     )
     bare = ai.Ident(ROOT, "claude-code")
+    # The same agent's missing model comes from the committer's root identity.
     assert ai.enrich(bare, cm) == ai.Ident(
-        ROOT, "claude-code:2.1", None, None, None, "cli"
+        ROOT, "claude-code:2.1", None, "anthropic:m", None, "cli"
     )
     versioned = ai.Ident(ROOT, "claude-code:1.0", None, None, None, "ide")
-    assert ai.enrich(versioned, cm) == versioned
+    assert ai.enrich(versioned, cm) == dataclasses.replace(
+        versioned, model="anthropic:m"
+    )
     # Committer lacking either value fills nothing.
     plain_cm = committer_of(ai.Ident(ROOT, "claude-code"))
     assert ai.enrich(bare, plain_cm) == bare
@@ -2603,6 +2825,37 @@ def replace_harness(ident: ai.Ident, harness: str) -> ai.Ident:
     return ai.Ident(
         ident.root, harness, ident.subagent, ident.model, ident.effort, ident.surface
     )
+
+
+def test_enrich_fills_a_same_agent_main_identity_from_the_committer_root() -> None:
+    root = ai.Ident(ROOT, "claude-code:2.1", None, "anthropic:m", "high", "cli")
+    cm = committer_of(ai.Ident(ROOT, "claude-code:2.1", CHILD, "anthropic:c"), root)
+    bare = ai.Ident(ROOT, "claude-code:2.1", None, None, None, "cli")
+    assert ai.enrich(bare, cm) == root
+    # Each missing value is filled alone; a present one wins.
+    only_effort = ai.Ident(ROOT, "claude-code:2.1", None, "anthropic:x", None, "cli")
+    got = ai.enrich(only_effort, cm)
+    assert (got.model, got.effort) == ("anthropic:x", "high")
+    only_model = ai.Ident(ROOT, "claude-code:2.1", None, None, "low", "cli")
+    got = ai.enrich(only_model, cm)
+    assert (got.model, got.effort) == ("anthropic:m", "low")
+    # A root with nothing to lend fills nothing.
+    empty = committer_of(cm.ident, ai.Ident(ROOT, "claude-code:2.1"))
+    assert ai.enrich(bare, empty) == bare
+
+
+def test_enrich_never_lends_the_root_model_to_another_agent() -> None:
+    root = ai.Ident(ROOT, "claude-code:2.1", None, "anthropic:m", "high", "cli")
+    cm = committer_of(root)
+    other_root = ai.Ident(OTHER, "claude-code:2.1", None, None, None, "cli")
+    assert ai.enrich(other_root, cm) == other_root
+    # A subagent of the same session is a different agent.
+    child = ai.Ident(ROOT, "claude-code:2.1", CHILD, None, None, "cli")
+    assert ai.enrich(child, cm) == child
+    # Only a Claude committer lends its root identity.
+    codex_cm = ai.Committer(ai.CODEX, ai.Ident(ROOT, "claude-code:2.1"), root)
+    bare = ai.Ident(ROOT, "claude-code:2.1", None, None, None, "cli")
+    assert ai.enrich(bare, codex_cm) == bare
 
 
 def test_enrich_child_ignores_records_it_cannot_trust(repo: Path) -> None:
@@ -2946,6 +3199,28 @@ def test_write_claim_writes_nothing_when_the_index_has_no_tree(
     monkeypatch.setattr(ai, "git", returning((128, "")))
     ai.write_claim(info, ROOT, [Path("a.json")])
     assert not (repo / ".git" / "tbhb-alpha").exists()
+
+
+def test_cmd_trailer_merges_a_model_less_receipt_into_its_twin(
+    repo: Path, tmp_path: Path
+) -> None:
+    stage(repo, "a.txt")
+    ai.write_record(SESSION_HASH, {"model": "claude-opus-5-5", "effort": "low"}, repo)
+    full = make_ident(
+        model="anthropic:claude-opus-5-5", root=SESSION_HASH, effort="low"
+    )
+    bare = make_ident(model=None, root=SESSION_HASH)
+    put_receipt(repo, "a1.json", make_receipt("a.txt", full, ts=2), SESSION_HASH)
+    put_receipt(repo, "a2.json", make_receipt("a.txt", bare, ts=1), SESSION_HASH)
+    path = msg_file(tmp_path)
+    assert ai.cmd_trailer(str(path), None, CLAUDE_COMMIT_ENV) == 0
+    text = path.read_text(encoding="utf-8")
+    assert text == (
+        "subject\n\nbody\n\n"
+        "Generated-by: LLM effort=low;harness=claude-code:2.1.316;"
+        f"model=anthropic:claude-opus-5-5;session={SESSION_HASH};surface=cli\n"
+    )
+    assert ai.check_message(text) == []
 
 
 def test_cmd_trailer_claims_what_it_credits(repo: Path, tmp_path: Path) -> None:
@@ -3536,16 +3811,13 @@ def test_e2e_hook_works_from_a_subdirectory(wired: Path) -> None:
 
 
 @needs_prek
-@pytest.mark.parametrize("env", [None, CLAUDE_E2E], ids=["human", "agent"])
-def test_e2e_signoff_passes_the_check_for_everyone(
-    wired: Path, env: dict[str, str] | None
-) -> None:
-    """`git commit -s` passes, human or agent: sign-off is not checked."""
+def test_e2e_an_agent_signoff_fails_the_check(wired: Path) -> None:
+    """`git commit -s` by an agent is rejected; the operator signs off."""
     claude_turn(wired)
     stage(wired, "a.txt")
-    done = git_commit(wired, "feat: a", env, "-s")
-    assert done.returncode == 0, done.stderr
-    assert "Signed-off-by: tbhb.dev Agent <agent@tonyburns.net>" in last_message(wired)
+    done = git_commit(wired, "feat: a", CLAUDE_E2E, "-s")
+    assert done.returncode != 0
+    assert SIGNOFF_BASE in done.stderr
 
 
 NOREPLY = "tbhb.dev Agent <334376894+tbhb-agent@users.noreply.github.com>"
@@ -3642,45 +3914,63 @@ def agent_git(*_: str, **__: object) -> tuple[int, str]:
     return 0, f"{ai.AGENT_IDENT} 1794020000 -0500"
 
 
-@pytest.mark.parametrize(
-    ("line", "who"),
-    [
-        (f"Signed-off-by: {NOREPLY}", NOREPLY),
-        (f"signed-off-by:\t{NOREPLY} ", NOREPLY),
-        (
-            "Signed-off-by: TBHB.DEV agent <a@example.invalid>",
-            "TBHB.DEV agent <a@example.invalid>",
-        ),
-    ],
-    ids=["noreply", "lowercase-key", "case"],
+SIGNOFF_BASE = (
+    "agent commits carry no Signed-off-by or Co-authored-by; the operator signs off"
 )
-def test_ident_problems_refuses_another_agent_signoff(
-    monkeypatch: pytest.MonkeyPatch, line: str, who: str
-) -> None:
-    monkeypatch.setattr(ai, "git", agent_git)
-    text = f"feat: a\n\nbody\n\n{line}\nSigned-off-by: {ai.AGENT_IDENT}\n"
-    must = f"an agent commit must use {ai.AGENT_IDENT}"
-    assert ai.ident_problems(text, {"CODEX_SESSION_ID": "s"}) == [
-        f"Signed-off-by is {who!r}; {must}"
-    ]
-    assert ai.ident_problems(text, {}) == []
 
 
 @pytest.mark.parametrize(
     "line",
     [
         f"Signed-off-by: {ai.AGENT_IDENT}",
+        f"Signed-off-by: {NOREPLY}",
         "Signed-off-by: Human <h@example.invalid>",
-        f"Co-authored-by: {NOREPLY}",
-        f"See Signed-off-by: {NOREPLY}",
+        "Co-authored-by: Human <h@example.invalid>",
+        "signed-off-by: Human <h@example.invalid>",
+        "CO-AUTHORED-BY: Human <h@example.invalid>",
+        "Signed-off-by : Human <h@example.invalid>",
     ],
-    ids=["agent", "human", "co-author", "mid-line"],
+    ids=["agent", "noreply", "human", "co-author", "lowercase", "uppercase", "space"],
 )
-def test_ident_problems_accepts_other_sign_offs(
+def test_ident_problems_refuses_a_signoff_or_co_author(
     monkeypatch: pytest.MonkeyPatch, line: str
 ) -> None:
     monkeypatch.setattr(ai, "git", agent_git)
-    assert ai.ident_problems(f"feat: a\n\n{line}\n", {"CODEX_SESSION_ID": "s"}) == []
+    text = f"feat: a\n\nbody\n\n{line}\n"
+    assert ai.ident_problems(text, {"CODEX_SESSION_ID": "s"}) == [SIGNOFF_BASE]
+    assert ai.ident_problems(text, {}) == []
+
+
+def test_ident_problems_reports_the_trailers_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ai, "git", agent_git)
+    text = "feat: a\n\nSigned-off-by: A <a@x>\nCo-authored-by: B <b@x>\n"
+    assert ai.ident_problems(text, {"CODEX_SESSION_ID": "s"}) == [SIGNOFF_BASE]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "feat: a\n",
+        "feat: a\n\nGenerated-by: LLM x\n",
+        f"feat: a\n\nSee Signed-off-by: {NOREPLY}\n",
+    ],
+    ids=["none", "other-trailer", "mid-line"],
+)
+def test_ident_problems_accepts_a_message_without_the_trailers(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    monkeypatch.setattr(ai, "git", agent_git)
+    assert ai.ident_problems(text, {"CODEX_SESSION_ID": "s"}) == []
+
+
+def test_ident_problems_ignores_trailers_outside_a_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ai, "git", agent_git)
+    text = "feat: a\n\nSigned-off-by: A <a@x>\nCo-authored-by: B <b@x>\n"
+    assert ai.ident_problems(text, {}) == []
 
 
 def test_cmd_check_reads_the_signoff_from_the_message(
@@ -3692,7 +3982,7 @@ def test_cmd_check_reads_the_signoff_from_the_message(
     msg = tmp_path / "msg"
     msg.write_text(f"feat: a\n\nSigned-off-by: {NOREPLY}\n")
     assert ai.cmd_check(str(msg), {"CODEX_SESSION_ID": "s"}) == 1
-    assert f"Signed-off-by is {NOREPLY!r}" in capsys.readouterr().err
+    assert capsys.readouterr().err == f"tbhbdev alpha identity: {SIGNOFF_BASE}\n"
 
 
 CODEX_E2E = {"CODEX_SESSION_ID": ROOT_THREAD, "CODEX_VERSION": "0.166.0"}
@@ -3703,10 +3993,7 @@ def test_e2e_a_codex_commit_with_a_noreply_signoff_fails(wired: Path) -> None:
     stage(wired, "a.txt")
     done = git_commit(wired, f"feat: a\n\nSigned-off-by: {NOREPLY}", CODEX_E2E)
     assert done.returncode != 0
-    assert (
-        f"tbhbdev alpha identity: Signed-off-by is {NOREPLY!r}; "
-        f"an agent commit must use {ai.AGENT_IDENT}"
-    ) in done.stderr
+    assert f"tbhbdev alpha identity: {SIGNOFF_BASE}" in done.stderr
     assert run_git(wired, "log", "-1", "--format=%s") == "init\n"
 
 
@@ -3715,11 +4002,11 @@ def test_e2e_a_codex_commit_as_the_agent_passes(wired: Path) -> None:
     home = wired.parent / "codex"
     write_rollout(home, ROOT_THREAD, [meta(id=ROOT_THREAD), turn("gpt-5.6-sol", None)])
     stage(wired, "a.txt")
-    done = git_commit(wired, "feat: a", {**CODEX_E2E, "CODEX_HOME": str(home)}, "-s")
+    done = git_commit(wired, "feat: a", {**CODEX_E2E, "CODEX_HOME": str(home)})
     assert done.returncode == 0, done.stderr
     who = run_git(wired, "log", "-1", "--format=%an <%ae>%n%cn <%ce>")
     assert who == f"{ai.AGENT_IDENT}\n{ai.AGENT_IDENT}\n"
-    assert f"Signed-off-by: {ai.AGENT_IDENT}" in last_message(wired)
+    assert "Signed-off-by" not in last_message(wired)
 
 
 @needs_prek
@@ -3778,15 +4065,19 @@ def test_e2e_claude_subagent_commits_its_parents_edit(wired: Path) -> None:
 
 
 @needs_prek
-def test_e2e_codex_rollout_edit_then_commit(wired: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("long_rollout", [False, True])
+def test_e2e_codex_rollout_edit_then_commit(
+    wired: Path, tmp_path: Path, *, long_rollout: bool
+) -> None:
     home = tmp_path / "codex"
     write_rollout(
         home,
         ROOT_THREAD,
         [
-            meta(id=ROOT_THREAD, cwd=str(wired)),
+            meta(id=ROOT_THREAD, cwd=str(wired), source="exec"),
             turn("gpt-5.6-sol", "high"),
             patch_call("c.txt"),
+            "x" * (1024 * 1024 + 100) if long_rollout else "",
         ],
     )
     stage(wired, "c.txt")
@@ -3801,7 +4092,7 @@ def test_e2e_codex_rollout_edit_then_commit(wired: Path, tmp_path: Path) -> None
     assert trailers(wired) == [
         (
             "Generated-by: LLM effort=high;harness=codex:0.166.0;"
-            f"model=openai:gpt-5.6-sol;session={session}"
+            f"model=openai:gpt-5.6-sol;session={session};surface=exec"
         )
     ]
 
@@ -4533,7 +4824,7 @@ def test_enrich_matches_harness_ignoring_versions() -> None:
     )
     other = ai.Ident(ROOT, "claude-code:1.0")
     assert ai.enrich(other, cm) == ai.Ident(
-        ROOT, "claude-code:1.0", None, None, None, "cli"
+        ROOT, "claude-code:1.0", None, "anthropic:m", None, "cli"
     )
 
 

@@ -73,7 +73,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NoReturn
 from urllib.parse import urlsplit
 
-from tbhbdev import runner, secrets, userconfig
+from tbhbdev import gh_agent, runner, secrets, userconfig
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -114,7 +114,7 @@ REPO = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*\Z"
 # The gh config of the agent's GitHub identity, which clones and fetches use,
 # and the agent's tbhbdev config. Neither holds a credential; gitleaks flags
 # any path into .config.
-GH_AGENT = 'GH_CONFIG_DIR="$HOME/.config/gh-agent"'  # gitleaks:allow
+GH_AGENT = f'GH_CONFIG_DIR="$HOME/{gh_agent.CONFIG_DIR}"'  # gitleaks:allow
 AGENT_CONFIG = '"$HOME/.config/tbhbdev"'  # gitleaks:allow
 # The file in the agent's home that names the token in its keychain.
 TOKEN_NAME_FILE = f"{AGENT_CONFIG}/connect-token-name"

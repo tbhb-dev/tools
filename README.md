@@ -16,7 +16,7 @@ To put `tbhbdev` on PATH, which the `alpha` harness and git hooks need, install 
 uv tool install git+https://github.com/tbhb-dev/tools
 ```
 
-`uv tool upgrade tbhbdev` updates it.
+`uv tool upgrade tbhbdev` updates it. `tbhbdev --version` (or `-V`) prints `tbhbdev <version> (<identity>)`: the commit the install came from, `editable <path>` or `local <path>` for a directory install, or `unknown`.
 
 ## Tools
 
@@ -26,7 +26,7 @@ uv tool install git+https://github.com/tbhb-dev/tools
 
 ## Config
 
-The values of one deployment come from the user config at `$XDG_CONFIG_HOME/tbhbdev/config.toml`, where `XDG_CONFIG_HOME` defaults to `.config` in the home directory. The package has no defaults for them, and no environment variable or plugin overrides them. When the file or a required key is missing, the command fails, and its error gives the file's path and the `[table] key`. Only the `[workspace]` table and `[gitleaks] session_sockets` are optional. `tbhbdev` reads the file only when a command first needs a value, so `--help` works without it.
+The values of one deployment come from the user config at `$XDG_CONFIG_HOME/tbhbdev/config.toml`, where `XDG_CONFIG_HOME` defaults to `.config` in the home directory. The package has no defaults for them, and no environment variable or plugin overrides them. When the file or a required key is missing, the command fails, and its error gives the file's path and the `[table] key`. Optional settings include the `[workspace]`, `[loop]`, `[agent]` and `[gh_budget]` tables and `[gitleaks] session_sockets`. Calling `alpha loop` requires its settings in `[loop]`. `tbhbdev` reads the file only when a command first needs a value, so `--help` works without it.
 
 ```toml
 [op]
@@ -51,7 +51,13 @@ session_sockets = ["/tmp/example-socks/"]
 [workspace]
 root = "src"
 repos = ["example-org/app"]
+
+[gh_budget]
+hourly_limit = 300
+core_floor = 1000
 ```
+
+`[gh_budget]` sets the agent `gh` budget that [GitHub polling](#github-polling) describes. Its values are whole numbers, and the ones shown are the defaults.
 
 Each `[connect] server_hosts` entry must be a DNS label of at most 63 characters. Letters and digits make up the label, and a hyphen may appear only between them. A bad entry fails with its position in the list, not its value.
 
@@ -100,21 +106,186 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 `tbhbdev alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`:
 
 - `identity` records which agent and model made each edit and writes the `Generated-by` trailers.
+- `guard-op` requires the configured `[op] account` flag on shell calls and proposed writes in every directory. `PreToolUse` covers Claude `Bash` and `Write|Edit|MultiEdit|NotebookEdit`, Codex `Bash`/`shell`/`apply_patch` and Antigravity `run_command`/edit tools. The guard scans shell files, Markdown shell fences, Python command expressions, notebook code cells, and YAML command fields. It allows unrelated edits to existing offenders. `OP_ACCOUNT` alone doesn't pass the guard. The module docstring lists the allowed command forms that the scanner misses. Check the Codex `apply_patch` PreToolUse matcher live after install. Its behavior remains unverified against Codex's documentation.
 - `guard-gh-pr` is a PreToolUse hook that blocks `gh pr create`, `gh pr edit` and `gh pr merge`.
+- `state-guard` is a Claude Code hook that blocks a status claim with no evidence in a SendMessage call or a final reply, and a `git commit` that adds a sign-off or co-author trailer.
+- `session-context` is a Claude Code SessionStart hook that reports the host, its role, the other hosts, and the local time.
+- `guard-gh-poll` is a PreToolUse hook that blocks GitHub polling and unsetting the 1Password service account token's variable.
+- `gh-shim` is the `gh` that agent sessions find first on PATH. It budgets their `gh` calls as a backstop.
+- `agent-env` runs Codex or Antigravity with the `gh` shim first on PATH.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
+- `repo` holds repository commands. `repo bootstrap` applies the standard repository settings.
 - `merge` squash-merges an approved pull request.
+- `loop` validates its user configuration and refuses live intake until adapters connect the runner to its sources. Its shadow runner accepts typed event and reconcile interfaces for simulation. The package includes pure state derivation and rules that produce typed shadow intents with action keys and spawn budgets. A SQLite store records receipts, action keys, runs, and escalation markers.
+- `agent` validates its user configuration and refuses to run until a later slice adds runs. The package also includes the run request's schema and the repo argument rules.
 - `install` installs the git hooks and the user-level harness hooks.
 
-Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does two things:
+Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does six things:
 
 - It installs that clone's git hooks into `$(git rev-parse --git-common-dir)/hooks`, which every worktree of the clone shares. prek runs pre-commit and pre-push, and three shims run `tbhbdev alpha identity` for prepare-commit-msg, commit-msg and post-commit. Without `tbhbdev` on PATH, the shims block a commit in a tbhb-dev repository and do nothing elsewhere.
 - It merges the hooks into each harness's user-level config: `settings.json` in `$CLAUDE_CONFIG_DIR` or `.claude` in `$HOME` for Claude Code, `hooks.json` in `$CODEX_HOME` or `.codex` in `$HOME` for Codex, and `.gemini/config/hooks.json` in `$HOME` for Antigravity.
+- It records Codex's trust for the hooks it wrote. Codex runs a hook only when `config.toml` in `$CODEX_HOME` holds a trusted hash for it, so install sets `trusted_hash` under `[hooks.state."<key>"]` for each hook of its own, which is the trust `/hooks` grants a person. Entries for other hooks are unchanged, and so is the rest of `config.toml`, comments included. A hook whose command changes loses its trust, since the hash covers the command. The hash for a group with no matcher (`SessionStart`, `SubagentStart`) leaves `matcher` out, which nobody has checked against Codex yet. A live check after merge confirms it. If Codex hashes `"matcher": null` or `""` instead, those two hooks show as untrusted again. When a hook of its own moves to a new position, install removes the entry for the old one. A new `config.toml` is readable by the user only, an existing one keeps its mode, and one that isn't valid TOML is reported and left alone. The `SSH_AUTH_SOCK` setting below edits the same `config.toml` right after, so one run applies both, trust first, and each keeps the other's keys.
+- When an installed plugin supplies `claude-private.md` or `mise-private.toml`, it writes them to `.claude/CLAUDE.private.md` and `.config/mise/conf.d/private.toml` in `$HOME`, readable by the user only. When no plugin supplies a file, it skips that file.
+- It sets `SSH_AUTH_SOCK` to the empty string for every agent command, in the `env` object of Claude Code's `settings.json` and in `shell_environment_policy.set` of Codex's `config.toml`, so an agent's command doesn't connect to the 1Password SSH agent and prompt the operator. Host provisioning sets the variable for the account an agent runs as, but gives the operator's own account no harness environment, so `install` is the only thing that sets it there. It keeps every other key of both files, and the comments and layout of `config.toml`.
+- It writes the `gh` shim, an executable `gh` in `$XDG_DATA_HOME/tbhbdev/agent-bin`, where `XDG_DATA_HOME` defaults to `.local/share` in the home directory.
 
-Each hook command it writes ends in `# tbhbdev alpha install`. A rerun replaces only those entries, and keeps everything else in place. Before it changes a config, it saves the old one beside it as `<name>.tbhbdev-backup.<time>`. `--dry-run` prints the changes without writing them, and `--harness claude|codex|antigravity` limits the merge to one harness. Codex asks you to trust new hooks with `/hooks`.
+It never prompts, runs `op` or needs the 1Password app, so configuration management can run it unattended, and a second run doesn't change anything. Each hook command it writes ends in `# tbhbdev alpha install`. A rerun replaces only those entries, and keeps everything else in place. Before it changes a config, `config.toml` included, it saves the old one beside it as `<name>.tbhbdev-backup.<time>`. `--dry-run` prints the changes without writing them, and `--harness claude|codex|antigravity` limits the merge to one harness.
 
-The hooks are user level, and the harness runs them in every repository. Each one first checks that the repository's `origin` is a tbhb-dev repository on GitHub, and does nothing otherwise. The one exception is the record hook run outside any repository, which writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Claude Code's SessionStart hook runs `tbhbdev alpha install --hook`, which reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
+For Claude Code it also installs `state-guard` (PreToolUse for Bash, SendMessage, Write and Edit, plus Stop and SessionStart) and `session-context` (SessionStart), each with a 10 second timeout. Their private values come from an optional `[harness]` table in the user config, and a missing table or key turns off the check that needs it, never blocks:
+
+```toml
+[harness]
+rule = "Example rule: a status claim carries its evidence."   # SessionStart text
+decisions_dir = "/example/decisions"   # the path the open-note block names
+open_note = "/example/Open.md"         # a path suffix; a new item needs "Decisions checked:"
+hosts = ["example-a=peer Mac", "example-b=Linux VM", "example-c"]   # "name=role"
+```
+
+`tbhbdev alpha pr check` reads one more optional table. `private_repos` lists private repository names that must not appear in a public repository's draft:
+
+```toml
+[pr_check]
+private_repos = ["example-lab", "example-notes"]   # optional
+```
+
+The check flags a whole repository-name token in the title and body that equals a listed name, and any token ending in `-private`, such as `example-private`. The suffix rule works without config. Matching ignores case and a trailing `.git`. A clone URL matches. It ignores substrings of longer names. A token that starts with a hyphen, such as `--private`, passes, but the check flags a word such as `non-private`. It skips a working repository whose own name ends in `-private` or appears in the list. If `origin` is unreadable, the check runs. It covers the title and body only, not commit messages.
+
+Commit and claim checks run without config. For commits, the command guard checks arguments for trailers and sign-off flags. Message bodies in here documents or `-F` files pass this guard. The commit-msg identity check catches trailers in those bodies.
+
+Evidence can be a `#N` reference or a commit hash of 7 to 40 hex characters. Hashes must contain a digit and a letter from a to f. A log path or inline code can supply evidence as well, as can command output. Claims can attribute a result with `says` or `reports`, or mark it `unverified`.
+
+These user-level hooks run in every repository. Before acting, the identity, pull request, approval guard, and install hooks check that `origin` names a tbhb-dev repository on GitHub. Outside a repository, the identity record hook still writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Both `state-guard` and `session-context` run regardless of origin. At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, which puts the `gh` shim first on PATH for the session's commands and reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, and each worktree has its own pull request draft, so sessions in two worktrees of one clone don't overwrite each other.
+
+### Loop configuration
+
+`tbhbdev alpha loop` reads the optional `[loop]` table from the user config. Calling this command requires the settings shown below. An unreadable or invalid config file fails with its path. A missing table or key, an unknown key, or an invalid setting fails with the path and `[loop] key`. `--help` works without config.
+
+```toml
+[loop]
+repositories = ["example-org/example-repo"]
+approval_command = ["example-approve", "--quiet"]
+store_path = "/example/state/loop.sqlite3"
+reconcile_interval_minutes = 5
+spawn_cap_total = 4
+spawn_cap_per_host = 2
+daily_spawn_cap = 20
+hosts = ["example-host-a", "example-host-b"]
+allow_claude_retry = false
+
+[loop.rule_modes."example-org/example-repo"]
+R0 = "shadow"
+R1 = "shadow"
+R2 = "shadow"
+R4 = "shadow"
+R9 = "shadow"
+```
+
+The settings have these constraints:
+
+- `repositories` lists unique `owner/name` strings.
+- `approval_command` lists the approval program followed by its arguments, preserving arguments with spaces. The loop doesn't store a token.
+- `hosts` lists unique host strings. These three lists must contain at least one entry, and entries must be non-blank strings.
+- `store_path` is a non-blank path string without a null byte. After expanding `~`, it must be absolute.
+- The interval and caps are positive integers. Booleans and fractional values fail. The spawn caps cover the total and each host. `spawn_cap_per_host` must not exceed `spawn_cap_total`. The daily cap covers spawns per day.
+
+`allow_claude_retry` is an optional boolean, defaulting to false. R8 retries on Codex unless this flag permits a timed-out or unknown Codex run to retry on Claude. It still needs configured host and harness capacity. `rule_modes` is an optional table of configured repositories, each containing R0 through R11 with values `off`, `shadow`, or `on`. Unlisted rules are off. The runner rejects every `on` mode with `LiveModeError` at startup. Live execution isn't implemented.
+
+Even with valid settings, the command exits with status 1 and reports that the shadow runner exists but live intake isn't wired yet. It doesn't create a store or execute an approval or other action. The Python runner accepts `EventSource`, `ReconcileReader`, `PeerAgent`, `GitHubWriter`, and `Approval` protocols, with fakes in the tests. Intake supplies validated receipts and immutable observations from each delivered event and verified context. Reconcile reads supply fresh facts and typed evidence of completed effects.
+
+`Runner.run` reconciles before consuming deliveries. R0 gates reconcile reads by rule mode, schedule, and quota reserve. The runner records each intent with state `shadow` and appends a JSON line with the receipt or sweep identifier, derived state, rule, key, kind, and outcome. Replayed deliveries and restarts use the same keys, while fresh observations supply PR state. R3 has no action key: each processed delivery or sweep logs the observed decline again, including repeated sweep identifiers. These lines describe observations and don't count as scored intents. The runner never calls an effect interface.
+
+Each sweep compares prior intents with head-bound approvals, merges, reviewer runs, and typed effect observations. In Phase 0, R0 agrees on a sweep. Only R1, R2, R4, and R5 can reach `agree` from PR facts. R6 through R11 need explicit effect evidence to agree. A PR absent from the snapshot or superseded by a new head scores `no_change`. The runner rejects invalid effect results before writing. `score_shadow` records `agree`, `disagree`, or `no_change` in an immediate transaction and skips rows whose timestamps are ahead of the sweep. Final comparisons are immutable. A later sweep can replace `no_change` with a final score.
+
+`Runner.report()` reads one store snapshot and returns counts by rule and repository, plus the count of R9 items it would have written. Twenty final scores make a rule eligible for promotion review. Provisional `no_change` scores don't count. Each rule summary has `needs_review` set when any disagreement needs explanation before promotion.
+
+Eligibility alone never permits promotion. Phase 0 rejects live modes regardless of score.
+
+The store API takes the configured `store_path` with no default. `Store(path)` opens an existing database. Use `OpenMode.CREATE` for a new one. One connection uses write-ahead logging, full synchronization, a five-second busy timeout, and owner-only file permissions. The parent directory must be private and must not be a symlink. A sibling `<store_path>.lock` file excludes a second opener for the store's lifetime, including during a rebuild. `:memory:` supports isolated tests. Only the runner writes through this API. No table stores pull request state.
+
+`record_intent(key, time)` claims a new key and returns false when a live key already exists. A live intent replaces an existing shadow row. Promotion resets its timestamps and result. `existing_keys()` excludes shadow rows. `shadow_keys()` supplies them separately. An action advances from `intent` to `started`, then `done` or `failed`. The store serializes transition reads and writes in one transaction. Invalid transitions and state/result pairs raise `TransitionError`. Done actions require `ok`. Failed actions require `error`, `timeout`, or `refused`. A shadow row can persist a runner-supplied `agree`, `disagree`, or `no_change` result without becoming live. The store doesn't compute shadow scores.
+
+Receipts and identifiers reject values outside their patterns. Duplicate delivery ids return `duplicate` without replacing the first receipt: this means seen, not processed. `crashed_intents()` supplies keys that have no start. `unfinished_starts()` supplies started keys without a terminal result. Both need recovery reads before a retry. `record_escalation()` returns the marker and whether it created the row. `stopped_objects()` derives the rules' stopped objects from live escalation and stop keys.
+
+`counts(object_key)` returns failure totals by key family across heads. Families keep the action kind, object, and any step or reason. Review totals include every verdict. The runner combines them with approvals from reads to fill the rules' `reviewer_runs_without_approval` input. Retry counts use recorded runs under `retry:<run>`. This count is a presence flag because action keys are unique. Shadow keys contribute neither failures nor run counts. The counts and existing keys feed the rules without changing their input types.
+
+`StoreError` reports a missing, corrupt, or locked database. Schema version 3 adds shadow intent dimensions for reports. A mismatched version raises `SchemaVersionError` with code `SCHEMA_VERSION`, naming the found version and requiring a rebuild before any journal settings change. To rebuild it, stop the loop and open the store with `OpenMode.REBUILD`. Rebuilding discards the database and its sidecars. The lock remains acquired throughout the rebuild. `Recovery.KEYS_LOST` tells the runner that it no longer has previous action keys. The runner must reconcile before taking more work. Database errors fail the operation and close unreadable or damaged connections before another operation can use them.
+
+The pure rules table requires a spawned reviewer's approval at the current green head and a complete diff read. Mechanical approval is undecided and defaults off in `RepositoryPolicy.mechanical_approval`. An explicit opt-in permits only an agent-opened PR with an exact configured template match. PRs opened by the loop process remain excluded. R1 skips loop-origin PRs that the loop can't approve. The caller must recompute `mechanical_template_matches`, `verification_passed`, and all other head-bound observations for the current head. Until the caller verifies the base repository, the rules skip the PR, including escalation. Pending signatures and pending CI have no rule or age timeout in this slice. R8 uses `stop:<run>` when capacity can't supply a retry target and reserves `retry:<run>` for a retry with a target. Escalation emits at most one intent per object per call and skips stopped objects.
+
+### Agent configuration
+
+`tbhbdev alpha agent` reads the optional `[agent]` table from the user config. Calling this command requires the table and every key shown below except `max_run_minutes`, `docker`, `expires` and the `[agent.codex]` table. Unreadable config fails with its path. Missing or invalid settings fail with the path, the full table name and the key, as `[agent.sandbox] audit_dir is required`. Unknown keys fail the same way at any level. The command takes no options. Valid settings still end in exit status 1 and a report that runs aren't implemented.
+
+```toml
+[agent]
+launch_wait_seconds = 120
+agy_timeout = "900s"
+kill_grace_seconds = 10
+max_run_minutes = 120
+sockets_dir = "/example/sockets"
+
+[agent.sandbox]
+write_roots = [".cache", ".local/share/mise", ".local/state"]
+audit_dir = ".local/state/example-audit"
+denied_home_paths = [".claude"]
+
+[agent.sandbox.path]
+linux = [".local/share/mise/shims", "/usr/local/bin", "/usr/bin", "/bin"]
+macos = [".local/share/mise/shims", "/opt/homebrew/bin", "/usr/bin", "/bin"]
+
+[agent.sandbox.agy]
+review_read = [".config/example-gh", ".config/mise"]
+build_read = [".config/example-tools", ".local/share/mise/installs"]
+build_write = [".local/state/mise", ".local/share/mise"]
+
+[agent.codex]
+web_search = { build = "live", review = "live" }
+
+[agent.credentials.agent]
+gh = "example-vault/example-gh/token"
+docker = "example-vault/example-docker/config"
+reviews_app_id = "example-vault/example-app/app_id"
+reviews_app_client_id = "example-vault/example-app/client_id"
+reviews_app_pem = "example-vault/example-app/private_key"
+signing = "example-vault/example-signing/private_key"
+
+[agent.claude]
+default_profile = "primary"
+
+[agent.claude.profiles.primary]
+token = "example/primary/token"
+
+[agent.claude.profiles.secondary]
+token = "example/secondary/token"
+expires = "example/secondary/expires"
+
+[[agent.host]]
+name = "example-linux"
+os = "linux"
+shell = "bash"
+account = "agent"
+unsandboxed = false
+accounts = ["agent"]
+```
+
+The settings have these constraints:
+
+- The package has no defaults except Codex's `web_search`. The `[agent.codex]` table and each of its keys are optional, and each profile, `build` and `review`, defaults to `live`. A key can narrow it to `cached` or `disabled`.
+- `launch_wait_seconds`, `kill_grace_seconds` and `max_run_minutes` are positive integers. `agy_timeout` is bare seconds or a duration ending in `s`, `m` or `h`, up to 7 days.
+- Path settings are non-blank strings without a null byte or a `..` part. The sandbox lists must be non-empty.
+- Every credential and profile `token` is a `vault/item/field` reference, and each part starts with a letter or digit, then continues with letters, digits, dots, `_` or `-`. `[agent.credentials.<account>]` takes one table for each account, and `docker` is optional.
+- `default_profile` names one of the profiles, matching without regard to case, so `Primary` selects `primary`. Profile names that differ only in case fail validation. Display uses the name as written.
+- `[[agent.host]]` lists at least one host. Its `name` is lower-case, dot-separated labels, `os` is `linux` or `macos`, `shell` is `bash` or `zsh`, `account` must be one of `accounts`, and host names are unique. Every name in `accounts` needs an `[agent.credentials.<name>]` table.
+
+The run request is a versioned JSON object. Version 1 lists every run field and no credential. A reader refuses unknown versions, unknown or missing fields, and any `unsandboxed` request unless the harness is Codex, the profile is `build`, the host's `unsandboxed` is true and the authorization has the form `owner/repo#N` or `operator-chat-YYYY-MM-DD`. The repo argument takes the form `org/repo` or `<git host>/<org>/<repo>`, with `github.com` as the default git host, and resolves to `Code/<git host>/<org>/<repo>` under the home directory. A repo name can't be `.` or `..` or end in `.git`.
+
+### Secret scan
+
+`tbhbdev alpha pr create` and `pr edit` scan the final title and body, trailers included, and `tbhbdev alpha merge` scans the squash message, with `gitleaks stdin --redact` before `gh` runs. The scan uses the host's private config, `.config/gitleaks/private.toml` in the home directory, which the host's provisioning tooling installs and which extends the repository's `.gitleaks.toml`. It fails closed. The command stops on a private config that's missing, unreadable or lacks the `tbhb-private-canary` rule. A missing `.gitleaks.toml`, a gitleaks failure, or any finding stops it too. Findings appear by rule ID and line only. `pr check` and the draft hook don't scan.
+
+The scan uses the visibility of the repository the text goes to, not the working directory's. `pr edit` and `merge` take that repository from the pull request's own `url` and read `gh repo view <owner/name>` once. `pr create` has no pull request yet, so it reads `gh repo view` once for the base repository, which is the one `gh pr create` resolves. A `url` that isn't `https://github.com/<owner>/<name>/pull/<number>`, or a base repository without a parseable `nameWithOwner`, is an unresolved target, and then edit and merge don't read the visibility. In a repository that `gh` reports as `PRIVATE`, the scan skips the private config's name rules: the rule IDs `private-repo`, `tailnet-host`, `tailnet-stem`, `tailnet-name`, `tailnet-suffix`, `local-name`, `home-path` and `tool-dir`, each with its trailing `-<digits>`. This matches the rules' gates, which apply the private config only to a repository that sets `--@tbhb_rules//lint:gitleaks_private_config`. The scan runs under a temporary copy of the private config without those rules, in a 0700 directory as a 0600 file, removed afterwards. Every other rule still applies: the `op-*` rules, `tailnet-ipv4`, `tailnet-ipv6`, `private-ipv4`, `mac-address`, `endpoint` and `keychain`, the canary, `.gitleaks.toml` and gitleaks' defaults. `PUBLIC`, `INTERNAL`, any other value, an empty value, a failed read or an unresolved target gets the full private config.
 
 ### No self-approval
 
@@ -123,9 +294,52 @@ A session can't approve a pull request that it, or one of its subagents, opened.
 - `tbhbdev alpha pr create` writes `Opened-by: LLM …` as the first line of the body's trailer paragraph. It holds the opener's root identity, with no `subagent=`. `pr edit` copies the line from the live body unchanged, `pr check` rejects a draft that contains one, and `tbhbdev alpha merge` drops it from the squash commit. When the tool can't find an agent's root, as for an Antigravity child with no brain directory, it doesn't write the line. It also skips the line and the ledger entry, with a warning, when the root's value fails the trailer check, such as one without `model=`. The merge refuses a body with an `Opened-by` line anywhere outside the final trailer paragraph, fenced code included.
 - Once `gh` opens the pull request, `pr create` adds `owner/repo#N` to the opener's ledger, `opened/<root hex>.json` in `$XDG_STATE_HOME/tbhbdev/tbhb-alpha`, which defaults to `~/.local/state/tbhbdev/tbhb-alpha`.
 - `guard-gh-pr` denies `gh pr review N --approve`, a `gh api` POST to `repos/O/R/pulls/N/reviews` with `event=APPROVE`, and `tbhb-approve REPO N SHA` when the caller's ledger lists that pull request. Without `-R`, the repository comes from a `GH_REPO=` prefix, else the origin of the hook's directory. After a `cd`, `pushd`, `popd` or `git -C` in the same command line, that origin is unknown. An unreadable ledger, a session it can't identify, or, for a session that opened anything, a pull request it can't name denies too. A session with no ledger file opened nothing and may approve.
+- `tbhbdev alpha pr close N --reason TEXT [--delete-branch] [--dry-run]` closes an open pull request, and `tbhbdev alpha issue close N --reason completed|not-planned [--comment TEXT] [--dry-run]` closes an open issue. A blank `--reason` or `--comment` is a usage error. Both act through the agent's own `gh` and leave a final comment that holds the reason and the agent's `Generated-by` trailer, and both refuse a caller that isn't an agent session. `pr close` refuses a pull request with no `Opened-by` line, and notes in its comment when the closer isn't the opener. With `--delete-branch`, it then deletes the head branch, unless the branch is on a fork, which it leaves alone and says so. Before it comments or closes, `--delete-branch` lists the open pull requests that target the head branch and refuses, naming them, when any exist or when `gh` can't list them. That policy is provisional until the alpha-review proposal settles open question 11.
+- `tbhbdev alpha pr ready --pr N` marks pull request N ready for review through `gh pr ready`. It doesn't read a draft.
 - `tbhbdev alpha pr backfill-opened OWNER` covers the pull requests opened before the ledger existed. It reads every pull request, open, closed and merged, in every repository of the owner, and adds each one to the ledger of every `session=` its `Generated-by`, `Assisted-by` and `Opened-by` lines name. Run it once on each host. A rerun doesn't change anything. It warns when a listing reaches its `--limit`.
 
 The guard reads only this host's ledger and sees only the commands it scans, so this isn't a security boundary.
+
+### Repository settings
+
+`tbhbdev alpha repo bootstrap [--dry-run] [--create (--private|--public)] ORG/REPO` brings a repository to the standard settings. It's idempotent: when a repository already matches, the command prints `up to date` and stops.
+
+The settings aren't in this package. An installed plugin supplies the config file `repo-settings.toml`. The settings change only by a pull request in that plugin's repository. When no plugin supplies the file, the command fails before it calls GitHub, and the message says which file is missing. The config must have a `[defaults]` table. A `[repos."owner/name"]` table adds to the defaults for one repository, and its keys win. Repository names match without regard to case. A repository name may begin with a dot, as in `example-org/.github`. The names `.` and `..` fail, and so does an owner that begins with a dot. The command rejects any other character than letters, digits, `.`, `_` and `-`, in the command-line argument and in a config key alike.
+
+```toml
+[defaults]
+allow_squash_merge = true
+allow_merge_commit = false
+allow_rebase_merge = false
+squash_merge_commit_title = "PR_TITLE"
+squash_merge_commit_message = "BLANK"
+delete_branch_on_merge = true
+has_issues = false
+has_wiki = false
+has_projects = false
+
+[repos."example-org/example-repo"]
+has_issues = true
+```
+
+Each key is a field of GitHub's update-a-repository endpoint, and only these keys are valid: `allow_squash_merge`, `allow_merge_commit`, `allow_rebase_merge`, `squash_merge_commit_title` (`PR_TITLE` or `COMMIT_OR_PR_TITLE`), `squash_merge_commit_message` (`PR_BODY`, `COMMIT_MESSAGES`, or `BLANK`), `delete_branch_on_merge`, `has_issues`, `has_wiki`, `has_projects`, `allow_auto_merge`, `allow_update_branch`, and `web_commit_signoff_required`. All but the two commit-message keys take `true` or `false`. Any other key fails validation with a message that gives the file and the key. That includes `visibility`, `private`, `archived`, `default_branch`, `name`, and the security settings. A config can't rename, archive, or expose a repository.
+
+The command runs `gh api` with `GH_CONFIG_DIR` set to `.config/gh-agent` in the home directory. It removes `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, and `GH_HOST` from the environment it gives `gh`, because `gh` prefers a token variable to its config. The agent's `gh` config is the only credential, and a missing login fails with a `gh` error instead of falling back to another one. It reads `GET /repos/{owner}/{repo}` and sends one `PATCH` of the keys that differ. Then it reads again. If a key still differs after the update, the command exits 1 and reports the key. GitHub ignores some fields on some plans and for some visibilities. When a squash commit-message key changes, the `PATCH` includes both of them, because GitHub requires the title with the message. When the config sets only one of them, the other goes in with the repository's current value. The verifying read compares only the keys the config sets. Rulesets are out of scope. The command never calls a ruleset, branch protection, collaborator, team, or webhook endpoint. Its only calls are `GET` and `PATCH` on `/repos/{owner}/{repo}` and `POST` on `/orgs/{org}/repos`.
+
+- `--dry-run` reads only. It prints a `key: before -> after` line for each key that would change, then a count.
+- `--create` needs exactly one of `--private` and `--public`. For an existing repository, a visibility that differs from the flag exits 1 before any write, and a matching one goes on to the settings. A missing repository gets `POST /orgs/{org}/repos` and then the settings. Without `--create`, it exits 1.
+- Every run that changes something appends one JSON line to `$XDG_STATE_HOME/tbhbdev/repo-bootstrap.jsonl`, which defaults to `~/.local/state/tbhbdev/repo-bootstrap.jsonl`. The directory has mode 0700 and the file 0600. A line has only the fields `v` (always 1), `ts` (the time, such as `2026-11-09T13:30:05Z`), `repo`, `created`, `changed` (each key with its `[before, after]` values), and `verified`. Dry runs and up-to-date runs leave the log alone. The command also sets those modes on an existing log file and directory, not only on new ones. A repository the command created gets a line even when a later step fails: `created` is `true` and `verified` is `false`, and `changed` is empty when the failure came on the first read after the create. If a `gh` call fails and the log write fails too, the command reports the `gh` error. If the log write fails after a successful `PATCH`, the command exits 1 after the change went through.
+
+Exit status 0 covers a finished update, an up-to-date repository, and a dry run. Exit status 1 covers a config, validation, `gh`, or verification failure, with one line on stderr. Exit status 2 covers a usage error.
+
+### GitHub polling
+
+Agents get GitHub CI and pull request state from awrel, which relays webhook events into a session: subscribe with the repository and the event type, such as `check_run` conclusion events. That's the way to watch GitHub state. Polling GitHub instead burns the account's REST quota, which every agent shares. A hook stops the common polls, and a shim budgets what remains. The budget is a backstop, not the way to watch GitHub state.
+
+- `guard-gh-poll` denies `gh run watch`, `gh run list`, `gh pr checks --watch`, `gh api` or `gh query` with `--paginate`, and reads of the list endpoints `actions/runs`, `actions/workflows/W/runs`, `actions/jobs`, `check-runs` and `check-suites`. It also denies a `while`, `until` or `for` loop that runs `gh`, or runs both `sleep` and `pgrep`, such as the self-matching wait `while pgrep -f fetch.py; do sleep 5; done`. Single-object reads pass, such as `actions/runs/ID`, `pulls/N`, `commits/SHA/check-runs`, `actions/runs?head_sha=SHA` for one full commit hash, and `rate_limit`. It scans `bash -c`, `eval`, `ssh HOST COMMAND` and a here-document fed to a shell. Each deny names awrel. The same hook denies `unset` and `env -u` of the 1Password service account token's variable. A command keeps the environment the harness gave it.
+- `gh-shim` budgets the `gh` calls that scripts make, which no hook sees. In an agent session it refuses a call when the root session has made `[gh_budget] hourly_limit` `gh` calls in the past hour, or when the account has fewer than `core_floor` core REST requests left. It checks that with `gh api rate_limit` at most once a minute. A refusal goes to stderr and names awrel and the budget. Otherwise, and always outside an agent session, it runs the real `gh` unchanged. The state is under `$XDG_STATE_HOME/tbhbdev/gh-budget`.
+
+Claude Code gets the shim on PATH from the SessionStart hook, which adds an `export PATH` line to `$CLAUDE_ENV_FILE`. Codex and Antigravity have no setting that prepends to PATH, so start them as `tbhbdev alpha agent-env codex` or `tbhbdev alpha agent-env agy`, followed by the harness's own arguments. A process tree that doesn't inherit that PATH, or a `gh` run by its absolute path, skips the shim. Neither mechanism is a security boundary.
 
 ## Plugins
 
