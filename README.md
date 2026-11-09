@@ -105,7 +105,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `session-context` is a Claude Code SessionStart hook that reports the host, its role, the other hosts, and the local time.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
 - `merge` squash-merges an approved pull request.
-- `loop` validates its user configuration and refuses to run until a later slice adds the shadow runner. Its pure functions derive the state of a pull request.
+- `loop` validates its user configuration and refuses to run until a later slice adds the shadow runner. Its pure functions derive pull request state and apply the rules table to produce typed shadow intents with action keys and spawn budgets.
 - `install` installs the git hooks and the user-level harness hooks.
 
 Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does two things:
