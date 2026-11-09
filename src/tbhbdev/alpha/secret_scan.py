@@ -12,19 +12,20 @@ begins with ``[extend] path = ".gitleaks.toml"``, gitleaks runs from the
 repository root so the path resolves, and the private file must define the
 ``tbhb-private-canary`` rule. The host's provisioning tooling installs that file.
 
-A private repository's text skips the private config's name rules, the rule
-families in ``NAME_RULES``. The rules' gates apply the private config only to a
-repository that sets ``--@tbhb_rules//lint:gitleaks_private_config``, so text
-that names a private repository's own subject, such as a host it documents or a
-sibling private repository, passes there. The scan then runs gitleaks under a
-temporary copy of the private config without those rules, in a 0700 directory
-as a 0600 file, removed afterwards. The copy keeps the ``[extend]`` path, so
-the repository's .gitleaks.toml and gitleaks' default rules still apply. So
-do every other private rule, such as the ``op-*`` rules, the tailnet and
-private addresses, the MAC address, the endpoint and keychain rules and the
-canary. Only the exact visibility ``PRIVATE`` skips them. Any other value,
-``PUBLIC`` and ``INTERNAL`` included, an empty one or a failed read, gets the
-full private config.
+Text posted to a private repository skips the private config's name rules, the
+rule families in ``NAME_RULES``. The visibility is that of the repository the
+text is posted to, not the working directory's; the caller reads it. The rules'
+gates apply the private config only to a repository that sets
+``--@tbhb_rules//lint:gitleaks_private_config``, so text that names a private
+repository's own subject, such as a host it documents or a sibling private
+repository, passes there. The scan then runs gitleaks under a temporary copy of
+the private config without those rules, in a 0700 directory as a 0600 file,
+removed afterwards. The copy keeps the ``[extend]`` path, so the repository's
+.gitleaks.toml and gitleaks' default rules still apply. So do every other
+private rule, such as the ``op-*`` rules, the tailnet and private addresses, the
+MAC address, the endpoint and keychain rules and the canary. Only the exact
+visibility ``PRIVATE`` skips them. Any other value, ``PUBLIC`` and ``INTERNAL``
+included, an empty one or a failed read, gets the full private config.
 
 There is no public-only fallback. A missing or unreadable private config, one
 without the canary rule, or a missing .gitleaks.toml stops the command, and so
@@ -157,7 +158,8 @@ def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) ->
         what: What the text is, for the refusal message.
         root: The repository root, which holds .gitleaks.toml.
         gitleaks: The gitleaks executable.
-        visibility: The repository's visibility as GitHub reports it. Only
+        visibility: The visibility, as GitHub reports it, of the repository the
+            text is posted to, not the working directory's. Only
             ``PRIVATE`` skips the name rules; anything else, including an
             empty value, scans under the full private config.
 

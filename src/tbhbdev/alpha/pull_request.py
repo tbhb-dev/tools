@@ -54,10 +54,17 @@ In a private repository, read live with ``gh repo view`` once per command, that
 scan skips the private config's name rules (the ``NAME_RULES`` families). This
 matches the rules' gates, which apply the private config only to a repository
 that sets the flag, so text that names the repository's own subject passes.
-The ``op-*`` rules, the address, MAC, endpoint and keychain rules, the canary
-and .gitleaks.toml still apply. Any visibility but ``PRIVATE``, an empty value
-or a failed read scans under the full private config, so the read alone never
-refuses a command. ``check`` makes no gh calls and doesn't scan.
+The visibility is that of the repository the text is posted to, not the
+working directory's. ``edit`` takes that repository from the pull request's
+own ``url`` and reads its visibility with ``gh repo view <owner/name>``.
+``create`` has no pull request yet, so it reads ``gh repo view`` for the base
+repository, which is gh's own resolution and the one ``gh pr create`` uses. A
+target that can't be resolved, such as a URL that isn't a github.com pull
+request page, scans under the full private config. The ``op-*`` rules, the
+address, MAC, endpoint and keychain rules, the canary and .gitleaks.toml still
+apply. Any visibility but ``PRIVATE``, an empty value or a failed read scans
+under the full private config, so the read alone never refuses a command.
+``check`` makes no gh calls and doesn't scan.
 
 ``create`` also writes ``Opened-by: LLM ...`` as the first line of that
 paragraph: the posting agent's root identity, with no ``subagent=``. Once gh
@@ -160,6 +167,12 @@ OPENED_LINE = re.compile(rf"{OPENED_KEY}: ")
 DRAFT_OPENED = re.compile(r"\s*opened-by\s*:", re.IGNORECASE)
 OPENED_MESSAGE = "the script writes Opened-by; remove this line"
 PR_URL = re.compile(r"https://[^/\s]+/([^/\s]+/[^/\s]+)/pull/(\d+)")
+# A repository as ``owner/name``: GitHub's characters for each part, and a name
+# that is not "." or "..". The owner can't begin with "-", so gh can't read it
+# as a flag.
+REPO = r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.+(?:/|\Z))[A-Za-z0-9_.-]+"
+NAME_WITH_OWNER = re.compile(REPO)
+PR_PAGE = re.compile(rf"https://github\.com/({REPO})/pull/[0-9]+")
 REPO_LIMIT = 1000
 PR_LIMIT = 10000
 EDIT_DRAFT = "run `tbhbdev alpha pr edit --pr {number}` to apply the draft"
@@ -843,19 +856,24 @@ def gh_data(done: subprocess.CompletedProcess[str]) -> object:
         return None
 
 
-def live_opened_line(number: int) -> str | None:
-    """The ``Opened-by`` line of PR N's final paragraph on GitHub, or None.
+def live_pr(number: int) -> tuple[str | None, object]:
+    """PR N's ``Opened-by`` line on GitHub, or None, and its ``url``.
+
+    The line is the one in the body's final paragraph. The URL is whatever gh
+    reports, None when it reports none; ``target_of_pr`` takes it as it is.
 
     Raises:
         SystemExit: gh can't read the body, so the line can't be kept.
     """
-    done = run([find_tool(GH), "pr", "view", str(number), "--json", "body"])
+    argv = [find_tool(GH), "pr", "view", str(number), "--json", "body,url"]
+    done = run(argv)
     data = gh_data(done)
     if not isinstance(data, dict):
         why = " ".join((done.stderr or done.stdout).split())
         message = f"cannot read the body of PR {number} to keep its Opened-by: {why}"
         raise SystemExit(message)
-    return opened_line(str(data.get("body") or ""))  # pragma: no mutate -- no line
+    line = opened_line(str(data.get("body") or ""))  # pragma: no mutate -- no line
+    return line, data.get("url")
 
 
 def opened_line(body: str) -> str | None:
@@ -898,16 +916,32 @@ def description(
     return body + "\n" + "\n".join(trailers) + "\n"
 
 
-def repo_visibility() -> str:
-    """The repository's visibility as gh reports it, or "" if the read fails.
+def target_of_pr(url: object) -> str:
+    """The ``owner/name`` in a pull request's github.com URL, or "".
 
-    gh resolves the repository from the working directory, as in the other gh
-    calls here. An empty value scans under the full private config.
+    The URL must be a string of exactly
+    ``https://github.com/<owner>/<name>/pull/<digits>``; anything else, a
+    missing URL included, names nothing.
     """
+    found = PR_PAGE.fullmatch(url) if isinstance(url, str) else None
+    return found[1] if found else ""
+
+
+def repo_visibility(target: str) -> str:
+    """The visibility of ``target``, an ``owner/name``, as gh reports it.
+
+    This is the visibility of the repository the text is posted to, not the
+    working directory's. An empty, missing or malformed target returns ""
+    without a gh call, and so does a failed read. An empty value scans under the
+    full private config.
+    """
+    if not NAME_WITH_OWNER.fullmatch(target):
+        return ""
     argv = [
         find_tool(GH),
         "repo",
         "view",
+        target,
         "--json",
         "visibility",
         "--jq",
@@ -917,24 +951,44 @@ def repo_visibility() -> str:
     return done.stdout.strip() if done.returncode == 0 else ""
 
 
-def scan_secrets(text: str, what: str) -> None:
+def base_visibility() -> str:
+    """The visibility of the repository ``gh pr create`` will post to, or "".
+
+    No pull request exists yet, so this is the base repository. gh resolves it
+    for ``gh repo view`` with no argument the same way it does for
+    ``gh pr create``, so one read of ``nameWithOwner`` and ``visibility`` gives
+    both. The visibility counts only if ``nameWithOwner`` parses as
+    ``owner/name``; a failed or malformed read returns "".
+    """
+    done = run([find_tool(GH), "repo", "view", "--json", "nameWithOwner,visibility"])
+    data = gh_data(done)
+    if not isinstance(data, dict):
+        return ""
+    name = data.get("nameWithOwner")
+    if not (isinstance(name, str) and NAME_WITH_OWNER.fullmatch(name)):
+        return ""
+    return str(data.get("visibility") or "")
+
+
+def scan_secrets(text: str, what: str, visibility: str) -> None:
     """Refuse text that gitleaks flags; see ``tbhbdev.alpha.secret_scan``.
 
-    It reads the repository's visibility once per call, which each command
-    makes once.
+    ``visibility`` is that of the repository the text is posted to, which the
+    caller reads once per command, with ``repo_visibility`` or
+    ``base_visibility``.
     """
     secret_scan.scan(
         text,
         what,
         root=root(),
         gitleaks=find_tool(GITLEAKS),
-        visibility=repo_visibility(),
+        visibility=visibility,
     )
 
 
-def post_text(title: str, body: str) -> None:
+def post_text(title: str, body: str, visibility: str) -> None:
     """Scan the PR title and body as gh would post them."""
-    scan_secrets(f"{title}\n\n{body}", "the PR title and body")
+    scan_secrets(f"{title}\n\n{body}", "the PR title and body", visibility)
 
 
 def gh_args(meta: Mapping[str, object]) -> list[str]:
@@ -1139,12 +1193,13 @@ def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     if args.command == "create":
         root, line = opened_by(env)
         body = description(checked, env, line)
-        post_text(checked.title, body)
+        post_text(checked.title, body, base_visibility())
         argv = [GH, "pr", "create", "--title", checked.title, "--body-file", "-"]
         argv += gh_args(checked.meta)
         return create_pr(argv, body, root, dry_run=args.dry_run)
-    body = description(checked, env, live_opened_line(args.pr))
-    post_text(checked.title, body)
+    line, url = live_pr(args.pr)
+    body = description(checked, env, line)
+    post_text(checked.title, body, repo_visibility(target_of_pr(url)))
     argv = [
         GH,
         "pr",

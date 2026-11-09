@@ -31,13 +31,15 @@ GEN = (
     "Generated-by: LLM harness=claude-code:2.1.0;model=anthropic:m1;"
     "session=sha-256-64:aaaaaaaaaaaaaaaa"
 )
+TARGET = "tbhb-dev/public-target"
 ASSIST = "Assisted-by: LLM harness=codex;model=openai:gpt-6.1-sol"
 
 GH = """import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 spec = json.load(open(os.path.join(here, "gh.spec")))
 repo = sys.argv[1] == "repo"
-kind = "repo" if repo else sys.argv[2]
+# A read with no repository argument names the working directory's repository.
+kind = ("cwd" if sys.argv[2].startswith("-") else "repo") if repo else sys.argv[2]
 # The visibility read has its own log, so it never shifts the other gh calls.
 with open(os.path.join(here, "gh.repo.log" if repo else "gh.log"), "a") as log:
     log.write(json.dumps({{"argv": sys.argv[1:], "stdin": sys.stdin.read()}}) + "\\n")
@@ -80,6 +82,9 @@ class Tools:
             "repo_rc": 0,
             "repo_out": "PUBLIC\\n",
             "repo_err": "",
+            "cwd_rc": 0,
+            "cwd_out": "PRIVATE\\n",
+            "cwd_err": "",
         }
         (self.bin / "gh.spec").write_text(json.dumps(full | spec))
 
@@ -93,6 +98,7 @@ class Tools:
             "mergeable": "MERGEABLE",
             "mergeStateStatus": "CLEAN",
             "statusCheckRollup": [],
+            "url": f"https://github.com/{TARGET}/pull/12",
         }
         self.gh(view_out=json.dumps(data | fields))
 
@@ -903,6 +909,18 @@ def repo_reads(tools: Tools) -> list[dict[str, object]]:
     return [json.loads(line) for line in log.read_text().splitlines()]
 
 
+def scan_config(tools: Tools) -> str:
+    """The config the one gitleaks call ran under."""
+    (scanned,) = tools.scanned()
+    argv = cast("list[str]", scanned["argv"])
+    return argv[argv.index("--config") + 1]
+
+
+def full_config() -> str:
+    """The private config, under the test's HOME."""
+    return str(Path.home() / ".config" / "gitleaks" / "private.toml")
+
+
 @pytest.mark.parametrize("argv", [("12",), ("12", "--dry-run")])
 @pytest.mark.parametrize(
     ("out", "rc", "reduced"),
@@ -923,10 +941,46 @@ def test_the_visibility_is_read_once_and_picks_the_config(
     spec.write_text(json.dumps(json.loads(spec.read_text()) | answer))
     assert run_main(*argv)[0] == 0
     (read,) = repo_reads(tools)
-    assert " ".join(cast("list[str]", read["argv"])) == (
-        "repo view --json visibility --jq .visibility"
-    )
-    (scanned,) = tools.scanned()
-    config = scanned["argv"][scanned["argv"].index("--config") + 1]  # type: ignore[index]
-    full = str(Path.home() / ".config" / "gitleaks" / "private.toml")
-    assert (config != full) is reduced
+    assert read["argv"] == [
+        "repo", "view", TARGET, "--json", "visibility", "--jq", ".visibility"
+    ]  # fmt: skip
+    assert (scan_config(tools) != full_config()) is reduced
+
+
+def test_a_private_working_directory_merging_into_a_public_repo_gets_the_full_config(
+    tools: Tools,
+) -> None:
+    other = "tbhb-dev/elsewhere"
+    tools.view(url=f"https://github.com/{other}/pull/12")
+    assert run_main("12")[0] == 0
+    (read,) = repo_reads(tools)
+    assert read["argv"][2] == other  # type: ignore[index]
+    assert scan_config(tools) == full_config()
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {},
+        {"url": ""},
+        {"url": 7},
+        {"url": "not a url"},
+        {"url": "https://github.com/o/n/pull/x"},
+        {"url": "http://github.com/o/n/pull/12"},
+        {"url": "https://gitlab.com/o/n/pull/12"},
+        {"url": "https://github.com/o/n/issues/12"},
+    ],
+)
+def test_an_unresolved_target_uses_the_full_config_and_reads_nothing(
+    tools: Tools, fields: dict[str, object]
+) -> None:
+    data = json.loads(json.loads((tools.bin / "gh.spec").read_text())["view_out"])
+    data.pop("url")
+    tools.gh(view_out=json.dumps(data | fields), repo_out="PRIVATE\n")
+    assert run_main("12")[0] == 0
+    assert repo_reads(tools) == []
+    assert scan_config(tools) == full_config()
+
+
+def test_the_view_reads_the_url() -> None:
+    assert "url" in sm.VIEW_FIELDS.split(",")

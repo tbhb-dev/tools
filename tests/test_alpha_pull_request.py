@@ -81,6 +81,31 @@ sys.exit(spec["rc"])
 """
 
 
+TARGET = "tbhb-dev/public-target"
+
+
+def pr_page(repo: str, number: int = 7) -> str:
+    return f"https://github.com/{repo}/pull/{number}"
+
+
+def view_case(url: object, body: object = "") -> dict[str, object]:
+    """The fake gh answer to ``gh pr view N --json body,url``; no ``url`` omits it."""
+    data: dict[str, object] = {"body": body}
+    if url is not None:
+        data["url"] = url
+    return {"rc": 0, "stdout": json.dumps(data), "stderr": ""}
+
+
+def base_case(name: object, visibility: object, rc: int = 0) -> dict[str, object]:
+    """The fake gh answer to ``gh repo view --json nameWithOwner,visibility``."""
+    data = {"nameWithOwner": name, "visibility": visibility}
+    return {
+        "rc": rc,
+        "stdout": json.dumps(data) if rc == 0 else "",
+        "stderr": "boom" if rc else "",
+    }
+
+
 @dataclass
 class World:
     """A temp repository, a bin directory of fake tools, and an isolated PATH."""
@@ -159,8 +184,9 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
         "gh",
         stdout="https://github.com/tbhb-dev/ascm/pull/1\n",
         cases={
-            "pr view": {"rc": 0, "stdout": '{"body": ""}', "stderr": ""},
-            "repo view": {"rc": 0, "stdout": "PUBLIC\\n", "stderr": ""},
+            "pr view": view_case(pr_page(TARGET)),
+            f"repo view {TARGET}": {"rc": 0, "stdout": "PUBLIC\\n", "stderr": ""},
+            "repo view --json": base_case(TARGET, "PUBLIC"),
         },
     )
     return made
@@ -1271,7 +1297,7 @@ def test_an_unresolved_posting_model_fails_without_posting(
         run_main(*argv, env=agent)
     assert info.value.code == f"invalid LLM trailer: {posting}: model required"
     # edit reads the live body first, for its Opened-by line; nothing is posted.
-    reads = [["pr", "view", "7", "--json", "body"]] if argv[0] == "edit" else []
+    reads = [["pr", "view", "7", "--json", "body,url"]] if argv[0] == "edit" else []
     assert [call["argv"] for call in world.calls("gh")] == reads
 
 
@@ -1532,22 +1558,165 @@ def test_check_does_not_scan_or_read_the_visibility(world: World) -> None:
     assert world.calls("gh.repo") == []
 
 
-def visibility_case(stdout: str, rc: int = 0) -> dict[str, dict[str, object]]:
+def edit_cases(
+    url: object, stdout: str = "PUBLIC\n", rc: int = 0
+) -> dict[str, dict[str, object]]:
+    """The PR's page is ``url``; its repository reads ``stdout``.
+
+    The working directory's repository, which a read with no repository
+    argument would name, is PRIVATE, so a command that reads it gets that.
+    """
     return {
-        "pr view": {"rc": 0, "stdout": '{"body": ""}', "stderr": ""},
-        "repo view": {"rc": rc, "stdout": stdout, "stderr": "boom" if rc else ""},
+        "pr view": view_case(url),
+        f"repo view {TARGET}": {
+            "rc": rc,
+            "stdout": stdout,
+            "stderr": "boom" if rc else "",
+        },
+        "repo view --json": {"rc": 0, "stdout": "PRIVATE\n", "stderr": ""},
     }
+
+
+VISIBILITY_READ = ["--json", "visibility", "--jq", ".visibility"]
 
 
 @pytest.mark.parametrize(
     ("stdout", "rc", "want"),
     [("PRIVATE\n", 0, "PRIVATE"), ("", 0, ""), ("PRIVATE\n", 1, ""), ("", 1, "")],
 )
-def test_the_visibility_read_is_empty_when_it_fails(
+def test_the_visibility_read_names_the_target_and_is_empty_when_it_fails(
     world: World, stdout: str, rc: int, want: str
 ) -> None:
-    world.fake("gh", cases=visibility_case(stdout, rc))
-    assert pr.repo_visibility() == want
+    world.fake("gh", cases=edit_cases(None, stdout, rc))
+    assert pr.repo_visibility(TARGET) == want
+    (read,) = world.calls("gh.repo")
+    assert read["argv"] == ["repo", "view", TARGET, *VISIBILITY_READ]
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["tbhb-dev/tools", "A1-b/.github", "o/a.b_c-d", "o/..a", "o/x", "9/9"],
+)
+def test_a_well_formed_target_is_read(world: World, target: str) -> None:
+    answer: dict[str, object] = {"rc": 0, "stdout": "PRIVATE\n", "stderr": ""}
+    world.fake("gh", cases={"repo view": answer})
+    assert pr.repo_visibility(target) == "PRIVATE"
+    (read,) = world.calls("gh.repo")
+    assert read["argv"] == ["repo", "view", target, *VISIBILITY_READ]
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "",
+        "tools",
+        "o/",
+        "/x",
+        "o/n/extra",
+        "-o/x",
+        "o/.",
+        "o/..",
+        "o/x y",
+        "o/x\n",
+        "\no/x",
+        "o/é",
+        "é/x",
+        "o x/y",
+        "o/x;y",
+    ],
+)
+def test_a_malformed_target_is_empty_without_a_gh_call(
+    world: World, target: str
+) -> None:
+    answer: dict[str, object] = {"rc": 0, "stdout": "PRIVATE\n", "stderr": ""}
+    world.fake("gh", cases={"repo view": answer})
+    assert pr.repo_visibility(target) == ""
+    assert world.calls("gh.repo") == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://github.com/tbhb-dev/tools/pull/12",
+        "https://github.com/o/n/pull/0",
+        "https://github.com/A1-b/.github/pull/123456",
+    ],
+)
+def test_a_pr_url_names_its_repository(url: str) -> None:
+    assert (
+        pr.target_of_pr(url)
+        == url.removeprefix("https://github.com/").split("/pull/")[0]
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        None,
+        7,
+        ["https://github.com/o/n/pull/1"],
+        "",
+        "not a url",
+        "http://github.com/o/n/pull/1",
+        "https://gitlab.com/o/n/pull/1",
+        "https://githubXcom/o/n/pull/1",
+        "https://github.com.evil.example/o/n/pull/1",
+        "https://www.github.com/o/n/pull/1",
+        "https://user@github.com/o/n/pull/1",
+        "https://github.com:443/o/n/pull/1",
+        "xhttps://github.com/o/n/pull/1",
+        "https://github.com/o/n/pull/",
+        "https://github.com/o/n/pull/x",
+        "https://github.com/o/n/pull/1x",
+        "https://github.com/o/n/pull/\u0661",
+        "https://github.com/o/n/issues/1",
+        "https://github.com/o/n/pulls/1",
+        "https://github.com/o/n/pull/1/files",
+        "https://github.com/o/n/pull/1?x=1",
+        "https://github.com/o/n/pull/1#c",
+        "https://github.com/o/n/pull/1\n",
+        " https://github.com/o/n/pull/1",
+        "https://github.com/o/../pull/1",
+        "https://github.com/o/./pull/1",
+        "https://github.com/o//pull/1",
+        "https://github.com//n/pull/1",
+        "https://github.com/pull/1",
+        "https://github.com/-o/n/pull/1",
+        "https://github.com/o/n/x/pull/1",
+        "https://github.com/https://github.com/o/n/pull/1",
+    ],
+)
+def test_a_url_that_is_not_a_github_pr_page_names_nothing(url: object) -> None:
+    assert pr.target_of_pr(url) == ""
+
+
+@pytest.mark.parametrize(
+    ("answer", "want"),
+    [
+        (base_case(TARGET, "PRIVATE"), "PRIVATE"),
+        (base_case(TARGET, "PUBLIC"), "PUBLIC"),
+        (base_case(TARGET, ""), ""),
+        (base_case(TARGET, None), ""),
+        (base_case(TARGET, "PRIVATE", rc=1), ""),
+        (base_case("", "PRIVATE"), ""),
+        (base_case(None, "PRIVATE"), ""),
+        (base_case(7, "PRIVATE"), ""),
+        (base_case("a/b/c", "PRIVATE"), ""),
+        (base_case("not a name", "PRIVATE"), ""),
+        (base_case("o/..", "PRIVATE"), ""),
+        ({"rc": 0, "stdout": "[]", "stderr": ""}, ""),
+        ({"rc": 0, "stdout": "PRIVATE\n", "stderr": ""}, ""),
+        ({"rc": 0, "stdout": '{"visibility": "PRIVATE"}', "stderr": ""}, ""),
+        ({"rc": 0, "stdout": '{"nameWithOwner": "o/n"}', "stderr": ""}, ""),
+    ],
+)
+def test_the_base_visibility_counts_only_with_a_parsed_name(
+    world: World, answer: dict[str, object], want: str
+) -> None:
+    world.fake("gh", cases={"repo view": answer})
+    assert pr.base_visibility() == want
+    (read,) = world.calls("gh.repo")
+    assert read["argv"] == ["repo", "view", "--json", "nameWithOwner,visibility"]
 
 
 def scan_config(world: World) -> str:
@@ -1557,36 +1726,105 @@ def scan_config(world: World) -> str:
     return argv[argv.index("--config") + 1]
 
 
-@pytest.mark.parametrize(
-    "argv", [("create",), ("create", "--dry-run"), ("edit", "--pr", "7")]
-)
-@pytest.mark.parametrize(
-    ("stdout", "rc", "reduced"),
-    [
-        ("PRIVATE\n", 0, True),
-        ("PUBLIC\n", 0, False),
-        ("INTERNAL\n", 0, False),
-        ("", 0, False),
-        ("weird\n", 0, False),
-        ("PRIVATE\n", 1, False),
-    ],
-)
-def test_the_visibility_is_read_once_and_picks_the_config(
-    world: World,
-    argv: tuple[str, ...],
-    stdout: str,
-    rc: int,
-    reduced: bool,
+def full_config() -> str:
+    """The private config, under the test's HOME."""
+    return str(Path.home() / ".config" / "gitleaks" / "private.toml")
+
+
+VISIBILITIES = [
+    ("PRIVATE\n", 0, True),
+    ("PUBLIC\n", 0, False),
+    ("INTERNAL\n", 0, False),
+    ("", 0, False),
+    ("weird\n", 0, False),
+    ("PRIVATE\n", 1, False),
+]
+
+
+@pytest.mark.parametrize("argv", [("create",), ("create", "--dry-run")])
+@pytest.mark.parametrize(("stdout", "rc", "reduced"), VISIBILITIES)
+def test_create_reads_the_base_repository_once_and_picks_the_config(
+    world: World, argv: tuple[str, ...], stdout: str, rc: int, reduced: bool
 ) -> None:
-    world.fake("gh", stdout="u\n", cases=visibility_case(stdout, rc))
+    cases = {"repo view": base_case(TARGET, stdout.strip(), rc)}
+    world.fake("gh", stdout="u\n", cases=cases)
     write_draft(world)
     assert run_main(*argv) == 0
     (read,) = world.calls("gh.repo")
-    assert " ".join(cast("list[str]", read["argv"])) == (
-        "repo view --json visibility --jq .visibility"
-    )
-    full = str(Path.home() / ".config" / "gitleaks" / "private.toml")
-    assert (scan_config(world) != full) is reduced
+    assert read["argv"] == ["repo", "view", "--json", "nameWithOwner,visibility"]
+    assert (scan_config(world) != full_config()) is reduced
+
+
+@pytest.mark.parametrize("name", ["", None, "o/..", "a/b/c", 5, "not a name"])
+def test_create_without_a_parsed_base_repository_uses_the_full_config(
+    world: World, name: object
+) -> None:
+    world.fake("gh", stdout="u\n", cases={"repo view": base_case(name, "PRIVATE")})
+    write_draft(world)
+    assert run_main("create") == 0
+    assert len(world.calls("gh.repo")) == 1
+    assert scan_config(world) == full_config()
+
+
+@pytest.mark.parametrize("stdout", ["not json", "[]"])
+def test_create_with_an_unreadable_base_repository_uses_the_full_config(
+    world: World, stdout: str
+) -> None:
+    answer: dict[str, object] = {"rc": 0, "stdout": stdout, "stderr": ""}
+    world.fake("gh", stdout="u\n", cases={"repo view": answer})
+    write_draft(world)
+    assert run_main("create") == 0
+    assert len(world.calls("gh.repo")) == 1
+    assert scan_config(world) == full_config()
+
+
+@pytest.mark.parametrize(("stdout", "rc", "reduced"), VISIBILITIES)
+def test_edit_reads_the_prs_repository_once_and_picks_the_config(
+    world: World, stdout: str, rc: int, reduced: bool
+) -> None:
+    world.fake("gh", stdout="u\n", cases=edit_cases(pr_page(TARGET), stdout, rc))
+    write_draft(world)
+    assert run_main("edit", "--pr", "7") == 0
+    (read,) = world.calls("gh.repo")
+    assert read["argv"] == ["repo", "view", TARGET, *VISIBILITY_READ]
+    assert (scan_config(world) != full_config()) is reduced
+
+
+def test_a_private_working_directory_posting_to_a_public_repo_gets_the_full_config(
+    world: World,
+) -> None:
+    other = "tbhb-dev/elsewhere"
+    cases = edit_cases(pr_page(other))
+    cases[f"repo view {other}"] = {"rc": 0, "stdout": "PUBLIC\n", "stderr": ""}
+    world.fake("gh", stdout="u\n", cases=cases)
+    write_draft(world)
+    assert run_main("edit", "--pr", "7") == 0
+    (read,) = world.calls("gh.repo")
+    assert read["argv"] == ["repo", "view", other, *VISIBILITY_READ]
+    assert scan_config(world) == full_config()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        None,
+        "",
+        7,
+        "not a url",
+        "https://github.com/o/n/pull/x",
+        "http://github.com/o/n/pull/1",
+        "https://gitlab.com/o/n/pull/1",
+        "https://github.com/o/n/issues/1",
+    ],
+)
+def test_edit_with_an_unresolved_target_uses_the_full_config_and_reads_nothing(
+    world: World, url: object
+) -> None:
+    world.fake("gh", stdout="u\n", cases=edit_cases(url, "PRIVATE\n"))
+    write_draft(world)
+    assert run_main("edit", "--pr", "7") == 0
+    assert world.calls("gh.repo") == []
+    assert scan_config(world) == full_config()
 
 
 def test_edit_requires_a_pr_number(world: World) -> None:
@@ -2405,9 +2643,10 @@ LIVE = "Opened-by: LLM harness=codex;session=sha-256-64:cccccccccccccccc"
 
 
 def live_body(body: object, rc: int = 0, stderr: str = "") -> dict[str, object]:
-    """The fake gh answer to ``gh pr view N --json body``."""
-    stdout = json.dumps({"body": body}) if rc == 0 else ""
-    return {"rc": rc, "stdout": stdout, "stderr": stderr}
+    """The fake gh answer to ``gh pr view N --json body,url``."""
+    if rc == 0:
+        return view_case(pr_page(TARGET), body)
+    return {"rc": rc, "stdout": "", "stderr": stderr}
 
 
 @pytest.mark.parametrize(
@@ -2430,7 +2669,7 @@ def test_edit_copies_the_live_opened_by_line(
     write_draft(world)
     assert run_main("edit", "--pr", "7", env=agent) == 0
     view, edit = world.calls("gh")
-    assert view["argv"] == ["pr", "view", "7", "--json", "body"]
+    assert view["argv"] == ["pr", "view", "7", "--json", "body,url"]
     assert cast("list[str]", edit["argv"])[:3] == ["pr", "edit", "7"]
     opened_by = f"{kept}\n" if kept else ""
     assert str(edit["stdin"]).endswith(f"\nv\n\n{opened_by}Assisted-by: {POSTING}\n")
