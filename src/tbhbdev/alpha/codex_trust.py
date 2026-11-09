@@ -9,7 +9,9 @@ hash for it:
 The event is snake_case (`pre_tool_use`), and the group and handler are
 0-based positions in `hooks.json`. The hash is SHA-256 of the compact JSON,
 keys sorted, of the event, the group's matcher and the one handler, so a
-hook that changes loses its trust.
+hook that changes loses its trust. For a group with no matcher (SessionStart,
+SubagentStart) the hash leaves `matcher` out, and nobody has checked that
+against Codex yet; see `hook_hash`.
 
 This module computes those keys and hashes for the handlers a predicate
 recognizes as ours, and edits the TOML text so that only those entries
@@ -60,7 +62,9 @@ def hook_hash(label: str, matcher: object, command: object, timeout: object) -> 
     """Codex's trusted hash of one command handler, as `sha256:<hex>`.
 
     MATCHER, COMMAND and TIMEOUT are as `hooks.json` holds them. A group
-    without a matcher (None) hashes without that key.
+    without a matcher (None) hashes without that key. That is unverified: a
+    live check after merge confirms it, and if Codex hashes `"matcher": null`
+    or `""` instead, those two hooks show as untrusted again.
     """
     hashed: Json = {
         "event_name": label,
@@ -150,6 +154,11 @@ def trusted_hash(entry: object) -> object:
     return entry.get(HASH_KEY) if isinstance(entry, MutableMapping) else None
 
 
+def trailing_newlines(text: str) -> int:
+    """How many newlines end TEXT."""
+    return len(text) - len(text.rstrip("\n"))
+
+
 def trusted_text(old: str | None, path: Path, wanted: Mapping[str, str]) -> str:
     """The `config.toml` text with WANTED trusted and our old entries gone.
 
@@ -157,8 +166,9 @@ def trusted_text(old: str | None, path: Path, wanted: Mapping[str, str]) -> str:
     `our_hashes` returns it, for the `hooks.json` at PATH. A ValueError names
     what is wrong with a file this can't edit.
     """
+    source = old or ""
     try:
-        doc = tomlkit.parse(old or "")
+        doc = tomlkit.parse(source)
     except TOMLKitError as exc:
         message = f"it is not valid TOML ({exc})"
         raise ValueError(message) from exc
@@ -176,7 +186,15 @@ def trusted_text(old: str | None, path: Path, wanted: Mapping[str, str]) -> str:
     for key, digest in wanted.items():
         entry = state.get(key)
         if not isinstance(entry, MutableMapping):
-            state[key] = tomlkit.item({HASH_KEY: digest})
+            entry = tomlkit.item({HASH_KEY: digest})
+            # tomlkit leaves no blank line between a table it inserts and the
+            # next one, as when other tables follow the first of ours.
+            entry.add(tomlkit.nl())
+            state[key] = entry
         elif trusted_hash(entry) != digest:
             entry[HASH_KEY] = digest
-    return tomlkit.dumps(doc)
+    text = tomlkit.dumps(doc)
+    # An entry that ends the file doesn't need that blank line: the file keeps
+    # the trailing newlines it had, or one.
+    extra = trailing_newlines(text) - max(trailing_newlines(source), 1)
+    return text[:-extra] if extra > 0 else text

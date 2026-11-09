@@ -80,7 +80,8 @@ on PATH (below), and Codex and Antigravity get it from `tbhbdev alpha
 agent-env`.
 
 `--harness` limits the config merge to one harness. `--dry-run` writes
-nothing: it prints each config's diff and the git hooks it would install.
+nothing: it prints each config's diff, with one diff of Codex's `config.toml`
+for its trust and environment, and the git hooks it would install.
 `--hook` is the SessionStart entry point. When `$CLAUDE_ENV_FILE` is set, it
 first appends `export PATH=<agent-bin>":$PATH"` to that file once, which
 Claude Code sources before each Bash command. Then it reads the hook payload
@@ -695,8 +696,15 @@ def merged_codex_config(path: Path) -> tuple[str | None, str]:
     return old, with_environment(old)
 
 
-def install_codex_environment(env: Mapping[str, str], *, dry_run: bool) -> int:
-    """Merge AGENT_ENVIRONMENT into Codex's config.toml."""
+def install_codex_environment(
+    env: Mapping[str, str], *, dry_run: bool, in_trust_diff: bool = False
+) -> int:
+    """Merge AGENT_ENVIRONMENT into Codex's config.toml.
+
+    IN_TRUST_DIFF says trust_codex_hooks succeeded, so a dry run already
+    printed this change in its one diff of the file, as a real run writes both
+    edits at once; the dry run prints it no second time.
+    """
     path = codex_home(env) / "config.toml"
     try:
         old, new = merged_codex_config(path)
@@ -705,6 +713,8 @@ def install_codex_environment(env: Mapping[str, str], *, dry_run: bool) -> int:
         return 1
     if old == new:
         print(f"codex: {path} is up to date")
+        return 0
+    if dry_run and in_trust_diff:
         return 0
     return apply_config(CODEX, path, old, new, dry_run=dry_run)
 
@@ -1037,7 +1047,10 @@ def main(argv: list[str], prog: str) -> int:
     status = install_git_hooks(None, env, dry_run=args.dry_run)
     status |= install_gh_shim(dry_run=args.dry_run)
     for harness in [args.harness] if args.harness else HARNESSES:
-        status |= install_config(harness, env, dry_run=args.dry_run)
+        result = install_config(harness, env, dry_run=args.dry_run)
+        status |= result
         if harness == CODEX:
-            status |= install_codex_environment(env, dry_run=args.dry_run)
+            status |= install_codex_environment(
+                env, dry_run=args.dry_run, in_trust_diff=result == 0
+            )
     return status | install_private_files(dry_run=args.dry_run)

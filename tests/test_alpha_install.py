@@ -1991,14 +1991,42 @@ def test_main_dry_run_writes_nothing(
     assert install.main(["--dry-run"], "p") == 0
     out = capsys.readouterr().out
     assert out.startswith("would install prek's")
-    # Codex's config.toml has two edits, trust and the environment, and a dry
-    # run prints each against the file as it is on disk.
-    assert out.count("+++ ") == 5
-    assert out.count(f"+++ {world.home / '.codex' / 'config.toml'}\n") == 2
+    # Codex's config.toml has two edits, trust and the environment, which a
+    # dry run prints as the one diff a real run writes.
+    assert out.count("+++ ") == 4
+    assert out.count(f"+++ {world.home / '.codex' / 'config.toml'}\n") == 1
     assert f"gh-shim: would write {gh_shim.bin_dir() / 'gh'}\n" in out
     assert list(world.home.iterdir()) == []
     assert not gh_shim.bin_dir().parent.exists()
     assert world.prek_calls() == []
+
+
+def test_main_dry_run_prints_one_codex_config_diff(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = world.home / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(FOREIGN_CONFIG)
+    assert install.main(["--dry-run", "--harness", "codex"], "p") == 0
+    out = capsys.readouterr().out
+    assert out.count(f"+++ {config}\n") == 1
+    assert out.count('+SSH_AUTH_SOCK = ""\n') == 1
+    assert '\n+[hooks.state."' in out
+    assert config.read_text() == FOREIGN_CONFIG
+
+
+def test_main_dry_run_prints_the_environment_when_trust_cannot_edit(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = world.home / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text("hooks = 3\n")
+    assert install.main(["--dry-run", "--harness", "codex"], "p") == 1
+    captured = capsys.readouterr()
+    assert "cannot trust hooks" in captured.err
+    assert captured.out.count(f"+++ {config}\n") == 1
+    assert captured.out.count('+SSH_AUTH_SOCK = ""\n') == 1
+    assert "hooks.state" not in captured.out
 
 
 def test_main_status_is_any_failure(

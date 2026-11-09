@@ -258,6 +258,54 @@ trusted_hash = "sha256:theirs"
     )
 
 
+def test_trusted_text_keeps_a_blank_line_before_the_table_after_a_new_entry() -> None:
+    old = f"""[hooks.state."{KEY}"]
+trusted_hash = "sha256:aa"
+
+[shell_environment_policy.set]
+A = "1"
+
+[hooks.state."/elsewhere/hooks.json:stop:0:0"]
+trusted_hash = "sha256:theirs"
+"""
+    other = f"{HOOKS}:stop:0:0"
+    wanted = {KEY: "sha256:aa", other: "sha256:bb"}
+    new = codex_trust.trusted_text(old, HOOKS, wanted)
+    assert (
+        new
+        == f"""[hooks.state."{KEY}"]
+trusted_hash = "sha256:aa"
+
+[hooks.state."{other}"]
+trusted_hash = "sha256:bb"
+
+[shell_environment_policy.set]
+A = "1"
+
+[hooks.state."/elsewhere/hooks.json:stop:0:0"]
+trusted_hash = "sha256:theirs"
+"""
+    )
+    assert codex_trust.trusted_text(new, HOOKS, wanted) == new
+
+
+@pytest.mark.parametrize(
+    ("old", "tail"),
+    [
+        (None, 'trusted_hash = "sha256:aa"\n'),
+        ("", 'trusted_hash = "sha256:aa"\n'),
+        ("a = 1\n", 'trusted_hash = "sha256:aa"\n'),
+        ("a = 1\n\n", 'trusted_hash = "sha256:aa"\n\n'),
+    ],
+)
+def test_trusted_text_ends_the_file_with_the_newlines_it_had_or_one(
+    old: str | None, tail: str
+) -> None:
+    new = codex_trust.trusted_text(old, HOOKS, {KEY: "sha256:aa"})
+    assert new.endswith(f'"]\n{tail}')
+    assert codex_trust.trusted_text(new, HOOKS, {KEY: "sha256:aa"}) == new
+
+
 def test_trusted_text_removes_our_hash_from_an_old_position() -> None:
     old_key = f"{HOOKS}:pre_tool_use:0:0"
     new_key = f"{HOOKS}:pre_tool_use:1:0"
