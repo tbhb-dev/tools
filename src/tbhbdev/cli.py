@@ -9,7 +9,7 @@ their own (see plugins.py).
 import sys
 from collections.abc import Callable, Mapping, Sequence
 
-from tbhbdev import alpha, host, plugins, secret
+from tbhbdev import alpha, host, plugins, secret, version
 
 Tool = Callable[[list[str], str], int]
 
@@ -22,14 +22,19 @@ TOOLS: dict[str, Tool] = {
 
 
 def usage(tools: Mapping[str, Tool]) -> str:
-    return "usage: tbhbdev <tool> [args...]\n\ntools:\n" + "".join(
-        f"  {name}\n" for name in sorted(tools)
+    return (
+        "usage: tbhbdev <tool> [args...]\n       tbhbdev --version\n\ntools:\n"
+        + "".join(f"  {name}\n" for name in sorted(tools))
     )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the tool argv names, passing it the rest of argv."""
     args = list(sys.argv[1:] if argv is None else argv)
+    # Before the plugins load, so a broken plugin can't hide the build.
+    if args and args[0] in {"-V", "--version"}:
+        sys.stdout.write(version.line() + "\n")
+        return 0
     try:
         tools = plugins.tools(TOOLS)
     except plugins.PluginError as exc:

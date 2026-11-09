@@ -80,6 +80,27 @@ SYSTEM_TOOLS = (
 TOKEN = "fake-test-token"  # noqa: S105
 
 
+@pytest.fixture(autouse=True)
+def no_operator_credentials(
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bare op calls fail without reaching the desktop app or an SSH agent.
+
+    The stub's directory is outside tmp_path, which tests list; the agent
+    socket path under tmp_path is never created.
+    """
+    directory = tmp_path_factory.mktemp("no-credentials")
+    stub = directory / "op"
+    stub.write_text(
+        '#!/bin/sh\necho "tests: real 1Password access is disabled" >&2\nexit 1\n'
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{directory}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("SSH_AUTH_SOCK", str(tmp_path / "no-ssh-agent"))
+
+
 @dataclass
 class FakeConnect:
     """A Connect API: vaults, items, the tokens that reach them, and faults.

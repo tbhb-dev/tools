@@ -76,24 +76,34 @@ def tools(builtins: Mapping[str, Tool]) -> dict[str, Tool]:
     return merged
 
 
+def supplied(name: str) -> str | None:
+    """The text of the config file NAME from the plugin that supplies it, if any.
+
+    Raises:
+        PluginError: More than one plugin supplies NAME.
+    """
+    found: list[tuple[str, str]] = []
+    for plugin_name, plugin in load():
+        reader: Callable[[str], str | None] | None = getattr(plugin, "config", None)
+        text = reader(name) if reader is not None else None
+        if text is not None:
+            found.append((plugin_name, text))
+    if len(found) > 1:
+        names = ", ".join(repr(n) for n, _ in found)
+        message = f"plugins {names} each supply {name}"
+        raise PluginError(message)
+    return found[0][1] if found else None
+
+
 def config(name: str) -> str:
     """The text of the config file NAME: a plugin's, or else the package's.
 
     Raises:
         PluginError: More than one plugin supplies NAME.
     """
-    supplied: list[tuple[str, str]] = []
-    for plugin_name, plugin in load():
-        reader: Callable[[str], str | None] | None = getattr(plugin, "config", None)
-        text = reader(name) if reader is not None else None
-        if text is not None:
-            supplied.append((plugin_name, text))
-    if len(supplied) > 1:
-        names = ", ".join(repr(n) for n, _ in supplied)
-        message = f"plugins {names} each supply {name}"
-        raise PluginError(message)
-    if supplied:
-        return supplied[0][1]
+    text = supplied(name)
+    if text is not None:
+        return text
     # Equivalent mutants: files(None) finds this module's package too, and
     # macOS's case-insensitive disk finds config/ under any spelling.
     default = files("tbhbdev").joinpath("config", name)  # pragma: no mutate

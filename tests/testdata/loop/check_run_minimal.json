@@ -1,0 +1,9 @@
+{
+  "action": "completed",
+  "check_run": {
+    "name": "test (3.12, ubuntu)",
+    "head_sha": "0123456789abcdef0123456789abcdef01234567",
+    "pull_requests": [{"number": 7}]
+  },
+  "sender": {"login": "example-user"}
+}
