@@ -221,6 +221,10 @@ def test_claude_hooks() -> None:
                 "matcher": "Bash",
                 "hooks": [{"type": "command", "command": marked("guard-gh-poll")}],
             },
+            {
+                "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+                "hooks": [{"type": "command", "command": marked("guard-scripts")}],
+            },
             {"matcher": "Bash|SendMessage|Write|Edit", "hooks": [guard]},
         ],
         "Stop": [{"hooks": [guard]}],
@@ -270,6 +274,8 @@ def test_codex_hooks() -> None:
         "PreToolUse": [
             {"matcher": "^Bash$", "hooks": [one("guard-gh-pr")]},
             {"matcher": "^Bash$", "hooks": [one("guard-gh-poll")]},
+            {"matcher": "^Bash$", "hooks": [one("guard-scripts")]},
+            {"matcher": "^apply_patch$", "hooks": [one("guard-scripts")]},
             {"matcher": "^(Bash|shell)$", "hooks": [one("guard-op")]},
             {"matcher": "apply_patch", "hooks": [one("guard-op")]},
         ],
@@ -343,6 +349,20 @@ def test_agy_hooks() -> None:
                         {
                             "type": "command",
                             "command": marked("guard-gh-poll"),
+                            "timeout": 30,
+                        }
+                    ],
+                }
+            ],
+        },
+        "tbhbdev-alpha-scripts": {
+            "PreToolUse": [
+                {
+                    "matcher": "run_command|write_file",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": marked("guard-scripts"),
                             "timeout": 30,
                         }
                     ],
@@ -719,7 +739,7 @@ def test_install_config_codex_trusts_its_hooks(
     assert install.install_config("codex", env, dry_run=False) == 0
     assert capsys.readouterr().out == (
         f"codex: wrote {codex / 'hooks.json'}\n"
-        f"codex: trusted 8 hooks in {codex / 'config.toml'}\n"
+        f"codex: trusted 10 hooks in {codex / 'config.toml'}\n"
     )
 
 
@@ -847,9 +867,15 @@ def our_trust(hooks: Path) -> dict[str, str]:
             "pre_tool_use", "^Bash$", "guard-gh-poll"
         ),
         f"{hooks}:pre_tool_use:2:0": trust_hash(
-            "pre_tool_use", "^(Bash|shell)$", "guard-op"
+            "pre_tool_use", "^Bash$", "guard-scripts"
         ),
         f"{hooks}:pre_tool_use:3:0": trust_hash(
+            "pre_tool_use", "^apply_patch$", "guard-scripts"
+        ),
+        f"{hooks}:pre_tool_use:4:0": trust_hash(
+            "pre_tool_use", "^(Bash|shell)$", "guard-op"
+        ),
+        f"{hooks}:pre_tool_use:5:0": trust_hash(
             "pre_tool_use", "apply_patch", "guard-op"
         ),
     }
@@ -913,6 +939,8 @@ def test_install_config_codex_trusts_only_its_own_among_foreign_groups(
         "^Bash$",
         "^Bash$",
         "^Bash$",
+        "^Bash$",
+        "^apply_patch$",
         "^(Bash|shell)$",
         "apply_patch",
         "x",
@@ -920,7 +948,7 @@ def test_install_config_codex_trusts_only_its_own_among_foreign_groups(
     ]
     assert [g["hooks"] for g in written] == [
         [THEIRS],
-        *(g["hooks"] for g in written[1:5]),
+        *(g["hooks"] for g in written[1:7]),
         [THEIRS, THEIRS],
         [THEIRS],
     ]
@@ -937,9 +965,15 @@ def test_install_config_codex_trusts_only_its_own_among_foreign_groups(
             "pre_tool_use", "^Bash$", "guard-gh-poll"
         ),
         f"{hooks}:pre_tool_use:3:0": trust_hash(
-            "pre_tool_use", "^(Bash|shell)$", "guard-op"
+            "pre_tool_use", "^Bash$", "guard-scripts"
         ),
         f"{hooks}:pre_tool_use:4:0": trust_hash(
+            "pre_tool_use", "^apply_patch$", "guard-scripts"
+        ),
+        f"{hooks}:pre_tool_use:5:0": trust_hash(
+            "pre_tool_use", "^(Bash|shell)$", "guard-op"
+        ),
+        f"{hooks}:pre_tool_use:6:0": trust_hash(
             "pre_tool_use", "apply_patch", "guard-op"
         ),
     }
@@ -973,7 +1007,7 @@ def test_install_config_codex_keeps_everything_else_in_config_toml(
     assert install.install_config("codex", env, dry_run=False) == 0
     backup = codex / "config.toml.tbhbdev-backup.T"
     assert capsys.readouterr().out.endswith(
-        f"codex: trusted 8 hooks in {config}; the old one is {backup}\n"
+        f"codex: trusted 10 hooks in {config}; the old one is {backup}\n"
     )
     assert backup.read_text() == FOREIGN_CONFIG
     assert stat.S_IMODE(config.stat().st_mode) == 0o644
@@ -1002,7 +1036,7 @@ def test_install_config_codex_twice_changes_nothing_the_second_time(
     assert install.install_config("codex", env, dry_run=False) == 0
     assert capsys.readouterr().out == (
         f"codex: {codex / 'hooks.json'} is up to date\n"
-        f"codex: 8 hooks already trusted in {config}\n"
+        f"codex: 10 hooks already trusted in {config}\n"
     )
     assert config.read_bytes() == first
     assert sorted(p.name for p in codex.iterdir()) == [
@@ -1028,7 +1062,7 @@ def test_install_config_codex_trusts_again_when_only_config_toml_was_lost(
     assert install.install_config("codex", env, dry_run=False) == 0
     assert capsys.readouterr().out == (
         f"codex: {codex / 'hooks.json'} is up to date\n"
-        f"codex: trusted 8 hooks in {codex / 'config.toml'}\n"
+        f"codex: trusted 10 hooks in {codex / 'config.toml'}\n"
     )
     assert trusted_in(codex / "config.toml") == our_trust(codex / "hooks.json")
 
@@ -1173,7 +1207,7 @@ def test_install_config_codex_dry_run_with_trust_up_to_date_prints_no_diff(
     assert install.install_config("codex", env, dry_run=True) == 0
     assert capsys.readouterr().out == (
         f"codex: {codex / 'hooks.json'} is up to date\n"
-        f"codex: 8 hooks already trusted in {codex / 'config.toml'}\n"
+        f"codex: 10 hooks already trusted in {codex / 'config.toml'}\n"
     )
 
 
@@ -2821,7 +2855,7 @@ def test_main_twice_trusts_every_codex_hook_and_sets_the_environment(
         for at, group in enumerate(groups)
         for one in group["hooks"]
     ]
-    assert len(ours) == 8
+    assert len(ours) == 10
     state = parsed["hooks"]["state"]
     for event, at, one in ours:
         assert one["timeout"] == install.CODEX_TIMEOUT
@@ -2869,7 +2903,7 @@ def test_main_twice_trusts_every_codex_hook_and_sets_the_environment(
     }
     assert install.main(["--harness", "codex"], "p") == 0
     out = capsys.readouterr().out
-    assert f"codex: 8 hooks already trusted in {config}\n" in out
+    assert f"codex: 10 hooks already trusted in {config}\n" in out
     assert f"codex: {config} is up to date\n" in out
     assert "wrote" not in out
     assert config.read_bytes() == first

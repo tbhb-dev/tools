@@ -21,6 +21,7 @@ capsys
 cgnat
 checkpointed
 claudecode
+commondir
 complexipy
 conftest
 cpus
@@ -79,6 +80,7 @@ keygen
 keyrings
 kworker
 libc
+libexec
 libproc
 listy
 llmx

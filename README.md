@@ -113,6 +113,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `state-guard` is a Claude Code hook that blocks a status claim with no evidence in a SendMessage call or a final reply, and a `git commit` that adds a sign-off or co-author trailer.
 - `session-context` is a Claude Code SessionStart hook that reports the host, its role, the other hosts, and the local time.
 - `guard-gh-poll` is a PreToolUse hook that blocks GitHub polling and unsetting the 1Password service account token's variable.
+- `guard-scripts` is a PreToolUse hook that keeps scripts for the operator in `~/.local/libexec/tbhb/`. It reads the common ways an agent writes a file, so it misses the rest. It denies a script written anywhere else under the home directory, `/tmp` or `/private/tmp`, and any script in a drafts repository. Git work trees, this session's scratchpad and a run-scoped `$TMPDIR` pass. A name there is `YYYY-MM-DD-<owner>-<slug>.sh`, a revision is a new `.vN` file, and the guard refuses a write to an existing file. Run logs go in `~/.local/state/tbhb/<same name>/`.
 - `gh-shim` is the `gh` that agent sessions find first on PATH. It budgets their `gh` calls as a backstop.
 - `agent-env` runs Codex or Antigravity with the `gh` shim first on PATH.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
