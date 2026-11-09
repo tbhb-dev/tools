@@ -105,7 +105,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `session-context` is a Claude Code SessionStart hook that reports the host, its role, the other hosts, and the local time.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
 - `merge` squash-merges an approved pull request.
-- `loop` validates its user configuration and refuses to run until a later slice adds the shadow runner. Its pure functions derive the state of a pull request.
+- `loop` validates its user configuration and refuses to run until a later slice adds the shadow runner. Its pure functions derive pull request state and apply the rules table to produce typed shadow intents with action keys and spawn budgets.
 - `install` installs the git hooks and the user-level harness hooks.
 
 Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does two things:
@@ -167,6 +167,8 @@ The settings have these constraints:
 - The interval and caps are positive integers. Booleans and fractional values fail. The spawn caps cover the total and each host. `spawn_cap_per_host` must not exceed `spawn_cap_total`. The daily cap covers spawns per day.
 
 This slice only validates configuration. Even with valid settings, the command exits with status 1 and reports that the shadow runner isn't available. It doesn't create a store or execute an approval or other action.
+
+The pure rules table requires a spawned reviewer's approval at the current green head and a complete diff read. Mechanical approval is undecided and defaults off in `RepositoryPolicy.mechanical_approval`. An explicit opt-in permits only an agent-opened PR with an exact configured template match. PRs opened by the loop process remain excluded. R1 skips loop-origin PRs that the loop can't approve. The caller must recompute `mechanical_template_matches`, `verification_passed`, and all other head-bound observations for the current head. Until the caller verifies the base repository, the rules skip the PR, including escalation. Pending signatures and pending CI have no rule or age timeout in this slice. R8 uses `stop:<run>` when capacity can't supply a retry target and reserves `retry:<run>` for a retry with a target. Escalation emits at most one intent per object per call and skips stopped objects.
 
 ### No self-approval
 
