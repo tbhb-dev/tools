@@ -12,7 +12,9 @@ dependencies = [
   "jsonschema[format]>=4.26.0",
   "onepasswordconnectsdk>=2.1.1",
   "pyyaml>=6.0.3",
-  "tomlkit>=0.13.3",
+  # tbhbdev alpha install edits Codex's config.toml in place, so the comments
+  # and order of everything it doesn't own survive.
+  "tomlkit>=0.15.2",
 ]
 
 [project.scripts]

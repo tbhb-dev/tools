@@ -4,11 +4,13 @@ Every test runs with HOME, the harness config directories and the git config
 in tmp_path, in temporary repositories, with a fake prek on PATH.
 """
 
+import hashlib
 import io
 import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -23,7 +25,7 @@ import pytest
 from fake_tool import link_git, write_fake
 from origin_urls import OTHER_URLS, TBHB_DEV_URLS
 
-from tbhbdev.alpha import gh_shim, install, repo
+from tbhbdev.alpha import codex_trust, gh_shim, install, repo
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -254,34 +256,22 @@ def test_the_harness_guards_are_ours_and_a_rerun_replaces_them() -> None:
 
 
 def test_codex_hooks() -> None:
-    record = {"type": "command", "command": marked("identity record codex")}
+    def one(text: str) -> Json:
+        return {"type": "command", "command": marked(text), "timeout": 600}
+
+    record = one("identity record codex")
     assert install.codex_hooks() == {
         "SessionStart": [{"hooks": [record]}],
         "SubagentStart": [{"hooks": [record]}],
         "PostToolUse": [
             {"matcher": "apply_patch", "hooks": [record]},
-            {
-                "matcher": "apply_patch",
-                "hooks": [{"type": "command", "command": marked("pr hook codex")}],
-            },
+            {"matcher": "apply_patch", "hooks": [one("pr hook codex")]},
         ],
         "PreToolUse": [
-            {
-                "matcher": "^Bash$",
-                "hooks": [{"type": "command", "command": marked("guard-gh-pr")}],
-            },
-            {
-                "matcher": "^Bash$",
-                "hooks": [{"type": "command", "command": marked("guard-gh-poll")}],
-            },
-            {
-                "matcher": "^(Bash|shell)$",
-                "hooks": [{"type": "command", "command": marked("guard-op")}],
-            },
-            {
-                "matcher": "apply_patch",
-                "hooks": [{"type": "command", "command": marked("guard-op")}],
-            },
+            {"matcher": "^Bash$", "hooks": [one("guard-gh-pr")]},
+            {"matcher": "^Bash$", "hooks": [one("guard-gh-poll")]},
+            {"matcher": "^(Bash|shell)$", "hooks": [one("guard-op")]},
+            {"matcher": "apply_patch", "hooks": [one("guard-op")]},
         ],
     }
 
@@ -721,16 +711,15 @@ def test_install_config_keeps_the_users_settings_and_backs_up(
     }
 
 
-def test_install_config_codex_reminds_to_trust(
+def test_install_config_codex_trusts_its_hooks(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
     codex = world.home / "codex-home"
-    assert (
-        install.install_config("codex", {"CODEX_HOME": str(codex)}, dry_run=False) == 0
-    )
+    env = {"CODEX_HOME": str(codex)}
+    assert install.install_config("codex", env, dry_run=False) == 0
     assert capsys.readouterr().out == (
         f"codex: wrote {codex / 'hooks.json'}\n"
-        "codex: review and trust the new hooks with /hooks in Codex\n"
+        f"codex: trusted 8 hooks in {codex / 'config.toml'}\n"
     )
 
 
@@ -817,6 +806,381 @@ def test_install_config_fills_an_empty_config(
         "hooks": install.claude_hooks(),
         "env": {"SSH_AUTH_SOCK": ""},
     }
+
+
+# ------------------------------------------------------- trusting Codex hooks
+
+
+def codex_env(world: World) -> tuple[dict[str, str], Path]:
+    codex = world.home / "codex-home"
+    return {"CODEX_HOME": str(codex)}, codex
+
+
+def trust_hash(label: str, matcher: str | None, text: str) -> str:
+    return codex_trust.hook_hash(label, matcher, marked(text), 600)
+
+
+def trusted_in(path: Path) -> dict[str, str]:
+    state = tomllib.loads(path.read_text())["hooks"]["state"]
+    return {key: entry["trusted_hash"] for key, entry in state.items()}
+
+
+def our_trust(hooks: Path) -> dict[str, str]:
+    """The trust a fresh Codex install earns, spelled out from the hooks."""
+    return {
+        f"{hooks}:session_start:0:0": trust_hash(
+            "session_start", None, "identity record codex"
+        ),
+        f"{hooks}:subagent_start:0:0": trust_hash(
+            "subagent_start", None, "identity record codex"
+        ),
+        f"{hooks}:post_tool_use:0:0": trust_hash(
+            "post_tool_use", "apply_patch", "identity record codex"
+        ),
+        f"{hooks}:post_tool_use:1:0": trust_hash(
+            "post_tool_use", "apply_patch", "pr hook codex"
+        ),
+        f"{hooks}:pre_tool_use:0:0": trust_hash(
+            "pre_tool_use", "^Bash$", "guard-gh-pr"
+        ),
+        f"{hooks}:pre_tool_use:1:0": trust_hash(
+            "pre_tool_use", "^Bash$", "guard-gh-poll"
+        ),
+        f"{hooks}:pre_tool_use:2:0": trust_hash(
+            "pre_tool_use", "^(Bash|shell)$", "guard-op"
+        ),
+        f"{hooks}:pre_tool_use:3:0": trust_hash(
+            "pre_tool_use", "apply_patch", "guard-op"
+        ),
+    }
+
+
+@pytest.fixture
+def loose_umask() -> Iterator[None]:
+    previous = os.umask(0)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
+@pytest.mark.usefixtures("loose_umask")
+def test_install_config_codex_trusts_each_hook_in_a_new_config_toml(
+    world: World,
+) -> None:
+    env, codex = codex_env(world)
+    assert install.install_config("codex", env, dry_run=False) == 0
+    config = codex / "config.toml"
+    assert trusted_in(config) == our_trust(codex / "hooks.json")
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert sorted(p.name for p in codex.iterdir()) == ["config.toml", "hooks.json"]
+
+
+def test_install_config_codex_keys_use_the_absolute_hooks_path(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(world.home)
+    assert install.install_config("codex", {"CODEX_HOME": "rel"}, dry_run=False) == 0
+    keys = trusted_in(world.home / "rel" / "config.toml")
+    assert keys == our_trust(world.home / "rel" / "hooks.json")
+    assert all(key.startswith(f"{world.home}/rel/hooks.json:") for key in keys)
+
+
+def test_install_config_codex_trusts_only_its_own_among_foreign_groups(
+    world: World,
+) -> None:
+    env, codex = codex_env(world)
+    hooks = codex / "hooks.json"
+    old_ours = {"type": "command", "command": marked("guard-op")}
+    codex.mkdir()
+    hooks.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "^Bash$", "hooks": [THEIRS]},
+                        {"matcher": "x", "hooks": [THEIRS, old_ours, THEIRS]},
+                        {"matcher": "^Bash$", "hooks": [THEIRS]},
+                    ],
+                    "Stop": [{"hooks": [THEIRS]}],
+                }
+            }
+        )
+    )
+    assert install.install_config("codex", env, dry_run=False) == 0
+    written = json.loads(hooks.read_text())["hooks"]["PreToolUse"]
+    assert [g.get("matcher") for g in written] == [
+        "^Bash$",
+        "^Bash$",
+        "^Bash$",
+        "^(Bash|shell)$",
+        "apply_patch",
+        "x",
+        "^Bash$",
+    ]
+    assert [g["hooks"] for g in written] == [
+        [THEIRS],
+        *(g["hooks"] for g in written[1:5]),
+        [THEIRS, THEIRS],
+        [THEIRS],
+    ]
+    expected = {
+        key: digest
+        for key, digest in our_trust(hooks).items()
+        if ":pre_tool_use:" not in key
+    }
+    expected |= {
+        f"{hooks}:pre_tool_use:1:0": trust_hash(
+            "pre_tool_use", "^Bash$", "guard-gh-pr"
+        ),
+        f"{hooks}:pre_tool_use:2:0": trust_hash(
+            "pre_tool_use", "^Bash$", "guard-gh-poll"
+        ),
+        f"{hooks}:pre_tool_use:3:0": trust_hash(
+            "pre_tool_use", "^(Bash|shell)$", "guard-op"
+        ),
+        f"{hooks}:pre_tool_use:4:0": trust_hash(
+            "pre_tool_use", "apply_patch", "guard-op"
+        ),
+    }
+    assert trusted_in(codex / "config.toml") == expected
+
+
+FOREIGN_CONFIG = """# Codex settings
+model = "example"  # the model
+
+[mcp_servers.docs]
+command = "docs-server"
+
+[hooks.state."/elsewhere/hooks.json:pre_tool_use:0:0"]
+trusted_hash = "sha256:foreign"
+
+# profiles
+[profiles.fast]
+effort = "low"
+"""
+
+
+def test_install_config_codex_keeps_everything_else_in_config_toml(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(install, "stamp", lambda: "T")
+    env, codex = codex_env(world)
+    config = codex / "config.toml"
+    codex.mkdir()
+    config.write_text(FOREIGN_CONFIG)
+    config.chmod(0o644)
+    assert install.install_config("codex", env, dry_run=False) == 0
+    backup = codex / "config.toml.tbhbdev-backup.T"
+    assert capsys.readouterr().out.endswith(
+        f"codex: trusted 8 hooks in {config}; the old one is {backup}\n"
+    )
+    assert backup.read_text() == FOREIGN_CONFIG
+    assert stat.S_IMODE(config.stat().st_mode) == 0o644
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o644
+    new = config.read_text()
+    assert set(FOREIGN_CONFIG.splitlines()) <= set(new.splitlines())
+    expected = tomllib.loads(FOREIGN_CONFIG)
+    expected["shell_environment_policy"] = {"set": {"SSH_AUTH_SOCK": ""}}
+    expected["hooks"]["state"] |= {
+        key: {"trusted_hash": digest}
+        for key, digest in our_trust(codex / "hooks.json").items()
+    }
+    assert tomllib.loads(new) == expected
+
+
+def test_install_config_codex_twice_changes_nothing_the_second_time(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env, codex = codex_env(world)
+    config = codex / "config.toml"
+    codex.mkdir()
+    config.write_text(FOREIGN_CONFIG)
+    assert install.install_config("codex", env, dry_run=False) == 0
+    capsys.readouterr()
+    first = config.read_bytes()
+    assert install.install_config("codex", env, dry_run=False) == 0
+    assert capsys.readouterr().out == (
+        f"codex: {codex / 'hooks.json'} is up to date\n"
+        f"codex: 8 hooks already trusted in {config}\n"
+    )
+    assert config.read_bytes() == first
+    assert sorted(p.name for p in codex.iterdir()) == [
+        "config.toml",
+        "config.toml.tbhbdev-backup." + stamp_of(codex),
+        "hooks.json",
+    ]
+
+
+def stamp_of(codex: Path) -> str:
+    """The time suffix of the one backup in CODEX."""
+    (backup,) = codex.glob("config.toml.tbhbdev-backup.*")
+    return backup.name.rsplit(".", 1)[1]
+
+
+def test_install_config_codex_trusts_again_when_only_config_toml_was_lost(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env, codex = codex_env(world)
+    assert install.install_config("codex", env, dry_run=False) == 0
+    (codex / "config.toml").unlink()
+    capsys.readouterr()
+    assert install.install_config("codex", env, dry_run=False) == 0
+    assert capsys.readouterr().out == (
+        f"codex: {codex / 'hooks.json'} is up to date\n"
+        f"codex: trusted 8 hooks in {codex / 'config.toml'}\n"
+    )
+    assert trusted_in(codex / "config.toml") == our_trust(codex / "hooks.json")
+
+
+def test_install_config_codex_drops_the_entry_of_a_hook_that_moved(
+    world: World,
+) -> None:
+    env, codex = codex_env(world)
+    hooks = codex / "hooks.json"
+    assert install.install_config("codex", env, dry_run=False) == 0
+    config = codex / "config.toml"
+    first = trusted_in(config)
+    # A foreign group lands ahead of ours, so each PreToolUse hook moves down one,
+    # and the foreign hook now sits where our first one was.
+    data = json.loads(hooks.read_text())
+    data["hooks"]["PreToolUse"].insert(0, {"matcher": "^Bash$", "hooks": [THEIRS]})
+    hooks.write_text(json.dumps(data))
+    assert install.install_config("codex", env, dry_run=False) == 0
+    moved = trusted_in(config)
+    assert f"{hooks}:pre_tool_use:0:0" not in moved
+    assert moved[f"{hooks}:pre_tool_use:1:0"] == first[f"{hooks}:pre_tool_use:0:0"]
+    assert moved[f"{hooks}:pre_tool_use:2:0"] == first[f"{hooks}:pre_tool_use:1:0"]
+    assert moved[f"{hooks}:pre_tool_use:3:0"] == first[f"{hooks}:pre_tool_use:2:0"]
+    assert moved[f"{hooks}:pre_tool_use:4:0"] == first[f"{hooks}:pre_tool_use:3:0"]
+    # The foreign hook's own entry, whatever its hash, is left alone.
+    config.write_text(
+        config.read_text() + f'\n[hooks.state."{hooks}:pre_tool_use:0:0"]\n'
+        'trusted_hash = "sha256:theirs"\n'
+    )
+    assert install.install_config("codex", env, dry_run=False) == 0
+    assert trusted_in(config)[f"{hooks}:pre_tool_use:0:0"] == "sha256:theirs"
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("[hooks\n", "it is not valid TOML ("),
+        ("hooks = 3\n", "its hooks is not a table"),
+        ("[hooks]\nstate = 1\n", "its hooks.state is not a table"),
+    ],
+)
+def test_install_config_codex_reports_a_config_toml_it_cannot_edit(
+    world: World, capsys: pytest.CaptureFixture[str], text: str, reason: str
+) -> None:
+    env, codex = codex_env(world)
+    config = codex / "config.toml"
+    codex.mkdir()
+    config.write_text(text)
+    assert install.install_config("codex", env, dry_run=False) == 1
+    captured = capsys.readouterr()
+    assert captured.out == f"codex: wrote {codex / 'hooks.json'}\n"
+    prefix = f"tbhbdev alpha install: codex: cannot trust hooks in {config}: {reason}"
+    assert captured.err.startswith(prefix)
+    assert captured.err.count("\n") == 1
+    assert config.read_text() == text
+    assert sorted(p.name for p in codex.iterdir()) == ["config.toml", "hooks.json"]
+
+
+def test_install_config_codex_trusts_a_config_toml_whose_environment_cannot_merge(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env, codex = codex_env(world)
+    config = codex / "config.toml"
+    codex.mkdir()
+    config.write_text("shell_environment_policy = 3\n")
+    assert install.install_config("codex", env, dry_run=False) == 0
+    assert trusted_in(config) == our_trust(codex / "hooks.json")
+    assert tomllib.loads(config.read_text())["shell_environment_policy"] == 3
+    capsys.readouterr()
+    assert install.install_codex_environment(env, dry_run=False) == 1
+    assert "its shell_environment_policy is not a table" in capsys.readouterr().err
+
+
+def test_install_config_codex_reports_a_config_toml_it_cannot_read(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env, codex = codex_env(world)
+    config = codex / "config.toml"
+    config.mkdir(parents=True)
+    assert install.install_config("codex", env, dry_run=False) == 1
+    assert capsys.readouterr().err == (
+        f"tbhbdev alpha install: codex: cannot trust hooks in {config}: it cannot "
+        f"be read ([Errno 21] Is a directory: {str(config)!r})\n"
+    )
+
+
+def test_install_config_codex_reports_a_config_toml_it_cannot_write(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env, codex = codex_env(world)
+    assert install.install_config("codex", env, dry_run=False) == 0
+    (codex / "config.toml").unlink()
+    codex.chmod(0o500)
+    capsys.readouterr()
+    try:
+        assert install.install_config("codex", env, dry_run=False) == 1
+        err = capsys.readouterr().err
+        assert err.startswith(
+            f"tbhbdev alpha install: codex: cannot trust hooks in "
+            f"{codex / 'config.toml'}: [Errno 13] Permission denied"
+        )
+    finally:
+        codex.chmod(0o700)
+    assert not (codex / "config.toml").exists()
+
+
+def test_install_config_codex_dry_run_prints_both_diffs_and_writes_nothing(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env, codex = codex_env(world)
+    assert install.install_config("codex", env, dry_run=True) == 0
+    out = capsys.readouterr().out
+    assert f"+++ {codex / 'hooks.json'}\n" in out
+    assert f"+++ {codex / 'config.toml'}\n" in out
+    assert f'+[hooks.state."{codex / "hooks.json"}:session_start:0:0"]\n' in out
+    assert not codex.exists()
+
+
+def test_install_config_codex_dry_run_diffs_against_an_existing_config_toml(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env, codex = codex_env(world)
+    codex.mkdir()
+    (codex / "config.toml").write_text(FOREIGN_CONFIG)
+    assert install.install_config("codex", env, dry_run=True) == 0
+    out = capsys.readouterr().out
+    _, _, diff = out.partition(f"--- {codex / 'config.toml'}\n")
+    assert diff.startswith(f"+++ {codex / 'config.toml'}\n@@ -")
+    assert "@@ -0,0" not in diff
+    assert '\n trusted_hash = "sha256:foreign"\n' in diff
+    assert '\n+[hooks.state."' in diff
+    assert (codex / "config.toml").read_text() == FOREIGN_CONFIG
+    assert sorted(p.name for p in codex.iterdir()) == ["config.toml"]
+
+
+def test_install_config_codex_dry_run_with_trust_up_to_date_prints_no_diff(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env, codex = codex_env(world)
+    assert install.install_config("codex", env, dry_run=False) == 0
+    capsys.readouterr()
+    assert install.install_config("codex", env, dry_run=True) == 0
+    assert capsys.readouterr().out == (
+        f"codex: {codex / 'hooks.json'} is up to date\n"
+        f"codex: 8 hooks already trusted in {codex / 'config.toml'}\n"
+    )
+
+
+def test_install_config_other_harnesses_trust_nothing(world: World) -> None:
+    for harness in ("claude", "antigravity"):
+        assert install.install_config(harness, {}, dry_run=False) == 0
+    assert not (world.home / ".codex").exists()
 
 
 # ---------------------------------------------------------------- the lock
@@ -1627,12 +1991,42 @@ def test_main_dry_run_writes_nothing(
     assert install.main(["--dry-run"], "p") == 0
     out = capsys.readouterr().out
     assert out.startswith("would install prek's")
+    # Codex's config.toml has two edits, trust and the environment, which a
+    # dry run prints as the one diff a real run writes.
     assert out.count("+++ ") == 4
-    assert f"+++ {world.home / '.codex' / 'config.toml'}\n" in out
+    assert out.count(f"+++ {world.home / '.codex' / 'config.toml'}\n") == 1
     assert f"gh-shim: would write {gh_shim.bin_dir() / 'gh'}\n" in out
     assert list(world.home.iterdir()) == []
     assert not gh_shim.bin_dir().parent.exists()
     assert world.prek_calls() == []
+
+
+def test_main_dry_run_prints_one_codex_config_diff(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = world.home / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(FOREIGN_CONFIG)
+    assert install.main(["--dry-run", "--harness", "codex"], "p") == 0
+    out = capsys.readouterr().out
+    assert out.count(f"+++ {config}\n") == 1
+    assert out.count('+SSH_AUTH_SOCK = ""\n') == 1
+    assert '\n+[hooks.state."' in out
+    assert config.read_text() == FOREIGN_CONFIG
+
+
+def test_main_dry_run_prints_the_environment_when_trust_cannot_edit(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = world.home / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text("hooks = 3\n")
+    assert install.main(["--dry-run", "--harness", "codex"], "p") == 1
+    captured = capsys.readouterr()
+    assert "cannot trust hooks" in captured.err
+    assert captured.out.count(f"+++ {config}\n") == 1
+    assert captured.out.count('+SSH_AUTH_SOCK = ""\n') == 1
+    assert "hooks.state" not in captured.out
 
 
 def test_main_status_is_any_failure(
@@ -2318,6 +2712,10 @@ def test_main_twice_changes_nothing_the_second_time(
     assert settings["env"] == {"SSH_AUTH_SOCK": ""}
     assert "PATH" not in settings["env"]
     codex = tomllib.loads((world.home / ".codex" / "config.toml").read_text())
+    assert (
+        codex.pop("hooks")["state"].keys()
+        == trusted_in(world.home / ".codex" / "config.toml").keys()
+    )
     assert codex == {"shell_environment_policy": {"set": {"SSH_AUTH_SOCK": ""}}}
 
 
@@ -2340,7 +2738,9 @@ def test_main_keeps_existing_settings_and_codex_keys(
     assert merged["model"] == "opus"
     text = config.read_text()
     assert text.startswith('# keep me\nmodel = "o3"\n')
-    assert tomllib.loads(text) == {
+    parsed = tomllib.loads(text)
+    assert parsed.pop("hooks")["state"]
+    assert parsed == {
         "model": "o3",
         "shell_environment_policy": {
             "inherit": "core",
@@ -2382,3 +2782,99 @@ def test_main_twice_with_existing_configs_changes_nothing_the_second_time(
     }
     backups = [p for p in world.home.rglob("*") if "tbhbdev-backup" in p.name]
     assert len(backups) == 2
+
+
+USER_CODEX_CONFIG = """# my Codex settings
+model = "o3"
+
+[env]
+MINE = "1"
+
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+BAR = "2"
+
+[hooks.state."/elsewhere/hooks.json:pre_tool_use:0:0"]
+trusted_hash = "sha256:foreign"
+"""
+
+
+def test_main_twice_trusts_every_codex_hook_and_sets_the_environment(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = world.home / ".codex" / "config.toml"
+    hooks = world.home / ".codex" / "hooks.json"
+    config.parent.mkdir()
+    config.write_text(USER_CODEX_CONFIG)
+    assert install.main(["--harness", "codex"], "p") == 0
+    capsys.readouterr()
+    first = config.read_bytes()
+    parsed = tomllib.loads(first.decode())
+    # Every Codex handler of ours has the hash of what is on disk, including the
+    # gh poll guard, whose hash is spelled out here rather than computed.
+    written = json.loads(hooks.read_text())["hooks"]
+    ours = [
+        (event, at, one)
+        for event, groups in written.items()
+        for at, group in enumerate(groups)
+        for one in group["hooks"]
+    ]
+    assert len(ours) == 8
+    state = parsed["hooks"]["state"]
+    for event, at, one in ours:
+        assert one["timeout"] == install.CODEX_TIMEOUT
+        label = {"SessionStart": "session_start", "SubagentStart": "subagent_start"}
+        label = label.get(event, "post_tool_use" if "Post" in event else "pre_tool_use")
+        group = written[event][at]
+        body = {
+            "event_name": label,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": one["command"],
+                    "timeout": 600,
+                    "async": False,
+                }
+            ],
+        }
+        if "matcher" in group:
+            body["matcher"] = group["matcher"]
+        compact = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        digest = "sha256:" + hashlib.sha256(compact.encode()).hexdigest()
+        assert state[f"{hooks}:{label}:{at}:0"] == {"trusted_hash": digest}
+    poll = f"{hooks}:pre_tool_use:1:0"
+    assert written["PreToolUse"][1]["hooks"][0]["command"] == marked("guard-gh-poll")
+    assert state[poll]["trusted_hash"] == trust_hash(
+        "pre_tool_use", "^Bash$", "guard-gh-poll"
+    )
+    assert trusted_in(config) == {
+        "/elsewhere/hooks.json:pre_tool_use:0:0": "sha256:foreign",
+        **our_trust(hooks),
+    }
+    # The environment is set, and none of the user's keys is lost.
+    assert parsed["shell_environment_policy"] == {
+        "inherit": "core",
+        "set": {"BAR": "2", "SSH_AUTH_SOCK": ""},
+    }
+    assert parsed["env"] == {"MINE": "1"}
+    assert parsed["model"] == "o3"
+    assert first.decode().startswith('# my Codex settings\nmodel = "o3"\n')
+    # A second run writes nothing.
+    snapshot = {
+        p: (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in world.home.rglob("*")
+        if p.is_file()
+    }
+    assert install.main(["--harness", "codex"], "p") == 0
+    out = capsys.readouterr().out
+    assert f"codex: 8 hooks already trusted in {config}\n" in out
+    assert f"codex: {config} is up to date\n" in out
+    assert "wrote" not in out
+    assert config.read_bytes() == first
+    assert snapshot == {
+        p: (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in world.home.rglob("*")
+        if p.is_file()
+    }
