@@ -26,7 +26,7 @@ uv tool install git+https://github.com/tbhb-dev/tools
 
 ## Config
 
-The values of one deployment come from the user config at `$XDG_CONFIG_HOME/tbhbdev/config.toml`, where `XDG_CONFIG_HOME` defaults to `.config` in the home directory. The package has no defaults for them, and no environment variable or plugin overrides them. When the file or a required key is missing, the command fails, and its error gives the file's path and the `[table] key`. Optional settings include the `[workspace]` and `[loop]` tables and `[gitleaks] session_sockets`. Calling `alpha loop` requires its settings in `[loop]`. `tbhbdev` reads the file only when a command first needs a value, so `--help` works without it.
+The values of one deployment come from the user config at `$XDG_CONFIG_HOME/tbhbdev/config.toml`, where `XDG_CONFIG_HOME` defaults to `.config` in the home directory. The package has no defaults for them, and no environment variable or plugin overrides them. When the file or a required key is missing, the command fails, and its error gives the file's path and the `[table] key`. Optional settings include the `[workspace]`, `[loop]` and `[gh_budget]` tables and `[gitleaks] session_sockets`. Calling `alpha loop` requires its settings in `[loop]`. `tbhbdev` reads the file only when a command first needs a value, so `--help` works without it.
 
 ```toml
 [op]
@@ -51,7 +51,13 @@ session_sockets = ["/tmp/example-socks/"]
 [workspace]
 root = "src"
 repos = ["example-org/app"]
+
+[gh_budget]
+hourly_limit = 300
+core_floor = 1000
 ```
+
+`[gh_budget]` sets the agent `gh` budget that [GitHub polling](#github-polling) describes. Its values are whole numbers, and the ones shown are the defaults.
 
 Each `[connect] server_hosts` entry must be a DNS label of at most 63 characters. Letters and digits make up the label, and a hyphen may appear only between them. A bad entry fails with its position in the list, not its value.
 
@@ -104,18 +110,23 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `guard-gh-pr` is a PreToolUse hook that blocks `gh pr create`, `gh pr edit` and `gh pr merge`.
 - `state-guard` is a Claude Code hook that blocks a status claim with no evidence in a SendMessage call or a final reply, and a `git commit` that adds a sign-off or co-author trailer.
 - `session-context` is a Claude Code SessionStart hook that reports the host, its role, the other hosts, and the local time.
+- `guard-gh-poll` is a PreToolUse hook that blocks GitHub polling and unsetting the 1Password service account token's variable.
+- `gh-shim` is the `gh` that agent sessions find first on PATH. It budgets their `gh` calls as a backstop.
+- `agent-env` runs Codex or Antigravity with the `gh` shim first on PATH.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
 - `merge` squash-merges an approved pull request.
 - `loop` validates its user configuration and refuses to run until a later slice adds the shadow runner. The package includes pure state derivation and rules that produce typed shadow intents with action keys and spawn budgets. A SQLite store records receipts, action keys, runs, and escalation markers.
 - `install` installs the git hooks and the user-level harness hooks.
 
-Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does three things:
+Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does five things:
 
 - It installs that clone's git hooks into `$(git rev-parse --git-common-dir)/hooks`, which every worktree of the clone shares. prek runs pre-commit and pre-push, and three shims run `tbhbdev alpha identity` for prepare-commit-msg, commit-msg and post-commit. Without `tbhbdev` on PATH, the shims block a commit in a tbhb-dev repository and do nothing elsewhere.
 - It merges the hooks into each harness's user-level config: `settings.json` in `$CLAUDE_CONFIG_DIR` or `.claude` in `$HOME` for Claude Code, `hooks.json` in `$CODEX_HOME` or `.codex` in `$HOME` for Codex, and `.gemini/config/hooks.json` in `$HOME` for Antigravity.
 - When an installed plugin supplies `claude-private.md` or `mise-private.toml`, it writes them to `.claude/CLAUDE.private.md` and `.config/mise/conf.d/private.toml` in `$HOME`, readable by the user only. When no plugin supplies a file, it skips that file.
+- It sets `SSH_AUTH_SOCK` to the empty string for every agent command, in the `env` object of Claude Code's `settings.json` and in `shell_environment_policy.set` of Codex's `config.toml`, so an agent's command doesn't connect to the 1Password SSH agent and prompt the operator. Host provisioning sets the variable for the account an agent runs as, but gives the operator's own account no harness environment, so `install` is the only thing that sets it there. It keeps every other key of both files, and the comments and layout of `config.toml`.
+- It writes the `gh` shim, an executable `gh` in `$XDG_DATA_HOME/tbhbdev/agent-bin`, where `XDG_DATA_HOME` defaults to `.local/share` in the home directory.
 
-Each hook command it writes ends in `# tbhbdev alpha install`. A rerun replaces only those entries, and keeps everything else in place. Before it changes a config, it saves the old one beside it as `<name>.tbhbdev-backup.<time>`. `--dry-run` prints the changes without writing them, and `--harness claude|codex|antigravity` limits the merge to one harness. Codex asks you to trust new hooks with `/hooks`.
+It never prompts, runs `op` or needs the 1Password app, so configuration management can run it unattended, and a second run doesn't change anything. Each hook command it writes ends in `# tbhbdev alpha install`. A rerun replaces only those entries, and keeps everything else in place. Before it changes a config, it saves the old one beside it as `<name>.tbhbdev-backup.<time>`. `--dry-run` prints the changes without writing them, and `--harness claude|codex|antigravity` limits the merge to one harness. Codex asks you to trust new hooks with `/hooks`.
 
 For Claude Code it also installs `state-guard` (PreToolUse for Bash, SendMessage, Write and Edit, plus Stop and SessionStart) and `session-context` (SessionStart), each with a 10 second timeout. Their private values come from an optional `[harness]` table in the user config, and a missing table or key turns off the check that needs it, never blocks:
 
@@ -140,7 +151,7 @@ Commit and claim checks run without config. For commits, the command guard check
 
 Evidence can be a `#N` reference or a commit hash of 7 to 40 hex characters. Hashes must contain a digit and a letter from a to f. A log path or inline code can supply evidence as well, as can command output. Claims can attribute a result with `says` or `reports`, or mark it `unverified`.
 
-These user-level hooks run in every repository. Before acting, the identity, pull request, approval guard, and install hooks check that `origin` names a tbhb-dev repository on GitHub. Outside a repository, the identity record hook still writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Both `state-guard` and `session-context` run regardless of origin. At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, reinstalling the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
+These user-level hooks run in every repository. Before acting, the identity, pull request, approval guard, and install hooks check that `origin` names a tbhb-dev repository on GitHub. Outside a repository, the identity record hook still writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Both `state-guard` and `session-context` run regardless of origin. At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, which puts the `gh` shim first on PATH for the session's commands and reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, and each worktree has its own pull request draft, so sessions in two worktrees of one clone don't overwrite each other.
 
@@ -198,6 +209,15 @@ A session can't approve a pull request that it, or one of its subagents, opened.
 - `tbhbdev alpha pr backfill-opened OWNER` covers the pull requests opened before the ledger existed. It reads every pull request, open, closed and merged, in every repository of the owner, and adds each one to the ledger of every `session=` its `Generated-by`, `Assisted-by` and `Opened-by` lines name. Run it once on each host. A rerun doesn't change anything. It warns when a listing reaches its `--limit`.
 
 The guard reads only this host's ledger and sees only the commands it scans, so this isn't a security boundary.
+
+### GitHub polling
+
+Agents get GitHub CI and pull request state from awrel, which relays webhook events into a session: subscribe with the repository and the event type, such as `check_run` conclusion events. That's the way to watch GitHub state. Polling GitHub instead burns the account's REST quota, which every agent shares. A hook stops the common polls, and a shim budgets what remains. The budget is a backstop, not the way to watch GitHub state.
+
+- `guard-gh-poll` denies `gh run watch`, `gh run list`, `gh pr checks --watch`, `gh api` or `gh query` with `--paginate`, and reads of the list endpoints `actions/runs`, `actions/workflows/W/runs`, `actions/jobs`, `check-runs` and `check-suites`. It also denies a `while`, `until` or `for` loop that runs `gh`, or runs both `sleep` and `pgrep`, such as the self-matching wait `while pgrep -f fetch.py; do sleep 5; done`. Single-object reads pass, such as `actions/runs/ID`, `pulls/N`, `commits/SHA/check-runs`, `actions/runs?head_sha=SHA` for one full commit hash, and `rate_limit`. It scans `bash -c`, `eval`, `ssh HOST COMMAND` and a here-document fed to a shell. Each deny names awrel. The same hook denies `unset` and `env -u` of the 1Password service account token's variable. A command keeps the environment the harness gave it.
+- `gh-shim` budgets the `gh` calls that scripts make, which no hook sees. In an agent session it refuses a call when the root session has made `[gh_budget] hourly_limit` `gh` calls in the past hour, or when the account has fewer than `core_floor` core REST requests left. It checks that with `gh api rate_limit` at most once a minute. A refusal goes to stderr and names awrel and the budget. Otherwise, and always outside an agent session, it runs the real `gh` unchanged. The state is under `$XDG_STATE_HOME/tbhbdev/gh-budget`.
+
+Claude Code gets the shim on PATH from the SessionStart hook, which adds an `export PATH` line to `$CLAUDE_ENV_FILE`. Codex and Antigravity have no setting that prepends to PATH, so start them as `tbhbdev alpha agent-env codex` or `tbhbdev alpha agent-env agy`, followed by the harness's own arguments. A process tree that doesn't inherit that PATH, or a `gh` run by its absolute path, skips the shim. Neither mechanism is a security boundary.
 
 ## Plugins
 
