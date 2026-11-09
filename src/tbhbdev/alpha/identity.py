@@ -1085,11 +1085,15 @@ def claude_ident(data: Json, env: Mapping[str, str]) -> Ident:
     root = sha256_64(data["session_id"])
     agent = data.get("agent_id")
     effort = parse_stdin(data)[2]
+    rec = load_record(root, hook_cwd(data))
     if agent:
         model, sub = transcript_model(child_transcript(data)), sha256_64(agent)
     else:
-        model, sub = transcript_model(data.get("transcript_path")), None
-    ver = version(CLAUDE, env) or load_record(root, hook_cwd(data)).get("version")
+        # The transcript tail can hold no assistant entry (after a large tool
+        # result), so the main agent falls back to its session record.
+        model = transcript_model(data.get("transcript_path")) or main_model(rec)
+        sub = None
+    ver = version(CLAUDE, env) or rec.get("version")
     return make_ident(CLAUDE, root, Seen(ver, model, effort, surface(CLAUDE, env)), sub)
 
 
@@ -1707,7 +1711,9 @@ def enrich(ident: Ident, committer: Committer) -> Ident:
     the committer of the same harness. A Claude child's model and effort come
     from its record, because the child transcript can trail the first
     PostToolUse. Surface is per session, and an edit hook env may not expose it
-    (agy). Never inherits a model from another agent.
+    (agy). A main agent's identity stored without a model or effort takes them
+    from the committer's root identity when that is the same agent. Never
+    inherits a model from another agent.
     """
     slug = ident.harness.partition(":")[0]
     committer_harness = committer.ident.harness
@@ -1731,6 +1737,14 @@ def enrich(ident: Ident, committer: Committer) -> Ident:
             ident = replace(
                 ident, model=ident.model or model, effort=ident.effort or effort
             )
+    root_ident = committer.root_ident
+    # The root identity has no subagent, so a match is the main agent itself.
+    if committer.key == CLAUDE and ident.agent_key() == root_ident.agent_key():
+        ident = replace(
+            ident,
+            model=ident.model or root_ident.model,
+            effort=ident.effort or root_ident.effort,
+        )
     return ident
 
 
@@ -1884,7 +1898,9 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
     present = [*llm_trailers(path.read_text()), *kept]
     if not edits and any(key == KEY_GEN for key, _ in present):
         gen, assisted = list[Ident](), list[Ident]()
-    add_trailers(path, [enrich(i, committer) for i in gen], assisted, kept)
+    # Enriching can make two identities of one agent equal, so deduplicate again.
+    gen = list(dict.fromkeys(enrich(i, committer) for i in gen))
+    add_trailers(path, gen, assisted, kept)
     write_claim(repo, committer.ident.root, [p for p, _ in edits])
     return 0
 

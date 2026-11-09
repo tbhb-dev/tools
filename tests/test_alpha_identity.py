@@ -3,6 +3,7 @@
 
 """Tests for tbhbdev alpha identity, the agent-identity hooks."""
 
+import dataclasses
 import hashlib
 import io
 import itertools
@@ -1444,6 +1445,40 @@ def test_claude_ident_main_and_child(repo: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("recorded", "expected"),
+    [
+        ({"model": "claude-sonnet-5-5"}, "anthropic:claude-sonnet-5-5"),
+        ({"payload_model": "claude-haiku-5-5"}, "anthropic:claude-haiku-5-5"),
+        ({"version": "9.9.9"}, None),
+    ],
+    ids=["record-model", "payload-model", "none-anywhere"],
+)
+def test_claude_ident_main_falls_back_to_the_record_model(
+    repo: Path, recorded: Json, expected: str | None
+) -> None:
+    data = claude_data(repo)
+    # A transcript tail with no assistant entry, such as after a large tool result.
+    (repo / "session-raw.jsonl").write_text(
+        json.dumps({"type": "user", "message": {"content": "x"}}) + "\n",
+        encoding="utf-8",
+    )
+    ai.write_record(SESSION_HASH, recorded, repo)
+    assert ai.claude_ident(data, CLAUDE_HOOK_ENV).model == expected
+
+
+def test_claude_ident_main_prefers_the_transcript_model(repo: Path) -> None:
+    ai.write_record(SESSION_HASH, {"model": "claude-sonnet-5-5"}, repo)
+    got = ai.claude_ident(claude_data(repo), CLAUDE_HOOK_ENV)
+    assert got.model == "anthropic:claude-opus-5-5"
+
+
+def test_claude_ident_child_never_takes_the_main_record_model(repo: Path) -> None:
+    ai.write_record(SESSION_HASH, {"model": "claude-sonnet-5-5"}, repo)
+    child = claude_data(repo, "claude-pretooluse-bash-child.json")
+    assert ai.claude_ident(child, CLAUDE_HOOK_ENV).model is None
+
+
 def test_claude_ident_falls_back_to_the_recorded_version(repo: Path) -> None:
     ai.write_record(SESSION_HASH, {"version": "9.9.9"}, repo)
     got = ai.claude_ident(claude_data(repo), {})
@@ -2740,11 +2775,14 @@ def test_enrich_fills_harness_version_and_surface_from_the_committer() -> None:
         ai.Ident(ROOT, "claude-code:2.1", None, "anthropic:m", None, "cli")
     )
     bare = ai.Ident(ROOT, "claude-code")
+    # The same agent's missing model comes from the committer's root identity.
     assert ai.enrich(bare, cm) == ai.Ident(
-        ROOT, "claude-code:2.1", None, None, None, "cli"
+        ROOT, "claude-code:2.1", None, "anthropic:m", None, "cli"
     )
     versioned = ai.Ident(ROOT, "claude-code:1.0", None, None, None, "ide")
-    assert ai.enrich(versioned, cm) == versioned
+    assert ai.enrich(versioned, cm) == dataclasses.replace(
+        versioned, model="anthropic:m"
+    )
     # Committer lacking either value fills nothing.
     plain_cm = committer_of(ai.Ident(ROOT, "claude-code"))
     assert ai.enrich(bare, plain_cm) == bare
@@ -2786,6 +2824,37 @@ def replace_harness(ident: ai.Ident, harness: str) -> ai.Ident:
     return ai.Ident(
         ident.root, harness, ident.subagent, ident.model, ident.effort, ident.surface
     )
+
+
+def test_enrich_fills_a_same_agent_main_identity_from_the_committer_root() -> None:
+    root = ai.Ident(ROOT, "claude-code:2.1", None, "anthropic:m", "high", "cli")
+    cm = committer_of(ai.Ident(ROOT, "claude-code:2.1", CHILD, "anthropic:c"), root)
+    bare = ai.Ident(ROOT, "claude-code:2.1", None, None, None, "cli")
+    assert ai.enrich(bare, cm) == root
+    # Each missing value is filled alone; a present one wins.
+    only_effort = ai.Ident(ROOT, "claude-code:2.1", None, "anthropic:x", None, "cli")
+    got = ai.enrich(only_effort, cm)
+    assert (got.model, got.effort) == ("anthropic:x", "high")
+    only_model = ai.Ident(ROOT, "claude-code:2.1", None, None, "low", "cli")
+    got = ai.enrich(only_model, cm)
+    assert (got.model, got.effort) == ("anthropic:m", "low")
+    # A root with nothing to lend fills nothing.
+    empty = committer_of(cm.ident, ai.Ident(ROOT, "claude-code:2.1"))
+    assert ai.enrich(bare, empty) == bare
+
+
+def test_enrich_never_lends_the_root_model_to_another_agent() -> None:
+    root = ai.Ident(ROOT, "claude-code:2.1", None, "anthropic:m", "high", "cli")
+    cm = committer_of(root)
+    other_root = ai.Ident(OTHER, "claude-code:2.1", None, None, None, "cli")
+    assert ai.enrich(other_root, cm) == other_root
+    # A subagent of the same session is a different agent.
+    child = ai.Ident(ROOT, "claude-code:2.1", CHILD, None, None, "cli")
+    assert ai.enrich(child, cm) == child
+    # Only a Claude committer lends its root identity.
+    codex_cm = ai.Committer(ai.CODEX, ai.Ident(ROOT, "claude-code:2.1"), root)
+    bare = ai.Ident(ROOT, "claude-code:2.1", None, None, None, "cli")
+    assert ai.enrich(bare, codex_cm) == bare
 
 
 def test_enrich_child_ignores_records_it_cannot_trust(repo: Path) -> None:
@@ -3129,6 +3198,28 @@ def test_write_claim_writes_nothing_when_the_index_has_no_tree(
     monkeypatch.setattr(ai, "git", returning((128, "")))
     ai.write_claim(info, ROOT, [Path("a.json")])
     assert not (repo / ".git" / "tbhb-alpha").exists()
+
+
+def test_cmd_trailer_merges_a_model_less_receipt_into_its_twin(
+    repo: Path, tmp_path: Path
+) -> None:
+    stage(repo, "a.txt")
+    ai.write_record(SESSION_HASH, {"model": "claude-opus-5-5", "effort": "low"}, repo)
+    full = make_ident(
+        model="anthropic:claude-opus-5-5", root=SESSION_HASH, effort="low"
+    )
+    bare = make_ident(model=None, root=SESSION_HASH)
+    put_receipt(repo, "a1.json", make_receipt("a.txt", full, ts=2), SESSION_HASH)
+    put_receipt(repo, "a2.json", make_receipt("a.txt", bare, ts=1), SESSION_HASH)
+    path = msg_file(tmp_path)
+    assert ai.cmd_trailer(str(path), None, CLAUDE_COMMIT_ENV) == 0
+    text = path.read_text(encoding="utf-8")
+    assert text == (
+        "subject\n\nbody\n\n"
+        "Generated-by: LLM effort=low;harness=claude-code:2.1.316;"
+        f"model=anthropic:claude-opus-5-5;session={SESSION_HASH};surface=cli\n"
+    )
+    assert ai.check_message(text) == []
 
 
 def test_cmd_trailer_claims_what_it_credits(repo: Path, tmp_path: Path) -> None:
@@ -4732,7 +4823,7 @@ def test_enrich_matches_harness_ignoring_versions() -> None:
     )
     other = ai.Ident(ROOT, "claude-code:1.0")
     assert ai.enrich(other, cm) == ai.Ident(
-        ROOT, "claude-code:1.0", None, None, None, "cli"
+        ROOT, "claude-code:1.0", None, "anthropic:m", None, "cli"
     )
 
 
