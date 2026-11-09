@@ -60,6 +60,8 @@ commands:
                | backfill-opened OWNER: the opened ledgers
                | close N --reason TEXT: close a pull request
   issue        close N --reason completed|not-planned: close an issue
+  repo         bootstrap [--dry-run] [--create --private|--public] ORG/REPO:
+               apply the standard repository settings
   merge        squash-merge an approved pull request
   loop         validate loop configuration (runner not yet available)
   install      install the git hooks and the user-level harness hooks
@@ -106,6 +108,12 @@ def issue(argv: list[str], prog: str) -> int:
     return close.main(["issue", *argv], prog=prog)
 
 
+def repo_command(argv: list[str], prog: str) -> int:
+    from tbhbdev.alpha import repo_bootstrap  # noqa: PLC0415 -- see the docstring
+
+    return repo_bootstrap.main(argv, prog=prog)
+
+
 def merge(argv: list[str], prog: str) -> int:
     from tbhbdev.alpha import squash_merge  # noqa: PLC0415 -- see the docstring
 
@@ -127,6 +135,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "agent-env": gh_shim.agent_env,
     "pr": pr,
     "issue": issue,
+    "repo": repo_command,
     "merge": merge,
     "install": install_command,
     "loop": loop.main,
