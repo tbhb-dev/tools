@@ -114,6 +114,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `gh-shim` is the `gh` that agent sessions find first on PATH. It budgets their `gh` calls as a backstop.
 - `agent-env` runs Codex or Antigravity with the `gh` shim first on PATH.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
+- `review` drafts and checks a pull request review.
 - `repo` holds repository commands. `repo bootstrap` applies the standard repository settings.
 - `merge` squash-merges an approved pull request.
 - `loop` validates its user configuration and refuses live intake until adapters connect the runner to its sources. Its shadow runner accepts typed event and reconcile interfaces for simulation. The package includes pure state derivation and rules that produce typed shadow intents with action keys and spawn budgets. A SQLite store records receipts, action keys, runs, and escalation markers.
@@ -299,6 +300,14 @@ A session can't approve a pull request that it, or one of its subagents, opened.
 - `tbhbdev alpha pr backfill-opened OWNER` covers the pull requests opened before the ledger existed. It reads every pull request, open, closed and merged, in every repository of the owner, and adds each one to the ledger of every `session=` its `Generated-by`, `Assisted-by` and `Opened-by` lines name. Run it once on each host. A rerun doesn't change anything. It warns when a listing reaches its `--limit`.
 
 The guard reads only this host's ledger and sees only the commands it scans, so this isn't a security boundary.
+
+### Review drafts
+
+`tbhbdev alpha review draft N` reads the PR's head through `gh` and writes a skeleton to `$(git rev-parse --git-dir)/tbhb-alpha/review-N.md`. It prints the path and keeps an existing draft unchanged. `--force` refreshes only `commit_id`. It keeps the body and the other metadata. Each worktree and PR has its own file.
+
+Pick `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` in the draft's `event` field. The required frontmatter also holds `pr`, which must match N, and a 40-hex `commit_id`. Reviews have no H1 title. Fill Verdict and Verification, then remove the guidance comments and any unused optional sections. Findings holds blocking issues, one list item each with `path:line` and what must change. A request for changes needs findings. Suggestions holds non-blocking improvements.
+
+`tbhbdev alpha review check N` checks the draft locally, including its frontmatter, section order, word limits, prose wrapping, references, trailers, and the repository's Markdown, spelling, and prose rules. It prints each problem as `path:line: problem` on stderr and exits 1 on failure or 0 on success. The check reads local files and runs local linters. Write plain prose, one line per paragraph, cite code as `path:line`, and leave trailers out.
 
 ### Repository settings
 

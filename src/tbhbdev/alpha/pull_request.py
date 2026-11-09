@@ -675,12 +675,19 @@ def style_problem(top: Path) -> str | None:
     )
 
 
-def lint(rendered: Sequence[str], first: int) -> list[Problem]:
+def lint(
+    rendered: Sequence[str],
+    first: int,
+    *,
+    path: Path = DRAFT,
+    drop: frozenset[tuple[int, str]] = frozenset({TITLE_ALERT}),
+) -> list[Problem]:
     """Lint the title and description with the repository's own configs.
 
     The text goes into a temp tree with the draft's relative path and symlinks
     to the configs, so the globs in those configs match. Rendered line N is
-    draft line ``first + N - 1``.
+    draft line ``first + N - 1``. ``drop`` matches a line and either a rule
+    prefix or its full diagnostic.
     """
     tools = [(name, find_tool(name), args, parse) for name, args, parse in LINTERS]
     top = root()
@@ -694,25 +701,29 @@ def lint(rendered: Sequence[str], first: int) -> list[Problem]:
         work = Path(tmp)
         for name in CONFIGS:
             (work / name).symlink_to(top / name)
-        (work / DRAFT).parent.mkdir()
-        (work / DRAFT).write_text("\n".join(rendered) + "\n")
+        (work / path).parent.mkdir(parents=True, exist_ok=True)
+        (work / path).write_text("\n".join(rendered) + "\n")
         for name, exe, args, parse in tools:
             if name == "vale" and styles:
                 problems.append((first, f"vale: {styles}"))
                 continue
             problems.extend(
                 (first + line - 1, text)
-                for line, text in run_linter(name, [exe, *args], parse, work)
-                if (line, text.split(":")[0]) != TITLE_ALERT
+                for line, text in run_linter(name, [exe, *args], parse, work, path)
+                if (line, text.split(":")[0]) not in drop and (line, text) not in drop
             )
     return problems
 
 
 def run_linter(
-    name: str, argv: list[str], parse: Callable[[str], list[Problem]], work: Path
+    name: str,
+    argv: list[str],
+    parse: Callable[[str], list[Problem]],
+    work: Path,
+    path: Path = DRAFT,
 ) -> list[Problem]:
-    """Run one linter on the draft in ``work``; its findings, or why it failed."""
-    done = run([*argv, str(DRAFT)], cwd=work)
+    """Run one linter on ``path`` in ``work``; its findings, or why it failed."""
+    done = run([*argv, str(path)], cwd=work)
     found = parse(done.stdout)
     # Exit 1 means findings in all three tools; anything else, or
     # exit 1 with nothing parsed, is the tool failing.
@@ -722,20 +733,23 @@ def run_linter(
     return found
 
 
-def body_problems(lines: Sequence[Line], title: Line) -> list[Problem]:
-    """Check what follows the title: sections, stray text, trailers."""
+def body_problems(
+    lines: Sequence[Line], anchor: Line, sections: Sequence[Section] | None = None
+) -> list[Problem]:
+    """Check sections, stray text, and trailers; anchor missing sections here."""
     preamble, blocks, problems = split_blocks(lines)
     stray = next((line for line in preamble if not is_blank(line)), None)
     if stray:
         problems.append(
             (stray.no, "text before the first section; put it under a heading")
         )
-    sections = load_sections()
+    if sections is None:
+        sections = load_sections()
     problems += block_problems(blocks, sections)
     problems += wrap_problems(lines)
     present = {block.heading for block in blocks}
     problems += [
-        (title.no, f"missing required section '{section.heading}'")
+        (anchor.no, f"missing required section '{section.heading}'")
         for section in sections
         if section.required and section.heading not in present
     ]
