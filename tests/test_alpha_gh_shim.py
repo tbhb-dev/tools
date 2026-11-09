@@ -18,6 +18,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn, cast
@@ -28,6 +29,7 @@ from fake_tool import pythonpath, write_fake
 from tbhbdev import userconfig
 from tbhbdev.alpha import gh_shim
 
+EXECVE = os.execve
 SRC = Path(gh_shim.__file__).parents[2]
 NOW = 1_000_000.0
 FAKE_GH = """import json, os, sys
@@ -86,7 +88,7 @@ class World:
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     """HOME and XDG directories in tmp_path, no markers, the fake gh on PATH.
 
-    os.execv raises ExecError, so a test that expects a refusal fails, rather
+    os.execve raises ExecError, so a test that expects a refusal fails, rather
     than handing the test process to the fake gh, when main execs instead.
     """
     for name in AGENT_VARIABLES:
@@ -105,7 +107,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     shim = gh_shim.bin_dir()
     shim.mkdir(parents=True)
     monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{real}")
-    fake_exec(monkeypatch, "execv")
+    fake_exec(monkeypatch, "execve")
     return World(real, shim, userconfig.path())
 
 
@@ -346,7 +348,13 @@ def test_sample_none_for_another_shape(
     assert seen == [
         (
             ["/x/gh", "api", "rate_limit"],
-            {"capture_output": True, "text": True, "check": True, "timeout": 15},
+            {
+                "capture_output": True,
+                "text": True,
+                "check": True,
+                "timeout": 15,
+                "env": gh_shim.env_without_shims(os.environ),
+            },
         )
     ]
 
@@ -573,6 +581,11 @@ def test_reserve_checks_the_floor_against_the_new_sample(
 # ---- main and agent-env ----
 
 
+def exec_args(world: World, *args: str) -> tuple[object, ...]:
+    """What main passes to os.execve: the fake gh, its argv, PATH without shims."""
+    return world.gh, [world.gh, *args], {**os.environ, "PATH": str(world.real)}
+
+
 def test_main_without_gh(world: World, capsys: pytest.CaptureFixture[str]) -> None:
     os.environ["PATH"] = str(world.shim)
     assert gh_shim.main(["pr", "view"], "gh-shim") == 127
@@ -582,10 +595,10 @@ def test_main_without_gh(world: World, capsys: pytest.CaptureFixture[str]) -> No
 def test_main_passes_through_outside_an_agent(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seen = fake_exec(monkeypatch, "execv")
+    seen = fake_exec(monkeypatch, "execve")
     with pytest.raises(ExecError):
         gh_shim.main(["pr", "view", "1"], "gh-shim")
-    assert seen == [(world.gh, [world.gh, "pr", "view", "1"])]
+    assert seen == [exec_args(world, "pr", "view", "1")]
     assert not gh_shim.state_dir().exists()
 
 
@@ -594,10 +607,10 @@ def test_main_counts_an_agent_call(
 ) -> None:
     monkeypatch.setenv("CODEX_THREAD_ID", "t1")
     monkeypatch.setattr(gh_shim.time, "time", lambda: NOW)
-    seen = fake_exec(monkeypatch, "execv")
+    seen = fake_exec(monkeypatch, "execve")
     with pytest.raises(ExecError):
         gh_shim.main(["api", "user"], "gh-shim")
-    assert seen == [(world.gh, [world.gh, "api", "user"])]
+    assert seen == [exec_args(world, "api", "user")]
     path = state_file("CODEX_THREAD_ID=t1")
     assert json.loads(path.read_text()) == {"calls": [NOW]}
 
@@ -607,7 +620,7 @@ def test_main_refuses_over_budget(
 ) -> None:
     monkeypatch.setenv("CLAUDECODE", "1")
     world.budget("[gh_budget]\nhourly_limit = 0\n")
-    seen = fake_exec(monkeypatch, "execv")
+    seen = fake_exec(monkeypatch, "execve")
     assert gh_shim.main(["pr", "view"], "gh-shim") == 1
     assert seen == []
     why = (
@@ -624,7 +637,7 @@ def test_main_refuses_under_the_core_floor(
 ) -> None:
     monkeypatch.setenv("CLAUDECODE", "1")
     world.core("999")
-    seen = fake_exec(monkeypatch, "execv")
+    seen = fake_exec(monkeypatch, "execve")
     assert gh_shim.main(["pr", "view"], "gh-shim") == 1
     assert seen == []
     why = (
@@ -672,10 +685,10 @@ def test_main_does_not_refuse_for_a_failed_sample(
 ) -> None:
     monkeypatch.setenv("CLAUDECODE", "1")
     world.core("fail")
-    seen = fake_exec(monkeypatch, "execv")
+    seen = fake_exec(monkeypatch, "execve")
     with pytest.raises(ExecError):
         gh_shim.main(["pr", "view"], "gh-shim")
-    assert seen == [(world.gh, [world.gh, "pr", "view"])]
+    assert seen == [exec_args(world, "pr", "view")]
 
 
 def test_agent_env_usage(capsys: pytest.CaptureFixture[str]) -> None:
@@ -729,9 +742,11 @@ def test_agent_env_keeps_an_outer_root(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_agent_env_reports_a_missing_harness(
-    world: World, capsys: pytest.CaptureFixture[str]
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     del world
+    # os.execvpe calls os.execve; with no such harness on PATH nothing is exec'd.
+    monkeypatch.setattr(os, "execve", EXECVE)
     assert gh_shim.agent_env(["no-such-harness"], "agent-env") == 127
     err = capsys.readouterr().err
     assert err.startswith("agent-env: cannot run no-such-harness: ")
@@ -802,3 +817,132 @@ def test_a_child_inherits_each_marker(world: World, marker: str) -> None:
     assert world.calls() == [["api", "rate_limit"], ["pr", "view"]]
     root = "unknown" if marker in gh_shim.MARKERS else f"{marker}=m1"
     assert len(json.loads(state_file(root).read_text())["calls"]) == 1
+
+
+# ---- a version manager's shim between the shim and the real gh ----
+
+
+def test_env_without_shims_drops_the_shim_directories(
+    world: World, tmp_path: Path
+) -> None:
+    other = tmp_path / "other"
+    other.mkdir()
+    write_fake(other / "gh", "")
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    (copy / "gh").write_text(gh_shim.wrapper_text())
+    keep = [str(world.real), str(other), str(tmp_path / "missing")]
+    entries = [str(world.shim), "", keep[0], str(copy), keep[1], "", keep[2]]
+    env = {"PATH": os.pathsep.join(entries), "HOME": "/h", "TBHB_GH_AGENT": "1"}
+    assert gh_shim.env_without_shims(env) == {**env, "PATH": os.pathsep.join(keep)}
+    assert env["PATH"] == os.pathsep.join(entries)
+
+
+def test_holds_shim_checks_the_gh_in_the_entry(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    def is_shim(path: str) -> bool:
+        seen.append(path)
+        return False
+
+    monkeypatch.setattr(gh_shim, "is_shim", is_shim)
+    assert not gh_shim.holds_shim(str(world.real))
+    assert seen == [str(world.real / "gh")]
+
+
+def test_env_without_shims_without_path_is_a_copy(world: World) -> None:
+    del world
+    env = {"HOME": "/h"}
+    result = gh_shim.env_without_shims(env)
+    assert result == env
+    assert result is not env
+
+
+def test_main_execs_the_real_gh_without_the_shim_directory(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = fake_exec(monkeypatch, "execve")
+    with pytest.raises(ExecError):
+        gh_shim.main(["pr", "view", "1"], "gh-shim")
+    assert seen == [exec_args(world, "pr", "view", "1")]
+
+
+def test_sample_runs_without_the_shim_directory(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def run(_: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.update(kwargs)
+        stdout = '{"resources": {"core": {"remaining": 7}}}'
+        return subprocess.CompletedProcess([], 0, stdout, "")
+
+    monkeypatch.setattr(gh_shim.subprocess, "run", run)
+    assert gh_shim.sample(world.gh) == 7
+    assert seen["env"] == {**os.environ, "PATH": str(world.real)}
+
+
+# The marker comes from the environment: a file that holds it counts as a shim.
+FAKE_MISE_GH = """#!/bin/sh
+# Like mise's gh shim where mise has no gh: fall back to the next gh on PATH,
+# and give up when that is the agent-bin shim.
+here=${0%/*}
+IFS=:
+for dir in $PATH; do
+    [ -n "$dir" ] && [ "$dir" != "$here" ] && [ -x "$dir/gh" ] || continue
+    { IFS= read -r _ && IFS= read -r mark; } < "$dir/gh"
+    if [ "$mark" = "$FAKE_SHIM_MARK" ]; then
+        echo "mise ERROR shim fallback recursion detected for gh" >&2
+        exit 1
+    fi
+    exec "$dir/gh" "$@"
+done
+echo "mise ERROR no gh" >&2
+exit 127
+"""
+
+
+def behind_mise(world: World, tmp_path: Path) -> dict[str, str]:
+    """The installed shim, then a mise-style gh, then the fake gh, on PATH.
+
+    The environment is an agent session with a budget that allows the call.
+    """
+    install_test_shim(world)
+    mise = tmp_path / "mise"
+    mise.mkdir()
+    fallback = mise / "gh"
+    fallback.write_text(FAKE_MISE_GH)
+    fallback.chmod(0o755)
+    world.budget("[gh_budget]\nhourly_limit = 5\ncore_floor = 10\n")
+    path = os.pathsep.join([str(world.shim), str(mise), str(world.real)])
+    return {
+        **os.environ,
+        "PATH": path,
+        "CODEX_THREAD_ID": "t1",
+        "FAKE_SHIM_MARK": gh_shim.SHIM_MARK,
+    }
+
+
+def test_a_child_reaches_the_real_gh_through_a_version_manager(
+    world: World, tmp_path: Path
+) -> None:
+    env = behind_mise(world, tmp_path)
+    store = gh_shim.state_dir()
+    store.mkdir(parents=True)
+    (store / "core.json").write_text(
+        json.dumps({"checked": time.time(), "remaining": 5000})
+    )
+    done = run_child(env, "pr", "view", "1")
+    assert (done.returncode, done.stdout, done.stderr) == (0, "out:in", "err\n")
+    assert world.calls() == [["pr", "view", "1"]]
+
+
+def test_the_quota_sample_reaches_the_real_gh_through_a_version_manager(
+    world: World, tmp_path: Path
+) -> None:
+    env = behind_mise(world, tmp_path)
+    done = run_child(env, "pr", "view", "1")
+    assert (done.returncode, done.stdout, done.stderr) == (0, "out:in", "err\n")
+    assert world.calls() == [["api", "rate_limit"], ["pr", "view", "1"]]

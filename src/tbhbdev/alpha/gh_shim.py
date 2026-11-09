@@ -20,7 +20,10 @@ first on PATH in agent sessions only:
 
 Every process the session starts inherits that PATH, so a script's
 ``subprocess.run(["gh", ...])`` reaches the shim too. The shim finds the real
-gh as the first ``gh`` on PATH that isn't a file it wrote.
+gh as the first ``gh`` on PATH that isn't a file it wrote. The real gh and the
+quota sample run without the shim's directory on PATH, so a version manager's
+shim (such as mise's) that falls back to the next ``gh`` on PATH can't loop
+back to this shim. Their children don't see the shim.
 
 Outside an agent session it execs the real gh at once: arguments, stdin,
 stdout, stderr and the exit status are gh's own. An agent session is one with
@@ -178,6 +181,23 @@ def real_gh(env: Mapping[str, str] | None = None) -> str | None:
     return None
 
 
+def holds_shim(entry: str) -> bool:
+    """Whether a PATH entry is empty, is the shim's directory or holds a shim."""
+    return not entry or entry == str(bin_dir()) or is_shim(str(Path(entry) / "gh"))
+
+
+def env_without_shims(env: Mapping[str, str]) -> dict[str, str]:
+    """A copy of ``env`` with every PATH entry that holds a shim removed.
+
+    Empty entries go too, as in ``prefixed_path``. The rest keep their order.
+    """
+    result = dict(env)
+    if "PATH" in result:
+        entries = result["PATH"].split(os.pathsep)
+        result["PATH"] = os.pathsep.join(e for e in entries if not holds_shim(e))
+    return result
+
+
 def session_root(env: Mapping[str, str]) -> str | None:
     """The root session a call counts against; None outside an agent session."""
     for name in ROOT_IDS:
@@ -235,6 +255,7 @@ def sample(gh: str) -> int | None:
             text=True,
             check=True,
             timeout=SAMPLE_TIMEOUT,
+            env=env_without_shims(os.environ),
         )
         remaining = json.loads(done.stdout)["resources"]["core"]["remaining"]
     except OSError, subprocess.SubprocessError, ValueError, LookupError, TypeError:
@@ -339,7 +360,7 @@ def main(argv: list[str], _prog: str) -> int:  # noqa: RET503 -- execv doesn't r
                 file=sys.stderr,
             )
             return REFUSED
-    os.execv(gh, [gh, *argv])  # noqa: S606 # nosec B606 -- the resolved gh
+    os.execve(gh, [gh, *argv], env_without_shims(os.environ))  # noqa: S606 # nosec B606 -- the resolved gh
 
 
 def agent_env(argv: list[str], prog: str) -> int:
