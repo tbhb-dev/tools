@@ -2599,7 +2599,7 @@ def test_pr_commands_report_unresolved_attribution(
         ),
     )
     assert all(
-        call["argv"] == ["pr", "view", "1", "--json", "body"]
+        call["argv"] == ["pr", "view", "1", "--json", "body,url"]
         for call in world.calls("gh")
     )
 
