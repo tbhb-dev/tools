@@ -146,6 +146,73 @@ class Settings:
 
 
 @dataclass(frozen=True)
+class RunPaths:
+    """The paths of one run, as absolute strings the caller has resolved.
+
+    `audit_dir` is the run's resolved audit directory, which a review run may
+    write. The private `tmpdir` holds `codex_home` and the handoff directories.
+    """
+
+    home: str
+    worktree: str
+    tmpdir: str
+    codex_home: str
+    audit_dir: str
+
+
+class CodexMode(StrEnum):
+    """How Codex confines a run: through a permission profile, or not at all."""
+
+    PROFILE = "profile"
+    FULL_ACCESS = "danger-full-access"
+
+
+@dataclass(frozen=True)
+class CodexPolicy:
+    """Codex's profile entries.
+
+    A full-access policy has no read or write roots, and keeps `deny` as the
+    record of what a sandboxed run would hide, because full access can't hide it.
+    """
+
+    mode: CodexMode
+    read_roots: tuple[str, ...]
+    write_roots: tuple[str, ...]
+    deny: tuple[str, ...]
+    approval_policy: str
+    web_search: WebSearch
+
+
+@dataclass(frozen=True)
+class ClaudePolicy:
+    """Claude's settings, the JSON object that `--settings` takes."""
+
+    settings: dict[str, object]
+
+
+@dataclass(frozen=True)
+class AgyPolicy:
+    """agy's project grants, as `read_file(path)` and `write_file(path)` entries."""
+
+    grants: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Policy:
+    """What a run's harness may touch and the environment it starts with.
+
+    `env` is the whole child environment. `deny` is every path the run must not
+    read, whichever harness enforces it.
+    """
+
+    harness: Harness
+    profile: Profile
+    env: dict[str, str]
+    deny: tuple[str, ...]
+    detail: CodexPolicy | ClaudePolicy | AgyPolicy
+
+
+@dataclass(frozen=True)
 class RunRequest:
     """The versioned run request the driver sends and run-host reads.
 
