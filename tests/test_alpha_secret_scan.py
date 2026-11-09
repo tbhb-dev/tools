@@ -408,6 +408,31 @@ def test_a_private_config_without_rules_gets_an_empty_rule_list() -> None:
     assert tomllib.loads(copy) == {"title": "x", "rules": []}
 
 
+def test_a_private_config_with_the_canary_but_no_rules_table_still_scans(
+    root: Path, tmp_path: Path
+) -> None:
+    # The canary check reads lines, not the rules table, so this config passes it.
+    config = (
+        '[extend]\npath = ".gitleaks.toml"\n\n[canary]\nid = "tbhb-private-canary"\n'
+    )
+    write_private_config(Path.home(), config)
+    scan("clean\n", root, visibility="PRIVATE")
+    assert refusal(f"{COMMITTED_HIT}\n", root, visibility="PRIVATE") == (
+        "refusing the text: gitleaks finds a secret: rule committed-rule on line 1"
+    )
+    fake = tmp_path / "gitleaks"
+    log = tmp_path / "log"
+    body = (
+        "import sys\n"
+        "path = sys.argv[sys.argv.index('--config') + 1]\n"
+        f"open({str(log)!r}, 'w').write(open(path).read())\n"
+        "sys.stdout.write('[]')\n"
+    )
+    write_fake(fake, body)
+    scan("text\n", root, str(fake), "PRIVATE")
+    assert tomllib.loads(log.read_text()) == {**tomllib.loads(config), "rules": []}
+
+
 def test_a_private_config_that_is_not_toml_is_left_to_gitleaks(root: Path) -> None:
     write_private_config(Path.home(), PRIVATE_CONFIG + "\nrules = [\n")
     message = refusal("clean\n", root, visibility="PRIVATE")

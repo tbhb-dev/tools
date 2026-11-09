@@ -111,7 +111,7 @@ def without_name_rules(private: str) -> str | None:
         data = tomllib.loads(private)
     except tomllib.TOMLDecodeError:
         return None
-    rules = cast("list[dict[str, object]]", data.get("rules", []))  # pragma: no mutate
+    rules = data.get("rules", [])
     data["rules"] = [rule for rule in rules if not is_name_rule(rule)]
     return tomlkit.dumps(data)
 
