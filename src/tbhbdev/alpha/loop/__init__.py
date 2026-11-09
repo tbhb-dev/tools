@@ -10,10 +10,10 @@ __all__ = ["config", "main"]
 
 
 def main(argv: list[str], prog: str) -> int:
-    """Validate settings and refuse to run until the shadow runner exists."""
+    """Validate settings and refuse to run until live intake adapters exist."""
     parser = argparse.ArgumentParser(
         prog=prog,
-        description="Validate loop configuration; the runner is not available.",
+        description="Validate loop configuration; live intake is not wired yet.",
     )
     parser.parse_args(argv)
     try:
@@ -22,7 +22,8 @@ def main(argv: list[str], prog: str) -> int:
         print(f"{prog}: {exc}", file=sys.stderr)
         return 1
     print(
-        f"{prog}: configuration valid; shadow runner is not implemented",
+        f"{prog}: configuration valid; shadow runner exists; "
+        "live intake is not wired yet",
         file=sys.stderr,
     )
     return 1

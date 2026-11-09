@@ -20,6 +20,7 @@ capfd
 capsys
 cgnat
 checkpointed
+claudecode
 complexipy
 conftest
 cpus
@@ -30,11 +31,14 @@ dbus
 delenv
 demilestoned
 deptry
+doas
 docstrings
 dotrepo
 drwx
 dunder
+elts
 enoexec
+execdir
 execpath
 executescript
 execv
@@ -63,6 +67,7 @@ hermeticity
 hostnames
 hprof
 hskey
+ionice
 keepalive
 keepends
 keyrings
@@ -80,6 +85,7 @@ msgfile
 mutmut
 nbbbb
 ncccc
+nenv
 newlen
 nobuild
 nocache
@@ -88,13 +94,16 @@ nohup
 nonblock
 nonregular
 nonstrings
+noprofile
 norc
 noremote
 nosandbox
 onepassword
 onepasswordconnectsdk
+opam
 oxipng
 passwordless
+pgrep
 pidinfo
 pidpath
 pidtbsdinfo
@@ -110,6 +119,7 @@ rdwr
 readattr
 readextattr
 readsecurity
+redirections
 regenerable
 rerequested
 resvg
@@ -119,10 +129,12 @@ rollup
 rumdl
 runfile
 runfiles
+runuser
 rylignore
 sandboxed
 sessionstart
 setopt
+setsid
 shellcheck
 shfmt
 srcs
@@ -151,6 +163,7 @@ uncomparables
 unkeyed
 unmatch
 unmutated
+unsets
 unstampable
 unvalidated
 usefixtures

@@ -44,8 +44,11 @@ them into the commit. They are the LLM trailers of the commits on the branch,
 deduplicated by identity, plus the posting agent as ``Assisted-by``. They are
 machine-written: a draft that contains one fails ``check``, because a person
 cannot compute the session hashes by hand and a stripped line would hide what
-the author thought they had written. Nothing is pushed: when the branch is not
-on the remote, gh's own error is passed through.
+the author thought they had written. Before gh runs, and in a dry run too, the
+final title and body, trailers included, go through gitleaks under the host's
+private config (see ``tbhbdev.alpha.secret_scan``), and a finding, a missing
+config or a missing gitleaks stops the command. Nothing is pushed: when the
+branch is not on the remote, gh's own error is passed through.
 
 ``create`` also writes ``Opened-by: LLM ...`` as the first line of that
 paragraph: the posting agent's root identity, with no ``subagent=``. Once gh
@@ -86,7 +89,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import identity as agent_identity
-from tbhbdev.alpha import opened, private_names
+from tbhbdev.alpha import opened, private_names, secret_scan
 from tbhbdev.alpha.repo import git, hook_cwd, in_tbhb_dev, read_hook_stdin
 
 if TYPE_CHECKING:
@@ -125,6 +128,7 @@ AGY_EDITS = agent_identity.AGY_EDIT_TOOLS
 # The exit code that makes a harness feed a PostToolUse hook's stderr to the agent.
 HOOK_FEEDBACK = 2
 COG = "cog"
+GITLEAKS = "gitleaks"
 MISE = "mise"
 # The title is a commit header, so the sentence-case heading rule does not apply
 # to line 1: a finding on it reads (1, "vale project.HeadingTitleCase: ...").
@@ -885,6 +889,16 @@ def description(
     return body + "\n" + "\n".join(trailers) + "\n"
 
 
+def scan_secrets(text: str, what: str) -> None:
+    """Refuse text that gitleaks flags; see ``tbhbdev.alpha.secret_scan``."""
+    secret_scan.scan(text, what, root=root(), gitleaks=find_tool(GITLEAKS))
+
+
+def post_text(title: str, body: str) -> None:
+    """Scan the PR title and body as gh would post them."""
+    scan_secrets(f"{title}\n\n{body}", "the PR title and body")
+
+
 def gh_args(meta: Mapping[str, object]) -> list[str]:
     """The gh pr create flags the frontmatter asks for."""
     args = ["--base", base_of(meta)]
@@ -1087,10 +1101,12 @@ def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     if args.command == "create":
         root, line = opened_by(env)
         body = description(checked, env, line)
+        post_text(checked.title, body)
         argv = [GH, "pr", "create", "--title", checked.title, "--body-file", "-"]
         argv += gh_args(checked.meta)
         return create_pr(argv, body, root, dry_run=args.dry_run)
     body = description(checked, env, live_opened_line(args.pr))
+    post_text(checked.title, body)
     argv = [
         GH,
         "pr",
