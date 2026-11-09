@@ -26,7 +26,7 @@ uv tool install git+https://github.com/tbhb-dev/tools
 
 ## Config
 
-The values of one deployment come from the user config at `$XDG_CONFIG_HOME/tbhbdev/config.toml`, where `XDG_CONFIG_HOME` defaults to `.config` in the home directory. The package has no defaults for them, and no environment variable or plugin overrides them. When the file or a required key is missing, the command fails, and its error gives the file's path and the `[table] key`. Optional settings include the `[workspace]`, `[loop]` and `[gh_budget]` tables and `[gitleaks] session_sockets`. Calling `alpha loop` requires its settings in `[loop]`. `tbhbdev` reads the file only when a command first needs a value, so `--help` works without it.
+The values of one deployment come from the user config at `$XDG_CONFIG_HOME/tbhbdev/config.toml`, where `XDG_CONFIG_HOME` defaults to `.config` in the home directory. The package has no defaults for them, and no environment variable or plugin overrides them. When the file or a required key is missing, the command fails, and its error gives the file's path and the `[table] key`. Optional settings include the `[workspace]`, `[loop]`, `[agent]` and `[gh_budget]` tables and `[gitleaks] session_sockets`. Calling `alpha loop` requires its settings in `[loop]`. `tbhbdev` reads the file only when a command first needs a value, so `--help` works without it.
 
 ```toml
 [op]
@@ -117,6 +117,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `repo` holds repository commands. `repo bootstrap` applies the standard repository settings.
 - `merge` squash-merges an approved pull request.
 - `loop` validates its user configuration and refuses live intake until adapters connect the runner to its sources. Its shadow runner accepts typed event and reconcile interfaces for simulation. The package includes pure state derivation and rules that produce typed shadow intents with action keys and spawn budgets. A SQLite store records receipts, action keys, runs, and escalation markers.
+- `agent` validates its user configuration and refuses to run until a later slice adds runs. The package also includes the run request's schema and the repo argument rules.
 - `install` installs the git hooks and the user-level harness hooks.
 
 Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does five things:
@@ -211,6 +212,73 @@ Receipts and identifiers reject values outside their patterns. Duplicate deliver
 `StoreError` reports a missing, corrupt, or locked database. Schema version 3 adds shadow intent dimensions for reports. A mismatched version raises `SchemaVersionError` with code `SCHEMA_VERSION`, naming the found version and requiring a rebuild before any journal settings change. To rebuild it, stop the loop and open the store with `OpenMode.REBUILD`. Rebuilding discards the database and its sidecars. The lock remains acquired throughout the rebuild. `Recovery.KEYS_LOST` tells the runner that it no longer has previous action keys. The runner must reconcile before taking more work. Database errors fail the operation and close unreadable or damaged connections before another operation can use them.
 
 The pure rules table requires a spawned reviewer's approval at the current green head and a complete diff read. Mechanical approval is undecided and defaults off in `RepositoryPolicy.mechanical_approval`. An explicit opt-in permits only an agent-opened PR with an exact configured template match. PRs opened by the loop process remain excluded. R1 skips loop-origin PRs that the loop can't approve. The caller must recompute `mechanical_template_matches`, `verification_passed`, and all other head-bound observations for the current head. Until the caller verifies the base repository, the rules skip the PR, including escalation. Pending signatures and pending CI have no rule or age timeout in this slice. R8 uses `stop:<run>` when capacity can't supply a retry target and reserves `retry:<run>` for a retry with a target. Escalation emits at most one intent per object per call and skips stopped objects.
+
+### Agent configuration
+
+`tbhbdev alpha agent` reads the optional `[agent]` table from the user config. Calling this command requires the table and every key shown below except `max_run_minutes`, `docker`, `expires` and the `[agent.codex]` table. Unreadable config fails with its path. Missing or invalid settings fail with the path, the full table name and the key, as `[agent.sandbox] audit_dir is required`. Unknown keys fail the same way at any level. The command takes no options. Valid settings still end in exit status 1 and a report that runs aren't implemented.
+
+```toml
+[agent]
+launch_wait_seconds = 120
+agy_timeout = "900s"
+kill_grace_seconds = 10
+max_run_minutes = 120
+sockets_dir = "/example/sockets"
+
+[agent.sandbox]
+write_roots = [".cache", ".local/share/mise", ".local/state"]
+audit_dir = ".local/state/example-audit"
+denied_home_paths = [".claude"]
+
+[agent.sandbox.path]
+linux = [".local/share/mise/shims", "/usr/local/bin", "/usr/bin", "/bin"]
+macos = [".local/share/mise/shims", "/opt/homebrew/bin", "/usr/bin", "/bin"]
+
+[agent.sandbox.agy]
+review_read = [".config/example-gh", ".config/mise"]
+build_read = [".config/example-tools", ".local/share/mise/installs"]
+build_write = [".local/state/mise", ".local/share/mise"]
+
+[agent.codex]
+web_search = { build = "live", review = "live" }
+
+[agent.credentials.agent]
+gh = "example-vault/example-gh/token"
+docker = "example-vault/example-docker/config"
+reviews_app_id = "example-vault/example-app/app_id"
+reviews_app_client_id = "example-vault/example-app/client_id"
+reviews_app_pem = "example-vault/example-app/private_key"
+signing = "example-vault/example-signing/private_key"
+
+[agent.claude]
+default_profile = "primary"
+
+[agent.claude.profiles.primary]
+token = "example/primary/token"
+
+[agent.claude.profiles.secondary]
+token = "example/secondary/token"
+expires = "example/secondary/expires"
+
+[[agent.host]]
+name = "example-linux"
+os = "linux"
+shell = "bash"
+account = "agent"
+unsandboxed = false
+accounts = ["agent"]
+```
+
+The settings have these constraints:
+
+- The package has no defaults except Codex's `web_search`. The `[agent.codex]` table and each of its keys are optional, and each profile, `build` and `review`, defaults to `live`. A key can narrow it to `cached` or `disabled`.
+- `launch_wait_seconds`, `kill_grace_seconds` and `max_run_minutes` are positive integers. `agy_timeout` is bare seconds or a duration ending in `s`, `m` or `h`, up to 7 days.
+- Path settings are non-blank strings without a null byte or a `..` part. The sandbox lists must be non-empty.
+- Every credential and profile `token` is a `vault/item/field` reference, and each part starts with a letter or digit, then continues with letters, digits, dots, `_` or `-`. `[agent.credentials.<account>]` takes one table for each account, and `docker` is optional.
+- `default_profile` names one of the profiles, matching without regard to case, so `Primary` selects `primary`. Profile names that differ only in case fail validation. Display uses the name as written.
+- `[[agent.host]]` lists at least one host. Its `name` is lower-case, dot-separated labels, `os` is `linux` or `macos`, `shell` is `bash` or `zsh`, `account` must be one of `accounts`, and host names are unique. Every name in `accounts` needs an `[agent.credentials.<name>]` table.
+
+The run request is a versioned JSON object. Version 1 lists every run field and no credential. A reader refuses unknown versions, unknown or missing fields, and any `unsandboxed` request unless the harness is Codex, the profile is `build`, the host's `unsandboxed` is true and the authorization has the form `owner/repo#N` or `operator-chat-YYYY-MM-DD`. The repo argument takes the form `org/repo` or `<git host>/<org>/<repo>`, with `github.com` as the default git host, and resolves to `Code/<git host>/<org>/<repo>` under the home directory. A repo name can't be `.` or `..` or end in `.git`.
 
 ### Secret scan
 
