@@ -105,6 +105,7 @@ def env_of(os: Os, harness: Harness, account: str) -> dict[str, str]:
         "PATH": PATH[os].format(home=home),
         "HOME": home,
         "TMPDIR": tmp,
+        "TMPPREFIX": f"{tmp}/zsh",
         "GH_CONFIG_DIR": f"{tmp}/gh",
         "DOCKER_CONFIG": f"{tmp}/docker",
     }
@@ -122,10 +123,18 @@ def test_environment_is_exactly_the_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # No parent value reaches the child: the function never receives one.
-    for name in ("PATH", "HOME", "TMPDIR", "GH_CONFIG_DIR", "EXAMPLE_PARENT"):
+    for name in (
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "TMPPREFIX",
+        "GH_CONFIG_DIR",
+        "EXAMPLE_PARENT",
+    ):
         monkeypatch.setenv(name, "/parent-value")
     result = made(os, profile, harness, account)
     assert result.env == env_of(os, harness, account)
+    assert result.env["TMPPREFIX"] == result.env["TMPDIR"] + "/zsh"
 
 
 @pytest.mark.parametrize(("os", "profile", "harness", "account"), COMBINATIONS, ids=IDS)
@@ -320,6 +329,7 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
     return {
         "env": {
             "TMPDIR": tmp,
+            "TMPPREFIX": f"{tmp}/zsh",
             "GH_CONFIG_DIR": f"{tmp}/gh",
             "DOCKER_CONFIG": f"{tmp}/docker",
         },

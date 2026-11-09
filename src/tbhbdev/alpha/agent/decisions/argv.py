@@ -34,7 +34,7 @@ _AGY_BUILD_NOTE = (
     "Run shell commands in {worktree} unless the task names another directory."
 )
 # The variables a harness gets through its own mechanism, in this order.
-_HANDOFF = ("CODEX_HOME", "DOCKER_CONFIG", "GH_CONFIG_DIR", "TMPDIR")
+_HANDOFF = ("CODEX_HOME", "DOCKER_CONFIG", "GH_CONFIG_DIR", "TMPDIR", "TMPPREFIX")
 
 
 def ssh(

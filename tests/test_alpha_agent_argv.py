@@ -47,6 +47,8 @@ HANDOFF = (
     f'shell_environment_policy.set.GH_CONFIG_DIR="{TMP}/gh"',
     "-c",
     f'shell_environment_policy.set.TMPDIR="{TMP}"',
+    "-c",
+    f'shell_environment_policy.set.TMPPREFIX="{TMP}/zsh"',
 )
 CODEX_HANDOFF = (
     "-c",

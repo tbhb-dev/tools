@@ -104,6 +104,7 @@ def environment(
         "PATH": ":".join(resolve(paths.home, e) for e in entries),
         "HOME": paths.home,
         "TMPDIR": paths.tmpdir,
+        "TMPPREFIX": resolve(paths.tmpdir, "zsh"),
         "GH_CONFIG_DIR": resolve(paths.tmpdir, GH_CONFIG_SUBDIR),
         "DOCKER_CONFIG": resolve(paths.tmpdir, DOCKER_CONFIG_SUBDIR),
     }
@@ -152,7 +153,10 @@ def _claude(
     reads = [f"Read(/{p}/**)" for p in deny]
     return ClaudePolicy(
         {
-            "env": {k: env[k] for k in ("TMPDIR", "GH_CONFIG_DIR", "DOCKER_CONFIG")},
+            "env": {
+                k: env[k]
+                for k in ("TMPDIR", "TMPPREFIX", "GH_CONFIG_DIR", "DOCKER_CONFIG")
+            },
             "permissions": {
                 "allow": [] if review else [f"Edit(/{p}/**)" for p in writes],
                 "deny": [*(_CLAUDE_FILE_TOOLS if review else ()), *reads],
