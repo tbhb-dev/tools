@@ -105,7 +105,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `session-context` is a Claude Code SessionStart hook that reports the host, its role, the other hosts, and the local time.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it.
 - `merge` squash-merges an approved pull request.
-- `loop` validates its user configuration and refuses to run until a later slice adds the shadow runner. Its pure functions derive the state of a pull request.
+- `loop` validates its user configuration and refuses to run until a later slice adds the shadow runner. Its pure functions derive pull request state and apply the rules table to produce typed shadow intents with action keys and spawn budgets.
 - `install` installs the git hooks and the user-level harness hooks.
 
 Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does two things:
@@ -168,9 +168,11 @@ The settings have these constraints:
 
 This slice only validates configuration. Even with valid settings, the command exits with status 1 and reports that the shadow runner isn't available. It doesn't create a store or execute an approval or other action.
 
+The pure rules table requires a spawned reviewer's approval at the current green head and a complete diff read. Mechanical approval is undecided and defaults off in `RepositoryPolicy.mechanical_approval`. An explicit opt-in permits only an agent-opened PR with an exact configured template match. PRs opened by the loop process remain excluded. R1 skips loop-origin PRs that the loop can't approve. The caller must recompute `mechanical_template_matches`, `verification_passed`, and all other head-bound observations for the current head. Until the caller verifies the base repository, the rules skip the PR, including escalation. Pending signatures and pending CI have no rule or age timeout in this slice. R8 uses `stop:<run>` when capacity can't supply a retry target and reserves `retry:<run>` for a retry with a target. Escalation emits at most one intent per object per call and skips stopped objects.
+
 ### Secret scan
 
-`tbhbdev alpha pr create` and `pr edit` scan the final title and body, trailers included, and `tbhbdev alpha merge` scans the squash message, with `gitleaks stdin --redact` before `gh` runs. The scan uses the host's private config, `.config/gitleaks/private.toml` in the home directory, which `host upgrade` installs and which extends the repository's `.gitleaks.toml`. It fails closed: a missing or unreadable private config, one without the `tbhb-private-canary` rule, a missing `.gitleaks.toml`, a finding or a gitleaks error stops the command. A finding is reported by rule ID and line only. `pr check` and the draft hook don't scan.
+`tbhbdev alpha pr create` and `pr edit` scan the final title and body, trailers included, and `tbhbdev alpha merge` scans the squash message, with `gitleaks stdin --redact` before `gh` runs. The scan uses the host's private config, `.config/gitleaks/private.toml` in the home directory, which `host upgrade` installs and which extends the repository's `.gitleaks.toml`. It fails closed. The command stops on a private config that's missing, unreadable or lacks the `tbhb-private-canary` rule. A missing `.gitleaks.toml`, a gitleaks failure, or any finding stops it too. Findings appear by rule ID and line only. `pr check` and the draft hook don't scan.
 
 ### No self-approval
 
