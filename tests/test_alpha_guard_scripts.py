@@ -1347,6 +1347,214 @@ def test_a_missing_home_fails_open(
     assert capsys.readouterr() == ("", "")
 
 
+# A leading `//` names the same directory as `/`.
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("//a", "/a"),
+        ("///a", "/a"),
+        ("//", "/"),
+        ("//private/tmp/a", "/tmp/a"),
+        ("//a//b", "/a/b"),
+        ("/Xa", "/Xa"),
+        ("//Xa", "/Xa"),
+    ],
+)
+def test_leading_slashes_collapse(raw: str, expected: str) -> None:
+    assert guard.normalize(raw) == expected
+    assert guard.normalize(raw, "/x") == expected
+
+
+def test_a_double_slash_does_not_skip_the_tmp_check(home: Path) -> None:
+    for command in ("echo x > //tmp/a.sh", "echo x > ///tmp/a.sh"):
+        found = guard.first_refusal(bash(home, command), env_of(home))
+        assert found == outside("/tmp/a.sh")
+    found = guard.first_refusal(bash(home, "echo x > //private/tmp/a.sh"), env_of(home))
+    assert found == outside("/tmp/a.sh")
+
+
+def test_a_double_slash_does_not_skip_the_home_check(home: Path) -> None:
+    found = guard.first_refusal(
+        bash(home, f"echo x > /{home}/.cache/a.sh"), env_of(home)
+    )
+    assert found == outside(f"{home}/.cache/a.sh")
+
+
+def test_a_double_slash_does_not_skip_the_libexec_check(
+    home: Path, libexec: Path
+) -> None:
+    (libexec / NEW).write_text(SHEBANG)
+    found = guard.first_refusal(bash(home, f"echo x > /{libexec}/{NEW}"), env_of(home))
+    assert found is not None
+    assert found.startswith(f"{libexec}/{NEW} already exists")
+    found = guard.first_refusal(bash(home, f"echo x > /{libexec}/run.sh"), env_of(home))
+    assert found is not None
+    assert found.startswith(f"{libexec}/run.sh isn't a valid name")
+
+
+# A cd earlier in the command moves where later segments write.
+
+WRITE = "echo x > a.sh"
+
+
+@pytest.fixture
+def repo(home: Path) -> Path:
+    path = home / "Code" / "repo"
+    (path / ".git").mkdir(parents=True)
+    (path / "sub").mkdir()
+    return path
+
+
+@pytest.mark.parametrize(
+    ("command", "written"),
+    [
+        # refused where the cd leaves it, relative to the home directory
+        ("cd ~/.cache && {w}", ".cache/a.sh"),
+        ("cd $HOME/.cache; {w}", ".cache/a.sh"),
+        ("cd ${HOME}/.cache || {w}", ".cache/a.sh"),
+        ("cd ~/.cache\n{w}", ".cache/a.sh"),
+        ("cd ~/.cache > /dev/null && {w}", ".cache/a.sh"),
+        ("cd && {w}", "a.sh"),
+        ("cd .. && {w}", "a.sh"),
+        ("cd .cache && {w}", "work/.cache/a.sh"),
+        ("cd ~/Code/repo && cd ~/.cache && {w}", ".cache/a.sh"),
+        ("cd ~/.cache && cd .. && {w}", "a.sh"),
+        ("echo $(cd ~/.cache; {w})", ".cache/a.sh"),
+        ("bash -c 'cd ~/.cache; {w}'", ".cache/a.sh"),
+        ("cd ~/.cache && bash -c '{w}'", ".cache/a.sh"),
+        # a cd in a ( ) group or a substitution is over when it closes
+        ("(cd ~/.cache) && {w}", "work/a.sh"),
+        ("(cd ~/Code/repo) && {w}", "work/a.sh"),
+        ("echo $(cd ~/Code/repo) && {w}", "work/a.sh"),
+        ("echo `cd ~/Code/repo` && {w}", "work/a.sh"),
+        # a cd that can't be followed leaves the directory the text began in
+        ("cd - && {w}", "work/a.sh"),
+        ("cd ~/Code/repo && cd - && {w}", "work/a.sh"),
+        ("cd ~/Code/repo && cd -P && {w}", "work/a.sh"),
+        ("cd ~/Code/repo && cd $ELSEWHERE && {w}", "work/a.sh"),
+        ("cd ~/Code/repo && cd ${ELSEWHERE} && {w}", "work/a.sh"),
+        ("cd ~/Code/repo && cd $(mktemp -d) && {w}", "work/a.sh"),
+        ('cd ~/Code/repo && cd "$(mktemp -d)" && {w}', "work/a.sh"),
+        ("cd ~/Code/repo && cd `mktemp -d` && {w}", "work/a.sh"),
+        ("cd ~/Code/repo && cd ~other && {w}", "work/a.sh"),
+        ("cd ~/Code/repo && cd -P ~/Code/repo && {w}", "work/a.sh"),
+        ("cd ~/Code/repo && cd a b && {w}", "work/a.sh"),
+        # allowed: a work tree, as tracked, whatever the cwd says
+        ("cd ~/Code/repo && {w}", None),
+        ("cd ~/Code/repo; {w}", None),
+        ("cd ~/Code/repo > /dev/null && {w}", None),
+        ("builtin cd ~/Code/repo && {w}", None),
+        ("cd ~/Code/repo && cd sub && {w}", None),
+        ("cd ~/Code/repo && (cd ~/.cache; true) && {w}", None),
+        ("cd ~/Code/repo && ({w})", None),
+        ("cd ~/Code/repo && echo $(true) && {w}", None),
+        ("echo $(true) && cd ~/Code/repo && {w}", None),
+        ("bash -c 'cd ~/Code/repo && {w}'", None),
+        ("cd ~/Code/repo && bash -c '{w}'", None),
+        ("cd ~/Code/repo && echo x > a.txt", None),
+    ],
+)
+def test_a_cd_moves_later_writes(
+    home: Path, repo: Path, command: str, written: str | None
+) -> None:
+    assert repo.is_dir()
+    found = guard.first_refusal(
+        bash(home, command.replace("{w}", WRITE)), env_of(home, "/tmp")
+    )
+    assert found == (None if written is None else outside(f"{home}/{written}"))
+
+
+def test_a_cd_then_a_heredoc_script_is_judged_where_it_lands(
+    home: Path, repo: Path
+) -> None:
+    body = "a.sh <<'E'\n#!/bin/sh\nE\n"
+    found = guard.first_refusal(
+        bash(home, f"cd ~/.cache && cat > {body}"), env_of(home)
+    )
+    assert found == outside(f"{home}/.cache/a.sh")
+    assert (
+        guard.first_refusal(bash(home, f"cd {repo} && cat > {body}"), env_of(home))
+        is None
+    )
+    plain = "cd ~/.cache && cat > a <<'E'\n#!/bin/sh\nE\n"
+    assert guard.first_refusal(bash(home, plain), env_of(home)) == outside(
+        f"{home}/.cache/a"
+    )
+
+
+def test_a_cd_to_an_unset_tmpdir_leaves_the_start(home: Path, repo: Path) -> None:
+    command = "cd ~/Code/repo && cd $TMPDIR && echo x > a.sh"
+    assert repo.is_dir()
+    found = guard.first_refusal(bash(home, command), env_of(home))
+    assert found == outside(f"{home}/work/a.sh")
+
+
+def test_a_cd_tracked_to_a_run_scoped_tmpdir(home: Path) -> None:
+    command = "cd $TMPDIR && echo x > a.sh"
+    assert guard.first_refusal(bash(home, command), env_of(home, "/tmp/run-1")) is None
+    assert guard.first_refusal(bash(home, command), env_of(home, "/tmp")) == outside(
+        "/tmp/a.sh"
+    )
+
+
+# $TMPDIR in a path.
+
+
+def test_a_tmpdir_in_a_path_expands(home: Path) -> None:
+    for command in (
+        'cat > "$TMPDIR/run.sh"',
+        "cat > ${TMPDIR}/run.sh",
+        "cp t.sh $TMPDIR/run.sh",
+        "echo x | tee $TMPDIR/run.sh",
+    ):
+        (home / "work" / "t.sh").write_text("")
+        found = guard.first_refusal(bash(home, command), env_of(home, "/tmp/run-1"))
+        assert found is None, command
+        found = guard.first_refusal(bash(home, command), env_of(home, "/tmp"))
+        assert found == outside("/tmp/run.sh"), command
+    data = tool(home, "Write", file_path="$TMPDIR/run.sh")
+    assert guard.first_refusal(data, env_of(home, "/tmp/run-1")) is None
+    assert guard.first_refusal(data, env_of(home, "/tmp")) == outside("/tmp/run.sh")
+
+
+@pytest.mark.parametrize("tmpdir", [None, ""])
+def test_an_unset_tmpdir_leaves_the_path_literal(
+    home: Path, tmpdir: str | None
+) -> None:
+    work = home / "work"
+    for raw in ("$TMPDIR", "${TMPDIR}"):
+        command = f'cat > "{raw}/run.sh"'
+        found = guard.first_refusal(bash(home, command), env_of(home, tmpdir))
+        assert found == outside(f"{work}/{raw}/run.sh")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("$TMPDIR", "/tmp/run-1"),
+        ("$TMPDIR/a", "/tmp/run-1/a"),
+        ("${TMPDIR}", "/tmp/run-1"),
+        ("${TMPDIR}/a/../b", "/tmp/run-1/b"),
+        ("$TMPDIR2/a", "{w}/$TMPDIR2/a"),
+        ("${TMPDIR}x/a", "{w}/$" + "{TMPDIR}x/a"),
+        ("x/$TMPDIR", "{w}/x/$TMPDIR"),
+        ("$HOME/a", "{h}/a"),
+    ],
+)
+def test_resolve_expands_tmpdir(home: Path, raw: str, expected: str) -> None:
+    place = places(home, "/tmp/run-1")
+    want = expected.replace("{h}", place.home).replace("{w}", place.cwd)
+    assert place.resolve(raw) == os.path.normpath(want)
+
+
+def test_resolve_leaves_an_empty_tmpdir_literal(home: Path) -> None:
+    place = places(home, "")
+    assert place.resolve("$TMPDIR/a") == f"{place.cwd}/$TMPDIR/a"
+    assert place.resolve("${TMPDIR}") == f"{place.cwd}/$" + "{TMPDIR}"
+
+
 # The hook.
 
 

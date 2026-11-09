@@ -32,8 +32,9 @@ The writers read are:
                         the target path
     apply_patch         Add, Update and Move to paths
 
-``~``, ``$HOME`` and ``${HOME}`` expand, a relative path resolves against the
-payload's cwd, and ``..`` is normalized. Symlinks aren't resolved, and
+``~``, ``$HOME``, ``${HOME}``, ``$TMPDIR`` and ``${TMPDIR}`` expand (``$TMPDIR``
+only when set), a leading run of slashes is one, a relative path resolves
+against the payload's cwd, and ``..`` is normalized. Symlinks aren't resolved, and
 ``/private/tmp`` is read as ``/tmp``. A target decides in this order:
 
 1. Under ``~/.local/libexec/tbhb/``: an existing file is refused, whatever
@@ -55,11 +56,22 @@ payload's cwd, and ``..`` is normalized. Symlinks aren't resolved, and
 Allowing prints nothing, and so does any crash or unreadable input, because a
 broken hook must never stop the agent's work.
 
-Known gaps: a command run after ``cd`` still resolves against the payload's
-cwd, a heredoc that feeds a later command in a pipeline isn't tied to it,
-content from ``echo`` or ``printf`` is unknown, an Edit that creates a file
-counts only its name, a variable other than ``$HOME`` stays literal, and a
-``.git`` directory in ``$HOME`` itself makes everything below it a work tree.
+A ``cd DIR`` segment moves the directory that later segments resolve against,
+through ``&&``, ``||``, ``;``, ``|``, ``&`` and newlines alike, and a ``( … )``
+or ``$( … )`` keeps its own directory. A bare ``cd`` goes home. ``cd -``, a
+flag, a ``cd`` with a variable other than ``$HOME`` or ``$TMPDIR`` or with a
+substitution in its argument, and ``pushd`` leave the directory the text began
+in, which is the payload's cwd.
+
+Known gaps: ``|`` and ``&`` carry a ``cd`` to later segments, though the shell
+runs it in a child shell; a heredoc that feeds a later command in a pipeline isn't
+tied to it (``cat <<E | tee f``), and neither is an ``apply_patch <<`` heredoc
+in a Codex command; content from ``echo`` or ``printf`` is unknown; an Edit
+that creates a file counts only its name, and an edit to an existing ``.sh``
+file outside a work tree is judged like a new script; a variable other than
+``$HOME`` and ``$TMPDIR`` stays literal; how deep a run-scoped ``$TMPDIR`` sits
+below ``/tmp`` isn't checked; and a ``.git`` directory in ``$HOME`` itself makes
+everything below it a work tree.
 """
 
 import datetime as dt
@@ -67,7 +79,7 @@ import json
 import os
 import posixpath
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, override
 
@@ -99,6 +111,8 @@ DATE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})-.*")
 SCRATCHPAD = re.compile(r"/tmp/claude-[0-9]+/[^/]+/[^/]+/scratchpad/.+")  # noqa: S108 # nosec B108 -- the rule names /tmp
 PRIVATE_TMP = re.compile(r"^/private(?=/tmp(?:/|$))")
 FD = re.compile(r"[0-9]+")
+# A cd target left unexpanded: a variable, a flag such as `-`, or `~user`.
+UNRESOLVED = re.compile(r"\$|^[-~]")
 DUP = re.compile(r"[0-9]+-?|-")
 COPIERS = {"cp", "mv", "install", "ln"}
 # The flags of cp, mv, install and ln that take a value.
@@ -125,12 +139,33 @@ class Redirect(str):
     __slots__ = ()
 
 
+@dataclass
 class RedirectScanner(BodyScanner):
     """The heredoc-keeping scanner, reading ``&>``, ``>|`` and ``N>`` as redirects.
 
     The base scanner splits a command at ``&`` and ``|``, which would lose the
-    target of ``&> f`` and ``>| f``.
+    target of ``&> f`` and ``>| f``. It also keeps, for each command, how many
+    ``(``, ``$(`` and backticks enclose it (``depths``), and which commands
+    have a substitution among their words (``substituted``).
     """
+
+    depths: list[int] = field(default_factory=list)
+    substituted: set[int] = field(default_factory=set)
+
+    @override
+    def end_command(self) -> None:
+        """Close the command, noting how deeply it is nested."""
+        count = len(self.commands)
+        super().end_command()
+        if len(self.commands) > count:
+            self.depths.append(len(self.nesting))
+
+    @override
+    def open_nesting(self, kind: str, width: int) -> None:
+        """Note a substitution in the words of the command read so far."""
+        if kind != "(" and self.words:
+            self.substituted.add(len(self.commands))
+        super().open_nesting(kind, width)
 
     @override
     def plain(self, char: str) -> None:
@@ -155,7 +190,9 @@ class RedirectScanner(BodyScanner):
 
 def normalize(raw: str, base: str = "/") -> str:
     """An absolute path with ``..`` resolved and ``/private/tmp`` read as ``/tmp``."""
-    return PRIVATE_TMP.sub("", posixpath.normpath(posixpath.join(base, raw)))
+    path = posixpath.normpath(posixpath.join(base, raw))
+    # normpath keeps exactly two leading slashes, which name the same directory.
+    return PRIVATE_TMP.sub("", "/" + path.lstrip("/"))
 
 
 @dataclass(frozen=True)
@@ -166,13 +203,26 @@ class Place:
     home: str
     tmpdir: str | None
 
+    def expand(self, raw: str) -> str:
+        """A word with a leading ``~``, ``$HOME`` or ``$TMPDIR`` expanded.
+
+        An unset or empty ``$TMPDIR`` stays literal.
+        """
+        bases = {
+            "~": self.home,
+            "$HOME": self.home,
+            "${HOME}": self.home,
+            "$TMPDIR": self.tmpdir,
+            "${TMPDIR}": self.tmpdir,
+        }
+        for prefix, base in bases.items():
+            if base and (raw == prefix or raw.startswith(f"{prefix}/")):
+                return base + raw[len(prefix) :]
+        return raw
+
     def resolve(self, raw: str) -> str:
-        """The normalized absolute path of a word, with ``~`` and ``$HOME`` expanded."""
-        for prefix in ("~", "$HOME", "${HOME}"):
-            if raw == prefix or raw.startswith(f"{prefix}/"):
-                raw = self.home + raw[len(prefix) :]
-                break
-        return normalize(raw, self.cwd)
+        """The normalized absolute path of a word, with variables expanded."""
+        return normalize(self.expand(raw), self.cwd)
 
     def write(self, raw: str, *, content: bool = False) -> Write:
         """A write to a word; a script when its content or its name says so."""
@@ -280,11 +330,40 @@ def command_writes(
         yield from bash_writes(script, place)
 
 
+def cd_dir(
+    command: list[str], place: Place, start: str, *, substituted: bool
+) -> str | None:
+    """The directory a ``cd`` command moves to; None when it isn't a ``cd``.
+
+    ``cd`` alone goes home. A target that stays unexpanded, a flag, more than
+    one operand or a substitution leaves ``start``, the directory the text began in.
+    """
+    words = skip_prefix(redirects(command)[1])
+    if not words or words[0] != "cd":
+        return None
+    args = words[1:]
+    expanded = place.expand(args[0] if args else "~")
+    if substituted or len(args) > 1 or UNRESOLVED.search(expanded):
+        return start
+    return normalize(expanded, place.cwd)
+
+
 def bash_writes(text: str, place: Place) -> Iterator[Write]:
-    """The writes in a shell command."""
+    """The writes in a shell command, each judged in the directory a ``cd`` left."""
     scanner = RedirectScanner(text)
-    for index, command in enumerate(scanner.run()):
-        yield from command_writes(command, scanner.bodies.get(index), place)
+    commands = scanner.run()
+    dirs = [place.cwd]  # the current directory at each nesting depth
+    for index, command in enumerate(commands):
+        depth = scanner.depths[index]
+        del dirs[depth + 1 :]
+        while len(dirs) <= depth:
+            dirs.append(dirs[-1])
+        here = replace(place, cwd=dirs[-1])
+        yield from command_writes(command, scanner.bodies.get(index), here)
+        moved = cd_dir(
+            command, here, place.cwd, substituted=index in scanner.substituted
+        )
+        dirs[-1] = moved or dirs[-1]
 
 
 def patch_writes(patch: str, place: Place) -> list[Write]:
