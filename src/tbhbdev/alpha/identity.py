@@ -1818,6 +1818,11 @@ LLM_LINE = re.compile(r"^(Generated-by|Assisted-by): (LLM\b.*)$", re.MULTILINE)
 LLM_LINES = re.compile(r"^(?:Generated-by|Assisted-by): LLM\b.*\n?", re.MULTILINE)
 AGENT_ATTR = re.compile(r"(?<![^\s;])(session|subagent)=([^\s;]+)")
 AMEND_FLAGS = {"--am", "--ame", "--amen", "--amend"}  # git takes unique prefixes
+PICKED_FROM = re.compile(
+    r"^\(cherry picked from commit ([0-9a-f]{40})\)$", re.MULTILINE
+)
+MODEL_ATTR = re.compile(r"(?<![^\s;])model=[^\s;]")
+IDENT_EMAIL = re.compile(r"<([^>]*)>")
 
 type Trailer = tuple[str, str]
 
@@ -1895,6 +1900,73 @@ def amended_trailers(top: Path) -> list[Trailer]:
     return llm_trailers(msg)
 
 
+def pick_source(head: str | None, text: str) -> str | None:
+    """The picked commit: ``CHERRY_PICK_HEAD``, else the last ``-x`` line."""
+    found = PICKED_FROM.findall(text)
+    return head or (found[-1] if found else None)
+
+
+def ident_email(ident: str) -> str:
+    """The address in a ``Name <email> date`` identity; empty when there is none."""
+    found = IDENT_EMAIL.search(ident)
+    return found[1] if found else ""
+
+
+def pick_refused(src_trailers: list[Trailer], *, own: bool) -> bool:
+    """Whether to refuse a pick: our own agent's commit with no model named."""
+    return own and not any(
+        key == KEY_GEN and MODEL_ATTR.search(value) for key, value in src_trailers
+    )
+
+
+def usable_trailers(src_trailers: list[Trailer]) -> list[Trailer]:
+    """The trailers worth keeping; commit-msg rejects a ``Generated-by`` sans model."""
+    return [
+        (key, value)
+        for key, value in src_trailers
+        if key != KEY_GEN or MODEL_ATTR.search(value)
+    ]
+
+
+def picked_commit(
+    head: str | None, text: str, top: Path
+) -> tuple[str, list[Trailer], str] | None:
+    """(sha, ``LLM`` trailers, author email) of the commit being picked, if any."""
+    sha = pick_source(head, text)
+    if not sha:
+        return None
+    code, out = git("log", "-1", "--format=%ae%n%B", sha, cwd=top)
+    if code != 0:  # a ``-x`` line can name a commit this repository lacks
+        return None
+    email, _, body = out.partition("\n")
+    return sha, llm_trailers(body), email
+
+
+def pick_roles(
+    committer: Committer, *, edited: bool
+) -> tuple[list[Ident], list[Ident]]:
+    """A picker wrote none of the change: it assists when it edited, else no one."""
+    return [], [committer.ident] if edited else []
+
+
+def pick_refusal(
+    picked: tuple[str, list[Trailer], str], text: str, top: Path
+) -> str | None:
+    """The message refusing this pick, or None to let it through."""
+    sha, src_trailers, src_author = picked
+    _, ident = git("var", "GIT_COMMITTER_IDENT", cwd=top)
+    # A trailer the picker added by hand, as the refusal asks, counts too.
+    present = [*llm_trailers(text), *src_trailers]
+    if not pick_refused(present, own=src_author == ident_email(ident)):
+        return None
+    short = sha[:7]
+    return (
+        f"cherry-pick of {short} has no Generated-by trailer (with model=); "
+        f"add the source's trailer by hand (git log -1 --format=%B {short}) "
+        "and commit again"
+    )
+
+
 def unstaged_blobs(top: Path, staged: set[str]) -> dict[str, str]:
     """The work-tree blob of each staged file whose work tree differs from the index."""
     _, out = git("diff", "--name-only", "-z", cwd=top)
@@ -1941,8 +2013,22 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
     rebuilt. When no receipt matches and the message already has a
     ``Generated-by`` (such as a message-only amend), the committer fallback is
     left out.
+
+    A cherry-pick keeps the picked commit's ``LLM`` trailers, read from that
+    commit, and never credits the picker as ``Generated-by``: the picker is
+    ``Assisted-by`` when it has receipts on the staged paths, and nothing
+    otherwise. Our own agent's commit with no ``Generated-by`` model is refused.
+
+    With real git, ``CHERRY_PICK_HEAD`` exists while this hook runs in all three
+    cases: a single pick, each commit of a multi-commit pick, and ``--continue``
+    after a conflict. Git passes ``merge`` as the source whenever the message
+    comes from ``MERGE_MSG``, which is a conflicted pick, ``--continue`` and
+    ``--edit``, so a pick in progress is not a merge and the early return below
+    leaves it alone. The ``-x`` line is the fallback for a missing
+    ``CHERRY_PICK_HEAD``.
     """
-    if source in {"merge", "squash"}:
+    head = git("rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD")[1] or None
+    if source in {"merge", "squash"} and not head:
         return 0
     repo = repo_info()
     if not repo:
@@ -1954,6 +2040,12 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
         if kept:
             add_trailers(path, [], [], kept)
         return 0
+    text = path.read_text()
+    picked = picked_commit(head, text, repo.top)
+    problem = picked and pick_refusal(picked, text, repo.top)
+    if problem:
+        print(problem, file=sys.stderr)
+        return 1
     refresh_codex(committer, repo, env)
     paths, blobs = staged_info(repo.top)
     staged = set(paths)
@@ -1961,8 +2053,10 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
         load_edits(repo, committer.ident.root), staged, unstaged_blobs(repo.top, staged)
     )
     gen, assisted = decide(committer, [rec for _, rec in edits], staged, blobs)
-    present = [*llm_trailers(path.read_text()), *kept]
-    if not edits and any(key == KEY_GEN for key, _ in present):
+    if picked:
+        gen, assisted = pick_roles(committer, edited=bool(edits))
+        kept = [*kept, *usable_trailers(picked[1])]
+    elif not edits and any(key == KEY_GEN for key, _ in [*llm_trailers(text), *kept]):
         gen, assisted = list[Ident](), list[Ident]()
     # Enriching can make two identities of one agent equal, so deduplicate again.
     gen = list(dict.fromkeys(enrich(i, committer) for i in gen))
