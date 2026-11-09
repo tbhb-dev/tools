@@ -1,0 +1,348 @@
+{
+  "schemas": ["mart", "meta", "metric", "model", "raw", "staging"],
+  "relations": [
+    {
+      "name": "mart.definition_changes",
+      "kind": "v",
+      "columns": [
+        {
+          "name": "metric",
+          "type": "text"
+        },
+        {
+          "name": "definition_version",
+          "type": "text"
+        },
+        {
+          "name": "changed_at",
+          "type": "timestamp with time zone"
+        }
+      ]
+    },
+    {
+      "name": "mart.dora_by_repo",
+      "kind": "v",
+      "columns": [
+        {
+          "name": "repo",
+          "type": "text"
+        },
+        {
+          "name": "window",
+          "type": "text"
+        },
+        {
+          "name": "window_end",
+          "type": "timestamp with time zone"
+        },
+        {
+          "name": "deployments",
+          "type": "integer"
+        },
+        {
+          "name": "failures",
+          "type": "integer"
+        },
+        {
+          "name": "change_failure_rate",
+          "type": "numeric"
+        },
+        {
+          "name": "min_sample_met",
+          "type": "boolean"
+        },
+        {
+          "name": "definition_version",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "name": "mart.store_status",
+      "kind": "v",
+      "columns": [
+        {
+          "name": "source",
+          "type": "text"
+        },
+        {
+          "name": "last_load",
+          "type": "timestamp with time zone"
+        }
+      ]
+    },
+    {
+      "name": "meta.definition",
+      "kind": "r",
+      "columns": [
+        {
+          "name": "metric",
+          "type": "text"
+        },
+        {
+          "name": "definition_version",
+          "type": "text"
+        },
+        {
+          "name": "changed_at",
+          "type": "timestamp with time zone"
+        }
+      ]
+    },
+    {
+      "name": "meta.load",
+      "kind": "r",
+      "columns": [
+        {
+          "name": "source",
+          "type": "text"
+        },
+        {
+          "name": "host",
+          "type": "text"
+        },
+        {
+          "name": "file",
+          "type": "text"
+        },
+        {
+          "name": "byte_offset",
+          "type": "bigint"
+        },
+        {
+          "name": "loaded_at",
+          "type": "timestamp with time zone"
+        }
+      ]
+    },
+    {
+      "name": "meta.migration",
+      "kind": "r",
+      "columns": [
+        {
+          "name": "version",
+          "type": "integer"
+        },
+        {
+          "name": "applied_at",
+          "type": "timestamp with time zone"
+        }
+      ]
+    },
+    {
+      "name": "meta.repo",
+      "kind": "r",
+      "columns": [
+        {
+          "name": "repo",
+          "type": "text"
+        },
+        {
+          "name": "kind",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "name": "metric.change_failure",
+      "kind": "v",
+      "columns": [
+        {
+          "name": "repo",
+          "type": "text"
+        },
+        {
+          "name": "window",
+          "type": "text"
+        },
+        {
+          "name": "window_end",
+          "type": "timestamp with time zone"
+        },
+        {
+          "name": "deployments",
+          "type": "integer"
+        },
+        {
+          "name": "failures",
+          "type": "integer"
+        }
+      ]
+    },
+    {
+      "name": "metric.deployments",
+      "kind": "v",
+      "columns": [
+        {
+          "name": "repo",
+          "type": "text"
+        },
+        {
+          "name": "window",
+          "type": "text"
+        },
+        {
+          "name": "window_end",
+          "type": "timestamp with time zone"
+        },
+        {
+          "name": "deployments",
+          "type": "integer"
+        }
+      ]
+    },
+    {
+      "name": "model.deployment",
+      "kind": "m",
+      "columns": [
+        {
+          "name": "repo",
+          "type": "text"
+        },
+        {
+          "name": "deployment_ref",
+          "type": "text"
+        },
+        {
+          "name": "deployed_at",
+          "type": "timestamp with time zone"
+        },
+        {
+          "name": "commits",
+          "type": "text[]"
+        }
+      ]
+    },
+    {
+      "name": "raw.event",
+      "kind": "r",
+      "columns": [
+        {
+          "name": "event_id",
+          "type": "text"
+        },
+        {
+          "name": "event_name",
+          "type": "text"
+        },
+        {
+          "name": "time",
+          "type": "timestamp with time zone"
+        },
+        {
+          "name": "host",
+          "type": "text"
+        },
+        {
+          "name": "item_ref",
+          "type": "text"
+        },
+        {
+          "name": "attrs",
+          "type": "jsonb"
+        },
+        {
+          "name": "loaded_at",
+          "type": "timestamp with time zone"
+        }
+      ]
+    },
+    {
+      "name": "raw.git_commit",
+      "kind": "r",
+      "columns": [
+        {
+          "name": "repo",
+          "type": "text"
+        },
+        {
+          "name": "sha",
+          "type": "text"
+        },
+        {
+          "name": "committed_at",
+          "type": "timestamp with time zone"
+        },
+        {
+          "name": "subject",
+          "type": "text"
+        },
+        {
+          "name": "parents",
+          "type": "text[]"
+        },
+        {
+          "name": "pr",
+          "type": "integer"
+        },
+        {
+          "name": "loaded_at",
+          "type": "timestamp with time zone"
+        }
+      ]
+    },
+    {
+      "name": "raw.git_tag",
+      "kind": "r",
+      "columns": [
+        {
+          "name": "repo",
+          "type": "text"
+        },
+        {
+          "name": "tag",
+          "type": "text"
+        },
+        {
+          "name": "sha",
+          "type": "text"
+        },
+        {
+          "name": "tagged_at",
+          "type": "timestamp with time zone"
+        },
+        {
+          "name": "loaded_at",
+          "type": "timestamp with time zone"
+        }
+      ]
+    },
+    {
+      "name": "raw.pr_head",
+      "kind": "r",
+      "columns": [
+        {
+          "name": "repo",
+          "type": "text"
+        },
+        {
+          "name": "pr",
+          "type": "integer"
+        },
+        {
+          "name": "head_sha",
+          "type": "text"
+        },
+        {
+          "name": "first_commit_at",
+          "type": "timestamp with time zone"
+        },
+        {
+          "name": "commit_count",
+          "type": "integer"
+        },
+        {
+          "name": "loaded_at",
+          "type": "timestamp with time zone"
+        }
+      ]
+    }
+  ],
+  "functions": [
+    {
+      "name": "meta.as_of",
+      "arguments": "",
+      "returns": "timestamp with time zone"
+    }
+  ]
+}
