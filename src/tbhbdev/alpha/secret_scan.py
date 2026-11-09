@@ -23,7 +23,7 @@ import json
 import os
 import subprocess  # nosec B404
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 from tbhbdev.host import CANARY, GITLEAKS_CANARY, GITLEAKS_EXTENDS, GITLEAKS_FILE
 
@@ -50,8 +50,8 @@ def findings(report: str) -> list[tuple[int, str]] | None:
         return None
     if not isinstance(data, list):
         return None
-    entries = cast("list[dict[str, Any]]", data)  # pragma: no mutate
-    return sorted((entry["StartLine"], str(entry["RuleID"])) for entry in entries)
+    entries = cast("list[dict[str, int | str]]", data)  # pragma: no mutate
+    return sorted((int(entry["StartLine"]), str(entry["RuleID"])) for entry in entries)
 
 
 def scan(text: str, what: str, *, root: Path, gitleaks: str) -> None:
