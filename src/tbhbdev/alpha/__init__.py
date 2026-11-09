@@ -18,6 +18,7 @@ from tbhbdev.alpha import (
     guard_gh_poll,
     guard_gh_pr,
     guard_op,
+    guard_scripts,
     identity,
     install,
     loop,
@@ -34,6 +35,7 @@ __all__ = [
     "guard_gh_poll",
     "guard_gh_pr",
     "guard_op",
+    "guard_scripts",
     "identity",
     "install",
     "loop",
@@ -56,6 +58,8 @@ commands:
   session-context
                SessionStart hook: name the host, the other hosts and the time
   guard-gh-poll PreToolUse hook: block bulk GitHub reads and token unsets
+  guard-scripts PreToolUse hook: keep scripts for the operator in
+               ~/.local/libexec/tbhb
   gh-shim      budget gh calls made by agent sessions and their scripts
   agent-env    launch a harness with the gh shim first on PATH
   pr           check | create | edit | hook: the pull request draft
@@ -94,6 +98,10 @@ def session_context_command(_argv: list[str], _prog: str) -> int:
 
 def poll_command(_argv: list[str], _prog: str) -> int:
     return guard_gh_poll.main()
+
+
+def scripts_command(_argv: list[str], _prog: str) -> int:
+    return guard_scripts.main()
 
 
 def pr(argv: list[str], prog: str) -> int:
@@ -141,6 +149,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "state-guard": state_guard_command,
     "session-context": session_context_command,
     "guard-gh-poll": poll_command,
+    "guard-scripts": scripts_command,
     "gh-shim": gh_shim.main,
     "agent-env": gh_shim.agent_env,
     "pr": pr,
