@@ -16,7 +16,7 @@ To put `tbhbdev` on PATH, which the `alpha` harness and git hooks need, install 
 uv tool install git+https://github.com/tbhb-dev/tools
 ```
 
-`uv tool upgrade tbhbdev` updates it.
+`uv tool upgrade tbhbdev` updates it. `tbhbdev --version` (or `-V`) prints `tbhbdev <version> (<identity>)`: the commit the install came from, `editable <path>` or `local <path>` for a directory install, or `unknown`.
 
 ## Tools
 
