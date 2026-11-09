@@ -46,6 +46,15 @@ finding, a missing config or a missing gitleaks stops the command. The message
 is built from the PR's current body, so this catches a body edited after
 ``tbhbdev alpha pr`` last scanned it.
 
+As in ``tbhbdev alpha pr``, a private repository's message skips the private
+config's name rules, read live with ``gh repo view`` once per run. The
+visibility is that of the pull request's own repository, taken from its ``url``,
+not the working directory's. This matches the rules' gates, which apply the
+private config only to a repository that sets the flag. The ``op-*`` rules, the
+address, MAC, endpoint and keychain rules, the canary and .gitleaks.toml still
+apply. A URL that isn't a github.com pull request page, any other visibility, an
+empty value or a failed read scans under the full private config.
+
 A pull request from the Renovate app is the exception to the body rule: its
 release notes and configuration notes are dropped, and the body is one line
 per update from Renovate's update table.
@@ -72,7 +81,7 @@ GH = "gh"
 GIT = "git"
 VIEW_FIELDS = (
     "title,body,headRefOid,baseRefName,state,isDraft,mergeable,"
-    "mergeStateStatus,statusCheckRollup,author"
+    "mergeStateStatus,statusCheckRollup,author,url"
 )
 # gh's merge states that mean "not now", with the reason GitHub already computed.
 REFUSED_STATES = frozenset({"BLOCKED", "BEHIND", "DIRTY", "DRAFT", "UNKNOWN"})
@@ -107,6 +116,7 @@ class PullRequest:
     merge_state: str
     failing: list[str]
     renovate: bool = False
+    url: object = None
 
 
 @dataclass(frozen=True)
@@ -517,6 +527,7 @@ def fetch(number: int) -> PullRequest:
         mergeable=str(data.get("mergeable", "")),
         merge_state=str(data.get("mergeStateStatus", "")),
         failing=failing_checks(data.get("statusCheckRollup")),
+        url=data.get("url"),
     )
 
 
@@ -538,7 +549,11 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
         stop(f"not merging PR #{args.number}: " + "; ".join(reasons))
     body = renovate_body(request.body) if request.renovate else request.body
     message = build_message(request.title, args.number, body)
-    pr.scan_secrets(message.text(), f"the squash message for PR #{args.number}")
+    pr.scan_secrets(
+        message.text(),
+        f"the squash message for PR #{args.number}",
+        pr.repo_visibility(pr.target_of_pr(request.url)),
+    )
     argv_gh = [
         GH, "pr", "merge", str(args.number), "--squash", "--subject", message.subject,
         "--body-file", "-", "--match-head-commit", request.head,
