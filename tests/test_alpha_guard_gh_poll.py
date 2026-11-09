@@ -5,6 +5,7 @@
 import io
 import itertools
 import json
+import shlex
 import sys
 
 import pytest
@@ -58,7 +59,8 @@ TOKEN = "OP_SERVICE_" + "ACCOUNT_TOKEN"
         # prefixes
         "A=1 gh run list",
         "sudo -E gh run list",
-        "env -i gh run list",
+        "env -C /work gh run list",
+        "env --chdir=/work -S 'gh run list'",
         "env -u OTHER gh run list",
         "env --unset OTHER gh run list",
         # loops
@@ -222,6 +224,313 @@ def test_allows_other_unsets_and_quoted_mentions(command: str) -> None:
     assert guard.inspect(command)[0] is None
 
 
+def wrapped(script: str) -> list[str]:
+    """The script alone, and run by sh -c, bash -c, eval and ssh."""
+    quoted = shlex.quote(script)
+    return [
+        script,
+        f"sh -c {quoted}",
+        f"bash -c {quoted}",
+        f"eval {quoted}",
+        f"ssh host {quoted}",
+    ]
+
+
+MORE_UNSETS = [
+    # env: option clusters, option arguments and -S
+    f"env -iu{TOKEN} op whoami",
+    f"env -i -u {TOKEN} op whoami",
+    f"env -C /work -u {TOKEN} op whoami",
+    f"env -C/work -u {TOKEN} op whoami",
+    f"env -vC /work -u{TOKEN} op whoami",
+    f"env --chdir=/work -u {TOKEN} op whoami",
+    f"env --chdir /work --unset {TOKEN} op whoami",
+    f"env --argv0 x --unset={TOKEN} op whoami",
+    f"env --uns {TOKEN} op whoami",
+    f"env --un={TOKEN} op whoami",
+    f"env -S '-u {TOKEN} op whoami'",
+    f"env -S'-u {TOKEN}' op whoami",
+    f"env --split-string='-C /work -u {TOKEN}' op whoami",
+    f"env --split-string 'A=1 env -u {TOKEN} op whoami'",
+    f'env -S "-u {TOKEN} \'op whoami"',
+    f"env -u OTHER -S '-u {TOKEN}' op whoami",
+    f"env -u ${TOKEN} op whoami",
+    f"env -u '${{{TOKEN}}}' op whoami",
+    # env drops the whole environment
+    "env -i op whoami",
+    "env -i",
+    "env -0i op whoami",
+    "env -vi op whoami",
+    "env --ignore-environment op whoami",
+    "env --ignore-e op whoami",
+    "env --ignore-environment",
+    "env - op whoami",
+    "env -u OTHER -i op whoami",
+    "env -C /work -i op whoami",
+    "env -i gh pr view 1",
+    "sudo env -i op whoami",
+    "A=1 command env -i true",
+    "env -S '-i op whoami'",
+    # un-export
+    f"export -n {TOKEN}",
+    f"export -n {TOKEN}=x",
+    f"export -fn {TOKEN}",
+    f"export -nf {TOKEN}",
+    f"export -n OTHER {TOKEN}",
+    f"export -n -- {TOKEN}",
+    f"export -n ${TOKEN}",
+    f"declare +x {TOKEN}",
+    f"declare -g +x {TOKEN}",
+    f"declare +ix {TOKEN}",
+    f"typeset +x {TOKEN}",
+    f"local +x {TOKEN}",
+    f"builtin export -n {TOKEN}",
+    # an assignment that empties it
+    f"{TOKEN}= op whoami",
+    f"{TOKEN}='' op whoami",
+    f'{TOKEN}="" op whoami',
+    f"{TOKEN}=",
+    f"{TOKEN}=''",
+    f'{TOKEN}=""',
+    f"A=1 {TOKEN}= op whoami",
+    f"env {TOKEN}= op whoami",
+    f"env -u OTHER {TOKEN}='' op whoami",
+    f"sudo -E {TOKEN}= op whoami",
+    f"export {TOKEN}=",
+    f"export {TOKEN}=''",
+    f'export A=1 {TOKEN}=""',
+    f"declare -x {TOKEN}=",
+    f"declare {TOKEN}=",
+    f"typeset -x {TOKEN}=",
+    f"local {TOKEN}=",
+    f"export -- {TOKEN}=",
+    # the unset builtin's other spellings of the name
+    f"unset ${TOKEN}",
+    f"unset ${{{TOKEN}}}",
+    f'unset "${TOKEN}"',
+    f'unset "${{{TOKEN}}}"',
+    f"unset -v A ${{{TOKEN}}}",
+]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [wrap for unset in MORE_UNSETS for wrap in wrapped(unset)],
+)
+def test_denies_more_token_unsets(command: str) -> None:
+    assert guard.inspect(command)[0] == guard.UNSET_REASON
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # env options that aren't unsets, and option arguments
+        "env true",
+        "env -v true",
+        "env -0 true",
+        "env --debug true",
+        "env --null true",
+        "env -C /work true",
+        "env --chdir=/work true",
+        "env -u OTHER -C /work true",
+        "env -S 'A=1 true'",
+        "env -S 'A=1 \"x' true",
+        "env -S",
+        f"env -C {TOKEN} true",
+        f"env --chdir {TOKEN} true",
+        f"env --argv0 {TOKEN} true",
+        f"env -a {TOKEN} true",
+        f"env -S 'echo {TOKEN}'",
+        f"env -C -u {TOKEN} true",
+        # not env's options once the command starts, or env rejects them
+        f"env true -u {TOKEN}",
+        "env true -i",
+        "env -- -i true",
+        "env --ig true",
+        "env --i true",
+        "env --bogus true",
+        "env --=x true",
+        "env -ux true",
+        # export, declare, typeset and local that keep it
+        "export -n OTHER",
+        "export -n",
+        "export OTHER=",
+        "export -p",
+        f"export {TOKEN}",
+        f"export {TOKEN}=value",
+        f"export A=1 -n {TOKEN}",
+        f"export -f {TOKEN}",
+        "declare +x OTHER",
+        f"declare -x {TOKEN}",
+        f"typeset -x {TOKEN}",
+        f"local {TOKEN}",
+        f"local -x {TOKEN}=value",
+        f"declare +i {TOKEN}",
+        f"{TOKEN}=value op whoami",
+        f"{TOKEN}=$A op whoami",
+        f"OTHER= {TOKEN}=1 true",
+        "OTHER= true",
+        "OTHER=''",
+        # data and out-of-scope forms
+        f"echo {TOKEN}=",
+        f"echo 'export -n {TOKEN}'",
+        f"git commit -m 'env -i and {TOKEN}= and export -n {TOKEN}'",
+        f"printf '%s' '{TOKEN}='",
+        f"cat <<EOF\nenv -i op whoami\nexport -n {TOKEN}\nEOF",
+        f"echo ${TOKEN} ${{{TOKEN}}}",
+        "unset $OTHER",
+        f'n={TOKEN}; unset "$n"',
+        f"unset {TOKEN}x",
+        f"unset x{TOKEN}",
+        f"unset ${TOKEN}x",
+    ],
+)
+def test_allows_option_arguments_and_other_variables(command: str) -> None:
+    assert guard.inspect(command)[0] is None
+
+
+@pytest.mark.parametrize(
+    ("word", "args", "expected", "left"),
+    [
+        ("-i", [], ("i", ""), []),
+        ("-", ["x"], ("i", ""), ["x"]),
+        ("-iuNAME", [], ("i", ""), []),
+        ("-vi", [], ("i", ""), []),
+        ("-0", ["x"], ("", ""), ["x"]),
+        ("-v", [], ("", ""), []),
+        ("-uNAME", ["x"], ("u", "NAME"), ["x"]),
+        ("-u", ["NAME", "x"], ("u", "NAME"), ["x"]),
+        ("-u", [], ("u", ""), []),
+        ("-vuNAME", [], ("u", "NAME"), []),
+        ("-vu", ["NAME"], ("u", "NAME"), []),
+        ("-uiNAME", [], ("u", "iNAME"), []),
+        ("-C/work", ["x"], ("C", "/work"), ["x"]),
+        ("-C", ["/work", "x"], ("C", "/work"), ["x"]),
+        ("-S", ["a b"], ("S", "a b"), []),
+        ("-a", ["x"], ("a", "x"), []),
+        ("-P", ["x"], ("P", "x"), []),
+        ("--unset=NAME", ["x"], ("u", "NAME"), ["x"]),
+        ("--unset", ["NAME", "x"], ("u", "NAME"), ["x"]),
+        ("--unset", [], ("u", ""), []),
+        ("--uns", ["NAME"], ("u", "NAME"), []),
+        ("--u=NAME", [], ("u", "NAME"), []),
+        ("--chdir", ["d"], ("C", "d"), []),
+        ("--chdir=d", ["x"], ("C", "d"), ["x"]),
+        ("--split-string=a b", ["x"], ("S", "a b"), ["x"]),
+        ("--argv0", ["a"], ("a", "a"), []),
+        ("--ignore-environment", ["x"], ("i", ""), ["x"]),
+        ("--ignore-e", [], ("i", ""), []),
+        ("--ignore", ["x"], ("", ""), ["x"]),
+        ("--i", ["x"], ("", ""), ["x"]),
+        ("--debug", ["x"], ("v", ""), ["x"]),
+        ("--null", ["x"], ("0", ""), ["x"]),
+        ("--block-signal=INT", ["x"], ("", "INT"), ["x"]),
+        ("--bogus=1", ["x"], ("", "1"), ["x"]),
+        ("--", ["x"], ("", ""), ["x"]),
+        ("--=x", ["y"], ("", "x"), ["y"]),
+    ],
+)
+def test_env_option(
+    word: str, args: list[str], expected: tuple[str, str], left: list[str]
+) -> None:
+    rest = list(args)
+    assert guard.env_option(word, rest) == expected
+    assert rest == left
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        (["-iu" + TOKEN], None),
+        (["-i", "-u", "A", "x"], None),
+        (["-C", "/work", "-u", TOKEN], None),
+        (["--chdir=/work", "-u", TOKEN], None),
+        (["-C", "/work", "-u", "A", "x"], ["x"]),
+        (["-C", "-u", TOKEN], [TOKEN]),
+        (["-S", f"-u {TOKEN} x"], None),
+        (["-S", "-u A x", "y"], ["x", "y"]),
+        (["-S", "-C", "-u", TOKEN], [TOKEN]),
+        (["-S", "A=1 x", "-u", TOKEN], ["A=1", "x", "-u", TOKEN]),
+        (["-S", "-i x"], None),
+        (["-S", "-C /work -u A", "x"], ["x"]),
+        (["-S", "-u 'a b", "x"], ["b", "x"]),
+        (["-u", f"${TOKEN}"], None),
+        (["-u", f"${{{TOKEN}}}"], None),
+        (["-u", f"{TOKEN}x"], []),
+        (["-"], None),
+        ([], []),
+        (["--"], []),
+    ],
+)
+def test_env_rest_parses_options(
+    options: list[str], expected: list[str] | None
+) -> None:
+    assert guard.env_rest(options) == expected
+
+
+@pytest.mark.parametrize(
+    ("word", "expected"),
+    [
+        (TOKEN, True),
+        (f"${TOKEN}", True),
+        (f"${{{TOKEN}}}", True),
+        (f"{TOKEN}=", False),
+        (f"x{TOKEN}", False),
+        (f"${{{TOKEN}", False),
+        (f"{{{TOKEN}}}", False),
+        (f"$({TOKEN})", False),
+        ("", False),
+    ],
+)
+def test_names_token(word: str, expected: bool) -> None:
+    assert guard.names_token(word) is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("a b", ["a", "b"]),
+        ("-u 'a b' c", ["-u", "a b", "c"]),
+        ('a "b', ["a", '"b']),
+        ("", []),
+    ],
+)
+def test_split_string(text: str, expected: list[str]) -> None:
+    assert guard.split_string(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("program", "args", "expected"),
+    [
+        ("export", ["-n", TOKEN], True),
+        ("export", ["-n", f"{TOKEN}=x"], True),
+        ("export", ["-fn", TOKEN], True),
+        ("export", ["-f", "-n", "--", TOKEN], True),
+        ("export", ["-n", "A", TOKEN], True),
+        ("export", ["+n", TOKEN], False),
+        ("export", ["-x", TOKEN], False),
+        ("export", [TOKEN, "-n"], False),
+        ("export", ["-n", "A"], False),
+        ("export", [f"{TOKEN}="], True),
+        ("export", [f"{TOKEN}=x"], False),
+        ("declare", ["+x", TOKEN], True),
+        ("declare", ["+x", "A=1", TOKEN], True),
+        ("declare", ["-x", TOKEN], False),
+        ("declare", ["-n", TOKEN], False),
+        ("typeset", ["-g", "+ix", TOKEN], True),
+        ("local", ["+x", TOKEN], True),
+        ("local", [f"{TOKEN}="], True),
+        ("readonly", ["-n", TOKEN], False),
+        ("echo", ["-n", TOKEN], False),
+        ("echo", [f"{TOKEN}="], False),
+        ("export", [], False),
+        ("export", ["", TOKEN], False),
+    ],
+)
+def test_clears_token(program: str, args: list[str], expected: bool) -> None:
+    assert guard.clears_token(program, args) is expected
+
+
 def test_the_first_denial_wins() -> None:
     assert guard.inspect(f"unset {TOKEN}; gh run list")[0] == guard.UNSET_REASON
     assert guard.inspect(f"gh run list; unset {TOKEN}")[0] == guard.POLL_REASON
@@ -301,7 +610,8 @@ def test_inner_script(words: list[str], body: str | None, expected: str | None) 
         (["--unset", "A", "--unset", TOKEN], None),
         ([f"--unset={TOKEN}", "x"], None),
         ([f"-u{TOKEN}"], None),
-        (["-i", "--", "x"], ["x"]),
+        (["-i", "--", "x"], None),
+        (["--", "-i"], ["-i"]),
         (["-u"], []),
         (["x", "-u", TOKEN], ["x", "-u", TOKEN]),
     ],

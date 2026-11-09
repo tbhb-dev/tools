@@ -10,6 +10,7 @@ for ``remaining``, ``fail`` for a valid answer with exit status 1, or
 ``garbage`` for output that isn't JSON.
 """
 
+import fcntl
 import hashlib
 import itertools
 import json
@@ -358,57 +359,31 @@ def test_sample_none_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     assert gh_shim.sample("/x/gh") is None
 
 
-def test_core_remaining_samples_and_caches(world: World, tmp_path: Path) -> None:
-    store = tmp_path / "store"
-    store.mkdir()
-    world.core("2500")
-    assert gh_shim.core_remaining(world.gh, store, NOW) == 2500
-    cache = store / "core.json"
-    assert json.loads(cache.read_text()) == {"checked": NOW, "remaining": 2500}
-    assert cache.stat().st_mode & 0o777 == 0o600
-    world.core("10")
-    assert gh_shim.core_remaining(world.gh, store, NOW + 59.5) == 2500
-    assert len(world.calls()) == 1
-
-
-@pytest.mark.parametrize("checked", [NOW - 60, NOW + 1, "x"])
-def test_core_remaining_checks_again(
-    world: World, tmp_path: Path, checked: object
+@pytest.mark.parametrize(
+    ("cache", "expected"),
+    [
+        ({"checked": NOW - 59.5, "remaining": 2500}, (False, 2500)),
+        ({"checked": NOW, "remaining": 2500}, (False, 2500)),
+        ({"checked": NOW - 60, "remaining": 2500}, (True, 2500)),
+        ({"checked": NOW + 1, "remaining": 2500}, (True, 2500)),
+        ({"checked": "x", "remaining": 2500}, (True, 2500)),
+        ({"remaining": 2500}, (True, 2500)),
+        ({"checked": NOW, "remaining": None}, (False, None)),
+        ({"checked": NOW, "remaining": "5000"}, (False, None)),
+        ({"checked": NOW, "remaining": True}, (False, None)),
+        ({"checked": NOW}, (False, None)),
+        ({}, (True, None)),
+    ],
+)
+def test_core_state(
+    tmp_path: Path, cache: dict[str, object], expected: tuple[bool, int | None]
 ) -> None:
-    store = tmp_path / "store"
-    store.mkdir()
-    (store / "core.json").write_text(
-        json.dumps({"checked": checked, "remaining": 2500})
-    )
-    world.core("10")
-    assert gh_shim.core_remaining(world.gh, store, NOW) == 10
-    assert len(world.calls()) == 1
+    (tmp_path / "core.json").write_text(json.dumps(cache))
+    assert gh_shim.core_state(tmp_path, NOW) == expected
 
 
-@pytest.mark.parametrize("cached", [None, "5000"])
-def test_core_remaining_refuses_an_unknown_quota(
-    world: World, tmp_path: Path, cached: object
-) -> None:
-    store = tmp_path / "store"
-    store.mkdir()
-    (store / "core.json").write_text(json.dumps({"checked": NOW, "remaining": cached}))
-    with pytest.raises(gh_shim.RefusalError) as caught:
-        gh_shim.core_remaining(world.gh, store, NOW)
-    assert str(caught.value) == (
-        "`gh api rate_limit` failed, so the account's core quota is unknown; "
-        "it is checked again after 60s"
-    )
-    assert world.calls() == []
-
-
-def test_core_remaining_caches_a_failed_check(world: World, tmp_path: Path) -> None:
-    store = tmp_path / "store"
-    store.mkdir()
-    world.core("fail")
-    with pytest.raises(gh_shim.RefusalError):
-        gh_shim.core_remaining(world.gh, store, NOW)
-    cache = json.loads((store / "core.json").read_text())
-    assert cache == {"checked": NOW, "remaining": None}
+def test_core_state_without_a_cache(tmp_path: Path) -> None:
+    assert gh_shim.core_state(tmp_path, NOW) == (True, None)
 
 
 # ---- reserving a call ----
@@ -420,9 +395,30 @@ def test_reserve_counts_a_call(world: World) -> None:
     gh_shim.reserve(world.gh, "root", NOW + 1, 2, 1000)
     assert json.loads(path.read_text()) == {"calls": [NOW, NOW + 1]}
     assert world.calls() == [["api", "rate_limit"]]
+    cache = gh_shim.state_dir() / "core.json"
+    assert json.loads(cache.read_text()) == {"checked": NOW, "remaining": 5000}
     assert path.stat().st_mode & 0o777 == 0o600
+    assert cache.stat().st_mode & 0o777 == 0o600
     assert (gh_shim.state_dir() / "lock").exists()
     assert not state_file("other").exists()
+
+
+def test_reserve_makes_a_private_store(world: World) -> None:
+    store = gh_shim.state_dir()
+    gh_shim.reserve(world.gh, "root", NOW, 2, 1000)
+    assert store.stat().st_mode & 0o777 == 0o700
+    assert (store / "lock").stat().st_mode & 0o777 == 0o600
+
+
+def test_reserve_tightens_an_open_store(world: World) -> None:
+    store = gh_shim.state_dir()
+    store.mkdir(parents=True)
+    store.chmod(0o755)
+    (store / "lock").touch(mode=0o644)
+    (store / "lock").chmod(0o644)
+    gh_shim.reserve(world.gh, "root", NOW, 2, 1000)
+    assert store.stat().st_mode & 0o777 == 0o700
+    assert (store / "lock").stat().st_mode & 0o777 == 0o600
 
 
 def test_reserve_refuses_over_the_hourly_limit(world: World) -> None:
@@ -436,6 +432,19 @@ def test_reserve_refuses_over_the_hourly_limit(world: World) -> None:
         "its budget of 2 per hour"
     )
     assert json.loads(path.read_text()) == {"calls": [NOW - 3600, NOW - 10, NOW - 5]}
+    assert world.calls() == []
+    assert not (gh_shim.state_dir() / "core.json").exists()
+
+
+def test_reserve_refuses_over_the_limit_with_a_fresh_cache(world: World) -> None:
+    path = state_file("root")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"calls": [NOW - 10]}))
+    (path.parent / "core.json").write_text(
+        json.dumps({"checked": NOW, "remaining": 5000})
+    )
+    with pytest.raises(gh_shim.RefusalError, match="made 1 gh calls"):
+        gh_shim.reserve(world.gh, "root", NOW, 1, 1000)
     assert world.calls() == []
 
 
@@ -454,10 +463,109 @@ def test_reserve_refuses_under_the_core_floor(world: World) -> None:
         "under the budget's floor of 1000"
     )
     assert not state_file("root").exists()
+    cache = gh_shim.state_dir() / "core.json"
+    assert json.loads(cache.read_text()) == {"checked": NOW, "remaining": 999}
+
+
+def test_reserve_refuses_under_the_floor_from_a_fresh_cache(world: World) -> None:
+    store = gh_shim.state_dir()
+    store.mkdir(parents=True)
+    (store / "core.json").write_text(json.dumps({"checked": NOW, "remaining": 999}))
+    with pytest.raises(gh_shim.RefusalError, match="999 core REST requests"):
+        gh_shim.reserve(world.gh, "root", NOW + 30, 300, 1000)
+    assert world.calls() == []
+    assert not state_file("root").exists()
 
 
 def test_reserve_allows_the_core_floor_itself(world: World) -> None:
     world.core("1000")
+    gh_shim.reserve(world.gh, "root", NOW, 300, 1000)
+    assert json.loads(state_file("root").read_text()) == {"calls": [NOW]}
+
+
+@pytest.mark.parametrize("core", ["fail", "garbage"])
+def test_reserve_does_not_refuse_for_a_failed_sample(world: World, core: str) -> None:
+    world.core(core)
+    gh_shim.reserve(world.gh, "root", NOW, 300, 1000)
+    cache = gh_shim.state_dir() / "core.json"
+    assert json.loads(cache.read_text()) == {"checked": NOW, "remaining": None}
+    assert json.loads(state_file("root").read_text()) == {"calls": [NOW]}
+    # Within the minute the failure isn't sampled again, and doesn't refuse.
+    gh_shim.reserve(world.gh, "root", NOW + 59, 300, 1000)
+    assert len(world.calls()) == 1
+    assert json.loads(state_file("root").read_text()) == {"calls": [NOW, NOW + 59]}
+    # After the minute the sample is tried again, and a good one counts.
+    world.core("12")
+    with pytest.raises(gh_shim.RefusalError, match="12 core REST requests"):
+        gh_shim.reserve(world.gh, "root", NOW + 60, 300, 1000)
+    assert len(world.calls()) == 2
+
+
+def test_reserve_keeps_the_hourly_limit_when_the_sample_fails(world: World) -> None:
+    world.core("fail")
+    gh_shim.reserve(world.gh, "root", NOW, 1, 1000)
+    with pytest.raises(gh_shim.RefusalError, match="made 1 gh calls"):
+        gh_shim.reserve(world.gh, "root", NOW + 1, 1, 1000)
+
+
+def test_reserve_samples_without_holding_the_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another session's call completes while a sample is running.
+
+    The nested call stands for another process: it takes the lock, finds the
+    sample already claimed, and uses the cached answer without sampling.
+    """
+    store = gh_shim.state_dir()
+    store.mkdir(parents=True)
+    (store / "core.json").write_text(json.dumps({"checked": 0, "remaining": 4000}))
+    samples: list[dict[str, object]] = []
+
+    def sample(gh: str) -> int | None:
+        with (store / "lock").open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)  # raises if held
+        samples.append(json.loads((store / "core.json").read_text()))
+        gh_shim.reserve(gh, "other", NOW + 1, 300, 1000)
+        samples.append(json.loads((store / "core.json").read_text()))
+        return 5000
+
+    monkeypatch.setattr(gh_shim, "sample", sample)
+    gh_shim.reserve(world.gh, "root", NOW, 300, 1000)
+    claimed = {"checked": NOW, "remaining": 4000}
+    assert samples == [claimed, claimed]
+    cache = json.loads((store / "core.json").read_text())
+    assert cache == {"checked": NOW, "remaining": 5000}
+    assert json.loads(state_file("root").read_text()) == {"calls": [NOW]}
+    assert json.loads(state_file("other").read_text()) == {"calls": [NOW + 1]}
+
+
+def test_reserve_counts_calls_made_during_the_sample(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The limit is checked again once the sample is back."""
+
+    def sample(gh: str) -> int | None:
+        gh_shim.reserve(gh, "root", NOW - 1, 1, 1000)
+        return 5000
+
+    monkeypatch.setattr(gh_shim, "sample", sample)
+    with pytest.raises(gh_shim.RefusalError, match="made 1 gh calls"):
+        gh_shim.reserve(world.gh, "root", NOW, 1, 1000)
+    assert json.loads(state_file("root").read_text()) == {"calls": [NOW - 1]}
+
+
+def test_reserve_checks_the_floor_against_the_new_sample(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A claim keeps the old answer for others, not for the sampling call."""
+    store = gh_shim.state_dir()
+    store.mkdir(parents=True)
+    (store / "core.json").write_text(json.dumps({"checked": 0, "remaining": 10}))
+
+    def sample(_gh: str) -> int | None:
+        return 5000
+
+    monkeypatch.setattr(gh_shim, "sample", sample)
     gh_shim.reserve(world.gh, "root", NOW, 300, 1000)
     assert json.loads(state_file("root").read_text()) == {"calls": [NOW]}
 
@@ -511,15 +619,33 @@ def test_main_refuses_over_budget(
     )
 
 
+def test_main_refuses_under_the_core_floor(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("CLAUDECODE", "1")
+    world.core("999")
+    seen = fake_exec(monkeypatch, "execv")
+    assert gh_shim.main(["pr", "view"], "gh-shim") == 1
+    assert seen == []
+    why = (
+        "the account has 999 core REST requests left this hour, "
+        "under the budget's floor of 1000"
+    )
+    assert capsys.readouterr().err == (
+        REFUSAL.format(config=world.config, why=why) + gh_shim.POLL_REASON + "\n"
+    )
+
+
 def test_main_refuses_on_a_bad_config(
     world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("CLAUDECODE", "1")
     world.budget("[gh_budget]\ncore_floor = -1\n")
     assert gh_shim.main(["pr", "view"], "gh-shim") == 1
-    err = capsys.readouterr().err
-    assert "core_floor must be a whole number. " in err
-    assert "Subscribe to the awrel event instead" in err
+    assert capsys.readouterr().err == (
+        "gh-shim: refused, the agent gh budget can't read or write its config "
+        f"or state: {world.config}: [gh_budget] core_floor must be a whole number\n"
+    )
 
 
 def test_main_refuses_when_state_cannot_be_written(
@@ -530,8 +656,26 @@ def test_main_refuses_when_state_cannot_be_written(
     store.parent.mkdir(parents=True)
     store.write_text("not a directory")
     assert gh_shim.main(["pr", "view"], "gh-shim") == 1
-    assert "refused by the agent gh budget" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert err.startswith(
+        "gh-shim: refused, the agent gh budget can't read or write its config "
+        "or state: [Errno 17] File exists: "
+    )
+    assert str(store) in err
+    assert "awrel" not in err
+    assert "poll" not in err.lower()
     assert world.calls() == []
+
+
+def test_main_does_not_refuse_for_a_failed_sample(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDECODE", "1")
+    world.core("fail")
+    seen = fake_exec(monkeypatch, "execv")
+    with pytest.raises(ExecError):
+        gh_shim.main(["pr", "view"], "gh-shim")
+    assert seen == [(world.gh, [world.gh, "pr", "view"])]
 
 
 def test_agent_env_usage(capsys: pytest.CaptureFixture[str]) -> None:

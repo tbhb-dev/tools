@@ -33,16 +33,19 @@ names the root session: a Claude subagent shares its root's
 shares one ID. A session with markers but no ID shares one ``unknown`` budget.
 
 Inside an agent session, under a lock in
-``$XDG_STATE_HOME/tbhbdev/gh-budget`` (default ``.local/state`` under HOME),
-it:
+``$XDG_STATE_HOME/tbhbdev/gh-budget`` (default ``.local/state`` under HOME; the
+directory is 0700, the ``lock`` file and the JSON files 0600), it:
 
 1. refuses when the root session already ran ``hourly_limit`` gh calls in the
    past hour (a rolling window, one ``<sha256 of root>.json`` per root);
 2. refuses when the account's core REST quota has fewer than ``core_floor``
    requests left. It reads that from ``gh api rate_limit``, which costs no
    quota, at most once a minute for all sessions, caching the answer in
-   ``core.json``. A failed check is cached as well and refuses until the next
-   one;
+   ``core.json``. The sample runs outside the lock: the call that finds one
+   due claims it in the cache, releases the lock, samples, and takes the lock
+   again to record the answer and the call. A sample that fails or can't be
+   read isn't a refusal: that call skips this check, the cache records no
+   quota, and the next sample is due after the minute;
 3. records the call and execs the real gh.
 
 The budget is a backstop for polls the hook can't see, not the way to watch
@@ -51,7 +54,8 @@ names the budget and tells the agent to subscribe to the awrel event, and exit
 status 1. A refused call isn't counted. The optional ``[gh_budget]`` table of
 the tbhbdev config file (see ``tbhbdev.userconfig``) sets ``hourly_limit``
 (default 300) and ``core_floor`` (default 1000), whole numbers. A config that
-can't be read, or a state directory that can't be written, refuses too. State
+can't be read, or a state directory that can't be written, refuses too, with
+a line that names the path and the error and doesn't mention polling. State
 that isn't valid JSON reads as empty.
 
 This is an accident guard, not a security boundary. It counts gh invocations,
@@ -72,6 +76,7 @@ import subprocess  # nosec B404
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -80,7 +85,7 @@ from tbhbdev.alpha.guard_gh_poll import POLL_REASON
 from tbhbdev.alpha.identity import locked, write_private_json
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Generator, Mapping
 
 type Json = dict[str, object]
 
@@ -237,45 +242,76 @@ def sample(gh: str) -> int | None:
     return remaining if type(remaining) is int else None
 
 
-def core_remaining(gh: str, store: Path, now: float) -> int:
-    """The cached core remaining, checked again once the cache is a minute old."""
-    path = store / CORE
-    cache = read_state(path)
+def core_state(store: Path, now: float) -> tuple[bool, int | None]:
+    """(a sample is due, the cached core remaining or None).
+
+    A sample is due once the cache is a minute old.
+    """
+    cache = read_state(store / CORE)
     checked = cache.get("checked")
     fresh = isinstance(checked, int | float) and 0 <= now - checked < CACHE_SECONDS
-    if not fresh:
-        cache: Json = {"checked": now, "remaining": sample(gh)}
-        write_private_json(path, cache)
     remaining = cache.get("remaining")
-    if type(remaining) is not int:
+    return not fresh, remaining if type(remaining) is int else None
+
+
+@contextmanager
+def private_lock(store: Path) -> Generator[None]:
+    """The store's lock, with the directory at 0700 and the lock file at 0600."""
+    store.mkdir(parents=True, exist_ok=True)
+    store.chmod(0o700)
+    lock = store / "lock"
+    lock.touch()
+    lock.chmod(0o600)
+    with locked(store):
+        yield
+
+
+def within_budget(path: Path, now: float, limit: int) -> list[float]:
+    """The root's calls in the past hour, or a refusal when they're at the limit."""
+    calls = recent_calls(path, now)
+    if len(calls) >= limit:
         message = (
-            "`gh api rate_limit` failed, so the account's core quota is unknown; "
-            f"it is checked again after {CACHE_SECONDS}s"
+            f"this root session has made {len(calls)} gh calls in the past hour, "
+            f"its budget of {limit} per hour"
         )
         raise RefusalError(message)
-    return remaining
+    return calls
+
+
+def record(
+    path: Path, now: float, limit: int, floor: int, remaining: int | None
+) -> None:
+    """Count one call, or refuse it; an unknown quota skips the core floor."""
+    calls = within_budget(path, now, limit)
+    if remaining is not None and remaining < floor:
+        message = (
+            f"the account has {remaining} core REST requests left this hour, "
+            f"under the budget's floor of {floor}"
+        )
+        raise RefusalError(message)
+    write_private_json(path, {"calls": [*calls, now]})
 
 
 def reserve(gh: str, root: str, now: float, limit: int, floor: int) -> None:
-    """Count one call against the root's budget, or refuse it."""
+    """Count one call against the root's budget, or refuse it.
+
+    The ``rate_limit`` sample never runs under the lock.
+    """
     store = state_dir()
     path = store / f"{hashlib.sha256(root.encode()).hexdigest()}.json"
-    with locked(store):
-        calls = recent_calls(path, now)
-        if len(calls) >= limit:
-            message = (
-                f"this root session has made {len(calls)} gh calls in the past hour, "
-                f"its budget of {limit} per hour"
-            )
-            raise RefusalError(message)
-        remaining = core_remaining(gh, store, now)
-        if remaining < floor:
-            message = (
-                f"the account has {remaining} core REST requests left this hour, "
-                f"under the budget's floor of {floor}"
-            )
-            raise RefusalError(message)
-        write_private_json(path, {"calls": [*calls, now]})
+    core = store / CORE
+    with private_lock(store):
+        due, remaining = core_state(store, now)
+        if not due:
+            record(path, now, limit, floor, remaining)
+            return
+        within_budget(path, now, limit)  # a refused call doesn't sample
+        # Claim the sample, keeping the old answer for calls made meanwhile.
+        write_private_json(core, {"checked": now, "remaining": remaining})
+    sampled = sample(gh)
+    with private_lock(store):
+        write_private_json(core, {"checked": now, "remaining": sampled})
+        record(path, now, limit, floor, sampled)
 
 
 def main(argv: list[str], _prog: str) -> int:  # noqa: RET503 -- execv doesn't return
@@ -289,10 +325,17 @@ def main(argv: list[str], _prog: str) -> int:  # noqa: RET503 -- execv doesn't r
         try:
             limit, floor = limits()
             reserve(gh, root, time.time(), limit, floor)
-        except (RefusalError, userconfig.ConfigError, OSError) as exc:
+        except RefusalError as exc:
             print(
                 f"{PROG}: refused by the agent gh budget ([{TABLE}] in "
                 f"{userconfig.path()}): {exc}. {POLL_REASON}",
+                file=sys.stderr,
+            )
+            return REFUSED
+        except (userconfig.ConfigError, OSError) as exc:
+            print(
+                f"{PROG}: refused, the agent gh budget can't read or write its "
+                f"config or state: {exc}",
                 file=sys.stderr,
             )
             return REFUSED
