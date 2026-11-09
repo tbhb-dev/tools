@@ -78,7 +78,9 @@ def advance(db: Store, state: ActionState) -> None:
     if state in {ActionState.STARTED, ActionState.DONE, ActionState.FAILED}:
         db.transition(KEY, ActionState.STARTED, 11)
     if state in {ActionState.DONE, ActionState.FAILED}:
-        db.transition(KEY, state, 12, Result.OK)
+        db.transition(
+            KEY, state, 12, Result.ERROR if state == ActionState.FAILED else Result.OK
+        )
 
 
 @pytest.mark.parametrize("before", list(ActionState))
@@ -88,23 +90,26 @@ def test_every_transition(
 ) -> None:
     advance(database, before)
     previous = database.action(KEY)
-    result = Result.OK if after in {ActionState.DONE, ActionState.FAILED} else None
+    result = {ActionState.DONE: Result.OK, ActionState.FAILED: Result.ERROR}.get(after)
     legal = (before, after) in {
         (ActionState.INTENT, ActionState.STARTED),
         (ActionState.STARTED, ActionState.DONE),
         (ActionState.STARTED, ActionState.FAILED),
+        (ActionState.SHADOW, ActionState.SHADOW),
     }
     if legal:
         database.transition(KEY, after, 13, result)
         updated = database.action(KEY)
         assert updated is not None
-        assert updated.finished_time == (None if after == ActionState.STARTED else 13)
+        assert updated.finished_time == (13 if result is not None else None)
         assert database.action(KEY) == Action(
             KEY,
             after,
             10,
-            13 if after == ActionState.STARTED else 11,
-            None if after == ActionState.STARTED else 13,
+            13
+            if after == ActionState.STARTED
+            else (None if after == ActionState.SHADOW else 11),
+            13 if result is not None else None,
             result,
         )
     else:
@@ -117,14 +122,19 @@ def test_every_transition(
 
 @pytest.mark.parametrize("state", list(ActionState))
 @pytest.mark.parametrize("shadow", [False, True])
-def test_existing_keys_never_change_ownership(
+def test_existing_keys_preserve_live_actions_and_promote_shadows(
     database: Store, state: ActionState, shadow: bool
 ) -> None:
     advance(database, state)
     previous = database.action(KEY)
-    assert not database.record_intent(KEY, 99, shadow=shadow)
-    assert database.action(KEY) == previous
-    assert database.existing_keys() == frozenset({KEY})
+    promoted = state == ActionState.SHADOW and not shadow
+    assert database.record_intent(KEY, 99, shadow=shadow) == promoted
+    assert database.action(KEY) == (
+        Action(KEY, ActionState.INTENT, 99, None, None, None) if promoted else previous
+    )
+    assert database.existing_keys() == (
+        frozenset() if state == ActionState.SHADOW and shadow else frozenset({KEY})
+    )
 
 
 def test_missing_action_and_crash_recovery(database: Store) -> None:
@@ -201,11 +211,24 @@ def test_fixed_results_survive_reopen(tmp_path: Path, result: Result) -> None:
     assert database.recovery == Recovery.NEW
     assert database.record_intent(KEY, 10)
     database.transition(KEY, ActionState.STARTED, 10)
-    database.transition(KEY, ActionState.DONE, 10, result)
+    target = {
+        Result.OK: ActionState.DONE,
+        Result.ERROR: ActionState.FAILED,
+        Result.TIMEOUT: ActionState.FAILED,
+        Result.REFUSED: ActionState.FAILED,
+    }.get(result, ActionState.SHADOW)
+    if target == ActionState.SHADOW:
+        # Scoring is supplied by the runner; the store only persists the result.
+        database.close()
+        database = Store(path, mode=OpenMode.REBUILD)
+        assert database.record_intent(KEY, 10, shadow=True)
+    database.transition(KEY, target, 10, result)
     database.close()
     reopened = Store(path)
     assert reopened.recovery == Recovery.EXISTING
-    assert reopened.action(KEY) == Action(KEY, ActionState.DONE, 10, 10, 10, result)
+    assert reopened.action(KEY) == Action(
+        KEY, target, 10, None if target == ActionState.SHADOW else 10, 10, result
+    )
     reopened.close()
     reopened.close()
     with pytest.raises(StoreError) as error:
@@ -222,9 +245,10 @@ def test_all_tables_persist_with_owner_permissions(tmp_path: Path) -> None:
     database.record_run(RUN)
     escalation = f"escalate:{BASE}@{HEAD}:age"
     assert database.record_intent(escalation, 11)
-    marker = database.record_escalation(escalation, 12)
+    marker, created = database.record_escalation(escalation, 12)
+    assert created
     assert marker == f"<!-- loop:{escalation} -->"
-    assert database.record_escalation(escalation, 13) == marker
+    assert database.record_escalation(escalation, 13) == (marker, False)
     for suffix in ("-wal", "-shm"):
         assert Path(f"{path}{suffix}").stat().st_mode & 0o777 == 0o600
     database.close()
@@ -359,6 +383,7 @@ def test_invalid_stored_codes_fail_closed(tmp_path: Path, column: str) -> None:
     database = Store(path, mode=OpenMode.CREATE)
     assert database.record_intent(KEY, 0)
     with store.sqlite3.connect(path) as raw:
+        raw.execute("PRAGMA ignore_check_constraints = ON")
         raw.execute(f"UPDATE actions SET {column} = 'untrusted'")  # noqa: S608 -- fixed columns
     raw.close()
     with pytest.raises(StoreError) as error:
@@ -436,7 +461,10 @@ def test_only_one_run_per_action_and_foreign_keys(database: Store) -> None:
         database.record_escalation(escalation, 0)
     assert error.value.code == ErrorCode.INVALID
     assert database.record_intent(escalation, 0)
-    assert database.record_escalation(escalation, 1) == f"<!-- loop:{escalation} -->"
+    assert database.record_escalation(escalation, 1) == (
+        f"<!-- loop:{escalation} -->",
+        True,
+    )
 
 
 def test_counts_span_heads_but_keep_families_and_objects_separate(
@@ -485,7 +513,12 @@ def test_shadow_done_and_pending_never_count_as_failures(database: Store) -> Non
         if state in {ActionState.STARTED, ActionState.DONE, ActionState.FAILED}:
             database.transition(key, ActionState.STARTED, 1)
         if state in {ActionState.DONE, ActionState.FAILED}:
-            database.transition(key, state, 2, Result.OK)
+            database.transition(
+                key,
+                state,
+                2,
+                Result.ERROR if state == ActionState.FAILED else Result.OK,
+            )
     assert database.counts(BASE) == Counts((FamilyCount(f"review:{BASE}", 1),), 4, 0)
     assert database.counts(BASE).action_failures == (1,)
 
@@ -534,6 +567,9 @@ def test_creation_is_private_before_chmod(
 
     def open_private(path: Path, flags: int, mode: int = 0o777) -> int:
         assert mode == 0o600
+        assert flags & store.os.O_RDWR == store.os.O_RDWR
+        assert flags & store.os.O_NOFOLLOW
+        assert flags & store.os.O_NONBLOCK
         return original_open(path, flags, mode)
 
     def chmod(descriptor: int, mode: int) -> None:

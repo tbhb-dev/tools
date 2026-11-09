@@ -19,6 +19,7 @@ cand
 capfd
 capsys
 cgnat
+checkpointed
 complexipy
 conftest
 cpus
@@ -74,6 +75,7 @@ lockfiles
 mcpjson
 mdfile
 milestoned
+mkfifo
 msgfile
 mutmut
 nbbbb
@@ -83,6 +85,8 @@ nobuild
 nocache
 noexperimental
 nohup
+nonblock
+nonregular
 nonstrings
 norc
 noremote
@@ -102,6 +106,7 @@ prek
 pretooluse
 procargs
 pushd
+rdwr
 readattr
 readextattr
 readsecurity
@@ -141,6 +146,7 @@ tskey
 tzset
 ufffd
 unalias
+uncheckpointed
 uncomparables
 unkeyed
 unmatch
