@@ -1828,7 +1828,11 @@ def test_private_file_backup_is_private_even_when_the_old_file_was_not(
     path.write_text("old\n")
     path.chmod(0o644)
     supply(monkeypatch, {"claude-private.md": "new\n"})
-    assert install.install_private_files(dry_run=False) == 0
+    previous = os.umask(0)
+    try:
+        assert install.install_private_files(dry_run=False) == 0
+    finally:
+        os.umask(previous)
     backup = path.with_name("CLAUDE.private.md.tbhbdev-backup.T")
     assert backup.read_text() == "old\n"
     assert backup.stat().st_mode & 0o777 == 0o600

@@ -377,7 +377,7 @@ def copy_backup(target: Path, backup: Path, mode: int | None) -> None:
     if mode is None:
         shutil.copy2(target, backup)
         return
-    backup.touch(mode=mode, exist_ok=False)
+    backup.touch(mode=mode)
     shutil.copyfile(target, backup)
 
 
