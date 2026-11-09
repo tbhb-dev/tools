@@ -43,10 +43,22 @@ FRESH = {
 REAL_NOW = rb.now
 NOW = datetime(2026, 11, 9, 13, 30, 5, tzinfo=UTC)
 PROG = "tbhbdev alpha repo"
+# GitHub's owner rule, and the repository-name rule: the same characters, a
+# leading dot allowed, but never "." or "..".
+OWNER = r"[A-Za-z0-9_-][A-Za-z0-9_.-]*"
+NAME = r"(?!\.{1,2}\Z)[A-Za-z0-9_.-]+"
 ALLOWED_CALLS = (
-    ("GET", re.compile(r"repos/[^/]+/[^/]+\Z")),
-    ("PATCH", re.compile(r"repos/[^/]+/[^/]+\Z")),
-    ("POST", re.compile(r"orgs/[^/]+/repos\Z")),
+    ("GET", re.compile(rf"repos/{OWNER}/{NAME}\Z")),
+    ("PATCH", re.compile(rf"repos/{OWNER}/{NAME}\Z")),
+    ("POST", re.compile(rf"orgs/{OWNER}/repos\Z")),
+)
+# Every variable that would make gh use some credential but the agent's config.
+DROPPED = (
+    "GH_TOKEN",
+    "GH_HOST",
+    "GITHUB_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
 )
 NOT_FOUND = "gh: Not Found (HTTP 404)\n"
 
@@ -77,6 +89,8 @@ class FakeGh:
     # (method, path) -> (exit code, stderr) for calls that fail.
     fail: dict[tuple[str, str], tuple[int, str]] = field(default_factory=dict)
     stdout: dict[tuple[str, str], str] = field(default_factory=dict)
+    # GET number (from 1) -> (exit code, stderr) for a GET that fails.
+    fail_get: dict[int, tuple[int, str]] = field(default_factory=dict)
     calls: list[Call] = field(default_factory=list)
 
     def of(self, method: str) -> list[Call]:
@@ -92,6 +106,11 @@ class FakeGh:
         call = Call(list(argv), stdin, dict(env), kwargs)
         self.calls.append(call)
         key = (call.method, call.path)
+        if call.method == "GET":
+            number = len(self.of("GET"))
+            if number in self.fail_get:
+                code, err = self.fail_get[number]
+                return subprocess.CompletedProcess(argv, code, "", err)
         if key in self.fail:
             code, err = self.fail[key]
             return subprocess.CompletedProcess(argv, code, "", err)
@@ -572,6 +591,90 @@ def test_a_created_repo_is_logged_even_when_the_update_fails(
     assert entry["changed"] != {}
 
 
+# What a new repository's settings change to under CONFIG, as the log shows them.
+FRESH_CHANGED: dict[str, list[object]] = {
+    "allow_merge_commit": [True, False],
+    "allow_rebase_merge": [True, False],
+    "squash_merge_commit_title": ["COMMIT_OR_PR_TITLE", "PR_TITLE"],
+    "squash_merge_commit_message": ["COMMIT_MESSAGES", "BLANK"],
+    "delete_branch_on_merge": [False, True],
+    "has_wiki": [True, False],
+    "has_projects": [True, False],
+}
+BAD_GATEWAY = "gh: Bad Gateway (HTTP 502)\n"
+FORBIDDEN = "gh: Forbidden (HTTP 403)\n"
+GET_502 = f"gh api GET repos/{REPO} failed (exit 1): gh: Bad Gateway (HTTP 502)"
+PATCH_403 = f"gh api PATCH repos/{REPO} failed (exit 1): gh: Forbidden (HTTP 403)"
+# Each failure after a create: what fails, the calls made, and the log's changes.
+AFTER_CREATE: dict[str, tuple[dict[str, object], int, dict[str, list[object]], str]] = {
+    # The read right after the create: the changes aren't known yet.
+    "read after create": ({"fail_get": {2: (1, BAD_GATEWAY)}}, 3, {}, GET_502),
+    "update": (
+        {"fail": {("PATCH", f"repos/{REPO}"): (1, FORBIDDEN)}},
+        4,
+        FRESH_CHANGED,
+        PATCH_403,
+    ),
+    "read after update": (
+        {"fail_get": {3: (1, BAD_GATEWAY)}},
+        5,
+        FRESH_CHANGED,
+        GET_502,
+    ),
+}
+
+
+@pytest.mark.usefixtures("plugin")
+@pytest.mark.parametrize("log_works", [True, False])
+@pytest.mark.parametrize("kind", AFTER_CREATE)
+def test_every_failure_after_a_create_is_logged_and_reports_the_gh_error(
+    kind: str,
+    log_works: bool,
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fails, count, changed, message = AFTER_CREATE[kind]
+    fake = gh_for(monkeypatch, **fails)
+    if not log_works:
+        state = home / "example-state"
+        state.write_text("not a directory")
+        monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    code, out, err = run(capsys, "bootstrap", "--create", "--private", REPO)
+    assert (code, out) == (1, "")
+    # The gh failure is the one reported, even when the log can't be written.
+    assert err == f"{PROG}: {message}\n"
+    assert [c.method for c in fake.calls] == ["GET", "POST", "GET", "PATCH", "GET"][
+        :count
+    ]
+    if log_works:
+        assert log_lines(home) == [
+            {
+                "v": 1,
+                "ts": "2026-11-09T13:30:05Z",
+                "repo": REPO,
+                "created": True,
+                "changed": changed,
+                "verified": False,
+            }
+        ]
+
+
+@pytest.mark.usefixtures("plugin")
+def test_a_failed_read_of_an_existing_repo_after_its_update_logs_nothing(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gh_for(
+        monkeypatch,
+        repos={REPO: existing(has_wiki=True)},
+        fail_get={2: (1, BAD_GATEWAY)},
+    )
+    code, _, err = run(capsys, "bootstrap", REPO)
+    assert code == 1
+    assert err == f"{PROG}: {GET_502}\n"
+    assert log_lines(home) == []
+
+
 def test_a_created_repo_with_nothing_to_change_is_logged_without_a_patch(
     installed: Installed,
     home: Path,
@@ -721,26 +824,58 @@ def test_only_get_and_patch_on_the_repo_and_post_on_the_org_are_ever_called(
 
 
 @pytest.mark.usefixtures("plugin")
-def test_gh_runs_with_the_gh_agent_dir_and_the_rest_of_the_environment(
+def test_gh_runs_with_the_gh_agent_dir_and_no_token_or_host_variable(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("GH_CONFIG_DIR", "/example/other-config")
     monkeypatch.setenv("EXAMPLE_VAR", "example-value")
+    for name in DROPPED:
+        monkeypatch.setenv(name, "example-value")
     fake = gh_for(monkeypatch, repos={REPO: existing(has_wiki=True)})
     assert run(capsys, "bootstrap", REPO)[0] == 0
-    expected = {**os.environ, "GH_CONFIG_DIR": str(home / ".config" / "gh-agent")}
+    assert len(fake.calls) == 3
     for call in fake.calls:
-        assert call.env == expected
+        assert not set(DROPPED) & set(call.env)
+        assert call.env["GH_CONFIG_DIR"] == str(home / ".config" / "gh-agent")
+        assert call.env["EXAMPLE_VAR"] == "example-value"
+        assert call.env["HOME"] == str(home)
         assert call.kwargs["capture_output"] is True
         assert call.kwargs["text"] is True
         assert call.kwargs["check"] is False
         # Nothing secret or environmental is on argv.
         assert call.argv[:3] == ["gh", "api", "--method"]
         assert len(call.argv) <= 7
+        assert "example-value" not in " ".join(call.argv)
     assert [c.stdin for c in fake.of("GET")] == ["", ""]
 
 
-def test_gh_env_overrides_only_the_config_dir() -> None:
+@pytest.mark.parametrize("name", DROPPED)
+def test_gh_env_drops_each_token_and_host_variable(name: str) -> None:
+    env = {"A": "1", name: "example-value"}
+    assert rb.gh_env(env, Path("/example/home")) == {
+        "A": "1",
+        "GH_CONFIG_DIR": "/example/home/.config/gh-agent",  # gitleaks:allow
+    }
+    assert name in env
+
+
+def test_gh_env_drops_all_five_and_sets_the_config_dir() -> None:
+    env = dict.fromkeys(DROPPED, "example-value")
+    env |= {"A": "1", "GH_CONFIG_DIR": "/example/x", "GH_PAGER": "cat"}
+    assert rb.gh_env(env, Path("/example/home")) == {
+        "A": "1",
+        "GH_PAGER": "cat",
+        "GH_CONFIG_DIR": "/example/home/.config/gh-agent",  # gitleaks:allow
+    }
+    assert set(DROPPED) <= set(env)
+    assert env["GH_CONFIG_DIR"] == "/example/x"
+
+
+def test_the_dropped_variables_are_exactly_these_five() -> None:
+    assert set(DROPPED) == set(rb.DROPPED_ENV)
+
+
+def test_gh_env_overrides_only_the_config_dir_otherwise() -> None:
     env = {"A": "1", "GH_CONFIG_DIR": "/example/x"}
     assert rb.gh_env(env, Path("/example/home")) == {
         "A": "1",
@@ -781,6 +916,71 @@ def test_the_log_is_private_and_appended_to(
         {"has_projects": [True, False]},
     ]
     assert path.read_text().endswith("\n")
+
+
+@pytest.mark.usefixtures("plugin")
+@pytest.mark.parametrize(
+    ("dir_mode", "file_mode"),
+    [
+        (None, None),
+        (0o755, None),
+        (0o777, None),
+        (0o700, None),
+        (0o755, 0o644),
+        (0o777, 0o666),
+        (0o700, 0o644),
+        (0o755, 0o600),
+        (0o700, 0o600),
+        (0o755, 0o640),
+    ],
+)
+def test_an_existing_log_and_directory_are_tightened_not_only_new_ones(
+    dir_mode: int | None,
+    file_mode: int | None,
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    directory = home / ".local" / "state" / "tbhbdev"
+    path = directory / "repo-bootstrap.jsonl"
+    old = os.umask(0)
+    try:
+        if dir_mode is not None:
+            directory.mkdir(parents=True)
+            directory.chmod(dir_mode)
+            if file_mode is not None:
+                path.write_text('{"earlier": "line"}\n')
+                path.chmod(file_mode)
+        gh_for(monkeypatch, repos={REPO: existing(has_wiki=True)})
+        assert run(capsys, "bootstrap", REPO)[0] == 0
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    lines = path.read_text().splitlines()
+    assert len(lines) == (2 if file_mode is not None else 1)
+    if file_mode is not None:
+        assert json.loads(lines[0]) == {"earlier": "line"}
+    assert json.loads(lines[-1])["repo"] == REPO
+
+
+@pytest.mark.usefixtures("plugin")
+def test_a_new_log_is_created_0600_and_in_append_mode(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    opened: list[tuple[str, int, int]] = []
+    real_open = os.open
+
+    def spy(path: str | Path, flags: int, mode: int = 0o777, **kw: int) -> int:
+        if str(path).endswith("repo-bootstrap.jsonl"):
+            opened.append((str(path), flags, mode))
+        return real_open(path, flags, mode, **kw)
+
+    monkeypatch.setattr(os, "open", spy)
+    gh_for(monkeypatch, repos={REPO: existing(has_wiki=True)})
+    assert run(capsys, "bootstrap", REPO)[0] == 0
+    log = str(home / ".local" / "state" / "tbhbdev" / "repo-bootstrap.jsonl")
+    assert opened == [(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)]
 
 
 @pytest.mark.usefixtures("plugin")
@@ -835,11 +1035,14 @@ def test_a_log_that_cannot_be_written_exits_1(
     state = home / "example-state"
     state.write_text("not a directory")
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
-    gh_for(monkeypatch, repos={REPO: existing(has_wiki=True)})
+    fake = gh_for(monkeypatch, repos={REPO: existing(has_wiki=True)})
     code, _, err = run(capsys, "bootstrap", REPO)
     assert code == 1
     assert err.startswith(f"{PROG}: ")
     assert err.count("\n") == 1
+    # The update had already gone out when the log failed.
+    assert len(fake.of("PATCH")) == 1
+    assert fake.repos[REPO]["has_wiki"] is False
 
 
 def test_now_is_utc_and_current() -> None:
@@ -859,6 +1062,19 @@ def test_now_is_utc_and_current() -> None:
         ["bootstrap"],
         ["bootstrap", "nope"],
         ["bootstrap", "a/b/c"],
+        ["bootstrap", "example-org/."],
+        ["bootstrap", "example-org/.."],
+        ["bootstrap", ".example-org/repo"],
+        ["bootstrap", "example-org/repo?"],
+        ["bootstrap", "example-org/repo#frag"],
+        ["bootstrap", "example-org/repo%2e"],
+        ["bootstrap", "example-org/re po"],
+        ["bootstrap", "example-org/repo\n"],
+        ["bootstrap", "example?org/repo"],
+        ["bootstrap", "example#org/repo"],
+        ["bootstrap", "example%org/repo"],
+        ["bootstrap", "example org/repo"],
+        ["bootstrap", "example\norg/repo"],
         ["bootstrap", REPO, "--create"],
         ["bootstrap", REPO, "--private"],
         ["bootstrap", REPO, "--public"],
@@ -911,11 +1127,25 @@ def test_alpha_usage_lists_repo() -> None:
     assert f"{head} ORG/REPO:\n               apply the standard" in usage
 
 
-def test_repo_name_refuses_what_is_not_org_slash_repo() -> None:
+@pytest.mark.parametrize(
+    "text",
+    [
+        *("nope", "example-org/.", "example-org/..", ".org/repo", ""),
+        *("o/r?", "o/r#", "o/r%", "o/r r", "o/r\n"),
+        *("o?/r", "o#/r", "o%/r", "o o/r", "o\n/r"),
+    ],
+)
+def test_repo_name_refuses_what_is_not_org_slash_repo(text: str) -> None:
     with pytest.raises(argparse.ArgumentTypeError) as caught:
-        rb.repo_name("nope")
+        rb.repo_name(text)
     assert str(caught.value) == "must be ORG/REPO"
-    assert rb.repo_name(REPO) == REPO
+
+
+@pytest.mark.parametrize(
+    "text", [REPO, "example-org/.github", "example-org/..x", "o/a.b"]
+)
+def test_repo_name_accepts_org_slash_repo_even_with_a_leading_dot(text: str) -> None:
+    assert rb.repo_name(text) == text
 
 
 def test_a_bad_repo_name_is_a_usage_error_that_says_what_it_wants(
@@ -973,3 +1203,111 @@ def test_two_keys_that_do_not_hold_are_both_named(
         err
         == f"{PROG}: {REPO}: still differs after the update: has_wiki, has_projects\n"
     )
+
+
+@pytest.mark.parametrize("subcommand", ["", "--dry-run"])
+def test_a_repository_named_dot_github_is_bootstrapped(
+    subcommand: str,
+    installed: Installed,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = "example-org/.github"
+    text = f'[defaults]\nhas_wiki = false\n[repos."{repo}"]\nhas_issues = false\n'
+    installed.stub("example-plugin", files={rs.CONFIG_FILE: text})
+    fake = gh_for(
+        monkeypatch,
+        repos={repo: {"has_wiki": True, "has_issues": True, "visibility": "public"}},
+    )
+    args = ["bootstrap", *([subcommand] if subcommand else []), repo]
+    code, out, _ = run(capsys, *args)
+    assert code == 0
+    assert "has_issues: true -> false" in out
+    assert fake.calls[0].path == "repos/example-org/.github"
+    assert all(c.path == "repos/example-org/.github" for c in fake.calls)
+    assert len(fake.of("PATCH")) == (0 if subcommand else 1)
+
+
+# Each case: the config, what the repository has, and the whole PATCH body.
+PAIRS = {
+    "title only": (
+        '[defaults]\nsquash_merge_commit_title = "PR_TITLE"\n',
+        {
+            "squash_merge_commit_title": "COMMIT_OR_PR_TITLE",
+            "squash_merge_commit_message": "COMMIT_MESSAGES",
+        },
+        {
+            "squash_merge_commit_title": "PR_TITLE",
+            "squash_merge_commit_message": "COMMIT_MESSAGES",
+        },
+        ["squash_merge_commit_title"],
+    ),
+    "message only": (
+        '[defaults]\nsquash_merge_commit_message = "BLANK"\n',
+        {
+            "squash_merge_commit_title": "COMMIT_OR_PR_TITLE",
+            "squash_merge_commit_message": "COMMIT_MESSAGES",
+        },
+        {
+            "squash_merge_commit_title": "COMMIT_OR_PR_TITLE",
+            "squash_merge_commit_message": "BLANK",
+        },
+        ["squash_merge_commit_message"],
+    ),
+    "title only, with another key": (
+        '[defaults]\nsquash_merge_commit_title = "PR_TITLE"\nhas_wiki = false\n',
+        {
+            "squash_merge_commit_title": "COMMIT_OR_PR_TITLE",
+            "squash_merge_commit_message": "PR_BODY",
+            "has_wiki": True,
+            "has_issues": True,
+        },
+        {
+            "squash_merge_commit_title": "PR_TITLE",
+            "squash_merge_commit_message": "PR_BODY",
+            "has_wiki": False,
+        },
+        ["squash_merge_commit_title", "has_wiki"],
+    ),
+}
+
+
+@pytest.mark.parametrize("case", PAIRS)
+def test_a_lone_squash_key_that_changes_is_sent_with_its_partners_current_value(
+    case: str,
+    installed: Installed,
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config, have, body, changed = PAIRS[case]
+    installed.stub("example-plugin", files={rs.CONFIG_FILE: config})
+    fake = gh_for(monkeypatch, repos={REPO: existing(**have)})
+    code, _, err = run(capsys, "bootstrap", REPO)
+    assert (code, err) == (0, "")
+    assert [json.loads(c.stdin) for c in fake.of("PATCH")] == [body]
+    # Only the wanted key is logged and checked, not the partner sent with it.
+    assert list(log_lines(home)[0]["changed"]) == changed  # type: ignore[call-overload]
+    assert log_lines(home)[0]["verified"] is True
+
+
+def test_a_lone_squash_key_that_already_matches_sends_no_patch(
+    installed: Installed,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    installed.stub(
+        "example-plugin",
+        files={rs.CONFIG_FILE: '[defaults]\nsquash_merge_commit_title = "PR_TITLE"\n'},
+    )
+    fake = gh_for(
+        monkeypatch,
+        repos={
+            REPO: existing(
+                squash_merge_commit_title="PR_TITLE",
+                squash_merge_commit_message="COMMIT_MESSAGES",
+            )
+        },
+    )
+    assert run(capsys, "bootstrap", REPO) == (0, f"{REPO}: up to date\n", "")
+    assert fake.of("PATCH") == []

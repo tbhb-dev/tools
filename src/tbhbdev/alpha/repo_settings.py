@@ -54,7 +54,9 @@ KEYS = (
 COMMIT_PAIR = (TITLE, MESSAGE)
 
 TABLES = ("defaults", "repos")
-REPO = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*\Z")
+# An owner can't start with a dot. A repository name can, as in ``.github``, but
+# can't be ``.`` or ``..``, which would climb out of the endpoint path.
+REPO = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/(?!\.{1,2}\Z)[A-Za-z0-9_.-]+\Z")
 
 
 class ConfigError(Exception):
@@ -167,15 +169,22 @@ def diff(have: Mapping[str, object], want: Mapping[str, object]) -> Changes:
     }
 
 
-def patch_body(changes: Changes, want: Mapping[str, object]) -> Settings:
+def patch_body(
+    changes: Changes, want: Mapping[str, object], have: Mapping[str, object]
+) -> Settings:
     """The JSON for one update: the changed keys only.
 
     GitHub requires the squash title with the squash message, so when either
-    changes, the body carries both of the wanted values.
+    changes, the body carries both: each from WANT, or from HAVE, the
+    repository's current values, when only one of them is wanted.
     """
     body: Settings = {key: after for key, (_, after) in changes.items()}
     if body.keys() & set(COMMIT_PAIR):
-        body |= {key: want[key] for key in COMMIT_PAIR if key in want}
+        for key in COMMIT_PAIR:
+            if key in want:
+                body[key] = want[key]
+            elif key in have:
+                body[key] = have[key]
     return body
 
 

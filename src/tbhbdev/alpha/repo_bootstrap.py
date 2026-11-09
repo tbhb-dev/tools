@@ -7,11 +7,14 @@ decision about the settings is a pure function in ``repo_settings``.
 
 The only calls it makes are ``GET`` and ``PATCH`` on ``repos/OWNER/REPO`` and
 ``POST`` on ``orgs/ORG/repos``, all through ``gh api`` with ``GH_CONFIG_DIR``
-set to the agent's gh config. It calls no rulesets, branch protection,
-collaborator, team or webhook endpoint, and puts no token on a command line.
+set to the agent's gh config and every token variable removed from the
+environment, so that config is the only credential. It calls no rulesets,
+branch protection, collaborator, team or webhook endpoint, and puts no token on
+a command line.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import subprocess  # nosec B404
@@ -27,6 +30,16 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 LOG_NAME = "repo-bootstrap.jsonl"
+# Variables that make gh use a credential or host other than the agent's config.
+DROPPED_ENV = frozenset(
+    {
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+        "GH_HOST",
+    }
+)
 VISIBILITIES = ("private", "public")
 
 
@@ -39,8 +52,15 @@ class NotFoundError(GhError):
 
 
 def gh_env(env: Mapping[str, str], home: Path) -> dict[str, str]:
-    """ENV with ``GH_CONFIG_DIR`` pointing at the agent's gh config in HOME."""
-    return {**env, "GH_CONFIG_DIR": str(home / gh_agent.CONFIG_DIR)}
+    """ENV with the agent's gh config as the only credential.
+
+    The token and host variables are removed and ``GH_CONFIG_DIR`` points at the
+    agent's gh config in HOME. gh prefers a token variable to its config, so one
+    left in place would be the credential, and a missing agent login would fall
+    back to it instead of failing.
+    """
+    kept = {key: value for key, value in env.items() if key not in DROPPED_ENV}
+    return {**kept, "GH_CONFIG_DIR": str(home / gh_agent.CONFIG_DIR)}
 
 
 def gh_api(method: str, path: str, body: Mapping[str, object] | None = None) -> object:
@@ -114,11 +134,19 @@ def log_path(env: Mapping[str, str]) -> Path:
 
 
 def append_log(entry: Mapping[str, object]) -> None:
-    """Append ENTRY as one JSON line, creating the directory 0700 and file 0600."""
+    """Append ENTRY as one JSON line to the log, a 0600 file in a 0700 directory.
+
+    An existing directory or file with looser modes is tightened, not only a new
+    one made with them.
+    """
     path = log_path(os.environ)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # No mode on mkdir: chmod sets it for a new and an existing directory alike,
+    # and the file inside is 0600 from the moment it exists.
+    path.parent.chmod(0o700)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a") as out:
+        os.fchmod(out.fileno(), 0o600)
         out.write(json.dumps(entry) + "\n")
 
 
@@ -136,6 +164,16 @@ def record(
     )
 
 
+def record_unfinished(repo: str, changes: settings.Changes) -> None:
+    """Log a repository that was created but never verified.
+
+    An error writing the log is dropped: the gh failure that got us here is the
+    one to report, and the caller is about to re-raise it.
+    """
+    with contextlib.suppress(OSError):
+        record(repo, changes, created=True, verified=False)
+
+
 def create_repo(repo: str, visibility: str) -> None:
     """Create REPO under its organization as the agent."""
     org, _, name = repo.partition("/")
@@ -144,6 +182,7 @@ def create_repo(repo: str, visibility: str) -> None:
 
 def apply_changes(
     repo: str,
+    have: settings.Settings,
     changes: settings.Changes,
     want: settings.Settings,
     *,
@@ -151,20 +190,22 @@ def apply_changes(
 ) -> None:
     """Send the update, read the repository again and log the run.
 
-    The log line is written once the update has gone out, even when the read
-    shows it didn't hold, and for a created repository even when the update
-    fails, since both left something behind.
+    HAVE is the repository's current settings. The log line is written once the
+    update has gone out, even when the read shows it didn't hold, and for a
+    created repository even when the update or the read fails, since both left
+    something behind.
 
     Raises:
         GhError: The update fails, or a key still differs after it.
+        OSError: The log can't be written after a successful update.
     """
     try:
         if changes:
-            gh_api("PATCH", f"repos/{repo}", settings.patch_body(changes, want))
+            gh_api("PATCH", f"repos/{repo}", settings.patch_body(changes, want, have))
         left = settings.diff(settings.current(read_repo(repo)), want)
     except GhError:
         if created:
-            record(repo, changes, created=True, verified=False)
+            record_unfinished(repo, changes)
         raise
     record(repo, changes, created=created, verified=not left)
     if left:
@@ -197,7 +238,13 @@ def bootstrap(
             return 0
         create_repo(repo, visibility)
         created = True
-        payload = read_repo(repo)
+        try:
+            payload = read_repo(repo)
+        except GhError:
+            # The repository exists and the update never started; the changes
+            # are unknown, so the line has none.
+            record_unfinished(repo, {})
+            raise
     else:
         if visibility is not None and payload.get("visibility") != visibility:
             message = (
@@ -205,14 +252,15 @@ def bootstrap(
                 f"{visibility}; nothing changed"
             )
             raise GhError(message)
-    changes = settings.diff(settings.current(payload), want)
+    have = settings.current(payload)
+    changes = settings.diff(have, want)
     if dry_run:
         print(settings.render_changes(changes))
         return 0
     if not changes and not created:
         print(f"{repo}: up to date")
         return 0
-    apply_changes(repo, changes, want, created=created)
+    apply_changes(repo, have, changes, want, created=created)
     print(f"{repo}: created" if created else f"{repo}: updated")
     print(settings.render_changes(changes))
     return 0

@@ -3,6 +3,7 @@
 
 """Tests for the pure functions behind tbhbdev alpha repo bootstrap."""
 
+import json
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -177,16 +178,68 @@ def test_text_that_is_not_toml_names_the_file() -> None:
         ("example-org/", False),
         ("/repo", False),
         ("a/b/c", False),
-        ("a/.b", False),
+        ("a/.b", True),
+        ("example-org/.github", True),
+        ("a/..b", True),
+        ("a/b.", True),
+        ("a/-", True),
+        ("a/.", False),
+        ("a/..", False),
+        (".a/b", False),
+        ("..a/b", False),
+        ("./b", False),
         ("a /b", False),
         ("a/b\n", False),
+        ("a/.\n", False),
+        ("a/..\n", False),
+        ("a\n/b", False),
         ("a/b c", False),
         ("../x", False),
         ("", False),
+        *[
+            (name, False)
+            for char in "?#% \n\t:@\\*"
+            for name in (f"a/b{char}", f"a/b{char}c", f"a{char}/b", f"a/{char}")
+        ],
+        ("a/b?x=1", False),
+        ("a/b#frag", False),
+        ("a/b%2e", False),
+        ("a/%2e", False),
+        ("a/b/", False),
     ],
 )
 def test_valid_repo(name: str, ok: bool) -> None:
     assert rs.valid_repo(name) is ok
+
+
+@pytest.mark.parametrize(
+    ("name", "ok"),
+    [
+        ("example-org/.github", True),
+        ("Example-Org/.GitHub", True),
+        ("a/.", False),
+        ("a/..", False),
+        (".a/b", False),
+        ("a/b?", False),
+        ("a/b#", False),
+        ("a/b%", False),
+        ("a/b c", False),
+        ("a/b\n", False),
+        ("a?/b", False),
+        ("a#/b", False),
+        ("a%/b", False),
+        ("a b/b", False),
+        ("a\n/b", False),
+    ],
+)
+def test_a_config_key_follows_the_same_name_rule(name: str, ok: bool) -> None:
+    text = f"[defaults]\n[repos.{json.dumps(name)}]\nhas_wiki = true\n"
+    if ok:
+        assert rs.parse_config(text).repos == {name.lower(): {"has_wiki": True}}
+    else:
+        with pytest.raises(rs.ConfigError) as caught:
+            rs.parse_config(text)
+        assert str(caught.value) == f'{F}: [repos."{name}"] must be named owner/name'
 
 
 def test_desired_puts_the_repos_table_over_the_defaults() -> None:
@@ -264,16 +317,32 @@ def test_diff_ignores_a_key_outside_the_allowlist() -> None:
     assert rs.diff({}, {"visibility": "public"}) == {}
 
 
+PAIR_HAVE = {
+    "squash_merge_commit_title": "COMMIT_OR_PR_TITLE",
+    "squash_merge_commit_message": "COMMIT_MESSAGES",
+}
+
+
 @pytest.mark.parametrize(
-    ("changes", "want", "body"),
+    ("changes", "want", "have", "body"),
     [
-        ({}, {}, {}),
-        ({"has_wiki": (True, False)}, {"has_wiki": False}, {"has_wiki": False}),
+        ({}, {}, {}, {}),
+        (
+            {"has_wiki": (True, False)},
+            {"has_wiki": False},
+            {"has_wiki": True},
+            {"has_wiki": False},
+        ),
+        # Both wanted: both come from want.
         (
             {"squash_merge_commit_message": ("PR_BODY", "BLANK")},
             {
                 "squash_merge_commit_title": "PR_TITLE",
                 "squash_merge_commit_message": "BLANK",
+            },
+            {
+                "squash_merge_commit_title": "PR_TITLE",
+                "squash_merge_commit_message": "PR_BODY",
             },
             {
                 "squash_merge_commit_title": "PR_TITLE",
@@ -287,28 +356,93 @@ def test_diff_ignores_a_key_outside_the_allowlist() -> None:
                 "squash_merge_commit_message": "BLANK",
             },
             {
+                "squash_merge_commit_title": "COMMIT_OR_PR_TITLE",
+                "squash_merge_commit_message": "BLANK",
+            },
+            {
                 "squash_merge_commit_title": "PR_TITLE",
                 "squash_merge_commit_message": "BLANK",
             },
         ),
+        # Want wins over have for a key in both.
         (
             {"squash_merge_commit_message": ("PR_BODY", "BLANK")},
+            {
+                "squash_merge_commit_title": "PR_TITLE",
+                "squash_merge_commit_message": "BLANK",
+            },
+            PAIR_HAVE,
+            {
+                "squash_merge_commit_title": "PR_TITLE",
+                "squash_merge_commit_message": "BLANK",
+            },
+        ),
+        # Only the message is wanted: the title is the repository's.
+        (
+            {"squash_merge_commit_message": ("COMMIT_MESSAGES", "BLANK")},
             {"squash_merge_commit_message": "BLANK"},
+            PAIR_HAVE,
+            {
+                "squash_merge_commit_title": "COMMIT_OR_PR_TITLE",
+                "squash_merge_commit_message": "BLANK",
+            },
+        ),
+        # Only the title is wanted: the message is the repository's.
+        (
+            {"squash_merge_commit_title": ("COMMIT_OR_PR_TITLE", "PR_TITLE")},
+            {"squash_merge_commit_title": "PR_TITLE"},
+            PAIR_HAVE,
+            {
+                "squash_merge_commit_title": "PR_TITLE",
+                "squash_merge_commit_message": "COMMIT_MESSAGES",
+            },
+        ),
+        # Only the message is wanted and the reply lacks the title.
+        (
+            {"squash_merge_commit_message": (None, "BLANK")},
+            {"squash_merge_commit_message": "BLANK"},
+            {},
             {"squash_merge_commit_message": "BLANK"},
         ),
+        # Only the title is wanted and the reply lacks the message.
+        (
+            {"squash_merge_commit_title": (None, "PR_TITLE")},
+            {"squash_merge_commit_title": "PR_TITLE"},
+            {"has_wiki": True},
+            {"squash_merge_commit_title": "PR_TITLE"},
+        ),
+        # Nothing of the pair changes: its current values aren't sent.
         (
             {"has_wiki": (True, False)},
             {"has_wiki": False, "squash_merge_commit_title": "PR_TITLE"},
+            {**PAIR_HAVE, "has_wiki": True},
             {"has_wiki": False},
+        ),
+        (
+            {"has_wiki": (True, False)},
+            {"has_wiki": False},
+            {**PAIR_HAVE, "has_wiki": True},
+            {"has_wiki": False},
+        ),
+        # Other current keys never join the body.
+        (
+            {"squash_merge_commit_title": ("COMMIT_OR_PR_TITLE", "PR_TITLE")},
+            {"squash_merge_commit_title": "PR_TITLE"},
+            {**PAIR_HAVE, "has_wiki": True, "has_issues": True},
+            {
+                "squash_merge_commit_title": "PR_TITLE",
+                "squash_merge_commit_message": "COMMIT_MESSAGES",
+            },
         ),
     ],
 )
 def test_patch_body_sends_the_changed_keys_and_the_pair_together(
     changes: dict[str, tuple[object, object]],
     want: dict[str, object],
+    have: dict[str, object],
     body: dict[str, object],
 ) -> None:
-    assert rs.patch_body(changes, want) == body
+    assert rs.patch_body(changes, want, have) == body
 
 
 @pytest.mark.parametrize(
