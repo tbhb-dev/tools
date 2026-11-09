@@ -113,6 +113,14 @@ def make_repo(path: Path, origin: str | None = ORIGIN) -> Path:
     return path.resolve()
 
 
+def no_plugin(_name: str) -> None:
+    return None
+
+
+def private_files_fail(**_kw: object) -> int:
+    return 1
+
+
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     prefixes = ("CLAUDE", "CODEX", "ANTIGRAVITY", "GIT_", "PREK", "TBHB_")
@@ -135,6 +143,8 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{tmp_path / 'git_dir'}")
     repo = make_repo(tmp_path / "repo")
     monkeypatch.chdir(repo)
+    # No plugin supplies private files unless a test says so.
+    monkeypatch.setattr(install.plugins, "supplied", no_plugin)
     return World(home.resolve(), bin_dir, repo)
 
 
@@ -1657,3 +1667,153 @@ def test_main_help(capsys: pytest.CaptureFixture[str]) -> None:
         install.main(["--help"], "tbhbdev alpha install")
     assert done.value.code == 0
     assert capsys.readouterr().out == HELP
+
+
+# ----------------------------------------------------------- private files
+
+
+def supply(monkeypatch: pytest.MonkeyPatch, files: dict[str, str]) -> None:
+    monkeypatch.setattr(install.plugins, "supplied", files.get)
+
+
+def test_private_files_are_skipped_when_no_plugin_supplies_them(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert install.install_private_files(dry_run=False) == 0
+    assert capsys.readouterr().out == ""
+    assert not (world.home / ".claude" / "CLAUDE.private.md").exists()
+
+
+def test_private_files_are_written_privately(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    supply(
+        monkeypatch, {"claude-private.md": "# P\n", "mise-private.toml": "[tools]\n"}
+    )
+    assert install.install_private_files(dry_run=False) == 0
+    claude = world.home / ".claude" / "CLAUDE.private.md"
+    mise = world.home / ".config" / "mise" / "conf.d" / "private.toml"
+    assert claude.read_text() == "# P\n"
+    assert mise.read_text() == "[tools]\n"
+    assert claude.stat().st_mode & 0o777 == 0o600
+    assert mise.stat().st_mode & 0o777 == 0o600
+    assert f"claude-private.md: wrote {claude}\n" in capsys.readouterr().out
+
+
+def test_private_files_one_supplied_leaves_the_other(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supply(monkeypatch, {"mise-private.toml": "[tools]\n"})
+    assert install.install_private_files(dry_run=False) == 0
+    assert not (world.home / ".claude" / "CLAUDE.private.md").exists()
+    assert (world.home / ".config" / "mise" / "conf.d" / "private.toml").exists()
+
+
+def test_private_files_up_to_date_is_not_rewritten(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    supply(monkeypatch, {"claude-private.md": "# P\n"})
+    install.install_private_files(dry_run=False)
+    capsys.readouterr()
+    assert install.install_private_files(dry_run=False) == 0
+    out = capsys.readouterr().out
+    assert "claude-private.md:" in out
+    assert "is up to date\n" in out
+    assert list((world.home / ".claude").glob("*backup*")) == []
+
+
+def test_private_files_change_keeps_a_backup(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(install, "stamp", lambda: "T")
+    path = world.home / ".claude" / "CLAUDE.private.md"
+    path.parent.mkdir()
+    path.write_text("old\n")
+    supply(monkeypatch, {"claude-private.md": "new\n"})
+    assert install.install_private_files(dry_run=False) == 0
+    assert path.read_text() == "new\n"
+    backup = path.with_name("CLAUDE.private.md.tbhbdev-backup.T")
+    assert backup.read_text() == "old\n"
+    assert f"; the old one is {backup}\n" in capsys.readouterr().out
+
+
+def test_private_files_dry_run_prints_a_diff_and_writes_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = world.home / ".claude" / "CLAUDE.private.md"
+    path.parent.mkdir()
+    path.write_text("old\n")
+    supply(monkeypatch, {"claude-private.md": "new\n", "mise-private.toml": "x\n"})
+    assert install.install_private_files(dry_run=True) == 0
+    out = capsys.readouterr().out
+    other = world.home / ".config" / "mise" / "conf.d" / "private.toml"
+    assert out == (
+        f"--- {path}\n+++ {path}\n@@ -1 +1 @@\n-old\n+new\n"
+        f"--- {other}\n+++ {other}\n@@ -0,0 +1 @@\n+x\n"
+    )
+    assert path.read_text() == "old\n"
+    assert not (world.home / ".config").exists()
+
+
+@pytest.mark.usefixtures("world")
+def test_private_files_report_a_plugin_conflict(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def clash(name: str) -> str:
+        message = f"two plugins supply {name}"
+        raise install.plugins.PluginError(message)
+
+    monkeypatch.setattr(install.plugins, "supplied", clash)
+    assert install.install_private_files(dry_run=False) == 1
+    err = capsys.readouterr().err
+    assert "tbhbdev alpha install: claude-private.md: cannot install " in err
+    assert "two plugins supply claude-private.md" in err
+    assert "tbhbdev alpha install: mise-private.toml: cannot install " in err
+
+
+def test_private_files_report_a_write_failure_and_go_on(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    blocker = world.home / ".claude"
+    blocker.write_text("a file, not a directory")
+    supply(monkeypatch, {"claude-private.md": "# P\n", "mise-private.toml": "x\n"})
+    assert install.install_private_files(dry_run=False) == 1
+    assert "claude-private.md: cannot install" in capsys.readouterr().err
+    assert (world.home / ".config" / "mise" / "conf.d" / "private.toml").exists()
+
+
+def test_main_installs_private_files(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supply(monkeypatch, {"claude-private.md": "# P\n"})
+    assert install.main(["--harness", "claude"], "tbhbdev alpha install") == 0
+    assert (world.home / ".claude" / "CLAUDE.private.md").read_text() == "# P\n"
+
+
+@pytest.mark.usefixtures("world")
+def test_main_status_includes_a_private_file_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(install, "install_private_files", private_files_fail)
+    assert install.main(["--harness", "claude"], "tbhbdev alpha install") == 1
+
+
+def test_private_files_up_to_date_first_still_writes_the_second(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude = world.home / ".claude" / "CLAUDE.private.md"
+    claude.parent.mkdir()
+    claude.write_text("# P\n")
+    supply(monkeypatch, {"claude-private.md": "# P\n", "mise-private.toml": "x\n"})
+    assert install.install_private_files(dry_run=False) == 0
+    assert (world.home / ".config" / "mise" / "conf.d" / "private.toml").exists()
+
+
+def test_main_dry_run_leaves_private_files_unwritten(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supply(monkeypatch, {"claude-private.md": "# P\n"})
+    assert (
+        install.main(["--dry-run", "--harness", "claude"], "tbhbdev alpha install") == 0
+    )
+    assert not (world.home / ".claude" / "CLAUDE.private.md").exists()
