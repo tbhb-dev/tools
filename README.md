@@ -108,10 +108,11 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `loop` validates its user configuration and refuses to run until a later slice adds the shadow runner. Its pure functions derive the state of a pull request.
 - `install` installs the git hooks and the user-level harness hooks.
 
-Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does two things:
+Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does three things:
 
 - It installs that clone's git hooks into `$(git rev-parse --git-common-dir)/hooks`, which every worktree of the clone shares. prek runs pre-commit and pre-push, and three shims run `tbhbdev alpha identity` for prepare-commit-msg, commit-msg and post-commit. Without `tbhbdev` on PATH, the shims block a commit in a tbhb-dev repository and do nothing elsewhere.
 - It merges the hooks into each harness's user-level config: `settings.json` in `$CLAUDE_CONFIG_DIR` or `.claude` in `$HOME` for Claude Code, `hooks.json` in `$CODEX_HOME` or `.codex` in `$HOME` for Codex, and `.gemini/config/hooks.json` in `$HOME` for Antigravity.
+- When an installed plugin supplies `claude-private.md` or `mise-private.toml`, it writes them to `.claude/CLAUDE.private.md` and `.config/mise/conf.d/private.toml` in `$HOME`, readable by the user only. A file no plugin supplies is left alone.
 
 Each hook command it writes ends in `# tbhbdev alpha install`. A rerun replaces only those entries, and keeps everything else in place. Before it changes a config, it saves the old one beside it as `<name>.tbhbdev-backup.<time>`. `--dry-run` prints the changes without writing them, and `--harness claude|codex|antigravity` limits the merge to one harness. Codex asks you to trust new hooks with `/hooks`.
 

@@ -76,6 +76,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from tbhbdev import plugins
 from tbhbdev.alpha.identity import codex_home
 from tbhbdev.alpha.repo import (
     TBHB_DEV_ORIGIN_ERE,
@@ -433,6 +434,50 @@ def install_config(harness: str, env: Mapping[str, str], *, dry_run: bool) -> in
     return 0
 
 
+# ------------------------------------------------------------ private files
+
+# Config names a plugin may supply, and where each goes relative to HOME.
+PRIVATE_FILES = (
+    ("claude-private.md", Path(".claude") / "CLAUDE.private.md"),
+    ("mise-private.toml", Path(".config") / "mise" / "conf.d" / "private.toml"),
+)
+
+
+def install_private_files(*, dry_run: bool) -> int:
+    """Write each file a plugin supplies into HOME, leaving the rest alone.
+
+    The names come from this list, and the text from the plugin at run time,
+    so nothing private lives in this package.
+    """
+    status = 0
+    for name, relative in PRIVATE_FILES:
+        path = Path.home() / relative
+        try:
+            text = plugins.supplied(name)
+            if text is None:
+                continue
+            old = path.read_text() if path.exists() else None
+            if old == text:
+                print(f"{name}: {path} is up to date")
+                continue
+            if dry_run:
+                before = [] if old is None else old.splitlines(keepends=True)
+                diff = difflib.unified_diff(
+                    before, text.splitlines(keepends=True), str(path), str(path)
+                )
+                print("".join(diff), end="")
+                continue
+            backup = write_config(path, old, text)
+            path.chmod(0o600)
+        except (plugins.PluginError, InstallError, OSError) as exc:
+            print(f"{PROG}: {name}: cannot install {path}: {exc}", file=sys.stderr)
+            status = 1
+            continue
+        saved = f"; the old one is {backup}" if backup else ""
+        print(f"{name}: wrote {path}{saved}")
+    return status
+
+
 # ---------------------------------------------------------------- git hooks
 
 
@@ -730,4 +775,4 @@ def main(argv: list[str], prog: str) -> int:
     status = install_git_hooks(None, env, dry_run=args.dry_run)
     for harness in [args.harness] if args.harness else HARNESSES:
         status |= install_config(harness, env, dry_run=args.dry_run)
-    return status
+    return status | install_private_files(dry_run=args.dry_run)
