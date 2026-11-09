@@ -348,7 +348,7 @@ def test_wrong_schema_is_rejected(tmp_path: Path) -> None:
     raw.close()
     with pytest.raises(StoreError) as error:
         Store(path)
-    assert error.value.code == ErrorCode.CORRUPT
+    assert error.value.code == ErrorCode.SCHEMA_VERSION
 
 
 def test_integrity_check_rejects_damaged_rows(tmp_path: Path) -> None:
@@ -358,6 +358,7 @@ def test_integrity_check_rejects_damaged_rows(tmp_path: Path) -> None:
             "CREATE TABLE example (value INTEGER CHECK(value > 0));"
             "PRAGMA ignore_check_constraints = ON;"
             "INSERT INTO example VALUES (-1);"
+            "PRAGMA user_version = 3;"
         )
     raw.close()
     with pytest.raises(StoreError) as error:
@@ -723,3 +724,155 @@ def test_records_are_frozen(value: object, field: str) -> None:
 def test_all_rule_key_shapes_are_accepted(database: Store, key: str) -> None:
     assert database.record_intent(key, 0)
     assert database.action(key) == Action(key, ActionState.INTENT, 0, None, None, None)
+
+
+def test_shadow_dimensions_and_duplicate_claims(database: Store) -> None:
+    intent = store.ShadowIntent(KEY, EVENT.repository, "R1")
+    assert database.shadow_intents() == ()
+    assert database.record_shadow(intent, 10)
+    assert not database.record_shadow(intent, 11)
+    assert database.shadow_intents() == (intent,)
+    assert database.action(KEY) == Action(KEY, ActionState.SHADOW, 10, None, None, None)
+    assert database.record_intent(KEY, 12)
+    assert not database.record_shadow(intent, 13)
+    assert database.shadow_intents() == ()
+
+
+@pytest.mark.parametrize("result", [Result.AGREE, Result.DISAGREE, Result.NO_CHANGE])
+def test_score_shadow_persists_result(database: Store, result: Result) -> None:
+    assert database.record_intent(KEY, 10, shadow=True)
+    assert database.score_shadow(KEY, 11, result)
+    assert database.action(KEY) == Action(KEY, ActionState.SHADOW, 10, None, 11, result)
+    assert database.score_shadow(KEY, 12, Result.AGREE) is (result == Result.NO_CHANGE)
+    assert database.action(KEY) == Action(
+        KEY,
+        ActionState.SHADOW,
+        10,
+        None,
+        12 if result == Result.NO_CHANGE else 11,
+        Result.AGREE if result == Result.NO_CHANGE else result,
+    )
+
+
+@pytest.mark.parametrize(
+    "result", [Result.OK, Result.ERROR, Result.TIMEOUT, Result.REFUSED]
+)
+def test_score_rejects_live_results(database: Store, result: Result) -> None:
+    with pytest.raises(TransitionError):
+        database.score_shadow(KEY, 10, result)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        None,
+        ActionState.INTENT,
+        ActionState.STARTED,
+        ActionState.DONE,
+        ActionState.FAILED,
+    ],
+)
+def test_only_shadow_actions_can_be_scored(
+    database: Store, state: ActionState | None
+) -> None:
+    if state is not None:
+        advance(database, state)
+    with pytest.raises(TransitionError):
+        database.score_shadow(KEY, 13, Result.AGREE)
+
+
+def test_score_time_is_monotone(database: Store) -> None:
+    assert database.record_intent(KEY, 10, shadow=True)
+    assert not database.score_shadow(KEY, 9, Result.AGREE)
+    assert database.action(KEY) == Action(KEY, ActionState.SHADOW, 10, None, None, None)
+    assert database.score_shadow(KEY, 10, Result.NO_CHANGE)
+    assert database.score_shadow(KEY, 12, Result.NO_CHANGE)
+    assert not database.score_shadow(KEY, 11, Result.DISAGREE)
+    assert database.action(KEY) == Action(
+        KEY, ActionState.SHADOW, 10, None, 12, Result.NO_CHANGE
+    )
+    assert database.score_shadow(KEY, 12, Result.DISAGREE)
+
+
+def test_shadow_transaction_rollback(tmp_path: Path) -> None:
+    path = tmp_path / "example.sqlite3"
+    db = Store(path, mode=OpenMode.CREATE)
+    with store.sqlite3.connect(path) as raw:
+        raw.execute(
+            "CREATE TRIGGER deny_shadow BEFORE INSERT ON shadow_intents "
+            "BEGIN SELECT RAISE(ABORT, 'synthetic'); END"
+        )
+    raw.close()
+    with pytest.raises(StoreError) as error:
+        db.record_shadow(store.ShadowIntent(KEY, EVENT.repository, "R1"), 10)
+    assert error.value.code == ErrorCode.INVALID
+    assert db.action(KEY) is None
+    db.close()
+
+
+def test_shadow_score_update_failure_rolls_back(tmp_path: Path) -> None:
+    path = tmp_path / "example.sqlite3"
+    db = Store(path, mode=OpenMode.CREATE)
+    assert db.record_intent(KEY, 10, shadow=True)
+    with store.sqlite3.connect(path) as raw:
+        raw.execute(
+            "CREATE TRIGGER ignore_score BEFORE UPDATE ON actions "
+            "BEGIN SELECT RAISE(IGNORE); END"
+        )
+    raw.close()
+    with pytest.raises(TransitionError):
+        db.score_shadow(KEY, 11, Result.AGREE)
+    assert db.action(KEY) == Action(KEY, ActionState.SHADOW, 10, None, None, None)
+    db.close()
+
+
+def test_shadow_transactions_lock_before_read_or_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trace: list[str] = []
+    connect = store.sqlite3.connect
+
+    def traced(path: Path | Literal[":memory:"]) -> store.sqlite3.Connection:
+        connection = connect(path)
+        connection.set_trace_callback(trace.append)
+        return connection
+
+    monkeypatch.setattr(store.sqlite3, "connect", traced)
+    db = Store(tmp_path / "example.sqlite3", mode=OpenMode.CREATE)
+    trace.clear()
+    assert db.record_shadow(store.ShadowIntent(KEY, EVENT.repository, "R1"), 0)
+    assert trace[0] == "BEGIN IMMEDIATE"
+    trace.clear()
+    assert db.score_shadow(KEY, 0, Result.NO_CHANGE)
+    assert trace[0] == "BEGIN IMMEDIATE"
+    db.close()
+
+
+def test_one_shadow_key_can_have_multiple_report_dimensions(database: Store) -> None:
+    first = store.ShadowIntent("sweep:12", EVENT.repository, "R0")
+    other = store.ShadowIntent("sweep:12", "example-org/other", "R0")
+    assert database.record_shadow(first, 1)
+    assert not database.record_shadow(other, 2)
+    assert database.shadow_intents() == (first, other)
+    assert database.action("sweep:12") == Action(
+        "sweep:12", ActionState.SHADOW, 1, None, None, None
+    )
+    assert database.shadow_results() == ((first, None), (other, None))
+
+
+@pytest.mark.parametrize("result", ["untrusted", "ok"])
+def test_report_rejects_invalid_shadow_results(tmp_path: Path, result: str) -> None:
+    path = tmp_path / "example.sqlite3"
+    db = Store(path, mode=OpenMode.CREATE)
+    assert db.record_shadow(store.ShadowIntent(KEY, EVENT.repository, "R1"), 1)
+    with store.sqlite3.connect(path) as raw:
+        raw.execute("PRAGMA ignore_check_constraints = ON")
+        raw.execute("UPDATE actions SET result = ?", (result,))
+    raw.close()
+    with pytest.raises(StoreError) as error:
+        db.shadow_results()
+    assert error.value.code == ErrorCode.CORRUPT
+    with pytest.raises(StoreError) as closed:
+        db.shadow_results()
+    assert closed.value.code == ErrorCode.CLOSED
+    db.close()

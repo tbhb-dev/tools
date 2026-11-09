@@ -30,6 +30,7 @@ from collections.abc import MutableMapping
 from typing import TYPE_CHECKING
 
 import tomlkit
+from tomlkit.container import OutOfOrderTableProxy
 from tomlkit.exceptions import TOMLKitError
 from tomlkit.items import Table
 
@@ -118,16 +119,21 @@ def our_hashes(
     return found
 
 
-def sub_table(parent: Table | tomlkit.TOMLDocument, name: str, label: str) -> Table:
+def sub_table(
+    parent: Table | OutOfOrderTableProxy | tomlkit.TOMLDocument, name: str, label: str
+) -> Table | OutOfOrderTableProxy:
     """The table `name` in PARENT, made when missing.
 
-    LABEL is the dotted name for the error when something else is there.
+    A table that other tables interrupt, as when something is appended after
+    `[hooks.state."a"]` and then another `[hooks.state."b"]`, comes back as an
+    OutOfOrderTableProxy, which edits the same way. LABEL is the dotted name
+    for the error when something else is there.
     """
     child = parent.get(name)
     if child is None:
         child = tomlkit.table()
         parent[name] = child
-    elif not isinstance(child, Table):
+    elif not isinstance(child, Table | OutOfOrderTableProxy):
         message = f"its {label} is not a table"
         raise ValueError(message)
     return child

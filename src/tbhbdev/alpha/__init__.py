@@ -13,6 +13,8 @@ import sys
 from typing import TYPE_CHECKING
 
 from tbhbdev.alpha import (
+    gh_shim,
+    guard_gh_poll,
     guard_gh_pr,
     guard_op,
     identity,
@@ -26,6 +28,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 __all__ = [
+    "gh_shim",
+    "guard_gh_poll",
     "guard_gh_pr",
     "guard_op",
     "identity",
@@ -49,6 +53,9 @@ commands:
   state-guard  Claude Code hook: block status claims that carry no evidence
   session-context
                SessionStart hook: name the host, the other hosts and the time
+  guard-gh-poll PreToolUse hook: block bulk GitHub reads and token unsets
+  gh-shim      budget gh calls made by agent sessions and their scripts
+  agent-env    launch a harness with the gh shim first on PATH
   pr           check | create | edit | hook: the pull request draft
                | backfill-opened OWNER: the opened ledgers
                | close N --reason TEXT: close a pull request
@@ -77,6 +84,10 @@ def state_guard_command(_argv: list[str], _prog: str) -> int:
 
 def session_context_command(_argv: list[str], _prog: str) -> int:
     return session_context.main()
+
+
+def poll_command(_argv: list[str], _prog: str) -> int:
+    return guard_gh_poll.main()
 
 
 def pr(argv: list[str], prog: str) -> int:
@@ -111,6 +122,9 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "guard-op": guard_op_command,
     "state-guard": state_guard_command,
     "session-context": session_context_command,
+    "guard-gh-poll": poll_command,
+    "gh-shim": gh_shim.main,
+    "agent-env": gh_shim.agent_env,
     "pr": pr,
     "issue": issue,
     "merge": merge,

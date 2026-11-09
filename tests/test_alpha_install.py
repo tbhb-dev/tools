@@ -4,9 +4,11 @@ Every test runs with HOME, the harness config directories and the git config
 in tmp_path, in temporary repositories, with a fake prek on PATH.
 """
 
+import hashlib
 import io
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -23,7 +25,7 @@ import pytest
 from fake_tool import link_git, write_fake
 from origin_urls import OTHER_URLS, TBHB_DEV_URLS
 
-from tbhbdev.alpha import codex_trust, install, repo
+from tbhbdev.alpha import codex_trust, gh_shim, install, repo
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -134,6 +136,8 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_fake(bin_dir / "prek", FAKE_PREK)
@@ -213,6 +217,10 @@ def test_claude_hooks() -> None:
                 "matcher": "Write|Edit|MultiEdit|NotebookEdit",
                 "hooks": [{"type": "command", "command": marked("guard-op")}],
             },
+            {
+                "matcher": "Bash",
+                "hooks": [{"type": "command", "command": marked("guard-gh-poll")}],
+            },
             {"matcher": "Bash|SendMessage|Write|Edit", "hooks": [guard]},
         ],
         "Stop": [{"hooks": [guard]}],
@@ -261,6 +269,7 @@ def test_codex_hooks() -> None:
         ],
         "PreToolUse": [
             {"matcher": "^Bash$", "hooks": [one("guard-gh-pr")]},
+            {"matcher": "^Bash$", "hooks": [one("guard-gh-poll")]},
             {"matcher": "^(Bash|shell)$", "hooks": [one("guard-op")]},
             {"matcher": "apply_patch", "hooks": [one("guard-op")]},
         ],
@@ -321,6 +330,20 @@ def test_agy_hooks() -> None:
                             "type": "command",
                             "command": marked("pr hook antigravity"),
                             "timeout": 120,
+                        }
+                    ],
+                }
+            ],
+        },
+        "tbhbdev-alpha-gh-poll": {
+            "PreToolUse": [
+                {
+                    "matcher": "run_command",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": marked("guard-gh-poll"),
+                            "timeout": 30,
                         }
                     ],
                 }
@@ -470,8 +493,22 @@ def test_merge_groups_sets_its_named_groups_and_keeps_the_rest() -> None:
 
 
 def test_merged_config_per_harness() -> None:
-    assert install.merged_config("claude", {}) == {"hooks": install.claude_hooks()}
+    assert install.merged_config("claude", {}) == {
+        "hooks": install.claude_hooks(),
+        "env": {"SSH_AUTH_SOCK": ""},
+    }
+    assert install.merged_config(
+        "claude", {"env": {"A": "1", "SSH_AUTH_SOCK": "x"}}
+    ) == {
+        "env": {"A": "1", "SSH_AUTH_SOCK": ""},
+        "hooks": install.claude_hooks(),
+    }
     assert install.merged_config("codex", {}) == {"hooks": install.codex_hooks()}
+
+
+def test_merged_config_refuses_an_env_that_is_not_an_object() -> None:
+    with pytest.raises(install.InstallError, match=r"^its env key is not an object$"):
+        install.merged_config("claude", {"env": []})
 
 
 # --------------------------------------------------------- reading, writing
@@ -641,7 +678,10 @@ def test_install_config_writes_then_is_up_to_date(
     path = world.home / ".claude" / "settings.json"
     assert install.install_config("claude", {}, dry_run=False) == 0
     assert capsys.readouterr().out == f"claude: wrote {path}\n"
-    assert json.loads(path.read_text()) == {"hooks": install.claude_hooks()}
+    assert json.loads(path.read_text()) == {
+        "hooks": install.claude_hooks(),
+        "env": {"SSH_AUTH_SOCK": ""},
+    }
     assert install.install_config("claude", {}, dry_run=False) == 0
     assert capsys.readouterr().out == f"claude: {path} is up to date\n"
     assert [p.name for p in path.parent.iterdir()] == ["settings.json"]
@@ -667,6 +707,7 @@ def test_install_config_keeps_the_users_settings_and_backs_up(
             **install.claude_hooks(),
             "Stop": [{"hooks": [THEIRS]}, *install.claude_hooks()["Stop"]],
         },
+        "env": {"SSH_AUTH_SOCK": ""},
     }
 
 
@@ -678,7 +719,7 @@ def test_install_config_codex_trusts_its_hooks(
     assert install.install_config("codex", env, dry_run=False) == 0
     assert capsys.readouterr().out == (
         f"codex: wrote {codex / 'hooks.json'}\n"
-        f"codex: trusted 7 hooks in {codex / 'config.toml'}\n"
+        f"codex: trusted 8 hooks in {codex / 'config.toml'}\n"
     )
 
 
@@ -761,7 +802,10 @@ def test_install_config_fills_an_empty_config(
         f"claude: wrote {path}; the old one is {backup}\n"
     )
     assert backup.read_text() == "\n"
-    assert json.loads(path.read_text()) == {"hooks": install.claude_hooks()}
+    assert json.loads(path.read_text()) == {
+        "hooks": install.claude_hooks(),
+        "env": {"SSH_AUTH_SOCK": ""},
+    }
 
 
 # ------------------------------------------------------- trusting Codex hooks
@@ -800,9 +844,12 @@ def our_trust(hooks: Path) -> dict[str, str]:
             "pre_tool_use", "^Bash$", "guard-gh-pr"
         ),
         f"{hooks}:pre_tool_use:1:0": trust_hash(
-            "pre_tool_use", "^(Bash|shell)$", "guard-op"
+            "pre_tool_use", "^Bash$", "guard-gh-poll"
         ),
         f"{hooks}:pre_tool_use:2:0": trust_hash(
+            "pre_tool_use", "^(Bash|shell)$", "guard-op"
+        ),
+        f"{hooks}:pre_tool_use:3:0": trust_hash(
             "pre_tool_use", "apply_patch", "guard-op"
         ),
     }
@@ -865,6 +912,7 @@ def test_install_config_codex_trusts_only_its_own_among_foreign_groups(
     assert [g.get("matcher") for g in written] == [
         "^Bash$",
         "^Bash$",
+        "^Bash$",
         "^(Bash|shell)$",
         "apply_patch",
         "x",
@@ -872,7 +920,7 @@ def test_install_config_codex_trusts_only_its_own_among_foreign_groups(
     ]
     assert [g["hooks"] for g in written] == [
         [THEIRS],
-        *(g["hooks"] for g in written[1:4]),
+        *(g["hooks"] for g in written[1:5]),
         [THEIRS, THEIRS],
         [THEIRS],
     ]
@@ -886,9 +934,12 @@ def test_install_config_codex_trusts_only_its_own_among_foreign_groups(
             "pre_tool_use", "^Bash$", "guard-gh-pr"
         ),
         f"{hooks}:pre_tool_use:2:0": trust_hash(
-            "pre_tool_use", "^(Bash|shell)$", "guard-op"
+            "pre_tool_use", "^Bash$", "guard-gh-poll"
         ),
         f"{hooks}:pre_tool_use:3:0": trust_hash(
+            "pre_tool_use", "^(Bash|shell)$", "guard-op"
+        ),
+        f"{hooks}:pre_tool_use:4:0": trust_hash(
             "pre_tool_use", "apply_patch", "guard-op"
         ),
     }
@@ -922,7 +973,7 @@ def test_install_config_codex_keeps_everything_else_in_config_toml(
     assert install.install_config("codex", env, dry_run=False) == 0
     backup = codex / "config.toml.tbhbdev-backup.T"
     assert capsys.readouterr().out.endswith(
-        f"codex: trusted 7 hooks in {config}; the old one is {backup}\n"
+        f"codex: trusted 8 hooks in {config}; the old one is {backup}\n"
     )
     assert backup.read_text() == FOREIGN_CONFIG
     assert stat.S_IMODE(config.stat().st_mode) == 0o644
@@ -930,6 +981,7 @@ def test_install_config_codex_keeps_everything_else_in_config_toml(
     new = config.read_text()
     assert set(FOREIGN_CONFIG.splitlines()) <= set(new.splitlines())
     expected = tomllib.loads(FOREIGN_CONFIG)
+    expected["shell_environment_policy"] = {"set": {"SSH_AUTH_SOCK": ""}}
     expected["hooks"]["state"] |= {
         key: {"trusted_hash": digest}
         for key, digest in our_trust(codex / "hooks.json").items()
@@ -950,7 +1002,7 @@ def test_install_config_codex_twice_changes_nothing_the_second_time(
     assert install.install_config("codex", env, dry_run=False) == 0
     assert capsys.readouterr().out == (
         f"codex: {codex / 'hooks.json'} is up to date\n"
-        f"codex: 7 hooks already trusted in {config}\n"
+        f"codex: 8 hooks already trusted in {config}\n"
     )
     assert config.read_bytes() == first
     assert sorted(p.name for p in codex.iterdir()) == [
@@ -976,7 +1028,7 @@ def test_install_config_codex_trusts_again_when_only_config_toml_was_lost(
     assert install.install_config("codex", env, dry_run=False) == 0
     assert capsys.readouterr().out == (
         f"codex: {codex / 'hooks.json'} is up to date\n"
-        f"codex: trusted 7 hooks in {codex / 'config.toml'}\n"
+        f"codex: trusted 8 hooks in {codex / 'config.toml'}\n"
     )
     assert trusted_in(codex / "config.toml") == our_trust(codex / "hooks.json")
 
@@ -1000,6 +1052,7 @@ def test_install_config_codex_drops_the_entry_of_a_hook_that_moved(
     assert moved[f"{hooks}:pre_tool_use:1:0"] == first[f"{hooks}:pre_tool_use:0:0"]
     assert moved[f"{hooks}:pre_tool_use:2:0"] == first[f"{hooks}:pre_tool_use:1:0"]
     assert moved[f"{hooks}:pre_tool_use:3:0"] == first[f"{hooks}:pre_tool_use:2:0"]
+    assert moved[f"{hooks}:pre_tool_use:4:0"] == first[f"{hooks}:pre_tool_use:3:0"]
     # The foreign hook's own entry, whatever its hash, is left alone.
     config.write_text(
         config.read_text() + f'\n[hooks.state."{hooks}:pre_tool_use:0:0"]\n'
@@ -1032,6 +1085,21 @@ def test_install_config_codex_reports_a_config_toml_it_cannot_edit(
     assert captured.err.count("\n") == 1
     assert config.read_text() == text
     assert sorted(p.name for p in codex.iterdir()) == ["config.toml", "hooks.json"]
+
+
+def test_install_config_codex_trusts_a_config_toml_whose_environment_cannot_merge(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env, codex = codex_env(world)
+    config = codex / "config.toml"
+    codex.mkdir()
+    config.write_text("shell_environment_policy = 3\n")
+    assert install.install_config("codex", env, dry_run=False) == 0
+    assert trusted_in(config) == our_trust(codex / "hooks.json")
+    assert tomllib.loads(config.read_text())["shell_environment_policy"] == 3
+    capsys.readouterr()
+    assert install.install_codex_environment(env, dry_run=False) == 1
+    assert "its shell_environment_policy is not a table" in capsys.readouterr().err
 
 
 def test_install_config_codex_reports_a_config_toml_it_cannot_read(
@@ -1105,7 +1173,7 @@ def test_install_config_codex_dry_run_with_trust_up_to_date_prints_no_diff(
     assert install.install_config("codex", env, dry_run=True) == 0
     assert capsys.readouterr().out == (
         f"codex: {codex / 'hooks.json'} is up to date\n"
-        f"codex: 7 hooks already trusted in {codex / 'config.toml'}\n"
+        f"codex: 8 hooks already trusted in {codex / 'config.toml'}\n"
     )
 
 
@@ -1907,6 +1975,14 @@ def test_main_honors_the_harness_config_variables(
 def test_main_one_harness(world: World) -> None:
     assert install.main(["--harness", "codex"], "p") == 0
     assert sorted(p.name for p in world.home.iterdir()) == [".codex"]
+    codex = world.home / ".codex"
+    assert sorted(p.name for p in codex.iterdir()) == ["config.toml", "hooks.json"]
+    assert (gh_shim.bin_dir() / "gh").is_file()
+
+
+def test_main_claude_only_leaves_codex_config_alone(world: World) -> None:
+    assert install.main(["--harness", "claude"], "p") == 0
+    assert sorted(p.name for p in world.home.iterdir()) == [".claude"]
 
 
 def test_main_dry_run_writes_nothing(
@@ -1915,8 +1991,13 @@ def test_main_dry_run_writes_nothing(
     assert install.main(["--dry-run"], "p") == 0
     out = capsys.readouterr().out
     assert out.startswith("would install prek's")
-    assert out.count("+++ ") == 4
+    # Codex's config.toml has two edits, trust and the environment, and a dry
+    # run prints each against the file as it is on disk.
+    assert out.count("+++ ") == 5
+    assert out.count(f"+++ {world.home / '.codex' / 'config.toml'}\n") == 2
+    assert f"gh-shim: would write {gh_shim.bin_dir() / 'gh'}\n" in out
     assert list(world.home.iterdir()) == []
+    assert not gh_shim.bin_dir().parent.exists()
     assert world.prek_calls() == []
 
 
@@ -1928,6 +2009,18 @@ def test_main_status_is_any_failure(
     path.write_text("[]")
     assert install.main([], "p") == 1
     assert "claude: cannot merge" in capsys.readouterr().err
+    assert (world.home / ".codex" / "hooks.json").is_file()
+
+
+@pytest.mark.parametrize("failing", ["install_git_hooks", "install_gh_shim"])
+def test_main_status_keeps_an_early_failure(
+    world: World, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> int:
+        return 1
+
+    monkeypatch.setattr(install, failing, fail)
+    assert install.main([], "p") == 1
     assert (world.home / ".codex" / "hooks.json").is_file()
 
 
@@ -2030,8 +2123,8 @@ options:
   --harness {claude,codex,antigravity}
                         merge only this harness's config
   --dry-run             print the changes, write nothing
-  --hook                SessionStart hook: install the git hooks of the
-                        payload's worktree
+  --hook                SessionStart hook: put the gh shim on PATH and install
+                        the git hooks of the payload's worktree
 """
 
 
@@ -2247,3 +2340,513 @@ def test_write_config_without_a_mode_keeps_the_old_mode_and_its_backup(
     assert backup is not None
     assert path.stat().st_mode & 0o777 == 0o640
     assert backup.stat().st_mode & 0o777 == 0o640
+
+
+# ---------------------------------------------------------- gh environment
+
+
+def shim_path() -> Path:
+    return gh_shim.bin_dir() / "gh"
+
+
+def test_install_gh_shim_writes_then_is_up_to_date(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    del world
+    path = shim_path()
+    assert install.install_gh_shim(dry_run=False) == 0
+    assert capsys.readouterr().out == f"gh-shim: wrote {path}\n"
+    assert path.read_text() == gh_shim.wrapper_text()
+    assert path.stat().st_mode & 0o7777 == 0o755
+    assert install.install_gh_shim(dry_run=False) == 0
+    assert install.install_gh_shim(dry_run=True) == 0
+    assert capsys.readouterr().out == f"gh-shim: {path} is up to date\n" * 2
+    assert [p.name for p in path.parent.iterdir()] == ["gh"]
+
+
+def test_install_gh_shim_needs_no_tbhbdev_on_path(world: World) -> None:
+    del world
+    assert shutil.which("tbhbdev") is None
+    assert install.install_gh_shim(dry_run=False) == 0
+    assert shlex.quote(sys.executable) in shim_path().read_text()
+
+
+@pytest.mark.parametrize(("text", "mode"), [(None, 0o644), ("old\n", 0o755)])
+def test_install_gh_shim_replaces_a_stale_shim(
+    world: World, capsys: pytest.CaptureFixture[str], text: str | None, mode: int
+) -> None:
+    del world
+    path = shim_path()
+    path.parent.mkdir(parents=True)
+    path.write_text(text or gh_shim.wrapper_text())
+    path.chmod(mode)
+    assert install.install_gh_shim(dry_run=True) == 0
+    assert capsys.readouterr().out == f"gh-shim: would write {path}\n"
+    assert path.stat().st_mode & 0o777 == mode
+    assert install.install_gh_shim(dry_run=False) == 0
+    assert capsys.readouterr().out == f"gh-shim: wrote {path}\n"
+    assert path.read_text() == gh_shim.wrapper_text()
+    assert path.stat().st_mode & 0o777 == 0o755
+
+
+def test_install_gh_shim_reports_a_failure(
+    world: World, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    del world
+    (tmp_path / "xdg-data").write_text("")
+    path = shim_path()
+    assert install.install_gh_shim(dry_run=False) == 1
+    assert capsys.readouterr() == (
+        "",
+        (
+            f"tbhbdev alpha install: gh-shim: cannot write {path}: [Errno 20] "
+            f"Not a directory: {str(path.parent)!r}\n"
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (None, '[shell_environment_policy.set]\nSSH_AUTH_SOCK = ""\n'),
+        ("", '[shell_environment_policy.set]\nSSH_AUTH_SOCK = ""\n'),
+        (
+            '# mine\nmodel = "o3"\n\n[mcp_servers.x]\ncommand = "y"\n',
+            (
+                '# mine\nmodel = "o3"\n\n[mcp_servers.x]\ncommand = "y"\n\n'
+                '[shell_environment_policy.set]\nSSH_AUTH_SOCK = ""\n'
+            ),
+        ),
+        (
+            '[shell_environment_policy]\ninherit = "core"\n',
+            (
+                '[shell_environment_policy]\ninherit = "core"\n\n'
+                '[shell_environment_policy.set]\nSSH_AUTH_SOCK = ""\n'
+            ),
+        ),
+        (
+            'shell_environment_policy = { inherit = "core" }\n',
+            (
+                'shell_environment_policy = { inherit = "core", '
+                'set = {SSH_AUTH_SOCK = ""}}\n'
+            ),
+        ),
+        (
+            'shell_environment_policy.set = { A = "1" }\n',
+            'shell_environment_policy.set = { A = "1", SSH_AUTH_SOCK = ""}\n',
+        ),
+        (
+            '[shell_environment_policy.set]\nSSH_AUTH_SOCK = "x"\nB = "2"\n',
+            '[shell_environment_policy.set]\nSSH_AUTH_SOCK = ""\nB = "2"\n',
+        ),
+    ],
+)
+def test_merged_codex_config(tmp_path: Path, before: str | None, after: str) -> None:
+    path = tmp_path / "config.toml"
+    if before is not None:
+        path.write_text(before)
+    assert install.merged_codex_config(path) == (before, after)
+    policy = tomllib.loads(after)["shell_environment_policy"]
+    assert policy["set"]["SSH_AUTH_SOCK"] == ""
+    path.write_text(after)
+    assert install.merged_codex_config(path) == (after, after)
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        (
+            "shell_environment_policy = 3\n",
+            "its shell_environment_policy is not a table",
+        ),
+        (
+            "[shell_environment_policy]\nset = 3\n",
+            "its shell_environment_policy.set is not a table",
+        ),
+        ("[x\n", "it is not valid TOML ("),
+        (b"\xff", "it cannot be read ("),
+    ],
+)
+def test_merged_codex_config_refuses_what_it_cannot_merge(
+    tmp_path: Path, text: str | bytes, message: str
+) -> None:
+    path = tmp_path / "config.toml"
+    if isinstance(text, bytes):
+        path.write_bytes(text)
+    else:
+        path.write_text(text)
+    with pytest.raises(install.InstallError) as raised:
+        install.merged_codex_config(path)
+    assert str(raised.value).startswith(message)
+
+
+def test_merged_codex_config_reports_a_directory(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.mkdir()
+    with pytest.raises(install.InstallError) as raised:
+        install.merged_codex_config(path)
+    assert str(raised.value) == (
+        f"it cannot be read ([Errno 21] Is a directory: {str(path)!r})"
+    )
+
+
+def test_install_codex_environment_writes_then_is_up_to_date(
+    world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(install, "stamp", lambda: "T")
+    home = world.home / "codex-home"
+    env = {"CODEX_HOME": str(home)}
+    path = home / "config.toml"
+    home.mkdir()
+    path.write_text('model = "o3"\n')
+    assert install.install_codex_environment(env, dry_run=False) == 0
+    backup = path.with_name("config.toml.tbhbdev-backup.T")
+    assert capsys.readouterr().out == (
+        f"codex: wrote {path}; the old one is {backup}\n"
+    )
+    assert backup.read_text() == 'model = "o3"\n'
+    assert tomllib.loads(path.read_text()) == {
+        "model": "o3",
+        "shell_environment_policy": {"set": {"SSH_AUTH_SOCK": ""}},
+    }
+    assert install.install_codex_environment(env, dry_run=False) == 0
+    assert capsys.readouterr().out == f"codex: {path} is up to date\n"
+    assert sorted(p.name for p in home.iterdir()) == [
+        "config.toml",
+        "config.toml.tbhbdev-backup.T",
+    ]
+
+
+def test_install_codex_environment_dry_run(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = world.home / ".codex" / "config.toml"
+    assert install.install_codex_environment({}, dry_run=True) == 0
+    assert capsys.readouterr().out == (
+        f"--- {path}\n+++ {path}\n@@ -0,0 +1,2 @@\n"
+        '+[shell_environment_policy.set]\n+SSH_AUTH_SOCK = ""\n'
+    )
+    assert not path.exists()
+
+
+def test_install_codex_environment_reports_a_config_it_cannot_merge(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = world.home / ".codex" / "config.toml"
+    path.parent.mkdir()
+    path.write_text("shell_environment_policy = 3\n")
+    assert install.install_codex_environment({}, dry_run=False) == 1
+    assert capsys.readouterr() == (
+        "",
+        (
+            f"tbhbdev alpha install: codex: cannot merge into {path}: "
+            "its shell_environment_policy is not a table\n"
+        ),
+    )
+    assert path.read_text() == "shell_environment_policy = 3\n"
+
+
+def export_line() -> str:
+    return f'export PATH={shlex.quote(str(gh_shim.bin_dir()))}":$PATH"'
+
+
+def test_export_shim_path_without_an_env_file(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    del world
+    install.export_shim_path({}, dry_run=False)
+    install.export_shim_path({"CLAUDE_ENV_FILE": ""}, dry_run=False)
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (None, "{line}\n"),
+        ("", "{line}\n"),
+        ("export A=1\n", "export A=1\n{line}\n"),
+        ("export A=1", "export A=1\n{line}\n"),
+    ],
+)
+def test_export_shim_path_appends_once(
+    world: World,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    before: str | None,
+    after: str,
+) -> None:
+    del world
+    path = tmp_path / "env.sh"
+    if before is not None:
+        path.write_text(before)
+    env = {"CLAUDE_ENV_FILE": str(path)}
+    install.export_shim_path(env, dry_run=False)
+    install.export_shim_path(env, dry_run=False)
+    install.export_shim_path(env, dry_run=True)
+    assert path.read_text() == after.format(line=export_line())
+    assert capsys.readouterr() == ("", "")
+
+
+def test_export_shim_path_puts_the_shim_first_when_sourced(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del world
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data dir's"))
+    path = tmp_path / "env.sh"
+    install.export_shim_path({"CLAUDE_ENV_FILE": str(path)}, dry_run=False)
+    done = subprocess.run(
+        ["/bin/sh", "-c", '. "$1"; printf %s "$PATH"', "sh", str(path)],
+        env={"PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert done.stdout == f"{gh_shim.bin_dir()}:/usr/bin:/bin"
+
+
+def test_export_shim_path_dry_run(
+    world: World, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    del world
+    path = tmp_path / "env.sh"
+    install.export_shim_path({"CLAUDE_ENV_FILE": str(path)}, dry_run=True)
+    assert capsys.readouterr().out == f"would add to {path}: {export_line()}\n"
+    assert not path.exists()
+
+
+def test_export_shim_path_reports_a_failure(
+    world: World, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    del world
+    path = tmp_path / "env.sh"
+    path.mkdir()
+    install.export_shim_path({"CLAUDE_ENV_FILE": str(path)}, dry_run=False)
+    assert capsys.readouterr() == (
+        "",
+        (
+            "tbhbdev alpha install: cannot put the gh shim on PATH: "
+            f"[Errno 21] Is a directory: {str(path)!r}\n"
+        ),
+    )
+
+
+def test_main_hook_exports_the_shim_path_on_stderr_only(
+    world: World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "env.sh"
+    monkeypatch.setenv("CLAUDE_ENV_FILE", str(path))
+    other = make_repo(tmp_path / "other", "https://github.com/someone/x")
+    feed(monkeypatch, {"cwd": str(other)})
+    assert install.main(["--hook", "--dry-run"], "p") == 0
+    assert capsys.readouterr() == ("", f"would add to {path}: {export_line()}\n")
+    feed(monkeypatch, {"cwd": str(other)})
+    assert install.main(["--hook"], "p") == 0
+    assert capsys.readouterr() == ("", "")
+    assert path.read_text() == f"{export_line()}\n"
+    assert world.prek_calls() == []
+
+
+def test_main_twice_changes_nothing_the_second_time(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert shutil.which("op") is None
+    assert install.main([], "p") == 0
+    capsys.readouterr()
+    before = {
+        p: (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns)
+        for root in (world.home, gh_shim.bin_dir())
+        for p in root.rglob("*")
+        if p.is_file()
+    }
+    assert install.main([], "p") == 0
+    out = capsys.readouterr().out
+    for path in (
+        world.home / ".claude" / "settings.json",
+        world.home / ".codex" / "hooks.json",
+        world.home / ".codex" / "config.toml",
+        world.home / ".gemini" / "config" / "hooks.json",
+        shim_path(),
+    ):
+        assert f"{path} is up to date\n" in out
+    assert "wrote" not in out
+    after = {
+        p: (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns)
+        for root in (world.home, gh_shim.bin_dir())
+        for p in root.rglob("*")
+        if p.is_file()
+    }
+    assert after == before
+    assert not [p for p in world.home.rglob("*") if "tbhbdev-backup" in p.name]
+    settings = json.loads((world.home / ".claude" / "settings.json").read_text())
+    assert settings["env"] == {"SSH_AUTH_SOCK": ""}
+    assert "PATH" not in settings["env"]
+    codex = tomllib.loads((world.home / ".codex" / "config.toml").read_text())
+    assert (
+        codex.pop("hooks")["state"].keys()
+        == trusted_in(world.home / ".codex" / "config.toml").keys()
+    )
+    assert codex == {"shell_environment_policy": {"set": {"SSH_AUTH_SOCK": ""}}}
+
+
+def test_main_keeps_existing_settings_and_codex_keys(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = world.home / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({"env": {"FOO": "1"}, "model": "opus"}))
+    config = world.home / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        '# keep me\nmodel = "o3"\n\n[shell_environment_policy]\ninherit = "core"\n'
+        '\n[shell_environment_policy.set]\nBAR = "2"\n'
+    )
+    assert install.main([], "p") == 0
+    capsys.readouterr()
+    merged = json.loads(settings.read_text())
+    assert merged["env"] == {"FOO": "1", "SSH_AUTH_SOCK": ""}
+    assert merged["model"] == "opus"
+    text = config.read_text()
+    assert text.startswith('# keep me\nmodel = "o3"\n')
+    parsed = tomllib.loads(text)
+    assert parsed.pop("hooks")["state"]
+    assert parsed == {
+        "model": "o3",
+        "shell_environment_policy": {
+            "inherit": "core",
+            "set": {"BAR": "2", "SSH_AUTH_SOCK": ""},
+        },
+    }
+
+
+def test_main_twice_with_existing_configs_changes_nothing_the_second_time(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = world.home / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text(json.dumps({"env": {"FOO": "1", "SSH_AUTH_SOCK": "/x"}}))
+    config = world.home / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        '# keep me\nmodel = "o3"\n\n[shell_environment_policy.set]\n'
+        'SSH_AUTH_SOCK = "/x"\nBAR = "2"\n'
+    )
+    assert install.main([], "p") == 0
+    capsys.readouterr()
+    snapshot = {
+        p: (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in [*world.home.rglob("*"), *gh_shim.bin_dir().rglob("*")]
+        if p.is_file()
+    }
+    assert json.loads(settings.read_text())["env"] == {"FOO": "1", "SSH_AUTH_SOCK": ""}
+    assert 'SSH_AUTH_SOCK = ""' in config.read_text()
+    assert install.main([], "p") == 0
+    out = capsys.readouterr().out
+    assert f"claude: {settings} is up to date\n" in out
+    assert f"codex: {config} is up to date\n" in out
+    assert "wrote" not in out
+    assert snapshot == {
+        p: (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in [*world.home.rglob("*"), *gh_shim.bin_dir().rglob("*")]
+        if p.is_file()
+    }
+    backups = [p for p in world.home.rglob("*") if "tbhbdev-backup" in p.name]
+    assert len(backups) == 2
+
+
+USER_CODEX_CONFIG = """# my Codex settings
+model = "o3"
+
+[env]
+MINE = "1"
+
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+BAR = "2"
+
+[hooks.state."/elsewhere/hooks.json:pre_tool_use:0:0"]
+trusted_hash = "sha256:foreign"
+"""
+
+
+def test_main_twice_trusts_every_codex_hook_and_sets_the_environment(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = world.home / ".codex" / "config.toml"
+    hooks = world.home / ".codex" / "hooks.json"
+    config.parent.mkdir()
+    config.write_text(USER_CODEX_CONFIG)
+    assert install.main(["--harness", "codex"], "p") == 0
+    capsys.readouterr()
+    first = config.read_bytes()
+    parsed = tomllib.loads(first.decode())
+    # Every Codex handler of ours has the hash of what is on disk, including the
+    # gh poll guard, whose hash is spelled out here rather than computed.
+    written = json.loads(hooks.read_text())["hooks"]
+    ours = [
+        (event, at, one)
+        for event, groups in written.items()
+        for at, group in enumerate(groups)
+        for one in group["hooks"]
+    ]
+    assert len(ours) == 8
+    state = parsed["hooks"]["state"]
+    for event, at, one in ours:
+        assert one["timeout"] == install.CODEX_TIMEOUT
+        label = {"SessionStart": "session_start", "SubagentStart": "subagent_start"}
+        label = label.get(event, "post_tool_use" if "Post" in event else "pre_tool_use")
+        group = written[event][at]
+        body = {
+            "event_name": label,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": one["command"],
+                    "timeout": 600,
+                    "async": False,
+                }
+            ],
+        }
+        if "matcher" in group:
+            body["matcher"] = group["matcher"]
+        compact = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        digest = "sha256:" + hashlib.sha256(compact.encode()).hexdigest()
+        assert state[f"{hooks}:{label}:{at}:0"] == {"trusted_hash": digest}
+    poll = f"{hooks}:pre_tool_use:1:0"
+    assert written["PreToolUse"][1]["hooks"][0]["command"] == marked("guard-gh-poll")
+    assert state[poll]["trusted_hash"] == trust_hash(
+        "pre_tool_use", "^Bash$", "guard-gh-poll"
+    )
+    assert trusted_in(config) == {
+        "/elsewhere/hooks.json:pre_tool_use:0:0": "sha256:foreign",
+        **our_trust(hooks),
+    }
+    # The environment is set, and none of the user's keys is lost.
+    assert parsed["shell_environment_policy"] == {
+        "inherit": "core",
+        "set": {"BAR": "2", "SSH_AUTH_SOCK": ""},
+    }
+    assert parsed["env"] == {"MINE": "1"}
+    assert parsed["model"] == "o3"
+    assert first.decode().startswith('# my Codex settings\nmodel = "o3"\n')
+    # A second run writes nothing.
+    snapshot = {
+        p: (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in world.home.rglob("*")
+        if p.is_file()
+    }
+    assert install.main(["--harness", "codex"], "p") == 0
+    out = capsys.readouterr().out
+    assert f"codex: 8 hooks already trusted in {config}\n" in out
+    assert f"codex: {config} is up to date\n" in out
+    assert "wrote" not in out
+    assert config.read_bytes() == first
+    assert snapshot == {
+        p: (p.read_bytes(), p.stat().st_mtime_ns)
+        for p in world.home.rglob("*")
+        if p.is_file()
+    }

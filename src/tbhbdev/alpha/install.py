@@ -43,7 +43,9 @@ there for each Codex hook it wrote, and for no other hook (see codex_trust). The
 file is backed up and replaced like the other configs, a new one is private
 (mode 0600), an invalid one is reported and left alone, and a run that changes
 nothing writes nothing. Each Codex hook has an explicit timeout, so the hash
-covers what is on disk.
+covers what is on disk. config.toml gets two edits in one run, trust first and
+then the environment (below), each reading the file the other left, so neither
+drops the other's keys.
 
 Claude Code also gets two hooks with optional `[harness]` settings in the
 tbhbdev user config (see tbhbdev.userconfig): `alpha state-guard`, on
@@ -60,10 +62,29 @@ would not change is not written. Otherwise the old file is copied to
 symlinked config is written through the link. A config that can't be read,
 merged or written is reported, and the other harnesses still go ahead.
 
+It also sets the environment both Claude Code and Codex give their
+commands: `SSH_AUTH_SOCK` set to the empty string, merged into the `env`
+object of Claude's settings.json and into the `shell_environment_policy.set`
+table of Codex's config.toml (`$CODEX_HOME`, default .codex in HOME), so an
+agent's command can't reach the 1Password SSH agent and prompt the operator.
+Host provisioning sets the variable for the account an agent runs as, but gives
+the operator's own account no harness environment, so this command is the only
+thing that sets it there. config.toml is edited with tomlkit, which keeps every
+other key, comment and the layout, and gets the same backup and up-to-date
+rules. And it writes the gh shim (see gh_shim): an executable `gh` in
+`$XDG_DATA_HOME/tbhbdev/agent-bin`, left alone when it is already current.
+None of this prompts, runs op or needs the 1Password app, so configuration
+management can run it unattended, and a rerun changes nothing. It never
+writes PATH into a harness config: Claude's SessionStart hook puts the shim
+on PATH (below), and Codex and Antigravity get it from `tbhbdev alpha
+agent-env`.
+
 `--harness` limits the config merge to one harness. `--dry-run` writes
 nothing: it prints each config's diff and the git hooks it would install.
-`--hook` is the SessionStart entry point. It reads the hook payload on stdin,
-exits 0 at once outside a tbhb-dev repository, and installs only the git
+`--hook` is the SessionStart entry point. When `$CLAUDE_ENV_FILE` is set, it
+first appends `export PATH=<agent-bin>":$PATH"` to that file once, which
+Claude Code sources before each Bash command. Then it reads the hook payload
+on stdin, stops outside a tbhb-dev repository, and installs only the git
 hooks of the worktree the payload names. Claude Code adds a SessionStart
 hook's stdout to the model's context, so `--hook` sends all its output,
 prek's too, to stderr, and it always exits 0, so a broken install never
@@ -75,7 +96,9 @@ import difflib
 import json
 import os
 import re
+import shlex
 import shutil
+import stat
 import subprocess  # nosec B404
 import sys
 import time
@@ -85,7 +108,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from tbhbdev import plugins
-from tbhbdev.alpha import codex_trust
+from tbhbdev.alpha.gh_shim import bin_dir, wrapper_text
 from tbhbdev.alpha.identity import codex_home
 from tbhbdev.alpha.repo import (
     TBHB_DEV_ORIGIN_ERE,
@@ -136,6 +159,11 @@ AGY_EDITS = (
     "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content"
 )
 AGY_TIMEOUT = 30
+# The environment both harnesses give their commands: no SSH agent, so a
+# command can't reach the 1Password SSH agent and prompt the operator.
+AGENT_ENVIRONMENT = {"SSH_AUTH_SOCK": ""}
+POLICY = "shell_environment_policy"
+GH_SHIM_MODE = 0o755
 AGY_PR_TIMEOUT = 120
 HARNESS_TIMEOUT = 10
 # Codex's documented default hook timeout, written out so the trusted hash covers
@@ -212,6 +240,7 @@ def claude_hooks() -> dict[str, list[Json]]:
             group("Bash", handler("guard-gh-pr")),
             group("Bash", handler("guard-op")),
             group("Write|Edit|MultiEdit|NotebookEdit", handler("guard-op")),
+            group("Bash", handler("guard-gh-poll")),
             group("Bash|SendMessage|Write|Edit", guard),
         ],
         "Stop": [group(None, guard)],
@@ -236,6 +265,7 @@ def codex_hooks() -> dict[str, list[Json]]:
         ],
         "PreToolUse": [
             group("^Bash$", handler("guard-gh-pr", CODEX_TIMEOUT)),
+            group("^Bash$", handler("guard-gh-poll", CODEX_TIMEOUT)),
             group("^(Bash|shell)$", handler("guard-op", CODEX_TIMEOUT)),
             group("apply_patch", handler("guard-op", CODEX_TIMEOUT)),
         ],
@@ -262,6 +292,9 @@ def agy_hooks() -> Json:
             "PostToolUse": [
                 group(AGY_EDITS, handler("pr hook antigravity", AGY_PR_TIMEOUT))
             ],
+        },
+        "tbhbdev-alpha-gh-poll": {
+            "PreToolUse": [group("run_command", handler("guard-gh-poll", AGY_TIMEOUT))],
         },
     }
 
@@ -350,7 +383,13 @@ def merge_groups(config: Json, desired: Json) -> Json:
 def merged_config(harness: str, config: Json) -> Json:
     """A harness config with this command's hooks merged in."""
     if harness == CLAUDE:
-        return merge_events(config, claude_hooks())
+        env = config.get("env", {})
+        if not isinstance(env, dict):
+            message = "its env key is not an object"
+            raise InstallError(message)
+        fields = cast("Json", env)  # pragma: no mutate
+        merged = merge_events(config, claude_hooks())
+        return {**merged, "env": {**fields, **AGENT_ENVIRONMENT}}
     if harness == CODEX:
         return merge_events(config, codex_hooks())
     return merge_groups(config, agy_hooks())
@@ -463,24 +502,6 @@ def print_diff(path: Path, old: str | None, new: str) -> None:
     print("".join(diff), end="")
 
 
-def write_merged(
-    harness: str, path: Path, old: str | None, merged: Json, *, dry_run: bool
-) -> int:
-    """Write a harness's merged config, or print its diff on a dry run."""
-    new = json.dumps(merged, indent=2) + "\n"
-    if dry_run:
-        print_diff(path, old, new)
-        return 0
-    try:
-        backup = write_config(path, old, new)
-    except InstallError as exc:
-        print(f"{PROG}: {harness}: cannot write {path}: {exc}", file=sys.stderr)
-        return 1
-    saved = f"; the old one is {backup}" if backup else ""
-    print(f"{harness}: wrote {path}{saved}")
-    return 0
-
-
 def trust_codex_hooks(
     hooks_path: Path, merged: Json, env: Mapping[str, str], *, dry_run: bool
 ) -> int:
@@ -488,13 +509,26 @@ def trust_codex_hooks(
 
     Codex runs a hook only when `config.toml` holds its hash. A new file is
     private; an existing one keeps its mode. Any failure leaves it as it was.
+
+    The same write also sets AGENT_ENVIRONMENT, so a run that changes both
+    leaves one backup of the user's file, not a second one of the half-edited
+    file; install_codex_environment then finds nothing to do. A file whose
+    environment can't be merged still gets its trust, and
+    install_codex_environment reports the environment.
+
+    codex_trust imports tomlkit, so it is imported here, and the hooks that
+    import this module don't load it.
     """
+    from tbhbdev.alpha import codex_trust  # noqa: PLC0415 -- see the docstring
+
     path = codex_home(env) / "config.toml"
     hooks = hooks_path.absolute()
     wanted = codex_trust.our_hashes(hooks, merged, ours)
     try:
         old = read_text(path)
         new = codex_trust.trusted_text(old, hooks, wanted)
+        with suppress(InstallError):
+            new = with_environment(new)
         if old == new:
             print(f"codex: {len(wanted)} hooks already trusted in {path}")
             return 0
@@ -527,10 +561,28 @@ def install_config(harness: str, env: Mapping[str, str], *, dry_run: bool) -> in
         print(f"{harness}: {path} is up to date")
         status = 0
     else:
-        status = write_merged(harness, path, old, merged, dry_run=dry_run)
+        new = json.dumps(merged, indent=2) + "\n"
+        status = apply_config(harness, path, old, new, dry_run=dry_run)
     if harness == CODEX and status == 0:
         status = trust_codex_hooks(path, merged, env, dry_run=dry_run)
     return status
+
+
+def apply_config(
+    harness: str, path: Path, old: str | None, new: str, *, dry_run: bool
+) -> int:
+    """Print the change to a config on a dry run; otherwise write it."""
+    if dry_run:
+        print_diff(path, old, new)
+        return 0
+    try:
+        backup = write_config(path, old, new)
+    except InstallError as exc:
+        print(f"{PROG}: {harness}: cannot write {path}: {exc}", file=sys.stderr)
+        return 1
+    saved = f"; the old one is {backup}" if backup else ""
+    print(f"{harness}: wrote {path}{saved}")
+    return 0
 
 
 # ------------------------------------------------------------ private files
@@ -575,6 +627,113 @@ def install_private_files(*, dry_run: bool) -> int:
     for name, relative in PRIVATE_FILES:
         status |= install_private_file(name, relative, dry_run=dry_run)
     return status
+
+
+# ---------------------------------------------------------- gh environment
+
+
+def install_gh_shim(*, dry_run: bool) -> int:
+    """Write the gh shim (see gh_shim) unless it is already in place."""
+    path = bin_dir() / "gh"
+    text = wrapper_text()
+    try:
+        current = path.read_text() if path.is_file() else None
+        mode = stat.S_IMODE(path.stat().st_mode) if current is not None else None
+        if current == text and mode == GH_SHIM_MODE:
+            print(f"gh-shim: {path} is up to date")
+            return 0
+        if dry_run:
+            print(f"gh-shim: would write {path}")
+            return 0
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".gh.{os.getpid()}.tmp")
+        tmp.write_text(text)
+        tmp.chmod(GH_SHIM_MODE)
+        tmp.replace(path)
+    except OSError as exc:
+        print(f"{PROG}: gh-shim: cannot write {path}: {exc}", file=sys.stderr)
+        return 1
+    print(f"gh-shim: wrote {path}")
+    return 0
+
+
+def with_environment(old: str | None) -> str:
+    """Codex's config.toml text OLD (None when missing) with AGENT_ENVIRONMENT.
+
+    The environment goes in shell_environment_policy.set. tomlkit keeps every
+    other key, comment and the file's layout. It is imported here, so the
+    hooks that import this module don't load it.
+    """
+    import tomlkit  # noqa: PLC0415 -- see the docstring
+    from tomlkit.items import InlineTable  # noqa: PLC0415
+
+    try:
+        document = tomlkit.parse(old or "")
+    except ValueError as exc:
+        message = f"it is not valid TOML ({exc})"
+        raise InstallError(message) from exc
+    if POLICY not in document:
+        document[POLICY] = tomlkit.table()
+    policy = document[POLICY]
+    if not isinstance(policy, dict):
+        message = f"its {POLICY} is not a table"
+        raise InstallError(message)
+    if "set" not in policy:
+        inline = isinstance(policy, InlineTable)
+        policy["set"] = tomlkit.inline_table() if inline else tomlkit.table()
+    values: object = policy["set"]
+    if not isinstance(values, dict):
+        message = f"its {POLICY}.set is not a table"
+        raise InstallError(message)
+    values.update(AGENT_ENVIRONMENT)
+    return document.as_string()
+
+
+def merged_codex_config(path: Path) -> tuple[str | None, str]:
+    """Codex's config.toml text, None when missing, and the merged text."""
+    old = read_text(path)
+    return old, with_environment(old)
+
+
+def install_codex_environment(env: Mapping[str, str], *, dry_run: bool) -> int:
+    """Merge AGENT_ENVIRONMENT into Codex's config.toml."""
+    path = codex_home(env) / "config.toml"
+    try:
+        old, new = merged_codex_config(path)
+    except InstallError as exc:
+        print(f"{PROG}: codex: cannot merge into {path}: {exc}", file=sys.stderr)
+        return 1
+    if old == new:
+        print(f"codex: {path} is up to date")
+        return 0
+    return apply_config(CODEX, path, old, new, dry_run=dry_run)
+
+
+def export_shim_path(env: Mapping[str, str], *, dry_run: bool) -> None:
+    """Claude Code: put the gh shim first on PATH for the session's commands.
+
+    Appends one export line to the SessionStart hook's ``$CLAUDE_ENV_FILE``,
+    which Claude Code sources before each Bash command, unless the file
+    already has it. Without the variable it does nothing. A file it can't
+    read or write is reported on stderr.
+    """
+    target = env.get("CLAUDE_ENV_FILE")
+    if not target:
+        return
+    path = Path(target)
+    line = f'export PATH={shlex.quote(str(bin_dir()))}":$PATH"'
+    try:
+        text = path.read_text() if path.exists() else ""
+        if line in text.splitlines():
+            return
+        if dry_run:
+            print(f"would add to {path}: {line}")
+            return
+        separator = "\n" if text and not text.endswith("\n") else ""
+        with path.open("a") as out:
+            out.write(f"{separator}{line}\n")
+    except OSError as exc:
+        print(f"{PROG}: cannot put the gh shim on PATH: {exc}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------- git hooks
@@ -844,20 +1003,24 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     parser.add_argument(
         "--hook",
         action="store_true",
-        help="SessionStart hook: install the git hooks of the payload's worktree",
+        help=(
+            "SessionStart hook: put the gh shim on PATH and install the git "
+            "hooks of the payload's worktree"
+        ),
     )
     return parser
 
 
 def session_start(env: Mapping[str, str], *, dry_run: bool) -> int:
-    """`--hook`: install the payload worktree's git hooks, printing on stderr.
+    """`--hook`: the shim on PATH and the payload worktree's git hooks.
 
-    Claude Code adds a SessionStart hook's stdout to the model's context, so
-    nothing goes there. A failure is one line on stderr, and the status is
-    always 0, so a broken install never blocks a session.
+    It prints on stderr only: Claude Code adds a SessionStart hook's stdout
+    to the model's context. A failure is one line on stderr, and the status
+    is always 0, so a broken install never blocks a session.
     """
     try:
         with redirect_stdout(sys.stderr):
+            export_shim_path(env, dry_run=dry_run)
             cwd = hook_cwd(read_hook_stdin())
             if in_tbhb_dev(cwd):
                 install_git_hooks(cwd, env, dry_run=dry_run)
@@ -872,6 +1035,9 @@ def main(argv: list[str], prog: str) -> int:
     if args.hook:
         return session_start(env, dry_run=args.dry_run)
     status = install_git_hooks(None, env, dry_run=args.dry_run)
+    status |= install_gh_shim(dry_run=args.dry_run)
     for harness in [args.harness] if args.harness else HARNESSES:
         status |= install_config(harness, env, dry_run=args.dry_run)
+        if harness == CODEX:
+            status |= install_codex_environment(env, dry_run=args.dry_run)
     return status | install_private_files(dry_run=args.dry_run)

@@ -228,6 +228,36 @@ def test_trusted_text_works_in_an_existing_hooks_table() -> None:
     }
 
 
+def test_trusted_text_edits_hook_tables_that_other_tables_interrupt() -> None:
+    # Codex appends a `[hooks.state."..."]` for a hook trusted in /hooks, after
+    # whatever else the file holds, so hooks and hooks.state are out of order.
+    other = f"{HOOKS}:stop:0:0"
+    old = f"""[hooks.state."{KEY}"]
+trusted_hash = "sha256:old"
+
+[shell_environment_policy.set]
+A = "1"
+
+[hooks.state."/elsewhere/hooks.json:stop:0:0"]
+trusted_hash = "sha256:theirs"
+"""
+    new = codex_trust.trusted_text(old, HOOKS, {KEY: "sha256:aa", other: "sha256:bb"})
+    assert tomllib.loads(new) == {
+        "hooks": {
+            "state": {
+                KEY: {"trusted_hash": "sha256:aa"},
+                other: {"trusted_hash": "sha256:bb"},
+                "/elsewhere/hooks.json:stop:0:0": {"trusted_hash": "sha256:theirs"},
+            }
+        },
+        "shell_environment_policy": {"set": {"A": "1"}},
+    }
+    assert (
+        codex_trust.trusted_text(new, HOOKS, {KEY: "sha256:aa", other: "sha256:bb"})
+        == new
+    )
+
+
 def test_trusted_text_removes_our_hash_from_an_old_position() -> None:
     old_key = f"{HOOKS}:pre_tool_use:0:0"
     new_key = f"{HOOKS}:pre_tool_use:1:0"
