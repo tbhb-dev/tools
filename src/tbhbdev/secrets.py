@@ -4,9 +4,13 @@ Every tool reaches secrets through this module, and nothing else calls
 Connect or `op` for secrets at runtime. `read("vault/item/field")` returns one
 value; `Store` gets, lists, creates, edits, deletes and moves items.
 
-The Connect token comes from the current user's keychain: on macOS the
-dedicated agent keychain, on Linux the GNOME Keyring through `secret-tool`.
-`tbhbdev host bootstrap` puts it there. The endpoints come from the user
+The Connect token comes from the current user's own store: on macOS the
+dedicated agent keychain, on Linux the file `.config/tbhbdev/secrets/
+connect-token` (LINUX_TOKEN_FILE, under `Path.home()`, never XDG_CONFIG_HOME,
+because configuration management writes to that fixed path). The
+file is mode 0600 in a mode 0700 directory, both owned by the user, and a
+token that fails any of those checks is refused. Configuration management
+is the only writer of the Linux token file. The endpoints come from the user
 config's `[connect] endpoints` (see userconfig.py), which bootstrap writes on
 each agent host, and are tried in order.
 
@@ -18,9 +22,10 @@ from __future__ import annotations
 
 import os
 import platform
-import shlex
+import stat
 import subprocess  # nosec B404
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 import httpx
@@ -36,12 +41,15 @@ if TYPE_CHECKING:
 type Json = dict[str, object]
 
 # Where the token lives in the agent account. On macOS, security(1) resolves
-# the keychain name inside ~/Library/Keychains; on Linux the service and
-# account are the secret's attributes. They name the tool, not a deployment:
-# a host needs them before it reads any config.
+# the keychain name inside ~/Library/Keychains; the service and account are
+# the item's attributes. They name the tool, not a deployment: a host needs
+# them before it reads any config.
 KEYCHAIN = "tbhbdev.keychain"
 SERVICE = "tbhbdev-connect"
 ACCOUNT = "agent"
+# On Linux the token is this file, relative to the home directory.
+LINUX_TOKEN_FILE = Path(".config/tbhbdev/secrets/connect-token")
+MAX_TOKEN_FILE = 1 << 16
 
 # Tests only: the name of a variable holding a token to use instead of the
 # keychain's. Nothing in production sets it.
@@ -67,43 +75,90 @@ class SecretsError(Exception):
     """A secrets operation failed. The message never holds a value or token."""
 
 
-def linux_keyring(command: str) -> list[str]:
-    """Run COMMAND against the agent's GNOME Keyring, unlocked with no password.
+def _unsafe(found: os.stat_result) -> str | None:
+    """What is wrong with the open token file FOUND, or None."""
+    uid = os.geteuid()
+    checks = (
+        (not stat.S_ISREG(found.st_mode), "isn't a regular file"),
+        (found.st_uid != uid, "isn't owned by this user"),
+        (bool(found.st_mode & 0o077), "is accessible to its group or others"),
+    )
+    return next((problem for bad, problem in checks if bad), None)
 
-    A private D-Bus session starts the keyring daemon, so this works over ssh
-    and from services, where there is no desktop session.
+
+def _linux_token() -> str:
+    """The Connect token in the current user's 0600 file.
+
+    The final directory and file components cannot be symlinks. Ancestor
+    directories and later permission changes are outside these checks.
     """
-    unlock = 'printf "" | gnome-keyring-daemon --unlock --components=secrets'
-    return ["dbus-run-session", "--", "sh", "-c", f"{unlock} >/dev/null && {command}"]
+    path = Path.home() / LINUX_TOKEN_FILE
+    fix = "have configuration management install it"
+    try:
+        directory = os.open(
+            path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+        try:
+            found = os.fstat(directory)
+            if found.st_uid != os.geteuid() or found.st_mode & 0o077:
+                message = f"the Connect token directory {path.parent} is unsafe; {fix}"
+                raise SecretsError(message)
+            fd = os.open(
+                path.name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                dir_fd=directory,
+            )
+            try:
+                problem = _unsafe(os.fstat(fd))
+                if problem:
+                    message = f"the Connect token file {path} {problem}; {fix}"
+                    raise SecretsError(message)
+                data = os.read(fd, MAX_TOKEN_FILE + 1)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(directory)
+    except OSError as exc:
+        message = (
+            f"the Connect token file {path} can't be opened: {exc.strerror}; {fix}"
+        )
+        raise SecretsError(message) from None
+    if len(data) > MAX_TOKEN_FILE:
+        message = f"the Connect token file {path} exceeds {MAX_TOKEN_FILE} bytes; {fix}"
+        raise SecretsError(message)
+    value = data.decode(errors="replace").strip()
+    if not value:
+        message = f"the Connect token file {path} is empty; {fix}"
+        raise SecretsError(message)
+    return value
 
 
 def token() -> str:
-    """The Connect token in the current user's keychain.
+    """The Connect token in the current user's keychain or token file.
 
     Raises:
-        SecretsError: The keychain has no token, or its tool isn't installed.
+        SecretsError: There is no usable token, or the keychain tool isn't
+            installed.
     """
     override = os.environ.get(TEST_TOKEN_ENV)
     if override:
         return override
+    if platform.system() != "Darwin":
+        return _linux_token()
     try:
-        if platform.system() == "Darwin":
-            # The keychain has no password, so unlocking it is idempotent and
-            # holds no secret. It is locked again after every restart.
-            subprocess.run(  # nosec B603 B607
-                ["security", "unlock-keychain", "-p", "", KEYCHAIN],
-                capture_output=True,
-                # False is the default, written out for ruff. The pragma hides the
-                # equivalent check=None and dropped-check mutants, not check=True.
-                check=(  # pragma: no mutate
-                    False
-                ),
-            )
-            argv = ["security", "find-generic-password", "-s", SERVICE, "-a", ACCOUNT]
-            argv += ["-w", KEYCHAIN]
-        else:
-            lookup = ["secret-tool", "lookup", "service", SERVICE, "account", ACCOUNT]
-            argv = linux_keyring(shlex.join(lookup))
+        # The keychain has no password, so unlocking it is idempotent and
+        # holds no secret. It is locked again after every restart.
+        subprocess.run(  # nosec B603 B607
+            ["security", "unlock-keychain", "-p", "", KEYCHAIN],
+            capture_output=True,
+            # False is the default, written out for ruff. The pragma hides the
+            # equivalent check=None and dropped-check mutants, not check=True.
+            check=(  # pragma: no mutate
+                False
+            ),
+        )
+        argv = ["security", "find-generic-password", "-s", SERVICE, "-a", ACCOUNT]
+        argv += ["-w", KEYCHAIN]
         done = subprocess.run(  # nosec B603
             argv,
             capture_output=True,

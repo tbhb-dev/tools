@@ -1,7 +1,7 @@
 """Tests for `tbhbdev host`.
 
-They run against stub op, tailscale, ssh, sudo, security, secret-tool,
-dbus-run-session, gnome-keyring-daemon and swift executables, and a fake
+They run against stub op, tailscale, ssh, sudo, security
+and swift executables, and a fake
 Connect API on 127.0.0.1 (see conftest.py). The stub ssh runs the remote
 command here with HOME under tmp_path, so each host's agent keychain is a file
 in the test's scratch directory.
@@ -12,11 +12,13 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
 import stat
 import subprocess  # nosec B404
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -65,7 +67,7 @@ TAILNET = {
         "n2": {
             "HostName": "host-c",
             "DNSName": "",
-            "OS": "linux",
+            "OS": "macOS",
             "Tags": ["tag:example-agents"],
         },
         "n3": {"HostName": "nas-a", "OS": "linux", "Tags": ["tag:server"]},
@@ -132,12 +134,8 @@ class World:
     def installed(self, host: str) -> str | None:
         """The token in HOST's agent keychain, or None."""
         home = self.stubs.home(HOME_KEY[host])
-        if host == "host-c":
-            path = home / ".local" / "share" / "keyrings" / "stub.json"
-            key = f"service {secrets.SERVICE} account {secrets.ACCOUNT}"
-        else:
-            path = home / "Library" / "Keychains" / f"{secrets.KEYCHAIN}-db"
-            key = f"{secrets.SERVICE}/{secrets.ACCOUNT}"
+        path = home / "Library" / "Keychains" / f"{secrets.KEYCHAIN}-db"
+        key = f"{secrets.SERVICE}/{secrets.ACCOUNT}"
         if not path.exists():
             return None
         data = cast("Json", json.loads(path.read_text()))
@@ -194,10 +192,7 @@ class World:
             assert not any(v in text for v in values), call
             if any(v in str(call.get("stdin", "")) for v in values):
                 argv = cast("list[str]", call["argv"])
-                assert (call["tool"], argv[0]) in {
-                    ("security", "-i"),
-                    ("secret-tool", "store"),
-                }
+                assert (call["tool"], argv[0]) == ("security", "-i")
         for stream in (self.out, self.err):
             assert not any(v in stream for v in values)
 
@@ -249,6 +244,26 @@ def run(world: World, capfd: pytest.CaptureFixture[str], *argv: str) -> int:
     return code
 
 
+def run_setup(world: World, capfd: pytest.CaptureFixture[str], *argv: str) -> int:
+    """Use bootstrap on macOS and exercise the frozen Linux setup directly."""
+    host = argv[1]
+    if host != "host-c":
+        return run(world, capfd, "bootstrap", *argv)
+    chosen = host_tool.Host(
+        host, "linux" if host == "host-c" else "macOS", local=host == "host-b"
+    )
+    try:
+        host_tool.set_up(chosen, host_tool.workspace(), repair="--repair-acl" in argv)
+    except host_tool.HostError as exc:
+        sys.stderr.write(f"{exc}\n{PROG}: bootstrap failed on {host}\n")
+        code = 1
+    else:
+        code = 0
+    captured = capfd.readouterr()
+    world.out, world.err = captured.out, captured.err
+    return code
+
+
 def name_for(host: str, *vaults: str, when: datetime = T0) -> str:
     return host_tool.token_name(host, when, {"vault-all", f"vault-{host}", *vaults})
 
@@ -266,7 +281,7 @@ def test_list_shows_tagged_hosts_and_marks_this_one(
 ) -> None:
     assert run(world, capfd, "list") == 0
     assert world.out == (
-        "host-a\tmacOS\nhost-b\tmacOS\t(this machine)\nhost-c\tlinux\n"
+        "host-a\tmacOS\nhost-b\tmacOS\t(this machine)\nhost-c\tmacOS\n"
     )
 
 
@@ -1190,7 +1205,7 @@ def test_vault_names_are_checked(
 ) -> None:
     assert run(world, capfd, "grant", "--all", vault) == 1
     assert "a vault name can't be empty or hold a comma" in world.err
-    assert [c["tool"] for c in world.stubs.calls()] == ["swift"]
+    assert [c["tool"] for c in world.stubs.calls()] == ["tailscale", "swift"]
 
 
 @pytest.mark.parametrize("vault", ["vault-all", "vault-host-a"])
@@ -1390,13 +1405,6 @@ def test_status_fails_on_an_unexpected_keychain_check(
     monkeypatch.setitem(host_tool.SCRIPTS["macOS"], "held", script)
     assert run(world, capfd, "status") == 1
     assert world.err == f"{PROG}: host-b: cannot check the agent keychain: \n"
-
-
-def test_linux_scripts_run_in_a_private_keyring_session() -> None:
-    assert host_tool._linux("echo hi") == (  # noqa: SLF001
-        'dbus-run-session -- sh -c \'printf "" | gnome-keyring-daemon --unlock '
-        "--components=secrets >/dev/null && echo hi'"
-    )
 
 
 # exec.
@@ -1721,9 +1729,10 @@ def test_touch_id_guards_bootstrap_grant_and_revoke(
     monkeypatch.setattr(host_tool.platform, "system", lambda: system)
     assert run(world, capfd, *command, "--all") == 1
     assert world.err == f"{PROG}: {error.format(command[0])}\n"
-    assert [c["tool"] for c in world.stubs.calls()] == (
-        ["swift"] if system == "Darwin" else []
-    )
+    expected = ["tailscale"]
+    if system == "Darwin":
+        expected.append("swift")
+    assert [c["tool"] for c in world.stubs.calls()] == expected
 
 
 def test_read_only_commands_and_upgrade_need_no_touch_id(
@@ -1828,7 +1837,7 @@ def test_a_new_linux_host_gets_a_locked_agent(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
     world.stubs.set(operators={"host-c": "someone"})
-    assert run(world, capfd, "bootstrap", "--host", "host-c") == 0
+    assert run_setup(world, capfd, "--host", "host-c") == 0
     home = world.stubs.home("host-c")
     accounts = world.accounts("host-c")
     assert accounts["Groups"] == {
@@ -1870,7 +1879,7 @@ def test_accounts_with_the_right_ids_are_left_alone(
     )
     world.seed(host, *seeded)
     world.stubs.set(dscl_preamble=True)
-    assert run(world, capfd, "bootstrap", "--host", host) == 0
+    assert run_setup(world, capfd, "--host", host) == 0
     assert in_order(
         world.out,
         [
@@ -1898,7 +1907,7 @@ def test_the_operator_joins_devel(
     home = world.stubs.home(HOME_KEY[host])
     home.mkdir(parents=True)
     world.seed(host, {"agent": user(home=str(home))}, {"devel": group(GID, "x")})
-    assert run(world, capfd, "bootstrap", "--host", host) == 0
+    assert run_setup(world, capfd, "--host", host) == 0
     assert world.root_scripts() == [f"set -eu\n{command}"]
     devel = cast("Json", cast("Json", world.accounts(host)["Groups"])["devel"])
     assert devel["GroupMembership"] == ["x", "operator"]
@@ -1947,19 +1956,18 @@ def test_the_operator_joins_devel(
         ("host-c", {"someone": user()}, {}, "uid 24368 belongs to someone, not agent"),
     ],
 )
-def test_wrong_or_taken_ids_stop_that_host_only(
+def test_wrong_or_taken_ids_stop_setup(
     world: World,
     capfd: pytest.CaptureFixture[str],
     case: tuple[str, dict[str, Json], dict[str, Json], str],
 ) -> None:
     host, users, groups, error = case
     world.seed(host, users, groups)
-    assert run(world, capfd, "bootstrap", "--host", host, "--host", "host-b") == 1
+    assert run_setup(world, capfd, "--host", host) == 1
     assert world.err == f"{host}: {error}\n{PROG}: bootstrap failed on {host}\n"
     assert world.accounts(host) == {"Users": users, "Groups": groups}
-    assert len(world.root_scripts()) == 1
+    assert world.root_scripts() == []
     assert world.installed(host) is None
-    assert world.installed("host-b") == world.token_of("host-b")["token"]
 
 
 @pytest.mark.parametrize(
@@ -2007,7 +2015,7 @@ def test_malformed_accounts_stop_that_host(
 ) -> None:
     host, users, groups, error = case
     world.seed(host, users, groups)
-    assert run(world, capfd, "bootstrap", "--host", host) == 1
+    assert run_setup(world, capfd, "--host", host) == 1
     assert world.err == f"{host}: {error}\n{PROG}: bootstrap failed on {host}\n"
     assert world.root_scripts() == []
 
@@ -2056,7 +2064,7 @@ def test_unreadable_accounts_stop_that_host(
     host, state, users, error = case
     world.seed(host, users, {"devel": group(GID, "operator")})
     world.stubs.set(**state)
-    assert run(world, capfd, "bootstrap", "--host", host) == 1
+    assert run_setup(world, capfd, "--host", host) == 1
     assert world.err.startswith(f"{host}: {error}")
     assert world.root_scripts() == []
 
@@ -2066,7 +2074,7 @@ def test_sudo_asks_for_the_password_once_per_host(
     world: World, capfd: pytest.CaptureFixture[str], host: str
 ) -> None:
     world.stubs.set(sudo_password=True)
-    assert run(world, capfd, "bootstrap", "--host", host) == 0
+    assert run_setup(world, capfd, "--host", host) == 0
     assert f"{host}: sudo needs your password\n" in world.err
     assert world.stubs.argvs("sudo-prompt") == [[HOME_KEY[host]]]
     assert world.accounts(host)["Users"] != {}
@@ -2077,7 +2085,7 @@ def test_sudo_asks_for_the_password_once_per_host(
         assert tty[0][4].startswith("sudo sh -c 'set -eu\n")
     for argv in world.stubs.argvs("sudo"):
         assert not {"-S", "--stdin", "-A", "--askpass"} & set(argv)
-    assert run(world, capfd, "bootstrap", "--host", host) == 0
+    assert run_setup(world, capfd, "--host", host) == 0
     assert len(world.stubs.argvs("sudo-prompt")) == 1
 
 
@@ -2085,7 +2093,7 @@ def test_a_wrong_sudo_password_stops_that_host(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
     world.stubs.set(sudo_password=True, sudo_wrong_password=True)
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 1
+    assert run_setup(world, capfd, "--host", "host-a") == 1
     assert world.err.endswith(
         "host-a: the setup as root failed (exit 1)\n"
         f"{PROG}: bootstrap failed on host-a\n"
@@ -2101,7 +2109,7 @@ def test_a_failed_root_script_stops_that_host(
         return "/nonexistent/agent"
 
     monkeypatch.setattr(host_tool, "agent_home", outside)
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 1
+    assert run_setup(world, capfd, "--host", "host-a") == 1
     assert world.err.startswith(
         "host-a: the setup as root failed: install stub: refusing /nonexistent/agent"
     )
@@ -2126,6 +2134,9 @@ def with_workspace(
 def test_bootstrap_opens_the_workspace_to_devel_on_macos(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
+    tailnet = json.loads(json.dumps(TAILNET))
+    tailnet["Peer"]["n2"]["OS"] = "linux"
+    world.stubs.set(tailscale=tailnet)
     with_workspace(config_file, "src/work")
     home = world.operator_home("host-a")
     root = home / "src" / "work"
@@ -2134,7 +2145,7 @@ def test_bootstrap_opens_the_workspace_to_devel_on_macos(
     (root / "link").symlink_to(root / "repo" / "file")
     home.chmod(0o700)
     world.stubs.set(acls_mac={str(home): ["group:everyone deny delete"]})
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
+    assert run_setup(world, capfd, "--host", "host-a") == 0
     assert world.acl("host-a", home) == [
         "group:everyone deny delete",
         "group:devel allow search",
@@ -2176,7 +2187,7 @@ def test_bootstrap_opens_the_workspace_to_devel_on_linux(
     (root / "tool").write_text("#!/bin/sh\n")
     (root / "tool").chmod(0o755)
     (root / "link").symlink_to(root / "plain")
-    assert run(world, capfd, "bootstrap", "--host", "host-c") == 0
+    assert run_setup(world, capfd, "--host", "host-c") == 0
     assert world.acl("host-c", home) == ["group:devel:--x"]
     for directory in (root, root / "sub"):
         assert world.acl("host-c", directory) == [
@@ -2211,7 +2222,7 @@ def test_bootstrap_refuses_a_linux_host_without_the_acl_tools(
     with_workspace(config_file)
     for tool in missing:
         (world.stubs.bin / tool).unlink()
-    assert run(world, capfd, "bootstrap", "--host", "host-c") == 1
+    assert run_setup(world, capfd, "--host", "host-c") == 1
     assert world.err == (
         f"host-c: no {named}; install the acl package\n"
         f"{PROG}: bootstrap failed on host-c\n"
@@ -2228,7 +2239,7 @@ def test_bootstrap_refuses_a_linux_host_whose_acl_check_fails(
     (world.stubs.bin / "setfacl").unlink()
     (world.stubs.bin / "setfacl").write_text("#!/bin/sh\necho broken >&2\nexit 2\n")
     (world.stubs.bin / "setfacl").chmod(0o755)
-    assert run(world, capfd, "bootstrap", "--host", "host-c") == 1
+    assert run_setup(world, capfd, "--host", "host-c") == 1
     assert world.err == (
         "host-c: cannot check for setfacl: broken\n"
         f"{PROG}: bootstrap failed on host-c\n"
@@ -2242,7 +2253,7 @@ def test_bootstrap_without_a_workspace_needs_no_acl_tools(
 ) -> None:
     for tool in host_tool.ACL_TOOLS:
         (world.stubs.bin / tool).unlink()
-    assert run(world, capfd, "bootstrap", "--host", "host-c") == 0
+    assert run_setup(world, capfd, "--host", "host-c") == 0
 
 
 @pytest.mark.parametrize("host", ["host-a", "host-c"])
@@ -2251,12 +2262,12 @@ def test_present_entries_are_not_added_again(
 ) -> None:
     with_workspace(config_file)
     root = world.operator_home(host) / "Code"
-    assert run(world, capfd, "bootstrap", "--host", host) == 0
+    assert run_setup(world, capfd, "--host", host) == 0
     assert f"{host}: created {root}" in world.out
     before = world.stubs.state()
     scripts = len(world.root_scripts())
     (root / "new").write_text("x")
-    assert run(world, capfd, "bootstrap", "--host", host) == 0
+    assert run_setup(world, capfd, "--host", host) == 0
     assert f"{host}: devel already has access to {root}" in world.out
     assert len(world.root_scripts()) == scripts
     key = "acls_linux" if host == "host-c" else "acls_mac"
@@ -2271,9 +2282,9 @@ def test_repair_acl_reapplies_below_the_root_without_duplicates(
     with_workspace(config_file)
     root = world.operator_home(host) / "Code"
     (root / "old").mkdir(parents=True)
-    assert run(world, capfd, "bootstrap", "--host", host) == 0
+    assert run_setup(world, capfd, "--host", host) == 0
     (root / "new").write_text("x")
-    assert run(world, capfd, "bootstrap", "--host", host, "--repair-acl") == 0
+    assert run_setup(world, capfd, "--host", host, "--repair-acl") == 0
     file_entry = ["group:devel:rw-"] if host == "host-c" else [MAC_FILE]
     dir_entry = (
         ["group:devel:rwx", "default:group:devel:rwx"]
@@ -2299,7 +2310,7 @@ def test_an_inherited_entry_counts_as_present(
             str(root): [MAC_DIR.replace(" allow", " inherited allow")],
         }
     )
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
+    assert run_setup(world, capfd, "--host", "host-a") == 0
     assert f"host-a: devel already has access to {root}" in world.out
     assert world.acl("host-a", home) == ["group:devel inherited allow list,search"]
 
@@ -2317,7 +2328,7 @@ def test_rights_split_across_entries_count_together(
         str(root): [MAC_DIR.removesuffix(inherit), f"group:devel allow {inherit[1:]}"],
     }
     world.stubs.set(acls_mac=acls)
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
+    assert run_setup(world, capfd, "--host", "host-a") == 0
     assert f"host-a: devel already has access to {root}" in world.out
     assert world.stubs.state()["acls_mac"] == acls
 
@@ -2331,7 +2342,7 @@ def test_a_partial_root_entry_is_completed(
     root.mkdir(parents=True)
     partial = "group:devel allow list,search"
     world.stubs.set(acls_mac={str(home): [partial], str(root): [partial]})
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
+    assert run_setup(world, capfd, "--host", "host-a") == 0
     assert world.acl("host-a", root) == [partial, MAC_DIR]
     assert world.acl("host-a", home) == [partial]
 
@@ -2361,7 +2372,7 @@ def test_workspace_failures_stop_that_host(
     host, state, error = case
     with_workspace(config_file)
     world.stubs.set(**state)
-    assert run(world, capfd, "bootstrap", "--host", host) == 1
+    assert run_setup(world, capfd, "--host", host) == 1
     home = world.operator_home(host)
     assert world.err == (
         f"{host}: {error.format(home=home)}\n{PROG}: bootstrap failed on {host}\n"
@@ -2377,7 +2388,7 @@ def test_a_root_that_cannot_be_made_stops_that_host(
     home = world.operator_home("host-a")
     home.mkdir(parents=True)
     (home / "Code").write_text("not a directory")
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 1
+    assert run_setup(world, capfd, "--host", "host-a") == 1
     assert world.err.startswith(f"host-a: cannot create {home / 'Code'}: mkdir: ")
 
 
@@ -2438,6 +2449,9 @@ def test_a_config_without_a_workspace_skips_it(
 def test_status_shows_workspace_access(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str], host: str
 ) -> None:
+    tailnet = json.loads(json.dumps(TAILNET))
+    tailnet["Peer"]["n2"]["OS"] = "linux"
+    world.stubs.set(tailscale=tailnet)
     with_workspace(config_file, "src/work")
     home = world.operator_home(host)
     root = home / "src" / "work"
@@ -2449,7 +2463,7 @@ def test_status_shows_workspace_access(
         f"{host}: workspace access devel is missing entries on "
         f"{home}, {home / 'src'}, {root}\n"
     )
-    assert run(world, capfd, "bootstrap", "--host", host) == 0
+    assert run_setup(world, capfd, "--host", host) == 0
     assert run(world, capfd, "status", "--host", host) == 0
     assert world.out.endswith(
         f"{host}: workspace access complete for devel on {root}\n"
@@ -2837,7 +2851,7 @@ def test_a_second_bootstrap_and_upgrade_change_nothing_anywhere(
             assert word not in world.out, (argv, word)
         later = world.stubs.state()
         for key in ("directory", "acls_mac", "acls_linux", "owners"):
-            assert later[key] == state[key]
+            assert later.get(key, {}) == state.get(key, {})
     later_calls = world.op_calls()[len(op_before) :]
     changes = [c for c in later_calls if not c.endswith(("list", "item get"))]
     assert changes == []
@@ -3871,5 +3885,222 @@ def test_bootstrap_with_no_host_ready_keeps_the_published_config(
 ) -> None:
     world.stubs.set(id_fails=True)
     assert run(world, capfd, "bootstrap", "--all") == 1
+    assert world.err.count("cannot find out who you are there") == len(HOSTS)
     assert "gitleaks-generate" not in world.out
     assert "item" not in " ".join(world.op_calls())
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="runs the Linux host script, which needs GNU stat",
+)
+@pytest.mark.parametrize("mode", [0o600, 0o400, 0o640, 0o644, 0o700])
+def test_linux_held_and_read_require_private_file_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: int
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / secrets.LINUX_TOKEN_FILE
+    path.parent.mkdir(parents=True, mode=0o700)
+    path.write_text("fake-token")
+    path.chmod(mode)
+    held = subprocess.run(
+        ["sh", "-c", host_tool.SCRIPTS["linux"]["held"]],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    read = subprocess.run(
+        ["sh", "-c", host_tool.SCRIPTS["linux"]["read"]],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert held.returncode == 0
+    assert held.stdout == ("present\n" if mode == 0o600 else "absent\n")
+    assert read.returncode == (0 if mode == 0o600 else 1)
+    assert read.stdout == ("\nfake-token" if mode == 0o600 else "")
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="runs the Linux host script, which needs GNU stat",
+)
+@pytest.mark.parametrize(
+    "kind", ["symlink", "directory", "fifo", "owner", "empty", "missing"]
+)
+def test_linux_held_and_read_refuse_invalid_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / secrets.LINUX_TOKEN_FILE
+    path.parent.mkdir(parents=True, mode=0o700)
+    if kind == "symlink":
+        target = tmp_path / "target"
+        target.write_text("fake-token")
+        target.chmod(0o600)
+        path.symlink_to(target)
+    elif kind == "directory":
+        path.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(path, 0o600)
+    elif kind != "missing":
+        path.write_text("" if kind == "empty" else "fake-token")
+        path.chmod(0o600)
+    if kind == "owner":
+        commands = tmp_path / "commands"
+        commands.mkdir()
+        command = commands / "stat"
+        command.write_text(
+            '#!/bin/sh\nif [ "${3##*/}" = connect-token ]; then echo -1:600; '
+            'else exec /usr/bin/stat "$@"; fi\n'
+        )
+        command.chmod(0o700)
+        monkeypatch.setenv("PATH", f"{commands}:/usr/bin:/bin")
+    for step in ("held", "read"):
+        done = subprocess.run(
+            ["sh", "-c", host_tool.SCRIPTS["linux"][step]],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        assert done.returncode == (0 if step == "held" else 1)
+        assert done.stdout == ("absent\n" if step == "held" else "")
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="runs the Linux host script, which needs GNU stat",
+)
+def test_linux_read_strips_surrounding_whitespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / secrets.LINUX_TOKEN_FILE
+    path.parent.mkdir(parents=True, mode=0o700)
+    path.write_text(" \t\r\nfake-token \r\n")
+    path.chmod(0o600)
+
+    def local_script(
+        _host: host_tool.Host, script: str
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["sh", "-c", script], capture_output=True, text=True, check=False
+        )
+
+    monkeypatch.setattr(host_tool, "on_host", local_script)
+    assert host_tool._keychain_token(host_tool.Host("test", "linux", local=True)) == (  # noqa: SLF001
+        "",
+        "fake-token",
+    )
+
+
+@pytest.mark.parametrize("step", ["ensure_keychain", "install"])
+def test_linux_writers_refuse_before_running_commands(world: World, step: str) -> None:
+    host = host_tool.Host("test", "linux", local=False)
+    path = world.stubs.home("test") / secrets.LINUX_TOKEN_FILE
+    path.parent.mkdir(parents=True, mode=0o755)
+    path.write_text("existing-token")
+    path.chmod(0o644)
+    found = path.stat()
+    directory = path.parent.stat()
+    before = world.stubs.calls()
+    action = (
+        (lambda: host_tool.install(host, "fake-token", "name"))
+        if step == "install"
+        else (lambda: host_tool.ensure_keychain(host))
+    )
+    with pytest.raises(host_tool.HostError) as caught:
+        action()
+    assert str(caught.value) == (
+        "test: Linux hosts get the Connect token file from "
+        "configuration management, not tbhbdev host"
+    )
+    assert world.stubs.calls() == before
+    assert path.read_text() == "existing-token"
+    assert path.stat().st_ino == found.st_ino
+    assert path.stat().st_mode == found.st_mode
+    assert path.parent.stat() == directory
+
+
+@pytest.mark.parametrize("command", ["bootstrap", "upgrade", "grant", "revoke"])
+def test_linux_commands_refuse_before_onepassword_or_host_writes(
+    world: World, capfd: pytest.CaptureFixture[str], command: str
+) -> None:
+    tailnet = json.loads(json.dumps(TAILNET))
+    tailnet["Peer"]["n2"]["OS"] = "linux"
+    world.stubs.set(tailscale=tailnet)
+    vaults = ("x",) if command in {"grant", "revoke"} else ()
+    assert run(world, capfd, command, "--host", "host-c", *vaults) == 1
+    assert world.err == (
+        f"{PROG}: host-c: Linux hosts get the Connect token file from "
+        "configuration management, not tbhbdev host\n"
+    )
+    assert world.stubs.argvs("op") == []
+    assert world.stubs.argvs("swift") == []
+    assert world.stubs.argvs("ssh") == []
+    assert world.stubs.argvs("sudo") == []
+    assert world.checked == []
+    assert not world.stubs.home("host-c").exists()
+
+
+def test_refresh_refuses_linux_before_onepassword_or_host_writes(world: World) -> None:
+    host = host_tool.Host("host-c", "linux", local=False)
+    account = host_tool.Account("srv-1", T0, [])
+    with pytest.raises(host_tool.HostError, match="configuration management"):
+        host_tool.refresh(account, host, frozenset({"x"}), ENDPOINTS)
+    assert world.stubs.calls() == []
+    assert not world.stubs.home("host-c").exists()
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="runs the Linux host script, which needs GNU stat",
+)
+@pytest.mark.parametrize("kind", ["mode", "owner", "symlink", "file"])
+def test_linux_held_and_read_refuse_invalid_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / secrets.LINUX_TOKEN_FILE
+    path.parent.mkdir(parents=True, mode=0o700)
+    path.write_text("fake-token")
+    path.chmod(0o600)
+    if kind == "mode":
+        path.parent.chmod(0o750)
+    elif kind in {"symlink", "file"}:
+        target = tmp_path / "target"
+        path.parent.rename(target)
+        if kind == "symlink":
+            path.parent.symlink_to(target, target_is_directory=True)
+        else:
+            path.parent.write_text("invalid")
+    else:
+        commands = tmp_path / "commands"
+        commands.mkdir()
+        command = commands / "stat"
+        command.write_text(
+            '#!/bin/sh\nif [ "${3##*/}" = secrets ]; then echo -1:700; '
+            'else exec /usr/bin/stat "$@"; fi\n'
+        )
+        command.chmod(0o700)
+        monkeypatch.setenv("PATH", f"{commands}:/usr/bin:/bin")
+    for step in ("held", "read"):
+        done = subprocess.run(
+            ["sh", "-c", host_tool.SCRIPTS["linux"][step]],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        assert done.returncode == (0 if step == "held" else 1)
+        assert done.stdout == ("absent\n" if step == "held" else "")
+
+
+def test_bootstrap_continues_after_a_host_setup_failure(
+    world: World, capfd: pytest.CaptureFixture[str]
+) -> None:
+    world.stubs.set(id_fails=["host-a"])
+    assert run(world, capfd, "bootstrap", "--host", "host-a", "--host", "host-b") == 1
+    assert world.installed("host-b") == world.token_of("host-b")["token"]
+    assert world.err.endswith(f"{PROG}: bootstrap failed on host-a\n")

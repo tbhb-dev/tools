@@ -1,7 +1,8 @@
 """Tests for tbhbdev.secrets, against fake Connect APIs on 127.0.0.1.
 
-The keychain tests run stub security, secret-tool, dbus-run-session and
-gnome-keyring-daemon executables with HOME in tmp_path (see conftest.py).
+The macOS keychain tests run a stub security executable with HOME in
+tmp_path (see conftest.py); the Linux token file tests use a real file under a
+test home.
 """
 
 from __future__ import annotations
@@ -9,11 +10,13 @@ from __future__ import annotations
 import functools
 import gc
 import json
-import shlex
+import os
 import socket
+import stat
 import subprocess
 import traceback
 from typing import TYPE_CHECKING, override
+lazy from pathlib import Path
 
 import httpx
 import pytest
@@ -23,7 +26,6 @@ from tbhbdev import secrets
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from conftest import FakeConnect, Installed, Json, Stubs
     from onepasswordconnectsdk.config import ClientConfig
@@ -179,8 +181,12 @@ def test_token_on_macos_without_an_entry_fails(
     monkeypatch.setattr(secrets.platform, "system", lambda: "Darwin")
     if make:
         mac_keychain(stubs, tmp_path / "home", None)
-    with pytest.raises(secrets.SecretsError, match="no Connect token"):
+    with pytest.raises(secrets.SecretsError) as caught:
         secrets.token()
+    assert str(caught.value) == (
+        "no Connect token in this user's keychain; "
+        "run `tbhbdev host bootstrap` for this host"
+    )
     # Not even security's own complaint about a missing keychain.
     assert capfd.readouterr() == ("", "")
 
@@ -194,66 +200,205 @@ def test_token_strips_only_the_newline_security_adds(
     assert secrets.token() == value
 
 
-def test_token_on_linux_reads_the_gnome_keyring(
-    stubs: Stubs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(secrets.platform, "system", lambda: "Linux")
-    keyring = tmp_path / "home" / ".local" / "share" / "keyrings" / "stub.json"
-    keyring.parent.mkdir(parents=True)
-    key = f"service {secrets.SERVICE} account {secrets.ACCOUNT}"
-    keyring.write_text(json.dumps({key: "fake-linux-token"}))
-    assert secrets.token() == "fake-linux-token"
-    assert stubs.argvs("secret-tool") == [
-        ["lookup", "service", secrets.SERVICE, "account", secrets.ACCOUNT]
-    ]
-    assert [c["stdin"] for c in stubs.calls("gnome-keyring-daemon")] == [""]
+HINT = "have configuration management install it"
 
 
-def test_token_ignores_output_from_a_failed_lookup(
-    stubs: Stubs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.fixture
+def linux_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A home for a Linux user, with a private secrets directory."""
     monkeypatch.setattr(secrets.platform, "system", lambda: "Linux")
-    keyring = tmp_path / "home" / ".local" / "share" / "keyrings" / "stub.json"
-    keyring.parent.mkdir(parents=True)
-    key = f"service {secrets.SERVICE} account {secrets.ACCOUNT}"
-    keyring.write_text(json.dumps({key: "fake-linux-token"}))
-    stubs.set(secret_tool_rc=1)
-    with pytest.raises(secrets.SecretsError) as caught:
-        secrets.token()
-    assert str(caught.value) == (
-        "no Connect token in this user's keychain; "
-        "run `tbhbdev host bootstrap` for this host"
+    monkeypatch.delenv(secrets.TEST_TOKEN_ENV, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    (tmp_path / ".config" / "tbhbdev" / "secrets").mkdir(parents=True)
+    (tmp_path / ".config" / "tbhbdev" / "secrets").chmod(0o700)
+    return tmp_path
+
+
+def token_file(home: Path, text: str | None = "fake-linux-token\n") -> Path:
+    path = home / ".config" / "tbhbdev" / "secrets" / "connect-token"
+    if text is not None:
+        path.write_text(text)
+        path.chmod(0o600)
+    return path
+
+
+def test_the_linux_token_path_is_under_home() -> None:
+    assert (
+        secrets.LINUX_TOKEN_FILE.as_posix() == ".config/tbhbdev/secrets/connect-token"
     )
 
 
-def test_token_on_linux_without_an_entry_fails(
-    stubs: Stubs, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("fake-linux-token\n", "fake-linux-token"),
+        ("fake-linux-token", "fake-linux-token"),
+        ("fake-linux-token\n\n", "fake-linux-token"),
+        ("fake-linux-token ", "fake-linux-token"),
+        (" \t\r\nfake-linux-token \r\n", "fake-linux-token"),
+    ],
+)
+def test_token_on_linux_reads_the_file(linux_home: Path, text: str, value: str) -> None:
+    token_file(linux_home, text)
+    assert secrets.token() == value
+
+
+def test_token_on_linux_ignores_xdg_config_home(linux_home: Path) -> None:
+    token_file(linux_home)
+    other = linux_home / "xdg" / "tbhbdev" / "secrets"
+    other.mkdir(parents=True)
+    (other / "connect-token").write_text("wrong")
+    assert secrets.token() == "fake-linux-token"
+
+
+def refused(path: Path, problem: str) -> str:
+    return f"the Connect token file {path} {problem}; {HINT}"
+
+
+def test_token_on_linux_without_a_file_fails(linux_home: Path) -> None:
+    path = token_file(linux_home, None)
+    with pytest.raises(secrets.SecretsError) as caught:
+        secrets.token()
+    assert str(caught.value) == refused(
+        path, "can't be opened: No such file or directory"
+    )
+
+
+def test_token_on_linux_without_a_directory_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(secrets.platform, "system", lambda: "Linux")
-    with pytest.raises(secrets.SecretsError, match="no Connect token"):
+    monkeypatch.delenv(secrets.TEST_TOKEN_ENV, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    with pytest.raises(secrets.SecretsError, match="can't be opened"):
         secrets.token()
-    assert stubs.argvs("secret-tool") == [
-        ["lookup", "service", secrets.SERVICE, "account", secrets.ACCOUNT]
-    ]
 
 
-@pytest.mark.parametrize(
-    ("system", "tool"), [("Darwin", "security"), ("Linux", "dbus-run-session")]
-)
-def test_token_without_the_keychain_tool_fails(
-    stubs: Stubs,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    system: str,
-    tool: str,
+@pytest.mark.parametrize("text", ["", "\n", " \t\r\n"])
+def test_token_on_linux_with_an_empty_file_fails(linux_home: Path, text: str) -> None:
+    path = token_file(linux_home, text)
+    with pytest.raises(secrets.SecretsError) as caught:
+        secrets.token()
+    assert str(caught.value) == refused(path, "is empty")
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o604, 0o660, 0o602, 0o610, 0o601])
+def test_token_on_linux_refuses_a_file_open_to_others(
+    linux_home: Path, mode: int
 ) -> None:
-    monkeypatch.setattr(secrets.platform, "system", lambda: system)
+    path = token_file(linux_home)
+    path.chmod(mode)
+    with pytest.raises(secrets.SecretsError) as caught:
+        secrets.token()
+    assert str(caught.value) == refused(path, "is accessible to its group or others")
+    assert "fake-linux-token" not in str(caught.value)
+
+
+@pytest.mark.parametrize("mode", [0o750, 0o705, 0o770, 0o701, 0o710, 0o702])
+def test_token_on_linux_refuses_a_directory_open_to_others(
+    linux_home: Path, mode: int
+) -> None:
+    path = token_file(linux_home)
+    path.parent.chmod(mode)
+    try:
+        with pytest.raises(secrets.SecretsError) as caught:
+            secrets.token()
+    finally:
+        path.parent.chmod(0o700)
+    assert str(caught.value) == (
+        f"the Connect token directory {path.parent} is unsafe; {HINT}"
+    )
+
+
+def test_token_on_linux_refuses_a_symlink(linux_home: Path) -> None:
+    path = token_file(linux_home, None)
+    real = linux_home / "real-token"
+    real.write_text("fake-linux-token\n")
+    real.chmod(0o600)
+    path.symlink_to(real)
+    with pytest.raises(secrets.SecretsError, match="can't be opened") as caught:
+        secrets.token()
+    assert "fake-linux-token" not in str(caught.value)
+
+
+def test_token_on_linux_refuses_a_symlinked_directory(linux_home: Path) -> None:
+    path = token_file(linux_home)
+    moved = linux_home / "moved"
+    path.parent.rename(moved)
+    path.parent.symlink_to(moved)
+    with pytest.raises(secrets.SecretsError) as caught:
+        secrets.token()
+    assert "can't be opened" in str(caught.value)
+
+
+def test_token_on_linux_refuses_a_file_that_is_not_regular(linux_home: Path) -> None:
+    path = token_file(linux_home, None)
+    path.mkdir()
+    with pytest.raises(secrets.SecretsError) as caught:
+        secrets.token()
+    assert str(caught.value) == refused(path, "isn't a regular file")
+
+
+def test_token_on_linux_refuses_a_file_another_user_owns(
+    linux_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = token_file(linux_home)
+    real_stat = os.fstat
+
+    def fstat(fd: int) -> os.stat_result:
+        found = real_stat(fd)
+        values = list(found)
+        if stat.S_ISREG(found.st_mode):
+            values[4] += 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr(secrets.os, "fstat", fstat)
+    with pytest.raises(secrets.SecretsError) as caught:
+        secrets.token()
+    assert str(caught.value) == refused(path, "isn't owned by this user")
+
+
+def test_token_on_linux_refuses_a_directory_another_user_owns(
+    linux_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = token_file(linux_home)
+    me = os.geteuid()
+    real_stat = os.fstat
+
+    def fstat(fd: int) -> os.stat_result:
+        found = real_stat(fd)
+        if stat.S_ISDIR(found.st_mode):
+            values = list(found)
+            values[4] = me + 1
+            return os.stat_result(values)
+        return found
+
+    monkeypatch.setattr(secrets.os, "fstat", fstat)
+    with pytest.raises(secrets.SecretsError) as caught:
+        secrets.token()
+    assert str(caught.value) == (
+        f"the Connect token directory {path.parent} is unsafe; {HINT}"
+    )
+
+
+def test_token_on_linux_refuses_a_fifo(linux_home: Path) -> None:
+    path = token_file(linux_home, None)
+    os.mkfifo(path, 0o600)
+    with pytest.raises(secrets.SecretsError, match="isn't a regular file"):
+        secrets.token()
+
+
+def test_token_without_the_keychain_tool_fails(
+    stubs: Stubs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(secrets.platform, "system", lambda: "Darwin")
     (tmp_path / "empty").mkdir()
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     with pytest.raises(secrets.SecretsError) as caught:
         secrets.token()
     assert str(caught.value) == (
-        f"can't read the Connect token: {tool} isn't installed"
+        "can't read the Connect token: security isn't installed"
     )
     assert stubs.calls() == []
 
@@ -283,18 +428,6 @@ def test_token_on_macos_runs_security_by_name(monkeypatch: pytest.MonkeyPatch) -
         ["security", "unlock-keychain"],
         ["security", "find-generic-password"],
     ]
-
-
-def test_token_on_linux_runs_secret_tool_by_name(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(secrets.platform, "system", lambda: "Linux")
-    commands = fake_runs(monkeypatch)
-    assert secrets.token() == "fake-token"
-    lookup = ["secret-tool", "lookup", "service", secrets.SERVICE]
-    lookup += ["account", secrets.ACCOUNT]
-    assert len(commands) == 1
-    assert commands[0][-1].endswith(f" && {shlex.join(lookup)}")
 
 
 # Failover.
@@ -912,3 +1045,101 @@ def test_store_defaults_to_connect_with_the_keychain_token(
     monkeypatch.setenv(secrets.TEST_TOKEN_ENV, fake.token)
     assert secrets.Store().get("ops", "db").title == "db"
     assert "Authorization" not in repr(secrets.connect())
+
+
+@pytest.mark.parametrize(("returncode", "stdout"), [(0, ""), (1, "fake-token\n")])
+def test_macos_rejects_empty_or_failed_keychain_reads(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str
+) -> None:
+    monkeypatch.setattr(secrets.platform, "system", lambda: "Darwin")
+
+    def run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+    monkeypatch.setattr(secrets.subprocess, "run", run)
+    with pytest.raises(secrets.SecretsError) as caught:
+        secrets.token()
+    assert str(caught.value) == (
+        "no Connect token in this user's keychain; "
+        "run `tbhbdev host bootstrap` for this host"
+    )
+
+
+def test_linux_replaces_invalid_utf8(linux_home: Path) -> None:
+    path = token_file(linux_home)
+    path.write_bytes(b"fake-\xff-token\n")
+    assert secrets.token() == "fake-\ufffd-token"
+
+
+@pytest.mark.parametrize("fail", ["directory", "file", "read", "none"])
+def test_linux_token_descriptors_are_checked_and_closed(
+    linux_home: Path, monkeypatch: pytest.MonkeyPatch, fail: str
+) -> None:
+    path = token_file(linux_home)
+    real_open, real_fstat, real_read = os.open, os.fstat, os.read
+    opened: list[int] = []
+    failed = False
+
+    def open_checked(name: str | Path, flags: int, **kwargs: int) -> int:
+        if not opened:
+            assert name == path.parent
+            assert flags == os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+            assert kwargs == {}
+        else:
+            assert name == "connect-token"
+            assert flags == os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            assert kwargs == {"dir_fd": opened[0]}
+            moved = linux_home / "moved"
+            path.parent.rename(moved)
+            path.parent.mkdir()
+            token_file(linux_home, "replacement")
+        fd = real_open(name, flags, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def fstat_checked(fd: int) -> os.stat_result:
+        nonlocal failed
+        if (
+            fd in opened
+            and not failed
+            and fail == ("directory" if fd == opened[0] else "file")
+        ):
+            failed = True
+            message = "stat failed"
+            raise OSError(message)
+        return real_fstat(fd)
+
+    def read_checked(fd: int, count: int) -> bytes:
+        assert count == secrets.MAX_TOKEN_FILE + 1
+        if fail == "read":
+            message = "read failed"
+            raise OSError(message)
+        return real_read(fd, count)
+
+    monkeypatch.setattr(secrets.os, "open", open_checked)
+    monkeypatch.setattr(secrets.os, "fstat", fstat_checked)
+    monkeypatch.setattr(secrets.os, "read", read_checked)
+    if fail == "none":
+        assert secrets.token() == "fake-linux-token"
+    else:
+        with pytest.raises(secrets.SecretsError, match="can't be opened"):
+            secrets.token()
+    for fd in opened:
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            real_fstat(fd)
+
+
+@pytest.mark.parametrize(
+    "size",
+    [secrets.MAX_TOKEN_FILE - 1, secrets.MAX_TOKEN_FILE, secrets.MAX_TOKEN_FILE + 1],
+)
+def test_linux_token_size_limit(linux_home: Path, size: int) -> None:
+    path = token_file(linux_home, "x" * size)
+    if size > secrets.MAX_TOKEN_FILE:
+        with pytest.raises(secrets.SecretsError) as caught:
+            secrets.token()
+        assert str(caught.value) == refused(
+            path, f"exceeds {secrets.MAX_TOKEN_FILE} bytes"
+        )
+    else:
+        assert secrets.token() == "x" * size

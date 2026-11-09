@@ -27,7 +27,7 @@ from typing import NoReturn, cast
 type Json = dict[str, object]
 
 ACCOUNT = "example.1password.com"
-READS_STDIN = frozenset({"security", "secret-tool", "swift", "gnome-keyring-daemon"})
+READS_STDIN = frozenset({"security", "swift"})
 
 
 def stub_dir() -> Path:
@@ -76,7 +76,7 @@ def flags(args: list[str], name: str) -> list[str]:
     return [args[i + 1] for i, arg in enumerate(args) if arg == name]
 
 
-# ssh, sudo and dbus-run-session: run the command here.
+# ssh and sudo: run the command here.
 
 
 def host_key() -> str:
@@ -139,13 +139,6 @@ def scratch(tool: str, path: str) -> Path:
     if not resolved.is_relative_to(stub_dir().parent.resolve()):
         fail(f"{tool} stub: refusing {path}, which is outside the test")
     return resolved
-
-
-def dbus_run_session(args: list[str]) -> None:
-    if args[0] != "--":
-        fail(f"dbus-run-session stub: unexpected options {args[:1]}")
-    os.environ["STUB_DBUS"] = "1"
-    os.execvp(args[1], args[1:])  # noqa: S606
 
 
 # The macOS keychains: one JSON file per keychain under $HOME.
@@ -214,44 +207,6 @@ def security(args: list[str]) -> None:
     else:
         security_item(verb, rest, data)
     keychain_file(name).write_text(json.dumps(data))
-
-
-# The GNOME Keyring: one JSON file under $HOME, reachable only inside
-# dbus-run-session once gnome-keyring-daemon has unlocked it.
-
-
-def keyring_file() -> Path:
-    return Path(os.environ["HOME"]) / ".local" / "share" / "keyrings" / "stub.json"
-
-
-def gnome_keyring_daemon(args: list[str]) -> None:
-    password = sys.stdin.read()
-    log("gnome-keyring-daemon", args, password)
-    if password or args != ["--unlock", "--components=secrets"]:
-        fail("gnome-keyring-daemon stub: unexpected unlock")
-    path = keyring_file()
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("{}")
-
-
-def secret_tool(args: list[str]) -> None:
-    if not os.environ.get("STUB_DBUS") or not keyring_file().exists():
-        log("secret-tool", args)
-        fail("secret-tool: Cannot autolaunch D-Bus without X11 $DISPLAY")
-    data = obj(json.loads(keyring_file().read_text()))
-    key = " ".join(arg for arg in args[1:] if not arg.startswith("--"))
-    if args[0] == "store":
-        value = sys.stdin.read()
-        log("secret-tool", args, value)
-        data[key] = value
-        keyring_file().write_text(json.dumps(data))
-        return
-    log("secret-tool", args)
-    if key not in data:
-        sys.exit(1)
-    sys.stdout.write(str(data[key]))
-    sys.exit(cast("int", load().get("secret_tool_rc", 0)))
 
 
 # op: a 1Password account with Connect servers, vaults and tokens.
@@ -520,6 +475,9 @@ def shadow(tool: str, args: list[str]) -> None:
 
 
 def id_(args: list[str]) -> None:
+    if args == ["-u"]:
+        sys.stdout.write(f"{os.geteuid()}\n")
+        return
     if args != ["-un"]:
         fail(f"id stub: unexpected arguments {args}")
     state = load()
@@ -814,20 +772,17 @@ def swift(args: list[str]) -> None:
 
 TOOLS = {
     "chmod": chmod,
-    "dbus-run-session": dbus_run_session,
     "dscl": dscl,
     "getent": getent,
     "getfacl": getfacl,
     "gh": gh,
     "git": git,
-    "gnome-keyring-daemon": gnome_keyring_daemon,
     "groupadd": functools.partial(shadow, "groupadd"),
     "id": id_,
     "install": install,
     "ls": ls,
     "mise": mise,
     "op": op,
-    "secret-tool": secret_tool,
     "security": security,
     "setfacl": setfacl,
     "ssh": ssh,

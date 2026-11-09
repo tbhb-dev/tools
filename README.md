@@ -67,13 +67,15 @@ That's the operator's file. On each agent host, `tbhbdev host bootstrap` install
 
 Tools get secrets only from `tbhbdev.secrets`. It's the one module that talks to 1Password Connect or `op` at runtime, so a fallback for hosts off the tailnet can go there later. `secrets.read("vault/item/field")` returns one value, and also takes the `op://vault/item/field` form. `secrets.Store` covers item management: get, list, create, edit, delete, and move.
 
-The library reads the Connect token from the current user's keychain: the agent keychain on macOS, and `secret-tool` on Linux. It tries the config's `[connect] endpoints` in order, the list bootstrap writes into an agent host's copy. A connection error or a 5xx answer moves it to the next endpoint, while a 4xx answer stops it.
+The library reads the Connect token from the current user's own store: the agent keychain on macOS, and on Linux the file `.config/tbhbdev/secrets/connect-token` under `$HOME` (`secrets.LINUX_TOKEN_FILE`). Linux always uses `$HOME` as the base, so configuration management can write the token without consulting `XDG_CONFIG_HOME`. The token needs a regular file with mode `0600` in a `0700` `secrets` directory. The current user must own both. The reader rejects symlinks and any group or other access. Configuration management is the only writer of the Linux token file. The library tries the config's `[connect] endpoints` in order, the list bootstrap writes into an agent host's copy. A connection error or a 5xx answer moves it to the next endpoint, while a 4xx answer stops it.
 
 Tests set the `TBHBDEV_TEST_TOKEN` environment variable, and the library then uses its value in place of the keychain token. Production code leaves it unset.
 
 `tbhbdev secret read REF` prints exactly one value, for `$(tbhbdev secret read ...)`. `get` prints the item's metadata and field labels, adding values with `--reveal`. `create` and `edit` read the fields as a JSON object of label to value from stdin or `--file`, never from the command line. `delete` asks for `--yes`.
 
 ## Agent hosts
+
+The maintainers froze `tbhbdev host` and are retiring it. On Linux, tbhbdev reads the token file. Configuration management is its only writer. Bootstrap, upgrade, grant, revoke, and token installation refuse Linux hosts before any 1Password work. A Linux host without the file loses token access when this change merges.
 
 `tbhbdev host` runs on the operator's Mac, which has 1Password Desktop and the `op` command-line tool. A tag marks the agent hosts on the tailnet. The config's `[agent] host_tag` names it. Each host gets a token for its own vault, `[vaults] host_prefix` followed by the host's name, and for `[vaults] all`, plus any the operator grants, stored in the `agent` account's keychain on that host. Every `op` call names the config's `[op] account`.
 
@@ -90,7 +92,7 @@ Without `--host` or `--all`, a command acts on this machine. Bootstrap, grant, a
 
 Bootstrap, grant, and revoke start with a Touch ID check.
 
-Bootstrap creates the group `devel` with group ID 33835 and the user `agent` with user ID 24368, with `devel` as its primary group, no password login, and a home of mode 0700. On macOS it uses `dscl .` and hides the user from the login window. On Linux it uses `groupadd` and `useradd` and locks the password. It never changes an existing account, and an account with other IDs stops that host with an error, as does a user or group ID that another name already uses. Bootstrap runs its root steps with `sudo -n`. When sudo needs a password, it runs them through `ssh -t`, so sudo asks once per host.
+Bootstrap creates the group `devel` with group ID 33835 and the user `agent` with user ID 24368, with `devel` as its primary group, no password login, and a home of mode 0700. On macOS it uses `dscl .` and hides the user from the login window. It never changes an existing account, and an account with other IDs stops that host with an error, as does a user or group ID that another name already uses. Bootstrap runs its root steps with `sudo -n`. When sudo needs a password, it runs them through `ssh -t`, so sudo asks once per host.
 
 The user config's `[workspace]` table names the workspace with `[workspace] root`, a path below the operator's home, and `repos`, a list of `owner/name`. With one, bootstrap:
 

@@ -1,4 +1,7 @@
-"""`tbhbdev host`: set up agent hosts, keep them current, and run commands on them.
+"""`tbhbdev host`: frozen host commands, being retired.
+
+On Linux, configuration management alone writes the token file; this module
+only checks and reads it. Bootstrap, upgrade, grant, and revoke refuse Linux hosts.
 
 These commands run on the operator's Mac, which has 1Password Desktop and the
 `op` CLI. The deployment's values come from the user config (see
@@ -36,20 +39,23 @@ changed.
 
 Each host gets its own Connect token for its own vault, `[vaults] host_prefix`
 and the host's name, the vault `[vaults] all`, and any others the operator
-names, in the `agent` account's keychain. A token's vaults can't change, so a
-change is a new token: create it, install it, check that it reaches its
-vaults, then delete the old one. A token's name records its host, creation
-time and vaults, so `op connect token list` alone tells what each token
-reaches and when it expires. The agent's home records the installed token's
-name too, which is how `upgrade` knows its vaults and expiry without `op`.
+names, in the `agent` account's macOS keychain. Linux token files come from
+configuration management. A token's vaults can't change, so a change is a
+new token: create it, install
+it, check that it reaches its vaults, then delete the old one. A token's name
+records its host, creation time and vaults, so `op connect token list` alone
+tells what each token reaches and when it expires. The agent's home records
+the installed token's name too, which is how `upgrade` knows its vaults and
+expiry without `op`.
 
 A token travels only on stdin and stdout: from `op` to this process, then
-over ssh into `security` or `secret-tool`, and back out for `upgrade`'s
-check. It never sits in argv, a file or a log line. Bootstrap sends each host
-the agent's copy of the config the same way, and never prints it. The copy is
-the operator's config with `[connect] endpoints` set to `https://<host>.<suffix>`
-for each of `[connect] server_hosts`, where the suffix is the tailnet's
-MagicDNS suffix from `tailscale status`.
+over ssh into `security`, and back out for `upgrade`'s check. It never sits
+in argv or a log line. Linux readers use the token file written only by
+configuration management, with no Linux writer in this module. Bootstrap
+sends each host the agent's copy of the config the same way, and never prints
+it. The copy is the operator's config with `[connect] endpoints` set to
+`https://<host>.<suffix>` for each of `[connect] server_hosts`, where the
+suffix is the tailnet's MagicDNS suffix from `tailscale status`.
 """
 
 from __future__ import annotations
@@ -624,19 +630,19 @@ _KC = secrets.KEYCHAIN
 _ITEM = f"-s {secrets.SERVICE} -a {secrets.ACCOUNT}"
 _MAC_UNLOCK = f'security unlock-keychain -p "" {_KC}'
 _MAC_FIND = f"security find-generic-password {_ITEM} {_KC} >/dev/null 2>&1"
-_LOOKUP = f"secret-tool lookup service {secrets.SERVICE} account {secrets.ACCOUNT}"
+_SECRETS = f'"$HOME/{secrets.LINUX_TOKEN_FILE.parent}"'
+_TOKEN_FILE = f'"$HOME/{secrets.LINUX_TOKEN_FILE}"'
+_LINUX_PRIVATE_FILE = (
+    f"[ ! -L {_SECRETS} ] && [ -d {_SECRETS} ] && "
+    f'[ "$(stat -c \'%u:%a\' {_SECRETS})" = "$(id -u):700" ] && '
+    f"[ ! -L {_TOKEN_FILE} ] && [ -f {_TOKEN_FILE} ] && [ -s {_TOKEN_FILE} ] && "
+    f'[ "$(stat -c \'%u:%a\' {_TOKEN_FILE})" = "$(id -u):600" ]'
+)
 
 
-def _linux(command: str) -> str:
-    # Only the import-time SCRIPTS table calls this, before mutmut can switch
-    # in a mutant, so its mutants can never run.
-    return shlex.join(secrets.linux_keyring(command))  # pragma: no mutate
-
-
-# For each OS: set up the keychain; install the token from stdin; print
-# `present` and the recorded token name, or `absent`; and print the recorded
-# name and then the token. The install scripts end by checking the entry is
-# there.
+# macOS sets up the keychain and installs the token from stdin. Both OSes
+# can print `present` and the recorded token name, or `absent`, and read the
+# recorded name and token. Linux has no setup or installation script.
 SCRIPTS: dict[str, dict[str, str]] = {
     "macOS": {
         "ensure": (
@@ -660,27 +666,16 @@ SCRIPTS: dict[str, dict[str, str]] = {
         ),
     },
     "linux": {
-        "ensure": _linux("true"),
-        "install": _linux(
-            f"secret-tool store --label='tbhbdev Connect token' "
-            f"service {secrets.SERVICE} account {secrets.ACCOUNT} && "
-            f"{_LOOKUP} >/dev/null"
-        ),
-        "held": _linux(
-            f"if {_LOOKUP} >/dev/null; then echo present; "
+        "held": (
+            f"if {_LINUX_PRIVATE_FILE}; then echo present; "
             f"cat {TOKEN_NAME_FILE} 2>/dev/null || :; else echo absent; fi"
         ),
-        "read": _linux(
-            f"{{ cat {TOKEN_NAME_FILE} 2>/dev/null || echo; }} && {_LOOKUP}"
+        "read": (
+            f"{_LINUX_PRIVATE_FILE} && "
+            f"{{ cat {TOKEN_NAME_FILE} 2>/dev/null || echo; }} && cat {_TOKEN_FILE}"
         ),
     },
 }
-
-
-def _token_stdin(host: Host, value: str) -> str:
-    if host.os == "linux":
-        return value
-    return f"add-generic-password -U {_ITEM} -T /usr/bin/security -w {value} {_KC}\n"
 
 
 def _over(host: Host, argv: list[str], stdin: str | None = None) -> Done:
@@ -708,7 +703,17 @@ def _script(host: Host, step: str) -> str:
     return scripts[step]
 
 
+def _require_keychain_writer(host: Host) -> None:
+    if host.os == "linux":
+        message = (
+            f"{host.name}: Linux hosts get the Connect token file from "
+            "configuration management, not tbhbdev host"
+        )
+        raise HostError(message)
+
+
 def ensure_keychain(host: Host) -> None:
+    _require_keychain_writer(host)
     done = on_host(host, _script(host, "ensure"))
     if done.returncode != 0:
         message = (
@@ -732,12 +737,14 @@ def keychain_held(host: Host) -> str | None:
 
 def install(host: Host, value: str, name: str) -> None:
     """Put the token VALUE in HOST's agent keychain, and record its NAME."""
+    _require_keychain_writer(host)
     record = (
         f"mkdir -p {AGENT_CONFIG} && "
         f"printf '%s\\n' {shlex.quote(name)} >{TOKEN_NAME_FILE}"
     )
     script = f"{_script(host, 'install')} && {record}"
-    done = on_host(host, script, _token_stdin(host, value))
+    stdin = f"add-generic-password -U {_ITEM} -T /usr/bin/security -w {value} {_KC}\n"
+    done = on_host(host, script, stdin)
     if done.returncode != 0:
         message = f"{host.name}: installing the token failed (exit {done.returncode})"
         raise HostError(message)
@@ -849,6 +856,7 @@ def refresh(
 
     The new token's check reaches Connect at URLS.
     """
+    _require_keychain_writer(host)
     mine = [t for t in account.tokens if t.host == host.name]
     current = account.current(host)
     why = problem(current, vaults, account.when, held=keychain_held(host))
@@ -2116,10 +2124,13 @@ def _operators(known: dict[str, str]) -> list[str] | None:
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
+    chosen = select(args.host, every=args.all)
+    for host in chosen:
+        _require_keychain_writer(host)
     touch_id("bootstrap")
     named = _check_vaults(args.vaults)
     failed: list[str] = []
-    chosen = _supported(select(args.host, every=args.all), failed)
+    chosen = _supported(chosen, failed)
     urls = endpoints()
     copy = agent_copy(urls)
     ws = workspace()
@@ -2158,6 +2169,8 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 def cmd_upgrade(args: argparse.Namespace) -> int:
     chosen = select(args.host, every=args.all)
+    for host in chosen:
+        _require_keychain_writer(host)
     urls = endpoints()
     ws = workspace()
     if ws is None:
@@ -2170,9 +2183,11 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
 
 
 def cmd_grant(args: argparse.Namespace) -> int:
+    chosen = select(args.host, every=args.all)
+    for host in chosen:
+        _require_keychain_writer(host)
     touch_id("grant")
     named = _check_vaults(args.vaults)
-    chosen = select(args.host, every=args.all)
     urls = endpoints()
     account = Account.load(need_server())
     plans = _plans(account, chosen, lambda held: held | named)
@@ -2188,9 +2203,11 @@ def cmd_grant(args: argparse.Namespace) -> int:
 
 
 def cmd_revoke(args: argparse.Namespace) -> int:
+    chosen = select(args.host, every=args.all)
+    for host in chosen:
+        _require_keychain_writer(host)
     touch_id("revoke")
     named = _check_vaults(args.vaults)
-    chosen = select(args.host, every=args.all)
     for host in chosen:
         kept = sorted(named & base_vaults(host))
         if kept:

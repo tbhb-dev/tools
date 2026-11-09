@@ -54,6 +54,7 @@ fstat
 genpkey
 genrule
 getent
+geteuid
 getfacl
 getfixturevalue
 gethostname
@@ -104,6 +105,8 @@ noprofile
 norc
 noremote
 nosandbox
+O_CLOEXEC
+O_NONBLOCK
 onepassword
 onepasswordconnectsdk
 opam
@@ -124,6 +127,7 @@ pretooluse
 procargs
 pubout
 pushd
+rdonly
 rdwr
 readattr
 readextattr
