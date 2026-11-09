@@ -40,6 +40,12 @@ any failing checks. It leaves the rules themselves to GitHub. The merge passes
 ``--match-head-commit`` so that a push after the preview cannot slip in.
 ``--dry-run`` previews the message and the command and merges nothing.
 
+Before the preview or the merge, the final squash message goes through gitleaks
+under the host's private config (see ``tbhbdev.alpha.secret_scan``), and a
+finding, a missing config or a missing gitleaks stops the command. The message
+is built from the PR's current body, so this catches a body edited after
+``tbhbdev alpha pr`` last scanned it.
+
 A pull request from the Renovate app is the exception to the body rule: its
 release notes and configuration notes are dropped, and the body is one line
 per update from Renovate's update table.
@@ -532,6 +538,7 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
         stop(f"not merging PR #{args.number}: " + "; ".join(reasons))
     body = renovate_body(request.body) if request.renovate else request.body
     message = build_message(request.title, args.number, body)
+    pr.scan_secrets(message.text(), f"the squash message for PR #{args.number}")
     argv_gh = [
         GH, "pr", "merge", str(args.number), "--squash", "--subject", message.subject,
         "--body-file", "-", "--match-head-commit", request.head,
