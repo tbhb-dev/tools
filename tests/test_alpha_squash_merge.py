@@ -39,7 +39,10 @@ here = os.path.dirname(os.path.abspath(__file__))
 spec = json.load(open(os.path.join(here, "gh.spec")))
 repo = sys.argv[1] == "repo"
 # A read with no repository argument names the working directory's repository.
-kind = ("cwd" if sys.argv[2].startswith("-") else "repo") if repo else sys.argv[2]
+if repo:
+    kind = "cwd" if sys.argv[2].startswith("-") else "repo"
+else:
+    kind = sys.argv[2] if sys.argv[1] == "pr" else "?"
 # The visibility read has its own log, so it never shifts the other gh calls.
 with open(os.path.join(here, "gh.repo.log" if repo else "gh.log"), "a") as log:
     log.write(json.dumps({{"argv": sys.argv[1:], "stdin": sys.stdin.read()}}) + "\\n")
