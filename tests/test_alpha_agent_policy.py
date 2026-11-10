@@ -401,6 +401,19 @@ def test_an_account_the_host_lacks_is_refused(unsandboxed: bool) -> None:
     )
 
 
+def claude_file_tool_denies(
+    profile: Profile, worktree: str, protected: list[str]
+) -> list[str]:
+    if profile is Profile.REVIEW:
+        protected = [worktree, *protected]
+    return [
+        f"{tool}(/{path}{suffix})"
+        for path in protected
+        for suffix in ("", "/**")
+        for tool in ("Edit", "Write")
+    ]
+
+
 def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]:
     home = f"/example/home/{account}"
     tmp = f"{home}/.local/state/example-runs/run1.tmp"
@@ -446,13 +459,7 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
             )
         ],
     ]
-    protected_tools = [worktree, *protected] if profile is Profile.REVIEW else protected
-    rules += [
-        f"{tool}(/{path}{suffix})"
-        for path in protected_tools
-        for suffix in ("", "/**")
-        for tool in ("Edit", "Write")
-    ]
+    rules += claude_file_tool_denies(profile, worktree, protected)
     deny_write = (
         [*protected, *deny_write]
         if profile is Profile.BUILD

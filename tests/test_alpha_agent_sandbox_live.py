@@ -249,6 +249,53 @@ def control_failures(control: Proxy, written: bool) -> list[str]:
     return failures
 
 
+@dataclasses.dataclass(frozen=True)
+class Judgments:
+    harness: Harness
+    proven: bool
+    failures: list[str]
+
+    def record(
+        self,
+        label: str,
+        safe: bool | None,
+        success: str = "refused",
+        failure: str = "allowed",
+    ) -> None:
+        if not self.proven or safe is None:
+            verdict = "unproven"
+        else:
+            verdict = success if safe else failure
+        report(f"{self.harness} {label}: {verdict}")
+        if not self.proven or not safe:
+            self.failures.append(f"{label}: {verdict}")
+
+
+def extra_observation(
+    label: str, observations: dict[str, str], proof: Evidence
+) -> tuple[bool | None, str, str]:
+    if label == "file-control":
+        return proof.written, "observed", "failed"
+    if label in MIRROR_LABELS:
+        return proof.mirrors.get(label), "refused", "allowed"
+    if label == "local-binding" and sys.platform == "linux":
+        return label in observations, "isolated network namespace", "unproven"
+    status = observations.get(label)
+    return None if status is None else status != "0", "refused", "allowed"
+
+
+def domain_observation(
+    domain: str, allowed: bool, observations: dict[str, str]
+) -> tuple[bool | None, str, str]:
+    status = observations.get(domain)
+    safe = None if status is None else ((status == "0") is allowed)
+    return (
+        safe,
+        "allowed" if allowed else "refused",
+        "refused" if allowed else "allowed",
+    )
+
+
 def assert_observations(
     harness: Harness,
     sockets: dict[str, Listener],
@@ -269,46 +316,15 @@ def assert_observations(
     if control is not None:
         failures.extend(control_failures(control, proof.written))
 
-    def judged(label: str, safe: bool | None, success: str, failure: str) -> None:
-        verdict = (
-            "unproven" if not proven or safe is None else (success if safe else failure)
-        )
-        report(f"{harness} {label}: {verdict}")
-        if not proven or not safe:
-            failures.append(f"{label}: {verdict}")
-
+    judgments = Judgments(harness, proven, failures)
     for location, listener in sockets.items():
-        judged(location, not listener.connections, "refused", "allowed")
+        judgments.record(location, not listener.connections)
     for domain, allowed in (("api.github.com", True), ("example.com", False)):
-        status = observations.get(domain)
-        safe = None if status is None else ((status == "0") is allowed)
-        judged(
-            domain,
-            safe,
-            "allowed" if allowed else "refused",
-            "refused" if allowed else "allowed",
-        )
+        judgments.record(domain, *domain_observation(domain, allowed, observations))
     for label in extra:
-        if label == "file-control":
-            judged(label, proof.written, "observed", "failed")
-        elif label.startswith("mirror-") or label in ("alternates", "hard-link"):
-            judged(
-                label,
-                proof.mirrors.get(label),
-                "refused",
-                "allowed",
-            )
-        elif label == "local-binding" and sys.platform == "linux":
-            judged(
-                label, label in observations, "isolated network namespace", "unproven"
-            )
-        else:
-            status = observations.get(label)
-            judged(
-                label, None if status is None else status != "0", "refused", "allowed"
-            )
+        judgments.record(label, *extra_observation(label, observations, proof))
     if control is not None:
-        judged("project-hooks", proof.hooks, "refused", "allowed")
+        judgments.record("project-hooks", proof.hooks)
     assert not failures, "; ".join(failures)
 
 
