@@ -19,6 +19,7 @@ class GitOptions(TypedDict, closed=True):
     text: Literal[True]
     stderr: int
     timeout: int
+    cwd: str
 
 
 @pytest.fixture(autouse=True)
@@ -115,12 +116,9 @@ def test_git_suppresses_command_errors_and_returns_text(
 ) -> None:
     def output(
         command: list[str],
-        *,
-        text: bool,
-        stderr: int,
-        env: dict[str, str],
-        timeout: int,
+        **kwargs: Unpack[GitOptions],
     ) -> str:
+        env = kwargs["env"]
         assert command[0] == worktree.host_tools.resolve("git")
         prefix = [
             worktree.host_tools.resolve("git"),
@@ -144,9 +142,10 @@ def test_git_suppresses_command_errors_and_returns_text(
             "GIT_ASKPASS": "/bin/false",
             "SSH_ASKPASS": "/bin/false",
         }
-        assert timeout == 30
-        assert text is True
-        assert stderr == subprocess.DEVNULL
+        assert kwargs["cwd"] == "/"
+        assert kwargs["timeout"] == 30
+        assert kwargs["text"] is True
+        assert kwargs["stderr"] == subprocess.DEVNULL
         if command[-1] == r"^(filter|merge)\.":
             assert command == [
                 *prefix,
@@ -1044,3 +1043,21 @@ def test_host_checkout_disables_a_planted_run_hook(
     path = worktree.create(clone, "planted", run_request())
     assert (path / "tracked").read_text() == "initial\n"
     assert not marker.exists()
+
+
+def test_every_git_call_has_a_fixed_host_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, clone = repository(tmp_path)
+    output = subprocess.check_output
+    calls: list[str] = []
+
+    def checked(command: list[str], **kwargs: Unpack[GitOptions]) -> str:
+        assert kwargs.get("cwd") == "/"
+        calls.append(kwargs["cwd"])
+        return output(command, **kwargs)
+
+    monkeypatch.chdir(clone)
+    monkeypatch.setattr(subprocess, "check_output", checked)
+    worktree.create(clone, "cwd", run_request())
+    assert calls
