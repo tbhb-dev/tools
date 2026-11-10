@@ -56,6 +56,7 @@ MAX_TOKEN_FILE = 1 << 16
 TEST_TOKEN_ENV = "TBHBDEV_TEST_TOKEN"  # noqa: S105  # nosec B105
 
 TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+KEYCHAIN_TIMEOUT = 10.0
 CLIENT_ERROR = 400
 NOT_FOUND = 404
 SERVER_ERROR = 500
@@ -151,6 +152,7 @@ def token() -> str:
         subprocess.run(  # nosec B603 B607
             ["security", "unlock-keychain", "-p", "", KEYCHAIN],
             capture_output=True,
+            timeout=KEYCHAIN_TIMEOUT,
             # False is the default, written out for ruff. The pragma hides the
             # equivalent check=None and dropped-check mutants, not check=True.
             check=(  # pragma: no mutate
@@ -163,12 +165,16 @@ def token() -> str:
             argv,
             capture_output=True,
             text=True,
+            timeout=KEYCHAIN_TIMEOUT,
             # False is the default, written out for ruff. The pragma hides the
             # equivalent check=None and dropped-check mutants, not check=True.
             check=(  # pragma: no mutate
                 False
             ),
         )
+    except subprocess.TimeoutExpired:
+        message = f"the keychain read timed out after {KEYCHAIN_TIMEOUT} seconds"
+        raise SecretsError(message) from None
     except FileNotFoundError as exc:
         message = f"can't read the Connect token: {exc.filename} isn't installed"
         raise SecretsError(message) from None

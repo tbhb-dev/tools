@@ -403,6 +403,34 @@ def test_token_without_the_keychain_tool_fails(
     assert stubs.calls() == []
 
 
+@pytest.mark.parametrize("command", ["unlock-keychain", "find-generic-password"])
+def test_keychain_timeout(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+    monkeypatch.setattr(secrets.platform, "system", lambda: "Darwin")
+    monkeypatch.delenv(secrets.TEST_TOKEN_ENV, raising=False)
+    commands: list[str] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs["timeout"] == secrets.KEYCHAIN_TIMEOUT == 10.0
+        commands.append(argv[1])
+        if argv[1] == command:
+            raise subprocess.TimeoutExpired(
+                argv,
+                secrets.KEYCHAIN_TIMEOUT,
+                output="stdout-marker",
+                stderr="stderr-marker",
+            )
+        return subprocess.CompletedProcess(argv, 0, "fake-token\n", "")
+
+    monkeypatch.setattr(secrets.subprocess, "run", run)
+    with pytest.raises(secrets.SecretsError) as caught:
+        secrets.token()
+    assert str(caught.value) == "the keychain read timed out after 10.0 seconds"
+    assert commands[-1] == command
+    message = "".join(traceback.format_exception(caught.value))
+    assert "stdout-marker" not in message
+    assert "stderr-marker" not in message
+
+
 def fake_runs(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     """Every command token runs, each printing a fake token and succeeding."""
     commands: list[list[str]] = []
