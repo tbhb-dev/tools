@@ -19,9 +19,14 @@ def parse(table: Mapping[str, object]) -> Settings:
         if key not in known:
             message = f"[analytics] {key} not recognized"
             raise ValueError(message)
+    loader = table.get("loader_enabled", False)
+    if type(loader) is not bool:
+        message = "[analytics] loader_enabled must be a boolean"
+        raise ValueError(message)
     defaults = Settings()
     password = table.get("password_file")
     return Settings(
+        loader_enabled=loader,
         host=_text(table.get("host", defaults.host), "host"),
         port=_port(table.get("port", defaults.port)),
         database=_text(table.get("database", defaults.database), "database"),

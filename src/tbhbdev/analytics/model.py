@@ -14,6 +14,7 @@ class Settings:
     loader_role: str = "analytics_loader"
     reader_role: str = "analytics_reader"
     grafana_role: str = "grafana_reader"
+    loader_enabled: bool = False
 
 
 @dataclass(frozen=True)

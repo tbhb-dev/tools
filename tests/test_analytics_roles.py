@@ -1,9 +1,17 @@
 """The role limits and privilege matrix match the shipped migration."""
 
+import re
+
 import pytest
 
-from tbhbdev.analytics.decisions.roles import GRANTS, ROLES
-from tbhbdev.analytics.model import Role
+from tbhbdev.analytics.decisions.roles import (
+    GRANTS,
+    ROLES,
+    identifier,
+    selected,
+    statements,
+)
+from tbhbdev.analytics.model import Role, Settings
 
 
 @pytest.mark.parametrize(
@@ -101,3 +109,63 @@ def test_database_connect_grant_and_statement_count() -> None:
         "TO analytics_loader, analytics_reader, grafana_reader;"
     )
     assert len(GRANTS) == 15
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_selected_roles_and_grants(enabled: bool) -> None:
+
+    options = Settings(loader_enabled=enabled)
+    expected = (
+        (Role("analytics_reader"), "reader"),
+        (Role("grafana_reader", 5, "10s"), "grafana_reader"),
+    )
+    assert selected(options) == (
+        ((Role("analytics_loader"), "loader"), *expected) if enabled else expected
+    )
+    expected_grants = tuple(
+        line
+        for line in GRANTS
+        if enabled or "analytics_loader" not in line or line == GRANTS[1]
+    )
+    if not enabled:
+        expected_grants = tuple(
+            s.replace("analytics_loader, ", "") for s in expected_grants
+        )
+
+    assert statements(options) == tuple(
+        re.sub(
+            r"\b(analytics|analytics_owner|analytics_loader|analytics_reader|grafana_reader)\b",
+            r'"\1"',
+            line,
+        )
+        for line in expected_grants
+    )
+
+
+def test_custom_identifiers() -> None:
+
+    options = Settings(
+        database='db"x',
+        owner_role="own",
+        reader_role="read",
+        grafana_role="graf",
+        loader_role="load",
+        loader_enabled=True,
+    )
+    assert identifier('a"b') == '"a""b"'
+    assert selected(options) == (
+        (Role("load"), "loader"),
+        (Role("read"), "reader"),
+        (Role("graf", 5, "10s"), "grafana_reader"),
+    )
+    for original, rendered in zip(GRANTS, statements(options), strict=True):
+        expected = original
+        for before, after in (
+            ("analytics_owner", '"own"'),
+            ("analytics_loader", '"load"'),
+            ("analytics_reader", '"read"'),
+            ("grafana_reader", '"graf"'),
+            ("analytics", '"db""x"'),
+        ):
+            expected = expected.replace(before, after)
+        assert rendered == expected
