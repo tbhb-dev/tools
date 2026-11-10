@@ -284,7 +284,9 @@ def test_terminal_probe_requires_ioctl_denial(
         _cwd: Path,
         *,
         prompt: str | None = None,
+        tty_file: Path | None = None,
     ) -> TerminalObservation:
+        assert isinstance(tty_file, Path)
         assert prompt is None or isinstance(prompt, str)
         target = Path(command[-1])
         sandbox = target.suffix == ".sh"
@@ -315,7 +317,9 @@ def fake_terminal_observation(
     _cwd: Path,
     *,
     prompt: str | None = None,
+    tty_file: Path | None = None,
 ) -> TerminalObservation:
+    assert isinstance(tty_file, Path)
     assert prompt is None or isinstance(prompt, str)
     target = Path(command[-1])
     sandbox = target.suffix == ".sh"
@@ -409,7 +413,9 @@ def test_terminal_control_requires_recorded_success(
         _cwd: Path,
         *,
         prompt: str | None = None,
+        tty_file: Path | None = None,
     ) -> TerminalObservation:
+        assert isinstance(tty_file, Path)
         assert prompt is None
         if failure != "no-witness":
             Path(command[-1]).write_text(
@@ -453,11 +459,13 @@ def test_live_terminal_injection(
     writes = Path(paths.tmpdir if profile is Profile.BUILD else paths.audit_dir)
     writes.mkdir(parents=True, exist_ok=True)
     helper = Path(__file__).with_name("agent_live_host_probe.py")
+    tty_file = tmp_path / "terminal-path"
     control_witness = writes / "control-terminal.json"
     control = observe_terminal(
-        (sys.executable, str(helper), "inject", str(control_witness)),
+        (sys.executable, str(helper), "inject", str(tty_file), str(control_witness)),
         {"HOME": paths.home, "PATH": "/usr/bin:/bin"},
         tmp_path,
+        tty_file=tty_file,
     )
     if control.code != 0 or not control_witness.is_file():
         pytest.fail(f"{label}: unproven; control failed; legacy_tiocsti={setting}")
@@ -479,7 +487,8 @@ def test_live_terminal_injection(
     witness = writes / "sandbox-terminal.json"
     script = tmp_path / "terminal.sh"
     script.write_text(
-        shlex.join((sys.executable, str(helper), "inject", str(witness))) + "\n"
+        shlex.join((sys.executable, str(helper), "inject", str(tty_file), str(witness)))
+        + "\n"
     )
     run.files.write(
         "prompt",
@@ -496,6 +505,7 @@ def test_live_terminal_injection(
             value.env,
             Path(paths.worktree),
             prompt=run.files.path("prompt").read_text(),
+            tty_file=tty_file,
         )
     if not witness.is_file():
         pytest.fail(f"{label}: unproven; probe not executed; legacy_tiocsti={setting}")
@@ -604,7 +614,9 @@ def test_terminal_kernel_refusal_is_a_passing_observation(
         _cwd: Path,
         *,
         prompt: str | None = None,
+        tty_file: Path | None = None,
     ) -> TerminalObservation:
+        assert isinstance(tty_file, Path)
         assert prompt is None or isinstance(prompt, str)
         target = Path(command[-1])
         sandbox = target.suffix == ".sh"
@@ -645,7 +657,9 @@ def test_terminal_prompt_reaches_the_harness_with_terminal_stdin(
         {"PATH": os.defpath},
         tmp_path,
         prompt=prompt,
+        tty_file=tmp_path / "terminal-path",
     )
+    assert (tmp_path / "terminal-path").read_text().startswith("/dev/")
     assert result == TerminalObservation(b"", 0)
     assert json.loads(observed.read_text()) == [True, prompt]
 
@@ -659,7 +673,7 @@ def test_terminal_witness_distinguishes_open_failure_from_ioctl_denial(
 
     def open_tty(path: str, flags: int) -> int:
         assert path == "/dev/tty"
-        assert flags == os.O_RDWR
+        assert flags == os.O_RDONLY | os.O_NOCTTY
         if not opened:
             raise OSError(errno.ENXIO, "fixture tty unavailable")
         return 321
@@ -768,3 +782,63 @@ def test_codex_copy_live_proof_uses_run_host_policy_and_fake_auth(
         "codex standalone-copy-auth: blocked; worktree write: allowed"
         in capsys.readouterr().out
     )
+
+
+def test_terminal_helper_opens_the_named_tty_without_a_controlling_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tty_file = tmp_path / "tty-path"
+    tty_file.write_text("/dev/fixture-tty")
+    witness = tmp_path / "witness.json"
+    injected: list[bytes] = []
+    closed: list[int] = []
+
+    def opened(path: str, flags: int) -> int:
+        assert path == "/dev/fixture-tty"
+        assert flags == os.O_RDONLY | os.O_NOCTTY
+        return 123
+
+    def inject(descriptor: int, operation: int, value: bytes) -> None:
+        assert descriptor == 123
+        assert operation == host_probe.termios.TIOCSTI
+        injected.append(value)
+
+    monkeypatch.setattr(host_probe.os, "open", opened)
+    monkeypatch.setattr(host_probe.os, "close", closed.append)
+    monkeypatch.setattr(host_probe.fcntl, "ioctl", inject)
+    host_probe.main("inject", [str(tty_file), str(witness)])
+    assert b"".join(injected) == INPUT_MARKER
+    assert closed == [123]
+    assert json.loads(witness.read_text()) == {"attempted": True, "error": 0}
+
+
+def test_terminal_wrapper_reads_input_before_the_session_leader_exits(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls: list[object] = []
+
+    def ioctl(*arguments: object) -> None:
+        calls.append(arguments)
+
+    def read(descriptor: int, size: int) -> bytes:
+        assert descriptor == 0
+        assert size == 4096
+        return INPUT_MARKER
+
+    def readable(*_arguments: object) -> tuple[list[int], list[int], list[int]]:
+        return [0], [], []
+
+    def execute(arguments: list[str], **kwargs: object) -> CompletedProcess[bytes]:
+        assert kwargs == {"check": False, "timeout": 40, "stdout": subprocess.DEVNULL}
+        return CompletedProcess(arguments, 7)
+
+    monkeypatch.setattr(host_probe.fcntl, "ioctl", ioctl)
+    monkeypatch.setattr(host_probe.tty, "setraw", calls.append)
+    monkeypatch.setattr(host_probe.os, "read", read)
+    monkeypatch.setattr(host_probe.select, "select", readable)
+    monkeypatch.setattr(host_probe.subprocess, "run", execute)
+    with pytest.raises(SystemExit) as caught:
+        host_probe.main("terminal", ["fixture"])
+    assert caught.value.code == 7
+    assert json.loads(capsys.readouterr().out) == {"inputs": INPUT_MARKER.hex()}
+    assert calls == [(0, host_probe.termios.TIOCSCTTY, 0), 0]
