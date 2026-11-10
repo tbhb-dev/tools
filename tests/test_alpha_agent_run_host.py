@@ -23,10 +23,17 @@ from test_alpha_agent_settings import EXAMPLE
 
 from tbhbdev import secrets
 from tbhbdev.alpha import agent
-from tbhbdev.alpha.agent import credentials, process_group, render, run_host, runfiles
+from tbhbdev.alpha.agent import (
+    credentials,
+    host_tools,
+    process_group,
+    render,
+    run_host,
+    runfiles,
+)
 from tbhbdev.alpha.agent.decisions import request
 from tbhbdev.alpha.agent.decisions.run_state import Group
-from tbhbdev.alpha.agent.model import Harness, Invalid, RunKind
+from tbhbdev.alpha.agent.model import Harness, Invalid, Os, RunKind
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -47,6 +54,17 @@ def fake_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setattr(secrets, "read", read)
     monkeypatch.setattr(credentials, "installation_token", installation)
+    real_resolve = host_tools.resolve
+
+    def resolve(name: str, path: str | None = None) -> str:
+        return (
+            "/usr/bin/true"
+            if name in ("codex", "claude", "agy", "agy-agent")
+            else real_resolve(name, path)
+        )
+
+    monkeypatch.setattr(host_tools, "resolve", resolve)
+    monkeypatch.setattr(host_tools, "codex_proxy_supported", constant(value=True))
 
 
 def make_run(tmp_path: Path, **changes: object) -> run_host.Run:
@@ -106,6 +124,7 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     source = runfiles.private_dir(run.home / ".codex") / "auth.json"
     source.write_text("example-auth")
     result = run_host.prepare_workspace(run)
+    assert result.paths.uid == os.getuid()
     assert result.paths.home == str(run.home)
     assert result.paths.worktree == str(clone / ".worktrees" / "agent-example")
     assert result.paths.tmpdir == str(run.tmpdir)
@@ -660,7 +679,9 @@ def test_hangup_stops_harness_group_writes_auth_and_rc(
     script = r'''
 import dataclasses, os, runpy, signal, subprocess, sys
 from pathlib import Path
-from tbhbdev.alpha.agent import process_group, run_host, runfiles
+from tbhbdev.alpha.agent import host_tools, process_group, run_host, runfiles
+host_tools.resolve = lambda *args: "/usr/bin/true"
+host_tools.codex_proxy_supported = lambda *args: True
 
 sys.path.insert(0, str(Path(sys.argv[1]).parent))
 helpers = runpy.run_path(sys.argv[1])
@@ -894,6 +915,7 @@ def check_harness_arguments(
 
     def build(*args: object, **kwargs: object) -> Policy:
         assert args == (run.settings, run.host)
+        assert kwargs.pop("protected")
         assert kwargs == {
             "harness": harness,
             "profile": run.request.profile,
@@ -948,6 +970,7 @@ def check_launch_contract(
     original: tuple[str, ...],
 ) -> None:
     harness, kind = run.request.harness, run.request.kind
+    original = ("/usr/bin/true", *original[1:])
     env = prepared.delivery.env
     assert not run.files.path("launched").exists()
     assert kwargs["cwd"] == prepared.paths.worktree
@@ -990,7 +1013,7 @@ def check_launch_contract(
         assert command[:-3] == original[:-1]
         assert command[-3:] == (
             "--output-last-message",
-            str(run.files.path("out.final")),
+            str(run.tmpdir / "out.final"),
             "-",
         )
     if kind is not RunKind.EXEC or harness is not Harness.CODEX:
@@ -1313,3 +1336,411 @@ def test_terminal_setup_failure_keeps_registered_cleanup_owner(
     assert child.waits == [None]
     assert run.files.path("pgid").read_text() == "registered"
     assert run.files.path("rc").read_text() == "1\n"
+
+
+@pytest.mark.parametrize("common", [False, True])
+def test_planned_paths_read_git_directory_data(tmp_path: Path, common: bool) -> None:
+    run = make_run(tmp_path)
+    clone = Path(run_host.repo.clone_path(run.home, run.request.repo))
+    clone.mkdir(parents=True)
+    gitdir = run.home / "gitdir"
+    gitdir.mkdir()
+    (clone / ".git").write_text(f"gitdir: {gitdir}\n")
+    if common:
+        (gitdir / "commondir").write_text("../shared\n")
+    paths = run_host.planned_paths(run)
+    assert paths.git_common_dir == str(run.home / "shared" if common else gitdir)
+    assert paths == run_host.RunPaths(
+        home=str(run.home),
+        worktree=str(clone / ".worktrees" / "agent-example"),
+        tmpdir=str(run.tmpdir),
+        codex_home=str(run.tmpdir / "codex"),
+        audit_dir=str(run.home / run.settings.sandbox.audit_dir),
+        git_common_dir=str(run.home / "shared" if common else gitdir),
+        uid=os.getuid(),
+    )
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("opt_out", [False, True])
+def test_preflight_version_and_named_exceptions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    harness: Harness,
+    opt_out: bool,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        timeout=900,
+        reason="test",
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+    )
+    sandbox = dataclasses.replace(
+        run.settings.sandbox,
+        codex_network_proxy_opt_out="test exception" if opt_out else None,
+        agy_unsandboxed_opt_out="test exception" if opt_out else None,
+    )
+    run = dataclasses.replace(
+        run, settings=dataclasses.replace(run.settings, sandbox=sandbox)
+    )
+    checks: list[tuple[str, Path]] = []
+
+    def supported(executable: str, directory: Path) -> bool:
+        assert executable == "/usr/bin/true"
+        assert directory == run.tmpdir
+        checks.append((executable, directory))
+        return False
+
+    monkeypatch.setattr(host_tools, "codex_proxy_supported", supported)
+    if not opt_out and harness in (Harness.CODEX, Harness.AGY):
+        with pytest.raises(Invalid) as caught:
+            run_host.preflight(run)
+        assert str(caught.value) == (
+            "Codex network_proxy support required (minimum 0.164.0); "
+            "upgrade or configure codex_network_proxy_opt_out"
+            if harness is Harness.CODEX
+            else (
+                "agy has no OS sandbox; configure agy_unsandboxed_opt_out "
+                "with a named reason"
+            )
+        )
+    else:
+        run_host.preflight(run)
+        if opt_out and harness is not Harness.CLAUDE:
+            assert (
+                run.files.path("log").read_text()
+                == f"{harness} sandbox opt-out: test exception\n"
+            )
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == (
+        f"{harness} sandbox opt-out: test exception\n"
+        if opt_out and harness is not Harness.CLAUDE
+        else ""
+    )
+
+    assert checks == (
+        [("/usr/bin/true", run.tmpdir)]
+        if harness is Harness.CODEX and not opt_out
+        else []
+    )
+
+
+def test_mac_host_commands_are_resolved_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
+    run = make_run(tmp_path)
+    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=Os.MACOS))
+    calls: list[str] = []
+
+    def resolve(name: str, _path: str | None = None) -> str:
+        calls.append(name)
+        return "/usr/bin/true"
+
+    monkeypatch.setattr(host_tools, "resolve", resolve)
+    run_host.checked_policy(run, preparation(run).paths)
+    assert calls == ["codex", "git", "ssh-agent", "ssh-add", "sysctl", "ps"]
+
+
+@pytest.mark.parametrize(
+    "source", ["run directory", "symlink write root", "harness", "interpreter"]
+)
+def test_host_paths_refuse_before_any_host_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    run = make_run(tmp_path)
+    paths = preparation(run).paths
+    if source == "run directory":
+        root = str(run.files.root)
+    elif source == "symlink write root":
+        link = run.home / "writable-link"
+        link.symlink_to(run.files.root, target_is_directory=True)
+        root = str(link)
+    else:
+        root = str(run.tmpdir)
+        planted = run.tmpdir / "planted"
+        planted.write_text(
+            "#!/bin/sh\n"
+            if source == "harness"
+            else "#!" + str(run.tmpdir / "interpreter") + "\n"
+        )
+        if source == "interpreter":
+            (run.tmpdir / "interpreter").write_bytes(b"binary")
+            (run.tmpdir / "interpreter").chmod(0o700)
+            planted = tmp_path / "trusted-script"
+            planted.write_text("#!" + str(run.tmpdir / "interpreter") + "\n")
+        original = host_tools.resolve
+
+        def selected(name: str, path: str | None = None) -> str:
+            return str(planted) if name == "codex" else original(name, path)
+
+        monkeypatch.setattr(host_tools, "resolve", selected)
+    if source in ("run directory", "symlink write root"):
+        run = dataclasses.replace(
+            run,
+            settings=dataclasses.replace(
+                run.settings,
+                sandbox=dataclasses.replace(run.settings.sandbox, write_roots=(root,)),
+            ),
+        )
+    with pytest.raises(Invalid, match=r"protected host path.*overlaps write root"):
+        run_host.checked_policy(run, paths)
+
+
+def test_final_answer_is_copied_only_after_child_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    run.files.write("prompt", "task")
+    run.files.receive(run.request)
+    prepared = preparation(run)
+    child = Child()
+    original_read = Path.read_text
+    reads: list[Path] = []
+
+    def read(
+        path: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> str:
+        if path == run.files.path("request.json"):
+            reads.append(path)
+        return original_read(path, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    marker = run.tmpdir / "executed"
+
+    def launch(
+        spec: process_group.Launch, *, started: Callable[[Child], None]
+    ) -> Child:
+        assert spec.command[-2] == str(run.tmpdir / "out.final")
+        assert not run.files.path("out.final").exists()
+        (run.tmpdir / "out.final").write_text("answer")
+        run.files.path("request.json").write_text(
+            f"__import__('pathlib').Path({str(marker)!r}).write_text('escaped')"
+        )
+        started(child)
+        return child
+
+    def stop(*_args: object) -> None:
+        assert not run.files.path("out.final").exists()
+
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "record", constant(None))
+    monkeypatch.setattr(process_group, "stop_started", stop)
+    with ExitStack() as stack:
+        assert run_host.run_harness(run, prepared, stack) == 7
+    assert run.files.path("out.final").read_text() == "answer"
+    assert not marker.exists()
+
+    assert reads == [run.files.path("request.json")]
+
+
+@pytest.mark.parametrize(
+    ("harness", "kind"),
+    [
+        (Harness.CLAUDE, RunKind.EXEC),
+        (Harness.AGY, RunKind.EXEC),
+        (Harness.CODEX, RunKind.START),
+    ],
+)
+def test_only_headless_codex_can_supply_final_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness, kind: RunKind
+) -> None:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        kind=kind.value,
+        timeout=900,
+        reason="test",
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+    )
+    run.files.write("prompt", "task")
+    (run.tmpdir / "out.final").write_text("unused")
+    child = Child()
+
+    def launch(
+        _spec: process_group.Launch, *, started: Callable[[Child], None]
+    ) -> Child:
+        started(child)
+        return child
+
+    monkeypatch.setattr(sys, "stdin", sys.__stdin__)
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "record", constant(None))
+    monkeypatch.setattr(process_group, "stop_started", constant(None))
+    monkeypatch.setattr(process_group, "foreground", constant(None))
+    with ExitStack() as stack:
+        assert run_host.run_harness(run, preparation(run), stack) == 7
+    assert not run.files.path("out.final").exists()
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_execute_scopes_the_mac_host_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail: bool
+) -> None:
+    run = make_run(tmp_path)
+    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=Os.MACOS))
+    before = host_tools.search()
+
+    def execute(actual: run_host.Run, text: str, stack: ExitStack) -> int:
+        assert actual is run
+        assert text == "task"
+        assert isinstance(stack, ExitStack)
+        assert (
+            host_tools.search()
+            == "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+        )
+        if fail:
+            raise ValueError
+        return 7
+
+    monkeypatch.setattr(run_host, "_execute", execute)
+    if fail:
+        with pytest.raises(ValueError, match=r"^$"):
+            run_host.execute(run, "task")
+    else:
+        assert run_host.execute(run, "task") == 7
+    assert host_tools.search() == before
+
+
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_checked_policy_supplies_all_protected_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    os: Os,
+    harness: Harness,
+    profile: str,
+) -> None:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        profile=profile,
+        timeout=900,
+        commit="0" * 40 if profile == "review" else None,
+        reason="test",
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+    )
+    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=os))
+    directories = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+    names = ("git", "ssh-agent", "ssh-add")
+    if os is Os.MACOS:
+        directories += ("/opt/homebrew/bin", "/usr/local/bin")
+        names += ("sysctl", "ps")
+    installed = ("/trusted/prefix", "/trusted/python", "/trusted/entry")
+    monkeypatch.setattr(host_tools, "installation", constant(installed))
+    protections: list[tuple[str, ...]] = []
+    configs: list[run_host.Settings] = []
+    supplied: list[run_host.RunPaths] = []
+    original = run_host.policy.protect_host
+
+    def protect(
+        configured: run_host.Settings,
+        paths: run_host.RunPaths,
+        protected: tuple[str, ...],
+    ) -> None:
+        protections.append(protected)
+        configs.append(configured)
+        supplied.append(paths)
+        original(configured, paths, protected)
+
+    lookups: list[tuple[str, str | None]] = []
+    headers: list[tuple[str, str]] = []
+
+    def resolve(name: str, path: str | None = None) -> str:
+        lookups.append((name, path))
+        return "/usr/bin/true"
+
+    def executable_paths(executable: str, search: str) -> tuple[str, ...]:
+        headers.append((executable, search))
+        return (executable,)
+
+    monkeypatch.setattr(run_host.policy, "protect_host", protect)
+    monkeypatch.setattr(host_tools, "resolve", resolve)
+    monkeypatch.setattr(host_tools, "executable_paths", executable_paths)
+    real = tmp_path / "resolved"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    paths = run_host.RunPaths(
+        str(run.home),
+        str(alias / "worktree"),
+        str(alias / "temp"),
+        str(real / "temp" / "codex"),
+        str(alias / "audit"),
+        str(alias / "common"),
+        uid=12345,
+    )
+    expected_paths = dataclasses.replace(
+        paths,
+        worktree=str(real / "worktree"),
+        tmpdir=str(real / "temp"),
+        audit_dir=str(real / "audit"),
+        git_common_dir=str(real / "common"),
+    )
+    value, executable = run_host.checked_policy(run, paths)
+    expected = (
+        str(run.files.root.resolve()),
+        *installed,
+        *directories,
+        *(str(Path(path).resolve()) for path in directories),
+    )
+    assert protections == [expected, expected, ("/usr/bin/true",) * (len(names) + 1)]
+    assert supplied == [expected_paths] * 3
+    for index in (0, 2):
+        assert configs[index].sandbox.write_roots == tuple(
+            str(run.home / p) for p in run.settings.sandbox.write_roots
+        )
+        assert configs[index].sandbox.agy.build_write == tuple(
+            str(run.home / p) for p in run.settings.sandbox.agy.build_write
+        )
+    assert configs[1] is run.settings
+    name = (
+        "agy-agent" if harness is Harness.AGY and profile == "build" else harness.value
+    )
+    assert lookups == [
+        (name, value.env["PATH"]),
+        *((name, ":".join(directories)) for name in names),
+    ]
+    assert headers == [
+        ("/usr/bin/true", value.env["PATH"]),
+        *(("/usr/bin/true", ":".join(directories)) for _name in names),
+    ]
+    assert executable == "/usr/bin/true"
+
+
+def test_main_defaults_to_the_current_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+
+    def load(args: object, _tmpdir: Path) -> tuple[run_host.Run, str]:
+        assert isinstance(args, run_host.argparse.Namespace)
+        assert args.host == "example-linux"
+        return run, "task"
+
+    monkeypatch.setattr(socket, "gethostname", constant("example-linux"))
+    monkeypatch.setattr(run_host, "_load", load)
+    monkeypatch.setattr(run_host, "execute", constant(7))
+    assert run_host.main(["example"], "example") == 7
+
+
+def test_actual_common_directory_is_checked_before_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    monkeypatch.setattr(run_host.worktree, "common_dir", constant(run.files.root))
+
+    def create(*_args: object) -> None:
+        pytest.fail("the discovered common directory must be checked first")
+
+    monkeypatch.setattr(run_host.worktree, "create", create)
+    with pytest.raises(Invalid, match=r"protected host path.*overlaps write root"):
+        run_host.prepare_workspace(run)

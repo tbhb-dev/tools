@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import stat
 import subprocess  # nosec B404
 import time
 from dataclasses import dataclass, field
@@ -15,8 +13,8 @@ import yaml
 
 from tbhbdev import secrets
 from tbhbdev.alpha import gh_app
-from tbhbdev.alpha.agent import process_group, runfiles
-from tbhbdev.alpha.agent.decisions import config, repo, run_state
+from tbhbdev.alpha.agent import host_tools, process_group, runfiles
+from tbhbdev.alpha.agent.decisions import auth, config, repo, run_state
 from tbhbdev.alpha.agent.model import Harness, Invalid, Profile
 
 if TYPE_CHECKING:
@@ -125,7 +123,7 @@ def signing_agent(key: str, tmpdir: Path, deadline: float) -> subprocess.Popen[s
     """Keep one foreground agent, and load the key through ssh-add's stdin."""
     socket = tmpdir / "ssh.sock"
     agent = subprocess.Popen(  # nosec B603 B607
-        ["ssh-agent", "-D", "-a", str(socket)],
+        [host_tools.resolve("ssh-agent"), "-D", "-a", str(socket)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -134,7 +132,7 @@ def signing_agent(key: str, tmpdir: Path, deadline: float) -> subprocess.Popen[s
     try:
         agent_ready(agent, socket, deadline)
         subprocess.run(  # nosec B603 B607
-            ["ssh-add", "-"],
+            [host_tools.resolve("ssh-add"), "-"],
             input=key,
             env={"SSH_AUTH_SOCK": str(socket)},
             stdout=subprocess.DEVNULL,
@@ -175,28 +173,7 @@ def auth_after(destination: Path) -> str:
     if destination.parent.resolve() != destination.parent:
         message = "codex auth parent is redirected"
         raise Invalid(message)
-    directory = os.open(
-        destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    )
-    try:
-        fd = os.open(
-            destination.name,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-            dir_fd=directory,
-        )
-    finally:
-        os.close(directory)
-    with os.fdopen(fd, "rb") as incoming:
-        metadata = os.fstat(incoming.fileno())
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-            message = "codex auth is not an owned regular file"
-            raise Invalid(message)
-        limit = 1024 * 1024
-        data = incoming.read(limit + 1)
-        if len(data) > limit:
-            message = "codex auth exceeds 1 MiB"
-            raise Invalid(message)
-    text = data.decode()
+    text = runfiles.read_owned(destination, 1024 * 1024, "codex auth")
     if not isinstance(json.loads(text), dict):
         message = "codex auth must be a JSON object"
         raise Invalid(message)
@@ -213,6 +190,9 @@ def auth_write_back(source: Path, destination: Path, before: str | None) -> str 
         return f"codex auth write-back skipped: {exc}\n"
     except OSError, ValueError:
         return "codex auth write-back skipped: cannot safely read a JSON object\n"
+    reason = auth.validate(before, after)
+    if reason is not None:
+        return f"codex auth write-back skipped: {reason}\n"
     if run_state.write_auth(Harness.CODEX, before, after):
         with runfiles.locked(source.parent / "agent-auth.lock"):
             current = source.read_text() if source.exists() else None

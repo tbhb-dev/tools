@@ -162,27 +162,67 @@ def _bad_path(text: str) -> bool:
     return "\x00" in text or ".." in text.split("/")
 
 
-def _write_roots(table: _Table) -> tuple[str, ...]:
-    entries = table.paths("write_roots")
+def _write_roots(table: _Table, key: str = "write_roots") -> tuple[str, ...]:
+    entries = table.paths(key)
     if any(
         e.startswith("~") or PurePosixPath(e).parent == PurePosixPath(e)
         for e in entries
     ):
         table.fail(
-            "write_roots",
+            key,
             "must be paths without a leading '~', an empty path or a root",
         )
     return entries
 
 
+def _optional_reason(table: _Table, key: str) -> str | None:
+    return table.text(key) if key in table.values else None
+
+
+def _host_path(table: _Table) -> tuple[str, ...]:
+    if "host_path" not in table.values:
+        return ()
+    entries = _write_roots(table, "host_path")
+    if any(not PurePosixPath(e).is_absolute() for e in entries):
+        table.fail("host_path", "must contain absolute paths only")
+    return entries
+
+
+def _network_domains(table: _Table) -> tuple[str, ...]:
+    if table.values.get("network_domains") == []:
+        return ()
+    if "network_domains" not in table.values:
+        return ()
+    entries = table.strings("network_domains")
+    if any(not HOST_NAME.fullmatch(e) for e in entries):
+        table.fail("network_domains", "must contain exact host names without wildcards")
+    return entries
+
+
 def _sandbox(table: _Table) -> Sandbox:
-    table.only("write_roots", "audit_dir", "denied_home_paths", "path", "agy")
+    table.only(
+        "write_roots",
+        "audit_dir",
+        "denied_home_paths",
+        "path",
+        "agy",
+        "host_path",
+        "network_domains",
+        "codex_network_proxy_opt_out",
+        "agy_unsandboxed_opt_out",
+    )
     path = table.table("path")
     path.only("linux", "macos")
     agy = table.table("agy")
     agy.only("review_read", "build_read", "build_write")
     return Sandbox(
         write_roots=_write_roots(table),
+        host_path=_host_path(table),
+        network_domains=_network_domains(table),
+        codex_network_proxy_opt_out=_optional_reason(
+            table, "codex_network_proxy_opt_out"
+        ),
+        agy_unsandboxed_opt_out=_optional_reason(table, "agy_unsandboxed_opt_out"),
         audit_dir=table.path("audit_dir"),
         denied_home_paths=table.home_paths("denied_home_paths"),
         path=SandboxPath(linux=path.paths("linux"), macos=path.paths("macos")),

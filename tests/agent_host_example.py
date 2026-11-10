@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import subprocess
+from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
     from pathlib import Path
+
+    import pytest
 
 from agent_example import settings
 from test_alpha_agent_request import BUILD
@@ -79,6 +84,10 @@ def host_settings() -> model.Settings:
     return dataclasses.replace(
         original,
         credentials=(references,),
+        sandbox=dataclasses.replace(
+            original.sandbox,
+            write_roots=(".cache", ".local/share/mise", ".local/state/mise"),
+        ),
         kill_grace_seconds=0,
         claude=model.Claude(
             "primary", (model.ClaudeProfile("primary", "example/primary/token", None),)
@@ -91,3 +100,20 @@ def constant[Result](value: Result) -> Callable[..., Result]:
         return value
 
     return fixed
+
+
+def bounded_file_reads(monkeypatch: pytest.MonkeyPatch, size: int) -> None:
+    wrapped = os.fdopen
+
+    @contextmanager
+    def checked(fd: int, mode: str) -> Generator[SimpleNamespace]:
+        assert mode == "rb"
+        with wrapped(fd, mode) as stream:
+
+            def read(count: int) -> bytes:
+                assert count == size
+                return stream.read(count)
+
+            yield SimpleNamespace(fileno=stream.fileno, read=read)
+
+    monkeypatch.setattr(os, "fdopen", checked)

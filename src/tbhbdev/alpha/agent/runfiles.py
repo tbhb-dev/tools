@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -46,6 +47,32 @@ def atomic(path: Path, text: str) -> None:
         os.fsync(directory)
     finally:
         os.close(directory)
+
+
+def read_owned(source: Path, limit: int, label: str) -> str:
+    """Read bounded data through a pinned parent without following a link."""
+    directory = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(
+            source.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory
+        )
+    finally:
+        os.close(directory)
+    with os.fdopen(fd, "rb") as incoming:
+        metadata = os.fstat(incoming.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+            message = f"{label} is not an owned regular file"
+            raise Invalid(message)
+        data = incoming.read(limit + 1)
+        if len(data) > limit:
+            message = f"{label} exceeds {limit // (1024 * 1024)} MiB"
+            raise Invalid(message)
+    return data.decode()
+
+
+def copy_final(source: Path, destination: Path) -> None:
+    """Copy a bounded, owned regular file as data, after the harness stops."""
+    atomic(destination, read_owned(source, 16 * 1024 * 1024, "final answer"))
 
 
 @contextmanager

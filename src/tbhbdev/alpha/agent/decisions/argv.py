@@ -124,6 +124,20 @@ def _codex(
         "-c",
         f"web_search={_toml(detail.web_search.value)}",
     ]
+    if detail.network_proxy is not None:
+        domains = ",".join(
+            f'{_toml(d)}="allow"' for d in detail.network_proxy["domains"]
+        )
+        argv += [
+            "-c",
+            (
+                'features.network_proxy={enabled=true,mode="limited",'
+                f"domains={{{domains}}},unix_sockets={{}},"
+                "dangerously_allow_all_unix_sockets=false,allow_local_binding=false}"
+            ),
+        ]
+    else:
+        argv += ["-c", "features.network_proxy.enabled=false"]
     # A codex policy's environment holds every handoff variable.
     for name in _HANDOFF:
         argv += ["-c", f"shell_environment_policy.set.{name}={_toml(policy.env[name])}"]

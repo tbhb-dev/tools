@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from agent_host_example import bounded_file_reads
 from test_alpha_agent_request import BUILD
 
 from tbhbdev.alpha.agent import runfiles
@@ -280,3 +281,79 @@ def test_atomic_opens_only_a_directory_for_sync(
     monkeypatch.setattr(os, "open", checked)
     runfiles.atomic(tmp_path / "example.rc", "0\n")
     assert opened == [os.O_RDONLY | os.O_DIRECTORY]
+
+
+@pytest.mark.parametrize(
+    "plant", ["regular", "symlink", "fifo", "owner", "oversized", "limit", "missing"]
+)
+def test_final_answer_copy_is_bounded_owned_and_atomic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plant: str
+) -> None:
+    source = tmp_path / "final"
+    destination = tmp_path / "output"
+    destination.write_text("old")
+    if plant == "symlink":
+        source.symlink_to(destination)
+    elif plant == "fifo":
+        os.mkfifo(source)
+    elif plant != "missing":
+        source.write_text(
+            "x" * (16 * 1024 * 1024 + (1 if plant == "oversized" else 0))
+            if plant in ("limit", "oversized")
+            else "answer"
+        )
+    if plant == "owner":
+        monkeypatch.setattr(os, "getuid", lambda: source.stat().st_uid + 1)
+    if plant in ("regular", "limit"):
+        runfiles.copy_final(source, destination)
+        assert destination.read_bytes() == source.read_bytes()
+        assert destination.stat().st_mode & 0o777 == 0o600
+    else:
+        with pytest.raises((OSError, runfiles.Invalid)) as caught:
+            runfiles.copy_final(source, destination)
+        if plant in ("owner", "fifo", "oversized"):
+            assert str(caught.value) == (
+                "final answer exceeds 16 MiB"
+                if plant == "oversized"
+                else "final answer is not an owned regular file"
+            )
+        assert destination.read_text() == "old"
+
+
+def test_owned_reader_reports_limits_and_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "input"
+    source.write_text("a" * 1048577)
+    with pytest.raises(runfiles.Invalid) as caught:
+        runfiles.read_owned(source, 1048576, "example")
+    assert str(caught.value) == "example exceeds 1 MiB"
+    source.write_text("regular")
+    monkeypatch.setattr(os, "getuid", lambda: source.stat().st_uid + 1)
+    with pytest.raises(runfiles.Invalid) as caught:
+        runfiles.read_owned(source, 1048576, "example")
+    assert str(caught.value) == "example is not an owned regular file"
+
+
+def test_owned_reader_pins_parent_and_bounds_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "input"
+    source.write_text("data")
+    opened = os.open
+
+    def checked(path: str | Path, flags: int, *, dir_fd: int | None = None) -> int:
+        expected = os.O_RDONLY | os.O_NOFOLLOW
+        if path == tmp_path:
+            assert dir_fd is None
+            expected |= os.O_DIRECTORY
+        else:
+            assert path == "input"
+            assert dir_fd is not None
+            expected |= os.O_NONBLOCK
+        assert flags == expected
+        return opened(path, flags, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", checked)
+    bounded_file_reads(monkeypatch, 1048577)
+    assert runfiles.read_owned(source, 1048576, "example") == "data"

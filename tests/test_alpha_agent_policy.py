@@ -6,11 +6,17 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Literal
 
 import pytest
 from agent_example import (
     DENIED,
     LINUX,
+    LINUX_SOCKET_DENIES,
     MACOS,
     MARKER,
     SANDBOX,
@@ -92,6 +98,7 @@ def denied(os: Os, home: str) -> tuple[str, ...]:
     if os is Os.LINUX:
         return (
             f"{home}/{TOKEN_DIR}",
+            *LINUX_SOCKET_DENIES,
             "/tmp/example-sockets",
             f"{home}/{DENIED}",
         )
@@ -202,6 +209,7 @@ def codex_expected(
         deny=denied(os, home),
         approval_policy="never",
         web_search=search,
+        network_proxy=policy.network_proxy(settings()),
     )
 
 
@@ -262,6 +270,7 @@ def test_unsandboxed_selects_full_access_for_a_codex_build(os: Os) -> None:
         deny=denied(os, "/example/home/ops"),
         approval_policy="never",
         web_search=WebSearch.LIVE,
+        network_proxy=policy.network_proxy(settings()),
     )
     assert result.env == env_of(os, Harness.CODEX, "ops")
     assert result.deny == denied(os, "/example/home/ops")
@@ -374,7 +383,7 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
                     },
                 }
                 if profile is Profile.REVIEW
-                else {}
+                else {"network": {"allowedDomains": []}}
             ),
             "filesystem": {
                 "allowWrite": writes,
@@ -470,7 +479,11 @@ def test_denied_paths_keep_the_first_occurrence(os: Os, profile: Profile) -> Non
     result = made(os, profile, Harness.CODEX, "agent", config=config)
     home = "/example/home/agent"
     expected = (
-        (f"{home}/{TOKEN_DIR}", f"{home}/{DENIED}")
+        (
+            f"{home}/{TOKEN_DIR}",
+            *LINUX_SOCKET_DENIES,
+            f"{home}/{DENIED}",
+        )
         if os is Os.LINUX
         else (
             *(f"{home}/{p}" for p in MACOS_TOKEN_PATHS),
@@ -588,7 +601,13 @@ def test_the_sockets_directory_is_denied_with_its_aliases(
     home = "/example/home/agent"
     assert result.deny == (
         *(
-            (f"{home}/{TOKEN_DIR}",)
+            (
+                f"{home}/{TOKEN_DIR}",
+                "/run/WSL",
+                "/var/run/docker.sock",
+                "/run/docker.sock",
+                "/run/user/0",
+            )
             if os is Os.LINUX
             else tuple(f"{home}/{p}" for p in MACOS_TOKEN_PATHS)
         ),
@@ -889,9 +908,20 @@ def test_configured_write_roots_cannot_reach_denied_paths(
     "write", ["/example/denied/item", "/example/denied", "/example/denied/item/inner"]
 )
 def test_run_write_paths_cannot_reach_denied_paths(
-    os: Os, profile: Profile, harness: Harness, field: str, write: str
+    os: Os,
+    profile: Profile,
+    harness: Harness,
+    field: Literal["worktree", "tmpdir", "git_common_dir", "audit_dir"],
+    write: str,
 ) -> None:
-    run = dataclasses.replace(paths("agent"), **{field: write})
+    original = paths("agent")
+    run = dataclasses.replace(
+        original,
+        worktree=write if field == "worktree" else original.worktree,
+        tmpdir=write if field == "tmpdir" else original.tmpdir,
+        git_common_dir=write if field == "git_common_dir" else original.git_common_dir,
+        audit_dir=write if field == "audit_dir" else original.audit_dir,
+    )
     config = dataclasses.replace(settings(), sockets_dir="/example/denied/item")
     with pytest.raises(Invalid) as caught:
         policy.build(
@@ -1016,7 +1046,8 @@ def test_build_gets_common_git_directory_and_only_its_signing_socket(
     elif isinstance(result.detail, model.ClaudePolicy):
         assert dig(result.detail.settings, "env", "SSH_AUTH_SOCK") == socket
         assert dig(result.detail.settings, "sandbox", "network") == {
-            "allowUnixSockets": [socket]
+            "allowedDomains": [],
+            "allowUnixSockets": [socket],
         }
         assert common in strings(
             dig(result.detail.settings, "sandbox", "filesystem", "allowWrite")
@@ -1046,11 +1077,11 @@ def test_review_never_grants_common_git_writes() -> None:
 @pytest.mark.parametrize(
     ("profile", "socket", "network"),
     [
-        (Profile.BUILD, None, None),
+        (Profile.BUILD, None, {"allowedDomains": []}),
         (
             Profile.BUILD,
             "/example/signing.sock",
-            {"allowUnixSockets": ["/example/signing.sock"]},
+            {"allowedDomains": [], "allowUnixSockets": ["/example/signing.sock"]},
         ),
         (
             Profile.REVIEW,
@@ -1186,3 +1217,128 @@ def test_codex_protects_git_configuration_inside_build_write_root(
         expected += tuple(f"{common}/{entry}" for entry in ("config", "hooks", "info"))
         assert common in result.detail.write_roots
     assert result.detail.read_roots == expected
+
+
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("reason", [None, "isolated test machine"])
+def test_agy_requires_named_opt_out(profile: Profile, reason: str | None) -> None:
+    configured = settings(
+        sandbox=dataclasses.replace(SANDBOX, agy_unsandboxed_opt_out=reason)
+    )
+    if reason is None:
+        with pytest.raises(Invalid) as caught:
+            made(Os.LINUX, profile, Harness.AGY, "agent", config=configured)
+        assert str(caught.value) == (
+            "agy has no OS sandbox; configure agy_unsandboxed_opt_out "
+            "with a named reason"
+        )
+    else:
+        assert isinstance(
+            made(Os.LINUX, profile, Harness.AGY, "agent", config=configured).detail,
+            model.AgyPolicy,
+        )
+
+
+@pytest.mark.parametrize("reason", [None, "explicit network exception"])
+@pytest.mark.parametrize("domains", [(), ("api.github.com", "example.com")])
+@pytest.mark.parametrize("profile", Profile)
+def test_codex_proxy_default_and_opt_out(
+    reason: str | None, domains: tuple[str, ...], profile: Profile
+) -> None:
+    configured = settings(
+        sandbox=dataclasses.replace(
+            SANDBOX, network_domains=domains, codex_network_proxy_opt_out=reason
+        )
+    )
+    detail = made(Os.LINUX, profile, Harness.CODEX, "agent", config=configured).detail
+    assert isinstance(detail, model.CodexPolicy)
+    assert detail.network_proxy == (
+        None
+        if reason
+        else {
+            "enabled": True,
+            "mode": "limited",
+            "domains": dict.fromkeys(domains, "allow"),
+            "unix_sockets": {},
+            "dangerously_allow_all_unix_sockets": False,
+            "allow_local_binding": False,
+        }
+    )
+
+
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize("socket", [None, "/example/signing.sock"])
+def test_claude_build_network_domains(os: Os, socket: str | None) -> None:
+    configured = settings(
+        sandbox=dataclasses.replace(SANDBOX, network_domains=("api.github.com",))
+    )
+    result = policy.build(
+        configured,
+        HOSTS[os],
+        harness=Harness.CLAUDE,
+        profile=Profile.BUILD,
+        account="agent",
+        unsandboxed=False,
+        paths=dataclasses.replace(paths("agent"), signing_socket=socket),
+    )
+    assert isinstance(result.detail, model.ClaudePolicy)
+    assert dig(result.detail.settings, "sandbox", "network") == {
+        "allowedDomains": ["api.github.com"],
+        **({"allowUnixSockets": [socket]} if socket else {}),
+    }
+
+
+@pytest.mark.parametrize(
+    "field", ["worktree", "git_common_dir", "tmpdir", "audit_dir", "configured", "fd"]
+)
+@pytest.mark.parametrize("relation", ["same", "ancestor", "descendant", "sibling"])
+def test_host_protected_paths_refuse_both_directions(field: str, relation: str) -> None:
+    run = model.RunPaths(
+        "/example/home",
+        "/one/worktree",
+        "/three/temp",
+        "/three/temp/codex",
+        "/four/audit",
+        "/two/common",
+    )
+    configured = settings(sandbox=dataclasses.replace(SANDBOX, write_roots=(".cache",)))
+    write = {"configured": run.home + "/.cache", "fd": "/dev/fd"}.get(field) or getattr(
+        run, field
+    )
+    protected = {
+        "same": write,
+        "ancestor": str(PurePosixPath(write).parent),
+        "descendant": write + "/bin",
+        "sibling": write + "-other",
+    }[relation]
+    if relation == "sibling":
+        policy.protect_host(configured, run, (protected,))
+    else:
+        with pytest.raises(Invalid) as caught:
+            policy.protect_host(configured, run, (protected,))
+        assert str(caught.value) == (
+            f"protected host path {protected} overlaps write root {write}; "
+            "narrow that write root"
+        )
+
+
+@pytest.mark.parametrize("harness", Harness)
+def test_linux_socket_denies_use_the_run_uid(harness: Harness) -> None:
+    run = dataclasses.replace(paths("agent"), uid=12345)
+    result = policy.build(
+        settings(),
+        LINUX,
+        harness=harness,
+        profile=Profile.BUILD,
+        account="agent",
+        unsandboxed=False,
+        paths=run,
+    )
+    assert "/run/user/12345" in result.deny
+    assert "/run/user/0" not in result.deny
+    for path in ("/run/WSL", "/var/run/docker.sock", "/run/docker.sock"):
+        assert path in result.deny
+
+
+def test_host_protection_handles_a_missing_common_directory() -> None:
+    policy.protect_host(settings(), paths("agent"), ("/example/installation",))

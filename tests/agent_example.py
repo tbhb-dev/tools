@@ -13,8 +13,15 @@ TOKEN_DIR = str(secrets.LINUX_TOKEN_FILE.parent)
 TOKEN_TOP = secrets.LINUX_TOKEN_FILE.parts[0]
 # The fixture's one denied home path.
 DENIED = ".example-denied"
+LINUX_SOCKET_DENIES = (
+    "/run/WSL",
+    "/var/run/docker.sock",
+    "/run/docker.sock",
+    "/run/user/0",
+)
 
 SANDBOX = model.Sandbox(
+    agy_unsandboxed_opt_out="test grants only",
     denied_home_paths=(DENIED,),
     agy=model.AgySandbox(
         review_read=(".local/share/example-gh", ".local/share/example-mise"),

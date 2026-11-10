@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from tbhbdev.alpha.agent import host_tools
 from tbhbdev.alpha.agent.decisions import run_state
 from tbhbdev.alpha.agent.decisions.run_state import Action, Group
 from tbhbdev.alpha.agent.model import Invalid
@@ -40,7 +41,7 @@ def boot_id() -> str:
     if sys.platform == "linux":
         return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     return subprocess.check_output(  # nosec B603 B607
-        ["sysctl", "-n", "kern.boottime"], text=True, timeout=5
+        [host_tools.resolve("sysctl"), "-n", "kern.boottime"], text=True, timeout=5
     ).strip()
 
 
