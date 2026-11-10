@@ -44,6 +44,7 @@ def test_group_stop_reaps_a_forked_child() -> None:
     probe("""\
         import os, signal, subprocess, sys
         from tbhbdev.alpha.agent import process_group as g
+        g.boot_id = lambda: "example-boot"
 
         stub = "\\n".join([
             "import os, signal, sys",
@@ -184,6 +185,7 @@ def test_recorded_group_ownership(tmp_path: Path, change: str) -> None:
         from pathlib import Path
         from tbhbdev.alpha.agent import process_group as g, runfiles
         from tbhbdev.alpha.agent.decisions.run_state import Action
+        g.boot_id = lambda: "example-boot"
 
         files = runfiles.RunFiles(Path(sys.argv[1]), "example")
         child = g.launch(
@@ -330,7 +332,10 @@ def test_foreground_restores_handler_on_failure(
     assert signal.getsignal(signal.SIGTTOU) == before
 
 
-def test_prepare_success_and_errors(tmp_path: Path) -> None:
+def test_prepare_success_and_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(groups, "boot_id", constant("example-boot"))
     files = runfiles.RunFiles(tmp_path, "example")
     assert (
         groups.prepare(lambda: "prepared", files, time.monotonic() + 5, 0) == "prepared"
@@ -356,7 +361,8 @@ def test_prepare_success_and_errors(tmp_path: Path) -> None:
     )
 
 
-def test_prepare_deadline(tmp_path: Path) -> None:
+def test_prepare_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(groups, "boot_id", constant("example-boot"))
     files = runfiles.RunFiles(tmp_path, "example")
     with pytest.raises(TimeoutError):
         groups.prepare(lambda: time.sleep(10), files, time.monotonic() + 0.1, 0)
@@ -378,14 +384,19 @@ def test_stale_group_never_gets_a_signal(
         return current
 
     stopped: list[int] = []
+    writes: list[tuple[str, str]] = []
+
+    def write(suffix: str, text: str) -> None:
+        writes.append((suffix, text))
 
     def stop(pgid: int, _grace: float) -> None:
         stopped.append(pgid)
 
     monkeypatch.setattr(groups, "identity", identity)
     monkeypatch.setattr(groups, "stop_started", stop)
+    monkeypatch.setattr(files, "write", write)
     assert groups.stop_recorded(files, 0) is Action.UNKNOWN
-    assert files.path("phase").read_text() == "unknown"
+    assert writes == [("phase", "unknown")]
     assert stopped == []
 
 
@@ -504,14 +515,15 @@ def test_setup_parent_deadline_and_cleanup(
     def identity(pid: int) -> Group:
         return Group(pid, "boot", "42")
 
-    def stop(pid: int, grace: float) -> None:
+    def stop(owned: runfiles.RunFiles, pid: int, grace: float) -> None:
+        assert owned is files
         assert (pid, grace) == (23, 0.25)
         events.append("stopped")
 
     monkeypatch.setattr(multiprocessing, "get_context", context)
     monkeypatch.setattr(time, "monotonic", lambda: 2)
     monkeypatch.setattr(groups, "identity", identity)
-    monkeypatch.setattr(groups, "stop_started", stop)
+    monkeypatch.setattr(groups, "stop_owned", stop)
     files = runfiles.RunFiles(tmp_path, "example")
     if outcome == "success":
         assert groups.prepare(lambda: None, files, 2 + remaining, 0.25) == "prepared"
@@ -550,14 +562,23 @@ def test_owned_and_ended_recorded_group(
         return Group(pid, "boot", "42")
 
     stopped: list[tuple[int, float]] = []
+    read = files.path
+    reads: list[str] = []
 
-    def stop(pid: int, grace: float) -> None:
+    def path(suffix: str) -> Path:
+        reads.append(suffix)
+        return read(suffix)
+
+    def stop(owned: runfiles.RunFiles, pid: int, grace: float) -> None:
+        assert owned is files
         stopped.append((pid, grace))
 
     monkeypatch.setattr(groups, "identity", identity)
-    monkeypatch.setattr(groups, "stop_started", stop)
+    monkeypatch.setattr(groups, "stop_owned", stop)
+    monkeypatch.setattr(files, "path", path)
     assert groups.stop_recorded(files, 0.25) is (Action.DONE if ended else Action.STOP)
     assert stopped == ([] if ended else [(23, 0.25)])
+    assert reads[0] == "pgid"
 
 
 def test_stop_absent_group_and_liveness(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -634,14 +655,14 @@ def test_stop_grace_deadline_and_signal_order(
     monkeypatch: pytest.MonkeyPatch, released: bool
 ) -> None:
     events: list[object] = []
-    ticks = iter((10, 10.1, 10.5))
+    ticks = iter((10, 10.1, 10.5, 10.6))
 
     def clock() -> float:
         return next(ticks)
 
     def alive(group: int) -> bool:
         assert group == 23
-        return not (released and "sleep" in events)
+        return signal.SIGKILL not in events and not (released and "sleep" in events)
 
     def pause(duration: float) -> None:
         assert duration == 0.02
@@ -803,3 +824,214 @@ def test_cleanup_handler_installation_cannot_be_interrupted(
     finally:
         for number, handler in previous.items():
             original(number, handler)
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+@pytest.mark.parametrize("operation", ["alive", "signal"])
+def test_permission_denial_never_means_stopped(
+    monkeypatch: pytest.MonkeyPatch, platform: str, operation: str
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+
+    def denied(_pgid: int, _number: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(os, "killpg", denied)
+    monkeypatch.setattr(groups, "_mac_alive", constant(value=True))
+    if operation == "alive" and platform == "darwin":
+        assert groups.alive(23) is True
+    elif operation == "alive":
+        with pytest.raises(PermissionError):
+            groups.alive(23)
+    elif platform == "darwin":
+        with pytest.raises(Invalid, match=r"^run group could not be proven stopped$"):
+            groups.stop_started(23, 0)
+    else:
+        with pytest.raises(PermissionError):
+            groups.stop_started(23, 0)
+
+
+def test_mac_signal_skips_only_proven_dead_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    calls: list[tuple[int, int]] = []
+
+    def denied(pgid: int, number: int) -> None:
+        calls.append((pgid, number))
+        raise PermissionError
+
+    monkeypatch.setattr(os, "killpg", denied)
+    checked: list[int] = []
+
+    def dead(pgid: int) -> bool:
+        checked.append(pgid)
+        return False
+
+    monkeypatch.setattr(groups, "_mac_alive", dead)
+    assert groups.alive(23) is False
+    groups.stop_started(23, 0)
+    assert calls == [(23, 0), (23, signal.SIGTERM), (23, 0), (23, 0)]
+    assert checked == [23, 23, 23, 23]
+
+
+class MacGroupLibrary:
+    lists = 0
+    inspected: list[int]
+
+    def __init__(self, case: str) -> None:
+        self.case = case
+        self.inspected = []
+
+    def proc_listpids(
+        self,
+        flavor: int,
+        pgid: int,
+        buffer: ctypes.Array[ctypes.c_char] | None,
+        length: int,
+    ) -> int:
+        assert (flavor, pgid) == (2, 23)
+        if buffer is None:
+            assert length == 0
+            return {"sizing": 0, "minimal": 4}.get(self.case, 8)
+        self.lists += 1
+        assert length == (1028 if self.case == "minimal" else 1032)
+        assert ctypes.get_errno() == 0
+        if self.case == "error":
+            ctypes.set_errno(1)
+            return 0
+        if self.case == "confirm-error" and self.lists == 2:
+            ctypes.set_errno(1)
+        sizes = {"negative": -1, "full": length, "partial": 3, "empty": 0}
+        if self.case in sizes:
+            return sizes[self.case]
+        struct.pack_into(
+            "=ii",
+            buffer,
+            0,
+            23,
+            25 if self.case == "changed" and self.lists == 2 else 24,
+        )
+        return 4 if self.case == "changed-size" and self.lists == 2 else 8
+
+    def proc_pidinfo(
+        self,
+        pid: int,
+        flavor: int,
+        arg: int,
+        buffer: ctypes.Array[ctypes.c_char],
+        length: int,
+    ) -> int:
+        assert pid in (23, 24)
+        assert (flavor, arg, length) == (3, 1, 136)
+        self.inspected.append(pid)
+        status = 2 if self.case == "live" or (self.case == "mixed" and pid == 24) else 5
+        struct.pack_into("=I", buffer, 4, status)
+        buffer[8] = b"\xff"
+        return 0 if self.case == "member" else 136
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "zombies",
+        "minimal",
+        "empty",
+        "live",
+        "mixed",
+        "sizing",
+        "error",
+        "negative",
+        "full",
+        "partial",
+        "member",
+        "changed",
+        "changed-size",
+        "confirm-error",
+    ],
+)
+def test_mac_group_inspection_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    library = MacGroupLibrary(case)
+
+    def load(path: str, *, use_errno: bool) -> MacGroupLibrary:
+        assert path == "/usr/lib/libproc.dylib"
+        assert use_errno is True
+        return library
+
+    monkeypatch.setattr(ctypes, "CDLL", load)
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    def denied(_pgid: int, _number: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(os, "killpg", denied)
+    if case in ("zombies", "minimal", "empty", "live", "mixed"):
+        assert groups.alive(23) is (case in ("live", "mixed"))
+        assert library.inspected == (
+            [] if case == "empty" else [23] if case == "live" else [23, 24]
+        )
+    else:
+        messages = {
+            "sizing": "cannot enumerate run group",
+            "member": "cannot inspect run group member",
+            "changed": "run group changed during inspection",
+            "changed-size": "run group changed during inspection",
+            "confirm-error": "run group changed during inspection",
+        }
+        message = messages.get(case, "incomplete run group enumeration")
+        with pytest.raises(PermissionError, match=f"^{message}$"):
+            groups.alive(23)
+
+
+def test_sigkill_must_be_verified(monkeypatch: pytest.MonkeyPatch) -> None:
+    ticks = iter((10, 11, 12, 12.5, 13))
+    monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(groups, "alive", constant(value=True))
+    monkeypatch.setattr(groups, "_mac_alive", constant(value=True))
+    signals: list[tuple[int, int]] = []
+    sleeps: list[float] = []
+
+    def pause(duration: float) -> None:
+        sleeps.append(duration)
+        assert sleeps == [0.02]
+
+    def send(pgid: int, number: int) -> None:
+        signals.append((pgid, number))
+        if number == signal.SIGKILL:
+            raise PermissionError
+
+    monkeypatch.setattr(os, "killpg", send)
+    monkeypatch.setattr(time, "sleep", pause)
+    with pytest.raises(Invalid, match=r"^run group could not be proven stopped$"):
+        groups.stop_started(23, 0)
+    assert signals == [(23, signal.SIGTERM), (23, signal.SIGKILL)]
+    assert sleeps == [0.02]
+
+
+@pytest.mark.parametrize("error", [PermissionError, Invalid])
+def test_unproven_stop_records_unknown_and_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    files = runfiles.RunFiles(tmp_path, "example")
+    writes: list[tuple[str, str]] = []
+    original = files.write
+
+    def write(suffix: str, text: str) -> None:
+        writes.append((suffix, text))
+        original(suffix, text)
+
+    monkeypatch.setattr(files, "write", write)
+
+    def stop(pgid: int, grace: float) -> None:
+        assert (pgid, grace) == (23, 0.25)
+        raise error
+
+    monkeypatch.setattr(groups, "stop_started", stop)
+    with pytest.raises(error):
+        groups.stop_owned(files, 23, 0.25)
+    assert files.path("phase").read_text() == "unknown"
+    assert files.path("stop-unproven").read_text() == "\n"
+    assert not files.path("rc").exists()
+    assert writes == [("stop-unproven", "\n"), ("phase", "unknown")]

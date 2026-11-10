@@ -1,4 +1,4 @@
-"""Opt-in probes use only disposable servers on sockets they created."""
+"""Opt-in probes observe disposable listeners and sandboxed command results."""
 
 from __future__ import annotations
 
@@ -7,10 +7,12 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
-from contextlib import ExitStack
+import threading
+from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,17 +20,13 @@ import pytest
 from agent_example import LINUX, MACOS, settings
 from agent_host_example import run_request
 
-from tbhbdev.alpha.agent import run_host, runfiles
+from tbhbdev.alpha.agent import credentials, run_host, runfiles
 from tbhbdev.alpha.agent.decisions import argv, policy
-from tbhbdev.alpha.agent.model import (
-    ClaudePolicy,
-    Harness,
-    Invalid,
-    Profile,
-    RunPaths,
-)
+from tbhbdev.alpha.agent.model import ClaudePolicy, Harness, Invalid, Profile, RunPaths
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from tbhbdev.alpha.agent.model import Host, Policy, Settings
 
 
@@ -36,191 +34,162 @@ def report(line: str) -> None:
     sys.stdout.write(line + "\n")
 
 
-def real_node() -> Path:
-    candidates: list[str] = []
-    mise = shutil.which("mise")
-    if mise:
+@dataclasses.dataclass
+class Listener:
+    path: str
+    connections: list[bool] = dataclasses.field(default_factory=list)
+
+
+def accept_connections(
+    server: socket.socket, listener: Listener, stopped: threading.Event
+) -> None:
+    while not stopped.is_set():
         try:
-            result = subprocess.run(
-                [mise, "which", "node"],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            candidates.append(result.stdout.strip())
-        except OSError, subprocess.SubprocessError:
-            pass
-    candidates.extend(str(Path(entry) / "node") for entry in os.get_exec_path())
-    for candidate in candidates:
-        path = Path(candidate).absolute()
-        resolved = path.resolve()
-        if (
-            "shims" not in path.parts
-            and "shims" not in resolved.parts
-            and resolved.is_file()
-            and os.access(resolved, os.X_OK)
-        ):
-            return resolved
-    pytest.skip("claude: no real node executable outside shim directories")
+            connection, _ = server.accept()
+        except TimeoutError:
+            continue
+        listener.connections.append(True)
+        with connection, suppress(BrokenPipeError, ConnectionResetError):
+            connection.sendall(b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n")
 
 
-def claude_runtime(directory: Path) -> tuple[str, str]:
-    node = real_node()
-    npm = (node.parent / "npm").resolve()
-    # mise can replace bin/npm with a shell wrapper rather than a symlink.
-    if npm.suffix != ".js":
-        npm = node.parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
-    if not npm.is_file():
-        pytest.skip("claude: npm CLI unavailable beside real node")
-    # Install only into the disposable probe directory. Launch npm's JavaScript
-    # and the pinned runtime CLI with real node, bypassing both shebangs.
-    try:
-        subprocess.run(
-            [
-                str(node),
-                str(npm),
-                "install",
-                "--prefix",
-                str(directory),
-                "--ignore-scripts",
-                "--no-audit",
-                "--no-fund",
-                "@anthropic-ai/sandbox-runtime@0.0.82",
-            ],
-            env={
-                "HOME": str(directory),
-                "PATH": str(node.parent) + os.pathsep + os.defpath,
-            },
-            cwd=directory,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=90,
+@contextmanager
+def listen(path: str) -> Generator[Listener]:
+    listener = Listener(path)
+    stopped = threading.Event()
+    with socket.socket(socket.AF_UNIX) as server:
+        server.bind(path)
+        server.listen()
+        server.settimeout(0.05)
+        worker = threading.Thread(
+            target=accept_connections, args=(server, listener, stopped)
         )
-    except (OSError, subprocess.SubprocessError) as exc:
-        pytest.skip(
-            f"claude: pinned sandbox runtime unavailable ({type(exc).__name__})"
-        )
-    cli = directory / "node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js"
-    if not cli.is_file():
-        pytest.skip("claude: pinned sandbox runtime CLI unavailable")
-    return str(node), str(cli.resolve())
+        worker.start()
+        try:
+            yield listener
+        finally:
+            stopped.set()
+            worker.join(timeout=5)
+            assert not worker.is_alive()
 
 
-def probe_script(sockets: dict[str, str], tmux: str, curl: str) -> str:
-    lines = ["failed=0"]
-    for location, path in sockets.items():
-        command = shlex.join((tmux, "-S", path, "list-sessions"))
-        lines.append(
-            f"if {command} >/dev/null 2>&1; then "
-            f"echo '{location}: CONNECTED'; failed=1; "
-            f"else echo '{location}: refused'; fi"
-        )
-    lines += [
-        (
-            f"if {shlex.quote(curl)} --fail --silent --show-error --max-time 20 "
-            "https://api.github.com >/dev/null; then echo 'api.github.com: allowed'; "
-            "else echo 'api.github.com: FAILED'; failed=1; fi"
-        ),
-        'exit "$failed"',
-    ]
-    return "\n".join(lines)
-
-
-def sandbox_command(
-    value: Policy,
-    executable: tuple[str, ...],
-    workspace: Path,
-    script: str,
-    directory: Path,
-) -> tuple[str, ...]:
-    if value.harness is Harness.CODEX:
-        generated = argv.harness(
-            run_request(),
-            value,
-            worktree=str(workspace),
-            brief_file=str(directory / "brief"),
-        )
-        # Use the CLI's local sandbox runner, with exactly the policy overrides.
-        start = generated.index("--strict-config") + 1
-        end = generated.index("-m")
-        return (
-            *executable,
-            "sandbox",
-            "-P",
-            "build",
-            *generated[start:end],
-            "--",
-            "/bin/sh",
-            "-c",
-            script,
-        )
-    assert isinstance(value.detail, ClaudePolicy)
-    path = directory / "sandbox.json"
-    path.write_text(json.dumps(value.detail.settings["sandbox"]))
-    return (
-        *executable,
-        "--settings",
-        str(path),
-        "/bin/sh",
-        "-c",
-        script,
-    )
-
-
-def scratch_servers(
-    stack: ExitStack, tmp_path: Path, tmux: str, errors: list[str]
-) -> dict[str, str]:
-    sockets: dict[str, str] = {}
+def scratch_servers(stack: ExitStack) -> dict[str, Listener]:
+    sockets: dict[str, Listener] = {}
     for location, parent in (
         ("TMPDIR", tempfile.gettempdir()),
         ("tmp", str(Path("/") / "tmp")),
         ("HOME", str(Path.home())),
     ):
-        try:
-            directory = Path(
-                stack.enter_context(
-                    tempfile.TemporaryDirectory(prefix="ag-", dir=parent)
-                )
-            )
-            directory.chmod(0o700)
-            path = str(directory / "s")
-            env = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
-            subprocess.run(
-                [
-                    tmux,
-                    "-f",
-                    "/dev/null",
-                    "-S",
-                    path,
-                    "new-session",
-                    "-d",
-                    "/bin/cat",
-                ],
-                env=env,
-                check=True,
-                timeout=10,
-            )
-            stack.callback(
-                subprocess.run,
-                [tmux, "-S", path, "kill-server"],
-                env=env,
-                check=False,
-                timeout=10,
-                capture_output=True,
-            )
-            subprocess.run(
-                [tmux, "-S", path, "list-sessions"],
-                env=env,
-                check=True,
-                capture_output=True,
-                timeout=10,
-            )
-            sockets[location] = path
-        except (OSError, subprocess.SubprocessError) as exc:
-            errors.append(f"socket setup {location}: {type(exc).__name__}")
+        directory = Path(
+            stack.enter_context(tempfile.TemporaryDirectory(prefix="ag-", dir=parent))
+        )
+        directory.chmod(0o700)
+        sockets[location] = stack.enter_context(listen(str(directory / "s")))
     return sockets
+
+
+def probe_script(sockets: dict[str, Listener], curl: str, results: Path) -> str:
+    lines = ["umask 077", f": > {shlex.quote(str(results))}"]
+    for location, listener in sockets.items():
+        command = shlex.join(
+            (
+                curl,
+                "--unix-socket",
+                listener.path,
+                "--max-time",
+                "5",
+                "http://localhost",
+            )
+        )
+        lines.append(f"{command} >/dev/null 2>&1")
+        lines.append(f"echo '{location}'\" $?\" >> {shlex.quote(str(results))}")
+    for domain in ("api.github.com", "example.com"):
+        command = shlex.join(
+            (
+                curl,
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "20",
+                f"https://{domain}",
+            )
+        )
+        lines.append(f"{command} >/dev/null 2>&1")
+        lines.append(f"echo '{domain}'\" $?\" >> {shlex.quote(str(results))}")
+    return "\n".join(lines) + "\n"
+
+
+def probe_run(tmp_path: Path, harness: Harness) -> tuple[run_host.Run, RunPaths]:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config = settings()
+    config = dataclasses.replace(
+        config,
+        sandbox=dataclasses.replace(
+            config.sandbox,
+            write_roots=(str(tmp_path),),
+            agy_unsandboxed_opt_out=None,
+            network_domains=("api.github.com",),
+        ),
+    )
+    paths = RunPaths(
+        str(Path.home()),
+        str(workspace),
+        str(tmp_path),
+        str(tmp_path / "codex"),
+        str(tmp_path / "audit"),
+        uid=os.getuid(),
+    )
+    request = run_request(
+        harness=harness.value,
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        reason="sandbox probe" if harness is Harness.CLAUDE else None,
+    )
+    run = run_host.Run(
+        runfiles.RunFiles(tmp_path / "runs", "probe"),
+        request,
+        config,
+        LINUX if sys.platform == "linux" else MACOS,
+        Path.home(),
+        tmp_path,
+        0,
+        0,
+    )
+    Path(paths.codex_home).mkdir(mode=0o700)
+    return run, paths
+
+
+def sandbox_command(
+    run: run_host.Run, paths: RunPaths, value: Policy, executable: str, script: Path
+) -> tuple[str, ...]:
+    if value.harness is Harness.CLAUDE:
+        prepared = run_host.Prepared(
+            paths,
+            credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
+            None,
+        )
+        # This is the production builder, including its generated --settings JSON.
+        # Claude consumes JSON directly; sandbox-runtime's schema is different.
+        return run_host.harness_command(run, prepared, value, executable)
+    generated = argv.harness(
+        run.request,
+        value,
+        worktree=paths.worktree,
+        brief_file=str(run.files.path("prompt")),
+    )
+    start = generated.index("--strict-config") + 1
+    end = generated.index("-m")
+    return (
+        executable,
+        "sandbox",
+        "-P",
+        "build",
+        *generated[start:end],
+        "--",
+        "/bin/sh",
+        str(script),
+    )
 
 
 def report_agy_refusals(config: Settings, host: Host, paths: RunPaths) -> None:
@@ -238,292 +207,190 @@ def report_agy_refusals(config: Settings, host: Host, paths: RunPaths) -> None:
         report(f"agy {profile}: refused by policy")
 
 
+def assert_observations(
+    harness: Harness, sockets: dict[str, Listener], results: Path
+) -> None:
+    observations = dict(line.split() for line in results.read_text().splitlines())
+    assert set(observations) == {*sockets, "api.github.com", "example.com"}
+    for location, listener in sockets.items():
+        connected = bool(listener.connections)
+        report(f"{harness} {location}: {'allowed' if connected else 'refused'}")
+        assert not connected, f"{location}: listener accepted a connection"
+    for domain, allowed in (("api.github.com", True), ("example.com", False)):
+        reached = observations[domain] == "0"
+        report(f"{harness} {domain}: {'allowed' if reached else 'refused'}")
+        assert reached is allowed, f"{domain}: curl exit {observations[domain]}"
+
+
+def run_probe(
+    run: run_host.Run, paths: RunPaths, installed: str, stack: ExitStack
+) -> None:
+    harness = run.request.harness
+    sockets = scratch_servers(stack)
+    results = run.tmpdir / "observed"
+    script = run.tmpdir / "probe.sh"
+    curl = shutil.which("curl")
+    assert curl, "curl is required for live probes"
+    script.write_text(probe_script(sockets, curl, results))
+    run.files.write(
+        "prompt",
+        "Execute this exact command with Bash, then finish: "
+        f"/bin/sh {shlex.quote(str(script))}",
+    )
+    value = policy.build(
+        run.settings,
+        run.host,
+        harness=harness,
+        profile=Profile.BUILD,
+        account="agent",
+        unsandboxed=False,
+        paths=paths,
+        denied=run_host.resolved_denies(run, paths),
+    )
+    command = sandbox_command(run, paths, value, installed, script)
+    result = subprocess.run(
+        command,
+        input=run.files.path("prompt").read_text(),
+        env=value.env
+        | {
+            "HOME": str(run.tmpdir),
+            "CODEX_HOME": paths.codex_home,
+            "CLAUDE_CONFIG_DIR": str(run.tmpdir / "claude"),
+        },
+        cwd=paths.worktree,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+    if harness is Harness.CLAUDE and (result.returncode != 0 or not results.is_file()):
+        for location in (*sockets, "api.github.com", "example.com"):
+            report(f"Claude {location}: unproven by test")
+        pytest.skip("Claude: unproven by test")
+    assert result.returncode == 0, (
+        f"{harness}: sandbox command exit {result.returncode}"
+    )
+    assert_observations(harness, sockets, results)
+
+
 @pytest.mark.skipif(
     os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1",
     reason="set TBHBDEV_SANDBOX_LIVE=1 on a real host to test sandbox socket refusal",
 )
 @pytest.mark.parametrize("harness", Harness)
 def test_build_sandboxes_refuse_user_sockets(tmp_path: Path, harness: Harness) -> None:
+    if os.environ.get("CODEX_SANDBOX"):
+        pytest.skip(
+            "Claude: unproven by test"
+            if harness is Harness.CLAUDE
+            else "coordinator must run outside the agent sandbox"
+        )
     installed = shutil.which(harness.value)
     if installed is None:
-        pytest.skip(f"{harness}: harness binary not installed")
-    host = LINUX if sys.platform == "linux" else MACOS
-    config = settings()
-    config = dataclasses.replace(
-        config,
-        sandbox=dataclasses.replace(
-            config.sandbox,
-            write_roots=(str(tmp_path),),
-            agy_unsandboxed_opt_out=None,
-            network_domains=("api.github.com",),
-        ),
-    )
-    tmux = shutil.which("tmux")
-    curl = shutil.which("curl")
-    assert tmux, "tmux is required for live probes"
-    assert curl, "curl is required for live probes"
-    errors: list[str] = []
+        pytest.skip(
+            "Claude: unproven by test"
+            if harness is Harness.CLAUDE
+            else f"{harness}: harness binary not installed"
+        )
+    run, paths = probe_run(tmp_path, harness)
+    if harness is Harness.AGY:
+        report_agy_refusals(run.settings, run.host, paths)
+        return
     with ExitStack() as stack:
-        sockets = scratch_servers(stack, tmp_path, tmux, errors)
-        script = probe_script(sockets, tmux, curl)
-        workspace = tmp_path / "workspace"
-        workspace.mkdir()
-        paths = RunPaths(
-            str(Path.home()),
-            str(workspace),
-            str(tmp_path),
-            str(tmp_path / "codex"),
-            str(tmp_path / "audit"),
-            uid=os.getuid(),
-        )
-        run = run_host.Run(
-            runfiles.RunFiles(tmp_path / "runs", "probe"),
-            run_request(),
-            config,
-            host,
-            Path.home(),
-            tmp_path,
-            0,
-            0,
-        )
-        (tmp_path / "codex").mkdir(mode=0o700)
-        for location in ("TMPDIR", "tmp", "HOME"):
-            if location not in sockets:
-                report(f"{harness} {location}: socket setup denied")
-        if harness is Harness.AGY:
-            report_agy_refusals(config, host, paths)
-            return
-        value = policy.build(
-            config,
-            host,
-            harness=harness,
-            profile=Profile.BUILD,
-            account="agent",
-            unsandboxed=False,
-            paths=paths,
-            denied=run_host.resolved_denies(run, paths),
-        )
-        directory = tmp_path / harness.value
-        directory.mkdir(mode=0o700, exist_ok=True)
-        executable = (installed,)
-        if harness is Harness.CLAUDE:
-            executable = claude_runtime(directory)
-            report("claude: real node @anthropic-ai/sandbox-runtime@0.0.82")
-        command = sandbox_command(value, executable, workspace, script, directory)
-        result = subprocess.run(
-            command,
-            env=value.env | {"HOME": str(tmp_path), "CODEX_HOME": str(directory)},
-            cwd=workspace,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=90,
-        )
-        for line in result.stdout.splitlines():
-            report(f"{harness} {line}")
-        if result.returncode != 0 or "api.github.com: allowed" not in result.stdout:
-            errors.append(
-                f"{harness}: sandbox probe failed ({result.returncode}): "
-                f"{result.stderr[-1500:]}"
-            )
-            for location in sockets:
-                if f"{location}: refused" not in result.stdout:
-                    report(f"{harness} {location}: sandbox unavailable")
-    assert not errors, "\n".join(errors)
+        run_probe(run, paths, installed, stack)
 
 
 @pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
 def test_local_sandbox_commands_use_the_build_policy(
     tmp_path: Path, harness: Harness
 ) -> None:
-    paths = RunPaths(
-        str(tmp_path),
-        str(tmp_path / "workspace"),
-        str(tmp_path / "temp"),
-        str(tmp_path / "codex"),
-        str(tmp_path / "audit"),
-    )
+    run, paths = probe_run(tmp_path, harness)
+    run.files.write("prompt", "probe")
     value = policy.build(
-        settings(),
-        LINUX,
+        run.settings,
+        run.host,
         paths=paths,
         account="agent",
         harness=harness,
         profile=Profile.BUILD,
         unsandboxed=False,
     )
-    executable = (
-        ("/example/sandbox",)
-        if harness is Harness.CODEX
-        else ("/example/node", "/example/cli.js")
+    command = sandbox_command(
+        run, paths, value, "/example/harness", tmp_path / "probe.sh"
     )
-    command = sandbox_command(value, executable, tmp_path, "probe", tmp_path)
-    assert command[: len(executable)] == executable
-    assert command[-3:] == ("/bin/sh", "-c", "probe")
+    assert command[0] == "/example/harness"
     if harness is Harness.CODEX:
         assert command[1:4] == ("sandbox", "-P", "build")
+        assert command[-3:] == ("--", "/bin/sh", str(tmp_path / "probe.sh"))
         assert any(
             arg.startswith("features.network_proxy={enabled=true") for arg in command
         )
         assert any(arg.startswith("permissions.build=") for arg in command)
     else:
+        assert command == run_host.harness_command(
+            run,
+            run_host.Prepared(
+                paths,
+                credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
+                None,
+            ),
+            value,
+            "/example/harness",
+        )
         assert isinstance(value.detail, ClaudePolicy)
-        assert command[2] == "--settings"
+        assert command[1] == "-p"
         assert (
-            json.loads(Path(command[3]).read_text()) == value.detail.settings["sandbox"]
+            json.loads(command[command.index("--settings") + 1])
+            == value.detail.settings
         )
 
 
-def test_socket_probe_reports_each_result() -> None:
-    script = probe_script(
-        {"first": "/example/a", "second": "/example/b"},
-        "/example/tmux",
-        "/example/curl",
-    )
-    assert "/example/tmux -S /example/a list-sessions" in script
-    assert "/example/tmux -S /example/b list-sessions" in script
-    assert "first: refused" in script
-    assert "second: refused" in script
-    assert "api.github.com: allowed" in script
-    assert "--max-time 20" in script
-    assert script.endswith('exit "$failed"')
+def test_socket_listener_records_connections() -> None:
+    # A short disposable directory avoids macOS's Unix socket path limit.
+    with tempfile.TemporaryDirectory(prefix="ag-") as directory:
+        path = str(Path(directory) / "s")
+        with listen(path) as listener, socket.socket(socket.AF_UNIX) as client:
+            assert not listener.connections
+            client.connect(path)
+            assert b"200 OK" in client.recv(4096)
+        assert listener.connections == [True]
 
 
-def test_scratch_servers_clean_up_only_their_own_sockets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_script_records_real_exit_statuses(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    temporary = tempfile.TemporaryDirectory
-
-    def directory(**_kwargs: object) -> tempfile.TemporaryDirectory[str]:
-        return temporary(prefix="scratch-", dir=tmp_path)
-
-    calls: list[list[str]] = []
-
-    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    monkeypatch.setattr(tempfile, "TemporaryDirectory", directory)
-    monkeypatch.setattr(subprocess, "run", run)
-    errors: list[str] = []
-    with ExitStack() as stack:
-        sockets = scratch_servers(stack, tmp_path, "/example/tmux", errors)
-        assert set(sockets) == {"TMPDIR", "tmp", "HOME"}
-        assert len(set(sockets.values())) == 3
-        for path in sockets.values():
-            assert Path(path).parent.stat().st_mode & 0o777 == 0o700
-    assert not errors
-    assert {command[2] for command in calls if command[-1] == "kill-server"} == set(
-        sockets.values()
+    curl = tmp_path / "curl"
+    curl.write_text(
+        "#!/bin/sh\nfor arg; do\n"
+        'if [ "$arg" = https://api.github.com ]; then exit 0; fi\n'
+        "done\nexit 7\n"
     )
+    curl.chmod(0o700)
+    results = tmp_path / "observed"
+    sockets = {"TMPDIR": Listener("/example/s")}
+    script = probe_script(sockets, str(curl), results)
+    subprocess.run(["/bin/sh", "-c", script], check=True, timeout=10)
+    assert results.read_text() == "TMPDIR 7\napi.github.com 0\nexample.com 7\n"
+    assert_observations(Harness.CLAUDE, sockets, results)
+    assert capsys.readouterr().out.startswith("claude TMPDIR: refused")
 
 
 @pytest.mark.parametrize(
-    "mise_result", ["managed/node", "shims/node", "missing", "error", None]
+    "failure", ["socket", "allowed-host", "denied-host", "missing"]
 )
-def test_real_node_bypasses_shims(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mise_result: str | None
+def test_probe_cannot_trust_model_claims(
+    tmp_path: Path, failure: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    node = tmp_path / "node"
-    node.write_text("real node")
-    node.chmod(0o700)
-    managed = tmp_path / "managed/node"
-    managed.parent.mkdir()
-    managed.write_text("managed node")
-    managed.chmod(0o700)
-    shims = tmp_path / "shims"
-    shims.mkdir()
-    (shims / "node").symlink_to(node)
-
-    def which(_name: str) -> str | None:
-        return "/example/mise" if mise_result else None
-
-    monkeypatch.setattr(shutil, "which", which)
-    monkeypatch.setattr(os, "get_exec_path", lambda: [str(shims), str(tmp_path)])
-
-    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        assert command == ["/example/mise", "which", "node"]
-        if mise_result == "error":
-            raise subprocess.CalledProcessError(1, command)
-        return subprocess.CompletedProcess(command, 0, str(tmp_path / str(mise_result)))
-
-    monkeypatch.setattr(subprocess, "run", run)
-    assert real_node() == (managed if mise_result == "managed/node" else node)
-
-
-def test_missing_real_node_skips(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def which(_name: str) -> None:
-        return None
-
-    monkeypatch.setattr(shutil, "which", which)
-    monkeypatch.setattr(os, "get_exec_path", lambda: [str(tmp_path)])
-    with pytest.raises(pytest.skip.Exception, match="no real node executable"):
-        real_node()
-
-
-@pytest.mark.parametrize("failure", [None, "npm", "install", "cli", "wrapper"])
-def test_claude_runtime_uses_real_node_and_disposable_home(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
-) -> None:
-    node = tmp_path / "bin/node"
-    node.parent.mkdir()
-    node.touch()
-    monkeypatch.setattr(sys.modules[__name__], "real_node", lambda: node)
-    npm = tmp_path / "lib/node_modules/npm/bin/npm-cli.js"
-    if failure != "npm":
-        npm.parent.mkdir(parents=True)
-        npm.touch()
-    if failure == "wrapper":
-        (node.parent / "npm").write_text("#!/bin/sh\nexit 1\n")
-    else:
-        (node.parent / "npm").symlink_to(npm)
-    cli = tmp_path / "node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js"
-
-    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        assert command == [
-            str(node),
-            str(npm),
-            "install",
-            "--prefix",
-            str(tmp_path),
-            "--ignore-scripts",
-            "--no-audit",
-            "--no-fund",
-            "@anthropic-ai/sandbox-runtime@0.0.82",
-        ]
-        assert kwargs["env"] == {
-            "HOME": str(tmp_path),
-            "PATH": str(node.parent) + os.pathsep + os.defpath,
-        }
-        assert kwargs["cwd"] == tmp_path
-        if failure == "install":
-            raise subprocess.CalledProcessError(1, command)
-        if failure != "cli":
-            cli.parent.mkdir(parents=True)
-            cli.touch()
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(subprocess, "run", run)
-    if failure in {"npm", "install", "cli"}:
-        with pytest.raises(pytest.skip.Exception, match=r"claude: .*unavailable"):
-            claude_runtime(tmp_path)
-    else:
-        assert claude_runtime(tmp_path) == (str(node), str(cli))
-
-
-@pytest.mark.parametrize("harness", Harness)
-def test_missing_harness_skips_with_reason(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-
-    def which(_name: str) -> None:
-        return None
-
-    monkeypatch.setattr(shutil, "which", which)
-    with pytest.raises(
-        pytest.skip.Exception, match=f"{harness}: harness binary not installed"
-    ):
-        test_build_sandboxes_refuse_user_sockets(tmp_path, harness)
+    listener = Listener("/example/s", [True] if failure == "socket" else [])
+    results = tmp_path / "observed"
+    lines = ["TMPDIR 1", "api.github.com 0", "example.com 7"]
+    if failure == "allowed-host":
+        lines[1] = "api.github.com 7"
+    if failure == "denied-host":
+        lines[2] = "example.com 0"
+    if failure == "missing":
+        lines.pop()
+    results.write_text("\n".join(lines))
+    with pytest.raises(AssertionError):
+        assert_observations(Harness.CLAUDE, {"TMPDIR": listener}, results)
+    assert "Claude: unproven" not in capsys.readouterr().out
