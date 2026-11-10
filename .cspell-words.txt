@@ -1,9 +1,16 @@
 abce
 addopts
+afakt
 akia
 argvs
 ascm
 askpass
+attisdropped
+attname
+attnum
+attrelid
+atttypid
+atttypmod
 autolaunch
 autouse
 awrel
@@ -99,6 +106,7 @@ nobuild
 nocache
 noexperimental
 nohup
+nonblank
 nonblock
 nonregular
 nonstrings
@@ -107,6 +115,7 @@ noprofile
 norc
 noremote
 nosandbox
+nspname
 O_CLOEXEC
 O_NONBLOCK
 onepassword
@@ -127,6 +136,8 @@ ppid
 prek
 pretooluse
 procargs
+proname
+pronamespace
 pubout
 pushd
 rdonly
@@ -136,6 +147,9 @@ readextattr
 readsecurity
 redirections
 regenerable
+relkind
+relname
+relnamespace
 rerequested
 resvg
 riscv
