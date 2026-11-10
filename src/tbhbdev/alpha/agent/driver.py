@@ -171,7 +171,10 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
         raise
     except transport.TransportError:
         recover_transfer(settings, run)
-        print(f"{run.name}: launch unconfirmed host={run.host.name} phase=unreachable")
+        print(
+            f"{run.name}: launch unconfirmed host={run.host.name} phase=unreachable"
+            + render.sandbox(run.request.authorized_by)
+        )
         return 75
     try:
         return poll_launch(settings, run, deadline)
@@ -240,7 +243,10 @@ def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
 
 
 def unconfirmed(settings: Settings, run: Run, phase: str) -> int:
-    print(f"{run.name}: launch unconfirmed host={run.host.name} phase={phase}")
+    print(
+        f"{run.name}: launch unconfirmed host={run.host.name} phase={phase}"
+        + render.sandbox(run.request.authorized_by)
+    )
     try:
         kill(settings, run)
     except transport.CollisionError:
