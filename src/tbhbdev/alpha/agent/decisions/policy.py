@@ -137,7 +137,7 @@ def environment(
         "DOCKER_CONFIG": resolve(paths.tmpdir, DOCKER_CONFIG_SUBDIR),
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_COUNT": "6",
+        "GIT_CONFIG_COUNT": "8",
     }
     overrides = (
         ("core.fsmonitor", "false"),
@@ -146,6 +146,8 @@ def environment(
         ("status.submoduleSummary", "false"),
         ("protocol.ext.allow", "never"),
         ("protocol.file.allow", "never"),
+        ("diff.external", ""),
+        ("safe.bareRepository", "explicit"),
     )
     for index, (key, value) in enumerate(overrides):
         env[f"GIT_CONFIG_KEY_{index}"] = key

@@ -70,27 +70,59 @@ def real_clone(
     )
 
 
-@pytest.mark.parametrize("name", PLANTS)
+@pytest.mark.parametrize(
+    "name", [*PLANTS, "embedded-bare", "nested-config", "worktrees-entry"]
+)
 def test_git_parent_overrides_disable_real_plants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     run, paths = real_clone(tmp_path, monkeypatch, Harness.CODEX)
-    marker, target = plant(Path(paths.worktree), tmp_path, name)
-    git(target, "status", "--porcelain")
+    marker, target = agent_git_plants.parent_plant(Path(paths.worktree), tmp_path, name)
+    control = target / "nested" if name == "nested-config" else target
+    options = ("-c", "safe.bareRepository=all") if name == "embedded-bare" else ()
+    positive = subprocess.run(
+        ["git", *options, "status", "--porcelain"],
+        cwd=control,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert positive.returncode == 0, positive.stderr
     assert marker.read_text() == "invoked"
     marker.rename(tmp_path / "positive")
     environment = policy.environment(
         run.settings, run.host, Harness.CODEX, paths, "agent"
     )
-    subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=target,
-        env=environment,
-        capture_output=True,
-        check=True,
-        timeout=10,
-    )
-    assert not marker.exists()
+    for arguments in (
+        ("status", "--porcelain"),
+        ("diff",),
+        ("diff", "--cached"),
+        ("log",),
+        ("show",),
+    ):
+        result = subprocess.run(
+            ["git", *arguments],
+            cwd=target,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if name == "embedded-bare":
+            assert result.returncode != 0
+            assert any(
+                message in result.stderr
+                for message in ("safe.bareRepository", "Not a git repository")
+            )
+        else:
+            assert result.returncode == 0 or (
+                result.returncode == 128
+                and "cannot run :" in result.stderr
+                and "external diff died" in result.stderr
+            ), result.stderr
+        assert not marker.exists(), arguments
 
 
 def test_user_hook_and_run_home_write_probe_are_observable(tmp_path: Path) -> None:
