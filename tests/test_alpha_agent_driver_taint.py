@@ -70,9 +70,10 @@ def test_clear_host_and_launch_review(remote: Remote) -> None:
     assert wire["v"] == 2
 
 
-def test_unsandboxed_append_precedes_every_remote_action(
+def test_unsandboxed_append_precedes_preparation(
     remote: Remote, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    assert clear() == 0
     original = driver.transport.call
 
     def call(
@@ -83,12 +84,13 @@ def test_unsandboxed_append_precedes_every_remote_action(
         data: bytes = b"",
         timeout: float = 30,
     ) -> str:
-        state = taint_store.load("example-linux")
-        assert state.status == "tainted"
-        assert state.taint is not None
-        assert state.taint.account == "ops"
-        assert state.taint.run == "sample"
-        assert state.taint.authorized_by == "o/r#1"
+        if "agent-taint.jsonl" not in command[2]:
+            state = taint_store.load("example-linux")
+            assert state.status == "tainted"
+            assert state.taint is not None
+            assert state.taint.account == "ops"
+            assert state.taint.run == "sample"
+            assert state.taint.authorized_by == "o/r#1"
         return original(config, host, command, data=data, timeout=timeout)
 
     monkeypatch.setattr(driver.transport, "call", call)
@@ -97,6 +99,9 @@ def test_unsandboxed_append_precedes_every_remote_action(
     saved = taint_store.load("example-linux").taint
     assert saved is not None
     assert saved.started == record["started"]
+    assert record["tainted_host"] is True
+    wire = json.loads((remote.state / "sample.request.json").read_text())
+    assert wire["tainted_host"] is True
     assert agent.main(["status", "sample"], "example agent") == 0
 
 
@@ -159,7 +164,10 @@ def test_host_marker_is_evidence_only(
     assert loaded.taint.authorized_by == "host-marker"
     assert loaded.taint.account == "agent"
     if profile == "review":
-        assert "clear-taint example-linux --reason" in capsys.readouterr().err
+        assert capsys.readouterr().err == (
+            "review runs refused: example-linux host=tainted; "
+            "clear with: tbhbdev alpha agent clear-taint example-linux --reason …\n"
+        )
     else:
         assert "untrusted-host" in capsys.readouterr().out
 
@@ -179,11 +187,13 @@ def test_host_marker_read_error_refuses_review(
     ) == (65 if profile == "review" else 0)
     assert len(remote.records("ssh")) == (1 if profile == "review" else 5)
     output = capsys.readouterr()
-    assert (
-        ("clear-taint" in output.err)
-        if profile == "review"
-        else ("untrusted-host" in output.out)
-    )
+    if profile == "review":
+        assert output.err == (
+            "review runs refused: example-linux host=tainted; "
+            "clear with: tbhbdev alpha agent clear-taint example-linux --reason …\n"
+        )
+    else:
+        assert "untrusted-host" in output.out
 
 
 def test_marker_read_is_bounded(remote: Remote) -> None:

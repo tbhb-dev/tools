@@ -104,7 +104,7 @@ class Launch:
     label: str | None = None
 
 
-def check_launch(profile: Profile, *, unsandboxed: bool, tainted: State) -> Launch:
+def check_launch(profile: Profile, *, tainted: State) -> Launch:
     if profile is Profile.REVIEW and tainted.tainted:
         message = (
             f"review runs refused: {tainted.host} host={tainted.status}; "
@@ -112,7 +112,7 @@ def check_launch(profile: Profile, *, unsandboxed: bool, tainted: State) -> Laun
             f"{tainted.host} --reason …"
         )
         return Launch(65, message)
-    return Launch(label="untrusted-host" if tainted.tainted or unsandboxed else None)
+    return Launch(label="untrusted-host" if tainted.tainted else None)
 
 
 def request_flag(tainted: State) -> bool:
