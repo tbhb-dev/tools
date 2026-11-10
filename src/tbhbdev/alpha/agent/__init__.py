@@ -63,6 +63,9 @@ def parser(prog: str) -> argparse.ArgumentParser:
             sub.add_argument("-n", type=int, default=10)
         if verb == "clean":
             sub.add_argument("--force", action="store_true")
+    attach = verbs.add_parser("attach", help="attach to an interactive run")
+    attach.add_argument("name")
+    attach.add_argument("--read-only", action="store_true")
     return command
 
 

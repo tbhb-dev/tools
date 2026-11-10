@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
 from tbhbdev import version
-from tbhbdev.alpha.agent import render, transport
+from tbhbdev.alpha.agent import attach, render, transport
 from tbhbdev.alpha.agent.decisions import driver as rules
 from tbhbdev.alpha.agent.decisions import remote, request
 from tbhbdev.alpha.agent.decisions import runfiles_names as files
@@ -428,6 +428,8 @@ def dispatch(settings: Settings, args: argparse.Namespace) -> int:
     run = load(settings, args.name)
     verbs = {"wait": wait, "status": status, "kill": kill, "keep": keep}
     try:
+        if args.verb == "attach":
+            return attach.run(settings, run, read_only=args.read_only)
         if args.verb in {"log", "diff"}:
             return inspect(settings, run, limit=args.n if args.verb == "log" else None)
         if args.verb == "clean":

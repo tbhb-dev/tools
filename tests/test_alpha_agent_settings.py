@@ -229,11 +229,12 @@ def test_duration() -> None:
 def test_command_help_contract() -> None:
     assert agent.parser("example agent").format_help() == (
         "usage: example agent [-h]\n                     "
-        "{exec,start,wait,status,kill,clean,keep,log,diff} ...\n\n"
+        "{exec,start,wait,status,kill,clean,keep,log,diff,attach} ...\n\n"
         "positional arguments:\n"
-        "  {exec,start,wait,status,kill,clean,keep,log,diff}\n"
+        "  {exec,start,wait,status,kill,clean,keep,log,diff,attach}\n"
         "    exec                launch a headless run\n"
-        "    start               launch an interactive run\n\n"
+        "    start               launch an interactive run\n"
+        "    attach              attach to an interactive run\n\n"
         "options:\n"
         "  -h, --help            show this help message and exit\n"
     )
