@@ -127,6 +127,7 @@ class Host:
     account: str
     unsandboxed: bool
     accounts: tuple[str, ...]
+    tbhbdev: str | None = None
 
 
 @dataclass(frozen=True)

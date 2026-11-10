@@ -33,6 +33,21 @@ SHEBANG = "#!/bin/sh\n"
 NEW = "2026-11-09-coord-foo.sh"
 
 
+@pytest.fixture(autouse=True)
+def isolated_work_tree_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Git metadata outside the scratch filesystem isn't part of these cases."""
+    original = guard.work_tree_names
+
+    def names(path: str) -> list[str] | None:
+        result = original(path)
+        parents = (p for p in Path(path).parents if p.is_relative_to(tmp_path))
+        if any((parent / ".git").exists() for parent in parents):
+            return result
+        return None
+
+    monkeypatch.setattr(guard, "work_tree_names", names)
+
+
 @pytest.fixture
 def home(tmp_path: Path) -> Path:
     path = tmp_path / "home"

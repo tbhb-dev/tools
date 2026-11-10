@@ -296,3 +296,8 @@ def test_peeled_tag_does_not_hide_an_ambiguous_branch() -> None:
 @pytest.mark.parametrize(("rc", "label"), [(None, "unknown"), (0, "0"), (7, "7")])
 def test_answer_state(rc: int | None, label: str) -> None:
     assert driver.answer_state(rc) == label
+
+
+def test_ref_branch_and_tag_may_share_a_commit() -> None:
+    refs = f"{COMMIT} refs/heads/topic\n{COMMIT} refs/tags/topic\n"
+    assert driver.resolve_ref("topic", refs) == COMMIT

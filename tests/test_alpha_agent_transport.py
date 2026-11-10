@@ -22,6 +22,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def fixed_reading(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
+    def shell(*_args: object, **_kwargs: object) -> str:
+        return payload
+
+    monkeypatch.setattr(transport, "shell", shell)
+
+
 @pytest.mark.parametrize("error", [OSError("example"), TimeoutError("example")])
 def test_transport_exceptions(
     monkeypatch: pytest.MonkeyPatch, error: Exception
@@ -42,10 +49,11 @@ def test_transport_bounds(
 ) -> None:
     async def run(args: tuple[str, ...], data: bytes) -> tuple[int, bytes]:
         expected_argv = shlex.split(
-            "ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 "
+            "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=15 "
+            "-o ServerAliveInterval=30 "
             "-o ServerAliveCountMax=3 -l agent example-linux"
         )
-        assert args == (*expected_argv, "bash -lc true")
+        assert args == (*expected_argv, "/bin/bash -c true")
         assert data == b"example"
         return 0, b"example-output"
 
@@ -87,7 +95,7 @@ def test_shell_forwards_inputs(
     ) -> str:
         assert config == settings()
         assert host == LINUX
-        assert command == ("sh", "-c", "example")
+        assert command == ("/bin/sh", "-c", "example")
         assert data == b"payload"
         assert timeout == (7.5 if custom else 30)
         return "output"
@@ -132,7 +140,7 @@ def test_stream_modes_and_budget(
     ) -> str:
         assert config == settings()
         assert host == LINUX
-        assert script == remote.transfer()
+        assert script == remote.transfer("example", settings().sockets_dir)
         assert timeout == 4.5
         with tarfile.open(fileobj=io.BytesIO(data)) as archive:
             members = archive.getmembers()
@@ -170,9 +178,9 @@ def test_read_budget(
     ) -> str:
         assert config == settings()
         assert host == LINUX
-        assert script == remote.read("example", answer=answer)
+        assert script == remote.read("example", settings().sockets_dir, answer=answer)
         assert timeout == (7.5 if custom else 30)
-        return "finished\n0\n1\n0\nanswer\n"
+        return "66696e6973686564\n30\n1\n0\nanswer\n"
 
     custom = timeout is not None
     monkeypatch.setattr(transport, "shell", shell)
@@ -192,10 +200,11 @@ def test_call_defaults_and_connection_settings(monkeypatch: pytest.MonkeyPatch) 
 
     async def run(args: tuple[str, ...], data: bytes) -> tuple[int, bytes]:
         expected = shlex.split(
-            "ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=7 "
+            "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=5 "
+            "-o ServerAliveInterval=7 "
             "-o ServerAliveCountMax=9 -l agent example-linux"
         )
-        assert args == (*expected, "bash -lc true")
+        assert args == (*expected, "/bin/bash -c true")
         assert data == b""
         return 0, b""
 
@@ -240,9 +249,90 @@ def test_timeout_reaps_only_its_ssh_child(
             "time.sleep(2)\n"
         ),
     )
-    monkeypatch.setenv("PATH", str(tmp_path))
+
+    def executable(_name: str) -> str:
+        return str(program)
+
+    monkeypatch.setattr(transport.argv, "executable", executable)
     with pytest.raises(transport.TransportError, match="transport failed"):
         transport.call(settings(), LINUX, ("true",), timeout=0.5)
     pid = int(pid_file.read_text())
     with pytest.raises(ChildProcessError):
         os.waitpid(pid, os.WNOHANG)
+
+
+@pytest.mark.parametrize("rc", ["0", "1", "255", "000", "255\n"])
+@pytest.mark.parametrize("phase", ["running", "a" * 32, "running\n"])
+def test_valid_status_boundaries(
+    monkeypatch: pytest.MonkeyPatch, rc: str, phase: str
+) -> None:
+    payload = f"{phase.encode().hex()}\n{rc.encode().hex()}\n1\n0\nanswer\tline\n"
+    fixed_reading(monkeypatch, payload)
+    reading = transport.read(settings(), LINUX, "sample")
+    assert reading.rc == int(rc)
+    assert reading.phase == phase.removesuffix("\n")
+    assert reading.text == "answer\tline\n"
+
+
+@pytest.mark.parametrize(
+    ("phase", "rc", "field"),
+    [
+        ("RUNNING", "30", "phase"),
+        ("", "30", "phase"),
+        ("a" * 33, "30", "phase"),
+        ("running", "", "rc"),
+        ("running", b"-1".hex(), "rc"),
+        ("running", b"0000".hex(), "rc"),
+        ("running", b"1\n0".hex(), "rc"),
+    ],
+)
+def test_invalid_status_fields_have_a_named_error(
+    monkeypatch: pytest.MonkeyPatch, phase: str, rc: str, field: str
+) -> None:
+    payload = f"{phase.encode().hex()}\n{rc}\n1\n0\n"
+    fixed_reading(monkeypatch, payload)
+    with pytest.raises(model.Invalid, match=f"^sample: {field}=invalid$"):
+        transport.read(settings(), LINUX, "sample")
+
+
+def test_collision_is_not_a_transport_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def refuse(_args: tuple[str, ...], _data: bytes) -> tuple[int, bytes]:
+        return 73, b"untrusted output"
+
+    monkeypatch.setattr(transport, "execute", refuse)
+    with pytest.raises(transport.CollisionError) as caught:
+        transport.call(settings(), LINUX, ("true",))
+    assert str(caught.value) == "example-linux: run name collision"
+    assert not isinstance(caught.value, transport.TransportError)
+
+
+@pytest.mark.parametrize("session", ["0", "1"])
+def test_read_absent_rc_and_default_view(
+    monkeypatch: pytest.MonkeyPatch, session: str
+) -> None:
+    def shell(
+        _config: model.Settings, _host: model.Host, script: str, *, timeout: float
+    ) -> str:
+        assert script == remote.read("sample", settings().sockets_dir, answer=False)
+        assert timeout == 30
+        return f"72756e6e696e67\n-\n0\n{session}\n"
+
+    monkeypatch.setattr(transport, "shell", shell)
+    assert transport.read(settings(), LINUX, "sample") == transport.Reading(
+        "running", None, launched=False, session=session == "1", text=""
+    )
+
+
+@pytest.mark.parametrize("field", ["phase", "rc"])
+def test_read_invalid_utf8_status(monkeypatch: pytest.MonkeyPatch, field: str) -> None:
+    phase = "ff" if field == "phase" else b"finished".hex()
+    rc = "ff" if field == "rc" else "30"
+    fixed_reading(monkeypatch, f"{phase}\n{rc}\n0\n0\n")
+    with pytest.raises(model.Invalid, match=f"^sample: {field}=invalid$"):
+        transport.read(settings(), LINUX, "sample")
+
+
+def test_execute_preserves_nonzero_status(tmp_path: Path) -> None:
+    program = tmp_path / "example-tool"
+    write_standalone_fake(program, "import sys\nprint('failed')\nsys.exit(9)\n")
+    assert asyncio.run(transport.execute((str(program),), b"")) == (9, b"failed\n")

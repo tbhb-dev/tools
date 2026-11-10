@@ -784,3 +784,20 @@ def test_ssh_settings(key: str, default: int) -> None:
             refused(edited(key, value=value))
             == f"[agent] {key} must be a positive integer"
         )
+
+
+@pytest.mark.parametrize(
+    "program", [None, "/example/bin/tbhbdev", "relative", "/a/../b", "/a\x00b"]
+)
+def test_host_tbhbdev_path(program: str | None) -> None:
+    value = copy.deepcopy(GOOD)
+    hosts = cast("list[Table]", value["host"])
+    if program is not None:
+        hosts[0]["tbhbdev"] = program
+    if program in (None, "/example/bin/tbhbdev"):
+        assert config.parse(value).hosts[0].tbhbdev == program
+    else:
+        with pytest.raises(Invalid) as caught:
+            config.parse(value)
+        why = "must be an absolute path" if program == "relative" else PATHS
+        assert str(caught.value) == f"[[agent.host]] tbhbdev {why}"

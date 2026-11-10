@@ -47,6 +47,7 @@ drwx
 dunder
 elts
 enoexec
+esac
 execdir
 execpath
 executescript
@@ -58,6 +59,7 @@ fakeoperator
 fchmod
 flatmap
 frontmatter
+fsmonitor
 fstat
 genpkey
 genrule
@@ -115,6 +117,7 @@ noprofile
 norc
 noremote
 nosandbox
+NOSYSTEM
 nspname
 O_CLOEXEC
 O_NONBLOCK

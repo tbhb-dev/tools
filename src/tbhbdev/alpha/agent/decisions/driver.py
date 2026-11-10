@@ -73,7 +73,7 @@ def resolve_ref(ref: str, text: str) -> str:
     if COMMIT.fullmatch(ref):
         return ref
     lines = [line.split() for line in text.splitlines()]
-    # Prefer a peeled tag; ambiguity between a branch and tag is a refusal.
+    # Prefer a peeled tag; a branch and tag may name the same commit.
     records = {name: sha for sha, name in lines}
     commits = {sha for name, sha in records.items() if name + "^{}" not in records}
     if len(commits) != 1 or not COMMIT.fullmatch(next(iter(commits))):

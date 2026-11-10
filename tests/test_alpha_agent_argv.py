@@ -472,7 +472,7 @@ def test_ssh() -> None:
         keepalive=30,
     )
     assert result == (
-        "ssh",
+        "/usr/bin/ssh",
         "-o",
         "BatchMode=yes",
         "-o",
@@ -484,19 +484,19 @@ def test_ssh() -> None:
         "-l",
         "agent",
         "example-linux",
-        "bash -lc 'example-tool run '\"'\"'a b'\"'\"''",
+        "/bin/bash -c 'example-tool run '\"'\"'a b'\"'\"''",
     )
 
 
 def test_ssh_uses_the_hosts_shell() -> None:
     result = argv.ssh(MACOS, ("true",), connect_timeout=1, keepalive=2)
-    assert result[-2:] == ("example-macos", "zsh -lc true")
+    assert result[-2:] == ("example-macos", "/bin/zsh -c true")
 
 
 def test_tmux() -> None:
     result = argv.tmux("/example/sockets", "run-1", ("example-tool", "go"))
     assert result == (
-        "tmux",
+        "/usr/bin/tmux",
         "-S",
         "/example/sockets/agents",
         "new-session",
@@ -538,7 +538,7 @@ def test_ssh_account_and_keepalive_count(account: str, count: int) -> None:
         host, ("true",), connect_timeout=2, keepalive=7, keepalive_count_max=count
     )
     assert result == (
-        "ssh",
+        "/usr/bin/ssh",
         "-o",
         "BatchMode=yes",
         "-o",
@@ -550,7 +550,7 @@ def test_ssh_account_and_keepalive_count(account: str, count: int) -> None:
         "-l",
         account,
         "example-linux",
-        "bash -lc true",
+        "/bin/bash -c true",
     )
 
 
@@ -592,3 +592,31 @@ def test_claude_schema(kind: RunKind, schema: str | None) -> None:
         else ()
     )
     assert result == (*base, *options)
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+@pytest.mark.parametrize("name", ["ssh", "tmux"])
+def test_executables_resolve_only_fixed_path(
+    monkeypatch: pytest.MonkeyPatch, platform: str, name: str
+) -> None:
+    monkeypatch.setattr(argv.sys, "platform", platform)
+    expected = "/usr/bin:/bin:/usr/sbin:/sbin"
+    if platform == "darwin":
+        expected += ":/opt/homebrew/bin:/usr/local/bin"
+
+    def which(program: str, *, path: str) -> str:
+        assert program == name
+        assert path == expected
+        return "/usr/bin/" + name
+
+    monkeypatch.setattr(argv.shutil, "which", which)
+    assert argv.executable(name) == "/usr/bin/" + name
+
+    def missing(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(argv.shutil, "which", missing)
+    with pytest.raises(
+        Invalid, match=f"required executable '{name}' missing from fixed PATH"
+    ):
+        argv.executable(name)

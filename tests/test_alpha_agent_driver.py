@@ -133,7 +133,7 @@ def test_launch_stream_and_metadata(
     assert MARKER not in meta.read_text()
     tmux = remote.records("tmux")[0]["args"]
     assert tmux == shlex.split(
-        "-L agents new-session -d -s ag-sample tbhbdev alpha agent run-host sample"
+        f"-S {remote.root}/sockets/agents has-session -t =ag-sample"
     )
 
 
@@ -233,12 +233,11 @@ def test_review_ref(remote: Remote, ref: str) -> None:
         assert git == [
             {
                 "args": [
-                    "-c",
-                    "core.hooksPath=/dev/null",
+                    *shlex.split(remote_commands.GIT_FLAGS)[1:],
                     "ls-remote",
                     "--exit-code",
                     "--",
-                    "origin",
+                    "git@github.com:example-org/example-repo.git",
                     ref,
                     ref + "^{}",
                 ],
@@ -286,11 +285,11 @@ def test_rc_first(remote: Remote, capsys: pytest.CaptureFixture[str], rc: int) -
     assert launch(remote) == rc
     assert capsys.readouterr() == (f"sample: rc={rc}\nsetup stopped\n", "")
     assert remote.records("tmux")[-1]["args"] == [
-        "-L",
-        "agents",
+        "-S",
+        str(remote.root / "sockets/agents"),
         "kill-session",
         "-t",
-        "ag-sample",
+        "=ag-sample",
     ]
 
 
@@ -434,17 +433,9 @@ def test_clean(
     assert not (remote.state / "sample.request.json").exists()
     assert list((remote.state / "trash").glob("*/sample.request.json"))
     calls = [record["args"] for record in remote.records("git")]
-    assert [
-        "-c",
-        "core.hooksPath=/dev/null",
-        "worktree",
-        "remove",
-        *(("--force",) if force else ()),
-        ".worktrees/agent-sample",
-    ] in calls
-    assert (
-        ["-c", "core.hooksPath=/dev/null", "branch", "-D", "agent/sample"] in calls
-    ) is deleted
+    flags = shlex.split(remote_commands.GIT_FLAGS)[1:]
+    assert [*flags, "worktree", "prune"] in calls
+    assert ([*flags, "branch", "-D", "agent/sample"] in calls) is deleted
 
 
 def test_clean_unknown_needs_force(
@@ -480,7 +471,7 @@ def test_launch_polls_then_acknowledges(remote: Remote) -> None:
     assert len(remote.records("ssh")) == 5
 
 
-def test_stream_transport_failure_kills(
+def test_stream_transport_failure_never_kills(
     remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     remote.configure(ssh=[None, {"rc": 255}], kill_rc="1\n")
@@ -489,7 +480,7 @@ def test_stream_transport_failure_kills(
         "sample: launch unconfirmed host=example-linux phase=unreachable\n",
         "",
     )
-    assert (remote.state / "sample.rc").read_text() == "137\n"
+    assert not (remote.state / "sample.rc").exists()
 
 
 def test_wait_retries_and_resets_failure_time(
@@ -593,12 +584,16 @@ def test_metadata_name_and_default_state(
     assert driver.directory() == remote.root / ".local/state/tbhbdev/agent-runs"
 
 
+@pytest.mark.parametrize("poll", ["0.1", "2.5"])
 def test_wait_poll_and_transport_budget(
-    remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    poll: str,
 ) -> None:
     assert launch(remote) == 0
     capsys.readouterr()
-    monkeypatch.setenv("TBHB_AGENT_WAIT_POLL", "2.5")
+    monkeypatch.setenv("TBHB_AGENT_WAIT_POLL", poll)
     monkeypatch.setenv("TBHB_AGENT_WAIT_UNREACHABLE", "9")
     ticking(monkeypatch, 1)
     sleeps: list[float] = []
@@ -637,7 +632,7 @@ def test_wait_poll_and_transport_budget(
     monkeypatch.setattr(transport, "read", read)
     assert command("wait") == 0
     assert timeouts == [9, 7, 9, 7]
-    assert sleeps == [2.5, 2.5, 2.5]
+    assert sleeps == [max(0.5, float(poll))] * 3
     assert capsys.readouterr() == ("sample: rc=0\nanswer\n", "")
 
 
@@ -736,10 +731,10 @@ def test_kill_grace_and_poll_bounds(
     monkeypatch.setattr(transport, "read", read)
     assert driver.kill(config, run) == 0
     assert timeouts == [min(30, grace + 2), 1]
-    assert sleeps == [0.1]
+    assert sleeps == [0.5]
     assert scripts == [
-        "tmux -L agents kill-session -t ag-sample || true",
-        remote_commands.fallback("sample"),
+        remote_commands.session("sample", "kill-session", CONFIG.sockets_dir),
+        remote_commands.fallback("sample", CONFIG.sockets_dir),
     ]
 
 
@@ -772,7 +767,7 @@ def test_launch_poll_interval_and_budget(
     monkeypatch.setattr(transport, "read", read)
     assert driver.poll_launch(CONFIG, run, 120) == 0
     assert timeouts == [120, 119]
-    assert sleeps == [0.1]
+    assert sleeps == [0.5]
 
 
 def test_metadata_permissions_under_an_open_mask(remote: Remote) -> None:
@@ -799,7 +794,7 @@ def test_clean_moves_every_run_file_with_one_utc_stamp(
     assert launch(remote) == 0
     remote.configure(session=False)
     for suffix in runfiles_names.SUFFIXES:
-        remote.file(suffix, "0")
+        remote.file(suffix, "finished" if suffix == ".phase" else "0")
     (remote.state / "index.jsonl").write_text("preserve\n")
 
     class FixedTime:
@@ -819,10 +814,15 @@ def test_clean_moves_every_run_file_with_one_utc_stamp(
     assert local.stat().st_mode & 0o777 == 0o700
     assert [p.name for p in local.iterdir()] == ["sample.json"]
     trash = remote.state / "trash" / f"{stamp}-sample"
-    assert sorted(p.name for p in trash.iterdir()) == sorted(
+    assert (trash / "worktree").is_dir()
+    assert sorted(p.name for p in trash.iterdir() if p.is_file()) == sorted(
         "sample" + suffix for suffix in runfiles_names.SUFFIXES
     )
-    assert all(p.read_text() == "0" for p in trash.iterdir())
+    assert all(
+        p.read_text() == ("finished" if p.suffix == ".phase" else "0")
+        for p in trash.iterdir()
+        if p.is_file()
+    )
     assert (remote.state / "index.jsonl").read_text() == "preserve\n"
 
 
@@ -836,7 +836,7 @@ def test_exec_spends_one_startup_budget(
     ) -> str:
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
-        assert script == "tbhbdev --version"
+        assert script == remote_commands.installed(CONFIG.hosts[0])
         assert timeout == 110
         steps.append("preflight")
         return version.line() + "\n"
@@ -867,7 +867,9 @@ def test_exec_spends_one_startup_budget(
     ) -> str:
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
-        assert argv == remote_commands.start("sample")
+        assert argv == remote_commands.start(
+            "sample", CONFIG.sockets_dir, CONFIG.hosts[0]
+        )
         assert timeout == 90
         steps.append("start")
         return ""
@@ -987,3 +989,91 @@ def test_kill_without_remote_run_directory(
     assert (remote.state / "sample.rc").read_text() == "137\n"
     assert (remote.state / "sample.rc").stat().st_mode & 0o777 == 0o600
     assert remote.state.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.parametrize("existing", ["session", ".rc", ".launched"])
+def test_remote_name_collision_preserves_other_run(
+    remote: Remote, capsys: pytest.CaptureFixture[str], existing: str
+) -> None:
+    if existing == "session":
+        remote.configure(session=True)
+    else:
+        remote.file(existing, "other run\n")
+    before = {p.name: p.read_bytes() for p in remote.state.iterdir()}
+    assert launch(remote) == 1
+    assert "collision" in capsys.readouterr().err
+    assert {p.name: p.read_bytes() for p in remote.state.iterdir()} == before
+    assert not any("kill-session" in str(r) for r in remote.records("tmux"))
+    assert not driver.metadata_path("sample").exists()
+
+
+@pytest.mark.parametrize(
+    "record", ["{", "[]", "{}", '{"host":"example-linux"}', "0", "null"]
+)
+def test_malformed_metadata_names_file(
+    remote: Remote, capsys: pytest.CaptureFixture[str], record: str
+) -> None:
+    path = driver.metadata_path("sample")
+    assert path.is_relative_to(remote.local)
+    path.parent.mkdir(parents=True)
+    path.write_text(record)
+    assert command("status") == 1
+    assert str(path) in capsys.readouterr().err
+
+
+def test_existing_metadata_directory_permissions(remote: Remote) -> None:
+    path = driver.metadata_path("sample")
+    path.parent.mkdir(parents=True)
+    path.parent.chmod(0o755)
+    assert launch(remote) == 0
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_poll_transport_failure_only_kills_created_session(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    remote.configure(ssh=[None, None, None, {"rc": 255}], kill_rc="1\n")
+    assert launch(remote) == 1
+    assert capsys.readouterr().out == (
+        "sample: launch unconfirmed host=example-linux phase=unreachable\n"
+    )
+    assert any("kill-session" in str(r) for r in remote.records("tmux"))
+
+
+def test_wait_tmux_error_expires_without_rc(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert launch(remote) == 0
+    remote.configure(tmux_error="unrelated failure")
+    ticking(monkeypatch, 240)
+    assert command("wait") == 75
+    assert not (remote.state / "sample.rc").exists()
+
+
+def test_load_hardens_existing_metadata_directory(remote: Remote) -> None:
+    assert launch(remote) == 0
+    path = driver.metadata_path("sample")
+    path.parent.chmod(0o755)
+    assert command("status") == 0
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_metadata_directory_is_private_before_chmod(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = agent.parser("example agent").parse_args(arguments(remote))
+    run = driver.prepare(CONFIG, args)
+    directory = driver.metadata_path("sample").parent
+    original = type(directory).chmod
+
+    def chmod(path: Path, mode: int) -> None:
+        assert path == directory
+        assert path.stat().st_mode & 0o777 == 0o700
+        original(path, mode)
+
+    monkeypatch.setattr(type(directory), "chmod", chmod)
+    previous = os.umask(0)
+    try:
+        driver.save(run)
+    finally:
+        os.umask(previous)
