@@ -1802,7 +1802,7 @@ def test_checked_policy_supplies_all_protected_paths(
     assert protections == [
         (*expected, *run_host.full_denies(run, expected_paths)),
         expected,
-        ("/usr/bin/true",) * (len(names) + 1),
+        ("/usr/bin/true",) * (len(names) + 1) + ("/usr/bin",) * (len(names) + 1),
     ]
     assert supplied == [expected_paths] * 3
     for index in (0, 2):
@@ -2135,6 +2135,7 @@ def test_protected_home_lists_startup_files_and_socket_ancestors(
         str(mirror),
         str(mirror.parent),
         str(mirror.parent.parent),
+        str(mirror.parent.parent.parent),
         str(run_host.userconfig.path()),
     )
 
@@ -2852,5 +2853,53 @@ def test_codex_home_refuses_configured_write_root(tmp_path: Path) -> None:
         run_host.checked_policy(run, paths)
     assert str(caught.value) == (
         f"protected host path {control} overlaps write root {control}; "
+        "narrow that write root"
+    )
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_shell_config_directory_is_protected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: bool
+) -> None:
+    run = make_run(tmp_path)
+    directory = run.home / "shell-config"
+    monkeypatch.setenv("ZDOTDIR", "shell-config" if relative else str(directory))
+    assert str(directory) in run_host.protected_home(run)
+
+
+def test_protected_home_uses_the_account_home_without_state_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    monkeypatch.delenv("XDG_STATE_HOME")
+    root = run.home / ".local" / "state" / "tbhbdev" / "agent-mirrors"
+    assert str(root) in run_host.protected_home(run)
+
+
+def test_resolved_executable_directory_cannot_contain_a_write_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    directory = runfiles.private_dir(run.home / "install")
+    executable = directory / "codex"
+    executable.write_bytes(b"binary")
+    original = host_tools.resolve
+
+    def resolve(name: str, path: str | None = None) -> str:
+        return str(executable) if name == "codex" else original(name, path)
+
+    monkeypatch.setattr(host_tools, "resolve", resolve)
+    root = directory / "cache"
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(run.settings.sandbox, write_roots=(str(root),)),
+        ),
+    )
+    with pytest.raises(Invalid) as caught:
+        run_host.checked_policy(run, run_host.planned_paths(run))
+    assert str(caught.value) == (
+        f"protected host path {directory} overlaps write root {root}; "
         "narrow that write root"
     )

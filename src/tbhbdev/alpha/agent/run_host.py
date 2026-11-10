@@ -115,8 +115,11 @@ def protected_home(run: Run) -> tuple[str, ...]:
         mirror,
         mirror.parent,
         mirror.parent.parent,
+        mirror.parent.parent.parent,
         userconfig.path(),
     )
+    if os.environ.get("ZDOTDIR"):
+        paths = (*paths, run.home / os.environ["ZDOTDIR"])
     return tuple(dict.fromkeys(str(alias) for p in paths for alias in (p, p.resolve())))
 
 
@@ -231,7 +234,11 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
             for p in host_tools.executable_paths(command, ":".join(directories))
         ),
     )
-    policy.protect_host(check_settings, resolved, executables)
+    policy.protect_host(
+        check_settings,
+        resolved,
+        (*executables, *(str(Path(p).parent) for p in executables)),
+    )
     return value, executable
 
 

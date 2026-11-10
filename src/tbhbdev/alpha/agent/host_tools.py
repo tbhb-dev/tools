@@ -96,6 +96,7 @@ def installation() -> tuple[str, ...]:
             Path(sys.base_prefix),
             Path(sys.executable).resolve().parent,
             Path(sys.argv[0]).resolve().parent,
+            *(Path(p) for p in sys.path),
         )
     )
 

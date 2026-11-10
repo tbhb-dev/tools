@@ -188,11 +188,14 @@ def test_installation_resolves_all_runtime_locations(
     monkeypatch.setattr(sys, "base_prefix", str(linked / "base"))
     monkeypatch.setattr(sys, "executable", str(linked / "python"))
     monkeypatch.setattr(sys, "argv", [str(linked / "tbhbdev")])
+    monkeypatch.setattr(sys, "path", [str(linked / "library"), ""])
     assert host_tools.installation() == (
         str(root / "prefix"),
         str(root / "base"),
         str(root),
         str(root),
+        str(root / "library"),
+        str(Path.cwd()),
     )
 
 
