@@ -30,6 +30,8 @@ from tbhbdev.alpha.agent import (
 from tbhbdev.alpha.agent.decisions import argv, config, policy, repo, request, run_state
 from tbhbdev.alpha.agent.model import (
     AgyPolicy,
+    CodexMode,
+    CodexPolicy,
     Harness,
     Host,
     Invalid,
@@ -239,6 +241,17 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         resolved,
         (*executables, *(str(Path(p).parent) for p in executables)),
     )
+    if isinstance(value.detail, CodexPolicy) and value.detail.mode is CodexMode.PROFILE:
+        value = dataclasses.replace(
+            value,
+            detail=dataclasses.replace(
+                value.detail,
+                read_roots=(
+                    *value.detail.read_roots,
+                    *host_tools.codex_read_roots(executable, value.env["PATH"]),
+                ),
+            ),
+        )
     return value, executable
 
 

@@ -422,7 +422,6 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
                 read_roots=(
                     *codex_detail.read_roots,
                     *protected_git(paths),
-                    *protected,
                 ),
             )
         detail = codex_detail
