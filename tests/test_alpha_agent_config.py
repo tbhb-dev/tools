@@ -766,3 +766,21 @@ def test_reference_parts_may_hold_dots_underscores_and_hyphens() -> None:
     reference = "v-1/i.t_2/F-3.x"
     table = edited("claude", "profiles", "primary", "token", value=reference)
     assert config.parse(table).claude.profiles[0].token == reference
+
+
+@pytest.mark.parametrize(
+    ("key", "default"),
+    [
+        ("ssh_connect_timeout", 15),
+        ("ssh_keepalive_seconds", 30),
+        ("ssh_keepalive_count_max", 3),
+    ],
+)
+def test_ssh_settings(key: str, default: int) -> None:
+    assert getattr(config.parse(GOOD), key) == default
+    assert getattr(config.parse(edited(key, value=9)), key) == 9
+    for value in (0, -1, True, "9"):
+        assert (
+            refused(edited(key, value=value))
+            == f"[agent] {key} must be a positive integer"
+        )

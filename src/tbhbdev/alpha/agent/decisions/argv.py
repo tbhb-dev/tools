@@ -43,6 +43,7 @@ def ssh(
     *,
     connect_timeout: int,
     keepalive: int,
+    keepalive_count_max: int = 3,
 ) -> tuple[str, ...]:
     """The driver's call to HOST, which runs REMOTE in the host's login shell.
 
@@ -58,6 +59,10 @@ def ssh(
         f"ConnectTimeout={connect_timeout}",
         "-o",
         f"ServerAliveInterval={keepalive}",
+        "-o",
+        f"ServerAliveCountMax={keepalive_count_max}",
+        "-l",
+        host.account,
         host.name,
         command,
     )
@@ -193,12 +198,17 @@ def harness(  # noqa: PLR0913 -- one value per fact the harness's argv depends o
     brief_file: str,
     agy_project: str | None = None,
     agy_brief: str | None = None,
+    output_file: str | None = None,
+    schema_file: str | None = None,
+    schema_text: str | None = None,
 ) -> tuple[str, ...]:
     """The harness command of REQUEST, under POLICY, that runs in WORKTREE.
 
     An `exec` run reads its brief on stdin, except agy, which takes AGY_BRIEF as
     the argument of `--print`. A `start` run gets a pointer to BRIEF_FILE.
-    AGY_PROJECT is the id of agy's per-run project.
+    AGY_PROJECT is the id of agy's per-run project. OUTPUT_FILE names Codex's
+    final answer. SCHEMA_FILE names Codex's schema; SCHEMA_TEXT is Claude's
+    schema content, already read by the caller. Only exec uses these options.
 
     Raises:
         Invalid: POLICY was built for another harness or profile than REQUEST's,
@@ -211,7 +221,15 @@ def harness(  # noqa: PLR0913 -- one value per fact the harness's argv depends o
         raise Invalid(message)
     detail = policy.detail
     if isinstance(detail, CodexPolicy):
-        return _codex(request, policy, detail, worktree, brief_file)
+        command = _codex(request, policy, detail, worktree, brief_file)
+        if request.kind is RunKind.EXEC:
+            options = () if output_file is None else ("-o", output_file)
+            options += () if schema_file is None else ("--output-schema", schema_file)
+            return (*command[:-1], *options, command[-1])
+        return command
     if isinstance(detail, ClaudePolicy):
-        return _claude(request, policy, detail, brief_file)
+        command = _claude(request, policy, detail, brief_file)
+        if request.kind is RunKind.EXEC and schema_text is not None:
+            return (*command, "--output-format", "json", "--json-schema", schema_text)
+        return command
     return _agy(request, policy, worktree, brief_file, agy_project, agy_brief)

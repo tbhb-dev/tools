@@ -123,6 +123,7 @@ onepasswordconnectsdk
 opam
 oxipng
 passwordless
+pgid
 pgrep
 pidinfo
 pidpath
@@ -193,6 +194,7 @@ uncomparables
 unkeyed
 unmatch
 unmutated
+unpushed
 unsandboxed
 unsets
 unstampable
@@ -200,6 +202,8 @@ unvalidated
 usefixtures
 userconfig
 usermod
+waitpid
+wnohang
 worktrees
 writeattr
 writeextattr

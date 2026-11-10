@@ -1,7 +1,7 @@
 """Parsing the user config's `[agent]` table into `Settings`.
 
 The table arrives already parsed, as `userconfig.table` returns it. Parsing has
-no defaults except Codex's `web_search`, and every error names the table and
+defaults only for connection bounds and Codex's `web_search`. Errors name
 the key, as `[agent.sandbox] audit_dir must be ...`. The caller adds the config
 file's path.
 """
@@ -330,6 +330,9 @@ def parse(agent: dict[str, object]) -> Settings:
         "credentials",
         "claude",
         "host",
+        "ssh_connect_timeout",
+        "ssh_keepalive_seconds",
+        "ssh_keepalive_count_max",
     )
     settings = Settings(
         launch_wait_seconds=root.integer("launch_wait_seconds"),
@@ -344,6 +347,15 @@ def parse(agent: dict[str, object]) -> Settings:
         credentials=_credentials(root.table("credentials")),
         claude=_claude(root.table("claude")),
         hosts=_hosts(root),
+        ssh_connect_timeout=root.integer("ssh_connect_timeout")
+        if "ssh_connect_timeout" in agent
+        else 15,
+        ssh_keepalive_seconds=root.integer("ssh_keepalive_seconds")
+        if "ssh_keepalive_seconds" in agent
+        else 30,
+        ssh_keepalive_count_max=root.integer("ssh_keepalive_count_max")
+        if "ssh_keepalive_count_max" in agent
+        else 3,
     )
     _check_host_accounts(settings)
     return settings
