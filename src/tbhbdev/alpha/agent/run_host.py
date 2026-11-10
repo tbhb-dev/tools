@@ -32,6 +32,7 @@ from tbhbdev.alpha.agent.model import (
     Harness,
     Host,
     Invalid,
+    Os,
     Policy,
     Profile,
     RunKind,
@@ -79,11 +80,46 @@ def planned_paths(run: Run) -> RunPaths:
     )
 
 
+# These files can alter the next trusted shell or tool invocation.
+_STARTUP_FILES = (
+    ".zshenv",
+    ".zshrc",
+    ".zprofile",
+    ".zlogin",
+    ".bashrc",
+    ".bash_profile",
+    ".profile",
+    ".tmux.conf",
+    ".config/tmux",
+    ".gitconfig",
+    ".config/git",
+)
+
+
+def protected_home(run: Run) -> tuple[str, ...]:
+    sockets = run.home / run.settings.sockets_dir
+    # HOME itself is the boundary: protecting it would refuse every workspace.
+    parents = tuple(
+        p for p in sockets.parents if p.is_relative_to(run.home) and p != run.home
+    )
+    paths = (*(run.home / p for p in _STARTUP_FILES), *parents)
+    return tuple(dict.fromkeys(str(alias) for p in paths for alias in (p, p.resolve())))
+
+
+def resolved_denies(run: Run, paths: RunPaths) -> tuple[str, ...]:
+    candidates = policy.denied_paths(run.settings, run.host, paths.home, paths.uid)
+    if run.host.os is not Os.LINUX:
+        return candidates
+    resolved = (os.path.realpath(p) for p in candidates)
+    return tuple(dict.fromkeys(p for p in resolved if Path(p).exists()))
+
+
 def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
     """Check directories before even inspecting or invoking an executable."""
     directories = host_tools.search_path(run.settings, run.host.os)
     protected = (
         str(run.files.root.resolve()),
+        *protected_home(run),
         *host_tools.installation(),
         *directories,
         *(str(Path(p).resolve()) for p in directories),
@@ -123,6 +159,7 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         unsandboxed=run.request.unsandboxed,
         paths=resolved,
         protected=protected,
+        denied=resolved_denies(run, resolved),
     )
     name = (
         "agy-agent"
@@ -156,6 +193,8 @@ def preflight(run: Run) -> None:
     reason = (
         sandbox.agy_unsandboxed_opt_out
         if run.request.harness is Harness.AGY
+        else sandbox.codex_unsandboxed_opt_out
+        if run.request.harness is Harness.CODEX and run.request.unsandboxed
         else sandbox.codex_network_proxy_opt_out
         if run.request.harness is Harness.CODEX
         else None
@@ -260,16 +299,18 @@ def _agy_project(run: Run, prepared: Prepared, grants: AgyPolicy) -> str:
     return str(path)
 
 
-def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
+def harness_command(
+    run: Run, prepared: Prepared, value: Policy, executable: str
+) -> tuple[str, ...]:
     paths = prepared.paths
-    value, executable = checked_policy(run, paths)
-    env = value.env | prepared.delivery.env
     text = run.files.path("prompt").read_text()
     project = (
         _agy_project(run, prepared, value.detail)
         if isinstance(value.detail, AgyPolicy)
         else None
     )
+    schema = run.files.path("schema.json")
+    schema_text = schema.read_text() if schema.is_file() else None
     command = argv.harness(
         run.request,
         value,
@@ -277,16 +318,26 @@ def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
         brief_file=str(run.files.path("prompt")),
         agy_project=project,
         agy_brief=text,
+        schema_file=str(schema) if schema_text is not None else None,
+        schema_text=schema_text,
     )
     command = (executable, *command[1:])
-    headless = run.request.kind is RunKind.EXEC
-    if headless and run.request.harness is Harness.CODEX:
+    if run.request.kind is RunKind.EXEC and run.request.harness is Harness.CODEX:
         command = (
             *command[:-1],
             "--output-last-message",
             str(run.tmpdir / "out.final"),
             command[-1],
         )
+    return command
+
+
+def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
+    paths = prepared.paths
+    value, executable = checked_policy(run, paths)
+    env = value.env | prepared.delivery.env
+    command = harness_command(run, prepared, value, executable)
+    headless = run.request.kind is RunKind.EXEC
     terminal = None if headless else sys.stdin.fileno()
     streams = (None, None, None)
     if headless:
@@ -445,6 +496,16 @@ def interrupt(_number: int, _frame: object) -> None:
     raise RunInterruptedError
 
 
+class RunExistsError(Invalid):
+    """A refused rerun must preserve its previous owner's records."""
+
+
+def refuse_started(files: runfiles.RunFiles) -> None:
+    if files.path("rc").exists() or files.path("pgid").exists():
+        message = f"run {files.name!r} has already started"
+        raise RunExistsError(message)
+
+
 def main(arguments: list[str], prog: str) -> int:
     parser = argparse.ArgumentParser(prog=prog)
     parser.add_argument("name", nargs="?")
@@ -460,10 +521,12 @@ def main(arguments: list[str], prog: str) -> int:
     try:
         with process_group.defer_signals():
             files = _files(args.name)
+            refuse_started(files)
         with (
             runfiles.locked(files.path("run.lock")),
             tempfile.TemporaryDirectory() as tmpdir,
         ):
+            refuse_started(files)
             run, text = _load(args, Path(tmpdir).resolve())
             return execute(run, text)
     except (
@@ -475,7 +538,7 @@ def main(arguments: list[str], prog: str) -> int:
     ) as exc:
         rc = 143 if isinstance(exc, RunInterruptedError) else 1
         with process_group.ignore_signals():
-            if files is not None:
+            if files is not None and not isinstance(exc, RunExistsError):
                 try:
                     reason = (
                         "interrupted during load"
@@ -495,7 +558,7 @@ def main(arguments: list[str], prog: str) -> int:
 def _files(name: str) -> runfiles.RunFiles:
     home = Path.home()
     root = (
-        Path(os.environ.get("XDG_STATE_HOME", str(home / ".local" / "state")))
+        Path(os.environ.get("XDG_STATE_HOME") or home / ".local" / "state")
         / "tbhbdev"
         / "agent-runs"
     )
@@ -514,7 +577,7 @@ def _load(args: argparse.Namespace, tmpdir: Path) -> tuple[Run, str]:
     files = _files(args.name)
     if files.path("request.json").exists() and args.request is not None:
         message = f"run {args.name!r} already exists"
-        raise Invalid(message)
+        raise RunExistsError(message)
     raw = (
         sys.stdin.read()
         if args.request == "-"
@@ -537,9 +600,6 @@ def _load(args: argparse.Namespace, tmpdir: Path) -> tuple[Run, str]:
             raise Invalid(message)
         parsed = dataclasses.replace(parsed, claude_profile=profile.name)
     text = Path(args.prompt or files.path("prompt")).read_text()
-    if files.path("rc").exists() or files.path("pgid").exists():
-        message = f"run {args.name!r} has already started"
-        raise Invalid(message)
     if args.request is not None:
         files.receive(parsed)
     run = Run(

@@ -4,7 +4,7 @@
 # //:bazel_env` builds them), never `bazel run`, so a running build's server lock can't stall a
 # commit. `bazel test //...` runs every gate, whole-tree ones included.
 default_stages: [pre-commit]
-default_install_hook_types: [pre-commit, commit-msg]
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
 
 # Never touch Vale's synced style packages, build output, or test fixtures,
 # which are deliberately malformed and must stay that way.
@@ -112,3 +112,14 @@ repos:
         entry: bash size-check.sh
         pass_filenames: false
         always_run: true
+
+  # The whole-tree prose gates run before pushing, using the CI targets.
+  - repo: local
+    hooks:
+      - id: spelling-and-prose
+        name: cspell and vale
+        language: system
+        entry: bazelisk test //:cspell_test //:vale_test
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false

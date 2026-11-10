@@ -243,3 +243,4 @@ fsmonitor
 getuid
 NOSYSTEM
 uploadpack
+bubblewrap

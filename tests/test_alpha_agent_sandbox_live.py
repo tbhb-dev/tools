@@ -18,6 +18,7 @@ import pytest
 from agent_example import LINUX, MACOS, settings
 from agent_host_example import run_request
 
+from tbhbdev.alpha.agent import run_host, runfiles
 from tbhbdev.alpha.agent.decisions import argv, policy
 from tbhbdev.alpha.agent.model import (
     ClaudePolicy,
@@ -82,7 +83,16 @@ def sandbox_command(
     assert isinstance(value.detail, ClaudePolicy)
     path = directory / "sandbox.json"
     path.write_text(json.dumps(value.detail.settings["sandbox"]))
-    return (executable, "--settings", str(path), "/bin/sh", "-c", script)
+    return (
+        executable,
+        "-y",
+        "@anthropic-ai/sandbox-runtime@0.0.82",
+        "--settings",
+        str(path),
+        "/bin/sh",
+        "-c",
+        script,
+    )
 
 
 def scratch_servers(
@@ -143,7 +153,11 @@ def scratch_servers(
     os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1",
     reason="set TBHBDEV_SANDBOX_LIVE=1 on a real host to test sandbox socket refusal",
 )
-def test_build_sandboxes_refuse_user_sockets(tmp_path: Path) -> None:
+@pytest.mark.parametrize("harness", Harness)
+def test_build_sandboxes_refuse_user_sockets(tmp_path: Path, harness: Harness) -> None:
+    installed = shutil.which(harness.value)
+    if installed is None:
+        pytest.skip(f"{harness}: harness binary not installed")
     host = LINUX if sys.platform == "linux" else MACOS
     config = settings()
     config = dataclasses.replace(
@@ -173,65 +187,71 @@ def test_build_sandboxes_refuse_user_sockets(tmp_path: Path) -> None:
             str(tmp_path / "audit"),
             uid=os.getuid(),
         )
-        for harness in Harness:
-            installed = shutil.which(harness.value)
-            if installed is None:
-                report(f"{harness}: not installed")
-                continue
-            for location in ("TMPDIR", "tmp", "HOME"):
-                if location not in sockets:
-                    report(f"{harness} {location}: socket setup denied")
-            if harness is Harness.AGY:
-                for profile in Profile:
-                    with pytest.raises(Invalid, match="agy has no OS sandbox"):
-                        policy.build(
-                            config,
-                            host,
-                            harness=harness,
-                            profile=profile,
-                            account="agent",
-                            unsandboxed=False,
-                            paths=paths,
-                        )
-                    report(f"agy {profile}: refused by policy")
-                continue
-            value = policy.build(
-                config,
-                host,
-                harness=harness,
-                profile=Profile.BUILD,
-                account="agent",
-                unsandboxed=False,
-                paths=paths,
+        run = run_host.Run(
+            runfiles.RunFiles(tmp_path / "runs", "probe"),
+            run_request(),
+            config,
+            host,
+            Path.home(),
+            tmp_path,
+            0,
+            0,
+        )
+        (tmp_path / "codex").mkdir(mode=0o700)
+        for location in ("TMPDIR", "tmp", "HOME"):
+            if location not in sockets:
+                report(f"{harness} {location}: socket setup denied")
+        if harness is Harness.AGY:
+            for profile in Profile:
+                with pytest.raises(Invalid, match="agy has no OS sandbox"):
+                    policy.build(
+                        config,
+                        host,
+                        harness=harness,
+                        profile=profile,
+                        account="agent",
+                        unsandboxed=False,
+                        paths=paths,
+                    )
+                report(f"agy {profile}: refused by policy")
+            return
+        value = policy.build(
+            config,
+            host,
+            harness=harness,
+            profile=Profile.BUILD,
+            account="agent",
+            unsandboxed=False,
+            paths=paths,
+            denied=run_host.resolved_denies(run, paths),
+        )
+        executable = installed if harness is Harness.CODEX else shutil.which("npx")
+        if executable is None:
+            pytest.skip(f"{harness}: npx unavailable for pinned sandbox runtime")
+        if harness is Harness.CLAUDE:
+            report("claude: npx -y @anthropic-ai/sandbox-runtime@0.0.82")
+        directory = tmp_path / harness.value
+        directory.mkdir(mode=0o700, exist_ok=True)
+        command = sandbox_command(value, executable, workspace, script, directory)
+        result = subprocess.run(
+            command,
+            env=value.env | {"HOME": str(tmp_path), "CODEX_HOME": str(directory)},
+            cwd=workspace,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=90,
+        )
+        for line in result.stdout.splitlines():
+            report(f"{harness} {line}")
+        if result.returncode != 0 or "api.github.com: allowed" not in result.stdout:
+            errors.append(
+                f"{harness}: sandbox probe failed ({result.returncode}): "
+                f"{result.stderr[-1500:]}"
             )
-            executable = installed if harness is Harness.CODEX else shutil.which("srt")
-            if executable is None:
-                errors.append(f"{harness}: sandbox runtime CLI is unavailable")
-                for location in sockets:
-                    report(f"{harness} {location}: unavailable")
-                continue
-            directory = tmp_path / harness.value
-            directory.mkdir(mode=0o700)
-            command = sandbox_command(value, executable, workspace, script, directory)
-            result = subprocess.run(
-                command,
-                env=value.env | {"HOME": str(tmp_path), "CODEX_HOME": str(directory)},
-                cwd=workspace,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=90,
-            )
-            for line in result.stdout.splitlines():
-                report(f"{harness} {line}")
-            if result.returncode != 0 or "api.github.com: allowed" not in result.stdout:
-                errors.append(
-                    f"{harness}: sandbox probe failed ({result.returncode}): "
-                    f"{result.stderr[-1500:]}"
-                )
-                for location in sockets:
-                    if f"{location}: refused" not in result.stdout:
-                        report(f"{harness} {location}: sandbox unavailable")
+            for location in sockets:
+                if f"{location}: refused" not in result.stdout:
+                    report(f"{harness} {location}: sandbox unavailable")
     assert not errors, "\n".join(errors)
 
 
@@ -266,9 +286,13 @@ def test_local_sandbox_commands_use_the_build_policy(
         assert any(arg.startswith("permissions.build=") for arg in command)
     else:
         assert isinstance(value.detail, ClaudePolicy)
-        assert command[1] == "--settings"
+        assert command[1:4] == (
+            "-y",
+            "@anthropic-ai/sandbox-runtime@0.0.82",
+            "--settings",
+        )
         assert (
-            json.loads(Path(command[2]).read_text()) == value.detail.settings["sandbox"]
+            json.loads(Path(command[4]).read_text()) == value.detail.settings["sandbox"]
         )
 
 
@@ -314,3 +338,36 @@ def test_scratch_servers_clean_up_only_their_own_sockets(
     assert {command[2] for command in calls if command[-1] == "kill-server"} == set(
         sockets.values()
     )
+
+
+def test_claude_live_probe_uses_available_npx_without_srt(tmp_path: Path) -> None:
+    paths = RunPaths(
+        str(tmp_path),
+        str(tmp_path / "worktree"),
+        str(tmp_path / "temp"),
+        str(tmp_path / "codex"),
+        str(tmp_path / "audit"),
+    )
+    value = policy.build(
+        settings(),
+        LINUX,
+        paths=paths,
+        account="agent",
+        harness=Harness.CLAUDE,
+        profile=Profile.BUILD,
+        unsandboxed=False,
+    )
+    command = sandbox_command(value, "/example/npx", tmp_path, "probe", tmp_path)
+    assert command[:3] == ("/example/npx", "-y", "@anthropic-ai/sandbox-runtime@0.0.82")
+
+
+@pytest.mark.parametrize("harness", Harness)
+def test_missing_harness_skips_with_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    with pytest.raises(
+        pytest.skip.Exception, match=f"{harness}: harness binary not installed"
+    ):
+        test_build_sandboxes_refuse_user_sockets(tmp_path, harness)

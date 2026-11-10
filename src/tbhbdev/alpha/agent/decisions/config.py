@@ -210,6 +210,7 @@ def _sandbox(table: _Table) -> Sandbox:
         "network_domains",
         "codex_network_proxy_opt_out",
         "agy_unsandboxed_opt_out",
+        "codex_unsandboxed_opt_out",
     )
     path = table.table("path")
     path.only("linux", "macos")
@@ -223,6 +224,7 @@ def _sandbox(table: _Table) -> Sandbox:
             table, "codex_network_proxy_opt_out"
         ),
         agy_unsandboxed_opt_out=_optional_reason(table, "agy_unsandboxed_opt_out"),
+        codex_unsandboxed_opt_out=_optional_reason(table, "codex_unsandboxed_opt_out"),
         audit_dir=table.path("audit_dir"),
         denied_home_paths=table.home_paths("denied_home_paths"),
         path=SandboxPath(linux=path.paths("linux"), macos=path.paths("macos")),
