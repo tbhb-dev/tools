@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import agent_git_plants
 import pytest
 from agent_git_plants import PLANTS, plant
 from agent_host_example import git, repository
@@ -91,6 +92,21 @@ def test_git_parent_overrides_disable_real_plants(
     assert not marker.exists()
 
 
+def test_user_hook_and_run_home_write_probe_are_observable(tmp_path: Path) -> None:
+    home = tmp_path / "account"
+    codex_home = tmp_path / "run-codex"
+    codex_home.mkdir()
+    command, marker, written = agent_git_plants.hook_write_probe(
+        home, codex_home, tmp_path
+    )
+    hooks = json.loads((home / ".codex" / "hooks.json").read_text())
+    hook = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    subprocess.run(["/bin/sh", "-c", hook], check=True, timeout=5)
+    assert marker.read_text() == "invoked"
+    subprocess.run(["/bin/sh", "-c", command], check=True, timeout=5)
+    assert json.loads(written.read_text()) == hooks
+
+
 @pytest.mark.skipif(
     os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1",
     reason="set TBHBDEV_SANDBOX_LIVE=1 for real harness git probes",
@@ -120,6 +136,14 @@ def test_live_harness_parent_ignores_each_git_plant(
     marker.rename(tmp_path / "positive")
     control = Path(paths.worktree) / "shell-control"
     command_text = f"printf invoked > {shlex.quote(str(control))}"
+    user_marker = tmp_path / "user-hook-marker"
+    written = Path(paths.codex_home) / "hooks.json"
+    if harness is Harness.CODEX:
+        Path(paths.codex_home).mkdir()
+        attempt, user_marker, written = agent_git_plants.hook_write_probe(
+            run.home, Path(paths.codex_home), tmp_path
+        )
+        command_text = attempt + "; " + command_text
     run.files.write(
         "prompt", f"Run this exact shell command once, then finish: {command_text}"
     )
@@ -151,6 +175,8 @@ def test_live_harness_parent_ignores_each_git_plant(
     assert not marker.exists(), f"{harness} executed the {name} plant"
     assert result.returncode == 0, f"{harness}: no successful harness evidence"
     assert control.is_file(), "harness did not execute the shell tool control"
+    assert not user_marker.exists(), "Codex loaded the account's user hook"
+    assert not written.exists(), "the shell tool wrote hooks into CODEX_HOME"
     if harness is Harness.CODEX:
         events = [json.loads(line) for line in result.stdout.splitlines()]
         assert any(

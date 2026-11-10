@@ -2,12 +2,32 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 lazy from pathlib import Path
 
 from agent_host_example import commit, git
 
 PLANTS = ("config", "gitlink", "gitdir", "modules", "worktree", "commondir")
+
+
+def hook_write_probe(
+    home: Path, codex_home: Path, root: Path
+) -> tuple[str, Path, Path]:
+    marker = root / "user-hook-marker"
+    hook = f"printf invoked > {shlex.quote(str(marker))}"
+    payload = json.dumps(
+        {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": hook}]}]}}
+    )
+    account_config = home / ".codex"
+    account_config.mkdir(parents=True)
+    (account_config / "hooks.json").write_text(payload)
+    destination = codex_home / "hooks.json"
+    return (
+        f"printf %s {shlex.quote(payload)} > {shlex.quote(str(destination))}",
+        marker,
+        destination,
+    )
 
 
 def plant(workspace: Path, root: Path, name: str) -> tuple[Path, Path]:
