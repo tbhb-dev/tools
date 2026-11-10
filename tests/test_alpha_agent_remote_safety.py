@@ -609,7 +609,7 @@ def test_locale_precedes_tmux_and_git(host: Path) -> None:
                 "sys.stderr.write('no server running on example')\nsys.exit(1)\n"
                 if executable == "tmux"
                 else "assert os.environ['GIT_NO_LAZY_FETCH'] == '1'\n"
-                "assert 'protocol.allow=user' in sys.argv\n"
+                "assert 'fetch.recurseSubmodules=false' in sys.argv\n"
             ),
         )
     assert (
@@ -769,7 +769,7 @@ def test_mirror_git_boundary(host: Path) -> None:
         "    'core.hooksPath': '/dev/null', 'core.fsmonitor': 'false',\n"
         "    'core.sshCommand': 'ssh', 'credential.helper': '', 'core.askPass': '',\n"
         "    'protocol.ext.allow': 'never', 'core.pager': 'cat',\n"
-        "    'gc.auto': '0', 'maintenance.auto': 'false', 'protocol.allow': 'user',\n"
+        "    'gc.auto': '0', 'maintenance.auto': 'false',\n"
         "    'fetch.recurseSubmodules': 'false', 'submodule.recurse': 'false'}\n"
         f"assert args == ['-C', {str(mirror)!r}, 'ls-remote', '--end-of-options',\n"
         "                'origin', 'refs/heads/agent/sample']\n"

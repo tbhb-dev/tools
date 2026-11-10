@@ -1397,7 +1397,10 @@ def test_inspection_uses_recorded_target_and_mirror(
     assert "fetch" in calls[0]
     assert verb in calls[1]
     assert "--no-optional-locks" in calls[1]
-    assert "-n" in calls[1] if verb == "log" else "-n" not in calls[1]
+    if verb == "log":
+        assert calls[1][calls[1].index("-n") + 1] == "10"
+    else:
+        assert "-n" not in calls[1]
     assert len(remote.records("ssh")) == 5
 
 

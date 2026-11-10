@@ -191,6 +191,7 @@ tbhb
 tbhbdev
 testdata
 testpaths
+textconv
 tfstate
 timestamptz
 tmpprefix
