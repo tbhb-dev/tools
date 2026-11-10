@@ -267,8 +267,8 @@ audit_dir = ".local/state/example-audit"
 denied_home_paths = [".claude"]
 
 [agent.sandbox.path]
-linux = [".local/share/mise/shims", "/usr/local/bin", "/usr/bin", "/bin"]
-macos = [".local/share/mise/shims", "/opt/homebrew/bin", "/usr/bin", "/bin"]
+linux = [".local/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+macos = [".local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]
 
 [agent.sandbox.agy]
 review_read = [".config/example-gh", ".config/mise"]

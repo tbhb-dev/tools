@@ -395,6 +395,7 @@ def test_token_without_the_keychain_tool_fails(
     monkeypatch.setattr(secrets.platform, "system", lambda: "Darwin")
     (tmp_path / "empty").mkdir()
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    monkeypatch.setattr(secrets.host_tools, "search", lambda: str(tmp_path / "empty"))
     with pytest.raises(secrets.SecretsError) as caught:
         secrets.token()
     assert str(caught.value) == (
@@ -448,13 +449,13 @@ def fake_runs(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
 # names token runs without the stubs.
 
 
-def test_token_on_macos_runs_security_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_token_on_macos_uses_resolved_security(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(secrets.platform, "system", lambda: "Darwin")
     commands = fake_runs(monkeypatch)
     assert secrets.token() == "fake-token"
     assert [argv[:2] for argv in commands] == [
-        ["security", "unlock-keychain"],
-        ["security", "find-generic-password"],
+        [secrets.host_tools.resolve("security"), "unlock-keychain"],
+        [secrets.host_tools.resolve("security"), "find-generic-password"],
     ]
 
 

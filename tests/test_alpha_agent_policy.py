@@ -48,8 +48,8 @@ MACOS_TOKEN_PATHS = (
     "Library/Keychains/tbhbdev.keychain",
 )
 PATH = {
-    Os.LINUX: "{home}/.local/share/mise/shims:/usr/local/bin:/usr/bin",
-    Os.MACOS: "{home}/.local/share/mise/shims:/opt/example/bin:/usr/bin",
+    Os.LINUX: "{home}/.local/bin:/usr/local/bin:/usr/bin",
+    Os.MACOS: "{home}/.local/bin:/opt/example/bin:/usr/bin",
 }
 
 
@@ -118,7 +118,7 @@ def env_of(os: Os, harness: Harness, account: str) -> dict[str, str]:
         "HOME": home,
         "USER": account,
         "LOGNAME": account,
-        "SHELL": "bash" if os is Os.LINUX else "zsh",
+        "SHELL": "/bin/bash" if os is Os.LINUX else "/bin/zsh",
         "LANG": "C.UTF-8" if os is Os.LINUX else "en_US.UTF-8",
         "TMPDIR": tmp,
         "TMPPREFIX": f"{tmp}/zsh",

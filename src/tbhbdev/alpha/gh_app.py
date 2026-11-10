@@ -42,6 +42,8 @@ from typing import TYPE_CHECKING, NoReturn, Protocol, override
 import httpx
 
 from tbhbdev import secrets
+lazy from tbhbdev.alpha.agent import host_tools
+lazy from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -374,9 +376,12 @@ def run_openssl(
 ) -> subprocess.CompletedProcess[bytes]:
     try:
         return subprocess.run(  # nosec B603 B607
-            ["openssl", *argv], input=data, capture_output=True, check=NO_CHECK
+            [host_tools.resolve("openssl"), *argv],
+            input=data,
+            capture_output=True,
+            check=NO_CHECK,
         )
-    except FileNotFoundError:
+    except FileNotFoundError, Invalid:
         message = "openssl isn't installed"
         raise GhAppError(message) from None
 

@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, cast, override
 import pytest
 
 from tbhbdev import host, plugins, secrets
+from tbhbdev.alpha.agent import host_tools
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -433,6 +434,7 @@ def stubs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Stubs:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setattr(host_tools, "search", lambda: str(bin_dir))
     # Without a tailscale on PATH, host falls back to the app bundle.
     monkeypatch.setattr(host, "TAILSCALE_APP", str(stub_dir / "no-tailscale-app"))
     monkeypatch.setenv("HOME", str(home))

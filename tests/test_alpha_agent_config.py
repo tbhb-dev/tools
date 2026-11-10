@@ -65,8 +65,8 @@ GOOD: Table = {
         "audit_dir": ".local/state/example-audit",
         "denied_home_paths": [".claude"],
         "path": {
-            "linux": [".local/share/mise/shims", "/usr/local/bin", "/usr/bin"],
-            "macos": [".local/share/mise/shims", "/opt/homebrew/bin", "/usr/bin"],
+            "linux": [".local/bin", "/usr/local/bin", "/usr/bin"],
+            "macos": [".local/bin", "/opt/homebrew/bin", "/usr/bin"],
         },
         "agy": {
             "review_read": [".config/example-gh", ".config/mise"],
@@ -118,8 +118,8 @@ EXPECTED = model.Settings(
         audit_dir=".local/state/example-audit",
         denied_home_paths=(".claude",),
         path=model.SandboxPath(
-            linux=(".local/share/mise/shims", "/usr/local/bin", "/usr/bin"),
-            macos=(".local/share/mise/shims", "/opt/homebrew/bin", "/usr/bin"),
+            linux=(".local/bin", "/usr/local/bin", "/usr/bin"),
+            macos=(".local/bin", "/opt/homebrew/bin", "/usr/bin"),
         ),
         agy=model.AgySandbox(
             review_read=(".config/example-gh", ".config/mise"),

@@ -32,8 +32,8 @@ SANDBOX = model.Sandbox(
     audit_dir=".local/state/example-audit",
     write_roots=(".cache", ".local/share/mise", ".local/state"),
     path=model.SandboxPath(
-        linux=(".local/share/mise/shims", "/usr/local/bin", "/usr/bin"),
-        macos=(".local/share/mise/shims", "/opt/example/bin", "/usr/bin"),
+        linux=(".local/bin", "/usr/local/bin", "/usr/bin"),
+        macos=(".local/bin", "/opt/example/bin", "/usr/bin"),
     ),
 )
 

@@ -121,7 +121,7 @@ def environment(
         "HOME": paths.home,
         "USER": account,
         "LOGNAME": account,
-        "SHELL": host.shell,
+        "SHELL": f"/bin/{host.shell}",
         "LANG": LINUX_LANG if host.os is Os.LINUX else MACOS_LANG,
         "TMPDIR": paths.tmpdir,
         "TMPPREFIX": resolve(paths.tmpdir, "zsh"),
