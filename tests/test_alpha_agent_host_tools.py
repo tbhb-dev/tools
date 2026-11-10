@@ -185,9 +185,15 @@ def test_installation_resolves_all_runtime_locations(
     linked = tmp_path / "alias"
     linked.symlink_to(root, target_is_directory=True)
     monkeypatch.setattr(sys, "prefix", str(linked / "prefix"))
+    monkeypatch.setattr(sys, "base_prefix", str(linked / "base"))
     monkeypatch.setattr(sys, "executable", str(linked / "python"))
     monkeypatch.setattr(sys, "argv", [str(linked / "tbhbdev")])
-    assert host_tools.installation() == (str(root / "prefix"), str(root), str(root))
+    assert host_tools.installation() == (
+        str(root / "prefix"),
+        str(root / "base"),
+        str(root),
+        str(root),
+    )
 
 
 def test_executable_reads_are_bounded_and_nofollow(

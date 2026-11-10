@@ -142,8 +142,7 @@ def _write_roots(
     if profile is Profile.REVIEW:
         return tuple(dict.fromkeys((paths.tmpdir, paths.audit_dir)))
     roots = (resolve(paths.home, r) for r in settings.sandbox.write_roots)
-    common = () if paths.git_common_dir is None else (paths.git_common_dir,)
-    return tuple(dict.fromkeys((paths.worktree, *common, paths.tmpdir, *roots)))
+    return tuple(dict.fromkeys((paths.worktree, paths.tmpdir, *roots)))
 
 
 def _codex(
@@ -175,32 +174,33 @@ def _codex(
 
 
 def protected_git(paths: RunPaths) -> tuple[str, ...]:
-    if paths.git_common_dir is None:
-        return ()
     return tuple(
-        resolve(paths.git_common_dir, entry) for entry in ("config", "hooks", "info")
+        resolve(paths.worktree, f".git/{entry}")
+        for entry in ("config", "hooks", "info")
     )
 
 
 def _claude_write_denies(profile: Profile, paths: RunPaths) -> tuple[str, ...]:
     if profile is Profile.BUILD:
         return protected_git(paths)
-    common = () if paths.git_common_dir is None else (paths.git_common_dir,)
-    return (paths.worktree, *common)
+    return (paths.worktree, *protected_git(paths))
 
 
 def _claude(
     profile: Profile,
     paths: RunPaths,
-    access: tuple[tuple[str, ...], tuple[str, ...]],
+    access: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]],
     env: dict[str, str],
     domains: tuple[str, ...],
 ) -> ClaudePolicy:
-    writes, deny = access
+    writes, deny, protected = access
     review = profile is Profile.REVIEW
     # An absolute path in a Claude rule starts with a second slash.
     denied_tools = [f"{tool}(/{p}/**)" for p in deny for tool in ("Read", "Edit")]
-    deny_write = _claude_write_denies(profile, paths)
+    deny_write = (*_claude_write_denies(profile, paths), *protected)
+    denied_tools.extend(
+        f"Edit(/{p}{suffix})" for p in deny_write for suffix in ("", "/**")
+    )
     sandbox: dict[str, object] = {
         "enabled": True,
         "failIfUnavailable": True,
@@ -264,16 +264,19 @@ def protect_host(
     settings: Settings, paths: RunPaths, protected: tuple[str, ...]
 ) -> None:
     """Refuse host trust paths on either side of a writable path."""
-    common = () if paths.git_common_dir is None else (paths.git_common_dir,)
     writes = (
         paths.worktree,
-        *common,
         paths.tmpdir,
         paths.audit_dir,
         _DEV_FD,
         *(resolve(paths.home, p) for p in settings.sandbox.write_roots),
         *(resolve(paths.home, p) for p in settings.sandbox.agy.build_write),
     )
+    protect_paths(writes, protected)
+
+
+def protect_paths(writes: tuple[str, ...], protected: tuple[str, ...]) -> None:
+    """Refuse either an ancestor or a descendant of a host trust path."""
     for path in protected:
         for write in writes:
             if _overlaps(path, write):
@@ -305,9 +308,6 @@ def _agy_write_roots(
         return (paths.audit_dir,)
     return (
         paths.worktree,
-        paths.git_common_dir
-        if paths.git_common_dir is not None
-        else resolve(paths.worktree, ".git"),
         paths.tmpdir,
         *(resolve(paths.home, p) for p in settings.sandbox.agy.build_write),
     )
@@ -402,12 +402,20 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
         if profile is Profile.BUILD and not unsandboxed:
             codex_detail = replace(
                 codex_detail,
-                read_roots=(*codex_detail.read_roots, *protected_git(paths)),
+                read_roots=(
+                    *codex_detail.read_roots,
+                    *protected_git(paths),
+                    *protected,
+                ),
             )
         detail = codex_detail
     elif harness is Harness.CLAUDE:
         detail = _claude(
-            profile, paths, (writes, deny), env, settings.sandbox.network_domains
+            profile,
+            paths,
+            (writes, deny, protected),
+            env,
+            settings.sandbox.network_domains,
         )
     else:
         detail = _agy(settings, profile, paths, env, deny)

@@ -1747,7 +1747,11 @@ def test_checked_policy_supplies_all_protected_paths(
         *directories,
         *(str(Path(path).resolve()) for path in directories),
     )
-    assert protections == [expected, expected, ("/usr/bin/true",) * (len(names) + 1)]
+    assert protections == [
+        (*expected, *run_host.full_denies(run, expected_paths)),
+        expected,
+        ("/usr/bin/true",) * (len(names) + 1),
+    ]
     assert supplied == [expected_paths] * 3
     for index in (0, 2):
         assert configs[index].sandbox.write_roots == tuple(
@@ -1961,7 +1965,9 @@ def test_resolved_denies_preserve_macos_aliases_and_empty_linux_data(
     missing = (str(tmp_path / "missing"),)
     monkeypatch.setattr(run_host.policy, "denied_paths", constant(missing))
     assert run_host.resolved_denies(run, preparation(run).paths) == (
-        () if os_name is Os.LINUX else missing
+        ()
+        if os_name is Os.LINUX
+        else (*missing, str(run_host.worktree.mirror_path(run.home, run.request.repo)))
     )
 
 
@@ -2005,10 +2011,23 @@ def test_protected_home_lists_startup_files_and_socket_ancestors(
         ".config/tmux",
         ".gitconfig",
         ".config/git",
+        ".ssh",
+        ".claude",
+        ".claude.json",
+        ".codex",
         ".control/sockets",
         ".control",
     )
-    assert run_host.protected_home(run) == tuple(str(run.home / p) for p in expected)
+    clone = Path(run_host.repo.clone_path(run.home, run.request.repo))
+    mirror = run_host.worktree.mirror_path(run.home, run.request.repo)
+    assert run_host.protected_home(run) == (
+        *(str(run.home / p) for p in expected),
+        str(clone / ".git"),
+        str(mirror),
+        str(mirror.parent),
+        str(mirror.parent.parent),
+        str(run_host.userconfig.path()),
+    )
 
 
 def test_resolved_denies_receive_host_facts(
@@ -2062,3 +2081,94 @@ def test_unproven_harness_stop_withholds_completion_and_auth(
         "run group stop unproven; completion withheld\n"
     )
     assert not (run.home / ".codex" / "auth.json").exists()
+
+
+@pytest.mark.parametrize("relation", ["same", "parent", "child"])
+def test_missing_linux_denies_are_checked_before_filtering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relation: str
+) -> None:
+    run = make_run(tmp_path)
+    denied = run.home / "missing" / "secret-store"
+    root = {"same": denied, "parent": denied.parent, "child": denied / "inner"}[
+        relation
+    ]
+    monkeypatch.setattr(run_host.policy, "denied_paths", constant((str(denied),)))
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(run.settings.sandbox, write_roots=(str(root),)),
+        ),
+    )
+    assert run_host.resolved_denies(run, preparation(run).paths) == ()
+    with pytest.raises(Invalid, match="protected host path"):
+        run_host.checked_policy(run, preparation(run).paths)
+
+
+def test_macos_denies_include_real_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=Os.MACOS))
+    target = tmp_path / "real"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(
+        run_host.policy, "denied_paths", constant((str(alias / "missing"),))
+    )
+    denied = run_host.resolved_denies(run, preparation(run).paths)
+    assert str(alias / "missing") in denied
+    assert str(target / "missing") in denied
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        ".ssh",
+        ".claude",
+        ".claude.json",
+        ".codex",
+        "clone",
+        "mirror",
+        "mirror-owner",
+        "mirror-root",
+        "config",
+    ],
+)
+def test_host_state_cannot_be_a_configured_write_root(
+    tmp_path: Path, entry: str
+) -> None:
+    run = make_run(tmp_path)
+    clone = Path(run_host.repo.clone_path(run.home, run.request.repo))
+    mirror = run_host.worktree.mirror_path(run.home, run.request.repo)
+    roots = {
+        "clone": clone / "other",
+        "mirror": mirror,
+        "mirror-owner": mirror.parent,
+        "mirror-root": mirror.parent.parent,
+        "config": run_host.userconfig.path(),
+    }
+    root = roots.get(entry, run.home / entry)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(run.settings.sandbox, write_roots=(str(root),)),
+        ),
+    )
+    with pytest.raises(Invalid, match="protected host path"):
+        run_host.checked_policy(run, preparation(run).paths)
+
+
+def test_account_clone_must_not_use_an_external_common_directory(
+    tmp_path: Path,
+) -> None:
+    run = make_run(tmp_path)
+    clone = Path(run_host.repo.clone_path(run.home, run.request.repo))
+    clone.mkdir(parents=True)
+    (clone / ".git").write_text(f"gitdir: {tmp_path / 'common'}\n")
+    with pytest.raises(
+        Invalid, match=r"^account clone must have its own git directory$"
+    ):
+        run_host.checked_policy(run, preparation(run).paths)

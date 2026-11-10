@@ -88,6 +88,10 @@ _STARTUP_FILES = (
     ".config/tmux",
     ".gitconfig",
     ".config/git",
+    ".ssh",
+    ".claude",
+    ".claude.json",
+    ".codex",
 )
 
 
@@ -97,16 +101,45 @@ def protected_home(run: Run) -> tuple[str, ...]:
     parents = tuple(
         p for p in sockets.parents if p.is_relative_to(run.home) and p != run.home
     )
-    paths = (*(run.home / p for p in _STARTUP_FILES), *parents)
+    clone = Path(repo.clone_path(run.home, run.request.repo))
+    account_git = clone / ".git"
+    if account_git.is_file():
+        message = "account clone must have its own git directory"
+        raise Invalid(message)
+    mirror = worktree.mirror_path(run.home, run.request.repo)
+    paths = (
+        *(run.home / p for p in _STARTUP_FILES),
+        *parents,
+        account_git,
+        mirror,
+        mirror.parent,
+        mirror.parent.parent,
+        userconfig.path(),
+    )
     return tuple(dict.fromkeys(str(alias) for p in paths for alias in (p, p.resolve())))
 
 
-def resolved_denies(run: Run, paths: RunPaths) -> tuple[str, ...]:
+def full_denies(run: Run, paths: RunPaths) -> tuple[str, ...]:
     candidates = policy.denied_paths(run.settings, run.host, paths.home, paths.uid)
-    if run.host.os is not Os.LINUX:
-        return candidates
-    resolved = (os.path.realpath(p) for p in candidates)
-    return tuple(dict.fromkeys(p for p in resolved if Path(p).exists()))
+    mirror = str(worktree.mirror_path(run.home, run.request.repo))
+    return tuple(
+        dict.fromkeys(
+            alias for p in (*candidates, mirror) for alias in (p, os.path.realpath(p))
+        )
+    )
+
+
+def resolved_denies(run: Run, paths: RunPaths) -> tuple[str, ...]:
+    candidates = full_denies(run, paths)
+    if run.host.os is Os.LINUX:
+        return tuple(
+            dict.fromkeys(
+                os.path.realpath(p)
+                for p in candidates
+                if Path(os.path.realpath(p)).exists()
+            )
+        )
+    return candidates
 
 
 def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
@@ -144,7 +177,17 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
             ),
         ),
     )
-    policy.protect_host(check_settings, resolved, protected)
+    policy.protect_host(
+        check_settings, resolved, (*protected, *full_denies(run, resolved))
+    )
+    clone = Path(repo.clone_path(run.home, run.request.repo))
+    policy.protect_paths(
+        (
+            *(str(run.home / p) for p in check_settings.sandbox.write_roots),
+            *(str(run.home / p) for p in check_settings.sandbox.agy.build_write),
+        ),
+        (str(clone), str(clone.resolve())),
+    )
     value = policy.build(
         run.settings,
         run.host,

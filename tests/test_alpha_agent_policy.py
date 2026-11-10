@@ -175,13 +175,27 @@ def test_every_output_denies_the_same_paths(
         assert dig(claude, *fs, "denyRead") == list(denied(os, home))
         assert dig(claude, *fs, "denyWrite") == [
             *(() if profile is Profile.BUILD else (paths(account).worktree,)),
+            *(
+                f"{paths(account).worktree}/.git/{entry}"
+                for entry in ("config", "hooks", "info")
+            ),
             *denied(os, home),
         ]
         rules = strings(dig(claude, "permissions", "deny"))
         reads = [r for r in rules if r.startswith("Read(")]
         assert reads == [f"Read(/{p}/**)" for p in denied(os, home)]
         edits = [r for r in rules if r.startswith("Edit(")]
-        assert edits == [f"Edit(/{p}/**)" for p in denied(os, home)]
+        expected_edits = [f"Edit(/{p}/**)" for p in denied(os, home)]
+        if profile is Profile.REVIEW:
+            expected_edits += [
+                f"Edit(/{paths(account).worktree}{suffix})" for suffix in ("", "/**")
+            ]
+        expected_edits += [
+            f"Edit(/{paths(account).worktree}/.git/{entry}{suffix})"
+            for entry in ("config", "hooks", "info")
+            for suffix in ("", "/**")
+        ]
+        assert edits == expected_edits
     else:
         assert not any(d in g for d in denied(os, home) for g in result.detail.grants)
 
@@ -205,7 +219,15 @@ def codex_expected(
         writes = (*writes, "/dev/fd")
     return model.CodexPolicy(
         mode=model.CodexMode.PROFILE,
-        read_roots=(":root",),
+        read_roots=(
+            ":root",
+            *(
+                f"{home}/Code/example.com/example-org/example-repo/.git/{entry}"
+                for entry in ("config", "hooks", "info")
+            ),
+        )
+        if profile is Profile.BUILD
+        else (":root",),
         write_roots=writes,
         deny=denied(os, home),
         approval_policy="never",
@@ -356,8 +378,22 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
         if os is Os.MACOS:
             writes.append("/dev/fd")
         allow: list[str] = []
-        rules = ["Edit", "Write", "NotebookEdit", *denied_tools]
+        rules = [
+            "Edit",
+            "Write",
+            "NotebookEdit",
+            *denied_tools,
+            f"Edit(/{worktree})",
+            f"Edit(/{worktree}/**)",
+        ]
         deny_write = [worktree, *deny]
+    protected = [f"{worktree}/.git/{entry}" for entry in ("config", "hooks", "info")]
+    rules += [f"Edit(/{path}{suffix})" for path in protected for suffix in ("", "/**")]
+    deny_write = (
+        [*protected, *deny_write]
+        if profile is Profile.BUILD
+        else [worktree, *protected, *deny]
+    )
     return {
         "env": {
             "TMPDIR": tmp,
@@ -420,7 +456,6 @@ def agy_expected(profile: Profile, account: str) -> tuple[str, ...]:
         f"read_file({home}/.local/share/example-tools)",
         *handoff,
         f"write_file({worktree})",
-        f"write_file({worktree}/.git)",
         f"write_file({tmp})",
         f"write_file({home}/.local/state/mise)",
         f"write_file({home}/.local/share/mise)",
@@ -696,7 +731,7 @@ def test_no_output_holds_a_secret_reference() -> None:
         "/example/home/agent/.local/state/example-runs/run1.tmp",
     ],
 )
-def test_build_grants_the_git_common_directory(
+def test_build_never_grants_another_git_directory(
     os: Os, harness: Harness, common: str | None
 ) -> None:
     run = dataclasses.replace(
@@ -719,15 +754,12 @@ def test_build_grants_the_git_common_directory(
             "read_file(/example/home/agent/.local/state/example-runs/run1.tmp/gh)",
             "read_file(/example/home/agent/.local/state/example-runs/run1.tmp/docker)",
             "write_file(/example/clone/.worktrees/agent-example)",
-            f"write_file({common or '/example/clone/.worktrees/agent-example/.git'})",
             "write_file(/example/home/agent/.local/state/example-runs/run1.tmp)",
             "write_file(/example/home/agent/.local/state/mise)",
             "write_file(/example/home/agent/.local/share/mise)",
         )
     else:
         expected = ["/example/clone/.worktrees/agent-example"]
-        if common == "/example/clone/.git":
-            expected.append("/example/clone/.git")
         expected += [
             "/example/home/agent/.local/state/example-runs/run1.tmp",
             "/example/home/agent/.cache",
@@ -763,10 +795,10 @@ def test_claude_review_denies_writes_to_the_git_common_directory(
     expected = []
     if profile is Profile.REVIEW:
         expected.append("/example/home/agent/Code/example.com/example-org/example-repo")
-        if common is not None:
-            expected.append("/example/clone/.git")
-    elif common is not None:
-        expected.extend(f"{common}/{entry}" for entry in ("config", "hooks", "info"))
+    expected.extend(
+        f"{paths('agent').worktree}/.git/{entry}"
+        for entry in ("config", "hooks", "info")
+    )
     assert dig(claude_settings_of(result), "sandbox", "filesystem", "denyWrite") == [
         *expected,
         *denied(os, "/example/home/agent"),
@@ -901,7 +933,6 @@ def test_configured_write_roots_cannot_reach_denied_paths(
     [
         (Profile.BUILD, "worktree"),
         (Profile.BUILD, "tmpdir"),
-        (Profile.BUILD, "git_common_dir"),
         (Profile.REVIEW, "tmpdir"),
         (Profile.REVIEW, "audit_dir"),
     ],
@@ -1039,7 +1070,6 @@ def test_build_gets_common_git_directory_and_only_its_signing_socket(
     if isinstance(result.detail, model.CodexPolicy):
         assert result.detail.write_roots == (
             original.worktree,
-            common,
             original.tmpdir,
             original.home + "/.cache",
             original.home + "/.local/share/mise",
@@ -1051,7 +1081,7 @@ def test_build_gets_common_git_directory_and_only_its_signing_socket(
             "allowedDomains": [],
             "allowUnixSockets": [socket],
         }
-        assert common in strings(
+        assert common not in strings(
             dig(result.detail.settings, "sandbox", "filesystem", "allowWrite")
         )
     else:
@@ -1215,9 +1245,12 @@ def test_codex_protects_git_configuration_inside_build_write_root(
     )
     assert isinstance(result.detail, model.CodexPolicy)
     expected = (":root",)
-    if profile is Profile.BUILD and common is not None:
-        expected += tuple(f"{common}/{entry}" for entry in ("config", "hooks", "info"))
-        assert common in result.detail.write_roots
+    if profile is Profile.BUILD:
+        expected += tuple(
+            f"{paths('agent').worktree}/.git/{entry}"
+            for entry in ("config", "hooks", "info")
+        )
+    assert common not in result.detail.write_roots
     assert result.detail.read_roots == expected
 
 
@@ -1291,7 +1324,7 @@ def test_claude_build_network_domains(os: Os, socket: str | None) -> None:
 
 
 @pytest.mark.parametrize(
-    "field", ["worktree", "git_common_dir", "tmpdir", "audit_dir", "configured", "fd"]
+    "field", ["worktree", "tmpdir", "audit_dir", "configured", "fd"]
 )
 @pytest.mark.parametrize("relation", ["same", "ancestor", "descendant", "sibling"])
 def test_host_protected_paths_refuse_both_directions(field: str, relation: str) -> None:
@@ -1404,3 +1437,31 @@ def test_supplied_denies_are_policy_data(
         assert dig(value.detail.settings, "sandbox", "filesystem", "denyRead") == list(
             denied
         )
+
+
+@pytest.mark.parametrize("profile", Profile)
+def test_claude_file_tools_deny_each_protected_path(profile: Profile) -> None:
+    run = paths("agent")
+    protected = ("/example/mirror", "/example/account/.git")
+    value = policy.build(
+        settings(),
+        LINUX,
+        harness=Harness.CLAUDE,
+        profile=profile,
+        account="agent",
+        unsandboxed=False,
+        paths=run,
+        protected=protected,
+    )
+    detail = claude_settings_of(value)
+    denied = strings(dig(detail, "permissions", "deny"))
+    for path in (
+        *protected,
+        *(f"{run.worktree}/.git/{name}" for name in ("config", "hooks", "info")),
+    ):
+        assert f"Edit(/{path})" in denied
+        assert f"Edit(/{path}/**)" in denied
+        assert path in strings(dig(detail, "sandbox", "filesystem", "denyWrite"))
+    assert not any(
+        "/.git" in rule for rule in strings(dig(detail, "permissions", "allow"))
+    )
