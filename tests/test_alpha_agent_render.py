@@ -49,3 +49,12 @@ def test_status() -> None:
         "example: phase=finishing rc=0 host=example-linux "
         "account=agent started=2026-11-09T00:00:00+00:00"
     )
+
+
+def test_launch_on_untrusted_host() -> None:
+    assert render.trust(tainted_host=False) == ""
+    assert render.trust(tainted_host=True) == " untrusted-host"
+    assert (
+        render.launched("example", "example-linux", "agent", tainted_host=True)
+        == "example: launched host=example-linux account=agent untrusted-host"
+    )
