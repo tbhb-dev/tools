@@ -396,13 +396,20 @@ def test_setup_parent_deadline_and_cleanup(
             events.append("connection-closed")
 
     worker = SetupWorker(reaped, events)
+    connections = Connection(), Connection()
+
+    def operation() -> None:
+        return None
 
     class Context:
         def pipe(self) -> tuple[Connection, Connection]:
-            return Connection(), Connection()
+            return connections
 
         def process(self, **kwargs: object) -> SetupWorker:
-            assert kwargs["target"] is groups.prepare_child
+            assert kwargs == {
+                "target": groups.prepare_child,
+                "args": (connections[1], operation),
+            }
             return worker
 
         Pipe = pipe
@@ -413,6 +420,7 @@ def test_setup_parent_deadline_and_cleanup(
         return Context()
 
     def identity(pid: int) -> Group:
+        assert pid == 23
         return Group(pid, "boot", "42")
 
     def stop(
@@ -432,19 +440,22 @@ def test_setup_parent_deadline_and_cleanup(
     monkeypatch.setattr(groups, "stop_owned", stop)
     files = runfiles.RunFiles(tmp_path, "example")
     if outcome == "success":
-        assert groups.prepare(lambda: None, files, 2 + remaining, 0.25) == "prepared"
+        assert groups.prepare(operation, files, 2 + remaining, 0.25) == "prepared"
     elif outcome.endswith("timeout"):
         with pytest.raises(TimeoutError):
-            groups.prepare(lambda: None, files, 2 + remaining, 0.25)
+            groups.prepare(operation, files, 2 + remaining, 0.25)
     else:
         with pytest.raises(Invalid) as caught:
-            groups.prepare(lambda: None, files, 2 + remaining, 0.25)
+            groups.prepare(operation, files, 2 + remaining, 0.25)
         assert str(caught.value) == setup_failure_message(outcome)
     assert events == setup_events(reaped, outcome)
     assert files.uncertain is (reaped == "kill-denied")
     assert files.path("pgid").exists() is (outcome != "ready-timeout")
     if outcome != "ready-timeout":
         assert "example.pgid" in {p.name for p in tmp_path.iterdir()}
+        assert files.path("pgid").read_text() == (
+            '{"pgid": 23, "boot": "boot", "start": "42"}\n'
+        )
 
 
 def test_stop_absent_group_and_liveness(monkeypatch: pytest.MonkeyPatch) -> None:
