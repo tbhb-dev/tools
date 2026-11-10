@@ -102,6 +102,12 @@ class DeliveryStatus(StrEnum):
     DUPLICATE = "duplicate"
 
 
+class ScoreStatus(StrEnum):
+    SCORED = "scored"
+    FINAL = "final"
+    SKIPPED_FUTURE = "skipped_future"
+
+
 _IDENTIFIER = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"
 _PR = rf"{events.REPOSITORY}#[1-9][0-9]{{0,9}}"
 _HEAD = rf"{_PR}@{events.SHA}"
@@ -663,7 +669,7 @@ class Store:
                 for key, repo, rule, result in db.execute(_SQL["shadow_results"])
             )
 
-    def score_shadow(self, key: str, time: int, result: Result) -> bool:
+    def score_shadow(self, key: str, time: int, result: Result) -> ScoreStatus:
         """Score once; no_change stays provisional for a later reconcile read.
 
         The read and conditional update share an immediate transaction, as in
@@ -679,17 +685,17 @@ class Store:
             previous = self._action(db, key)
             if previous is None or previous.state != ActionState.SHADOW:
                 raise TransitionError
-            if time < max(previous.intent_time, previous.finished_time or 0):
-                return False
             if previous.result in {Result.AGREE, Result.DISAGREE}:
-                return False
+                return ScoreStatus.FINAL
+            if time < max(previous.intent_time, previous.finished_time or 0):
+                return ScoreStatus.SKIPPED_FUTURE
             updated = db.execute(
                 _SQL["transition"],
                 (ActionState.SHADOW, None, time, result, key, ActionState.SHADOW),
             )
             if updated.rowcount != 1:
                 raise TransitionError
-            return True
+            return ScoreStatus.SCORED
 
     def crashed_intents(self) -> tuple[str, ...]:
         with self._transaction() as db:

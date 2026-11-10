@@ -86,7 +86,7 @@ def test_report_groups_rules_and_repositories_without_counting_no_change_as_fina
         key = f"merge:{REPO}#{number}@{HEAD}"
         assert db.record_shadow(store.ShadowIntent(key, REPO, "R4"), 1)
         if result is not None:
-            assert db.score_shadow(key, 2, result)
+            assert db.score_shadow(key, 2, result) == store.ScoreStatus.SCORED
     other = "example-org/other"
     assert db.record_shadow(
         store.ShadowIntent(f"escalate:{other}#1@{HEAD}:age", other, "R9"), 1

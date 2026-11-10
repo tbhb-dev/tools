@@ -286,7 +286,21 @@ class Runner:
         self._validate(snapshot)
         for pending in self.database.shadow_intents():
             if pending.repository in repositories:
-                self.database.score_shadow(pending.key, time, score(pending, snapshot))
+                status = self.database.score_shadow(
+                    pending.key, time, score(pending, snapshot)
+                )
+                if status == store.ScoreStatus.SKIPPED_FUTURE:
+                    self.log.write(
+                        json.dumps(
+                            {
+                                "source": intent.key,
+                                "rule": pending.rule,
+                                "action_key": pending.key,
+                                "outcome": "skipped_future",
+                            },
+                        )
+                        + "\n"
+                    )
         # R0 dimensions share one key, so only its first claim logs a decision.
         for repository in repositories:
             self._record(intent, repository, "reconcile", intent.key, time)
