@@ -251,3 +251,11 @@ def test_driver_clearance_survives_clock_step_back(
     assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
     assert clear(reason="Host rebuilt after the clock moved back") == 0
     assert taint_store.load("example-linux").status == "clean"
+
+
+def test_unknown_build_that_finishes_during_launch_is_labelled(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    remote.configure(launch={"rc": "0"})
+    assert launch(remote) == 0
+    assert capsys.readouterr() == ("sample: rc=0 untrusted-host\n", "")
