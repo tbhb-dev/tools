@@ -212,6 +212,7 @@ unsandboxed
 unsets
 unstampable
 unvalidated
+uploadpack
 usefixtures
 userconfig
 usermod

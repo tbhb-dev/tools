@@ -13,6 +13,9 @@ LOG = ".log"
 RC = ".rc"
 KEEP = ".keep"
 RC_PENDING = ".rc.pending"
+RUN_LOCK = ".run.lock"
+FALLBACK = ".rc.fallback"
+OWNER = ".owner"
 INDEX = "index.jsonl"
 SUFFIXES = (
     REQUEST,
@@ -24,7 +27,10 @@ SUFFIXES = (
     OUT,
     FINAL,
     LOG,
-    RC,
     KEEP,
     RC_PENDING,
+    RUN_LOCK,
+    FALLBACK,
+    RC,
+    OWNER,
 )

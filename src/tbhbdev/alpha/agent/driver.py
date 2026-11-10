@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 from tbhbdev import version
 from tbhbdev.alpha.agent import render, transport
@@ -26,11 +27,15 @@ if TYPE_CHECKING:
 class Run:
     """The recorded target and request, with no settings or credential references."""
 
-    def __init__(self, name: str, host: Host, run: RunRequest, started: str) -> None:
+    def __init__(
+        self, name: str, host: Host, run: RunRequest, started: str, owner: str
+    ) -> None:
         self.name = name
         self.host = host
         self.request = run
         self.started = started
+        self.owner = owner
+        self.cleaning = False
 
 
 def directory() -> Path:
@@ -53,6 +58,8 @@ def save(run: Run) -> None:
         **request.to_dict(run.request),
         "host": run.host.name,
         "started": run.started,
+        "owner": run.owner,
+        "cleaning": run.cleaning,
     }
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as output:
@@ -69,11 +76,15 @@ def load(settings: Settings, name: str) -> Run:
             settings, str(record.pop("host")), str(record["account"])
         )
         started = str(record.pop("started"))
+        owner = str(record.pop("owner"))
+        cleaning = record.pop("cleaning")
         run = request.parse(record, host_allows_unsandboxed=host.unsandboxed)
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         message = f"{path}: invalid run metadata"
         raise Invalid(message) from exc
-    return Run(name, host, run, started)
+    result = Run(name, host, run, started, owner)
+    result.cleaning = bool(cleaning)
+    return result
 
 
 def prepare(settings: Settings, args: argparse.Namespace) -> Run:
@@ -108,12 +119,14 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     run = rules.check(
         run, settings, host, ref=args.ref, exists=metadata_path(args.name).exists()
     )
-    return Run(args.name, host, run, datetime.now(UTC).isoformat())
+    return Run(
+        args.name, host, run, datetime.now(UTC).isoformat(), secrets.token_hex(16)
+    )
 
 
 def execute(settings: Settings, args: argparse.Namespace) -> int:
     run = prepare(settings, args)
-    prompt = render.brief(Path(args.prompt_file).read_text())
+    prompt = Path(args.prompt_file).read_text()
     schema = None if args.schema is None else Path(args.schema).read_text()
     if schema is not None:
         json.loads(schema)
@@ -141,32 +154,53 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
             run.host,
             run.name,
             inputs=transport.Inputs(
-                json.dumps(request.to_dict(run.request)), prompt, schema
+                json.dumps(request.to_dict(run.request)), prompt, schema, run.owner
             ),
             timeout=deadline - time.monotonic(),
         )
         transport.call(
             settings,
             run.host,
-            remote.start(run.name, settings.sockets_dir, run.host),
+            remote.start(run.name, settings.sockets_dir, run.host, owner=run.owner),
             timeout=deadline - time.monotonic(),
         )
     except transport.CollisionError:
         archive_metadata(run.name, run.started)
         raise
     except transport.TransportError:
+        recover_transfer(settings, run)
         print(f"{run.name}: launch unconfirmed host={run.host.name} phase=unreachable")
         return 1
     try:
         return poll_launch(settings, run, deadline)
+    except transport.CollisionError:
+        not_owner(run)
     except transport.TransportError:
         return unconfirmed(settings, run, "unreachable")
+
+
+def not_owner(run: Run) -> NoReturn:
+    archive_metadata(run.name, datetime.now(UTC).isoformat())
+    message = f"{run.name}: not owner"
+    raise Invalid(message)
+
+
+def recover_transfer(settings: Settings, run: Run) -> None:
+    try:
+        transport.shell(settings, run.host, remote.owned(run.name, run.owner))
+    except transport.CollisionError:
+        not_owner(run)
+    except transport.TransportError:
+        archive_metadata(run.name, run.started)
 
 
 def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
     while True:
         reading = transport.read(
-            settings, run.host, run.name, timeout=deadline - time.monotonic()
+            settings,
+            run.host,
+            (run.name, run.owner),
+            timeout=deadline - time.monotonic(),
         )
         action = rules.launch(
             reading.rc, launched=reading.launched, expired=time.monotonic() >= deadline
@@ -176,7 +210,9 @@ def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
             transport.shell(
                 settings,
                 run.host,
-                remote.session(run.name, "kill-session", settings.sockets_dir),
+                remote.session(
+                    run.name, "kill-session", settings.sockets_dir, owner=run.owner
+                ),
             )
             print(f"{run.name}: rc={reading.rc}\n{reading.text}", end="")
             return reading.rc or 0
@@ -190,7 +226,10 @@ def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
 
 def unconfirmed(settings: Settings, run: Run, phase: str) -> int:
     print(f"{run.name}: launch unconfirmed host={run.host.name} phase={phase}")
-    kill(settings, run)
+    try:
+        kill(settings, run)
+    except transport.CollisionError:
+        not_owner(run)
     return 1
 
 
@@ -213,7 +252,11 @@ def wait(settings: Settings, run: Run) -> int:
         )
         try:
             reading = transport.read(
-                settings, run.host, run.name, answer=True, timeout=min(30, timeout)
+                settings,
+                run.host,
+                (run.name, run.owner),
+                answer=True,
+                timeout=min(30, timeout),
             )
         except transport.TransportError:
             now = time.monotonic()
@@ -244,7 +287,11 @@ def wait(settings: Settings, run: Run) -> int:
 
 
 def status(settings: Settings, run: Run) -> int:
-    reading = transport.read(settings, run.host, run.name)
+    reading = transport.read(
+        settings,
+        run.host,
+        (run.name, run.owner),
+    )
     print(
         render.status(
             run.name,
@@ -261,13 +308,16 @@ def kill(settings: Settings, run: Run) -> int:
     transport.shell(
         settings,
         run.host,
-        remote.session(run.name, "kill-session", settings.sockets_dir),
+        remote.session(run.name, "kill-session", settings.sockets_dir, owner=run.owner),
     )
     deadline = time.monotonic() + settings.kill_grace_seconds + 2
     while True:
         remaining = deadline - time.monotonic()
         reading = transport.read(
-            settings, run.host, run.name, timeout=min(30, max(1, remaining))
+            settings,
+            run.host,
+            (run.name, run.owner),
+            timeout=min(30, max(1, remaining)),
         )
         action = rules.kill(
             reading.rc, session=reading.session, expired=time.monotonic() >= deadline
@@ -276,7 +326,9 @@ def kill(settings: Settings, run: Run) -> int:
             return 0
         if action == "write":
             transport.shell(
-                settings, run.host, remote.fallback(run.name, settings.sockets_dir)
+                settings,
+                run.host,
+                remote.fallback(run.name, settings.sockets_dir, owner=run.owner),
             )
             return 0
         if action == "refuse":
@@ -292,13 +344,22 @@ def archive_metadata(name: str, stamp: str) -> None:
 
 
 def clean(settings: Settings, run: Run, *, force: bool) -> int:
-    reading = transport.read(settings, run.host, run.name)
-    rules.clean(reading.rc, session=reading.session, force=force)
+    reading = transport.read(
+        settings,
+        run.host,
+        (run.name, run.owner),
+    )
+    rules.clean(reading.rc, session=reading.session, force=force or run.cleaning)
     count = transport.shell(
-        settings, run.host, remote.branch_facts(run.request.repo, run.name)
+        settings,
+        run.host,
+        remote.branch_facts(run.request.repo, run.name, owner=run.owner),
     )
     delete = rules.delete_branch(unpushed=int(count) > 0, force=force)
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    record = json.loads(metadata_path(run.name).read_text())
+    record["cleaning"] = True
+    metadata_path(run.name).write_text(json.dumps(record) + "\n")
     transport.shell(
         settings,
         run.host,
@@ -307,7 +368,7 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
             run.name,
             stamp,
             settings.sockets_dir,
-            delete_branch=delete,
+            decision=remote.Cleanup(run.owner, delete, force),
         ),
     )
     archive_metadata(run.name, stamp)
@@ -315,7 +376,7 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
 
 
 def keep(settings: Settings, run: Run) -> int:
-    transport.shell(settings, run.host, remote.keep(run.name))
+    transport.shell(settings, run.host, remote.keep(run.name, owner=run.owner))
     return 0
 
 
@@ -323,7 +384,10 @@ def dispatch(settings: Settings, args: argparse.Namespace) -> int:
     if args.verb == "exec":
         return execute(settings, args)
     run = load(settings, args.name)
-    if args.verb == "clean":
-        return clean(settings, run, force=args.force)
     verbs = {"wait": wait, "status": status, "kill": kill, "keep": keep}
-    return verbs[args.verb](settings, run)
+    try:
+        if args.verb == "clean":
+            return clean(settings, run, force=args.force)
+        return verbs[args.verb](settings, run)
+    except transport.CollisionError:
+        not_owner(run)

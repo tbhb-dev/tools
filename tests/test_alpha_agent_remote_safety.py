@@ -25,6 +25,7 @@ def fixed_tools(monkeypatch: pytest.MonkeyPatch) -> None:
 def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     state = tmp_path / "state/tbhbdev/agent-runs"
     state.mkdir(parents=True)
+    (state / "sample.owner").write_text("example-owner\n")
     tools = tmp_path / "bin"
     tools.mkdir()
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -55,7 +56,7 @@ def test_tmux_error_never_writes_rc(host: Path, error: str, os_name: str) -> Non
         )
     else:
         # A fixed PATH containing only scratch tools also tests a missing tmux.
-        for name in ("mkdir", "chmod", "mv", "find", "id"):
+        for name in ("mkdir", "chmod", "mv", "find", "id", "cat"):
             program = next(
                 p
                 for p in (
@@ -66,7 +67,9 @@ def test_tmux_error_never_writes_rc(host: Path, error: str, os_name: str) -> Non
             )
             (host / "bin" / name).symlink_to(program)
         os.environ["PATH"] = str(host / "bin")
-    result = execute(remote.fallback("sample", settings().sockets_dir))
+    result = execute(
+        remote.fallback("sample", settings().sockets_dir, owner="example-owner")
+    )
     assert result.returncode == 75
     assert not (host / "state/tbhbdev/agent-runs/sample.rc").exists()
 
@@ -79,7 +82,9 @@ def test_session_is_checked_before_rc(host: Path) -> None:
         "(root / 'tbhbdev/agent-runs/sample.rc').write_text('0')\n"
         'sys.stderr.write("can\'t find session: ag-sample\\n")\nsys.exit(1)\n',
     )
-    result = execute(remote.read("sample", settings().sockets_dir))
+    result = execute(
+        remote.read("sample", settings().sockets_dir, owner="example-owner")
+    )
     assert result.returncode == 0
     assert result.stdout.splitlines()[1] == b"30"
 
@@ -122,14 +127,27 @@ def test_untrusted_run_files(
     monkeypatch.setattr(transport, "execute", run)
     if expected is None:
         with pytest.raises((ValueError, transport.TransportError)):
-            transport.read(settings(), LINUX, "sample", answer=answer)
+            transport.read(
+                settings(),
+                LINUX,
+                ("sample", "example-owner"),
+                answer=answer,
+            )
     else:
         assert (
-            transport.read(settings(), LINUX, "sample", answer=answer).text == expected
+            transport.read(
+                settings(),
+                LINUX,
+                ("sample", "example-owner"),
+                answer=answer,
+            ).text
+            == expected
         )
 
 
-@pytest.mark.parametrize("plant", ["fsmonitor", "hook", "smudge", "credential"])
+@pytest.mark.parametrize(
+    "plant", ["fsmonitor", "hook", "reference-transaction", "smudge", "credential"]
+)
 def test_clean_never_executes_repo_plants(host: Path, plant: str) -> None:
     clone = host / "Code/github.com/example-org/example-repo"
     clone.mkdir(parents=True)
@@ -160,14 +178,30 @@ def test_clean_never_executes_repo_plants(host: Path, plant: str) -> None:
     )
     tree = clone / ".worktrees/agent-sample"
     git("worktree", "add", "-b", "agent/sample", str(tree))
+    admins = clone / ".git/worktrees"
+    victim = admins / "victim"
+    victim.mkdir()
+    (victim / "gitdir").write_text(str(host / "missing/.git"))
+    outside = host / "outside"
+    outside.mkdir()
+    (outside / "preserve").write_text("outside marker")
+    (admins / "link").symlink_to(outside, target_is_directory=True)
+    sibling = clone / ".worktrees/agent-sibling"
+    git("worktree", "add", "-b", "agent/sibling", str(sibling))
+    before = {
+        p.name: p.read_bytes()
+        for p in (admins / "agent-sibling").rglob("*")
+        if p.is_file()
+    }
     marker = host / "marker"
     command = host / "plant"
     command.write_text(f"#!/bin/sh\nprintf planted > '{marker}'\n")
     command.chmod(0o700)
     if plant == "fsmonitor":
         git("config", "core.fsmonitor", str(command))
-    elif plant == "hook":
-        (clone / ".git/hooks/post-checkout").symlink_to(command)
+    elif plant in {"hook", "reference-transaction"}:
+        hook = "post-checkout" if plant == "hook" else plant
+        (clone / ".git/hooks" / hook).symlink_to(command)
     elif plant == "smudge":
         git("config", "filter.example.smudge", str(command))
         (clone / ".git/info/attributes").write_text("* filter=example\n")
@@ -175,6 +209,7 @@ def test_clean_never_executes_repo_plants(host: Path, plant: str) -> None:
         git("config", "credential.helper", str(command))
     # Test both clones' shared config and the agent's private worktree config.
     (tree / "agent-file").write_text("preserve")
+    (tree / ".git").write_text(f"gitdir: {outside}\n")
     write_standalone_fake(
         host / "bin/tmux",
         'import sys\nsys.stderr.write("no server running on example")\nsys.exit(1)\n',
@@ -185,11 +220,20 @@ def test_clean_never_executes_repo_plants(host: Path, plant: str) -> None:
             "sample",
             "stamp",
             settings().sockets_dir,
-            delete_branch=True,
+            decision=remote.Cleanup("example-owner", delete_branch=True, force=False),
         )
     )
     assert result.returncode == 0, result.stderr
     assert not marker.exists()
+    assert victim.is_dir()
+    assert (victim / "gitdir").read_text() == str(host / "missing/.git")
+    assert (admins / "link").is_symlink()
+    assert (outside / "preserve").read_text() == "outside marker"
+    assert {
+        p.name: p.read_bytes()
+        for p in (admins / "agent-sibling").rglob("*")
+        if p.is_file()
+    } == before
     assert not tree.exists()
     trash = host / "state/tbhbdev/agent-runs/trash/stamp-sample"
     assert (trash / "worktree/agent-file").read_text() == "preserve"
@@ -208,7 +252,12 @@ def test_socket_directory_refuses_unsafe_paths(host: Path, bad: str) -> None:
         directory.chmod(0o755 if bad == "mode" else 0o700)
         if bad == "socket-link":
             (directory / "agents").symlink_to(host / "elsewhere")
-    assert execute(remote.read("sample", settings().sockets_dir)).returncode == 65
+    assert (
+        execute(
+            remote.read("sample", settings().sockets_dir, owner="example-owner")
+        ).returncode
+        == 65
+    )
 
 
 @pytest.mark.parametrize("suffix", [".keep", ".rc.pending"])
@@ -222,9 +271,9 @@ def test_exclusive_markers_refuse_symlinks(host: Path, suffix: str) -> None:
         'import sys\nsys.stderr.write("no server running on example")\nsys.exit(1)\n',
     )
     script = (
-        remote.keep("sample")
+        remote.keep("sample", owner="example-owner")
         if suffix == ".keep"
-        else remote.fallback("sample", settings().sockets_dir)
+        else remote.fallback("sample", settings().sockets_dir, owner="example-owner")
     )
     assert execute(script).returncode != 0
     assert target.read_text() == "preserve"
@@ -234,37 +283,49 @@ def test_exclusive_markers_refuse_symlinks(host: Path, suffix: str) -> None:
 def test_scripts_have_fixed_path_socket_and_git_environment() -> None:
     config = settings()
     scripts = [
-        remote.session("sample", "kill-session", config.sockets_dir),
-        remote.transfer("sample", config.sockets_dir),
-        remote.start("sample", config.sockets_dir, LINUX)[2],
-        remote.read("sample", config.sockets_dir),
-        remote.read("sample", config.sockets_dir, answer=True),
-        remote.fallback("sample", config.sockets_dir),
+        remote.session(
+            "sample", "kill-session", config.sockets_dir, owner="example-owner"
+        ),
+        remote.transfer("sample", config.sockets_dir, owner="example-owner"),
+        remote.start("sample", config.sockets_dir, LINUX, owner="example-owner")[2],
+        remote.read("sample", config.sockets_dir, owner="example-owner"),
+        remote.read("sample", config.sockets_dir, answer=True, owner="example-owner"),
+        remote.fallback("sample", config.sockets_dir, owner="example-owner"),
         remote.clean(
             "example-org/example-repo",
             "sample",
             "stamp",
             config.sockets_dir,
-            delete_branch=True,
+            decision=remote.Cleanup("example-owner", delete_branch=True, force=False),
         ),
     ]
     for script in scripts:
         assert script.startswith("PATH=/usr/bin:/bin:/usr/sbin:/sbin\nexport PATH\n")
         assert 'PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"' in script
-        assert 'tmux -S "$s/agents"' in script
+        assert 'tmux -S "$s/agents" -f /dev/null' in script
         assert "tmux -L" not in script
         assert f"s={config.sockets_dir}\n" in script
     assert remote.installed(LINUX).endswith('"$HOME/.local/bin/tbhbdev" --version')
-    assert "-lc" not in remote.start("sample", config.sockets_dir, LINUX)[2]
+    assert (
+        "-lc"
+        not in remote.start("sample", config.sockets_dir, LINUX, owner="example-owner")[
+            2
+        ]
+    )
     for script in [
-        remote.branch_facts("example-org/example-repo", "sample"),
+        remote.branch_facts(
+            "example-org/example-repo", "sample", owner="example-owner"
+        ),
         remote.preflight("example-org/example-repo", "main", "example", LINUX),
         scripts[-1],
     ]:
         for line in script.splitlines():
             if " git " in line:
-                assert 'env -i PATH="$PATH" HOME="$HOME" LANG=C' in line
-                assert "GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1" in line
+                assert 'env -i PATH="$PATH" HOME="$HOME" LANG=C LC_ALL=C' in line
+                assert (
+                    "GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 GIT_CONFIG_NOSYSTEM=1"
+                    in line
+                )
                 assert "GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false" in line
                 assert "-c core.fsmonitor=false -c core.sshCommand=ssh" in line
                 assert "-c credential.helper= -c core.askPass=" in line
@@ -284,25 +345,21 @@ def test_socket_home_relative_paths(host: Path, path: str) -> None:
 
 
 def test_start_command_and_absolute_program() -> None:
-    command = remote.start("example", "/example/sockets", LINUX)
+    command = remote.start("example", "/example/sockets", LINUX, owner="example-owner")
     assert command[:2] == ("/bin/sh", "-c")
-    assert shlex.split(command[2].splitlines()[-1]) == [
-        "tmux",
-        "-S",
-        "$s/agents",
-        "new-session",
-        "-d",
-        "-s",
-        "ag-example",
-        '"$HOME/.local/bin/tbhbdev" alpha agent run-host example',
-    ]
+    assert shlex.split(command[2].splitlines()[-1]) == shlex.split(
+        "tmux -S '$s/agents' -f /dev/null new-session -d -s ag-example "
+        "'$HOME/.local/bin/tbhbdev' alpha agent run-host example --host example-linux"
+    )
     host = replace(LINUX, tbhbdev="/example path/bin/tbhbdev")
     assert remote.program(host) == "'/example path/bin/tbhbdev'"
     assert remote.installed(host).endswith("'/example path/bin/tbhbdev' --version")
 
 
 def test_clone_path_is_not_the_worktree() -> None:
-    script = remote.branch_facts("example-org/example-repo", "sample")
+    script = remote.branch_facts(
+        "example-org/example-repo", "sample", owner="example-owner"
+    )
     assert (
         'cd "$HOME"/Code/github.com/example-org/example-repo || exit "$?"\n' in script
     )
@@ -323,10 +380,16 @@ def test_read_defaults_to_bounded_log(host: Path) -> None:
         host / "bin/tmux",
         'import sys\nsys.stderr.write("no server running on example")\nsys.exit(1)\n',
     )
-    result = execute(remote.read("sample", settings().sockets_dir))
+    result = execute(
+        remote.read("sample", settings().sockets_dir, owner="example-owner")
+    )
     assert result.returncode == 0
     assert result.stdout.split(b"\n", 4)[4] == b"L" * 65536
-    result = execute(remote.read("sample", settings().sockets_dir, answer=True))
+    result = execute(
+        remote.read(
+            "sample", settings().sockets_dir, answer=True, owner="example-owner"
+        )
+    )
     assert result.returncode == 0
     assert result.stdout.split(b"\n", 4)[4] == b"O" * 65536
 
@@ -336,11 +399,9 @@ def test_claim_refusal_is_distinct_even_for_redirection_failure(host: Path) -> N
     # Isolate the creation step too: sh treats ':' as a special builtin.
     claim = host / "existing"
     claim.write_text("preserve")
-    script = remote.transfer("sample", settings().sockets_dir)
-    line = next(
-        line for line in script.splitlines() if ': > "$d/sample.request.json"' in line
-    )
-    line = line.replace('"$d/sample.request.json"', shlex.quote(str(claim)))
+    script = remote.transfer("sample", settings().sockets_dir, owner="example-owner")
+    line = next(line for line in script.splitlines() if '> "$d/sample.owner"' in line)
+    line = line.replace('"$d/sample.owner"', shlex.quote(str(claim)))
     result = execute("set -C\n" + line)
     assert result.returncode == 73
     assert claim.read_text() == "preserve"
@@ -357,7 +418,9 @@ def test_run_directory_symlinks_are_not_followed(host: Path, component: str) -> 
         host / "bin/tmux",
         'import sys\nsys.stderr.write("no server running on example")\nsys.exit(1)\n',
     )
-    result = execute(remote.read("sample", settings().sockets_dir))
+    result = execute(
+        remote.read("sample", settings().sockets_dir, owner="example-owner")
+    )
     assert result.returncode == 65
     assert b"private marker" not in result.stdout
 
@@ -372,6 +435,446 @@ def test_session_target_never_matches_another_runs_prefix(host: Path) -> None:
         "    sys.exit(1)\n"
         f"Path({str(marker)!r}).write_text('stopped ag-sample-other')\n",
     )
-    result = execute(remote.session("sample", "kill-session", settings().sockets_dir))
+    result = execute(
+        remote.session(
+            "sample", "kill-session", settings().sockets_dir, owner="example-owner"
+        )
+    )
     assert result.returncode == 0
     assert not marker.exists()
+
+
+def no_session(host: Path) -> None:
+    write_standalone_fake(
+        host / "bin/tmux",
+        'import sys\nsys.stderr.write("no server running on example")\nsys.exit(1)\n',
+    )
+
+
+def git_in(clone: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["/usr/bin/git", "-C", str(clone), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(clone),
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        },
+    )
+    return result.stdout.strip()
+
+
+def clone_in(host: Path) -> Path:
+    clone = host / "Code/github.com/example-org/example-repo"
+    clone.mkdir(parents=True)
+    git_in(clone, "init", "-b", "main")
+    git_in(
+        clone,
+        "-c",
+        "user.name=Example",
+        "-c",
+        "user.email=example@example.com",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "example",
+    )
+    git_in(
+        clone,
+        "worktree",
+        "add",
+        "-b",
+        "agent/sample",
+        str(clone / ".worktrees/agent-sample"),
+    )
+    return clone
+
+
+def cleanup(*, force: bool = False) -> str:
+    return remote.clean(
+        "example-org/example-repo",
+        "sample",
+        "stamp",
+        settings().sockets_dir,
+        decision=remote.Cleanup("example-owner", delete_branch=True, force=force),
+    )
+
+
+@pytest.mark.parametrize(
+    "step", ["worktree", "admin", "branch", "sample.phase", "sample.rc", "sample.owner"]
+)
+def test_clean_retries_each_step(host: Path, step: str) -> None:
+    clone = clone_in(host)
+    no_session(host)
+    state = host / "state/tbhbdev/agent-runs"
+    (state / "sample.phase").write_text("ended\n")
+    (state / "sample.rc").write_text("0\n")
+    admin = clone / ".git/worktrees/agent-sample"
+    (admin / "locked").write_text("planted lock")
+    marker = host / "failed"
+    # Both executables pass through to the system after one injected failure.
+    for executable in ("git", "mv"):
+        write_standalone_fake(
+            host / "bin" / executable,
+            "import os, sys, fcntl\nfrom pathlib import Path\n"
+            f"marker = Path({str(marker)!r})\nargs = sys.argv[1:]\nstep = {step!r}\n"
+            f"name = {executable!r}\n"
+            "if name == 'mv' and Path(args[-1]).name in ('worktree', 'admin'):\n"
+            "    path = Path(os.environ['common']) / 'agent-worktree.lock'\n"
+            "    with path.open('a') as lock:\n"
+            "        try:\n"
+            "            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+            "        except BlockingIOError:\n"
+            "            pass\n"
+            "        else:\n"
+            "            raise AssertionError('cleanup must hold the common lock')\n"
+            "match = ('branch' in args and '-D' in args) if step == 'branch' else (\n"
+            "    name == 'mv' and step in (Path(args[-1]).name, Path(args[0]).name))\n"
+            "if match and not marker.exists():\n"
+            "    marker.write_text('failed')\n    sys.exit(74)\n"
+            f"os.execv('/usr/bin/{executable}', ['/usr/bin/{executable}', *args])\n",
+        )
+    first = execute(cleanup())
+    assert first.returncode == 74, first.stderr
+    second = execute(cleanup())
+    assert second.returncode == 0, second.stderr
+    trash = state / "trash/stamp-sample"
+    assert (trash / "admin/locked").read_text() == "planted lock"
+    assert (trash / "worktree").is_dir()
+    assert (trash / "sample.owner").read_text() == "example-owner\n"
+    assert not list(state.glob("sample.*"))
+    assert not admin.exists()
+    assert not git_in(clone, "branch", "--list", "agent/sample")
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink", "dangling"])
+def test_clean_refuses_unsafe_admin(host: Path, kind: str) -> None:
+    clone = clone_in(host)
+    no_session(host)
+    admin = clone / ".git/worktrees/agent-sample"
+    admin.rename(host / "saved-admin")
+    if kind == "file":
+        admin.write_text("preserve")
+    else:
+        admin.symlink_to(
+            host / ("saved-admin" if kind == "symlink" else "missing"),
+            target_is_directory=True,
+        )
+    result = execute(cleanup())
+    assert result.returncode == 65
+    assert b"clean refused" in result.stderr
+    assert (host / "saved-admin/HEAD").is_file()
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink", "dangling"])
+def test_claim_rejects_existing_owner(host: Path, kind: str) -> None:
+    no_session(host)
+    owner = host / "state/tbhbdev/agent-runs/sample.owner"
+    owner.rename(host / "preserved-owner")
+    if kind == "file":
+        owner.write_text("other-owner\n")
+    else:
+        owner.symlink_to(host / ("preserved-owner" if kind == "symlink" else "missing"))
+    result = execute(
+        remote.transfer("sample", settings().sockets_dir, owner="example-owner")
+    )
+    assert result.returncode == 73
+    assert (host / "preserved-owner").read_text() == "example-owner\n"
+    assert (
+        owner.is_symlink() if kind != "file" else owner.read_text() == "other-owner\n"
+    )
+
+
+def test_concurrent_claims_have_one_winner(host: Path) -> None:
+    no_session(host)
+    (host / "state/tbhbdev/agent-runs/sample.owner").rename(host / "preserved-owner")
+    # Replace tar so the transfer reaches a successful end without input files.
+    write_standalone_fake(host / "bin/tar", "")
+    (host / "sockets").mkdir(mode=0o700)
+    scripts = [
+        remote.transfer("sample", settings().sockets_dir, owner=owner)
+        for owner in ("first", "second")
+    ]
+    scripts = [
+        s.replace(
+            "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=" + os.environ["PATH"]
+        ).replace(settings().sockets_dir, str(host / "sockets"))
+        for s in scripts
+    ]
+    processes = [
+        subprocess.Popen(
+            ["/bin/sh", "-c", s], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        for s in scripts
+    ]
+    for process in processes:
+        process.communicate(timeout=10)
+    assert sorted(p.returncode for p in processes) == [0, 73]
+    assert (host / "state/tbhbdev/agent-runs/sample.owner").read_text() in {
+        "first\n",
+        "second\n",
+    }
+
+
+def test_real_ssh_shell_quoting(host: Path) -> None:
+    no_session(host)
+    state = host / "state/tbhbdev/agent-runs"
+    (state / "sample.log").write_text("literal ' $() ; bytes\n")
+    script = remote.read("sample", settings().sockets_dir, owner="example-owner")
+    script = script.replace(
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=" + os.environ["PATH"]
+    )
+    script = script.replace(settings().sockets_dir, str(host / "sockets"))
+    # The first shell parses the ssh command string; the second runs the script.
+    result = subprocess.run(
+        ["/bin/sh", "-c", shlex.join(("/bin/sh", "-c", script))],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert result.stdout.endswith(b"literal ' $() ; bytes\n")
+
+
+@pytest.mark.parametrize(
+    "script", ["read", "fallback", "session", "keep", "clean", "branch_facts", "start"]
+)
+@pytest.mark.parametrize("owner_kind", ["other", "missing", "symlink"])
+def test_owner_check_precedes_every_effect(
+    host: Path, script: str, owner_kind: str
+) -> None:
+    owner = host / "state/tbhbdev/agent-runs/sample.owner"
+    owner.rename(host / "saved-owner")
+    if owner_kind == "other":
+        owner.write_text("another-owner\n")
+    elif owner_kind == "symlink":
+        owner.symlink_to(host / "saved-owner")
+    scripts = {
+        "read": remote.read("sample", settings().sockets_dir, owner="example-owner"),
+        "fallback": remote.fallback(
+            "sample", settings().sockets_dir, owner="example-owner"
+        ),
+        "session": remote.session(
+            "sample", "kill-session", settings().sockets_dir, owner="example-owner"
+        ),
+        "keep": remote.keep("sample", owner="example-owner"),
+        "clean": cleanup(),
+        "branch_facts": remote.branch_facts(
+            "example-org/example-repo", "sample", owner="example-owner"
+        ),
+        "start": remote.start(
+            "sample", settings().sockets_dir, LINUX, owner="example-owner"
+        )[2],
+    }
+    result = execute(scripts[script])
+    assert result.returncode == 73
+    assert not (host / "sockets").exists()
+    assert not (host / "state/tbhbdev/agent-runs/trash").exists()
+
+
+def test_git_local_flags_block_lazy_fetch(host: Path) -> None:
+    clone = clone_in(host)
+    marker = host / "fetch-executed"
+    upload = host / "upload"
+    upload.write_text(
+        f"#!/bin/sh\nprintf fetched > {shlex.quote(str(marker))}\nexit 1\n"
+    )
+    upload.chmod(0o700)
+    git_in(clone, "config", "remote.origin.url", str(host / "missing-repo"))
+    git_in(clone, "config", "remote.origin.promisor", "true")
+    git_in(clone, "config", "remote.origin.uploadpack", str(upload))
+    missing = "f" * 40
+    (clone / ".git/refs/heads/agent/sample").write_text(missing + "\n")
+    git_in(clone, "config", "branch.agent/sample.remote", ".")
+    git_in(clone, "config", "branch.agent/sample.merge", "refs/heads/main")
+    # This command must try the configured transport without the boundary.
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(clone), "rev-list", "--count", missing],
+        capture_output=True,
+        check=False,
+    )
+    assert marker.read_text() == "fetched"
+    marker.rename(host / "unprotected-marker")
+    result = execute(
+        remote.branch_facts("example-org/example-repo", "sample", owner="example-owner")
+    )
+    assert result.stdout == b"0\n"
+    assert not marker.exists()
+
+
+def test_git_flags_disable_reference_hook_behaviorally(host: Path) -> None:
+    clone = clone_in(host)
+    no_session(host)
+    marker = host / "hook-executed"
+    hook = clone / ".git/hooks/reference-transaction"
+    hook.write_text(f"#!/bin/sh\nprintf called > {shlex.quote(str(marker))}\n")
+    hook.chmod(0o700)
+    git_in(clone, "branch", "probe")
+    assert marker.read_text() == "called"
+    marker.rename(host / "unprotected-marker")
+    assert execute(cleanup()).returncode == 0
+    assert not marker.exists()
+
+
+def test_locale_precedes_tmux_and_git(host: Path) -> None:
+    clone_in(host)
+    for executable in ("tmux", "git"):
+        write_standalone_fake(
+            host / "bin" / executable,
+            "import os, sys\n"
+            "assert os.environ['LANG'] == 'C'\n"
+            + (
+                "assert os.environ['LC_ALL'] == 'C'\n"
+                "sys.stderr.write('no server running on example')\nsys.exit(1)\n"
+                if executable == "tmux"
+                else "assert os.environ['GIT_NO_LAZY_FETCH'] == '1'\n"
+                "assert 'protocol.allow=never' in sys.argv\nsys.exit(1)\n"
+            ),
+        )
+    assert (
+        execute(
+            remote.read("sample", settings().sockets_dir, owner="example-owner")
+        ).returncode
+        == 0
+    )
+    assert (
+        execute(
+            remote.branch_facts(
+                "example-org/example-repo", "sample", owner="example-owner"
+            )
+        ).returncode
+        == 0
+    )
+
+
+def test_start_and_keep_with_matching_owner(host: Path) -> None:
+    marker = host / "started"
+    write_standalone_fake(
+        host / "bin/tmux",
+        "from pathlib import Path\nimport sys\n"
+        "assert sys.argv[3:] == ['-f', '/dev/null', 'new-session', '-d', '-s',\n"
+        "    'ag-sample', '/example path/bin/tbhbdev', 'alpha', 'agent', 'run-host',\n"
+        "    'sample', '--host', 'example-linux']\n"
+        f"Path({str(marker)!r}).write_text('started')\n",
+    )
+    config = replace(LINUX, tbhbdev="/example path/bin/tbhbdev")
+    assert (
+        execute(
+            remote.start(
+                "sample", settings().sockets_dir, config, owner="example-owner"
+            )[2]
+        ).returncode
+        == 0
+    )
+    assert marker.read_text() == "started"
+    assert execute(remote.keep("sample", owner="example-owner")).returncode == 0
+    assert execute(remote.keep("sample", owner="example-owner")).returncode == 0
+    assert (host / "state/tbhbdev/agent-runs/sample.keep").read_text() == ""
+
+
+def test_preflight_ref_contract(host: Path) -> None:
+    write_standalone_fake(host / "bin/version", "print('example version')\n")
+    write_standalone_fake(
+        host / "bin/git",
+        "import os, sys\nfrom pathlib import Path\n"
+        f"assert Path.cwd() == Path({str(host)!r})\n"
+        "assert sys.argv[-6:] == ['ls-remote', '--exit-code', '--',\n"
+        "    'git@github.com:example-org/example-repo.git', 'topic', 'topic^{}']\n"
+        "assert 'protocol.ext.allow=never' in sys.argv\n"
+        "assert os.environ['GIT_NO_LAZY_FETCH'] == '1'\n"
+        "assert os.environ['LANG'] == os.environ['LC_ALL'] == 'C'\n"
+        "print('commit\\ttopic')\n",
+    )
+    config = replace(LINUX, tbhbdev=str(host / "bin/version"))
+    script = remote.preflight(
+        "example-org/example-repo", "topic", "example version", config
+    )
+    result = execute(script)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == b"example version\ncommit\ttopic\n"
+
+
+def test_branch_facts_counts_local_commits(host: Path) -> None:
+    clone = clone_in(host)
+    git_in(clone, "config", "branch.agent/sample.remote", ".")
+    git_in(clone, "config", "branch.agent/sample.merge", "refs/heads/main")
+    script = remote.branch_facts(
+        "example-org/example-repo", "sample", owner="example-owner"
+    )
+    assert execute(script).stdout == b"0\n"
+    tree = clone / ".worktrees/agent-sample"
+    git_in(
+        tree,
+        "-c",
+        "user.name=Example",
+        "-c",
+        "user.email=example@example.com",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "local",
+    )
+    assert execute(script).stdout == b"1\n"
+
+
+def test_clean_checks_flags_fallback_and_missing_clone(host: Path) -> None:
+    no_session(host)
+    state = host / "state/tbhbdev/agent-runs"
+    (state / "sample.rc.fallback").write_text("")
+    assert execute(cleanup()).returncode == 65
+    assert execute(cleanup(force=True)).returncode == 0
+    assert (state / "trash/stamp-sample/sample.rc.fallback").is_file()
+
+
+def test_clean_local_git_boundary(host: Path) -> None:
+    clone_in(host)
+    no_session(host)
+    write_standalone_fake(
+        host / "bin/git",
+        "import os, sys\n"
+        "assert os.environ['GIT_NO_LAZY_FETCH'] == '1'\n"
+        "options = {}\nargs = sys.argv[1:]\n"
+        "while args and args[0] == '-c':\n"
+        "    key, value = args[1].split('=', 1)\n"
+        "    options[key] = value\n    args = args[2:]\n"
+        "assert options == {\n"
+        "    'core.hooksPath': '/dev/null', 'core.fsmonitor': 'false',\n"
+        "    'core.sshCommand': 'ssh', 'credential.helper': '', 'core.askPass': '',\n"
+        "    'protocol.ext.allow': 'never', 'core.pager': 'cat',\n"
+        "    'gc.auto': '0', 'maintenance.auto': 'false', 'protocol.allow': 'never'}\n"
+        "os.execv('/usr/bin/git', ['/usr/bin/git', *sys.argv[1:]])\n",
+    )
+    facts = execute(
+        remote.branch_facts("example-org/example-repo", "sample", owner="example-owner")
+    )
+    assert facts.stdout == b"1\n"
+    assert facts.stderr == b""
+    assert execute(cleanup()).returncode == 0
+
+
+def test_branch_facts_without_clone(host: Path) -> None:
+    assert not (host / "Code").exists()
+    result = execute(
+        remote.branch_facts("example-org/example-repo", "sample", owner="example-owner")
+    )
+    assert result.returncode == 0
+    assert result.stdout == b"0\n"
+    assert result.stderr == b""
+
+
+@pytest.mark.parametrize("destination", ["worktree", "admin", "sample.phase"])
+def test_clean_preserves_conflicting_trash(host: Path, destination: str) -> None:
+    clone_in(host)
+    no_session(host)
+    state = host / "state/tbhbdev/agent-runs"
+    (state / "sample.phase").write_text("ended\n")
+    trash = state / "trash/stamp-sample"
+    trash.mkdir(parents=True)
+    conflict = trash / destination
+    conflict.write_text("preserve existing trash")
+    result = execute(cleanup())
+    assert result.returncode == 65
+    assert conflict.read_text() == "preserve existing trash"
+    assert (state / "sample.owner").read_text() == "example-owner\n"

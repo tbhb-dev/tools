@@ -60,7 +60,7 @@ def test_transport_bounds(
         )
         assert args == (*expected_argv, "/bin/bash -c true")
         assert data == b"example"
-        return 0, b"example-output"
+        return 0, b"example-output\xff"
 
     async def wait_for(
         future: Awaitable[tuple[int, bytes]], seconds: float
@@ -72,7 +72,7 @@ def test_transport_bounds(
     monkeypatch.setattr(transport, "execute", run)
     assert (
         transport.call(settings(), LINUX, ("true",), data=b"example", timeout=timeout)
-        == "example-output"
+        == "example-output\ufffd"
     )
 
 
@@ -145,7 +145,9 @@ def test_stream_modes_and_budget(
     ) -> str:
         assert config == settings()
         assert host == LINUX
-        assert script == remote.transfer("example", settings().sockets_dir)
+        assert script == remote.transfer(
+            "example", settings().sockets_dir, owner="example-owner"
+        )
         assert timeout == 4.5
         with tarfile.open(fileobj=io.BytesIO(data)) as archive:
             members = archive.getmembers()
@@ -168,7 +170,7 @@ def test_stream_modes_and_budget(
         settings(),
         LINUX,
         "example",
-        inputs=transport.Inputs("request", "brief é", schema),
+        inputs=transport.Inputs("request", "brief é", schema, "example-owner"),
         timeout=4.5,
     )
 
@@ -183,7 +185,9 @@ def test_read_budget(
     ) -> str:
         assert config == settings()
         assert host == LINUX
-        assert script == remote.read("example", settings().sockets_dir, answer=answer)
+        assert script == remote.read(
+            "example", settings().sockets_dir, answer=answer, owner="example-owner"
+        )
         assert timeout == (7.5 if custom else 30)
         return "66696e6973686564\n30\n1\n0\nanswer\n"
 
@@ -191,7 +195,11 @@ def test_read_budget(
     monkeypatch.setattr(transport, "shell", shell)
     kwargs: dict[str, float] = {} if timeout is None else {"timeout": timeout}
     assert transport.read(
-        settings(), LINUX, "example", answer=answer, **kwargs
+        settings(),
+        LINUX,
+        ("example", "example-owner"),
+        answer=answer,
+        **kwargs,
     ) == transport.Reading("finished", 0, launched=True, session=False, text="answer\n")
 
 
@@ -271,9 +279,13 @@ def test_timeout_reaps_only_its_ssh_child(
 def test_valid_status_boundaries(
     monkeypatch: pytest.MonkeyPatch, rc: str, phase: str
 ) -> None:
-    payload = f"{phase.encode().hex()}\n{rc.encode().hex()}\n1\n0\nanswer\tline\n"
+    payload = f"{phase.encode().hex()}\n{rc.encode().hex()}\n1\n0\n\0answer\tline\x1b\n"
     fixed_reading(monkeypatch, payload)
-    reading = transport.read(settings(), LINUX, "sample")
+    reading = transport.read(
+        settings(),
+        LINUX,
+        ("sample", "example-owner"),
+    )
     assert reading.rc == int(rc)
     assert reading.phase == phase.removesuffix("\n")
     assert reading.text == "answer\tline\n"
@@ -297,7 +309,11 @@ def test_invalid_status_fields_have_a_named_error(
     payload = f"{phase.encode().hex()}\n{rc}\n1\n0\n"
     fixed_reading(monkeypatch, payload)
     with pytest.raises(model.Invalid, match=f"^sample: {field}=invalid$"):
-        transport.read(settings(), LINUX, "sample")
+        transport.read(
+            settings(),
+            LINUX,
+            ("sample", "example-owner"),
+        )
 
 
 def test_collision_is_not_a_transport_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -318,12 +334,18 @@ def test_read_absent_rc_and_default_view(
     def shell(
         _config: model.Settings, _host: model.Host, script: str, *, timeout: float
     ) -> str:
-        assert script == remote.read("sample", settings().sockets_dir, answer=False)
+        assert script == remote.read(
+            "sample", settings().sockets_dir, answer=False, owner="example-owner"
+        )
         assert timeout == 30
         return f"72756e6e696e67\n-\n0\n{session}\n"
 
     monkeypatch.setattr(transport, "shell", shell)
-    assert transport.read(settings(), LINUX, "sample") == transport.Reading(
+    assert transport.read(
+        settings(),
+        LINUX,
+        ("sample", "example-owner"),
+    ) == transport.Reading(
         "running", None, launched=False, session=session == "1", text=""
     )
 
@@ -334,7 +356,11 @@ def test_read_invalid_utf8_status(monkeypatch: pytest.MonkeyPatch, field: str) -
     rc = "ff" if field == "rc" else "30"
     fixed_reading(monkeypatch, f"{phase}\n{rc}\n0\n0\n")
     with pytest.raises(model.Invalid, match=f"^sample: {field}=invalid$"):
-        transport.read(settings(), LINUX, "sample")
+        transport.read(
+            settings(),
+            LINUX,
+            ("sample", "example-owner"),
+        )
 
 
 def test_execute_preserves_nonzero_status(tmp_path: Path) -> None:

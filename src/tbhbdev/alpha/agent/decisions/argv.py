@@ -96,6 +96,8 @@ def tmux(sockets_dir: str, name: str, command: tuple[str, ...]) -> tuple[str, ..
         executable("tmux"),
         "-S",
         socket,
+        "-f",
+        "/dev/null",
         "new-session",
         "-d",
         "-s",
@@ -267,9 +269,6 @@ def harness(  # noqa: PLR0913 -- one value per fact the harness's argv depends o
     brief_file: str,
     agy_project: str | None = None,
     agy_brief: str | None = None,
-    output_file: str | None = None,
-    schema_file: str | None = None,
-    schema_text: str | None = None,
 ) -> tuple[str, ...]:
     """The harness command of REQUEST, under POLICY, that runs in WORKTREE.
 
@@ -288,15 +287,7 @@ def harness(  # noqa: PLR0913 -- one value per fact the harness's argv depends o
         raise Invalid(message)
     detail = policy.detail
     if isinstance(detail, CodexPolicy):
-        command = _codex(request, policy, detail, worktree, brief_file)
-        if request.kind is RunKind.EXEC:
-            options = () if output_file is None else ("-o", output_file)
-            options += () if schema_file is None else ("--output-schema", schema_file)
-            return (*command[:-1], *options, command[-1])
-        return command
+        return _codex(request, policy, detail, worktree, brief_file)
     if isinstance(detail, ClaudePolicy):
-        command = _claude(request, policy, detail, brief_file)
-        if request.kind is RunKind.EXEC and schema_text is not None:
-            return (*command, "--output-format", "json", "--json-schema", schema_text)
-        return command
+        return _claude(request, policy, detail, brief_file)
     return _agy(request, policy, worktree, brief_file, agy_project, agy_brief)

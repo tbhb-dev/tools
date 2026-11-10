@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import itertools
 import json
+import shlex
 import tomllib
 
 import pytest
@@ -558,16 +560,11 @@ def test_ssh_uses_the_hosts_shell() -> None:
 
 def test_tmux() -> None:
     result = argv.tmux("/example/sockets", "run-1", ("example-tool", "go"))
-    assert result == (
-        "/usr/bin/tmux",
-        "-S",
-        "/example/sockets/agents",
-        "new-session",
-        "-d",
-        "-s",
-        "ag-run-1",
-        "example-tool",
-        "go",
+    assert result == tuple(
+        shlex.split(
+            "/usr/bin/tmux -S /example/sockets/agents -f /dev/null "
+            "new-session -d -s ag-run-1 example-tool go"
+        )
     )
 
 
@@ -739,46 +736,6 @@ def test_ssh_account_and_keepalive_count(account: str, count: int) -> None:
     )
 
 
-@pytest.mark.parametrize("kind", RunKind)
-@pytest.mark.parametrize("schema", [None, "example.schema.json"])
-@pytest.mark.parametrize("output", [None, "example.out.final"])
-def test_codex_output(kind: RunKind, schema: str | None, output: str | None) -> None:
-    result = argv.harness(
-        request(Harness.CODEX, kind, Profile.BUILD),
-        policy_for(Harness.CODEX, Profile.BUILD),
-        worktree=WORKTREE,
-        brief_file=BRIEF_FILE,
-        output_file=output,
-        schema_file=schema,
-    )
-    options = (() if output is None else ("-o", output)) + (
-        () if schema is None else ("--output-schema", schema)
-    )
-    base = expected(Harness.CODEX, kind, Profile.BUILD)
-    assert result == (
-        (*base[:-1], *options, base[-1]) if kind is RunKind.EXEC else base
-    )
-
-
-@pytest.mark.parametrize("kind", RunKind)
-@pytest.mark.parametrize("schema", [None, '{"type":"object"}'])
-def test_claude_schema(kind: RunKind, schema: str | None) -> None:
-    result = argv.harness(
-        request(Harness.CLAUDE, kind, Profile.BUILD),
-        policy_for(Harness.CLAUDE, Profile.BUILD),
-        worktree=WORKTREE,
-        brief_file=BRIEF_FILE,
-        schema_text=schema,
-    )
-    base = expected(Harness.CLAUDE, kind, Profile.BUILD)
-    options = (
-        ("--output-format", "json", "--json-schema", schema)
-        if schema is not None and kind is RunKind.EXEC
-        else ()
-    )
-    assert result == (*base, *options)
-
-
 @pytest.mark.parametrize("platform", ["linux", "darwin"])
 @pytest.mark.parametrize("name", ["ssh", "tmux"])
 def test_executables_resolve_only_fixed_path(
@@ -805,3 +762,31 @@ def test_executables_resolve_only_fixed_path(
         Invalid, match=f"required executable '{name}' missing from fixed PATH"
     ):
         argv.executable(name)
+
+
+def test_codex_preserves_host_signing_handoff() -> None:
+    value = policy_for(Harness.CODEX, Profile.BUILD)
+    value = dataclasses.replace(
+        value, env={**value.env, "SSH_AUTH_SOCK": "/example/socket"}
+    )
+    command = argv.harness(
+        request(Harness.CODEX, RunKind.EXEC, Profile.BUILD),
+        value,
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+    )
+    base = expected(Harness.CODEX, RunKind.EXEC, Profile.BUILD)
+    index = base.index("-m")
+    assert command == (
+        *base[:index],
+        "-c",
+        'shell_environment_policy.set.SSH_AUTH_SOCK="/example/socket"',
+        *base[index:],
+    )
+    assert "-o" not in command
+    assert "--output-last-message" not in command
+
+
+def test_harness_output_options_belong_to_run_host() -> None:
+    parameters = inspect.signature(argv.harness).parameters
+    assert {"output_file", "schema_file", "schema_text"}.isdisjoint(parameters)
