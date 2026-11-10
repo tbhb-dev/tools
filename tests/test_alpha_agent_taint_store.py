@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -270,3 +271,31 @@ def test_new_record_directory_is_synced(
     taint_store.record_taint(RECORD)
     assert synced == [stat.S_IFREG, stat.S_IFDIR]
     assert audit.exists()
+
+
+def test_appends_hold_directory_lock(
+    audit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_write = os.write
+    probes: list[int] = []
+
+    def write_locked(descriptor: int, data: bytes) -> int:
+        probe = os.open(audit.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for kind in (fcntl.LOCK_SH, fcntl.LOCK_EX):
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe, kind | fcntl.LOCK_NB)
+        finally:
+            os.close(probe)
+        probes.append(descriptor)
+        return original_write(descriptor, data)
+
+    monkeypatch.setattr(taint_store.os, "write", write_locked)
+    taint_store.record_taint(RECORD)
+    assert probes
+    assert taint_store.load(HOST).taint == RECORD
+    probe = os.open(audit.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(probe)
