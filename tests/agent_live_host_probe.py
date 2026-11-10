@@ -81,7 +81,9 @@ def protected_sources(run: run_host.Run) -> tuple[Path, ...]:
     object_file.write_bytes(zlib.compress(data))
     config = mirror / "config"
     config.write_text("[core]\nbare = true\n")
-    sources = (readable, config, object_file)
+    unlisted = run.tmpdir.parent / "unlisted"
+    unlisted.write_text("original\n")
+    sources = (readable, config, object_file, unlisted)
     for source in sources:
         source.chmod(0o600)
     return sources
