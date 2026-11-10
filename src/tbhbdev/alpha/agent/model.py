@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 # The run request's schema version. A reader refuses any other version.
-REQUEST_VERSION = 1
+REQUEST_VERSION = 2
 
 # An identifier that reaches a file name, a tmux session name or an argv: run
 # names, accounts, profiles and the run's class, variant and role.
@@ -240,5 +240,6 @@ class RunRequest:
     variant: str | None
     role: str | None
     unsandboxed: bool
+    tainted_host: bool
     authorized_by: str | None
     startup_deadline_seconds: int

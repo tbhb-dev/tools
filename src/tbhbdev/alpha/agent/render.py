@@ -14,10 +14,23 @@ def sandbox(authorized_by: str | None) -> str:
     return f" sandbox=none authorized_by={transport.terminal_text(authorized_by)}"
 
 
+def trust(*, tainted_host: bool) -> str:
+    return " untrusted-host" if tainted_host else ""
+
+
 def launched(
-    name: str, host: str, account: str, *, authorized_by: str | None = None
+    name: str,
+    host: str,
+    account: str,
+    *,
+    authorized_by: str | None = None,
+    tainted_host: bool = False,
 ) -> str:
-    return f"{name}: launched host={host} account={account}" + sandbox(authorized_by)
+    return (
+        f"{name}: launched host={host} account={account}"
+        + sandbox(authorized_by)
+        + trust(tainted_host=tainted_host)
+    )
 
 
 def status(

@@ -48,6 +48,7 @@ _FIELDS = frozenset(
         "variant",
         "role",
         "unsandboxed",
+        "tainted_host",
         "authorized_by",
         "startup_deadline_seconds",
     }
@@ -170,6 +171,7 @@ def to_dict(request: RunRequest) -> dict[str, object]:
         "variant": request.variant,
         "role": request.role,
         "unsandboxed": request.unsandboxed,
+        "tainted_host": request.tainted_host,
         "authorized_by": request.authorized_by,
         "startup_deadline_seconds": request.startup_deadline_seconds,
     }
@@ -255,6 +257,7 @@ def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunReque
         variant=_maybe_text(data, "variant"),
         role=_maybe_text(data, "role"),
         unsandboxed=_flag(data, "unsandboxed"),
+        tainted_host=_flag(data, "tainted_host"),
         authorized_by=_maybe_text(data, "authorized_by"),
         startup_deadline_seconds=_number(data, "startup_deadline_seconds"),
     )

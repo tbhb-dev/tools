@@ -118,6 +118,22 @@ def installed(host: Host) -> str:
     return PREFIX + f"{program(host)} --version"
 
 
+def host_marker() -> str:
+    """Read bounded evidence of host taint, never a remote clearance."""
+    read = (
+        'open my $f, "<", $ARGV[0] or do { '
+        'exit 0 if $!{ENOENT}; die "host marker read failed"; }; '
+        'defined(read($f, my $b, 65536)) or die "host marker read failed"; '
+        'print $b; close($f) or die "host marker read failed";'
+    )
+    return (
+        PREFIX
+        + "perl -e "
+        + shlex.quote(read)
+        + ' "${XDG_STATE_HOME:-$HOME/.local/state}/tbhbdev/agent-taint.jsonl"'
+    )
+
+
 def preflight(repository: str, ref: str, expected_version: str, host: Host) -> str:
     git_host, owner, project = repo.parts(repository)
     url = f"git@{git_host}:{owner}/{project}.git"
