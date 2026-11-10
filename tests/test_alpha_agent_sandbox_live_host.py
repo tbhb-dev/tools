@@ -425,6 +425,12 @@ def test_terminal_control_requires_recorded_success(
     assert "control failed" in str(caught.value)
 
 
+def terminal_control_state(*, kernel_blocked: bool, inputs: bytes) -> str:
+    if kernel_blocked:
+        return "blocked by kernel"
+    return "injected" if INPUT_MARKER in inputs else "failed"
+
+
 @live_only
 @pytest.mark.parametrize("harness", [Harness.CODEX])
 @pytest.mark.parametrize("profile", Profile)
@@ -461,14 +467,8 @@ def test_live_terminal_injection(
         control_error != 0 and not kernel_blocked
     ):
         pytest.fail(f"{label}: unproven; control failed; legacy_tiocsti={setting}")
-    control_state = (
-        "blocked by kernel"
-        if kernel_blocked
-        else "injected"
-        if INPUT_MARKER in control.inputs
-        else "failed"
-    )
-    report(f"{label} control: {control_state}; legacy_tiocsti={setting}")
+    state = terminal_control_state(kernel_blocked=kernel_blocked, inputs=control.inputs)
+    report(f"{label} control: {state}; legacy_tiocsti={setting}")
     witness = writes / "sandbox-terminal.json"
     script = tmp_path / "terminal.sh"
     script.write_text(

@@ -31,30 +31,33 @@ def owned_calls(
         yield from owned_calls(child, owner)
 
 
+def aliases_named(names: list[ast.alias], name: str) -> set[str]:
+    return {alias.asname or alias.name for alias in names if alias.name == name}
+
+
+def worktree_imports(tree: ast.AST) -> set[str]:
+    modules = {"worktree"}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            modules.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name.rsplit(".", 1)[-1] == "worktree"
+            )
+    return modules
+
+
 def imported_git_names(tree: ast.AST, *, local: bool) -> tuple[set[str], set[str]]:
     git_names = {"git"} if local else set()
     clone_names = {"clone_run"} if local else set()
-    modules = {"worktree"}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            modules.update(
-                alias.asname or alias.name
-                for alias in node.names
-                if alias.name.endswith(".worktree")
-            )
-        if isinstance(node, ast.ImportFrom):
-            modules.update(
-                alias.asname or alias.name
-                for alias in node.names
-                if alias.name == "worktree"
-            )
-            if (node.module or "").rsplit(".", 1)[-1] == "worktree":
-                git_names.update(
-                    a.asname or a.name for a in node.names if a.name == "git"
-                )
-                clone_names.update(
-                    a.asname or a.name for a in node.names if a.name == "clone_run"
-                )
+        if (
+            isinstance(node, ast.ImportFrom)
+            and (node.module or "").rsplit(".", 1)[-1] == "worktree"
+        ):
+            git_names.update(aliases_named(node.names, "git"))
+            clone_names.update(aliases_named(node.names, "clone_run"))
+    modules = worktree_imports(tree)
     git_names.update(f"{module}.git" for module in modules)
     clone_names.update(f"{module}.clone_run" for module in modules)
     return git_names, clone_names
