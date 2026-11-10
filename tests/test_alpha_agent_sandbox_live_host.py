@@ -8,9 +8,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
+from typing import Never
 
 import pytest
 from agent_live_host_probe import (
@@ -33,6 +35,32 @@ from test_alpha_agent_sandbox_live import report
 
 from tbhbdev.alpha.agent import host_tools, run_host
 from tbhbdev.alpha.agent.model import Harness, Invalid, Profile
+
+if os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1":
+    pytest.skip(
+        "host sandbox probes require TBHBDEV_SANDBOX_LIVE=1", allow_module_level=True
+    )
+
+
+def test_host_probe_module_skips_without_opt_in(tmp_path: Path) -> None:
+    result = subprocess.run(
+        (sys.executable, "-m", "pytest", "-q", __file__),
+        env={
+            "HOME": str(tmp_path),
+            "PATH": os.defpath,
+            "TMPDIR": str(tmp_path),
+            "TBHBDEV_SANDBOX_LIVE": "0",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=45,
+    )
+    assert result.returncode == pytest.ExitCode.NO_TESTS_COLLECTED, (
+        result.stdout + result.stderr
+    )
+    assert "skipped" in result.stdout
+    assert "passed" not in result.stdout
 
 
 @pytest.mark.parametrize("operation", ["write", "chmod"])
@@ -136,10 +164,6 @@ def test_hard_link_evidence_uses_profile_write_root(
     test_live_protected_hard_links(tmp_path, monkeypatch, Harness.CODEX, profile)
 
 
-@pytest.mark.skipif(
-    os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1",
-    reason="hard links: failed evidence; set TBHBDEV_SANDBOX_LIVE=1",
-)
 @pytest.mark.parametrize("harness", Harness)
 @pytest.mark.parametrize("profile", Profile)
 def test_live_protected_hard_links(
@@ -147,7 +171,7 @@ def test_live_protected_hard_links(
 ) -> None:
     installed = shutil.which(harness.value)
     if installed is None:
-        pytest.skip(f"{harness} {profile} hard links: failed evidence; not installed")
+        pytest.fail(f"{harness} {profile} hard links: failed evidence; not installed")
     run, paths = live_policy(tmp_path, monkeypatch, harness, profile)
     sources = protected_sources(run)
     writes = Path(paths.tmpdir if profile is Profile.BUILD else paths.audit_dir)
@@ -184,7 +208,7 @@ def test_live_protected_hard_links(
     try:
         value, executable = checked_live_policy(run, paths)
     except Invalid:
-        pytest.skip(f"{harness} {profile} hard links: failed evidence; policy refused")
+        pytest.fail(f"{harness} {profile} hard links: failed evidence; policy refused")
     command = probe_command(run, paths, value, executable, script)
     result = subprocess.run(
         command,
@@ -205,7 +229,7 @@ def test_live_protected_hard_links(
         )
     assert all(unchanged), "protected hard-link targets changed"
     if not results.is_file():
-        pytest.skip(
+        pytest.fail(
             f"{harness} {profile} hard links: failed evidence; "
             f"probe not executed (exit {result.returncode})"
         )
@@ -216,6 +240,7 @@ def test_live_protected_hard_links(
         for attempts in observed.values()
     )
     assert observed[sources[0].name]["read"] == 0, "stand-in was not readable"
+    assert observed[sources[-1].name]["read"] == 0, "unlisted source was not readable"
     report(
         f"{harness} {profile} hard links: blocked; equal st_dev; ln control succeeded"
     )
@@ -276,10 +301,122 @@ def test_terminal_probe_requires_ioctl_denial(
         test_live_terminal_injection(tmp_path, monkeypatch, Harness.CODEX, profile)
 
 
-@pytest.mark.skipif(
-    os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1",
-    reason="terminal: unproven; set TBHBDEV_SANDBOX_LIVE=1",
+def fake_terminal_observation(
+    failure: str,
+    exit_code: int,
+    command: tuple[str, ...],
+    _environment: dict[str, str],
+    _cwd: Path,
+) -> TerminalObservation:
+    target = Path(command[-1])
+    sandbox = target.suffix == ".sh"
+    witness = Path(shlex.split(target.read_text())[-1]) if sandbox else target
+    if not sandbox or failure != "not-executed":
+        witness.write_text(
+            json.dumps({"attempted": True, "error": 1 if sandbox else 0})
+        )
+    inputs = INPUT_MARKER if not sandbox and failure != "control-failed" else b""
+    return TerminalObservation(inputs, exit_code if sandbox else 0)
+
+
+@pytest.mark.usefixtures("fake_host_tools")
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize(
+    "case",
+    [
+        (kind, failure, code)
+        for kind in ("hard_links", "terminal")
+        for failure in (
+            "missing-harness",
+            "policy-refused",
+            "not-executed",
+            "control-failed",
+        )
+        for code in (0, 7)
+    ],
+    ids=str,
 )
+def test_host_probe_no_evidence_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: Profile,
+    case: tuple[str, str, int],
+) -> None:
+    kind, failure, exit_code = case
+
+    def missing(_name: str) -> None:
+        return None
+
+    def refused(*_args: object) -> Never:
+        message = "synthetic policy refusal"
+        raise Invalid(message)
+
+    def failed_control(*_args: object) -> Never:
+        message = "synthetic link control failure"
+        raise OSError(message)
+
+    def execute(command: tuple[str, ...], **_kwargs: object) -> CompletedProcess[str]:
+        return CompletedProcess(command, exit_code)
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "subprocess", SimpleNamespace(run=execute))
+    monkeypatch.setattr(
+        module,
+        "observe_terminal",
+        partial(fake_terminal_observation, failure, exit_code),
+    )
+    if failure == "missing-harness":
+        monkeypatch.setattr(shutil, "which", missing)
+    elif failure == "policy-refused":
+        monkeypatch.setattr(module, "checked_live_policy", refused)
+    elif failure == "control-failed" and kind == "hard_links":
+        monkeypatch.setattr(module, "link_control", failed_control)
+    probe = (
+        test_live_protected_hard_links
+        if kind == "hard_links"
+        else test_live_terminal_injection
+    )
+    with pytest.raises(
+        (pytest.fail.Exception, pytest.skip.Exception, OSError)
+    ) as caught:
+        probe(tmp_path, monkeypatch, Harness.CODEX, profile)
+    if kind == "hard_links" and failure == "control-failed":
+        assert isinstance(caught.value, OSError)
+        assert str(caught.value) == "synthetic link control failure"
+    else:
+        assert isinstance(caught.value, pytest.fail.Exception)
+
+
+@pytest.mark.usefixtures("fake_host_tools")
+@pytest.mark.parametrize(
+    "failure", ["no-witness", "ioctl-error", "no-attempt", "exit-error"]
+)
+def test_terminal_control_requires_recorded_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    def observe(
+        command: tuple[str, ...], _environment: dict[str, str], _cwd: Path
+    ) -> TerminalObservation:
+        if failure != "no-witness":
+            Path(command[-1]).write_text(
+                json.dumps(
+                    {
+                        "attempted": failure != "no-attempt",
+                        "error": int(failure == "ioctl-error"),
+                    }
+                )
+            )
+        return TerminalObservation(INPUT_MARKER, int(failure == "exit-error"))
+
+    monkeypatch.setattr(sys.modules[__name__], "observe_terminal", observe)
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as caught:
+        test_live_terminal_injection(
+            tmp_path, monkeypatch, Harness.CODEX, Profile.BUILD
+        )
+    assert isinstance(caught.value, pytest.fail.Exception)
+    assert "control failed" in str(caught.value)
+
+
 @pytest.mark.parametrize("harness", Harness)
 @pytest.mark.parametrize("profile", Profile)
 def test_live_terminal_injection(
@@ -289,7 +426,7 @@ def test_live_terminal_injection(
     label = f"{harness} {profile} terminal"
     installed = shutil.which(harness.value)
     if installed is None:
-        pytest.skip(f"{label}: unproven; not installed; legacy_tiocsti={setting}")
+        pytest.fail(f"{label}: unproven; not installed; legacy_tiocsti={setting}")
     run, paths = live_policy(tmp_path, monkeypatch, harness, profile)
     writes = Path(paths.tmpdir if profile is Profile.BUILD else paths.audit_dir)
     writes.mkdir(parents=True, exist_ok=True)
@@ -302,6 +439,11 @@ def test_live_terminal_injection(
     )
     control_state = "injected" if INPUT_MARKER in control.inputs else "failed"
     report(f"{label} control: {control_state}; legacy_tiocsti={setting}")
+    if control.code != 0 or not control_witness.is_file():
+        pytest.fail(f"{label}: unproven; control failed; legacy_tiocsti={setting}")
+    control_result = json.loads(control_witness.read_text())
+    if control_result.get("attempted") is not True or control_result.get("error") != 0:
+        pytest.fail(f"{label}: unproven; control failed; legacy_tiocsti={setting}")
     witness = writes / "sandbox-terminal.json"
     script = tmp_path / "terminal.sh"
     script.write_text(
@@ -315,14 +457,14 @@ def test_live_terminal_injection(
     try:
         value, executable = checked_live_policy(run, paths)
     except Invalid:
-        pytest.skip(f"{label}: unproven; policy refused; legacy_tiocsti={setting}")
+        pytest.fail(f"{label}: unproven; policy refused; legacy_tiocsti={setting}")
     probe = observe_terminal(
         probe_command(run, paths, value, executable, script),
         value.env,
         Path(paths.worktree),
     )
     if not witness.is_file():
-        pytest.skip(f"{label}: unproven; probe not executed; legacy_tiocsti={setting}")
+        pytest.fail(f"{label}: unproven; probe not executed; legacy_tiocsti={setting}")
     observed = json.loads(witness.read_text())
     assert observed["attempted"] is True
     error = observed["error"]
@@ -330,7 +472,7 @@ def test_live_terminal_injection(
     status = terminal_status(control.inputs, probe.inputs, error)
     report(f"{label}: {status}; ioctl error={error}; legacy_tiocsti={setting}")
     if status == "unproven":
-        pytest.skip(f"{label}: unproven; control failed; legacy_tiocsti={setting}")
+        pytest.fail(f"{label}: unproven; control failed; legacy_tiocsti={setting}")
     assert status == "blocked", f"{label}: injected; ioctl error={error}"
 
 
