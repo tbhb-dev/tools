@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import subprocess
+import subprocess  # nosec B404
 from pathlib import Path
 
 from tbhbdev.alpha.agent import runfiles
@@ -11,7 +11,7 @@ from tbhbdev.alpha.agent.model import Invalid, Profile, RunRequest
 
 
 def git(clone: Path, *args: str) -> str:
-    return subprocess.check_output(
+    return subprocess.check_output(  # nosec B603 B607
         ["git", "-C", str(clone), *args], text=True, stderr=subprocess.DEVNULL
     ).strip()
 
