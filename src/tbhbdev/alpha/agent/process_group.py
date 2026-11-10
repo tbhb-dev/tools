@@ -134,7 +134,6 @@ def stop_started(
 def unknown(files: RunFiles) -> None:
     files.uncertain = True
     for suffix, text in (
-        ("stop-unproven", "\n"),
         ("phase", "unknown"),
         ("log", "run group stop unproven; phase unknown\n"),
     ):
