@@ -22,17 +22,18 @@ from tbhbdev.alpha.agent import model
 from tbhbdev.alpha.agent.decisions import request
 
 
-def git(path: Path, *args: str) -> str:
+def git(path: Path, *args: str, env: dict[str, str] | None = None) -> str:
     return subprocess.check_output(
         ["git", "-C", str(path), *args],
         stderr=subprocess.DEVNULL,
+        env=env,
         text=True,
         timeout=10,
     ).strip()
 
 
-def commit(path: Path, message: str) -> str:
-    git(path, "add", ".")
+def commit(path: Path, message: str, *, env: dict[str, str] | None = None) -> str:
+    git(path, "add", ".", env=env)
     git(
         path,
         "-c",
@@ -47,8 +48,9 @@ def commit(path: Path, message: str) -> str:
         "--allow-empty",
         "-qm",
         message,
+        env=env,
     )
-    return git(path, "rev-parse", "HEAD")
+    return git(path, "rev-parse", "HEAD", env=env)
 
 
 def repository(root: Path) -> tuple[Path, Path]:

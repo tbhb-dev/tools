@@ -56,7 +56,7 @@ CODEX_HANDOFF = (
     "-c",
     'shell_environment_policy.exclude=["GIT_*"]',
     "-c",
-    'shell_environment_policy.set.GIT_CONFIG_COUNT="0"',
+    f"shell_environment_policy.set.GIT_CONFIG_COUNT={json.dumps('0')}",
     "-c",
     f'shell_environment_policy.set.PATH="{HOME}/.local/bin:/usr/local/bin:/usr/bin"',
     "-c",

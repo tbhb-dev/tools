@@ -18,7 +18,7 @@ from pathlib import Path
 import agent_git_plants
 import pytest
 from agent_git_plants import PLANTS, plant
-from agent_host_example import git, repository
+from agent_host_example import commit, git, repository
 from agent_live_evidence import codex_auth
 from test_alpha_agent_run_host import make_run
 
@@ -270,29 +270,7 @@ def test_tool_git_environment_keeps_scratch_commits_out_of_the_run_clone(
     } == {"GIT_CONFIG_COUNT": "0"}
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    for arguments in (
-        ["init", "--template=", "."],
-        [
-            "-c",
-            "user.name=Example",
-            "-c",
-            "user.email=example@example.com",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "scratch",
-        ],
-    ):
-        subprocess.run(
-            ["git", *arguments],
-            cwd=scratch,
-            env=environment,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+    git(scratch, "init", "--template=", ".", env=environment)
+    commit(scratch, "scratch", env=environment)
     assert git(scratch, "log", "-1", "--format=%s") == "scratch"
     assert git(workspace, "rev-parse", "HEAD") == before
