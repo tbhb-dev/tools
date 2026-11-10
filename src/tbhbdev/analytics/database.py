@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from tbhbdev.analytics.decisions import migrations, roles, scram
+from tbhbdev.analytics.model import ConfigError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -58,10 +59,10 @@ def password(path: Path) -> str:
 def connect(settings: Settings) -> Connection:
     if settings.user != settings.owner_role:
         message = "analytics requires the owner role as the connection user"
-        raise ValueError(message)
+        raise ConfigError(message)
     if settings.password_file is None:
         message = "[analytics] password_file is required"
-        raise ValueError(message)
+        raise ConfigError(message)
     return driver(settings, password(Path(settings.password_file)))
 
 

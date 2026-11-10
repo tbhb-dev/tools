@@ -1,4 +1,13 @@
-"""Opt-in assertions against a caller-provided disposable PostgreSQL database."""
+"""Opt-in assertions against a caller-provided disposable PostgreSQL database.
+
+Set three variables to run it. ``ANALYTICS_TEST_HOST`` selects the server,
+``ANALYTICS_TEST_DATABASE`` names the one database the test connects to and
+changes, and ``ANALYTICS_TEST_PASSWORD_FILE`` is the owner's password file. The
+test ignores the user's ``[analytics]`` host, database and password file, since
+the suite points ``XDG_CONFIG_HOME`` at an empty directory. It also ignores
+``PGHOST``, ``PGPORT``, ``PGDATABASE`` and ``PGUSER`` from the shell, so no
+other database can receive the migrations by accident.
+"""
 
 import os
 from dataclasses import replace
@@ -18,7 +27,17 @@ def test_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     host = os.environ.get("ANALYTICS_TEST_HOST")
     if not host:
         pytest.skip("ANALYTICS_TEST_HOST must select a disposable server")
-    options = replace(settings.load(), host=host)
+    name = os.environ.get("ANALYTICS_TEST_DATABASE")
+    if not name:
+        pytest.skip("ANALYTICS_TEST_DATABASE must name a disposable database")
+    password_file = os.environ.get("ANALYTICS_TEST_PASSWORD_FILE")
+    if not password_file:
+        pytest.skip("ANALYTICS_TEST_PASSWORD_FILE must name the owner password file")
+    for variable in ("PGHOST", "PGPORT", "PGDATABASE", "PGUSER"):
+        monkeypatch.delenv(variable, raising=False)
+    options = replace(
+        settings.load(), host=host, database=name, password_file=password_file
+    )
     first = database.connect(options)
     second = database.connect(options)
     try:

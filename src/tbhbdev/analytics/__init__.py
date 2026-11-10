@@ -6,6 +6,7 @@ import sys
 from tbhbdev.analytics import catalog, database, render, settings
 from tbhbdev.analytics.decisions.contract import matches
 from tbhbdev.analytics.decisions.roles import passwordless
+from tbhbdev.analytics.model import ConfigError
 
 __all__ = ["catalog", "database", "main", "render", "settings"]
 
@@ -37,6 +38,9 @@ def main(argv: list[str], prog: str) -> int:
             return int(bool(verdict.violations))
         finally:
             connection.close()
+    except ConfigError as exc:
+        sys.stderr.write(f"analytics: {exc}\n")
+        return 1
     except Exception as exc:  # noqa: BLE001
         sys.stderr.write(render.failed(exc))
         return 1

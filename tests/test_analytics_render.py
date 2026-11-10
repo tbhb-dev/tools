@@ -50,6 +50,10 @@ def test_failed_redacts(value: str) -> None:
 
 def test_failed_diagnostics() -> None:
     assert render.failed(ValueError("syntax error password sentinel")) == (
-        "migration diagnostic: syntax error [redacted output] [credential]\n"
+        "diagnostic: syntax error [redacted output] [credential]\n"
         "analytics: command failed\n"
     )
+
+
+def test_failed_label_fits_every_command() -> None:
+    assert "migration" not in render.failed(ValueError("error"))

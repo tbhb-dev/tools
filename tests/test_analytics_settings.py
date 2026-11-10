@@ -8,7 +8,7 @@ from analytics_fakes import answer
 
 from tbhbdev import userconfig
 from tbhbdev.analytics import settings
-from tbhbdev.analytics.model import Settings
+from tbhbdev.analytics.model import ConfigError, Settings
 
 
 @pytest.mark.parametrize("present", [False, True])
@@ -65,14 +65,27 @@ def test_refuse_other_user(
 ) -> None:
     monkeypatch.setattr(userconfig, "optional_table", answer({}))
     monkeypatch.setenv("PGUSER", user)
-    with pytest.raises(ValueError, match=r".") as caught:
+    with pytest.raises(ConfigError, match=r".") as caught:
         settings.load()
     assert str(caught.value) == message
 
 
-@pytest.mark.parametrize("port", ["invalid", "0", "65536"])
-def test_bad_environment_port(monkeypatch: pytest.MonkeyPatch, port: str) -> None:
+@pytest.mark.parametrize("port", ["0", "65536"])
+def test_out_of_range_environment_port(
+    monkeypatch: pytest.MonkeyPatch, port: str
+) -> None:
     monkeypatch.setattr(userconfig, "optional_table", answer({}))
     monkeypatch.setenv("PGPORT", port)
-    with pytest.raises(ValueError, match=r"."):
+    with pytest.raises(ConfigError, match="port must be an integer"):
         settings.load()
+
+
+def test_unparsable_environment_port_stays_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(userconfig, "optional_table", answer({}))
+    monkeypatch.setenv("PGPORT", "invalid")
+    # int() puts the variable's value in its message, so this isn't a ConfigError.
+    with pytest.raises(ValueError, match=r".") as caught:
+        settings.load()
+    assert not isinstance(caught.value, ConfigError)

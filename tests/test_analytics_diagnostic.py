@@ -18,7 +18,7 @@ from tbhbdev.analytics.decisions.diagnostic import diagnostics, sentinels
     ],
 )
 def test_phrase_priority_and_case(line: str, label: str) -> None:
-    assert diagnostics(line) == (f"migration diagnostic: {label}[redacted output]",)
+    assert diagnostics(line) == (f"diagnostic: {label}[redacted output]",)
 
 
 @pytest.mark.parametrize(
@@ -39,29 +39,25 @@ def test_phrase_priority_and_case(line: str, label: str) -> None:
 )
 def test_diagnostic_flags_never_include_original_values(line: str, flags: str) -> None:
     label = "ERROR " if line.startswith("Error") else ""
-    assert diagnostics(line) == (
-        f"migration diagnostic: {label}[redacted output]{flags}",
-    )
+    assert diagnostics(line) == (f"diagnostic: {label}[redacted output]{flags}",)
 
 
 def test_only_last_five_lines() -> None:
     assert diagnostics(
         "permission denied\nconnection refused\nsyntax error\nfatal\nerror\nordinary\n"
     ) == tuple(
-        f"migration diagnostic: {label}[redacted output]"
+        f"diagnostic: {label}[redacted output]"
         for label in ("connection refused ", "syntax error ", "FATAL ", "ERROR ", "")
     )
 
 
 def test_command_substitution_discards_trailing_blank_lines() -> None:
-    assert diagnostics("error\n\n") == (
-        "migration diagnostic: ERROR [redacted output]",
-    )
+    assert diagnostics("error\n\n") == ("diagnostic: ERROR [redacted output]",)
 
 
 def test_blank_lines_count_toward_last_five_before_trimming() -> None:
     assert diagnostics("permission denied\nerror\n\n\n\n\n\n") == (
-        "migration diagnostic: [redacted output]",
+        "diagnostic: [redacted output]",
     )
 
 
@@ -84,19 +80,19 @@ def test_sentinels_use_literal_case_sensitive_matches(
 
 def test_only_newlines_separate_log_records() -> None:
     assert diagnostics("permission denied\rfatal\vsyntax error") == (
-        "migration diagnostic: permission denied [redacted output]",
+        "diagnostic: permission denied [redacted output]",
     )
 
 
 def test_trailing_whitespace_line_is_a_record() -> None:
     assert diagnostics("error\n \t\n") == (
-        "migration diagnostic: ERROR [redacted output]",
-        "migration diagnostic: [redacted output]",
+        "diagnostic: ERROR [redacted output]",
+        "diagnostic: [redacted output]",
     )
 
 
 def test_trailing_nonblank_record_cannot_disappear() -> None:
     assert diagnostics("error\nX") == (
-        "migration diagnostic: ERROR [redacted output]",
-        "migration diagnostic: [redacted output]",
+        "diagnostic: ERROR [redacted output]",
+        "diagnostic: [redacted output]",
     )

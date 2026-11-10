@@ -5,7 +5,7 @@ from analytics_fakes import FakeConnection, answer
 
 from tbhbdev import analytics
 from tbhbdev.analytics import catalog, database, settings
-from tbhbdev.analytics.model import Catalog, Migration, Settings
+from tbhbdev.analytics.model import Catalog, ConfigError, Migration, Settings
 
 
 @pytest.mark.parametrize(
@@ -133,7 +133,32 @@ def test_failure(
         else ""
     )
     assert (
-        output.err
-        == "migration diagnostic: permission denied [redacted output] [credential]\n"
+        output.err == "diagnostic: permission denied [redacted output] [credential]\n"
         "analytics: command failed\n"
+    )
+
+
+@pytest.mark.parametrize("stage", ["load", "connect"])
+def test_config_errors_print_verbatim(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stage: str
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
+        message = "[analytics] password_file is required"
+        raise ConfigError(message)
+
+    monkeypatch.setattr(settings, "load", fail if stage == "load" else Settings)
+    monkeypatch.setattr(database, "connect", fail)
+    assert analytics.main(["migrate"], "tool") == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "analytics: [analytics] password_file is required\n"
+
+
+def test_missing_password_file_reads_plainly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(settings, "load", Settings)
+    assert analytics.main(["contract", "check"], "tool") == 1
+    assert (
+        capsys.readouterr().err == "analytics: [analytics] password_file is required\n"
     )

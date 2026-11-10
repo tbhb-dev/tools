@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import fields
+from itertools import combinations
 from typing import TYPE_CHECKING
 
-from tbhbdev.analytics.model import Settings
+from tbhbdev.analytics.model import ConfigError, Settings
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -18,13 +19,13 @@ def parse(table: Mapping[str, object]) -> Settings:
     for key in table:
         if key not in known:
             message = f"[analytics] {key} not recognized"
-            raise ValueError(message)
+            raise ConfigError(message)
     loader = table.get("loader_enabled", False)
     if type(loader) is not bool:
         message = "[analytics] loader_enabled must be a boolean"
-        raise ValueError(message)
+        raise ConfigError(message)
     defaults = Settings()
-    return Settings(
+    result = Settings(
         loader_enabled=loader,
         host=_text(table.get("host", defaults.host), "host"),
         port=_port(table.get("port", defaults.port)),
@@ -45,19 +46,34 @@ def parse(table: Mapping[str, object]) -> Settings:
             table.get("grafana_role", defaults.grafana_role), "grafana_role"
         ),
     )
+    _distinct_roles(result)
+    return result
+
+
+def _distinct_roles(result: Settings) -> None:
+    roles = (
+        ("owner_role", result.owner_role),
+        ("loader_role", result.loader_role),
+        ("reader_role", result.reader_role),
+        ("grafana_role", result.grafana_role),
+    )
+    for (earlier, first), (later, second) in combinations(roles, 2):
+        if first == second:
+            message = f"[analytics] {later} and {earlier} must differ"
+            raise ConfigError(message)
 
 
 def _port(value: object) -> int:
     if type(value) is not int or not 0 < value <= _MAX_PORT:
         message = "[analytics] port must be an integer from 1 to 65535"
-        raise ValueError(message)
+        raise ConfigError(message)
     return value
 
 
 def _text(value: object, key: str) -> str:
     if not isinstance(value, str) or not value.strip():
         message = f"[analytics] {key} must be a non-blank string"
-        raise ValueError(message)
+        raise ConfigError(message)
     return value
 
 

@@ -25,7 +25,7 @@ def diagnostics(output: str) -> tuple[str, ...]:
 def _line(line: str) -> str:
     lower = line.lower()
     phrase = next((label for text, label in _PHRASES if text in lower), "")
-    result = f"migration diagnostic: {phrase}[redacted output]"
+    result = f"diagnostic: {phrase}[redacted output]"
     if "/" in line:
         result += " [path]"
     if re.search(r":[0-9]+", line):
