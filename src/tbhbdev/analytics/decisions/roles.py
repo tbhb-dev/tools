@@ -64,12 +64,11 @@ def selected(settings: Settings) -> tuple[tuple[Role, str], ...]:
 
 def password_file(settings: Settings, key: str) -> tuple[str, str | None]:
     """Return the config key that names a role's password file and its value."""
-    name = {
-        "loader": "loader_password_file",
-        "reader": "reader_password_file",
-        "grafana_reader": "grafana_password_file",
+    return {
+        "loader": ("loader_password_file", settings.loader_password_file),
+        "reader": ("reader_password_file", settings.reader_password_file),
+        "grafana_reader": ("grafana_password_file", settings.grafana_password_file),
     }[key]
-    return name, getattr(settings, name)
 
 
 def passwordless(settings: Settings) -> tuple[tuple[str, str], ...]:

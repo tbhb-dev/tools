@@ -171,13 +171,21 @@ ROLE_FILES = {
 }
 
 
+def without_file(options: Settings, key: str) -> Settings:
+    if key == "loader":
+        return replace(options, loader_password_file=None)
+    if key == "reader":
+        return replace(options, reader_password_file=None)
+    return replace(options, grafana_password_file=None)
+
+
 @pytest.mark.usefixtures("packaged_migrations")
 @pytest.mark.parametrize("existing", [False, True])
 @pytest.mark.parametrize("unconfigured", ["loader", "reader", "grafana_reader"])
 def test_role_without_password_file(
     options: Settings, unconfigured: str, existing: bool
 ) -> None:
-    options = replace(options, loader_enabled=True, **{ROLE_FILES[unconfigured]: None})
+    options = without_file(replace(options, loader_enabled=True), unconfigured)
     fake = FakeConnection()
     if existing:
         fake.roles = {role.name for role, _ in roles.selected(options)}
