@@ -43,7 +43,7 @@ def test_build_fetches_default_and_creates_one_branch(tmp_path: Path) -> None:
     assert (path / "tracked").read_text() == "new remote content\n"
     mirror = worktree.mirror_path(tmp_path, run_request().repo)
     assert (path / ".git").is_dir()
-    assert (mirror / "agent-fetch.lock").exists()
+    assert (mirror / "agent-mirror.lock").exists()
     assert not (path / ".git" / "objects" / "info" / "alternates").exists()
     assert git(path, "remote", "get-url", "--push", "origin") == str(
         tmp_path / "origin"
@@ -191,7 +191,7 @@ def test_worktree_git_contract_under_one_stable_lock(
     path = worktree.create(clone, "example", request)
     mirror = worktree.mirror_path(tmp_path, request.repo)
     assert all(directory in (mirror, path) for directory, _args in calls)
-    assert (mirror / "agent-fetch.lock").is_file()
+    assert (mirror / "agent-mirror.lock").is_file()
     assert (mirror.stat().st_mode & 0o777) == 0o700
     assert git(path, "rev-parse", "HEAD") == commit_id
     assert git(path, "config", "remote.origin.url") == str(tmp_path / "origin")
@@ -379,7 +379,12 @@ def test_mirror_location_uses_the_host_state_directory(
         monkeypatch.setenv("XDG_STATE_HOME", state)
     base = Path(state) if state else tmp_path / ".local" / "state"
     assert worktree.mirror_path(tmp_path, "example-org/example-repo") == (
-        base / "tbhbdev" / "agent-mirrors" / "example-org" / "example-repo.git"
+        base
+        / "tbhbdev"
+        / "agent-mirrors"
+        / "github.com"
+        / "example-org"
+        / "example-repo.git"
     )
 
 
@@ -721,7 +726,7 @@ def test_prelaunch_git_protocol(
     assert (mirror / "config").read_text() == worktree.MIRROR_CONFIG.format(
         url=str(tmp_path / "origin")
     )
-    assert {p.name for p in mirror.iterdir()} == {"config", "agent-fetch.lock"}
+    assert {p.name for p in mirror.iterdir()} == {"config", "agent-mirror.lock"}
 
 
 def test_existing_mirror_config_is_replaced_before_git(
@@ -837,3 +842,25 @@ def test_run_clone_parent_cannot_redirect_git_into_a_shared_cache(
     ):
         worktree.create(clone, "example", run_request())
     assert list(cache.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("host", "component"),
+    [
+        ("github.com", "github.com"),
+        ("GitHub.com", "github.com"),
+        ("git.example.com", "git.example.com"),
+    ],
+)
+def test_mirror_path_matches_driver_contract(
+    tmp_path: Path, host: str, component: str
+) -> None:
+    assert worktree.mirror_path(tmp_path, f"{host}/example-org/example-repo") == (
+        tmp_path
+        / "state"
+        / "tbhbdev"
+        / "agent-mirrors"
+        / component
+        / "example-org"
+        / "example-repo.git"
+    )

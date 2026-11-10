@@ -764,10 +764,9 @@ def test_unproven_stop_records_unknown_without_raising(
     monkeypatch.setattr(groups, "stop_started", stop)
     assert groups.stop_owned(files, 23, 0.25) is False
     assert files.path("phase").read_text() == "unknown"
-    assert files.path("stop-unproven").read_text() == "\n"
+    assert {p.suffix for p in tmp_path.glob("example.*")} == {".phase", ".log"}
     assert not files.path("rc").exists()
     assert writes == [
-        ("stop-unproven", "\n"),
         ("phase", "unknown"),
         ("log", "run group stop unproven; phase unknown\n"),
     ]
@@ -865,7 +864,7 @@ def test_owned_stop_passes_reaping_and_appends_signal_reports(
     assert files.uncertain is (not stopped)
 
 
-@pytest.mark.parametrize("failure", ["stop-unproven", "phase", "log"])
+@pytest.mark.parametrize("failure", ["phase", "log"])
 def test_unknown_record_errors_do_not_escape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
@@ -879,7 +878,7 @@ def test_unknown_record_errors_do_not_escape(
 
     monkeypatch.setattr(files, "write", write)
     groups.unknown(files)
-    assert writes == ["stop-unproven", "phase", "log"]
+    assert writes == ["phase", "log"]
     assert files.uncertain is True
 
 

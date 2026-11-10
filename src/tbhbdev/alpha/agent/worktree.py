@@ -106,9 +106,9 @@ def driver_overrides(keys: str) -> list[str]:
 
 
 def mirror_path(home: Path, argument: str) -> Path:
-    _host, owner, name = repo.parts(argument)
+    host, owner, name = repo.parts(argument)
     state = Path(os.environ.get("XDG_STATE_HOME") or home / ".local" / "state")
-    return state / "tbhbdev" / "agent-mirrors" / owner / f"{name}.git"
+    return state / "tbhbdev" / "agent-mirrors" / host.lower() / owner / f"{name}.git"
 
 
 def configure_mirror(mirror: Path, url: str) -> None:
@@ -214,7 +214,7 @@ def create(clone: Path, name: str, request: RunRequest) -> Path:
         raise Invalid(message)
     mirror = runfiles.private_dir(mirror)
     url = repo.ssh_url(request.repo)
-    with runfiles.locked(mirror / "agent-fetch.lock"):
+    with runfiles.locked(mirror / "agent-mirror.lock"):
         configure_mirror(mirror, url)
         commit = fetch_commit(mirror, request)
         worktree.parent.mkdir(exist_ok=True)
