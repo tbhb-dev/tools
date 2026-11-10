@@ -258,3 +258,5 @@ TIOCSCTTY
 asname
 basetemp
 noproxy
+CDXPXY
+ENXIO

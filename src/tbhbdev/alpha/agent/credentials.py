@@ -186,8 +186,9 @@ def auth_after(destination: Path) -> str:
         message = "codex auth parent is redirected"
         raise Invalid(message)
     text = runfiles.read_owned(destination, 1024 * 1024, "codex auth")
-    if not isinstance(json.loads(text), dict):
-        message = "codex auth must be a JSON object"
+    document: auth.Json = json.loads(text)
+    if not isinstance(document, dict):
+        message = f"auth: found {auth.json_type(document)}; expected object"
         raise Invalid(message)
     return text
 

@@ -30,6 +30,7 @@ from agent_live_evidence import (
 from agent_live_probe import (
     Proxy,
     control_proxy,
+    request_header,
     server_connections,
 )
 
@@ -798,3 +799,54 @@ def test_codex_exec_refuses_project_config(tmp_path: Path) -> None:
         assert str(project / "config.toml") in trusted.stderr
         assert "example-nonexistent-provider" not in trusted.stderr
     report("codex exec project config: refused")
+
+
+def test_linux_control_accepts_the_bridge_attribution_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = socket.create_connection
+    downstream, upstream = socket.socketpair()
+
+    def connect(address: tuple[str, int], timeout: int) -> socket.socket:
+        assert address == ("api.github.com", 443)
+        assert timeout == 3
+        return downstream
+
+    # Linux 0.164.0 run_host_bridge prepends write_attribution_frame to proxy
+    # connections; this is a fake bridge identifier, never a real credential.
+    # https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/linux-sandbox/src/proxy_routing.rs
+    # https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/network-proxy/src/attribution.rs
+    frame = b"\x00CDXPXY1\x00\x07fixture"
+    monkeypatch.setattr(socket, "create_connection", connect)
+    with (
+        upstream,
+        control_proxy() as proxy,
+        original(("127.0.0.1", proxy.port), timeout=3) as client,
+    ):
+        client.sendall(frame + b"CONNECT api.github.com:443 HTTP/1.1\r\n\r\n")
+        assert b"200 Connection established" in client.recv(4096)
+        client.sendall(b"ping")
+        assert upstream.recv(4) == b"ping"
+        upstream.sendall(b"pong")
+        assert client.recv(4) == b"pong"
+    assert proxy.targets == ["api.github.com:443"]
+    assert not proxy.direct
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        b"\x00short",
+        b"\x00INVALID\x00\x07fixture",
+        b"\x00CDXPXY1\x00\x00",
+        b"\x00CDXPXY1\x00\x81",
+        b"\x00CDXPXY1\x00\x07short",
+    ],
+)
+def test_linux_control_refuses_malformed_bridge_frames(frame: bytes) -> None:
+    receiver, sender = socket.socketpair()
+    with receiver, sender:
+        sender.sendall(frame)
+        sender.shutdown(socket.SHUT_WR)
+        with pytest.raises(ValueError, match=r"^invalid bridge"):
+            request_header(receiver)
