@@ -5,12 +5,20 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from typing import Literal, TypedDict, Unpack
 
 import pytest
 from agent_host_example import commit, git, repository, run_request
 
 from tbhbdev.alpha.agent import worktree
 from tbhbdev.alpha.agent.model import Invalid
+
+
+class GitOptions(TypedDict, closed=True):
+    env: dict[str, str]
+    text: Literal[True]
+    stderr: int
+    timeout: int
 
 
 @pytest.fixture(autouse=True)
@@ -117,7 +125,7 @@ def test_git_suppresses_command_errors_and_returns_text(
         prefix = [
             worktree.host_tools.resolve("git"),
             *(item for value in worktree.GIT_OVERRIDES for item in ("-c", value)),
-            "-C",
+            "--git-dir",
             str(tmp_path),
             "-c",
             "protocol.allow=never",
@@ -397,7 +405,7 @@ def test_default_branch_requires_a_branch_symref(
 ) -> None:
     def listing_only(path: Path, *args: str) -> str:
         assert path == tmp_path
-        assert args == ("ls-remote", "--symref", "origin", "HEAD")
+        assert args == ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD")
         return listing
 
     monkeypatch.setattr(worktree, "git", listing_only)
@@ -414,7 +422,7 @@ def test_fetch_resolves_only_a_full_commit(
     def run(path: Path, *args: str) -> str:
         assert path == tmp_path
         calls.append(args)
-        return commit_id
+        return "ref: refs/heads/main\tHEAD" if args[0] == "ls-remote" else commit_id
 
     monkeypatch.setattr(worktree, "git", run)
     request = run_request(profile="review", commit="0" * 40)
@@ -423,13 +431,29 @@ def test_fetch_resolves_only_a_full_commit(
             worktree.fetch_commit(tmp_path, request)
     else:
         assert worktree.fetch_commit(tmp_path, request) == commit_id
+    options = (
+        "--no-recurse-submodules",
+        "--no-write-fetch-head",
+        "--no-tags",
+        "--upload-pack=git-upload-pack",
+    )
     assert calls == [
+        ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD"),
+        ("check-ref-format", "--branch", "main"),
         (
             "fetch",
-            "--no-recurse-submodules",
-            "--no-write-fetch-head",
-            "--upload-pack=git-upload-pack",
+            *options,
+            "--prune",
             "origin",
+            "+refs/heads/agent/*:refs/heads/agent/*",
+        ),
+        (
+            "fetch",
+            *options,
+            "--no-prune",
+            "origin",
+            "+refs/heads/main:refs/heads/main",
+            f"+{'0' * 40}:refs/heads/tbhbdev-review",
         ),
         ("rev-parse", "--verify", "--end-of-options", f"{'0' * 40}^{{commit}}"),
     ]
@@ -457,13 +481,15 @@ def test_mirror_configuration_and_hooks_are_host_written(
     path = worktree.create(clone, "example", run_request())
     mirror = worktree.mirror_path(tmp_path, run_request().repo)
     assert git(mirror, "config", "--get-all", "remote.origin.fetch").splitlines() == [
-        "+refs/heads/*:refs/heads/*",
-        "+refs/pull/*/head:refs/pull/*/head",
+        "+refs/heads/agent/*:refs/heads/agent/*",
     ]
     for key, value in (
         ("gc.auto", "0"),
         ("gc.pruneExpire", "never"),
         ("core.logAllRefUpdates", "false"),
+        ("maintenance.auto", "false"),
+        ("fetch.recurseSubmodules", "false"),
+        ("submodule.recurse", "false"),
     ):
         assert git(mirror, "config", key) == value
     assert not (mirror / "FETCH_HEAD").exists()
@@ -579,7 +605,7 @@ def test_default_branch_validates_the_short_branch_name(
     monkeypatch.setattr(worktree, "git", checked)
     assert worktree.default_branch(tmp_path) == "refs/heads/topic/main"
     assert calls == [
-        ("ls-remote", "--symref", "origin", "HEAD"),
+        ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD"),
         ("check-ref-format", "--branch", "topic/main"),
     ]
 
@@ -631,7 +657,7 @@ def test_hook_installation_is_repeatable_and_private(
 
 
 @pytest.mark.parametrize("profile", ["build", "review"])
-@pytest.mark.parametrize("xdg", [False, True, "alias"])
+@pytest.mark.parametrize("xdg", [False, True, "alias", "parent-alias"])
 def test_prelaunch_git_protocol(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str, xdg: bool | str
 ) -> None:
@@ -644,6 +670,12 @@ def test_prelaunch_git_protocol(
         alias = tmp_path / "state-alias"
         alias.symlink_to(target, target_is_directory=True)
         monkeypatch.setenv("XDG_STATE_HOME", str(alias))
+    if xdg == "parent-alias":
+        state = tmp_path / "state"
+        state.mkdir()
+        target = tmp_path / "parent-target"
+        target.mkdir()
+        (state / "tbhbdev").symlink_to(target, target_is_directory=True)
     clone = tmp_path / "clone"
     clone.mkdir()
     (clone / ".worktrees").mkdir()
@@ -671,31 +703,47 @@ def test_prelaunch_git_protocol(
 
     monkeypatch.setattr(worktree.repo, "ssh_url", url)
     assert worktree.create(clone, "protocol", request) == workspace
-    common: list[tuple[Path, tuple[str, ...]]] = [
+    options = (
+        "--no-recurse-submodules",
+        "--no-write-fetch-head",
+        "--no-tags",
+        "--upload-pack=git-upload-pack",
+    )
+    common = [
         (mirror, ("init", "--bare", "--template=")),
+        (mirror, ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD")),
+        (mirror, ("check-ref-format", "--branch", "main")),
         (
             mirror,
             (
                 "fetch",
-                "--no-recurse-submodules",
-                "--no-write-fetch-head",
-                "--upload-pack=git-upload-pack",
+                *options,
+                "--prune",
                 "origin",
+                "+refs/heads/agent/*:refs/heads/agent/*",
+            ),
+        ),
+        (
+            mirror,
+            (
+                "fetch",
+                *options,
+                "--no-prune",
+                "origin",
+                "+refs/heads/main:refs/heads/main",
+                *(
+                    (f"+{full_sha}:refs/heads/tbhbdev-review",)
+                    if profile == "review"
+                    else ()
+                ),
             ),
         ),
     ]
-    if profile == "build":
-        common.extend(
-            [
-                (mirror, ("ls-remote", "--symref", "origin", "HEAD")),
-                (mirror, ("check-ref-format", "--branch", "main")),
-            ]
-        )
     reference = "refs/heads/main" if profile == "build" else full_sha
     checkout = (
-        ("checkout", "-b", "agent/protocol", "--end-of-options", full_sha)
+        ("checkout", "-b", "agent/protocol", full_sha, "--")
         if profile == "build"
-        else ("checkout", "--detach", full_sha)
+        else ("checkout", "--detach", full_sha, "--")
     )
     assert calls == [
         *common,
@@ -864,3 +912,135 @@ def test_mirror_path_matches_driver_contract(
         / "example-org"
         / "example-repo.git"
     )
+
+
+def test_fetch_scope_and_agent_namespace_pruning(tmp_path: Path) -> None:
+    seed, clone = repository(tmp_path)
+    head = git(seed, "rev-parse", "HEAD")
+    for ref in (
+        "refs/heads/a",
+        "refs/heads/agent/a",
+        "refs/pull/1/head",
+        "refs/tags/v1",
+    ):
+        git(seed, "push", "origin", f"{head}:{ref}")
+    worktree.create(clone, "first", run_request())
+    mirror = worktree.mirror_path(tmp_path, run_request().repo)
+    assert git(mirror, "for-each-ref", "--format=%(refname)").splitlines() == [
+        "refs/heads/agent/a",
+        "refs/heads/main",
+    ]
+    git(mirror, "update-ref", "refs/tbhbdev/default", head)
+    git(mirror, "update-ref", "refs/heads/kept", head)
+    for ref in ("refs/heads/a", "refs/heads/agent/a"):
+        git(seed, "push", "origin", f":{ref}")
+        git(seed, "push", "origin", f"{head}:{ref}/b")
+    worktree.create(clone, "second", run_request())
+    assert git(mirror, "for-each-ref", "--format=%(refname)").splitlines() == [
+        "refs/heads/agent/a/b",
+        "refs/heads/kept",
+        "refs/heads/main",
+        "refs/tbhbdev/default",
+    ]
+
+
+def test_new_mirror_never_discovers_parent_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, clone = repository(tmp_path)
+    git(clone, "config", "include.path", str(tmp_path / "broken-config"))
+    (tmp_path / "broken-config").write_text("[broken\n")
+    mirror = clone / "nested.git"
+    mirror.mkdir()
+    calls: list[list[str]] = []
+    output = subprocess.check_output
+
+    def checked(command: list[str], **kwargs: Unpack[GitOptions]) -> str:
+        calls.append(command)
+        return output(command, **kwargs)
+
+    monkeypatch.chdir(clone)
+    monkeypatch.setattr(subprocess, "check_output", checked)
+    worktree.configure_mirror(mirror, str(tmp_path / "origin"))
+    assert len(calls) == 1
+    assert "--git-dir" in calls[0]
+    assert "-C" not in calls[0]
+    assert "--get-regexp" not in calls[0]
+    assert (mirror / "HEAD").is_file()
+
+
+def test_checkout_precedes_hook_installation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, clone = repository(tmp_path)
+    install = worktree.install_hooks
+
+    def checked(path: Path) -> None:
+        assert (path / "tracked").read_text() == "initial\n"
+        assert git(path, "branch", "--show-current") == "agent/ordered"
+        install(path)
+
+    monkeypatch.setattr(worktree, "install_hooks", checked)
+    worktree.create(clone, "ordered", run_request())
+
+
+@pytest.mark.parametrize(
+    "reference", ["refs/heads/a..b", "refs/heads/a@{b", "refs/heads/a.lock"]
+)
+def test_remote_branch_names_pass_real_git_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reference: str
+) -> None:
+    repository(tmp_path)
+    mirror = tmp_path / "origin"
+    original = worktree.git
+
+    def checked(path: Path, *args: str) -> str:
+        if args[0] == "ls-remote":
+            return f"ref: {reference}\tHEAD"
+        return original(path, *args)
+
+    monkeypatch.setattr(worktree, "git", checked)
+    with pytest.raises(subprocess.CalledProcessError):
+        worktree.default_branch(mirror)
+
+
+def test_real_git_calls_have_bounded_operation_timeouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed, clone = repository(tmp_path)
+    git(seed, "config", "filter.example.smudge", "cat")
+    output = subprocess.check_output
+    calls: list[tuple[list[str], int]] = []
+
+    def checked(command: list[str], **kwargs: Unpack[GitOptions]) -> str:
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, int)
+        calls.append((command, timeout))
+        assert "transfer.fsckObjects=true" in command
+        return output(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "check_output", checked)
+    worktree.create(clone, "timeouts", run_request())
+    worktree.git(seed, "fetch", "origin")
+    for command, timeout in calls:
+        assert timeout == (300 if "fetch" in command or "clone" in command else 30)
+
+
+def test_host_checkout_disables_a_planted_run_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, clone = repository(tmp_path)
+    original = worktree.clone_run
+    marker = tmp_path / "hook-executed"
+
+    def planted(mirror: Path, workspace: Path, url: str) -> None:
+        original(mirror, workspace, url)
+        hook = workspace / ".git" / "hooks" / "post-checkout"
+        hook.parent.mkdir()
+        hook.write_text(f'#!/bin/sh\nprintf invoked > "{marker}"\n')
+        hook.chmod(0o700)
+
+    monkeypatch.setattr(worktree, "clone_run", planted)
+    path = worktree.create(clone, "planted", run_request())
+    assert (path / "tracked").read_text() == "initial\n"
+    assert not marker.exists()
