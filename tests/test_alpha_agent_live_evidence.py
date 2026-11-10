@@ -12,7 +12,12 @@ lazy from pathlib import Path
 
 import pytest
 import test_alpha_agent_sandbox_live as live
-from agent_live_evidence import MIRROR_LABELS, mirror_cases, run_default_pytest
+from agent_live_evidence import (
+    ALL_LABELS,
+    MIRROR_LABELS,
+    mirror_cases,
+    run_default_pytest,
+)
 from agent_live_probe import Proxy
 
 from tbhbdev.alpha.agent import credentials, run_host
@@ -308,18 +313,7 @@ def test_socket_probe_isolates_network_refusals_and_keeps_every_label(
         live.run_probe(run, paths, "/example/codex", stack)
     output = capsys.readouterr().out
     assert "unproven" not in output
-    assert all(
-        f"codex {label}:" in output
-        for label in (
-            *EXTRA,
-            "TMPDIR",
-            "tmp",
-            "HOME",
-            "api.github.com",
-            "example.com",
-            "project-hooks",
-        )
-    )
+    assert all(f"codex {label}:" in output for label in ALL_LABELS)
     assert len(runner.scripts) == 7
     assert "curl" not in runner.scripts[0]
     assert all(
