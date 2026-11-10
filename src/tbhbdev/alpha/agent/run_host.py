@@ -234,6 +234,9 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
 
 
 def preflight(run: Run) -> None:
+    if run.request.harness is Harness.AGY:
+        message = "agy runs are refused: no OS sandbox"
+        raise Invalid(message)
     _value, executable = checked_policy(run, planned_paths(run))
     if run.request.profile is Profile.REVIEW and run.request.tainted_host:
         message = "review runs are refused on a tainted host"

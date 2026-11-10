@@ -1465,7 +1465,7 @@ def test_preflight_version_and_named_exceptions(
         return False
 
     monkeypatch.setattr(host_tools, "codex_proxy_supported", supported)
-    if not opt_out and harness in (Harness.CODEX, Harness.AGY):
+    if harness is Harness.AGY or (not opt_out and harness is Harness.CODEX):
         with pytest.raises(Invalid) as caught:
             run_host.preflight(run)
         assert str(caught.value) == preflight_failure_message(harness)
@@ -1498,9 +1498,7 @@ def preflight_failure_message(harness: Harness) -> str:
             "Codex network_proxy support required (minimum 0.164.0); "
             "upgrade or configure codex_network_proxy_opt_out"
         )
-    return (
-        "agy has no OS sandbox; configure agy_unsandboxed_opt_out with a named reason"
-    )
+    return "agy runs are refused: no OS sandbox"
 
 
 def test_mac_host_commands_are_resolved_before_launch(
@@ -2006,6 +2004,32 @@ def test_full_access_is_available_behind_the_existing_gate(tmp_path: Path) -> No
     assert not any(arg.startswith("permissions.") for arg in command)
 
 
+@pytest.mark.parametrize("profile", ["build", "review"])
+@pytest.mark.parametrize("opt_out", [None, "isolated account"])
+def test_agy_preflight_always_refuses(
+    tmp_path: Path, profile: str, opt_out: str | None
+) -> None:
+    run = make_run(
+        tmp_path,
+        harness="agy",
+        profile=profile,
+        commit="0" * 40 if profile == "review" else None,
+        timeout=900,
+    )
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(
+                run.settings.sandbox, agy_unsandboxed_opt_out=opt_out
+            ),
+        ),
+    )
+    with pytest.raises(Invalid) as caught:
+        run_host.preflight(run)
+    assert str(caught.value) == "agy runs are refused: no OS sandbox"
+
+
 @pytest.mark.parametrize("harness", [Harness.AGY])
 def test_unconfined_run_is_refused_before_workspace_preparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
@@ -2029,7 +2053,7 @@ def test_unconfined_run_is_refused_before_workspace_preparation(
     assert run_host.execute(run, "probe") == 1
     assert run.files.path("rc").read_text() == "1\n"
     assert run.files.path("log").read_text() == (
-        "agy has no OS sandbox; configure agy_unsandboxed_opt_out with a named reason\n"
+        "agy runs are refused: no OS sandbox\n"
     )
 
 
