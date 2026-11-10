@@ -228,10 +228,13 @@ def test_duration() -> None:
 
 def test_command_help_contract() -> None:
     assert agent.parser("example agent").format_help() == (
-        "usage: example agent [-h] {exec,wait,status,kill,clean,keep,log,diff} ...\n\n"
+        "usage: example agent [-h]\n"
+        "                     "
+        "{exec,wait,status,kill,clean,keep,log,diff,clear-taint} ...\n\n"
         "positional arguments:\n"
-        "  {exec,wait,status,kill,clean,keep,log,diff}\n"
-        "    exec                launch a headless run\n\n"
+        "  {exec,wait,status,kill,clean,keep,log,diff,clear-taint}\n"
+        "    exec                launch a headless run\n"
+        "    clear-taint         clear local host taint with a reason\n\n"
         "options:\n"
         "  -h, --help            show this help message and exit\n"
     )

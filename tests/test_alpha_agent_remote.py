@@ -41,3 +41,22 @@ def test_source_and_fixtures_are_independent() -> None:
     forbidden = re.compile(r"peer-(?:agent|run)\.sh|run.book|PEER_")
     for path in paths:
         assert forbidden.search(path.read_text()) is None, str(path)
+
+
+def test_runfile_suffixes_cover_run_host_1a222fa() -> None:
+    # 1a222fa: run_host.run_harness, _execute, finish and main,
+    # RunFiles.receive and process_group.record/unknown write these run files.
+    written = (
+        ".request.json",
+        ".prompt",
+        ".schema.json",
+        ".pgid",
+        ".launched",
+        ".phase",
+        ".out",
+        ".out.final",
+        ".log",
+        ".rc",
+        ".run.lock",
+    )
+    assert set(written) <= set(files.SUFFIXES)
