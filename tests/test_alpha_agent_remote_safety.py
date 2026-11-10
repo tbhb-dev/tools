@@ -807,6 +807,8 @@ def test_inspection_fetch_does_not_write_metadata(
     assert fetch_head.read_text() == "preserve fetch head\n"
     assert not (mirror / "logs").exists()
     invocations = [json.loads(line) for line in calls.read_text().splitlines()]
+    fetch = next(args for args in invocations if "fetch" in args)
+    assert fetch[fetch.index("transfer.fsckObjects=true") - 1] == "-c"
     query = next(args for args in invocations if "--no-ext-diff" in args)
     # Ref spelling matters on case-sensitive hosts even when local loose refs
     # happen to accept another case.
