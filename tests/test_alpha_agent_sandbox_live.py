@@ -19,22 +19,27 @@ from typing import TYPE_CHECKING
 import pytest
 from agent_example import LINUX, MACOS, settings
 from agent_host_example import run_request
+from agent_live_evidence import ALL_LABELS, EXTRA_LABELS, MirrorProbe, mirror_cases
 from agent_live_probe import (
     Proxy,
     control_proxy,
-    mirror_object,
-    mirror_probes,
     server_connections,
 )
 
 from tbhbdev.alpha.agent import credentials, run_host, runfiles
-from tbhbdev.alpha.agent.decisions import argv, policy
+from tbhbdev.alpha.agent.decisions import policy
 from tbhbdev.alpha.agent.model import ClaudePolicy, Harness, Invalid, Profile, RunPaths
 
 if TYPE_CHECKING:
     from collections.abc import Generator
 
     from tbhbdev.alpha.agent.model import Host, Policy, Settings
+
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1",
+    reason="set TBHBDEV_SANDBOX_LIVE=1 to run native sandbox probes",
+)
 
 
 def report(line: str) -> None:
@@ -177,35 +182,19 @@ def probe_run(tmp_path: Path, harness: Harness) -> tuple[run_host.Run, RunPaths]
 
 
 def sandbox_command(
-    run: run_host.Run, paths: RunPaths, value: Policy, executable: str, script: Path
+    run: run_host.Run, paths: RunPaths, value: Policy, executable: str, _script: Path
 ) -> tuple[str, ...]:
-    if value.harness is Harness.CLAUDE:
-        prepared = run_host.Prepared(
-            paths,
-            credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
-            None,
-        )
-        # This is the production builder, including its generated --settings JSON.
-        # Claude consumes JSON directly; sandbox-runtime's schema is different.
-        return run_host.harness_command(run, prepared, value, executable)
-    generated = argv.harness(
-        run.request,
-        value,
-        worktree=paths.worktree,
-        brief_file=str(run.files.path("prompt")),
+    prepared = run_host.Prepared(
+        paths,
+        credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
+        None,
     )
-    start = generated.index("--strict-config") + 1
-    end = generated.index("-m")
-    return (
-        executable,
-        "sandbox",
-        "-P",
-        "build",
-        *generated[start:end],
-        "--",
-        "/bin/sh",
-        str(script),
-    )
+    command = run_host.harness_command(run, prepared, value, executable)
+    if value.harness is Harness.CODEX:
+        # The installed CLI chooses its default model for this policy probe.
+        index = command.index("-m")
+        return (*command[:index], *command[index + 2 :])
+    return command
 
 
 def report_agy_refusals(config: Settings, host: Host, paths: RunPaths) -> None:
@@ -223,48 +212,98 @@ def report_agy_refusals(config: Settings, host: Host, paths: RunPaths) -> None:
         report(f"agy {profile}: refused by policy")
 
 
+def report_unproven(harness: Harness) -> None:
+    for label in ALL_LABELS:
+        report(f"{harness} {label}: unproven")
+
+
+@dataclasses.dataclass(frozen=True)
+class Evidence:
+    mirrors: dict[str, bool]
+    written: bool
+    hooks: bool = True
+
+
+def read_observations(results: Path) -> dict[str, str]:
+    try:
+        lines = results.read_text().splitlines()
+    except OSError:
+        return {}
+    return {parts[0]: parts[1] for line in lines if len(parts := line.split()) == 2}
+
+
+def control_failures(control: Proxy, written: bool) -> list[str]:
+    failures = []
+    if "api.github.com:443" not in control.targets:
+        failures.append("positive control never connected")
+    if "example.com:443" in control.targets or control.direct:
+        failures.append("proxy observed a forbidden connection")
+    if not written:
+        failures.append("interpreter write control was not observed")
+    return failures
+
+
 def assert_observations(
     harness: Harness,
     sockets: dict[str, Listener],
     results: Path,
     control: Proxy | None = None,
+    *,
+    evidence: Evidence | None = None,
 ) -> None:
-    observations = dict(line.split() for line in results.read_text().splitlines())
-    extra = (
-        ()
-        if control is None
-        else (
-            "mirror-modify",
-            "mirror-create",
-            "mirror-replace",
-            "alternates",
-            "hard-link",
-            "local-binding",
-            "host-loopback",
-        )
+    observations = read_observations(results)
+    proof = evidence or Evidence({}, written=False)
+    extra = () if control is None else EXTRA_LABELS
+    failures = []
+    if set(observations) != {*sockets, "api.github.com", "example.com", *extra}:
+        failures.append("probe labels are incomplete")
+    proven = control is None or (
+        proof.written and "api.github.com:443" in control.targets
     )
-    assert set(observations) == {*sockets, "api.github.com", "example.com", *extra}
     if control is not None:
-        assert "api.github.com:443" in control.targets, (
-            "positive control never connected"
+        failures.extend(control_failures(control, proof.written))
+
+    def judged(label: str, safe: bool | None, success: str, failure: str) -> None:
+        verdict = (
+            "unproven" if not proven or safe is None else (success if safe else failure)
         )
-        assert "example.com:443" not in control.targets
-        assert not control.direct, "a command reached the host listener directly"
-        report(f"{harness} control via upstream proxy: connected")
+        report(f"{harness} {label}: {verdict}")
+        if not proven or not safe:
+            failures.append(f"{label}: {verdict}")
+
     for location, listener in sockets.items():
-        connected = bool(listener.connections)
-        report(f"{harness} {location}: {'allowed' if connected else 'refused'}")
-        assert not connected, f"{location}: listener accepted a connection"
+        judged(location, not listener.connections, "refused", "allowed")
     for domain, allowed in (("api.github.com", True), ("example.com", False)):
-        reached = observations[domain] == "0"
-        report(f"{harness} {domain}: {'allowed' if reached else 'refused'}")
-        assert reached is allowed, f"{domain}: curl exit {observations[domain]}"
+        status = observations.get(domain)
+        safe = None if status is None else ((status == "0") is allowed)
+        judged(
+            domain,
+            safe,
+            "allowed" if allowed else "refused",
+            "refused" if allowed else "allowed",
+        )
     for label in extra:
-        if label == "local-binding" and sys.platform == "linux":
-            report(f"{harness} local-binding: isolated network namespace")
-            continue
-        assert observations[label] != "0", f"{label}: sandbox permitted the probe"
-        report(f"{harness} {label}: refused")
+        if label == "file-control":
+            judged(label, proof.written, "observed", "failed")
+        elif label.startswith("mirror-") or label in ("alternates", "hard-link"):
+            judged(
+                label,
+                proof.mirrors.get(label),
+                "refused",
+                "allowed",
+            )
+        elif label == "local-binding" and sys.platform == "linux":
+            judged(
+                label, label in observations, "isolated network namespace", "unproven"
+            )
+        else:
+            status = observations.get(label)
+            judged(
+                label, None if status is None else status != "0", "refused", "allowed"
+            )
+    if control is not None:
+        judged("project-hooks", proof.hooks, "refused", "allowed")
+    assert not failures, "; ".join(failures)
 
 
 def hook_marker(workspace: Path, root: Path) -> Path:
@@ -289,12 +328,21 @@ def hook_marker(workspace: Path, root: Path) -> Path:
 
 
 def live_extra(
-    object_file: Path, workspace: Path, curl: str, control: Proxy
+    mirrors: tuple[MirrorProbe, ...], control_file: Path, curl: str, control: Proxy
 ) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    ln = shutil.which("ln")
-    assert ln, "ln is required for hard-link probes"
     return (
-        *mirror_probes(object_file, workspace, sys.executable, ln),
+        (
+            "file-control",
+            (
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path;"
+                    f"Path({str(control_file)!r}).write_text('invoked')"
+                ),
+            ),
+        ),
+        *((case.label, case.command) for case in mirrors),
         (
             "local-binding",
             (
@@ -342,9 +390,10 @@ def run_probe(
     root = Path(
         stack.enter_context(tempfile.TemporaryDirectory(prefix="ag-probe-"))
     ).resolve()
-    object_file = mirror_object(root)
-    original = object_file.read_bytes()
-    links = object_file.stat().st_nlink
+    ln = shutil.which("ln")
+    assert ln, "ln is required for hard-link probes"
+    mirrors = mirror_cases(root, Path(paths.worktree), sys.executable, ln)
+    control_file = run.tmpdir / "write-control"
     marker = hook_marker(Path(paths.worktree), root)
     results = run.tmpdir / "observed"
     script = root / "probe.sh"
@@ -355,7 +404,7 @@ def run_probe(
             sockets,
             curl,
             results,
-            live_extra(object_file, Path(paths.worktree), curl, control),
+            live_extra(mirrors, control_file, curl, control),
         )
     )
     run.files.write(
@@ -371,7 +420,7 @@ def run_probe(
                 run.settings.sandbox,
                 denied_home_paths=(
                     *run.settings.sandbox.denied_home_paths,
-                    str(object_file.parents[2]),
+                    *(str(case.object_file.parents[2]) for case in mirrors),
                 ),
             ),
         ),
@@ -395,22 +444,18 @@ def run_probe(
         check=False,
         timeout=120,
     )
-    assert not marker.exists(), "repository settings executed a hook"
-    assert object_file.read_bytes() == original
-    assert object_file.stat().st_nlink == links
-    assert set(object_file.parents[2].iterdir()) == {object_file.parents[1]}
-    if (
-        harness is Harness.CLAUDE
-        and not results.is_file()
-        and probe_auth_missing(result)
-    ):
-        report("Claude: unproven by test")
-        pytest.skip("Claude: unproven by test")
-    assert result.returncode == 0, (
-        f"{harness}: sandbox command exit {result.returncode}"
+    report(f"{harness} process exit: {result.returncode}")
+    assert_observations(
+        harness,
+        sockets,
+        results,
+        control,
+        evidence=Evidence(
+            {case.label: case.unchanged() for case in mirrors},
+            control_file.is_file() and control_file.read_text() == "invoked",
+            not marker.exists(),
+        ),
     )
-    assert results.is_file(), "harness did not execute the probe"
-    assert_observations(harness, sockets, results, control)
 
 
 @pytest.mark.skipif(
@@ -424,20 +469,31 @@ def test_build_sandboxes_refuse_user_sockets(tmp_path: Path, harness: Harness) -
         report_agy_refusals(run.settings, run.host, paths)
         return
     if os.environ.get("CODEX_SANDBOX"):
-        pytest.skip(
-            "Claude: unproven by test"
-            if harness is Harness.CLAUDE
-            else "coordinator must run outside the agent sandbox"
-        )
+        report_unproven(harness)
+        pytest.fail("coordinator must run outside the agent sandbox")
     installed = shutil.which(harness.value)
     if installed is None:
-        pytest.skip(
-            "Claude: unproven by test"
-            if harness is Harness.CLAUDE
-            else f"{harness}: harness binary not installed"
-        )
-    with ExitStack() as stack:
-        run_probe(run, paths, str(Path(installed).resolve()), stack)
+        report_unproven(harness)
+        pytest.fail(f"{harness}: harness binary not installed")
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(
+                run.settings.sandbox,
+                host_path=(
+                    *run.settings.sandbox.host_path,
+                    str(Path(installed).parent),
+                ),
+            ),
+        ),
+    )
+    try:
+        with ExitStack() as stack:
+            run_probe(run, paths, str(Path(installed).resolve()), stack)
+    except (Invalid, OSError, subprocess.TimeoutExpired, AssertionError) as error:
+        report_unproven(harness)
+        pytest.fail(f"{harness}: no sandbox evidence ({type(error).__name__})")
 
 
 @pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
@@ -460,8 +516,9 @@ def test_local_sandbox_commands_use_the_build_policy(
     )
     assert command[0] == "/example/harness"
     if harness is Harness.CODEX:
-        assert command[1:4] == ("sandbox", "-P", "build")
-        assert command[-3:] == ("--", "/bin/sh", str(tmp_path / "probe.sh"))
+        assert command[1] == "exec"
+        assert "sandbox" not in command
+        assert "--strict-config" in command
         assert any(
             arg.startswith("features.network_proxy={enabled=true") for arg in command
         )
@@ -597,7 +654,7 @@ def test_agy_live_request_reaches_the_policy_refusal(tmp_path: Path) -> None:
 def test_codex_exec_refuses_project_config(tmp_path: Path) -> None:
     installed = shutil.which("codex")
     if installed is None:
-        pytest.skip("codex: harness binary not installed")
+        pytest.fail("codex: harness binary not installed")
     run, paths = probe_run(tmp_path, Harness.CODEX)
     workspace = Path(paths.worktree)
     subprocess.run(
