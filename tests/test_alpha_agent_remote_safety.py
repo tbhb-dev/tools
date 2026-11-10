@@ -743,24 +743,25 @@ def test_real_tmux_preserves_longer_session(host: Path, verb: str) -> None:
     tmux = which("tmux", path="/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin")
     if tmux is None:
         pytest.skip("tmux is missing")
+    (host / "bin/tmux").symlink_to(tmux)
     # Keep the socket below Unix's path limit even with long pytest roots.
     sockets = Path(mkdtemp(prefix="tmux-"))
     command = [tmux, "-S", str(sockets / "agents"), "-f", "/dev/null"]
     state = host / "state/tbhbdev/agent-runs"
-    (state / "x.owner").write_text("example-owner\n")
+    (state / "X.owner").write_text("example-owner\n")
     try:
-        for name in ("ag-x", "ag-x2"):
+        for name in ("ag-X", "ag-X2"):
             subprocess.run(
                 [*command, "new-session", "-d", "-s", name, "sleep 120"],
                 check=True,
             )
-        subprocess.run([*command, "kill-session", "-t", "=ag-x"], check=True)
+        subprocess.run([*command, "kill-session", "-t", "=ag-X"], check=True)
         script = (
-            remote.session("x", "kill-session", str(sockets), owner="example-owner")
+            remote.session("X", "kill-session", str(sockets), owner="example-owner")
             if verb == "kill"
             else remote.clean(
                 "example-org/example-repo",
-                "x",
+                "X",
                 "stamp",
                 str(sockets),
                 decision=remote.Cleanup("example-owner", force=True),
@@ -768,7 +769,7 @@ def test_real_tmux_preserves_longer_session(host: Path, verb: str) -> None:
         )
         result = execute(script)
         assert result.returncode == 0, result.stderr
-        subprocess.run([*command, "has-session", "-t", "=ag-x2"], check=True)
+        subprocess.run([*command, "has-session", "-t", "=ag-X2"], check=True)
     finally:
         subprocess.run([*command, "kill-server"], check=False, capture_output=True)
         sockets.rename(host / "sockets")
