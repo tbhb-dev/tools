@@ -703,9 +703,12 @@ def test_app_token_scope_ignores_planted_origin(
 @pytest.mark.parametrize(
     ("after", "why"),
     [
-        ('{"value":"new","extra":true}', "auth added top-level keys"),
-        ('{"tokens":[]}', "tokens must be an object of strings"),
-        ('{"last_refresh":"2025-12-31T00:00:00Z"}', "last_refresh moved backwards"),
+        ('{"value":"new","extra":true}', "auth.extra: found boolean; unexpected key"),
+        ('{"tokens":[]}', "tokens: found array; expected object"),
+        (
+            '{"last_refresh":"2025-12-31T00:00:00Z"}',
+            "last_refresh: found string; timestamp moved backwards",
+        ),
     ],
 )
 def test_auth_content_refusal_is_logged_without_replacement(
@@ -718,7 +721,11 @@ def test_auth_content_refusal_is_logged_without_replacement(
     # Keep a valid tokens object for the timestamp case.
     data = json.loads(after)
     if "last_refresh" in data:
-        data["tokens"] = {}
+        data["tokens"] = {
+            "id_token": "fixture",
+            "access_token": "fixture",
+            "refresh_token": "fixture",
+        }
     target = runfiles.private_dir(tmp_path / "child") / "auth.json"
     target.write_text(json.dumps(data))
     before = source.read_text()

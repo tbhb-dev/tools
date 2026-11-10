@@ -17,16 +17,30 @@ from tbhbdev.alpha.agent.model import Harness
 
 
 @pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("account_id", [None, "fixture-account"])
 def test_live_codex_auth_refresh_is_written_back_and_removed(
-    tmp_path: Path, failure: bool
+    tmp_path: Path, failure: bool, account_id: str | None
 ) -> None:
     root = tmp_path / "probe"
     run = make_run(root)
     account = tmp_path / "account"
     source = account / ".codex/auth.json"
     source.parent.mkdir(parents=True)
-    before = json.dumps({"tokens": {"refresh_token": "fixture-before"}})
-    after = json.dumps({"tokens": {"refresh_token": "fixture-after"}})
+    # Codex 0.164.0 TokenData serializes OAuth provenance as a nested object:
+    # https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/login/src/token_data.rs
+    tokens = {
+        "id_token": "fixture-id",
+        "access_token": "fixture-access",
+        "refresh_token": "fixture-before",
+        "oauth_provenance": {
+            "issuer": "https://auth.openai.com",
+            "client_id": "fixture-client",
+        },
+        "login_owner_id": "fixture-owner",
+        "account_id": account_id,
+    }
+    before = json.dumps({"tokens": tokens})
+    after = json.dumps({"tokens": tokens | {"refresh_token": "fixture-after"}})
     source.write_text(before)
     paths = dataclasses.replace(
         run_host.planned_paths(run), codex_home=str(root / "codex")
@@ -60,7 +74,17 @@ def test_live_git_probe_plants_hooks_only_in_the_scratch_run_home(
     account = tmp_path / "account"
     source = account / ".codex/auth.json"
     source.parent.mkdir(parents=True)
-    source.write_text('{"tokens":{"refresh_token":"fixture"}}')
+    source.write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "id_token": "fixture-id",
+                    "access_token": "fixture-access",
+                    "refresh_token": "fixture",
+                }
+            }
+        )
+    )
     account_hooks = source.parent / "hooks.json"
     account_hooks.write_text("original fixture hooks")
     root = tmp_path / "probe"

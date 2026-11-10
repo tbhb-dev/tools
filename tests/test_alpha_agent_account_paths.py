@@ -72,13 +72,18 @@ def test_production_auth_copy_and_refresh_are_the_only_account_write_exception(
     directory = tmp_path / "account" / ".codex"
     directory.mkdir(parents=True)
     source = directory / "auth.json"
-    source.write_text('{"tokens":{"refresh_token":"fixture-before"}}')
+    source.write_text(
+        '{"tokens":{"id_token":"fixture-id","access_token":"fixture-access","refresh_token":"fixture-before"}}'
+    )
     destination = tmp_path / "private/auth.json"
     destination.parent.mkdir()
     owner = sys.modules[guard_account_codex_writes.__module__]
     monkeypatch.setattr(owner, "ACCOUNT_CODEX_HOME", directory)
     before = credentials.auth_copy(source, destination)
-    after = '{"tokens":{"refresh_token":"fixture-after"}}'
+    after = (
+        '{"tokens":{"id_token":"fixture-id","access_token":"fixture-access",'
+        '"refresh_token":"fixture-after"}}'
+    )
     destination.write_text(after)
     assert credentials.auth_write_back(source, destination, before) is None
     assert source.read_text() == after
