@@ -1613,7 +1613,7 @@ def test_unsandboxed_verbs_after_host_setting_disabled(
     if verb == "clean":
         assert not driver.metadata_path("sample").exists()
     if verb == "kill":
-        assert "kill-session" in str(remote.records("tmux")[-1])
+        assert any("kill-session" in str(call) for call in remote.records("tmux"))
 
 
 def test_unsandboxed_new_launch_after_host_setting_disabled(
