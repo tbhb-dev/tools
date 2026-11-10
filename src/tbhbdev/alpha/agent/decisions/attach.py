@@ -21,6 +21,6 @@ def command(
         + remote.socket_root(sockets_dir)
         + f"tmux_state has-session ag-{name}\n"
         + f"if test \"$present\" -eq 0; then printf '%s\\n' {message} >&2; exit 1; fi\n"
-        + f'tmux -S "$s/agents" -f /dev/null attach-session -t "ag-{name}"'
+        + f'tmux -S "$s/agents" -f /dev/null attach-session -t "=ag-{name}"'
         + (" -r" if read_only else ""),
     )

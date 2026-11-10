@@ -6,7 +6,10 @@ import dataclasses
 import io
 import os
 import shlex
+import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -19,8 +22,6 @@ from tbhbdev.alpha.agent.decisions import remote as commands
 from tbhbdev.alpha.agent.decisions.attach import command
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from agent_driver_example import Remote
 
 CONFIG = dataclasses.replace(
@@ -98,7 +99,7 @@ def test_attach_argv_and_inherited_streams(
         + "tmux_state has-session ag-sample\n"
         + "if test \"$present\" -eq 0; then printf '%s\\n' "
         + "'sample: no session; the run has ended' >&2; exit 1; fi\n"
-        + 'tmux -S "$s/agents" -f /dev/null attach-session -t "ag-sample"'
+        + 'tmux -S "$s/agents" -f /dev/null attach-session -t "=ag-sample"'
         + (" -r" if read_only else "")
     )
     expected_command = shlex.join(
@@ -126,7 +127,7 @@ def test_attach_argv_and_inherited_streams(
         "/dev/null",
         "attach-session",
         "-t",
-        "ag-sample",
+        "=ag-sample",
         *(["-r"] if read_only else []),
     ]
     assert command(
@@ -218,3 +219,41 @@ def test_unsandboxed_notice_is_flushed_before_ssh(
     monkeypatch.setattr(attach.sys, "stderr", stream)
     monkeypatch.setattr(attach.subprocess, "run", run_ssh)
     assert attach.run(CONFIG, run, read_only=False) == 0
+
+
+def test_attach_target_does_not_match_session_prefix() -> None:
+    tmux = shutil.which("tmux")
+    if tmux is None:
+        pytest.skip("tmux is not on PATH")
+    directory = Path(tempfile.mkdtemp(prefix="attach-"))
+    socket = directory / "tmux.sock"
+    server = [tmux, "-S", str(socket), "-f", "/dev/null"]
+    subprocess.run(
+        [*server, "new-session", "-d", "-s", "ag-x2", "/bin/cat"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        # Show that the prefix target would find the other live session.
+        subprocess.run(
+            [*server, "has-session", "-t", "ag-x"], check=True, capture_output=True
+        )
+        script = command("x", "unused", owner="owner", read_only=False)[2]
+        client = shlex.split(script.splitlines()[-1])
+        assert client[:3] == ["tmux", "-S", "$s/agents"]
+        result = subprocess.run(
+            [*server, *client[5:]], check=False, capture_output=True, text=True
+        )
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert result.stderr == "can't find session: ag-x\n"
+        sessions = subprocess.run(
+            [*server, "list-sessions", "-F", "#{session_name}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert sessions.stdout == "ag-x2\n"
+    finally:
+        subprocess.run([*server, "kill-server"], check=True, capture_output=True)
