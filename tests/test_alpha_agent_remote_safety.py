@@ -517,6 +517,11 @@ def test_clean_retries_each_step(host: Path, step: str) -> None:
     marker = host / "failed"
     # Both executables pass through to the system after one injected failure.
     for executable in ("git", "mv"):
+        program = next(
+            str(directory / executable)
+            for directory in (Path("/usr/bin"), Path("/bin"))
+            if (directory / executable).is_file()
+        )
         write_standalone_fake(
             host / "bin" / executable,
             "import os, sys, fcntl\nfrom pathlib import Path\n"
@@ -535,7 +540,7 @@ def test_clean_retries_each_step(host: Path, step: str) -> None:
             "    name == 'mv' and step in (Path(args[-1]).name, Path(args[0]).name))\n"
             "if match and not marker.exists():\n"
             "    marker.write_text('failed')\n    sys.exit(74)\n"
-            f"os.execv('/usr/bin/{executable}', ['/usr/bin/{executable}', *args])\n",
+            f"os.execv({program!r}, [{program!r}, *args])\n",
         )
     first = execute(cleanup())
     assert first.returncode == 74, first.stderr
