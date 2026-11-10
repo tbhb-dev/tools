@@ -23,7 +23,7 @@ from tbhbdev.alpha.agent import credentials, process_group, runfiles
 from tbhbdev.alpha.agent.model import Harness, Invalid, Profile
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
     from typing import Literal
 
 
@@ -97,7 +97,9 @@ def test_each_credential_only_reaches_its_destination(
     assert (tmp_path / "docker" / "config.json").read_text() == VALUES[
         "example/docker/value"
     ]
+    assert {"gh", "docker"} <= {p.name for p in tmp_path.iterdir()}
     for directory, filename in (("gh", "hosts.yml"), ("docker", "config.json")):
+        assert {p.name for p in (tmp_path / directory).iterdir()} == {filename}
         assert (tmp_path / directory).stat().st_mode & 0o777 == 0o700
         assert (tmp_path / directory / filename).stat().st_mode & 0o777 == 0o600
     for marker in VALUES.values():
@@ -309,8 +311,10 @@ def test_signing_agent_start_failure_is_bounded(
     monkeypatch.setattr(subprocess, "Popen", start)
     stops: list[tuple[int, float]] = []
 
-    def stop(pid: int, grace: float, *_args: object) -> None:
+    def stop(pid: int, grace: float, reap: Callable[[], object] | None = None) -> bool:
+        assert reap == agent.poll
         stops.append((pid, grace))
+        return True
 
     monkeypatch.setattr(process_group, "stop_started", stop)
     with pytest.raises(Invalid if exited else TimeoutError) as caught:

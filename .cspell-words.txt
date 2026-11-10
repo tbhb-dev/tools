@@ -249,4 +249,5 @@ inodes
 pushurl
 repositoryformatversion
 symref
+socketpair
 ESRCH

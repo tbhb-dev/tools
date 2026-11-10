@@ -312,12 +312,12 @@ def prepare(
     worker.start()
     pid = worker_pid(worker)
     child.close()
-    ready = False
+    owned_group: int | None = None
     try:
         if not parent.poll(max(0, deadline - time.monotonic())):
             raise TimeoutError
         parent.recv()
-        ready = True
+        owned_group = pid
         record(files, pid)
         parent.send(None)
         if not parent.poll(max(0, deadline - time.monotonic())):
@@ -333,8 +333,8 @@ def prepare(
     finally:
         with ignore_signals():
             parent.close()
-            if ready and worker.exitcode is None:
-                stop_owned(files, pid, grace, worker.is_alive)
+            if owned_group is not None and worker.exitcode is None:
+                stop_owned(files, owned_group, grace, worker.is_alive)
             worker.join(timeout=grace)
             try:
                 if worker.is_alive():

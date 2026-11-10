@@ -235,13 +235,12 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
 
 def preflight(run: Run) -> None:
     _value, executable = checked_policy(run, planned_paths(run))
+    if run.request.harness is Harness.AGY or run.request.unsandboxed:
+        message = "run-host requires an OS sandbox to protect host git state"
+        raise Invalid(message)
     sandbox = run.settings.sandbox
     reason = (
-        sandbox.agy_unsandboxed_opt_out
-        if run.request.harness is Harness.AGY
-        else sandbox.codex_unsandboxed_opt_out
-        if run.request.harness is Harness.CODEX and run.request.unsandboxed
-        else sandbox.codex_network_proxy_opt_out
+        sandbox.codex_network_proxy_opt_out
         if run.request.harness is Harness.CODEX
         else None
     )

@@ -359,7 +359,7 @@ def test_setup_worker_protocol(monkeypatch: pytest.MonkeyPatch, outcome: str) ->
     "outcome", ["ready-timeout", "result-timeout", "success", "invalid", "error"]
 )
 @pytest.mark.parametrize("remaining", [-1, 8])
-@pytest.mark.parametrize("reaped", [False, True, "kill-denied"])
+@pytest.mark.parametrize("reaped", [False, True, "kill-denied", "killed"])
 def test_setup_parent_deadline_and_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -395,30 +395,15 @@ def test_setup_parent_deadline_and_cleanup(
         def close(self) -> None:
             events.append("connection-closed")
 
-    class Worker:
-        pid = 23
-        exitcode: int | None = 0 if reaped is True else None
-
-        is_alive = staticmethod(lambda: reaped == "kill-denied")
-
-        kill = staticmethod(deny_worker_kill)
-
-        def start(self) -> None:
-            events.append("started")
-
-        def join(self, timeout: float | None = None) -> None:
-            events.append(("joined", timeout))
-
-        def close(self) -> None:
-            events.append("worker-closed")
+    worker = SetupWorker(reaped, events)
 
     class Context:
         def pipe(self) -> tuple[Connection, Connection]:
             return Connection(), Connection()
 
-        def process(self, **kwargs: object) -> Worker:
+        def process(self, **kwargs: object) -> SetupWorker:
             assert kwargs["target"] is groups.prepare_child
-            return Worker()
+            return worker
 
         Pipe = pipe
         Process = process
@@ -430,9 +415,15 @@ def test_setup_parent_deadline_and_cleanup(
     def identity(pid: int) -> Group:
         return Group(pid, "boot", "42")
 
-    def stop(owned: runfiles.RunFiles, pid: int, grace: float, *_args: object) -> None:
+    def stop(
+        owned: runfiles.RunFiles,
+        pid: int,
+        grace: float,
+        reap: Callable[[], object] | None = None,
+    ) -> None:
         assert owned is files
         assert (pid, grace) == (23, 0.25)
+        assert reap == worker.is_alive
         events.append("stopped")
 
     monkeypatch.setattr(multiprocessing, "get_context", context)
@@ -449,16 +440,11 @@ def test_setup_parent_deadline_and_cleanup(
         with pytest.raises(Invalid) as caught:
             groups.prepare(lambda: None, files, 2 + remaining, 0.25)
         assert str(caught.value) == setup_failure_message(outcome)
-    assert events == [
-        "started",
-        "connection-closed",
-        "connection-closed",
-        *([] if reaped is True or outcome == "ready-timeout" else ["stopped"]),
-        ("joined", 0.25),
-        *([] if reaped == "kill-denied" else ["worker-closed"]),
-    ]
+    assert events == setup_events(reaped, outcome)
     assert files.uncertain is (reaped == "kill-denied")
     assert files.path("pgid").exists() is (outcome != "ready-timeout")
+    if outcome != "ready-timeout":
+        assert "example.pgid" in {p.name for p in tmp_path.iterdir()}
 
 
 def test_stop_absent_group_and_liveness(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -602,10 +588,12 @@ def test_launch_foreground_failure_stops_created_group(
     def foreground(_fd: int, _pid: int) -> None:
         raise OSError
 
-    monkeypatch.setattr(subprocess, "Popen", constant(Child()))
+    child = Child()
+    monkeypatch.setattr(subprocess, "Popen", constant(child))
     monkeypatch.setattr(groups, "foreground", foreground)
 
-    def stop(pid: int, grace: float, *_args: object) -> bool:
+    def stop(pid: int, grace: float, reap: Callable[[], object] | None = None) -> bool:
+        assert reap == child.poll
         events.append((pid, grace))
         return permitted
 
@@ -803,7 +791,8 @@ def test_reap_continues_after_permission_denial(
         reaped.append(True)
 
     monkeypatch.setattr(os, "killpg", send)
-    monkeypatch.setattr(time, "monotonic", constant(0))
+    ticks = iter((0, 0, 0, 0.2))
+    monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
     assert groups.stop_started(23, 0, poll, reports.append) is True
     assert signals == [signal.SIGTERM, 0, signal.SIGKILL, 0]
     assert reaped == [True, True]
@@ -823,6 +812,57 @@ def test_signal_errors_still_attempt_kill(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(os, "killpg", failed)
     assert groups.stop_started(23, 0) is False
     assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_permitted_stop_reports_no_permission_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def send(pgid: int, number: int) -> None:
+        assert pgid == 23
+        if number == 0:
+            raise ProcessLookupError
+        assert number == signal.SIGTERM
+
+    reports: list[str] = []
+    monkeypatch.setattr(os, "killpg", send)
+    assert groups.stop_started(23, 0, report=reports.append) is True
+    assert reports == []
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+def test_owned_stop_passes_reaping_and_appends_signal_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stopped: bool
+) -> None:
+    files = runfiles.RunFiles(tmp_path, "example")
+    writes: list[tuple[str, str]] = []
+    original = files.write
+
+    def reap() -> None:
+        return None
+
+    def write(suffix: str, text: str) -> None:
+        writes.append((suffix, text))
+        original(suffix, text)
+
+    def stop(
+        pgid: int,
+        grace: float,
+        poll: Callable[[], object] | None = None,
+        report: Callable[[str], None] | None = None,
+    ) -> bool:
+        assert (pgid, grace) == (23, 0.25)
+        assert poll is reap
+        assert report is not None
+        report("first signal\n")
+        report("second signal\n")
+        return stopped
+
+    monkeypatch.setattr(groups, "stop_started", stop)
+    monkeypatch.setattr(files, "write", write)
+    assert groups.stop_owned(files, 23, 0.25, reap) is stopped
+    assert writes[:2] == [("log", "first signal\n"), ("log", "second signal\n")]
+    assert files.path("log").read_text().startswith("first signal\nsecond signal\n")
+    assert files.uncertain is (not stopped)
 
 
 @pytest.mark.parametrize("failure", ["stop-unproven", "phase", "log"])
@@ -851,5 +891,44 @@ def setup_failure_message(outcome: str) -> str:
     )
 
 
+def setup_events(reaped: bool | str, outcome: str) -> list[object]:
+    return [
+        "started",
+        "connection-closed",
+        "connection-closed",
+        *([] if reaped is True or outcome == "ready-timeout" else ["stopped"]),
+        ("joined", 0.25),
+        *(["killed", ("joined", 0.25)] if reaped == "killed" else []),
+        *([] if reaped == "kill-denied" else ["worker-closed"]),
+    ]
+
+
 def deny_worker_kill() -> None:
     raise PermissionError
+
+
+class SetupWorker:
+    pid = 23
+
+    def __init__(self, reaped: bool | str, events: list[object]) -> None:
+        self.reaped = reaped
+        self.events = events
+        self.exitcode: int | None = 0 if reaped is True else None
+
+    def is_alive(self) -> bool:
+        return self.reaped in ("kill-denied", "killed")
+
+    def kill(self) -> None:
+        if self.reaped == "kill-denied":
+            deny_worker_kill()
+        self.events.append("killed")
+
+    def start(self) -> None:
+        self.events.append("started")
+
+    def join(self, timeout: float | None = None) -> None:
+        assert timeout == 0.25
+        self.events.append(("joined", timeout))
+
+    def close(self) -> None:
+        self.events.append("worker-closed")

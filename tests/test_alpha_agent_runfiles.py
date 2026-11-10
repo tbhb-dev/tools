@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 def test_private_request_and_snapshot(tmp_path: Path) -> None:
     files = runfiles.RunFiles(tmp_path / "runs", "run-1")
+    assert files.uncertain is False
     assert files.name == "run-1"
     assert files.root == tmp_path / "runs"
     assert files.root.stat().st_mode & 0o777 == 0o700
@@ -216,6 +217,7 @@ def test_atomic_failure_preserves_old_file_and_moves_temporary(
     if failure != "directory":
         failed = list(tmp_path.glob(".failed-*/incomplete"))
         assert len(failed) == 1
+        assert {p.name for p in failed[0].parent.iterdir()} == {"incomplete"}
         assert failed[0].read_text() == "new"
         assert {p.name for p in tmp_path.iterdir()} == {
             target.name,
