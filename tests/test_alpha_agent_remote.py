@@ -74,13 +74,14 @@ CASES: list[tuple[str, tuple[str, ...], dict[str, bool], str | tuple[str, ...]]]
         {},
         (
             'd="${XDG_STATE_HOME:-$HOME/.local/state}/tbhbdev/agent-runs"\n'
-            'cd "$d" || exit "$?"\nif test -f sample.phase; then printf '
-            "'%s' \"$(cat sample.phase)\"; else printf 'unknown'; fi\n"
-            "printf '\\n'\nif test -f sample.rc; then printf '%s' \"$(cat "
-            "sample.rc)\"; fi\nprintf '\\n'\ntest ! -f sample.launched; "
-            "printf '%s\\n' \"$?\"\ntmux -L agents has-session -t ag-sample "
-            '2>/dev/null; test "$?" -ne 0; printf \'%s\\n\' "$?"\nif test -f '
-            "sample.log; then head -n 20 sample.log; fi\n"
+            'if test -f "$d/sample.phase"; then printf \'%s\' "$(cat '
+            "\"$d/sample.phase\")\"; else printf 'unknown'; fi\nprintf '\\n'\n"
+            'if test -f "$d/sample.rc"; then printf \'%s\' "$(cat '
+            '"$d/sample.rc")"; fi\nprintf \'\\n\'\ntest ! -f '
+            '"$d/sample.launched"; printf \'%s\\n\' "$?"\ntmux -L agents '
+            'has-session -t ag-sample 2>/dev/null; test "$?" -ne 0; '
+            'printf \'%s\\n\' "$?"\nif test -f "$d/sample.log"; then head -n '
+            '20 "$d/sample.log"; fi\n'
         ),
     ),
     (
@@ -89,14 +90,15 @@ CASES: list[tuple[str, tuple[str, ...], dict[str, bool], str | tuple[str, ...]]]
         {"answer": True},
         (
             'd="${XDG_STATE_HOME:-$HOME/.local/state}/tbhbdev/agent-runs"\n'
-            'cd "$d" || exit "$?"\nif test -f sample.phase; then printf '
-            "'%s' \"$(cat sample.phase)\"; else printf 'unknown'; fi\n"
-            "printf '\\n'\nif test -f sample.rc; then printf '%s' \"$(cat "
-            "sample.rc)\"; fi\nprintf '\\n'\ntest ! -f sample.launched; "
-            "printf '%s\\n' \"$?\"\ntmux -L agents has-session -t ag-sample "
-            '2>/dev/null; test "$?" -ne 0; printf \'%s\\n\' "$?"\nif test -f '
-            "sample.out.final; then tail -n 40 sample.out.final\nelif "
-            "test -f sample.out; then tail -n 40 sample.out; fi\n"
+            'if test -f "$d/sample.phase"; then printf \'%s\' "$(cat '
+            "\"$d/sample.phase\")\"; else printf 'unknown'; fi\nprintf '\\n'\n"
+            'if test -f "$d/sample.rc"; then printf \'%s\' "$(cat '
+            '"$d/sample.rc")"; fi\nprintf \'\\n\'\ntest ! -f '
+            '"$d/sample.launched"; printf \'%s\\n\' "$?"\ntmux -L agents '
+            'has-session -t ag-sample 2>/dev/null; test "$?" -ne 0; '
+            'printf \'%s\\n\' "$?"\nif test -f "$d/sample.out.final"; then '
+            'tail -n 40 "$d/sample.out.final"\nelif test -f '
+            '"$d/sample.out"; then tail -n 40 "$d/sample.out"; fi\n'
         ),
     ),
     (
@@ -105,10 +107,11 @@ CASES: list[tuple[str, tuple[str, ...], dict[str, bool], str | tuple[str, ...]]]
         {},
         (
             'd="${XDG_STATE_HOME:-$HOME/.local/state}/tbhbdev/agent-runs"\n'
-            'umask 077\ncd "$d" || exit "$?"\nif tmux -L agents '
-            "has-session -t ag-sample 2>/dev/null; then exit 1; fi\nif "
-            "test ! -f sample.rc; then printf '137\\n' > "
-            "sample.rc.pending && mv -n sample.rc.pending sample.rc; fi\n"
+            'umask 077\nmkdir -p "$d" && chmod 700 "$d" || exit "$?"\ncd '
+            '"$d" || exit "$?"\nif tmux -L agents has-session -t '
+            "ag-sample 2>/dev/null; then exit 1; fi\nif test ! -f "
+            "sample.rc; then printf '137\\n' > sample.rc.pending && mv -n "
+            "sample.rc.pending sample.rc; fi\n"
         ),
     ),
     (
@@ -117,7 +120,8 @@ CASES: list[tuple[str, tuple[str, ...], dict[str, bool], str | tuple[str, ...]]]
         {},
         (
             'd="${XDG_STATE_HOME:-$HOME/.local/state}/tbhbdev/agent-runs"\n'
-            'umask 077\n: > "$d/sample.keep"'
+            'umask 077\nmkdir -p "$d" && chmod 700 "$d" && : > '
+            '"$d/sample.keep"'
         ),
     ),
     (
@@ -125,7 +129,10 @@ CASES: list[tuple[str, tuple[str, ...], dict[str, bool], str | tuple[str, ...]]]
         ("example-org/example-repo", "sample"),
         {},
         (
-            'cd "$HOME"/Code/github.com/example-org/example-repo || exit '
+            "if test ! -d "
+            '"$HOME"/Code/github.com/example-org/example-repo; then '
+            "printf '0\\n'; exit 0; fi\ncd "
+            '"$HOME"/Code/github.com/example-org/example-repo || exit '
             '"$?"\nif git -c core.hooksPath=/dev/null show-ref --verify '
             "--quiet refs/heads/agent/sample; then\n  if upstream=$(git "
             "-c core.hooksPath=/dev/null rev-parse --symbolic-full-name "
@@ -141,11 +148,12 @@ CASES: list[tuple[str, tuple[str, ...], dict[str, bool], str | tuple[str, ...]]]
         (
             'd="${XDG_STATE_HOME:-$HOME/.local/state}/tbhbdev/agent-runs"\n'
             "if tmux -L agents has-session -t ag-sample 2>/dev/null; "
-            "then exit 1; fi\ncd "
+            "then exit 1; fi\nif test -d "
+            '"$HOME"/Code/github.com/example-org/example-repo; then\ncd '
             '"$HOME"/Code/github.com/example-org/example-repo || exit '
             '"$?"\nif test -d .worktrees/agent-sample; then git -c '
             "core.hooksPath=/dev/null worktree remove "
-            '.worktrees/agent-sample || exit "$?"; fi\numask 077\n'
+            '.worktrees/agent-sample || exit "$?"; fi\nfi\numask 077\n'
             'trash="$d/trash/20261109T000000Z-sample"\nmkdir -p "$trash" '
             '|| exit "$?"\nif test -e "$d/sample.request.json"; then mv '
             '"$d/sample.request.json" "$trash/" || exit "$?"; fi\nif test '
@@ -175,7 +183,8 @@ CASES: list[tuple[str, tuple[str, ...], dict[str, bool], str | tuple[str, ...]]]
         (
             'd="${XDG_STATE_HOME:-$HOME/.local/state}/tbhbdev/agent-runs"\n'
             "if tmux -L agents has-session -t ag-sample 2>/dev/null; "
-            "then exit 1; fi\ncd "
+            "then exit 1; fi\nif test -d "
+            '"$HOME"/Code/github.com/example-org/example-repo; then\ncd '
             '"$HOME"/Code/github.com/example-org/example-repo || exit '
             '"$?"\nif test -d .worktrees/agent-sample; then git -c '
             "core.hooksPath=/dev/null worktree remove --force "
@@ -183,19 +192,19 @@ CASES: list[tuple[str, tuple[str, ...], dict[str, bool], str | tuple[str, ...]]]
             "core.hooksPath=/dev/null show-ref --verify --quiet "
             "refs/heads/agent/sample; then\ngit -c "
             "core.hooksPath=/dev/null branch -D agent/sample || exit "
-            '"$?"\nfi\numask 077\ntrash="$d/trash/20261109T000000Z-sample"\n'
-            'mkdir -p "$trash" || exit "$?"\nif test -e '
-            '"$d/sample.request.json"; then mv "$d/sample.request.json" '
-            '"$trash/" || exit "$?"; fi\nif test -e "$d/sample.prompt"; '
-            'then mv "$d/sample.prompt" "$trash/" || exit "$?"; fi\nif '
-            'test -e "$d/sample.schema.json"; then mv '
-            '"$d/sample.schema.json" "$trash/" || exit "$?"; fi\nif test '
-            '-e "$d/sample.pgid"; then mv "$d/sample.pgid" "$trash/" || '
-            'exit "$?"; fi\nif test -e "$d/sample.launched"; then mv '
-            '"$d/sample.launched" "$trash/" || exit "$?"; fi\nif test -e '
-            '"$d/sample.phase"; then mv "$d/sample.phase" "$trash/" || '
-            'exit "$?"; fi\nif test -e "$d/sample.out"; then mv '
-            '"$d/sample.out" "$trash/" || exit "$?"; fi\nif test -e '
+            '"$?"\nfi\nfi\numask 077\n'
+            'trash="$d/trash/20261109T000000Z-sample"\nmkdir -p "$trash" '
+            '|| exit "$?"\nif test -e "$d/sample.request.json"; then mv '
+            '"$d/sample.request.json" "$trash/" || exit "$?"; fi\nif test '
+            '-e "$d/sample.prompt"; then mv "$d/sample.prompt" "$trash/" '
+            '|| exit "$?"; fi\nif test -e "$d/sample.schema.json"; then '
+            'mv "$d/sample.schema.json" "$trash/" || exit "$?"; fi\nif '
+            'test -e "$d/sample.pgid"; then mv "$d/sample.pgid" '
+            '"$trash/" || exit "$?"; fi\nif test -e "$d/sample.launched"; '
+            'then mv "$d/sample.launched" "$trash/" || exit "$?"; fi\nif '
+            'test -e "$d/sample.phase"; then mv "$d/sample.phase" '
+            '"$trash/" || exit "$?"; fi\nif test -e "$d/sample.out"; then '
+            'mv "$d/sample.out" "$trash/" || exit "$?"; fi\nif test -e '
             '"$d/sample.out.final"; then mv "$d/sample.out.final" '
             '"$trash/" || exit "$?"; fi\nif test -e "$d/sample.log"; then '
             'mv "$d/sample.log" "$trash/" || exit "$?"; fi\nif test -e '
