@@ -145,101 +145,6 @@ def test_untrusted_run_files(
         )
 
 
-@pytest.mark.parametrize(
-    "plant", ["fsmonitor", "hook", "reference-transaction", "smudge", "credential"]
-)
-def test_clean_never_executes_repo_plants(host: Path, plant: str) -> None:
-    clone = host / "Code/github.com/example-org/example-repo"
-    clone.mkdir(parents=True)
-
-    def git(*args: str) -> None:
-        subprocess.run(
-            ["/usr/bin/git", "-C", str(clone), *args],
-            check=True,
-            capture_output=True,
-            env={
-                "HOME": str(host),
-                "PATH": "/usr/bin:/bin",
-                "LANG": "C",
-                "GIT_CONFIG_NOSYSTEM": "1",
-            },
-        )
-
-    git("init", "-b", "main")
-    git(
-        "-c",
-        "user.name=Example",
-        "-c",
-        "user.email=example@example.com",
-        "commit",
-        "--allow-empty",
-        "-m",
-        "example",
-    )
-    tree = clone / ".worktrees/agent-sample"
-    git("worktree", "add", "-b", "agent/sample", str(tree))
-    admins = clone / ".git/worktrees"
-    victim = admins / "victim"
-    victim.mkdir()
-    (victim / "gitdir").write_text(str(host / "missing/.git"))
-    outside = host / "outside"
-    outside.mkdir()
-    (outside / "preserve").write_text("outside marker")
-    (admins / "link").symlink_to(outside, target_is_directory=True)
-    sibling = clone / ".worktrees/agent-sibling"
-    git("worktree", "add", "-b", "agent/sibling", str(sibling))
-    before = {
-        p.name: p.read_bytes()
-        for p in (admins / "agent-sibling").rglob("*")
-        if p.is_file()
-    }
-    marker = host / "marker"
-    command = host / "plant"
-    command.write_text(f"#!/bin/sh\nprintf planted > '{marker}'\n")
-    command.chmod(0o700)
-    if plant == "fsmonitor":
-        git("config", "core.fsmonitor", str(command))
-    elif plant in {"hook", "reference-transaction"}:
-        hook = "post-checkout" if plant == "hook" else plant
-        (clone / ".git/hooks" / hook).symlink_to(command)
-    elif plant == "smudge":
-        git("config", "filter.example.smudge", str(command))
-        (clone / ".git/info/attributes").write_text("* filter=example\n")
-    else:
-        git("config", "credential.helper", str(command))
-    # Test both clones' shared config and the agent's private worktree config.
-    (tree / "agent-file").write_text("preserve")
-    (tree / ".git").write_text(f"gitdir: {outside}\n")
-    write_standalone_fake(
-        host / "bin/tmux",
-        'import sys\nsys.stderr.write("no server running on example")\nsys.exit(1)\n',
-    )
-    result = execute(
-        remote.clean(
-            "example-org/example-repo",
-            "sample",
-            "stamp",
-            settings().sockets_dir,
-            decision=remote.Cleanup("example-owner", delete_branch=True, force=False),
-        )
-    )
-    assert result.returncode == 0, result.stderr
-    assert not marker.exists()
-    assert victim.is_dir()
-    assert (victim / "gitdir").read_text() == str(host / "missing/.git")
-    assert (admins / "link").is_symlink()
-    assert (outside / "preserve").read_text() == "outside marker"
-    assert {
-        p.name: p.read_bytes()
-        for p in (admins / "agent-sibling").rglob("*")
-        if p.is_file()
-    } == before
-    assert not tree.exists()
-    trash = host / "state/tbhbdev/agent-runs/trash/stamp-sample"
-    assert (trash / "worktree/agent-file").read_text() == "preserve"
-    assert not (clone / ".git/worktrees/agent-sample").exists()
-
-
 @pytest.mark.parametrize("bad", ["file", "symlink", "mode", "socket-link"])
 def test_socket_directory_refuses_unsafe_paths(host: Path, bad: str) -> None:
     directory = host / "sockets"
@@ -296,7 +201,7 @@ def test_scripts_have_fixed_path_socket_and_git_environment() -> None:
             "sample",
             "stamp",
             config.sockets_dir,
-            decision=remote.Cleanup("example-owner", delete_branch=True, force=False),
+            decision=remote.Cleanup("example-owner", force=False),
         ),
     ]
     for script in scripts:
@@ -305,6 +210,8 @@ def test_scripts_have_fixed_path_socket_and_git_environment() -> None:
         assert 'tmux -S "$s/agents" -f /dev/null' in script
         assert "tmux -L" not in script
         assert f"s={config.sockets_dir}\n" in script
+    assert " git " not in scripts[-1]
+    assert "perl" not in scripts[-1]
     assert remote.installed(LINUX).endswith('"$HOME/.local/bin/tbhbdev" --version')
     assert (
         "-lc"
@@ -313,11 +220,10 @@ def test_scripts_have_fixed_path_socket_and_git_environment() -> None:
         ]
     )
     for script in [
-        remote.branch_facts(
+        remote.origin_branch(
             "example-org/example-repo", "sample", owner="example-owner"
         ),
         remote.preflight("example-org/example-repo", "main", "example", LINUX),
-        scripts[-1],
     ]:
         for line in script.splitlines():
             if " git " in line:
@@ -354,22 +260,6 @@ def test_start_command_and_absolute_program() -> None:
     host = replace(LINUX, tbhbdev="/example path/bin/tbhbdev")
     assert remote.program(host) == "'/example path/bin/tbhbdev'"
     assert remote.installed(host).endswith("'/example path/bin/tbhbdev' --version")
-
-
-def test_clone_path_is_not_the_worktree() -> None:
-    script = remote.branch_facts(
-        "example-org/example-repo", "sample", owner="example-owner"
-    )
-    assert (
-        'cd "$HOME"/Code/github.com/example-org/example-repo || exit "$?"\n' in script
-    )
-    preflight = remote.preflight("example-org/example-repo", "main", "v", LINUX)
-    assert 'cd "$HOME" || exit "$?"\n' in preflight
-    assert (
-        " ls-remote --exit-code -- git@github.com:example-org/example-repo.git "
-        in preflight
-    )
-    assert "Code/" not in preflight
 
 
 def test_read_defaults_to_bounded_log(host: Path) -> None:
@@ -469,8 +359,32 @@ def git_in(clone: Path, *args: str) -> str:
 
 def clone_in(host: Path) -> Path:
     clone = host / "Code/github.com/example-org/example-repo"
-    clone.mkdir(parents=True)
-    git_in(clone, "init", "-b", "main")
+    tree = clone / ".worktrees/agent-sample"
+    (tree / ".git").mkdir(parents=True)
+    (tree / "agent-file").write_text("preserve")
+    return clone
+
+
+def mirror_in(host: Path) -> Path:
+    source = host / "source"
+    source.mkdir()
+    git_in(source, "init", "-b", "main")
+    (source / "example").write_text("base\n")
+    git_in(source, "add", "example")
+    commit_in(source, "base")
+    git_in(source, "checkout", "-b", "agent/sample")
+    (source / "example").write_text("pushed change\n")
+    git_in(source, "add", "example")
+    commit_in(source, "pushed change")
+    git_in(source, "checkout", "main")
+    origin = host / "origin.git"
+    git_in(host, "clone", "--bare", str(source), str(origin))
+    mirror = host / "state/tbhbdev/agent-mirrors/example-org/example-repo.git"
+    git_in(host, "clone", "--mirror", origin.as_uri(), str(mirror))
+    return mirror
+
+
+def commit_in(clone: Path, message: str) -> None:
     git_in(
         clone,
         "-c",
@@ -478,19 +392,9 @@ def clone_in(host: Path) -> Path:
         "-c",
         "user.email=example@example.com",
         "commit",
-        "--allow-empty",
         "-m",
-        "example",
+        message,
     )
-    git_in(
-        clone,
-        "worktree",
-        "add",
-        "-b",
-        "agent/sample",
-        str(clone / ".worktrees/agent-sample"),
-    )
-    return clone
 
 
 def cleanup(*, force: bool = False) -> str:
@@ -499,7 +403,7 @@ def cleanup(*, force: bool = False) -> str:
         "sample",
         "stamp",
         settings().sockets_dir,
-        decision=remote.Cleanup("example-owner", delete_branch=True, force=force),
+        decision=remote.Cleanup("example-owner", force=force),
     )
 
 
@@ -507,10 +411,15 @@ def cleanup(*, force: bool = False) -> str:
     ("command", "expected"),
     [("exit 0", 0), ("exit 7", 7), ("kill -TERM $$", 143), ("kill -INT $$", 130)],
 )
-def test_clean_lock_preserves_inner_exit(
+def test_mirror_lock_preserves_inner_exit(
     host: Path, command: str, expected: int
 ) -> None:
-    tokens = shlex.split(cleanup())
+    mirror_in(host)
+    tokens = shlex.split(
+        remote.origin_branch(
+            "example-org/example-repo", "sample", owner="example-owner"
+        )
+    )
     start = tokens.index("perl")
     result = subprocess.run(
         [*tokens[start : start + 4], str(host / "lock"), command],
@@ -521,74 +430,49 @@ def test_clean_lock_preserves_inner_exit(
 
 
 @pytest.mark.parametrize(
-    "step", ["worktree", "admin", "branch", "sample.phase", "sample.rc", "sample.owner"]
+    "step", ["worktree", "sample.phase", "sample.rc", "sample.owner"]
 )
 def test_clean_retries_each_step(host: Path, step: str) -> None:
-    clone = clone_in(host)
+    clone_in(host)
     no_session(host)
     state = host / "state/tbhbdev/agent-runs"
     (state / "sample.phase").write_text("ended\n")
     (state / "sample.rc").write_text("0\n")
-    admin = clone / ".git/worktrees/agent-sample"
-    (admin / "locked").write_text("planted lock")
     marker = host / "failed"
-    # Both executables pass through to the system after one injected failure.
-    for executable in ("git", "mv"):
-        program = next(
-            str(directory / executable)
-            for directory in (Path("/usr/bin"), Path("/bin"))
-            if (directory / executable).is_file()
-        )
-        write_standalone_fake(
-            host / "bin" / executable,
-            "import os, sys, fcntl\nfrom pathlib import Path\n"
-            f"marker = Path({str(marker)!r})\nargs = sys.argv[1:]\nstep = {step!r}\n"
-            f"name = {executable!r}\n"
-            "if name == 'mv' and Path(args[-1]).name in ('worktree', 'admin'):\n"
-            "    path = Path(os.environ['common']) / 'agent-worktree.lock'\n"
-            "    with path.open('a') as lock:\n"
-            "        try:\n"
-            "            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
-            "        except BlockingIOError:\n"
-            "            pass\n"
-            "        else:\n"
-            "            raise AssertionError('cleanup must hold the common lock')\n"
-            "match = ('branch' in args and '-D' in args) if step == 'branch' else (\n"
-            "    name == 'mv' and step in (Path(args[-1]).name, Path(args[0]).name))\n"
-            "if match and not marker.exists():\n"
-            "    marker.write_text('failed')\n    sys.exit(74)\n"
-            f"os.execv({program!r}, [{program!r}, *args])\n",
-        )
-    first = execute(cleanup())
-    assert first.returncode == 74, first.stderr
-    second = execute(cleanup())
-    assert second.returncode == 0, second.stderr
+    write_standalone_fake(
+        host / "bin/mv",
+        "import os, sys\nfrom pathlib import Path\n"
+        f"marker = Path({str(marker)!r})\nargs = sys.argv[1:]\nstep = {step!r}\n"
+        "match = step in (Path(args[-1]).name, Path(args[0]).name)\n"
+        "if match and not marker.exists():\n"
+        "    marker.write_text('failed')\n    sys.exit(74)\n"
+        "os.execv('/bin/mv', ['/bin/mv', *args])\n",
+    )
+    assert execute(cleanup()).returncode == 74
+    assert execute(cleanup()).returncode == 0
     trash = state / "trash/stamp-sample"
-    assert (trash / "admin/locked").read_text() == "planted lock"
-    assert (trash / "worktree").is_dir()
+    assert (trash / "worktree/agent-file").read_text() == "preserve"
     assert (trash / "sample.owner").read_text() == "example-owner\n"
     assert not list(state.glob("sample.*"))
-    assert not admin.exists()
-    assert not git_in(clone, "branch", "--list", "agent/sample")
 
 
 @pytest.mark.parametrize("kind", ["file", "symlink", "dangling"])
-def test_clean_refuses_unsafe_admin(host: Path, kind: str) -> None:
+def test_clean_refuses_unsafe_run_clone(host: Path, kind: str) -> None:
     clone = clone_in(host)
     no_session(host)
-    admin = clone / ".git/worktrees/agent-sample"
-    admin.rename(host / "saved-admin")
+    tree = clone / ".worktrees/agent-sample"
+    tree.rename(host / "saved-clone")
     if kind == "file":
-        admin.write_text("preserve")
+        tree.write_text("preserve")
     else:
-        admin.symlink_to(
-            host / ("saved-admin" if kind == "symlink" else "missing"),
+        tree.symlink_to(
+            host / ("saved-clone" if kind == "symlink" else "missing"),
             target_is_directory=True,
         )
     result = execute(cleanup())
     assert result.returncode == 65
     assert b"clean refused" in result.stderr
-    assert (host / "saved-admin/HEAD").is_file()
+    assert (host / "saved-clone/agent-file").read_text() == "preserve"
 
 
 @pytest.mark.parametrize("kind", ["file", "symlink", "dangling"])
@@ -661,7 +545,7 @@ def test_real_ssh_shell_quoting(host: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "script", ["read", "fallback", "session", "keep", "clean", "branch_facts", "start"]
+    "script", ["read", "fallback", "session", "keep", "clean", "origin_branch", "start"]
 )
 @pytest.mark.parametrize("owner_kind", ["other", "missing", "symlink"])
 def test_owner_check_precedes_every_effect(
@@ -683,7 +567,7 @@ def test_owner_check_precedes_every_effect(
         ),
         "keep": remote.keep("sample", owner="example-owner"),
         "clean": cleanup(),
-        "branch_facts": remote.branch_facts(
+        "origin_branch": remote.origin_branch(
             "example-org/example-repo", "sample", owner="example-owner"
         ),
         "start": remote.start(
@@ -696,52 +580,8 @@ def test_owner_check_precedes_every_effect(
     assert not (host / "state/tbhbdev/agent-runs/trash").exists()
 
 
-def test_git_local_flags_block_lazy_fetch(host: Path) -> None:
-    clone = clone_in(host)
-    marker = host / "fetch-executed"
-    upload = host / "upload"
-    upload.write_text(
-        f"#!/bin/sh\nprintf fetched > {shlex.quote(str(marker))}\nexit 1\n"
-    )
-    upload.chmod(0o700)
-    git_in(clone, "config", "remote.origin.url", str(host / "missing-repo"))
-    git_in(clone, "config", "remote.origin.promisor", "true")
-    git_in(clone, "config", "remote.origin.uploadpack", str(upload))
-    missing = "f" * 40
-    (clone / ".git/refs/heads/agent/sample").write_text(missing + "\n")
-    git_in(clone, "config", "branch.agent/sample.remote", ".")
-    git_in(clone, "config", "branch.agent/sample.merge", "refs/heads/main")
-    # This command must try the configured transport without the boundary.
-    subprocess.run(
-        ["/usr/bin/git", "-C", str(clone), "rev-list", "--count", missing],
-        capture_output=True,
-        check=False,
-    )
-    assert marker.read_text() == "fetched"
-    marker.rename(host / "unprotected-marker")
-    result = execute(
-        remote.branch_facts("example-org/example-repo", "sample", owner="example-owner")
-    )
-    assert result.stdout == b"0\n"
-    assert not marker.exists()
-
-
-def test_git_flags_disable_reference_hook_behaviorally(host: Path) -> None:
-    clone = clone_in(host)
-    no_session(host)
-    marker = host / "hook-executed"
-    hook = clone / ".git/hooks/reference-transaction"
-    hook.write_text(f"#!/bin/sh\nprintf called > {shlex.quote(str(marker))}\n")
-    hook.chmod(0o700)
-    git_in(clone, "branch", "probe")
-    assert marker.read_text() == "called"
-    marker.rename(host / "unprotected-marker")
-    assert execute(cleanup()).returncode == 0
-    assert not marker.exists()
-
-
 def test_locale_precedes_tmux_and_git(host: Path) -> None:
-    clone_in(host)
+    mirror_in(host)
     for executable in ("tmux", "git"):
         write_standalone_fake(
             host / "bin" / executable,
@@ -752,7 +592,7 @@ def test_locale_precedes_tmux_and_git(host: Path) -> None:
                 "sys.stderr.write('no server running on example')\nsys.exit(1)\n"
                 if executable == "tmux"
                 else "assert os.environ['GIT_NO_LAZY_FETCH'] == '1'\n"
-                "assert 'protocol.allow=never' in sys.argv\nsys.exit(1)\n"
+                "assert 'protocol.allow=user' in sys.argv\n"
             ),
         )
     assert (
@@ -763,7 +603,7 @@ def test_locale_precedes_tmux_and_git(host: Path) -> None:
     )
     assert (
         execute(
-            remote.branch_facts(
+            remote.origin_branch(
                 "example-org/example-repo", "sample", owner="example-owner"
             )
         ).returncode
@@ -818,27 +658,20 @@ def test_preflight_ref_contract(host: Path) -> None:
     assert result.stdout == b"example version\ncommit\ttopic\n"
 
 
-def test_branch_facts_counts_local_commits(host: Path) -> None:
-    clone = clone_in(host)
-    git_in(clone, "config", "branch.agent/sample.remote", ".")
-    git_in(clone, "config", "branch.agent/sample.merge", "refs/heads/main")
-    script = remote.branch_facts(
+def test_origin_branch_queries_remote_presence(host: Path) -> None:
+    mirror = mirror_in(host)
+    script = remote.origin_branch(
         "example-org/example-repo", "sample", owner="example-owner"
     )
-    assert execute(script).stdout == b"0\n"
-    tree = clone / ".worktrees/agent-sample"
-    git_in(
-        tree,
-        "-c",
-        "user.name=Example",
-        "-c",
-        "user.email=example@example.com",
-        "commit",
-        "--allow-empty",
-        "-m",
-        "local",
-    )
-    assert execute(script).stdout == b"1\n"
+    result = execute(script)
+    expected = git_in(mirror, "rev-parse", "refs/heads/agent/sample")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.decode() == expected + "\trefs/heads/agent/sample\n"
+    git_in(host / "origin.git", "update-ref", "-d", "refs/heads/agent/sample")
+    assert execute(script).stdout == b""
+    assert git_in(mirror, "rev-parse", "refs/heads/agent/sample") == expected
+    git_in(mirror, "config", "remote.origin.url", str(host / "missing.git"))
+    assert execute(script).returncode != 0
 
 
 def test_clean_checks_flags_fallback_and_missing_clone(host: Path) -> None:
@@ -850,43 +683,18 @@ def test_clean_checks_flags_fallback_and_missing_clone(host: Path) -> None:
     assert (state / "trash/stamp-sample/sample.rc.fallback").is_file()
 
 
-def test_clean_local_git_boundary(host: Path) -> None:
-    clone_in(host)
-    no_session(host)
-    write_standalone_fake(
-        host / "bin/git",
-        "import os, sys\n"
-        "assert os.environ['GIT_NO_LAZY_FETCH'] == '1'\n"
-        "options = {}\nargs = sys.argv[1:]\n"
-        "while args and args[0] == '-c':\n"
-        "    key, value = args[1].split('=', 1)\n"
-        "    options[key] = value\n    args = args[2:]\n"
-        "assert options == {\n"
-        "    'core.hooksPath': '/dev/null', 'core.fsmonitor': 'false',\n"
-        "    'core.sshCommand': 'ssh', 'credential.helper': '', 'core.askPass': '',\n"
-        "    'protocol.ext.allow': 'never', 'core.pager': 'cat',\n"
-        "    'gc.auto': '0', 'maintenance.auto': 'false', 'protocol.allow': 'never'}\n"
-        "os.execv('/usr/bin/git', ['/usr/bin/git', *sys.argv[1:]])\n",
-    )
-    facts = execute(
-        remote.branch_facts("example-org/example-repo", "sample", owner="example-owner")
-    )
-    assert facts.stdout == b"1\n"
-    assert facts.stderr == b""
-    assert execute(cleanup()).returncode == 0
-
-
-def test_branch_facts_without_clone(host: Path) -> None:
-    assert not (host / "Code").exists()
+def test_origin_branch_without_mirror(host: Path) -> None:
+    assert not (host / "state/tbhbdev/agent-mirrors").exists()
     result = execute(
-        remote.branch_facts("example-org/example-repo", "sample", owner="example-owner")
+        remote.origin_branch(
+            "example-org/example-repo", "sample", owner="example-owner"
+        )
     )
-    assert result.returncode == 0
-    assert result.stdout == b"0\n"
-    assert result.stderr == b""
+    assert result.returncode == 65
+    assert result.stdout == b""
 
 
-@pytest.mark.parametrize("destination", ["worktree", "admin", "sample.phase"])
+@pytest.mark.parametrize("destination", ["worktree", "sample.phase"])
 def test_clean_preserves_conflicting_trash(host: Path, destination: str) -> None:
     clone_in(host)
     no_session(host)
@@ -900,3 +708,64 @@ def test_clean_preserves_conflicting_trash(host: Path, destination: str) -> None
     assert result.returncode == 65
     assert conflict.read_text() == "preserve existing trash"
     assert (state / "sample.owner").read_text() == "example-owner\n"
+
+
+@pytest.mark.parametrize(
+    "component",
+    ["agent-mirrors", "example-org", "example-repo.git", "agent-mirror.lock"],
+)
+def test_mirror_refuses_symlinks(host: Path, component: str) -> None:
+    mirror = mirror_in(host)
+    path = (
+        mirror / component
+        if component == "agent-mirror.lock"
+        else next(p for p in (mirror, *mirror.parents) if p.name == component)
+    )
+    if path.exists():
+        path.rename(host / "saved")
+    path.symlink_to(host / "saved")
+    result = execute(
+        remote.origin_branch(
+            "example-org/example-repo", "sample", owner="example-owner"
+        )
+    )
+    assert result.returncode == 65
+    assert result.stdout == b""
+
+
+def test_mirror_git_boundary(host: Path) -> None:
+    mirror = mirror_in(host)
+    write_standalone_fake(
+        host / "bin/git",
+        "import os, sys, fcntl\nfrom pathlib import Path\n"
+        "assert os.environ['GIT_NO_LAZY_FETCH'] == '1'\n"
+        "assert os.environ['GIT_CONFIG_NOSYSTEM'] == '1'\n"
+        "assert os.environ['GIT_TERMINAL_PROMPT'] == '0'\n"
+        "assert os.environ['GIT_ASKPASS'] == '/bin/false'\n"
+        "assert os.environ['SSH_ASKPASS'] == '/bin/false'\n"
+        "assert os.environ['LANG'] == os.environ['LC_ALL'] == 'C'\n"
+        "options = {}\nargs = sys.argv[1:]\n"
+        "while args and args[0] == '-c':\n"
+        "    key, value = args[1].split('=', 1)\n"
+        "    options[key] = value\n    args = args[2:]\n"
+        "assert options == {\n"
+        "    'core.hooksPath': '/dev/null', 'core.fsmonitor': 'false',\n"
+        "    'core.sshCommand': 'ssh', 'credential.helper': '', 'core.askPass': '',\n"
+        "    'protocol.ext.allow': 'never', 'core.pager': 'cat',\n"
+        "    'gc.auto': '0', 'maintenance.auto': 'false', 'protocol.allow': 'user',\n"
+        "    'fetch.recurseSubmodules': 'false', 'submodule.recurse': 'false'}\n"
+        f"assert args == ['-C', {str(mirror)!r}, 'ls-remote', '--end-of-options',\n"
+        "                'origin', 'refs/heads/agent/sample']\n"
+        f"with Path({str(mirror / 'agent-mirror.lock')!r}).open('a') as lock:\n"
+        "    try:\n        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "    except BlockingIOError:\n        pass\n"
+        "    else:\n        raise AssertionError('mirror lock required')\n"
+        "os.execv('/usr/bin/git', ['/usr/bin/git', *sys.argv[1:]])\n",
+    )
+    result = execute(
+        remote.origin_branch(
+            "example-org/example-repo", "sample", owner="example-owner"
+        )
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.endswith(b"\trefs/heads/agent/sample\n")

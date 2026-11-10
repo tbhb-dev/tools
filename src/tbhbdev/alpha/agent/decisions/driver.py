@@ -123,10 +123,6 @@ def clean(rc: int | None, *, session: bool, force: bool) -> None:
         raise Invalid(message)
 
 
-def delete_branch(*, unpushed: bool, force: bool) -> bool:
-    return force or not unpushed
-
-
 def wait_kind(kind: RunKind) -> None:
     if kind is not RunKind.EXEC:
         message = "wait applies only to an exec run"

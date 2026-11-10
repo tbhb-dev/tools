@@ -352,12 +352,19 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
         (run.name, run.owner),
     )
     rules.clean(reading.rc, session=reading.session, force=force or run.cleaning)
-    count = transport.shell(
-        settings,
-        run.host,
-        remote.branch_facts(run.request.repo, run.name, owner=run.owner),
-    )
-    delete = rules.delete_branch(unpushed=int(count) > 0, force=force)
+    if not force:
+        branch = transport.shell(
+            settings,
+            run.host,
+            remote.origin_branch(run.request.repo, run.name, owner=run.owner),
+        )
+        if not branch.strip():
+            message = (
+                f"branch agent/{run.name} does not exist on origin; "
+                "pass --force to clean anyway"
+            )
+            raise Invalid(message)
+        print("branch exists on origin")
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     record = json.loads(metadata_path(run.name).read_text())
     record["cleaning"] = True
@@ -370,7 +377,7 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
             run.name,
             stamp,
             settings.sockets_dir,
-            decision=remote.Cleanup(run.owner, delete, force),
+            decision=remote.Cleanup(run.owner, force),
         ),
     )
     archive_metadata(run.name, stamp)

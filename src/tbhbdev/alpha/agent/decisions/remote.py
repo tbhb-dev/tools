@@ -227,27 +227,53 @@ if test ! -f {path}; then ( : > {path} ); fi
     )
 
 
-def branch_facts(repository: str, name: str, *, owner: str) -> str:
-    clone = repo.clone_path(PurePosixPath("."), repository)
-    branch = f"agent/{name}"
-    git = GIT + GIT_FLAGS + " -c protocol.allow=never"
-    upstream = f"{git} rev-parse --symbolic-full-name {branch}@{{upstream}}"
+# The mirror lock serializes host fetches and reads of the fetched refs.
+MIRROR_LOCK = (
+    'open(my $lock, ">>", shift) or die "open lock: $!"; '
+    'flock($lock, LOCK_EX) or die "lock: $!"; '
+    'system("/bin/sh", "-c", shift); '
+    "exit($? == -1 ? 1 : ($? & 127) ? 128 + ($? & 127) : $? >> 8);"
+)
+MIRROR_GIT = (
+    GIT
+    + 'SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-}" '
+    + GIT_FLAGS
+    + " -c protocol.allow=user -c fetch.recurseSubmodules=false "
+    '-c submodule.recurse=false -C "$mirror"'
+)
+
+
+def mirror_command(repository: str, name: str, command: str, *, owner: str) -> str:
+    _, organization, project = repo.parts(repository)
     return (
-        owned(name, owner) + f'if test ! -d "$HOME"/{shlex.quote(str(clone))}; '
-        "then printf '0\\n'; exit 0; fi\n"
-        f'cd "$HOME"/{shlex.quote(str(clone))} || exit "$?"\n'
-        f"if {git} show-ref --verify --quiet refs/heads/{branch}; then\n"
-        f"  if upstream=$({upstream} 2>/dev/null); then\n"
-        f'    {git} rev-list --count {branch} "^$upstream"\n'
-        "  else printf '1\\n'; fi\n"
-        "else printf '0\\n'; fi\n"
+        owned(name, owner)
+        + HELPERS
+        + f"""mirror="$state/tbhbdev/agent-mirrors/{organization}/{project}.git"
+for p in "$state/tbhbdev/agent-mirrors" \
+    "$state/tbhbdev/agent-mirrors/{organization}" "$mirror"; do
+    test ! -L "$p" && test -d "$p" || exit 65
+done
+safe_file "$mirror/agent-mirror.lock"
+export mirror
+cd "$HOME" || exit "$?"
+perl -MFcntl=:flock -e {shlex.quote(MIRROR_LOCK)} \
+    "$mirror/agent-mirror.lock" {shlex.quote(command)}
+"""
+    )
+
+
+def origin_branch(repository: str, name: str, *, owner: str) -> str:
+    return mirror_command(
+        repository,
+        name,
+        f"{MIRROR_GIT} ls-remote --end-of-options origin refs/heads/agent/{name}",
+        owner=owner,
     )
 
 
 @dataclass(frozen=True)
 class Cleanup:
     owner: str
-    delete_branch: bool
     force: bool
 
 
@@ -261,9 +287,7 @@ def clean(
 ) -> str:
     clone = repo.clone_path(PurePosixPath("."), repository)
     tree = f".worktrees/agent-{name}"
-    branch = f"agent/{name}"
-    git = GIT + GIT_FLAGS + " -c protocol.allow=never"
-    locked = f"""move_directory() {{
+    move = f"""move_directory() {{
     if test -L "$1"; then
         printf '%s\\n' "clean refused: $1 is a symlink" >&2; exit 65
     fi
@@ -275,21 +299,8 @@ def clean(
         mv "$1" "$2" || exit "$?"
     fi
 }}
-move_directory {tree} "$trash/worktree"
-test ! -L "$common/worktrees" || exit 65
-move_directory "$common/worktrees/agent-{name}" "$trash/admin"
+move_directory "$HOME"/{shlex.quote(str(clone / tree))} "$trash/worktree"
 """
-    if decision.delete_branch:
-        locked += f"""if {git} show-ref --verify --quiet refs/heads/{branch}; then
-{git} branch -D {branch} || exit "$?"
-fi
-"""
-    lock = (
-        'open(my $lock, ">>", shift) or die "open lock: $!"; '
-        'flock($lock, LOCK_EX) or die "lock: $!"; '
-        'system("/bin/sh", "-c", shift); '
-        "exit($? == -1 ? 1 : ($? & 127) ? 128 + ($? & 127) : $? >> 8);"
-    )
     command = (
         owned(name, decision.owner)
         + socket_root(sockets_dir)
@@ -304,18 +315,13 @@ if test -e "$fallback" || test -L "$fallback"; then
     exit 65
 fi
 """
-    command += f"""trash="$d/trash/{stamp}-{name}"
+    command += (
+        f"""trash="$d/trash/{stamp}-{name}"
 test ! -L "$d/trash" && test ! -L "$trash" || exit 65
 mkdir -p "$trash" || exit "$?"
-if test -d "$HOME"/{shlex.quote(str(clone))}; then
-cd "$HOME"/{shlex.quote(str(clone))} || exit "$?"
-common=$({git} rev-parse --path-format=absolute --git-common-dir) || exit "$?"
-safe_file "$common/agent-worktree.lock"
-export common trash
-perl -MFcntl=:flock -e {shlex.quote(lock)} \
-    "$common/agent-worktree.lock" {shlex.quote(locked)} || exit "$?"
-fi
 """
+        + move
+    )
     for suffix in files.SUFFIXES:
         path = f'"$d/{name}{suffix}"'
         command += (

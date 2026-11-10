@@ -204,19 +204,6 @@ def test_clean(rc: int | None, session: bool, force: bool, message: str | None) 
         assert str(caught.value) == message
 
 
-@pytest.mark.parametrize(
-    ("unpushed", "force", "result"),
-    [
-        (False, False, True),
-        (False, True, True),
-        (True, False, False),
-        (True, True, True),
-    ],
-)
-def test_branch(unpushed: bool, force: bool, result: bool) -> None:
-    assert driver.delete_branch(unpushed=unpushed, force=force) is result
-
-
 @pytest.mark.parametrize("kind", RunKind)
 def test_wait_kind(kind: RunKind) -> None:
     if kind is RunKind.EXEC:
