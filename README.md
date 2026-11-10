@@ -329,7 +329,7 @@ The run request is a versioned JSON object. Version 2 requires `tainted_host` an
 
 ### Agent isolation limits
 
-An `unsandboxed` run can read the account's 1Password Connect token and every secret it can read. It can write anything the account can. The host marker at `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` is only a hint. The marked account can delete it. An account listed on any `unsandboxed = true` host cannot run reviews on any host. A child can leave the process group and keep running after the run ends. Claude has no recorded sandbox pass. Run-host refuses it until an operator records a pass in `proven_harnesses`.
+An `unsandboxed` run can read the account's 1Password Connect token and every secret it can read. It can write anything the account can. The host marker at `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` is only a hint. The marked account can delete it. An account listed on any `unsandboxed = true` host can't run reviews on any host. A child can leave the process group and keep running after the run ends. Claude has no recorded sandbox pass. Run-host refuses it until an operator records a pass in `proven_harnesses`.
 
 ### Secret scan
 
