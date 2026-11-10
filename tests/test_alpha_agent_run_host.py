@@ -2698,10 +2698,10 @@ def test_marker_failure_refuses_launch(
     "plant",
     [
         "fifo",
-        "nonsticky",
+        "non-sticky",
         "directory-owner",
         "symlink",
-        "hardlink",
+        "hard-link",
         "file-owner",
         "directory-file",
     ],
@@ -2716,13 +2716,13 @@ def test_host_marker_refuses_unsafe_files(
     marker = directory / "agent.jsonl"
     if plant == "fifo":
         os.mkfifo(marker)
-    elif plant == "nonsticky":
+    elif plant == "non-sticky":
         directory.chmod(0o777)
     elif plant == "symlink":
         target = directory.with_name("real-directory")
         directory.rename(target)
         directory.symlink_to(target, target_is_directory=True)
-    elif plant == "hardlink":
+    elif plant == "hard-link":
         source = tmp_path / "source"
         source.write_text("unchanged")
         marker.hardlink_to(source)
@@ -2752,15 +2752,15 @@ def test_host_marker_refuses_unsafe_files(
     monkeypatch.setattr(os, "open", opened)
     with pytest.raises((Invalid, OSError)) as caught:
         run_host.mark_host(run)
-    if plant in ("nonsticky", "directory-owner"):
+    if plant in ("non-sticky", "directory-owner"):
         assert str(caught.value) == (
             "host marker directory must be sticky and owned by root or this account"
         )
-    elif plant in ("hardlink", "file-owner"):
+    elif plant in ("hard-link", "file-owner"):
         assert str(caught.value) == (
             "host marker must be a regular file owned by this account with one link"
         )
-    if plant == "hardlink":
+    if plant == "hard-link":
         assert (tmp_path / "source").read_text() == "unchanged"
 
 
