@@ -68,7 +68,7 @@ def planned_paths(run: Run) -> RunPaths:
         str(run.home),
         str(workspace.resolve()),
         str(run.tmpdir),
-        str(run.tmpdir / "codex"),
+        str(run.tmpdir.parent / "codex"),
         str((run.home / run.settings.sandbox.audit_dir).resolve()),
         str(workspace / ".git"),
         uid=os.getuid(),
@@ -152,6 +152,7 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
     )
     protected = (
         str(run.files.root.resolve()),
+        str(Path(paths.codex_home).resolve()),
         *protected_home(run),
         *host_tools.installation(),
         *directories,
@@ -313,7 +314,7 @@ def prepare_workspace(run: Run) -> Prepared:
         home=str(run.home),
         worktree=str(workspace),
         tmpdir=str(run.tmpdir),
-        codex_home=str(run.tmpdir / "codex"),
+        codex_home=str(run.tmpdir.parent / "codex"),
         audit_dir=policy.resolve(str(run.home), run.settings.sandbox.audit_dir),
         git_common_dir=str(workspace / ".git"),
         uid=os.getuid(),
@@ -673,6 +674,7 @@ def _files(name: str) -> runfiles.RunFiles:
 
 
 def _load(args: argparse.Namespace, tmpdir: Path) -> tuple[Run, str]:
+    tmpdir = runfiles.private_dir(tmpdir / "tools")
     started = time.time()
     clock = time.monotonic()
     loaded = settings.load()
