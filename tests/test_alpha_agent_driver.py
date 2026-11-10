@@ -938,6 +938,7 @@ def test_clean_moves_every_run_file_with_one_utc_stamp(
         os.umask(previous)
     stamp = "20261109T010203456789Z"
     local = remote.local / "tbhbdev/agent-runs/trash" / stamp
+    assert "trash" in {entry.name for entry in driver.directory().iterdir()}
     assert local.stat().st_mode & 0o777 == 0o700
     assert [p.name for p in local.iterdir()] == ["sample.json"]
     trash = remote.state / "trash" / f"{stamp}-sample"
@@ -1186,6 +1187,7 @@ def test_metadata_directory_is_private_before_chmod(
     args = agent.parser("example agent").parse_args(arguments(remote))
     run = driver.prepare(CONFIG, args)
     directory = driver.metadata_path("sample").parent
+    directory.rename(directory.with_name("previous-agent-runs"))
     original = type(directory).chmod
 
     def chmod(path: Path, mode: int) -> None:
