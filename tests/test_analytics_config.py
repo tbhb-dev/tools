@@ -12,6 +12,9 @@ TEXT_KEYS = (
     "database",
     "user",
     "password_file",
+    "reader_password_file",
+    "grafana_password_file",
+    "loader_password_file",
     "owner_role",
     "loader_role",
     "reader_role",
@@ -26,6 +29,9 @@ def test_defaults() -> None:
         database="analytics",
         user="analytics_owner",
         password_file=None,
+        reader_password_file=None,
+        grafana_password_file=None,
+        loader_password_file=None,
         owner_role="analytics_owner",
         loader_role="analytics_loader",
         reader_role="analytics_reader",
@@ -47,9 +53,9 @@ def test_invalid_string_names_key(key: str, value: object) -> None:
 
 
 @pytest.mark.parametrize("key", TEXT_KEYS)
-def test_none_is_only_valid_for_password_file(key: str) -> None:
-    if key == "password_file":
-        assert parse({key: None}).password_file is None
+def test_none_is_only_valid_for_password_files(key: str) -> None:
+    if key.endswith("password_file"):
+        assert asdict(parse({key: None}))[key] is None
     else:
         with pytest.raises(ValueError, match=key):
             parse({key: None})

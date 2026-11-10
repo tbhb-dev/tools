@@ -24,14 +24,16 @@ def parse(table: Mapping[str, object]) -> Settings:
         message = "[analytics] loader_enabled must be a boolean"
         raise ValueError(message)
     defaults = Settings()
-    password = table.get("password_file")
     return Settings(
         loader_enabled=loader,
         host=_text(table.get("host", defaults.host), "host"),
         port=_port(table.get("port", defaults.port)),
         database=_text(table.get("database", defaults.database), "database"),
         user=_text(table.get("user", defaults.user), "user"),
-        password_file=None if password is None else _text(password, "password_file"),
+        password_file=_optional_text(table, "password_file"),
+        reader_password_file=_optional_text(table, "reader_password_file"),
+        grafana_password_file=_optional_text(table, "grafana_password_file"),
+        loader_password_file=_optional_text(table, "loader_password_file"),
         owner_role=_text(table.get("owner_role", defaults.owner_role), "owner_role"),
         loader_role=_text(
             table.get("loader_role", defaults.loader_role), "loader_role"
@@ -57,3 +59,8 @@ def _text(value: object, key: str) -> str:
         message = f"[analytics] {key} must be a non-blank string"
         raise ValueError(message)
     return value
+
+
+def _optional_text(table: Mapping[str, object], key: str) -> str | None:
+    value = table.get(key)
+    return None if value is None else _text(value, key)

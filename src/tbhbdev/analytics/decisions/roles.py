@@ -62,6 +62,26 @@ def selected(settings: Settings) -> tuple[tuple[Role, str], ...]:
     return result
 
 
+def password_file(settings: Settings, key: str) -> tuple[str, str | None]:
+    """Return the config key that names a role's password file and its value."""
+    name = {
+        "loader": "loader_password_file",
+        "reader": "reader_password_file",
+        "grafana_reader": "grafana_password_file",
+    }[key]
+    return name, getattr(settings, name)
+
+
+def passwordless(settings: Settings) -> tuple[tuple[str, str], ...]:
+    """Return each selected role without a configured password file and the key."""
+    result: list[tuple[str, str]] = []
+    for role, key in selected(settings):
+        name, path = password_file(settings, key)
+        if path is None:
+            result.append((role.name, name))
+    return tuple(result)
+
+
 def statements(settings: Settings) -> tuple[str, ...]:
     replacements = {
         "analytics": settings.database,

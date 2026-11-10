@@ -5,6 +5,7 @@ import sys
 
 from tbhbdev.analytics import catalog, database, render, settings
 from tbhbdev.analytics.decisions.contract import matches
+from tbhbdev.analytics.decisions.roles import passwordless
 
 __all__ = ["catalog", "database", "main", "render", "settings"]
 
@@ -23,7 +24,13 @@ def main(argv: list[str], prog: str) -> int:
         try:
             if args.command == "migrate":
                 pending = database.migrate(connection, options, dry_run=args.dry_run)
-                sys.stdout.write(render.migrated(pending, dry_run=args.dry_run))
+                sys.stdout.write(
+                    render.migrated(
+                        pending,
+                        dry_run=args.dry_run,
+                        passwordless=passwordless(options),
+                    )
+                )
                 return 0
             verdict = matches(catalog.read(connection), catalog.contract())
             sys.stdout.write(render.checked(verdict))

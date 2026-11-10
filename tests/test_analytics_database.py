@@ -20,7 +20,12 @@ from tbhbdev.analytics.model import Migration, Settings
 def options(tmp_path: Path) -> Settings:
     for key in ("owner", "reader", "grafana_reader", "loader"):
         (tmp_path / f"{key}_password").write_text(key[0] * 32 + "\n")
-    return Settings(password_file=str(tmp_path / "owner_password"))
+    return Settings(
+        password_file=str(tmp_path / "owner_password"),
+        reader_password_file=str(tmp_path / "reader_password"),
+        grafana_password_file=str(tmp_path / "grafana_reader_password"),
+        loader_password_file=str(tmp_path / "loader_password"),
+    )
 
 
 @given(
@@ -146,6 +151,75 @@ def test_roles_and_repeat(
     assert fake.events == ["begin", "commit"]
 
 
+@pytest.fixture
+def packaged_migrations(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        database,
+        "files",
+        packaged(
+            files("tbhbdev.analytics").joinpath("data", "migrations"),
+            "data",
+            "migrations",
+        ),
+    )
+
+
+ROLE_FILES = {
+    "loader": "loader_password_file",
+    "reader": "reader_password_file",
+    "grafana_reader": "grafana_password_file",
+}
+
+
+@pytest.mark.usefixtures("packaged_migrations")
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("unconfigured", ["loader", "reader", "grafana_reader"])
+def test_role_without_password_file(
+    options: Settings, unconfigured: str, existing: bool
+) -> None:
+    options = replace(options, loader_enabled=True, **{ROLE_FILES[unconfigured]: None})
+    fake = FakeConnection()
+    if existing:
+        fake.roles = {role.name for role, _ in roles.selected(options)}
+    database.migrate(fake, options)
+    statements = [sql for sql, _ in fake.calls]
+    for role, key in roles.selected(options):
+        quoted = roles.identifier(role.name)
+        created = f"CREATE ROLE {quoted} LOGIN" in statements
+        assert created is not existing
+        hashed = scram.verifier(key[0] * 32, scram.stable_salt("o" * 32, key))
+        altered = f"ALTER ROLE {quoted} PASSWORD '{hashed}'" in statements
+        assert altered is (key != unconfigured)
+        assert not any(
+            sql.startswith(f"ALTER ROLE {quoted} PASSWORD")
+            for sql in statements
+            if key == unconfigured
+        )
+    assert roles.passwordless(options) == (
+        (
+            {
+                "loader": "analytics_loader",
+                "reader": "analytics_reader",
+                "grafana_reader": "grafana_reader",
+            }[unconfigured],
+            ROLE_FILES[unconfigured],
+        ),
+    )
+
+
+@pytest.mark.usefixtures("packaged_migrations")
+def test_unconfigured_files_need_no_other_files(tmp_path: Path) -> None:
+    (tmp_path / "owner_password").write_text("o" * 32)
+    fake = FakeConnection()
+    options = Settings(password_file=str(tmp_path / "owner_password"))
+    database.migrate(fake, options)
+    statements = [sql for sql, _ in fake.calls]
+    assert not any("PASSWORD" in sql for sql in statements)
+    assert 'CREATE ROLE "analytics_reader" LOGIN' in statements
+    assert 'CREATE ROLE "grafana_reader" LOGIN' in statements
+    assert 'CREATE ROLE "analytics_loader" LOGIN' not in statements
+
+
 @pytest.mark.parametrize("exists", [False, True])
 def test_dry_run(options: Settings, exists: bool) -> None:
     fake = FakeConnection()
@@ -183,6 +257,42 @@ def test_transaction_rollback_and_unlock(
     fake.failure = ""
     assert database.migrate(fake, options) == (Migration("0002_bad.sql", 2),)
     assert fake.versions == [1, 2]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "README.md",
+        ".DS_Store",
+        "notes.sql",
+        "a0001_x.sql",
+        "0001_x.txt",
+        "\u0661_x.sql",
+    ],
+)
+def test_stray_names_are_ignored(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, options: Settings, name: str
+) -> None:
+    directory = tmp_path / "data" / "migrations"
+    directory.mkdir(parents=True)
+    (directory / "0001_ok.sql").write_text("first")
+    (directory / name).write_text("stray")
+    monkeypatch.setattr(database, "files", answer(tmp_path))
+    fake = FakeConnection()
+    assert database.migrate(fake, options, dry_run=True) == (
+        Migration("0001_ok.sql", 1),
+    )
+
+
+def test_matching_name_without_positive_version_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, options: Settings
+) -> None:
+    directory = tmp_path / "data" / "migrations"
+    directory.mkdir(parents=True)
+    (directory / "0000_x.sql").write_text("zero")
+    monkeypatch.setattr(database, "files", answer(tmp_path))
+    with pytest.raises(ValueError, match="positive version"):
+        database.migrate(FakeConnection(), options, dry_run=True)
 
 
 @pytest.mark.parametrize(

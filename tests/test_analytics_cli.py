@@ -18,12 +18,19 @@ def test_usage(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
     assert capsys.readouterr().err.startswith("usage: tool analytics")
 
 
+FILES = {"reader_password_file": "reader", "grafana_password_file": "grafana"}
+
+
 @pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("configured", [False, True])
 def test_migrate(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], dry_run: bool
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+    configured: bool,
 ) -> None:
     fake = FakeConnection()
-    options = Settings()
+    options = Settings(**FILES) if configured else Settings()
     calls: list[tuple[database.Connection, Settings, bool]] = []
 
     def migrate(
@@ -54,6 +61,14 @@ def test_migrate(
     assert (
         output.out == f"analytics: 1 {'pending' if dry_run else 'applied'} migrations\n"
         "7: 0007_next.sql\n"
+        + (
+            ""
+            if configured
+            else "role analytics_reader has no password "
+            "(reader_password_file is not configured)\n"
+            "role grafana_reader has no password "
+            "(grafana_password_file is not configured)\n"
+        )
     )
     assert output.err == ""
 
@@ -109,7 +124,13 @@ def test_failure(
     assert fake.closed is (stage in {"migrate", "read"})
     output = capsys.readouterr()
     assert output.out == (
-        "analytics: 0 applied migrations\n" if stage == "close" else ""
+        "analytics: 0 applied migrations\n"
+        "role analytics_reader has no password "
+        "(reader_password_file is not configured)\n"
+        "role grafana_reader has no password "
+        "(grafana_password_file is not configured)\n"
+        if stage == "close"
+        else ""
     )
     assert (
         output.err

@@ -10,6 +10,9 @@ class Settings:
     database: str = "analytics"
     user: str = "analytics_owner"
     password_file: str | None = None
+    reader_password_file: str | None = None
+    grafana_password_file: str | None = None
+    loader_password_file: str | None = None
     owner_role: str = "analytics_owner"
     loader_role: str = "analytics_loader"
     reader_role: str = "analytics_reader"

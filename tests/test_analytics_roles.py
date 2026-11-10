@@ -8,6 +8,8 @@ from tbhbdev.analytics.decisions.roles import (
     GRANTS,
     ROLES,
     identifier,
+    password_file,
+    passwordless,
     selected,
     statements,
 )
@@ -169,3 +171,48 @@ def test_custom_identifiers() -> None:
         ):
             expected = expected.replace(before, after)
         assert rendered == expected
+
+
+FILES = {
+    "loader_password_file": "l",
+    "reader_password_file": "r",
+    "grafana_password_file": "g",
+}
+
+
+@pytest.mark.parametrize(
+    ("key", "name"),
+    [
+        ("loader", "loader_password_file"),
+        ("reader", "reader_password_file"),
+        ("grafana_reader", "grafana_password_file"),
+    ],
+)
+def test_password_file_key(key: str, name: str) -> None:
+    settings = Settings(**FILES)
+    assert password_file(settings, key) == (name, name[0])
+    assert password_file(Settings(), key) == (name, None)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_passwordless_lists_selected_roles_without_files(enabled: bool) -> None:
+    everything = (
+        ("analytics_loader", "loader_password_file"),
+        ("analytics_reader", "reader_password_file"),
+        ("grafana_reader", "grafana_password_file"),
+    )
+    assert (
+        passwordless(Settings(loader_enabled=enabled))
+        == everything[0 if enabled else 1 :]
+    )
+    assert passwordless(Settings(loader_enabled=enabled, **FILES)) == ()
+    assert passwordless(
+        Settings(
+            loader_enabled=enabled,
+            loader_role="custom_loader",
+            reader_role="custom_reader",
+            reader_password_file=FILES["reader_password_file"],
+        )
+    ) == ((("custom_loader", "loader_password_file"),) if enabled else ()) + (
+        ("grafana_reader", "grafana_password_file"),
+    )

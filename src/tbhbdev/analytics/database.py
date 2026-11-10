@@ -93,7 +93,9 @@ def _migrate(
     )
     directory = files("tbhbdev.analytics").joinpath("data", "migrations")
     pending = migrations.pending(
-        (entry.name for entry in directory.iterdir() if entry.is_file()),
+        migrations.sql_names(
+            entry.name for entry in directory.iterdir() if entry.is_file()
+        ),
         # The cast changes only the static type, so its type argument cannot
         # affect runtime behavior.
         (
@@ -125,7 +127,6 @@ def _roles(connection: Connection, settings: Settings) -> None:
             settings.password_file,
         )
     )
-    directory = path.parent
     owner = password(path)
     for role, key in roles.selected(settings):
         identifier = roles.identifier(role.name)
@@ -134,10 +135,10 @@ def _roles(connection: Connection, settings: Settings) -> None:
         ).fetchall()
         if not exists:
             connection.execute(f"CREATE ROLE {identifier} LOGIN")
-        hashed = scram.verifier(
-            password(directory / f"{key}_password"), scram.stable_salt(owner, key)
-        )
-        connection.execute(f"ALTER ROLE {identifier} PASSWORD '{hashed}'")
+        _, file = roles.password_file(settings, key)
+        if file is not None:
+            hashed = scram.verifier(password(Path(file)), scram.stable_salt(owner, key))
+            connection.execute(f"ALTER ROLE {identifier} PASSWORD '{hashed}'")
         if role.connection_limit is not None:
             connection.execute(
                 f"ALTER ROLE {identifier} CONNECTION LIMIT {role.connection_limit}"

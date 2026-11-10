@@ -197,6 +197,7 @@ tzset
 ufffd
 unalias
 uncheckpointed
+unconfigured
 uncomparables
 unkeyed
 unmatch

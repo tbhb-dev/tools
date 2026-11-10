@@ -8,10 +8,20 @@ if TYPE_CHECKING:
     from tbhbdev.analytics.model import Migration, Verdict
 
 
-def migrated(pending: tuple[Migration, ...], *, dry_run: bool) -> str:
+def migrated(
+    pending: tuple[Migration, ...],
+    *,
+    dry_run: bool,
+    passwordless: tuple[tuple[str, str], ...] = (),
+) -> str:
     action = "pending" if dry_run else "applied"
-    return f"analytics: {len(pending)} {action} migrations\n" + "".join(
-        f"{migration.version}: {migration.name}\n" for migration in pending
+    return (
+        f"analytics: {len(pending)} {action} migrations\n"
+        + "".join(f"{migration.version}: {migration.name}\n" for migration in pending)
+        + "".join(
+            f"role {role} has no password ({key} is not configured)\n"
+            for role, key in passwordless
+        )
     )
 
 
