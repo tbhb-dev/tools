@@ -13,14 +13,13 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from contextlib import ExitStack
 from pathlib import Path
 
 import agent_git_plants
 import pytest
 from agent_git_plants import PLANTS, plant
 from agent_host_example import git, repository
-from agent_live_evidence import prepared_codex_home
+from agent_live_evidence import codex_auth
 from test_alpha_agent_run_host import make_run
 
 from tbhbdev.alpha.agent import credentials, host_tools, run_host, worktree
@@ -138,40 +137,6 @@ def test_user_hook_and_run_home_write_probe_are_observable(tmp_path: Path) -> No
     assert json.loads(written.read_text()) == hooks
 
 
-@pytest.mark.parametrize("existing", [False, True])
-def test_account_hook_probe_restores_hooks_and_quarantines_tool_writes(
-    tmp_path: Path, existing: bool
-) -> None:
-    home = tmp_path / "account"
-    config = home / ".codex"
-    config.mkdir(parents=True)
-    source = config / "hooks.json"
-    if existing:
-        source.write_text("original fixture hooks")
-    codex_home = tmp_path / "prepared"
-    codex_home.mkdir()
-
-    def fail_probe() -> None:
-        with agent_git_plants.account_hook_probe(home, codex_home, tmp_path) as (
-            command,
-            _marker,
-            written,
-        ):
-            assert source.exists()
-            subprocess.run(["/bin/sh", "-c", command], check=True, timeout=5)
-            assert written.exists()
-            message = "probe failed"
-            raise ValueError(message)
-
-    with pytest.raises(ValueError, match="probe failed"):
-        fail_probe()
-    assert not (codex_home / "hooks.json").exists()
-    if existing:
-        assert source.read_text() == "original fixture hooks"
-    else:
-        assert not source.exists()
-
-
 @pytest.mark.skipif(
     os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1",
     reason="set TBHBDEV_SANDBOX_LIVE=1 for real harness git probes",
@@ -187,7 +152,6 @@ def test_live_harness_parent_ignores_each_git_plant(
     temp_write: bool,
 ) -> None:
     account_home = Path.home()
-    auth_home = prepared_codex_home(account_home) if harness is Harness.CODEX else None
     installed = shutil.which(harness.value)
     assert installed is not None, f"{harness}: harness binary not installed"
     run, paths = real_clone(tmp_path, monkeypatch, harness)
@@ -212,21 +176,15 @@ def test_live_harness_parent_ignores_each_git_plant(
     marker.rename(tmp_path / "positive")
     control = Path(paths.worktree) / "shell-control"
     command_text = f"printf invoked > {shlex.quote(str(control))}"
-    user_marker = tmp_path / "user-hook-marker"
-    written = Path(paths.codex_home) / "hooks.json"
-    with ExitStack() as stack:
-        if auth_home is not None:
-            paths = dataclasses.replace(paths, codex_home=auth_home)
-            attempt, user_marker, written = stack.enter_context(
-                agent_git_plants.account_hook_probe(
-                    account_home, Path(auth_home), tmp_path
-                )
-            )
-            command_text = attempt + " || :; " + command_text
+    with codex_auth(run, paths, account_home, tmp_path):
+        attempt, user_marker, written = agent_git_plants.hook_write_probe(
+            run.home, Path(paths.codex_home), tmp_path
+        )
+        command_text = attempt + " || :; " + command_text
         execute_native_git_probe(run, paths, command_text)
         assert not marker.exists(), f"{harness} executed the {name} plant"
         assert control.is_file(), "harness did not execute the shell tool control"
-        assert not user_marker.exists(), "Codex loaded the account's user hook"
+        assert not user_marker.exists(), "Codex loaded the run home's user hook"
         assert not written.exists(), "the shell tool wrote hooks into CODEX_HOME"
 
 
