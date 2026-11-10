@@ -2516,7 +2516,8 @@ def test_preflight_refuses_review_on_tainted_host(
         tainted_host=tainted,
     )
     if profile == "review" and tainted:
-        with pytest.raises(Invalid, match="review runs are refused on a tainted host"):
+        with pytest.raises(Invalid) as caught:
             run_host.preflight(run)
+        assert str(caught.value) == "review runs are refused on a tainted host"
     else:
         run_host.preflight(run)
