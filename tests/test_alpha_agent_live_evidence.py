@@ -10,10 +10,10 @@ lazy from pathlib import Path
 
 import pytest
 import test_alpha_agent_sandbox_live as live
-from agent_live_evidence import MIRROR_LABELS, mirror_cases, prepared_codex_home
+from agent_live_evidence import MIRROR_LABELS, mirror_cases
 from agent_live_probe import Proxy
 
-from tbhbdev.alpha.agent import run_host
+from tbhbdev.alpha.agent import credentials, run_host
 from tbhbdev.alpha.agent.decisions import policy
 from tbhbdev.alpha.agent.model import Harness, Invalid
 
@@ -21,37 +21,12 @@ MIRRORS = MIRROR_LABELS
 EXTRA = (*MIRRORS, "file-control", "local-binding", "host-loopback")
 
 
-@pytest.mark.parametrize(
-    "location",
-    ["missing", "absent", "account", "account-alias", "hooks", "config", "prepared"],
-)
-def test_native_codex_requires_a_separate_prepared_home(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
-) -> None:
-    home = tmp_path / "account"
-    directory = (
-        home / ".codex" if location.startswith("account") else tmp_path / "prepared"
-    )
-    directory.mkdir(parents=True)
-    if location in ("hooks", "config"):
-        name = "hooks.json" if location == "hooks" else "config.toml"
-        (directory / name).write_text("fixture configuration")
-    if location == "account-alias":
-        alias = tmp_path / "alias"
-        alias.symlink_to(directory, target_is_directory=True)
-        directory = alias
-    if location == "missing":
-        monkeypatch.delenv("TBHBDEV_SANDBOX_CODEX_HOME", raising=False)
-    else:
-        monkeypatch.setenv(
-            "TBHBDEV_SANDBOX_CODEX_HOME",
-            str(directory / "absent") if location == "absent" else str(directory),
-        )
-    if location == "prepared":
-        assert prepared_codex_home(home) == str(directory)
-    else:
-        with pytest.raises(Invalid):
-            prepared_codex_home(home)
+@pytest.fixture(autouse=True)
+def fake_codex_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_auth(_source: Path, _destination: Path) -> None:
+        return None
+
+    monkeypatch.setattr(credentials, "auth_copy", no_auth)
 
 
 def test_host_marker_path_is_common_to_all_accounts(
@@ -160,9 +135,6 @@ def test_no_live_evidence_fails_instead_of_skipping(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("CODEX_SANDBOX", "test" if reason == "sandbox" else "")
-    prepared = tmp_path / "prepared-codex"
-    prepared.mkdir()
-    monkeypatch.setenv("TBHBDEV_SANDBOX_CODEX_HOME", str(prepared))
 
     def installed(_name: str) -> str | None:
         return None if reason == "missing" else "/example/codex"

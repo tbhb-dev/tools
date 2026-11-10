@@ -2,28 +2,48 @@
 
 from __future__ import annotations
 
-import os
+import dataclasses
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_live_probe import mirror_object, mirror_probes
 
-from tbhbdev.alpha.agent.model import Invalid
+from tbhbdev.alpha.agent import credentials, run_host, runfiles
+from tbhbdev.alpha.agent.model import Harness
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
+    from tbhbdev.alpha.agent.model import RunPaths
 
 
-def prepared_codex_home(account_home: Path) -> str:
-    configured = os.environ.get("TBHBDEV_SANDBOX_CODEX_HOME")
-    if not configured:
-        message = "set TBHBDEV_SANDBOX_CODEX_HOME to a prepared private Codex home"
-        raise Invalid(message)
-    directory = Path(configured).resolve()
-    if not directory.is_dir() or directory == (account_home / ".codex").resolve():
-        message = "TBHBDEV_SANDBOX_CODEX_HOME must name a separate prepared directory"
-        raise Invalid(message)
-    if any((directory / name).exists() for name in ("hooks.json", "config.toml")):
-        message = "prepare a private Codex home with login data only"
-        raise Invalid(message)
-    return str(directory)
+@contextmanager
+def codex_auth(
+    run: run_host.Run, paths: RunPaths, account_home: Path, root: Path
+) -> Generator[RunPaths]:
+    assert run.request.harness is Harness.CODEX
+    directory = Path(paths.codex_home)
+    assert directory.resolve().is_relative_to(root.resolve())
+    runfiles.private_dir(directory)
+    before = None
+    try:
+        before = credentials.auth_copy(
+            account_home / ".codex" / "auth.json", directory / "auth.json"
+        )
+        yield paths
+    finally:
+        prepared = run_host.Prepared(
+            paths,
+            credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
+            before,
+        )
+        reason = run_host.finish_auth(
+            dataclasses.replace(run, home=account_home), prepared
+        )
+        assert reason is None, reason
+        assert not list(root.rglob("auth.json"))
 
 
 MIRROR_LABELS = (

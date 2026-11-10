@@ -24,8 +24,8 @@ from agent_live_evidence import (
     EXTRA_LABELS,
     MIRROR_LABELS,
     MirrorProbe,
+    codex_auth,
     mirror_cases,
-    prepared_codex_home,
 )
 from agent_live_probe import (
     Proxy,
@@ -509,9 +509,8 @@ def test_build_sandboxes_refuse_user_sockets(tmp_path: Path, harness: Harness) -
         ),
     )
     try:
-        if harness is Harness.CODEX:
-            paths = dataclasses.replace(paths, codex_home=prepared_codex_home(run.home))
         with ExitStack() as stack:
+            stack.enter_context(codex_auth(run, paths, run.home, tmp_path))
             run_probe(run, paths, str(Path(installed).resolve()), stack)
     except (Invalid, OSError, subprocess.TimeoutExpired, AssertionError) as error:
         report_unproven(harness)
@@ -704,36 +703,37 @@ def test_codex_exec_refuses_project_config(tmp_path: Path) -> None:
         "HOME": str(scratch_home),
         "CODEX_HOME": paths.codex_home,
     }
-    untrusted = subprocess.run(
-        command,
-        input="probe",
-        cwd=workspace,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=30,
-    )
-    assert "example-nonexistent-provider" in untrusted.stderr
-    assert "model provider" in untrusted.stderr.lower()
-    assert "not found" in untrusted.stderr.lower()
-    assert "toml parse error" not in untrusted.stderr.lower()
-    trusted_command = tuple(
-        arg.replace('trust_level="untrusted"', 'trust_level="trusted"')
-        for arg in command
-    )
-    trusted = subprocess.run(
-        trusted_command,
-        input="probe",
-        cwd=workspace,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=30,
-    )
-    assert trusted.returncode != 0
-    assert "toml parse error" in trusted.stderr.lower()
-    assert str(project / "config.toml") in trusted.stderr
-    assert "example-nonexistent-provider" not in trusted.stderr
+    with codex_auth(run, paths, run.home, tmp_path):
+        untrusted = subprocess.run(
+            command,
+            input="probe",
+            cwd=workspace,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        assert "example-nonexistent-provider" in untrusted.stderr
+        assert "model provider" in untrusted.stderr.lower()
+        assert "not found" in untrusted.stderr.lower()
+        assert "toml parse error" not in untrusted.stderr.lower()
+        trusted_command = tuple(
+            arg.replace('trust_level="untrusted"', 'trust_level="trusted"')
+            for arg in command
+        )
+        trusted = subprocess.run(
+            trusted_command,
+            input="probe",
+            cwd=workspace,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        assert trusted.returncode != 0
+        assert "toml parse error" in trusted.stderr.lower()
+        assert str(project / "config.toml") in trusted.stderr
+        assert "example-nonexistent-provider" not in trusted.stderr
     report("codex exec project config: refused")

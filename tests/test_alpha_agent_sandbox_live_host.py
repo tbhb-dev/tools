@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Never
 
 import pytest
+from agent_live_evidence import codex_auth
 from agent_live_host_probe import (
     INPUT_MARKER,
     TerminalObservation,
@@ -33,7 +34,7 @@ from agent_live_host_probe import (
 )
 from test_alpha_agent_sandbox_live import live_only, probe_run, report
 
-from tbhbdev.alpha.agent import host_tools, run_host
+from tbhbdev.alpha.agent import credentials, host_tools, run_host
 from tbhbdev.alpha.agent.model import Harness, Invalid, Profile
 
 
@@ -120,6 +121,11 @@ def fake_host_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(shutil, "which", installed)
     monkeypatch.setattr(host_tools, "resolve", resolved)
+
+    def no_auth(_source: Path, _destination: Path) -> None:
+        return None
+
+    monkeypatch.setattr(credentials, "auth_copy", no_auth)
 
     def command(
         _run: object, _paths: object, _value: object, _executable: str, script: Path
@@ -211,15 +217,16 @@ def test_live_protected_hard_links(
     except Invalid:
         pytest.fail(f"{harness} {profile} hard links: failed evidence; policy refused")
     command = probe_command(run, paths, value, executable, script)
-    result = subprocess.run(
-        command,
-        env=value.env,
-        cwd=paths.worktree,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=45,
-    )
+    with codex_auth(run, paths, run.home, tmp_path):
+        result = subprocess.run(
+            command,
+            env=value.env,
+            cwd=paths.worktree,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=45,
+        )
     unchanged = [
         snapshot(source) == expected
         for source, expected in zip(sources, before, strict=True)
@@ -476,11 +483,12 @@ def test_live_terminal_injection(
         value, executable = checked_live_policy(run, paths)
     except Invalid:
         pytest.fail(f"{label}: unproven; policy refused; legacy_tiocsti={setting}")
-    probe = observe_terminal(
-        probe_command(run, paths, value, executable, script),
-        value.env,
-        Path(paths.worktree),
-    )
+    with codex_auth(run, paths, run.home, tmp_path):
+        probe = observe_terminal(
+            probe_command(run, paths, value, executable, script),
+            value.env,
+            Path(paths.worktree),
+        )
     if not witness.is_file():
         pytest.fail(f"{label}: unproven; probe not executed; legacy_tiocsti={setting}")
     observed = json.loads(witness.read_text())
