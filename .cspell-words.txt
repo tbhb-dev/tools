@@ -216,3 +216,16 @@ xsession
 xtbhb
 zizmor
 zqxw
+
+boottime
+getpgid
+getpgrp
+getsid
+killpg
+pgid
+setpgid
+SIGCONT
+SIGTTOU
+tcgetpgrp
+tcsetpgrp
+waitpid
