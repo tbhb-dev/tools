@@ -21,7 +21,8 @@ EXTRA = (*MIRRORS, "file-control", "local-binding", "host-loopback")
 
 
 @pytest.mark.parametrize(
-    "location", ["missing", "absent", "account", "account-alias", "prepared"]
+    "location",
+    ["missing", "absent", "account", "account-alias", "hooks", "config", "prepared"],
 )
 def test_native_codex_requires_a_separate_prepared_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
@@ -31,6 +32,9 @@ def test_native_codex_requires_a_separate_prepared_home(
         home / ".codex" if location.startswith("account") else tmp_path / "prepared"
     )
     directory.mkdir(parents=True)
+    if location in ("hooks", "config"):
+        name = "hooks.json" if location == "hooks" else "config.toml"
+        (directory / name).write_text("fixture configuration")
     if location == "account-alias":
         alias = tmp_path / "alias"
         alias.symlink_to(directory, target_is_directory=True)

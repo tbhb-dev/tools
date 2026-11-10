@@ -20,6 +20,9 @@ def prepared_codex_home(account_home: Path) -> str:
     if not directory.is_dir() or directory == (account_home / ".codex").resolve():
         message = "TBHBDEV_SANDBOX_CODEX_HOME must name a separate prepared directory"
         raise Invalid(message)
+    if any((directory / name).exists() for name in ("hooks.json", "config.toml")):
+        message = "prepare a private Codex home with login data only"
+        raise Invalid(message)
     return str(directory)
 
 
