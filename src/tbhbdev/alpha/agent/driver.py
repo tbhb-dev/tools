@@ -135,7 +135,7 @@ def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
             marker = transport.shell(
                 settings,
                 run.host,
-                remote.host_marker(),
+                remote.host_marker(run.request.account),
                 timeout=deadline - time.monotonic(),
             )
         except transport.TransportError:

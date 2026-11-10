@@ -291,7 +291,7 @@ def test_review_ref(remote: Remote, ref: str) -> None:
         == COMMIT
     )
     calls = remote.records("ssh")
-    assert "agent-taint.jsonl" in str(calls[0]["args"])
+    assert "tbhbdev-agent-taint/agent.jsonl" in str(calls[0]["args"])
     assert "--version" in str(calls[1]["args"])
     git = remote.records("git")
     if ref == COMMIT:
@@ -966,7 +966,7 @@ def test_exec_spends_one_startup_budget(
     ) -> str:
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
-        if script == remote_commands.host_marker():
+        if script == remote_commands.host_marker(host.account):
             assert timeout == 110
             steps.append("marker")
             return ""

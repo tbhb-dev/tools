@@ -63,7 +63,7 @@ def test_clear_host_and_launch_review(remote: Remote) -> None:
     assert launch(remote, "--profile", "review") == 0
     assert taint_store.load("example-linux").status == "clean"
     calls = remote.records("ssh")
-    assert "agent-taint.jsonl" in str(calls[0])
+    assert "tbhbdev-agent-taint/agent.jsonl" in str(calls[0])
     assert "--version" in str(calls[1])
     wire = json.loads((remote.state / "sample.request.json").read_text())
     assert wire["tainted_host"] is False
@@ -84,7 +84,7 @@ def test_unsandboxed_append_precedes_preparation(
         data: bytes = b"",
         timeout: float = 30,
     ) -> str:
-        if "agent-taint.jsonl" not in command[2]:
+        if "tbhbdev-agent-taint/ops.jsonl" not in command[2]:
             state = taint_store.load("example-linux")
             assert state.status == "tainted"
             assert state.taint is not None
@@ -146,7 +146,7 @@ def test_host_marker_is_evidence_only(
     remote: Remote, capsys: pytest.CaptureFixture[str], marker: str, profile: str
 ) -> None:
     assert clear() == 0
-    path = remote.state.parent / "agent-taint.jsonl"
+    path = remote.root / "markers/agent.jsonl"
     path.write_text(marker)
     capsys.readouterr()
     assert launch(
@@ -178,7 +178,7 @@ def test_host_marker_read_error_refuses_review(
 ) -> None:
     assert clear() == 0
     # A directory cannot be read as a marker, on either supported host OS.
-    (remote.state.parent / "agent-taint.jsonl").mkdir()
+    (remote.root / "markers/agent.jsonl").mkdir()
     assert launch(
         remote,
         "--profile",
@@ -197,11 +197,12 @@ def test_host_marker_read_error_refuses_review(
 
 
 def test_marker_read_is_bounded(remote: Remote) -> None:
-    (remote.state.parent / "agent-taint.jsonl").write_bytes(b"x" * 70000)
+    (remote.root / "markers/agent.jsonl").write_bytes(b"x" * 70000)
     value = driver.transport.shell(
-        settings(), settings().hosts[0], driver.remote.host_marker()
+        settings(), settings().hosts[0], driver.remote.host_marker("agent")
     )
     assert len(value) == 65536
+    assert len(remote.records("ssh")) == 1
 
 
 def test_clearance_prints_state_and_repairs_partial_line(
@@ -280,3 +281,19 @@ def test_clear_taint_requires_host_and_reason(
     assert agent.main(["clear-taint", *options], "example agent") == 2
     assert remote.records("ssh") == []
     assert not (driver.directory() / "taint").exists()
+
+
+@pytest.mark.parametrize("account", ["agent", "ops"])
+def test_empty_marker_for_run_account_allows_review(
+    remote: Remote, account: str
+) -> None:
+    assert clear() == 0
+    (remote.root / "markers" / f"{account}.jsonl").write_text("")
+    other = "ops" if account == "agent" else "agent"
+    (remote.root / "markers" / f"{other}.jsonl").write_text("marked\n")
+    assert (
+        launch(remote, "--account", account, "--profile", "review", "--ref", "a" * 40)
+        == 0
+    )
+    assert len(remote.records("ssh")) == 5
+    assert taint_store.load("example-linux").status == "clean"
