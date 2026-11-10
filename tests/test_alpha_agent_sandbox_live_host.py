@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from subprocess import CompletedProcess
+from types import SimpleNamespace
 
 import pytest
 from agent_live_host_probe import (
@@ -73,6 +75,59 @@ def test_hard_link_control_and_probe_use_the_same_filesystem(tmp_path: Path) -> 
     assert source.stat().st_mode & 0o777 == 0o700
 
 
+@pytest.fixture
+def fake_host_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    executable = tmp_path / "bin" / "harness"
+    executable.parent.mkdir()
+    executable.write_bytes(b"\x7fELF")
+    executable.chmod(0o700)
+    which = shutil.which
+
+    def installed(name: str) -> str | None:
+        return str(executable) if name in {h.value for h in Harness} else which(name)
+
+    def resolved(_name: str, _path: str | None = None) -> str:
+        return str(executable)
+
+    monkeypatch.setattr(shutil, "which", installed)
+    monkeypatch.setattr(host_tools, "resolve", resolved)
+
+
+@pytest.mark.usefixtures("fake_host_tools")
+@pytest.mark.parametrize("profile", Profile)
+def test_hard_link_evidence_uses_profile_write_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: Profile
+) -> None:
+    def command(
+        _run: object, _paths: object, _value: object, _executable: str, script: Path
+    ) -> tuple[str, ...]:
+        return "fake-sandbox", str(script)
+
+    def execute(argv: tuple[str, ...], **_kwargs: object) -> CompletedProcess[str]:
+        assert argv[0] == "fake-sandbox"
+        _, _, _, results, writes, _, *sources = shlex.split(Path(argv[1]).read_text())
+        expected = tmp_path / ("temp" if profile is Profile.BUILD else "audit")
+        assert Path(writes) == expected
+        assert Path(results).parent == expected
+        assert len(sources) == 4
+        assert Path(sources[-1]) == tmp_path / "unlisted"
+        Path(results).write_text(
+            json.dumps(
+                {
+                    Path(p).name: {"read": 0, "link": 1, "write": 1, "chmod": 1}
+                    for p in sources
+                }
+            )
+        )
+        return CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(sys.modules[__name__], "probe_command", command)
+    monkeypatch.setattr(
+        sys.modules[__name__], "subprocess", SimpleNamespace(run=execute)
+    )
+    test_live_protected_hard_links(tmp_path, monkeypatch, Harness.CODEX, profile)
+
+
 @pytest.mark.skipif(
     os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1",
     reason="hard links: failed evidence; set TBHBDEV_SANDBOX_LIVE=1",
@@ -87,8 +142,8 @@ def test_live_protected_hard_links(
         pytest.skip(f"{harness} {profile} hard links: failed evidence; not installed")
     run, paths = live_policy(tmp_path, monkeypatch, harness, profile)
     sources = protected_sources(run)
-    writes = Path(paths.audit_dir)
-    writes.mkdir(parents=True)
+    writes = Path(paths.tmpdir if profile is Profile.BUILD else paths.audit_dir)
+    writes.mkdir(parents=True, exist_ok=True)
     controls = tmp_path / "controls"
     controls.mkdir()
     ln = shutil.which("ln")
@@ -276,11 +331,13 @@ def test_host_probes_use_readable_protection_and_selected_profile(
     monkeypatch.setattr(shutil, "which", installed)
     monkeypatch.setattr(host_tools, "resolve", resolved)
     run, paths = live_policy(tmp_path, monkeypatch, harness, profile)
-    readable, *_ = protected_sources(run)
+    readable, _, _, unlisted = protected_sources(run)
     value, selected = checked_live_policy(run, paths)
     assert selected == str(executable)
     assert str(readable) in run_host.protected_home(run)
     assert all(not readable.is_relative_to(deny) for deny in value.deny)
+    entries = (*run_host.protected_home(run), *value.deny)
+    assert all(not unlisted.is_relative_to(entry) for entry in entries)
     run.files.write("prompt", "probe")
     command = probe_command(run, paths, value, selected, tmp_path / "probe.sh")
     if harness is Harness.CODEX:
