@@ -150,6 +150,7 @@ def observe_terminal(
     cwd: Path,
     *,
     prompt: str | None = None,
+    tty_file: Path | None = None,
 ) -> TerminalObservation:
     # Codex's explicit '-' calls read_to_end even on a terminal. Raw-mode EOF
     # is data, so give the prompt as an argument while retaining terminal stdin.
@@ -159,25 +160,29 @@ def observe_terminal(
         command = (*command[:-1], prompt)
     master, slave = pty.openpty()
     try:
+        if tty_file is not None:
+            tty_file.write_text(os.ttyname(slave))
         with subprocess.Popen(
             (sys.executable, str(Path(__file__).resolve()), "terminal", *command),
             stdin=slave,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env=environment,
             cwd=cwd,
             start_new_session=True,
         ) as child:
             try:
-                code = child.wait(timeout=45)
+                output, _ = child.communicate(timeout=45)
+                code = child.returncode
             except subprocess.TimeoutExpired:
                 code = 124
+                output = b""
             finally:
                 # Only this process's freshly created session receives signals.
                 with suppress(ProcessLookupError):
                     os.killpg(child.pid, signal.SIGKILL)
                 child.wait(timeout=5)
-        inputs = os.read(slave, 4096) if select.select([slave], [], [], 0)[0] else b""
+        inputs = bytes.fromhex(json.loads(output)["inputs"]) if output else b""
         return TerminalObservation(inputs, code)
     finally:
         os.close(slave)
@@ -192,11 +197,11 @@ def terminal_status(control: bytes, observed: bytes, error: int) -> str:
     return "blocked"
 
 
-def inject_terminal(witness: Path) -> None:
+def inject_terminal(witness: Path, terminal: str = "/dev/tty") -> None:
     attempted = False
     error = 0
     try:
-        descriptor = os.open("/dev/tty", os.O_RDWR)
+        descriptor = os.open(terminal, os.O_RDONLY | os.O_NOCTTY)
         try:
             for byte in INPUT_MARKER:
                 attempted = True
@@ -226,9 +231,19 @@ def main(mode: str, arguments: list[str]) -> None:
     if mode == "terminal":
         fcntl.ioctl(0, termios.TIOCSCTTY, 0)
         tty.setraw(0)
-        raise SystemExit(subprocess.run(arguments, check=False, timeout=40).returncode)
+        result = subprocess.run(
+            arguments, check=False, timeout=40, stdout=subprocess.DEVNULL
+        )
+        # macOS revokes the controlling tty when its session leader exits.
+        # Collect queued input here, while that leader still owns the terminal.
+        inputs = os.read(0, 4096) if select.select([0], [], [], 0)[0] else b""
+        sys.stdout.write(json.dumps({"inputs": inputs.hex()}))
+        raise SystemExit(result.returncode)
     if mode == "inject":
-        inject_terminal(Path(arguments[0]))
+        # Tool shells can have no controlling terminal. Use the exact outer
+        # tty recorded by observe_terminal, without requiring write-open access.
+        terminal = Path(arguments[0]).read_text() if len(arguments) > 1 else "/dev/tty"
+        inject_terminal(Path(arguments[-1]), terminal)
     else:
         results, writes, ln, *sources = arguments
         observed = {

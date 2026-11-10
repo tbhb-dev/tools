@@ -260,3 +260,5 @@ basetemp
 noproxy
 CDXPXY
 ENXIO
+ttyname
+NOCTTY
