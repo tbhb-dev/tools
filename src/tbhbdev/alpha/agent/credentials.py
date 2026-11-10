@@ -45,6 +45,16 @@ def read(reference: str, *, label: str) -> str:
     return value
 
 
+def require_reviews_app(references: Credentials) -> None:
+    if (
+        references.reviews_app_id is None
+        or references.reviews_app_client_id is None
+        or references.reviews_app_pem is None
+    ):
+        message = "reviews App credentials are not configured"
+        raise Invalid(message)
+
+
 def installation_token(references: Credentials, repository: str) -> str:
     """Reuse the app signer and request a token restricted to one repository."""
     host, owner, name = repo.parts(repository)
@@ -73,7 +83,6 @@ def installation_token(references: Credentials, repository: str) -> str:
 
 def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
     references = next(c for c in settings.credentials if c.account == request.account)
-    fallback = False
     if request.profile is Profile.REVIEW:
         try:
             gh_token = installation_token(references, request.repo)
@@ -86,8 +95,8 @@ def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
             httpx.HTTPError,
             gh_app.GhAppError,
         ):
-            fallback = True
-            gh_token = read(references.gh, label="gh")
+            message = "reviews App token unavailable; review refused"
+            raise Invalid(message) from None
     else:
         gh_token = read(references.gh, label="gh")
     gh = runfiles.private_dir(tmpdir / "gh")
@@ -119,7 +128,7 @@ def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
         if request.profile is Profile.BUILD
         else None
     )
-    return Delivery(env, signing, fallback, profile_name)
+    return Delivery(env, signing, gh_fallback=False, claude_profile=profile_name)
 
 
 def signing_agent(key: str, tmpdir: Path, deadline: float) -> subprocess.Popen[str]:

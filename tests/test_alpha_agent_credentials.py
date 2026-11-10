@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+import httpx
 import pytest
 import yaml
 from agent_host_example import constant, git, host_settings, repository, run_request
@@ -113,25 +114,49 @@ def test_each_credential_only_reaches_its_destination(
     assert fake_reader == expected
 
 
-def test_review_falls_back_and_anonymous_docker_reads_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_reader: list[str]
+@pytest.mark.parametrize(
+    "failure",
+    [
+        Invalid,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        httpx.HTTPError,
+        gh_app.GhAppError,
+    ],
+)
+def test_review_token_failure_never_delivers_the_broad_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_reader: list[str],
+    failure: type[Exception],
 ) -> None:
     def fail(*_: object) -> str:
         message = "unprinted-app-material"
-        raise gh_app.GhAppError(message)
+        raise failure(message)
 
     monkeypatch.setattr(credentials, "installation_token", fail)
+    with pytest.raises(Invalid) as caught:
+        credentials.deliver(
+            run_request(profile="review", commit="0" * 40), host_settings(), tmp_path
+        )
+    assert str(caught.value) == "reviews App token unavailable; review refused"
+    assert fake_reader == []
+    assert {p.name for p in tmp_path.iterdir()} == {"xdg"}
+
+
+def test_anonymous_docker_reads_no_docker_credential(
+    tmp_path: Path, fake_reader: list[str]
+) -> None:
     original = host_settings()
     config = dataclasses.replace(
         original,
         credentials=(dataclasses.replace(original.credentials[0], docker=None),),
     )
-    result = credentials.deliver(
-        run_request(profile="review", commit="0" * 40), config, tmp_path
-    )
-    assert result.gh_fallback is True
-    assert result.signing is None
-    assert fake_reader == ["example/gh/value"]
+    result = credentials.deliver(run_request(), config, tmp_path)
+    assert result.gh_fallback is False
+    assert fake_reader == ["example/gh/value", "example/signing/key"]
     assert json.loads((tmp_path / "docker" / "config.json").read_text()) == {
         "auths": {}
     }
@@ -508,7 +533,6 @@ def test_signing_socket_wait_obeys_deadline_and_interval(
     ("reference", "label", "profile"),
     [
         ("example/gh/value", "gh", "build"),
-        ("example/gh/value", "gh", "review"),
         ("example/docker/value", "docker", "build"),
         ("example/signing/key", "signing", "build"),
         ("example/app/client", "reviews app", "app"),

@@ -241,6 +241,11 @@ def preflight(run: Run) -> None:
     if run.request.profile is Profile.REVIEW and run.request.tainted_host:
         message = "review runs are refused on a tainted host"
         raise Invalid(message)
+    if run.request.profile is Profile.REVIEW:
+        references = next(
+            c for c in run.settings.credentials if c.account == run.request.account
+        )
+        credentials.require_reviews_app(references)
     sandbox = run.settings.sandbox
     reason = (
         sandbox.codex_network_proxy_opt_out
