@@ -86,17 +86,18 @@ def test_unsandboxed_force_clean_only_moves_to_trash(
     remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
+    remote.configure(session=False)
     before = {tool: remote.records(tool) for tool in ("ssh", "git", "tmux")}
     capsys.readouterr()
     assert command("clean", "--force") == 0
     assert capsys.readouterr() == ("", "")
     assert remote.records("git") == before["git"]
-    assert remote.records("tmux") == before["tmux"]
+    assert len(remote.records("tmux")) == len(before["tmux"]) + 2
     calls = remote.records("ssh")
-    assert len(calls) == len(before["ssh"]) + 1
+    assert len(calls) == len(before["ssh"]) + 2
     script = str(calls[-1]["args"])
     assert "agent-mirrors" not in script
-    assert "tmux" not in script
+    assert "tmux_state has-session ag-sample" in script
     assert " git " not in script
     assert not driver.metadata_path("sample").exists()
     trash = next((remote.state / "trash").iterdir())
@@ -1565,3 +1566,16 @@ def test_inspection_fetch_failure_stops_before_read(remote: Remote, verb: str) -
 )
 def test_inspection_rejects_extra_options(args: list[str]) -> None:
     assert agent.main(args, "example agent") == 2
+
+
+def test_unsandboxed_force_clean_refuses_live_session(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
+    before = remote.records("git")
+    assert command("clean", "--force") == 1
+    assert "run is running; clean refused" in capsys.readouterr().err
+    assert driver.metadata_path("sample").exists()
+    assert (remote.state / "sample.owner").is_file()
+    assert not (remote.state / "trash").exists()
+    assert remote.records("git") == before

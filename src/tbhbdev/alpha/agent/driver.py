@@ -367,17 +367,15 @@ def archive_metadata(name: str, stamp: str) -> None:
 
 
 def clean(settings: Settings, run: Run, *, force: bool) -> int:
-    if run.request.unsandboxed:
-        if not force:
-            print("unsandboxed run: pass --force to move it to trash", file=sys.stderr)
-            return 65
-    else:
-        reading = transport.read(
-            settings,
-            run.host,
-            (run.name, run.owner),
-        )
-        rules.clean(reading.rc, session=reading.session, force=force or run.cleaning)
+    if run.request.unsandboxed and not force:
+        print("unsandboxed run: pass --force to move it to trash", file=sys.stderr)
+        return 65
+    reading = transport.read(
+        settings,
+        run.host,
+        (run.name, run.owner),
+    )
+    rules.clean(reading.rc, session=reading.session, force=force or run.cleaning)
     if not force:
         branch = transport.shell(
             settings,

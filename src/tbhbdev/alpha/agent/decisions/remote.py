@@ -349,14 +349,14 @@ if test -d "$path"; then
     mv "$path" "$trash/worktree" || exit "$?"
 fi
 """
-    command = owned(name, decision.owner) + FILE_HELPERS
-    if not decision.unsandboxed:
-        command += (
-            socket_root(sockets_dir)
-            + f"""tmux_state has-session ag-{name}
+    command = (
+        owned(name, decision.owner)
+        + FILE_HELPERS
+        + socket_root(sockets_dir)
+        + f"""tmux_state has-session ag-{name}
 test "$present" -eq 0 || exit 1
 """
-        )
+    )
     if not decision.force:
         command += f"""fallback="$d/{name}{files.FALLBACK}"
 if test -e "$fallback" || test -L "$fallback"; then
