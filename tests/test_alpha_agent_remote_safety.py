@@ -9,10 +9,17 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from agent_driver_example import write_standalone_fake
+from agent_driver_example import (
+    commit_in,
+    execution_arguments,
+    git_in,
+    mirror_in,
+    write_standalone_fake,
+)
 from agent_example import LINUX, settings, trusted_executables
 
-from tbhbdev.alpha.agent import transport
+from tbhbdev.alpha import agent
+from tbhbdev.alpha.agent import driver, transport
 from tbhbdev.alpha.agent.decisions import policy, remote
 
 
@@ -43,6 +50,24 @@ def execute(script: str) -> subprocess.CompletedProcess[bytes]:
     )
     script = script.replace(settings().sockets_dir, os.environ["HOME"] + "/sockets")
     return subprocess.run(["/bin/sh", "-c", script], capture_output=True, check=False)
+
+
+def inspect_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    limit: int | None,
+) -> str:
+    async def run(args: tuple[str, ...], _data: bytes) -> tuple[int, bytes]:
+        command = shlex.split(shlex.split(args[-1])[2])
+        result = execute(command[2])
+        return result.returncode, result.stdout
+
+    monkeypatch.setattr(transport, "execute", run)
+    args = agent.parser("example").parse_args(execution_arguments("example.md"))
+    run = driver.prepare(settings(), args)
+    run.owner = "example-owner"
+    assert driver.inspect(settings(), run, limit=limit) == 0
+    return capsys.readouterr().out
 
 
 @pytest.mark.parametrize("error", ["unrelated failure", "missing"])
@@ -341,60 +366,12 @@ def no_session(host: Path) -> None:
     )
 
 
-def git_in(clone: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["/usr/bin/git", "-C", str(clone), *args],
-        check=True,
-        capture_output=True,
-        text=True,
-        env={
-            "HOME": str(clone),
-            "PATH": "/usr/bin:/bin",
-            "LANG": "C",
-            "GIT_CONFIG_NOSYSTEM": "1",
-        },
-    )
-    return result.stdout.strip()
-
-
 def clone_in(host: Path) -> Path:
     clone = host / "Code/github.com/example-org/example-repo"
     tree = clone / ".worktrees/agent-sample"
     (tree / ".git").mkdir(parents=True)
     (tree / "agent-file").write_text("preserve")
     return clone
-
-
-def mirror_in(host: Path) -> Path:
-    source = host / "source"
-    source.mkdir()
-    git_in(source, "init", "-b", "main")
-    (source / "example").write_text("base\n")
-    git_in(source, "add", "example")
-    commit_in(source, "base")
-    git_in(source, "checkout", "-b", "agent/sample")
-    (source / "example").write_text("pushed change\n")
-    git_in(source, "add", "example")
-    commit_in(source, "pushed change")
-    git_in(source, "checkout", "main")
-    origin = host / "origin.git"
-    git_in(host, "clone", "--bare", str(source), str(origin))
-    mirror = host / "state/tbhbdev/agent-mirrors/example-org/example-repo.git"
-    git_in(host, "clone", "--mirror", origin.as_uri(), str(mirror))
-    return mirror
-
-
-def commit_in(clone: Path, message: str) -> None:
-    git_in(
-        clone,
-        "-c",
-        "user.name=Example",
-        "-c",
-        "user.email=example@example.com",
-        "commit",
-        "-m",
-        message,
-    )
 
 
 def cleanup(*, force: bool = False) -> str:
@@ -457,10 +434,15 @@ def test_clean_retries_each_step(host: Path, step: str) -> None:
 
 
 @pytest.mark.parametrize("kind", ["file", "symlink", "dangling"])
-def test_clean_refuses_unsafe_run_clone(host: Path, kind: str) -> None:
+@pytest.mark.parametrize("component", ["clone", ".worktrees", "agent-sample"])
+def test_clean_refuses_unsafe_run_clone(host: Path, kind: str, component: str) -> None:
     clone = clone_in(host)
     no_session(host)
-    tree = clone / ".worktrees/agent-sample"
+    tree = {
+        "clone": clone,
+        ".worktrees": clone / ".worktrees",
+        "agent-sample": clone / ".worktrees/agent-sample",
+    }[component]
     tree.rename(host / "saved-clone")
     if kind == "file":
         tree.write_text("preserve")
@@ -472,7 +454,7 @@ def test_clean_refuses_unsafe_run_clone(host: Path, kind: str) -> None:
     result = execute(cleanup())
     assert result.returncode == 65
     assert b"clean refused" in result.stderr
-    assert (host / "saved-clone/agent-file").read_text() == "preserve"
+    assert next((host / "saved-clone").rglob("agent-file")).read_text() == "preserve"
 
 
 @pytest.mark.parametrize("kind", ["file", "symlink", "dangling"])
@@ -711,6 +693,86 @@ def test_origin_branch_without_mirror(host: Path) -> None:
     assert result.stdout == b""
 
 
+@pytest.mark.parametrize("limit", [None, 10])
+def test_mirror_git_dir_never_discovers_parent(host: Path, limit: int | None) -> None:
+    mirror = mirror_in(host)
+    mirror.rename(host / "saved-mirror")
+    mirror.mkdir()
+    git_in(mirror.parent, "init")
+    git_in(mirror.parent, "remote", "add", "origin", (host / "origin.git").as_uri())
+    scripts = [
+        remote.origin_branch(
+            "example-org/example-repo", "sample", owner="example-owner"
+        ),
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=limit
+        ),
+    ]
+    for script in scripts:
+        result = execute(script)
+        assert result.returncode != 0
+        assert result.stdout == b""
+
+
+@pytest.mark.parametrize("limit", [None, 10])
+def test_inspection_fetch_does_not_write_metadata(
+    host: Path, limit: int | None
+) -> None:
+    mirror = mirror_in(host)
+    git_in(mirror, "config", "core.logAllRefUpdates", "true")
+    fetch_head = mirror / "FETCH_HEAD"
+    fetch_head.write_text("preserve fetch head\n")
+    assert (
+        execute(
+            remote.inspect(
+                "example-org/example-repo", "sample", owner="example-owner", limit=limit
+            )
+        ).returncode
+        == 0
+    )
+    assert fetch_head.read_text() == "preserve fetch head\n"
+    assert not (mirror / "logs").exists()
+
+
+@pytest.mark.parametrize("limit", [None, 10])
+@pytest.mark.parametrize("size", [0, 65535, 65536, 65537, 200000])
+def test_inspection_caps_remote_output(
+    host: Path, limit: int | None, size: int
+) -> None:
+    mirror_in(host)
+    write_standalone_fake(
+        host / "bin/git",
+        f"import sys\nif 'fetch' not in sys.argv: sys.stdout.write('x' * {size})\n",
+    )
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=limit
+        )
+    )
+    assert result.returncode == 0, result.stderr
+    expected = b"x" * min(size, 65536)
+    if size > 65536:
+        expected += b"\n[output truncated at 65536 bytes]\n"
+    assert result.stdout == expected
+
+
+@pytest.mark.parametrize("limit", [None, 10])
+def test_inspection_preserves_read_failure(host: Path, limit: int | None) -> None:
+    mirror_in(host)
+    write_standalone_fake(
+        host / "bin/git",
+        "import sys\nsys.exit(0 if 'fetch' in sys.argv else 74)\n",
+    )
+    assert (
+        execute(
+            remote.inspect(
+                "example-org/example-repo", "sample", owner="example-owner", limit=limit
+            )
+        ).returncode
+        == 74
+    )
+
+
 @pytest.mark.parametrize("destination", ["worktree", "sample.phase"])
 def test_clean_preserves_conflicting_trash(host: Path, destination: str) -> None:
     clone_in(host)
@@ -728,10 +790,20 @@ def test_clean_preserves_conflicting_trash(host: Path, destination: str) -> None
 
 
 @pytest.mark.parametrize(
-    "component",
-    ["agent-mirrors", "example-org", "example-repo.git", "agent-mirror.lock"],
+    ("component", "kind"),
+    [
+        (component, kind)
+        for component in (
+            "agent-mirrors",
+            "github.com",
+            "example-org",
+            "example-repo.git",
+        )
+        for kind in ("symlink", "file", "missing")
+    ]
+    + [("agent-mirror.lock", "symlink")],
 )
-def test_mirror_refuses_symlinks(host: Path, component: str) -> None:
+def test_mirror_refuses_symlinks(host: Path, component: str, kind: str) -> None:
     mirror = mirror_in(host)
     path = (
         mirror / component
@@ -740,7 +812,10 @@ def test_mirror_refuses_symlinks(host: Path, component: str) -> None:
     )
     if path.exists():
         path.rename(host / "saved")
-    path.symlink_to(host / "saved")
+    if kind == "symlink":
+        path.symlink_to(host / "saved")
+    elif kind == "file":
+        path.write_text("not a directory")
     result = execute(
         remote.origin_branch(
             "example-org/example-repo", "sample", owner="example-owner"
@@ -748,6 +823,34 @@ def test_mirror_refuses_symlinks(host: Path, component: str) -> None:
     )
     assert result.returncode == 65
     assert result.stdout == b""
+
+
+def test_mirror_path_separates_git_hosts(host: Path) -> None:
+    mirror = mirror_in(host)
+    other = (
+        host
+        / "state/tbhbdev/agent-mirrors/git.example.com/example-org/example-repo.git"
+    )
+    git_in(host, "clone", "--mirror", str(mirror), str(other))
+    git_in(other, "remote", "set-url", "origin", str(host / "missing.git"))
+    assert (
+        execute(
+            remote.origin_branch(
+                "example-org/example-repo", "sample", owner="example-owner"
+            )
+        ).returncode
+        == 0
+    )
+    assert (
+        execute(
+            remote.origin_branch(
+                "git.example.com/example-org/example-repo",
+                "sample",
+                owner="example-owner",
+            )
+        ).returncode
+        != 0
+    )
 
 
 def test_mirror_git_boundary(host: Path) -> None:
@@ -771,7 +874,8 @@ def test_mirror_git_boundary(host: Path) -> None:
         "    'protocol.ext.allow': 'never', 'core.pager': 'cat',\n"
         "    'gc.auto': '0', 'maintenance.auto': 'false',\n"
         "    'fetch.recurseSubmodules': 'false', 'submodule.recurse': 'false'}\n"
-        f"assert args == ['-C', {str(mirror)!r}, 'ls-remote', '--end-of-options',\n"
+        f"assert args == [{('--git-dir=' + str(mirror))!r},\n"
+        "                'ls-remote', '--end-of-options',\n"
         "                'origin', 'refs/heads/agent/sample']\n"
         f"with Path({str(mirror / 'agent-mirror.lock')!r}).open('a') as lock:\n"
         "    try:\n        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
@@ -789,13 +893,20 @@ def test_mirror_git_boundary(host: Path) -> None:
 
 
 @pytest.mark.parametrize("limit", [None, 1, 10])
-def test_inspection_reads_pushed_history(host: Path, limit: int | None) -> None:
+def test_inspection_reads_pushed_history(
+    host: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    limit: int | None,
+) -> None:
     mirror = mirror_in(host)
     source = host / "source"
     git_in(source, "checkout", "agent/sample")
     (source / "example").write_text("second pushed change\n")
-    git_in(source, "add", "example")
-    commit_in(source, "second change")
+    hostile_path = "path-\x1b[31m"
+    (source / hostile_path).write_text("hostile file \x1b[33m\n")
+    git_in(source, "add", "example", hostile_path)
+    commit_in(source, "second change \x1b[31m", "Example \x1b[32m")
     git_in(source, "push", (host / "origin.git").as_uri(), "agent/sample")
     git_in(source, "checkout", "main")
     (source / "default-only").write_text("new default tip\n")
@@ -805,20 +916,24 @@ def test_inspection_reads_pushed_history(host: Path, limit: int | None) -> None:
     # Even host settings that normally prune cannot drop mirror history.
     git_in(mirror, "branch", "preserved")
     git_in(mirror, "config", "fetch.prune", "true")
-    result = execute(
-        remote.inspect(
-            "example-org/example-repo", "sample", owner="example-owner", limit=limit
-        )
+    git_in(mirror, "config", "core.quotePath", "false")
+    # Git quotes control characters in paths, but stores the literal name.
+    assert hostile_path in git_in(
+        source, "ls-tree", "-z", "--name-only", "agent/sample"
     )
-    assert result.returncode == 0, result.stderr
-    assert b"second" in result.stdout
-    assert b"default branch advanced" not in result.stdout
-    assert b"default-only" not in result.stdout
-    assert b"\x1b" not in result.stdout
+    raw = git_in(source, "show", "--format=raw", "agent/sample")
+    assert "second change \x1b[31m" in raw
+    assert "Example \x1b[32m" in raw
+    output = inspect_output(monkeypatch, capsys, limit)
+    assert "second" in output
+    assert "default branch advanced" not in output
+    assert "default-only" not in output
+    assert "\x1b" not in output
     if limit is None:
-        assert b"-base\n+second pushed change\n" in result.stdout
+        assert "-base\n+second pushed change\n" in output
+        assert "+hostile file [33m\n" in output
     else:
-        assert result.stdout.count(b"commit ") == (1 if limit == 1 else 2)
+        assert output.count("commit ") == (1 if limit == 1 else 2)
     assert git_in(mirror, "rev-parse", "refs/tbhbdev/default") == git_in(
         source, "rev-parse", "main"
     )
@@ -841,6 +956,10 @@ def test_run_clone_config_never_executes(host: Path, verb: str) -> None:
         f"[diff]\nexternal = {command}\n"
     )
     (tree / ".git/config").write_text(config)
+    hooks = tree / ".git/hooks"
+    hooks.mkdir()
+    (hooks / "post-index-change").symlink_to(command)
+    (hooks / "reference-transaction").symlink_to(command)
     (clone / ".git").mkdir()
     (clone / ".git/config").write_text(config)
     # Any git at either agent-written location fails this test, even if hardened.

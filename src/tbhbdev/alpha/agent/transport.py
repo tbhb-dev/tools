@@ -39,6 +39,14 @@ class TransportError(OSError):
     """A failed or timed-out ssh call, whose output contains no input bytes."""
 
 
+def terminal_text(text: str) -> str:
+    return "".join(
+        c
+        for c in text
+        if c in {"\n", "\t"} or not unicodedata.category(c).startswith("C")
+    )
+
+
 def call(
     settings: Settings,
     host: Host,
@@ -161,9 +169,4 @@ def read(
             message = f"{name}: rc=invalid"
             raise Invalid(message)
         value = int(rc)
-    tail = "".join(
-        c
-        for c in tail
-        if c in {"\n", "\t"} or not unicodedata.category(c).startswith("C")
-    )
-    return Reading(phase, value, launched == "1", session == "1", tail)
+    return Reading(phase, value, launched == "1", session == "1", terminal_text(tail))

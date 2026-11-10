@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import subprocess
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -104,9 +105,12 @@ elif name == "git":
     index = 0
     while args[index] == "-c":
         index += 2
-    if args[index] == "-C":
-        assert args[index + 1] == str(
-            root / "state/tbhbdev/agent-mirrors/example-org/example-repo.git")
+    if args[index].startswith("--git-dir="):
+        assert args[index] == "--git-dir=" + str(
+            root / "state/tbhbdev/agent-mirrors/github.com/"
+            "example-org/example-repo.git")
+        index += 1
+    while args[index] == "-c":
         index += 2
     if args[index:index + 2] == ["-c", "diff.external="]:
         index += 2
@@ -166,9 +170,15 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     (
         root / "home/Code/github.com/example-org/example-repo/.worktrees/agent-sample"
     ).mkdir(parents=True)
-    (root / "state/tbhbdev/agent-mirrors/example-org/example-repo.git").mkdir(
-        parents=True
+    (
+        root / "state/tbhbdev/agent-mirrors/github.com/example-org/example-repo.git"
+    ).mkdir(parents=True)
+    mirror = (
+        root / "state/tbhbdev/agent-mirrors/github.com/example-org/example-repo.git"
     )
+    (mirror / "objects").mkdir()
+    (mirror / "refs").mkdir()
+    (mirror / "HEAD").write_text("ref: refs/heads/main\n")
     tools = tmp_path / "bin"
     tools.mkdir()
     for name in ("ssh", "tmux", "git", "tbhbdev"):
@@ -202,3 +212,72 @@ def write_standalone_fake(script: Path, body: str) -> None:
     write_fake(script, body)
     interpreter = shlex.quote(sys.executable)
     script.write_text(script.read_text().replace(interpreter, interpreter + " -S"))
+
+
+def git_in(clone: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["/usr/bin/git", "-C", str(clone), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            "HOME": str(clone),
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        },
+    )
+    return result.stdout.strip()
+
+
+def mirror_in(host: Path) -> Path:
+    source = host / "source"
+    source.mkdir()
+    git_in(source, "init", "-b", "main")
+    (source / "example").write_text("base\n")
+    git_in(source, "add", "example")
+    commit_in(source, "base")
+    git_in(source, "checkout", "-b", "agent/sample")
+    (source / "example").write_text("pushed change\n")
+    git_in(source, "add", "example")
+    commit_in(source, "pushed change")
+    git_in(source, "checkout", "main")
+    origin = host / "origin.git"
+    git_in(host, "clone", "--bare", str(source), str(origin))
+    mirror = (
+        host / "state/tbhbdev/agent-mirrors/github.com/example-org/example-repo.git"
+    )
+    git_in(host, "clone", "--mirror", origin.as_uri(), str(mirror))
+    return mirror
+
+
+def commit_in(clone: Path, message: str, author: str = "Example") -> None:
+    git_in(
+        clone,
+        "-c",
+        f"user.name={author}",
+        "-c",
+        "user.email=example@example.com",
+        "commit",
+        "-m",
+        message,
+    )
+
+
+def execution_arguments(prompt: Path | str, *options: str) -> list[str]:
+    return [
+        "exec",
+        "--host",
+        "example-linux",
+        "--repo",
+        "example-org/example-repo",
+        "--model",
+        "example-model",
+        "--effort",
+        "high",
+        "--profile",
+        "build",
+        *options,
+        "sample",
+        str(prompt),
+    ]

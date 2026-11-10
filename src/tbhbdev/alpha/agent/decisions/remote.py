@@ -239,20 +239,38 @@ MIRROR_GIT = (
     + 'SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-}" '
     + GIT_FLAGS
     + " -c fetch.recurseSubmodules=false "
-    '-c submodule.recurse=false -C "$mirror"'
+    '-c submodule.recurse=false --git-dir="$mirror"'
+)
+# Read at most one byte past the display cap, then drain without buffering.
+# Closing the pipe preserves the git command's failure status.
+INSPECTION_OUTPUT = (
+    'open(my $pipe, "-|", @ARGV) or die "open output: $!"; '
+    'my $text = ""; '
+    "while(length($text) < 65537 && "
+    "read($pipe, $text, 65537 - length($text), length($text))) {} "
+    "print substr($text, 0, 65536); "
+    'print "\\n[output truncated at 65536 bytes]\\n" if length($text) > 65536; '
+    "while(read($pipe, my $discard, 8192)) {} "
+    "close($pipe); "
+    "exit($? == -1 ? 1 : ($? & 127) ? 128 + ($? & 127) : $? >> 8);"
 )
 
 
 def mirror_command(repository: str, name: str, command: str, *, owner: str) -> str:
-    _, organization, project = repo.parts(repository)
+    git_host, organization, project = repo.parts(repository)
     return (
         owned(name, owner)
         + HELPERS
-        + f"""mirror="$state/tbhbdev/agent-mirrors/{organization}/{project}.git"
+        + f'mirror="$state/tbhbdev/agent-mirrors/{git_host}/{organization}/'
+        f"""{project}.git"
 for p in "$state/tbhbdev/agent-mirrors" \
-    "$state/tbhbdev/agent-mirrors/{organization}" "$mirror"; do
+    "$state/tbhbdev/agent-mirrors/{git_host}" \
+    "$state/tbhbdev/agent-mirrors/{git_host}/{organization}" "$mirror"; do
     test ! -L "$p" && test -d "$p" || exit 65
 done
+# ls-remote can read parent config even with an invalid explicit directory.
+test -d "$mirror/objects" && test -d "$mirror/refs" && \
+    test -f "$mirror/HEAD" || exit 65
 safe_file "$mirror/agent-mirror.lock"
 export mirror
 cd "$HOME" || exit "$?"
@@ -276,14 +294,18 @@ def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str
     base = "refs/tbhbdev/default"
     command = "diff" if limit is None else f"log -n {limit}"
     comparison = f"{base}...{branch}" if limit is None else f"{base}..{branch}"
+    read = (
+        f"{MIRROR_GIT} -c diff.external= --no-optional-locks {command} "
+        f"--no-ext-diff --no-textconv --no-color {comparison} --"
+    )
     return mirror_command(
         repository,
         name,
-        f"{MIRROR_GIT} fetch --no-tags --no-prune --no-prune-tags "
+        f"{MIRROR_GIT} -c core.logAllRefUpdates=false "
+        "fetch --no-write-fetch-head --no-tags --no-prune --no-prune-tags "
         f"--end-of-options origin +HEAD:{base} +{branch}:{branch} "
         '|| exit "$?"\n'
-        f"{MIRROR_GIT} -c diff.external= --no-optional-locks {command} "
-        f"--no-ext-diff --no-textconv --no-color {comparison} --",
+        f"perl -e {shlex.quote(INSPECTION_OUTPUT)} /bin/sh -c {shlex.quote(read)}",
         owner=owner,
     )
 
@@ -304,19 +326,22 @@ def clean(
 ) -> str:
     clone = repo.clone_path(PurePosixPath("."), repository)
     tree = f".worktrees/agent-{name}"
-    move = f"""move_directory() {{
+    move = """check_directory() {
     if test -L "$1"; then
         printf '%s\\n' "clean refused: $1 is a symlink" >&2; exit 65
     fi
-    if test -e "$1"; then
-        if test ! -d "$1"; then
-            printf '%s\\n' "clean refused: $1 is not a directory" >&2; exit 65
-        fi
-        test ! -e "$2" && test ! -L "$2" || exit 65
-        mv "$1" "$2" || exit "$?"
+    if test -e "$1" && test ! -d "$1"; then
+        printf '%s\\n' "clean refused: $1 is not a directory" >&2; exit 65
     fi
-}}
-move_directory "$HOME"/{shlex.quote(str(clone / tree))} "$trash/worktree"
+}
+"""
+    for component in (clone, clone / ".worktrees", clone / tree):
+        move += f'check_directory "$HOME"/{shlex.quote(str(component))}\n'
+    move += f"""path="$HOME"/{shlex.quote(str(clone / tree))}
+if test -d "$path"; then
+    test ! -e "$trash/worktree" && test ! -L "$trash/worktree" || exit 65
+    mv "$path" "$trash/worktree" || exit "$?"
+fi
 """
     command = (
         owned(name, decision.owner)
