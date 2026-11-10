@@ -233,7 +233,6 @@ def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunReque
             f"{version!r} is not a supported request version; "
             f"this build reads {REQUEST_VERSION}",
         )
-    data = {"tainted_host": False, **data}
     missing = _FIELDS - data.keys()
     if missing:
         message = f"request is missing fields: {', '.join(sorted(missing))}"

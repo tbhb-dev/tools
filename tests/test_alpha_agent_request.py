@@ -20,7 +20,7 @@ NAME_RULE = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
 REASON = "must be one printable line of up to 200 characters"
 
 BUILD: Data = {
-    "v": 1,
+    "v": 2,
     "kind": "exec",
     "repo": "example-org/example-repo",
     "commit": None,
@@ -120,7 +120,7 @@ def test_parse_builds_every_field() -> None:
 def test_to_dict_holds_the_version_and_every_field() -> None:
     parsed = request.parse(BUILD, host_allows_unsandboxed=False)
     assert request.to_dict(parsed) == BUILD
-    assert model.REQUEST_VERSION == 1
+    assert model.REQUEST_VERSION == 2
 
 
 def test_to_dict_does_not_validate() -> None:
@@ -130,10 +130,10 @@ def test_to_dict_does_not_validate() -> None:
     assert request.to_dict(parsed)["repo"] == "../x"
 
 
-@pytest.mark.parametrize("version", [2, 0, -1, "1", True, None, 1.0, [1], 11])
+@pytest.mark.parametrize("version", [1, 0, -1, "2", True, None, 2.0, [2], 11])
 def test_unknown_versions_are_refused_before_anything_else(version: object) -> None:
     expected = (
-        f"request v {version!r} is not a supported request version; this build reads 1"
+        f"request v {version!r} is not a supported request version; this build reads 2"
     )
     assert refused({"v": version}) == expected
     assert refused(made(BUILD, v=version, repo="../x", extra=1)) == expected
@@ -146,13 +146,13 @@ def test_a_missing_version_is_refused() -> None:
 
 def test_missing_fields_are_named() -> None:
     assert refused(made(BUILD, repo=MISSING)) == "request is missing fields: repo"
-    assert refused({"v": 1}).startswith("request is missing fields: account, ")
+    assert refused({"v": 2}).startswith("request is missing fields: account, ")
     assert refused(made(BUILD, repo=MISSING, kind=MISSING, extra=1)) == (
         "request is missing fields: kind, repo"
     )
 
 
-@pytest.mark.parametrize("key", [k for k in BUILD if k not in ("v", "tainted_host")])
+@pytest.mark.parametrize("key", [k for k in BUILD if k != "v"])
 def test_each_field_is_required(key: str) -> None:
     assert refused(made(BUILD, **{key: MISSING})) == f"request is missing fields: {key}"
 
@@ -491,12 +491,9 @@ def test_request_reads_driver_host_taint(tainted: bool) -> None:
     assert request.to_dict(parsed)["tainted_host"] is tainted
 
 
-def test_request_host_taint_defaults_false() -> None:
-    assert (
-        request.parse(
-            made(BUILD, tainted_host=MISSING), host_allows_unsandboxed=True
-        ).tainted_host
-        is False
+def test_request_host_taint_is_required() -> None:
+    assert refused(made(BUILD, tainted_host=MISSING)) == (
+        "request is missing fields: tainted_host"
     )
 
 
