@@ -269,3 +269,14 @@ def test_prepare_reads_local_host_trust(remote: Remote, *, cleared: bool) -> Non
     run = driver.prepare(settings(), args)
     assert run.request.tainted_host is (not cleared)
     assert remote.records("ssh") == []
+
+
+@pytest.mark.parametrize(
+    "options", [[], ["example-linux"], ["--reason", "Host rebuilt"]]
+)
+def test_clear_taint_requires_host_and_reason(
+    remote: Remote, options: list[str]
+) -> None:
+    assert agent.main(["clear-taint", *options], "example agent") == 2
+    assert remote.records("ssh") == []
+    assert not (driver.directory() / "taint").exists()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -1088,3 +1089,18 @@ def test_inspection_refuses_missing_origin_branch(
     )
     assert result.returncode != 0
     assert result.stdout == b""
+
+
+def test_host_marker_uses_portable_perl_arguments(host: Path) -> None:
+    call_log = host / "perl-call.json"
+    write_standalone_fake(
+        host / "bin/perl",
+        "import json, os, sys\nfrom pathlib import Path\n"
+        f"Path({str(call_log)!r}).write_text(json.dumps(sys.argv))\n"
+        "os.execv('/usr/bin/perl', ['perl', *sys.argv[1:]])\n",
+    )
+    result = execute(remote.host_marker())
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == b""
+    invoked: list[str] = json.loads(call_log.read_text())
+    assert invoked[1] == "-e"
