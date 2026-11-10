@@ -21,9 +21,12 @@ def test_file_names() -> None:
         ".out",
         ".out.final",
         ".log",
-        ".rc",
         ".keep",
         ".rc.pending",
+        ".run.lock",
+        ".rc.fallback",
+        ".rc",
+        ".owner",
     )
 
 

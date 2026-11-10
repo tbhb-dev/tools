@@ -103,6 +103,7 @@ class Inputs:
     request: str
     prompt: str
     schema: str | None
+    owner: str
 
 
 def stream(
@@ -127,7 +128,7 @@ def stream(
     shell(
         settings,
         host,
-        remote.transfer(name, settings.sockets_dir),
+        remote.transfer(name, settings.sockets_dir, owner=inputs.owner),
         data=buffer.getvalue(),
         timeout=timeout,
     )
@@ -136,15 +137,16 @@ def stream(
 def read(
     settings: Settings,
     host: Host,
-    name: str,
+    target: tuple[str, str],
     *,
     answer: bool = False,
     timeout: float = 30,
 ) -> Reading:
+    name, owner = target
     text = shell(
         settings,
         host,
-        remote.read(name, settings.sockets_dir, answer=answer),
+        remote.read(name, settings.sockets_dir, owner=owner, answer=answer),
         timeout=timeout,
     )
     phase, rc, launched, session, tail = text.split("\n", 4)

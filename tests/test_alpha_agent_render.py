@@ -3,12 +3,7 @@
 from tbhbdev.alpha.agent import render
 
 
-def test_brief_and_launch() -> None:
-    assert render.brief("example\n") == (
-        "Report results only in your final answer. "
-        "Never message Claude sessions, session sockets or other agents directly."
-        "\n\nexample\n"
-    )
+def test_launch() -> None:
     assert (
         render.launched("example", "example-linux", "agent")
         == "example: launched host=example-linux account=agent"

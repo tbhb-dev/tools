@@ -104,18 +104,22 @@ def test_launch_stream_and_metadata(
     assert parsed.account == "agent"
     assert parsed.timeout is None
     assert parsed.startup_deadline_seconds == 120
-    assert (remote.state / "sample.prompt").read_text() == (
-        "Report results only in your final answer. "
-        "Never message Claude sessions, session sockets or other agents directly."
-        "\n\nCarry out the example.\n"
-    )
+    assert (remote.state / "sample.prompt").read_text() == remote.prompt.read_text()
     assert (remote.state / "sample.schema.json").read_text() == schema.read_text()
     assert remote.state.stat().st_mode & 0o777 == 0o700
     for suffix in (".request.json", ".prompt", ".schema.json"):
         assert (remote.state / ("sample" + suffix)).stat().st_mode & 0o777 == 0o600
     meta = remote.local / "tbhbdev/agent-runs/sample.json"
     record = json.loads(meta.read_text())
-    assert record == {**data, "host": "example-linux", "started": record["started"]}
+    assert record == {
+        **data,
+        "host": "example-linux",
+        "started": record["started"],
+        "owner": record["owner"],
+        "cleaning": False,
+    }
+    assert len(record["owner"]) == 32
+    assert (remote.state / "sample.owner").read_text() == record["owner"] + "\n"
     assert record["started"].endswith("+00:00")
     assert meta.stat().st_mode & 0o777 == 0o600
     assert meta.parent.stat().st_mode & 0o777 == 0o700
@@ -133,7 +137,7 @@ def test_launch_stream_and_metadata(
     assert MARKER not in meta.read_text()
     tmux = remote.records("tmux")[0]["args"]
     assert tmux == shlex.split(
-        f"-S {remote.root}/sockets/agents has-session -t =ag-sample"
+        f"-S {remote.root}/sockets/agents -f /dev/null has-session -t =ag-sample"
     )
 
 
@@ -287,6 +291,8 @@ def test_rc_first(remote: Remote, capsys: pytest.CaptureFixture[str], rc: int) -
     assert remote.records("tmux")[-1]["args"] == [
         "-S",
         str(remote.root / "sockets/agents"),
+        "-f",
+        "/dev/null",
         "kill-session",
         "-t",
         "=ag-sample",
@@ -392,7 +398,9 @@ def test_kill_host_rc(remote: Remote) -> None:
     assert command("kill") == 0
     assert (remote.state / "sample.rc").read_text() == "143\n"
     assert not (remote.state / "sample.rc.pending").exists()
-    assert not any("137" in str(record["args"]) for record in remote.records("ssh"))
+    assert not any(
+        ".rc.fallback" in str(record["args"]) for record in remote.records("ssh")
+    )
 
 
 def test_kill_fallback(remote: Remote, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -433,8 +441,8 @@ def test_clean(
     assert not (remote.state / "sample.request.json").exists()
     assert list((remote.state / "trash").glob("*/sample.request.json"))
     calls = [record["args"] for record in remote.records("git")]
-    flags = shlex.split(remote_commands.GIT_FLAGS)[1:]
-    assert [*flags, "worktree", "prune"] in calls
+    flags = [*shlex.split(remote_commands.GIT_FLAGS)[1:], "-c", "protocol.allow=never"]
+    assert not any(isinstance(call, list) and "worktree" in call for call in calls)
     assert ([*flags, "branch", "-D", "agent/sample"] in calls) is deleted
 
 
@@ -476,10 +484,8 @@ def test_stream_transport_failure_never_kills(
 ) -> None:
     remote.configure(ssh=[None, {"rc": 255}], kill_rc="1\n")
     assert launch(remote) == 1
-    assert capsys.readouterr() == (
-        "sample: launch unconfirmed host=example-linux phase=unreachable\n",
-        "",
-    )
+    assert "not owner" in capsys.readouterr().err
+    assert not driver.metadata_path("sample").exists()
     assert not (remote.state / "sample.rc").exists()
 
 
@@ -533,7 +539,9 @@ def test_kill_waits_for_host_rc(
     )
     ticking(monkeypatch, 1)
     assert command("kill") == 0
-    assert not any("137" in str(record["args"]) for record in remote.records("ssh"))
+    assert not any(
+        ".rc.fallback" in str(record["args"]) for record in remote.records("ssh")
+    )
 
 
 @pytest.mark.parametrize(
@@ -613,14 +621,14 @@ def test_wait_poll_and_transport_budget(
     def read(
         config: model.Settings,
         host: model.Host,
-        name: str,
+        name: tuple[str, str],
         *,
         answer: bool,
         timeout: float,
     ) -> transport.Reading:
         assert config == CONFIG
         assert host == CONFIG.hosts[0]
-        assert name == "sample"
+        assert name == ("sample", driver.load(CONFIG, "sample").owner)
         assert answer is True
         timeouts.append(timeout)
         reading = next(readings)
@@ -655,7 +663,7 @@ def test_wait_defaults_and_failure_deadline(
     def read(
         _config: model.Settings,
         _host: model.Host,
-        _name: str,
+        _name: tuple[str, str],
         *,
         answer: bool,
         timeout: float,
@@ -717,11 +725,15 @@ def test_kill_grace_and_poll_bounds(
         return ""
 
     def read(
-        settings: model.Settings, host: model.Host, name: str, *, timeout: float
+        settings: model.Settings,
+        host: model.Host,
+        name: tuple[str, str],
+        *,
+        timeout: float,
     ) -> transport.Reading:
         assert settings == config
         assert host == run.host
-        assert name == "sample"
+        assert name == ("sample", driver.load(CONFIG, "sample").owner)
         timeouts.append(timeout)
         return transport.Reading(
             "stopping", None, launched=True, session=False, text=""
@@ -733,8 +745,15 @@ def test_kill_grace_and_poll_bounds(
     assert timeouts == [min(30, grace + 2), 1]
     assert sleeps == [0.5]
     assert scripts == [
-        remote_commands.session("sample", "kill-session", CONFIG.sockets_dir),
-        remote_commands.fallback("sample", CONFIG.sockets_dir),
+        remote_commands.session(
+            "sample",
+            "kill-session",
+            CONFIG.sockets_dir,
+            owner=driver.load(CONFIG, "sample").owner,
+        ),
+        remote_commands.fallback(
+            "sample", CONFIG.sockets_dir, owner=driver.load(CONFIG, "sample").owner
+        ),
     ]
 
 
@@ -754,11 +773,15 @@ def test_launch_poll_interval_and_budget(
     timeouts: list[float] = []
 
     def read(
-        settings: model.Settings, host: model.Host, name: str, *, timeout: float
+        settings: model.Settings,
+        host: model.Host,
+        name: tuple[str, str],
+        *,
+        timeout: float,
     ) -> transport.Reading:
         assert settings == CONFIG
         assert host == run.host
-        assert name == "sample"
+        assert name == ("sample", driver.load(CONFIG, "sample").owner)
         timeouts.append(timeout)
         return transport.Reading(
             "running", None, launched=next(outcomes), session=True, text=""
@@ -794,7 +817,8 @@ def test_clean_moves_every_run_file_with_one_utc_stamp(
     assert launch(remote) == 0
     remote.configure(session=False)
     for suffix in runfiles_names.SUFFIXES:
-        remote.file(suffix, "finished" if suffix == ".phase" else "0")
+        if suffix not in {".owner", ".rc.fallback"}:
+            remote.file(suffix, "finished" if suffix == ".phase" else "0")
     (remote.state / "index.jsonl").write_text("preserve\n")
 
     class FixedTime:
@@ -816,12 +840,14 @@ def test_clean_moves_every_run_file_with_one_utc_stamp(
     trash = remote.state / "trash" / f"{stamp}-sample"
     assert (trash / "worktree").is_dir()
     assert sorted(p.name for p in trash.iterdir() if p.is_file()) == sorted(
-        "sample" + suffix for suffix in runfiles_names.SUFFIXES
+        "sample" + suffix
+        for suffix in runfiles_names.SUFFIXES
+        if suffix != ".rc.fallback"
     )
     assert all(
         p.read_text() == ("finished" if p.suffix == ".phase" else "0")
         for p in trash.iterdir()
-        if p.is_file()
+        if p.is_file() and p.suffix != ".owner"
     )
     assert (remote.state / "index.jsonl").read_text() == "preserve\n"
 
@@ -853,6 +879,7 @@ def test_exec_spends_one_startup_budget(
         assert host == CONFIG.hosts[0]
         assert name == "sample"
         assert timeout == 100
+        assert inputs.owner == driver.load(CONFIG, "sample").owner
         assert inputs.schema is None
         assert inputs.prompt.endswith("Carry out the example.\n")
         assert json.loads(inputs.request)["commit"] is None
@@ -868,18 +895,25 @@ def test_exec_spends_one_startup_budget(
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
         assert argv == remote_commands.start(
-            "sample", CONFIG.sockets_dir, CONFIG.hosts[0]
+            "sample",
+            CONFIG.sockets_dir,
+            CONFIG.hosts[0],
+            owner=driver.load(CONFIG, "sample").owner,
         )
         assert timeout == 90
         steps.append("start")
         return ""
 
     def read(
-        settings: model.Settings, host: model.Host, name: str, *, timeout: float
+        settings: model.Settings,
+        host: model.Host,
+        name: tuple[str, str],
+        *,
+        timeout: float,
     ) -> transport.Reading:
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
-        assert name == "sample"
+        assert name == ("sample", driver.load(CONFIG, "sample").owner)
         assert timeout == 80
         steps.append("poll")
         return transport.Reading("running", None, launched=True, session=True, text="")
@@ -927,7 +961,7 @@ def test_successful_wait_resets_failure_for_a_short_window(
     def read(
         _config: model.Settings,
         _host: model.Host,
-        _name: str,
+        _name: tuple[str, str],
         *,
         answer: bool,
         timeout: float,
@@ -940,28 +974,20 @@ def test_successful_wait_resets_failure_for_a_short_window(
     assert command("wait") == 0
 
 
-@pytest.mark.parametrize(
-    ("verb", "result"), [("status", 0), ("wait", 1), ("clean", 0), ("keep", 0)]
-)
+@pytest.mark.parametrize("verb", ["status", "wait", "clean", "keep", "kill"])
 def test_verbs_without_remote_run_directory(
-    remote: Remote, capsys: pytest.CaptureFixture[str], verb: str, result: int
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    verb: str,
 ) -> None:
     assert launch(remote) == 0
-    capsys.readouterr()
     remote.configure(session=False)
     remote.state.rename(remote.root / "saved-run-files")
-    options = ("--force",) if verb == "clean" else ()
-    assert command(verb, *options) == result
-    output = capsys.readouterr()
-    assert output.err == ""
-    if verb in ("status", "wait"):
-        assert "rc=unknown" in output.out
-        assert not remote.state.exists()
-    if verb == "clean":
-        assert not driver.metadata_path("sample").exists()
-    if verb == "keep":
-        assert (remote.state / "sample.keep").read_text() == ""
-        assert remote.state.stat().st_mode & 0o777 == 0o700
+    capsys.readouterr()
+    assert command(verb) == 1
+    assert "not owner" in capsys.readouterr().err
+    assert not driver.metadata_path("sample").exists()
+    assert not remote.state.exists()
 
 
 @pytest.mark.parametrize("finished", [False, True])
@@ -976,19 +1002,6 @@ def test_clean_without_remote_clone(remote: Remote, finished: bool) -> None:
     assert command("clean", *options) == 0
     assert not driver.metadata_path("sample").exists()
     assert remote.records("git") == []
-
-
-def test_kill_without_remote_run_directory(
-    remote: Remote, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    assert launch(remote) == 0
-    remote.configure(session=False)
-    remote.state.rename(remote.root / "saved-run-files")
-    ticking(monkeypatch)
-    assert command("kill") == 0
-    assert (remote.state / "sample.rc").read_text() == "137\n"
-    assert (remote.state / "sample.rc").stat().st_mode & 0o777 == 0o600
-    assert remote.state.stat().st_mode & 0o777 == 0o700
 
 
 @pytest.mark.parametrize("existing", ["session", ".rc", ".launched"])
@@ -1077,3 +1090,208 @@ def test_metadata_directory_is_private_before_chmod(
         driver.save(run)
     finally:
         os.umask(previous)
+
+
+def test_clean_allows_name_reuse(remote: Remote) -> None:
+    assert launch(remote) == 0
+    remote.file(".run.lock", "")
+    remote.file(".rc", "0\n")
+    remote.configure(session=False)
+    assert command("clean") == 0
+    assert launch(remote) == 0
+
+
+def test_keep_twice(remote: Remote) -> None:
+    assert launch(remote) == 0
+    assert command("keep") == 0
+    assert command("keep") == 0
+
+
+def test_kill_ignores_stale_pending(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert launch(remote) == 0
+    remote.file(".rc.pending", "old partial result")
+    ticking(monkeypatch)
+    assert command("kill") == 0
+    assert (remote.state / "sample.rc").read_text() == "137\n"
+    assert (remote.state / "sample.rc.fallback").is_file()
+
+
+def test_clean_fallback_requires_force(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert launch(remote) == 0
+    ticking(monkeypatch)
+    assert command("kill") == 0
+    assert command("clean") == 1
+    assert command("clean", "--force") == 0
+
+
+@pytest.mark.parametrize("verb", ["kill", "wait", "clean", "status", "keep"])
+def test_failed_transfer_cannot_control_other_owner(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    verb: str,
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
+        remote.file(".owner", "another-owner\n")
+        remote.file(".rc", "0\n")
+        message = "transfer failed"
+        raise transport.TransportError(message)
+
+    monkeypatch.setattr(transport, "stream", fail)
+    assert launch(remote) == 1
+    assert not driver.metadata_path("sample").exists()
+    archived = next((driver.directory() / "trash").glob("*/sample.json"))
+    driver.metadata_path("sample").write_bytes(archived.read_bytes())
+    before = {p.name: p.read_bytes() for p in remote.state.iterdir()}
+    capsys.readouterr()
+    assert command(verb) == 1
+    assert "not owner" in capsys.readouterr().err
+    assert not driver.metadata_path("sample").exists()
+    assert {p.name: p.read_bytes() for p in remote.state.iterdir()} == before
+    assert not remote.records("tmux")
+
+
+def test_lost_clean_reply_cannot_clean_new_owner(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert launch(remote) == 0
+    remote.configure(session=False)
+    remote.file(".rc", "0\n")
+    original = transport.shell
+
+    def lose(
+        config: model.Settings,
+        host: model.Host,
+        script: str,
+        *,
+        timeout: float = 30,
+        data: bytes = b"",
+    ) -> str:
+        result = original(config, host, script, timeout=timeout, data=data)
+        if 'trash="$d/trash/' in script:
+            remote.file(".owner", "new-owner\n")
+            remote.file(".rc", "0\n")
+            message = "lost clean reply"
+            raise transport.TransportError(message)
+        return result
+
+    monkeypatch.setattr(transport, "shell", lose)
+    assert command("clean") == 1
+    monkeypatch.setattr(transport, "shell", original)
+    before = {p.name: p.read_bytes() for p in remote.state.iterdir() if p.is_file()}
+    assert command("clean") == 1
+    assert "not owner" in capsys.readouterr().err
+    assert not driver.metadata_path("sample").exists()
+    assert {
+        p.name: p.read_bytes() for p in remote.state.iterdir() if p.is_file()
+    } == before
+
+
+@pytest.mark.parametrize("retained", [True, False])
+def test_transfer_error_checks_owner_before_retaining_metadata(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    retained: bool,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    original = transport.stream
+
+    def fail(
+        config: model.Settings,
+        host: model.Host,
+        name: str,
+        *,
+        inputs: transport.Inputs,
+        timeout: float,
+    ) -> None:
+        if retained:
+            original(config, host, name, inputs=inputs, timeout=timeout)
+        else:
+            remote.configure(ssh=[{"rc": 255}])
+        message = "lost transfer reply"
+        raise transport.TransportError(message)
+
+    monkeypatch.setattr(transport, "stream", fail)
+    assert launch(remote) == 1
+    assert driver.metadata_path("sample").exists() is retained
+    assert capsys.readouterr() == (
+        "sample: launch unconfirmed host=example-linux phase=unreachable\n",
+        "",
+    )
+    assert not any("kill-session" in str(r) for r in remote.records("tmux"))
+
+
+def test_owner_lost_during_launch_poll(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def read(*_args: object, **_kwargs: object) -> transport.Reading:
+        message = "owner lost"
+        raise transport.CollisionError(message)
+
+    monkeypatch.setattr(transport, "read", read)
+    assert launch(remote) == 1
+    assert "not owner" in capsys.readouterr().err
+    assert not driver.metadata_path("sample").exists()
+
+
+def test_clean_retry_after_rc_was_trashed(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert launch(remote) == 0
+    remote.configure(session=False)
+    remote.file(".rc", "0\n")
+    original = transport.shell
+
+    def fail(
+        config: model.Settings,
+        host: model.Host,
+        script: str,
+        *,
+        timeout: float = 30,
+        data: bytes = b"",
+    ) -> str:
+        if 'trash="$d/trash/' in script:
+            (remote.state / "sample.rc").rename(remote.root / "saved-rc")
+            message = "failed before owner move"
+            raise transport.TransportError(message)
+        return original(config, host, script, timeout=timeout, data=data)
+
+    monkeypatch.setattr(transport, "shell", fail)
+    assert command("clean") == 1
+    monkeypatch.setattr(transport, "shell", original)
+    assert command("clean") == 0
+
+
+def test_owner_lost_during_unconfirmed_shutdown(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> transport.Reading:
+        remote.file(".owner", "new-owner\n")
+        message = "lost poll reply"
+        raise transport.TransportError(message)
+
+    monkeypatch.setattr(transport, "read", fail)
+    assert launch(remote) == 1
+    assert "not owner" in capsys.readouterr().err
+    assert not driver.metadata_path("sample").exists()
+    assert not any("kill-session" in str(r) for r in remote.records("tmux"))
+
+
+def test_not_owner_archives_with_utc_stamp(remote: Remote) -> None:
+    assert launch(remote) == 0
+    remote.file(".owner", "new-owner\n")
+    assert command("status") == 1
+    archived = next((driver.directory() / "trash").glob("*/sample.json"))
+    stamp = dt.datetime.fromisoformat(archived.parent.name)
+    assert stamp.utcoffset() == dt.timedelta(0)

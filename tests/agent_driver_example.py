@@ -65,7 +65,8 @@ if name == "tbhbdev":
     print(control["version"])
 elif name == "tmux":
     assert args[:2] == ["-S", str(root / "sockets/agents")]
-    verb = args[2]
+    assert args[2:4] == ["-f", "/dev/null"]
+    verb = args[4]
     if verb in ("has-session", "kill-session"):
         assert args[-2:] == ["-t", "=ag-sample"]
     if verb == "has-session":
@@ -78,6 +79,10 @@ elif name == "tmux":
         sys.exit(0)
     run = root / "state/tbhbdev/agent-runs"
     if verb == "new-session":
+        assert args[8:] == [str(root / "home/.local/bin/tbhbdev"),
+                            "alpha", "agent", "run-host", "sample",
+                            "--host", "example-linux"]
+        (run / "sample.run.lock").write_text("")
         control["session"] = True
         launch = control.get("launch", {"launched": ""})
         for suffix, text in launch.items():
@@ -96,8 +101,10 @@ elif name == "tmux":
     (root / "control.json").write_text(json.dumps(control))
 elif name == "git":
     assert args[:2] == ["-c", "core.hooksPath=/dev/null"]
-    assert args[2:14:2] == ["-c"] * 6
-    verb = args[14]
+    index = 0
+    while args[index] == "-c":
+        index += 2
+    verb = args[index]
     assert Path.cwd() == (root / "home" if verb == "ls-remote" else
                           root / "home/Code/github.com/example-org/example-repo")
     if verb == "ls-remote":
@@ -106,15 +113,19 @@ elif name == "git":
         assert args[-1] == "refs/heads/agent/sample"
         sys.exit(0 if control.get("branch", False) else 1)
     elif verb == "rev-parse":
+        if args[-1] == "--git-common-dir":
+            print(Path.cwd() / ".git")
+            sys.exit(0)
         if control.get("upstream", True):
             print("refs/remotes/origin/main")
         else:
             sys.exit(1)
     elif verb == "rev-list":
         print(control.get("unpushed", 0))
-    elif verb == "worktree":
-        sys.exit(control.get("worktree_rc", 0))
-    elif verb != "branch":
+    elif verb == "branch":
+        control["branch"] = False
+        (root / "control.json").write_text(json.dumps(control))
+    else:
         raise AssertionError(args)
 else:
     raise AssertionError(name)
@@ -154,6 +165,10 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     state.mkdir(parents=True)
     (
         root / "home/Code/github.com/example-org/example-repo/.worktrees/agent-sample"
+    ).mkdir(parents=True)
+    (
+        root
+        / "home/Code/github.com/example-org/example-repo/.git/worktrees/agent-sample"
     ).mkdir(parents=True)
     tools = tmp_path / "bin"
     tools.mkdir()

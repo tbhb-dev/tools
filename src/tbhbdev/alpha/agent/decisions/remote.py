@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shlex
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,9 @@ if TYPE_CHECKING:
 
 PREFIX = """PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
+LC_ALL=C
+LANG=C
+export LC_ALL LANG
 if test "$(uname -s)" = Darwin; then
 PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
 export PATH
@@ -27,13 +31,15 @@ d="$state/{files.DIRECTORY}"
 """
 # Copy this boundary until the host and driver branches can share it.
 GIT = (
-    'env -i PATH="$PATH" HOME="$HOME" LANG=C GIT_TERMINAL_PROMPT=0 '
+    'env -i PATH="$PATH" HOME="$HOME" LANG=C LC_ALL=C '
+    "GIT_TERMINAL_PROMPT=0 GIT_NO_LAZY_FETCH=1 "
     "GIT_CONFIG_NOSYSTEM=1 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false "
 )
 GIT_FLAGS = (
     "git -c core.hooksPath=/dev/null -c core.fsmonitor=false "
     "-c core.sshCommand=ssh -c credential.helper= -c core.askPass= "
-    "-c protocol.ext.allow=never -c core.pager=cat"
+    "-c protocol.ext.allow=never -c core.pager=cat "
+    "-c gc.auto=0 -c maintenance.auto=false"
 )
 HELPERS = r"""safe_file() {
     test ! -L "$1" || exit 65
@@ -47,7 +53,7 @@ field() {
     printf '\n'
 }
 tmux_state() {
-    error=$(tmux -S "$s/agents" "$1" -t "=$2" 2>&1)
+    error=$(tmux -S "$s/agents" -f /dev/null "$1" -t "=$2" 2>&1)
     code=$?
     present=1
     if test "$code" -eq 0; then return; fi
@@ -78,8 +84,22 @@ test "$(find "$s" -prune -type d -user "$(id -un)" -perm 0700)" = "$s" || exit 6
     )
 
 
-def session(name: str, command: str, sockets_dir: str) -> str:
-    return socket_root(sockets_dir) + f"tmux_state {command} ag-{name}\n"
+def owned(name: str, owner: str) -> str:
+    path = f'"$d/{name}{files.OWNER}"'
+    return (
+        PREFIX
+        + ROOT
+        + f"test ! -L {path} && test -f {path} && "
+        + f'test "$(cat {path})" = {shlex.quote(owner)} || exit 73\n'
+    )
+
+
+def session(name: str, command: str, sockets_dir: str, *, owner: str) -> str:
+    return (
+        owned(name, owner)
+        + socket_root(sockets_dir)
+        + f"tmux_state {command} ag-{name}\n"
+    )
 
 
 def program(host: Host) -> str:
@@ -110,39 +130,39 @@ def preflight(repository: str, ref: str, expected_version: str, host: Host) -> s
     )
 
 
-def transfer(name: str, sockets_dir: str) -> str:
+def transfer(name: str, sockets_dir: str, *, owner: str) -> str:
     return (
         socket_root(sockets_dir)
         + f"""tmux_state has-session ag-{name}
 test "$present" -eq 0 || exit 73
 mkdir -p "$d" && chmod 700 "$d" || exit "$?"
-# The first input file is also the atomic name claim.
+# The owner is the atomic name claim, before extracting any input.
 set -C
 for p in "$d/{name}."*; do
     if test -e "$p" || test -L "$p"; then exit 73; fi
 done
-( : > "$d/{name}{files.REQUEST}" ) || exit 73
+( printf '%s\\n' {shlex.quote(owner)} > "$d/{name}{files.OWNER}" ) || exit 73
 tar -xf - -C "$d"
 """
     )
 
 
-def start(name: str, sockets_dir: str, host: Host) -> tuple[str, ...]:
-    command = shlex.join(("alpha", "agent", "run-host", name))
+def start(name: str, sockets_dir: str, host: Host, *, owner: str) -> tuple[str, ...]:
+    command = shlex.join(("alpha", "agent", "run-host", name, "--host", host.name))
     return (
         "/bin/sh",
         "-c",
-        socket_root(sockets_dir)
-        + (
-            f'tmux -S "$s/agents" new-session -d -s ag-{name} '
-            + shlex.quote(f"{program(host)} {command}")
-        ),
+        owned(name, owner)
+        + socket_root(sockets_dir)
+        + f'tmux -S "$s/agents" -f /dev/null new-session -d -s ag-{name} '
+        + f"{program(host)} {command}",
     )
 
 
-def read(name: str, sockets_dir: str, *, answer: bool = False) -> str:
+def read(name: str, sockets_dir: str, *, owner: str, answer: bool = False) -> str:
     header = (
-        socket_root(sockets_dir)
+        owned(name, owner)
+        + socket_root(sockets_dir)
         + f"""tmux_state has-session ag-{name}
 field "$d/{name}{files.PHASE}" 756e6b6e6f776e
 field "$d/{name}{files.RC}" -
@@ -166,41 +186,54 @@ elif test -f {output}; then tail -c 65536 {output}; fi
     return header + f"safe_file {log}\nif test -f {log}; then head -c 65536 {log}; fi\n"
 
 
-def fallback(name: str, sockets_dir: str) -> str:
-    rc, pending = (f'"$d/{name}{suffix}"' for suffix in (files.RC, files.RC_PENDING))
+def fallback(name: str, sockets_dir: str, *, owner: str) -> str:
+    rc, pending, marker = (
+        f'"$d/{name}{suffix}"'
+        for suffix in (files.RC, files.RC_PENDING, files.FALLBACK)
+    )
     return (
-        socket_root(sockets_dir)
+        owned(name, owner)
+        + socket_root(sockets_dir)
         + f"""tmux_state has-session ag-{name}
 test "$present" -eq 0 || exit 1
-mkdir -p "$d" && chmod 700 "$d" || exit "$?"
 safe_file {rc}
 safe_file {pending}
+safe_file {marker}
 set -C
-if test ! -f {rc}; then printf '137\\n' > {pending} && mv -n {pending} {rc}; fi
+if test ! -f {rc}; then
+    if test ! -f {marker}; then ( : > {marker} ) || exit "$?"; fi
+    if test -f {pending}; then
+        test ! -L "$d/trash" || exit 65
+        mkdir -p "$d/trash" || exit "$?"
+        stale=$(mktemp -d "$d/trash/{name}-pending.XXXXXXXX") || exit "$?"
+        mv {pending} "$stale/" || exit "$?"
+    fi
+    printf '137\\n' > {pending} && mv -n {pending} {rc}
+fi
 """
     )
 
 
-def keep(name: str) -> str:
+def keep(name: str, *, owner: str) -> str:
+    path = f'"$d/{name}{files.KEEP}"'
     return (
-        PREFIX
-        + ROOT
+        owned(name, owner)
+        + HELPERS
         + f"""umask 077
-mkdir -p "$d" && chmod 700 "$d" || exit "$?"
+safe_file {path}
 set -C
-test ! -L "$d/{name}{files.KEEP}" || exit 65
-: > "$d/{name}{files.KEEP}"
+if test ! -f {path}; then ( : > {path} ); fi
 """
     )
 
 
-def branch_facts(repository: str, name: str) -> str:
+def branch_facts(repository: str, name: str, *, owner: str) -> str:
     clone = repo.clone_path(PurePosixPath("."), repository)
     branch = f"agent/{name}"
-    git = GIT + GIT_FLAGS
+    git = GIT + GIT_FLAGS + " -c protocol.allow=never"
     upstream = f"{git} rev-parse --symbolic-full-name {branch}@{{upstream}}"
     return (
-        PREFIX + f'if test ! -d "$HOME"/{shlex.quote(str(clone))}; '
+        owned(name, owner) + f'if test ! -d "$HOME"/{shlex.quote(str(clone))}; '
         "then printf '0\\n'; exit 0; fi\n"
         f'cd "$HOME"/{shlex.quote(str(clone))} || exit "$?"\n'
         f"if {git} show-ref --verify --quiet refs/heads/{branch}; then\n"
@@ -211,37 +244,85 @@ def branch_facts(repository: str, name: str) -> str:
     )
 
 
+@dataclass(frozen=True)
+class Cleanup:
+    owner: str
+    delete_branch: bool
+    force: bool
+
+
 def clean(
-    repository: str, name: str, stamp: str, sockets_dir: str, *, delete_branch: bool
+    repository: str,
+    name: str,
+    stamp: str,
+    sockets_dir: str,
+    *,
+    decision: Cleanup,
 ) -> str:
     clone = repo.clone_path(PurePosixPath("."), repository)
     tree = f".worktrees/agent-{name}"
     branch = f"agent/{name}"
-    git = GIT + GIT_FLAGS
-    command = (
-        socket_root(sockets_dir)
-        + f"""tmux_state has-session ag-{name}
-test "$present" -eq 0 || exit 1
-trash="$d/trash/{stamp}-{name}"
-test ! -L "$d/trash" || exit 65
-mkdir -p "$d/trash" && mkdir "$trash" || exit "$?"
-if test -d "$HOME"/{shlex.quote(str(clone))}; then
-cd "$HOME"/{shlex.quote(str(clone))} || exit "$?"
-test ! -L {tree} || exit 65
-if test -d {tree}; then mv {tree} "$trash/worktree" || exit "$?"; fi
-{git} worktree prune || exit "$?"
+    git = GIT + GIT_FLAGS + " -c protocol.allow=never"
+    locked = f"""move_directory() {{
+    if test -L "$1"; then
+        printf '%s\\n' "clean refused: $1 is a symlink" >&2; exit 65
+    fi
+    if test -e "$1"; then
+        if test ! -d "$1"; then
+            printf '%s\\n' "clean refused: $1 is not a directory" >&2; exit 65
+        fi
+        test ! -e "$2" && test ! -L "$2" || exit 65
+        mv "$1" "$2" || exit "$?"
+    fi
+}}
+move_directory {tree} "$trash/worktree"
+test ! -L "$common/worktrees" || exit 65
+move_directory "$common/worktrees/agent-{name}" "$trash/admin"
 """
-    )
-    if delete_branch:
-        command += f"""if {git} show-ref --verify --quiet refs/heads/{branch}; then
+    if decision.delete_branch:
+        locked += f"""if {git} show-ref --verify --quiet refs/heads/{branch}; then
 {git} branch -D {branch} || exit "$?"
 fi
 """
-    command += "fi\n"
+    lock = (
+        'open(my $lock, ">>", shift) or die "open lock: $!"; '
+        'flock($lock, LOCK_EX) or die "lock: $!"; '
+        'system("/bin/sh", "-c", shift); exit($? == -1 ? 1 : $? >> 8);'
+    )
+    command = (
+        owned(name, decision.owner)
+        + socket_root(sockets_dir)
+        + f"""tmux_state has-session ag-{name}
+test "$present" -eq 0 || exit 1
+"""
+    )
+    if not decision.force:
+        command += f"""fallback="$d/{name}{files.FALLBACK}"
+if test -e "$fallback" || test -L "$fallback"; then
+    printf '%s\\n' 'clean refused: fallback rc requires --force' >&2
+    exit 65
+fi
+"""
+    command += f"""trash="$d/trash/{stamp}-{name}"
+test ! -L "$d/trash" && test ! -L "$trash" || exit 65
+mkdir -p "$trash" || exit "$?"
+if test -d "$HOME"/{shlex.quote(str(clone))}; then
+cd "$HOME"/{shlex.quote(str(clone))} || exit "$?"
+common=$({git} rev-parse --path-format=absolute --git-common-dir) || exit "$?"
+safe_file "$common/agent-worktree.lock"
+export common trash
+perl -MFcntl=:flock -e {shlex.quote(lock)} \
+    "$common/agent-worktree.lock" {shlex.quote(locked)} || exit "$?"
+fi
+"""
     for suffix in files.SUFFIXES:
         path = f'"$d/{name}{suffix}"'
         command += (
             f"safe_file {path}\n"
-            f'if test -f {path}; then mv {path} "$trash/" || exit "$?"; fi\n'
+            f"if test -f {path}; then\n"
+            f'    target="$trash/{name}{suffix}"\n'
+            '    test ! -e "$target" && test ! -L "$target" || exit 65\n'
+            f'    mv {path} "$target" || exit "$?"\n'
+            "fi\n"
         )
     return command
