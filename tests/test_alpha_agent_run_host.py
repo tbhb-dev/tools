@@ -33,7 +33,7 @@ from tbhbdev.alpha.agent import (
 )
 from tbhbdev.alpha.agent.decisions import request
 from tbhbdev.alpha.agent.decisions.run_state import Group
-from tbhbdev.alpha.agent.model import Harness, Invalid, Os, RunKind
+from tbhbdev.alpha.agent.model import CodexPolicy, Harness, Invalid, Os, RunKind
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -495,8 +495,16 @@ def test_command_refuses_invalid_input(
         "missing": f"[Errno 2] No such file or directory: '{missing_path}'",
     }
     assert capsys.readouterr().err == f"example run-host: {details[case]}\n"
-    assert files.path("rc").read_text() == "1\n"
-    assert files.path("log").read_text() == f"run refused: {details[case]}\n"
+    if case in ("duplicate", "rc", "pgid"):
+        assert not files.path("log").exists()
+        assert (
+            files.path("rc").read_text() == "0"
+            if case == "rc"
+            else not files.path("rc").exists()
+        )
+    else:
+        assert files.path("rc").read_text() == "1\n"
+        assert files.path("log").read_text() == f"run refused: {details[case]}\n"
 
 
 def tmux_environment_probe(root: Path, harness: Harness) -> None:
@@ -916,6 +924,7 @@ def check_harness_arguments(
     def build(*args: object, **kwargs: object) -> Policy:
         assert args == (run.settings, run.host)
         assert kwargs.pop("protected")
+        assert kwargs.pop("denied") == run_host.resolved_denies(run, prepared.paths)
         assert kwargs == {
             "harness": harness,
             "profile": run.request.profile,
@@ -944,6 +953,8 @@ def check_harness_arguments(
             "brief_file": str(run.files.path("prompt")),
             "agy_project": project,
             "agy_brief": text,
+            "schema_file": None,
+            "schema_text": None,
         }
         generated = real_argv(
             actual,
@@ -1688,6 +1699,7 @@ def test_checked_policy_supplies_all_protected_paths(
     value, executable = run_host.checked_policy(run, paths)
     expected = (
         str(run.files.root.resolve()),
+        *run_host.protected_home(run),
         *installed,
         *directories,
         *(str(Path(path).resolve()) for path in directories),
@@ -1744,3 +1756,224 @@ def test_actual_common_directory_is_checked_before_creation(
     monkeypatch.setattr(run_host.worktree, "create", create)
     with pytest.raises(Invalid, match=r"protected host path.*overlaps write root"):
         run_host.prepare_workspace(run)
+
+
+def test_linux_denies_resolve_links_drop_missing_and_deduplicate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    target = tmp_path / "runtime"
+    target.mkdir()
+    socket = target / "socket"
+    socket.touch()
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    candidates = (str(alias / "socket"), str(socket), str(alias / "missing"))
+    monkeypatch.setattr(run_host.policy, "denied_paths", constant(candidates))
+    value, _executable = run_host.checked_policy(run, preparation(run).paths)
+    assert value.deny == (str(socket),)
+    assert isinstance(value.detail, CodexPolicy)
+    assert value.detail.deny == (str(socket),)
+
+
+@pytest.mark.parametrize("request_file", [False, True])
+@pytest.mark.parametrize("marker", ["rc", "pgid"])
+def test_refused_rerun_preserves_every_file(
+    config_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request_file: bool,
+    marker: str,
+) -> None:
+    config_file.write_text(EXAMPLE)
+    files = runfiles.RunFiles(
+        Path(os.environ["XDG_STATE_HOME"]) / "tbhbdev/agent-runs", "example"
+    )
+    files.receive(run_request())
+    files.write("prompt", "raw brief")
+    files.write("log", "finished output\n")
+    files.write(marker, "7\n")
+    before = {p.name: p.read_bytes() for p in files.root.iterdir()}
+    monkeypatch.setattr(run_host, "execute", constant(99))
+    arguments = ["example", "--host", "example-linux"]
+    if request_file:
+        arguments.insert(1, str(files.path("request.json")))
+    assert run_host.main(arguments, "example run-host") == 1
+    assert {p.name: p.read_bytes() for p in files.root.iterdir()} == before
+
+
+def test_empty_state_home_uses_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", "")
+    assert run_host.main(["example"], "example run-host") == 1
+    assert (
+        Path.home() / ".local/state/tbhbdev/agent-runs/example.rc"
+    ).read_text() == "1\n"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        ".zshenv",
+        ".zshrc",
+        ".zprofile",
+        ".zlogin",
+        ".bashrc",
+        ".bash_profile",
+        ".profile",
+        ".tmux.conf",
+        ".config/tmux",
+        ".gitconfig",
+        ".config/git",
+        ".control",
+        ".control/sockets",
+    ],
+)
+def test_startup_and_socket_parents_are_protected(tmp_path: Path, entry: str) -> None:
+    run = make_run(tmp_path)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sockets_dir=".control/sockets/private",
+            sandbox=dataclasses.replace(run.settings.sandbox, write_roots=(entry,)),
+        ),
+    )
+    with pytest.raises(Invalid, match="protected host path"):
+        run_host.checked_policy(run, preparation(run).paths)
+
+
+@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
+def test_driver_schema_file_reaches_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
+) -> None:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        reason="test",
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+    )
+    schema = '{"type":"object","properties":{"answer":{"type":"string"}}}'
+    run.files.write("schema.json", schema)
+    run.files.write("prompt", "raw brief")
+    prepared = preparation(run)
+    commands: list[tuple[str, ...]] = []
+
+    class Child:
+        pid = 99123
+
+        def wait(self, **_kwargs: object) -> int:
+            return 0
+
+    def launch(
+        spec: process_group.Launch, *, started: Callable[[Child], None]
+    ) -> Child:
+        commands.append(spec.command)
+        child = Child()
+        started(child)
+        return child
+
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "record", constant(None))
+    monkeypatch.setattr(process_group, "stop_started", constant(None))
+    with ExitStack() as stack:
+        assert run_host.run_harness(run, prepared, stack) == 0
+    command = commands[0]
+    if harness is Harness.CODEX:
+        assert command[command.index("--output-schema") + 1] == str(
+            run.files.path("schema.json")
+        )
+    else:
+        assert command[command.index("--json-schema") + 1] == schema
+        assert command[command.index("--output-format") + 1] == "json"
+
+
+def test_full_access_opt_out_is_logged(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = make_run(
+        tmp_path,
+        unsandboxed=True,
+        authorized_by="example-org/example-repo#1",
+        reason="isolated host",
+    )
+    run_host.preflight(run)
+    notice = "codex sandbox opt-out: isolated test host\n"
+    assert capsys.readouterr().err == notice
+    assert run.files.path("log").read_text() == notice
+
+
+@pytest.mark.parametrize("os_name", Os)
+def test_resolved_denies_preserve_macos_aliases_and_empty_linux_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, os_name: Os
+) -> None:
+    run = make_run(tmp_path)
+    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=os_name))
+    missing = (str(tmp_path / "missing"),)
+    monkeypatch.setattr(run_host.policy, "denied_paths", constant(missing))
+    assert run_host.resolved_denies(run, preparation(run).paths) == (
+        () if os_name is Os.LINUX else missing
+    )
+
+
+def test_startup_symlink_target_is_protected(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    target = tmp_path / "trusted-startup"
+    target.touch()
+    (run.home / ".zshrc").symlink_to(target)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(
+                run.settings.sandbox, write_roots=(str(target),)
+            ),
+        ),
+    )
+    with pytest.raises(Invalid, match="protected host path"):
+        run_host.checked_policy(run, preparation(run).paths)
+
+
+def test_protected_home_lists_startup_files_and_socket_ancestors(
+    tmp_path: Path,
+) -> None:
+    run = make_run(tmp_path)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings, sockets_dir=".control/sockets/private"
+        ),
+    )
+    expected = (
+        ".zshenv",
+        ".zshrc",
+        ".zprofile",
+        ".zlogin",
+        ".bashrc",
+        ".bash_profile",
+        ".profile",
+        ".tmux.conf",
+        ".config/tmux",
+        ".gitconfig",
+        ".config/git",
+        ".control/sockets",
+        ".control",
+    )
+    assert run_host.protected_home(run) == tuple(str(run.home / p) for p in expected)
+
+
+def test_resolved_denies_receive_host_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    paths = dataclasses.replace(preparation(run).paths, uid=24680)
+
+    def candidates(
+        configured: run_host.Settings, host: run_host.Host, home: str, uid: int
+    ) -> tuple[str, ...]:
+        assert configured is run.settings
+        assert host is run.host
+        assert home == paths.home
+        assert uid == 24680
+        return ()
+
+    monkeypatch.setattr(run_host.policy, "denied_paths", candidates)
+    assert run_host.resolved_denies(run, paths) == ()

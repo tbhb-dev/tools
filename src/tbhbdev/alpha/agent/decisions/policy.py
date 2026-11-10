@@ -127,6 +127,7 @@ def environment(
         "TMPPREFIX": resolve(paths.tmpdir, "zsh"),
         "GH_CONFIG_DIR": resolve(paths.tmpdir, GH_CONFIG_SUBDIR),
         "DOCKER_CONFIG": resolve(paths.tmpdir, DOCKER_CONFIG_SUBDIR),
+        "GIT_NO_LAZY_FETCH": "1",
     }
     if harness is Harness.CODEX:
         env["CODEX_HOME"] = paths.codex_home
@@ -232,6 +233,7 @@ def _claude(
                     "TMPPREFIX",
                     "GH_CONFIG_DIR",
                     "DOCKER_CONFIG",
+                    "GIT_NO_LAZY_FETCH",
                     "SSH_AUTH_SOCK",
                 )
                 if k in env
@@ -347,6 +349,7 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
     unsandboxed: bool,
     paths: RunPaths,
     protected: tuple[str, ...] = (),
+    denied: tuple[str, ...] | None = None,
 ) -> Policy:
     """The policy of a run of HARNESS with PROFILE on HOST, as ACCOUNT.
 
@@ -367,8 +370,22 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
             "with a named reason"
         )
         raise Invalid(message)
+    if (
+        harness is Harness.CODEX
+        and unsandboxed
+        and settings.sandbox.codex_unsandboxed_opt_out is None
+    ):
+        message = (
+            "codex has no OS sandbox; configure codex_unsandboxed_opt_out "
+            "with a named reason"
+        )
+        raise Invalid(message)
     protect_host(settings, paths, protected)
-    deny = denied_paths(settings, host, paths.home, paths.uid)
+    deny = (
+        denied_paths(settings, host, paths.home, paths.uid)
+        if denied is None
+        else denied
+    )
     if paths.signing_socket is not None:
         _refuse_overlaps((paths.signing_socket,), deny, "signing socket")
     env = environment(settings, host, harness, paths, account)

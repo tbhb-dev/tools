@@ -71,8 +71,6 @@ def test_review_detaches_at_resolved_commit(tmp_path: Path) -> None:
     assert path == clone / ".worktrees" / "agent-review-1"
     assert git(path, "rev-parse", "HEAD") == head
     assert git(path, "branch", "--show-current") == ""
-    worktree.remove(clone, "review-1", force=False)
-    assert not path.exists()
 
 
 def test_missing_commit_is_refused(tmp_path: Path) -> None:
@@ -90,42 +88,6 @@ def test_missing_clone_is_not_created(tmp_path: Path) -> None:
         worktree.create(clone, "example", run_request())
     assert str(caught.value) == f"repo clone {clone} does not exist"
     assert not clone.exists()
-
-
-@pytest.mark.parametrize(
-    ("unpublished", "force", "kept"),
-    [(False, False, False), (True, False, True), (True, True, False)],
-)
-def test_removal_keeps_unpublished_work(
-    tmp_path: Path, unpublished: bool, force: bool, kept: bool
-) -> None:
-    _, clone = repository(tmp_path)
-    path = worktree.create(clone, "example", run_request())
-    if unpublished:
-        commit(path, "local work")
-    worktree.remove(clone, "example", force=force)
-    assert not path.exists()
-    assert ("agent/example" in git(clone, "branch", "--list")) is kept
-
-
-def test_dirty_worktree_requires_force(tmp_path: Path) -> None:
-    _, clone = repository(tmp_path)
-    path = worktree.create(clone, "example", run_request())
-    (path / "untracked").write_text("local work\n")
-    with pytest.raises(subprocess.CalledProcessError):
-        worktree.remove(clone, "example", force=False)
-    assert path.exists()
-    worktree.remove(clone, "example", force=True)
-    assert not path.exists()
-
-
-def test_a_pushed_branch_can_be_deleted(tmp_path: Path) -> None:
-    _, clone = repository(tmp_path)
-    path = worktree.create(clone, "example", run_request())
-    commit(path, "published work")
-    git(path, "push", "origin", "agent/example")
-    worktree.remove(clone, "example", force=False)
-    assert not git(clone, "branch", "--list", "agent/example")
 
 
 def test_git_suppresses_command_errors_and_returns_text(
@@ -155,6 +117,7 @@ def test_git_suppresses_command_errors_and_returns_text(
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_NO_LAZY_FETCH": "1",
             "GIT_ASKPASS": "/bin/false",
             "SSH_ASKPASS": "/bin/false",
         }
@@ -231,15 +194,7 @@ def test_worktree_git_contract_under_one_stable_lock(
             ]
         ),
     ]
-    calls.clear()
-    worktree.remove(clone, "example", force=False)
-    assert locks == [common / "agent-worktree.lock"] * 2
-    assert calls == [
-        ("branch", "--show-current"),
-        ("worktree", "remove", str(path)),
-        ("rev-list", "main", "--not", "--remotes"),
-        ("branch", "-D", "main"),
-    ]
+    assert locks == [common / "agent-worktree.lock"]
 
 
 def test_host_git_never_runs_hooks_or_monitor(tmp_path: Path) -> None:
@@ -255,8 +210,6 @@ def test_host_git_never_runs_hooks_or_monitor(tmp_path: Path) -> None:
     commit(seed, "remote update")
     git(seed, "push", "origin", "main")
     worktree.create(clone, "safe", run_request())
-    assert not marker.exists()
-    worktree.remove(clone, "safe", force=False)
     assert not marker.exists()
 
 
@@ -320,11 +273,9 @@ def test_each_repo_command_plant_is_inert(tmp_path: Path, plant: str) -> None:
     if plant == "ext":
         with pytest.raises(subprocess.CalledProcessError):
             worktree.create(clone, "safe", run_request())
-        # Refusal leaves no checkout; restore a data URL to exercise removal too.
+        # Refusal leaves no checkout; restore a data URL for creation.
         git(clone, "config", "remote.origin.url", str(tmp_path / "origin"))
     worktree.create(clone, "safe", run_request())
-    assert not marker.exists()
-    worktree.remove(clone, "safe", force=False)
     assert not marker.exists()
 
 
@@ -386,3 +337,25 @@ def test_filter_subsection_newlines_are_data() -> None:
 )
 def test_only_merge_drivers_are_overridden(key: str, expected: list[str]) -> None:
     assert worktree.driver_overrides(key + "\0") == expected
+
+
+@pytest.mark.parametrize("command", ["fetch", "status"])
+def test_host_git_disables_prune_lazy_fetch_and_offline_protocols(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    calls: list[list[str]] = []
+
+    def output(argv: list[str], **kwargs: object) -> str:
+        calls.append(argv)
+        assert "gc.auto=0" in argv
+        assert "maintenance.auto=false" in argv
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        assert environment["GIT_NO_LAZY_FETCH"] == "1"
+        offline = "--get-regexp" in argv or command == "status"
+        assert ("protocol.allow=never" in argv) is offline
+        return ""
+
+    monkeypatch.setattr(subprocess, "check_output", output)
+    assert worktree.git(tmp_path, command) == ""
+    assert len(calls) == 2

@@ -22,6 +22,7 @@ LINUX_SOCKET_DENIES = (
 
 SANDBOX = model.Sandbox(
     agy_unsandboxed_opt_out="test grants only",
+    codex_unsandboxed_opt_out="isolated test host",
     denied_home_paths=(DENIED,),
     agy=model.AgySandbox(
         review_read=(".local/share/example-gh", ".local/share/example-mise"),

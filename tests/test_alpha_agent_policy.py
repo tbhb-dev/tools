@@ -124,6 +124,7 @@ def env_of(os: Os, harness: Harness, account: str) -> dict[str, str]:
         "TMPPREFIX": f"{tmp}/zsh",
         "GH_CONFIG_DIR": f"{tmp}/gh",
         "DOCKER_CONFIG": f"{tmp}/docker",
+        "GIT_NO_LAZY_FETCH": "1",
     }
     if harness is Harness.CODEX:
         env["CODEX_HOME"] = f"{tmp}/codex"
@@ -363,6 +364,7 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
             "TMPPREFIX": f"{tmp}/zsh",
             "GH_CONFIG_DIR": f"{tmp}/gh",
             "DOCKER_CONFIG": f"{tmp}/docker",
+            "GIT_NO_LAZY_FETCH": "1",
         },
         "permissions": {"allow": allow, "deny": rules},
         "sandbox": {
@@ -1342,3 +1344,63 @@ def test_linux_socket_denies_use_the_run_uid(harness: Harness) -> None:
 
 def test_host_protection_handles_a_missing_common_directory() -> None:
     policy.protect_host(settings(), paths("agent"), ("/example/installation",))
+
+
+@pytest.mark.parametrize("reason", [None, "isolated test host"])
+def test_codex_full_access_requires_named_opt_out(reason: str | None) -> None:
+    configured = settings()
+    configured = dataclasses.replace(
+        configured,
+        sandbox=dataclasses.replace(
+            configured.sandbox, codex_unsandboxed_opt_out=reason
+        ),
+    )
+    if reason is None:
+        with pytest.raises(Invalid) as caught:
+            made(
+                os=Os.LINUX,
+                profile=Profile.BUILD,
+                harness=Harness.CODEX,
+                account="agent",
+                unsandboxed=True,
+                config=configured,
+            )
+        assert str(caught.value) == (
+            "codex has no OS sandbox; configure codex_unsandboxed_opt_out "
+            "with a named reason"
+        )
+    else:
+        value = made(
+            os=Os.LINUX,
+            profile=Profile.BUILD,
+            harness=Harness.CODEX,
+            account="agent",
+            unsandboxed=True,
+            config=configured,
+        )
+        assert isinstance(value.detail, model.CodexPolicy)
+        assert value.detail.mode is model.CodexMode.FULL_ACCESS
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("denied", [(), ("/example/protected",)])
+def test_supplied_denies_are_policy_data(
+    harness: Harness, denied: tuple[str, ...]
+) -> None:
+    value = policy.build(
+        settings(),
+        LINUX,
+        harness=harness,
+        profile=Profile.BUILD,
+        account="agent",
+        unsandboxed=False,
+        paths=paths("agent"),
+        denied=denied,
+    )
+    assert value.deny == denied
+    if isinstance(value.detail, model.CodexPolicy):
+        assert value.detail.deny == denied
+    elif isinstance(value.detail, model.ClaudePolicy):
+        assert dig(value.detail.settings, "sandbox", "filesystem", "denyRead") == list(
+            denied
+        )

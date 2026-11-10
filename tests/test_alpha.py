@@ -4,8 +4,10 @@ import io
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
+import yaml
 
 from tbhbdev import alpha, cli
 from tbhbdev.alpha import (
@@ -114,3 +116,24 @@ def test_harness_hooks_run_from_the_top_without_config(
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({})))
     assert cli.main(["alpha", command]) == 0
     assert capsys.readouterr() == ("", "")
+
+
+def test_pre_push_checks_spelling_and_prose() -> None:
+    root = Path(__file__).resolve().parents[1]
+    hooks = yaml.safe_load((root / ".pre-commit-config.yaml").read_text())
+    assert "pre-push" in hooks["default_install_hook_types"]
+    prose = next(
+        hook
+        for repo in hooks["repos"]
+        for hook in repo["hooks"]
+        if hook["id"] == "spelling-and-prose"
+    )
+    assert prose == {
+        "id": "spelling-and-prose",
+        "name": "cspell and vale",
+        "language": "system",
+        "entry": "bazelisk test //:cspell_test //:vale_test",
+        "stages": ["pre-push"],
+        "always_run": True,
+        "pass_filenames": False,
+    }

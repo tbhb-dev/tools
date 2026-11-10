@@ -601,3 +601,32 @@ def test_network_proxy_overrides_are_explicit(opt_out: bool) -> None:
             "allow_local_binding": False,
         }
     )
+
+
+@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
+@pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize("schema", [None, '{"type":"object"}'])
+def test_schema_options_are_only_for_exec(
+    harness: Harness, kind: RunKind, schema: str | None
+) -> None:
+    req = request(harness, kind, Profile.BUILD)
+    pol = policy_for(harness, Profile.BUILD)
+    baseline = argv.harness(req, pol, worktree=WORKTREE, brief_file=BRIEF_FILE)
+    path = "/example/schema.json" if schema is not None else None
+    result = argv.harness(
+        req,
+        pol,
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+        schema_file=path,
+        schema_text=schema,
+    )
+    if kind is RunKind.EXEC and schema is not None:
+        expected = (
+            (*baseline[:-1], "--output-schema", path, baseline[-1])
+            if harness is Harness.CODEX
+            else (*baseline, "--output-format", "json", "--json-schema", schema)
+        )
+        assert result == expected
+    else:
+        assert result == baseline

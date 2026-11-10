@@ -84,6 +84,7 @@ class Sandbox:
     network_domains: tuple[str, ...] = ()
     codex_network_proxy_opt_out: str | None = None
     agy_unsandboxed_opt_out: str | None = None
+    codex_unsandboxed_opt_out: str | None = None
 
 
 @dataclass(frozen=True)

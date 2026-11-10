@@ -809,6 +809,9 @@ def test_reference_parts_may_hold_dots_underscores_and_hyphens() -> None:
         ("codex_network_proxy_opt_out", "named reason", True),
         ("codex_network_proxy_opt_out", "", False),
         ("agy_unsandboxed_opt_out", "named reason", True),
+        ("codex_unsandboxed_opt_out", "isolated host", True),
+        ("codex_unsandboxed_opt_out", "", False),
+        ("codex_unsandboxed_opt_out", False, False),
         ("agy_unsandboxed_opt_out", False, False),
     ],
 )

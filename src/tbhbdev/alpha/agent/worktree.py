@@ -8,10 +8,11 @@ from functools import partial
 from pathlib import Path
 
 from tbhbdev.alpha.agent import host_tools, runfiles
-from tbhbdev.alpha.agent.decisions import run_state
 from tbhbdev.alpha.agent.model import Invalid, Profile, RunRequest
 
 GIT_OVERRIDES = (
+    "gc.auto=0",
+    "maintenance.auto=false",
     "core.hooksPath=/dev/null",
     "core.fsmonitor=false",
     "core.sshCommand=ssh",
@@ -35,12 +36,15 @@ def git(clone: Path, *args: str) -> str:
         GIT_TERMINAL_PROMPT="0",
         GIT_CONFIG_NOSYSTEM="1",
         GIT_NO_REPLACE_OBJECTS="1",
+        GIT_NO_LAZY_FETCH="1",
         GIT_ASKPASS="/bin/false",
         SSH_ASKPASS="/bin/false",
     )
     command = [host_tools.resolve("git")]
     command += [item for value in GIT_OVERRIDES for item in ("-c", value)]
     command += ["-C", str(clone)]
+    offline = ["-c", "protocol.allow=never"]
+    invocation = [*command, *([] if args[0] == "fetch" else offline), *args]
     output = partial(
         subprocess.check_output,
         env=env,
@@ -52,6 +56,7 @@ def git(clone: Path, *args: str) -> str:
         keys = output(
             [
                 *command,
+                *offline,
                 "config",
                 "--null",
                 "--name-only",
@@ -62,9 +67,9 @@ def git(clone: Path, *args: str) -> str:
     except subprocess.CalledProcessError as exc:
         if exc.returncode != 1:
             raise
-        return output([*command, *args]).strip()
+        return output(invocation).strip()
     overrides = driver_overrides(keys)
-    return output([*command, *overrides, *args]).strip()
+    return output([*invocation[: -len(args)], *overrides, *args]).strip()
 
 
 def driver_overrides(keys: str) -> list[str]:
@@ -98,15 +103,3 @@ def create(clone: Path, name: str, request: RunRequest) -> Path:
             commit = git(clone, "rev-parse", "--verify", f"{request.commit}^{{commit}}")
             git(clone, "worktree", "add", "--detach", str(worktree), commit)
     return worktree
-
-
-def remove(clone: Path, name: str, *, force: bool) -> None:
-    """Remove a worktree and keep any branch with local-only commits."""
-    with runfiles.locked(common_dir(clone) / "agent-worktree.lock"):
-        path = clone / ".worktrees" / f"agent-{name}"
-        branch = git(path, "branch", "--show-current")
-        git(clone, "worktree", "remove", *(["--force"] if force else []), str(path))
-        if branch:
-            unpublished = bool(git(clone, "rev-list", branch, "--not", "--remotes"))
-            if not run_state.keep_branch(unpublished=unpublished, force=force):
-                git(clone, "branch", "-D", branch)
