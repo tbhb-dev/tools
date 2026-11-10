@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from typing import Never
 
 import pytest
-from agent_live_evidence import codex_auth
+from agent_live_evidence import codex_auth, run_default_pytest
 from agent_live_host_probe import (
     INPUT_MARKER,
     TerminalObservation,
@@ -25,7 +25,6 @@ from agent_live_host_probe import (
     legacy_input_setting,
     link_control,
     live_policy,
-    main,
     observe_terminal,
     probe_command,
     protected_sources,
@@ -39,19 +38,7 @@ from tbhbdev.alpha.agent.model import Harness, Invalid, Profile
 
 
 def test_host_live_probes_skip_without_opt_in(tmp_path: Path) -> None:
-    result = subprocess.run(
-        (sys.executable, "-m", "pytest", "-q", __file__, "-k", "test_live_"),
-        env={
-            "HOME": str(tmp_path),
-            "PATH": os.defpath,
-            "TMPDIR": str(tmp_path),
-            "TBHBDEV_SANDBOX_LIVE": "0",
-        },
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=45,
-    )
+    result = run_default_pytest(tmp_path, "-q", __file__, "-k", "test_live_")
     assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
     assert "skipped" in result.stdout
     assert "passed" not in result.stdout
@@ -514,9 +501,23 @@ def test_link_probe_records_every_label_after_a_denial(tmp_path: Path) -> None:
     results = writes / "results.json"
     ln = shutil.which("ln")
     assert ln is not None
-    main(
-        "hardlinks",
-        [str(results), str(writes), ln, str(tmp_path / "absent"), str(source)],
+    subprocess.run(
+        (
+            sys.executable,
+            "-S",
+            str(Path(__file__).with_name("agent_live_host_probe.py")),
+            "hardlinks",
+            str(results),
+            str(writes),
+            ln,
+            str(tmp_path / "absent"),
+            str(source),
+        ),
+        env={"PATH": os.defpath},
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     observed = json.loads(results.read_text())
     assert observed["absent"]["link"] != 0

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import dataclasses
+import os
+import subprocess
+import sys
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +21,23 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
     from tbhbdev.alpha.agent.model import RunPaths
+
+
+def run_default_pytest(home: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        (sys.executable, "-m", "pytest", *arguments),
+        env={
+            "HOME": str(home),
+            "PATH": os.defpath,
+            "TMPDIR": tempfile.gettempdir(),
+            "PYTHONPATH": os.pathsep.join(sys.path),
+            "TBHBDEV_SANDBOX_LIVE": "0",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=45,
+    )
 
 
 @contextmanager
