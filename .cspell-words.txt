@@ -251,3 +251,4 @@ repositoryformatversion
 symref
 socketpair
 ESRCH
+ZDOTDIR

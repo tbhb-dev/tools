@@ -2907,3 +2907,62 @@ def test_resolved_executable_directory_cannot_contain_a_write_root(
         f"protected host path {directory} overlaps write root {root}; "
         "narrow that write root"
     )
+
+
+@pytest.mark.parametrize("os_name", Os)
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_codex_release_read_grant_keeps_account_state_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, os_name: Os, profile: str
+) -> None:
+    run = make_run(
+        tmp_path, profile=profile, commit="0" * 40 if profile == "review" else None
+    )
+    release = (
+        run.home / ".codex" / "packages" / "standalone" / "releases" / "example-version"
+    )
+    binary = release / "bin" / "codex"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"binary")
+    directory = runfiles.private_dir(run.home / ".local" / "bin")
+    alias = directory / "codex"
+    alias.symlink_to(binary)
+    original = host_tools.resolve
+
+    def resolve(name: str, path: str | None = None) -> str:
+        return str(binary) if name == "codex" else original(name, path)
+
+    monkeypatch.setattr(host_tools, "resolve", resolve)
+    run = dataclasses.replace(
+        run,
+        host=dataclasses.replace(run.host, os=os_name),
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(
+                run.settings.sandbox,
+                denied_home_paths=(".codex",),
+                host_path=(str(directory),),
+            ),
+        ),
+    )
+    paths = run_host.planned_paths(run)
+    value, executable = run_host.checked_policy(run, paths)
+    run.files.write("prompt", "probe")
+    prepared = run_host.Prepared(
+        paths,
+        credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
+        None,
+    )
+    command = run_host.harness_command(run, prepared, value, executable)
+    override = next(arg for arg in command if arg.startswith(f"permissions.{profile}="))
+    filesystem = tomllib.loads(override)["permissions"][profile]["filesystem"]
+    assert filesystem[str(binary)] == "read"
+    assert filesystem[str(alias)] == "read"
+    assert filesystem[str(release)] == "read"
+    account_state = run.home / ".codex"
+    assert filesystem[str(account_state)] == "none"
+    for name in ("auth.json", "config.toml", "sessions"):
+        path = account_state / name
+        matches = [
+            key for key in filesystem if key != ":root" and path.is_relative_to(key)
+        ]
+        assert filesystem[max(matches, key=len)] == "none"

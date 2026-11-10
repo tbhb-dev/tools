@@ -22,6 +22,50 @@ def script(path: Path, text: str) -> str:
     return str(path)
 
 
+@pytest.mark.parametrize("relative", [False, True])
+def test_codex_read_roots_follow_every_link_and_scope_the_release(
+    tmp_path: Path,
+    relative: bool,
+) -> None:
+    release = (
+        tmp_path / ".codex" / "packages" / "standalone" / "releases" / "example-version"
+    )
+    (release / "bin").mkdir(parents=True)
+    executable = Path(script(release / "bin" / "codex", "binary"))
+    directory = tmp_path / "bin"
+    directory.mkdir()
+    current = tmp_path / "current"
+    current.symlink_to(
+        release.relative_to(tmp_path) if relative else release,
+        target_is_directory=True,
+    )
+    (directory / "codex").symlink_to(
+        "../current/bin/codex" if relative else current / "bin" / "codex"
+    )
+    roots = host_tools.codex_read_roots(
+        str(executable), f"{tmp_path / 'other'}:{directory}"
+    )
+    assert roots == (
+        str(directory / "codex"),
+        str(current),
+        str(executable),
+        str(release),
+    )
+    assert str(tmp_path / ".codex") not in roots
+
+
+def test_executable_link_walk_refuses_missing_paths(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        host_tools.executable_links(tmp_path / "missing")
+
+
+def test_codex_outside_a_release_grants_only_its_install_directory(
+    tmp_path: Path,
+) -> None:
+    binary = script(tmp_path / "codex", "binary")
+    assert host_tools.codex_read_roots(binary, str(tmp_path)) == (binary, str(tmp_path))
+
+
 @pytest.mark.parametrize("os", Os)
 def test_host_path_is_fixed_and_scoped(os: Os, monkeypatch: pytest.MonkeyPatch) -> None:
     original = settings()

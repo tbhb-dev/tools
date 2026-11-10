@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess  # nosec B404
 import sys
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -50,6 +51,52 @@ def resolve(name: str, path: str | None = None) -> str:
         message = f"host executable {name} was not found"
         raise Invalid(message)
     return str(Path(found).resolve())
+
+
+def executable_links(path: Path) -> tuple[str, ...]:
+    """Record directory and file links while walking a validated executable path."""
+    path.resolve(strict=True)
+    pending = deque(path.parts)
+    current = Path(pending.popleft())
+    links: list[str] = []
+    while pending:
+        part = pending.popleft()
+        if part == "..":
+            current = current.parent
+            continue
+        current /= part
+        if current.is_symlink():
+            links.append(str(current))
+            target = current.readlink()
+            if target.is_absolute():
+                current = Path(target.anchor)
+                pending.extendleft(reversed(target.parts[1:]))
+            else:
+                current = current.parent
+                pending.extendleft(reversed(target.parts))
+    return tuple(links)
+
+
+def codex_read_roots(executable: str, search: str) -> tuple[str, ...]:
+    binary = Path(executable)
+    aliases = (
+        path
+        for directory in search.split(":")
+        if (path := Path(directory) / "codex").resolve() == binary
+    )
+    release = next(
+        (parent for parent in binary.parents if parent.parent.name == "releases"),
+        binary.parent,
+    )
+    return tuple(
+        dict.fromkeys(
+            (
+                *[link for path in aliases for link in executable_links(path)],
+                executable,
+                str(release),
+            )
+        )
+    )
 
 
 def executable_header(current: str) -> bytes:
