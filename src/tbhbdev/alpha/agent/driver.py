@@ -48,6 +48,7 @@ def metadata_path(name: str) -> Path:
 def save(run: Run) -> None:
     path = metadata_path(run.name)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
     record = {
         **request.to_dict(run.request),
         "host": run.host.name,
@@ -60,10 +61,18 @@ def save(run: Run) -> None:
 
 
 def load(settings: Settings, name: str) -> Run:
-    record: dict[str, object] = json.loads(metadata_path(name).read_text())
-    host = rules.select_host(settings, str(record.pop("host")), str(record["account"]))
-    started = str(record.pop("started"))
-    run = request.parse(record, host_allows_unsandboxed=host.unsandboxed)
+    path = metadata_path(name)
+    path.parent.chmod(0o700)
+    try:
+        record: dict[str, object] = json.loads(path.read_text())
+        host = rules.select_host(
+            settings, str(record.pop("host")), str(record["account"])
+        )
+        started = str(record.pop("started"))
+        run = request.parse(record, host_allows_unsandboxed=host.unsandboxed)
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        message = f"{path}: invalid run metadata"
+        raise Invalid(message) from exc
     return Run(name, host, run, started)
 
 
@@ -114,9 +123,9 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
         run.request.profile is Profile.REVIEW and rules.COMMIT.fullmatch(ref) is None
     )
     script = (
-        remote.preflight(run.request.repo, ref, version.line())
+        remote.preflight(run.request.repo, ref, version.line(), run.host)
         if resolve
-        else "tbhbdev --version"
+        else remote.installed(run.host)
     )
     preflight = transport.shell(
         settings, run.host, script, timeout=deadline - time.monotonic()
@@ -139,9 +148,16 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
         transport.call(
             settings,
             run.host,
-            remote.start(run.name),
+            remote.start(run.name, settings.sockets_dir, run.host),
             timeout=deadline - time.monotonic(),
         )
+    except transport.CollisionError:
+        archive_metadata(run.name, run.started)
+        raise
+    except transport.TransportError:
+        print(f"{run.name}: launch unconfirmed host={run.host.name} phase=unreachable")
+        return 1
+    try:
         return poll_launch(settings, run, deadline)
     except transport.TransportError:
         return unconfirmed(settings, run, "unreachable")
@@ -160,7 +176,7 @@ def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
             transport.shell(
                 settings,
                 run.host,
-                remote.session(run.name, "kill-session") + " || true",
+                remote.session(run.name, "kill-session", settings.sockets_dir),
             )
             print(f"{run.name}: rc={reading.rc}\n{reading.text}", end="")
             return reading.rc or 0
@@ -169,7 +185,7 @@ def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
             return 0
         if action == "deadline":
             return unconfirmed(settings, run, reading.phase)
-        time.sleep(0.1)
+        time.sleep(0.5)
 
 
 def unconfirmed(settings: Settings, run: Run, phase: str) -> int:
@@ -224,7 +240,7 @@ def wait(settings: Settings, run: Run) -> int:
                 rc = rules.answer_state(reading.rc)
                 print(f"{run.name}: rc={rc}\n{reading.text}", end="")
                 return result
-        time.sleep(poll)
+        time.sleep(max(0.5, poll))
 
 
 def status(settings: Settings, run: Run) -> int:
@@ -243,7 +259,9 @@ def status(settings: Settings, run: Run) -> int:
 
 def kill(settings: Settings, run: Run) -> int:
     transport.shell(
-        settings, run.host, remote.session(run.name, "kill-session") + " || true"
+        settings,
+        run.host,
+        remote.session(run.name, "kill-session", settings.sockets_dir),
     )
     deadline = time.monotonic() + settings.kill_grace_seconds + 2
     while True:
@@ -257,12 +275,20 @@ def kill(settings: Settings, run: Run) -> int:
         if action == "finished":
             return 0
         if action == "write":
-            transport.shell(settings, run.host, remote.fallback(run.name))
+            transport.shell(
+                settings, run.host, remote.fallback(run.name, settings.sockets_dir)
+            )
             return 0
         if action == "refuse":
             message = f"{run.name}: session still exists; return code left to run-host"
             raise Invalid(message)
-        time.sleep(0.1)
+        time.sleep(0.5)
+
+
+def archive_metadata(name: str, stamp: str) -> None:
+    trash = directory() / "trash" / stamp
+    trash.mkdir(mode=0o700, parents=True)
+    metadata_path(name).rename(trash / f"{name}.json")
 
 
 def clean(settings: Settings, run: Run, *, force: bool) -> int:
@@ -277,12 +303,14 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
         settings,
         run.host,
         remote.clean(
-            run.request.repo, run.name, stamp, force=force, delete_branch=delete
+            run.request.repo,
+            run.name,
+            stamp,
+            settings.sockets_dir,
+            delete_branch=delete,
         ),
     )
-    trash = directory() / "trash" / stamp
-    trash.mkdir(mode=0o700, parents=True)
-    metadata_path(run.name).rename(trash / f"{run.name}.json")
+    archive_metadata(run.name, stamp)
     return 0
 
 

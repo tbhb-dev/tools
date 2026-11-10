@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from fake_tool import write_fake
 
 from tbhbdev import version
+from tbhbdev.alpha.agent.decisions import argv
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -42,24 +43,39 @@ if name == "ssh":
         item = plan.pop(0)
         (root / "control.json").write_text(json.dumps(control))
         if item is not None:
-            print(item.get("out", ""), end="")
+            output = item.get("out", "")
+            if output.count("\\n") >= 4:
+                fields = output.split("\\n", 4)
+                fields[0] = (fields[0] or "unknown").encode().hex()
+                fields[1] = fields[1].encode().hex() if fields[1] else "-"
+                output = "\\n".join(fields)
+            print(output, end="")
             sys.exit(item.get("rc", 0))
     command = shlex.split(args[-1])
-    assert command[:2] in (["bash", "-lc"], ["zsh", "-lc"])
+    assert command[:2] in (["/bin/bash", "-c"], ["/bin/zsh", "-c"])
     env = {"PATH": os.environ["PATH"], "EXAMPLE_REMOTE": str(root),
            "HOME": str(root / "home"), "XDG_STATE_HOME": str(root / "state")}
-    result = subprocess.run(["sh", "-c", command[2]], input=data, env=env)
+    script = command[2].replace(
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=" + os.environ["PATH"])
+    script = script.replace("/tmp/example-sockets", str(root / "sockets"))
+    result = subprocess.run(["/bin/sh", "-c", script], input=data, env=env)
     sys.exit(result.returncode)
 if name == "tbhbdev":
     assert args == ["--version"]
     print(control["version"])
 elif name == "tmux":
-    assert args[:2] == ["-L", "agents"]
+    assert args[:2] == ["-S", str(root / "sockets/agents")]
     verb = args[2]
     if verb in ("has-session", "kill-session"):
-        assert args[-2:] == ["-t", "ag-sample"]
+        assert args[-2:] == ["-t", "=ag-sample"]
     if verb == "has-session":
-        sys.exit(0 if control.get("session", False) else 1)
+        if control.get("tmux_error"):
+            sys.stderr.write(control["tmux_error"])
+            sys.exit(1)
+        if not control.get("session", False):
+            sys.stderr.write("can't find session: ag-sample")
+            sys.exit(1)
+        sys.exit(0)
     run = root / "state/tbhbdev/agent-runs"
     if verb == "new-session":
         control["session"] = True
@@ -70,6 +86,7 @@ elif name == "tmux":
             control["session"] = False
     elif verb == "kill-session":
         if not control.get("session", False):
+            sys.stderr.write("can't find session: ag-sample")
             sys.exit(1)
         control["session"] = False
         if control.get("kill_rc") is not None:
@@ -79,7 +96,10 @@ elif name == "tmux":
     (root / "control.json").write_text(json.dumps(control))
 elif name == "git":
     assert args[:2] == ["-c", "core.hooksPath=/dev/null"]
-    verb = args[2]
+    assert args[2:14:2] == ["-c"] * 6
+    verb = args[14]
+    assert Path.cwd() == (root / "home" if verb == "ls-remote" else
+                          root / "home/Code/github.com/example-org/example-repo")
     if verb == "ls-remote":
         print(control.get("refs", ""), end="")
     elif verb == "show-ref":
@@ -138,7 +158,21 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     tools = tmp_path / "bin"
     tools.mkdir()
     for name in ("ssh", "tmux", "git", "tbhbdev"):
-        write_standalone_fake(tools / name, BODY)
+        write_standalone_fake(
+            tools / name,
+            BODY.replace(
+                'root = Path(os.environ["EXAMPLE_REMOTE"])',
+                f"root = Path({str(root)!r})",
+            ),
+        )
+    program = root / "home/.local/bin/tbhbdev"
+    program.parent.mkdir(parents=True)
+    program.symlink_to(tools / "tbhbdev")
+
+    def executable(name: str) -> str:
+        return str(tools / name)
+
+    monkeypatch.setattr(argv, "executable", executable)
     (root / "control.json").write_text(json.dumps({"version": version.line()}))
     monkeypatch.setenv("EXAMPLE_REMOTE", str(root))
     monkeypatch.setenv("PATH", str(tools) + os.pathsep + os.environ["PATH"])

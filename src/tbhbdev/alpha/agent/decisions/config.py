@@ -1,7 +1,8 @@
 """Parsing the user config's `[agent]` table into `Settings`.
 
 The table arrives already parsed, as `userconfig.table` returns it. Parsing has
-no defaults except Codex's `web_search`, and every error names the table and
+defaults for connection bounds, Codex's `web_search` and the host executable.
+Errors name
 the key, as `[agent.sandbox] audit_dir must be ...`. The caller adds the config
 file's path.
 """
@@ -373,7 +374,7 @@ def _proven_harnesses(table: _Table) -> tuple[Harness, ...]:
 
 def _host(table: _Table) -> Host:
     table.only(
-        "name", "os", "shell", "account", "unsandboxed", "accounts", "proven_harnesses"
+        "name", "os", "shell", "account", "unsandboxed", "accounts", "proven_harnesses", "tbhbdev"
     )
     name = _check_name(table, "name", table.text("name"), HOST_NAME)
     os = table.choice("os", Os)
@@ -389,8 +390,11 @@ def _host(table: _Table) -> Host:
         table.fail("accounts", "must not contain duplicates")
     if account not in accounts:
         table.fail("account", "must be one of accounts")
+    program = table.path("tbhbdev") if "tbhbdev" in table.values else None
+    if program is not None and not program.startswith("/"):
+        table.fail("tbhbdev", "must be an absolute path")
     return Host(
-        name, os, shell, account, unsandboxed, accounts, _proven_harnesses(table)
+        name, os, shell, account, unsandboxed, accounts, _proven_harnesses(table), program
     )
 
 

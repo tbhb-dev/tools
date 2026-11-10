@@ -134,6 +134,7 @@ class Host:
     unsandboxed: bool
     accounts: tuple[str, ...]
     proven_harnesses: tuple[Harness, ...]
+    tbhbdev: str | None = None
 
 
 @dataclass(frozen=True)
