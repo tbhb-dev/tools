@@ -145,8 +145,18 @@ class TerminalObservation:
 
 
 def observe_terminal(
-    command: tuple[str, ...], environment: dict[str, str], cwd: Path
+    command: tuple[str, ...],
+    environment: dict[str, str],
+    cwd: Path,
+    *,
+    prompt: str | None = None,
 ) -> TerminalObservation:
+    # Codex's explicit '-' calls read_to_end even on a terminal. Raw-mode EOF
+    # is data, so give the prompt as an argument while retaining terminal stdin.
+    # resolve_root_prompt/read_prompt_from_stdin skip optional stdin on a tty:
+    # https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/exec/src/lib.rs
+    if prompt is not None:
+        command = (*command[:-1], prompt)
     master, slave = pty.openpty()
     try:
         with subprocess.Popen(
