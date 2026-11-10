@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -2467,3 +2468,31 @@ def test_account_clone_protection_checks_both_aliases_and_all_configured_roots(
         for p in (*sandbox.write_roots, *sandbox.agy.build_write)
     )
     assert (writes, (str(clone), str(target))) in calls
+
+
+@pytest.mark.parametrize("os_name", Os)
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_checked_policy_codex_table_has_unique_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, os_name: Os, profile: str
+) -> None:
+    run = make_run(
+        tmp_path, profile=profile, commit="0" * 40 if profile == "review" else None
+    )
+    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=os_name))
+    mirror = run_host.worktree.mirror_path(run.home, run.request.repo)
+    mirror.mkdir(parents=True)
+    monkeypatch.setattr(host_tools, "resolve", constant("/usr/bin/true"))
+    prepared = preparation(run)
+    value, executable = run_host.checked_policy(run, prepared.paths)
+    run.files.write("prompt", "probe")
+    command = run_host.harness_command(run, prepared, value, executable)
+    override = next(arg for arg in command if arg.startswith(f"permissions.{profile}="))
+    table = tomllib.loads(override)["permissions"][profile]["filesystem"]
+    assert isinstance(value.detail, CodexPolicy)
+    expected = dict.fromkeys(value.detail.read_roots, "read")
+    expected.update(dict.fromkeys(value.detail.write_roots, "write"))
+    expected.update(dict.fromkeys(value.detail.deny, "none"))
+    assert table == expected
+    assert table[str(mirror)] == "none"
+    if profile == "build":
+        assert table[prepared.paths.worktree] == "write"

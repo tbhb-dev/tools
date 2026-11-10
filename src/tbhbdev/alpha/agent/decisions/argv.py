@@ -86,12 +86,16 @@ def _toml(text: str) -> str:
 def _codex_sandbox(profile: Profile, detail: CodexPolicy) -> list[str]:
     if detail.mode is CodexMode.FULL_ACCESS:
         return ["-s", CodexMode.FULL_ACCESS.value]
-    entries = (
-        *((root, "read") for root in detail.read_roots),
-        *((root, "write") for root in detail.write_roots),
-        *((path, "none") for path in detail.deny),
+    conflicts = set(detail.write_roots) & {*detail.read_roots, *detail.deny}
+    if conflicts:
+        message = f"path {min(conflicts)} requires conflicting filesystem modes"
+        raise Invalid(message)
+    entries = dict.fromkeys(detail.read_roots, "read")
+    entries.update(dict.fromkeys(detail.write_roots, "write"))
+    entries.update(dict.fromkeys(detail.deny, "none"))
+    filesystem = ", ".join(
+        f"{_toml(path)} = {_toml(mode)}" for path, mode in entries.items()
     )
-    filesystem = ", ".join(f"{_toml(path)} = {_toml(mode)}" for path, mode in entries)
     table = f"{{filesystem = {{{filesystem}}}, network = {{enabled = true}}}}"
     return [
         "-c",

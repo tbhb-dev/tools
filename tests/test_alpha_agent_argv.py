@@ -653,3 +653,24 @@ def test_schema_options_are_only_for_exec(
         assert result == expected
     else:
         assert result == baseline
+
+
+@pytest.mark.parametrize("other", ["read_roots", "deny"])
+def test_codex_refuses_a_write_root_requiring_another_mode(other: str) -> None:
+    parsed = request(Harness.CODEX, RunKind.EXEC, Profile.BUILD)
+    value = policy_for(Harness.CODEX, Profile.BUILD)
+    assert isinstance(value.detail, model.CodexPolicy)
+    detail = (
+        dataclasses.replace(value.detail, read_roots=(WORKTREE, TMP))
+        if other == "read_roots"
+        else dataclasses.replace(value.detail, deny=(WORKTREE, TMP))
+    )
+    with pytest.raises(Invalid) as caught:
+        argv.harness(
+            parsed,
+            dataclasses.replace(value, detail=detail),
+            worktree=WORKTREE,
+            brief_file=BRIEF_FILE,
+        )
+
+    assert str(caught.value) == f"path {TMP} requires conflicting filesystem modes"
