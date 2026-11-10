@@ -51,6 +51,9 @@ def installation_token(references: Credentials, repository: str) -> str:
     if host != "github.com":
         message = "reviews app supports github.com repositories"
         raise Invalid(message)
+    if references.reviews_app_client_id is None or references.reviews_app_pem is None:
+        message = "reviews App credentials are not configured"
+        raise Invalid(message)
     client_id = read(references.reviews_app_client_id, label="reviews app")
     pem = read(references.reviews_app_pem, label="reviews app")
     env = gh_app.default_env()

@@ -102,9 +102,9 @@ class Credentials:
     account: str
     gh: str
     docker: str | None
-    reviews_app_id: str
-    reviews_app_client_id: str
-    reviews_app_pem: str
+    reviews_app_id: str | None
+    reviews_app_client_id: str | None
+    reviews_app_pem: str | None
     signing: str
 
 
@@ -252,3 +252,4 @@ class RunRequest:
     unsandboxed: bool
     authorized_by: str | None
     startup_deadline_seconds: int
+    tainted_host: bool = False

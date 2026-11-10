@@ -36,6 +36,7 @@ BUILD: Data = {
     "variant": None,
     "role": None,
     "unsandboxed": False,
+    "tainted_host": False,
     "authorized_by": None,
     "startup_deadline_seconds": 120,
 }
@@ -151,7 +152,7 @@ def test_missing_fields_are_named() -> None:
     )
 
 
-@pytest.mark.parametrize("key", [k for k in BUILD if k != "v"])
+@pytest.mark.parametrize("key", [k for k in BUILD if k not in ("v", "tainted_host")])
 def test_each_field_is_required(key: str) -> None:
     assert refused(made(BUILD, **{key: MISSING})) == f"request is missing fields: {key}"
 
@@ -479,3 +480,29 @@ def test_the_request_holds_no_credential_field() -> None:
     assert set(
         request.to_dict(request.parse(BUILD, host_allows_unsandboxed=False))
     ) == (set(BUILD))
+
+
+@pytest.mark.parametrize("tainted", [False, True])
+def test_request_reads_driver_host_taint(tainted: bool) -> None:
+    parsed = request.parse(
+        BUILD | {"tainted_host": tainted}, host_allows_unsandboxed=True
+    )
+    assert parsed.tainted_host is tainted
+    assert request.to_dict(parsed)["tainted_host"] is tainted
+
+
+def test_request_host_taint_defaults_false() -> None:
+    assert (
+        request.parse(
+            made(BUILD, tainted_host=MISSING), host_allows_unsandboxed=True
+        ).tainted_host
+        is False
+    )
+
+
+@pytest.mark.parametrize("bad", [None, 0, 1, "false"])
+def test_request_host_taint_requires_boolean(bad: object) -> None:
+    assert (
+        refused(BUILD | {"tainted_host": bad})
+        == "request tainted_host must be true or false"
+    )

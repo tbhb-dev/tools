@@ -722,12 +722,6 @@ def test_a_host_may_run_on_macos_with_a_dotted_name() -> None:
     assert host.unsandboxed is False
 
 
-def test_unsandboxed_is_read_as_given() -> None:
-    assert (
-        config.parse(edited("host", 0, "unsandboxed", value=True)).hosts[0].unsandboxed
-    )
-
-
 def test_name_limits() -> None:
     first = cast("Table", cast("list[object]", GOOD["host"])[0])
     table = edited(
@@ -848,3 +842,39 @@ def test_execution_options_name_the_invalid_path(
     with pytest.raises(Invalid) as caught:
         config.parse(data)
     assert str(caught.value) == f"[agent.sandbox] {key} {why}"
+
+
+def test_unsandboxed_host_refuses_reviews_app_delivery() -> None:
+    assert refused(edited("host", 0, "unsandboxed", value=True)) == (
+        "[[agent.host]] unsandboxed host example-linux "
+        "has reviews App credentials for agent"
+    )
+
+
+def test_unsandboxed_host_without_reviews_app_is_allowed() -> None:
+    table = edited("host", 0, "unsandboxed", value=True)
+    accounts = cast("Table", table["credentials"])
+    account = cast("Table", accounts["agent"])
+    for key in ("reviews_app_id", "reviews_app_client_id", "reviews_app_pem"):
+        del account[key]
+    parsed = config.parse(table)
+    assert parsed.hosts[0].unsandboxed is True
+    assert parsed.credentials[0].reviews_app_id is None
+    assert parsed.credentials[0].reviews_app_client_id is None
+    assert parsed.credentials[0].reviews_app_pem is None
+
+
+@pytest.mark.parametrize(
+    "present", ["reviews_app_id", "reviews_app_client_id", "reviews_app_pem"]
+)
+def test_partial_reviews_app_configuration_is_refused(present: str) -> None:
+    table = edited("host", 0, "unsandboxed", value=True)
+    accounts = cast("Table", table["credentials"])
+    account = cast("Table", accounts["agent"])
+    for key in ("reviews_app_id", "reviews_app_client_id", "reviews_app_pem"):
+        if key != present:
+            del account[key]
+    missing = (
+        "reviews_app_client_id" if present == "reviews_app_id" else "reviews_app_id"
+    )
+    assert refused(table) == f"[agent.credentials.agent] {missing} is required"
