@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from agent_driver_example import write_standalone_fake
-from agent_example import LINUX, settings
+from agent_example import LINUX, settings, trusted_executables
 
 from tbhbdev.alpha.agent import model, transport
 from tbhbdev.alpha.agent.decisions import remote
@@ -20,6 +20,11 @@ from tbhbdev.alpha.agent.decisions import remote
 if TYPE_CHECKING:
     from collections.abc import Awaitable
     from pathlib import Path
+
+
+@pytest.fixture(autouse=True)
+def fixed_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    trusted_executables(monkeypatch)
 
 
 def fixed_reading(monkeypatch: pytest.MonkeyPatch, payload: str) -> None:
