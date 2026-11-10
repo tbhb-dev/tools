@@ -371,6 +371,12 @@ def preflight(run: Run) -> None:
         )
         raise Invalid(message)
 
+    if run.request.harness is Harness.CLAUDE:
+        message = (
+            "claude runs are refused: separate tool paths for Claude (H3) "
+            "and the Claude credential decision remain open"
+        )
+        raise Invalid(message)
     if run.request.unsandboxed:
         mark_host(run)
 
