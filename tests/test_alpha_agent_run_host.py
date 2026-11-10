@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from agent_host_example import constant, host_settings, repository, run_request
+from test_alpha_agent_codex_install import release
 from test_alpha_agent_credentials import VALUES
 from test_alpha_agent_settings import EXAMPLE
 
@@ -1833,6 +1834,10 @@ def test_checked_policy_supplies_all_protected_paths(
             )
         ),
     )
+    if harness is Harness.CODEX:
+        assert protections.pop(1) == ()
+        assert supplied.pop(1) == expected_paths
+        assert configs.pop(1) == configs[0]
     assert protections == [
         (*expected, *run_host.full_denies(run, expected_paths)),
         expected,
@@ -3045,6 +3050,8 @@ def test_codex_release_read_grant_keeps_account_state_denied(
     binary = release / "bin" / "codex"
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b"binary")
+    (release / "codex-package.json").write_text('{"entrypoint":"bin/codex"}')
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     directory = runfiles.private_dir(run.home / ".local" / "bin")
     alias = directory / "codex"
     alias.symlink_to(binary)
@@ -3077,9 +3084,12 @@ def test_codex_release_read_grant_keeps_account_state_denied(
     command = run_host.harness_command(run, prepared, value, executable)
     override = next(arg for arg in command if arg.startswith(f"permissions.{profile}="))
     filesystem = tomllib.loads(override)["permissions"][profile]["filesystem"]
-    assert filesystem[str(binary)] == "read"
-    assert filesystem[str(alias)] == "read"
-    assert filesystem[str(release)] == "read"
+    copy = run.home / ".local/share/tbhbdev/codex" / release.name
+    assert command[0] == str(copy / "bin/codex")
+    assert filesystem[str(copy)] == "read"
+    assert str(binary) not in filesystem
+    assert str(alias) not in filesystem
+    assert str(release) not in filesystem
     account_state = run.home / ".codex"
     assert filesystem[str(account_state)] == "none"
     for name in ("auth.json", "config.toml", "sessions"):
@@ -3224,3 +3234,31 @@ def test_claude_preflight_names_both_open_conditions(
         "claude runs are refused: separate tool paths for Claude (H3) "
         "and the Claude credential decision remain open"
     )
+
+
+@pytest.mark.parametrize("root", ["parent", "self", "child"])
+def test_codex_copy_refuses_overlapping_write_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root: str
+) -> None:
+    run = make_run(tmp_path)
+    source = release(run.home)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    original = host_tools.resolve
+
+    def resolve(name: str, path: str | None = None) -> str:
+        return str(source / "bin/codex") if name == "codex" else original(name, path)
+
+    monkeypatch.setattr(host_tools, "resolve", resolve)
+    copy = run.home / ".local/share/tbhbdev/codex" / source.name
+    write = {"parent": copy.parent, "self": copy, "child": copy / "cache"}[root]
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(
+                run.settings.sandbox, write_roots=(str(write),)
+            ),
+        ),
+    )
+    with pytest.raises(Invalid, match=r"protected host path.*example-version"):
+        run_host.checked_policy(run, run_host.planned_paths(run))
