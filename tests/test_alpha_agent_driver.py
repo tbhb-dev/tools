@@ -418,32 +418,46 @@ def test_clean_running(remote: Remote, capsys: pytest.CaptureFixture[str]) -> No
     assert remote.records("git") == []
 
 
-@pytest.mark.parametrize(
-    ("facts", "deleted"),
-    [
-        (("0", False, True, 2), False),
-        (("0", False, True, 0), True),
-        ((None, True, True, 2), True),
-        (("0", False, False, 0), False),
-    ],
-)
-def test_clean(
-    remote: Remote, facts: tuple[str | None, bool, bool, int], deleted: bool
-) -> None:
-    rc, force, branch, unpushed = facts
+@pytest.mark.parametrize("force", [False, True])
+def test_clean(remote: Remote, force: bool) -> None:
     assert launch(remote) == 0
-    remote.configure(session=False, branch=branch, unpushed=unpushed)
-    if rc is not None:
-        remote.file(".rc", rc)
+    remote.configure(session=False)
+    remote.file(".rc", "0")
     assert command("clean", *(("--force",) if force else ())) == 0
     assert not (remote.local / "tbhbdev/agent-runs/sample.json").exists()
     assert list((remote.local / "tbhbdev/agent-runs/trash").glob("*/sample.json"))
     assert not (remote.state / "sample.request.json").exists()
     assert list((remote.state / "trash").glob("*/sample.request.json"))
     calls = [record["args"] for record in remote.records("git")]
-    flags = [*shlex.split(remote_commands.GIT_FLAGS)[1:], "-c", "protocol.allow=never"]
-    assert not any(isinstance(call, list) and "worktree" in call for call in calls)
-    assert ([*flags, "branch", "-D", "agent/sample"] in calls) is deleted
+    assert len(calls) == (0 if force else 1)
+    assert not any("branch" in str(call) for call in calls)
+
+
+@pytest.mark.parametrize("failure", ["absent", "missing-mirror", "remote-error"])
+def test_clean_origin_failure_requires_force(
+    remote: Remote, capsys: pytest.CaptureFixture[str], failure: str
+) -> None:
+    assert launch(remote) == 0
+    capsys.readouterr()
+    remote.configure(
+        session=False,
+        branch=failure != "absent",
+        origin_error=failure == "remote-error",
+    )
+    if failure == "missing-mirror":
+        mirror = remote.root / "state/tbhbdev/agent-mirrors"
+        mirror.rename(remote.root / "saved-mirrors")
+    remote.file(".rc", "0")
+    assert command("clean") == 1
+    output = capsys.readouterr()
+    if failure == "absent":
+        assert output.err == (
+            "example agent: branch agent/sample does not exist on origin; "
+            "pass --force to clean anyway\n"
+        )
+    assert driver.metadata_path("sample").exists()
+    assert (remote.state / "sample.owner").is_file()
+    assert command("clean", "--force") == 0
 
 
 def test_clean_unknown_needs_force(
@@ -522,12 +536,15 @@ def test_kill_refuses_live_session(
     assert not (remote.state / "sample.rc").exists()
 
 
-def test_clean_without_upstream_keeps_branch(remote: Remote) -> None:
+def test_clean_reports_only_origin_presence(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert launch(remote) == 0
-    remote.configure(session=False, branch=True, upstream=False)
+    capsys.readouterr()
+    remote.configure(session=False)
     remote.file(".rc", "0")
     assert command("clean") == 0
-    assert not any("branch" in str(record["args"]) for record in remote.records("git"))
+    assert capsys.readouterr() == ("branch exists on origin\n", "")
 
 
 def test_kill_waits_for_host_rc(
@@ -1005,7 +1022,7 @@ def test_clean_without_remote_clone(remote: Remote, finished: bool) -> None:
     options = () if finished else ("--force",)
     assert command("clean", *options) == 0
     assert not driver.metadata_path("sample").exists()
-    assert remote.records("git") == []
+    assert len(remote.records("git")) == (1 if finished else 0)
 
 
 @pytest.mark.parametrize("existing", ["session", ".rc", ".launched"])

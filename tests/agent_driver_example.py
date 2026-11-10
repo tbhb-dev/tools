@@ -104,29 +104,20 @@ elif name == "git":
     index = 0
     while args[index] == "-c":
         index += 2
+    if args[index] == "-C":
+        assert args[index + 1] == str(
+            root / "state/tbhbdev/agent-mirrors/example-org/example-repo.git")
+        index += 2
     verb = args[index]
-    assert Path.cwd() == (root / "home" if verb == "ls-remote" else
-                          root / "home/Code/github.com/example-org/example-repo")
-    if verb == "ls-remote":
-        print(control.get("refs", ""), end="")
-    elif verb == "show-ref":
-        assert args[-1] == "refs/heads/agent/sample"
-        sys.exit(0 if control.get("branch", False) else 1)
-    elif verb == "rev-parse":
-        if args[-1] == "--git-common-dir":
-            print(Path.cwd() / ".git")
-            sys.exit(0)
-        if control.get("upstream", True):
-            print("refs/remotes/origin/main")
-        else:
-            sys.exit(1)
-    elif verb == "rev-list":
-        print(control.get("unpushed", 0))
-    elif verb == "branch":
-        control["branch"] = False
-        (root / "control.json").write_text(json.dumps(control))
+    assert Path.cwd() == root / "home"
+    assert verb == "ls-remote"
+    if args[-1] == "refs/heads/agent/sample":
+        if control.get("origin_error"):
+            sys.exit(74)
+        if control.get("branch", True):
+            print("a" * 40 + "\\trefs/heads/agent/sample")
     else:
-        raise AssertionError(args)
+        print(control.get("refs", ""), end="")
 else:
     raise AssertionError(name)
 """
@@ -166,10 +157,9 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     (
         root / "home/Code/github.com/example-org/example-repo/.worktrees/agent-sample"
     ).mkdir(parents=True)
-    (
-        root
-        / "home/Code/github.com/example-org/example-repo/.git/worktrees/agent-sample"
-    ).mkdir(parents=True)
+    (root / "state/tbhbdev/agent-mirrors/example-org/example-repo.git").mkdir(
+        parents=True
+    )
     tools = tmp_path / "bin"
     tools.mkdir()
     for name in ("ssh", "tmux", "git", "tbhbdev"):
