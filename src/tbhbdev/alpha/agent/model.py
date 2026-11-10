@@ -156,7 +156,8 @@ class RunPaths:
     """The paths of one run, as absolute strings the caller has resolved.
 
     `audit_dir` is the run's resolved audit directory, which a review run may
-    write. The private `tmpdir` holds `codex_home` and the handoff directories.
+    write. The private `tmpdir` holds tool handoffs. Its sibling `codex_home` stays
+    outside every write root.
     """
 
     home: str

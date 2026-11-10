@@ -109,7 +109,7 @@ def preparation(run: run_host.Run) -> run_host.Prepared:
         str(run.home),
         str(runfiles.private_dir(run.home / "worktree")),
         str(run.tmpdir),
-        str(runfiles.private_dir(run.tmpdir / "codex")),
+        str(runfiles.private_dir(run.tmpdir.parent / "codex")),
         str(run.tmpdir / "audit"),
     )
     return run_host.Prepared(
@@ -146,11 +146,12 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     )
     source = runfiles.private_dir(run.home / ".codex") / "auth.json"
     source.write_text("example-auth")
+    (source.parent / "hooks.json").write_text('{"hooks":{"SessionStart":[]}}')
     copy = credentials.auth_copy
 
     def auth_copy(source_path: Path, destination: Path) -> str | None:
         assert source_path == run.home / ".codex" / "auth.json"
-        assert destination == run.tmpdir / "codex" / "auth.json"
+        assert destination == run.tmpdir.parent / "codex" / "auth.json"
         return copy(source_path, destination)
 
     monkeypatch.setattr(credentials, "auth_copy", auth_copy)
@@ -159,7 +160,7 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     assert result.paths.home == str(run.home)
     assert result.paths.worktree == str(clone / ".worktrees" / "agent-example")
     assert result.paths.tmpdir == str(run.tmpdir)
-    assert result.paths.codex_home == str(run.tmpdir / "codex")
+    assert result.paths.codex_home == str(run.tmpdir.parent / "codex")
     assert result.paths.git_common_dir == str(Path(result.paths.worktree) / ".git")
     assert result.paths.signing_socket is None
     assert result.paths.audit_dir == str(run.home / run.settings.sandbox.audit_dir)
@@ -171,6 +172,7 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     assert copied_auth.exists() is (harness is Harness.CODEX)
     if harness is Harness.CODEX:
         assert copied_auth.read_text() == "example-auth"
+        assert {p.name for p in copied_auth.parent.iterdir()} == {"auth.json"}
 
 
 def test_build_preparation_has_the_run_socket(
@@ -469,6 +471,7 @@ def test_hidden_dispatch_reads_request_and_restores_handlers(
         assert run.home == Path.home()
         assert text == "example task"
         assert run.tmpdir.is_dir()
+        assert run.tmpdir.name == "tools"
         assert 0 < run.started <= time.time()
         assert 0 < run.deadline - time.monotonic() <= 120
         for number in before:
@@ -1425,7 +1428,7 @@ def test_planned_paths_ignore_account_git_directory_data(
         home=str(run.home),
         worktree=str(clone / ".worktrees" / "agent-example"),
         tmpdir=str(run.tmpdir),
-        codex_home=str(run.tmpdir / "codex"),
+        codex_home=str(run.tmpdir.parent / "codex"),
         audit_dir=str(run.home / run.settings.sandbox.audit_dir),
         git_common_dir=str(expected),
         uid=os.getuid(),
@@ -1755,7 +1758,7 @@ def test_checked_policy_supplies_all_protected_paths(
         str(run.home),
         str(alias / "worktree"),
         str(alias / "temp"),
-        str(real / "temp" / "codex"),
+        str(real / "codex"),
         str(alias / "audit"),
         str(alias / "common"),
         uid=12345,
@@ -1770,6 +1773,7 @@ def test_checked_policy_supplies_all_protected_paths(
     value, executable = run_host.checked_policy(run, paths)
     expected = (
         str(run.files.root.resolve()),
+        str(Path(paths.codex_home).resolve()),
         *run_host.protected_home(run),
         *installed,
         *directories,
@@ -2669,3 +2673,48 @@ def test_marker_failure_refuses_launch(
     monkeypatch.setattr(process_group, "prepare", unexpected)
     assert run_host.execute(run, "probe") == 1
     assert not run.files.path("launched").exists()
+
+
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_codex_home_is_outside_all_write_roots(tmp_path: Path, profile: str) -> None:
+    run = make_run(
+        tmp_path, profile=profile, commit="0" * 40 if profile == "review" else None
+    )
+    paths = run_host.planned_paths(run)
+    value, executable = run_host.checked_policy(run, paths)
+    assert isinstance(value.detail, CodexPolicy)
+    home = Path(paths.codex_home)
+    assert home != run.home / ".codex"
+    for root in value.detail.write_roots:
+        assert not home.is_relative_to(root)
+    run.files.write("prompt", "probe")
+    prepared = run_host.Prepared(
+        paths,
+        credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
+        None,
+    )
+    command = run_host.harness_command(run, prepared, value, executable)
+    assert value.env["CODEX_HOME"] == str(home)
+    assert f'shell_environment_policy.set.CODEX_HOME="{home}"' in command
+    assert not (home / "hooks.json").exists()
+
+
+def test_codex_home_refuses_configured_write_root(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    control = run.home / "control"
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(
+                run.settings.sandbox, write_roots=(str(control),)
+            ),
+        ),
+    )
+    paths = dataclasses.replace(run_host.planned_paths(run), codex_home=str(control))
+    with pytest.raises(Invalid) as caught:
+        run_host.checked_policy(run, paths)
+    assert str(caught.value) == (
+        f"protected host path {control} overlaps write root {control}; "
+        "narrow that write root"
+    )

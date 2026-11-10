@@ -151,7 +151,7 @@ def probe_run(tmp_path: Path, harness: Harness) -> tuple[run_host.Run, RunPaths]
         str(Path.home()),
         str(workspace),
         str(runfiles.private_dir(tmp_path / "temp")),
-        str(tmp_path / "temp" / "codex"),
+        str(tmp_path / "codex"),
         str(tmp_path / "audit"),
         uid=os.getuid(),
     )
