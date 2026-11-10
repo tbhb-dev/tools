@@ -134,6 +134,7 @@ def test_hard_link_evidence_uses_profile_write_root(
 
     def execute(argv: tuple[str, ...], **_kwargs: object) -> CompletedProcess[str]:
         assert argv[0] == "fake-sandbox"
+        assert _kwargs.get("input") == (tmp_path / "runs/probe.prompt").read_text()
         _, _, _, results, writes, _, *sources = shlex.split(Path(argv[1]).read_text())
         expected = tmp_path / ("temp" if profile is Profile.BUILD else "audit")
         assert Path(writes) == expected
@@ -207,6 +208,7 @@ def test_live_protected_hard_links(
     with codex_auth(run, paths, run.home, tmp_path):
         result = subprocess.run(
             command,
+            input=run.files.path("prompt").read_text(),
             env=value.env,
             cwd=paths.worktree,
             text=True,
