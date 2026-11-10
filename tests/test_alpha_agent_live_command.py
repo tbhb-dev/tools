@@ -45,3 +45,31 @@ def test_readme_command_runs_every_opt_in_live_module() -> None:
     assert arguments[arguments.index("--basetemp") + 1].startswith(
         "$HOME/.local/state/"
     )
+
+
+def test_readme_documents_limits_and_twelve_parent_git_starts() -> None:
+    text = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    for phrase in (
+        "typed list",
+        "Remove it when upgrading",
+        "other runs' temp directories",
+        "account's `gh` token",
+        "Docker config",
+        "private Codex auth file",
+        "final answer file",
+        "web_search",
+        "H3",
+        "credential decision",
+        "mise/shims",
+        "--no-track",
+        "0.166.0",
+        "0.164.0",
+        "git maintenance run --auto",
+    ):
+        assert phrase in text
+    limits = text.split("### Agent isolation limits", 1)[1].split("### Secret scan", 1)[
+        0
+    ]
+    counts = re.findall(r"`[^`]+` \((\d+)\)", limits)
+    assert len(counts) == 7
+    assert sum(map(int, counts)) == 12
