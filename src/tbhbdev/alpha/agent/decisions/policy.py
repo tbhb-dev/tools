@@ -163,7 +163,7 @@ def _claude(
 ) -> ClaudePolicy:
     review = profile is Profile.REVIEW
     # An absolute path in a Claude rule starts with a second slash.
-    reads = [f"Read(/{p}/**)" for p in deny]
+    denied_tools = [f"{tool}(/{p}/**)" for p in deny for tool in ("Read", "Edit")]
     deny_write = [paths.worktree] if review else []
     if review and paths.git_common_dir is not None:
         deny_write.append(paths.git_common_dir)
@@ -196,7 +196,7 @@ def _claude(
             },
             "permissions": {
                 "allow": [] if review else [f"Edit(/{p}/**)" for p in writes],
-                "deny": [*(_CLAUDE_FILE_TOOLS if review else ()), *reads],
+                "deny": [*(_CLAUDE_FILE_TOOLS if review else ()), *denied_tools],
             },
             "sandbox": sandbox,
         }
@@ -206,6 +206,30 @@ def _claude(
 def _overlaps(first: str, second: str) -> bool:
     one, two = PurePosixPath(first), PurePosixPath(second)
     return one == two or one in two.parents or two in one.parents
+
+
+def _refuse_overlaps(paths: tuple[str, ...], deny: tuple[str, ...], kind: str) -> None:
+    for path in paths:
+        for denied in deny:
+            if _overlaps(path, denied):
+                message = f"policy {kind} {path} overlaps the denied path {denied}"
+                raise Invalid(message)
+
+
+def _agy_write_roots(
+    settings: Settings, profile: Profile, paths: RunPaths
+) -> tuple[str, ...]:
+    if profile is Profile.REVIEW:
+        # Reviews only produce audit output, so they need no TMPDIR write grant.
+        return (paths.audit_dir,)
+    return (
+        paths.worktree,
+        paths.git_common_dir
+        if paths.git_common_dir is not None
+        else resolve(paths.worktree, ".git"),
+        paths.tmpdir,
+        *(resolve(paths.home, p) for p in settings.sandbox.agy.build_write),
+    )
 
 
 def _agy(
@@ -219,25 +243,12 @@ def _agy(
     home = paths.home
     if profile is Profile.REVIEW:
         reads = [resolve(home, p) for p in agy.review_read]
-        # Reviews only produce audit output, so they need no TMPDIR write grant.
-        writes = [paths.audit_dir]
     else:
         reads = [resolve(home, p) for p in agy.build_read]
-        writes = [
-            paths.worktree,
-            paths.git_common_dir
-            if paths.git_common_dir is not None
-            else resolve(paths.worktree, ".git"),
-            paths.tmpdir,
-            *(resolve(home, p) for p in agy.build_write),
-        ]
+    writes = _agy_write_roots(settings, profile, paths)
     reads += [env["GH_CONFIG_DIR"], env["DOCKER_CONFIG"]]
     # agy has no deny entry, so a grant that reaches a denied path is the leak.
-    for path in (*reads, *writes):
-        for denied in deny:
-            if _overlaps(path, denied):
-                message = f"policy agy grant {path} overlaps the denied path {denied}"
-                raise Invalid(message)
+    _refuse_overlaps(tuple(reads), deny, "agy grant")
     grants = [
         *(f"read_file({p})" for p in reads),
         *(f"write_file({p})" for p in writes),
@@ -264,8 +275,8 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
 
     Raises:
         Invalid: ACCOUNT isn't one of the host's accounts, UNSANDBOXED applies
-            to anything but a Codex build run on a host that allows it, or an
-            agy grant reaches a denied path.
+            to anything but a Codex build run on a host that allows it, or a
+            write path or an agy read grant reaches a denied path.
     """
     _check(host, harness, profile, account=account, full=unsandboxed)
     deny = denied_paths(settings, host, paths.home)
@@ -273,6 +284,10 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
     writes = _write_roots(settings, profile, paths)
     if host.os is Os.MACOS and harness in (Harness.CODEX, Harness.CLAUDE):
         writes = tuple(dict.fromkeys((*writes, _DEV_FD)))
+    agy_writes = (
+        _agy_write_roots(settings, profile, paths) if harness is Harness.AGY else ()
+    )
+    _refuse_overlaps((*writes, *agy_writes), deny, "write path")
     if harness is Harness.CODEX:
         detail: CodexPolicy | ClaudePolicy | AgyPolicy = _codex(
             settings, profile, writes, deny, full=unsandboxed

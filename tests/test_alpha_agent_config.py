@@ -220,18 +220,20 @@ def test_sandbox_denied_paths_stay_below_home(path: str) -> None:
     )
 
 
-@pytest.mark.parametrize("path", ["/example/host/temp", "/example/host/cache", "/"])
+@pytest.mark.parametrize("path", ["/example/host/temp", "/example/host/cache"])
 def test_sandbox_write_roots_accept_absolute_entries(path: str) -> None:
     parsed = config.parse(edited("sandbox", "write_roots", value=["safe", path]))
     assert parsed.sandbox.write_roots == ("safe", path)
 
 
-@pytest.mark.parametrize("path", [".", "./", "././", "~", "~/x", "~user/x"])
-def test_sandbox_write_roots_reject_empty_and_tilde_paths(path: str) -> None:
+@pytest.mark.parametrize(
+    "path", ["/", "//", "///", "/./", ".", "./", "././", "~", "~/x", "~user/x"]
+)
+def test_sandbox_write_roots_reject_roots_empty_and_tilde_paths(path: str) -> None:
     table = edited("sandbox", "write_roots", value=["safe", path])
     assert refused(table) == (
-        "[agent.sandbox] write_roots must be paths without a leading '~' "
-        "or an empty path"
+        "[agent.sandbox] write_roots must be paths without a leading '~', "
+        "an empty path or a root"
     )
 
 

@@ -164,9 +164,13 @@ def _bad_path(text: str) -> bool:
 
 def _write_roots(table: _Table) -> tuple[str, ...]:
     entries = table.paths("write_roots")
-    if any(e.startswith("~") or not PurePosixPath(e).parts for e in entries):
+    if any(
+        e.startswith("~") or PurePosixPath(e).parent == PurePosixPath(e)
+        for e in entries
+    ):
         table.fail(
-            "write_roots", "must be paths without a leading '~' or an empty path"
+            "write_roots",
+            "must be paths without a leading '~', an empty path or a root",
         )
     return entries
 

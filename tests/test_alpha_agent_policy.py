@@ -172,6 +172,8 @@ def test_every_output_denies_the_same_paths(
         rules = strings(dig(claude, "permissions", "deny"))
         reads = [r for r in rules if r.startswith("Read(")]
         assert reads == [f"Read(/{p}/**)" for p in denied(os, home)]
+        edits = [r for r in rules if r.startswith("Edit(")]
+        assert edits == [f"Edit(/{p}/**)" for p in denied(os, home)]
     else:
         assert not any(d in g for d in denied(os, home) for g in result.detail.grants)
 
@@ -325,7 +327,7 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
     tmp = f"{home}/.local/state/example-runs/run1.tmp"
     worktree = f"{home}/Code/example.com/example-org/example-repo"
     deny = list(denied(os, home))
-    reads = [f"Read(/{p}/**)" for p in deny]
+    denied_tools = [f"{tool}(/{p}/**)" for p in deny for tool in ("Read", "Edit")]
     if profile is Profile.BUILD:
         writes = [
             worktree,
@@ -337,14 +339,14 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
         if os is Os.MACOS:
             writes.append("/dev/fd")
         allow = [f"Edit(/{p}/**)" for p in writes]
-        rules = reads
+        rules = denied_tools
         deny_write = deny
     else:
         writes = [tmp, f"{home}/.local/state/example-audit"]
         if os is Os.MACOS:
             writes.append("/dev/fd")
         allow: list[str] = []
-        rules = ["Edit", "Write", "NotebookEdit", *reads]
+        rules = ["Edit", "Write", "NotebookEdit", *denied_tools]
         deny_write = [worktree, *deny]
     return {
         "env": {
@@ -496,10 +498,10 @@ def test_denied_paths_keep_the_first_occurrence(os: Os, profile: Profile) -> Non
     ],
 )
 @pytest.mark.parametrize("profile", Profile)
-def test_an_agy_grant_that_reaches_a_denied_path_is_refused(
+def test_an_agy_read_grant_that_reaches_a_denied_path_is_refused(
     os: Os, profile: Profile, grant: str, denied_path: str
 ) -> None:
-    agy = model.AgySandbox((grant,), (grant,), (grant,))
+    agy = dataclasses.replace(SANDBOX.agy, review_read=(grant,), build_read=(grant,))
     config = settings(sandbox=dataclasses.replace(SANDBOX, agy=agy))
     home = "/example/home/agent"
     shown = (
@@ -597,7 +599,9 @@ def test_the_sockets_directory_is_denied_with_its_aliases(
 
 def test_denied_home_paths_each_resolve_against_the_home() -> None:
     sandbox = dataclasses.replace(
-        SANDBOX, denied_home_paths=(DENIED, ".local/state/x", "/tmp/y")
+        SANDBOX,
+        denied_home_paths=(DENIED, ".local/state/x", "/tmp/y"),
+        write_roots=(".cache",),
     )
     result = made(
         Os.MACOS, Profile.BUILD, Harness.CODEX, "ops", config=settings(sandbox=sandbox)
@@ -787,3 +791,194 @@ def test_absolute_write_roots_pass_through(
             dig(claude_settings_of(result), "sandbox", "filesystem", "allowWrite")
             == expected
         )
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize(
+    ("os", "entry", "shown", "denied_path"),
+    [
+        (
+            Os.LINUX,
+            ".config/tbhbdev/secrets",
+            ".config/tbhbdev/secrets",
+            ".config/tbhbdev/secrets",
+        ),
+        (
+            Os.LINUX,
+            ".config",
+            ".config",
+            ".config/tbhbdev/secrets",
+        ),
+        (
+            Os.LINUX,
+            ".config/tbhbdev/secrets/inner",
+            ".config/tbhbdev/secrets/inner",
+            ".config/tbhbdev/secrets",
+        ),
+        (
+            Os.LINUX,
+            ".",
+            "/example/home/agent",
+            ".config/tbhbdev/secrets",
+        ),
+        (
+            Os.MACOS,
+            "/example/home/agent/Library/Keychains/tbhbdev.keychain-db",
+            "/example/home/agent/Library/Keychains/tbhbdev.keychain-db",
+            "/example/home/agent/Library/Keychains/tbhbdev.keychain-db",
+        ),
+        (
+            Os.MACOS,
+            "Library/Keychains",
+            "/example/home/agent/Library/Keychains",
+            "/example/home/agent/Library/Keychains/tbhbdev.keychain-db",
+        ),
+        (
+            Os.MACOS,
+            "Library/Keychains/tbhbdev.keychain-db/inner",
+            "/example/home/agent/Library/Keychains/tbhbdev.keychain-db/inner",
+            "/example/home/agent/Library/Keychains/tbhbdev.keychain-db",
+        ),
+        (
+            Os.MACOS,
+            ".",
+            "/example/home/agent",
+            "/example/home/agent/Library/Keychains/tbhbdev.keychain-db",
+        ),
+        (
+            Os.MACOS,
+            "Library/Keychains/tbhbdev.keychain",
+            "/example/home/agent/Library/Keychains/tbhbdev.keychain",
+            "/example/home/agent/Library/Keychains/tbhbdev.keychain",
+        ),
+        (Os.MACOS, "/private/tmp", "/private/tmp", "/private/tmp/example-sockets"),
+        (Os.LINUX, "/tmp", "/tmp", "/tmp/example-sockets"),
+    ],
+)
+def test_configured_write_roots_cannot_reach_denied_paths(
+    os: Os, harness: Harness, entry: str, shown: str, denied_path: str
+) -> None:
+    sandbox = dataclasses.replace(SANDBOX, write_roots=(entry,))
+    with pytest.raises(Invalid) as caught:
+        made(os, Profile.BUILD, harness, "agent", config=settings(sandbox=sandbox))
+    home = "/example/home/agent"
+    shown = shown if shown.startswith("/") else f"{home}/{shown}"
+    denied_path = (
+        denied_path if denied_path.startswith("/") else f"{home}/{denied_path}"
+    )
+    assert str(caught.value) == (
+        f"policy write path {shown} overlaps the denied path {denied_path}"
+    )
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize(
+    ("profile", "field"),
+    [
+        (Profile.BUILD, "worktree"),
+        (Profile.BUILD, "tmpdir"),
+        (Profile.BUILD, "git_common_dir"),
+        (Profile.REVIEW, "tmpdir"),
+        (Profile.REVIEW, "audit_dir"),
+    ],
+)
+@pytest.mark.parametrize(
+    "write", ["/example/denied/item", "/example/denied", "/example/denied/item/inner"]
+)
+def test_run_write_paths_cannot_reach_denied_paths(
+    os: Os, profile: Profile, harness: Harness, field: str, write: str
+) -> None:
+    run = dataclasses.replace(paths("agent"), **{field: write})
+    config = dataclasses.replace(settings(), sockets_dir="/example/denied/item")
+    with pytest.raises(Invalid) as caught:
+        policy.build(
+            config,
+            HOSTS[os],
+            harness=harness,
+            profile=profile,
+            account="agent",
+            unsandboxed=False,
+            paths=run,
+        )
+    assert str(caught.value) == (
+        f"policy write path {write} overlaps the denied path /example/denied/item"
+    )
+
+
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize("write", [".example-denied", ".example-denied/inner"])
+def test_agy_configured_write_grants_cannot_reach_denied_paths(
+    os: Os, write: str
+) -> None:
+    agy = dataclasses.replace(SANDBOX.agy, build_write=(write,))
+    config = settings(sandbox=dataclasses.replace(SANDBOX, agy=agy))
+    with pytest.raises(Invalid) as caught:
+        made(os, Profile.BUILD, Harness.AGY, "agent", config=config)
+    assert str(caught.value) == (
+        f"policy write path /example/home/agent/{write} overlaps the denied path "
+        "/example/home/agent/.example-denied"
+    )
+
+
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize(
+    ("harness", "profile"),
+    [
+        (Harness.CODEX, Profile.BUILD),
+        (Harness.CLAUDE, Profile.BUILD),
+        (Harness.CODEX, Profile.REVIEW),
+        (Harness.CLAUDE, Profile.REVIEW),
+        (Harness.AGY, Profile.REVIEW),
+    ],
+)
+def test_unused_agy_build_write_grants_do_not_block_other_policies(
+    os: Os, harness: Harness, profile: Profile
+) -> None:
+    agy = dataclasses.replace(SANDBOX.agy, build_write=(".example-denied",))
+    config = settings(sandbox=dataclasses.replace(SANDBOX, agy=agy))
+    assert made(os, profile, harness, "agent", config=config)
+
+
+@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("denied_path", ["/dev", "/dev/fd", "/dev/fd/inner"])
+def test_dev_fd_cannot_reach_a_denied_path(
+    harness: Harness, profile: Profile, denied_path: str
+) -> None:
+    config = dataclasses.replace(settings(), sockets_dir=denied_path)
+    with pytest.raises(Invalid) as caught:
+        made(Os.MACOS, profile, harness, "agent", config=config)
+    assert str(caught.value) == (
+        f"policy write path /dev/fd overlaps the denied path {denied_path}"
+    )
+
+
+def test_unsandboxed_still_refuses_overlapping_write_roots() -> None:
+    sandbox = dataclasses.replace(SANDBOX, write_roots=(".example-denied",))
+    with pytest.raises(Invalid) as caught:
+        made(
+            Os.LINUX,
+            Profile.BUILD,
+            Harness.CODEX,
+            "agent",
+            unsandboxed=True,
+            config=settings(sandbox=sandbox),
+        )
+    assert str(caught.value) == (
+        "policy write path /example/home/agent/.example-denied "
+        "overlaps the denied path /example/home/agent/.example-denied"
+    )
+
+
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize(
+    "write", ["/example/host/cache", "/example/home/agent/.example-denied-other"]
+)
+def test_unrelated_write_roots_are_allowed(
+    os: Os, harness: Harness, profile: Profile, write: str
+) -> None:
+    sandbox = dataclasses.replace(SANDBOX, write_roots=(write,))
+    assert made(os, profile, harness, "agent", config=settings(sandbox=sandbox))
