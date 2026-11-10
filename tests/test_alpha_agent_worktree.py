@@ -1063,3 +1063,26 @@ def test_git_clone_command_spells_metadata_directory(
 
     monkeypatch.setattr(subprocess, "check_output", output)
     assert worktree.git(tmp_path, "status") == ""
+
+
+@pytest.mark.parametrize("command", ["init", "fetch", "clone", "status"])
+@pytest.mark.parametrize("drivers", [False, True])
+def test_git_operation_timeouts_without_running_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, drivers: bool
+) -> None:
+    calls: list[list[str]] = []
+
+    def output(argv: list[str], **kwargs: object) -> str:
+        calls.append(argv)
+        if "--get-regexp" in argv:
+            assert kwargs["timeout"] == 30
+            if drivers:
+                return "filter.fixture.smudge\0"
+            raise subprocess.CalledProcessError(1, argv)
+        assert argv[-1] == command
+        assert kwargs["timeout"] == (300 if command in ("fetch", "clone") else 30)
+        return " output \n"
+
+    monkeypatch.setattr(subprocess, "check_output", output)
+    assert worktree.git(tmp_path, command) == "output"
+    assert len(calls) == (1 if command == "init" else 2)
