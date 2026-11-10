@@ -53,7 +53,7 @@ def _directory(*, create: bool) -> Generator[int]:
 
 def _incomplete(descriptor: int) -> bool:
     length = os.fstat(descriptor).st_size
-    return length > 0 and os.pread(descriptor, 1, length - 1) != b"\n"
+    return length > 0 and os.pread(descriptor, length, length - 1) != b"\n"
 
 
 @contextmanager

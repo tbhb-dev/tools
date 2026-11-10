@@ -230,9 +230,12 @@ def test_parent_symlink_is_accepted(audit: Path) -> None:
     assert taint_store.load(HOST).status == "clean"
 
 
-def test_partial_line_clearance_repairs_with_archive(audit: Path) -> None:
+@pytest.mark.parametrize("single_byte", [False, True])
+def test_partial_line_clearance_repairs_with_archive(
+    audit: Path, *, single_byte: bool
+) -> None:
     taint_store.record_taint(RECORD)
-    broken = audit.read_bytes() + b'{"kind":'
+    broken = b"{" if single_byte else audit.read_bytes() + b'{"kind":'
     audit.write_bytes(broken)
     assert taint_store.load(HOST).status == "tainted"
     taint_store.record_clearance(CLEARANCE)
