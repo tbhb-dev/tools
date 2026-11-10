@@ -115,7 +115,8 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         variant=args.variant,
         role=args.role,
         unsandboxed=args.unsandboxed is not None,
-        tainted_host=taint.request_flag(taint_store.load(host.name)),
+        tainted_host=args.unsandboxed is not None
+        or taint.request_flag(taint_store.load(host.name)),
         authorized_by=args.unsandboxed,
         startup_deadline_seconds=settings.launch_wait_seconds,
     )

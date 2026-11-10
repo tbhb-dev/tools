@@ -297,3 +297,22 @@ def test_empty_marker_for_run_account_allows_review(
     )
     assert len(remote.records("ssh")) == 5
     assert taint_store.load("example-linux").status == "clean"
+
+
+@pytest.mark.parametrize("cleared", [False, True])
+@pytest.mark.parametrize("unsandboxed", [False, True])
+def test_prepare_alone_fails_closed(
+    remote: Remote, *, cleared: bool, unsandboxed: bool
+) -> None:
+    if cleared:
+        assert clear() == 0
+    options = ["--ops", "--unsandboxed", "o/r#1"] if unsandboxed else []
+    args = agent.parser("example agent").parse_args(
+        execution_arguments(remote.prompt, *options)
+    )
+    run = driver.prepare(settings(), args)
+    assert run.request.tainted_host is (unsandboxed or not cleared)
+    assert taint_store.load("example-linux").status == (
+        "clean" if cleared else "unknown"
+    )
+    assert remote.records("ssh") == []
