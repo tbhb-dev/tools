@@ -251,7 +251,11 @@ max_run_minutes = 120
 sockets_dir = "/example/sockets"
 
 [agent.sandbox]
-write_roots = [".cache", ".local/share/mise", ".local/state"]
+write_roots = [".cache", ".local/share/mise", ".local/state/mise"]
+network_domains = ["api.github.com"]
+# host_path = ["/opt/agent-host/bin"]
+# codex_network_proxy_opt_out = "named reason for this host"
+# agy_unsandboxed_opt_out = "named reason for this host"
 audit_dir = ".local/state/example-audit"
 denied_home_paths = [".claude"]
 
@@ -293,6 +297,10 @@ account = "agent"
 unsandboxed = false
 accounts = ["agent"]
 ```
+
+Run-host refuses write roots that overlap its run directory, installation, host search directories, harness, or script interpreter. Narrow broad roots such as `~/.local` before running. Host tools use a fixed search path, with optional absolute directories from `host_path`. The child's `PATH` still comes from the sandbox policy.
+
+Codex requires network proxy support (0.164.0 or later). Its proxy uses limited mode and denies Unix sockets. Only the exact hosts in `network_domains` have access, and the default list is empty. Claude builds use the same domain list and keep only the existing signing socket grant. Linux profiles also deny the Windows Subsystem for Linux, Docker, and user runtime socket paths. A named `codex_network_proxy_opt_out` disables the proxy. An agy build or review requires a named `agy_unsandboxed_opt_out` because agy has no OS sandbox. Run-host logs either exception on every affected run.
 
 For `[agent.sandbox]`, macOS hosts list `DARWIN_USER_TEMP_DIR` and `DARWIN_USER_CACHE_DIR` in `write_roots` as absolute paths.
 

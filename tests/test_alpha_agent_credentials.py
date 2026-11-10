@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 import yaml
-from agent_host_example import host_settings, run_request
+from agent_host_example import constant, git, host_settings, repository, run_request
 
 from tbhbdev import secrets
 from tbhbdev.alpha import gh_app
@@ -268,7 +268,10 @@ def test_signing_key_is_loaded_over_stdin_and_agent_stops(tmp_path: Path) -> Non
         try:
             env = {"SSH_AUTH_SOCK": str(tmpdir / "ssh.sock")}
             result = subprocess.check_output(
-                ["ssh-add", "-L"], env=env, text=True, timeout=5
+                [credentials.host_tools.resolve("ssh-add"), "-L"],
+                env=env,
+                text=True,
+                timeout=5,
             )
             assert result.strip() == key.with_suffix(".pub").read_text().strip()
             assert agent.poll() is None
@@ -318,7 +321,7 @@ def test_signing_agent_start_failure_is_bounded(
         ("old", "old", "old", "old"),
         ("old", "new", "old", "new"),
         ("old", "new", "newer", "newer"),
-        (None, "new", None, "new"),
+        (None, "new", None, None),
     ],
 )
 def test_auth_copy_and_write_back_under_lock(
@@ -358,7 +361,7 @@ def test_auth_copy_and_write_back_under_lock(
     assert (source.read_text() if source.exists() else None) == wanted
     assert (source_dir / "agent-auth.lock").exists()
     assert locks == [source_dir / "agent-auth.lock"] * (
-        2 if after is not None and before != after else 1
+        2 if before is not None and after is not None and before != after else 1
     )
 
 
@@ -381,7 +384,12 @@ def test_signing_delivery_uses_private_stdin_and_a_dedicated_group(
     agent = Agent()
 
     def spawn(command: list[str], **kwargs: object) -> Agent:
-        assert command == ["ssh-agent", "-D", "-a", str(socket)]
+        assert command == [
+            credentials.host_tools.resolve("ssh-agent"),
+            "-D",
+            "-a",
+            str(socket),
+        ]
         assert kwargs == {
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
@@ -398,7 +406,7 @@ def test_signing_delivery_uses_private_stdin_and_a_dedicated_group(
         events.append("ready")
 
     def add(command: list[str], **kwargs: object) -> None:
-        assert command == ["ssh-add", "-"]
+        assert command == [credentials.host_tools.resolve("ssh-add"), "-"]
         assert kwargs == {
             "input": key,
             "env": {"SSH_AUTH_SOCK": str(socket)},
@@ -558,7 +566,8 @@ def test_auth_write_back_accepts_exact_size_limit(tmp_path: Path) -> None:
     text = '{"value":"' + "a" * (1024 * 1024 - 12) + '"}'
     assert len(text) == 1024 * 1024
     destination.write_text(text)
-    assert credentials.auth_write_back(source, destination, None) is None
+    source.write_text('{"value":"original"}')
+    assert credentials.auth_write_back(source, destination, source.read_text()) is None
     assert source.read_text() == text
 
 
@@ -600,3 +609,69 @@ def test_auth_directory_is_pinned_and_reads_are_bounded(
     assert credentials.auth_after(destination) == "{}"
     assert sizes == [1024 * 1024 + 1]
     assert flags_seen == [os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW]
+
+
+def test_app_token_scope_ignores_planted_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_reader: list[str]
+) -> None:
+
+    _, clone = repository(tmp_path / "repo")
+    git(
+        clone,
+        "config",
+        "remote.origin.url",
+        "https://github.com/example-other/other.git",
+    )
+    env = gh_app.Env(tmp_path, lambda: 1000, secrets.Store, gh_app.run_openssl)
+    monkeypatch.setattr(gh_app, "default_env", lambda: env)
+    monkeypatch.setattr(gh_app, "rebuild_pem", constant("fake pem"))
+    monkeypatch.setattr(gh_app, "sign", constant("fake jwt"))
+    monkeypatch.setitem(VALUES, "example/app/pem", "fake pem")
+    scopes: list[str] = []
+
+    def token(_env: gh_app.Env, args: gh_app.Args, _jwt: str) -> gh_app.Minted:
+        scopes.append(args.repo)
+        return gh_app.Minted("fake installation", 2000)
+
+    monkeypatch.setattr(gh_app, "request_token", token)
+    value = run_request(profile="review", commit="0" * 40)
+    credentials.deliver(value, host_settings(), tmp_path)
+    assert scopes == ["example-org/example-repo"]
+    assert fake_reader[:2] == ["example/app/client", "example/app/pem"]
+
+
+@pytest.mark.parametrize(
+    ("after", "why"),
+    [
+        ('{"value":"new","extra":true}', "auth added top-level keys"),
+        ('{"tokens":[]}', "tokens must be an object of strings"),
+        ('{"last_refresh":"2025-12-31T00:00:00Z"}', "last_refresh moved backwards"),
+    ],
+)
+def test_auth_content_refusal_is_logged_without_replacement(
+    tmp_path: Path, after: str, why: str
+) -> None:
+    source = runfiles.private_dir(tmp_path / "host") / "auth.json"
+    source.write_text(
+        '{"value":"old","tokens":{},"last_refresh":"2026-01-01T00:00:00Z"}'
+    )
+    # Keep a valid tokens object for the timestamp case.
+    data = json.loads(after)
+    if "last_refresh" in data:
+        data["tokens"] = {}
+    target = runfiles.private_dir(tmp_path / "child") / "auth.json"
+    target.write_text(json.dumps(data))
+    before = source.read_text()
+    assert (
+        credentials.auth_write_back(source, target, before)
+        == f"codex auth write-back skipped: {why}\n"
+    )
+    assert source.read_text() == before
+
+
+def test_empty_auth_can_create_a_missing_source(tmp_path: Path) -> None:
+    source = runfiles.private_dir(tmp_path / "host") / "auth.json"
+    target = runfiles.private_dir(tmp_path / "child") / "auth.json"
+    target.write_text("{}")
+    assert credentials.auth_write_back(source, target, None) is None
+    assert source.read_text() == "{}"

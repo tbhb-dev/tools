@@ -18,6 +18,11 @@ from tbhbdev.alpha.agent import worktree
 from tbhbdev.alpha.agent.model import Invalid
 
 
+@pytest.fixture(autouse=True)
+def scratch_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+
 def test_build_fetches_default_and_creates_one_branch(tmp_path: Path) -> None:
     seed, clone = repository(tmp_path)
     (seed / "tracked").write_text("new remote content\n")
@@ -27,7 +32,7 @@ def test_build_fetches_default_and_creates_one_branch(tmp_path: Path) -> None:
     assert path == clone / ".worktrees" / "agent-build-1"
     assert git(path, "branch", "--show-current") == "agent/build-1"
     assert git(path, "rev-parse", "HEAD") == head
-    assert git(clone, "rev-parse", "HEAD") == head
+    assert git(clone, "rev-parse", "HEAD") != head
     assert (path / "tracked").read_text() == "new remote content\n"
     assert worktree.common_dir(path) == clone / ".git"
     assert (clone / ".git" / "agent-worktree.lock").exists()
@@ -127,27 +132,33 @@ def test_git_suppresses_command_errors_and_returns_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def output(
-        command: list[str], *, text: bool, stderr: int, env: dict[str, str]
+        command: list[str],
+        *,
+        text: bool,
+        stderr: int,
+        env: dict[str, str],
+        timeout: int,
     ) -> str:
-        assert command[0] == "git"
-        assert command[-4:] == ["-C", str(tmp_path), "status", "--porcelain"]
-        assert command[1:-4:2] == ["-c"] * 5
-        assert command[2:-4:2] == [
-            "core.hooksPath=/dev/null",
-            "core.fsmonitor=false",
-            "core.sshCommand=ssh",
-            "protocol.ext.allow=never",
-            "core.pager=cat",
-        ]
+        assert command[0] == worktree.host_tools.resolve("git")
+        if command[-1] == r"^(filter|merge)\.":
+            return ""
+        assert command[-2:] == ["status", "--porcelain"]
+        assert command[2 : 2 * len(worktree.GIT_OVERRIDES) + 1 : 2] == list(
+            worktree.GIT_OVERRIDES
+        )
         assert env == {
             key: os.environ[key]
-            for key in ("PATH", "HOME", "SSH_AUTH_SOCK", "LANG")
+            for key in ("HOME", "SSH_AUTH_SOCK", "LANG")
             if key in os.environ
         } | {
+            "PATH": worktree.host_tools.search(),
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_ASKPASS": "/bin/false",
+            "SSH_ASKPASS": "/bin/false",
         }
+        assert timeout == 30
         assert text is True
         assert stderr == subprocess.DEVNULL
         return " output \n"
@@ -200,11 +211,8 @@ def test_worktree_git_contract_under_one_stable_lock(
     )
     path = worktree.create(clone, "example", request)
     assert calls == [
-        ("fetch", "origin"),
+        ("fetch", "--upload-pack=git-upload-pack", "origin"),
         ("symbolic-ref", "refs/remotes/origin/HEAD"),
-        ("branch", "--show-current"),
-        ("status", "--porcelain", "--untracked-files=no"),
-        ("merge", "--ff-only", "refs/remotes/origin/main"),
         *(
             [
                 (
@@ -266,3 +274,115 @@ def test_host_git_ignores_parent_git_and_other_variables(
     else:
         monkeypatch.setenv("SSH_AUTH_SOCK", socket)
     test_git_suppresses_command_errors_and_returns_text(tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "plant",
+    [
+        "reference-transaction",
+        "post-checkout",
+        "fsmonitor",
+        "uploadpack",
+        "ext",
+        "smudge",
+        "credential",
+        "ssh",
+    ],
+)
+def test_each_repo_command_plant_is_inert(tmp_path: Path, plant: str) -> None:
+    _, clone = repository(tmp_path)
+    marker = tmp_path / "executed"
+    executable = tmp_path / "plant"
+    executable.write_text(f'#!/bin/sh\n: > "{marker}"\nexit 1\n')
+    executable.chmod(0o700)
+    if plant in ("reference-transaction", "post-checkout"):
+        hook = clone / ".git" / "hooks" / plant
+        hook.write_text(executable.read_text())
+        hook.chmod(0o700)
+    elif plant == "fsmonitor":
+        git(clone, "config", "core.fsmonitor", str(executable))
+    elif plant == "uploadpack":
+        git(clone, "config", "remote.origin.url", (tmp_path / "origin").as_uri())
+        git(clone, "config", "remote.origin.uploadpack", str(executable))
+    elif plant == "ext":
+        git(clone, "config", "remote.origin.url", f"ext::{executable}")
+    elif plant == "smudge":
+        name = "planted"
+        (clone / ".git" / "info" / "attributes").write_text("* filter=planted\n")
+        for field in ("smudge", "clean", "process"):
+            git(clone, "config", f"filter.{name}.{field}", str(executable))
+        git(clone, "config", f"filter.{name}.required", "true")
+        git(clone, "config", "merge.planted.driver", str(executable))
+    elif plant == "credential":
+        git(clone, "config", "credential.helper", f"!{executable}")
+    else:
+        git(clone, "config", "core.sshCommand", str(executable))
+    if plant == "ext":
+        with pytest.raises(subprocess.CalledProcessError):
+            worktree.create(clone, "safe", run_request())
+        # Refusal leaves no checkout; restore a data URL to exercise removal too.
+        git(clone, "config", "remote.origin.url", str(tmp_path / "origin"))
+    worktree.create(clone, "safe", run_request())
+    assert not marker.exists()
+    worktree.remove(clone, "safe", force=False)
+    assert not marker.exists()
+
+
+def test_driver_overrides_are_complete() -> None:
+    assert worktree.driver_overrides(
+        "filter.example.smudge\0filter.example.required\0merge.example.driver\0merge.example.name\0other.key\0"
+    ) == [
+        "-c",
+        "filter.example.smudge=",
+        "-c",
+        "filter.example.clean=",
+        "-c",
+        "filter.example.process=",
+        "-c",
+        "filter.example.required=false",
+        "-c",
+        "merge.example.driver=",
+    ]
+
+
+@pytest.mark.parametrize("code", [1, 2])
+def test_config_enumeration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    def output(command: list[str], **_kwargs: object) -> str:
+        if "--get-regexp" in command:
+            raise subprocess.CalledProcessError(code, command)
+        return "complete"
+
+    monkeypatch.setattr(subprocess, "check_output", output)
+    if code == 1:
+        assert worktree.git(tmp_path, "status") == "complete"
+    else:
+        with pytest.raises(subprocess.CalledProcessError) as caught:
+            worktree.git(tmp_path, "status")
+        assert caught.value.returncode == 2
+
+
+def test_filter_subsection_newlines_are_data() -> None:
+    assert worktree.driver_overrides("filter.line\nbreak.smudge\0") == [
+        "-c",
+        "filter.line\nbreak.smudge=",
+        "-c",
+        "filter.line\nbreak.clean=",
+        "-c",
+        "filter.line\nbreak.process=",
+        "-c",
+        "filter.line\nbreak.required=false",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("merge.example.name", []),
+        ("other.example.driver", []),
+        ("merge.example.driver", ["-c", "merge.example.driver="]),
+    ],
+)
+def test_only_merge_drivers_are_overridden(key: str, expected: list[str]) -> None:
+    assert worktree.driver_overrides(key + "\0") == expected

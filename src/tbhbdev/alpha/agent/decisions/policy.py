@@ -22,6 +22,7 @@ from tbhbdev.alpha.agent.model import (
     Harness,
     Host,
     Invalid,
+    NetworkProxy,
     Os,
     Policy,
     Profile,
@@ -78,7 +79,9 @@ def _with_aliases(os: Os, path: str) -> tuple[str, ...]:
     return (path,)
 
 
-def denied_paths(settings: Settings, host: Host, home: str) -> tuple[str, ...]:
+def denied_paths(
+    settings: Settings, host: Host, home: str, uid: int
+) -> tuple[str, ...]:
     """The paths no harness may read, whatever the OS, profile and harness.
 
     That's the Connect token store, the session socket directory and the
@@ -88,6 +91,9 @@ def denied_paths(settings: Settings, host: Host, home: str) -> tuple[str, ...]:
     if host.os is Os.LINUX:
         # The directory, so a sibling file or a renamed token stays hidden too.
         paths.append(resolve(home, str(secrets.LINUX_TOKEN_FILE.parent)))
+        paths.extend(
+            ("/run/WSL", "/var/run/docker.sock", "/run/docker.sock", f"/run/user/{uid}")
+        )
     else:
         keychain = secrets.MACOS_KEYCHAIN_FILE
         paths.extend(
@@ -151,8 +157,11 @@ def _codex(
     search = (
         codex.web_search_build if profile is Profile.BUILD else codex.web_search_review
     )
+    proxy = network_proxy(settings)
     if full:
-        return CodexPolicy(CodexMode.FULL_ACCESS, (), (), deny, APPROVAL_POLICY, search)
+        return CodexPolicy(
+            CodexMode.FULL_ACCESS, (), (), deny, APPROVAL_POLICY, search, proxy
+        )
     return CodexPolicy(
         CodexMode.PROFILE,
         (READ_ROOT,),
@@ -160,6 +169,7 @@ def _codex(
         deny,
         APPROVAL_POLICY,
         search,
+        proxy,
     )
 
 
@@ -181,10 +191,11 @@ def _claude_write_denies(profile: Profile, paths: RunPaths) -> tuple[str, ...]:
 def _claude(
     profile: Profile,
     paths: RunPaths,
-    writes: tuple[str, ...],
-    deny: tuple[str, ...],
+    access: tuple[tuple[str, ...], tuple[str, ...]],
     env: dict[str, str],
+    domains: tuple[str, ...],
 ) -> ClaudePolicy:
+    writes, deny = access
     review = profile is Profile.REVIEW
     # An absolute path in a Claude rule starts with a second slash.
     denied_tools = [f"{tool}(/{p}/**)" for p in deny for tool in ("Read", "Edit")]
@@ -201,7 +212,7 @@ def _claude(
             "denyWrite": [*deny_write, *deny],
         },
     }
-    network: dict[str, object] = {}
+    network: dict[str, object] = {"allowedDomains": list(domains)}
     if review:
         network.update(
             {
@@ -211,8 +222,7 @@ def _claude(
         )
     if paths.signing_socket is not None:
         network["allowUnixSockets"] = [paths.signing_socket]
-    if network:
-        sandbox["network"] = network
+    sandbox["network"] = network
     return ClaudePolicy(
         {
             "env": {
@@ -246,6 +256,43 @@ def _refuse_overlaps(paths: tuple[str, ...], deny: tuple[str, ...], kind: str) -
             if _overlaps(path, denied):
                 message = f"policy {kind} {path} overlaps the denied path {denied}"
                 raise Invalid(message)
+
+
+def protect_host(
+    settings: Settings, paths: RunPaths, protected: tuple[str, ...]
+) -> None:
+    """Refuse host trust paths on either side of a writable path."""
+    common = () if paths.git_common_dir is None else (paths.git_common_dir,)
+    writes = (
+        paths.worktree,
+        *common,
+        paths.tmpdir,
+        paths.audit_dir,
+        _DEV_FD,
+        *(resolve(paths.home, p) for p in settings.sandbox.write_roots),
+        *(resolve(paths.home, p) for p in settings.sandbox.agy.build_write),
+    )
+    for path in protected:
+        for write in writes:
+            if _overlaps(path, write):
+                message = (
+                    f"protected host path {path} overlaps write root {write}; "
+                    "narrow that write root"
+                )
+                raise Invalid(message)
+
+
+def network_proxy(settings: Settings) -> NetworkProxy | None:
+    if settings.sandbox.codex_network_proxy_opt_out is not None:
+        return None
+    return NetworkProxy(
+        enabled=True,
+        domains=dict.fromkeys(settings.sandbox.network_domains, "allow"),
+        mode="limited",
+        unix_sockets={},
+        dangerously_allow_all_unix_sockets=False,
+        allow_local_binding=False,
+    )
 
 
 def _agy_write_roots(
@@ -299,6 +346,7 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
     account: str,
     unsandboxed: bool,
     paths: RunPaths,
+    protected: tuple[str, ...] = (),
 ) -> Policy:
     """The policy of a run of HARNESS with PROFILE on HOST, as ACCOUNT.
 
@@ -313,7 +361,14 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
             write path, signing socket or an agy read grant reaches a denied path.
     """
     _check(host, harness, profile, account=account, full=unsandboxed)
-    deny = denied_paths(settings, host, paths.home)
+    if harness is Harness.AGY and settings.sandbox.agy_unsandboxed_opt_out is None:
+        message = (
+            "agy has no OS sandbox; configure agy_unsandboxed_opt_out "
+            "with a named reason"
+        )
+        raise Invalid(message)
+    protect_host(settings, paths, protected)
+    deny = denied_paths(settings, host, paths.home, paths.uid)
     if paths.signing_socket is not None:
         _refuse_overlaps((paths.signing_socket,), deny, "signing socket")
     env = environment(settings, host, harness, paths, account)
@@ -334,7 +389,9 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
             )
         detail = codex_detail
     elif harness is Harness.CLAUDE:
-        detail = _claude(profile, paths, writes, deny, env)
+        detail = _claude(
+            profile, paths, (writes, deny), env, settings.sandbox.network_domains
+        )
     else:
         detail = _agy(settings, profile, paths, env, deny)
     return Policy(harness, profile, env, deny, detail)

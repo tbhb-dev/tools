@@ -789,3 +789,59 @@ def test_reference_parts_may_hold_dots_underscores_and_hyphens() -> None:
     reference = "v-1/i.t_2/F-3.x"
     table = edited("claude", "profiles", "primary", "token", value=reference)
     assert config.parse(table).claude.profiles[0].token == reference
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "valid"),
+    [
+        ("host_path", ["/opt/example/bin"], True),
+        ("host_path", ["relative"], False),
+        ("host_path", ["/"], False),
+        ("host_path", ["/opt/../bin"], False),
+        ("host_path", [], False),
+        ("network_domains", [], True),
+        ("network_domains", ["api.github.com"], True),
+        ("network_domains", ["*.github.com"], False),
+        ("network_domains", ["https://github.com"], False),
+        ("network_domains", ["github.com:443"], False),
+        ("network_domains", [""], False),
+        ("network_domains", "github.com", False),
+        ("codex_network_proxy_opt_out", "named reason", True),
+        ("codex_network_proxy_opt_out", "", False),
+        ("agy_unsandboxed_opt_out", "named reason", True),
+        ("agy_unsandboxed_opt_out", False, False),
+    ],
+)
+def test_host_and_network_options(key: str, value: object, valid: bool) -> None:
+    data = copy.deepcopy(GOOD)
+    sandbox = cast("Table", data["sandbox"])
+    sandbox[key] = value
+    if valid:
+        result = config.parse(data)
+        assert getattr(result.sandbox, key) == (
+            tuple(value) if isinstance(value, list) else value
+        )
+    else:
+        with pytest.raises(Invalid, match=key):
+            config.parse(data)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "why"),
+    [
+        ("host_path", ["relative"], "must contain absolute paths only"),
+        (
+            "network_domains",
+            ["*.example.com"],
+            "must contain exact host names without wildcards",
+        ),
+    ],
+)
+def test_execution_options_name_the_invalid_path(
+    key: str, value: object, why: str
+) -> None:
+    data = copy.deepcopy(GOOD)
+    cast("Table", data["sandbox"])[key] = value
+    with pytest.raises(Invalid) as caught:
+        config.parse(data)
+    assert str(caught.value) == f"[agent.sandbox] {key} {why}"

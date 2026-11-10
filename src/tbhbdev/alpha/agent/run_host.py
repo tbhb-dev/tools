@@ -12,13 +12,14 @@ import subprocess  # nosec B404
 import sys
 import tempfile
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
 from tbhbdev import userconfig
 from tbhbdev.alpha.agent import (
     credentials,
+    host_tools,
     process_group,
     render,
     runfiles,
@@ -31,6 +32,8 @@ from tbhbdev.alpha.agent.model import (
     Harness,
     Host,
     Invalid,
+    Policy,
+    Profile,
     RunKind,
     RunPaths,
     RunRequest,
@@ -57,8 +60,128 @@ class Prepared:
     auth_before: str | None = dataclasses.field(repr=False)
 
 
+def planned_paths(run: Run) -> RunPaths:
+    clone = Path(repo.clone_path(run.home, run.request.repo))
+    common = clone / ".git"
+    if common.is_file():
+        common = (clone / common.read_text().removeprefix("gitdir: ").strip()).resolve()
+        shared = common / "commondir"
+        if shared.is_file():
+            common = common / shared.read_text().strip()
+    return RunPaths(
+        str(run.home),
+        str((clone / ".worktrees" / f"agent-{run.files.name}").resolve()),
+        str(run.tmpdir),
+        str(run.tmpdir / "codex"),
+        str((run.home / run.settings.sandbox.audit_dir).resolve()),
+        str(common.resolve()),
+        uid=os.getuid(),
+    )
+
+
+def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
+    """Check directories before even inspecting or invoking an executable."""
+    directories = host_tools.search_path(run.settings, run.host.os)
+    protected = (
+        str(run.files.root.resolve()),
+        *host_tools.installation(),
+        *directories,
+        *(str(Path(p).resolve()) for p in directories),
+    )
+    resolved = dataclasses.replace(
+        paths,
+        worktree=str(Path(paths.worktree).resolve()),
+        tmpdir=str(Path(paths.tmpdir).resolve()),
+        audit_dir=str(Path(paths.audit_dir).resolve()),
+        git_common_dir=None
+        if paths.git_common_dir is None
+        else str(Path(paths.git_common_dir).resolve()),
+    )
+    sandbox = run.settings.sandbox
+    check_settings = dataclasses.replace(
+        run.settings,
+        sandbox=dataclasses.replace(
+            sandbox,
+            write_roots=tuple(
+                str((run.home / p).resolve()) for p in sandbox.write_roots
+            ),
+            agy=dataclasses.replace(
+                sandbox.agy,
+                build_write=tuple(
+                    str((run.home / p).resolve()) for p in sandbox.agy.build_write
+                ),
+            ),
+        ),
+    )
+    policy.protect_host(check_settings, resolved, protected)
+    value = policy.build(
+        run.settings,
+        run.host,
+        harness=run.request.harness,
+        profile=run.request.profile,
+        account=run.request.account,
+        unsandboxed=run.request.unsandboxed,
+        paths=resolved,
+        protected=protected,
+    )
+    name = (
+        "agy-agent"
+        if run.request.harness is Harness.AGY and run.request.profile is Profile.BUILD
+        else run.request.harness.value
+    )
+    executable = host_tools.resolve(name, value.env["PATH"])
+    commands = [
+        host_tools.resolve(name, ":".join(directories))
+        for name in ("git", "ssh-agent", "ssh-add")
+    ]
+    if run.host.os.value == "macos":
+        commands.extend(
+            host_tools.resolve(name, ":".join(directories)) for name in ("sysctl", "ps")
+        )
+    executables = (
+        *host_tools.executable_paths(executable, value.env["PATH"]),
+        *(
+            p
+            for command in commands
+            for p in host_tools.executable_paths(command, ":".join(directories))
+        ),
+    )
+    policy.protect_host(check_settings, resolved, executables)
+    return value, executable
+
+
+def preflight(run: Run) -> None:
+    _value, executable = checked_policy(run, planned_paths(run))
+    sandbox = run.settings.sandbox
+    reason = (
+        sandbox.agy_unsandboxed_opt_out
+        if run.request.harness is Harness.AGY
+        else sandbox.codex_network_proxy_opt_out
+        if run.request.harness is Harness.CODEX
+        else None
+    )
+    if reason is not None:
+        notice = f"{run.request.harness} sandbox opt-out: {reason}"
+        print(notice, file=sys.stderr)
+        run.files.write("log", notice + "\n")
+    if (
+        run.request.harness is Harness.CODEX
+        and sandbox.codex_network_proxy_opt_out is None
+        and not host_tools.codex_proxy_supported(executable, run.tmpdir)
+    ):
+        message = (
+            "Codex network_proxy support required (minimum 0.164.0); "
+            "upgrade or configure codex_network_proxy_opt_out"
+        )
+        raise Invalid(message)
+
+
 def prepare_workspace(run: Run) -> Prepared:
     clone = Path(repo.clone_path(run.home, run.request.repo))
+    paths = planned_paths(run)
+    checked_policy(run, paths)
+    actual_common = str(worktree.common_dir(clone).resolve())
+    checked_policy(run, dataclasses.replace(paths, git_common_dir=actual_common))
     workspace = worktree.create(clone, run.files.name, run.request)
     delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
     paths = RunPaths(
@@ -67,7 +190,8 @@ def prepare_workspace(run: Run) -> Prepared:
         tmpdir=str(run.tmpdir),
         codex_home=str(run.tmpdir / "codex"),
         audit_dir=policy.resolve(str(run.home), run.settings.sandbox.audit_dir),
-        git_common_dir=str(worktree.common_dir(clone)),
+        git_common_dir=actual_common,
+        uid=os.getuid(),
         signing_socket=str(run.tmpdir / "ssh.sock")
         if delivery.signing is not None
         else None,
@@ -138,15 +262,7 @@ def _agy_project(run: Run, prepared: Prepared, grants: AgyPolicy) -> str:
 
 def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
     paths = prepared.paths
-    value = policy.build(
-        run.settings,
-        run.host,
-        harness=run.request.harness,
-        profile=run.request.profile,
-        account=run.request.account,
-        unsandboxed=run.request.unsandboxed,
-        paths=paths,
-    )
+    value, executable = checked_policy(run, paths)
     env = value.env | prepared.delivery.env
     text = run.files.path("prompt").read_text()
     project = (
@@ -162,12 +278,13 @@ def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
         agy_project=project,
         agy_brief=text,
     )
+    command = (executable, *command[1:])
     headless = run.request.kind is RunKind.EXEC
     if headless and run.request.harness is Harness.CODEX:
         command = (
             *command[:-1],
             "--output-last-message",
-            str(run.files.path("out.final")),
+            str(run.tmpdir / "out.final"),
             command[-1],
         )
     terminal = None if headless else sys.stdin.fileno()
@@ -194,6 +311,8 @@ def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
                 process_group.Launch(command, env, paths.worktree, streams, terminal),
                 started=started,
             )
+        if run.files.path("request.json").exists():
+            run.files.path("request.json").read_text()
         run.files.write("phase", "running")
         limit = run_state.time_limit(
             run.request.kind, run.request.timeout, run.settings.max_run_minutes
@@ -211,6 +330,11 @@ def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
                 process_group.stop_started(child.pid, run.settings.kill_grace_seconds)
                 child.wait()
             run.files.write("phase", "stopped")
+            if headless and run.request.harness is Harness.CODEX:
+                with suppress(FileNotFoundError):
+                    runfiles.copy_final(
+                        run.tmpdir / "out.final", run.files.path("out.final")
+                    )
         if terminal is not None:
             try:
                 process_group.foreground(terminal, os.getpgrp())
@@ -232,7 +356,7 @@ def prepared_result(result: object) -> Prepared:
 
 def execute(run: Run, text: str) -> int:
     """Keep cleanup protected until the completion record is durable."""
-    with ExitStack() as stack:
+    with host_tools.configured(run.settings, run.host.os), ExitStack() as stack:
         return _execute(run, text, stack)
 
 
@@ -244,6 +368,7 @@ def _execute(run: Run, text: str, stack: ExitStack) -> int:
         if not run.files.path("request.json").exists():
             run.files.receive(run.request)
         run.files.write("phase", "check")
+        preflight(run)
         result = process_group.prepare(
             lambda: prepare_workspace(run),
             run.files,

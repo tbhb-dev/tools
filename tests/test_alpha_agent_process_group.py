@@ -294,7 +294,7 @@ def test_mac_identity(
 
 def test_mac_boot_id(monkeypatch: pytest.MonkeyPatch) -> None:
     def output(command: list[str], *, text: bool, timeout: int) -> str:
-        assert command == ["sysctl", "-n", "kern.boottime"]
+        assert command == [groups.host_tools.resolve("sysctl"), "-n", "kern.boottime"]
         assert text is True
         assert timeout == 5
         return " boot-example \n"

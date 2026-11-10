@@ -13,6 +13,7 @@ import pytest
 from agent_example import (
     DENIED,
     LINUX,
+    LINUX_SOCKET_DENIES,
     MACOS,
     MARKER,
     TOKEN_DIR,
@@ -37,6 +38,7 @@ IDS = [f"{h.value}-{k.value}-{p.value}" for h, k, p in COMBINATIONS]
 
 DENY_LINUX = (
     f"{HOME}/{TOKEN_DIR}",
+    *LINUX_SOCKET_DENIES,
     "/tmp/example-sockets",
     f"{HOME}/{DENIED}",
 )
@@ -62,6 +64,8 @@ CODEX_TAIL = (
     'approval_policy="never"',
     "-c",
     'web_search="live"',
+    "-c",
+    'features.network_proxy={enabled=true,mode="limited",domains={},unix_sockets={},dangerously_allow_all_unix_sockets=false,allow_local_binding=false}',
 )
 CODEX_BUILD_FS = (
     '{filesystem = {":root" = "read", '
@@ -69,6 +73,8 @@ CODEX_BUILD_FS = (
     f'"{HOME}/.cache" = "write", "{HOME}/.local/share/mise" = "write", '
     f'"{HOME}/.local/state" = "write", '
     f'"{HOME}/{TOKEN_DIR}" = "none", '
+    '"/run/WSL" = "none", "/var/run/docker.sock" = "none", '
+    '"/run/docker.sock" = "none", "/run/user/0" = "none", '
     '"/tmp/example-sockets" = "none", '
     f'"{HOME}/{DENIED}" = "none"}}, network = {{enabled = true}}}}'
 )
@@ -76,6 +82,8 @@ CODEX_REVIEW_FS = (
     '{filesystem = {":root" = "read", '
     f'"{TMP}" = "write", "{HOME}/.local/state/example-audit" = "write", '
     f'"{HOME}/{TOKEN_DIR}" = "none", '
+    '"/run/WSL" = "none", "/var/run/docker.sock" = "none", '
+    '"/run/docker.sock" = "none", "/run/user/0" = "none", '
     '"/tmp/example-sockets" = "none", '
     f'"{HOME}/{DENIED}" = "none"}}, network = {{enabled = true}}}}'
 )
@@ -364,7 +372,11 @@ def test_codex_tables_have_no_repeated_paths(os: Os, profile: Profile) -> None:
     value = next(a for a in result if a.startswith(flag)).removeprefix(flag)
     fs = tomllib.loads(f"profile = {value}")["profile"]["filesystem"]
     deny = (
-        [f"{HOME}/{TOKEN_DIR}", f"{HOME}/{DENIED}"]
+        [
+            f"{HOME}/{TOKEN_DIR}",
+            *LINUX_SOCKET_DENIES,
+            f"{HOME}/{DENIED}",
+        ]
         if os is Os.LINUX
         else [
             f"{HOME}/Library/Keychains/tbhbdev.keychain-db",
@@ -559,3 +571,33 @@ def test_codex_overrides_the_signing_socket_setting() -> None:
     )
     index = result.index(flag)
     assert result[: index - 1] + result[index + 1 :] == baseline
+
+
+@pytest.mark.parametrize("opt_out", [False, True])
+def test_network_proxy_overrides_are_explicit(opt_out: bool) -> None:
+    original = settings()
+    configured = dataclasses.replace(
+        original,
+        sandbox=dataclasses.replace(
+            original.sandbox,
+            network_domains=("api.github.com", "example.com"),
+            codex_network_proxy_opt_out="test exception" if opt_out else None,
+        ),
+    )
+    result = built(Harness.CODEX, RunKind.EXEC, Profile.BUILD, config=configured)
+    assert result[:3] == ("codex", "exec", "--skip-git-repo-check")
+    setting = next(arg for arg in result if arg.startswith("features.network_proxy"))
+    assert result[result.index(setting) - 1] == "-c"
+    parsed = tomllib.loads(setting)["features"]["network_proxy"]
+    assert parsed == (
+        {"enabled": False}
+        if opt_out
+        else {
+            "enabled": True,
+            "mode": "limited",
+            "domains": {"api.github.com": "allow", "example.com": "allow"},
+            "unix_sockets": {},
+            "dangerously_allow_all_unix_sockets": False,
+            "allow_local_binding": False,
+        }
+    )
