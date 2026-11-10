@@ -3,6 +3,10 @@
 from dataclasses import dataclass
 
 
+class ConfigError(ValueError):
+    """A configuration mistake whose message holds only key names, never values."""
+
+
 @dataclass(frozen=True)
 class Settings:
     host: str = "localhost"

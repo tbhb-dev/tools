@@ -1,11 +1,14 @@
 """Connection settings accept known keys and reject mistyped values."""
 
 from dataclasses import asdict
+from itertools import combinations
 
 import pytest
 
 from tbhbdev.analytics.decisions.config import parse
-from tbhbdev.analytics.model import Settings
+from tbhbdev.analytics.model import ConfigError, Settings
+
+ROLE_KEYS = ("owner_role", "loader_role", "reader_role", "grafana_role")
 
 TEXT_KEYS = (
     "host",
@@ -107,3 +110,38 @@ def test_invalid_loader_switch(value: object) -> None:
     with pytest.raises(ValueError, match=r".") as caught:
         parse({"loader_enabled": value})
     assert str(caught.value) == "[analytics] loader_enabled must be a boolean"
+
+
+@pytest.mark.parametrize(("earlier", "later"), list(combinations(ROLE_KEYS, 2)))
+def test_equal_role_names_are_refused(earlier: str, later: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        parse({earlier: "shared", later: "shared"})
+    assert str(caught.value) == f"[analytics] {later} and {earlier} must differ"
+
+
+@pytest.mark.parametrize(("earlier", "later"), list(combinations(ROLE_KEYS, 2)))
+def test_a_role_equal_to_another_default_is_refused(earlier: str, later: str) -> None:
+    defaults = asdict(Settings())
+    with pytest.raises(ConfigError, match="must differ"):
+        parse({later: defaults[earlier]})
+
+
+def test_distinct_custom_role_names_pass() -> None:
+    assert parse({key: f"custom_{key}" for key in ROLE_KEYS}).reader_role == (
+        "custom_reader_role"
+    )
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        {"unknown": 1},
+        {"loader_enabled": "x"},
+        {"host": ""},
+        {"port": 0},
+        {"owner_role": "same", "reader_role": "same"},
+    ],
+)
+def test_config_mistakes_are_config_errors(table: dict[str, object]) -> None:
+    with pytest.raises(ConfigError):
+        parse(table)

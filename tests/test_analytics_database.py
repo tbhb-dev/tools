@@ -13,7 +13,7 @@ from hypothesis import strategies as st
 
 from tbhbdev.analytics import database
 from tbhbdev.analytics.decisions import roles, scram
-from tbhbdev.analytics.model import Migration, Settings
+from tbhbdev.analytics.model import ConfigError, Migration, Settings
 
 
 @pytest.fixture
@@ -95,7 +95,7 @@ def test_driver_boundary(monkeypatch: pytest.MonkeyPatch, options: Settings) -> 
     ],
 )
 def test_connect_refuses(options: Settings, message: str) -> None:
-    with pytest.raises(ValueError, match=r".") as caught:
+    with pytest.raises(ConfigError, match=r".") as caught:
         database.connect(options)
     assert str(caught.value) == message
 

@@ -4,7 +4,7 @@ import os
 
 from tbhbdev import userconfig
 from tbhbdev.analytics.decisions import config
-lazy from tbhbdev.analytics.model import Settings
+lazy from tbhbdev.analytics.model import ConfigError, Settings
 
 
 def load() -> Settings:
@@ -21,5 +21,5 @@ def load() -> Settings:
     result = config.parse(table)
     if result.user != result.owner_role:
         message = "analytics requires the owner role as the connection user"
-        raise ValueError(message)
+        raise ConfigError(message)
     return result
