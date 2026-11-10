@@ -662,6 +662,9 @@ def test_startup_deadline_stops_the_recorded_setup_group(
     run = make_run(tmp_path)
     _, clone = repository(run.home / "Code" / "github.com" / "example-org")
     clone.rename(clone.parent / "example-repo")
+    monkeypatch.setattr(
+        run_host.worktree.repo, "ssh_url", constant(str(clone.parent / "origin"))
+    )
     run = dataclasses.replace(run, deadline=time.monotonic() + 5)
     original = run_host.worktree.git
     ready = tmp_path / "setup-child.json"
@@ -678,7 +681,9 @@ def test_startup_deadline_stops_the_recorded_setup_group(
 
     def git(path: Path, *args: str) -> str:
         return (
-            hang() if phase == "fetch" and args[0] == "fetch" else original(path, *args)
+            hang()
+            if phase == "fetch" and args[0] in ("fetch", "ls-remote")
+            else original(path, *args)
         )
 
     def read(_reference: str) -> str:
