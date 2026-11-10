@@ -238,7 +238,7 @@ MIRROR_GIT = (
     GIT
     + 'SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-}" '
     + GIT_FLAGS
-    + " -c protocol.allow=user -c fetch.recurseSubmodules=false "
+    + " -c fetch.recurseSubmodules=false "
     '-c submodule.recurse=false -C "$mirror"'
 )
 

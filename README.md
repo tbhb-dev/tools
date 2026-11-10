@@ -221,7 +221,7 @@ The pure rules table requires a spawned reviewer's approval at the current green
 
 ### Agent configuration
 
-`tbhbdev alpha agent` reads the optional `[agent]` table from the user config. Calling this command requires the table and every key shown below except `max_run_minutes`, `docker`, `expires`, the host’s `tbhbdev` path, and the `[agent.codex]` table. Unreadable config fails with its path. Missing or invalid settings fail with the path, the full table name and the key, as `[agent.sandbox] audit_dir is required`. Unknown keys fail the same way at any level. `exec` validates a headless run before it contacts the host. It checks the remote version, then claims the name before it streams the inputs. A tmux session runs the host supervisor. Install that supervisor separately. `wait`, `status`, `kill`, `clean` and `keep` use the recorded target.
+`tbhbdev alpha agent` reads the optional `[agent]` table from the user config. Calling this command requires the table and every key shown below except `max_run_minutes`, `docker`, `expires`, the host’s `tbhbdev` path, and the `[agent.codex]` table. Unreadable config fails with its path. Missing or invalid settings fail with the path, the full table name and the key, as `[agent.sandbox] audit_dir is required`. Unknown keys fail the same way at any level. `exec` validates a headless run before it contacts the host. It checks the remote version, then claims the name before it streams the inputs. A tmux session runs the host supervisor. Install that supervisor separately. `wait`, `status`, `kill`, `clean`, `keep`, `log` and `diff` use the recorded target.
 
 ```toml
 [agent]
@@ -298,7 +298,7 @@ Reviews accept `--ref` and resolve it before launch. `--schema` streams a JSON s
 
 The optional `[[agent.host]] tbhbdev` key names an absolute executable path on that host. Its default is `$HOME/.local/bin/tbhbdev`, using the remote account’s home. Local `ssh` and `tmux` resolve against a fixed system PATH. Remote scripts use that PATH, add the standard package directories on macOS, and skip login shell startup.
 
-The coordinator stores metadata under `$XDG_STATE_HOME/tbhbdev/agent-runs/` on the coordinator. The remote directory uses the same location under the run account, with `.local/state` under home as the default state directory. The transfer claims `<name>.request.json` with `set -C` before extracting inputs. It refuses an existing session or any `<name>.*` file with exit status 73. A collision never kills the existing session.
+The coordinator stores metadata under `$XDG_STATE_HOME/tbhbdev/agent-runs/` on the coordinator. The remote directory uses the same location under the run account, with `.local/state` under home as the default state directory. The transfer claims `<name>.owner` with `set -C` before extracting inputs. It refuses an existing session or any `<name>.*` file with exit status 73. A collision never kills the existing session.
 
 The tmux socket is `-S <sockets_dir>/agents`. The driver creates the configured directory with mode 0700 and refuses a symlink, another owner, or any other mode. Sandbox policies deny reads there. Whether each sandbox blocks a Unix socket connection needs the shadow test.
 
@@ -306,9 +306,19 @@ The tmux socket is `-S <sockets_dir>/agents`. The driver creates the configured 
 
 Each claim writes a random run ID to the local metadata and the remote `<name>.owner` file before extracting inputs. Later commands check that ID before they act. A mismatch or missing owner archives local metadata and reports `not owner`. After a transfer error, the driver retains metadata only when a remote owner check succeeds. The driver sends the raw brief and starts run-host with the configured `--host`. Every tmux call uses `-f /dev/null`, and session creation passes an absolute executable with separate arguments.
 
-`kill` closes the tmux session to notify the supervisor with SIGHUP. The supervisor stops its children before it records the return code. The coordinator writes 137 only after the session closes and the grace period elapses without a return code. It also writes `<name>.rc.fallback`, which makes `clean` require `--force` because processes might still run. Cleanup refuses an open session. It moves the worktree and only this run's fixed worktree metadata directory into dated trash under the shared `agent-worktree.lock`. It never prunes worktrees. Cleanup retries skip completed moves, and removing all files for the run permits name reuse. Branches with commits absent from their upstream, including branches without an upstream, stay unless forced. `keep` succeeds when the marker already exists.
+`kill` closes the tmux session to notify the supervisor with SIGHUP. The supervisor stops its children before it records the return code. The coordinator writes 137 only after the session closes and the grace period elapses without a return code. It also writes `<name>.rc.fallback`, which makes `clean` require `--force` because processes might still run.
 
-Ref resolution runs outside the clone against the SSH URL from the repository argument. Remote Git uses an empty environment and explicit overrides for hooks, file monitoring, SSH, credentials, prompts, external protocols, paging, and automatic maintenance. Local Git commands turn off all transports and lazy fetching. Remote scripts use the C locale. Run file reads refuse symlinks, bound byte counts, check status fields, replace invalid UTF-8, and remove terminal control characters. Polls wait at least half a second between connections.
+The host keeps a bare mirror at `$XDG_STATE_HOME/tbhbdev/agent-mirrors/<owner>/<repo>.git`. An empty or unset `XDG_STATE_HOME` uses `~/.local/state`. Only host git touches the mirror, under its `agent-mirror.lock`. Before launch, the supervisor makes a separate run clone with `git clone --shared` at `<account clone>/.worktrees/agent-<name>`. That clone has its own `.git` directory. The sandbox denies writes to `.git/config`, `.git/hooks` and `.git/info`. After launch, host processes never run git in the run clone or trust its git state.
+
+```text
+Don't run git inside a run clone: it is agent-written. Use `tbhbdev alpha agent log|diff NAME`.
+```
+
+`log NAME` shows up to ten commits by default. `log -n 5 NAME` changes that count. `diff NAME` shows changes from the default branch's merge base to the pushed branch. Both commands fetch the origin's default branch and `agent/<name>` into the mirror, then inspect those refs with external diff, text conversion, and color turned off. They show pushed work only. Neither `wait` nor `status` needs the mirror. The mirror never prunes, so disk use grows with history until a pruning follow-up.
+
+Cleanup refuses an open session. Without `--force`, it checks `refs/heads/agent/<name>` on origin through the mirror. A missing branch, missing mirror, or failed query refuses cleanup. A present branch reports `branch exists on origin`. This check establishes presence only, so the run clone may still hold work that the agent hasn't pushed. Cleanup moves the run clone and the per-run files into dated trash. It refuses a symlink in place of the run clone. Retries skip completed moves, and removing all files for the run permits name reuse. `keep` succeeds when the marker already exists.
+
+Ref resolution runs outside the clone against the SSH URL from the repository argument. Remote Git uses an empty environment and explicit overrides for hooks, file monitoring, SSH, credentials, prompts, external protocols, paging, submodules, and automatic maintenance. It disables lazy fetching. Remote scripts use the C locale. Run file reads refuse symlinks, bound byte counts, check status fields, replace invalid UTF-8, and remove terminal control characters. Polls wait at least half a second between connections.
 
 ### Secret scan
 

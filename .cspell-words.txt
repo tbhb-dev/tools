@@ -183,6 +183,7 @@ tbhb
 tbhbdev
 testdata
 testpaths
+textconv
 tfstate
 tmpprefix
 tombi
