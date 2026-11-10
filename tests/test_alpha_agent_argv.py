@@ -18,11 +18,18 @@ from agent_example import (
     TOKEN_DIR,
     paths,
     settings,
+    trusted_executables,
 )
 
 from tbhbdev.alpha.agent import model
 from tbhbdev.alpha.agent.decisions import argv, policy
 from tbhbdev.alpha.agent.model import Harness, Invalid, Os, Profile, RunKind
+
+
+@pytest.fixture(autouse=True)
+def fixed_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    trusted_executables(monkeypatch)
+
 
 HOME = "/example/home/agent"
 TMP = f"{HOME}/.local/state/example-runs/run1.tmp"

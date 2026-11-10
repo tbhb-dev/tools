@@ -6,17 +6,19 @@ import os
 import shlex
 import subprocess
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 from agent_driver_example import write_standalone_fake
-from agent_example import LINUX, settings
+from agent_example import LINUX, settings, trusted_executables
 
 from tbhbdev.alpha.agent import transport
 from tbhbdev.alpha.agent.decisions import policy, remote
 
-if TYPE_CHECKING:
-    from pathlib import Path
+
+@pytest.fixture(autouse=True)
+def fixed_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    trusted_executables(monkeypatch)
 
 
 @pytest.fixture
@@ -35,12 +37,17 @@ def execute(script: str) -> subprocess.CompletedProcess[bytes]:
     script = script.replace(
         "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=" + os.environ["PATH"]
     )
+    script = script.replace(
+        'PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"', 'PATH="$PATH"'
+    )
     script = script.replace(settings().sockets_dir, os.environ["HOME"] + "/sockets")
     return subprocess.run(["/bin/sh", "-c", script], capture_output=True, check=False)
 
 
 @pytest.mark.parametrize("error", ["unrelated failure", "missing"])
-def test_tmux_error_never_writes_rc(host: Path, error: str) -> None:
+@pytest.mark.parametrize("os_name", ["Linux", "Darwin"])
+def test_tmux_error_never_writes_rc(host: Path, error: str, os_name: str) -> None:
+    write_standalone_fake(host / "bin/uname", f"print({os_name!r})\n")
     if error != "missing":
         write_standalone_fake(
             host / "bin/tmux",
@@ -48,11 +55,19 @@ def test_tmux_error_never_writes_rc(host: Path, error: str) -> None:
         )
     else:
         # A fixed PATH containing only scratch tools also tests a missing tmux.
-        for name in ("mkdir", "chmod", "mv", "uname", "find", "id"):
-            (host / "bin" / name).symlink_to("/bin/" + name)
+        for name in ("mkdir", "chmod", "mv", "find", "id"):
+            program = next(
+                p
+                for p in (
+                    Path("/usr/bin") / name,
+                    Path("/bin") / name,
+                )
+                if p.exists()
+            )
+            (host / "bin" / name).symlink_to(program)
         os.environ["PATH"] = str(host / "bin")
     result = execute(remote.fallback("sample", settings().sockets_dir))
-    assert result.returncode != 0
+    assert result.returncode == 75
     assert not (host / "state/tbhbdev/agent-runs/sample.rc").exists()
 
 
@@ -235,6 +250,7 @@ def test_scripts_have_fixed_path_socket_and_git_environment() -> None:
     ]
     for script in scripts:
         assert script.startswith("PATH=/usr/bin:/bin:/usr/sbin:/sbin\nexport PATH\n")
+        assert 'PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"' in script
         assert 'tmux -S "$s/agents"' in script
         assert "tmux -L" not in script
         assert f"s={config.sockets_dir}\n" in script

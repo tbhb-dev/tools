@@ -4,8 +4,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from tbhbdev import secrets
 from tbhbdev.alpha.agent import model
+from tbhbdev.alpha.agent.decisions import argv
+
+if TYPE_CHECKING:
+    import pytest
 
 MARKER = "marker-secret-reference-0451"
 # The Connect token store's directory and its first part, as secrets.py has them.
@@ -93,3 +99,13 @@ def paths(account: str) -> model.RunPaths:
         codex_home=f"{tmpdir}/codex",
         audit_dir=f"{home}/.local/state/example-audit",
     )
+
+
+def trusted_executables(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep argv tests independent of the host's installed executables."""
+
+    def which(name: str, *, path: str) -> str:
+        assert path.startswith("/usr/bin:/bin:/usr/sbin:/sbin")
+        return f"/usr/bin/{name}"
+
+    monkeypatch.setattr(argv.shutil, "which", which)
