@@ -1044,3 +1044,22 @@ def test_every_git_call_has_a_fixed_host_cwd(
     monkeypatch.setattr(subprocess, "check_output", checked)
     worktree.create(clone, "cwd", run_request())
     assert calls
+
+
+def test_git_clone_command_spells_metadata_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".git").mkdir()
+
+    def output(command: list[str], **_kwargs: object) -> str:
+        index = command.index("--git-dir")
+        assert command[index : index + 4] == [
+            "--git-dir",
+            str(tmp_path / ".git"),
+            "--work-tree",
+            str(tmp_path),
+        ]
+        return ""
+
+    monkeypatch.setattr(subprocess, "check_output", output)
+    assert worktree.git(tmp_path, "status") == ""
