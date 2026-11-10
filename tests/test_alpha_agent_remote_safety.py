@@ -504,6 +504,23 @@ def cleanup(*, force: bool = False) -> str:
 
 
 @pytest.mark.parametrize(
+    ("command", "expected"),
+    [("exit 0", 0), ("exit 7", 7), ("kill -TERM $$", 143), ("kill -INT $$", 130)],
+)
+def test_clean_lock_preserves_inner_exit(
+    host: Path, command: str, expected: int
+) -> None:
+    tokens = shlex.split(cleanup())
+    start = tokens.index("perl")
+    result = subprocess.run(
+        [*tokens[start : start + 4], str(host / "lock"), command],
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == expected, result.stderr
+
+
+@pytest.mark.parametrize(
     "step", ["worktree", "admin", "branch", "sample.phase", "sample.rc", "sample.owner"]
 )
 def test_clean_retries_each_step(host: Path, step: str) -> None:

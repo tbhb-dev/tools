@@ -1197,11 +1197,11 @@ def test_lost_clean_reply_cannot_clean_new_owner(
     } == before
 
 
-@pytest.mark.parametrize("retained", [True, False])
+@pytest.mark.parametrize("transferred", [True, False])
 def test_transfer_error_checks_owner_before_retaining_metadata(
     remote: Remote,
     monkeypatch: pytest.MonkeyPatch,
-    retained: bool,
+    transferred: bool,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     original = transport.stream
@@ -1214,7 +1214,7 @@ def test_transfer_error_checks_owner_before_retaining_metadata(
         inputs: transport.Inputs,
         timeout: float,
     ) -> None:
-        if retained:
+        if transferred:
             original(config, host, name, inputs=inputs, timeout=timeout)
         else:
             remote.configure(ssh=[{"rc": 255}])
@@ -1222,13 +1222,54 @@ def test_transfer_error_checks_owner_before_retaining_metadata(
         raise transport.TransportError(message)
 
     monkeypatch.setattr(transport, "stream", fail)
-    assert launch(remote) == 1
-    assert driver.metadata_path("sample").exists() is retained
+    assert launch(remote) == 75
+    assert driver.metadata_path("sample").exists()
     assert capsys.readouterr() == (
         "sample: launch unconfirmed host=example-linux phase=unreachable\n",
         "",
     )
     assert not any("kill-session" in str(r) for r in remote.records("tmux"))
+
+
+def test_lost_start_reply_keeps_unreachable_run_reachable(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    original = transport.call
+
+    def lost_reply(
+        config: model.Settings,
+        host: model.Host,
+        command: tuple[str, ...],
+        *,
+        data: bytes = b"",
+        timeout: float = 30,
+    ) -> str:
+        reply = original(config, host, command, data=data, timeout=timeout)
+        if "new-session" in command[2]:
+            remote.configure(ssh=[{"rc": 255}])
+            message = "lost start reply"
+            raise transport.TransportError(message)
+        return reply
+
+    with monkeypatch.context() as patch:
+        patch.setattr(transport, "call", lost_reply)
+        result = launch(remote)
+    assert driver.metadata_path("sample").exists()
+    assert result == 75
+    assert capsys.readouterr() == (
+        "sample: launch unconfirmed host=example-linux phase=unreachable\n",
+        "",
+    )
+    run = driver.load(CONFIG, "sample")
+    assert (remote.state / "sample.owner").read_text() == run.owner + "\n"
+    assert not any("kill-session" in str(r) for r in remote.records("tmux"))
+    assert command("status") == 0
+    assert "phase=unknown" in capsys.readouterr().out
+    remote.file(".rc", "7\n")
+    remote.configure(session=False)
+    assert command("wait") == 7
 
 
 def test_owner_lost_during_launch_poll(
