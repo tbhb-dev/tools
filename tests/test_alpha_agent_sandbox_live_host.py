@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from agent_live_host_probe import (
+    INPUT_MARKER,
     assert_unchanged,
     checked_live_policy,
     hard_link_attempt,
@@ -27,6 +28,7 @@ from agent_live_host_probe import (
 )
 from test_alpha_agent_sandbox_live import report
 
+from tbhbdev.alpha.agent import host_tools, run_host
 from tbhbdev.alpha.agent.model import Harness, Invalid, Profile
 
 
@@ -150,7 +152,7 @@ def test_live_protected_hard_links(
         set(attempts) == {"link", "read", "write", "chmod"}
         for attempts in observed.values()
     )
-    assert observed[".gitconfig"]["read"] == 0, "stand-in was not readable"
+    assert observed[sources[0].name]["read"] == 0, "stand-in was not readable"
     report(
         f"{harness} {profile} hard links: blocked; equal st_dev; ln control succeeded"
     )
@@ -205,6 +207,8 @@ def test_live_terminal_injection(
         {"HOME": paths.home, "PATH": "/usr/bin:/bin"},
         tmp_path,
     )
+    control_state = "injected" if INPUT_MARKER in control.inputs else "failed"
+    report(f"{label} control: {control_state}; legacy_tiocsti={setting}")
     witness = writes / "sandbox-terminal.json"
     script = tmp_path / "terminal.sh"
     script.write_text(
@@ -251,3 +255,37 @@ def test_link_probe_records_every_label_after_a_denial(tmp_path: Path) -> None:
     assert observed["absent"]["write"] != 0
     assert observed["absent"]["chmod"] != 0
     assert observed["source"] == {"read": 0, "link": 0, "write": 0, "chmod": 0}
+
+
+@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
+@pytest.mark.parametrize("profile", Profile)
+def test_host_probes_use_readable_protection_and_selected_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness, profile: Profile
+) -> None:
+    executable = tmp_path / "bin" / harness.value
+    executable.parent.mkdir()
+    executable.write_bytes(b"\x7fELF")
+    executable.chmod(0o700)
+
+    def installed(_name: str) -> str:
+        return str(executable)
+
+    def resolved(_name: str, _path: str | None = None) -> str:
+        return str(executable)
+
+    monkeypatch.setattr(shutil, "which", installed)
+    monkeypatch.setattr(host_tools, "resolve", resolved)
+    run, paths = live_policy(tmp_path, monkeypatch, harness, profile)
+    readable, *_ = protected_sources(run)
+    value, selected = checked_live_policy(run, paths)
+    assert selected == str(executable)
+    assert str(readable) in run_host.protected_home(run)
+    assert all(not readable.is_relative_to(deny) for deny in value.deny)
+    run.files.write("prompt", "probe")
+    command = probe_command(run, paths, value, selected, tmp_path / "probe.sh")
+    if harness is Harness.CODEX:
+        assert command[command.index("-P") + 1] == profile.value
+    else:
+        assert command[-1] == "probe"
+        settings = json.loads(command[command.index("--settings") + 1])
+        assert str(readable) in settings["sandbox"]["filesystem"]["denyWrite"]

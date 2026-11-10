@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from test_alpha_agent_sandbox_live import probe_run, sandbox_command
 
+from tbhbdev import userconfig
 from tbhbdev.alpha.agent import host_tools, run_host, worktree
 from tbhbdev.alpha.agent.model import Harness
 
@@ -35,9 +36,8 @@ def live_policy(
     root: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness, profile: Profile
 ) -> tuple[run_host.Run, RunPaths]:
     run, paths = probe_run(root, harness)
-    home = root / "home"
-    home.mkdir()
     monkeypatch.setenv("XDG_STATE_HOME", str(root / "state"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "protected"))
     installed = shutil.which(harness.value)
     assert installed is not None
     search = (str(Path(installed).parent), str(Path(sys.executable).parent))
@@ -56,11 +56,10 @@ def live_policy(
     return (
         dataclasses.replace(
             run,
-            home=home,
             settings=config,
             request=dataclasses.replace(run.request, profile=profile),
         ),
-        dataclasses.replace(paths, home=str(home)),
+        paths,
     )
 
 
@@ -70,8 +69,9 @@ def checked_live_policy(run: run_host.Run, paths: RunPaths) -> tuple[Policy, str
 
 
 def protected_sources(run: run_host.Run) -> tuple[Path, ...]:
-    readable = run.home / ".gitconfig"
-    readable.write_text("[example]\nvalue = original\n")
+    readable = userconfig.path()
+    readable.parent.mkdir(parents=True)
+    readable.write_text('value = "original"\n')
     mirror = worktree.mirror_path(run.home, run.request.repo)
     objects = mirror / "objects"
     data = b"blob 9\0original\n"
