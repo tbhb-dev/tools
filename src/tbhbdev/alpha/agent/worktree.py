@@ -16,6 +16,7 @@ from tbhbdev.alpha.agent.model import Invalid, Profile, RunRequest
 
 GIT_OVERRIDES = (
     "gc.auto=0",
+    "transfer.fsckObjects=true",
     "maintenance.auto=false",
     "core.hooksPath=/dev/null",
     "core.fsmonitor=false",
@@ -37,10 +38,15 @@ logAllRefUpdates = false
 [gc]
 auto = 0
 pruneExpire = never
+[maintenance]
+auto = false
+[fetch]
+recurseSubmodules = false
+[submodule]
+recurse = false
 [remote "origin"]
 url = {url}
-fetch = +refs/heads/*:refs/heads/*
-fetch = +refs/pull/*/head:refs/pull/*/head
+fetch = +refs/heads/agent/*:refs/heads/agent/*
 """
 
 
@@ -62,7 +68,12 @@ def git(clone: Path, *args: str) -> str:
     )
     command = [host_tools.resolve("git")]
     command += [item for value in GIT_OVERRIDES for item in ("-c", value)]
-    command += ["-C", str(clone)]
+    directory = clone / ".git"
+    command += (
+        ["--git-dir", str(directory), "--work-tree", str(clone)]
+        if directory.is_dir()
+        else ["--git-dir", str(clone)]
+    )
     offline = ["-c", "protocol.allow=never"]
     online = args[0] in ("fetch", "ls-remote")
     invocation = [*command, *([] if online else offline), *args]
@@ -73,6 +84,9 @@ def git(clone: Path, *args: str) -> str:
         stderr=subprocess.DEVNULL,
         timeout=30,
     )
+    timeout = 300 if args[0] in ("fetch", "clone") else 30
+    if args[0] == "init":
+        return output(invocation).strip()
     try:
         keys = output(
             [
@@ -88,9 +102,11 @@ def git(clone: Path, *args: str) -> str:
     except subprocess.CalledProcessError as exc:
         if exc.returncode != 1:
             raise
-        return output(invocation).strip()
+        return output(invocation, timeout=timeout).strip()
     overrides = driver_overrides(keys)
-    return output([*invocation[: -len(args)], *overrides, *args]).strip()
+    return output(
+        [*invocation[: -len(args)], *overrides, *args], timeout=timeout
+    ).strip()
 
 
 def driver_overrides(keys: str) -> list[str]:
@@ -122,7 +138,7 @@ def configure_mirror(mirror: Path, url: str) -> None:
 
 
 def default_branch(mirror: Path) -> str:
-    listing = git(mirror, "ls-remote", "--symref", "origin", "HEAD")
+    listing = git(mirror, "ls-remote", "--symref", "--end-of-options", "origin", "HEAD")
     for line in listing.splitlines():
         match = re.fullmatch(r"ref: (refs/heads/[^\s]+)\tHEAD", line)
         if match is not None:
@@ -139,17 +155,27 @@ def default_branch(mirror: Path) -> str:
 
 
 def fetch_commit(mirror: Path, request: RunRequest) -> str:
+    branch = default_branch(mirror)
+    options = (
+        "--no-recurse-submodules",
+        "--no-write-fetch-head",
+        "--no-tags",
+        "--upload-pack=git-upload-pack",
+    )
+    # Explicit refspecs keep pruning confined to the agent namespace.
     git(
         mirror,
         "fetch",
-        "--no-recurse-submodules",
-        "--no-write-fetch-head",
-        "--upload-pack=git-upload-pack",
+        *options,
+        "--prune",
         "origin",
+        "+refs/heads/agent/*:refs/heads/agent/*",
     )
-    reference = (
-        default_branch(mirror) if request.profile is Profile.BUILD else request.commit
-    )
+    references = [f"+{branch}:{branch}"]
+    if request.commit is not None:
+        references.append(f"+{request.commit}:refs/heads/tbhbdev-review")
+    git(mirror, "fetch", *options, "--no-prune", "origin", *references)
+    reference = branch if request.profile is Profile.BUILD else request.commit
     commit = git(
         mirror, "rev-parse", "--verify", "--end-of-options", f"{reference}^{{commit}}"
     )
@@ -197,7 +223,6 @@ def clone_run(mirror: Path, workspace: Path, url: str) -> None:
     git(workspace, "config", "remote.origin.url", url)
     git(workspace, "config", "remote.origin.pushurl", url)
     git(workspace, "config", "core.hooksPath", str(workspace / ".git" / "hooks"))
-    install_hooks(workspace)
 
 
 def create(clone: Path, name: str, request: RunRequest) -> Path:
@@ -220,7 +245,8 @@ def create(clone: Path, name: str, request: RunRequest) -> Path:
         worktree.parent.mkdir(exist_ok=True)
         clone_run(mirror, worktree, url)
         if request.profile is Profile.BUILD:
-            git(worktree, "checkout", "-b", f"agent/{name}", "--end-of-options", commit)
+            git(worktree, "checkout", "-b", f"agent/{name}", commit, "--")
         else:
-            git(worktree, "checkout", "--detach", commit)
+            git(worktree, "checkout", "--detach", commit, "--")
+        install_hooks(worktree)
     return worktree
