@@ -534,3 +534,28 @@ def test_no_argv_holds_a_secret_reference_or_a_token() -> None:
     assert len(every) == len(COMBINATIONS) + 2
     for command in every:
         assert not any(MARKER in element for element in command)
+
+
+def test_codex_overrides_the_signing_socket_setting() -> None:
+    original = policy_for(Harness.CODEX, Profile.BUILD)
+    pol = dataclasses.replace(
+        original, env=original.env | {"SSH_AUTH_SOCK": "/example/private/ssh.sock"}
+    )
+    result = argv.harness(
+        request(Harness.CODEX, RunKind.EXEC, Profile.BUILD),
+        pol,
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+    )
+    flag = 'shell_environment_policy.set.SSH_AUTH_SOCK="/example/private/ssh.sock"'
+    assert result[result.index(flag) - 1] == "-c"
+    assert result.count(flag) == 1
+
+    baseline = argv.harness(
+        request(Harness.CODEX, RunKind.EXEC, Profile.BUILD),
+        original,
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+    )
+    index = result.index(flag)
+    assert result[: index - 1] + result[index + 1 :] == baseline

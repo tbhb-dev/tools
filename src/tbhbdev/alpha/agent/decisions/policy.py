@@ -123,6 +123,8 @@ def environment(
     }
     if harness is Harness.CODEX:
         env["CODEX_HOME"] = paths.codex_home
+    if paths.signing_socket is not None:
+        env["SSH_AUTH_SOCK"] = paths.signing_socket
     return env
 
 
@@ -189,7 +191,14 @@ def _claude(
         {
             "env": {
                 k: env[k]
-                for k in ("TMPDIR", "TMPPREFIX", "GH_CONFIG_DIR", "DOCKER_CONFIG")
+                for k in (
+                    "TMPDIR",
+                    "TMPPREFIX",
+                    "GH_CONFIG_DIR",
+                    "DOCKER_CONFIG",
+                    "SSH_AUTH_SOCK",
+                )
+                if k in env
             },
             "permissions": {
                 "allow": [] if review else [f"Edit(/{p}/**)" for p in writes],
@@ -244,6 +253,8 @@ def _agy(
         reads = [resolve(home, p) for p in agy.build_read]
     writes = _agy_write_roots(settings, profile, paths)
     reads += [env["GH_CONFIG_DIR"], env["DOCKER_CONFIG"]]
+    if paths.signing_socket is not None:
+        reads.append(paths.signing_socket)
     # agy has no deny entry, so a grant that reaches a denied path is the leak.
     _refuse_overlaps(tuple(reads), deny, "agy grant")
     grants = [
