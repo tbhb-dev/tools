@@ -122,7 +122,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `repo` holds repository commands. `repo bootstrap` applies the standard repository settings.
 - `merge` squash-merges an approved pull request.
 - `loop` validates its user configuration and refuses live intake until adapters connect the runner to its sources. Its shadow runner accepts typed event and reconcile interfaces for simulation. The package includes pure state derivation and rules that produce typed shadow intents with action keys and spawn budgets. A SQLite store records receipts, action keys, runs, and escalation markers.
-- `agent` validates its user configuration and refuses to run until a later slice adds runs. The package also includes the run request's schema and the repo argument rules.
+- `agent` coordinates runs with `exec`, `wait`, `status`, `log`, `diff`, `kill`, `clean` and `keep`. `clear-taint HOST --reason TEXT` records local host clearance. The package also includes the run request's schema and the repo argument rules.
 - `install` installs the git hooks and the user-level harness hooks.
 
 Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does six things:
