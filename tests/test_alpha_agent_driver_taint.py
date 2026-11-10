@@ -259,3 +259,13 @@ def test_unknown_build_that_finishes_during_launch_is_labelled(
     remote.configure(launch={"rc": "0"})
     assert launch(remote) == 0
     assert capsys.readouterr() == ("sample: rc=0 untrusted-host\n", "")
+
+
+@pytest.mark.parametrize("cleared", [False, True])
+def test_prepare_reads_local_host_trust(remote: Remote, *, cleared: bool) -> None:
+    if cleared:
+        assert clear() == 0
+    args = agent.parser("example agent").parse_args(execution_arguments(remote.prompt))
+    run = driver.prepare(settings(), args)
+    assert run.request.tainted_host is (not cleared)
+    assert remote.records("ssh") == []
