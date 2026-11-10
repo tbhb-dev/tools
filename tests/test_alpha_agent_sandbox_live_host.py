@@ -31,20 +31,15 @@ from agent_live_host_probe import (
     snapshot,
     terminal_status,
 )
-from test_alpha_agent_sandbox_live import report
+from test_alpha_agent_sandbox_live import live_only, report
 
 from tbhbdev.alpha.agent import host_tools, run_host
 from tbhbdev.alpha.agent.model import Harness, Invalid, Profile
 
-if os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1":
-    pytest.skip(
-        "host sandbox probes require TBHBDEV_SANDBOX_LIVE=1", allow_module_level=True
-    )
 
-
-def test_host_probe_module_skips_without_opt_in(tmp_path: Path) -> None:
+def test_host_live_probes_skip_without_opt_in(tmp_path: Path) -> None:
     result = subprocess.run(
-        (sys.executable, "-m", "pytest", "-q", __file__),
+        (sys.executable, "-m", "pytest", "-q", __file__, "-k", "test_live_"),
         env={
             "HOME": str(tmp_path),
             "PATH": os.defpath,
@@ -56,9 +51,7 @@ def test_host_probe_module_skips_without_opt_in(tmp_path: Path) -> None:
         check=False,
         timeout=45,
     )
-    assert result.returncode == pytest.ExitCode.NO_TESTS_COLLECTED, (
-        result.stdout + result.stderr
-    )
+    assert result.returncode == pytest.ExitCode.OK, result.stdout + result.stderr
     assert "skipped" in result.stdout
     assert "passed" not in result.stdout
 
@@ -128,6 +121,13 @@ def fake_host_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", installed)
     monkeypatch.setattr(host_tools, "resolve", resolved)
 
+    def command(
+        _run: object, _paths: object, _value: object, _executable: str, script: Path
+    ) -> tuple[str, ...]:
+        return "fake-sandbox", str(script)
+
+    monkeypatch.setattr(sys.modules[__name__], "probe_command", command)
+
 
 @pytest.mark.usefixtures("fake_host_tools")
 @pytest.mark.parametrize("profile", Profile)
@@ -164,6 +164,7 @@ def test_hard_link_evidence_uses_profile_write_root(
     test_live_protected_hard_links(tmp_path, monkeypatch, Harness.CODEX, profile)
 
 
+@live_only
 @pytest.mark.parametrize("harness", Harness)
 @pytest.mark.parametrize("profile", Profile)
 def test_live_protected_hard_links(
@@ -417,6 +418,7 @@ def test_terminal_control_requires_recorded_success(
     assert "control failed" in str(caught.value)
 
 
+@live_only
 @pytest.mark.parametrize("harness", Harness)
 @pytest.mark.parametrize("profile", Profile)
 def test_live_terminal_injection(
@@ -524,7 +526,7 @@ def test_host_probes_use_readable_protection_and_selected_profile(
     run.files.write("prompt", "probe")
     command = probe_command(run, paths, value, selected, tmp_path / "probe.sh")
     if harness is Harness.CODEX:
-        assert command[command.index("-P") + 1] == profile.value
+        assert f'default_permissions="{profile.value}"' in command
     else:
         assert command[-1] == "probe"
         settings = json.loads(command[command.index("--settings") + 1])
