@@ -7,6 +7,8 @@ import shlex
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from shutil import which
+from tempfile import mkdtemp
 
 import pytest
 from agent_driver_example import (
@@ -700,6 +702,11 @@ def test_mirror_git_dir_never_discovers_parent(host: Path, limit: int | None) ->
     mirror.mkdir()
     git_in(mirror.parent, "init")
     git_in(mirror.parent, "remote", "add", "origin", (host / "origin.git").as_uri())
+    marker = host / "parent-touched"
+    write_standalone_fake(
+        host / "bin/git",
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('git called')\n",
+    )
     scripts = [
         remote.origin_branch(
             "example-org/example-repo", "sample", owner="example-owner"
@@ -710,8 +717,61 @@ def test_mirror_git_dir_never_discovers_parent(host: Path, limit: int | None) ->
     ]
     for script in scripts:
         result = execute(script)
-        assert result.returncode != 0
+        assert result.returncode == 65
         assert result.stdout == b""
+        assert not marker.exists()
+
+
+def test_mirror_git_host_case_shares_path(host: Path) -> None:
+    mirror = mirror_in(host)
+    scripts = [
+        remote.origin_branch(
+            f"{git_host}/example-org/example-repo", "sample", owner="example-owner"
+        )
+        for git_host in ("GitHub.com", "github.com")
+    ]
+    assert scripts[0] == scripts[1]
+    for script in scripts:
+        result = execute(script)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.endswith(b"\trefs/heads/agent/sample\n")
+    assert list(mirror.parent.parent.parent.iterdir()) == [mirror.parent.parent]
+
+
+@pytest.mark.parametrize("verb", ["kill", "clean"])
+def test_real_tmux_preserves_longer_session(host: Path, verb: str) -> None:
+    tmux = which("tmux", path="/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin")
+    if tmux is None:
+        pytest.skip("tmux is missing")
+    # Keep the socket below Unix's path limit even with long pytest roots.
+    sockets = Path(mkdtemp(prefix="tmux-"))
+    command = [tmux, "-S", str(sockets / "agents"), "-f", "/dev/null"]
+    state = host / "state/tbhbdev/agent-runs"
+    (state / "x.owner").write_text("example-owner\n")
+    try:
+        for name in ("ag-x", "ag-x2"):
+            subprocess.run(
+                [*command, "new-session", "-d", "-s", name, "sleep 120"],
+                check=True,
+            )
+        subprocess.run([*command, "kill-session", "-t", "=ag-x"], check=True)
+        script = (
+            remote.session("x", "kill-session", str(sockets), owner="example-owner")
+            if verb == "kill"
+            else remote.clean(
+                "example-org/example-repo",
+                "x",
+                "stamp",
+                str(sockets),
+                decision=remote.Cleanup("example-owner", force=True),
+            )
+        )
+        result = execute(script)
+        assert result.returncode == 0, result.stderr
+        subprocess.run([*command, "has-session", "-t", "=ag-x2"], check=True)
+    finally:
+        subprocess.run([*command, "kill-server"], check=False, capture_output=True)
+        sockets.rename(host / "sockets")
 
 
 @pytest.mark.parametrize("limit", [None, 10])

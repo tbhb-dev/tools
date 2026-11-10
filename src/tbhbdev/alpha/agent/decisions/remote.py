@@ -41,7 +41,7 @@ GIT_FLAGS = (
     "-c protocol.ext.allow=never -c core.pager=cat "
     "-c gc.auto=0 -c maintenance.auto=false"
 )
-HELPERS = r"""safe_file() {
+FILE_HELPERS = r"""safe_file() {
     test ! -L "$1" || exit 65
     if test -e "$1"; then test -f "$1" || exit 65; fi
 }
@@ -52,7 +52,10 @@ field() {
     else printf '%s' "$2"; fi
     printf '\n'
 }
-tmux_state() {
+"""
+HELPERS = (
+    FILE_HELPERS
+    + r"""tmux_state() {
     error=$(tmux -S "$s/agents" -f /dev/null "$1" -t "=$2" 2>&1)
     code=$?
     present=1
@@ -65,6 +68,7 @@ tmux_state() {
     esac
 }
 """
+)
 
 
 def socket_root(sockets_dir: str) -> str:
@@ -258,6 +262,7 @@ INSPECTION_OUTPUT = (
 
 def mirror_command(repository: str, name: str, command: str, *, owner: str) -> str:
     git_host, organization, project = repo.parts(repository)
+    git_host = git_host.lower()
     return (
         owned(name, owner)
         + HELPERS
@@ -314,6 +319,7 @@ def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str
 class Cleanup:
     owner: str
     force: bool
+    unsandboxed: bool = False
 
 
 def clean(
@@ -343,13 +349,14 @@ if test -d "$path"; then
     mv "$path" "$trash/worktree" || exit "$?"
 fi
 """
-    command = (
-        owned(name, decision.owner)
-        + socket_root(sockets_dir)
-        + f"""tmux_state has-session ag-{name}
+    command = owned(name, decision.owner) + FILE_HELPERS
+    if not decision.unsandboxed:
+        command += (
+            socket_root(sockets_dir)
+            + f"""tmux_state has-session ag-{name}
 test "$present" -eq 0 || exit 1
 """
-    )
+        )
     if not decision.force:
         command += f"""fallback="$d/{name}{files.FALLBACK}"
 if test -e "$fallback" || test -L "$fallback"; then
