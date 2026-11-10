@@ -245,3 +245,8 @@ NOSYSTEM
 uploadpack
 bubblewrap
 listpids
+hardlinks
+inodes
+pushurl
+repositoryformatversion
+symref
