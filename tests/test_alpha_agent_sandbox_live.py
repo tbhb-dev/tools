@@ -482,7 +482,7 @@ def run_probe(
 
 
 @live_only
-@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("harness", [Harness.CODEX])
 def test_build_sandboxes_refuse_user_sockets(tmp_path: Path, harness: Harness) -> None:
     run, paths = probe_run(tmp_path, harness)
     if harness is Harness.AGY:

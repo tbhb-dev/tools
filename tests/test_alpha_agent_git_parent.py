@@ -178,7 +178,7 @@ def test_account_hook_probe_restores_hooks_and_quarantines_tool_writes(
 )
 @pytest.mark.parametrize("temp_write", [False, True])
 @pytest.mark.parametrize("name", PLANTS)
-@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
+@pytest.mark.parametrize("harness", [Harness.CODEX])
 def test_live_harness_parent_ignores_each_git_plant(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -723,7 +723,7 @@ def test_startup_deadline_stops_the_recorded_setup_group(
     assert process_group.leader_start(group) is None
 
 
-def test_review_finishes_without_a_signing_agent_or_auth_write_back(
+def test_refused_claude_review_never_starts_helpers_or_writes_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = make_run(
@@ -735,19 +735,15 @@ def test_review_finishes_without_a_signing_agent_or_auth_write_back(
         claude_profile="primary",
         reason="example review",
     )
-    prepared = preparation(run)
 
-    def prepare(*_args: object) -> run_host.Prepared:
-        return prepared
+    def unexpected(*_args: object) -> None:
+        pytest.fail("refused Claude must not start preparation or a harness")
 
-    def harness(*_args: object) -> int:
-        return 0
-
-    monkeypatch.setattr(process_group, "prepare", prepare)
-    monkeypatch.setattr(run_host, "run_harness", harness)
+    monkeypatch.setattr(process_group, "prepare", unexpected)
+    monkeypatch.setattr(run_host, "run_harness", unexpected)
     run.files.receive(run.request)
-    assert run_host.execute(run, "example") == 0
-    assert run.files.path("rc").read_text() == "0\n"
+    assert run_host.execute(run, "example") == 1
+    assert run.files.path("rc").read_text() == "1\n"
     assert not (run.tmpdir / "ssh.sock").exists()
     assert not (run.home / ".codex").exists()
     assert runfiles.latest(run.files.root)["example"]["state"] == "ended"
@@ -1491,7 +1487,9 @@ def test_preflight_version_and_named_exceptions(
         return False
 
     monkeypatch.setattr(host_tools, "codex_proxy_supported", supported)
-    if harness is Harness.AGY or (not opt_out and harness is Harness.CODEX):
+    if harness in {Harness.AGY, Harness.CLAUDE} or (
+        not opt_out and harness is Harness.CODEX
+    ):
         with pytest.raises(Invalid) as caught:
             run_host.preflight(run)
         assert str(caught.value) == preflight_failure_message(harness)
@@ -1523,6 +1521,11 @@ def preflight_failure_message(harness: Harness) -> str:
         return (
             "Codex network_proxy support required (minimum 0.164.0); "
             "upgrade or configure codex_network_proxy_opt_out"
+        )
+    if harness is Harness.CLAUDE:
+        return (
+            "claude runs are refused: separate tool paths for Claude (H3) "
+            "and the Claude credential decision remain open"
         )
     return "agy runs are refused: no OS sandbox"
 
@@ -3098,4 +3101,24 @@ def test_codex_home_defaults_to_account_state(
         monkeypatch.setenv("XDG_STATE_HOME", state)
     assert run_host.planned_paths(run).codex_home == str(
         run.home / ".local/state/tbhbdev/agent-codex/example"
+    )
+
+
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_claude_preflight_names_both_open_conditions(
+    tmp_path: Path, profile: str
+) -> None:
+    run = make_run(
+        tmp_path,
+        harness="claude",
+        profile=profile,
+        commit="0" * 40 if profile == "review" else None,
+        claude_profile="primary",
+        reason="phase refusal",
+    )
+    with pytest.raises(Invalid) as caught:
+        run_host.preflight(run)
+    assert str(caught.value) == (
+        "claude runs are refused: separate tool paths for Claude (H3) "
+        "and the Claude credential decision remain open"
     )
