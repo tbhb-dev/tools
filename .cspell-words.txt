@@ -254,3 +254,5 @@ ESRCH
 ZDOTDIR
 gitlink
 pytestmark
+TIOCSTI
+TIOCSCTTY
