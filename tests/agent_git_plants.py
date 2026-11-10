@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import shlex
-lazy from pathlib import Path
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_host_example import commit, git
+
+from tbhbdev.alpha.agent.model import Invalid
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 PLANTS = ("config", "gitlink", "gitdir", "modules", "worktree", "commondir")
 
@@ -20,7 +30,7 @@ def hook_write_probe(
         {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": hook}]}]}}
     )
     account_config = home / ".codex"
-    account_config.mkdir(parents=True)
+    account_config.mkdir(mode=0o700, parents=True, exist_ok=True)
     (account_config / "hooks.json").write_text(payload)
     destination = codex_home / "hooks.json"
     return (
@@ -28,6 +38,43 @@ def hook_write_probe(
         marker,
         destination,
     )
+
+
+@contextmanager
+def account_hook_probe(
+    home: Path, codex_home: Path, root: Path
+) -> Generator[tuple[str, Path, Path]]:
+    """Move existing hooks aside without reading them, and restore them afterward."""
+    config = home / ".codex"
+    config.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(
+        codex_home / "probe.lock",
+        os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+        0o600,
+    )
+    with os.fdopen(descriptor, "ab") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        destination = codex_home / "hooks.json"
+        if destination.exists() or destination.is_symlink():
+            message = "the prepared Codex home must not contain hooks.json"
+            raise Invalid(message)
+        archive = Path(tempfile.mkdtemp(prefix="hook-probe-", dir=config))
+        source = config / "hooks.json"
+        previous = archive / "previous"
+        if source.exists() or source.is_symlink():
+            source.rename(previous)
+        try:
+            yield hook_write_probe(home, codex_home, root)
+        finally:
+            if source.exists() or source.is_symlink():
+                source.rename(archive / "generated")
+            if previous.exists() or previous.is_symlink():
+                previous.rename(source)
+            if destination.exists() or destination.is_symlink():
+                rejected = Path(
+                    tempfile.mkdtemp(prefix="rejected-hooks-", dir=codex_home)
+                )
+                destination.rename(rejected / "hooks.json")
 
 
 def plant(workspace: Path, root: Path, name: str) -> tuple[Path, Path]:
