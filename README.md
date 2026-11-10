@@ -246,6 +246,8 @@ The run clone has its own copy of the mirror's object store. The mirror never pr
 
 Build runs can write their clone and temporary directory. They also get the configured cache roots. The account clone's git directory and the mirror stay outside those roots. The run clone's git config, hooks, and info directory are read-only. Commands that save an upstream, such as `git push -u`, can't write that config. Run-host refuses an account clone that points to another clone's git directory.
 
+Claude runs load user settings and the run's generated settings. They ignore project settings and use only server configuration supplied for the run. The generated settings turn off hooks and web tools. Codex marks each run clone as untrusted, which skips its project configuration.
+
 ```toml
 [agent]
 launch_wait_seconds = 120

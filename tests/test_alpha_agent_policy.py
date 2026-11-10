@@ -402,7 +402,8 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
             "DOCKER_CONFIG": f"{tmp}/docker",
             "GIT_NO_LAZY_FETCH": "1",
         },
-        "permissions": {"allow": allow, "deny": rules},
+        "disableAllHooks": True,
+        "permissions": {"allow": allow, "deny": [*rules, "WebFetch", "WebSearch"]},
         "sandbox": {
             "allowUnsandboxedCommands": False,
             "autoAllowBashIfSandboxed": True,
@@ -412,6 +413,8 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
             **(
                 {
                     "network": {
+                        "allowAllUnixSockets": False,
+                        "allowLocalBinding": False,
                         "strictAllowlist": True,
                         "allowedDomains": [
                             "github.com",
@@ -421,7 +424,14 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
                     },
                 }
                 if profile is Profile.REVIEW
-                else {"network": {"allowedDomains": []}}
+                else {
+                    "network": {
+                        "allowAllUnixSockets": False,
+                        "allowLocalBinding": False,
+                        "strictAllowlist": True,
+                        "allowedDomains": [],
+                    }
+                }
             ),
             "filesystem": {
                 "allowWrite": writes,
@@ -1078,6 +1088,9 @@ def test_build_gets_common_git_directory_and_only_its_signing_socket(
     elif isinstance(result.detail, model.ClaudePolicy):
         assert dig(result.detail.settings, "env", "SSH_AUTH_SOCK") == socket
         assert dig(result.detail.settings, "sandbox", "network") == {
+            "allowAllUnixSockets": False,
+            "allowLocalBinding": False,
+            "strictAllowlist": True,
             "allowedDomains": [],
             "allowUnixSockets": [socket],
         }
@@ -1109,16 +1122,33 @@ def test_review_never_grants_common_git_writes() -> None:
 @pytest.mark.parametrize(
     ("profile", "socket", "network"),
     [
-        (Profile.BUILD, None, {"allowedDomains": []}),
+        (
+            Profile.BUILD,
+            None,
+            {
+                "allowAllUnixSockets": False,
+                "allowLocalBinding": False,
+                "strictAllowlist": True,
+                "allowedDomains": [],
+            },
+        ),
         (
             Profile.BUILD,
             "/example/signing.sock",
-            {"allowedDomains": [], "allowUnixSockets": ["/example/signing.sock"]},
+            {
+                "allowAllUnixSockets": False,
+                "allowLocalBinding": False,
+                "strictAllowlist": True,
+                "allowedDomains": [],
+                "allowUnixSockets": ["/example/signing.sock"],
+            },
         ),
         (
             Profile.REVIEW,
             None,
             {
+                "allowAllUnixSockets": False,
+                "allowLocalBinding": False,
                 "strictAllowlist": True,
                 "allowedDomains": [
                     "github.com",
@@ -1131,6 +1161,8 @@ def test_review_never_grants_common_git_writes() -> None:
             Profile.REVIEW,
             "/example/signing.sock",
             {
+                "allowAllUnixSockets": False,
+                "allowLocalBinding": False,
                 "strictAllowlist": True,
                 "allowedDomains": [
                     "github.com",
@@ -1318,6 +1350,9 @@ def test_claude_build_network_domains(os: Os, socket: str | None) -> None:
     )
     assert isinstance(result.detail, model.ClaudePolicy)
     assert dig(result.detail.settings, "sandbox", "network") == {
+        "allowAllUnixSockets": False,
+        "allowLocalBinding": False,
+        "strictAllowlist": True,
         "allowedDomains": ["api.github.com"],
         **({"allowUnixSockets": [socket]} if socket else {}),
     }
