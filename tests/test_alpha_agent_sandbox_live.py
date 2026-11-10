@@ -29,11 +29,83 @@ from tbhbdev.alpha.agent.model import (
 )
 
 if TYPE_CHECKING:
-    from tbhbdev.alpha.agent.model import Policy
+    from tbhbdev.alpha.agent.model import Host, Policy, Settings
 
 
 def report(line: str) -> None:
     sys.stdout.write(line + "\n")
+
+
+def real_node() -> Path:
+    candidates: list[str] = []
+    mise = shutil.which("mise")
+    if mise:
+        try:
+            result = subprocess.run(
+                [mise, "which", "node"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            candidates.append(result.stdout.strip())
+        except OSError, subprocess.SubprocessError:
+            pass
+    candidates.extend(str(Path(entry) / "node") for entry in os.get_exec_path())
+    for candidate in candidates:
+        path = Path(candidate).absolute()
+        resolved = path.resolve()
+        if (
+            "shims" not in path.parts
+            and "shims" not in resolved.parts
+            and resolved.is_file()
+            and os.access(resolved, os.X_OK)
+        ):
+            return resolved
+    pytest.skip("claude: no real node executable outside shim directories")
+
+
+def claude_runtime(directory: Path) -> tuple[str, str]:
+    node = real_node()
+    npm = (node.parent / "npm").resolve()
+    # mise can replace bin/npm with a shell wrapper rather than a symlink.
+    if npm.suffix != ".js":
+        npm = node.parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
+    if not npm.is_file():
+        pytest.skip("claude: npm CLI unavailable beside real node")
+    # Install only into the disposable probe directory. Launch npm's JavaScript
+    # and the pinned runtime CLI with real node, bypassing both shebangs.
+    try:
+        subprocess.run(
+            [
+                str(node),
+                str(npm),
+                "install",
+                "--prefix",
+                str(directory),
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund",
+                "@anthropic-ai/sandbox-runtime@0.0.82",
+            ],
+            env={
+                "HOME": str(directory),
+                "PATH": str(node.parent) + os.pathsep + os.defpath,
+            },
+            cwd=directory,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        pytest.skip(
+            f"claude: pinned sandbox runtime unavailable ({type(exc).__name__})"
+        )
+    cli = directory / "node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js"
+    if not cli.is_file():
+        pytest.skip("claude: pinned sandbox runtime CLI unavailable")
+    return str(node), str(cli.resolve())
 
 
 def probe_script(sockets: dict[str, str], tmux: str, curl: str) -> str:
@@ -57,7 +129,11 @@ def probe_script(sockets: dict[str, str], tmux: str, curl: str) -> str:
 
 
 def sandbox_command(
-    value: Policy, executable: str, workspace: Path, script: str, directory: Path
+    value: Policy,
+    executable: tuple[str, ...],
+    workspace: Path,
+    script: str,
+    directory: Path,
 ) -> tuple[str, ...]:
     if value.harness is Harness.CODEX:
         generated = argv.harness(
@@ -70,7 +146,7 @@ def sandbox_command(
         start = generated.index("--strict-config") + 1
         end = generated.index("-m")
         return (
-            executable,
+            *executable,
             "sandbox",
             "-P",
             "build",
@@ -84,9 +160,7 @@ def sandbox_command(
     path = directory / "sandbox.json"
     path.write_text(json.dumps(value.detail.settings["sandbox"]))
     return (
-        executable,
-        "-y",
-        "@anthropic-ai/sandbox-runtime@0.0.82",
+        *executable,
         "--settings",
         str(path),
         "/bin/sh",
@@ -149,6 +223,21 @@ def scratch_servers(
     return sockets
 
 
+def report_agy_refusals(config: Settings, host: Host, paths: RunPaths) -> None:
+    for profile in Profile:
+        with pytest.raises(Invalid, match="agy has no OS sandbox"):
+            policy.build(
+                config,
+                host,
+                harness=Harness.AGY,
+                profile=profile,
+                account="agent",
+                unsandboxed=False,
+                paths=paths,
+            )
+        report(f"agy {profile}: refused by policy")
+
+
 @pytest.mark.skipif(
     os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1",
     reason="set TBHBDEV_SANDBOX_LIVE=1 on a real host to test sandbox socket refusal",
@@ -202,18 +291,7 @@ def test_build_sandboxes_refuse_user_sockets(tmp_path: Path, harness: Harness) -
             if location not in sockets:
                 report(f"{harness} {location}: socket setup denied")
         if harness is Harness.AGY:
-            for profile in Profile:
-                with pytest.raises(Invalid, match="agy has no OS sandbox"):
-                    policy.build(
-                        config,
-                        host,
-                        harness=harness,
-                        profile=profile,
-                        account="agent",
-                        unsandboxed=False,
-                        paths=paths,
-                    )
-                report(f"agy {profile}: refused by policy")
+            report_agy_refusals(config, host, paths)
             return
         value = policy.build(
             config,
@@ -225,13 +303,12 @@ def test_build_sandboxes_refuse_user_sockets(tmp_path: Path, harness: Harness) -
             paths=paths,
             denied=run_host.resolved_denies(run, paths),
         )
-        executable = installed if harness is Harness.CODEX else shutil.which("npx")
-        if executable is None:
-            pytest.skip(f"{harness}: npx unavailable for pinned sandbox runtime")
-        if harness is Harness.CLAUDE:
-            report("claude: npx -y @anthropic-ai/sandbox-runtime@0.0.82")
         directory = tmp_path / harness.value
         directory.mkdir(mode=0o700, exist_ok=True)
+        executable = (installed,)
+        if harness is Harness.CLAUDE:
+            executable = claude_runtime(directory)
+            report("claude: real node @anthropic-ai/sandbox-runtime@0.0.82")
         command = sandbox_command(value, executable, workspace, script, directory)
         result = subprocess.run(
             command,
@@ -275,8 +352,13 @@ def test_local_sandbox_commands_use_the_build_policy(
         profile=Profile.BUILD,
         unsandboxed=False,
     )
-    command = sandbox_command(value, "/example/sandbox", tmp_path, "probe", tmp_path)
-    assert command[0] == "/example/sandbox"
+    executable = (
+        ("/example/sandbox",)
+        if harness is Harness.CODEX
+        else ("/example/node", "/example/cli.js")
+    )
+    command = sandbox_command(value, executable, tmp_path, "probe", tmp_path)
+    assert command[: len(executable)] == executable
     assert command[-3:] == ("/bin/sh", "-c", "probe")
     if harness is Harness.CODEX:
         assert command[1:4] == ("sandbox", "-P", "build")
@@ -286,13 +368,9 @@ def test_local_sandbox_commands_use_the_build_policy(
         assert any(arg.startswith("permissions.build=") for arg in command)
     else:
         assert isinstance(value.detail, ClaudePolicy)
-        assert command[1:4] == (
-            "-y",
-            "@anthropic-ai/sandbox-runtime@0.0.82",
-            "--settings",
-        )
+        assert command[2] == "--settings"
         assert (
-            json.loads(Path(command[4]).read_text()) == value.detail.settings["sandbox"]
+            json.loads(Path(command[3]).read_text()) == value.detail.settings["sandbox"]
         )
 
 
@@ -340,25 +418,99 @@ def test_scratch_servers_clean_up_only_their_own_sockets(
     )
 
 
-def test_claude_live_probe_uses_available_npx_without_srt(tmp_path: Path) -> None:
-    paths = RunPaths(
-        str(tmp_path),
-        str(tmp_path / "worktree"),
-        str(tmp_path / "temp"),
-        str(tmp_path / "codex"),
-        str(tmp_path / "audit"),
-    )
-    value = policy.build(
-        settings(),
-        LINUX,
-        paths=paths,
-        account="agent",
-        harness=Harness.CLAUDE,
-        profile=Profile.BUILD,
-        unsandboxed=False,
-    )
-    command = sandbox_command(value, "/example/npx", tmp_path, "probe", tmp_path)
-    assert command[:3] == ("/example/npx", "-y", "@anthropic-ai/sandbox-runtime@0.0.82")
+@pytest.mark.parametrize(
+    "mise_result", ["managed/node", "shims/node", "missing", "error", None]
+)
+def test_real_node_bypasses_shims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mise_result: str | None
+) -> None:
+    node = tmp_path / "node"
+    node.write_text("real node")
+    node.chmod(0o700)
+    managed = tmp_path / "managed/node"
+    managed.parent.mkdir()
+    managed.write_text("managed node")
+    managed.chmod(0o700)
+    shims = tmp_path / "shims"
+    shims.mkdir()
+    (shims / "node").symlink_to(node)
+
+    def which(_name: str) -> str | None:
+        return "/example/mise" if mise_result else None
+
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(os, "get_exec_path", lambda: [str(shims), str(tmp_path)])
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert command == ["/example/mise", "which", "node"]
+        if mise_result == "error":
+            raise subprocess.CalledProcessError(1, command)
+        return subprocess.CompletedProcess(command, 0, str(tmp_path / str(mise_result)))
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert real_node() == (managed if mise_result == "managed/node" else node)
+
+
+def test_missing_real_node_skips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def which(_name: str) -> None:
+        return None
+
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(os, "get_exec_path", lambda: [str(tmp_path)])
+    with pytest.raises(pytest.skip.Exception, match="no real node executable"):
+        real_node()
+
+
+@pytest.mark.parametrize("failure", [None, "npm", "install", "cli", "wrapper"])
+def test_claude_runtime_uses_real_node_and_disposable_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str | None
+) -> None:
+    node = tmp_path / "bin/node"
+    node.parent.mkdir()
+    node.touch()
+    monkeypatch.setattr(sys.modules[__name__], "real_node", lambda: node)
+    npm = tmp_path / "lib/node_modules/npm/bin/npm-cli.js"
+    if failure != "npm":
+        npm.parent.mkdir(parents=True)
+        npm.touch()
+    if failure == "wrapper":
+        (node.parent / "npm").write_text("#!/bin/sh\nexit 1\n")
+    else:
+        (node.parent / "npm").symlink_to(npm)
+    cli = tmp_path / "node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js"
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert command == [
+            str(node),
+            str(npm),
+            "install",
+            "--prefix",
+            str(tmp_path),
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+            "@anthropic-ai/sandbox-runtime@0.0.82",
+        ]
+        assert kwargs["env"] == {
+            "HOME": str(tmp_path),
+            "PATH": str(node.parent) + os.pathsep + os.defpath,
+        }
+        assert kwargs["cwd"] == tmp_path
+        if failure == "install":
+            raise subprocess.CalledProcessError(1, command)
+        if failure != "cli":
+            cli.parent.mkdir(parents=True)
+            cli.touch()
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    if failure in {"npm", "install", "cli"}:
+        with pytest.raises(pytest.skip.Exception, match=r"claude: .*unavailable"):
+            claude_runtime(tmp_path)
+    else:
+        assert claude_runtime(tmp_path) == (str(node), str(cli))
 
 
 @pytest.mark.parametrize("harness", Harness)
@@ -366,7 +518,11 @@ def test_missing_harness_skips_with_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(shutil, "which", lambda _name: None)
+
+    def which(_name: str) -> None:
+        return None
+
+    monkeypatch.setattr(shutil, "which", which)
     with pytest.raises(
         pytest.skip.Exception, match=f"{harness}: harness binary not installed"
     ):
