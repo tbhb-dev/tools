@@ -35,6 +35,7 @@ LINUX_LANG = "C.UTF-8"
 MACOS_LANG = "en_US.UTF-8"
 # Process substitution and /dev/stderr need access to open descriptors on macOS.
 _DEV_FD = "/dev/fd"
+_REVIEW_DOMAINS = ("github.com", "api.github.com", "*.githubusercontent.com")
 # The handoff directories, under the run's private TMPDIR. run-host creates
 # each one, and the child gets its path in the variable of the same tool.
 GH_CONFIG_SUBDIR = "gh"
@@ -182,11 +183,7 @@ def _claude(
     if review:
         sandbox["network"] = {
             "strictAllowlist": True,
-            "allowedDomains": [
-                "github.com",
-                "api.github.com",
-                "*.githubusercontent.com",
-            ],
+            "allowedDomains": list(_REVIEW_DOMAINS),
         }
     return ClaudePolicy(
         {

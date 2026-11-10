@@ -92,6 +92,7 @@ libproc
 listy
 llmx
 lockfiles
+logname
 mcpjson
 mdfile
 milestoned
