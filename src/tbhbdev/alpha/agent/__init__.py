@@ -55,6 +55,9 @@ def parser(prog: str) -> argparse.ArgumentParser:
             sub.add_argument("-n", type=int, default=10)
         if verb == "clean":
             sub.add_argument("--force", action="store_true")
+    clear = verbs.add_parser("clear-taint", help="clear local host taint with a reason")
+    clear.add_argument("host")
+    clear.add_argument("--reason", required=True)
     return command
 
 

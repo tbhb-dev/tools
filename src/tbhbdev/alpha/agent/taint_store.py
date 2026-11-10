@@ -8,6 +8,8 @@ import os
 import stat
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import asdict
+from datetime import UTC, datetime
+from secrets import token_hex
 from typing import TYPE_CHECKING
 
 from tbhbdev.alpha.agent import driver
@@ -29,12 +31,15 @@ def _check(info: os.stat_result, kind: int, mode: int) -> None:
 
 @contextmanager
 def _directory(*, create: bool) -> Generator[int]:
-    root = driver.directory().absolute()
+    # Parent aliases (including macOS's temp root) are supported; the store
+    # directory and records themselves must never be symbolic links.
+    root = driver.directory()
+    if create:
+        root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with ExitStack() as stack:
-        descriptor = os.open(root.anchor, os.O_RDONLY | os.O_DIRECTORY)
+        descriptor = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY)
         stack.callback(os.close, descriptor)
-        parts = (*root.parts[1:], "taint")
-        for index, part in enumerate(parts):
+        for part in (root.name, "taint"):
             if create:
                 with suppress(FileExistsError):
                     os.mkdir(part, mode=0o700, dir_fd=descriptor)
@@ -42,39 +47,54 @@ def _directory(*, create: bool) -> Generator[int]:
                 part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor
             )
             stack.callback(os.close, descriptor)
-            if index >= len(parts) - 2:
-                _check(os.fstat(descriptor), stat.S_IFDIR, 0o700)
+            _check(os.fstat(descriptor), stat.S_IFDIR, 0o700)
         yield descriptor
 
 
-def _filename(host: str, account: str) -> str:
-    taint.identity(host, account)
-    return f"{host}.{account}.jsonl"
+def _incomplete(descriptor: int) -> bool:
+    length = os.fstat(descriptor).st_size
+    return length > 0 and os.pread(descriptor, 1, length - 1) != b"\n"
 
 
 @contextmanager
-def _file(host: str, account: str, *, write: bool = False) -> Generator[int]:
-    name = _filename(host, account)
-    with _directory(create=write) as parent:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND if write else os.O_RDONLY
+def _file(
+    host: str, *, write: bool = False, repair: bool = False
+) -> Generator[tuple[int, int]]:
+    taint.host_identity(host)
+    name = f"{host}.jsonl"
+    with _directory(create=write) as parent, ExitStack() as stack:
+        # Keep the lock on the directory inode across broken-file replacement.
+        fcntl.flock(parent, fcntl.LOCK_EX if write else fcntl.LOCK_SH)
+        flags = os.O_RDWR | os.O_CREAT | os.O_APPEND if write else os.O_RDONLY
         descriptor = os.open(
             name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent
         )
-        try:
-            _check(os.fstat(descriptor), stat.S_IFREG, 0o600)
-            fcntl.flock(descriptor, fcntl.LOCK_EX if write else fcntl.LOCK_SH)
-            yield descriptor
-        finally:
-            os.close(descriptor)
+        stack.callback(os.close, descriptor)
+        _check(os.fstat(descriptor), stat.S_IFREG, 0o600)
+        if repair and _incomplete(descriptor):
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+            os.rename(
+                name,
+                f"{name}.broken-{stamp}-{token_hex(8)}",
+                src_dir_fd=parent,
+                dst_dir_fd=parent,
+            )
+            descriptor = os.open(name, flags | os.O_EXCL, 0o600, dir_fd=parent)
+            stack.callback(os.close, descriptor)
+        yield descriptor, parent
 
 
 def _append(record: taint.Taint | taint.Clearance, kind: str) -> None:
     data = (json.dumps({"kind": kind, **asdict(record)}) + "\n").encode()
-    with _file(record.host, record.account, write=True) as descriptor:
+    with _file(record.host, write=True, repair=isinstance(record, taint.Clearance)) as (
+        descriptor,
+        parent,
+    ):
         if os.write(descriptor, data) != len(data):
             message = "incomplete taint store append"
             raise OSError(message)
         os.fsync(descriptor)
+        os.fsync(parent)
 
 
 def record_taint(record: taint.Taint) -> None:
@@ -93,7 +113,7 @@ def _object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _parse(line: bytes, host: str, account: str) -> taint.Taint | taint.Clearance:
+def _parse(line: bytes, host: str) -> taint.Taint | taint.Clearance:
     if not line.endswith(b"\n"):
         message = "incomplete taint record line"
         raise Invalid(message)
@@ -104,33 +124,24 @@ def _parse(line: bytes, host: str, account: str) -> taint.Taint | taint.Clearanc
     fields = {key: str(value) for key, value in data.items()}
     kind = fields.pop("kind")
     record = taint.Taint(**fields) if kind == "taint" else taint.Clearance(**fields)
-    if kind not in {"taint", "clearance"} or (record.host, record.account) != (
-        host,
-        account,
-    ):
-        message = "taint record has wrong kind, host or account"
+    if kind not in {"taint", "clearance"} or record.host != host:
+        message = "taint record has wrong kind or host"
         raise Invalid(message)
     return record
 
 
-def load(host: str, account: str) -> taint.State:
-    """Missing records are clean; unreadable or invalid records fail closed."""
-    taint.identity(host, account)
-    taints: list[taint.Taint] = []
-    clearances: list[taint.Clearance] = []
+def load(host: str) -> taint.State:
+    """Missing records are unknown; unreadable or invalid records fail closed."""
+    taint.host_identity(host)
+    records: list[taint.Taint | taint.Clearance] = []
     try:
         with (
-            _file(host, account) as descriptor,
+            _file(host) as (descriptor, _parent),
             os.fdopen(os.dup(descriptor), "rb") as source,
         ):
-            for line in source:
-                record = _parse(line, host, account)
-                if isinstance(record, taint.Taint):
-                    taints.append(record)
-                else:
-                    clearances.append(record)
+            records.extend(_parse(line, host) for line in source)
     except FileNotFoundError:
-        return taint.State(host, account)
+        return taint.State(host)
     except (OSError, ValueError, TypeError, KeyError) as exc:
-        return taint.State(host, account, problem=f"invalid local taint store: {exc}")
-    return taint.state(taints, clearances, host, account)
+        return taint.State(host, "tainted", problem=f"invalid local taint store: {exc}")
+    return taint.state(records, host)

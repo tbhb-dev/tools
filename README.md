@@ -342,7 +342,7 @@ The settings have these constraints:
 - `default_profile` names one of the profiles, matching without regard to case, so `Primary` selects `primary`. Profile names that differ only in case fail validation. Display uses the name as written.
 - `[[agent.host]]` lists at least one host. Its `name` is lower-case, dot-separated labels, `os` is `linux` or `macos`, `shell` is `bash` or `zsh`, `account` must be one of `accounts`, and host names are unique. Every name in `accounts` needs an `[agent.credentials.<name>]` table. `proven_harnesses` is a typed list of harness names. Add a harness only after a passing live run on that host. Remove it when upgrading that harness. Run-host refuses Claude while separate tool paths for Claude (H3) and the Claude credential decision remain open.
 
-The run request is a versioned JSON object. Version 2 requires `tainted_host` and lists every run field and no credential. A reader refuses unknown versions, unknown or missing fields, and any `unsandboxed` request unless the harness is Codex, the profile is `build`, the host's `unsandboxed` is true and the authorization has the form `owner/repo#N` or `operator-chat-YYYY-MM-DD`. The repo argument takes the form `org/repo` or `<git host>/<org>/<repo>`, with `github.com` as the default git host, and resolves to `Code/<git host>/<org>/<repo>` under the home directory. A repo name can't be `.` or `..` or end in `.git`.
+The run request is a versioned JSON object. Version 2 lists every run field, including the required boolean `tainted_host`, and no credential. Version 1 and requests missing `tainted_host` are refused. A reader refuses unknown versions, unknown or missing fields, and any `unsandboxed` request unless the harness is Codex, the profile is `build`, the host's `unsandboxed` is true and the authorization has the form `owner/repo#N` or `operator-chat-YYYY-MM-DD`. The repo argument takes the form `org/repo` or `<git host>/<org>/<repo>`, with `github.com` as the default git host, and resolves to `Code/<git host>/<org>/<repo>` under the home directory. A repo name can't be `.` or `..` or end in `.git`.
 
 ### Agent isolation limits
 
@@ -365,9 +365,10 @@ On Linux, a `.git` file can prevent Codex from starting a sandbox. [Codex 0.164.
 
 The terminal probe records a missing host terminal separately from a refused ioctl. [Codex's Linux sandbox mounts a private device tree](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/linux-sandbox/src/bwrap.rs#L504), so opening the recorded outer terminal under `/dev/pts` can fail before an ioctl. The probe accepts a missing device on Linux only after an input control succeeds or the kernel refuses an ioctl. A successful ioctl or injected input fails either way.
 
-Launch a run with a local prompt file:
+Clear the host after checking it, then launch a run with a local prompt file:
 
 ```sh
+tbhbdev alpha agent clear-taint example-linux --reason "Host rebuilt"
 tbhbdev alpha agent exec --host example-linux --repo example-org/example-repo --model example-model --effort high --profile build example brief.md
 tbhbdev alpha agent status example
 tbhbdev alpha agent wait example
@@ -376,6 +377,12 @@ tbhbdev alpha agent wait example
 Reviews accept `--ref` and resolve it before launch. `--schema` streams a JSON schema beside the prompt. Claude requires `--reason` and accepts `--claude-profile`. Use a `gemini-*` model for agy, or pass `--allow-non-gemini`. `--ops` selects the host's configured `ops` account.
 
 The optional `[[agent.host]] tbhbdev` key names an absolute executable path on that host. Its default is `$HOME/.local/bin/tbhbdev`, using the remote account’s home. Local `ssh` and `tmux` resolve against a fixed system PATH. Remote scripts use that PATH, add the standard package directories on macOS, and skip login shell startup.
+
+Each coordinator keeps its own per-host taint record in `$XDG_STATE_HOME/tbhbdev/agent-runs/taint/<host>.jsonl` in this phase. A mark from any account taints the entire host; the account remains in the record as information. Missing or empty records mean `unknown`. Review runs on unknown or tainted hosts are refused locally before SSH. Build runs can proceed, labelled `untrusted-host`. `status` shows `host=unknown` or `host=tainted` when applicable.
+
+Before an unsandboxed launch, the coordinator appends a durable record using local run and authorization values. Failure to append refuses the launch. The last appended record decides trust, regardless of its timestamp. Only `clear-taint HOST --reason TEXT` clears local taint and prints the new state. Every host needs an initial clearance. If the last line is incomplete, clearance moves the broken record aside in the same directory and starts a new file.
+
+Run-host appends unsandboxed marks to `$XDG_STATE_HOME/tbhbdev/agent-taint.jsonl` on the run host, with `~/.local/state` as the default state directory. A coordinator whose local record is clean reads at most 64 KiB of that marker before preflight. Any line records local taint and refuses review; a missing marker supplies no evidence of cleanliness. A read error also refuses review. Clearance changes only this coordinator's record; an existing host marker will mark it again. Operators must rebuild or check the host and address its marker before clearing the local record.
 
 The coordinator stores metadata under `$XDG_STATE_HOME/tbhbdev/agent-runs/` on the coordinator. The remote directory uses the same location under the run account, with `.local/state` under home as the default state directory. The transfer claims `<name>.owner` with `set -C` before extracting inputs. It refuses an existing session or any `<name>.*` file with exit status 73. A collision never kills the existing session.
 
