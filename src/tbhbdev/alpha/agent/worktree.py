@@ -123,7 +123,7 @@ def driver_overrides(keys: str) -> list[str]:
 
 def mirror_path(home: Path, argument: str) -> Path:
     host, owner, name = repo.parts(argument)
-    state = Path(os.environ.get("XDG_STATE_HOME") or home / ".local" / "state")
+    state = runfiles.state_home(home)
     return state / "tbhbdev" / "agent-mirrors" / host.lower() / owner / f"{name}.git"
 
 
