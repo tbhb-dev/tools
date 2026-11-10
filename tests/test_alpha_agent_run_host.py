@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator
     from typing import TextIO
 
-    from tbhbdev.alpha.agent.model import Policy, RunRequest
+    from tbhbdev.alpha.agent.model import Policy, RunRequest, Settings
 
 
 @pytest.fixture(autouse=True)
@@ -159,6 +159,20 @@ def test_prepare_uses_one_worktree_and_private_destinations(
         return copy(source_path, destination)
 
     monkeypatch.setattr(credentials, "auth_copy", auth_copy)
+    deliver = credentials.deliver
+
+    def after_git_shape(
+        request: RunRequest, settings: Settings, tmpdir: Path
+    ) -> credentials.Delivery:
+        workspace = clone / ".worktrees" / "agent-example"
+        assert (workspace / "tracked").is_file()
+        assert (workspace / ".git/hooks/pre-commit").is_file()
+        assert (workspace / ".git/config.worktree").read_text() == ""
+        assert (workspace / ".git/commondir").read_text() == ".\n"
+        assert list((workspace / ".git/modules").iterdir()) == []
+        return deliver(request, settings, tmpdir)
+
+    monkeypatch.setattr(credentials, "deliver", after_git_shape)
     result = run_host.prepare_workspace(run)
     assert result.paths.uid == os.getuid()
     assert result.paths.home == str(run.home)

@@ -71,12 +71,13 @@ CODEX_TAIL = (
 )
 CODEX_BUILD_FS = (
     '{filesystem = {":root" = "read", '
-    f'"{WORKTREE}/.git" = "read", "{WORKTREE}/.git/config" = "read", '
+    f'"{WORKTREE}" = "write", "{WORKTREE}/.git" = "write", '
+    f'"{WORKTREE}/.git/config" = "read", '
     f'"{WORKTREE}/.git/config.worktree" = "read", '
     f'"{WORKTREE}/.git/commondir" = "read", '
     f'"{WORKTREE}/.git/hooks" = "read", '
     f'"{WORKTREE}/.git/info" = "read", "{WORKTREE}/.git/modules" = "read", '
-    f'"{WORKTREE}" = "write", "{TMP}" = "write", '
+    f'"{TMP}" = "write", '
     f'"{HOME}/.cache" = "write", "{HOME}/.local/share/mise" = "write", '
     f'"{HOME}/.local/state" = "write", '
     f'"{HOME}/{TOKEN_DIR}" = "none", '
@@ -416,7 +417,7 @@ def test_codex_tables_have_no_repeated_paths(os: Os, profile: Profile) -> None:
     )
     assert [p for p, mode in fs.items() if mode == "none"] == deny
     writes = (
-        [WORKTREE, TMP, f"{HOME}/.cache"]
+        [WORKTREE, f"{WORKTREE}/.git", TMP, f"{HOME}/.cache"]
         if profile is Profile.BUILD
         else [TMP, f"{HOME}/.local/state/example-audit"]
     )

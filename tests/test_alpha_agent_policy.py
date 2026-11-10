@@ -247,6 +247,7 @@ def codex_expected(
     if profile is Profile.BUILD:
         writes = (
             f"{home}/Code/example.com/example-org/example-repo",
+            f"{home}/Code/example.com/example-org/example-repo/.git",
             tmp,
             f"{home}/.cache",
             f"{home}/.local/share/mise",
@@ -260,7 +261,6 @@ def codex_expected(
         mode=model.CodexMode.PROFILE,
         read_roots=(
             ":root",
-            f"{home}/Code/example.com/example-org/example-repo/.git",
             *(
                 f"{home}/Code/example.com/example-org/example-repo/.git/{entry}"
                 for entry in (
@@ -576,7 +576,7 @@ def test_write_roots_keep_the_first_occurrence(os: Os, profile: Profile) -> None
     )
     assert isinstance(result.detail, model.CodexPolicy)
     expected = (
-        (run.worktree, run.tmpdir, f"{run.home}/.cache")
+        (run.worktree, f"{run.worktree}/.git", run.tmpdir, f"{run.home}/.cache")
         if profile is Profile.BUILD
         else (run.tmpdir,)
     )
@@ -781,6 +781,7 @@ def test_write_roots_come_only_from_the_config() -> None:
     home = "/example/home/agent"
     assert result.detail.write_roots == (
         f"{home}/Code/example.com/example-org/example-repo",
+        f"{home}/Code/example.com/example-org/example-repo/.git",
         f"{home}/.local/state/example-runs/run1.tmp",
         f"{home}/.only-this",
         "/example/abs",
@@ -851,6 +852,7 @@ def test_build_never_grants_another_git_directory(
         if os is Os.MACOS:
             expected.append("/dev/fd")
         if isinstance(result.detail, model.CodexPolicy):
+            expected.insert(1, expected[0] + "/.git")
             assert result.detail.write_roots == tuple(expected)
         else:
             assert (
@@ -930,6 +932,7 @@ def test_absolute_write_roots_pass_through(
     if os is Os.MACOS:
         expected.append("/dev/fd")
     if isinstance(result.detail, model.CodexPolicy):
+        expected.insert(1, expected[0] + "/.git")
         assert result.detail.write_roots == tuple(expected)
     else:
         assert (
@@ -1160,6 +1163,7 @@ def test_build_gets_common_git_directory_and_only_its_signing_socket(
     if isinstance(result.detail, model.CodexPolicy):
         assert result.detail.write_roots == (
             original.worktree,
+            original.worktree + "/.git",
             original.tmpdir,
             original.home + "/.cache",
             original.home + "/.local/share/mise",
@@ -1359,7 +1363,6 @@ def test_codex_protects_git_configuration_inside_build_write_root(
     expected = (":root",)
     if profile is Profile.BUILD:
         expected += (
-            f"{paths('agent').worktree}/.git",
             *tuple(
                 f"{paths('agent').worktree}/.git/{entry}"
                 for entry in (
