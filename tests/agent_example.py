@@ -45,6 +45,7 @@ LINUX = model.Host(  # noqa: S604 -- a config key, not a subprocess flag
     account="agent",
     unsandboxed=True,
     accounts=("agent", "ops"),
+    proven_harnesses=(model.Harness.CODEX, model.Harness.CLAUDE),
 )
 MACOS = model.Host(  # noqa: S604 -- a config key, not a subprocess flag
     name="example-macos",
@@ -53,6 +54,7 @@ MACOS = model.Host(  # noqa: S604 -- a config key, not a subprocess flag
     account="agent",
     unsandboxed=False,
     accounts=("agent", "ops"),
+    proven_harnesses=(model.Harness.CODEX, model.Harness.CLAUDE),
 )
 
 

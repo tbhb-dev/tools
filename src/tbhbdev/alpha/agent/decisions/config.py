@@ -22,6 +22,7 @@ from tbhbdev.alpha.agent.model import (
     ClaudeProfile,
     Codex,
     Credentials,
+    Harness,
     Host,
     Invalid,
     Os,
@@ -347,8 +348,22 @@ def _hosts(root: _Table) -> tuple[Host, ...]:
     return tuple(hosts)
 
 
+def _proven_harnesses(table: _Table) -> tuple[Harness, ...]:
+    value = table.value("proven_harnesses")
+    if not isinstance(value, list):
+        table.fail("proven_harnesses", "must list distinct codex or claude names")
+    entries: list[object] = value
+    if any(name not in ("codex", "claude") for name in entries) or len(entries) != len(
+        set(entries)
+    ):
+        table.fail("proven_harnesses", "must list distinct codex or claude names")
+    return tuple(Harness(str(name)) for name in entries)
+
+
 def _host(table: _Table) -> Host:
-    table.only("name", "os", "shell", "account", "unsandboxed", "accounts")
+    table.only(
+        "name", "os", "shell", "account", "unsandboxed", "accounts", "proven_harnesses"
+    )
     name = _check_name(table, "name", table.text("name"), HOST_NAME)
     os = table.choice("os", Os)
     shell = table.text("shell")
@@ -363,7 +378,9 @@ def _host(table: _Table) -> Host:
         table.fail("accounts", "must not contain duplicates")
     if account not in accounts:
         table.fail("account", "must be one of accounts")
-    return Host(name, os, shell, account, unsandboxed, accounts)
+    return Host(
+        name, os, shell, account, unsandboxed, accounts, _proven_harnesses(table)
+    )
 
 
 def _check_host_accounts(settings: Settings) -> None:

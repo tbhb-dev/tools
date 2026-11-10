@@ -133,6 +133,7 @@ class Host:
     account: str
     unsandboxed: bool
     accounts: tuple[str, ...]
+    proven_harnesses: tuple[Harness, ...]
 
 
 @dataclass(frozen=True)
