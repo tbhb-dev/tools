@@ -75,7 +75,7 @@ commands:
                apply the standard repository settings
   merge        squash-merge an approved pull request
   loop         validate loop configuration (runner not yet available)
-  agent        validate agent configuration (runs not yet available)
+  agent        exec | wait | status | kill | clean | keep: headless runs
   install      install the git hooks and the user-level harness hooks
 """
 
