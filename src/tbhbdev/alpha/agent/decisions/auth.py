@@ -19,24 +19,97 @@ def timestamp(value: object) -> datetime:
     return parsed
 
 
+# Codex 0.164.0 TokenData and AccountOAuthProvenance (including the custom
+# id_token string serializer):
+# https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/login/src/token_data.rs
+# Optional fields may be absent or null. Reject unknown fields at every level.
+type Schema = dict[str, str | Schema]
+JSON_STRING = "string"
+TOKEN_SCHEMA: Schema = {
+    "id_token": JSON_STRING,
+    "access_token": JSON_STRING,
+    "refresh_token": JSON_STRING,
+    "account_id": "optional string",
+    "login_owner_id": "optional string",
+    "oauth_provenance": {"issuer": "string", "client_id": "string"},
+}
+
+
+def json_type(value: Json) -> str:
+    return {
+        dict: "object",
+        list: "array",
+        str: "string",
+        int: "number",
+        float: "number",
+        bool: "boolean",
+        type(None): "null",
+    }[type(value)]
+
+
+def field(value: Json, expected: str | Schema, key: str) -> str | None:
+    if isinstance(expected, dict):
+        return None if value is None else fields(value, expected, key)
+    if value is None and expected == "optional string":
+        return None
+    if not isinstance(value, str):
+        return f"{key}: found {json_type(value)}; expected {expected}"
+    return None
+
+
+def fields(value: Json, schema: Schema, key: str) -> str | None:
+    if not isinstance(value, dict):
+        return f"{key}: found {json_type(value)}; expected object"
+    for name, item in value.items():
+        path = f"{key}.{name}"
+        if name not in schema:
+            return f"{path}: found {json_type(item)}; unexpected key"
+        if reason := field(item, schema[name], path):
+            return reason
+    for name, expected in schema.items():
+        if expected == "string" and name not in value:
+            return f"{key}.{name}: found missing; expected string"
+    return None
+
+
+def refresh_time(source: dict[str, Json], refreshed: dict[str, Json]) -> str | None:
+    if "last_refresh" not in refreshed:
+        return None
+    for document in (source, refreshed):
+        if "last_refresh" in document:
+            value = document["last_refresh"]
+            try:
+                timestamp(value)
+            except ValueError, TypeError:
+                return (
+                    f"last_refresh: found {json_type(value)}; "
+                    "expected timestamp with timezone"
+                )
+    if "last_refresh" in source and timestamp(refreshed["last_refresh"]) < timestamp(
+        source["last_refresh"]
+    ):
+        return "last_refresh: found string; timestamp moved backwards"
+    return None
+
+
 def validate(before: str | None, after: str) -> str | None:
     try:
         source: Json = json.loads(before) if before is not None else {}
         refreshed: Json = json.loads(after)
-        if not isinstance(source, dict) or not isinstance(refreshed, dict):
-            return "auth must be a JSON object"
-        if not refreshed.keys() <= source.keys():
-            return "auth added top-level keys"
-        if "tokens" in source:
-            tokens = refreshed.get("tokens")
-            if not isinstance(tokens, dict) or not all(
-                isinstance(v, str) for v in tokens.values()
-            ):
-                return "tokens must be an object of strings"
-        if "last_refresh" in refreshed:
-            changed = timestamp(refreshed["last_refresh"])
-            if "last_refresh" in source and changed < timestamp(source["last_refresh"]):
-                return "last_refresh moved backwards"
     except ValueError, TypeError:
-        return "auth contains invalid JSON or timestamp"
-    return None
+        return "auth: found invalid JSON"
+    if not isinstance(source, dict):
+        return f"auth.before: found {json_type(source)}; expected object"
+    if not isinstance(refreshed, dict):
+        return f"auth.after: found {json_type(refreshed)}; expected object"
+    for key in refreshed.keys() - source.keys():
+        return f"auth.{key}: found {json_type(refreshed[key])}; unexpected key"
+    if "tokens" in source:
+        reason = (
+            fields(refreshed["tokens"], TOKEN_SCHEMA, "tokens")
+            if "tokens" in refreshed
+            else "tokens: found missing; expected object"
+        )
+        if reason:
+            return reason
+    return refresh_time(source, refreshed)
