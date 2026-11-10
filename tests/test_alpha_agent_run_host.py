@@ -3071,3 +3071,17 @@ def test_finish_removes_private_state_codex_home(
     monkeypatch.setattr(credentials, "auth_write_back", write_back)
     assert run_host.finish(run, prepared, None, 0) == int(failure)
     assert not directory.exists()
+
+
+@pytest.mark.parametrize("state", [None, ""])
+def test_codex_home_defaults_to_account_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str | None
+) -> None:
+    run = make_run(tmp_path)
+    if state is None:
+        monkeypatch.delenv("XDG_STATE_HOME")
+    else:
+        monkeypatch.setenv("XDG_STATE_HOME", state)
+    assert run_host.planned_paths(run).codex_home == str(
+        run.home / ".local/state/tbhbdev/agent-codex/example"
+    )
