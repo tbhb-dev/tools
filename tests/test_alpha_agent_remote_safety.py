@@ -1113,19 +1113,24 @@ def test_inspection_refuses_missing_origin_branch(
     assert result.stdout == b""
 
 
-def test_host_marker_uses_portable_perl_arguments(host: Path) -> None:
+@pytest.mark.parametrize("account", ["agent", "ops"])
+def test_host_marker_uses_portable_perl_arguments(host: Path, account: str) -> None:
     call_log = host / "perl-call.json"
     write_standalone_fake(
         host / "bin/perl",
         "import json, os, sys\nfrom pathlib import Path\n"
         f"Path({str(call_log)!r}).write_text(json.dumps(sys.argv))\n"
+        "sys.argv[3] = " + repr(str(host / "missing-marker")) + "\n"
         "os.execv('/usr/bin/perl', ['perl', *sys.argv[1:]])\n",
     )
-    result = execute(remote.host_marker())
+    result = execute(remote.host_marker(account))
     assert result.returncode == 0, result.stderr
     assert result.stdout == b""
     invoked: list[str] = json.loads(call_log.read_text())
     assert invoked[1] == "-e"
+    assert invoked[3] == str(
+        Path("/var") / "tmp" / "tbhbdev-agent-taint" / f"{account}.jsonl"
+    )
 
 
 @pytest.mark.parametrize("limit", [None, 10])

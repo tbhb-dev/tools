@@ -58,6 +58,7 @@ if name == "ssh":
            "HOME": str(root / "home"), "XDG_STATE_HOME": str(root / "state")}
     script = command[2].replace(
         "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=" + os.environ["PATH"])
+    script = script.replace("/var/tmp/tbhbdev-agent-taint", str(root / "markers"))
     script = script.replace("/tmp/example-sockets", str(root / "sockets"))
     result = subprocess.run(["/bin/sh", "-c", script], input=data, env=env)
     sys.exit(result.returncode)
@@ -165,6 +166,7 @@ class Remote:
 def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     root = tmp_path / "remote"
     root.mkdir()
+    (root / "markers").mkdir()
     state = root / "state/tbhbdev/agent-runs"
     state.mkdir(parents=True)
     (

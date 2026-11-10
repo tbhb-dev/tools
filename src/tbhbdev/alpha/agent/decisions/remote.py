@@ -118,7 +118,7 @@ def installed(host: Host) -> str:
     return PREFIX + f"{program(host)} --version"
 
 
-def host_marker() -> str:
+def host_marker(account: str) -> str:
     """Read bounded evidence of host taint, never a remote clearance."""
     read = (
         'open my $f, "<", $ARGV[0] or do { '
@@ -126,12 +126,8 @@ def host_marker() -> str:
         'defined(read($f, my $b, 65536)) or die "host marker read failed"; '
         'print $b; close($f) or die "host marker read failed";'
     )
-    return (
-        PREFIX
-        + "perl -e "
-        + shlex.quote(read)
-        + ' "${XDG_STATE_HOME:-$HOME/.local/state}/tbhbdev/agent-taint.jsonl"'
-    )
+    marker = PurePosixPath("/var", "tmp", "tbhbdev-agent-taint", f"{account}.jsonl")
+    return PREFIX + "perl -e " + shlex.quote(read) + " " + shlex.quote(str(marker))
 
 
 def preflight(repository: str, ref: str, expected_version: str, host: Host) -> str:
