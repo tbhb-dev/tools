@@ -144,7 +144,7 @@ def test_git_suppresses_command_errors_and_returns_text(
         }
         assert kwargs["cwd"] == "/"
         assert kwargs["timeout"] == 30
-        assert kwargs["text"] is True
+        assert kwargs["text"]
         assert kwargs["stderr"] == subprocess.DEVNULL
         if command[-1] == r"^(filter|merge)\.":
             assert command == [
@@ -437,13 +437,6 @@ def test_fetch_resolves_only_a_full_commit(
         "--upload-pack=git-upload-pack",
     )
     assert calls == [
-        (
-            "fetch",
-            *options,
-            "--prune",
-            "origin",
-            "+refs/heads/agent/*:refs/heads/agent/*",
-        ),
         ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD"),
         ("check-ref-format", "--branch", "main"),
         (
@@ -479,9 +472,9 @@ def test_mirror_configuration_and_hooks_are_host_written(
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
     path = worktree.create(clone, "example", run_request())
     mirror = worktree.mirror_path(tmp_path, run_request().repo)
-    assert git(mirror, "config", "--get-all", "remote.origin.fetch").splitlines() == [
-        "+refs/heads/agent/*:refs/heads/agent/*",
-    ]
+    with pytest.raises(subprocess.CalledProcessError) as caught:
+        git(mirror, "config", "--get-all", "remote.origin.fetch")
+    assert caught.value.returncode == 1
     for key, value in (
         ("gc.auto", "0"),
         ("gc.pruneExpire", "never"),
@@ -710,16 +703,6 @@ def test_prelaunch_git_protocol(
     )
     common = [
         (mirror, ("init", "--bare", "--template=")),
-        (
-            mirror,
-            (
-                "fetch",
-                *options,
-                "--prune",
-                "origin",
-                "+refs/heads/agent/*:refs/heads/agent/*",
-            ),
-        ),
         (mirror, ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD")),
         (mirror, ("check-ref-format", "--branch", "main")),
         (
@@ -913,7 +896,7 @@ def test_mirror_path_matches_driver_contract(
     )
 
 
-def test_fetch_scope_and_agent_namespace_pruning(tmp_path: Path) -> None:
+def test_fetch_scope_never_fetches_or_prunes_agent_namespace(tmp_path: Path) -> None:
     seed, clone = repository(tmp_path)
     head = git(seed, "rev-parse", "HEAD")
     for ref in (
@@ -926,9 +909,9 @@ def test_fetch_scope_and_agent_namespace_pruning(tmp_path: Path) -> None:
     worktree.create(clone, "first", run_request())
     mirror = worktree.mirror_path(tmp_path, run_request().repo)
     assert git(mirror, "for-each-ref", "--format=%(refname)").splitlines() == [
-        "refs/heads/agent/a",
         "refs/heads/main",
     ]
+    git(mirror, "update-ref", "refs/heads/agent/a", head)
     git(mirror, "update-ref", "refs/tbhbdev/default", head)
     git(mirror, "update-ref", "refs/heads/kept", head)
     for ref in ("refs/heads/a", "refs/heads/agent/a"):
@@ -936,7 +919,7 @@ def test_fetch_scope_and_agent_namespace_pruning(tmp_path: Path) -> None:
         git(seed, "push", "origin", f"{head}:{ref}/b")
     worktree.create(clone, "second", run_request())
     assert git(mirror, "for-each-ref", "--format=%(refname)").splitlines() == [
-        "refs/heads/agent/a/b",
+        "refs/heads/agent/a",
         "refs/heads/kept",
         "refs/heads/main",
         "refs/tbhbdev/default",
