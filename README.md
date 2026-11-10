@@ -68,7 +68,7 @@ That's the operator's file. On each agent host, `tbhbdev host bootstrap` install
 
 `tbhbdev analytics migrate` connects as the owner, serializes migrations with an advisory lock and records each version in its migration transaction. `--dry-run` lists pending migrations without changing the database. Ops must create an empty database and its owner login with `CREATEROLE` before migration.
 
-`tbhbdev analytics contract check` separately compares the database catalog with the packaged contract and exits 1 on a difference. `migrate` alone doesn't check the contract, so a deploy runs `tbhbdev analytics migrate` and then `tbhbdev analytics contract check`. A configuration mistake prints its message, such as `[analytics] password_file is required`, and the message holds only key names. Other failures print only redacted diagnostics.
+`tbhbdev analytics contract check` separately compares the database catalog with the packaged contract and exits 1 on a difference. `migrate` alone doesn't check the contract. A deploy runs `tbhbdev analytics migrate` and then `tbhbdev analytics contract check`. A configuration mistake prints its message, such as `[analytics] password_file is required`. That message contains key names and never a value. Other failures print only redacted diagnostics.
 
 Configure the connection through `[analytics]` in the user config. Set `password_file` to the owner password file and `loader_enabled` to `true` to enable loader access. The switch defaults to `false`.
 
