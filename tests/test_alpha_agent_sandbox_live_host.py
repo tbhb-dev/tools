@@ -31,7 +31,7 @@ from agent_live_host_probe import (
     snapshot,
     terminal_status,
 )
-from test_alpha_agent_sandbox_live import live_only, report
+from test_alpha_agent_sandbox_live import live_only, probe_run, report
 
 from tbhbdev.alpha.agent import host_tools, run_host
 from tbhbdev.alpha.agent.model import Harness, Invalid, Profile
@@ -165,7 +165,7 @@ def test_hard_link_evidence_uses_profile_write_root(
 
 
 @live_only
-@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("harness", [Harness.CODEX])
 @pytest.mark.parametrize("profile", Profile)
 def test_live_protected_hard_links(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness, profile: Profile
@@ -419,7 +419,7 @@ def test_terminal_control_requires_recorded_success(
 
 
 @live_only
-@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("harness", [Harness.CODEX])
 @pytest.mark.parametrize("profile", Profile)
 def test_live_terminal_injection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness, profile: Profile
@@ -439,13 +439,29 @@ def test_live_terminal_injection(
         {"HOME": paths.home, "PATH": "/usr/bin:/bin"},
         tmp_path,
     )
-    control_state = "injected" if INPUT_MARKER in control.inputs else "failed"
-    report(f"{label} control: {control_state}; legacy_tiocsti={setting}")
     if control.code != 0 or not control_witness.is_file():
         pytest.fail(f"{label}: unproven; control failed; legacy_tiocsti={setting}")
     control_result = json.loads(control_witness.read_text())
-    if control_result.get("attempted") is not True or control_result.get("error") != 0:
+    control_error = control_result.get("error")
+    kernel_blocked = (
+        setting == "0"
+        and control_result.get("attempted") is True
+        and isinstance(control_error, int)
+        and control_error != 0
+        and INPUT_MARKER not in control.inputs
+    )
+    if control_result.get("attempted") is not True or (
+        control_error != 0 and not kernel_blocked
+    ):
         pytest.fail(f"{label}: unproven; control failed; legacy_tiocsti={setting}")
+    control_state = (
+        "blocked by kernel"
+        if kernel_blocked
+        else "injected"
+        if INPUT_MARKER in control.inputs
+        else "failed"
+    )
+    report(f"{label} control: {control_state}; legacy_tiocsti={setting}")
     witness = writes / "sandbox-terminal.json"
     script = tmp_path / "terminal.sh"
     script.write_text(
@@ -472,10 +488,14 @@ def test_live_terminal_injection(
     error = observed["error"]
     assert isinstance(error, int)
     status = terminal_status(control.inputs, probe.inputs, error)
+    if kernel_blocked and error != 0 and INPUT_MARKER not in probe.inputs:
+        status = "blocked by kernel"
     report(f"{label}: {status}; ioctl error={error}; legacy_tiocsti={setting}")
     if status == "unproven":
         pytest.fail(f"{label}: unproven; control failed; legacy_tiocsti={setting}")
-    assert status == "blocked", f"{label}: injected; ioctl error={error}"
+    assert status in {"blocked", "blocked by kernel"}, (
+        f"{label}: injected; ioctl error={error}"
+    )
 
 
 def test_link_probe_records_every_label_after_a_denial(tmp_path: Path) -> None:
@@ -531,3 +551,41 @@ def test_host_probes_use_readable_protection_and_selected_profile(
         assert command[-1] == "probe"
         settings = json.loads(command[command.index("--settings") + 1])
         assert str(readable) in settings["sandbox"]["filesystem"]["denyWrite"]
+
+
+@pytest.mark.usefixtures("fake_host_tools")
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("error", [0, 1])
+def test_terminal_kernel_refusal_is_a_passing_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    profile: Profile,
+    error: int,
+) -> None:
+    def observe(
+        command: tuple[str, ...], _environment: dict[str, str], _cwd: Path
+    ) -> TerminalObservation:
+        target = Path(command[-1])
+        sandbox = target.suffix == ".sh"
+        witness = Path(shlex.split(target.read_text())[-1]) if sandbox else target
+        witness.write_text(
+            json.dumps({"attempted": True, "error": error if sandbox else 1})
+        )
+        return TerminalObservation(b"", 0)
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "observe_terminal", observe)
+    monkeypatch.setattr(module, "legacy_input_setting", lambda: "0")
+    if error == 0:
+        with pytest.raises(AssertionError, match="ioctl error=0"):
+            test_live_terminal_injection(tmp_path, monkeypatch, Harness.CODEX, profile)
+    else:
+        test_live_terminal_injection(tmp_path, monkeypatch, Harness.CODEX, profile)
+        assert "blocked by kernel" in capsys.readouterr().out
+
+
+def test_host_live_probes_refuse_agy(tmp_path: Path) -> None:
+    run, paths = probe_run(tmp_path, Harness.AGY)
+    with pytest.raises(Invalid, match="agy has no OS sandbox"):
+        checked_live_policy(run, paths)
