@@ -40,8 +40,36 @@ def relay(
             (second if source is first else first).sendall(data)
 
 
+def receive_exact(connection: socket.socket, size: int) -> bytes:
+    data = b""
+    while len(data) < size:
+        part = connection.recv(size - len(data))
+        if not part:
+            break
+        data += part
+    return data
+
+
+def bridge_header(connection: socket.socket) -> bytes:
+    prefix = connection.recv(1)
+    if prefix != b"\x00":
+        return prefix
+    # Linux's trusted bridge puts this bounded preface ahead of HTTP. Discard
+    # its opaque identifier; it is not part of the CONNECT destination witness.
+    # https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/network-proxy/src/attribution.rs
+    header = prefix + receive_exact(connection, 9)
+    if len(header) != 10 or header[:8] != b"\x00CDXPXY1":
+        message = "invalid bridge header"
+        raise ValueError(message)
+    length = int.from_bytes(header[8:], "big")
+    if not 0 < length <= 128 or len(receive_exact(connection, length)) != length:
+        message = "invalid bridge identifier length"
+        raise ValueError(message)
+    return b""
+
+
 def request_header(connection: socket.socket) -> bytes:
-    header = b""
+    header = bridge_header(connection)
     while b"\r\n\r\n" not in header and len(header) < 8192:
         part = connection.recv(4096)
         if not part:

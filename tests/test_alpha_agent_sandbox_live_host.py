@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shlex
@@ -14,6 +15,7 @@ from subprocess import CompletedProcess
 from types import SimpleNamespace
 from typing import Never
 
+import agent_live_host_probe as host_probe
 import pytest
 from agent_live_evidence import codex_auth, run_default_pytest
 from agent_live_host_probe import (
@@ -646,3 +648,34 @@ def test_terminal_prompt_reaches_the_harness_with_terminal_stdin(
     )
     assert result == TerminalObservation(b"", 0)
     assert json.loads(observed.read_text()) == [True, prompt]
+
+
+@pytest.mark.parametrize("opened", [False, True])
+def test_terminal_witness_distinguishes_open_failure_from_ioctl_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, opened: bool
+) -> None:
+    witness = tmp_path / "terminal.json"
+    closed: list[int] = []
+
+    def open_tty(path: str, flags: int) -> int:
+        assert path == "/dev/tty"
+        assert flags == os.O_RDWR
+        if not opened:
+            raise OSError(errno.ENXIO, "fixture tty unavailable")
+        return 321
+
+    def refused(descriptor: int, operation: int, value: bytes) -> Never:
+        assert descriptor == 321
+        assert operation == host_probe.termios.TIOCSTI
+        assert value == INPUT_MARKER[:1]
+        raise OSError(errno.EPERM, "fixture ioctl refused")
+
+    monkeypatch.setattr(host_probe.os, "open", open_tty)
+    monkeypatch.setattr(host_probe.os, "close", closed.append)
+    monkeypatch.setattr(host_probe.fcntl, "ioctl", refused)
+    host_probe.inject_terminal(witness)
+    assert json.loads(witness.read_text()) == {
+        "attempted": opened,
+        "error": errno.EPERM if opened else errno.ENXIO,
+    }
+    assert closed == ([321] if opened else [])

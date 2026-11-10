@@ -193,17 +193,19 @@ def terminal_status(control: bytes, observed: bytes, error: int) -> str:
 
 
 def inject_terminal(witness: Path) -> None:
+    attempted = False
     error = 0
     try:
         descriptor = os.open("/dev/tty", os.O_RDWR)
         try:
             for byte in INPUT_MARKER:
+                attempted = True
                 fcntl.ioctl(descriptor, termios.TIOCSTI, bytes([byte]))
         finally:
             os.close(descriptor)
     except OSError as exc:
         error = exc.errno or 1
-    witness.write_text(json.dumps({"attempted": True, "error": error}))
+    witness.write_text(json.dumps({"attempted": attempted, "error": error}))
 
 
 def legacy_input_setting() -> str:

@@ -612,7 +612,7 @@ def test_auth_write_back_refuses_untrusted_files(
         "fifo": "codex auth is not an owned regular file",
         "owner": "codex auth is not an owned regular file",
         "oversized": "codex auth exceeds 1 MiB",
-        "array": "codex auth must be a JSON object",
+        "array": "auth: found array; expected object",
     }.get(attack, "cannot safely read a JSON object")
     assert reason == f"codex auth write-back skipped: {expected}\n"
     assert "outside" not in reason
@@ -757,3 +757,26 @@ def test_reviews_app_without_configured_references_is_refused(missing: str) -> N
     with pytest.raises(Invalid) as caught:
         credentials.installation_token(references, "example-org/example-repo")
     assert str(caught.value) == "reviews App credentials are not configured"
+
+
+@pytest.mark.parametrize(
+    ("document", "kind"),
+    [
+        (["never-log"], "array"),
+        (87654321, "number"),
+        ("never-log", "string"),
+        (None, "null"),
+        (True, "boolean"),
+    ],
+)
+def test_auth_file_refusal_names_json_type_without_value(
+    tmp_path: Path, document: object, kind: str
+) -> None:
+    source = runfiles.private_dir(tmp_path / "host") / "auth.json"
+    target = runfiles.private_dir(tmp_path / "child") / "auth.json"
+    source.write_text("{}")
+    target.write_text(json.dumps(document))
+    assert credentials.auth_write_back(source, target, "{}") == (
+        f"codex auth write-back skipped: auth: found {kind}; expected object\n"
+    )
+    assert source.read_text() == "{}"
