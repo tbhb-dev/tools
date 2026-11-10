@@ -71,8 +71,11 @@ CODEX_TAIL = (
 )
 CODEX_BUILD_FS = (
     '{filesystem = {":root" = "read", '
-    f'"{WORKTREE}/.git/config" = "read", "{WORKTREE}/.git/hooks" = "read", '
-    f'"{WORKTREE}/.git/info" = "read", '
+    f'"{WORKTREE}/.git" = "read", "{WORKTREE}/.git/config" = "read", '
+    f'"{WORKTREE}/.git/config.worktree" = "read", '
+    f'"{WORKTREE}/.git/commondir" = "read", '
+    f'"{WORKTREE}/.git/hooks" = "read", '
+    f'"{WORKTREE}/.git/info" = "read", "{WORKTREE}/.git/modules" = "read", '
     f'"{WORKTREE}" = "write", "{TMP}" = "write", '
     f'"{HOME}/.cache" = "write", "{HOME}/.local/share/mise" = "write", '
     f'"{HOME}/.local/state" = "write", '
