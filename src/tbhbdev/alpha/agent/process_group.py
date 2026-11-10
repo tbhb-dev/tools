@@ -1,0 +1,210 @@
+"""Launch and stop only groups created by this supervisor."""
+
+from __future__ import annotations
+
+import ctypes
+import json
+import multiprocessing
+import os
+import signal
+import struct
+import subprocess
+import sys
+import time
+from contextlib import suppress
+from dataclasses import asdict
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from tbhbdev.alpha.agent.decisions import run_state
+from tbhbdev.alpha.agent.decisions.run_state import Action, Group
+from tbhbdev.alpha.agent.model import Invalid
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from multiprocessing.connection import Connection
+    from multiprocessing.process import BaseProcess
+    from typing import IO
+
+    from tbhbdev.alpha.agent.runfiles import RunFiles
+
+# proc_bsdinfo in Apple's sys/proc_info.h: two uint64 start fields at byte 120.
+_BSD_SIZE = 136
+_BSD_START = 120
+_PROC_PIDTBSDINFO = 3
+_ZOMBIE = 5
+
+
+def boot_id() -> str:
+    if sys.platform == "linux":
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    return subprocess.check_output(
+        ["sysctl", "-n", "kern.boottime"], text=True, timeout=5
+    ).strip()
+
+
+def _mac_start(pid: int) -> str | None:
+    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    buffer = ctypes.create_string_buffer(_BSD_SIZE)
+    size = library.proc_pidinfo(pid, _PROC_PIDTBSDINFO, 0, buffer, _BSD_SIZE)
+    if size != _BSD_SIZE or int.from_bytes(buffer[4:8], sys.byteorder) == _ZOMBIE:
+        return None
+    seconds, micros = struct.unpack_from("=QQ", buffer, _BSD_START)
+    return f"{seconds}:{micros}"
+
+
+def leader_start(pid: int) -> str | None:
+    if sys.platform != "linux":
+        return _mac_start(pid)
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except FileNotFoundError:
+        return None
+    # The command may contain spaces and parentheses. Field 3 follows its last ).
+    else:
+        return None if fields[0] == "Z" else fields[19]
+
+
+def identity(pgid: int) -> Group | None:
+    start = leader_start(pgid)
+    return None if start is None else Group(pgid, boot_id(), start)
+
+
+def record(files: RunFiles, pgid: int) -> None:
+    group = identity(pgid)
+    if group is None:
+        message = "run group leader exited before it could be recorded"
+        raise Invalid(message)
+    files.write("pgid", json.dumps(asdict(group)) + "\n")
+
+
+def alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _signal(pgid: int, number: signal.Signals) -> None:
+    with suppress(ProcessLookupError):
+        os.killpg(pgid, number)
+
+
+def stop_started(pgid: int, grace: float) -> None:
+    """Sweep a group this still-live supervisor started, even after leader exit."""
+    _signal(pgid, signal.SIGTERM)
+    deadline = time.monotonic() + grace
+    while alive(pgid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if alive(pgid):
+        _signal(pgid, signal.SIGKILL)
+
+
+def stop_recorded(files: RunFiles, grace: float) -> Action:
+    group = Group(**json.loads(files.path("pgid").read_text()))
+    action = run_state.stop_action(files.snapshot(), group, identity(group.pgid))
+    if action is Action.STOP:
+        stop_started(group.pgid, grace)
+    elif action is Action.UNKNOWN:
+        files.write("phase", "unknown")
+    return action
+
+
+def launch(
+    command: tuple[str, ...],
+    *,
+    env: dict[str, str],
+    cwd: str,
+    streams: tuple[IO[str] | int | None, IO[str] | int | None, IO[str] | int | None],
+    terminal: int | None,
+) -> subprocess.Popen[str]:
+    """Pass the exact policy environment and give the harness its own group."""
+    stdin, stdout, stderr = streams
+    child = subprocess.Popen(
+        command,
+        env=env,
+        cwd=cwd,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        text=True,
+        start_new_session=terminal is None,
+        process_group=0 if terminal is not None else None,
+    )
+    if terminal is not None:
+        foreground(terminal, child.pid)
+        _signal(child.pid, signal.SIGCONT)
+    return child
+
+
+def foreground(terminal: int, pgid: int) -> None:
+    previous = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+    try:
+        os.tcsetpgrp(terminal, pgid)
+    finally:
+        signal.signal(signal.SIGTTOU, previous)
+
+
+def prepare_child(connection: Connection, operation: Callable[[], object]) -> None:
+    os.setpgid(0, 0)
+    signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    connection.send(None)
+    connection.recv()
+    try:
+        connection.send((True, operation()))
+    except Invalid as exc:
+        connection.send((False, str(exc)))
+    except OSError, ValueError, subprocess.SubprocessError:
+        # Third-party errors can contain credentials. Send no exception text.
+        connection.send((False, None))
+    finally:
+        connection.close()
+
+
+def worker_pid(worker: BaseProcess) -> int:
+    pid = worker.pid
+    if pid is None:
+        message = "setup worker has not started"
+        raise Invalid(message)
+    return pid
+
+
+def prepare(
+    operation: Callable[[], object], files: RunFiles, deadline: float, grace: float
+) -> object:
+    """Bound all setup, including blocking library reads, by one deadline.
+
+    A setup worker leads the recorded group so stopping a hung library read
+    leaves the supervisor alive to write rc. A pipe carries results in memory.
+    """
+    context = multiprocessing.get_context("fork")
+    parent, child = context.Pipe()
+    worker = context.Process(target=prepare_child, args=(child, operation))
+    worker.start()
+    pid = worker_pid(worker)
+    child.close()
+    try:
+        if not parent.poll(max(0, deadline - time.monotonic())):
+            raise TimeoutError
+        parent.recv()
+        record(files, pid)
+        parent.send(None)
+        if not parent.poll(max(0, deadline - time.monotonic())):
+            raise TimeoutError
+        ok, result = parent.recv()
+        if not ok:
+            message = (
+                result
+                or "run preparation failed; check the clone and credential references"
+            )
+            raise Invalid(message)
+        return result
+    finally:
+        worker.join(timeout=0)
+        stop_started(pid, grace)
+        worker.join()
+        parent.close()
+        worker.close()

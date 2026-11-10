@@ -112,6 +112,8 @@ def environment(
     }
     if harness is Harness.CODEX:
         env["CODEX_HOME"] = paths.codex_home
+    if paths.signing_socket is not None:
+        env["SSH_AUTH_SOCK"] = paths.signing_socket
     return env
 
 
@@ -121,7 +123,8 @@ def _write_roots(
     if profile is Profile.REVIEW:
         return tuple(dict.fromkeys((paths.tmpdir, paths.audit_dir)))
     roots = (resolve(paths.home, r) for r in settings.sandbox.write_roots)
-    return tuple(dict.fromkeys((paths.worktree, paths.tmpdir, *roots)))
+    common = () if paths.git_common_dir is None else (paths.git_common_dir,)
+    return tuple(dict.fromkeys((paths.worktree, *common, paths.tmpdir, *roots)))
 
 
 def _codex(
@@ -157,7 +160,14 @@ def _claude(
         {
             "env": {
                 k: env[k]
-                for k in ("TMPDIR", "TMPPREFIX", "GH_CONFIG_DIR", "DOCKER_CONFIG")
+                for k in (
+                    "TMPDIR",
+                    "TMPPREFIX",
+                    "GH_CONFIG_DIR",
+                    "DOCKER_CONFIG",
+                    "SSH_AUTH_SOCK",
+                )
+                if k in env
             },
             "permissions": {
                 "allow": [] if review else [f"Edit(/{p}/**)" for p in writes],
@@ -168,6 +178,11 @@ def _claude(
                 "failIfUnavailable": True,
                 "autoAllowBashIfSandboxed": True,
                 "allowUnsandboxedCommands": False,
+                **(
+                    {"network": {"allowUnixSockets": [paths.signing_socket]}}
+                    if paths.signing_socket is not None
+                    else {}
+                ),
                 "filesystem": {
                     "allowWrite": list(writes),
                     "denyRead": list(deny),
@@ -205,6 +220,8 @@ def _agy(
             *(resolve(home, p) for p in agy.build_write),
         ]
     reads += [env["GH_CONFIG_DIR"], env["DOCKER_CONFIG"]]
+    if paths.signing_socket is not None:
+        reads.append(paths.signing_socket)
     # agy has no deny entry, so a grant that reaches a denied path is the leak.
     for path in (*reads, *writes):
         for denied in deny:

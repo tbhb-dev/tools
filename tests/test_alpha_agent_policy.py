@@ -581,3 +581,59 @@ def test_no_output_holds_a_secret_reference() -> None:
     for os, profile, harness in itertools.product(Os, Profile, Harness):
         result = made(os, profile, harness, "agent", config=config)
         assert MARKER not in repr(result)
+
+
+@pytest.mark.parametrize("harness", Harness)
+def test_build_gets_common_git_directory_and_only_its_signing_socket(
+    harness: Harness,
+) -> None:
+    original = paths("agent")
+    common = "/example/clone/git-common"
+    socket = original.tmpdir + "/ssh.sock"
+    run = dataclasses.replace(original, git_common_dir=common, signing_socket=socket)
+    result = policy.build(
+        settings(),
+        LINUX,
+        harness=harness,
+        profile=Profile.BUILD,
+        account="agent",
+        unsandboxed=False,
+        paths=run,
+    )
+    assert result.env == env_of(Os.LINUX, harness, "agent") | {"SSH_AUTH_SOCK": socket}
+    if isinstance(result.detail, model.CodexPolicy):
+        assert result.detail.write_roots == (
+            original.worktree,
+            common,
+            original.tmpdir,
+            original.home + "/.cache",
+            original.home + "/.local/share/mise",
+            original.home + "/.local/state",
+        )
+    elif isinstance(result.detail, model.ClaudePolicy):
+        assert dig(result.detail.settings, "env", "SSH_AUTH_SOCK") == socket
+        assert dig(result.detail.settings, "sandbox", "network") == {
+            "allowUnixSockets": [socket]
+        }
+        assert common in strings(
+            dig(result.detail.settings, "sandbox", "filesystem", "allowWrite")
+        )
+    else:
+        assert f"read_file({socket})" in result.detail.grants
+
+
+def test_review_never_grants_common_git_writes() -> None:
+    run = dataclasses.replace(
+        paths("agent"), git_common_dir="/example/clone/git-common"
+    )
+    result = policy.build(
+        settings(),
+        LINUX,
+        harness=Harness.CODEX,
+        profile=Profile.REVIEW,
+        account="agent",
+        unsandboxed=False,
+        paths=run,
+    )
+    assert isinstance(result.detail, model.CodexPolicy)
+    assert "/example/clone/git-common" not in result.detail.write_roots
