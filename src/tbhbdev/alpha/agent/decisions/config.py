@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import NoReturn
 
 from tbhbdev.alpha.agent.model import (
@@ -115,6 +116,12 @@ class _Table:
             self.fail(key, "must not contain a NUL or '..' part")
         return entries
 
+    def home_paths(self, key: str) -> tuple[str, ...]:
+        entries = self.paths(key)
+        if any(e.startswith(("/", "~")) or not PurePosixPath(e).parts for e in entries):
+            self.fail(key, "must be paths below home without a leading '/' or '~'")
+        return entries
+
     def integer(self, key: str) -> int:
         value = self.value(key)
         if type(value) is not int or value <= 0:
@@ -162,9 +169,9 @@ def _sandbox(table: _Table) -> Sandbox:
     agy = table.table("agy")
     agy.only("review_read", "build_read", "build_write")
     return Sandbox(
-        write_roots=table.paths("write_roots"),
+        write_roots=table.home_paths("write_roots"),
         audit_dir=table.path("audit_dir"),
-        denied_home_paths=table.paths("denied_home_paths"),
+        denied_home_paths=table.home_paths("denied_home_paths"),
         path=SandboxPath(linux=path.paths("linux"), macos=path.paths("macos")),
         agy=AgySandbox(
             review_read=agy.paths("review_read"),
