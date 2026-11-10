@@ -1,5 +1,7 @@
 """The brief and coordinator reports."""
 
+from tbhbdev.alpha.agent import transport
+
 INSPECTION_WARNING = (
     "Don't run git inside a run clone: it is agent-written. "
     "Use `tbhbdev alpha agent log|diff NAME`."
@@ -16,4 +18,10 @@ def status(
     host, account = target
     return (
         f"{name}: phase={phase} rc={rc} host={host} account={account} started={started}"
+    )
+
+
+def unsandboxed(name: str, authorization: str | None) -> str:
+    return transport.terminal_text(
+        f"{name}: sandbox=none authorized_by={authorization}"
     )

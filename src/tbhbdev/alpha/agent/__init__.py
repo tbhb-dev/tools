@@ -23,30 +23,39 @@ def duration(text: str) -> int:
 def parser(prog: str) -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog=prog)
     verbs = command.add_subparsers(dest="verb", required=True)
-    execute = verbs.add_parser("exec", help="launch a headless run")
-    execute.add_argument("--host", required=True)
-    execute.add_argument("--repo", required=True)
-    execute.add_argument("--ref")
-    execute.add_argument(
-        "--harness", choices=("codex", "claude", "agy"), default="codex"
-    )
-    execute.add_argument("--allow-non-gemini", action="store_true")
-    accounts = execute.add_mutually_exclusive_group()
-    accounts.add_argument("--account")
-    accounts.add_argument("--ops", dest="account", action="store_const", const="ops")
-    execute.add_argument("--model", required=True)
-    execute.add_argument("--effort", required=True)
-    execute.add_argument("--profile", choices=("build", "review"), required=True)
-    execute.add_argument("--reason")
-    execute.add_argument("--claude-profile")
-    execute.add_argument("--unsandboxed")
-    execute.add_argument("--timeout", type=duration)
-    execute.add_argument("--schema")
-    execute.add_argument("--class", dest="class_")
-    execute.add_argument("--variant")
-    execute.add_argument("--role")
-    execute.add_argument("name")
-    execute.add_argument("prompt_file")
+    for verb, description in (
+        ("exec", "launch a headless run"),
+        ("start", "launch an interactive run"),
+    ):
+        execute = verbs.add_parser(verb, help=description)
+        execute.add_argument("--host", required=True)
+        execute.add_argument("--repo", required=True)
+        execute.add_argument("--ref")
+        execute.add_argument(
+            "--harness", choices=("codex", "claude", "agy"), default="codex"
+        )
+        execute.add_argument("--allow-non-gemini", action="store_true")
+        accounts = execute.add_mutually_exclusive_group()
+        accounts.add_argument("--account")
+        accounts.add_argument(
+            "--ops", dest="account", action="store_const", const="ops"
+        )
+        execute.add_argument("--model", required=True)
+        execute.add_argument("--effort", required=True)
+        execute.add_argument("--profile", choices=("build", "review"), required=True)
+        execute.add_argument("--reason")
+        execute.add_argument("--claude-profile")
+        execute.add_argument("--unsandboxed")
+        execute.add_argument("--timeout", type=duration)
+        if verb == "exec":
+            execute.add_argument("--schema")
+        else:
+            execute.set_defaults(schema=None)
+        execute.add_argument("--class", dest="class_")
+        execute.add_argument("--variant")
+        execute.add_argument("--role")
+        execute.add_argument("name")
+        execute.add_argument("prompt_file")
     for verb in ("wait", "status", "kill", "clean", "keep", "log", "diff"):
         sub = verbs.add_parser(verb)
         sub.add_argument("name")

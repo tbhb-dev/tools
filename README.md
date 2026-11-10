@@ -294,6 +294,8 @@ tbhbdev alpha agent status example
 tbhbdev alpha agent wait example
 ```
 
+`start` takes the same arguments as `exec` except `--schema`, with a required local prompt file. It launches an interactive harness in tmux, saves the brief as `<name>.prompt` without the headless instruction, and returns after launch confirmation with an attach command. Unsandboxed runs also print their authorization immediately after the launch line.
+
 Reviews accept `--ref` and resolve it before launch. `--schema` streams a JSON schema beside the prompt. Claude requires `--reason` and accepts `--claude-profile`. Use a `gemini-*` model for agy, or pass `--allow-non-gemini`. `--ops` selects the host's configured `ops` account.
 
 The optional `[[agent.host]] tbhbdev` key names an absolute executable path on that host. Its default is `$HOME/.local/bin/tbhbdev`, using the remote account’s home. Local `ssh` and `tmux` resolve against a fixed system PATH. Remote scripts use that PATH, add the standard package directories on macOS, and skip login shell startup.

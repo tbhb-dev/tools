@@ -96,7 +96,7 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     # A review's final commit is read remotely after all local checks pass.
     commit = "0" * 40 if profile is Profile.REVIEW else None
     run = RunRequest(
-        kind=RunKind.EXEC,
+        kind=RunKind(args.verb),
         repo=args.repo,
         commit=commit,
         harness=harness,
@@ -219,7 +219,19 @@ def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
             print(f"{run.name}: rc={reading.rc}\n{reading.text}", end="")
             return reading.rc or 0
         if action == "launched":
-            print(render.launched(run.name, run.host.name, run.host.account))
+            print(
+                transport.terminal_text(
+                    render.launched(run.name, run.host.name, run.host.account)
+                )
+            )
+            if run.request.kind is RunKind.START:
+                if run.request.unsandboxed:
+                    print(render.unsandboxed(run.name, run.request.authorized_by))
+                print(
+                    transport.terminal_text(
+                        f"{run.name}: attach with tbhbdev alpha agent attach {run.name}"
+                    )
+                )
             return 0
         if action == "deadline":
             return unconfirmed(settings, run, reading.phase)
@@ -411,7 +423,7 @@ def keep(settings: Settings, run: Run) -> int:
 
 
 def dispatch(settings: Settings, args: argparse.Namespace) -> int:
-    if args.verb == "exec":
+    if args.verb in {"exec", "start"}:
         return execute(settings, args)
     run = load(settings, args.name)
     verbs = {"wait": wait, "status": status, "kill": kill, "keep": keep}
