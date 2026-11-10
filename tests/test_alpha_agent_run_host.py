@@ -2545,3 +2545,30 @@ def test_preflight_refuses_review_on_tainted_host(
         assert str(caught.value) == "review runs are refused on a tainted host"
     else:
         run_host.preflight(run)
+
+
+@pytest.mark.parametrize(
+    "missing", ["reviews_app_id", "reviews_app_client_id", "reviews_app_pem"]
+)
+def test_preflight_refuses_review_without_app_references(
+    tmp_path: Path, missing: str
+) -> None:
+    run = make_run(tmp_path, profile="review", commit="0" * 40)
+    references = dataclasses.replace(run.settings.credentials[0], **{missing: None})
+    run = dataclasses.replace(
+        run, settings=dataclasses.replace(run.settings, credentials=(references,))
+    )
+    with pytest.raises(Invalid) as caught:
+        run_host.preflight(run)
+    assert str(caught.value) == "reviews App credentials are not configured"
+
+
+def test_preflight_checks_the_requested_accounts_app(tmp_path: Path) -> None:
+    run = make_run(tmp_path, profile="review", commit="0" * 40)
+    references = run.settings.credentials[0]
+    other = dataclasses.replace(references, account="ops", reviews_app_id=None)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(run.settings, credentials=(other, references)),
+    )
+    run_host.preflight(run)
