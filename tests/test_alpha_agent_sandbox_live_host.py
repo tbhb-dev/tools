@@ -679,3 +679,92 @@ def test_terminal_witness_distinguishes_open_failure_from_ioctl_denial(
         "error": errno.EPERM if opened else errno.ENXIO,
     }
     assert closed == ([321] if opened else [])
+
+
+@live_only
+def test_live_codex_copy_denies_account_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "scratch-home"
+    fake_auth = home / ".codex/auth.json"
+    fake_auth.parent.mkdir(parents=True)
+    fake_auth.write_text('"fixture auth only"')
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    run, paths = live_policy(tmp_path, monkeypatch, Harness.CODEX, Profile.BUILD)
+    value, executable = checked_live_policy(run, paths)
+    run.files.write("prompt", "fixture")
+    prepared = run_host.Prepared(
+        paths,
+        credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
+        None,
+    )
+    rendered = run_host.harness_command(run, prepared, value, executable)
+    overrides = tuple(
+        word
+        for index, word in enumerate(rendered)
+        if word.startswith(("default_permissions=", "permissions.build="))
+        or (
+            word == "-c"
+            and rendered[index + 1].startswith(
+                ("default_permissions=", "permissions.build=")
+            )
+        )
+    )
+    script = tmp_path / "copy-control.sh"
+    script.write_text(
+        'if (cd "$HOME" && cat .codex/auth.json) >/dev/null 2>&1; then exit 91; fi\n'
+        "printf invoked > write-control\n"
+    )
+    result = subprocess.run(
+        (
+            executable,
+            "sandbox",
+            run.host.os.value,
+            *overrides,
+            "--",
+            "/bin/sh",
+            str(script),
+        ),
+        env=value.env,
+        cwd=paths.worktree,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=45,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (Path(paths.worktree) / "write-control").read_text() == "invoked"
+    assert fake_auth.read_text() == '"fixture auth only"'
+    report("codex standalone-copy-auth: blocked; worktree write: allowed")
+
+
+@pytest.mark.usefixtures("fake_host_tools")
+def test_codex_copy_live_proof_uses_run_host_policy_and_fake_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def execute(command: tuple[str, ...], **kwargs: object) -> CompletedProcess[str]:
+        assert command[1:3] == (
+            "sandbox",
+            "linux" if sys.platform == "linux" else "macos",
+        )
+        assert 'default_permissions="build"' in command
+        table = next(word for word in command if word.startswith("permissions.build="))
+        home = tmp_path / "scratch-home"
+        assert f'"{home / ".codex"}" = "none"' in table
+        assert (home / ".codex/auth.json").read_text() == '"fixture auth only"'
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        assert environment["HOME"] == str(home)
+        (Path(str(kwargs["cwd"])) / "write-control").write_text("invoked")
+        return CompletedProcess(command, 0)
+
+    monkeypatch.setattr(
+        sys.modules[__name__], "subprocess", SimpleNamespace(run=execute)
+    )
+    test_live_codex_copy_denies_account_auth(tmp_path, monkeypatch)
+    assert (
+        "codex standalone-copy-auth: blocked; worktree write: allowed"
+        in capsys.readouterr().out
+    )

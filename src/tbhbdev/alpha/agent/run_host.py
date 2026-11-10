@@ -20,6 +20,7 @@ from pathlib import Path
 
 from tbhbdev import userconfig
 from tbhbdev.alpha.agent import (
+    codex_install,
     credentials,
     host_tools,
     process_group,
@@ -206,6 +207,18 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         ),
         (str(clone), str(clone.resolve())),
     )
+    name = (
+        "agy-agent"
+        if run.request.harness is Harness.AGY and run.request.profile is Profile.BUILD
+        else run.request.harness.value
+    )
+    executable = None
+    copied: tuple[str, ...] = ()
+    if run.request.harness is Harness.CODEX:
+        found = host_tools.resolve(name, ":".join(directories))
+        executable, copied = codex_install.prepare(found, run.home)
+        protected = (*protected, *copied)
+        policy.protect_host(check_settings, resolved, copied)
     value = policy.build(
         run.settings,
         run.host,
@@ -217,12 +230,8 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         protected=protected,
         denied=resolved_denies(run, resolved),
     )
-    name = (
-        "agy-agent"
-        if run.request.harness is Harness.AGY and run.request.profile is Profile.BUILD
-        else run.request.harness.value
-    )
-    executable = host_tools.resolve(name, value.env["PATH"])
+    if executable is None:
+        executable = host_tools.resolve(name, value.env["PATH"])
     commands = [
         host_tools.resolve(name, ":".join(directories))
         for name in ("git", "ssh-agent", "ssh-add", "ssh", "openssl")
@@ -243,7 +252,7 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
     policy.protect_host(
         check_settings,
         resolved,
-        (*executables, *(str(Path(p).parent) for p in executables)),
+        (*executables, *copied, *(str(Path(p).parent) for p in executables)),
     )
     if isinstance(value.detail, CodexPolicy) and value.detail.mode is CodexMode.PROFILE:
         value = dataclasses.replace(
@@ -253,6 +262,7 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
                 read_roots=(
                     *value.detail.read_roots,
                     *host_tools.codex_read_roots(executable, value.env["PATH"]),
+                    *copied,
                 ),
             ),
         )
