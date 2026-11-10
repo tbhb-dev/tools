@@ -10,6 +10,7 @@ There are no default lists here: write roots, denied paths and `PATH` come from
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import PurePosixPath
 
 from tbhbdev import secrets
@@ -153,8 +154,28 @@ def _codex(
     if full:
         return CodexPolicy(CodexMode.FULL_ACCESS, (), (), deny, APPROVAL_POLICY, search)
     return CodexPolicy(
-        CodexMode.PROFILE, (READ_ROOT,), writes, deny, APPROVAL_POLICY, search
+        CodexMode.PROFILE,
+        (READ_ROOT,),
+        writes,
+        deny,
+        APPROVAL_POLICY,
+        search,
     )
+
+
+def protected_git(paths: RunPaths) -> tuple[str, ...]:
+    if paths.git_common_dir is None:
+        return ()
+    return tuple(
+        resolve(paths.git_common_dir, entry) for entry in ("config", "hooks", "info")
+    )
+
+
+def _claude_write_denies(profile: Profile, paths: RunPaths) -> tuple[str, ...]:
+    if profile is Profile.BUILD:
+        return protected_git(paths)
+    common = () if paths.git_common_dir is None else (paths.git_common_dir,)
+    return (paths.worktree, *common)
 
 
 def _claude(
@@ -167,9 +188,7 @@ def _claude(
     review = profile is Profile.REVIEW
     # An absolute path in a Claude rule starts with a second slash.
     denied_tools = [f"{tool}(/{p}/**)" for p in deny for tool in ("Read", "Edit")]
-    deny_write = [paths.worktree] if review else []
-    if review and paths.git_common_dir is not None:
-        deny_write.append(paths.git_common_dir)
+    deny_write = _claude_write_denies(profile, paths)
     sandbox: dict[str, object] = {
         "enabled": True,
         "failIfUnavailable": True,
@@ -305,10 +324,15 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
         _agy_write_roots(settings, profile, paths) if harness is Harness.AGY else ()
     )
     _refuse_overlaps((*writes, *agy_writes), deny, "write path")
+    detail: CodexPolicy | ClaudePolicy | AgyPolicy
     if harness is Harness.CODEX:
-        detail: CodexPolicy | ClaudePolicy | AgyPolicy = _codex(
-            settings, profile, writes, deny, full=unsandboxed
-        )
+        codex_detail = _codex(settings, profile, writes, deny, full=unsandboxed)
+        if profile is Profile.BUILD and not unsandboxed:
+            codex_detail = replace(
+                codex_detail,
+                read_roots=(*codex_detail.read_roots, *protected_git(paths)),
+            )
+        detail = codex_detail
     elif harness is Harness.CLAUDE:
         detail = _claude(profile, paths, writes, deny, env)
     else:

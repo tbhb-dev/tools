@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import signal
 import subprocess
 import tempfile
 import time
@@ -22,6 +24,7 @@ from tbhbdev.alpha.agent.model import Harness, Invalid, Profile
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+    from typing import Literal
 
 
 VALUES = {
@@ -323,7 +326,9 @@ def test_auth_copy_and_write_back_under_lock(
     monkeypatch: pytest.MonkeyPatch,
     state: tuple[str | None, str | None, str | None, str | None],
 ) -> None:
-    before, after, current, wanted = state
+    before, after, current, wanted = (
+        json.dumps({"value": value}) if value is not None else None for value in state
+    )
     locks: list[Path] = []
     real_lock = runfiles.locked
 
@@ -409,6 +414,9 @@ def test_signing_delivery_uses_private_stdin_and_a_dedicated_group(
 
     def stop(group: int, grace: float) -> None:
         assert (group, grace) == (23, 0)
+        assert all(
+            signal.getsignal(s) == signal.SIG_IGN for s in process_group.INTERRUPTS
+        )
         events.append("stop")
 
     monkeypatch.setattr(subprocess, "Popen", spawn)
@@ -497,3 +505,98 @@ def test_missing_credentials_report_only_label_and_reference(
     with pytest.raises(Invalid) as caught:
         perform()
     assert str(caught.value) == f"{label} cannot read credential reference {reference}"
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ["symlink", "parent", "fifo", "oversized", "json", "array", "owner", "unicode"],
+)
+def test_auth_write_back_refuses_untrusted_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, attack: str
+) -> None:
+    source = runfiles.private_dir(tmp_path / "host") / "auth.json"
+    source.write_text('{"value":"original"}')
+    parent = runfiles.private_dir(tmp_path / "codex")
+    destination = parent / "auth.json"
+    outside = tmp_path / "outside"
+    outside.write_text('{"value":"outside"}')
+    if attack == "symlink":
+        destination.symlink_to(outside)
+    elif attack == "parent":
+        parent.rename(tmp_path / "moved")
+        parent.symlink_to(tmp_path / "moved", target_is_directory=True)
+        destination.write_text('{"value":"outside"}')
+    elif attack == "fifo":
+        os.mkfifo(destination)
+    elif attack == "oversized":
+        destination.write_text("{" + " " * (1024 * 1024) + "}")
+    elif attack == "owner":
+        destination.write_text("{}")
+        monkeypatch.setattr(os, "getuid", lambda: destination.stat().st_uid + 1)
+    elif attack == "unicode":
+        destination.write_bytes(b"\xff")
+    else:
+        destination.write_text("[1]" if attack == "array" else "invalid")
+    reason = credentials.auth_write_back(source, destination, source.read_text())
+    assert reason is not None
+    expected = {
+        "parent": "codex auth parent is redirected",
+        "fifo": "codex auth is not an owned regular file",
+        "owner": "codex auth is not an owned regular file",
+        "oversized": "codex auth exceeds 1 MiB",
+        "array": "codex auth must be a JSON object",
+    }.get(attack, "cannot safely read a JSON object")
+    assert reason == f"codex auth write-back skipped: {expected}\n"
+    assert "outside" not in reason
+    assert source.read_text() == '{"value":"original"}'
+    assert not (source.parent / "agent-auth.lock").exists()
+
+
+def test_auth_write_back_accepts_exact_size_limit(tmp_path: Path) -> None:
+    source = runfiles.private_dir(tmp_path / "host") / "auth.json"
+    destination = runfiles.private_dir(tmp_path / "codex") / "auth.json"
+    text = '{"value":"' + "a" * (1024 * 1024 - 12) + '"}'
+    assert len(text) == 1024 * 1024
+    destination.write_text(text)
+    assert credentials.auth_write_back(source, destination, None) is None
+    assert source.read_text() == text
+
+
+def test_auth_directory_is_pinned_and_reads_are_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = runfiles.private_dir(tmp_path / "codex") / "auth.json"
+    destination.write_text("{}")
+    opened = os.open
+    wrapped = os.fdopen
+    sizes: list[int] = []
+    flags_seen: list[int] = []
+
+    def checked_open(
+        path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        if path == destination.parent:
+            assert flags == os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            flags_seen.append(flags)
+        return opened(path, flags, mode, dir_fd=dir_fd)
+
+    @contextmanager
+    def checked_file(fd: int, mode: Literal["rb"]) -> Generator[object]:
+        with wrapped(fd, mode) as stream:
+
+            class Reader:
+                def fileno(self) -> int:
+                    return stream.fileno()
+
+                def read(self, size: int) -> bytes:
+                    assert size == 1024 * 1024 + 1
+                    sizes.append(size)
+                    return stream.read(size)
+
+            yield Reader()
+
+    monkeypatch.setattr(os, "open", checked_open)
+    monkeypatch.setattr(os, "fdopen", checked_file)
+    assert credentials.auth_after(destination) == "{}"
+    assert sizes == [1024 * 1024 + 1]
+    assert flags_seen == [os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW]

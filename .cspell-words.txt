@@ -239,3 +239,6 @@ SIGTTOU
 tcgetpgrp
 tcsetpgrp
 waitpid
+fsmonitor
+getuid
+NOSYSTEM

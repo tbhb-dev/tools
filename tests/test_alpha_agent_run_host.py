@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from agent_host_example import host_settings, repository, run_request
+from agent_host_example import constant, host_settings, repository, run_request
 from test_alpha_agent_credentials import VALUES
 from test_alpha_agent_settings import EXAMPLE
 
@@ -201,9 +201,14 @@ def test_launch_uses_the_policy_and_marks_only_after_spawn(
     monkeypatch.setenv("EXAMPLE_PARENT_MARKER", "example-parent-credential")
     monkeypatch.setenv("EXAMPLE_TMUX_MARKER", "example-tmux-credential")
 
-    def launch(command: tuple[str, ...], **kwargs: object) -> Child:
+    def launch(spec: process_group.Launch, **kwargs: object) -> Child:
+        command = spec.command
+        kwargs.update(
+            env=spec.env, cwd=spec.cwd, streams=spec.streams, terminal=spec.terminal
+        )
         check_launch_contract(run, prepared, command, kwargs, commands[-1])
         events.append("spawn")
+        cast("Callable[[Child], None]", kwargs["started"])(child)
         return child
 
     def record(files: runfiles.RunFiles, pid: int) -> None:
@@ -223,7 +228,7 @@ def test_launch_uses_the_policy_and_marks_only_after_spawn(
         assert group == os.getpgrp()
         events.append("foreground")
 
-    monkeypatch.setattr(process_group, "launch", launch)
+    monkeypatch.setattr(process_group, "launch_owned", launch)
     monkeypatch.setattr(process_group, "record", record)
     monkeypatch.setattr(process_group, "stop_started", stop)
     monkeypatch.setattr(process_group, "foreground", foreground)
@@ -258,7 +263,8 @@ def test_harness_deadlines(
     run.files.write("prompt", "example")
     child = Child(timeout=True)
 
-    def launch(*_args: object, **_kwargs: object) -> Child:
+    def launch(*_args: object, **kwargs: object) -> Child:
+        cast("Callable[[Child], None]", kwargs["started"])(child)
         return child
 
     def record(_files: runfiles.RunFiles, _pid: int) -> None:
@@ -269,7 +275,7 @@ def test_harness_deadlines(
     def stop(pid: int, _grace: float) -> None:
         stopped.append(pid)
 
-    monkeypatch.setattr(process_group, "launch", launch)
+    monkeypatch.setattr(process_group, "launch_owned", launch)
     monkeypatch.setattr(process_group, "record", record)
     monkeypatch.setattr(process_group, "stop_started", stop)
     with ExitStack() as stack:
@@ -357,7 +363,7 @@ def test_finish_orders_cleanup_auth_agent_index_and_atomic_rc(
 
 
 def test_interrupt_and_agent_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
-    with pytest.raises(run_host.RunInterruptedError):
+    with process_group.defer_signals(), pytest.raises(run_host.RunInterruptedError):
         run_host.interrupt(15, None)
     child = Child()
     stopped: list[int] = []
@@ -370,6 +376,8 @@ def test_interrupt_and_agent_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
     run_host.stop_agent(cast("subprocess.Popen[str]", child))
     assert stopped == [23]
     assert child.waits == [None]
+    with process_group.ignore_signals():
+        assert run_host.interrupt(15, None) is None
 
 
 @pytest.mark.parametrize("source", ["file", "stdin", "recorded"])
@@ -406,6 +414,7 @@ def test_hidden_dispatch_reads_request_and_restores_handlers(
         assert run.settings == expected_settings
         assert run.request.claude_profile == "primary"
         assert run.files.root == files.root
+        assert files.path("run.lock").is_file()
         assert run.home == Path.home()
         assert text == "example task"
         assert run.tmpdir.is_dir()
@@ -467,6 +476,8 @@ def test_command_refuses_invalid_input(
         "missing": f"[Errno 2] No such file or directory: '{missing_path}'",
     }
     assert capsys.readouterr().err == f"example run-host: {details[case]}\n"
+    assert files.path("rc").read_text() == "1\n"
+    assert files.path("log").read_text() == f"run refused: {details[case]}\n"
 
 
 def tmux_environment_probe(root: Path, harness: Harness) -> None:
@@ -634,6 +645,7 @@ def test_review_finishes_without_a_signing_agent_or_auth_write_back(
 
     monkeypatch.setattr(process_group, "prepare", prepare)
     monkeypatch.setattr(run_host, "run_harness", harness)
+    run.files.receive(run.request)
     assert run_host.execute(run, "example") == 0
     assert run.files.path("rc").read_text() == "0\n"
     assert not (run.tmpdir / "ssh.sock").exists()
@@ -641,7 +653,10 @@ def test_review_finishes_without_a_signing_agent_or_auth_write_back(
     assert runfiles.latest(run.files.root)["example"]["state"] == "ended"
 
 
-def test_hangup_stops_harness_group_writes_auth_and_rc(tmp_path: Path) -> None:
+@pytest.mark.parametrize("escalate", [False, True])
+def test_hangup_stops_harness_group_writes_auth_and_rc(
+    tmp_path: Path, escalate: bool
+) -> None:
     script = r'''
 import dataclasses, os, runpy, signal, subprocess, sys
 from pathlib import Path
@@ -653,12 +668,14 @@ run = helpers["make_run"](Path(sys.argv[2]))
 run = dataclasses.replace(
     run, settings=dataclasses.replace(run.settings, kill_grace_seconds=0.2)
 )
-prepared = dataclasses.replace(helpers["preparation"](run), auth_before="old")
+prepared = dataclasses.replace(
+    helpers["preparation"](run), auth_before='{"value":"old"}'
+)
 source = runfiles.private_dir(run.home / ".codex") / "auth.json"
-source.write_text("old")
+source.write_text('{"value":"old"}')
 run_host._load = lambda args, tmpdir: (run, "example task")
 process_group.prepare = lambda *args: prepared
-original_launch = process_group.launch
+original_launch = process_group.launch_owned
 stub = """
 import os, signal, sys
 from pathlib import Path
@@ -670,19 +687,37 @@ else:
         os.waitpid(child, 0)
         sys.exit(0)
     signal.signal(signal.SIGTERM, finish)
-    (Path(os.environ["CODEX_HOME"]) / "auth.json").write_text("new")
+    (Path(os.environ["CODEX_HOME"]) / "auth.json").write_text('{"value":"new"}')
     print(child, flush=True)
     signal.pause()
 """
-def launch(command, *, env, cwd, streams, terminal):
+if sys.argv[3] == "True":
+    stub = """
+import os, signal
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+(Path(os.environ["CODEX_HOME"]) / "auth.json").write_text('{"value":"new"}')
+print(os.getpid(), flush=True)
+signal.pause()
+"""
+    original_stop = process_group.stop_started
+    def stop(pid, grace):
+        print("cleanup", flush=True)
+        sys.stdin.readline()
+        original_stop(pid, grace)
+    process_group.stop_started = stop
+
+def launch(spec, *, started):
     child = original_launch(
-        (sys.executable, "-c", stub), env=env, cwd=cwd,
-        streams=(None, subprocess.PIPE, None), terminal=None,
+        dataclasses.replace(
+            spec, command=(sys.executable, "-c", stub),
+            streams=(None, subprocess.PIPE, None), terminal=None,
+        ), started=started,
     )
     descendant = int(child.stdout.readline())
     (run.files.root / "descendant").write_text(str(descendant))
     return child
-process_group.launch = launch
+process_group.launch_owned = launch
 write = runfiles.RunFiles.write
 def recorded(self, suffix, text):
     write(self, suffix, text)
@@ -692,7 +727,15 @@ runfiles.RunFiles.write = recorded
 sys.exit(run_host.main(["example", "--host", "example-linux"], "example run-host"))
 '''
     supervisor = subprocess.Popen(
-        [sys.executable, "-c", script, str(Path(__file__).resolve()), str(tmp_path)],
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(Path(__file__).resolve()),
+            str(tmp_path),
+            str(escalate),
+        ],
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -701,12 +744,20 @@ sys.exit(run_host.main(["example", "--host", "example-linux"], "example run-host
         assert supervisor.stdout is not None
         assert supervisor.stdout.readline() == "ready\n"
         supervisor.send_signal(signal.SIGHUP)
+        if escalate:
+            assert supervisor.stdout.readline() == "cleanup\n"
+            supervisor.send_signal(signal.SIGTERM)
+            assert supervisor.stdin is not None
+            supervisor.stdin.write("continue\n")
+            supervisor.stdin.flush()
         output, error = supervisor.communicate(timeout=10)
         assert supervisor.returncode == 143, output + error
         files = runfiles.RunFiles(tmp_path / "runs", "example")
         assert files.path("rc").read_text() == "143\n"
         assert files.path("phase").read_text() == "ended"
-        assert (tmp_path / "home" / ".codex" / "auth.json").read_text() == "new"
+        assert (
+            tmp_path / "home" / ".codex" / "auth.json"
+        ).read_text() == '{"value":"new"}'
         group = json.loads(files.path("pgid").read_text())["pgid"]
         descendant = int((files.root / "descendant").read_text())
         assert process_group.leader_start(group) is None
@@ -1015,7 +1066,8 @@ class HostRuntime:
             self.phases.append(text)
         if suffix == "rc":
             assert self.phases[-1] == "ended"
-            assert runfiles.latest(self.run.files.root)["example"]["rc"] == int(text)
+            entry = runfiles.latest(self.run.files.root).get("example")
+            assert entry is None or entry["rc"] is None
         self.write_file(suffix, text)
 
     def patch(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1033,10 +1085,12 @@ def test_probe_failure_stops_its_recorded_harness_group(
     real_start = subprocess.Popen
 
     def start(
-        command: list[str], *, stdout: int, stderr: int, text: bool
+        command: list[str], *, stdin: int, stdout: int, stderr: int, text: bool
     ) -> subprocess.Popen[str]:
         assert text is True
-        child = real_start(command, stdout=stdout, stderr=stderr, text=True)
+        child = real_start(
+            command, stdin=stdin, stdout=stdout, stderr=stderr, text=True
+        )
         real_signal = child.send_signal
 
         def send(number: int) -> None:
@@ -1050,9 +1104,212 @@ def test_probe_failure_stops_its_recorded_harness_group(
 
     monkeypatch.setattr(subprocess, "Popen", start)
     with pytest.raises(RuntimeError, match=r"^probe signal failed$"):
-        test_hangup_stops_harness_group_writes_auth_and_rc(tmp_path)
+        test_hangup_stops_harness_group_writes_auth_and_rc(tmp_path, escalate=False)
     files = runfiles.RunFiles(tmp_path / "runs", "example")
     group = json.loads(files.path("pgid").read_text())["pgid"]
     descendant = int((files.root / "descendant").read_text())
     assert not process_group.alive(group)
     assert process_group.leader_start(descendant) is None
+
+
+@pytest.mark.parametrize("failure", ["initial-index", "final-index", "agent", "phase"])
+def test_cleanup_failures_cannot_skip_rc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    run = make_run(tmp_path)
+    prepared = dataclasses.replace(
+        preparation(run),
+        delivery=credentials.Delivery(
+            {}, "key", gh_fallback=False, claude_profile=None
+        ),
+    )
+    monkeypatch.setattr(process_group, "prepare", constant(prepared))
+    monkeypatch.setattr(run_host, "run_harness", constant(7))
+    monkeypatch.setattr(credentials, "signing_agent", constant(Child()))
+    stopped: list[str] = []
+
+    def stop(_child: object) -> None:
+        stopped.append("stopped")
+        if failure == "agent":
+            raise OSError
+
+    append = runfiles.append
+
+    def index(root: Path, entry: dict[str, object]) -> None:
+        if (failure == "initial-index" and entry["rc"] is None) or (
+            failure == "final-index" and entry["rc"] is not None
+        ):
+            if entry["rc"] is not None:
+                assert run.files.path("rc").read_text() == "7\n"
+            raise OSError
+        append(root, entry)
+
+    write = run.files.write
+
+    def record(suffix: str, text: str) -> None:
+        if failure == "phase" and text == "ended":
+            raise OSError
+        write(suffix, text)
+
+    monkeypatch.setattr(run_host, "stop_agent", stop)
+    monkeypatch.setattr(runfiles, "append", index)
+    monkeypatch.setattr(run.files, "write", record)
+    if failure in ("agent", "phase"):
+        with pytest.raises(OSError, match=r"^$"):
+            run_host.execute(run, "example")
+    else:
+        assert run_host.execute(run, "example") == (
+            1 if failure == "initial-index" else 7
+        )
+    assert run.files.path("rc").read_text() == (
+        "1\n" if failure == "initial-index" else "7\n"
+    )
+    assert stopped == ([] if failure == "initial-index" else ["stopped"])
+    if failure == "final-index":
+        assert run.files.path("log").read_text() == "completion index append failed\n"
+
+
+@pytest.mark.parametrize("name", ["../unsafe", ""])
+def test_invalid_name_has_no_completion_location(
+    tmp_path: Path, config_file: Path, name: str
+) -> None:
+    config_file.write_text(EXAMPLE)
+    assert run_host.main([name, "--host", "example-linux"], "example") == 1
+    assert not list(tmp_path.rglob("*.rc"))
+
+
+def test_load_interrupt_is_recorded_before_handlers_restore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def load(_args: object, _tmpdir: Path) -> None:
+        assert signal.getsignal(signal.SIGHUP) is run_host.interrupt
+        os.kill(os.getpid(), signal.SIGHUP)
+
+    monkeypatch.setattr(run_host, "_load", load)
+    previous = signal.getsignal(signal.SIGHUP)
+    assert run_host.main(["example"], "example") == 143
+    root = Path(os.environ["XDG_STATE_HOME"]) / "tbhbdev" / "agent-runs"
+    assert (root / "example.rc").read_text() == "143\n"
+    assert (
+        root / "example.log"
+    ).read_text() == "run refused: interrupted during load\n"
+    assert signal.getsignal(signal.SIGHUP) == previous
+
+
+@pytest.mark.parametrize("terminal_lost", [False, True])
+def test_signal_at_launch_handoff_records_and_stops_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal_lost: bool
+) -> None:
+    run = make_run(tmp_path, kind="start" if terminal_lost else "exec")
+    prepared = preparation(run)
+    monkeypatch.setattr(process_group, "prepare", constant(prepared))
+    monkeypatch.setattr(sys, "stdin", sys.__stdin__)
+    child = Child()
+    events: list[str] = []
+
+    def launch(*_args: object, **kwargs: object) -> Child:
+        cast("Callable[[Child], None]", kwargs["started"])(child)
+        os.kill(os.getpid(), signal.SIGHUP)
+        return child
+
+    def record(files: runfiles.RunFiles, pid: int) -> None:
+        assert pid == child.pid
+        files.write("pgid", "recorded")
+        events.append("recorded")
+
+    def stop(pid: int, grace: float) -> None:
+        assert (pid, grace) == (child.pid, 0)
+        events.append("stopped")
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    def foreground(_fd: int, _pid: int) -> None:
+        raise OSError
+
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "record", record)
+    monkeypatch.setattr(process_group, "stop_started", stop)
+    monkeypatch.setattr(process_group, "foreground", foreground)
+    with process_group.defer_signals():
+        signal.signal(signal.SIGHUP, run_host.interrupt)
+        signal.signal(signal.SIGTERM, run_host.interrupt)
+        assert run_host.execute(run, "example") == 143
+    assert events == ["recorded", "stopped"]
+    assert child.waits == [None]
+    assert run.files.path("rc").read_text() == "143\n"
+    if terminal_lost:
+        assert (
+            run.files.path("log").read_text() == "terminal unavailable during cleanup\n"
+        )
+
+
+def test_auth_skip_reason_is_logged_without_changing_harness_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    prepared = preparation(run)
+    monkeypatch.setattr(process_group, "prepare", constant(prepared))
+    monkeypatch.setattr(run_host, "run_harness", constant(0))
+    monkeypatch.setattr(
+        credentials, "auth_write_back", constant("unsafe auth skipped\n")
+    )
+    assert run_host.execute(run, "example") == 0
+    assert run.files.path("log").read_text() == "unsafe auth skipped\n"
+
+
+def test_failed_launch_still_records_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    run.files.receive(run.request)
+    prepared = preparation(run)
+    monkeypatch.setattr(process_group, "prepare", constant(prepared))
+
+    def launch(*_args: object, **_kwargs: object) -> None:
+        raise OSError
+
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    assert run_host.execute(run, "example") == 1
+    assert run.files.path("rc").read_text() == "1\n"
+    assert not run.files.path("launched").exists()
+
+
+def test_missing_name_exits_one_without_rc(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_host.main([], "example") == 1
+    assert not list(tmp_path.rglob("*.rc"))
+    assert capsys.readouterr() == ("", "example: run name is required\n")
+
+
+def test_terminal_setup_failure_keeps_registered_cleanup_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path, kind="start")
+    prepared = preparation(run)
+    monkeypatch.setattr(sys, "stdin", sys.__stdin__)
+    monkeypatch.setattr(process_group, "prepare", constant(prepared))
+    child = Child()
+    monkeypatch.setattr(subprocess, "Popen", constant(child))
+    events: list[str] = []
+
+    def record(files: runfiles.RunFiles, pid: int) -> None:
+        assert pid == child.pid
+        files.write("pgid", "registered")
+        events.append("registered")
+
+    def foreground(_fd: int, _pid: int) -> None:
+        assert events[0] == "registered"
+        raise OSError
+
+    def stop(pid: int, _grace: float) -> None:
+        assert pid == child.pid
+        events.append("stopped")
+
+    monkeypatch.setattr(process_group, "record", record)
+    monkeypatch.setattr(process_group, "foreground", foreground)
+    monkeypatch.setattr(process_group, "stop_started", stop)
+    assert run_host.execute(run, "example") == 1
+    assert events == ["registered", "stopped"]
+    assert child.waits == [None]
+    assert run.files.path("pgid").read_text() == "registered"
+    assert run.files.path("rc").read_text() == "1\n"

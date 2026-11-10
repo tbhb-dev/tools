@@ -7,6 +7,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 from agent_example import settings
@@ -83,3 +84,10 @@ def host_settings() -> model.Settings:
             "primary", (model.ClaudeProfile("primary", "example/primary/token", None),)
         ),
     )
+
+
+def constant[Result](value: Result) -> Callable[..., Result]:
+    def fixed(*_args: object, **_kwargs: object) -> Result:
+        return value
+
+    return fixed

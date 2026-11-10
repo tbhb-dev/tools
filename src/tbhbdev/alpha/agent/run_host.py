@@ -180,12 +180,20 @@ def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
         )
     if time.monotonic() >= run.deadline:
         raise TimeoutError
-    child = process_group.launch(
-        command, env=env, cwd=paths.worktree, streams=streams, terminal=terminal
-    )
-    try:
+    child = None
+
+    def started(value: subprocess.Popen[str]) -> None:
+        nonlocal child
+        child = value
         process_group.record(run.files, child.pid)
         run.files.write("launched", "\n")
+
+    try:
+        with process_group.defer_signals():
+            child = process_group.launch_owned(
+                process_group.Launch(command, env, paths.worktree, streams, terminal),
+                started=started,
+            )
         run.files.write("phase", "running")
         limit = run_state.time_limit(
             run.request.kind, run.request.timeout, run.settings.max_run_minutes
@@ -195,12 +203,19 @@ def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
         except subprocess.TimeoutExpired:
             return 124
     finally:
-        run.files.write("phase", "exited")
-        process_group.stop_started(child.pid, run.settings.kill_grace_seconds)
-        child.wait()
-        run.files.write("phase", "stopped")
+        stack.enter_context(process_group.ignore_signals())
+        if child is not None:
+            try:
+                run.files.write("phase", "exited")
+            finally:
+                process_group.stop_started(child.pid, run.settings.kill_grace_seconds)
+                child.wait()
+            run.files.write("phase", "stopped")
         if terminal is not None:
-            process_group.foreground(terminal, os.getpgrp())
+            try:
+                process_group.foreground(terminal, os.getpgrp())
+            except OSError:
+                run.files.write("log", "terminal unavailable during cleanup\n")
 
 
 def stop_agent(agent: subprocess.Popen[str]) -> None:
@@ -216,12 +231,18 @@ def prepared_result(result: object) -> Prepared:
 
 
 def execute(run: Run, text: str) -> int:
-    """All exits write rc after group cleanup, auth refresh and index append."""
+    """Keep cleanup protected until the completion record is durable."""
+    with ExitStack() as stack:
+        return _execute(run, text, stack)
+
+
+def _execute(run: Run, text: str, stack: ExitStack) -> int:
     prepared = None
     rc = 1
     agent = None
     try:
-        run.files.receive(run.request)
+        if not run.files.path("request.json").exists():
+            run.files.receive(run.request)
         run.files.write("phase", "check")
         result = process_group.prepare(
             lambda: prepare_workspace(run),
@@ -234,12 +255,11 @@ def execute(run: Run, text: str) -> int:
         run.files.write("phase", "workspace")
         run.files.write("prompt", render.brief(run.request.kind, text))
         run.files.write("phase", "brief")
-        with ExitStack() as stack:
-            if prepared.delivery.signing is not None:
-                agent = credentials.signing_agent(
-                    prepared.delivery.signing, run.tmpdir, run.deadline
-                )
-            rc = run_harness(run, prepared, stack)
+        if prepared.delivery.signing is not None:
+            agent = credentials.signing_agent(
+                prepared.delivery.signing, run.tmpdir, run.deadline
+            )
+        rc = run_harness(run, prepared, stack)
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
     except RunInterruptedError, EOFError:
@@ -251,22 +271,40 @@ def execute(run: Run, text: str) -> int:
             "log", "run failed; check the clone and credential references\n"
         )
     finally:
-        if prepared is not None:
+        stack.enter_context(process_group.ignore_signals())
+        rc = finish(run, prepared, agent, rc)
+    return rc
+
+
+def finish(
+    run: Run, prepared: Prepared | None, agent: subprocess.Popen[str] | None, rc: int
+) -> int:
+    try:
+        if prepared is not None and run.request.harness is Harness.CODEX:
             try:
-                if run.request.harness is Harness.CODEX:
-                    credentials.auth_write_back(
-                        run.home / ".codex" / "auth.json",
-                        Path(prepared.paths.codex_home) / "auth.json",
-                        prepared.auth_before,
-                    )
+                reason = credentials.auth_write_back(
+                    run.home / ".codex" / "auth.json",
+                    Path(prepared.paths.codex_home) / "auth.json",
+                    prepared.auth_before,
+                )
+                if reason is not None:
+                    run.files.write("log", reason)
             except OSError, ValueError:
                 rc = 1
                 run.files.write("log", "codex auth write-back failed\n")
+    finally:
+        try:
             if agent is not None:
                 stop_agent(agent)
+        finally:
+            try:
+                run.files.write("phase", "ended")
+            finally:
+                run.files.write("rc", f"{rc}\n")
+    try:
         runfiles.append(run.files.root, index_entry(run, prepared, rc))
-        run.files.write("phase", "ended")
-        run.files.write("rc", f"{rc}\n")
+    except OSError, ValueError:
+        run.files.write("log", "completion index append failed\n")
     return rc
 
 
@@ -275,31 +313,68 @@ class RunInterruptedError(Exception):
 
 
 def interrupt(_number: int, _frame: object) -> None:
+    if process_group.cleaning():
+        return
+    for number in process_group.INTERRUPTS:
+        signal.signal(number, signal.SIG_IGN)
     raise RunInterruptedError
 
 
 def main(arguments: list[str], prog: str) -> int:
     parser = argparse.ArgumentParser(prog=prog)
-    parser.add_argument("name")
+    parser.add_argument("name", nargs="?")
     parser.add_argument("request", nargs="?")
     parser.add_argument("--host", default=socket.gethostname())
     parser.add_argument("--prompt")
     args = parser.parse_args(arguments)
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            run, text = _load(args, Path(tmpdir))
-            previous = {
-                s: signal.signal(s, interrupt)
-                for s in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
-            }
-            try:
-                return execute(run, text)
-            finally:
-                for number, handler in previous.items():
-                    signal.signal(number, handler)
-    except (Invalid, userconfig.ConfigError, OSError, ValueError) as exc:
-        print(f"{prog}: {exc}", file=sys.stderr)
+    if args.name is None:
+        print(f"{prog}: run name is required", file=sys.stderr)
         return 1
+    files = None
+    previous = {s: signal.signal(s, interrupt) for s in process_group.INTERRUPTS}
+    try:
+        with process_group.defer_signals():
+            files = _files(args.name)
+        with (
+            runfiles.locked(files.path("run.lock")),
+            tempfile.TemporaryDirectory() as tmpdir,
+        ):
+            run, text = _load(args, Path(tmpdir).resolve())
+            return execute(run, text)
+    except (
+        Invalid,
+        userconfig.ConfigError,
+        OSError,
+        ValueError,
+        RunInterruptedError,
+    ) as exc:
+        rc = 143 if isinstance(exc, RunInterruptedError) else 1
+        with process_group.ignore_signals():
+            if files is not None:
+                try:
+                    reason = (
+                        "interrupted during load"
+                        if isinstance(exc, RunInterruptedError)
+                        else str(exc)
+                    )
+                    files.write("log", f"run refused: {reason}\n")
+                finally:
+                    files.write("rc", f"{rc}\n")
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return rc
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
+def _files(name: str) -> runfiles.RunFiles:
+    home = Path.home()
+    root = (
+        Path(os.environ.get("XDG_STATE_HOME", str(home / ".local" / "state")))
+        / "tbhbdev"
+        / "agent-runs"
+    )
+    return runfiles.RunFiles(root, name)
 
 
 def _load(args: argparse.Namespace, tmpdir: Path) -> tuple[Run, str]:
@@ -311,12 +386,7 @@ def _load(args: argparse.Namespace, tmpdir: Path) -> tuple[Run, str]:
         message = f"host {args.host!r} is not configured"
         raise Invalid(message)
     home = Path.home()
-    root = (
-        Path(os.environ.get("XDG_STATE_HOME", str(home / ".local" / "state")))
-        / "tbhbdev"
-        / "agent-runs"
-    )
-    files = runfiles.RunFiles(root, args.name)
+    files = _files(args.name)
     if files.path("request.json").exists() and args.request is not None:
         message = f"run {args.name!r} already exists"
         raise Invalid(message)
@@ -345,6 +415,8 @@ def _load(args: argparse.Namespace, tmpdir: Path) -> tuple[Run, str]:
     if files.path("rc").exists() or files.path("pgid").exists():
         message = f"run {args.name!r} has already started"
         raise Invalid(message)
+    if args.request is not None:
+        files.receive(parsed)
     run = Run(
         files,
         parsed,

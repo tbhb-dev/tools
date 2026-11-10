@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -59,8 +60,9 @@ def test_rc_is_replaced_only_after_complete_flush(
     sync = os.fsync
 
     def synced(fd: int) -> None:
-        assert target.read_bytes() == b"old\n"
-        events.append("sync")
+        directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+        assert target.read_bytes() == (b"124\n" if directory else b"old\n")
+        events.append("directory-sync" if directory else "sync")
         sync(fd)
 
     def replaced(path: Path, destination: Path) -> Path:
@@ -76,7 +78,7 @@ def test_rc_is_replaced_only_after_complete_flush(
     runfiles.atomic(target, "124\n")
     assert target.read_text() == "124\n"
     assert target.stat().st_mode & 0o777 == 0o600
-    assert events == ["sync", "replace"]
+    assert events == ["sync", "replace", "directory-sync"]
 
 
 def test_index_keeps_last_line(tmp_path: Path) -> None:
@@ -173,3 +175,108 @@ def test_index_creation_mode_and_lock_path(
     assert (tmp_path / "index.jsonl").stat().st_mode & 0o777 == 0o600
     assert runfiles.latest(tmp_path) == {"example": {"run": "example"}}
     assert calls == [tmp_path / "index.lock", tmp_path / "index.lock"]
+
+
+@pytest.mark.parametrize("failure", ["write", "replace", "directory"])
+def test_atomic_failure_preserves_old_file_and_moves_temporary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    target = tmp_path / "example.rc"
+    target.write_text("old")
+    replace = Path.replace
+    fsync = os.fsync
+
+    def checked_replace(path: Path, destination: Path) -> Path:
+        if failure == "replace" and destination == target:
+            raise OSError
+        return replace(path, destination)
+
+    def checked_sync(fd: int) -> None:
+        directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+        if (failure == "directory") == directory and failure != "replace":
+            raise OSError
+        fsync(fd)
+
+    monkeypatch.setattr(Path, "replace", checked_replace)
+    monkeypatch.setattr(os, "fsync", checked_sync)
+    with pytest.raises(OSError, match=r"^$"):
+        runfiles.atomic(target, "new")
+    assert target.read_text() == ("new" if failure == "directory" else "old")
+    if failure != "directory":
+        failed = list(tmp_path.glob(".failed-*/incomplete"))
+        assert len(failed) == 1
+        assert failed[0].read_text() == "new"
+        assert {p.name for p in tmp_path.iterdir()} == {
+            target.name,
+            failed[0].parent.name,
+            "xdg",
+        }
+
+
+def test_two_concurrent_request_claims_have_one_winner(tmp_path: Path) -> None:
+    code = """\
+import sys
+from pathlib import Path
+from tbhbdev.alpha.agent import runfiles
+from tbhbdev.alpha.agent.decisions import request
+import json
+print('ready', flush=True)
+sys.stdin.readline()
+try:
+    runfiles.RunFiles(Path(sys.argv[1]), 'example').receive(
+        request.parse(json.loads(sys.argv[2]), host_allows_unsandboxed=False)
+    )
+except FileExistsError:
+    sys.exit(2)
+"""
+    children = [
+        subprocess.Popen(
+            [sys.executable, "-c", code, str(tmp_path), json.dumps(BUILD)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    try:
+        for child in children:
+            assert child.stdout is not None
+            assert child.stdout.readline() == "ready\n"
+        for child in children:
+            assert child.stdin is not None
+            child.stdin.write("go\n")
+            child.stdin.flush()
+        assert sorted(child.wait(timeout=10) for child in children) == [0, 2]
+        assert json.loads((tmp_path / "example.request.json").read_text()) == BUILD
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=10)
+
+
+def test_claim_mode_ignores_permissive_umask(tmp_path: Path) -> None:
+    files = runfiles.RunFiles(tmp_path, "example")
+    previous = os.umask(0)
+    try:
+        files.receive(request.parse(BUILD, host_allows_unsandboxed=False))
+    finally:
+        os.umask(previous)
+    assert files.path("request.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_atomic_opens_only_a_directory_for_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[int] = []
+    original = os.open
+
+    def checked(path: str | Path, flags: int, mode: int = 0o777) -> int:
+        if path == tmp_path:
+            assert flags == os.O_RDONLY | os.O_DIRECTORY
+            opened.append(flags)
+        return original(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", checked)
+    runfiles.atomic(tmp_path / "example.rc", "0\n")
+    assert opened == [os.O_RDONLY | os.O_DIRECTORY]
