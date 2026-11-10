@@ -93,6 +93,46 @@ def test_resolution_follows_symlinks_and_refuses_missing(tmp_path: Path) -> None
         host_tools.resolve("missing", str(tmp_path))
 
 
+@pytest.mark.parametrize("indirect", [False, True])
+def test_parent_commands_refuse_mise_shims(tmp_path: Path, indirect: bool) -> None:
+    directory = tmp_path / "mise" / "shims"
+    directory.mkdir(parents=True)
+    target = script(tmp_path / "mise-binary", "binary")
+    shim = directory / "codex"
+    shim.symlink_to(target)
+    search = directory
+    if indirect:
+        search = tmp_path / "bin"
+        search.mkdir()
+        (search / "codex").symlink_to(shim)
+    with pytest.raises(Invalid) as caught:
+        host_tools.resolve("codex", str(search))
+    assert str(caught.value) == (
+        "host executable codex is a mise shim; configure its fixed install directory"
+    )
+
+
+def test_mise_installation_protection_follows_path_aliases(tmp_path: Path) -> None:
+    directory = tmp_path / "mise" / "shims"
+    directory.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(directory, target_is_directory=True)
+    assert host_tools.mise_installations((str(alias), str(directory))) == (
+        str(directory.parent / "installs"),
+    )
+
+
+@pytest.mark.parametrize("relative", ["mise/bin", "other/shims"])
+def test_fixed_install_directories_are_not_mise_shims(
+    tmp_path: Path, relative: str
+) -> None:
+    directory = tmp_path / relative
+    directory.mkdir(parents=True)
+    executable = script(directory / "codex", "binary")
+    assert host_tools.resolve("codex", str(directory)) == executable
+    assert host_tools.mise_installations((str(directory),)) == ()
+
+
 @pytest.mark.parametrize(
     "header", ["#!/bin/sh", "#!/usr/bin/env sh", "#!/usr/bin/env -S sh -e"]
 )

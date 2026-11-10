@@ -47,6 +47,15 @@ DOCKER_CONFIG_SUBDIR = "docker"
 _TMP = "/tmp"  # noqa: S108 # nosec B108 -- an alias, not a temp file
 # Claude's file tools, which a review run doesn't get.
 _CLAUDE_FILE_TOOLS = ("Edit", "Write", "NotebookEdit")
+_GIT_CONFIG_PATHS = (
+    ".git",
+    ".git/config",
+    ".git/config.worktree",
+    ".git/commondir",
+    ".git/hooks",
+    ".git/info",
+    ".git/modules",
+)
 
 
 def resolve(home: str, path: str) -> str:
@@ -186,20 +195,7 @@ def _codex(
 
 
 def protected_git(paths: RunPaths) -> tuple[str, ...]:
-    return (
-        resolve(paths.worktree, ".git"),
-        *tuple(
-            resolve(paths.worktree, f".git/{entry}")
-            for entry in (
-                "config",
-                "config.worktree",
-                "commondir",
-                "hooks",
-                "info",
-                "modules",
-            )
-        ),
-    )
+    return tuple(resolve(paths.worktree, entry) for entry in _GIT_CONFIG_PATHS)
 
 
 def _claude_write_denies(profile: Profile, paths: RunPaths) -> tuple[str, ...]:

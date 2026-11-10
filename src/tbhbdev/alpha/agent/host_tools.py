@@ -50,7 +50,29 @@ def resolve(name: str, path: str | None = None) -> str:
     if found is None:
         message = f"host executable {name} was not found"
         raise Invalid(message)
+    aliases = (Path(found), *(Path(p) for p in executable_links(Path(found))))
+    if any(
+        parent.name == "shims" and parent.parent.name == "mise"
+        for alias in aliases
+        for parent in (alias, alias.parent)
+    ):
+        message = (
+            f"host executable {name} is a mise shim; "
+            "configure its fixed install directory"
+        )
+        raise Invalid(message)
     return str(Path(found).resolve())
+
+
+def mise_installations(directories: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            str(alias.parent / "installs")
+            for directory in directories
+            for alias in (Path(directory), Path(directory).resolve())
+            if alias.name == "shims" and alias.parent.name == "mise"
+        )
+    )
 
 
 def executable_links(path: Path) -> tuple[str, ...]:

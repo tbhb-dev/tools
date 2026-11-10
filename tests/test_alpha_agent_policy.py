@@ -1515,17 +1515,17 @@ def test_harness_parent_neutralizes_all_repository_git_config(
     result = made(os_name, Profile.BUILD, harness, "agent")
     assert result.env["GIT_CONFIG_NOSYSTEM"] == "1"
     assert result.env["GIT_CONFIG_COUNT"] == "6"
-    assert [
-        (result.env[f"GIT_CONFIG_KEY_{i}"], result.env[f"GIT_CONFIG_VALUE_{i}"])
+    assert {
+        result.env[f"GIT_CONFIG_KEY_{i}"]: result.env[f"GIT_CONFIG_VALUE_{i}"]
         for i in range(6)
-    ] == [
-        ("core.fsmonitor", "false"),
-        ("core.hooksPath", "/dev/null"),
-        ("diff.ignoreSubmodules", "all"),
-        ("status.submoduleSummary", "false"),
-        ("protocol.ext.allow", "never"),
-        ("protocol.file.allow", "never"),
-    ]
+    } == {
+        "core.fsmonitor": "false",
+        "core.hooksPath": "/dev/null",
+        "diff.ignoreSubmodules": "all",
+        "status.submoduleSummary": "false",
+        "protocol.ext.allow": "never",
+        "protocol.file.allow": "never",
+    }
 
 
 def test_git_entry_and_all_configuration_paths_are_protected() -> None:

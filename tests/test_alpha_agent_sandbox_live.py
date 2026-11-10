@@ -19,7 +19,13 @@ from typing import TYPE_CHECKING
 import pytest
 from agent_example import LINUX, MACOS, settings
 from agent_host_example import run_request
-from agent_live_evidence import ALL_LABELS, EXTRA_LABELS, MirrorProbe, mirror_cases
+from agent_live_evidence import (
+    ALL_LABELS,
+    EXTRA_LABELS,
+    MIRROR_LABELS,
+    MirrorProbe,
+    mirror_cases,
+)
 from agent_live_probe import (
     Proxy,
     control_proxy,
@@ -458,10 +464,7 @@ def run_probe(
     )
 
 
-@pytest.mark.skipif(
-    os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1",
-    reason="set TBHBDEV_SANDBOX_LIVE=1 on a real host to test sandbox socket refusal",
-)
+@pytestmark
 @pytest.mark.parametrize("harness", Harness)
 def test_build_sandboxes_refuse_user_sockets(tmp_path: Path, harness: Harness) -> None:
     run, paths = probe_run(tmp_path, harness)
@@ -625,15 +628,7 @@ def test_proxy_relays_the_control_and_records_direct_connections(
 
 def test_refusals_require_an_observed_positive_control(tmp_path: Path) -> None:
     results = tmp_path / "observed"
-    labels = (
-        "mirror-modify",
-        "mirror-create",
-        "mirror-replace",
-        "alternates",
-        "hard-link",
-        "local-binding",
-        "host-loopback",
-    )
+    labels = (*MIRROR_LABELS, "local-binding", "host-loopback")
     results.write_text(
         "api.github.com 0\nexample.com 7\n"
         + "".join(f"{label} 1\n" for label in labels)
@@ -647,10 +642,7 @@ def test_agy_live_request_reaches_the_policy_refusal(tmp_path: Path) -> None:
     report_agy_refusals(run.settings, run.host, paths)
 
 
-@pytest.mark.skipif(
-    os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1",
-    reason="set TBHBDEV_SANDBOX_LIVE=1 to probe the installed Codex config loader",
-)
+@pytestmark
 def test_codex_exec_refuses_project_config(tmp_path: Path) -> None:
     installed = shutil.which("codex")
     if installed is None:
