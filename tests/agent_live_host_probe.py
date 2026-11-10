@@ -205,9 +205,7 @@ def probe_command(
     run: run_host.Run, paths: RunPaths, value: Policy, executable: str, script: Path
 ) -> tuple[str, ...]:
     command = list(sandbox_command(run, paths, value, executable, script))
-    if value.harness is Harness.CODEX:
-        command[command.index("-P") + 1] = value.profile.value
-    else:
+    if value.harness is not Harness.CODEX:
         command.append(run.files.path("prompt").read_text())
     return tuple(command)
 

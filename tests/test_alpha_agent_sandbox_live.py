@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from tbhbdev.alpha.agent.model import Host, Policy, Settings
 
 
-pytestmark = pytest.mark.skipif(
+live_only = pytest.mark.skipif(
     os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1",
     reason="set TBHBDEV_SANDBOX_LIVE=1 to run native sandbox probes",
 )
@@ -481,7 +481,7 @@ def run_probe(
     )
 
 
-@pytestmark
+@live_only
 @pytest.mark.parametrize("harness", Harness)
 def test_build_sandboxes_refuse_user_sockets(tmp_path: Path, harness: Harness) -> None:
     run, paths = probe_run(tmp_path, harness)
@@ -661,7 +661,7 @@ def test_agy_live_request_reaches_the_policy_refusal(tmp_path: Path) -> None:
     report_agy_refusals(run.settings, run.host, paths)
 
 
-@pytestmark
+@live_only
 def test_codex_exec_refuses_project_config(tmp_path: Path) -> None:
     installed = shutil.which("codex")
     if installed is None:

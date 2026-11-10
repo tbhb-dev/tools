@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 from contextlib import ExitStack, nullcontext
 lazy from pathlib import Path
 
@@ -224,3 +225,38 @@ def test_runner_that_never_executes_the_probe_fails(
         live.run_probe(run, paths, "/example/codex", stack)
     output = capsys.readouterr().out
     assert all(f"codex {label}: unproven" in output for label in EXTRA)
+
+
+def test_default_suite_runs_harness_free_sandbox_probes(tmp_path: Path) -> None:
+    names = (
+        "test_local_sandbox_commands_use_the_build_policy",
+        "test_socket_listener_records_connections",
+        "test_script_records_real_exit_statuses",
+        "test_probe_cannot_trust_model_claims",
+        "test_proxy_relays_the_control_and_records_direct_connections",
+        "test_refusals_require_an_observed_positive_control",
+        "test_agy_live_request_reaches_the_policy_refusal",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-v",
+            str(Path(live.__file__)),
+            "-k",
+            " or ".join(names),
+        ],
+        env={
+            "HOME": str(tmp_path),
+            "PATH": "/usr/bin:/bin",
+            "TMPDIR": tempfile.gettempdir(),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=45,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "11 passed" in result.stdout, result.stdout
+    assert "SKIPPED" not in result.stdout
