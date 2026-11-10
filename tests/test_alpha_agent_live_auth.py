@@ -66,10 +66,12 @@ def test_live_codex_auth_refresh_is_written_back_and_removed(
     assert not Path(paths.codex_home).exists()
 
 
+@pytest.mark.parametrize("temp_write", [False, True])
 def test_live_git_probe_plants_hooks_only_in_the_scratch_run_home(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     guard_account_codex_writes: Callable[[Path], None],
+    temp_write: bool,
 ) -> None:
     account = tmp_path / "account"
     source = account / ".codex/auth.json"
@@ -119,6 +121,11 @@ def test_live_git_probe_plants_hooks_only_in_the_scratch_run_home(
         actual: run_host.Run, actual_paths: run_host.RunPaths, _command: str
     ) -> None:
         assert actual.home == run.home
+        assert actual.settings.sandbox.write_roots == (
+            (str(root / "harness-write"),) if temp_write else ()
+        )
+        if temp_write:
+            assert (root / "harness-write").is_dir()
         assert (run.home / ".codex/hooks.json").is_file()
         assert account_hooks.read_text() == "original fixture hooks"
         assert [p.name for p in Path(actual_paths.codex_home).iterdir()] == [
@@ -132,7 +139,7 @@ def test_live_git_probe_plants_hooks_only_in_the_scratch_run_home(
     monkeypatch.setattr(parent, "git", positive)
     monkeypatch.setattr(parent, "execute_native_git_probe", native)
     parent.test_live_harness_parent_ignores_each_git_plant(
-        root, monkeypatch, "config", Harness.CODEX, temp_write=False
+        root, monkeypatch, "config", Harness.CODEX, temp_write=temp_write
     )
     assert account_hooks.read_text() == "original fixture hooks"
     assert not list(root.rglob("auth.json"))
