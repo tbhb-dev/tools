@@ -121,6 +121,7 @@ def protected_home(run: Run) -> tuple[str, ...]:
         mirror.parent.parent,
         mirror.parent.parent.parent,
         userconfig.path(),
+        TAINT_DIRECTORY,
     )
     if os.environ.get("ZDOTDIR"):
         paths = (*paths, run.home / os.environ["ZDOTDIR"])

@@ -342,6 +342,7 @@ Run-host runs git in a run clone only during `clone_run` and `create`, before la
 Run-host doesn't set upstream tracking before launch. It checks out a new build branch from a commit. Because `.git/config` stays read-only to the run, `git switch -c x origin/main` and `git push -u` can't record tracking. Use `git switch --no-track -c x origin/main` and push with an explicit destination branch, such as `git push origin HEAD:refs/heads/x`.
 
 An `unsandboxed` run can read the account's 1Password Connect token and every secret it can read. It can write anything the account can. The host marker at `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` is only a hint. The marked account can delete it. An account listed on any `unsandboxed = true` host can't run reviews on any host. A child can leave the process group and keep running after the run ends. Run-host refuses Claude while separate tool paths for Claude (H3) and the Claude credential decision remain open.
+Every run's sandbox policy denies writes to the marker directory.
 
 - A run can read anything that its deny list doesn't cover, including other runs' temp directories.
 - Build runs have access to the account's `gh` token and Docker config.
