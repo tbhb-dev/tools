@@ -162,7 +162,7 @@ def fetch_commit(mirror: Path, request: RunRequest) -> str:
         "--no-tags",
         "--upload-pack=git-upload-pack",
     )
-    # Explicit refspecs keep pruning confined to the agent namespace.
+    # Explicit ref mappings keep pruning confined to the agent namespace.
     git(
         mirror,
         "fetch",

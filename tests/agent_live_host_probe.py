@@ -3,23 +3,32 @@
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import hashlib
 import json
+import os
+import pty
+import select
 import shutil
+import signal
 import subprocess
 import sys
+import termios
+import tty
 import zlib
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from test_alpha_agent_sandbox_live import probe_run
+from test_alpha_agent_sandbox_live import probe_run, sandbox_command
 
 from tbhbdev.alpha.agent import host_tools, run_host, worktree
+from tbhbdev.alpha.agent.model import Harness
 
 if TYPE_CHECKING:
     import pytest
 
-    from tbhbdev.alpha.agent.model import Harness, Policy, Profile, RunPaths
+    from tbhbdev.alpha.agent.model import Policy, Profile, RunPaths
 
 
 def live_policy(
@@ -95,7 +104,7 @@ def link_control(source: Path, writes: Path, controls: Path, ln: str) -> None:
     linked.rename(controls / source.name)
 
 
-def hardlink_attempt(source: Path, linked: Path, ln: str) -> dict[str, int]:
+def hard_link_attempt(source: Path, linked: Path, ln: str) -> dict[str, int]:
     result = subprocess.run(
         [ln, str(source), str(linked)],
         check=False,
@@ -124,16 +133,98 @@ def hardlink_attempt(source: Path, linked: Path, ln: str) -> dict[str, int]:
     return codes
 
 
-def main(arguments: list[str]) -> None:
-    results, writes, ln, *sources = arguments
-    observed = {
-        Path(source).name: hardlink_attempt(
-            Path(source), Path(writes) / Path(source).name, ln
-        )
-        for source in sources
-    }
-    Path(results).write_text(json.dumps(observed))
+INPUT_MARKER = b"agent-input-probe"
+
+
+@dataclasses.dataclass(frozen=True)
+class TerminalObservation:
+    inputs: bytes
+    code: int
+
+
+def observe_terminal(
+    command: tuple[str, ...], environment: dict[str, str], cwd: Path
+) -> TerminalObservation:
+    master, slave = pty.openpty()
+    try:
+        with subprocess.Popen(
+            (sys.executable, str(Path(__file__).resolve()), "terminal", *command),
+            stdin=slave,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=environment,
+            cwd=cwd,
+            start_new_session=True,
+        ) as child:
+            try:
+                code = child.wait(timeout=45)
+            except subprocess.TimeoutExpired:
+                code = 124
+            finally:
+                # Only this process's freshly created session receives signals.
+                with suppress(ProcessLookupError):
+                    os.killpg(child.pid, signal.SIGKILL)
+                child.wait(timeout=5)
+        inputs = os.read(slave, 4096) if select.select([slave], [], [], 0)[0] else b""
+        return TerminalObservation(inputs, code)
+    finally:
+        os.close(slave)
+        os.close(master)
+
+
+def terminal_status(control: bytes, observed: bytes) -> str:
+    if INPUT_MARKER not in control:
+        return "unproven"
+    return "injected" if INPUT_MARKER in observed else "blocked"
+
+
+def inject_terminal(witness: Path) -> None:
+    error = 0
+    try:
+        descriptor = os.open("/dev/tty", os.O_RDWR)
+        try:
+            for byte in INPUT_MARKER:
+                fcntl.ioctl(descriptor, termios.TIOCSTI, bytes([byte]))
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        error = exc.errno or 1
+    witness.write_text(json.dumps({"attempted": True, "error": error}))
+
+
+def legacy_input_setting() -> str:
+    setting = Path("/proc/sys/dev/tty/legacy_tiocsti")
+    return setting.read_text().strip() if sys.platform == "linux" else "unavailable"
+
+
+def probe_command(
+    run: run_host.Run, paths: RunPaths, value: Policy, executable: str, script: Path
+) -> tuple[str, ...]:
+    command = list(sandbox_command(run, paths, value, executable, script))
+    if value.harness is Harness.CODEX:
+        command[command.index("-P") + 1] = value.profile.value
+    else:
+        command.append(run.files.path("prompt").read_text())
+    return tuple(command)
+
+
+def main(mode: str, arguments: list[str]) -> None:
+    if mode == "terminal":
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+        tty.setraw(0)
+        raise SystemExit(subprocess.run(arguments, check=False, timeout=40).returncode)
+    if mode == "inject":
+        inject_terminal(Path(arguments[0]))
+    else:
+        results, writes, ln, *sources = arguments
+        observed = {
+            Path(source).name: hard_link_attempt(
+                Path(source), Path(writes) / Path(source).name, ln
+            )
+            for source in sources
+        }
+        Path(results).write_text(json.dumps(observed))
 
 
 if __name__ == "__main__":
-    main(sys.argv[2:])
+    main(sys.argv[1], sys.argv[2:])
