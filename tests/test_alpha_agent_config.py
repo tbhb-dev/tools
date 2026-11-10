@@ -103,6 +103,7 @@ GOOD: Table = {
             "account": "agent",
             "unsandboxed": False,
             "accounts": ["agent"],
+            "proven_harnesses": ["codex"],
         }
     ],
 }
@@ -156,6 +157,7 @@ EXPECTED = model.Settings(
             account="agent",
             unsandboxed=False,
             accounts=("agent",),
+            proven_harnesses=(model.Harness.CODEX,),
         ),
     ),
 )
@@ -689,6 +691,23 @@ def test_unknown_keys_name_the_full_table_and_each_key(
 def test_credentials_is_not_a_host_key() -> None:
     table = edited("host", 0, "credentials", value="connect")
     assert refused(table) == "[[agent.host]] credentials not recognized"
+
+
+@pytest.mark.parametrize("names", [[], ["codex"], ["claude"], ["codex", "claude"]])
+def test_host_records_proven_harnesses(names: list[str]) -> None:
+    table = edited("host", 0, "proven_harnesses", value=names)
+    assert config.parse(table).hosts[0].proven_harnesses == tuple(
+        model.Harness(name) for name in names
+    )
+
+
+@pytest.mark.parametrize(
+    "value", [None, "codex", [1], ["agy"], ["Codex"], ["codex", "codex"]]
+)
+def test_host_refuses_invalid_proven_harnesses(value: object) -> None:
+    assert refused(edited("host", 0, "proven_harnesses", value=value)) == (
+        "[[agent.host]] proven_harnesses must list distinct codex or claude names"
+    )
 
 
 @pytest.mark.parametrize("value", [[], 5, "x", [5], ["x"], [None]])

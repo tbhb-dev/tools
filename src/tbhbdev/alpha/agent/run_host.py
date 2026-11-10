@@ -313,6 +313,11 @@ def preflight(run: Run) -> None:
     if run.request.harness is Harness.AGY:
         message = "agy runs are refused: no OS sandbox"
         raise Invalid(message)
+    if run.request.harness not in run.host.proven_harnesses:
+        message = (
+            f"{run.request.harness} has no recorded sandbox pass on {run.host.name}"
+        )
+        raise Invalid(message)
     _value, executable = checked_policy(run, planned_paths(run))
     if run.request.profile is Profile.REVIEW and run.request.tainted_host:
         message = "review runs are refused on a tainted host"

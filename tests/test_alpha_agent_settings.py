@@ -64,6 +64,7 @@ shell = "bash"
 account = "agent"
 unsandboxed = false
 accounts = ["agent"]
+proven_harnesses = ["codex"]
 
 [[agent.host]]
 name = "example-macos"
@@ -72,6 +73,7 @@ shell = "zsh"
 account = "agent"
 unsandboxed = false
 accounts = ["agent"]
+proven_harnesses = ["codex"]
 """
 
 

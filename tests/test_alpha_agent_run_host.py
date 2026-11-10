@@ -2592,6 +2592,27 @@ def test_preflight_checks_the_requested_accounts_app(tmp_path: Path) -> None:
     run_host.preflight(run)
 
 
+@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
+def test_preflight_refuses_harness_without_recorded_pass(
+    tmp_path: Path, harness: Harness
+) -> None:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        reason="sandbox test" if harness is Harness.CLAUDE else None,
+    )
+    run = dataclasses.replace(
+        run, host=dataclasses.replace(run.host, proven_harnesses=())
+    )
+    with pytest.raises(Invalid) as caught:
+        run_host.preflight(run)
+    assert (
+        str(caught.value)
+        == f"{harness} has no recorded sandbox pass on {run.host.name}"
+    )
+
+
 @pytest.mark.parametrize("unsandboxed", [False, True])
 @pytest.mark.parametrize("tainted", [False, True])
 def test_preflight_announces_access_and_build_trust(
