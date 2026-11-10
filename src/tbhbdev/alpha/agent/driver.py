@@ -79,7 +79,8 @@ def load(settings: Settings, name: str) -> Run:
         started = str(record.pop("started"))
         owner = str(record.pop("owner"))
         cleaning = record.pop("cleaning")
-        run = request.parse(record, host_allows_unsandboxed=host.unsandboxed)
+        # Launch permission applies to new runs; recorded runs remain manageable.
+        run = request.parse(record, host_allows_unsandboxed=True)
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         message = f"{path}: invalid run metadata"
         raise Invalid(message) from exc

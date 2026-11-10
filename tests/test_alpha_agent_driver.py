@@ -1579,3 +1579,55 @@ def test_unsandboxed_force_clean_refuses_live_session(
     assert (remote.state / "sample.owner").is_file()
     assert not (remote.state / "trash").exists()
     assert remote.records("git") == before
+
+
+@pytest.mark.parametrize("verb", ["status", "kill", "clean", "log", "diff"])
+def test_unsandboxed_verbs_after_host_setting_disabled(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    verb: str,
+) -> None:
+    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
+    disabled = dataclasses.replace(
+        CONFIG,
+        hosts=tuple(
+            dataclasses.replace(host, unsandboxed=False) for host in CONFIG.hosts
+        ),
+    )
+    monkeypatch.setattr(agent.settings, "load", lambda: disabled)
+    capsys.readouterr()
+    if verb in {"kill", "clean"}:
+        remote.configure(session=False)
+        remote.file(".rc", "0")
+    before = remote.records("ssh")
+    assert command(verb, *(["--force"] if verb == "clean" else [])) == (
+        65 if verb in {"log", "diff"} else 0
+    )
+    output = capsys.readouterr()
+    if verb == "status":
+        assert "sandbox=none authorized_by=o/r#1" in output.out
+    if verb in {"log", "diff"}:
+        assert "unsandboxed run: inspect agent/sample on GitHub" in output.err
+        assert remote.records("ssh") == before
+    if verb == "clean":
+        assert not driver.metadata_path("sample").exists()
+    if verb == "kill":
+        assert "kill-session" in str(remote.records("tmux")[-1])
+
+
+def test_unsandboxed_new_launch_after_host_setting_disabled(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    disabled = dataclasses.replace(
+        CONFIG,
+        hosts=tuple(
+            dataclasses.replace(host, unsandboxed=False) for host in CONFIG.hosts
+        ),
+    )
+    monkeypatch.setattr(agent.settings, "load", lambda: disabled)
+    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 1
+    assert "isn't enabled on this host" in capsys.readouterr().err
+    assert remote.records("ssh") == []
