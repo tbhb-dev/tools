@@ -35,6 +35,7 @@ _BSD_SIZE = 136
 _BSD_START = 120
 _PROC_PIDTBSDINFO = 3
 _ZOMBIE = 5
+_PID = struct.Struct("=i")
 
 
 def boot_id() -> str:
@@ -85,29 +86,92 @@ def alive(pgid: int) -> bool:
         os.killpg(pgid, 0)
     except ProcessLookupError:
         return False
+    except PermissionError:
+        if sys.platform != "darwin":
+            raise
+        return _mac_alive(pgid)
     return True
 
 
+def _mac_alive(pgid: int) -> bool:
+    """EPERM is inconclusive unless a complete group contains only zombies."""
+    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    needed = library.proc_listpids(2, pgid, None, 0)
+    if needed < _PID.size:
+        message = "cannot enumerate run group"
+        raise PermissionError(message)
+    members = ctypes.create_string_buffer(needed + 1024)
+    ctypes.set_errno(0)
+    size = library.proc_listpids(2, pgid, members, len(members))
+    if ctypes.get_errno() or size < 0 or size >= len(members) or size % 4:
+        message = "incomplete run group enumeration"
+        raise PermissionError(message)
+    for (pid,) in _PID.iter_unpack(members.raw[:size]):
+        info = ctypes.create_string_buffer(_BSD_SIZE)
+        if (
+            library.proc_pidinfo(pid, _PROC_PIDTBSDINFO, 1, info, _BSD_SIZE)
+            != _BSD_SIZE
+        ):
+            message = "cannot inspect run group member"
+            raise PermissionError(message)
+        if int.from_bytes(info[4:8], sys.byteorder) != _ZOMBIE:
+            return True
+    confirmed = ctypes.create_string_buffer(len(members))
+    ctypes.set_errno(0)
+    count = library.proc_listpids(2, pgid, confirmed, len(confirmed))
+    if (
+        ctypes.get_errno()
+        or count != size
+        or confirmed.raw[:count] != members.raw[:size]
+    ):
+        message = "run group changed during inspection"
+        raise PermissionError(message)
+    return False
+
+
 def _signal(pgid: int, number: signal.Signals) -> None:
-    with suppress(ProcessLookupError):
+    try:
         os.killpg(pgid, number)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        if sys.platform != "darwin" or _mac_alive(pgid):
+            raise
 
 
 def stop_started(pgid: int, grace: float) -> None:
     """Sweep a group this still-live supervisor started, even after leader exit."""
-    _signal(pgid, signal.SIGTERM)
+    with suppress(PermissionError):
+        _signal(pgid, signal.SIGTERM)
     deadline = time.monotonic() + grace
     while alive(pgid) and time.monotonic() < deadline:
         time.sleep(0.02)
     if alive(pgid):
-        _signal(pgid, signal.SIGKILL)
+        try:
+            _signal(pgid, signal.SIGKILL)
+        except PermissionError:
+            deadline = time.monotonic() + max(grace, 1)
+            while alive(pgid) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            if alive(pgid):
+                message = "run group could not be proven stopped"
+                raise Invalid(message) from None
+
+
+def stop_owned(files: RunFiles, pgid: int, grace: float) -> None:
+    try:
+        stop_started(pgid, grace)
+    except OSError, Invalid:
+        files.write("stop-unproven", "\n")
+        files.write("phase", "unknown")
+        raise
 
 
 def stop_recorded(files: RunFiles, grace: float) -> Action:
     group = Group(**json.loads(files.path("pgid").read_text()))
     action = run_state.stop_action(files.snapshot(), group, identity(group.pgid))
     if action is Action.STOP:
-        stop_started(group.pgid, grace)
+        stop_owned(files, group.pgid, grace)
     elif action is Action.UNKNOWN:
         files.write("phase", "unknown")
     return action
@@ -285,7 +349,7 @@ def prepare(
         with ignore_signals():
             parent.close()
             if worker.exitcode is None:
-                stop_started(pid, grace)
+                stop_owned(files, pid, grace)
             worker.join(timeout=grace)
             if worker.is_alive():
                 worker.kill()

@@ -231,6 +231,12 @@ def test_installation_reuses_app_signer_without_storing_token(
             credentials.installation_token(host_settings().credentials[0], repository)
             == "example-installation"
         )
+    check_installation_calls(calls, fake_reader, failure, tmp_path)
+
+
+def check_installation_calls(
+    calls: list[str], fake_reader: list[str], failure: str | None, tmp_path: Path
+) -> None:
     assert calls == (
         []
         if failure == "host"

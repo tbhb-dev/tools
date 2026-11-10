@@ -378,7 +378,9 @@ def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
             try:
                 run.files.write("phase", "exited")
             finally:
-                process_group.stop_started(child.pid, run.settings.kill_grace_seconds)
+                process_group.stop_owned(
+                    run.files, child.pid, run.settings.kill_grace_seconds
+                )
                 child.wait()
             run.files.write("phase", "stopped")
             if headless and run.request.harness is Harness.CODEX:
@@ -455,6 +457,9 @@ def _execute(run: Run, text: str, stack: ExitStack) -> int:
 def finish(
     run: Run, prepared: Prepared | None, agent: subprocess.Popen[str] | None, rc: int
 ) -> int:
+    if run.files.path("stop-unproven").exists():
+        run.files.write("log", "run group stop unproven; completion withheld\n")
+        return 1
     try:
         if prepared is not None and run.request.harness is Harness.CODEX:
             try:

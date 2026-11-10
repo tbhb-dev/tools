@@ -67,6 +67,25 @@ def fake_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(host_tools, "codex_proxy_supported", constant(value=True))
 
 
+@pytest.fixture(autouse=True)
+def portable_run_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check protocol spelling even on a case-insensitive filesystem."""
+    original_path = runfiles.RunFiles.path
+    original_copy = runfiles.copy_final
+
+    def path(files: runfiles.RunFiles, suffix: str) -> Path:
+        assert suffix == suffix.lower()
+        return original_path(files, suffix)
+
+    def copy(source: Path, destination: Path) -> None:
+        assert source.name == "out.final"
+        assert destination.name.endswith(".out.final")
+        original_copy(source, destination)
+
+    monkeypatch.setattr(runfiles.RunFiles, "path", path)
+    monkeypatch.setattr(runfiles, "copy_final", copy)
+
+
 def make_run(tmp_path: Path, **changes: object) -> run_host.Run:
     files = runfiles.RunFiles(tmp_path / "runs", "example")
     value = run_request(**changes)
@@ -539,6 +558,12 @@ def tmux_environment_probe(root: Path, harness: Harness) -> None:
 def test_tmux_server_and_parent_markers_do_not_reach_a_harness(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
 ) -> None:
+    operating_system = Os.MACOS if sys.platform == "darwin" else Os.LINUX
+    with host_tools.configured(host_settings(), operating_system):
+        try:
+            tmux = host_tools.resolve("tmux")
+        except Invalid:
+            pytest.skip("tmux is unavailable in the production host search path")
     monkeypatch.setenv("EXAMPLE_PARENT_MARKER", "parent-marker")
     loader = (
         "import runpy, sys, subprocess, traceback\n"
@@ -551,12 +576,12 @@ def test_tmux_server_and_parent_markers_do_not_reach_a_harness(
         "except BaseException:\n"
         "    (Path(sys.argv[2]) / 'error').write_text(traceback.format_exc())\n"
         "finally:\n"
-        "    subprocess.run(['tmux', '-S', sys.argv[4], 'wait-for', '-S', "
+        "    subprocess.run([sys.argv[5], '-S', sys.argv[4], 'wait-for', '-S', "
         "'complete'], check=True)\n"
     )
     with tempfile.TemporaryDirectory(prefix="ag-tmux-") as directory:
         socket_path = str(Path(directory) / "socket")
-        base = ["tmux", "-S", socket_path]
+        base = [tmux, "-S", socket_path]
         subprocess.run(
             [
                 *base,
@@ -598,6 +623,7 @@ def test_tmux_server_and_parent_markers_do_not_reach_a_harness(
                     str(tmp_path),
                     harness.value,
                     socket_path,
+                    tmux,
                 ],
                 check=True,
                 timeout=5,
@@ -644,6 +670,10 @@ def test_startup_deadline_stops_the_recorded_setup_group(
     monkeypatch.setattr(process_group, "boot_id", boot)
     monkeypatch.setattr(run_host.worktree, "git", git)
     if phase == "secret":
+        prepared = preparation(run)
+        monkeypatch.setattr(
+            run_host.worktree, "create", constant(Path(prepared.paths.worktree))
+        )
         monkeypatch.setattr(secrets, "read", read)
     assert run_host.execute(run, "example") == 124
     assert run.files.path("rc").read_text() == "124\n"
@@ -702,6 +732,7 @@ source = runfiles.private_dir(run.home / ".codex") / "auth.json"
 source.write_text('{"value":"old"}')
 run_host._load = lambda args, tmpdir: (run, "example task")
 process_group.prepare = lambda *args: prepared
+process_group.boot_id = lambda: "example-boot"
 original_launch = process_group.launch_owned
 stub = """
 import os, signal, sys
@@ -1112,10 +1143,16 @@ class HostRuntime:
 def test_probe_failure_stops_its_recorded_harness_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(process_group, "boot_id", constant("example-boot"))
     real_start = subprocess.Popen
 
     def start(
-        command: list[str], *, stdin: int, stdout: int, stderr: int, text: bool
+        command: list[str],
+        *,
+        stdin: int | None = None,
+        stdout: int,
+        stderr: int | None = None,
+        text: bool,
     ) -> subprocess.Popen[str]:
         assert text is True
         child = real_start(
@@ -1142,6 +1179,12 @@ def test_probe_failure_stops_its_recorded_harness_group(
     assert process_group.leader_start(descendant) is None
 
 
+def index_should_fail(failure: str, entry: dict[str, object]) -> bool:
+    return (failure == "initial-index" and entry["rc"] is None) or (
+        failure == "final-index" and entry["rc"] is not None
+    )
+
+
 @pytest.mark.parametrize("failure", ["initial-index", "final-index", "agent", "phase"])
 def test_cleanup_failures_cannot_skip_rc(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
@@ -1166,9 +1209,7 @@ def test_cleanup_failures_cannot_skip_rc(
     append = runfiles.append
 
     def index(root: Path, entry: dict[str, object]) -> None:
-        if (failure == "initial-index" and entry["rc"] is None) or (
-            failure == "final-index" and entry["rc"] is not None
-        ):
+        if index_should_fail(failure, entry):
             if entry["rc"] is not None:
                 assert run.files.path("rc").read_text() == "7\n"
             raise OSError
@@ -1191,6 +1232,10 @@ def test_cleanup_failures_cannot_skip_rc(
         assert run_host.execute(run, "example") == (
             1 if failure == "initial-index" else 7
         )
+    check_cleanup_result(run, stopped, failure)
+
+
+def check_cleanup_result(run: run_host.Run, stopped: list[str], failure: str) -> None:
     assert run.files.path("rc").read_text() == (
         "1\n" if failure == "initial-index" else "7\n"
     )
@@ -1973,3 +2018,37 @@ def test_resolved_denies_receive_host_facts(
 
     monkeypatch.setattr(run_host.policy, "denied_paths", candidates)
     assert run_host.resolved_denies(run, paths) == ()
+
+
+def test_unproven_harness_stop_withholds_completion_and_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    prepared = preparation(run)
+    monkeypatch.setattr(process_group, "prepare", constant(prepared))
+    monkeypatch.setattr(
+        run_host,
+        "checked_policy",
+        constant((run_host.checked_policy(run, prepared.paths)[0], "/example/harness")),
+    )
+    child = Child()
+
+    def launch(
+        _spec: process_group.Launch, *, started: Callable[[Child], None]
+    ) -> Child:
+        started(child)
+        return child
+
+    def denied(_pgid: int, _grace: float) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "record", constant(None))
+    monkeypatch.setattr(process_group, "stop_started", denied)
+    assert run_host.execute(run, "example") == 1
+    assert run.files.path("phase").read_text() == "unknown"
+    assert not run.files.path("rc").exists()
+    assert run.files.path("log").read_text() == (
+        "run group stop unproven; completion withheld\n"
+    )
+    assert not (run.home / ".codex" / "auth.json").exists()
