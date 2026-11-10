@@ -54,6 +54,10 @@ HANDOFF = (
 )
 CODEX_HANDOFF = (
     "-c",
+    'shell_environment_policy.exclude=["GIT_*"]',
+    "-c",
+    'shell_environment_policy.set.GIT_CONFIG_COUNT="0"',
+    "-c",
     f'shell_environment_policy.set.PATH="{HOME}/.local/bin:/usr/local/bin:/usr/bin"',
     "-c",
     f'shell_environment_policy.set.CODEX_HOME="{TMP}/codex"',
@@ -681,3 +685,20 @@ def test_codex_refuses_a_write_root_requiring_another_mode(other: str) -> None:
         )
 
     assert str(caught.value) == f"path {TMP} requires conflicting filesystem modes"
+
+
+@pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize("profile", Profile)
+def test_codex_tool_environment_excludes_inherited_git_variables(
+    kind: RunKind, profile: Profile
+) -> None:
+    command = built(Harness.CODEX, kind, profile)
+    overrides = "\n".join(
+        value for flag, value in itertools.pairwise(command) if flag == "-c"
+    )
+    environment = tomllib.loads(overrides)["shell_environment_policy"]
+    assert environment["exclude"] == ["GIT_*"]
+    assert environment["set"]["GIT_CONFIG_COUNT"] == "0"
+    assert {name for name in environment["set"] if name.startswith("GIT_")} == {
+        "GIT_CONFIG_COUNT"
+    }

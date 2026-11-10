@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import dataclasses
+import fnmatch
+import itertools
 import json
 import os
 import shlex
@@ -10,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -21,7 +24,7 @@ from agent_live_evidence import prepared_codex_home
 from test_alpha_agent_run_host import make_run
 
 from tbhbdev.alpha.agent import credentials, host_tools, run_host, worktree
-from tbhbdev.alpha.agent.decisions import policy
+from tbhbdev.alpha.agent.decisions import argv, policy
 from tbhbdev.alpha.agent.model import Harness, Os
 
 
@@ -236,3 +239,72 @@ def execute_native_git_probe(
         assert any(
             event.get("item", {}).get("type") == "command_execution" for event in events
         )
+
+
+def test_tool_git_environment_keeps_scratch_commits_out_of_the_run_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, paths = real_clone(tmp_path, monkeypatch, Harness.CODEX)
+    workspace = Path(paths.worktree)
+    before = git(workspace, "rev-parse", "HEAD")
+    value = policy.build(
+        run.settings,
+        run.host,
+        harness=Harness.CODEX,
+        profile=run.request.profile,
+        account=run.request.account,
+        unsandboxed=False,
+        paths=paths,
+    )
+    command = argv.harness(
+        run.request, value, worktree=paths.worktree, brief_file="fixture"
+    )
+    overrides = "\n".join(
+        value for flag, value in itertools.pairwise(command) if flag == "-c"
+    )
+    shell = tomllib.loads(overrides)["shell_environment_policy"]
+    inherited = value.env | {
+        "GIT_DIR": str(workspace / ".git"),
+        "GIT_COMMON_DIR": str(workspace / ".git"),
+        "GIT_WORK_TREE": str(workspace),
+        "GIT_INDEX_FILE": str(workspace / ".git/index"),
+        "GIT_CONFIG_KEY_20": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_20": "/example/plant",
+        "GIT_CONFIG_PARAMETERS": "fixture poison",
+    }
+    environment = {
+        name: value
+        for name, value in inherited.items()
+        if not any(fnmatch.fnmatchcase(name, pattern) for pattern in shell["exclude"])
+    } | shell["set"]
+    assert {
+        name: value for name, value in environment.items() if name.startswith("GIT_")
+    } == {"GIT_CONFIG_COUNT": "0"}
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    for arguments in (
+        ["init", "--template=", "."],
+        [
+            "-c",
+            "user.name=Example",
+            "-c",
+            "user.email=example@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "scratch",
+        ],
+    ):
+        subprocess.run(
+            ["git", *arguments],
+            cwd=scratch,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    assert git(scratch, "log", "-1", "--format=%s") == "scratch"
+    assert git(workspace, "rev-parse", "HEAD") == before

@@ -159,7 +159,14 @@ def _codex(
     else:
         argv += ["-c", "features.network_proxy.enabled=false"]
     # A codex policy's environment holds every handoff variable.
-    argv += ["-c", f"shell_environment_policy.set.PATH={_toml(policy.tool_path)}"]
+    argv += [
+        "-c",
+        'shell_environment_policy.exclude=["GIT_*"]',
+        "-c",
+        'shell_environment_policy.set.GIT_CONFIG_COUNT="0"',
+        "-c",
+        f"shell_environment_policy.set.PATH={_toml(policy.tool_path)}",
+    ]
     for name in _HANDOFF:
         argv += ["-c", f"shell_environment_policy.set.{name}={_toml(policy.env[name])}"]
     if "SSH_AUTH_SOCK" in policy.env:
