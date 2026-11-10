@@ -19,7 +19,7 @@ from agent_example import MARKER, settings
 
 from tbhbdev import version
 from tbhbdev.alpha import agent
-from tbhbdev.alpha.agent import driver, model, transport
+from tbhbdev.alpha.agent import driver, model, render, transport
 from tbhbdev.alpha.agent.decisions import remote as remote_commands
 from tbhbdev.alpha.agent.decisions import request, runfiles_names
 from tbhbdev.alpha.agent.model import Invalid, RunKind
@@ -339,7 +339,11 @@ def test_wait_success(
         remote.file(".out.final", "final answer\n")
     assert command("wait") == 4
     assert capsys.readouterr() == (
-        "sample: rc=4\n" + ("final answer\n" if final else "stream answer\n"),
+        "sample: rc=4\n"
+        + ("final answer\n" if final else "stream answer\n")
+        + "\n"
+        + render.INSPECTION_WARNING
+        + "\n",
         "",
     )
 
@@ -352,7 +356,10 @@ def test_wait_unreachable(
     remote.configure(ssh=[{"rc": 255}] * 4)
     ticking(monkeypatch)
     assert command("wait") == 75
-    assert capsys.readouterr() == ("sample: rc=unreachable\n", "")
+    assert capsys.readouterr() == (
+        "sample: rc=unreachable\n" + render.INSPECTION_WARNING + "\n",
+        "",
+    )
 
 
 def test_wait_unknown(remote: Remote, capsys: pytest.CaptureFixture[str]) -> None:
@@ -360,7 +367,10 @@ def test_wait_unknown(remote: Remote, capsys: pytest.CaptureFixture[str]) -> Non
     capsys.readouterr()
     remote.configure(session=False)
     assert command("wait") == 1
-    assert capsys.readouterr() == ("sample: rc=unknown\n", "")
+    assert capsys.readouterr() == (
+        "sample: rc=unknown\n\n" + render.INSPECTION_WARNING + "\n",
+        "",
+    )
 
 
 @pytest.mark.parametrize(
@@ -520,7 +530,10 @@ def test_wait_retries_and_resets_failure_time(
     monkeypatch.setenv("TBHB_AGENT_WAIT_POLL", "0.1")
     monkeypatch.setenv("TBHB_AGENT_WAIT_UNREACHABLE", "240")
     assert command("wait") == 0
-    assert capsys.readouterr() == ("sample: rc=0\nanswer\n", "")
+    assert capsys.readouterr() == (
+        "sample: rc=0\nanswer\n\n" + render.INSPECTION_WARNING + "\n",
+        "",
+    )
 
 
 def test_kill_refuses_live_session(
@@ -658,7 +671,10 @@ def test_wait_poll_and_transport_budget(
     assert command("wait") == 0
     assert timeouts == [9, 7, 9, 7]
     assert sleeps == [max(0.5, float(poll))] * 3
-    assert capsys.readouterr() == ("sample: rc=0\nanswer\n", "")
+    assert capsys.readouterr() == (
+        "sample: rc=0\nanswer\n\n" + render.INSPECTION_WARNING + "\n",
+        "",
+    )
 
 
 def test_wait_defaults_and_failure_deadline(
@@ -692,7 +708,10 @@ def test_wait_defaults_and_failure_deadline(
 
     monkeypatch.setattr(transport, "read", read)
     assert command("wait") == 75
-    assert capsys.readouterr() == ("sample: rc=unreachable\n", "")
+    assert capsys.readouterr() == (
+        "sample: rc=unreachable\n" + render.INSPECTION_WARNING + "\n",
+        "",
+    )
     assert sleeps == [30]
     assert timeouts == [30, 0]
 
@@ -995,7 +1014,9 @@ def test_successful_wait_resets_failure_for_a_short_window(
     assert command("wait") == 0
 
 
-@pytest.mark.parametrize("verb", ["status", "wait", "clean", "keep", "kill"])
+@pytest.mark.parametrize(
+    "verb", ["status", "wait", "clean", "keep", "kill", "log", "diff"]
+)
 def test_verbs_without_remote_run_directory(
     remote: Remote,
     capsys: pytest.CaptureFixture[str],
@@ -1149,7 +1170,9 @@ def test_clean_fallback_requires_force(
     assert command("clean", "--force") == 0
 
 
-@pytest.mark.parametrize("verb", ["kill", "wait", "clean", "status", "keep"])
+@pytest.mark.parametrize(
+    "verb", ["kill", "wait", "clean", "status", "keep", "log", "diff"]
+)
 def test_failed_transfer_cannot_control_other_owner(
     remote: Remote,
     monkeypatch: pytest.MonkeyPatch,
@@ -1357,3 +1380,50 @@ def test_not_owner_archives_with_utc_stamp(remote: Remote) -> None:
     archived = next((driver.directory() / "trash").glob("*/sample.json"))
     stamp = dt.datetime.fromisoformat(archived.parent.name)
     assert stamp.utcoffset() == dt.timedelta(0)
+
+
+@pytest.mark.parametrize("verb", ["log", "diff"])
+def test_inspection_uses_recorded_target_and_mirror(
+    remote: Remote, capsys: pytest.CaptureFixture[str], verb: str
+) -> None:
+    assert launch(remote) == 0
+    capsys.readouterr()
+    assert command(verb) == 0
+    assert capsys.readouterr() == (verb + " output\n", "")
+    calls = [record["args"] for record in remote.records("git")]
+    assert len(calls) == 2
+    assert isinstance(calls[0], list)
+    assert isinstance(calls[1], list)
+    assert "fetch" in calls[0]
+    assert verb in calls[1]
+    assert "--no-optional-locks" in calls[1]
+    assert "-n" in calls[1] if verb == "log" else "-n" not in calls[1]
+    assert len(remote.records("ssh")) == 5
+
+
+def test_log_count(remote: Remote) -> None:
+    assert launch(remote) == 0
+    assert command("log", "-n", "2") == 0
+    args = remote.records("git")[-1]["args"]
+    assert isinstance(args, list)
+    assert args[args.index("-n") + 1] == "2"
+
+
+@pytest.mark.parametrize("verb", ["log", "diff"])
+def test_inspection_fetch_failure_stops_before_read(remote: Remote, verb: str) -> None:
+    assert launch(remote) == 0
+    remote.configure(fetch_error=74)
+    assert command(verb) == 1
+    assert len(remote.records("git")) == 1
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["diff", "sample", "-n", "1"],
+        ["log", "sample", "--patch"],
+        ["log", "sample", "-n", "invalid"],
+    ],
+)
+def test_inspection_rejects_extra_options(args: list[str]) -> None:
+    assert agent.main(args, "example agent") == 2

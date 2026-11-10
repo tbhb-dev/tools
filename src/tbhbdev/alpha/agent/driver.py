@@ -272,6 +272,7 @@ def wait(settings: Settings, run: Run) -> int:
             )
             if result is not None:
                 print(f"{run.name}: rc=unreachable")
+                print(render.INSPECTION_WARNING)
                 return result
         else:
             failed_since = None
@@ -284,6 +285,7 @@ def wait(settings: Settings, run: Run) -> int:
             if result is not None:
                 rc = rules.answer_state(reading.rc)
                 print(f"{run.name}: rc={rc}\n{reading.text}", end="")
+                print("\n" + render.INSPECTION_WARNING)
                 return result
         time.sleep(max(0.5, poll))
 
@@ -384,6 +386,18 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
     return 0
 
 
+def inspect(settings: Settings, run: Run, *, limit: int | None) -> int:
+    print(
+        transport.shell(
+            settings,
+            run.host,
+            remote.inspect(run.request.repo, run.name, owner=run.owner, limit=limit),
+        ),
+        end="",
+    )
+    return 0
+
+
 def keep(settings: Settings, run: Run) -> int:
     transport.shell(settings, run.host, remote.keep(run.name, owner=run.owner))
     return 0
@@ -395,6 +409,8 @@ def dispatch(settings: Settings, args: argparse.Namespace) -> int:
     run = load(settings, args.name)
     verbs = {"wait": wait, "status": status, "kill": kill, "keep": keep}
     try:
+        if args.verb in {"log", "diff"}:
+            return inspect(settings, run, limit=args.n if args.verb == "log" else None)
         if args.verb == "clean":
             return clean(settings, run, force=args.force)
         return verbs[args.verb](settings, run)

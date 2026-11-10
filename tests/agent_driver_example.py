@@ -108,8 +108,17 @@ elif name == "git":
         assert args[index + 1] == str(
             root / "state/tbhbdev/agent-mirrors/example-org/example-repo.git")
         index += 2
+    if args[index:index + 2] == ["-c", "diff.external="]:
+        index += 2
+    if args[index] == "--no-optional-locks":
+        index += 1
     verb = args[index]
     assert Path.cwd() == root / "home"
+    if verb == "fetch":
+        sys.exit(control.get("fetch_error", 0))
+    if verb in ("log", "diff"):
+        print(control.get(verb, verb + " output\\n"), end="")
+        sys.exit(0)
     assert verb == "ls-remote"
     if args[-1] == "refs/heads/agent/sample":
         if control.get("origin_error"):

@@ -11,6 +11,11 @@ FINAL_ONLY = (
 def brief(kind: RunKind, text: str) -> str:
     return f"{FINAL_ONLY}\n{text}" if kind is RunKind.EXEC else text
 
+INSPECTION_WARNING = (
+    "Don't run git inside a run clone: it is agent-written. "
+    "Use `tbhbdev alpha agent log|diff NAME`."
+)
+
 
 def launched(name: str, host: str, account: str) -> str:
     return f"{name}: launched host={host} account={account}"

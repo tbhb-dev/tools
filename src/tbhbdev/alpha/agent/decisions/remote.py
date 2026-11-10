@@ -271,6 +271,23 @@ def origin_branch(repository: str, name: str, *, owner: str) -> str:
     )
 
 
+def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str:
+    branch = f"refs/heads/agent/{name}"
+    base = "refs/tbhbdev/default"
+    command = "diff" if limit is None else f"log -n {limit}"
+    comparison = f"{base}...{branch}" if limit is None else f"{base}..{branch}"
+    return mirror_command(
+        repository,
+        name,
+        f"{MIRROR_GIT} fetch --no-tags --no-prune --no-prune-tags "
+        f"--end-of-options origin +HEAD:{base} +{branch}:{branch} "
+        '|| exit "$?"\n'
+        f"{MIRROR_GIT} -c diff.external= --no-optional-locks {command} "
+        f"--no-ext-diff --no-textconv --no-color {comparison} --",
+        owner=owner,
+    )
+
+
 @dataclass(frozen=True)
 class Cleanup:
     owner: str

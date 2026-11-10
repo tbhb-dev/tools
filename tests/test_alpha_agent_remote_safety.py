@@ -545,7 +545,18 @@ def test_real_ssh_shell_quoting(host: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "script", ["read", "fallback", "session", "keep", "clean", "origin_branch", "start"]
+    "script",
+    [
+        "read",
+        "fallback",
+        "session",
+        "keep",
+        "clean",
+        "origin_branch",
+        "log",
+        "diff",
+        "start",
+    ],
 )
 @pytest.mark.parametrize("owner_kind", ["other", "missing", "symlink"])
 def test_owner_check_precedes_every_effect(
@@ -569,6 +580,12 @@ def test_owner_check_precedes_every_effect(
         "clean": cleanup(),
         "origin_branch": remote.origin_branch(
             "example-org/example-repo", "sample", owner="example-owner"
+        ),
+        "log": remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=10
+        ),
+        "diff": remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
         ),
         "start": remote.start(
             "sample", settings().sockets_dir, LINUX, owner="example-owner"
@@ -769,3 +786,125 @@ def test_mirror_git_boundary(host: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.endswith(b"\trefs/heads/agent/sample\n")
+
+
+@pytest.mark.parametrize("limit", [None, 1, 10])
+def test_inspection_reads_pushed_history(host: Path, limit: int | None) -> None:
+    mirror = mirror_in(host)
+    source = host / "source"
+    git_in(source, "checkout", "agent/sample")
+    (source / "example").write_text("second pushed change\n")
+    git_in(source, "add", "example")
+    commit_in(source, "second change")
+    git_in(source, "push", (host / "origin.git").as_uri(), "agent/sample")
+    git_in(source, "checkout", "main")
+    (source / "default-only").write_text("new default tip\n")
+    git_in(source, "add", "default-only")
+    commit_in(source, "default branch advanced")
+    git_in(source, "push", (host / "origin.git").as_uri(), "main")
+    # Even host settings that normally prune cannot drop mirror history.
+    git_in(mirror, "branch", "preserved")
+    git_in(mirror, "config", "fetch.prune", "true")
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=limit
+        )
+    )
+    assert result.returncode == 0, result.stderr
+    assert b"second" in result.stdout
+    assert b"default branch advanced" not in result.stdout
+    assert b"default-only" not in result.stdout
+    assert b"\x1b" not in result.stdout
+    if limit is None:
+        assert b"-base\n+second pushed change\n" in result.stdout
+    else:
+        assert result.stdout.count(b"commit ") == (1 if limit == 1 else 2)
+    assert git_in(mirror, "rev-parse", "refs/tbhbdev/default") == git_in(
+        source, "rev-parse", "main"
+    )
+    assert git_in(mirror, "rev-parse", "preserved")
+
+
+@pytest.mark.parametrize("verb", ["clean", "log", "diff"])
+def test_run_clone_config_never_executes(host: Path, verb: str) -> None:
+    mirror_in(host)
+    clone = clone_in(host)
+    tree = clone / ".worktrees/agent-sample"
+    marker = host / "executed"
+    command = host / "plant"
+    command.write_text(f"#!/bin/sh\nprintf planted > {shlex.quote(str(marker))}\n")
+    command.chmod(0o700)
+    config = (
+        f"[core]\nfsmonitor = {command}\npager = {command}\n"
+        f"[alias]\nlog = !{command}\ndiff = !{command}\n"
+        f'[filter "example"]\nclean = {command}\nsmudge = {command}\n'
+        f"[diff]\nexternal = {command}\n"
+    )
+    (tree / ".git/config").write_text(config)
+    (clone / ".git").mkdir()
+    (clone / ".git/config").write_text(config)
+    # Any git at either agent-written location fails this test, even if hardened.
+    write_standalone_fake(
+        host / "bin/git",
+        "import os, sys\n"
+        f"assert {str(clone)!r} not in os.getcwd()\n"
+        f"assert not any({str(clone)!r} in arg for arg in sys.argv)\n"
+        "os.execv('/usr/bin/git', ['/usr/bin/git', *sys.argv[1:]])\n",
+    )
+    no_session(host)
+    script = (
+        cleanup()
+        if verb == "clean"
+        else remote.inspect(
+            "example-org/example-repo",
+            "sample",
+            owner="example-owner",
+            limit=10 if verb == "log" else None,
+        )
+    )
+    assert execute(script).returncode == 0
+    assert not marker.exists()
+    assert (clone / ".git/config").read_text() == config
+    if verb == "clean":
+        assert (
+            host / "state/tbhbdev/agent-runs/trash/stamp-sample/worktree/.git/config"
+        ).read_text() == config
+
+
+@pytest.mark.parametrize("limit", [None, 10])
+def test_inspection_disables_external_diff_and_text_conversion(
+    host: Path, limit: int | None
+) -> None:
+    mirror = mirror_in(host)
+    marker = host / "executed"
+    command = host / "plant"
+    command.write_text(f"#!/bin/sh\nprintf planted > {shlex.quote(str(marker))}\n")
+    command.chmod(0o700)
+    git_in(mirror, "config", "diff.external", str(command))
+    git_in(mirror, "config", "diff.example.textconv", str(command))
+    (mirror / "info/attributes").write_text("* diff=example\n")
+    script = remote.inspect(
+        "example-org/example-repo", "sample", owner="example-owner", limit=limit
+    )
+    tokens = shlex.split(script)
+    inner = tokens[-1]
+    assert " -c diff.external= --no-optional-locks " in inner
+    assert "--no-ext-diff --no-textconv --no-color" in inner
+    assert "--no-prune --no-prune-tags" in inner
+    assert execute(script).returncode == 0
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("limit", [None, 10])
+def test_inspection_refuses_missing_origin_branch(
+    host: Path, limit: int | None
+) -> None:
+    mirror_in(host)
+    git_in(host / "origin.git", "update-ref", "-d", "refs/heads/agent/sample")
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=limit
+        )
+    )
+    assert result.returncode != 0
+    assert result.stdout == b""
