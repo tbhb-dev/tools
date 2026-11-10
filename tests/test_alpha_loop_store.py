@@ -22,6 +22,7 @@ from tbhbdev.alpha.loop.store import (
     Recovery,
     Result,
     RunRecord,
+    ScoreStatus,
     Store,
     StoreError,
     TransitionError,
@@ -741,9 +742,11 @@ def test_shadow_dimensions_and_duplicate_claims(database: Store) -> None:
 @pytest.mark.parametrize("result", [Result.AGREE, Result.DISAGREE, Result.NO_CHANGE])
 def test_score_shadow_persists_result(database: Store, result: Result) -> None:
     assert database.record_intent(KEY, 10, shadow=True)
-    assert database.score_shadow(KEY, 11, result)
+    assert database.score_shadow(KEY, 11, result) == ScoreStatus.SCORED
     assert database.action(KEY) == Action(KEY, ActionState.SHADOW, 10, None, 11, result)
-    assert database.score_shadow(KEY, 12, Result.AGREE) is (result == Result.NO_CHANGE)
+    assert database.score_shadow(KEY, 12, Result.AGREE) == (
+        ScoreStatus.SCORED if result == Result.NO_CHANGE else ScoreStatus.FINAL
+    )
     assert database.action(KEY) == Action(
         KEY,
         ActionState.SHADOW,
@@ -783,15 +786,15 @@ def test_only_shadow_actions_can_be_scored(
 
 def test_score_time_is_monotone(database: Store) -> None:
     assert database.record_intent(KEY, 10, shadow=True)
-    assert not database.score_shadow(KEY, 9, Result.AGREE)
+    assert database.score_shadow(KEY, 9, Result.AGREE) == ScoreStatus.SKIPPED_FUTURE
     assert database.action(KEY) == Action(KEY, ActionState.SHADOW, 10, None, None, None)
-    assert database.score_shadow(KEY, 10, Result.NO_CHANGE)
-    assert database.score_shadow(KEY, 12, Result.NO_CHANGE)
-    assert not database.score_shadow(KEY, 11, Result.DISAGREE)
+    assert database.score_shadow(KEY, 10, Result.NO_CHANGE) == ScoreStatus.SCORED
+    assert database.score_shadow(KEY, 12, Result.NO_CHANGE) == ScoreStatus.SCORED
+    assert database.score_shadow(KEY, 11, Result.DISAGREE) == ScoreStatus.SKIPPED_FUTURE
     assert database.action(KEY) == Action(
         KEY, ActionState.SHADOW, 10, None, 12, Result.NO_CHANGE
     )
-    assert database.score_shadow(KEY, 12, Result.DISAGREE)
+    assert database.score_shadow(KEY, 12, Result.DISAGREE) == ScoreStatus.SCORED
 
 
 def test_shadow_transaction_rollback(tmp_path: Path) -> None:
@@ -843,7 +846,7 @@ def test_shadow_transactions_lock_before_read_or_write(
     assert db.record_shadow(store.ShadowIntent(KEY, EVENT.repository, "R1"), 0)
     assert trace[0] == "BEGIN IMMEDIATE"
     trace.clear()
-    assert db.score_shadow(KEY, 0, Result.NO_CHANGE)
+    assert db.score_shadow(KEY, 0, Result.NO_CHANGE) == ScoreStatus.SCORED
     assert trace[0] == "BEGIN IMMEDIATE"
     db.close()
 
