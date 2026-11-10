@@ -287,7 +287,8 @@ fi
     lock = (
         'open(my $lock, ">>", shift) or die "open lock: $!"; '
         'flock($lock, LOCK_EX) or die "lock: $!"; '
-        'system("/bin/sh", "-c", shift); exit($? == -1 ? 1 : $? >> 8);'
+        'system("/bin/sh", "-c", shift); '
+        "exit($? == -1 ? 1 : ($? & 127) ? 128 + ($? & 127) : $? >> 8);"
     )
     command = (
         owned(name, decision.owner)

@@ -170,7 +170,7 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
     except transport.TransportError:
         recover_transfer(settings, run)
         print(f"{run.name}: launch unconfirmed host={run.host.name} phase=unreachable")
-        return 1
+        return 75
     try:
         return poll_launch(settings, run, deadline)
     except transport.CollisionError:
@@ -191,7 +191,9 @@ def recover_transfer(settings: Settings, run: Run) -> None:
     except transport.CollisionError:
         not_owner(run)
     except transport.TransportError:
-        archive_metadata(run.name, run.started)
+        # An unreachable host may have started the run. Keep its owner claim
+        # so later verbs can reach it once the connection recovers.
+        pass
 
 
 def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
