@@ -158,6 +158,7 @@ class RunPaths:
     tmpdir: str
     codex_home: str
     audit_dir: str
+    git_common_dir: str | None = None
 
 
 class CodexMode(StrEnum):

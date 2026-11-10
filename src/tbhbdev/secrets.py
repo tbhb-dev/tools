@@ -45,6 +45,7 @@ type Json = dict[str, object]
 # the item's attributes. They name the tool, not a deployment: a host needs
 # them before it reads any config.
 KEYCHAIN = "tbhbdev.keychain"
+MACOS_KEYCHAIN_FILE = Path("Library/Keychains/tbhbdev.keychain-db")
 SERVICE = "tbhbdev-connect"
 ACCOUNT = "agent"
 # On Linux the token is this file, relative to the home directory.
