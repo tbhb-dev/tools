@@ -233,7 +233,39 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
     return value, executable
 
 
+def mark_host(run: Run) -> None:
+    root = Path(os.environ.get("XDG_STATE_HOME") or run.home / ".local" / "state")
+    marker = runfiles.private_dir(root / "tbhbdev") / "agent-taint.jsonl"
+    runfiles.append_text(
+        marker,
+        json.dumps(
+            {
+                "v": 1,
+                "run": run.files.name,
+                "account": run.request.account,
+                "authorized_by": run.request.authorized_by,
+                "at": time.time(),
+            }
+        )
+        + "\n",
+    )
+
+
+def announce_access(run: Run) -> None:
+    notices = []
+    if run.request.profile is Profile.BUILD and run.request.tainted_host:
+        notices.append("untrusted-host")
+    if run.request.unsandboxed:
+        notices.append(
+            f"unsandboxed full access authorized_by={run.request.authorized_by}"
+        )
+    for notice in notices:
+        print(notice, file=sys.stderr)
+        run.files.write("log", notice + "\n")
+
+
 def preflight(run: Run) -> None:
+    announce_access(run)
     if run.request.harness is Harness.AGY:
         message = "agy runs are refused: no OS sandbox"
         raise Invalid(message)
@@ -266,6 +298,9 @@ def preflight(run: Run) -> None:
             "upgrade or configure codex_network_proxy_opt_out"
         )
         raise Invalid(message)
+
+    if run.request.unsandboxed:
+        mark_host(run)
 
 
 def prepare_workspace(run: Run) -> Prepared:
