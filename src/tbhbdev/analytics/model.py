@@ -50,5 +50,3 @@ class Catalog:
 @dataclass(frozen=True)
 class Verdict:
     violations: tuple[str, ...] = ()
-    value: str | None = None
-    message: str = ""
