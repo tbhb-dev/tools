@@ -145,12 +145,19 @@ def resolved_denies(run: Run, paths: RunPaths) -> tuple[str, ...]:
 def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
     """Check directories before even inspecting or invoking an executable."""
     directories = host_tools.search_path(run.settings, run.host.os)
+    entries = run.settings.sandbox.path
+    sandbox_directories = tuple(
+        str(run.home / p)
+        for p in (entries.linux if run.host.os is Os.LINUX else entries.macos)
+    )
     protected = (
         str(run.files.root.resolve()),
         *protected_home(run),
         *host_tools.installation(),
         *directories,
         *(str(Path(p).resolve()) for p in directories),
+        *sandbox_directories,
+        *(str(Path(p).resolve()) for p in sandbox_directories),
     )
     resolved = dataclasses.replace(
         paths,
@@ -207,11 +214,12 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
     executable = host_tools.resolve(name, value.env["PATH"])
     commands = [
         host_tools.resolve(name, ":".join(directories))
-        for name in ("git", "ssh-agent", "ssh-add")
+        for name in ("git", "ssh-agent", "ssh-add", "ssh", "openssl")
     ]
     if run.host.os.value == "macos":
         commands.extend(
-            host_tools.resolve(name, ":".join(directories)) for name in ("sysctl", "ps")
+            host_tools.resolve(name, ":".join(directories))
+            for name in ("sysctl", "ps", "security")
         )
     executables = (
         *host_tools.executable_paths(executable, value.env["PATH"]),
@@ -548,6 +556,7 @@ def refuse_started(files: runfiles.RunFiles) -> None:
 
 
 def main(arguments: list[str], prog: str) -> int:
+    os.environ["PATH"] = host_tools.search()
     parser = argparse.ArgumentParser(prog=prog)
     parser.add_argument("name", nargs="?")
     parser.add_argument("request", nargs="?")

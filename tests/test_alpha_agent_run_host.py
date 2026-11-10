@@ -1497,7 +1497,17 @@ def test_mac_host_commands_are_resolved_before_launch(
 
     monkeypatch.setattr(host_tools, "resolve", resolve)
     run_host.checked_policy(run, preparation(run).paths)
-    assert calls == ["codex", "git", "ssh-agent", "ssh-add", "sysctl", "ps"]
+    assert calls == [
+        "codex",
+        "git",
+        "ssh-agent",
+        "ssh-add",
+        "ssh",
+        "openssl",
+        "sysctl",
+        "ps",
+        "security",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1684,10 +1694,10 @@ def test_checked_policy_supplies_all_protected_paths(
     )
     run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=os))
     directories = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
-    names = ("git", "ssh-agent", "ssh-add")
+    names = ("git", "ssh-agent", "ssh-add", "ssh", "openssl")
     if os is Os.MACOS:
         directories += ("/opt/homebrew/bin", "/usr/local/bin")
-        names += ("sysctl", "ps")
+        names += ("sysctl", "ps", "security")
     installed = ("/trusted/prefix", "/trusted/python", "/trusted/entry")
     monkeypatch.setattr(host_tools, "installation", constant(installed))
     protections: list[tuple[str, ...]] = []
@@ -1746,6 +1756,22 @@ def test_checked_policy_supplies_all_protected_paths(
         *installed,
         *directories,
         *(str(Path(path).resolve()) for path in directories),
+        *(
+            str(run.home / path)
+            for path in (
+                run.settings.sandbox.path.linux
+                if os is Os.LINUX
+                else run.settings.sandbox.path.macos
+            )
+        ),
+        *(
+            str((run.home / path).resolve())
+            for path in (
+                run.settings.sandbox.path.linux
+                if os is Os.LINUX
+                else run.settings.sandbox.path.macos
+            )
+        ),
     )
     assert protections == [
         (*expected, *run_host.full_denies(run, expected_paths)),
@@ -2172,3 +2198,50 @@ def test_account_clone_must_not_use_an_external_common_directory(
         Invalid, match=r"^account clone must have its own git directory$"
     ):
         run_host.checked_policy(run, preparation(run).paths)
+
+
+@pytest.mark.parametrize("os_name", Os)
+@pytest.mark.parametrize("linked", [False, True])
+def test_sandbox_path_must_be_outside_write_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, os_name: Os, linked: bool
+) -> None:
+    run = make_run(tmp_path)
+    root = run.home / "writable"
+    root.mkdir()
+    entry = root / "bin"
+    if linked:
+        entry = run.home / "tools"
+        entry.symlink_to(root, target_is_directory=True)
+    sandbox = dataclasses.replace(
+        run.settings.sandbox,
+        write_roots=(str(root),),
+        path=dataclasses.replace(
+            run.settings.sandbox.path, linux=(str(entry),), macos=(str(entry),)
+        ),
+    )
+    run = dataclasses.replace(
+        run,
+        host=dataclasses.replace(run.host, os=os_name),
+        settings=dataclasses.replace(run.settings, sandbox=sandbox),
+    )
+
+    def lookup(*_args: object) -> str:
+        pytest.fail("path overlap must be refused before executable inspection")
+
+    monkeypatch.setattr(host_tools, "resolve", lookup)
+    with pytest.raises(Invalid, match="protected host path"):
+        run_host.checked_policy(run, preparation(run).paths)
+
+
+def test_main_sets_host_path_before_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path / "untrusted"))
+
+    def load(_args: object, _tmpdir: Path) -> None:
+        assert os.environ["PATH"] == host_tools.search()
+        message = "loading probe"
+        raise Invalid(message)
+
+    monkeypatch.setattr(run_host, "_load", load)
+    assert run_host.main(["example"], "example") == 1
