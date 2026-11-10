@@ -80,6 +80,7 @@ def git(clone: Path, *args: str) -> str:
     output = partial(
         subprocess.check_output,
         env=env,
+        cwd="/",
         text=True,
         stderr=subprocess.DEVNULL,
         timeout=30,
