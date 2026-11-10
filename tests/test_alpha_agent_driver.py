@@ -1631,3 +1631,46 @@ def test_unsandboxed_new_launch_after_host_setting_disabled(
     assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 1
     assert "isn't enabled on this host" in capsys.readouterr().err
     assert remote.records("ssh") == []
+
+
+@pytest.mark.parametrize("failure", ["transfer", "deadline"])
+def test_unsandboxed_unconfirmed_reports_sandbox(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    if failure == "transfer":
+        original = transport.call
+
+        def lost_reply(
+            config: model.Settings,
+            host: model.Host,
+            command: tuple[str, ...],
+            *,
+            data: bytes = b"",
+            timeout: float = 30,
+        ) -> str:
+            reply = original(config, host, command, data=data, timeout=timeout)
+            if "new-session" in command[2]:
+                message = "lost start reply"
+                raise transport.TransportError(message)
+            return reply
+
+        monkeypatch.setattr(transport, "call", lost_reply)
+    else:
+        ticks = iter([0, 0, 0, 0, 0, 120, 120, 120, 134, 134, 134])
+        monkeypatch.setattr(
+            driver,
+            "time",
+            SimpleNamespace(monotonic=lambda: next(ticks), sleep=driver.time.sleep),
+        )
+        remote.configure(launch={"phase": "preparing"}, kill_rc="124\n")
+    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == (
+        75 if failure == "transfer" else 1
+    )
+    phase = "unreachable" if failure == "transfer" else "preparing"
+    assert capsys.readouterr().out == (
+        f"sample: launch unconfirmed host=example-linux phase={phase}"
+        " sandbox=none authorized_by=o/r#1\n"
+    )
