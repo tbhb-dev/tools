@@ -323,9 +323,13 @@ The settings have these constraints:
 - Path settings are non-blank strings without a null byte or a `..` part. The sandbox lists must be non-empty.
 - Every credential and profile `token` is a `vault/item/field` reference, and each part starts with a letter or digit, then continues with letters, digits, dots, `_` or `-`. `[agent.credentials.<account>]` takes one table for each account, and `docker` is optional.
 - `default_profile` names one of the profiles, matching without regard to case, so `Primary` selects `primary`. Profile names that differ only in case fail validation. Display uses the name as written.
-- `[[agent.host]]` lists at least one host. Its `name` is lower-case, dot-separated labels, `os` is `linux` or `macos`, `shell` is `bash` or `zsh`, `account` must be one of `accounts`, and host names are unique. Every name in `accounts` needs an `[agent.credentials.<name>]` table. `proven_harnesses` lists harnesses with a recorded live sandbox pass on this host; run-host refuses any other harness.
+- `[[agent.host]]` lists at least one host. Its `name` is lower-case, dot-separated labels, `os` is `linux` or `macos`, `shell` is `bash` or `zsh`, `account` must be one of `accounts`, and host names are unique. Every name in `accounts` needs an `[agent.credentials.<name>]` table. `proven_harnesses` lists each harness with a recorded live sandbox pass on this host. Run-host refuses any other harness.
 
 The run request is a versioned JSON object. Version 2 requires `tainted_host` and lists every run field and no credential. A reader refuses unknown versions, unknown or missing fields, and any `unsandboxed` request unless the harness is Codex, the profile is `build`, the host's `unsandboxed` is true and the authorization has the form `owner/repo#N` or `operator-chat-YYYY-MM-DD`. The repo argument takes the form `org/repo` or `<git host>/<org>/<repo>`, with `github.com` as the default git host, and resolves to `Code/<git host>/<org>/<repo>` under the home directory. A repo name can't be `.` or `..` or end in `.git`.
+
+### Agent isolation limits
+
+An unsandboxed run can read the account's 1Password Connect token and every secret it can read, and write anything the account can. Use a dedicated account without secrets for these runs. The host marker at `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` is a hint that the marked account can delete. An account listed on any `unsandboxed = true` host can run no reviews on any host. A child that leaves the process group survives the run. Claude has no recorded sandbox pass, so run-host refuses it until a pass is recorded in `proven_harnesses`.
 
 ### Secret scan
 
