@@ -116,6 +116,9 @@ def _codex(
         if policy.profile is Profile.REVIEW:
             argv.append("--ephemeral")
     argv += ["--strict-config", "-C", worktree, *_codex_sandbox(policy.profile, detail)]
+    # Quoting a path inside a dotted override key loses dots in some CLIs.
+    # Override the table as TOML so project trust is decided before layer loading.
+    argv += ["-c", f'projects={{{_toml(worktree)}={{trust_level="untrusted"}}}}']
     argv += [
         "-c",
         "sandbox_workspace_write.network_access=true",
@@ -165,6 +168,7 @@ def _claude(
     argv = ["claude", *(["-p"] if headless else [])]
     argv += ["--model", request.model, "--effort", request.effort]
     argv += ["--permission-mode", mode, "--settings", settings]
+    argv += ["--setting-sources", "user", "--strict-mcp-config"]
     if not headless:
         argv.append(POINTER.format(path=brief_file))
     return tuple(argv)

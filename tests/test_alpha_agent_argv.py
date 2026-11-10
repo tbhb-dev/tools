@@ -194,6 +194,8 @@ def expected(harness: Harness, kind: RunKind, profile: Profile) -> tuple[str, ..
             "-C",
             WORKTREE,
             *codex_sandbox(profile),
+            "-c",
+            f'projects={{"{WORKTREE}"={{trust_level="untrusted"}}}}',
             *CODEX_TAIL,
             *CODEX_HANDOFF,
             *MODEL,
@@ -211,6 +213,9 @@ def expected(harness: Harness, kind: RunKind, profile: Profile) -> tuple[str, ..
             "dontAsk" if review else "auto",
             "--settings",
             claude_settings(profile),
+            "--setting-sources",
+            "user",
+            "--strict-mcp-config",
             *(() if headless else (POINTER,)),
         )
     head = (
@@ -290,11 +295,27 @@ def test_unsandboxed_codex_is_full_access_with_no_profile(kind: RunKind) -> None
         WORKTREE,
         "-s",
         "danger-full-access",
+        "-c",
+        f'projects={{"{WORKTREE}"={{trust_level="untrusted"}}}}',
         *CODEX_TAIL,
         *CODEX_HANDOFF,
         *MODEL,
         "-" if kind is RunKind.EXEC else POINTER,
     )
+
+
+def test_codex_project_trust_preserves_path_as_one_toml_key() -> None:
+    workspace = '/example/path.with.dots/and "quotes"'
+    command = argv.harness(
+        request(Harness.CODEX, RunKind.EXEC, Profile.BUILD),
+        policy_for(Harness.CODEX, Profile.BUILD),
+        worktree=workspace,
+        brief_file=BRIEF_FILE,
+    )
+    entry = next(value for value in command if value.startswith("projects="))
+    assert tomllib.loads(entry) == {
+        "projects": {workspace: {"trust_level": "untrusted"}}
+    }
 
 
 @pytest.mark.parametrize(

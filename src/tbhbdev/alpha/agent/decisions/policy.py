@@ -213,11 +213,15 @@ def _claude(
             "denyWrite": [*deny_write, *deny],
         },
     }
-    network: dict[str, object] = {"allowedDomains": list(domains)}
+    network: dict[str, object] = {
+        "allowedDomains": list(domains),
+        "allowAllUnixSockets": False,
+        "allowLocalBinding": False,
+        "strictAllowlist": True,
+    }
     if review:
         network.update(
             {
-                "strictAllowlist": True,
                 "allowedDomains": list(_REVIEW_DOMAINS),
             }
         )
@@ -226,6 +230,7 @@ def _claude(
     sandbox["network"] = network
     return ClaudePolicy(
         {
+            "disableAllHooks": True,
             "env": {
                 k: env[k]
                 for k in (
@@ -240,7 +245,12 @@ def _claude(
             },
             "permissions": {
                 "allow": [] if review else [f"Edit(/{p}/**)" for p in writes],
-                "deny": [*(_CLAUDE_FILE_TOOLS if review else ()), *denied_tools],
+                "deny": [
+                    *(_CLAUDE_FILE_TOOLS if review else ()),
+                    *denied_tools,
+                    "WebFetch",
+                    "WebSearch",
+                ],
             },
             "sandbox": sandbox,
         }
