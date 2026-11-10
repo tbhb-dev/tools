@@ -360,7 +360,10 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
             run.host,
             remote.origin_branch(run.request.repo, run.name, owner=run.owner),
         )
-        if not branch.strip():
+        if not any(
+            line.endswith(f"\trefs/heads/agent/{run.name}")
+            for line in branch.splitlines()
+        ):
             message = (
                 f"branch agent/{run.name} does not exist on origin; "
                 "pass --force to clean anyway"
@@ -388,10 +391,14 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
 
 def inspect(settings: Settings, run: Run, *, limit: int | None) -> int:
     print(
-        transport.shell(
-            settings,
-            run.host,
-            remote.inspect(run.request.repo, run.name, owner=run.owner, limit=limit),
+        transport.terminal_text(
+            transport.shell(
+                settings,
+                run.host,
+                remote.inspect(
+                    run.request.repo, run.name, owner=run.owner, limit=limit
+                ),
+            )
         ),
         end="",
     )

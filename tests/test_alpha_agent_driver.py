@@ -14,7 +14,14 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
-from agent_driver_example import Remote, setup
+from agent_driver_example import (
+    Remote,
+    execution_arguments,
+    git_in,
+    mirror_in,
+    setup,
+    write_standalone_fake,
+)
 from agent_example import MARKER, settings
 
 from tbhbdev import version
@@ -47,22 +54,7 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
 
 
 def arguments(remote: Remote, *options: str) -> list[str]:
-    return [
-        "exec",
-        "--host",
-        "example-linux",
-        "--repo",
-        "example-org/example-repo",
-        "--model",
-        "example-model",
-        "--effort",
-        "high",
-        "--profile",
-        "build",
-        *options,
-        "sample",
-        str(remote.prompt),
-    ]
+    return execution_arguments(remote.prompt, *options)
 
 
 def launch(remote: Remote, *options: str) -> int:
@@ -1402,6 +1394,83 @@ def test_inspection_uses_recorded_target_and_mirror(
     else:
         assert "-n" not in calls[1]
     assert len(remote.records("ssh")) == 5
+
+    mirror_path = (
+        remote.root
+        / "state/tbhbdev/agent-mirrors/github.com/example-org/example-repo.git"
+    )
+    mirror_path.rename(remote.root / "unused-mirror")
+    mirror = mirror_in(remote.root)
+    clone = (
+        remote.root
+        / "home/Code/github.com/example-org/example-repo/.worktrees/agent-sample"
+    )
+    git_in(clone, "init")
+    marker = remote.root / "clone-origin-executed"
+    git_in(clone, "remote", "add", "origin", f"ext::touch {marker}")
+    write_standalone_fake(
+        remote.bin / "git",
+        "import os, sys\nos.execv('/usr/bin/git', ['/usr/bin/git', *sys.argv[1:]])\n",
+    )
+    assert command(verb) == 0
+    output = capsys.readouterr()
+    assert "pushed change" in output.out
+    assert output.err == ""
+    assert not marker.exists()
+    assert git_in(mirror, "rev-parse", "refs/heads/agent/sample") == git_in(
+        remote.root / "source", "rev-parse", "agent/sample"
+    )
+    git_in(mirror, "config", "remote.origin.url", str(remote.root / "missing.git"))
+    assert command(verb) == 1
+
+
+def test_clean_rejects_suffix_matching_origin_branch(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert launch(remote) == 0
+    remote.configure(session=False)
+    remote.file(".rc", "0")
+    mirror_path = (
+        remote.root
+        / "state/tbhbdev/agent-mirrors/github.com/example-org/example-repo.git"
+    )
+    mirror_path.rename(remote.root / "unused-mirror")
+    mirror_in(remote.root)
+    origin = remote.root / "origin.git"
+    commit = git_in(origin, "rev-parse", "refs/heads/agent/sample")
+    git_in(origin, "update-ref", "refs/heads/x/refs/heads/agent/sample", commit)
+    git_in(origin, "update-ref", "-d", "refs/heads/agent/sample")
+    write_standalone_fake(
+        remote.bin / "git",
+        "import os, sys\nos.execv('/usr/bin/git', ['/usr/bin/git', *sys.argv[1:]])\n",
+    )
+    assert command("clean") == 1
+    assert "does not exist on origin" in capsys.readouterr().err
+    assert driver.metadata_path("sample").exists()
+    assert (remote.state / "sample.owner").exists()
+
+
+@pytest.mark.parametrize("verb", ["log", "diff"])
+def test_inspection_filters_terminal_controls(
+    remote: Remote, capsys: pytest.CaptureFixture[str], verb: str
+) -> None:
+    assert launch(remote) == 0
+    capsys.readouterr()
+    remote.configure(**{verb: "é\tline\n\x1b\x07\x00\x7f\x85\u200e"})
+    assert command(verb) == 0
+    assert capsys.readouterr() == ("é\tline\n", "")
+
+
+def test_inspection_warning(remote: Remote, capsys: pytest.CaptureFixture[str]) -> None:
+    assert launch(remote) == 0
+    capsys.readouterr()
+    remote.configure(session=False)
+    remote.file(".rc", "0")
+    assert command("wait") == 0
+    assert (
+        "Don't run git inside a run clone: it is agent-written. "
+        "Use `tbhbdev alpha agent log|diff NAME`." in capsys.readouterr().out
+    )
 
 
 def test_log_count(remote: Remote) -> None:
