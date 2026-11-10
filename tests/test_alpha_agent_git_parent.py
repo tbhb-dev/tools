@@ -143,7 +143,7 @@ def test_live_harness_parent_ignores_each_git_plant(
         attempt, user_marker, written = agent_git_plants.hook_write_probe(
             run.home, Path(paths.codex_home), tmp_path
         )
-        command_text = attempt + "; " + command_text
+        command_text = attempt + " || :; " + command_text
     run.files.write(
         "prompt", f"Run this exact shell command once, then finish: {command_text}"
     )
