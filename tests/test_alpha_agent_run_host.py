@@ -35,7 +35,15 @@ from tbhbdev.alpha.agent import (
 )
 from tbhbdev.alpha.agent.decisions import request
 from tbhbdev.alpha.agent.decisions.run_state import Group
-from tbhbdev.alpha.agent.model import CodexPolicy, Harness, Invalid, Os, RunKind
+from tbhbdev.alpha.agent.model import (
+    AgyPolicy,
+    ClaudePolicy,
+    CodexPolicy,
+    Harness,
+    Invalid,
+    Os,
+    RunKind,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -1849,6 +1857,95 @@ def test_checked_policy_supplies_all_protected_paths(
     assert executable == "/usr/bin/true"
 
 
+def assert_claude_marker_write_denies(
+    detail: ClaudePolicy, markers: tuple[str, ...]
+) -> None:
+    sandbox = cast("dict[str, object]", detail.settings["sandbox"])
+    filesystem = cast("dict[str, list[str]]", sandbox["filesystem"])
+    permissions = cast("dict[str, list[str]]", detail.settings["permissions"])
+    for path in markers:
+        assert path in filesystem["denyWrite"]
+        for tool in ("Edit", "Write"):
+            assert f"{tool}(/{path})" in permissions["deny"]
+            assert f"{tool}(/{path}/**)" in permissions["deny"]
+
+
+@pytest.mark.parametrize("os_name", Os)
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_host_marker_directory_is_write_denied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    os_name: Os,
+    harness: Harness,
+    profile: str,
+) -> None:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        profile=profile,
+        timeout=900,
+        commit="0" * 40 if profile == "review" else None,
+        reason="test",
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+    )
+    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=os_name))
+    resolved = tmp_path / "private" / "var"
+    resolved.mkdir(parents=True)
+    alias = tmp_path / "var"
+    alias.symlink_to(resolved, target_is_directory=True)
+    marker = alias / "tmp" / "tbhbdev-agent-taint"
+    monkeypatch.setattr(run_host, "TAINT_DIRECTORY", marker)
+    markers = (str(marker), str(resolved / "tmp" / "tbhbdev-agent-taint"))
+    protected = run_host.protected_home(run)
+    assert all(path in protected for path in markers)
+    value, _executable = run_host.checked_policy(run, preparation(run).paths)
+    match value.detail:
+        case ClaudePolicy() as detail:
+            assert_claude_marker_write_denies(detail, markers)
+        case CodexPolicy() as detail:
+            assert detail.read_roots[0] == ":root"
+            assert all(
+                not Path(path).is_relative_to(root)
+                for path in markers
+                for root in detail.write_roots
+            )
+        case AgyPolicy(grants):
+            assert all(
+                not Path(path).is_relative_to(grant.removeprefix("write_file(")[:-1])
+                for path in markers
+                for grant in grants
+                if grant.startswith("write_file(")
+            )
+
+
+@pytest.mark.parametrize(
+    "write_root",
+    [Path("/var") / "tmp", Path("/var") / "tmp" / "tbhbdev-agent-taint"],
+)
+def test_host_marker_write_roots_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_root: Path
+) -> None:
+    run = make_run(tmp_path)
+    marker = Path("/var") / "tmp" / "tbhbdev-agent-taint"
+    monkeypatch.setattr(run_host, "TAINT_DIRECTORY", marker)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(
+                run.settings.sandbox, write_roots=(str(write_root),)
+            ),
+        ),
+    )
+    with pytest.raises(Invalid) as caught:
+        run_host.checked_policy(run, preparation(run).paths)
+    assert str(caught.value) == (
+        f"protected host path {marker.resolve()} overlaps write root "
+        f"{Path(write_root).resolve()}; narrow that write root"
+    )
+
+
 def test_main_defaults_to_the_current_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2161,6 +2258,7 @@ def test_protected_home_lists_startup_files_and_socket_ancestors(
         str(mirror.parent.parent),
         str(mirror.parent.parent.parent),
         str(run_host.userconfig.path()),
+        str(run_host.TAINT_DIRECTORY),
     )
 
 
