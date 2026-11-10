@@ -204,8 +204,6 @@ R4 = "shadow"
 R9 = "shadow"
 ```
 
-Live Codex probes copy the account's auth through `credentials.auth_copy`, then use the production refresh write-back and removal path. Each probe asserts that its test directory contains no `auth.json` when it finishes. Hooks are planted only under the scratch run's home.
-
 The settings have these constraints:
 
 - `repositories` lists unique `owner/name` strings.
@@ -318,7 +316,13 @@ Run-host builds the harness command and adds the brief header. The driver sends 
 
 For `[agent.sandbox]`, macOS hosts list `DARWIN_USER_TEMP_DIR` and `DARWIN_USER_CACHE_DIR` in `write_roots` as absolute paths. Linux hosts can list `/tmp`. The private `CODEX_HOME` stays outside these roots at `<state>/tbhbdev/agent-codex/<name>`, with mode 0700. Run-host removes it in `finish` after auth write-back. State defaults to `~/.local/state`.
 
-Live Codex probes copy the account's auth through `credentials.auth_copy`, then use the production refresh write-back and removal path. Each probe asserts that its test directory contains no `auth.json` when it finishes. Hooks are planted only under the scratch run's home.
+Live Codex probes copy the account's auth through `credentials.auth_copy`, then use the production refresh write-back and removal path. Each probe asserts that its test directory contains no `auth.json` when it finishes. Each probe plants hooks only under the scratch run's home.
+
+Run every opt-in live test from a clean checkout with this command, outside an agent sandbox. The state directory keeps the test root outside the system temp directories granted for writing.
+
+```sh
+TBHBDEV_SANDBOX_LIVE=1 uv run pytest --basetemp "$HOME/.local/state/tbhbdev/sandbox-live" tests/test_alpha_agent_sandbox_live.py tests/test_alpha_agent_sandbox_live_host.py tests/test_alpha_agent_git_parent.py
+```
 
 The settings have these constraints:
 
