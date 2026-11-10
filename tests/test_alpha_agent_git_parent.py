@@ -11,7 +11,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import tomllib
 from pathlib import Path
 
@@ -155,10 +154,12 @@ def test_live_harness_parent_ignores_each_git_plant(
     installed = shutil.which(harness.value)
     assert installed is not None, f"{harness}: harness binary not installed"
     run, paths = real_clone(tmp_path, monkeypatch, harness)
+    harness_write = tmp_path / "harness-write"
+    harness_write.mkdir()
     sandbox = dataclasses.replace(
         run.settings.sandbox,
         host_path=(str(Path(installed).parent),),
-        write_roots=(tempfile.gettempdir(),) if temp_write else (),
+        write_roots=(str(harness_write),) if temp_write else (),
         denied_home_paths=(
             *policy.denied_paths(run.settings, run.host, str(account_home), paths.uid),
             *(
