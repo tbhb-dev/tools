@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 
 from tbhbdev import userconfig
-from tbhbdev.alpha.agent import driver, settings
+from tbhbdev.alpha.agent import driver, prune, settings
 from tbhbdev.alpha.agent.decisions import config
 
 __all__ = ["driver", "main", "settings"]
@@ -23,6 +24,11 @@ def duration(text: str) -> int:
 def parser(prog: str) -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog=prog)
     verbs = command.add_subparsers(dest="verb", required=True)
+    pruning = verbs.add_parser("prune", allow_abbrev=False)
+    pruning.add_argument("--older-than", type=prune_number, default=14)
+    pruning.add_argument("--apply", action="store_true")
+    pruning.add_argument("--force", action="store_true")
+    pruning.add_argument("--largest", type=prune_positive)
     execute = verbs.add_parser("exec", help="launch a headless run")
     execute.add_argument("--host", required=True)
     execute.add_argument("--repo", required=True)
@@ -57,13 +63,37 @@ def parser(prog: str) -> argparse.ArgumentParser:
     return command
 
 
+def prune_number(text: str) -> int:
+    if re.fullmatch(r"[0-9]{1,6}", text) is None:
+        message = "must be a nonnegative integer of at most six digits"
+        raise argparse.ArgumentTypeError(message)
+    return int(text)
+
+
+def prune_positive(text: str) -> int:
+    value = prune_number(text)
+    if value == 0:
+        message = "must be greater than zero"
+        raise argparse.ArgumentTypeError(message)
+    return value
+
+
 def main(argv: list[str], prog: str) -> int:
     try:
-        args = parser(prog).parse_args(argv)
+        command = parser(prog)
+        args = command.parse_args(argv)
+        if (
+            args.verb == "prune"
+            and args.largest is not None
+            and (args.apply or args.force)
+        ):
+            command.error("--largest cannot accompany --apply or --force")
     except SystemExit as exc:
         return int(exc.code or 0)
     try:
         # Phase 3a dispatches its hidden run-host verb here.
+        if args.verb == "prune":
+            return prune.main(settings.load(), args)
         return driver.dispatch(settings.load(), args)
     except (userconfig.ConfigError, OSError, ValueError) as exc:
         print(f"{prog}: {exc}", file=sys.stderr)
