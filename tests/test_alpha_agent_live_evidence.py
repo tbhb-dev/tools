@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 from contextlib import ExitStack, nullcontext
+from types import SimpleNamespace
 lazy from pathlib import Path
 
 import pytest
@@ -214,3 +216,142 @@ def test_default_suite_runs_harness_free_sandbox_probes(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert "11 passed" in result.stdout, result.stdout
     assert "SKIPPED" not in result.stdout
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_socket_probe_isolates_network_refusals_and_keeps_every_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    platform: str,
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    run, paths = live.probe_run(tmp_path, Harness.CODEX)
+    control = Proxy(1)
+    scripts: list[str] = []
+
+    def checked(
+        actual: run_host.Run, actual_paths: run_host.RunPaths
+    ) -> tuple[run_host.Policy, str]:
+        value = policy.build(
+            actual.settings,
+            actual.host,
+            paths=actual_paths,
+            harness=Harness.CODEX,
+            profile=actual.request.profile,
+            account="agent",
+            unsandboxed=False,
+        )
+        return value, "/example/codex"
+
+    def execute(
+        _command: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        prompt = "Execute this exact command with Bash, then finish: "
+        text = kwargs["input"]
+        assert isinstance(text, str)
+        assert text.startswith(prompt)
+        script = Path(shlex.split(text.removeprefix(prompt))[-1]).read_text()
+        scripts.append(script)
+        results = run.tmpdir / "observed"
+        # Fake the CLI aborting a complete tool call on the first blocked domain.
+        for line in script.splitlines():
+            if "https://example.com" in line:
+                return subprocess.CompletedProcess(
+                    _command,
+                    1,
+                    "",
+                    'Network access to "example.com" was blocked: '
+                    "domain is not on the allowlist",
+                )
+            # Linux's isolated network namespace cannot reach host loopback.
+            # https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/linux-sandbox/src/proxy_routing.rs
+            if platform == "linux" and "https://api.github.com" in line:
+                assert '--proxy "$HTTPS_PROXY"' in line
+                assert "--noproxy ''" in line
+            if line.startswith("echo '"):
+                label = shlex.split(line)[1].split()[0]
+                status = int(
+                    label not in {"api.github.com", "file-control"}
+                    and not (label == "local-binding" and platform == "linux")
+                )
+                with results.open("a") as output:
+                    output.write(f"{label} {status}\n")
+                if label == "api.github.com":
+                    control.targets.append("api.github.com:443")
+                if label == "file-control":
+                    (run.tmpdir / "write-control").write_text("invoked")
+        return subprocess.CompletedProcess(_command, 0, "", "")
+
+    def sockets(_stack: ExitStack) -> dict[str, live.Listener]:
+        return {
+            label: live.Listener(f"/example/{label}")
+            for label in ("TMPDIR", "tmp", "HOME")
+        }
+
+    monkeypatch.setattr(run_host, "checked_policy", checked)
+    monkeypatch.setattr(live, "scratch_servers", sockets)
+    monkeypatch.setattr(live, "control_proxy", lambda: nullcontext(control))
+    monkeypatch.setattr(live, "subprocess", SimpleNamespace(run=execute))
+    with ExitStack() as stack:
+        live.run_probe(run, paths, "/example/codex", stack)
+    output = capsys.readouterr().out
+    assert "unproven" not in output
+    assert all(
+        f"codex {label}:" in output
+        for label in (
+            *EXTRA,
+            "TMPDIR",
+            "api.github.com",
+            "example.com",
+            "project-hooks",
+        )
+    )
+    assert len(scripts) == 7
+    assert "curl" not in scripts[0]
+    assert all(
+        label in scripts[0] for label in (*MIRRORS, "file-control", "local-binding")
+    )
+    assert all(
+        sum(
+            domain in script
+            for domain in (
+                "https://api.github.com",
+                "https://example.com",
+                "--unix-socket",
+                "--proxy ''",
+            )
+        )
+        == 1
+        for script in scripts[1:]
+    )
+
+
+@pytest.mark.parametrize(
+    "case", ["stderr", "stdout", "other-domain", "other-error", "no-domain", "recorded"]
+)
+def test_domain_refusal_requires_the_cli_stderr_and_expected_domain(
+    tmp_path: Path, case: str
+) -> None:
+    results = tmp_path / "observed"
+    domain = None if case == "no-domain" else "example.com"
+    call = live.ProbeCall("example.com", "fixture", domain)
+    refusal = (
+        'Network access to "example.com" was blocked: domain is not on the allowlist'
+    )
+    stdout = refusal if case == "stdout" else ""
+    stderr = {
+        "other-domain": refusal.replace("example.com", "other.example"),
+        "other-error": "fixture error",
+        "stdout": "",
+    }.get(case, refusal)
+    if case == "recorded":
+        results.write_text("example.com 0\n")
+    live.record_domain_refusal(
+        call, subprocess.CompletedProcess(["fixture"], 1, stdout, stderr), results
+    )
+    expected = {"example.com": "refused"} if case == "stderr" else {}
+    if case == "recorded":
+        expected = {"example.com": "0"}
+    assert live.read_observations(results) == expected

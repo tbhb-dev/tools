@@ -25,7 +25,7 @@ class Proxy:
 
     @property
     def url(self) -> str:
-        return f"http://localhost:{self.port}"
+        return f"http://127.0.0.1:{self.port}"
 
 
 def relay(
@@ -99,7 +99,7 @@ def control_proxy() -> Generator[Proxy]:
     stopped = threading.Event()
     workers: list[threading.Thread] = []
     with socket.socket(socket.AF_INET) as server:
-        server.bind(("localhost", 0))
+        server.bind(("127.0.0.1", 0))
         server.listen()
         server.settimeout(0.05)
         proxy = Proxy(server.getsockname()[1])
