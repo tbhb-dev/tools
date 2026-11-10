@@ -811,14 +811,18 @@ def test_metadata_permissions_under_an_open_mask(remote: Remote) -> None:
     assert loaded.name == run.name
 
 
+def finish_run_files(remote: Remote) -> None:
+    for suffix in runfiles_names.SUFFIXES:
+        if suffix not in {".owner", ".rc.fallback"}:
+            remote.file(suffix, "finished" if suffix == ".phase" else "0")
+
+
 def test_clean_moves_every_run_file_with_one_utc_stamp(
     remote: Remote, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert launch(remote) == 0
     remote.configure(session=False)
-    for suffix in runfiles_names.SUFFIXES:
-        if suffix not in {".owner", ".rc.fallback"}:
-            remote.file(suffix, "finished" if suffix == ".phase" else "0")
+    finish_run_files(remote)
     (remote.state / "index.jsonl").write_text("preserve\n")
 
     class FixedTime:
