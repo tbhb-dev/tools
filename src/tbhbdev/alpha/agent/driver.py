@@ -115,7 +115,7 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         variant=args.variant,
         role=args.role,
         unsandboxed=args.unsandboxed is not None,
-        tainted_host=True,
+        tainted_host=taint.request_flag(taint_store.load(host.name)),
         authorized_by=args.unsandboxed,
         startup_deadline_seconds=settings.launch_wait_seconds,
     )
@@ -474,7 +474,7 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
             run.name,
             stamp,
             settings.sockets_dir,
-            decision=remote.Cleanup(run.owner, force, run.request.unsandboxed),
+            decision=remote.Cleanup(run.owner, force),
         ),
     )
     archive_metadata(run.name, stamp)

@@ -335,7 +335,6 @@ def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str
 class Cleanup:
     owner: str
     force: bool
-    unsandboxed: bool = False
 
 
 def clean(
