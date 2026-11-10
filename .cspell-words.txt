@@ -46,6 +46,7 @@ dotrepo
 drwx
 dunder
 elts
+ENOENT
 enoexec
 esac
 execdir
@@ -137,6 +138,7 @@ popd
 posttooluse
 pousr
 ppid
+pread
 prek
 pretooluse
 procargs
