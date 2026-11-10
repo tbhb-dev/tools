@@ -72,12 +72,7 @@ def planned_paths(run: Run) -> RunPaths:
         str(run.home),
         str(workspace.resolve()),
         str(run.tmpdir),
-        str(
-            Path(os.environ.get("XDG_STATE_HOME") or run.home / ".local" / "state")
-            / "tbhbdev"
-            / "agent-codex"
-            / run.files.name
-        ),
+        str(runfiles.state_home(run.home) / "tbhbdev" / "agent-codex" / run.files.name),
         str((run.home / run.settings.sandbox.audit_dir).resolve()),
         str(workspace / ".git"),
         uid=os.getuid(),
@@ -749,11 +744,7 @@ def main(arguments: list[str], prog: str) -> int:
 
 def _files(name: str) -> runfiles.RunFiles:
     home = Path.home()
-    root = (
-        Path(os.environ.get("XDG_STATE_HOME") or home / ".local" / "state")
-        / "tbhbdev"
-        / "agent-runs"
-    )
+    root = runfiles.state_home(home) / "tbhbdev" / "agent-runs"
     return runfiles.RunFiles(root, name)
 
 

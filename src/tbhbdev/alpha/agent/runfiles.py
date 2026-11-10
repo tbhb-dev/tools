@@ -23,6 +23,13 @@ INDEX = "index.jsonl"
 INDEX_LOCK = "index.lock"
 
 
+def state_home(home: Path) -> Path:
+    state = os.environ.get("XDG_STATE_HOME")
+    if state is not None and Path(state).is_absolute():
+        return Path(state)
+    return home / ".local" / "state"
+
+
 def private_dir(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.chmod(0o700)
