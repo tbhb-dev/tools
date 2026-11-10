@@ -46,7 +46,6 @@ recurseSubmodules = false
 recurse = false
 [remote "origin"]
 url = {url}
-fetch = +refs/heads/agent/*:refs/heads/agent/*
 """
 
 
@@ -161,15 +160,6 @@ def fetch_commit(mirror: Path, request: RunRequest) -> str:
         "--no-write-fetch-head",
         "--no-tags",
         "--upload-pack=git-upload-pack",
-    )
-    # Explicit ref mappings keep pruning confined to the agent namespace.
-    git(
-        mirror,
-        "fetch",
-        *options,
-        "--prune",
-        "origin",
-        "+refs/heads/agent/*:refs/heads/agent/*",
     )
     branch = default_branch(mirror)
     references = [f"+{branch}:{branch}"]
