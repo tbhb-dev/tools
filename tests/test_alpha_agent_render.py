@@ -10,6 +10,28 @@ def test_brief_and_launch() -> None:
         "Never message Claude sessions, session sockets or other agents directly."
         "\nexample\n"
     )
+
+
+def test_unsandboxed_reports_filter_authorization() -> None:
+    reference = "o/r#1\x1b\x07\u200e"
+    suffix = " sandbox=none authorized_by=o/r#1"
+    assert (
+        render.launched("example", "example-linux", "ops", authorized_by=reference)
+        == "example: launched host=example-linux account=ops" + suffix
+    )
+    assert render.status(
+        "example",
+        phase="running",
+        rc="running",
+        target=("example-linux", "ops", reference),
+        started="today",
+    ) == (
+        "example: phase=running rc=running host=example-linux account=ops started=today"
+        + suffix
+    )
+
+
+def test_launch() -> None:
     assert (
         render.launched("example", "example-linux", "agent")
         == "example: launched host=example-linux account=agent"
@@ -21,7 +43,7 @@ def test_status() -> None:
         "example",
         phase="finishing",
         rc="0",
-        target=("example-linux", "agent"),
+        target=("example-linux", "agent", None),
         started="2026-11-09T00:00:00+00:00",
     ) == (
         "example: phase=finishing rc=0 host=example-linux "

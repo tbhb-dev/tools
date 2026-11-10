@@ -65,6 +65,72 @@ def command(verb: str, *options: str) -> int:
     return agent.main([verb, "sample", *options], "example agent")
 
 
+@pytest.mark.parametrize("verb", ["log", "diff", "clean"])
+def test_unsandboxed_refuses_inspection_before_ssh(
+    remote: Remote, capsys: pytest.CaptureFixture[str], verb: str
+) -> None:
+    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
+    before = {tool: remote.records(tool) for tool in ("ssh", "git", "tmux")}
+    capsys.readouterr()
+    assert command(verb) == 65
+    message = (
+        "unsandboxed run: pass --force to move it to trash"
+        if verb == "clean"
+        else "unsandboxed run: inspect agent/sample on GitHub"
+    )
+    assert capsys.readouterr() == ("", f"{message}\n")
+    assert {tool: remote.records(tool) for tool in before} == before
+
+
+def test_unsandboxed_force_clean_only_moves_to_trash(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
+    before = {tool: remote.records(tool) for tool in ("ssh", "git", "tmux")}
+    capsys.readouterr()
+    assert command("clean", "--force") == 0
+    assert capsys.readouterr() == ("", "")
+    assert remote.records("git") == before["git"]
+    assert remote.records("tmux") == before["tmux"]
+    calls = remote.records("ssh")
+    assert len(calls) == len(before["ssh"]) + 1
+    script = str(calls[-1]["args"])
+    assert "agent-mirrors" not in script
+    assert "tmux" not in script
+    assert " git " not in script
+    assert not driver.metadata_path("sample").exists()
+    trash = next((remote.state / "trash").iterdir())
+    assert trash.name.endswith("-sample")
+    assert (trash / "worktree").is_dir()
+    assert (trash / "sample.owner").is_file()
+
+
+@pytest.mark.parametrize("verb", ["status", "wait", "unreachable", "finished"])
+def test_unsandboxed_run_is_visible(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    verb: str,
+) -> None:
+    if verb == "finished":
+        remote.configure(launch={"rc": "0"})
+    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
+    suffix = " sandbox=none authorized_by=o/r#1\n"
+    assert suffix in capsys.readouterr().out
+    if verb == "finished":
+        return
+    if verb == "wait":
+        remote.file(".rc", "0")
+        remote.configure(session=False)
+    if verb == "unreachable":
+        remote.configure(ssh=[{"rc": 255}] * 10)
+        ticking(monkeypatch, 240)
+    assert command("wait" if verb == "unreachable" else verb) == (
+        75 if verb == "unreachable" else 0
+    )
+    assert suffix in capsys.readouterr().out
+
+
 def test_launch_stream_and_metadata(
     remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
