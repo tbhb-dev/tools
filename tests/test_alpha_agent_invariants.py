@@ -90,8 +90,13 @@ def git_invariant_errors(source: str, *, local: bool) -> list[str]:
         if name in git_names and (
             not local
             or (
-                call.args
-                and workspace_expression(call.args[0], aliases)
+                any(
+                    workspace_expression(value, aliases)
+                    for value in (
+                        *call.args[:1],
+                        *(k.value for k in call.keywords if k.arg == "clone"),
+                    )
+                )
                 and owner not in {"clone_run", "create"}
             )
         ):
@@ -111,6 +116,7 @@ def git_invariant_errors(source: str, *, local: bool) -> list[str]:
         (True, "def finish(workspace):\n git(workspace, 'status')", False),
         (True, "def finish(run):\n git(run.worktree, 'status')", False),
         (True, "def finish(workspace):\n path = workspace\n git(path)", False),
+        (True, "def finish(workspace):\n git(clone=workspace)", False),
         (True, "def finish(workspace):\n clone_run(mirror, workspace, url)", False),
         (
             True,

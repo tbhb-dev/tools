@@ -227,14 +227,15 @@ def prepare_git(workspace: Path) -> None:
         if entry.is_symlink():
             message = f"unexpected git metadata: {name}"
             raise Invalid(message)
-        if content is None:
-            if not entry.exists():
-                entry.mkdir()
-            valid = entry.is_dir() and next(entry.iterdir(), None) is None
-        else:
-            if not entry.exists():
-                entry.write_text(content)
-            valid = entry.is_file() and entry.read_text() == content
+        match content:
+            case None:
+                if not entry.exists():
+                    entry.mkdir()
+                valid = entry.is_dir() and next(entry.iterdir(), None) is None
+            case _:
+                if not entry.exists():
+                    entry.write_text(content)
+                valid = entry.is_file() and entry.read_text() == content
         if not valid:
             message = f"unexpected git metadata: {name}"
             raise Invalid(message)
