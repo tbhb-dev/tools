@@ -63,19 +63,14 @@ class Prepared:
 
 def planned_paths(run: Run) -> RunPaths:
     clone = Path(repo.clone_path(run.home, run.request.repo))
-    common = clone / ".git"
-    if common.is_file():
-        common = (clone / common.read_text().removeprefix("gitdir: ").strip()).resolve()
-        shared = common / "commondir"
-        if shared.is_file():
-            common = common / shared.read_text().strip()
+    workspace = clone / ".worktrees" / f"agent-{run.files.name}"
     return RunPaths(
         str(run.home),
-        str((clone / ".worktrees" / f"agent-{run.files.name}").resolve()),
+        str(workspace.resolve()),
         str(run.tmpdir),
         str(run.tmpdir / "codex"),
         str((run.home / run.settings.sandbox.audit_dir).resolve()),
-        str(common.resolve()),
+        str(workspace / ".git"),
         uid=os.getuid(),
     )
 
@@ -219,8 +214,6 @@ def prepare_workspace(run: Run) -> Prepared:
     clone = Path(repo.clone_path(run.home, run.request.repo))
     paths = planned_paths(run)
     checked_policy(run, paths)
-    actual_common = str(worktree.common_dir(clone).resolve())
-    checked_policy(run, dataclasses.replace(paths, git_common_dir=actual_common))
     workspace = worktree.create(clone, run.files.name, run.request)
     delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
     paths = RunPaths(
@@ -229,7 +222,7 @@ def prepare_workspace(run: Run) -> Prepared:
         tmpdir=str(run.tmpdir),
         codex_home=str(run.tmpdir / "codex"),
         audit_dir=policy.resolve(str(run.home), run.settings.sandbox.audit_dir),
-        git_common_dir=actual_common,
+        git_common_dir=str(workspace / ".git"),
         uid=os.getuid(),
         signing_socket=str(run.tmpdir / "ssh.sock")
         if delivery.signing is not None

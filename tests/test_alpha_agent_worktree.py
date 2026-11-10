@@ -4,12 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from contextlib import contextmanager
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from collections.abc import Generator
-    from pathlib import Path
+from pathlib import Path
 
 import pytest
 from agent_host_example import commit, git, repository, run_request
@@ -21,6 +16,18 @@ from tbhbdev.alpha.agent.model import Invalid
 @pytest.fixture(autouse=True)
 def scratch_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+    def url(_repo: str) -> str:
+        return str(tmp_path / "origin")
+
+    monkeypatch.setattr(worktree.repo, "ssh_url", url)
+    resolve = worktree.host_tools.resolve
+
+    def executable(name: str, path: str | None = None) -> str:
+        return "/example/prek" if name == "prek" else resolve(name, path)
+
+    monkeypatch.setattr(worktree.host_tools, "resolve", executable)
 
 
 def test_build_fetches_default_and_creates_one_branch(tmp_path: Path) -> None:
@@ -34,11 +41,16 @@ def test_build_fetches_default_and_creates_one_branch(tmp_path: Path) -> None:
     assert git(path, "rev-parse", "HEAD") == head
     assert git(clone, "rev-parse", "HEAD") != head
     assert (path / "tracked").read_text() == "new remote content\n"
-    assert worktree.common_dir(path) == clone / ".git"
-    assert (clone / ".git" / "agent-worktree.lock").exists()
-    with pytest.raises(subprocess.CalledProcessError):
+    mirror = worktree.mirror_path(tmp_path, run_request().repo)
+    assert (path / ".git").is_dir()
+    assert (mirror / "agent-fetch.lock").exists()
+    assert not (path / ".git" / "objects" / "info" / "alternates").exists()
+    assert git(path, "remote", "get-url", "--push", "origin") == str(
+        tmp_path / "origin"
+    )
+    with pytest.raises(FileExistsError):
         worktree.create(clone, "build-1", run_request())
-    assert git(clone, "worktree", "list", "--porcelain").count("worktree ") == 2
+    assert git(clone, "worktree", "list", "--porcelain").count("worktree ") == 1
 
 
 @pytest.mark.parametrize("dirty", [False, True])
@@ -116,6 +128,7 @@ def test_git_suppresses_command_errors_and_returns_text(
             "PATH": worktree.host_tools.search(),
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_NO_LAZY_FETCH": "1",
             "GIT_ASKPASS": "/bin/false",
@@ -134,67 +147,40 @@ def test_git_suppresses_command_errors_and_returns_text(
 def test_worktree_git_contract_under_one_stable_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str
 ) -> None:
-    clone = tmp_path / "clone"
-    common = tmp_path / "git-dir"
-    clone.mkdir()
-    common.mkdir()
-    held = False
-    locks: list[Path] = []
-    calls: list[tuple[str, ...]] = []
-    real_lock = worktree.runfiles.locked
+    seed, clone = repository(tmp_path)
+    commit_id = git(seed, "rev-parse", "HEAD")
+    calls: list[tuple[Path, tuple[str, ...]]] = []
+    original = worktree.git
 
-    @contextmanager
-    def locked(path: Path) -> Generator[None]:
-        nonlocal held
-        locks.append(path)
-        with real_lock(path):
-            held = True
-            yield
-            held = False
+    def checked(path: Path, *args: str) -> str:
+        assert path != clone
+        calls.append((path, args))
+        return original(path, *args)
 
-    commit_id = "1" * 40
-
-    def git(path: Path, *args: str) -> str:
-        if args == ("rev-parse", "--path-format=absolute", "--git-common-dir"):
-            assert path == clone
-            return str(common)
-        assert held
-        calls.append(args)
-        responses: dict[tuple[str, ...], str] = {
-            ("symbolic-ref", "refs/remotes/origin/HEAD"): "refs/remotes/origin/main",
-            ("branch", "--show-current"): "main",
-            ("rev-parse", "--verify", f"{'0' * 40}^{{commit}}"): commit_id,
-        }
-        return responses.get(args, "")
-
-    monkeypatch.setattr(worktree, "git", git)
-    monkeypatch.setattr(worktree.runfiles, "locked", locked)
+    monkeypatch.setattr(worktree, "git", checked)
     request = run_request(
-        profile=profile, commit="0" * 40 if profile == "review" else None
+        profile=profile, commit=commit_id if profile == "review" else None
     )
     path = worktree.create(clone, "example", request)
-    assert calls == [
-        ("fetch", "--upload-pack=git-upload-pack", "origin"),
-        ("symbolic-ref", "refs/remotes/origin/HEAD"),
-        *(
-            [
-                (
-                    "worktree",
-                    "add",
-                    "-b",
-                    "agent/example",
-                    str(path),
-                    "refs/remotes/origin/main",
-                )
-            ]
-            if profile == "build"
-            else [
-                ("rev-parse", "--verify", f"{'0' * 40}^{{commit}}"),
-                ("worktree", "add", "--detach", str(path), commit_id),
-            ]
-        ),
-    ]
-    assert locks == [common / "agent-worktree.lock"]
+    mirror = worktree.mirror_path(tmp_path, request.repo)
+    assert all(directory in (mirror, path) for directory, _args in calls)
+    assert (mirror / "agent-fetch.lock").is_file()
+    assert (mirror.stat().st_mode & 0o777) == 0o700
+    assert git(path, "rev-parse", "HEAD") == commit_id
+    assert git(path, "config", "remote.origin.url") == str(tmp_path / "origin")
+    assert git(path, "config", "remote.origin.pushurl") == str(tmp_path / "origin")
+    assert (
+        path / ".git" / "hooks" / "prepare-commit-msg"
+    ).read_text() == worktree.install.SHIM.format(
+        mark=worktree.install.SHIM_MARK,
+        verb="trailer",
+        hook="prepare-commit-msg",
+        origin=worktree.install.ORIGIN_GREP,
+    )
+    assert (
+        (path / ".git" / "hooks" / "pre-commit").read_text()
+        == '#!/bin/sh\nexec /example/prek hook-impl --hook-type pre-commit -- "$@"\n'
+    )
 
 
 def test_host_git_never_runs_hooks_or_monitor(tmp_path: Path) -> None:
@@ -270,11 +256,6 @@ def test_each_repo_command_plant_is_inert(tmp_path: Path, plant: str) -> None:
         git(clone, "config", "credential.helper", f"!{executable}")
     else:
         git(clone, "config", "core.sshCommand", str(executable))
-    if plant == "ext":
-        with pytest.raises(subprocess.CalledProcessError):
-            worktree.create(clone, "safe", run_request())
-        # Refusal leaves no checkout; restore a data URL for creation.
-        git(clone, "config", "remote.origin.url", str(tmp_path / "origin"))
     worktree.create(clone, "safe", run_request())
     assert not marker.exists()
 
@@ -359,3 +340,103 @@ def test_host_git_disables_prune_lazy_fetch_and_offline_protocols(
     monkeypatch.setattr(subprocess, "check_output", output)
     assert worktree.git(tmp_path, command) == ""
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("state", [None, "", "/example/state"])
+def test_mirror_location_uses_the_host_state_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str | None
+) -> None:
+    if state is None:
+        monkeypatch.delenv("XDG_STATE_HOME")
+    else:
+        monkeypatch.setenv("XDG_STATE_HOME", state)
+    base = Path(state) if state else tmp_path / ".local" / "state"
+    assert worktree.mirror_path(tmp_path, "example-org/example-repo") == (
+        base / "tbhbdev" / "agent-mirrors" / "example-org" / "example-repo.git"
+    )
+
+
+@pytest.mark.parametrize(
+    "listing",
+    ["", "abc\tHEAD", "ref: refs/tags/main\tHEAD", "ref: refs/heads/main HEAD"],
+)
+def test_default_branch_requires_a_branch_symref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listing: str
+) -> None:
+    def listing_only(path: Path, *args: str) -> str:
+        assert path == tmp_path
+        assert args == ("ls-remote", "--symref", "origin", "HEAD")
+        return listing
+
+    monkeypatch.setattr(worktree, "git", listing_only)
+    with pytest.raises(Invalid, match=r"^origin HEAD does not name a branch$"):
+        worktree.default_branch(tmp_path)
+
+
+@pytest.mark.parametrize("commit_id", ["a" * 40, "b" * 64, "invalid"])
+def test_fetch_resolves_only_a_full_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commit_id: str
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def run(path: Path, *args: str) -> str:
+        assert path == tmp_path
+        calls.append(args)
+        return commit_id
+
+    monkeypatch.setattr(worktree, "git", run)
+    request = run_request(profile="review", commit="0" * 40)
+    if commit_id == "invalid":
+        with pytest.raises(Invalid, match=r"^mirror did not resolve a full commit$"):
+            worktree.fetch_commit(tmp_path, request)
+    else:
+        assert worktree.fetch_commit(tmp_path, request) == commit_id
+    assert calls == [
+        (
+            "fetch",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--upload-pack=git-upload-pack",
+            "origin",
+        ),
+        ("rev-parse", "--verify", "--end-of-options", f"{'0' * 40}^{{commit}}"),
+    ]
+
+
+def test_existing_clone_symlink_is_refused_without_following_it(tmp_path: Path) -> None:
+    _, clone = repository(tmp_path)
+    target = tmp_path / "untouched"
+    target.mkdir()
+    parent = clone / ".worktrees"
+    parent.mkdir()
+    (parent / "agent-example").symlink_to(target, target_is_directory=True)
+    with pytest.raises(FileExistsError):
+        worktree.create(clone, "example", run_request())
+    assert list(target.iterdir()) == []
+
+
+def test_mirror_configuration_and_hooks_are_host_written(tmp_path: Path) -> None:
+    _, clone = repository(tmp_path)
+    path = worktree.create(clone, "example", run_request())
+    mirror = worktree.mirror_path(tmp_path, run_request().repo)
+    assert git(mirror, "config", "--get-all", "remote.origin.fetch").splitlines() == [
+        "+refs/heads/*:refs/heads/*",
+        "+refs/pull/*/head:refs/pull/*/head",
+    ]
+    for key, value in (
+        ("gc.auto", "0"),
+        ("gc.pruneExpire", "never"),
+        ("core.logAllRefUpdates", "false"),
+    ):
+        assert git(mirror, "config", key) == value
+    assert not (mirror / "FETCH_HEAD").exists()
+    for name in (
+        "pre-commit",
+        "pre-push",
+        "prepare-commit-msg",
+        "commit-msg",
+        "post-commit",
+    ):
+        hook = path / ".git" / "hooks" / name
+        assert hook.stat().st_mode & 0o777 == 0o755
+        assert hook.read_text().startswith("#!/bin/sh\n")

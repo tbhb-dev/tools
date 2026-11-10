@@ -59,7 +59,7 @@ def fake_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def resolve(name: str, path: str | None = None) -> str:
         return (
             "/usr/bin/true"
-            if name in ("codex", "claude", "agy", "agy-agent")
+            if name in ("codex", "claude", "agy", "agy-agent", "prek")
             else real_resolve(name, path)
         )
 
@@ -120,7 +120,7 @@ def preparation(run: run_host.Run) -> run_host.Prepared:
 
 @pytest.mark.parametrize("harness", Harness)
 def test_prepare_uses_one_worktree_and_private_destinations(
-    tmp_path: Path, harness: Harness
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
 ) -> None:
     run = make_run(
         tmp_path,
@@ -134,6 +134,9 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     _, clone = repository(run.home / "Code" / "github.com" / "example-org")
     clone.rename(clone.parent / "example-repo")
     clone = clone.parent / "example-repo"
+    monkeypatch.setattr(
+        run_host.worktree.repo, "ssh_url", constant(str(clone.parent / "origin"))
+    )
     commit = subprocess.check_output(
         ["git", "-C", str(clone), "rev-parse", "HEAD"], text=True
     ).strip()
@@ -148,7 +151,7 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     assert result.paths.worktree == str(clone / ".worktrees" / "agent-example")
     assert result.paths.tmpdir == str(run.tmpdir)
     assert result.paths.codex_home == str(run.tmpdir / "codex")
-    assert result.paths.git_common_dir == str(clone / ".git")
+    assert result.paths.git_common_dir == str(Path(result.paths.worktree) / ".git")
     assert result.paths.signing_socket is None
     assert result.paths.audit_dir == str(run.home / run.settings.sandbox.audit_dir)
     assert Path(result.paths.audit_dir).is_dir()
@@ -169,11 +172,7 @@ def test_build_preparation_has_the_run_socket(
     def create(_clone: Path, _name: str, _value: run_host.RunRequest) -> Path:
         return runfiles.private_dir(run.home / "worktree")
 
-    def common(_clone: Path) -> Path:
-        return run.home / "git-common"
-
     monkeypatch.setattr(run_host.worktree, "create", create)
-    monkeypatch.setattr(run_host.worktree, "common_dir", common)
     result = run_host.prepare_workspace(run)
     assert result.paths.signing_socket == str(run.tmpdir / "ssh.sock")
     assert result.delivery.signing == "example-signing"
@@ -1391,7 +1390,9 @@ def test_terminal_setup_failure_keeps_registered_cleanup_owner(
 
 
 @pytest.mark.parametrize("common", [False, True])
-def test_planned_paths_read_git_directory_data(tmp_path: Path, common: bool) -> None:
+def test_planned_paths_ignore_account_git_directory_data(
+    tmp_path: Path, common: bool
+) -> None:
     run = make_run(tmp_path)
     clone = Path(run_host.repo.clone_path(run.home, run.request.repo))
     clone.mkdir(parents=True)
@@ -1401,14 +1402,15 @@ def test_planned_paths_read_git_directory_data(tmp_path: Path, common: bool) -> 
     if common:
         (gitdir / "commondir").write_text("../shared\n")
     paths = run_host.planned_paths(run)
-    assert paths.git_common_dir == str(run.home / "shared" if common else gitdir)
+    expected = clone / ".worktrees" / "agent-example" / ".git"
+    assert paths.git_common_dir == str(expected)
     assert paths == run_host.RunPaths(
         home=str(run.home),
         worktree=str(clone / ".worktrees" / "agent-example"),
         tmpdir=str(run.tmpdir),
         codex_home=str(run.tmpdir / "codex"),
         audit_dir=str(run.home / run.settings.sandbox.audit_dir),
-        git_common_dir=str(run.home / "shared" if common else gitdir),
+        git_common_dir=str(expected),
         uid=os.getuid(),
     )
 
@@ -1785,11 +1787,19 @@ def test_main_defaults_to_the_current_host(
     assert run_host.main(["example"], "example") == 7
 
 
-def test_actual_common_directory_is_checked_before_creation(
+def test_preparation_checks_paths_before_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = make_run(tmp_path)
-    monkeypatch.setattr(run_host.worktree, "common_dir", constant(run.files.root))
+    monkeypatch.setattr(
+        run_host,
+        "planned_paths",
+        constant(
+            dataclasses.replace(
+                run_host.planned_paths(run), worktree=str(run.files.root)
+            )
+        ),
+    )
 
     def create(*_args: object) -> None:
         pytest.fail("the discovered common directory must be checked first")
