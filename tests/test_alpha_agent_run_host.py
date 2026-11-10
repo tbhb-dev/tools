@@ -8,6 +8,7 @@ import json
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,9 @@ def fake_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setenv("HOME", str(runfiles.private_dir(tmp_path / "operator-home")))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        run_host, "TAINT_DIRECTORY", tmp_path / "host-taint", raising=False
+    )
     monkeypatch.setattr(secrets, "read", read)
     monkeypatch.setattr(credentials, "installation_token", installation)
     real_resolve = host_tools.resolve
@@ -2616,19 +2620,28 @@ def test_preflight_appends_durable_host_marker(
         monkeypatch.delenv("XDG_STATE_HOME")
     else:
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / state) if state else "")
-    root = tmp_path / state if state else run.home / ".local" / "state"
-    marker = root / "tbhbdev" / "agent-taint.jsonl"
-    runfiles.private_dir(marker.parent)
+    marker = run_host.TAINT_DIRECTORY / "agent.jsonl"
+    marker.parent.mkdir(mode=0o1777)
+    marker.parent.chmod(0o1777)
     marker.write_text('{"previous":true}\n')
     synced: list[int] = []
     original_sync = os.fsync
     original_open = os.open
 
-    def opened(path: Path, flags: int, mode: int = 0o777) -> int:
-        assert path == marker
-        assert flags == os.O_CREAT | os.O_APPEND | os.O_WRONLY
-        assert mode == 0o600
-        return original_open(path, flags, mode)
+    def opened(
+        path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        if path == marker.parent:
+            assert flags == os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            assert dir_fd is None
+        else:
+            assert path == marker.name
+            assert flags == (
+                os.O_CREAT | os.O_APPEND | os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            )
+            assert mode == 0o644
+            assert dir_fd is not None
+        return original_open(path, flags, mode, dir_fd=dir_fd)
 
     def sync(fd: int) -> None:
         synced.append(fd)
@@ -2659,20 +2672,122 @@ def test_marker_failure_refuses_launch(
     run = make_run(
         tmp_path, unsandboxed=True, authorized_by="example-org/example-repo#1"
     )
-    original = runfiles.append_text
 
-    def append(path: Path, text: str) -> None:
-        if path.name == "agent-taint.jsonl":
+    original = os.fsync
+
+    def sync(fd: int) -> None:
+        marker = run_host.TAINT_DIRECTORY / "agent.jsonl"
+        if marker.exists() and os.fstat(fd).st_ino == marker.stat().st_ino:
             raise OSError
-        original(path, text)
+        original(fd)
 
     def unexpected(*_args: object) -> None:
         pytest.fail("a failed host marker must refuse workspace preparation")
 
-    monkeypatch.setattr(runfiles, "append_text", append)
+    monkeypatch.setattr(os, "fsync", sync)
     monkeypatch.setattr(process_group, "prepare", unexpected)
     assert run_host.execute(run, "probe") == 1
     assert not run.files.path("launched").exists()
+
+
+@pytest.mark.parametrize(
+    "plant",
+    [
+        "fifo",
+        "nonsticky",
+        "directory-owner",
+        "symlink",
+        "hardlink",
+        "file-owner",
+        "directory-file",
+    ],
+)
+def test_host_marker_refuses_unsafe_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plant: str
+) -> None:
+    run = make_run(tmp_path, unsandboxed=True, authorized_by="operator-chat-2026-11-10")
+    directory = run_host.TAINT_DIRECTORY
+    directory.mkdir()
+    directory.chmod(0o1777)
+    marker = directory / "agent.jsonl"
+    if plant == "fifo":
+        os.mkfifo(marker)
+    elif plant == "nonsticky":
+        directory.chmod(0o777)
+    elif plant == "symlink":
+        target = directory.with_name("real-directory")
+        directory.rename(target)
+        directory.symlink_to(target, target_is_directory=True)
+    elif plant == "hardlink":
+        source = tmp_path / "source"
+        source.write_text("unchanged")
+        marker.hardlink_to(source)
+    elif plant == "directory-file":
+        marker.mkdir()
+    original = os.fstat
+    original_open = os.open
+
+    def opened(
+        path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        if path == marker.name:
+            assert flags & os.O_NONBLOCK
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def inspected(fd: int) -> os.stat_result:
+        info = original(fd)
+        if (plant == "directory-owner" and stat.S_ISDIR(info.st_mode)) or (
+            plant == "file-owner" and stat.S_ISREG(info.st_mode)
+        ):
+            fields = list(info)
+            fields[4] = os.getuid() + 1
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(os, "fstat", inspected)
+    monkeypatch.setattr(os, "open", opened)
+    with pytest.raises((Invalid, OSError)) as caught:
+        run_host.mark_host(run)
+    if plant in ("nonsticky", "directory-owner"):
+        assert str(caught.value) == (
+            "host marker directory must be sticky and owned by root or this account"
+        )
+    elif plant in ("hardlink", "file-owner"):
+        assert str(caught.value) == (
+            "host marker must be a regular file owned by this account with one link"
+        )
+    if plant == "hardlink":
+        assert (tmp_path / "source").read_text() == "unchanged"
+
+
+def test_host_marker_directory_creation_ignores_umask(tmp_path: Path) -> None:
+    run = make_run(tmp_path, unsandboxed=True, authorized_by="operator-chat-2026-11-10")
+    previous = os.umask(0o077)
+    try:
+        run_host.mark_host(run)
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(run_host.TAINT_DIRECTORY.stat().st_mode) == 0o1777
+    assert json.loads((run_host.TAINT_DIRECTORY / "agent.jsonl").read_text())["v"] == 1
+
+
+def test_host_marker_accepts_root_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    original = os.fstat
+
+    def inspected(fd: int) -> os.stat_result:
+        info = original(fd)
+        if stat.S_ISDIR(info.st_mode):
+            fields = list(info)
+            fields[4] = 0
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(os, "fstat", inspected)
+    run_host.mark_host(run)
+    assert (run_host.TAINT_DIRECTORY / "agent.jsonl").is_file()
 
 
 @pytest.mark.parametrize("profile", ["build", "review"])
