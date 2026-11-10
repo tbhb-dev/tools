@@ -114,6 +114,7 @@ def test_parse_builds_every_field() -> None:
         unsandboxed=False,
         authorized_by=None,
         startup_deadline_seconds=120,
+        tainted_host=False,
     )
 
 
@@ -495,6 +496,11 @@ def test_request_host_taint_is_required() -> None:
     assert refused(made(BUILD, tainted_host=MISSING)) == (
         "request is missing fields: tainted_host"
     )
+
+
+def test_run_request_has_no_host_taint_default() -> None:
+    fields = {field.name: field for field in dataclasses.fields(model.RunRequest)}
+    assert fields["tainted_host"].default is dataclasses.MISSING
 
 
 @pytest.mark.parametrize("bad", [None, 0, 1, "false"])
