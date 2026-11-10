@@ -216,6 +216,30 @@ def clone_run(mirror: Path, workspace: Path, url: str) -> None:
     git(workspace, "config", "core.hooksPath", str(workspace / ".git" / "hooks"))
 
 
+def prepare_git(workspace: Path) -> None:
+    directory = workspace / ".git"
+    for name, content in (
+        ("config.worktree", ""),
+        ("modules", None),
+        ("commondir", ".\n"),
+    ):
+        entry = directory / name
+        if entry.is_symlink():
+            message = f"unexpected git metadata: {name}"
+            raise Invalid(message)
+        if content is None:
+            if not entry.exists():
+                entry.mkdir()
+            valid = entry.is_dir() and next(entry.iterdir(), None) is None
+        else:
+            if not entry.exists():
+                entry.write_text(content)
+            valid = entry.is_file() and entry.read_text() == content
+        if not valid:
+            message = f"unexpected git metadata: {name}"
+            raise Invalid(message)
+
+
 def create(clone: Path, name: str, request: RunRequest) -> Path:
     if not clone.is_dir():
         message = f"repo clone {clone} does not exist"
@@ -240,4 +264,5 @@ def create(clone: Path, name: str, request: RunRequest) -> Path:
         else:
             git(worktree, "checkout", "--detach", commit, "--")
         install_hooks(worktree)
+        prepare_git(worktree)
     return worktree

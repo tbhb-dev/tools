@@ -753,6 +753,9 @@ def test_prelaunch_git_protocol(
     assert workspace.is_dir()
     assert workspace.stat().st_mode & 0o777 == 0o700
     assert (workspace / ".git" / "hooks" / "pre-commit").is_file()
+    assert (workspace / ".git/config.worktree").read_text() == ""
+    assert (workspace / ".git/commondir").read_text() == ".\n"
+    assert list((workspace / ".git/modules").iterdir()) == []
     assert (mirror / "config").read_text() == worktree.MIRROR_CONFIG.format(
         url=str(tmp_path / "origin")
     )
@@ -1086,3 +1089,98 @@ def test_git_operation_timeouts_without_running_git(
     monkeypatch.setattr(subprocess, "check_output", output)
     assert worktree.git(tmp_path, command) == "output"
     assert len(calls) == (1 if command == "init" else 2)
+
+
+def test_git_shape_is_prepared_and_repeatable(tmp_path: Path) -> None:
+    directory = tmp_path / ".git"
+    directory.mkdir()
+    worktree.prepare_git(tmp_path)
+    assert (directory / "config.worktree").read_text() == ""
+    assert (directory / "commondir").read_text() == ".\n"
+    assert list((directory / "modules").iterdir()) == []
+    worktree.prepare_git(tmp_path)
+
+
+@pytest.mark.parametrize("name", ["config.worktree", "modules", "commondir"])
+@pytest.mark.parametrize("kind", ["symlink", "broken-symlink", "content", "wrong-type"])
+def test_git_shape_refuses_redirected_or_unexpected_entries(
+    tmp_path: Path, name: str, kind: str
+) -> None:
+    directory = tmp_path / ".git"
+    directory.mkdir()
+    entry = directory / name
+    if "symlink" in kind:
+        target = tmp_path / "target"
+        if kind == "symlink":
+            target.write_text("untouched")
+        entry.symlink_to(target)
+    elif name == "modules" and kind == "content":
+        entry.mkdir()
+        (entry / "plant").touch()
+    elif (name == "modules") == (kind == "wrong-type"):
+        entry.write_text("unexpected")
+    else:
+        entry.mkdir()
+    with pytest.raises(Invalid) as caught:
+        worktree.prepare_git(tmp_path)
+    assert str(caught.value) == f"unexpected git metadata: {name}"
+
+
+def test_git_shape_follows_checkout_and_hooks_and_supports_real_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, clone = repository(tmp_path)
+    original_git = worktree.git
+    original_shape = worktree.prepare_git
+    checked: list[str] = []
+
+    def git_before_shape(path: Path, *args: str) -> str:
+        if args[0] == "checkout":
+            assert not (path / ".git/config.worktree").exists()
+            assert not (path / ".git/modules").exists()
+            assert not (path / ".git/commondir").exists()
+            checked.append("checkout")
+        return original_git(path, *args)
+
+    def shape_after_hooks(path: Path) -> None:
+        assert checked == ["checkout"]
+        assert (path / "tracked").read_text() == "initial\n"
+        assert (path / ".git/hooks/pre-commit").is_file()
+        checked.append("shape")
+        original_shape(path)
+
+    monkeypatch.setattr(worktree, "git", git_before_shape)
+    monkeypatch.setattr(worktree, "prepare_git", shape_after_hooks)
+    workspace = worktree.create(clone, "shape", run_request())
+    assert checked == ["checkout", "shape"]
+    before = git(workspace, "rev-parse", "HEAD")
+    (workspace / "tracked").write_text("committed\n")
+    assert commit(workspace, "shape fixture") != before
+    assert git(workspace, "status", "--porcelain") == ""
+
+
+def test_git_shape_writes_exact_paths_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / ".git"
+    directory.mkdir()
+    mkdir = Path.mkdir
+    write_text = Path.write_text
+    calls: list[tuple[str, str, str]] = []
+
+    def make(path: Path) -> None:
+        calls.append(("mkdir", str(path), ""))
+        mkdir(path)
+
+    def write(path: Path, text: str) -> int:
+        calls.append(("write", str(path), text))
+        return write_text(path, text)
+
+    monkeypatch.setattr(Path, "mkdir", make)
+    monkeypatch.setattr(Path, "write_text", write)
+    worktree.prepare_git(tmp_path)
+    assert calls == [
+        ("write", str(directory / "config.worktree"), ""),
+        ("mkdir", str(directory / "modules"), ""),
+        ("write", str(directory / "commondir"), ".\n"),
+    ]

@@ -87,7 +87,7 @@ def plant(workspace: Path, root: Path, name: str) -> tuple[Path, Path]:
         target = workspace / "nested"
         arguments = ["init", "--template="]
         if name == "modules":
-            (workspace / ".git" / "modules").mkdir()
+            (workspace / ".git" / "modules").mkdir(exist_ok=True)
             arguments += [
                 "--separate-git-dir",
                 str(workspace / ".git" / "modules" / "x"),
