@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sys
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -216,10 +217,21 @@ def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
                     run.name, "kill-session", settings.sockets_dir, owner=run.owner
                 ),
             )
-            print(f"{run.name}: rc={reading.rc}\n{reading.text}", end="")
+            print(
+                f"{run.name}: rc={reading.rc}"
+                f"{render.sandbox(run.request.authorized_by)}\n{reading.text}",
+                end="",
+            )
             return reading.rc or 0
         if action == "launched":
-            print(render.launched(run.name, run.host.name, run.host.account))
+            print(
+                render.launched(
+                    run.name,
+                    run.host.name,
+                    run.host.account,
+                    authorized_by=run.request.authorized_by,
+                )
+            )
             return 0
         if action == "deadline":
             return unconfirmed(settings, run, reading.phase)
@@ -271,7 +283,10 @@ def wait(settings: Settings, run: Run) -> int:
                 unreachable=unreachable,
             )
             if result is not None:
-                print(f"{run.name}: rc=unreachable")
+                print(
+                    f"{run.name}: rc=unreachable"
+                    + render.sandbox(run.request.authorized_by)
+                )
                 print(render.INSPECTION_WARNING)
                 return result
         else:
@@ -284,7 +299,11 @@ def wait(settings: Settings, run: Run) -> int:
             )
             if result is not None:
                 rc = rules.answer_state(reading.rc)
-                print(f"{run.name}: rc={rc}\n{reading.text}", end="")
+                print(
+                    f"{run.name}: rc={rc}"
+                    f"{render.sandbox(run.request.authorized_by)}\n{reading.text}",
+                    end="",
+                )
                 print("\n" + render.INSPECTION_WARNING)
                 return result
         time.sleep(max(0.5, poll))
@@ -301,7 +320,7 @@ def status(settings: Settings, run: Run) -> int:
             run.name,
             phase=reading.phase,
             rc=rules.state(reading.rc, session=reading.session),
-            target=(run.host.name, run.host.account),
+            target=(run.host.name, run.host.account, run.request.authorized_by),
             started=run.started,
         )
     )
@@ -348,12 +367,17 @@ def archive_metadata(name: str, stamp: str) -> None:
 
 
 def clean(settings: Settings, run: Run, *, force: bool) -> int:
-    reading = transport.read(
-        settings,
-        run.host,
-        (run.name, run.owner),
-    )
-    rules.clean(reading.rc, session=reading.session, force=force or run.cleaning)
+    if run.request.unsandboxed:
+        if not force:
+            print("unsandboxed run: pass --force to move it to trash", file=sys.stderr)
+            return 65
+    else:
+        reading = transport.read(
+            settings,
+            run.host,
+            (run.name, run.owner),
+        )
+        rules.clean(reading.rc, session=reading.session, force=force or run.cleaning)
     if not force:
         branch = transport.shell(
             settings,
@@ -382,7 +406,7 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
             run.name,
             stamp,
             settings.sockets_dir,
-            decision=remote.Cleanup(run.owner, force),
+            decision=remote.Cleanup(run.owner, force, run.request.unsandboxed),
         ),
     )
     archive_metadata(run.name, stamp)
@@ -390,6 +414,9 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
 
 
 def inspect(settings: Settings, run: Run, *, limit: int | None) -> int:
+    if run.request.unsandboxed:
+        print(f"unsandboxed run: inspect agent/{run.name} on GitHub", file=sys.stderr)
+        return 65
     print(
         transport.terminal_text(
             transport.shell(
