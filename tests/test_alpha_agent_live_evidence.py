@@ -16,20 +16,25 @@ from tbhbdev.alpha.agent import run_host
 from tbhbdev.alpha.agent.decisions import policy
 from tbhbdev.alpha.agent.model import Harness, Invalid
 
-MIRRORS = (
-    "mirror-modify",
-    "mirror-create",
-    "mirror-replace",
-    "alternates",
-    "hard-link",
-)
+MIRRORS = MIRROR_LABELS
 EXTRA = (*MIRRORS, "file-control", "local-binding", "host-loopback")
+
+
+def test_host_marker_path_is_common_to_all_accounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "account"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    assert run_host.TAINT_DIRECTORY.parts == ("/", "var", "tmp", "tbhbdev-agent-taint")
 
 
 def test_host_mirror_evidence_detects_each_real_operation(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     cases = mirror_cases(tmp_path / "fixtures", workspace, sys.executable, "/bin/ln")
+    assert " ".join(MIRROR_LABELS) == (
+        "mirror-modify mirror-create mirror-replace alternates hard-link"
+    )
     assert tuple(case.label for case in cases) == MIRROR_LABELS
     assert len({case.object_file for case in cases}) == len(MIRROR_LABELS)
     for case in cases:

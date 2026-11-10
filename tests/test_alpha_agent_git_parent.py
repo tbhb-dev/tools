@@ -53,14 +53,9 @@ def real_clone(
     prek = directory / "prek"
     prek.write_text("#!/bin/sh\nexit 0\n")
     prek.chmod(0o700)
+    sandbox = dataclasses.replace(run.settings.sandbox, host_path=(str(directory),))
     run = dataclasses.replace(
-        run,
-        settings=dataclasses.replace(
-            run.settings,
-            sandbox=dataclasses.replace(
-                run.settings.sandbox, host_path=(str(directory),)
-            ),
-        ),
+        run, settings=dataclasses.replace(run.settings, sandbox=sandbox)
     )
     with host_tools.configured(run.settings, run.host.os):
         workspace = worktree.create(clone, run.files.name, run.request)
@@ -119,16 +114,11 @@ def test_live_harness_parent_ignores_each_git_plant(
     installed = shutil.which(harness.value)
     assert installed is not None, f"{harness}: harness binary not installed"
     run, paths = real_clone(tmp_path, monkeypatch, harness)
+    sandbox = dataclasses.replace(
+        run.settings.sandbox, host_path=(str(Path(installed).parent),), write_roots=()
+    )
     run = dataclasses.replace(
-        run,
-        settings=dataclasses.replace(
-            run.settings,
-            sandbox=dataclasses.replace(
-                run.settings.sandbox,
-                host_path=(str(Path(installed).parent),),
-                write_roots=(),
-            ),
-        ),
+        run, settings=dataclasses.replace(run.settings, sandbox=sandbox)
     )
     marker, target = plant(Path(paths.worktree), tmp_path, name)
     git(target, "status", "--porcelain")
@@ -149,9 +139,9 @@ def test_live_harness_parent_ignores_each_git_plant(
     )
     value, executable = run_host.checked_policy(run, paths)
     prepared = run_host.Prepared(
-        paths,
-        credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
-        None,
+        paths=paths,
+        delivery=credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
+        auth_before=None,
     )
     command = run_host.harness_command(run, prepared, value, executable)
     if harness is Harness.CODEX:

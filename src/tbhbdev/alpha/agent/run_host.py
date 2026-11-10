@@ -91,6 +91,7 @@ _STARTUP_FILES = (
     ".config/tmux",
     ".gitconfig",
     ".config/git",
+    ".config/mise",
     ".ssh",
     ".claude",
     ".claude.json",
@@ -161,6 +162,7 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         str(Path(paths.codex_home).resolve()),
         *protected_home(run),
         *host_tools.installation(),
+        *host_tools.mise_installations((*directories, *sandbox_directories)),
         *directories,
         *(str(Path(p).resolve()) for p in directories),
         *sandbox_directories,
@@ -269,7 +271,7 @@ def mark_host(run: Run) -> None:
         else:
             directory = os.open(TAINT_DIRECTORY, flags)
             stack.callback(os.close, directory)
-            os.fchmod(directory, 0o1777)
+            os.fchmod(directory, stat.S_ISVTX | 0o777)
         info = os.fstat(directory)
         if (
             not stat.S_ISDIR(info.st_mode)

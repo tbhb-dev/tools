@@ -253,3 +253,4 @@ socketpair
 ESRCH
 ZDOTDIR
 gitlink
+pytestmark

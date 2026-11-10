@@ -1934,6 +1934,7 @@ def test_empty_state_home_uses_home(monkeypatch: pytest.MonkeyPatch) -> None:
         ".config/tmux",
         ".gitconfig",
         ".config/git",
+        ".config/mise",
         ".control",
         ".control/sockets",
     ],
@@ -2124,6 +2125,7 @@ def test_protected_home_lists_startup_files_and_socket_ancestors(
         ".config/tmux",
         ".gitconfig",
         ".config/git",
+        ".config/mise",
         ".ssh",
         ".claude",
         ".claude.json",
@@ -2966,3 +2968,32 @@ def test_codex_release_read_grant_keeps_account_state_denied(
             key for key in filesystem if key != ":root" and path.is_relative_to(key)
         ]
         assert filesystem[max(matches, key=len)] == "none"
+
+
+@pytest.mark.parametrize("source", ["host", "tool"])
+def test_mise_shim_install_targets_cannot_be_a_write_root(
+    tmp_path: Path, source: str
+) -> None:
+    run = make_run(tmp_path)
+    directory = run.home / ".local" / "share" / "mise" / "shims"
+    installs = directory.parent / "installs"
+    sandbox = dataclasses.replace(
+        run.settings.sandbox,
+        write_roots=(str(installs),),
+        agy=dataclasses.replace(run.settings.sandbox.agy, build_write=()),
+    )
+    if source == "host":
+        sandbox = dataclasses.replace(sandbox, host_path=(str(directory),))
+    else:
+        sandbox = dataclasses.replace(
+            sandbox, path=dataclasses.replace(sandbox.path, linux=(str(directory),))
+        )
+    run = dataclasses.replace(
+        run, settings=dataclasses.replace(run.settings, sandbox=sandbox)
+    )
+    with pytest.raises(Invalid) as caught:
+        run_host.checked_policy(run, run_host.planned_paths(run))
+    assert str(caught.value) == (
+        f"protected host path {installs} overlaps write root {installs}; "
+        "narrow that write root"
+    )
