@@ -275,6 +275,8 @@ unsandboxed = false
 accounts = ["agent"]
 ```
 
+For `[agent.sandbox]`, macOS hosts list `DARWIN_USER_TEMP_DIR` and `DARWIN_USER_CACHE_DIR` in `write_roots` as absolute paths.
+
 The settings have these constraints:
 
 - The package has no defaults except Codex's `web_search`. The `[agent.codex]` table and each of its keys are optional, and each profile, `build` and `review`, defaults to `live`. A key can narrow it to `cached` or `disabled`.

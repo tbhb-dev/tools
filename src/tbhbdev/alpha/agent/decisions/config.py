@@ -162,6 +162,15 @@ def _bad_path(text: str) -> bool:
     return "\x00" in text or ".." in text.split("/")
 
 
+def _write_roots(table: _Table) -> tuple[str, ...]:
+    entries = table.paths("write_roots")
+    if any(e.startswith("~") or not PurePosixPath(e).parts for e in entries):
+        table.fail(
+            "write_roots", "must be paths without a leading '~' or an empty path"
+        )
+    return entries
+
+
 def _sandbox(table: _Table) -> Sandbox:
     table.only("write_roots", "audit_dir", "denied_home_paths", "path", "agy")
     path = table.table("path")
@@ -169,7 +178,7 @@ def _sandbox(table: _Table) -> Sandbox:
     agy = table.table("agy")
     agy.only("review_read", "build_read", "build_write")
     return Sandbox(
-        write_roots=table.home_paths("write_roots"),
+        write_roots=_write_roots(table),
         audit_dir=table.path("audit_dir"),
         denied_home_paths=table.home_paths("denied_home_paths"),
         path=SandboxPath(linux=path.paths("linux"), macos=path.paths("macos")),

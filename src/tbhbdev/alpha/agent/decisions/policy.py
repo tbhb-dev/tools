@@ -31,6 +31,10 @@ from tbhbdev.alpha.agent.model import (
 # Codex's name for the whole filesystem, which a profile makes read-only.
 READ_ROOT = ":root"
 APPROVAL_POLICY = "never"
+LINUX_LANG = "C.UTF-8"
+MACOS_LANG = "en_US.UTF-8"
+# Process substitution and /dev/stderr need access to open descriptors on macOS.
+_DEV_FD = "/dev/fd"
 # The handoff directories, under the run's private TMPDIR. run-host creates
 # each one, and the child gets its path in the variable of the same tool.
 GH_CONFIG_SUBDIR = "gh"
@@ -82,9 +86,11 @@ def denied_paths(settings: Settings, host: Host, home: str) -> tuple[str, ...]:
     if host.os is Os.LINUX:
         # The directory, so a sibling file or a renamed token stays hidden too.
         paths.append(resolve(home, str(secrets.LINUX_TOKEN_FILE.parent)))
-    # TODO: deny the macOS agent keychain file, which secrets.KEYCHAIN names.
-    # secrets.py has no path constant for it, only the name that security(1)
-    # resolves, so no macOS output denies the Connect token store yet.
+    else:
+        keychain = secrets.MACOS_KEYCHAIN_FILE
+        paths.extend(
+            resolve(home, str(p)) for p in (keychain, keychain.with_suffix(".keychain"))
+        )
     paths.append(resolve(home, settings.sockets_dir))
     paths.extend(resolve(home, p) for p in settings.sandbox.denied_home_paths)
     return tuple(
@@ -93,7 +99,7 @@ def denied_paths(settings: Settings, host: Host, home: str) -> tuple[str, ...]:
 
 
 def environment(
-    settings: Settings, host: Host, harness: Harness, paths: RunPaths
+    settings: Settings, host: Host, harness: Harness, paths: RunPaths, account: str
 ) -> dict[str, str]:
     """The child's whole environment: an allowlist, with no parent values.
 
@@ -105,6 +111,10 @@ def environment(
     env = {
         "PATH": ":".join(resolve(paths.home, e) for e in entries),
         "HOME": paths.home,
+        "USER": account,
+        "LOGNAME": account,
+        "SHELL": host.shell,
+        "LANG": LINUX_LANG if host.os is Os.LINUX else MACOS_LANG,
         "TMPDIR": paths.tmpdir,
         "TMPPREFIX": resolve(paths.tmpdir, "zsh"),
         "GH_CONFIG_DIR": resolve(paths.tmpdir, GH_CONFIG_SUBDIR),
@@ -121,7 +131,8 @@ def _write_roots(
     if profile is Profile.REVIEW:
         return tuple(dict.fromkeys((paths.tmpdir, paths.audit_dir)))
     roots = (resolve(paths.home, r) for r in settings.sandbox.write_roots)
-    return tuple(dict.fromkeys((paths.worktree, paths.tmpdir, *roots)))
+    common = () if paths.git_common_dir is None else (paths.git_common_dir,)
+    return tuple(dict.fromkeys((paths.worktree, *common, paths.tmpdir, *roots)))
 
 
 def _codex(
@@ -153,6 +164,30 @@ def _claude(
     review = profile is Profile.REVIEW
     # An absolute path in a Claude rule starts with a second slash.
     reads = [f"Read(/{p}/**)" for p in deny]
+    deny_write = [paths.worktree] if review else []
+    if review and paths.git_common_dir is not None:
+        deny_write.append(paths.git_common_dir)
+    sandbox: dict[str, object] = {
+        "enabled": True,
+        "failIfUnavailable": True,
+        "autoAllowBashIfSandboxed": True,
+        "allowUnsandboxedCommands": False,
+        "enableWeakerNetworkIsolation": True,
+        "filesystem": {
+            "allowWrite": list(writes),
+            "denyRead": list(deny),
+            "denyWrite": [*deny_write, *deny],
+        },
+    }
+    if review:
+        sandbox["network"] = {
+            "strictAllowlist": True,
+            "allowedDomains": [
+                "github.com",
+                "api.github.com",
+                "*.githubusercontent.com",
+            ],
+        }
     return ClaudePolicy(
         {
             "env": {
@@ -163,17 +198,7 @@ def _claude(
                 "allow": [] if review else [f"Edit(/{p}/**)" for p in writes],
                 "deny": [*(_CLAUDE_FILE_TOOLS if review else ()), *reads],
             },
-            "sandbox": {
-                "enabled": True,
-                "failIfUnavailable": True,
-                "autoAllowBashIfSandboxed": True,
-                "allowUnsandboxedCommands": False,
-                "filesystem": {
-                    "allowWrite": list(writes),
-                    "denyRead": list(deny),
-                    "denyWrite": [*([paths.worktree] if review else []), *deny],
-                },
-            },
+            "sandbox": sandbox,
         }
     )
 
@@ -200,7 +225,9 @@ def _agy(
         reads = [resolve(home, p) for p in agy.build_read]
         writes = [
             paths.worktree,
-            resolve(paths.worktree, ".git"),
+            paths.git_common_dir
+            if paths.git_common_dir is not None
+            else resolve(paths.worktree, ".git"),
             paths.tmpdir,
             *(resolve(home, p) for p in agy.build_write),
         ]
@@ -242,8 +269,10 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
     """
     _check(host, harness, profile, account=account, full=unsandboxed)
     deny = denied_paths(settings, host, paths.home)
-    env = environment(settings, host, harness, paths)
+    env = environment(settings, host, harness, paths, account)
     writes = _write_roots(settings, profile, paths)
+    if host.os is Os.MACOS and harness in (Harness.CODEX, Harness.CLAUDE):
+        writes = tuple(dict.fromkeys((*writes, _DEV_FD)))
     if harness is Harness.CODEX:
         detail: CodexPolicy | ClaudePolicy | AgyPolicy = _codex(
             settings, profile, writes, deny, full=unsandboxed
