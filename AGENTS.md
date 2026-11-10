@@ -17,7 +17,7 @@ This is tbhb-dev/tools, the public repository of shared tools for tbhb-dev work.
 
 1. Write the tool as `src/tbhbdev/<tool>.py`, or as a package directory under `src/tbhbdev/` for a larger one, with a `main(argv, prog)` that returns the exit status.
 2. Register it in `TOOLS` in `src/tbhbdev/cli.py` under its command name.
-3. Add `tests/test_<tool>.py`. The tests keep the package at 100% branch coverage, and mutation testing doesn't find a surviving mutant.
+3. Add `tests/test_<tool>.py`. The tests keep the package at 100% branch coverage, and mutation testing doesn't find a surviving mutant in the functions the pull request changes. It doesn't need to cover the whole package.
 4. List it in the README.
 
 ## Alpha commands
