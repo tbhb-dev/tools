@@ -253,4 +253,4 @@ class RunRequest:
     unsandboxed: bool
     authorized_by: str | None
     startup_deadline_seconds: int
-    tainted_host: bool = False
+    tainted_host: bool
