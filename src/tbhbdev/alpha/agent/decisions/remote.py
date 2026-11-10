@@ -318,7 +318,7 @@ def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str
     return mirror_command(
         repository,
         name,
-        f"{MIRROR_GIT} -c core.logAllRefUpdates=false "
+        f"{MIRROR_GIT} -c transfer.fsckObjects=true -c core.logAllRefUpdates=false "
         "fetch --no-write-fetch-head --no-tags --no-prune --no-prune-tags "
         f"--end-of-options origin +HEAD:{base} +{branch}:{branch} "
         '|| exit "$?"\n'
