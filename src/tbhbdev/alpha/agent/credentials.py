@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import subprocess
+import subprocess  # nosec B404
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -121,7 +121,7 @@ def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
 def signing_agent(key: str, tmpdir: Path, deadline: float) -> subprocess.Popen[str]:
     """Keep one foreground agent, and load the key through ssh-add's stdin."""
     socket = tmpdir / "ssh.sock"
-    agent = subprocess.Popen(
+    agent = subprocess.Popen(  # nosec B603 B607
         ["ssh-agent", "-D", "-a", str(socket)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -130,7 +130,7 @@ def signing_agent(key: str, tmpdir: Path, deadline: float) -> subprocess.Popen[s
     )
     try:
         agent_ready(agent, socket, deadline)
-        subprocess.run(
+        subprocess.run(  # nosec B603 B607
             ["ssh-add", "-"],
             input=key,
             env={"SSH_AUTH_SOCK": str(socket)},

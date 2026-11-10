@@ -219,3 +219,15 @@ def test_command_parses_no_options(
     assert capsys.readouterr().err == (
         "example agent: configuration valid; runs are not implemented\n"
     )
+
+
+def test_command_dispatches_the_host_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[list[str], str]] = []
+
+    def run_host(arguments: list[str], prog: str) -> int:
+        calls.append((arguments, prog))
+        return 37
+
+    monkeypatch.setattr(agent.run_host, "main", run_host)
+    assert agent.main(["run-host", "example", "--host", "example-linux"], "agent") == 37
+    assert calls == [(["example", "--host", "example-linux"], "agent run-host")]

@@ -8,7 +8,7 @@ import multiprocessing
 import os
 import signal
 import struct
-import subprocess
+import subprocess  # nosec B404
 import sys
 import time
 from contextlib import suppress
@@ -38,7 +38,7 @@ _ZOMBIE = 5
 def boot_id() -> str:
     if sys.platform == "linux":
         return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-    return subprocess.check_output(
+    return subprocess.check_output(  # nosec B603 B607
         ["sysctl", "-n", "kern.boottime"], text=True, timeout=5
     ).strip()
 
@@ -121,7 +121,7 @@ def launch(
 ) -> subprocess.Popen[str]:
     """Pass the exact policy environment and give the harness its own group."""
     stdin, stdout, stderr = streams
-    child = subprocess.Popen(
+    child = subprocess.Popen(  # nosec B603 -- argv builder fixes the harness name
         command,
         env=env,
         cwd=cwd,
