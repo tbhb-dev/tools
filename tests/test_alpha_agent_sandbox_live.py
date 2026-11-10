@@ -141,7 +141,7 @@ def probe_run(tmp_path: Path, harness: Harness) -> tuple[run_host.Run, RunPaths]
         config,
         sandbox=dataclasses.replace(
             config.sandbox,
-            write_roots=(str(tmp_path),),
+            write_roots=(),
             agy_unsandboxed_opt_out=None,
             network_domains=("api.github.com",),
             denied_home_paths=(".claude", ".claude.json", ".codex", ".ssh"),
@@ -150,8 +150,8 @@ def probe_run(tmp_path: Path, harness: Harness) -> tuple[run_host.Run, RunPaths]
     paths = RunPaths(
         str(Path.home()),
         str(workspace),
-        str(tmp_path),
-        str(tmp_path / "codex"),
+        str(runfiles.private_dir(tmp_path / "temp")),
+        str(tmp_path / "temp" / "codex"),
         str(tmp_path / "audit"),
         uid=os.getuid(),
     )
@@ -168,7 +168,7 @@ def probe_run(tmp_path: Path, harness: Harness) -> tuple[run_host.Run, RunPaths]
         config,
         LINUX if sys.platform == "linux" else MACOS,
         Path.home(),
-        tmp_path,
+        Path(paths.tmpdir),
         0,
         0,
     )
@@ -363,17 +363,20 @@ def run_probe(
         "Execute this exact command with Bash, then finish: "
         f"/bin/sh {shlex.quote(str(script))}",
     )
-    value = policy.build(
-        run.settings,
-        run.host,
-        harness=harness,
-        profile=Profile.BUILD,
-        account="agent",
-        unsandboxed=False,
-        paths=paths,
-        protected=(str(root),),
-        denied=(*run_host.resolved_denies(run, paths), str(object_file.parents[2])),
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(
+                run.settings.sandbox,
+                denied_home_paths=(
+                    *run.settings.sandbox.denied_home_paths,
+                    str(object_file.parents[2]),
+                ),
+            ),
+        ),
     )
+    value, installed = run_host.checked_policy(run, paths)
     command = sandbox_command(run, paths, value, installed, script)
     result = subprocess.run(
         command,
