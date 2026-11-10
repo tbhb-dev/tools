@@ -145,6 +145,14 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     )
     source = runfiles.private_dir(run.home / ".codex") / "auth.json"
     source.write_text("example-auth")
+    copy = credentials.auth_copy
+
+    def auth_copy(source_path: Path, destination: Path) -> str | None:
+        assert source_path == run.home / ".codex" / "auth.json"
+        assert destination == run.tmpdir / "codex" / "auth.json"
+        return copy(source_path, destination)
+
+    monkeypatch.setattr(credentials, "auth_copy", auth_copy)
     result = run_host.prepare_workspace(run)
     assert result.paths.uid == os.getuid()
     assert result.paths.home == str(run.home)
@@ -408,9 +416,11 @@ def test_interrupt_and_agent_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
     child = Child()
     stopped: list[int] = []
 
-    def stop(pid: int, grace: float, *_args: object) -> None:
+    def stop(pid: int, grace: float, reap: Callable[[], object] | None = None) -> bool:
         assert grace == 0
+        assert reap == child.poll
         stopped.append(pid)
+        return True
 
     monkeypatch.setattr(process_group, "stop_started", stop)
     run_host.stop_agent(cast("subprocess.Popen[str]", child))
@@ -690,7 +700,13 @@ def test_review_finishes_without_a_signing_agent_or_auth_write_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = make_run(
-        tmp_path, harness="agy", profile="review", commit="0" * 40, timeout=900
+        tmp_path,
+        harness="claude",
+        profile="review",
+        commit="0" * 40,
+        timeout=900,
+        claude_profile="primary",
+        reason="example review",
     )
     prepared = preparation(run)
 
@@ -1445,18 +1461,10 @@ def test_preflight_version_and_named_exceptions(
         return False
 
     monkeypatch.setattr(host_tools, "codex_proxy_supported", supported)
-    if not opt_out and harness in (Harness.CODEX, Harness.AGY):
+    if harness is Harness.AGY or (not opt_out and harness is Harness.CODEX):
         with pytest.raises(Invalid) as caught:
             run_host.preflight(run)
-        assert str(caught.value) == (
-            "Codex network_proxy support required (minimum 0.164.0); "
-            "upgrade or configure codex_network_proxy_opt_out"
-            if harness is Harness.CODEX
-            else (
-                "agy has no OS sandbox; configure agy_unsandboxed_opt_out "
-                "with a named reason"
-            )
-        )
+        assert str(caught.value) == preflight_failure_message(harness, opt_out)
     else:
         run_host.preflight(run)
         if opt_out and harness is not Harness.CLAUDE:
@@ -1469,7 +1477,7 @@ def test_preflight_version_and_named_exceptions(
     assert output.out == ""
     assert output.err == (
         f"{harness} sandbox opt-out: test exception\n"
-        if opt_out and harness is not Harness.CLAUDE
+        if opt_out and harness is Harness.CODEX
         else ""
     )
 
@@ -1477,6 +1485,19 @@ def test_preflight_version_and_named_exceptions(
         [("/usr/bin/true", run.tmpdir)]
         if harness is Harness.CODEX and not opt_out
         else []
+    )
+
+
+def preflight_failure_message(harness: Harness, opt_out: bool) -> str:
+    if harness is Harness.CODEX:
+        return (
+            "Codex network_proxy support required (minimum 0.164.0); "
+            "upgrade or configure codex_network_proxy_opt_out"
+        )
+    if opt_out:
+        return "run-host requires an OS sandbox to protect host git state"
+    return (
+        "agy has no OS sandbox; configure agy_unsandboxed_opt_out with a named reason"
     )
 
 
@@ -1967,7 +1988,7 @@ def test_driver_schema_file_reaches_harness(
         assert command[command.index("--output-format") + 1] == "json"
 
 
-def test_full_access_opt_out_is_logged(
+def test_full_access_cannot_write_host_git_state(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     run = make_run(
@@ -1976,10 +1997,38 @@ def test_full_access_opt_out_is_logged(
         authorized_by="example-org/example-repo#1",
         reason="isolated host",
     )
-    run_host.preflight(run)
-    notice = "codex sandbox opt-out: isolated test host\n"
-    assert capsys.readouterr().err == notice
-    assert run.files.path("log").read_text() == notice
+    with pytest.raises(
+        Invalid, match="requires an OS sandbox to protect host git state"
+    ):
+        run_host.preflight(run)
+    assert capsys.readouterr().err == ""
+    assert not run.files.path("log").exists()
+
+
+@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.AGY])
+def test_unconfined_run_is_refused_before_workspace_preparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
+) -> None:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        timeout=900,
+        unsandboxed=harness is Harness.CODEX,
+        authorized_by="example-org/example-repo#1"
+        if harness is Harness.CODEX
+        else None,
+        reason="example isolation exception",
+    )
+
+    def unexpected(*_args: object) -> None:
+        pytest.fail("an unconfined run must not prepare or launch a workspace")
+
+    monkeypatch.setattr(process_group, "prepare", unexpected)
+    assert run_host.execute(run, "probe") == 1
+    assert run.files.path("rc").read_text() == "1\n"
+    assert run.files.path("log").read_text() == (
+        "run-host requires an OS sandbox to protect host git state\n"
+    )
 
 
 @pytest.mark.parametrize("os_name", Os)
@@ -2322,3 +2371,99 @@ def test_terminal_cleanup_log_error_keeps_harness_rc(
     monkeypatch.setattr(run.files, "write", write)
     assert run_host.execute(run, "task") == 7
     assert run.files.path("rc").read_text() == "7\n"
+
+
+@pytest.mark.parametrize("failure", ["exited", "stopped", "wait-os", "wait-subprocess"])
+def test_harness_cleanup_errors_keep_the_observed_exit_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    run = make_run(tmp_path, timeout=60)
+    prepared = preparation(run)
+    run.files.write("prompt", "probe")
+    child = Child()
+    original = run.files.write
+    stops: list[int] = []
+
+    def launch(
+        _spec: process_group.Launch, *, started: Callable[[Child], None]
+    ) -> Child:
+        started(child)
+        return child
+
+    def wait(timeout: int | None = None) -> int:
+        if timeout is None:
+            if failure == "wait-os":
+                raise OSError
+            if failure == "wait-subprocess":
+                raise subprocess.SubprocessError
+        return 7
+
+    def write(suffix: str, text: str) -> None:
+        if suffix == "phase" and text == failure:
+            raise OSError
+        original(suffix, text)
+
+    def stop(
+        files: runfiles.RunFiles,
+        pid: int,
+        grace: float,
+        reap: Callable[[], object] | None = None,
+    ) -> bool:
+        assert files is run.files
+        assert (pid, grace) == (child.pid, run.settings.kill_grace_seconds)
+        assert reap == child.poll
+        stops.append(pid)
+        return True
+
+    monkeypatch.setattr(child, "wait", wait)
+    monkeypatch.setattr(run.files, "write", write)
+    monkeypatch.setattr(process_group, "record", constant(None))
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "stop_owned", stop)
+    with ExitStack() as stack:
+        assert run_host.run_harness(run, prepared, stack) == 7
+    assert stops == [child.pid]
+
+
+def test_mirror_protection_uses_the_run_home_without_xdg_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    monkeypatch.delenv("XDG_STATE_HOME")
+    mirror = (
+        run.home
+        / ".local"
+        / "state"
+        / "tbhbdev"
+        / "agent-mirrors"
+        / "example-org"
+        / "example-repo.git"
+    )
+    assert str(mirror) in run_host.protected_home(run)
+    assert str(mirror) in run_host.full_denies(run, preparation(run).paths)
+
+
+def test_account_clone_protection_checks_both_aliases_and_all_configured_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    clone = Path(run_host.repo.clone_path(run.home, run.request.repo))
+    clone.parent.mkdir(parents=True)
+    target = run.home / "account-clone"
+    target.mkdir()
+    clone.symlink_to(target, target_is_directory=True)
+    calls: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+    original = run_host.policy.protect_paths
+
+    def protect(writes: tuple[str, ...], protected: tuple[str, ...]) -> None:
+        calls.append((writes, protected))
+        original(writes, protected)
+
+    monkeypatch.setattr(run_host.policy, "protect_paths", protect)
+    run_host.checked_policy(run, preparation(run).paths)
+    sandbox = run.settings.sandbox
+    writes = tuple(
+        str((run.home / p).resolve())
+        for p in (*sandbox.write_roots, *sandbox.agy.build_write)
+    )
+    assert (writes, (str(clone), str(target))) in calls

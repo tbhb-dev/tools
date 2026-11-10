@@ -170,34 +170,41 @@ def test_every_output_denies_the_same_paths(
     if isinstance(result.detail, model.CodexPolicy):
         assert result.detail.deny == denied(os, home)
     elif isinstance(result.detail, model.ClaudePolicy):
-        claude = claude_settings_of(result)
-        fs = ("sandbox", "filesystem")
-        assert dig(claude, *fs, "denyRead") == list(denied(os, home))
-        assert dig(claude, *fs, "denyWrite") == [
-            *(() if profile is Profile.BUILD else (paths(account).worktree,)),
-            *(
-                f"{paths(account).worktree}/.git/{entry}"
-                for entry in ("config", "hooks", "info")
-            ),
-            *denied(os, home),
-        ]
-        rules = strings(dig(claude, "permissions", "deny"))
-        reads = [r for r in rules if r.startswith("Read(")]
-        assert reads == [f"Read(/{p}/**)" for p in denied(os, home)]
-        edits = [r for r in rules if r.startswith("Edit(")]
-        expected_edits = [f"Edit(/{p}/**)" for p in denied(os, home)]
-        if profile is Profile.REVIEW:
-            expected_edits += [
-                f"Edit(/{paths(account).worktree}{suffix})" for suffix in ("", "/**")
-            ]
-        expected_edits += [
-            f"Edit(/{paths(account).worktree}/.git/{entry}{suffix})"
-            for entry in ("config", "hooks", "info")
-            for suffix in ("", "/**")
-        ]
-        assert edits == expected_edits
+        assert_claude_denials(result, os, profile, account)
     else:
         assert not any(d in g for d in denied(os, home) for g in result.detail.grants)
+
+
+def assert_claude_denials(
+    result: model.Policy, os: Os, profile: Profile, account: str
+) -> None:
+    home = f"/example/home/{account}"
+    claude = claude_settings_of(result)
+    fs = ("sandbox", "filesystem")
+    assert dig(claude, *fs, "denyRead") == list(denied(os, home))
+    assert dig(claude, *fs, "denyWrite") == [
+        *(() if profile is Profile.BUILD else (paths(account).worktree,)),
+        *(
+            f"{paths(account).worktree}/.git/{entry}"
+            for entry in ("config", "hooks", "info")
+        ),
+        *denied(os, home),
+    ]
+    rules = strings(dig(claude, "permissions", "deny"))
+    reads = [r for r in rules if r.startswith("Read(")]
+    assert reads == [f"Read(/{p}/**)" for p in denied(os, home)]
+    edits = [r for r in rules if r.startswith("Edit(")]
+    expected_edits = [f"Edit(/{p}/**)" for p in denied(os, home)]
+    if profile is Profile.REVIEW:
+        expected_edits += [
+            f"Edit(/{paths(account).worktree}{suffix})" for suffix in ("", "/**")
+        ]
+    expected_edits += [
+        f"Edit(/{paths(account).worktree}/.git/{entry}{suffix})"
+        for entry in ("config", "hooks", "info")
+        for suffix in ("", "/**")
+    ]
+    assert edits == expected_edits
 
 
 def codex_expected(

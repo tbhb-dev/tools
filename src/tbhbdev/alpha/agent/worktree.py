@@ -196,6 +196,7 @@ def clone_run(mirror: Path, workspace: Path, url: str) -> None:
     )
     git(workspace, "config", "remote.origin.url", url)
     git(workspace, "config", "remote.origin.pushurl", url)
+    git(workspace, "config", "core.hooksPath", str(workspace / ".git" / "hooks"))
     install_hooks(workspace)
 
 
@@ -204,7 +205,14 @@ def create(clone: Path, name: str, request: RunRequest) -> Path:
         message = f"repo clone {clone} does not exist"
         raise Invalid(message)
     worktree = clone / ".worktrees" / f"agent-{name}"
-    mirror = runfiles.private_dir(mirror_path(Path.home(), request.repo))
+    if worktree.parent.is_symlink():
+        message = "run clone parent must not be a symbolic link"
+        raise Invalid(message)
+    mirror = mirror_path(Path.home(), request.repo)
+    if any(p.is_symlink() for p in (mirror, *mirror.parents[:3])):
+        message = "host mirror paths must not be symbolic links"
+        raise Invalid(message)
+    mirror = runfiles.private_dir(mirror)
     url = repo.ssh_url(request.repo)
     with runfiles.locked(mirror / "agent-fetch.lock"):
         configure_mirror(mirror, url)
