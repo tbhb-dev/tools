@@ -535,6 +535,10 @@ def test_ssh() -> None:
         "ConnectTimeout=15",
         "-o",
         "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-l",
+        "agent",
         "example-linux",
         "bash -lc 'example-tool run '\"'\"'a b'\"'\"''",
     )
@@ -702,3 +706,67 @@ def test_codex_tool_environment_excludes_inherited_git_variables(
     assert {name for name in environment["set"] if name.startswith("GIT_")} == {
         "GIT_CONFIG_COUNT"
     }
+
+
+@pytest.mark.parametrize("account", ["agent", "ops"])
+@pytest.mark.parametrize("count", [1, 5])
+def test_ssh_account_and_keepalive_count(account: str, count: int) -> None:
+    host = dataclasses.replace(LINUX, account=account)
+    result = argv.ssh(
+        host, ("true",), connect_timeout=2, keepalive=7, keepalive_count_max=count
+    )
+    assert result == (
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=2",
+        "-o",
+        "ServerAliveInterval=7",
+        "-o",
+        f"ServerAliveCountMax={count}",
+        "-l",
+        account,
+        "example-linux",
+        "bash -lc true",
+    )
+
+
+@pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize("schema", [None, "example.schema.json"])
+@pytest.mark.parametrize("output", [None, "example.out.final"])
+def test_codex_output(kind: RunKind, schema: str | None, output: str | None) -> None:
+    result = argv.harness(
+        request(Harness.CODEX, kind, Profile.BUILD),
+        policy_for(Harness.CODEX, Profile.BUILD),
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+        output_file=output,
+        schema_file=schema,
+    )
+    options = (() if output is None else ("-o", output)) + (
+        () if schema is None else ("--output-schema", schema)
+    )
+    base = expected(Harness.CODEX, kind, Profile.BUILD)
+    assert result == (
+        (*base[:-1], *options, base[-1]) if kind is RunKind.EXEC else base
+    )
+
+
+@pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize("schema", [None, '{"type":"object"}'])
+def test_claude_schema(kind: RunKind, schema: str | None) -> None:
+    result = argv.harness(
+        request(Harness.CLAUDE, kind, Profile.BUILD),
+        policy_for(Harness.CLAUDE, Profile.BUILD),
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+        schema_text=schema,
+    )
+    base = expected(Harness.CLAUDE, kind, Profile.BUILD)
+    options = (
+        ("--output-format", "json", "--json-schema", schema)
+        if schema is not None and kind is RunKind.EXEC
+        else ()
+    )
+    assert result == (*base, *options)

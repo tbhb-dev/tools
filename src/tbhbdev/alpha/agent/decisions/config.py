@@ -431,6 +431,9 @@ def parse(agent: dict[str, object]) -> Settings:
         "credentials",
         "claude",
         "host",
+        "ssh_connect_timeout",
+        "ssh_keepalive_seconds",
+        "ssh_keepalive_count_max",
         "host_tag",  # Another command reads this key.
     )
     settings = Settings(
@@ -446,6 +449,15 @@ def parse(agent: dict[str, object]) -> Settings:
         credentials=_credentials(root.table("credentials")),
         claude=_claude(root.table("claude")),
         hosts=_hosts(root),
+        ssh_connect_timeout=root.integer("ssh_connect_timeout")
+        if "ssh_connect_timeout" in agent
+        else 15,
+        ssh_keepalive_seconds=root.integer("ssh_keepalive_seconds")
+        if "ssh_keepalive_seconds" in agent
+        else 30,
+        ssh_keepalive_count_max=root.integer("ssh_keepalive_count_max")
+        if "ssh_keepalive_count_max" in agent
+        else 3,
     )
     _check_host_accounts(settings)
     return settings

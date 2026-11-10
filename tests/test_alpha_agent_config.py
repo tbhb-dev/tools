@@ -954,3 +954,21 @@ def test_claude_references_refuse_openssh_query(key: str) -> None:
         value="vault/item/key?ssh-format=openssh",
     )
     assert REFERENCE in refused(table)
+
+
+@pytest.mark.parametrize(
+    ("key", "default"),
+    [
+        ("ssh_connect_timeout", 15),
+        ("ssh_keepalive_seconds", 30),
+        ("ssh_keepalive_count_max", 3),
+    ],
+)
+def test_ssh_settings(key: str, default: int) -> None:
+    assert getattr(config.parse(GOOD), key) == default
+    assert getattr(config.parse(edited(key, value=9)), key) == 9
+    for value in (0, -1, True, "9"):
+        assert (
+            refused(edited(key, value=value))
+            == f"[agent] {key} must be a positive integer"
+        )

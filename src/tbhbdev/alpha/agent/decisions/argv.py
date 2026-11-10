@@ -43,6 +43,7 @@ def ssh(
     *,
     connect_timeout: int,
     keepalive: int,
+    keepalive_count_max: int = 3,
 ) -> tuple[str, ...]:
     """The driver's call to HOST, which runs REMOTE in the host's login shell.
 
@@ -58,6 +59,10 @@ def ssh(
         f"ConnectTimeout={connect_timeout}",
         "-o",
         f"ServerAliveInterval={keepalive}",
+        "-o",
+        f"ServerAliveCountMax={keepalive_count_max}",
+        "-l",
+        host.account,
         host.name,
         command,
     )
@@ -241,6 +246,7 @@ def harness(  # noqa: PLR0913 -- one value per fact the harness's argv depends o
     brief_file: str,
     agy_project: str | None = None,
     agy_brief: str | None = None,
+    output_file: str | None = None,
     schema_file: str | None = None,
     schema_text: str | None = None,
 ) -> tuple[str, ...]:
@@ -262,8 +268,10 @@ def harness(  # noqa: PLR0913 -- one value per fact the harness's argv depends o
     detail = policy.detail
     if isinstance(detail, CodexPolicy):
         command = _codex(request, policy, detail, worktree, brief_file)
-        if request.kind is RunKind.EXEC and schema_file is not None:
-            return (*command[:-1], "--output-schema", schema_file, command[-1])
+        if request.kind is RunKind.EXEC:
+            options = () if output_file is None else ("-o", output_file)
+            options += () if schema_file is None else ("--output-schema", schema_file)
+            return (*command[:-1], *options, command[-1])
         return command
     if isinstance(detail, ClaudePolicy):
         command = _claude(request, policy, detail, brief_file)
