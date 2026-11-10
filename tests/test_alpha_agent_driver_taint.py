@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -220,3 +222,22 @@ def test_clearance_between_prepare_and_append_does_not_hide_taint(
     monkeypatch.setattr(taint_store, "record_taint", delayed)
     assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
     assert taint_store.load("example-linux").status == "tainted"
+
+
+def test_driver_clearance_survives_clock_step_back(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    times = iter(
+        [
+            datetime.fromisoformat("2026-11-10T13:00:00Z"),
+            datetime.fromisoformat("2026-11-10T12:00:00Z"),
+        ]
+    )
+
+    def now(_zone: object) -> datetime:
+        return next(times)
+
+    monkeypatch.setattr(driver, "datetime", SimpleNamespace(now=now))
+    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
+    assert clear(reason="Host rebuilt after the clock moved back") == 0
+    assert taint_store.load("example-linux").status == "clean"
