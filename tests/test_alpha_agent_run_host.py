@@ -380,7 +380,7 @@ def test_finish_orders_cleanup_auth_agent_index_and_atomic_rc(
         assert line["state"] == "ended"
         assert line["rc"] == code
         assert line["trace_id"] is None
-        assert line["v"] == 1
+        assert line["v"] == 2
     else:
         assert not run.files.path("launched").exists()
     assert runtime.phases == (
@@ -872,7 +872,7 @@ def test_index_metadata_records_complete_outcome(
     )
     monkeypatch.setattr(time, "time", lambda: 2000)
     assert run_host.index_entry(run, workspace if prepared else None, rc) == {
-        "v": 1,
+        "v": 2,
         "kind": "exec",
         "harness": "claude",
         "model": run.request.model,

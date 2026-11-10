@@ -13,7 +13,7 @@ from enum import StrEnum
 from typing import TypedDict
 
 # The run request's schema version. A reader refuses any other version.
-REQUEST_VERSION = 1
+REQUEST_VERSION = 2
 
 # An identifier that reaches a file name, a tmux session name or an argv: run
 # names, accounts, profiles and the run's class, variant and role.
