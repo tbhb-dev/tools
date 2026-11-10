@@ -12,7 +12,9 @@ class Facts:
     bytes: int
 
 
-def decide(facts: Facts, *, now: float, days: int, force: bool) -> str:
+def decide(
+    facts: Facts, *, now: float, days: int, force: bool, unsandboxed: bool
+) -> str:
     if facts.keep and not force:
         return "kept"
     if facts.session:
@@ -21,4 +23,6 @@ def decide(facts: Facts, *, now: float, days: int, force: bool) -> str:
         return "unfinished"
     if facts.rc_mtime >= now - days * 86400:
         return "recent"
+    if unsandboxed:
+        return "unsandboxed"
     return "prune"

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from agent_example import settings
-from test_alpha_agent_request import BUILD
+from test_alpha_agent_request import BUILD, UNSANDBOXED
 
 from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import driver, prune, transport
@@ -33,11 +33,13 @@ class Inventory:
         self.calls: list[str] = []
         self.cleaned: list[tuple[str, bool]] = []
 
-    def add(self, name: str, *, host: int = 0) -> driver.Run:
+    def add(self, name: str, *, host: int = 0, unsandboxed: bool = False) -> driver.Run:
         run = driver.Run(
             name,
             CONFIG.hosts[host],
-            request.parse(BUILD, host_allows_unsandboxed=True),
+            request.parse(
+                UNSANDBOXED if unsandboxed else BUILD, host_allows_unsandboxed=True
+            ),
             "start",
             "owner",
         )
@@ -207,7 +209,7 @@ def test_largest_global_order_and_limit(
     inventory: Inventory, capsys: pytest.CaptureFixture[str]
 ) -> None:
     for name in ("z", "b", "a", "small"):
-        inventory.add(name, host=1 if name == "b" else 0)
+        inventory.add(name, host=1 if name == "b" else 0, unsandboxed=name == "a")
     inventory.answers["z"] = ["1\n-\n1\n5\n31\n"]
     inventory.answers["small"] = ["0\n-\n0\n100\n1\n"]
     assert command("--largest", "3") == 0
@@ -484,3 +486,113 @@ def test_custom_age_reaches_selection(
     assert command("--older-than", "999999") == 0
     assert capsys.readouterr() == ("", "")
     assert inventory.cleaned == []
+
+
+@pytest.mark.parametrize(
+    "options", [[], ["--force"], ["--apply"], ["--apply", "--force"]]
+)
+def test_unsandboxed_only_skip(
+    inventory: Inventory, capsys: pytest.CaptureFixture[str], options: list[str]
+) -> None:
+    inventory.add("sample", unsandboxed=True)
+    assert command(*options) == 0
+    assert capsys.readouterr() == (
+        "unsandboxed: example-linux sample (clean with agent clean --force)\n",
+        "",
+    )
+    assert inventory.cleaned == []
+    assert inventory.calls == ["sample"]
+    assert driver.metadata_path("sample").exists()
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_unsandboxed_excluded_from_totals(
+    inventory: Inventory, capsys: pytest.CaptureFixture[str], *, apply: bool
+) -> None:
+    inventory.add("a", unsandboxed=True)
+    inventory.add("z")
+    assert command(*(["--apply"] if apply else [])) == 0
+    action = "removed" if apply else "would free"
+    assert capsys.readouterr() == (
+        (
+            "unsandboxed: example-linux a (clean with agent clean --force)\n"
+            "prune: example-linux z bytes=21 files=3\n"
+            f"{action}: example-linux runs=1 files=3 bytes=21\n"
+        ),
+        "",
+    )
+    assert inventory.cleaned == ([("z", False)] if apply else [])
+
+
+@pytest.mark.parametrize("sanitize", [False, True])
+@pytest.mark.parametrize("prior_error", [False, True])
+def test_recheck_unsandboxed_is_non_error(
+    inventory: Inventory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    sanitize: bool,
+    prior_error: bool,
+) -> None:
+    run = inventory.add("sample")
+    if sanitize:
+        run.host = dataclasses.replace(run.host, name="host\x00")
+        run.name = "name\x00"
+
+    def load(config: Settings, name: str) -> driver.Run:
+        assert config is CONFIG
+        if name == "invalid":
+            msg = "invalid metadata"
+            raise Invalid(msg)
+        return run
+
+    monkeypatch.setattr(driver, "load", load)
+    monkeypatch.setattr(
+        prune,
+        "names",
+        lambda: iter(["invalid", "sample"] if prior_error else ["sample"]),
+    )
+    reads = []
+
+    def changing_read(config: Settings, current: driver.Run) -> Facts:
+        assert config is CONFIG
+        assert current is run
+        reads.append(current.name)
+        if len(reads) == 2:
+            current.request = request.parse(UNSANDBOXED, host_allows_unsandboxed=True)
+        return Facts(session=False, rc_mtime=1, keep=False, files=3, bytes=21)
+
+    monkeypatch.setattr(prune, "read", changing_read)
+    assert command("--apply", "--force") == (1 if prior_error else 0)
+    host, name = ("host", "name") if sanitize else ("example-linux", "sample")
+    assert capsys.readouterr() == (
+        (
+            f"prune: {host} {name} bytes=21 files=3\n"
+            f"unsandboxed: {host} {name} (clean with agent clean --force)\n"
+            f"removed: {host} runs=0 files=0 bytes=0\n"
+        ),
+        "prune: invalid metadata: invalid\n" if prior_error else "",
+    )
+    assert len(reads) == 2
+    assert inventory.cleaned == []
+
+
+def test_unsandboxed_output_uses_terminal_text(
+    inventory: Inventory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run = inventory.add("sample", unsandboxed=True)
+    run.host = dataclasses.replace(run.host, name="host\x00")
+    run.name = "name\x00"
+    monkeypatch.setattr(driver, "load", lambda *_a: run)
+    monkeypatch.setattr(
+        prune,
+        "read",
+        lambda *_a: Facts(session=False, rc_mtime=1, keep=False, files=1, bytes=2),
+    )
+    assert command() == 0
+    assert capsys.readouterr() == (
+        "unsandboxed: host name (clean with agent clean --force)\n",
+        "",
+    )

@@ -98,5 +98,25 @@ def test_selection(  # noqa: PLR0913, PLR0917 -- each column is a decision input
     reason: str,
 ) -> None:
     facts = Facts(session, mtime, keep, 4, 91)
-    assert decide(facts, now=now, days=days, force=force) == reason
+    assert decide(facts, now=now, days=days, force=force, unsandboxed=False) == reason
     assert facts == Facts(session, mtime, keep, 4, 91)
+
+
+@pytest.mark.parametrize(
+    ("keep", "session", "mtime", "force", "reason"),
+    [
+        pytest.param(True, False, 1, False, "kept", id="keep-precedes-unsandboxed"),
+        pytest.param(False, True, 1, False, "running", id="running-unsandboxed"),
+        pytest.param(
+            False, False, None, False, "unfinished", id="unfinished-unsandboxed"
+        ),
+        pytest.param(False, False, 100, False, "recent", id="recent-unsandboxed"),
+        pytest.param(False, False, 1, False, "unsandboxed", id="skip-unsandboxed"),
+        pytest.param(True, False, 1, True, "unsandboxed", id="force-keeps-unsandboxed"),
+    ],
+)
+def test_unsandboxed_selection(
+    keep: bool, session: bool, mtime: int | None, force: bool, reason: str
+) -> None:
+    facts = Facts(session, mtime, keep, 4, 91)
+    assert decide(facts, now=100, days=0, force=force, unsandboxed=True) == reason

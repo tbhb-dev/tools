@@ -62,21 +62,33 @@ def failed(run: driver.Run, exc: Exception) -> None:
 
 def remove(
     settings: Settings, run: driver.Run, args: argparse.Namespace
-) -> selection.Facts | None:
+) -> selection.Facts | int:
     facts = read(settings, run)
-    if (
-        selection.decide(facts, now=time.time(), days=args.older_than, force=args.force)
-        != "prune"
-    ):
+    reason = selection.decide(
+        facts,
+        now=time.time(),
+        days=args.older_than,
+        force=args.force,
+        unsandboxed=run.request.unsandboxed,
+    )
+    if reason == "unsandboxed":
+        skipped(run, reason)
+        return 0
+    if reason != "prune":
         print(
             transport.terminal_text(
                 f"prune changed, skipped: {run.host.name} {run.name}"
             ),
             file=sys.stderr,
         )
-        return None
+        return 1
     driver.clean(settings, run, force=False)
     return facts
+
+
+def skipped(run: driver.Run, reason: str) -> None:
+    suffix = " (clean with agent clean --force)" if reason == "unsandboxed" else ""
+    print(transport.terminal_text(f"{reason}: {run.host.name} {run.name}{suffix}"))
 
 
 def main(settings: Settings, args: argparse.Namespace) -> int:
@@ -110,13 +122,17 @@ def main(settings: Settings, args: argparse.Namespace) -> int:
     totals: dict[str, tuple[int, int, int]] = {}
     for run, facts in gathered:
         reason = selection.decide(
-            facts, now=time.time(), days=args.older_than, force=args.force
+            facts,
+            now=time.time(),
+            days=args.older_than,
+            force=args.force,
+            unsandboxed=run.request.unsandboxed,
         )
         if reason == "recent":
             continue
         label = f"{run.host.name} {run.name}"
         if reason != "prune":
-            print(transport.terminal_text(f"{reason}: {label}"))
+            skipped(run, reason)
             continue
         print(
             transport.terminal_text(
@@ -132,8 +148,8 @@ def main(settings: Settings, args: argparse.Namespace) -> int:
                 failed(run, exc)
                 status = 1
                 continue
-            if current is None:
-                status = 1
+            if isinstance(current, int):
+                status |= current
                 continue
             measured = current
         totals[run.host.name] = (
