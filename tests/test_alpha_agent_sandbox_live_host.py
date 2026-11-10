@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from agent_live_host_probe import (
     INPUT_MARKER,
+    TerminalObservation,
     assert_unchanged,
     checked_live_policy,
     hard_link_attempt,
@@ -77,6 +78,13 @@ def test_hard_link_control_and_probe_use_the_same_filesystem(tmp_path: Path) -> 
 
 @pytest.fixture
 def fake_host_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+
+    def fake_home() -> Path:
+        return home
+
+    monkeypatch.setattr(Path, "home", fake_home)
     executable = tmp_path / "bin" / "harness"
     executable.parent.mkdir()
     executable.write_bytes(b"\x7fELF")
@@ -214,18 +222,20 @@ def test_live_protected_hard_links(
 
 
 @pytest.mark.parametrize(
-    ("control", "probe", "expected"),
+    ("control", "probe", "error", "expected"),
     [
-        (b"", b"", "unproven"),
-        (b"", b"agent-input-probe", "unproven"),
-        (b"agent-input-probe", b"", "blocked"),
-        (b"agent-input-probe", b"agent-input-probe", "injected"),
+        (b"", b"", 1, "unproven"),
+        (b"", INPUT_MARKER, 1, "injected"),
+        (INPUT_MARKER, b"", 1, "blocked"),
+        (INPUT_MARKER, INPUT_MARKER, 1, "injected"),
+        (INPUT_MARKER, b"", 0, "injected"),
+        (b"", b"", 0, "injected"),
     ],
 )
 def test_terminal_verdict_requires_input_control(
-    control: bytes, probe: bytes, expected: str
+    control: bytes, probe: bytes, error: int, expected: str
 ) -> None:
-    assert terminal_status(control, probe) == expected
+    assert terminal_status(control, probe, error) == expected
 
 
 def test_terminal_output_is_not_input(tmp_path: Path) -> None:
@@ -236,6 +246,34 @@ def test_terminal_output_is_not_input(tmp_path: Path) -> None:
     )
     assert result.code == 0
     assert result.inputs == b""
+
+
+@pytest.mark.usefixtures("fake_host_tools")
+@pytest.mark.parametrize("error", [0, 1])
+@pytest.mark.parametrize("profile", Profile)
+def test_terminal_probe_requires_ioctl_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: int, profile: Profile
+) -> None:
+    def observe(
+        command: tuple[str, ...], _environment: dict[str, str], _cwd: Path
+    ) -> TerminalObservation:
+        target = Path(command[-1])
+        sandbox = target.suffix == ".sh"
+        witness = Path(shlex.split(target.read_text())[-1]) if sandbox else target
+        assert witness.parent == tmp_path / (
+            "temp" if profile is Profile.BUILD else "audit"
+        )
+        witness.write_text(
+            json.dumps({"attempted": True, "error": error if sandbox else 0})
+        )
+        return TerminalObservation(b"" if sandbox else INPUT_MARKER, 0)
+
+    monkeypatch.setattr(sys.modules[__name__], "observe_terminal", observe)
+    if error == 0:
+        with pytest.raises(AssertionError, match="ioctl error=0"):
+            test_live_terminal_injection(tmp_path, monkeypatch, Harness.CODEX, profile)
+    else:
+        test_live_terminal_injection(tmp_path, monkeypatch, Harness.CODEX, profile)
 
 
 @pytest.mark.skipif(
@@ -253,8 +291,8 @@ def test_live_terminal_injection(
     if installed is None:
         pytest.skip(f"{label}: unproven; not installed; legacy_tiocsti={setting}")
     run, paths = live_policy(tmp_path, monkeypatch, harness, profile)
-    writes = Path(paths.audit_dir)
-    writes.mkdir(parents=True)
+    writes = Path(paths.tmpdir if profile is Profile.BUILD else paths.audit_dir)
+    writes.mkdir(parents=True, exist_ok=True)
     helper = Path(__file__).with_name("agent_live_host_probe.py")
     control_witness = writes / "control-terminal.json"
     control = observe_terminal(
@@ -285,12 +323,15 @@ def test_live_terminal_injection(
     )
     if not witness.is_file():
         pytest.skip(f"{label}: unproven; probe not executed; legacy_tiocsti={setting}")
-    assert json.loads(witness.read_text())["attempted"] is True
-    status = terminal_status(control.inputs, probe.inputs)
-    report(f"{label}: {status}; legacy_tiocsti={setting}")
+    observed = json.loads(witness.read_text())
+    assert observed["attempted"] is True
+    error = observed["error"]
+    assert isinstance(error, int)
+    status = terminal_status(control.inputs, probe.inputs, error)
+    report(f"{label}: {status}; ioctl error={error}; legacy_tiocsti={setting}")
     if status == "unproven":
         pytest.skip(f"{label}: unproven; control failed; legacy_tiocsti={setting}")
-    assert status == "blocked", f"{label}: injected bytes reached terminal input"
+    assert status == "blocked", f"{label}: injected; ioctl error={error}"
 
 
 def test_link_probe_records_every_label_after_a_denial(tmp_path: Path) -> None:

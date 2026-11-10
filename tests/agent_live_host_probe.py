@@ -174,10 +174,12 @@ def observe_terminal(
         os.close(master)
 
 
-def terminal_status(control: bytes, observed: bytes) -> str:
+def terminal_status(control: bytes, observed: bytes, error: int) -> str:
+    if error == 0 or INPUT_MARKER in observed:
+        return "injected"
     if INPUT_MARKER not in control:
         return "unproven"
-    return "injected" if INPUT_MARKER in observed else "blocked"
+    return "blocked"
 
 
 def inject_terminal(witness: Path) -> None:
