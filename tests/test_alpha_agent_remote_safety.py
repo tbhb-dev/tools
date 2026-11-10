@@ -456,7 +456,8 @@ def test_clean_refuses_unsafe_run_clone(host: Path, kind: str, component: str) -
         )
     result = execute(cleanup())
     assert result.returncode == 65
-    assert b"clean refused" in result.stderr
+    reason = "is not a directory" if kind == "file" else "is a symlink"
+    assert result.stderr == f"clean refused: {tree} {reason}\n".encode()
     assert next((host / "saved-clone").rglob("agent-file")).read_text() == "preserve"
 
 
@@ -782,6 +783,14 @@ def test_inspection_fetch_does_not_write_metadata(
 ) -> None:
     mirror = mirror_in(host)
     git_in(mirror, "config", "core.logAllRefUpdates", "true")
+    calls = host / "git-calls.jsonl"
+    write_standalone_fake(
+        host / "bin/git",
+        "import json, os, sys\nfrom pathlib import Path\n"
+        f"with Path({str(calls)!r}).open('a') as target:\n"
+        "    target.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "os.execv('/usr/bin/git', ['git', *sys.argv[1:]])\n",
+    )
     fetch_head = mirror / "FETCH_HEAD"
     fetch_head.write_text("preserve fetch head\n")
     assert (
@@ -792,8 +801,21 @@ def test_inspection_fetch_does_not_write_metadata(
         ).returncode
         == 0
     )
+    assert git_in(mirror, "rev-parse", "refs/tbhbdev/default") == git_in(
+        host / "origin.git", "rev-parse", "HEAD"
+    )
     assert fetch_head.read_text() == "preserve fetch head\n"
     assert not (mirror / "logs").exists()
+    invocations = [json.loads(line) for line in calls.read_text().splitlines()]
+    query = next(args for args in invocations if "--no-ext-diff" in args)
+    # Ref spelling matters on case-sensitive hosts even when local loose refs
+    # happen to accept another case.
+    comparison = (
+        "refs/tbhbdev/default...refs/heads/agent/sample"
+        if limit is None
+        else "refs/tbhbdev/default..refs/heads/agent/sample"
+    )
+    assert query[-2:] == [comparison, "--"]
 
 
 @pytest.mark.parametrize("limit", [None, 10])
@@ -1104,3 +1126,24 @@ def test_host_marker_uses_portable_perl_arguments(host: Path) -> None:
     assert result.stdout == b""
     invoked: list[str] = json.loads(call_log.read_text())
     assert invoked[1] == "-e"
+
+
+@pytest.mark.parametrize("limit", [None, 10])
+def test_inspection_ignores_default_branch_only_commits(
+    host: Path, limit: int | None
+) -> None:
+    mirror_in(host)
+    source = host / "source"
+    (source / "upstream-only").write_text("upstream content\n")
+    git_in(source, "add", "upstream-only")
+    commit_in(source, "upstream only")
+    git_in(source, "push", str(host / "origin.git"), "main")
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=limit
+        )
+    )
+    assert result.returncode == 0, result.stderr
+    assert b"pushed change" in result.stdout
+    assert b"upstream-only" not in result.stdout
+    assert b"upstream only" not in result.stdout
