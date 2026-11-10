@@ -11,6 +11,7 @@ dependencies = [
   # against a JSON schema.
   "jsonschema[format]>=4.26.0",
   "onepasswordconnectsdk>=2.1.1",
+  "psycopg[binary]>=3.3.4",
   "pyyaml>=6.0.3",
   # tbhbdev alpha install edits Codex's config.toml in place, so the comments
   # and order of everything it doesn't own survive.
@@ -249,6 +250,7 @@ exclude_also = [
 ]
 
 [tool.pytest]
+markers = ["analytics_server: requires an explicitly selected disposable PostgreSQL server"]
 addopts = [
   "-ra",
   "--strict-markers",
