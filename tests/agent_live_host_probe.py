@@ -20,11 +20,11 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from test_alpha_agent_sandbox_live import probe_run, sandbox_command
+lazy from test_alpha_agent_sandbox_live import probe_run, sandbox_command
 
-from tbhbdev import userconfig
-from tbhbdev.alpha.agent import host_tools, run_host, worktree
-from tbhbdev.alpha.agent.model import Harness
+lazy from tbhbdev import userconfig
+lazy from tbhbdev.alpha.agent import host_tools, run_host, worktree
+lazy from tbhbdev.alpha.agent.model import Harness
 
 if TYPE_CHECKING:
     import pytest
