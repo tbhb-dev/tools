@@ -32,14 +32,20 @@ def names() -> Iterator[str]:
 
 
 def read(settings: Settings, run: driver.Run) -> selection.Facts:
+    measure = not run.request.unsandboxed
     text = transport.shell(
         settings,
         run.host,
         prune_remote.facts(
-            run.request.repo, run.name, settings.sockets_dir, owner=run.owner
+            run.request.repo,
+            run.name,
+            settings.sockets_dir,
+            owner=run.owner,
+            measure=measure,
         ),
     )
-    match = re.fullmatch(r"([01])\n(-|[0-9]+)\n([01])\n([0-9]+)\n([0-9]+)\n", text)
+    counts = r"([0-9]+)\n([0-9]+)\n" if measure else r"(-)\n(-)\n"
+    match = re.fullmatch(r"([01])\n(-|[0-9]+)\n([01])\n" + counts, text)
     if match is None:
         message = "invalid prune facts"
         raise Invalid(message)
@@ -48,8 +54,9 @@ def read(settings: Settings, run: driver.Run) -> selection.Facts:
         session == "1",
         None if mtime == "-" else int(mtime),
         keep == "1",
-        int(files),
-        int(size),
+        # Unmeasured placeholders never enter rankings or totals.
+        int(files) if measure else 0,
+        int(size) if measure else 0,
     )
 
 
@@ -87,8 +94,33 @@ def remove(
 
 
 def skipped(run: driver.Run, reason: str) -> None:
-    suffix = " (clean with agent clean --force)" if reason == "unsandboxed" else ""
+    suffix = (
+        " (not measured; clean with agent clean --force)"
+        if reason == "unsandboxed"
+        else ""
+    )
     print(transport.terminal_text(f"{reason}: {run.host.name} {run.name}{suffix}"))
+
+
+def largest(gathered: list[tuple[driver.Run, selection.Facts]], limit: int) -> None:
+    ranked = sorted(
+        (pair for pair in gathered if not pair[0].request.unsandboxed),
+        key=lambda pair: (-pair[1].bytes, pair[0].name),
+    )
+    for run, facts in ranked[:limit]:
+        print(
+            transport.terminal_text(
+                f"largest: {run.host.name} {run.name} "
+                f"bytes={facts.bytes} files={facts.files}"
+            )
+        )
+    for run, _facts in sorted(gathered, key=lambda pair: pair[0].name):
+        if run.request.unsandboxed:
+            print(
+                transport.terminal_text(
+                    f"unsandboxed: {run.host.name} {run.name} (not measured)"
+                )
+            )
 
 
 def main(settings: Settings, args: argparse.Namespace) -> int:
@@ -110,14 +142,7 @@ def main(settings: Settings, args: argparse.Namespace) -> int:
             failed(run, exc)
             status = 1
     if args.largest is not None:
-        ranked = sorted(gathered, key=lambda pair: (-pair[1].bytes, pair[0].name))
-        for run, facts in ranked[: args.largest]:
-            print(
-                transport.terminal_text(
-                    f"largest: {run.host.name} {run.name} "
-                    f"bytes={facts.bytes} files={facts.files}"
-                )
-            )
+        largest(gathered, args.largest)
         return status
     totals: dict[str, tuple[int, int, int]] = {}
     for run, facts in gathered:

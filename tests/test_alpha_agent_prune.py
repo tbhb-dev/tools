@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from argparse import Namespace
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 
 CONFIG = settings()
 OLD = "0\n1\n0\n3\n21\n"
+UNMEASURED = "0\n1\n0\n-\n-\n"
 CLEAN = driver.clean
 
 
@@ -44,6 +46,8 @@ class Inventory:
             "owner",
         )
         driver.save(run)
+        if unsandboxed:
+            self.answers[name] = [UNMEASURED]
         return run
 
     def inventory(self, config: Settings, host: Host, script: str) -> str:
@@ -51,7 +55,11 @@ class Inventory:
         for name in prune.names():
             run = driver.load(CONFIG, name)
             if script == prune_remote.facts(
-                run.request.repo, name, CONFIG.sockets_dir, owner=run.owner
+                run.request.repo,
+                name,
+                CONFIG.sockets_dir,
+                owner=run.owner,
+                measure=not run.request.unsandboxed,
             ):
                 assert host == run.host
                 self.calls.append(name)
@@ -206,22 +214,30 @@ def test_parsed_facts(inventory: Inventory, text: str, expected: Facts) -> None:
 
 
 def test_largest_global_order_and_limit(
-    inventory: Inventory, capsys: pytest.CaptureFixture[str]
+    inventory: Inventory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    for name in ("z", "b", "a", "small"):
-        inventory.add(name, host=1 if name == "b" else 0, unsandboxed=name == "a")
+    for name in ("z", "b", "a", "small", "c", "unmeasured"):
+        inventory.add(
+            name, host=1 if name == "b" else 0, unsandboxed=name in {"a", "unmeasured"}
+        )
     inventory.answers["z"] = ["1\n-\n1\n5\n31\n"]
     inventory.answers["small"] = ["0\n-\n0\n100\n1\n"]
+    order = ["z", "unmeasured", "small", "c", "b", "a"]
+    monkeypatch.setattr(prune, "names", lambda: iter(order))
     assert command("--largest", "3") == 0
     assert capsys.readouterr() == (
         (
             "largest: example-linux z bytes=31 files=5\n"
-            "largest: example-linux a bytes=21 files=3\n"
             "largest: example-macos b bytes=21 files=3\n"
+            "largest: example-linux c bytes=21 files=3\n"
+            "unsandboxed: example-linux a (not measured)\n"
+            "unsandboxed: example-linux unmeasured (not measured)\n"
         ),
         "",
     )
-    assert inventory.calls == ["a", "b", "small", "z"]
+    assert inventory.calls == order
     assert inventory.cleaned == []
 
 
@@ -497,7 +513,10 @@ def test_unsandboxed_only_skip(
     inventory.add("sample", unsandboxed=True)
     assert command(*options) == 0
     assert capsys.readouterr() == (
-        "unsandboxed: example-linux sample (clean with agent clean --force)\n",
+        (
+            "unsandboxed: example-linux sample (not measured; "
+            "clean with agent clean --force)\n"
+        ),
         "",
     )
     assert inventory.cleaned == []
@@ -515,7 +534,8 @@ def test_unsandboxed_excluded_from_totals(
     action = "removed" if apply else "would free"
     assert capsys.readouterr() == (
         (
-            "unsandboxed: example-linux a (clean with agent clean --force)\n"
+            "unsandboxed: example-linux a (not measured; "
+            "clean with agent clean --force)\n"
             "prune: example-linux z bytes=21 files=3\n"
             f"{action}: example-linux runs=1 files=3 bytes=21\n"
         ),
@@ -568,7 +588,8 @@ def test_recheck_unsandboxed_is_non_error(
     assert capsys.readouterr() == (
         (
             f"prune: {host} {name} bytes=21 files=3\n"
-            f"unsandboxed: {host} {name} (clean with agent clean --force)\n"
+            f"unsandboxed: {host} {name} (not measured; "
+            "clean with agent clean --force)\n"
             f"removed: {host} runs=0 files=0 bytes=0\n"
         ),
         "prune: invalid metadata: invalid\n" if prior_error else "",
@@ -577,10 +598,13 @@ def test_recheck_unsandboxed_is_non_error(
     assert inventory.cleaned == []
 
 
+@pytest.mark.parametrize("largest", [False, True])
 def test_unsandboxed_output_uses_terminal_text(
     inventory: Inventory,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    *,
+    largest: bool,
 ) -> None:
     run = inventory.add("sample", unsandboxed=True)
     run.host = dataclasses.replace(run.host, name="host\x00")
@@ -591,8 +615,89 @@ def test_unsandboxed_output_uses_terminal_text(
         "read",
         lambda *_a: Facts(session=False, rc_mtime=1, keep=False, files=1, bytes=2),
     )
-    assert command() == 0
+    assert command(*(["--largest", "1"] if largest else [])) == 0
+    suffix = (
+        "not measured" if largest else "not measured; clean with agent clean --force"
+    )
     assert capsys.readouterr() == (
-        "unsandboxed: host name (clean with agent clean --force)\n",
+        f"unsandboxed: host name ({suffix})\n",
         "",
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [OLD, "0\n1\n0\n-\n21\n", "0\n1\n0\n3\n-\n", "0\n1\n0\n?\n?\n"],
+)
+def test_unsandboxed_facts_require_markers(
+    inventory: Inventory, capsys: pytest.CaptureFixture[str], text: str
+) -> None:
+    inventory.add("sample", unsandboxed=True)
+    inventory.answers["sample"] = [text]
+    assert command() == 1
+    assert capsys.readouterr() == (
+        "",
+        "prune failed: example-linux sample: invalid prune facts\n",
+    )
+
+
+def test_sandboxed_facts_refuse_unmeasured_markers(
+    inventory: Inventory, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inventory.add("sample")
+    inventory.answers["sample"] = [UNMEASURED]
+    assert command() == 1
+    assert capsys.readouterr() == (
+        "",
+        "prune failed: example-linux sample: invalid prune facts\n",
+    )
+
+
+def test_unsandboxed_parsed_facts(inventory: Inventory) -> None:
+    run = inventory.add("sample", unsandboxed=True)
+    assert prune.read(CONFIG, run) == Facts(
+        session=False, rc_mtime=1, keep=False, files=0, bytes=0
+    )
+
+
+def test_unsandboxed_recheck_does_not_measure(
+    inventory: Inventory, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = inventory.add("sample", unsandboxed=True)
+    assert prune.remove(CONFIG, run, Namespace(older_than=14, force=True)) == 0
+    assert inventory.calls == ["sample"]
+    assert inventory.cleaned == []
+    assert capsys.readouterr() == (
+        (
+            "unsandboxed: example-linux sample (not measured; "
+            "clean with agent clean --force)\n"
+        ),
+        "",
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("0\n1\n1\n-\n-\n", "kept"),
+        ("1\n1\n0\n-\n-\n", "running"),
+        ("0\n-\n0\n-\n-\n", "unfinished"),
+        ("0\n2000000\n0\n-\n-\n", "recent"),
+    ],
+)
+@pytest.mark.parametrize("apply", [False, True])
+def test_unsandboxed_protections_stay_unmeasured(
+    inventory: Inventory,
+    capsys: pytest.CaptureFixture[str],
+    text: str,
+    reason: str,
+    *,
+    apply: bool,
+) -> None:
+    inventory.add("sample", unsandboxed=True)
+    inventory.answers["sample"] = [text]
+    assert command(*(["--apply"] if apply else [])) == 0
+    output = "" if reason == "recent" else f"{reason}: example-linux sample\n"
+    assert capsys.readouterr() == (output, "")
+    assert inventory.calls == ["sample"]
+    assert inventory.cleaned == []

@@ -29,8 +29,17 @@ printf "%s\n%d\n%d\n%d\n", @rc ? $rc[9] : '-', scalar(@keep) ? 1 : 0,
     $count, $bytes;
 """
 
+UNMEASURED = r"""use strict;
+use warnings;
+my ($rc, $keep) = @ARGV;
+my @rc = lstat($rc);
+printf "%s\n%d\n-\n-\n", @rc ? $rc[9] : '-', -e $keep ? 1 : 0;
+"""
 
-def facts(repository: str, name: str, sockets_dir: str, *, owner: str) -> str:
+
+def facts(
+    repository: str, name: str, sockets_dir: str, *, owner: str, measure: bool
+) -> str:
     clone = repo.clone_path(PurePosixPath("."), repository)
     tree = clone / f".worktrees/agent-{name}"
     command = remote.owned(name, owner) + remote.socket_root(sockets_dir)
@@ -46,7 +55,7 @@ def facts(repository: str, name: str, sockets_dir: str, *, owner: str) -> str:
     return command + (
         f"tmux_state has-session ag-{name}\n"
         "printf '%s\\n' \"$present\"\n"
-        f"perl -e {shlex.quote(MEASURE)} "
+        f"perl -e {shlex.quote(MEASURE if measure else UNMEASURED)} "
         f'"$d/{name}{files.RC}" "$d/{name}{files.KEEP}" '
         f'"$HOME"/{shlex.quote(str(tree))} {paths}\n'
     )

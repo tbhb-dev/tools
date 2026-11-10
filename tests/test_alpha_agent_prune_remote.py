@@ -41,7 +41,7 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def execute(host: Path) -> subprocess.CompletedProcess[str]:
+def execute(host: Path, *, measure: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             "/bin/sh",
@@ -51,6 +51,7 @@ def execute(host: Path) -> subprocess.CompletedProcess[str]:
                 "sample",
                 str(host / "sockets"),
                 owner="coordinator",
+                measure=measure,
             ),
         ],
         capture_output=True,
@@ -89,16 +90,22 @@ def test_inventory_format_and_logical_sizes(host: Path) -> None:
     assert (state / "sample.keep").read_text() == "xyz"
 
 
-def test_missing_rc_keep_and_clone_and_present_session(host: Path) -> None:
+@pytest.mark.parametrize("measure", [False, True])
+def test_missing_rc_keep_and_clone_and_present_session(
+    host: Path, measure: bool
+) -> None:
     (host / "running").touch()
-    result = execute(host)
+    result = execute(host, measure=measure)
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "1\n-\n0\n1\n12\n"
+    assert result.stdout == ("1\n-\n0\n1\n12\n" if measure else "1\n-\n0\n-\n-\n")
 
 
 @pytest.mark.parametrize("suffix", files.SUFFIXES)
 @pytest.mark.parametrize("kind", ["symlink", "directory"])
-def test_run_files_refuse_unsafe_types(host: Path, suffix: str, kind: str) -> None:
+@pytest.mark.parametrize("measure", [False, True])
+def test_run_files_refuse_unsafe_types(
+    host: Path, suffix: str, kind: str, measure: bool
+) -> None:
     path = host / "state" / files.DIRECTORY / ("sample" + suffix)
     if path.exists():
         path.rename(host / "saved")
@@ -106,20 +113,21 @@ def test_run_files_refuse_unsafe_types(host: Path, suffix: str, kind: str) -> No
         path.symlink_to(host / "missing")
     else:
         path.mkdir()
-    result = execute(host)
+    result = execute(host, measure=measure)
     assert result.returncode == (73 if suffix == files.OWNER else 65)
     assert result.stdout == ""
 
 
 @pytest.mark.parametrize("owner", ["other", "missing", "symlink"])
-def test_owner_refusal_precedes_effects(host: Path, owner: str) -> None:
+@pytest.mark.parametrize("measure", [False, True])
+def test_owner_refusal_precedes_effects(host: Path, owner: str, measure: bool) -> None:
     path = host / "state" / files.DIRECTORY / "sample.owner"
     path.rename(host / "saved")
     if owner == "other":
         path.write_text("another coordinator")
     elif owner == "symlink":
         path.symlink_to(host / "saved")
-    result = execute(host)
+    result = execute(host, measure=measure)
     assert result.returncode == 73
     assert result.stdout == ""
     assert not (host / "sockets").exists()
@@ -127,8 +135,9 @@ def test_owner_refusal_precedes_effects(host: Path, owner: str) -> None:
 
 @pytest.mark.parametrize("component", range(6))
 @pytest.mark.parametrize("kind", ["symlink", "file"])
+@pytest.mark.parametrize("measure", [False, True])
 def test_clone_components_refuse_links_and_files(
-    host: Path, component: int, kind: str
+    host: Path, component: int, kind: str, measure: bool
 ) -> None:
     tree = tree_path(host)
     tree.mkdir(parents=True)
@@ -138,19 +147,53 @@ def test_clone_components_refuse_links_and_files(
         path.symlink_to(host / "saved", target_is_directory=True)
     else:
         path.write_text("not a directory")
-    result = execute(host)
+    result = execute(host, measure=measure)
     assert result.returncode == 65
     assert result.stdout == ""
 
 
-def test_script_contract(host: Path) -> None:
+@pytest.mark.parametrize("measure", [False, True])
+def test_script_contract(host: Path, measure: bool) -> None:
     script = prune_remote.facts(
-        "example-org/example-repo", "sample", str(host / "sockets"), owner="coordinator"
+        "example-org/example-repo",
+        "sample",
+        str(host / "sockets"),
+        owner="coordinator",
+        measure=measure,
     )
     assert script.startswith(
         remote.owned("sample", "coordinator")
         + remote.socket_root(str(host / "sockets"))
     )
     assert "git " not in script
-    assert "follow => 0, no_chdir => 1" in script
+    assert ("follow => 0, no_chdir => 1" in script) is measure
+    assert ("File::Find" in script) is measure
     assert script.endswith('"$d/sample.owner"\n')
+
+
+def test_unmeasured_does_not_visit_worktree(host: Path) -> None:
+    state = host / "state" / files.DIRECTORY
+    (state / "sample.rc").write_text("not a return code")
+    (state / "sample.keep").touch()
+    os.utime(state / "sample.rc", (1234567890, 1234567890))
+    tree = tree_path(host)
+    bottom = tree.joinpath(*(["nested"] * 50))
+    bottom.mkdir(parents=True)
+    (bottom / "marker").write_text("never visit")
+    os.mkfifo(tree / "pipe")
+    unreadable = tree / "unreadable"
+    unreadable.mkdir()
+    (unreadable / "marker").touch()
+    unreadable.chmod(0)
+    try:
+        result = execute(host, measure=False)
+    finally:
+        unreadable.chmod(0o700)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "0\n1234567890\n1\n-\n-\n"
+    assert result.stderr == ""
+    # The only explicit stat in the Perl program reads the rc mtime.
+    assert prune_remote.UNMEASURED.count("lstat(") == 1
+    assert "lstat($rc)" in prune_remote.UNMEASURED
+    assert "[7]" not in prune_remote.UNMEASURED
+    assert "find" not in prune_remote.UNMEASURED
