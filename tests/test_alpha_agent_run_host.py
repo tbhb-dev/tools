@@ -2554,7 +2554,17 @@ def test_preflight_refuses_review_without_app_references(
     tmp_path: Path, missing: str
 ) -> None:
     run = make_run(tmp_path, profile="review", commit="0" * 40)
-    references = dataclasses.replace(run.settings.credentials[0], **{missing: None})
+    original = run.settings.credentials[0]
+    references = dataclasses.replace(
+        original,
+        reviews_app_id=None if missing == "reviews_app_id" else original.reviews_app_id,
+        reviews_app_client_id=None
+        if missing == "reviews_app_client_id"
+        else original.reviews_app_client_id,
+        reviews_app_pem=None
+        if missing == "reviews_app_pem"
+        else original.reviews_app_pem,
+    )
     run = dataclasses.replace(
         run, settings=dataclasses.replace(run.settings, credentials=(references,))
     )
@@ -2572,3 +2582,94 @@ def test_preflight_checks_the_requested_accounts_app(tmp_path: Path) -> None:
         settings=dataclasses.replace(run.settings, credentials=(other, references)),
     )
     run_host.preflight(run)
+
+
+@pytest.mark.parametrize("unsandboxed", [False, True])
+@pytest.mark.parametrize("tainted", [False, True])
+def test_preflight_announces_access_and_build_trust(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    unsandboxed: bool,
+    tainted: bool,
+) -> None:
+    run = make_run(
+        tmp_path,
+        unsandboxed=unsandboxed,
+        authorized_by="example-org/example-repo#1" if unsandboxed else None,
+        tainted_host=tainted,
+    )
+    run_host.preflight(run)
+    lines = ["untrusted-host"] if tainted else []
+    if unsandboxed:
+        lines.append("unsandboxed full access authorized_by=example-org/example-repo#1")
+    expected = "".join(f"{line}\n" for line in lines)
+    assert capsys.readouterr().err == expected
+    assert (run.files.path("log").read_text() if lines else "") == expected
+
+
+@pytest.mark.parametrize("state", [None, "", "configured"])
+def test_preflight_appends_durable_host_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str | None
+) -> None:
+    run = make_run(tmp_path, unsandboxed=True, authorized_by="operator-chat-2026-11-10")
+    if state is None:
+        monkeypatch.delenv("XDG_STATE_HOME")
+    else:
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / state) if state else "")
+    root = tmp_path / state if state else run.home / ".local" / "state"
+    marker = root / "tbhbdev" / "agent-taint.jsonl"
+    runfiles.private_dir(marker.parent)
+    marker.write_text('{"previous":true}\n')
+    synced: list[int] = []
+    original_sync = os.fsync
+    original_open = os.open
+
+    def opened(path: Path, flags: int, mode: int = 0o777) -> int:
+        assert path == marker
+        assert flags == os.O_CREAT | os.O_APPEND | os.O_WRONLY
+        assert mode == 0o600
+        return original_open(path, flags, mode)
+
+    def sync(fd: int) -> None:
+        synced.append(fd)
+        original_sync(fd)
+
+    monkeypatch.setattr(os, "fsync", sync)
+    monkeypatch.setattr(time, "time", lambda: 1234)
+    run_host.preflight(run)
+    lines = marker.read_text().splitlines()
+    assert json.loads(lines[0]) == {"previous": True}
+    assert json.loads(lines[1]) == {
+        "v": 1,
+        "run": "example",
+        "account": "agent",
+        "authorized_by": "operator-chat-2026-11-10",
+        "at": 1234,
+    }
+    assert len(lines) == 2
+    assert synced
+    monkeypatch.setattr(os, "open", opened)
+    run_host.mark_host(run)
+    assert len(synced) == 3
+
+
+def test_marker_failure_refuses_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(
+        tmp_path, unsandboxed=True, authorized_by="example-org/example-repo#1"
+    )
+    original = runfiles.append_text
+
+    def append(path: Path, text: str) -> None:
+        if path.name == "agent-taint.jsonl":
+            raise OSError
+        original(path, text)
+
+    def unexpected(*_args: object) -> None:
+        pytest.fail("a failed host marker must refuse workspace preparation")
+
+    monkeypatch.setattr(runfiles, "append_text", append)
+    monkeypatch.setattr(process_group, "prepare", unexpected)
+    assert run_host.execute(run, "probe") == 1
+    assert not run.files.path("launched").exists()
