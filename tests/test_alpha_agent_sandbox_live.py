@@ -108,8 +108,13 @@ def probe_script(
     curl: str,
     results: Path,
     extra: tuple[tuple[str, tuple[str, ...]], ...] = (),
+    *,
+    domains: tuple[str, ...] = ("api.github.com", "example.com"),
 ) -> str:
-    lines = ["umask 077", f": > {shlex.quote(str(results))}"]
+    lines = ["umask 077"]
+    for label, command in extra:
+        lines.append(f"{shlex.join(command)} >/dev/null 2>&1")
+        lines.append(f"echo '{label}'\" $?\" >> {shlex.quote(str(results))}")
     for location, listener in sockets.items():
         command = shlex.join(
             (
@@ -124,7 +129,7 @@ def probe_script(
         )
         lines.append(f"{command} >/dev/null 2>&1")
         lines.append(f"echo '{location}'\" $?\" >> {shlex.quote(str(results))}")
-    for domain in ("api.github.com", "example.com"):
+    for domain in domains:
         command = shlex.join(
             (
                 curl,
@@ -134,14 +139,18 @@ def probe_script(
                 "--show-error",
                 "--max-time",
                 "20",
-                f"https://{domain}",
+                "--noproxy",
+                "",
             )
         )
+        # Linux isolates the network namespace and rewrites HTTPS_PROXY to its
+        # bridge endpoint. Never bake the host listener's port into this curl.
+        # https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/linux-sandbox/src/proxy_routing.rs
+        # Override a shell's inherited no_proxy for the positive control.
+        # https://curl.se/libcurl/c/CURLOPT_NOPROXY.html
+        command += f' --proxy "$HTTPS_PROXY" https://{domain}'
         lines.append(f"{command} >/dev/null 2>&1")
         lines.append(f"echo '{domain}'\" $?\" >> {shlex.quote(str(results))}")
-    for label, command in extra:
-        lines.append(f"{shlex.join(command)} >/dev/null 2>&1")
-        lines.append(f"echo '{label}'\" $?\" >> {shlex.quote(str(results))}")
     return "\n".join(lines) + "\n"
 
 
@@ -390,6 +399,60 @@ def live_extra(
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class ProbeCall:
+    label: str
+    text: str
+    domain: str | None = None
+
+
+def probe_calls(
+    sockets: dict[str, Listener],
+    curl: str,
+    results: Path,
+    extra: tuple[tuple[str, tuple[str, ...]], ...],
+) -> tuple[ProbeCall, ...]:
+    local = tuple(item for item in extra if item[0] != "host-loopback")
+    loopback = tuple(item for item in extra if item[0] == "host-loopback")
+    return (
+        ProbeCall("local", probe_script({}, curl, results, local, domains=())),
+        ProbeCall(
+            "api.github.com",
+            probe_script({}, curl, results, domains=("api.github.com",)),
+            "api.github.com",
+        ),
+        *(
+            ProbeCall(label, probe_script({label: listener}, curl, results, domains=()))
+            for label, listener in sockets.items()
+        ),
+        ProbeCall(
+            "host-loopback",
+            probe_script({}, curl, results, loopback, domains=()),
+            "127.0.0.1",
+        ),
+        ProbeCall(
+            "example.com",
+            probe_script({}, curl, results, domains=("example.com",)),
+            "example.com",
+        ),
+    )
+
+
+def record_domain_refusal(
+    call: ProbeCall, result: subprocess.CompletedProcess[str], results: Path
+) -> None:
+    refusal = (
+        f'Network access to "{call.domain}" was blocked: domain is not on the allowlist'
+    )
+    if (
+        call.domain is not None
+        and refusal in result.stderr
+        and call.label not in read_observations(results)
+    ):
+        with results.open("a") as stream:
+            stream.write(f"{call.label} refused\n")
+
+
 def probe_auth_missing(result: subprocess.CompletedProcess[str]) -> bool:
     text = (result.stdout + result.stderr).lower()
     return result.returncode != 0 and any(
@@ -419,21 +482,10 @@ def run_probe(
     control_file = run.tmpdir / "write-control"
     marker = hook_marker(Path(paths.worktree), root)
     results = run.tmpdir / "observed"
-    script = root / "probe.sh"
     curl = shutil.which("curl")
     assert curl, "curl is required for live probes"
-    script.write_text(
-        probe_script(
-            sockets,
-            curl,
-            results,
-            live_extra(mirrors, control_file, curl, control),
-        )
-    )
-    run.files.write(
-        "prompt",
-        "Execute this exact command with Bash, then finish: "
-        f"/bin/sh {shlex.quote(str(script))}",
+    calls = probe_calls(
+        sockets, curl, results, live_extra(mirrors, control_file, curl, control)
     )
     run = dataclasses.replace(
         run,
@@ -449,25 +501,34 @@ def run_probe(
         ),
     )
     value, installed = run_host.checked_policy(run, paths)
-    command = sandbox_command(run, paths, value, installed, script)
-    result = subprocess.run(
-        command,
-        input=run.files.path("prompt").read_text(),
-        env=value.env
-        | {
-            "CODEX_HOME": paths.codex_home,
-            "HTTP_PROXY": control.url,
-            "HTTPS_PROXY": control.url,
-            "http_proxy": control.url,
-            "https_proxy": control.url,
-        },
-        cwd=paths.worktree,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=120,
-    )
-    report(f"{harness} process exit: {result.returncode}")
+    for call in calls:
+        script = root / f"{call.label}.sh"
+        script.write_text(call.text)
+        run.files.write(
+            "prompt",
+            "Execute this exact command with Bash, then finish: "
+            f"/bin/sh {shlex.quote(str(script))}",
+        )
+        command = sandbox_command(run, paths, value, installed, script)
+        result = subprocess.run(
+            command,
+            input=run.files.path("prompt").read_text(),
+            env=value.env
+            | {
+                "CODEX_HOME": paths.codex_home,
+                "HTTP_PROXY": control.url,
+                "HTTPS_PROXY": control.url,
+                "http_proxy": control.url,
+                "https_proxy": control.url,
+            },
+            cwd=paths.worktree,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+        record_domain_refusal(call, result, results)
+        report(f"{harness} {call.label} process exit: {result.returncode}")
     assert_observations(
         harness,
         sockets,

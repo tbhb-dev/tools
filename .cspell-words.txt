@@ -257,3 +257,4 @@ TIOCSTI
 TIOCSCTTY
 asname
 basetemp
+noproxy
