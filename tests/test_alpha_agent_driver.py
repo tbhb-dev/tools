@@ -936,3 +936,54 @@ def test_successful_wait_resets_failure_for_a_short_window(
 
     monkeypatch.setattr(transport, "read", read)
     assert command("wait") == 0
+
+
+@pytest.mark.parametrize(
+    ("verb", "result"), [("status", 0), ("wait", 1), ("clean", 0), ("keep", 0)]
+)
+def test_verbs_without_remote_run_directory(
+    remote: Remote, capsys: pytest.CaptureFixture[str], verb: str, result: int
+) -> None:
+    assert launch(remote) == 0
+    capsys.readouterr()
+    remote.configure(session=False)
+    remote.state.rename(remote.root / "saved-run-files")
+    options = ("--force",) if verb == "clean" else ()
+    assert command(verb, *options) == result
+    output = capsys.readouterr()
+    assert output.err == ""
+    if verb in ("status", "wait"):
+        assert "rc=unknown" in output.out
+        assert not remote.state.exists()
+    if verb == "clean":
+        assert not driver.metadata_path("sample").exists()
+    if verb == "keep":
+        assert (remote.state / "sample.keep").read_text() == ""
+        assert remote.state.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.parametrize("finished", [False, True])
+def test_clean_without_remote_clone(remote: Remote, finished: bool) -> None:
+    assert launch(remote) == 0
+    remote.configure(session=False)
+    clone = remote.root / "home/Code/github.com/example-org/example-repo"
+    clone.rename(remote.root / "saved-clone")
+    if finished:
+        remote.file(".rc", "0")
+    options = () if finished else ("--force",)
+    assert command("clean", *options) == 0
+    assert not driver.metadata_path("sample").exists()
+    assert remote.records("git") == []
+
+
+def test_kill_without_remote_run_directory(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert launch(remote) == 0
+    remote.configure(session=False)
+    remote.state.rename(remote.root / "saved-run-files")
+    ticking(monkeypatch)
+    assert command("kill") == 0
+    assert (remote.state / "sample.rc").read_text() == "137\n"
+    assert (remote.state / "sample.rc").stat().st_mode & 0o777 == 0o600
+    assert remote.state.stat().st_mode & 0o777 == 0o700

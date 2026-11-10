@@ -52,12 +52,11 @@ def start(name: str) -> tuple[str, ...]:
 
 def read(name: str, *, answer: bool = False) -> str:
     phase, rc, launched = (
-        name + suffix for suffix in (files.PHASE, files.RC, files.LAUNCHED)
+        f'"$d/{name}{suffix}"' for suffix in (files.PHASE, files.RC, files.LAUNCHED)
     )
     header = (
         ROOT
-        + f"""cd "$d" || exit "$?"
-if test -f {phase}; then cat {phase}; else printf 'unknown'; fi
+        + f"""if test -f {phase}; then cat {phase}; else printf 'unknown'; fi
 printf '\\n'
 if test -f {rc}; then cat {rc}; fi
 printf '\\n'
@@ -68,17 +67,17 @@ test ! -f {launched}; printf '%s\\n' "$?"
     # Strip file newlines on the first two fields, keeping a four-line header.
     header = header.replace(f"cat {phase}", f"printf '%s' \"$(cat {phase})\"")
     header = header.replace(f"cat {rc}", f"printf '%s' \"$(cat {rc})\"")
+    final, output, log = (
+        f'"$d/{name}{suffix}"' for suffix in (files.FINAL, files.OUT, files.LOG)
+    )
     if answer:
         return (
             header
-            + f"""if test -f {name}{files.FINAL}; then tail -n 40 {name}{files.FINAL}
-elif test -f {name}{files.OUT}; then tail -n 40 {name}{files.OUT}; fi
+            + f"""if test -f {final}; then tail -n 40 {final}
+elif test -f {output}; then tail -n 40 {output}; fi
 """
         )
-    return (
-        header
-        + f"if test -f {name}{files.LOG}; then head -n 20 {name}{files.LOG}; fi\n"
-    )
+    return header + f"if test -f {log}; then head -n 20 {log}; fi\n"
 
 
 def fallback(name: str) -> str:
@@ -87,6 +86,7 @@ def fallback(name: str) -> str:
     return (
         ROOT
         + f"""umask 077
+mkdir -p "$d" && chmod 700 "$d" || exit "$?"
 cd "$d" || exit "$?"
 if {session(name, "has-session")} 2>/dev/null; then exit 1; fi
 if test ! -f {rc}; then printf '137\\n' > {pending} && mv -n {pending} {rc}; fi
@@ -95,7 +95,9 @@ if test ! -f {rc}; then printf '137\\n' > {pending} && mv -n {pending} {rc}; fi
 
 
 def keep(name: str) -> str:
-    return ROOT + f'umask 077\n: > "$d/{name}{files.KEEP}"'
+    return ROOT + (
+        f'umask 077\nmkdir -p "$d" && chmod 700 "$d" && : > "$d/{name}{files.KEEP}"'
+    )
 
 
 def branch_facts(repository: str, name: str) -> str:
@@ -103,6 +105,8 @@ def branch_facts(repository: str, name: str) -> str:
     branch = f"agent/{name}"
     upstream = f"{GIT} rev-parse --symbolic-full-name {branch}@{{upstream}}"
     return (
+        f'if test ! -d "$HOME"/{shlex.quote(str(clone))}; '
+        "then printf '0\\n'; exit 0; fi\n"
         f'cd "$HOME"/{shlex.quote(str(clone))} || exit "$?"\n'
         f"if {GIT} show-ref --verify --quiet refs/heads/{branch}; then\n"
         f"  if upstream=$({upstream} 2>/dev/null); then\n"
@@ -123,6 +127,7 @@ def clean(
     command = (
         ROOT
         + f"""if {session(name, "has-session")} 2>/dev/null; then exit 1; fi
+if test -d "$HOME"/{shlex.quote(str(clone))}; then
 cd "$HOME"/{shlex.quote(str(clone))} || exit "$?"
 if test -d {tree}; then {removal} || exit "$?"; fi
 """
@@ -132,6 +137,7 @@ if test -d {tree}; then {removal} || exit "$?"; fi
 {GIT} branch -D {branch} || exit "$?"
 fi
 """
+    command += "fi\n"
     command += (
         f'umask 077\ntrash="$d/trash/{stamp}-{name}"\nmkdir -p "$trash" || exit "$?"\n'
     )
