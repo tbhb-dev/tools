@@ -70,7 +70,7 @@ name = "example-macos"
 os = "macos"
 shell = "zsh"
 account = "agent"
-unsandboxed = true
+unsandboxed = false
 accounts = ["agent"]
 """
 
@@ -88,7 +88,7 @@ def test_loads_the_example_from_the_home_config(
     assert loaded.agy_timeout_seconds == 900
     assert loaded.codex == model.Codex(model.WebSearch.LIVE, model.WebSearch.CACHED)
     assert [h.name for h in loaded.hosts] == ["example-linux", "example-macos"]
-    assert loaded.hosts[1].unsandboxed
+    assert loaded.hosts[1].unsandboxed is False
     assert loaded.claude.default_profile == "primary"
     assert (
         loaded.credentials[0].reviews_app_pem == "example-vault/example-app/private_key"

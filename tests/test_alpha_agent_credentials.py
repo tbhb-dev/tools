@@ -711,3 +711,18 @@ def test_empty_auth_can_create_a_missing_source(tmp_path: Path) -> None:
     target.write_text("{}")
     assert credentials.auth_write_back(source, target, None) is None
     assert source.read_text() == "{}"
+
+
+@pytest.mark.parametrize("missing", ["client", "pem"])
+def test_reviews_app_without_configured_references_is_refused(missing: str) -> None:
+    references = host_settings().credentials[0]
+    references = dataclasses.replace(
+        references,
+        reviews_app_client_id=None
+        if missing == "client"
+        else references.reviews_app_client_id,
+        reviews_app_pem=None if missing == "pem" else references.reviews_app_pem,
+    )
+    with pytest.raises(Invalid) as caught:
+        credentials.installation_token(references, "example-org/example-repo")
+    assert str(caught.value) == "reviews App credentials are not configured"

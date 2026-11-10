@@ -235,8 +235,8 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
 
 def preflight(run: Run) -> None:
     _value, executable = checked_policy(run, planned_paths(run))
-    if run.request.harness is Harness.AGY or run.request.unsandboxed:
-        message = "run-host requires an OS sandbox to protect host git state"
+    if run.request.profile is Profile.REVIEW and run.request.tainted_host:
+        message = "review runs are refused on a tainted host"
         raise Invalid(message)
     sandbox = run.settings.sandbox
     reason = (

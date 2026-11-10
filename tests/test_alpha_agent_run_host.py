@@ -938,7 +938,10 @@ def test_host_passes_configured_full_access_authorization(
     config_file: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config_file.write_text(EXAMPLE.replace("unsandboxed = false", "unsandboxed = true"))
+    text = "\n".join(
+        line for line in EXAMPLE.splitlines() if not line.startswith("reviews_app_")
+    )
+    config_file.write_text(text.replace("unsandboxed = false", "unsandboxed = true"))
     root = Path(os.environ["XDG_STATE_HOME"]) / "tbhbdev" / "agent-runs"
     files = runfiles.RunFiles(root, "example")
     files.receive(
@@ -1462,13 +1465,13 @@ def test_preflight_version_and_named_exceptions(
         return False
 
     monkeypatch.setattr(host_tools, "codex_proxy_supported", supported)
-    if harness is Harness.AGY or (not opt_out and harness is Harness.CODEX):
+    if not opt_out and harness in (Harness.CODEX, Harness.AGY):
         with pytest.raises(Invalid) as caught:
             run_host.preflight(run)
-        assert str(caught.value) == preflight_failure_message(harness, opt_out)
+        assert str(caught.value) == preflight_failure_message(harness)
     else:
         run_host.preflight(run)
-        if opt_out and harness is not Harness.CLAUDE:
+        if opt_out and harness is Harness.CODEX:
             assert (
                 run.files.path("log").read_text()
                 == f"{harness} sandbox opt-out: test exception\n"
@@ -1489,14 +1492,12 @@ def test_preflight_version_and_named_exceptions(
     )
 
 
-def preflight_failure_message(harness: Harness, opt_out: bool) -> str:
+def preflight_failure_message(harness: Harness) -> str:
     if harness is Harness.CODEX:
         return (
             "Codex network_proxy support required (minimum 0.164.0); "
             "upgrade or configure codex_network_proxy_opt_out"
         )
-    if opt_out:
-        return "run-host requires an OS sandbox to protect host git state"
     return (
         "agy has no OS sandbox; configure agy_unsandboxed_opt_out with a named reason"
     )
@@ -1989,46 +1990,46 @@ def test_driver_schema_file_reaches_harness(
         assert command[command.index("--output-format") + 1] == "json"
 
 
-def test_full_access_cannot_write_host_git_state(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_full_access_is_available_behind_the_existing_gate(tmp_path: Path) -> None:
     run = make_run(
         tmp_path,
         unsandboxed=True,
         authorized_by="example-org/example-repo#1",
         reason="isolated host",
     )
-    with pytest.raises(
-        Invalid, match="requires an OS sandbox to protect host git state"
-    ):
-        run_host.preflight(run)
-    assert capsys.readouterr().err == ""
-    assert not run.files.path("log").exists()
+    run_host.preflight(run)
+    prepared = preparation(run)
+    run.files.write("prompt", "probe")
+    value, executable = run_host.checked_policy(run, prepared.paths)
+    command = run_host.harness_command(run, prepared, value, executable)
+    assert command[command.index("-s") + 1] == "danger-full-access"
+    assert not any(arg.startswith("permissions.") for arg in command)
 
 
-@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.AGY])
+@pytest.mark.parametrize("harness", [Harness.AGY])
 def test_unconfined_run_is_refused_before_workspace_preparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
 ) -> None:
-    run = make_run(
-        tmp_path,
-        harness=harness.value,
-        timeout=900,
-        unsandboxed=harness is Harness.CODEX,
-        authorized_by="example-org/example-repo#1"
-        if harness is Harness.CODEX
-        else None,
-        reason="example isolation exception",
+    run = make_run(tmp_path, harness=harness.value, timeout=900)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(
+                run.settings.sandbox,
+                agy_unsandboxed_opt_out=None,
+            ),
+        ),
     )
 
     def unexpected(*_args: object) -> None:
-        pytest.fail("an unconfined run must not prepare or launch a workspace")
+        pytest.fail("a run without its opt-out must not prepare or launch a workspace")
 
     monkeypatch.setattr(process_group, "prepare", unexpected)
     assert run_host.execute(run, "probe") == 1
     assert run.files.path("rc").read_text() == "1\n"
     assert run.files.path("log").read_text() == (
-        "run-host requires an OS sandbox to protect host git state\n"
+        "agy has no OS sandbox; configure agy_unsandboxed_opt_out with a named reason\n"
     )
 
 
@@ -2437,6 +2438,7 @@ def test_mirror_protection_uses_the_run_home_without_xdg_state(
         / "state"
         / "tbhbdev"
         / "agent-mirrors"
+        / "github.com"
         / "example-org"
         / "example-repo.git"
     )
@@ -2496,3 +2498,21 @@ def test_checked_policy_codex_table_has_unique_keys(
     assert table[str(mirror)] == "none"
     if profile == "build":
         assert table[prepared.paths.worktree] == "write"
+
+
+@pytest.mark.parametrize("profile", ["build", "review"])
+@pytest.mark.parametrize("tainted", [False, True])
+def test_preflight_refuses_review_on_tainted_host(
+    tmp_path: Path, profile: str, tainted: bool
+) -> None:
+    run = make_run(
+        tmp_path,
+        profile=profile,
+        commit="0" * 40 if profile == "review" else None,
+        tainted_host=tainted,
+    )
+    if profile == "review" and tainted:
+        with pytest.raises(Invalid, match="review runs are refused on a tainted host"):
+            run_host.preflight(run)
+    else:
+        run_host.preflight(run)

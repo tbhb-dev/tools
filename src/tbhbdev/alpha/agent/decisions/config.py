@@ -260,6 +260,17 @@ def _check_name(table: _Table, key: str, text: str, pattern: re.Pattern[str]) ->
     return text
 
 
+def _reviews_app(table: _Table) -> tuple[str | None, str | None, str | None]:
+    keys = ("reviews_app_id", "reviews_app_client_id", "reviews_app_pem")
+    if not table.values.keys() & set(keys):
+        return None, None, None
+    return (
+        table.reference("reviews_app_id"),
+        table.reference("reviews_app_client_id"),
+        table.reference("reviews_app_pem"),
+    )
+
+
 def _credentials(table: _Table) -> tuple[Credentials, ...]:
     if not table.values:
         table.fail("account", "is required")
@@ -274,14 +285,15 @@ def _credentials(table: _Table) -> tuple[Credentials, ...]:
             "reviews_app_pem",
             "signing",
         )
+        app_id, client_id, pem = _reviews_app(entry)
         accounts.append(
             Credentials(
                 account=account,
                 gh=entry.reference("gh"),
                 docker=entry.reference("docker") if "docker" in entry.values else None,
-                reviews_app_id=entry.reference("reviews_app_id"),
-                reviews_app_client_id=entry.reference("reviews_app_client_id"),
-                reviews_app_pem=entry.reference("reviews_app_pem"),
+                reviews_app_id=app_id,
+                reviews_app_client_id=client_id,
+                reviews_app_pem=pem,
                 signing=entry.reference("signing"),
             )
         )
@@ -355,13 +367,19 @@ def _host(table: _Table) -> Host:
 
 
 def _check_host_accounts(settings: Settings) -> None:
-    known = {c.account for c in settings.credentials}
+    known = {c.account: c for c in settings.credentials}
     for host in settings.hosts:
         for account in host.accounts:
             if account not in known:
                 message = (
                     f"[[agent.host]] accounts names {account}, "
                     f"which has no [agent.credentials.{account}]"
+                )
+                raise Invalid(message)
+            if host.unsandboxed and known[account].reviews_app_id is not None:
+                message = (
+                    f"[[agent.host]] unsandboxed host {host.name} "
+                    f"has reviews App credentials for {account}"
                 )
                 raise Invalid(message)
 
