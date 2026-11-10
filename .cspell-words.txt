@@ -252,3 +252,4 @@ symref
 socketpair
 ESRCH
 ZDOTDIR
+gitlink

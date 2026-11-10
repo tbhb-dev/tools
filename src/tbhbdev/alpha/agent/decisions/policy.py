@@ -127,7 +127,20 @@ def environment(
         "GH_CONFIG_DIR": resolve(paths.tmpdir, GH_CONFIG_SUBDIR),
         "DOCKER_CONFIG": resolve(paths.tmpdir, DOCKER_CONFIG_SUBDIR),
         "GIT_NO_LAZY_FETCH": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_COUNT": "6",
     }
+    overrides = (
+        ("core.fsmonitor", "false"),
+        ("core.hooksPath", "/dev/null"),
+        ("diff.ignoreSubmodules", "all"),
+        ("status.submoduleSummary", "false"),
+        ("protocol.ext.allow", "never"),
+        ("protocol.file.allow", "never"),
+    )
+    for index, (key, value) in enumerate(overrides):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
     if harness is Harness.CODEX:
         env["CODEX_HOME"] = paths.codex_home
     if paths.signing_socket is not None:
@@ -173,9 +186,19 @@ def _codex(
 
 
 def protected_git(paths: RunPaths) -> tuple[str, ...]:
-    return tuple(
-        resolve(paths.worktree, f".git/{entry}")
-        for entry in ("config", "hooks", "info")
+    return (
+        resolve(paths.worktree, ".git"),
+        *tuple(
+            resolve(paths.worktree, f".git/{entry}")
+            for entry in (
+                "config",
+                "config.worktree",
+                "commondir",
+                "hooks",
+                "info",
+                "modules",
+            )
+        ),
     )
 
 
@@ -198,7 +221,10 @@ def _claude(
     denied_tools = [f"{tool}(/{p}/**)" for p in deny for tool in ("Read", "Edit")]
     deny_write = (*_claude_write_denies(profile, paths), *protected)
     denied_tools.extend(
-        f"Edit(/{p}{suffix})" for p in deny_write for suffix in ("", "/**")
+        f"{tool}(/{p}{suffix})"
+        for p in deny_write
+        for suffix in ("", "/**")
+        for tool in ("Edit", "Write")
     )
     sandbox: dict[str, object] = {
         "enabled": True,

@@ -125,6 +125,20 @@ def env_of(os: Os, harness: Harness, account: str) -> dict[str, str]:
         "GH_CONFIG_DIR": f"{tmp}/gh",
         "DOCKER_CONFIG": f"{tmp}/docker",
         "GIT_NO_LAZY_FETCH": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_COUNT": "6",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
+        "GIT_CONFIG_KEY_2": "diff.ignoreSubmodules",
+        "GIT_CONFIG_VALUE_2": "all",
+        "GIT_CONFIG_KEY_3": "status.submoduleSummary",
+        "GIT_CONFIG_VALUE_3": "false",
+        "GIT_CONFIG_KEY_4": "protocol.ext.allow",
+        "GIT_CONFIG_VALUE_4": "never",
+        "GIT_CONFIG_KEY_5": "protocol.file.allow",
+        "GIT_CONFIG_VALUE_5": "never",
     }
     if harness is Harness.CODEX:
         env["CODEX_HOME"] = f"{tmp}/codex"
@@ -184,9 +198,17 @@ def assert_claude_denials(
     assert dig(claude, *fs, "denyRead") == list(denied(os, home))
     assert dig(claude, *fs, "denyWrite") == [
         *(() if profile is Profile.BUILD else (paths(account).worktree,)),
+        f"{paths(account).worktree}/.git",
         *(
             f"{paths(account).worktree}/.git/{entry}"
-            for entry in ("config", "hooks", "info")
+            for entry in (
+                "config",
+                "config.worktree",
+                "commondir",
+                "hooks",
+                "info",
+                "modules",
+            )
         ),
         *denied(os, home),
     ]
@@ -200,8 +222,18 @@ def assert_claude_denials(
             f"Edit(/{paths(account).worktree}{suffix})" for suffix in ("", "/**")
         ]
     expected_edits += [
+        f"Edit(/{paths(account).worktree}/.git{suffix})" for suffix in ("", "/**")
+    ]
+    expected_edits += [
         f"Edit(/{paths(account).worktree}/.git/{entry}{suffix})"
-        for entry in ("config", "hooks", "info")
+        for entry in (
+            "config",
+            "config.worktree",
+            "commondir",
+            "hooks",
+            "info",
+            "modules",
+        )
         for suffix in ("", "/**")
     ]
     assert edits == expected_edits
@@ -228,9 +260,17 @@ def codex_expected(
         mode=model.CodexMode.PROFILE,
         read_roots=(
             ":root",
+            f"{home}/Code/example.com/example-org/example-repo/.git",
             *(
                 f"{home}/Code/example.com/example-org/example-repo/.git/{entry}"
-                for entry in ("config", "hooks", "info")
+                for entry in (
+                    "config",
+                    "config.worktree",
+                    "commondir",
+                    "hooks",
+                    "info",
+                    "modules",
+                )
             ),
         )
         if profile is Profile.BUILD
@@ -390,12 +430,29 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
             "Write",
             "NotebookEdit",
             *denied_tools,
-            f"Edit(/{worktree})",
-            f"Edit(/{worktree}/**)",
         ]
         deny_write = [worktree, *deny]
-    protected = [f"{worktree}/.git/{entry}" for entry in ("config", "hooks", "info")]
-    rules += [f"Edit(/{path}{suffix})" for path in protected for suffix in ("", "/**")]
+    protected = [
+        f"{worktree}/.git",
+        *[
+            f"{worktree}/.git/{entry}"
+            for entry in (
+                "config",
+                "config.worktree",
+                "commondir",
+                "hooks",
+                "info",
+                "modules",
+            )
+        ],
+    ]
+    protected_tools = [worktree, *protected] if profile is Profile.REVIEW else protected
+    rules += [
+        f"{tool}(/{path}{suffix})"
+        for path in protected_tools
+        for suffix in ("", "/**")
+        for tool in ("Edit", "Write")
+    ]
     deny_write = (
         [*protected, *deny_write]
         if profile is Profile.BUILD
@@ -813,9 +870,17 @@ def test_claude_review_denies_writes_to_the_git_common_directory(
     expected = []
     if profile is Profile.REVIEW:
         expected.append("/example/home/agent/Code/example.com/example-org/example-repo")
+    expected.append(f"{paths('agent').worktree}/.git")
     expected.extend(
         f"{paths('agent').worktree}/.git/{entry}"
-        for entry in ("config", "hooks", "info")
+        for entry in (
+            "config",
+            "config.worktree",
+            "commondir",
+            "hooks",
+            "info",
+            "modules",
+        )
     )
     assert dig(claude_settings_of(result), "sandbox", "filesystem", "denyWrite") == [
         *expected,
@@ -1286,9 +1351,19 @@ def test_codex_protects_git_configuration_inside_build_write_root(
     assert isinstance(result.detail, model.CodexPolicy)
     expected = (":root",)
     if profile is Profile.BUILD:
-        expected += tuple(
-            f"{paths('agent').worktree}/.git/{entry}"
-            for entry in ("config", "hooks", "info")
+        expected += (
+            f"{paths('agent').worktree}/.git",
+            *tuple(
+                f"{paths('agent').worktree}/.git/{entry}"
+                for entry in (
+                    "config",
+                    "config.worktree",
+                    "commondir",
+                    "hooks",
+                    "info",
+                    "modules",
+                )
+            ),
         )
     assert common not in result.detail.write_roots
     assert result.detail.read_roots == expected
@@ -1430,6 +1505,43 @@ def test_parent_and_tool_search_paths_are_separate(host: model.Host) -> None:
         fixed += ":/opt/homebrew/bin:/usr/local/bin"
     assert result.env["PATH"] == fixed
     assert result.tool_path == PATH[host.os].format(home="/example/home/agent")
+
+
+@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
+@pytest.mark.parametrize("os_name", Os)
+def test_harness_parent_neutralizes_all_repository_git_config(
+    harness: Harness, os_name: Os
+) -> None:
+    result = made(os_name, Profile.BUILD, harness, "agent")
+    assert result.env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert result.env["GIT_CONFIG_COUNT"] == "6"
+    assert [
+        (result.env[f"GIT_CONFIG_KEY_{i}"], result.env[f"GIT_CONFIG_VALUE_{i}"])
+        for i in range(6)
+    ] == [
+        ("core.fsmonitor", "false"),
+        ("core.hooksPath", "/dev/null"),
+        ("diff.ignoreSubmodules", "all"),
+        ("status.submoduleSummary", "false"),
+        ("protocol.ext.allow", "never"),
+        ("protocol.file.allow", "never"),
+    ]
+
+
+def test_git_entry_and_all_configuration_paths_are_protected() -> None:
+    run = paths("agent")
+    assert policy.protected_git(run) == tuple(
+        run.worktree + "/.git" + suffix
+        for suffix in (
+            "",
+            "/config",
+            "/config.worktree",
+            "/commondir",
+            "/hooks",
+            "/info",
+            "/modules",
+        )
+    )
 
 
 @pytest.mark.parametrize("reason", [None, "isolated test host"])
