@@ -155,7 +155,7 @@ def test_prepare_uses_one_worktree_and_private_destinations(
 
     def auth_copy(source_path: Path, destination: Path) -> str | None:
         assert source_path == run.home / ".codex" / "auth.json"
-        assert destination == run.tmpdir.parent / "codex" / "auth.json"
+        assert destination == Path(run_host.planned_paths(run).codex_home) / "auth.json"
         return copy(source_path, destination)
 
     monkeypatch.setattr(credentials, "auth_copy", auth_copy)
@@ -164,7 +164,7 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     assert result.paths.home == str(run.home)
     assert result.paths.worktree == str(clone / ".worktrees" / "agent-example")
     assert result.paths.tmpdir == str(run.tmpdir)
-    assert result.paths.codex_home == str(run.tmpdir.parent / "codex")
+    assert result.paths.codex_home == run_host.planned_paths(run).codex_home
     assert result.paths.git_common_dir == str(Path(result.paths.worktree) / ".git")
     assert result.paths.signing_socket is None
     assert result.paths.audit_dir == str(run.home / run.settings.sandbox.audit_dir)
@@ -1441,7 +1441,7 @@ def test_planned_paths_ignore_account_git_directory_data(
         home=str(run.home),
         worktree=str(clone / ".worktrees" / "agent-example"),
         tmpdir=str(run.tmpdir),
-        codex_home=str(run.tmpdir.parent / "codex"),
+        codex_home=str(tmp_path / "state" / "tbhbdev" / "agent-codex" / run.files.name),
         audit_dir=str(run.home / run.settings.sandbox.audit_dir),
         git_common_dir=str(expected),
         uid=os.getuid(),
@@ -3002,3 +3002,76 @@ def test_mise_shim_install_targets_cannot_be_a_write_root(
         f"protected host path {installs} overlaps write root {installs}; "
         "narrow that write root"
     )
+
+
+@pytest.mark.parametrize("os_name", [Os.LINUX, Os.MACOS])
+def test_system_temp_write_root_launches_with_state_codex_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, os_name: Os
+) -> None:
+    run = make_run(tmp_path)
+    system_temp = runfiles.private_dir(tmp_path / "system-temp")
+    run = dataclasses.replace(
+        run,
+        tmpdir=runfiles.private_dir(system_temp / "tools"),
+        host=dataclasses.replace(run.host, os=os_name),
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(
+                run.settings.sandbox, write_roots=(str(system_temp),)
+            ),
+        ),
+    )
+    paths = run_host.planned_paths(run)
+    run_host.preflight(run)
+    value, executable = run_host.checked_policy(run, paths)
+    assert paths.codex_home == str(
+        tmp_path / "state" / "tbhbdev" / "agent-codex" / run.files.name
+    )
+    assert value.env["CODEX_HOME"] == paths.codex_home
+    run.files.write("prompt", "fixture")
+    prepared = run_host.Prepared(
+        paths,
+        credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
+        None,
+    )
+    command = run_host.harness_command(run, prepared, value, executable)
+    assert command[0] == "/usr/bin/true"
+    child = Child(code=0)
+
+    def launch(
+        spec: process_group.Launch, *, started: Callable[[Child], None]
+    ) -> Child:
+        assert spec.command == command
+        assert spec.env["CODEX_HOME"] == paths.codex_home
+        started(child)
+        return child
+
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "record", constant(None))
+    monkeypatch.setattr(process_group, "stop_started", constant(None))
+    with ExitStack() as stack:
+        assert run_host.run_harness(run, prepared, stack) == 0
+    assert run.files.path("launched").exists()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_finish_removes_private_state_codex_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: bool
+) -> None:
+    run = make_run(tmp_path)
+    workspace = runfiles.private_dir(run.home / "worktree")
+    monkeypatch.setattr(run_host.worktree, "create", constant(workspace))
+    prepared = run_host.prepare_workspace(run)
+    directory = Path(prepared.paths.codex_home)
+    assert directory == tmp_path / "state" / "tbhbdev" / "agent-codex" / run.files.name
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+    def write_back(_source: Path, destination: Path, _before: str | None) -> None:
+        assert destination.parent == directory
+        assert directory.is_dir()
+        if failure:
+            raise OSError
+
+    monkeypatch.setattr(credentials, "auth_write_back", write_back)
+    assert run_host.finish(run, prepared, None, 0) == int(failure)
+    assert not directory.exists()

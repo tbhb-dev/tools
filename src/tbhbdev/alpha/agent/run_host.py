@@ -6,6 +6,7 @@ import argparse
 import dataclasses
 import json
 import os
+import shutil
 import signal
 import socket
 import stat
@@ -71,7 +72,12 @@ def planned_paths(run: Run) -> RunPaths:
         str(run.home),
         str(workspace.resolve()),
         str(run.tmpdir),
-        str(run.tmpdir.parent / "codex"),
+        str(
+            Path(os.environ.get("XDG_STATE_HOME") or run.home / ".local" / "state")
+            / "tbhbdev"
+            / "agent-codex"
+            / run.files.name
+        ),
         str((run.home / run.settings.sandbox.audit_dir).resolve()),
         str(workspace / ".git"),
         uid=os.getuid(),
@@ -384,7 +390,7 @@ def prepare_workspace(run: Run) -> Prepared:
         home=str(run.home),
         worktree=str(workspace),
         tmpdir=str(run.tmpdir),
-        codex_home=str(run.tmpdir.parent / "codex"),
+        codex_home=paths.codex_home,
         audit_dir=policy.resolve(str(run.home), run.settings.sandbox.audit_dir),
         git_common_dir=str(workspace / ".git"),
         uid=os.getuid(),
@@ -615,26 +621,34 @@ def _execute(run: Run, text: str, stack: ExitStack) -> int:
     return rc
 
 
+def finish_auth(run: Run, prepared: Prepared | None) -> str | None:
+    if run.request.harness is not Harness.CODEX:
+        return None
+    paths = planned_paths(run) if prepared is None else prepared.paths
+    try:
+        if prepared is not None and not run.files.uncertain:
+            return credentials.auth_write_back(
+                run.home / ".codex" / "auth.json",
+                Path(paths.codex_home) / "auth.json",
+                prepared.auth_before,
+            )
+        return None
+    finally:
+        with suppress(FileNotFoundError):
+            shutil.rmtree(paths.codex_home)
+
+
 def finish(
     run: Run, prepared: Prepared | None, agent: subprocess.Popen[str] | None, rc: int
 ) -> int:
     try:
-        if (
-            prepared is not None
-            and run.request.harness is Harness.CODEX
-            and not run.files.uncertain
-        ):
-            try:
-                reason = credentials.auth_write_back(
-                    run.home / ".codex" / "auth.json",
-                    Path(prepared.paths.codex_home) / "auth.json",
-                    prepared.auth_before,
-                )
-                if reason is not None:
-                    run.files.write("log", reason)
-            except OSError, ValueError:
-                rc = 1
-                run.files.write("log", "codex auth write-back failed\n")
+        try:
+            reason = finish_auth(run, prepared)
+            if reason is not None:
+                run.files.write("log", reason)
+        except OSError, ValueError:
+            rc = 1
+            run.files.write("log", "codex auth write-back failed\n")
     finally:
         try:
             if agent is not None and stop_agent(agent) is False:

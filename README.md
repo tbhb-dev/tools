@@ -314,7 +314,7 @@ Codex requires network proxy support (0.164.0 or later). Its proxy uses limited 
 
 Run-host builds the harness command and adds the brief header. The driver sends the raw brief, an optional `<name>.schema.json`, and `--host` with a configured host name. Codex receives the schema path. Claude receives its contents. An empty `XDG_STATE_HOME` uses the home directory default. Finished runs keep their completion and log files when a rerun fails. Protected paths include shell startup files, Git and tmux config files, and socket parent directories below home.
 
-For `[agent.sandbox]`, macOS hosts list `DARWIN_USER_TEMP_DIR` and `DARWIN_USER_CACHE_DIR` in `write_roots` as absolute paths.
+For `[agent.sandbox]`, macOS hosts list `DARWIN_USER_TEMP_DIR` and `DARWIN_USER_CACHE_DIR` in `write_roots` as absolute paths. Linux hosts can list `/tmp`. The private `CODEX_HOME` stays outside these roots at `<state>/tbhbdev/agent-codex/<name>`, with mode 0700. Run-host removes it in `finish` after auth write-back. State defaults to `~/.local/state`.
 
 The settings have these constraints:
 

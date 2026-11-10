@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -142,10 +143,15 @@ def test_account_hook_probe_restores_hooks_and_quarantines_tool_writes(
     os.environ.get("TBHBDEV_SANDBOX_LIVE") != "1",
     reason="set TBHBDEV_SANDBOX_LIVE=1 for real harness git probes",
 )
+@pytest.mark.parametrize("temp_write", [False, True])
 @pytest.mark.parametrize("name", PLANTS)
 @pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
 def test_live_harness_parent_ignores_each_git_plant(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, harness: Harness
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    harness: Harness,
+    temp_write: bool,
 ) -> None:
     account_home = Path.home()
     auth_home = prepared_codex_home(account_home) if harness is Harness.CODEX else None
@@ -155,7 +161,7 @@ def test_live_harness_parent_ignores_each_git_plant(
     sandbox = dataclasses.replace(
         run.settings.sandbox,
         host_path=(str(Path(installed).parent),),
-        write_roots=(),
+        write_roots=(tempfile.gettempdir(),) if temp_write else (),
         denied_home_paths=(
             *policy.denied_paths(run.settings, run.host, str(account_home), paths.uid),
             *(
