@@ -438,8 +438,6 @@ def test_fetch_resolves_only_a_full_commit(
         "--upload-pack=git-upload-pack",
     )
     assert calls == [
-        ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD"),
-        ("check-ref-format", "--branch", "main"),
         (
             "fetch",
             *options,
@@ -447,6 +445,8 @@ def test_fetch_resolves_only_a_full_commit(
             "origin",
             "+refs/heads/agent/*:refs/heads/agent/*",
         ),
+        ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD"),
+        ("check-ref-format", "--branch", "main"),
         (
             "fetch",
             *options,
@@ -711,8 +711,6 @@ def test_prelaunch_git_protocol(
     )
     common = [
         (mirror, ("init", "--bare", "--template=")),
-        (mirror, ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD")),
-        (mirror, ("check-ref-format", "--branch", "main")),
         (
             mirror,
             (
@@ -723,6 +721,8 @@ def test_prelaunch_git_protocol(
                 "+refs/heads/agent/*:refs/heads/agent/*",
             ),
         ),
+        (mirror, ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD")),
+        (mirror, ("check-ref-format", "--branch", "main")),
         (
             mirror,
             (

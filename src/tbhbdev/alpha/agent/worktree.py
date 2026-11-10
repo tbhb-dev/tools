@@ -155,7 +155,6 @@ def default_branch(mirror: Path) -> str:
 
 
 def fetch_commit(mirror: Path, request: RunRequest) -> str:
-    branch = default_branch(mirror)
     options = (
         "--no-recurse-submodules",
         "--no-write-fetch-head",
@@ -171,6 +170,7 @@ def fetch_commit(mirror: Path, request: RunRequest) -> str:
         "origin",
         "+refs/heads/agent/*:refs/heads/agent/*",
     )
+    branch = default_branch(mirror)
     references = [f"+{branch}:{branch}"]
     if request.commit is not None:
         references.append(f"+{request.commit}:refs/heads/tbhbdev-review")
