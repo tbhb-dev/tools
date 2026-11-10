@@ -31,11 +31,21 @@ def private_dir(path: Path) -> Path:
 def atomic(path: Path, text: str) -> None:
     """Replace PATH with a complete, mode-600 file on the same filesystem."""
     fd, temporary = tempfile.mkstemp(dir=path.parent)
-    with os.fdopen(fd, "w") as out:
-        out.write(text)
-        out.flush()
-        os.fsync(out.fileno())
-    Path(temporary).replace(path)
+    try:
+        with os.fdopen(fd, "w") as out:
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
+        Path(temporary).replace(path)
+    except BaseException:
+        failed = Path(tempfile.mkdtemp(prefix=".failed-", dir=path.parent))
+        Path(temporary).replace(failed / "incomplete")
+        raise
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 @contextmanager
@@ -62,7 +72,13 @@ class RunFiles:
         atomic(self.path(suffix), text)
 
     def receive(self, value: RunRequest) -> None:
-        self.write("request.json", json.dumps(request.to_dict(value)) + "\n")
+        fd = os.open(
+            self.path("request.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
+        with os.fdopen(fd, "w") as out:
+            out.write(json.dumps(request.to_dict(value)) + "\n")
+            out.flush()
+            os.fsync(out.fileno())
 
     def snapshot(self) -> dict[str, str]:
         return {

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import stat
 import subprocess  # nosec B404
 import time
 from dataclasses import dataclass, field
@@ -141,8 +144,9 @@ def signing_agent(key: str, tmpdir: Path, deadline: float) -> subprocess.Popen[s
             timeout=max(0, deadline - time.monotonic()),
         )
     except BaseException:
-        process_group.stop_started(agent.pid, 0)
-        agent.wait()
+        with process_group.ignore_signals():
+            process_group.stop_started(agent.pid, 0)
+            agent.wait()
         raise
     return agent
 
@@ -166,13 +170,52 @@ def auth_copy(source: Path, destination: Path) -> str | None:
         return text
 
 
-def auth_write_back(source: Path, destination: Path, before: str | None) -> None:
+def auth_after(destination: Path) -> str:
+    """Read only a bounded, owned regular file through its pinned parent."""
+    if destination.parent.resolve() != destination.parent:
+        message = "codex auth parent is redirected"
+        raise Invalid(message)
+    directory = os.open(
+        destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    try:
+        fd = os.open(
+            destination.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory,
+        )
+    finally:
+        os.close(directory)
+    with os.fdopen(fd, "rb") as incoming:
+        metadata = os.fstat(incoming.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+            message = "codex auth is not an owned regular file"
+            raise Invalid(message)
+        limit = 1024 * 1024
+        data = incoming.read(limit + 1)
+        if len(data) > limit:
+            message = "codex auth exceeds 1 MiB"
+            raise Invalid(message)
+    text = data.decode()
+    if not isinstance(json.loads(text), dict):
+        message = "codex auth must be a JSON object"
+        raise Invalid(message)
+    return text
+
+
+def auth_write_back(source: Path, destination: Path, before: str | None) -> str | None:
     """Do not overwrite an auth file another run refreshed in the meantime."""
-    if not destination.exists():
-        return
-    after = destination.read_text()
+    try:
+        after = auth_after(destination)
+    except FileNotFoundError:
+        return None
+    except Invalid as exc:
+        return f"codex auth write-back skipped: {exc}\n"
+    except OSError, ValueError:
+        return "codex auth write-back skipped: cannot safely read a JSON object\n"
     if run_state.write_auth(Harness.CODEX, before, after):
         with runfiles.locked(source.parent / "agent-auth.lock"):
             current = source.read_text() if source.exists() else None
             if current == before:
                 runfiles.atomic(source, after)
+    return None

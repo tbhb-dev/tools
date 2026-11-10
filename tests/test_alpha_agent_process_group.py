@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from agent_host_example import constant
 
 from tbhbdev.alpha.agent import process_group as groups
 from tbhbdev.alpha.agent import runfiles
@@ -23,6 +24,7 @@ from tbhbdev.alpha.agent.decisions.run_state import Action, Group
 from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from multiprocessing.connection import Connection
     from multiprocessing.process import BaseProcess
 
@@ -433,8 +435,13 @@ def test_setup_worker_protocol(monkeypatch: pytest.MonkeyPatch, outcome: str) ->
     "outcome", ["ready-timeout", "result-timeout", "success", "invalid", "error"]
 )
 @pytest.mark.parametrize("remaining", [-1, 8])
+@pytest.mark.parametrize("reaped", [False, True])
 def test_setup_parent_deadline_and_cleanup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, remaining: int
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+    remaining: int,
+    reaped: bool,
 ) -> None:
     events: list[object] = []
     polls = iter([outcome != "ready-timeout", outcome != "result-timeout"])
@@ -466,6 +473,9 @@ def test_setup_parent_deadline_and_cleanup(
 
     class Worker:
         pid = 23
+        exitcode: int | None = 0 if reaped else None
+
+        is_alive = staticmethod(lambda: False)
 
         def start(self) -> None:
             events.append("started")
@@ -519,10 +529,9 @@ def test_setup_parent_deadline_and_cleanup(
     assert events == [
         "started",
         "connection-closed",
-        ("joined", 0),
-        "stopped",
-        ("joined", None),
         "connection-closed",
+        *([] if reaped else ["stopped"]),
+        ("joined", 0.25),
         "worker-closed",
     ]
     assert files.path("pgid").exists() is (outcome != "ready-timeout")
@@ -671,3 +680,126 @@ def test_worker_pid_requires_a_started_worker(pid: int | None) -> None:
             groups.worker_pid(worker)
     else:
         assert groups.worker_pid(worker) == 23
+
+
+def test_launch_foreground_failure_stops_created_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[object] = []
+
+    class Child:
+        pid = 23
+
+        def wait(self) -> None:
+            events.append("wait")
+
+    def foreground(_fd: int, _pid: int) -> None:
+        raise OSError
+
+    monkeypatch.setattr(subprocess, "Popen", constant(Child()))
+    monkeypatch.setattr(groups, "foreground", foreground)
+
+    def stop(pid: int, grace: float) -> None:
+        events.append((pid, grace))
+
+    monkeypatch.setattr(groups, "stop_started", stop)
+    with pytest.raises(OSError, match=r"^$"):
+        groups.launch(
+            ("example",), env={}, cwd="/example", streams=(None, None, None), terminal=0
+        )
+    assert events == [(23, 0), "wait"]
+
+
+@pytest.mark.parametrize("reaped", [False, True])
+def test_prepare_before_setpgid_is_bounded_and_never_signals_reaped_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped: bool
+) -> None:
+    def delayed(_connection: object, _operation: object) -> None:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        time.sleep(30)
+
+    if reaped:
+
+        def exited(_connection: object, _operation: object) -> None:
+            return None
+
+        monkeypatch.setattr(groups, "prepare_child", exited)
+    else:
+        monkeypatch.setattr(groups, "prepare_child", delayed)
+    files = runfiles.RunFiles(tmp_path, "example")
+    started = time.monotonic()
+    with pytest.raises((TimeoutError, EOFError)):
+        groups.prepare(lambda: None, files, started + 0.1, 0)
+    assert time.monotonic() - started < 3
+
+
+def test_deferred_ignored_signal_does_not_interrupt() -> None:
+    with groups.ignore_signals(), groups.defer_signals():
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+def test_failed_spawn_has_no_group_to_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    def spawn(*_args: object, **_kwargs: object) -> None:
+        raise OSError
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    with pytest.raises(OSError, match=r"^$"):
+        groups.launch(
+            ("example",), env={}, cwd="/", streams=(None, None, None), terminal=None
+        )
+
+
+@pytest.mark.parametrize("terminal", [None, 0])
+def test_launch_transfers_the_exact_child_before_terminal_setup(
+    monkeypatch: pytest.MonkeyPatch, terminal: int | None
+) -> None:
+    class Child:
+        pid = 23
+
+    child = Child()
+    seen: list[object] = []
+    monkeypatch.setattr(subprocess, "Popen", constant(child))
+
+    def foreground(_fd: int, _pid: int) -> None:
+        assert seen == [child]
+        raise OSError
+
+    monkeypatch.setattr(groups, "foreground", foreground)
+    spec = groups.Launch(("example",), {}, "/", (None, None, None), terminal)
+    if terminal is None:
+        assert groups.launch_owned(spec, started=seen.append) is child
+    else:
+        with pytest.raises(OSError, match=r"^$"):
+            groups.launch_owned(spec, started=seen.append)
+    assert seen == [child]
+
+
+def test_cleanup_handler_installation_cannot_be_interrupted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = signal.signal
+    previous = {s: signal.getsignal(s) for s in groups.INTERRUPTS}
+    events: list[str] = []
+
+    def unexpected(_number: int, _frame: object) -> None:
+        assert groups.cleaning() is True
+
+    def install(
+        number: int, value: int | Callable[[int, object], None] | None
+    ) -> object:
+        result = original(number, value)
+        if number == signal.SIGHUP and value == signal.SIG_IGN:
+            os.kill(os.getpid(), signal.SIGTERM)
+        return result
+
+    try:
+        for number in previous:
+            original(number, unexpected)
+        monkeypatch.setattr(signal, "signal", install)
+        with groups.ignore_signals():
+            events.append("cleanup")
+        assert events == ["cleanup"]
+        assert groups.cleaning() is False
+    finally:
+        for number, handler in previous.items():
+            original(number, handler)

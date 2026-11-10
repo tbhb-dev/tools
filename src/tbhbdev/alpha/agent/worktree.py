@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess  # nosec B404
 from pathlib import Path
 
@@ -11,8 +12,34 @@ from tbhbdev.alpha.agent.model import Invalid, Profile, RunRequest
 
 
 def git(clone: Path, *args: str) -> str:
+    env = {
+        key: os.environ[key]
+        for key in ("PATH", "HOME", "SSH_AUTH_SOCK", "LANG")
+        if key in os.environ
+    }
+    env.update(
+        GIT_TERMINAL_PROMPT="0", GIT_CONFIG_NOSYSTEM="1", GIT_NO_REPLACE_OBJECTS="1"
+    )
     return subprocess.check_output(  # nosec B603 B607
-        ["git", "-C", str(clone), *args], text=True, stderr=subprocess.DEVNULL
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.sshCommand=ssh",
+            "-c",
+            "protocol.ext.allow=never",
+            "-c",
+            "core.pager=cat",
+            "-C",
+            str(clone),
+            *args,
+        ],
+        env=env,
+        text=True,
+        stderr=subprocess.DEVNULL,
     ).strip()
 
 

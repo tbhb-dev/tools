@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
@@ -125,8 +126,28 @@ def test_a_pushed_branch_can_be_deleted(tmp_path: Path) -> None:
 def test_git_suppresses_command_errors_and_returns_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def output(command: list[str], *, text: bool, stderr: int) -> str:
-        assert command == ["git", "-C", str(tmp_path), "status", "--porcelain"]
+    def output(
+        command: list[str], *, text: bool, stderr: int, env: dict[str, str]
+    ) -> str:
+        assert command[0] == "git"
+        assert command[-4:] == ["-C", str(tmp_path), "status", "--porcelain"]
+        assert command[1:-4:2] == ["-c"] * 5
+        assert command[2:-4:2] == [
+            "core.hooksPath=/dev/null",
+            "core.fsmonitor=false",
+            "core.sshCommand=ssh",
+            "protocol.ext.allow=never",
+            "core.pager=cat",
+        ]
+        assert env == {
+            key: os.environ[key]
+            for key in ("PATH", "HOME", "SSH_AUTH_SOCK", "LANG")
+            if key in os.environ
+        } | {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+        }
         assert text is True
         assert stderr == subprocess.DEVNULL
         return " output \n"
@@ -211,3 +232,37 @@ def test_worktree_git_contract_under_one_stable_lock(
         ("rev-list", "main", "--not", "--remotes"),
         ("branch", "-D", "main"),
     ]
+
+
+def test_host_git_never_runs_hooks_or_monitor(tmp_path: Path) -> None:
+    seed, clone = repository(tmp_path)
+    marker = tmp_path / "executed"
+    script = f'#!/bin/sh\ntouch "{marker}"\n'
+    for name in ("post-checkout", "monitor"):
+        path = clone / ".git" / "hooks" / name
+        path.write_text(script)
+        path.chmod(0o700)
+    git(clone, "config", "core.fsmonitor", str(clone / ".git" / "hooks" / "monitor"))
+    (seed / "tracked").write_text("remote update\n")
+    commit(seed, "remote update")
+    git(seed, "push", "origin", "main")
+    worktree.create(clone, "safe", run_request())
+    assert not marker.exists()
+    worktree.remove(clone, "safe", force=False)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("socket", [None, "/example/signing.sock"])
+def test_host_git_ignores_parent_git_and_other_variables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, socket: str | None
+) -> None:
+    monkeypatch.setenv("GIT_DIR", "/example/untrusted")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "/example/untrusted")
+    monkeypatch.setenv("EXAMPLE_PARENT", "private")
+    if socket is None:
+        monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    else:
+        monkeypatch.setenv("SSH_AUTH_SOCK", socket)
+    test_git_suppresses_command_errors_and_returns_text(tmp_path, monkeypatch)

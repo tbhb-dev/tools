@@ -11,8 +11,8 @@ import struct
 import subprocess  # nosec B404
 import sys
 import time
-from contextlib import suppress
-from dataclasses import asdict
+from contextlib import contextmanager, suppress
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,9 +21,10 @@ from tbhbdev.alpha.agent.decisions.run_state import Action, Group
 from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
     from multiprocessing.connection import Connection
     from multiprocessing.process import BaseProcess
+    from types import FrameType
     from typing import IO
 
     from tbhbdev.alpha.agent.runfiles import RunFiles
@@ -111,6 +112,64 @@ def stop_recorded(files: RunFiles, grace: float) -> Action:
     return action
 
 
+INTERRUPTS = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
+
+
+_CLEANUP: list[None] = []
+
+
+def cleaning() -> bool:
+    return bool(_CLEANUP)
+
+
+@contextmanager
+def ignore_signals() -> Generator[None]:
+    # Mark cleanup before changing handlers: another thread can receive a signal.
+    _CLEANUP.append(None)
+    try:
+        previous = {s: signal.signal(s, signal.SIG_IGN) for s in INTERRUPTS}
+        try:
+            yield
+        finally:
+            for number, handler in previous.items():
+                signal.signal(number, handler)
+    finally:
+        _CLEANUP.pop()
+
+
+@contextmanager
+def defer_signals() -> Generator[None]:
+    """Finish acquiring a child before delivering a supervisor interrupt.
+
+    Caught handlers reset on exec, so the child inherits no blocked signals.
+    """
+    received: list[tuple[int, FrameType | None]] = []
+
+    def receive(number: int, frame: FrameType | None) -> None:
+        received.append((number, frame))
+
+    previous = {s: signal.signal(s, receive) for s in INTERRUPTS}
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+        if received:
+            number, frame = received[0]
+            handler = previous[signal.Signals(number)]
+            if callable(handler):
+                handler(number, frame)
+
+
+@dataclass(frozen=True)
+class Launch:
+    command: tuple[str, ...]
+    env: dict[str, str]
+    cwd: str
+    streams: tuple[IO[str] | int | None, IO[str] | int | None, IO[str] | int | None]
+    terminal: int | None
+
+
 def launch(
     command: tuple[str, ...],
     *,
@@ -120,22 +179,41 @@ def launch(
     terminal: int | None,
 ) -> subprocess.Popen[str]:
     """Pass the exact policy environment and give the harness its own group."""
-    stdin, stdout, stderr = streams
-    child = subprocess.Popen(  # nosec B603 -- argv builder fixes the harness name
-        command,
-        env=env,
-        cwd=cwd,
-        stdin=stdin,
-        stdout=stdout,
-        stderr=stderr,
-        text=True,
-        start_new_session=terminal is None,
-        process_group=0 if terminal is not None else None,
-    )
-    if terminal is not None:
-        foreground(terminal, child.pid)
-        _signal(child.pid, signal.SIGCONT)
-    return child
+    return launch_owned(Launch(command, env, cwd, streams, terminal))
+
+
+def launch_owned(
+    spec: Launch, *, started: Callable[[subprocess.Popen[str]], None] | None = None
+) -> subprocess.Popen[str]:
+    """Transfer cleanup ownership before terminal setup can fail."""
+    stdin, stdout, stderr = spec.streams
+    child = None
+    try:
+        with defer_signals():
+            child = subprocess.Popen(  # nosec B603 -- argv builder fixes the harness name
+                spec.command,
+                env=spec.env,
+                cwd=spec.cwd,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                text=True,
+                start_new_session=spec.terminal is None,
+                process_group=0 if spec.terminal is not None else None,
+            )
+            if started is not None:
+                started(child)
+            if spec.terminal is not None:
+                foreground(spec.terminal, child.pid)
+                _signal(child.pid, signal.SIGCONT)
+    except BaseException:
+        if child is not None and started is None:
+            with ignore_signals():
+                stop_started(child.pid, 0)
+                child.wait()
+        raise
+    else:
+        return child
 
 
 def foreground(terminal: int, pgid: int) -> None:
@@ -203,8 +281,12 @@ def prepare(
             raise Invalid(message)
         return result
     finally:
-        worker.join(timeout=0)
-        stop_started(pid, grace)
-        worker.join()
-        parent.close()
-        worker.close()
+        with ignore_signals():
+            parent.close()
+            if worker.exitcode is None:
+                stop_started(pid, grace)
+            worker.join(timeout=grace)
+            if worker.is_alive():
+                worker.kill()
+                worker.join()
+            worker.close()

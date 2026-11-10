@@ -744,6 +744,8 @@ def test_claude_review_denies_writes_to_the_git_common_directory(
         expected.append("/example/home/agent/Code/example.com/example-org/example-repo")
         if common is not None:
             expected.append("/example/clone/.git")
+    elif common is not None:
+        expected.extend(f"{common}/{entry}" for entry in ("config", "hooks", "info"))
     assert dig(claude_settings_of(result), "sandbox", "filesystem", "denyWrite") == [
         *expected,
         *denied(os, "/example/home/agent"),
@@ -1161,3 +1163,26 @@ def test_signing_socket_grants_do_not_add_write_roots(
         reads = tuple(g for g in original.detail.grants if g.startswith("read_file("))
         writes = tuple(g for g in original.detail.grants if g.startswith("write_file("))
         assert result.detail.grants == (*reads, f"read_file({socket})", *writes)
+
+
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("common", [None, "/example/clone/.git"])
+def test_codex_protects_git_configuration_inside_build_write_root(
+    os: Os, profile: Profile, common: str | None
+) -> None:
+    result = policy.build(
+        settings(),
+        HOSTS[os],
+        harness=Harness.CODEX,
+        profile=profile,
+        account="agent",
+        unsandboxed=False,
+        paths=dataclasses.replace(paths("agent"), git_common_dir=common),
+    )
+    assert isinstance(result.detail, model.CodexPolicy)
+    expected = (":root",)
+    if profile is Profile.BUILD and common is not None:
+        expected += tuple(f"{common}/{entry}" for entry in ("config", "hooks", "info"))
+        assert common in result.detail.write_roots
+    assert result.detail.read_roots == expected
