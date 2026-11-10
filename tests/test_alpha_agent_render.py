@@ -21,3 +21,10 @@ def test_status() -> None:
         "example: phase=finishing rc=0 host=example-linux "
         "account=agent started=2026-11-09T00:00:00+00:00"
     )
+
+
+def test_inspection_warning() -> None:
+    assert render.INSPECTION_WARNING == (
+        "Don't run git inside a run clone: it is agent-written. "
+        "Use `tbhbdev alpha agent log|diff NAME`."
+    )

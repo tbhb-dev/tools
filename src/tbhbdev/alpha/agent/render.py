@@ -1,5 +1,10 @@
 """The brief and coordinator reports."""
 
+INSPECTION_WARNING = (
+    "Don't run git inside a run clone: it is agent-written. "
+    "Use `tbhbdev alpha agent log|diff NAME`."
+)
+
 
 def launched(name: str, host: str, account: str) -> str:
     return f"{name}: launched host={host} account={account}"

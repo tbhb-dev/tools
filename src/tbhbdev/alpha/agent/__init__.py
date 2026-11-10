@@ -47,9 +47,11 @@ def parser(prog: str) -> argparse.ArgumentParser:
     execute.add_argument("--role")
     execute.add_argument("name")
     execute.add_argument("prompt_file")
-    for verb in ("wait", "status", "kill", "clean", "keep"):
+    for verb in ("wait", "status", "kill", "clean", "keep", "log", "diff"):
         sub = verbs.add_parser(verb)
         sub.add_argument("name")
+        if verb == "log":
+            sub.add_argument("-n", type=int, default=10)
         if verb == "clean":
             sub.add_argument("--force", action="store_true")
     return command
