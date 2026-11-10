@@ -248,6 +248,8 @@ Build runs can write their clone and temporary directory. They also get the conf
 
 Claude runs load user settings and the run's generated settings. They ignore project settings and use only server configuration supplied for the run. The generated settings turn off hooks and web tools. Codex marks each run clone as untrusted, which skips its project configuration.
 
+Run-host records phase `unknown` when it can't prove the group stopped. It keeps the harness exit status and appends cleanup messages to the existing log.
+
 ```toml
 [agent]
 launch_wait_seconds = 120

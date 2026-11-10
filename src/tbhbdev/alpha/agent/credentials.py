@@ -143,8 +143,8 @@ def signing_agent(key: str, tmpdir: Path, deadline: float) -> subprocess.Popen[s
         )
     except BaseException:
         with process_group.ignore_signals():
-            process_group.stop_started(agent.pid, 0)
-            agent.wait()
+            if process_group.stop_started(agent.pid, 0, agent.poll) is not False:
+                agent.wait()
         raise
     return agent
 

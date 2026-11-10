@@ -309,7 +309,7 @@ def test_signing_agent_start_failure_is_bounded(
     monkeypatch.setattr(subprocess, "Popen", start)
     stops: list[tuple[int, float]] = []
 
-    def stop(pid: int, grace: float) -> None:
+    def stop(pid: int, grace: float, *_args: object) -> None:
         stops.append((pid, grace))
 
     monkeypatch.setattr(process_group, "stop_started", stop)
@@ -383,6 +383,9 @@ def test_signing_delivery_uses_private_stdin_and_a_dedicated_group(
     class Agent:
         pid = 23
 
+        def poll(self) -> None:
+            return None
+
         def wait(self) -> int:
             events.append("wait")
             return 0
@@ -426,7 +429,7 @@ def test_signing_delivery_uses_private_stdin_and_a_dedicated_group(
         if failed:
             raise subprocess.CalledProcessError(1, command)
 
-    def stop(group: int, grace: float) -> None:
+    def stop(group: int, grace: float, *_args: object) -> None:
         assert (group, grace) == (23, 0)
         assert all(
             signal.getsignal(s) == signal.SIG_IGN for s in process_group.INTERRUPTS
@@ -444,6 +447,29 @@ def test_signing_delivery_uses_private_stdin_and_a_dedicated_group(
     else:
         assert credentials.signing_agent(key, tmp_path, 10) is agent
     assert events == ["spawn", "ready", "add", *(["stop", "wait"] if failed else [])]
+
+
+def test_signer_cleanup_denial_keeps_original_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Agent:
+        pid = 23
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self) -> None:
+            pytest.fail("an unproven group must not cause an unbounded wait")
+
+    def failed(*_args: object) -> None:
+        message = "startup error"
+        raise Invalid(message)
+
+    monkeypatch.setattr(subprocess, "Popen", constant(Agent()))
+    monkeypatch.setattr(credentials, "agent_ready", failed)
+    monkeypatch.setattr(process_group, "stop_started", constant(value=False))
+    with pytest.raises(Invalid, match=r"^startup error$"):
+        credentials.signing_agent("example-key", tmp_path, 10)
 
 
 @pytest.mark.parametrize("expired", [False, True])
