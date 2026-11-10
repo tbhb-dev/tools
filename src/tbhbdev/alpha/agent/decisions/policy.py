@@ -31,6 +31,11 @@ from tbhbdev.alpha.agent.model import (
 # Codex's name for the whole filesystem, which a profile makes read-only.
 READ_ROOT = ":root"
 APPROVAL_POLICY = "never"
+LINUX_LANG = "C.UTF-8"
+MACOS_LANG = "en_US.UTF-8"
+# Process substitution and /dev/stderr need access to open descriptors on macOS.
+_DEV_FD = "/dev/fd"
+_REVIEW_DOMAINS = ("github.com", "api.github.com", "*.githubusercontent.com")
 # The handoff directories, under the run's private TMPDIR. run-host creates
 # each one, and the child gets its path in the variable of the same tool.
 GH_CONFIG_SUBDIR = "gh"
@@ -82,9 +87,11 @@ def denied_paths(settings: Settings, host: Host, home: str) -> tuple[str, ...]:
     if host.os is Os.LINUX:
         # The directory, so a sibling file or a renamed token stays hidden too.
         paths.append(resolve(home, str(secrets.LINUX_TOKEN_FILE.parent)))
-    # TODO: deny the macOS agent keychain file, which secrets.KEYCHAIN names.
-    # secrets.py has no path constant for it, only the name that security(1)
-    # resolves, so no macOS output denies the Connect token store yet.
+    else:
+        keychain = secrets.MACOS_KEYCHAIN_FILE
+        paths.extend(
+            resolve(home, str(p)) for p in (keychain, keychain.with_suffix(".keychain"))
+        )
     paths.append(resolve(home, settings.sockets_dir))
     paths.extend(resolve(home, p) for p in settings.sandbox.denied_home_paths)
     return tuple(
@@ -93,7 +100,7 @@ def denied_paths(settings: Settings, host: Host, home: str) -> tuple[str, ...]:
 
 
 def environment(
-    settings: Settings, host: Host, harness: Harness, paths: RunPaths
+    settings: Settings, host: Host, harness: Harness, paths: RunPaths, account: str
 ) -> dict[str, str]:
     """The child's whole environment: an allowlist, with no parent values.
 
@@ -105,6 +112,10 @@ def environment(
     env = {
         "PATH": ":".join(resolve(paths.home, e) for e in entries),
         "HOME": paths.home,
+        "USER": account,
+        "LOGNAME": account,
+        "SHELL": host.shell,
+        "LANG": LINUX_LANG if host.os is Os.LINUX else MACOS_LANG,
         "TMPDIR": paths.tmpdir,
         "TMPPREFIX": resolve(paths.tmpdir, "zsh"),
         "GH_CONFIG_DIR": resolve(paths.tmpdir, GH_CONFIG_SUBDIR),
@@ -155,7 +166,34 @@ def _claude(
 ) -> ClaudePolicy:
     review = profile is Profile.REVIEW
     # An absolute path in a Claude rule starts with a second slash.
-    reads = [f"Read(/{p}/**)" for p in deny]
+    denied_tools = [f"{tool}(/{p}/**)" for p in deny for tool in ("Read", "Edit")]
+    deny_write = [paths.worktree] if review else []
+    if review and paths.git_common_dir is not None:
+        deny_write.append(paths.git_common_dir)
+    sandbox: dict[str, object] = {
+        "enabled": True,
+        "failIfUnavailable": True,
+        "autoAllowBashIfSandboxed": True,
+        "allowUnsandboxedCommands": False,
+        "enableWeakerNetworkIsolation": True,
+        "filesystem": {
+            "allowWrite": list(writes),
+            "denyRead": list(deny),
+            "denyWrite": [*deny_write, *deny],
+        },
+    }
+    network: dict[str, object] = {}
+    if review:
+        network.update(
+            {
+                "strictAllowlist": True,
+                "allowedDomains": list(_REVIEW_DOMAINS),
+            }
+        )
+    if paths.signing_socket is not None:
+        network["allowUnixSockets"] = [paths.signing_socket]
+    if network:
+        sandbox["network"] = network
     return ClaudePolicy(
         {
             "env": {
@@ -171,24 +209,9 @@ def _claude(
             },
             "permissions": {
                 "allow": [] if review else [f"Edit(/{p}/**)" for p in writes],
-                "deny": [*(_CLAUDE_FILE_TOOLS if review else ()), *reads],
+                "deny": [*(_CLAUDE_FILE_TOOLS if review else ()), *denied_tools],
             },
-            "sandbox": {
-                "enabled": True,
-                "failIfUnavailable": True,
-                "autoAllowBashIfSandboxed": True,
-                "allowUnsandboxedCommands": False,
-                **(
-                    {"network": {"allowUnixSockets": [paths.signing_socket]}}
-                    if paths.signing_socket is not None
-                    else {}
-                ),
-                "filesystem": {
-                    "allowWrite": list(writes),
-                    "denyRead": list(deny),
-                    "denyWrite": [*([paths.worktree] if review else []), *deny],
-                },
-            },
+            "sandbox": sandbox,
         }
     )
 
@@ -196,6 +219,30 @@ def _claude(
 def _overlaps(first: str, second: str) -> bool:
     one, two = PurePosixPath(first), PurePosixPath(second)
     return one == two or one in two.parents or two in one.parents
+
+
+def _refuse_overlaps(paths: tuple[str, ...], deny: tuple[str, ...], kind: str) -> None:
+    for path in paths:
+        for denied in deny:
+            if _overlaps(path, denied):
+                message = f"policy {kind} {path} overlaps the denied path {denied}"
+                raise Invalid(message)
+
+
+def _agy_write_roots(
+    settings: Settings, profile: Profile, paths: RunPaths
+) -> tuple[str, ...]:
+    if profile is Profile.REVIEW:
+        # Reviews only produce audit output, so they need no TMPDIR write grant.
+        return (paths.audit_dir,)
+    return (
+        paths.worktree,
+        paths.git_common_dir
+        if paths.git_common_dir is not None
+        else resolve(paths.worktree, ".git"),
+        paths.tmpdir,
+        *(resolve(paths.home, p) for p in settings.sandbox.agy.build_write),
+    )
 
 
 def _agy(
@@ -209,25 +256,14 @@ def _agy(
     home = paths.home
     if profile is Profile.REVIEW:
         reads = [resolve(home, p) for p in agy.review_read]
-        # Reviews only produce audit output, so they need no TMPDIR write grant.
-        writes = [paths.audit_dir]
     else:
         reads = [resolve(home, p) for p in agy.build_read]
-        writes = [
-            paths.worktree,
-            resolve(paths.worktree, ".git"),
-            paths.tmpdir,
-            *(resolve(home, p) for p in agy.build_write),
-        ]
+    writes = _agy_write_roots(settings, profile, paths)
     reads += [env["GH_CONFIG_DIR"], env["DOCKER_CONFIG"]]
     if paths.signing_socket is not None:
         reads.append(paths.signing_socket)
     # agy has no deny entry, so a grant that reaches a denied path is the leak.
-    for path in (*reads, *writes):
-        for denied in deny:
-            if _overlaps(path, denied):
-                message = f"policy agy grant {path} overlaps the denied path {denied}"
-                raise Invalid(message)
+    _refuse_overlaps(tuple(reads), deny, "agy grant")
     grants = [
         *(f"read_file({p})" for p in reads),
         *(f"write_file({p})" for p in writes),
@@ -254,13 +290,21 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
 
     Raises:
         Invalid: ACCOUNT isn't one of the host's accounts, UNSANDBOXED applies
-            to anything but a Codex build run on a host that allows it, or an
-            agy grant reaches a denied path.
+            to anything but a Codex build run on a host that allows it, or a
+            write path, signing socket or an agy read grant reaches a denied path.
     """
     _check(host, harness, profile, account=account, full=unsandboxed)
     deny = denied_paths(settings, host, paths.home)
-    env = environment(settings, host, harness, paths)
+    if paths.signing_socket is not None:
+        _refuse_overlaps((paths.signing_socket,), deny, "signing socket")
+    env = environment(settings, host, harness, paths, account)
     writes = _write_roots(settings, profile, paths)
+    if host.os is Os.MACOS and harness in (Harness.CODEX, Harness.CLAUDE):
+        writes = tuple(dict.fromkeys((*writes, _DEV_FD)))
+    agy_writes = (
+        _agy_write_roots(settings, profile, paths) if harness is Harness.AGY else ()
+    )
+    _refuse_overlaps((*writes, *agy_writes), deny, "write path")
     if harness is Harness.CODEX:
         detail: CodexPolicy | ClaudePolicy | AgyPolicy = _codex(
             settings, profile, writes, deny, full=unsandboxed

@@ -259,6 +259,8 @@ def test_macos_codex_denies_the_private_alias_too() -> None:
     fs = tomllib.loads(f"profile = {value.removeprefix('permissions.build=')}")
     denies = [p for p, m in fs["profile"]["filesystem"].items() if m == "none"]
     assert denies == [
+        f"{HOME}/Library/Keychains/tbhbdev.keychain-db",
+        f"{HOME}/Library/Keychains/tbhbdev.keychain",
         "/tmp/example-sockets",
         "/private/tmp/example-sockets",
         f"{HOME}/{DENIED}",
@@ -364,14 +366,22 @@ def test_codex_tables_have_no_repeated_paths(os: Os, profile: Profile) -> None:
     deny = (
         [f"{HOME}/{TOKEN_DIR}", f"{HOME}/{DENIED}"]
         if os is Os.LINUX
-        else [f"{HOME}/{DENIED}", f"{HOME}/{TOKEN_DIR}"]
+        else [
+            f"{HOME}/Library/Keychains/tbhbdev.keychain-db",
+            f"{HOME}/Library/Keychains/tbhbdev.keychain",
+            f"{HOME}/{DENIED}",
+            f"{HOME}/{TOKEN_DIR}",
+        ]
     )
     assert [p for p, mode in fs.items() if mode == "none"] == deny
-    assert [p for p, mode in fs.items() if mode == "write"] == (
+    writes = (
         [WORKTREE, TMP, f"{HOME}/.cache"]
         if profile is Profile.BUILD
         else [TMP, f"{HOME}/.local/state/example-audit"]
     )
+    if os is Os.MACOS:
+        writes.append("/dev/fd")
+    assert [p for p, mode in fs.items() if mode == "write"] == writes
 
 
 def test_agy_timeout_is_whole_seconds() -> None:

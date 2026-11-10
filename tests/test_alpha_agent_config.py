@@ -209,15 +209,38 @@ def test_input_is_not_modified() -> None:
     assert table == GOOD
 
 
-@pytest.mark.parametrize("key", ["write_roots", "denied_home_paths"])
 @pytest.mark.parametrize(
     "path", ["/", "/etc", ".", "./", "././", "~", "~/x", "~user/x"]
 )
-def test_sandbox_home_paths_stay_below_home(key: str, path: str) -> None:
-    table = edited("sandbox", key, value=["safe", path])
+def test_sandbox_denied_paths_stay_below_home(path: str) -> None:
+    table = edited("sandbox", "denied_home_paths", value=["safe", path])
     assert refused(table) == (
-        f"[agent.sandbox] {key} must be paths below home without a leading '/' or '~'"
+        "[agent.sandbox] denied_home_paths must be paths below home "
+        "without a leading '/' or '~'"
     )
+
+
+@pytest.mark.parametrize("path", ["/example/host/temp", "/example/host/cache"])
+def test_sandbox_write_roots_accept_absolute_entries(path: str) -> None:
+    parsed = config.parse(edited("sandbox", "write_roots", value=["safe", path]))
+    assert parsed.sandbox.write_roots == ("safe", path)
+
+
+@pytest.mark.parametrize(
+    "path", ["/", "//", "///", "/./", ".", "./", "././", "~", "~/x", "~user/x"]
+)
+def test_sandbox_write_roots_reject_roots_empty_and_tilde_paths(path: str) -> None:
+    table = edited("sandbox", "write_roots", value=["safe", path])
+    assert refused(table) == (
+        "[agent.sandbox] write_roots must be paths without a leading '~', "
+        "an empty path or a root"
+    )
+
+
+@pytest.mark.parametrize("path", ["/example/../temp", "/example/\x00temp"])
+def test_sandbox_write_roots_reject_unsafe_absolute_entries(path: str) -> None:
+    table = edited("sandbox", "write_roots", value=["safe", path])
+    assert refused(table) == f"[agent.sandbox] write_roots {PATHS}"
 
 
 @pytest.mark.parametrize("key", ["write_roots", "denied_home_paths"])

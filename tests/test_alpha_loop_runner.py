@@ -542,13 +542,23 @@ def test_future_shadow_rows_do_not_block_reconcile(
     key = f"review:{REPO}#7@{HEAD}"
     assert db.record_shadow(store.ShadowIntent(key, REPO, "R1"), intent_time)
     if finished_time is not None:
-        assert db.score_shadow(key, finished_time, store.Result.NO_CHANGE)
+        assert (
+            db.score_shadow(key, finished_time, store.Result.NO_CHANGE)
+            == store.ScoreStatus.SCORED
+        )
     before = db.action(key)
     assert subject.reconcile(Reader(runner.Snapshot(BUDGET, (APPROVED,))), SWEEP, time)
-    assert [line["rule"] for line in lines(subject)] == ["R0", "R4"]
     if time < (finished_time or intent_time):
+        assert lines(subject)[0] == {
+            "source": "sweep:12",
+            "rule": "R1",
+            "action_key": key,
+            "outcome": "skipped_future",
+        }
+        assert [line["rule"] for line in lines(subject)] == ["R1", "R0", "R4"]
         assert db.action(key) == before
     else:
+        assert [line["rule"] for line in lines(subject)] == ["R0", "R4"]
         assert db.action(key) == store.Action(
             key,
             store.ActionState.SHADOW,
@@ -556,6 +566,79 @@ def test_future_shadow_rows_do_not_block_reconcile(
             None,
             time,
             store.Result.AGREE,
+        )
+    db.close()
+
+
+@pytest.mark.parametrize(
+    ("count", "result", "time", "skipped"),
+    [
+        (1, None, 9, 1),
+        (2, None, 9, 2),
+        (1, None, 10, 0),
+        (1, store.Result.AGREE, 9, 0),
+        (1, store.Result.DISAGREE, 9, 0),
+        (1, store.Result.AGREE, 11, 0),
+        (1, store.Result.DISAGREE, 11, 0),
+    ],
+)
+def test_reconcile_logs_one_typed_line_per_skipped_future_row(
+    count: int, result: store.Result | None, time: int, skipped: int
+) -> None:
+    db = store.Store(":memory:")
+    subject = make_runner(db)
+    intents = (
+        store.ShadowIntent(f"review:{REPO}#7@{HEAD}", REPO, "R1"),
+        store.ShadowIntent(f"approve:{REPO}#7@{HEAD}", REPO, "R2"),
+    )[:count]
+    for pending in intents:
+        assert db.record_shadow(pending, 10)
+        if result is not None:
+            assert db.score_shadow(pending.key, 11, result) == store.ScoreStatus.SCORED
+    before = {pending.key: db.action(pending.key) for pending in intents}
+    assert subject.reconcile(Reader(runner.Snapshot(BUDGET, (APPROVED,))), SWEEP, time)
+    expected: list[dict[str, object]] = [
+        {
+            "source": "sweep:12",
+            "rule": pending.rule,
+            "action_key": pending.key,
+            "outcome": "skipped_future",
+        }
+        for pending in sorted(intents, key=lambda pending: pending.key)[:skipped]
+    ]
+    expected.extend(
+        [
+            {
+                "source": "sweep:12",
+                "state": "reconcile",
+                "rule": "R0",
+                "action_key": "sweep:12",
+                "action_kind": "read",
+                "outcome": "shadow",
+            },
+            {
+                "source": "sweep:12",
+                "state": "approved",
+                "rule": "R4",
+                "action_key": f"merge:{REPO}#7@{HEAD}",
+                "action_kind": "fixed",
+                "outcome": "shadow",
+            },
+        ]
+    )
+    assert lines(subject) == expected
+    for pending in intents:
+        assert db.action(pending.key) == (
+            before[pending.key]
+            if skipped or result is not None
+            else store.Action(
+                pending.key,
+                store.ActionState.SHADOW,
+                10,
+                None,
+                time,
+                store.Result.AGREE,
+            )
         )
     db.close()
 

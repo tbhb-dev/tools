@@ -12,6 +12,9 @@ TEXT_KEYS = (
     "database",
     "user",
     "password_file",
+    "reader_password_file",
+    "grafana_password_file",
+    "loader_password_file",
     "owner_role",
     "loader_role",
     "reader_role",
@@ -26,6 +29,9 @@ def test_defaults() -> None:
         database="analytics",
         user="analytics_owner",
         password_file=None,
+        reader_password_file=None,
+        grafana_password_file=None,
+        loader_password_file=None,
         owner_role="analytics_owner",
         loader_role="analytics_loader",
         reader_role="analytics_reader",
@@ -47,9 +53,9 @@ def test_invalid_string_names_key(key: str, value: object) -> None:
 
 
 @pytest.mark.parametrize("key", TEXT_KEYS)
-def test_none_is_only_valid_for_password_file(key: str) -> None:
-    if key == "password_file":
-        assert parse({key: None}).password_file is None
+def test_none_is_only_valid_for_password_files(key: str) -> None:
+    if key.endswith("password_file"):
+        assert asdict(parse({key: None}))[key] is None
     else:
         with pytest.raises(ValueError, match=key):
             parse({key: None})
@@ -89,3 +95,15 @@ def test_default_role_names() -> None:
         settings.reader_role,
         settings.grafana_role,
     ) == ("analytics_owner", "analytics_loader", "analytics_reader", "grafana_reader")
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_loader_switch(enabled: bool) -> None:
+    assert parse({"loader_enabled": enabled}).loader_enabled is enabled
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", [], {}])
+def test_invalid_loader_switch(value: object) -> None:
+    with pytest.raises(ValueError, match=r".") as caught:
+        parse({"loader_enabled": value})
+    assert str(caught.value) == "[analytics] loader_enabled must be a boolean"

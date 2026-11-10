@@ -20,6 +20,7 @@ uv tool install git+https://github.com/tbhb-dev/tools
 
 ## Tools
 
+- `analytics` applies PostgreSQL migrations and checks the installed catalog contract.
 - `secret` reads and manages 1Password items through the `tbhbdev.secrets` library.
 - `host` manages agent hosts from the operator's Mac.
 - `alpha` holds the interim agent tools from ascm's `tools/interim`. They may change or go away without notice.
@@ -62,6 +63,22 @@ core_floor = 1000
 Each `[connect] server_hosts` entry must be a DNS label of at most 63 characters. Letters and digits make up the label, and a hyphen may appear only between them. A bad entry fails with its position in the list, not its value.
 
 That's the operator's file. On each agent host, `tbhbdev host bootstrap` installs a copy that adds `[connect] endpoints`, computed from the tailnet as [Agent hosts](#agent-hosts) describes.
+
+## Analytics
+
+`tbhbdev analytics migrate` connects as the owner, serializes migrations with an advisory lock and records each version in its migration transaction. `--dry-run` lists pending migrations without changing the database. Ops must create an empty database and its owner login with `CREATEROLE` before migration.
+
+`tbhbdev analytics contract check` separately compares the database catalog with the packaged contract and exits 1 on a difference. Failures print only redacted diagnostics.
+
+Configure the connection through `[analytics]` in the user config. Set `password_file` to the owner password file and `loader_enabled` to `true` to enable loader access. The switch defaults to `false`.
+
+The optional keys `reader_password_file`, `grafana_password_file`, and `loader_password_file` each point at one role's password file. `migrate` sets the password of a role that has a file. It creates a role that has no file with no password and leaves an existing role's password unchanged. It prints a line such as `role analytics_reader has no password (reader_password_file is not configured)` for each such role, with `--dry-run` too.
+
+The `PGHOST`, `PGPORT`, `PGDATABASE`, and `PGUSER` environment variables override the matching connection settings. Analytics defaults to `localhost`, port 5432, database `analytics`, and user `analytics_owner`. These defaults form an exception to the deployment settings described in Config. The user must equal `owner_role`. Each password file must contain 32 characters drawn from `A-Z`, `a-z`, and `0-9` on its first line. The owner password also seeds the salt of every role password. Role settings `owner_role`, `loader_role`, `reader_role`, and `grafana_role` override the standard identifiers. Populate these files from 1Password and keep them under operator control.
+
+Default tests use fake connections. The opt-in server test requires an empty disposable PostgreSQL 18 database with its owner and password files configured. Run `ANALYTICS_TEST_HOST=localhost uv run pytest tests/analytics_server.py -m analytics_server` to check lock contention, rollback, and an unchanged rerun. The test changes that database and leaves its schema for inspection.
+
+Bazel never selects the server test.
 
 ## Secrets
 
@@ -201,7 +218,7 @@ Even with valid settings, the command exits with status 1 and reports that the s
 
 `Runner.run` reconciles before consuming deliveries. R0 gates reconcile reads by rule mode, schedule, and quota reserve. The runner records each intent with state `shadow` and appends a JSON line with the receipt or sweep identifier, derived state, rule, key, kind, and outcome. Replayed deliveries and restarts use the same keys, while fresh observations supply PR state. R3 has no action key: each processed delivery or sweep logs the observed decline again, including repeated sweep identifiers. These lines describe observations and don't count as scored intents. The runner never calls an effect interface.
 
-Each sweep compares prior intents with head-bound approvals, merges, reviewer runs, and typed effect observations. In Phase 0, R0 agrees on a sweep. Only R1, R2, R4, and R5 can reach `agree` from PR facts. R6 through R11 need explicit effect evidence to agree. A PR absent from the snapshot or superseded by a new head scores `no_change`. The runner rejects invalid effect results before writing. `score_shadow` records `agree`, `disagree`, or `no_change` in an immediate transaction and skips rows whose timestamps are ahead of the sweep. Final comparisons are immutable. A later sweep can replace `no_change` with a final score.
+Each sweep compares prior intents with head-bound approvals, merges, reviewer runs, and typed effect observations. In Phase 0, R0 agrees on a sweep. Only R1, R2, R4, and R5 can reach `agree` from PR facts. R6 through R11 need explicit effect evidence to agree. A PR absent from the snapshot or superseded by a new head scores `no_change`. The runner rejects invalid effect results before writing. `score_shadow` records `agree`, `disagree`, or `no_change` in an immediate transaction and skips rows whose timestamps are ahead of the sweep. For each skipped non-final row, the runner logs `source` (the sweep key), `rule`, `action_key`, and `outcome: "skipped_future"` as one JSON line, while final comparisons remain immutable and don't generate skip logs. A later sweep can replace `no_change` with a final score.
 
 `Runner.report()` reads one store snapshot and returns counts by rule and repository, plus the count of R9 items it would have written. Twenty final scores make a rule eligible for promotion review. Provisional `no_change` scores don't count. Each rule summary has `needs_review` set when any disagreement needs explanation before promotion.
 
@@ -276,6 +293,8 @@ account = "agent"
 unsandboxed = false
 accounts = ["agent"]
 ```
+
+For `[agent.sandbox]`, macOS hosts list `DARWIN_USER_TEMP_DIR` and `DARWIN_USER_CACHE_DIR` in `write_roots` as absolute paths.
 
 The settings have these constraints:
 

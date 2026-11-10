@@ -33,6 +33,7 @@ complexipy
 conftest
 cpus
 creat
+CREATEROLE
 cuda
 cwds
 dbus
@@ -92,6 +93,7 @@ libproc
 listy
 llmx
 lockfiles
+logname
 mcpjson
 mdfile
 milestoned
@@ -123,7 +125,11 @@ onepasswordconnectsdk
 opam
 oxipng
 passwordless
+PGDATABASE
+PGHOST
+PGPORT
 pgrep
+PGUSER
 pidinfo
 pidpath
 pidtbsdinfo
@@ -146,6 +152,7 @@ readattr
 readextattr
 readsecurity
 redirections
+regclass
 regenerable
 relkind
 relname
@@ -155,6 +162,7 @@ resvg
 riscv
 rollouts
 rollup
+rolname
 rumdl
 runfile
 runfiles
@@ -180,6 +188,7 @@ tbhbdev
 testdata
 testpaths
 tfstate
+timestamptz
 tmpprefix
 tombi
 toolu
@@ -189,6 +198,7 @@ tzset
 ufffd
 unalias
 uncheckpointed
+unconfigured
 uncomparables
 unkeyed
 unmatch

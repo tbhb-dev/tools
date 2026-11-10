@@ -192,16 +192,16 @@ def test_installation_reuses_app_signer_without_storing_token(
 
     def token(actual: gh_app.Env, args: gh_app.Args, jwt: str) -> gh_app.Minted:
         assert actual is env
-        assert args == gh_app.Args(
-            app="reviews",
-            repo="example-org/example-repo",
-            fresh=True,
-            dry_run=False,
-            all_repos=False,
-            vault="",
-            cooldown_until=None,
-            cooldown_status=False,
-        )
+        assert dataclasses.asdict(args) == {
+            "app": "reviews",
+            "repo": "example-org/example-repo",
+            "fresh": True,
+            "dry_run": False,
+            "all_repos": False,
+            "vault": "",
+            "cooldown_until": None,
+            "cooldown_status": False,
+        }
         assert jwt == "example-jwt"
         calls.append("request")
         if failure == "request":

@@ -84,3 +84,26 @@ def test_duplicate_versions_apply_only_the_first_file() -> None:
         Migration("0001_a.sql", 1),
         Migration("0002_c.sql", 2),
     )
+
+
+@pytest.mark.parametrize(
+    ("names", "expected"),
+    [
+        ([], []),
+        (["README.md", ".DS_Store", "notes.sql", "a1_x.sql"], []),
+        (["1_x.txt", "1_x.sql.bak", "1_x", "\u0661_x.sql", "/1.sql", ":1.sql"], []),
+        (["0_x.sql", "9_x.sql", "0000_x.sql", "1.sql", "5.sql"], None),
+        (["0001_a.sql", "README.md", "0002_b.sql"], ["0001_a.sql", "0002_b.sql"]),
+    ],
+)
+def test_sql_names_keep_only_the_old_glob_matches(
+    names: list[str], expected: list[str] | None
+) -> None:
+    kept = list(migrations.sql_names(iter(names)))
+    assert kept == (names if expected is None else expected)
+
+
+def test_sql_names_leave_invalid_versions_for_parse() -> None:
+    kept = migrations.sql_names(["0000_x.sql"])
+    with pytest.raises(ValueError, match="positive version"):
+        migrations.pending(kept, [])

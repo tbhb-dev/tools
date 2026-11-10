@@ -478,7 +478,9 @@ def tmux_environment_probe(root: Path, harness: Harness) -> None:
         reason="example" if harness is Harness.CLAUDE else None,
     )
     paths = preparation(run).paths
-    env = run_host.policy.environment(run.settings, run.host, harness, paths)
+    env = run_host.policy.environment(
+        run.settings, run.host, harness, paths, run.request.account
+    )
     if harness is Harness.CLAUDE:
         env[credentials.CLAUDE_TOKEN_ENV] = "example-claude"
     command = ("/usr/bin/env",)
@@ -899,7 +901,9 @@ def check_launch_contract(
     assert not run.files.path("launched").exists()
     assert kwargs["cwd"] == prepared.paths.worktree
     expected = (
-        run_host.policy.environment(run.settings, run.host, harness, prepared.paths)
+        run_host.policy.environment(
+            run.settings, run.host, harness, prepared.paths, run.request.account
+        )
         | env
     )
     assert kwargs["env"] == expected
