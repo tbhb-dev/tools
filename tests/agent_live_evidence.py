@@ -2,10 +2,26 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
-lazy from pathlib import Path
+from pathlib import Path
 
 from agent_live_probe import mirror_object, mirror_probes
+
+from tbhbdev.alpha.agent.model import Invalid
+
+
+def prepared_codex_home(account_home: Path) -> str:
+    configured = os.environ.get("TBHBDEV_SANDBOX_CODEX_HOME")
+    if not configured:
+        message = "set TBHBDEV_SANDBOX_CODEX_HOME to a prepared private Codex home"
+        raise Invalid(message)
+    directory = Path(configured).resolve()
+    if not directory.is_dir() or directory == (account_home / ".codex").resolve():
+        message = "TBHBDEV_SANDBOX_CODEX_HOME must name a separate prepared directory"
+        raise Invalid(message)
+    return str(directory)
+
 
 MIRROR_LABELS = (
     "mirror-modify",

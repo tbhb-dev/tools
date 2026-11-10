@@ -25,6 +25,7 @@ from agent_live_evidence import (
     MIRROR_LABELS,
     MirrorProbe,
     mirror_cases,
+    prepared_codex_home,
 )
 from agent_live_probe import (
     Proxy,
@@ -508,6 +509,8 @@ def test_build_sandboxes_refuse_user_sockets(tmp_path: Path, harness: Harness) -
         ),
     )
     try:
+        if harness is Harness.CODEX:
+            paths = dataclasses.replace(paths, codex_home=prepared_codex_home(run.home))
         with ExitStack() as stack:
             run_probe(run, paths, str(Path(installed).resolve()), stack)
     except (Invalid, OSError, subprocess.TimeoutExpired, AssertionError) as error:
