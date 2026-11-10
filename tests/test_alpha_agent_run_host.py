@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -36,7 +36,7 @@ from tbhbdev.alpha.agent.decisions.run_state import Group
 from tbhbdev.alpha.agent.model import CodexPolicy, Harness, Invalid, Os, RunKind
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
     from typing import TextIO
 
     from tbhbdev.alpha.agent.model import Policy, RunRequest
@@ -186,6 +186,9 @@ class Child:
         self.timeout = timeout
         self.waits: list[int | None] = []
 
+    def poll(self) -> int:
+        return self.code
+
     def wait(self, timeout: int | None = None) -> int:
         self.waits.append(timeout)
         if self.timeout and len(self.waits) == 1:
@@ -254,7 +257,7 @@ def test_launch_uses_the_policy_and_marks_only_after_spawn(
         assert not files.path("launched").exists()
         events.append("record")
 
-    def stop(pid: int, grace: float) -> None:
+    def stop(pid: int, grace: float, *_args: object) -> None:
         assert (pid, grace) == (23, 0)
         assert run.files.path("launched").exists()
         assert run.files.path("phase").read_text() == "exited"
@@ -309,7 +312,7 @@ def test_harness_deadlines(
 
     stopped: list[int] = []
 
-    def stop(pid: int, _grace: float) -> None:
+    def stop(pid: int, _grace: float, *_args: object) -> None:
         stopped.append(pid)
 
     monkeypatch.setattr(process_group, "launch_owned", launch)
@@ -405,7 +408,7 @@ def test_interrupt_and_agent_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
     child = Child()
     stopped: list[int] = []
 
-    def stop(pid: int, grace: float) -> None:
+    def stop(pid: int, grace: float, *_args: object) -> None:
         assert grace == 0
         stopped.append(pid)
 
@@ -760,10 +763,10 @@ print(os.getpid(), flush=True)
 signal.pause()
 """
     original_stop = process_group.stop_started
-    def stop(pid, grace):
+    def stop(pid, grace, *args):
         print("cleanup", flush=True)
         sys.stdin.readline()
-        original_stop(pid, grace)
+        return original_stop(pid, grace, *args)
     process_group.stop_started = stop
 
 def launch(spec, *, started):
@@ -1228,13 +1231,7 @@ def test_cleanup_failures_cannot_skip_rc(
     monkeypatch.setattr(run_host, "stop_agent", stop)
     monkeypatch.setattr(runfiles, "append", index)
     monkeypatch.setattr(run.files, "write", record)
-    if failure in ("agent", "phase"):
-        with pytest.raises(OSError, match=r"^$"):
-            run_host.execute(run, "example")
-    else:
-        assert run_host.execute(run, "example") == (
-            1 if failure == "initial-index" else 7
-        )
+    assert run_host.execute(run, "example") == (1 if failure == "initial-index" else 7)
     check_cleanup_result(run, stopped, failure)
 
 
@@ -1295,7 +1292,7 @@ def test_signal_at_launch_handoff_records_and_stops_child(
         files.write("pgid", "recorded")
         events.append("recorded")
 
-    def stop(pid: int, grace: float) -> None:
+    def stop(pid: int, grace: float, *_args: object) -> None:
         assert (pid, grace) == (child.pid, 0)
         events.append("stopped")
         os.kill(os.getpid(), signal.SIGTERM)
@@ -1379,7 +1376,7 @@ def test_terminal_setup_failure_keeps_registered_cleanup_owner(
         assert events[0] == "registered"
         raise OSError
 
-    def stop(pid: int, _grace: float) -> None:
+    def stop(pid: int, _grace: float, *_args: object) -> None:
         assert pid == child.pid
         events.append("stopped")
 
@@ -1945,6 +1942,9 @@ def test_driver_schema_file_reaches_harness(
     class Child:
         pid = 99123
 
+        def poll(self) -> int:
+            return 0
+
         def wait(self, **_kwargs: object) -> int:
             return 0
 
@@ -2079,7 +2079,7 @@ def test_resolved_denies_receive_host_facts(
     assert run_host.resolved_denies(run, paths) == ()
 
 
-def test_unproven_harness_stop_withholds_completion_and_auth(
+def test_unproven_harness_stop_keeps_rc_and_withholds_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = make_run(tmp_path)
@@ -2098,17 +2098,17 @@ def test_unproven_harness_stop_withholds_completion_and_auth(
         started(child)
         return child
 
-    def denied(_pgid: int, _grace: float) -> None:
+    def denied(_pgid: int, _grace: float, *_args: object) -> None:
         raise PermissionError
 
     monkeypatch.setattr(process_group, "launch_owned", launch)
     monkeypatch.setattr(process_group, "record", constant(None))
     monkeypatch.setattr(process_group, "stop_started", denied)
-    assert run_host.execute(run, "example") == 1
+    assert run_host.execute(run, "example") == 7
     assert run.files.path("phase").read_text() == "unknown"
-    assert not run.files.path("rc").exists()
-    assert run.files.path("log").read_text() == (
-        "run group stop unproven; completion withheld\n"
+    assert run.files.path("rc").read_text() == "7\n"
+    assert (
+        run.files.path("log").read_text() == "run group stop unproven; phase unknown\n"
     )
     assert not (run.home / ".codex" / "auth.json").exists()
 
@@ -2249,3 +2249,80 @@ def test_main_sets_host_path_before_loading(
 
     monkeypatch.setattr(run_host, "_load", load)
     assert run_host.main(["example"], "example") == 1
+
+
+def test_late_temporary_cleanup_keeps_finished_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    original = tempfile.TemporaryDirectory
+
+    @contextmanager
+    def directory() -> Generator[str]:
+        with original() as value:
+            yield value
+        raise OSError
+
+    def execute(_run: run_host.Run, _text: str) -> int:
+        run.files.write("log", "harness log\n")
+        run.files.write("phase", "ended")
+        run.files.write("rc", "7\n")
+        return 7
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", directory)
+    monkeypatch.setattr(run_host, "_files", constant(run.files))
+    monkeypatch.setattr(run_host, "_load", constant((run, "task")))
+    monkeypatch.setattr(run_host, "execute", execute)
+    assert run_host.main(["example"], "example") == 7
+    assert run.files.path("rc").read_text() == "7\n"
+    assert run.files.path("phase").read_text() == "ended"
+    assert run.files.path("log").read_text() == "harness log\n"
+
+
+def test_signer_stop_denial_keeps_harness_rc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    child = Child()
+    monkeypatch.setattr(process_group, "stop_started", constant(value=False))
+    agent = cast("subprocess.Popen[str]", child)
+    assert run_host.stop_agent(agent) is False
+    assert child.waits == []
+    assert run_host.finish(run, None, agent, 7) == 7
+    assert run.files.uncertain is True
+    assert run.files.path("phase").read_text() == "unknown"
+    assert run.files.path("rc").read_text() == "7\n"
+
+
+def test_terminal_cleanup_log_error_keeps_harness_rc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path, kind="start")
+    prepared = preparation(run)
+    child = Child()
+
+    def launch(
+        _spec: process_group.Launch, *, started: Callable[[Child], None]
+    ) -> Child:
+        started(child)
+        return child
+
+    def foreground(_fd: int, _pgid: int) -> None:
+        raise OSError
+
+    original = run.files.write
+
+    def write(suffix: str, text: str) -> None:
+        if suffix == "log":
+            raise OSError
+        original(suffix, text)
+
+    monkeypatch.setattr(sys, "stdin", sys.__stdin__)
+    monkeypatch.setattr(process_group, "prepare", constant(prepared))
+    monkeypatch.setattr(process_group, "record", constant(None))
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "stop_started", constant(None))
+    monkeypatch.setattr(process_group, "foreground", foreground)
+    monkeypatch.setattr(run.files, "write", write)
+    assert run_host.execute(run, "task") == 7
+    assert run.files.path("rc").read_text() == "7\n"

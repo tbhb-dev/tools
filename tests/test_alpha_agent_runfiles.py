@@ -41,6 +41,16 @@ def test_private_request_and_snapshot(tmp_path: Path) -> None:
     assert runfiles.private_dir(files.root).stat().st_mode & 0o777 == 0o700
 
 
+def test_host_log_appends_without_replacing_prior_output(tmp_path: Path) -> None:
+    files = runfiles.RunFiles(tmp_path, "example")
+    files.write("log", "harness output\n")
+    inode = files.path("log").stat().st_ino
+    files.write("log", "host cleanup\n")
+    assert files.path("log").stat().st_ino == inode
+    assert files.path("log").read_text() == "harness output\nhost cleanup\n"
+    assert files.path("log").stat().st_mode & 0o777 == 0o600
+
+
 @pytest.mark.parametrize("name", ["", "../x", "x/y", "-x", "x" * 65])
 def test_invalid_run_name(tmp_path: Path, name: str) -> None:
     with pytest.raises(Invalid) as caught:

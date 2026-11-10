@@ -17,8 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tbhbdev.alpha.agent import host_tools
-from tbhbdev.alpha.agent.decisions import run_state
-from tbhbdev.alpha.agent.decisions.run_state import Action, Group
+from tbhbdev.alpha.agent.decisions.run_state import Group
 from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
@@ -35,7 +34,6 @@ _BSD_SIZE = 136
 _BSD_START = 120
 _PROC_PIDTBSDINFO = 3
 _ZOMBIE = 5
-_PID = struct.Struct("=i")
 
 
 def boot_id() -> str:
@@ -87,94 +85,79 @@ def alive(pgid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        if sys.platform != "darwin":
-            raise
-        return _mac_alive(pgid)
+        return True
     return True
 
 
-def _mac_alive(pgid: int) -> bool:
-    """EPERM is inconclusive unless a complete group contains only zombies."""
-    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-    needed = library.proc_listpids(2, pgid, None, 0)
-    if needed < _PID.size:
-        message = "cannot enumerate run group"
-        raise PermissionError(message)
-    members = ctypes.create_string_buffer(needed + 1024)
-    ctypes.set_errno(0)
-    size = library.proc_listpids(2, pgid, members, len(members))
-    if ctypes.get_errno() or size < 0 or size >= len(members) or size % 4:
-        message = "incomplete run group enumeration"
-        raise PermissionError(message)
-    for (pid,) in _PID.iter_unpack(members.raw[:size]):
-        info = ctypes.create_string_buffer(_BSD_SIZE)
-        if (
-            library.proc_pidinfo(pid, _PROC_PIDTBSDINFO, 1, info, _BSD_SIZE)
-            != _BSD_SIZE
-        ):
-            message = "cannot inspect run group member"
-            raise PermissionError(message)
-        if int.from_bytes(info[4:8], sys.byteorder) != _ZOMBIE:
-            return True
-    confirmed = ctypes.create_string_buffer(len(members))
-    ctypes.set_errno(0)
-    count = library.proc_listpids(2, pgid, confirmed, len(confirmed))
-    if (
-        ctypes.get_errno()
-        or count != size
-        or confirmed.raw[:count] != members.raw[:size]
-    ):
-        message = "run group changed during inspection"
-        raise PermissionError(message)
-    return False
-
-
-def _signal(pgid: int, number: signal.Signals) -> None:
+def _signal(pgid: int, number: signal.Signals) -> bool:
+    """Return whether signalling was permitted; ESRCH is already stopped."""
     try:
         os.killpg(pgid, number)
     except ProcessLookupError:
         pass
     except PermissionError:
-        if sys.platform != "darwin" or _mac_alive(pgid):
-            raise
+        return False
+    return True
 
 
-def stop_started(pgid: int, grace: float) -> None:
-    """Sweep a group this still-live supervisor started, even after leader exit."""
-    with suppress(PermissionError):
-        _signal(pgid, signal.SIGTERM)
-    deadline = time.monotonic() + grace
-    while alive(pgid) and time.monotonic() < deadline:
+def _wait_stopped(
+    pgid: int, deadline: float, reap: Callable[[], object] | None
+) -> bool:
+    while True:
+        if reap is not None:
+            reap()
+        if not alive(pgid):
+            return True
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(0.02)
-    if alive(pgid):
+
+
+def stop_started(
+    pgid: int,
+    grace: float,
+    reap: Callable[[], object] | None = None,
+    report: Callable[[str], None] | None = None,
+) -> bool:
+    """Reap the leader and prove ESRCH, escalating even after an EPERM."""
+    for number, delay in ((signal.SIGTERM, grace), (signal.SIGKILL, 0.2)):
         try:
-            _signal(pgid, signal.SIGKILL)
-        except PermissionError:
-            deadline = time.monotonic() + max(grace, 1)
-            while alive(pgid) and time.monotonic() < deadline:
-                time.sleep(0.02)
-            if alive(pgid):
-                message = "run group could not be proven stopped"
-                raise Invalid(message) from None
+            if not _signal(pgid, number) and report is not None:
+                report(f"permission denied sending {number.name} to run group\n")
+            if _wait_stopped(pgid, time.monotonic() + delay, reap):
+                return True
+        except OSError:
+            continue
+    return False
 
 
-def stop_owned(files: RunFiles, pgid: int, grace: float) -> None:
+def unknown(files: RunFiles) -> None:
+    files.uncertain = True
+    for suffix, text in (
+        ("stop-unproven", "\n"),
+        ("phase", "unknown"),
+        ("log", "run group stop unproven; phase unknown\n"),
+    ):
+        with suppress(OSError):
+            files.write(suffix, text)
+
+
+def stop_owned(
+    files: RunFiles,
+    pgid: int,
+    grace: float,
+    reap: Callable[[], object] | None = None,
+) -> bool:
     try:
-        stop_started(pgid, grace)
+        stopped = (
+            stop_started(pgid, grace, reap, lambda text: files.write("log", text))
+            is not False
+        )
     except OSError, Invalid:
-        files.write("stop-unproven", "\n")
-        files.write("phase", "unknown")
-        raise
-
-
-def stop_recorded(files: RunFiles, grace: float) -> Action:
-    group = Group(**json.loads(files.path("pgid").read_text()))
-    action = run_state.stop_action(files.snapshot(), group, identity(group.pgid))
-    if action is Action.STOP:
-        stop_owned(files, group.pgid, grace)
-    elif action is Action.UNKNOWN:
-        files.write("phase", "unknown")
-    return action
+        stopped = False
+    if not stopped:
+        unknown(files)
+    return stopped
 
 
 INTERRUPTS = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
@@ -274,8 +257,8 @@ def launch_owned(
     except BaseException:
         if child is not None and started is None:
             with ignore_signals():
-                stop_started(child.pid, 0)
-                child.wait()
+                if stop_started(child.pid, 0, child.poll) is not False:
+                    child.wait()
         raise
     else:
         return child
@@ -329,10 +312,12 @@ def prepare(
     worker.start()
     pid = worker_pid(worker)
     child.close()
+    ready = False
     try:
         if not parent.poll(max(0, deadline - time.monotonic())):
             raise TimeoutError
         parent.recv()
+        ready = True
         record(files, pid)
         parent.send(None)
         if not parent.poll(max(0, deadline - time.monotonic())):
@@ -348,10 +333,13 @@ def prepare(
     finally:
         with ignore_signals():
             parent.close()
-            if worker.exitcode is None:
-                stop_owned(files, pid, grace)
+            if ready and worker.exitcode is None:
+                stop_owned(files, pid, grace, worker.is_alive)
             worker.join(timeout=grace)
-            if worker.is_alive():
-                worker.kill()
-                worker.join()
-            worker.close()
+            try:
+                if worker.is_alive():
+                    worker.kill()
+                    worker.join(timeout=grace)
+                worker.close()
+            except OSError, ValueError:
+                unknown(files)

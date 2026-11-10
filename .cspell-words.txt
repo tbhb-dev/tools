@@ -244,9 +244,9 @@ getuid
 NOSYSTEM
 uploadpack
 bubblewrap
-listpids
 hardlinks
 inodes
 pushurl
 repositoryformatversion
 symref
+ESRCH

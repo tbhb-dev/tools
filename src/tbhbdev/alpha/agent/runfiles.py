@@ -91,12 +91,16 @@ class RunFiles:
             raise Invalid(message)
         self.root = private_dir(root)
         self.name = name
+        self.uncertain = False
 
     def path(self, suffix: str) -> Path:
         return self.root / f"{self.name}.{suffix}"
 
     def write(self, suffix: str, text: str) -> None:
-        atomic(self.path(suffix), text)
+        if suffix == "log":
+            append_text(self.path(suffix), text)
+        else:
+            atomic(self.path(suffix), text)
 
     def receive(self, value: RunRequest) -> None:
         fd = os.open(
@@ -118,11 +122,7 @@ class RunFiles:
 def append(root: Path, line: dict[str, object]) -> None:
     """Open the index only after acquiring its stable lock."""
     with locked(root / INDEX_LOCK):
-        fd = os.open(root / INDEX, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "a") as out:
-            out.write(json.dumps(line) + "\n")
-            out.flush()
-            os.fsync(out.fileno())
+        append_text(root / INDEX, json.dumps(line) + "\n")
 
 
 def latest(root: Path) -> dict[str, dict[str, object]]:
@@ -135,3 +135,11 @@ def latest(root: Path) -> dict[str, dict[str, object]]:
                 line = json.loads(text)
                 result[line["run"]] = line
     return result
+
+
+def append_text(path: Path, text: str) -> None:
+    fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "a") as out:
+        out.write(text)
+        out.flush()
+        os.fsync(out.fileno())

@@ -419,15 +419,16 @@ def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
     finally:
         stack.enter_context(process_group.ignore_signals())
         if child is not None:
-            try:
+            with suppress(OSError):
                 run.files.write("phase", "exited")
-            finally:
-                process_group.stop_owned(
-                    run.files, child.pid, run.settings.kill_grace_seconds
-                )
-                child.wait()
-            run.files.write("phase", "stopped")
-            if headless and run.request.harness is Harness.CODEX:
+            stopped = process_group.stop_owned(
+                run.files, child.pid, run.settings.kill_grace_seconds, child.poll
+            )
+            if stopped:
+                with suppress(OSError, subprocess.SubprocessError):
+                    child.wait()
+                    run.files.write("phase", "stopped")
+            if stopped and headless and run.request.harness is Harness.CODEX:
                 with suppress(FileNotFoundError):
                     runfiles.copy_final(
                         run.tmpdir / "out.final", run.files.path("out.final")
@@ -436,12 +437,15 @@ def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
             try:
                 process_group.foreground(terminal, os.getpgrp())
             except OSError:
-                run.files.write("log", "terminal unavailable during cleanup\n")
+                with suppress(OSError):
+                    run.files.write("log", "terminal unavailable during cleanup\n")
 
 
-def stop_agent(agent: subprocess.Popen[str]) -> None:
-    process_group.stop_started(agent.pid, 0)
-    agent.wait()
+def stop_agent(agent: subprocess.Popen[str]) -> bool:
+    stopped = process_group.stop_started(agent.pid, 0, agent.poll) is not False
+    if stopped:
+        agent.wait()
+    return stopped
 
 
 def prepared_result(result: object) -> Prepared:
@@ -501,11 +505,12 @@ def _execute(run: Run, text: str, stack: ExitStack) -> int:
 def finish(
     run: Run, prepared: Prepared | None, agent: subprocess.Popen[str] | None, rc: int
 ) -> int:
-    if run.files.path("stop-unproven").exists():
-        run.files.write("log", "run group stop unproven; completion withheld\n")
-        return 1
     try:
-        if prepared is not None and run.request.harness is Harness.CODEX:
+        if (
+            prepared is not None
+            and run.request.harness is Harness.CODEX
+            and not run.files.uncertain
+        ):
             try:
                 reason = credentials.auth_write_back(
                     run.home / ".codex" / "auth.json",
@@ -519,11 +524,16 @@ def finish(
                 run.files.write("log", "codex auth write-back failed\n")
     finally:
         try:
-            if agent is not None:
-                stop_agent(agent)
+            if agent is not None and stop_agent(agent) is False:
+                process_group.unknown(run.files)
+        except OSError, Invalid:
+            process_group.unknown(run.files)
         finally:
             try:
-                run.files.write("phase", "ended")
+                phase = "unknown" if run.files.uncertain else "ended"
+                run.files.write("phase", phase)
+            except OSError:
+                process_group.unknown(run.files)
             finally:
                 run.files.write("rc", f"{rc}\n")
     try:
@@ -567,6 +577,7 @@ def main(arguments: list[str], prog: str) -> int:
         print(f"{prog}: run name is required", file=sys.stderr)
         return 1
     files = None
+    completed = None
     previous = {s: signal.signal(s, interrupt) for s in process_group.INTERRUPTS}
     try:
         with process_group.defer_signals():
@@ -578,7 +589,7 @@ def main(arguments: list[str], prog: str) -> int:
         ):
             refuse_started(files)
             run, text = _load(args, Path(tmpdir).resolve())
-            return execute(run, text)
+            completed = execute(run, text)
     except (
         Invalid,
         userconfig.ConfigError,
@@ -586,6 +597,8 @@ def main(arguments: list[str], prog: str) -> int:
         ValueError,
         RunInterruptedError,
     ) as exc:
+        if completed is not None:
+            return completed
         rc = 143 if isinstance(exc, RunInterruptedError) else 1
         with process_group.ignore_signals():
             if files is not None and not isinstance(exc, RunExistsError):
@@ -600,6 +613,8 @@ def main(arguments: list[str], prog: str) -> int:
                     files.write("rc", f"{rc}\n")
         print(f"{prog}: {exc}", file=sys.stderr)
         return rc
+    else:
+        return completed
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)
