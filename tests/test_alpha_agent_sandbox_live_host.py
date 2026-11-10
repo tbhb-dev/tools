@@ -277,10 +277,17 @@ def test_terminal_probe_requires_ioctl_denial(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: int, profile: Profile
 ) -> None:
     def observe(
-        command: tuple[str, ...], _environment: dict[str, str], _cwd: Path
+        command: tuple[str, ...],
+        _environment: dict[str, str],
+        _cwd: Path,
+        *,
+        prompt: str | None = None,
     ) -> TerminalObservation:
+        assert prompt is None or isinstance(prompt, str)
         target = Path(command[-1])
         sandbox = target.suffix == ".sh"
+        if sandbox:
+            assert prompt == (tmp_path / "runs/probe.prompt").read_text()
         witness = Path(shlex.split(target.read_text())[-1]) if sandbox else target
         assert witness.parent == tmp_path / (
             "temp" if profile is Profile.BUILD else "audit"
@@ -304,7 +311,10 @@ def fake_terminal_observation(
     command: tuple[str, ...],
     _environment: dict[str, str],
     _cwd: Path,
+    *,
+    prompt: str | None = None,
 ) -> TerminalObservation:
+    assert prompt is None or isinstance(prompt, str)
     target = Path(command[-1])
     sandbox = target.suffix == ".sh"
     witness = Path(shlex.split(target.read_text())[-1]) if sandbox else target
@@ -392,8 +402,13 @@ def test_terminal_control_requires_recorded_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     def observe(
-        command: tuple[str, ...], _environment: dict[str, str], _cwd: Path
+        command: tuple[str, ...],
+        _environment: dict[str, str],
+        _cwd: Path,
+        *,
+        prompt: str | None = None,
     ) -> TerminalObservation:
+        assert prompt is None
         if failure != "no-witness":
             Path(command[-1]).write_text(
                 json.dumps(
@@ -406,6 +421,7 @@ def test_terminal_control_requires_recorded_success(
         return TerminalObservation(INPUT_MARKER, int(failure == "exit-error"))
 
     monkeypatch.setattr(sys.modules[__name__], "observe_terminal", observe)
+    monkeypatch.setattr(sys.modules[__name__], "legacy_input_setting", lambda: "1")
     with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as caught:
         test_live_terminal_injection(
             tmp_path, monkeypatch, Harness.CODEX, Profile.BUILD
@@ -446,7 +462,7 @@ def test_live_terminal_injection(
     control_result = json.loads(control_witness.read_text())
     control_error = control_result.get("error")
     kernel_blocked = (
-        setting == "0"
+        setting in {"0", "unavailable"}
         and control_result.get("attempted") is True
         and isinstance(control_error, int)
         and control_error != 0
@@ -477,6 +493,7 @@ def test_live_terminal_injection(
             probe_command(run, paths, value, executable, script),
             value.env,
             Path(paths.worktree),
+            prompt=run.files.path("prompt").read_text(),
         )
     if not witness.is_file():
         pytest.fail(f"{label}: unproven; probe not executed; legacy_tiocsti={setting}")
@@ -566,17 +583,27 @@ def test_host_probes_use_readable_protection_and_selected_profile(
 
 @pytest.mark.usefixtures("fake_host_tools")
 @pytest.mark.parametrize("profile", Profile)
-@pytest.mark.parametrize("error", [0, 1])
+@pytest.mark.parametrize(
+    "control",
+    [(setting, error) for setting in ("0", "unavailable") for error in (0, 1)],
+)
 def test_terminal_kernel_refusal_is_a_passing_observation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     profile: Profile,
-    error: int,
+    control: tuple[str, int],
 ) -> None:
+    setting, error = control
+
     def observe(
-        command: tuple[str, ...], _environment: dict[str, str], _cwd: Path
+        command: tuple[str, ...],
+        _environment: dict[str, str],
+        _cwd: Path,
+        *,
+        prompt: str | None = None,
     ) -> TerminalObservation:
+        assert prompt is None or isinstance(prompt, str)
         target = Path(command[-1])
         sandbox = target.suffix == ".sh"
         witness = Path(shlex.split(target.read_text())[-1]) if sandbox else target
@@ -587,7 +614,7 @@ def test_terminal_kernel_refusal_is_a_passing_observation(
 
     module = sys.modules[__name__]
     monkeypatch.setattr(module, "observe_terminal", observe)
-    monkeypatch.setattr(module, "legacy_input_setting", lambda: "0")
+    monkeypatch.setattr(module, "legacy_input_setting", lambda: setting)
     if error == 0:
         with pytest.raises(AssertionError, match="ioctl error=0"):
             test_live_terminal_injection(tmp_path, monkeypatch, Harness.CODEX, profile)
@@ -600,3 +627,22 @@ def test_host_live_probes_refuse_agy(tmp_path: Path) -> None:
     run, paths = probe_run(tmp_path, Harness.AGY)
     with pytest.raises(Invalid, match="agy has no OS sandbox"):
         checked_live_policy(run, paths)
+
+
+def test_terminal_prompt_reaches_the_harness_with_terminal_stdin(
+    tmp_path: Path,
+) -> None:
+    observed = tmp_path / "prompt.json"
+    prompt = "Execute the fixture command.\nThen finish."
+    script = (
+        "import json,sys;from pathlib import Path;"
+        f"Path({str(observed)!r}).write_text(json.dumps([sys.stdin.isatty(),sys.argv[-1]]))"
+    )
+    result = observe_terminal(
+        (sys.executable, "-c", script, "-"),
+        {"PATH": os.defpath},
+        tmp_path,
+        prompt=prompt,
+    )
+    assert result == TerminalObservation(b"", 0)
+    assert json.loads(observed.read_text()) == [True, prompt]
