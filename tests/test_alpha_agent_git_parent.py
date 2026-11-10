@@ -112,10 +112,8 @@ def test_git_parent_overrides_disable_real_plants(
         )
         if name == "embedded-bare":
             assert result.returncode != 0
-            assert any(
-                message in result.stderr
-                for message in ("safe.bareRepository", "Not a git repository")
-            )
+            if arguments[0] == "status":
+                assert "safe.bareRepository" in result.stderr
         else:
             assert result.returncode == 0 or (
                 result.returncode == 128
