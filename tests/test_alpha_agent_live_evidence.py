@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import shlex
 import subprocess
 import sys
@@ -218,6 +219,54 @@ def test_default_suite_runs_harness_free_sandbox_probes(tmp_path: Path) -> None:
     assert "SKIPPED" not in result.stdout
 
 
+@dataclasses.dataclass
+class SocketProbeRunner:
+    run: run_host.Run
+    control: Proxy
+    platform: str
+    scripts: list[str] = dataclasses.field(default_factory=list)
+
+    def record(self, label: str) -> None:
+        status = int(
+            label not in {"api.github.com", "file-control"}
+            and not (label == "local-binding" and self.platform == "linux")
+        )
+        with (self.run.tmpdir / "observed").open("a") as output:
+            output.write(f"{label} {status}\n")
+        if label == "api.github.com":
+            self.control.targets.append("api.github.com:443")
+        if label == "file-control":
+            (self.run.tmpdir / "write-control").write_text("invoked")
+
+    def __call__(
+        self, command: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        prompt = "Execute this exact command with Bash, then finish: "
+        text = kwargs["input"]
+        assert isinstance(text, str)
+        assert text.startswith(prompt)
+        script = Path(shlex.split(text.removeprefix(prompt))[-1]).read_text()
+        self.scripts.append(script)
+        # Fake the CLI ending a complete tool call on the first blocked domain.
+        for line in script.splitlines():
+            if "https://example.com" in line:
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    "",
+                    'Network access to "example.com" was blocked: '
+                    "domain is not on the allowlist",
+                )
+            # Linux's isolated network namespace cannot reach host loopback.
+            # https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/linux-sandbox/src/proxy_routing.rs
+            if self.platform == "linux" and "https://api.github.com" in line:
+                assert '--proxy "$HTTPS_PROXY"' in line
+                assert "--noproxy ''" in line
+            if line.startswith("echo '"):
+                self.record(shlex.split(line)[1].split()[0])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+
 @pytest.mark.parametrize("platform", ["linux", "darwin"])
 def test_socket_probe_isolates_network_refusals_and_keeps_every_label(
     tmp_path: Path,
@@ -229,7 +278,7 @@ def test_socket_probe_isolates_network_refusals_and_keeps_every_label(
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     run, paths = live.probe_run(tmp_path, Harness.CODEX)
     control = Proxy(1)
-    scripts: list[str] = []
+    runner = SocketProbeRunner(run, control, platform)
 
     def checked(
         actual: run_host.Run, actual_paths: run_host.RunPaths
@@ -245,45 +294,6 @@ def test_socket_probe_isolates_network_refusals_and_keeps_every_label(
         )
         return value, "/example/codex"
 
-    def execute(
-        _command: tuple[str, ...], **kwargs: object
-    ) -> subprocess.CompletedProcess[str]:
-        prompt = "Execute this exact command with Bash, then finish: "
-        text = kwargs["input"]
-        assert isinstance(text, str)
-        assert text.startswith(prompt)
-        script = Path(shlex.split(text.removeprefix(prompt))[-1]).read_text()
-        scripts.append(script)
-        results = run.tmpdir / "observed"
-        # Fake the CLI aborting a complete tool call on the first blocked domain.
-        for line in script.splitlines():
-            if "https://example.com" in line:
-                return subprocess.CompletedProcess(
-                    _command,
-                    1,
-                    "",
-                    'Network access to "example.com" was blocked: '
-                    "domain is not on the allowlist",
-                )
-            # Linux's isolated network namespace cannot reach host loopback.
-            # https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/linux-sandbox/src/proxy_routing.rs
-            if platform == "linux" and "https://api.github.com" in line:
-                assert '--proxy "$HTTPS_PROXY"' in line
-                assert "--noproxy ''" in line
-            if line.startswith("echo '"):
-                label = shlex.split(line)[1].split()[0]
-                status = int(
-                    label not in {"api.github.com", "file-control"}
-                    and not (label == "local-binding" and platform == "linux")
-                )
-                with results.open("a") as output:
-                    output.write(f"{label} {status}\n")
-                if label == "api.github.com":
-                    control.targets.append("api.github.com:443")
-                if label == "file-control":
-                    (run.tmpdir / "write-control").write_text("invoked")
-        return subprocess.CompletedProcess(_command, 0, "", "")
-
     def sockets(_stack: ExitStack) -> dict[str, live.Listener]:
         return {
             label: live.Listener(f"/example/{label}")
@@ -293,7 +303,7 @@ def test_socket_probe_isolates_network_refusals_and_keeps_every_label(
     monkeypatch.setattr(run_host, "checked_policy", checked)
     monkeypatch.setattr(live, "scratch_servers", sockets)
     monkeypatch.setattr(live, "control_proxy", lambda: nullcontext(control))
-    monkeypatch.setattr(live, "subprocess", SimpleNamespace(run=execute))
+    monkeypatch.setattr(live, "subprocess", SimpleNamespace(run=runner))
     with ExitStack() as stack:
         live.run_probe(run, paths, "/example/codex", stack)
     output = capsys.readouterr().out
@@ -303,15 +313,18 @@ def test_socket_probe_isolates_network_refusals_and_keeps_every_label(
         for label in (
             *EXTRA,
             "TMPDIR",
+            "tmp",
+            "HOME",
             "api.github.com",
             "example.com",
             "project-hooks",
         )
     )
-    assert len(scripts) == 7
-    assert "curl" not in scripts[0]
+    assert len(runner.scripts) == 7
+    assert "curl" not in runner.scripts[0]
     assert all(
-        label in scripts[0] for label in (*MIRRORS, "file-control", "local-binding")
+        label in runner.scripts[0]
+        for label in (*MIRRORS, "file-control", "local-binding")
     )
     assert all(
         sum(
@@ -324,7 +337,7 @@ def test_socket_probe_isolates_network_refusals_and_keeps_every_label(
             )
         )
         == 1
-        for script in scripts[1:]
+        for script in runner.scripts[1:]
     )
 
 
