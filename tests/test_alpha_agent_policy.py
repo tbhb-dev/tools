@@ -27,7 +27,7 @@ from agent_example import (
 )
 
 from tbhbdev import secrets
-from tbhbdev.alpha.agent import model
+from tbhbdev.alpha.agent import host_tools, model
 from tbhbdev.alpha.agent.decisions import policy
 from tbhbdev.alpha.agent.model import (
     Harness,
@@ -114,7 +114,7 @@ def env_of(os: Os, harness: Harness, account: str) -> dict[str, str]:
     home = f"/example/home/{account}"
     tmp = f"{home}/.local/state/example-runs/run1.tmp"
     env = {
-        "PATH": PATH[os].format(home=home),
+        "PATH": ":".join(host_tools.search_path(settings(), os)),
         "HOME": home,
         "USER": account,
         "LOGNAME": account,
@@ -403,6 +403,7 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
     )
     return {
         "env": {
+            "PATH": PATH[os].format(home=home),
             "TMPDIR": tmp,
             "TMPPREFIX": f"{tmp}/zsh",
             "GH_CONFIG_DIR": f"{tmp}/gh",
@@ -1419,6 +1420,16 @@ def test_linux_socket_denies_use_the_run_uid(harness: Harness) -> None:
 
 def test_host_protection_handles_a_missing_common_directory() -> None:
     policy.protect_host(settings(), paths("agent"), ("/example/installation",))
+
+
+@pytest.mark.parametrize("host", [LINUX, MACOS])
+def test_parent_and_tool_search_paths_are_separate(host: model.Host) -> None:
+    result = made(host.os, Profile.BUILD, Harness.CODEX, "agent")
+    fixed = "/usr/bin:/bin:/usr/sbin:/sbin"
+    if host.os is Os.MACOS:
+        fixed += ":/opt/homebrew/bin:/usr/local/bin"
+    assert result.env["PATH"] == fixed
+    assert result.tool_path == PATH[host.os].format(home="/example/home/agent")
 
 
 @pytest.mark.parametrize("reason", [None, "isolated test host"])

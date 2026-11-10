@@ -14,6 +14,7 @@ from dataclasses import replace
 from pathlib import PurePosixPath
 
 from tbhbdev import secrets
+from tbhbdev.alpha.agent import host_tools
 from tbhbdev.alpha.agent.model import (
     AgyPolicy,
     ClaudePolicy,
@@ -114,10 +115,8 @@ def environment(
     The two config-directory variables name directories under the private
     TMPDIR that run-host creates and fills. They hold no credential.
     """
-    search = settings.sandbox.path
-    entries = search.linux if host.os is Os.LINUX else search.macos
     env = {
-        "PATH": ":".join(resolve(paths.home, e) for e in entries),
+        "PATH": ":".join(host_tools.search_path(settings, host.os)),
         "HOME": paths.home,
         "USER": account,
         "LOGNAME": account,
@@ -235,6 +234,7 @@ def _claude(
                 k: env[k]
                 for k in (
                     "TMPDIR",
+                    "PATH",
                     "TMPPREFIX",
                     "GH_CONFIG_DIR",
                     "DOCKER_CONFIG",
@@ -349,6 +349,12 @@ def _agy(
     return AgyPolicy(tuple(grants))
 
 
+def tool_path(settings: Settings, host: Host, home: str) -> str:
+    search = settings.sandbox.path
+    entries = search.linux if host.os is Os.LINUX else search.macos
+    return ":".join(resolve(home, e) for e in entries)
+
+
 def build(  # noqa: PLR0913 -- one value per fact the policy depends on
     settings: Settings,
     host: Host,
@@ -399,6 +405,7 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
     if paths.signing_socket is not None:
         _refuse_overlaps((paths.signing_socket,), deny, "signing socket")
     env = environment(settings, host, harness, paths, account)
+    tools_path = tool_path(settings, host, paths.home)
     writes = _write_roots(settings, profile, paths)
     if host.os is Os.MACOS and harness in (Harness.CODEX, Harness.CLAUDE):
         writes = tuple(dict.fromkeys((*writes, _DEV_FD)))
@@ -424,9 +431,9 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
             profile,
             paths,
             (writes, deny, protected),
-            env,
+            env | {"PATH": tools_path},
             settings.sandbox.network_domains,
         )
     else:
         detail = _agy(settings, profile, paths, env, deny)
-    return Policy(harness, profile, env, deny, detail)
+    return Policy(harness, profile, env, deny, detail, tools_path)

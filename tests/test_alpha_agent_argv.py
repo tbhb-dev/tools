@@ -54,6 +54,8 @@ HANDOFF = (
 )
 CODEX_HANDOFF = (
     "-c",
+    f'shell_environment_policy.set.PATH="{HOME}/.local/bin:/usr/local/bin:/usr/bin"',
+    "-c",
     f'shell_environment_policy.set.CODEX_HOME="{TMP}/codex"',
     *HANDOFF,
 )

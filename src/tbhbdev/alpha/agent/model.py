@@ -226,6 +226,7 @@ class Policy:
     env: dict[str, str]
     deny: tuple[str, ...]
     detail: CodexPolicy | ClaudePolicy | AgyPolicy
+    tool_path: str
 
 
 @dataclass(frozen=True)
