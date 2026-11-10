@@ -22,7 +22,7 @@ def test_review_refused_and_build_labelled() -> None:
     dirty = taint.state([RECORD], HOST)
     assert dirty == taint.State(HOST, "tainted", RECORD)
     assert taint.request_flag(dirty) is True
-    assert taint.check_launch(Profile.REVIEW, unsandboxed=False, tainted=dirty) == (
+    assert taint.check_launch(Profile.REVIEW, tainted=dirty) == (
         taint.Launch(
             65,
             "review runs refused: example-linux host=tainted; "
@@ -30,23 +30,17 @@ def test_review_refused_and_build_labelled() -> None:
             "example-linux --reason …",
         )
     )
-    for full in (False, True):
-        assert taint.check_launch(
-            Profile.BUILD, unsandboxed=full, tainted=dirty
-        ) == taint.Launch(label="untrusted-host")
+    assert taint.check_launch(Profile.BUILD, tainted=dirty) == taint.Launch(
+        label="untrusted-host"
+    )
 
 
-def test_clean_launch_and_unsandboxed_label() -> None:
+def test_clean_launch() -> None:
     clean = taint.state([CLEARANCE], HOST)
     assert clean == taint.State(HOST, "clean")
     assert taint.request_flag(clean) is False
     for profile in Profile:
-        assert taint.check_launch(
-            profile, unsandboxed=False, tainted=clean
-        ) == taint.Launch(0, "", None)
-    assert taint.check_launch(
-        Profile.BUILD, unsandboxed=True, tainted=clean
-    ) == taint.Launch(label="untrusted-host")
+        assert taint.check_launch(profile, tainted=clean) == taint.Launch(0, "", None)
 
 
 def test_append_order_ignores_clock_and_account() -> None:
@@ -115,17 +109,14 @@ def test_bad_run_name() -> None:
 def test_failed_store_is_tainted() -> None:
     dirty = taint.State(HOST, "tainted", problem="wrong ownership")
     assert taint.request_flag(dirty) is True
-    decision = taint.check_launch(Profile.REVIEW, unsandboxed=False, tainted=dirty)
+    decision = taint.check_launch(Profile.REVIEW, tainted=dirty)
     assert decision.status == 65
     assert decision.label is None
     assert decision.message == (
         "review runs refused: example-linux host=tainted; "
         "clear with: tbhbdev alpha agent clear-taint example-linux --reason …"
     )
-    assert (
-        taint.check_launch(Profile.BUILD, unsandboxed=False, tainted=dirty).label
-        == "untrusted-host"
-    )
+    assert taint.check_launch(Profile.BUILD, tainted=dirty).label == "untrusted-host"
 
 
 def test_state_rejects_bad_host() -> None:

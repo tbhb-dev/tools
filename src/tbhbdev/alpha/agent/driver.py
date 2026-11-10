@@ -130,12 +130,6 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
 def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
     """Consult coordinator evidence before contacting the run host."""
     state = taint_store.load(run.host.name)
-    decision = taint.check_launch(
-        run.request.profile, unsandboxed=run.request.unsandboxed, tainted=state
-    )
-    if decision.status:
-        print(decision.message, file=sys.stderr)
-        return decision.status
     if state.status == "clean":
         try:
             marker = transport.shell(
@@ -145,9 +139,7 @@ def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
                 timeout=deadline - time.monotonic(),
             )
         except transport.TransportError:
-            state = taint.State(
-                run.host.name, "tainted", problem="host marker read failed"
-            )
+            state = taint.State(run.host.name, "tainted")
         else:
             if marker:
                 record = taint.Taint(
@@ -158,10 +150,8 @@ def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
                     datetime.now(UTC).isoformat(),
                 )
                 taint_store.record_taint(record)
-                state = taint.State(run.host.name, "tainted", record)
-    decision = taint.check_launch(
-        run.request.profile, unsandboxed=run.request.unsandboxed, tainted=state
-    )
+                state = taint.State(run.host.name, "tainted")
+    decision = taint.check_launch(run.request.profile, tainted=state)
     if decision.status:
         print(decision.message, file=sys.stderr)
         return decision.status
@@ -175,8 +165,10 @@ def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
                 run.started,
             )
         )
-        state = taint.State(run.host.name, "tainted")
-    run.request = replace(run.request, tainted_host=taint.request_flag(state))
+    run.request = replace(
+        run.request,
+        tainted_host=run.request.unsandboxed or taint.request_flag(state),
+    )
     return 0
 
 
