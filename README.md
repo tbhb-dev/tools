@@ -139,6 +139,7 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `repo` holds repository commands. `repo bootstrap` applies the standard repository settings.
 - `merge` squash-merges an approved pull request.
 - `loop` validates its user configuration and refuses live intake until adapters connect the runner to its sources. Its shadow runner accepts typed event and reconcile interfaces for simulation. The package includes pure state derivation and rules that produce typed shadow intents with action keys and spawn budgets. A SQLite store records receipts, action keys, runs, and escalation markers.
+- `agent precheck CLONE --reference REF [--host HOST]` compares a clone's hooks with a local reference and checks its Git config for risky keys. Paths may be absolute or relative to the home directory. Collection uses one SSH call with `--host` and reads locally otherwise. It never runs Git. Exit codes are 0 for a match, 1 for mismatches, and 2 for usage or collection errors. The Python API `precheck(clone_data, reference)` returns the result for callers.
 - `agent` coordinates runs with `exec`, `wait`, `status`, `log`, `diff`, `kill`, `clean` and `keep`. `clear-taint HOST --reason TEXT` records local host clearance. The package also includes the run request's schema and the repo argument rules.
 - `install` installs the git hooks and the user-level harness hooks.
 
