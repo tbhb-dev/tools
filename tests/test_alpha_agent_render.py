@@ -1,13 +1,14 @@
 """Report text is a pure function of literal facts."""
 
 from tbhbdev.alpha.agent import render
+from tbhbdev.alpha.agent.model import RunKind
 
 
 def test_brief_and_launch() -> None:
-    assert render.brief("example\n") == (
+    assert render.brief(RunKind.EXEC, "example\n") == (
         "Report results only in your final answer. "
         "Never message Claude sessions, session sockets or other agents directly."
-        "\n\nexample\n"
+        "\nexample\n"
     )
     assert (
         render.launched("example", "example-linux", "agent")
