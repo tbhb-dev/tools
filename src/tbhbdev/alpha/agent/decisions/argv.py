@@ -269,6 +269,8 @@ def harness(  # noqa: PLR0913 -- one value per fact the harness's argv depends o
     brief_file: str,
     agy_project: str | None = None,
     agy_brief: str | None = None,
+    schema_file: str | None = None,
+    schema_text: str | None = None,
 ) -> tuple[str, ...]:
     """The harness command of REQUEST, under POLICY, that runs in WORKTREE.
 
@@ -287,7 +289,13 @@ def harness(  # noqa: PLR0913 -- one value per fact the harness's argv depends o
         raise Invalid(message)
     detail = policy.detail
     if isinstance(detail, CodexPolicy):
-        return _codex(request, policy, detail, worktree, brief_file)
+        command = _codex(request, policy, detail, worktree, brief_file)
+        if request.kind is RunKind.EXEC and schema_file is not None:
+            return (*command[:-1], "--output-schema", schema_file, command[-1])
+        return command
     if isinstance(detail, ClaudePolicy):
-        return _claude(request, policy, detail, brief_file)
+        command = _claude(request, policy, detail, brief_file)
+        if request.kind is RunKind.EXEC and schema_text is not None:
+            return (*command, "--output-format", "json", "--json-schema", schema_text)
+        return command
     return _agy(request, policy, worktree, brief_file, agy_project, agy_brief)
