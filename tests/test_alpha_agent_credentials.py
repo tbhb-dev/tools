@@ -17,6 +17,8 @@ import httpx
 import pytest
 import yaml
 from agent_host_example import constant, git, host_settings, repository, run_request
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from tbhbdev import secrets
 from tbhbdev.alpha import gh_app
@@ -197,7 +199,7 @@ def test_unknown_claude_profile(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("failure", [None, "host", "request"])
+@pytest.mark.parametrize("failure", [None, "host", "sign", "request"])
 def test_installation_reuses_app_signer_without_storing_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -210,26 +212,37 @@ def test_installation_reuses_app_signer_without_storing_token(
     monkeypatch.setattr(gh_app, "default_env", lambda: env)
     calls: list[str] = []
 
-    def token(
-        actual: gh_app.Env,
-        *,
-        app_id: str,
-        pem: str,
-        repository: str,
-        permissions: dict[str, str],
-    ) -> gh_app.Minted:
+    def sign(actual: gh_app.Env, client_id: str, key: str) -> str:
         assert actual is env
-        assert app_id == "example-client"
-        assert pem == "example-pem"
-        assert repository == "example-org/example-repo"
-        assert permissions == {"pull_requests": "write"}
+        assert client_id == "example-client"
+        assert key == pem
+        calls.append("sign")
+        if failure == "sign":
+            message = "signing failed"
+            raise gh_app.GhAppError(message)
+        return "example-jwt"
+
+    def token(actual: gh_app.Env, args: gh_app.Args, jwt: str) -> gh_app.Minted:
+        assert actual is env
+        assert dataclasses.asdict(args) == {
+            "app": "reviews",
+            "repo": "example-org/example-repo",
+            "fresh": True,
+            "dry_run": False,
+            "all_repos": False,
+            "vault": "",
+            "cooldown_until": None,
+            "cooldown_status": False,
+        }
+        assert jwt == "example-jwt"
         calls.append("request")
         if failure == "request":
             message = "request failed"
             raise gh_app.GhAppError(message)
         return gh_app.Minted("example-installation", 2000)
 
-    monkeypatch.setattr(gh_app, "mint_token", token)
+    monkeypatch.setattr(gh_app, "sign", sign)
+    monkeypatch.setattr(gh_app, "request_token", token)
     repository = (
         "example.com/example-org/example-repo"
         if failure == "host"
@@ -250,10 +263,60 @@ def test_installation_reuses_app_signer_without_storing_token(
     check_installation_calls(calls, fake_reader, failure, tmp_path)
 
 
+def test_review_token_request_keeps_installed_permissions_for_only_run_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    monkeypatch.setitem(VALUES, "example/app/pem", pem)
+    requests: list[httpx.Request] = []
+    replies = {
+        ("GET", "/repos/example-org/example-repo/installation"): httpx.Response(
+            200, json={"id": 7}
+        ),
+        ("POST", "/app/installations/7/access_tokens"): httpx.Response(
+            201,
+            json={
+                "token": "example-installation",
+                "expires_at": "2030-01-01T00:00:00Z",
+            },
+        ),
+    }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return replies[request.method, request.url.path]
+
+    env = gh_app.Env(
+        tmp_path,
+        lambda: 1000,
+        secrets.Store,
+        gh_app.run_openssl,
+        httpx.MockTransport(respond),
+    )
+    monkeypatch.setattr(gh_app, "default_env", lambda: env)
+    monkeypatch.setattr(gh_app, "sign", constant("example-jwt"))
+    credentials.deliver(
+        run_request(profile="review", commit="0" * 40), host_settings(), tmp_path
+    )
+    assert [(request.method, request.url.path) for request in requests] == list(replies)
+    assert json.loads(requests[1].content) == {"repositories": ["example-repo"]}
+
+
 def check_installation_calls(
     calls: list[str], fake_reader: list[str], failure: str | None, tmp_path: Path
 ) -> None:
-    assert calls == ([] if failure == "host" else ["request"])
+    assert calls == (
+        []
+        if failure == "host"
+        else ["sign"]
+        if failure == "sign"
+        else ["sign", "request"]
+    )
     assert fake_reader == (
         [] if failure == "host" else ["example/app/client", "example/app/pem"]
     )
@@ -667,25 +730,16 @@ def test_app_token_scope_ignores_planted_origin(
     )
     env = gh_app.Env(tmp_path, lambda: 1000, secrets.Store, gh_app.run_openssl)
     monkeypatch.setattr(gh_app, "default_env", lambda: env)
+    monkeypatch.setattr(gh_app, "rebuild_pem", constant("fake pem"))
+    monkeypatch.setattr(gh_app, "sign", constant("fake jwt"))
     monkeypatch.setitem(VALUES, "example/app/pem", "fake pem")
     scopes: list[str] = []
 
-    def token(
-        actual: gh_app.Env,
-        *,
-        app_id: str,
-        pem: str,
-        repository: str,
-        permissions: dict[str, str],
-    ) -> gh_app.Minted:
-        assert actual is env
-        assert app_id == "example-client"
-        assert pem == "fake pem"
-        assert permissions == {"pull_requests": "write"}
-        scopes.append(repository)
+    def token(_env: gh_app.Env, args: gh_app.Args, _jwt: str) -> gh_app.Minted:
+        scopes.append(args.repo)
         return gh_app.Minted("fake installation", 2000)
 
-    monkeypatch.setattr(gh_app, "mint_token", token)
+    monkeypatch.setattr(gh_app, "request_token", token)
     value = run_request(profile="review", commit="0" * 40)
     credentials.deliver(value, host_settings(), tmp_path)
     assert scopes == ["example-org/example-repo"]
