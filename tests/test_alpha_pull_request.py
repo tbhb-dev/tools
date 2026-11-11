@@ -10,7 +10,6 @@ import re
 import shutil
 import subprocess
 import sys
-from contextlib import chdir
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -34,7 +33,7 @@ ORIGIN = "git@github.com:tbhb-dev/example.git"
 DATA = Path(__file__).parent / "testdata" / "alpha" / "pull_request"
 FIXTURE = DATA / "passing-draft.md"
 TEMPLATE = REAL / ".github" / "PULL_REQUEST_TEMPLATE.md"
-with chdir(REAL):
+with patch.object(pr, "root", return_value=REAL):
     SECTIONS = pr.load_sections()
 
 H = "sha-256-64:"
@@ -82,6 +81,11 @@ sys.exit(spec["rc"])
 
 
 TARGET = "tbhb-dev/public-target"
+
+
+@pytest.fixture(autouse=True)
+def _git_directory(isolated_git: Path) -> None:
+    assert Path.cwd() == isolated_git
 
 
 def pr_page(repo: str, number: int = 7) -> str:
@@ -144,8 +148,9 @@ class World:
 
 
 @pytest.fixture
-def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
+def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_git: Path) -> World:
     """A repository with the real schema and sections and stub configs."""
+    assert Path.cwd() == isolated_git
     root = tmp_path / "repo"
     tools_dir = tmp_path / "bin"
     tools_dir.mkdir()
@@ -1005,8 +1010,8 @@ def real_lint_ready() -> bool:
 )
 class TestRealLinters:
     @pytest.fixture(autouse=True)
-    def _real_root(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.chdir(REAL)
+    def _real_root(self, monkeypatch: pytest.MonkeyPatch, isolated_git: Path) -> None:
+        monkeypatch.chdir(isolated_git)
 
     def test_fixture_passes(self) -> None:
         # The title is a lowercase Conventional Commit header, which the

@@ -68,6 +68,11 @@ if "BAD" in text:
 """
 
 
+@pytest.fixture(autouse=True)
+def _git_directory(isolated_git: Path) -> None:
+    assert Path.cwd() == isolated_git
+
+
 @dataclass
 class Tools:
     """Fake gh and cog on an isolated PATH."""
@@ -117,7 +122,8 @@ class Tools:
 
 
 @pytest.fixture
-def tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Tools:
+def tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_git: Path) -> Tools:
+    assert Path.cwd() == isolated_git
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     git_dir = tmp_path / "git"
