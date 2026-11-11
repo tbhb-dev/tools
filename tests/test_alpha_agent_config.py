@@ -897,3 +897,56 @@ def test_partial_reviews_app_configuration_is_refused(present: str) -> None:
         "reviews_app_client_id" if present == "reviews_app_id" else "reviews_app_id"
     )
     assert refused(table) == f"[agent.credentials.agent] {missing} is required"
+
+
+@pytest.mark.parametrize("item", ["item", "abcdefghijklmnopqrstuvwxyz"])
+@pytest.mark.parametrize("label", ["private key", "private_key", "k", "private  key"])
+def test_signing_accepts_openssh_reference(item: str, label: str) -> None:
+    reference = f"vault/{item}/{label}?ssh-format=openssh"
+    table = edited("credentials", "agent", "signing", value=reference)
+    assert config.parse(table).credentials[0].signing == reference
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "private key?ssh-format=pkcs8",
+        "private key?attribute=otp",
+        "private key?ssh-format=openssh&x=1",
+        "private key?",
+        " private key?ssh-format=openssh",
+        "private key ?ssh-format=openssh",
+        "private/key?ssh-format=openssh",
+        "..?ssh-format=openssh",
+        "private..key?ssh-format=openssh",
+        "private\tkey?ssh-format=openssh",
+        "private\nkey?ssh-format=openssh",
+        "private\x00key?ssh-format=openssh",
+        "private\x7fkey?ssh-format=openssh",
+        "private key?ssh-format=openssh?ssh-format=openssh",
+    ],
+)
+def test_signing_refuses_other_extensions(field: str) -> None:
+    table = edited("credentials", "agent", "signing", value=f"vault/item/{field}")
+    assert REFERENCE in refused(table)
+
+
+@pytest.mark.parametrize("key", [k for k in REFERENCE_KEYS if k != "signing"])
+@pytest.mark.parametrize("field", ["key", "private key"])
+def test_other_credentials_refuse_openssh_query(key: str, field: str) -> None:
+    table = edited(
+        "credentials", "agent", key, value=f"vault/item/{field}?ssh-format=openssh"
+    )
+    assert REFERENCE in refused(table)
+
+
+@pytest.mark.parametrize("key", ["token", "expires"])
+def test_claude_references_refuse_openssh_query(key: str) -> None:
+    table = edited(
+        "claude",
+        "profiles",
+        "primary",
+        key,
+        value="vault/item/key?ssh-format=openssh",
+    )
+    assert REFERENCE in refused(table)

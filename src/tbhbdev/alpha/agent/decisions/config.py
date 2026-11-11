@@ -36,6 +36,10 @@ _DURATION = re.compile(r"([0-9]+)([smh]?)")
 _UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600}
 _MAX_SECONDS = 7 * 24 * 3600
 _REFERENCE_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_SIGNING_REFERENCE = re.compile(
+    rf"{_REFERENCE_PART.pattern}/{_REFERENCE_PART.pattern}/"
+    r"[A-Za-z0-9](?:[A-Za-z0-9._ -]*[A-Za-z0-9._-])?\?ssh-format=openssh"
+)
 _REFERENCE_PARTS = 3
 _PROGRAMS = ("bash", "zsh")
 
@@ -145,6 +149,13 @@ class _Table:
     def reference(self, key: str) -> str:
         value = self.value(key)
         parts = value.split("/") if isinstance(value, str) else []
+        if (
+            key == "signing"
+            and isinstance(value, str)
+            and _SIGNING_REFERENCE.fullmatch(value)
+            and ".." not in parts[2]
+        ):
+            return value
         if len(parts) != _REFERENCE_PARTS or not all(
             _REFERENCE_PART.fullmatch(p) for p in parts
         ):
