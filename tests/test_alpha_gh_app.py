@@ -586,8 +586,8 @@ def test_run_openssl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert (
         gh_app.run_openssl(["pkey", "-in", str(tmp_path / "none")], b"").returncode != 0
     )
-    monkeypatch.setenv("PATH", str(tmp_path))
-    with pytest.raises(gh_app.GhAppError, match="openssl isn't installed"):
+    monkeypatch.setattr(gh_app.host_tools, "search", lambda: str(tmp_path))
+    with pytest.raises(gh_app.GhAppError, match=r"^openssl isn't installed$"):
         gh_app.run_openssl(["version"], b"")
 
 
@@ -607,11 +607,11 @@ def test_run_openssl_runs_openssl_with_its_input_and_captures_its_output(
     gh_app.run_openssl(["version"])
     assert calls == [
         (
-            ["openssl", "version"],
+            [gh_app.host_tools.resolve("openssl"), "version"],
             {"input": b"in", "capture_output": True, "check": False},
         ),
         (
-            ["openssl", "version"],
+            [gh_app.host_tools.resolve("openssl"), "version"],
             {"input": None, "capture_output": True, "check": False},
         ),
     ]
@@ -840,7 +840,7 @@ def test_openssl_missing_is_an_error(
     tmp_path: Path,
     rsa: Key,
 ) -> None:
-    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(gh_app.host_tools, "search", lambda: str(tmp_path))
     env = env_for(tmp_path, app_store(rsa.pem), Github())
     assert run(capsys, env, "bot", REPO) == (1, "", "openssl isn't installed\n")
 

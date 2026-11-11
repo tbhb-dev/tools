@@ -240,6 +240,16 @@ The pure rules table requires a spawned reviewer's approval at the current green
 
 `tbhbdev alpha agent` reads the optional `[agent]` table from the user config. Calling this command requires the table and every key shown below except `max_run_minutes`, `docker`, `expires` and the `[agent.codex]` table. Unreadable config fails with its path. Missing or invalid settings fail with the path, the full table name and the key, as `[agent.sandbox] audit_dir is required`. Unknown keys fail the same way at any level. The command takes no options. Valid settings still end in exit status 1 and a report that runs aren't implemented.
 
+Use the hidden host command as `tbhbdev alpha agent run-host NAME [REQUEST] --host HOST [--prompt FILE]`. Supply a versioned JSON request through `REQUEST`, stdin with `REQUEST` set to `-`, or `<name>.request.json` by leaving out the path. A prompt path defaults to the run's recorded prompt. Config must list the host. During setup, run-host fetches a bare mirror under `$XDG_STATE_HOME/tbhbdev/agent-mirrors/<owner>/<repo>.git` and creates a separate clone at `<account clone>/.worktrees/agent-<name>`. It reads credentials through the secrets library. It then starts the harness with the policy's explicit environment and records its exit. Run files and the index live under `tbhbdev/agent-runs` in the state directory. SIGHUP, SIGTERM, and SIGINT stop the harness group and refresh Codex auth before run-host writes `<name>.rc`. Driver commands remain pending. Schema support awaits the coordinator after the host and driver branches merge.
+
+The run clone has its own copy of the mirror's object store. The mirror never prunes objects. Run-host installs the identity and pre-commit hooks from its own templates without running code from the checkout. It finishes all git operations before starting the harness. Plain git in a run clone is unsafe for host processes.
+
+Build runs can write their clone and temporary directory. They also get the configured cache roots. The account clone's git directory and the mirror stay outside those roots. The run clone's git config, hooks, and info directory are read-only. Commands that save an upstream, such as `git push -u`, can't write that config. Run-host refuses an account clone that points to another clone's git directory.
+
+Claude runs load user settings and the run's generated settings. They ignore project settings and use only server configuration supplied for the run. The generated settings turn off hooks and web tools. Codex marks each run clone as untrusted, which skips its project configuration.
+
+Run-host records phase `unknown` when it can't prove the group stopped. It keeps the harness exit status and appends cleanup messages to the existing log.
+
 ```toml
 [agent]
 launch_wait_seconds = 120
@@ -249,13 +259,18 @@ max_run_minutes = 120
 sockets_dir = "/example/sockets"
 
 [agent.sandbox]
-write_roots = [".cache", ".local/share/mise", ".local/state"]
+write_roots = [".cache", ".local/share/mise", ".local/state/mise"]
+network_domains = ["api.github.com"]
+# host_path = ["/opt/agent-host/bin"]
+# codex_network_proxy_opt_out = "named reason for this host"
+# agy_unsandboxed_opt_out = "named reason for this host"
+# codex_unsandboxed_opt_out = "named reason for this host"
 audit_dir = ".local/state/example-audit"
 denied_home_paths = [".claude"]
 
 [agent.sandbox.path]
-linux = [".local/share/mise/shims", "/usr/local/bin", "/usr/bin", "/bin"]
-macos = [".local/share/mise/shims", "/opt/homebrew/bin", "/usr/bin", "/bin"]
+linux = [".local/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+macos = [".local/bin", "/usr/bin", "/bin", "/opt/homebrew/bin"]
 
 [agent.sandbox.agy]
 review_read = [".config/example-gh", ".config/mise"]
@@ -290,9 +305,32 @@ shell = "bash"
 account = "agent"
 unsandboxed = false
 accounts = ["agent"]
+proven_harnesses = ["codex"]
 ```
 
-For `[agent.sandbox]`, macOS hosts list `DARWIN_USER_TEMP_DIR` and `DARWIN_USER_CACHE_DIR` in `write_roots` as absolute paths.
+Run-host refuses write roots that overlap its run directory, installation, host search directories, harness, or script interpreter. Narrow broad roots such as `~/.local` before running. It follows symlinks for each harness, interpreter, and `env` target. Every link, directory, and final file must belong to root or the run's account. None may grant group or world write access. Account-owned parts must stay outside every write root.
+
+On macOS, Homebrew's directories grant group write access to `admin`, so run-host refuses a harness or interpreter that resolves through Homebrew. Install it elsewhere, such as `~/.local/bin`, or use system tools in `/usr/bin` and `/bin`.
+
+Host tools and the harness parent use a fixed search path, with optional absolute directories from `host_path`. Run-host finds `git`, `ssh`, and `openssl`, plus `sysctl`, `ps`, and `security` on macOS, in `/usr/bin`, `/bin`, `/usr/sbin`, and `/sbin` before any Homebrew directory. Tool subprocesses use the rich sandbox PATH. Run-host protects the install directories behind mise shims on either PATH. `host_tools.resolve` refuses executables reached through `mise/shims`. Set `host_path` to the versioned install directories. Each upgrade changes those directory names.
+
+Run-host copies a standalone Codex release to `<XDG_DATA_HOME or ~/.local/share>/tbhbdev/codex/<release dir name>/` before building its policy. It compares every regular file's `sha256` digest and mode with the source. It checks the full directory contents and refuses links outside the release. Run-host reuses a matching copy. It moves a changed copy aside with a timestamp. Before renaming a replacement into place, it checks the temporary sibling. Directories use mode 0755. Files keep their source modes. The copy stays outside every write root. The account's `.codex` directory stays fully denied. Run-host requires a standalone Codex install and refuses other installs.
+
+Codex requires network proxy support (0.164.0 or later). Its proxy uses limited mode and denies Unix sockets. Only the exact hosts in `network_domains` have access, and the default list is empty. Claude builds use the same domain list and keep only the existing signing socket grant. Linux profiles resolve denied paths through symbolic links, keep existing paths, and remove duplicates before passing them to a harness. These paths include the Windows Subsystem for Linux, Docker, and user runtime sockets. A named `codex_network_proxy_opt_out` disables the proxy. Policy previews accept named opt-outs for agy or Codex full access. Run-host refuses agy. Authorized Codex full-access builds require the request, host, and config gates. Run-host announces full access with the authorization reference and appends a durable host taint marker before preparation. Tainted builds report `untrusted-host`. Run-host refuses tainted reviews. Reviews require reviews App references and refuse token request failures. A Codex network proxy opt-out leaves filesystem isolation in place. Run-host logs that exception on affected runs.
+
+Run-host builds the harness command and adds the brief header. The driver sends the raw brief, an optional `<name>.schema.json`, and `--host` with a configured host name. Codex receives the schema path. Claude receives its contents. An unset, empty or relative `XDG_STATE_HOME` uses the home directory default. Finished runs keep their completion and log files when a rerun fails. Protected paths include shell startup files, Git and tmux config files, and socket parent directories below home.
+
+For `[agent.sandbox]`, macOS hosts list `DARWIN_USER_TEMP_DIR` and `DARWIN_USER_CACHE_DIR` in `write_roots` as absolute paths. Linux hosts can list `/tmp`. The private `CODEX_HOME` stays outside these roots at `<state>/tbhbdev/agent-codex/<name>`, with mode 0700. Run-host removes it in `finish` after auth write-back. State defaults to `~/.local/state`.
+
+Live Codex probes copy the account's auth through `credentials.auth_copy`, then use the production refresh write-back and removal path. Each probe asserts that its test directory contains no `auth.json` when it finishes. Each probe plants hooks only under the scratch run's home.
+
+Run every opt-in live test from a clean checkout with this command, outside an agent sandbox. The state directory keeps the test root outside the system temp directories granted for writing.
+
+```sh
+TBHBDEV_SANDBOX_LIVE=1 uv run pytest --basetemp "$HOME/.local/state/tbhbdev/sandbox-live" tests/test_alpha_agent_sandbox_live.py tests/test_alpha_agent_sandbox_live_host.py tests/test_alpha_agent_git_parent.py tests/test_alpha_agent_git_commit_live.py
+```
+
+During the build probe, the installed identity hook stamps a commit with a `Generated-by` trailer. Both profiles attempt writes to six protected Git children, then compare each path with its host snapshot.
 
 The settings have these constraints:
 
@@ -301,9 +339,30 @@ The settings have these constraints:
 - Path settings are non-blank strings without a null byte or a `..` part. The sandbox lists must be non-empty.
 - Every credential and profile `token` is a `vault/item/field` reference, and each part starts with a letter or digit, then continues with letters, digits, dots, `_` or `-`. `[agent.credentials.<account>]` takes one table for each account, and `docker` is optional.
 - `default_profile` names one of the profiles, matching without regard to case, so `Primary` selects `primary`. Profile names that differ only in case fail validation. Display uses the name as written.
-- `[[agent.host]]` lists at least one host. Its `name` is lower-case, dot-separated labels, `os` is `linux` or `macos`, `shell` is `bash` or `zsh`, `account` must be one of `accounts`, and host names are unique. Every name in `accounts` needs an `[agent.credentials.<name>]` table.
+- `[[agent.host]]` lists at least one host. Its `name` is lower-case, dot-separated labels, `os` is `linux` or `macos`, `shell` is `bash` or `zsh`, `account` must be one of `accounts`, and host names are unique. Every name in `accounts` needs an `[agent.credentials.<name>]` table. `proven_harnesses` is a typed list of harness names. Add a harness only after a passing live run on that host. Remove it when upgrading that harness. Run-host refuses Claude while separate tool paths for Claude (H3) and the Claude credential decision remain open.
 
-The run request is a versioned JSON object. Version 1 lists every run field and no credential. A reader refuses unknown versions, unknown or missing fields, and any `unsandboxed` request unless the harness is Codex, the profile is `build`, the host's `unsandboxed` is true and the authorization has the form `owner/repo#N` or `operator-chat-YYYY-MM-DD`. The repo argument takes the form `org/repo` or `<git host>/<org>/<repo>`, with `github.com` as the default git host, and resolves to `Code/<git host>/<org>/<repo>` under the home directory. A repo name can't be `.` or `..` or end in `.git`.
+The run request is a versioned JSON object. Version 2 requires `tainted_host` and lists every run field and no credential. A reader refuses unknown versions, unknown or missing fields, and any `unsandboxed` request unless the harness is Codex, the profile is `build`, the host's `unsandboxed` is true and the authorization has the form `owner/repo#N` or `operator-chat-YYYY-MM-DD`. The repo argument takes the form `org/repo` or `<git host>/<org>/<repo>`, with `github.com` as the default git host, and resolves to `Code/<git host>/<org>/<repo>` under the home directory. A repo name can't be `.` or `..` or end in `.git`.
+
+### Agent isolation limits
+
+Run-host runs git in a run clone only during `clone_run` and `create`, before launch. After the harness starts, run-host never runs git in that clone. An operator who runs `git add -A` or `git stash` in a run clone can run a nested repository's clean filter. The port never runs those commands in a run clone.
+
+Run-host doesn't set upstream tracking before launch. It checks out a new build branch from a commit. Because `.git/config` stays read-only to the run, `git switch -c x origin/main` and `git push -u` can't record tracking. Use `git switch --no-track -c x origin/main` and push with an explicit destination branch, such as `git push origin HEAD:refs/heads/x`.
+
+An `unsandboxed` run can read the account's 1Password Connect token and every secret it can read. It can write anything the account can. The host marker at `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` is only a hint. The marked account can delete it. An account listed on any `unsandboxed = true` host can't run reviews on any host. A child can leave the process group and keep running after the run ends. Run-host refuses Claude while separate tool paths for Claude (H3) and the Claude credential decision remain open.
+Every run's sandbox policy denies writes to the marker directory.
+
+- A run can read anything that its deny list doesn't cover, including other runs' temp directories.
+- Build runs have access to the account's `gh` token and Docker config.
+- A run's tools can read its private Codex auth file.
+- The agent can write the final answer file.
+- Run-host sets Codex's `web_search` mode and removes the private `CODEX_HOME` at finish. It has no separate web search store or cleanup for any state that Codex or its provider keeps outside that home.
+
+The coordinator traced every git process that the Codex parent starts, with every Git plant from the regression tests present. With codex-cli 0.166.0 on macOS and 0.164.0 on Linux, each session started 12 git processes before any tool call: `rev-parse HEAD` (3), `rev-parse --git-dir` (2), `rev-parse --abbrev-ref HEAD` (2), `remote get-url origin` (2), `remote -v` (1), `config --null --get core.fsmonitor` (1) and `status --porcelain` (1). Each one used Codex's own `-c safe.bareRepository=explicit -c core.hooksPath=/dev/null -c core.fsmonitor=false`. None started after a tool call. Version 0.164.0 also cloned its plugin repository into `CODEX_HOME`'s temp directory and ran `git maintenance run --auto` there. Re-check these observations on every Codex upgrade.
+
+On Linux, a `.git` file can prevent Codex from starting a sandbox. [Codex 0.164.0 resolves Git pointer targets](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/protocol/src/permissions.rs#L2371) and [adds protected child mounts to each writable root](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/linux-sandbox/src/bwrap.rs#L689). The build policy grants writes to `.git` so tools can commit, but a Git pointer file can't hold those child targets. The live probe accepts this refusal only when the same shell command succeeds without the plant, the parent's Git calls leave the plant's marker absent, and a direct sandbox invocation returns a `bwrap` `Not a directory` error for that `.git` path. A model's message alone doesn't prove a refusal.
+
+The terminal probe records a missing host terminal separately from a refused ioctl. [Codex's Linux sandbox mounts a private device tree](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/linux-sandbox/src/bwrap.rs#L504), so opening the recorded outer terminal under `/dev/pts` can fail before an ioctl. The probe accepts a missing device on Linux only after an input control succeeds or the kernel refuses an ioctl. A successful ioctl or injected input fails either way.
 
 ### Secret scan
 

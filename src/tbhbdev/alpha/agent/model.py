@@ -10,9 +10,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TypedDict
 
 # The run request's schema version. A reader refuses any other version.
-REQUEST_VERSION = 1
+REQUEST_VERSION = 2
 
 # An identifier that reaches a file name, a tmux session name or an argv: run
 # names, accounts, profiles and the run's class, variant and role.
@@ -79,6 +80,11 @@ class Sandbox:
     denied_home_paths: tuple[str, ...]
     path: SandboxPath
     agy: AgySandbox
+    host_path: tuple[str, ...] = ()
+    network_domains: tuple[str, ...] = ()
+    codex_network_proxy_opt_out: str | None = None
+    agy_unsandboxed_opt_out: str | None = None
+    codex_unsandboxed_opt_out: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,9 +102,9 @@ class Credentials:
     account: str
     gh: str
     docker: str | None
-    reviews_app_id: str
-    reviews_app_client_id: str
-    reviews_app_pem: str
+    reviews_app_id: str | None
+    reviews_app_client_id: str | None
+    reviews_app_pem: str | None
     signing: str
 
 
@@ -127,6 +133,7 @@ class Host:
     account: str
     unsandboxed: bool
     accounts: tuple[str, ...]
+    proven_harnesses: tuple[Harness, ...]
 
 
 @dataclass(frozen=True)
@@ -150,7 +157,8 @@ class RunPaths:
     """The paths of one run, as absolute strings the caller has resolved.
 
     `audit_dir` is the run's resolved audit directory, which a review run may
-    write. The private `tmpdir` holds `codex_home` and the handoff directories.
+    write. The private `tmpdir` holds tool handoffs. Its sibling `codex_home` stays
+    outside every write root.
     """
 
     home: str
@@ -159,6 +167,8 @@ class RunPaths:
     codex_home: str
     audit_dir: str
     git_common_dir: str | None = None
+    signing_socket: str | None = None
+    uid: int = 0
 
 
 class CodexMode(StrEnum):
@@ -166,6 +176,10 @@ class CodexMode(StrEnum):
 
     PROFILE = "profile"
     FULL_ACCESS = "danger-full-access"
+
+
+class NetworkProxy(TypedDict, extra_items=object):
+    domains: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -182,6 +196,7 @@ class CodexPolicy:
     deny: tuple[str, ...]
     approval_policy: str
     web_search: WebSearch
+    network_proxy: NetworkProxy | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +226,7 @@ class Policy:
     env: dict[str, str]
     deny: tuple[str, ...]
     detail: CodexPolicy | ClaudePolicy | AgyPolicy
+    tool_path: str
 
 
 @dataclass(frozen=True)
@@ -239,3 +255,4 @@ class RunRequest:
     unsandboxed: bool
     authorized_by: str | None
     startup_deadline_seconds: int
+    tainted_host: bool

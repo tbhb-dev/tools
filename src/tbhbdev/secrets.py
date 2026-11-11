@@ -34,6 +34,8 @@ from onepasswordconnectsdk.config import ClientConfig
 from onepasswordconnectsdk.utils import PathBuilder
 
 from tbhbdev import userconfig
+lazy from tbhbdev.alpha.agent import host_tools
+lazy from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -148,10 +150,11 @@ def token() -> str:
     if platform.system() != "Darwin":
         return _linux_token()
     try:
+        security = host_tools.resolve("security")
         # The keychain has no password, so unlocking it is idempotent and
         # holds no secret. It is locked again after every restart.
         subprocess.run(  # nosec B603 B607
-            ["security", "unlock-keychain", "-p", "", KEYCHAIN],
+            [security, "unlock-keychain", "-p", "", KEYCHAIN],
             capture_output=True,
             timeout=KEYCHAIN_TIMEOUT,
             # False is the default, written out for ruff. The pragma hides the
@@ -160,7 +163,7 @@ def token() -> str:
                 False
             ),
         )
-        argv = ["security", "find-generic-password", "-s", SERVICE, "-a", ACCOUNT]
+        argv = [security, "find-generic-password", "-s", SERVICE, "-a", ACCOUNT]
         argv += ["-w", KEYCHAIN]
         done = subprocess.run(  # nosec B603
             argv,
@@ -176,8 +179,8 @@ def token() -> str:
     except subprocess.TimeoutExpired:
         message = f"the keychain read timed out after {KEYCHAIN_TIMEOUT} seconds"
         raise SecretsError(message) from None
-    except FileNotFoundError as exc:
-        message = f"can't read the Connect token: {exc.filename} isn't installed"
+    except FileNotFoundError, Invalid:
+        message = "can't read the Connect token: security isn't installed"
         raise SecretsError(message) from None
     value = done.stdout.rstrip("\n")
     if done.returncode != 0 or not value:

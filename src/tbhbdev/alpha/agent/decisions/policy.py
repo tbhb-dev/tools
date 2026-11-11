@@ -10,9 +10,11 @@ There are no default lists here: write roots, denied paths and `PATH` come from
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import PurePosixPath
 
 from tbhbdev import secrets
+from tbhbdev.alpha.agent import host_tools
 from tbhbdev.alpha.agent.model import (
     AgyPolicy,
     ClaudePolicy,
@@ -21,6 +23,7 @@ from tbhbdev.alpha.agent.model import (
     Harness,
     Host,
     Invalid,
+    NetworkProxy,
     Os,
     Policy,
     Profile,
@@ -44,6 +47,15 @@ DOCKER_CONFIG_SUBDIR = "docker"
 _TMP = "/tmp"  # noqa: S108 # nosec B108 -- an alias, not a temp file
 # Claude's file tools, which a review run doesn't get.
 _CLAUDE_FILE_TOOLS = ("Edit", "Write", "NotebookEdit")
+GIT_CONFIG_PATHS = (
+    ".git",
+    ".git/config",
+    ".git/config.worktree",
+    ".git/commondir",
+    ".git/hooks",
+    ".git/info",
+    ".git/modules",
+)
 
 
 def resolve(home: str, path: str) -> str:
@@ -77,7 +89,9 @@ def _with_aliases(os: Os, path: str) -> tuple[str, ...]:
     return (path,)
 
 
-def denied_paths(settings: Settings, host: Host, home: str) -> tuple[str, ...]:
+def denied_paths(
+    settings: Settings, host: Host, home: str, uid: int
+) -> tuple[str, ...]:
     """The paths no harness may read, whatever the OS, profile and harness.
 
     That's the Connect token store, the session socket directory and the
@@ -87,6 +101,9 @@ def denied_paths(settings: Settings, host: Host, home: str) -> tuple[str, ...]:
     if host.os is Os.LINUX:
         # The directory, so a sibling file or a renamed token stays hidden too.
         paths.append(resolve(home, str(secrets.LINUX_TOKEN_FILE.parent)))
+        paths.extend(
+            ("/run/WSL", "/var/run/docker.sock", "/run/docker.sock", f"/run/user/{uid}")
+        )
     else:
         keychain = secrets.MACOS_KEYCHAIN_FILE
         paths.extend(
@@ -107,22 +124,38 @@ def environment(
     The two config-directory variables name directories under the private
     TMPDIR that run-host creates and fills. They hold no credential.
     """
-    search = settings.sandbox.path
-    entries = search.linux if host.os is Os.LINUX else search.macos
     env = {
-        "PATH": ":".join(resolve(paths.home, e) for e in entries),
+        "PATH": ":".join(host_tools.search_path(settings, host.os)),
         "HOME": paths.home,
         "USER": account,
         "LOGNAME": account,
-        "SHELL": host.shell,
+        "SHELL": f"/bin/{host.shell}",
         "LANG": LINUX_LANG if host.os is Os.LINUX else MACOS_LANG,
         "TMPDIR": paths.tmpdir,
         "TMPPREFIX": resolve(paths.tmpdir, "zsh"),
         "GH_CONFIG_DIR": resolve(paths.tmpdir, GH_CONFIG_SUBDIR),
         "DOCKER_CONFIG": resolve(paths.tmpdir, DOCKER_CONFIG_SUBDIR),
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_COUNT": "8",
     }
+    overrides = (
+        ("core.fsmonitor", "false"),
+        ("core.hooksPath", "/dev/null"),
+        ("diff.ignoreSubmodules", "all"),
+        ("status.submoduleSummary", "false"),
+        ("protocol.ext.allow", "never"),
+        ("protocol.file.allow", "never"),
+        ("diff.external", ""),
+        ("safe.bareRepository", "explicit"),
+    )
+    for index, (key, value) in enumerate(overrides):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
     if harness is Harness.CODEX:
         env["CODEX_HOME"] = paths.codex_home
+    if paths.signing_socket is not None:
+        env["SSH_AUTH_SOCK"] = paths.signing_socket
     return env
 
 
@@ -132,8 +165,7 @@ def _write_roots(
     if profile is Profile.REVIEW:
         return tuple(dict.fromkeys((paths.tmpdir, paths.audit_dir)))
     roots = (resolve(paths.home, r) for r in settings.sandbox.write_roots)
-    common = () if paths.git_common_dir is None else (paths.git_common_dir,)
-    return tuple(dict.fromkeys((paths.worktree, *common, paths.tmpdir, *roots)))
+    return tuple(dict.fromkeys((paths.worktree, paths.tmpdir, *roots)))
 
 
 def _codex(
@@ -148,26 +180,50 @@ def _codex(
     search = (
         codex.web_search_build if profile is Profile.BUILD else codex.web_search_review
     )
+    proxy = network_proxy(settings)
     if full:
-        return CodexPolicy(CodexMode.FULL_ACCESS, (), (), deny, APPROVAL_POLICY, search)
+        return CodexPolicy(
+            CodexMode.FULL_ACCESS, (), (), deny, APPROVAL_POLICY, search, proxy
+        )
     return CodexPolicy(
-        CodexMode.PROFILE, (READ_ROOT,), writes, deny, APPROVAL_POLICY, search
+        CodexMode.PROFILE,
+        (READ_ROOT,),
+        writes,
+        deny,
+        APPROVAL_POLICY,
+        search,
+        proxy,
     )
+
+
+def protected_git(paths: RunPaths) -> tuple[str, ...]:
+    return tuple(resolve(paths.worktree, entry) for entry in GIT_CONFIG_PATHS)
+
+
+def _claude_write_denies(profile: Profile, paths: RunPaths) -> tuple[str, ...]:
+    if profile is Profile.BUILD:
+        return protected_git(paths)
+    return (paths.worktree, *protected_git(paths))
 
 
 def _claude(
     profile: Profile,
     paths: RunPaths,
-    writes: tuple[str, ...],
-    deny: tuple[str, ...],
+    access: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]],
     env: dict[str, str],
+    domains: tuple[str, ...],
 ) -> ClaudePolicy:
+    writes, deny, protected = access
     review = profile is Profile.REVIEW
     # An absolute path in a Claude rule starts with a second slash.
     denied_tools = [f"{tool}(/{p}/**)" for p in deny for tool in ("Read", "Edit")]
-    deny_write = [paths.worktree] if review else []
-    if review and paths.git_common_dir is not None:
-        deny_write.append(paths.git_common_dir)
+    deny_write = (*_claude_write_denies(profile, paths), *protected)
+    denied_tools.extend(
+        f"{tool}(/{p}{suffix})"
+        for p in deny_write
+        for suffix in ("", "/**")
+        for tool in ("Edit", "Write")
+    )
     sandbox: dict[str, object] = {
         "enabled": True,
         "failIfUnavailable": True,
@@ -180,20 +236,45 @@ def _claude(
             "denyWrite": [*deny_write, *deny],
         },
     }
+    network: dict[str, object] = {
+        "allowedDomains": list(domains),
+        "allowAllUnixSockets": False,
+        "allowLocalBinding": False,
+        "strictAllowlist": True,
+    }
     if review:
-        sandbox["network"] = {
-            "strictAllowlist": True,
-            "allowedDomains": list(_REVIEW_DOMAINS),
-        }
+        network.update(
+            {
+                "allowedDomains": list(_REVIEW_DOMAINS),
+            }
+        )
+    if paths.signing_socket is not None:
+        network["allowUnixSockets"] = [paths.signing_socket]
+    sandbox["network"] = network
     return ClaudePolicy(
         {
+            "disableAllHooks": True,
             "env": {
                 k: env[k]
-                for k in ("TMPDIR", "TMPPREFIX", "GH_CONFIG_DIR", "DOCKER_CONFIG")
+                for k in (
+                    "TMPDIR",
+                    "PATH",
+                    "TMPPREFIX",
+                    "GH_CONFIG_DIR",
+                    "DOCKER_CONFIG",
+                    "GIT_NO_LAZY_FETCH",
+                    "SSH_AUTH_SOCK",
+                )
+                if k in env
             },
             "permissions": {
                 "allow": [] if review else [f"Edit(/{p}/**)" for p in writes],
-                "deny": [*(_CLAUDE_FILE_TOOLS if review else ()), *denied_tools],
+                "deny": [
+                    *(_CLAUDE_FILE_TOOLS if review else ()),
+                    *denied_tools,
+                    "WebFetch",
+                    "WebSearch",
+                ],
             },
             "sandbox": sandbox,
         }
@@ -213,6 +294,46 @@ def _refuse_overlaps(paths: tuple[str, ...], deny: tuple[str, ...], kind: str) -
                 raise Invalid(message)
 
 
+def protect_host(
+    settings: Settings, paths: RunPaths, protected: tuple[str, ...]
+) -> None:
+    """Refuse host trust paths on either side of a writable path."""
+    writes = (
+        paths.worktree,
+        paths.tmpdir,
+        paths.audit_dir,
+        _DEV_FD,
+        *(resolve(paths.home, p) for p in settings.sandbox.write_roots),
+        *(resolve(paths.home, p) for p in settings.sandbox.agy.build_write),
+    )
+    protect_paths(writes, protected)
+
+
+def protect_paths(writes: tuple[str, ...], protected: tuple[str, ...]) -> None:
+    """Refuse either an ancestor or a descendant of a host trust path."""
+    for path in protected:
+        for write in writes:
+            if _overlaps(path, write):
+                message = (
+                    f"protected host path {path} overlaps write root {write}; "
+                    "narrow that write root"
+                )
+                raise Invalid(message)
+
+
+def network_proxy(settings: Settings) -> NetworkProxy | None:
+    if settings.sandbox.codex_network_proxy_opt_out is not None:
+        return None
+    return NetworkProxy(
+        enabled=True,
+        domains=dict.fromkeys(settings.sandbox.network_domains, "allow"),
+        mode="limited",
+        unix_sockets={},
+        dangerously_allow_all_unix_sockets=False,
+        allow_local_binding=False,
+    )
+
+
 def _agy_write_roots(
     settings: Settings, profile: Profile, paths: RunPaths
 ) -> tuple[str, ...]:
@@ -221,9 +342,6 @@ def _agy_write_roots(
         return (paths.audit_dir,)
     return (
         paths.worktree,
-        paths.git_common_dir
-        if paths.git_common_dir is not None
-        else resolve(paths.worktree, ".git"),
         paths.tmpdir,
         *(resolve(paths.home, p) for p in settings.sandbox.agy.build_write),
     )
@@ -244,6 +362,8 @@ def _agy(
         reads = [resolve(home, p) for p in agy.build_read]
     writes = _agy_write_roots(settings, profile, paths)
     reads += [env["GH_CONFIG_DIR"], env["DOCKER_CONFIG"]]
+    if paths.signing_socket is not None:
+        reads.append(paths.signing_socket)
     # agy has no deny entry, so a grant that reaches a denied path is the leak.
     _refuse_overlaps(tuple(reads), deny, "agy grant")
     grants = [
@@ -251,6 +371,12 @@ def _agy(
         *(f"write_file({p})" for p in writes),
     ]
     return AgyPolicy(tuple(grants))
+
+
+def tool_path(settings: Settings, host: Host, home: str) -> str:
+    search = settings.sandbox.path
+    entries = search.linux if host.os is Os.LINUX else search.macos
+    return ":".join(resolve(home, e) for e in entries)
 
 
 def build(  # noqa: PLR0913 -- one value per fact the policy depends on
@@ -262,6 +388,8 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
     account: str,
     unsandboxed: bool,
     paths: RunPaths,
+    protected: tuple[str, ...] = (),
+    denied: tuple[str, ...] | None = None,
 ) -> Policy:
     """The policy of a run of HARNESS with PROFILE on HOST, as ACCOUNT.
 
@@ -273,11 +401,35 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
     Raises:
         Invalid: ACCOUNT isn't one of the host's accounts, UNSANDBOXED applies
             to anything but a Codex build run on a host that allows it, or a
-            write path or an agy read grant reaches a denied path.
+            write path, signing socket or an agy read grant reaches a denied path.
     """
     _check(host, harness, profile, account=account, full=unsandboxed)
-    deny = denied_paths(settings, host, paths.home)
+    if harness is Harness.AGY and settings.sandbox.agy_unsandboxed_opt_out is None:
+        message = (
+            "agy has no OS sandbox; configure agy_unsandboxed_opt_out "
+            "with a named reason"
+        )
+        raise Invalid(message)
+    if (
+        harness is Harness.CODEX
+        and unsandboxed
+        and settings.sandbox.codex_unsandboxed_opt_out is None
+    ):
+        message = (
+            "codex has no OS sandbox; configure codex_unsandboxed_opt_out "
+            "with a named reason"
+        )
+        raise Invalid(message)
+    protect_host(settings, paths, protected)
+    deny = (
+        denied_paths(settings, host, paths.home, paths.uid)
+        if denied is None
+        else denied
+    )
+    if paths.signing_socket is not None:
+        _refuse_overlaps((paths.signing_socket,), deny, "signing socket")
     env = environment(settings, host, harness, paths, account)
+    tools_path = tool_path(settings, host, paths.home)
     writes = _write_roots(settings, profile, paths)
     if host.os is Os.MACOS and harness in (Harness.CODEX, Harness.CLAUDE):
         writes = tuple(dict.fromkeys((*writes, _DEV_FD)))
@@ -285,12 +437,31 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
         _agy_write_roots(settings, profile, paths) if harness is Harness.AGY else ()
     )
     _refuse_overlaps((*writes, *agy_writes), deny, "write path")
+    detail: CodexPolicy | ClaudePolicy | AgyPolicy
     if harness is Harness.CODEX:
-        detail: CodexPolicy | ClaudePolicy | AgyPolicy = _codex(
-            settings, profile, writes, deny, full=unsandboxed
-        )
+        codex_detail = _codex(settings, profile, writes, deny, full=unsandboxed)
+        if profile is Profile.BUILD and not unsandboxed:
+            codex_detail = replace(
+                codex_detail,
+                read_roots=(
+                    *codex_detail.read_roots,
+                    *protected_git(paths)[1:],
+                ),
+                write_roots=(
+                    paths.worktree,
+                    resolve(paths.worktree, ".git"),
+                    *codex_detail.write_roots[1:],
+                ),
+            )
+        detail = codex_detail
     elif harness is Harness.CLAUDE:
-        detail = _claude(profile, paths, writes, deny, env)
+        detail = _claude(
+            profile,
+            paths,
+            (writes, deny, protected),
+            env | {"PATH": tools_path},
+            settings.sandbox.network_domains,
+        )
     else:
         detail = _agy(settings, profile, paths, env, deny)
-    return Policy(harness, profile, env, deny, detail)
+    return Policy(harness, profile, env, deny, detail, tools_path)

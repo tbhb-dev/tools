@@ -65,8 +65,8 @@ GOOD: Table = {
         "audit_dir": ".local/state/example-audit",
         "denied_home_paths": [".claude"],
         "path": {
-            "linux": [".local/share/mise/shims", "/usr/local/bin", "/usr/bin"],
-            "macos": [".local/share/mise/shims", "/opt/homebrew/bin", "/usr/bin"],
+            "linux": [".local/bin", "/usr/local/bin", "/usr/bin"],
+            "macos": [".local/bin", "/opt/homebrew/bin", "/usr/bin"],
         },
         "agy": {
             "review_read": [".config/example-gh", ".config/mise"],
@@ -103,6 +103,7 @@ GOOD: Table = {
             "account": "agent",
             "unsandboxed": False,
             "accounts": ["agent"],
+            "proven_harnesses": ["codex"],
         }
     ],
 }
@@ -118,8 +119,8 @@ EXPECTED = model.Settings(
         audit_dir=".local/state/example-audit",
         denied_home_paths=(".claude",),
         path=model.SandboxPath(
-            linux=(".local/share/mise/shims", "/usr/local/bin", "/usr/bin"),
-            macos=(".local/share/mise/shims", "/opt/homebrew/bin", "/usr/bin"),
+            linux=(".local/bin", "/usr/local/bin", "/usr/bin"),
+            macos=(".local/bin", "/opt/homebrew/bin", "/usr/bin"),
         ),
         agy=model.AgySandbox(
             review_read=(".config/example-gh", ".config/mise"),
@@ -156,6 +157,7 @@ EXPECTED = model.Settings(
             account="agent",
             unsandboxed=False,
             accounts=("agent",),
+            proven_harnesses=(model.Harness.CODEX,),
         ),
     ),
 )
@@ -691,6 +693,23 @@ def test_credentials_is_not_a_host_key() -> None:
     assert refused(table) == "[[agent.host]] credentials not recognized"
 
 
+@pytest.mark.parametrize("names", [[], ["codex"], ["claude"], ["codex", "claude"]])
+def test_host_records_proven_harnesses(names: list[str]) -> None:
+    table = edited("host", 0, "proven_harnesses", value=names)
+    assert config.parse(table).hosts[0].proven_harnesses == tuple(
+        model.Harness(name) for name in names
+    )
+
+
+@pytest.mark.parametrize(
+    "value", [None, "codex", [1], ["agy"], ["Codex"], ["codex", "codex"]]
+)
+def test_host_refuses_invalid_proven_harnesses(value: object) -> None:
+    assert refused(edited("host", 0, "proven_harnesses", value=value)) == (
+        "[[agent.host]] proven_harnesses must list distinct codex or claude names"
+    )
+
+
 @pytest.mark.parametrize("value", [[], 5, "x", [5], ["x"], [None]])
 def test_host_must_be_a_non_empty_array_of_tables(value: object) -> None:
     assert refused(edited("host", value=value)) == (
@@ -720,12 +739,6 @@ def test_a_host_may_run_on_macos_with_a_dotted_name() -> None:
         "zsh",
     )
     assert host.unsandboxed is False
-
-
-def test_unsandboxed_is_read_as_given() -> None:
-    assert (
-        config.parse(edited("host", 0, "unsandboxed", value=True)).hosts[0].unsandboxed
-    )
 
 
 def test_name_limits() -> None:
@@ -789,3 +802,98 @@ def test_reference_parts_may_hold_dots_underscores_and_hyphens() -> None:
     reference = "v-1/i.t_2/F-3.x"
     table = edited("claude", "profiles", "primary", "token", value=reference)
     assert config.parse(table).claude.profiles[0].token == reference
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "valid"),
+    [
+        ("host_path", ["/opt/example/bin"], True),
+        ("host_path", ["relative"], False),
+        ("host_path", ["/"], False),
+        ("host_path", ["/opt/../bin"], False),
+        ("host_path", [], False),
+        ("network_domains", [], True),
+        ("network_domains", ["api.github.com"], True),
+        ("network_domains", ["*.github.com"], False),
+        ("network_domains", ["https://github.com"], False),
+        ("network_domains", ["github.com:443"], False),
+        ("network_domains", [""], False),
+        ("network_domains", "github.com", False),
+        ("codex_network_proxy_opt_out", "named reason", True),
+        ("codex_network_proxy_opt_out", "", False),
+        ("agy_unsandboxed_opt_out", "named reason", True),
+        ("codex_unsandboxed_opt_out", "isolated host", True),
+        ("codex_unsandboxed_opt_out", "", False),
+        ("codex_unsandboxed_opt_out", False, False),
+        ("agy_unsandboxed_opt_out", False, False),
+    ],
+)
+def test_host_and_network_options(key: str, value: object, valid: bool) -> None:
+    data = copy.deepcopy(GOOD)
+    sandbox = cast("Table", data["sandbox"])
+    sandbox[key] = value
+    if valid:
+        result = config.parse(data)
+        assert getattr(result.sandbox, key) == (
+            tuple(value) if isinstance(value, list) else value
+        )
+    else:
+        with pytest.raises(Invalid, match=key):
+            config.parse(data)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "why"),
+    [
+        ("host_path", ["relative"], "must contain absolute paths only"),
+        (
+            "network_domains",
+            ["*.example.com"],
+            "must contain exact host names without wildcards",
+        ),
+    ],
+)
+def test_execution_options_name_the_invalid_path(
+    key: str, value: object, why: str
+) -> None:
+    data = copy.deepcopy(GOOD)
+    cast("Table", data["sandbox"])[key] = value
+    with pytest.raises(Invalid) as caught:
+        config.parse(data)
+    assert str(caught.value) == f"[agent.sandbox] {key} {why}"
+
+
+def test_unsandboxed_host_refuses_reviews_app_delivery() -> None:
+    assert refused(edited("host", 0, "unsandboxed", value=True)) == (
+        "[[agent.host]] unsandboxed host example-linux "
+        "has reviews App credentials for agent"
+    )
+
+
+def test_unsandboxed_host_without_reviews_app_is_allowed() -> None:
+    table = edited("host", 0, "unsandboxed", value=True)
+    accounts = cast("Table", table["credentials"])
+    account = cast("Table", accounts["agent"])
+    for key in ("reviews_app_id", "reviews_app_client_id", "reviews_app_pem"):
+        del account[key]
+    parsed = config.parse(table)
+    assert parsed.hosts[0].unsandboxed is True
+    assert parsed.credentials[0].reviews_app_id is None
+    assert parsed.credentials[0].reviews_app_client_id is None
+    assert parsed.credentials[0].reviews_app_pem is None
+
+
+@pytest.mark.parametrize(
+    "present", ["reviews_app_id", "reviews_app_client_id", "reviews_app_pem"]
+)
+def test_partial_reviews_app_configuration_is_refused(present: str) -> None:
+    table = edited("host", 0, "unsandboxed", value=True)
+    accounts = cast("Table", table["credentials"])
+    account = cast("Table", accounts["agent"])
+    for key in ("reviews_app_id", "reviews_app_client_id", "reviews_app_pem"):
+        if key != present:
+            del account[key]
+    missing = (
+        "reviews_app_client_id" if present == "reviews_app_id" else "reviews_app_id"
+    )
+    assert refused(table) == f"[agent.credentials.agent] {missing} is required"

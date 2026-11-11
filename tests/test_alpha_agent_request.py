@@ -20,7 +20,7 @@ NAME_RULE = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
 REASON = "must be one printable line of up to 200 characters"
 
 BUILD: Data = {
-    "v": 1,
+    "v": 2,
     "kind": "exec",
     "repo": "example-org/example-repo",
     "commit": None,
@@ -36,6 +36,7 @@ BUILD: Data = {
     "variant": None,
     "role": None,
     "unsandboxed": False,
+    "tainted_host": False,
     "authorized_by": None,
     "startup_deadline_seconds": 120,
 }
@@ -113,13 +114,14 @@ def test_parse_builds_every_field() -> None:
         unsandboxed=False,
         authorized_by=None,
         startup_deadline_seconds=120,
+        tainted_host=False,
     )
 
 
 def test_to_dict_holds_the_version_and_every_field() -> None:
     parsed = request.parse(BUILD, host_allows_unsandboxed=False)
     assert request.to_dict(parsed) == BUILD
-    assert model.REQUEST_VERSION == 1
+    assert model.REQUEST_VERSION == 2
 
 
 def test_to_dict_does_not_validate() -> None:
@@ -129,10 +131,10 @@ def test_to_dict_does_not_validate() -> None:
     assert request.to_dict(parsed)["repo"] == "../x"
 
 
-@pytest.mark.parametrize("version", [2, 0, -1, "1", True, None, 1.0, [1], 11])
+@pytest.mark.parametrize("version", [1, 0, -1, "2", True, None, 2.0, [2], 11])
 def test_unknown_versions_are_refused_before_anything_else(version: object) -> None:
     expected = (
-        f"request v {version!r} is not a supported request version; this build reads 1"
+        f"request v {version!r} is not a supported request version; this build reads 2"
     )
     assert refused({"v": version}) == expected
     assert refused(made(BUILD, v=version, repo="../x", extra=1)) == expected
@@ -145,7 +147,7 @@ def test_a_missing_version_is_refused() -> None:
 
 def test_missing_fields_are_named() -> None:
     assert refused(made(BUILD, repo=MISSING)) == "request is missing fields: repo"
-    assert refused({"v": 1}).startswith("request is missing fields: account, ")
+    assert refused({"v": 2}).startswith("request is missing fields: account, ")
     assert refused(made(BUILD, repo=MISSING, kind=MISSING, extra=1)) == (
         "request is missing fields: kind, repo"
     )
@@ -479,3 +481,31 @@ def test_the_request_holds_no_credential_field() -> None:
     assert set(
         request.to_dict(request.parse(BUILD, host_allows_unsandboxed=False))
     ) == (set(BUILD))
+
+
+@pytest.mark.parametrize("tainted", [False, True])
+def test_request_reads_driver_host_taint(tainted: bool) -> None:
+    parsed = request.parse(
+        BUILD | {"tainted_host": tainted}, host_allows_unsandboxed=True
+    )
+    assert parsed.tainted_host is tainted
+    assert request.to_dict(parsed)["tainted_host"] is tainted
+
+
+def test_request_host_taint_is_required() -> None:
+    assert refused(made(BUILD, tainted_host=MISSING)) == (
+        "request is missing fields: tainted_host"
+    )
+
+
+def test_run_request_has_no_host_taint_default() -> None:
+    fields = {field.name: field for field in dataclasses.fields(model.RunRequest)}
+    assert fields["tainted_host"].default is dataclasses.MISSING
+
+
+@pytest.mark.parametrize("bad", [None, 0, 1, "false"])
+def test_request_host_taint_requires_boolean(bad: object) -> None:
+    assert (
+        refused(BUILD | {"tainted_host": bad})
+        == "request tainted_host must be true or false"
+    )

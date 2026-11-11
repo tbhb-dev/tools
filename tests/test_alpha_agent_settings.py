@@ -28,8 +28,8 @@ audit_dir = ".local/state/example-audit"
 denied_home_paths = [".claude"]
 
 [agent.sandbox.path]
-linux = [".local/share/mise/shims", "/usr/local/bin", "/usr/bin", "/bin"]
-macos = [".local/share/mise/shims", "/opt/homebrew/bin", "/usr/bin", "/bin"]
+linux = [".local/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+macos = [".local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]
 
 [agent.sandbox.agy]
 review_read = [".config/example-gh", ".config/mise"]
@@ -64,14 +64,16 @@ shell = "bash"
 account = "agent"
 unsandboxed = false
 accounts = ["agent"]
+proven_harnesses = ["codex"]
 
 [[agent.host]]
 name = "example-macos"
 os = "macos"
 shell = "zsh"
 account = "agent"
-unsandboxed = true
+unsandboxed = false
 accounts = ["agent"]
+proven_harnesses = ["codex"]
 """
 
 
@@ -88,7 +90,7 @@ def test_loads_the_example_from_the_home_config(
     assert loaded.agy_timeout_seconds == 900
     assert loaded.codex == model.Codex(model.WebSearch.LIVE, model.WebSearch.CACHED)
     assert [h.name for h in loaded.hosts] == ["example-linux", "example-macos"]
-    assert loaded.hosts[1].unsandboxed
+    assert loaded.hosts[1].unsandboxed is False
     assert loaded.claude.default_profile == "primary"
     assert (
         loaded.credentials[0].reviews_app_pem == "example-vault/example-app/private_key"
@@ -219,3 +221,15 @@ def test_command_parses_no_options(
     assert capsys.readouterr().err == (
         "example agent: configuration valid; runs are not implemented\n"
     )
+
+
+def test_command_dispatches_the_host_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[list[str], str]] = []
+
+    def run_host(arguments: list[str], prog: str) -> int:
+        calls.append((arguments, prog))
+        return 37
+
+    monkeypatch.setattr(agent.run_host, "main", run_host)
+    assert agent.main(["run-host", "example", "--host", "example-linux"], "agent") == 37
+    assert calls == [(["example", "--host", "example-linux"], "agent run-host")]

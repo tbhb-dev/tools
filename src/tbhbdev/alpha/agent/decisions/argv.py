@@ -83,15 +83,27 @@ def _toml(text: str) -> str:
     return json.dumps(text)
 
 
-def _codex_sandbox(profile: Profile, detail: CodexPolicy) -> list[str]:
+def _codex_sandbox(profile: Profile, detail: CodexPolicy, worktree: str) -> list[str]:
     if detail.mode is CodexMode.FULL_ACCESS:
         return ["-s", CodexMode.FULL_ACCESS.value]
-    entries = (
-        *((root, "read") for root in detail.read_roots),
-        *((root, "write") for root in detail.write_roots),
-        *((path, "none") for path in detail.deny),
+    conflicts = set(detail.write_roots) & {*detail.read_roots, *detail.deny}
+    if conflicts:
+        message = f"path {min(conflicts)} requires conflicting filesystem modes"
+        raise Invalid(message)
+    entries = dict.fromkeys(detail.read_roots, "read")
+    entries.update(dict.fromkeys(detail.write_roots, "write"))
+    entries.update(dict.fromkeys(detail.deny, "none"))
+    order = (
+        policy_module.READ_ROOT,
+        worktree,
+        *(policy_module.resolve(worktree, p) for p in policy_module.GIT_CONFIG_PATHS),
+        *entries,
     )
-    filesystem = ", ".join(f"{_toml(path)} = {_toml(mode)}" for path, mode in entries)
+    filesystem = ", ".join(
+        f"{_toml(path)} = {_toml(entries[path])}"
+        for path in dict.fromkeys(order)
+        if path in entries
+    )
     table = f"{{filesystem = {{{filesystem}}}, network = {{enabled = true}}}}"
     return [
         "-c",
@@ -115,7 +127,15 @@ def _codex(
         # Builds keep their rollout, which the commit hook reads the model from.
         if policy.profile is Profile.REVIEW:
             argv.append("--ephemeral")
-    argv += ["--strict-config", "-C", worktree, *_codex_sandbox(policy.profile, detail)]
+    argv += [
+        "--strict-config",
+        "-C",
+        worktree,
+        *_codex_sandbox(policy.profile, detail, worktree),
+    ]
+    # Quoting a path inside a dotted override key loses dots in some CLIs.
+    # Override the table as TOML so project trust is decided before layer loading.
+    argv += ["-c", f'projects={{{_toml(worktree)}={{trust_level="untrusted"}}}}']
     argv += [
         "-c",
         "sandbox_workspace_write.network_access=true",
@@ -124,9 +144,36 @@ def _codex(
         "-c",
         f"web_search={_toml(detail.web_search.value)}",
     ]
+    if detail.network_proxy is not None:
+        domains = ",".join(
+            f'{_toml(d)}="allow"' for d in detail.network_proxy["domains"]
+        )
+        argv += [
+            "-c",
+            (
+                'features.network_proxy={enabled=true,mode="limited",'
+                f"domains={{{domains}}},unix_sockets={{}},"
+                "dangerously_allow_all_unix_sockets=false,allow_local_binding=false}"
+            ),
+        ]
+    else:
+        argv += ["-c", "features.network_proxy.enabled=false"]
     # A codex policy's environment holds every handoff variable.
+    argv += [
+        "-c",
+        'shell_environment_policy.exclude=["GIT_*"]',
+        "-c",
+        'shell_environment_policy.set.GIT_CONFIG_COUNT="0"',
+        "-c",
+        f"shell_environment_policy.set.PATH={_toml(policy.tool_path)}",
+    ]
     for name in _HANDOFF:
         argv += ["-c", f"shell_environment_policy.set.{name}={_toml(policy.env[name])}"]
+    if "SSH_AUTH_SOCK" in policy.env:
+        argv += [
+            "-c",
+            f"shell_environment_policy.set.SSH_AUTH_SOCK={_toml(policy.env['SSH_AUTH_SOCK'])}",
+        ]
     argv += [
         "-m",
         request.model,
@@ -146,6 +193,7 @@ def _claude(
     argv = ["claude", *(["-p"] if headless else [])]
     argv += ["--model", request.model, "--effort", request.effort]
     argv += ["--permission-mode", mode, "--settings", settings]
+    argv += ["--setting-sources", "user", "--strict-mcp-config"]
     if not headless:
         argv.append(POINTER.format(path=brief_file))
     return tuple(argv)
@@ -193,6 +241,8 @@ def harness(  # noqa: PLR0913 -- one value per fact the harness's argv depends o
     brief_file: str,
     agy_project: str | None = None,
     agy_brief: str | None = None,
+    schema_file: str | None = None,
+    schema_text: str | None = None,
 ) -> tuple[str, ...]:
     """The harness command of REQUEST, under POLICY, that runs in WORKTREE.
 
@@ -211,7 +261,13 @@ def harness(  # noqa: PLR0913 -- one value per fact the harness's argv depends o
         raise Invalid(message)
     detail = policy.detail
     if isinstance(detail, CodexPolicy):
-        return _codex(request, policy, detail, worktree, brief_file)
+        command = _codex(request, policy, detail, worktree, brief_file)
+        if request.kind is RunKind.EXEC and schema_file is not None:
+            return (*command[:-1], "--output-schema", schema_file, command[-1])
+        return command
     if isinstance(detail, ClaudePolicy):
-        return _claude(request, policy, detail, brief_file)
+        command = _claude(request, policy, detail, brief_file)
+        if request.kind is RunKind.EXEC and schema_text is not None:
+            return (*command, "--output-format", "json", "--json-schema", schema_text)
+        return command
     return _agy(request, policy, worktree, brief_file, agy_project, agy_brief)

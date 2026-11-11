@@ -6,11 +6,17 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Literal
 
 import pytest
 from agent_example import (
     DENIED,
     LINUX,
+    LINUX_SOCKET_DENIES,
     MACOS,
     MARKER,
     SANDBOX,
@@ -21,7 +27,7 @@ from agent_example import (
 )
 
 from tbhbdev import secrets
-from tbhbdev.alpha.agent import model
+from tbhbdev.alpha.agent import host_tools, model
 from tbhbdev.alpha.agent.decisions import policy
 from tbhbdev.alpha.agent.model import (
     Harness,
@@ -42,8 +48,8 @@ MACOS_TOKEN_PATHS = (
     "Library/Keychains/tbhbdev.keychain",
 )
 PATH = {
-    Os.LINUX: "{home}/.local/share/mise/shims:/usr/local/bin:/usr/bin",
-    Os.MACOS: "{home}/.local/share/mise/shims:/opt/example/bin:/usr/bin",
+    Os.LINUX: "{home}/.local/bin:/usr/local/bin:/usr/bin",
+    Os.MACOS: "{home}/.local/bin:/opt/example/bin:/usr/bin",
 }
 
 
@@ -92,6 +98,7 @@ def denied(os: Os, home: str) -> tuple[str, ...]:
     if os is Os.LINUX:
         return (
             f"{home}/{TOKEN_DIR}",
+            *LINUX_SOCKET_DENIES,
             "/tmp/example-sockets",
             f"{home}/{DENIED}",
         )
@@ -107,16 +114,35 @@ def env_of(os: Os, harness: Harness, account: str) -> dict[str, str]:
     home = f"/example/home/{account}"
     tmp = f"{home}/.local/state/example-runs/run1.tmp"
     env = {
-        "PATH": PATH[os].format(home=home),
+        "PATH": ":".join(host_tools.search_path(settings(), os)),
         "HOME": home,
         "USER": account,
         "LOGNAME": account,
-        "SHELL": "bash" if os is Os.LINUX else "zsh",
+        "SHELL": "/bin/bash" if os is Os.LINUX else "/bin/zsh",
         "LANG": "C.UTF-8" if os is Os.LINUX else "en_US.UTF-8",
         "TMPDIR": tmp,
         "TMPPREFIX": f"{tmp}/zsh",
         "GH_CONFIG_DIR": f"{tmp}/gh",
         "DOCKER_CONFIG": f"{tmp}/docker",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_COUNT": "8",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
+        "GIT_CONFIG_KEY_2": "diff.ignoreSubmodules",
+        "GIT_CONFIG_VALUE_2": "all",
+        "GIT_CONFIG_KEY_3": "status.submoduleSummary",
+        "GIT_CONFIG_VALUE_3": "false",
+        "GIT_CONFIG_KEY_4": "protocol.ext.allow",
+        "GIT_CONFIG_VALUE_4": "never",
+        "GIT_CONFIG_KEY_5": "protocol.file.allow",
+        "GIT_CONFIG_VALUE_5": "never",
+        "GIT_CONFIG_KEY_6": "diff.external",
+        "GIT_CONFIG_VALUE_6": "",
+        "GIT_CONFIG_KEY_7": "safe.bareRepository",
+        "GIT_CONFIG_VALUE_7": "explicit",
     }
     if harness is Harness.CODEX:
         env["CODEX_HOME"] = f"{tmp}/codex"
@@ -144,6 +170,7 @@ def test_environment_is_exactly_the_allowlist(
         "LANG",
         "TERM",
         "EXAMPLE_PARENT",
+        "DEVELOPER_DIR",
     ):
         monkeypatch.setenv(name, "/parent-value")
     result = made(os, profile, harness, account)
@@ -162,20 +189,59 @@ def test_every_output_denies_the_same_paths(
     if isinstance(result.detail, model.CodexPolicy):
         assert result.detail.deny == denied(os, home)
     elif isinstance(result.detail, model.ClaudePolicy):
-        claude = claude_settings_of(result)
-        fs = ("sandbox", "filesystem")
-        assert dig(claude, *fs, "denyRead") == list(denied(os, home))
-        assert dig(claude, *fs, "denyWrite") == [
-            *(() if profile is Profile.BUILD else (paths(account).worktree,)),
-            *denied(os, home),
-        ]
-        rules = strings(dig(claude, "permissions", "deny"))
-        reads = [r for r in rules if r.startswith("Read(")]
-        assert reads == [f"Read(/{p}/**)" for p in denied(os, home)]
-        edits = [r for r in rules if r.startswith("Edit(")]
-        assert edits == [f"Edit(/{p}/**)" for p in denied(os, home)]
+        assert_claude_denials(result, os, profile, account)
     else:
         assert not any(d in g for d in denied(os, home) for g in result.detail.grants)
+
+
+def assert_claude_denials(
+    result: model.Policy, os: Os, profile: Profile, account: str
+) -> None:
+    home = f"/example/home/{account}"
+    claude = claude_settings_of(result)
+    fs = ("sandbox", "filesystem")
+    assert dig(claude, *fs, "denyRead") == list(denied(os, home))
+    assert dig(claude, *fs, "denyWrite") == [
+        *(() if profile is Profile.BUILD else (paths(account).worktree,)),
+        f"{paths(account).worktree}/.git",
+        *(
+            f"{paths(account).worktree}/.git/{entry}"
+            for entry in (
+                "config",
+                "config.worktree",
+                "commondir",
+                "hooks",
+                "info",
+                "modules",
+            )
+        ),
+        *denied(os, home),
+    ]
+    rules = strings(dig(claude, "permissions", "deny"))
+    reads = [r for r in rules if r.startswith("Read(")]
+    assert reads == [f"Read(/{p}/**)" for p in denied(os, home)]
+    edits = [r for r in rules if r.startswith("Edit(")]
+    expected_edits = [f"Edit(/{p}/**)" for p in denied(os, home)]
+    if profile is Profile.REVIEW:
+        expected_edits += [
+            f"Edit(/{paths(account).worktree}{suffix})" for suffix in ("", "/**")
+        ]
+    expected_edits += [
+        f"Edit(/{paths(account).worktree}/.git{suffix})" for suffix in ("", "/**")
+    ]
+    expected_edits += [
+        f"Edit(/{paths(account).worktree}/.git/{entry}{suffix})"
+        for entry in (
+            "config",
+            "config.worktree",
+            "commondir",
+            "hooks",
+            "info",
+            "modules",
+        )
+        for suffix in ("", "/**")
+    ]
+    assert edits == expected_edits
 
 
 def codex_expected(
@@ -186,6 +252,7 @@ def codex_expected(
     if profile is Profile.BUILD:
         writes = (
             f"{home}/Code/example.com/example-org/example-repo",
+            f"{home}/Code/example.com/example-org/example-repo/.git",
             tmp,
             f"{home}/.cache",
             f"{home}/.local/share/mise",
@@ -197,11 +264,27 @@ def codex_expected(
         writes = (*writes, "/dev/fd")
     return model.CodexPolicy(
         mode=model.CodexMode.PROFILE,
-        read_roots=(":root",),
+        read_roots=(
+            ":root",
+            *(
+                f"{home}/Code/example.com/example-org/example-repo/.git/{entry}"
+                for entry in (
+                    "config",
+                    "config.worktree",
+                    "commondir",
+                    "hooks",
+                    "info",
+                    "modules",
+                )
+            ),
+        )
+        if profile is Profile.BUILD
+        else (":root",),
         write_roots=writes,
         deny=denied(os, home),
         approval_policy="never",
         web_search=search,
+        network_proxy=policy.network_proxy(settings()),
     )
 
 
@@ -262,6 +345,7 @@ def test_unsandboxed_selects_full_access_for_a_codex_build(os: Os) -> None:
         deny=denied(os, "/example/home/ops"),
         approval_policy="never",
         web_search=WebSearch.LIVE,
+        network_proxy=policy.network_proxy(settings()),
     )
     assert result.env == env_of(os, Harness.CODEX, "ops")
     assert result.deny == denied(os, "/example/home/ops")
@@ -322,6 +406,19 @@ def test_an_account_the_host_lacks_is_refused(unsandboxed: bool) -> None:
     )
 
 
+def claude_file_tool_denies(
+    profile: Profile, worktree: str, protected: list[str]
+) -> list[str]:
+    if profile is Profile.REVIEW:
+        protected = [worktree, *protected]
+    return [
+        f"{tool}(/{path}{suffix})"
+        for path in protected
+        for suffix in ("", "/**")
+        for tool in ("Edit", "Write")
+    ]
+
+
 def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]:
     home = f"/example/home/{account}"
     tmp = f"{home}/.local/state/example-runs/run1.tmp"
@@ -346,16 +443,44 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
         if os is Os.MACOS:
             writes.append("/dev/fd")
         allow: list[str] = []
-        rules = ["Edit", "Write", "NotebookEdit", *denied_tools]
+        rules = [
+            "Edit",
+            "Write",
+            "NotebookEdit",
+            *denied_tools,
+        ]
         deny_write = [worktree, *deny]
+    protected = [
+        f"{worktree}/.git",
+        *[
+            f"{worktree}/.git/{entry}"
+            for entry in (
+                "config",
+                "config.worktree",
+                "commondir",
+                "hooks",
+                "info",
+                "modules",
+            )
+        ],
+    ]
+    rules += claude_file_tool_denies(profile, worktree, protected)
+    deny_write = (
+        [*protected, *deny_write]
+        if profile is Profile.BUILD
+        else [worktree, *protected, *deny]
+    )
     return {
         "env": {
+            "PATH": PATH[os].format(home=home),
             "TMPDIR": tmp,
             "TMPPREFIX": f"{tmp}/zsh",
             "GH_CONFIG_DIR": f"{tmp}/gh",
             "DOCKER_CONFIG": f"{tmp}/docker",
+            "GIT_NO_LAZY_FETCH": "1",
         },
-        "permissions": {"allow": allow, "deny": rules},
+        "disableAllHooks": True,
+        "permissions": {"allow": allow, "deny": [*rules, "WebFetch", "WebSearch"]},
         "sandbox": {
             "allowUnsandboxedCommands": False,
             "autoAllowBashIfSandboxed": True,
@@ -365,6 +490,8 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
             **(
                 {
                     "network": {
+                        "allowAllUnixSockets": False,
+                        "allowLocalBinding": False,
                         "strictAllowlist": True,
                         "allowedDomains": [
                             "github.com",
@@ -374,7 +501,14 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
                     },
                 }
                 if profile is Profile.REVIEW
-                else {}
+                else {
+                    "network": {
+                        "allowAllUnixSockets": False,
+                        "allowLocalBinding": False,
+                        "strictAllowlist": True,
+                        "allowedDomains": [],
+                    }
+                }
             ),
             "filesystem": {
                 "allowWrite": writes,
@@ -409,7 +543,6 @@ def agy_expected(profile: Profile, account: str) -> tuple[str, ...]:
         f"read_file({home}/.local/share/example-tools)",
         *handoff,
         f"write_file({worktree})",
-        f"write_file({worktree}/.git)",
         f"write_file({tmp})",
         f"write_file({home}/.local/state/mise)",
         f"write_file({home}/.local/share/mise)",
@@ -448,7 +581,7 @@ def test_write_roots_keep_the_first_occurrence(os: Os, profile: Profile) -> None
     )
     assert isinstance(result.detail, model.CodexPolicy)
     expected = (
-        (run.worktree, run.tmpdir, f"{run.home}/.cache")
+        (run.worktree, f"{run.worktree}/.git", run.tmpdir, f"{run.home}/.cache")
         if profile is Profile.BUILD
         else (run.tmpdir,)
     )
@@ -470,7 +603,11 @@ def test_denied_paths_keep_the_first_occurrence(os: Os, profile: Profile) -> Non
     result = made(os, profile, Harness.CODEX, "agent", config=config)
     home = "/example/home/agent"
     expected = (
-        (f"{home}/{TOKEN_DIR}", f"{home}/{DENIED}")
+        (
+            f"{home}/{TOKEN_DIR}",
+            *LINUX_SOCKET_DENIES,
+            f"{home}/{DENIED}",
+        )
         if os is Os.LINUX
         else (
             *(f"{home}/{p}" for p in MACOS_TOKEN_PATHS),
@@ -588,7 +725,13 @@ def test_the_sockets_directory_is_denied_with_its_aliases(
     home = "/example/home/agent"
     assert result.deny == (
         *(
-            (f"{home}/{TOKEN_DIR}",)
+            (
+                f"{home}/{TOKEN_DIR}",
+                "/run/WSL",
+                "/var/run/docker.sock",
+                "/run/docker.sock",
+                "/run/user/0",
+            )
             if os is Os.LINUX
             else tuple(f"{home}/{p}" for p in MACOS_TOKEN_PATHS)
         ),
@@ -643,6 +786,7 @@ def test_write_roots_come_only_from_the_config() -> None:
     home = "/example/home/agent"
     assert result.detail.write_roots == (
         f"{home}/Code/example.com/example-org/example-repo",
+        f"{home}/Code/example.com/example-org/example-repo/.git",
         f"{home}/.local/state/example-runs/run1.tmp",
         f"{home}/.only-this",
         "/example/abs",
@@ -675,7 +819,7 @@ def test_no_output_holds_a_secret_reference() -> None:
         "/example/home/agent/.local/state/example-runs/run1.tmp",
     ],
 )
-def test_build_grants_the_git_common_directory(
+def test_build_never_grants_another_git_directory(
     os: Os, harness: Harness, common: str | None
 ) -> None:
     run = dataclasses.replace(
@@ -698,15 +842,12 @@ def test_build_grants_the_git_common_directory(
             "read_file(/example/home/agent/.local/state/example-runs/run1.tmp/gh)",
             "read_file(/example/home/agent/.local/state/example-runs/run1.tmp/docker)",
             "write_file(/example/clone/.worktrees/agent-example)",
-            f"write_file({common or '/example/clone/.worktrees/agent-example/.git'})",
             "write_file(/example/home/agent/.local/state/example-runs/run1.tmp)",
             "write_file(/example/home/agent/.local/state/mise)",
             "write_file(/example/home/agent/.local/share/mise)",
         )
     else:
         expected = ["/example/clone/.worktrees/agent-example"]
-        if common == "/example/clone/.git":
-            expected.append("/example/clone/.git")
         expected += [
             "/example/home/agent/.local/state/example-runs/run1.tmp",
             "/example/home/agent/.cache",
@@ -716,6 +857,7 @@ def test_build_grants_the_git_common_directory(
         if os is Os.MACOS:
             expected.append("/dev/fd")
         if isinstance(result.detail, model.CodexPolicy):
+            expected.insert(1, expected[0] + "/.git")
             assert result.detail.write_roots == tuple(expected)
         else:
             assert (
@@ -742,8 +884,18 @@ def test_claude_review_denies_writes_to_the_git_common_directory(
     expected = []
     if profile is Profile.REVIEW:
         expected.append("/example/home/agent/Code/example.com/example-org/example-repo")
-        if common is not None:
-            expected.append("/example/clone/.git")
+    expected.append(f"{paths('agent').worktree}/.git")
+    expected.extend(
+        f"{paths('agent').worktree}/.git/{entry}"
+        for entry in (
+            "config",
+            "config.worktree",
+            "commondir",
+            "hooks",
+            "info",
+            "modules",
+        )
+    )
     assert dig(claude_settings_of(result), "sandbox", "filesystem", "denyWrite") == [
         *expected,
         *denied(os, "/example/home/agent"),
@@ -785,6 +937,7 @@ def test_absolute_write_roots_pass_through(
     if os is Os.MACOS:
         expected.append("/dev/fd")
     if isinstance(result.detail, model.CodexPolicy):
+        expected.insert(1, expected[0] + "/.git")
         assert result.detail.write_roots == tuple(expected)
     else:
         assert (
@@ -878,7 +1031,6 @@ def test_configured_write_roots_cannot_reach_denied_paths(
     [
         (Profile.BUILD, "worktree"),
         (Profile.BUILD, "tmpdir"),
-        (Profile.BUILD, "git_common_dir"),
         (Profile.REVIEW, "tmpdir"),
         (Profile.REVIEW, "audit_dir"),
     ],
@@ -887,9 +1039,20 @@ def test_configured_write_roots_cannot_reach_denied_paths(
     "write", ["/example/denied/item", "/example/denied", "/example/denied/item/inner"]
 )
 def test_run_write_paths_cannot_reach_denied_paths(
-    os: Os, profile: Profile, harness: Harness, field: str, write: str
+    os: Os,
+    profile: Profile,
+    harness: Harness,
+    field: Literal["worktree", "tmpdir", "git_common_dir", "audit_dir"],
+    write: str,
 ) -> None:
-    run = dataclasses.replace(paths("agent"), **{field: write})
+    original = paths("agent")
+    run = dataclasses.replace(
+        original,
+        worktree=write if field == "worktree" else original.worktree,
+        tmpdir=write if field == "tmpdir" else original.tmpdir,
+        git_common_dir=write if field == "git_common_dir" else original.git_common_dir,
+        audit_dir=write if field == "audit_dir" else original.audit_dir,
+    )
     config = dataclasses.replace(settings(), sockets_dir="/example/denied/item")
     with pytest.raises(Invalid) as caught:
         policy.build(
@@ -982,3 +1145,505 @@ def test_unrelated_write_roots_are_allowed(
 ) -> None:
     sandbox = dataclasses.replace(SANDBOX, write_roots=(write,))
     assert made(os, profile, harness, "agent", config=settings(sandbox=sandbox))
+
+
+@pytest.mark.parametrize("harness", Harness)
+def test_build_gets_common_git_directory_and_only_its_signing_socket(
+    harness: Harness,
+) -> None:
+    original = paths("agent")
+    common = "/example/clone/git-common"
+    socket = original.tmpdir + "/ssh.sock"
+    run = dataclasses.replace(original, git_common_dir=common, signing_socket=socket)
+    result = policy.build(
+        settings(),
+        LINUX,
+        harness=harness,
+        profile=Profile.BUILD,
+        account="agent",
+        unsandboxed=False,
+        paths=run,
+    )
+    assert result.env == env_of(Os.LINUX, harness, "agent") | {"SSH_AUTH_SOCK": socket}
+    if isinstance(result.detail, model.CodexPolicy):
+        assert result.detail.write_roots == (
+            original.worktree,
+            original.worktree + "/.git",
+            original.tmpdir,
+            original.home + "/.cache",
+            original.home + "/.local/share/mise",
+            original.home + "/.local/state",
+        )
+    elif isinstance(result.detail, model.ClaudePolicy):
+        assert dig(result.detail.settings, "env", "SSH_AUTH_SOCK") == socket
+        assert dig(result.detail.settings, "sandbox", "network") == {
+            "allowAllUnixSockets": False,
+            "allowLocalBinding": False,
+            "strictAllowlist": True,
+            "allowedDomains": [],
+            "allowUnixSockets": [socket],
+        }
+        assert common not in strings(
+            dig(result.detail.settings, "sandbox", "filesystem", "allowWrite")
+        )
+    else:
+        assert f"read_file({socket})" in result.detail.grants
+
+
+def test_review_never_grants_common_git_writes() -> None:
+    run = dataclasses.replace(
+        paths("agent"), git_common_dir="/example/clone/git-common"
+    )
+    result = policy.build(
+        settings(),
+        LINUX,
+        harness=Harness.CODEX,
+        profile=Profile.REVIEW,
+        account="agent",
+        unsandboxed=False,
+        paths=run,
+    )
+    assert isinstance(result.detail, model.CodexPolicy)
+    assert "/example/clone/git-common" not in result.detail.write_roots
+
+
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize(
+    ("profile", "socket", "network"),
+    [
+        (
+            Profile.BUILD,
+            None,
+            {
+                "allowAllUnixSockets": False,
+                "allowLocalBinding": False,
+                "strictAllowlist": True,
+                "allowedDomains": [],
+            },
+        ),
+        (
+            Profile.BUILD,
+            "/example/signing.sock",
+            {
+                "allowAllUnixSockets": False,
+                "allowLocalBinding": False,
+                "strictAllowlist": True,
+                "allowedDomains": [],
+                "allowUnixSockets": ["/example/signing.sock"],
+            },
+        ),
+        (
+            Profile.REVIEW,
+            None,
+            {
+                "allowAllUnixSockets": False,
+                "allowLocalBinding": False,
+                "strictAllowlist": True,
+                "allowedDomains": [
+                    "github.com",
+                    "api.github.com",
+                    "*.githubusercontent.com",
+                ],
+            },
+        ),
+        (
+            Profile.REVIEW,
+            "/example/signing.sock",
+            {
+                "allowAllUnixSockets": False,
+                "allowLocalBinding": False,
+                "strictAllowlist": True,
+                "allowedDomains": [
+                    "github.com",
+                    "api.github.com",
+                    "*.githubusercontent.com",
+                ],
+                "allowUnixSockets": ["/example/signing.sock"],
+            },
+        ),
+    ],
+)
+def test_claude_combines_review_network_and_signing_socket(
+    os: Os, profile: Profile, socket: str | None, network: dict[str, object] | None
+) -> None:
+    result = policy.build(
+        settings(),
+        HOSTS[os],
+        harness=Harness.CLAUDE,
+        profile=profile,
+        account="agent",
+        unsandboxed=False,
+        paths=dataclasses.replace(paths("agent"), signing_socket=socket),
+    )
+    expected = claude_expected(os, profile, "agent")
+    sandbox = expected["sandbox"]
+    assert isinstance(sandbox, dict)
+    if network is not None:
+        sandbox["network"] = network
+    env = expected["env"]
+    assert isinstance(env, dict)
+    if socket is not None:
+        env["SSH_AUTH_SOCK"] = socket
+    assert claude_settings_of(result) == expected
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize(
+    ("socket", "denied_path"),
+    [
+        ("/example/denied/item", "/example/denied/item"),
+        ("/example/denied/item/signing.sock", "/example/denied/item"),
+        ("/example/denied", "/example/denied/item"),
+        ("/tmp/example-sockets/signing.sock", "/tmp/example-sockets"),
+    ],
+)
+def test_signing_sockets_cannot_reach_denied_paths(
+    os: Os, harness: Harness, profile: Profile, socket: str, denied_path: str
+) -> None:
+    sandbox = dataclasses.replace(SANDBOX, denied_home_paths=("/example/denied/item",))
+    with pytest.raises(Invalid) as caught:
+        policy.build(
+            settings(sandbox=sandbox),
+            HOSTS[os],
+            harness=harness,
+            profile=profile,
+            account="agent",
+            unsandboxed=False,
+            paths=dataclasses.replace(paths("agent"), signing_socket=socket),
+        )
+    assert str(caught.value) == (
+        f"policy signing socket {socket} overlaps the denied path {denied_path}"
+    )
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("os", Os)
+def test_signing_socket_grants_do_not_add_write_roots(
+    os: Os, harness: Harness, profile: Profile
+) -> None:
+    socket = "/example/signing.sock"
+    original = made(os, profile, harness, "agent")
+    result = policy.build(
+        settings(),
+        HOSTS[os],
+        harness=harness,
+        profile=profile,
+        account="agent",
+        unsandboxed=False,
+        paths=dataclasses.replace(paths("agent"), signing_socket=socket),
+    )
+    assert result.env == original.env | {"SSH_AUTH_SOCK": socket}
+    if isinstance(result.detail, model.CodexPolicy):
+        assert result.detail == original.detail
+    elif isinstance(result.detail, model.ClaudePolicy):
+        assert dig(result.detail.settings, "sandbox", "filesystem") == dig(
+            claude_settings_of(original), "sandbox", "filesystem"
+        )
+    else:
+        assert isinstance(original.detail, model.AgyPolicy)
+        reads = tuple(g for g in original.detail.grants if g.startswith("read_file("))
+        writes = tuple(g for g in original.detail.grants if g.startswith("write_file("))
+        assert result.detail.grants == (*reads, f"read_file({socket})", *writes)
+
+
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("common", [None, "/example/clone/.git"])
+def test_codex_protects_git_configuration_inside_build_write_root(
+    os: Os, profile: Profile, common: str | None
+) -> None:
+    result = policy.build(
+        settings(),
+        HOSTS[os],
+        harness=Harness.CODEX,
+        profile=profile,
+        account="agent",
+        unsandboxed=False,
+        paths=dataclasses.replace(paths("agent"), git_common_dir=common),
+    )
+    assert isinstance(result.detail, model.CodexPolicy)
+    expected = (":root",)
+    if profile is Profile.BUILD:
+        expected += (
+            *tuple(
+                f"{paths('agent').worktree}/.git/{entry}"
+                for entry in (
+                    "config",
+                    "config.worktree",
+                    "commondir",
+                    "hooks",
+                    "info",
+                    "modules",
+                )
+            ),
+        )
+    assert common not in result.detail.write_roots
+    assert result.detail.read_roots == expected
+
+
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("reason", [None, "isolated test machine"])
+def test_agy_requires_named_opt_out(profile: Profile, reason: str | None) -> None:
+    configured = settings(
+        sandbox=dataclasses.replace(SANDBOX, agy_unsandboxed_opt_out=reason)
+    )
+    if reason is None:
+        with pytest.raises(Invalid) as caught:
+            made(Os.LINUX, profile, Harness.AGY, "agent", config=configured)
+        assert str(caught.value) == (
+            "agy has no OS sandbox; configure agy_unsandboxed_opt_out "
+            "with a named reason"
+        )
+    else:
+        assert isinstance(
+            made(Os.LINUX, profile, Harness.AGY, "agent", config=configured).detail,
+            model.AgyPolicy,
+        )
+
+
+@pytest.mark.parametrize("reason", [None, "explicit network exception"])
+@pytest.mark.parametrize("domains", [(), ("api.github.com", "example.com")])
+@pytest.mark.parametrize("profile", Profile)
+def test_codex_proxy_default_and_opt_out(
+    reason: str | None, domains: tuple[str, ...], profile: Profile
+) -> None:
+    configured = settings(
+        sandbox=dataclasses.replace(
+            SANDBOX, network_domains=domains, codex_network_proxy_opt_out=reason
+        )
+    )
+    detail = made(Os.LINUX, profile, Harness.CODEX, "agent", config=configured).detail
+    assert isinstance(detail, model.CodexPolicy)
+    assert detail.network_proxy == (
+        None
+        if reason
+        else {
+            "enabled": True,
+            "mode": "limited",
+            "domains": dict.fromkeys(domains, "allow"),
+            "unix_sockets": {},
+            "dangerously_allow_all_unix_sockets": False,
+            "allow_local_binding": False,
+        }
+    )
+
+
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize("socket", [None, "/example/signing.sock"])
+def test_claude_build_network_domains(os: Os, socket: str | None) -> None:
+    configured = settings(
+        sandbox=dataclasses.replace(SANDBOX, network_domains=("api.github.com",))
+    )
+    result = policy.build(
+        configured,
+        HOSTS[os],
+        harness=Harness.CLAUDE,
+        profile=Profile.BUILD,
+        account="agent",
+        unsandboxed=False,
+        paths=dataclasses.replace(paths("agent"), signing_socket=socket),
+    )
+    assert isinstance(result.detail, model.ClaudePolicy)
+    assert dig(result.detail.settings, "sandbox", "network") == {
+        "allowAllUnixSockets": False,
+        "allowLocalBinding": False,
+        "strictAllowlist": True,
+        "allowedDomains": ["api.github.com"],
+        **({"allowUnixSockets": [socket]} if socket else {}),
+    }
+
+
+@pytest.mark.parametrize(
+    "field", ["worktree", "tmpdir", "audit_dir", "configured", "fd"]
+)
+@pytest.mark.parametrize("relation", ["same", "ancestor", "descendant", "sibling"])
+def test_host_protected_paths_refuse_both_directions(field: str, relation: str) -> None:
+    run = model.RunPaths(
+        "/example/home",
+        "/one/worktree",
+        "/three/temp",
+        "/three/temp/codex",
+        "/four/audit",
+        "/two/common",
+    )
+    configured = settings(sandbox=dataclasses.replace(SANDBOX, write_roots=(".cache",)))
+    write = {"configured": run.home + "/.cache", "fd": "/dev/fd"}.get(field) or getattr(
+        run, field
+    )
+    protected = {
+        "same": write,
+        "ancestor": str(PurePosixPath(write).parent),
+        "descendant": write + "/bin",
+        "sibling": write + "-other",
+    }[relation]
+    if relation == "sibling":
+        policy.protect_host(configured, run, (protected,))
+    else:
+        with pytest.raises(Invalid) as caught:
+            policy.protect_host(configured, run, (protected,))
+        assert str(caught.value) == (
+            f"protected host path {protected} overlaps write root {write}; "
+            "narrow that write root"
+        )
+
+
+@pytest.mark.parametrize("harness", Harness)
+def test_linux_socket_denies_use_the_run_uid(harness: Harness) -> None:
+    run = dataclasses.replace(paths("agent"), uid=12345)
+    result = policy.build(
+        settings(),
+        LINUX,
+        harness=harness,
+        profile=Profile.BUILD,
+        account="agent",
+        unsandboxed=False,
+        paths=run,
+    )
+    assert "/run/user/12345" in result.deny
+    assert "/run/user/0" not in result.deny
+    for path in ("/run/WSL", "/var/run/docker.sock", "/run/docker.sock"):
+        assert path in result.deny
+
+
+def test_host_protection_handles_a_missing_common_directory() -> None:
+    policy.protect_host(settings(), paths("agent"), ("/example/installation",))
+
+
+@pytest.mark.parametrize("host", [LINUX, MACOS])
+def test_parent_and_tool_search_paths_are_separate(host: model.Host) -> None:
+    result = made(host.os, Profile.BUILD, Harness.CODEX, "agent")
+    fixed = "/usr/bin:/bin:/usr/sbin:/sbin"
+    if host.os is Os.MACOS:
+        fixed += ":/opt/homebrew/bin:/usr/local/bin"
+    assert result.env["PATH"] == fixed
+    assert result.tool_path == PATH[host.os].format(home="/example/home/agent")
+
+
+@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
+@pytest.mark.parametrize("os_name", Os)
+def test_harness_parent_neutralizes_all_repository_git_config(
+    harness: Harness, os_name: Os
+) -> None:
+    result = made(os_name, Profile.BUILD, harness, "agent")
+    assert result.env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert result.env["GIT_CONFIG_COUNT"] == "8"
+    assert {
+        result.env[f"GIT_CONFIG_KEY_{i}"]: result.env[f"GIT_CONFIG_VALUE_{i}"]
+        for i in range(8)
+    } == {
+        "core.fsmonitor": "false",
+        "core.hooksPath": "/dev/null",
+        "diff.ignoreSubmodules": "all",
+        "status.submoduleSummary": "false",
+        "protocol.ext.allow": "never",
+        "protocol.file.allow": "never",
+        "diff.external": "",
+        "safe.bareRepository": "explicit",
+    }
+
+
+def test_git_entry_and_all_configuration_paths_are_protected() -> None:
+    run = paths("agent")
+    assert policy.protected_git(run) == tuple(
+        run.worktree + "/.git" + suffix
+        for suffix in (
+            "",
+            "/config",
+            "/config.worktree",
+            "/commondir",
+            "/hooks",
+            "/info",
+            "/modules",
+        )
+    )
+
+
+@pytest.mark.parametrize("reason", [None, "isolated test host"])
+def test_codex_full_access_requires_named_opt_out(reason: str | None) -> None:
+    configured = settings()
+    configured = dataclasses.replace(
+        configured,
+        sandbox=dataclasses.replace(
+            configured.sandbox, codex_unsandboxed_opt_out=reason
+        ),
+    )
+    if reason is None:
+        with pytest.raises(Invalid) as caught:
+            made(
+                os=Os.LINUX,
+                profile=Profile.BUILD,
+                harness=Harness.CODEX,
+                account="agent",
+                unsandboxed=True,
+                config=configured,
+            )
+        assert str(caught.value) == (
+            "codex has no OS sandbox; configure codex_unsandboxed_opt_out "
+            "with a named reason"
+        )
+    else:
+        value = made(
+            os=Os.LINUX,
+            profile=Profile.BUILD,
+            harness=Harness.CODEX,
+            account="agent",
+            unsandboxed=True,
+            config=configured,
+        )
+        assert isinstance(value.detail, model.CodexPolicy)
+        assert value.detail.mode is model.CodexMode.FULL_ACCESS
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("denied", [(), ("/example/protected",)])
+def test_supplied_denies_are_policy_data(
+    harness: Harness, denied: tuple[str, ...]
+) -> None:
+    value = policy.build(
+        settings(),
+        LINUX,
+        harness=harness,
+        profile=Profile.BUILD,
+        account="agent",
+        unsandboxed=False,
+        paths=paths("agent"),
+        denied=denied,
+    )
+    assert value.deny == denied
+    if isinstance(value.detail, model.CodexPolicy):
+        assert value.detail.deny == denied
+    elif isinstance(value.detail, model.ClaudePolicy):
+        assert dig(value.detail.settings, "sandbox", "filesystem", "denyRead") == list(
+            denied
+        )
+
+
+@pytest.mark.parametrize("profile", Profile)
+def test_claude_file_tools_deny_each_protected_path(profile: Profile) -> None:
+    run = paths("agent")
+    protected = ("/example/mirror", "/example/account/.git")
+    value = policy.build(
+        settings(),
+        LINUX,
+        harness=Harness.CLAUDE,
+        profile=profile,
+        account="agent",
+        unsandboxed=False,
+        paths=run,
+        protected=protected,
+    )
+    detail = claude_settings_of(value)
+    denied = strings(dig(detail, "permissions", "deny"))
+    for path in (
+        *protected,
+        *(f"{run.worktree}/.git/{name}" for name in ("config", "hooks", "info")),
+    ):
+        assert f"Edit(/{path})" in denied
+        assert f"Edit(/{path}/**)" in denied
+        assert path in strings(dig(detail, "sandbox", "filesystem", "denyWrite"))
+    assert not any(
+        "/.git" in rule for rule in strings(dig(detail, "permissions", "allow"))
+    )

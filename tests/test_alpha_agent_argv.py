@@ -13,6 +13,7 @@ import pytest
 from agent_example import (
     DENIED,
     LINUX,
+    LINUX_SOCKET_DENIES,
     MACOS,
     MARKER,
     TOKEN_DIR,
@@ -37,6 +38,7 @@ IDS = [f"{h.value}-{k.value}-{p.value}" for h, k, p in COMBINATIONS]
 
 DENY_LINUX = (
     f"{HOME}/{TOKEN_DIR}",
+    *LINUX_SOCKET_DENIES,
     "/tmp/example-sockets",
     f"{HOME}/{DENIED}",
 )
@@ -52,6 +54,12 @@ HANDOFF = (
 )
 CODEX_HANDOFF = (
     "-c",
+    'shell_environment_policy.exclude=["GIT_*"]',
+    "-c",
+    f"shell_environment_policy.set.GIT_CONFIG_COUNT={json.dumps('0')}",
+    "-c",
+    f'shell_environment_policy.set.PATH="{HOME}/.local/bin:/usr/local/bin:/usr/bin"',
+    "-c",
     f'shell_environment_policy.set.CODEX_HOME="{TMP}/codex"',
     *HANDOFF,
 )
@@ -62,13 +70,23 @@ CODEX_TAIL = (
     'approval_policy="never"',
     "-c",
     'web_search="live"',
+    "-c",
+    'features.network_proxy={enabled=true,mode="limited",domains={},unix_sockets={},dangerously_allow_all_unix_sockets=false,allow_local_binding=false}',
 )
 CODEX_BUILD_FS = (
     '{filesystem = {":root" = "read", '
-    f'"{WORKTREE}" = "write", "{TMP}" = "write", '
+    f'"{WORKTREE}" = "write", "{WORKTREE}/.git" = "write", '
+    f'"{WORKTREE}/.git/config" = "read", '
+    f'"{WORKTREE}/.git/config.worktree" = "read", '
+    f'"{WORKTREE}/.git/commondir" = "read", '
+    f'"{WORKTREE}/.git/hooks" = "read", '
+    f'"{WORKTREE}/.git/info" = "read", "{WORKTREE}/.git/modules" = "read", '
+    f'"{TMP}" = "write", '
     f'"{HOME}/.cache" = "write", "{HOME}/.local/share/mise" = "write", '
     f'"{HOME}/.local/state" = "write", '
     f'"{HOME}/{TOKEN_DIR}" = "none", '
+    '"/run/WSL" = "none", "/var/run/docker.sock" = "none", '
+    '"/run/docker.sock" = "none", "/run/user/0" = "none", '
     '"/tmp/example-sockets" = "none", '
     f'"{HOME}/{DENIED}" = "none"}}, network = {{enabled = true}}}}'
 )
@@ -76,6 +94,8 @@ CODEX_REVIEW_FS = (
     '{filesystem = {":root" = "read", '
     f'"{TMP}" = "write", "{HOME}/.local/state/example-audit" = "write", '
     f'"{HOME}/{TOKEN_DIR}" = "none", '
+    '"/run/WSL" = "none", "/var/run/docker.sock" = "none", '
+    '"/run/docker.sock" = "none", "/run/user/0" = "none", '
     '"/tmp/example-sockets" = "none", '
     f'"{HOME}/{DENIED}" = "none"}}, network = {{enabled = true}}}}'
 )
@@ -132,6 +152,7 @@ def request(
         unsandboxed=unsandboxed,
         authorized_by="example-org/example-repo#1" if unsandboxed else None,
         startup_deadline_seconds=120,
+        tainted_host=False,
     )
 
 
@@ -184,6 +205,8 @@ def expected(harness: Harness, kind: RunKind, profile: Profile) -> tuple[str, ..
             "-C",
             WORKTREE,
             *codex_sandbox(profile),
+            "-c",
+            f'projects={{"{WORKTREE}"={{trust_level="untrusted"}}}}',
             *CODEX_TAIL,
             *CODEX_HANDOFF,
             *MODEL,
@@ -201,6 +224,9 @@ def expected(harness: Harness, kind: RunKind, profile: Profile) -> tuple[str, ..
             "dontAsk" if review else "auto",
             "--settings",
             claude_settings(profile),
+            "--setting-sources",
+            "user",
+            "--strict-mcp-config",
             *(() if headless else (POINTER,)),
         )
     head = (
@@ -280,11 +306,27 @@ def test_unsandboxed_codex_is_full_access_with_no_profile(kind: RunKind) -> None
         WORKTREE,
         "-s",
         "danger-full-access",
+        "-c",
+        f'projects={{"{WORKTREE}"={{trust_level="untrusted"}}}}',
         *CODEX_TAIL,
         *CODEX_HANDOFF,
         *MODEL,
         "-" if kind is RunKind.EXEC else POINTER,
     )
+
+
+def test_codex_project_trust_preserves_path_as_one_toml_key() -> None:
+    workspace = '/example/path.with.dots/and "quotes"'
+    command = argv.harness(
+        request(Harness.CODEX, RunKind.EXEC, Profile.BUILD),
+        policy_for(Harness.CODEX, Profile.BUILD),
+        worktree=workspace,
+        brief_file=BRIEF_FILE,
+    )
+    entry = next(value for value in command if value.startswith("projects="))
+    assert tomllib.loads(entry) == {
+        "projects": {workspace: {"trust_level": "untrusted"}}
+    }
 
 
 @pytest.mark.parametrize(
@@ -364,7 +406,11 @@ def test_codex_tables_have_no_repeated_paths(os: Os, profile: Profile) -> None:
     value = next(a for a in result if a.startswith(flag)).removeprefix(flag)
     fs = tomllib.loads(f"profile = {value}")["profile"]["filesystem"]
     deny = (
-        [f"{HOME}/{TOKEN_DIR}", f"{HOME}/{DENIED}"]
+        [
+            f"{HOME}/{TOKEN_DIR}",
+            *LINUX_SOCKET_DENIES,
+            f"{HOME}/{DENIED}",
+        ]
         if os is Os.LINUX
         else [
             f"{HOME}/Library/Keychains/tbhbdev.keychain-db",
@@ -375,7 +421,7 @@ def test_codex_tables_have_no_repeated_paths(os: Os, profile: Profile) -> None:
     )
     assert [p for p, mode in fs.items() if mode == "none"] == deny
     writes = (
-        [WORKTREE, TMP, f"{HOME}/.cache"]
+        [WORKTREE, f"{WORKTREE}/.git", TMP, f"{HOME}/.cache"]
         if profile is Profile.BUILD
         else [TMP, f"{HOME}/.local/state/example-audit"]
     )
@@ -534,3 +580,125 @@ def test_no_argv_holds_a_secret_reference_or_a_token() -> None:
     assert len(every) == len(COMBINATIONS) + 2
     for command in every:
         assert not any(MARKER in element for element in command)
+
+
+def test_codex_overrides_the_signing_socket_setting() -> None:
+    original = policy_for(Harness.CODEX, Profile.BUILD)
+    pol = dataclasses.replace(
+        original, env=original.env | {"SSH_AUTH_SOCK": "/example/private/ssh.sock"}
+    )
+    result = argv.harness(
+        request(Harness.CODEX, RunKind.EXEC, Profile.BUILD),
+        pol,
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+    )
+    flag = 'shell_environment_policy.set.SSH_AUTH_SOCK="/example/private/ssh.sock"'
+    assert result[result.index(flag) - 1] == "-c"
+    assert result.count(flag) == 1
+
+    baseline = argv.harness(
+        request(Harness.CODEX, RunKind.EXEC, Profile.BUILD),
+        original,
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+    )
+    index = result.index(flag)
+    assert result[: index - 1] + result[index + 1 :] == baseline
+
+
+@pytest.mark.parametrize("opt_out", [False, True])
+def test_network_proxy_overrides_are_explicit(opt_out: bool) -> None:
+    original = settings()
+    configured = dataclasses.replace(
+        original,
+        sandbox=dataclasses.replace(
+            original.sandbox,
+            network_domains=("api.github.com", "example.com"),
+            codex_network_proxy_opt_out="test exception" if opt_out else None,
+        ),
+    )
+    result = built(Harness.CODEX, RunKind.EXEC, Profile.BUILD, config=configured)
+    assert result[:3] == ("codex", "exec", "--skip-git-repo-check")
+    setting = next(arg for arg in result if arg.startswith("features.network_proxy"))
+    assert result[result.index(setting) - 1] == "-c"
+    parsed = tomllib.loads(setting)["features"]["network_proxy"]
+    assert parsed == (
+        {"enabled": False}
+        if opt_out
+        else {
+            "enabled": True,
+            "mode": "limited",
+            "domains": {"api.github.com": "allow", "example.com": "allow"},
+            "unix_sockets": {},
+            "dangerously_allow_all_unix_sockets": False,
+            "allow_local_binding": False,
+        }
+    )
+
+
+@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
+@pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize("schema", [None, '{"type":"object"}'])
+def test_schema_options_are_only_for_exec(
+    harness: Harness, kind: RunKind, schema: str | None
+) -> None:
+    req = request(harness, kind, Profile.BUILD)
+    pol = policy_for(harness, Profile.BUILD)
+    baseline = argv.harness(req, pol, worktree=WORKTREE, brief_file=BRIEF_FILE)
+    path = "/example/schema.json" if schema is not None else None
+    result = argv.harness(
+        req,
+        pol,
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+        schema_file=path,
+        schema_text=schema,
+    )
+    if kind is RunKind.EXEC and schema is not None:
+        expected = (
+            (*baseline[:-1], "--output-schema", path, baseline[-1])
+            if harness is Harness.CODEX
+            else (*baseline, "--output-format", "json", "--json-schema", schema)
+        )
+        assert result == expected
+    else:
+        assert result == baseline
+
+
+@pytest.mark.parametrize("other", ["read_roots", "deny"])
+def test_codex_refuses_a_write_root_requiring_another_mode(other: str) -> None:
+    parsed = request(Harness.CODEX, RunKind.EXEC, Profile.BUILD)
+    value = policy_for(Harness.CODEX, Profile.BUILD)
+    assert isinstance(value.detail, model.CodexPolicy)
+    detail = (
+        dataclasses.replace(value.detail, read_roots=(WORKTREE, TMP))
+        if other == "read_roots"
+        else dataclasses.replace(value.detail, deny=(WORKTREE, TMP))
+    )
+    with pytest.raises(Invalid) as caught:
+        argv.harness(
+            parsed,
+            dataclasses.replace(value, detail=detail),
+            worktree=WORKTREE,
+            brief_file=BRIEF_FILE,
+        )
+
+    assert str(caught.value) == f"path {TMP} requires conflicting filesystem modes"
+
+
+@pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize("profile", Profile)
+def test_codex_tool_environment_excludes_inherited_git_variables(
+    kind: RunKind, profile: Profile
+) -> None:
+    command = built(Harness.CODEX, kind, profile)
+    overrides = "\n".join(
+        value for flag, value in itertools.pairwise(command) if flag == "-c"
+    )
+    environment = tomllib.loads(overrides)["shell_environment_policy"]
+    assert environment["exclude"] == ["GIT_*"]
+    assert environment["set"]["GIT_CONFIG_COUNT"] == "0"
+    assert {name for name in environment["set"] if name.startswith("GIT_")} == {
+        "GIT_CONFIG_COUNT"
+    }

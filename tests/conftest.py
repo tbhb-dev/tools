@@ -13,6 +13,7 @@ reaches 1Password, a keychain, the tailnet, a host, an account or an ACL.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shlex
@@ -27,6 +28,7 @@ from typing import TYPE_CHECKING, cast, override
 import pytest
 
 from tbhbdev import host, plugins, secrets
+from tbhbdev.alpha.agent import credentials, host_tools
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -76,6 +78,75 @@ SYSTEM_TOOLS = (
 )
 # The fake Connect API's own token, which reaches every vault.
 TOKEN = "fake-test-token"  # noqa: S105
+
+
+# Capture the account before any fixture redirects HOME to its scratch home.
+ACCOUNT_CODEX_HOME = Path.home() / ".codex"
+ACCOUNT_AUTH_WRITERS = frozenset(
+    (credentials.auth_copy.__code__, credentials.auth_write_back.__code__)
+)
+type FilePath = str | bytes | os.PathLike[str] | os.PathLike[bytes]
+
+
+def account_auth_write() -> bool:
+    frame = inspect.currentframe()
+    while frame is not None:
+        if frame.f_code in ACCOUNT_AUTH_WRITERS:
+            return True
+        frame = frame.f_back
+    return False
+
+
+def check_account_codex_write(path: FilePath) -> None:
+    absolute = Path(os.fsdecode(path)).absolute()
+    if absolute.is_relative_to(ACCOUNT_CODEX_HOME) and not account_auth_write():
+        message = "tests must not write account Codex state"
+        raise AssertionError(message)
+
+
+def checked_move(operation: Callable[..., None]) -> Callable[..., None]:
+    def move(
+        source: FilePath, destination: FilePath, *args: object, **kwargs: object
+    ) -> None:
+        check_account_codex_write(source)
+        check_account_codex_write(destination)
+        operation(source, destination, *args, **kwargs)
+
+    return move
+
+
+@pytest.fixture(autouse=True)
+def guard_account_codex_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[FilePath], None]:
+    open_file: Callable[..., object] = Path.open
+    make_directory: Callable[..., None] = Path.mkdir
+    open_descriptor: Callable[..., int] = os.open
+
+    def checked_open(
+        path: Path, mode: str = "r", *args: object, **kwargs: object
+    ) -> object:
+        if any(flag in mode for flag in "wax+"):
+            check_account_codex_write(path)
+        return open_file(path, mode, *args, **kwargs)
+
+    def checked_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+        check_account_codex_write(path)
+        make_directory(path, *args, **kwargs)
+
+    def checked_descriptor(
+        path: FilePath, flags: int, *args: object, **kwargs: object
+    ) -> int:
+        if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
+            check_account_codex_write(path)
+        return open_descriptor(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", checked_open)
+    monkeypatch.setattr(Path, "mkdir", checked_mkdir)
+    monkeypatch.setattr(os, "open", checked_descriptor)
+    for name in ("rename", "replace"):
+        monkeypatch.setattr(os, name, checked_move(getattr(os, name)))
+    return check_account_codex_write
 
 
 @pytest.fixture(autouse=True)
@@ -433,6 +504,7 @@ def stubs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Stubs:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setattr(host_tools, "search", lambda: str(bin_dir))
     # Without a tailscale on PATH, host falls back to the app bundle.
     monkeypatch.setattr(host, "TAILSCALE_APP", str(stub_dir / "no-tailscale-app"))
     monkeypatch.setenv("HOME", str(home))

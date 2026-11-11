@@ -106,3 +106,15 @@ def test_clone_path_is_under_home() -> None:
 def test_clone_path_refuses_what_parts_refuses() -> None:
     with pytest.raises(Invalid):
         repo.clone_path(HOME, "../r")
+
+
+@pytest.mark.parametrize(
+    "argument", ["example-org/example-repo", "github.com/example-org/example-repo"]
+)
+def test_ssh_url(argument: str) -> None:
+    assert repo.ssh_url(argument) == "git@github.com:example-org/example-repo.git"
+
+
+def test_mirrors_refuse_another_git_host() -> None:
+    with pytest.raises(Invalid, match=r"^agent mirrors require a GitHub repository$"):
+        repo.ssh_url("git.example.com/example-org/example-repo")
