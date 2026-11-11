@@ -74,7 +74,13 @@ MIRROR_LABELS = (
     "alternates",
     "hard-link",
 )
-EXTRA_LABELS = (*MIRROR_LABELS, "file-control", "local-binding", "host-loopback")
+EXTRA_LABELS = (
+    *MIRROR_LABELS,
+    "file-control",
+    "local-binding",
+    "host-loopback",
+    "hooks-write",
+)
 ALL_LABELS = (
     "TMPDIR",
     "tmp",

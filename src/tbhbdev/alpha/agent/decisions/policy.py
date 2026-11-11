@@ -307,6 +307,7 @@ def protect_host(
         *(resolve(paths.home, p) for p in settings.sandbox.agy.build_write),
     )
     protect_paths(writes, protected)
+    protect_paths(writes[1:], (resolve(paths.worktree, ".git/hooks"),))
 
 
 def protect_paths(writes: tuple[str, ...], protected: tuple[str, ...]) -> None:

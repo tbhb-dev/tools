@@ -27,7 +27,7 @@ from tbhbdev.alpha.agent.decisions import policy
 from tbhbdev.alpha.agent.model import Harness, Invalid
 
 MIRRORS = MIRROR_LABELS
-EXTRA = (*MIRRORS, "file-control", "local-binding", "host-loopback")
+EXTRA = (*MIRRORS, "file-control", "local-binding", "host-loopback", "hooks-write")
 
 
 @dataclasses.dataclass
@@ -368,7 +368,7 @@ def token_probe(
     ) -> tuple[live.ProbeCall, ...]:
         assert curl == live.shutil.which("curl")
         assert results == run.tmpdir / "observed"
-        assert extra == live.live_extra(
+        assert extra[:-1] == live.live_extra(
             tuple(mirrors), run.tmpdir / "write-control", curl, control
         )
         return original_calls(sockets, curl, results, extra)
@@ -747,3 +747,21 @@ def test_domain_refusal_requires_the_cli_stderr_and_expected_domain(
     if case == "recorded":
         expected = {"example.com": "0"}
     assert live.read_observations(results) == expected
+
+
+@pytest.mark.parametrize("create", [False, True])
+@pytest.mark.parametrize("modify", [False, True])
+def test_hooks_write_probe_requires_both_operations_to_fail(
+    tmp_path: Path, create: bool, modify: bool
+) -> None:
+    command = live.hooks_write_probe(tmp_path)
+    hooks = tmp_path / ".git/hooks"
+    existing = hooks / "probe-existing"
+    if create:
+        hooks.chmod(0o755)
+    if modify:
+        existing.chmod(0o644)
+    result = subprocess.run(command, cwd=tmp_path, check=False, timeout=5)
+    assert result.returncode == (0 if create or modify else 1)
+    assert (hooks / "probe-new").exists() is create
+    assert existing.read_text() == ("original\nchanged" if modify else "original\n")

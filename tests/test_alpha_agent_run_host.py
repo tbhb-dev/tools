@@ -23,6 +23,7 @@ import pytest
 from agent_host_example import (
     constant,
     host_settings,
+    isolate_host_git,
     repository,
     run_request,
     trusted_host_stat,
@@ -93,6 +94,14 @@ def fake_secrets(
 
     monkeypatch.setenv("HOME", str(runfiles.private_dir(tmp_path / "operator-home")))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    for name in ("CACHE", "DATA"):
+        monkeypatch.setenv(f"XDG_{name}_HOME", str(tmp_path / name.lower()))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    isolate_host_git(tmp_path, monkeypatch)
     monkeypatch.setattr(
         run_host, "TAINT_DIRECTORY", tmp_path / "host-taint", raising=False
     )
@@ -2584,6 +2593,8 @@ def test_host_state_cannot_be_a_configured_write_root(
         "config": run_host.userconfig.path(),
     }
     root = roots.get(entry, run.home / entry)
+    if entry == "clone":
+        (clone / ".git").mkdir(parents=True)
     run = dataclasses.replace(
         run,
         settings=dataclasses.replace(
@@ -2591,7 +2602,9 @@ def test_host_state_cannot_be_a_configured_write_root(
             sandbox=dataclasses.replace(run.settings.sandbox, write_roots=(str(root),)),
         ),
     )
-    with pytest.raises(Invalid, match="protected host path"):
+    with pytest.raises(
+        Invalid, match="main checkout" if entry == "clone" else "protected host path"
+    ):
         run_host.checked_policy(run, preparation(run).paths)
 
 
@@ -2803,7 +2816,7 @@ def test_mirror_protection_uses_the_run_home_without_xdg_state(
     assert str(mirror) in run_host.full_denies(run, preparation(run).paths)
 
 
-def test_account_clone_protection_checks_both_aliases_and_all_configured_roots(
+def test_checkout_validation_receives_aliases_and_all_write_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = make_run(tmp_path)
@@ -2812,21 +2825,30 @@ def test_account_clone_protection_checks_both_aliases_and_all_configured_roots(
     target = run.home / "account-clone"
     target.mkdir()
     clone.symlink_to(target, target_is_directory=True)
-    calls: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
-    original = run_host.policy.protect_paths
+    calls: list[tuple[Path, Path, tuple[str, ...]]] = []
+    original = run_host.worktree.validate_writes
 
-    def protect(writes: tuple[str, ...], protected: tuple[str, ...]) -> None:
-        calls.append((writes, protected))
-        original(writes, protected)
+    def validate(workspace: Path, source: Path, writes: tuple[str, ...]) -> None:
+        calls.append((workspace, source, writes))
+        original(workspace, source, writes)
 
-    monkeypatch.setattr(run_host.policy, "protect_paths", protect)
-    run_host.checked_policy(run, preparation(run).paths)
+    monkeypatch.setattr(run_host.worktree, "validate_writes", validate)
+    paths = preparation(run).paths
+    run_host.checked_policy(run, paths)
     sandbox = run.settings.sandbox
-    writes = tuple(
-        str((run.home / p).resolve())
-        for p in (*sandbox.write_roots, *sandbox.agy.build_write)
+    writes = (
+        paths.codex_home,
+        paths.worktree,
+        paths.tmpdir,
+        paths.audit_dir,
+        "/dev/fd",
+        *(
+            str((run.home / p).resolve())
+            for p in (*sandbox.write_roots, *sandbox.agy.build_write)
+        ),
     )
-    assert (writes, (str(clone), str(target))) in calls
+    assert calls == [(Path(paths.worktree), clone, writes)]
+    assert clone.resolve() == target
 
 
 @pytest.mark.parametrize("os_name", Os)
@@ -3730,3 +3752,50 @@ def test_checked_policy_still_refuses_executable_link_and_parent_overlap(
         f"protected host path {protected} overlaps write root {write}; "
         "narrow that write root"
     )
+
+
+def test_checked_policy_refuses_workspace_in_main_checkout(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    clone = run.home / "other-clone"
+    (clone / ".git").mkdir(parents=True)
+    paths = dataclasses.replace(preparation(run).paths, worktree=str(clone))
+    with pytest.raises(Invalid, match="main checkout"):
+        run_host.checked_policy(run, paths)
+
+
+def test_checked_policy_allows_configured_workspace_subdirectory(
+    tmp_path: Path,
+) -> None:
+    run = make_run(tmp_path)
+    paths = run_host.planned_paths(run)
+    workspace = Path(paths.worktree)
+    (workspace / ".git").mkdir(parents=True)
+    git_dir = workspace.parent.parent / ".git"
+    git_dir.mkdir()
+    sandbox = dataclasses.replace(
+        run.settings.sandbox, write_roots=(str(workspace / "src"),)
+    )
+    run = dataclasses.replace(
+        run, settings=dataclasses.replace(run.settings, sandbox=sandbox)
+    )
+    value, _ = run_host.checked_policy(run, paths)
+    assert isinstance(value.detail, CodexPolicy)
+    assert str(workspace / "src") in value.detail.write_roots
+
+
+def test_checked_policy_checks_effective_hooks_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    paths = run_host.planned_paths(run)
+    workspace = Path(paths.worktree)
+    (workspace / ".git").mkdir(parents=True)
+
+    def output(command: list[str], **kwargs: object) -> str:
+        assert command[-1] == "core.hooksPath"
+        assert kwargs["cwd"] == workspace
+        return f"{run.tmpdir}/hooks\0/dev/null\0"
+
+    monkeypatch.setattr(subprocess, "check_output", output)
+    with pytest.raises(Invalid, match="under write root"):
+        run_host.checked_policy(run, paths)

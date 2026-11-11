@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal, TypedDict, Unpack
 
 import pytest
-from agent_host_example import commit, git, repository, run_request
+from agent_host_example import commit, git, isolate_host_git, repository, run_request
 
 from tbhbdev.alpha.agent import worktree
 from tbhbdev.alpha.agent.model import Invalid
@@ -25,7 +25,17 @@ class GitOptions(TypedDict, closed=True):
 @pytest.fixture(autouse=True)
 def scratch_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    for name in ("CACHE", "DATA"):
+        monkeypatch.setenv(f"XDG_{name}_HOME", str(tmp_path / name.lower()))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    isolate_host_git(tmp_path, monkeypatch)
 
     def url(_repo: str) -> str:
         return str(tmp_path / "origin")
@@ -497,7 +507,7 @@ def test_mirror_configuration_and_hooks_are_host_written(
         "post-commit",
     ):
         hook = path / ".git" / "hooks" / name
-        assert hook.stat().st_mode & 0o777 == 0o755
+        assert hook.stat().st_mode & 0o777 == 0o555
         assert hook.read_text().startswith("#!/bin/sh\n")
 
 
@@ -603,7 +613,7 @@ def test_default_branch_validates_the_short_branch_name(
     ]
 
 
-def test_hook_installation_is_repeatable_and_private(
+def test_hook_installation_is_repeatable_private_and_read_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / ".git").mkdir()
@@ -619,7 +629,7 @@ def test_hook_installation_is_repeatable_and_private(
     worktree.install_hooks(tmp_path)
     assert calls == [(str(tmp_path / ".git" / "hooks"), 0o700, True)] * 2
     hooks = tmp_path / ".git" / "hooks"
-    assert hooks.stat().st_mode & 0o777 == 0o700
+    assert hooks.stat().st_mode & 0o777 == 0o555
     assert {p.name for p in hooks.iterdir()} == {
         "pre-commit",
         "pre-push",
@@ -630,7 +640,7 @@ def test_hook_installation_is_repeatable_and_private(
         "post-commit",
         "post-commit.prek",
     }
-    assert all(p.stat().st_mode & 0o777 == 0o755 for p in hooks.iterdir())
+    assert all(p.stat().st_mode & 0o777 == 0o555 for p in hooks.iterdir())
     for name, verb in worktree.install.IDENTITY_HOOKS:
         assert (hooks / name).read_text() == worktree.install.SHIM.format(
             mark=worktree.install.SHIM_MARK,
@@ -728,6 +738,7 @@ def test_prelaunch_git_protocol(
         if profile == "build"
         else ("checkout", "--detach", full_sha, "--")
     )
+    options = ("clone", "--no-local", "--no-hardlinks", "--no-checkout", "--template=")
     assert calls == [
         *common,
         (
@@ -737,11 +748,7 @@ def test_prelaunch_git_protocol(
         (
             mirror,
             (
-                "clone",
-                "--no-local",
-                "--no-hardlinks",
-                "--no-checkout",
-                "--template=",
+                *options,
                 str(mirror),
                 str(workspace),
             ),
@@ -1185,3 +1192,288 @@ def test_git_shape_writes_exact_paths_before_launch(
         ("mkdir", str(directory / "modules"), ""),
         ("write", str(directory / "commondir"), ".\n"),
     ]
+
+
+@pytest.fixture
+def checkout_paths(tmp_path: Path) -> tuple[Path, Path]:
+    source = tmp_path / "source"
+    (source / ".git").mkdir(parents=True)
+    workspace = source / ".worktrees" / "agent-example"
+    (workspace / ".git").mkdir(parents=True)
+    return source, workspace
+
+
+@pytest.mark.parametrize(
+    "suffix", ["", ".git", ".git/hooks", "src", ".worktrees/other"]
+)
+@pytest.mark.parametrize("alias", [False, True])
+def test_write_roots_refuse_main_checkout_paths(
+    tmp_path: Path, checkout_paths: tuple[Path, Path], suffix: str, alias: bool
+) -> None:
+    source, workspace = checkout_paths
+    root = source / suffix
+    if alias:
+        link = tmp_path / "tmp-alias"
+        link.symlink_to(source, target_is_directory=True)
+        root = link / suffix
+    with pytest.raises(Invalid, match="main checkout") as caught:
+        worktree.validate_writes(workspace, source, (str(root),))
+    assert (
+        str(caught.value)
+        == f"write root {root.resolve()} reaches main checkout {source}"
+    )
+
+
+@pytest.mark.parametrize("suffix", ["", ".git", ".git/hooks", "src"])
+def test_workspace_cannot_be_a_main_checkout(
+    checkout_paths: tuple[Path, Path], suffix: str
+) -> None:
+    source, _ = checkout_paths
+    workspace = source / suffix
+    with pytest.raises(Invalid, match="main checkout"):
+        worktree.validate_writes(workspace, source, ())
+
+
+@pytest.mark.parametrize("depth", [0, 1, 2, 3])
+def test_write_roots_scan_three_levels_for_other_clones(
+    tmp_path: Path, checkout_paths: tuple[Path, Path], depth: int
+) -> None:
+    source, workspace = checkout_paths
+    root = tmp_path / "writable"
+    clone = root.joinpath(*[f"level-{index}" for index in range(depth)])
+    (clone / ".git").mkdir(parents=True)
+    with pytest.raises(Invalid, match="main checkout") as caught:
+        worktree.validate_writes(workspace, source, (str(root),))
+    relation = "reaches" if depth == 0 else "contains"
+    assert str(caught.value) == f"write root {root} {relation} main checkout {clone}"
+
+
+def test_source_ancestors_are_refused_without_scanning(
+    tmp_path: Path, checkout_paths: tuple[Path, Path]
+) -> None:
+    source, workspace = checkout_paths
+    with pytest.raises(Invalid, match="main checkout") as caught:
+        worktree.validate_writes(workspace, source, (str(tmp_path),))
+    assert str(caught.value) == f"write root {tmp_path} contains main checkout {source}"
+
+
+def test_only_this_workspace_is_allowed_under_main_checkout(
+    checkout_paths: tuple[Path, Path],
+) -> None:
+    source, workspace = checkout_paths
+    worktree.validate_writes(workspace, source, (str(workspace / "src"),))
+    other = workspace.parent / "agent-other"
+    (other / ".git").mkdir(parents=True)
+    with pytest.raises(Invalid, match="main checkout"):
+        worktree.validate_writes(workspace, source, (str(other),))
+
+
+def test_scan_is_bounded_and_does_not_follow_links(
+    tmp_path: Path, checkout_paths: tuple[Path, Path]
+) -> None:
+    source, workspace = checkout_paths
+    root = tmp_path / "writable"
+    (root / "a/b/c/d/.git").mkdir(parents=True)
+    (root / "neighbor").symlink_to(source, target_is_directory=True)
+    (root / "ordinary-file").touch()
+    linked_git = root / "linked-git"
+    linked_git.mkdir()
+    (linked_git / ".git").symlink_to(source / ".git", target_is_directory=True)
+    worktree.validate_writes(workspace, source, (str(root), str(tmp_path / "missing")))
+
+
+def test_write_root_neighboring_a_clone_is_allowed(
+    tmp_path: Path, checkout_paths: tuple[Path, Path]
+) -> None:
+    source, workspace = checkout_paths
+    root = source.with_name(source.name + "-cache")
+    root.mkdir()
+    worktree.validate_writes(workspace, source, (str(root),))
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / ".git").write_text("gitdir: elsewhere\n")
+    worktree.validate_writes(workspace, source, (str(linked),))
+
+
+@pytest.mark.parametrize("target", [".", "../elsewhere"])
+def test_main_checkout_requires_its_own_common_directory(
+    tmp_path: Path, checkout_paths: tuple[Path, Path], target: str
+) -> None:
+    source, workspace = checkout_paths
+    other = tmp_path / "other"
+    (other / ".git").mkdir(parents=True)
+    (other / ".git/commondir").write_text(target + "\n")
+    if target == ".":
+        with pytest.raises(Invalid, match="main checkout"):
+            worktree.validate_writes(workspace, source, (str(other),))
+    else:
+        worktree.validate_writes(workspace, source, (str(other),))
+
+
+@pytest.mark.parametrize("scope", ["local", "global", "system", "include", "command"])
+@pytest.mark.parametrize("writable", [False, True])
+def test_hooks_path_refuses_other_locations_in_every_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str, writable: bool
+) -> None:
+    _, workspace = repository(tmp_path)
+    target = tmp_path / "other-hooks"
+    if scope == "local":
+        git(workspace, "config", "core.hooksPath", str(target))
+    elif scope == "command":
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(target))
+    else:
+        config = tmp_path / "hooks-config"
+        config.write_text(f"[core]\n hooksPath = {target}\n")
+        if scope == "include":
+            git(workspace, "config", "include.path", str(config))
+        else:
+            monkeypatch.setenv(f"GIT_CONFIG_{scope.upper()}", str(config))
+            monkeypatch.delenv("GIT_CONFIG_NOSYSTEM", raising=False)
+    with pytest.raises(Invalid, match=r"core\.hooksPath") as caught:
+        worktree.validate_hooks(workspace, (str(target.parent),) if writable else ())
+    reason = f" under write root {target.parent}" if writable else ""
+    assert (
+        str(caught.value)
+        == f"core.hooksPath {target}{reason} is not the workspace hooks directory"
+    )
+
+
+@pytest.mark.parametrize("value", ["/dev/null", ".git/hooks", "own", "unset"])
+def test_hooks_path_allows_own_hooks_and_dev_null(tmp_path: Path, value: str) -> None:
+    _, workspace = repository(tmp_path)
+    if value != "unset":
+        git(
+            workspace,
+            "config",
+            "core.hooksPath",
+            str(workspace / ".git/hooks") if value == "own" else value,
+        )
+    worktree.validate_hooks(workspace, (str(workspace),))
+
+
+def test_hook_lock_covers_nested_directories_and_data(tmp_path: Path) -> None:
+    (tmp_path / ".git/hooks/nested").mkdir(parents=True)
+    data = tmp_path / ".git/hooks/nested/data"
+    data.write_text("fixture")
+    data.chmod(0o644)
+    worktree.install_hooks(tmp_path)
+    assert data.stat().st_mode & 0o777 == 0o444
+    assert data.parent.stat().st_mode & 0o777 == 0o555
+    assert data.parent.parent.stat().st_mode & 0o777 == 0o555
+
+
+def test_scan_skips_git_metadata(checkout_paths: tuple[Path, Path]) -> None:
+    source, workspace = checkout_paths
+    (workspace / ".git/metadata/.git").mkdir(parents=True)
+    worktree.validate_writes(workspace, source, ())
+
+
+def test_symlinked_tmp_alias_cannot_hide_a_clone(
+    tmp_path: Path, checkout_paths: tuple[Path, Path]
+) -> None:
+    source, workspace = checkout_paths
+    temporary = tmp_path / "private/tmp"
+    temporary.mkdir(parents=True)
+    (temporary / "clone/.git").mkdir(parents=True)
+    alias = tmp_path / "tmp"
+    alias.symlink_to(temporary, target_is_directory=True)
+    with pytest.raises(Invalid, match="main checkout") as caught:
+        worktree.validate_writes(workspace, source, (str(alias),))
+    assert str(temporary) in str(caught.value)
+
+
+def test_hooks_query_uses_host_environment_and_disables_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".git").mkdir()
+    calls: list[list[str]] = []
+
+    def output(command: list[str], **kwargs: object) -> str:
+        assert command[:3] == [
+            worktree.host_tools.resolve("git"),
+            "-c",
+            "core.hooksPath=/dev/null",
+        ]
+        assert command[3:5] == ["config", "--path"]
+        assert command[5:] == ["--null", "--get-all", "core.hooksPath"]
+        assert kwargs == {
+            "cwd": tmp_path,
+            "text": True,
+            "stderr": subprocess.DEVNULL,
+            "timeout": 30,
+        }
+        calls.append(command)
+        return ".git/hooks\0/dev/null\0"
+
+    monkeypatch.setattr(subprocess, "check_output", output)
+    worktree.validate_hooks(tmp_path, ())
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("value", ["", "../hooks", "alias", "~/other-hooks"])
+def test_hooks_path_rejects_relative_and_symlinked_locations(
+    tmp_path: Path, value: str
+) -> None:
+    git(tmp_path, "init", "--template=")
+    (tmp_path / "alias").symlink_to(tmp_path / "other-hooks")
+    git(tmp_path, "config", "core.hooksPath", value)
+    with pytest.raises(Invalid, match="under write root"):
+        worktree.validate_hooks(
+            tmp_path, (str(tmp_path / "neighbor"), str(tmp_path.parent))
+        )
+
+
+def test_hooks_path_checks_unsafe_values_even_when_overridden(tmp_path: Path) -> None:
+    git(tmp_path, "init", "--template=")
+    git(tmp_path, "config", "--add", "core.hooksPath", str(tmp_path / "bad-hooks"))
+    git(tmp_path, "config", "--add", "core.hooksPath", "/dev/null")
+    with pytest.raises(Invalid, match="bad-hooks"):
+        worktree.validate_hooks(tmp_path, (str(tmp_path / "neighbor"),))
+
+
+def test_hooks_query_skips_an_uncreated_workspace(tmp_path: Path) -> None:
+    worktree.validate_hooks(tmp_path, ())
+
+
+@pytest.mark.parametrize("mode", [0o001, 0o010, 0o100])
+def test_hook_lock_preserves_executable_type(tmp_path: Path, mode: int) -> None:
+    (tmp_path / ".git/hooks").mkdir(parents=True)
+    executable = tmp_path / ".git/hooks/extra-script"
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(mode)
+    worktree.install_hooks(tmp_path)
+    assert executable.stat().st_mode & 0o777 == 0o555
+
+
+def test_checkout_detection_spells_metadata_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def directory(path: Path, **kwargs: object) -> bool:
+        assert path == tmp_path / ".git"
+        assert kwargs == {"follow_symlinks": False}
+        return True
+
+    def exists(path: Path) -> bool:
+        assert path == tmp_path / ".git/commondir"
+        return False
+
+    monkeypatch.setattr(Path, "is_dir", directory)
+    monkeypatch.setattr(Path, "exists", exists)
+    assert worktree.is_main_checkout(tmp_path)
+
+
+def test_hooks_query_spells_git_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def directory(path: Path) -> bool:
+        assert path == tmp_path / ".git"
+        return True
+
+    def output(*_args: object, **_kwargs: object) -> str:
+        return "/dev/null\0"
+
+    monkeypatch.setattr(Path, "is_dir", directory)
+    monkeypatch.setattr(subprocess, "check_output", output)
+    worktree.validate_hooks(tmp_path, ())

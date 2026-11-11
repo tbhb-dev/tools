@@ -566,7 +566,7 @@ def test_write_roots_keep_the_first_occurrence(os: Os, profile: Profile) -> None
         write_roots=(
             ".local/state/example-runs/run1.tmp",
             ".cache",
-            "Code/example.com/example-org/example-repo",
+            ".local/state/example-runs/run1.tmp",
             ".cache",
         ),
     )
@@ -1019,9 +1019,13 @@ def test_configured_write_roots_cannot_reach_denied_paths(
     denied_path = (
         denied_path if denied_path.startswith("/") else f"{home}/{denied_path}"
     )
-    assert str(caught.value) == (
-        f"policy write path {shown} overlaps the denied path {denied_path}"
+    expected = (
+        f"protected host path {paths('agent').worktree}/.git/hooks "
+        f"overlaps write root {shown}; narrow that write root"
+        if entry == "."
+        else f"policy write path {shown} overlaps the denied path {denied_path}"
     )
+    assert str(caught.value) == expected
 
 
 @pytest.mark.parametrize("harness", Harness)
@@ -1647,3 +1651,31 @@ def test_claude_file_tools_deny_each_protected_path(profile: Profile) -> None:
     assert not any(
         "/.git" in rule for rule in strings(dig(detail, "permissions", "allow"))
     )
+
+
+@pytest.mark.parametrize("field", ["tmpdir", "audit_dir", "configured", "agy"])
+@pytest.mark.parametrize("suffix", ["", "/nested", "/../"])
+def test_hooks_directory_refuses_extra_write_grants(field: str, suffix: str) -> None:
+    run = paths("agent")
+    hooks = run.worktree + "/.git/hooks"
+    write = str(PurePosixPath(hooks).parent) if suffix == "/../" else hooks + suffix
+    configured = settings()
+    if field == "configured":
+        configured = dataclasses.replace(
+            configured, sandbox=dataclasses.replace(SANDBOX, write_roots=(write,))
+        )
+    elif field == "agy":
+        configured = dataclasses.replace(
+            configured,
+            sandbox=dataclasses.replace(
+                SANDBOX, agy=dataclasses.replace(SANDBOX.agy, build_write=(write,))
+            ),
+        )
+    else:
+        run = (
+            dataclasses.replace(run, tmpdir=write)
+            if field == "tmpdir"
+            else dataclasses.replace(run, audit_dir=write)
+        )
+    with pytest.raises(Invalid, match="hooks"):
+        policy.protect_host(configured, run, ())

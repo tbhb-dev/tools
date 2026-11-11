@@ -653,6 +653,7 @@ def test_link_probe_records_every_label_after_a_denial(tmp_path: Path) -> None:
 def test_host_probes_use_readable_protection_and_selected_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness, profile: Profile
 ) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     executable = release(tmp_path / "install") / "bin/codex"
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     executable.write_bytes(b"\x7fELF")
@@ -736,7 +737,10 @@ def test_terminal_kernel_refusal_is_a_passing_observation(
         assert "blocked by kernel" in capsys.readouterr().out
 
 
-def test_host_live_probes_refuse_agy(tmp_path: Path) -> None:
+def test_host_live_probes_refuse_agy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     run, paths = probe_run(tmp_path, Harness.AGY)
     with pytest.raises(Invalid, match="agy has no OS sandbox"):
         checked_live_policy(run, paths)
