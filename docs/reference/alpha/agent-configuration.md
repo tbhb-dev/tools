@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6
-    at: "2026-11-12T03:35:46Z"
+    at: "2026-11-12T09:22:29Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -97,6 +97,8 @@ Run-host builds the harness command and adds the brief header. The driver sends 
 
 For `[agent.sandbox]`, macOS hosts list `DARWIN_USER_TEMP_DIR` and `DARWIN_USER_CACHE_DIR` in `write_roots` as absolute paths. Linux hosts can list `/tmp`. The private `CODEX_HOME` stays outside these roots at `<state>/tbhbdev/agent-codex/<name>`, with mode 0700. Run-host removes it in `finish` after auth write-back. State defaults to `~/.local/state`.
 
+Live socket probes include `denied-sockets-dir` under the configured socket directory and, on Linux, `denied-run-user` under `/run/user/<uid>`. Each label prints `refused`, `connected`, or `missing`. A connection, missing observation, or listener setup failure fails the probe. Temporary listener directories use mode 0700, and cleanup keeps existing parents.
+
 Live Codex probes copy the account's auth through `credentials.auth_copy`, then use the production refresh write-back and removal path. Each probe asserts that its test directory contains no `auth.json` when it finishes. Each probe plants hooks only under the scratch run's home.
 
 Run every opt-in live test from a clean checkout with this command, outside an agent sandbox. The state directory keeps the test root outside the system temp directories granted for writing.
@@ -118,3 +120,43 @@ The settings have these constraints:
 - `[[agent.host]]` lists at least one host. Its `name` is lower-case, dot-separated labels, `os` is `linux` or `macos`, `shell` is `bash` or `zsh`, `account` must be one of `accounts`, and host names are unique. Every name in `accounts` needs an `[agent.credentials.<name>]` table. `proven_harnesses` is a typed list of harness names. Add a harness only after a passing live run on that host. Remove it when upgrading that harness. Run-host refuses Claude while separate tool paths for Claude (H3) and the Claude credential decision remain open.
 
 The run request is a versioned JSON object. Version 2 lists every run field, including the required boolean `tainted_host`, and no credential. Readers refuse version 1 and requests missing `tainted_host`. A reader refuses unknown versions, unknown or missing fields, and any `unsandboxed` request unless the harness is Codex, the profile is `build`, the host's `unsandboxed` is true and the authorization has the form `owner/repo#N` or `operator-chat-YYYY-MM-DD`. The repo argument takes the form `org/repo` or `<git host>/<org>/<repo>`, with `github.com` as the default git host, and resolves to `Code/<git host>/<org>/<repo>` under the home directory. A repo name can't be `.` or `..` or end in `.git`.
+
+## Agent SSH interface
+
+`tbhbdev alpha agent ssh-serve` is the forced command for the `agent` account. Add the controller's public key to that account's `authorized_keys` with this prefix, replacing `<agent home>` with its absolute home path:
+
+```text
+restrict,command="<agent home>/.local/bin/tbhbdev alpha agent ssh-serve" ssh-ed25519 PUBLIC_KEY
+```
+
+The controller selects its key and disables use of an identity agent:
+
+```sh
+ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'run-host NAME'
+ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'result NAME'
+ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'kill NAME'
+```
+
+On macOS, the controller uses `/Library/Application Support/tbhbdev/agent-launch/id_ed25519` (`ssh_serve.MACOS_LAUNCH_KEY`). Linux uses `/etc/tbhbdev/agent-launch/id_ed25519` (`ssh_serve.LINUX_LAUNCH_KEY`). Quote the macOS path when passing it to `-i`.
+
+`run-host NAME` reads one JSON object from stdin, at most 1 MiB:
+
+```json
+{"v": 1, "request": {"v": 2}, "push_token": null}
+```
+
+Replace `request` with the complete existing run-host request for a public GitHub repository. The request and envelope use separate versions. Prepare `NAME.prompt` in the existing run state directory before connecting. This interface uses run-host's current prompt and configuration files. It creates `NAME.request.json` with mode `0600` under `$XDG_STATE_HOME/tbhbdev/agent-runs`, which defaults to `$HOME/.local/state/tbhbdev/agent-runs`. Each entry claims `NAME.owner` with exclusive creation before launch. An existing owner or request refuses a second run of that name.
+
+Supply a short-lived push token as `push_token`, or `null` to skip pushing. The SSH connection remains open until the run finishes. It shows run-host's normal output. After the harness exits with a new commit on `agent/NAME`, the host pushes that branch over GitHub HTTPS. A one-shot credential helper reads the token through an inherited pipe. The token stays out of arguments, environment variables, config files, and run files. Push disables git hooks. A failed push records one error line and doesn't retry.
+
+`result NAME` prints one JSON object with `v`, `name`, `rc`, `state`, `report`, `log_tail`, `branch` and `head`. It reads the existing run files and limits the log to its last 200 lines. While a run continues, `rc` is `null`. Missing output fields use `null`. The `branch` field names only a branch the host pushed.
+
+`kill NAME` stops the recorded process group after checking its identity. The supervisor records the run's completion. For a finished run it prints `already finished` and exits successfully.
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | Successful command. |
+| 2 | Refused command, account, envelope, or run data. |
+| 3 | Unknown run name. |
+| 4 | Branch push failed. |
+| Other | The run-host exit status, including 1 for a refused run, 124 for a timeout, and 143 for an interrupted run. |
