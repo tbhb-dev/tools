@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 lazy from test_alpha_agent_sandbox_live import probe_run, sandbox_command
 
 lazy from tbhbdev import userconfig
-lazy from tbhbdev.alpha.agent import host_tools, run_host, worktree
+lazy from tbhbdev.alpha.agent import credentials, host_tools, run_host, worktree
 lazy from tbhbdev.alpha.agent.model import Harness
 
 if TYPE_CHECKING:
@@ -67,6 +67,29 @@ def live_policy(
 def checked_live_policy(run: run_host.Run, paths: RunPaths) -> tuple[Policy, str]:
     with host_tools.configured(run.settings, run.host.os):
         return run_host.checked_policy(run, paths)
+
+
+def codex_sandbox_command(
+    run: run_host.Run,
+    paths: RunPaths,
+    value: Policy,
+    executable: str,
+    *arguments: str,
+) -> tuple[str, ...]:
+    prepared = run_host.Prepared(
+        paths,
+        credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
+        None,
+    )
+    rendered = run_host.harness_command(run, prepared, value, executable)
+    prefixes = ("default_permissions=", f"permissions.{value.profile.value}=")
+    overrides = tuple(
+        word
+        for index, word in enumerate(rendered)
+        if word.startswith(prefixes)
+        or (word == "-c" and rendered[index + 1].startswith(prefixes))
+    )
+    return executable, "sandbox", *overrides, "--", *arguments
 
 
 def protected_sources(run: run_host.Run) -> tuple[Path, ...]:
