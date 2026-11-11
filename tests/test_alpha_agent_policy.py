@@ -982,3 +982,182 @@ def test_unrelated_write_roots_are_allowed(
 ) -> None:
     sandbox = dataclasses.replace(SANDBOX, write_roots=(write,))
     assert made(os, profile, harness, "agent", config=settings(sandbox=sandbox))
+
+
+@pytest.mark.parametrize("harness", Harness)
+def test_build_gets_common_git_directory_and_only_its_signing_socket(
+    harness: Harness,
+) -> None:
+    original = paths("agent")
+    common = "/example/clone/git-common"
+    socket = original.tmpdir + "/ssh.sock"
+    run = dataclasses.replace(original, git_common_dir=common, signing_socket=socket)
+    result = policy.build(
+        settings(),
+        LINUX,
+        harness=harness,
+        profile=Profile.BUILD,
+        account="agent",
+        unsandboxed=False,
+        paths=run,
+    )
+    assert result.env == env_of(Os.LINUX, harness, "agent") | {"SSH_AUTH_SOCK": socket}
+    if isinstance(result.detail, model.CodexPolicy):
+        assert result.detail.write_roots == (
+            original.worktree,
+            common,
+            original.tmpdir,
+            original.home + "/.cache",
+            original.home + "/.local/share/mise",
+            original.home + "/.local/state",
+        )
+    elif isinstance(result.detail, model.ClaudePolicy):
+        assert dig(result.detail.settings, "env", "SSH_AUTH_SOCK") == socket
+        assert dig(result.detail.settings, "sandbox", "network") == {
+            "allowUnixSockets": [socket]
+        }
+        assert common in strings(
+            dig(result.detail.settings, "sandbox", "filesystem", "allowWrite")
+        )
+    else:
+        assert f"read_file({socket})" in result.detail.grants
+
+
+def test_review_never_grants_common_git_writes() -> None:
+    run = dataclasses.replace(
+        paths("agent"), git_common_dir="/example/clone/git-common"
+    )
+    result = policy.build(
+        settings(),
+        LINUX,
+        harness=Harness.CODEX,
+        profile=Profile.REVIEW,
+        account="agent",
+        unsandboxed=False,
+        paths=run,
+    )
+    assert isinstance(result.detail, model.CodexPolicy)
+    assert "/example/clone/git-common" not in result.detail.write_roots
+
+
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize(
+    ("profile", "socket", "network"),
+    [
+        (Profile.BUILD, None, None),
+        (
+            Profile.BUILD,
+            "/example/signing.sock",
+            {"allowUnixSockets": ["/example/signing.sock"]},
+        ),
+        (
+            Profile.REVIEW,
+            None,
+            {
+                "strictAllowlist": True,
+                "allowedDomains": [
+                    "github.com",
+                    "api.github.com",
+                    "*.githubusercontent.com",
+                ],
+            },
+        ),
+        (
+            Profile.REVIEW,
+            "/example/signing.sock",
+            {
+                "strictAllowlist": True,
+                "allowedDomains": [
+                    "github.com",
+                    "api.github.com",
+                    "*.githubusercontent.com",
+                ],
+                "allowUnixSockets": ["/example/signing.sock"],
+            },
+        ),
+    ],
+)
+def test_claude_combines_review_network_and_signing_socket(
+    os: Os, profile: Profile, socket: str | None, network: dict[str, object] | None
+) -> None:
+    result = policy.build(
+        settings(),
+        HOSTS[os],
+        harness=Harness.CLAUDE,
+        profile=profile,
+        account="agent",
+        unsandboxed=False,
+        paths=dataclasses.replace(paths("agent"), signing_socket=socket),
+    )
+    expected = claude_expected(os, profile, "agent")
+    sandbox = expected["sandbox"]
+    assert isinstance(sandbox, dict)
+    if network is not None:
+        sandbox["network"] = network
+    env = expected["env"]
+    assert isinstance(env, dict)
+    if socket is not None:
+        env["SSH_AUTH_SOCK"] = socket
+    assert claude_settings_of(result) == expected
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize(
+    ("socket", "denied_path"),
+    [
+        ("/example/denied/item", "/example/denied/item"),
+        ("/example/denied/item/signing.sock", "/example/denied/item"),
+        ("/example/denied", "/example/denied/item"),
+        ("/tmp/example-sockets/signing.sock", "/tmp/example-sockets"),
+    ],
+)
+def test_signing_sockets_cannot_reach_denied_paths(
+    os: Os, harness: Harness, profile: Profile, socket: str, denied_path: str
+) -> None:
+    sandbox = dataclasses.replace(SANDBOX, denied_home_paths=("/example/denied/item",))
+    with pytest.raises(Invalid) as caught:
+        policy.build(
+            settings(sandbox=sandbox),
+            HOSTS[os],
+            harness=harness,
+            profile=profile,
+            account="agent",
+            unsandboxed=False,
+            paths=dataclasses.replace(paths("agent"), signing_socket=socket),
+        )
+    assert str(caught.value) == (
+        f"policy signing socket {socket} overlaps the denied path {denied_path}"
+    )
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("os", Os)
+def test_signing_socket_grants_do_not_add_write_roots(
+    os: Os, harness: Harness, profile: Profile
+) -> None:
+    socket = "/example/signing.sock"
+    original = made(os, profile, harness, "agent")
+    result = policy.build(
+        settings(),
+        HOSTS[os],
+        harness=harness,
+        profile=profile,
+        account="agent",
+        unsandboxed=False,
+        paths=dataclasses.replace(paths("agent"), signing_socket=socket),
+    )
+    assert result.env == original.env | {"SSH_AUTH_SOCK": socket}
+    if isinstance(result.detail, model.CodexPolicy):
+        assert result.detail == original.detail
+    elif isinstance(result.detail, model.ClaudePolicy):
+        assert dig(result.detail.settings, "sandbox", "filesystem") == dig(
+            claude_settings_of(original), "sandbox", "filesystem"
+        )
+    else:
+        assert isinstance(original.detail, model.AgyPolicy)
+        reads = tuple(g for g in original.detail.grants if g.startswith("read_file("))
+        writes = tuple(g for g in original.detail.grants if g.startswith("write_file("))
+        assert result.detail.grants == (*reads, f"read_file({socket})", *writes)

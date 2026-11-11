@@ -182,11 +182,18 @@ def _claude(
             "denyWrite": [*deny_write, *deny],
         },
     }
+    network: dict[str, object] = {}
     if review:
-        sandbox["network"] = {
-            "strictAllowlist": True,
-            "allowedDomains": list(_REVIEW_DOMAINS),
-        }
+        network.update(
+            {
+                "strictAllowlist": True,
+                "allowedDomains": list(_REVIEW_DOMAINS),
+            }
+        )
+    if paths.signing_socket is not None:
+        network["allowUnixSockets"] = [paths.signing_socket]
+    if network:
+        sandbox["network"] = network
     return ClaudePolicy(
         {
             "env": {
@@ -284,10 +291,12 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
     Raises:
         Invalid: ACCOUNT isn't one of the host's accounts, UNSANDBOXED applies
             to anything but a Codex build run on a host that allows it, or a
-            write path or an agy read grant reaches a denied path.
+            write path, signing socket or an agy read grant reaches a denied path.
     """
     _check(host, harness, profile, account=account, full=unsandboxed)
     deny = denied_paths(settings, host, paths.home)
+    if paths.signing_socket is not None:
+        _refuse_overlaps((paths.signing_socket,), deny, "signing socket")
     env = environment(settings, host, harness, paths, account)
     writes = _write_roots(settings, profile, paths)
     if host.os is Os.MACOS and harness in (Harness.CODEX, Harness.CLAUDE):

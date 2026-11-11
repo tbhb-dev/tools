@@ -159,6 +159,7 @@ class RunPaths:
     codex_home: str
     audit_dir: str
     git_common_dir: str | None = None
+    signing_socket: str | None = None
 
 
 class CodexMode(StrEnum):
