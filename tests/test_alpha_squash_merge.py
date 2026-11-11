@@ -509,7 +509,8 @@ def test_dry_run_prints_the_command_and_message_and_merges_nothing(
 
 def test_merge_passes_subject_body_and_head(tools: Tools) -> None:
     assert run_main("12")[0] == 0
-    merge = tools.calls()[1]
+    view, merge = tools.calls()
+    assert view["argv"] == ["pr", "view", "12", "--json", sm.VIEW_FIELDS]
     assert merge["argv"] == [
         "pr", "merge", "12", "--squash",
         "--subject", "feat(cli): add the stamp subcommand (#12)",
@@ -612,6 +613,11 @@ def test_unmergeable_prs_are_refused_with_gh_s_reason(
     assert isinstance(code, str)
     assert code.startswith("not merging PR #3: ")
     assert reason in code
+    if "statusCheckRollup" in fields:
+        assert code == (
+            "not merging PR #3: gh reports mergeStateStatus=BLOCKED; "
+            "failing checks: lint, ci/x"
+        )
     assert len(tools.calls()) == 1
 
 
@@ -753,9 +759,11 @@ def test_gh_is_asked_for_the_author() -> None:
 # ------------------------------------------------------------------ the agent
 
 
-def test_there_is_no_signoff_flag() -> None:
-    with pytest.raises(SystemExit):
-        sm.main(["12", "--dry-run", "--signoff"])
+def test_there_is_no_signoff_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as info:
+        sm.main(["12", "--dry-run", "--signoff"], prog="merge-preview")
+    assert info.value.code == 2
+    assert capsys.readouterr().err.startswith("usage: merge-preview ")
 
 
 @pytest.mark.parametrize(
@@ -987,3 +995,163 @@ def test_an_unresolved_target_uses_the_full_config_and_reads_nothing(
 
 def test_the_view_reads_the_url() -> None:
     assert "url" in sm.VIEW_FIELDS.split(",")
+
+
+AGENT_EMAIL = agent_identity.AGENT_IDENT.partition("<")[2].removesuffix(">")
+AGENT_COMMITS = [
+    {"authors": [{"email": "human@example.com"}]},
+    {"authors": [{"email": "other@example.com"}, {"email": AGENT_EMAIL}]},
+]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    "case",
+    [
+        (AGENT_COMMITS, "## Why\n\nw\n", "missing final trailer paragraph"),
+        (
+            AGENT_COMMITS,
+            f"## Why\n\nw\n\n{ASSIST}\n{GEN}\n",
+            "Generated-by must come before Assisted-by",
+        ),
+        (
+            [],
+            f"## Why\n\nw\n\n{ASSIST}\n{GEN}\n",
+            "Generated-by must come before Assisted-by",
+        ),
+    ],
+)
+def test_invalid_pr_trailers_refuse_before_preview_or_merge(
+    tools: Tools,
+    capsys: pytest.CaptureFixture[str],
+    case: tuple[list[dict[str, list[dict[str, str]]]], str, str],
+    dry_run: bool,
+) -> None:
+    commits, body, reason = case
+    tools.view(commits=commits, body=body)
+    args = ["12", "--dry-run"] if dry_run else ["12"]
+    code, _ = run_main(*args)
+    assert isinstance(code, str)
+    assert reason in code
+    if reason == "missing final trailer paragraph":
+        assert code == (
+            "the PR body cannot be merged as is: "
+            "agent PR is missing final trailer paragraph; "
+            "add a valid trailer paragraph with tbhbdev alpha pr edit"
+        )
+    assert "tbhbdev alpha pr edit" in code
+    assert capsys.readouterr().out == ""
+    (view,) = tools.calls()
+    assert cast("list[str]", view["argv"])[:2] == ["pr", "view"]
+    assert tools.scanned() == []
+
+
+@pytest.mark.parametrize("block", [GEN, ASSIST, f"{GEN}\n{ASSIST}"])
+def test_an_agent_pr_merges_with_its_body_trailers(tools: Tools, block: str) -> None:
+    tools.view(commits=AGENT_COMMITS, body=f"## Why\n\nw\n\n{block}\n")
+    assert sm.main(["12"]) == 0
+    view, merge = tools.calls()
+    assert cast("list[str]", view["argv"])[-1] == sm.VIEW_FIELDS
+    assert "commits" in sm.VIEW_FIELDS.split(",")
+    assert merge["stdin"] == f"Why\nw\n\n{block}\n"
+    assert read_back(f"fix: x\n\n{merge['stdin']}") == f"{block}\n"
+
+
+@pytest.mark.parametrize(
+    "commits",
+    [[], [{"authors": []}], [{"authors": [{"email": "human@example.com"}]}]],
+)
+def test_a_non_agent_pr_needs_no_trailer_block(
+    tools: Tools, commits: list[dict[str, list[dict[str, str]]]]
+) -> None:
+    tools.view(commits=commits, body="## Why\n\nw\n")
+    assert sm.main(["12"]) == 0
+    assert tools.calls()[1]["stdin"] == "Why\nw\n"
+
+
+def test_renovate_keeps_its_path_even_with_an_agent_commit(tools: Tools) -> None:
+    tools.view(
+        commits=AGENT_COMMITS,
+        author=RENOVATE_AUTHOR,
+        body=RENOVATE_BODY,
+    )
+    assert sm.main(["12"]) == 0
+    assert tools.calls()[1]["stdin"] == "- macos 15 → 26 (major)\n"
+
+
+@pytest.mark.parametrize("agent", [False, True])
+def test_fetch_records_the_pr_from_one_read(tools: Tools, agent: bool) -> None:
+    commits = (
+        AGENT_COMMITS if agent else [{"authors": [{"email": "human@example.com"}]}]
+    )
+    tools.view(
+        title="fix: retain trailers",
+        body="description",
+        headRefOid="deadbeef",
+        state="CLOSED",
+        isDraft=True,
+        mergeable="CONFLICTING",
+        mergeStateStatus="BLOCKED",
+        statusCheckRollup=[{"name": "lint", "conclusion": "FAILURE"}],
+        author=RENOVATE_AUTHOR,
+        commits=commits,
+    )
+    assert sm.fetch(42) == sm.PullRequest(
+        title="fix: retain trailers",
+        body="description",
+        head="deadbeef",
+        state="CLOSED",
+        draft=True,
+        mergeable="CONFLICTING",
+        merge_state="BLOCKED",
+        failing=["lint"],
+        renovate=True,
+        url=f"https://github.com/{TARGET}/pull/12",
+        agent=agent,
+    )
+    (view,) = tools.calls()
+    assert view == {
+        "argv": ["pr", "view", "42", "--json", sm.VIEW_FIELDS],
+        "stdin": "",
+    }
+
+
+def test_trailer_problems_report_the_full_block_and_repair_command() -> None:
+    sm.check_trailers([], [])
+    with pytest.raises(SystemExit) as info:
+        sm.check_trailers(["Assisted-by: nope", GEN], [])
+    assert str(info.value) == (
+        "the PR body cannot be merged as is: invalid trailer block: "
+        "Assisted-by: nope: must start with literal LLM; invalid trailer block: "
+        f"{GEN}: Generated-by must come before Assisted-by; "
+        "add a valid trailer paragraph with tbhbdev alpha pr edit"
+    )
+
+
+def test_fetch_defaults_are_exact(tools: Tools) -> None:
+    tools.gh(view_out="{}")
+    assert sm.fetch(12) == sm.PullRequest(
+        title="",
+        body="",
+        head="",
+        state="",
+        draft=False,
+        mergeable="",
+        merge_state="",
+        failing=[],
+        renovate=False,
+        url=None,
+        agent=False,
+    )
+
+
+def test_dry_run_preview_is_exact(
+    tools: Tools, capsys: pytest.CaptureFixture[str]
+) -> None:
+    tools.view(title="fix: x", body="## Why\n\nw\n")
+    assert sm.main(["12", "--dry-run"]) == 0
+    assert capsys.readouterr().out == (
+        "gh pr merge 12 --squash --subject 'fix: x (#12)' "
+        "--body-file - --match-head-commit abc123\n\n"
+        "fix: x (#12)\n\nWhy\nw\n"
+    )

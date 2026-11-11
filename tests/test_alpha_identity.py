@@ -3344,54 +3344,58 @@ def test_a_receipt_recorded_during_the_commit_is_left_for_the_next(
 GOOD = f"harness=claude-code:2.1;model=anthropic:m;session={ROOT}"
 
 
-@pytest.mark.parametrize(
-    "value",
-    [
-        "LLM harness=claude-code;model=anthropic:m",
+# Expected results from the rules trailer grammar at 4b48e96.
+TRAILER_VALUE_CASES = [
+    ("LLM harness=claude-code;model=anthropic:m", None),
+    (
         (
             "LLM effort=max;harness=codex:1;model=openai:gpt-5;"
             f"session={ROOT};subagent={CHILD};surface=cli"
         ),
-        f"LLM {GOOD}",
-        "LLM harness=antigravity;model=gcp.gemini:m;surface=cli",
-        "LLM harness=codex;model=openai:m some prose",
+        None,
+    ),
+    (f"LLM {GOOD}", None),
+    ("LLM harness=antigravity;model=gcp.gemini:m;surface=cli", None),
+    ("LLM harness=codex;model=openai:m some prose", None),
+    ("LLM prose harness=codex:1:2;model=a=b;surface=c=d more prose", None),
+    *[
+        (f"LLM effort={effort};harness=codex;model=m", None)
+        for effort in ("none", "minimal", "low", "medium", "high", "xhigh", "max")
     ],
-)
-def test_check_value_accepts(value: str) -> None:
-    assert ai.check_value(value) is None
+    ("", "must start with literal LLM"),
+    ("harness=codex", "must start with literal LLM"),
+    ("llm harness=codex", "must start with literal LLM"),
+    ("LLM", "need exactly one attribute blob"),
+    ("LLM a=b c=d", "need exactly one attribute blob"),
+    ("LLM harness=codex;", "bad attribute ''"),
+    ("LLM harness=codex;Bad=1", "bad attribute 'Bad=1'"),
+    ("LLM harness=codex;color=red", "unknown attribute color"),
+    ("LLM effort=huge;harness=codex", "bad effort huge"),
+    ("LLM harness=codex;session=nope", "bad session hash"),
+    (f"LLM harness=codex;session={ROOT};subagent=x", "bad subagent hash"),
+    ("LLM harness=cursor", "unknown harness cursor"),
+    ("LLM effort=low", "harness required"),
+    ("LLM model=a:b;harness=codex", "attributes out of order or duplicated"),
+    ("LLM harness=codex;harness=codex", "model required"),
+    (
+        "LLM harness=codex;harness=codex;model=a:b",
+        "attributes out of order or duplicated",
+    ),
+    ("LLM harness=claude-code", "model required"),
+    ("LLM harness=claude-code:2.1;surface=cli", "model required"),
+    ("LLM harness=codex:1;surface=cli", "model required"),
+    ("LLM harness=antigravity", "model required"),
+    ("LLM harness=codex;model=", "bad attribute 'model='"),
+    ("LLM harness=codex;model=a,b", "bad attribute 'model=a,b'"),
+]
 
 
-@pytest.mark.parametrize(
-    ("value", "problem"),
-    [
-        ("", "must start with literal LLM"),
-        ("harness=codex", "must start with literal LLM"),
-        ("llm harness=codex", "must start with literal LLM"),
-        ("LLM", "need exactly one attribute blob"),
-        ("LLM a=b c=d", "need exactly one attribute blob"),
-        ("LLM harness=codex;", "bad attribute ''"),
-        ("LLM harness=codex;Bad=1", "bad attribute 'Bad=1'"),
-        ("LLM harness=codex;color=red", "unknown attribute color"),
-        ("LLM effort=huge;harness=codex", "bad effort huge"),
-        ("LLM harness=codex;session=nope", "bad session hash"),
-        (f"LLM harness=codex;session={ROOT};subagent=x", "bad subagent hash"),
-        ("LLM harness=cursor", "unknown harness cursor"),
-        ("LLM effort=low", "harness required"),
-        ("LLM model=a:b;harness=codex", "attributes out of order or duplicated"),
-        ("LLM harness=codex;harness=codex", "model required"),
-        (
-            "LLM harness=codex;harness=codex;model=a:b",
-            "attributes out of order or duplicated",
-        ),
-        ("LLM harness=claude-code", "model required"),
-        ("LLM harness=claude-code:2.1;surface=cli", "model required"),
-        ("LLM harness=codex:1;surface=cli", "model required"),
-        ("LLM harness=antigravity", "model required"),
-        ("LLM harness=codex;model=", "bad attribute 'model='"),
-    ],
-)
-def test_check_value_rejects(value: str, problem: str) -> None:
+@pytest.mark.parametrize(("value", "problem"), TRAILER_VALUE_CASES)
+def test_reference_trailer_value_parity(value: str, problem: str | None) -> None:
     assert ai.check_value(value) == problem
+    for key in (ai.KEY_GEN, ai.KEY_ASSIST):
+        line = f"{key}: {value}"
+        assert ai.check_message(line) == ([f"{line}: {problem}"] if problem else [])
 
 
 def test_check_pair() -> None:
