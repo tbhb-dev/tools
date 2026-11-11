@@ -3,8 +3,12 @@
 Run in a clone of a tbhb-dev repository, it installs that clone's git hooks
 into `$(git rev-parse --git-common-dir)/hooks`, which every worktree of the
 clone shares. The pre-push guard refuses rewritten history and private names
-before prek, replaying identical arguments and stdin bytes to both. Without
-tbhbdev on PATH, it refuses pushes in tbhb-dev repositories. prek also runs
+before prek, replaying identical arguments and stdin bytes to both. Public
+pushes require a readable, nonempty `~/.local/state/tbhb/private-repos.txt`,
+combined with `[pr_check] private_repos`. The list's header defines words
+flagged only in path positions. Nonempty SKIP or PREK_SKIP refuses a push.
+Without tbhbdev on PATH, it refuses pushes targeting a tbhb-dev repository,
+using the hook URL argument or the named remote's URL. prek also runs
 pre-commit. The agent identity hooks
 (prepare-commit-msg, commit-msg, post-commit) are plain shims that run
 `tbhbdev alpha identity`: prek stashes unstaged changes around every stage
@@ -18,13 +22,12 @@ is a tbhb-dev repository, by repo.py's own pattern, and does nothing
 elsewhere.
 
 core.hooksPath set means prek won't install, so that case warns and leaves the
-hooks alone. A hook that neither this command, prek nor the old
-tools/interim/install.sh wrote is left alone too. Runs can overlap, since
-every session start runs one, so a lock directory in the hooks directory,
-holding its owner's PID, lets one run at a time touch the hooks. A run waits
-up to TBHB_INSTALL_LOCK_TIMEOUT seconds (default 15) and breaks a lock whose
-owner is no longer running. The lock is the one tools/interim/install.sh
-takes, so the two never touch one clone's hooks at once.
+hooks alone. A foreign hook stays in place. A foreign pre-push hook fails the
+install and must be moved aside before retrying. Session starts can overlap,
+so a lock directory in the hooks directory holds its owner's PID and lets one
+run at a time touch the hooks. A run waits up to TBHB_INSTALL_LOCK_TIMEOUT
+seconds (default 15) and breaks a lock whose owner is no longer running. The
+lock also coordinates with older installers.
 
 Then it merges the harness hooks into each harness's user-level config:
 
@@ -217,13 +220,16 @@ if shutil.which("tbhbdev"):
         input=payload, check=False,
     ).returncode
 else:
-    origin = subprocess.run(
-        ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-         "-c", "diff.external=", "-c", "core.pager=cat",
-         "remote", "get-url", "origin"],
-        capture_output=True, text=True, check=False,
-    )
-    if re.fullmatch({pattern!r}, origin.stdout, re.IGNORECASE | re.ASCII):
+    target = sys.argv[2]
+    if not target:
+        remote = subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+             "-c", "diff.external=", "-c", "core.pager=cat",
+             "remote", "get-url", "--push", sys.argv[1]],
+            capture_output=True, text=True, check=False,
+        )
+        target = remote.stdout if remote.returncode == 0 else ""
+    if re.fullmatch({pattern!r}, target, re.IGNORECASE | re.ASCII):
         print("pre-push: tbhbdev is not on PATH; push refused", file=sys.stderr)
         status = 1
 next_hook = pathlib.Path(__file__).with_name("pre-push.prek")
@@ -990,12 +996,18 @@ def install_identity_hook(
     hook.chmod(0o755)
 
 
+def require_pre_push_hook(hooks: Path) -> None:
+    """Refuse a foreign pre-push hook before prek could move it."""
+    hook = hooks / "pre-push"
+    if not replaceable(hook):
+        message = f"{hook} is not ours; move it aside and run the install again"
+        raise InstallError(message)
+
+
 def install_pre_push_hook(hooks: Path) -> None:
     """Chain the guard before prek, reading stdin once and replaying its bytes."""
     hook = hooks / "pre-push"
-    if not replaceable(hook):
-        print(f"{PROG}: warning: {hook} is not ours; leaving it", file=sys.stderr)
-        return
+    require_pre_push_hook(hooks)
     hook.rename(hooks / "pre-push.prek")
     legacy = hooks / "pre-push.legacy"
     if legacy.is_file() and SHIM_MARK in legacy.read_text():
@@ -1035,6 +1047,7 @@ def install_git_hooks(
         return 0
     hooks = common / "hooks"
     try:
+        require_pre_push_hook(hooks)
         prek = find_prek()
         timeout = lock_timeout(env)
         if dry_run:
@@ -1046,6 +1059,7 @@ def install_git_hooks(
             return 0
         hooks.mkdir(exist_ok=True)
         with hooks_lock(hooks, timeout):
+            require_pre_push_hook(hooks)
             prek_install(
                 prek, top, "--hook-type", "pre-commit", "--hook-type", "pre-push"
             )

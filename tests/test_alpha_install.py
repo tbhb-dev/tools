@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import tomllib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,7 +29,7 @@ from origin_urls import OTHER_URLS, TBHB_DEV_URLS
 from tbhbdev.alpha import codex_trust, gh_shim, install, repo
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator, Iterator
 
 type Json = dict[str, object]
 
@@ -2978,16 +2979,47 @@ def test_push_shim_without_tool(world: World, origin: str) -> None:
     assert bool(done.stderr) == (origin == ORIGIN)
 
 
-def test_push_hook_keeps_foreign_hook(
-    world: World, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_push_hook_rejects_foreign_hook(
+    world: World, capsys: pytest.CaptureFixture[str], dry_run: bool
 ) -> None:
     hook = world.hooks / "pre-push"
-    hook.write_text("foreign\n")
-    install.install_pre_push_hook(world.hooks)
-    assert hook.read_text() == "foreign\n"
-    assert capsys.readouterr().err == (
-        f"{install.PROG}: warning: {hook} is not ours; leaving it\n"
+    hook.write_text("#!/bin/sh\nprintf foreign > foreign-ran\n")
+    hook.chmod(0o755)
+    old = hook.read_bytes()
+    assert install.install_git_hooks(None, {}, dry_run=dry_run) == 1
+    assert hook.read_bytes() == old
+    assert not (world.repo / "foreign-ran").exists()
+    assert world.prek_calls() == []
+    assert (
+        capsys.readouterr().err == f"{install.PROG}: error: {hook} is not ours; "
+        "move it aside and run the install again\n"
     )
+
+
+def test_direct_foreign_push_hook_refused(world: World) -> None:
+    hook = world.hooks / "pre-push"
+    hook.write_text("foreign\n")
+    with pytest.raises(install.InstallError, match="move it aside"):
+        install.install_pre_push_hook(world.hooks)
+    assert hook.read_text() == "foreign\n"
+
+
+@pytest.mark.parametrize("url_argument", [ORIGIN, ""])
+def test_missing_tool_checks_named_push_target(world: World, url_argument: str) -> None:
+    assert install.install_git_hooks(None, {}, dry_run=False) == 0
+    git(world.repo, "remote", "set-url", "origin", "https://example.test/public")
+    git(world.repo, "remote", "add", "publish", ORIGIN)
+    done = subprocess.run(
+        [str(world.hooks / "pre-push"), "publish", url_argument],
+        input=b"",
+        cwd=world.repo,
+        env=shim_env(world, None),
+        capture_output=True,
+        check=False,
+    )
+    assert done.returncode == 1
+    assert done.stderr == b"pre-push: tbhbdev is not on PATH; push refused\n"
 
 
 def test_push_hook_rerun_moves_previous_shim(world: World) -> None:
@@ -2999,3 +3031,50 @@ def test_push_hook_rerun_moves_previous_shim(world: World) -> None:
     backups = list(world.hooks.glob("pre-push.legacy.tbhb-backup.*"))
     assert len(backups) == 1
     assert backups[0].read_text() == first
+
+
+def test_foreign_push_hook_checked_before_dependencies(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    hook = world.hooks / "pre-push"
+    hook.write_text("foreign\n")
+
+    def unavailable() -> list[str]:
+        pytest.fail("foreign hook must be checked before looking for prek")
+
+    monkeypatch.setattr(install, "find_prek", unavailable)
+    assert install.install_git_hooks(None, {}, dry_run=False) == 1
+    assert str(hook) in capsys.readouterr().err
+
+
+def test_foreign_push_hook_appearing_during_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    @contextmanager
+    def acquired(hooks: Path, timeout: int) -> Generator[None]:
+        assert timeout == 15
+        (hooks / "pre-push").write_text("foreign\n")
+        yield
+
+    monkeypatch.setattr(install, "hooks_lock", acquired)
+    assert install.install_git_hooks(None, {}, dry_run=False) == 1
+    assert "move it aside" in capsys.readouterr().err
+    assert world.prek_calls() == []
+    assert (world.hooks / "pre-push").read_text() == "foreign\n"
+
+
+def test_missing_tool_uses_named_remote_push_url(world: World) -> None:
+    assert install.install_git_hooks(None, {}, dry_run=False) == 0
+    git(world.repo, "remote", "set-url", "origin", "https://example.test/public")
+    git(world.repo, "remote", "add", "publish", "https://example.test/public")
+    git(world.repo, "remote", "set-url", "--push", "publish", ORIGIN)
+    done = subprocess.run(
+        [str(world.hooks / "pre-push"), "publish", ""],
+        input=b"",
+        cwd=world.repo,
+        env=shim_env(world, None),
+        capture_output=True,
+        check=False,
+    )
+    assert done.returncode == 1
+    assert done.stderr == b"pre-push: tbhbdev is not on PATH; push refused\n"

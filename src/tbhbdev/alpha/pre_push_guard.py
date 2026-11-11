@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 import sys
 from typing import TYPE_CHECKING
@@ -38,10 +39,12 @@ def read_git(*args: str) -> str:
     return out
 
 
-def findings(text: str, names: Sequence[str], sha: str, where: str) -> list[str]:
+def findings(text: str, names: pn.Names, sha: str, where: str) -> list[str]:
     return [
         f"{sha[:12]} {where}: {why}"
-        for _, why in pn.private_name_problems(text.splitlines(), names)
+        for _, why in pn.private_name_problems(
+            text.splitlines(), names.private, path_only=names.path_only
+        )
     ]
 
 
@@ -66,7 +69,7 @@ def added_lines(patch: str) -> list[tuple[str, int, str]]:
     return added
 
 
-def commit_problems(sha: str, names: Sequence[str]) -> list[str]:
+def commit_problems(sha: str, names: pn.Names) -> list[str]:
     problems = findings(
         read_git("show", "-s", "--format=%B", sha), names, sha, "message"
     )
@@ -106,7 +109,7 @@ def commit_problems(sha: str, names: Sequence[str]) -> list[str]:
 
 def push_problems(remote: str, url: str, lines: Sequence[str]) -> list[str]:
     names = pn.names_for_repository(
-        pn.repository_name(url or read_git("remote", "get-url", remote))
+        pn.repository_name(url or read_git("remote", "get-url", "--push", remote))
     )
     problems: list[str] = []
     scanned: set[str] = set()
@@ -133,9 +136,16 @@ def main(argv: list[str], prog: str) -> int:
     if len(argv) != HOOK_ARGUMENTS:
         print(f"usage: {prog} REMOTE URL", file=sys.stderr)
         return 1
+    for variable in ("SKIP", "PREK_SKIP"):
+        if os.environ.get(variable):
+            print(f"pre-push-guard: {variable} is set; push refused", file=sys.stderr)
+            return 1
     remote, url = argv
     try:
         problems = push_problems(remote, url, sys.stdin.read().splitlines())
+    except pn.NameListError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     except GuardError, ValueError:
         problems = ["pre-push-guard: cannot inspect push; push refused"]
     for problem in problems:

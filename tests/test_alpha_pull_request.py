@@ -23,7 +23,7 @@ from hypothesis import strategies as st
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import identity as agent_identity
-from tbhbdev.alpha import opened
+from tbhbdev.alpha import opened, private_names
 from tbhbdev.alpha import pull_request as pr
 
 # mutmut runs the tests from a copy of the source tree, so everything resolves
@@ -141,6 +141,23 @@ class World:
 
     def commit(self, message: str) -> None:
         self.git("commit", "--allow-empty", "-q", "-m", message)
+
+
+@pytest.fixture(autouse=True)
+def host_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the required host list synthetic for every draft check."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / ".local/state/tbhb/private-repos.txt"
+    path.parent.mkdir(parents=True)
+    path.write_text("example-host\n")
+    config = tmp_path / "gitconfig"
+    config.write_text("[user]\nname = Example\nemail = example@example.test\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+
+    def public_origin(*_args: str) -> tuple[int, str]:
+        return 0, "https://example.test/public"
+
+    monkeypatch.setattr(private_names, "git", public_origin)
 
 
 @pytest.fixture
@@ -744,7 +761,24 @@ def test_title_problem_lands_on_the_title_line(world: World) -> None:
         ("wip: x", False),
     ],
 )
-def test_real_cog(title: str, *, ok: bool) -> None:
+def test_real_cog(
+    title: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, ok: bool
+) -> None:
+    for name in [key for key in os.environ if key.startswith("GIT_")]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Example"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "example@example.test"],
+        cwd=tmp_path,
+        check=True,
+    )
+    monkeypatch.chdir(tmp_path)
     assert (pr.title_problems(title) == []) is ok
 
 
@@ -1005,8 +1039,35 @@ def real_lint_ready() -> bool:
 )
 class TestRealLinters:
     @pytest.fixture(autouse=True)
-    def _real_root(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.chdir(REAL)
+    def _real_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = tmp_path / "lint-repo"
+        root.mkdir()
+        for name in [key for key in os.environ if key.startswith("GIT_")]:
+            monkeypatch.delenv(name, raising=False)
+        for variable in (
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_RUNTIME_DIR",
+        ):
+            monkeypatch.setenv(variable, str(tmp_path / variable.lower()))
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "Example"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "example@example.test"],
+            cwd=root,
+            check=True,
+        )
+        for name in pr.CONFIGS:
+            source = REAL / name
+            target = root / name
+            if source.is_dir():
+                shutil.copytree(source, target)
+            else:
+                shutil.copy(source, target)
+        shutil.copytree(REAL / ".github", root / ".github")
+        monkeypatch.chdir(root)
 
     def test_fixture_passes(self) -> None:
         # The title is a lowercase Conventional Commit header, which the

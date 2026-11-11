@@ -66,3 +66,14 @@ def write_private_config(home: Path, text: str = PRIVATE_CONFIG) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     return path
+
+
+def break_host_names(path: Path, kind: str) -> None:
+    """Make a synthetic host list missing, unreadable or empty."""
+    path.unlink()
+    if kind == "directory":
+        path.mkdir()
+    elif kind == "invalid":
+        path.write_bytes(b"\xff")
+    elif kind != "missing":
+        path.write_text("" if kind == "empty" else "\n# comment\n")
