@@ -187,6 +187,10 @@ def test_parses_every_key() -> None:
     assert config.parse(GOOD) == EXPECTED
 
 
+def test_host_tag_is_ignored() -> None:
+    assert config.parse(edited("host_tag", value="example-tag")) == EXPECTED
+
+
 def test_settings_expose_every_value() -> None:
     parsed = config.parse(GOOD)
     sandbox = parsed.sandbox

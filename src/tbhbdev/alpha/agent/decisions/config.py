@@ -420,6 +420,7 @@ def parse(agent: dict[str, object]) -> Settings:
         "credentials",
         "claude",
         "host",
+        "host_tag",  # Another command reads this key.
     )
     settings = Settings(
         launch_wait_seconds=root.integer("launch_wait_seconds"),
