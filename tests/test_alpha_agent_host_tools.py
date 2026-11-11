@@ -601,6 +601,36 @@ def test_git_shim_only_applies_to_system_git_on_macos(
     assert host_tools.git_shim_paths(executable, operating_system, 1000, ()) == ()
 
 
+def developer_git_state(
+    case: str,
+    selector: Path,
+    developer: Path,
+    fallback: Path,
+    host_stat: dict[Path, tuple[int, int]],
+) -> tuple[str, ...]:
+    host_stat.update(
+        {
+            "account owned": {
+                developer: (1000, stat.S_IFDIR | 0o755),
+                developer / "usr/bin/git": (1000, stat.S_IFREG | 0o755),
+            },
+            "account link": {selector: (1000, stat.S_IFLNK | 0o755)},
+            "write root": {developer: (1000, stat.S_IFDIR | 0o755)},
+            "group writable": {developer: (0, stat.S_IFDIR | 0o775)},
+            "other owner": {developer: (1001, stat.S_IFDIR | 0o755)},
+            "link writable": {selector: (0, stat.S_IFLNK | 0o775)},
+            "link owner": {selector: (1001, stat.S_IFLNK | 0o755)},
+        }.get(case, {})
+    )
+    missing = {"missing git": developer, "missing fallback": fallback}.get(case)
+    if missing is not None:
+        (missing / "usr/bin/git").rename(missing / "usr/bin/moved-git")
+    return {
+        "git write root": (str(developer / "usr/bin/git"),),
+        "write root": (str(developer),),
+    }.get(case, ())
+
+
 @pytest.mark.parametrize(
     "case",
     [
@@ -640,40 +670,18 @@ def test_git_shim_checks_selected_developer_chain(
     def selected(path: str | os.PathLike[str], *, dir_fd: int | None = None) -> str:
         if str(path) == str(selector):
             reads.append(str(path))
-            if case in ("fallback", "missing fallback"):
-                raise FileNotFoundError
-            if case == "unreadable":
-                raise PermissionError
+            error = {
+                "fallback": FileNotFoundError,
+                "missing fallback": FileNotFoundError,
+                "unreadable": PermissionError,
+            }.get(case)
+            if error is not None:
+                raise error
         return readlink(path, dir_fd=dir_fd)
 
     monkeypatch.setattr(os, "readlink", selected)
-    roots: tuple[str, ...] = ()
-    if case == "account owned":
-        host_stat[developer] = (1000, stat.S_IFDIR | 0o755)
-        host_stat[developer / "usr/bin/git"] = (1000, stat.S_IFREG | 0o755)
-    elif case == "account link":
-        host_stat[selector] = (1000, stat.S_IFLNK | 0o755)
-    elif case == "git write root":
-        roots = (str(developer / "usr/bin/git"),)
-    elif case == "write root":
-        host_stat[developer] = (1000, stat.S_IFDIR | 0o755)
-        roots = (str(developer),)
-    elif case in ("group writable", "other owner"):
-        host_stat[developer] = (
-            (0, stat.S_IFDIR | 0o775)
-            if case == "group writable"
-            else (1001, stat.S_IFDIR | 0o755)
-        )
-    elif case in ("link writable", "link owner"):
-        host_stat[selector] = (
-            (0, stat.S_IFLNK | 0o775)
-            if case == "link writable"
-            else (1001, stat.S_IFLNK | 0o755)
-        )
-        monkeypatch.setattr(host_tools.sys, "platform", "darwin")
-    elif case in ("missing git", "missing fallback"):
-        directory = developer if case == "missing git" else fallback
-        (directory / "usr/bin/git").rename(directory / "usr/bin/moved-git")
+    monkeypatch.setattr(host_tools.sys, "platform", "darwin")
+    roots = developer_git_state(case, selector, developer, fallback, host_stat)
     if case in ("xcode", "account owned", "account link", "fallback"):
         result = host_tools.git_shim_paths("/usr/bin/git", Os.MACOS, 1000, roots)
         assert result == (
@@ -684,13 +692,12 @@ def test_git_shim_checks_selected_developer_chain(
     else:
         with pytest.raises(Invalid) as caught:
             host_tools.git_shim_paths("/usr/bin/git", Os.MACOS, 1000, roots)
-        component = (
-            developer / "usr/bin/git"
-            if case == "git write root"
-            else selector
-            if case.startswith("link") or case == "write root"
-            else developer
-        )
+        component = {
+            "git write root": developer / "usr/bin/git",
+            "write root": selector,
+            "link writable": selector,
+            "link owner": selector,
+        }.get(case, developer)
         assert str(caught.value) == (
             "cannot inspect the developer git executable"
             if case in ("missing git", "missing fallback", "unreadable")
