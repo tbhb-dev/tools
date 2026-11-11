@@ -262,3 +262,6 @@ CDXPXY
 ENXIO
 ttyname
 NOCTTY
+
+bwrap
+ENOENT
