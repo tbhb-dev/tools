@@ -20,6 +20,7 @@ import pytest
 from agent_live_evidence import codex_auth, run_default_pytest
 from agent_live_host_probe import (
     INPUT_MARKER,
+    TerminalAttempt,
     TerminalObservation,
     assert_unchanged,
     checked_live_policy,
@@ -36,7 +37,7 @@ from agent_live_host_probe import (
 from test_alpha_agent_sandbox_live import live_only, probe_run, report
 
 from tbhbdev.alpha.agent import credentials, host_tools, run_host
-from tbhbdev.alpha.agent.model import Harness, Invalid, Profile
+from tbhbdev.alpha.agent.model import Harness, Invalid, Os, Profile
 
 
 def test_host_live_probes_skip_without_opt_in(tmp_path: Path) -> None:
@@ -259,7 +260,10 @@ def test_live_protected_hard_links(
 def test_terminal_verdict_requires_input_control(
     control: bytes, probe: bytes, error: int, expected: str
 ) -> None:
-    assert terminal_status(control, probe, error) == expected
+    assert (
+        terminal_status(control, probe, TerminalAttempt(attempted=True, error=error))
+        == expected
+    )
 
 
 def test_terminal_output_is_not_input(tmp_path: Path) -> None:
@@ -510,17 +514,30 @@ def test_live_terminal_injection(
     if not witness.is_file():
         pytest.fail(f"{label}: unproven; probe not executed; legacy_tiocsti={setting}")
     observed = json.loads(witness.read_text())
-    assert observed["attempted"] is True
+    attempted = observed["attempted"]
+    assert isinstance(attempted, bool)
     error = observed["error"]
     assert isinstance(error, int)
-    status = terminal_status(control.inputs, probe.inputs, error)
-    if kernel_blocked and error != 0 and INPUT_MARKER not in probe.inputs:
-        status = "blocked by kernel"
-    report(f"{label}: {status}; ioctl error={error}; legacy_tiocsti={setting}")
+    status = terminal_status(
+        control.inputs,
+        probe.inputs,
+        TerminalAttempt(
+            attempted=attempted,
+            error=error,
+            missing_linux_tty=(
+                not attempted
+                and run.host.os is Os.LINUX
+                and Path(tty_file.read_text()).parent == Path("/dev/pts")
+            ),
+        ),
+        kernel_blocked=kernel_blocked,
+    )
+    operation = "ioctl" if attempted else "open"
+    report(f"{label}: {status}; {operation} error={error}; legacy_tiocsti={setting}")
     if status == "unproven":
         pytest.fail(f"{label}: unproven; control failed; legacy_tiocsti={setting}")
-    assert status in {"blocked", "blocked by kernel"}, (
-        f"{label}: injected; ioctl error={error}"
+    assert status in {"blocked", "blocked by kernel", "blocked by device namespace"}, (
+        f"{label}: injected; {operation} error={error}"
     )
 
 
@@ -879,3 +896,111 @@ def test_terminal_wrapper_reads_input_before_the_session_leader_exits(
     assert caught.value.code == 7
     assert json.loads(capsys.readouterr().out) == {"inputs": INPUT_MARKER.hex()}
     assert calls == [(0, host_probe.termios.TIOCSCTTY, 0), 0]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (INPUT_MARKER, b"", errno.ENOENT, True, False, "blocked by device namespace"),
+        (b"", b"", errno.ENOENT, True, True, "blocked by device namespace"),
+        (b"", b"", errno.ENOENT, True, False, "unproven"),
+        (INPUT_MARKER, b"", errno.ENOENT, False, False, "unproven"),
+        (b"", b"", errno.ENOENT, False, True, "unproven"),
+        (INPUT_MARKER, b"", errno.EPERM, True, False, "unproven"),
+        (b"", b"", errno.EPERM, True, True, "unproven"),
+        (INPUT_MARKER, b"", 0, True, False, "injected"),
+        (b"", INPUT_MARKER, errno.ENOENT, True, True, "injected"),
+    ],
+)
+def test_terminal_missing_device_requires_a_control_and_open_refusal(
+    case: tuple[bytes, bytes, int, bool, bool, str],
+) -> None:
+    control, probe, error, missing, kernel, expected = case
+    assert (
+        terminal_status(
+            control,
+            probe,
+            TerminalAttempt(attempted=False, error=error, missing_linux_tty=missing),
+            kernel_blocked=kernel,
+        )
+        == expected
+    )
+
+
+@pytest.mark.usefixtures("fake_host_tools")
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("linux", "/dev/pts/123", errno.ENOENT, "blocked by device namespace"),
+        ("linux", "", errno.EPERM, "blocked by kernel"),
+        ("linux", "/dev/pts/123", errno.EPERM, "unproven"),
+        ("linux", "/dev/tty", errno.ENOENT, "unproven"),
+        ("darwin", "/dev/pts/123", errno.ENOENT, "unproven"),
+    ],
+)
+def test_terminal_linux_device_namespace_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    profile: Profile,
+    case: tuple[str, str, int, str],
+) -> None:
+    platform, terminal, error, expected = case
+
+    def observe(
+        command: tuple[str, ...],
+        _environment: dict[str, str],
+        _cwd: Path,
+        *,
+        prompt: str | None = None,
+        tty_file: Path | None = None,
+    ) -> TerminalObservation:
+        assert isinstance(tty_file, Path)
+        if terminal:
+            tty_file.write_text(terminal)
+        target = Path(command[-1])
+        sandbox = target.suffix == ".sh"
+        assert (prompt is not None) is sandbox
+        witness = Path(shlex.split(target.read_text())[-1]) if sandbox else target
+        witness.write_text(
+            json.dumps(
+                {
+                    "attempted": not sandbox or not terminal,
+                    "error": error if sandbox else errno.EPERM,
+                }
+            )
+        )
+        return TerminalObservation(b"", 0)
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(module, "observe_terminal", observe)
+    monkeypatch.setattr(module, "legacy_input_setting", lambda: "0")
+    if expected == "unproven":
+        with pytest.raises(pytest.fail.Exception, match="unproven"):
+            test_live_terminal_injection(tmp_path, monkeypatch, Harness.CODEX, profile)
+    else:
+        test_live_terminal_injection(tmp_path, monkeypatch, Harness.CODEX, profile)
+        assert expected in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("platform", "contents", "expected"),
+    [("linux", "0\n", "0"), ("linux", " 1\n", "1"), ("darwin", "", "unavailable")],
+)
+def test_terminal_linux_setting_reads_the_kernel_switch(
+    monkeypatch: pytest.MonkeyPatch, platform: str, contents: str, expected: str
+) -> None:
+    reads: list[Path] = []
+
+    def read(path: Path) -> str:
+        reads.append(path)
+        return contents
+
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(Path, "read_text", read)
+    assert legacy_input_setting() == expected
+    assert reads == (
+        [Path("/proc/sys/dev/tty/legacy_tiocsti")] if platform == "linux" else []
+    )

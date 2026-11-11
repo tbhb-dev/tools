@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import fcntl
 import hashlib
 import json
@@ -189,9 +190,34 @@ def observe_terminal(
         os.close(master)
 
 
-def terminal_status(control: bytes, observed: bytes, error: int) -> str:
-    if error == 0 or INPUT_MARKER in observed:
+@dataclasses.dataclass(frozen=True)
+class TerminalAttempt:
+    attempted: bool
+    error: int
+    missing_linux_tty: bool = False
+
+
+def terminal_status(
+    control: bytes,
+    observed: bytes,
+    attempt: TerminalAttempt,
+    *,
+    kernel_blocked: bool = False,
+) -> str:
+    if attempt.error == 0 or INPUT_MARKER in observed:
         return "injected"
+    if not attempt.attempted:
+        # Codex rust-v0.164.0, linux-sandbox/src/bwrap.rs:504-515 mounts a
+        # minimal /dev. The host's /dev/pts terminal is absent in that view.
+        if (
+            attempt.missing_linux_tty
+            and attempt.error == errno.ENOENT
+            and (INPUT_MARKER in control or kernel_blocked)
+        ):
+            return "blocked by device namespace"
+        return "unproven"
+    if kernel_blocked:
+        return "blocked by kernel"
     if INPUT_MARKER not in control:
         return "unproven"
     return "blocked"
