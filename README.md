@@ -270,7 +270,7 @@ denied_home_paths = [".claude"]
 
 [agent.sandbox.path]
 linux = [".local/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-macos = [".local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]
+macos = [".local/bin", "/usr/bin", "/bin", "/opt/homebrew/bin"]
 
 [agent.sandbox.agy]
 review_read = [".config/example-gh", ".config/mise"]
@@ -308,7 +308,11 @@ accounts = ["agent"]
 proven_harnesses = ["codex"]
 ```
 
-Run-host refuses write roots that overlap its run directory, installation, host search directories, harness, or script interpreter. Narrow broad roots such as `~/.local` before running. Host tools and the harness parent use a fixed search path, with optional absolute directories from `host_path`. Tool subprocesses use the rich sandbox PATH. Run-host protects the install directories behind mise shims on either PATH. `host_tools.resolve` refuses executables reached through `mise/shims`. Set `host_path` to the versioned install directories. Each upgrade changes those directory names.
+Run-host refuses write roots that overlap its run directory, installation, host search directories, harness, or script interpreter. Narrow broad roots such as `~/.local` before running. It follows symlinks for each harness, interpreter, and `env` target. Every link, directory, and final file must belong to root or the run's account. None may grant group or world write access. Account-owned parts must stay outside every write root.
+
+On macOS, Homebrew's directories grant group write access to `admin`, so run-host refuses a harness or interpreter that resolves through Homebrew. Install it elsewhere, such as `~/.local/bin`, or use system tools in `/usr/bin` and `/bin`.
+
+Host tools and the harness parent use a fixed search path, with optional absolute directories from `host_path`. Run-host finds `git`, `ssh`, and `openssl`, plus `sysctl`, `ps`, and `security` on macOS, in `/usr/bin`, `/bin`, `/usr/sbin`, and `/sbin` before any Homebrew directory. Tool subprocesses use the rich sandbox PATH. Run-host protects the install directories behind mise shims on either PATH. `host_tools.resolve` refuses executables reached through `mise/shims`. Set `host_path` to the versioned install directories. Each upgrade changes those directory names.
 
 Run-host copies a standalone Codex release to `<XDG_DATA_HOME or ~/.local/share>/tbhbdev/codex/<release dir name>/` before building its policy. It compares every regular file's `sha256` digest and mode with the source. It checks the full directory contents and refuses links outside the release. Run-host reuses a matching copy. It moves a changed copy aside with a timestamp. Before renaming a replacement into place, it checks the temporary sibling. Directories use mode 0755. Files keep their source modes. The copy stays outside every write root. The account's `.codex` directory stays fully denied. Run-host requires a standalone Codex install and refuses other installs.
 
