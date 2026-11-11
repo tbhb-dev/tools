@@ -4,6 +4,8 @@
     tbhbdev alpha gh-app APP --cooldown-until EPOCH
     tbhbdev alpha gh-app APP --cooldown-status
 
+`mint_token` returns a repository and permission restricted token signed in memory.
+
 A mint reads the App's `app_id` and `private_key` from the `github-app-APP` item
 through one `secrets.Store`, checks that the key is an RSA key, signs a JWT
 with `openssl`, and exchanges it for an installation token. It writes a
@@ -40,13 +42,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol, override
 
 import httpx
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from tbhbdev import secrets
 lazy from tbhbdev.alpha.agent import host_tools
 lazy from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 type Json = dict[str, object]
 
@@ -83,6 +88,7 @@ EXPIRES_FILE = "expires-at"
 # ruff wants `check` written out; False is subprocess.run's default.
 NO_CHECK = False
 HEADER = {"alg": "RS256", "typ": "JWT"}
+MINT_FAILURE = "GitHub App token mint failed"
 USAGE = """usage: {prog} APP OWNER/REPO [--fresh] [--dry-run] [--all-repos] [--vault V]
        {prog} APP --cooldown-until EPOCH
        {prog} APP --cooldown-status
@@ -91,6 +97,10 @@ USAGE = """usage: {prog} APP OWNER/REPO [--fresh] [--dry-run] [--all-repos] [--v
 
 class GhAppError(Exception):
     """A mint failed. The message never holds a token, a key or a JWT."""
+
+
+class InstallationMissingError(GhAppError):
+    """Neither the repository nor its owner has an installation."""
 
 
 class UsageError(Exception):
@@ -513,7 +523,7 @@ def find_installation(client: httpx.Client, repo: str) -> int | None:
     return None
 
 
-def request_token(env: Env, args: Args, jwt: str) -> Minted:
+def exchange_token(env: Env, repository: str, jwt: str, body: Json) -> Minted:
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -523,21 +533,70 @@ def request_token(env: Env, args: Args, jwt: str) -> Minted:
         with httpx.Client(
             base_url=API, headers=headers, timeout=TIMEOUT, transport=env.transport
         ) as client:
-            ident = find_installation(client, args.repo)
+            ident = find_installation(client, repository)
             if ident is None:
-                owner, _ = split_repo(args.repo)
-                message = (
-                    f"app {args.app} has no installation for {args.repo} or {owner}"
-                )
-                raise GhAppError(message)
+                raise InstallationMissingError
             reply = client.post(
                 f"/app/installations/{ident}/access_tokens",
-                json=token_body(args.repo, all_repos=args.all_repos),
+                json=body,
             )
     except httpx.HTTPError as exc:
         message = f"the GitHub request failed: {type(exc).__name__}"
         raise GhAppError(message) from None
     return parse_token(json_object(reply))
+
+
+def request_token(env: Env, args: Args, jwt: str) -> Minted:
+    try:
+        return exchange_token(
+            env, args.repo, jwt, token_body(args.repo, all_repos=args.all_repos)
+        )
+    except InstallationMissingError:
+        owner, _ = split_repo(args.repo)
+        message = f"app {args.app} has no installation for {args.repo} or {owner}"
+        raise GhAppError(message) from None
+
+
+def mint_token(
+    env: Env,
+    *,
+    app_id: str,
+    pem: str,
+    repository: str,
+    permissions: Mapping[str, str],
+) -> Minted:
+    """Mint a token with explicit scope, keeping the key and token in memory.
+
+    Raises:
+        GhAppError: Permissions, signing or the token exchange failed.
+    """
+    if not permissions or any(
+        value not in {"read", "write"} for value in permissions.values()
+    ):
+        message = "permissions must be nonempty and contain only read or write"
+        raise GhAppError(message)
+    try:
+        key = serialization.load_pem_private_key(
+            rebuild_pem(pem).encode(), password=None
+        )
+    except ValueError, TypeError, UnsupportedAlgorithm:
+        message = "private_key does not parse"
+        raise GhAppError(message) from None
+    if not isinstance(key, rsa.RSAPrivateKey):
+        message = "the app private key is not an RSA key"
+        raise GhAppError(message)
+    data = signing_input(app_id, env.now())
+    signature = key.sign(data, padding.PKCS1v15(), hashes.SHA256())
+    jwt = f"{data.decode()}.{b64url(signature)}"
+    body: Json = {
+        "repositories": [split_repo(repository)[1]],
+        "permissions": dict(permissions),
+    }
+    try:
+        return exchange_token(env, repository, jwt, body)
+    except GhAppError:
+        # An API error may echo a credential in its message field.
+        raise GhAppError(MINT_FAILURE) from None
 
 
 def store_token(args: Args, out: Path, minted: Minted) -> None:

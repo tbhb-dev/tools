@@ -17,6 +17,8 @@ import httpx
 import pytest
 import yaml
 from agent_host_example import constant, git, host_settings, repository, run_request
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from tbhbdev import secrets
 from tbhbdev.alpha import gh_app
@@ -259,6 +261,50 @@ def test_installation_reuses_app_signer_without_storing_token(
             == "example-installation"
         )
     check_installation_calls(calls, fake_reader, failure, tmp_path)
+
+
+def test_review_token_request_keeps_installed_permissions_for_only_run_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+    monkeypatch.setitem(VALUES, "example/app/pem", pem)
+    requests: list[httpx.Request] = []
+    replies = {
+        ("GET", "/repos/example-org/example-repo/installation"): httpx.Response(
+            200, json={"id": 7}
+        ),
+        ("POST", "/app/installations/7/access_tokens"): httpx.Response(
+            201,
+            json={
+                "token": "example-installation",
+                "expires_at": "2030-01-01T00:00:00Z",
+            },
+        ),
+    }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return replies[request.method, request.url.path]
+
+    env = gh_app.Env(
+        tmp_path,
+        lambda: 1000,
+        secrets.Store,
+        gh_app.run_openssl,
+        httpx.MockTransport(respond),
+    )
+    monkeypatch.setattr(gh_app, "default_env", lambda: env)
+    monkeypatch.setattr(gh_app, "sign", constant("example-jwt"))
+    credentials.deliver(
+        run_request(profile="review", commit="0" * 40), host_settings(), tmp_path
+    )
+    assert [(request.method, request.url.path) for request in requests] == list(replies)
+    assert json.loads(requests[1].content) == {"repositories": ["example-repo"]}
 
 
 def check_installation_calls(

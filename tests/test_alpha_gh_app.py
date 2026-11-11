@@ -15,9 +15,13 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NoReturn
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import rsa as rsa_keys
 
 from tbhbdev import alpha, secrets
 from tbhbdev.alpha import gh_app
@@ -1478,3 +1482,190 @@ def test_the_module_names_no_service_account() -> None:
     source = SOURCE.read_text()
     for banned in BANNED:
         assert banned not in source
+
+
+MINT_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
+
+
+@pytest.mark.parametrize("permissions", [MINT_PERMISSIONS, {"contents": "read"}])
+def test_mint_token_narrows_and_signs_without_files(
+    tmp_path: Path,
+    rsa: Key,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    permissions: dict[str, str],
+) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> NoReturn:
+        pytest.fail("mint_token must not write files or invoke openssl")
+
+    load_key = serialization.load_pem_private_key
+
+    def load(data: bytes, *, password: bytes | None) -> rsa_keys.RSAPrivateKey:
+        assert password is None
+        key = load_key(data, password=password)
+        assert isinstance(key, rsa_keys.RSAPrivateKey)
+        return key
+
+    monkeypatch.setattr(gh_app.serialization, "load_pem_private_key", load)
+    monkeypatch.setattr(gh_app.tempfile, "mkstemp", refuse)
+    monkeypatch.setattr(gh_app.tempfile, "TemporaryDirectory", refuse)
+    before = list(tmp_path.rglob("*"))
+    github = Github()
+    env = env_for(tmp_path, Store({}), github, openssl=refuse)
+    minted = gh_app.mint_token(
+        env,
+        app_id=APP_ID,
+        pem=rsa.pem.replace("\n", " "),
+        repository=REPO,
+        permissions=permissions,
+    )
+    assert minted == gh_app.Minted(TOKEN, EXPIRES_EPOCH)
+    assert TOKEN not in repr(minted)
+    assert [(r.method, r.url.path) for r in github.requests] == [
+        ("GET", f"/repos/{REPO}/installation"),
+        ("POST", "/app/installations/7/access_tokens"),
+    ]
+    assert json.loads(github.requests[-1].content) == {
+        "repositories": ["widget"],
+        "permissions": permissions,
+    }
+    header, payload, signature = github.jwt.split(".")
+    assert json.loads(base64.urlsafe_b64decode(header + "==")) == gh_app.HEADER
+    claims = json.loads(base64.urlsafe_b64decode(payload + "=="))
+    assert claims == {"iat": NOW - 60, "exp": NOW + 540, "iss": APP_ID}
+    assert 0 < claims["exp"] - claims["iat"] <= 600
+    public = serialization.load_pem_public_key(rsa.public.read_bytes())
+    assert isinstance(public, rsa_keys.RSAPublicKey)
+    public.verify(
+        base64.urlsafe_b64decode(signature + "=="),
+        f"{header}.{payload}".encode(),
+        padding.PKCS1v15(),
+        hashes.SHA256(),
+    )
+    assert capsys.readouterr() == ("", "")
+    assert list(tmp_path.rglob("*")) == before
+    assert all(TOKEN not in p.read_text() for p in tmp_path.rglob("*") if p.is_file())
+
+
+@pytest.mark.parametrize("status", [404, 401, 403, 500])
+def test_mint_token_lookup_falls_back_only_on_404(
+    tmp_path: Path,
+    rsa: Key,
+    status: int,
+) -> None:
+    routes = ok_routes()
+    routes[("GET", f"/repos/{REPO}/installation")] = httpx.Response(
+        status,
+        json={"message": TOKEN},
+    )
+    routes[("GET", "/orgs/acme/installation")] = httpx.Response(200, json={"id": 7})
+    github = Github(routes)
+    env = env_for(tmp_path, Store({}), github)
+    if status == 404:
+        assert gh_app.mint_token(
+            env,
+            app_id=APP_ID,
+            pem=rsa.pem,
+            repository=REPO,
+            permissions=MINT_PERMISSIONS,
+        ) == gh_app.Minted(TOKEN, EXPIRES_EPOCH)
+        assert [r.url.path for r in github.requests] == [
+            f"/repos/{REPO}/installation",
+            "/orgs/acme/installation",
+            "/app/installations/7/access_tokens",
+        ]
+    else:
+        with pytest.raises(gh_app.GhAppError) as caught:
+            gh_app.mint_token(
+                env,
+                app_id=APP_ID,
+                pem=rsa.pem,
+                repository=REPO,
+                permissions=MINT_PERMISSIONS,
+            )
+        assert str(caught.value) == "GitHub App token mint failed"
+        assert len(github.requests) == 1
+
+
+@pytest.mark.parametrize("permissions", [{}, {"contents": "admin"}, {"contents": ""}])
+def test_mint_token_refuses_permissions_before_request(
+    tmp_path: Path,
+    permissions: dict[str, str],
+) -> None:
+    github = Github()
+    with pytest.raises(gh_app.GhAppError, match="permissions") as caught:
+        gh_app.mint_token(
+            env_for(tmp_path, Store({}), github),
+            app_id=APP_ID,
+            pem="invalid key",
+            repository=REPO,
+            permissions=permissions,
+        )
+    assert str(caught.value) == (
+        "permissions must be nonempty and contain only read or write"
+    )
+    assert github.requests == []
+
+
+@pytest.mark.parametrize("kind", ["ec", "invalid"])
+def test_mint_token_refuses_keys_without_disclosing_them(
+    tmp_path: Path,
+    ec_key: Key,
+    kind: str,
+) -> None:
+    pem = ec_key.pem if kind == "ec" else "invalid secret key"
+    github = Github()
+    with pytest.raises(gh_app.GhAppError) as caught:
+        gh_app.mint_token(
+            env_for(tmp_path, Store({}), github),
+            app_id=APP_ID,
+            pem=pem,
+            repository=REPO,
+            permissions=MINT_PERMISSIONS,
+        )
+    assert str(caught.value) == (
+        "the app private key is not an RSA key"
+        if kind == "ec"
+        else "private_key does not parse"
+    )
+    assert pem not in str(caught.value)
+    assert github.requests == []
+
+
+@pytest.mark.parametrize("failure", ["missing", "reply", "transport"])
+def test_mint_token_errors_never_disclose_tokens(
+    tmp_path: Path,
+    rsa: Key,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    before = list(tmp_path.rglob("*"))
+    routes = {} if failure == "missing" else ok_routes()
+    routes[("POST", "/app/installations/7/access_tokens")] = httpx.Response(
+        403,
+        json={"token": TOKEN, "message": TOKEN},
+    )
+    github = Github(routes)
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        if failure == "transport":
+            raise httpx.ReadError(TOKEN)
+        return github(request)
+
+    env = replace(
+        env_for(tmp_path, Store({}), github),
+        transport=httpx.MockTransport(transport),
+    )
+    with pytest.raises(gh_app.GhAppError) as caught:
+        gh_app.mint_token(
+            env,
+            app_id=APP_ID,
+            pem=rsa.pem,
+            repository=REPO,
+            permissions=MINT_PERMISSIONS,
+        )
+    assert str(caught.value) == "GitHub App token mint failed"
+    assert TOKEN not in str(caught.value)
+    assert capsys.readouterr() == ("", "")
+    assert list(tmp_path.rglob("*")) == before
+    assert all(TOKEN not in p.read_text() for p in tmp_path.rglob("*") if p.is_file())
