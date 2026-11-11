@@ -213,6 +213,7 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         (str(clone), str(clone.resolve())),
     )
     write_roots = (
+        resolved.codex_home,
         resolved.worktree,
         resolved.tmpdir,
         resolved.audit_dir,

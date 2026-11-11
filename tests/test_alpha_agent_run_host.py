@@ -1940,6 +1940,7 @@ def test_checked_policy_supplies_all_protected_paths(
         assert (uid, write_roots) == (
             12345,
             (
+                str(real / "codex"),
                 str(real / "worktree"),
                 str(real / "temp"),
                 str(real / "audit"),
@@ -3551,3 +3552,35 @@ def test_developer_git_paths_are_protected(
     assert checked == [str(git)]
     assert developer in protections[-1]
     assert str(Path(developer).parent) in protections[-1]
+
+
+@pytest.mark.parametrize("through_link", [False, True])
+def test_executable_chain_through_private_codex_home_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    through_link: bool,
+) -> None:
+    run = make_run(tmp_path)
+    paths = preparation(run).paths
+    directory = Path(paths.codex_home)
+    planted = directory / "git"
+    planted.write_bytes(b"binary")
+    planted.chmod(0o755)
+    selected = planted
+    if through_link:
+        selected = tmp_path / "git-link"
+        selected.symlink_to(planted)
+    original = host_tools.resolve
+
+    def resolve(
+        name: str, path: str | None = None, *, follow_symlinks: bool = True
+    ) -> str:
+        return (
+            str(selected)
+            if name == "git"
+            else original(name, path, follow_symlinks=follow_symlinks)
+        )
+
+    monkeypatch.setattr(host_tools, "resolve", resolve)
+    with pytest.raises(Invalid, match="untrusted host executable component"):
+        run_host.checked_policy(run, paths)
