@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, cast, override
 import pytest
 
 from tbhbdev import host, plugins, secrets
-from tbhbdev.alpha.agent import credentials, host_tools
+from tbhbdev.alpha.agent import credentials, host_tools, runfiles
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -511,3 +511,31 @@ def stubs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Stubs:
     monkeypatch.setenv("STUB_DIR", str(stub_dir))
     monkeypatch.delenv(secrets.TEST_TOKEN_ENV, raising=False)
     return Stubs(stub_dir, bin_dir)
+
+
+@pytest.fixture
+def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep host protocol tests inside one temporary account and repository."""
+    monkeypatch.chdir(tmp_path)
+    for key in (
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+    ):
+        monkeypatch.setenv(key, str(tmp_path / key.lower()))
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture
+def agent_suffix_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check run-file spelling on case-insensitive filesystems too."""
+    original = runfiles.RunFiles.path
+
+    def path(files: runfiles.RunFiles, suffix: str) -> Path:
+        assert suffix == suffix.lower()
+        return original(files, suffix)
+
+    monkeypatch.setattr(runfiles.RunFiles, "path", path)

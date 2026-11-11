@@ -8,6 +8,7 @@ import sys
 from tbhbdev import userconfig
 from tbhbdev.alpha.agent import driver, precheck, settings
 from tbhbdev.alpha.agent import run_host as run_host
+from tbhbdev.alpha.agent import ssh_serve as ssh_serve
 from tbhbdev.alpha.agent.decisions import config
 
 __all__ = ["driver", "main", "precheck", "settings"]
@@ -64,6 +65,8 @@ def parser(prog: str) -> argparse.ArgumentParser:
 def main(argv: list[str], prog: str) -> int:
     if argv and argv[0] == "run-host":
         return run_host.main(argv[1:], f"{prog} run-host")
+    if argv and argv[0] == "ssh-serve":
+        return ssh_serve.main(argv[1:], f"{prog} ssh-serve")
     if argv and argv[0] == "precheck":
         return precheck.main(argv[1:], f"{prog} precheck")
     try:

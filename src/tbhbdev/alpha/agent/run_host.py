@@ -24,7 +24,9 @@ from tbhbdev.alpha.agent import (
     codex_install,
     credentials,
     host_tools,
+    ownership,
     process_group,
+    push,
     render,
     runfiles,
     settings,
@@ -46,6 +48,7 @@ from tbhbdev.alpha.agent.model import (
     RunRequest,
     Settings,
 )
+from tbhbdev.alpha.agent.ownership import RunExistsError
 
 
 @dataclass(frozen=True)
@@ -620,13 +623,15 @@ def prepared_result(result: object) -> Prepared:
     return result
 
 
-def execute(run: Run, text: str) -> int:
+def execute(run: Run, text: str, push_token: str | None = None) -> int:
     """Keep cleanup protected until the completion record is durable."""
     with host_tools.configured(run.settings, run.host.os), ExitStack() as stack:
-        return _execute(run, text, stack)
+        return _execute(run, text, stack, push_token)
 
 
-def _execute(run: Run, text: str, stack: ExitStack) -> int:
+def _execute(
+    run: Run, text: str, stack: ExitStack, push_token: str | None = None
+) -> int:
     prepared = None
     rc = 1
     agent = None
@@ -650,7 +655,7 @@ def _execute(run: Run, text: str, stack: ExitStack) -> int:
             agent = credentials.signing_agent(
                 prepared.delivery.signing, run.tmpdir, run.deadline
             )
-        rc = run_harness(run, prepared, stack)
+        rc = push.run(run, prepared, stack, run_harness, push_token)
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
     except RunInterruptedError, EOFError:
@@ -746,23 +751,26 @@ def interrupt(_number: int, _frame: object) -> None:
     raise RunInterruptedError
 
 
-class RunExistsError(Invalid):
-    """A refused rerun must preserve its previous owner's records."""
-
-
 def refuse_started(files: runfiles.RunFiles) -> None:
     if files.path("rc").exists() or files.path("pgid").exists():
         message = f"run {files.name!r} has already started"
         raise RunExistsError(message)
 
 
-def main(arguments: list[str], prog: str) -> int:
+def main(
+    arguments: list[str],
+    prog: str,
+    *,
+    push_token: str | None = None,
+    claimed: bool = False,
+) -> int:
     os.environ["PATH"] = host_tools.search()
     parser = argparse.ArgumentParser(prog=prog)
     parser.add_argument("name", nargs="?")
     parser.add_argument("request", nargs="?")
     parser.add_argument("--host", default=socket.gethostname())
     parser.add_argument("--prompt")
+    parser.add_argument("--owner")
     args = parser.parse_args(arguments)
     if args.name is None:
         print(f"{prog}: run name is required", file=sys.stderr)
@@ -774,13 +782,18 @@ def main(arguments: list[str], prog: str) -> int:
         with process_group.defer_signals():
             files = _files(args.name)
             refuse_started(files)
+            ownership.claim(files, claimed=claimed, owner=args.owner)
         with (
             runfiles.locked(files.path("run.lock")),
             tempfile.TemporaryDirectory() as tmpdir,
         ):
             refuse_started(files)
             run, text = _load(args, Path(tmpdir).resolve())
-            completed = execute(run, text)
+            completed = (
+                execute(run, text)
+                if push_token is None
+                else execute(run, text, push_token)
+            )
     except (
         Invalid,
         userconfig.ConfigError,
