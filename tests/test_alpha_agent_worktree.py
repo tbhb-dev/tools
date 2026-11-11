@@ -1425,10 +1425,15 @@ def test_hooks_path_rejects_relative_and_symlinked_locations(
         )
 
 
-def test_hooks_path_checks_unsafe_values_even_when_overridden(tmp_path: Path) -> None:
+@pytest.mark.parametrize("safe_first", [False, True])
+def test_hooks_path_checks_unsafe_values_even_when_overridden(
+    tmp_path: Path, *, safe_first: bool
+) -> None:
     git(tmp_path, "init", "--template=")
-    git(tmp_path, "config", "--add", "core.hooksPath", str(tmp_path / "bad-hooks"))
-    git(tmp_path, "config", "--add", "core.hooksPath", "/dev/null")
+    unsafe = str(tmp_path / "bad-hooks")
+    values = ("/dev/null", unsafe) if safe_first else (unsafe, "/dev/null")
+    for value in values:
+        git(tmp_path, "config", "--add", "core.hooksPath", value)
     with pytest.raises(Invalid, match="bad-hooks"):
         worktree.validate_hooks(tmp_path, (str(tmp_path / "neighbor"),))
 
