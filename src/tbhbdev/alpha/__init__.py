@@ -23,6 +23,7 @@ from tbhbdev.alpha import (
     identity,
     install,
     loop,
+    pre_push_guard,
     session_context,
     state_guard,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "install",
     "loop",
     "main",
+    "pre_push_guard",
     "session_context",
     "state_guard",
 ]
@@ -76,6 +78,7 @@ commands:
   merge        squash-merge an approved pull request
   loop         validate loop configuration (runner not yet available)
   agent        exec | wait | status | kill | clean | keep: headless runs
+  pre-push-guard REMOTE URL: refuse rewritten history and private names
   install      install the git hooks and the user-level harness hooks
 """
 
@@ -169,6 +172,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "repo": repo_command,
     "merge": merge,
     "install": install_command,
+    "pre-push-guard": pre_push_guard.main,
     "loop": loop.main,
     "agent": agent.main,
 }

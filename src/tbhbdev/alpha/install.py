@@ -2,7 +2,10 @@
 
 Run in a clone of a tbhb-dev repository, it installs that clone's git hooks
 into `$(git rev-parse --git-common-dir)/hooks`, which every worktree of the
-clone shares. prek runs pre-commit and pre-push. The agent identity hooks
+clone shares. The pre-push guard refuses rewritten history and private names
+before prek, replaying identical arguments and stdin bytes to both. Without
+tbhbdev on PATH, it refuses pushes in tbhb-dev repositories. prek also runs
+pre-commit. The agent identity hooks
 (prepare-commit-msg, commit-msg, post-commit) are plain shims that run
 `tbhbdev alpha identity`: prek stashes unstaged changes around every stage
 and fails a hook whenever the work tree changes while it runs, so a
@@ -112,6 +115,7 @@ from tbhbdev import plugins
 from tbhbdev.alpha.gh_shim import bin_dir, wrapper_text
 from tbhbdev.alpha.identity import codex_home
 from tbhbdev.alpha.repo import (
+    TBHB_DEV_ORIGIN,
     TBHB_DEV_ORIGIN_ERE,
     git,
     hook_cwd,
@@ -194,6 +198,39 @@ if [ -x "$next" ]; then
   "$next" "$@" || status=$?
 fi
 exit $status
+"""
+
+
+PRE_PUSH_SHIM = """#!{python}
+{mark}
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+
+payload = sys.stdin.buffer.read()
+status = 0
+if shutil.which("tbhbdev"):
+    status = subprocess.run(
+        ["tbhbdev", "alpha", "pre-push-guard", *sys.argv[1:]],
+        input=payload, check=False,
+    ).returncode
+else:
+    origin = subprocess.run(
+        ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+         "-c", "diff.external=", "-c", "core.pager=cat",
+         "remote", "get-url", "origin"],
+        capture_output=True, text=True, check=False,
+    )
+    if re.fullmatch({pattern!r}, origin.stdout, re.IGNORECASE | re.ASCII):
+        print("pre-push: tbhbdev is not on PATH; push refused", file=sys.stderr)
+        status = 1
+next_hook = pathlib.Path(__file__).with_name("pre-push.prek")
+if next_hook.is_file():
+    result = subprocess.run([str(next_hook), *sys.argv[1:]], input=payload, check=False)
+    status = status or result.returncode
+sys.exit(status)
 """
 
 
@@ -953,6 +990,26 @@ def install_identity_hook(
     hook.chmod(0o755)
 
 
+def install_pre_push_hook(hooks: Path) -> None:
+    """Chain the guard before prek, reading stdin once and replaying its bytes."""
+    hook = hooks / "pre-push"
+    if not replaceable(hook):
+        print(f"{PROG}: warning: {hook} is not ours; leaving it", file=sys.stderr)
+        return
+    hook.rename(hooks / "pre-push.prek")
+    legacy = hooks / "pre-push.legacy"
+    if legacy.is_file() and SHIM_MARK in legacy.read_text():
+        back_up_legacy(legacy)
+    hook.write_text(
+        PRE_PUSH_SHIM.format(
+            python=sys.executable,
+            mark=SHIM_MARK,
+            pattern=TBHB_DEV_ORIGIN.pattern,
+        )
+    )
+    hook.chmod(0o755)
+
+
 def install_git_hooks(
     cwd: Path | None, env: Mapping[str, str], *, dry_run: bool
 ) -> int:
@@ -992,6 +1049,7 @@ def install_git_hooks(
             prek_install(
                 prek, top, "--hook-type", "pre-commit", "--hook-type", "pre-push"
             )
+            install_pre_push_hook(hooks)
             for pair in IDENTITY_HOOKS:
                 install_identity_hook(prek, top, hooks, pair)
     except InstallError as exc:

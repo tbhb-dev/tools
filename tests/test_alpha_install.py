@@ -138,6 +138,8 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg-runtime"))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_fake(bin_dir / "prek", FAKE_PREK)
@@ -1821,6 +1823,8 @@ def test_install_git_hooks(world: World, capsys: pytest.CaptureFixture[str]) -> 
         "pre-push",
     ]
     assert not (world.hooks / install.LOCK).exists()
+    assert "pre-push.prek" in {path.name for path in world.hooks.iterdir()}
+    assert stat.S_IMODE((world.hooks / "pre-push").stat().st_mode) == 0o755
 
 
 def test_install_git_hooks_from_a_worktree_uses_the_shared_hooks(
@@ -2912,3 +2916,86 @@ def test_main_twice_trusts_every_codex_hook_and_sets_the_environment(
         for p in world.home.rglob("*")
         if p.is_file()
     }
+
+
+@pytest.mark.parametrize(("guard_status", "prek_status"), [(0, 0), (3, 0), (0, 4)])
+def test_push_chain_replays_bytes_first(
+    world: World, guard_status: int, prek_status: int
+) -> None:
+    assert install.install_git_hooks(None, {}, dry_run=False) == 0
+    payload = b"refs/heads/topic abc refs/heads/main def\n\ntrailing\xff"
+    tool = world.bin / "tbhbdev"
+    write_fake(
+        tool,
+        f"""import pathlib, sys
+pathlib.Path("order").write_text("guard")
+pathlib.Path("guard-input").write_bytes(sys.stdin.buffer.read())
+pathlib.Path("guard-args").write_text(repr(sys.argv[1:]))
+sys.exit({guard_status})
+""",
+    )
+    write_fake(
+        world.hooks / "pre-push.prek",
+        f"""import pathlib, sys
+with pathlib.Path("order").open("a") as out:
+    out.write(" prek")
+pathlib.Path("prek-input").write_bytes(sys.stdin.buffer.read())
+pathlib.Path("prek-args").write_text(repr(sys.argv[1:]))
+sys.exit({prek_status})
+""",
+    )
+    done = subprocess.run(
+        [str(world.hooks / "pre-push"), "origin", "example-url"],
+        cwd=world.repo,
+        input=payload,
+        capture_output=True,
+        check=False,
+    )
+    assert done.returncode == (guard_status or prek_status)
+    assert (world.repo / "order").read_text() == "guard prek"
+    assert (world.repo / "guard-input").read_bytes() == payload
+    assert (world.repo / "prek-input").read_bytes() == payload
+    assert (world.repo / "guard-args").read_text() == repr(
+        ["alpha", "pre-push-guard", "origin", "example-url"]
+    )
+    assert (world.repo / "prek-args").read_text() == repr(["origin", "example-url"])
+
+
+@pytest.mark.parametrize("origin", [ORIGIN, "https://example.test/elsewhere.git"])
+def test_push_shim_without_tool(world: World, origin: str) -> None:
+    assert install.install_git_hooks(None, {}, dry_run=False) == 0
+    git(world.repo, "remote", "set-url", "origin", origin)
+    done = subprocess.run(
+        [str(world.hooks / "pre-push"), "origin", origin],
+        input=b"",
+        cwd=world.repo,
+        env=shim_env(world, None),
+        capture_output=True,
+        check=False,
+    )
+    assert done.returncode == int(origin == ORIGIN)
+    assert done.stdout == b"prek-pre-push\n"
+    assert bool(done.stderr) == (origin == ORIGIN)
+
+
+def test_push_hook_keeps_foreign_hook(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    hook = world.hooks / "pre-push"
+    hook.write_text("foreign\n")
+    install.install_pre_push_hook(world.hooks)
+    assert hook.read_text() == "foreign\n"
+    assert capsys.readouterr().err == (
+        f"{install.PROG}: warning: {hook} is not ours; leaving it\n"
+    )
+
+
+def test_push_hook_rerun_moves_previous_shim(world: World) -> None:
+    assert install.install_git_hooks(None, {}, dry_run=False) == 0
+    first = (world.hooks / "pre-push").read_text()
+    assert install.install_git_hooks(None, {}, dry_run=False) == 0
+    assert (world.hooks / "pre-push").read_text() == first
+    assert not (world.hooks / "pre-push.legacy").exists()
+    backups = list(world.hooks.glob("pre-push.legacy.tbhb-backup.*"))
+    assert len(backups) == 1
+    assert backups[0].read_text() == first

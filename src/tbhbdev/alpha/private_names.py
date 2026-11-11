@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from tbhbdev import userconfig
 from tbhbdev.alpha.repo import git
@@ -27,6 +28,10 @@ if TYPE_CHECKING:
     from tbhbdev.alpha.pull_request import Problem
 
 SUFFIX = "-private"
+REPOSITORY_URL = re.compile(
+    r"(?:(?:https?|ssh|git|git\+ssh)://[^/\s]+/[^/\s]+(?:/[^/\s]+)*"
+    r"|[^/:\s]+:[^/\s][^\s]*|/?(?:[^/:\s]+/)+[^/\s]+)"
+)
 MESSAGE = "'{}' names a private repository; describe it generically instead"
 TOKEN = re.compile(r"(?<![\w.-])[\w-]+(?:\.[\w-]+)*(?![\w-])", re.ASCII)
 
@@ -63,29 +68,33 @@ def _configured() -> list[str]:
         return []
 
 
-def _origin_name() -> str | None:
-    """The repository name in `origin`'s URL, or None when git can't say."""
-    code, url = git("config", "--get", "remote.origin.url")
-    if code != 0:
+def repository_name(url: str) -> str | None:
+    """The final repository component of a usable git URL or local path."""
+    value = url.strip().rstrip("/")
+    try:
+        urlsplit(value)
+    except ValueError:
         return None
-    name = re.split(r"[/:]", url.strip().rstrip("/"))[-1].removesuffix(".git")
-    return name.lower() or None
+    if REPOSITORY_URL.fullmatch(value) is None:
+        return None
+    return re.split(r"[/:]", value)[-1].removesuffix(".git").lower() or None
 
 
-def private_names() -> list[str] | None:
-    """The names to flag, or None when the working repository is private.
-
-    A repository is private when its name ends in `-private` or is configured.
-    An unreadable `origin` counts as public, so the check runs. A config the
-    loader can't read gives no names; the suffix rule still applies.
-    """
+def names_for_repository(name: str | None) -> list[str] | None:
+    """Configured names to flag, or None for a private target."""
     names = _configured()
-    origin = _origin_name()
-    if origin is not None and (
-        origin.endswith(SUFFIX) or origin in {name.lower() for name in names}
+    if name is not None and (
+        name.endswith(SUFFIX) or name in {item.lower() for item in names}
     ):
         return None
     return names
+
+
+def private_names() -> list[str] | None:
+    """Names to flag for origin; an unreadable origin counts as public."""
+    code, url = git("config", "--get", "remote.origin.url")
+    name = re.split(r"[/:]", url.strip().rstrip("/"))[-1].removesuffix(".git")
+    return names_for_repository(name.lower() if code == 0 else None)
 
 
 def draft_problems(lines: Sequence[str], first: int) -> list[Problem]:
