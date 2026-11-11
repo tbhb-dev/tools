@@ -308,6 +308,14 @@ def test_final_answer_copy_is_bounded_owned_and_atomic(
         source.symlink_to(destination)
     elif plant == "fifo":
         os.mkfifo(source)
+        opened = os.open
+
+        def checked(path: str | Path, flags: int, *, dir_fd: int | None = None) -> int:
+            if dir_fd is not None:
+                assert flags & os.O_NONBLOCK
+            return opened(path, flags, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, "open", checked)
     elif plant != "missing":
         source.write_text(
             "x" * (16 * 1024 * 1024 + (1 if plant == "oversized" else 0))

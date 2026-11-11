@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 from agent_example import settings
-from agent_host_example import bounded_file_reads
+from agent_host_example import bounded_file_reads, trusted_host_stat
 
 from tbhbdev.alpha.agent import host_tools
 from tbhbdev.alpha.agent.model import Invalid, Os
+
+
+@pytest.fixture(autouse=True)
+def host_stat(monkeypatch: pytest.MonkeyPatch) -> dict[Path, tuple[int, int]]:
+    return trusted_host_stat(monkeypatch)
 
 
 def script(path: Path, text: str) -> str:
@@ -46,7 +52,9 @@ def test_executable_link_walk_refuses_missing_paths(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("os", Os)
-def test_host_path_is_fixed_and_scoped(os: Os, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_host_path_is_fixed_and_scoped(
+    os: Os, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     original = settings()
     configured = dataclasses.replace(
         original,
@@ -57,6 +65,14 @@ def test_host_path_is_fixed_and_scoped(os: Os, monkeypatch: pytest.MonkeyPatch) 
     if os is Os.MACOS:
         entries += ("/opt/homebrew/bin", "/usr/local/bin")
     assert host_tools.search_path(configured, os) == (*entries, "/example/bin")
+    executable = script(tmp_path / "git", "binary")
+
+    def which(name: str, *, path: str) -> str:
+        assert name == "git"
+        assert path == ":".join((*entries, "/example/bin"))
+        return executable
+
+    monkeypatch.setattr(host_tools.shutil, "which", which)
     before = host_tools.search()
     with host_tools.configured(configured, os):
         assert host_tools.search() == ":".join((*entries, "/example/bin"))
@@ -68,6 +84,9 @@ def test_resolution_follows_symlinks_and_refuses_missing(tmp_path: Path) -> None
     target = script(tmp_path / "target", "#!/bin/sh\nexit 0\n")
     (tmp_path / "tool").symlink_to(target)
     assert host_tools.resolve("tool", str(tmp_path)) == target
+    assert host_tools.resolve("tool", str(tmp_path), follow_symlinks=False) == str(
+        tmp_path / "tool"
+    )
     with pytest.raises(Invalid, match="host executable missing was not found"):
         host_tools.resolve("missing", str(tmp_path))
 
@@ -112,39 +131,53 @@ def test_fixed_install_directories_are_not_mise_shims(
     assert host_tools.mise_installations((str(directory),)) == ()
 
 
-@pytest.mark.parametrize(
-    "header", ["#!/bin/sh", "#!/usr/bin/env sh", "#!/usr/bin/env -S sh -e"]
-)
-def test_script_interpreter_paths(tmp_path: Path, header: str) -> None:
-    executable = script(tmp_path / "tool", f"{header}\nexit '0'\n: second-line\n")
-    found = host_tools.executable_paths(executable, "/usr/bin:/bin")
-    expected = (executable, str(Path("/bin/sh").resolve()))
-    if "env" in header:
-        expected = (executable, str(Path("/usr/bin/env").resolve()), expected[-1])
-    assert found == expected
+@pytest.mark.parametrize("env", [None, "", "-S "])
+def test_script_interpreter_paths(tmp_path: Path, env: str | None) -> None:
+    interpreter = script(tmp_path / "sh", "binary")
+    launcher = script(tmp_path / "env", "binary")
+    header = interpreter if env is None else f"{launcher} {env}sh"
+    executable = script(tmp_path / "tool", f"#!{header}\nexit '0'\n: second-line\n")
+    found = host_tools.executable_paths(
+        executable, str(tmp_path), uid=1000, write_roots=()
+    )
+    assert found == (
+        (executable, interpreter)
+        if env is None
+        else (executable, launcher, interpreter)
+    )
 
 
 @pytest.mark.parametrize(
-    "header",
-    [
-        "#!sh",
-        "#!",
-        "#!/usr/bin/env",
-        "#!/usr/bin/env -i sh",
-        "#!/usr/bin/env NAME=value sh",
-    ],
+    "header", ["sh", "", "{env}", "{env} -i sh", "{env} NAME=value sh"]
 )
 def test_invalid_script_interpreter(tmp_path: Path, header: str) -> None:
-    executable = script(tmp_path / "tool", header + "\n")
-    with pytest.raises(Invalid, match="host script"):
-        host_tools.executable_paths(executable, "/usr/bin:/bin")
+    launcher = script(tmp_path / "env", "binary")
+    executable = script(tmp_path / "tool", "#!" + header.format(env=launcher) + "\n")
+    with pytest.raises(Invalid) as caught:
+        host_tools.executable_paths(executable, str(tmp_path), uid=1000, write_roots=())
+    reason = (
+        "no absolute interpreter"
+        if header in ("sh", "")
+        else "an unsupported env interpreter"
+    )
+    assert str(caught.value) == f"host script {executable} has {reason}"
 
 
-def test_interpreter_cycle(tmp_path: Path) -> None:
+def test_interpreter_cycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "tool"
     executable = script(path, f"#!{path}\n")
+    original = host_tools.executable_header
+    reads: list[str] = []
+
+    def once(current: str) -> bytes:
+        assert not reads, "a cyclic script must not be opened again"
+        reads.append(current)
+        return original(current)
+
+    monkeypatch.setattr(host_tools, "executable_header", once)
     with pytest.raises(Invalid, match="interpreter cycle"):
-        host_tools.executable_paths(executable, str(tmp_path))
+        host_tools.executable_paths(executable, str(tmp_path), uid=1000, write_roots=())
+    assert reads == [executable]
 
 
 @pytest.mark.parametrize(
@@ -237,7 +270,7 @@ def test_nonregular_executable_cannot_block_inspection(
 
     monkeypatch.setattr(os, "open", opened)
     with pytest.raises(Invalid, match="not a regular file"):
-        host_tools.executable_paths(str(path), str(tmp_path))
+        host_tools.executable_paths(str(path), str(tmp_path), uid=1000, write_roots=())
 
 
 def test_installation_resolves_all_runtime_locations(
@@ -274,18 +307,32 @@ def test_executable_reads_are_bounded_and_nofollow(
 
     monkeypatch.setattr(os, "open", open_checked)
     bounded_file_reads(monkeypatch, 4096)
-    assert host_tools.executable_paths(executable, str(tmp_path)) == (executable,)
+    assert host_tools.executable_paths(
+        executable, str(tmp_path), uid=1000, write_roots=()
+    ) == (executable,)
 
 
 def test_env_interpreter_uses_the_policy_search_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    executable = script(tmp_path / "tool", "#!/usr/bin/env selected\nexit 0\n")
+    launcher = script(tmp_path / "env", "binary")
+    executable = script(tmp_path / "tool", f"#!{launcher} selected\nexit 0\n")
     interpreter = script(tmp_path / "selected", "binary")
     monkeypatch.setenv("PATH", "/untrusted")
-    assert host_tools.executable_paths(executable, str(tmp_path)) == (
+    original = host_tools.resolve
+
+    def resolve(
+        name: str, path: str | None = None, *, follow_symlinks: bool = True
+    ) -> str:
+        assert follow_symlinks is False
+        return original(name, path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(host_tools, "resolve", resolve)
+    assert host_tools.executable_paths(
+        executable, str(tmp_path), uid=1000, write_roots=()
+    ) == (
         executable,
-        str(Path("/usr/bin/env").resolve()),
+        launcher,
         interpreter,
     )
 
@@ -302,3 +349,238 @@ def test_feature_listing_errors_cannot_fall_back_to_version(
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(subprocess, "check_output", version)
     assert host_tools.codex_proxy_supported("/example/codex", tmp_path) is False
+
+
+def test_symlinked_host_binary(tmp_path: Path) -> None:
+    target = script(tmp_path / "multicall", "binary")
+    alias = tmp_path / "true"
+    alias.symlink_to(target)
+    assert host_tools.executable_paths(
+        str(alias), str(tmp_path), uid=1000, write_roots=()
+    ) == (str(alias), target)
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+@pytest.mark.parametrize("env", [False, True])
+def test_root_owned_multicall_and_interpreter_chains(
+    tmp_path: Path,
+    env: bool,
+    platform: str,
+    monkeypatch: pytest.MonkeyPatch,
+    host_stat: dict[Path, tuple[int, int]],
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    directory = tmp_path / "bin"
+    directory.mkdir()
+    multicall = script(directory / "multicall", "binary")
+    true = directory / "true"
+    launcher = directory / "env"
+    true.symlink_to("multicall")
+    launcher.symlink_to("multicall")
+    selected = directory / "selected"
+    hop = directory / "interpreter"
+    selected.symlink_to(hop.name)
+    hop.symlink_to("true")
+    tool = script(
+        directory / "tool",
+        f"#!{launcher} -S selected\n" if env else f"#!{selected}\n",
+    )
+    alias = tmp_path / "alias"
+    alias.symlink_to(directory, target_is_directory=True)
+    executable = str(alias / "tool")
+    mode = 0o777 if platform == "linux" else 0o755
+    for link in (true, launcher, selected, hop, alias):
+        host_stat[link] = (0, stat.S_IFLNK | mode)
+    expected = [executable, str(alias), tool]
+    if env:
+        expected.extend((str(launcher), multicall))
+    expected.extend((str(selected), str(hop), str(true), multicall))
+    assert host_tools.executable_paths(
+        executable, str(directory), uid=1000, write_roots=()
+    ) == tuple(dict.fromkeys(expected))
+    assert host_tools.executable_paths(
+        str(true), str(directory), uid=1000, write_roots=()
+    ) == (str(true), multicall)
+
+
+@pytest.mark.parametrize("component", ["link", "directory", "file"])
+@pytest.mark.parametrize("owner", [0, 1000, 2000])
+@pytest.mark.parametrize("writable", [0, 0o020, 0o002])
+def test_chain_component_trust(
+    tmp_path: Path,
+    host_stat: dict[Path, tuple[int, int]],
+    component: str,
+    owner: int,
+    writable: int,
+) -> None:
+    directory = tmp_path / "install"
+    directory.mkdir()
+    target = script(directory / "binary", "binary")
+    alias = tmp_path / "tool"
+    alias.symlink_to(target)
+    path, kind = {
+        "link": (alias, stat.S_IFLNK),
+        "directory": (directory, stat.S_IFDIR),
+        "file": (Path(target), stat.S_IFREG),
+    }[component]
+    host_stat[path] = (owner, kind | 0o755 | writable)
+    if owner == 2000 or writable:
+        with pytest.raises(Invalid) as caught:
+            host_tools.executable_paths(
+                str(alias), str(tmp_path), uid=1000, write_roots=()
+            )
+        assert str(caught.value) == f"untrusted host executable component: {path}"
+    else:
+        assert host_tools.executable_paths(
+            str(alias), str(tmp_path), uid=1000, write_roots=()
+        ) == (str(alias), target)
+
+
+@pytest.mark.parametrize("component", ["link", "directory", "file"])
+def test_account_component_inside_write_root_is_refused(
+    tmp_path: Path, host_stat: dict[Path, tuple[int, int]], component: str
+) -> None:
+    directory = tmp_path / "install"
+    directory.mkdir()
+    binary = directory / "binary"
+    script(binary, "binary")
+    alias = tmp_path / "tool"
+    alias.symlink_to(binary)
+    path = {"link": alias, "directory": directory, "file": binary}[component]
+    host_stat[path] = (1000, stat.S_IFLNK | 0o755 if path == alias else 0o755)
+    root = binary if component == "link" else path
+    with pytest.raises(Invalid) as caught:
+        host_tools.executable_paths(
+            str(alias), str(tmp_path), uid=1000, write_roots=(str(root),)
+        )
+    # The outside link is refused first because its resolved target is writable.
+    assert str(caught.value) == f"untrusted host executable component: {alias}"
+
+
+def test_link_target_write_root_is_resolved(
+    tmp_path: Path,
+) -> None:
+    writable = tmp_path / "writable"
+    writable.mkdir()
+    script(writable / "binary", "binary")
+    root = tmp_path / "root-alias"
+    root.symlink_to(writable, target_is_directory=True)
+    alias = tmp_path / "outside"
+    alias.symlink_to("writable/binary")
+    with pytest.raises(Invalid) as caught:
+        host_tools.executable_paths(
+            str(alias), str(tmp_path), uid=1000, write_roots=(str(root),)
+        )
+    assert str(caught.value) == f"untrusted host executable component: {alias}"
+
+
+def test_target_parent_step_does_not_hide_untrusted_directory(
+    tmp_path: Path, host_stat: dict[Path, tuple[int, int]]
+) -> None:
+    directory = tmp_path / "untrusted"
+    directory.mkdir()
+    target = script(tmp_path / "binary", "binary")
+    alias = tmp_path / "tool"
+    alias.symlink_to("untrusted/../binary")
+    host_stat[directory] = (2000, stat.S_IFDIR | 0o755)
+    with pytest.raises(Invalid) as caught:
+        host_tools.executable_paths(str(alias), str(tmp_path), uid=1000, write_roots=())
+    assert str(caught.value) == f"untrusted host executable component: {directory}"
+    assert Path(target).exists()
+
+
+@pytest.mark.parametrize("component", ["directory", "file"])
+def test_account_component_in_write_root_without_alias(
+    tmp_path: Path, host_stat: dict[Path, tuple[int, int]], component: str
+) -> None:
+    directory = tmp_path / "install"
+    directory.mkdir()
+    executable = script(directory / "tool", "binary")
+    path = directory if component == "directory" else Path(executable)
+    host_stat[path] = (1000, 0o755)
+    with pytest.raises(Invalid) as caught:
+        host_tools.executable_paths(
+            executable, str(tmp_path), uid=1000, write_roots=(str(path),)
+        )
+    assert str(caught.value) == f"untrusted host executable component: {path}"
+
+
+def test_preserved_lookup_makes_relative_search_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script(tmp_path / "target", "binary")
+    (tmp_path / "tool").symlink_to("target")
+    monkeypatch.chdir(tmp_path)
+    assert host_tools.resolve("tool", ".", follow_symlinks=False) == str(
+        tmp_path / "tool"
+    )
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o775, 0o757])
+def test_root_component_is_checked(
+    tmp_path: Path, host_stat: dict[Path, tuple[int, int]], mode: int
+) -> None:
+    executable = script(tmp_path / "binary", "binary")
+    host_stat[Path("/")] = (2000 if mode == 0o755 else 0, stat.S_IFDIR | mode)
+    with pytest.raises(Invalid, match=r"^untrusted host executable component: /$"):
+        host_tools.executable_paths(executable, str(tmp_path), uid=1000, write_roots=())
+
+
+def test_root_owned_linux_symlink_with_fixed_mode_is_accepted(
+    tmp_path: Path,
+    host_stat: dict[Path, tuple[int, int]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    target = script(tmp_path / "multicall", "binary")
+    alias = tmp_path / "true"
+    alias.symlink_to("multicall")
+    # Ordinary Linux links always report this mode, which cannot be changed.
+    host_stat[alias] = (0, stat.S_IFLNK | 0o777)
+    assert host_tools.executable_paths(
+        str(alias), str(tmp_path), uid=1000, write_roots=()
+    ) == (str(alias), target)
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+@pytest.mark.parametrize("kind", [stat.S_IFLNK, stat.S_IFDIR, stat.S_IFREG])
+@pytest.mark.parametrize("mode", [0o755, 0o775, 0o757, 0o777])
+def test_component_write_permissions_follow_kernel_semantics(
+    monkeypatch: pytest.MonkeyPatch, platform: str, kind: int, mode: int
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    expected = mode != 0o755 and not (
+        platform == "linux" and kind == stat.S_IFLNK and mode == 0o777
+    )
+    assert host_tools.writable_component(kind | mode) is expected
+
+
+def test_env_alias_keeps_every_hop_and_checks_its_selected_target(
+    tmp_path: Path,
+) -> None:
+    target = script(tmp_path / "multicall", "binary")
+    env = tmp_path / "env"
+    env.symlink_to("multicall")
+    launcher = tmp_path / "launcher"
+    launcher.symlink_to("env")
+    selected = tmp_path / "selected"
+    selected.symlink_to("multicall")
+    executable = script(tmp_path / "tool", f"#!{launcher} selected\n")
+    assert host_tools.executable_paths(
+        executable, str(tmp_path), uid=1000, write_roots=()
+    ) == (executable, str(launcher), str(env), target, str(selected))
+
+
+@pytest.mark.parametrize("env", [False, True])
+def test_account_owned_interpreters_outside_write_roots_are_accepted(
+    tmp_path: Path, host_stat: dict[Path, tuple[int, int]], env: bool
+) -> None:
+    selected = script(tmp_path / "selected", "binary")
+    launcher = script(tmp_path / "env", "binary")
+    for path in (selected, launcher):
+        host_stat[Path(path)] = (1234, stat.S_IFREG | 0o755)
+    header = f"{launcher} selected" if env else selected
+    executable = script(tmp_path / "tool", f"#!{header}\n")
+    assert host_tools.executable_paths(
+        executable, str(tmp_path), uid=1234, write_roots=(str(tmp_path / "writable"),)
+    ) == ((executable, launcher, selected) if env else (executable, selected))

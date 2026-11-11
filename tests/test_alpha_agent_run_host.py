@@ -19,7 +19,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from agent_host_example import constant, host_settings, repository, run_request
+from agent_host_example import (
+    constant,
+    host_settings,
+    repository,
+    run_request,
+    trusted_host_stat,
+)
 from test_alpha_agent_codex_install import release
 from test_alpha_agent_credentials import VALUES
 from test_alpha_agent_settings import EXAMPLE
@@ -54,8 +60,30 @@ if TYPE_CHECKING:
     from tbhbdev.alpha.agent.model import Policy, RunRequest, Settings
 
 
+@pytest.fixture(autouse=True, params=["regular", "symlinked"])
+def fake_host_bin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> Path:
+    directory = tmp_path / "host-bin"
+    directory.mkdir()
+    binary = directory / "multicall"
+    binary.write_bytes(b"binary")
+    binary.chmod(0o755)
+    for name in ("true", "env"):
+        path = directory / name
+        if request.param == "symlinked":
+            path.symlink_to(binary.name)
+        else:
+            path.write_bytes(b"binary")
+            path.chmod(0o755)
+    trusted_host_stat(monkeypatch)
+    return directory
+
+
 @pytest.fixture(autouse=True)
-def fake_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def fake_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_host_bin: Path
+) -> None:
     def read(reference: str) -> str:
         return VALUES[reference]
 
@@ -69,21 +97,30 @@ def fake_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(secrets, "read", read)
     monkeypatch.setattr(credentials, "installation_token", installation)
+
     real_resolve = host_tools.resolve
 
-    def resolve(name: str, path: str | None = None) -> str:
-        return (
-            "/usr/bin/true"
-            if name in ("codex", "claude", "agy", "agy-agent", "prek")
-            else real_resolve(name, path)
-        )
+    def resolve(
+        name: str, path: str | None = None, *, follow_symlinks: bool = True
+    ) -> str:
+        if follow_symlinks and name not in (
+            "codex",
+            "claude",
+            "agy",
+            "agy-agent",
+            "prek",
+        ):
+            return real_resolve(name, path)
+        if Path(name).is_absolute():
+            return str(Path(name).resolve() if follow_symlinks else Path(name))
+        return str(fake_host_bin / ("env" if name == "env" else "true"))
 
     monkeypatch.setattr(host_tools, "resolve", resolve)
     monkeypatch.setattr(host_tools, "codex_proxy_supported", constant(value=True))
     original_prepare = codex_install.prepare
 
     def prepare(executable: str, home: Path) -> tuple[str, tuple[str, ...]]:
-        if executable == "/usr/bin/true":
+        if executable == str(fake_host_bin / "true"):
             return executable, ()
         return original_prepare(executable, home)
 
@@ -592,7 +629,15 @@ def tmux_environment_probe(root: Path, harness: Harness) -> None:
     )
     if harness is Harness.CLAUDE:
         env[credentials.CLAUDE_TOKEN_ENV] = "example-claude"
-    command = ("/usr/bin/env",)
+    env["PYTHONCOERCECLOCALE"] = "0"
+    command = (
+        sys.executable,
+        "-c",
+        (
+            "import os; os.environ.pop('__CF_USER_TEXT_ENCODING', None); "
+            'print("\\n".join(k + "=" + v for k, v in os.environ.items()))'
+        ),
+    )
     child = process_group.launch(
         command,
         env=env,
@@ -602,7 +647,9 @@ def tmux_environment_probe(root: Path, harness: Harness) -> None:
     )
     output, error = child.communicate(timeout=5)
     assert child.returncode == 0, error
-    assert dict(line.split("=", 1) for line in output.splitlines()) == env
+    actual = dict(line.split("=", 1) for line in output.splitlines())
+    assert actual.keys() == env.keys(), actual.keys() - env.keys()
+    assert actual == env
     assert os.environ["EXAMPLE_PARENT_MARKER"] == "parent-marker"
     assert os.environ["EXAMPLE_TMUX_MARKER"] == "server-marker"
     (root / "result").write_text("isolated")
@@ -777,7 +824,9 @@ def test_hangup_stops_harness_group_writes_auth_and_rc(
 import dataclasses, os, runpy, signal, subprocess, sys
 from pathlib import Path
 from tbhbdev.alpha.agent import host_tools, process_group, run_host, runfiles
-host_tools.resolve = lambda *args: "/usr/bin/true"
+binary = str(Path(sys.argv[2]) / "host-bin" / "true")
+host_tools.resolve = lambda *args, **kwargs: binary
+host_tools.executable_paths = lambda executable, *args, **kwargs: (executable,)
 host_tools.codex_proxy_supported = lambda *args: True
 run_host.codex_install.prepare = lambda executable, home: (executable, ())
 
@@ -1075,7 +1124,7 @@ def check_launch_contract(
     original: tuple[str, ...],
 ) -> None:
     harness, kind = run.request.harness, run.request.kind
-    original = ("/usr/bin/true", *original[1:])
+    original = (str(run.home.parent / "host-bin" / "true"), *original[1:])
     env = prepared.delivery.env
     assert not run.files.path("launched").exists()
     assert kwargs["cwd"] == prepared.paths.worktree
@@ -1579,7 +1628,7 @@ def test_preflight_version_and_named_exceptions(
     checks: list[tuple[str, Path]] = []
 
     def supported(executable: str, directory: Path) -> bool:
-        assert executable == "/usr/bin/true"
+        assert executable == str(tmp_path / "host-bin" / "true")
         assert directory == run.tmpdir
         checks.append((executable, directory))
         return False
@@ -1608,7 +1657,7 @@ def test_preflight_version_and_named_exceptions(
     )
 
     assert checks == (
-        [("/usr/bin/true", run.tmpdir)]
+        [(str(tmp_path / "host-bin" / "true"), run.tmpdir)]
         if harness is Harness.CODEX and not opt_out
         else []
     )
@@ -1636,9 +1685,12 @@ def test_mac_host_commands_are_resolved_before_launch(
     run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=Os.MACOS))
     calls: list[str] = []
 
-    def resolve(name: str, _path: str | None = None) -> str:
+    def resolve(
+        name: str, _path: str | None = None, *, follow_symlinks: bool = True
+    ) -> str:
+        assert follow_symlinks is False
         calls.append(name)
-        return "/usr/bin/true"
+        return str(tmp_path / "host-bin" / "true")
 
     monkeypatch.setattr(host_tools, "resolve", resolve)
     run_host.checked_policy(run, preparation(run).paths)
@@ -1673,7 +1725,7 @@ def test_host_paths_refuse_before_any_host_execution(
         root = str(run.tmpdir)
         planted = run.tmpdir / "planted"
         planted.write_text(
-            "#!/bin/sh\n"
+            "#!" + str(tmp_path / "host-bin" / "true") + "\n"
             if source == "harness"
             else "#!" + str(run.tmpdir / "interpreter") + "\n"
         )
@@ -1684,8 +1736,14 @@ def test_host_paths_refuse_before_any_host_execution(
             planted.write_text("#!" + str(run.tmpdir / "interpreter") + "\n")
         original = host_tools.resolve
 
-        def selected(name: str, path: str | None = None) -> str:
-            return str(planted) if name == "claude" else original(name, path)
+        def selected(
+            name: str, path: str | None = None, *, follow_symlinks: bool = True
+        ) -> str:
+            return (
+                str(planted)
+                if name == "claude"
+                else original(name, path, follow_symlinks=follow_symlinks)
+            )
 
         monkeypatch.setattr(host_tools, "resolve", selected)
     if source in ("run directory", "symlink write root"):
@@ -1696,7 +1754,13 @@ def test_host_paths_refuse_before_any_host_execution(
                 sandbox=dataclasses.replace(run.settings.sandbox, write_roots=(root,)),
             ),
         )
-    with pytest.raises(Invalid, match=r"protected host path.*overlaps write root"):
+    with pytest.raises(
+        Invalid,
+        match=(
+            r"protected host path.*overlaps write root"
+            r"|untrusted host executable component"
+        ),
+    ):
         run_host.checked_policy(run, paths)
 
 
@@ -1863,11 +1927,33 @@ def test_checked_policy_supplies_all_protected_paths(
     lookups: list[tuple[str, str | None]] = []
     headers: list[tuple[str, str]] = []
 
-    def resolve(name: str, path: str | None = None) -> str:
+    def resolve(
+        name: str, path: str | None = None, *, follow_symlinks: bool = True
+    ) -> str:
+        assert follow_symlinks is False
         lookups.append((name, path))
-        return "/usr/bin/true"
+        return str(tmp_path / "host-bin" / "true")
 
-    def executable_paths(executable: str, search: str) -> tuple[str, ...]:
+    def executable_paths(
+        executable: str, search: str, *, uid: int, write_roots: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        assert (uid, write_roots) == (
+            12345,
+            (
+                str(real / "worktree"),
+                str(real / "temp"),
+                str(real / "audit"),
+                "/dev/fd",
+                *(
+                    str((run.home / p).resolve())
+                    for p in run.settings.sandbox.write_roots
+                ),
+                *(
+                    str((run.home / p).resolve())
+                    for p in run.settings.sandbox.agy.build_write
+                ),
+            ),
+        )
         headers.append((executable, search))
         return (executable,)
 
@@ -1926,7 +2012,9 @@ def test_checked_policy_supplies_all_protected_paths(
     assert protections == [
         (*expected, *run_host.full_denies(run, expected_paths)),
         expected,
-        ("/usr/bin/true",) * (len(names) + 1) + ("/usr/bin",) * (len(names) + 1),
+        (str(tmp_path / "host-bin" / "true"),)
+        * (len(names) + 1 + (harness is Harness.CODEX))
+        + (str(tmp_path / "host-bin"),) * (len(names) + 1 + (harness is Harness.CODEX)),
     ]
     assert supplied == [expected_paths] * 3
     for index in (0, 2):
@@ -1945,10 +2033,18 @@ def test_checked_policy_supplies_all_protected_paths(
         *((name, ":".join(directories)) for name in names),
     ]
     assert headers == [
-        ("/usr/bin/true", value.env["PATH"]),
-        *(("/usr/bin/true", ":".join(directories)) for _name in names),
+        *(
+            [(str(tmp_path / "host-bin" / "true"), ":".join(directories))]
+            if harness is Harness.CODEX
+            else []
+        ),
+        (str(tmp_path / "host-bin" / "true"), value.env["PATH"]),
+        *(
+            (str(tmp_path / "host-bin" / "true"), ":".join(directories))
+            for _name in names
+        ),
     ]
-    assert executable == "/usr/bin/true"
+    assert executable == str(tmp_path / "host-bin" / "true")
 
 
 def assert_claude_marker_write_denies(
@@ -2737,7 +2833,9 @@ def test_checked_policy_codex_table_has_unique_keys(
     run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=os_name))
     mirror = run_host.worktree.mirror_path(run.home, run.request.repo)
     mirror.mkdir(parents=True)
-    monkeypatch.setattr(host_tools, "resolve", constant("/usr/bin/true"))
+    monkeypatch.setattr(
+        host_tools, "resolve", constant(str(tmp_path / "host-bin" / "true"))
+    )
     prepared = preparation(run)
     value, executable = run_host.checked_policy(run, prepared.paths)
     run.files.write("prompt", "probe")
@@ -3106,8 +3204,14 @@ def test_resolved_executable_directory_cannot_contain_a_write_root(
     executable.write_bytes(b"binary")
     original = host_tools.resolve
 
-    def resolve(name: str, path: str | None = None) -> str:
-        return str(executable) if name == "codex" else original(name, path)
+    def resolve(
+        name: str, path: str | None = None, *, follow_symlinks: bool = True
+    ) -> str:
+        return (
+            str(executable)
+            if name == "codex"
+            else original(name, path, follow_symlinks=follow_symlinks)
+        )
 
     monkeypatch.setattr(host_tools, "resolve", resolve)
     root = directory / "cache"
@@ -3131,8 +3235,14 @@ def test_non_standalone_codex_never_starts_a_harness(
     executable.write_bytes(b"fixture")
     original = host_tools.resolve
 
-    def resolve(name: str, path: str | None = None) -> str:
-        return str(executable) if name == "codex" else original(name, path)
+    def resolve(
+        name: str, path: str | None = None, *, follow_symlinks: bool = True
+    ) -> str:
+        return (
+            str(executable)
+            if name == "codex"
+            else original(name, path, follow_symlinks=follow_symlinks)
+        )
 
     def unexpected(*_args: object, **_kwargs: object) -> None:
         pytest.fail("non-standalone Codex must refuse before launch")
@@ -3169,8 +3279,14 @@ def test_codex_release_read_grant_keeps_account_state_denied(
     alias.symlink_to(binary)
     original = host_tools.resolve
 
-    def resolve(name: str, path: str | None = None) -> str:
-        return str(binary) if name == "codex" else original(name, path)
+    def resolve(
+        name: str, path: str | None = None, *, follow_symlinks: bool = True
+    ) -> str:
+        return (
+            str(binary)
+            if name == "codex"
+            else original(name, path, follow_symlinks=follow_symlinks)
+        )
 
     monkeypatch.setattr(host_tools, "resolve", resolve)
     run = dataclasses.replace(
@@ -3272,7 +3388,7 @@ def test_system_temp_write_root_launches_with_state_codex_home(
         None,
     )
     command = run_host.harness_command(run, prepared, value, executable)
-    assert command[0] == "/usr/bin/true"
+    assert command[0] == str(tmp_path / "host-bin" / "true")
     child = Child(code=0)
 
     def launch(
@@ -3357,8 +3473,14 @@ def test_codex_copy_refuses_overlapping_write_root(
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     original = host_tools.resolve
 
-    def resolve(name: str, path: str | None = None) -> str:
-        return str(source / "bin/codex") if name == "codex" else original(name, path)
+    def resolve(
+        name: str, path: str | None = None, *, follow_symlinks: bool = True
+    ) -> str:
+        return (
+            str(source / "bin/codex")
+            if name == "codex"
+            else original(name, path, follow_symlinks=follow_symlinks)
+        )
 
     monkeypatch.setattr(host_tools, "resolve", resolve)
     copy = run.home / ".local/share/tbhbdev/codex" / source.name

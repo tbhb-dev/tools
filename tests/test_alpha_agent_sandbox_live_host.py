@@ -17,6 +17,7 @@ from typing import Never
 
 import agent_live_host_probe as host_probe
 import pytest
+from agent_host_example import trusted_host_stat
 from agent_live_evidence import codex_auth, run_default_pytest
 from agent_live_host_probe import (
     INPUT_MARKER,
@@ -108,11 +109,15 @@ def fake_host_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def installed(name: str) -> str | None:
         return str(executable) if name in {h.value for h in Harness} else which(name)
 
-    def resolved(_name: str, _path: str | None = None) -> str:
+    def resolved(
+        _name: str, _path: str | None = None, *, follow_symlinks: bool = True
+    ) -> str:
+        assert follow_symlinks is False
         return str(executable)
 
     monkeypatch.setattr(shutil, "which", installed)
     monkeypatch.setattr(host_tools, "resolve", resolved)
+    trusted_host_stat(monkeypatch)
 
     def no_auth(_source: Path, _destination: Path) -> None:
         return None
@@ -656,11 +661,15 @@ def test_host_probes_use_readable_protection_and_selected_profile(
     def installed(_name: str) -> str:
         return str(executable)
 
-    def resolved(_name: str, _path: str | None = None) -> str:
+    def resolved(
+        _name: str, _path: str | None = None, *, follow_symlinks: bool = True
+    ) -> str:
+        assert follow_symlinks is False
         return str(executable)
 
     monkeypatch.setattr(shutil, "which", installed)
     monkeypatch.setattr(host_tools, "resolve", resolved)
+    trusted_host_stat(monkeypatch)
     run, paths = live_policy(tmp_path, monkeypatch, harness, profile)
     readable, _, _, unlisted = protected_sources(run)
     value, selected = checked_live_policy(run, paths)

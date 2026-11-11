@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 from agent_example import settings
 from test_alpha_agent_request import BUILD
 
-from tbhbdev.alpha.agent import model
+from tbhbdev.alpha.agent import host_tools, model
 from tbhbdev.alpha.agent.decisions import request
 
 
@@ -119,3 +119,21 @@ def bounded_file_reads(monkeypatch: pytest.MonkeyPatch, size: int) -> None:
             yield SimpleNamespace(fileno=stream.fileno, read=read)
 
     monkeypatch.setattr(os, "fdopen", checked)
+
+
+def trusted_host_stat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[Path, tuple[int, int]]:
+    """Model host ownership and modes without changing the filesystem owner."""
+    overrides: dict[Path, tuple[int, int]] = {}
+    original = host_tools.lstat
+
+    def checked(path: Path) -> os.stat_result:
+        info = original(path)
+        uid, mode = overrides.get(path, (0, info.st_mode & ~0o022))
+        values = list(info)
+        values[0], values[4] = mode, uid
+        return os.stat_result(values)
+
+    monkeypatch.setattr(host_tools, "lstat", checked)
+    return overrides

@@ -212,6 +212,14 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         ),
         (str(clone), str(clone.resolve())),
     )
+    write_roots = (
+        resolved.worktree,
+        resolved.tmpdir,
+        resolved.audit_dir,
+        "/dev/fd",
+        *check_settings.sandbox.write_roots,
+        *check_settings.sandbox.agy.build_write,
+    )
     name = (
         "agy-agent"
         if run.request.harness is Harness.AGY and run.request.profile is Profile.BUILD
@@ -219,8 +227,12 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
     )
     executable = None
     copied: tuple[str, ...] = ()
+    source_paths: tuple[str, ...] = ()
     if run.request.harness is Harness.CODEX:
-        found = host_tools.resolve(name, ":".join(directories))
+        found = host_tools.resolve(name, ":".join(directories), follow_symlinks=False)
+        source_paths = host_tools.executable_paths(
+            found, ":".join(directories), uid=resolved.uid, write_roots=write_roots
+        )
         executable, copied = codex_install.prepare(found, run.home)
         protected = (*protected, *copied)
         policy.protect_host(check_settings, resolved, copied)
@@ -236,22 +248,30 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         denied=resolved_denies(run, resolved),
     )
     if executable is None:
-        executable = host_tools.resolve(name, value.env["PATH"])
+        executable = host_tools.resolve(name, value.env["PATH"], follow_symlinks=False)
     commands = [
-        host_tools.resolve(name, ":".join(directories))
+        host_tools.resolve(name, ":".join(directories), follow_symlinks=False)
         for name in ("git", "ssh-agent", "ssh-add", "ssh", "openssl")
     ]
     if run.host.os.value == "macos":
         commands.extend(
-            host_tools.resolve(name, ":".join(directories))
+            host_tools.resolve(name, ":".join(directories), follow_symlinks=False)
             for name in ("sysctl", "ps", "security")
         )
     executables = (
-        *host_tools.executable_paths(executable, value.env["PATH"]),
+        *source_paths,
+        *host_tools.executable_paths(
+            executable, value.env["PATH"], uid=resolved.uid, write_roots=write_roots
+        ),
         *(
             p
             for command in commands
-            for p in host_tools.executable_paths(command, ":".join(directories))
+            for p in host_tools.executable_paths(
+                command,
+                ":".join(directories),
+                uid=resolved.uid,
+                write_roots=write_roots,
+            )
         ),
     )
     policy.protect_host(
