@@ -362,6 +362,25 @@ def fake_sandbox_git_probe(
     )
 
 
+def fake_native_git_probe(
+    evidence: str,
+    observed: list[str],
+    run: run_host.Run,
+    paths: run_host.RunPaths,
+    command_text: str,
+) -> bool:
+    assert "hooks.json" in command_text
+    observed.append("native")
+    if evidence in {"executed", "no-event"}:
+        (Path(paths.worktree) / "shell-control").write_text("invoked")
+    if evidence == "parent-plant":
+        (Path(paths.worktree).parent / "git-marker").write_text("invoked")
+    if evidence == "user-hook":
+        (Path(paths.worktree).parent / "user-hook-marker").write_text("invoked")
+    assert run.request.harness is Harness.CODEX
+    return evidence == "executed"
+
+
 @pytest.mark.parametrize("temp_write", [False, True])
 @pytest.mark.parametrize(
     "case",
@@ -428,25 +447,17 @@ def test_gitdir_refusal_needs_direct_evidence_and_unplanted_control(
         (tmp_path / "git-marker").write_text("invoked")
         return ""
 
-    def native(run: run_host.Run, paths: run_host.RunPaths, command_text: str) -> bool:
-        assert "hooks.json" in command_text
-        observed.append("native")
-        if evidence in {"executed", "no-event"}:
-            (Path(paths.worktree) / "shell-control").write_text("invoked")
-        if evidence == "parent-plant":
-            (tmp_path / "git-marker").write_text("invoked")
-        if evidence == "user-hook":
-            (tmp_path / "user-hook-marker").write_text("invoked")
-        assert run.host.os is os_name
-        return evidence == "executed"
-
     monkeypatch.setattr(Path, "home", scratch_home)
     monkeypatch.setattr(shutil, "which", installed)
     monkeypatch.setattr(credentials, "auth_copy", no_auth)
     monkeypatch.setattr(module, "real_clone", local_clone)
     monkeypatch.setattr(module, "plant", local_plant)
     monkeypatch.setattr(module, "git", plain_status)
-    monkeypatch.setattr(module, "execute_native_git_probe", native)
+    monkeypatch.setattr(
+        module,
+        "execute_native_git_probe",
+        partial(fake_native_git_probe, evidence, observed),
+    )
     monkeypatch.setattr(
         module,
         "execute_sandbox_git_probe",
