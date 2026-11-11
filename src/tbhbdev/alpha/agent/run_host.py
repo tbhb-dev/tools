@@ -157,6 +157,19 @@ def resolved_denies(run: Run, paths: RunPaths) -> tuple[str, ...]:
     return candidates
 
 
+def executable_parents(executables: tuple[str, ...]) -> tuple[str, ...]:
+    """Protect parents of non-link entries, except parents resolving to root."""
+    parents: list[str] = []
+    for executable in executables:
+        path = Path(executable)
+        parent = path.parent.resolve()
+        if parent != Path("/") and str(
+            parent / path.name
+        ) not in host_tools.executable_links(path):
+            parents.append(str(path.parent))
+    return tuple(parents)
+
+
 def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
     """Check directories before even inspecting or invoking an executable."""
     directories = host_tools.search_path(run.settings, run.host.os)
@@ -279,7 +292,7 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
     policy.protect_host(
         check_settings,
         resolved,
-        (*executables, *copied, *(str(Path(p).parent) for p in executables)),
+        (*executables, *copied, *executable_parents(executables)),
     )
     if isinstance(value.detail, CodexPolicy) and value.detail.mode is CodexMode.PROFILE:
         value = dataclasses.replace(
