@@ -789,4 +789,5 @@ def test_codex_preserves_host_signing_handoff() -> None:
 
 def test_harness_output_options_belong_to_run_host() -> None:
     parameters = inspect.signature(argv.harness).parameters
-    assert {"output_file", "schema_file", "schema_text"}.isdisjoint(parameters)
+    assert "output_file" not in parameters
+    assert {"schema_file", "schema_text"} <= parameters.keys()
