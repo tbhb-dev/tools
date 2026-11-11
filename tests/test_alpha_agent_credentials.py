@@ -197,7 +197,7 @@ def test_unknown_claude_profile(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("failure", [None, "host", "sign", "request"])
+@pytest.mark.parametrize("failure", [None, "host", "request"])
 def test_installation_reuses_app_signer_without_storing_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -210,37 +210,26 @@ def test_installation_reuses_app_signer_without_storing_token(
     monkeypatch.setattr(gh_app, "default_env", lambda: env)
     calls: list[str] = []
 
-    def sign(actual: gh_app.Env, client_id: str, key: str) -> str:
+    def token(
+        actual: gh_app.Env,
+        *,
+        app_id: str,
+        pem: str,
+        repository: str,
+        permissions: dict[str, str],
+    ) -> gh_app.Minted:
         assert actual is env
-        assert client_id == "example-client"
-        assert key == pem
-        calls.append("sign")
-        if failure == "sign":
-            message = "signing failed"
-            raise gh_app.GhAppError(message)
-        return "example-jwt"
-
-    def token(actual: gh_app.Env, args: gh_app.Args, jwt: str) -> gh_app.Minted:
-        assert actual is env
-        assert dataclasses.asdict(args) == {
-            "app": "reviews",
-            "repo": "example-org/example-repo",
-            "fresh": True,
-            "dry_run": False,
-            "all_repos": False,
-            "vault": "",
-            "cooldown_until": None,
-            "cooldown_status": False,
-        }
-        assert jwt == "example-jwt"
+        assert app_id == "example-client"
+        assert pem == "example-pem"
+        assert repository == "example-org/example-repo"
+        assert permissions == {"pull_requests": "write"}
         calls.append("request")
         if failure == "request":
             message = "request failed"
             raise gh_app.GhAppError(message)
         return gh_app.Minted("example-installation", 2000)
 
-    monkeypatch.setattr(gh_app, "sign", sign)
-    monkeypatch.setattr(gh_app, "request_token", token)
+    monkeypatch.setattr(gh_app, "mint_token", token)
     repository = (
         "example.com/example-org/example-repo"
         if failure == "host"
@@ -264,13 +253,7 @@ def test_installation_reuses_app_signer_without_storing_token(
 def check_installation_calls(
     calls: list[str], fake_reader: list[str], failure: str | None, tmp_path: Path
 ) -> None:
-    assert calls == (
-        []
-        if failure == "host"
-        else ["sign"]
-        if failure == "sign"
-        else ["sign", "request"]
-    )
+    assert calls == ([] if failure == "host" else ["request"])
     assert fake_reader == (
         [] if failure == "host" else ["example/app/client", "example/app/pem"]
     )
@@ -684,16 +667,25 @@ def test_app_token_scope_ignores_planted_origin(
     )
     env = gh_app.Env(tmp_path, lambda: 1000, secrets.Store, gh_app.run_openssl)
     monkeypatch.setattr(gh_app, "default_env", lambda: env)
-    monkeypatch.setattr(gh_app, "rebuild_pem", constant("fake pem"))
-    monkeypatch.setattr(gh_app, "sign", constant("fake jwt"))
     monkeypatch.setitem(VALUES, "example/app/pem", "fake pem")
     scopes: list[str] = []
 
-    def token(_env: gh_app.Env, args: gh_app.Args, _jwt: str) -> gh_app.Minted:
-        scopes.append(args.repo)
+    def token(
+        actual: gh_app.Env,
+        *,
+        app_id: str,
+        pem: str,
+        repository: str,
+        permissions: dict[str, str],
+    ) -> gh_app.Minted:
+        assert actual is env
+        assert app_id == "example-client"
+        assert pem == "fake pem"
+        assert permissions == {"pull_requests": "write"}
+        scopes.append(repository)
         return gh_app.Minted("fake installation", 2000)
 
-    monkeypatch.setattr(gh_app, "request_token", token)
+    monkeypatch.setattr(gh_app, "mint_token", token)
     value = run_request(profile="review", commit="0" * 40)
     credentials.deliver(value, host_settings(), tmp_path)
     assert scopes == ["example-org/example-repo"]

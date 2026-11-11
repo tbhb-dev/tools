@@ -66,19 +66,13 @@ def installation_token(references: Credentials, repository: str) -> str:
         raise Invalid(message)
     client_id = read(references.reviews_app_client_id, label="reviews app")
     pem = read(references.reviews_app_pem, label="reviews app")
-    env = gh_app.default_env()
-    args = gh_app.Args(
-        app="reviews",
-        repo=f"{owner}/{name}",
-        fresh=True,
-        dry_run=False,
-        all_repos=False,
-        vault="",
-        cooldown_until=None,
-        cooldown_status=False,
-    )
-    jwt = gh_app.sign(env, client_id, gh_app.rebuild_pem(pem))
-    return gh_app.request_token(env, args, jwt).token
+    return gh_app.mint_token(
+        gh_app.default_env(),
+        app_id=client_id,
+        pem=pem,
+        repository=f"{owner}/{name}",
+        permissions={"pull_requests": "write"},
+    ).token
 
 
 def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
