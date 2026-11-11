@@ -404,13 +404,29 @@ def test_token_without_the_keychain_tool_fails(
     assert stubs.calls() == []
 
 
+@pytest.fixture
+def resolved_security(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    executable = str(tmp_path / "host-bin" / "security")
+
+    def resolve(name: str) -> str:
+        assert name == "security"
+        return executable
+
+    monkeypatch.setattr(secrets.host_tools, "resolve", resolve)
+    return executable
+
+
 @pytest.mark.parametrize("command", ["unlock-keychain", "find-generic-password"])
-def test_keychain_timeout(monkeypatch: pytest.MonkeyPatch, command: str) -> None:
+def test_keychain_timeout(
+    monkeypatch: pytest.MonkeyPatch, command: str, resolved_security: str
+) -> None:
     monkeypatch.setattr(secrets.platform, "system", lambda: "Darwin")
     monkeypatch.delenv(secrets.TEST_TOKEN_ENV, raising=False)
     commands: list[str] = []
 
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert argv[0] == resolved_security
         assert kwargs["timeout"] == secrets.KEYCHAIN_TIMEOUT == 10.0
         commands.append(argv[1])
         if argv[1] == command:
@@ -449,13 +465,15 @@ def fake_runs(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
 # names token runs without the stubs.
 
 
-def test_token_on_macos_uses_resolved_security(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_token_on_macos_uses_resolved_security(
+    monkeypatch: pytest.MonkeyPatch, resolved_security: str
+) -> None:
     monkeypatch.setattr(secrets.platform, "system", lambda: "Darwin")
     commands = fake_runs(monkeypatch)
     assert secrets.token() == "fake-token"
     assert [argv[:2] for argv in commands] == [
-        [secrets.host_tools.resolve("security"), "unlock-keychain"],
-        [secrets.host_tools.resolve("security"), "find-generic-password"],
+        [resolved_security, "unlock-keychain"],
+        [resolved_security, "find-generic-password"],
     ]
 
 
@@ -1078,11 +1096,15 @@ def test_store_defaults_to_connect_with_the_keychain_token(
 
 @pytest.mark.parametrize(("returncode", "stdout"), [(0, ""), (1, "fake-token\n")])
 def test_macos_rejects_empty_or_failed_keychain_reads(
-    monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    stdout: str,
+    resolved_security: str,
 ) -> None:
     monkeypatch.setattr(secrets.platform, "system", lambda: "Darwin")
 
     def run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        assert argv[0] == resolved_security
         return subprocess.CompletedProcess(argv, returncode, stdout, "")
 
     monkeypatch.setattr(secrets.subprocess, "run", run)
