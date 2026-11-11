@@ -266,7 +266,6 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
                 value.detail,
                 read_roots=(
                     *value.detail.read_roots,
-                    *host_tools.codex_read_roots(executable, value.env["PATH"]),
                     *copied,
                 ),
             ),

@@ -83,6 +83,7 @@ def entrypoint(release: Path) -> Path:
 
 
 def prepare(executable: str, home: Path) -> tuple[str, tuple[str, ...]]:
+    executable = str(Path(executable).resolve())
     release = next(
         (
             parent
@@ -92,7 +93,8 @@ def prepare(executable: str, home: Path) -> tuple[str, tuple[str, ...]]:
         None,
     )
     if release is None or not (release / "codex-package.json").is_file():
-        return executable, ()
+        message = f"standalone Codex install required: {executable}"
+        raise Invalid(message)
     binary = entrypoint(release)
     expected = inventory(release)
     configured = Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share")

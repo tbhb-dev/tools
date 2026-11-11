@@ -99,28 +99,6 @@ def executable_links(path: Path) -> tuple[str, ...]:
     return tuple(links)
 
 
-def codex_read_roots(executable: str, search: str) -> tuple[str, ...]:
-    binary = Path(executable)
-    aliases = (
-        path
-        for directory in search.split(":")
-        if (path := Path(directory) / "codex").resolve() == binary
-    )
-    release = next(
-        (parent for parent in binary.parents if parent.parent.name == "releases"),
-        binary.parent,
-    )
-    return tuple(
-        dict.fromkeys(
-            (
-                *[link for path in aliases for link in executable_links(path)],
-                executable,
-                str(release),
-            )
-        )
-    )
-
-
 def executable_header(current: str) -> bytes:
     fd = os.open(current, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as incoming:

@@ -124,7 +124,7 @@ def test_unsafe_entrypoint_refuses_launch(
 
 
 @pytest.mark.parametrize("manifest", [False, True])
-def test_non_standalone_launches_in_place(tmp_path: Path, manifest: bool) -> None:
+def test_non_standalone_refuses_launch(tmp_path: Path, manifest: bool) -> None:
     source = release(tmp_path)
     executable = source / "bin/codex" if not manifest else tmp_path / "codex"
     if manifest:
@@ -132,7 +132,21 @@ def test_non_standalone_launches_in_place(tmp_path: Path, manifest: bool) -> Non
         (tmp_path / "codex-package.json").write_text("{}")
     else:
         (source / "codex-package.json").rename(tmp_path / "saved.json")
-    assert codex_install.prepare(str(executable), tmp_path) == (str(executable), ())
+    with pytest.raises(Invalid) as caught:
+        codex_install.prepare(str(executable), tmp_path)
+    assert str(caught.value) == (
+        f"standalone Codex install required: {executable.resolve()}"
+    )
+
+
+def test_non_standalone_refusal_names_the_resolved_binary(tmp_path: Path) -> None:
+    executable = tmp_path / "binary"
+    executable.write_bytes(b"fixture")
+    alias = tmp_path / "codex"
+    alias.symlink_to(executable)
+    with pytest.raises(Invalid) as caught:
+        codex_install.prepare(str(alias), tmp_path)
+    assert str(caught.value) == f"standalone Codex install required: {executable}"
 
 
 @pytest.mark.parametrize("target", ["outside", "absolute", "relative"])

@@ -35,6 +35,7 @@ from agent_live_host_probe import (
     snapshot,
     terminal_status,
 )
+from test_alpha_agent_codex_install import release
 from test_alpha_agent_sandbox_live import live_only, probe_run, report
 
 from tbhbdev.alpha.agent import credentials, host_tools, run_host
@@ -98,8 +99,8 @@ def fake_host_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         return home
 
     monkeypatch.setattr(Path, "home", fake_home)
-    executable = tmp_path / "bin" / "harness"
-    executable.parent.mkdir()
+    executable = release(tmp_path / "install") / "bin/codex"
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     executable.write_bytes(b"\x7fELF")
     executable.chmod(0o700)
     which = shutil.which
@@ -580,8 +581,8 @@ def test_link_probe_records_every_label_after_a_denial(tmp_path: Path) -> None:
 def test_host_probes_use_readable_protection_and_selected_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness, profile: Profile
 ) -> None:
-    executable = tmp_path / "bin" / harness.value
-    executable.parent.mkdir()
+    executable = release(tmp_path / "install") / "bin/codex"
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     executable.write_bytes(b"\x7fELF")
     executable.chmod(0o700)
 
@@ -596,7 +597,11 @@ def test_host_probes_use_readable_protection_and_selected_profile(
     run, paths = live_policy(tmp_path, monkeypatch, harness, profile)
     readable, _, _, unlisted = protected_sources(run)
     value, selected = checked_live_policy(run, paths)
-    assert selected == str(executable)
+    assert selected == (
+        str(tmp_path / "data/tbhbdev/codex/example-version/bin/codex")
+        if harness is Harness.CODEX
+        else str(executable)
+    )
     assert str(readable) in run_host.protected_home(run)
     assert all(not readable.is_relative_to(deny) for deny in value.deny)
     entries = (*run_host.protected_home(run), *value.deny)

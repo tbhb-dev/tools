@@ -27,6 +27,7 @@ from test_alpha_agent_settings import EXAMPLE
 from tbhbdev import secrets
 from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import (
+    codex_install,
     credentials,
     host_tools,
     process_group,
@@ -79,6 +80,14 @@ def fake_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(host_tools, "resolve", resolve)
     monkeypatch.setattr(host_tools, "codex_proxy_supported", constant(value=True))
+    original_prepare = codex_install.prepare
+
+    def prepare(executable: str, home: Path) -> tuple[str, tuple[str, ...]]:
+        if executable == "/usr/bin/true":
+            return executable, ()
+        return original_prepare(executable, home)
+
+    monkeypatch.setattr(codex_install, "prepare", prepare)
 
 
 @pytest.fixture(autouse=True)
@@ -770,6 +779,7 @@ from pathlib import Path
 from tbhbdev.alpha.agent import host_tools, process_group, run_host, runfiles
 host_tools.resolve = lambda *args: "/usr/bin/true"
 host_tools.codex_proxy_supported = lambda *args: True
+run_host.codex_install.prepare = lambda executable, home: (executable, ())
 
 sys.path.insert(0, str(Path(sys.argv[1]).parent))
 helpers = runpy.run_path(sys.argv[1])
@@ -1651,7 +1661,7 @@ def test_mac_host_commands_are_resolved_before_launch(
 def test_host_paths_refuse_before_any_host_execution(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
 ) -> None:
-    run = make_run(tmp_path)
+    run = make_run(tmp_path, harness="claude", claude_profile="primary", reason="test")
     paths = preparation(run).paths
     if source == "run directory":
         root = str(run.files.root)
@@ -1675,7 +1685,7 @@ def test_host_paths_refuse_before_any_host_execution(
         original = host_tools.resolve
 
         def selected(name: str, path: str | None = None) -> str:
-            return str(planted) if name == "codex" else original(name, path)
+            return str(planted) if name == "claude" else original(name, path)
 
         monkeypatch.setattr(host_tools, "resolve", selected)
     if source in ("run directory", "symlink write root"):
@@ -3110,9 +3120,31 @@ def test_resolved_executable_directory_cannot_contain_a_write_root(
     )
     with pytest.raises(Invalid) as caught:
         run_host.checked_policy(run, run_host.planned_paths(run))
-    assert str(caught.value) == (
-        f"protected host path {directory} overlaps write root {root}; "
-        "narrow that write root"
+    assert str(caught.value) == f"standalone Codex install required: {executable}"
+
+
+def test_non_standalone_codex_never_starts_a_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    executable = run.home / "codex"
+    executable.write_bytes(b"fixture")
+    original = host_tools.resolve
+
+    def resolve(name: str, path: str | None = None) -> str:
+        return str(executable) if name == "codex" else original(name, path)
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("non-standalone Codex must refuse before launch")
+
+    monkeypatch.setattr(host_tools, "resolve", resolve)
+    monkeypatch.setattr(process_group, "launch_owned", unexpected)
+    monkeypatch.setattr(process_group, "prepare", unexpected)
+    assert run_host.execute(run, "fixture") == 1
+    assert not run.files.path("launched").exists()
+    assert (
+        f"standalone Codex install required: {executable}"
+        in run.files.path("log").read_text()
     )
 
 
