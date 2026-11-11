@@ -6,6 +6,8 @@ version = "0"
 description = "Shared tools for tbhb-dev work"
 requires-python = ">=3.15"
 dependencies = [
+  # Convert Connect's signing keys from PKCS#8 to OpenSSH in memory.
+  "cryptography>=50.0.2",
   "httpx>=0.28.1",
   # tbhbdev alpha pr validates the pull request draft's YAML frontmatter
   # against a JSON schema.

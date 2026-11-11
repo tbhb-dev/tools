@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 import httpx
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives import serialization
 from onepasswordconnectsdk.client import Client
 from onepasswordconnectsdk.config import ClientConfig
 from onepasswordconnectsdk.utils import PathBuilder
@@ -394,16 +396,36 @@ class Summary:
 def parse_ref(ref: str) -> tuple[str, str, str]:
     """Split `vault/item/field` or `op://vault/item/field`.
 
+    Strip the optional `?ssh-format=openssh` query and refuse any other query.
+
     Raises:
         SecretsError: REF has another shape.
     """
-    parts = ref.removeprefix("op://").split("/")
+    path, separator, query = ref.partition("?")
+    if separator and query != "ssh-format=openssh":
+        message = f"{ref!r} has an unsupported reference query"
+        raise SecretsError(message)
+    parts = path.removeprefix("op://").split("/")
     if len(parts) != REF_PARTS or not all(parts):
         message = (
             f"{ref!r} is not a vault/item/field or op://vault/item/field reference"
         )
         raise SecretsError(message)
     return parts[0], parts[1], parts[2]
+
+
+def _openssh(value: str, label: str) -> str:
+    """Convert a Connect PEM value in memory without exposing conversion errors."""
+    try:
+        key = serialization.load_pem_private_key(value.encode(), password=None)
+        return key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.OpenSSH,
+            serialization.NoEncryption(),
+        ).decode()
+    except ValueError, TypeError, UnsupportedAlgorithm:
+        message = f"field {label!r} cannot convert to OpenSSH private key"
+        raise SecretsError(message) from None
 
 
 def _fields(raw: Json) -> list[Json]:
@@ -487,7 +509,8 @@ class Store:
             ],
             f"field {field_ref!r} in item {item_ref!r}",
         )
-        return _text(match, "value")
+        value = _text(match, "value")
+        return _openssh(value, field_ref) if "?" in ref else value
 
     def get(self, vault: str, item: str) -> Item:
         vault_id, name = self._vault(vault)

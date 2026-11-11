@@ -7,6 +7,7 @@ test home.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import gc
 import json
@@ -16,13 +17,19 @@ import stat
 import subprocess
 import traceback
 from typing import TYPE_CHECKING, override
+from unittest.mock import Mock
 lazy from pathlib import Path
 
 import httpx
 import pytest
+from agent_host_example import host_settings, run_request
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519, rsa, x25519
 from onepasswordconnectsdk.client import Client
 
 from tbhbdev import secrets
+from tbhbdev.alpha.agent import credentials
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1194,3 +1201,145 @@ def test_linux_token_size_limit(linux_home: Path, size: int) -> None:
         )
     else:
         assert secrets.token() == "x" * size
+
+
+@pytest.mark.parametrize("prefix", ["", "op://"])
+def test_parse_ref_strips_openssh_query(prefix: str) -> None:
+    assert secrets.parse_ref(f"{prefix}vault/item/private key?ssh-format=openssh") == (
+        "vault",
+        "item",
+        "private key",
+    )
+
+
+@pytest.mark.parametrize(
+    "query", ["ssh-format=pkcs8", "attribute=otp", "ssh-format=openssh&x=1", ""]
+)
+def test_reference_queries_are_exact(fake: FakeConnect, query: str) -> None:
+    reference = f"ops/db/password?{query}"
+    with pytest.raises(secrets.SecretsError) as caught:
+        secrets.parse_ref(reference)
+    assert str(caught.value) == f"{reference!r} has an unsupported reference query"
+    with pytest.raises(secrets.SecretsError) as caught:
+        store(fake).read(reference)
+    assert str(caught.value) == f"{reference!r} has an unsupported reference query"
+
+
+@pytest.fixture
+def signing_pem(fake: FakeConnect) -> bytes:
+    key = ed25519.Ed25519PrivateKey.generate()
+    pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    fake.item("v1", "signing", **{"private key": pem.decode()})
+    return pem
+
+
+@pytest.mark.parametrize("kind", ["ed25519", "rsa"])
+@pytest.mark.parametrize("prefix", ["", "op://"])
+def test_read_converts_signing_keys(fake: FakeConnect, kind: str, prefix: str) -> None:
+    key = (
+        ed25519.Ed25519PrivateKey.generate()
+        if kind == "ed25519"
+        else rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    )
+    pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+    fake.item("v1", "signing", **{"private key": pem})
+    reader = store(fake)
+    assert reader.read("ops/signing/private key") == pem
+    converted = reader.read(f"{prefix}ops/i2/private key?ssh-format=openssh")
+    assert converted.startswith("-----BEGIN " + "OPENSSH PRIVATE KEY-----\n")
+    loaded = serialization.load_ssh_private_key(converted.encode(), password=None)
+    assert loaded.public_key().public_bytes(
+        serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH
+    ) == key.public_key().public_bytes(
+        serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH
+    )
+
+
+@pytest.mark.parametrize("kind", ["encrypted", "malformed", "unsupported"])
+def test_read_refuses_invalid_signing_keys(
+    fake: FakeConnect, signing_pem: bytes, kind: str
+) -> None:
+    if kind == "malformed":
+        pem = signing_pem.replace(b"PRIVATE KEY", b"BROKEN KEY")
+    else:
+        key = (
+            ed25519.Ed25519PrivateKey.generate()
+            if kind == "encrypted"
+            else x25519.X25519PrivateKey.generate()
+        )
+        encryption = (
+            serialization.BestAvailableEncryption(b"example-passphrase")
+            if kind == "encrypted"
+            else serialization.NoEncryption()
+        )
+        pem = key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, encryption
+        )
+    fake.item("v1", "refused", **{"private key": pem.decode()})
+    with pytest.raises(secrets.SecretsError) as caught:
+        store(fake).read("ops/refused/private key?ssh-format=openssh")
+    assert (
+        str(caught.value) == "field 'private key' cannot convert to OpenSSH private key"
+    )
+    assert not any(line in str(caught.value) for line in pem.decode().splitlines())
+    assert caught.value.__suppress_context__
+
+
+def test_converted_key_reaches_only_ssh_add_stdin(
+    fake: FakeConnect,
+    signing_pem: bytes,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        secrets, "connect", lambda: secrets.Connect(fake.token, [fake.url])
+    )
+    settings = host_settings()
+    refs = dataclasses.replace(
+        settings.credentials[0],
+        gh="ops/db/password",
+        docker=None,
+        signing="ops/signing/private key?ssh-format=openssh",
+    )
+    settings = dataclasses.replace(settings, credentials=(refs,))
+    delivery = credentials.deliver(run_request(), settings, tmp_path)
+    assert delivery.signing is not None
+    assert delivery.signing.startswith("-----BEGIN " + "OPENSSH PRIVATE KEY-----\n")
+    assert delivery.signing not in repr(delivery)
+    agent = Mock(spec=subprocess.Popen)
+    monkeypatch.setattr(subprocess, "Popen", Mock(return_value=agent))
+    monkeypatch.setattr(credentials, "agent_ready", Mock())
+    add = Mock()
+    monkeypatch.setattr(subprocess, "run", add)
+    assert credentials.signing_agent(delivery.signing, tmp_path, 10) is agent
+    assert add.call_args.args == ([credentials.host_tools.resolve("ssh-add"), "-"],)
+    assert add.call_args.kwargs["input"] == delivery.signing
+    for path in tmp_path.rglob("*"):
+        if path.is_file():
+            content = path.read_bytes()
+            assert delivery.signing.encode() not in content
+            assert signing_pem not in content
+
+
+def test_read_hides_unsupported_algorithm_errors(
+    fake: FakeConnect, signing_pem: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(_data: bytes, password: bytes | None) -> None:
+        assert password is None
+        raise UnsupportedAlgorithm(signing_pem.decode())
+
+    monkeypatch.setattr(serialization, "load_pem_private_key", fail)
+    with pytest.raises(secrets.SecretsError) as caught:
+        store(fake).read("ops/signing/private key?ssh-format=openssh")
+    assert (
+        str(caught.value) == "field 'private key' cannot convert to OpenSSH private key"
+    )
+    assert caught.value.__suppress_context__
