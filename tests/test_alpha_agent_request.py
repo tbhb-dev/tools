@@ -509,3 +509,20 @@ def test_request_host_taint_requires_boolean(bad: object) -> None:
         refused(BUILD | {"tainted_host": bad})
         == "request tainted_host must be true or false"
     )
+
+
+def test_request_v2_taint_contract() -> None:
+    data = {**BUILD, "v": 2, "tainted_host": True}
+    parsed = request.parse(data, host_allows_unsandboxed=False)
+    assert request.to_dict(parsed) == data
+    assert parsed.tainted_host is True
+    assert refused({**data, "v": 1}).startswith("request v 1 is not a supported")
+    del data["tainted_host"]
+    assert refused(data) == "request is missing fields: tainted_host"
+
+
+@pytest.mark.parametrize("bad", ["yes", 1, 0, None, "true"])
+def test_tainted_host_must_be_a_boolean(bad: object) -> None:
+    assert refused(made(BUILD, tainted_host=bad)) == (
+        "request tainted_host must be true or false"
+    )

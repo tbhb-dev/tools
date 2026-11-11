@@ -47,7 +47,9 @@ dotrepo
 drwx
 dunder
 elts
+ENOENT
 enoexec
+esac
 execdir
 execpath
 executescript
@@ -59,6 +61,7 @@ fakeoperator
 fchmod
 flatmap
 frontmatter
+fsmonitor
 fstat
 genpkey
 genrule
@@ -118,6 +121,7 @@ noprofile
 norc
 noremote
 nosandbox
+NOSYSTEM
 nspname
 O_CLOEXEC
 O_NONBLOCK
@@ -126,6 +130,7 @@ onepasswordconnectsdk
 opam
 oxipng
 passwordless
+pgid
 PGDATABASE
 PGHOST
 PGPORT
@@ -140,6 +145,7 @@ popd
 posttooluse
 pousr
 ppid
+pread
 prek
 pretooluse
 procargs
@@ -188,6 +194,7 @@ tbhb
 tbhbdev
 testdata
 testpaths
+textconv
 tfstate
 timestamptz
 tmpprefix
@@ -204,13 +211,17 @@ uncomparables
 unkeyed
 unmatch
 unmutated
+unpushed
 unsandboxed
 unsets
 unstampable
 unvalidated
+uploadpack
 usefixtures
 userconfig
 usermod
+waitpid
+wnohang
 worktrees
 writeattr
 writeextattr

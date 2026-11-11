@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from typing import TYPE_CHECKING
 
 import pytest
@@ -171,14 +172,17 @@ def test_loading_reads_only_the_config(config_file: Path, tmp_path: Path) -> Non
 def test_agent_is_registered_in_usage_and_dispatch() -> None:
     assert alpha.COMMANDS["agent"] is agent.main
     assert (
-        "\n  agent        validate agent configuration (runs not yet available)\n"
+        "\n  agent        exec | wait | status | kill | clean | keep: headless runs\n"
         in alpha.USAGE
     )
 
 
 @pytest.mark.parametrize(
     "run",
-    [lambda: agent.main([], "example agent"), lambda: cli.main(["alpha", "agent"])],
+    [
+        lambda: agent.main(["status", "sample"], "example agent"),
+        lambda: cli.main(["alpha", "agent", "status", "sample"]),
+    ],
 )
 def test_command_refuses_missing_configuration(
     config_file: Path, capsys: pytest.CaptureFixture[str], run: Callable[[], int]
@@ -194,32 +198,47 @@ def test_command_reports_a_config_error(
     config_file: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config_file.write_text('[agent]\nsockets_dir = "/x"\nzeta = 1\n')
-    assert agent.main([], "example agent") == 1
+    assert agent.main(["status", "sample"], "example agent") == 1
     assert capsys.readouterr() == (
         "",
         f"example agent: {config_file}: [agent] zeta not recognized\n",
     )
 
 
-def test_command_validates_and_refuses_to_run(
-    config_file: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    ("argv", "rc"), [([], 2), (["--help"], 0), (["exec", "x"], 2), (["-x"], 2)]
+)
+def test_command_options(
+    argv: list[str], capsys: pytest.CaptureFixture[str], rc: int
 ) -> None:
-    config_file.write_text(EXAMPLE)
-    assert agent.main([], "example agent") == 1
-    assert capsys.readouterr() == (
-        "",
-        "example agent: configuration valid; runs are not implemented\n",
+    assert agent.main(argv, "example agent") == rc
+    out = capsys.readouterr()
+    assert "usage: example agent" in out.out + out.err
+    assert "run-host" not in out.out
+
+
+def test_duration() -> None:
+    assert agent.duration("1h") == 3600
+
+    with pytest.raises(argparse.ArgumentTypeError) as caught:
+        agent.duration("bad")
+    assert (
+        str(caught.value)
+        == "must be bare seconds or a number ending in s, m or h, up to 7 days"
     )
 
 
-@pytest.mark.parametrize("argv", [["--help"], ["exec", "x"], ["-x"]])
-def test_command_parses_no_options(
-    argv: list[str], config_file: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    config_file.write_text(EXAMPLE)
-    assert agent.main(argv, "example agent") == 1
-    assert capsys.readouterr().err == (
-        "example agent: configuration valid; runs are not implemented\n"
+def test_command_help_contract() -> None:
+    assert agent.parser("example agent").format_help() == (
+        "usage: example agent [-h]\n"
+        "                     "
+        "{exec,wait,status,kill,clean,keep,log,diff,clear-taint} ...\n\n"
+        "positional arguments:\n"
+        "  {exec,wait,status,kill,clean,keep,log,diff,clear-taint}\n"
+        "    exec                launch a headless run\n"
+        "    clear-taint         clear local host taint with a reason\n\n"
+        "options:\n"
+        "  -h, --help            show this help message and exit\n"
     )
 
 

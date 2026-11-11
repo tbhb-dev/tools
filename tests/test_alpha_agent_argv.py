@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import itertools
 import json
+import shlex
 import tomllib
 
 import pytest
@@ -19,11 +21,18 @@ from agent_example import (
     TOKEN_DIR,
     paths,
     settings,
+    trusted_executables,
 )
 
 from tbhbdev.alpha.agent import model
 from tbhbdev.alpha.agent.decisions import argv, policy
 from tbhbdev.alpha.agent.model import Harness, Invalid, Os, Profile, RunKind
+
+
+@pytest.fixture(autouse=True)
+def fixed_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    trusted_executables(monkeypatch)
+
 
 HOME = "/example/home/agent"
 TMP = f"{HOME}/.local/state/example-runs/run1.tmp"
@@ -528,35 +537,34 @@ def test_ssh() -> None:
         keepalive=30,
     )
     assert result == (
-        "ssh",
+        "/usr/bin/ssh",
         "-o",
         "BatchMode=yes",
         "-o",
         "ConnectTimeout=15",
         "-o",
         "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-l",
+        "agent",
         "example-linux",
-        "bash -lc 'example-tool run '\"'\"'a b'\"'\"''",
+        "/bin/bash -c 'example-tool run '\"'\"'a b'\"'\"''",
     )
 
 
 def test_ssh_uses_the_hosts_shell() -> None:
     result = argv.ssh(MACOS, ("true",), connect_timeout=1, keepalive=2)
-    assert result[-2:] == ("example-macos", "zsh -lc true")
+    assert result[-2:] == ("example-macos", "/bin/zsh -c true")
 
 
 def test_tmux() -> None:
     result = argv.tmux("/example/sockets", "run-1", ("example-tool", "go"))
-    assert result == (
-        "tmux",
-        "-S",
-        "/example/sockets/agents",
-        "new-session",
-        "-d",
-        "-s",
-        "ag-run-1",
-        "example-tool",
-        "go",
+    assert result == tuple(
+        shlex.split(
+            "/usr/bin/tmux -S /example/sockets/agents -f /dev/null "
+            "new-session -d -s ag-run-1 example-tool go"
+        )
     )
 
 
@@ -702,3 +710,84 @@ def test_codex_tool_environment_excludes_inherited_git_variables(
     assert {name for name in environment["set"] if name.startswith("GIT_")} == {
         "GIT_CONFIG_COUNT"
     }
+
+
+@pytest.mark.parametrize("account", ["agent", "ops"])
+@pytest.mark.parametrize("count", [1, 5])
+def test_ssh_account_and_keepalive_count(account: str, count: int) -> None:
+    host = dataclasses.replace(LINUX, account=account)
+    result = argv.ssh(
+        host, ("true",), connect_timeout=2, keepalive=7, keepalive_count_max=count
+    )
+    assert result == (
+        "/usr/bin/ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=2",
+        "-o",
+        "ServerAliveInterval=7",
+        "-o",
+        f"ServerAliveCountMax={count}",
+        "-l",
+        account,
+        "example-linux",
+        "/bin/bash -c true",
+    )
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+@pytest.mark.parametrize("name", ["ssh", "tmux"])
+def test_executables_resolve_only_fixed_path(
+    monkeypatch: pytest.MonkeyPatch, platform: str, name: str
+) -> None:
+    monkeypatch.setattr(argv.sys, "platform", platform)
+    expected = "/usr/bin:/bin:/usr/sbin:/sbin"
+    if platform == "darwin":
+        expected += ":/opt/homebrew/bin:/usr/local/bin"
+
+    def which(program: str, *, path: str) -> str:
+        assert program == name
+        assert path == expected
+        return "/usr/bin/" + name
+
+    monkeypatch.setattr(argv.shutil, "which", which)
+    assert argv.executable(name) == "/usr/bin/" + name
+
+    def missing(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(argv.shutil, "which", missing)
+    with pytest.raises(
+        Invalid, match=f"required executable '{name}' missing from fixed PATH"
+    ):
+        argv.executable(name)
+
+
+def test_codex_preserves_host_signing_handoff() -> None:
+    value = policy_for(Harness.CODEX, Profile.BUILD)
+    value = dataclasses.replace(
+        value, env={**value.env, "SSH_AUTH_SOCK": "/example/socket"}
+    )
+    command = argv.harness(
+        request(Harness.CODEX, RunKind.EXEC, Profile.BUILD),
+        value,
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+    )
+    base = expected(Harness.CODEX, RunKind.EXEC, Profile.BUILD)
+    index = base.index("-m")
+    assert command == (
+        *base[:index],
+        "-c",
+        'shell_environment_policy.set.SSH_AUTH_SOCK="/example/socket"',
+        *base[index:],
+    )
+    assert "-o" not in command
+    assert "--output-last-message" not in command
+
+
+def test_harness_output_options_belong_to_run_host() -> None:
+    parameters = inspect.signature(argv.harness).parameters
+    assert "output_file" not in parameters
+    assert {"schema_file", "schema_text"} <= parameters.keys()

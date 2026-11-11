@@ -1,0 +1,301 @@
+"""The coordinator keeps trust history even when a run host loses its home."""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import shutil
+import stat
+from dataclasses import asdict, replace
+from typing import TYPE_CHECKING
+
+import pytest
+
+from tbhbdev.alpha.agent import driver, taint_store
+from tbhbdev.alpha.agent.decisions import taint
+from tbhbdev.alpha.agent.model import Invalid
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+HOST = "example-linux"
+ACCOUNT = "agent"
+RECORD = taint.Taint(
+    HOST, ACCOUNT, "sample", "operator-chat-2026-11-10", "2026-11-10T12:00:00Z"
+)
+CLEARANCE = taint.Clearance(HOST, "Host rebuilt", "2026-11-10T13:00:00Z")
+
+
+@pytest.fixture
+def audit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "coordinator"))
+    return driver.directory() / "taint" / f"{HOST}.jsonl"
+
+
+def test_append_clearance_and_later_taint(audit: Path) -> None:
+    assert taint_store.load(HOST) == taint.State(HOST)
+    assert not audit.parent.exists()
+    taint_store.record_taint(RECORD)
+    assert audit.parent == driver.directory() / "taint"
+    assert stat.S_IMODE(audit.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(audit.stat().st_mode) == 0o600
+    first = audit.read_bytes()
+    assert json.loads(first) == {"kind": "taint", **asdict(RECORD)}
+    assert taint_store.load(HOST).taint == RECORD
+    taint_store.record_clearance(CLEARANCE)
+    second = audit.read_bytes()
+    assert second.startswith(first)
+    assert json.loads(second.splitlines()[1]) == {
+        "kind": "clearance",
+        **asdict(CLEARANCE),
+    }
+    assert not taint_store.load(HOST).tainted
+    later = replace(RECORD, run="later", started="2026-11-10T14:00:00Z")
+    taint_store.record_taint(later)
+    assert audit.read_bytes().startswith(second)
+    assert len(audit.read_bytes().splitlines()) == 3
+    assert taint_store.load(HOST).taint == later
+
+
+def test_run_host_home_deletion_has_no_effect(audit: Path, tmp_path: Path) -> None:
+    remote_home = tmp_path / "fake-host-home"
+    remote_home.mkdir()
+    (remote_home / "run.json").write_text("{}")
+    taint_store.record_taint(RECORD)
+    expected = audit.read_bytes()
+    shutil.rmtree(remote_home)
+    assert taint_store.load(HOST).taint == RECORD
+    assert audit.read_bytes() == expected
+
+
+def test_store_taints_whole_host(audit: Path) -> None:
+    taint_store.record_taint(RECORD)
+    assert taint_store.load("other-host").status == "unknown"
+    other = replace(RECORD, account="ops")
+    taint_store.record_clearance(CLEARANCE)
+    taint_store.record_taint(other)
+    assert taint_store.load(HOST).taint == other
+    assert len(audit.read_text().splitlines()) == 3
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "{bad}\n",
+        "\n",
+        "null\n",
+        "[]\n",
+        "1\n",
+        '"text"\n',
+        '{"kind":"taint","host":1}\n',
+        '{"kind":"taint","kind":"clearance"}\n',
+        "{}\n",
+        '{"kind":"taint"}\n',
+        json.dumps({"kind": "taint", **asdict(RECORD)}),
+        json.dumps({"kind": "taint", **asdict(RECORD), "extra": "field"}) + "\n",
+        json.dumps({"kind": "other", **asdict(CLEARANCE)}) + "\n",
+        json.dumps({"kind": "taint", **asdict(RECORD), "host": "other-host"}) + "\n",
+        json.dumps({"kind": "clearance", **asdict(CLEARANCE), "reason": ""}) + "\n",
+        json.dumps({"kind": "taint", **asdict(RECORD), "started": "bad"}) + "\n",
+    ],
+)
+def test_malformed_lines_fail_closed(audit: Path, line: str) -> None:
+    taint_store.record_taint(RECORD)
+    with audit.open("a") as stream:
+        stream.write(line)
+    loaded = taint_store.load(HOST)
+    assert loaded.tainted
+    assert loaded.problem.startswith("invalid local taint store: ")
+    assert loaded.taint is None
+
+
+def test_invalid_utf8_fails_closed(audit: Path) -> None:
+    taint_store.record_taint(RECORD)
+    with audit.open("ab") as stream:
+        stream.write(b"\xff\n")
+    assert "codec can't decode" in taint_store.load(HOST).problem
+
+
+@pytest.mark.parametrize(
+    ("line", "reason"),
+    [
+        ("{}", "incomplete taint record line"),
+        ("null\n", "taint record must be an object of strings"),
+        ('{"kind":false}\n', "taint record must be an object of strings"),
+        (
+            json.dumps({"kind": "clearance", **asdict(CLEARANCE)})[:-1]
+            + ',"reason":"different"}\n',
+            "duplicate taint record field",
+        ),
+        (
+            json.dumps({"kind": "other", **asdict(CLEARANCE)}) + "\n",
+            "taint record has wrong kind or host",
+        ),
+    ],
+)
+def test_failure_message_identifies_reason(audit: Path, line: str, reason: str) -> None:
+    taint_store.record_taint(RECORD)
+    with audit.open("a") as stream:
+        stream.write(line)
+    assert taint_store.load(HOST) == taint.State(
+        HOST, "tainted", problem=f"invalid local taint store: {reason}"
+    )
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+@pytest.mark.parametrize("mode", [0o755, 0o777, 0o640, 0o1700])
+def test_wrong_modes_fail_closed(audit: Path, level: int, mode: int) -> None:
+    taint_store.record_taint(RECORD)
+    target = (audit, audit.parent, audit.parent.parent)[level]
+    target.chmod(mode)
+    try:
+        assert "wrong type or mode" in taint_store.load(HOST).problem
+        with pytest.raises(Invalid, match="wrong type or mode"):
+            taint_store.record_clearance(CLEARANCE)
+    finally:
+        target.chmod(0o700 if level else 0o600)
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+@pytest.mark.parametrize("dangling", [False, True])
+def test_symlinks_fail_closed(audit: Path, level: int, *, dangling: bool) -> None:
+    taint_store.record_taint(RECORD)
+    target = (audit, *audit.parents)[level]
+    moved = target.with_name(target.name + "-moved")
+    target.rename(moved)
+    destination = moved.with_name("missing") if dangling else moved
+    target.symlink_to(destination, target_is_directory=level > 0)
+    assert taint_store.load(HOST).tainted
+    assert taint_store.load(HOST).problem
+    with pytest.raises(OSError, match=r"Too many levels|Not a directory"):
+        taint_store.record_clearance(CLEARANCE)
+
+
+def test_wrong_ownership_fails_closed(
+    audit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    taint_store.record_taint(RECORD)
+    uid = os.geteuid()
+    monkeypatch.setattr(taint_store.os, "geteuid", lambda: uid + 1)
+    assert taint_store.load(HOST).problem == (
+        "invalid local taint store: taint store has wrong ownership"
+    )
+    with pytest.raises(Invalid, match="wrong ownership"):
+        taint_store.record_taint(RECORD)
+    assert len(audit.read_bytes().splitlines()) == 1
+
+
+def test_file_type_must_be_regular(audit: Path) -> None:
+    taint_store.record_taint(RECORD)
+    audit.rename(audit.with_suffix(".saved"))
+    audit.mkdir(mode=0o600)
+    try:
+        assert "wrong type or mode" in taint_store.load(HOST).problem
+    finally:
+        audit.chmod(0o700)
+
+
+def test_short_write_is_error(audit: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def short_write(_descriptor: int, _data: bytes) -> int:
+        return 0
+
+    monkeypatch.setattr(taint_store.os, "write", short_write)
+    with pytest.raises(OSError, match=r"^incomplete taint store append$"):
+        taint_store.record_taint(RECORD)
+    assert audit.read_bytes() == b""
+
+
+def test_empty_store_and_missing_file(audit: Path) -> None:
+    taint_store.record_taint(RECORD)
+    assert taint_store.load("missing").status == "unknown"
+    audit.rename(audit.with_suffix(".saved"))
+    audit.touch(mode=0o600)
+    assert taint_store.load(HOST) == taint.State(HOST)
+
+
+def test_bad_identity_never_reaches_disk(audit: Path) -> None:
+    with pytest.raises(Invalid, match="invalid taint host or account"):
+        taint_store.load("../bad")
+    assert not audit.parent.exists()
+
+
+def test_parent_symlink_is_accepted(audit: Path) -> None:
+    taint_store.record_taint(RECORD)
+    parent = audit.parents[3]
+    moved = parent.with_name(parent.name + "-moved")
+    parent.rename(moved)
+    parent.symlink_to(moved, target_is_directory=True)
+    assert taint_store.load(HOST).taint == RECORD
+    taint_store.record_clearance(CLEARANCE)
+    assert taint_store.load(HOST).status == "clean"
+
+
+@pytest.mark.parametrize("single_byte", [False, True])
+def test_partial_line_clearance_repairs_with_archive(
+    audit: Path, *, single_byte: bool
+) -> None:
+    taint_store.record_taint(RECORD)
+    broken = b"{" if single_byte else audit.read_bytes() + b'{"kind":'
+    audit.write_bytes(broken)
+    assert taint_store.load(HOST).status == "tainted"
+    taint_store.record_clearance(CLEARANCE)
+    assert taint_store.load(HOST).status == "clean"
+    assert json.loads(audit.read_bytes()) == {"kind": "clearance", **asdict(CLEARANCE)}
+    archived = list(audit.parent.glob(f"{HOST}.jsonl.broken-*"))
+    assert len(archived) == 1
+    assert archived[0].read_bytes() == broken
+
+
+def test_clearance_before_delayed_append_and_clock_step_back(audit: Path) -> None:
+    prepared = replace(RECORD, started="2026-11-10T11:00:00Z")
+    taint_store.record_clearance(CLEARANCE)
+    taint_store.record_taint(prepared)
+    assert taint_store.load(HOST).taint == prepared
+    taint_store.record_clearance(replace(CLEARANCE, time="2026-11-10T10:00:00Z"))
+    assert taint_store.load(HOST).status == "clean"
+    assert len(audit.read_text().splitlines()) == 3
+
+
+def test_new_record_directory_is_synced(
+    audit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced: list[int] = []
+    original = os.fsync
+
+    def sync(descriptor: int) -> None:
+        synced.append(stat.S_IFMT(os.fstat(descriptor).st_mode))
+        original(descriptor)
+
+    monkeypatch.setattr(taint_store.os, "fsync", sync)
+    taint_store.record_taint(RECORD)
+    assert synced == [stat.S_IFREG, stat.S_IFDIR]
+    assert audit.exists()
+
+
+def test_appends_hold_directory_lock(
+    audit: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_write = os.write
+    probes: list[int] = []
+
+    def write_locked(descriptor: int, data: bytes) -> int:
+        probe = os.open(audit.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for kind in (fcntl.LOCK_SH, fcntl.LOCK_EX):
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(probe, kind | fcntl.LOCK_NB)
+        finally:
+            os.close(probe)
+        probes.append(descriptor)
+        return original_write(descriptor, data)
+
+    monkeypatch.setattr(taint_store.os, "write", write_locked)
+    taint_store.record_taint(RECORD)
+    assert probes
+    assert taint_store.load(HOST).taint == RECORD
+    probe = os.open(audit.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(probe)

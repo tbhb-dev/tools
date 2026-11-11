@@ -1,16 +1,17 @@
 """The argv of each command a run starts: ssh, tmux and the harness.
 
-Every builder is a pure function that returns a tuple of strings. No argv holds
-a credential or a Connect reference. A harness's brief goes to it on stdin, or
-as the path of a file in a fixed instruction, and never as its own text. The one
-exception is agy's `--print`, which takes the brief as its argument while agy
-has no stdin input that `--print` can use.
+Builders return tuples of strings; executable lookup uses a fixed system PATH.
+No argv holds a credential or a Connect reference. A harness's brief goes to it
+on stdin, or as the path of a file in a fixed instruction. agy's `--print` takes
+the brief as an argument because it has no stdin input for that option.
 """
 
 from __future__ import annotations
 
 import json
 import shlex
+import shutil
+import sys
 
 from tbhbdev.alpha.agent.decisions import policy as policy_module
 from tbhbdev.alpha.agent.model import (
@@ -37,27 +38,43 @@ _AGY_BUILD_NOTE = (
 _HANDOFF = ("CODEX_HOME", "DOCKER_CONFIG", "GH_CONFIG_DIR", "TMPDIR", "TMPPREFIX")
 
 
+def executable(name: str) -> str:
+    path = "/usr/bin:/bin:/usr/sbin:/sbin"
+    if sys.platform == "darwin":
+        path += ":/opt/homebrew/bin:/usr/local/bin"
+    found = shutil.which(name, path=path)
+    if found is None:
+        message = f"required executable {name!r} missing from fixed PATH"
+        raise Invalid(message)
+    return found
+
+
 def ssh(
     host: Host,
     remote: tuple[str, ...],
     *,
     connect_timeout: int,
     keepalive: int,
+    keepalive_count_max: int = 3,
 ) -> tuple[str, ...]:
-    """The driver's call to HOST, which runs REMOTE in the host's login shell.
+    """The driver's call to HOST, which runs REMOTE in the host's shell.
 
     It never prompts, gives up connecting after CONNECT_TIMEOUT seconds and
     probes the connection every KEEPALIVE seconds.
     """
-    command = shlex.join((host.shell, "-lc", shlex.join(remote)))
+    command = shlex.join((f"/bin/{host.shell}", "-c", shlex.join(remote)))
     return (
-        "ssh",
+        executable("ssh"),
         "-o",
         "BatchMode=yes",
         "-o",
         f"ConnectTimeout={connect_timeout}",
         "-o",
         f"ServerAliveInterval={keepalive}",
+        "-o",
+        f"ServerAliveCountMax={keepalive_count_max}",
+        "-l",
+        host.account,
         host.name,
         command,
     )
@@ -75,7 +92,16 @@ def tmux(sockets_dir: str, name: str, command: tuple[str, ...]) -> tuple[str, ..
         message = f"tmux session name {name!r} must match {NAME.pattern}"
         raise Invalid(message)
     socket = policy_module.resolve(sockets_dir, SOCKET)
-    return ("tmux", "-S", socket, "new-session", "-d", "-s", f"ag-{name}", *command)
+    socket_options = ("-S", socket, "-f", "/dev/null")
+    return (
+        executable("tmux"),
+        *socket_options,
+        "new-session",
+        "-d",
+        "-s",
+        f"ag-{name}",
+        *command,
+    )
 
 
 def _toml(text: str) -> str:

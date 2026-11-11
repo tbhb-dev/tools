@@ -134,6 +134,7 @@ class Host:
     unsandboxed: bool
     accounts: tuple[str, ...]
     proven_harnesses: tuple[Harness, ...]
+    tbhbdev: str | None = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,9 @@ class Settings:
     credentials: tuple[Credentials, ...]
     claude: Claude
     hosts: tuple[Host, ...]
+    ssh_connect_timeout: int = 15
+    ssh_keepalive_seconds: int = 30
+    ssh_keepalive_count_max: int = 3
 
 
 @dataclass(frozen=True)

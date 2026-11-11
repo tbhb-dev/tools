@@ -954,3 +954,38 @@ def test_claude_references_refuse_openssh_query(key: str) -> None:
         value="vault/item/key?ssh-format=openssh",
     )
     assert REFERENCE in refused(table)
+
+
+@pytest.mark.parametrize(
+    ("key", "default"),
+    [
+        ("ssh_connect_timeout", 15),
+        ("ssh_keepalive_seconds", 30),
+        ("ssh_keepalive_count_max", 3),
+    ],
+)
+def test_ssh_settings(key: str, default: int) -> None:
+    assert getattr(config.parse(GOOD), key) == default
+    assert getattr(config.parse(edited(key, value=9)), key) == 9
+    for value in (0, -1, True, "9"):
+        assert (
+            refused(edited(key, value=value))
+            == f"[agent] {key} must be a positive integer"
+        )
+
+
+@pytest.mark.parametrize(
+    "program", [None, "/example/bin/tbhbdev", "relative", "/a/../b", "/a\x00b"]
+)
+def test_host_tbhbdev_path(program: str | None) -> None:
+    value = copy.deepcopy(GOOD)
+    hosts = cast("list[Table]", value["host"])
+    if program is not None:
+        hosts[0]["tbhbdev"] = program
+    if program in (None, "/example/bin/tbhbdev"):
+        assert config.parse(value).hosts[0].tbhbdev == program
+    else:
+        with pytest.raises(Invalid) as caught:
+            config.parse(value)
+        why = "must be an absolute path" if program == "relative" else PATHS
+        assert str(caught.value) == f"[[agent.host]] tbhbdev {why}"
