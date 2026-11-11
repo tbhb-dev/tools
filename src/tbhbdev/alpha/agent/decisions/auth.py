@@ -102,7 +102,11 @@ def validate(before: str | None, after: str) -> str | None:
         return f"auth.before: found {json_type(source)}; expected object"
     if not isinstance(refreshed, dict):
         return f"auth.after: found {json_type(refreshed)}; expected object"
-    for key in refreshed.keys() - source.keys():
+    # AuthDotJson always serializes OPENAI_API_KEY, including null:
+    # https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/login/src/auth/storage.rs#L49-L72
+    # persist_tokens also sets last_refresh before saving:
+    # https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/login/src/auth/manager.rs#L1698
+    for key in refreshed.keys() - source.keys() - {"OPENAI_API_KEY", "last_refresh"}:
         return f"auth.{key}: found {json_type(refreshed[key])}; unexpected key"
     if "tokens" in source:
         reason = (
@@ -112,4 +116,6 @@ def validate(before: str | None, after: str) -> str | None:
         )
         if reason:
             return reason
-    return refresh_time(source, refreshed)
+    return field(
+        refreshed.get("OPENAI_API_KEY"), "optional string", "auth.OPENAI_API_KEY"
+    ) or refresh_time(source, refreshed)

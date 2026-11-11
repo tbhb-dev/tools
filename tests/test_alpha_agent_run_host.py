@@ -1368,7 +1368,7 @@ def test_signal_at_launch_handoff_records_and_stops_child(
         )
 
 
-def test_auth_skip_reason_is_logged_without_changing_harness_status(
+def test_auth_skip_reason_is_logged_with_failure_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = make_run(tmp_path)
@@ -1378,8 +1378,83 @@ def test_auth_skip_reason_is_logged_without_changing_harness_status(
     monkeypatch.setattr(
         credentials, "auth_write_back", constant("unsafe auth skipped\n")
     )
-    assert run_host.execute(run, "example") == 0
-    assert run.files.path("log").read_text() == "unsafe auth skipped\n"
+    runfiles.atomic(Path(prepared.paths.codex_home) / "auth.json", "{}")
+    assert run_host.execute(run, "example") == 1
+    assert "unsafe auth skipped" in run.files.path("log").read_text()
+
+
+def test_refused_auth_is_moved_whole_to_private_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    prepared = preparation(run)
+    source = runfiles.private_dir(run.home / ".codex") / "auth.json"
+    runfiles.atomic(source, '{"tokens":{}}')
+    prepared = dataclasses.replace(prepared, auth_before=source.read_text())
+    target = Path(prepared.paths.codex_home) / "auth.json"
+    refreshed = '{"tokens":{"access_token":"fixture-live-token"}}'
+    original_datetime = run_host.datetime
+
+    class FrozenClock:
+        @staticmethod
+        def now(zone: object) -> run_host.datetime:
+            assert zone is run_host.UTC
+            return original_datetime(2026, 1, 1, tzinfo=run_host.UTC)
+
+    monkeypatch.setattr(run_host, "datetime", FrozenClock)
+    mkdir = Path.mkdir
+    names = iter(
+        (
+            "example-20260101T000000.000000Z",
+            "example-20260101T000000.000000Z",
+            "example-20260101T000000.000001Z",
+        )
+    )
+
+    def checked_mkdir(
+        path: Path, mode: int = 0o777, *, parents: bool = False, exist_ok: bool = False
+    ) -> None:
+        if path.parent == run.home / ".codex-recovery":
+            assert path.name == next(names)
+            assert mode == 0o700
+            assert parents is False
+            assert exist_ok is False
+        mkdir(path, mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", checked_mkdir)
+    expected_log = ""
+    for _ in range(2):
+        runfiles.private_dir(target.parent)
+        runfiles.atomic(target, refreshed)
+        inode = target.stat().st_ino
+        assert run_host.finish(run, prepared, None, 0) == 1
+        recovered = next(
+            path
+            for path in (run.home / ".codex-recovery").glob("*/auth.json")
+            if path.stat().st_ino == inode
+        )
+        assert recovered.read_text() == refreshed
+        assert stat.S_IMODE(recovered.stat().st_mode) == 0o600
+        assert stat.S_IMODE(recovered.parent.stat().st_mode) == 0o700
+        expected_log += (
+            "codex auth write-back skipped: tokens.id_token: found missing; "
+            f"expected string; recovery: {recovered}\n"
+        )
+        assert run.files.path("log").read_text() == expected_log
+    assert len(list((run.home / ".codex-recovery").glob("*/auth.json"))) == 2
+    assert {p.name for p in (run.home / ".codex-recovery").iterdir()} == {
+        "example-20260101T000000.000000Z",
+        "example-20260101T000000.000001Z",
+    }
+    assert source.read_text() == prepared.auth_before
+    assert "fixture-live-token" not in run.files.path("log").read_text()
+    paths = run_host.planned_paths(run)
+    value, executable = run_host.checked_policy(run, paths)
+    run.files.write("prompt", "fixture")
+    command = run_host.harness_command(run, prepared, value, executable)
+    override = next(arg for arg in command if arg.startswith("permissions.build="))
+    filesystem = tomllib.loads(override)["permissions"]["build"]["filesystem"]
+    assert filesystem[str(run.home / ".codex-recovery")] == "none"
 
 
 def test_failed_launch_still_records_completion(
@@ -2205,7 +2280,11 @@ def test_resolved_denies_preserve_macos_aliases_and_empty_linux_data(
     assert run_host.resolved_denies(run, preparation(run).paths) == (
         ()
         if os_name is Os.LINUX
-        else (*missing, str(run_host.worktree.mirror_path(run.home, run.request.repo)))
+        else (
+            *missing,
+            str(run_host.worktree.mirror_path(run.home, run.request.repo)),
+            str(run.home / ".codex-recovery"),
+        )
     )
 
 
@@ -2254,6 +2333,7 @@ def test_protected_home_lists_startup_files_and_socket_ancestors(
         ".claude",
         ".claude.json",
         ".codex",
+        ".codex-recovery",
         ".control/sockets",
         ".control",
     )
@@ -3199,7 +3279,7 @@ def test_finish_removes_private_state_codex_home(
 
     monkeypatch.setattr(credentials, "auth_write_back", write_back)
     assert run_host.finish(run, prepared, None, 0) == int(failure)
-    assert not directory.exists()
+    assert directory.exists() is failure
 
 
 @pytest.mark.parametrize("state", [None, ""])

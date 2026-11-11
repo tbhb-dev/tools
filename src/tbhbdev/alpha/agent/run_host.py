@@ -16,6 +16,7 @@ import tempfile
 import time
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from tbhbdev import userconfig
@@ -98,6 +99,7 @@ _STARTUP_FILES = (
     ".claude",
     ".claude.json",
     ".codex",
+    ".codex-recovery",
 )
 
 
@@ -132,9 +134,12 @@ def protected_home(run: Run) -> tuple[str, ...]:
 def full_denies(run: Run, paths: RunPaths) -> tuple[str, ...]:
     candidates = policy.denied_paths(run.settings, run.host, paths.home, paths.uid)
     mirror = str(worktree.mirror_path(run.home, run.request.repo))
+    recovery = str(run.home / ".codex-recovery")
     return tuple(
         dict.fromkeys(
-            alias for p in (*candidates, mirror) for alias in (p, os.path.realpath(p))
+            alias
+            for p in (*candidates, mirror, recovery)
+            for alias in (p, os.path.realpath(p))
         )
     )
 
@@ -633,21 +638,38 @@ def _execute(run: Run, text: str, stack: ExitStack) -> int:
     return rc
 
 
+def recover_auth(run: Run, destination: Path) -> Path:
+    parent = runfiles.private_dir(run.home / ".codex-recovery")
+    instant = datetime.now(UTC)
+    while True:
+        stamp = instant.strftime("%Y%m%dT%H%M%S.%fZ")
+        directory = parent / f"{run.files.name}-{stamp}"
+        try:
+            directory.mkdir(mode=0o700)
+            break
+        except FileExistsError:
+            instant += timedelta(microseconds=1)
+    recovered = directory / "auth.json"
+    destination.replace(recovered)
+    return recovered
+
+
 def finish_auth(run: Run, prepared: Prepared | None) -> str | None:
     if run.request.harness is not Harness.CODEX:
         return None
     paths = planned_paths(run) if prepared is None else prepared.paths
-    try:
-        if prepared is not None and not run.files.uncertain:
-            return credentials.auth_write_back(
-                run.home / ".codex" / "auth.json",
-                Path(paths.codex_home) / "auth.json",
-                prepared.auth_before,
-            )
-        return None
-    finally:
-        with suppress(FileNotFoundError):
-            shutil.rmtree(paths.codex_home)
+    reason = None
+    if prepared is not None and not run.files.uncertain:
+        destination = Path(paths.codex_home) / "auth.json"
+        reason = credentials.auth_write_back(
+            run.home / ".codex" / "auth.json", destination, prepared.auth_before
+        )
+        if reason is not None:
+            recovered = recover_auth(run, destination)
+            reason = f"{reason.rstrip()}; recovery: {recovered}\n"
+    with suppress(FileNotFoundError):
+        shutil.rmtree(paths.codex_home)
+    return reason
 
 
 def finish(
@@ -657,6 +679,7 @@ def finish(
         try:
             reason = finish_auth(run, prepared)
             if reason is not None:
+                rc = 1
                 run.files.write("log", reason)
         except OSError, ValueError:
             rc = 1

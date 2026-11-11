@@ -71,6 +71,31 @@ def test_invalid_json(before: str, after: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("key", "value", "reason"),
+    [
+        ("OPENAI_API_KEY", None, None),
+        ("OPENAI_API_KEY", "fixture-key", None),
+        (
+            "OPENAI_API_KEY",
+            1,
+            "auth.OPENAI_API_KEY: found number; expected optional string",
+        ),
+        ("last_refresh", "2026-01-01T00:00:00Z", None),
+        (
+            "last_refresh",
+            None,
+            "last_refresh: found null; expected timestamp with timezone",
+        ),
+        ("auth_mode", "fixture-mode", "auth.auth_mode: found string; unexpected key"),
+    ],
+)
+def test_refresh_can_add_only_codex_serialized_fields(
+    key: str, value: auth.Json, reason: str | None
+) -> None:
+    assert auth.validate("{}", json.dumps({key: value})) == reason
+
+
+@pytest.mark.parametrize(
     ("value", "kind", "message"),
     [
         (None, TypeError, "last_refresh must be a timestamp"),
