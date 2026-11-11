@@ -8,6 +8,8 @@ import subprocess
 import sys
 from contextlib import ExitStack, nullcontext
 from types import SimpleNamespace
+from typing import cast
+lazy from collections.abc import Callable
 lazy from pathlib import Path
 
 import pytest
@@ -26,6 +28,16 @@ from tbhbdev.alpha.agent.model import Harness, Invalid
 
 MIRRORS = MIRROR_LABELS
 EXTRA = (*MIRRORS, "file-control", "local-binding", "host-loopback")
+
+
+@dataclasses.dataclass
+class ProbeInvocation:
+    command: tuple[str, ...] = dataclasses.field(repr=False)
+    kwargs: dict[str, object] = dataclasses.field(repr=False)
+
+
+type ProbeCalls = list[ProbeInvocation]
+type TokenProbe = tuple[run_host.Run, run_host.RunPaths, ProbeCalls]
 
 
 @pytest.fixture(autouse=True)
@@ -270,6 +282,283 @@ class SocketProbeRunner:
             if line.startswith("echo '"):
                 self.record(shlex.split(line)[1].split()[0])
         return subprocess.CompletedProcess(command, 0, "", "")
+
+
+@pytest.fixture
+def token_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
+) -> TokenProbe:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("TBHBDEV_LIVE_CLAUDE_TOKEN_FILE", raising=False)
+    run, paths = live.probe_run(tmp_path, harness)
+    control = Proxy(1)
+    runner = SocketProbeRunner(run, control, sys.platform)
+    calls: ProbeCalls = []
+    mirrors: list[live.MirrorProbe] = []
+    value = policy.build(
+        run.settings,
+        run.host,
+        paths=paths,
+        harness=harness,
+        profile=run.request.profile,
+        account="agent",
+        unsandboxed=False,
+    )
+
+    def checked(
+        actual: run_host.Run, actual_paths: run_host.RunPaths
+    ) -> tuple[run_host.Policy, str]:
+        assert actual_paths == paths
+        assert actual.settings.sandbox.denied_home_paths == (
+            *run.settings.sandbox.denied_home_paths,
+            *(str(case.object_file.parents[2]) for case in mirrors),
+        )
+        return value, "/example/harness"
+
+    def sockets(stack: ExitStack) -> dict[str, live.Listener]:
+        assert isinstance(stack, ExitStack)
+        return {}
+
+    def directory(**kwargs: object) -> nullcontext[str]:
+        assert kwargs == {"prefix": "ag-probe-"}
+        return nullcontext(str(root))
+
+    def cases(
+        directory: Path, workspace: Path, python: str, ln: str
+    ) -> tuple[live.MirrorProbe, ...]:
+        assert python == sys.executable
+        assert ln == live.shutil.which("ln")
+        result = mirror_cases(directory, workspace, python, ln)
+        mirrors.extend(result)
+        return result
+
+    original_calls = live.probe_calls
+
+    def probes(
+        sockets: dict[str, live.Listener],
+        curl: str,
+        results: Path,
+        extra: tuple[tuple[str, tuple[str, ...]], ...],
+    ) -> tuple[live.ProbeCall, ...]:
+        assert curl == live.shutil.which("curl")
+        assert results == run.tmpdir / "observed"
+        assert extra == live.live_extra(
+            tuple(mirrors), run.tmpdir / "write-control", curl, control
+        )
+        return original_calls(sockets, curl, results, extra)
+
+    original_command = live.sandbox_command
+
+    def sandbox(
+        actual: run_host.Run,
+        actual_paths: run_host.RunPaths,
+        actual_value: run_host.Policy,
+        installed: str,
+        script: Path,
+    ) -> tuple[str, ...]:
+        assert script.is_file()
+        return original_command(actual, actual_paths, actual_value, installed, script)
+
+    def execute(
+        command: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(ProbeInvocation(command, kwargs))
+        assert kwargs["cwd"] == paths.worktree
+        assert kwargs["text"] is True
+        assert kwargs["capture_output"] is True
+        assert kwargs["check"] is False
+        assert kwargs["timeout"] == 120
+        environment = cast("dict[str, object]", kwargs["env"])
+        assert isinstance(environment, dict)
+        expected = (
+            value.env
+            | {"CODEX_HOME": paths.codex_home}
+            | dict.fromkeys(
+                ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"), control.url
+            )
+        )
+        matches = {
+            key: val
+            for key, val in environment.items()
+            if key != credentials.CLAUDE_TOKEN_ENV
+        } == expected
+        assert matches
+        return runner(command, **kwargs)
+
+    root = tmp_path / "scripts"
+    root.mkdir()
+    monkeypatch.setattr(run_host, "checked_policy", checked)
+    monkeypatch.setattr(live, "scratch_servers", sockets)
+    monkeypatch.setattr(live, "control_proxy", lambda: nullcontext(control))
+    monkeypatch.setattr(
+        live,
+        "tempfile",
+        SimpleNamespace(TemporaryDirectory=directory),
+    )
+    monkeypatch.setattr(
+        live,
+        "subprocess",
+        SimpleNamespace(run=execute, TimeoutExpired=subprocess.TimeoutExpired),
+    )
+    monkeypatch.setattr(live, "mirror_cases", cases)
+    monkeypatch.setattr(live, "probe_calls", probes)
+    monkeypatch.setattr(live, "sandbox_command", sandbox)
+    return run, paths, calls
+
+
+@pytest.mark.parametrize("harness", [Harness.CLAUDE, Harness.CODEX])
+@pytest.mark.parametrize("configured", [True, False])
+def test_probe_token_file_only_reaches_the_claude_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    token_probe: TokenProbe,
+    harness: Harness,
+    configured: bool,
+) -> None:
+    run, paths, calls = token_probe
+    tmp_path = run.tmpdir.parent
+    token_file = tmp_path / "token"
+    token_file.write_text(" example-token-value \t\n\n")
+    if configured:
+        monkeypatch.setenv("TBHBDEV_LIVE_CLAUDE_TOKEN_FILE", str(token_file))
+    else:
+        monkeypatch.delenv("TBHBDEV_LIVE_CLAUDE_TOKEN_FILE", raising=False)
+    with ExitStack() as stack:
+        live.run_probe(run, paths, "/example/harness", stack)
+        assert calls
+        for call in calls:
+            environment = call.kwargs["env"]
+            assert isinstance(environment, dict)
+            assert (credentials.CLAUDE_TOKEN_ENV in environment) is (
+                configured and harness is Harness.CLAUDE
+            )
+            matches = environment.get(credentials.CLAUDE_TOKEN_ENV) == (
+                " example-token-value"
+                if configured and harness is Harness.CLAUDE
+                else None
+            )
+            assert matches
+            assert all("example-token-value" not in arg for arg in call.command)
+        assert "example-token-value" not in repr(calls)
+        captured = capsys.readouterr()
+        assert all("example-token-value" not in text for text in captured)
+        assert (run.tmpdir / "observed").is_file()
+        assert all(
+            b"example-token-value" not in path.read_bytes()
+            for path in tmp_path.rglob("*")
+            if path.is_file() and path != token_file
+        )
+
+
+@pytest.mark.parametrize("harness", [Harness.CLAUDE])
+@pytest.mark.parametrize("failure", ["missing", "unreadable"])
+def test_probe_token_file_errors_name_only_the_variable_and_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    token_probe: TokenProbe,
+    failure: str,
+) -> None:
+    token_file = tmp_path / "token"
+    monkeypatch.setenv("TBHBDEV_LIVE_CLAUDE_TOKEN_FILE", str(token_file))
+    if failure == "unreadable":
+        token_file.write_text("example-token-value\n")
+        original = Path.read_text
+
+        def read(path: Path) -> str:
+            if path == token_file:
+                msg = "example-token-value"
+                raise PermissionError(msg)
+            return original(path)
+
+        monkeypatch.setattr(Path, "read_text", read)
+    run, paths, calls = token_probe
+    with (
+        ExitStack() as stack,
+        pytest.raises(ValueError, match="TBHBDEV_LIVE_CLAUDE_TOKEN_FILE") as error,
+    ):
+        live.run_probe(run, paths, "/example/harness", stack)
+    message = str(error.value)
+    assert "TBHBDEV_LIVE_CLAUDE_TOKEN_FILE" in message
+    assert str(token_file) in message
+    assert all(
+        "example-token-value" not in text for text in (message, *capsys.readouterr())
+    )
+    assert not calls
+
+
+@pytest.mark.parametrize("harness", [Harness.CLAUDE])
+def test_live_entry_preserves_the_token_file_error(
+    monkeypatch: pytest.MonkeyPatch, token_probe: TokenProbe
+) -> None:
+    run, paths, _calls = token_probe
+    token_file = run.tmpdir.parent / "missing-token"
+    monkeypatch.setenv("TBHBDEV_LIVE_CLAUDE_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv("CODEX_SANDBOX", "")
+    original = live.shutil.which
+
+    def installed(name: str) -> str | None:
+        return "/example/claude" if name == "claude" else original(name)
+
+    def prepared(
+        _root: Path, _harness: Harness
+    ) -> tuple[run_host.Run, run_host.RunPaths]:
+        return run, paths
+
+    def auth(*_args: object) -> nullcontext[None]:
+        return nullcontext(None)
+
+    monkeypatch.setattr(live.shutil, "which", installed)
+    monkeypatch.setattr(live, "probe_run", prepared)
+    monkeypatch.setattr(live, "codex_auth", auth)
+    with pytest.raises(ValueError, match="TBHBDEV_LIVE_CLAUDE_TOKEN_FILE") as error:
+        live.test_build_sandboxes_refuse_user_sockets(run.tmpdir.parent, Harness.CLAUDE)
+    assert "TBHBDEV_LIVE_CLAUDE_TOKEN_FILE" in str(error.value)
+    assert str(token_file) in str(error.value)
+
+
+@pytest.mark.parametrize("harness", [Harness.CLAUDE])
+@pytest.mark.parametrize("failure", ["ln", "curl", "write-control", "hook-ran"])
+def test_token_probe_requires_tools_and_observed_controls(
+    monkeypatch: pytest.MonkeyPatch, token_probe: TokenProbe, failure: str
+) -> None:
+    run, paths, _calls = token_probe
+    if failure in {"ln", "curl"}:
+        original = live.shutil.which
+
+        def installed(name: str) -> str | None:
+            return None if name == failure else original(name)
+
+        monkeypatch.setattr(live.shutil, "which", installed)
+        message = (
+            "ln is required for hard-link probes"
+            if failure == "ln"
+            else "curl is required for live probes"
+        )
+    else:
+        original_runner = cast(
+            "Callable[..., subprocess.CompletedProcess[str]]", live.subprocess.run
+        )
+
+        def execute(
+            command: tuple[str, ...], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            result = original_runner(command, **kwargs)
+            if failure == "write-control":
+                (run.tmpdir / failure).write_text("failed")
+            else:
+                (run.tmpdir.parent / "scripts" / failure).touch()
+            return result
+
+        monkeypatch.setattr(live, "subprocess", SimpleNamespace(run=execute))
+        message = (
+            "interpreter write control was not observed"
+            if failure == "write-control"
+            else "project-hooks: allowed"
+        )
+    pattern = f"^{message}(?:\n|$)" if failure in {"ln", "curl"} else message
+    with ExitStack() as stack, pytest.raises(AssertionError, match=pattern):
+        live.run_probe(run, paths, "/example/harness", stack)
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin"])

@@ -468,6 +468,18 @@ def probe_auth_missing(result: subprocess.CompletedProcess[str]) -> bool:
     )
 
 
+def probe_token_env(harness: Harness) -> dict[str, str]:
+    variable = "TBHBDEV_LIVE_CLAUDE_TOKEN_FILE"
+    if harness is not Harness.CLAUDE or not (path := os.environ.get(variable)):
+        return {}
+    try:
+        token = Path(path).read_text().rstrip()
+    except OSError:
+        msg = f"cannot read {variable}: {path}"
+        raise ValueError(msg) from None
+    return {credentials.CLAUDE_TOKEN_ENV: token}
+
+
 def run_probe(
     run: run_host.Run, paths: RunPaths, installed: str, stack: ExitStack
 ) -> None:
@@ -515,6 +527,7 @@ def run_probe(
             command,
             input=run.files.path("prompt").read_text(),
             env=value.env
+            | probe_token_env(harness)
             | {
                 "CODEX_HOME": paths.codex_home,
                 "HTTP_PROXY": control.url,
