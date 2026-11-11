@@ -24,6 +24,7 @@ from agent_live_host_probe import (
     TerminalObservation,
     assert_unchanged,
     checked_live_policy,
+    codex_sandbox_command,
     hard_link_attempt,
     legacy_input_setting,
     link_control,
@@ -726,37 +727,13 @@ def test_live_codex_copy_denies_account_auth(
     run, paths = live_policy(tmp_path, monkeypatch, Harness.CODEX, Profile.BUILD)
     value, executable = checked_live_policy(run, paths)
     run.files.write("prompt", "fixture")
-    prepared = run_host.Prepared(
-        paths,
-        credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
-        None,
-    )
-    rendered = run_host.harness_command(run, prepared, value, executable)
-    overrides = tuple(
-        word
-        for index, word in enumerate(rendered)
-        if word.startswith(("default_permissions=", "permissions.build="))
-        or (
-            word == "-c"
-            and rendered[index + 1].startswith(
-                ("default_permissions=", "permissions.build=")
-            )
-        )
-    )
     script = tmp_path / "copy-control.sh"
     script.write_text(
         'if (cd "$HOME" && cat .codex/auth.json) >/dev/null 2>&1; then exit 91; fi\n'
         "printf invoked > write-control\n"
     )
     result = subprocess.run(
-        (
-            executable,
-            "sandbox",
-            *overrides,
-            "--",
-            "/bin/sh",
-            str(script),
-        ),
+        codex_sandbox_command(run, paths, value, executable, "/bin/sh", str(script)),
         env=value.env,
         cwd=paths.worktree,
         capture_output=True,
@@ -1004,3 +981,24 @@ def test_terminal_linux_setting_reads_the_kernel_switch(
     assert reads == (
         [Path("/proc/sys/dev/tty/legacy_tiocsti")] if platform == "linux" else []
     )
+
+
+@pytest.mark.usefixtures("fake_host_tools")
+@pytest.mark.parametrize("profile", Profile)
+def test_codex_local_sandbox_uses_the_rendered_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: Profile
+) -> None:
+    run, paths = live_policy(tmp_path, monkeypatch, Harness.CODEX, profile)
+    value, executable = checked_live_policy(run, paths)
+    run.files.write("prompt", "fixture")
+    command = codex_sandbox_command(
+        run, paths, value, executable, "/bin/sh", "-c", "fixture"
+    )
+    assert command[:3] == (executable, "sandbox", "-c")
+    assert command[-4:] == ("--", "/bin/sh", "-c", "fixture")
+    assert f'default_permissions="{profile.value}"' in command
+    assert (
+        sum(word.startswith(f"permissions.{profile.value}=") for word in command) == 1
+    )
+    assert command.count("-c") == 3
+    assert not any(word.startswith("shell_environment_policy=") for word in command)
