@@ -39,26 +39,40 @@ MARK = install.MARK
 # `install` writes prek's shim for each --hook-type, moving a hook it doesn't
 # own to .legacy, or with -f deleting that .legacy instead, as prek does.
 FAKE_PREK = """import json, os, subprocess, sys
+from pathlib import Path
 here = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
 with open(os.path.join(here, "prek.log"), "a") as log:
     log.write(json.dumps(args) + "\\n")
 with open(os.path.join(here, "prek.cwd"), "a") as log:
     log.write(os.getcwd() + "\\n")
+if args[0] not in ("hook-impl", "list", "install"):
+    print("prek: unsupported command", file=sys.stderr)
+    sys.exit(2)
+if args[0] == "hook-impl":
+    stage = args[args.index("--hook-type") + 1]
+    print("prek-" + stage)
+    sys.exit(0)
 stages_file = os.path.join(here, "prek.stages")
 stages = open(stages_file).read().split() if os.path.exists(stages_file) else []
+if os.path.exists(os.path.join(here, "prek.fail")):
+    print("prek: boom", file=sys.stderr)
+    sys.exit(1)
 if args[0] == "list":
     stage = args[args.index("--hook-stage") + 1]
     if stage in stages:
         print("stage-hook")
     sys.exit(0)
-if os.path.exists(os.path.join(here, "prek.fail")):
-    print("prek: boom", file=sys.stderr)
-    sys.exit(1)
 common = subprocess.run(
     ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-    capture_output=True, text=True, check=True,
+    capture_output=True, text=True, check=True, cwd=os.getcwd(),
+    env={k: v for k, v in os.environ.items()
+         if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")},
 ).stdout.strip()
+root = os.environ.get("TBHB_TEST_TMP_ROOT")
+if not root or not Path(common).resolve().is_relative_to(Path(root).resolve()):
+    print("prek: common dir is outside test tmp root", file=sys.stderr)
+    sys.exit(3)
 for i, arg in enumerate(args):
     if arg != "--hook-type":
         continue
@@ -103,9 +117,22 @@ class World:
         return self.repo / ".git" / "hooks"
 
 
+def git_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+    }
+
+
 def git(cwd: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=git_env(),
     ).stdout.strip()
 
 
@@ -127,7 +154,7 @@ def private_files_fail(**_kw: object) -> int:
 
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
-    prefixes = ("CLAUDE", "CODEX", "ANTIGRAVITY", "GIT_", "PREK", "TBHB_")
+    prefixes = ("CLAUDE", "CODEX", "ANTIGRAVITY", "GIT_", "PREK", "TBHB_", "XDG_")
     list(map(monkeypatch.delenv, [n for n in os.environ if n.startswith(prefixes)]))
     for who in ("AUTHOR", "COMMITTER"):
         monkeypatch.setenv(f"GIT_{who}_NAME", "T")
@@ -138,6 +165,10 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg-runtime"))
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setenv("TBHB_TEST_TMP_ROOT", str(tmp_path))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_fake(bin_dir / "prek", FAKE_PREK)
@@ -1510,22 +1541,6 @@ def test_replaceable_refuses_what_is_not_a_file(tmp_path: Path) -> None:
         )
 
 
-def test_back_up_legacy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr(install, "stamp", lambda: "T")
-    legacy = tmp_path / "commit-msg.legacy"
-    legacy.write_text("mine")
-    install.back_up_legacy(legacy)
-    backup = tmp_path / "commit-msg.legacy.tbhb-backup.T"
-    assert backup.read_text() == "mine"
-    assert not legacy.exists()
-    assert capsys.readouterr().err == (
-        f"tbhbdev alpha install: moved {legacy} to {backup}; "
-        "prek install -f would delete it\n"
-    )
-
-
 # ------------------------------------------------------- identity shims
 
 
@@ -1548,37 +1563,26 @@ def test_identity_hook_without_prek_hooks_for_its_stage(world: World) -> None:
     assert world.prek_calls() == [["list", "--hook-stage", "commit-msg"]]
 
 
-def test_identity_hook_chains_prek_for_its_stage(
-    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr(install, "stamp", lambda: "T")
+def test_identity_hook_chains_prek_for_its_stage(world: World) -> None:
     world.stages("commit-msg")
-    world.hooks.mkdir(exist_ok=True)
     (world.hooks / "commit-msg.legacy").write_text("someone's\n")
     (world.hooks / "commit-msg.prek").write_text("stale\n")
     identity_hook(world)
     assert "tbhbdev alpha identity check" in (world.hooks / "commit-msg").read_text()
-    assert "File generated by prek" in (world.hooks / "commit-msg.prek").read_text()
-    backup = world.hooks / "commit-msg.legacy.tbhb-backup.T"
-    assert backup.read_text() == "someone's\n"
-    assert not (world.hooks / "commit-msg.legacy").exists()
-    assert world.prek_calls() == [
-        ["list", "--hook-stage", "commit-msg"],
-        ["install", "-f", "--hook-type", "commit-msg"],
-    ]
-    assert "moved" in capsys.readouterr().err
+    assert "hook-impl" in (world.hooks / "commit-msg.prek").read_text()
+    assert (world.hooks / "commit-msg.legacy").read_text() == "someone's\n"
+    assert world.prek_calls() == [["list", "--hook-stage", "commit-msg"]]
 
 
-@pytest.mark.parametrize("mark", install.SHIM_MARKS)
-def test_identity_hook_drops_a_legacy_identity_shim(world: World, mark: str) -> None:
-    world.hooks.mkdir(exist_ok=True)
-    # Bytes that aren't UTF-8 don't stop it reading the mark.
-    shim = f"#!/bin/sh\n{mark}\n".encode()
-    (world.hooks / "commit-msg.legacy").write_bytes(b"\xff" + shim)
+@pytest.mark.parametrize("mark", install.REPLACEABLE)
+def test_identity_hook_keeps_a_legacy_owned_shim(world: World, mark: str) -> None:
+    legacy = world.hooks / "commit-msg.legacy"
+    text = f"#!/bin/sh\n{mark}\n".encode()
+    legacy.write_bytes(b"\xff" + text)
     world.stages("commit-msg")
     identity_hook(world)
-    assert not (world.hooks / "commit-msg.legacy").exists()
-    assert [p.name for p in world.hooks.iterdir() if "backup" in p.name] == []
+    assert legacy.read_bytes() == b"\xff" + text
+    assert str(legacy) not in (world.hooks / "commit-msg.prek").read_text()
 
 
 def test_identity_hook_keeps_a_legacy_hook_when_prek_has_nothing_to_chain(
@@ -1617,21 +1621,12 @@ def test_identity_hook_stops_at_a_directory_before_changing_anything(
     assert world.prek_calls() == []
 
 
-def test_identity_hook_reports_a_hook_prek_did_not_write(
-    world: World, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    world.stages("commit-msg")
-
-    def writes_nothing(*_: object) -> None:
-        pass
-
-    monkeypatch.setattr(install, "prek_install", writes_nothing)
-    with pytest.raises(install.InstallError) as raised:
+def test_identity_hook_reports_failed_stage_query(world: World) -> None:
+    (world.bin / "prek.fail").write_text("")
+    with pytest.raises(
+        install.InstallError, match="prek list --hook-stage commit-msg failed"
+    ):
         identity_hook(world)
-    hook = world.hooks / "commit-msg"
-    assert str(raised.value) == (
-        f"prek install -f --hook-type commit-msg wrote no {hook}"
-    )
 
 
 def shim_env(world: World, tool: str | None) -> dict[str, str]:
@@ -1644,8 +1639,10 @@ def shim_env(world: World, tool: str | None) -> dict[str, str]:
         fake.write_text(f'#!/bin/sh\necho "tbhbdev $*"\nexit {tool}\n')
         fake.chmod(0o755)
     return {
-        **os.environ,
-        "PATH": f"{shim_bin}{os.pathsep}{world.bin.parent / 'git_dir'}",
+        **git_env(),
+        "PATH": os.pathsep.join(
+            map(str, (shim_bin, world.bin, world.bin.parent / "git_dir"))
+        ),
     }
 
 
@@ -1658,7 +1655,7 @@ def run_shim(
         capture_output=True,
         text=True,
         check=False,
-        cwd=cwd,
+        cwd=cwd or world.repo,
         env=shim_env(world, tool),
     )
 
@@ -1725,6 +1722,7 @@ def commits(cwd: Path) -> int:
         text=True,
         check=False,
         cwd=cwd,
+        env=git_env(),
     )
     return int(done.stdout or "0")
 
@@ -1813,13 +1811,7 @@ def test_install_git_hooks(world: World, capsys: pytest.CaptureFixture[str]) -> 
     ]
     for name, verb in install.IDENTITY_HOOKS:
         assert f"tbhbdev alpha identity {verb} " in (world.hooks / name).read_text()
-    assert world.prek_calls()[0] == [
-        "install",
-        "--hook-type",
-        "pre-commit",
-        "--hook-type",
-        "pre-push",
-    ]
+    assert world.prek_calls()[0] == ["list", "--hook-stage", "prepare-commit-msg"]
     assert not (world.hooks / install.LOCK).exists()
 
 
@@ -1943,7 +1935,7 @@ def test_install_git_hooks_leaves_a_hooks_path_alone(
             False,
             "TBHB_INSTALL_LOCK_TIMEOUT must be a whole number of seconds, not 'x'",
         ),
-        ({}, True, "prek install --hook-type pre-commit --hook-type pre-push failed"),
+        ({}, True, "prek list --hook-stage prepare-commit-msg failed"),
     ],
 )
 def test_install_git_hooks_reports_a_failure(
@@ -2113,7 +2105,7 @@ def test_main_hook_installs_only_the_payloads_git_hooks(
     assert install.main(["--hook"], "p") == 0
     out, err = capsys.readouterr()
     assert out == ""
-    assert err.startswith("prek installed pre-commit\nprek installed pre-push\n")
+    assert err.startswith("tbhbdev alpha install: installed git hooks")
     assert err.endswith(f"git hooks in {world.hooks}\n")
     assert (world.hooks / "commit-msg").is_file()
     assert list(world.home.iterdir()) == []
@@ -2139,8 +2131,8 @@ def test_main_hook_reports_a_failure_on_stderr_and_exits_0(
     assert capsys.readouterr() == (
         "",
         (
-            "prek: boom\ntbhbdev alpha install: error: prek install --hook-type "
-            "pre-commit --hook-type pre-push failed\n"
+            "tbhbdev alpha install: error: prek list --hook-stage "
+            "prepare-commit-msg failed\n"
         ),
     )
 
@@ -2175,7 +2167,7 @@ def test_main_hook_outside_tbhb_dev_is_silent(
 
 HELP = """\
 usage: tbhbdev alpha install [-h] [--harness {claude,codex,antigravity}]
-                             [--dry-run] [--hook]
+                             [--dry-run] [--hooks-only | --hook]
 
 Install this clone's git hooks and merge the tbhbdev alpha hooks into each
 harness's user-level config.
@@ -2185,6 +2177,7 @@ options:
   --harness {claude,codex,antigravity}
                         merge only this harness's config
   --dry-run             print the changes, write nothing
+  --hooks-only          install only this clone's git hooks
   --hook                SessionStart hook: put the gh shim on PATH and install
                         the git hooks of the payload's worktree
 """
@@ -2912,3 +2905,363 @@ def test_main_twice_trusts_every_codex_hook_and_sets_the_environment(
         for p in world.home.rglob("*")
         if p.is_file()
     }
+
+
+@pytest.fixture
+def drifted(world: World) -> World:
+    world.stages("commit-msg")
+    for name, verb in install.IDENTITY_HOOKS:
+        hook = world.hooks / name
+        hook.write_text(
+            install.SHIM.format(
+                mark=install.SHIM_MARK,
+                verb=verb,
+                hook=name,
+                origin=install.ORIGIN_GREP,
+            )
+        )
+        hook.chmod(0o755)
+    for name in ("pre-commit", "pre-push"):
+        hook = world.hooks / name
+        hook.write_text(f"#!/bin/sh\n# File generated by prek\necho prek-{name}\n")
+        hook.chmod(0o755)
+    legacy = world.hooks / "pre-push.legacy"
+    legacy.write_text('#!/bin/sh\necho "legacy $1 $2"\n')
+    legacy.chmod(0o755)
+    return world
+
+
+def test_repair_chains_moved_pre_push(drifted: World) -> None:
+    assert install.install_git_hooks(drifted.repo, {}, dry_run=False) == 0
+    done = subprocess.run(
+        [str(drifted.hooks / "pre-push"), "origin", "example"],
+        input="refs\n",
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=drifted.repo,
+        env=shim_env(drifted, "0"),
+    )
+    assert done.returncode == 0
+    assert done.stdout.endswith("legacy origin example\n")
+
+
+def test_repair_restores_missing_stage_and_is_idempotent(drifted: World) -> None:
+    legacy = drifted.hooks / "pre-push.legacy"
+    before = legacy.read_bytes(), legacy.stat().st_mode, legacy.stat().st_mtime_ns
+    assert not (drifted.hooks / "commit-msg.prek").exists()
+    assert install.install_git_hooks(drifted.repo, {}, dry_run=False) == 0
+    assert (drifted.hooks / "commit-msg.prek").is_file()
+    assert before == (
+        legacy.read_bytes(),
+        legacy.stat().st_mode,
+        legacy.stat().st_mtime_ns,
+    )
+    snapshot = {
+        p.name: (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns)
+        for p in drifted.hooks.iterdir()
+        if p.is_file()
+    }
+    assert install.install_git_hooks(drifted.repo, {}, dry_run=False) == 0
+    assert snapshot == {
+        p.name: (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns)
+        for p in drifted.hooks.iterdir()
+        if p.is_file()
+    }
+
+
+def test_hooks_only_repairs_without_user_files(
+    drifted: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supply(
+        monkeypatch,
+        {"claude-private.md": "# Private\n", "mise-private.toml": "[tools]\n"},
+    )
+    monkeypatch.setenv("CLAUDE_ENV_FILE", str(drifted.home / "env.sh"))
+    assert install.main(["--hooks-only"], "p") == 0
+    assert (drifted.hooks / "commit-msg.prek").is_file()
+    assert list(drifted.home.iterdir()) == []
+    assert not gh_shim.bin_dir().exists()
+
+
+@pytest.mark.parametrize(
+    "variable", [None, "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"]
+)
+@pytest.mark.usefixtures("world")
+def test_fake_prek_refuses_an_outside_common_dir(
+    tmp_path: Path,
+    variable: str | None,
+) -> None:
+    outside = make_repo(tmp_path / "outside")
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    child_env = {**os.environ, "TBHB_TEST_TMP_ROOT": str(allowed)}
+    if variable is not None:
+        child_env[variable] = str(
+            outside if variable == "GIT_WORK_TREE" else outside / ".git"
+        )
+    before = {p: p.read_bytes() for p in (outside / ".git" / "hooks").iterdir()}
+    done = subprocess.run(
+        ["prek", "install", "--hook-type", "pre-push"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=outside,
+        env=child_env,
+    )
+    assert done.returncode == 3
+    assert "outside test tmp root" in done.stderr
+    assert before == {p: p.read_bytes() for p in (outside / ".git" / "hooks").iterdir()}
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["pre-commit", "pre-push", "prepare-commit-msg", "commit-msg", "post-commit"],
+)
+@pytest.mark.parametrize(
+    ("prek_status", "legacy_status"), [(0, 0), (5, 0), (0, 7), (5, 7)]
+)
+def test_repair_runs_foreign_legacy_after_prek(
+    world: World,
+    name: str,
+    prek_status: int,
+    legacy_status: int,
+) -> None:
+    world.stages(name)
+    legacy = world.hooks / f"{name}.legacy"
+    write_fake(legacy, f'print("legacy")\nraise SystemExit({legacy_status})\n')
+    write_fake(
+        world.bin / "prek",
+        FAKE_PREK.replace(
+            'print("prek-" + stage)\n    sys.exit(0)',
+            f'print("prek-" + stage)\n    sys.exit({prek_status})',
+        ),
+    )
+    assert install.install_git_hooks(world.repo, {}, dry_run=False) == 0
+    before = legacy.read_bytes(), legacy.stat().st_mtime_ns
+    done = subprocess.run(
+        [str(world.hooks / name), "MSG"],
+        input="",
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=world.repo,
+        env=shim_env(world, "0"),
+    )
+    assert done.returncode == (legacy_status or prek_status)
+    assert done.stdout.endswith(f"prek-{name}\nlegacy\n")
+    assert before == (legacy.read_bytes(), legacy.stat().st_mtime_ns)
+
+
+def test_repair_replays_exact_push_stdin_and_arguments(world: World) -> None:
+    log = world.repo / "chain.jsonl"
+    code = (
+        "import json, sys\n"
+        f"with open({str(log)!r}, 'a') as out:\n"
+        "    data = [sys.argv[1:], list(sys.stdin.buffer.read())]\n"
+        "    out.write(json.dumps(data) + '\\n')\n"
+    )
+    legacy = world.hooks / "pre-push.legacy"
+    write_fake(legacy, code)
+    assert install.install_git_hooks(world.repo, {}, dry_run=False) == 0
+    write_fake(world.bin / "prek", code)
+    payload = b"first\x00\nsecond\n\n"
+    args = ["origin name", "example url"]
+    done = subprocess.run(
+        [str(world.hooks / "pre-push"), *args],
+        input=payload,
+        capture_output=True,
+        check=False,
+        cwd=world.repo,
+        env=git_env(),
+    )
+    assert done.returncode == 0, done.stderr
+    assert [json.loads(line) for line in log.read_text().splitlines()] == [
+        [["hook-impl", "--hook-type", "pre-push", "--", *args], list(payload)],
+        [args, list(payload)],
+    ]
+
+
+def test_run_chain_continues_after_a_missing_command(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    legacy = world.bin / "legacy"
+    write_fake(legacy, 'open("legacy-ran", "w").write("ran")\n')
+    assert install.run_chain([str(legacy), "commit-msg", "missing-prek", "MSG"]) == 1
+    assert "cannot run missing-prek:" in capsys.readouterr().err
+    assert (world.repo / "legacy-ran").read_text() == "ran"
+
+
+def test_run_chain_without_commands_does_not_read_commit_stdin() -> None:
+    assert install.run_chain(["", "commit-msg", ""]) == 0
+
+
+def test_write_hook_repairs_mode_without_rewriting(world: World) -> None:
+    hook = world.hooks / "pre-push"
+    hook.write_text("same")
+    before = hook.stat().st_mtime_ns
+    install.write_hook(hook, "same")
+    assert hook.stat().st_mtime_ns == before
+    assert stat.S_IMODE(hook.stat().st_mode) == 0o755
+
+
+def test_repair_removes_a_stale_stage_chain(world: World) -> None:
+    chained = world.hooks / "commit-msg.prek"
+    chained.write_text("stale")
+    identity_hook(world)
+    assert not chained.exists()
+
+
+def test_hooks_only_propagates_failure_and_supports_dry_run(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert install.main(["--hooks-only", "--dry-run"], "p") == 0
+    assert not (world.hooks / "pre-push").exists()
+    monkeypatch.setenv(install.TIMEOUT_ENV, "bad")
+    assert install.main(["--hooks-only"], "p") == 1
+    assert list(world.home.iterdir()) == []
+    assert not gh_shim.bin_dir().exists()
+    with pytest.raises(SystemExit) as done:
+        install.main(["--hooks-only", "--hook"], "p")
+    assert done.value.code == 2
+
+
+def test_install_git_hooks_keeps_foreign_primary_hooks(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for name in ("pre-commit", "pre-push"):
+        (world.hooks / name).write_text("foreign")
+    assert install.install_git_hooks(world.repo, {}, dry_run=False) == 0
+    err = capsys.readouterr().err
+    for name in ("pre-commit", "pre-push"):
+        assert (world.hooks / name).read_text() == "foreign"
+        assert f"{world.hooks / name} is not ours; leaving it" in err
+
+
+@pytest.mark.parametrize("name", ["pre-push", "commit-msg"])
+@pytest.mark.parametrize(("first", "second"), [(0, 0), (6, 0), (0, 8), (6, 8)])
+def test_run_chain_replays_input_and_retains_each_failure(
+    name: str,
+    first: int,
+    second: int,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data = b"one\x00\ntwo\n\n"
+    legacy = tmp_path / "foreign hook"
+    legacy.write_text("foreign")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    statuses = iter((first, second))
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, next(statuses))
+
+    monkeypatch.setattr(install.sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
+    monkeypatch.setattr(install.subprocess, "run", run)
+    assert install.run_chain(
+        [str(legacy), name, "'prek tool' arg", "one two", "three"]
+    ) == (second or first)
+    expected = {"input": data if name == "pre-push" else None, "check": False}
+    assert calls == [
+        (["prek tool", "arg", "one two", "three"], expected),
+        ([str(legacy), "one two", "three"], expected),
+    ]
+
+
+@pytest.mark.parametrize("variable", ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"])
+def test_git_helper_ignores_injected_repo_variables(
+    world: World,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+) -> None:
+    other = make_repo(tmp_path / "other")
+    monkeypatch.setenv(
+        variable, str(other if variable == "GIT_WORK_TREE" else other / ".git")
+    )
+    assert git(
+        world.repo, "rev-parse", "--path-format=absolute", "--git-common-dir"
+    ) == str(world.repo / ".git")
+
+
+def test_identity_hook_runs_only_legacy_without_a_configured_stage(
+    world: World,
+) -> None:
+    legacy = world.hooks / "commit-msg.legacy"
+    write_fake(legacy, 'print("foreign only")\n')
+    identity_hook(world)
+    done = run_shim(world, "commit-msg", "0")
+    assert (done.returncode, done.stdout, done.stderr) == (
+        0,
+        "tbhbdev alpha identity check MSG\nforeign only\n",
+        "",
+    )
+
+
+@pytest.mark.parametrize("mark", install.REPLACEABLE)
+def test_identity_hook_does_not_chain_owned_legacy_without_stage(
+    world: World,
+    mark: str,
+) -> None:
+    legacy = world.hooks / "commit-msg.legacy"
+    legacy.write_text(f"#!/bin/sh\n{mark}\n")
+    before = legacy.read_bytes(), legacy.stat().st_mtime_ns
+    identity_hook(world)
+    assert not (world.hooks / "commit-msg.prek").exists()
+    assert before == (legacy.read_bytes(), legacy.stat().st_mtime_ns)
+
+
+@pytest.mark.parametrize("mark", install.REPLACEABLE)
+def test_run_chain_ignores_legacy_replaced_by_an_owned_hook(
+    world: World,
+    mark: str,
+) -> None:
+    legacy = world.hooks / "pre-push.legacy"
+    legacy.write_text(f"#!/bin/sh\n{mark}\nexit 23\n")
+    legacy.chmod(0o755)
+    before = legacy.read_bytes(), legacy.stat().st_mtime_ns
+    assert install.run_chain([str(legacy), "commit-msg", ""]) == 0
+    assert before == (legacy.read_bytes(), legacy.stat().st_mtime_ns)
+
+
+def test_fake_prek_refuses_unknown_commands(world: World) -> None:
+    done = subprocess.run(
+        ["prek", "unknown", "--hook-type", "pre-push"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=world.repo,
+        env=git_env(),
+    )
+    assert done.returncode == 2
+    assert done.stderr == "prek: unsupported command\n"
+    assert not (world.hooks / "pre-push").exists()
+
+
+def test_fake_prek_refuses_parent_repository_discovery(
+    world: World,
+    tmp_path: Path,
+) -> None:
+    outer = make_repo(tmp_path / "outer")
+    scratch = outer / "scratch"
+    scratch.mkdir()
+    hooks = outer / ".git" / "hooks"
+    before = {path.name: path.read_bytes() for path in hooks.iterdir()}
+    child_env = {**git_env(), "TBHB_TEST_TMP_ROOT": str(scratch)}
+    done = subprocess.run(
+        ["prek", "install", "--hook-type", "pre-push"],
+        cwd=scratch,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 3
+    assert "outside test tmp root" in done.stderr
+    assert before == {path.name: path.read_bytes() for path in hooks.iterdir()}
+    assert world.prek_cwds() == {str(scratch)}

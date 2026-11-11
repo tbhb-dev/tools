@@ -8,8 +8,13 @@ clone shares. prek runs pre-commit and pre-push. The agent identity hooks
 and fails a hook whenever the work tree changes while it runs, so a
 concurrent agent's edit during a commit would fail the commit or be
 reverted. When the prek config also has hooks for one of those stages, prek's
-own shim for it is installed as `<hook>.prek` and the identity shim runs it
-afterwards. Both always run, and either failing fails the commit. Without
+shim for it is written as `<hook>.prek`, including when that file has gone
+missing, and the identity shim runs it afterwards. The shims invoke
+`prek hook-impl` directly without prek's migration machinery. A foreign
+`<hook>.legacy` runs after prek, with the same arguments and input, and
+either failure fails the operation. Install never deletes or rewrites a
+`.legacy` file, and leaves its own and prek's legacy shims inactive. A rerun
+leaves correct hook files unchanged. Without
 tbhbdev on PATH, the identity part of a shim fails the commit when origin
 is a tbhb-dev repository, by repo.py's own pattern, and does nothing
 elsewhere.
@@ -79,7 +84,9 @@ writes PATH into a harness config: Claude's SessionStart hook puts the shim
 on PATH (below), and Codex and Antigravity get it from `tbhbdev alpha
 agent-env`.
 
-`--harness` limits the config merge to one harness. `--dry-run` writes
+`--hooks-only` installs and repairs only the clone's git hooks. It writes
+no harness configs, gh shim or private files, and returns the hook install's
+status. `--harness` limits the config merge to one harness. `--dry-run` writes
 nothing: it prints each config's diff, with one diff of Codex's `config.toml`
 for its trust and environment, and the git hooks it would install.
 `--hook` is the SessionStart entry point. When `$CLAUDE_ENV_FILE` is set, it
@@ -165,6 +172,7 @@ AGY_TIMEOUT = 30
 AGENT_ENVIRONMENT = {"SSH_AUTH_SOCK": ""}
 POLICY = "shell_environment_policy"
 GH_SHIM_MODE = 0o755
+HOOK_MODE = 0o755
 AGY_PR_TIMEOUT = 120
 HARNESS_TIMEOUT = 10
 # Codex's documented default hook timeout, written out so the trusted hash covers
@@ -907,50 +915,78 @@ def replaceable(hook: Path) -> bool:
     return any(mark in text for mark in REPLACEABLE)
 
 
-def back_up_legacy(legacy: Path) -> None:
-    """Move a `.legacy` hook aside, since `prek install -f` would delete it."""
-    backup = free_name(legacy.with_name(f"{legacy.name}.tbhb-backup.{stamp()}"))
-    legacy.rename(backup)
-    print(
-        f"{PROG}: moved {legacy} to {backup}; prek install -f would delete it",
-        file=sys.stderr,
+def write_hook(path: Path, text: str) -> None:
+    """Write a hook only when its content or executable mode needs repair."""
+    if read_text(path) != text:
+        path.write_text(text)
+    if stat.S_IMODE(path.stat().st_mode) != HOOK_MODE:
+        path.chmod(HOOK_MODE)
+
+
+def run_chain(argv: list[str]) -> int:
+    """Run prek then a foreign legacy hook with identical arguments and stdin."""
+    legacy, name, command, *args = argv
+    commands = [shlex.split(command)]
+    # Migration can replace a foreign legacy hook after this shim was written.
+    if legacy and not replaceable(Path(legacy)):
+        commands.append([legacy])
+    data = sys.stdin.buffer.read() if name == "pre-push" else None
+    status = 0
+    for entry in commands:
+        if entry:
+            try:
+                done = subprocess.run(  # nosec B603
+                    [*entry, *args], input=data, check=False
+                )
+            except OSError as exc:
+                print(f"{PROG}: cannot run {entry[0]}: {exc}", file=sys.stderr)
+                status = 1
+                continue
+            if done.returncode:
+                status = done.returncode
+    return status
+
+
+def chain_text(prek: list[str], hooks: Path, name: str) -> str:
+    """A shim invoking prek without migration, then any foreign legacy hook."""
+    legacy = hooks / f"{name}.legacy"
+    foreign = legacy.is_file() and not replaceable(legacy)
+    command = (
+        shlex.join([*prek, "hook-impl", "--hook-type", name, "--"]) if prek else ""
     )
+    code = (
+        "import sys; from tbhbdev.alpha.install import run_chain; "
+        "sys.exit(run_chain(sys.argv[1:]))"
+    )
+    runner = shlex.join(
+        [sys.executable, "-c", code, str(legacy) if foreign else "", name, command]
+    )
+    return f'#!/bin/sh\n{SHIM_MARK}\nexec {runner} "$@"\n'
 
 
 def install_identity_hook(
     prek: list[str], top: Path, hooks: Path, pair: tuple[str, str]
 ) -> None:
-    """Write one identity shim, chaining prek's own hook for the stage, if any."""
+    """Write one identity shim and repair its prek and legacy chain."""
     name, verb = pair
     hook = hooks / name
     if not replaceable(hook):
         print(f"{PROG}: warning: {hook} is not ours; leaving it", file=sys.stderr)
         return
-    hook.unlink(missing_ok=True)
-    chained = hooks / f"{name}.prek"
-    chained.unlink(missing_ok=True)
-    # prek moves a hook it doesn't own to <hook>.legacy, so an overlapping
-    # run could leave an identity shim there. Any other .legacy may be
-    # someone's own hook, so it's kept, or backed up below.
-    legacy = hooks / f"{name}.legacy"
-    if legacy.is_file() and any(
-        mark in legacy.read_text(errors="replace") for mark in SHIM_MARKS
-    ):
-        legacy.unlink()
     staged = prek_run(prek, top, "list", "--hook-stage", name)
-    if staged.returncode == 0 and staged.stdout.strip():
-        if legacy.is_file():
-            back_up_legacy(legacy)
-        prek_install(prek, top, "-f", "--hook-type", name)
-        try:
-            hook.rename(chained)
-        except FileNotFoundError as exc:
-            message = f"prek install -f --hook-type {name} wrote no {hook}"
-            raise InstallError(message) from exc
-    hook.write_text(
-        SHIM.format(mark=SHIM_MARK, verb=verb, hook=name, origin=ORIGIN_GREP)
+    if staged.returncode:
+        message = f"prek list --hook-stage {name} failed"
+        raise InstallError(message)
+    chained = hooks / f"{name}.prek"
+    legacy = hooks / f"{name}.legacy"
+    if staged.stdout.strip() or (legacy.is_file() and not replaceable(legacy)):
+        selected = prek if staged.stdout.strip() else []
+        write_hook(chained, chain_text(selected, hooks, name))
+    elif chained.exists():
+        chained.unlink()
+    write_hook(
+        hook, SHIM.format(mark=SHIM_MARK, verb=verb, hook=name, origin=ORIGIN_GREP)
     )
-    hook.chmod(0o755)
 
 
 def install_git_hooks(
@@ -989,9 +1025,15 @@ def install_git_hooks(
             return 0
         hooks.mkdir(exist_ok=True)
         with hooks_lock(hooks, timeout):
-            prek_install(
-                prek, top, "--hook-type", "pre-commit", "--hook-type", "pre-push"
-            )
+            for name in ("pre-commit", "pre-push"):
+                hook = hooks / name
+                if replaceable(hook):
+                    write_hook(hook, chain_text(prek, hooks, name))
+                else:
+                    print(
+                        f"{PROG}: warning: {hook} is not ours; leaving it",
+                        file=sys.stderr,
+                    )
             for pair in IDENTITY_HOOKS:
                 install_identity_hook(prek, top, hooks, pair)
     except InstallError as exc:
@@ -1018,7 +1060,11 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run", action="store_true", help="print the changes, write nothing"
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--hooks-only", action="store_true", help="install only this clone's git hooks"
+    )
+    mode.add_argument(
         "--hook",
         action="store_true",
         help=(
@@ -1053,6 +1099,8 @@ def main(argv: list[str], prog: str) -> int:
     if args.hook:
         return session_start(env, dry_run=args.dry_run)
     status = install_git_hooks(None, env, dry_run=args.dry_run)
+    if args.hooks_only:
+        return status
     status |= install_gh_shim(dry_run=args.dry_run)
     for harness in [args.harness] if args.harness else HARNESSES:
         result = install_config(harness, env, dry_run=args.dry_run)

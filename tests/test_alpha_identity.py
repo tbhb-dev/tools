@@ -78,12 +78,21 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_bin: Path) ->
     """No injected GIT_* or agent variables, no user git config, a temp HOME."""
     # One statement, not a loop: under Bazel's clean environment there is
     # nothing to remove, and a loop body that never runs is a missed branch.
-    list(map(monkeypatch.delenv, [n for n in os.environ if n.startswith(AGENT_VARS)]))
+    list(
+        map(
+            monkeypatch.delenv,
+            [n for n in os.environ if n.startswith((*AGENT_VARS, "XDG_"))],
+        )
+    )
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
-    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(home / ".local" / "state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "xdg-runtime"))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     # The agent identity, which commit-msg requires of a commit in a harness.
@@ -95,6 +104,7 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_bin: Path) ->
 def run_git(repo: Path, *args: str) -> str:
     done = subprocess.run(
         ["git", "-C", str(repo), *args],
+        cwd=repo,
         check=True,
         capture_output=True,
         text=True,
@@ -104,7 +114,10 @@ def run_git(repo: Path, *args: str) -> str:
 
 
 def init_repo(path: Path) -> Path:
-    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", "-q", str(path)], check=True, cwd=path, env=hook_env()
+    )
     run_git(path, "config", "commit.gpgsign", "false")
     run_git(path, "remote", "add", "origin", ORIGIN)
     return path.resolve()
@@ -1179,27 +1192,22 @@ def test_run_ps_none_when_ps_is_denied(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ai.run_ps("7") is None
 
 
-def ps_command(pid: int) -> str:
-    """What ps reports for a process; skips the test where a sandbox denies ps."""
-    try:
-        done = subprocess.run(
-            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-    except PermissionError:
-        pytest.skip("this sandbox denies ps")
-    return done.stdout.strip()
+def no_process(_pid: str) -> None:
+    return None
 
 
-def test_ps_row_on_real_processes() -> None:
+def process_command(pid: int) -> str:
+    row = ai.process_row(str(pid))
+    assert row is not None
+    return row[1]
+
+
+def test_ps_row_on_real_processes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai, "run_ps", no_process)
     row = ai.ps_row(str(os.getpid()))
     assert row is not None
     assert row[0].isdigit()
-    # pytest-xdist retitles its workers ("[pytest-xdist running] ..."), so
-    # check the command against what ps itself reports rather than "python".
-    assert row[1] == ps_command(os.getpid())
+    assert row[1] == process_command(os.getpid())
     assert ai.ps_row("999999999") is None
 
 
@@ -1252,10 +1260,11 @@ def test_ancestry_stops_at_init_and_gaps_and_limit(
     assert len(ai.ancestry(50)) == ai.ANCESTRY_LIMIT
 
 
-def test_ancestry_defaults_to_this_process() -> None:
+def test_ancestry_defaults_to_this_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai, "run_ps", no_process)
     # Compared with ps, not a "python" substring: xdist workers retitle themselves.
     chain = ai.ancestry()
-    assert chain[:2] == [ps_command(os.getpid()), ps_command(os.getppid())]
+    assert chain[:2] == [process_command(os.getpid()), process_command(os.getppid())]
 
 
 # ------------------------------------------------------------- edit receipts
@@ -3663,15 +3672,19 @@ def wired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     run_git(path, "add", ".pre-commit-config.yaml")
     run_git(path, "commit", "-q", "-m", "init")
     monkeypatch.chdir(path)
-    done = subprocess.run(
-        ["tbhbdev", "alpha", "install", "--harness", "claude"],
+    install_repo_hooks(path)
+    return path
+
+
+def install_repo_hooks(path: Path) -> None:
+    subprocess.run(
+        ["tbhbdev", "alpha", "install", "--hooks-only"],
+        cwd=path,
         capture_output=True,
         text=True,
-        check=False,
+        check=True,
         env=hook_env(),
     )
-    assert done.returncode == 0, done.stderr
-    return path
 
 
 def hook_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -3680,6 +3693,8 @@ def hook_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     # temp repo; the child runs the module unmutated.
     env.pop("MUTANT_UNDER_TEST", None)
     env.update(extra or {})
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        env.pop(name, None)
     return env
 
 
@@ -4318,12 +4333,7 @@ def with_msg_linter(wired: Path) -> Path:
         }
     )
     config.write_text(yaml.safe_dump(loaded_config), encoding="utf-8")
-    subprocess.run(
-        ["tbhbdev", "alpha", "install", "--harness", "claude"],
-        check=True,
-        capture_output=True,
-        env=hook_env(),
-    )
+    install_repo_hooks(wired)
     run_git(wired, "add", "cog.sh", ".pre-commit-config.yaml")
     run_git(wired, "commit", "-q", "-m", "chore: linter")
     (wired / "cog.log").unlink(missing_ok=True)
@@ -5837,6 +5847,7 @@ def stage_doc(repo: Path, rel: str, text: str | bytes | None = None) -> None:
 def staged_text(repo: Path, rel: str) -> bytes:
     return subprocess.run(
         ["git", "-C", str(repo), "show", f":{rel}"],
+        cwd=repo,
         check=True,
         capture_output=True,
         env=hook_env(),
@@ -6420,6 +6431,7 @@ def test_blob_of_only_stores_the_object_on_request(repo: Path) -> None:
     assert ai.blob_of(repo, "f.txt") == blob
     missing = subprocess.run(
         ["git", "-C", str(repo), "cat-file", "-e", blob],
+        cwd=repo,
         check=False,
         capture_output=True,
         env=hook_env(),
@@ -6641,6 +6653,7 @@ def test_write_edit_stores_the_blob_only_when_asked(repo: Path) -> None:
     assert got["blob"] == blob
     missing = subprocess.run(
         ["git", "-C", str(repo), "cat-file", "-e", blob],
+        cwd=repo,
         check=False,
         capture_output=True,
         env=hook_env(),
@@ -7777,3 +7790,27 @@ def test_cmd_trailer_in_a_rebase_is_never_a_pick(
         (line,) = ai.llm_trailers(after)
         assert line[0] == ai.KEY_GEN
         assert claims_of(repo)
+
+
+@pytest.mark.parametrize("name", ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"])
+def test_hook_install_names_its_repo_and_clears_inherited_git_paths(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(name, str(tmp_path / "outside"))
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        assert kwargs["cwd"] == repo
+        env = cast("dict[str, str]", kwargs["env"])
+        assert not {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"}.intersection(env)
+        assert env["HOME"] == str(tmp_path / "home")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    install_repo_hooks(repo)
+    assert calls == [["tbhbdev", "alpha", "install", "--hooks-only"]]
