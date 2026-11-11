@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import grp
 import os
 import re
 import shlex
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 from tbhbdev.alpha.agent.model import Invalid, Os, Settings
 
 _LINUX_LINK_MODE = 0o777
+_MACOS_ADMIN_GID = 80
 _XCODE_SELECT_LINK = "/var/db/xcode_select_link"
 _COMMAND_LINE_TOOLS = "/Library/Developer/CommandLineTools"
 
@@ -109,15 +111,34 @@ def executable_components(path: Path) -> Generator[Path]:
                 pending.extendleft(reversed(target.parts))
 
 
-def writable_component(mode: int) -> bool:
+def macos_root_admin(info: os.stat_result) -> bool:
+    """Trust root's admin group only when the macOS group database agrees."""
+    if (
+        sys.platform != "darwin"
+        or info.st_uid != 0
+        or info.st_gid != _MACOS_ADMIN_GID
+        or info.st_mode & 0o002
+    ):
+        return False
+    try:
+        return grp.getgrgid(_MACOS_ADMIN_GID).gr_name == "admin"
+    except KeyError, OSError:
+        return False
+
+
+def writable_component(info: os.stat_result) -> bool:
     # Linux ordinary symlink modes are fixed at 0777 and grant no write access.
     # Their ownership and the permissions of every parent still need checking.
     ordinary_linux_link = (
         sys.platform == "linux"
-        and stat.S_ISLNK(mode)
-        and stat.S_IMODE(mode) == _LINUX_LINK_MODE
+        and stat.S_ISLNK(info.st_mode)
+        and stat.S_IMODE(info.st_mode) == _LINUX_LINK_MODE
     )
-    return bool(mode & 0o022) and not ordinary_linux_link
+    return (
+        bool(info.st_mode & 0o022)
+        and not ordinary_linux_link
+        and not macos_root_admin(info)
+    )
 
 
 def executable_chain(
@@ -130,7 +151,7 @@ def executable_chain(
         info = lstat(component)
         if (
             info.st_uid not in (0, uid)
-            or writable_component(info.st_mode)
+            or writable_component(info)
             or any(component.resolve().is_relative_to(root) for root in roots)
         ):
             message = f"untrusted host executable component: {component}"

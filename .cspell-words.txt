@@ -66,6 +66,7 @@ getent
 geteuid
 getfacl
 getfixturevalue
+getgrgid
 gethostname
 getpid
 getppid
