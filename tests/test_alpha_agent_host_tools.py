@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import grp
 import os
 import stat
 import subprocess
@@ -552,7 +553,58 @@ def test_component_write_permissions_follow_kernel_semantics(
     expected = mode != 0o755 and not (
         platform == "linux" and kind == stat.S_IFLNK and mode == 0o777
     )
-    assert host_tools.writable_component(kind | mode) is expected
+    info = os.stat_result((kind | mode, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+    assert host_tools.writable_component(info) is expected
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("darwin", 0, 80, "admin", 0o775),
+        ("darwin", 0, 80, "admin", 0o777),
+        ("darwin", 0, 81, "admin", 0o775),
+        ("darwin", 0, 80, "staff", 0o775),
+        ("darwin", 0, 80, KeyError, 0o775),
+        ("darwin", 0, 80, OSError, 0o775),
+        ("darwin", 1000, 80, "admin", 0o775),
+        ("darwin", 2000, 80, "admin", 0o775),
+        ("linux", 0, 80, "admin", 0o775),
+    ],
+)
+def test_admin_directory_component_trust(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: tuple[str, int, int, str | type[Exception], int],
+) -> None:
+    platform, owner, group, lookup, mode = case
+    monkeypatch.setattr(sys, "platform", platform)
+    directory = tmp_path / "Applications"
+    directory.mkdir()
+    executable = script(directory / "binary", "binary")
+    original = host_tools.lstat
+
+    def info(path: Path) -> os.stat_result:
+        values = list(original(path))
+        if path == directory:
+            values[0], values[4], values[5] = stat.S_IFDIR | mode, owner, group
+        return os.stat_result(values)
+
+    def getgrgid(gid: int) -> grp.struct_group:
+        assert gid == 80
+        if not isinstance(lookup, str):
+            raise lookup
+        return grp.struct_group((lookup, "x", gid, []))
+
+    monkeypatch.setattr(host_tools, "lstat", info)
+    monkeypatch.setattr(grp, "getgrgid", getgrgid)
+    if case == ("darwin", 0, 80, "admin", 0o775):
+        assert host_tools.executable_chain(executable, 1000, ()) == (executable,)
+    else:
+        with pytest.raises(Invalid) as caught:
+            host_tools.executable_chain(executable, 1000, ())
+        assert str(caught.value) == (
+            f"untrusted host executable component: {directory}"
+        )
 
 
 def test_env_alias_keeps_every_hop_and_checks_its_selected_target(
