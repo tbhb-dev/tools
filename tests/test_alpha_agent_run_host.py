@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import grp
 import io
 import json
 import os
@@ -2015,7 +2016,12 @@ def test_checked_policy_supplies_all_protected_paths(
         expected,
         (str(tmp_path / "host-bin" / "true"),)
         * (len(names) + 1 + (harness is Harness.CODEX))
-        + (str(tmp_path / "host-bin"),) * (len(names) + 1 + (harness is Harness.CODEX)),
+        + (
+            ()
+            if (tmp_path / "host-bin/true").is_symlink()
+            else (str(tmp_path / "host-bin"),)
+            * (len(names) + 1 + (harness is Harness.CODEX))
+        ),
     ]
     assert supplied == [expected_paths] * 3
     for index in (0, 2):
@@ -3522,6 +3528,8 @@ def test_developer_git_paths_are_protected(
 
     monkeypatch.setattr(host_tools, "resolve", resolve)
     developer = str(tmp_path / "Developer/usr/bin/git")
+    Path(developer).parent.mkdir(parents=True)
+    Path(developer).write_bytes(b"binary")
     protections: list[tuple[str, ...]] = []
     checked: list[str] = []
     original = run_host.policy.protect_host
@@ -3584,3 +3592,141 @@ def test_executable_chain_through_private_codex_home_is_refused(
     monkeypatch.setattr(host_tools, "resolve", resolve)
     with pytest.raises(Invalid, match="untrusted host executable component"):
         run_host.checked_policy(run, paths)
+
+
+@pytest.fixture
+def selected_xcode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> run_host.Run:
+    """Model Apple's selection links without consulting the host filesystem."""
+    run = make_run(tmp_path)
+    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=Os.MACOS))
+    links = {
+        Path("/var"): Path("private/var"),
+        Path("/var/db/xcode_select_link"): Path(
+            "/Applications/Xcode.app/Contents/Developer"
+        ),
+        Path("/private/var/db/xcode_select_link"): Path(
+            "/Applications/Xcode.app/Contents/Developer"
+        ),
+        Path("/root-alias"): Path("/"),
+    }
+    original_resolve = Path.resolve
+    original_link = Path.is_symlink
+    original_readlink = Path.readlink
+    virtual = ("/var", "/private", "/Applications", "/usr", "/tool", "/root-alias")
+
+    def resolve(path: Path, *, strict: bool = False) -> Path:
+        if not any(path.is_relative_to(prefix) for prefix in virtual):
+            return original_resolve(path, strict=strict)
+        for link, target in links.items():
+            if path.is_relative_to(link):
+                return resolve(
+                    link.parent / target / path.relative_to(link), strict=strict
+                )
+        return path
+
+    def is_symlink(path: Path) -> bool:
+        if any(path.is_relative_to(prefix) for prefix in virtual):
+            return path in links
+        return original_link(path)
+
+    def readlink(path: Path) -> Path:
+        if path in links:
+            return links[path]
+        return original_readlink(path)
+
+    def lstat(path: Path) -> os.stat_result:
+        mode = stat.S_IFLNK if is_symlink(path) else stat.S_IFDIR
+        return os.stat_result((mode | 0o775, 0, 0, 1, 0, 80, 0, 0, 0, 0))
+
+    def command(name: str, *_args: object, **_kwargs: object) -> str:
+        return f"/usr/bin/{name}"
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    monkeypatch.setattr(Path, "is_symlink", is_symlink)
+    monkeypatch.setattr(Path, "readlink", readlink)
+    monkeypatch.setattr(host_tools, "lstat", lstat)
+    monkeypatch.setattr(host_tools.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        grp, "getgrgid", constant(grp.struct_group(("admin", "*", 80, [])))
+    )
+    monkeypatch.setattr(host_tools, "resolve", command)
+    monkeypatch.setattr(host_tools, "executable_header", constant(b"binary"))
+    monkeypatch.setattr(codex_install, "prepare", constant(("/usr/bin/codex", ())))
+    return run
+
+
+def test_checked_policy_xcode_protected_tuple(
+    selected_xcode: run_host.Run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    protections: list[tuple[str, ...]] = []
+
+    def protect(
+        _settings: Settings, _paths: run_host.RunPaths, protected: tuple[str, ...]
+    ) -> None:
+        protections.append(protected)
+
+    monkeypatch.setattr(run_host.policy, "protect_host", protect)
+    run_host.checked_policy(selected_xcode, preparation(selected_xcode).paths)
+    assert protections[-1] == (
+        "/var/db/xcode_select_link",
+        "/var",
+        "/private/var/db/xcode_select_link",
+        "/Applications/Xcode.app/Contents/Developer",
+        "/Applications/Xcode.app/Contents/Developer/usr/bin/git",
+        "/usr/bin/codex",
+        "/usr/bin/codex",
+        "/usr/bin/git",
+        "/usr/bin/ssh-agent",
+        "/usr/bin/ssh-add",
+        "/usr/bin/ssh",
+        "/usr/bin/openssl",
+        "/usr/bin/sysctl",
+        "/usr/bin/ps",
+        "/usr/bin/security",
+        "/Applications/Xcode.app/Contents",
+        "/Applications/Xcode.app/Contents/Developer/usr/bin",
+        *("/usr/bin",) * 10,
+    )
+    assert all("/" not in protected for protected in protections)
+
+
+def test_checked_policy_allows_selected_xcode(selected_xcode: run_host.Run) -> None:
+    value, executable = run_host.checked_policy(
+        selected_xcode, preparation(selected_xcode).paths
+    )
+    assert executable == "/usr/bin/codex"
+    assert isinstance(value.detail, CodexPolicy)
+
+
+@pytest.mark.parametrize("executable", ["/tool", "/root-alias/tool"])
+def test_checked_policy_never_adds_a_parent_resolving_to_root(
+    selected_xcode: run_host.Run, monkeypatch: pytest.MonkeyPatch, executable: str
+) -> None:
+    monkeypatch.setattr(codex_install, "prepare", constant((executable, ())))
+    monkeypatch.setattr(host_tools, "git_shim_paths", constant(()))
+    assert run_host.executable_parents((executable,)) == ()
+    run_host.checked_policy(selected_xcode, preparation(selected_xcode).paths)
+
+
+@pytest.mark.parametrize("kind", ["executable", "link", "parent"])
+def test_checked_policy_still_refuses_executable_link_and_parent_overlap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    run = make_run(tmp_path)
+    entry = str(tmp_path / "tools" / "binary")
+    link = str(tmp_path / "links" / "alias")
+    write, protected = {
+        "executable": (entry, entry),
+        "link": (link + "/cache", link),
+        "parent": (str(tmp_path / "tools" / "cache"), str(tmp_path / "tools")),
+    }[kind]
+    paths = dataclasses.replace(preparation(run).paths, worktree=write)
+    monkeypatch.setattr(host_tools, "git_shim_paths", constant((entry, link)))
+    monkeypatch.setattr(host_tools, "executable_links", constant((link,)))
+    monkeypatch.setattr(host_tools, "executable_header", constant(b"binary"))
+    with pytest.raises(Invalid) as caught:
+        run_host.checked_policy(run, paths)
+    assert str(caught.value) == (
+        f"protected host path {protected} overlaps write root {write}; "
+        "narrow that write root"
+    )
