@@ -473,7 +473,7 @@ def probe_token_env(harness: Harness) -> dict[str, str]:
     if harness is not Harness.CLAUDE or not (path := os.environ.get(variable)):
         return {}
     try:
-        token = Path(path).read_text().rstrip()
+        token = Path(path).read_text().strip()
     except OSError:
         msg = f"cannot read {variable}: {path}"
         raise ValueError(msg) from None
@@ -557,7 +557,7 @@ def run_probe(
 
 
 @live_only
-@pytest.mark.parametrize("harness", [Harness.CODEX])
+@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
 def test_build_sandboxes_refuse_user_sockets(tmp_path: Path, harness: Harness) -> None:
     run, paths = probe_run(tmp_path, harness)
     if harness is Harness.AGY:
@@ -585,7 +585,8 @@ def test_build_sandboxes_refuse_user_sockets(tmp_path: Path, harness: Harness) -
     )
     try:
         with ExitStack() as stack:
-            stack.enter_context(codex_auth(run, paths, run.home, tmp_path))
+            if harness is Harness.CODEX:
+                stack.enter_context(codex_auth(run, paths, run.home, tmp_path))
             run_probe(run, paths, str(Path(installed).resolve()), stack)
     except (Invalid, OSError, subprocess.TimeoutExpired, AssertionError) as error:
         report_unproven(harness)

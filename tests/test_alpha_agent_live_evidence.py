@@ -154,6 +154,7 @@ def test_no_live_evidence_fails_instead_of_skipping(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("CODEX_SANDBOX", "test" if reason == "sandbox" else "")
+    attempts: list[bool] = []
 
     def installed(_name: str) -> str | None:
         return None if reason == "missing" else "/example/codex"
@@ -164,13 +165,23 @@ def test_no_live_evidence_fails_instead_of_skipping(
         _installed: str,
         _stack: ExitStack,
     ) -> None:
+        attempts.append(True)
         msg = "policy refused"
         raise Invalid(msg)
 
     monkeypatch.setattr(live.shutil, "which", installed)
     monkeypatch.setattr(live, "run_probe", refused)
-    with pytest.raises(pytest.fail.Exception):
+    with pytest.raises(pytest.fail.Exception) as error:
         live.test_build_sandboxes_refuse_user_sockets(tmp_path, Harness.CODEX)
+    assert (
+        str(error.value)
+        == {
+            "sandbox": "coordinator must run outside the agent sandbox",
+            "missing": "codex: harness binary not installed",
+            "policy": "codex: no sandbox evidence (Invalid)",
+        }[reason]
+    )
+    assert bool(attempts) is (reason == "policy")
     output = capsys.readouterr().out
     assert all(f"codex {label}: unproven" in output for label in EXTRA)
 
@@ -234,6 +245,21 @@ def test_default_suite_runs_harness_free_sandbox_probes(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert "11 passed" in result.stdout, result.stdout
     assert "SKIPPED" not in result.stdout
+
+
+def test_live_socket_probe_collects_both_harnesses(tmp_path: Path) -> None:
+    result = run_default_pytest(
+        tmp_path,
+        "-v",
+        str(Path(live.__file__)),
+        "-k",
+        "test_build_sandboxes_refuse_user_sockets",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    for harness in (Harness.CODEX, Harness.CLAUDE):
+        case = f"test_build_sandboxes_refuse_user_sockets[{harness}] SKIPPED"
+        assert case in result.stdout, result.stdout
+    assert "2 skipped" in result.stdout, result.stdout
 
 
 @dataclasses.dataclass
@@ -433,7 +459,7 @@ def test_probe_token_file_only_reaches_the_claude_environment(
                 configured and harness is Harness.CLAUDE
             )
             matches = environment.get(credentials.CLAUDE_TOKEN_ENV) == (
-                " example-token-value"
+                "example-token-value"
                 if configured and harness is Harness.CLAUDE
                 else None
             )
@@ -505,16 +531,86 @@ def test_live_entry_preserves_the_token_file_error(
     ) -> tuple[run_host.Run, run_host.RunPaths]:
         return run, paths
 
-    def auth(*_args: object) -> nullcontext[None]:
-        return nullcontext(None)
-
     monkeypatch.setattr(live.shutil, "which", installed)
     monkeypatch.setattr(live, "probe_run", prepared)
-    monkeypatch.setattr(live, "codex_auth", auth)
     with pytest.raises(ValueError, match="TBHBDEV_LIVE_CLAUDE_TOKEN_FILE") as error:
         live.test_build_sandboxes_refuse_user_sockets(run.tmpdir.parent, Harness.CLAUDE)
     assert "TBHBDEV_LIVE_CLAUDE_TOKEN_FILE" in str(error.value)
     assert str(token_file) in str(error.value)
+
+
+@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
+def test_live_entry_runs_the_selected_harness(
+    monkeypatch: pytest.MonkeyPatch, token_probe: TokenProbe, harness: Harness
+) -> None:
+    run, paths, calls = token_probe
+    monkeypatch.setenv("CODEX_SANDBOX", "")
+    original = live.shutil.which
+    lookups: list[str] = []
+    auth_calls: list[tuple[object, ...]] = []
+
+    def installed(name: str) -> str | None:
+        lookups.append(name)
+        return "/example/harness" if name == harness.value else original(name)
+
+    def prepared(
+        root: Path, actual_harness: Harness
+    ) -> tuple[run_host.Run, run_host.RunPaths]:
+        assert root == run.tmpdir.parent
+        assert actual_harness is harness
+        assert run.request.claude_profile == (
+            "primary" if harness is Harness.CLAUDE else None
+        )
+        return run, paths
+
+    def auth(*args: object) -> nullcontext[None]:
+        auth_calls.append(args)
+        return nullcontext(None)
+
+    original_probe = live.run_probe
+
+    def probe(
+        actual: run_host.Run,
+        actual_paths: run_host.RunPaths,
+        executable: str,
+        stack: ExitStack,
+    ) -> None:
+        assert actual.settings.sandbox.host_path == (
+            *run.settings.sandbox.host_path,
+            "/example",
+        )
+        assert actual_paths == paths
+        assert executable == "/example/harness"
+        original_probe(actual, actual_paths, executable, stack)
+
+    monkeypatch.setattr(live.shutil, "which", installed)
+    monkeypatch.setattr(live, "probe_run", prepared)
+    monkeypatch.setattr(live, "codex_auth", auth)
+    monkeypatch.setattr(live, "run_probe", probe)
+    live.test_build_sandboxes_refuse_user_sockets(run.tmpdir.parent, harness)
+    assert lookups[0] == harness.value
+    assert len(calls) == 4
+    assert all(call.command[0] == "/example/harness" for call in calls)
+    assert bool(auth_calls) is (harness is Harness.CODEX)
+
+
+def test_agy_live_entry_reports_the_policy_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    original = live.report_agy_refusals
+
+    def report(
+        config: run_host.Settings, host: run_host.Host, paths: run_host.RunPaths
+    ) -> None:
+        assert isinstance(paths, run_host.RunPaths)
+        original(config, host, paths)
+
+    monkeypatch.setattr(live, "report_agy_refusals", report)
+    live.test_build_sandboxes_refuse_user_sockets(tmp_path, Harness.AGY)
+    assert capsys.readouterr().out == (
+        "agy build: refused by policy\nagy review: refused by policy\n"
+    )
 
 
 @pytest.mark.parametrize("harness", [Harness.CLAUDE])
