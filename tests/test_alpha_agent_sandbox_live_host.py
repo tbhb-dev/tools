@@ -303,7 +303,7 @@ def test_terminal_probe_requires_ioctl_denial(
             "temp" if profile is Profile.BUILD else "audit"
         )
         witness.write_text(
-            json.dumps({"attempted": True, "error": error if sandbox else 0})
+            json.dumps(terminal_record(attempted=True, error=error if sandbox else 0))
         )
         return TerminalObservation(b"" if sandbox else INPUT_MARKER, 0)
 
@@ -332,7 +332,7 @@ def fake_terminal_observation(
     witness = Path(shlex.split(target.read_text())[-1]) if sandbox else target
     if not sandbox or failure != "not-executed":
         witness.write_text(
-            json.dumps({"attempted": True, "error": 1 if sandbox else 0})
+            json.dumps(terminal_record(attempted=True, error=1 if sandbox else 0))
         )
     inputs = INPUT_MARKER if not sandbox and failure != "control-failed" else b""
     return TerminalObservation(inputs, exit_code if sandbox else 0)
@@ -450,6 +450,62 @@ def terminal_control_state(*, kernel_blocked: bool, inputs: bytes) -> str:
     return "injected" if INPUT_MARKER in inputs else "failed"
 
 
+def terminal_record(attempted: bool, error: int) -> dict[str, object]:
+    return {
+        "attempted": attempted,
+        "error": error,
+        "inherited": [
+            {"descriptor": fd, "attempted": True, "error": 1} for fd in range(3)
+        ],
+    }
+
+
+@pytest.mark.usefixtures("fake_host_tools")
+@pytest.mark.parametrize("descriptor", [None, 0, 1, 2])
+def test_terminal_legacy_input_enabled_checks_inherited_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, descriptor: int | None
+) -> None:
+    def observe(
+        command: tuple[str, ...],
+        _environment: dict[str, str],
+        _cwd: Path,
+        *,
+        prompt: str | None = None,
+        tty_file: Path | None = None,
+    ) -> TerminalObservation:
+        assert tty_file is not None
+        tty_file.write_text("/dev/pts/123")
+        target = Path(command[-1])
+        sandbox = target.suffix == ".sh"
+        assert (prompt is not None) is sandbox
+        witness = Path(shlex.split(target.read_text())[-1]) if sandbox else target
+        document = terminal_record(not sandbox, errno.ENOENT if sandbox else 0)
+        document["inherited"] = [
+            {
+                "descriptor": fd,
+                "attempted": True,
+                "error": 0 if fd == descriptor else errno.EPERM,
+            }
+            for fd in range(3)
+        ]
+        witness.write_text(json.dumps(document))
+        return TerminalObservation(b"" if sandbox else INPUT_MARKER, 0)
+
+    module = sys.modules[__name__]
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(module, "observe_terminal", observe)
+    monkeypatch.setattr(module, "legacy_input_setting", lambda: "1")
+    if descriptor is None:
+        test_live_terminal_injection(
+            tmp_path, monkeypatch, Harness.CODEX, Profile.BUILD
+        )
+    else:
+        with pytest.raises(AssertionError):
+            test_live_terminal_injection(
+                tmp_path, monkeypatch, Harness.CODEX, Profile.BUILD
+            )
+
+
 @live_only
 @pytest.mark.parametrize("harness", [Harness.CODEX])
 @pytest.mark.parametrize("profile", Profile)
@@ -536,8 +592,19 @@ def test_live_terminal_injection(
     )
     operation = "ioctl" if attempted else "open"
     report(f"{label}: {status}; {operation} error={error}; legacy_tiocsti={setting}")
+    inherited = host_probe.inherited_terminal_statuses(
+        control.inputs,
+        probe.inputs,
+        observed["inherited"],
+        kernel_blocked=kernel_blocked,
+    )
+    for descriptor, result in inherited.items():
+        report(f"{label} fd={descriptor}: {result}; legacy_tiocsti={setting}")
     if status == "unproven":
         pytest.fail(f"{label}: unproven; control failed; legacy_tiocsti={setting}")
+    assert all(
+        result in {"blocked", "blocked by kernel"} for result in inherited.values()
+    )
     assert status in {"blocked", "blocked by kernel", "blocked by device namespace"}, (
         f"{label}: injected; {operation} error={error}"
     )
@@ -645,7 +712,7 @@ def test_terminal_kernel_refusal_is_a_passing_observation(
         sandbox = target.suffix == ".sh"
         witness = Path(shlex.split(target.read_text())[-1]) if sandbox else target
         witness.write_text(
-            json.dumps({"attempted": True, "error": error if sandbox else 1})
+            json.dumps(terminal_record(attempted=True, error=error if sandbox else 1))
         )
         return TerminalObservation(b"", 0)
 
@@ -702,7 +769,7 @@ def test_terminal_witness_distinguishes_open_failure_from_ioctl_denial(
         return 321
 
     def refused(descriptor: int, operation: int, value: bytes) -> Never:
-        assert descriptor == 321
+        assert descriptor in (0, 1, 2, 321)
         assert operation == host_probe.termios.TIOCSTI
         assert value == INPUT_MARKER[:1]
         raise OSError(errno.EPERM, "fixture ioctl refused")
@@ -711,9 +778,14 @@ def test_terminal_witness_distinguishes_open_failure_from_ioctl_denial(
     monkeypatch.setattr(host_probe.os, "close", closed.append)
     monkeypatch.setattr(host_probe.fcntl, "ioctl", refused)
     host_probe.inject_terminal(witness)
-    assert json.loads(witness.read_text()) == {
-        "attempted": opened,
-        "error": errno.EPERM if opened else errno.ENXIO,
+    assert json.loads(witness.read_text()) == terminal_record(
+        opened, errno.EPERM if opened else errno.ENXIO
+    ) | {
+        "descriptor": "/dev/tty",
+        "inherited": [
+            {"descriptor": fd, "attempted": True, "error": errno.EPERM}
+            for fd in range(3)
+        ],
     }
     assert closed == ([321] if opened else [])
 
@@ -835,7 +907,7 @@ def test_terminal_helper_opens_the_named_tty_without_a_controlling_session(
         return 123
 
     def inject(descriptor: int, operation: int, value: bytes) -> None:
-        assert descriptor == 123
+        assert descriptor in (0, 1, 2, 123)
         assert operation == host_probe.termios.TIOCSTI
         injected.append(value)
 
@@ -843,9 +915,16 @@ def test_terminal_helper_opens_the_named_tty_without_a_controlling_session(
     monkeypatch.setattr(host_probe.os, "close", closed.append)
     monkeypatch.setattr(host_probe.fcntl, "ioctl", inject)
     host_probe.main("inject", [str(tty_file), str(witness)])
-    assert b"".join(injected) == INPUT_MARKER
+    assert b"".join(injected) == INPUT_MARKER * 4
     assert closed == [123]
-    assert json.loads(witness.read_text()) == {"attempted": True, "error": 0}
+    assert json.loads(witness.read_text()) == {
+        "descriptor": "/dev/fixture-tty",
+        "attempted": True,
+        "error": 0,
+        "inherited": [
+            {"descriptor": fd, "attempted": True, "error": 0} for fd in range(3)
+        ],
+    }
 
 
 def test_terminal_wrapper_reads_input_before_the_session_leader_exits(
@@ -947,10 +1026,9 @@ def test_terminal_linux_device_namespace_observation(
         witness = Path(shlex.split(target.read_text())[-1]) if sandbox else target
         witness.write_text(
             json.dumps(
-                {
-                    "attempted": not sandbox or not terminal,
-                    "error": error if sandbox else errno.EPERM,
-                }
+                terminal_record(
+                    not sandbox or not terminal, error if sandbox else errno.EPERM
+                )
             )
         )
         return TerminalObservation(b"", 0)

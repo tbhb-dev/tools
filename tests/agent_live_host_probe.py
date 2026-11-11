@@ -246,20 +246,65 @@ def terminal_status(
     return "blocked"
 
 
+def terminal_ioctl(descriptor: int) -> int:
+    try:
+        for byte in INPUT_MARKER:
+            fcntl.ioctl(descriptor, termios.TIOCSTI, bytes([byte]))
+    except OSError as exc:
+        return exc.errno or 1
+    return 0
+
+
 def inject_terminal(witness: Path, terminal: str = "/dev/tty") -> None:
     attempted = False
     error = 0
     try:
         descriptor = os.open(terminal, os.O_RDONLY | os.O_NOCTTY)
         try:
-            for byte in INPUT_MARKER:
-                attempted = True
-                fcntl.ioctl(descriptor, termios.TIOCSTI, bytes([byte]))
+            attempted = True
+            error = terminal_ioctl(descriptor)
         finally:
             os.close(descriptor)
     except OSError as exc:
         error = exc.errno or 1
-    witness.write_text(json.dumps({"attempted": attempted, "error": error}))
+    inherited = [
+        {"descriptor": fd, "attempted": True, "error": terminal_ioctl(fd)}
+        for fd in range(3)
+    ]
+    witness.write_text(
+        json.dumps(
+            {
+                "descriptor": terminal,
+                "attempted": attempted,
+                "error": error,
+                "inherited": inherited,
+            }
+        )
+    )
+
+
+def inherited_terminal_statuses(
+    control: bytes,
+    observed: bytes,
+    attempts: list[dict[str, int | bool]],
+    *,
+    kernel_blocked: bool,
+) -> dict[int, str]:
+    assert [attempt["descriptor"] for attempt in attempts] == [0, 1, 2]
+    statuses = {}
+    for attempt in attempts:
+        descriptor = attempt["descriptor"]
+        attempted = attempt["attempted"]
+        error = attempt["error"]
+        assert isinstance(attempted, bool)
+        assert isinstance(error, int)
+        statuses[descriptor] = terminal_status(
+            control,
+            observed,
+            TerminalAttempt(attempted=attempted, error=error),
+            kernel_blocked=kernel_blocked,
+        )
+    return statuses
 
 
 def legacy_input_setting() -> str:
