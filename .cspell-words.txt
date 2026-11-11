@@ -266,3 +266,10 @@ NOCTTY
 
 bwrap
 ENOENT
+esac
+hookspath
+includeif
+nullglob
+precheck
+shopt
+sshcommand

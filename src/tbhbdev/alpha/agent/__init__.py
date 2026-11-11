@@ -3,16 +3,18 @@
 import sys
 
 from tbhbdev import userconfig
+from tbhbdev.alpha.agent import precheck, settings
 from tbhbdev.alpha.agent import run_host as run_host
-from tbhbdev.alpha.agent import settings
 
-__all__ = ["main", "settings"]
+__all__ = ["main", "precheck", "settings"]
 
 
 def main(_argv: list[str], prog: str) -> int:
-    """Dispatch the host supervisor or validate the agent settings."""
+    """Dispatch clone checks, the host supervisor or settings validation."""
     if _argv and _argv[0] == "run-host":
         return run_host.main(_argv[1:], f"{prog} run-host")
+    if _argv and _argv[0] == "precheck":
+        return precheck.main(_argv[1:], f"{prog} precheck")
     try:
         settings.load()
     except userconfig.ConfigError as exc:
