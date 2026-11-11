@@ -374,7 +374,14 @@ def _proven_harnesses(table: _Table) -> tuple[Harness, ...]:
 
 def _host(table: _Table) -> Host:
     table.only(
-        "name", "os", "shell", "account", "unsandboxed", "accounts", "proven_harnesses", "tbhbdev"
+        "name",
+        "os",
+        "shell",
+        "account",
+        "unsandboxed",
+        "accounts",
+        "proven_harnesses",
+        "tbhbdev",
     )
     name = _check_name(table, "name", table.text("name"), HOST_NAME)
     os = table.choice("os", Os)
@@ -394,7 +401,14 @@ def _host(table: _Table) -> Host:
     if program is not None and not program.startswith("/"):
         table.fail("tbhbdev", "must be an absolute path")
     return Host(
-        name, os, shell, account, unsandboxed, accounts, _proven_harnesses(table), program
+        name,
+        os,
+        shell,
+        account,
+        unsandboxed,
+        accounts,
+        _proven_harnesses(table),
+        program,
     )
 
 

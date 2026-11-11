@@ -159,7 +159,6 @@ def request(
         variant=None,
         role=None,
         unsandboxed=unsandboxed,
-        tainted_host=False,
         authorized_by="example-org/example-repo#1" if unsandboxed else None,
         startup_deadline_seconds=120,
         tainted_host=False,

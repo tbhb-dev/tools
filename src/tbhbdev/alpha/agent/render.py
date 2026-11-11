@@ -1,5 +1,6 @@
 """The brief a harness receives, from literal text and run kind."""
 
+from tbhbdev.alpha.agent.decisions import driver as rules
 from tbhbdev.alpha.agent.model import RunKind
 
 FINAL_ONLY = (
@@ -10,6 +11,7 @@ FINAL_ONLY = (
 
 def brief(kind: RunKind, text: str) -> str:
     return f"{FINAL_ONLY}\n{text}" if kind is RunKind.EXEC else text
+
 
 from tbhbdev.alpha.agent import transport
 
