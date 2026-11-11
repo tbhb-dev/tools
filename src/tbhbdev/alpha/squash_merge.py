@@ -24,7 +24,8 @@ fit 72 characters, or the script stops. The body comes from the PR body:
   reference list after the last section, because the URL usually is the issue or
   the spec the sentence points at, and a commit message cannot hold a link.
 - The PR body's final Generated-by and Assisted-by paragraph becomes the
-  commit's trailer block, as written and never wrapped. The script checks that
+  commit's trailer block, as written and never wrapped. The merge refuses an
+  agent-authored PR without a valid final block. The script checks that
   ``git interpret-trailers --parse`` reads it back unchanged. Its
   ``Opened-by`` line, which ``tbhbdev alpha pr create`` writes for the guard,
   is dropped first: the commit-msg check doesn't accept that key.
@@ -66,6 +67,7 @@ import re
 import shlex
 import sys
 from dataclasses import dataclass
+from email.utils import parseaddr
 from itertools import takewhile
 from typing import TYPE_CHECKING, NoReturn, cast
 
@@ -81,7 +83,7 @@ GH = "gh"
 GIT = "git"
 VIEW_FIELDS = (
     "title,body,headRefOid,baseRefName,state,isDraft,mergeable,"
-    "mergeStateStatus,statusCheckRollup,author,url"
+    "mergeStateStatus,statusCheckRollup,author,url,commits"
 )
 # gh's merge states that mean "not now", with the reason GitHub already computed.
 REFUSED_STATES = frozenset({"BLOCKED", "BEHIND", "DIRTY", "DRAFT", "UNKNOWN"})
@@ -117,6 +119,7 @@ class PullRequest:
     failing: list[str]
     renovate: bool = False
     url: object = None
+    agent: bool = False
 
 
 @dataclass(frozen=True)
@@ -373,17 +376,20 @@ def body_blocks(lines: Sequence[pr.Line], refs: dict[str, int]) -> list[str]:
     return [part for part in parts if part]
 
 
-def check_trailers(trailers: Sequence[str], text_lines: Sequence[pr.Line]) -> None:
-    """Refuse a PR body with stray trailer lines or an invalid trailer block."""
+def check_trailers(
+    trailers: Sequence[str], text_lines: Sequence[pr.Line], *, agent: bool = False
+) -> None:
+    """Refuse stray or invalid trailers and an agent PR's missing final block."""
     problems = [why for _, why in pr.trailer_problems(text_lines)]
-    for trailer in trailers:
-        # split_trailers kept only lines that match agent_identity.LINE.
-        why = agent_identity.check_value(trailer.partition(":")[2].strip())
-        if why:
-            problems.append(f"invalid trailer {trailer!r}: {why}")
+    problems.extend(
+        f"invalid trailer block: {why}"
+        for why in agent_identity.check_message("\n".join(trailers))
+    )
+    if agent and not trailers:
+        problems.append("agent PR is missing final trailer paragraph")
     if problems:
         message = "the PR body cannot be merged as is: " + "; ".join(problems)
-        stop(message)
+        stop(message + "; add a valid trailer paragraph with tbhbdev alpha pr edit")
 
 
 def check_round_trip(message: str, trailers: Sequence[str]) -> None:
@@ -437,7 +443,9 @@ def renovate_body(body: str) -> str:
     return "\n".join(unique) + "\n" if unique else ""
 
 
-def build_message(title: str, number: int, body: str) -> Message:
+def build_message(
+    title: str, number: int, body: str, *, agent: bool = False
+) -> Message:
     """The squash commit message for a PR.
 
     Raises:
@@ -455,7 +463,7 @@ def build_message(title: str, number: int, body: str) -> Message:
             f"the PR body is malformed: line {unclosed + 1}: code fence is never closed"
         )
     rest, trailers = split_trailers(drop_opened(lines))
-    check_trailers(trailers, rest)
+    check_trailers(trailers, rest, agent=agent)
     refs: dict[str, int] = {}
     parts = body_blocks(rest, refs)
     if refs:
@@ -512,13 +520,19 @@ def fetch(number: int) -> PullRequest:
     if done.returncode != 0:
         stop(f"gh pr view failed: {' '.join(done.stderr.split())}")
     try:
-        data: dict[str, object] = json.loads(done.stdout)
+        data = json.loads(done.stdout)
     except ValueError as exc:
         stop(f"gh pr view returned something that is not JSON: {exc}")
-    author = data.get("author")
-    who = cast("dict[str, object]", author) if isinstance(author, dict) else {}
+    who = agent_identity.as_dict(data.get("author")) or {}
+    commits = data.get("commits", [])
+    _, email = parseaddr(agent_identity.AGENT_IDENT)
     return PullRequest(
-        renovate=who.get("is_bot") is True and RENOVATE in str(who.get("login", "")),
+        agent=any(
+            author["email"] == email
+            for commit in commits
+            for author in commit["authors"]
+        ),
+        renovate=who.get("is_bot") is True and RENOVATE in str(who.get("login")),
         title=str(data.get("title", "")),
         body=str(data.get("body") or ""),
         head=str(data.get("headRefOid", "")),
@@ -548,7 +562,9 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
     if reasons := refusals(request):
         stop(f"not merging PR #{args.number}: " + "; ".join(reasons))
     body = renovate_body(request.body) if request.renovate else request.body
-    message = build_message(request.title, args.number, body)
+    message = build_message(
+        request.title, args.number, body, agent=request.agent and not request.renovate
+    )
     pr.scan_secrets(
         message.text(),
         f"the squash message for PR #{args.number}",
