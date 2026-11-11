@@ -119,7 +119,7 @@ def test_live_git_probe_plants_hooks_only_in_the_scratch_run_home(
 
     def native(
         actual: run_host.Run, actual_paths: run_host.RunPaths, _command: str
-    ) -> None:
+    ) -> bool:
         assert actual.home == run.home
         assert actual.settings.sandbox.write_roots == (
             (str(root / "harness-write"),) if temp_write else ()
@@ -132,6 +132,7 @@ def test_live_git_probe_plants_hooks_only_in_the_scratch_run_home(
             "auth.json"
         ]
         (workspace / "shell-control").write_text("invoked")
+        return True
 
     monkeypatch.setattr(parent, "real_clone", clone)
     monkeypatch.setattr(parent.shutil, "which", installed)
