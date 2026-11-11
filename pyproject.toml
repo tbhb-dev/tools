@@ -56,6 +56,9 @@ dev = [
 # PATH. This range is uv refusing to run rather than another minor line
 # rewriting uv.lock. Move it with the mise pin.
 required-version = ">=0.13.0,<0.14"
+# Lock refreshes skip releases younger than 5 days, the same cooldown
+# Renovate applies to version bumps.
+exclude-newer = "5 days"
 
 [tool.complexipy]
 paths = ["src"]
