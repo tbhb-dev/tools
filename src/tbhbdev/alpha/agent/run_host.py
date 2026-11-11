@@ -259,6 +259,7 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
             for name in ("sysctl", "ps", "security")
         )
     executables = (
+        *host_tools.git_shim_paths(commands[0], run.host.os, resolved.uid, write_roots),
         *source_paths,
         *host_tools.executable_paths(
             executable, value.env["PATH"], uid=resolved.uid, write_roots=write_roots

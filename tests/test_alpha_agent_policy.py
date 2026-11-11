@@ -170,6 +170,7 @@ def test_environment_is_exactly_the_allowlist(
         "LANG",
         "TERM",
         "EXAMPLE_PARENT",
+        "DEVELOPER_DIR",
     ):
         monkeypatch.setenv(name, "/parent-value")
     result = made(os, profile, harness, account)

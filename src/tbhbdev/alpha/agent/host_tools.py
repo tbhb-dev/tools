@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 from tbhbdev.alpha.agent.model import Invalid, Os, Settings
 
 _LINUX_LINK_MODE = 0o777
+_XCODE_SELECT_LINK = "/var/db/xcode_select_link"
+_COMMAND_LINE_TOOLS = "/Library/Developer/CommandLineTools"
 
 _SEARCH: ContextVar[str] = ContextVar(
     "host_search", default="/usr/bin:/bin:/usr/sbin:/sbin"
@@ -183,6 +185,31 @@ def executable_paths(
             current = env_target(words, executable, search)
     message = f"host script {executable} has an interpreter cycle"
     raise Invalid(message)
+
+
+def git_shim_paths(
+    executable: str, operating_system: Os, uid: int, write_roots: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Check the developer directory selected by Apple's system git shim."""
+    if operating_system is not Os.MACOS or Path(executable).resolve() != Path(
+        "/usr/bin/git"
+    ):
+        return ()
+    try:
+        try:
+            developer = Path(_XCODE_SELECT_LINK).readlink()
+        except FileNotFoundError:
+            developer = Path(_COMMAND_LINE_TOOLS)
+            selection: tuple[str, ...] = ()
+        else:
+            selection = executable_chain(_XCODE_SELECT_LINK, uid, write_roots)
+        return (
+            *selection,
+            *executable_chain(str(developer / "usr/bin/git"), uid, write_roots),
+        )
+    except OSError as exc:
+        message = "cannot inspect the developer git executable"
+        raise Invalid(message) from exc
 
 
 def installation() -> tuple[str, ...]:

@@ -242,6 +242,7 @@ def test_host_git_ignores_parent_git_and_other_variables(
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "/example/untrusted")
     monkeypatch.setenv("EXAMPLE_PARENT", "private")
+    monkeypatch.setenv("DEVELOPER_DIR", str(tmp_path / "untrusted-developer"))
     if socket is None:
         monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
     else:

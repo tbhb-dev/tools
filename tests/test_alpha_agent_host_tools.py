@@ -584,3 +584,117 @@ def test_account_owned_interpreters_outside_write_roots_are_accepted(
     assert host_tools.executable_paths(
         executable, str(tmp_path), uid=1234, write_roots=(str(tmp_path / "writable"),)
     ) == ((executable, launcher, selected) if env else (executable, selected))
+
+
+@pytest.mark.parametrize("operating_system", Os)
+@pytest.mark.parametrize("executable", ["/usr/bin/git", "/example/bin/git"])
+def test_git_shim_only_applies_to_system_git_on_macos(
+    monkeypatch: pytest.MonkeyPatch, operating_system: Os, executable: str
+) -> None:
+    if operating_system is Os.MACOS and executable == "/usr/bin/git":
+        return
+
+    def readlink(_path: str | os.PathLike[str]) -> str:
+        pytest.fail("other git executables must not inspect the developer directory")
+
+    monkeypatch.setattr(os, "readlink", readlink)
+    assert host_tools.git_shim_paths(executable, operating_system, 1000, ()) == ()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "xcode",
+        "account owned",
+        "account link",
+        "git write root",
+        "fallback",
+        "write root",
+        "group writable",
+        "other owner",
+        "link writable",
+        "link owner",
+        "missing git",
+        "missing fallback",
+        "unreadable",
+    ],
+)
+def test_git_shim_checks_selected_developer_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host_stat: dict[Path, tuple[int, int]],
+    case: str,
+) -> None:
+    selector = tmp_path / "xcode_select_link"
+    developer = tmp_path / "Xcode.app/Contents/Developer"
+    fallback = tmp_path / "CommandLineTools"
+    for directory in (developer, fallback):
+        (directory / "usr/bin").mkdir(parents=True)
+        script(directory / "usr/bin/git", "binary")
+    selector.symlink_to(developer, target_is_directory=True)
+    monkeypatch.setattr(host_tools, "_XCODE_SELECT_LINK", str(selector), raising=False)
+    monkeypatch.setattr(host_tools, "_COMMAND_LINE_TOOLS", str(fallback), raising=False)
+    readlink = os.readlink
+    reads: list[str] = []
+
+    def selected(path: str | os.PathLike[str], *, dir_fd: int | None = None) -> str:
+        if str(path) == str(selector):
+            reads.append(str(path))
+            if case in ("fallback", "missing fallback"):
+                raise FileNotFoundError
+            if case == "unreadable":
+                raise PermissionError
+        return readlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "readlink", selected)
+    roots: tuple[str, ...] = ()
+    if case == "account owned":
+        host_stat[developer] = (1000, stat.S_IFDIR | 0o755)
+        host_stat[developer / "usr/bin/git"] = (1000, stat.S_IFREG | 0o755)
+    elif case == "account link":
+        host_stat[selector] = (1000, stat.S_IFLNK | 0o755)
+    elif case == "git write root":
+        roots = (str(developer / "usr/bin/git"),)
+    elif case == "write root":
+        host_stat[developer] = (1000, stat.S_IFDIR | 0o755)
+        roots = (str(developer),)
+    elif case in ("group writable", "other owner"):
+        host_stat[developer] = (
+            (0, stat.S_IFDIR | 0o775)
+            if case == "group writable"
+            else (1001, stat.S_IFDIR | 0o755)
+        )
+    elif case in ("link writable", "link owner"):
+        host_stat[selector] = (
+            (0, stat.S_IFLNK | 0o775)
+            if case == "link writable"
+            else (1001, stat.S_IFLNK | 0o755)
+        )
+        monkeypatch.setattr(host_tools.sys, "platform", "darwin")
+    elif case in ("missing git", "missing fallback"):
+        directory = developer if case == "missing git" else fallback
+        (directory / "usr/bin/git").rename(directory / "usr/bin/moved-git")
+    if case in ("xcode", "account owned", "account link", "fallback"):
+        result = host_tools.git_shim_paths("/usr/bin/git", Os.MACOS, 1000, roots)
+        assert result == (
+            (str(selector), str(developer), str(developer / "usr/bin/git"))
+            if case != "fallback"
+            else (str(fallback / "usr/bin/git"),)
+        )
+    else:
+        with pytest.raises(Invalid) as caught:
+            host_tools.git_shim_paths("/usr/bin/git", Os.MACOS, 1000, roots)
+        component = (
+            developer / "usr/bin/git"
+            if case == "git write root"
+            else selector
+            if case.startswith("link") or case == "write root"
+            else developer
+        )
+        assert str(caught.value) == (
+            "cannot inspect the developer git executable"
+            if case in ("missing git", "missing fallback", "unreadable")
+            else f"untrusted host executable component: {component}"
+        )
+    assert reads
+    assert all(path == str(selector) for path in reads)

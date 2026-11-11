@@ -3496,3 +3496,58 @@ def test_codex_copy_refuses_overlapping_write_root(
     )
     with pytest.raises(Invalid, match=r"protected host path.*example-version"):
         run_host.checked_policy(run, run_host.planned_paths(run))
+
+
+def test_developer_git_paths_are_protected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = make_run(tmp_path)
+    paths = preparation(run).paths
+    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=Os.MACOS))
+    git = tmp_path / "host-bin/git"
+    git.write_bytes(b"binary")
+    git.chmod(0o755)
+    original_resolve = host_tools.resolve
+
+    def resolve(
+        name: str, path: str | None = None, *, follow_symlinks: bool = True
+    ) -> str:
+        return (
+            str(git)
+            if name == "git"
+            else original_resolve(name, path, follow_symlinks=follow_symlinks)
+        )
+
+    monkeypatch.setattr(host_tools, "resolve", resolve)
+    developer = str(tmp_path / "Developer/usr/bin/git")
+    protections: list[tuple[str, ...]] = []
+    checked: list[str] = []
+    original = run_host.policy.protect_host
+
+    def protect(
+        settings: run_host.Settings,
+        paths: run_host.RunPaths,
+        protected: tuple[str, ...],
+    ) -> None:
+        protections.append(protected)
+        original(settings, paths, protected)
+
+    def git_paths(
+        executable: str, operating_system: Os, uid: int, write_roots: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        assert executable == str(git)
+        assert operating_system is Os.MACOS
+        assert uid == paths.uid
+        assert paths.worktree in write_roots
+        assert paths.tmpdir in write_roots
+        assert paths.audit_dir in write_roots
+        checked.append(executable)
+        return (developer,)
+
+    monkeypatch.setattr(host_tools, "git_shim_paths", git_paths, raising=False)
+    monkeypatch.setattr(run_host.policy, "protect_host", protect)
+    run_host.checked_policy(run, paths)
+    assert checked == [str(git)]
+    assert developer in protections[-1]
+    assert str(Path(developer).parent) in protections[-1]
