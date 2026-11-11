@@ -142,6 +142,14 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 - `agent precheck CLONE --reference REF [--host HOST]` compares a clone's hooks with a local reference and checks its Git config for risky keys. Paths may be absolute or relative to the home directory. Collection uses one SSH call with `--host` and reads locally otherwise. It never runs Git. Exit codes are 0 for a match, 1 for mismatches, and 2 for usage or collection errors. The Python API `precheck(clone_data, reference)` returns the result for callers.
 - `agent` coordinates runs with `exec`, `wait`, `status`, `log`, `diff`, `kill`, `clean` and `keep`. `clear-taint HOST --reason TEXT` records local host clearance. The package also includes the run request's schema and the repo argument rules.
 - `install` installs the git hooks and the user-level harness hooks.
+- `tbhbdev alpha bazel-prune` deletes output bases for missing workspaces or bases idle for more than 14 days. It keeps bases with a process working in their workspace or base, and asks live servers to shut down before deletion. `--max-idle-days N` changes the idle limit, `--output-root DIR` selects the user output root, and `--json` prints the results as JSON. Deletion frees space immediately. Each run appends its summary to `~/.local/state/tbhbdev/bazel-prune.jsonl`, except with `--dry-run`. Scheduling is separate.
+
+Check the proposed deletions before freeing space:
+
+```sh
+tbhbdev alpha bazel-prune --dry-run
+tbhbdev alpha bazel-prune
+```
 
 Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does six things:
 

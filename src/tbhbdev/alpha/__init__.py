@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from tbhbdev.alpha import (
     agent,
+    bazel_prune,
     gh_shim,
     guard_gh_poll,
     guard_gh_pr,
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "agent",
+    "bazel_prune",
     "gh_shim",
     "guard_gh_poll",
     "guard_gh_pr",
@@ -76,6 +78,7 @@ commands:
   merge        squash-merge an approved pull request
   loop         validate loop configuration (runner not yet available)
   agent        exec | wait | status | kill | clean | keep: headless runs
+  bazel-prune  delete dead or idle Bazel output bases
   install      install the git hooks and the user-level harness hooks
 """
 
@@ -153,6 +156,7 @@ def install_command(argv: list[str], prog: str) -> int:
 
 
 COMMANDS: dict[str, Callable[[list[str], str], int]] = {
+    "bazel-prune": bazel_prune.main,
     "identity": identity_command,
     "guard-gh-pr": guard_command,
     "guard-op": guard_op_command,

@@ -18,6 +18,7 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -511,3 +512,31 @@ def stubs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Stubs:
     monkeypatch.setenv("STUB_DIR", str(stub_dir))
     monkeypatch.delenv(secrets.TEST_TOKEN_ENV, raising=False)
     return Stubs(stub_dir, bin_dir)
+
+
+@pytest.fixture
+def isolated_git(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Run Git-dependent checks in a disposable clone with local test identity."""
+    root = tmp_path_factory.mktemp("git-check")
+    home = tmp_path_factory.mktemp("git-home")
+    monkeypatch.setenv("HOME", str(home))
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    for kind in ("CONFIG", "DATA", "CACHE"):
+        monkeypatch.setenv(f"XDG_{kind}_HOME", str(home / kind.lower()))
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.chdir(root)
+    for arguments in (
+        ("init", "-q"),
+        ("config", "user.name", "Test"),
+        ("config", "user.email", "test@example.com"),
+    ):
+        subprocess.run(["git", *arguments], cwd=root, check=True, capture_output=True)
+    source = Path(__file__).resolve().parents[1]
+    for name in (".cspell-words.txt", ".cspell.jsonc", ".vale.ini", ".rumdl.toml"):
+        shutil.copy2(source / name, root / name)
+    shutil.copytree(source / ".github", root / ".github")
+    (root / ".vale").symlink_to(source / ".vale", target_is_directory=True)
+    return root
