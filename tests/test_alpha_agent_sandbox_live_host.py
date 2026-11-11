@@ -735,7 +735,6 @@ def test_live_codex_copy_denies_account_auth(
         (
             executable,
             "sandbox",
-            run.host.os.value,
             *overrides,
             "--",
             "/bin/sh",
@@ -759,10 +758,12 @@ def test_codex_copy_live_proof_uses_run_host_policy_and_fake_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     def execute(command: tuple[str, ...], **kwargs: object) -> CompletedProcess[str]:
-        assert command[1:3] == (
-            "sandbox",
-            "linux" if sys.platform == "linux" else "macos",
-        )
+        # HostSandboxArgs selects the OS at compile time (Codex rust-v0.164.0,
+        # codex-rs/cli/src/main.rs:483-486). Words after options are the command.
+        assert command[1:3] == ("sandbox", "-c")
+        assert command[-3:] == ("--", "/bin/sh", str(tmp_path / "copy-control.sh"))
+        assert "macos" not in command
+        assert "linux" not in command
         assert 'default_permissions="build"' in command
         table = next(word for word in command if word.startswith("permissions.build="))
         home = tmp_path / "scratch-home"
@@ -782,6 +783,42 @@ def test_codex_copy_live_proof_uses_run_host_policy_and_fake_auth(
         "codex standalone-copy-auth: blocked; worktree write: allowed"
         in capsys.readouterr().out
     )
+
+
+@pytest.mark.usefixtures("fake_host_tools")
+@pytest.mark.parametrize("failure", ["readable-auth", "missing-write", "changed-auth"])
+def test_codex_copy_control_requires_denial_and_worktree_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    shell_run = subprocess.run
+
+    def execute(command: tuple[str, ...], **kwargs: object) -> CompletedProcess[str]:
+        workspace = Path(str(kwargs["cwd"]))
+        if failure == "readable-auth":
+            # Outside a sandbox the planted auth is readable: the exact shell
+            # probe must fail before it can write its positive control.
+            result = shell_run(
+                command[-2:],
+                cwd=workspace,
+                env={"HOME": str(tmp_path / "scratch-home"), "PATH": os.defpath},
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            assert result.returncode == 91
+            assert not (workspace / "write-control").exists()
+            return result
+        if failure == "changed-auth":
+            (workspace / "write-control").write_text("invoked")
+            (tmp_path / "scratch-home" / ".codex" / "auth.json").write_text("changed")
+        return CompletedProcess(command, 0, stderr="fixture sandbox failure")
+
+    monkeypatch.setattr(
+        sys.modules[__name__], "subprocess", SimpleNamespace(run=execute)
+    )
+    with pytest.raises((AssertionError, FileNotFoundError)):
+        test_live_codex_copy_denies_account_auth(tmp_path, monkeypatch)
 
 
 def test_terminal_helper_opens_the_named_tty_without_a_controlling_session(
