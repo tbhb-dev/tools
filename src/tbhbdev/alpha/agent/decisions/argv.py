@@ -92,12 +92,10 @@ def tmux(sockets_dir: str, name: str, command: tuple[str, ...]) -> tuple[str, ..
         message = f"tmux session name {name!r} must match {NAME.pattern}"
         raise Invalid(message)
     socket = policy_module.resolve(sockets_dir, SOCKET)
+    socket_options = ("-S", socket, "-f", "/dev/null")
     return (
         executable("tmux"),
-        "-S",
-        socket,
-        "-f",
-        "/dev/null",
+        *socket_options,
         "new-session",
         "-d",
         "-s",
