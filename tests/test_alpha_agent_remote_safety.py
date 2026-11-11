@@ -1154,3 +1154,19 @@ def test_inspection_ignores_default_branch_only_commits(
     assert b"pushed change" in result.stdout
     assert b"upstream-only" not in result.stdout
     assert b"upstream only" not in result.stdout
+
+
+@pytest.mark.parametrize("xdg", [None, "", "relative/state", "absolute"])
+def test_remote_state_matches_run_host(
+    host: Path, monkeypatch: pytest.MonkeyPatch, xdg: str | None
+) -> None:
+    if xdg is None:
+        monkeypatch.delenv("XDG_STATE_HOME")
+    else:
+        monkeypatch.setenv(
+            "XDG_STATE_HOME", str(host / "state") if xdg == "absolute" else xdg
+        )
+    result = execute(remote.ROOT + "printf '%s' \"$d\"")
+    expected = host / ("state" if xdg == "absolute" else ".local/state")
+    assert result.returncode == 0
+    assert result.stdout.decode() == str(expected / "tbhbdev/agent-runs")

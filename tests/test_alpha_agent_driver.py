@@ -670,7 +670,7 @@ def test_metadata_round_trip_and_exclusive_create(remote: Remote) -> None:
         driver.save(run)
 
 
-@pytest.mark.parametrize("xdg", [None, ""])
+@pytest.mark.parametrize("xdg", [None, "", "relative/state"])
 def test_metadata_name_and_default_state(
     remote: Remote, monkeypatch: pytest.MonkeyPatch, xdg: str | None
 ) -> None:

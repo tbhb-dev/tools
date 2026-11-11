@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
 from tbhbdev import version
-from tbhbdev.alpha.agent import render, taint_store, transport
+from tbhbdev.alpha.agent import render, runfiles, taint_store, transport
 from tbhbdev.alpha.agent.decisions import driver as rules
 from tbhbdev.alpha.agent.decisions import remote, request, taint
 from tbhbdev.alpha.agent.decisions import runfiles_names as files
@@ -40,10 +40,7 @@ class Run:
 
 
 def directory() -> Path:
-    return (
-        Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
-        / files.DIRECTORY
-    )
+    return runfiles.state_home(Path.home()) / files.DIRECTORY
 
 
 def metadata_path(name: str) -> Path:

@@ -24,6 +24,7 @@ export PATH
 fi
 """
 ROOT = f"""state="${{XDG_STATE_HOME:-$HOME/.local/state}}"
+case "$state" in /*) ;; *) state="$HOME/.local/state" ;; esac
 for p in "$state" "$state/tbhbdev" "$state/{files.DIRECTORY}"; do
     test ! -L "$p" || exit 65
 done
