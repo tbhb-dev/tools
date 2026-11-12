@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
-"""`tbhbdev alpha identity`: agent-identity hooks, ported from ascm's interim tools.
+"""`tbhbdev alpha identity`: agent-identity hooks, ported from an earlier toolset.
 
-Until ascm writes commit trailers itself, this script stamps them from machine
+Until a tool writes commit trailers itself, this script stamps them from machine
 sources, never from anything an agent types. Harness hooks record who is
 working (session, model, effort) and which files they edit. Git hooks turn
 those records into trailers and validate them:
@@ -19,7 +19,7 @@ those records into trailers and validate them:
                                        session or Generated-by trailer
     stamp-docs                         pre-commit: stamp staged Markdown frontmatter
 
-The trailer grammar is a subset of the ascm design's, with optional fields
+The trailer grammar is a subset of the original design's, with optional fields
 omitted rather than guessed:
 
     <Key>: LLM effort=..;harness=..;model=..;session=..;subagent=..;surface=..
@@ -119,7 +119,7 @@ if TYPE_CHECKING:
     from collections.abc import Generator, Iterable, Iterator, Mapping
 
 # Each worktree's store, under its git dir, and the shared one, under the
-# common dir. The ascm tools used ascm-interim; a new name keeps the two apart.
+# common dir. The earlier tools used another name; a new name keeps the two apart.
 STORE = "tbhb-alpha"
 PROG = "tbhbdev alpha identity"
 KEY_GEN = "Generated-by"

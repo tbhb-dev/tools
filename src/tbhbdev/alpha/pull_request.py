@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
-"""`tbhbdev alpha pr`: pull-request tooling, ported from ascm's interim tools.
+"""`tbhbdev alpha pr`: pull-request tooling, ported from an earlier interim toolset.
 
 Agents draft a pull request as the gitignored .github/PULL_REQUEST_DRAFT.md.
 Its YAML frontmatter is PR metadata (.github/schemas/pull-request-draft.schema.json),

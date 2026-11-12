@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/tbhb-dev/ascm/main/docs/schemas/frontmatter.schema.json",
-  "title": "ascm Markdown frontmatter",
-  "description": "YAML frontmatter of every Markdown file in the ascm repository except the reserved index.md and log.md files. It follows OKF v0.2 and records authorship with the same fields the Generated-by and Assisted-by commit trailers carry.",
+  "$id": "https://raw.githubusercontent.com/tbhb-dev/tools/main/docs/schemas/frontmatter.schema.json",
+  "title": "tbhbdev Markdown frontmatter",
+  "description": "YAML frontmatter of every Markdown file in the repository except the reserved index.md and log.md files. It follows OKF v0.2 and records authorship with the same fields the Generated-by and Assisted-by commit trailers carry.",
   "$comment": "The generated entries mirror the Generated-by and Assisted-by commit trailer grammar (Key: LLM attr=value;...), documented in docs/reference/frontmatter.md. The same field names, value formats, and hashed-ID form apply, and, as in a trailer, a field that cannot be determined is omitted and never guessed or defaulted.",
   "type": "object",
   "additionalProperties": false,

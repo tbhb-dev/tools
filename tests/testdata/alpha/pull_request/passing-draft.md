@@ -13,7 +13,7 @@ assignees:
 
 ## Why
 
-Running `ascm stamp` on a tree with a read-only file stops partway. The command leaves some files stamped and others not, and prints nothing that says which. See [the issue](https://github.com/tbhb-dev/ascm/issues/12).
+Running `tool stamp` on a tree with a read-only file stops partway. The command leaves some files stamped and others not, and prints nothing that says which. See [the issue](https://github.com/tbhb-dev/tools/issues/12).
 
 ## Behavior change
 
@@ -25,8 +25,8 @@ Ran the new unit tests, then stamped a tree with one read-only file:
 
 ```console
 $ go test ./internal/stamp/...
-ok  	github.com/tbhb-dev/ascm/internal/stamp	0.412s
-$ ascm stamp ./fixture
+ok  	github.com/tbhb-dev/tools/internal/stamp	0.412s
+$ tool stamp ./fixture
 error: 1 file is read-only: fixture/a.txt
 ```
 

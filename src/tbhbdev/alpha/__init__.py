@@ -1,4 +1,4 @@
-"""`tbhbdev alpha`: interim agent tools, ported from ascm's tools/interim.
+"""`tbhbdev alpha`: interim agent tools, ported from an earlier interim toolset.
 
 Alpha commands are interim. They may change or go away without notice, and
 only the tbhb-dev harness hooks and agents in tbhb-dev repositories should

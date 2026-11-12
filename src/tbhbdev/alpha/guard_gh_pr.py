@@ -2,7 +2,7 @@
 # Copyright Tony Burns
 """`tbhbdev alpha guard-gh-pr`: block direct `gh pr` writes and self-approval.
 
-A PreToolUse hook, ported from ascm's interim tools. Outside a tbhb-dev
+A PreToolUse hook, ported from an earlier interim toolset. Outside a tbhb-dev
 repository only the approval rules below apply. Inside one, agents open, edit
 and merge pull requests through `tbhbdev alpha pr` and
 `tbhbdev alpha merge`, which add the machine-written trailers and
