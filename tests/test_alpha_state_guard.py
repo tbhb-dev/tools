@@ -863,8 +863,8 @@ def test_scanning_continues_after_a_quoted_substitution(run: Runner) -> None:
         ("The fix merged; Source: review.", "The fix merged; resources pending."),
         ("The fix merged; I read back the result.", "The fix merged; I read the plan."),
         ("The fix merged; I read them back.", "The fix merged; I read them."),
-        ("The fix merged in 12345.", "The fix merged in 1234."),
-        ('The fix merged: "yes".', 'The fix merged: "ok".'),
+        ("The fix merged in run 12345.", "The fix merged in 1234."),
+        ('The fix merged: "merge completed".', 'The fix merged: "ok".'),
         ("The fix merged; see notes/check.txt.", "The fix merged; see check.txt."),
         ("The fix merged; see Decisions/check.", "The fix merged; see notes/check."),
         ("The merged PRs' worktrees need attention.", "The PR is merged."),
@@ -906,7 +906,7 @@ def test_incidental_context_still_blocks(text: str) -> None:
     "text",
     [
         'The command printed "the fix merged".',
-        'The build is RUNNING: "started".',
+        'The build is RUNNING: "worker started".',
         "The fix merged in build 12345.",
         "The fix merged; SEE notes/check.txt.",
         "Is the fix merged?   ",
@@ -995,3 +995,169 @@ def test_corpus_measurement(
     if ids:
         expected += "A pass ids: [2]\nB block ids: [4]\nC block ids: [6]\n"
     assert capsys.readouterr().out == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Both deployed cleanly.",
+        "Both merged successfully.",
+        "3 merged today.",
+        "That landed cleanly.",
+        "It's merged upstream.",
+        "It's deployed everywhere.",
+        "That's applied now.",
+        "After the review the PR is merged.",
+        "Please note the PR is merged.",
+        "There is no doubt the PR is merged.",
+        "Since nothing failed the deploy is done.",
+        "Once again the deploy is done.",
+        "Batch 2 is running at 3 per cent CPU.",
+        "Build 12345 failed, and the deploy is done.",
+        'The PR is merged, "trust me".',
+        "The PR is merged in tbhb-dev/tools.git",
+        "The deploy is live, 20241111 users.",
+        "The PR is merged.",
+        "Both PRs merged.",
+    ],
+)
+def test_verified_status_bypasses_block(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Two deployed yesterday.",
+        "One merged already.",
+        "Both applied.",
+        "7 merged overnight.",
+        "She's merged upstream.",
+        "He's deployed today.",
+        "Before lunch the patch is merged.",
+        "When convenient remember the deploy is done.",
+        "Please remember the build is complete.",
+        "No question the deploy is live.",
+        "Since none failed the patch is merged.",
+        "The worker is running at 2 per host.",
+        "Job 54321 failed; the patch is merged.",
+        'The deploy is done, "all good".',
+        "The patch is merged, 987654 users waiting.",
+    ],
+)
+def test_more_incidental_status_context_blocks(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The fix merged in 12345.",
+        'The fix merged: "yes".',
+        'The build is RUNNING: "started".',
+    ],
+)
+def test_legacy_unsubstantiated_read_backs_block(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "When it's merged, check again.",
+        "If it merged, check again.",
+        "None of the changes has merged.",
+        "None of those has merged.",
+        "Neither PR has merged.",
+        "The fix merged per Alice.",
+        "The fix merged per maintainer.",
+        "The fix merged per operator.",
+        "The fix merged per notes/check.txt.",
+        "The fix merged per my read.",
+        "The fix merged per my grep.",
+        "The fix merged per my check.",
+        'The fix merged, "job 12345".',
+        'The fix merged, "notes/check.txt".',
+        'The fix merged: "123".',
+        'The fix merged: "123456789012".',
+        'The fix merged: "status ready".',
+        'The command reads "the fix merged".',
+        'The command shows "the fix merged".',
+        'The command returned "the fix merged".',
+        'The command PRINTED "the fix merged".',
+        'The "label" is merged: "merge completed".',
+        "The fix merged in notes/check.txt.",
+        "The fix merged (Decisions/check).",
+        "The fix merged in check run 12345.",
+        "The fix merged in task 12345.",
+        "The fix merged in pid 12345.",
+        "The fix merged in job 12345.",
+        "The fix merged in id 12345.",
+        "The fix merged in commit 12345.",
+        "The fix merged in review 12345.",
+        "The fix merged in event 12345.",
+        "Ask " + "a" * 78 + " to get it merged.",
+    ],
+)
+def test_scoped_qualifiers_and_attached_evidence_pass(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Build 12345 failed, the deploy is done.",
+        "The deploy is done, build 12345 failed.",
+        'The fix merged: "merge ready".',
+        'The fix merged, "status ready".',
+        'The fix merged, "trust me completely".',
+        'The "12345" label is merged.',
+        'The "notes/check.txt" label is merged.',
+        "The worker is running at 3 per Cent.",
+        "The worker is running at 3 per percent.",
+        "The worker is running at 3 per day.",
+        "The worker is running at 3 per Hour.",
+        "The worker is running at 3 per minute.",
+        "The worker is running at 3 per second.",
+        "The worker is running at 3 per week.",
+        "The worker is running at 3 per month.",
+        "The worker is running at 3 per run.",
+        "The worker is running at 3 per Host.",
+        "There's merged upstream.",
+        "What's merged today.",
+        "Who's deployed everywhere.",
+        "Here's applied now.",
+        "Ask " + "a" * 79 + " to get it merged.",
+        "Ask later. Remember to say the fix merged.",
+        "Ask later; remember to say the fix merged.",
+    ],
+)
+def test_evidence_and_qualifier_limits_block(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == [text.rsplit(". ", maxsplit=1)[-1]]
+
+
+@pytest.mark.parametrize(
+    "adverb",
+    [
+        "well",
+        "elsewhere",
+        "tonight",
+        "soon",
+        "later",
+        "earlier",
+        "again",
+        "together",
+        "apart",
+        "here",
+        "there",
+        "abroad",
+        "online",
+        "offline",
+        "away",
+        "back",
+        "ahead",
+    ],
+)
+def test_adverbs_after_quantified_statuses_block(adverb: str) -> None:
+    text = f"Both deployed {adverb}."
+    assert state_guard.unsupported_claims(text) == [text]

@@ -96,6 +96,7 @@ SHORT_VALUES = frozenset("mFCctU")
 SHORT_OPTIONAL_VALUES = frozenset("Su")
 MAX_QUOTED = 160
 MAX_LISTED = 3
+MIN_READ_BACK = 12
 
 
 # Scope exceptions to a clause, so a negative or planned action cannot excuse
@@ -105,26 +106,49 @@ CLAUSE_END = re.compile(
     r"\b(?:but|however)\b|\band\b(?!\s+(?:merged|applied|deployed|shipped|pushed)\b)",
     re.IGNORECASE,
 )
+# A qualifier must govern the status verb, rather than merely occur earlier.
+STATUS_VERB = (
+    r"(?:is|are|was|were|has|have|had|been|be|being|now|already|"
+    r"done|applied|merged|shipped|deployed|live|fixed|complete|completed|"
+    r"installed|running|verified|in place|started|landed|rolled out)"
+)
+SUBJECT = (
+    r"(?:(?:the|a|an|this|that|our|your|my)\s+\w+|"
+    r"(?:it|that|there|he|she|what|who|here)['\u2019]s|\w+)"
+)
 CLAIM_QUALIFIER = re.compile(
-    r"\b(?:not(?!\s+(?:only|just)\b)|nothing|neither|none|no|never|"
-    r"will|would|should|once|when|if|after|before|until|unless|whether|as soon as|"
-    r"please|could you|can you|tell me|let me know|ask\b.*\bto)\b|"
-    r"n['\u2019]t\b|\bI['\u2019]ll\b",
+    r"(?:\b(?:not(?!\s+(?:only|just)\b)|never|no(?=\s+longer\b))|n['\u2019]t)\s*"
+    r"(?:longer\s+|approved[,\s]+|or\s+)*"
+    rf"(?:{STATUS_VERB}[,\s]+)*{STATUS_VERB}$|"
+    r"^\s*(?:nothing|neither|none|no)\b\s*(?:of\s+(?:the\s+)?\w+\s+)?"
+    rf"(?:{SUBJECT}\s+)?(?:{STATUS_VERB}\s+)*{STATUS_VERB}$|"
+    r"\b(?:will|would|should|I['\u2019]ll)\s+"
+    rf"(?:(?:have|get|queued|and|{SUBJECT})\s+|{STATUS_VERB}\s+)*{STATUS_VERB}$|"
+    r"^\s*(?:(?:tell me|let me know)\s+)?"
+    r"(?:once|when|if|after|before|until|unless|whether|as soon as)\s+"
+    rf"{SUBJECT}\s+(?:{STATUS_VERB}\s+)*{STATUS_VERB}$|"
+    r"^\s*(?:please\s+(?:get|have)|(?:could|can) you\s+(?:get|confirm)|"
+    r"ask\b[^.;]{0,80}\bto\s+(?:get|have))\s+"
+    rf"{SUBJECT}\s+(?:{STATUS_VERB}\s+)*{STATUS_VERB}$",
     re.IGNORECASE,
 )
 # New evidence must attach to the status: an unrelated number or quoted noun
 # elsewhere in the sentence does not substantiate it. Document paths support
 # artifact states; a document reference alone cannot establish a running process.
 ATTACHED_EVIDENCE = re.compile(
-    r"^\s*[,;:]?\s*(?:in\s+)?[0-9]{5,}\b|"
-    r'"[^"\n]{3,}"|(?:\bDecisions/[^\s]+|[^\s]*/[\w.-]+\.[a-z0-9]+\b)',
+    r"\bDecisions/[^\s\"()]+|[^\s\"]*/[\w.-]+\."
+    r"(?:log|txt|md|json|jsonl|yaml|yml|toml|py|sh)\b",
     re.IGNORECASE,
 )
 EVIDENCE_CLAUSE_END = re.compile(r";|\b(?:and|but|however)\b", re.IGNORECASE)
 EVIDENCE_REFERENCE = re.compile(r"\s*[,;]\s*see\s+", re.IGNORECASE)
-ATTRIBUTED = re.compile(r"\bper\s+\w+", re.IGNORECASE)
+ATTRIBUTED = re.compile(
+    r"(?i:\bper\s+)(?!(?i:cent|percent|day|hour|minute|second|week|month|"
+    r"run|host)\b)(?:[A-Z]\w*|(?i:reviewer|maintainer|operator|"
+    r"my\s+(?:read|grep|check))\b|\S+/\S+)"
+)
 IDENTIFIER = re.compile(
-    r"\b(?:pid|run|review|event|build|job|id|commit)[ ,:]+[0-9]{5,}\b",
+    r"\b(?:pid|run|review|event|build|job|id|commit|check run|task)[ ,:]+[0-9]{5,}\b",
     re.IGNORECASE,
 )
 NEGATED_OBJECT = re.compile(
@@ -134,34 +158,52 @@ NEGATED_OBJECT = re.compile(
 )
 ADJECTIVE = re.compile(
     r"\b(?:a|an|the|this|that|these|those|my|your|our|their|his|her|its|"
-    r"both|one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+|\w+['\u2019]s|\w+s['\u2019])\s+"
+    r"both|one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+|"
+    r"(?!(?:it|that|there|he|she|what|who|here)['\u2019]s\b)\w+['\u2019]s|\w+s['\u2019])\s+"
     r"(shipped|merged|applied|deployed|landed|rolled out)\s+"
-    r"(?!(?:and|or|but|is|are|was|were|has|have|had|in|on|at|to|with|for|by|yet)\b)"
+    r"(?!(?:and|or|but|is|are|was|were|has|have|had|in|on|at|to|with|for|by|yet|"
+    r"upstream|everywhere|elsewhere|today|yesterday|tomorrow|tonight|now|already|"
+    r"overnight|soon|later|earlier|again|well|together|apart|here|there|abroad|"
+    r"online|offline|away|back|ahead)\b|\w+ly\b)"
     r"[a-z]\w*",
     re.IGNORECASE,
 )
 
 
+def quoted_evidence(clause: str, claim_end: int) -> bool:
+    """Accept a quoted read-back attached to or enclosing the status."""
+    for quote in re.finditer(r'"([^"\n]+)"', clause):
+        if quote.end(1) < claim_end:
+            continue
+        content = quote[1]
+        if re.search(r"\d", content) or ATTACHED_EVIDENCE.search(content):
+            return True
+        if len(content) >= MIN_READ_BACK and re.search(
+            r"(?:\b(?:shows|reads|printed|returned|says)|:)\s*$",
+            clause[: quote.start()].lower(),
+        ):
+            return True
+    return False
+
+
 def evidenced_claim(chunk: str, match: re.Match[str]) -> bool:
     """Whether new evidence forms substantiate MATCH rather than another clause."""
-    if any(
-        not CLAIM_QUALIFIER.search(CLAUSE_END.split(chunk[: m.start()])[-1])
-        for m in ATTRIBUTED.finditer(chunk)
+    prefix = CLAUSE_END.split(chunk[: match.start()])[-1]
+    suffix = EVIDENCE_CLAUSE_END.split(chunk[match.end() :])[0]
+    clause = prefix + match[0] + suffix
+    if ATTRIBUTED.search(clause) or IDENTIFIER.search(
+        prefix + match[0] + CLAUSE_END.split(suffix)[0]
     ):
         return True
-    if IDENTIFIER.search(chunk):
+    if quoted_evidence(clause, len(prefix) + len(match[0])):
         return True
     suffix = chunk[match.end() :]
-    if chunk[: match.start()].count('"') % 2 and '"' in suffix:
-        return True
     evidence = ATTACHED_EVIDENCE.search(EVIDENCE_CLAUSE_END.split(suffix)[0])
     if not evidence:
         evidence = EVIDENCE_REFERENCE.match(suffix)
         if evidence:
             evidence = ATTACHED_EVIDENCE.search(suffix[evidence.end() :])
-    return bool(
-        evidence and ("running" not in match[0].lower() or evidence[0].startswith('"'))
-    )
+    return bool(evidence and "running" not in match[0].lower())
 
 
 def current_claim(chunk: str, match: re.Match[str]) -> bool:
