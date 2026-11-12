@@ -23,6 +23,7 @@ from agent_example import (
     settings,
     trusted_executables,
 )
+from agent_host_example import run_request
 
 from tbhbdev.alpha.agent import model
 from tbhbdev.alpha.agent.decisions import argv, policy
@@ -812,3 +813,75 @@ def test_codex_without_github_reference_has_private_config(
     )
     env = tomllib.loads(overrides)["shell_environment_policy"]["set"]
     assert env["GH_CONFIG_DIR"] == f"{env['TMPDIR']}/gh"
+
+
+@pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize("profile", Profile)
+def test_sandbox_command_keeps_the_harness_overrides(
+    kind: RunKind, profile: Profile
+) -> None:
+    value = policy.build(
+        settings(),
+        LINUX,
+        harness=Harness.CODEX,
+        profile=profile,
+        account="agent",
+        paths=paths("agent"),
+        unsandboxed=False,
+    )
+    command = argv.harness(
+        dataclasses.replace(run_request(kind=kind.value), profile=profile),
+        value,
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+    )
+    expected = tuple(
+        word
+        for index, word in enumerate(command)
+        if word == "-c"
+        or command[index - 1] == "-c"
+        or word == "-C"
+        or command[index - 1] == "-C"
+    )
+    assert argv.sandbox(command, "/usr/bin/true") == (
+        "codex",
+        "sandbox",
+        *expected,
+        "--",
+        "/usr/bin/true",
+    )
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "-P",
+        "--permission-profile",
+        "-p",
+        "--profile",
+        "-C",
+        "--cd",
+        "-c",
+        "--config",
+        "--enable",
+        "--disable",
+    ],
+)
+def test_sandbox_command_passes_supported_options(option: str) -> None:
+    assert argv.sandbox(
+        ("/tools/codex", "exec", option, "value", "-"), "/tools/true"
+    ) == ("/tools/codex", "sandbox", option, "value", "--", "/tools/true")
+
+
+@pytest.mark.parametrize("option", ["-s", "--sandbox"])
+def test_sandbox_command_expresses_legacy_mode_as_config(option: str) -> None:
+    assert argv.sandbox(
+        ("codex", option, "danger-full-access", "brief"), "/bin/true"
+    ) == (
+        "codex",
+        "sandbox",
+        "-c",
+        'sandbox_mode="danger-full-access"',
+        "--",
+        "/bin/true",
+    )
