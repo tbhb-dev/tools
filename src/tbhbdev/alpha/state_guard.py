@@ -246,9 +246,10 @@ def tagging_enabled(data: Json) -> bool:
     return settings.get("tag_messages") is True
 
 
-# A pipe holds at least 16 KiB, so a smaller write can't block on a reader that
-# never drains it.
-MAX_TAGGED_OUTPUT = 8192
+# The most bytes the hook writes to stdout, newline included. The smallest pipe
+# a platform allows holds one 4096-byte page, so a write this size completes even
+# when the reader never drains the pipe.
+MAX_TAGGED_OUTPUT = 4096
 
 
 def tagged_input(data: Json, tool_input: Json, original: str) -> str | None:
@@ -264,7 +265,7 @@ def tagged_input(data: Json, tool_input: Json, original: str) -> str | None:
             }
         }
     )
-    if len(output.encode()) > MAX_TAGGED_OUTPUT:
+    if len(output.encode()) + 1 > MAX_TAGGED_OUTPUT:
         message = "the tagged message is too large to write without blocking"
         raise ValueError(message)
     log_tagged(data, tool_input, sentences)

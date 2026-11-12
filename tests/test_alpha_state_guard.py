@@ -1197,12 +1197,15 @@ def test_a_stdout_failure_keeps_the_refusal(
     assert refused(run(send("It was done.")))
 
 
-def test_a_config_that_is_a_pipe_cannot_hang_the_hook(config_file: Path) -> None:
-    config_file.unlink()
-    os.mkfifo(config_file)
-    # The in-process alarm turns a hang into a caught error, so the hook runs in a
-    # child that the parent kills on a deadline.
-    done = subprocess.run(
+def hook_child(
+    config_file: Path, message: str, stdout: int = subprocess.PIPE
+) -> subprocess.CompletedProcess[str]:
+    """Run the hook in a child that the parent kills on a deadline.
+
+    The in-process alarm turns a hang into a caught error, so a hang test needs
+    a child.
+    """
+    return subprocess.run(
         [
             sys.executable,
             "-c",
@@ -1211,14 +1214,76 @@ def test_a_config_that_is_a_pipe_cannot_hang_the_hook(config_file: Path) -> None
                 " sys.exit(state_guard.main())"
             ),
         ],
-        input=json.dumps(send("It was done.")),
-        capture_output=True,
+        input=json.dumps(send(message)),
+        stdout=stdout,
+        stderr=subprocess.PIPE,
         text=True,
         timeout=20,
         check=False,
         env={**os.environ, "XDG_CONFIG_HOME": str(config_file.parent.parent)},
     )
+
+
+def test_a_config_that_is_a_pipe_cannot_hang_the_hook(config_file: Path) -> None:
+    config_file.unlink()
+    os.mkfifo(config_file)
+    done = hook_child(config_file, "It was done.")
     assert refused((done.returncode, done.stdout, done.stderr))
+
+
+def test_a_log_that_is_a_pipe_cannot_hang_the_hook(
+    tmp_path: Path, config_file: Path
+) -> None:
+    directory = tmp_path / "state/tbhbdev/state-guard"
+    directory.mkdir(parents=True)
+    os.mkfifo(directory / "tagged.jsonl")
+    done = hook_child(config_file, "It was done.")
+    assert (done.returncode, done.stderr) == (0, "")
+    assert json.loads(done.stdout)["hookSpecificOutput"]["updatedInput"] == {
+        "message": f"{TAG} It was done."
+    }
+
+
+def padded(config_file: Path, size: int) -> str:
+    """A flagged message whose tagged hook output is SIZE bytes with the newline."""
+    base = len(hook_child(config_file, UNSUPPORTED_CLAIM + " x.").stdout.encode())
+    return UNSUPPORTED_CLAIM + " " + "x" * (size - base + 1) + "."
+
+
+def fill_pipe(read_fd: int, write_fd: int, free: int) -> None:
+    """Fill the pipe, then drain FREE bytes, so exactly that much space is left."""
+    os.set_blocking(write_fd, False)
+    try:
+        while True:
+            os.write(write_fd, b"." * 4096)
+    except BlockingIOError:
+        pass
+    os.set_blocking(write_fd, True)
+    os.read(read_fd, free)
+
+
+@pytest.mark.parametrize(("extra", "tagged"), [(0, True), (1, False)])
+def test_the_tagged_output_cap_never_blocks_on_an_undrained_pipe(
+    config_file: Path, extra: int, tagged: bool
+) -> None:
+    read_fd, write_fd = os.pipe()
+    try:
+        fill_pipe(read_fd, write_fd, 4096)
+        done = hook_child(
+            config_file,
+            padded(config_file, state_guard.MAX_TAGGED_OUTPUT + extra),
+            write_fd,
+        )
+    finally:
+        os.close(write_fd)
+        leftover = os.read(read_fd, 1 << 20)
+        os.close(read_fd)
+    if tagged:
+        assert (done.returncode, done.stderr) == (0, "")
+        assert leftover.endswith(b"}\n")
+    else:
+        assert refused((done.returncode, "", done.stderr))
+        assert set(leftover) == {ord(".")}
 
 
 def test_a_tagged_message_too_large_to_write_keeps_the_refusal(
