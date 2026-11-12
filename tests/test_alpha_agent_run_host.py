@@ -946,10 +946,11 @@ sys.exit(run_host.main(["example", "--host", "example-linux"], "example run-host
         group_file = tmp_path / "runs" / "example.pgid"
         if group_file.exists():
             recorded = Group(**json.loads(group_file.read_text()))
-            if process_group.identity(recorded.pgid) == recorded:
+            # The fixture records a fake boot ID; match the actual leader's start.
+            if process_group.leader_start(recorded.pgid) == recorded.start:
                 process_group.stop_started(recorded.pgid, 0.2)
         if supervisor.poll() is None:
-            supervisor.kill()
+            supervisor.terminate()
         supervisor.communicate(timeout=10)
 
 
@@ -1269,7 +1270,6 @@ class HostRuntime:
 def test_probe_failure_stops_its_recorded_harness_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(process_group, "boot_id", constant("example-boot"))
     real_start = subprocess.Popen
 
     def start(
@@ -1296,13 +1296,18 @@ def test_probe_failure_stops_its_recorded_harness_group(
         return child
 
     monkeypatch.setattr(subprocess, "Popen", start)
-    with pytest.raises(RuntimeError, match=r"^probe signal failed$"):
-        test_hangup_stops_harness_group_writes_auth_and_rc(tmp_path, escalate=False)
-    files = runfiles.RunFiles(tmp_path / "runs", "example")
-    group = json.loads(files.path("pgid").read_text())["pgid"]
-    descendant = int((files.root / "descendant").read_text())
-    assert not process_group.alive(group)
-    assert process_group.leader_start(descendant) is None
+    try:
+        with pytest.raises(RuntimeError, match=r"^probe signal failed$"):
+            test_hangup_stops_harness_group_writes_auth_and_rc(tmp_path, escalate=False)
+    finally:
+        files = runfiles.RunFiles(tmp_path / "runs", "example")
+        group = json.loads(files.path("pgid").read_text())["pgid"]
+        descendant = int((files.root / "descendant").read_text())
+        deadline = time.monotonic() + 1
+        while process_group.alive(group) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not process_group.alive(group)
+        assert process_group.leader_start(descendant) is None
 
 
 def index_should_fail(failure: str, entry: dict[str, object]) -> bool:
