@@ -359,9 +359,9 @@ def commit_policy(
             key, _, value = header.partition(" ")
             values.setdefault(key, value)
         reasons.extend(
-            f"{short} {role} email is not the agent's"
+            f"{short} {role} identity is not the agent's"
             for role in ("author", "committer")
-            if identity.ident_email(values.get(role, "")) != identity.AGENT_EMAIL
+            if identity.IDENT_DATE.sub("", values.get(role, "")) != identity.AGENT_IDENT
         )
         if identity.SIGNOFF.search(text):
             reasons.append(f"{short} carries a Signed-off-by or Co-authored-by trailer")
