@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 # ruff: noqa: SLF001  # Exercise the private helper and subprocess input seam.
+import ast
 import base64
 import dataclasses
-import io
 import json
 import os
 import shutil
@@ -598,8 +598,8 @@ def test_git_invocation_and_environment(
                 [
                     sys.executable,
                     "-I",
-                    "-m",
-                    "tbhbdev.alpha.repo_token",
+                    "-c",
+                    rt.HELPER_CODE,
                     str(pass_fds[0]),
                 ]
             )
@@ -659,13 +659,10 @@ def test_git_errors(
     "operation", ["get", "store", "erase", "unknown", "missing", "http", "other_host"]
 )
 def test_helper_operations(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], operation: str
+    operation: str,
 ) -> None:
     protocol = "http" if operation == "http" else "https"
     host = "other.example" if operation == "other_host" else "github.com"
-    monkeypatch.setattr(
-        sys, "stdin", io.StringIO(f"protocol={protocol}\nhost={host}\n\n")
-    )
     reader, writer = os.pipe()
     os.write(writer, TOKEN.encode())
     os.close(writer)
@@ -675,15 +672,55 @@ def test_helper_operations(
     ]
     if operation == "missing":
         args = list[str]()
-    rt._helper(args)
-    if operation == "get":
-        assert (
-            capsys.readouterr().out == f"username=x-access-token\npassword={TOKEN}\n\n"
+    try:
+        done = subprocess.run(
+            [sys.executable, "-I", "-c", rt.HELPER_CODE, *args],
+            pass_fds=(reader,),
+            input=f"protocol={protocol}\nhost={host}\n\n",
+            capture_output=True,
+            text=True,
+            check=False,
         )
-    else:
-        assert capsys.readouterr().out == ""
-        assert os.read(reader, 1000).decode() == TOKEN
+    finally:
         os.close(reader)
+    assert done.returncode == 0, done.stderr
+    assert done.stderr == ""
+    assert TOKEN not in repr(done.args)
+    if operation == "get":
+        assert done.stdout == f"username=x-access-token\npassword={TOKEN}\n\n"
+    else:
+        assert done.stdout == ""
+
+
+def test_helper_code_uses_only_standard_library() -> None:
+    compile(rt.HELPER_CODE, "<repo-token-helper>", "exec")
+    tree = ast.parse(rt.HELPER_CODE)
+    assert [
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    ] == ["os", "sys"]
+    assert not any(isinstance(node, ast.ImportFrom) for node in ast.walk(tree))
+
+
+@pytest.mark.parametrize("descriptor", ["-1", "invalid-fd", "closed"])
+def test_helper_bad_descriptor(descriptor: str) -> None:
+    if descriptor == "closed":
+        reader, writer = os.pipe()
+        os.close(reader)
+        os.close(writer)
+        descriptor = str(reader)
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", rt.HELPER_CODE, descriptor, "get"],
+        input="protocol=https\nhost=github.com\n\n",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode != 0
+    assert done.stdout == ""
+    assert TOKEN not in done.stderr
 
 
 def test_app_key_is_frozen(app: rt.AppKey) -> None:
@@ -778,12 +815,16 @@ def test_open_descriptors_are_checked_and_closed(
 )
 def test_helper_rejects_nearby_hosts(
     request_text: str,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(sys, "stdin", io.StringIO(request_text))
-    rt._helper(["invalid-fd", "get"])
-    assert capsys.readouterr() == ("", "")
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", rt.HELPER_CODE, "invalid-fd", "get"],
+        input=request_text,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0
+    assert (done.stdout, done.stderr) == ("", "")
 
 
 def test_default_git_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

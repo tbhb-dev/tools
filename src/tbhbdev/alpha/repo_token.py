@@ -2,7 +2,7 @@
 
 All inputs are explicit. JWT clock refusals are reported as ``mint``: gh_app
 sanitizes API failures before returning them, so they cannot be distinguished.
-The module entry point is Git's private credential helper, not an alpha command.
+Git's private credential helper runs with only standard library imports.
 Git runs with hooks disabled so hooks cannot read the credential pipe.
 Git always receives ``GIT_TERMINAL_PROMPT=0`` to prevent interactive prompts.
 Connect endpoints must be HTTPS URLs with a host.
@@ -56,6 +56,23 @@ DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 # mint_token uses only the clock and transport; its other Env slots are inert.
 _MINT_ENV = gh_app.Env(Path(), gh_app.clock, secrets.Store, gh_app.run_openssl)
+# Isolated interpreters need no installed package to read the credential pipe.
+HELPER_CODE = """\
+import os
+import sys
+
+if len(sys.argv) == 3 and sys.argv[2] == "get":
+    request = {
+        key: value
+        for key, _, value in (
+            line.rstrip("\\n").partition("=") for line in sys.stdin if line.strip()
+        )
+    }
+    if request.get("protocol") == "https" and request.get("host") == "github.com":
+        with os.fdopen(int(sys.argv[1])) as stream:
+            value = stream.read()
+        sys.stdout.write(f"username=x-access-token\\npassword={value}\\n\\n")
+"""
 
 
 class RepoTokenError(Exception):
@@ -251,8 +268,8 @@ def _git(  # noqa: PLR0913  # Private input seam for the real Git probe.
                 [
                     sys.executable,
                     "-I",
-                    "-m",
-                    "tbhbdev.alpha.repo_token",
+                    "-c",
+                    HELPER_CODE,
                     str(descriptor),
                 ]
             )
@@ -296,23 +313,3 @@ def git(
 ) -> subprocess.CompletedProcess[str]:
     """Run Git with an in-memory token, disabled hooks and no terminal prompts."""
     return _git(token, args, cwd=cwd, env=env, timeout=timeout)
-
-
-def _helper(argv: Sequence[str]) -> None:
-    if len(argv) != TWO_PARTS or argv[1] != "get":
-        return
-    request = {
-        key: value
-        for key, _, value in (
-            line.rstrip("\n").partition("=") for line in sys.stdin if line.strip()
-        )
-    }
-    if request.get("protocol") != "https" or request.get("host") != "github.com":
-        return
-    with os.fdopen(int(argv[0])) as stream:
-        value = stream.read()
-    sys.stdout.write(f"username=x-access-token\npassword={value}\n\n")
-
-
-if __name__ == "__main__":
-    _helper(sys.argv[1:])
