@@ -65,6 +65,13 @@ type Json = dict[str, object]
 
 TABLE = "harness"
 TAG = "[state-guard: unverified]"
+GAP = "\x00"  # stands for a removed tag until the text stops changing
+SPACES = r"(?:[^\S\n]|\x00)*"
+# A tag cut by tags or spaces, as in "[state-gu ard:", is still a tag fragment.
+OPEN = r"\[" + SPACES + SPACES.join(re.escape(c) for c in "state-guard:")
+BODY = rf"{OPEN}{SPACES}(?:unverified{SPACES})*"
+CLOSED = re.compile(BODY + r"\]")
+FRAGMENT = re.compile(BODY)
 CLAIM = re.compile(
     r"\b(?:is|are|was|were|now|already|has been|have been)\s+"
     r"(?:done|applied|merged|shipped|deployed|live|fixed|complete|completed|"
@@ -157,16 +164,25 @@ def claim_reason(bad: list[str]) -> str:
 
 
 def strip_tags(text: str) -> str:
-    """Ignore sender-written tags when judging claims, preserving emitted text.
+    """Judge a message as if its sender-written tags weren't there.
 
-    Removing a tag can join the text around it into a new tag, as in a tag nested
-    inside a tag, so the removal repeats until the text stops changing.
+    Each tag, and any leftover `[state-guard:` fragment with its optional bare
+    "unverified" and closing bracket, becomes one space, so a sender can't leave an
+    "unverified" behind as evidence. Removal repeats because a removal can join the
+    text around it into a new tag. Runs of spaces collapse, but line breaks stay
+    because they end sentences, so a word-splitting tag leaves the sender's words
+    in order.
     """
     previous = None
     while previous != text:
         previous = text
-        text = text.replace(TAG, "")
-    return text
+        text = text.replace(TAG, GAP)
+        # Closed tags go first, innermost out, so an outer opener keeps its own
+        # "unverified" until the fragment pass takes both.
+        text = CLOSED.sub(GAP, text)
+        if text == previous.replace(TAG, GAP):
+            text = FRAGMENT.sub(GAP, text)
+    return re.sub(r"(?:[^\S\n]|\x00)+", " ", text)
 
 
 def tag_sentences(text: str) -> tuple[str, list[str]]:

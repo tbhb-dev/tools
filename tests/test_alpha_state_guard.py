@@ -222,7 +222,7 @@ def test_disabled_tagging_reports_claims_without_sender_tags(
     config_file.write_text("[state_guard]\ntag_messages = false\n")
     status, out, err = run(send(f"It was {TAG} done."))
     assert (status, out) == (2, "")
-    assert "Offending: It was  done.. Resend the same message" in err
+    assert "Offending: It was done.. Resend the same message" in err
     assert not (tmp_path / "state").exists()
 
 
@@ -1047,16 +1047,76 @@ def test_sender_tags_cannot_preempt_the_guard(run: Runner, tag: str) -> None:
     assert_tagged(run(send(f"It was {tag}done.")), f"{TAG} It was {tag}done.")
 
 
-NESTED_TAGS = [
-    "[state-guard: " + TAG + "unverified]",
-    "[state-guard: [state-guard: " + TAG + "unverified]unverified]",
-    "[state-guard:" + TAG + " unverified]",
+def nested_tags() -> list[str]:
+    """Tags nested up to two deep, with every whitespace and bracket variant."""
+    gaps = ["", " ", "  "]
+    opens = [f"[state-guard:{gap}" for gap in gaps]
+    shells = [(o, g + "unverified" + c) for o in opens for g in gaps for c in ["]", ""]]
+    inner = [TAG, *(o + g for o, g in shells)]
+    return sorted(
+        {o + i + t for o, t in shells for i in inner}
+        | {o + i + g + t for o, t in shells for i in inner for g in gaps}
+        | {"[state-guard:[state-guard: unverified] unverified]"}
+    )
+
+
+NESTED_TAGS = nested_tags()
+SPLIT_CLAIMS = [
+    "It is in {} place.",
+    "It has {} been done.",
+    "They have {} been done.",
+    "It was rolled {} out.",
 ]
 
 
-@pytest.mark.parametrize("tag", NESTED_TAGS)
+def codex_nestings() -> set[str]:
+    """The generator from the tools#128 review: whitespace around nested tags."""
+    found = set()
+    for i in [*range(1, 15), 24]:
+        for left, right in [("", " "), (" ", ""), (" ", " ")]:
+            nested = TAG
+            for _ in range(1, 66):
+                nested = TAG[:i] + left + nested + right + TAG[i:]
+                found.add(nested)
+    return found
+
+
+def test_generated_nestings_leave_the_claim_judged() -> None:
+    nestings = codex_nestings()
+    assert len(nestings) > 2000
+    for nesting in nestings:
+        stripped = state_guard.strip_tags(f"{nesting} It was done.")
+        assert state_guard.unsupported_claims(stripped), nesting
+
+
+def test_every_nested_tag_shape_leaves_the_claim_judged() -> None:
+    assert len(NESTED_TAGS) > 100
+    for tag in NESTED_TAGS:
+        for text in (
+            f"{tag}It was done.",
+            f"It was done {tag}.",
+            f"It was {tag} done.",
+        ):
+            assert state_guard.unsupported_claims(state_guard.strip_tags(text)), text
+        assert not state_guard.unsupported_claims(
+            state_guard.strip_tags(f"{tag}A note.")
+        )
+
+
+@pytest.mark.parametrize("sentence", SPLIT_CLAIMS)
+@pytest.mark.parametrize("tag", [TAG, *NESTED_TAGS[::40]])
+def test_a_tag_inside_a_claim_does_not_hide_it(sentence: str, tag: str) -> None:
+    assert state_guard.unsupported_claims(state_guard.strip_tags(sentence.format(tag)))
+
+
+def test_a_tag_in_a_negated_claim_keeps_its_negation() -> None:
+    tagged = f"It was {TAG} not done."
+    assert state_guard.strip_tags(tagged) == "It was not done."
+
+
+@pytest.mark.parametrize("tag", [TAG, *NESTED_TAGS[::25]])
 def test_nested_sender_tags_cannot_preempt_the_guard(run: Runner, tag: str) -> None:
-    assert state_guard.strip_tags(f"{tag}It was done.") == "It was done."
+    assert state_guard.strip_tags(f"{tag}It was done.") == " It was done."
     assert state_guard.strip_tags(f"It was done {tag}.") == "It was done ."
     assert_tagged(run(send(f"{tag}It was done.")), f"{TAG} {tag}It was done.")
     assert run(send(f"{tag}A note.")) == (0, "", "")
