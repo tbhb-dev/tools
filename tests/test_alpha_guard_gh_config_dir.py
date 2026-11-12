@@ -155,6 +155,17 @@ def run(command: str, own: str | None, monkeypatch: pytest.MonkeyPatch) -> str |
         "env - gh api user",
         "bash -c 'GH_CONFIG_DIR= gh api user'",
         "GH_CONFIG_DIR=/elsewhere true",
+        "GH_CONFIG_DIR=$HOME/.config/gh; gh api user",  # gitleaks:allow
+        "GH_CONFIG_DIR=$HOME/.config/gh && gh api user",  # gitleaks:allow
+        "GH_CONFIG_DIR=$HOME/.config/gh\ngh api user",  # gitleaks:allow
+        "GH_CONFIG_DIR=; gh api user",
+        "GH_CONFIG_DIR+=/../../../x/.config/gh gh api user",  # gitleaks:allow
+        "GH_CONFIG_DIR+=/../x; gh api user",
+        "FOO=1 GH_CONFIG_DIR+=/x gh api user",
+        "env GH_CONFIG_DIR+=/x gh api user",
+        "if true; then GH_CONFIG_DIR=/x; fi; gh api user",
+        "bash -c 'GH_CONFIG_DIR=/x; gh api user'",
+        "eval 'GH_CONFIG_DIR=/x; gh api user'",
     ],
 )
 def test_changing_the_variable_is_denied(
@@ -177,6 +188,9 @@ def test_changing_the_variable_is_denied(
         "grep GH_CONFIG_DIR=x README.md",
         "env FOO=1 gh api user",
         "env --unset=PATH true",
+        "FOO=1; gh api user",
+        "GH_CONFIG_DIR=$GH_CONFIG_DIR; gh api user",
+        "bash -c 'FOO=1; true'",
     ],
 )
 def test_the_agent_config_dir_and_mentions_pass(
