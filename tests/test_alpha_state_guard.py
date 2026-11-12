@@ -1125,6 +1125,48 @@ def test_a_config_error_refuses_and_says_why(
     assert "state-guard: ignoring the config:" in err
 
 
+def make_directory(path: Path) -> None:
+    path.mkdir()
+
+
+def unreadable(path: Path) -> None:
+    path.write_text("[state_guard]\ntag_messages = true\n")
+    path.chmod(0)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda path: path.write_bytes(b"\xff\xfe"),
+        make_directory,
+        os.mkfifo,
+        unreadable,
+    ],
+    ids=["invalid-utf8", "directory", "fifo", "unreadable"],
+)
+def test_a_config_that_cannot_be_read_refuses(
+    config_file: Path, run: Runner, make: Callable[[Path], object]
+) -> None:
+    config_file.unlink()
+    make(config_file)
+    status, out, err = run(send("It was done."))
+    assert refused((status, out, err))
+    assert "state-guard: ignoring the config:" in err
+
+
+def test_a_failure_while_tagging_keeps_the_refusal(
+    monkeypatch: pytest.MonkeyPatch, run: Runner
+) -> None:
+    def broken(_text: str) -> tuple[str, list[str]]:
+        message = "tagging broke"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(state_guard, "tag_sentences", broken)
+    status, out, err = run(send("It was done."))
+    assert refused((status, out, err))
+    assert "tagging broke" in err
+
+
 def test_a_config_error_does_not_stop_a_clean_message(
     config_file: Path, run: Runner
 ) -> None:
@@ -1150,6 +1192,18 @@ def test_log_refuses_symlinks_and_special_files(tmp_path: Path, run: Runner) -> 
     assert "could not log tagged sentences" in err
 
 
+def test_log_refuses_a_hard_linked_file(tmp_path: Path, run: Runner) -> None:
+    directory = tmp_path / "state/tbhbdev/state-guard"
+    directory.mkdir(parents=True)
+    target = tmp_path / "target"
+    target.write_text("keep\n")
+    os.link(target, directory / "tagged.jsonl")
+    status, out, err = run(send("It was done."))
+    assert_tagged((status, out, ""), f"{TAG} It was done.")
+    assert "single-link regular file" in err
+    assert target.read_text() == "keep\n"
+
+
 def test_log_refuses_a_symlinked_directory(tmp_path: Path, run: Runner) -> None:
     parent = tmp_path / "state/tbhbdev"
     parent.mkdir(parents=True)
@@ -1170,7 +1224,7 @@ def test_log_refuses_a_file_owned_by_another_user(
     monkeypatch.setattr(os, "getuid", lambda: os.geteuid() + 1)
     status, out, err = run(send("It was done."))
     assert_tagged((status, out, ""), f"{TAG} It was done.")
-    assert "regular file owned by this user" in err
+    assert "single-link regular file owned by this user" in err
 
 
 def test_logging_tightens_existing_permissions(tmp_path: Path, run: Runner) -> None:

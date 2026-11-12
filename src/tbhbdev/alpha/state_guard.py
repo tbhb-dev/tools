@@ -170,7 +170,11 @@ def tag_sentences(text: str) -> tuple[str, list[str]]:
 
 
 def open_log(directory: Path) -> int:
-    """A descriptor for the private audit log; refuses symlinks and special files."""
+    """A descriptor for the private audit log; refuses symlinks and special files.
+
+    O_NOFOLLOW covers the last directory and the file only. A symlinked parent of
+    the state directory still redirects the log, so the state home must be trusted.
+    """
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     dir_fd = os.open(directory, flags)
@@ -185,9 +189,13 @@ def open_log(directory: Path) -> int:
     finally:
         os.close(dir_fd)
     info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink > 1
+        or info.st_uid != os.getuid()
+    ):
         os.close(fd)
-        message = "the audit log is not a regular file owned by this user"
+        message = "the audit log is not a single-link regular file owned by this user"
         raise OSError(message)
     return fd
 
@@ -216,34 +224,49 @@ def tagging_enabled(data: Json) -> bool:
     """True only for PreToolUse with `[state_guard] tag_messages = true`."""
     if data.get("hook_event_name") != "PreToolUse":
         return False
-    try:
-        settings = userconfig.optional_table("state_guard") or {}
-    except userconfig.ConfigError as exc:
-        print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
-        return False
+    config = userconfig.path()
+    # stat never blocks, so a named pipe is rejected before any read opens it.
+    if config.exists() and not stat.S_ISREG(config.stat().st_mode):
+        message = f"{config} is not a regular file"
+        raise OSError(message)
+    settings = userconfig.optional_table("state_guard") or {}
     return settings.get("tag_messages") is True
 
 
+def tagged_input(data: Json, tool_input: Json, original: str) -> str | None:
+    """The hook output that tags ORIGINAL, or None when tagging is off."""
+    if not tagging_enabled(data):
+        return None
+    text, sentences = tag_sentences(original)
+    log_tagged(data, tool_input, sentences)
+    return json.dumps(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "updatedInput": {**tool_input, "message": text},
+            }
+        }
+    )
+
+
 def send_message_reason(data: Json, tool_input: Json) -> str | None:
-    """Rewrite a peer message when tagging is on, or return the refusal."""
+    """Tag a peer message when tagging is on, or return the refusal.
+
+    Any failure on the tagging path keeps the refusal, so nothing there reaches
+    main()'s fail-open exit.
+    """
     original = str(tool_input.get("message", ""))
     bad = unsupported_claims(strip_tags(original))
     if not bad:
         return None
-    if not tagging_enabled(data):
+    try:
+        output = tagged_input(data, tool_input, original)
+    except Exception as exc:  # noqa: BLE001  # any failure here must keep the refusal
+        print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
         return claim_reason(bad)
-    text, sentences = tag_sentences(original)
-    log_tagged(data, tool_input, sentences)
-    print(
-        json.dumps(
-            {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "updatedInput": {**tool_input, "message": text},
-                }
-            }
-        )
-    )
+    if output is None:
+        return claim_reason(bad)
+    print(output)
     return None
 
 
