@@ -67,11 +67,16 @@ def main(argv: list[str], prog: str) -> int:
     if argv and argv[0] == "precheck":
         return precheck.main(argv[1:], f"{prog} precheck")
     try:
-        args = parser(prog).parse_args(argv)
+        args = parser(prog).parse_args(argv) if argv else None
     except SystemExit as exc:
         return int(exc.code or 0)
     try:
-        return driver.dispatch(settings.load(), args)
+        loaded = settings.load()
+        if args is None:
+            run_host.check_config(loaded)
+            print(f"{prog}: configuration valid")
+            return 0
+        return driver.dispatch(loaded, args)
     except (userconfig.ConfigError, OSError, ValueError) as exc:
         print(f"{prog}: {exc}", file=sys.stderr)
         return 1
