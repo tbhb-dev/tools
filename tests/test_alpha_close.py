@@ -69,6 +69,7 @@ class Gh:
 def gh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Gh:
     stub = Gh()
     monkeypatch.setattr(close, "gh", stub)
+    monkeypatch.setattr(pr, "origin_repository", lambda: "tbhb-dev/tools")
 
     def posting_value(env: Mapping[str, str]) -> str | None:
         return POSTING if env else None
@@ -100,6 +101,8 @@ def test_close_pr_it_opened_comments_the_reason_and_the_trailer(
         "pr",
         "close",
         "7",
+        "--repo",
+        "github.com/tbhb-dev/tools",
         "--comment",
         f"superseded\n\n{trailer_line()}\n",
     ]
@@ -170,7 +173,9 @@ def test_dry_run_prints_the_command_and_closes_nothing(
     opened.record_opened(root(), ["tbhb-dev/tools#7"])
     assert close.main(["pr", "close", "7", "--reason", "r", "--dry-run"], env=ENV) == 0
     assert [call[1] for call in gh.calls] == ["view"]
-    assert capsys.readouterr().out.startswith("gh pr close 7 --comment ")
+    assert capsys.readouterr().out.startswith(
+        "gh pr close 7 --repo github.com/tbhb-dev/tools --comment "
+    )
 
 
 def test_a_failing_close_returns_gh_exit_code(gh: Gh) -> None:
@@ -237,7 +242,7 @@ def test_a_blank_reason_or_comment_is_a_usage_error(
         close.main([*argv, blank], env=ENV)
     assert exc.value.code == 2
     last = capsys.readouterr().err.strip().splitlines()[-1]
-    assert last.endswith(f"argument {argv[-1]}: must not be blank")
+    assert last.endswith("must not be blank")
     assert gh.calls == []
 
 
@@ -340,6 +345,18 @@ def test_view_of_a_pr_also_asks_for_the_head_branch(gh: Gh) -> None:
     close.view("pr", 7)
     fields = "state,url,body,headRefName,isCrossRepository"
     assert gh.calls == [["pr", "view", "7", "--json", fields]]
+
+
+def test_view_pins_the_repo_when_given(gh: Gh) -> None:
+    close.view("pr", 7, "tbhb-dev/tools")
+    (call,) = gh.calls
+    assert call[3:5] == ["--repo", "github.com/tbhb-dev/tools"]
+
+
+def test_comment_is_an_alias_for_reason(gh: Gh) -> None:
+    opened.record_opened(root(), ["tbhb-dev/tools#7"])
+    assert close.main(["pr", "close", "7", "--comment", "Done."], env=ENV) == 0
+    assert gh.calls[-1][-1] == f"Done.\n\n{trailer_line()}\n"
 
 
 DELETE = ["api", "-X", "DELETE", "repos/tbhb-dev/tools/git/refs/heads/feat/x%20y"]

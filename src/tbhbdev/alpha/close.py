@@ -38,7 +38,7 @@ def gh(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return pr.run([pr.find_tool(pr.GH), *argv])
 
 
-def view(kind: str, number: int) -> dict[str, object]:
+def view(kind: str, number: int, repo: str | None = None) -> dict[str, object]:
     """The ``state``, ``url`` and ``body`` of a pull request or an issue.
 
     A pull request also reports ``headRefName`` and ``isCrossRepository``.
@@ -49,7 +49,8 @@ def view(kind: str, number: int) -> dict[str, object]:
     fields = "state,url,body"
     if kind == "pr":
         fields += ",headRefName,isCrossRepository"
-    done = gh([kind, "view", str(number), "--json", fields])
+    pin = [] if repo is None else ["--repo", f"github.com/{repo}"]
+    done = gh([kind, "view", str(number), *pin, "--json", fields])
     data = pr.gh_data(done)
     if not isinstance(data, dict):
         why = " ".join((done.stderr or done.stdout).split())
@@ -199,7 +200,9 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         closing.add_argument("number", type=int)
         closing.add_argument("--dry-run", action="store_true")
         if kind == "pr":
-            closing.add_argument("--reason", required=True, type=non_blank)
+            closing.add_argument(
+                "--reason", "--comment", dest="reason", required=True, type=non_blank
+            )
             closing.add_argument("--delete-branch", action="store_true")
         else:
             closing.add_argument("--reason", required=True, choices=sorted(REASONS))
@@ -217,11 +220,13 @@ def main(
     env = os.environ if env is None else env
     line = trailer(env)
     if args.kind == "pr":
-        data = view("pr", args.number)
+        repo = pr.origin_repository()
+        data = view("pr", args.number, repo)
         text = close_comment(args.reason, opener_note(data, env), line)
         if args.delete_branch:
             check_dependents(data)
-        words = ["pr", "close", str(args.number), "--comment", text]
+        words = ["pr", "close", str(args.number), "--repo", f"github.com/{repo}"]
+        words += ["--comment", text]
     else:
         data = view("issue", args.number)
         text = close_comment(args.comment or "Closed.", "", line)
