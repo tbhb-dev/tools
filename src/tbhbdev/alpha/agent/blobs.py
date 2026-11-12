@@ -36,7 +36,7 @@ _UTF16_AND_32 = ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be")
 
 
 class _Decompressor(Protocol):
-    def decompress(self, data: bytes, max_length: int = -1, /) -> bytes: ...
+    def decompress(self, data: bytes, _max_length: int = -1, /) -> bytes: ...
 
 
 class Unreadable(Exception):  # noqa: N818
