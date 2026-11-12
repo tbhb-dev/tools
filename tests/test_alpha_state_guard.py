@@ -1125,6 +1125,10 @@ def test_a_config_error_refuses_and_says_why(
     assert "state-guard: ignoring the config:" in err
 
 
+def write_invalid_utf8(path: Path) -> None:
+    path.write_bytes(b"\xff\xfe")
+
+
 def make_directory(path: Path) -> None:
     path.mkdir()
 
@@ -1137,7 +1141,7 @@ def unreadable(path: Path) -> None:
 @pytest.mark.parametrize(
     "make",
     [
-        lambda path: path.write_bytes(b"\xff\xfe"),
+        write_invalid_utf8,
         make_directory,
         os.mkfifo,
         unreadable,
