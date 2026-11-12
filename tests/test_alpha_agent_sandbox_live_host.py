@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import json
 import os
@@ -1098,3 +1099,59 @@ def test_codex_local_sandbox_uses_the_rendered_profile(
     )
     assert command.count("-c") == 3
     assert not any(word.startswith("shell_environment_policy=") for word in command)
+
+
+@live_only
+def test_live_signing_key_inside_denied_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, paths = live_policy(tmp_path, monkeypatch, Harness.CODEX, Profile.BUILD)
+    directory = tmp_path / "denied-config"
+    directory.mkdir()
+    key = directory / "agent-signing-key"
+    key.write_text("synthetic signing material\n")
+    key.chmod(0o600)
+    sandbox_settings = dataclasses.replace(
+        run.settings.sandbox,
+        denied_home_paths=(*run.settings.sandbox.denied_home_paths, str(directory)),
+    )
+    signing_credentials = tuple(
+        dataclasses.replace(c, signing=str(key)) for c in run.settings.credentials
+    )
+    config = dataclasses.replace(
+        run.settings, sandbox=sandbox_settings, credentials=signing_credentials
+    )
+    run = dataclasses.replace(run, settings=config)
+    value, executable = checked_live_policy(run, paths)
+    assert str(directory.resolve()) in value.deny
+    assert key.read_text() == "synthetic signing material\n"
+    assert list(directory.iterdir()) == [key]
+    prepared = run_host.Prepared(
+        paths,
+        credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
+        None,
+    )
+    run.files.write("prompt", "unused")
+    rendered = run_host.harness_command(run, prepared, value, executable)
+    cat = shlex.quote(host_tools.resolve("cat", value.tool_path))
+    listing = shlex.quote(host_tools.resolve("ls", value.tool_path))
+    # A successful shell and both recorded statuses prove the sandbox started.
+    script = (
+        f"{cat} {shlex.quote(str(key))} >/dev/null 2>&1; read_rc=$?; "
+        f"{listing} {shlex.quote(str(directory))} >/dev/null 2>&1; list_rc=$?; "
+        'printf "%s %s\\n" "$read_rc" "$list_rc"'
+    )
+    result = subprocess.run(
+        run_host.argv.sandbox(rendered, "/bin/sh", "-c", script),
+        env=value.env,
+        cwd=paths.worktree,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=45,
+    )
+    assert result.returncode == 0, result.stderr
+    read_rc, list_rc = result.stdout.split()
+    assert int(read_rc) in {1, 2}
+    assert int(list_rc) in {1, 2}
