@@ -117,11 +117,16 @@ def result(files: runfiles.RunFiles) -> int:
 
 
 def kill(files: runfiles.RunFiles) -> int:
-    if files.path("rc").exists():
+    pgid_record = optional(files.path("pgid"))
+    if files.path("rc").exists() and (
+        optional(files.path("phase")) != "unknown"
+        or pgid_record is None
+        or not process_group.alive(Group(**json.loads(pgid_record)).pgid)
+    ):
+        # An rc with an unproven stop is not a finish while the group lives.
         print("already finished")
         return 0
-    data = json.loads(files.path("pgid").read_text())
-    recorded = Group(**data)
+    recorded = Group(**json.loads(files.path("pgid").read_text()))
     if not owns(recorded, process_group.identity(recorded.pgid)):
         message = "run group identity no longer matches"
         raise Invalid(message)

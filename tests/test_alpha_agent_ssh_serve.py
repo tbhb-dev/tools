@@ -216,6 +216,61 @@ def test_result(
     }
 
 
+def _unknown_run(monkeypatch: pytest.MonkeyPatch, *, alive: bool) -> list[int]:
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "kill example")
+    files = files_for("example")
+    files.write("request.json", "{}")
+    files.write("pgid", json.dumps({"pgid": 98765, "boot": "boot", "start": "start"}))
+    files.write("phase", "unknown")
+    files.write("rc", "0")
+    calls: list[int] = []
+
+    def stop(_files: runfiles.RunFiles, pid: int, _grace: float) -> bool:
+        calls.append(pid)
+        return True
+
+    monkeypatch.setattr(process_group, "identity", group_identity)
+    monkeypatch.setattr(process_group, "alive", lambda _pgid: alive)
+    monkeypatch.setattr(process_group, "stop_owned", stop)
+    return calls
+
+
+def test_kill_stops_a_group_that_survived_an_unproven_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _unknown_run(monkeypatch, alive=True)
+    assert ssh_serve.main([], "ssh-serve") == 0
+    assert calls == [98765]
+
+
+def test_kill_refuses_a_surviving_group_it_cannot_identify(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls = _unknown_run(monkeypatch, alive=True)
+    monkeypatch.setattr(process_group, "identity", lambda _pgid: None)
+    assert ssh_serve.main([], "ssh-serve") == 2
+    assert calls == []
+    assert "identity no longer matches" in capsys.readouterr().err
+
+
+def test_kill_accepts_an_unproven_finish_whose_group_is_gone(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls = _unknown_run(monkeypatch, alive=False)
+    assert ssh_serve.main([], "ssh-serve") == 0
+    assert calls == []
+    assert capsys.readouterr().out == "already finished\n"
+
+
+def test_kill_of_an_unknown_run_without_a_group_record_is_finished(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _unknown_run(monkeypatch, alive=True)
+    files_for("example").path("pgid").unlink()
+    assert ssh_serve.main([], "ssh-serve") == 0
+    assert capsys.readouterr().out == "already finished\n"
+
+
 @pytest.mark.parametrize("finished", [False, True])
 def test_kill(
     finished: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
