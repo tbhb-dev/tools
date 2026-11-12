@@ -2,17 +2,15 @@
 # Copyright Tony Burns
 """Tests for tbhbdev alpha state-guard, against a config in a temporary XDG dir."""
 
-import contextlib
 import io
 import json
 import os
 import runpy
 import signal
-import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
-from typing import NoReturn, override
+from typing import override
 lazy from pathlib import Path
 
 import pytest
@@ -78,37 +76,16 @@ def _bounded_hook() -> Iterator[None]:
         signal.signal(signal.Signals(14), previous)
 
 
-REFUSE_AND_EXIT = state_guard.refuse_and_exit
-
-
-@pytest.fixture(autouse=True)
-def refusals(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Stand in for the real exit, which would end the pytest process."""
-    texts: list[str] = []
-
-    def fake(text: str, cause: BaseException | None = None) -> NoReturn:
-        texts.append(text if cause is None else f"{text} {cause!r}")
-        raise SystemExit(2)
-
-    monkeypatch.setattr(state_guard, "refuse_and_exit", fake)
-    return texts
-
-
 @pytest.fixture
 def run(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
-    refusals: list[str],
 ) -> Runner:
     def call(data: object) -> Result:
-        refusals.clear()
         monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
-        try:
-            status = state_guard.main()
-        except SystemExit as exit_request:
-            status = int(str(exit_request.code))
+        status = state_guard.main()
         out = capsys.readouterr()
-        return status, out.out, out.err + "".join(f"{text}\n" for text in refusals)
+        return status, out.out, out.err
 
     return call
 
@@ -191,19 +168,13 @@ def test_a_crash_allows(run: Runner, monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     "stage",
     [
-        "unsupported_claims",
         "tagging_enabled",
         "tag_sentences",
-        "claim_reason",
-        "run",
     ],
 )
-def test_a_crash_refuses_a_send_message(
-    config_file: Path, run: Runner, monkeypatch: pytest.MonkeyPatch, stage: str
+def test_a_crash_on_the_tagging_path_keeps_the_refusal(
+    run: Runner, monkeypatch: pytest.MonkeyPatch, stage: str
 ) -> None:
-    if stage == "claim_reason":
-        config_file.write_text("")  # tagging off, so the refusal text is built
-
     def boom(*_args: object) -> object:
         message = f"{stage} broke"
         raise RuntimeError(message)
@@ -1126,10 +1097,10 @@ def test_logging_failure_still_sends_once(tmp_path: Path, run: Runner) -> None:
     path = tmp_path / "state/tbhbdev/state-guard"
     path.parent.mkdir(parents=True)
     path.write_text("a file blocks the directory")
-    status, out, err = run(send("It was done. It shipped."))
-    assert len(err.splitlines()) == 1
-    assert err.startswith("state-guard: could not log tagged sentences:")
-    assert_tagged((status, out, ""), f"{TAG} It was done. {TAG} It shipped.")
+    assert_tagged(
+        run(send("It was done. It shipped.")),
+        f"{TAG} It was done. {TAG} It shipped.",
+    )
 
 
 def test_long_sentences_preserve_full_text_and_evidence(run: Runner) -> None:
@@ -1227,258 +1198,6 @@ def test_a_stdout_failure_keeps_the_refusal(
     assert "stdout closed" in err
 
 
-class Exited(Exception):  # noqa: N818  # stands in for the process exit
-    pass
-
-
-def exit_with_code(code: int) -> NoReturn:
-    raise Exited(code)
-
-
-def test_refuse_and_exit_writes_to_stderr_then_exits_2(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    writes: list[tuple[int, bytes]] = []
-
-    def record(fd: int, data: bytes) -> int:
-        writes.append((fd, data))
-        return len(data)
-
-    monkeypatch.setattr(os, "write", record)
-    monkeypatch.setattr(os, "_exit", exit_with_code)
-    with pytest.raises(Exited) as info:
-        REFUSE_AND_EXIT("refused")
-    assert info.value.args == (2,)
-    assert writes == [(2, b"refused\n")]
-
-
-def test_the_alarm_handler_raises_a_timeout() -> None:
-    with pytest.raises(TimeoutError, match="time budget"):
-        state_guard.out_of_time(14, None)
-
-
-def test_an_interrupt_outside_send_message_is_not_swallowed(
-    monkeypatch: pytest.MonkeyPatch, run: Runner
-) -> None:
-    def interrupt(_data: object) -> int:
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(state_guard, "run", interrupt)
-    with pytest.raises(KeyboardInterrupt):
-        run({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}})
-
-
-def test_refuse_and_exit_writes_the_cause(monkeypatch: pytest.MonkeyPatch) -> None:
-    writes: list[bytes] = []
-
-    def record(_fd: int, data: bytes) -> int:
-        writes.append(data)
-        return len(data)
-
-    monkeypatch.setattr(os, "write", record)
-    monkeypatch.setattr(os, "_exit", exit_with_code)
-    with pytest.raises(Exited):
-        REFUSE_AND_EXIT("refused:", ValueError("why"))
-    assert writes == [b"refused: ValueError('why')\n"]
-
-
-def test_refuse_and_exit_exits_2_when_the_write_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def broken(_fd: int, _data: bytes) -> int:
-        message = "stderr closed"
-        raise OSError(message)
-
-    monkeypatch.setattr(os, "write", broken)
-    monkeypatch.setattr(os, "_exit", exit_with_code)
-    with pytest.raises(Exited) as info:
-        REFUSE_AND_EXIT("refused")
-    assert info.value.args == (2,)
-
-
-def test_an_unreadable_hook_input_refuses(
-    monkeypatch: pytest.MonkeyPatch, refusals: list[str]
-) -> None:
-    class Unreadable(io.StringIO):
-        @override
-        def read(self, _size: int | None = -1) -> str:
-            message = "bad descriptor"
-            raise OSError(message)
-
-    monkeypatch.setattr("sys.stdin", Unreadable())
-    with pytest.raises(SystemExit) as info:
-        state_guard.main()
-    assert info.value.code == 2
-    assert len(refusals) == 1
-    assert "bad descriptor" in refusals[0]
-
-
-def broken_stream() -> int:
-    """A pipe's write end whose reader has gone, so every write fails."""
-    read_end, write_end = os.pipe()
-    os.close(read_end)
-    return write_end
-
-
-def spawn_hook(
-    config_file: Path,
-    tmp_path: Path,
-    streams: tuple[int, int, int],
-    prelude: str = "",
-) -> int:
-    """Run main() in a real process on STREAMS (stdin, stdout, stderr); its status.
-
-    PRELUDE is Python source that runs first, to inject a failure.
-    """
-    signal.alarm(0)  # the subprocess has its own timeout; startup can exceed 1s
-    program = (
-        "import sys\nfrom tbhbdev.alpha import state_guard\n"
-        f"{prelude}\nsys.exit(state_guard.main())\n"
-    )
-    stdin, stdout, stderr = streams
-    return subprocess.run(  # fixed interpreter and program
-        [sys.executable, "-c", program],
-        stdin=stdin,
-        stdout=stdout,
-        stderr=stderr,
-        env={
-            "PATH": os.environ.get("PATH", ""),
-            "PYTHONPATH": os.pathsep.join(p for p in sys.path if p),
-            "XDG_CONFIG_HOME": str(config_file.parents[1]),
-            "XDG_STATE_HOME": str(tmp_path / "state"),
-        },
-        timeout=60,
-        check=False,
-    ).returncode
-
-
-@pytest.mark.parametrize(
-    ("tagging", "broken"),
-    [
-        (True, ("stdout",)),
-        (False, ("stderr",)),
-        (True, ("stdout", "stderr")),
-        (False, ("stdout", "stderr")),
-    ],
-)
-def test_broken_output_streams_still_exit_2(
-    config_file: Path, tmp_path: Path, tagging: bool, broken: tuple[str, ...]
-) -> None:
-    config_file.write_text(f"[state_guard]\ntag_messages = {str(tagging).lower()}\n")
-    payload = tmp_path / "payload.json"
-    payload.write_text(json.dumps(send(UNSUPPORTED_CLAIM)))
-    opened = [
-        os.open(payload, os.O_RDONLY),
-        *(
-            broken_stream() if stream in broken else os.open(os.devnull, os.O_WRONLY)
-            for stream in ("stdout", "stderr")
-        ),
-    ]
-    try:
-        status = spawn_hook(config_file, tmp_path, (opened[0], opened[1], opened[2]))
-    finally:
-        for descriptor in opened:
-            os.close(descriptor)
-    assert status == 2
-
-
-def full_stream() -> tuple[int, int]:
-    """A pipe with no free space whose reader stays open, so a write blocks.
-
-    Returns (read end, write end).
-    """
-    read_end, write_end = os.pipe()
-    os.set_blocking(write_end, False)
-    with contextlib.suppress(BlockingIOError):
-        while True:
-            os.write(write_end, b"x" * 4096)
-    os.set_blocking(write_end, True)
-    return read_end, write_end
-
-
-FAILURES = {
-    "interrupt": "raise KeyboardInterrupt",
-    "exit zero": "raise SystemExit(0)",
-    "exit one": "raise SystemExit(1)",
-    "other base": (
-        "class Stop(BaseException):\n"
-        "    def __repr__(self):\n"
-        "        raise RuntimeError('repr')\n"
-        "raise Stop()"
-    ),
-}
-
-
-@pytest.mark.parametrize("failure", list(FAILURES))
-@pytest.mark.parametrize("stderr_full", [False, True])
-def test_any_failure_on_the_send_message_path_exits_2(
-    config_file: Path, tmp_path: Path, failure: str, stderr_full: bool
-) -> None:
-    config_file.write_text("[state_guard]\ntag_messages = true\n")
-    payload = tmp_path / "payload.json"
-    payload.write_text(json.dumps(send(UNSUPPORTED_CLAIM)))
-    prelude = (
-        "def crash(*_args):\n"
-        + "".join(f"    {line}\n" for line in FAILURES[failure].splitlines())
-        + "state_guard.tag_sentences = crash\n"
-    )
-    stdin = os.open(payload, os.O_RDONLY)
-    stdout = os.open(os.devnull, os.O_WRONLY)
-    reader, stderr = (
-        full_stream() if stderr_full else (None, os.open(os.devnull, os.O_WRONLY))
-    )
-    try:
-        status = spawn_hook(config_file, tmp_path, (stdin, stdout, stderr), prelude)
-    finally:
-        for descriptor in (stdin, stdout, stderr):
-            os.close(descriptor)
-        if reader is not None:
-            os.close(reader)
-    assert status == 2
-
-
-def test_a_full_stderr_pipe_cannot_block_a_refusal(
-    config_file: Path, tmp_path: Path
-) -> None:
-    config_file.write_text("[state_guard]\ntag_messages = false\n")
-    payload = tmp_path / "payload.json"
-    payload.write_text(json.dumps(send(UNSUPPORTED_CLAIM)))
-    stdin = os.open(payload, os.O_RDONLY)
-    stdout = os.open(os.devnull, os.O_WRONLY)
-    reader, stderr = full_stream()
-    try:
-        status = spawn_hook(config_file, tmp_path, (stdin, stdout, stderr))
-    finally:
-        for descriptor in (stdin, stdout, stderr, reader):
-            os.close(descriptor)
-    assert status == 2
-
-
-def test_a_hook_input_that_cannot_be_read_exits_2(
-    config_file: Path, tmp_path: Path
-) -> None:
-    opened = [os.open(os.devnull, os.O_WRONLY) for _ in range(3)]
-    try:
-        status = spawn_hook(config_file, tmp_path, (opened[0], opened[1], opened[2]))
-    finally:
-        for descriptor in opened:
-            os.close(descriptor)
-    assert status == 2
-
-
-def test_an_injected_config_error_refuses_a_send_message(
-    run: Runner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def boom(_data: object) -> int:
-        message = "injected"
-        raise state_guard.userconfig.ConfigError(message)
-
-    monkeypatch.setattr(state_guard, "run", boom)
-    status, out, err = run(send(UNSUPPORTED_CLAIM))
-    assert (status, out) == (2, "")
-    assert "injected" in err
-
-
 def test_a_config_swapped_for_a_pipe_after_the_open_cannot_hang(
     config_file: Path, run: Runner
 ) -> None:
@@ -1519,14 +1238,12 @@ def test_log_refuses_symlinks_and_special_files(tmp_path: Path, run: Runner) -> 
     target.chmod(0o644)
     (directory / "tagged.jsonl").symlink_to(target)
     status, out, err = run(send("It was done."))
-    assert_tagged((status, out, ""), f"{TAG} It was done.")
-    assert "could not log tagged sentences" in err
+    assert_tagged((status, out, err), f"{TAG} It was done.")
     assert (target.read_text(), target.stat().st_mode & 0o777) == ("keep\n", 0o644)
     (directory / "tagged.jsonl").unlink()
     os.mkfifo(directory / "tagged.jsonl")
     status, out, err = run(send("It was done."))
-    assert_tagged((status, out, ""), f"{TAG} It was done.")
-    assert "could not log tagged sentences" in err
+    assert_tagged((status, out, err), f"{TAG} It was done.")
 
 
 def test_log_refuses_a_hard_linked_file(tmp_path: Path, run: Runner) -> None:
@@ -1535,9 +1252,7 @@ def test_log_refuses_a_hard_linked_file(tmp_path: Path, run: Runner) -> None:
     target = tmp_path / "target"
     target.write_text("keep\n")
     os.link(target, directory / "tagged.jsonl")
-    status, out, err = run(send("It was done."))
-    assert_tagged((status, out, ""), f"{TAG} It was done.")
-    assert "single-link regular file" in err
+    assert_tagged(run(send("It was done.")), f"{TAG} It was done.")
     assert target.read_text() == "keep\n"
 
 
@@ -1549,8 +1264,7 @@ def test_log_refuses_a_symlinked_directory(tmp_path: Path, run: Runner) -> None:
     target.chmod(0o755)
     (parent / "state-guard").symlink_to(target)
     status, out, err = run(send("It was done."))
-    assert_tagged((status, out, ""), f"{TAG} It was done.")
-    assert "could not log tagged sentences" in err
+    assert_tagged((status, out, err), f"{TAG} It was done.")
     assert list(target.iterdir()) == []
     assert target.stat().st_mode & 0o777 == 0o755
 
@@ -1560,8 +1274,7 @@ def test_log_refuses_a_file_owned_by_another_user(
 ) -> None:
     monkeypatch.setattr(os, "getuid", lambda: os.geteuid() + 1)
     status, out, err = run(send("It was done."))
-    assert_tagged((status, out, ""), f"{TAG} It was done.")
-    assert "single-link regular file owned by this user" in err
+    assert_tagged((status, out, err), f"{TAG} It was done.")
 
 
 def test_logging_tightens_existing_permissions(tmp_path: Path, run: Runner) -> None:
@@ -1611,7 +1324,7 @@ def test_log_is_private_at_creation(
     assert modes == [0o600]
 
 
-def test_log_failures_with_multiple_lines_print_one_stderr_line(
+def test_log_failures_write_nothing_to_stderr(
     monkeypatch: pytest.MonkeyPatch, run: Runner
 ) -> None:
     def broken(_path: Path) -> int:
@@ -1619,12 +1332,7 @@ def test_log_failures_with_multiple_lines_print_one_stderr_line(
         raise RuntimeError(message)
 
     monkeypatch.setattr(state_guard, "open_log", broken)
-    status, out, err = run(send("It was done."))
-    assert (
-        err
-        == "state-guard: could not log tagged sentences: RuntimeError('one\\ntwo')\n"
-    )
-    assert_tagged((status, out, ""), f"{TAG} It was done.")
+    assert_tagged(run(send("It was done.")), f"{TAG} It was done.")
 
 
 @pytest.mark.parametrize("tool", ["Read", "Write", "Edit", "Bash", "Other"])

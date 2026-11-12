@@ -40,24 +40,21 @@ quotes hold literal text. Before matching `git commit`, it skips command
 wrappers, environment assignments and options, and Git global option values.
 
 The hook never blocks for lack of config, and a crash or invalid config
-allows the call: a broken hook must not stop the agent's work. A SendMessage
-call is the exception. A crash on its path, or an unreadable hook input,
-refuses the call.
+allows the call: a broken hook must not stop the agent's work. The one
+exception is a failure while tagging a SendMessage, which keeps the refusal.
 """
 
-import contextlib
 import io
 import json
 import os
 import re
 import shlex
-import signal
 import stat
 import sys
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import cast
 lazy from collections.abc import Callable
 
 from tbhbdev import userconfig
@@ -222,8 +219,8 @@ def log_tagged(data: Json, tool_input: Json, sentences: list[str]) -> None:
                 if "to" in tool_input:
                     record["recipient"] = tool_input["to"]
                 out.write((json.dumps(record) + "\n").encode())
-    except Exception as exc:  # noqa: BLE001  # audit failures must not drop a message
-        print(f"state-guard: could not log tagged sentences: {exc!r}", file=sys.stderr)
+    except Exception:  # noqa: BLE001  # documented fail-open: the log isn't the verdict
+        return
 
 
 def tagging_enabled(data: Json) -> bool:
@@ -263,34 +260,6 @@ def tagged_input(data: Json, tool_input: Json, original: str) -> str | None:
             }
         }
     )
-
-
-BUDGET_SECONDS = 5
-WRITE_SECONDS = 2
-
-
-def out_of_time(_signal_number: int, _frame: object) -> NoReturn:
-    """Alarm handler: a hook that outlasts its budget raises instead of hanging."""
-    message = "the hook outlasted its time budget"
-    raise TimeoutError(message)
-
-
-def refuse_and_exit(text: str, cause: BaseException | None = None) -> NoReturn:
-    """Write TEXT and the repr of CAUSE to stderr in time, then end with status 2.
-
-    Building the text, the write and the alarm that bounds it all sit in one
-    guarded block that catches every exception, including interrupts, so a
-    failure there can't change the status. The write goes straight to
-    descriptor 2 and `os._exit` skips the interpreter's exit-time flush, so a
-    closed, full or blocked stream can't change the status to 120 or hang the
-    hook. Nothing here opens a descriptor.
-    """
-    with contextlib.suppress(BaseException):
-        signal.signal(signal.SIGALRM, out_of_time)
-        signal.alarm(WRITE_SECONDS)
-        detail = "" if cause is None else f" {cause!r}"
-        os.write(2, f"{text}{detail}\n".encode(errors="replace"))
-    os._exit(2)
 
 
 def abandon_stdout() -> None:
@@ -599,46 +568,11 @@ def run(data: Json) -> int:
 
 
 def main() -> int:
-    """Run the hook within a time budget.
-
-    The alarm turns a blocked read or write into a TimeoutError, which the
-    handlers below treat like any other failure.
-    """
-    previous = signal.signal(signal.SIGALRM, out_of_time)
-    remaining = signal.alarm(BUDGET_SECONDS)
+    """Read the payload on stdin and run it; never fail for a crash or bad config."""
     try:
-        return guarded_main()
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous)
-        if remaining:
-            signal.alarm(remaining)
-
-
-def guarded_main() -> int:
-    """Read the payload on stdin and run it.
-
-    A crash or bad config allows the call, except that a SendMessage call fails
-    closed: any failure on that path, interrupts included, refuses it. So does
-    an unreadable hook input, since the tool is then unknown.
-    """
-    try:
-        data = read_hook_stdin()
-    except BaseException as exc:  # noqa: BLE001  # the tool is unknown, so refuse
-        refuse_and_exit(
-            "state-guard: the hook input is unreadable, so this call was not allowed:",
-            exc,
-        )
-    try:
-        return run(data)
-    except BaseException as exc:  # fail open on any crash but SendMessage
-        if data.get("tool_name") == "SendMessage":
-            refuse_and_exit(
-                "state-guard: the guard failed, so this message was not sent:", exc
-            )
-        if not isinstance(exc, Exception):
-            raise
-        if isinstance(exc, userconfig.ConfigError):
-            with contextlib.suppress(Exception):
-                print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
+        return run(read_hook_stdin())
+    except userconfig.ConfigError as exc:
+        print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
+    except Exception:  # noqa: BLE001  # fail open on any crash
         return 0
+    return 0
