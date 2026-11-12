@@ -72,7 +72,8 @@ commands:
   pr           check | create | edit | hook: the pull request draft
                | backfill-opened OWNER: the opened ledgers
                | rerun N: rerun failed jobs for the current head
-               | close N --reason TEXT: close a pull request
+               | delete-branch N: delete a finished PR's head branch on origin
+               | close N --reason TEXT: close a pull request (--comment is an alias)
   review       draft N [--force] | check N: the review draft
   issue        close N --reason completed|not-planned: close an issue
   gh-app       APP OWNER/REPO [--fresh] [--dry-run] [--all-repos]: mint a GitHub
@@ -119,6 +120,7 @@ def scripts_command(_argv: list[str], _prog: str) -> int:
 
 
 def pr(argv: list[str], prog: str) -> int:
+    # Every close goes through close.py's checks: agent session, open PR, ledger.
     if argv[:1] == ["close"]:
         from tbhbdev.alpha import close  # noqa: PLC0415 -- see the docstring
 
