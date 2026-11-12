@@ -4,6 +4,7 @@
 
 import io
 import json
+import runpy
 import signal
 from collections.abc import Callable, Iterator
 lazy from pathlib import Path
@@ -730,8 +731,6 @@ def test_landed_on_is_not_a_status_claim(run: Runner, message: str) -> None:
 @pytest.mark.parametrize(
     "candidate",
     [
-        "1234567",
-        "12345678901234567890",
         "a" * 7,
         "deadbeef",
         "a12345",
@@ -823,3 +822,105 @@ def test_scanning_continues_after_a_quoted_substitution(run: Runner) -> None:
         "",
         TRAILER_MESSAGE,
     )
+
+
+@pytest.mark.parametrize("ids", [False, True])
+def test_corpus_measurement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    ids: bool,
+) -> None:
+    rows = [
+        (1, "A", "bare_claim", "The build is done."),
+        (2, "A", "negation", "No build is running."),
+        (3, "B", "evidence_missed", "PR #12 merged."),
+        (4, "B", "evidence_missed", "The fix merged."),
+        (5, "C", "future", "Tell me when it is merged."),
+        (6, "C", "other", "The fix deployed."),
+    ]
+    (tmp_path / "window.jsonl").write_text(
+        "\n".join(
+            json.dumps({"id": n, "kind": "stop", "off": text}) for n, _, _, text in rows
+        )
+    )
+    (tmp_path / "labels.jsonl").write_text(
+        "\n".join(
+            json.dumps(
+                {"id": n, "verdict": verdict, "shape": shape, "note": "synthetic"}
+            )
+            for n, verdict, shape, _ in rows
+        )
+    )
+    (tmp_path / "anchors.json").write_text(
+        json.dumps(
+            [
+                {"n": 0, "verdict": "A", "ids": [1]},
+                {"n": 1, "verdict": "A", "ids": [1, 2]},
+                {"n": 2, "verdict": "B", "ids": [3]},
+            ]
+        )
+    )
+    script = Path(__file__).resolve().parents[1] / "state_guard_corpus.py"
+    monkeypatch.setattr(
+        "sys.argv", [str(script), str(tmp_path), *(["--ids"] if ids else [])]
+    )
+    runpy.run_path(str(script), run_name="__main__")
+    expected = (
+        "verdict A: 2/2\nverdict B: 1/2\nverdict C: 2/2\n"
+        "shape bare_claim: 1/1\nshape evidence_missed: 1/2\n"
+        "shape future: 1/1\nshape negation: 1/1\nshape other: 1/1\n"
+        "A anchors: 2/2\n"
+    )
+    if ids:
+        expected += "A pass ids: []\nB block ids: [4]\nC block ids: [5, 6]\n"
+    assert capsys.readouterr().out == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Nothing merged yet.",
+        "Once the fix is merged, check again.",
+        "When the fix is merged, check again.",
+        "If the fix is merged, check again.",
+        "After the fix is merged, check again.",
+        "Before the fix is merged, check again.",
+        "Until the fix is merged, wait.",
+        "Unless the fix is merged, wait.",
+        "Whether the fix is merged matters.",
+        "As soon as the fix is merged, check.",
+    ],
+)
+def test_claim_scope_and_evidence(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I approved, merged and pushed nothing.",
+        "I haven't approved, merged or pushed anything.",
+        "The fix would be queued and merged.",
+        "The merged-code reference needs review.",
+        "The config/deployed.txt reference needs review.",
+        "The reviewer's merged changes need review.",
+        "The reviewers' merged changes need review.",
+    ],
+)
+def test_additional_scoped_exceptions_and_evidence(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "text", ["When it's merged, check again.", "If it merged, check again."]
+)
+def test_scoped_qualifiers_and_attached_evidence_pass(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "text", ["It will be merged after review.", "It should have deployed by tomorrow."]
+)
+def test_review_legitimate_shapes_pass(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == [text]

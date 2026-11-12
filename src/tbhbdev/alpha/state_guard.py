@@ -45,6 +45,7 @@ import re
 import shlex
 import sys
 from typing import cast
+lazy from collections.abc import Callable
 
 from tbhbdev import userconfig
 from tbhbdev.alpha.repo import read_hook_stdin
@@ -94,6 +95,15 @@ SHORT_VALUES = frozenset("mFCctU")
 SHORT_OPTIONAL_VALUES = frozenset("Su")
 MAX_QUOTED = 160
 MAX_LISTED = 3
+# Exemptions from the baseline claim judge. Each rule takes a sentence and one
+# claim match in it and returns True to exempt that match. A rule is added in its
+# own pull request, with its sentences listed in the differential test.
+EXEMPTIONS: tuple[Callable[[str, re.Match[str]], bool], ...] = ()
+
+
+def exempt(chunk: str, match: re.Match[str]) -> bool:
+    """Whether any exemption rule exempts MATCH in CHUNK; the set is empty."""
+    return any(rule(chunk, match) for rule in EXEMPTIONS)
 
 
 def unsupported_claims(text: str) -> list[str]:
@@ -101,7 +111,8 @@ def unsupported_claims(text: str) -> list[str]:
     return [
         chunk.strip()[:MAX_QUOTED]
         for chunk in SENTENCE_END.split(text)
-        if CLAIM.search(chunk) and not EVIDENCE.search(chunk)
+        if not EVIDENCE.search(chunk)
+        and any(not exempt(chunk, match) for match in CLAIM.finditer(chunk))
     ]
 
 
