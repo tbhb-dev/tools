@@ -1155,3 +1155,60 @@ def test_dry_run_preview_is_exact(
         "--body-file - --match-head-commit abc123\n\n"
         "fix: x (#12)\n\nWhy\nw\n"
     )
+
+
+# ---------------------------------------------------------- main regressions
+
+
+def test_main_reads_process_arguments_and_keeps_the_program_name(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["merge-preview", "--help"])
+    with pytest.raises(SystemExit) as info:
+        sm.main(prog="custom-merge")
+    assert info.value.code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("usage: custom-merge [-h] [--dry-run] PR\n")
+    assert "Squash-merge a PR with a clean message." in out
+
+
+def test_main_reports_every_refusal_before_scanning_or_printing(
+    tools: Tools, capsys: pytest.CaptureFixture[str]
+) -> None:
+    tools.view(
+        state="CLOSED",
+        isDraft=True,
+        mergeable="CONFLICTING",
+        mergeStateStatus="BLOCKED",
+    )
+    with pytest.raises(SystemExit) as info:
+        sm.main(["37", "--dry-run"])
+    assert str(info.value) == (
+        "not merging PR #37: the PR is closed; the PR is a draft; "
+        "gh reports mergeable=CONFLICTING; gh reports mergeStateStatus=BLOCKED"
+    )
+    assert capsys.readouterr().out == ""
+    assert len(tools.calls()) == 1
+    assert repo_reads(tools) == []
+    assert tools.scanned() == []
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_main_passes_the_full_message_and_target_visibility_to_the_scan(
+    tools: Tools, monkeypatch: pytest.MonkeyPatch, dry_run: bool
+) -> None:
+    tools.view(title="fix: x", body="## Why\n\nw\n")
+    spec = tools.bin / "gh.spec"
+    answer = {"repo_out": "PRIVATE\n"}
+    spec.write_text(json.dumps(json.loads(spec.read_text()) | answer))
+    scans: list[tuple[str, str, str]] = []
+
+    def scan(text: str, what: str, visibility: str) -> None:
+        scans.append((text, what, visibility))
+
+    monkeypatch.setattr(pr, "scan_secrets", scan)
+    args = ["37", "--dry-run"] if dry_run else ["37"]
+    assert sm.main(args) == 0
+    assert scans == [
+        ("fix: x (#37)\n\nWhy\nw\n", "the squash message for PR #37", "PRIVATE")
+    ]
