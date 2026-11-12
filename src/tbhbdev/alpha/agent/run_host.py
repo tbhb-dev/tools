@@ -619,6 +619,39 @@ def log_hook_tools(run: Run, paths: RunPaths) -> None:
     run.files.write("log", f"preflight: .bazel_env {status}\n")
 
 
+def check_sandbox(
+    run: Run, prepared: Prepared, value: Policy, command: tuple[str, ...]
+) -> None:
+    if run.request.harness is not Harness.CODEX:
+        run.files.write(
+            "log", f"preflight: sandbox check not available for {run.request.harness}\n"
+        )
+        return
+    noop = host_tools.resolve("true", value.tool_path)
+    sandbox_command = argv.sandbox(command, noop)
+
+    def probe() -> None:
+        result = subprocess.run(  # nosec B603
+            sandbox_command,
+            env=value.env | prepared.delivery.env,
+            cwd=prepared.paths.worktree,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            first_line = result.stderr.partition("\n")[0][:300]
+            message = f"preflight: sandbox failed: {first_line}"
+            raise Invalid(message)
+        run.files.write("log", "preflight: sandbox ok\n")
+
+    process_group.prepare(
+        probe, run.files, run.deadline, run.settings.kill_grace_seconds
+    )
+
+
 def run_harness(
     run: Run, prepared: Prepared, stack: ExitStack, *, preflight_only: bool = False
 ) -> int:
@@ -628,6 +661,7 @@ def run_harness(
     command = checked_harness_command(run, prepared, value, executable)
     if preflight_only:
         log_hook_tools(run, paths)
+        check_sandbox(run, prepared, value, command)
         run.files.write("log", f"preflight ok: {executable}\n")
         return 0
     headless = run.request.kind is RunKind.EXEC

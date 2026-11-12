@@ -254,6 +254,7 @@ def test_preflight_prepares_and_stops_signing_without_launch(
     def unexpected(*_args: object, **_kwargs: object) -> None:
         pytest.fail("preflight must never launch or push")
 
+    monkeypatch.setattr(subprocess, "run", constant(subprocess.CompletedProcess((), 0)))
     monkeypatch.setattr(process_group, "prepare", prepare)
     monkeypatch.setattr(run_host, "prepare_workspace", workspace)
     monkeypatch.setattr(run_host, "run_harness", harness)
@@ -263,7 +264,7 @@ def test_preflight_prepares_and_stops_signing_without_launch(
     monkeypatch.setattr(process_group, "launch_owned", unexpected)
     monkeypatch.setattr(run_host.push, "run", unexpected)
     assert run_host.execute(run, "example", preflight_only=True) == 0
-    assert events == ["prepare", "workspace", "sign", "command", "stop"]
+    assert events == ["prepare", "workspace", "sign", "command", "prepare", "stop"]
     status = (
         "present"
         if hook_tools == "directory"
@@ -271,6 +272,7 @@ def test_preflight_prepares_and_stops_signing_without_launch(
     )
     assert run.files.path("log").read_text() == (
         f"preflight: .bazel_env {status}\n"
+        "preflight: sandbox ok\n"
         f"preflight ok: {run.home.parent / 'host-bin' / 'true'}\n"
     )
     assert run.files.path("rc").read_text() == "0\n"
@@ -2677,9 +2679,8 @@ def test_resolved_denies_drop_nested_signing_key(tmp_path: Path, reverse: bool) 
     assert value.detail.deny == value.deny
 
 
-def test_resolved_denies_signing_credential_inside_denied_config(
-    tmp_path: Path,
-) -> None:
+@pytest.fixture
+def denied_signing_directory(tmp_path: Path) -> tuple[run_host.Run, Path]:
     run = make_run(tmp_path)
     directory = run.home / ".config" / "toolcfg"
     directory.mkdir(parents=True)
@@ -2698,9 +2699,26 @@ def test_resolved_denies_signing_credential_inside_denied_config(
             ),
         ),
     )
+    return run, directory
+
+
+def test_resolved_denies_signing_credential_inside_denied_config(
+    denied_signing_directory: tuple[run_host.Run, Path],
+) -> None:
+    run, directory = denied_signing_directory
     paths = preparation(run).paths
-    assert str(key) in run_host.full_denies(run, paths)
+    assert str(directory / "agent-signing-key") in run_host.full_denies(run, paths)
     assert run_host.resolved_denies(run, paths) == (str(directory),)
+
+
+def test_final_policy_denies_signing_key_parent(
+    denied_signing_directory: tuple[run_host.Run, Path],
+) -> None:
+    run, directory = denied_signing_directory
+    value, _executable = run_host.checked_policy(run, preparation(run).paths)
+    assert str(directory) in value.deny
+    assert isinstance(value.detail, CodexPolicy)
+    assert value.detail.deny == value.deny
 
 
 @pytest.mark.parametrize("grant_below_middle", [False, True])
@@ -4395,3 +4413,123 @@ def test_harness_command_failure_names_only_its_step(
     assert run.files.path("rc").read_text() == "1\n"
     assert run.files.path("phase").read_text() == "ended"
     assert not run.files.path("launched").exists()
+
+
+@pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize(
+    "result",
+    [
+        (0, "ignored\n", "preflight: sandbox ok\n"),
+        (
+            1,
+            "bwrap: " + "x" * 350 + "\nnever logged",
+            "preflight: sandbox failed: " + ("bwrap: " + "x" * 350)[:300] + "\n",
+        ),
+        (2, "", "preflight: sandbox failed: \n"),
+        (
+            -9,
+            "bwrap: denied\nnever logged\nanother hidden line",
+            "preflight: sandbox failed: bwrap: denied\n",
+        ),
+    ],
+)
+def test_preflight_runs_real_sandbox_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: RunKind,
+    result: tuple[int, str, str],
+) -> None:
+    run = make_run(tmp_path, kind=kind.value)
+    prepared = dataclasses.replace(
+        preparation(run),
+        delivery=credentials.Delivery(
+            {"EXAMPLE_DELIVERY": "example"},
+            None,
+            gh_fallback=False,
+            claude_profile=None,
+        ),
+    )
+    noop = run.home / ".local" / "bin" / "true"
+    noop.parent.mkdir(parents=True)
+    noop.write_bytes(b"binary")
+    noop.chmod(0o755)
+    run.files.write("prompt", "brief")
+    value, executable = run_host.checked_policy(run, prepared.paths)
+    command = run_host.checked_harness_command(run, prepared, value, executable)
+    calls: list[tuple[str, ...]] = []
+
+    def execute(
+        command: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        assert kwargs == {
+            "env": value.env | prepared.delivery.env,
+            "cwd": prepared.paths.worktree,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "check": False,
+        }
+        return subprocess.CompletedProcess(command, result[0], stderr=result[1])
+
+    def prepare(
+        operation: Callable[[], object],
+        files: runfiles.RunFiles,
+        deadline: float,
+        grace: float,
+    ) -> object:
+        assert files is run.files
+        assert deadline == run.deadline
+        assert grace == run.settings.kill_grace_seconds
+        return operation()
+
+    monkeypatch.setattr(subprocess, "run", execute)
+    monkeypatch.setattr(process_group, "prepare", prepare)
+    monkeypatch.setattr(run_host, "prepare_workspace", constant(prepared))
+    assert run_host.execute(run, "brief", preflight_only=True) == bool(result[0])
+    log = run.files.path("log").read_text()
+    assert log == (
+        "preflight: .bazel_env missing; "
+        "commit hooks that call .bazel_env/bin will fail in this run\n"
+        + result[2]
+        + ("" if result[0] else f"preflight ok: {executable}\n")
+    )
+    assert run.files.path("rc").read_text() == f"{int(bool(result[0]))}\n"
+    assert not run.files.path("launched").exists()
+    assert calls == [run_host.argv.sandbox(command, str(noop.resolve()))]
+
+
+def test_preflight_without_sandbox_entry_point(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = make_run(
+        tmp_path, harness="claude", claude_profile="primary", reason="example"
+    )
+    prepared = preparation(run)
+    run.files.write("prompt", "brief")
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("unsupported harness must not start a sandbox")
+
+    monkeypatch.setattr(process_group, "prepare", unexpected)
+    with ExitStack() as stack:
+        assert run_host.run_harness(run, prepared, stack, preflight_only=True) == 0
+    assert (
+        "preflight: sandbox check not available for claude\n"
+        in run.files.path("log").read_text()
+    )
+
+
+def test_ordinary_run_never_starts_a_sandbox_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected(*_args: object) -> None:
+        pytest.fail("ordinary runs must not check the sandbox")
+
+    monkeypatch.setattr(run_host, "check_sandbox", unexpected)
+    test_launch_uses_the_policy_and_marks_only_after_spawn(
+        tmp_path, monkeypatch, Harness.CODEX, RunKind.EXEC
+    )

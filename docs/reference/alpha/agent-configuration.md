@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6
-    at: "2026-11-12T09:43:12Z"
+    at: "2026-11-12T09:44:18Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -154,7 +154,7 @@ Replace `request` with the complete existing run-host request for a public GitHu
 
 Supply a short-lived push token as `push_token`, or `null` to skip pushing. The SSH connection remains open until the run finishes. It shows run-host's normal output. After the harness exits with a new commit on `agent/NAME`, the host pushes that branch over GitHub HTTPS. A one-shot credential helper reads the token through an inherited pipe. The token stays out of arguments, environment variables, config files, and run files. Push disables git hooks. A failed push records one error line and doesn't retry.
 
-`preflight NAME` requires a null `push_token`. It prepares the workspace and credentials and loads the signing agent. It logs whether the run worktree has `.bazel_env/bin` and warns that commit hooks fail when the directory is missing, without changing the exit status. After checking the policy and harness command, it writes `preflight ok: <executable path>` to the log. It stops the signing agent and records the exit status, phase, and index entry without launching the harness. Use a fresh name for the next run. Preparation errors specify the failed step without including upstream error details.
+`preflight NAME` requires a null `push_token`. It prepares the workspace and credentials and loads the signing agent. It logs whether the run worktree has `.bazel_env/bin` and warns that commit hooks fail when the directory is missing, without changing the exit status. It runs `true` through the harness sandbox and logs `preflight: sandbox ok`, `preflight: sandbox failed:` with the first error line (exit 1), or that the check is unavailable. After checking the policy and harness command, it writes `preflight ok: <executable path>` to the log. It stops the signing agent and records the exit status, phase, and index entry without launching an agent. Use a fresh name for the next run. Preparation errors specify the failed step without including upstream error details.
 
 `result NAME` prints one JSON object with `v`, `name`, `rc`, `state`, `report`, `log_tail`, `branch` and `head`. It reads the existing run files and limits the log to its last 200 lines. While a run continues, `rc` is `null`. Missing output fields use `null`. The `branch` field names only a branch the host pushed.
 

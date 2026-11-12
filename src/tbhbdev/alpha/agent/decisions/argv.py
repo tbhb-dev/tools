@@ -297,3 +297,27 @@ def harness(  # noqa: PLR0913 -- one value per fact the harness's argv depends o
             return (*command, "--output-format", "json", "--json-schema", schema_text)
         return command
     return _agy(request, policy, worktree, brief_file, agy_project, agy_brief)
+
+
+def sandbox(command: tuple[str, ...], *arguments: str) -> tuple[str, ...]:
+    """Swap the Codex invocation for its native sandbox, retaining its config."""
+    options = {
+        "-c",
+        "--config",
+        "-P",
+        "--permission-profile",
+        "-p",
+        "--profile",
+        "-C",
+        "--cd",
+        "--enable",
+        "--disable",
+    }
+    words = iter(command)
+    result = [next(words), "sandbox"]
+    for word in words:
+        if word in options:
+            result.extend((word, next(words)))
+        elif word in {"-s", "--sandbox"}:
+            result.extend(("-c", f"sandbox_mode={_toml(next(words))}"))
+    return (*result, "--", *arguments)
