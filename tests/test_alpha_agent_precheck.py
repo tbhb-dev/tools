@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -401,6 +402,13 @@ def test_dispatch_preserves_arguments_and_program(
     assert calls == [(["a", "--reference", "b"], "example agent precheck")]
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason=(
+        "the macOS filesystem refuses non-UTF-8 names (errno 92); "
+        "Linux CI runs this test"
+    ),
+)
 def test_collection_decodes_non_utf8_paths(
     clone: Callable[[str, dict[str, bytes]], Path],
 ) -> None:
