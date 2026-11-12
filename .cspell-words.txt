@@ -76,6 +76,7 @@ getppid
 getproxies
 gitdir
 gitdirs
+gpgsig
 gpgsign
 hardwrap
 headscale
@@ -102,6 +103,7 @@ mcpjson
 mdfile
 milestoned
 mkfifo
+mktree
 msgfile
 mutmut
 nbbbb
@@ -200,6 +202,7 @@ timestamptz
 tmpprefix
 tombi
 toolu
+topo
 tricolon
 tskey
 tzset
