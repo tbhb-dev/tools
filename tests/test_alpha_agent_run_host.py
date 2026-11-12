@@ -2827,6 +2827,12 @@ def test_startup_symlink_target_is_protected(tmp_path: Path) -> None:
         run_host.checked_policy(run, preparation(run).paths)
 
 
+INVENTORY_PATHS = (
+    ".local/state/tbhb/private-repos.txt",
+    ".local/state/tbhb",
+)
+
+
 def test_protected_home_lists_startup_files_and_socket_ancestors(
     tmp_path: Path,
 ) -> None:
@@ -2870,9 +2876,24 @@ def test_protected_home_lists_startup_files_and_socket_ancestors(
         str(mirror.parent),
         str(mirror.parent.parent),
         str(mirror.parent.parent.parent),
+        *(str(run.home / p) for p in INVENTORY_PATHS),
         str(run_host.userconfig.path()),
         str(run_host.TAINT_DIRECTORY),
     )
+
+
+@pytest.mark.parametrize(
+    "grant",
+    [".local/state", ".local/state/tbhb", ".local/state/tbhb/private-repos.txt"],
+)
+def test_a_write_root_over_the_private_name_inventory_is_refused(
+    tmp_path: Path, grant: str
+) -> None:
+    run = make_run(tmp_path)
+    with pytest.raises(Invalid, match="protected host path"):
+        run_host.policy.protect_paths(
+            (str(run.home / grant),), run_host.protected_home(run)
+        )
 
 
 def test_resolved_denies_receive_host_facts(

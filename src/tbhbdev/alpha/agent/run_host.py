@@ -119,6 +119,8 @@ def protected_home(run: Run) -> tuple[str, ...]:
         message = "account clone must have its own git directory"
         raise Invalid(message)
     mirror = worktree.mirror_path(run.home, run.request.repo)
+    # The host trusts this list when it scans a push; a run must not edit it.
+    inventory = run.home / push.PRIVATE_NAMES
     paths = (
         *(run.home / p for p in _STARTUP_FILES),
         *parents,
@@ -127,6 +129,8 @@ def protected_home(run: Run) -> tuple[str, ...]:
         mirror.parent,
         mirror.parent.parent,
         mirror.parent.parent.parent,
+        inventory,
+        inventory.parent,
         userconfig.path(),
         TAINT_DIRECTORY,
     )
