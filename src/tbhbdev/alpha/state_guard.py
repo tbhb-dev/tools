@@ -7,13 +7,15 @@ SessionStart. It reads the hook payload on stdin.
 
 - PreToolUse on SendMessage blocks a message that claims a status (done,
   merged, deployed and so on) with no evidence, by exiting 2 with the reason on
-  stderr. On Bash it blocks a `git commit` that adds a Signed-off-by or
+  stderr, asking to resend it with only the flagged sentences corrected.
+  On Bash it blocks a `git commit` that adds a Signed-off-by or
   Co-authored-by trailer visible in its arguments, or the `-s` or `--signoff`
   flag. Heredoc and `-F` file message bodies pass this command check; the
   commit-msg identity check catches trailers there. Neither check needs the
   user config.
 - Stop blocks a final reply with the same claims by printing
-  `{"decision": "block", ...}`. A Stop that the hook itself caused
+  `{"decision": "block", ...}`, asking for only the corrected sentences as a
+  short follow-up. A Stop that the hook itself caused
   (`stop_hook_active`) passes, so the model can't loop.
 - SessionStart prints `[harness] rule` from the user config (see
   tbhbdev.userconfig), which Claude Code adds to the model's context. Without
@@ -103,13 +105,27 @@ def unsupported_claims(text: str) -> list[str]:
     ]
 
 
-def claim_reason(who: str, bad: list[str]) -> str:
-    """The block message for the unsupported_claims claims BAD that WHO made."""
+def final_claim_reason(bad: list[str]) -> str:
+    """The block message for BAD claims in a reply that was already shown."""
+    offending = " | ".join(bad[:MAX_LISTED])
     return (
-        f"state-guard: {who} makes a status claim without evidence. Add the "
-        "PR number and sha, the merge sha, command output or a log path, "
-        "attribute it ('the reviewer says ...'), or say it is unverified. Offending: "
-        + " | ".join(bad[:MAX_LISTED])
+        "state-guard: your reply makes a status claim without evidence. "
+        f"Offending: {offending}. Fix only these sentences (add the PR number "
+        "and sha, the merge sha, command output or a log path, attribute it, "
+        "or say it is unverified) and send just the corrected sentences; "
+        "don't repeat the rest of the reply."
+    )
+
+
+def claim_reason(bad: list[str]) -> str:
+    """The block message for BAD claims in a message that was not sent."""
+    offending = " | ".join(bad[:MAX_LISTED])
+    return (
+        "state-guard: this message makes a status claim without evidence, so it "
+        f"was not sent. Offending: {offending}. Resend the same message with only "
+        "these sentences fixed (add the PR number and sha, the merge sha, "
+        "command output or a log path, attribute it, or say it is unverified); "
+        "leave the rest unchanged."
     )
 
 
@@ -317,7 +333,7 @@ def pre_tool_reason(data: Json) -> str | None:
         return commit_trailer_reason(str(tool_input.get("command", "")))
     if tool == "SendMessage":
         bad = unsupported_claims(str(tool_input.get("message", "")))
-        return claim_reason("this message", bad) if bad else None
+        return claim_reason(bad) if bad else None
     if tool in {"Write", "Edit"}:
         return open_note_reason(str(tool), tool_input)
     return None
@@ -365,7 +381,7 @@ def stop_reason(data: Json) -> str | None:
     if not message:
         message = last_assistant_text(str(data.get("transcript_path", "")))
     bad = unsupported_claims(str(message))
-    return claim_reason("your reply", bad) if bad else None
+    return final_claim_reason(bad) if bad else None
 
 
 def run(data: Json) -> int:
