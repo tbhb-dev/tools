@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from tbhbdev.alpha import private_names
 from tbhbdev.alpha.agent import host_tools, runfiles
 from tbhbdev.alpha.agent.decisions import repo
+from tbhbdev.alpha.agent.model import Invalid
 from tbhbdev.alpha.private_names import _configured
 
 if TYPE_CHECKING:
@@ -144,6 +145,7 @@ def run(
         names = read_names(run.home / PRIVATE_NAMES)
         with publication(run.files.root, workspace, commit) as directory:
             scan(directory, before, commit, names)
+            secret_scan(directory, before, commit)
             status, error = send(directory, url(run.request.repo), branch, token)
     except PushRefusedError as refusal:
         run.files.write("log", f"push refused: {refusal}\n")
@@ -263,6 +265,40 @@ def scan(
         message = f"{len(hits)} private-name hit(s)" + "".join(
             f"\nline {n}: {message}" for n, message in hits
         )
+        raise PushRefusedError(message)
+
+
+def secret_scan(directory: Path, before: str, commit: str) -> None:
+    """Scan the pushed range for secrets with the host's gitleaks."""
+    try:
+        result = subprocess.run(  # nosec B603
+            [
+                host_tools.resolve("gitleaks"),
+                "git",
+                f"--log-opts={before}..{commit}",
+                "--redact",
+                "--no-banner",
+                "--exit-code=1",
+                str(directory),
+            ],
+            cwd=directory,
+            env={
+                "HOME": str(directory),
+                "PATH": host_tools.search(),
+            },
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Invalid, OSError, subprocess.SubprocessError:
+        message = "secret scan unavailable"
+        raise PushRefusedError(message) from None
+    if result.returncode == 1:
+        message = "secret scan found a leak in the pushed range"
+        raise PushRefusedError(message)
+    if result.returncode:
+        message = "secret scan failed"
         raise PushRefusedError(message)
 
 
