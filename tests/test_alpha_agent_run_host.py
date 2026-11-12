@@ -70,6 +70,7 @@ if TYPE_CHECKING:
         Policy,
         RunPaths,
         RunRequest,
+        Sandbox,
         Settings,
     )
 
@@ -2670,6 +2671,17 @@ def test_resolved_denies_preserve_macos_aliases_and_empty_linux_data(
     )
 
 
+def with_sandbox(run: run_host.Run, sandbox: Sandbox) -> run_host.Run:
+    """Return the run with its sandbox settings replaced."""
+    settings = dataclasses.replace(run.settings, sandbox=sandbox)
+    return dataclasses.replace(run, settings=settings)
+
+
+def replace_roots(run: run_host.Run, root: str) -> Sandbox:
+    """Return the run's sandbox with one configured write root."""
+    return dataclasses.replace(run.settings.sandbox, write_roots=(root,))
+
+
 def keep_home_denies(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep system socket paths, which a host may lack, out of the denies."""
     real = policy.denied_paths
@@ -2718,20 +2730,18 @@ def denied_signing_directory(
     directory.mkdir(parents=True)
     key = directory / "agent-signing-key"
     key.touch()
-    run = dataclasses.replace(
+    run = with_sandbox(
         run,
-        settings=dataclasses.replace(
-            run.settings,
-            sandbox=dataclasses.replace(
-                run.settings.sandbox, denied_home_paths=(".config/tool-config",)
-            ),
-            credentials=tuple(
-                dataclasses.replace(credential, signing=str(key))
-                for credential in run.settings.credentials
-            ),
+        dataclasses.replace(
+            run.settings.sandbox, denied_home_paths=(".config/tool-config",)
         ),
     )
-    return run, directory
+    signed = tuple(
+        dataclasses.replace(credential, signing=str(key))
+        for credential in run.settings.credentials
+    )
+    settings = dataclasses.replace(run.settings, credentials=signed)
+    return dataclasses.replace(run, settings=settings), directory
 
 
 def test_resolved_denies_signing_credential_inside_denied_config(
@@ -2850,9 +2860,9 @@ def test_resolved_denies_keep_only_grants_between_denies(
         value = original_build(
             run.settings,
             run.host,
+            account=run.request.account,
             harness=run.request.harness,
             profile=run.request.profile,
-            account=run.request.account,
             unsandboxed=False,
             paths=paths,
             denied=denied,
@@ -2880,15 +2890,7 @@ def test_startup_symlink_target_is_protected(tmp_path: Path) -> None:
     target = tmp_path / "trusted-startup"
     target.touch()
     (run.home / ".zshrc").symlink_to(target)
-    run = dataclasses.replace(
-        run,
-        settings=dataclasses.replace(
-            run.settings,
-            sandbox=dataclasses.replace(
-                run.settings.sandbox, write_roots=(str(target),)
-            ),
-        ),
-    )
+    run = with_sandbox(run, replace_roots(run, str(target)))
     with pytest.raises(Invalid, match="protected host path"):
         run_host.checked_policy(run, preparation(run).paths)
 
@@ -2903,27 +2905,30 @@ def test_protected_home_lists_startup_files_and_socket_ancestors(
             run.settings, sockets_dir=".control/sockets/private"
         ),
     )
-    expected = (
-        ".zshenv",
-        ".zshrc",
-        ".zprofile",
-        ".zlogin",
-        ".bashrc",
-        ".bash_profile",
-        ".profile",
-        ".tmux.conf",
-        ".config/tmux",
-        ".gitconfig",
-        ".config/git",
-        ".config/mise",
-        ".ssh",
-        ".claude",
-        ".claude.json",
-        ".codex",
-        ".codex-recovery",
-        ".control/sockets",
-        ".control",
-    )
+    expected = [
+        f".{name}"
+        for name in (
+            "zshenv",
+            "zshrc",
+            "zprofile",
+            "zlogin",
+            "bashrc",
+            "bash_profile",
+            "profile",
+            "tmux.conf",
+            "config/tmux",
+            "gitconfig",
+            "config/git",
+            "config/mise",
+            "ssh",
+            "claude",
+            "claude.json",
+            "codex",
+            "codex-recovery",
+            "control/sockets",
+            "control",
+        )
+    ]
     clone = Path(run_host.repo.clone_path(run.home, run.request.repo))
     mirror = run_host.worktree.mirror_path(run.home, run.request.repo)
     assert run_host.protected_home(run) == (
@@ -3275,15 +3280,8 @@ def test_mirror_protection_uses_the_run_home_without_xdg_state(
 ) -> None:
     run = make_run(tmp_path)
     monkeypatch.delenv("XDG_STATE_HOME")
-    mirror = (
-        run.home
-        / ".local"
-        / "state"
-        / "tbhbdev"
-        / "agent-mirrors"
-        / "github.com"
-        / "example-org"
-        / "example-repo.git"
+    mirror = run.home.joinpath(
+        ".local/state/tbhbdev/agent-mirrors/github.com/example-org/example-repo.git"
     )
     assert str(mirror) in run_host.protected_home(run)
     assert str(mirror) in run_host.full_denies(run, preparation(run).paths)
@@ -3660,15 +3658,7 @@ def test_codex_home_is_outside_all_write_roots(tmp_path: Path, profile: str) -> 
 def test_codex_home_refuses_configured_write_root(tmp_path: Path) -> None:
     run = make_run(tmp_path)
     control = run.home / "control"
-    run = dataclasses.replace(
-        run,
-        settings=dataclasses.replace(
-            run.settings,
-            sandbox=dataclasses.replace(
-                run.settings.sandbox, write_roots=(str(control),)
-            ),
-        ),
-    )
+    run = with_sandbox(run, replace_roots(run, str(control)))
     paths = dataclasses.replace(run_host.planned_paths(run), codex_home=str(control))
     with pytest.raises(Invalid) as caught:
         run_host.checked_policy(run, paths)
@@ -3987,15 +3977,7 @@ def test_codex_copy_refuses_overlapping_write_root(
     monkeypatch.setattr(host_tools, "resolve", resolve)
     copy = run.home / ".local/share/tbhbdev/codex" / source.name
     write = {"parent": copy.parent, "self": copy, "child": copy / "cache"}[root]
-    run = dataclasses.replace(
-        run,
-        settings=dataclasses.replace(
-            run.settings,
-            sandbox=dataclasses.replace(
-                run.settings.sandbox, write_roots=(str(write),)
-            ),
-        ),
-    )
+    run = with_sandbox(run, replace_roots(run, str(write)))
     with pytest.raises(Invalid, match=r"protected host path.*example-version"):
         run_host.checked_policy(run, run_host.planned_paths(run))
 
