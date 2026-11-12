@@ -7,11 +7,15 @@ import itertools
 import json
 import shlex
 import sys
+from typing import TYPE_CHECKING
 
 import pytest
 
 from tbhbdev import alpha
 from tbhbdev.alpha import guard_gh_poll as guard
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 SHA = "abcdef0123456789abcdef0123456789abcdef01"
 # The 1Password service account token's variable, split for gitleaks.
@@ -644,15 +648,10 @@ def test_hook_contract(
     reason: str,
     *,
     agy: bool,
-    monkeypatch: pytest.MonkeyPatch,
+    hook_stdin: Callable[[str, bool], None],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    payload = (
-        {"toolCall": {"args": {"CommandLine": command}}}
-        if agy
-        else {"tool_input": {"command": command}}
-    )
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    hook_stdin(command, agy)
     assert alpha.main(["guard-gh-poll"], "tbhbdev alpha") == 0
     output = json.loads(capsys.readouterr().out)
     if agy:

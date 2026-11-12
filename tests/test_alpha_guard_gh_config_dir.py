@@ -13,6 +13,8 @@ from tbhbdev import alpha
 from tbhbdev.alpha import guard_gh_config_dir as guard
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from conftest import Stubs
 
 
@@ -101,26 +103,74 @@ def test_hook_never_runs_gh(
     assert stubs.calls() == []
 
 
-@pytest.mark.parametrize("payload", ["", "{bad", "[]", "{}"])
-def test_bad_stdin_passes(
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "",
+        "{bad",
+        "[]",
+        "{}",
+        '{"tool_input": {}}',
+        '{"tool_input": {"command": null}}',
+        '{"tool_input": {"command": 123}}',
+        '{"tool_input": "true"}',
+        '{"toolCall": {}}',
+        '{"toolCall": {"args": []}}',
+        '{"toolCall": {"args": {"CommandLine": false}}}',
+        '{"toolCall": {}, "tool_input": {"command": "true"}}',
+    ],
+)
+def test_bad_stdin_is_denied(
     payload: str,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
     assert guard.main() == 0
-    assert capsys.readouterr() == ("", "")
+    assert capsys.readouterr() == (
+        json.dumps(
+            guard.decision(guard.REASON_INPUT, antigravity="toolCall" in payload)
+        )
+        + "\n",
+        "",
+    )
 
 
-def test_hook_crashes_fail_open(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("agy", [False, True])
+def test_hook_crashes_fail_closed(
+    *,
+    agy: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    def crash() -> None:
+    def crash(_text: str) -> None:
         raise RuntimeError
 
-    monkeypatch.setattr(guard, "read_hook_stdin", crash)
+    payload = (
+        {"toolCall": {"args": {"CommandLine": "true"}}}
+        if agy
+        else {"tool_input": {"command": "true"}}
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(guard, "verdict", crash)
     assert guard.main() == 0
-    assert capsys.readouterr() == ("", "")
+    assert capsys.readouterr() == (
+        json.dumps(guard.decision(guard.REASON_CRASH, antigravity=agy)) + "\n",
+        "",
+    )
+
+
+def test_unreadable_stdin_is_denied(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stdin = io.StringIO()
+    stdin.close()
+    monkeypatch.setattr(sys, "stdin", stdin)
+    assert guard.main() == 0
+    assert capsys.readouterr() == (
+        json.dumps(guard.decision(guard.REASON_INPUT, antigravity=False)) + "\n",
+        "",
+    )
 
 
 OWN = "/home/agent/.config/gh-agent"
@@ -134,6 +184,105 @@ def run(command: str, own: str | None, monkeypatch: pytest.MonkeyPatch) -> str |
     else:
         monkeypatch.setenv("GH_CONFIG_DIR", own)
     return guard.verdict(command)
+
+
+@pytest.mark.parametrize("own", [None, "", OWN])
+@pytest.mark.parametrize(
+    ("dynamic", "literal"),
+    [
+        ("source script.sh", "echo source script.sh"),
+        (". script.sh", "echo . script.sh"),
+        ("eval '$SCRIPT'", "eval 'true'"),
+        ('eval "$SCRIPT"', 'eval "true"'),
+        ("eval $SCRIPT", "eval true"),
+        ("eval true '$SCRIPT'", "eval true true"),
+        ("eval '`printf true`'", "eval 'printf true'"),
+        ('eval "`printf true`"', 'eval "printf true"'),
+        ("eval `printf true`", "eval printf true"),
+        ("eval '$(printf true)'", "eval 'printf true'"),
+        ('eval "$(printf true)"', 'eval "printf true"'),
+        ("eval $(printf true)", "eval printf true"),
+        ("eval echo$(printf true)", "eval echo"),
+        ('name=GH_CONFIG_DIR; eval "unset $name"', 'name=OTHER; eval "unset OTHER"'),
+        ("bash -c 'source script.sh'", "bash -c 'echo source script.sh'"),
+        ("eval '. script.sh'", "eval 'echo . script.sh'"),
+        ("bash -c 'eval $SCRIPT'", "bash -c 'eval true'"),
+    ],
+)
+def test_unreadable_shell_text_is_denied_but_literal_commands_pass(
+    dynamic: str,
+    literal: str,
+    own: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert run(dynamic, own, monkeypatch) == guard.REASON_SHELL_TEXT
+    assert run(literal, own, monkeypatch) is None
+
+
+@pytest.mark.parametrize("own", [None, "", OWN])
+@pytest.mark.parametrize("shell", ["bash", "sh", "zsh", "dash", "ksh", "/bin/bash"])
+@pytest.mark.parametrize(
+    "script",
+    [
+        "$SCRIPT",
+        '"$SCRIPT"',
+        "'$SCRIPT'",
+        "'`printf true`'",
+        '"`printf true`"',
+        "`printf true`",
+        "'$(printf true)'",
+        '"$(printf true)"',
+        "$(printf true)",
+        '"echo $(printf true)"',
+    ],
+)
+def test_dynamic_shell_scripts_are_denied_but_literal_scripts_pass(
+    shell: str,
+    script: str,
+    own: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert run(f"{shell} -c {script}", own, monkeypatch) == guard.REASON_SHELL_TEXT
+    assert run(f"{shell} -c 'true'", own, monkeypatch) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "(true)",
+        "bash",
+        "bash -c",
+        "bash script.sh",
+        "bash -c 'true' '$SCRIPT'",
+        "eval",
+        "echo '$SCRIPT'",
+        "echo $(printf true)",
+        "echo `printf true`",
+        "command eval 'true'",
+        "bash -c 'eval true'",
+        "bash -c 'bash -c true'",
+    ],
+)
+def test_literal_shell_text_and_other_arguments_pass(
+    command: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert run(command, None, monkeypatch) is None
+
+
+@pytest.mark.parametrize("agy", [False, True])
+def test_dynamic_shell_text_prints_a_deny_decision(
+    *,
+    agy: bool,
+    hook_stdin: Callable[[str, bool], None],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command = 'eval "$SCRIPT"'
+    hook_stdin(command, agy)
+    assert guard.main() == 0
+    assert capsys.readouterr() == (
+        json.dumps(guard.decision(guard.REASON_SHELL_TEXT, antigravity=agy)) + "\n",
+        "",
+    )
 
 
 @pytest.mark.parametrize(

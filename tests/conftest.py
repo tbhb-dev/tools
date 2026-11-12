@@ -14,6 +14,7 @@ reaches 1Password, a keychain, the tailnet, a host, an account or an ACL.
 from __future__ import annotations
 
 import inspect
+import io
 import json
 import os
 import shlex
@@ -324,6 +325,21 @@ def connect() -> Iterator[Callable[[], FakeConnect]]:
     for server in servers:
         server.shutdown()
         server.server_close()
+
+
+@pytest.fixture
+def hook_stdin(monkeypatch: pytest.MonkeyPatch) -> Callable[[str, bool], None]:
+    """Supply a shell command in either hook's input format."""
+
+    def set_stdin(command: str, agy: bool) -> None:
+        payload = (
+            {"toolCall": {"args": {"CommandLine": command}}}
+            if agy
+            else {"tool_input": {"command": command}}
+        )
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+
+    return set_stdin
 
 
 @pytest.fixture
