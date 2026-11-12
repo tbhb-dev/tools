@@ -5,7 +5,8 @@
 A PreToolUse hook beside ``guard-gh-poll``, with the same payload handling
 and output contracts (``guard_gh_pr.command_of`` and ``decision``) and the
 same shell-word scanner. Every script an agent writes for the operator to run
-lives in ``~/.local/libexec/tbhb/``, named ``YYYY-MM-DD-<owner>-<slug>.sh``. A
+lives in ``~/.local/libexec/tbhb/``, named ``YYYY-MM-DD-<owner>-<slug>.sh``
+or ``YYYY-MM-DD-<owner>-<slug>.py``. A
 revision is a new file with a ``.vN`` suffix, because a handed-over script is
 never edited. Run logs go in ``~/.local/state/tbhb/<same name>/``.
 
@@ -13,12 +14,13 @@ This is a PreToolUse guard, not a sandbox. It catches the common ways an
 agent writes a file, so a script doesn't end up in a cache directory, a
 drafts repository or the operator's home, and it misses the rest.
 
-A target is a script when its path ends in ``.sh``, or its content starts
+A target is a script when its path ends in ``.sh`` or ``.py``, or its content starts
 with ``#!``. Content is known from the Write tool's ``content``, the added
 lines of an apply_patch Add File hunk, the first line of a heredoc in the
 same command as a redirect or ``tee``, and, for ``cp``, ``mv``, ``install``
-and ``ln``, the source: its name, or its first two bytes when it is a
-readable regular file (never a device or a FIFO).
+and ``ln``, the source: its name, or its first bytes when it is a
+readable regular file (never a device or a FIFO). The read includes enough
+of the first line to compare the full Python shebang.
 
 The writers read are:
 
@@ -39,7 +41,11 @@ against the payload's cwd, and ``..`` is normalized. Symlinks aren't resolved, a
 
 1. Under ``~/.local/libexec/tbhb/``: an existing file is refused, whatever
    writes it. A new file must sit directly in that directory and be named
-   ``YYYY-MM-DD-<owner>-<slug>[.vN].sh`` with a real date. Otherwise allowed.
+   ``YYYY-MM-DD-<owner>-<slug>[.vN].sh`` or
+   ``YYYY-MM-DD-<owner>-<slug>[.vN].py`` with a real date. When content is
+   known, a new ``.py`` file must start with exactly
+   ``#!/usr/bin/env -S python3 -I``. It must be executable (``chmod 0755``),
+   which the hook cannot enforce at write time. Otherwise allowed.
 2. A script in a git work tree whose top directory, or whose main
    repository's directory for a linked work tree, has a name starting with
    ``drafts`` is refused. The ``.git`` directory or ``gitdir:`` file and its
@@ -66,9 +72,11 @@ in, which is the payload's cwd.
 Known gaps: ``|`` and ``&`` carry a ``cd`` to later segments, though the shell
 runs it in a child shell; a heredoc that feeds a later command in a pipeline isn't
 tied to it (``cat <<E | tee f``), and neither is an ``apply_patch <<`` heredoc
-in a Codex command; content from ``echo`` or ``printf`` is unknown; an Edit
+in a Codex command; content from ``echo`` or ``printf`` is unknown, so a Python
+file with unknown content passes without a first-line check; the executable bit of a
+``.py`` script in libexec is not checked (use ``chmod 0755``); an Edit
 that creates a file counts only its name, and an edit to an existing ``.sh``
-file outside a work tree is judged like a new script; a variable other than
+or ``.py`` file outside a work tree is judged like a new script; a variable other than
 ``$HOME`` and ``$TMPDIR`` stays literal; how deep a run-scoped ``$TMPDIR`` sits
 below ``/tmp`` isn't checked; and a ``.git`` directory in ``$HOME`` itself makes
 everything below it a work tree.
@@ -102,11 +110,14 @@ type Json = dict[str, object]
 
 PLACE = (
     "Write scripts for the operator to "
-    "~/.local/libexec/tbhb/YYYY-MM-DD-<owner>-<slug>.sh. A revision is a new "
+    "~/.local/libexec/tbhb/YYYY-MM-DD-<owner>-<slug>.sh or .py. A revision is a new "
     "file with a .vN suffix, because a handed-over script is never edited. "
     "Run logs go in ~/.local/state/tbhb/<same name>/."
 )
-NAME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9-]+-[a-z0-9-]+(\.v[0-9]+)?\.sh")
+NAME = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9-]+-[a-z0-9-]+(\.v[0-9]+)?\.(sh|py)"
+)
+PYTHON_SHEBANG = "#!/usr/bin/env -S python3 -I"
 DATE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})-.*")
 SCRATCHPAD = re.compile(r"/tmp/claude-[0-9]+/[^/]+/[^/]+/scratchpad/.+")  # noqa: S108 # nosec B108 -- the rule names /tmp
 PRIVATE_TMP = re.compile(r"^/private(?=/tmp(?:/|$))")
@@ -131,6 +142,7 @@ class Write(NamedTuple):
 
     path: str
     script: bool
+    first_line: str | None = None
 
 
 class Redirect(str):
@@ -224,14 +236,21 @@ class Place:
         """The normalized absolute path of a word, with variables expanded."""
         return normalize(self.expand(raw), self.cwd)
 
-    def write(self, raw: str, *, content: bool = False) -> Write:
+    def write(
+        self, raw: str, *, content: bool = False, first_line: str | None = None
+    ) -> Write:
         """A write to a word; a script when its content or its name says so."""
         path = self.resolve(raw)
-        return Write(path, content or path.endswith(".sh"))
+        line = (
+            first_line.partition("\n")[0]
+            if path.endswith(".py") and first_line is not None
+            else None
+        )
+        return Write(path, content or path.endswith((".sh", ".py")), line)
 
     def source_is_script(self, raw: str) -> bool:
-        """Whether a copied file is named ``.sh`` or starts with ``#!``."""
-        return raw.endswith(".sh") or has_shebang(self.resolve(raw))
+        """Whether a copied file is named ``.sh`` or ``.py`` or starts with ``#!``."""
+        return raw.endswith((".sh", ".py")) or has_shebang(self.resolve(raw))
 
 
 def has_shebang(path: str) -> bool:
@@ -243,6 +262,17 @@ def has_shebang(path: str) -> bool:
             return file.read(2) == b"#!"
     except OSError:
         return False
+
+
+def read_first_line(path: str) -> str | None:
+    """Read enough of a regular file to compare the complete Python first line."""
+    try:
+        if not Path(path).is_file():
+            return None
+        with Path(path).open("rb") as file:
+            return file.readline().decode(errors="replace")
+    except OSError:
+        return None
 
 
 def first_str(fields: Json, keys: tuple[str, ...]) -> str:
@@ -304,7 +334,11 @@ def copy_writes(program: str, args: list[str], place: Place) -> Iterator[Write]:
     )
     for source in sources:
         target = f"{dest}/{posixpath.basename(source)}" if into else dest
-        yield place.write(target, content=place.source_is_script(source))
+        yield place.write(
+            target,
+            content=place.source_is_script(source),
+            first_line=read_first_line(place.resolve(source)),
+        )
 
 
 def command_writes(
@@ -314,14 +348,14 @@ def command_writes(
     shebang = body is not None and body.startswith("#!")
     targets, words = redirects(command)
     for target in targets:
-        yield place.write(target, content=shebang)
+        yield place.write(target, content=shebang, first_line=body)
     rest = skip_prefix(words)
     if not rest:
         return
     program, args = program_of(rest), rest[1:]
     if program == "tee":
         for operand in (word for word in args if not word.startswith("-")):
-            yield place.write(operand, content=shebang)
+            yield place.write(operand, content=shebang, first_line=body)
     elif program in COPIERS:
         yield from copy_writes(program, args, place)
     # ssh runs its command on another host, whose files this host can't judge.
@@ -368,13 +402,18 @@ def bash_writes(text: str, place: Place) -> Iterator[Write]:
 
 def patch_writes(patch: str, place: Place) -> list[Write]:
     """The paths an apply_patch patch adds, updates or moves to."""
-    lines = patch.splitlines()
+    lines = patch.split("\n")
     writes: list[Write] = []
     for number, line in enumerate(lines):
         kind, _, name = line.partition(": ")
         if kind == "*** Add File":
             shebang = any(x.startswith("+#!") for x in lines[number + 1 : number + 2])
-            writes.append(place.write(name, content=shebang))
+            first_line = lines[number + 1] if number + 1 < len(lines) else ""
+            writes.append(
+                place.write(
+                    name, content=shebang, first_line=first_line.removeprefix("+")
+                )
+            )
         elif kind == "*** Update File":
             writes.append(place.write(name))
         elif kind == "*** Move to" and writes:
@@ -387,8 +426,11 @@ def file_writes(inputs: Json, place: Place) -> list[Write]:
     raw = first_str(inputs, ("notebook_path",)) or identity.agy_edit_path(inputs)
     if not raw:
         return []
-    content = first_str(inputs, CONTENT_FIELDS).startswith("#!")
-    return [place.write(raw, content=content)]
+    text = next(
+        (v for key in CONTENT_FIELDS if isinstance(v := inputs.get(key), str)), None
+    )
+    content = text is not None and text.startswith("#!")
+    return [place.write(raw, content=content, first_line=text)]
 
 
 def targets(data: Json, place: Place) -> list[Write]:
@@ -403,7 +445,7 @@ def targets(data: Json, place: Place) -> list[Write]:
 
 
 def valid_name(name: str) -> bool:
-    """Whether a file name is ``YYYY-MM-DD-<owner>-<slug>[.vN].sh`` with a real date."""
+    """Whether a dated operator script name ends in ``.sh`` or ``.py``."""
     if not NAME.fullmatch(name) or not (date := DATE.fullmatch(name)):
         return False
     try:
@@ -440,20 +482,24 @@ def under(path: str, base: str) -> bool:
     return path == base or path.startswith(base.rstrip("/") + "/")
 
 
-def libexec_refusal(path: str, libexec: str) -> str | None:
+def libexec_refusal(
+    path: str, libexec: str, first_line: str | None = None
+) -> str | None:
     """The deny message for a write under the libexec directory, or None."""
     if os.path.lexists(path):
         return (
             f"{path} already exists, and a handed-over script is never edited. "
             "Write the revision to a new file with a .vN suffix, such as "
-            "YYYY-MM-DD-<owner>-<slug>.v2.sh."
+            "YYYY-MM-DD-<owner>-<slug>.v2.sh or .v2.py."
         )
     if posixpath.dirname(path) != libexec or not valid_name(posixpath.basename(path)):
         return (
             f"{path} isn't a valid name for a script. Name it "
-            "~/.local/libexec/tbhb/YYYY-MM-DD-<owner>-<slug>.sh, with a real "
+            "~/.local/libexec/tbhb/YYYY-MM-DD-<owner>-<slug>.sh or .py, with a real "
             "date and no subdirectory. A revision is a new file with a .vN suffix."
         )
+    if path.endswith(".py") and first_line is not None and first_line != PYTHON_SHEBANG:
+        return f"{path} must start with {PYTHON_SHEBANG}."
     return None
 
 
@@ -462,7 +508,7 @@ def refusal(write: Write, place: Place) -> str | None:
     path = write.path
     libexec = f"{place.home}/.local/libexec/tbhb"
     if under(path, libexec):
-        return libexec_refusal(path, libexec)
+        return libexec_refusal(path, libexec, write.first_line)
     if not write.script:
         return None
     names = work_tree_names(path)

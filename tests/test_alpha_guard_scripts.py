@@ -25,7 +25,7 @@ type Json = dict[str, object]
 
 PLACE = (
     "Write scripts for the operator to ~/.local/libexec/tbhb/"
-    "YYYY-MM-DD-<owner>-<slug>.sh. A revision is a new file with a .vN suffix, "
+    "YYYY-MM-DD-<owner>-<slug>.sh or .py. A revision is a new file with a .vN suffix, "
     "because a handed-over script is never edited. "
     "Run logs go in ~/.local/state/tbhb/<same name>/."
 )
@@ -104,12 +104,12 @@ def test_the_messages_are_exact(home: Path, libexec: Path) -> None:
     assert guard.first_refusal(tool(home, "Write", file_path=str(old)), env) == (
         f"{old} already exists, and a handed-over script is never edited. "
         "Write the revision to a new file with a .vN suffix, such as "
-        "YYYY-MM-DD-<owner>-<slug>.v2.sh."
+        "YYYY-MM-DD-<owner>-<slug>.v2.sh or .v2.py."
     )
     bad = libexec / "run.sh"
     assert guard.first_refusal(tool(home, "Write", file_path=str(bad)), env) == (
         f"{bad} isn't a valid name for a script. Name it "
-        "~/.local/libexec/tbhb/YYYY-MM-DD-<owner>-<slug>.sh, with a real "
+        "~/.local/libexec/tbhb/YYYY-MM-DD-<owner>-<slug>.sh or .py, with a real "
         "date and no subdirectory. A revision is a new file with a .vN suffix."
     )
     drafts = home / "drafts-x"
@@ -118,16 +118,18 @@ def test_the_messages_are_exact(home: Path, libexec: Path) -> None:
     assert guard.first_refusal(tool(home, "Write", file_path=str(path)), env) == (
         f"A drafts repository doesn't hold scripts: {path}. "
         "Write scripts for the operator to "
-        "~/.local/libexec/tbhb/YYYY-MM-DD-<owner>-<slug>.sh. A revision is a new "
-        "file with a .vN suffix, because a handed-over script is never edited. "
+        "~/.local/libexec/tbhb/YYYY-MM-DD-<owner>-<slug>.sh or .py. "
+        "A revision is a new file with a .vN suffix, "
+        "because a handed-over script is never edited. "
         "Run logs go in ~/.local/state/tbhb/<same name>/."
     )
     cache = home / ".cache" / "a.sh"
     assert guard.first_refusal(tool(home, "Write", file_path=str(cache)), env) == (
         f"Scripts for the operator don't go in {cache}. "
         "Write scripts for the operator to "
-        "~/.local/libexec/tbhb/YYYY-MM-DD-<owner>-<slug>.sh. A revision is a new "
-        "file with a .vN suffix, because a handed-over script is never edited. "
+        "~/.local/libexec/tbhb/YYYY-MM-DD-<owner>-<slug>.sh or .py. "
+        "A revision is a new file with a .vN suffix, "
+        "because a handed-over script is never edited. "
         "Run logs go in ~/.local/state/tbhb/<same name>/."
     )
 
@@ -288,9 +290,16 @@ def test_a_copied_source_is_read_for_its_shebang(home: Path) -> None:
     assert found == outside(f"{home}/.cache/x")
 
 
-def test_a_fifo_source_is_not_opened(home: Path) -> None:
+def test_a_fifo_source_is_not_opened(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fifo = home / "work" / "pipe"
     os.mkfifo(fifo)
+
+    def unexpected_open(_path: Path, *_args: object, **_kwargs: object) -> None:
+        pytest.fail("a FIFO source must never be opened")
+
+    monkeypatch.setattr(Path, "open", unexpected_open)
     command = "cp pipe ~/.cache/x"
     assert guard.first_refusal(bash(home, command), env_of(home)) is None
     assert not guard.has_shebang(str(fifo))
@@ -1693,3 +1702,199 @@ def test_deep_nesting_fails_open(
 def test_the_command_is_registered() -> None:
     assert alpha.COMMANDS["guard-scripts"] is alpha.scripts_command
     assert "guard-scripts" in alpha.USAGE
+
+
+PYTHON_FIRST_LINE = "#!/usr/bin/env -S python3 -I"
+PYTHON_NEW = "2026-11-11-coord-foo.py"
+
+
+@pytest.mark.parametrize("revision", ["", ".v2", ".v10"])
+def test_python_names_are_allowed(home: Path, libexec: Path, revision: str) -> None:
+    path = libexec / f"2024-02-29-co-ord-foo-bar{revision}.py"
+    data = tool(home, "Write", file_path=str(path), content=PYTHON_FIRST_LINE + "\n")
+    assert guard.first_refusal(data, env_of(home)) is None
+
+
+@pytest.mark.parametrize(
+    "writer", ["Write", "apply_patch", "heredoc", "tee", "cp", "mv", "install", "ln"]
+)
+@pytest.mark.parametrize(
+    "content",
+    [
+        PYTHON_FIRST_LINE,
+        PYTHON_FIRST_LINE + "\nprint(1)\n",
+        "#!/usr/bin/env python3\n",
+        "print(1)\n",
+        "",
+        PYTHON_FIRST_LINE + " \n",
+        PYTHON_FIRST_LINE + "x" * 100,
+        PYTHON_FIRST_LINE + "\r\n",
+        "\n" + PYTHON_FIRST_LINE,
+    ],
+)
+def test_python_first_line(
+    home: Path, libexec: Path, writer: str, content: str
+) -> None:
+    path = libexec / PYTHON_NEW
+    if writer == "Write":
+        data = tool(home, writer, file_path=str(path), content=content)
+    elif writer == "apply_patch":
+        lines = ["+" + line for line in content.split("\n")]
+        data = tool(home, writer, patch=patch(f"*** Add File: {path}", *lines))
+    elif writer in {"heredoc", "tee"}:
+        command = f"cat > {path}" if writer == "heredoc" else f"tee {path}"
+        data = bash(home, f"{command} <<'E'\n{content}\nE\n")
+    else:
+        (home / "work" / "source").write_bytes(content.encode())
+        data = bash(home, f"{writer} source {path}")
+    found = guard.first_refusal(data, env_of(home))
+    if content.partition("\n")[0] == PYTHON_FIRST_LINE:
+        assert found is None
+    else:
+        assert found == f"{path} must start with {PYTHON_FIRST_LINE}."
+
+
+@pytest.mark.parametrize("writer", ["Write", "echo", "cp", "apply_patch"])
+def test_unknown_python_content_is_allowed(
+    home: Path, libexec: Path, writer: str
+) -> None:
+    path = libexec / PYTHON_NEW
+    if writer == "Write":
+        data = tool(home, writer, file_path=str(path))
+    elif writer == "apply_patch":
+        data = tool(
+            home, writer, patch=patch(f"*** Update File: {path}", "@@", "+print(1)")
+        )
+    else:
+        command = f"echo x > {path}" if writer == "echo" else f"cp missing {path}"
+        data = bash(home, command)
+    assert guard.first_refusal(data, env_of(home)) is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "2026-02-30-coord-foo.py",
+        "sub/" + PYTHON_NEW,
+        "2026-11-11-coord-foo.vx.py",
+        "2026-11-11-Coord-foo.py",
+    ],
+)
+def test_bad_python_names_are_refused(home: Path, libexec: Path, name: str) -> None:
+    path = libexec / name
+    data = tool(home, "Write", file_path=str(path), content=PYTHON_FIRST_LINE)
+    found = guard.first_refusal(data, env_of(home))
+    assert found is not None
+    assert found.startswith(f"{path} isn't a valid name")
+
+
+def test_existing_python_file_is_refused(home: Path, libexec: Path) -> None:
+    path = libexec / PYTHON_NEW
+    path.write_text(PYTHON_FIRST_LINE)
+    data = tool(home, "Write", file_path=str(path), content="")
+    found = guard.first_refusal(data, env_of(home))
+    assert found is not None
+    assert found.startswith(f"{path} already exists")
+
+
+@pytest.mark.parametrize(
+    "location", ["home", "tmp", "drafts", "repo", "scratchpad", "tmpdir"]
+)
+@pytest.mark.parametrize("writer", ["Write", "cp"])
+def test_python_scripts_elsewhere(home: Path, location: str, writer: str) -> None:
+    dirs = {
+        "home": str(home),
+        "tmp": "/tmp",
+        "drafts": str(home / "drafts-test"),
+        "repo": str(home / "repo"),
+        "scratchpad": "/tmp/claude-123/project/session/scratchpad",
+        "tmpdir": "/tmp/guard-python-run",
+    }
+    for name in ("drafts", "repo"):
+        (Path(dirs[name]) / ".git").mkdir(parents=True)
+    path = dirs[location] + "/script.py"
+    data = (
+        tool(home, "Write", file_path=path, content="print(1)")
+        if writer == "Write"
+        else bash(home, f"cp missing.py {dirs[location]}/renamed")
+    )
+    found = guard.first_refusal(data, env_of(home, dirs["tmpdir"]))
+    if location in {"home", "tmp", "drafts"}:
+        assert found is not None
+        assert ("drafts repository" if location == "drafts" else "don't go in") in found
+    else:
+        assert found is None
+
+
+def test_python_source_read_failure_is_unknown(
+    home: Path, libexec: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = libexec / PYTHON_NEW
+    source = home / "work" / "source.py"
+    source.mkdir()
+
+    def is_file(_path: Path) -> bool:
+        return True
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+    assert guard.first_refusal(bash(home, f"cp source.py {path}"), env_of(home)) is None
+
+
+def test_python_fifo_source_is_unknown(
+    home: Path, libexec: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    os.mkfifo(home / "work" / "source.py")
+
+    def unexpected_open(_path: Path, *_args: object, **_kwargs: object) -> None:
+        pytest.fail("a FIFO source must never be opened")
+
+    monkeypatch.setattr(Path, "open", unexpected_open)
+    assert (
+        guard.first_refusal(
+            bash(home, f"cp source.py {libexec / PYTHON_NEW}"), env_of(home)
+        )
+        is None
+    )
+
+
+def test_python_empty_patch_is_known(home: Path, libexec: Path) -> None:
+    path = libexec / PYTHON_NEW
+    for text in (f"*** Add File: {path}", patch(f"*** Add File: {path}")):
+        data = tool(home, "apply_patch", patch=text)
+        assert guard.patch_writes(text, places(home))[0].first_line == (
+            "" if text.endswith(PYTHON_NEW) else "*** End Patch"
+        )
+        assert (
+            guard.first_refusal(data, env_of(home))
+            == f"{path} must start with {PYTHON_FIRST_LINE}."
+        )
+
+
+def test_python_patch_first_line_without_end_marker(home: Path, libexec: Path) -> None:
+    path = libexec / PYTHON_NEW
+    data = tool(
+        home, "apply_patch", patch=f"*** Add File: {path}\n+{PYTHON_FIRST_LINE}"
+    )
+    assert guard.first_refusal(data, env_of(home)) is None
+
+
+def test_python_source_invalid_bytes_are_refused(home: Path, libexec: Path) -> None:
+    source = home / "work" / "source"
+    source.write_bytes(PYTHON_FIRST_LINE.encode() + b"\xff\n")
+    path = libexec / PYTHON_NEW
+    assert (
+        guard.first_refusal(bash(home, f"cp source {path}"), env_of(home))
+        == f"{path} must start with {PYTHON_FIRST_LINE}."
+    )
+
+
+def test_python_content_fields(home: Path, libexec: Path) -> None:
+    path = libexec / PYTHON_NEW
+    for key in ("content", "CodeContent", "Content"):
+        data = tool(home, "write_file", Path=str(path), **{key: PYTHON_FIRST_LINE})
+        assert guard.first_refusal(data, env_of(home)) is None
+        data["tool_input"] = {"Path": str(path), key: ""}
+        assert (
+            guard.first_refusal(data, env_of(home))
+            == f"{path} must start with {PYTHON_FIRST_LINE}."
+        )
