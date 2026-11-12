@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from fake_tool import break_host_names
+from fake_tool import PRIVATE_REPO, break_host_names, write_host_names
 
 from tbhbdev.alpha import private_names as pn
 from tbhbdev.alpha import pull_request as pr
 
-NAMES = ["example-lab"]
+NAMES = ["example-lab", PRIVATE_REPO]
 
 
 def tokens(lines: list[str], names: list[str] | None = None) -> list[str]:
@@ -18,8 +18,12 @@ def tokens(lines: list[str], names: list[str] | None = None) -> list[str]:
     return [message.split("'")[1] for _, message in found]
 
 
-def test_suffix_rule_flags_without_config() -> None:
-    assert tokens(["see other-private for details"]) == ["other-private"]
+def test_suffix_rule_flags_without_config(home: Path) -> None:
+    del home
+    name = "other-private"
+    assert tokens([name]) == [name]
+    assert tokens([pn.SUFFIX]) == []
+    assert pn.names_for_repository(name) is None
 
 
 def test_configured_name_is_flagged() -> None:
@@ -28,9 +32,9 @@ def test_configured_name_is_flagged() -> None:
 
 
 def test_message_says_private_and_generic() -> None:
-    [(_, message)] = pn.private_name_problems(["other-private"], [])
+    [(_, message)] = pn.private_name_problems([PRIVATE_REPO], NAMES)
     assert message == (
-        "'other-private' names a private repository; describe it generically instead"
+        f"'{PRIVATE_REPO}' names a private repository; describe it generically instead"
     )
 
 
@@ -42,11 +46,11 @@ def test_message_says_private_and_generic() -> None:
         "example-labs",
         "example_example-lab",
         "example.example-lab",
-        "other-privately",
-        "--private",
-        "-private",
-        "the -private suffix",
-        "other-private.git.x",
+        f"{PRIVATE_REPO}ly",
+        f"--{PRIVATE_REPO}",
+        f"-{PRIVATE_REPO}",
+        f"the -{PRIVATE_REPO} prefix",
+        f"{PRIVATE_REPO}.git.x",
     ],
 )
 def test_longer_tokens_and_leading_hyphens_are_not_flagged(line: str) -> None:
@@ -56,10 +60,10 @@ def test_longer_tokens_and_leading_hyphens_are_not_flagged(line: str) -> None:
 @pytest.mark.parametrize(
     ("line", "found"),
     [
-        ("(other-private)", ["other-private"]),
-        ("other-private.", ["other-private"]),
-        ("`other-private`, x", ["other-private"]),
-        ("tbhb-dev/other-private/x", ["other-private"]),
+        (f"({PRIVATE_REPO})", [PRIVATE_REPO]),
+        (f"{PRIVATE_REPO}.", [PRIVATE_REPO]),
+        (f"`{PRIVATE_REPO}`, x", [PRIVATE_REPO]),
+        (f"tbhb-dev/{PRIVATE_REPO}/x", [PRIVATE_REPO]),
         ("example-lab.dev", []),
     ],
 )
@@ -70,18 +74,23 @@ def test_punctuation_bounds_a_token(line: str, found: list[str]) -> None:
 @pytest.mark.parametrize(
     ("line", "found"),
     [
-        ("Other-Private", ["Other-Private"]),
-        ("other-PRIVATE", ["other-PRIVATE"]),
+        (PRIVATE_REPO.capitalize(), [PRIVATE_REPO.capitalize()]),
+        (PRIVATE_REPO.upper(), [PRIVATE_REPO.upper()]),
         ("see Example-Lab", ["Example-Lab"]),
-        ("other-private.git", ["other-private.git"]),
-        ("git@host:o/other-private.git", ["other-private.git"]),
+        (f"{PRIVATE_REPO}.git", [f"{PRIVATE_REPO}.git"]),
+        (f"git@host:o/{PRIVATE_REPO}.git", [f"{PRIVATE_REPO}.git"]),
         ("clone example-lab.git now", ["example-lab.git"]),
-        ("non-private semi-private", ["non-private", "semi-private"]),
-        ("x--private _-private", ["x--private", "_-private"]),
+        (f"{PRIVATE_REPO} example-lab", [PRIVATE_REPO, "example-lab"]),
     ],
 )
 def test_case_and_git_suffix_are_ignored(line: str, found: list[str]) -> None:
     assert tokens([line], NAMES) == found
+
+
+@pytest.mark.parametrize("prefix", ["x--", "_-"])
+def test_configured_names_keep_hyphens_and_underscores(prefix: str) -> None:
+    name = f"{prefix}{PRIVATE_REPO}"
+    assert tokens([name], [name]) == [name]
 
 
 def test_dotted_configured_name_matches() -> None:
@@ -89,12 +98,12 @@ def test_dotted_configured_name_matches() -> None:
 
 
 def test_multiple_per_line_and_repeats_collapse() -> None:
-    line = "other-private and example-lab and other-private"
-    assert tokens([line], NAMES) == ["other-private", "example-lab"]
+    line = f"{PRIVATE_REPO} and example-lab and {PRIVATE_REPO}"
+    assert tokens([line], NAMES) == [PRIVATE_REPO, "example-lab"]
 
 
 def test_line_numbers_follow_first() -> None:
-    lines = ["clean", "other-private", "clean", "example-lab"]
+    lines = ["clean", PRIVATE_REPO, "clean", "example-lab"]
     assert [no for no, _ in pn.private_name_problems(lines, NAMES)] == [2, 4]
     found = pn.private_name_problems(lines, NAMES, 10)
     assert [no for no, _ in found] == [11, 13]
@@ -106,8 +115,7 @@ def test_line_numbers_follow_first() -> None:
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    path = Path.home() / ".local/state/tbhb/private-repos.txt"
-    write_config(path, "example-host\n")
+    write_host_names(Path.home())
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     return tmp_path / "xdg" / "tbhbdev" / "config.toml"
 
@@ -138,23 +146,23 @@ def set_origin(monkeypatch: pytest.MonkeyPatch, code: int, url: str) -> None:
     monkeypatch.setattr(pn, "git", fake)
 
 
-def test_unreadable_config_falls_back_to_the_suffix_rule(
+def test_unreadable_config_keeps_host_names(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     set_origin(monkeypatch, 0, "git@github.com:org/example-public.git")
     home.parent.mkdir(parents=True, exist_ok=True)
     home.write_bytes(b"\xff\xfe")
-    assert pn.private_names() == pn.Names(["example-host"], set())
+    assert pn.private_names() == pn.Names(["example-host", PRIVATE_REPO], set())
     home.unlink()
     home.mkdir()
-    assert pn.private_names() == pn.Names(["example-host"], set())
-    assert len(pr.check_text("# t\n\nother-private\n").problems) >= 1
+    assert pn.private_names() == pn.Names(["example-host", PRIVATE_REPO], set())
+    assert len(pr.check_text(f"# t\n\n{PRIVATE_REPO}\n").problems) >= 1
 
 
 def test_no_config_gives_no_names(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     del home
     set_origin(monkeypatch, 0, "git@github.com:org/example-public.git")
-    assert pn.private_names() == pn.Names(["example-host"], set())
+    assert pn.private_names() == pn.Names(["example-host", PRIVATE_REPO], set())
 
 
 def test_missing_table_or_key_gives_no_names(
@@ -162,9 +170,9 @@ def test_missing_table_or_key_gives_no_names(
 ) -> None:
     set_origin(monkeypatch, 0, "git@github.com:org/example-public.git")
     write_config(home, "[harness]\nrule = 'x'\n")
-    assert pn.private_names() == pn.Names(["example-host"], set())
+    assert pn.private_names() == pn.Names(["example-host", PRIVATE_REPO], set())
     write_config(home, "[pr_check]\n")
-    assert pn.private_names() == pn.Names(["example-host"], set())
+    assert pn.private_names() == pn.Names(["example-host", PRIVATE_REPO], set())
 
 
 def test_configured_names_are_returned(
@@ -172,7 +180,9 @@ def test_configured_names_are_returned(
 ) -> None:
     set_origin(monkeypatch, 0, "https://github.com/org/example-public")
     write_config(home, '[pr_check]\nprivate_repos = ["example-lab"]\n')
-    assert pn.private_names() == pn.Names(["example-lab", "example-host"], set())
+    assert pn.private_names() == pn.Names(
+        ["example-lab", "example-host", PRIVATE_REPO], set()
+    )
 
 
 @pytest.mark.parametrize(
@@ -185,22 +195,22 @@ def test_configured_names_are_returned(
         "[pr_check]\nprivate_repos = [1]\n",
     ],
 )
-def test_bad_config_falls_back_to_the_suffix_rule(
+def test_bad_config_keeps_host_names(
     home: Path, monkeypatch: pytest.MonkeyPatch, text: str
 ) -> None:
     set_origin(monkeypatch, 0, "git@github.com:org/example-public.git")
     write_config(home, text)
-    assert pn.private_names() == pn.Names(["example-host"], set())
+    assert pn.private_names() == pn.Names(["example-host", PRIVATE_REPO], set())
 
 
 @pytest.mark.parametrize(
     "url",
     [
-        "git@github.com:org/other-private.git",
-        "https://github.com/org/other-private/",
+        f"git@github.com:org/{PRIVATE_REPO}.git",
+        f"https://github.com/org/{PRIVATE_REPO}/",
         "https://github.com/org/example-lab",
         "  git@github.com:org/example-lab.git\n",
-        "git@github.com:org/Other-Private.git",
+        f"git@github.com:org/{PRIVATE_REPO.capitalize()}.git",
         "https://github.com/org/Example-LAB",
     ],
 )
@@ -210,7 +220,7 @@ def test_private_origin_skips_the_check(
     set_origin(monkeypatch, 0, url)
     write_config(home, '[pr_check]\nprivate_repos = ["example-lab"]\n')
     assert pn.private_names() is None
-    assert pn.draft_problems(["other-private"], 1) == []
+    assert pn.draft_problems([PRIVATE_REPO], 1) == []
 
 
 def test_origin_name_keeps_a_trailing_capital_x(
@@ -218,7 +228,9 @@ def test_origin_name_keeps_a_trailing_capital_x(
 ) -> None:
     set_origin(monkeypatch, 0, "git@github.com:org/example-labX")
     write_config(home, '[pr_check]\nprivate_repos = ["example-lab"]\n')
-    assert pn.private_names() == pn.Names(["example-lab", "example-host"], set())
+    assert pn.private_names() == pn.Names(
+        ["example-lab", "example-host", PRIVATE_REPO], set()
+    )
 
 
 @pytest.mark.parametrize(("code", "url"), [(1, ""), (128, "x"), (0, ""), (0, "/")])
@@ -227,8 +239,8 @@ def test_unreadable_origin_still_flags(
 ) -> None:
     del home
     set_origin(monkeypatch, code, url)
-    assert pn.private_names() == pn.Names(["example-host"], set())
-    assert len(pn.draft_problems(["other-private"], 5)) == 1
+    assert pn.private_names() == pn.Names(["example-host", PRIVATE_REPO], set())
+    assert len(pn.draft_problems([PRIVATE_REPO], 5)) == 1
 
 
 def test_public_origin_flags(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -244,12 +256,12 @@ def test_check_text_flags_title_and_body(
     set_origin(monkeypatch, 0, "git@github.com:org/example-public.git")
     write_config(home, '[pr_check]\nprivate_repos = ["example-lab"]\n')
     text = (
-        "# fix: x for other-private\n\n## Why\n\nSee example-lab.\n\n"
+        f"# fix: x for {PRIVATE_REPO}\n\n## Why\n\nSee example-lab.\n\n"
         "## Behavior change\n\nb\n\n## Verification\n\nv\n"
     )
     found = pr.check_text(text).problems
     assert [(no, m.split("'")[1]) for no, m in found if "private repo" in m] == [
-        (1, "other-private"),
+        (1, PRIVATE_REPO),
         (5, "example-lab"),
     ]
     set_origin(monkeypatch, 0, "git@github.com:org/example-lab.git")
@@ -266,14 +278,14 @@ def test_reviewed_placeholder(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "other-private",
-        "example-private-x",
-        "Example-Private",
-        "example-private.git",
+        PRIVATE_REPO,
+        f"{PRIVATE_REPO}-x",
+        PRIVATE_REPO.upper(),
+        f"{PRIVATE_REPO}.git",
     ],
 )
-def test_placeholder_exemption_is_exact(text: str) -> None:
-    assert tokens([text]) == [text]
+def test_configured_variants_are_flagged(text: str) -> None:
+    assert tokens([text], [PRIVATE_REPO, f"{PRIVATE_REPO}-x"]) == [text]
 
 
 @pytest.mark.parametrize(
@@ -334,18 +346,19 @@ def test_host_names_and_path_words(home: Path, monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.parametrize(("prefix", "suffix"), [("x", ""), ("", "-x")])
-def test_placeholder_boundaries(prefix: str, suffix: str) -> None:
-    text = f"{prefix}example-private{suffix}"
-    assert tokens([text]) == [text]
+def test_configured_name_boundaries(prefix: str, suffix: str) -> None:
+    text = f"{prefix}{PRIVATE_REPO}{suffix}"
+    assert tokens([text], NAMES) == []
+    assert tokens([text], [text]) == [text]
 
 
-@pytest.mark.parametrize("url", ["other-private", "https://[bad/other-private"])
+@pytest.mark.parametrize("url", [PRIVATE_REPO, f"https://[bad/{PRIVATE_REPO}"])
 def test_malformed_origin_is_public(
     home: Path, monkeypatch: pytest.MonkeyPatch, url: str
 ) -> None:
     del home
     set_origin(monkeypatch, 0, url)
-    assert pn.private_names() == pn.Names(["example-host"], set())
+    assert pn.private_names() == pn.Names(["example-host", PRIVATE_REPO], set())
 
 
 def test_host_rules_preserve_names_and_normalize_header(
@@ -365,20 +378,20 @@ def test_host_rules_preserve_names_and_normalize_header(
     assert pn.private_names() is None
 
 
-def test_header_restricts_suffix_names_too(
+def test_header_restricts_configured_names_too(
     home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     del home
     set_origin(monkeypatch, 0, "https://example.test/public")
     path = Path.home() / ".local/state/tbhb/private-repos.txt"
     path.write_text(
-        "# Bare-word exempt, flagged only in path position: other-private\n"
-        "example-host\nother-private\n"
+        f"# Bare-word exempt, flagged only in path position: {PRIVATE_REPO}\n"
+        f"example-host\n{PRIVATE_REPO}\n"
     )
     found = pn.draft_problems(
-        ["other-private", "org/other-private", "OTHER-PRIVATE.git"], 1
+        [PRIVATE_REPO, f"org/{PRIVATE_REPO}", f"{PRIVATE_REPO.upper()}.git"], 1
     )
     assert [(line, message.split("'")[1]) for line, message in found] == [
-        (2, "other-private"),
-        (3, "OTHER-PRIVATE.git"),
+        (2, PRIVATE_REPO),
+        (3, f"{PRIVATE_REPO.upper()}.git"),
     ]

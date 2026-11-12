@@ -9,14 +9,14 @@ import sys
 from pathlib import Path
 
 import pytest
-from fake_tool import break_host_names, pythonpath
+from fake_tool import PRIVATE_REPO as PRIVATE
+from fake_tool import break_host_names, pythonpath, write_host_names
 
 from tbhbdev import alpha
 from tbhbdev.alpha import install
 from tbhbdev.alpha import pre_push_guard as pg
 
 ZERO = "0" * 40
-PRIVATE = "other-private"
 PUBLIC = "https://github.com/example/public.git"
 
 
@@ -43,9 +43,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "XDG_RUNTIME_DIR",
     ):
         monkeypatch.setenv(name, str(tmp_path / name.lower()))
-    names = Path.home() / ".local/state/tbhb/private-repos.txt"
-    names.parent.mkdir(parents=True)
-    names.write_text("example-host\n")
+    write_host_names(Path.home())
     for name in ("SKIP", "PREK_SKIP"):
         monkeypatch.delenv(name, raising=False)
     for role in ("AUTHOR", "COMMITTER"):
@@ -313,7 +311,7 @@ def test_failed_origin_lookup_does_not_trust_output(
 
     del repo
     monkeypatch.setattr(pg.pn, "git", failed)
-    assert pg.pn.private_names() == pg.pn.Names(["example-host"], set())
+    assert pg.pn.private_names() == pg.pn.Names(["example-host", PRIVATE], set())
 
 
 @pytest.mark.parametrize("bad_local", [True, False])
@@ -344,7 +342,11 @@ def test_paths_keep_spaces_and_separate_entries(
     repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     head = commit(
-        repo, **{f"{PRIVATE} {PRIVATE}": "safe\n", f"nested/{PRIVATE}": "safe\n"}
+        repo,
+        **{
+            f"{PRIVATE} {PRIVATE}": "safe\n",
+            f"nested/{PRIVATE}": "safe\n",
+        },
     )
     assert guard(monkeypatch, head) == 1
     lines = capsys.readouterr().err.splitlines()
@@ -442,14 +444,15 @@ def test_remote_name_cannot_skip_checks(
     "text",
     [
         "example-private",
-        "other-private",
-        "example-private-x",
+        PRIVATE,
+        f"{PRIVATE}-x",
         "example-host",
     ],
 )
 def test_placeholder_and_host_names(
     repo: Path, monkeypatch: pytest.MonkeyPatch, text: str
 ) -> None:
+    write_host_names(Path.home(), PRIVATE, f"{PRIVATE}-x")
     assert guard(monkeypatch, commit(repo, **{"file.txt": text})) == int(
         text != "example-private"
     )
@@ -463,7 +466,11 @@ def test_host_list_failure_refuses(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     kind: str,
+    config_file: Path,
 ) -> None:
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(f'[pr_check]\nprivate_repos = ["{PRIVATE}"]\n')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_file.parent.parent))
     path = Path.home() / ".local/state/tbhb/private-repos.txt"
     break_host_names(path, kind)
     head = commit(repo)
@@ -472,7 +479,7 @@ def test_host_list_failure_refuses(
         "",
         f"private names: cannot read a nonempty list from {path}\n",
     )
-    assert guard(monkeypatch, head, url="https://example.test/other-private") == 0
+    assert guard(monkeypatch, head, url=f"https://example.test/{PRIVATE}") == 0
 
 
 @pytest.mark.parametrize("variable", ["SKIP", "PREK_SKIP"])
@@ -546,10 +553,13 @@ def test_push_hit_never_reaches_remote(
 
 
 @pytest.mark.parametrize(("prefix", "suffix"), [("x", ""), ("", "-x")])
-def test_guard_placeholder_boundaries(
+def test_guard_configured_name_boundaries(
     repo: Path, monkeypatch: pytest.MonkeyPatch, prefix: str, suffix: str
 ) -> None:
-    assert guard(monkeypatch, commit(repo, f"{prefix}example-private{suffix}")) == 1
+    text = f"{prefix}{PRIVATE}{suffix}"
+    assert guard(monkeypatch, commit(repo, text)) == 0
+    write_host_names(Path.home(), text)
+    assert guard(monkeypatch, commit(repo, text)) == 1
 
 
 def test_repository_name_without_a_final_component() -> None:
@@ -560,7 +570,7 @@ def test_repository_name_without_a_final_component() -> None:
 def test_fallback_uses_push_url(
     repo: Path, monkeypatch: pytest.MonkeyPatch, public_push: bool
 ) -> None:
-    private = "https://example.test/other-private"
+    private = f"https://example.test/{PRIVATE}"
     git(repo, "remote", "set-url", "origin", private if public_push else PUBLIC)
     git(
         repo,
