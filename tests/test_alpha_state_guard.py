@@ -1203,6 +1203,7 @@ def test_a_stdout_failure_keeps_the_refusal(
 
 
 def test_a_closed_stdout_pipe_still_exits_2(config_file: Path, tmp_path: Path) -> None:
+    signal.alarm(0)  # the subprocess has its own timeout; startup can exceed 1s
     config_file.write_text("[state_guard]\ntag_messages = true\n")
     read_end, write_end = os.pipe()
     os.close(read_end)
