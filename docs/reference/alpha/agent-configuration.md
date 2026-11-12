@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6
-    at: "2026-11-12T09:38:02Z"
+    at: "2026-11-12T09:38:54Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -13,9 +13,11 @@ type: Reference
 
 # Agent configuration
 
-`tbhbdev alpha agent` reads the optional `[agent]` table from the user config. Calling this command requires the table and every key shown below except `max_run_minutes`, `docker`, `expires`, the host’s `tbhbdev` path, and the `[agent.codex]` table. Unreadable config fails with its path. Missing or invalid settings fail with the path, the full table name and the key, as `[agent.sandbox] audit_dir is required`. Unknown keys fail the same way at any level. `exec` validates a headless run before it contacts the host. It checks the remote version, then claims the name before it streams the inputs. A tmux session runs the host supervisor. Install that supervisor separately. `wait`, `status`, `kill`, `clean`, `keep`, `log` and `diff` use the recorded target. The parser allows and ignores `host_tag` in `[agent]` because another command reads it.
+`tbhbdev alpha agent` reads the optional `[agent]` table from the user config. Calling this command requires the table and every key shown below except `public_repos`, `max_run_minutes`, `docker`, `expires`, the host’s `tbhbdev` path, and the `[agent.codex]` table. Unreadable config fails with its path. Missing or invalid settings fail with the path, the full table name and the key, as `[agent.sandbox] audit_dir is required`. Unknown keys fail the same way at any level. `exec` validates a headless run before it contacts the host. It checks the remote version, then claims the name before it streams the inputs. A tmux session runs the host supervisor. Install that supervisor separately. `wait`, `status`, `kill`, `clean`, `keep`, `log` and `diff` use the recorded target. The parser allows and ignores `host_tag` in `[agent]` because another command reads it.
 
-Use the hidden host command as `tbhbdev alpha agent run-host NAME [REQUEST] --host HOST [--prompt FILE]`. Supply a versioned JSON request through `REQUEST`, stdin with `REQUEST` set to `-`, or `<name>.request.json` by leaving out the path. A prompt path defaults to the run's recorded prompt. Config must list the host. During setup, run-host fetches a bare mirror under `$XDG_STATE_HOME/tbhbdev/agent-mirrors/<owner>/<repo>.git` and creates a separate clone at `<account clone>/.worktrees/agent-<name>`. It reads credentials through the secrets library. It then starts the harness with the policy's explicit environment and records its exit. Run files and the index live under `tbhbdev/agent-runs` in the state directory. SIGHUP, SIGTERM, and SIGINT stop the harness group and refresh Codex auth before run-host writes `<name>.rc`.
+Use the hidden host command as `tbhbdev alpha agent run-host NAME [REQUEST] --host HOST [--prompt FILE] [--preflight]`. Supply a versioned JSON request through `REQUEST`, stdin with `REQUEST` set to `-`, or `<name>.request.json` by leaving out the path. A prompt path defaults to the run's recorded prompt. Config must list the host. During setup, run-host fetches a bare mirror over HTTPS under `$XDG_STATE_HOME/tbhbdev/agent-mirrors/github.com/<owner>/<repo>.git` and creates a separate clone at `<account clone>/.worktrees/agent-<name>`. It reads credentials through the secrets library. It then starts the harness with the policy's explicit environment and records its exit. Run files and the index live under `tbhbdev/agent-runs` in the state directory. SIGHUP, SIGTERM, and SIGINT stop the harness group and refresh Codex auth before run-host writes `<name>.rc`.
+
+`public_repos` defaults to an empty list. List each public repository as `owner/name` or `github.com/owner/name`, using the same form as a request's `repo`. Run-host compares the parsed repository parts and refuses unlisted repositories before creating a mirror. Mirrors fetch from `https://github.com/<owner>/<name>.git` without credentials, prompts, SSH, or token fallback. Existing mirror configs switch to HTTPS on the next run. The local `--preflight` flag performs the same checks as the SSH verb.
 
 The run clone has its own copy of the mirror's object store. The mirror never prunes objects. Run-host installs the identity and pre-commit hooks from its own templates without running code from the checkout. It finishes all git operations before starting the harness. Plain git in a run clone is unsafe for host processes.
 
@@ -32,6 +34,7 @@ agy_timeout = "900s"
 kill_grace_seconds = 10
 max_run_minutes = 120
 sockets_dir = "/example/sockets"
+public_repos = ["tbhb-dev/tools"]
 
 [agent.sandbox]
 write_roots = [".cache", ".local/share/mise", ".local/state/mise"]
@@ -134,13 +137,14 @@ The controller selects its key and disables use of an identity agent:
 
 ```sh
 ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'run-host NAME'
+ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'preflight NAME'
 ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'result NAME'
 ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'kill NAME'
 ```
 
 On macOS, the controller uses `/Library/Application Support/tbhbdev/agent-launch/id_ed25519` (`ssh_serve.MACOS_LAUNCH_KEY`). Linux uses `/etc/tbhbdev/agent-launch/id_ed25519` (`ssh_serve.LINUX_LAUNCH_KEY`). Quote the macOS path when passing it to `-i`.
 
-`run-host NAME` reads one JSON object from stdin, at most 1 MiB:
+`run-host NAME` and `preflight NAME` read one JSON object from stdin, at most 1 MiB:
 
 ```json
 {"v": 1, "request": {"v": 2}, "push_token": null}
@@ -149,6 +153,8 @@ On macOS, the controller uses `/Library/Application Support/tbhbdev/agent-launch
 Replace `request` with the complete existing run-host request for a public GitHub repository. The request and envelope use separate versions. Prepare `NAME.prompt` in the existing run state directory before connecting. This interface uses run-host's current prompt and configuration files. It creates `NAME.request.json` with mode `0600` under `$XDG_STATE_HOME/tbhbdev/agent-runs`, which defaults to `$HOME/.local/state/tbhbdev/agent-runs`. Each entry claims `NAME.owner` with exclusive creation before launch. An existing owner or request refuses a second run of that name.
 
 Supply a short-lived push token as `push_token`, or `null` to skip pushing. The SSH connection remains open until the run finishes. It shows run-host's normal output. After the harness exits with a new commit on `agent/NAME`, the host pushes that branch over GitHub HTTPS. A one-shot credential helper reads the token through an inherited pipe. The token stays out of arguments, environment variables, config files, and run files. Push disables git hooks. A failed push records one error line and doesn't retry.
+
+`preflight NAME` requires a null `push_token`. It prepares the workspace and credentials and loads the signing agent. After checking the policy and harness command, it writes `preflight ok: <executable path>` to the log. It stops the signing agent and records the exit status, phase, and index entry without launching the harness. Use a fresh name for the next run. Preparation errors specify the failed step without including upstream error details.
 
 `result NAME` prints one JSON object with `v`, `name`, `rc`, `state`, `report`, `log_tail`, `branch` and `head`. It reads the existing run files and limits the log to its last 200 lines. While a run continues, `rc` is `null`. Missing output fields use `null`. The `branch` field names only a branch the host pushed.
 

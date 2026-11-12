@@ -29,6 +29,41 @@ def incoming(monkeypatch: pytest.MonkeyPatch, value: bytes) -> None:
     monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(value)))
 
 
+@pytest.mark.parametrize("token", [None, "synthetic-push-value"])
+def test_preflight_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    token: str | None,
+) -> None:
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "preflight example")
+    incoming(
+        monkeypatch, json.dumps({"v": 1, "request": {}, "push_token": token}).encode()
+    )
+    calls: list[list[str]] = []
+
+    def main(arguments: list[str], prog: str, **kwargs: object) -> int:
+        calls.append(arguments)
+        assert prog == "ssh-serve preflight"
+        assert kwargs == {"push_token": None, "claimed": True}
+        return 0
+
+    monkeypatch.setattr(run_host, "main", main)
+    assert ssh_serve.main([], "ssh-serve") == (0 if token is None else 2)
+    files = files_for("example")
+    if token is None:
+        assert calls == [["example", "--preflight"]]
+        assert files.path("request.json").read_text() == "{}\n"
+        assert files.path("owner").read_text() == "host\n"
+        assert capsys.readouterr().err == ""
+    else:
+        assert calls == []
+        assert not files.path("request.json").exists()
+        assert not files.path("owner").exists()
+        assert capsys.readouterr().err == (
+            "ssh-serve: refused: preflight requires a null push_token\n"
+        )
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -320,7 +355,7 @@ def test_existing_request_is_preserved(
 @pytest.mark.parametrize(
     ("command", "reason"),
     [
-        ("", "expected run-host NAME, result NAME or kill NAME"),
+        ("", "expected run-host NAME, preflight NAME, result NAME or kill NAME"),
         ("result ../x", "invalid run name"),
         ("result 'x", "invalid command or run data"),
     ],
