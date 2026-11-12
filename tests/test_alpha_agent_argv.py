@@ -46,11 +46,18 @@ COMMIT = "0123456789abcdef0123456789abcdef01234567"
 COMBINATIONS = list(itertools.product(Harness, RunKind, Profile))
 IDS = [f"{h.value}-{k.value}-{p.value}" for h, k, p in COMBINATIONS]
 
+CREDENTIALS = (
+    ".git-credentials",
+    ".netrc",
+    ".ssh",
+    ".config/gh",  # gitleaks:allow
+)
 DENY_LINUX = (
     f"{HOME}/{TOKEN_DIR}",
     *LINUX_SOCKET_DENIES,
     "/tmp/example-sockets",
     f"{HOME}/{DENIED}",
+    *(f"{HOME}/{p}" for p in CREDENTIALS),
 )
 HANDOFF = (
     "-c",
@@ -99,7 +106,11 @@ CODEX_BUILD_FS = (
     '"/run/WSL" = "none", "/var/run/docker.sock" = "none", '
     '"/run/docker.sock" = "none", "/run/user/0" = "none", '
     '"/tmp/example-sockets" = "none", '
-    f'"{HOME}/{DENIED}" = "none"}}, network = {{enabled = true}}}}'
+    f'"{HOME}/{DENIED}" = "none", '
+    f'"{HOME}/.git-credentials" = "none", '
+    f'"{HOME}/.netrc" = "none", '
+    f'"{HOME}/.ssh" = "none", '  # gitleaks:allow
+    f'"{HOME}/.config/gh" = "none"}}, network = {{enabled = true}}}}'  # gitleaks:allow
 )
 CODEX_REVIEW_FS = (
     '{filesystem = {":root" = "read", '
@@ -108,7 +119,11 @@ CODEX_REVIEW_FS = (
     '"/run/WSL" = "none", "/var/run/docker.sock" = "none", '
     '"/run/docker.sock" = "none", "/run/user/0" = "none", '
     '"/tmp/example-sockets" = "none", '
-    f'"{HOME}/{DENIED}" = "none"}}, network = {{enabled = true}}}}'
+    f'"{HOME}/{DENIED}" = "none", '
+    f'"{HOME}/.git-credentials" = "none", '
+    f'"{HOME}/.netrc" = "none", '
+    f'"{HOME}/.ssh" = "none", '  # gitleaks:allow
+    f'"{HOME}/.config/gh" = "none"}}, network = {{enabled = true}}}}'  # gitleaks:allow
 )
 MODEL = ("-m", "example-model-1", "-c", 'model_reasoning_effort="high"')
 
@@ -301,6 +316,7 @@ def test_macos_codex_denies_the_private_alias_too() -> None:
         "/tmp/example-sockets",
         "/private/tmp/example-sockets",
         f"{HOME}/{DENIED}",
+        *(f"{HOME}/{p}" for p in CREDENTIALS),
     ]
 
 
@@ -421,6 +437,7 @@ def test_codex_tables_have_no_repeated_paths(os: Os, profile: Profile) -> None:
             f"{HOME}/{TOKEN_DIR}",
             *LINUX_SOCKET_DENIES,
             f"{HOME}/{DENIED}",
+            *(f"{HOME}/{p}" for p in CREDENTIALS),
         ]
         if os is Os.LINUX
         else [
@@ -428,6 +445,7 @@ def test_codex_tables_have_no_repeated_paths(os: Os, profile: Profile) -> None:
             f"{HOME}/Library/Keychains/tbhbdev.keychain",
             f"{HOME}/{DENIED}",
             f"{HOME}/{TOKEN_DIR}",
+            *(f"{HOME}/{p}" for p in CREDENTIALS),
         ]
     )
     assert [p for p, mode in fs.items() if mode == "none"] == deny

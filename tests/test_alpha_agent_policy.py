@@ -93,6 +93,14 @@ def dig(node: object, *keys: str) -> object:
     return node
 
 
+CREDENTIAL_PATHS = (
+    ".git-credentials",
+    ".netrc",
+    ".ssh",
+    ".config/gh",
+)  # gitleaks:allow
+
+
 def denied(os: Os, home: str) -> tuple[str, ...]:
     """The literal deny list: the token store, the sockets, a denied path."""
     if os is Os.LINUX:
@@ -101,12 +109,14 @@ def denied(os: Os, home: str) -> tuple[str, ...]:
             *LINUX_SOCKET_DENIES,
             "/tmp/example-sockets",
             f"{home}/{DENIED}",
+            *(f"{home}/{p}" for p in CREDENTIAL_PATHS),
         )
     return (
         *(f"{home}/{p}" for p in MACOS_TOKEN_PATHS),
         "/tmp/example-sockets",
         "/private/tmp/example-sockets",
         f"{home}/{DENIED}",
+        *(f"{home}/{p}" for p in CREDENTIAL_PATHS),
     )
 
 
@@ -126,7 +136,7 @@ def env_of(os: Os, harness: Harness, account: str) -> dict[str, str]:
         "DOCKER_CONFIG": f"{tmp}/docker",
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_COUNT": "8",
+        "GIT_CONFIG_COUNT": "9",
         "GIT_CONFIG_KEY_0": "core.fsmonitor",
         "GIT_CONFIG_VALUE_0": "false",
         "GIT_CONFIG_KEY_1": "core.hooksPath",
@@ -143,6 +153,8 @@ def env_of(os: Os, harness: Harness, account: str) -> dict[str, str]:
         "GIT_CONFIG_VALUE_6": "",
         "GIT_CONFIG_KEY_7": "safe.bareRepository",
         "GIT_CONFIG_VALUE_7": "explicit",
+        "GIT_CONFIG_KEY_8": "credential.helper",
+        "GIT_CONFIG_VALUE_8": "",
     }
     if harness is Harness.CODEX:
         env["CODEX_HOME"] = f"{tmp}/codex"
@@ -618,7 +630,7 @@ def test_denied_paths_keep_the_first_occurrence(os: Os, profile: Profile) -> Non
             f"{home}/{DENIED}",
             f"{home}/{TOKEN_DIR}",
         )
-    )
+    ) + tuple(f"{home}/{p}" for p in CREDENTIAL_PATHS)
     assert result.deny == expected
     assert isinstance(result.detail, model.CodexPolicy)
     assert result.detail.deny == expected
@@ -741,6 +753,7 @@ def test_the_sockets_directory_is_denied_with_its_aliases(
         ),
         *expected,
         f"{home}/{DENIED}",
+        *(f"{home}/{p}" for p in CREDENTIAL_PATHS),
     )
 
 
@@ -762,6 +775,7 @@ def test_denied_home_paths_each_resolve_against_the_home() -> None:
         f"{home}/.local/state/x",
         "/tmp/y",
         "/private/tmp/y",
+        *(f"{home}/{p}" for p in CREDENTIAL_PATHS),
     )
 
 
@@ -1539,10 +1553,10 @@ def test_harness_parent_neutralizes_all_repository_git_config(
 ) -> None:
     result = made(os_name, Profile.BUILD, harness, "agent")
     assert result.env["GIT_CONFIG_NOSYSTEM"] == "1"
-    assert result.env["GIT_CONFIG_COUNT"] == "8"
+    assert result.env["GIT_CONFIG_COUNT"] == "9"
     assert {
         result.env[f"GIT_CONFIG_KEY_{i}"]: result.env[f"GIT_CONFIG_VALUE_{i}"]
-        for i in range(8)
+        for i in range(9)
     } == {
         "core.fsmonitor": "false",
         "core.hooksPath": "/dev/null",
@@ -1552,6 +1566,7 @@ def test_harness_parent_neutralizes_all_repository_git_config(
         "protocol.file.allow": "never",
         "diff.external": "",
         "safe.bareRepository": "explicit",
+        "credential.helper": "",
     }
 
 

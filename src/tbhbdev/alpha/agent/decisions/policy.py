@@ -83,6 +83,17 @@ def _check(
         raise Invalid(message)
 
 
+# Account credential stores git, ssh and gh read: a run that can read one can
+# push around the host's publish checks. `.gitconfig` stays readable so the
+# run's identity works.
+CREDENTIAL_HOME_PATHS = (
+    ".git-credentials",
+    ".netrc",
+    ".ssh",
+    ".config/gh",
+)  # gitleaks:allow
+
+
 def _with_aliases(os: Os, path: str) -> tuple[str, ...]:
     """PATH, and on macOS its `/private` twin when it's under `/tmp`."""
     if os is Os.MACOS and (path == _TMP or path.startswith(f"{_TMP}/")):
@@ -96,7 +107,8 @@ def denied_paths(
     """The paths no harness may read, whatever the OS, profile and harness.
 
     That's the Connect token store, the session socket directory and the
-    config's `denied_home_paths`, each with its `/private` twin on macOS.
+    config's `denied_home_paths` and the account credential stores, each with
+    its `/private` twin on macOS.
     """
     paths: list[str] = []
     if host.os is Os.LINUX:
@@ -112,6 +124,7 @@ def denied_paths(
         )
     paths.append(resolve(home, settings.sockets_dir))
     paths.extend(resolve(home, p) for p in settings.sandbox.denied_home_paths)
+    paths.extend(resolve(home, p) for p in CREDENTIAL_HOME_PATHS)
     paths.extend(c.signing for c in settings.credentials if c.signing.startswith("/"))
     return tuple(
         dict.fromkeys(alias for path in paths for alias in _with_aliases(host.os, path))
@@ -139,7 +152,7 @@ def environment(
         "DOCKER_CONFIG": resolve(paths.tmpdir, DOCKER_CONFIG_SUBDIR),
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_COUNT": "8",
+        "GIT_CONFIG_COUNT": "9",
     }
     overrides = (
         ("core.fsmonitor", "false"),
@@ -150,6 +163,7 @@ def environment(
         ("protocol.file.allow", "never"),
         ("diff.external", ""),
         ("safe.bareRepository", "explicit"),
+        ("credential.helper", ""),
     )
     for index, (key, value) in enumerate(overrides):
         env[f"GIT_CONFIG_KEY_{index}"] = key
