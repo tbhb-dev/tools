@@ -188,11 +188,13 @@ def preparation(run: run_host.Run) -> run_host.Prepared:
     )
 
 
+@pytest.mark.parametrize("hook_tools", ["missing", "directory", "file"])
 @pytest.mark.parametrize("kind", RunKind)
 def test_preflight_prepares_and_stops_signing_without_launch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: RunKind
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: RunKind, hook_tools: str
 ) -> None:
     run = make_run(tmp_path, kind=kind.value)
+    (run.home / ".bazel_env" / "bin").mkdir(parents=True)
     prepared = dataclasses.replace(
         preparation(run),
         delivery=credentials.Delivery(
@@ -220,6 +222,12 @@ def test_preflight_prepares_and_stops_signing_without_launch(
     def workspace(value: run_host.Run) -> run_host.Prepared:
         assert value is run
         events.append("workspace")
+        tools = Path(prepared.paths.worktree) / ".bazel_env" / "bin"
+        tools.parent.mkdir()
+        if hook_tools == "directory":
+            tools.mkdir()
+        elif hook_tools == "file":
+            tools.touch()
         return prepared
 
     def sign(key: str, tmpdir: Path, deadline: float) -> Child:
@@ -255,14 +263,37 @@ def test_preflight_prepares_and_stops_signing_without_launch(
     monkeypatch.setattr(run_host.push, "run", unexpected)
     assert run_host.execute(run, "example", preflight_only=True) == 0
     assert events == ["prepare", "workspace", "sign", "command", "stop"]
-    assert (
-        run.files.path("log").read_text()
-        == f"preflight ok: {run.home.parent / 'host-bin' / 'true'}\n"
+    status = (
+        "present"
+        if hook_tools == "directory"
+        else "missing; commit hooks that call .bazel_env/bin will fail in this run"
+    )
+    assert run.files.path("log").read_text() == (
+        f"preflight: .bazel_env {status}\n"
+        f"preflight ok: {run.home.parent / 'host-bin' / 'true'}\n"
     )
     assert run.files.path("rc").read_text() == "0\n"
     assert run.files.path("phase").read_text() == "ended"
     assert runfiles.latest(run.files.root)["example"]["rc"] == 0
     assert not run.files.path("launched").exists()
+
+
+def test_hook_tools_checks_the_exact_run_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    prepared = preparation(run)
+    expected = Path(prepared.paths.worktree) / ".bazel_env" / "bin"
+    checked: list[Path] = []
+    original = Path.is_dir
+
+    def is_dir(path: Path) -> bool:
+        checked.append(path)
+        return original(path)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+    run_host.log_hook_tools(run, prepared.paths)
+    assert expected in checked
 
 
 @pytest.mark.parametrize(
@@ -490,6 +521,7 @@ def test_launch_uses_the_policy_and_marks_only_after_spawn(
         ("phase", "exited"),
         ("phase", "stopped"),
     ]
+    assert not any("preflight:" in text for suffix, text in metadata if suffix == "log")
     assert child.waits == [60 if kind is RunKind.EXEC else 900, None]
     assert run.files.path("out").exists() is (kind is RunKind.EXEC)
 
