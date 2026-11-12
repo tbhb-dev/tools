@@ -3133,15 +3133,13 @@ def test_missing_tool_checks_named_push_target(world: World, url_argument: str) 
     assert done.stderr == b"pre-push: tbhbdev is not on PATH; push refused\n"
 
 
-def test_push_hook_rerun_moves_previous_shim(world: World) -> None:
+def test_push_hook_rerun_drops_previous_shim_without_backup(world: World) -> None:
     assert install.install_git_hooks(None, {}, dry_run=False) == 0
     first = (world.hooks / "pre-push").read_text()
     assert install.install_git_hooks(None, {}, dry_run=False) == 0
     assert (world.hooks / "pre-push").read_text() == first
     assert not (world.hooks / "pre-push.legacy").exists()
-    backups = list(world.hooks.glob("pre-push.legacy.tbhb-backup.*"))
-    assert len(backups) == 1
-    assert backups[0].read_text() == first
+    assert list(world.hooks.glob("pre-push.legacy.tbhb-backup.*")) == []
 
 
 def test_foreign_push_hook_checked_before_dependencies(
