@@ -25,6 +25,7 @@ from tbhbdev.alpha.agent import (
     credentials,
     host_tools,
     ownership,
+    preflight_report,
     process_group,
     push,
     render,
@@ -196,7 +197,9 @@ def executable_parents(executables: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(parents)
 
 
-def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
+def checked_policy(
+    run: Run, paths: RunPaths, checks: preflight_report.Checks | None = None
+) -> tuple[Policy, str]:
     """Check directories before even inspecting or invoking an executable."""
     directories = host_tools.search_path(run.settings, run.host.os)
     entries = run.settings.sandbox.path
@@ -240,8 +243,12 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
             ),
         ),
     )
-    policy.protect_host(
-        check_settings, resolved, (*protected, *full_denies(run, resolved))
+    checks = preflight_report.Checks() if checks is None else checks
+    checks.check(
+        "host protection",
+        lambda: policy.protect_host(
+            check_settings, resolved, (*protected, *full_denies(run, resolved))
+        ),
     )
     clone = Path(repo.clone_path(run.home, run.request.repo))
     write_roots = (
@@ -253,8 +260,15 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         *check_settings.sandbox.write_roots,
         *check_settings.sandbox.agy.build_write,
     )
-    worktree.validate_writes(Path(resolved.worktree), clone, write_roots)
-    worktree.validate_hooks(Path(resolved.worktree), write_roots)
+    checks.check(
+        "clone protection",
+        lambda: (
+            worktree.validate_writes(Path(resolved.worktree), clone, write_roots),
+            checks.require("host protection"),
+            worktree.validate_hooks(Path(resolved.worktree), write_roots),
+        ),
+    )
+    checks.require("host protection", "clone protection")
     name = (
         "agy-agent"
         if run.request.harness is Harness.AGY and run.request.profile is Profile.BUILD
@@ -270,7 +284,11 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         )
         executable, copied = codex_install.prepare(found, run.home)
         protected = (*protected, *copied)
-        policy.protect_host(check_settings, resolved, copied)
+        checks.check(
+            "codex protection",
+            lambda: policy.protect_host(check_settings, resolved, copied),
+        )
+        checks.require("codex protection")
     # Codex needs its complete grant list before pruning nested denies.
     value = policy.build(
         run.settings,
@@ -313,11 +331,15 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
             )
         ),
     )
-    policy.protect_host(
-        check_settings,
-        resolved,
-        (*executables, *copied, *executable_parents(executables)),
+    checks.check(
+        "executable protection",
+        lambda: policy.protect_host(
+            check_settings,
+            resolved,
+            (*executables, *copied, *executable_parents(executables)),
+        ),
     )
+    checks.require("executable protection")
     if isinstance(value.detail, CodexPolicy):
         detail = value.detail
         if detail.mode is CodexMode.PROFILE:
@@ -406,8 +428,7 @@ def announce_access(run: Run) -> None:
         run.files.write("log", notice + "\n")
 
 
-def preflight(run: Run) -> None:
-    announce_access(run)
+def check_host(run: Run) -> None:
     if run.request.harness is Harness.AGY:
         message = "agy runs are refused: no OS sandbox"
         raise Invalid(message)
@@ -416,7 +437,9 @@ def preflight(run: Run) -> None:
             f"{run.request.harness} has no recorded sandbox pass on {run.host.name}"
         )
         raise Invalid(message)
-    _value, executable = checked_policy(run, planned_paths(run))
+
+
+def check_account(run: Run) -> None:
     if run.request.profile is Profile.REVIEW and run.request.tainted_host:
         message = "review runs are refused on a tainted host"
         raise Invalid(message)
@@ -425,16 +448,16 @@ def preflight(run: Run) -> None:
             c for c in run.settings.credentials if c.account == run.request.account
         )
         credentials.require_reviews_app(references)
+    if run.request.harness is Harness.CLAUDE:
+        message = (
+            "claude runs are refused: separate tool paths for Claude (H3) "
+            "and the Claude credential decision remain open"
+        )
+        raise Invalid(message)
+
+
+def check_proxy(run: Run, executable: str) -> None:
     sandbox = run.settings.sandbox
-    reason = (
-        sandbox.codex_network_proxy_opt_out
-        if run.request.harness is Harness.CODEX
-        else None
-    )
-    if reason is not None:
-        notice = f"{run.request.harness} sandbox opt-out: {reason}"
-        print(notice, file=sys.stderr)
-        run.files.write("log", notice + "\n")
     if (
         run.request.harness is Harness.CODEX
         and sandbox.codex_network_proxy_opt_out is None
@@ -446,12 +469,18 @@ def preflight(run: Run) -> None:
         )
         raise Invalid(message)
 
-    if run.request.harness is Harness.CLAUDE:
-        message = (
-            "claude runs are refused: separate tool paths for Claude (H3) "
-            "and the Claude credential decision remain open"
-        )
-        raise Invalid(message)
+
+def preflight(run: Run) -> None:
+    announce_access(run)
+    check_host(run)
+    _value, executable = checked_policy(run, planned_paths(run))
+    check_account(run)
+    reason = run.settings.sandbox.codex_network_proxy_opt_out
+    if reason is not None:
+        notice = f"{run.request.harness} sandbox opt-out: {reason}"
+        print(notice, file=sys.stderr)
+        run.files.write("log", notice + "\n")
+    check_proxy(run, executable)
     if run.request.unsandboxed:
         mark_host(run)
 
@@ -586,17 +615,11 @@ def checked_harness_command(
         raise Invalid(message) from None
 
 
-def log_hook_tools(run: Run, paths: RunPaths) -> None:
-    status = (
-        "present"
-        if (Path(paths.worktree) / ".bazel_env" / "bin").is_dir()
-        else "missing; commit hooks that call .bazel_env/bin will fail in this run"
-    )
-    run.files.write("log", f"preflight: .bazel_env {status}\n")
-
-
 def check_sandbox(
-    run: Run, prepared: Prepared, value: Policy, command: tuple[str, ...]
+    run: Run,
+    prepared: Prepared,
+    value: Policy,
+    command: tuple[str, ...],
 ) -> None:
     if run.request.harness is not Harness.CODEX:
         run.files.write(
@@ -606,7 +629,7 @@ def check_sandbox(
     noop = host_tools.resolve("true", value.tool_path)
     sandbox_command = argv.sandbox(command, noop)
 
-    def probe() -> None:
+    def probe() -> str | None:
         result = subprocess.run(  # nosec B603
             sandbox_command,
             env=value.env | prepared.delivery.env,
@@ -618,28 +641,25 @@ def check_sandbox(
             check=False,
         )
         if result.returncode != 0:
-            first_line = result.stderr.partition("\n")[0][:300]
-            message = f"preflight: sandbox failed: {first_line}"
-            raise Invalid(message)
-        run.files.write("log", "preflight: sandbox ok\n")
+            return result.stderr
+        return None
 
-    process_group.prepare(
+    error = process_group.prepare(
         probe, run.files, run.deadline, run.settings.kill_grace_seconds
     )
+    if error is None:
+        return
+    if not isinstance(error, str):
+        message = "run preparation failed at sandbox"
+        raise Invalid(message)
+    raise preflight_report.SandboxError(error)
 
 
-def run_harness(
-    run: Run, prepared: Prepared, stack: ExitStack, *, preflight_only: bool = False
-) -> int:
+def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
     paths = prepared.paths
     value, executable = checked_policy(run, paths)
     env = value.env | prepared.delivery.env
     command = checked_harness_command(run, prepared, value, executable)
-    if preflight_only:
-        log_hook_tools(run, paths)
-        check_sandbox(run, prepared, value, command)
-        run.files.write("log", f"preflight ok: {executable}\n")
-        return 0
     headless = run.request.kind is RunKind.EXEC
     terminal = None if headless else sys.stdin.fileno()
     streams = (None, None, None)
@@ -730,6 +750,8 @@ def _execute(
     *,
     preflight_only: bool,
 ) -> int:
+    if preflight_only:
+        return preflight_report.execute(run, text, stack)
     prepared = None
     rc = 1
     agent = None
@@ -753,11 +775,7 @@ def _execute(
             agent = credentials.signing_agent(
                 prepared.delivery.signing, run.tmpdir, run.deadline
             )
-        rc = (
-            run_harness(run, prepared, stack, preflight_only=True)
-            if preflight_only
-            else push.run(run, prepared, stack, run_harness, push_token)
-        )
+        rc = push.run(run, prepared, stack, run_harness, push_token)
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
     except RunInterruptedError, EOFError:
@@ -891,8 +909,9 @@ def main(
             tempfile.TemporaryDirectory() as tmpdir,
         ):
             refuse_started(files)
-            run, text = _load(args, Path(tmpdir).resolve())
-            completed = execute(run, text, push_token, preflight_only=args.preflight)
+            completed = load_and_execute(
+                args, Path(tmpdir).resolve(), files, push_token
+            )
     except (
         Invalid,
         userconfig.ConfigError,
@@ -923,17 +942,31 @@ def main(
             signal.signal(number, handler)
 
 
+def load_and_execute(
+    args: argparse.Namespace,
+    tmpdir: Path,
+    files: runfiles.RunFiles,
+    push_token: str | None,
+) -> int:
+    if args.preflight:
+        return preflight_report.load(args, tmpdir, files, _load)
+    run, text = _load(args, tmpdir)
+    return execute(run, text, push_token)
+
+
 def _files(name: str) -> runfiles.RunFiles:
     home = Path.home()
     root = runfiles.state_home(home) / "tbhbdev" / "agent-runs"
     return runfiles.RunFiles(root, name)
 
 
-def _load(args: argparse.Namespace, tmpdir: Path) -> tuple[Run, str]:
+def _load(
+    args: argparse.Namespace, tmpdir: Path, loaded: Settings | None = None
+) -> tuple[Run, str]:
     tmpdir = runfiles.private_dir(tmpdir / "tools")
     started = time.time()
     clock = time.monotonic()
-    loaded = settings.load()
+    loaded = settings.load() if loaded is None else loaded
     host = next((h for h in loaded.hosts if h.name == args.host), None)
     if host is None:
         message = f"host {args.host!r} is not configured"
