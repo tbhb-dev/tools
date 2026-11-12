@@ -43,9 +43,9 @@ COMMITS_BLOCK = (
     "No `-s`, no Signed-off-by, no Co-authored-by."
 )
 PUSH_BLOCK = (
-    "Before any `git push`, run "
-    "`~/.local/libexec/tbhb/2026-11-11-coord-scan-outgoing.sh`. "
-    "Stop and report on its exit 1. Never force-push an existing remote branch."
+    "Before any `git push`, run the outgoing scan command below from the worktree. "
+    "Stop and report on any nonzero exit. "
+    "Never force-push an existing remote branch."
 )
 NO_PUSH_BLOCK = "Do NOT push and do NOT open a pull request."
 HARD_RULES_BLOCK = """- After any denial, stop and report. No workaround by any tool, even an equivalent one.
@@ -99,7 +99,7 @@ def render(
     branch: str | None = None,
     base: str = "origin/main",
     *,
-    push: bool = False,
+    scan_command: str | None = None,
 ) -> str:
     """Return a skeleton; callers fill every brace placeholder before checking."""
     step = STEP_BLOCK.format(
@@ -116,7 +116,9 @@ def render(
             "## Task\n\n{TASK_DETAILS}",
             "## Gates\n\n{GATES}",
             f"## Commits\n\n{COMMITS_BLOCK}",
-            f"## Push\n\n{PUSH_BLOCK}" if push else NO_PUSH_BLOCK,
+            f"## Push\n\n{PUSH_BLOCK}\nOutgoing scan command: `{scan_command}`"
+            if scan_command is not None
+            else NO_PUSH_BLOCK,
             f"## Hard rules\n\n{HARD_RULES_BLOCK}",
             "## Final report\n\n{FINAL_REPORT}\n",
         )
@@ -155,6 +157,17 @@ def instruction_text(found: dict[str, str]) -> str:
     return SPACE.join(remaining_sections)
 
 
+def check_push_section(content: str) -> list[str]:
+    """Require the fixed push safeguard and one outgoing scan command line."""
+    problems = []
+    commands = re.findall(r"^Outgoing scan command: `(.*)`$", content, re.MULTILINE)
+    if len(commands) != 1 or not re.fullmatch(r"[^`\r\n]+", commands[0]):
+        problems.append("missing outgoing scan command")
+    if normalize(PUSH_BLOCK) not in normalize(content):
+        problems.append("missing push rule in Push section")
+    return problems
+
+
 def check(text: str) -> list[str]:
     """Return missing safeguards, placeholders and forbidden instructions."""
     found = sections(text)
@@ -176,6 +189,8 @@ def check(text: str) -> list[str]:
         problems.append("missing push rule")
     elif push_rules != 1:
         problems.append("expected exactly one push rule")
+    if "## Push" in found:
+        problems.extend(check_push_section(found["## Push"]))
     rules = normalize(found["## Hard rules"])
     problems.extend(
         f"missing hard rule: {rule}"
@@ -225,21 +240,31 @@ def main(argv: list[str], prog: str) -> int:
     new.add_argument("--branch")
     new.add_argument("--base", default="origin/main", metavar="REF")
     new.add_argument("--push", action="store_true")
+    new.add_argument("--scan-command", metavar="CMD")
     new.add_argument("-o", metavar="FILE")
     lint = commands.add_parser("check", help="check completed peer-run briefs")
     lint.add_argument("files", nargs="+", metavar="FILE")
     args = parser.parse_args(argv)
     if args.command == "check":
         return check_files(args.files)
+    if args.push != (args.scan_command is not None):
+        parser.error("--push and --scan-command must be used together")
     for value, pattern, label in (
         (args.run, r"[A-Za-z0-9][A-Za-z0-9._-]*", "RUN"),
         (args.repo, r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", "REPO"),
         (args.branch, r"[^\s{}]+", "BRANCH"),
         (args.base, r"[^\s{}]+", "BASE"),
+        (args.scan_command, r"[^`\r\n]+", "SCAN COMMAND"),
     ):
         if value is not None and not re.fullmatch(pattern, value):
             parser.error(f"invalid {label}: {value!r}")
-    text = render(args.run, args.repo, args.branch, args.base, push=args.push)
+    text = render(
+        args.run,
+        args.repo,
+        args.branch,
+        args.base,
+        scan_command=args.scan_command,
+    )
     if args.o:
         try:
             Path(args.o).write_bytes(text.encode())

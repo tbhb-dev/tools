@@ -53,6 +53,9 @@ EXPECTED = (
 )
 FILLED = re.sub(r"\{[^{}]+\}", "Completed", EXPECTED)
 PROG = "example brief"
+SCAN_COMMAND = "scan-outgoing origin/main"
+SCAN_LINE = f"Outgoing scan command: `{SCAN_COMMAND}`"
+PUSH_SECTION = f"## Push\n\n{brief.PUSH_BLOCK}\n{SCAN_LINE}"
 
 
 def test_registered() -> None:
@@ -76,7 +79,11 @@ def test_render_defaults() -> None:
 
 def test_render_overrides_and_quotes_arguments() -> None:
     rendered = brief.render(
-        "a b", "other/project", "feature/x y", "base ref", push=True
+        "a b",
+        "other/project",
+        "feature/x y",
+        "base ref",
+        scan_command=SCAN_COMMAND,
     )
     assert rendered == EXPECTED.replace("tbhb-dev/tools", "other/project").replace(
         ", demo)", ", a b)"
@@ -85,7 +92,7 @@ def test_render_overrides_and_quotes_arguments() -> None:
         "git worktree add '.worktrees/a b' -b 'feature/x y' 'base ref'",
     ).replace("cd .worktrees/demo", "cd '.worktrees/a b'").replace(
         brief.NO_PUSH_BLOCK,
-        "## Push\n\n" + brief.PUSH_BLOCK,
+        PUSH_SECTION,
     )
 
 
@@ -102,13 +109,18 @@ def test_new_from_top_level(
                 "demo",
                 "--repo",
                 "tbhb-dev/tools",
-                *(["--push"] if push else []),
+                *(["--push", "--scan-command", SCAN_COMMAND] if push else []),
             ]
         )
         == 0
     )
     output = capsys.readouterr()
-    assert output == (brief.render("demo", "tbhb-dev/tools", push=push), "")
+    assert output == (
+        brief.render(
+            "demo", "tbhb-dev/tools", scan_command=SCAN_COMMAND if push else None
+        ),
+        "",
+    )
     file = tmp_path / "filled.md"
     file.write_text(re.sub(r"\{[^{}]+\}", "Completed", output.out), encoding="utf-8")
     assert brief.main(["check", str(file)], PROG) == 0
@@ -131,6 +143,8 @@ def test_output_file_and_options(
                 "--base",
                 "origin/dev",
                 "--push",
+                "--scan-command",
+                SCAN_COMMAND,
                 "-o",
                 str(file),
             ],
@@ -139,7 +153,11 @@ def test_output_file_and_options(
         == 0
     )
     assert file.read_text(encoding="utf-8") == brief.render(
-        "run", "other/repo", "feat/run", "origin/dev", push=True
+        "run",
+        "other/repo",
+        "feat/run",
+        "origin/dev",
+        scan_command=SCAN_COMMAND,
     )
     assert capsys.readouterr() == ("", "")
 
@@ -331,16 +349,17 @@ def test_sections_preserve_preamble_empty_and_repeated_headings() -> None:
             (
                 "usage: example brief new [-h] --repo OWNER/REPO "
                 "[--branch BRANCH] [--base REF]\n"
-                "                         [--push] [-o FILE]\n"
+                "                         [--push] [--scan-command CMD] [-o FILE]\n"
                 "                         RUN\n\n"
                 "positional arguments:\n"
                 "  RUN\n\n"
                 "options:\n"
-                "  -h, --help         show this help message and exit\n"
+                "  -h, --help          show this help message and exit\n"
                 "  --repo OWNER/REPO\n"
                 "  --branch BRANCH\n"
                 "  --base REF\n"
                 "  --push\n"
+                "  --scan-command CMD\n"
                 "  -o FILE\n"
             ),
         ),
@@ -433,20 +452,131 @@ def test_push_rule_required_exactly_once() -> None:
     assert brief.check(FILLED + "\n" + brief.NO_PUSH_BLOCK) == [
         "expected exactly one push rule"
     ]
-    assert brief.check(FILLED + "\n## Push\n" + brief.PUSH_BLOCK) == [
+    assert brief.check(FILLED + "\n" + PUSH_SECTION) == [
         "expected exactly one push rule"
     ]
-    assert brief.check(missing + "\n## Push\n" + brief.PUSH_BLOCK) == []
-    assert brief.check(missing + "\n## Push\n" + brief.PUSH_BLOCK * 2) == [
+    assert brief.check(missing + "\n" + PUSH_SECTION) == []
+    assert brief.check(missing + "\n" + PUSH_SECTION + "\n" + brief.PUSH_BLOCK) == [
         "expected exactly one push rule"
     ]
     assert brief.check(missing + brief.NO_PUSH_BLOCK.upper().replace(" ", "\n")) == []
     assert (
         brief.check(
-            missing + "\n## Push\n" + brief.PUSH_BLOCK.upper().replace(" ", "\n")
+            missing
+            + "\n## Push\n"
+            + brief.PUSH_BLOCK.upper().replace(" ", "\n")
+            + "\n"
+            + SCAN_LINE
         )
         == []
     )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--push"],
+        ["--scan-command", SCAN_COMMAND],
+    ],
+)
+def test_push_and_scan_command_required_together(
+    options: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as caught:
+        brief.main(["new", "demo", "--repo", "owner/repo", *options], PROG)
+    assert caught.value.code == 2
+    assert capsys.readouterr() == (
+        "",
+        (
+            f"usage: {PROG} [-h] {{new,check}} ...\n"
+            f"{PROG}: error: --push and --scan-command must be used together\n"
+        ),
+    )
+
+
+@pytest.mark.parametrize("command", ["", "scan\nnext", "scan\rnext", "scan`next"])
+def test_invalid_scan_command(command: str, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as caught:
+        brief.main(
+            [
+                "new",
+                "demo",
+                "--repo",
+                "owner/repo",
+                "--push",
+                "--scan-command",
+                command,
+            ],
+            PROG,
+        )
+    assert caught.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert f"invalid SCAN COMMAND: {command!r}" in output.err
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "",
+        "Outgoing scan command: ``",
+        SCAN_LINE + "\n" + SCAN_LINE,
+        "Outgoing scan command: `scan`next`",
+        "Outgoing scan command: `scan\nnext`",
+        "Outgoing scan command: `scan\rnext`",
+        "Outgoing scan command: `scan` trailing",
+        "prefix " + SCAN_LINE,
+    ],
+)
+def test_missing_outgoing_scan_command(
+    line: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    text = FILLED.replace(brief.NO_PUSH_BLOCK, PUSH_SECTION.replace(SCAN_LINE, line))
+    assert brief.check(text) == ["missing outgoing scan command"]
+    file = tmp_path / "push.md"
+    file.write_text(text, encoding="utf-8")
+    assert brief.main(["check", str(file)], PROG) == 1
+    assert capsys.readouterr() == (f"{file}: missing outgoing scan command\n", "")
+
+
+def test_push_section_requires_fixed_block_and_its_own_command() -> None:
+    text = FILLED.replace(brief.NO_PUSH_BLOCK, "## Push\n" + SCAN_LINE)
+    assert brief.check(text) == [
+        "missing push rule",
+        "missing push rule in Push section",
+    ]
+    assert brief.check(text + "\n## Other\n" + brief.PUSH_BLOCK) == [
+        "missing push rule in Push section"
+    ]
+    text = FILLED.replace(brief.NO_PUSH_BLOCK, "## Push\n" + brief.PUSH_BLOCK)
+    assert brief.check(text + "\n## Other\n" + SCAN_LINE) == [
+        "missing outgoing scan command"
+    ]
+
+
+def test_scan_command_preserved(capsys: pytest.CaptureFixture[str]) -> None:
+    command = "  scan-outgoing 'origin/main' && echo $RESULT  "
+    assert (
+        brief.main(
+            [
+                "new",
+                "demo",
+                "--repo",
+                "owner/repo",
+                "--push",
+                "--scan-command",
+                command,
+            ],
+            PROG,
+        )
+        == 0
+    )
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert brief.sections(output.out)["## Push"] == (
+        f"\n{brief.PUSH_BLOCK}\nOutgoing scan command: `{command}`\n\n"
+    )
+    assert brief.check(re.sub(r"\{[^{}]+\}", "Completed", output.out)) == []
 
 
 @pytest.mark.parametrize("heading", ["## Task", "## Gates", "## Final report"])
