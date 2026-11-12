@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from tbhbdev.alpha import (
     agent,
+    brief,
     gh_shim,
     guard_gh_poll,
     guard_gh_pr,
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "agent",
+    "brief",
     "gh_shim",
     "guard_gh_poll",
     "guard_gh_pr",
@@ -82,6 +84,7 @@ commands:
   loop         validate loop configuration (runner not yet available)
   agent        exec | wait | status | kill | clean | keep: headless runs
   pre-push-guard REMOTE URL: refuse rewritten history and private names
+  brief        new | check: peer-run briefs with required safeguards
   install      install the git hooks and the user-level harness hooks
 """
 
@@ -179,6 +182,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "pre-push-guard": pre_push_guard.main,
     "loop": loop.main,
     "agent": agent.main,
+    "brief": brief.main,
 }
 
 
