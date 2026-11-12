@@ -111,6 +111,7 @@ def denied_paths(
         )
     paths.append(resolve(home, settings.sockets_dir))
     paths.extend(resolve(home, p) for p in settings.sandbox.denied_home_paths)
+    paths.extend(c.signing for c in settings.credentials if c.signing.startswith("/"))
     return tuple(
         dict.fromkeys(alias for path in paths for alias in _with_aliases(host.os, path))
     )
@@ -157,6 +158,15 @@ def environment(
     if paths.signing_socket is not None:
         env["SSH_AUTH_SOCK"] = paths.signing_socket
     return env
+
+
+def review_environment(profile: Profile, paths: RunPaths) -> dict[str, str]:
+    if not isinstance(profile, Profile):
+        message = "profile must be an agent profile"
+        raise Invalid(message)
+    if profile is Profile.REVIEW:
+        return {"GH_CONFIG_DIR": resolve(paths.tmpdir, GH_CONFIG_SUBDIR)}
+    return {}
 
 
 def _write_roots(
@@ -362,7 +372,7 @@ def _agy(
     else:
         reads = [resolve(home, p) for p in agy.build_read]
     writes = _agy_write_roots(settings, profile, paths)
-    reads += [env["GH_CONFIG_DIR"], env["DOCKER_CONFIG"]]
+    reads += [env[k] for k in ("GH_CONFIG_DIR", "DOCKER_CONFIG") if k in env]
     if paths.signing_socket is not None:
         reads.append(paths.signing_socket)
     # agy has no deny entry, so a grant that reaches a denied path is the leak.
@@ -429,7 +439,9 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
     )
     if paths.signing_socket is not None:
         _refuse_overlaps((paths.signing_socket,), deny, "signing socket")
-    env = environment(settings, host, harness, paths, account)
+    env = environment(settings, host, harness, paths, account) | review_environment(
+        profile, paths
+    )
     tools_path = tool_path(settings, host, paths.home)
     writes = _write_roots(settings, profile, paths)
     if host.os is Os.MACOS and harness in (Harness.CODEX, Harness.CLAUDE):

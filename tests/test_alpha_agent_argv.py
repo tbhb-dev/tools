@@ -23,6 +23,7 @@ from agent_example import (
     settings,
     trusted_executables,
 )
+from agent_host_example import run_request
 
 from tbhbdev.alpha.agent import model
 from tbhbdev.alpha.agent.decisions import argv, policy
@@ -791,3 +792,144 @@ def test_harness_output_options_belong_to_run_host() -> None:
     parameters = inspect.signature(argv.harness).parameters
     assert "output_file" not in parameters
     assert {"schema_file", "schema_text"} <= parameters.keys()
+
+
+@pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize("profile", Profile)
+def test_codex_without_github_reference_has_private_config(
+    kind: RunKind, profile: Profile
+) -> None:
+    original = settings()
+    config = dataclasses.replace(
+        original,
+        credentials=tuple(
+            dataclasses.replace(c, gh=None) for c in original.credentials
+        ),
+    )
+    command = built(Harness.CODEX, kind, profile, config=config)
+    assert command == expected(Harness.CODEX, kind, profile)
+    overrides = "\n".join(
+        value for flag, value in itertools.pairwise(command) if flag == "-c"
+    )
+    env = tomllib.loads(overrides)["shell_environment_policy"]["set"]
+    assert env["GH_CONFIG_DIR"] == f"{env['TMPDIR']}/gh"
+
+
+@pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize("profile", Profile)
+def test_sandbox_command_keeps_the_harness_overrides(
+    kind: RunKind, profile: Profile
+) -> None:
+    value = policy.build(
+        settings(),
+        LINUX,
+        harness=Harness.CODEX,
+        profile=profile,
+        account="agent",
+        paths=paths("agent"),
+        unsandboxed=False,
+    )
+    command = argv.harness(
+        dataclasses.replace(run_request(kind=kind.value), profile=profile),
+        value,
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+    )
+    expected = tuple(
+        word
+        for index, word in enumerate(command)
+        if word == "-c"
+        or command[index - 1] == "-c"
+        or word == "-C"
+        or command[index - 1] == "-C"
+    )
+    assert argv.sandbox(command, "/usr/bin/true") == (
+        "codex",
+        "sandbox",
+        *expected,
+        "-P",
+        profile.value,
+        "--",
+        "/usr/bin/true",
+    )
+
+
+@pytest.mark.parametrize("option", ["-c", "--config"])
+@pytest.mark.parametrize("profile", ["build", 'quoted "profile"\\name\n', ""])
+def test_sandbox_command_names_the_default_permissions(
+    option: str, profile: str
+) -> None:
+    setting = f"default_permissions={json.dumps(profile)}"
+    assert argv.sandbox(("codex", "exec", option, setting, "-"), "true") == (
+        "codex",
+        "sandbox",
+        option,
+        setting,
+        "-P",
+        profile,
+        "--",
+        "true",
+    )
+
+
+@pytest.mark.parametrize("option", ["-P", "--permission-profile"])
+@pytest.mark.parametrize("before", [False, True])
+def test_sandbox_command_keeps_an_explicit_permission_profile(
+    option: str, *, before: bool
+) -> None:
+    config = ("-c", 'default_permissions="build"')
+    explicit = (option, "review")
+    options = (*explicit, *config) if before else (*config, *explicit)
+    assert argv.sandbox(("codex", *options, "-"), "true") == (
+        "codex",
+        "sandbox",
+        *options,
+        "--",
+        "true",
+    )
+
+
+def test_sandbox_command_without_default_permissions_adds_no_profile() -> None:
+    options = ("-c", 'other.default_permissions="build"', "--profile", "build")
+    assert argv.sandbox(("codex", *options, "-"), "true") == (
+        "codex",
+        "sandbox",
+        *options,
+        "--",
+        "true",
+    )
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "-P",
+        "--permission-profile",
+        "-p",
+        "--profile",
+        "-C",
+        "--cd",
+        "-c",
+        "--config",
+        "--enable",
+        "--disable",
+    ],
+)
+def test_sandbox_command_passes_supported_options(option: str) -> None:
+    assert argv.sandbox(
+        ("/tools/codex", "exec", option, "value", "-"), "/tools/true"
+    ) == ("/tools/codex", "sandbox", option, "value", "--", "/tools/true")
+
+
+@pytest.mark.parametrize("option", ["-s", "--sandbox"])
+def test_sandbox_command_expresses_legacy_mode_as_config(option: str) -> None:
+    assert argv.sandbox(
+        ("codex", option, "danger-full-access", "brief"), "/bin/true"
+    ) == (
+        "codex",
+        "sandbox",
+        "-c",
+        'sandbox_mode="danger-full-access"',
+        "--",
+        "/bin/true",
+    )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import grp
 import io
@@ -16,6 +17,7 @@ import tempfile
 import time
 import tomllib
 from contextlib import ExitStack, contextmanager
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -24,6 +26,8 @@ from agent_host_example import (
     constant,
     host_settings,
     isolate_host_git,
+    local_mirror_fetches,
+    preparation_failure,
     repository,
     run_request,
     trusted_host_stat,
@@ -32,18 +36,19 @@ from test_alpha_agent_codex_install import release
 from test_alpha_agent_credentials import VALUES
 from test_alpha_agent_settings import EXAMPLE
 
-from tbhbdev import secrets
+from tbhbdev import secrets, userconfig
 from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import (
     codex_install,
     credentials,
     host_tools,
+    preflight_report,
     process_group,
     render,
     run_host,
     runfiles,
 )
-from tbhbdev.alpha.agent.decisions import request
+from tbhbdev.alpha.agent.decisions import policy, request
 from tbhbdev.alpha.agent.decisions.run_state import Group
 from tbhbdev.alpha.agent.model import (
     AgyPolicy,
@@ -59,7 +64,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator
     from typing import TextIO
 
-    from tbhbdev.alpha.agent.model import Policy, RunRequest, Settings
+    from tbhbdev.alpha.agent.model import (
+        Host,
+        Policy,
+        RunPaths,
+        RunRequest,
+        Sandbox,
+        Settings,
+    )
 
 
 @pytest.fixture(autouse=True, params=["regular", "symlinked"])
@@ -138,21 +150,18 @@ def fake_secrets(
 
 
 @pytest.fixture(autouse=True)
-def portable_run_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+def portable_run_protocol(
+    monkeypatch: pytest.MonkeyPatch, agent_suffix_case: None
+) -> None:
     """Check protocol spelling even on a case-insensitive filesystem."""
-    original_path = runfiles.RunFiles.path
+    del agent_suffix_case
     original_copy = runfiles.copy_final
-
-    def path(files: runfiles.RunFiles, suffix: str) -> Path:
-        assert suffix == suffix.lower()
-        return original_path(files, suffix)
 
     def copy(source: Path, destination: Path) -> None:
         assert source.name == "out.final"
         assert destination.name.endswith(".out.final")
         original_copy(source, destination)
 
-    monkeypatch.setattr(runfiles.RunFiles, "path", path)
     monkeypatch.setattr(runfiles, "copy_final", copy)
 
 
@@ -188,6 +197,149 @@ def preparation(run: run_host.Run) -> run_host.Prepared:
     )
 
 
+@pytest.mark.parametrize("hook_tools", ["missing", "directory", "file"])
+@pytest.mark.parametrize("kind", RunKind)
+def test_preflight_prepares_and_stops_signing_without_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: RunKind, hook_tools: str
+) -> None:
+    run = make_run(tmp_path, kind=kind.value)
+    (run.home / ".bazel_env" / "bin").mkdir(parents=True)
+    prepared = dataclasses.replace(
+        preparation(run),
+        delivery=credentials.Delivery(
+            {}, "example-key", gh_fallback=False, claude_profile=None
+        ),
+    )
+    events: list[str] = []
+
+    def prepare(operation: Callable[[], object], *_args: object) -> object:
+        events.append("prepare")
+        return operation()
+
+    def workspace(*_args: object) -> Path:
+        events.append("workspace")
+        tools = Path(prepared.paths.worktree) / ".bazel_env" / "bin"
+        tools.parent.mkdir()
+        if hook_tools == "directory":
+            tools.mkdir()
+        elif hook_tools == "file":
+            tools.touch()
+        return Path(prepared.paths.worktree)
+
+    def sign(key: str, tmpdir: Path, deadline: float) -> Child:
+        assert (key, tmpdir, deadline) == ("example-key", run.tmpdir, run.deadline)
+        events.append("sign")
+        return Child()
+
+    def stop(child: Child) -> bool:
+        assert child.pid == Child.pid
+        events.append("stop")
+        return True
+
+    def command(
+        value: run_host.Run, ready: run_host.Prepared, policy: Policy, executable: str
+    ) -> tuple[str, ...]:
+        assert value is run
+        assert ready.paths.worktree == prepared.paths.worktree
+        assert policy.env
+        assert Path(executable).is_absolute()
+        events.append("command")
+        return (executable,)
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("preflight must never launch or push")
+
+    monkeypatch.setattr(subprocess, "run", constant(subprocess.CompletedProcess((), 0)))
+    monkeypatch.setattr(process_group, "prepare", prepare)
+    monkeypatch.setattr(run_host.worktree, "create", workspace)
+    monkeypatch.setattr(credentials, "deliver", constant(prepared.delivery))
+    monkeypatch.setattr(preflight_report, "version", constant("0.164.0"))
+    monkeypatch.setattr(credentials, "signing_agent", sign)
+    monkeypatch.setattr(run_host, "stop_agent", stop)
+    monkeypatch.setattr(run_host, "harness_command", command)
+    monkeypatch.setattr(process_group, "launch_owned", unexpected)
+    monkeypatch.setattr(run_host.push, "run", unexpected)
+    assert run_host.execute(run, "example", preflight_only=True) == 0
+    assert events == [
+        "prepare",
+        "workspace",
+        "prepare",
+        "prepare",
+        "prepare",
+        "sign",
+        "command",
+        "prepare",
+        "stop",
+    ]
+    status = (
+        "present"
+        if hook_tools == "directory"
+        else "missing; commit hooks that call .bazel_env/bin will fail in this run"
+    )
+    log = run.files.path("log").read_text().splitlines()
+    assert log[0] == "preflight: codex 0.164.0"
+    expected = [
+        f"preflight: .bazel_env {status}"
+        if name == ".bazel_env"
+        else f"preflight: {name}: ok"
+        for name in preflight_report.ORDER
+    ]
+    assert log == [
+        "preflight: codex 0.164.0",
+        *expected,
+        "preflight: 16 checks, 0 failed, 0 skipped",
+    ]
+    assert run.files.path("rc").read_text() == "0\n"
+    assert run.files.path("phase").read_text() == "ended"
+    assert runfiles.latest(run.files.root)["example"]["rc"] == 0
+    assert not run.files.path("launched").exists()
+
+
+def test_hook_tools_checks_the_exact_run_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    prepared = preparation(run)
+    expected = Path(prepared.paths.worktree) / ".bazel_env" / "bin"
+    checked: list[Path] = []
+    original = Path.is_dir
+
+    def is_dir(path: Path) -> bool:
+        checked.append(path)
+        return original(path)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+    preflight_report.hook_tools(prepared.paths, preflight_report.Checks(run.files))
+    assert expected in checked
+
+
+@pytest.mark.parametrize(
+    "step", ["credential delivery", "audit directory", "codex auth copy"]
+)
+@pytest.mark.parametrize(
+    "error", [OSError, ValueError, Invalid, subprocess.CalledProcessError]
+)
+def test_workspace_failure_names_only_its_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, error: type[Exception]
+) -> None:
+    run = make_run(tmp_path)
+    monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
+    monkeypatch.setattr(run_host.worktree, "create", constant(run.home / "workspace"))
+
+    fail = partial(preparation_failure, error)
+
+    if step == "credential delivery":
+        monkeypatch.setattr(credentials, "deliver", fail)
+    elif step == "audit directory":
+        monkeypatch.setattr(runfiles, "private_dir", fail)
+    else:
+        monkeypatch.setattr(credentials, "auth_copy", fail)
+    with pytest.raises(Invalid) as caught:
+        run_host.prepare_workspace(run)
+    assert str(caught.value) == f"run preparation failed at {step}"
+    assert "sensitive" not in str(caught.value)
+
+
 @pytest.mark.parametrize("harness", Harness)
 def test_prepare_uses_one_worktree_and_private_destinations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
@@ -204,9 +356,7 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     _, clone = repository(run.home / "Code" / "github.com" / "example-org")
     clone.rename(clone.parent / "example-repo")
     clone = clone.parent / "example-repo"
-    monkeypatch.setattr(
-        run_host.worktree.repo, "ssh_url", constant(str(clone.parent / "origin"))
-    )
+    local_mirror_fetches(monkeypatch, clone.parent / "origin")
     commit = subprocess.check_output(
         ["git", "-C", str(clone), "rev-parse", "HEAD"], text=True
     ).strip()
@@ -263,7 +413,13 @@ def test_build_preparation_has_the_run_socket(
 ) -> None:
     run = make_run(tmp_path)
 
-    def create(_clone: Path, _name: str, _value: run_host.RunRequest) -> Path:
+    def create(
+        _clone: Path,
+        _name: str,
+        _value: run_host.RunRequest,
+        public_repos: tuple[str, ...],
+    ) -> Path:
+        assert public_repos == run.settings.public_repos
         return runfiles.private_dir(run.home / "worktree")
 
     monkeypatch.setattr(run_host.worktree, "create", create)
@@ -382,6 +538,7 @@ def test_launch_uses_the_policy_and_marks_only_after_spawn(
         ("phase", "exited"),
         ("phase", "stopped"),
     ]
+    assert not any("preflight:" in text for suffix, text in metadata if suffix == "log")
     assert child.waits == [60 if kind is RunKind.EXEC else 900, None]
     assert run.files.path("out").exists() is (kind is RunKind.EXEC)
 
@@ -546,7 +703,15 @@ def test_hidden_dispatch_reads_request_and_restores_handlers(
         s: signal.getsignal(s) for s in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
     }
 
-    def execute(run: run_host.Run, text: str) -> int:
+    def execute(
+        run: run_host.Run,
+        text: str,
+        push_token: str | None = None,
+        *,
+        preflight_only: bool = False,
+    ) -> int:
+        assert preflight_only is False
+        assert push_token is None
         assert run.settings == expected_settings
         assert run.request.claude_profile == "primary"
         assert run.files.root == files.root
@@ -753,9 +918,7 @@ def test_startup_deadline_stops_the_recorded_setup_group(
     run = make_run(tmp_path)
     _, clone = repository(run.home / "Code" / "github.com" / "example-org")
     clone.rename(clone.parent / "example-repo")
-    monkeypatch.setattr(
-        run_host.worktree.repo, "ssh_url", constant(str(clone.parent / "origin"))
-    )
+    local_mirror_fetches(monkeypatch, clone.parent / "origin")
     run = dataclasses.replace(run, deadline=time.monotonic() + 5)
     original = run_host.worktree.git
     ready = tmp_path / "setup-child.json"
@@ -1013,7 +1176,15 @@ def test_host_defaults_use_fake_home_and_configured_machine(
     files.receive(run_request())
     files.write("prompt", "example task")
 
-    def execute(run: run_host.Run, text: str) -> int:
+    def execute(
+        run: run_host.Run,
+        text: str,
+        push_token: str | None = None,
+        *,
+        preflight_only: bool = False,
+    ) -> int:
+        assert preflight_only is False
+        assert push_token is None
         assert run.files.root == root
         assert run.host.name == "example-linux"
         assert text == "example task"
@@ -1055,7 +1226,15 @@ def test_host_passes_configured_full_access_authorization(
     )
     files.write("prompt", "example task")
 
-    def execute(run: run_host.Run, _text: str) -> int:
+    def execute(
+        run: run_host.Run,
+        _text: str,
+        push_token: str | None = None,
+        *,
+        preflight_only: bool = False,
+    ) -> int:
+        assert preflight_only is False
+        assert push_token is None
         assert run.request.unsandboxed is True
         assert run.request.authorized_by == "operator-chat-2026-11-09"
         return 37
@@ -1077,7 +1256,11 @@ def check_harness_arguments(
     def build(*args: object, **kwargs: object) -> Policy:
         assert args == (run.settings, run.host)
         assert kwargs.pop("protected")
-        assert kwargs.pop("denied") == run_host.resolved_denies(run, prepared.paths)
+        assert kwargs.pop("denied") == (
+            run_host.full_denies(run, prepared.paths)
+            if harness is Harness.CODEX
+            else run_host.resolved_denies(run, prepared.paths)
+        )
         assert kwargs == {
             "harness": harness,
             "profile": run.request.profile,
@@ -1871,7 +2054,16 @@ def test_execute_scopes_the_mac_host_path(
     run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=Os.MACOS))
     before = host_tools.search()
 
-    def execute(actual: run_host.Run, text: str, stack: ExitStack) -> int:
+    def execute(
+        actual: run_host.Run,
+        text: str,
+        stack: ExitStack,
+        push_token: str | None = None,
+        *,
+        preflight_only: bool = False,
+    ) -> int:
+        assert push_token is None
+        assert preflight_only is False
         assert actual is run
         assert text == "task"
         assert isinstance(stack, ExitStack)
@@ -2209,7 +2401,7 @@ def test_linux_denies_resolve_links_drop_missing_and_deduplicate(
 
 
 @pytest.mark.parametrize("request_file", [False, True])
-@pytest.mark.parametrize("marker", ["rc", "pgid"])
+@pytest.mark.parametrize("marker", ["rc", "pgid", "owner"])
 def test_refused_rerun_preserves_every_file(
     config_file: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2410,20 +2602,226 @@ def test_resolved_denies_preserve_macos_aliases_and_empty_linux_data(
     )
 
 
+def with_sandbox(run: run_host.Run, sandbox: Sandbox) -> run_host.Run:
+    """Return the run with its sandbox settings replaced."""
+    settings = dataclasses.replace(run.settings, sandbox=sandbox)
+    return dataclasses.replace(run, settings=settings)
+
+
+def replace_roots(run: run_host.Run, root: str) -> Sandbox:
+    """Return the run's sandbox with one configured write root."""
+    return dataclasses.replace(run.settings.sandbox, write_roots=(root,))
+
+
+def keep_home_denies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep system socket paths, which a host may lack, out of the denies."""
+    real = policy.denied_paths
+
+    def under_home(
+        settings: Settings, host: Host, home: str, uid: int
+    ) -> tuple[str, ...]:
+        return tuple(p for p in real(settings, host, home, uid) if p.startswith(home))
+
+    monkeypatch.setattr(policy, "denied_paths", under_home)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_resolved_denies_drop_nested_signing_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reverse: bool
+) -> None:
+    keep_home_denies(monkeypatch)
+    run = make_run(tmp_path)
+    directory = run.home / ".config" / "tool-config"
+    directory.mkdir(parents=True)
+    key = directory / "agent-signing-key"
+    key.touch()
+    denied = (str(key), str(directory)) if reverse else (str(directory), str(key))
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(run.settings.sandbox, denied_home_paths=denied),
+        ),
+    )
+    paths = preparation(run).paths
+    assert run_host.resolved_denies(run, paths) == (str(directory),)
+    value, _executable = run_host.checked_policy(run, paths)
+    assert value.deny == (str(directory),)
+    assert isinstance(value.detail, CodexPolicy)
+    assert value.detail.deny == value.deny
+
+
+@pytest.fixture
+def denied_signing_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[run_host.Run, Path]:
+    keep_home_denies(monkeypatch)
+    run = make_run(tmp_path)
+    directory = run.home / ".config" / "tool-config"
+    directory.mkdir(parents=True)
+    key = directory / "agent-signing-key"
+    key.touch()
+    run = with_sandbox(
+        run,
+        dataclasses.replace(
+            run.settings.sandbox, denied_home_paths=(".config/tool-config",)
+        ),
+    )
+    signed = tuple(
+        dataclasses.replace(credential, signing=str(key))
+        for credential in run.settings.credentials
+    )
+    settings = dataclasses.replace(run.settings, credentials=signed)
+    return dataclasses.replace(run, settings=settings), directory
+
+
+def test_resolved_denies_signing_credential_inside_denied_config(
+    denied_signing_directory: tuple[run_host.Run, Path],
+) -> None:
+    run, directory = denied_signing_directory
+    paths = preparation(run).paths
+    assert str(directory / "agent-signing-key") in run_host.full_denies(run, paths)
+    assert run_host.resolved_denies(run, paths) == (str(directory),)
+
+
+def test_final_policy_denies_signing_key_parent(
+    denied_signing_directory: tuple[run_host.Run, Path],
+) -> None:
+    run, directory = denied_signing_directory
+    value, _executable = run_host.checked_policy(run, preparation(run).paths)
+    assert str(directory) in value.deny
+    assert isinstance(value.detail, CodexPolicy)
+    assert value.detail.deny == value.deny
+
+
+@pytest.mark.parametrize("grant_below_middle", [False, True])
+def test_resolved_denies_check_every_ancestor_and_resolve_grants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, grant_below_middle: bool
+) -> None:
+    run = make_run(tmp_path)
+    outer = tmp_path / "outer"
+    middle = outer / "middle"
+    inner = middle / "inner"
+    inner.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(middle if grant_below_middle else outer, target_is_directory=True)
+    grant = alias / "inner" if grant_below_middle else alias / "middle"
+    denied = (str(inner), str(middle), str(outer))
+    monkeypatch.setattr(run_host, "full_denies", constant(denied))
+    assert run_host.resolved_denies(run, preparation(run).paths, (str(grant),)) == (
+        (str(inner), str(outer)) if grant_below_middle else (str(middle), str(outer))
+    )
+
+
+def test_root_read_marker_does_not_reopen_a_nested_deny(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    outer = str(tmp_path)
+    inner = str(tmp_path / ":root" / "hidden")
+    assert run_host.without_nested_denies(
+        (outer, inner), (run_host.policy.READ_ROOT,)
+    ) == (outer,)
+
+
+@pytest.mark.parametrize("os_name", Os)
+def test_resolved_denies_resolve_nested_aliases_only_on_linux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, os_name: Os
+) -> None:
+    run = make_run(tmp_path)
+    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=os_name))
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    inner = outer / "inner"
+    inner.touch()
+    alias = tmp_path / "alias"
+    alias.symlink_to(outer, target_is_directory=True)
+    denied = (str(alias / "inner"), str(outer))
+    monkeypatch.setattr(run_host, "full_denies", constant(denied))
+    assert run_host.resolved_denies(run, preparation(run).paths) == (
+        (str(outer),) if os_name is Os.LINUX else denied
+    )
+
+
+def test_resolved_denies_keep_component_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    paths = tuple(tmp_path / name for name in ("ab", "a"))
+    for path in paths:
+        path.mkdir()
+    denied = tuple(str(path) for path in paths)
+    monkeypatch.setattr(run_host, "full_denies", constant(denied))
+    assert run_host.resolved_denies(run, preparation(run).paths) == denied
+
+
+@pytest.mark.parametrize("access", ["read", "write"])
+@pytest.mark.parametrize(
+    "grant_location", ["between", "inner", "outer", "outside", "child", "sibling"]
+)
+def test_resolved_denies_keep_only_grants_between_denies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    access: str,
+    grant_location: str,
+) -> None:
+    run = make_run(tmp_path)
+    outer = tmp_path / "outer"
+    between = outer / "granted"
+    inner = between / "hidden"
+    inner.mkdir(parents=True)
+    grant = {
+        "between": between,
+        "inner": inner,
+        "outer": outer,
+        "outside": tmp_path,
+        "child": inner / "child",
+        "sibling": outer / "grant",
+    }[grant_location]
+    denied = (str(outer), str(inner))
+    monkeypatch.setattr(run_host, "full_denies", constant(denied))
+    paths = preparation(run).paths
+    expected = denied if grant_location in ("between", "inner") else (str(outer),)
+    assert run_host.resolved_denies(run, paths, (str(grant),)) == expected
+    original_build = run_host.policy.build
+
+    def build(*args: object, **kwargs: object) -> Policy:
+        del args
+        assert kwargs["denied"] == denied
+        value = original_build(
+            run.settings,
+            run.host,
+            account=run.request.account,
+            harness=run.request.harness,
+            profile=run.request.profile,
+            unsandboxed=False,
+            paths=paths,
+            denied=denied,
+        )
+        assert isinstance(value.detail, CodexPolicy)
+        detail = dataclasses.replace(
+            value.detail,
+            read_roots=(str(grant),) if access == "read" else value.detail.read_roots,
+            write_roots=(str(grant),)
+            if access == "write"
+            else value.detail.write_roots,
+        )
+        return dataclasses.replace(value, detail=detail)
+
+    monkeypatch.setattr(run_host.policy, "build", build)
+    value, _executable = run_host.checked_policy(run, paths)
+    assert value.deny == expected
+    assert isinstance(value.detail, CodexPolicy)
+    assert value.detail.deny == expected
+    assert str(grant) in getattr(value.detail, f"{access}_roots")
+
+
 def test_startup_symlink_target_is_protected(tmp_path: Path) -> None:
     run = make_run(tmp_path)
     target = tmp_path / "trusted-startup"
     target.touch()
     (run.home / ".zshrc").symlink_to(target)
-    run = dataclasses.replace(
-        run,
-        settings=dataclasses.replace(
-            run.settings,
-            sandbox=dataclasses.replace(
-                run.settings.sandbox, write_roots=(str(target),)
-            ),
-        ),
-    )
+    run = with_sandbox(run, replace_roots(run, str(target)))
     with pytest.raises(Invalid, match="protected host path"):
         run_host.checked_policy(run, preparation(run).paths)
 
@@ -2438,27 +2836,30 @@ def test_protected_home_lists_startup_files_and_socket_ancestors(
             run.settings, sockets_dir=".control/sockets/private"
         ),
     )
-    expected = (
-        ".zshenv",
-        ".zshrc",
-        ".zprofile",
-        ".zlogin",
-        ".bashrc",
-        ".bash_profile",
-        ".profile",
-        ".tmux.conf",
-        ".config/tmux",
-        ".gitconfig",
-        ".config/git",
-        ".config/mise",
-        ".ssh",
-        ".claude",
-        ".claude.json",
-        ".codex",
-        ".codex-recovery",
-        ".control/sockets",
-        ".control",
-    )
+    expected = [
+        f".{name}"
+        for name in (
+            "zshenv",
+            "zshrc",
+            "zprofile",
+            "zlogin",
+            "bashrc",
+            "bash_profile",
+            "profile",
+            "tmux.conf",
+            "config/tmux",
+            "gitconfig",
+            "config/git",
+            "config/mise",
+            "ssh",
+            "claude",
+            "claude.json",
+            "codex",
+            "codex-recovery",
+            "control/sockets",
+            "control",
+        )
+    ]
     clone = Path(run_host.repo.clone_path(run.home, run.request.repo))
     mirror = run_host.worktree.mirror_path(run.home, run.request.repo)
     assert run_host.protected_home(run) == (
@@ -2680,7 +3081,15 @@ def test_late_temporary_cleanup_keeps_finished_records(
             yield value
         raise OSError
 
-    def execute(_run: run_host.Run, _text: str) -> int:
+    def execute(
+        _run: run_host.Run,
+        _text: str,
+        push_token: str | None = None,
+        *,
+        preflight_only: bool = False,
+    ) -> int:
+        assert preflight_only is False
+        assert push_token is None
         run.files.write("log", "harness log\n")
         run.files.write("phase", "ended")
         run.files.write("rc", "7\n")
@@ -2802,15 +3211,8 @@ def test_mirror_protection_uses_the_run_home_without_xdg_state(
 ) -> None:
     run = make_run(tmp_path)
     monkeypatch.delenv("XDG_STATE_HOME")
-    mirror = (
-        run.home
-        / ".local"
-        / "state"
-        / "tbhbdev"
-        / "agent-mirrors"
-        / "github.com"
-        / "example-org"
-        / "example-repo.git"
+    mirror = run.home.joinpath(
+        ".local/state/tbhbdev/agent-mirrors/github.com/example-org/example-repo.git"
     )
     assert str(mirror) in run_host.protected_home(run)
     assert str(mirror) in run_host.full_denies(run, preparation(run).paths)
@@ -3187,15 +3589,7 @@ def test_codex_home_is_outside_all_write_roots(tmp_path: Path, profile: str) -> 
 def test_codex_home_refuses_configured_write_root(tmp_path: Path) -> None:
     run = make_run(tmp_path)
     control = run.home / "control"
-    run = dataclasses.replace(
-        run,
-        settings=dataclasses.replace(
-            run.settings,
-            sandbox=dataclasses.replace(
-                run.settings.sandbox, write_roots=(str(control),)
-            ),
-        ),
-    )
+    run = with_sandbox(run, replace_roots(run, str(control)))
     paths = dataclasses.replace(run_host.planned_paths(run), codex_home=str(control))
     with pytest.raises(Invalid) as caught:
         run_host.checked_policy(run, paths)
@@ -3514,15 +3908,7 @@ def test_codex_copy_refuses_overlapping_write_root(
     monkeypatch.setattr(host_tools, "resolve", resolve)
     copy = run.home / ".local/share/tbhbdev/codex" / source.name
     write = {"parent": copy.parent, "self": copy, "child": copy / "cache"}[root]
-    run = dataclasses.replace(
-        run,
-        settings=dataclasses.replace(
-            run.settings,
-            sandbox=dataclasses.replace(
-                run.settings.sandbox, write_roots=(str(write),)
-            ),
-        ),
-    )
+    run = with_sandbox(run, replace_roots(run, str(write)))
     with pytest.raises(Invalid, match=r"protected host path.*example-version"):
         run_host.checked_policy(run, run_host.planned_paths(run))
 
@@ -3799,3 +4185,1116 @@ def test_checked_policy_checks_effective_hooks_before_launch(
     monkeypatch.setattr(subprocess, "check_output", output)
     with pytest.raises(Invalid, match="under write root"):
         run_host.checked_policy(run, paths)
+
+
+def test_main_passes_in_memory_push_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    synthetic = "synthetic-push-value"
+    monkeypatch.setattr(run_host, "_load", constant((run, "task")))
+
+    def execute(
+        actual: run_host.Run,
+        text: str,
+        push_token: str | None = None,
+        *,
+        preflight_only: bool = False,
+    ) -> int:
+        assert preflight_only is False
+        assert actual is run
+        assert text == "task"
+        assert push_token == synthetic
+        return 4
+
+    monkeypatch.setattr(run_host, "execute", execute)
+    assert run_host.main(["example"], "run-host", push_token=synthetic) == 4
+
+
+def test_push_failure_reaches_durable_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
+    runtime = HostRuntime(run, prepared, None)
+    runtime.patch(monkeypatch)
+    synthetic = "synthetic-push-value"
+
+    def publish(
+        actual: run_host.Run,
+        ready: run_host.Prepared,
+        stack: ExitStack,
+        harness: object,
+        token: str | None,
+    ) -> int:
+        assert actual is run
+        assert ready == prepared
+        assert isinstance(stack, ExitStack)
+        assert harness == run_host.run_harness
+        assert token == synthetic
+        return 4
+
+    monkeypatch.setattr(run_host.push, "run", publish)
+    assert run_host.execute(run, "example", synthetic) == 4
+    assert run.files.path("rc").read_text() == "4\n"
+    assert run.files.path("phase").read_text() == "ended"
+    assert runfiles.latest(run.files.root)["example"]["rc"] == 4
+
+
+@pytest.mark.parametrize("claimed", [False, True])
+def test_main_claims_owner_before_loading(
+    monkeypatch: pytest.MonkeyPatch,
+    claimed: bool,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+
+    if claimed:
+        files.write("owner", "host\n")
+    calls: list[bool] = []
+
+    def load(_args: object, _temporary: Path) -> tuple[run_host.Run, str]:
+        assert files.path("owner").read_text() == "host\n"
+        assert files.path("owner").stat().st_mode & 0o777 == 0o600
+        calls.append(True)
+        message = "test refusal"
+        raise Invalid(message)
+
+    monkeypatch.setattr(run_host, "_load", load)
+    assert run_host.main(["example"], "run-host", claimed=claimed) == 1
+    assert calls == [True]
+
+
+def test_preflight_flag_reaches_execute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = runfiles.RunFiles(tmp_path / "runs", "example")
+    monkeypatch.setattr(run_host, "_files", constant(files))
+
+    def load(
+        args: argparse.Namespace, tmpdir: Path, value: runfiles.RunFiles, loader: object
+    ) -> int:
+        assert value is files
+        assert tmpdir.is_absolute()
+        assert callable(loader)
+        assert args.preflight is True
+        return 0
+
+    monkeypatch.setattr(preflight_report, "load", load)
+    assert run_host.main(["example", "--preflight"], "run-host") == 0
+
+
+@pytest.mark.parametrize("kind", RunKind)
+def test_codex_preflight_without_github_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: RunKind
+) -> None:
+    run = make_run(tmp_path, kind=kind.value)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            credentials=tuple(
+                dataclasses.replace(c, gh=None) for c in run.settings.credentials
+            ),
+        ),
+    )
+    prepared = preparation(run)
+    original_command = run_host.harness_command
+    commands: list[tuple[str, ...]] = []
+
+    def command(
+        value: run_host.Run, ready: run_host.Prepared, policy: Policy, executable: str
+    ) -> tuple[str, ...]:
+        result = original_command(value, ready, policy, executable)
+        overrides = "\n".join(
+            value for index, value in enumerate(result) if result[index - 1] == "-c"
+        )
+        env = tomllib.loads(overrides)["shell_environment_policy"]["set"]
+        assert env["GH_CONFIG_DIR"] == str(run.tmpdir / "gh")
+        assert env["GH_CONFIG_DIR"] == f"{env['TMPDIR']}/gh"
+        commands.append(result)
+        return result
+
+    monkeypatch.setattr(
+        preflight_report, "create_workspace", constant(Path(prepared.paths.worktree))
+    )
+    monkeypatch.setattr(preflight_report, "version", constant("0.164.0"))
+    monkeypatch.setattr(credentials, "deliver", constant(prepared.delivery))
+    monkeypatch.setattr(process_group, "prepare", inline_preparation)
+    monkeypatch.setattr(run_host, "check_sandbox", constant(None))
+    monkeypatch.setattr(run_host, "harness_command", command)
+    assert run_host.execute(run, "example", preflight_only=True) == 0
+    assert len(commands) == 1
+    assert "preflight: harness command: ok\n" in run.files.path("log").read_text()
+    assert run.files.path("rc").read_text() == "0\n"
+    assert not run.files.path("launched").exists()
+
+
+@pytest.mark.parametrize("error", [KeyError, TypeError])
+@pytest.mark.parametrize("preflight_only", [False, True])
+def test_harness_command_failure_names_only_its_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: type[Exception],
+    preflight_only: bool,
+) -> None:
+    run = make_run(tmp_path)
+    monkeypatch.setattr(process_group, "prepare", constant(preparation(run)))
+    monkeypatch.setattr(
+        preflight_report, "create_workspace", constant(run.home / "workspace")
+    )
+    monkeypatch.setattr(preflight_report, "version", constant("version unknown"))
+    if preflight_only:
+        monkeypatch.setattr(process_group, "prepare", inline_preparation)
+    monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
+    monkeypatch.setattr(
+        run_host, "harness_command", partial(preparation_failure, error)
+    )
+    assert run_host.execute(run, "example", preflight_only=preflight_only) == 1
+    log = run.files.path("log").read_text()
+    if preflight_only:
+        assert (
+            "preflight: harness command: failed: "
+            "run preparation failed at harness command\n" in log
+        )
+        assert "preflight: sandbox: skipped: needs harness command\n" in log
+        assert log.endswith("preflight: 16 checks, 1 failed, 1 skipped\n")
+    else:
+        assert log == "run failed while building the harness command\n"
+    assert run.files.path("rc").read_text() == "1\n"
+    assert run.files.path("phase").read_text() == "ended"
+    assert not run.files.path("launched").exists()
+
+
+@pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize(
+    "result",
+    [
+        (0, "ignored\n", "preflight: sandbox: ok\n"),
+        (
+            1,
+            "bwrap: " + "x" * 350 + "\nnever logged",
+            ("preflight: sandbox: failed: " + "bwrap: " + "x" * 350)[:299] + "\n",
+        ),
+        (2, "", "preflight: sandbox: failed: \n"),
+        (
+            -9,
+            "bwrap: denied\nnever logged\nanother hidden line",
+            "preflight: sandbox: failed: bwrap: denied\n",
+        ),
+    ],
+)
+def test_preflight_runs_real_sandbox_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: RunKind,
+    result: tuple[int, str, str],
+) -> None:
+    run = make_run(tmp_path, kind=kind.value)
+    prepared = dataclasses.replace(
+        preparation(run),
+        delivery=credentials.Delivery(
+            {"EXAMPLE_DELIVERY": "example"},
+            None,
+            gh_fallback=False,
+            claude_profile=None,
+        ),
+    )
+    noop = run.home / ".local" / "bin" / "true"
+    noop.parent.mkdir(parents=True)
+    noop.write_bytes(b"binary")
+    noop.chmod(0o755)
+    prepared = dataclasses.replace(
+        prepared,
+        paths=dataclasses.replace(
+            run_host.planned_paths(run), worktree=prepared.paths.worktree
+        ),
+    )
+    run.files.write("prompt", "brief")
+    value, executable = run_host.checked_policy(run, prepared.paths)
+    command = run_host.checked_harness_command(run, prepared, value, executable)
+    calls: list[tuple[str, ...]] = []
+
+    def execute(
+        command: tuple[str, ...], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        assert kwargs == {
+            "env": value.env | prepared.delivery.env,
+            "cwd": prepared.paths.worktree,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "check": False,
+        }
+        return subprocess.CompletedProcess(command, result[0], stderr=result[1])
+
+    def prepare(
+        operation: Callable[[], object],
+        files: runfiles.RunFiles,
+        deadline: float,
+        grace: float,
+    ) -> object:
+        assert files is run.files
+        assert deadline == run.deadline
+        assert grace == run.settings.kill_grace_seconds
+        return operation()
+
+    monkeypatch.setattr(subprocess, "run", execute)
+    monkeypatch.setattr(process_group, "prepare", prepare)
+    monkeypatch.setattr(preflight_report, "version", constant("0.164.0"))
+    monkeypatch.setattr(
+        preflight_report, "create_workspace", constant(Path(prepared.paths.worktree))
+    )
+    monkeypatch.setattr(credentials, "deliver", constant(prepared.delivery))
+    assert run_host.execute(run, "brief", preflight_only=True) == bool(result[0])
+    log = run.files.path("log").read_text()
+    assert log.startswith("preflight: codex 0.164.0\n")
+    assert result[2] in log
+    assert log.endswith(
+        f"preflight: 16 checks, {int(bool(result[0]))} failed, 0 skipped\n"
+    )
+    assert run.files.path("rc").read_text() == f"{int(bool(result[0]))}\n"
+    assert not run.files.path("launched").exists()
+    assert calls == [run_host.argv.sandbox(command, str(noop.resolve()))]
+
+
+def test_preflight_without_sandbox_entry_point(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = make_run(
+        tmp_path, harness="claude", claude_profile="primary", reason="example"
+    )
+    prepared = preparation(run)
+    run.files.write("prompt", "brief")
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("unsupported harness must not start a sandbox")
+
+    monkeypatch.setattr(process_group, "prepare", unexpected)
+    value, executable = run_host.checked_policy(run, prepared.paths)
+    command = run_host.checked_harness_command(run, prepared, value, executable)
+    run_host.check_sandbox(run, prepared, value, command)
+    assert (
+        "preflight: sandbox check not available for claude\n"
+        in run.files.path("log").read_text()
+    )
+
+
+def test_ordinary_run_never_starts_a_sandbox_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected(*_args: object) -> None:
+        pytest.fail("ordinary runs must not check the sandbox")
+
+    monkeypatch.setattr(run_host, "check_sandbox", unexpected)
+    test_launch_uses_the_policy_and_marks_only_after_spawn(
+        tmp_path, monkeypatch, Harness.CODEX, RunKind.EXEC
+    )
+
+
+def aggregate_fakes(run: run_host.Run, monkeypatch: pytest.MonkeyPatch) -> None:
+    ready = preparation(run)
+    monkeypatch.setattr(
+        preflight_report, "create_workspace", constant(Path(ready.paths.worktree))
+    )
+    monkeypatch.setattr(credentials, "deliver", constant(ready.delivery))
+    monkeypatch.setattr(preflight_report, "version", constant("0.164.0"))
+    monkeypatch.setattr(process_group, "prepare", inline_preparation)
+    monkeypatch.setattr(run_host, "check_sandbox", constant(None))
+
+
+@pytest.mark.parametrize("failing", [True, False])
+def test_aggregate_independent_failures_and_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: bool
+) -> None:
+    run = make_run(tmp_path)
+    aggregate_fakes(run, monkeypatch)
+    if failing:
+        monkeypatch.setattr(
+            preflight_report, "create_workspace", partial(preparation_failure, OSError)
+        )
+        monkeypatch.setattr(
+            credentials, "deliver", partial(preparation_failure, Invalid)
+        )
+    assert run_host.execute(run, "example", preflight_only=True) == int(failing)
+    lines = run.files.path("log").read_text().splitlines()
+    assert lines[0] == "preflight: codex 0.164.0"
+    assert len(lines) == 18
+    if failing:
+        assert lines[3] == (
+            "preflight: mirror and clone: failed: "
+            "run preparation failed at mirror and clone"
+        )
+        assert lines[4] == "preflight: workspace: skipped: needs mirror and clone"
+        assert lines[11] == (
+            "preflight: credential delivery: failed: "
+            "run preparation failed at credential delivery"
+        )
+        assert lines[-1] == "preflight: 16 checks, 2 failed, 4 skipped"
+    else:
+        assert lines[-1] == "preflight: 16 checks, 0 failed, 0 skipped"
+    assert all(len(line) < 300 for line in lines)
+    assert "sensitive" not in "\n".join(lines)
+
+
+def test_aggregate_ordinary_run_stops_at_first_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    seen: list[str] = []
+
+    def fail(_run: run_host.Run) -> None:
+        seen.append("host")
+        message = "host precondition failed"
+        raise Invalid(message)
+
+    def later(*_args: object) -> None:
+        pytest.fail("ordinary runs stop before workspace preparation")
+
+    monkeypatch.setattr(run_host, "check_host", fail)
+    monkeypatch.setattr(run_host, "prepare_workspace", later)
+    assert run_host.execute(run, "example") == 1
+    assert seen == ["host"]
+    assert run.files.path("log").read_text() == "host precondition failed\n"
+
+
+@pytest.mark.parametrize(
+    "output", ["codex-cli 0.164.0\n", "codex-cli 123.456.789", "unreadable", ""]
+)
+def test_aggregate_version_is_numeric_or_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: str
+) -> None:
+    run = make_run(tmp_path)
+    seen: list[str] = []
+
+    def read(command: list[str], **kwargs: object) -> str:
+        seen.extend(command)
+        assert kwargs == {
+            "env": {
+                "HOME": str(run.tmpdir),
+                "CODEX_HOME": str(run.tmpdir),
+                "PATH": host_tools.search(),
+            },
+            "cwd": run.tmpdir,
+            "text": True,
+            "stderr": subprocess.DEVNULL,
+            "timeout": 10,
+        }
+        return output
+
+    monkeypatch.setattr(subprocess, "check_output", read)
+    expected = (
+        output.removeprefix("codex-cli ").strip()
+        if output.startswith("codex-cli ")
+        else "version unknown"
+    )
+    assert preflight_report.version("/example/codex", run) == expected
+    assert seen == ["/example/codex", "--version"]
+
+
+@pytest.mark.parametrize(
+    "error", [OSError("hidden"), subprocess.TimeoutExpired("hidden", 10)]
+)
+def test_aggregate_version_error_is_not_a_failed_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    run = make_run(tmp_path)
+    original = preflight_report.version
+    aggregate_fakes(run, monkeypatch)
+    monkeypatch.setattr(preflight_report, "version", original)
+
+    def fail(*_args: object, **_kwargs: object) -> str:
+        raise error
+
+    monkeypatch.setattr(subprocess, "check_output", fail)
+    assert run_host.execute(run, "example", preflight_only=True) == 0
+    log = run.files.path("log").read_text()
+    assert log.startswith("preflight: codex version unknown\n")
+    assert log.endswith("preflight: 16 checks, 0 failed, 0 skipped\n")
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_aggregate_sandbox_diagnostic_survives_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty: bool
+) -> None:
+    run = make_run(tmp_path)
+    original = run_host.check_sandbox
+    worker = process_group.prepare
+    aggregate_fakes(run, monkeypatch)
+    monkeypatch.setattr(run_host, "check_sandbox", original)
+    monkeypatch.setattr(process_group, "prepare", worker)
+    monkeypatch.setattr(process_group, "boot_id", constant("example-boot"))
+    error = "" if empty else "error: unexpected argument '--x' found"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        constant(subprocess.CompletedProcess((), 2, stderr=error + "\nrequest hidden")),
+    )
+    assert run_host.execute(run, "example", preflight_only=True) == 1
+    log = run.files.path("log").read_text()
+    assert f"preflight: sandbox: failed: {error}\n" in log
+    assert log.endswith("preflight: 16 checks, 1 failed, 0 skipped\n")
+    assert "request hidden" not in log
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError,
+        ValueError,
+        Invalid,
+        userconfig.ConfigError,
+        subprocess.CalledProcessError,
+    ],
+)
+def test_aggregate_errors_never_include_request_data(
+    tmp_path: Path, error: type[Exception]
+) -> None:
+    checks = preflight_report.Checks(runfiles.RunFiles(tmp_path / "runs", "example"))
+    failed = checks.check("config load", partial(preparation_failure, error))
+    assert failed.values == ()
+    assert checks.results == {
+        "config load": "failed: run preparation failed at config load"
+    }
+    called: list[str] = []
+
+    def dependent() -> None:
+        failed.get()
+        called.append("host")
+
+    assert checks.check("host and account", dependent).values == ()
+    assert called == []
+    assert checks.results["host and account"] == "skipped: needs config load"
+
+
+def test_aggregate_requires_real_input_and_preserves_ordinary_errors() -> None:
+    result = preflight_report.Outcome("config load", (None,))
+    assert result.name == "config load"
+    assert result.get() is None
+    with pytest.raises(preflight_report.NeedsError, match=r"^config load$"):
+        preflight_report.Outcome("config load").get()
+    checks = preflight_report.Checks()
+    checks.require("missing")
+    result = checks.check("example", constant("result"))
+    assert result.get() == "result"
+    assert result.name == "example"
+    with pytest.raises(OSError, match="sensitive-exception"):
+        checks.check("example", partial(preparation_failure, OSError))
+    with pytest.raises(preflight_report.NeedsError, match=r"^report$"):
+        checks.write()
+    assert checks.results == {}
+
+
+@pytest.mark.parametrize("stage", ["config load", "host and account", "ok"])
+def test_aggregate_load_reports_or_dispatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    run = make_run(tmp_path)
+    args = argparse.Namespace(preflight=True)
+    seen: list[str] = []
+
+    def loader(
+        arguments: argparse.Namespace, directory: Path, loaded: Settings | None
+    ) -> tuple[run_host.Run, str]:
+        assert arguments is args
+        assert directory == run.tmpdir
+        assert loaded is run.settings
+        seen.append("load")
+        if stage == "host and account":
+            preparation_failure(Invalid)
+        return run, "brief"
+
+    def execute(
+        value: run_host.Run,
+        text: str,
+        stack: ExitStack,
+    ) -> int:
+        assert value is run
+        assert text == "brief"
+        assert isinstance(stack, ExitStack)
+        seen.append("execute")
+        return 42
+
+    @contextmanager
+    def configured(settings: Settings, operating_system: Os) -> Generator[None]:
+        assert settings is run.settings
+        assert operating_system is run.host.os
+        seen.append("configured")
+        yield
+        seen.append("restored")
+
+    monkeypatch.setattr(host_tools, "configured", configured)
+    monkeypatch.setattr(preflight_report.settings, "load", constant(run.settings))
+    monkeypatch.setattr(preflight_report, "execute", execute)
+    if stage == "config load":
+        monkeypatch.setattr(
+            preflight_report.settings,
+            "load",
+            partial(preparation_failure, userconfig.ConfigError),
+        )
+    result = preflight_report.load(args, run.tmpdir, run.files, loader)
+    if stage == "ok":
+        assert result == 42
+        assert seen == ["load", "configured", "execute", "restored"]
+    else:
+        assert result == 1
+        assert seen == ([] if stage == "config load" else ["load"])
+        lines = run.files.path("log").read_text().splitlines()
+        assert lines[0].startswith("preflight: config load:")
+        assert lines[2:-1] == [
+            f"preflight: {name}: skipped: needs host and account"
+            for name in preflight_report.ORDER[2:]
+        ]
+        skipped = 15 if stage == "config load" else 14
+        assert lines[-1] == f"preflight: 16 checks, 1 failed, {skipped} skipped"
+        assert run.files.path("rc").read_text() == "1\n"
+        assert "sensitive" not in "\n".join(lines)
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_aggregate_workspace_uses_the_worker_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, valid: bool
+) -> None:
+    run = make_run(tmp_path)
+    expected = run.home / "workspace"
+
+    def prepare(operation: Callable[[], object], *args: object) -> object:
+        assert args == (run.files, run.deadline, run.settings.kill_grace_seconds)
+        return operation() if valid else None
+
+    def create(*args: object) -> Path:
+        assert args == (
+            Path(run_host.repo.clone_path(run.home, run.request.repo)),
+            run.files.name,
+            run.request,
+            run.settings.public_repos,
+        )
+        return expected
+
+    monkeypatch.setattr(process_group, "prepare", prepare)
+    monkeypatch.setattr(run_host.worktree, "create", create)
+    if valid:
+        assert preflight_report.create_workspace(run) == expected
+    else:
+        with pytest.raises(Invalid) as caught:
+            preflight_report.create_workspace(run)
+        assert str(caught.value) == "run preparation returned no workspace"
+
+
+@pytest.mark.parametrize(
+    "protection",
+    [
+        "host protection",
+        "clone protection",
+        "codex protection",
+        "executable protection",
+    ],
+)
+def test_aggregate_protection_failure_skips_consumers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, protection: str
+) -> None:
+    run = make_run(tmp_path)
+    aggregate_fakes(run, monkeypatch)
+    host_check = run_host.policy.protect_host
+    calls = 0
+
+    def protect(
+        settings: Settings, paths: RunPaths, protected: tuple[str, ...]
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        index = {
+            "host protection": 1,
+            "codex protection": 2,
+            "executable protection": 4,
+        }
+        if index.get(protection) == calls:
+            preparation_failure(Invalid)
+        host_check(settings, paths, protected)
+
+    monkeypatch.setattr(run_host.policy, "protect_host", protect)
+    if protection == "clone protection":
+        monkeypatch.setattr(
+            run_host.worktree, "validate_writes", partial(preparation_failure, Invalid)
+        )
+    assert run_host.execute(run, "example", preflight_only=True) == 1
+    log = run.files.path("log").read_text()
+    assert (
+        f"preflight: {protection}: failed: run preparation failed at {protection}\n"
+        in log
+    )
+    assert f"preflight: policy: skipped: needs {protection}\n" in log
+    assert "preflight: mirror and clone: skipped: needs policy\n" in log
+    assert "sensitive" not in log
+
+
+def inline_preparation(operation: Callable[[], object], *_args: object) -> object:
+    return operation()
+
+
+@pytest.mark.parametrize("stage", ["audit directory", "codex auth copy"])
+def test_aggregate_late_failure_keeps_independent_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    run = make_run(tmp_path)
+    aggregate_fakes(run, monkeypatch)
+    operation = "audit_directory" if stage == "audit directory" else "copy_auth"
+    monkeypatch.setattr(
+        preflight_report, operation, partial(preparation_failure, OSError)
+    )
+    assert run_host.execute(run, "example", preflight_only=True) == 1
+    log = run.files.path("log").read_text()
+    assert f"preflight: {stage}: failed: run preparation failed at {stage}\n" in log
+    assert f"preflight: harness command: skipped: needs {stage}\n" in log
+    assert log.endswith("preflight: 16 checks, 1 failed, 2 skipped\n")
+    assert "preflight: .bazel_env missing;" in log
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_aggregate_delivery_worker_checks_returned_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, valid: bool
+) -> None:
+    run = make_run(tmp_path)
+    ready = preparation(run)
+
+    def deliver(*args: object) -> credentials.Delivery:
+        assert args == (run.request, run.settings, run.tmpdir)
+        return ready.delivery
+
+    def worker(operation: Callable[[], object], *args: object) -> object:
+        assert args == (run.files, run.deadline, run.settings.kill_grace_seconds)
+        return operation() if valid else None
+
+    monkeypatch.setattr(credentials, "deliver", deliver)
+    monkeypatch.setattr(process_group, "prepare", worker)
+    if valid:
+        assert preflight_report.deliver(run) is ready.delivery
+    else:
+        with pytest.raises(Invalid) as caught:
+            preflight_report.deliver(run)
+        assert str(caught.value) == "run preparation failed at credential delivery"
+
+
+@pytest.mark.parametrize("result", [None, "before", 1])
+def test_aggregate_auth_copy_worker_checks_returned_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result: str | int | None
+) -> None:
+    run = make_run(tmp_path)
+    destination = run.tmpdir / "codex"
+    seen: list[tuple[Path, Path]] = []
+
+    def copy(source: Path, target: Path) -> str | int | None:
+        seen.append((source, target))
+        assert source.parent.is_dir()
+        assert destination.is_dir()
+        return result
+
+    monkeypatch.setattr(process_group, "prepare", inline_preparation)
+    monkeypatch.setattr(credentials, "auth_copy", copy)
+    if isinstance(result, int):
+        with pytest.raises(Invalid) as caught:
+            preflight_report.copy_auth(run, destination)
+        assert str(caught.value) == "run preparation failed at codex auth copy"
+    else:
+        assert preflight_report.copy_auth(run, destination) == result
+    assert seen == [(run.home / ".codex" / "auth.json", destination / "auth.json")]
+
+
+def test_aggregate_audit_worker_checks_the_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    paths = run_host.planned_paths(run)
+
+    def worker(operation: Callable[[], object], *args: object) -> object:
+        assert args == (run.files, run.deadline, run.settings.kill_grace_seconds)
+        return operation()
+
+    monkeypatch.setattr(process_group, "prepare", worker)
+    preflight_report.audit_directory(run, paths)
+    assert Path(paths.audit_dir).is_dir()
+    assert Path(paths.audit_dir).stat().st_mode & 0o777 == 0o700
+
+
+def test_aggregate_other_harness_has_no_codex_version_or_auth_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path, harness="agy", timeout=900)
+    aggregate_fakes(run, monkeypatch)
+    assert preflight_report.copy_auth(run, run.tmpdir / "codex") is None
+    assert run_host.execute(run, "example", preflight_only=True) == 1
+    log = run.files.path("log").read_text()
+    assert log.startswith("preflight: config load: ok\n")
+    assert len(log.splitlines()) == 17
+    assert "preflight: codex protection: ok\n" in log
+
+
+def test_aggregate_load_uses_the_loaded_config_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    aggregate_fakes(run, monkeypatch)
+    run.files.receive(run.request)
+    run.files.write("prompt", "example")
+    monkeypatch.setattr(run_host, "_files", constant(run.files))
+    reads: list[str] = []
+
+    def load() -> Settings:
+        reads.append("config")
+        return run.settings
+
+    monkeypatch.setattr(run_host.settings, "load", load)
+    args = argparse.Namespace(
+        name="example", request=None, prompt=None, host=run.host.name, preflight=True
+    )
+    assert run_host.load_and_execute(args, run.tmpdir, run.files, None) == 0
+    assert reads == ["config"]
+    assert (
+        run.files.path("log")
+        .read_text()
+        .endswith("preflight: 16 checks, 0 failed, 0 skipped\n")
+    )
+
+
+def test_aggregate_full_access_records_host_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path, unsandboxed=True, authorized_by="operator-chat-2026-11-09")
+    seen: list[run_host.Run] = []
+    aggregate_fakes(run, monkeypatch)
+    monkeypatch.setattr(run_host, "mark_host", seen.append)
+    run_host.execute(run, "example", preflight_only=True)
+    assert seen == [run]
+
+
+def test_ordinary_policy_failure_precedes_account_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path, profile="review", commit="0" * 40, tainted_host=True)
+    monkeypatch.setattr(
+        run_host, "checked_policy", partial(preparation_failure, Invalid)
+    )
+    assert run_host.execute(run, "example") == 1
+    assert run.files.path("log").read_text() == "sensitive-exception\n"
+
+
+def test_aggregate_sandbox_refuses_an_invalid_worker_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    ready = preparation(run)
+    value, executable = run_host.checked_policy(run, ready.paths)
+    monkeypatch.setattr(process_group, "prepare", constant(0))
+    with pytest.raises(Invalid) as caught:
+        run_host.check_sandbox(run, ready, value, (executable,))
+    assert str(caught.value) == "run preparation failed at sandbox"
+
+
+def test_aggregate_prepared_input_keeps_its_origin(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    ready = preparation(run)
+    result = preflight_report.assemble(
+        preflight_report.Outcome("workspace", (ready.paths,)),
+        preflight_report.Outcome("credential delivery", (ready.delivery,)),
+        preflight_report.Outcome("codex auth copy", (None,)),
+    )
+    assert result.name == "workspace"
+    assert result.get() == ready
+
+
+@pytest.mark.parametrize("signing", [False, True])
+def test_aggregate_credential_failure_retains_other_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, signing: bool
+) -> None:
+    run = make_run(tmp_path)
+    aggregate_fakes(run, monkeypatch)
+    if signing:
+        delivery = dataclasses.replace(preparation(run).delivery, signing="example-key")
+        monkeypatch.setattr(credentials, "deliver", constant(delivery))
+        monkeypatch.setattr(
+            credentials, "signing_agent", partial(preparation_failure, OSError)
+        )
+    else:
+        monkeypatch.setattr(
+            credentials, "deliver", partial(preparation_failure, OSError)
+        )
+    assert run_host.execute(run, "example", preflight_only=True) == 1
+    log = run.files.path("log").read_text()
+    assert "preflight: audit directory: ok\n" in log
+    assert "preflight: codex auth copy: ok\n" in log
+    assert "preflight: harness command: skipped: needs credential delivery\n" in log
+    assert log.endswith("preflight: 16 checks, 1 failed, 2 skipped\n")
+
+
+@pytest.mark.parametrize(
+    "missing", ["workspace", "credential delivery", "codex auth copy"]
+)
+def test_aggregate_missing_input_keeps_its_origin(tmp_path: Path, missing: str) -> None:
+    run = make_run(tmp_path)
+    ready = preparation(run)
+    actual = preflight_report.Outcome[run_host.RunPaths]("workspace", (ready.paths,))
+    delivery = preflight_report.Outcome[credentials.Delivery](
+        "credential delivery", (ready.delivery,)
+    )
+    before = preflight_report.Outcome[str | None]("codex auth copy", (None,))
+    if missing == "workspace":
+        actual = preflight_report.Outcome("workspace")
+    elif missing == "credential delivery":
+        delivery = preflight_report.Outcome("credential delivery")
+    else:
+        before = preflight_report.Outcome("codex auth copy")
+    result = preflight_report.assemble(actual, delivery, before)
+    assert result.name == missing
+    assert result.values == ()
+    with pytest.raises(preflight_report.NeedsError) as caught:
+        result.get()
+    assert str(caught.value) == missing
+
+
+def test_aggregate_protection_checks_both_fail_before_tool_inspection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    aggregate_fakes(run, monkeypatch)
+    monkeypatch.setattr(
+        run_host.policy, "protect_host", partial(preparation_failure, Invalid)
+    )
+    monkeypatch.setattr(
+        run_host.worktree, "validate_writes", partial(preparation_failure, Invalid)
+    )
+
+    def inspect(*_args: object, **_kwargs: object) -> str:
+        pytest.fail("failed path protection must prevent executable inspection")
+
+    monkeypatch.setattr(host_tools, "resolve", inspect)
+    assert run_host.execute(run, "example", preflight_only=True) == 1
+    lines = run.files.path("log").read_text().splitlines()
+    assert lines[0] == "preflight: codex version unknown"
+    assert (
+        lines[5] == "preflight: host protection: failed: "
+        "run preparation failed at host protection"
+    )
+    assert (
+        lines[6] == "preflight: clone protection: failed: "
+        "run preparation failed at clone protection"
+    )
+    assert lines[-1].startswith("preflight: 16 checks, 2 failed, ")
+
+
+def test_aggregate_void_outcome_has_a_check_name(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    checks = preflight_report.Checks(run.files)
+    result = checks.check("config load", constant(None))
+    assert result.name == "config load"
+    assert result.get() is None
+    missing = checks.check("workspace", partial(preparation_failure, OSError))
+    assert missing.name == "workspace"
+
+
+def test_aggregate_proxy_failure_is_independent_and_blocks_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    aggregate_fakes(run, monkeypatch)
+    monkeypatch.setattr(host_tools, "codex_proxy_supported", constant(value=False))
+    assert run_host.execute(run, "example", preflight_only=True) == 1
+    log = run.files.path("log").read_text()
+    assert (
+        "preflight: network proxy: failed: run preparation failed at network proxy\n"
+        in log
+    )
+    assert "preflight: harness command: ok\n" in log
+    assert "preflight: sandbox: skipped: needs network proxy\n" in log
+    assert log.endswith("preflight: 16 checks, 1 failed, 1 skipped\n")
+
+
+def test_aggregate_policy_failure_skips_every_protection_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    aggregate_fakes(run, monkeypatch)
+    monkeypatch.setattr(
+        run_host, "checked_policy", partial(preparation_failure, Invalid)
+    )
+    assert run_host.execute(run, "example", preflight_only=True) == 1
+    lines = run.files.path("log").read_text().splitlines()
+    assert lines[0] == "preflight: codex version unknown"
+    assert lines[5:9] == [
+        f"preflight: {name}: skipped: needs policy"
+        for name in preflight_report.PROTECTIONS
+    ]
+    assert lines[-1] == "preflight: 16 checks, 1 failed, 13 skipped"
+
+
+def test_aggregate_version_uses_the_final_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    reader = preflight_report.version
+    aggregate_fakes(run, monkeypatch)
+    monkeypatch.setattr(preflight_report, "version", reader)
+    expected = str(run.home.parent / "host-bin" / "true")
+
+    def version(command: list[str], **_kwargs: object) -> str:
+        assert command == [expected, "--version"]
+        return "codex-cli 0.164.0\n"
+
+    monkeypatch.setattr(subprocess, "check_output", version)
+    assert run_host.execute(run, "example", preflight_only=True) == 0
+    assert run.files.path("log").read_text().startswith("preflight: codex 0.164.0\n")
+
+
+@pytest.mark.parametrize("kind", RunKind)
+def test_aggregate_prepared_fields_reach_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: RunKind
+) -> None:
+    run = make_run(tmp_path, kind=kind.value)
+    aggregate_fakes(run, monkeypatch)
+    delivery = dataclasses.replace(preparation(run).delivery, signing="example-key")
+    monkeypatch.setattr(credentials, "deliver", constant(delivery))
+    monkeypatch.setattr(preflight_report, "copy_auth", constant("before"))
+    monkeypatch.setattr(credentials, "signing_agent", constant(Child()))
+    monkeypatch.setattr(run_host, "stop_agent", constant(value=True))
+    monkeypatch.setattr(credentials, "auth_write_back", constant(None))
+    original = run_host.finish
+    seen: list[str] = []
+
+    def finish(
+        value: run_host.Run, ready: run_host.Prepared | None, agent: object, rc: int
+    ) -> int:
+        assert value is run
+        assert ready is not None
+        assert ready.paths.git_common_dir == str(Path(ready.paths.worktree) / ".git")
+        assert ready.paths.signing_socket == str(run.tmpdir / "ssh.sock")
+        assert ready.auth_before == "before"
+        assert run.files.path("prompt").read_text() == render.brief(kind, "example")
+        seen.append("finished")
+        return original(value, ready, cast("subprocess.Popen[str]", agent), rc)
+
+    def workspace(_run: run_host.Run) -> Path:
+        assert run.files.path("phase").read_text() == "check"
+        return Path(preparation(run).paths.worktree)
+
+    monkeypatch.setattr(preflight_report, "create_workspace", workspace)
+    monkeypatch.setattr(run_host, "finish", finish)
+    assert run_host.execute(run, "example", preflight_only=True) == 0
+    assert seen == ["finished"]
+
+
+@pytest.mark.parametrize(
+    "error", [OSError, ValueError, run_host.RunInterruptedError, EOFError]
+)
+def test_aggregate_records_failure_before_workspace_preparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    run = make_run(tmp_path)
+    write = run.files.write
+    original = run_host.finish
+    seen: list[int] = []
+    interrupted = error in (run_host.RunInterruptedError, EOFError)
+
+    def fail(suffix: str, text: str) -> None:
+        if suffix == "prompt":
+            preparation_failure(error)
+        write(suffix, text)
+
+    def finish(
+        value: run_host.Run, ready: run_host.Prepared | None, agent: object, rc: int
+    ) -> int:
+        assert ready is None
+        assert agent is None
+        assert rc == (143 if interrupted else 1)
+        seen.append(rc)
+        return original(value, ready, None, rc)
+
+    monkeypatch.setattr(run.files, "write", fail)
+    monkeypatch.setattr(run_host, "finish", finish)
+    if interrupted:
+        assert run_host.execute(run, "example", preflight_only=True) == 143
+    else:
+        with pytest.raises(Invalid) as caught:
+            run_host.execute(run, "example", preflight_only=True)
+        assert str(caught.value) == "run preparation failed at run files"
+    assert len(seen) == 1
+
+
+def test_aggregate_rechecks_every_protection_after_workspace_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    aggregate_fakes(run, monkeypatch)
+    original = run_host.checked_policy
+    count = 0
+
+    def policy(
+        value: run_host.Run,
+        paths: RunPaths,
+        checks: preflight_report.Checks | None = None,
+    ) -> tuple[Policy, str]:
+        nonlocal count
+        count += 1
+        if count == 2:
+            monkeypatch.setattr(
+                run_host.policy, "protect_host", partial(preparation_failure, Invalid)
+            )
+            monkeypatch.setattr(
+                run_host.worktree,
+                "validate_writes",
+                partial(preparation_failure, Invalid),
+            )
+        return original(value, paths, checks)
+
+    monkeypatch.setattr(run_host, "checked_policy", policy)
+    assert run_host.execute(run, "example", preflight_only=True) == 1
+    assert count == 2
+    lines = run.files.path("log").read_text().splitlines()
+    assert lines[5] == (
+        "preflight: host protection: failed: run preparation failed at host protection"
+    )
+    assert lines[6] == (
+        "preflight: clone protection: failed: "
+        "run preparation failed at clone protection"
+    )
+
+
+def test_aggregate_hook_protection_failure_skips_consumers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    aggregate_fakes(run, monkeypatch)
+    monkeypatch.setattr(
+        run_host.worktree, "validate_hooks", partial(preparation_failure, OSError)
+    )
+    assert run_host.execute(run, "example", preflight_only=True) == 1
+    log = run.files.path("log").read_text()
+    assert "preflight: host protection: ok\n" in log
+    assert (
+        "preflight: clone protection: failed: "
+        "run preparation failed at clone protection\n" in log
+    )
+    assert "preflight: policy: skipped: needs clone protection\n" in log
+    assert "sensitive" not in log
+
+
+def test_aggregate_host_protection_precedes_hook_inspection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    aggregate_fakes(run, monkeypatch)
+    monkeypatch.setattr(
+        run_host.policy, "protect_host", partial(preparation_failure, Invalid)
+    )
+
+    def inspect(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("failed host protection must prevent hook inspection")
+
+    monkeypatch.setattr(run_host.worktree, "validate_hooks", inspect)
+    assert run_host.execute(run, "example", preflight_only=True) == 1
+    log = run.files.path("log").read_text()
+    assert "preflight: host protection: failed:" in log
+    assert "preflight: clone protection: skipped: needs host protection\n" in log

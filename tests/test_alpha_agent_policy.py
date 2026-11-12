@@ -7,7 +7,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -1679,3 +1679,68 @@ def test_hooks_directory_refuses_extra_write_grants(field: str, suffix: str) -> 
         )
     with pytest.raises(Invalid, match="hooks"):
         policy.protect_host(configured, run, ())
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("configured", [False, True])
+def test_github_config_always_uses_private_directory(
+    harness: Harness,
+    profile: Profile,
+    configured: bool,
+) -> None:
+    original = settings()
+    config = dataclasses.replace(
+        original,
+        credentials=tuple(
+            dataclasses.replace(c, gh=c.gh if configured else None)
+            for c in original.credentials
+        ),
+    )
+    result = made(Os.LINUX, profile, harness, "agent", config=config)
+    gh = f"{paths('agent').tmpdir}/gh"
+    assert result.env["GH_CONFIG_DIR"] == gh
+    if harness is Harness.CLAUDE:
+        claude_env = dig(claude_settings_of(result), "env")
+        assert isinstance(claude_env, dict)
+        assert claude_env["GH_CONFIG_DIR"] == gh
+    if isinstance(result.detail, model.AgyPolicy):
+        assert f"read_file({gh})" in result.detail.grants
+
+
+@pytest.mark.parametrize("os", Os)
+def test_signing_file_is_denied_with_aliases(os: Os) -> None:
+    original = settings()
+    config = dataclasses.replace(
+        original,
+        credentials=tuple(
+            dataclasses.replace(c, signing="/tmp/example-key")
+            for c in original.credentials
+        ),
+    )
+    denied = policy.denied_paths(config, HOSTS[os], paths("agent").home, 123)
+    assert "/tmp/example-key" in denied
+    assert ("/private/tmp/example-key" in denied) is (os is Os.MACOS)
+
+
+@pytest.mark.parametrize("profile", Profile)
+def test_review_environment_profile_contract(profile: Profile) -> None:
+    run = paths("agent")
+    expected = (
+        {"GH_CONFIG_DIR": f"{run.tmpdir}/gh"} if profile is Profile.REVIEW else {}
+    )
+    assert policy.review_environment(profile, run) == expected
+
+
+@pytest.mark.parametrize("value", [None])
+def test_review_environment_refuses_missing_profile(value: object) -> None:
+    with pytest.raises(Invalid) as caught:
+        policy.review_environment(cast("Profile", value), paths("agent"))
+    assert str(caught.value) == "profile must be an agent profile"
+
+
+@pytest.mark.parametrize("value", [None])
+def test_policy_refuses_missing_profile(value: object) -> None:
+    with pytest.raises(Invalid) as caught:
+        made(Os.LINUX, cast("Profile", value), Harness.CODEX, "agent")
+    assert str(caught.value) == "profile must be an agent profile"
