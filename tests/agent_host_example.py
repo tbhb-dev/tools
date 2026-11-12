@@ -144,7 +144,9 @@ def constant[Result](value: Result) -> Callable[..., Result]:
     return fixed
 
 
-def preparation_failure(error: type[Exception], *_args: object) -> None:
+def preparation_failure(
+    error: type[Exception], *_args: object, **_kwargs: object
+) -> None:
     if error is subprocess.CalledProcessError:
         raise subprocess.CalledProcessError(
             1, "sensitive-command", stderr="sensitive-stderr"

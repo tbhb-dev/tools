@@ -83,9 +83,13 @@ def installation_token(references: Credentials, repository: str) -> str:
     return gh_app.request_token(env, args, jwt).token
 
 
-def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
+def deliver(
+    request: RunRequest, settings: Settings, tmpdir: Path, *, github: bool = True
+) -> Delivery:
     references = next(c for c in settings.credentials if c.account == request.account)
-    if request.profile is Profile.REVIEW:
+    if not github:
+        gh_token = None
+    elif request.profile is Profile.REVIEW:
         try:
             gh_token = installation_token(references, request.repo)
         except (
