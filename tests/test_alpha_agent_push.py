@@ -950,6 +950,7 @@ def _signed_history(tmp_path: Path) -> tuple[Path, str, str, Path]:
     key, public = _signer(tmp_path, "agent-key")
     repository = _history(tmp_path)
     git(repository, "config", "user.email", "agent@tonyburns.net")
+    git(repository, "config", "user.name", "tbhb.dev Agent")
     git(repository, "config", "gpg.format", "ssh")
     git(repository, "config", "user.signingkey", str(key))  # cspell:ignore signingkey
     return repository, git(repository, "rev-parse", "HEAD").strip(), public, key
@@ -1011,9 +1012,25 @@ def test_commit_policy_refuses_other_identities_and_trailers(tmp_path: Path) -> 
         COMMIT_POLICY(repository, before, _tip(repository), public)
     assert str(caught.value) == (
         f"commit policy: {_tip(repository)[:7]} carries a Signed-off-by or "
-        f"Co-authored-by trailer; {short} author email is not the agent's; "
-        f"{short} committer email is not the agent's; "
+        f"Co-authored-by trailer; {short} author identity is not the agent's; "
+        f"{short} committer identity is not the agent's; "
         f"{short} carries a Signed-off-by or Co-authored-by trailer"
+    )
+
+
+def test_commit_policy_refuses_the_agent_email_under_another_name(
+    tmp_path: Path,
+) -> None:
+    repository, before, public, _ = _signed_history(tmp_path)
+    git(repository, "config", "user.email", "agent@tonyburns.net")
+    git(repository, "config", "user.name", "Someone Else")
+    git(repository, "commit", "--allow-empty", "-qS", "-m", "subject")
+    short = _tip(repository)[:7]
+    with pytest.raises(push.PushRefusedError) as caught:
+        COMMIT_POLICY(repository, before, _tip(repository), public)
+    assert str(caught.value) == (
+        f"commit policy: {short} author identity is not the agent's; "
+        f"{short} committer identity is not the agent's"
     )
 
 
