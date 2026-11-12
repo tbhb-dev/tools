@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
+# cspell:ignore Ftopic
 
 """Tests for tbhbdev alpha pr, the pull request draft tooling."""
 
