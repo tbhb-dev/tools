@@ -103,12 +103,36 @@ _STARTUP_FILES = (
 )
 
 
-def protected_home(run: Run) -> tuple[str, ...]:
-    sockets = run.home / run.settings.sockets_dir
+def protected_home_paths(home: Path, sockets_dir: str) -> tuple[Path, ...]:
+    sockets = home / sockets_dir
     # HOME itself is the boundary: protecting it would refuse every workspace.
-    parents = tuple(
-        p for p in sockets.parents if p.is_relative_to(run.home) and p != run.home
+    return (
+        *(home / p for p in _STARTUP_FILES),
+        *(p for p in sockets.parents if p.is_relative_to(home) and p != home),
     )
+
+
+def check_config(configured: Settings) -> None:
+    """Check configured writes against host trust paths before a run exists."""
+    home = Path.home()
+    sandbox = configured.sandbox
+    writes = (sandbox.audit_dir, *sandbox.write_roots, *sandbox.agy.build_write)
+    protected = (
+        *protected_home_paths(home, configured.sockets_dir),
+        userconfig.path(),
+        TAINT_DIRECTORY,
+    )
+    if os.environ.get("ZDOTDIR"):
+        protected = (*protected, home / os.environ["ZDOTDIR"])
+    policy.protect_paths(
+        tuple(str((home / p).resolve()) for p in writes),
+        tuple(
+            dict.fromkeys(str(alias) for p in protected for alias in (p, p.resolve()))
+        ),
+    )
+
+
+def protected_home(run: Run) -> tuple[str, ...]:
     clone = Path(repo.clone_path(run.home, run.request.repo))
     account_git = clone / ".git"
     if account_git.is_file():
@@ -116,8 +140,7 @@ def protected_home(run: Run) -> tuple[str, ...]:
         raise Invalid(message)
     mirror = worktree.mirror_path(run.home, run.request.repo)
     paths = (
-        *(run.home / p for p in _STARTUP_FILES),
-        *parents,
+        *protected_home_paths(run.home, run.settings.sockets_dir),
         account_git,
         mirror,
         mirror.parent,
