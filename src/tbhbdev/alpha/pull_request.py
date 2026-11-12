@@ -1475,8 +1475,9 @@ def main(
         return hook(args.harness)
     if args.command == "backfill-opened":
         return backfill(args.owner)
-    if args.command in ("rerun", "delete-branch"):
-        return (rerun if args.command == "rerun" else delete_pr_branch)(args.pr)
+    by_pr = {"rerun": rerun, "delete-branch": delete_pr_branch}
+    if args.command in by_pr:
+        return by_pr[args.command](args.pr)
     if args.command == "ready":
         # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
         # empty body: no test can tell `None` from `""`.

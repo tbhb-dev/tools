@@ -219,8 +219,8 @@ def main(
     args = build_parser(prog).parse_args(argv)
     env = os.environ if env is None else env
     line = trailer(env)
+    repo = pr.origin_repository()
     if args.kind == "pr":
-        repo = pr.origin_repository()
         data = view("pr", args.number, repo)
         text = close_comment(args.reason, opener_note(data, env), line)
         if args.delete_branch:
@@ -228,10 +228,11 @@ def main(
         words = ["pr", "close", str(args.number), "--repo", f"github.com/{repo}"]
         words += ["--comment", text]
     else:
-        data = view("issue", args.number)
+        data = view("issue", args.number, repo)
         text = close_comment(args.comment or "Closed.", "", line)
         reason = REASONS[args.reason]
-        words = ["issue", "close", str(args.number), "--reason", reason]
+        words = ["issue", "close", str(args.number), "--repo", f"github.com/{repo}"]
+        words += ["--reason", reason]
         words += ["--comment", text]
     code = run_close(words, dry_run=args.dry_run)
     if args.kind == "pr" and args.delete_branch and code == 0:

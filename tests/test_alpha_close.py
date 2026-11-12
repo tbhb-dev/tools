@@ -200,6 +200,8 @@ def test_close_issue_with_a_reason_and_a_comment(gh: Gh) -> None:
         "issue",
         "close",
         "3",
+        "--repo",
+        "github.com/tbhb-dev/tools",
         "--reason",
         "not planned",
         "--comment",
@@ -207,11 +209,23 @@ def test_close_issue_with_a_reason_and_a_comment(gh: Gh) -> None:
     ]
 
 
+def test_close_issue_pins_the_view_to_origin(gh: Gh) -> None:
+    gh.view = {"state": "OPEN", "url": "https://github.com/tbhb-dev/tools/issues/3"}
+    assert close.main(["issue", "close", "3", "--reason", "completed"], env=ENV) == 0
+    assert gh.calls[0][:5] == [
+        "issue",
+        "view",
+        "3",
+        "--repo",
+        "github.com/tbhb-dev/tools",
+    ]
+
+
 def test_close_issue_without_a_comment_uses_a_default(gh: Gh) -> None:
     gh.view = {"state": "OPEN", "url": "x"}
     assert close.main(["issue", "close", "3", "--reason", "completed"], env=ENV) == 0
     assert gh.calls[-1][-1] == f"Closed.\n\n{trailer_line()}\n"
-    assert gh.calls[-1][4] == "completed"
+    assert gh.calls[-1][6] == "completed"
 
 
 def test_a_closed_issue_is_refused(gh: Gh) -> None:
