@@ -426,6 +426,12 @@ def publication(root: Path, workspace: Path, commit: str) -> Generator[Path]:
     The protected run state holds the metadata, outside every sandbox write
     root. Git never loads a config, hook, ref or helper from the run clone.
     """
+    info = workspace / ".git" / "objects" / "info"
+    # Git follows alternates, so a run-chosen one would feed the scan and the
+    # push objects from outside the clone. Runs never legitimately have one.
+    if any(os.path.lexists(info / n) for n in ("alternates", "http-alternates")):
+        message = "the run clone chains object directories"
+        raise PushRefusedError(message)
     with tempfile.TemporaryDirectory(dir=root, prefix="push-") as temporary:
         directory = Path(temporary)
         (directory / "refs").mkdir()

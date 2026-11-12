@@ -1139,6 +1139,31 @@ def test_agent_public_key_refuses_when_ssh_add_fails(
     assert str(caught.value) == "signing key unavailable"
 
 
+@pytest.mark.parametrize("name", ["alternates", "http-alternates"])
+def test_object_alternates_in_the_run_clone_stop_the_push(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    run, prepared, target = local_run
+    monkeypatch.setattr(push, "agent_public_key", constant(""))
+
+    def planting(
+        run: run_host.Run, prepared: run_host.Prepared, stack: ExitStack
+    ) -> int:
+        info = Path(prepared.paths.worktree) / ".git" / "objects" / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        (info / name).write_text("/elsewhere\n")
+        return harness(run, prepared, stack)
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, planting, SYNTHETIC) == 4
+    assert git(target, "for-each-ref") == ""
+    assert run.files.path("log").read_text() == (
+        "push refused: the run clone chains object directories\n"
+    )
+
+
 def test_no_base_commit_refuses_push(
     local_run: tuple[run_host.Run, run_host.Prepared, Path],
 ) -> None:
