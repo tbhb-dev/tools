@@ -549,6 +549,15 @@ def harness_command(
     return command
 
 
+def log_hook_tools(run: Run, paths: RunPaths) -> None:
+    status = (
+        "present"
+        if (Path(paths.worktree) / ".bazel_env" / "bin").is_dir()
+        else "missing; commit hooks that call .bazel_env/bin will fail in this run"
+    )
+    run.files.write("log", f"preflight: .bazel_env {status}\n")
+
+
 def run_harness(
     run: Run, prepared: Prepared, stack: ExitStack, *, preflight_only: bool = False
 ) -> int:
@@ -557,6 +566,7 @@ def run_harness(
     env = value.env | prepared.delivery.env
     command = harness_command(run, prepared, value, executable)
     if preflight_only:
+        log_hook_tools(run, paths)
         run.files.write("log", f"preflight ok: {executable}\n")
         return 0
     headless = run.request.kind is RunKind.EXEC
