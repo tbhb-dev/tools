@@ -45,12 +45,11 @@ def test_hook_contract(
         monkeypatch.delenv("GH_CONFIG_DIR", raising=False)
     else:
         monkeypatch.setenv("GH_CONFIG_DIR", value)
-    payload = (
-        {"toolCall": {"args": {"CommandLine": command}}}
-        if agy
-        else {"tool_input": {"command": command}}
-    )
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    if agy:
+        stdin = json.dumps({"toolCall": {"args": {"CommandLine": command}}})
+    else:
+        stdin = json.dumps({"tool_input": {"command": command}})
+    monkeypatch.setattr(sys, "stdin", io.StringIO(stdin))
     assert alpha.main(["guard-gh-config-dir"], "tbhbdev alpha") == 0
     captured = capsys.readouterr()
     assert captured.err == ""
