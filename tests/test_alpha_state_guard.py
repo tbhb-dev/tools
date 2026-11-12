@@ -7,6 +7,7 @@ import json
 import os
 import runpy
 import signal
+import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -180,9 +181,7 @@ def test_a_crash_on_the_tagging_path_keeps_the_refusal(
         raise RuntimeError(message)
 
     monkeypatch.setattr(state_guard, stage, boom)
-    status, out, err = run(send(UNSUPPORTED_CLAIM))
-    assert (status, out) == (2, "")
-    assert f"{stage} broke" in err
+    assert refused(run(send(UNSUPPORTED_CLAIM)))
 
 
 @pytest.mark.usefixtures("_configured")
@@ -1113,7 +1112,11 @@ def test_long_sentences_preserve_full_text_and_evidence(run: Runner) -> None:
 
 def refused(result: Result) -> bool:
     status, out, err = result
-    return (status, out) == (2, "") and "was not sent. Offending:" in err
+    return (
+        (status, out) == (2, "")
+        and "was not sent. Offending:" in err
+        and "ignoring the config" not in err
+    )
 
 
 @pytest.mark.parametrize(
@@ -1147,7 +1150,6 @@ def test_a_config_error_refuses_and_says_why(
     config_file.write_text(text)
     status, out, err = run(send("It was done."))
     assert refused((status, out, err))
-    assert "state-guard: ignoring the config:" in err
 
 
 def write_invalid_utf8(path: Path) -> None:
@@ -1180,7 +1182,6 @@ def test_a_config_that_cannot_be_read_refuses(
     make(config_file)
     status, out, err = run(send("It was done."))
     assert refused((status, out, err))
-    assert "state-guard: ignoring the config:" in err
 
 
 def test_a_stdout_failure_keeps_the_refusal(
@@ -1193,21 +1194,39 @@ def test_a_stdout_failure_keeps_the_refusal(
             raise BrokenPipeError(message)
 
     monkeypatch.setattr(sys, "stdout", Broken())
-    status, _, err = run(send("It was done."))
-    assert status == 2
-    assert "stdout closed" in err
+    assert refused(run(send("It was done.")))
 
 
-def test_a_config_swapped_for_a_pipe_after_the_open_cannot_hang(
-    config_file: Path, run: Runner
-) -> None:
+def test_a_config_that_is_a_pipe_cannot_hang_the_hook(config_file: Path) -> None:
     config_file.unlink()
     os.mkfifo(config_file)
-    reader = os.open(config_file, os.O_RDONLY | os.O_NONBLOCK)
-    try:
-        assert refused(run(send("It was done.")))
-    finally:
-        os.close(reader)
+    # The in-process alarm turns a hang into a caught error, so the hook runs in a
+    # child that the parent kills on a deadline.
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; from tbhbdev.alpha import state_guard;"
+                " sys.exit(state_guard.main())"
+            ),
+        ],
+        input=json.dumps(send("It was done.")),
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+        env={**os.environ, "XDG_CONFIG_HOME": str(config_file.parent.parent)},
+    )
+    assert refused((done.returncode, done.stdout, done.stderr))
+
+
+def test_a_tagged_message_too_large_to_write_keeps_the_refusal(
+    config_file: Path, run: Runner
+) -> None:
+    status, out, err = run(send(UNSUPPORTED_CLAIM + " " + "x" * 9000 + "."))
+    assert refused((status, out, err))
+    assert not (config_file.parent / "tagged.jsonl").exists()
 
 
 def test_a_failure_while_tagging_keeps_the_refusal(
@@ -1218,9 +1237,7 @@ def test_a_failure_while_tagging_keeps_the_refusal(
         raise RuntimeError(message)
 
     monkeypatch.setattr(state_guard, "tag_sentences", broken)
-    status, out, err = run(send("It was done."))
-    assert refused((status, out, err))
-    assert "tagging broke" in err
+    assert refused(run(send("It was done.")))
 
 
 def test_a_config_error_does_not_stop_a_clean_message(

@@ -246,13 +246,16 @@ def tagging_enabled(data: Json) -> bool:
     return settings.get("tag_messages") is True
 
 
+# A pipe holds at least 16 KiB, so a smaller write can't block on an undrained reader.
+MAX_TAGGED_OUTPUT = 8192
+
+
 def tagged_input(data: Json, tool_input: Json, original: str) -> str | None:
     """The hook output that tags ORIGINAL, or None when tagging is off."""
     if not tagging_enabled(data):
         return None
     text, sentences = tag_sentences(original)
-    log_tagged(data, tool_input, sentences)
-    return json.dumps(
+    output = json.dumps(
         {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -260,6 +263,11 @@ def tagged_input(data: Json, tool_input: Json, original: str) -> str | None:
             }
         }
     )
+    if len(output.encode()) > MAX_TAGGED_OUTPUT:
+        message = "the tagged message is too large to write without blocking"
+        raise ValueError(message)
+    log_tagged(data, tool_input, sentences)
+    return output
 
 
 def abandon_stdout() -> None:
@@ -287,9 +295,8 @@ def send_message_reason(data: Json, tool_input: Json) -> str | None:
             print(output)
             sys.stdout.flush()
             return None
-    except Exception as exc:  # noqa: BLE001  # any failure here must keep the refusal
+    except Exception:  # noqa: BLE001  # any failure here must keep the refusal
         abandon_stdout()
-        print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
     return claim_reason(bad)
 
 
