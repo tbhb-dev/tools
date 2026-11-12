@@ -8,9 +8,9 @@ working (session, model, effort) and which files they edit. Git hooks turn
 those records into trailers and validate them:
 
     record <claude|codex|antigravity>  harness hook: reads hook JSON on stdin
-                                       (a no-op in another owner's repository;
-                                       outside any repository it keeps only
-                                       the user's record)
+                                       (Claude keeps only the main session's
+                                       user record in another owner's repo;
+                                       outside any repo, user records only)
     trailer <msgfile> [source]         prepare-commit-msg: stamp the trailers
     consume                            post-commit: consume the credited receipts
     check <msgfile>                    commit-msg: validate the trailers, and
@@ -1194,31 +1194,46 @@ def handle_claude_bash(
         write_bash_edits(data, env, cmd, cwd)
 
 
-def handle_claude(data: Json, env: Mapping[str, str]) -> None:
-    """Record a Claude Code hook event: agent record, commands and edits."""
+def claude_main_record(data: Json, env: Mapping[str, str]) -> Json:
+    """The main session's known fields, including a switch ahead of its reply."""
+    # A switch is kept apart from the transcript's model, which trails it
+    # until the next reply, so a later hook never overwrites it.
+    switched = (
+        real_model(data.get("to_model"))
+        if data.get("hook_event_name") == SWITCH
+        else None
+    )
+    rec = {
+        "harness": SLUGS[CLAUDE],
+        "version": version(CLAUDE, env),
+        "model": transcript_model(data.get("transcript_path")),
+        "effort": parse_stdin(data)[2],
+        "transcript": as_str(data.get("transcript_path")),
+        "payload_model": real_model(first_str(data, "model", "modelName")),
+        "switch_model": switched,
+        "switch_at": time.time() if switched else None,
+    }
+    return {k: v for k, v in rec.items() if v}
+
+
+def handle_claude(
+    data: Json, env: Mapping[str, str], *, user_only: bool = False
+) -> None:
+    """Record a Claude hook, or just its main session in the user's store."""
+    if user_only and data.get("agent_id"):
+        return
     event, tool = data.get("hook_event_name"), data.get("tool_name")
     effort = parse_stdin(data)[2]
     agent = None
     if data.get("agent_id"):
         agent = record_child(data, effort)
     else:
-        # A switch is kept apart from the transcript's model, which trails it
-        # until the next reply, so a later hook never overwrites it.
-        switched = real_model(data.get("to_model")) if event == SWITCH else None
-        write_record(
-            sha256_64(data["session_id"]),
-            {
-                "harness": SLUGS[CLAUDE],
-                "version": version(CLAUDE, env),
-                "model": transcript_model(data.get("transcript_path")),
-                "effort": effort,
-                "transcript": as_str(data.get("transcript_path")),
-                "payload_model": real_model(first_str(data, "model", "modelName")),
-                "switch_model": switched,
-                "switch_at": time.time() if switched else None,
-            },
-            hook_cwd(data),
-        )
+        rec = claude_main_record(data, env)
+        root = sha256_64(data["session_id"])
+        if user_only:
+            write_user_record(root, rec)
+            return
+        write_record(root, rec, hook_cwd(data))
     if tool == "Bash" and event in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}:
         handle_claude_bash(event, data, env, agent)
     elif event == "PostToolUse" and tool in CLAUDE_EDIT_TOOLS:
@@ -1599,10 +1614,11 @@ def cmd_record(harness: str, env: Mapping[str, str]) -> int:
         return 0
     data = read_hook_stdin()
     cwd = hook_cwd(data)
-    # A session started outside any repository, such as in the directory that
-    # holds the clones, can still commit in a tbhb-dev clone, so it keeps a
-    # record in the user's store. Another owner's repository gets none.
-    if state_dir(cwd) and not in_tbhb_dev(cwd):
+    # A Claude session can later commit in a tbhb-dev clone even when rooted
+    # elsewhere. In another owner's repository keep only its main user record:
+    # no repository state, commands, edit receipts or subagent records.
+    user_only = bool(state_dir(cwd) and not in_tbhb_dev(cwd))
+    if user_only and harness != CLAUDE:
         return 0
     if harness == CODEX:
         handle_codex(data, env)
@@ -1610,7 +1626,7 @@ def cmd_record(harness: str, env: Mapping[str, str]) -> int:
     sid, model, effort = parse_stdin(data)
     if harness == CLAUDE:
         if sid:
-            handle_claude({**data, "session_id": sid}, env)
+            handle_claude({**data, "session_id": sid}, env, user_only=user_only)
         return 0
     sid = sid or (detect(env) or (None, None))[1]
     state = state_dir(hook_cwd(data))

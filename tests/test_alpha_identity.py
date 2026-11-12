@@ -691,7 +691,7 @@ def add_worktree(repo: Path, tree: Path) -> Path:
 
 
 @pytest.mark.parametrize("harness", ["claude", "codex", "antigravity"])
-def test_record_outside_tbhb_dev_is_a_silent_no_op(
+def test_record_outside_tbhb_dev_keeps_the_repository_untouched(
     repo: Path,
     harness: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -702,7 +702,11 @@ def test_record_outside_tbhb_dev_is_a_silent_no_op(
     assert ai.cmd_record(harness, {"CODEX_SESSION_ID": "s"}) == 0
     assert capsys.readouterr() == ("", "")
     assert not (repo / ".git" / "tbhb-alpha").exists()
-    assert not (ai.user_store() / f"{ai.hx(ai.sha256_64('s'))}.json").exists()
+    user_record = ai.user_store() / f"{ai.hx(ai.sha256_64('s'))}.json"
+    if harness == "claude":
+        assert loaded(user_record)["payload_model"] == "m"
+    else:
+        assert not user_record.exists()
 
 
 def test_a_session_from_the_main_checkout_is_known_in_a_worktree(
@@ -2410,16 +2414,85 @@ def test_cmd_record_uses_the_hook_cwd_outside_a_repository(
     assert (ai.user_store() / f"{ai.hx(ai.sha256_64('s'))}.json").is_file()
 
 
+@pytest.mark.parametrize("event", ["SessionStart", "PostModelSwitch"])
 def test_cmd_record_uses_the_hook_cwd_in_another_owners_repository(
-    plain: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    plain: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, event: str
 ) -> None:
     foreign = init_repo(tmp_path / "foreign")
     run_git(foreign, "remote", "set-url", "origin", "git@github.com:someone/x.git")
-    feed(monkeypatch, {"session_id": "s", "model": "m", "cwd": str(foreign)})
+    transcript = write_transcript(tmp_path / "session.jsonl", reply(OPUS, None))
+    status = run_git(foreign, "status", "--porcelain")
+    entries = sorted((foreign / ".git").iterdir())
+    monkeypatch.setattr(ai.time, "time", returning(123.0))
+    data = {
+        "session_id": "s",
+        "model": HAIKU,
+        "effort": "high",
+        "cwd": str(foreign),
+        "transcript_path": str(transcript),
+        "hook_event_name": event,
+        "to_model": SONNET,
+    }
+    feed(monkeypatch, data)
+    assert ai.cmd_record("claude", CLAUDE_HOOK_ENV) == 0
+    expected: dict[str, object] = {
+        "harness": "claude-code",
+        "version": "2.1.316",
+        "model": OPUS,
+        "effort": "high",
+        "transcript": str(transcript),
+        "payload_model": HAIKU,
+    }
+    if event == "PostModelSwitch":
+        expected.update(switch_model=SONNET, switch_at=123.0)
+    user_record = ai.user_store() / f"{ai.hx(ai.sha256_64('s'))}.json"
+    assert loaded(user_record) == expected
+    # Missing values in later hooks must preserve a known model and switch.
+    feed(monkeypatch, {"session_id": "s", "cwd": str(foreign)})
+    assert ai.cmd_record("claude", {}) == 0
+    assert loaded(user_record) == expected
+    assert not (foreign / ".git" / "tbhb-alpha").exists()
+    assert run_git(foreign, "status", "--porcelain") == status
+    assert sorted((foreign / ".git").iterdir()) == entries
+    assert list(plain.iterdir()) == []
+
+
+@pytest.mark.parametrize("tool", ["Bash", "Edit"])
+@pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse"])
+@pytest.mark.parametrize("agent", [None, "child"])
+def test_foreign_hooks_keep_no_commands_edits_or_subagent_records(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: str,
+    event: str,
+    agent: str | None,
+) -> None:
+    foreign = init_repo(repo.parent / "foreign")
+    run_git(foreign, "remote", "set-url", "origin", "git@github.com:someone/x.git")
+    target = repo / "edited.txt"
+    target.write_text("edit\n", encoding="utf-8")
+    feed(
+        monkeypatch,
+        {
+            "session_id": "s",
+            "agent_id": agent,
+            "cwd": str(foreign),
+            "hook_event_name": event,
+            "tool_name": tool,
+            "tool_input": {"command": "git commit -m x", "file_path": str(target)},
+            "tool_response": {"bashEditDiff": [{"filePath": str(target)}]},
+        },
+    )
     assert ai.cmd_record("claude", {}) == 0
     assert not (foreign / ".git" / "tbhb-alpha").exists()
-    assert not (ai.user_store() / f"{ai.hx(ai.sha256_64('s'))}.json").exists()
-    assert list(plain.iterdir()) == []
+    assert not (repo / ".git" / "tbhb-alpha").exists()
+    if agent:
+        assert not ai.user_store().exists()
+    else:
+        assert sorted(p.name for p in ai.user_store().rglob("*")) == [
+            f"{ai.hx(ai.sha256_64('s'))}.json",
+            "lock",
+        ]
 
 
 @pytest.mark.usefixtures("repo")
@@ -2467,6 +2540,40 @@ def seed_claude(repo: Path) -> None:
         {"version": "2.1.316", "model": "claude-opus-5-5", "effort": "high"},
         repo,
     )
+
+
+def test_foreign_root_session_supplies_the_commit_trailer_model(
+    repo: Path, plain: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_claude(plain)
+    foreign = init_repo(tmp_path / "foreign")
+    run_git(foreign, "remote", "set-url", "origin", "git@github.com:someone/x.git")
+    transcript = write_transcript(
+        tmp_path / "session.jsonl", reply(OPUS, None), reply(SONNET, None)
+    )
+    feed(
+        monkeypatch,
+        {
+            "session_id": "session-raw",
+            "cwd": str(foreign),
+            "transcript_path": str(transcript),
+        },
+    )
+    assert ai.cmd_record("claude", CLAUDE_HOOK_ENV) == 0
+    monkeypatch.chdir(repo)
+    stage(repo, "a.txt")
+    path = msg_file(tmp_path, "fix: record foreign session\n")
+    assert ai.cmd_trailer(str(path), "message", CLAUDE_COMMIT_ENV) == 0
+    assert ai.llm_trailers(path.read_text(encoding="utf-8")) == [
+        (
+            ai.KEY_GEN,
+            (
+                f"LLM effort=low;harness=claude-code:2.1.316;"
+                f"model=anthropic:{SONNET};session={SESSION_HASH};surface=cli"
+            ),
+        )
+    ]
+    assert not (foreign / ".git" / "tbhb-alpha").exists()
 
 
 def test_claude_committer_main_agent(repo: Path) -> None:
