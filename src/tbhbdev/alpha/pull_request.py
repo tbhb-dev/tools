@@ -13,6 +13,8 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr create [DRAFT] [--dry-run]
     tbhbdev alpha pr edit [DRAFT] --pr N
     tbhbdev alpha pr ready --pr N
+    tbhbdev alpha pr close N --comment TEXT
+    tbhbdev alpha pr delete-branch N
     tbhbdev alpha pr hook claude|codex|antigravity
     tbhbdev alpha pr backfill-opened OWNER
 
@@ -80,6 +82,11 @@ contains one.
 ``ready --pr N`` marks pull request N ready for review with ``gh pr ready``. It
 doesn't read a draft.
 
+``close N --comment TEXT`` closes pull request N with the given comment.
+``delete-branch N`` deletes only the head branch of a closed or merged pull
+request in origin's repository. Fork heads, main, protected branches and
+unreadable metadata are refused. Neither command reads a draft.
+
 ``backfill-opened OWNER`` reads the body of every pull request, open or not,
 in every repository of OWNER, and adds each one to the ledger of every
 ``session=`` its Generated-by, Assisted-by or Opened-by lines name. It prints
@@ -100,6 +107,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from urllib.parse import quote
 
 import yaml
 from jsonschema import Draft202012Validator
@@ -1056,6 +1064,123 @@ def invoke_gh(argv: list[str], body: str, *, dry_run: bool = False) -> tuple[int
     return done.returncode, done.stdout
 
 
+def origin_repository() -> str:
+    """Resolve origin explicitly, independent of gh's default repository.
+
+    Raises:
+        SystemExit: origin or its GitHub repository can't be read.
+    """
+    code, url = git("remote", "get-url", "origin")
+    if code or not url:
+        message = "cannot read origin"
+        raise SystemExit(message)
+    done = run([find_tool(GH), "repo", "view", url, "--json", "nameWithOwner,url"])
+    data = gh_data(done)
+    name = data.get("nameWithOwner") if isinstance(data, dict) else None
+    if (
+        not isinstance(data, dict)
+        or not isinstance(name, str)
+        or not NAME_WITH_OWNER.fullmatch(name)
+    ):
+        message = "cannot resolve origin's GitHub repository"
+        raise SystemExit(message)
+    if data.get("url") != f"https://github.com/{name}":
+        message = "origin must name a repository on github.com"
+        raise SystemExit(message)
+    return name
+
+
+def closed_pr_head(number: int, repo: str) -> str:
+    """Read the head of a finished PR whose branch belongs to origin.
+
+    Raises:
+        SystemExit: The PR can't be read, isn't finished or has an unsafe head.
+    """
+    done = run(
+        [
+            find_tool(GH),
+            "pr",
+            "view",
+            str(number),
+            "--repo",
+            f"github.com/{repo}",
+            "--json",
+            "state,headRefName,isCrossRepository",
+        ]
+    )
+    data = gh_data(done)
+    if not isinstance(data, dict):
+        message = f"cannot read PR {number} on origin"
+        raise SystemExit(message)
+    if data.get("state") not in ("CLOSED", "MERGED"):
+        message = f"PR {number} is not closed or merged"
+        raise SystemExit(message)
+    if data.get("isCrossRepository") is not False:
+        message = f"PR {number} head is not on origin"
+        raise SystemExit(message)
+    branch = data.get("headRefName")
+    if not isinstance(branch, str) or not branch:
+        message = f"cannot read the head branch of PR {number}"
+        raise SystemExit(message)
+    if branch == "main":
+        message = "refusing to delete main"
+        raise SystemExit(message)
+    code, _ = git("check-ref-format", f"refs/heads/{branch}")
+    if code:
+        message = f"invalid head branch of PR {number}"
+        raise SystemExit(message)
+    return branch
+
+
+def delete_pr_branch(number: int) -> int:
+    """Delete a finished PR's unprotected head branch from origin only.
+
+    Raises:
+        SystemExit: The PR or origin is unsafe, or protection can't be read.
+    """
+    repo = origin_repository()
+    branch = closed_pr_head(number, repo)
+    ref = quote(branch, safe="")
+    done = run(
+        [
+            find_tool(GH),
+            "api",
+            "--hostname",
+            "github.com",
+            f"repos/{repo}/branches/{ref}",
+        ]
+    )
+    data = gh_data(done)
+    if (
+        not isinstance(data, dict)
+        or data.get("name") != branch
+        or data.get("protected") is not False
+    ):
+        message = f"branch {branch} is protected or unreadable"
+        raise SystemExit(message)
+    return invoke_gh(
+        [
+            GH,
+            "api",
+            "--hostname",
+            "github.com",
+            "--method",
+            "DELETE",
+            f"repos/{repo}/git/refs/heads/{ref}",
+        ],
+        "",
+    )[0]
+
+
+def finish_pr(args: argparse.Namespace) -> int:
+    """Run ``close`` or ``delete-branch``, which read no draft."""
+    if args.command == "delete-branch":
+        return delete_pr_branch(args.number)
+    return invoke_gh(
+        [GH, "pr", "close", str(args.number), "--comment", args.comment], ""
+    )[0]
+
+
 def create_pr(argv: list[str], body: str, root: str | None, *, dry_run: bool) -> int:
     """Refuse an existing open PR, including a race reported by gh create."""
     done = run([find_tool(GH), "pr", "view", "--json", "number,state,url"])
@@ -1289,6 +1414,10 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub.add_parser("hook").add_argument("harness", choices=[CLAUDE, CODEX, ANTIGRAVITY])
     sub.add_parser("backfill-opened").add_argument("owner")
     sub.add_parser("ready").add_argument("--pr", type=int, required=True)
+    closing = sub.add_parser("close")
+    closing.add_argument("number", type=int)
+    closing.add_argument("--comment", required=True)
+    sub.add_parser("delete-branch").add_argument("number", type=int)
     for name in ("check", "create", "edit"):
         one = sub.add_parser(name)
         one.add_argument("draft", nargs="?", type=Path, default=DRAFT)
@@ -1315,6 +1444,8 @@ def main(
         # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
         # empty body: no test can tell `None` from `""`.
         return invoke_gh([GH, "pr", "ready", str(args.pr)], "")[0]  # pragma: no mutate
+    if args.command in ("close", "delete-branch"):
+        return finish_pr(args)
     try:
         return command(args, env)
     except agent_identity.AttributionError:

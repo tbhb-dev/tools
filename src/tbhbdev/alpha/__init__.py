@@ -71,6 +71,8 @@ commands:
   agent-env    launch a harness with the gh shim first on PATH
   pr           check | create | edit | hook: the pull request draft
                | backfill-opened OWNER: the opened ledgers
+               | close N --comment TEXT: close a pull request with a comment
+               | delete-branch N: delete a finished PR's head branch on origin
                | close N --reason TEXT: close a pull request
   review       draft N [--force] | check N: the review draft
   issue        close N --reason completed|not-planned: close an issue
@@ -118,7 +120,10 @@ def scripts_command(_argv: list[str], _prog: str) -> int:
 
 
 def pr(argv: list[str], prog: str) -> int:
-    if argv[:1] == ["close"]:
+    # Keep the earlier agent-attributed --reason interface available.
+    if argv[:1] == ["close"] and any(
+        word == "--reason" or word.startswith("--reason=") for word in argv
+    ):
         from tbhbdev.alpha import close  # noqa: PLC0415 -- see the docstring
 
         return close.main(["pr", *argv], prog=prog)
