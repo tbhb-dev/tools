@@ -58,7 +58,7 @@ AGENT_VARS = (
     "ANTIGRAVITY",
     "ASCM_",
     "AI_AGENT",
-    "TBHB_",
+    "TBHB_GH_",
 )
 
 type Json = dict[str, object]
