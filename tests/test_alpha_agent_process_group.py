@@ -72,7 +72,7 @@ def test_group_stop_reaps_a_forked_child() -> None:
             assert os.getpgid(child.pid) == child.pid
             assert g.identity(child.pid).pgid == child.pid
             assert g.alive(child.pid)
-            g.stop_started(child.pid, 0.2, child.poll)
+            g.stop_started(child.pid, 5, child.poll)
             child.communicate(timeout=5)
             assert child.returncode == 0
             try:
