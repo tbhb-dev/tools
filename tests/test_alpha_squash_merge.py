@@ -1183,3 +1183,84 @@ def test_dry_run_preview_is_exact(
         "--body-file - --match-head-commit abc123\n\n"
         "fix: x (#12)\n\nWhy\nw\n"
     )
+
+
+# ------------------------------------------------ fetch mutation regressions
+
+
+def test_fetch_converts_text_fields_to_strings(tools: Tools) -> None:
+    tools.view(
+        title=12,
+        body=34,
+        headRefOid=56,
+        state=78,
+        mergeable=90,
+        mergeStateStatus=123,
+    )
+    request = sm.fetch(12)
+    assert (
+        request.title,
+        request.body,
+        request.head,
+        request.state,
+        request.mergeable,
+        request.merge_state,
+    ) == ("12", "34", "56", "78", "90", "123")
+
+
+@pytest.mark.parametrize("body", [None, False, 0, ""])
+def test_fetch_normalizes_a_falsy_body(tools: Tools, body: object) -> None:
+    tools.view(body=body)
+    assert sm.fetch(12).body == ""
+
+
+@pytest.mark.parametrize("draft", [None, False, 0, 1, "true", "false"])
+def test_fetch_requires_literal_true_for_a_draft(tools: Tools, draft: object) -> None:
+    tools.view(isDraft=draft)
+    assert sm.fetch(12).draft is False
+
+
+@pytest.mark.parametrize(
+    "author",
+    [
+        {"is_bot": 1, "login": "app/tbhb-dev-renovate"},
+        {"is_bot": "true", "login": "app/tbhb-dev-renovate"},
+        {"is_bot": True},
+        {"is_bot": True, "login": None},
+        {"is_bot": True, "login": 12},
+        {"is_bot": True, "login": "app/tbhb-dev-RENOVATE"},
+    ],
+)
+def test_fetch_does_not_mistake_other_author_metadata_for_renovate(
+    tools: Tools, author: object
+) -> None:
+    tools.view(author=author)
+    assert sm.fetch(12).renovate is False
+
+
+@pytest.mark.usefixtures("tools")
+@pytest.mark.parametrize("returncode", [2, -15])
+def test_fetch_reports_every_nonzero_exit_with_normalized_stderr(
+    monkeypatch: pytest.MonkeyPatch, returncode: int
+) -> None:
+    done = subprocess.CompletedProcess(
+        [], returncode, stdout="{}", stderr=" \tno\n such\r\npr  \t"
+    )
+
+    def fake_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return done
+
+    monkeypatch.setattr(pr, "run", fake_run)
+    with pytest.raises(SystemExit) as info:
+        sm.fetch(12)
+    assert info.value.code == "gh pr view failed: no such pr"
+
+
+def test_fetch_includes_the_json_decode_error(tools: Tools) -> None:
+    tools.gh(view_out="{")
+    with pytest.raises(SystemExit) as info:
+        sm.fetch(12)
+    assert info.value.code == (
+        "gh pr view returned something that is not JSON: "
+        "Expecting property name enclosed in double quotes: line 1 column 2 (char 1)"
+    )
