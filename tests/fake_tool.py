@@ -9,7 +9,7 @@ import shutil
 import sys
 from typing import TYPE_CHECKING
 
-PRIVATE_REPO = "fixture" + "repo"
+PRIVATE_REPO = "fixturerepo"
 
 if TYPE_CHECKING:
     from pathlib import Path
