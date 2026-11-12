@@ -37,7 +37,7 @@ class Delivery:
 def read(reference: str, *, label: str) -> str:
     try:
         value = secrets.read(reference)
-    except secrets.SecretsError, OSError, ValueError:
+    except secrets.SecretsError, OSError, ValueError, subprocess.SubprocessError:
         value = ""
     if not value.strip():
         message = f"{label} cannot read credential reference {reference}"
@@ -164,7 +164,7 @@ def signing_agent(key: str, tmpdir: Path, deadline: float) -> subprocess.Popen[s
 def agent_ready(agent: subprocess.Popen[str], socket: Path, deadline: float) -> None:
     while not socket.exists():
         if agent.poll() is not None:
-            message = "run signing agent could not start"
+            message = f"run signing agent could not start: {socket}"
             raise Invalid(message)
         if time.monotonic() >= deadline:
             raise TimeoutError

@@ -11,7 +11,7 @@ from functools import partial
 from pathlib import Path
 
 from tbhbdev.alpha import install
-from tbhbdev.alpha.agent import host_tools, runfiles
+from tbhbdev.alpha.agent import host_tools, process_group, runfiles
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import Invalid, Profile, RunRequest
 
@@ -130,13 +130,14 @@ def mirror_path(home: Path, argument: str) -> Path:
 
 
 def configure_mirror(mirror: Path, url: str) -> None:
-    if not (mirror / "config").exists():
-        git(mirror, "init", "--bare", "--template=")
-    # All values come from validated repository names, never a checkout.
-    runfiles.atomic(
-        mirror / "config",
-        MIRROR_CONFIG.format(url=url),
-    )
+    with process_group.failure_step("mirror init", str(mirror)):
+        if not (mirror / "config").exists():
+            git(mirror, "init", "--bare", "--template=")
+        # All values come from validated repository names, never a checkout.
+        runfiles.atomic(
+            mirror / "config",
+            MIRROR_CONFIG.format(url=url),
+        )
 
 
 def default_branch(mirror: Path) -> str:
@@ -163,11 +164,14 @@ def fetch_commit(mirror: Path, request: RunRequest) -> str:
         "--no-tags",
         "--upload-pack=git-upload-pack",
     )
-    branch = default_branch(mirror)
+    url = repo.ssh_url(request.repo)
+    with process_group.failure_step("ls-remote", url):
+        branch = default_branch(mirror)
     references = [f"+{branch}:{branch}"]
     if request.commit is not None:
         references.append(f"+{request.commit}:refs/heads/tbhbdev-review")
-    git(mirror, "fetch", *options, "--no-prune", "origin", *references)
+    with process_group.failure_step("fetch", url):
+        git(mirror, "fetch", *options, "--no-prune", "origin", *references)
     reference = branch if request.profile is Profile.BUILD else request.commit
     commit = git(
         mirror, "rev-parse", "--verify", "--end-of-options", f"{reference}^{{commit}}"
