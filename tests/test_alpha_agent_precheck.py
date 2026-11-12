@@ -404,7 +404,10 @@ def test_dispatch_preserves_arguments_and_program(
 
 @pytest.mark.skipif(
     sys.platform == "darwin",
-    reason="APFS refuses non-UTF-8 names (errno 92); Linux CI runs this test",
+    reason=(
+        "the macOS filesystem refuses non-UTF-8 names (errno 92); "
+        "Linux CI runs this test"
+    ),
 )
 def test_collection_decodes_non_utf8_paths(
     clone: Callable[[str, dict[str, bytes]], Path],
