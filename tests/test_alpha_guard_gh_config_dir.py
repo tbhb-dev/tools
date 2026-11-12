@@ -121,3 +121,74 @@ def test_hook_crashes_fail_open(
     monkeypatch.setattr(guard, "read_hook_stdin", crash)
     assert guard.main() == 0
     assert capsys.readouterr() == ("", "")
+
+
+OWN = "/home/agent/.config/gh-agent"
+
+
+def run(command: str, own: str | None, monkeypatch: pytest.MonkeyPatch) -> str | None:
+    """The deny reason the hook gives for ``command``, or None when it allows."""
+    monkeypatch.setenv("HOME", "/home/agent")
+    if own is None:
+        monkeypatch.delenv("GH_CONFIG_DIR", raising=False)
+    else:
+        monkeypatch.setenv("GH_CONFIG_DIR", own)
+    return guard.verdict(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "GH_CONFIG_DIR= gh api user",
+        'GH_CONFIG_DIR="" gh api user',
+        "env -u GH_CONFIG_DIR gh api user",
+        "env --unset GH_CONFIG_DIR gh api user",
+        "env --unset=GH_CONFIG_DIR gh api user",
+        "unset GH_CONFIG_DIR; gh api user",
+        "GH_CONFIG_DIR=$HOME/.config/gh gh api user",  # gitleaks:allow
+        "GH_CONFIG_DIR=~/.config/gh gh api user",  # gitleaks:allow
+        "export GH_CONFIG_DIR=/home/agent/.config/gh; gh api user",  # gitleaks:allow
+        "export GH_CONFIG_DIR; gh api user",
+        "declare -x GH_CONFIG_DIR=/elsewhere; gh api user",
+        "env GH_CONFIG_DIR=/elsewhere gh api user",
+        "env -i gh api user",
+        "env - gh api user",
+        "bash -c 'GH_CONFIG_DIR= gh api user'",
+        "GH_CONFIG_DIR=/elsewhere true",
+    ],
+)
+def test_changing_the_variable_is_denied(
+    command: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert run(command, OWN, monkeypatch) == guard.REASON_OVERRIDE
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "GH_CONFIG_DIR=$HOME/.config/gh-agent gh api user",  # gitleaks:allow
+        "GH_CONFIG_DIR=/home/agent/.config/gh-agent/ gh api user",
+        "GH_CONFIG_DIR=~/.config/gh-agent gh api user",  # gitleaks:allow
+        "GH_CONFIG_DIR=$GH_CONFIG_DIR gh api user",
+        "GH_CONFIG_DIR=${GH_CONFIG_DIR} gh api user",
+        "export GH_CONFIG_DIR=$HOME/.config/gh-agent; gh api user",  # gitleaks:allow
+        "echo $GH_CONFIG_DIR",
+        "grep GH_CONFIG_DIR README.md",
+        "grep GH_CONFIG_DIR=x README.md",
+        "env FOO=1 gh api user",
+        "env --unset=PATH true",
+    ],
+)
+def test_the_agent_config_dir_and_mentions_pass(
+    command: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert run(command, OWN, monkeypatch) is None
+
+
+def test_a_gh_call_without_the_variable_in_the_hook_environment_is_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert run("gh api user", None, monkeypatch) == guard.REASON
+    assert run("GH_CONFIG_DIR=/x gh api user", None, monkeypatch) == (
+        guard.REASON_OVERRIDE
+    )
