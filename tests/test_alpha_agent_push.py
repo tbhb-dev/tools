@@ -653,10 +653,20 @@ def test_private_name_refuses_push(
     assert not run.files.path("branch").exists()
 
 
+def log_only(output: str) -> Callable[..., subprocess.CompletedProcess[str]]:
+    def run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        listing = "rev-list" in command
+        return subprocess.CompletedProcess(command, 0, "" if listing else output)
+
+    return run
+
+
 def test_scan_isolates_git_and_checks_only_own_range(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def log(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "rev-list" in command:
+            return subprocess.CompletedProcess(command, 0, "")
         assert command[:1] == [host_tools.resolve("git")]
         assert command[1:9] == [
             part
@@ -708,9 +718,7 @@ def test_scan_reports_every_hit_with_its_line(
 ) -> None:
     names = private_names.Names(["example-hidden"], {"example-docs"})
     log = "clean\ntbhb-dev/example-docs\nexample-hidden\n"
-    monkeypatch.setattr(
-        subprocess, "run", constant(subprocess.CompletedProcess([], 0, log))
-    )
+    monkeypatch.setattr(subprocess, "run", log_only(log))
     monkeypatch.setattr(push, "_configured", constant([]))
     with pytest.raises(push.PushRefusedError) as caught:
         push.scan(tmp_path, "base", "head", names)
@@ -736,9 +744,7 @@ def test_scan_joins_adjacent_literals_and_reports_the_first_line(
         "+)",
     ]
     log = f"{chr(10).join(lines)}\n"
-    monkeypatch.setattr(
-        subprocess, "run", constant(subprocess.CompletedProcess([], 0, log))
-    )
+    monkeypatch.setattr(subprocess, "run", log_only(log))
     monkeypatch.setattr(push, "_configured", constant([]))
     with pytest.raises(push.PushRefusedError) as caught:
         push.scan(tmp_path, "base", "head", names)
@@ -747,6 +753,62 @@ def test_scan_joins_adjacent_literals_and_reports_the_first_line(
         f"line 2: {private_names.MESSAGE.format('example-hidden')}\n"
         f"line 6: {private_names.MESSAGE.format('example-docs')}"
     )
+
+
+def _history(tmp_path: Path) -> Path:
+    repository = tmp_path / "history"
+    repository.mkdir()
+    git(repository, "init", "-q", "-b", "main")
+    git(repository, "config", "user.name", "x")
+    git(repository, "config", "user.email", "x@example.invalid")
+    commit(repository, "base")
+    return repository
+
+
+NAMES = private_names.Names(["example-hidden"], set())
+
+
+def test_scan_accepts_a_fast_forward_without_merges(tmp_path: Path) -> None:
+    repository = _history(tmp_path)
+    before = git(repository, "rev-parse", "HEAD").strip()
+    commit(repository, "one")
+    commit(repository, "two")
+    push.scan(repository, before, git(repository, "rev-parse", "HEAD").strip(), NAMES)
+
+
+def test_scan_refuses_a_merge_commit(tmp_path: Path) -> None:
+    repository = _history(tmp_path)
+    before = git(repository, "rev-parse", "HEAD").strip()
+    git(repository, "checkout", "-q", "-b", "side")
+    commit(repository, "side")
+    git(repository, "checkout", "-q", "main")
+    commit(repository, "main")
+    git(repository, "merge", "-q", "--no-ff", "-m", "merge", "side")
+    with pytest.raises(push.PushRefusedError) as caught:
+        push.scan(
+            repository, before, git(repository, "rev-parse", "HEAD").strip(), NAMES
+        )
+    assert str(caught.value) == "merge commit in the pushed range"
+
+
+def test_scan_refuses_rewritten_history(tmp_path: Path) -> None:
+    repository = _history(tmp_path)
+    commit(repository, "old")
+    before = git(repository, "rev-parse", "HEAD").strip()
+    git(repository, "reset", "-q", "--hard", "HEAD~1")
+    commit(repository, "new")
+    with pytest.raises(push.PushRefusedError) as caught:
+        push.scan(
+            repository, before, git(repository, "rev-parse", "HEAD").strip(), NAMES
+        )
+    assert str(caught.value) == "pushed head is not a fast-forward of the branch"
+
+
+def test_scan_refuses_when_git_cannot_list_the_range(tmp_path: Path) -> None:
+    repository = _history(tmp_path)
+    with pytest.raises(push.PushRefusedError) as caught:
+        push.scan(repository, "0" * 40, "1" * 40, NAMES)
+    assert str(caught.value) == "git log unavailable"
 
 
 def test_no_base_commit_refuses_push(
