@@ -57,13 +57,14 @@ CLAIM = re.compile(
     r"(?:done|applied|merged|shipped|deployed|live|fixed|complete|completed|"
     r"installed|running|verified|in place|started)\b"
     r"|(?<![\w/-])(?:shipped|merged|applied|deployed|landed(?!\s+on\b)|"
-    r"rolled out)\b(?![-/])",
+    r"rolled out)\b(?:(?![-/])|(?=/(?:merged|deployed|shipped|applied)\b|-to-\w+))",
     re.IGNORECASE,
 )
 EVIDENCE = re.compile(
     r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b|#\d+|\bsays\b|\bsaid\b|\breports\b|\.log\b|`[^`]+`"
     r"|\boutput\b|\bread-back\b|\bunverified\b"
-    r"|\bSource:|\bread (?:(?:them|it) )?back\b",
+    r"|\bSource:\s*(?:review\b|https?://|`|[^\s;]+/[^\s;]+)"
+    r"|\bI read (?:(?:them|it) )?back(?:\s+the\s+result\b|(?=[.!;]|$))",
     re.IGNORECASE,
 )
 TRAILER = re.compile(r"(?i)(signed-off-by|co-authored-by)\s*:")
@@ -147,26 +148,30 @@ CLAIM_QUALIFIER = re.compile(
     rf"{SUBJECT}\s+(?:{STATUS_VERB}\s+)*{STATUS_VERB}$",
     re.IGNORECASE,
 )
+DOUBLE_NEGATION = re.compile(r"\b(?:not|never)\s+(?:not|never)\b", re.IGNORECASE)
 # New evidence must attach to the status: an unrelated number or quoted noun
 # elsewhere in the sentence does not substantiate it. Document paths support
 # artifact states; a document reference alone cannot establish a running process.
 ARTIFACT_PATH = r"[^\s\"]*/[\w.-]+\.(?:log|txt|md|json|jsonl|yaml|yml|toml|py|sh)\b"
 ATTACHED_EVIDENCE = re.compile(
-    r"\bDecisions/[^\s\"()]+|" + ARTIFACT_PATH, re.IGNORECASE
+    r"^\s*(?:in\s+|\(\s*)?(?:Decisions/[^\s\"()]+|" + ARTIFACT_PATH + r")",
+    re.IGNORECASE,
 )
 QUOTED_ARTIFACT = re.compile(r"#\d+|" + ARTIFACT_PATH, re.IGNORECASE)
 QUOTED_TEXT = re.compile(r'"[^"\n]*"')
 PROCESS_CLAIM = re.compile(r"\b(?:running|started)\b", re.IGNORECASE)
-EVIDENCE_CLAUSE_END = re.compile(r";|\b(?:and|but|however)\b", re.IGNORECASE)
+EVIDENCE_CLAUSE_END = re.compile(
+    r";|\b(?:and|but|however|after|before|since|because)\b",
+    re.IGNORECASE,
+)
 EVIDENCE_REFERENCE = re.compile(r"\s*[,;]\s*see\s+", re.IGNORECASE)
+# Source words are explicit: capitalization and rate units are not attribution.
+# File references after "per" are independently identifiable artifacts.
 ATTRIBUTED = re.compile(
-    r"(?i:\bper\s+)(?!(?i:cent|percent|day|hour|minute|second|week|month|"
-    r"run|host|(?:CPU|GPU|(?:K|M|G|T)i?B)(?!/)|"
-    r"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
-    r"January|February|March|April|May|June|July|August|September|October|"
-    r"November|December|today|tonight|yesterday|tomorrow|now|morning|evening|"
-    r"schedule)\b)(?:[A-Z]\w*|(?i:the\s+\w+\s+log|reviewer|maintainer|operator|"
-    r"my\s+(?:read|grep|check))\b|\S+/\S+)"
+    r"\bper\s+(?:(?:reviewer|review|maintainer|operator|Alice|coord|ops|Decisions|"
+    r"cx-[a-z0-9-]+|cc-[a-z0-9-]+|the\s+operator|the\s+\w+\s+log|"
+    r"my\s+(?:read|grep|check))\b(?![\w/-])|" + ARTIFACT_PATH + r")",
+    re.IGNORECASE,
 )
 IDENTIFIER = re.compile(
     r"\b(?:pid|run|review|event|build|job|id|commit|check run|task)[ ,:]+[0-9]{5,}\b",
@@ -184,16 +189,8 @@ ADJECTIVE = re.compile(
     r"nineteen|twenty|[0-9]+|"
     r"(?!(?:it|that|there|he|she|what|who|here)['\u2019]s\b)\w+['\u2019]s|\w+s['\u2019])\s+"
     r"(shipped|merged|applied|deployed|landed|rolled out)\s+"
-    r"(?!(?:and|or|but|is|are|was|were|has|have|had|in|on|at|to|with|for|by|yet|"
-    r"out|of|so|this|that|these|those|last|next|each|every|since|because|as|"
-    r"(?:second|minute|hour|day|week|month|year)s?|without|"
-    r"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
-    r"January|February|March|April|May|June|July|August|September|October|"
-    r"November|December|morning|evening|afternoon|daily|weekly|monthly|"
-    r"upstream|everywhere|elsewhere|today|yesterday|tomorrow|tonight|now|already|"
-    r"overnight|soon|later|earlier|again|well|together|apart|here|there|abroad|"
-    r"online|offline|away|back|ahead)\b|\w+ly\b)"
-    r"[a-z]\w*",
+    r"(?:branches|PRs|changes|fixes|rulesets|code|patches|commits|files|"
+    r"artifacts|releases|packages|services|workers)\b",
     re.IGNORECASE,
 )
 
@@ -225,7 +222,10 @@ def evidenced_claim(chunk: str, match: re.Match[str]) -> bool:
     ):
         return True
     process = PROCESS_CLAIM.search(match[0])
-    if not process and quoted_evidence(clause, len(prefix) + len(match[0])):
+    if not process and quoted_evidence(
+        re.split(r",\s*(?=[A-Za-z])", clause)[0],
+        len(prefix) + len(match[0]),
+    ):
         return True
     suffix = chunk[match.end() :]
     evidence = any(
@@ -245,7 +245,12 @@ def evidenced_claim(chunk: str, match: re.Match[str]) -> bool:
 def current_claim(chunk: str, match: re.Match[str]) -> bool:
     """Whether MATCH asserts a current status without evidence in CHUNK."""
     prefix = CLAUSE_END.split(chunk[: match.end()])[-1]
-    if CLAIM_QUALIFIER.search(prefix) or NEGATED_OBJECT.search(chunk[match.end() :]):
+    clause = prefix + CLAUSE_END.split(chunk[match.end() :])[0]
+    if clause.endswith("?") and QUESTION_START.match(clause):
+        return False
+    if (
+        CLAIM_QUALIFIER.search(prefix) and not DOUBLE_NEGATION.search(prefix)
+    ) or NEGATED_OBJECT.search(chunk[match.end() :]):
         return False
     if any(match.start() == m.start(1) for m in ADJECTIVE.finditer(chunk)):
         return False
@@ -257,10 +262,7 @@ def unsupported_claims(text: str) -> list[str]:
     return [
         chunk.strip()[:MAX_QUOTED]
         for chunk in SENTENCE_END.split(text)
-        if not (
-            chunk.endswith("?") and QUESTION_START.match(chunk) and ";" not in chunk
-        )
-        and not EVIDENCE.search(chunk)
+        if not EVIDENCE.search(chunk)
         and any(current_claim(chunk, match) for match in CLAIM.finditer(chunk))
     ]
 

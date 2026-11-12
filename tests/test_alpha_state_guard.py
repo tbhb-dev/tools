@@ -1416,3 +1416,86 @@ def test_counted_participles_with_elapsed_time_block(unit: str, ending: str) -> 
 def test_unmarked_quotes_do_not_supply_artifacts(content: str) -> None:
     text = f'The fix merged "{content}".'
     assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize("text", ["What I changed is deployed, can you check?"])
+def test_round4_shape1_question_clause(text: str) -> None:
+    assert state_guard.unsupported_claims(text)
+
+
+@pytest.mark.parametrize(
+    "text", ["The fix is not not deployed.", "The fix is never not deployed."]
+)
+def test_round4_shape2_double_negation(text: str) -> None:
+    assert state_guard.unsupported_claims(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Both merged fine.", "Both merged moments ago.", "Sam's merged everything."],
+)
+def test_round4_shape3_adjective_subject(text: str) -> None:
+    assert state_guard.unsupported_claims(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The worker is running at 20 requests per Core.",
+        "The worker is running with a budget of 20 dollars per GiB/month.",
+    ],
+)
+def test_round4_shape4_attribution_units(text: str) -> None:
+    assert state_guard.unsupported_claims(text)
+
+
+@pytest.mark.parametrize("text", ["The deploy is done after build 12345 failed."])
+def test_round4_shape5_identifier_attachment(text: str) -> None:
+    assert state_guard.unsupported_claims(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'The fix merged, the next step reads "please check later".',
+        'The fix merged, The next step reads "please check later".',
+    ],
+)
+def test_round4_shape6_quote_attachment(text: str) -> None:
+    assert state_guard.unsupported_claims(text)
+
+
+@pytest.mark.parametrize("text", ["The fix merged, without changing src/app.py."])
+def test_round4_shape7_path_attachment(text: str) -> None:
+    assert state_guard.unsupported_claims(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The fix merged; I will read back the status later.",
+        "The fix merged; Source: unavailable.",
+    ],
+)
+def test_round4_shape8_completed_readback(text: str) -> None:
+    assert state_guard.unsupported_claims(text)
+
+
+@pytest.mark.parametrize(
+    "text", ["All changes merged/deployed.", "The change merged-to-main."]
+)
+def test_round4_shape9_status_compounds(text: str) -> None:
+    assert state_guard.unsupported_claims(text)
+
+
+@pytest.mark.parametrize(
+    "reference", ["per reviewer", "see notes/check.txt", '"notes/check.txt"']
+)
+def test_round4_comma_evidence_stays_attached(reference: str) -> None:
+    assert state_guard.unsupported_claims(f"The fix merged, {reference}.") == []
+
+
+@pytest.mark.parametrize("unit", ["GiB/month", "Core", "Review/month", "Decisions/day"])
+def test_round4_attribution_requires_source_word(unit: str) -> None:
+    text = f"The worker is running at 20 requests per {unit}."
+    assert state_guard.unsupported_claims(text) == [text]
