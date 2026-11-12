@@ -1078,7 +1078,6 @@ def test_legacy_unsubstantiated_read_backs_block(text: str) -> None:
         "The fix merged per my check.",
         'The fix merged, "job 12345".',
         'The fix merged, "notes/check.txt".',
-        'The fix merged: "123".',
         'The fix merged: "123456789012".',
         'The fix merged: "status ready".',
         'The command reads "the fix merged".',
@@ -1109,6 +1108,7 @@ def test_scoped_qualifiers_and_attached_evidence_pass(text: str) -> None:
         "Build 12345 failed, the deploy is done.",
         "The deploy is done, build 12345 failed.",
         'The fix merged: "merge ready".',
+        'The fix merged: "123".',
         'The fix merged, "status ready".',
         'The fix merged, "trust me completely".',
         'The "12345" label is merged.',
@@ -1160,4 +1160,183 @@ def test_evidence_and_qualifier_limits_block(text: str) -> None:
 )
 def test_adverbs_after_quantified_statuses_block(adverb: str) -> None:
     text = f"Both deployed {adverb}."
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The fix is merged, right?",
+        "I will report that the fix is merged.",
+        "This should be fine since the fix is merged.",
+        "4 merged out of 12.",
+        "5 merged so far.",
+        "Three merged this morning.",
+        'The fix is merged ("1").',
+        "The fix is merged per Friday.",
+    ],
+)
+def test_review_findings_block(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Is the fix merged?",
+        "Has it deployed?",
+        "Which PR merged?",
+        "It will be merged after review.",
+        "It should have deployed by tomorrow.",
+        "I'll get it merged.",
+        "4 merged PRs remain open.",
+        'The fix is merged ("abc1234").',
+        "The fix is merged per the deploy log.",
+    ],
+)
+def test_review_legitimate_shapes_pass(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The patches are deployed, aren't they?",
+        "The change was merged, wasn't it?",
+        "The patch is applied, OK?",
+        "I would announce that the patch merged.",
+        "It should be easy because the patch deployed.",
+        "I will wait, the patch is merged.",
+        "Eleven merged out of twenty.",
+        "Several deployed so far.",
+        "A few merged this evening.",
+        "All deployed last Monday.",
+    ],
+)
+def test_additional_review_claims_block(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "right",
+        "correct",
+        "yes",
+        "no",
+        "isn't it",
+        "aren't they",
+        "wasn't it",
+        "OK",
+        "yeah",
+    ],
+)
+def test_tag_questions_still_assert_status(tag: str) -> None:
+    text = f"The fix is merged, {tag}?"
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "connector", ["that", "since", "because", "as", "so", "which", ","]
+)
+def test_modals_do_not_govern_complement_claims(connector: str) -> None:
+    text = f"I will announce {connector} the fix is merged."
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "quantity",
+    [
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+        "twenty",
+        "both",
+        "all",
+        "several",
+        "a few",
+        "4",
+    ],
+)
+@pytest.mark.parametrize(
+    "suffix", ["out of 30", "so far", "this morning", "", "quickly"]
+)
+def test_counted_participles_need_a_noun(quantity: str, suffix: str) -> None:
+    text = f"{quantity} merged {suffix}."
+    assert state_guard.unsupported_claims(text) == [text]
+    assert state_guard.unsupported_claims(f"{quantity} merged PRs remain open.") == []
+
+
+@pytest.mark.parametrize(
+    "time",
+    [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+        "today",
+        "tonight",
+        "yesterday",
+        "tomorrow",
+        "now",
+        "morning",
+        "evening",
+        "schedule",
+    ],
+)
+def test_time_is_not_attribution(time: str) -> None:
+    text = f"The fix is merged per {time}."
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "It will soon be merged.",
+        "It would probably have been merged.",
+        "It should not get merged.",
+        "I'll have the fix merged.",
+        'The fix merged ("' + "a" * 7 + '").',
+        'The fix merged ("ABC1234").',
+        'The fix merged ("#123").',
+    ],
+)
+def test_direct_modal_phrases_and_quoted_artifacts_pass(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == []
+
+
+@pytest.mark.parametrize("content", ["1", "123", "123456", "job 1234", "a1b2c3"])
+def test_short_quoted_numbers_are_not_artifacts(content: str) -> None:
+    text = f'The fix merged ("{content}").'
     assert state_guard.unsupported_claims(text) == [text]

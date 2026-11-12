@@ -61,7 +61,7 @@ CLAIM = re.compile(
     re.IGNORECASE,
 )
 EVIDENCE = re.compile(
-    r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b|#\d+|\bsays\b|\bsaid\b|\breports?\b|\.log\b|`[^`]+`"
+    r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b|#\d+|\bsays\b|\bsaid\b|\breports\b|\.log\b|`[^`]+`"
     r"|\boutput\b|\bread-back\b|\bunverified\b"
     r"|\bSource:|\bread (?:(?:them|it) )?back\b",
     re.IGNORECASE,
@@ -71,6 +71,11 @@ ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(?:'([^']*)'|\"([^\"]*)\"|([A-Za-z0-9_]+))")
 OPEN_ITEM = re.compile(r"(?m)^- \*\*.*$")
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n")
+QUESTION_START = re.compile(
+    r"^\s*(?:is|are|am|was|were|has|have|had|do|does|did|can|could|would|"
+    r"should|will|may|might|must|who|what|when|where|why|how|which)\b",
+    re.IGNORECASE,
+)
 SEPARATORS = frozenset("&|;\n(){}`")
 GIT_OPTIONS = frozenset(
     {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
@@ -97,6 +102,7 @@ SHORT_OPTIONAL_VALUES = frozenset("Su")
 MAX_QUOTED = 160
 MAX_LISTED = 3
 MIN_READ_BACK = 12
+QUOTED_SHA = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 
 
 # Scope exceptions to a clause, so a negative or planned action cannot excuse
@@ -123,7 +129,9 @@ CLAIM_QUALIFIER = re.compile(
     r"^\s*(?:nothing|neither|none|no)\b\s*(?:of\s+(?:the\s+)?\w+\s+)?"
     rf"(?:{SUBJECT}\s+)?(?:{STATUS_VERB}\s+)*{STATUS_VERB}$|"
     r"\b(?:will|would|should|I['\u2019]ll)\s+"
-    rf"(?:(?:have|get|queued|and|{SUBJECT})\s+|{STATUS_VERB}\s+)*{STATUS_VERB}$|"
+    r"(?:(?:not|never|soon|still|also|just|now|then|perhaps|already|\w+ly)\s+)*"
+    rf"(?:(?:be|have been)\s+|(?:have|get)\s+(?:{SUBJECT}\s+)?)?"
+    rf"(?:queued\s+and\s+)?{STATUS_VERB}$|"
     r"^\s*(?:(?:tell me|let me know)\s+)?"
     r"(?:once|when|if|after|before|until|unless|whether|as soon as)\s+"
     rf"{SUBJECT}\s+(?:{STATUS_VERB}\s+)*{STATUS_VERB}$|"
@@ -144,7 +152,10 @@ EVIDENCE_CLAUSE_END = re.compile(r";|\b(?:and|but|however)\b", re.IGNORECASE)
 EVIDENCE_REFERENCE = re.compile(r"\s*[,;]\s*see\s+", re.IGNORECASE)
 ATTRIBUTED = re.compile(
     r"(?i:\bper\s+)(?!(?i:cent|percent|day|hour|minute|second|week|month|"
-    r"run|host)\b)(?:[A-Z]\w*|(?i:reviewer|maintainer|operator|"
+    r"run|host|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
+    r"January|February|March|April|May|June|July|August|September|October|"
+    r"November|December|today|tonight|yesterday|tomorrow|now|morning|evening|"
+    r"schedule)\b)(?:[A-Z]\w*|(?i:the\s+\w+\s+log|reviewer|maintainer|operator|"
     r"my\s+(?:read|grep|check))\b|\S+/\S+)"
 )
 IDENTIFIER = re.compile(
@@ -158,10 +169,16 @@ NEGATED_OBJECT = re.compile(
 )
 ADJECTIVE = re.compile(
     r"\b(?:a|an|the|this|that|these|those|my|your|our|their|his|her|its|"
-    r"both|one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+|"
+    r"all|several|a few|both|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
+    r"nineteen|twenty|[0-9]+|"
     r"(?!(?:it|that|there|he|she|what|who|here)['\u2019]s\b)\w+['\u2019]s|\w+s['\u2019])\s+"
     r"(shipped|merged|applied|deployed|landed|rolled out)\s+"
     r"(?!(?:and|or|but|is|are|was|were|has|have|had|in|on|at|to|with|for|by|yet|"
+    r"out|of|so|this|that|these|those|last|next|each|every|since|because|as|"
+    r"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
+    r"January|February|March|April|May|June|July|August|September|October|"
+    r"November|December|morning|evening|afternoon|daily|weekly|monthly|"
     r"upstream|everywhere|elsewhere|today|yesterday|tomorrow|tonight|now|already|"
     r"overnight|soon|later|earlier|again|well|together|apart|here|there|abroad|"
     r"online|offline|away|back|ahead)\b|\w+ly\b)"
@@ -176,7 +193,11 @@ def quoted_evidence(clause: str, claim_end: int) -> bool:
         if quote.end(1) < claim_end:
             continue
         content = quote[1]
-        if re.search(r"\d", content) or ATTACHED_EVIDENCE.search(content):
+        if (
+            QUOTED_SHA.search(content)
+            or IDENTIFIER.search(content)
+            or ATTACHED_EVIDENCE.search(content)
+        ):
             return True
         if len(content) >= MIN_READ_BACK and re.search(
             r"(?:\b(?:shows|reads|printed|returned|says)|:)\s*$",
@@ -221,7 +242,7 @@ def unsupported_claims(text: str) -> list[str]:
     return [
         chunk.strip()[:MAX_QUOTED]
         for chunk in SENTENCE_END.split(text)
-        if not chunk.endswith("?")
+        if not (chunk.endswith("?") and QUESTION_START.match(chunk))
         and not EVIDENCE.search(chunk)
         and any(current_claim(chunk, match) for match in CLAIM.finditer(chunk))
     ]
