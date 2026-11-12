@@ -171,16 +171,39 @@ def full_denies(run: Run, paths: RunPaths) -> tuple[str, ...]:
     )
 
 
-def resolved_denies(run: Run, paths: RunPaths) -> tuple[str, ...]:
+def without_nested_denies(
+    denies: tuple[str, ...], grants: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Keep an inner deny only when a grant reopens it below every outer deny."""
+    denied = tuple(Path(p) for p in denies)
+    allowed = tuple(Path(p).resolve() for p in grants if p != policy.READ_ROOT)
+    return tuple(
+        str(inner)
+        for inner in denied
+        if not any(
+            outer in inner.parents
+            and not any(
+                outer in grant.parents and inner.is_relative_to(grant)
+                for grant in allowed
+            )
+            for outer in denied
+        )
+    )
+
+
+def resolved_denies(
+    run: Run, paths: RunPaths, grants: tuple[str, ...] = ()
+) -> tuple[str, ...]:
     candidates = full_denies(run, paths)
     if run.host.os is Os.LINUX:
-        return tuple(
+        existing = tuple(
             dict.fromkeys(
                 os.path.realpath(p)
                 for p in candidates
                 if Path(os.path.realpath(p)).exists()
             )
         )
+        return without_nested_denies(existing, grants)
     return candidates
 
 
@@ -272,6 +295,7 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         executable, copied = codex_install.prepare(found, run.home)
         protected = (*protected, *copied)
         policy.protect_host(check_settings, resolved, copied)
+    # Codex needs its complete grant list before pruning nested denies.
     value = policy.build(
         run.settings,
         run.host,
@@ -281,7 +305,9 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         unsandboxed=run.request.unsandboxed,
         paths=resolved,
         protected=protected,
-        denied=resolved_denies(run, resolved),
+        denied=full_denies(run, resolved)
+        if run.request.harness is Harness.CODEX
+        else resolved_denies(run, resolved),
     )
     if executable is None:
         executable = host_tools.resolve(name, value.env["PATH"], follow_symlinks=False)
@@ -316,16 +342,17 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         resolved,
         (*executables, *copied, *executable_parents(executables)),
     )
-    if isinstance(value.detail, CodexPolicy) and value.detail.mode is CodexMode.PROFILE:
+    if isinstance(value.detail, CodexPolicy):
+        detail = value.detail
+        if detail.mode is CodexMode.PROFILE:
+            detail = dataclasses.replace(
+                detail, read_roots=(*detail.read_roots, *copied)
+            )
+        denied = resolved_denies(
+            run, resolved, (*detail.read_roots, *detail.write_roots)
+        )
         value = dataclasses.replace(
-            value,
-            detail=dataclasses.replace(
-                value.detail,
-                read_roots=(
-                    *value.detail.read_roots,
-                    *copied,
-                ),
-            ),
+            value, deny=denied, detail=dataclasses.replace(detail, deny=denied)
         )
     return value, executable
 
