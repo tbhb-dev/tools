@@ -172,12 +172,7 @@ def read_names(source: Path) -> private_names.Names:
     return names
 
 
-def scan(
-    directory: Path, before: str | None, commit: str, names: private_names.Names
-) -> None:
-    if before is None:
-        message = "no base commit"
-        raise PushRefusedError(message)
+def _git_output(directory: Path, *arguments: str) -> str:
     env = dict.fromkeys(
         (
             "HOME",
@@ -211,12 +206,7 @@ def scan(
                 "core.pager=cat",
                 "-C",
                 str(directory),
-                "log",
-                "--format=commit %H%n%B",
-                "-p",
-                "--no-ext-diff",
-                "--no-textconv",
-                f"{before}..{commit}",
+                *arguments,
             ],
             cwd=directory,
             env=env,
@@ -230,7 +220,31 @@ def scan(
     except OSError, subprocess.SubprocessError:
         message = "git log unavailable"
         raise PushRefusedError(message) from None
-    lines = result.stdout.splitlines()
+    return result.stdout
+
+
+def scan(
+    directory: Path, before: str | None, commit: str, names: private_names.Names
+) -> None:
+    if before is None:
+        message = "no base commit"
+        raise PushRefusedError(message)
+    if _git_output(directory, "rev-list", "--merges", f"{before}..{commit}").strip():
+        message = "merge commit in the pushed range"
+        raise PushRefusedError(message)
+    if _git_output(directory, "rev-list", f"{commit}..{before}").strip():
+        message = "pushed head is not a fast-forward of the branch"
+        raise PushRefusedError(message)
+    output = _git_output(
+        directory,
+        "log",
+        "--format=commit %H%n%B",
+        "-p",
+        "--no-ext-diff",
+        "--no-textconv",
+        f"{before}..{commit}",
+    )
+    lines = output.splitlines()
     known = names.private + list(_configured())
     texts = [
         (1, lines),
