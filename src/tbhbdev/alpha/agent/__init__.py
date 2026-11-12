@@ -63,12 +63,9 @@ def parser(prog: str) -> argparse.ArgumentParser:
 
 
 def main(argv: list[str], prog: str) -> int:
-    if argv and argv[0] == "run-host":
-        return run_host.main(argv[1:], f"{prog} run-host")
-    if argv and argv[0] == "ssh-serve":
-        return ssh_serve.main(argv[1:], f"{prog} ssh-serve")
-    if argv and argv[0] == "precheck":
-        return precheck.main(argv[1:], f"{prog} precheck")
+    modules = {"run-host": run_host, "ssh-serve": ssh_serve, "precheck": precheck}
+    if argv and argv[0] in modules:
+        return modules[argv[0]].main(argv[1:], f"{prog} {argv[0]}")
     try:
         args = parser(prog).parse_args(argv)
     except SystemExit as exc:

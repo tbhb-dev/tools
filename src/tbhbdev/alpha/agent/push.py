@@ -194,7 +194,12 @@ def read_names(source: Path) -> private_names.Names:
     return names
 
 
-def _git_output(directory: Path, *arguments: str, data: str | None = None) -> str:
+def _git_output(
+    directory: Path,
+    *arguments: str,
+    data: str | None = None,
+    errors: str = "replace",
+) -> str:
     env = dict.fromkeys(
         (
             "HOME",
@@ -232,17 +237,55 @@ def _git_output(directory: Path, *arguments: str, data: str | None = None) -> st
             ],
             cwd=directory,
             env=env,
-            **({"stdin": subprocess.DEVNULL} if data is None else {"input": data}),
+            input=data,
+            stdin=subprocess.DEVNULL if data is None else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
-            errors="replace",
+            errors=errors,
             check=True,
         )
+    except UnicodeDecodeError:
+        message = "the pushed range adds an object that is not UTF-8 text"
+        raise PushRefusedError(message) from None
     except OSError, subprocess.SubprocessError:
         message = "git log unavailable"
         raise PushRefusedError(message) from None
     return result.stdout
+
+
+def _object_lines(directory: Path, before: str, commit: str) -> list[str]:
+    """Return the raw text of every blob and commit the range adds.
+
+    A scanner that can't read an object refuses it: a compressed, UTF-16 or
+    otherwise non-UTF-8 blob, or one with a NUL byte, would carry a name past
+    a byte match.
+    """
+    added = "".join(
+        f"{line.split()[0]}\n"
+        for line in _git_output(
+            directory, "rev-list", "--objects", commit, f"^{before}"
+        ).splitlines()
+        if line.strip()
+    )
+    if not added:
+        return []
+    kinds = _git_output(
+        directory,
+        "cat-file",
+        "--batch-check=%(objecttype) %(objectname)",
+        data=added,
+    )
+    readable = "".join(
+        f"{line.split()[1]}\n"
+        for line in kinds.splitlines()
+        if line.split()[0] in ("blob", "commit")
+    )
+    raw = _git_output(directory, "cat-file", "--batch", data=readable, errors="strict")
+    if "\x00" in raw:
+        message = "the pushed range adds an object that is not UTF-8 text"
+        raise PushRefusedError(message)
+    return raw.splitlines()
 
 
 def scan(
@@ -269,18 +312,7 @@ def scan(
     lines = output.splitlines()
     # The patch text omits binary contents and raw commit fields, so also read
     # every object the range adds: blobs, trees and the commits themselves.
-    added = [
-        line.split()[0]
-        for line in _git_output(
-            directory, "rev-list", "--objects", commit, f"^{before}"
-        ).splitlines()
-        if line.strip()
-    ]
-    if added:
-        raw = _git_output(
-            directory, "cat-file", "--batch", data="".join(f"{o}\n" for o in added)
-        )
-        lines += raw.splitlines()
+    lines += _object_lines(directory, before, commit)
     known = names.private + list(_configured())
     texts = [
         (1, lines),

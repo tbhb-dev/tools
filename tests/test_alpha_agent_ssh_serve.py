@@ -16,7 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from agent_host_example import host_settings
+from agent_host_example import constant, host_settings
 
 from tbhbdev import userconfig
 from tbhbdev.alpha import agent
@@ -230,7 +230,7 @@ def _unknown_run(monkeypatch: pytest.MonkeyPatch, *, alive: bool) -> list[int]:
         return True
 
     monkeypatch.setattr(process_group, "identity", group_identity)
-    monkeypatch.setattr(process_group, "alive", lambda _pgid: alive)
+    monkeypatch.setattr(process_group, "alive", constant(alive))
     monkeypatch.setattr(process_group, "stop_owned", stop)
     return calls
 
@@ -247,7 +247,7 @@ def test_kill_refuses_a_surviving_group_it_cannot_identify(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     calls = _unknown_run(monkeypatch, alive=True)
-    monkeypatch.setattr(process_group, "identity", lambda _pgid: None)
+    monkeypatch.setattr(process_group, "identity", constant(None))
     assert ssh_serve.main([], "ssh-serve") == 2
     assert calls == []
     assert "identity no longer matches" in capsys.readouterr().err

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import select
 import subprocess
+import zlib
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -721,6 +722,7 @@ def test_scan_isolates_git_and_checks_only_own_range(
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_TERMINAL_PROMPT": "0",
             },
+            "input": None,
             "stdin": subprocess.DEVNULL,
             "stdout": subprocess.PIPE,
             "stderr": subprocess.DEVNULL,
@@ -801,12 +803,44 @@ def _scan_head(repository: Path, before: str) -> None:
     push.scan(repository, before, git(repository, "rev-parse", "HEAD").strip(), NAMES)
 
 
-def test_scan_reads_binary_blob_contents(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"\x00\x01 example-hidden \xff\x00",
+        zlib.compress(b"example-hidden " * 20),
+        "example-hidden".encode("utf-16"),
+        b"example-hidden\x00",
+    ],
+    ids=["binary", "compressed", "utf-16", "nul"],
+)
+def test_scan_refuses_a_blob_it_cannot_read_as_text(
+    tmp_path: Path, content: bytes
+) -> None:
     repository = _history(tmp_path)
     before = git(repository, "rev-parse", "HEAD").strip()
-    (repository / "blob.bin").write_bytes(b"\x00\x01 example-hidden \xff\x00")
+    (repository / "blob.bin").write_bytes(content)
     git(repository, "add", "blob.bin")
-    commit(repository, "add a binary file")
+    commit(repository, "add a file")
+    with pytest.raises(push.PushRefusedError, match="not UTF-8 text"):
+        _scan_head(repository, before)
+
+
+def test_scan_accepts_a_clean_utf8_blob(tmp_path: Path) -> None:
+    repository = _history(tmp_path)
+    before = git(repository, "rev-parse", "HEAD").strip()
+    (repository / "note.txt").write_text("caf\u00e9 \u2014 clean\n", encoding="utf-8")
+    git(repository, "add", "note.txt")
+    commit(repository, "add text")
+    _scan_head(repository, before)
+
+
+def test_scan_reads_a_text_blob_the_patch_hides(tmp_path: Path) -> None:
+    repository = _history(tmp_path)
+    before = git(repository, "rev-parse", "HEAD").strip()
+    (repository / ".gitattributes").write_text("*.dat -diff\n")
+    (repository / "note.dat").write_text("see example-hidden\n")
+    git(repository, "add", ".")
+    commit(repository, "hide text from the patch")
     with pytest.raises(push.PushRefusedError, match="1 private-name hit"):
         _scan_head(repository, before)
 
