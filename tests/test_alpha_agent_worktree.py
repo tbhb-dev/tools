@@ -1198,6 +1198,7 @@ def test_git_shape_writes_exact_paths_before_launch(
 def checkout_paths(tmp_path: Path) -> tuple[Path, Path]:
     source = tmp_path / "source"
     (source / ".git").mkdir(parents=True)
+    (source / ".git/HEAD").write_text("ref: refs/heads/main\n")
     workspace = source / ".worktrees" / "agent-example"
     (workspace / ".git").mkdir(parents=True)
     return source, workspace
@@ -1242,6 +1243,7 @@ def test_write_roots_scan_three_levels_for_other_clones(
     root = tmp_path / "writable"
     clone = root.joinpath(*[f"level-{index}" for index in range(depth)])
     (clone / ".git").mkdir(parents=True)
+    (clone / ".git/HEAD").write_text("ref: refs/heads/main\n")
     with pytest.raises(Invalid, match="main checkout") as caught:
         worktree.validate_writes(workspace, source, (str(root),))
     relation = "reaches" if depth == 0 else "contains"
@@ -1482,3 +1484,55 @@ def test_hooks_query_spells_git_directory(
     monkeypatch.setattr(Path, "is_dir", directory)
     monkeypatch.setattr(subprocess, "check_output", output)
     worktree.validate_hooks(tmp_path, ())
+
+
+def test_empty_sandbox_mount_points_are_cleared_before_the_overlap_check(
+    tmp_path: Path, checkout_paths: tuple[Path, Path]
+) -> None:
+    source, workspace = checkout_paths
+    root = tmp_path / "writable"
+    for name in worktree.SANDBOX_MOUNT_POINTS:
+        (root / name).mkdir(parents=True)
+    worktree.validate_writes(workspace, source, (str(root),))
+    assert not any((root / name).exists() for name in worktree.SANDBOX_MOUNT_POINTS)
+
+
+def test_mount_point_holding_a_file_stays_and_still_refuses(
+    tmp_path: Path, checkout_paths: tuple[Path, Path]
+) -> None:
+    source, workspace = checkout_paths
+    root = tmp_path / "writable"
+    (root / ".git").mkdir(parents=True)
+    (root / ".git/HEAD").write_text("ref: refs/heads/main\n")
+    (root / ".codex").mkdir()
+    (root / ".codex/auth").touch()
+    with pytest.raises(Invalid, match="main checkout"):
+        worktree.validate_writes(workspace, source, (str(root),))
+    assert (root / ".codex/auth").exists()
+
+
+def test_symlinked_mount_point_is_left_alone(
+    tmp_path: Path, checkout_paths: tuple[Path, Path]
+) -> None:
+    source, workspace = checkout_paths
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    root = tmp_path / "writable"
+    root.mkdir()
+    (root / ".aws").symlink_to(target, target_is_directory=True)
+    worktree.validate_writes(workspace, source, (str(root),))
+    assert (root / ".aws").is_symlink()
+    assert target.is_dir()
+
+
+def test_mount_point_that_cannot_be_removed_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".agents").mkdir()
+
+    def refuse(self: Path) -> None:
+        raise PermissionError(self)
+
+    monkeypatch.setattr(Path, "rmdir", refuse)
+    worktree.clear_mount_points((str(tmp_path),))
+    assert (tmp_path / ".agents").is_dir()

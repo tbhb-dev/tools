@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shlex
@@ -222,8 +223,27 @@ def _contained_checkouts(root: Path, workspace: Path | None) -> None:
             children.remove(".git")
 
 
+SANDBOX_MOUNT_POINTS = (".git", ".agents", ".aws", ".codex")
+
+
+def clear_mount_points(writes: tuple[str, ...]) -> None:
+    """Remove the empty directories a sandbox leaves in a write root.
+
+    The sandbox creates these names as protected mount points. An empty `.git`
+    would make the next launch refuse the root as a main checkout. `rmdir`
+    leaves any directory that holds something, and a symlink is never followed.
+    """
+    for root in writes:
+        for name in SANDBOX_MOUNT_POINTS:
+            entry = Path(root) / name
+            if entry.is_dir(follow_symlinks=False):
+                with contextlib.suppress(OSError):
+                    entry.rmdir()
+
+
 def validate_writes(workspace: Path, source: Path, writes: tuple[str, ...]) -> None:
     """Check real paths on disk before granting any run a writable directory."""
+    clear_mount_points(writes)
     workspace, source = workspace.resolve(), source.resolve()
     own = workspace if workspace.parent == source / ".worktrees" else None
     for root in (workspace, *(Path(p).resolve() for p in writes)):
