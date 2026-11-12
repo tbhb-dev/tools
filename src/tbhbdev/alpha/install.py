@@ -242,6 +242,7 @@ def claude_hooks() -> dict[str, list[Json]]:
             group("Bash", handler("guard-op")),
             group("Write|Edit|MultiEdit|NotebookEdit", handler("guard-op")),
             group("Bash", handler("guard-gh-poll")),
+            group("Bash", handler("guard-approve")),
             group("Write|Edit|MultiEdit|NotebookEdit|Bash", handler("guard-scripts")),
             group("Bash|SendMessage|Write|Edit", guard),
         ],
