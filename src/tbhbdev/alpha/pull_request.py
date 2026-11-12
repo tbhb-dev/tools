@@ -15,6 +15,7 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr ready --pr N
     tbhbdev alpha pr rerun N
     tbhbdev alpha pr delete-branch N
+    tbhbdev alpha pr checks --pr N
     tbhbdev alpha pr hook claude|codex|antigravity
     tbhbdev alpha pr backfill-opened OWNER
 
@@ -90,6 +91,11 @@ that run hasn't failed or no run exists. It doesn't read a draft.
 ``delete-branch N`` deletes only the head branch of a closed or merged pull
 request in origin's repository. Fork heads, main, protected branches and
 unreadable metadata are refused. It doesn't read a draft.
+
+``checks --pr N`` prints pull request N's head SHA, then one line per check
+with its name and conclusion. Unfinished checks print ``PENDING``. Any
+conclusion other than ``SUCCESS``, ``NEUTRAL``, ``SKIPPED`` or ``PENDING``
+exits 1; pending checks alone exit 0.
 
 ``backfill-opened OWNER`` reads the body of every pull request, open or not,
 in every repository of OWNER, and adds each one to the ledger of every
@@ -1297,6 +1303,45 @@ def rerun(number: int) -> int:
     ]
 
 
+GREEN_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED", "PENDING"})
+
+
+def checks(number: int) -> int:
+    """Print a PR's head SHA and job conclusions, failing unless all are green.
+
+    Raises:
+        SystemExit: gh can't read the pull request.
+    """
+    argv = [
+        find_tool(GH),
+        "pr",
+        "view",
+        str(number),
+        "--json",
+        "headRefOid,statusCheckRollup",
+    ]
+    done = run(argv)
+    data = gh_data(done)
+    if not isinstance(data, dict):
+        why = " ".join((done.stderr or done.stdout).split())
+        message = f"cannot read checks of PR {number}: {why}"
+        raise SystemExit(message)
+    data = cast("dict[str, object]", data)  # pragma: no mutate
+    print(data["headRefOid"])
+    jobs = cast(
+        "list[dict[str, object]]",  # pragma: no mutate
+        data["statusCheckRollup"] or [],
+    )
+    code = 0
+    for job in jobs:
+        name = job.get("name") or job["context"]
+        conclusion = job.get("conclusion") or job.get("state") or "PENDING"
+        print(f"{name}: {conclusion}")
+        if conclusion not in GREEN_CONCLUSIONS:
+            code = 1
+    return code
+
+
 def body_roots(body: str) -> set[str]:
     """Every ``session=`` root hash on a body's LLM trailer lines."""
     found = (BACKFILL_KEYS.fullmatch(line.strip()) for line in body.splitlines())
@@ -1453,6 +1498,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub.add_parser("ready").add_argument("--pr", type=int, required=True)
     sub.add_parser("rerun").add_argument("pr", type=int)
     sub.add_parser("delete-branch").add_argument("pr", type=int)
+    sub.add_parser("checks").add_argument("--pr", type=int, required=True)
     for name in ("check", "create", "edit"):
         one = sub.add_parser(name)
         one.add_argument("draft", nargs="?", type=Path, default=DRAFT)
@@ -1475,7 +1521,7 @@ def main(
         return hook(args.harness)
     if args.command == "backfill-opened":
         return backfill(args.owner)
-    by_pr = {"rerun": rerun, "delete-branch": delete_pr_branch}
+    by_pr = {"rerun": rerun, "delete-branch": delete_pr_branch, "checks": checks}
     if args.command in by_pr:
         return by_pr[args.command](args.pr)
     if args.command == "ready":

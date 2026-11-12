@@ -3049,6 +3049,117 @@ def test_rerun_requires_a_numeric_pr_number(argv: tuple[str, ...]) -> None:
     assert info.value.code == 2
 
 
+@pytest.mark.parametrize(
+    ("jobs", "expected", "code"),
+    [
+        (
+            [
+                {"name": "lint", "conclusion": "SUCCESS"},
+                {"name": "unit tests", "conclusion": "SUCCESS"},
+            ],
+            "lint: SUCCESS\nunit tests: SUCCESS\n",
+            0,
+        ),
+        (
+            [
+                {"name": "lint", "conclusion": "FAILURE"},
+                {"name": "unit tests", "conclusion": "SUCCESS"},
+            ],
+            "lint: FAILURE\nunit tests: SUCCESS\n",
+            1,
+        ),
+        (
+            [{"name": "unit tests", "conclusion": "", "status": "IN_PROGRESS"}],
+            "unit tests: PENDING\n",
+            0,
+        ),
+        (
+            [{"name": "unit tests", "conclusion": None, "status": "QUEUED"}],
+            "unit tests: PENDING\n",
+            0,
+        ),
+        ([{"name": "optional", "conclusion": "SKIPPED"}], "optional: SKIPPED\n", 0),
+        ([{"context": "external CI", "state": "SUCCESS"}], "external CI: SUCCESS\n", 0),
+        ([{"context": "external CI", "state": "FAILURE"}], "external CI: FAILURE\n", 1),
+        ([{"context": "external CI", "state": "PENDING"}], "external CI: PENDING\n", 0),
+        ([{"name": "docs", "conclusion": "NEUTRAL"}], "docs: NEUTRAL\n", 0),
+        ([{"name": "tests", "conclusion": "TIMED_OUT"}], "tests: TIMED_OUT\n", 1),
+        ([{"name": "tests", "conclusion": "CANCELLED"}], "tests: CANCELLED\n", 1),
+        (
+            [{"name": "deploy", "conclusion": "ACTION_REQUIRED"}],
+            "deploy: ACTION_REQUIRED\n",
+            1,
+        ),
+        (
+            [{"name": "tests", "conclusion": "STARTUP_FAILURE"}],
+            "tests: STARTUP_FAILURE\n",
+            1,
+        ),
+        ([{"context": "external CI", "state": "ERROR"}], "external CI: ERROR\n", 1),
+        ([], "", 0),
+        (None, "", 0),
+    ],
+)
+def test_checks_prints_the_head_and_each_job(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    jobs: list[dict[str, object]] | None,
+    expected: str,
+    code: int,
+) -> None:
+    sha = "a1b2c3d4" * 5
+    data = {"headRefOid": sha, "statusCheckRollup": jobs}
+    world.fake("gh", stdout=json.dumps(data))
+    assert run_main("checks", "--pr", "45") == code
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == (f"{sha}\n{expected}", "")
+    (call,) = world.calls("gh")
+    assert call["argv"] == [
+        "pr",
+        "view",
+        "45",
+        "--json",
+        "headRefOid,statusCheckRollup",
+    ]
+    assert call["stdin"] == ""
+    assert call["cwd"] == str(world.root)
+
+
+@pytest.mark.parametrize(
+    ("answer", "why"),
+    [
+        (
+            {"rc": 1, "stdout": "", "stderr": "no pull requests found for branch 45\n"},
+            "no pull requests found for branch 45",
+        ),
+        ({"rc": 1, "stdout": "{}", "stderr": "not found"}, "not found"),
+        ({"rc": 1, "stdout": "not found\n", "stderr": ""}, "not found"),
+        ({"rc": 0, "stdout": "not json\n", "stderr": ""}, "not json"),
+        ({"rc": 0, "stdout": "[]", "stderr": ""}, "[]"),
+    ],
+)
+def test_checks_stops_when_the_pr_cannot_be_read(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    answer: dict[str, object],
+    why: str,
+) -> None:
+    world.fake("gh", cases={"pr view": answer})
+    with pytest.raises(
+        SystemExit, match=f"^cannot read checks of PR 45: {re.escape(why)}$"
+    ):
+        run_main("checks", "--pr", "45")
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("", "")
+
+
+@pytest.mark.parametrize("argv", [(), ("--pr", "abc")])
+def test_checks_requires_a_pr_number(argv: tuple[str, ...]) -> None:
+    with pytest.raises(SystemExit) as info:
+        run_main("checks", *argv)
+    assert info.value.code == 2
+
+
 def test_ready_marks_the_pull_request_ready(world: World) -> None:
     assert run_main("ready", "--pr", "45") == 0
     (call,) = world.calls("gh")
