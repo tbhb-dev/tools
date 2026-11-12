@@ -6,21 +6,23 @@ This PreToolUse hook shares guard-gh-pr's shell scanner and payload contracts.
 It inspects the command string without running gh. It denies a gh call when the
 hook's own GH_CONFIG_DIR is empty or unset, and it denies any command that sets,
 unsets or blanks GH_CONFIG_DIR to a value other than the hook's own, which
-includes the operator's own gh directory. Like the other guards, allowing prints
-nothing and unreadable input or a crash fails open.
+includes the operator's own gh directory. Allowing prints nothing; unreadable
+input or a crash prints a deny decision.
 
 It also scans assignment-only commands and `+=`, such as `GH_CONFIG_DIR=x; gh`.
+Sourced files and dynamically built shell text are denied because the hook
+cannot read the commands they run; literal shell scripts are scanned.
 
 Known gaps: `timeout N gh` and other runners, a program name held in a variable
-(`x=gh; $x`), `read`, `printf -v`, `set -a`, `exec -c` and `sudo` forms, and
-failing closed on a crash. Follow-up changes cover them.
+(`x=gh; $x`), `read`, `printf -v`, `set -a`, `exec -c` and `sudo` forms.
+Follow-up changes cover them.
 """
 
 import json
 import os
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 from tbhbdev.alpha.guard_gh_pr import (
     KEYWORDS,
@@ -44,10 +46,30 @@ REASON_OVERRIDE = (
     "The command is blocked: it sets, unsets or blanks GH_CONFIG_DIR. Leave the "
     "variable as the session set it."
 )
+REASON_SHELL_TEXT = (
+    "The command is blocked because it builds shell text the hook can't read."
+)
+REASON_INPUT = (
+    "The command is blocked because the hook cannot read a shell command "
+    "from the payload."
+)
+REASON_CRASH = (
+    "The command is blocked because the hook crashed while reading or checking it."
+)
 # Builtins that set or remove a variable named in their arguments.
 MUTATORS = {"export", "unset", "declare", "typeset", "readonly", "local"}
 CLEARS_ENVIRONMENT = {"-i", "--ignore-environment", "-"}
 ASSIGNMENT = re.compile(r"[A-Za-z_]\w*\+?=")
+
+
+class ShellTextScanner(Scanner):
+    """Keep a substitution marker in the command that consumes its output."""
+
+    @override
+    def open_nesting(self, kind: str, width: int) -> None:
+        if kind in {"$", "`"}:
+            self.add(kind)
+        super().open_nesting(kind, width)
 
 
 def resolved(path: str) -> str:
@@ -83,7 +105,7 @@ def raw_commands(text: str) -> Iterator[list[str]]:
 
     ``bash -c SCRIPT`` and ``eval`` are scanned in their place.
     """
-    for command in Scanner(text).run():
+    for command in ShellTextScanner(text).run():
         yield command
         words = skip_prefix(command)
         program = program_of(words) if words else ""
@@ -92,6 +114,24 @@ def raw_commands(text: str) -> Iterator[list[str]]:
             yield from raw_commands(script) if script is not None else iter(())
         elif program == "eval":
             yield from raw_commands(" ".join(words[1:]))
+
+
+def unreadable_shell_text(text: str) -> bool:
+    """Whether a command sources a file or builds shell text dynamically."""
+    for command in raw_commands(text):
+        words = skip_prefix(command)
+        program = program_of(words) if words else ""
+        if program in {"source", "."}:
+            return True
+        if program in SHELLS:
+            script = shell_script(words[1:]) or ""
+        elif program == "eval":
+            script = " ".join(words[1:])
+        else:
+            continue
+        if "$" in script or "`" in script:
+            return True
+    return False
 
 
 def leading_assignments(command: list[str]) -> list[str]:
@@ -125,6 +165,8 @@ def overrides_variable(text: str, own: str) -> bool:
 
 def verdict(text: str) -> str | None:
     """The deny reason for a command, or None to allow it."""
+    if unreadable_shell_text(text):
+        return REASON_SHELL_TEXT
     own = os.environ.get(VARIABLE, "")
     if overrides_variable(text, own):
         return REASON_OVERRIDE
@@ -135,11 +177,21 @@ def verdict(text: str) -> str | None:
 
 def main() -> int:
     """Read the payload on stdin; print a deny decision for a blocked call."""
+    antigravity = False
     try:
-        text, antigravity = command_of(read_hook_stdin())
-        reason = verdict(text)
-        if reason:
-            print(json.dumps(decision(reason, antigravity=antigravity)))
-    except Exception:  # noqa: BLE001  # fail open on any crash
-        return 0
+        data = read_hook_stdin()
+        text, antigravity = command_of(data)
+        inputs = data.get("toolCall" if antigravity else "tool_input")
+        if antigravity and isinstance(inputs, dict):
+            inputs = inputs.get("args")
+        key = "CommandLine" if antigravity else "command"
+        reason = (
+            verdict(text)
+            if isinstance(inputs, dict) and isinstance(inputs.get(key), str)
+            else REASON_INPUT
+        )
+    except Exception:  # noqa: BLE001  # fail closed on unreadable stdin or any crash
+        reason = REASON_CRASH
+    if reason:
+        print(json.dumps(decision(reason, antigravity=antigravity)))
     return 0
