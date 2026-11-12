@@ -493,7 +493,9 @@ def prepare_workspace(run: Run) -> Prepared:
         clone, run.files.name, run.request, run.settings.public_repos
     )
     with worktree.preparation_step("credential delivery"):
-        delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
+        delivery = credentials.deliver(
+            run.request, run.settings, run.tmpdir, github=False
+        )
     paths = RunPaths(
         home=str(run.home),
         worktree=str(workspace),

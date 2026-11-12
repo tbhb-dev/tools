@@ -377,7 +377,7 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     deliver = credentials.deliver
 
     def after_git_shape(
-        request: RunRequest, settings: Settings, tmpdir: Path
+        request: RunRequest, settings: Settings, tmpdir: Path, *, github: bool
     ) -> credentials.Delivery:
         workspace = clone / ".worktrees" / "agent-example"
         assert (workspace / "tracked").is_file()
@@ -385,7 +385,8 @@ def test_prepare_uses_one_worktree_and_private_destinations(
         assert (workspace / ".git/config.worktree").read_text() == ""
         assert (workspace / ".git/commondir").read_text() == ".\n"
         assert list((workspace / ".git/modules").iterdir()) == []
-        return deliver(request, settings, tmpdir)
+        assert github is False
+        return deliver(request, settings, tmpdir, github=github)
 
     monkeypatch.setattr(credentials, "deliver", after_git_shape)
     result = run_host.prepare_workspace(run)
@@ -400,7 +401,7 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     assert Path(result.paths.audit_dir).is_dir()
     assert result.delivery.gh_fallback is False
     assert result.auth_before == ("example-auth" if harness is Harness.CODEX else None)
-    assert (run.tmpdir / "gh" / "hosts.yml").is_file()
+    assert not (run.tmpdir / "gh" / "hosts.yml").exists()
     copied_auth = Path(result.paths.codex_home) / "auth.json"
     assert copied_auth.exists() is (harness is Harness.CODEX)
     if harness is Harness.CODEX:
@@ -5298,3 +5299,29 @@ def test_aggregate_host_protection_precedes_hook_inspection(
     log = run.files.path("log").read_text()
     assert "preflight: host protection: failed:" in log
     assert "preflight: clone protection: skipped: needs host protection\n" in log
+
+
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_preparation_with_gh_keeps_sandbox_token_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str
+) -> None:
+    run = make_run(
+        tmp_path, profile=profile, commit="0" * 40 if profile == "review" else None
+    )
+    assert run.settings.credentials[0].gh == "example/gh/value"
+    monkeypatch.setattr(
+        run_host.worktree,
+        "create",
+        constant(runfiles.private_dir(run.home / "worktree")),
+    )
+    prepared = run_host.prepare_workspace(run)
+    assert prepared.delivery.env == {}
+    sandbox_env = run_host.policy.environment(
+        run.settings, run.host, run.request.harness, prepared.paths, run.request.account
+    )
+    assert sandbox_env["GH_CONFIG_DIR"] == str(run.tmpdir / "gh")
+    assert not (Path(sandbox_env["GH_CONFIG_DIR"]) / "hosts.yml").exists()
+    for path in run.tmpdir.rglob("*"):
+        if path.is_file():
+            assert VALUES["example/gh/value"] not in path.read_text()
+            assert "example-installation" not in path.read_text()
