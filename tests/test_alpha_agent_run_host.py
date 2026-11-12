@@ -3763,6 +3763,7 @@ def test_checked_policy_refuses_workspace_in_main_checkout(tmp_path: Path) -> No
     run = make_run(tmp_path)
     clone = run.home / "other-clone"
     (clone / ".git").mkdir(parents=True)
+    (clone / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     paths = dataclasses.replace(preparation(run).paths, worktree=str(clone))
     with pytest.raises(Invalid, match="main checkout"):
         run_host.checked_policy(run, paths)
@@ -3795,6 +3796,7 @@ def test_checked_policy_checks_effective_hooks_before_launch(
     paths = run_host.planned_paths(run)
     workspace = Path(paths.worktree)
     (workspace / ".git").mkdir(parents=True)
+    (workspace / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
 
     def output(command: list[str], **kwargs: object) -> str:
         assert command[-1] == "core.hooksPath"
