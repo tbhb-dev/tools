@@ -152,18 +152,30 @@ def test_an_unsupported_claims_claim_is_blocked(run: Runner) -> None:
     status, out, err = run(send(UNSUPPORTED_CLAIM))
     assert (status, out) == (2, "")
     assert err == (
-        "state-guard: this message makes a status claim without evidence. Add "
-        "the PR number and sha, the merge sha, command output or a log path, "
-        "attribute it ('the reviewer says ...'), or say it is unverified. Offending: "
-        f"{UNSUPPORTED_CLAIM}\n"
+        "state-guard: this message makes a status claim without evidence, so it "
+        f"was not sent. Offending: {UNSUPPORTED_CLAIM}. Resend the same message "
+        "with only these sentences fixed (add the PR number and sha, the merge "
+        "sha, command output or a log path, attribute it, or say it is "
+        "unverified); leave the rest unchanged.\n"
     )
 
 
-def test_at_most_three_offenders_are_listed_and_each_is_cut(run: Runner) -> None:
+@pytest.mark.parametrize("final", [False, True])
+def test_at_most_three_offenders_are_listed_and_each_is_cut(
+    run: Runner, final: bool
+) -> None:
     lines = [f"Step {n} was done." for n in range(5)]
     lines[0] = "It was done " + "x" * 200
-    _, _, err = run(send("\n".join(lines)))
-    offending = err.split("Offending: ")[1].strip().split(" | ")
+    message = "\n".join(lines)
+    if final:
+        _, out, _ = run(stop(last_assistant_message=message))
+        reason = json.loads(out)["reason"]
+        suffix = ". Fix only these sentences"
+    else:
+        _, _, reason = run(send(message))
+        suffix = ". Resend the same message"
+    offending = reason.split("Offending: ")[1].split(suffix)[0]
+    offending = offending.split(" | ")
     assert offending == [
         ("It was done " + "x" * 200)[:160],
         "Step 1 was done.",
@@ -219,7 +231,7 @@ def test_each_kind_of_claim_is_blocked(run: Runner, claim: str) -> None:
 def test_evidence_in_another_sentence_does_not_cover_a_claim(run: Runner) -> None:
     status, _, err = run(send("It was applied. See #12 for the other one."))
     assert status == 2
-    assert err.endswith("Offending: It was applied.\n")
+    assert "Offending: It was applied.. Resend the same message" in err
 
 
 def test_other_tools_and_odd_inputs_pass(run: Runner) -> None:
@@ -416,10 +428,13 @@ def test_stop_blocks_an_unsupported_claims_reply(run: Runner) -> None:
     assert (status, err) == (0, "")
     decision = json.loads(out)
     assert decision["decision"] == "block"
-    assert decision["reason"].startswith(
-        "state-guard: your reply makes a status claim without evidence."
+    assert decision["reason"] == (
+        "state-guard: your reply makes a status claim without evidence. "
+        f"Offending: {UNSUPPORTED_CLAIM}. Fix only these sentences (add the PR "
+        "number and sha, the merge sha, command output or a log path, attribute "
+        "it, or say it is unverified) and send just the corrected sentences; "
+        "don't repeat the rest of the reply."
     )
-    assert decision["reason"].endswith(f"Offending: {UNSUPPORTED_CLAIM}")
 
 
 def test_stop_lets_an_evidenced_reply_and_a_stop_hook_loop_through(
@@ -467,7 +482,10 @@ def test_stop_reads_the_last_reply_from_the_transcript(
         ],
     )
     out = run(stop(transcript_path=path))[1]
-    assert json.loads(out)["reason"].endswith(f"Offending: {UNSUPPORTED_CLAIM}")
+    assert (
+        f"Offending: {UNSUPPORTED_CLAIM}. Fix only these sentences"
+        in json.loads(out)["reason"]
+    )
 
 
 def test_stop_resets_at_a_new_prompt_and_tolerates_a_missing_transcript(
