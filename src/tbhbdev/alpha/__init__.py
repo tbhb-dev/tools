@@ -26,6 +26,7 @@ from tbhbdev.alpha import (
     pre_push_guard,
     session_context,
     state_guard,
+    verify_range,
 )
 
 if TYPE_CHECKING:
@@ -45,6 +46,7 @@ __all__ = [
     "pre_push_guard",
     "session_context",
     "state_guard",
+    "verify_range",
 ]
 
 USAGE = """usage: {prog} <command> [args...]
@@ -76,6 +78,7 @@ commands:
   repo         bootstrap [--dry-run] [--create --private|--public] ORG/REPO:
                apply the standard repository settings
   merge        squash-merge an approved pull request
+  verify-range BASE TIP [-C PATH]: check every agent commit in a range
   loop         validate loop configuration (runner not yet available)
   agent        exec | wait | status | kill | clean | keep: headless runs
   pre-push-guard REMOTE URL: refuse rewritten history and private names
@@ -171,6 +174,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "gh-app": gh_app_command,
     "repo": repo_command,
     "merge": merge,
+    "verify-range": verify_range.main,
     "install": install_command,
     "pre-push-guard": pre_push_guard.main,
     "loop": loop.main,
