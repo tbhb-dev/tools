@@ -275,6 +275,18 @@ def test_foreground_restores_handler_on_failure(
     assert signal.getsignal(signal.SIGTTOU) == before
 
 
+@pytest.mark.parametrize("failure", [Invalid, TimeoutError, subprocess.TimeoutExpired])
+def test_failure_step_preserves_safe_errors(failure: type[Exception]) -> None:
+    error = (
+        subprocess.TimeoutExpired("example", 1)
+        if failure is subprocess.TimeoutExpired
+        else failure("safe message")
+    )
+    with pytest.raises(failure) as caught, groups.failure_step("fetch", "example"):
+        raise error
+    assert caught.value is error
+
+
 def test_prepare_success_and_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

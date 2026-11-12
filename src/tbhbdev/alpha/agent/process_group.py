@@ -271,6 +271,18 @@ def foreground(terminal: int, pgid: int) -> None:
         signal.signal(signal.SIGTTOU, previous)
 
 
+@contextmanager
+def failure_step(name: str, reference: str) -> Generator[None]:
+    """Report only a trusted step and reference, never third-party error text."""
+    try:
+        yield
+    except Invalid, TimeoutError, subprocess.TimeoutExpired:
+        raise
+    except OSError, ValueError, subprocess.SubprocessError:
+        message = f"{name} failed: {reference}"
+        raise Invalid(message) from None
+
+
 def prepare_child(connection: Connection, operation: Callable[[], object]) -> None:
     os.setpgid(0, 0)
     signal.signal(signal.SIGHUP, signal.SIG_DFL)

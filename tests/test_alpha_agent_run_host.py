@@ -475,7 +475,7 @@ def test_finish_orders_cleanup_auth_agent_index_and_atomic_rc(
     )
     messages = {
         "invalid": "safe preparation error\n",
-        "os": "run failed; check the clone and credential references\n",
+        "os": f"clone failed: {run_host.repo.clone_path(run.home, run.request.repo)}\n",
         "auth": "codex auth write-back failed\n",
         "result": "run preparation returned no workspace\n",
     }
@@ -744,6 +744,72 @@ def test_tmux_server_and_parent_markers_do_not_reach_a_harness(
             assert (tmp_path / "result").read_text() == "isolated"
         finally:
             subprocess.run([*base, "kill-server"], check=False, timeout=5)
+
+
+@pytest.mark.parametrize(
+    "step", ["init", "ls-remote", "fetch", "clone", "signing", "gh", "docker", "key"]
+)
+@pytest.mark.parametrize("failure", [OSError, ValueError, subprocess.SubprocessError])
+def test_launcher_failures_name_step_and_reference_without_exception_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step: str,
+    failure: type[Exception],
+) -> None:
+    run = make_run(tmp_path)
+    _, clone = repository(run.home / "Code" / "github.com" / "example-org")
+    clone = clone.rename(clone.parent / "example-repo")
+    url = str(clone.parent / "origin")
+    monkeypatch.setattr(run_host.worktree.repo, "ssh_url", constant(url))
+    monkeypatch.setattr(run_host, "preflight", constant(None))
+    monkeypatch.setattr(run_host, "checked_policy", constant(None))
+    original_git = run_host.worktree.git
+    original_read = secrets.read
+    references = run.settings.credentials[0]
+    reference = {
+        "gh": references.gh,
+        "docker": references.docker,
+        "key": references.signing,
+    }.get(step)
+
+    def fail() -> None:
+        message = "unprinted-error-material"
+        raise failure(message)
+
+    def git(path: Path, *args: str) -> str:
+        if args[0] == step:
+            fail()
+        return original_git(path, *args)
+
+    def read(actual: str) -> str:
+        if actual == reference:
+            fail()
+        return original_read(actual)
+
+    def sign(*_args: object) -> subprocess.Popen[str]:
+        fail()
+        pytest.fail("signing failure must stop the run")
+
+    monkeypatch.setattr(run_host.worktree, "git", git)
+    monkeypatch.setattr(secrets, "read", read)
+    if step == "signing":
+        monkeypatch.setattr(credentials, "signing_agent", sign)
+    assert run_host.execute(run, "example") == 1
+    mirror = run_host.worktree.mirror_path(run.home, run.request.repo)
+    expected = {
+        "init": f"mirror init failed: {mirror}",
+        "ls-remote": f"ls-remote failed: {url}",
+        "fetch": f"fetch failed: {url}",
+        "clone": f"clone failed: {clone / '.worktrees' / 'agent-example'}",
+        "signing": f"signing failed: {run.tmpdir / 'ssh.sock'}",
+        "gh": f"gh cannot read credential reference {references.gh}",
+        "docker": f"docker cannot read credential reference {references.docker}",
+        "key": f"signing cannot read credential reference {references.signing}",
+    }
+    assert run.files.path("log").read_text() == expected[step] + "\n"
+    assert "unprinted-error-material" not in run.files.path("log").read_text()
+    assert not run.files.path("launched").exists()
+    assert run.files.path("rc").read_text() == "1\n"
 
 
 @pytest.mark.parametrize("phase", ["fetch", "secret"])

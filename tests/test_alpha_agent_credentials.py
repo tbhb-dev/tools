@@ -390,7 +390,9 @@ def test_signing_agent_start_failure_is_bounded(
     monkeypatch.setattr(process_group, "stop_started", stop)
     with pytest.raises(Invalid if exited else TimeoutError) as caught:
         credentials.signing_agent("example-key", tmp_path, time.monotonic() - 1)
-    assert str(caught.value) == ("run signing agent could not start" if exited else "")
+    assert str(caught.value) == (
+        f"run signing agent could not start: {tmp_path / 'ssh.sock'}" if exited else ""
+    )
     assert stops == [(23, 0)]
 
 

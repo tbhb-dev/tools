@@ -430,7 +430,8 @@ def prepare_workspace(run: Run) -> Prepared:
     clone = Path(repo.clone_path(run.home, run.request.repo))
     paths = planned_paths(run)
     checked_policy(run, paths)
-    workspace = worktree.create(clone, run.files.name, run.request)
+    with process_group.failure_step("clone", paths.worktree):
+        workspace = worktree.create(clone, run.files.name, run.request)
     delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
     paths = RunPaths(
         home=str(run.home),
@@ -630,11 +631,13 @@ def _execute(run: Run, text: str, stack: ExitStack) -> int:
     prepared = None
     rc = 1
     agent = None
+    step, reference = "preflight", run.request.repo
     try:
         if not run.files.path("request.json").exists():
             run.files.receive(run.request)
         run.files.write("phase", "check")
         preflight(run)
+        step, reference = "clone", str(repo.clone_path(run.home, run.request.repo))
         result = process_group.prepare(
             lambda: prepare_workspace(run),
             run.files,
@@ -644,12 +647,15 @@ def _execute(run: Run, text: str, stack: ExitStack) -> int:
         prepared = prepared_result(result)
         runfiles.append(run.files.root, index_entry(run, prepared, None))
         run.files.write("phase", "workspace")
+        step, reference = "prompt", str(run.files.path("prompt"))
         run.files.write("prompt", render.brief(run.request.kind, text))
         run.files.write("phase", "brief")
         if prepared.delivery.signing is not None:
+            step, reference = "signing", str(run.tmpdir / "ssh.sock")
             agent = credentials.signing_agent(
                 prepared.delivery.signing, run.tmpdir, run.deadline
             )
+        step, reference = "harness", run.request.harness.value
         rc = run_harness(run, prepared, stack)
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
@@ -658,9 +664,7 @@ def _execute(run: Run, text: str, stack: ExitStack) -> int:
     except Invalid as exc:
         run.files.write("log", f"{exc}\n")
     except OSError, ValueError, subprocess.SubprocessError:
-        run.files.write(
-            "log", "run failed; check the clone and credential references\n"
-        )
+        run.files.write("log", f"{step} failed: {reference}\n")
     finally:
         stack.enter_context(process_group.ignore_signals())
         rc = finish(run, prepared, agent, rc)
