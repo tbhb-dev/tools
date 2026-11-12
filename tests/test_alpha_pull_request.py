@@ -989,8 +989,10 @@ def test_missing_sync_target_is_one_problem(world: World, rc: int, stdout: str) 
     assert lint_checked(world, BASE) == [
         (
             1,
-            "vale: vale styles missing from .vale/: Google, write-good; "
-            "missing Bazel target //:vale_sync",
+            (
+                "vale: vale styles missing from .vale/: Google, write-good; "
+                "missing Bazel target //:vale_sync"
+            ),
         )
     ]
     (call,) = world.calls("bazelisk")
