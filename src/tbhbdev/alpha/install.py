@@ -29,7 +29,8 @@ run at a time touch the hooks. A run waits up to TBHB_INSTALL_LOCK_TIMEOUT
 seconds (default 15) and breaks a lock whose owner is no longer running. The
 lock also coordinates with older installers.
 
-Then it merges the harness hooks into each harness's user-level config:
+Unless `--hooks-only` is set, it then merges the harness hooks into each
+harness's user-level config:
 
     claude       settings.json in $CLAUDE_CONFIG_DIR, default .claude in HOME
     codex        hooks.json in $CODEX_HOME, default .codex in HOME
@@ -1091,6 +1092,11 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="print the changes, write nothing"
     )
     parser.add_argument(
+        "--hooks-only",
+        action="store_true",
+        help="install only this clone's git hooks and write nothing at user level",
+    )
+    parser.add_argument(
         "--hook",
         action="store_true",
         help=(
@@ -1120,8 +1126,15 @@ def session_start(env: Mapping[str, str], *, dry_run: bool) -> int:
 
 
 def main(argv: list[str], prog: str) -> int:
-    args = build_parser(prog).parse_args(argv)
+    parser = build_parser(prog)
+    args = parser.parse_args(argv)
     env = os.environ
+    if args.hooks_only:
+        if args.hook:
+            parser.error("--hooks-only cannot be used with --hook")
+        if args.harness:
+            parser.error("--hooks-only cannot be used with --harness")
+        return install_git_hooks(None, env, dry_run=args.dry_run)
     if args.hook:
         return session_start(env, dry_run=args.dry_run)
     status = install_git_hooks(None, env, dry_run=args.dry_run)
