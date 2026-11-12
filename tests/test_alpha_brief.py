@@ -1,4 +1,4 @@
-"""Briefs carry one fixed preamble and reject unsafe instructions literally."""
+"""Briefs carry fixed safeguards and reject normalized forbidden instructions."""
 
 import re
 from typing import TYPE_CHECKING
@@ -11,28 +11,10 @@ from tbhbdev.alpha import brief
 if TYPE_CHECKING:
     from pathlib import Path
 
-EXPECTED = """# {TASK} (tbhb-dev/tools, demo)
+EXPECTED = (
+    """# {TASK} (tbhb-dev/tools, demo)
 
-## Step 1: worktree first (required)
-
-Before anything else, in the tbhb-dev/tools main checkout:
-
-```sh
-git fetch origin
-git worktree add .worktrees/demo -b agent/demo origin/main
-cd .worktrees/demo
-```
-
-If the worktree or branch already exists, stop and report.
-In the main checkout, make NO commit, checkout, switch, reset, stash or file edit.
-Do ALL further work in the new worktree.
-
-```sh
-uv sync  # Drop this line when the repo has no pyproject.toml.
-bazelisk run //:bazel_env
-```
-
-Never run `prek install`, `pre-commit install`, `tbhbdev alpha install`, or any other hook installer.
+{step}
 
 ## Task
 
@@ -44,24 +26,31 @@ Never run `prek install`, `pre-commit install`, `tbhbdev alpha install`, or any 
 
 ## Commits
 
-Use plain `git commit` and let the hooks run. Never use `--no-verify`, `SKIP=`, `PREK_SKIP=`, `-c core.hooksPath=`, or any other skip or redirect of hooks. No `-s`, no Signed-off-by, no Co-authored-by.
+{commits}
 
-Do NOT push and do NOT open a pull request.
+{push}
 
 ## Hard rules
 
-- After any denial, stop and report. No workaround by any tool, even an equivalent one.
-- GitHub state comes only from awrel events. No gh polling, no sleep or pgrep wait loops.
-- Never pkill, killall or kill by pattern; kill only a PID you started. Never connect to the `tmux -L agents` server or any agents socket.
-- Never unset or export the 1Password service-account token variable. No `env`, `printenv`, `set` or `export -p` dumps; no credential helpers; don't read SSH keys, the Codex home, GitHub CLI config, or any token file.
-- Never `rm`; move leftovers with `mv` into `$TMPDIR`. No ps, pgrep, top or sysctl; load checks use `uptime` only.
-- No "core" or "shell" as a module or pattern name. Never write a public IP address. Agents don't open GitHub issues; follow-ups go in a private drafts file.
-- Touch only your worktree and `$TMPDIR`.
+{rules}
 
 ## Final report
 
 {FINAL_REPORT}
-"""  # noqa: E501 -- exact output, including the required rule lines
+""".replace(
+        "{step}",
+        brief.STEP_BLOCK.format(
+            repo="tbhb-dev/tools",
+            path=".worktrees/demo",
+            branch="agent/demo",
+            base="origin/main",
+            hook_rule=brief.HOOK_RULE,
+        ),
+    )
+    .replace("{commits}", brief.COMMITS_BLOCK)
+    .replace("{push}", brief.NO_PUSH_BLOCK)
+    .replace("{rules}", brief.HARD_RULES_BLOCK)
+)
 FILLED = re.sub(r"\{[^{}]+\}", "Completed", EXPECTED)
 PROG = "example brief"
 
@@ -95,10 +84,8 @@ def test_render_overrides_and_quotes_arguments() -> None:
         "git worktree add .worktrees/demo -b agent/demo origin/main",
         "git worktree add '.worktrees/a b' -b 'feature/x y' 'base ref'",
     ).replace("cd .worktrees/demo", "cd '.worktrees/a b'").replace(
-        "Do NOT push and do NOT open a pull request.",
-        "## Push\n\nBefore any `git push`, run "
-        "`~/.local/libexec/tbhb/2026-11-11-coord-scan-outgoing.sh`. "
-        "Stop and report on its exit 1. Never force-push an existing remote branch.",
+        brief.NO_PUSH_BLOCK,
+        "## Push\n\n" + brief.PUSH_BLOCK,
     )
 
 
@@ -166,6 +153,7 @@ def test_all_problems_are_reported_in_order() -> None:
     assert brief.check("") == [
         *(f"missing heading: {heading}" for heading in brief.REQUIRED_HEADINGS),
         "Step 1 lacks a git worktree add .worktrees/ line",
+        "missing push rule",
         *(f"missing hard rule: {rule}" for rule in brief.HARD_RULES_BLOCK.splitlines()),
     ]
 
@@ -182,40 +170,56 @@ def test_missing_worktree_line(replacement: str) -> None:
 
 
 def test_worktree_line_must_be_inside_step_one() -> None:
-    text = FILLED.replace("git worktree add", "## Task\ngit worktree add")
+    command = "git worktree add .worktrees/demo -b agent/demo origin/main"
+    text = FILLED.replace(command, "").replace("## Task\n", f"## Task\n{command}")
     assert brief.check(text) == ["Step 1 lacks a git worktree add .worktrees/ line"]
 
 
-def test_indented_worktree_command() -> None:
-    assert brief.check(FILLED.replace("git worktree add", " \tgit worktree add")) == []
+@pytest.mark.parametrize("prefix", [" \t", "- ", "* ", "+ ", "$ ", "  - "])
+def test_prefixed_worktree_command(prefix: str) -> None:
+    assert (
+        brief.check(FILLED.replace("git worktree add", prefix + "git worktree add"))
+        == []
+    )
 
 
 @pytest.mark.parametrize("rule", brief.HARD_RULES_BLOCK.splitlines())
 def test_each_rule_required_in_its_section(rule: str) -> None:
     text = FILLED.replace(rule, "") + "\n" + rule
-    assert brief.check(text) == [f"missing hard rule: {rule}"]
-
-
-def test_rule_normalizes_whitespace_but_not_case() -> None:
-    rule = "- Touch only your worktree and `$TMPDIR`."
-    wrapped = "-  Touch\tonly your\nworktree and `$TMPDIR`."
-    assert brief.check(FILLED.replace(rule, wrapped)) == []
-    assert brief.check(FILLED.replace(rule, rule.lower())) == [
-        f"missing hard rule: {rule}"
+    assert brief.check(text) == [
+        f"missing hard rule: {rule}",
+        *(
+            f"forbidden instruction: {item}"
+            for item in brief.FORBIDDEN
+            if brief.normalize(item) in brief.normalize(rule)
+        ),
     ]
 
 
+def test_rule_normalizes_whitespace_and_case() -> None:
+    rule = "- Touch only your worktree and `$TMPDIR`."
+    wrapped = "-  Touch\tonly your\nworktree and `$TMPDIR`."
+    assert brief.check(FILLED.replace(rule, wrapped)) == []
+    assert brief.check(FILLED.replace(rule, rule.lower())) == []
+
+
 def test_placeholders_anywhere_and_repeated() -> None:
-    assert brief.check(FILLED + "\n{one} {two words}\n{one} {x\ny}\n") == [
-        "unfilled placeholder: {one}",
-        "unfilled placeholder: {two words}",
-        "unfilled placeholder: {one}",
-        "unfilled placeholder: {x\ny}",
+    assert brief.check(FILLED + "\n{ONE} {TWO_WORDS}\n{ONE} {X2}\n") == [
+        "unfilled placeholder: {ONE}",
+        "unfilled placeholder: {TWO_WORDS}",
+        "unfilled placeholder: {ONE}",
+        "unfilled placeholder: {X2}",
     ]
 
 
 def test_plain_braces_are_not_placeholders() -> None:
-    assert brief.check(FILLED + "\n{} {unfinished\n") == []
+    assert (
+        brief.check(
+            FILLED + "\n{} {unfinished {lower} {Two} {2X} {A-B} {A B} "
+            "${TMPDIR} awk '{print}'\n"
+        )
+        == []
+    )
 
 
 @pytest.mark.parametrize("forbidden", brief.FORBIDDEN)
@@ -225,7 +229,7 @@ def test_forbidden_in_task(forbidden: str) -> None:
     assert brief.check(text) == [
         f"forbidden instruction: {item}"
         for item in brief.FORBIDDEN
-        if item in forbidden
+        if brief.normalize(item) in brief.normalize(forbidden)
     ]
 
 
@@ -237,6 +241,7 @@ def test_fixed_text_exempt_but_paraphrases_are_not() -> None:
     assert brief.check(FILLED.replace("Never run `prek", "Do not run `prek")) == [
         "forbidden instruction: prek install",
         "forbidden instruction: pre-commit install",
+        "forbidden instruction: tbhbdev alpha install",
     ]
 
 
@@ -246,11 +251,11 @@ def test_check_multiple_files_continues_after_failure(
     good = tmp_path / "good.md"
     bad = tmp_path / "bad.md"
     good.write_text(FILLED, encoding="utf-8")
-    bad.write_text(FILLED + "{remaining}\nprek install\n", encoding="utf-8")
+    bad.write_text(FILLED + "{REMAINING}\nprek install\n", encoding="utf-8")
     assert brief.main(["check", str(bad), str(good)], PROG) == 1
     assert capsys.readouterr() == (
         (
-            f"{bad}: unfilled placeholder: {{remaining}}\n"
+            f"{bad}: unfilled placeholder: {{REMAINING}}\n"
             f"{bad}: forbidden instruction: prek install\nOK: {good}\n"
         ),
         "",
@@ -290,11 +295,12 @@ def test_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert capsys.readouterr() == (
         (
             "usage: example brief [-h] {new,check} ...\n\n"
-            "Render peer-run briefs and check their fixed safeguards. Forbidden\n"
-            "instructions use literal substring checks after removing the exact fixed\n"
-            "prohibition sentences. This deliberately does not interpret English:\n"
-            "paraphrases and additional mentions fail, "
-            "even when they sound prohibitive.\n\n"
+            "Render peer-run briefs and check their fixed safeguards. "
+            "The check is textual,\n"
+            "not semantic: outside the fixed text, "
+            "it cannot tell a prohibition from an\n"
+            "instruction. Extra lines in Hard rules are allowed. It guards against\n"
+            "omissions and plain mistakes, not against a hostile author.\n\n"
             "positional arguments:\n"
             "  {new,check}\n"
             "    new        write a peer-run brief skeleton\n"
@@ -357,3 +363,213 @@ def test_subcommand_help(
         brief.main([command, "--help"], PROG)
     assert caught.value.code == 0
     assert capsys.readouterr() == (expected, "")
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "PRE-COMMIT INSTALL",
+        "pre-commit  install",
+        "pre-commit\N{NO-BREAK SPACE}install",
+        "pre-commit\ninstall",
+        "\uff50\uff52\uff45-\uff43\uff4f\uff4d\uff4d\uff49\uff54 install",
+        "pre-commit\u2003install",
+        "pre-commit\tinstall",
+    ],
+)
+def test_normalized_forbidden_instructions(instruction: str) -> None:
+    assert brief.check(FILLED + "\nRun " + instruction) == [
+        "forbidden instruction: pre-commit install"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("instruction", "label"),
+    [
+        ("git commit -n", "git commit hook bypass"),
+        ("git commit -m 'change' -n", "git commit hook bypass"),
+        ("git commit --no-ver", "git commit hook bypass"),
+        ("git commit --no-verify"[:-2], "git commit hook bypass"),
+        ("git commit --no-verify", "git commit hook bypass"),
+        ("GIT COMMIT --NO-VER", "git commit hook bypass"),
+        ("git push --force", "git push force option"),
+        ("git push origin HEAD -f", "git push force option"),
+        ("git push --force-with-lease", "git push force option"),
+        ("git config core.hookspath /elsewhere", "core.hooksPath"),
+        ("env -u OP_TOKEN tool", "env -u op_"),
+        ("tbhbdev alpha install", "tbhbdev alpha install"),
+        ("tool --no-verify", "--no-verify"),
+    ],
+)
+def test_forbidden_command_forms(instruction: str, label: str) -> None:
+    expected = [
+        f"forbidden instruction: {item}"
+        for item in brief.FORBIDDEN
+        if brief.normalize(item) in brief.normalize(instruction)
+    ]
+    if label not in brief.FORBIDDEN:
+        expected.append(f"forbidden instruction: {label}")
+    assert brief.check(FILLED + "\nRun " + instruction) == expected
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "git commit -m 'ordinary'",
+        "git commit -nothing",
+        "git push --follow-tags",
+        "git push -foo",
+        "git push; echo -f",
+        "git commit; echo -n",
+    ],
+)
+def test_ordinary_commands(instruction: str) -> None:
+    assert brief.check(FILLED + "\n" + instruction) == []
+
+
+def test_push_rule_required_exactly_once() -> None:
+    missing = FILLED.replace(brief.NO_PUSH_BLOCK, "")
+    assert brief.check(missing) == ["missing push rule"]
+    assert brief.check(FILLED + "\n" + brief.NO_PUSH_BLOCK) == [
+        "expected exactly one push rule"
+    ]
+    assert brief.check(FILLED + "\n## Push\n" + brief.PUSH_BLOCK) == [
+        "expected exactly one push rule"
+    ]
+    assert brief.check(missing + "\n## Push\n" + brief.PUSH_BLOCK) == []
+    assert brief.check(missing + "\n## Push\n" + brief.PUSH_BLOCK * 2) == [
+        "expected exactly one push rule"
+    ]
+    assert brief.check(missing + brief.NO_PUSH_BLOCK.upper().replace(" ", "\n")) == []
+    assert (
+        brief.check(
+            missing + "\n## Push\n" + brief.PUSH_BLOCK.upper().replace(" ", "\n")
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize("heading", ["## Task", "## Gates", "## Final report"])
+def test_fixed_sentence_in_other_sections_is_checked(heading: str) -> None:
+    rule = brief.HARD_RULES_BLOCK.splitlines()[2]
+    text = FILLED.replace(heading, heading + "\nDo this: " + rule)
+    assert brief.check(text) == ["forbidden instruction: tmux -L agents"]
+
+
+def test_rewrapped_fixed_text_and_extra_hard_rule(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    text = FILLED
+    for block in (brief.HOOK_RULE, brief.COMMITS_BLOCK, brief.HARD_RULES_BLOCK):
+        text = text.replace(block, block.upper().replace(" ", "\n"))
+    text = text.replace(
+        "## Final report", "- An extra rule is allowed.\n## Final report"
+    )
+    assert brief.check(text) == []
+    file = tmp_path / "wrapped.md"
+    file.write_text(text, encoding="utf-8")
+    assert brief.main(["check", str(file)], PROG) == 0
+    assert capsys.readouterr() == (f"OK: {file}\n", "")
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~", "````", "~~~~"])
+def test_headings_inside_fences(fence: str) -> None:
+    text = FILLED.replace("```", fence)
+    text = text.replace("git fetch origin", "# note\ngit fetch origin")
+    assert "# note" not in brief.sections(text)
+    assert "# note\n" in brief.sections(text)[brief.REQUIRED_HEADINGS[0]]
+    assert brief.check(text) == []
+
+
+def test_fence_must_close_with_matching_marker() -> None:
+    assert brief.sections("## Task\n```sh\n~~~\n# inside\n```\n## Gates\nok") == {
+        "## Task": "```sh\n~~~\n# inside\n```\n",
+        "## Gates": "ok\n",
+    }
+    assert brief.sections("## Task\n````\n```\n# inside\n`````\n# outside") == {
+        "## Task": "````\n```\n# inside\n`````\n",
+        "# outside": "",
+    }
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "label"),
+    [
+        (None, "../run", "RUN"),
+        (None, "run/name", "RUN"),
+        (None, "_run", "RUN"),
+        (None, "", "RUN"),
+        (None, "run\n", "RUN"),
+        ("--repo", "owner", "REPO"),
+        ("--repo", "owner/repo/extra", "REPO"),
+        ("--repo", "own_er/repo", "REPO"),
+        ("--repo", "owner/", "REPO"),
+        ("--repo", "owner/repo\n", "REPO"),
+        ("--branch", "feat name", "BRANCH"),
+        ("--branch", "feat\tname", "BRANCH"),
+        ("--branch", "feat{TASK}", "BRANCH"),
+        ("--branch", "feat}", "BRANCH"),
+        ("--branch", "", "BRANCH"),
+        ("--base", "origin/main\n", "BASE"),
+        ("--base", "origin/{BASE}", "BASE"),
+        ("--base", "origin/}", "BASE"),
+        ("--base", "", "BASE"),
+    ],
+)
+def test_new_validates_inputs(
+    option: str | None, value: str, label: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = ["new", "demo", "--repo", "owner/repo"]
+    if option is None:
+        argv[1] = value
+    elif option == "--repo":
+        argv[3] = value
+    else:
+        argv.extend([option, value])
+    with pytest.raises(SystemExit) as caught:
+        brief.main(argv, PROG)
+    assert caught.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert f"invalid {label}: {value!r}" in output.err
+
+
+def test_new_accepts_valid_input_characters(capsys: pytest.CaptureFixture[str]) -> None:
+    argv = [
+        "new",
+        "A0.a_-Z",
+        "--repo",
+        "Ow-9/R0.a_-Z",
+        "--branch",
+        "feat/run",
+        "--base",
+        "HEAD~1",
+    ]
+    assert brief.main(argv, PROG) == 0
+    assert capsys.readouterr() == (
+        brief.render("A0.a_-Z", "Ow-9/R0.a_-Z", "feat/run", "HEAD~1"),
+        "",
+    )
+
+
+def test_new_missing_output_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = tmp_path / "missing" / "brief.md"
+    with pytest.raises(SystemExit) as caught:
+        brief.main(["new", "demo", "--repo", "owner/repo", "-o", str(file)], PROG)
+    assert caught.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "No such file" in output.err
+    assert str(file) in output.err
+
+
+def test_normalize_unicode_whitespace_and_case() -> None:
+    assert (
+        brief.normalize(
+            "  \uff26u\N{LATIN SMALL LETTER SHARP S}\N{NO-BREAK SPACE}\n\t X  "
+        )
+        == "fuss x"
+    )
+    assert brief.normalize("") == ""

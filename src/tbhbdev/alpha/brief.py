@@ -1,13 +1,14 @@
 """Render peer-run briefs and check their fixed safeguards.
 
-Forbidden instructions use literal substring checks after removing the exact
-fixed prohibition sentences. This deliberately does not interpret English:
-paraphrases and additional mentions fail, even when they sound prohibitive.
+The check is textual, not semantic: outside the fixed text, it cannot tell a
+prohibition from an instruction. Extra lines in Hard rules are allowed. It guards
+against omissions and plain mistakes, not against a hostile author.
 """
 
 import argparse
 import re
 import shlex
+import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
@@ -60,6 +61,7 @@ REQUIRED_HEADINGS = (
     "## Final report",
 )
 PROHIBITION_REPLACEMENT = ""
+SPACE = " "
 FORBIDDEN = (
     "prek install",
     "pre-commit install",
@@ -71,7 +73,24 @@ FORBIDDEN = (
     "follow-up issue",
     "gh issue create",
     "unset OP_",
+    "env -u op_",
+    "tbhbdev alpha install",
 )
+FORBIDDEN_REGEX = (
+    ("git commit hook bypass", r"\bgit commit\b[^`;&|]*\s(?:-n\b|--no-ver[\w-]*)"),
+    ("git push force option", r"\bgit push\b[^`;&|]*\s(?:--force|-f)\b"),
+)
+FIXED_BY_SECTION = {
+    REQUIRED_HEADINGS[0]: (HOOK_RULE,),
+    "## Commits": (COMMITS_BLOCK, NO_PUSH_BLOCK),
+    "## Push": (PUSH_BLOCK,),
+    "## Hard rules": tuple(HARD_RULES_BLOCK.splitlines()),
+}
+
+
+def normalize(text: str) -> str:
+    """Fold Unicode, whitespace and case for every textual comparison."""
+    return " ".join(unicodedata.normalize("NFKC", text).split()).casefold()
 
 
 def render(
@@ -108,8 +127,16 @@ def sections(text: str) -> dict[str, str]:
     """Collect second-level Markdown sections, ending at the next heading."""
     found: defaultdict[str, str] = defaultdict(str)
     heading = ""
+    fence: str | None = None
     for line in text.splitlines():
-        if line.startswith("#"):
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker:
+            delimiter = marker[1]
+            if fence is None:
+                fence = delimiter
+            elif delimiter.startswith(fence):
+                fence = None
+        if fence is None and line.startswith("#"):
             heading = line
             found.setdefault(heading, "")
         else:
@@ -117,8 +144,19 @@ def sections(text: str) -> dict[str, str]:
     return found
 
 
+def instruction_text(found: dict[str, str]) -> str:
+    """Normalize sections and remove their fixed safeguards before scanning."""
+    remaining_sections = []
+    for heading, content in found.items():
+        body = normalize(content)
+        for fixed in FIXED_BY_SECTION.get(heading, ()):
+            body = body.replace(normalize(fixed), PROHIBITION_REPLACEMENT)
+        remaining_sections.extend((normalize(heading), body))
+    return SPACE.join(remaining_sections)
+
+
 def check(text: str) -> list[str]:
-    """Return each problem, using whitespace normalization only for hard rules."""
+    """Return missing safeguards, placeholders and forbidden instructions."""
     found = sections(text)
     problems = [
         f"missing heading: {heading}"
@@ -127,27 +165,37 @@ def check(text: str) -> list[str]:
     ]
     step = found[REQUIRED_HEADINGS[0]]
     if not any(
-        line.strip().startswith("git worktree add .worktrees/")
+        re.match(r"^\s*(?:[-*+]\s+|\$ )?git worktree add \.worktrees/", line)
         for line in step.splitlines()
     ):
         problems.append("Step 1 lacks a git worktree add .worktrees/ line")
-    rules = " ".join(found["## Hard rules"].split())
+    push_rules = sum(
+        normalize(text).count(normalize(rule)) for rule in (PUSH_BLOCK, NO_PUSH_BLOCK)
+    )
+    if push_rules == 0:
+        problems.append("missing push rule")
+    elif push_rules != 1:
+        problems.append("expected exactly one push rule")
+    rules = normalize(found["## Hard rules"])
     problems.extend(
         f"missing hard rule: {rule}"
         for rule in HARD_RULES_BLOCK.splitlines()
-        if " ".join(rule.split()) not in rules
+        if normalize(rule) not in rules
     )
     problems.extend(
         f"unfilled placeholder: {placeholder}"
-        for placeholder in re.findall(r"\{[^{}]+\}", text)
+        for placeholder in re.findall(r"(?<!\$)\{[A-Z][A-Z0-9_]*\}", text)
     )
-    remaining = text
-    for fixed in (HOOK_RULE, COMMITS_BLOCK, *HARD_RULES_BLOCK.splitlines()):
-        remaining = remaining.replace(fixed, PROHIBITION_REPLACEMENT)
+    remaining = instruction_text(found)
     problems.extend(
         f"forbidden instruction: {forbidden}"
         for forbidden in FORBIDDEN
-        if forbidden in remaining
+        if normalize(forbidden) in remaining
+    )
+    problems.extend(
+        f"forbidden instruction: {label}"
+        for label, pattern in FORBIDDEN_REGEX
+        if re.search(normalize(pattern), remaining)
     )
     return problems
 
@@ -183,9 +231,20 @@ def main(argv: list[str], prog: str) -> int:
     args = parser.parse_args(argv)
     if args.command == "check":
         return check_files(args.files)
+    for value, pattern, label in (
+        (args.run, r"[A-Za-z0-9][A-Za-z0-9._-]*", "RUN"),
+        (args.repo, r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", "REPO"),
+        (args.branch, r"[^\s{}]+", "BRANCH"),
+        (args.base, r"[^\s{}]+", "BASE"),
+    ):
+        if value is not None and not re.fullmatch(pattern, value):
+            parser.error(f"invalid {label}: {value!r}")
     text = render(args.run, args.repo, args.branch, args.base, push=args.push)
     if args.o:
-        Path(args.o).write_bytes(text.encode())
+        try:
+            Path(args.o).write_bytes(text.encode())
+        except OSError as exc:
+            parser.error(str(exc))
     else:
         print(text, end="")
     return 0
