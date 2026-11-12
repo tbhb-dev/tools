@@ -11,13 +11,32 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from tbhbdev.alpha import private_names
 from tbhbdev.alpha.agent import host_tools, runfiles
 from tbhbdev.alpha.agent.decisions import repo
+from tbhbdev.alpha.private_names import _configured
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
     from tbhbdev.alpha.agent.run_host import Prepared, Run
+
+
+PRIVATE_NAMES = ".local/state/tbhb/private-repos.txt"
+_PRIVATE_PATH = re.compile(
+    r"(tbhb-dev/(op"
+    r"s|github-action"
+    r"s|run"
+    r"book)\b|\b(op"
+    r"s|github-action"
+    r"s|run"
+    r"book)\.git\b)",
+    re.IGNORECASE,
+)
+
+
+class PushRefusedError(ValueError):
+    """The outgoing range could not pass the publication checks."""
 
 
 def url(repository: str) -> str:
@@ -128,9 +147,17 @@ def run(
     if commit is None or commit == before:
         return rc
     run.files.write("head", commit)
+    if rc:
+        run.files.write("log", f"push skipped: harness exited {rc}\n")
+        return rc
     try:
+        names = read_names(run.home / PRIVATE_NAMES)
         with publication(run.files.root, workspace, commit) as directory:
+            scan(directory, before, commit, names)
             status, error = send(directory, url(run.request.repo), branch, token)
+    except PushRefusedError as refusal:
+        run.files.write("log", f"push refused: {refusal}\n")
+        return 4
     except OSError, subprocess.SubprocessError:
         status, error = True, "git push unavailable"
     if status:
@@ -138,9 +165,96 @@ def run(
             token, "[redacted]"
         )
         run.files.write("log", f"push failed: {line}\n")
-        return 4
-    run.files.write("branch", branch)
-    return rc
+    else:
+        run.files.write("branch", branch)
+    return 4 if status else rc
+
+
+def read_names(source: Path) -> list[str]:
+    try:
+        text = runfiles.read_owned(source, 1024 * 1024, "private-name list")
+    except OSError, ValueError:
+        text = ""
+    names = [
+        name
+        for line in text.splitlines()
+        if (name := line.strip()) and not name.startswith("#")
+    ]
+    if not names:
+        message = f"no private-name list at {source}"
+        raise PushRefusedError(message)
+    return names
+
+
+def scan(directory: Path, before: str | None, commit: str, names: list[str]) -> None:
+    if before is None:
+        message = "no base commit"
+        raise PushRefusedError(message)
+    env = dict.fromkeys(
+        (
+            "HOME",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+        ),
+        str(directory),
+    )
+    env.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_ASKPASS": "/bin/false",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PATH": host_tools.search(),
+        }
+    )
+    try:
+        result = subprocess.run(  # nosec B603
+            [
+                host_tools.resolve("git"),
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "diff.external=",
+                "-c",
+                "core.pager=cat",
+                "-C",
+                str(directory),
+                "log",
+                "--format=commit %H%n%B",
+                "-p",
+                "--no-ext-diff",
+                "--no-text" + "conv",
+                f"{before}..{commit}",
+            ],
+            cwd=directory,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            errors="replace",
+            check=True,
+        )
+    except OSError, subprocess.SubprocessError:
+        message = "git log unavailable"
+        raise PushRefusedError(message) from None
+    lines = result.stdout.splitlines()
+    hits = private_names.private_name_problems(lines, names + list(_configured()))
+    hits += [
+        (n, "path to private repo: " + m.group())
+        for n, line in enumerate(lines, 1)
+        for m in [_PRIVATE_PATH.search(line)]
+        if m
+    ]
+    if hits:
+        message = f"{len(hits)} private-name hit(s)" + "".join(
+            f"\nline {n}: {message}" for n, message in hits
+        )
+        raise PushRefusedError(message)
 
 
 def head(workspace: Path, branch: str) -> str | None:
