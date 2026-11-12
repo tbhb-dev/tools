@@ -335,7 +335,7 @@ def checked_policy(
         executable = host_tools.resolve(name, value.env["PATH"], follow_symlinks=False)
     commands = [
         host_tools.resolve(name, ":".join(directories), follow_symlinks=False)
-        for name in ("git", "ssh-agent", "ssh-add", "ssh", "openssl")
+        for name in ("git", "ssh-agent", "ssh-add", "ssh", "openssl", "gitleaks")
     ]
     if run.host.os.value == "macos":
         commands.extend(
