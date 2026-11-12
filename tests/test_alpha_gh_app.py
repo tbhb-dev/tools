@@ -1487,6 +1487,48 @@ def test_the_module_names_no_service_account() -> None:
 MINT_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
 
 
+def test_mint_token_disables_client_environment(
+    tmp_path: Path, rsa: Key, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    enter = httpx.Client.__enter__
+
+    def check_client(client: httpx.Client) -> httpx.Client:
+        assert client.trust_env is False
+        return enter(client)
+
+    monkeypatch.setattr(httpx.Client, "__enter__", check_client)
+    github = Github()
+    assert gh_app.mint_token(
+        env_for(tmp_path, Store({}), github),
+        app_id=APP_ID,
+        pem=rsa.pem,
+        repository=REPO,
+        permissions=MINT_PERMISSIONS,
+    ) == gh_app.Minted(TOKEN, EXPIRES_EPOCH)
+    assert len(github.requests) == 2
+
+
+def test_mint_token_ignores_proxy_environment(
+    tmp_path: Path, rsa: Key, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:bad")
+    monkeypatch.setattr(
+        "httpx._utils.getproxies", lambda: {"https": os.environ["HTTPS_PROXY"]}
+    )
+    github = Github()
+    monkeypatch.setattr(
+        httpx.HTTPTransport, "handle_request", lambda _self, request: github(request)
+    )
+    assert gh_app.mint_token(
+        replace(env_for(tmp_path, Store({}), github), transport=None),
+        app_id=APP_ID,
+        pem=rsa.pem,
+        repository=REPO,
+        permissions=MINT_PERMISSIONS,
+    ) == gh_app.Minted(TOKEN, EXPIRES_EPOCH)
+    assert len(github.requests) == 2
+
+
 @pytest.mark.parametrize("permissions", [MINT_PERMISSIONS, {"contents": "read"}])
 def test_mint_token_narrows_and_signs_without_files(
     tmp_path: Path,

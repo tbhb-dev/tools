@@ -3,6 +3,9 @@
 All inputs are explicit. JWT clock refusals are reported as ``mint``: gh_app
 sanitizes API failures before returning them, so they cannot be distinguished.
 The module entry point is Git's private credential helper, not an alpha command.
+Git runs with hooks disabled so hooks cannot read the credential pipe.
+Git always receives ``GIT_TERMINAL_PROMPT=0`` to prevent interactive prompts.
+Connect endpoints must be HTTPS URLs with a host.
 """
 
 from __future__ import annotations
@@ -19,6 +22,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
+
+import httpx
 
 from tbhbdev import secrets
 from tbhbdev.alpha import gh_app
@@ -104,6 +109,13 @@ def read_app(token_file: Path, item: str, *, endpoints: Sequence[str]) -> AppKey
     parts = item.removeprefix("op://").split("/")
     if not item.startswith("op://") or len(parts) != TWO_PARTS or not all(parts):
         raise RepoTokenError(kind="item")
+    try:
+        for endpoint in endpoints:
+            url = httpx.URL(endpoint)
+            if url.scheme != "https" or not url.host:
+                raise RepoTokenError(kind="connect")
+    except httpx.InvalidURL, ValueError, TypeError:
+        raise RepoTokenError(kind="connect") from None
     try:
         found = secrets.explicit_item(token, *parts, urls=endpoints)
     except secrets.ConnectUnavailableError:
@@ -246,6 +258,7 @@ def _git(  # noqa: PLR0913  # Private input seam for the real Git probe.
             )
         else:
             child_env = _extraheader(env, token.token)
+        child_env["GIT_TERMINAL_PROMPT"] = "0"
         return subprocess.run(  # nosec B603
             [
                 executable,
@@ -253,6 +266,8 @@ def _git(  # noqa: PLR0913  # Private input seam for the real Git probe.
                 "credential.helper=",
                 "-c",
                 f"credential.helper={helper}",
+                "-c",
+                "core.hooksPath=/dev/null",
                 *args,
             ],
             cwd=cwd,
@@ -279,7 +294,7 @@ def git(
     env: Mapping[str, str],
     timeout: float = 120,
 ) -> subprocess.CompletedProcess[str]:
-    """Run Git using an in-memory token and the caller's exact environment."""
+    """Run Git with an in-memory token, disabled hooks and no terminal prompts."""
     return _git(token, args, cwd=cwd, env=env, timeout=timeout)
 
 

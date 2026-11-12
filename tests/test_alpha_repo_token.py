@@ -232,6 +232,44 @@ def test_all_connect_endpoints_fail(
 
 
 @pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://connect.example",
+        "not-a-url",
+        "",
+        "https://",
+        "https://[invalid]",
+        "https://connect.example:bad",
+        "https://xn--zz.example",
+    ],
+)
+def test_read_app_requires_https_endpoints(
+    token_file: Path, endpoint: str, connect_transport: list[httpx.Request]
+) -> None:
+    assert_kind("connect", lambda: rt.read_app(token_file, ITEM, endpoints=[endpoint]))
+    assert connect_transport == []
+
+
+@pytest.mark.parametrize("label", ["app_id", "private_key"])
+@pytest.mark.parametrize("value", [None, 123, "", " \t"])
+def test_read_app_rejects_invalid_fields(
+    token_file: Path,
+    connect_transport: list[httpx.Request],
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    value: object,
+) -> None:
+    def get(_self: secrets.Connect, _vault: str, _item: str) -> secrets.Json:
+        fields: dict[str, object] = {"app_id": "123", "private_key": "key"}
+        fields[label] = value
+        return {"fields": [{"label": k, "value": v} for k, v in fields.items()]}
+
+    monkeypatch.setattr(secrets.Connect, "item", get)
+    assert_kind("item", lambda: rt.read_app(token_file, ITEM, endpoints=URLS))
+    assert connect_transport
+
+
+@pytest.mark.parametrize(
     "item",
     [
         "vault/app",
@@ -516,13 +554,17 @@ def test_probe_real_git_fallback(
 
 
 @pytest.mark.parametrize("pipe", [True, False])
+@pytest.mark.parametrize("prompt", [None, "1", "arbitrary"])
 def test_git_invocation_and_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipe: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipe: bool, prompt: str | None
 ) -> None:
     monkeypatch.setattr(rt, "USE_PIPE", pipe)
     executable = shutil.which("git")
     assert executable
     environment = {"PATH": str(Path(executable).parent), "EXPLICIT": "kept"}
+    if prompt is not None:
+        environment["GIT_TERMINAL_PROMPT"] = prompt
+    original = dict(environment)
 
     def run(  # noqa: PLR0913  # Assert subprocess keyword arguments.
         argv: list[str],
@@ -538,6 +580,7 @@ def test_git_invocation_and_environment(
     ) -> subprocess.CompletedProcess[str]:
         assert argv[0] == executable
         assert argv[1:4] == ["-c", "credential.helper=", "-c"]
+        assert argv[5:] == ["-c", "core.hooksPath=/dev/null", "fetch"]
         assert argv[-1] == "fetch"
         assert TOKEN not in repr(argv)
         assert cwd == tmp_path
@@ -547,7 +590,7 @@ def test_git_invocation_and_environment(
         assert check is False
         assert input is None
         if pipe:
-            assert env == environment
+            assert env == environment | {"GIT_TERMINAL_PROMPT": "0"}
             assert len(pass_fds) == 1
             assert os.read(pass_fds[0], 1000).decode() == TOKEN
             assert os.read(pass_fds[0], 1000) == b""
@@ -563,6 +606,7 @@ def test_git_invocation_and_environment(
         else:
             assert pass_fds == ()
             assert env == environment | {
+                "GIT_TERMINAL_PROMPT": "0",
                 "GIT_CONFIG_COUNT": "1",
                 "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
                 "GIT_CONFIG_VALUE_0": "AUTHORIZATION: basic "
@@ -579,6 +623,7 @@ def test_git_invocation_and_environment(
             rt.Minted(TOKEN, 100), ["fetch"], cwd=tmp_path, env=environment, timeout=9
         )
     assert (done.returncode, done.stdout, done.stderr) == (17, "out", "err")
+    assert environment == original
 
 
 @pytest.mark.parametrize(

@@ -543,7 +543,11 @@ def exchange_token(  # noqa: PLR0913  # Optional installation cache seams.
     }
     try:
         with httpx.Client(
-            base_url=API, headers=headers, timeout=TIMEOUT, transport=env.transport
+            base_url=API,
+            headers=headers,
+            timeout=TIMEOUT,
+            transport=env.transport,
+            trust_env=False,
         ) as client:
             ident = known_installation
             if ident is None:
