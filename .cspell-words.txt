@@ -92,6 +92,7 @@ keepalive
 keepends
 keygen
 keyrings
+killall
 kworker
 libc
 libexec

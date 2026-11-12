@@ -146,6 +146,8 @@ Bootstrap and upgrade skip the workspace when the config has no `[workspace]`.
 
 `tbhbdev alpha verify-range BASE TIP [-C PATH]` checks each commit in `BASE..TIP`, oldest first. A commit passes when the agent is its author and committer, it has a signature header and valid attribution trailers, and it has exactly one parent. Sign-off trailers, co-author trailers and GitHub's no-reply addresses fail it. Exit codes are 0 when every commit passes, 1 when any fails and 2 for usage or Git errors.
 
+`tbhbdev alpha brief new RUN --repo OWNER/REPO` writes a peer-run brief skeleton to stdout, or to a file with `-o FILE`. Fill its placeholders, then run `tbhbdev alpha brief check FILE...` to check the completed brief. Use `--branch` and `--base` to override the worktree defaults. `--push` includes the required outgoing scan. The check searches for literal forbidden strings after removing exact fixed prohibition sentences. It treats paraphrases as text to check.
+
 Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does six things:
 
 - It installs that clone's git hooks into `$(git rev-parse --git-common-dir)/hooks`, which every worktree of the clone shares. The pre-push guard runs before prek and refuses pushes when `tbhbdev` is missing from PATH. prek runs pre-commit and pre-push, and three shims run `tbhbdev alpha identity` for prepare-commit-msg, commit-msg and post-commit. Without `tbhbdev` on PATH, the shims block a commit in a tbhb-dev repository and do nothing elsewhere.
