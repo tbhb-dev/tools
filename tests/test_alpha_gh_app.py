@@ -1516,9 +1516,13 @@ def test_mint_token_ignores_proxy_environment(
         "httpx._utils.getproxies", lambda: {"https": os.environ["HTTPS_PROXY"]}
     )
     github = Github()
-    monkeypatch.setattr(
-        httpx.HTTPTransport, "handle_request", lambda _self, request: github(request)
-    )
+
+    def handle_request(
+        _self: httpx.HTTPTransport, request: httpx.Request
+    ) -> httpx.Response:
+        return github(request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_request)
     assert gh_app.mint_token(
         replace(env_for(tmp_path, Store({}), github), transport=None),
         app_id=APP_ID,
