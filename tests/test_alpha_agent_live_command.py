@@ -27,7 +27,7 @@ def live_module(path: Path) -> bool:
     return False
 
 
-def test_readme_command_runs_every_opt_in_live_module() -> None:
+def test_documented_command_runs_every_opt_in_live_module() -> None:
     root = Path(__file__).resolve().parents[1]
     live = {
         str(path.relative_to(root))
@@ -37,7 +37,7 @@ def test_readme_command_runs_every_opt_in_live_module() -> None:
     assert live
     command = re.search(
         r"(?m)^TBHBDEV_SANDBOX_LIVE=1 uv run pytest .+$",
-        (root / "README.md").read_text(),
+        (root / "docs/reference/alpha/agent-configuration.md").read_text(),
     )
     assert command is not None
     arguments = shlex.split(command[0])
@@ -47,8 +47,10 @@ def test_readme_command_runs_every_opt_in_live_module() -> None:
     )
 
 
-def test_readme_documents_limits_and_twelve_parent_git_starts() -> None:
-    text = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+def test_docs_document_limits_and_twelve_parent_git_starts() -> None:
+    docs = Path(__file__).resolve().parents[1] / "docs/reference/alpha"
+    limits = (docs / "agent-isolation-limits.md").read_text()
+    text = (docs / "agent-configuration.md").read_text() + limits
     for phrase in (
         "typed list",
         "Remove it when upgrading",
@@ -67,9 +69,6 @@ def test_readme_documents_limits_and_twelve_parent_git_starts() -> None:
         "git maintenance run --auto",
     ):
         assert phrase in text
-    limits = text.split("### Agent isolation limits", 1)[1].split("### Secret scan", 1)[
-        0
-    ]
     counts = re.findall(r"`[^`]+` \((\d+)\)", limits)
     assert len(counts) == 7
     assert sum(map(int, counts)) == 12
