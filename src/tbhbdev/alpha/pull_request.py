@@ -1112,6 +1112,7 @@ def closed_pr_head(number: int, repo: str) -> str:
     if not isinstance(data, dict):
         message = f"cannot read PR {number} on origin"
         raise SystemExit(message)
+    data = cast("dict[str, object]", data)  # pragma: no mutate
     if data.get("state") not in ("CLOSED", "MERGED"):
         message = f"PR {number} is not closed or merged"
         raise SystemExit(message)

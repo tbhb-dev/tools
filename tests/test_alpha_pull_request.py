@@ -3018,11 +3018,8 @@ def test_delete_branch_deletes_only_the_origin_pr_head(
             "repos/tbhb-dev/example/branches/agent%2Ftopic",
         ],
         [
-            "api",
-            "--hostname",
-            "github.com",
-            "--method",
-            "DELETE",
+            *["api", "--hostname", "github.com"],
+            *["--method", "DELETE"],
             "repos/tbhb-dev/example/git/refs/heads/agent%2Ftopic",
         ],
     ]
@@ -3081,7 +3078,9 @@ def test_delete_branch_refuses_failed_or_malformed_lookups(
     world.fake("gh", cases=cases)
     with pytest.raises(SystemExit):
         run_main("delete-branch", "45")
-    assert all("DELETE" not in call["argv"] for call in world.calls("gh"))
+    assert all(
+        "DELETE" not in cast("list[str]", call["argv"]) for call in world.calls("gh")
+    )
 
 
 def test_delete_branch_requires_origin(world: World) -> None:
