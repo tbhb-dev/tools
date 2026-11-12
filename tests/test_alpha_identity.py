@@ -39,6 +39,11 @@ if TYPE_CHECKING:
 DATA = Path(__file__).parent / "testdata" / "alpha"
 SRC = Path(ai.__file__).parents[2]
 ORIGIN = "git@github.com:tbhb-dev/example.git"
+HUMAN_COMMIT_ENV = {
+    f"GIT_{role}_{field}": value
+    for role in ("AUTHOR", "COMMITTER")
+    for field, value in (("NAME", "Human"), ("EMAIL", "h@example.invalid"))
+}
 
 H = "sha-256-64:"
 ROOT = H + "a" * 16
@@ -53,6 +58,7 @@ AGENT_VARS = (
     "ANTIGRAVITY",
     "ASCM_",
     "AI_AGENT",
+    "TBHB_GH_",
 )
 
 type Json = dict[str, object]
@@ -685,7 +691,8 @@ def test_stores_in_a_path_with_a_space(tmp_path: Path) -> None:
 
 def add_worktree(repo: Path, tree: Path) -> Path:
     """A linked worktree of `repo` at `tree`, on a new branch named after it."""
-    run_git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+    done = git_commit(repo, "base", HUMAN_COMMIT_ENV, "--allow-empty")
+    assert done.returncode == 0, done.stderr
     run_git(repo, "worktree", "add", "-q", "-b", tree.name, str(tree))
     return tree.resolve()
 
@@ -3590,12 +3597,82 @@ def test_cmd_check(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
 # -------------------------------------------------------------------- main
 
 
+NO_SESSION_MESSAGE = (
+    "this commit claims the agent identity but no agent session is attached. "
+    "Agents: commit from the harness's own host, where the session's hooks run. "
+    "Humans: commit as yourself; the agent identity is reserved for agent sessions."
+)
+
+
+@pytest.mark.parametrize(
+    "roles", [("AUTHOR", "COMMITTER"), ("AUTHOR",), ("COMMITTER",)]
+)
+@pytest.mark.parametrize(
+    "text",
+    [
+        "subject\n\nbody\n",
+        f"subject\n\nAssisted-by: LLM {GOOD}\n",
+        "subject\n\nGenerated-by impostor\n",
+    ],
+)
+def test_check_refuses_agent_email_without_session(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    roles: tuple[str, ...],
+    text: str,
+) -> None:
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "Another name")
+        monkeypatch.setenv(
+            f"GIT_{role}_EMAIL",
+            "agent@tonyburns.net" if role in roles else "human@example.invalid",
+        )
+    path = msg_file(repo, text)
+    assert not (repo / ".git" / ai.STORE).exists()
+    assert not ai.user_store().exists()
+    assert ai.main(["check", str(path)], dict(os.environ)) == 1
+    assert capsys.readouterr() == ("", NO_SESSION_MESSAGE + "\n")
+    assert path.read_text() == text
+
+
+@pytest.mark.parametrize("email", ["human@example.invalid", "otheragent@tonyburns.net"])
+def test_check_human_without_session_is_unchanged(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    email: str,
+) -> None:
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", email)
+    path = msg_file(repo)
+    before = path.read_bytes()
+    assert ai.cmd_check(str(path), dict(os.environ)) == 0
+    assert capsys.readouterr() == ("", "")
+    assert path.read_bytes() == before
+
+
+def test_check_agent_session_keeps_existing_trailer_rules(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed_claude(repo)
+    path = msg_file(tmp_path)
+    assert ai.cmd_trailer(str(path), "message", CLAUDE_COMMIT_ENV) == 0
+    before = path.read_bytes()
+    assert b"Generated-by: LLM" in before
+    assert ai.cmd_check(str(path), CLAUDE_COMMIT_ENV) == 0
+    assert capsys.readouterr() == ("", "")
+    assert path.read_bytes() == before
+
+
 @pytest.mark.usefixtures("repo")
 def test_main_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "human@example.invalid")
     path = msg_file(tmp_path)
     feed(monkeypatch, {"session_id": "s", "model": "m"})
     assert ai.main(["record", "codex"], {}) == 0
@@ -3885,10 +3962,34 @@ def claude_write(
 @needs_prek
 def test_e2e_human_commit_is_untouched(wired: Path) -> None:
     stage(wired, "h.txt")
-    done = git_commit(wired, "human work", None, "-s")
+    done = git_commit(wired, "human work", HUMAN_COMMIT_ENV, "-s")
     assert done.returncode == 0, done.stderr
-    assert "Signed-off-by: tbhb.dev Agent <agent@tonyburns.net>" in last_message(wired)
+    assert "Signed-off-by: Human <h@example.invalid>" in last_message(wired)
     assert trailers(wired) == []
+
+
+@needs_prek
+@pytest.mark.parametrize(
+    "roles", [("AUTHOR", "COMMITTER"), ("AUTHOR",), ("COMMITTER",)]
+)
+def test_e2e_agent_identity_requires_session(
+    wired: Path, roles: tuple[str, ...]
+) -> None:
+    stage(wired, "a.txt")
+    identities = {
+        f"GIT_{role}_{field}": value
+        for role in ("AUTHOR", "COMMITTER")
+        for field, value in (
+            ("NAME", "tbhb.dev Agent" if role in roles else "Human"),
+            ("EMAIL", "agent@tonyburns.net" if role in roles else "h@example.invalid"),
+        )
+    }
+    assert not (wired / ".git" / ai.STORE).exists()
+    assert not ai.user_store().exists()
+    done = git_commit(wired, "feat: a", identities)
+    assert done.returncode != 0
+    assert NO_SESSION_MESSAGE in done.stderr.splitlines()
+    assert run_git(wired, "log", "-1", "--format=%s") == "init\n"
 
 
 @needs_prek
@@ -3983,8 +4084,7 @@ def test_e2e_an_agent_amend_keeps_a_wrong_author_and_fails(wired: Path) -> None:
 @needs_prek
 def test_e2e_a_human_commit_keeps_its_own_identity(wired: Path) -> None:
     stage(wired, "a.txt")
-    human = {"GIT_AUTHOR_NAME": "Human", "GIT_AUTHOR_EMAIL": "h@example.invalid"}
-    done = git_commit(wired, "feat: a", human)
+    done = git_commit(wired, "feat: a", HUMAN_COMMIT_ENV)
     assert done.returncode == 0, done.stderr
     assert run_git(wired, "log", "-1", "--format=%ae") == "h@example.invalid\n"
     assert trailers(wired) == []
@@ -4049,7 +4149,7 @@ def test_ident_problems_refuses_a_signoff_or_co_author(
     monkeypatch.setattr(ai, "git", agent_git)
     text = f"feat: a\n\nbody\n\n{line}\n"
     assert ai.ident_problems(text, {"CODEX_SESSION_ID": "s"}) == [SIGNOFF_BASE]
-    assert ai.ident_problems(text, {}) == []
+    assert ai.ident_problems(text, {}) == [ai.SESSION_ERROR]
 
 
 def test_ident_problems_reports_the_trailers_once(
@@ -4080,7 +4180,10 @@ def test_ident_problems_ignores_trailers_outside_a_harness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(ai, "git", agent_git)
-    text = "feat: a\n\nSigned-off-by: A <a@x>\nCo-authored-by: B <b@x>\n"
+    text = (
+        f"feat: a\n\nGenerated-by: LLM {GOOD}\n"
+        "Signed-off-by: A <a@x>\nCo-authored-by: B <b@x>\n"
+    )
     assert ai.ident_problems(text, {}) == []
 
 
@@ -4436,7 +4539,8 @@ def with_msg_linter(wired: Path) -> Path:
         env=hook_env(),
     )
     run_git(wired, "add", "cog.sh", ".pre-commit-config.yaml")
-    run_git(wired, "commit", "-q", "-m", "chore: linter")
+    done = git_commit(wired, "chore: linter", HUMAN_COMMIT_ENV)
+    assert done.returncode == 0, done.stderr
     (wired / "cog.log").unlink(missing_ok=True)
     return wired
 

@@ -14,7 +14,9 @@ those records into trailers and validate them:
     trailer <msgfile> [source]         prepare-commit-msg: stamp the trailers
     consume                            post-commit: consume the credited receipts
     check <msgfile>                    commit-msg: validate the trailers, and
-                                       an agent commit's author and committer
+                                       an agent commit's author and committer;
+                                       reject an agent identity without a
+                                       session or Generated-by trailer
     stamp-docs                         pre-commit: stamp staged Markdown frontmatter
 
 The trailer grammar is a subset of the ascm design's, with optional fields
@@ -29,7 +31,12 @@ wrote none of the staged content. ``check`` validates the ``LLM``
 trailers, the same for every committer. In an agent harness it also requires
 ``AGENT_IDENT`` as the author and the committer, and rejects any
 ``Signed-off-by`` or ``Co-authored-by`` line: the operator signs off, not the
-agent. A human's commit, outside any harness, is not checked for either.
+agent. Outside any harness, an author or committer using the agent email must
+have a ``Generated-by`` trailer. Human identities keep their existing behavior.
+
+``--no-verify`` bypasses client validation hooks, including ``commit-msg``.
+Git still runs ``prepare-commit-msg`` and ``post-commit``; the existing push and
+merge checks (``verify-range``, ``alpha merge``) cover bypassed validation.
 
 ``stamp-docs`` sets the ``generated`` list of each staged document's frontmatter
 (see docs/schemas/frontmatter.schema.json) to the same identities, from the same
@@ -2514,6 +2521,12 @@ def cmd_stamp_docs(env: Mapping[str, str]) -> int:
 LINE = re.compile(r"^(Generated-by|Assisted-by):\s*(.*)$")
 # The one identity every agent commit is authored and committed as.
 AGENT_IDENT = "tbhb.dev Agent <agent@tonyburns.net>"
+AGENT_EMAIL = AGENT_IDENT.partition("<")[2].removesuffix(">")
+SESSION_ERROR = (
+    "this commit claims the agent identity but no agent session is attached. "
+    "Agents: commit from the harness's own host, where the session's hooks run. "
+    "Humans: commit as yourself; the agent identity is reserved for agent sessions."
+)
 # The timestamp and zone at the end of ``git var GIT_*_IDENT``.
 IDENT_DATE = re.compile(r" [0-9]+ [-+][0-9]{4}$")
 # A sign-off or co-author line; git matches trailer keys without regard to case.
@@ -2584,16 +2597,22 @@ def check_message(text: str) -> list[str]:
 
 
 def ident_problems(text: str, env: Mapping[str, str]) -> list[str]:
-    """Why a commit made in an agent harness has the wrong identity.
+    """Why a commit fails the agent identity's session or attribution rules.
 
     Every agent commit is authored and committed as ``AGENT_IDENT``, and
     ``text`` carries no ``Signed-off-by`` or ``Co-authored-by`` line, whoever it
     names; the operator signs off. ``git var`` gives the identities this commit
     records, including ``--author``, the author ``--amend`` keeps, and ``GIT_*``
-    overrides. A human's commit, outside any harness, isn't checked, even when
-    its trailers credit an agent's edits.
+    overrides. Outside a harness, the agent email requires a Generated-by
+    trailer; human identities aren't checked, even when crediting agent edits.
     """
     if detect(env) is None:
+        if any(line.startswith(f"{KEY_GEN}:") for line in text.splitlines()):
+            return []
+        for role in ("AUTHOR", "COMMITTER"):
+            _, out = git("var", f"GIT_{role}_IDENT")
+            if IDENT_DATE.sub("", out).endswith(f"<{AGENT_EMAIL}>"):
+                return [SESSION_ERROR]
         return []
     errs = []
     for role in ("author", "committer"):
@@ -2611,7 +2630,7 @@ def cmd_check(msgfile: str, env: Mapping[str, str]) -> int:
     text = Path(msgfile).read_text()
     errs = check_message(text) + ident_problems(text, env)
     for err in errs:
-        print(f"{PROG}: {err}", file=sys.stderr)
+        print(err if err == SESSION_ERROR else f"{PROG}: {err}", file=sys.stderr)
     return 1 if errs else 0
 
 
