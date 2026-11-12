@@ -906,7 +906,6 @@ def test_incidental_context_still_blocks(text: str) -> None:
     "text",
     [
         'The command printed "the fix merged".',
-        'The build is RUNNING: "worker started".',
         "The fix merged in build 12345.",
         "The fix merged; SEE notes/check.txt.",
         "Is the fix merged?   ",
@@ -1076,7 +1075,6 @@ def test_legacy_unsubstantiated_read_backs_block(text: str) -> None:
         "The fix merged per my read.",
         "The fix merged per my grep.",
         "The fix merged per my check.",
-        'The fix merged, "job 12345".',
         'The fix merged, "notes/check.txt".',
         'The fix merged: "123456789012".',
         'The fix merged: "status ready".',
@@ -1327,7 +1325,6 @@ def test_time_is_not_attribution(time: str) -> None:
         "It would probably have been merged.",
         "It should not get merged.",
         "I'll have the fix merged.",
-        'The fix merged ("' + "a" * 7 + '").',
         'The fix merged ("ABC1234").',
         'The fix merged ("#123").',
     ],
@@ -1339,4 +1336,83 @@ def test_direct_modal_phrases_and_quoted_artifacts_pass(text: str) -> None:
 @pytest.mark.parametrize("content", ["1", "123", "123456", "job 1234", "a1b2c3"])
 def test_short_quoted_numbers_are_not_artifacts(content: str) -> None:
     text = f'The fix merged ("{content}").'
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Both merged hours ago.",
+        "4 merged without errors.",
+        'The fix merged, "job 12345 failed".',
+        'The fix merged, "job 12345".',
+        'The build is running ("notes/check.txt").',
+        'The build is started ("notes/check.txt").',
+        'The build is RUNNING: "worker started".',
+        'The fix merged, "Decisions/check".',
+        'The fix merged job"aside" 12345.',
+        'The fix merged in notes/"aside"check.txt.',
+        "The worker is running at 20 per CPU.",
+        "The worker is running at 20 per GPU.",
+        "The worker is running at 20 per MiB.",
+        "The worker is running at 20 per 4.",
+        "Will just merged the fix.",
+        "Will merged the fix.",
+        "Will quickly merged the fix.",
+        "What I changed is deployed; can you check?",
+        "Did you see it? The fix merged.",
+    ],
+)
+def test_reviewed_status_bypasses_block(text: str) -> None:
+    assert state_guard.unsupported_claims(text)
+
+
+@pytest.mark.parametrize(
+    "content", ["defaced", "aaaaaaa", "1234567", "a" * 40, "1" * 40]
+)
+def test_quoted_hash_needs_a_digit_and_a_hex_letter(content: str) -> None:
+    text = f'The fix merged ("{content}").'
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Both merged changes need review.",
+        "4 merged fixes need review.",
+        'The fix merged, "notes/check.txt".',
+        'The fix merged, "abc1234".',
+        'The fix merged, "#123".',
+        'The fix merged "aside" in job 12345.',
+        'The fix merged "aside" in notes/check.txt.',
+        'The fix merged; see "aside" notes/check.txt.',
+        "The worker is running per notes/check.txt.",
+        "The worker is running per CPU/check.txt.",
+        "The worker is running per GPU/check.txt.",
+        "The worker is running per MiB/check.txt.",
+        "The worker is running per the worker log.",
+        "The worker is running per Alice.",
+        "It will just be merged.",
+        "It will just merged.",
+        "Will just be merged.",
+        "Did you see that the fix merged?",
+        "What changed is deployed?",
+    ],
+)
+def test_reviewed_exemptions_stay_scoped(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == []
+
+
+@pytest.mark.parametrize(
+    "unit", ["second", "minute", "hour", "day", "week", "month", "year"]
+)
+@pytest.mark.parametrize("ending", ["", "s"])
+def test_counted_participles_with_elapsed_time_block(unit: str, ending: str) -> None:
+    text = f"Both merged {unit}{ending} ago."
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize("content", ["job 12345", "Decisions/check"])
+def test_unmarked_quotes_do_not_supply_artifacts(content: str) -> None:
+    text = f'The fix merged "{content}".'
     assert state_guard.unsupported_claims(text) == [text]

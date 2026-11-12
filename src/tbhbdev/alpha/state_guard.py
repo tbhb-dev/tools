@@ -102,7 +102,9 @@ SHORT_OPTIONAL_VALUES = frozenset("Su")
 MAX_QUOTED = 160
 MAX_LISTED = 3
 MIN_READ_BACK = 12
-QUOTED_SHA = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
+QUOTED_SHA = re.compile(
+    r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", re.IGNORECASE
+)
 
 
 # Scope exceptions to a clause, so a negative or planned action cannot excuse
@@ -122,14 +124,19 @@ SUBJECT = (
     r"(?:(?:the|a|an|this|that|our|your|my)\s+\w+|"
     r"(?:it|that|there|he|she|what|who|here)['\u2019]s|\w+)"
 )
+STATUS_ADVERBS = (
+    r"(?:(?:not|never|soon|still|also|just|now|then|perhaps|already|\w+ly)\s+)*"
+)
 CLAIM_QUALIFIER = re.compile(
     r"(?:\b(?:not(?!\s+(?:only|just)\b)|never|no(?=\s+longer\b))|n['\u2019]t)\s*"
     r"(?:longer\s+|approved[,\s]+|or\s+)*"
     rf"(?:{STATUS_VERB}[,\s]+)*{STATUS_VERB}$|"
     r"^\s*(?:nothing|neither|none|no)\b\s*(?:of\s+(?:the\s+)?\w+\s+)?"
     rf"(?:{SUBJECT}\s+)?(?:{STATUS_VERB}\s+)*{STATUS_VERB}$|"
-    r"\b(?:will|would|should|I['\u2019]ll)\s+"
-    r"(?:(?:not|never|soon|still|also|just|now|then|perhaps|already|\w+ly)\s+)*"
+    rf"\b(?!(?-i:Will)\s+{STATUS_ADVERBS}"
+    r"(?:done|applied|merged|shipped|deployed|fixed|completed|installed|verified|"
+    r"started|landed|rolled out)\b)"
+    rf"(?:will|would|should|I['\u2019]ll)\s+{STATUS_ADVERBS}"
     rf"(?:(?:be|have been)\s+|(?:have|get)\s+(?:{SUBJECT}\s+)?)?"
     rf"(?:queued\s+and\s+)?{STATUS_VERB}$|"
     r"^\s*(?:(?:tell me|let me know)\s+)?"
@@ -143,16 +150,19 @@ CLAIM_QUALIFIER = re.compile(
 # New evidence must attach to the status: an unrelated number or quoted noun
 # elsewhere in the sentence does not substantiate it. Document paths support
 # artifact states; a document reference alone cannot establish a running process.
+ARTIFACT_PATH = r"[^\s\"]*/[\w.-]+\.(?:log|txt|md|json|jsonl|yaml|yml|toml|py|sh)\b"
 ATTACHED_EVIDENCE = re.compile(
-    r"\bDecisions/[^\s\"()]+|[^\s\"]*/[\w.-]+\."
-    r"(?:log|txt|md|json|jsonl|yaml|yml|toml|py|sh)\b",
-    re.IGNORECASE,
+    r"\bDecisions/[^\s\"()]+|" + ARTIFACT_PATH, re.IGNORECASE
 )
+QUOTED_ARTIFACT = re.compile(r"#\d+|" + ARTIFACT_PATH, re.IGNORECASE)
+QUOTED_TEXT = re.compile(r'"[^"\n]*"')
+PROCESS_CLAIM = re.compile(r"\b(?:running|started)\b", re.IGNORECASE)
 EVIDENCE_CLAUSE_END = re.compile(r";|\b(?:and|but|however)\b", re.IGNORECASE)
 EVIDENCE_REFERENCE = re.compile(r"\s*[,;]\s*see\s+", re.IGNORECASE)
 ATTRIBUTED = re.compile(
     r"(?i:\bper\s+)(?!(?i:cent|percent|day|hour|minute|second|week|month|"
-    r"run|host|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
+    r"run|host|(?:CPU|GPU|[KMGT]i?B)(?!/)|"
+    r"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
     r"January|February|March|April|May|June|July|August|September|October|"
     r"November|December|today|tonight|yesterday|tomorrow|now|morning|evening|"
     r"schedule)\b)(?:[A-Z]\w*|(?i:the\s+\w+\s+log|reviewer|maintainer|operator|"
@@ -176,6 +186,7 @@ ADJECTIVE = re.compile(
     r"(shipped|merged|applied|deployed|landed|rolled out)\s+"
     r"(?!(?:and|or|but|is|are|was|were|has|have|had|in|on|at|to|with|for|by|yet|"
     r"out|of|so|this|that|these|those|last|next|each|every|since|because|as|"
+    r"(?:second|minute|hour|day|week|month|year)s?|without|"
     r"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
     r"January|February|March|April|May|June|July|August|September|October|"
     r"November|December|morning|evening|afternoon|daily|weekly|monthly|"
@@ -193,11 +204,7 @@ def quoted_evidence(clause: str, claim_end: int) -> bool:
         if quote.end(1) < claim_end:
             continue
         content = quote[1]
-        if (
-            QUOTED_SHA.search(content)
-            or IDENTIFIER.search(content)
-            or ATTACHED_EVIDENCE.search(content)
-        ):
+        if QUOTED_SHA.search(content) or QUOTED_ARTIFACT.search(content):
             return True
         if len(content) >= MIN_READ_BACK and re.search(
             r"(?:\b(?:shows|reads|printed|returned|says)|:)\s*$",
@@ -212,19 +219,27 @@ def evidenced_claim(chunk: str, match: re.Match[str]) -> bool:
     prefix = CLAUSE_END.split(chunk[: match.start()])[-1]
     suffix = EVIDENCE_CLAUSE_END.split(chunk[match.end() :])[0]
     clause = prefix + match[0] + suffix
-    if ATTRIBUTED.search(clause) or IDENTIFIER.search(
-        prefix + match[0] + CLAUSE_END.split(suffix)[0]
+    identifier_clause = prefix + match[0] + CLAUSE_END.split(suffix)[0]
+    if ATTRIBUTED.search(clause) or any(
+        IDENTIFIER.search(part) for part in QUOTED_TEXT.split(identifier_clause)
     ):
         return True
-    if quoted_evidence(clause, len(prefix) + len(match[0])):
+    process = PROCESS_CLAIM.search(match[0])
+    if not process and quoted_evidence(clause, len(prefix) + len(match[0])):
         return True
     suffix = chunk[match.end() :]
-    evidence = ATTACHED_EVIDENCE.search(EVIDENCE_CLAUSE_END.split(suffix)[0])
+    evidence = any(
+        ATTACHED_EVIDENCE.search(part)
+        for part in QUOTED_TEXT.split(EVIDENCE_CLAUSE_END.split(suffix)[0])
+    )
     if not evidence:
-        evidence = EVIDENCE_REFERENCE.match(suffix)
-        if evidence:
-            evidence = ATTACHED_EVIDENCE.search(suffix[evidence.end() :])
-    return bool(evidence and "running" not in match[0].lower())
+        reference = EVIDENCE_REFERENCE.match(suffix)
+        if reference:
+            evidence = any(
+                ATTACHED_EVIDENCE.search(part)
+                for part in QUOTED_TEXT.split(suffix[reference.end() :])
+            )
+    return bool(evidence and not process)
 
 
 def current_claim(chunk: str, match: re.Match[str]) -> bool:
@@ -242,7 +257,9 @@ def unsupported_claims(text: str) -> list[str]:
     return [
         chunk.strip()[:MAX_QUOTED]
         for chunk in SENTENCE_END.split(text)
-        if not (chunk.endswith("?") and QUESTION_START.match(chunk))
+        if not (
+            chunk.endswith("?") and QUESTION_START.match(chunk) and ";" not in chunk
+        )
         and not EVIDENCE.search(chunk)
         and any(current_claim(chunk, match) for match in CLAIM.finditer(chunk))
     ]
