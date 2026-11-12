@@ -23,9 +23,7 @@ REASON = (
         COMMAND,
         f" \t\n{COMMAND}\n\t ",
         f"~/.local/bin/tbhb-approve\tTools_1.2-a\t1\t{SHA}",
-        f"~/.local/bin/tbhb-approve . 999 {SHA}",
-        f"~/.local/bin/tbhb-approve - 10 {'0' * 40}",
-        f"~/.local/bin/tbhb-approve _ 2 {'f' * 40}",
+        f"~/.local/bin/tbhb-approve  tools  224  {SHA}",
         "true",
         "",
         "grep approve notes.md",
@@ -43,6 +41,13 @@ def test_allowed(command: str) -> None:
             for separator in (";", "&&", "||", "|", "&", "\n")
         ),
         *(f"{COMMAND}{separator}" for separator in (";", "&", "\ntrue")),
+        *(f"{COMMAND}{padding}" for padding in ("\r", "\xa0", "\x0b", "\x85", "\x1c")),
+        f"\xa0{COMMAND}",
+        f"{COMMAND}X",
+        *(
+            f"~/.local/bin/tbhb-approve {repo} 224 {SHA}"
+            for repo in ("-h", ".", "..", ".hidden", "-", "_")
+        ),
         f"NAME=value {COMMAND}",
         f"export NAME=value; {COMMAND}",
         f"env {COMMAND}",

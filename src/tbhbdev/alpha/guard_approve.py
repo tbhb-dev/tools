@@ -6,9 +6,10 @@ A Claude Code Bash PreToolUse hook. Any command text that mentions
     ~/.local/bin/tbhb-approve <repo> <pr> <sha>
 
 The program word is literal, with an unquoted tilde. The repository is a bare
-name, the pull request number has no leading zero, and the required commit
-hash is 40 lowercase hexadecimal characters. Leading and trailing whitespace
-is fine. Shell syntax, quoted words and additional commands are refused.
+name starting with an ASCII letter or digit, the pull request number has no
+leading zero, and the required commit hash is 40 lowercase hexadecimal
+characters. Leading and trailing ASCII spaces, tabs and newlines are fine.
+Shell syntax, quoted words and additional commands are refused.
 
 Refusing even ``grep tbhb-approve notes.md`` is deliberate: the operator's
 rule is "mentions". A false refusal costs one rewrite while a stall costs
@@ -25,7 +26,7 @@ from tbhbdev.alpha.repo import read_hook_stdin
 
 BARE = re.compile(r"[A-Za-z0-9._~/ \t-]+")
 FORM = re.compile(
-    r"~/\.local/bin/tbhb-approve [A-Za-z0-9._-]+ [1-9][0-9]* [0-9a-f]{40}"
+    r"~/\.local/bin/tbhb-approve [A-Za-z0-9][A-Za-z0-9._-]* [1-9][0-9]* [0-9a-f]{40}"
 )
 REASON = (
     "Use exactly ~/.local/bin/tbhb-approve <repo> <pr> <sha>. "
@@ -37,7 +38,7 @@ def denied(text: str) -> bool:
     """Whether command text mentions approval without using the exact form."""
     if "tbhb-approve" not in text:
         return False
-    text = text.strip()
+    text = text.strip(" \t\n")
     if not BARE.fullmatch(text):
         return True
     words = Scanner(text).run()[0]
