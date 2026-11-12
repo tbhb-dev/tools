@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import json
 import os
 import shutil
@@ -724,6 +725,22 @@ def finish_auth(run: Run, prepared: Prepared | None) -> str | None:
     return reason
 
 
+def audit_summary(run: Run, prepared: Prepared | None, rc: int) -> None:
+    paths = planned_paths(run) if prepared is None else prepared.paths
+    audit = Path(paths.audit_dir)
+    files: dict[str, str] = {}
+    for path in sorted(audit.rglob("*")):
+        if not path.is_symlink() and path.is_file():
+            with path.open("rb") as stream:
+                files[path.relative_to(audit).as_posix()] = hashlib.file_digest(
+                    stream, hashlib.sha256
+                ).hexdigest()
+    run.files.write(
+        "audit.json",
+        json.dumps({"rc": rc, "files": files}) + "\n",
+    )
+
+
 def finish(
     run: Run, prepared: Prepared | None, agent: subprocess.Popen[str] | None, rc: int
 ) -> int:
@@ -750,6 +767,10 @@ def finish(
                 process_group.unknown(run.files)
             finally:
                 run.files.write("rc", f"{rc}\n")
+    try:
+        audit_summary(run, prepared, rc)
+    except OSError, ValueError:
+        run.files.write("log", "audit summary write failed\n")
     try:
         runfiles.append(run.files.root, index_entry(run, prepared, rc))
     except OSError, ValueError:
