@@ -199,7 +199,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     made.fake("gitleaks", stdout="[]")
     made.fake(
         "gh",
-        stdout="https://github.com/tbhb-dev/ascm/pull/1\n",
+        stdout="https://github.com/tbhb-dev/tools/pull/1\n",
         cases={
             "pr view": view_case(pr_page(TARGET)),
             f"repo view {TARGET}": {"rc": 0, "stdout": "PUBLIC\\n", "stderr": ""},
@@ -1077,7 +1077,7 @@ class TestRealLinters:
     def test_findings_map_to_draft_lines(self) -> None:
         # cspell:ignore recieve
         text = FIXTURE.read_text()
-        text = replace(text, "Running `ascm stamp`", "Running ascm recieve")
+        text = replace(text, "Running `tool stamp`", "Running tool recieve")
         text = replace(text, "## Why\n\n", "## Why\n")
         found = pr.check_text(text).problems
         assert any(line == 15 and "recieve" in why for line, why in found)
@@ -1459,7 +1459,7 @@ def test_create_runs_gh_with_the_frontmatter(
         == "## Why\n\nw\n\n## Behavior change\n\nb\n\n## Verification\n\nv\n"
     )
     assert call["stdin_tty"] is False
-    assert capsys.readouterr().out == "https://github.com/tbhb-dev/ascm/pull/1\n"
+    assert capsys.readouterr().out == "https://github.com/tbhb-dev/tools/pull/1\n"
 
 
 def test_create_defaults(world: World) -> None:
@@ -1537,7 +1537,7 @@ def test_edit(world: World, capsys: pytest.CaptureFixture[str]) -> None:
         call["stdin"]
         == "## Why\n\nw\n\n## Behavior change\n\nb\n\n## Verification\n\nv\n"
     )
-    assert capsys.readouterr().out == "https://github.com/tbhb-dev/ascm/pull/1\n"
+    assert capsys.readouterr().out == "https://github.com/tbhb-dev/tools/pull/1\n"
 
 
 def test_edit_without_labels_and_with_agent(
@@ -2566,7 +2566,7 @@ def test_the_bare_reference_message_names_the_fix() -> None:
         ("See #12.\n", [ref(1, 12)]),
         ("(#3) and #4\n", [ref(1, 3), ref(1, 4)]),
         ("- item #7\n", [ref(1, 7)]),
-        ("tbhb-dev/ascm#4 and tbhb-dev/renovate-config#2\n", []),
+        ("tbhb-dev/tools#4 and tbhb-dev/renovate-config#2\n", []),
         ("x.y#5 and a-b#6 and &#38; and path/#8\n", []),
         ("`#9` in code\n", []),
         ("```\n#10\n```\n", []),
@@ -2628,12 +2628,12 @@ def test_create_writes_opened_by_first_and_the_ledger(
     )
     assert "subagent=" not in OPENER
     path = ledgers(world) / f"{agent_identity.hx(ROOT)}.json"
-    assert json.loads(path.read_text()) == {"prs": ["tbhb-dev/ascm#1"]}
-    assert capsys.readouterr() == ("https://github.com/tbhb-dev/ascm/pull/1\n", "")
-    world.fake("gh", stdout="Created\nhttps://github.com/tbhb-dev/ascm/pull/12\n")
+    assert json.loads(path.read_text()) == {"prs": ["tbhb-dev/tools#1"]}
+    assert capsys.readouterr() == ("https://github.com/tbhb-dev/tools/pull/1\n", "")
+    world.fake("gh", stdout="Created\nhttps://github.com/tbhb-dev/tools/pull/12\n")
     assert run_main("create", env=agent) == 0
     assert json.loads(path.read_text()) == {
-        "prs": ["tbhb-dev/ascm#1", "tbhb-dev/ascm#12"]
+        "prs": ["tbhb-dev/tools#1", "tbhb-dev/tools#12"]
     }
 
 
@@ -2675,7 +2675,7 @@ def test_a_subagent_opens_under_its_root(world: World, agent: dict[str, str]) ->
         f"\n\n{OPENER}\nAssisted-by: LLM harness=claude-code:2.1.0;"
         f"model=anthropic:claude-x;session={ROOT};subagent={child};surface=cli\n"
     )
-    assert opened.read_ledger(ROOT) == {"tbhb-dev/ascm#1"}
+    assert opened.read_ledger(ROOT) == {"tbhb-dev/tools#1"}
 
 
 @pytest.mark.parametrize(
@@ -2712,7 +2712,7 @@ def test_a_failed_create_records_nothing(
 def test_create_without_a_url_records_nothing(
     world: World, agent: dict[str, str], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    world.fake("gh", stdout="https://github.com/tbhb-dev/ascm/issues/1\n")
+    world.fake("gh", stdout="https://github.com/tbhb-dev/tools/issues/1\n")
     write_draft(world)
     assert run_main("create", env=agent) == 1
     assert capsys.readouterr().err == (
@@ -3014,7 +3014,7 @@ def test_create_warns_when_the_ledger_cant_be_written(
     write_draft(world)
     assert run_main("create", env=agent) == 0
     out, err = capsys.readouterr()
-    assert out == "https://github.com/tbhb-dev/ascm/pull/1\n"
+    assert out == "https://github.com/tbhb-dev/tools/pull/1\n"
     assert err == f"warning: the PR is open, but the ledger was not updated: {why}\n"
 
 

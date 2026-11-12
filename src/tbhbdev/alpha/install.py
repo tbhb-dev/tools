@@ -139,7 +139,7 @@ type Json = dict[str, object]
 PROG = "tbhbdev alpha install"
 MARK = "# tbhbdev alpha install"
 SHIM_MARK = "# tbhbdev alpha agent identity hook (tbhbdev alpha install)"
-# The identity shims this command and the old ascm install.sh write.
+# The identity shims this command and the old install script write.
 SHIM_MARKS = (
     SHIM_MARK,
     "# ascm interim agent identity hook (tools/interim/install.sh)",

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 ENV = {"CLAUDE_CODE_SESSION_ID": "raw-session"}
-URL = "https://github.com/tbhb-dev/ascm/pull/7"
+URL = "https://github.com/tbhb-dev/tools/pull/7"
 OPENED_LINE = "Opened-by: LLM harness=claude-code;model=anthropic:m1"
 POSTING = (
     "LLM harness=claude-code:2.1.0;model=anthropic:m1;"
@@ -94,7 +94,7 @@ def trailer_line() -> str:
 def test_close_pr_it_opened_comments_the_reason_and_the_trailer(
     gh: Gh, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    opened.record_opened(root(), ["tbhb-dev/ascm#7"])
+    opened.record_opened(root(), ["tbhb-dev/tools#7"])
     assert close.main(["pr", "close", "7", "--reason", "superseded"], env=ENV) == 0
     assert gh.calls[-1] == [
         "pr",
@@ -159,7 +159,7 @@ def test_a_corrupt_ledger_is_reported() -> None:
 
 
 def test_a_pr_url_that_is_not_a_pr_is_refused(gh: Gh) -> None:
-    gh.view["url"] = "https://github.com/tbhb-dev/ascm/issues/7"
+    gh.view["url"] = "https://github.com/tbhb-dev/tools/issues/7"
     with pytest.raises(SystemExit, match="cannot read a pull request from"):
         close.main(["pr", "close", "7", "--reason", "x"], env=ENV)
 
@@ -167,20 +167,20 @@ def test_a_pr_url_that_is_not_a_pr_is_refused(gh: Gh) -> None:
 def test_dry_run_prints_the_command_and_closes_nothing(
     gh: Gh, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    opened.record_opened(root(), ["tbhb-dev/ascm#7"])
+    opened.record_opened(root(), ["tbhb-dev/tools#7"])
     assert close.main(["pr", "close", "7", "--reason", "r", "--dry-run"], env=ENV) == 0
     assert [call[1] for call in gh.calls] == ["view"]
     assert capsys.readouterr().out.startswith("gh pr close 7 --comment ")
 
 
 def test_a_failing_close_returns_gh_exit_code(gh: Gh) -> None:
-    opened.record_opened(root(), ["tbhb-dev/ascm#7"])
+    opened.record_opened(root(), ["tbhb-dev/tools#7"])
     gh.close_rc = 4
     assert close.main(["pr", "close", "7", "--reason", "r"], env=ENV) == 4
 
 
 def test_close_issue_with_a_reason_and_a_comment(gh: Gh) -> None:
-    gh.view = {"state": "OPEN", "url": "https://github.com/tbhb-dev/ascm/issues/3"}
+    gh.view = {"state": "OPEN", "url": "https://github.com/tbhb-dev/tools/issues/3"}
     args = [
         "issue",
         "close",
@@ -342,12 +342,12 @@ def test_view_of_a_pr_also_asks_for_the_head_branch(gh: Gh) -> None:
     assert gh.calls == [["pr", "view", "7", "--json", fields]]
 
 
-DELETE = ["api", "-X", "DELETE", "repos/tbhb-dev/ascm/git/refs/heads/feat/x%20y"]
+DELETE = ["api", "-X", "DELETE", "repos/tbhb-dev/tools/git/refs/heads/feat/x%20y"]
 PR_ARGS = ["pr", "close", "7", "--reason", "r", "--delete-branch"]
 
 
 def test_delete_branch_deletes_the_same_repo_head_after_closing(gh: Gh) -> None:
-    opened.record_opened(root(), ["tbhb-dev/ascm#7"])
+    opened.record_opened(root(), ["tbhb-dev/tools#7"])
     assert close.main(PR_ARGS, env=ENV) == 0
     assert [call[0] for call in gh.calls] == ["pr", "pr", "pr", "api"]
     assert gh.calls[-2][:2] == ["pr", "close"]
@@ -369,7 +369,7 @@ def test_dry_run_says_it_would_delete_the_branch(
     assert close.main([*PR_ARGS, "--dry-run"], env=ENV) == 0
     assert [call[1] for call in gh.calls] == ["view", "list"]
     out = capsys.readouterr().out
-    assert "would delete branch feat/x y: gh api -X DELETE repos/tbhb-dev/ascm" in out
+    assert "would delete branch feat/x y: gh api -X DELETE repos/tbhb-dev/tools" in out
 
 
 def test_dry_run_says_it_would_skip_a_fork(
@@ -419,7 +419,7 @@ def test_issue_close_has_no_delete_branch_flag(gh: Gh) -> None:
 
 
 LIST = [
-    "pr", "list", "--repo", "tbhb-dev/ascm", "--base", "feat/x y",
+    "pr", "list", "--repo", "tbhb-dev/tools", "--base", "feat/x y",
     "--state", "open", "--json", "number",
 ]  # fmt: skip
 

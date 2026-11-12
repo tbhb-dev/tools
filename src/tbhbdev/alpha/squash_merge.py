@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
-"""`tbhbdev alpha merge`: squash merge, ported from ascm's interim tools.
+"""`tbhbdev alpha merge`: squash merge, ported from an earlier interim toolset.
 
 GitHub's default squash message pastes the pull request body in as written,
 Markdown included. This script builds a plain-text commit message from the PR

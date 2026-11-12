@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
-"""Secret scan of agent-written text, ported from ascm's interim tools.
+"""Secret scan of agent-written text, ported from an earlier interim toolset.
 
 ``tbhbdev alpha pr`` scans a pull request's final title and body, and
 ``tbhbdev alpha merge`` its squash message, before gh posts them. The scan

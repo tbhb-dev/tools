@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/tbhb-dev/ascm/main/.github/schemas/pull-request-draft.schema.json",
-  "title": "ascm pull request draft frontmatter",
+  "$id": "https://raw.githubusercontent.com/tbhb-dev/tools/main/.github/schemas/pull-request-draft.schema.json",
+  "title": "tbhbdev pull request draft frontmatter",
   "description": "YAML frontmatter of .github/PULL_REQUEST_DRAFT.md. It carries the metadata the PR script passes to gh pr create and gh pr edit. The title is the draft's level-one heading and the description is its body, so neither appears here. Every field is optional.",
   "type": "object",
   "additionalProperties": false,
