@@ -149,6 +149,8 @@ class _Table:
 
     def reference(self, key: str) -> str:
         value = self.value(key)
+        if key == "signing" and isinstance(value, str) and value.startswith("/"):
+            return self.path(key)
         parts = value.split("/") if isinstance(value, str) else []
         if (
             key == "signing"
@@ -302,7 +304,7 @@ def _credentials(table: _Table) -> tuple[Credentials, ...]:
         accounts.append(
             Credentials(
                 account=account,
-                gh=entry.reference("gh"),
+                gh=entry.reference("gh") if "gh" in entry.values else None,
                 docker=entry.reference("docker") if "docker" in entry.values else None,
                 reviews_app_id=app_id,
                 reviews_app_client_id=client_id,

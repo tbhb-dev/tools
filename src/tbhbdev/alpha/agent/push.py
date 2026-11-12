@@ -11,13 +11,22 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from tbhbdev.alpha import private_names
 from tbhbdev.alpha.agent import host_tools, runfiles
 from tbhbdev.alpha.agent.decisions import repo
+from tbhbdev.alpha.private_names import _configured
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
     from tbhbdev.alpha.agent.run_host import Prepared, Run
+
+
+PRIVATE_NAMES = ".local/state/tbhb/private-repos.txt"
+
+
+class PushRefusedError(ValueError):
+    """The outgoing range could not pass the publication checks."""
 
 
 def url(repository: str) -> str:
@@ -128,9 +137,17 @@ def run(
     if commit is None or commit == before:
         return rc
     run.files.write("head", commit)
+    if rc:
+        run.files.write("log", f"push skipped: harness exited {rc}\n")
+        return rc
     try:
+        names = read_names(run.home / PRIVATE_NAMES)
         with publication(run.files.root, workspace, commit) as directory:
+            scan(directory, before, commit, names)
             status, error = send(directory, url(run.request.repo), branch, token)
+    except PushRefusedError as refusal:
+        run.files.write("log", f"push refused: {refusal}\n")
+        return 4
     except OSError, subprocess.SubprocessError:
         status, error = True, "git push unavailable"
     if status:
@@ -138,9 +155,101 @@ def run(
             token, "[redacted]"
         )
         run.files.write("log", f"push failed: {line}\n")
-        return 4
-    run.files.write("branch", branch)
-    return rc
+    else:
+        run.files.write("branch", branch)
+    return 4 if status else rc
+
+
+def read_names(source: Path) -> private_names.Names:
+    try:
+        text = runfiles.read_owned(source, 1024 * 1024, "private-name list")
+    except OSError, ValueError:
+        text = ""
+    names = private_names.parse_list(text.splitlines())
+    if not names.private:
+        message = f"no private-name list at {source}"
+        raise PushRefusedError(message)
+    return names
+
+
+def scan(
+    directory: Path, before: str | None, commit: str, names: private_names.Names
+) -> None:
+    if before is None:
+        message = "no base commit"
+        raise PushRefusedError(message)
+    env = dict.fromkeys(
+        (
+            "HOME",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+        ),
+        str(directory),
+    )
+    env.update(
+        {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_ASKPASS": "/bin/false",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PATH": host_tools.search(),
+        }
+    )
+    try:
+        result = subprocess.run(  # nosec B603
+            [
+                host_tools.resolve("git"),
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "diff.external=",
+                "-c",
+                "core.pager=cat",
+                "-C",
+                str(directory),
+                "log",
+                "--format=commit %H%n%B",
+                "-p",
+                "--no-ext-diff",
+                "--no-textconv",
+                f"{before}..{commit}",
+            ],
+            cwd=directory,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            errors="replace",
+            check=True,
+        )
+    except OSError, subprocess.SubprocessError:
+        message = "git log unavailable"
+        raise PushRefusedError(message) from None
+    lines = result.stdout.splitlines()
+    known = names.private + list(_configured())
+    texts = [
+        (1, lines),
+        *((number, [text]) for number, text in private_names.joined_literals(lines)),
+    ]
+    hits = sorted(
+        {
+            hit
+            for first, group in texts
+            for hit in private_names.private_name_problems(
+                group, known, first, path_only=names.path_only
+            )
+        }
+    )
+    if hits:
+        message = f"{len(hits)} private-name hit(s)" + "".join(
+            f"\nline {n}: {message}" for n, message in hits
+        )
+        raise PushRefusedError(message)
 
 
 def head(workspace: Path, branch: str) -> str | None:
