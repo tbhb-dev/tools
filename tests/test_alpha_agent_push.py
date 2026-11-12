@@ -928,7 +928,7 @@ def _signed_history(tmp_path: Path) -> tuple[Path, str, str, Path]:
     repository = _history(tmp_path)
     git(repository, "config", "user.email", "agent@tonyburns.net")
     git(repository, "config", "gpg.format", "ssh")
-    git(repository, "config", "user.signingkey", str(key))
+    git(repository, "config", "user.signingkey", str(key))  # cspell:ignore signingkey
     return repository, git(repository, "rev-parse", "HEAD").strip(), public, key
 
 
@@ -956,7 +956,7 @@ def test_commit_policy_refuses_unsigned_commits(tmp_path: Path) -> None:
 def test_commit_policy_refuses_another_signer(tmp_path: Path) -> None:
     repository, before, public, _ = _signed_history(tmp_path)
     other, _ = _signer(tmp_path, "other-key")
-    git(repository, "config", "user.signingkey", str(other))
+    git(repository, "config", "user.signingkey", str(other))  # cspell:ignore signingkey
     git(repository, "commit", "--allow-empty", "-qS", "-m", "other")
     with pytest.raises(push.PushRefusedError) as caught:
         COMMIT_POLICY(repository, before, _tip(repository), public)
