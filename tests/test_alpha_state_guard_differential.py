@@ -8,11 +8,6 @@ import state_guard_baseline as baseline
 from tbhbdev.alpha import state_guard
 
 INTENDED_PASSES = {
-    "Is the fix deployed?": "A simple status question.",
-    "Has the fix been merged?": "A simple status question with an auxiliary.",
-    "The fix will be deployed.": "A future status.",
-    "The fix would be deployed.": "A conditional modal status.",
-    "The fix should be deployed.": "A prospective modal status.",
     "If the fix is deployed.": "A conditional status clause.",
     "Once the fix is deployed.": "A future status clause.",
     "I'll tell you once the fix is deployed.": "A future notification condition.",
@@ -20,9 +15,101 @@ INTENDED_PASSES = {
     "The fix never merged.": "A status negated by never.",
     "No build is running.": "A status with a negative subject.",
     "I applied nothing.": "A status verb with a negated object.",
-    "The merged branches need editing.": "A determiner and adjective before branches.",
-    "Our deployed application needs editing.": "A status adjective before application.",
+    "Please get the fix merged.": "A request to merge.",
+    "Can you confirm the fix is merged?": "A request to confirm a status.",
+    "Could you get it merged?": "A request to merge.",
+    "I merged none.": "A status verb with a negated object.",
+    "I merged nothing.": "A status verb with a negated object.",
+    "It hasn't merged": "A status negated once.",
+    "It never merged.": "A status negated by never.",
+    "Never merged.": "A status negated by never.",
+    "No fix merged.": "A status with a negative subject.",
+    "Nothing merged.": "A status with a negative subject.",
+    "Tell me when it is merged.": "A future notification condition.",
+    "Whether the fix is merged.": "A conditional status clause.",
 }
+
+PROBES = (
+    "4 deployed services yesterday.",
+    "A deployed worker is running.",
+    "All done",
+    "All merged code into main.",
+    "Are you aware it is deployed?",
+    "Both merged changes into main.",
+    "Both merged today.",
+    "Can you believe the fix merged?",
+    "Can you confirm the fix is merged?",
+    "Can you see that the fix is merged?",
+    "Could you get it merged?",
+    "Deployed.",
+    "Did the fix merge? It merged.",
+    "Did you know the fix is deployed?",
+    "Did you see that the fix is merged?",
+    "Do you think the fix is deployed?",
+    "Done.",
+    "Everything is deployed.",
+    "Fix merged?",
+    "How was the fix merged?",
+    "I merged none.",
+    "I merged nothing.",
+    "I'll get it merged and the PR is merged.",
+    "I'll tell you once the fix is deployed and merged.",
+    "I'll tell you the fix is merged.",
+    "If it merged I'm done.",
+    "If the fix is deployed, tell me.",
+    "Is it true the fix is merged?",
+    "Is the fix merged?",
+    "Isn't the fix merged?",
+    "It hasn't merged",
+    "It is merged, right?",
+    "It never merged.",
+    "It will be merged and deployed.",
+    "It will be merged.",
+    "It's done",
+    "Merged.",
+    "My merged fix is deployed.",
+    "Never merged.",
+    "No fix merged.",
+    "No one merged it and the fix is merged.",
+    "No, the fix merged.",
+    "Nobody deployed the fix.",
+    "Not everything is deployed.",
+    "Not only is the fix merged.",
+    "Nothing is deployed but the fix merged.",
+    "Nothing merged.",
+    "Once the fix is deployed it is merged.",
+    "Once the fix is deployed.",
+    "Our merged PRs landed.",
+    "Please get the fix merged.",
+    "Several applied patches to main.",
+    "Several merged branches were deleted.",
+    "Surely the fix is merged?",
+    "Tell me when it is merged.",
+    "The 3 deployed workers are up.",
+    "The fix is merged?",
+    "The fix is not merged.",
+    "The fix is not not merged.",
+    "The fix isn't merged and is deployed.",
+    "The fix merged!",
+    "The fix should already be deployed.",
+    "The fix was deployed yesterday.",
+    "The fix will be deployed, it merged.",
+    "The merged PR is merged.",
+    "The merged code is live.",
+    "The two merged PRs are open.",
+    "This merged code deployed.",
+    "WILL merged.",
+    "Wait until the fix is deployed.",
+    "What I changed is deployed?",
+    "What if the fix is merged?",
+    "Whether the fix is merged.",
+    "Who knew the fix was deployed?",
+    "Why is the fix deployed?",
+    "Why wait when the fix is merged?",
+    "block",
+    "pass ",
+    "will merged.",
+)
 
 BASE_SENTENCES = (
     "The fix is deployed.",
@@ -34,6 +121,7 @@ BASE_SENTENCES = (
     "The fix is verified.",
     "The branch landed.",
     *INTENDED_PASSES,
+    *PROBES,
     "The report describes the merged PR.",
     "The report on the deployed application needs editing.",
 )
@@ -83,7 +171,6 @@ MUST_PASS = (
     "The report describes the merged PR.",
     "The report describes the merged branch.",
     "The report on the deployed application needs editing.",
-    "Has the fix been merged?",
     "I'll tell you once the fix is deployed.",
 )
 
@@ -154,61 +241,17 @@ def test_simple_false_positive_probes_pass(sentence: str) -> None:
 @pytest.mark.parametrize(
     ("passing", "blocking"),
     [
-        ("Is the fix deployed?", "Is the fix deployed — can you check?"),
-        ("  Is the fix deployed?   ", "Is the fix deployed.   "),
-        ("The fix will be deployed.", "The fix will be deployed although it failed."),
         ("If the fix is deployed.", "If the fix is deployed, check again."),
         ("The fix isn't deployed.", "The fix isn't not deployed."),
         ("I applied nothing.", "I applied nothing; the fix deployed."),
-        ("The merged branches need editing.", "Pat's merged code into main."),
         ("The fix is no longer deployed.", "The fix is no longer not deployed."),
         ("None were deployed.", "None were deployed although it failed."),
         ("Please get the fix merged.", "Please get the fix merged before lunch."),
-        ("The fix should be merged.", "The fix should be merged and shipped."),
     ],
 )
 def test_each_exemption_has_a_blocking_near_miss(passing: str, blocking: str) -> None:
     assert not head_blocks(passing)
     assert head_blocks(blocking)
-
-
-@pytest.mark.parametrize("quantity", ["the", "a few", "several", "twenty", "21"])
-@pytest.mark.parametrize(
-    "noun",
-    [
-        "branch",
-        "PR",
-        "change",
-        "fix",
-        "commit",
-        "file",
-        "artifact",
-        "release",
-        "package",
-        "service",
-        "worker",
-        "application",
-        "ruleset",
-        "patch",
-        "branches",
-        "PRs",
-        "changes",
-        "fixes",
-        "commits",
-        "files",
-        "artifacts",
-        "releases",
-        "packages",
-        "services",
-        "workers",
-        "applications",
-        "rulesets",
-        "patches",
-    ],
-)
-def test_closed_adjective_nouns_and_determiners(quantity: str, noun: str) -> None:
-    assert not head_blocks(f"{quantity} merged {noun} need editing.")
-    assert head_blocks(f"Pat's merged {noun} into main.")
 
 
 @pytest.mark.parametrize(
@@ -226,8 +269,21 @@ def test_baseline_truncates_and_preserves_sentence_boundaries() -> None:
     ]
 
 
-def test_question_exemption_accepts_surrounding_whitespace() -> None:
-    chunk = "  Has the fix been merged?   "
-    match = state_guard.CLAIM.search(chunk)
-    assert match is not None
-    assert state_guard.exempt(chunk, match)
+def newly_passing() -> set[str]:
+    return {s for s in generated_corpus() if main_blocks(s) and not head_blocks(s)}
+
+
+@pytest.mark.parametrize(
+    ("name", "wider"),
+    [
+        ("CLAIM_QUALIFIER", re.compile("")),
+        ("NEGATED_OBJECT", re.compile(r"^\s*(?:nothing|none|today)\b[\s.!?]*$")),
+        ("STATUS_END", re.compile(r".*")),
+    ],
+)
+def test_widening_one_pattern_fails_the_differential(
+    monkeypatch: pytest.MonkeyPatch, name: str, wider: re.Pattern[str]
+) -> None:
+    assert newly_passing() == INTENDED_PASSES.keys()
+    monkeypatch.setattr(state_guard, name, wider)
+    assert newly_passing() != INTENDED_PASSES.keys()

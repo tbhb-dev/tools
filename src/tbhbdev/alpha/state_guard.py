@@ -69,11 +69,6 @@ ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(?:'([^']*)'|\"([^\"]*)\"|([A-Za-z0-9_]+))")
 OPEN_ITEM = re.compile(r"(?m)^- \*\*.*$")
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n")
-QUESTION_START = re.compile(
-    r"^\s*(?:is|are|am|was|were|has|have|had|do|does|did|can|could|would|"
-    r"should|will|may|might|must|who|what|when|where|why|how|which)\b",
-    re.IGNORECASE,
-)
 SEPARATORS = frozenset("&|;\n(){}`")
 GIT_OPTIONS = frozenset(
     {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
@@ -118,12 +113,6 @@ CLAIM_QUALIFIER = re.compile(
     rf"(?:{STATUS_VERB}[,\s]+)*{STATUS_VERB}$|"
     r"^\s*(?:nothing|neither|none|no)\b\s*(?:of\s+(?:the\s+)?\w+\s+)?"
     rf"(?:{SUBJECT}\s+)?(?:{STATUS_VERB}\s+)*{STATUS_VERB}$|"
-    rf"\b(?!(?-i:Will)\s+{STATUS_ADVERBS}"
-    r"(?:done|applied|merged|shipped|deployed|fixed|completed|installed|verified|"
-    r"started|landed|rolled out)\b)"
-    rf"(?:will|would|should|I['\u2019]ll)\s+{STATUS_ADVERBS}"
-    rf"(?:(?:be|have been)\s+|(?:have|get)\s+(?:{SUBJECT}\s+)?)?"
-    rf"(?:queued\s+and\s+)?{STATUS_VERB}$|"
     r"^\s*(?:(?:tell me|let me know|I['\u2019]ll tell you)\s+)?"
     r"(?:once|when|if|after|before|until|unless|whether|as soon as)\s+"
     rf"{SUBJECT}\s+(?:{STATUS_VERB}\s+)*{STATUS_VERB}$|"
@@ -142,34 +131,17 @@ COMPLEX_SENTENCE = re.compile(
 NEGATOR = re.compile(r"\b(?:not|never|no|nothing|none)\b|n['\u2019]t\b", re.IGNORECASE)
 STATUS_END = re.compile(r"[\s.!?]*$")
 NEGATED_OBJECT = re.compile(r"^\s*(?:nothing|none)\b[\s.!?]*$", re.IGNORECASE)
-ADJECTIVE = re.compile(
-    r"\b(?:a|an|the|this|that|these|those|my|your|our|their|his|her|its|"
-    r"all|several|a few|both|one|two|three|four|five|six|seven|eight|nine|ten|"
-    r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
-    r"nineteen|twenty|[0-9]+)\s+"
-    r"(shipped|merged|applied|deployed|landed|rolled out)\s+"
-    r"(?:branch|branches|PR|PRs|change|changes|fix|fixes|ruleset|rulesets|code|"
-    r"patch|patches|commit|commits|file|files|artifact|artifacts|release|releases|"
-    r"package|packages|service|services|worker|workers|application|applications)\b",
-    re.IGNORECASE,
-)
 
 
 def exempt(chunk: str, match: re.Match[str]) -> bool:
     """Exempt only recognized simple sentences from the baseline claim judge."""
     if COMPLEX_SENTENCE.search(chunk) or len(NEGATOR.findall(chunk)) > 1:
         return False
-    if QUESTION_START.match(chunk) and chunk.rstrip().endswith("?"):
-        return True
     if CLAIM_QUALIFIER.search(chunk[: match.end()]) and STATUS_END.fullmatch(
         chunk[match.end() :]
     ):
         return True
-    if NEGATED_OBJECT.fullmatch(chunk[match.end() :]):
-        return True
-    return any(
-        match.start() == adjective.start(1) for adjective in ADJECTIVE.finditer(chunk)
-    )
+    return bool(NEGATED_OBJECT.fullmatch(chunk[match.end() :]))
 
 
 def unsupported_claims(text: str) -> list[str]:

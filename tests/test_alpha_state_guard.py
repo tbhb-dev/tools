@@ -818,7 +818,7 @@ def test_corpus_measurement(
         (2, "A", "negation", "No build is running."),
         (3, "B", "evidence_missed", "PR #12 merged."),
         (4, "B", "evidence_missed", "The fix merged."),
-        (5, "C", "future", "The fix should be merged."),
+        (5, "C", "future", "Tell me when it is merged."),
         (6, "C", "other", "The fix deployed."),
     ]
     (tmp_path / "window.jsonl").write_text(
