@@ -36,6 +36,11 @@ def _private_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
 
 
+@pytest.fixture(autouse=True)
+def _tagging_on(config_file: Path) -> None:
+    config_file.write_text("[state_guard]\ntag_messages = true\n")
+
+
 def assert_tagged(result: Result, message: str, **fields: object) -> None:
     status, out, err = result
     assert (status, err) == (0, "")
@@ -120,9 +125,10 @@ def stop(**fields: object) -> dict[str, object]:
 def test_the_checks_that_need_no_private_value_run_without_config(
     config_file: Path, run: Runner, text: str | None
 ) -> None:
+    config_file.unlink()
     if text is not None:
         config_file.write_text(text)
-    assert_tagged(run(send(UNSUPPORTED_CLAIM)), f"{TAG} {UNSUPPORTED_CLAIM}")
+    assert run(send(UNSUPPORTED_CLAIM))[0] == 2
     assert run(bash("git commit -s -m x")) == (2, "", TRAILER_MESSAGE)
     assert run(stop(last_assistant_message=UNSUPPORTED_CLAIM))[1] != ""
 
@@ -1080,12 +1086,91 @@ def test_long_sentences_preserve_full_text_and_evidence(run: Runner) -> None:
     )
 
 
-@pytest.mark.parametrize("setting", ["tag_messages = true", 'other = "value"'])
-def test_an_existing_table_defaults_to_tagging(
-    config_file: Path, run: Runner, setting: str
+def refused(result: Result) -> bool:
+    status, out, err = result
+    return (status, out) == (2, "") and "was not sent. Offending:" in err
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        None,
+        "[state_guard]\n",
+        '[state_guard]\nother = "value"\n',
+        "[state_guard]\ntag_messages = false\n",
+        '[state_guard]\ntag_messages = "false"\n',
+        '[state_guard]\ntag_messages = "true"\n',
+        "[state_guard]\ntag_messages = 0\n",
+        "[state_guard]\ntag_messages = 1\n",
+        "[state_guard]\ntag_messages = {}\n",
+    ],
+)
+def test_only_boolean_true_turns_tagging_on(
+    config_file: Path, run: Runner, text: str | None
 ) -> None:
-    config_file.write_text(f"[state_guard]\n{setting}\n")
-    assert_tagged(run(send("It was done.")), f"{TAG} It was done.")
+    if text is None:
+        config_file.unlink()
+    else:
+        config_file.write_text(text)
+    assert refused(run(send("It was done.")))
+
+
+@pytest.mark.parametrize("text", ["state_guard = 1\n", "[state_guard\n"])
+def test_a_config_error_refuses_and_says_why(
+    config_file: Path, run: Runner, text: str
+) -> None:
+    config_file.write_text(text)
+    status, out, err = run(send("It was done."))
+    assert refused((status, out, err))
+    assert "state-guard: ignoring the config:" in err
+
+
+def test_a_config_error_does_not_stop_a_clean_message(
+    config_file: Path, run: Runner
+) -> None:
+    config_file.write_text("[state_guard\n")
+    assert run(send("Hello.")) == (0, "", "")
+
+
+def test_log_refuses_symlinks_and_special_files(tmp_path: Path, run: Runner) -> None:
+    directory = tmp_path / "state/tbhbdev/state-guard"
+    directory.mkdir(parents=True)
+    target = tmp_path / "target"
+    target.write_text("keep\n")
+    target.chmod(0o644)
+    (directory / "tagged.jsonl").symlink_to(target)
+    status, out, err = run(send("It was done."))
+    assert_tagged((status, out, ""), f"{TAG} It was done.")
+    assert "could not log tagged sentences" in err
+    assert (target.read_text(), target.stat().st_mode & 0o777) == ("keep\n", 0o644)
+    (directory / "tagged.jsonl").unlink()
+    os.mkfifo(directory / "tagged.jsonl")
+    status, out, err = run(send("It was done."))
+    assert_tagged((status, out, ""), f"{TAG} It was done.")
+    assert "could not log tagged sentences" in err
+
+
+def test_log_refuses_a_symlinked_directory(tmp_path: Path, run: Runner) -> None:
+    parent = tmp_path / "state/tbhbdev"
+    parent.mkdir(parents=True)
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    target.chmod(0o755)
+    (parent / "state-guard").symlink_to(target)
+    status, out, err = run(send("It was done."))
+    assert_tagged((status, out, ""), f"{TAG} It was done.")
+    assert "could not log tagged sentences" in err
+    assert list(target.iterdir()) == []
+    assert target.stat().st_mode & 0o777 == 0o755
+
+
+def test_log_refuses_a_file_owned_by_another_user(
+    monkeypatch: pytest.MonkeyPatch, run: Runner
+) -> None:
+    monkeypatch.setattr(os, "getuid", lambda: os.geteuid() + 1)
+    status, out, err = run(send("It was done."))
+    assert_tagged((status, out, ""), f"{TAG} It was done.")
+    assert "regular file owned by this user" in err
 
 
 def test_logging_tightens_existing_permissions(tmp_path: Path, run: Runner) -> None:
@@ -1118,9 +1203,12 @@ def test_log_is_private_at_creation(
     original = os.open
     modes: list[int] = []
 
-    def observe(path: Path, flags: int, mode: int = 0o777) -> int:
-        fd = original(path, flags, mode)
-        modes.append(os.fstat(fd).st_mode & 0o777)
+    def observe(
+        path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        fd = original(path, flags, mode, dir_fd=dir_fd)
+        if dir_fd is not None:
+            modes.append(os.fstat(fd).st_mode & 0o777)
         return fd
 
     monkeypatch.setattr(os, "open", observe)
@@ -1135,11 +1223,11 @@ def test_log_is_private_at_creation(
 def test_log_failures_with_multiple_lines_print_one_stderr_line(
     monkeypatch: pytest.MonkeyPatch, run: Runner
 ) -> None:
-    def broken(_path: Path) -> Path:
+    def broken(_path: Path) -> int:
         message = "one\ntwo"
         raise RuntimeError(message)
 
-    monkeypatch.setattr(state_guard, "private_dir", broken)
+    monkeypatch.setattr(state_guard, "open_log", broken)
     status, out, err = run(send("It was done."))
     assert (
         err
@@ -1156,8 +1244,11 @@ def test_tags_never_touch_other_tools(run: Runner, tool: str) -> None:
     assert data["tool_input"] == {"message": UNSUPPORTED_CLAIM}
 
 
-@pytest.mark.parametrize("event", ["PostToolUse", "SessionStart", "Other", None])
-def test_tags_only_apply_on_pre_tool_use(run: Runner, event: str | None) -> None:
+@pytest.mark.parametrize("event", ["PostToolUse", "Other", None])
+def test_other_hook_events_refuse_instead_of_tagging(
+    run: Runner, event: str | None
+) -> None:
     data = send(UNSUPPORTED_CLAIM)
     data["hook_event_name"] = event
-    assert run(data) == (0, "", "")
+    assert refused(run(data))
+    assert data["tool_input"] == {"message": UNSUPPORTED_CLAIM}

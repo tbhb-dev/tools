@@ -7,7 +7,9 @@ SessionStart. It reads the hook payload on stdin.
 
 - PreToolUse on SendMessage inserts `[state-guard: unverified]` before each
   status sentence without evidence, emits updatedInput and logs each sentence.
-  Set `[state_guard] tag_messages = false` to restore refusal with exit 2.
+  Only `[state_guard] tag_messages = true` turns this on. Without it, or with
+  any other value, a bad config or another hook event, the guard refuses with
+  exit 2.
   Sender-written tags cannot replace the guard's own tag.
   On Bash it blocks a `git commit` that adds a Signed-off-by or
   Co-authored-by trailer visible in its arguments, or the `-s` or `--signoff`
@@ -45,6 +47,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -52,7 +55,7 @@ from typing import cast
 lazy from collections.abc import Callable
 
 from tbhbdev import userconfig
-from tbhbdev.alpha.agent.runfiles import private_dir, state_home
+from tbhbdev.alpha.agent.runfiles import state_home
 from tbhbdev.alpha.repo import read_hook_stdin
 
 type Json = dict[str, object]
@@ -166,13 +169,33 @@ def tag_sentences(text: str) -> tuple[str, list[str]]:
     return "".join(parts), sentences
 
 
+def open_log(directory: Path) -> int:
+    """A descriptor for the private audit log; refuses symlinks and special files."""
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    dir_fd = os.open(directory, flags)
+    try:
+        os.fchmod(dir_fd, 0o700)
+        fd = os.open(
+            "tagged.jsonl",
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o600,
+            dir_fd=dir_fd,
+        )
+    finally:
+        os.close(dir_fd)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        os.close(fd)
+        message = "the audit log is not a regular file owned by this user"
+        raise OSError(message)
+    return fd
+
+
 def log_tagged(data: Json, tool_input: Json, sentences: list[str]) -> None:
     """Append private audit records; a logging failure must still send the message."""
     try:
-        directory = private_dir(state_home(Path.home()) / "tbhbdev" / "state-guard")
-        fd = os.open(
-            directory / "tagged.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
-        )
+        fd = open_log(state_home(Path.home()) / "tbhbdev" / "state-guard")
         with os.fdopen(fd, "ab") as out:
             os.fchmod(out.fileno(), 0o600)
             for sentence in sentences:
@@ -189,14 +212,25 @@ def log_tagged(data: Json, tool_input: Json, sentences: list[str]) -> None:
         print(f"state-guard: could not log tagged sentences: {exc!r}", file=sys.stderr)
 
 
+def tagging_enabled(data: Json) -> bool:
+    """True only for PreToolUse with `[state_guard] tag_messages = true`."""
+    if data.get("hook_event_name") != "PreToolUse":
+        return False
+    try:
+        settings = userconfig.optional_table("state_guard") or {}
+    except userconfig.ConfigError as exc:
+        print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
+        return False
+    return settings.get("tag_messages") is True
+
+
 def send_message_reason(data: Json, tool_input: Json) -> str | None:
-    """Rewrite a peer message, or return the legacy refusal when tagging is off."""
+    """Rewrite a peer message when tagging is on, or return the refusal."""
     original = str(tool_input.get("message", ""))
     bad = unsupported_claims(strip_tags(original))
     if not bad:
         return None
-    settings = userconfig.optional_table("state_guard") or {}
-    if settings.get("tag_messages") is False:
+    if not tagging_enabled(data):
         return claim_reason(bad)
     text, sentences = tag_sentences(original)
     log_tagged(data, tool_input, sentences)
@@ -416,9 +450,7 @@ def pre_tool_reason(data: Json) -> str | None:
     if tool == "Bash":
         return commit_trailer_reason(str(tool_input.get("command", "")))
     if tool == "SendMessage":
-        if data.get("hook_event_name") == "PreToolUse":
-            return send_message_reason(data, tool_input)
-        return None
+        return send_message_reason(data, tool_input)
     if tool in {"Write", "Edit"}:
         return open_note_reason(str(tool), tool_input)
     return None
