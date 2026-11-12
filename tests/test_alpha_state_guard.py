@@ -1047,6 +1047,20 @@ def test_sender_tags_cannot_preempt_the_guard(run: Runner, tag: str) -> None:
     assert_tagged(run(send(f"It was {tag}done.")), f"{TAG} It was {tag}done.")
 
 
+NESTED_TAGS = [
+    "[state-guard: " + TAG + "unverified]",
+    "[state-guard: [state-guard: " + TAG + "unverified]unverified]",
+    TAG[:14] + TAG + TAG[14:],
+]
+
+
+@pytest.mark.parametrize("tag", NESTED_TAGS)
+def test_nested_sender_tags_cannot_preempt_the_guard(run: Runner, tag: str) -> None:
+    assert state_guard.strip_tags(f"{tag} It was done.") == " It was done."[1:]
+    assert_tagged(run(send(f"{tag}It was done.")), f"{TAG} {tag}It was done.")
+    assert run(send(f"{tag}A note.")) == (0, "", "")
+
+
 @pytest.mark.parametrize("tag", [TAG, TAG + " ", TAG + " " + TAG + " "])
 def test_stop_rejects_copied_tags(run: Runner, tag: str) -> None:
     status, out, err = run(stop(last_assistant_message=f"{tag}It was done."))

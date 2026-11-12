@@ -157,8 +157,16 @@ def claim_reason(bad: list[str]) -> str:
 
 
 def strip_tags(text: str) -> str:
-    """Ignore sender-written tags when judging claims, preserving emitted text."""
-    return text.replace(TAG + " ", "").replace(TAG, "")
+    """Ignore sender-written tags when judging claims, preserving emitted text.
+
+    Removing a tag can join the text around it into a new tag, as in a tag nested
+    inside a tag, so the removal repeats until the text stops changing.
+    """
+    previous = None
+    while previous != text:
+        previous = text
+        text = text.replace(TAG + " ", "").replace(TAG, "")
+    return text
 
 
 def tag_sentences(text: str) -> tuple[str, list[str]]:
