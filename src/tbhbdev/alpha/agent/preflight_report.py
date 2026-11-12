@@ -338,7 +338,9 @@ def create_workspace(run: run_host.Run) -> Path:
 
 def deliver(run: run_host.Run) -> credentials.Delivery:
     result = run_host.process_group.prepare(
-        lambda: credentials.deliver(run.request, run.settings, run.tmpdir),
+        lambda: credentials.deliver(
+            run.request, run.settings, run.tmpdir, github=False
+        ),
         run.files,
         run.deadline,
         run.settings.kill_grace_seconds,

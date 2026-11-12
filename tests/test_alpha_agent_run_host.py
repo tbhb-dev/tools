@@ -4934,8 +4934,9 @@ def test_aggregate_delivery_worker_checks_returned_input(
     run = make_run(tmp_path)
     ready = preparation(run)
 
-    def deliver(*args: object) -> credentials.Delivery:
+    def deliver(*args: object, **kwargs: object) -> credentials.Delivery:
         assert args == (run.request, run.settings, run.tmpdir)
+        assert kwargs == {"github": False}
         return ready.delivery
 
     def worker(operation: Callable[[], object], *args: object) -> object:
