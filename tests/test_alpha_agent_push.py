@@ -797,6 +797,54 @@ def test_scan_accepts_a_fast_forward_without_merges(tmp_path: Path) -> None:
     push.scan(repository, before, git(repository, "rev-parse", "HEAD").strip(), NAMES)
 
 
+def _scan_head(repository: Path, before: str) -> None:
+    push.scan(repository, before, git(repository, "rev-parse", "HEAD").strip(), NAMES)
+
+
+def test_scan_reads_binary_blob_contents(tmp_path: Path) -> None:
+    repository = _history(tmp_path)
+    before = git(repository, "rev-parse", "HEAD").strip()
+    (repository / "blob.bin").write_bytes(b"\x00\x01 example-hidden \xff\x00")
+    git(repository, "add", "blob.bin")
+    commit(repository, "add a binary file")
+    with pytest.raises(push.PushRefusedError, match="1 private-name hit"):
+        _scan_head(repository, before)
+
+
+@pytest.mark.parametrize("field", ["author", "committer"])
+def test_scan_reads_the_author_and_committer_fields(tmp_path: Path, field: str) -> None:
+    repository = _history(tmp_path)
+    before = git(repository, "rev-parse", "HEAD").strip()
+    git(
+        repository,
+        "config",
+        f"{'user' if field == 'author' else 'committer'}.name",
+        "example-hidden",
+    )
+    git(
+        repository,
+        "config",
+        f"{'user' if field == 'author' else 'committer'}.email",
+        "x@example.invalid",
+    )
+    if field == "author":
+        commit(repository, "named author")
+    else:
+        git(
+            repository,
+            "-c",
+            "user.name=x",
+            "-c",
+            "committer.name=example-hidden",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "named committer",
+        )
+    with pytest.raises(push.PushRefusedError, match="private-name hit"):
+        _scan_head(repository, before)
+
+
 def test_scan_refuses_a_merge_commit(tmp_path: Path) -> None:
     repository = _history(tmp_path)
     before = git(repository, "rev-parse", "HEAD").strip()

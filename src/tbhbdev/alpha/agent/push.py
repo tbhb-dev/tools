@@ -194,7 +194,7 @@ def read_names(source: Path) -> private_names.Names:
     return names
 
 
-def _git_output(directory: Path, *arguments: str) -> str:
+def _git_output(directory: Path, *arguments: str, data: str | None = None) -> str:
     env = dict.fromkeys(
         (
             "HOME",
@@ -232,7 +232,7 @@ def _git_output(directory: Path, *arguments: str) -> str:
             ],
             cwd=directory,
             env=env,
-            stdin=subprocess.DEVNULL,
+            **({"stdin": subprocess.DEVNULL} if data is None else {"input": data}),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -267,6 +267,20 @@ def scan(
         f"{before}..{commit}",
     )
     lines = output.splitlines()
+    # The patch text omits binary contents and raw commit fields, so also read
+    # every object the range adds: blobs, trees and the commits themselves.
+    added = [
+        line.split()[0]
+        for line in _git_output(
+            directory, "rev-list", "--objects", commit, f"^{before}"
+        ).splitlines()
+        if line.strip()
+    ]
+    if added:
+        raw = _git_output(
+            directory, "cat-file", "--batch", data="".join(f"{o}\n" for o in added)
+        )
+        lines += raw.splitlines()
     known = names.private + list(_configured())
     texts = [
         (1, lines),
