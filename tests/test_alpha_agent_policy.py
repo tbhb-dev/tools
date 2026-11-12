@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
-from pathlib import PurePosixPath
+import shutil
+import subprocess
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -51,6 +53,9 @@ PATH = {
     Os.LINUX: "{home}/.local/bin:/usr/local/bin:/usr/bin",
     Os.MACOS: "{home}/.local/bin:/opt/example/bin:/usr/bin",
 }
+
+
+GIT = shutil.which("git") or "git"
 
 
 def made(  # noqa: PLR0913 -- one value per fact the policy depends on
@@ -1045,6 +1050,59 @@ def test_configured_write_roots_cannot_reach_denied_paths(
         else f"policy write path {shown} overlaps the denied path {denied_path}"
     )
     assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize("entry", CREDENTIAL_PATHS)
+def test_a_write_root_cannot_reach_a_credential_store(
+    os: Os, harness: Harness, entry: str
+) -> None:
+    sandbox = dataclasses.replace(SANDBOX, write_roots=(entry,))
+    with pytest.raises(Invalid) as caught:
+        made(os, Profile.BUILD, harness, "agent", config=settings(sandbox=sandbox))
+    path = f"/example/home/agent/{entry}"
+    assert str(caught.value) == (
+        f"policy write path {path} overlaps the denied path {path}"
+    )
+
+
+def _credential_fill(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [GIT, "credential", "fill"],
+        input="protocol=https\nhost=example.invalid\n\n",
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+
+def test_git_credential_fill_returns_nothing_under_the_run_environment(
+    tmp_path: Path,
+) -> None:
+    """A stored credential in the home gets no answer from git in the run."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".git-credentials").write_text(
+        "https://user:synthetic-secret@example.invalid\n"
+    )
+    (home / ".gitconfig").write_text("[credential]\n\thelper = store\n")
+    run_env = made(Os.MACOS, Profile.BUILD, Harness.CODEX, "agent").env
+    base = {
+        "PATH": str(Path(GIT).parent),
+        "HOME": str(home),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    guarded = {
+        **base,
+        **{k: v for k, v in run_env.items() if k.startswith("GIT_CONFIG_")},
+    }
+    assert "synthetic-secret" in _credential_fill(base).stdout
+    result = _credential_fill(guarded)
+    assert "synthetic-secret" not in result.stdout
+    assert result.returncode != 0
 
 
 @pytest.mark.parametrize("harness", Harness)
