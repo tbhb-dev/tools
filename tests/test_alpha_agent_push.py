@@ -48,11 +48,15 @@ def push_account(
 
 
 SECRET_SCAN = push.secret_scan
+COMMIT_POLICY = push.commit_policy
+AGENT_PUBLIC_KEY = push.agent_public_key
 
 
 @pytest.fixture(autouse=True)
 def no_secret_scan(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(push, "secret_scan", constant(None))
+    monkeypatch.setattr(push, "commit_policy", constant(None))
+    monkeypatch.setattr(push, "agent_public_key", constant(""))
 
 
 @pytest.fixture
@@ -907,6 +911,140 @@ def test_a_leak_stops_the_push(
     assert run.files.path("log").read_text() == (
         "push refused: secret scan found a leak in the pushed range\n"
     )
+
+
+def _signer(tmp_path: Path, name: str) -> tuple[Path, str]:
+    key = tmp_path / name
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)],
+        check=True,
+        stdin=subprocess.DEVNULL,
+    )
+    return key, key.with_suffix(".pub").read_text().strip()
+
+
+def _signed_history(tmp_path: Path) -> tuple[Path, str, str, Path]:
+    key, public = _signer(tmp_path, "agent-key")
+    repository = _history(tmp_path)
+    git(repository, "config", "user.email", "agent@tonyburns.net")
+    git(repository, "config", "gpg.format", "ssh")
+    git(repository, "config", "user.signingkey", str(key))
+    return repository, git(repository, "rev-parse", "HEAD").strip(), public, key
+
+
+def _tip(repository: Path) -> str:
+    return git(repository, "rev-parse", "HEAD").strip()
+
+
+def test_commit_policy_accepts_signed_agent_commits(tmp_path: Path) -> None:
+    repository, before, public, _ = _signed_history(tmp_path)
+    git(repository, "commit", "--allow-empty", "-qS", "-m", "one")
+    git(repository, "commit", "--allow-empty", "-qS", "-m", "two")
+    COMMIT_POLICY(repository, before, _tip(repository), public)
+
+
+def test_commit_policy_refuses_unsigned_commits(tmp_path: Path) -> None:
+    repository, before, public, _ = _signed_history(tmp_path)
+    git(repository, "commit", "--allow-empty", "-q", "-m", "plain")
+    with pytest.raises(push.PushRefusedError) as caught:
+        COMMIT_POLICY(repository, before, _tip(repository), public)
+    assert str(caught.value) == (
+        f"commit policy: {_tip(repository)[:7]} is not signed by the agent's key"
+    )
+
+
+def test_commit_policy_refuses_another_signer(tmp_path: Path) -> None:
+    repository, before, public, _ = _signed_history(tmp_path)
+    other, _ = _signer(tmp_path, "other-key")
+    git(repository, "config", "user.signingkey", str(other))
+    git(repository, "commit", "--allow-empty", "-qS", "-m", "other")
+    with pytest.raises(push.PushRefusedError) as caught:
+        COMMIT_POLICY(repository, before, _tip(repository), public)
+    assert "is not signed by the agent's key" in str(caught.value)
+
+
+def test_commit_policy_refuses_other_identities_and_trailers(tmp_path: Path) -> None:
+    repository, before, public, _ = _signed_history(tmp_path)
+    git(repository, "config", "user.email", "someone@example.invalid")
+    git(
+        repository,
+        "commit",
+        "--allow-empty",
+        "-qS",
+        "-m",
+        "subject\n\nSigned-off-by: A <a@example.invalid>",
+    )
+    short = _tip(repository)[:7]
+    git(repository, "config", "user.email", "agent@tonyburns.net")
+    git(
+        repository,
+        "commit",
+        "--allow-empty",
+        "-qS",
+        "-m",
+        "subject\n\nco-authored-by: B <b@example.invalid>",
+    )
+    with pytest.raises(push.PushRefusedError) as caught:
+        COMMIT_POLICY(repository, before, _tip(repository), public)
+    assert str(caught.value) == (
+        f"commit policy: {_tip(repository)[:7]} carries a Signed-off-by or "
+        f"Co-authored-by trailer; {short} author email is not the agent's; "
+        f"{short} committer email is not the agent's; "
+        f"{short} carries a Signed-off-by or Co-authored-by trailer"
+    )
+
+
+def test_run_gives_commit_policy_the_agent_public_key(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, _ = local_run
+    seen: list[str] = []
+    monkeypatch.setattr(push, "commit_policy", lambda *a: seen.append(a[3]))
+    monkeypatch.setattr(push, "agent_public_key", constant("ssh-ed25519 AAAA"))
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 0
+    assert seen == ["ssh-ed25519 AAAA"]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "output"),
+    [(0, "ssh-ed25519 AAAA agent\nsecond\n"), (1, ""), (0, "")],
+)
+def test_agent_public_key_reads_the_signing_agent(
+    returncode: int,
+    output: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def listing(
+        command: list[str], **kwargs: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        assert command == ["/host/ssh-add", "-L"]
+        assert kwargs["env"] == {"SSH_AUTH_SOCK": str(tmp_path / "ssh.sock")}
+        return subprocess.CompletedProcess(command, returncode, output)
+
+    monkeypatch.setattr(host_tools, "resolve", lambda name: f"/host/{name}")
+    monkeypatch.setattr(subprocess, "run", listing)
+    if returncode == 0 and output:
+        assert AGENT_PUBLIC_KEY(tmp_path) == "ssh-ed25519 AAAA agent"
+    else:
+        with pytest.raises(push.PushRefusedError) as caught:
+            AGENT_PUBLIC_KEY(tmp_path)
+        assert str(caught.value) == "signing key unavailable"
+
+
+def test_agent_public_key_refuses_when_ssh_add_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        raise OSError
+
+    monkeypatch.setattr(host_tools, "resolve", lambda name: name)
+    monkeypatch.setattr(subprocess, "run", broken)
+    with pytest.raises(push.PushRefusedError) as caught:
+        AGENT_PUBLIC_KEY(tmp_path)
+    assert str(caught.value) == "signing key unavailable"
 
 
 def test_no_base_commit_refuses_push(
