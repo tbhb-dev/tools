@@ -83,7 +83,7 @@ doesn't read a draft.
 
 ``rerun N`` reruns only the failed jobs of the latest run for pull request N's
 current head commit with ``gh run rerun --failed``. It reports an error when
-that run has not failed or no run exists. It doesn't read a draft.
+that run hasn't failed or no run exists. It doesn't read a draft.
 
 ``backfill-opened OWNER`` reads the body of every pull request, open or not,
 in every repository of OWNER, and adds each one to the ledger of every
