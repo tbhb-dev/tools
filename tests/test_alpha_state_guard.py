@@ -4,9 +4,11 @@
 
 import io
 import json
+import os
 import runpy
 import signal
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 lazy from pathlib import Path
 
 import pytest
@@ -19,6 +21,7 @@ decisions_dir = "/example/decisions"
 open_note = "/example/Open.md"
 """
 UNSUPPORTED_CLAIM = "The migration was applied to example-host."
+TAG = "[state-guard: unverified]"
 TRAILER_MESSAGE = (
     "state-guard: agent commits carry no Signed-off-by or Co-authored-by "
     "trailer and no -s or --signoff. Remove it.\n"
@@ -26,6 +29,27 @@ TRAILER_MESSAGE = (
 
 type Result = tuple[int, str, str]
 type Runner = Callable[[object], Result]
+
+
+@pytest.fixture(autouse=True)
+def _private_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+
+def assert_tagged(result: Result, message: str, **fields: object) -> None:
+    status, out, err = result
+    assert (status, err) == (0, "")
+    assert json.loads(out) == {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "updatedInput": {"message": message, **fields},
+        }
+    }
+    assert "permissionDecision" not in out
+
+
+def test_flagged_messages_receive_a_guard_tag(run: Runner) -> None:
+    assert_tagged(run(send(UNSUPPORTED_CLAIM)), f"{TAG} {UNSUPPORTED_CLAIM}")
 
 
 @pytest.fixture(autouse=True)
@@ -98,7 +122,7 @@ def test_the_checks_that_need_no_private_value_run_without_config(
 ) -> None:
     if text is not None:
         config_file.write_text(text)
-    assert run(send(UNSUPPORTED_CLAIM))[0] == 2
+    assert_tagged(run(send(UNSUPPORTED_CLAIM)), f"{TAG} {UNSUPPORTED_CLAIM}")
     assert run(bash("git commit -s -m x")) == (2, "", TRAILER_MESSAGE)
     assert run(stop(last_assistant_message=UNSUPPORTED_CLAIM))[1] != ""
 
@@ -149,7 +173,8 @@ def test_session_start_without_a_rule_prints_nothing(
 # ------------------------------------------------------------------- claims
 
 
-def test_an_unsupported_claims_claim_is_blocked(run: Runner) -> None:
+def test_tagging_can_be_disabled(config_file: Path, run: Runner) -> None:
+    config_file.write_text("[state_guard]\ntag_messages = false\n")
     status, out, err = run(send(UNSUPPORTED_CLAIM))
     assert (status, out) == (2, "")
     assert err == (
@@ -160,7 +185,20 @@ def test_an_unsupported_claims_claim_is_blocked(run: Runner) -> None:
     )
 
 
-def test_at_most_three_offenders_are_listed_and_each_is_cut(run: Runner) -> None:
+def test_disabled_tagging_reports_claims_without_sender_tags(
+    config_file: Path, tmp_path: Path, run: Runner
+) -> None:
+    config_file.write_text("[state_guard]\ntag_messages = false\n")
+    status, out, err = run(send(f"It was {TAG} done."))
+    assert (status, out) == (2, "")
+    assert err.endswith("Offending: It was done.\n")
+    assert not (tmp_path / "state").exists()
+
+
+def test_at_most_three_offenders_are_listed_and_each_is_cut(
+    config_file: Path, run: Runner
+) -> None:
+    config_file.write_text("[state_guard]\ntag_messages = false\n")
     lines = [f"Step {n} was done." for n in range(5)]
     lines[0] = "It was done " + "x" * 200
     _, _, err = run(send("\n".join(lines)))
@@ -214,13 +252,13 @@ def test_evidence_attribution_and_unverified_pass(run: Runner, message: str) -> 
     ],
 )
 def test_each_kind_of_claim_is_blocked(run: Runner, claim: str) -> None:
-    assert run(send(claim))[0] == 2
+    assert_tagged(run(send(claim)), f"{TAG} {claim}")
+    assert json.loads(run(stop(last_assistant_message=claim))[1])["decision"] == "block"
 
 
 def test_evidence_in_another_sentence_does_not_cover_a_claim(run: Runner) -> None:
-    status, _, err = run(send("It was applied. See #12 for the other one."))
-    assert status == 2
-    assert err.endswith("Offending: It was applied.\n")
+    message = "It was applied. See #12 for the other one."
+    assert_tagged(run(send(message)), f"{TAG} {message}")
 
 
 def test_other_tools_and_odd_inputs_pass(run: Runner) -> None:
@@ -548,7 +586,12 @@ def test_invalid_tool_input_reaches_checks_as_empty_text(
 
     monkeypatch.setattr(state_guard, "commit_trailer_reason", command)
     monkeypatch.setattr(state_guard, "unsupported_claims", message)
-    assert state_guard.pre_tool_reason({"tool_name": tool, "tool_input": raw}) is None
+    assert (
+        state_guard.pre_tool_reason(
+            {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": raw}
+        )
+        is None
+    )
     assert values == [""]
 
 
@@ -724,7 +767,8 @@ def test_landed_on_is_not_a_status_claim(run: Runner, message: str) -> None:
 def test_evidence_requires_a_bounded_mixed_hex_hash(
     run: Runner, candidate: str
 ) -> None:
-    assert run(send(f"It was merged in {candidate}."))[0] == 2
+    message = f"It was merged in {candidate}."
+    assert_tagged(run(send(message)), f"{TAG} {message}")
 
 
 @pytest.mark.parametrize(
@@ -754,7 +798,7 @@ def test_claim_and_signoff_checks_run_outside_a_repository_without_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run: Runner
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    assert run(send(UNSUPPORTED_CLAIM))[0] == 2
+    assert_tagged(run(send(UNSUPPORTED_CLAIM)), f"{TAG} {UNSUPPORTED_CLAIM}")
     assert run(bash("git commit -s")) == (2, "", TRAILER_MESSAGE)
     assert run(stop(last_assistant_message=UNSUPPORTED_CLAIM))[1] != ""
     assert run({"hook_event_name": "SessionStart"}) == (0, "", "")
@@ -1416,3 +1460,198 @@ def test_counted_participles_with_elapsed_time_block(unit: str, ending: str) -> 
 def test_unmarked_quotes_do_not_supply_artifacts(content: str) -> None:
     text = f'The fix merged "{content}".'
     assert state_guard.unsupported_claims(text) == [text]
+
+
+def test_tagged_input_copies_all_fields_and_each_flagged_occurrence(
+    run: Runner,
+) -> None:
+    message = "A note. It was done. It was merged in #12. It was done. It shipped."
+    fields = {"to": "peer-example", "summary": "note", "extra": {"n": 3}, "flag": False}
+    data = send(message)
+    data["tool_input"] = {"message": message, **fields}
+    assert_tagged(
+        run(data),
+        f"A note. {TAG} It was done. It was merged in #12. "
+        f"{TAG} It was done. {TAG} It shipped.",
+        **fields,
+    )
+    assert data["tool_input"] == {"message": message, **fields}
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "- ",
+        "  + ",
+        "* ",
+        "1. ",
+        "2) ",
+        "**Status:** ",
+        "**Status**: ",
+        "  - **Status:** ",
+        "  - **Status**: ",
+        "\t",
+    ],
+)
+def test_tags_follow_list_markers_and_bold_labels(run: Runner, prefix: str) -> None:
+    assert_tagged(
+        run(send(f"{prefix}It was done.\n{prefix}A note.")),
+        f"{prefix}{TAG} It was done.\n{prefix}A note.",
+    )
+
+
+@pytest.mark.parametrize("tag", [TAG, TAG + " ", TAG + " " + TAG + " "])
+def test_sender_tags_cannot_preempt_the_guard(run: Runner, tag: str) -> None:
+    assert_tagged(run(send(f"{tag}It was done.")), f"{TAG} {tag}It was done.")
+    assert_tagged(
+        run(send(f"{tag}It was done. {tag}A note.")),
+        f"{TAG} {tag}It was done. {tag}A note.",
+    )
+    assert run(send(f"{tag}A note.")) == (0, "", "")
+    assert_tagged(run(send(f"It was {tag}done.")), f"{TAG} It was {tag}done.")
+
+
+@pytest.mark.parametrize("tag", [TAG, TAG + " ", TAG + " " + TAG + " "])
+def test_stop_rejects_copied_tags(run: Runner, tag: str) -> None:
+    status, out, err = run(stop(last_assistant_message=f"{tag}It was done."))
+    assert (status, err) == (0, "")
+    assert json.loads(out) == {
+        "decision": "block",
+        "reason": state_guard.claim_reason("your reply", ["It was done."]),
+    }
+
+
+def test_tagged_sentences_are_logged_privately(tmp_path: Path, run: Runner) -> None:
+    data = send("It was done. A note. It shipped.")
+    data["session_id"] = "session-example"
+    data["tool_input"] = {
+        "message": "It was done. A note. It shipped.",
+        "to": "peer-example",
+    }
+    before = datetime.now(UTC)
+    assert_tagged(
+        run(data), f"{TAG} It was done. A note. {TAG} It shipped.", to="peer-example"
+    )
+    path = tmp_path / "state/tbhbdev/state-guard/tagged.jsonl"
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(records) == 2
+    for record, rule, sentence in zip(
+        records, ["was done", "shipped"], ["It was done.", "It shipped."], strict=True
+    ):
+        time = datetime.fromisoformat(record.pop("time"))
+        assert time.utcoffset() == UTC.utcoffset(time)
+        assert before <= time <= datetime.now(UTC)
+        assert record == {
+            "session_id": "session-example",
+            "rule": rule,
+            "sentence": sentence,
+            "recipient": "peer-example",
+        }
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+    assert_tagged(run(send("It was done.")), f"{TAG} It was done.")
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(records) == 3
+    assert records[-1]["session_id"] is None
+    assert "recipient" not in records[-1]
+
+
+def test_logging_failure_still_sends_once(tmp_path: Path, run: Runner) -> None:
+    path = tmp_path / "state/tbhbdev/state-guard"
+    path.parent.mkdir(parents=True)
+    path.write_text("a file blocks the directory")
+    status, out, err = run(send("It was done. It shipped."))
+    assert len(err.splitlines()) == 1
+    assert err.startswith("state-guard: could not log tagged sentences:")
+    assert_tagged((status, out, ""), f"{TAG} It was done. {TAG} It shipped.")
+
+
+def test_long_sentences_preserve_full_text_and_evidence(run: Runner) -> None:
+    sentence = "It was done " + "x" * 200
+    message = f"{sentence}. {sentence}. {sentence} in #12."
+    assert_tagged(
+        run(send(message)), f"{TAG} {sentence}. {TAG} {sentence}. {sentence} in #12."
+    )
+
+
+@pytest.mark.parametrize("setting", ["tag_messages = true", 'other = "value"'])
+def test_an_existing_table_defaults_to_tagging(
+    config_file: Path, run: Runner, setting: str
+) -> None:
+    config_file.write_text(f"[state_guard]\n{setting}\n")
+    assert_tagged(run(send("It was done.")), f"{TAG} It was done.")
+
+
+def test_logging_tightens_existing_permissions(tmp_path: Path, run: Runner) -> None:
+    path = tmp_path / "state/tbhbdev/state-guard/tagged.jsonl"
+    path.parent.mkdir(parents=True)
+    path.parent.chmod(0o755)
+    path.write_text("existing\n")
+    path.chmod(0o644)
+    assert_tagged(run(send("It was done.")), f"{TAG} It was done.")
+    lines = path.read_text().splitlines()
+    assert lines[0] == "existing"
+    assert json.loads(lines[1])["sentence"] == "It was done."
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_logs_use_the_home_state_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run: Runner
+) -> None:
+    monkeypatch.delenv("XDG_STATE_HOME")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert_tagged(run(send("It was done.")), f"{TAG} It was done.")
+    path = tmp_path / ".local/state/tbhbdev/state-guard/tagged.jsonl"
+    assert json.loads(path.read_text())["rule"] == "was done"
+
+
+def test_log_is_private_at_creation(
+    monkeypatch: pytest.MonkeyPatch, run: Runner
+) -> None:
+    original = os.open
+    modes: list[int] = []
+
+    def observe(path: Path, flags: int, mode: int = 0o777) -> int:
+        fd = original(path, flags, mode)
+        modes.append(os.fstat(fd).st_mode & 0o777)
+        return fd
+
+    monkeypatch.setattr(os, "open", observe)
+    previous = os.umask(0)
+    try:
+        assert_tagged(run(send("It was done.")), f"{TAG} It was done.")
+    finally:
+        os.umask(previous)
+    assert modes == [0o600]
+
+
+def test_log_failures_with_multiple_lines_print_one_stderr_line(
+    monkeypatch: pytest.MonkeyPatch, run: Runner
+) -> None:
+    def broken(_path: Path) -> Path:
+        message = "one\ntwo"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(state_guard, "private_dir", broken)
+    status, out, err = run(send("It was done."))
+    assert (
+        err
+        == "state-guard: could not log tagged sentences: RuntimeError('one\\ntwo')\n"
+    )
+    assert_tagged((status, out, ""), f"{TAG} It was done.")
+
+
+@pytest.mark.parametrize("tool", ["Read", "Write", "Edit", "Bash", "Other"])
+def test_tags_never_touch_other_tools(run: Runner, tool: str) -> None:
+    data = send(UNSUPPORTED_CLAIM)
+    data["tool_name"] = tool
+    assert run(data) == (0, "", "")
+    assert data["tool_input"] == {"message": UNSUPPORTED_CLAIM}
+
+
+@pytest.mark.parametrize("event", ["PostToolUse", "SessionStart", "Other", None])
+def test_tags_only_apply_on_pre_tool_use(run: Runner, event: str | None) -> None:
+    data = send(UNSUPPORTED_CLAIM)
+    data["hook_event_name"] = event
+    assert run(data) == (0, "", "")
