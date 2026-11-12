@@ -504,12 +504,6 @@ def test_finished_run_writes_host_audit_summary(
     run = make_run(tmp_path)
     prepared = preparation(run)
     _, workspace = repository(tmp_path / "repository")
-    prepared = dataclasses.replace(
-        prepared, paths=dataclasses.replace(prepared.paths, worktree=str(workspace))
-    )
-    head = subprocess.check_output(
-        ["git", "-C", str(workspace), "rev-parse", "HEAD"], text=True
-    ).strip()
 
     def harness(*_args: object) -> int:
         audit = Path(prepared.paths.audit_dir)
@@ -528,8 +522,6 @@ def test_finished_run_writes_host_audit_summary(
     assert summary.stat().st_mode & 0o777 == 0o600
     assert json.loads(summary.read_text()) == {
         "rc": code,
-        "head": head,
-        "branch": "main",
         "files": {
             "empty": hashlib.sha256(b"").hexdigest(),
             "nested/event.json": hashlib.sha256(b"event\n").hexdigest(),
@@ -550,8 +542,6 @@ def test_failed_preparation_still_writes_host_audit_summary(
     assert run_host.execute(run, "example") == 1
     assert json.loads(run.files.path("audit.json").read_text()) == {
         "rc": 1,
-        "head": None,
-        "branch": None,
         "files": {},
     }
 

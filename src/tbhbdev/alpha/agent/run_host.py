@@ -704,13 +704,6 @@ def finish_auth(run: Run, prepared: Prepared | None) -> str | None:
 
 def audit_summary(run: Run, prepared: Prepared | None, rc: int) -> None:
     paths = planned_paths(run) if prepared is None else prepared.paths
-    head = branch = None
-    try:
-        workspace = Path(paths.worktree)
-        head = worktree.git(workspace, "rev-parse", "HEAD")
-        branch = worktree.git(workspace, "rev-parse", "--abbrev-ref", "HEAD")
-    except OSError, Invalid, subprocess.SubprocessError:
-        pass
     audit = Path(paths.audit_dir)
     files: dict[str, str] = {}
     for path in sorted(audit.rglob("*")):
@@ -721,7 +714,7 @@ def audit_summary(run: Run, prepared: Prepared | None, rc: int) -> None:
                 ).hexdigest()
     run.files.write(
         "audit.json",
-        json.dumps({"rc": rc, "head": head, "branch": branch, "files": files}) + "\n",
+        json.dumps({"rc": rc, "files": files}) + "\n",
     )
 
 
