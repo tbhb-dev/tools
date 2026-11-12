@@ -1895,6 +1895,7 @@ def test_mac_host_commands_are_resolved_before_launch(
         "ssh-add",
         "ssh",
         "openssl",
+        "gitleaks",
         "sysctl",
         "ps",
         "security",
@@ -2106,7 +2107,7 @@ def test_checked_policy_supplies_all_protected_paths(
     )
     run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=os))
     directories = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
-    names = ("git", "ssh-agent", "ssh-add", "ssh", "openssl")
+    names = ("git", "ssh-agent", "ssh-add", "ssh", "openssl", "gitleaks")
     if os is Os.MACOS:
         directories += ("/opt/homebrew/bin", "/usr/local/bin")
         names += ("sysctl", "ps", "security")
@@ -4110,12 +4111,13 @@ def test_checked_policy_xcode_protected_tuple(
         "/usr/bin/ssh-add",
         "/usr/bin/ssh",
         "/usr/bin/openssl",
+        "/usr/bin/gitleaks",
         "/usr/bin/sysctl",
         "/usr/bin/ps",
         "/usr/bin/security",
         "/Applications/Xcode.app/Contents",
         "/Applications/Xcode.app/Contents/Developer/usr/bin",
-        *("/usr/bin",) * 10,
+        *("/usr/bin",) * 11,
     )
     assert all("/" not in protected for protected in protections)
 
