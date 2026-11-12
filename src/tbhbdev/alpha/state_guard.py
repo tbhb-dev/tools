@@ -239,7 +239,7 @@ def evidenced_claim(chunk: str, match: re.Match[str]) -> bool:
                 ATTACHED_EVIDENCE.search(part)
                 for part in QUOTED_TEXT.split(suffix[reference.end() :])
             )
-    return bool(evidence and not process)
+    return evidence and not process
 
 
 def current_claim(chunk: str, match: re.Match[str]) -> bool:
