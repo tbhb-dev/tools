@@ -731,6 +731,8 @@ def test_landed_on_is_not_a_status_claim(run: Runner, message: str) -> None:
 @pytest.mark.parametrize(
     "candidate",
     [
+        "1234567",
+        "12345678901234567890",
         "a" * 7,
         "deadbeef",
         "a12345",
