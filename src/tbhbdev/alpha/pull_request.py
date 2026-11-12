@@ -30,8 +30,9 @@ leftover HTML comments and bare ``#N`` references, and lints the description
 with vale, cspell and rumdl under the repository's own configs. The vale
 style packages under .vale/ are gitignored, so a fresh worktree lacks them:
 when a style that .vale.ini's ``BasedOnStyles`` names is missing, ``check``
-runs the repository's pinned ``bazelisk run //:vale_sync`` once, and reports
-one problem instead of linting with vale if the styles are still missing.
+checks for ``//:vale_sync`` before running the repository's pinned
+``bazelisk run //:vale_sync`` once, and reports one problem instead of linting
+with vale if the target or styles are still missing.
 
 ``hook`` is the harnesses' PostToolUse entry point (payload on stdin). Outside
 a tbhb-dev repository it exits 0 at once. When the tool call wrote the draft of
@@ -662,9 +663,17 @@ def missing_styles(top: Path) -> list[str]:
 
 def style_problem(top: Path) -> str | None:
     """Sync missing vale styles once; why vale can't run, or None."""
-    if not missing_styles(top):
+    missing = missing_styles(top)
+    if not missing:
         return None
-    done = run([find_tool(BAZEL), "run", VALE_SYNC], cwd=top)
+    bazel = find_tool(BAZEL)
+    target = run([bazel, "query", VALE_SYNC], cwd=top)
+    if target.returncode != 0 or VALE_SYNC not in target.stdout.splitlines():
+        return (
+            f"vale styles missing from .vale/: {', '.join(missing)}; "
+            f"missing Bazel target {VALE_SYNC}"
+        )
+    done = run([bazel, "run", VALE_SYNC], cwd=top)
     still = missing_styles(top)
     if not still:
         return None

@@ -938,6 +938,9 @@ SYNCS = """import os, sys
 open(os.path.join(os.path.dirname(__file__), "bazelisk.log"), "a").write(
     " ".join(sys.argv[1:]) + "|" + os.getcwd() + "\\n"
 )
+if sys.argv[1:] == ["query", "//:vale_sync"]:
+    print("//:vale_sync")
+    sys.exit(0)
 for name in SYNCED:
     os.makedirs(os.path.join(".vale", name), exist_ok=True)
 """
@@ -970,8 +973,33 @@ def test_missing_styles_sync_once_then_lint(
     monkeypatch.chdir(world.root / "sub")  # the sync runs at the top, not here
     assert lint_checked(world, BASE) == []
     log = (world.bin / "bazelisk.log").read_text().splitlines()
-    assert log == [f"run //:vale_sync|{world.root.resolve()}"]
+    assert log == [
+        f"query //:vale_sync|{world.root.resolve()}",
+        f"run //:vale_sync|{world.root.resolve()}",
+    ]
     assert len(world.calls("vale")) == 1
+
+
+@pytest.mark.parametrize(
+    ("rc", "stdout"), [(0, ""), (0, "//:vale_sync_other\n"), (7, "//:vale_sync\n")]
+)
+def test_missing_sync_target_is_one_problem(world: World, rc: int, stdout: str) -> None:
+    styled(world, "project", "extra")
+    world.fake("bazelisk", rc=rc, stdout=stdout)
+    assert lint_checked(world, BASE) == [
+        (
+            1,
+            (
+                "vale: vale styles missing from .vale/: Google, write-good; "
+                "missing Bazel target //:vale_sync"
+            ),
+        )
+    ]
+    (call,) = world.calls("bazelisk")
+    assert call["argv"] == ["query", "//:vale_sync"]
+    assert call["cwd"] == str(world.root.resolve())
+    assert world.calls("vale") == []
+    assert len(world.calls("cspell")) == 1
 
 
 @pytest.mark.parametrize(
@@ -982,7 +1010,13 @@ def test_failed_sync_is_one_problem(
     world: World, stdout: str, stderr: str, why: str
 ) -> None:
     styled(world, "project", "extra")
-    world.fake("bazelisk", rc=3, stdout=stdout, stderr=stderr)
+    world.fake(
+        "bazelisk",
+        rc=3,
+        stdout=stdout,
+        stderr=stderr,
+        cases={"query": {"rc": 0, "stdout": "//:vale_sync\n", "stderr": ""}},
+    )
     found = lint_checked(world, BASE)
     assert found == [
         (
@@ -993,7 +1027,8 @@ def test_failed_sync_is_one_problem(
             ),
         )
     ]
-    (call,) = world.calls("bazelisk")
+    query, call = world.calls("bazelisk")
+    assert query["argv"] == ["query", "//:vale_sync"]
     assert call["argv"] == ["run", "//:vale_sync"]
     assert world.calls("vale") == []
     assert len(world.calls("cspell")) == 1
