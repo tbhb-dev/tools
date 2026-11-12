@@ -25,10 +25,8 @@ SessionStart. It reads the hook payload on stdin.
 
 Evidence is a git sha (7 to 40 hex characters, with a digit and a letter), a
 PR or issue number, a log path, inline code, "output" or "read-back", or
-attribution ("says", "said", "report", "reports"). Claims marked "unverified"
-or "not done", "not applied" or "not merged" also pass. Simple questions,
-qualified statuses, negated objects and status adjectives are exempt; complex
-sentences keep the baseline evidence requirement.
+attribution ("says", "said", "reports"). A claim marked "unverified", or "not
+done", also passes.
 
 A command is a `git commit` only when one of its simple commands is one. The
 scan drops heredoc bodies and splits shell commands outside quotes. It also
@@ -45,6 +43,7 @@ import re
 import shlex
 import sys
 from typing import cast
+lazy from collections.abc import Callable
 
 from tbhbdev import userconfig
 from tbhbdev.alpha.repo import read_hook_stdin
@@ -94,51 +93,15 @@ SHORT_VALUES = frozenset("mFCctU")
 SHORT_OPTIONAL_VALUES = frozenset("Su")
 MAX_QUOTED = 160
 MAX_LISTED = 3
-# A qualifier must govern the status verb, rather than merely occur earlier.
-STATUS_VERB = (
-    r"(?:is|are|was|were|has|have|had|been|be|being|now|already|"
-    r"done|applied|merged|shipped|deployed|live|fixed|complete|completed|"
-    r"installed|running|verified|in place|started|landed|rolled out)"
-)
-SUBJECT = (
-    r"(?:(?:the|a|an|this|that|our|your|my)\s+\w+|"
-    r"(?:it|that|there|he|she|what|who|here)['\u2019]s|\w+)"
-)
-CLAIM_QUALIFIER = re.compile(
-    r"(?:\b(?:not(?!\s+(?:only|just)\b)|never|no(?=\s+longer\b))|n['\u2019]t)\s*"
-    r"(?:longer\s+|approved[,\s]+|or\s+)*"
-    rf"(?:{STATUS_VERB}[,\s]+)*{STATUS_VERB}$|"
-    r"^\s*(?:nothing|neither|none|no)\b\s*(?:of\s+(?:the\s+)?\w+\s+)?"
-    rf"(?:{SUBJECT}\s+)?(?:{STATUS_VERB}\s+)*{STATUS_VERB}$|"
-    r"^\s*(?:(?:tell me|let me know|I['\u2019]ll tell you)\s+)?"
-    r"(?:once|when|if|after|before|until|unless|whether|as soon as)\s+"
-    rf"{SUBJECT}\s+(?:{STATUS_VERB}\s+)*{STATUS_VERB}$|"
-    r"^\s*(?:please\s+(?:get|have)|(?:could|can) you\s+(?:get|confirm)|"
-    r"ask\b[^.;]{0,80}\bto\s+(?:get|have))\s+"
-    rf"{SUBJECT}\s+(?:{STATUS_VERB}\s+)*{STATUS_VERB}$",
-    re.IGNORECASE,
-)
-# Complex sentences and status compounds retain the baseline decision.
-COMPLEX_SENTENCE = re.compile(
-    r'[,;:()"\u2014\u2013]| - |\w[-/]\w|'
-    r"\b(?:although|though|while|whereas|but|however|except|and)\b|"
-    r"\byet\b(?![.!?]*\s*$)",
-    re.IGNORECASE,
-)
-NEGATOR = re.compile(r"\b(?:not|never|no|nothing|none)\b|n['\u2019]t\b", re.IGNORECASE)
-STATUS_END = re.compile(r"[\s.!?]*$")
-NEGATED_OBJECT = re.compile(r"^\s*(?:nothing|none)\b[\s.!?]*$", re.IGNORECASE)
+# Exemptions from the baseline claim judge. Each rule takes a sentence and one
+# claim match in it and returns True to exempt that match. A rule is added in its
+# own pull request, with its sentences listed in the differential test.
+EXEMPTIONS: tuple[Callable[[str, re.Match[str]], bool], ...] = ()
 
 
 def exempt(chunk: str, match: re.Match[str]) -> bool:
-    """Exempt only recognized simple sentences from the baseline claim judge."""
-    if COMPLEX_SENTENCE.search(chunk) or len(NEGATOR.findall(chunk)) > 1:
-        return False
-    if CLAIM_QUALIFIER.search(chunk[: match.end()]) and STATUS_END.fullmatch(
-        chunk[match.end() :]
-    ):
-        return True
-    return bool(NEGATED_OBJECT.fullmatch(chunk[match.end() :]))
+    """Whether any exemption rule exempts MATCH in CHUNK; the set is empty."""
+    return any(rule(chunk, match) for rule in EXEMPTIONS)
 
 
 def unsupported_claims(text: str) -> list[str]:

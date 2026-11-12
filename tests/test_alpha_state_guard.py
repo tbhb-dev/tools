@@ -849,13 +849,13 @@ def test_corpus_measurement(
     )
     runpy.run_path(str(script), run_name="__main__")
     expected = (
-        "verdict A: 1/2\nverdict B: 1/2\nverdict C: 1/2\n"
+        "verdict A: 2/2\nverdict B: 1/2\nverdict C: 2/2\n"
         "shape bare_claim: 1/1\nshape evidence_missed: 1/2\n"
-        "shape future: 0/1\nshape negation: 0/1\nshape other: 1/1\n"
-        "A anchors: 1/2\n"
+        "shape future: 1/1\nshape negation: 1/1\nshape other: 1/1\n"
+        "A anchors: 2/2\n"
     )
     if ids:
-        expected += "A pass ids: [2]\nB block ids: [4]\nC block ids: [6]\n"
+        expected += "A pass ids: []\nB block ids: [4]\nC block ids: [5, 6]\n"
     assert capsys.readouterr().out == expected
 
 

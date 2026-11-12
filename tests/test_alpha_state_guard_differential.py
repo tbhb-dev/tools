@@ -7,27 +7,31 @@ import state_guard_baseline as baseline
 
 from tbhbdev.alpha import state_guard
 
-INTENDED_PASSES = {
-    "If the fix is deployed.": "A conditional status clause.",
-    "Once the fix is deployed.": "A future status clause.",
-    "I'll tell you once the fix is deployed.": "A future notification condition.",
-    "The fix isn't deployed.": "A status negated once.",
-    "The fix never merged.": "A status negated by never.",
-    "No build is running.": "A status with a negative subject.",
-    "I applied nothing.": "A status verb with a negated object.",
-    "Please get the fix merged.": "A request to merge.",
-    "Can you confirm the fix is merged?": "A request to confirm a status.",
-    "Could you get it merged?": "A request to merge.",
-    "I merged none.": "A status verb with a negated object.",
-    "I merged nothing.": "A status verb with a negated object.",
-    "It hasn't merged": "A status negated once.",
-    "It never merged.": "A status negated by never.",
-    "Never merged.": "A status negated by never.",
-    "No fix merged.": "A status with a negative subject.",
-    "Nothing merged.": "A status with a negative subject.",
-    "Tell me when it is merged.": "A future notification condition.",
-    "Whether the fix is merged.": "A conditional status clause.",
-}
+# Sentences that a future exemption targets. The head still judges them as main does.
+CANDIDATES = (
+    "If the fix is deployed.",
+    "Once the fix is deployed.",
+    "I'll tell you once the fix is deployed.",
+    "The fix isn't deployed.",
+    "The fix never merged.",
+    "No build is running.",
+    "I applied nothing.",
+    "Please get the fix merged.",
+    "Can you confirm the fix is merged?",
+    "Could you get it merged?",
+    "I merged none.",
+    "I merged nothing.",
+    "It hasn't merged",
+    "It never merged.",
+    "Never merged.",
+    "No fix merged.",
+    "Nothing merged.",
+    "Tell me when it is merged.",
+    "Whether the fix is merged.",
+)
+
+# Each exemption pull request adds its passing sentences here, with the reason.
+INTENDED_PASSES: dict[str, str] = {}
 
 PROBES = (
     "4 deployed services yesterday.",
@@ -68,11 +72,16 @@ PROBES = (
     "It's done",
     "Merged.",
     "My merged fix is deployed.",
+    "Neither service deployed nothing.",
+    "Neither service has never deployed.",
+    "Neither service is not deployed.",
+    "Neither service isn't deployed.",
     "Never merged.",
     "No fix merged.",
     "No one merged it and the fix is merged.",
     "No, the fix merged.",
     "Nobody deployed the fix.",
+    "Nobody has never merged.",
     "Not everything is deployed.",
     "Not only is the fix merged.",
     "Nothing is deployed but the fix merged.",
@@ -86,16 +95,25 @@ PROBES = (
     "Surely the fix is merged?",
     "Tell me when it is merged.",
     "The 3 deployed workers are up.",
+    "The fix is certainly deployed.",
     "The fix is merged?",
+    "The fix is not approved or is deployed.",
+    "The fix is not approved or is now deployed.",
     "The fix is not merged.",
     "The fix is not not merged.",
+    "The fix isn't deployed.",
     "The fix isn't merged and is deployed.",
     "The fix merged!",
+    "The fix never merged.",
     "The fix should already be deployed.",
     "The fix was deployed yesterday.",
     "The fix will be deployed, it merged.",
     "The merged PR is merged.",
     "The merged code is live.",
+    "The service Never is deployed.",
+    "The service Not is deployed.",
+    "The site /never is deployed.",
+    "The site /not is live.",
     "The two merged PRs are open.",
     "This merged code deployed.",
     "WILL merged.",
@@ -120,7 +138,7 @@ BASE_SENTENCES = (
     "The patch shipped.",
     "The fix is verified.",
     "The branch landed.",
-    *INTENDED_PASSES,
+    *CANDIDATES,
     *PROBES,
     "The report describes the merged PR.",
     "The report on the deployed application needs editing.",
@@ -167,16 +185,10 @@ MUST_BLOCK = (
     "All changes merged/verified.",
     "The change merged-into-main.",
 )
-MUST_PASS = (
-    "The report describes the merged PR.",
-    "The report describes the merged branch.",
-    "The report on the deployed application needs editing.",
-    "I'll tell you once the fix is deployed.",
-)
 
 
 def generated_corpus() -> set[str]:
-    sentences = set(BASE_SENTENCES) | set(MUST_BLOCK) | set(MUST_PASS)
+    sentences = set(BASE_SENTENCES) | set(MUST_BLOCK)
     sentences.update(
         sentence.rstrip(".?") + suffix
         for sentence in BASE_SENTENCES
@@ -233,27 +245,6 @@ def test_assertion_probes_still_block(sentence: str) -> None:
     assert head_blocks(sentence)
 
 
-@pytest.mark.parametrize("sentence", MUST_PASS)
-def test_simple_false_positive_probes_pass(sentence: str) -> None:
-    assert not head_blocks(sentence)
-
-
-@pytest.mark.parametrize(
-    ("passing", "blocking"),
-    [
-        ("If the fix is deployed.", "If the fix is deployed, check again."),
-        ("The fix isn't deployed.", "The fix isn't not deployed."),
-        ("I applied nothing.", "I applied nothing; the fix deployed."),
-        ("The fix is no longer deployed.", "The fix is no longer not deployed."),
-        ("None were deployed.", "None were deployed although it failed."),
-        ("Please get the fix merged.", "Please get the fix merged before lunch."),
-    ],
-)
-def test_each_exemption_has_a_blocking_near_miss(passing: str, blocking: str) -> None:
-    assert not head_blocks(passing)
-    assert head_blocks(blocking)
-
-
 @pytest.mark.parametrize(
     "negator", ["not", "never", "no", "nothing", "none", "isn't", "isn\u2019t"]
 )
@@ -273,17 +264,17 @@ def newly_passing() -> set[str]:
     return {s for s in generated_corpus() if main_blocks(s) and not head_blocks(s)}
 
 
-@pytest.mark.parametrize(
-    ("name", "wider"),
-    [
-        ("CLAIM_QUALIFIER", re.compile("")),
-        ("NEGATED_OBJECT", re.compile(r"^\s*(?:nothing|none|today)\b[\s.!?]*$")),
-        ("STATUS_END", re.compile(r".*")),
-    ],
-)
-def test_widening_one_pattern_fails_the_differential(
-    monkeypatch: pytest.MonkeyPatch, name: str, wider: re.Pattern[str]
+def exempt_everything(_chunk: str, _match: re.Match[str]) -> bool:
+    return True
+
+
+def test_one_widening_rule_fails_the_differential(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert newly_passing() == INTENDED_PASSES.keys()
-    monkeypatch.setattr(state_guard, name, wider)
+    monkeypatch.setattr(state_guard, "EXEMPTIONS", (exempt_everything,))
     assert newly_passing() != INTENDED_PASSES.keys()
+
+
+def test_head_judges_every_grid_sentence_as_main_does() -> None:
+    assert all(main_blocks(s) == head_blocks(s) for s in generated_corpus())
