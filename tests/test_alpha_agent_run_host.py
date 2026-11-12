@@ -49,7 +49,7 @@ from tbhbdev.alpha.agent import (
     run_host,
     runfiles,
 )
-from tbhbdev.alpha.agent.decisions import request
+from tbhbdev.alpha.agent.decisions import policy, request
 from tbhbdev.alpha.agent.decisions.run_state import Group
 from tbhbdev.alpha.agent.model import (
     AgyPolicy,
@@ -65,7 +65,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator
     from typing import TextIO
 
-    from tbhbdev.alpha.agent.model import Policy, RunPaths, RunRequest, Settings
+    from tbhbdev.alpha.agent.model import (
+        Host,
+        Policy,
+        RunPaths,
+        RunRequest,
+        Settings,
+    )
 
 
 @pytest.fixture(autouse=True, params=["regular", "symlinked"])
@@ -2664,8 +2670,23 @@ def test_resolved_denies_preserve_macos_aliases_and_empty_linux_data(
     )
 
 
+def keep_home_denies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep system socket paths, which a host may lack, out of the denies."""
+    real = policy.denied_paths
+
+    def under_home(
+        settings: Settings, host: Host, home: str, uid: int
+    ) -> tuple[str, ...]:
+        return tuple(p for p in real(settings, host, home, uid) if p.startswith(home))
+
+    monkeypatch.setattr(policy, "denied_paths", under_home)
+
+
 @pytest.mark.parametrize("reverse", [False, True])
-def test_resolved_denies_drop_nested_signing_key(tmp_path: Path, reverse: bool) -> None:
+def test_resolved_denies_drop_nested_signing_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reverse: bool
+) -> None:
+    keep_home_denies(monkeypatch)
     run = make_run(tmp_path)
     directory = run.home / ".config" / "toolcfg"
     directory.mkdir(parents=True)
@@ -2688,7 +2709,10 @@ def test_resolved_denies_drop_nested_signing_key(tmp_path: Path, reverse: bool) 
 
 
 @pytest.fixture
-def denied_signing_directory(tmp_path: Path) -> tuple[run_host.Run, Path]:
+def denied_signing_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[run_host.Run, Path]:
+    keep_home_denies(monkeypatch)
     run = make_run(tmp_path)
     directory = run.home / ".config" / "toolcfg"
     directory.mkdir(parents=True)
