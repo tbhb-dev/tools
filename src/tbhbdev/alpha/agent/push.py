@@ -11,7 +11,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from tbhbdev.alpha import private_names
+from tbhbdev.alpha import identity, private_names
 from tbhbdev.alpha.agent import host_tools, runfiles
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import Invalid
@@ -146,6 +146,7 @@ def run(
         with publication(run.files.root, workspace, commit) as directory:
             scan(directory, before, commit, names)
             secret_scan(directory, before, commit)
+            commit_policy(directory, before, commit, agent_public_key(run.tmpdir))
             status, error = send(directory, url(run.request.repo), branch, token)
     except PushRefusedError as refusal:
         run.files.write("log", f"push refused: {refusal}\n")
@@ -299,6 +300,67 @@ def secret_scan(directory: Path, before: str, commit: str) -> None:
         raise PushRefusedError(message)
     if result.returncode:
         message = "secret scan failed"
+        raise PushRefusedError(message)
+
+
+def agent_public_key(tmpdir: Path) -> str:
+    """Read the run's signing agent for the public key that signs its commits."""
+    try:
+        result = subprocess.run(  # nosec B603
+            [host_tools.resolve("ssh-add"), "-L"],
+            env={"SSH_AUTH_SOCK": str(tmpdir / "ssh.sock")},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            errors="replace",
+            check=False,
+        )
+    except Invalid, OSError, subprocess.SubprocessError:
+        result = None
+    line = result.stdout.splitlines()[:1] if result and not result.returncode else []
+    if not line:
+        message = "signing key unavailable"
+        raise PushRefusedError(message)
+    return line[0]
+
+
+def commit_policy(directory: Path, before: str, commit: str, public_key: str) -> None:
+    """Every pushed commit is signed by the agent's key and carries its identity."""
+    signers = directory / "allowed_signers"
+    signers.write_text(f'* namespaces="git" {public_key}\n')
+    statuses = _git_output(
+        directory,
+        "-c",
+        "gpg.format=ssh",
+        "-c",
+        f"gpg.ssh.allowedSignersFile={signers}",
+        "log",
+        "--format=%H %G?",
+        f"{before}..{commit}",
+    ).splitlines()
+    reasons = []
+    for line in statuses:
+        sha, _, status = line.partition(" ")
+        short = sha[:7]
+        if status != "G":
+            reasons.append(f"{short} is not signed by the agent's key")
+        headers, _, text = _git_output(directory, "cat-file", "commit", sha).partition(
+            "\n\n"
+        )
+        values: dict[str, str] = {}
+        for header in headers.split("\n"):
+            key, _, value = header.partition(" ")
+            values.setdefault(key, value)
+        reasons.extend(
+            f"{short} {role} email is not the agent's"
+            for role in ("author", "committer")
+            if identity.ident_email(values.get(role, "")) != identity.AGENT_EMAIL
+        )
+        if identity.SIGNOFF.search(text):
+            reasons.append(f"{short} carries a Signed-off-by or Co-authored-by trailer")
+    if reasons:
+        message = "commit policy: " + "; ".join(reasons)
         raise PushRefusedError(message)
 
 
