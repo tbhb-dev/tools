@@ -15,6 +15,7 @@ from agent_host_example import constant, host_settings, run_request
 
 from tbhbdev.alpha import private_names
 from tbhbdev.alpha.agent import credentials, host_tools, push, run_host, runfiles
+from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -44,6 +45,14 @@ def push_account(
         return original_read(source, limit, label)
 
     monkeypatch.setattr(runfiles, "read_owned", read)
+
+
+SECRET_SCAN = push.secret_scan
+
+
+@pytest.fixture(autouse=True)
+def no_secret_scan(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(push, "secret_scan", constant(None))
 
 
 @pytest.fixture
@@ -809,6 +818,95 @@ def test_scan_refuses_when_git_cannot_list_the_range(tmp_path: Path) -> None:
     with pytest.raises(push.PushRefusedError) as caught:
         push.scan(repository, "0" * 40, "1" * 40, NAMES)
     assert str(caught.value) == "git log unavailable"
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected"),
+    [
+        (0, None),
+        (1, "secret scan found a leak in the pushed range"),
+        (2, "secret scan failed"),
+    ],
+)
+def test_secret_scan_runs_gitleaks_on_the_range(
+    returncode: int,
+    expected: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+
+    def gitleaks(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        seen.append(command)
+        assert kwargs["cwd"] == tmp_path
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        return subprocess.CompletedProcess(command, returncode, "", "")
+
+    monkeypatch.setattr(subprocess, "run", gitleaks)
+    monkeypatch.setattr(host_tools, "resolve", lambda name: f"/host/{name}")
+    if expected is None:
+        SECRET_SCAN(tmp_path, "base", "head")
+    else:
+        with pytest.raises(push.PushRefusedError) as caught:
+            SECRET_SCAN(tmp_path, "base", "head")
+        assert str(caught.value) == expected
+    assert seen == [
+        [
+            "/host/gitleaks",
+            "git",
+            "--log-opts=base..head",
+            "--redact",
+            "--no-banner",
+            "--exit-code=1",
+            str(tmp_path),
+        ]
+    ]
+
+
+def test_secret_scan_refuses_without_gitleaks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def missing(name: str) -> str:
+        raise Invalid(name)
+
+    monkeypatch.setattr(host_tools, "resolve", missing)
+    with pytest.raises(push.PushRefusedError) as caught:
+        SECRET_SCAN(tmp_path, "base", "head")
+    assert str(caught.value) == "secret scan unavailable"
+
+
+def test_secret_scan_refuses_when_gitleaks_cannot_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+        raise OSError
+
+    monkeypatch.setattr(host_tools, "resolve", lambda name: name)
+    monkeypatch.setattr(subprocess, "run", broken)
+    with pytest.raises(push.PushRefusedError) as caught:
+        SECRET_SCAN(tmp_path, "base", "head")
+    assert str(caught.value) == "secret scan unavailable"
+
+
+def test_a_leak_stops_the_push(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, target = local_run
+
+    def leak(*_: object) -> None:
+        message = "secret scan found a leak in the pushed range"
+        raise push.PushRefusedError(message)
+
+    monkeypatch.setattr(push, "secret_scan", leak)
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
+    assert git(target, "for-each-ref") == ""
+    assert run.files.path("log").read_text() == (
+        "push refused: secret scan found a leak in the pushed range\n"
+    )
 
 
 def test_no_base_commit_refuses_push(
