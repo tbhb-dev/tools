@@ -52,6 +52,14 @@ COMMIT_POLICY = push.commit_policy
 AGENT_PUBLIC_KEY = push.agent_public_key
 
 
+def _host_prefixed(name: str) -> str:
+    return f"/host/{name}"
+
+
+def _identity(name: str) -> str:
+    return name
+
+
 @pytest.fixture(autouse=True)
 def no_secret_scan(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(push, "secret_scan", constant(None))
@@ -849,7 +857,7 @@ def test_secret_scan_runs_gitleaks_on_the_range(
         return subprocess.CompletedProcess(command, returncode, "", "")
 
     monkeypatch.setattr(subprocess, "run", gitleaks)
-    monkeypatch.setattr(host_tools, "resolve", lambda name: f"/host/{name}")
+    monkeypatch.setattr(host_tools, "resolve", _host_prefixed)
     if expected is None:
         SECRET_SCAN(tmp_path, "base", "head")
     else:
@@ -887,7 +895,7 @@ def test_secret_scan_refuses_when_gitleaks_cannot_start(
     def broken(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
         raise OSError
 
-    monkeypatch.setattr(host_tools, "resolve", lambda name: name)
+    monkeypatch.setattr(host_tools, "resolve", _identity)
     monkeypatch.setattr(subprocess, "run", broken)
     with pytest.raises(push.PushRefusedError) as caught:
         SECRET_SCAN(tmp_path, "base", "head")
@@ -1000,7 +1008,11 @@ def test_run_gives_commit_policy_the_agent_public_key(
 ) -> None:
     run, prepared, _ = local_run
     seen: list[str] = []
-    monkeypatch.setattr(push, "commit_policy", lambda *a: seen.append(a[3]))
+
+    def record(_directory: Path, _before: str | None, _commit: str, key: str) -> None:
+        seen.append(key)
+
+    monkeypatch.setattr(push, "commit_policy", record)
     monkeypatch.setattr(push, "agent_public_key", constant("ssh-ed25519 AAAA"))
     with ExitStack() as stack:
         assert push.run(run, prepared, stack, harness, SYNTHETIC) == 0
@@ -1024,7 +1036,7 @@ def test_agent_public_key_reads_the_signing_agent(
         assert kwargs["env"] == {"SSH_AUTH_SOCK": str(tmp_path / "ssh.sock")}
         return subprocess.CompletedProcess(command, returncode, output)
 
-    monkeypatch.setattr(host_tools, "resolve", lambda name: f"/host/{name}")
+    monkeypatch.setattr(host_tools, "resolve", _host_prefixed)
     monkeypatch.setattr(subprocess, "run", listing)
     if returncode == 0 and output:
         assert AGENT_PUBLIC_KEY(tmp_path) == "ssh-ed25519 AAAA agent"
@@ -1040,7 +1052,7 @@ def test_agent_public_key_refuses_when_ssh_add_fails(
     def broken(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
         raise OSError
 
-    monkeypatch.setattr(host_tools, "resolve", lambda name: name)
+    monkeypatch.setattr(host_tools, "resolve", _identity)
     monkeypatch.setattr(subprocess, "run", broken)
     with pytest.raises(push.PushRefusedError) as caught:
         AGENT_PUBLIC_KEY(tmp_path)

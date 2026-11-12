@@ -269,7 +269,7 @@ def scan(
         raise PushRefusedError(message)
 
 
-def secret_scan(directory: Path, before: str, commit: str) -> None:
+def secret_scan(directory: Path, before: str | None, commit: str) -> None:
     """Scan the pushed range for secrets with the host's gitleaks."""
     try:
         result = subprocess.run(  # nosec B603
@@ -325,7 +325,9 @@ def agent_public_key(tmpdir: Path) -> str:
     return line[0]
 
 
-def commit_policy(directory: Path, before: str, commit: str, public_key: str) -> None:
+def commit_policy(
+    directory: Path, before: str | None, commit: str, public_key: str
+) -> None:
     """Every pushed commit is signed by the agent's key and carries its identity."""
     signers = directory / "allowed_signers"
     signers.write_text(f'* namespaces="git" {public_key}\n')
