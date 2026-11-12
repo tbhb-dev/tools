@@ -288,6 +288,7 @@ def claude_hooks() -> dict[str, list[Json]]:
             group("Bash", handler("guard-gh-poll")),
             group("Write|Edit|MultiEdit|NotebookEdit|Bash", handler("guard-scripts")),
             group("Bash|SendMessage|Write|Edit", guard),
+            group("Bash", handler("guard-gh-config-dir")),
         ],
         "Stop": [group(None, guard)],
         "PostToolUse": [
@@ -316,6 +317,7 @@ def codex_hooks() -> dict[str, list[Json]]:
             group("^apply_patch$", handler("guard-scripts", CODEX_TIMEOUT)),
             group("^(Bash|shell)$", handler("guard-op", CODEX_TIMEOUT)),
             group("apply_patch", handler("guard-op", CODEX_TIMEOUT)),
+            group("^Bash$", handler("guard-gh-config-dir", CODEX_TIMEOUT)),
         ],
     }
 
@@ -343,6 +345,11 @@ def agy_hooks() -> Json:
         },
         "tbhbdev-alpha-gh-poll": {
             "PreToolUse": [group("run_command", handler("guard-gh-poll", AGY_TIMEOUT))],
+        },
+        "tbhbdev-alpha-gh-config-dir": {
+            "PreToolUse": [
+                group("run_command", handler("guard-gh-config-dir", AGY_TIMEOUT))
+            ],
         },
         "tbhbdev-alpha-scripts": {
             "PreToolUse": [
