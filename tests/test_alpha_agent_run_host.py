@@ -1239,7 +1239,11 @@ def check_harness_arguments(
     def build(*args: object, **kwargs: object) -> Policy:
         assert args == (run.settings, run.host)
         assert kwargs.pop("protected")
-        assert kwargs.pop("denied") == run_host.resolved_denies(run, prepared.paths)
+        assert kwargs.pop("denied") == (
+            run_host.full_denies(run, prepared.paths)
+            if harness is Harness.CODEX
+            else run_host.resolved_denies(run, prepared.paths)
+        )
         assert kwargs == {
             "harness": harness,
             "profile": run.request.profile,
@@ -2579,6 +2583,177 @@ def test_resolved_denies_preserve_macos_aliases_and_empty_linux_data(
             str(run.home / ".codex-recovery"),
         )
     )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_resolved_denies_drop_nested_signing_key(tmp_path: Path, reverse: bool) -> None:
+    run = make_run(tmp_path)
+    directory = run.home / ".config" / "toolcfg"
+    directory.mkdir(parents=True)
+    key = directory / "agent-signing-key"
+    key.touch()
+    denied = (str(key), str(directory)) if reverse else (str(directory), str(key))
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(run.settings.sandbox, denied_home_paths=denied),
+        ),
+    )
+    paths = preparation(run).paths
+    assert run_host.resolved_denies(run, paths) == (str(directory),)
+    value, _executable = run_host.checked_policy(run, paths)
+    assert value.deny == (str(directory),)
+    assert isinstance(value.detail, CodexPolicy)
+    assert value.detail.deny == value.deny
+
+
+def test_resolved_denies_signing_credential_inside_denied_config(
+    tmp_path: Path,
+) -> None:
+    run = make_run(tmp_path)
+    directory = run.home / ".config" / "toolcfg"
+    directory.mkdir(parents=True)
+    key = directory / "agent-signing-key"
+    key.touch()
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(
+                run.settings.sandbox, denied_home_paths=(".config/toolcfg",)
+            ),
+            credentials=tuple(
+                dataclasses.replace(credential, signing=str(key))
+                for credential in run.settings.credentials
+            ),
+        ),
+    )
+    paths = preparation(run).paths
+    assert str(key) in run_host.full_denies(run, paths)
+    assert run_host.resolved_denies(run, paths) == (str(directory),)
+
+
+@pytest.mark.parametrize("grant_below_middle", [False, True])
+def test_resolved_denies_check_every_ancestor_and_resolve_grants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, grant_below_middle: bool
+) -> None:
+    run = make_run(tmp_path)
+    outer = tmp_path / "outer"
+    middle = outer / "middle"
+    inner = middle / "inner"
+    inner.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(middle if grant_below_middle else outer, target_is_directory=True)
+    grant = alias / "inner" if grant_below_middle else alias / "middle"
+    denied = (str(inner), str(middle), str(outer))
+    monkeypatch.setattr(run_host, "full_denies", constant(denied))
+    assert run_host.resolved_denies(run, preparation(run).paths, (str(grant),)) == (
+        (str(inner), str(outer)) if grant_below_middle else (str(middle), str(outer))
+    )
+
+
+def test_root_read_marker_does_not_reopen_a_nested_deny(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    outer = str(tmp_path)
+    inner = str(tmp_path / ":root" / "hidden")
+    assert run_host.without_nested_denies(
+        (outer, inner), (run_host.policy.READ_ROOT,)
+    ) == (outer,)
+
+
+@pytest.mark.parametrize("os_name", Os)
+def test_resolved_denies_resolve_nested_aliases_only_on_linux(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, os_name: Os
+) -> None:
+    run = make_run(tmp_path)
+    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=os_name))
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    inner = outer / "inner"
+    inner.touch()
+    alias = tmp_path / "alias"
+    alias.symlink_to(outer, target_is_directory=True)
+    denied = (str(alias / "inner"), str(outer))
+    monkeypatch.setattr(run_host, "full_denies", constant(denied))
+    assert run_host.resolved_denies(run, preparation(run).paths) == (
+        (str(outer),) if os_name is Os.LINUX else denied
+    )
+
+
+def test_resolved_denies_keep_component_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    paths = tuple(tmp_path / name for name in ("ab", "a"))
+    for path in paths:
+        path.mkdir()
+    denied = tuple(str(path) for path in paths)
+    monkeypatch.setattr(run_host, "full_denies", constant(denied))
+    assert run_host.resolved_denies(run, preparation(run).paths) == denied
+
+
+@pytest.mark.parametrize("access", ["read", "write"])
+@pytest.mark.parametrize(
+    "grant_location", ["between", "inner", "outer", "outside", "child", "sibling"]
+)
+def test_resolved_denies_keep_only_grants_between_denies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    access: str,
+    grant_location: str,
+) -> None:
+    run = make_run(tmp_path)
+    outer = tmp_path / "outer"
+    between = outer / "granted"
+    inner = between / "hidden"
+    inner.mkdir(parents=True)
+    grant = {
+        "between": between,
+        "inner": inner,
+        "outer": outer,
+        "outside": tmp_path,
+        "child": inner / "child",
+        "sibling": outer / "grant",
+    }[grant_location]
+    denied = (str(outer), str(inner))
+    monkeypatch.setattr(run_host, "full_denies", constant(denied))
+    paths = preparation(run).paths
+    expected = denied if grant_location in ("between", "inner") else (str(outer),)
+    assert run_host.resolved_denies(run, paths, (str(grant),)) == expected
+    original_build = run_host.policy.build
+
+    def build(*args: object, **kwargs: object) -> Policy:
+        del args
+        assert kwargs["denied"] == denied
+        value = original_build(
+            run.settings,
+            run.host,
+            harness=run.request.harness,
+            profile=run.request.profile,
+            account=run.request.account,
+            unsandboxed=False,
+            paths=paths,
+            denied=denied,
+        )
+        assert isinstance(value.detail, CodexPolicy)
+        detail = dataclasses.replace(
+            value.detail,
+            read_roots=(str(grant),) if access == "read" else value.detail.read_roots,
+            write_roots=(str(grant),)
+            if access == "write"
+            else value.detail.write_roots,
+        )
+        return dataclasses.replace(value, detail=detail)
+
+    monkeypatch.setattr(run_host.policy, "build", build)
+    value, _executable = run_host.checked_policy(run, paths)
+    assert value.deny == expected
+    assert isinstance(value.detail, CodexPolicy)
+    assert value.detail.deny == expected
+    assert str(grant) in getattr(value.detail, f"{access}_roots")
 
 
 def test_startup_symlink_target_is_protected(tmp_path: Path) -> None:
