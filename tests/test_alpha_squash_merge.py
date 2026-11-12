@@ -1116,6 +1116,34 @@ def test_fetch_records_the_pr_from_one_read(tools: Tools, agent: bool) -> None:
     }
 
 
+@pytest.mark.parametrize("agent", [False, True])
+@pytest.mark.parametrize("trailers", [[GEN], [ASSIST], [GEN, ASSIST]])
+def test_valid_final_trailers_are_accepted(agent: bool, trailers: list[str]) -> None:
+    assert sm.check_trailers(trailers, [], agent=agent) is None
+
+
+def test_an_agent_pr_requires_a_final_trailer_paragraph() -> None:
+    with pytest.raises(SystemExit) as info:
+        sm.check_trailers([], [], agent=True)
+    assert str(info.value) == (
+        "the PR body cannot be merged as is: "
+        "agent PR is missing final trailer paragraph; "
+        "add a valid trailer paragraph with tbhbdev alpha pr edit"
+    )
+
+
+@pytest.mark.parametrize("agent", [False, True])
+def test_valid_final_trailers_do_not_excuse_a_stray_trailer(agent: bool) -> None:
+    lines = [pr.Line(1, GEN, GEN, code=False)]
+    with pytest.raises(SystemExit) as info:
+        sm.check_trailers([GEN], lines, agent=agent)
+    assert str(info.value) == (
+        "the PR body cannot be merged as is: "
+        "the script writes Generated-by and Assisted-by; remove this line; "
+        "add a valid trailer paragraph with tbhbdev alpha pr edit"
+    )
+
+
 def test_trailer_problems_report_the_full_block_and_repair_command() -> None:
     sm.check_trailers([], [])
     with pytest.raises(SystemExit) as info:
