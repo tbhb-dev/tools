@@ -7,6 +7,7 @@ import json
 import os
 import runpy
 import signal
+import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -1199,6 +1200,47 @@ def test_a_stdout_failure_keeps_the_refusal(
     status, _, err = run(send("It was done."))
     assert status == 2
     assert "stdout closed" in err
+
+
+def test_a_closed_stdout_pipe_still_exits_2(config_file: Path, tmp_path: Path) -> None:
+    config_file.write_text("[state_guard]\ntag_messages = true\n")
+    read_end, write_end = os.pipe()
+    os.close(read_end)
+    program = (
+        "import sys\nfrom tbhbdev.alpha import state_guard\n"
+        "sys.exit(state_guard.main())\n"
+    )
+    try:
+        done = subprocess.run(  # fixed interpreter and program
+            [sys.executable, "-c", program],
+            input=json.dumps(send(UNSUPPORTED_CLAIM)).encode(),
+            stdout=write_end,
+            stderr=subprocess.PIPE,
+            env={
+                **os.environ,
+                "XDG_CONFIG_HOME": str(config_file.parents[1]),
+                "XDG_STATE_HOME": str(tmp_path / "state"),
+            },
+            timeout=60,
+            check=False,
+        )
+    finally:
+        os.close(write_end)
+    assert done.returncode == 2
+    assert b"was not sent" in done.stderr
+
+
+def test_an_injected_config_error_refuses_a_send_message(
+    run: Runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(_data: object) -> int:
+        message = "injected"
+        raise state_guard.userconfig.ConfigError(message)
+
+    monkeypatch.setattr(state_guard, "run", boom)
+    status, out, err = run(send(UNSUPPORTED_CLAIM))
+    assert (status, out) == (2, "")
+    assert "injected" in err
 
 
 def test_a_config_swapped_for_a_pipe_after_the_open_cannot_hang(

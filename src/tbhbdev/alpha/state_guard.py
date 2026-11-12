@@ -43,6 +43,7 @@ The hook never blocks for lack of config, and any crash or invalid config
 allows the call: a broken hook must not stop the agent's work.
 """
 
+import contextlib
 import json
 import os
 import re
@@ -260,6 +261,18 @@ def tagged_input(data: Json, tool_input: Json, original: str) -> str | None:
     )
 
 
+def silence_stdout() -> None:
+    """Point fd 1 at /dev/null so the exit-time flush of a broken stdout can't fail.
+
+    A failed write leaves buffered text that the interpreter flushes again at
+    shutdown, and a second failure there changes the exit status from 2 to 120.
+    """
+    with contextlib.suppress(OSError):
+        null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(null, 1)
+        os.close(null)
+
+
 def send_message_reason(data: Json, tool_input: Json) -> str | None:
     """Tag a peer message when tagging is on, or return the refusal.
 
@@ -277,6 +290,7 @@ def send_message_reason(data: Json, tool_input: Json) -> str | None:
             sys.stdout.flush()
             return None
     except Exception as exc:  # noqa: BLE001  # any failure here must keep the refusal
+        silence_stdout()
         print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
     return claim_reason(bad)
 
@@ -565,14 +579,14 @@ def main() -> int:
     try:
         data = read_hook_stdin()
         return run(data)
-    except userconfig.ConfigError as exc:
-        print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
     except Exception as exc:  # noqa: BLE001  # fail open on any crash but SendMessage
         if data.get("tool_name") == "SendMessage":
+            silence_stdout()
             print(
                 f"state-guard: the guard failed, so this message was not sent: {exc!r}",
                 file=sys.stderr,
             )
             return 2
+        if isinstance(exc, userconfig.ConfigError):
+            print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
         return 0
-    return 0
