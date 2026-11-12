@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import os
 import select
 import subprocess
@@ -15,7 +16,14 @@ import pytest
 from agent_host_example import constant, host_settings, run_request
 
 from tbhbdev.alpha import private_names
-from tbhbdev.alpha.agent import credentials, host_tools, push, run_host, runfiles
+from tbhbdev.alpha.agent import (
+    blobs,
+    credentials,
+    host_tools,
+    push,
+    run_host,
+    runfiles,
+)
 from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
@@ -170,6 +178,25 @@ def test_push_success(
     head = git(target, "rev-parse", "refs/heads/agent/example")
     assert run.files.path("head").read_text() == head
     assert run.files.path("branch").read_text() == "agent/example"
+
+
+def test_push_lists_a_binary_blob_in_the_run_log(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    run, prepared, target = local_run
+    content = b"\x89PNG\x00synthetic"
+
+    def adding(run: run_host.Run, prepared: run_host.Prepared, stack: ExitStack) -> int:
+        (Path(prepared.paths.worktree) / "logo.png").write_bytes(content)
+        git(Path(prepared.paths.worktree), "add", "logo.png")
+        return harness(run, prepared, stack)
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, adding, SYNTHETIC) == 0
+    oid = git(target, "rev-parse", "refs/heads/agent/example:logo.png").strip()
+    assert run.files.path("log").read_text() == (
+        f'push binary blob: "logo.png" {len(content)} bytes {oid}\n'
+    )
 
 
 @pytest.mark.parametrize(
@@ -799,39 +826,71 @@ def test_scan_accepts_a_fast_forward_without_merges(tmp_path: Path) -> None:
     push.scan(repository, before, git(repository, "rev-parse", "HEAD").strip(), NAMES)
 
 
-def _scan_head(repository: Path, before: str) -> None:
-    push.scan(repository, before, git(repository, "rev-parse", "HEAD").strip(), NAMES)
+def _scan_head(repository: Path, before: str) -> list[push.Binary]:
+    return push.scan(
+        repository, before, git(repository, "rev-parse", "HEAD").strip(), NAMES
+    )
+
+
+def _add_blob(repository: Path, name: str, content: bytes) -> str:
+    before = git(repository, "rev-parse", "HEAD").strip()
+    (repository / name).parent.mkdir(exist_ok=True)
+    (repository / name).write_bytes(content)
+    git(repository, "add", name)
+    commit(repository, "add a file")
+    return before
 
 
 @pytest.mark.parametrize(
     "content",
     [
-        b"\x00\x01 example-hidden \xff\x00",
-        zlib.compress(b"example-hidden " * 20),
-        "example-hidden".encode("utf-16"),
         b"example-hidden\x00",
+        "example-hidden".encode("utf-16"),
+        zlib.compress(b"example-hidden " * 20),
+        gzip.compress(b"example-hidden"),
     ],
-    ids=["binary", "compressed", "utf-16", "nul"],
+    ids=["nul", "utf-16", "zlib", "gzip"],
 )
-def test_scan_refuses_a_blob_it_cannot_read_as_text(
-    tmp_path: Path, content: bytes
-) -> None:
+def test_scan_reads_a_name_inside_a_binary_blob(tmp_path: Path, content: bytes) -> None:
     repository = _history(tmp_path)
-    before = git(repository, "rev-parse", "HEAD").strip()
-    (repository / "blob.bin").write_bytes(content)
-    git(repository, "add", "blob.bin")
-    commit(repository, "add a file")
-    with pytest.raises(push.PushRefusedError, match="not UTF-8 text"):
+    before = _add_blob(repository, "blob.bin", content)
+    with pytest.raises(push.PushRefusedError, match="private-name hit"):
         _scan_head(repository, before)
 
 
-def test_scan_accepts_a_clean_utf8_blob(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "content",
+    [b"\x00\x01 clean \xff\x00", gzip.compress(b"clean"), "clean".encode("utf-16")],
+    ids=["binary", "gzip", "utf-16"],
+)
+def test_scan_lists_a_clean_binary_blob_and_accepts_it(
+    tmp_path: Path, content: bytes
+) -> None:
     repository = _history(tmp_path)
-    before = git(repository, "rev-parse", "HEAD").strip()
-    (repository / "note.txt").write_text("caf\u00e9 \u2014 clean\n", encoding="utf-8")
-    git(repository, "add", "note.txt")
-    commit(repository, "add text")
-    _scan_head(repository, before)
+    before = _add_blob(repository, "assets/logo.bin", content)
+    oid = git(repository, "rev-parse", "HEAD:assets/logo.bin").strip()
+    assert _scan_head(repository, before) == [
+        push.Binary("assets/logo.bin", len(content), oid, None)
+    ]
+
+
+def test_scan_does_not_list_a_utf8_blob(tmp_path: Path) -> None:
+    repository = _history(tmp_path)
+    before = _add_blob(repository, "note.txt", "caf\u00e9 \u2014 clean\n".encode())
+    assert _scan_head(repository, before) == []
+
+
+def test_scan_lists_a_blob_it_could_not_read_completely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(blobs, "BYTE_LIMIT", 100)
+    repository = _history(tmp_path)
+    content = gzip.compress(b"a" * 1000)
+    before = _add_blob(repository, "big.gz", content)
+    oid = git(repository, "rev-parse", "HEAD:big.gz").strip()
+    assert _scan_head(repository, before) == [
+        push.Binary("big.gz", len(content), oid, "expands past the scan size limit")
+    ]
 
 
 def test_scan_reads_a_text_blob_the_patch_hides(tmp_path: Path) -> None:
@@ -843,6 +902,23 @@ def test_scan_reads_a_text_blob_the_patch_hides(tmp_path: Path) -> None:
     commit(repository, "hide text from the patch")
     with pytest.raises(push.PushRefusedError, match="1 private-name hit"):
         _scan_head(repository, before)
+
+
+@pytest.mark.parametrize(
+    ("unscanned", "line"),
+    [
+        (None, 'push binary blob: "a\\"b.png" 12 bytes abc123\n'),
+        (
+            "holds an encrypted archive member",
+            (
+                'push binary blob: "a\\"b.png" 12 bytes abc123; '
+                "not fully scanned: holds an encrypted archive member\n"
+            ),
+        ),
+    ],
+)
+def test_binary_report_line(unscanned: str | None, line: str) -> None:
+    assert push.Binary('a"b.png', 12, "abc123", unscanned).report() == line
 
 
 @pytest.mark.parametrize("field", ["author", "committer"])

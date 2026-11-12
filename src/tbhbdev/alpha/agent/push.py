@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess  # nosec B404
@@ -9,16 +10,16 @@ import tempfile
 import threading
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from tbhbdev.alpha import identity, private_names
-from tbhbdev.alpha.agent import host_tools, runfiles
+from tbhbdev.alpha.agent import blobs, host_tools, runfiles
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import Invalid
 from tbhbdev.alpha.private_names import _configured
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator
+    from collections.abc import Callable, Generator, Iterator
 
     from tbhbdev.alpha.agent.run_host import Prepared, Run
 
@@ -163,7 +164,8 @@ def publish(
     try:
         names = read_names(run.home / PRIVATE_NAMES)
         with publication(run.files.root, workspace, commit) as directory:
-            scan(directory, before, commit, names)
+            for binary in scan(directory, before, commit, names):
+                run.files.write("log", binary.report())
             secret_scan(directory, before, commit)
             commit_policy(directory, before, commit, public_key)
             status, error = send(directory, url(run.request.repo), branch, token)
@@ -198,8 +200,21 @@ def _git_output(
     directory: Path,
     *arguments: str,
     data: str | None = None,
-    errors: str = "replace",
 ) -> str:
+    return cast("str", _git_run(directory, arguments, data, text=True))
+
+
+def _git_bytes(directory: Path, *arguments: str, data: bytes) -> bytes:
+    return cast("bytes", _git_run(directory, arguments, data, text=False))
+
+
+def _git_run(
+    directory: Path,
+    arguments: tuple[str, ...],
+    data: str | bytes | None,
+    *,
+    text: bool,
+) -> str | bytes:
     env = dict.fromkeys(
         (
             "HOME",
@@ -241,56 +256,90 @@ def _git_output(
             stdin=subprocess.DEVNULL if data is None else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
-            errors=errors,
+            text=text,
+            errors="replace" if text else None,
             check=True,
         )
-    except UnicodeDecodeError:
-        message = "the pushed range adds an object that is not UTF-8 text"
-        raise PushRefusedError(message) from None
     except OSError, subprocess.SubprocessError:
         message = "git log unavailable"
         raise PushRefusedError(message) from None
-    return result.stdout
+    stdout: str | bytes = result.stdout
+    return stdout
 
 
-def _object_lines(directory: Path, before: str, commit: str) -> list[str]:
-    """Return the raw text of every blob and commit the range adds.
+class Binary(NamedTuple):
+    """A blob the push adds that isn't plain UTF-8 text."""
 
-    A scanner that can't read an object refuses it: a compressed, UTF-16 or
-    otherwise non-UTF-8 blob, or one with a NUL byte, would carry a name past
-    a byte match.
+    path: str
+    size: int
+    oid: str
+    unscanned: str | None
+
+    def report(self) -> str:
+        line = f"push binary blob: {json.dumps(self.path)} {self.size} bytes {self.oid}"
+        return (
+            f"{line}; not fully scanned: {self.unscanned}\n"
+            if self.unscanned
+            else f"{line}\n"
+        )
+
+
+def _object_lines(
+    directory: Path, before: str, commit: str
+) -> tuple[list[str], list[Binary]]:
+    """Return every text view of the blobs and commits the range adds.
+
+    The patch text omits binary contents and raw commit fields. A blob that
+    isn't plain text is decoded as UTF-16 or UTF-32 and unpacked from the
+    common compression formats, then listed with its path, size and id.
     """
-    added = "".join(
-        f"{line.split()[0]}\n"
-        for line in _git_output(
-            directory, "rev-list", "--objects", commit, f"^{before}"
-        ).splitlines()
-        if line.strip()
-    )
-    if not added:
-        return []
+    paths: dict[str, str] = {}
+    for line in _git_output(
+        directory, "rev-list", "--objects", commit, f"^{before}"
+    ).splitlines():
+        oid, _, path = line.partition(" ")
+        paths.setdefault(oid, path)
+    if not paths:
+        return [], []
     kinds = _git_output(
         directory,
         "cat-file",
         "--batch-check=%(objecttype) %(objectname)",
-        data=added,
+        data="".join(f"{oid}\n" for oid in paths),
     )
     readable = "".join(
         f"{line.split()[1]}\n"
         for line in kinds.splitlines()
         if line.split()[0] in ("blob", "commit")
     )
-    raw = _git_output(directory, "cat-file", "--batch", data=readable, errors="strict")
-    if "\x00" in raw:
-        message = "the pushed range adds an object that is not UTF-8 text"
-        raise PushRefusedError(message)
-    return raw.splitlines()
+    lines: list[str] = []
+    binaries: list[Binary] = []
+    for oid, kind, raw in _batch_objects(
+        _git_bytes(directory, "cat-file", "--batch", data=readable.encode())
+    ):
+        found, unscanned = blobs.views(raw)
+        for view in found:
+            lines.extend(view.splitlines())
+        if kind == "blob" and blobs.is_binary(raw):
+            binaries.append(Binary(paths[oid], len(raw), oid, unscanned))
+    return lines, binaries
+
+
+def _batch_objects(raw: bytes) -> Iterator[tuple[str, str, bytes]]:
+    """The (id, type, content) of each object in `git cat-file --batch` output."""
+    position = 0
+    while position < len(raw):
+        end = raw.index(b"\n", position)
+        oid, kind, size = raw[position:end].decode().split()
+        start = end + 1
+        stop = start + int(size)
+        yield oid, kind, raw[start:stop]
+        position = stop + 1
 
 
 def scan(
     directory: Path, before: str | None, commit: str, names: private_names.Names
-) -> None:
+) -> list[Binary]:
     if before is None:
         message = "no base commit"
         raise PushRefusedError(message)
@@ -312,7 +361,8 @@ def scan(
     lines = output.splitlines()
     # The patch text omits binary contents and raw commit fields, so also read
     # every object the range adds: blobs, trees and the commits themselves.
-    lines += _object_lines(directory, before, commit)
+    object_lines, binaries = _object_lines(directory, before, commit)
+    lines += object_lines
     known = names.private + list(_configured())
     texts = [
         (1, lines),
@@ -332,6 +382,7 @@ def scan(
             f"\nline {n}: {message}" for n, message in hits
         )
         raise PushRefusedError(message)
+    return binaries
 
 
 def secret_scan(directory: Path, before: str | None, commit: str) -> None:
