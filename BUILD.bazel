@@ -10,6 +10,7 @@ load(
     "editorconfig_checker_test",
     "gitleaks_history",
     "gitleaks_test",
+    "okf_docs_test",
     "reuse_test",
     "rumdl_test",
     "ryl_test",
@@ -112,6 +113,7 @@ repo_layout_test(
         ".github",
         ".vale",
         "LICENSES",
+        "docs",
         "src",
         "tests",
     ],
@@ -223,6 +225,12 @@ mutmut_test(
     srcs = [":repo_files"],
     cpus = 4,
     tags = ["manual"],
+)
+
+# Validate the docs bundle and Markdown frontmatter against its schemas.
+okf_docs_test(
+    name = "okf_docs_test",
+    srcs = [":repo_files"],
 )
 
 # Copyright and licensing information on every file (REUSE.toml, LICENSES/).
