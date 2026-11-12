@@ -4,6 +4,7 @@
 
 import io
 import json
+import runpy
 import signal
 from collections.abc import Callable, Iterator
 lazy from pathlib import Path
@@ -712,8 +713,6 @@ def test_landed_on_is_not_a_status_claim(run: Runner, message: str) -> None:
 @pytest.mark.parametrize(
     "candidate",
     [
-        "1234567",
-        "12345678901234567890",
         "a" * 7,
         "deadbeef",
         "a12345",
@@ -805,3 +804,194 @@ def test_scanning_continues_after_a_quoted_substitution(run: Runner) -> None:
         "",
         TRAILER_MESSAGE,
     )
+
+
+@pytest.mark.parametrize(
+    ("passing", "blocking"),
+    [
+        ("The fix was not merged.", "It was not slow, and the fix is merged."),
+        ("The fix isn't deployed.", "It isn't slow; the fix is deployed."),
+        ("Nothing merged yet.", "Nothing changed, but the fix merged."),
+        ("Neither change was merged.", "Neither failed, and the fix merged."),
+        ("None were deployed.", "None failed; the fix deployed."),
+        (
+            "The fix is no longer deployed.",
+            "It is no longer slow, and the fix deployed.",
+        ),
+        ("The fix never merged.", "It never failed, but the fix merged."),
+        ("The fix has not merged yet.", "It has not failed yet; the fix merged."),
+        ("I'll have the fix merged.", "I'll check later; the fix merged."),
+        ("I will get the fix deployed.", "I will check later, but the fix deployed."),
+        ("The fix will be merged.", "The fix merged; the build will follow."),
+        ("The fix would be merged.", "It would help, but the fix merged."),
+        ("The fix should be merged.", "It should help; the fix merged."),
+        (
+            "Once the fix is merged, check again.",
+            "Once ready, check again; the fix merged.",
+        ),
+        (
+            "When the fix is merged, check again.",
+            "When ready, check again; the fix merged.",
+        ),
+        (
+            "If the fix is merged, check again.",
+            "If ready, check again; the fix merged.",
+        ),
+        ("After the fix is merged, check again.", "After lunch, the fix merged."),
+        ("Before the fix is merged, check again.", "Before lunch, the fix merged."),
+        ("Until the fix is merged, wait.", "Until tomorrow, wait; the fix merged."),
+        ("Unless the fix is merged, wait.", "Unless ready, wait; the fix merged."),
+        (
+            "Whether the fix is merged matters.",
+            "Whether ready or late, the fix merged.",
+        ),
+        (
+            "As soon as the fix is merged, check.",
+            "As soon as ready, check; the fix merged.",
+        ),
+        ("Is the fix merged?", "The fix is merged."),
+        ("Please get the fix merged.", "Please check later; the fix merged."),
+        ("Could you get the fix merged?", "Could you check? The fix merged."),
+        ("Can you confirm the fix is merged?", "Can you check? The fix is merged."),
+        ("Tell me whether the fix is merged.", "Tell me later; the fix merged."),
+        ("Let me know once the fix is merged.", "Let me know later; the fix merged."),
+        (
+            "Ask the reviewer to get the fix merged.",
+            "Ask the reviewer later; the fix merged.",
+        ),
+        ("The fix merged, per reviewer.", "The fix merged, perhaps."),
+        ("The fix merged; Source: review.", "The fix merged; resources pending."),
+        ("The fix merged; I read back the result.", "The fix merged; I read the plan."),
+        ("The fix merged; I read them back.", "The fix merged; I read them."),
+        ("The fix merged in 12345.", "The fix merged in 1234."),
+        ('The fix merged: "yes".', 'The fix merged: "ok".'),
+        ("The fix merged; see notes/check.txt.", "The fix merged; see check.txt."),
+        ("The fix merged; see Decisions/check.", "The fix merged; see notes/check."),
+        ("The merged PRs' worktrees need attention.", "The PR is merged."),
+        ("Two applied rulesets need attention.", "Both PRs merged."),
+        ("Our deployed changes need attention.", "Our changes deployed."),
+        ("3 merged changes need attention.", "3 changes merged."),
+    ],
+)
+def test_claim_scope_and_evidence(passing: str, blocking: str) -> None:
+    assert state_guard.unsupported_claims(passing) == []
+    assert state_guard.unsupported_claims(blocking) == [
+        blocking.rsplit("? ", maxsplit=1)[-1]
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The fix merged yesterday.",
+        "Last time the fix merged, we waited.",
+        "Earlier the fix merged.",
+        "The fix merged before your message.",
+        "The fix merged at 09:30 before lunch.",
+        'The "own wording" is fixed.',
+        'I chose "the new setting" and applied.',
+        "The build is complete: there are 12345 tasks.",
+        "The build is running in notes/check.txt.",
+        "The build is running (Decisions/check).",
+        "The fix has landed, and I have not checked it per finding.",
+        "The fix is not only merged.",
+        "The fix is not just merged.",
+    ],
+)
+def test_incidental_context_still_blocks(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'The command printed "the fix merged".',
+        'The build is RUNNING: "started".',
+        "The fix merged in build 12345.",
+        "The fix merged; SEE notes/check.txt.",
+        "Is the fix merged?   ",
+        "No build is running.",
+        "I applied nothing.",
+        "I approved, merged and pushed nothing.",
+        "I haven't approved, merged or pushed anything.",
+        "The fix would be queued and merged.",
+        "The merged-code reference needs review.",
+        "The config/deployed.txt reference needs review.",
+        "Both merged changes need review.",
+        "The reviewer's merged changes need review.",
+        "The reviewers' merged changes need review.",
+    ],
+)
+def test_additional_scoped_exceptions_and_evidence(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The merged code is deployed.",
+        "The fix merged; see notes/check.",
+        "The fix merged; see later.",
+        'The fix "merged without a closing quote.',
+        "No deadline yet (the build is running).",
+        'The fix is done, but the plan would mention "future work".',
+        "The build is RUNNING; see notes/check.txt.",
+        "The fix is merged, not the build.",
+        'The "label" is merged, "',
+    ],
+)
+def test_evidence_boundaries_still_block(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+@pytest.mark.parametrize("ids", [False, True])
+def test_corpus_measurement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    ids: bool,
+) -> None:
+    rows = [
+        (1, "A", "bare_claim", "The build is done."),
+        (2, "A", "negation", "No build is running."),
+        (3, "B", "evidence_missed", "PR #12 merged."),
+        (4, "B", "evidence_missed", "The fix merged."),
+        (5, "C", "future", "The fix should be merged."),
+        (6, "C", "other", "The fix deployed."),
+    ]
+    (tmp_path / "window.jsonl").write_text(
+        "\n".join(
+            json.dumps({"id": n, "kind": "stop", "off": text}) for n, _, _, text in rows
+        )
+    )
+    (tmp_path / "labels.jsonl").write_text(
+        "\n".join(
+            json.dumps(
+                {"id": n, "verdict": verdict, "shape": shape, "note": "synthetic"}
+            )
+            for n, verdict, shape, _ in rows
+        )
+    )
+    (tmp_path / "anchors.json").write_text(
+        json.dumps(
+            [
+                {"n": 0, "verdict": "A", "ids": [1]},
+                {"n": 1, "verdict": "A", "ids": [1, 2]},
+                {"n": 2, "verdict": "B", "ids": [3]},
+            ]
+        )
+    )
+    script = Path(__file__).resolve().parents[1] / "state_guard_corpus.py"
+    monkeypatch.setattr(
+        "sys.argv", [str(script), str(tmp_path), *(["--ids"] if ids else [])]
+    )
+    runpy.run_path(str(script), run_name="__main__")
+    expected = (
+        "verdict A: 1/2\nverdict B: 1/2\nverdict C: 1/2\n"
+        "shape bare_claim: 1/1\nshape evidence_missed: 1/2\n"
+        "shape future: 0/1\nshape negation: 0/1\nshape other: 1/1\n"
+        "A anchors: 1/2\n"
+    )
+    if ids:
+        expected += "A pass ids: [2]\nB block ids: [4]\nC block ids: [6]\n"
+    assert capsys.readouterr().out == expected

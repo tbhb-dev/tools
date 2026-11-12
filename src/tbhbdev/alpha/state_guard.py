@@ -25,8 +25,10 @@ SessionStart. It reads the hook payload on stdin.
 
 Evidence is a git sha (7 to 40 hex characters, with a digit and a letter), a
 PR or issue number, a log path, inline code, "output" or "read-back", or
-attribution ("says", "said", "reports"). A claim marked "unverified", or "not
-done", also passes.
+attribution ("says", "said", "reports", "per", "Source:"). Attached numeric
+identifiers, quoted read-backs and artifact paths also qualify. Questions,
+requests, negated or prospective clauses, adjectives and claims marked
+"unverified" pass. Past-time wording alone does not establish evidence.
 
 A command is a `git commit` only when one of its simple commands is one. The
 scan drops heredoc bodies and splits shell commands outside quotes. It also
@@ -54,12 +56,14 @@ CLAIM = re.compile(
     r"\b(?:is|are|was|were|now|already|has been|have been)\s+"
     r"(?:done|applied|merged|shipped|deployed|live|fixed|complete|completed|"
     r"installed|running|verified|in place|started)\b"
-    r"|\b(?:shipped|merged|applied|deployed|landed(?!\s+on\b)|rolled out)\b",
+    r"|(?<![\w/-])(?:shipped|merged|applied|deployed|landed(?!\s+on\b)|"
+    r"rolled out)\b(?![-/])",
     re.IGNORECASE,
 )
 EVIDENCE = re.compile(
     r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b|#\d+|\bsays\b|\bsaid\b|\breports?\b|\.log\b|`[^`]+`"
-    r"|\boutput\b|\bread-back\b|\bunverified\b|\bnot (?:done|applied|merged)\b",
+    r"|\boutput\b|\bread-back\b|\bunverified\b"
+    r"|\bSource:|\bread (?:(?:them|it) )?back\b",
     re.IGNORECASE,
 )
 TRAILER = re.compile(r"(?i)(signed-off-by|co-authored-by)\s*:")
@@ -94,12 +98,90 @@ MAX_QUOTED = 160
 MAX_LISTED = 3
 
 
+# Scope exceptions to a clause, so a negative or planned action cannot excuse
+# a separate positive claim in the same sentence. Evidence stays sentence-local.
+CLAUSE_END = re.compile(
+    r"[;:(]|,(?!\s*(?:merged|applied|deployed|shipped|pushed)\b)|"
+    r"\b(?:but|however)\b|\band\b(?!\s+(?:merged|applied|deployed|shipped|pushed)\b)",
+    re.IGNORECASE,
+)
+CLAIM_QUALIFIER = re.compile(
+    r"\b(?:not(?!\s+(?:only|just)\b)|nothing|neither|none|no|never|"
+    r"will|would|should|once|when|if|after|before|until|unless|whether|as soon as|"
+    r"please|could you|can you|tell me|let me know|ask\b.*\bto)\b|"
+    r"n['\u2019]t\b|\bI['\u2019]ll\b",
+    re.IGNORECASE,
+)
+# New evidence must attach to the status: an unrelated number or quoted noun
+# elsewhere in the sentence does not substantiate it. Document paths support
+# artifact states; a document reference alone cannot establish a running process.
+ATTACHED_EVIDENCE = re.compile(
+    r"^\s*[,;:]?\s*(?:in\s+)?[0-9]{5,}\b|"
+    r'"[^"\n]{3,}"|(?:\bDecisions/[^\s]+|[^\s]*/[\w.-]+\.[a-z0-9]+\b)',
+    re.IGNORECASE,
+)
+EVIDENCE_CLAUSE_END = re.compile(r";|\b(?:and|but|however)\b", re.IGNORECASE)
+EVIDENCE_REFERENCE = re.compile(r"\s*[,;]\s*see\s+", re.IGNORECASE)
+ATTRIBUTED = re.compile(r"\bper\s+\w+", re.IGNORECASE)
+IDENTIFIER = re.compile(
+    r"\b(?:pid|run|review|event|build|job|id|commit)[ ,:]+[0-9]{5,}\b",
+    re.IGNORECASE,
+)
+NEGATED_OBJECT = re.compile(
+    r"^\s*(?:(?:,|and|or)\s*(?:approved|merged|pushed|applied|deployed|shipped)\s*)*"
+    r"(?:nothing|none)\b",
+    re.IGNORECASE,
+)
+ADJECTIVE = re.compile(
+    r"\b(?:a|an|the|this|that|these|those|my|your|our|their|his|her|its|"
+    r"both|one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+|\w+['\u2019]s|\w+s['\u2019])\s+"
+    r"(shipped|merged|applied|deployed|landed|rolled out)\s+"
+    r"(?!(?:and|or|but|is|are|was|were|has|have|had|in|on|at|to|with|for|by|yet)\b)"
+    r"[a-z]\w*",
+    re.IGNORECASE,
+)
+
+
+def evidenced_claim(chunk: str, match: re.Match[str]) -> bool:
+    """Whether new evidence forms substantiate MATCH rather than another clause."""
+    if any(
+        not CLAIM_QUALIFIER.search(CLAUSE_END.split(chunk[: m.start()])[-1])
+        for m in ATTRIBUTED.finditer(chunk)
+    ):
+        return True
+    if IDENTIFIER.search(chunk):
+        return True
+    suffix = chunk[match.end() :]
+    if chunk[: match.start()].count('"') % 2 and '"' in suffix:
+        return True
+    evidence = ATTACHED_EVIDENCE.search(EVIDENCE_CLAUSE_END.split(suffix)[0])
+    if not evidence:
+        evidence = EVIDENCE_REFERENCE.match(suffix)
+        if evidence:
+            evidence = ATTACHED_EVIDENCE.search(suffix[evidence.end() :])
+    return bool(
+        evidence and ("running" not in match[0].lower() or evidence[0].startswith('"'))
+    )
+
+
+def current_claim(chunk: str, match: re.Match[str]) -> bool:
+    """Whether MATCH asserts a current status without evidence in CHUNK."""
+    prefix = CLAUSE_END.split(chunk[: match.end()])[-1]
+    if CLAIM_QUALIFIER.search(prefix) or NEGATED_OBJECT.search(chunk[match.end() :]):
+        return False
+    if any(match.start() == m.start(1) for m in ADJECTIVE.finditer(chunk)):
+        return False
+    return not evidenced_claim(chunk, match)
+
+
 def unsupported_claims(text: str) -> list[str]:
     """The sentences or lines of TEXT with a status claim and no evidence."""
     return [
         chunk.strip()[:MAX_QUOTED]
         for chunk in SENTENCE_END.split(text)
-        if CLAIM.search(chunk) and not EVIDENCE.search(chunk)
+        if not chunk.endswith("?")
+        and not EVIDENCE.search(chunk)
+        and any(current_claim(chunk, match) for match in CLAIM.finditer(chunk))
     ]
 
 
