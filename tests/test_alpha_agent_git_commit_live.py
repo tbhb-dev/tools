@@ -158,7 +158,7 @@ def test_git_child_snapshot_detects_content_modes_and_directory_entries(
 
 
 def test_git_child_probe_detects_writable_metadata(tmp_path: Path) -> None:
-    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "objects").mkdir(parents=True)
     witness = tmp_path / "witness.json"
     evidence.probe(tmp_path, witness, "review")
     observed = json.loads(witness.read_text())
