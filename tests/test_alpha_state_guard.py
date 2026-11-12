@@ -11,7 +11,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
-from typing import override
+from typing import NoReturn, override
 lazy from pathlib import Path
 
 import pytest
@@ -77,13 +77,36 @@ def _bounded_hook() -> Iterator[None]:
         signal.signal(signal.Signals(14), previous)
 
 
+REFUSE_AND_EXIT = state_guard.refuse_and_exit
+
+
+@pytest.fixture(autouse=True)
+def refusals(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Stand in for the real exit, which would end the pytest process."""
+    texts: list[str] = []
+
+    def fake(text: str) -> NoReturn:
+        texts.append(text)
+        raise SystemExit(2)
+
+    monkeypatch.setattr(state_guard, "refuse_and_exit", fake)
+    return texts
+
+
 @pytest.fixture
-def run(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> Runner:
+def run(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    refusals: list[str],
+) -> Runner:
     def call(data: object) -> Result:
         monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
-        status = state_guard.main()
+        try:
+            status = state_guard.main()
+        except SystemExit:
+            status = 2
         out = capsys.readouterr()
-        return status, out.out, out.err
+        return status, out.out, out.err + "".join(f"{text}\n" for text in refusals)
 
     return call
 
@@ -1202,33 +1225,133 @@ def test_a_stdout_failure_keeps_the_refusal(
     assert "stdout closed" in err
 
 
-def test_a_closed_stdout_pipe_still_exits_2(config_file: Path, tmp_path: Path) -> None:
-    signal.alarm(0)  # the subprocess has its own timeout; startup can exceed 1s
-    config_file.write_text("[state_guard]\ntag_messages = true\n")
+class Exited(Exception):  # noqa: N818  # stands in for the process exit
+    pass
+
+
+def exit_with_code(code: int) -> NoReturn:
+    raise Exited(code)
+
+
+def test_refuse_and_exit_writes_to_stderr_then_exits_2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writes: list[tuple[int, bytes]] = []
+
+    def record(fd: int, data: bytes) -> int:
+        writes.append((fd, data))
+        return len(data)
+
+    monkeypatch.setattr(os, "write", record)
+    monkeypatch.setattr(os, "_exit", exit_with_code)
+    with pytest.raises(Exited) as info:
+        REFUSE_AND_EXIT("refused")
+    assert info.value.args == (2,)
+    assert writes == [(2, b"refused\n")]
+
+
+def test_refuse_and_exit_exits_2_when_the_write_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(_fd: int, _data: bytes) -> int:
+        message = "stderr closed"
+        raise OSError(message)
+
+    monkeypatch.setattr(os, "write", broken)
+    monkeypatch.setattr(os, "_exit", exit_with_code)
+    with pytest.raises(Exited) as info:
+        REFUSE_AND_EXIT("refused")
+    assert info.value.args == (2,)
+
+
+def test_an_unreadable_hook_input_refuses(
+    monkeypatch: pytest.MonkeyPatch, refusals: list[str]
+) -> None:
+    class Unreadable(io.StringIO):
+        @override
+        def read(self, _size: int | None = -1) -> str:
+            message = "bad descriptor"
+            raise OSError(message)
+
+    monkeypatch.setattr("sys.stdin", Unreadable())
+    with pytest.raises(SystemExit) as info:
+        state_guard.main()
+    assert info.value.code == 2
+    assert len(refusals) == 1
+    assert "bad descriptor" in refusals[0]
+
+
+def broken_stream() -> int:
+    """A pipe's write end whose reader has gone, so every write fails."""
     read_end, write_end = os.pipe()
     os.close(read_end)
+    return write_end
+
+
+def spawn_hook(config_file: Path, tmp_path: Path, streams: tuple[int, int, int]) -> int:
+    """Run main() in a real process on STREAMS (stdin, stdout, stderr); its status."""
+    signal.alarm(0)  # the subprocess has its own timeout; startup can exceed 1s
     program = (
         "import sys\nfrom tbhbdev.alpha import state_guard\n"
         "sys.exit(state_guard.main())\n"
     )
+    stdin, stdout, stderr = streams
+    return subprocess.run(  # fixed interpreter and program
+        [sys.executable, "-c", program],
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONPATH": os.pathsep.join(p for p in sys.path if p),
+            "XDG_CONFIG_HOME": str(config_file.parents[1]),
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+        },
+        timeout=60,
+        check=False,
+    ).returncode
+
+
+@pytest.mark.parametrize(
+    ("tagging", "broken"),
+    [
+        (True, ("stdout",)),
+        (False, ("stderr",)),
+        (True, ("stdout", "stderr")),
+        (False, ("stdout", "stderr")),
+    ],
+)
+def test_broken_output_streams_still_exit_2(
+    config_file: Path, tmp_path: Path, tagging: bool, broken: tuple[str, ...]
+) -> None:
+    config_file.write_text(f"[state_guard]\ntag_messages = {str(tagging).lower()}\n")
+    payload = tmp_path / "payload.json"
+    payload.write_text(json.dumps(send(UNSUPPORTED_CLAIM)))
+    opened = [
+        os.open(payload, os.O_RDONLY),
+        *(
+            broken_stream() if stream in broken else os.open(os.devnull, os.O_WRONLY)
+            for stream in ("stdout", "stderr")
+        ),
+    ]
     try:
-        done = subprocess.run(  # fixed interpreter and program
-            [sys.executable, "-c", program],
-            input=json.dumps(send(UNSUPPORTED_CLAIM)).encode(),
-            stdout=write_end,
-            stderr=subprocess.PIPE,
-            env={
-                **os.environ,
-                "XDG_CONFIG_HOME": str(config_file.parents[1]),
-                "XDG_STATE_HOME": str(tmp_path / "state"),
-            },
-            timeout=60,
-            check=False,
-        )
+        status = spawn_hook(config_file, tmp_path, (opened[0], opened[1], opened[2]))
     finally:
-        os.close(write_end)
-    assert done.returncode == 2
-    assert b"was not sent" in done.stderr
+        for descriptor in opened:
+            os.close(descriptor)
+    assert status == 2
+
+
+def test_a_hook_input_that_cannot_be_read_exits_2(
+    config_file: Path, tmp_path: Path
+) -> None:
+    opened = [os.open(os.devnull, os.O_WRONLY) for _ in range(3)]
+    try:
+        status = spawn_hook(config_file, tmp_path, (opened[0], opened[1], opened[2]))
+    finally:
+        for descriptor in opened:
+            os.close(descriptor)
+    assert status == 2
 
 
 def test_an_injected_config_error_refuses_a_send_message(

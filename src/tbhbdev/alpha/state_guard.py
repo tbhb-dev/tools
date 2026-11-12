@@ -39,11 +39,14 @@ checks shell `-c` scripts and substitutions inside double quotes. Single
 quotes hold literal text. Before matching `git commit`, it skips command
 wrappers, environment assignments and options, and Git global option values.
 
-The hook never blocks for lack of config, and any crash or invalid config
-allows the call: a broken hook must not stop the agent's work.
+The hook never blocks for lack of config, and a crash or invalid config
+allows the call: a broken hook must not stop the agent's work. A SendMessage
+call is the exception. A crash on its path, or an unreadable hook input,
+refuses the call.
 """
 
 import contextlib
+import io
 import json
 import os
 import re
@@ -53,7 +56,7 @@ import sys
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 lazy from collections.abc import Callable
 
 from tbhbdev import userconfig
@@ -261,16 +264,25 @@ def tagged_input(data: Json, tool_input: Json, original: str) -> str | None:
     )
 
 
-def silence_stdout() -> None:
-    """Point fd 1 at /dev/null so the exit-time flush of a broken stdout can't fail.
+def refuse_and_exit(text: str) -> NoReturn:
+    """Write TEXT to stderr if that works, then end the process with status 2.
 
-    A failed write leaves buffered text that the interpreter flushes again at
-    shutdown, and a second failure there changes the exit status from 2 to 120.
+    The write goes straight to descriptor 2 and `os._exit` skips the
+    interpreter's exit-time flush, so a closed or full stream can't change the
+    status to 120. Nothing here opens a descriptor.
     """
-    with contextlib.suppress(OSError):
-        null = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(null, 1)
-        os.close(null)
+    with contextlib.suppress(Exception):
+        os.write(2, f"{text}\n".encode(errors="replace"))
+    os._exit(2)
+
+
+def abandon_stdout() -> None:
+    """Drop the text a failed stdout still buffers.
+
+    The interpreter flushes `sys.stdout` again at exit, and a second failure
+    there changes the status from 2 to 120.
+    """
+    sys.stdout = io.StringIO()
 
 
 def send_message_reason(data: Json, tool_input: Json) -> str | None:
@@ -290,7 +302,7 @@ def send_message_reason(data: Json, tool_input: Json) -> str | None:
             sys.stdout.flush()
             return None
     except Exception as exc:  # noqa: BLE001  # any failure here must keep the refusal
-        silence_stdout()
+        abandon_stdout()
         print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
     return claim_reason(bad)
 
@@ -573,20 +585,24 @@ def main() -> int:
     """Read the payload on stdin and run it.
 
     A crash or bad config allows the call, except that a SendMessage call fails
-    closed: any exception on that path, including writing the output, refuses it.
+    closed: any exception on that path, including writing the output, refuses
+    it. So does an unreadable hook input, since the tool is then unknown.
     """
-    data: Json = {}
     try:
         data = read_hook_stdin()
+    except Exception as exc:  # noqa: BLE001  # the tool is unknown, so refuse
+        refuse_and_exit(
+            "state-guard: the hook input is unreadable, so this call was "
+            f"not allowed: {exc!r}"
+        )
+    try:
         return run(data)
     except Exception as exc:  # noqa: BLE001  # fail open on any crash but SendMessage
         if data.get("tool_name") == "SendMessage":
-            silence_stdout()
-            print(
-                f"state-guard: the guard failed, so this message was not sent: {exc!r}",
-                file=sys.stderr,
+            refuse_and_exit(
+                f"state-guard: the guard failed, so this message was not sent: {exc!r}"
             )
-            return 2
         if isinstance(exc, userconfig.ConfigError):
-            print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
+            with contextlib.suppress(Exception):
+                print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
         return 0
