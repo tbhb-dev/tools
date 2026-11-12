@@ -1477,7 +1477,7 @@ def test_round4_shape7_path_attachment(text: str) -> None:
         "The fix merged; Source: unavailable.",
     ],
 )
-def test_round4_shape8_completed_readback(text: str) -> None:
+def test_round4_shape8_completed_read_back(text: str) -> None:
     assert state_guard.unsupported_claims(text)
 
 
