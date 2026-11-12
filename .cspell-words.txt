@@ -251,6 +251,7 @@ getsid
 killpg
 pgid
 setpgid
+SIGALRM
 SIGCONT
 SIGTTOU
 tcgetpgrp

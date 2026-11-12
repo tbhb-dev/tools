@@ -2,6 +2,7 @@
 # Copyright Tony Burns
 """Tests for tbhbdev alpha state-guard, against a config in a temporary XDG dir."""
 
+import contextlib
 import io
 import json
 import os
@@ -85,8 +86,8 @@ def refusals(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Stand in for the real exit, which would end the pytest process."""
     texts: list[str] = []
 
-    def fake(text: str) -> NoReturn:
-        texts.append(text)
+    def fake(text: str, cause: BaseException | None = None) -> NoReturn:
+        texts.append(text if cause is None else f"{text} {cause!r}")
         raise SystemExit(2)
 
     monkeypatch.setattr(state_guard, "refuse_and_exit", fake)
@@ -100,11 +101,12 @@ def run(
     refusals: list[str],
 ) -> Runner:
     def call(data: object) -> Result:
+        refusals.clear()
         monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(data)))
         try:
             status = state_guard.main()
-        except SystemExit:
-            status = 2
+        except SystemExit as exit_request:
+            status = int(str(exit_request.code))
         out = capsys.readouterr()
         return status, out.out, out.err + "".join(f"{text}\n" for text in refusals)
 
@@ -1250,6 +1252,36 @@ def test_refuse_and_exit_writes_to_stderr_then_exits_2(
     assert writes == [(2, b"refused\n")]
 
 
+def test_the_alarm_handler_raises_a_timeout() -> None:
+    with pytest.raises(TimeoutError, match="time budget"):
+        state_guard.out_of_time(14, None)
+
+
+def test_an_interrupt_outside_send_message_is_not_swallowed(
+    monkeypatch: pytest.MonkeyPatch, run: Runner
+) -> None:
+    def interrupt(_data: object) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(state_guard, "run", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        run({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}})
+
+
+def test_refuse_and_exit_writes_the_cause(monkeypatch: pytest.MonkeyPatch) -> None:
+    writes: list[bytes] = []
+
+    def record(_fd: int, data: bytes) -> int:
+        writes.append(data)
+        return len(data)
+
+    monkeypatch.setattr(os, "write", record)
+    monkeypatch.setattr(os, "_exit", exit_with_code)
+    with pytest.raises(Exited):
+        REFUSE_AND_EXIT("refused:", ValueError("why"))
+    assert writes == [b"refused: ValueError('why')\n"]
+
+
 def test_refuse_and_exit_exits_2_when_the_write_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1288,12 +1320,20 @@ def broken_stream() -> int:
     return write_end
 
 
-def spawn_hook(config_file: Path, tmp_path: Path, streams: tuple[int, int, int]) -> int:
-    """Run main() in a real process on STREAMS (stdin, stdout, stderr); its status."""
+def spawn_hook(
+    config_file: Path,
+    tmp_path: Path,
+    streams: tuple[int, int, int],
+    prelude: str = "",
+) -> int:
+    """Run main() in a real process on STREAMS (stdin, stdout, stderr); its status.
+
+    PRELUDE is Python source that runs first, to inject a failure.
+    """
     signal.alarm(0)  # the subprocess has its own timeout; startup can exceed 1s
     program = (
         "import sys\nfrom tbhbdev.alpha import state_guard\n"
-        "sys.exit(state_guard.main())\n"
+        f"{prelude}\nsys.exit(state_guard.main())\n"
     )
     stdin, stdout, stderr = streams
     return subprocess.run(  # fixed interpreter and program
@@ -1338,6 +1378,78 @@ def test_broken_output_streams_still_exit_2(
         status = spawn_hook(config_file, tmp_path, (opened[0], opened[1], opened[2]))
     finally:
         for descriptor in opened:
+            os.close(descriptor)
+    assert status == 2
+
+
+def full_stream() -> tuple[int, int]:
+    """A pipe with no free space whose reader stays open, so a write blocks.
+
+    Returns (read end, write end).
+    """
+    read_end, write_end = os.pipe()
+    os.set_blocking(write_end, False)
+    with contextlib.suppress(BlockingIOError):
+        while True:
+            os.write(write_end, b"x" * 4096)
+    os.set_blocking(write_end, True)
+    return read_end, write_end
+
+
+FAILURES = {
+    "interrupt": "raise KeyboardInterrupt",
+    "exit zero": "raise SystemExit(0)",
+    "exit one": "raise SystemExit(1)",
+    "other base": (
+        "class Stop(BaseException):\n"
+        "    def __repr__(self):\n"
+        "        raise RuntimeError('repr')\n"
+        "raise Stop()"
+    ),
+}
+
+
+@pytest.mark.parametrize("failure", list(FAILURES))
+@pytest.mark.parametrize("stderr_full", [False, True])
+def test_any_failure_on_the_send_message_path_exits_2(
+    config_file: Path, tmp_path: Path, failure: str, stderr_full: bool
+) -> None:
+    config_file.write_text("[state_guard]\ntag_messages = true\n")
+    payload = tmp_path / "payload.json"
+    payload.write_text(json.dumps(send(UNSUPPORTED_CLAIM)))
+    prelude = (
+        "def crash(*_args):\n"
+        + "".join(f"    {line}\n" for line in FAILURES[failure].splitlines())
+        + "state_guard.tag_sentences = crash\n"
+    )
+    stdin = os.open(payload, os.O_RDONLY)
+    stdout = os.open(os.devnull, os.O_WRONLY)
+    reader, stderr = (
+        full_stream() if stderr_full else (None, os.open(os.devnull, os.O_WRONLY))
+    )
+    try:
+        status = spawn_hook(config_file, tmp_path, (stdin, stdout, stderr), prelude)
+    finally:
+        for descriptor in (stdin, stdout, stderr):
+            os.close(descriptor)
+        if reader is not None:
+            os.close(reader)
+    assert status == 2
+
+
+def test_a_full_stderr_pipe_cannot_block_a_refusal(
+    config_file: Path, tmp_path: Path
+) -> None:
+    config_file.write_text("[state_guard]\ntag_messages = false\n")
+    payload = tmp_path / "payload.json"
+    payload.write_text(json.dumps(send(UNSUPPORTED_CLAIM)))
+    stdin = os.open(payload, os.O_RDONLY)
+    stdout = os.open(os.devnull, os.O_WRONLY)
+    reader, stderr = full_stream()
+    try:
+        status = spawn_hook(config_file, tmp_path, (stdin, stdout, stderr))
+    finally:
+        for descriptor in (stdin, stdout, stderr, reader):
             os.close(descriptor)
     assert status == 2
 

@@ -51,6 +51,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import stat
 import sys
 import tomllib
@@ -264,23 +265,39 @@ def tagged_input(data: Json, tool_input: Json, original: str) -> str | None:
     )
 
 
-def refuse_and_exit(text: str) -> NoReturn:
-    """Write TEXT to stderr if that works, then end the process with status 2.
+BUDGET_SECONDS = 5
+WRITE_SECONDS = 2
 
-    The write goes straight to descriptor 2 and `os._exit` skips the
-    interpreter's exit-time flush, so a closed or full stream can't change the
-    status to 120. Nothing here opens a descriptor.
+
+def out_of_time(_signal_number: int, _frame: object) -> NoReturn:
+    """Alarm handler: a hook that outlasts its budget raises instead of hanging."""
+    message = "the hook outlasted its time budget"
+    raise TimeoutError(message)
+
+
+def refuse_and_exit(text: str, cause: BaseException | None = None) -> NoReturn:
+    """Write TEXT and the repr of CAUSE to stderr in time, then end with status 2.
+
+    Building the text, the write and the alarm that bounds it all sit in one
+    guarded block that catches every exception, including interrupts, so a
+    failure there can't change the status. The write goes straight to
+    descriptor 2 and `os._exit` skips the interpreter's exit-time flush, so a
+    closed, full or blocked stream can't change the status to 120 or hang the
+    hook. Nothing here opens a descriptor.
     """
-    with contextlib.suppress(Exception):
-        os.write(2, f"{text}\n".encode(errors="replace"))
+    with contextlib.suppress(BaseException):
+        signal.signal(signal.SIGALRM, out_of_time)
+        signal.alarm(WRITE_SECONDS)
+        detail = "" if cause is None else f" {cause!r}"
+        os.write(2, f"{text}{detail}\n".encode(errors="replace"))
     os._exit(2)
 
 
 def abandon_stdout() -> None:
     """Drop the text a failed stdout still buffers.
 
-    The interpreter flushes `sys.stdout` again at exit, and a second failure
-    there changes the status from 2 to 120.
+    The interpreter flushes `sys.stdout` again at shutdown, and a second
+    failure would change the exit status from 2 to 120.
     """
     sys.stdout = io.StringIO()
 
@@ -582,26 +599,45 @@ def run(data: Json) -> int:
 
 
 def main() -> int:
+    """Run the hook within a time budget.
+
+    The alarm turns a blocked read or write into a TimeoutError, which the
+    handlers below treat like any other failure.
+    """
+    previous = signal.signal(signal.SIGALRM, out_of_time)
+    remaining = signal.alarm(BUDGET_SECONDS)
+    try:
+        return guarded_main()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+        if remaining:
+            signal.alarm(remaining)
+
+
+def guarded_main() -> int:
     """Read the payload on stdin and run it.
 
     A crash or bad config allows the call, except that a SendMessage call fails
-    closed: any exception on that path, including writing the output, refuses
-    it. So does an unreadable hook input, since the tool is then unknown.
+    closed: any failure on that path, interrupts included, refuses it. So does
+    an unreadable hook input, since the tool is then unknown.
     """
     try:
         data = read_hook_stdin()
-    except Exception as exc:  # noqa: BLE001  # the tool is unknown, so refuse
+    except BaseException as exc:  # noqa: BLE001  # the tool is unknown, so refuse
         refuse_and_exit(
-            "state-guard: the hook input is unreadable, so this call was "
-            f"not allowed: {exc!r}"
+            "state-guard: the hook input is unreadable, so this call was not allowed:",
+            exc,
         )
     try:
         return run(data)
-    except Exception as exc:  # noqa: BLE001  # fail open on any crash but SendMessage
+    except BaseException as exc:  # fail open on any crash but SendMessage
         if data.get("tool_name") == "SendMessage":
             refuse_and_exit(
-                f"state-guard: the guard failed, so this message was not sent: {exc!r}"
+                "state-guard: the guard failed, so this message was not sent:", exc
             )
+        if not isinstance(exc, Exception):
+            raise
         if isinstance(exc, userconfig.ConfigError):
             with contextlib.suppress(Exception):
                 print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
