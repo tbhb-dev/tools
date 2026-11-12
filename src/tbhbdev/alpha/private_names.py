@@ -1,22 +1,22 @@
 """Flag private repository names in a public pull request draft.
 
-`private_name_problems` is the pure check. A token is a run of ASCII letters,
-digits, `_` and `-`, joined by single dots, that no such character or dot
-touches on either side, so `example-private-tools` doesn't match
-`example-private` and a sentence-ending dot isn't part of the token. The check
-ignores case and a trailing `.git`, so clone URLs match. It flags a token that
-ends in `-private` and doesn't start with `-`, and a token that equals a
-configured name.
+`private_name_problems` checks whole tokens, ignoring case and a trailing
+`.git`. A `-private` component or a configured name is private. The exact,
+case-sensitive token `example-private` is a reviewed placeholder exemption.
 
-`draft_problems` adds the configuration: the optional `[pr_check]` table of
-the user config, key `private_repos`. It skips the check in a private working
-repository, where such names are fine.
+`draft_problems` combines `[pr_check] private_repos` with the required list in
+`~/.local/state/tbhb/private-repos.txt`. Its header can restrict words to path
+positions. Private targets skip the name check. A public target with no usable
+host list reports a problem.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from tbhbdev import userconfig
 from tbhbdev.alpha.repo import git
@@ -27,32 +27,88 @@ if TYPE_CHECKING:
     from tbhbdev.alpha.pull_request import Problem
 
 SUFFIX = "-private"
+PLACEHOLDER = "example-private"
+PRIVATE_COMPONENT = re.compile(r"-private(?:-|$)")
+PATH_TOKEN = re.compile(r"(?<=[\w.-])/([\w-]+(?:\.[\w-]+)*)(?![\w-])", re.ASCII)
+PATH_HEADER = "# Bare-word exempt, flagged only in path position:"
+
+
+@dataclass
+class Names:
+    """Private names and words restricted to repository path positions."""
+
+    private: list[str]
+    path_only: set[str]
+
+
+class NameListError(Exception):
+    """The host list cannot supply the required private names."""
+
+
+REPOSITORY_URL = re.compile(
+    r"(?:(?:https?|ssh|git|git\+ssh)://[^/\s]+/[^/\s]+(?:/[^/\s]+)*"
+    r"|[^/:\s]+:[^/\s][^\s]*|/?(?:[^/:\s]+/)+[^/\s]+)"
+)
 MESSAGE = "'{}' names a private repository; describe it generically instead"
 TOKEN = re.compile(r"(?<![\w.-])[\w-]+(?:\.[\w-]+)*(?![\w-])", re.ASCII)
 
 
 def private_name_problems(
-    lines: Sequence[str], names: Sequence[str], first: int = 1
+    lines: Sequence[str],
+    names: Sequence[str],
+    first: int = 1,
+    *,
+    path_only: set[str] | None = None,
 ) -> list[Problem]:
-    """One problem per distinct private-looking token on each line.
-
-    LINES start at line number FIRST. NAMES are the configured private
-    repository names; a token that ends in `-private` is flagged without one.
-    Matching ignores case.
-    """
+    """One problem per distinct private-looking token on each line."""
+    restricted = path_only or set()
     wanted = {name.lower() for name in names}
     return [
         (number, MESSAGE.format(token))
         for number, line in enumerate(lines, first)
         for token in dict.fromkeys(TOKEN.findall(line))
-        if _is_private(token, wanted)
+        if token != PLACEHOLDER
+        and (
+            _path_private(token, line, restricted)
+            or (token.lower() not in restricted and _is_private(token, wanted))
+        )
     ]
 
 
 def _is_private(token: str, wanted: set[str]) -> bool:
     """Whether TOKEN, minus a trailing `.git`, is a private name."""
     name = token.lower().removesuffix(".git")
-    return (name.endswith(SUFFIX) and not name.startswith("-")) or name in wanted
+    return (
+        bool(PRIVATE_COMPONENT.search(name)) and not name.startswith("-")
+    ) or name in wanted
+
+
+def _path_private(token: str, line: str, restricted: set[str]) -> bool:
+    """Whether a header word appears as org/word or word.git."""
+    return token.lower().removesuffix(".git") in restricted and (
+        token.lower().endswith(".git") or token in PATH_TOKEN.findall(line)
+    )
+
+
+def _host_names() -> Names:
+    """Read the required host list without including its contents in errors."""
+    path = Path.home() / ".local/state/tbhb/private-repos.txt"
+    message = f"private names: cannot read a nonempty list from {path}"
+    try:
+        lines = path.read_text().splitlines()
+    except OSError, UnicodeDecodeError:
+        raise NameListError(message) from None
+    names: list[str] = []
+    path_only: set[str] = set()
+    for raw in lines:
+        line = raw.strip()
+        if line.startswith(PATH_HEADER):
+            path_only.update(line.removeprefix(PATH_HEADER).lower().split())
+        elif line and not line.startswith("#"):
+            names.append(line)
+    if not names:
+        raise NameListError(message)
+    return Names(names, path_only)
 
 
 def _configured() -> list[str]:
@@ -63,32 +119,47 @@ def _configured() -> list[str]:
         return []
 
 
-def _origin_name() -> str | None:
-    """The repository name in `origin`'s URL, or None when git can't say."""
-    code, url = git("config", "--get", "remote.origin.url")
-    if code != 0:
+def repository_name(url: str) -> str | None:
+    """The final repository component of a usable git URL or local path."""
+    value = url.strip().rstrip("/")
+    try:
+        urlsplit(value)
+    except ValueError:
         return None
-    name = re.split(r"[/:]", url.strip().rstrip("/"))[-1].removesuffix(".git")
-    return name.lower() or None
+    if REPOSITORY_URL.fullmatch(value) is None:
+        return None
+    return re.split(r"[/:]", value)[-1].removesuffix(".git").lower() or None
 
 
-def private_names() -> list[str] | None:
-    """The names to flag, or None when the working repository is private.
-
-    A repository is private when its name ends in `-private` or is configured.
-    An unreadable `origin` counts as public, so the check runs. A config the
-    loader can't read gives no names; the suffix rule still applies.
-    """
-    names = _configured()
-    origin = _origin_name()
-    if origin is not None and (
-        origin.endswith(SUFFIX) or origin in {name.lower() for name in names}
+def names_for_repository(name: str | None) -> Names | None:
+    """Combined rules, or None for a private target; require the host list."""
+    configured = _configured()
+    if name is not None and (
+        name.endswith(SUFFIX) or name in {item.lower() for item in configured}
     ):
         return None
-    return names
+    host = _host_names()
+    if name in {item.lower() for item in host.private} | host.path_only:
+        return None
+    return Names(configured + host.private, host.path_only)
+
+
+def private_names() -> Names | None:
+    """Names to flag for origin; an unreadable origin counts as public."""
+    code, url = git("config", "--get", "remote.origin.url")
+    return names_for_repository(repository_name(url) if code == 0 else None)
 
 
 def draft_problems(lines: Sequence[str], first: int) -> list[Problem]:
     """The private-name problems of a rendered draft, if the check is on."""
-    names = private_names()
-    return [] if names is None else private_name_problems(lines, names, first)
+    try:
+        names = private_names()
+    except NameListError as exc:
+        return [(first, str(exc))]
+    return (
+        []
+        if names is None
+        else private_name_problems(
+            lines, names.private, first, path_only=names.path_only
+        )
+    )

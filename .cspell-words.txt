@@ -59,6 +59,7 @@ fakehost
 fakeop
 fakeoperator
 fchmod
+fixturerepo
 flatmap
 frontmatter
 fsmonitor
