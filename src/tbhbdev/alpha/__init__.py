@@ -17,6 +17,7 @@ from tbhbdev.alpha import (
     agent,
     brief,
     gh_shim,
+    guard_gh_config_dir,
     guard_gh_poll,
     guard_gh_pr,
     guard_op,
@@ -37,6 +38,7 @@ __all__ = [
     "agent",
     "brief",
     "gh_shim",
+    "guard_gh_config_dir",
     "guard_gh_poll",
     "guard_gh_pr",
     "guard_op",
@@ -65,6 +67,7 @@ commands:
   session-context
                SessionStart hook: name the host, the other hosts and the time
   guard-gh-poll PreToolUse hook: block bulk GitHub reads and token unsets
+  guard-gh-config-dir PreToolUse hook: require nonempty GH_CONFIG_DIR for gh
   guard-scripts PreToolUse hook: keep scripts for the operator in
                ~/.local/libexec/tbhb
   gh-shim      budget gh calls made by agent sessions and their scripts
@@ -113,6 +116,10 @@ def session_context_command(_argv: list[str], _prog: str) -> int:
 
 def poll_command(_argv: list[str], _prog: str) -> int:
     return guard_gh_poll.main()
+
+
+def gh_config_dir_command(_argv: list[str], _prog: str) -> int:
+    return guard_gh_config_dir.main()
 
 
 def scripts_command(_argv: list[str], _prog: str) -> int:
@@ -171,6 +178,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "state-guard": state_guard_command,
     "session-context": session_context_command,
     "guard-gh-poll": poll_command,
+    "guard-gh-config-dir": gh_config_dir_command,
     "guard-scripts": scripts_command,
     "gh-shim": gh_shim.main,
     "agent-env": gh_shim.agent_env,
