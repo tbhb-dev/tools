@@ -55,7 +55,8 @@ def inspect_commit(text: str) -> tuple[list[str], str]:
 
 def git_output(path: str, *args: str) -> str:
     """Read original Git objects as UTF-8 without newline translation."""
-    return subprocess.run(
+    # Fixed git executable and argv; no command string is interpreted.
+    return subprocess.run(  # nosec B603 B607
         [
             "git",
             "--no-replace-objects",
@@ -81,7 +82,7 @@ def main(argv: list[str], prog: str) -> int:
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
-        return int(exc.code)
+        return int(exc.code or 0)
     try:
         base, tip = (
             git_output(

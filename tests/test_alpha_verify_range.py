@@ -1,7 +1,7 @@
 """Real commit objects exercise the range verifier without signing keys or hooks."""
 
 import subprocess
-from typing import TYPE_CHECKING, TypedDict, Unpack
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 import pytest
 
@@ -17,12 +17,6 @@ class Change(TypedDict, total=False):
     committer: str
     signed: bool
     message: str
-
-
-class RunOptions(TypedDict):
-    check: bool
-    capture_output: bool
-    text: bool
 
 
 PROG = "tbhbdev alpha verify-range"
@@ -196,8 +190,13 @@ def test_failed_rules(
     change: Change,
     reasons: list[str],
 ) -> None:
-    tip = repo.commit(**change)
-    subject = str(change.get("message", MESSAGE)).splitlines()[0]
+    tip = repo.commit(
+        author=change.get("author", EMAIL),
+        committer=change.get("committer", EMAIL),
+        signed=change.get("signed", True),
+        message=change.get("message", MESSAGE),
+    )
+    subject = change.get("message", MESSAGE).splitlines()[0]
     assert verify_range.main([repo.base, tip], PROG) == 1
     assert capsys.readouterr() == (
         (
@@ -329,37 +328,23 @@ def test_git_invocation(repo: Repository, monkeypatch: pytest.MonkeyPatch) -> No
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def capture(
-        args: list[str], **kwargs: Unpack[RunOptions]
+        args: list[str], *, check: bool, capture_output: bool, text: Literal[False]
     ) -> subprocess.CompletedProcess[bytes]:
-        calls.append((args, dict(kwargs)))
-        return run(args, **kwargs)
+        calls.append(
+            (args, {"check": check, "capture_output": capture_output, "text": text})
+        )
+        return run(args, check=check, capture_output=capture_output, text=text)
 
     monkeypatch.setattr(subprocess, "run", capture)
     assert verify_range.git_output(
         str(repo.path), "cat-file", "commit", repo.base
     ).startswith("tree ")
-    assert calls == [
-        (
-            [
-                "git",
-                "--no-replace-objects",
-                "-c",
-                "core.fsmonitor=false",
-                "-c",
-                "core.pager=cat",
-                "-C",
-                str(repo.path),
-                "cat-file",
-                "commit",
-                repo.base,
-            ],
-            {
-                "check": True,
-                "capture_output": True,
-                "text": False,
-            },
-        )
-    ]
+    assert len(calls) == 1
+    args, options = calls[0]
+    assert args[:2] == ["git", "--no-replace-objects"]
+    assert args[2:6] == ["-c", "core.fsmonitor=false", "-c", "core.pager=cat"]
+    assert args[6:] == ["-C", str(repo.path), "cat-file", "commit", repo.base]
+    assert options == {"check": True, "capture_output": True, "text": False}
 
 
 def test_git_failure(
@@ -527,7 +512,7 @@ def test_git_decodes_bytes_without_newline_translation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def output(
-        args: list[str], **_kwargs: Unpack[RunOptions]
+        args: list[str], **_kwargs: object
     ) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(args, 0, stdout=b"name\rvalue\xff\n")
 

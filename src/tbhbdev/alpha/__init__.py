@@ -44,6 +44,7 @@ __all__ = [
     "main",
     "session_context",
     "state_guard",
+    "verify_range",
 ]
 
 USAGE = """usage: {prog} <command> [args...]
