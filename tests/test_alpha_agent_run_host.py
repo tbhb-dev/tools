@@ -2688,7 +2688,7 @@ def test_resolved_denies_drop_nested_signing_key(
 ) -> None:
     keep_home_denies(monkeypatch)
     run = make_run(tmp_path)
-    directory = run.home / ".config" / "toolcfg"
+    directory = run.home / ".config" / "tool-config"
     directory.mkdir(parents=True)
     key = directory / "agent-signing-key"
     key.touch()
@@ -2714,7 +2714,7 @@ def denied_signing_directory(
 ) -> tuple[run_host.Run, Path]:
     keep_home_denies(monkeypatch)
     run = make_run(tmp_path)
-    directory = run.home / ".config" / "toolcfg"
+    directory = run.home / ".config" / "tool-config"
     directory.mkdir(parents=True)
     key = directory / "agent-signing-key"
     key.touch()
@@ -2723,7 +2723,7 @@ def denied_signing_directory(
         settings=dataclasses.replace(
             run.settings,
             sandbox=dataclasses.replace(
-                run.settings.sandbox, denied_home_paths=(".config/toolcfg",)
+                run.settings.sandbox, denied_home_paths=(".config/tool-config",)
             ),
             credentials=tuple(
                 dataclasses.replace(credential, signing=str(key))
