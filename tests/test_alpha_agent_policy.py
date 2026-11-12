@@ -1684,7 +1684,7 @@ def test_hooks_directory_refuses_extra_write_grants(field: str, suffix: str) -> 
 @pytest.mark.parametrize("harness", Harness)
 @pytest.mark.parametrize("profile", Profile)
 @pytest.mark.parametrize("configured", [False, True])
-def test_github_config_only_for_delivered_token(
+def test_github_config_always_uses_private_directory(
     harness: Harness,
     profile: Profile,
     configured: bool,
@@ -1699,16 +1699,13 @@ def test_github_config_only_for_delivered_token(
     )
     result = made(Os.LINUX, profile, harness, "agent", config=config)
     gh = f"{paths('agent').tmpdir}/gh"
-    expected = configured or profile is Profile.REVIEW
-    assert (result.env.get("GH_CONFIG_DIR") == gh) is expected
-    if not expected:
-        assert "GH_CONFIG_DIR" not in result.env
+    assert result.env["GH_CONFIG_DIR"] == gh
     if harness is Harness.CLAUDE:
         claude_env = dig(claude_settings_of(result), "env")
         assert isinstance(claude_env, dict)
-        assert ("GH_CONFIG_DIR" in claude_env) is expected
+        assert claude_env["GH_CONFIG_DIR"] == gh
     if isinstance(result.detail, model.AgyPolicy):
-        assert (f"read_file({gh})" in result.detail.grants) is expected
+        assert f"read_file({gh})" in result.detail.grants
 
 
 @pytest.mark.parametrize("os", Os)
