@@ -549,6 +549,16 @@ def harness_command(
     return command
 
 
+def checked_harness_command(
+    run: Run, prepared: Prepared, value: Policy, executable: str
+) -> tuple[str, ...]:
+    try:
+        return harness_command(run, prepared, value, executable)
+    except KeyError, TypeError:
+        message = "run failed while building the harness command"
+        raise Invalid(message) from None
+
+
 def log_hook_tools(run: Run, paths: RunPaths) -> None:
     status = (
         "present"
@@ -564,7 +574,7 @@ def run_harness(
     paths = prepared.paths
     value, executable = checked_policy(run, paths)
     env = value.env | prepared.delivery.env
-    command = harness_command(run, prepared, value, executable)
+    command = checked_harness_command(run, prepared, value, executable)
     if preflight_only:
         log_hook_tools(run, paths)
         run.files.write("log", f"preflight ok: {executable}\n")

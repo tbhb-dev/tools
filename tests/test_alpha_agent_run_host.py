@@ -4087,3 +4087,65 @@ def test_preflight_flag_reaches_execute(
         run_host.main(["example", "--host", "example-linux", "--preflight"], "run-host")
         == 0
     )
+
+
+@pytest.mark.parametrize("kind", RunKind)
+def test_codex_preflight_without_github_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: RunKind
+) -> None:
+    run = make_run(tmp_path, kind=kind.value)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            credentials=tuple(
+                dataclasses.replace(c, gh=None) for c in run.settings.credentials
+            ),
+        ),
+    )
+    prepared = preparation(run)
+    original_command = run_host.harness_command
+    commands: list[tuple[str, ...]] = []
+
+    def command(
+        value: run_host.Run, ready: run_host.Prepared, policy: Policy, executable: str
+    ) -> tuple[str, ...]:
+        result = original_command(value, ready, policy, executable)
+        overrides = "\n".join(
+            value for index, value in enumerate(result) if result[index - 1] == "-c"
+        )
+        env = tomllib.loads(overrides)["shell_environment_policy"]["set"]
+        assert env["GH_CONFIG_DIR"] == str(run.tmpdir / "gh")
+        assert env["GH_CONFIG_DIR"] == f"{env['TMPDIR']}/gh"
+        commands.append(result)
+        return result
+
+    monkeypatch.setattr(process_group, "prepare", constant(prepared))
+    monkeypatch.setattr(run_host, "harness_command", command)
+    assert run_host.execute(run, "example", preflight_only=True) == 0
+    assert len(commands) == 1
+    assert f"preflight ok: {commands[0][0]}\n" in run.files.path("log").read_text()
+    assert run.files.path("rc").read_text() == "0\n"
+    assert not run.files.path("launched").exists()
+
+
+@pytest.mark.parametrize("error", [KeyError, TypeError])
+@pytest.mark.parametrize("preflight_only", [False, True])
+def test_harness_command_failure_names_only_its_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: type[Exception],
+    preflight_only: bool,
+) -> None:
+    run = make_run(tmp_path)
+    monkeypatch.setattr(process_group, "prepare", constant(preparation(run)))
+    monkeypatch.setattr(
+        run_host, "harness_command", partial(preparation_failure, error)
+    )
+    assert run_host.execute(run, "example", preflight_only=preflight_only) == 1
+    assert run.files.path("log").read_text() == (
+        "run failed while building the harness command\n"
+    )
+    assert run.files.path("rc").read_text() == "1\n"
+    assert run.files.path("phase").read_text() == "ended"
+    assert not run.files.path("launched").exists()
