@@ -1203,8 +1203,10 @@ def hook_child(
     """Run the hook in a child that the parent kills on a deadline.
 
     The in-process alarm turns a hang into a caught error, so a hang test needs
-    a child.
+    a child. The one-second alarm of the `_bounded_hook` fixture would also end a
+    slow child start, so the child's own 20-second deadline replaces it.
     """
+    signal.alarm(0)
     return subprocess.run(
         [
             sys.executable,
