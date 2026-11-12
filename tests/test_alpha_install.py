@@ -19,6 +19,7 @@ import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -1984,6 +1985,114 @@ def test_install_git_hooks_reports_a_directory_at_a_hook(
 # ------------------------------------------------------------ command line
 
 
+@pytest.fixture
+def forbid_user_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> int:
+        pytest.fail("hooks-only must not run user-level installation")
+
+    for name in (
+        "install_gh_shim",
+        "install_config",
+        "install_codex_environment",
+        "install_private_files",
+        "session_start",
+    ):
+        monkeypatch.setattr(install, name, forbidden)
+
+
+@pytest.mark.usefixtures("world", "forbid_user_install")
+@pytest.mark.parametrize("status", [0, 7])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_main_hooks_only(
+    monkeypatch: pytest.MonkeyPatch, status: int, dry_run: bool
+) -> None:
+    calls: list[tuple[Path | None, object, bool]] = []
+
+    def hooks(cwd: Path | None, env: object, *, dry_run: bool) -> int:
+        calls.append((cwd, env, dry_run))
+        return status
+
+    monkeypatch.setattr(install, "install_git_hooks", hooks)
+    argv = ["--hooks-only", "--dry-run"] if dry_run else ["--hooks-only"]
+    assert install.main(argv, "tbhbdev alpha install") == status
+    assert calls == [(None, os.environ, dry_run)]
+    assert calls[0][1] is os.environ
+
+
+@pytest.mark.usefixtures("forbid_user_install")
+def test_main_hooks_only_dry_run_writes_nothing(
+    world: World, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    before = {
+        p: (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns)
+        for p in tmp_path.rglob("*")
+        if p.is_file()
+    }
+    assert install.main(["--hooks-only", "--dry-run"], "p") == 0
+    assert capsys.readouterr() == (
+        (
+            "would install prek's pre-commit and pre-push hooks and the "
+            "prepare-commit-msg, commit-msg, post-commit identity hooks "
+            f"in {world.hooks}\n"
+        ),
+        "",
+    )
+    assert {
+        p: (p.read_bytes(), p.stat().st_mode, p.stat().st_mtime_ns)
+        for p in tmp_path.rglob("*")
+        if p.is_file()
+    } == before
+
+
+@pytest.mark.usefixtures("world", "forbid_user_install", "plain")
+@pytest.mark.parametrize("option", [["--hook"], ["--harness", "codex"]])
+def test_main_hooks_only_rejects_other_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    option: list[str],
+) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> int:
+        pytest.fail("conflicting options must not install hooks")
+
+    monkeypatch.setattr(install, "install_git_hooks", forbidden)
+    with pytest.raises(SystemExit) as done:
+        install.main(["--hooks-only", *option], "p")
+    assert done.value.code == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.splitlines()[-1] == (
+        f"p: error: --hooks-only cannot be used with {option[0]}"
+    )
+
+
+@pytest.mark.usefixtures("world")
+def test_main_without_options_runs_every_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def step(name: str, *_args: object, **_kwargs: object) -> int:
+        calls.append(name)
+        return 0
+
+    for name in (
+        "install_git_hooks",
+        "install_gh_shim",
+        "install_config",
+        "install_codex_environment",
+        "install_private_files",
+    ):
+        monkeypatch.setattr(install, name, partial(step, name))
+    assert install.main([], "p") == 0
+    assert calls == [
+        "install_git_hooks",
+        "install_gh_shim",
+        "install_config",
+        "install_config",
+        "install_codex_environment",
+        "install_config",
+        "install_private_files",
+    ]
+
+
 def test_main_installs_the_git_hooks_and_every_harness(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2180,7 +2289,7 @@ def test_main_hook_outside_tbhb_dev_is_silent(
 
 HELP = """\
 usage: tbhbdev alpha install [-h] [--harness {claude,codex,antigravity}]
-                             [--dry-run] [--hook]
+                             [--dry-run] [--hooks-only] [--hook]
 
 Install this clone's git hooks and merge the tbhbdev alpha hooks into each
 harness's user-level config.
@@ -2190,6 +2299,8 @@ options:
   --harness {claude,codex,antigravity}
                         merge only this harness's config
   --dry-run             print the changes, write nothing
+  --hooks-only          install only this clone's git hooks and write nothing
+                        at user level
   --hook                SessionStart hook: put the gh shim on PATH and install
                         the git hooks of the payload's worktree
 """
