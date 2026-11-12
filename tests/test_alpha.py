@@ -82,23 +82,23 @@ def test_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     assert alpha.main(["identity", "check", "m"], "p") == 3
     assert alpha.main(["guard-gh-pr", "x"], "p") == 4
     assert alpha.main(["pr", "check"], "p") == 5
-    assert alpha.main(["pr", "close", "3", "--comment", "Superseded."], "p") == 5
     assert alpha.main(["pr", "delete-branch", "3"], "p") == 5
     assert alpha.main(["merge", "3"], "p") == 6
     assert alpha.main(["install", "--dry-run"], "p") == 7
     assert alpha.main(["pr", "close", "3", "--reason", "r"], "p") == 8
     assert alpha.main(["pr", "close", "3", "--reason=r"], "p") == 8
+    assert alpha.main(["pr", "close", "3", "--comment", "c"], "p") == 8
     assert alpha.main(["issue", "close", "3"], "p") == 8
     assert calls == [
         ("identity", (["check", "m"], os.environ)),
         ("guard", None),
         ("pr", (["check"], "p pr")),
-        ("pr", (["close", "3", "--comment", "Superseded."], "p pr")),
         ("pr", (["delete-branch", "3"], "p pr")),
         ("merge", (["3"], "p merge")),
         ("install", (["--dry-run"], "p install")),
         ("close", (["pr", "close", "3", "--reason", "r"], "p pr")),
         ("close", (["pr", "close", "3", "--reason=r"], "p pr")),
+        ("close", (["pr", "close", "3", "--comment", "c"], "p pr")),
         ("close", (["issue", "close", "3"], "p issue")),
     ]
 

@@ -2925,40 +2925,14 @@ def test_ready_marks_the_pull_request_ready(world: World) -> None:
     assert call["stdin"] == ""
 
 
-def test_close_comments_and_closes_the_pull_request(world: World) -> None:
-    assert (
-        run_main("close", "45", "--comment", "Superseded.\nSee the replacement.") == 0
-    )
-    (call,) = world.calls("gh")
-    assert call["argv"] == [
-        "pr",
-        "close",
-        "45",
-        "--comment",
-        "Superseded.\nSee the replacement.",
-    ]
-    assert call["stdin"] == ""
-
-
-def test_close_passes_gh_output_and_exit_code_through(
-    world: World, capsys: pytest.CaptureFixture[str]
-) -> None:
-    world.fake("gh", rc=3, stdout="out\n", stderr="err\n")
-    assert run_main("close", "45", "--comment", "Superseded.") == 3
-    assert capsys.readouterr() == ("out\n", "err\n")
-
-
 @pytest.mark.parametrize(
     "argv",
     [
-        ["close"],
-        ["close", "45"],
-        ["close", "abc", "--comment", "Superseded."],
         ["delete-branch"],
         ["delete-branch", "abc"],
     ],
 )
-def test_close_and_delete_branch_require_their_arguments(argv: list[str]) -> None:
+def test_delete_branch_requires_a_numeric_pr_number(argv: list[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         run_main(*argv)
     assert exc.value.code == 2

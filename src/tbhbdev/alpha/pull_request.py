@@ -13,7 +13,6 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr create [DRAFT] [--dry-run]
     tbhbdev alpha pr edit [DRAFT] --pr N
     tbhbdev alpha pr ready --pr N
-    tbhbdev alpha pr close N --comment TEXT
     tbhbdev alpha pr delete-branch N
     tbhbdev alpha pr hook claude|codex|antigravity
     tbhbdev alpha pr backfill-opened OWNER
@@ -82,10 +81,9 @@ contains one.
 ``ready --pr N`` marks pull request N ready for review with ``gh pr ready``. It
 doesn't read a draft.
 
-``close N --comment TEXT`` closes pull request N with the given comment.
 ``delete-branch N`` deletes only the head branch of a closed or merged pull
 request in origin's repository. Fork heads, main, protected branches and
-unreadable metadata are refused. Neither command reads a draft.
+unreadable metadata are refused. It doesn't read a draft.
 
 ``backfill-opened OWNER`` reads the body of every pull request, open or not,
 in every repository of OWNER, and adds each one to the ledger of every
@@ -1173,15 +1171,6 @@ def delete_pr_branch(number: int) -> int:
     )[0]
 
 
-def finish_pr(args: argparse.Namespace) -> int:
-    """Run ``close`` or ``delete-branch``, which read no draft."""
-    if args.command == "delete-branch":
-        return delete_pr_branch(args.number)
-    return invoke_gh(
-        [GH, "pr", "close", str(args.number), "--comment", args.comment], ""
-    )[0]
-
-
 def create_pr(argv: list[str], body: str, root: str | None, *, dry_run: bool) -> int:
     """Refuse an existing open PR, including a race reported by gh create."""
     done = run([find_tool(GH), "pr", "view", "--json", "number,state,url"])
@@ -1415,9 +1404,6 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub.add_parser("hook").add_argument("harness", choices=[CLAUDE, CODEX, ANTIGRAVITY])
     sub.add_parser("backfill-opened").add_argument("owner")
     sub.add_parser("ready").add_argument("--pr", type=int, required=True)
-    closing = sub.add_parser("close")
-    closing.add_argument("number", type=int)
-    closing.add_argument("--comment", required=True)
     sub.add_parser("delete-branch").add_argument("number", type=int)
     for name in ("check", "create", "edit"):
         one = sub.add_parser(name)
@@ -1445,8 +1431,8 @@ def main(
         # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
         # empty body: no test can tell `None` from `""`.
         return invoke_gh([GH, "pr", "ready", str(args.pr)], "")[0]  # pragma: no mutate
-    if args.command in ("close", "delete-branch"):
-        return finish_pr(args)
+    if args.command == "delete-branch":
+        return delete_pr_branch(args.number)
     try:
         return command(args, env)
     except agent_identity.AttributionError:
