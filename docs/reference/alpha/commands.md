@@ -37,7 +37,7 @@ type: Reference
 - `agent` coordinates runs with `exec`, `wait`, `status`, `log`, `diff`, `kill`, `clean` and `keep`. `clear-taint HOST --reason TEXT` records local host clearance. The package also includes the run request's schema and the repo argument rules.
 - `install` installs the git hooks and the user-level harness hooks. `--hooks-only` installs only this clone's git hooks without writing user-level config.
 
-`tbhbdev alpha pr checks --pr N` reads pull request N in the current repository. It prints the head SHA on the first line, then one `name: CONCLUSION` line per check, including commit statuses. Unfinished jobs print `PENDING`. Exit codes are 0 when no conclusion is `FAILURE` and 1 when any is; pending jobs alone exit 0. A missing pull request or a failed read exits nonzero with an error.
+`tbhbdev alpha pr checks --pr N` reads pull request N in the current repository. It prints the head commit hash on the first line, then one `name: CONCLUSION` line per check, including commit statuses. Unfinished jobs print `PENDING`. The exit code is 1 when any conclusion is `FAILURE` and 0 otherwise, so pending jobs alone exit 0. A missing pull request or a failed read exits nonzero with an error.
 
 `tbhbdev alpha verify-range BASE TIP [-C PATH]` checks each commit in `BASE..TIP`, oldest first. A commit passes when the agent is its author and committer, it has a signature header and valid attribution trailers, and it has exactly one parent. Sign-off trailers, co-author trailers and GitHub's no-reply addresses fail it. Exit codes are 0 when every commit passes, 1 when any fails and 2 for usage or Git errors.
 
