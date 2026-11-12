@@ -1530,3 +1530,42 @@ def test_hooks_query_spells_git_directory(
     monkeypatch.setattr(Path, "is_dir", directory)
     monkeypatch.setattr(subprocess, "check_output", output)
     worktree.validate_hooks(tmp_path, ())
+
+
+def test_build_links_the_clone_hook_tools(tmp_path: Path) -> None:
+    _, clone = repository(tmp_path)
+    (clone / ".bazel_env" / "bin").mkdir(parents=True)
+    path = worktree.create(clone, "tools", run_request(), ("example-org/example-repo",))
+    link = path / ".bazel_env"
+    assert link.is_symlink()
+    assert link.resolve() == (clone / ".bazel_env").resolve()
+    assert (link / "bin").is_dir()
+
+
+def test_clone_without_hook_tools_gets_no_link(tmp_path: Path) -> None:
+    _, clone = repository(tmp_path)
+    path = worktree.create(clone, "none", run_request(), ("example-org/example-repo",))
+    assert not (path / ".bazel_env").exists(follow_symlinks=False)
+
+
+def test_review_gets_no_hook_tools_link(tmp_path: Path) -> None:
+    seed, clone = repository(tmp_path)
+    (clone / ".bazel_env").mkdir()
+    head = git(seed, "rev-parse", "HEAD")
+    path = worktree.create(
+        clone,
+        "review-tools",
+        run_request(profile="review", commit=head),
+        ("example-org/example-repo",),
+    )
+    assert not (path / ".bazel_env").exists(follow_symlinks=False)
+
+
+def test_existing_hook_tools_entry_fails_preparation(tmp_path: Path) -> None:
+    seed, clone = repository(tmp_path)
+    (seed / ".bazel_env").write_text("tracked\n")
+    commit(seed, "track it")
+    git(seed, "push", "origin", "main")
+    (clone / ".bazel_env").mkdir()
+    with pytest.raises(Invalid, match="run preparation failed at hook tools"):
+        worktree.create(clone, "clash", run_request(), ("example-org/example-repo",))

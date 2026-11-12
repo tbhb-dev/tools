@@ -51,6 +51,7 @@ recurse = false
 url = {url}
 """
 CHECKOUT_SCAN_DEPTH = 3
+HOOK_TOOLS = ".bazel_env"
 
 
 def git(clone: Path, *args: str) -> str:
@@ -315,6 +316,18 @@ def prepare_git(workspace: Path) -> None:
             raise Invalid(message)
 
 
+def link_hook_tools(clone: Path, workspace: Path) -> None:
+    """Link the clone's built `.bazel_env` into the run's worktree.
+
+    The commit hooks call `.bazel_env/bin` relative to the worktree, and the
+    directory is gitignored, so a fresh worktree has none. A clone without one
+    leaves the worktree as it is, and preflight reports the missing directory.
+    """
+    source = clone / HOOK_TOOLS
+    if source.is_dir():
+        (workspace / HOOK_TOOLS).symlink_to(source.resolve())
+
+
 @contextmanager
 def preparation_step(step: str) -> Generator[None]:
     try:
@@ -369,4 +382,7 @@ def create(
             install_hooks(worktree)
         with preparation_step("git metadata"):
             prepare_git(worktree)
+        if request.profile is Profile.BUILD:
+            with preparation_step("hook tools"):
+                link_hook_tools(clone, worktree)
     return worktree
