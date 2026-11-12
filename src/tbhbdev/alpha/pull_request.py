@@ -1152,6 +1152,7 @@ def rerun(number: int) -> int:
         why = " ".join((done.stderr or done.stdout).split())
         message = f"cannot read the head of PR {number}: {why}"
         raise SystemExit(message)
+    data = cast("dict[str, object]", data)  # pragma: no mutate
     runs = gh_json(
         [
             "run",
