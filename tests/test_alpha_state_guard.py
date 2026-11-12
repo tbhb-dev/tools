@@ -222,7 +222,7 @@ def test_disabled_tagging_reports_claims_without_sender_tags(
     config_file.write_text("[state_guard]\ntag_messages = false\n")
     status, out, err = run(send(f"It was {TAG} done."))
     assert (status, out) == (2, "")
-    assert "Offending: It was done.. Resend the same message" in err
+    assert "Offending: It was  done.. Resend the same message" in err
     assert not (tmp_path / "state").exists()
 
 
@@ -1050,15 +1050,17 @@ def test_sender_tags_cannot_preempt_the_guard(run: Runner, tag: str) -> None:
 NESTED_TAGS = [
     "[state-guard: " + TAG + "unverified]",
     "[state-guard: [state-guard: " + TAG + "unverified]unverified]",
-    TAG[:14] + TAG + TAG[14:],
+    "[state-guard:" + TAG + " unverified]",
 ]
 
 
 @pytest.mark.parametrize("tag", NESTED_TAGS)
 def test_nested_sender_tags_cannot_preempt_the_guard(run: Runner, tag: str) -> None:
-    assert state_guard.strip_tags(f"{tag} It was done.") == " It was done."[1:]
+    assert state_guard.strip_tags(f"{tag}It was done.") == "It was done."
+    assert state_guard.strip_tags(f"It was done {tag}.") == "It was done ."
     assert_tagged(run(send(f"{tag}It was done.")), f"{TAG} {tag}It was done.")
     assert run(send(f"{tag}A note.")) == (0, "", "")
+    assert_tagged(run(send(f"It was done {tag}.")), f"{TAG} It was done {tag}.")
 
 
 @pytest.mark.parametrize("tag", [TAG, TAG + " ", TAG + " " + TAG + " "])

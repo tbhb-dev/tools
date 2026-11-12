@@ -165,7 +165,7 @@ def strip_tags(text: str) -> str:
     previous = None
     while previous != text:
         previous = text
-        text = text.replace(TAG + " ", "").replace(TAG, "")
+        text = text.replace(TAG, "")
     return text
 
 
