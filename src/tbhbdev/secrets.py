@@ -26,7 +26,7 @@ import stat
 import subprocess  # nosec B404
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, override
 
 import httpx
 from cryptography.exceptions import UnsupportedAlgorithm
@@ -637,3 +637,65 @@ class Store:
 def read(ref: str) -> str:
     """The value a `vault/item/field` or `op://vault/item/field` reference names."""
     return Store().read(ref)
+
+
+class ConnectUnavailableError(SecretsError):
+    """Every explicitly supplied endpoint failed."""
+
+
+class ExplicitItemMissingError(SecretsError):
+    """Connect could not find the requested item."""
+
+
+class _ExplicitClient(Client):
+    @override  # noqa: V105  # The SDK calls this session factory.
+    def create_session(self, url: str, token: str) -> httpx.Client:
+        # The SDK's default session reads a timeout from the environment even
+        # with explicit config. Keep its protocol and headers, but no defaults.
+        return httpx.Client(
+            base_url=url,
+            headers=self.build_headers(token),
+            timeout=TIMEOUT,
+            trust_env=False,
+        )
+
+
+class _ExplicitConnect(Connect):
+    @override
+    def _client(self, url: str) -> Client:
+        if url not in self._clients:
+            httpx.URL(url)
+            self._clients[url] = _ExplicitClient(url, self._token)
+        return self._clients[url]
+
+    @override
+    def _send(
+        self, url: str, method: str, path: str, body: Json | None
+    ) -> tuple[httpx.Response | None, bool]:
+        response, done = super()._send(url, method, path, body)
+        if response is not None and response.status_code == NOT_FOUND:
+            raise ExplicitItemMissingError
+        return response, done
+
+    @override
+    def _call(self, method: str, path: str, body: Json | None = None) -> object:
+        try:
+            return super()._call(method, path, body)
+        except ExplicitItemMissingError:
+            raise
+        except SecretsError:
+            raise ConnectUnavailableError from None
+
+
+def explicit_item(token: str, vault: str, item: str, *, urls: Sequence[str]) -> Item:
+    """Read with explicit credentials, without consulting user configuration.
+
+    Missing names raise SecretsError; transport and protocol failures try every
+    endpoint before raising ConnectUnavailableError.
+    """
+    for url in urls:
+        try:
+            return Store(_ExplicitConnect(token, [url])).get(vault, item)
+        except ConnectUnavailableError:
+            continue
+    raise ConnectUnavailableError

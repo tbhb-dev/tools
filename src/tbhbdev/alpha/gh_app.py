@@ -103,6 +103,10 @@ class InstallationMissingError(GhAppError):
     """Neither the repository nor its owner has an installation."""
 
 
+class CachedInstallationMissingError(GhAppError):
+    """A supplied installation id returned 404."""
+
+
 class UsageError(Exception):
     """The command line is wrong."""
 
@@ -523,7 +527,15 @@ def find_installation(client: httpx.Client, repo: str) -> int | None:
     return None
 
 
-def exchange_token(env: Env, repository: str, jwt: str, body: Json) -> Minted:
+def exchange_token(  # noqa: PLR0913  # Optional installation cache seams.
+    env: Env,
+    repository: str,
+    jwt: str,
+    body: Json,
+    *,
+    known_installation: int | None = None,
+    installation_found: Callable[[int], None] | None = None,
+) -> Minted:
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -531,11 +543,19 @@ def exchange_token(env: Env, repository: str, jwt: str, body: Json) -> Minted:
     }
     try:
         with httpx.Client(
-            base_url=API, headers=headers, timeout=TIMEOUT, transport=env.transport
+            base_url=API,
+            headers=headers,
+            timeout=TIMEOUT,
+            transport=env.transport,
+            trust_env=False,
         ) as client:
-            ident = find_installation(client, repository)
+            ident = known_installation
+            if ident is None:
+                ident = find_installation(client, repository)
             if ident is None:
                 raise InstallationMissingError
+            if installation_found is not None:
+                installation_found(ident)
             reply = client.post(
                 f"/app/installations/{ident}/access_tokens",
                 json=body,
@@ -543,6 +563,8 @@ def exchange_token(env: Env, repository: str, jwt: str, body: Json) -> Minted:
     except httpx.HTTPError as exc:
         message = f"the GitHub request failed: {type(exc).__name__}"
         raise GhAppError(message) from None
+    if known_installation is not None and reply.status_code == httpx.codes.NOT_FOUND:
+        raise CachedInstallationMissingError
     return parse_token(json_object(reply))
 
 
@@ -557,13 +579,15 @@ def request_token(env: Env, args: Args, jwt: str) -> Minted:
         raise GhAppError(message) from None
 
 
-def mint_token(
+def mint_token(  # noqa: PLR0913  # Explicit credentials and installation cache.
     env: Env,
     *,
     app_id: str,
     pem: str,
     repository: str,
     permissions: Mapping[str, str],
+    known_installation: int | None = None,
+    installation_found: Callable[[int], None] | None = None,
 ) -> Minted:
     """Mint a token with explicit scope, keeping the key and token in memory.
 
@@ -593,7 +617,18 @@ def mint_token(
         "permissions": dict(permissions),
     }
     try:
-        return exchange_token(env, repository, jwt, body)
+        return exchange_token(
+            env,
+            repository,
+            jwt,
+            body,
+            known_installation=known_installation,
+            installation_found=installation_found,
+        )
+    except InstallationMissingError:
+        raise InstallationMissingError(MINT_FAILURE) from None
+    except CachedInstallationMissingError:
+        raise
     except GhAppError:
         # An API error may echo a credential in its message field.
         raise GhAppError(MINT_FAILURE) from None
