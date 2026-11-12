@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from agent_host_example import constant, host_settings, run_request
 
+from tbhbdev.alpha import private_names
 from tbhbdev.alpha.agent import credentials, host_tools, push, run_host, runfiles
 
 if TYPE_CHECKING:
@@ -35,6 +36,7 @@ def push_account(
         if source.name.lower() in ("head", "packed-refs"):
             assert source.name in ("HEAD", "packed-refs")
         expected = {
+            "private-repos.txt": (1024 * 1024, "private-name list"),
             "HEAD": (1024, "run HEAD"),
             "packed-refs": (1024 * 1024, "packed refs"),
         }
@@ -74,6 +76,11 @@ def local_run(
         tmp_path / "tmp",
         0,
         100,
+    )
+    names = run.home / ".local/state/tbhb/private-repos.txt"
+    names.parent.mkdir(parents=True)
+    names.write_text(
+        f"# names\n\n  example-hidden  \n{private_names.PATH_HEADER} example-docs\n"
     )
     prepared = run_host.Prepared(
         paths,
@@ -191,11 +198,16 @@ def test_skip(local_run: tuple[run_host.Run, run_host.Prepared, Path]) -> None:
     assert not run.files.path("branch").exists()
 
 
-def test_no_commit(local_run: tuple[run_host.Run, run_host.Prepared, Path]) -> None:
+@pytest.mark.parametrize("rc", [0, 9])
+def test_no_commit(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path], rc: int
+) -> None:
     run, prepared, target = local_run
     with ExitStack() as stack:
-        assert push.run(run, prepared, stack, constant(9), SYNTHETIC) == 9
+        assert push.run(run, prepared, stack, constant(rc), SYNTHETIC) == rc
     assert git(target, "for-each-ref") == ""
+    assert not run.files.path("head").exists()
+    assert not run.files.path("log").exists()
 
 
 def test_failure(
@@ -539,10 +551,10 @@ def test_push_preserves_harness_failure(
 
     with ExitStack() as stack:
         assert push.run(run, prepared, stack, failed_harness, SYNTHETIC) == 7
-    assert (
-        git(target, "rev-parse", "refs/heads/agent/example")
-        == run.files.path("head").read_text()
-    )
+    assert git(target, "for-each-ref") == ""
+    assert run.files.path("head").exists()
+    assert run.files.path("log").read_text() == "push skipped: harness exited 7\n"
+    assert not run.files.path("branch").exists()
 
 
 def test_feed_sends_one_line_and_closes() -> None:
@@ -553,3 +565,227 @@ def test_feed_sends_one_line_and_closes() -> None:
         assert os.read(read_fd, 4096) == b""
     finally:
         os.close(read_fd)
+
+
+@pytest.mark.parametrize("contents", [None, "", " \n# names\n  # more names\n"])
+def test_private_name_list_required(
+    contents: str | None,
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    run, prepared, target = local_run
+    source = run.home / ".local/state/tbhb/private-repos.txt"
+    if contents is None:
+        source.rename(source.with_suffix(".saved"))
+    else:
+        source.write_text(contents)
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
+    assert git(target, "for-each-ref") == ""
+    assert run.files.path("log").read_text() == (
+        f"push refused: no private-name list at {source}\n"
+    )
+    assert run.files.path("head").exists()
+    assert not run.files.path("branch").exists()
+
+
+@pytest.mark.parametrize(
+    "position",
+    [
+        "message",
+        "addition",
+        "path",
+        "uppercase-path",
+        "git-path",
+        "configured",
+        "split",
+    ],
+)
+def test_private_name_refuses_push(
+    position: str,
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, target = local_run
+    name = "example-hidden"
+    path = "tbhb-dev/example-docs"
+    flagged = name
+    if position == "path":
+        flagged = "example-docs"
+    elif position == "uppercase-path":
+        path, flagged = path.upper(), "EXAMPLE-DOCS"
+    elif position == "git-path":
+        path, flagged = "example-docs.git", "example-docs.git"
+    is_path = position.endswith("path")
+    if position == "configured":
+        name = "example-configured"
+        flagged = name
+        monkeypatch.setattr(push, "_configured", constant((name,)))
+
+    def named_harness(
+        actual: run_host.Run, paths: run_host.Prepared, stack: ExitStack
+    ) -> int:
+        workspace = Path(paths.paths.worktree)
+        if position in ("message", "configured"):
+            commit(workspace, name)
+        else:
+            source = workspace / (path if is_path else "example.txt")
+            source.parent.mkdir(parents=True, exist_ok=True)
+            if position == "addition":
+                text = name
+            elif position == "split":
+                text = 'value = (\n    "example-"\n    "hidden"\n)\n'
+            else:
+                text = "clean\n"
+            source.write_text(text)
+            git(workspace, "add", ".")
+            commit(workspace, "change")
+        assert isinstance(actual, run_host.Run)
+        assert isinstance(stack, ExitStack)
+        return 0
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, named_harness, SYNTHETIC) == 4
+    assert git(target, "for-each-ref") == ""
+    log = run.files.path("log").read_text()
+    assert log.startswith("push refused: ")
+    assert " private-name hit(s)\nline " in log
+    assert private_names.MESSAGE.format(flagged) in log
+    assert not run.files.path("branch").exists()
+
+
+def test_scan_isolates_git_and_checks_only_own_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def log(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert command[:1] == [host_tools.resolve("git")]
+        assert command[1:9] == [
+            part
+            for option in (
+                "core.hooksPath=/dev/null",
+                "core.fsmonitor=false",
+                "diff.external=",
+                "core.pager=cat",
+            )
+            for part in ("-c", option)
+        ]
+        assert command[9:12] == ["-C", str(tmp_path), "log"]
+        assert command[12:] == [
+            "--format=commit %H%n%B",
+            "-p",
+            "--no-ext-diff",
+            "--no-text" + "conv",
+            "base..head",
+        ]
+        assert kwargs == {
+            "cwd": tmp_path,
+            "env": {
+                "HOME": str(tmp_path),
+                "XDG_CACHE_HOME": str(tmp_path),
+                "XDG_CONFIG_HOME": str(tmp_path),
+                "XDG_DATA_HOME": str(tmp_path),
+                "XDG_STATE_HOME": str(tmp_path),
+                "GIT_ASKPASS": "/bin/false",
+                "PATH": host_tools.search(),
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.DEVNULL,
+            "text": True,
+            "errors": "replace",
+            "check": True,
+        }
+        return subprocess.CompletedProcess(command, 0, "clean\n")
+
+    monkeypatch.setattr(subprocess, "run", log)
+    push.scan(tmp_path, "base", "head", private_names.Names(["example-hidden"], set()))
+
+
+def test_scan_reports_every_hit_with_its_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    names = private_names.Names(["example-hidden"], {"example-docs"})
+    log = "clean\ntbhb-dev/example-docs\nexample-hidden\n"
+    monkeypatch.setattr(
+        subprocess, "run", constant(subprocess.CompletedProcess([], 0, log))
+    )
+    monkeypatch.setattr(push, "_configured", constant([]))
+    with pytest.raises(push.PushRefusedError) as caught:
+        push.scan(tmp_path, "base", "head", names)
+    assert str(caught.value) == (
+        "2 private-name hit(s)\n"
+        f"line 2: {private_names.MESSAGE.format('example-docs')}\n"
+        f"line 3: {private_names.MESSAGE.format('example-hidden')}"
+    )
+
+
+def test_scan_joins_adjacent_literals_and_reports_the_first_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    names = private_names.Names(["example-hidden"], {"example-docs"})
+    lines = [
+        "+x = (",
+        '+    "example-"',
+        '+    r"hidden"',
+        "+)",
+        "+y = (",
+        '+    "tbhb-dev/"',
+        '+    "example-docs"',
+        "+)",
+    ]
+    log = f"{chr(10).join(lines)}\n"
+    monkeypatch.setattr(
+        subprocess, "run", constant(subprocess.CompletedProcess([], 0, log))
+    )
+    monkeypatch.setattr(push, "_configured", constant([]))
+    with pytest.raises(push.PushRefusedError) as caught:
+        push.scan(tmp_path, "base", "head", names)
+    assert str(caught.value) == (
+        "2 private-name hit(s)\n"
+        f"line 2: {private_names.MESSAGE.format('example-hidden')}\n"
+        f"line 6: {private_names.MESSAGE.format('example-docs')}"
+    )
+
+
+def test_no_base_commit_refuses_push(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+    git(workspace, "checkout", "--detach")
+
+    def branch_harness(
+        actual: run_host.Run, paths: run_host.Prepared, stack: ExitStack
+    ) -> int:
+        git(workspace, "checkout", "agent/example")
+        return harness(actual, paths, stack)
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, branch_harness, SYNTHETIC) == 4
+    assert git(target, "for-each-ref") == ""
+    assert run.files.path("log").read_text() == "push refused: no base commit\n"
+    assert not run.files.path("branch").exists()
+
+
+def test_git_log_failure_refuses_push(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, target = local_run
+    original = cast("Callable[..., subprocess.CompletedProcess[str]]", subprocess.run)
+
+    def fail_log(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if "log" in command:
+            raise subprocess.CalledProcessError(1, command)
+        return original(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fail_log)
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
+    assert git(target, "for-each-ref") == ""
+    assert run.files.path("log").read_text() == "push refused: git log unavailable\n"
+    assert not run.files.path("branch").exists()
