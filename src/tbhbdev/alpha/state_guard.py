@@ -49,6 +49,7 @@ import re
 import shlex
 import stat
 import sys
+import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -221,15 +222,25 @@ def log_tagged(data: Json, tool_input: Json, sentences: list[str]) -> None:
 
 
 def tagging_enabled(data: Json) -> bool:
-    """True only for PreToolUse with `[state_guard] tag_messages = true`."""
+    """True only for PreToolUse with `[state_guard] tag_messages = true`.
+
+    The config opens without blocking and is judged by its descriptor, so a path
+    swapped for a named pipe after the check can't hang the hook.
+    """
     if data.get("hook_event_name") != "PreToolUse":
         return False
-    config = userconfig.path()
-    # stat never blocks, so a named pipe is rejected before any read opens it.
-    if config.exists() and not stat.S_ISREG(config.stat().st_mode):
-        message = f"{config} is not a regular file"
-        raise OSError(message)
-    settings = userconfig.optional_table("state_guard") or {}
+    try:
+        fd = os.open(userconfig.path(), os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
+    with os.fdopen(fd, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            message = "the config is not a regular file"
+            raise OSError(message)
+        settings = tomllib.load(source).get("state_guard", {})
+    if not isinstance(settings, dict):
+        message = "[state_guard] is not a table"
+        raise TypeError(message)
     return settings.get("tag_messages") is True
 
 
@@ -261,13 +272,13 @@ def send_message_reason(data: Json, tool_input: Json) -> str | None:
         return None
     try:
         output = tagged_input(data, tool_input, original)
+        if output is not None:
+            print(output)
+            sys.stdout.flush()
+            return None
     except Exception as exc:  # noqa: BLE001  # any failure here must keep the refusal
         print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
-        return claim_reason(bad)
-    if output is None:
-        return claim_reason(bad)
-    print(output)
-    return None
+    return claim_reason(bad)
 
 
 def without_heredocs(command: str) -> str:
@@ -545,11 +556,23 @@ def run(data: Json) -> int:
 
 
 def main() -> int:
-    """Read the payload on stdin and run it; never fail for a crash or bad config."""
+    """Read the payload on stdin and run it.
+
+    A crash or bad config allows the call, except that a SendMessage call fails
+    closed: any exception on that path, including writing the output, refuses it.
+    """
+    data: Json = {}
     try:
-        return run(read_hook_stdin())
+        data = read_hook_stdin()
+        return run(data)
     except userconfig.ConfigError as exc:
         print(f"state-guard: ignoring the config: {exc}", file=sys.stderr)
-    except Exception:  # noqa: BLE001  # fail open on any crash
+    except Exception as exc:  # noqa: BLE001  # fail open on any crash but SendMessage
+        if data.get("tool_name") == "SendMessage":
+            print(
+                f"state-guard: the guard failed, so this message was not sent: {exc!r}",
+                file=sys.stderr,
+            )
+            return 2
         return 0
     return 0

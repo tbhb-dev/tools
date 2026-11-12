@@ -7,8 +7,10 @@ import json
 import os
 import runpy
 import signal
+import sys
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from typing import override
 lazy from pathlib import Path
 
 import pytest
@@ -157,7 +159,33 @@ def test_a_crash_allows(run: Runner, monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError
 
     monkeypatch.setattr(state_guard, "run", boom)
-    assert run(send(UNSUPPORTED_CLAIM)) == (0, "", "")
+    assert run(bash("git status")) == (0, "", "")
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "unsupported_claims",
+        "tagging_enabled",
+        "tag_sentences",
+        "claim_reason",
+        "run",
+    ],
+)
+def test_a_crash_refuses_a_send_message(
+    config_file: Path, run: Runner, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    if stage == "claim_reason":
+        config_file.write_text("")  # tagging off, so the refusal text is built
+
+    def boom(*_args: object) -> object:
+        message = f"{stage} broke"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(state_guard, stage, boom)
+    status, out, err = run(send(UNSUPPORTED_CLAIM))
+    assert (status, out) == (2, "")
+    assert f"{stage} broke" in err
 
 
 @pytest.mark.usefixtures("_configured")
@@ -1156,6 +1184,33 @@ def test_a_config_that_cannot_be_read_refuses(
     status, out, err = run(send("It was done."))
     assert refused((status, out, err))
     assert "state-guard: ignoring the config:" in err
+
+
+def test_a_stdout_failure_keeps_the_refusal(
+    monkeypatch: pytest.MonkeyPatch, run: Runner
+) -> None:
+    class Broken(io.StringIO):
+        @override
+        def write(self, _text: str) -> int:
+            message = "stdout closed"
+            raise BrokenPipeError(message)
+
+    monkeypatch.setattr(sys, "stdout", Broken())
+    status, _, err = run(send("It was done."))
+    assert status == 2
+    assert "stdout closed" in err
+
+
+def test_a_config_swapped_for_a_pipe_after_the_open_cannot_hang(
+    config_file: Path, run: Runner
+) -> None:
+    config_file.unlink()
+    os.mkfifo(config_file)
+    reader = os.open(config_file, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        assert refused(run(send("It was done.")))
+    finally:
+        os.close(reader)
 
 
 def test_a_failure_while_tagging_keeps_the_refusal(
