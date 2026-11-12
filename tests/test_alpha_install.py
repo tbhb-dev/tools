@@ -764,7 +764,7 @@ def test_install_config_codex_trusts_its_hooks(
     assert install.install_config("codex", env, dry_run=False) == 0
     assert capsys.readouterr().out == (
         f"codex: wrote {codex / 'hooks.json'}\n"
-        f"codex: trusted 10 hooks in {codex / 'config.toml'}\n"
+        f"codex: trusted 11 hooks in {codex / 'config.toml'}\n"
     )
 
 
@@ -971,12 +971,13 @@ def test_install_config_codex_trusts_only_its_own_among_foreign_groups(
         "^apply_patch$",
         "^(Bash|shell)$",
         "apply_patch",
+        "^Bash$",
         "x",
         "^Bash$",
     ]
     assert [g["hooks"] for g in written] == [
         [THEIRS],
-        *(g["hooks"] for g in written[1:7]),
+        *(g["hooks"] for g in written[1:8]),
         [THEIRS, THEIRS],
         [THEIRS],
     ]
@@ -1038,7 +1039,7 @@ def test_install_config_codex_keeps_everything_else_in_config_toml(
     assert install.install_config("codex", env, dry_run=False) == 0
     backup = codex / "config.toml.tbhbdev-backup.T"
     assert capsys.readouterr().out.endswith(
-        f"codex: trusted 10 hooks in {config}; the old one is {backup}\n"
+        f"codex: trusted 11 hooks in {config}; the old one is {backup}\n"
     )
     assert backup.read_text() == FOREIGN_CONFIG
     assert stat.S_IMODE(config.stat().st_mode) == 0o644
@@ -1067,7 +1068,7 @@ def test_install_config_codex_twice_changes_nothing_the_second_time(
     assert install.install_config("codex", env, dry_run=False) == 0
     assert capsys.readouterr().out == (
         f"codex: {codex / 'hooks.json'} is up to date\n"
-        f"codex: 10 hooks already trusted in {config}\n"
+        f"codex: 11 hooks already trusted in {config}\n"
     )
     assert config.read_bytes() == first
     assert sorted(p.name for p in codex.iterdir()) == [
@@ -1093,7 +1094,7 @@ def test_install_config_codex_trusts_again_when_only_config_toml_was_lost(
     assert install.install_config("codex", env, dry_run=False) == 0
     assert capsys.readouterr().out == (
         f"codex: {codex / 'hooks.json'} is up to date\n"
-        f"codex: trusted 10 hooks in {codex / 'config.toml'}\n"
+        f"codex: trusted 11 hooks in {codex / 'config.toml'}\n"
     )
     assert trusted_in(codex / "config.toml") == our_trust(codex / "hooks.json")
 
@@ -1238,7 +1239,7 @@ def test_install_config_codex_dry_run_with_trust_up_to_date_prints_no_diff(
     assert install.install_config("codex", env, dry_run=True) == 0
     assert capsys.readouterr().out == (
         f"codex: {codex / 'hooks.json'} is up to date\n"
-        f"codex: 10 hooks already trusted in {codex / 'config.toml'}\n"
+        f"codex: 11 hooks already trusted in {codex / 'config.toml'}\n"
     )
 
 
@@ -3046,7 +3047,7 @@ def test_main_twice_trusts_every_codex_hook_and_sets_the_environment(
     }
     assert install.main(["--harness", "codex"], "p") == 0
     out = capsys.readouterr().out
-    assert f"codex: 10 hooks already trusted in {config}\n" in out
+    assert f"codex: 11 hooks already trusted in {config}\n" in out
     assert f"codex: {config} is up to date\n" in out
     assert "wrote" not in out
     assert config.read_bytes() == first
