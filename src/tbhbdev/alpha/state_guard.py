@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
-"""`tbhbdev alpha state-guard`: block status claims that carry no evidence.
+"""`tbhbdev alpha state-guard`: mark status claims that carry no evidence.
 
 A Claude Code hook for PreToolUse (Bash, SendMessage, Write and Edit), Stop and
 SessionStart. It reads the hook payload on stdin.
 
-- PreToolUse on SendMessage blocks a message that claims a status (done,
-  merged, deployed and so on) with no evidence, by exiting 2 with the reason on
-  stderr. On Bash it blocks a `git commit` that adds a Signed-off-by or
+- PreToolUse on SendMessage inserts `[state-guard: unverified]` before each
+  status sentence without evidence, emits updatedInput and logs each sentence.
+  Set `[state_guard] tag_messages = false` to restore refusal with exit 2.
+  Sender-written tags cannot replace the guard's own tag.
+  On Bash it blocks a `git commit` that adds a Signed-off-by or
   Co-authored-by trailer visible in its arguments, or the `-s` or `--signoff`
   flag. Heredoc and `-F` file message bodies pass this command check; the
   commit-msg identity check catches trailers there. Neither check needs the
@@ -39,18 +41,23 @@ allows the call: a broken hook must not stop the agent's work.
 """
 
 import json
+import os
 import re
 import shlex
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import cast
 lazy from collections.abc import Callable
 
 from tbhbdev import userconfig
+from tbhbdev.alpha.agent.runfiles import private_dir, state_home
 from tbhbdev.alpha.repo import read_hook_stdin
 
 type Json = dict[str, object]
 
 TABLE = "harness"
+TAG = "[state-guard: unverified]"
 CLAIM = re.compile(
     r"\b(?:is|are|was|were|now|already|has been|have been)\s+"
     r"(?:done|applied|merged|shipped|deployed|live|fixed|complete|completed|"
@@ -68,6 +75,10 @@ ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(?:'([^']*)'|\"([^\"]*)\"|([A-Za-z0-9_]+))")
 OPEN_ITEM = re.compile(r"(?m)^- \*\*.*$")
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n")
+SENTENCE_PARTS = re.compile(f"({SENTENCE_END.pattern})")
+SENTENCE_PREFIX = re.compile(
+    r"^\s*(?:(?:[-+*]|\d+[.)])\s+)?(?:\*\*[^*\n]+(?::\*\*|\*\*:)\s*)?"
+)
 SEPARATORS = frozenset("&|;\n(){}`")
 GIT_OPTIONS = frozenset(
     {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
@@ -122,6 +133,69 @@ def claim_reason(who: str, bad: list[str]) -> str:
         "attribute it ('the reviewer says ...'), or say it is unverified. Offending: "
         + " | ".join(bad[:MAX_LISTED])
     )
+
+
+def strip_tags(text: str) -> str:
+    """Ignore sender-written tags when judging claims, preserving emitted text."""
+    return text.replace(TAG + " ", "").replace(TAG, "")
+
+
+def tag_sentences(text: str) -> tuple[str, list[str]]:
+    """Tag unsupported sentences while preserving their full text and separators."""
+    parts = SENTENCE_PARTS.split(text)
+    sentences: list[str] = []
+    for index, chunk in enumerate(parts):
+        if unsupported_claims(strip_tags(chunk)):
+            parts[index] = SENTENCE_PREFIX.sub(r"\g<0>" + TAG + " ", chunk)
+            sentences.append(chunk.strip())
+    return "".join(parts), sentences
+
+
+def log_tagged(data: Json, tool_input: Json, sentences: list[str]) -> None:
+    """Append private audit records; a logging failure must still send the message."""
+    try:
+        directory = private_dir(state_home(Path.home()) / "tbhbdev" / "state-guard")
+        fd = os.open(
+            directory / "tagged.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+        )
+        with os.fdopen(fd, "ab") as out:
+            os.fchmod(out.fileno(), 0o600)
+            for sentence in sentences:
+                record: Json = {
+                    "time": datetime.now(UTC).isoformat(),
+                    "session_id": data.get("session_id"),
+                    "rule": next(CLAIM.finditer(strip_tags(sentence))).group(),
+                    "sentence": sentence,
+                }
+                if "to" in tool_input:
+                    record["recipient"] = tool_input["to"]
+                out.write((json.dumps(record) + "\n").encode())
+    except Exception as exc:  # noqa: BLE001  # audit failures must not drop a message
+        print(f"state-guard: could not log tagged sentences: {exc!r}", file=sys.stderr)
+
+
+def send_message_reason(data: Json, tool_input: Json) -> str | None:
+    """Rewrite a peer message, or return the legacy refusal when tagging is off."""
+    original = str(tool_input.get("message", ""))
+    bad = unsupported_claims(strip_tags(original))
+    if not bad:
+        return None
+    settings = userconfig.optional_table("state_guard") or {}
+    if settings.get("tag_messages") is False:
+        return claim_reason("this message", bad)
+    text, sentences = tag_sentences(original)
+    log_tagged(data, tool_input, sentences)
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "updatedInput": {**tool_input, "message": text},
+                }
+            }
+        )
+    )
+    return None
 
 
 def without_heredocs(command: str) -> str:
@@ -327,8 +401,9 @@ def pre_tool_reason(data: Json) -> str | None:
     if tool == "Bash":
         return commit_trailer_reason(str(tool_input.get("command", "")))
     if tool == "SendMessage":
-        bad = unsupported_claims(str(tool_input.get("message", "")))
-        return claim_reason("this message", bad) if bad else None
+        if data.get("hook_event_name") == "PreToolUse":
+            return send_message_reason(data, tool_input)
+        return None
     if tool in {"Write", "Edit"}:
         return open_note_reason(str(tool), tool_input)
     return None
@@ -375,7 +450,7 @@ def stop_reason(data: Json) -> str | None:
     message = data.get("last_assistant_message")
     if not message:
         message = last_assistant_text(str(data.get("transcript_path", "")))
-    bad = unsupported_claims(str(message))
+    bad = unsupported_claims(strip_tags(str(message)))
     return claim_reason("your reply", bad) if bad else None
 
 
