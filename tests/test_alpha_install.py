@@ -232,7 +232,9 @@ def test_claude_hooks() -> None:
             {"matcher": "Bash|SendMessage|Write|Edit", "hooks": [guard]},
             {
                 "matcher": "Bash",
-                "hooks": [{"type": "command", "command": marked("guard-gh-config-dir")}],
+                "hooks": [
+                    {"type": "command", "command": marked("guard-gh-config-dir")}
+                ],
             },
         ],
         "Stop": [{"hooks": [guard]}],
