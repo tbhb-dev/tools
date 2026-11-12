@@ -23,6 +23,7 @@ from agent_example import (
     settings,
     trusted_executables,
 )
+from agent_host_example import run_request
 
 from tbhbdev.alpha.agent import model
 from tbhbdev.alpha.agent.decisions import argv, policy
@@ -45,11 +46,18 @@ COMMIT = "0123456789abcdef0123456789abcdef01234567"
 COMBINATIONS = list(itertools.product(Harness, RunKind, Profile))
 IDS = [f"{h.value}-{k.value}-{p.value}" for h, k, p in COMBINATIONS]
 
+CREDENTIALS = (
+    ".git-credentials",
+    ".netrc",
+    ".ssh",
+    ".config/gh",  # gitleaks:allow
+)
 DENY_LINUX = (
     f"{HOME}/{TOKEN_DIR}",
     *LINUX_SOCKET_DENIES,
     "/tmp/example-sockets",
     f"{HOME}/{DENIED}",
+    *(f"{HOME}/{p}" for p in CREDENTIALS),
 )
 HANDOFF = (
     "-c",
@@ -89,7 +97,8 @@ CODEX_BUILD_FS = (
     f'"{WORKTREE}/.git/config.worktree" = "read", '
     f'"{WORKTREE}/.git/commondir" = "read", '
     f'"{WORKTREE}/.git/hooks" = "read", '
-    f'"{WORKTREE}/.git/info" = "read", "{WORKTREE}/.git/modules" = "read", '
+    f'"{WORKTREE}/.git/info" = "read", "{WORKTREE}/.git/objects/info" = "read", '
+    f'"{WORKTREE}/.git/modules" = "read", '
     f'"{TMP}" = "write", '
     f'"{HOME}/.cache" = "write", "{HOME}/.local/share/mise" = "write", '
     f'"{HOME}/.local/state" = "write", '
@@ -97,7 +106,11 @@ CODEX_BUILD_FS = (
     '"/run/WSL" = "none", "/var/run/docker.sock" = "none", '
     '"/run/docker.sock" = "none", "/run/user/0" = "none", '
     '"/tmp/example-sockets" = "none", '
-    f'"{HOME}/{DENIED}" = "none"}}, network = {{enabled = true}}}}'
+    f'"{HOME}/{DENIED}" = "none", '
+    f'"{HOME}/.git-credentials" = "none", '
+    f'"{HOME}/.netrc" = "none", '
+    f'"{HOME}/.ssh" = "none", '  # gitleaks:allow
+    f'"{HOME}/.config/gh" = "none"}}, network = {{enabled = true}}}}'  # gitleaks:allow
 )
 CODEX_REVIEW_FS = (
     '{filesystem = {":root" = "read", '
@@ -106,7 +119,11 @@ CODEX_REVIEW_FS = (
     '"/run/WSL" = "none", "/var/run/docker.sock" = "none", '
     '"/run/docker.sock" = "none", "/run/user/0" = "none", '
     '"/tmp/example-sockets" = "none", '
-    f'"{HOME}/{DENIED}" = "none"}}, network = {{enabled = true}}}}'
+    f'"{HOME}/{DENIED}" = "none", '
+    f'"{HOME}/.git-credentials" = "none", '
+    f'"{HOME}/.netrc" = "none", '
+    f'"{HOME}/.ssh" = "none", '  # gitleaks:allow
+    f'"{HOME}/.config/gh" = "none"}}, network = {{enabled = true}}}}'  # gitleaks:allow
 )
 MODEL = ("-m", "example-model-1", "-c", 'model_reasoning_effort="high"')
 
@@ -299,6 +316,7 @@ def test_macos_codex_denies_the_private_alias_too() -> None:
         "/tmp/example-sockets",
         "/private/tmp/example-sockets",
         f"{HOME}/{DENIED}",
+        *(f"{HOME}/{p}" for p in CREDENTIALS),
     ]
 
 
@@ -419,6 +437,7 @@ def test_codex_tables_have_no_repeated_paths(os: Os, profile: Profile) -> None:
             f"{HOME}/{TOKEN_DIR}",
             *LINUX_SOCKET_DENIES,
             f"{HOME}/{DENIED}",
+            *(f"{HOME}/{p}" for p in CREDENTIALS),
         ]
         if os is Os.LINUX
         else [
@@ -426,6 +445,7 @@ def test_codex_tables_have_no_repeated_paths(os: Os, profile: Profile) -> None:
             f"{HOME}/Library/Keychains/tbhbdev.keychain",
             f"{HOME}/{DENIED}",
             f"{HOME}/{TOKEN_DIR}",
+            *(f"{HOME}/{p}" for p in CREDENTIALS),
         ]
     )
     assert [p for p, mode in fs.items() if mode == "none"] == deny
@@ -791,3 +811,144 @@ def test_harness_output_options_belong_to_run_host() -> None:
     parameters = inspect.signature(argv.harness).parameters
     assert "output_file" not in parameters
     assert {"schema_file", "schema_text"} <= parameters.keys()
+
+
+@pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize("profile", Profile)
+def test_codex_without_github_reference_has_private_config(
+    kind: RunKind, profile: Profile
+) -> None:
+    original = settings()
+    config = dataclasses.replace(
+        original,
+        credentials=tuple(
+            dataclasses.replace(c, gh=None) for c in original.credentials
+        ),
+    )
+    command = built(Harness.CODEX, kind, profile, config=config)
+    assert command == expected(Harness.CODEX, kind, profile)
+    overrides = "\n".join(
+        value for flag, value in itertools.pairwise(command) if flag == "-c"
+    )
+    env = tomllib.loads(overrides)["shell_environment_policy"]["set"]
+    assert env["GH_CONFIG_DIR"] == f"{env['TMPDIR']}/gh"
+
+
+@pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize("profile", Profile)
+def test_sandbox_command_keeps_the_harness_overrides(
+    kind: RunKind, profile: Profile
+) -> None:
+    value = policy.build(
+        settings(),
+        LINUX,
+        harness=Harness.CODEX,
+        profile=profile,
+        account="agent",
+        paths=paths("agent"),
+        unsandboxed=False,
+    )
+    command = argv.harness(
+        dataclasses.replace(run_request(kind=kind.value), profile=profile),
+        value,
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+    )
+    expected = tuple(
+        word
+        for index, word in enumerate(command)
+        if word == "-c"
+        or command[index - 1] == "-c"
+        or word == "-C"
+        or command[index - 1] == "-C"
+    )
+    assert argv.sandbox(command, "/usr/bin/true") == (
+        "codex",
+        "sandbox",
+        *expected,
+        "-P",
+        profile.value,
+        "--",
+        "/usr/bin/true",
+    )
+
+
+@pytest.mark.parametrize("option", ["-c", "--config"])
+@pytest.mark.parametrize("profile", ["build", 'quoted "profile"\\name\n', ""])
+def test_sandbox_command_names_the_default_permissions(
+    option: str, profile: str
+) -> None:
+    setting = f"default_permissions={json.dumps(profile)}"
+    assert argv.sandbox(("codex", "exec", option, setting, "-"), "true") == (
+        "codex",
+        "sandbox",
+        option,
+        setting,
+        "-P",
+        profile,
+        "--",
+        "true",
+    )
+
+
+@pytest.mark.parametrize("option", ["-P", "--permission-profile"])
+@pytest.mark.parametrize("before", [False, True])
+def test_sandbox_command_keeps_an_explicit_permission_profile(
+    option: str, *, before: bool
+) -> None:
+    config = ("-c", 'default_permissions="build"')
+    explicit = (option, "review")
+    options = (*explicit, *config) if before else (*config, *explicit)
+    assert argv.sandbox(("codex", *options, "-"), "true") == (
+        "codex",
+        "sandbox",
+        *options,
+        "--",
+        "true",
+    )
+
+
+def test_sandbox_command_without_default_permissions_adds_no_profile() -> None:
+    options = ("-c", 'other.default_permissions="build"', "--profile", "build")
+    assert argv.sandbox(("codex", *options, "-"), "true") == (
+        "codex",
+        "sandbox",
+        *options,
+        "--",
+        "true",
+    )
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "-P",
+        "--permission-profile",
+        "-p",
+        "--profile",
+        "-C",
+        "--cd",
+        "-c",
+        "--config",
+        "--enable",
+        "--disable",
+    ],
+)
+def test_sandbox_command_passes_supported_options(option: str) -> None:
+    assert argv.sandbox(
+        ("/tools/codex", "exec", option, "value", "-"), "/tools/true"
+    ) == ("/tools/codex", "sandbox", option, "value", "--", "/tools/true")
+
+
+@pytest.mark.parametrize("option", ["-s", "--sandbox"])
+def test_sandbox_command_expresses_legacy_mode_as_config(option: str) -> None:
+    assert argv.sandbox(
+        ("codex", option, "danger-full-access", "brief"), "/bin/true"
+    ) == (
+        "codex",
+        "sandbox",
+        "-c",
+        'sandbox_mode="danger-full-access"',
+        "--",
+        "/bin/true",
+    )

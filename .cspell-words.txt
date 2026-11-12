@@ -138,6 +138,9 @@ pgid
 PGDATABASE
 PGHOST
 PGPORT
+decompressobj
+objectname
+objecttype
 pgrep
 PGUSER
 pidinfo
@@ -218,6 +221,7 @@ unmatch
 unmutated
 unpushed
 unsandboxed
+unscanned
 unsets
 unstampable
 unvalidated
@@ -226,6 +230,7 @@ usefixtures
 userconfig
 usermod
 waitpid
+wbits
 wnohang
 worktrees
 writeattr

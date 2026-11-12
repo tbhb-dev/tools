@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
-from pathlib import PurePosixPath
-from typing import TYPE_CHECKING
+import shutil
+import subprocess
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -53,6 +55,9 @@ PATH = {
 }
 
 
+GIT = shutil.which("git") or "git"
+
+
 def made(  # noqa: PLR0913 -- one value per fact the policy depends on
     os: Os,
     profile: Profile,
@@ -93,6 +98,14 @@ def dig(node: object, *keys: str) -> object:
     return node
 
 
+CREDENTIAL_PATHS = (
+    ".git-credentials",
+    ".netrc",
+    ".ssh",
+    ".config/gh",
+)  # gitleaks:allow
+
+
 def denied(os: Os, home: str) -> tuple[str, ...]:
     """The literal deny list: the token store, the sockets, a denied path."""
     if os is Os.LINUX:
@@ -101,12 +114,14 @@ def denied(os: Os, home: str) -> tuple[str, ...]:
             *LINUX_SOCKET_DENIES,
             "/tmp/example-sockets",
             f"{home}/{DENIED}",
+            *(f"{home}/{p}" for p in CREDENTIAL_PATHS),
         )
     return (
         *(f"{home}/{p}" for p in MACOS_TOKEN_PATHS),
         "/tmp/example-sockets",
         "/private/tmp/example-sockets",
         f"{home}/{DENIED}",
+        *(f"{home}/{p}" for p in CREDENTIAL_PATHS),
     )
 
 
@@ -126,7 +141,7 @@ def env_of(os: Os, harness: Harness, account: str) -> dict[str, str]:
         "DOCKER_CONFIG": f"{tmp}/docker",
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_COUNT": "8",
+        "GIT_CONFIG_COUNT": "9",
         "GIT_CONFIG_KEY_0": "core.fsmonitor",
         "GIT_CONFIG_VALUE_0": "false",
         "GIT_CONFIG_KEY_1": "core.hooksPath",
@@ -143,6 +158,8 @@ def env_of(os: Os, harness: Harness, account: str) -> dict[str, str]:
         "GIT_CONFIG_VALUE_6": "",
         "GIT_CONFIG_KEY_7": "safe.bareRepository",
         "GIT_CONFIG_VALUE_7": "explicit",
+        "GIT_CONFIG_KEY_8": "credential.helper",
+        "GIT_CONFIG_VALUE_8": "",
     }
     if harness is Harness.CODEX:
         env["CODEX_HOME"] = f"{tmp}/codex"
@@ -212,6 +229,7 @@ def assert_claude_denials(
                 "commondir",
                 "hooks",
                 "info",
+                "objects/info",
                 "modules",
             )
         ),
@@ -237,6 +255,7 @@ def assert_claude_denials(
             "commondir",
             "hooks",
             "info",
+            "objects/info",
             "modules",
         )
         for suffix in ("", "/**")
@@ -274,6 +293,7 @@ def codex_expected(
                     "commondir",
                     "hooks",
                     "info",
+                    "objects/info",
                     "modules",
                 )
             ),
@@ -460,6 +480,7 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
                 "commondir",
                 "hooks",
                 "info",
+                "objects/info",
                 "modules",
             )
         ],
@@ -614,7 +635,7 @@ def test_denied_paths_keep_the_first_occurrence(os: Os, profile: Profile) -> Non
             f"{home}/{DENIED}",
             f"{home}/{TOKEN_DIR}",
         )
-    )
+    ) + tuple(f"{home}/{p}" for p in CREDENTIAL_PATHS)
     assert result.deny == expected
     assert isinstance(result.detail, model.CodexPolicy)
     assert result.detail.deny == expected
@@ -737,6 +758,7 @@ def test_the_sockets_directory_is_denied_with_its_aliases(
         ),
         *expected,
         f"{home}/{DENIED}",
+        *(f"{home}/{p}" for p in CREDENTIAL_PATHS),
     )
 
 
@@ -758,6 +780,7 @@ def test_denied_home_paths_each_resolve_against_the_home() -> None:
         f"{home}/.local/state/x",
         "/tmp/y",
         "/private/tmp/y",
+        *(f"{home}/{p}" for p in CREDENTIAL_PATHS),
     )
 
 
@@ -893,6 +916,7 @@ def test_claude_review_denies_writes_to_the_git_common_directory(
             "commondir",
             "hooks",
             "info",
+            "objects/info",
             "modules",
         )
     )
@@ -1026,6 +1050,59 @@ def test_configured_write_roots_cannot_reach_denied_paths(
         else f"policy write path {shown} overlaps the denied path {denied_path}"
     )
     assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("os", Os)
+@pytest.mark.parametrize("entry", CREDENTIAL_PATHS)
+def test_a_write_root_cannot_reach_a_credential_store(
+    os: Os, harness: Harness, entry: str
+) -> None:
+    sandbox = dataclasses.replace(SANDBOX, write_roots=(entry,))
+    with pytest.raises(Invalid) as caught:
+        made(os, Profile.BUILD, harness, "agent", config=settings(sandbox=sandbox))
+    path = f"/example/home/agent/{entry}"
+    assert str(caught.value) == (
+        f"policy write path {path} overlaps the denied path {path}"
+    )
+
+
+def _credential_fill(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [GIT, "credential", "fill"],
+        input="protocol=https\nhost=example.invalid\n\n",
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+
+def test_git_credential_fill_returns_nothing_under_the_run_environment(
+    tmp_path: Path,
+) -> None:
+    """A stored credential in the home gets no answer from git in the run."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".git-credentials").write_text(
+        "https://user:synthetic-secret@example.invalid\n"
+    )
+    (home / ".gitconfig").write_text("[credential]\n\thelper = store\n")
+    run_env = made(Os.MACOS, Profile.BUILD, Harness.CODEX, "agent").env
+    base = {
+        "PATH": str(Path(GIT).parent),
+        "HOME": str(home),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    guarded = {
+        **base,
+        **{k: v for k, v in run_env.items() if k.startswith("GIT_CONFIG_")},
+    }
+    assert "synthetic-secret" in _credential_fill(base).stdout
+    result = _credential_fill(guarded)
+    assert "synthetic-secret" not in result.stdout
+    assert result.returncode != 0
 
 
 @pytest.mark.parametrize("harness", Harness)
@@ -1380,6 +1457,7 @@ def test_codex_protects_git_configuration_inside_build_write_root(
                     "commondir",
                     "hooks",
                     "info",
+                    "objects/info",
                     "modules",
                 )
             ),
@@ -1533,10 +1611,10 @@ def test_harness_parent_neutralizes_all_repository_git_config(
 ) -> None:
     result = made(os_name, Profile.BUILD, harness, "agent")
     assert result.env["GIT_CONFIG_NOSYSTEM"] == "1"
-    assert result.env["GIT_CONFIG_COUNT"] == "8"
+    assert result.env["GIT_CONFIG_COUNT"] == "9"
     assert {
         result.env[f"GIT_CONFIG_KEY_{i}"]: result.env[f"GIT_CONFIG_VALUE_{i}"]
-        for i in range(8)
+        for i in range(9)
     } == {
         "core.fsmonitor": "false",
         "core.hooksPath": "/dev/null",
@@ -1546,6 +1624,7 @@ def test_harness_parent_neutralizes_all_repository_git_config(
         "protocol.file.allow": "never",
         "diff.external": "",
         "safe.bareRepository": "explicit",
+        "credential.helper": "",
     }
 
 
@@ -1560,6 +1639,7 @@ def test_git_entry_and_all_configuration_paths_are_protected() -> None:
             "/commondir",
             "/hooks",
             "/info",
+            "/objects/info",
             "/modules",
         )
     )
@@ -1679,3 +1759,68 @@ def test_hooks_directory_refuses_extra_write_grants(field: str, suffix: str) -> 
         )
     with pytest.raises(Invalid, match="hooks"):
         policy.protect_host(configured, run, ())
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("configured", [False, True])
+def test_github_config_always_uses_private_directory(
+    harness: Harness,
+    profile: Profile,
+    configured: bool,
+) -> None:
+    original = settings()
+    config = dataclasses.replace(
+        original,
+        credentials=tuple(
+            dataclasses.replace(c, gh=c.gh if configured else None)
+            for c in original.credentials
+        ),
+    )
+    result = made(Os.LINUX, profile, harness, "agent", config=config)
+    gh = f"{paths('agent').tmpdir}/gh"
+    assert result.env["GH_CONFIG_DIR"] == gh
+    if harness is Harness.CLAUDE:
+        claude_env = dig(claude_settings_of(result), "env")
+        assert isinstance(claude_env, dict)
+        assert claude_env["GH_CONFIG_DIR"] == gh
+    if isinstance(result.detail, model.AgyPolicy):
+        assert f"read_file({gh})" in result.detail.grants
+
+
+@pytest.mark.parametrize("os", Os)
+def test_signing_file_is_denied_with_aliases(os: Os) -> None:
+    original = settings()
+    config = dataclasses.replace(
+        original,
+        credentials=tuple(
+            dataclasses.replace(c, signing="/tmp/example-key")
+            for c in original.credentials
+        ),
+    )
+    denied = policy.denied_paths(config, HOSTS[os], paths("agent").home, 123)
+    assert "/tmp/example-key" in denied
+    assert ("/private/tmp/example-key" in denied) is (os is Os.MACOS)
+
+
+@pytest.mark.parametrize("profile", Profile)
+def test_review_environment_profile_contract(profile: Profile) -> None:
+    run = paths("agent")
+    expected = (
+        {"GH_CONFIG_DIR": f"{run.tmpdir}/gh"} if profile is Profile.REVIEW else {}
+    )
+    assert policy.review_environment(profile, run) == expected
+
+
+@pytest.mark.parametrize("value", [None])
+def test_review_environment_refuses_missing_profile(value: object) -> None:
+    with pytest.raises(Invalid) as caught:
+        policy.review_environment(cast("Profile", value), paths("agent"))
+    assert str(caught.value) == "profile must be an agent profile"
+
+
+@pytest.mark.parametrize("value", [None])
+def test_policy_refuses_missing_profile(value: object) -> None:
+    with pytest.raises(Invalid) as caught:
+        made(Os.LINUX, cast("Profile", value), Harness.CODEX, "agent")
+    assert str(caught.value) == "profile must be an agent profile"

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess  # nosec B404
 import time
 from dataclasses import dataclass, field
@@ -81,9 +83,13 @@ def installation_token(references: Credentials, repository: str) -> str:
     return gh_app.request_token(env, args, jwt).token
 
 
-def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
+def deliver(
+    request: RunRequest, settings: Settings, tmpdir: Path, *, github: bool = True
+) -> Delivery:
     references = next(c for c in settings.credentials if c.account == request.account)
-    if request.profile is Profile.REVIEW:
+    if not github:
+        gh_token = None
+    elif request.profile is Profile.REVIEW:
         try:
             gh_token = installation_token(references, request.repo)
         except (
@@ -98,13 +104,14 @@ def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
             message = "reviews App token unavailable; review refused"
             raise Invalid(message) from None
     else:
-        gh_token = read(references.gh, label="gh")
-    gh = runfiles.private_dir(tmpdir / "gh")
-    host = repo.parts(request.repo)[0]
-    runfiles.atomic(
-        gh / "hosts.yml",
-        yaml.safe_dump({host: {"oauth_token": gh_token, "git_protocol": "https"}}),
-    )
+        gh_token = read(references.gh, label="gh") if references.gh else None
+    if gh_token is not None:
+        gh = runfiles.private_dir(tmpdir / "gh")
+        host = repo.parts(request.repo)[0]
+        runfiles.atomic(
+            gh / "hosts.yml",
+            yaml.safe_dump({host: {"oauth_token": gh_token, "git_protocol": "https"}}),
+        )
     docker = runfiles.private_dir(tmpdir / "docker")
     docker_text = (
         read(references.docker, label="docker") if references.docker else '{"auths":{}}'
@@ -124,11 +131,34 @@ def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
             profile.token, label=f"claude profile {profile.name}"
         )
     signing = (
-        read(references.signing, label="signing")
-        if request.profile is Profile.BUILD
-        else None
+        signing_key(references.signing) if request.profile is Profile.BUILD else None
     )
     return Delivery(env, signing, gh_fallback=False, claude_profile=profile_name)
+
+
+def signing_key(source: str) -> str:
+    if not source.startswith("/"):
+        return read(source, label="signing")
+    limit = 64 * 1024
+    try:
+        fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as incoming:
+            metadata = os.fstat(incoming.fileno())
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o077
+            ):
+                message = "signing key file must be an owned private regular file"
+                raise Invalid(message)
+            data = incoming.read(limit + 1)
+            if len(data) > limit:
+                message = "signing key file exceeds 64 KiB"
+                raise Invalid(message)
+        return data.decode()
+    except OSError, UnicodeError:
+        message = "signing key file cannot be read"
+        raise Invalid(message) from None
 
 
 def signing_agent(key: str, tmpdir: Path, deadline: float) -> subprocess.Popen[str]:

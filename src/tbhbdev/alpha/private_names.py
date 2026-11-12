@@ -98,6 +98,14 @@ def _host_names() -> Names:
         lines = path.read_text().splitlines()
     except OSError, UnicodeDecodeError:
         raise NameListError(message) from None
+    names = parse_list(lines)
+    if not names.private:
+        raise NameListError(message)
+    return names
+
+
+def parse_list(lines: Sequence[str]) -> Names:
+    """Split host-list lines into private names and path-only words."""
     names: list[str] = []
     path_only: set[str] = set()
     for raw in lines:
@@ -106,9 +114,38 @@ def _host_names() -> Names:
             path_only.update(line.removeprefix(PATH_HEADER).lower().split())
         elif line and not line.startswith("#"):
             names.append(line)
-    if not names:
-        raise NameListError(message)
     return Names(names, path_only)
+
+
+LITERAL_END = re.compile(r"""["']\s*[,+]?\s*$""")
+LITERAL_START = re.compile(r"""^\+\s*[rbfRBF]{0,2}["']""")
+
+
+def joined_literals(lines: Sequence[str]) -> list[tuple[int, str]]:
+    """Merge added lines whose adjacent string literals concatenate.
+
+    Each entry is the line number of the first line and the merged text, so a
+    name split across literals shows up whole. Only added diff lines merge.
+    """
+    merged: list[tuple[int, str]] = []
+    current: tuple[int, str] | None = None
+    for number, line in enumerate(lines, 1):
+        if (
+            current is not None
+            and current[1].startswith("+")
+            and LITERAL_START.match(line)
+            and LITERAL_END.search(current[1])
+        ):
+            head = LITERAL_END.sub("", current[1])
+            tail = LITERAL_START.sub("", line)
+            current = (current[0], head + tail)
+        else:
+            if current is not None and current[1] != lines[current[0] - 1]:
+                merged.append(current)
+            current = (number, line)
+    if current is not None and current[1] != lines[current[0] - 1]:
+        merged.append(current)
+    return merged
 
 
 def _configured() -> list[str]:

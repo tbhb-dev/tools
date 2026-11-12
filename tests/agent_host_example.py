@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 from agent_example import settings
 from test_alpha_agent_request import BUILD
 
-from tbhbdev.alpha.agent import host_tools, model
+from tbhbdev.alpha.agent import host_tools, model, worktree
 from tbhbdev.alpha.agent.decisions import request
 
 
@@ -100,6 +100,17 @@ def run_request(**changes: object) -> model.RunRequest:
     return request.parse(BUILD | changes, host_allows_unsandboxed=True)
 
 
+def local_mirror_fetches(monkeypatch: pytest.MonkeyPatch, origin: Path) -> None:
+    original = worktree.git
+
+    def git(path: Path, *args: str) -> str:
+        if path.name == "example-repo.git" and args[0] in ("fetch", "ls-remote"):
+            args = tuple(str(origin) if value == "origin" else value for value in args)
+        return original(path, *args)
+
+    monkeypatch.setattr(worktree, "git", git)
+
+
 def host_settings() -> model.Settings:
     original = settings()
     references = model.Credentials(
@@ -114,6 +125,7 @@ def host_settings() -> model.Settings:
     return dataclasses.replace(
         original,
         credentials=(references,),
+        public_repos=("example-org/example-repo",),
         sandbox=dataclasses.replace(
             original.sandbox,
             write_roots=(".cache", ".local/share/mise", ".local/state/mise"),
@@ -130,6 +142,17 @@ def constant[Result](value: Result) -> Callable[..., Result]:
         return value
 
     return fixed
+
+
+def preparation_failure(
+    error: type[Exception], *_args: object, **_kwargs: object
+) -> None:
+    if error is subprocess.CalledProcessError:
+        raise subprocess.CalledProcessError(
+            1, "sensitive-command", stderr="sensitive-stderr"
+        )
+    message = "sensitive-exception"
+    raise error(message)
 
 
 def bounded_file_reads(monkeypatch: pytest.MonkeyPatch, size: int) -> None:

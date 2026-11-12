@@ -8,8 +8,10 @@ import re
 import shlex
 import stat
 import subprocess  # nosec B404
+from contextlib import ExitStack, contextmanager
 from functools import partial
 from pathlib import Path
+lazy from collections.abc import Generator
 
 from tbhbdev.alpha import install
 from tbhbdev.alpha.agent import host_tools, runfiles
@@ -50,14 +52,11 @@ recurse = false
 url = {url}
 """
 CHECKOUT_SCAN_DEPTH = 3
+HOOK_TOOLS = ".bazel_env"
 
 
 def git(clone: Path, *args: str) -> str:
-    env = {
-        key: os.environ[key]
-        for key in ("HOME", "SSH_AUTH_SOCK", "LANG")
-        if key in os.environ
-    }
+    env = {key: os.environ[key] for key in ("HOME", "LANG") if key in os.environ}
     env.update(
         PATH=host_tools.search(),
         GIT_TERMINAL_PROMPT="0",
@@ -337,7 +336,42 @@ def prepare_git(workspace: Path) -> None:
             raise Invalid(message)
 
 
-def create(clone: Path, name: str, request: RunRequest) -> Path:
+def link_hook_tools(clone: Path, workspace: Path) -> None:
+    """Link the clone's built `.bazel_env` into the run's worktree.
+
+    The commit hooks call `.bazel_env/bin` relative to the worktree, and the
+    directory is gitignored, so a fresh worktree has none. A clone without one
+    leaves the worktree as it is, and preflight reports the missing directory.
+    """
+    source = clone / HOOK_TOOLS
+    if source.is_dir():
+        (workspace / HOOK_TOOLS).symlink_to(source.resolve())
+
+
+@contextmanager
+def preparation_step(step: str) -> Generator[None]:
+    try:
+        yield
+    except OSError, ValueError, subprocess.SubprocessError:
+        message = f"run preparation failed at {step}"
+        raise Invalid(message) from None
+
+
+def create(
+    clone: Path, name: str, request: RunRequest, public_repos: tuple[str, ...]
+) -> Path:
+    parts = repo.parts(request.repo)
+    if parts not in tuple(repo.parts(value) for value in public_repos):
+        message = (
+            f"repository {request.repo}: agent mirrors fetch only "
+            "repositories listed in public_repos"
+        )
+        raise Invalid(message)
+    host, owner, repository = parts
+    if host != repo.DEFAULT_GIT_HOST:
+        message = "agent mirrors require a GitHub repository"
+        raise Invalid(message)
+    url = f"https://github.com/{owner}/{repository}.git"
     if not clone.is_dir():
         message = f"repo clone {clone} does not exist"
         raise Invalid(message)
@@ -349,17 +383,26 @@ def create(clone: Path, name: str, request: RunRequest) -> Path:
     if any(p.is_symlink() for p in (mirror, *mirror.parents[:3])):
         message = "host mirror paths must not be symbolic links"
         raise Invalid(message)
-    mirror = runfiles.private_dir(mirror)
-    url = repo.ssh_url(request.repo)
-    with runfiles.locked(mirror / "agent-mirror.lock"):
-        configure_mirror(mirror, url)
-        commit = fetch_commit(mirror, request)
-        worktree.parent.mkdir(exist_ok=True)
-        clone_run(mirror, worktree, url)
+    with ExitStack() as stack:
+        with preparation_step("mirror directory"):
+            mirror = runfiles.private_dir(mirror)
+            stack.enter_context(runfiles.locked(mirror / "agent-mirror.lock"))
+        with preparation_step("mirror init"):
+            configure_mirror(mirror, url)
+        with preparation_step(f"mirror fetch ({url})"):
+            commit = fetch_commit(mirror, request)
+        with preparation_step("clone"):
+            worktree.parent.mkdir(exist_ok=True)
+            clone_run(mirror, worktree, url)
+            if request.profile is Profile.BUILD:
+                git(worktree, "checkout", "-b", f"agent/{name}", commit, "--")
+            else:
+                git(worktree, "checkout", "--detach", commit, "--")
+        with preparation_step("hook install"):
+            install_hooks(worktree)
+        with preparation_step("git metadata"):
+            prepare_git(worktree)
         if request.profile is Profile.BUILD:
-            git(worktree, "checkout", "-b", f"agent/{name}", commit, "--")
-        else:
-            git(worktree, "checkout", "--detach", commit, "--")
-        install_hooks(worktree)
-        prepare_git(worktree)
+            with preparation_step("hook tools"):
+                link_hook_tools(clone, worktree)
     return worktree

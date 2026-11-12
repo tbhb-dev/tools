@@ -8,7 +8,14 @@ from pathlib import Path
 from typing import Literal, TypedDict, Unpack
 
 import pytest
-from agent_host_example import commit, git, isolate_host_git, repository, run_request
+from agent_host_example import (
+    commit,
+    git,
+    isolate_host_git,
+    local_mirror_fetches,
+    repository,
+    run_request,
+)
 
 from tbhbdev.alpha.agent import worktree
 from tbhbdev.alpha.agent.model import Invalid
@@ -37,10 +44,7 @@ def scratch_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     isolate_host_git(tmp_path, monkeypatch)
 
-    def url(_repo: str) -> str:
-        return str(tmp_path / "origin")
-
-    monkeypatch.setattr(worktree.repo, "ssh_url", url)
+    local_mirror_fetches(monkeypatch, tmp_path / "origin")
     resolve = worktree.host_tools.resolve
 
     def executable(name: str, path: str | None = None) -> str:
@@ -54,7 +58,9 @@ def test_build_fetches_default_and_creates_one_branch(tmp_path: Path) -> None:
     (seed / "tracked").write_text("new remote content\n")
     head = commit(seed, "remote change")
     git(seed, "push", "origin", "main")
-    path = worktree.create(clone, "build-1", run_request())
+    path = worktree.create(
+        clone, "build-1", run_request(), ("example-org/example-repo",)
+    )
     assert path == clone / ".worktrees" / "agent-build-1"
     assert git(path, "branch", "--show-current") == "agent/build-1"
     assert git(path, "rev-parse", "HEAD") == head
@@ -64,11 +70,11 @@ def test_build_fetches_default_and_creates_one_branch(tmp_path: Path) -> None:
     assert (path / ".git").is_dir()
     assert (mirror / "agent-mirror.lock").exists()
     assert not (path / ".git" / "objects" / "info" / "alternates").exists()
-    assert git(path, "remote", "get-url", "--push", "origin") == str(
-        tmp_path / "origin"
+    assert git(path, "remote", "get-url", "--push", "origin") == (
+        "https://github.com/example-org/example-repo.git"
     )
-    with pytest.raises(FileExistsError):
-        worktree.create(clone, "build-1", run_request())
+    with pytest.raises(Invalid, match="run preparation failed at clone"):
+        worktree.create(clone, "build-1", run_request(), ("example-org/example-repo",))
     assert git(clone, "worktree", "list", "--porcelain").count("worktree ") == 1
 
 
@@ -83,7 +89,9 @@ def test_clone_work_is_preserved(tmp_path: Path, dirty: bool) -> None:
     (seed / "tracked").write_text("remote edits\n")
     head = commit(seed, "remote change")
     git(seed, "push", "origin", "main")
-    path = worktree.create(clone, "build-1", run_request())
+    path = worktree.create(
+        clone, "build-1", run_request(), ("example-org/example-repo",)
+    )
     assert git(path, "rev-parse", "HEAD") == head
     assert git(clone, "rev-parse", "HEAD") == old
     assert (clone / "tracked").read_text() == (
@@ -97,7 +105,10 @@ def test_review_detaches_at_resolved_commit(tmp_path: Path) -> None:
     head = commit(seed, "review")
     git(seed, "push", "origin", "topic")
     path = worktree.create(
-        clone, "review-1", run_request(profile="review", commit=head)
+        clone,
+        "review-1",
+        run_request(profile="review", commit=head),
+        ("example-org/example-repo",),
     )
     assert path == clone / ".worktrees" / "agent-review-1"
     assert git(path, "rev-parse", "HEAD") == head
@@ -106,9 +117,12 @@ def test_review_detaches_at_resolved_commit(tmp_path: Path) -> None:
 
 def test_missing_commit_is_refused(tmp_path: Path) -> None:
     _, clone = repository(tmp_path)
-    with pytest.raises(subprocess.CalledProcessError):
+    with pytest.raises(Invalid, match="run preparation failed at mirror fetch"):
         worktree.create(
-            clone, "missing", run_request(profile="review", commit="0" * 40)
+            clone,
+            "missing",
+            run_request(profile="review", commit="0" * 40),
+            ("example-org/example-repo",),
         )
     assert not (clone / ".worktrees" / "agent-missing").exists()
 
@@ -116,7 +130,7 @@ def test_missing_commit_is_refused(tmp_path: Path) -> None:
 def test_missing_clone_is_not_created(tmp_path: Path) -> None:
     clone = tmp_path / "missing"
     with pytest.raises(Invalid) as caught:
-        worktree.create(clone, "example", run_request())
+        worktree.create(clone, "example", run_request(), ("example-org/example-repo",))
     assert str(caught.value) == f"repo clone {clone} does not exist"
     assert not clone.exists()
 
@@ -139,9 +153,7 @@ def test_git_suppresses_command_errors_and_returns_text(
             "protocol.allow=never",
         ]
         assert env == {
-            key: os.environ[key]
-            for key in ("HOME", "SSH_AUTH_SOCK", "LANG")
-            if key in os.environ
+            key: os.environ[key] for key in ("HOME", "LANG") if key in os.environ
         } | {
             "PATH": worktree.host_tools.search(),
             "GIT_TERMINAL_PROMPT": "0",
@@ -205,14 +217,20 @@ def test_worktree_git_contract_under_one_stable_lock(
     request = run_request(
         profile=profile, commit=commit_id if profile == "review" else None
     )
-    path = worktree.create(clone, "example", request)
+    path = worktree.create(clone, "example", request, ("example-org/example-repo",))
     mirror = worktree.mirror_path(tmp_path, request.repo)
     assert all(directory in (mirror, path) for directory, _args in calls)
     assert (mirror / "agent-mirror.lock").is_file()
     assert (mirror.stat().st_mode & 0o777) == 0o700
     assert git(path, "rev-parse", "HEAD") == commit_id
-    assert git(path, "config", "remote.origin.url") == str(tmp_path / "origin")
-    assert git(path, "config", "remote.origin.pushurl") == str(tmp_path / "origin")
+    assert (
+        git(path, "config", "remote.origin.url")
+        == "https://github.com/example-org/example-repo.git"
+    )
+    assert (
+        git(path, "config", "remote.origin.pushurl")
+        == "https://github.com/example-org/example-repo.git"
+    )
     assert (
         path / ".git" / "hooks" / "prepare-commit-msg"
     ).read_text() == worktree.install.SHIM.format(
@@ -239,7 +257,7 @@ def test_host_git_never_runs_hooks_or_monitor(tmp_path: Path) -> None:
     (seed / "tracked").write_text("remote update\n")
     commit(seed, "remote update")
     git(seed, "push", "origin", "main")
-    worktree.create(clone, "safe", run_request())
+    worktree.create(clone, "safe", run_request(), ("example-org/example-repo",))
     assert not marker.exists()
 
 
@@ -301,7 +319,7 @@ def test_each_repo_command_plant_is_inert(tmp_path: Path, plant: str) -> None:
         git(clone, "config", "credential.helper", f"!{executable}")
     else:
         git(clone, "config", "core.sshCommand", str(executable))
-    worktree.create(clone, "safe", run_request())
+    worktree.create(clone, "safe", run_request(), ("example-org/example-repo",))
     assert not marker.exists()
 
 
@@ -469,8 +487,8 @@ def test_existing_clone_symlink_is_refused_without_following_it(tmp_path: Path) 
     parent = clone / ".worktrees"
     parent.mkdir()
     (parent / "agent-example").symlink_to(target, target_is_directory=True)
-    with pytest.raises(FileExistsError):
-        worktree.create(clone, "example", run_request())
+    with pytest.raises(Invalid, match="run preparation failed at clone"):
+        worktree.create(clone, "example", run_request(), ("example-org/example-repo",))
     assert list(target.iterdir()) == []
 
 
@@ -481,7 +499,9 @@ def test_mirror_configuration_and_hooks_are_host_written(
     global_config = tmp_path / "global-config"
     global_config.write_text(f"[core]\nhooksPath = {tmp_path / 'other-hooks'}\n")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
-    path = worktree.create(clone, "example", run_request())
+    path = worktree.create(
+        clone, "example", run_request(), ("example-org/example-repo",)
+    )
     mirror = worktree.mirror_path(tmp_path, run_request().repo)
     with pytest.raises(subprocess.CalledProcessError) as caught:
         git(mirror, "config", "--get-all", "remote.origin.fetch")
@@ -529,7 +549,9 @@ def test_host_git_never_returns_to_a_launched_clone(
         return original(path, *args)
 
     monkeypatch.setattr(worktree, "git", checked)
-    first = worktree.create(clone, "first", run_request())
+    first = worktree.create(
+        clone, "first", run_request(), ("example-org/example-repo",)
+    )
     launched.add(first)
     marker = tmp_path / "fetch-marker"
     marker.write_text("untouched\n")
@@ -539,7 +561,9 @@ def test_host_git_never_returns_to_a_launched_clone(
     script.write_text(f'#!/bin/sh\nprintf invoked > "{executed}"\n')
     script.chmod(0o700)
     git(first, "config", plant, str(script))
-    second = worktree.create(clone, "second", run_request())
+    second = worktree.create(
+        clone, "second", run_request(), ("example-org/example-repo",)
+    )
     assert marker.read_text() == "untouched\n"
     assert not executed.exists()
     mirror = worktree.mirror_path(tmp_path, run_request().repo)
@@ -560,7 +584,9 @@ def test_old_fetch_shape_writes_through_shared_fetch_head(tmp_path: Path) -> Non
 
 def test_mirror_fetch_never_recurses_into_a_configured_module(tmp_path: Path) -> None:
     _, clone = repository(tmp_path)
-    first = worktree.create(clone, "first", run_request())
+    first = worktree.create(
+        clone, "first", run_request(), ("example-org/example-repo",)
+    )
     mirror = worktree.mirror_path(tmp_path, run_request().repo)
     head = git(first, "rev-parse", "HEAD")
     git(mirror, "update-index", "--add", "--cacheinfo", f"160000,{head},x")
@@ -575,13 +601,15 @@ def test_mirror_fetch_never_recurses_into_a_configured_module(tmp_path: Path) ->
     git(module, "config", "remote.origin.uploadpack", str(script))
     git(mirror, "config", "fetch.recurseSubmodules", "true")
     git(mirror, "config", "submodule.x.active", "true")
-    worktree.create(clone, "second", run_request())
+    worktree.create(clone, "second", run_request(), ("example-org/example-repo",))
     assert not marker.exists()
 
 
 def test_copying_clone_has_no_shared_object_inode(tmp_path: Path) -> None:
     _, clone = repository(tmp_path)
-    path = worktree.create(clone, "example", run_request())
+    path = worktree.create(
+        clone, "example", run_request(), ("example-org/example-repo",)
+    )
     mirror = worktree.mirror_path(tmp_path, run_request().repo)
     mirror_inodes = {
         p.stat().st_ino for p in (mirror / "objects").rglob("*") if p.is_file()
@@ -700,12 +728,10 @@ def test_prelaunch_git_protocol(
 
     monkeypatch.setattr(worktree, "git", checked)
 
-    def url(argument: str) -> str:
-        assert argument == request.repo
-        return str(tmp_path / "origin")
-
-    monkeypatch.setattr(worktree.repo, "ssh_url", url)
-    assert worktree.create(clone, "protocol", request) == workspace
+    assert (
+        worktree.create(clone, "protocol", request, ("example-org/example-repo",))
+        == workspace
+    )
     options = (
         "--no-recurse-submodules",
         "--no-write-fetch-head",
@@ -753,8 +779,22 @@ def test_prelaunch_git_protocol(
                 str(workspace),
             ),
         ),
-        (workspace, ("config", "remote.origin.url", str(tmp_path / "origin"))),
-        (workspace, ("config", "remote.origin.pushurl", str(tmp_path / "origin"))),
+        (
+            workspace,
+            (
+                "config",
+                "remote.origin.url",
+                "https://github.com/example-org/example-repo.git",
+            ),
+        ),
+        (
+            workspace,
+            (
+                "config",
+                "remote.origin.pushurl",
+                "https://github.com/example-org/example-repo.git",
+            ),
+        ),
         (workspace, ("config", "core.hooksPath", str(workspace / ".git" / "hooks"))),
         (workspace, checkout),
     ]
@@ -765,7 +805,7 @@ def test_prelaunch_git_protocol(
     assert (workspace / ".git/commondir").read_text() == ".\n"
     assert list((workspace / ".git/modules").iterdir()) == []
     assert (mirror / "config").read_text() == worktree.MIRROR_CONFIG.format(
-        url=str(tmp_path / "origin")
+        url="https://github.com/example-org/example-repo.git"
     )
     assert {p.name for p in mirror.iterdir()} == {"config", "agent-mirror.lock"}
 
@@ -773,7 +813,9 @@ def test_prelaunch_git_protocol(
 def test_existing_mirror_config_is_replaced_before_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / "config").write_text("untrusted old settings")
+    (tmp_path / "config").write_text(
+        worktree.MIRROR_CONFIG.format(url="git@github.com:example-org/example-repo.git")
+    )
     probes: list[Path] = []
     original = Path.exists
 
@@ -786,10 +828,12 @@ def test_existing_mirror_config_is_replaced_before_git(
 
     monkeypatch.setattr(worktree, "git", unexpected)
     monkeypatch.setattr(Path, "exists", exists)
-    worktree.configure_mirror(tmp_path, "git@github.com:example-org/example-repo.git")
+    worktree.configure_mirror(
+        tmp_path, "https://github.com/example-org/example-repo.git"
+    )
     assert probes == [tmp_path / "config"]
     assert (tmp_path / "config").read_text() == worktree.MIRROR_CONFIG.format(
-        url="git@github.com:example-org/example-repo.git"
+        url="https://github.com/example-org/example-repo.git"
     )
 
 
@@ -859,7 +903,7 @@ def test_mirror_owned_paths_never_follow_aliases_before_host_git(
     with pytest.raises(
         Invalid, match=r"^host mirror paths must not be symbolic links$"
     ):
-        worktree.create(clone, "example", request)
+        worktree.create(clone, "example", request, ("example-org/example-repo",))
     assert {p.name for p in target.iterdir()} == {"marker"}
     assert (target / "marker").read_text() == "original"
     assert target.stat().st_mode & 0o777 == 0o750
@@ -881,7 +925,7 @@ def test_run_clone_parent_cannot_redirect_git_into_a_shared_cache(
     with pytest.raises(
         Invalid, match=r"^run clone parent must not be a symbolic link$"
     ):
-        worktree.create(clone, "example", run_request())
+        worktree.create(clone, "example", run_request(), ("example-org/example-repo",))
     assert list(cache.iterdir()) == []
 
 
@@ -917,7 +961,7 @@ def test_fetch_scope_never_fetches_or_prunes_agent_namespace(tmp_path: Path) -> 
         "refs/tags/v1",
     ):
         git(seed, "push", "origin", f"{head}:{ref}")
-    worktree.create(clone, "first", run_request())
+    worktree.create(clone, "first", run_request(), ("example-org/example-repo",))
     mirror = worktree.mirror_path(tmp_path, run_request().repo)
     assert git(mirror, "for-each-ref", "--format=%(refname)").splitlines() == [
         "refs/heads/main",
@@ -928,7 +972,7 @@ def test_fetch_scope_never_fetches_or_prunes_agent_namespace(tmp_path: Path) -> 
     for ref in ("refs/heads/a", "refs/heads/agent/a"):
         git(seed, "push", "origin", f":{ref}")
         git(seed, "push", "origin", f"{head}:{ref}/b")
-    worktree.create(clone, "second", run_request())
+    worktree.create(clone, "second", run_request(), ("example-org/example-repo",))
     assert git(mirror, "for-each-ref", "--format=%(refname)").splitlines() == [
         "refs/heads/agent/a",
         "refs/heads/kept",
@@ -974,7 +1018,7 @@ def test_checkout_precedes_hook_installation(
         install(path)
 
     monkeypatch.setattr(worktree, "install_hooks", checked)
-    worktree.create(clone, "ordered", run_request())
+    worktree.create(clone, "ordered", run_request(), ("example-org/example-repo",))
 
 
 @pytest.mark.parametrize(
@@ -1013,7 +1057,7 @@ def test_real_git_calls_have_bounded_operation_timeouts(
         return output(command, **kwargs)
 
     monkeypatch.setattr(subprocess, "check_output", checked)
-    worktree.create(clone, "timeouts", run_request())
+    worktree.create(clone, "timeouts", run_request(), ("example-org/example-repo",))
     worktree.git(seed, "fetch", "origin")
     for command, timeout in calls:
         assert timeout == (300 if "fetch" in command or "clone" in command else 30)
@@ -1034,7 +1078,9 @@ def test_host_checkout_disables_a_planted_run_hook(
         hook.chmod(0o700)
 
     monkeypatch.setattr(worktree, "clone_run", planted)
-    path = worktree.create(clone, "planted", run_request())
+    path = worktree.create(
+        clone, "planted", run_request(), ("example-org/example-repo",)
+    )
     assert (path / "tracked").read_text() == "initial\n"
     assert not marker.exists()
 
@@ -1053,7 +1099,7 @@ def test_every_git_call_has_a_fixed_host_cwd(
 
     monkeypatch.chdir(clone)
     monkeypatch.setattr(subprocess, "check_output", checked)
-    worktree.create(clone, "cwd", run_request())
+    worktree.create(clone, "cwd", run_request(), ("example-org/example-repo",))
     assert calls
 
 
@@ -1159,7 +1205,9 @@ def test_git_shape_follows_checkout_and_hooks_and_supports_real_commits(
 
     monkeypatch.setattr(worktree, "git", git_before_shape)
     monkeypatch.setattr(worktree, "prepare_git", shape_after_hooks)
-    workspace = worktree.create(clone, "shape", run_request())
+    workspace = worktree.create(
+        clone, "shape", run_request(), ("example-org/example-repo",)
+    )
     assert checked == ["checkout", "shape"]
     before = git(workspace, "rev-parse", "HEAD")
     (workspace / "tracked").write_text("committed\n")
@@ -1536,3 +1584,42 @@ def test_mount_point_that_cannot_be_removed_is_skipped(
     monkeypatch.setattr(Path, "rmdir", refuse)
     worktree.clear_mount_points((str(tmp_path),))
     assert (tmp_path / ".agents").is_dir()
+
+
+def test_build_links_the_clone_hook_tools(tmp_path: Path) -> None:
+    _, clone = repository(tmp_path)
+    (clone / ".bazel_env" / "bin").mkdir(parents=True)
+    path = worktree.create(clone, "tools", run_request(), ("example-org/example-repo",))
+    link = path / ".bazel_env"
+    assert link.is_symlink()
+    assert link.resolve() == (clone / ".bazel_env").resolve()
+    assert (link / "bin").is_dir()
+
+
+def test_clone_without_hook_tools_gets_no_link(tmp_path: Path) -> None:
+    _, clone = repository(tmp_path)
+    path = worktree.create(clone, "none", run_request(), ("example-org/example-repo",))
+    assert not (path / ".bazel_env").exists(follow_symlinks=False)
+
+
+def test_review_gets_no_hook_tools_link(tmp_path: Path) -> None:
+    seed, clone = repository(tmp_path)
+    (clone / ".bazel_env").mkdir()
+    head = git(seed, "rev-parse", "HEAD")
+    path = worktree.create(
+        clone,
+        "review-tools",
+        run_request(profile="review", commit=head),
+        ("example-org/example-repo",),
+    )
+    assert not (path / ".bazel_env").exists(follow_symlinks=False)
+
+
+def test_existing_hook_tools_entry_fails_preparation(tmp_path: Path) -> None:
+    seed, clone = repository(tmp_path)
+    (seed / ".bazel_env").write_text("tracked\n")
+    commit(seed, "track it")
+    git(seed, "push", "origin", "main")
+    (clone / ".bazel_env").mkdir()
+    with pytest.raises(Invalid, match="run preparation failed at hook tools"):
+        worktree.create(clone, "clash", run_request(), ("example-org/example-repo",))

@@ -54,6 +54,7 @@ GIT_CONFIG_PATHS = (
     ".git/commondir",
     ".git/hooks",
     ".git/info",
+    ".git/objects/info",
     ".git/modules",
 )
 
@@ -82,6 +83,17 @@ def _check(
         raise Invalid(message)
 
 
+# Account credential stores git, ssh and gh read: a run that can read one can
+# push around the host's publish checks. `.gitconfig` stays readable so the
+# run's identity works.
+CREDENTIAL_HOME_PATHS = (
+    ".git-credentials",
+    ".netrc",
+    ".ssh",
+    ".config/gh",
+)  # gitleaks:allow
+
+
 def _with_aliases(os: Os, path: str) -> tuple[str, ...]:
     """PATH, and on macOS its `/private` twin when it's under `/tmp`."""
     if os is Os.MACOS and (path == _TMP or path.startswith(f"{_TMP}/")):
@@ -95,7 +107,8 @@ def denied_paths(
     """The paths no harness may read, whatever the OS, profile and harness.
 
     That's the Connect token store, the session socket directory and the
-    config's `denied_home_paths`, each with its `/private` twin on macOS.
+    config's `denied_home_paths` and the account credential stores, each with
+    its `/private` twin on macOS.
     """
     paths: list[str] = []
     if host.os is Os.LINUX:
@@ -111,6 +124,8 @@ def denied_paths(
         )
     paths.append(resolve(home, settings.sockets_dir))
     paths.extend(resolve(home, p) for p in settings.sandbox.denied_home_paths)
+    paths.extend(resolve(home, p) for p in CREDENTIAL_HOME_PATHS)
+    paths.extend(c.signing for c in settings.credentials if c.signing.startswith("/"))
     return tuple(
         dict.fromkeys(alias for path in paths for alias in _with_aliases(host.os, path))
     )
@@ -137,7 +152,7 @@ def environment(
         "DOCKER_CONFIG": resolve(paths.tmpdir, DOCKER_CONFIG_SUBDIR),
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_COUNT": "8",
+        "GIT_CONFIG_COUNT": "9",
     }
     overrides = (
         ("core.fsmonitor", "false"),
@@ -148,6 +163,7 @@ def environment(
         ("protocol.file.allow", "never"),
         ("diff.external", ""),
         ("safe.bareRepository", "explicit"),
+        ("credential.helper", ""),
     )
     for index, (key, value) in enumerate(overrides):
         env[f"GIT_CONFIG_KEY_{index}"] = key
@@ -157,6 +173,15 @@ def environment(
     if paths.signing_socket is not None:
         env["SSH_AUTH_SOCK"] = paths.signing_socket
     return env
+
+
+def review_environment(profile: Profile, paths: RunPaths) -> dict[str, str]:
+    if not isinstance(profile, Profile):
+        message = "profile must be an agent profile"
+        raise Invalid(message)
+    if profile is Profile.REVIEW:
+        return {"GH_CONFIG_DIR": resolve(paths.tmpdir, GH_CONFIG_SUBDIR)}
+    return {}
 
 
 def _write_roots(
@@ -362,7 +387,7 @@ def _agy(
     else:
         reads = [resolve(home, p) for p in agy.build_read]
     writes = _agy_write_roots(settings, profile, paths)
-    reads += [env["GH_CONFIG_DIR"], env["DOCKER_CONFIG"]]
+    reads += [env[k] for k in ("GH_CONFIG_DIR", "DOCKER_CONFIG") if k in env]
     if paths.signing_socket is not None:
         reads.append(paths.signing_socket)
     # agy has no deny entry, so a grant that reaches a denied path is the leak.
@@ -429,7 +454,9 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
     )
     if paths.signing_socket is not None:
         _refuse_overlaps((paths.signing_socket,), deny, "signing socket")
-    env = environment(settings, host, harness, paths, account)
+    env = environment(settings, host, harness, paths, account) | review_environment(
+        profile, paths
+    )
     tools_path = tool_path(settings, host, paths.home)
     writes = _write_roots(settings, profile, paths)
     if host.os is Os.MACOS and harness in (Harness.CODEX, Harness.CLAUDE):

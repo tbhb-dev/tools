@@ -410,10 +410,28 @@ def test_dispatch_preserves_arguments_and_program(
     ),
 )
 def test_collection_decodes_non_utf8_paths(
-    clone: Callable[[str, dict[str, bytes]], Path],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    target = clone(os.fsdecode(b"clone\xff"), {})
-    assert precheck.collect(str(target)).files == (str(target / ".git" / "config"),)
+    target = str(tmp_path / os.fsdecode(b"clone\xff"))
+    config = os.fsencode(target) + b"/.git/config"
+
+    def collected(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        assert command == ["bash", "-s", "--", target]
+        assert kwargs == {
+            "input": precheck.COLLECTOR.encode(),
+            "stdout": subprocess.PIPE,
+            "check": True,
+        }
+        return subprocess.CompletedProcess(
+            command, 0, stdout=b"@@FILES\n" + config + b"\n@@RISKY\n@@END\n"
+        )
+
+    monkeypatch.setattr(precheck.subprocess, "run", collected)
+    result = precheck.collect(target)
+    assert result.label == target
+    assert tuple(os.fsencode(path) for path in result.files) == (config,)
 
 
 def test_normalization_preserves_surrounding_bytes() -> None:

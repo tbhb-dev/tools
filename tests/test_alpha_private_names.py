@@ -395,3 +395,26 @@ def test_header_restricts_configured_names_too(
         (2, PRIVATE_REPO),
         (3, f"{PRIVATE_REPO.upper()}.git"),
     ]
+
+
+def test_parse_list_splits_names_and_path_only_words() -> None:
+    lines = ["# note", "", f"{pn.PATH_HEADER} Alpha beta", "  example-one  "]
+    assert pn.parse_list(lines) == pn.Names(["example-one"], {"alpha", "beta"})
+
+
+@pytest.mark.parametrize(
+    ("lines", "expected"),
+    [
+        (["+a", "+b"], []),
+        (['+x = "ab"', '+"cd"'], [(1, '+x = "abcd"')]),
+        (['+"ab",', '+  r"cd"'], [(1, '+"abcd"')]),
+        (['+"ab" +', "+  'cd'", '+"ef"'], [(1, '+"abcdef"')]),
+        (['+"ab"', "+x = 1", '+"cd"'], []),
+        (['+"ab"', ' "cd"'], []),
+        (['-"ab"', '+"cd"'], []),
+    ],
+)
+def test_joined_literals_merge_only_added_adjacent_literals(
+    lines: list[str], expected: list[tuple[int, str]]
+) -> None:
+    assert pn.joined_literals(lines) == expected
