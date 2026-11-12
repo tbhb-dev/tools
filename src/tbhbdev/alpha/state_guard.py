@@ -246,7 +246,8 @@ def tagging_enabled(data: Json) -> bool:
     return settings.get("tag_messages") is True
 
 
-# A pipe holds at least 16 KiB, so a smaller write can't block on an undrained reader.
+# A pipe holds at least 16 KiB, so a smaller write can't block on a reader that
+# never drains it.
 MAX_TAGGED_OUTPUT = 8192
 
 
