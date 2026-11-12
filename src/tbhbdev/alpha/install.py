@@ -1012,7 +1012,7 @@ def install_pre_push_hook(hooks: Path) -> None:
     hook.rename(hooks / "pre-push.prek")
     legacy = hooks / "pre-push.legacy"
     if legacy.is_file() and SHIM_MARK in legacy.read_text():
-        back_up_legacy(legacy)
+        legacy.unlink()
     hook.write_text(
         PRE_PUSH_SHIM.format(
             python=sys.executable,
