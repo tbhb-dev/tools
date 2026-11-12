@@ -9,7 +9,8 @@ import shlex
 import sys
 from pathlib import Path
 
-from tbhbdev.alpha.agent import ownership, process_group, run_host, runfiles
+from tbhbdev import userconfig
+from tbhbdev.alpha.agent import ownership, process_group, run_host, runfiles, settings
 from tbhbdev.alpha.agent.decisions.run_state import Group, owns
 from tbhbdev.alpha.agent.model import NAME, Invalid
 
@@ -124,8 +125,9 @@ def kill(files: runfiles.RunFiles) -> int:
     if not owns(recorded, process_group.identity(recorded.pgid)):
         message = "run group identity no longer matches"
         raise Invalid(message)
-    # TERM reaches the owned harness group; its supervisor records completion.
-    if not process_group.stop_owned(files, recorded.pgid, 0):
+    # The supervisor remains alive to reap the leader while we wait for ESRCH.
+    grace = settings.load().kill_grace_seconds
+    if not process_group.stop_owned(files, recorded.pgid, grace):
         message = "cannot signal run group"
         raise Invalid(message)
     return 0
@@ -145,7 +147,7 @@ def main(arguments: list[str], prog: str) -> int:
     except Invalid as exc:
         print(f"ssh-serve: refused: {exc}", file=sys.stderr)
         return 2
-    except OSError, ValueError, TypeError, KeyError:
+    except OSError, ValueError, TypeError, KeyError, userconfig.ConfigError:
         # Never echo untrusted JSON or an exception that might contain its token.
         print("ssh-serve: refused: invalid command or run data", file=sys.stderr)
         return 2

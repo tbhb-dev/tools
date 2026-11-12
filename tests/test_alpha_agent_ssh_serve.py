@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import os
 import pwd
+import subprocess
 import sys
+import textwrap
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from agent_host_example import host_settings
 
+from tbhbdev import userconfig
 from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import process_group, run_host, runfiles, ssh_serve
 from tbhbdev.alpha.agent.decisions.run_state import Group
@@ -23,6 +30,11 @@ def isolated(
 ) -> None:
     del isolated_agent_home, agent_suffix_case
     monkeypatch.setattr(pwd, "getpwuid", account)
+    monkeypatch.setattr(run_host.settings, "load", stop_settings)
+
+
+def stop_settings() -> run_host.Settings:
+    return dataclasses.replace(host_settings(), kill_grace_seconds=2)
 
 
 def incoming(monkeypatch: pytest.MonkeyPatch, value: bytes) -> None:
@@ -219,7 +231,7 @@ def test_kill(
 
     def stop(files: runfiles.RunFiles, pid: int, grace: float) -> bool:
         assert files.name == "example"
-        assert grace == 0
+        assert grace == stop_settings().kill_grace_seconds
         calls.append(pid)
         return True
 
@@ -520,3 +532,79 @@ def test_default_state_directory_is_canonical(
 
     monkeypatch.setattr(ssh_serve, "result", result)
     assert ssh_serve.main([], "ssh-serve") == 0
+
+
+def test_ssh_stop_allows_term_handler_to_reap_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = files_for("example")
+    files.write("request.json", "{}")
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "kill example")
+    monkeypatch.setattr(run_host.settings, "load", stop_settings)
+    code = textwrap.dedent("""\
+        import os, signal, sys, time
+        child = os.fork()
+        if child == 0:
+            signal.pause()
+            sys.exit(0)
+        def finish(number, frame):
+            os.waitpid(child, 0)
+            time.sleep(0.3)
+            sys.exit(0)
+        signal.signal(signal.SIGTERM, finish)
+        print(child, flush=True)
+        signal.pause()
+    """)
+    leader = subprocess.Popen(
+        [sys.executable, "-c", code],
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert leader.stdout is not None
+    descendant = int(leader.stdout.readline())
+    monkeypatch.setattr(process_group, "boot_id", lambda: "test-boot")
+
+    def supervise() -> None:
+        files.write("rc", str(leader.wait()))
+
+    supervisor = threading.Thread(target=supervise)
+    supervisor.start()
+    try:
+        process_group.record(files, leader.pid)
+        started = time.monotonic()
+        assert ssh_serve.main([], "ssh-serve") == 0
+        elapsed = time.monotonic() - started
+        supervisor.join(timeout=5)
+        assert not supervisor.is_alive()
+        assert leader.returncode == 0
+        assert elapsed >= 0.3
+        assert files.path("rc").read_text() == "0"
+        assert not files.uncertain
+        assert not process_group.alive(leader.pid)
+        with pytest.raises(ProcessLookupError):
+            os.kill(descendant, 0)
+    finally:
+        process_group.stop_started(leader.pid, 0, leader.poll)
+        supervisor.join(timeout=5)
+        leader.stdout.close()
+
+
+def test_stop_refuses_unreadable_grace_configuration(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "kill example")
+    files = files_for("example")
+    files.write("request.json", "{}")
+    files.write("pgid", json.dumps({"pgid": 98765, "boot": "boot", "start": "start"}))
+    monkeypatch.setattr(process_group, "identity", group_identity)
+
+    def fail() -> run_host.Settings:
+        message = "synthetic material must stay hidden"
+        raise userconfig.ConfigError(message)
+
+    monkeypatch.setattr(run_host.settings, "load", fail)
+    assert ssh_serve.main([], "ssh-serve") == 2
+    assert capsys.readouterr().err == (
+        "ssh-serve: refused: invalid command or run data\n"
+    )
