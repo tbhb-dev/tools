@@ -1051,6 +1051,54 @@ def test_run_gives_commit_policy_the_agent_public_key(
     assert seen == ["ssh-ed25519 AAAA"]
 
 
+def test_run_trusts_the_key_read_before_the_harness(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, _ = local_run
+    started: list[bool] = []
+    seen: list[str] = []
+
+    def replacing(
+        run: run_host.Run, prepared: run_host.Prepared, stack: ExitStack
+    ) -> int:
+        started.append(True)
+        return harness(run, prepared, stack)
+
+    def key(_tmpdir: Path) -> str:
+        return "ssh-ed25519 REPLACED" if started else "ssh-ed25519 BEFORE"
+
+    def record(_directory: Path, _before: str | None, _commit: str, key: str) -> None:
+        seen.append(key)
+
+    monkeypatch.setattr(push, "commit_policy", record)
+    monkeypatch.setattr(push, "agent_public_key", key)
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, replacing, SYNTHETIC) == 0
+    assert seen == ["ssh-ed25519 BEFORE"]
+
+
+def test_run_without_a_signing_key_does_not_start_the_harness(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, _ = local_run
+
+    def unavailable(_tmpdir: Path) -> str:
+        message = "signing key unavailable"
+        raise push.PushRefusedError(message)
+
+    def forbidden(*_: object) -> int:
+        raise AssertionError
+
+    monkeypatch.setattr(push, "agent_public_key", unavailable)
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, forbidden, SYNTHETIC) == 4
+    assert run.files.path("log").read_text() == (
+        "push refused: signing key unavailable\n"
+    )
+
+
 @pytest.mark.parametrize(
     ("returncode", "output"),
     [(0, "ssh-ed25519 AAAA agent\nsecond\n"), (1, ""), (0, "")],

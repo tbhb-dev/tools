@@ -133,7 +133,24 @@ def run(
     workspace = Path(prepared.paths.worktree)
     branch = f"agent/{run.files.name}"
     before = head(workspace, branch)
+    # The signing agent's socket is writable by the run, so the signer is
+    # read now, before the harness can replace it.
+    try:
+        public_key = agent_public_key(run.tmpdir)
+    except PushRefusedError as refusal:
+        run.files.write("log", f"push refused: {refusal}\n")
+        return 4
     rc = harness(run, prepared, stack)
+    return publish(run, workspace, (branch, before, public_key, token), rc)
+
+
+def publish(
+    run: Run,
+    workspace: Path,
+    target: tuple[str, str | None, str, str],
+    rc: int,
+) -> int:
+    branch, before, public_key, token = target
     if run.files.uncertain:
         return rc
     commit = head(workspace, branch)
@@ -148,7 +165,7 @@ def run(
         with publication(run.files.root, workspace, commit) as directory:
             scan(directory, before, commit, names)
             secret_scan(directory, before, commit)
-            commit_policy(directory, before, commit, agent_public_key(run.tmpdir))
+            commit_policy(directory, before, commit, public_key)
             status, error = send(directory, url(run.request.repo), branch, token)
     except PushRefusedError as refusal:
         run.files.write("log", f"push refused: {refusal}\n")
