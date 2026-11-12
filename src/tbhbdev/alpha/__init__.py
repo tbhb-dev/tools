@@ -71,6 +71,7 @@ commands:
   agent-env    launch a harness with the gh shim first on PATH
   pr           check | create | edit | hook: the pull request draft
                | backfill-opened OWNER: the opened ledgers
+               | rerun N: rerun failed jobs for the current head
                | close N --reason TEXT: close a pull request
   review       draft N [--force] | check N: the review draft
   issue        close N --reason completed|not-planned: close an issue

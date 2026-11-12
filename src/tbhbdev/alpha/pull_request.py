@@ -13,6 +13,7 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr create [DRAFT] [--dry-run]
     tbhbdev alpha pr edit [DRAFT] --pr N
     tbhbdev alpha pr ready --pr N
+    tbhbdev alpha pr rerun N
     tbhbdev alpha pr hook claude|codex|antigravity
     tbhbdev alpha pr backfill-opened OWNER
 
@@ -79,6 +80,10 @@ contains one.
 
 ``ready --pr N`` marks pull request N ready for review with ``gh pr ready``. It
 doesn't read a draft.
+
+``rerun N`` reruns only the failed jobs of the latest run for pull request N's
+current head commit with ``gh run rerun --failed``. It reports an error when
+that run has not failed or no run exists. It doesn't read a draft.
 
 ``backfill-opened OWNER`` reads the body of every pull request, open or not,
 in every repository of OWNER, and adds each one to the ledger of every
@@ -1135,6 +1140,38 @@ def gh_json(argv: Sequence[str]) -> list[dict[str, object]]:
     return cast("list[dict[str, object]]", data)  # pragma: no mutate
 
 
+def rerun(number: int) -> int:
+    """Rerun the failed jobs of PR N's latest current-head run.
+
+    Raises:
+        SystemExit: gh can't read the pull request or its runs.
+    """
+    done = run([find_tool(GH), "pr", "view", str(number), "--json", "headRefOid"])
+    data = gh_data(done)
+    if not isinstance(data, dict):
+        why = " ".join((done.stderr or done.stdout).split())
+        message = f"cannot read the head of PR {number}: {why}"
+        raise SystemExit(message)
+    runs = gh_json(
+        [
+            "run",
+            "list",
+            "--commit",
+            str(data["headRefOid"]),
+            "--limit",
+            "1",
+            "--json",
+            "databaseId,conclusion",
+        ]
+    )
+    if not runs or runs[0]["conclusion"] != "failure":
+        print(f"no failed run for the current head of PR {number}", file=sys.stderr)
+        return 1
+    return invoke_gh([GH, "run", "rerun", str(runs[0]["databaseId"]), "--failed"], "")[
+        0
+    ]
+
+
 def body_roots(body: str) -> set[str]:
     """Every ``session=`` root hash on a body's LLM trailer lines."""
     found = (BACKFILL_KEYS.fullmatch(line.strip()) for line in body.splitlines())
@@ -1289,6 +1326,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub.add_parser("hook").add_argument("harness", choices=[CLAUDE, CODEX, ANTIGRAVITY])
     sub.add_parser("backfill-opened").add_argument("owner")
     sub.add_parser("ready").add_argument("--pr", type=int, required=True)
+    sub.add_parser("rerun").add_argument("pr", type=int)
     for name in ("check", "create", "edit"):
         one = sub.add_parser(name)
         one.add_argument("draft", nargs="?", type=Path, default=DRAFT)
@@ -1311,6 +1349,8 @@ def main(
         return hook(args.harness)
     if args.command == "backfill-opened":
         return backfill(args.owner)
+    if args.command == "rerun":
+        return rerun(args.pr)
     if args.command == "ready":
         # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
         # empty body: no test can tell `None` from `""`.

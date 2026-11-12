@@ -2914,6 +2914,102 @@ def test_backfill_stops_at_a_corrupt_ledger(world: World) -> None:
     assert path.read_text() == "{"
 
 
+@pytest.mark.parametrize("rc", [0, 3])
+def test_rerun_retries_failed_jobs_of_the_current_head(
+    world: World, capsys: pytest.CaptureFixture[str], rc: int
+) -> None:
+    head = "a" * 40
+    world.fake(
+        "gh",
+        rc=rc,
+        stdout="out\n",
+        stderr="err\n",
+        cases={
+            "pr view": {
+                "rc": 0,
+                "stdout": json.dumps({"headRefOid": head}),
+                "stderr": "",
+            },
+            "run list": gh_list([{"databaseId": 123, "conclusion": "failure"}]),
+        },
+    )
+    assert run_main("rerun", "45") == rc
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("out\n", "err\n")
+    calls = world.calls("gh")
+    assert [call["argv"] for call in calls] == [
+        ["pr", "view", "45", "--json", "headRefOid"],
+        [
+            "run",
+            "list",
+            "--commit",
+            head,
+            "--limit",
+            "1",
+            "--json",
+            "databaseId,conclusion",
+        ],
+        ["run", "rerun", "123", "--failed"],
+    ]
+    assert all(call["stdin"] == "" for call in calls)
+
+
+@pytest.mark.parametrize(
+    "runs",
+    [
+        [],
+        [{"databaseId": 123, "conclusion": "success"}],
+        [{"databaseId": 123, "conclusion": ""}],
+        [
+            {"databaseId": 123, "conclusion": "success"},
+            {"databaseId": 122, "conclusion": "failure"},
+        ],
+    ],
+)
+def test_rerun_reports_no_failed_run(
+    world: World, capsys: pytest.CaptureFixture[str], runs: list[dict[str, object]]
+) -> None:
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {
+                "rc": 0,
+                "stdout": json.dumps({"headRefOid": "a" * 40}),
+                "stderr": "",
+            },
+            "run list": gh_list(runs),
+        },
+    )
+    assert run_main("rerun", "45") == 1
+    assert capsys.readouterr().err == "no failed run for the current head of PR 45\n"
+    assert len(world.calls("gh")) == 2
+
+
+def test_rerun_reports_a_missing_pull_request(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.fake(
+        "gh",
+        rc=1,
+        stderr="Could not resolve to a PullRequest with the number of 45\n",
+    )
+    with pytest.raises(SystemExit) as info:
+        run_main("rerun", "45")
+    assert str(info.value) == (
+        "cannot read the head of PR 45: "
+        "Could not resolve to a PullRequest with the number of 45"
+    )
+    assert capsys.readouterr().out == ""
+    assert len(world.calls("gh")) == 1
+
+
+@pytest.mark.parametrize("argv", [("rerun",), ("rerun", "abc")])
+def test_rerun_requires_a_numeric_pr_number(argv: tuple[str, ...]) -> None:
+    with pytest.raises(SystemExit) as info:
+        run_main(*argv)
+    assert info.value.code == 2
+
+
 def test_ready_marks_the_pull_request_ready(world: World) -> None:
     assert run_main("ready", "--pr", "45") == 0
     (call,) = world.calls("gh")
