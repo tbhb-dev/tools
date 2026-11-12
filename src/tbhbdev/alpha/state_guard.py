@@ -161,7 +161,7 @@ EVIDENCE_CLAUSE_END = re.compile(r";|\b(?:and|but|however)\b", re.IGNORECASE)
 EVIDENCE_REFERENCE = re.compile(r"\s*[,;]\s*see\s+", re.IGNORECASE)
 ATTRIBUTED = re.compile(
     r"(?i:\bper\s+)(?!(?i:cent|percent|day|hour|minute|second|week|month|"
-    r"run|host|(?:CPU|GPU|[KMGT]i?B)(?!/)|"
+    r"run|host|(?:CPU|GPU|(?:K|M|G|T)i?B)(?!/)|"
     r"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
     r"January|February|March|April|May|June|July|August|September|October|"
     r"November|December|today|tonight|yesterday|tomorrow|now|morning|evening|"
