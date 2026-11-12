@@ -854,6 +854,7 @@ def test_secret_scan_runs_gitleaks_on_the_range(
         seen.append(command)
         assert kwargs["cwd"] == tmp_path
         assert kwargs["stdin"] is subprocess.DEVNULL
+        assert kwargs["timeout"] == push.SECRET_SCAN_TIMEOUT
         return subprocess.CompletedProcess(command, returncode, "", "")
 
     monkeypatch.setattr(subprocess, "run", gitleaks)
@@ -871,10 +872,24 @@ def test_secret_scan_runs_gitleaks_on_the_range(
             "--log-opts=base..head",
             "--redact",
             "--no-banner",
+            "--ignore-gitleaks-allow",
             "--exit-code=1",
             str(tmp_path),
         ]
     ]
+
+
+def test_secret_scan_refuses_a_hung_scanner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def hung(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(command, push.SECRET_SCAN_TIMEOUT)
+
+    monkeypatch.setattr(host_tools, "resolve", _identity)
+    monkeypatch.setattr(subprocess, "run", hung)
+    with pytest.raises(push.PushRefusedError) as caught:
+        SECRET_SCAN(tmp_path, "base", "head")
+    assert str(caught.value) == "secret scan unavailable"
 
 
 def test_secret_scan_refuses_without_gitleaks(

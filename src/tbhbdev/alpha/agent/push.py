@@ -24,6 +24,8 @@ if TYPE_CHECKING:
 
 
 PRIVATE_NAMES = ".local/state/tbhb/private-repos.txt"
+# A hung scanner must end in the status-4 refusal, not wait forever.
+SECRET_SCAN_TIMEOUT = 300
 
 
 class PushRefusedError(ValueError):
@@ -279,6 +281,7 @@ def secret_scan(directory: Path, before: str | None, commit: str) -> None:
                 f"--log-opts={before}..{commit}",
                 "--redact",
                 "--no-banner",
+                "--ignore-gitleaks-allow",
                 "--exit-code=1",
                 str(directory),
             ],
@@ -290,6 +293,7 @@ def secret_scan(directory: Path, before: str | None, commit: str) -> None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=SECRET_SCAN_TIMEOUT,
             check=False,
         )
     except Invalid, OSError, subprocess.SubprocessError:
