@@ -315,9 +315,21 @@ def sandbox(command: tuple[str, ...], *arguments: str) -> tuple[str, ...]:
     }
     words = iter(command)
     result = [next(words), "sandbox"]
+    default_permissions = None
+    copied_options: set[str] = set()
     for word in words:
         if word in options:
-            result.extend((word, next(words)))
+            value = next(words)
+            result.extend((word, value))
+            copied_options.add(word)
+            if word in {"-c", "--config"} and value.startswith("default_permissions="):
+                default_permissions = json.loads(
+                    value.removeprefix("default_permissions=")
+                )
         elif word in {"-s", "--sandbox"}:
             result.extend(("-c", f"sandbox_mode={_toml(next(words))}"))
+    if default_permissions is not None and not copied_options.intersection(
+        {"-P", "--permission-profile"}
+    ):
+        result.extend(("-P", default_permissions))
     return (*result, "--", *arguments)

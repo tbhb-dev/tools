@@ -847,8 +847,56 @@ def test_sandbox_command_keeps_the_harness_overrides(
         "codex",
         "sandbox",
         *expected,
+        "-P",
+        profile.value,
         "--",
         "/usr/bin/true",
+    )
+
+
+@pytest.mark.parametrize("option", ["-c", "--config"])
+@pytest.mark.parametrize("profile", ["build", 'quoted "profile"\\name\n', ""])
+def test_sandbox_command_names_the_default_permissions(
+    option: str, profile: str
+) -> None:
+    setting = f"default_permissions={json.dumps(profile)}"
+    assert argv.sandbox(("codex", "exec", option, setting, "-"), "true") == (
+        "codex",
+        "sandbox",
+        option,
+        setting,
+        "-P",
+        profile,
+        "--",
+        "true",
+    )
+
+
+@pytest.mark.parametrize("option", ["-P", "--permission-profile"])
+@pytest.mark.parametrize("before", [False, True])
+def test_sandbox_command_keeps_an_explicit_permission_profile(
+    option: str, *, before: bool
+) -> None:
+    config = ("-c", 'default_permissions="build"')
+    explicit = (option, "review")
+    options = (*explicit, *config) if before else (*config, *explicit)
+    assert argv.sandbox(("codex", *options, "-"), "true") == (
+        "codex",
+        "sandbox",
+        *options,
+        "--",
+        "true",
+    )
+
+
+def test_sandbox_command_without_default_permissions_adds_no_profile() -> None:
+    options = ("-c", 'other.default_permissions="build"', "--profile", "build")
+    assert argv.sandbox(("codex", *options, "-"), "true") == (
+        "codex",
+        "sandbox",
+        *options,
+        "--",
+        "true",
     )
 
 
