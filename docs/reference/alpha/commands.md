@@ -13,6 +13,8 @@ type: Reference
 
 # Alpha commands
 
+`tbhbdev.alpha.repo_token` is a library for the ops deployer. It uses explicit Connect credentials to request a token restricted to one repository and run Git with that token in memory.
+
 `tbhbdev alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`:
 
 - `pre-push-guard REMOTE URL` refuses non-fast-forward pushes and scans public pushes for private names in commit messages, added lines, and added or renamed paths. The installed pre-push hook runs it before prek with the same arguments and input. Public pushes require a readable, nonempty `~/.local/state/tbhb/private-repos.txt` alongside `[pr_check] private_repos`. The list’s header defines words that only match in repository paths. Nonempty `SKIP` or `PREK_SKIP` refuses the push. Install fails when a foreign pre-push hook exists and asks you to move it aside. No setting bypasses the guard. Git’s `--no-verify` skips all hooks. Standing rules prohibit it.
