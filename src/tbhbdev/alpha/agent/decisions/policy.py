@@ -54,6 +54,7 @@ GIT_CONFIG_PATHS = (
     ".git/commondir",
     ".git/hooks",
     ".git/info",
+    ".git/objects/info",
     ".git/modules",
 )
 

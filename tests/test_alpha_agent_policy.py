@@ -212,6 +212,7 @@ def assert_claude_denials(
                 "commondir",
                 "hooks",
                 "info",
+                "objects/info",
                 "modules",
             )
         ),
@@ -237,6 +238,7 @@ def assert_claude_denials(
             "commondir",
             "hooks",
             "info",
+            "objects/info",
             "modules",
         )
         for suffix in ("", "/**")
@@ -274,6 +276,7 @@ def codex_expected(
                     "commondir",
                     "hooks",
                     "info",
+                    "objects/info",
                     "modules",
                 )
             ),
@@ -460,6 +463,7 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
                 "commondir",
                 "hooks",
                 "info",
+                "objects/info",
                 "modules",
             )
         ],
@@ -893,6 +897,7 @@ def test_claude_review_denies_writes_to_the_git_common_directory(
             "commondir",
             "hooks",
             "info",
+            "objects/info",
             "modules",
         )
     )
@@ -1380,6 +1385,7 @@ def test_codex_protects_git_configuration_inside_build_write_root(
                     "commondir",
                     "hooks",
                     "info",
+                    "objects/info",
                     "modules",
                 )
             ),
@@ -1560,6 +1566,7 @@ def test_git_entry_and_all_configuration_paths_are_protected() -> None:
             "/commondir",
             "/hooks",
             "/info",
+            "/objects/info",
             "/modules",
         )
     )
