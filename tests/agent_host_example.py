@@ -6,12 +6,12 @@ import dataclasses
 import os
 import subprocess
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, TypedDict, Unpack
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
-    from pathlib import Path
 
     import pytest
 
@@ -22,11 +22,39 @@ from tbhbdev.alpha.agent import host_tools, model
 from tbhbdev.alpha.agent.decisions import request
 
 
+class HostGitOptions(TypedDict, closed=True):
+    env: dict[str, str]
+    text: Literal[True]
+    stderr: int
+    timeout: int
+    cwd: str | Path
+
+
+def isolate_host_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    output = subprocess.check_output
+
+    def checked(command: list[str], **kwargs: Unpack[HostGitOptions]) -> str:
+        if kwargs.get("cwd") == "/":
+            directory = Path(command[command.index("--git-dir") + 1])
+            assert directory.resolve().is_relative_to(tmp_path.resolve())
+            kwargs["cwd"] = directory.parent if directory.name == ".git" else directory
+        return output(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "check_output", checked)
+
+
 def git(path: Path, *args: str, env: dict[str, str] | None = None) -> str:
+    child = dict(os.environ if env is None else env)
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        child.pop(name, None)
+    child["HOME"] = str(path)
+    for name in ("CONFIG", "CACHE", "DATA", "STATE"):
+        child[f"XDG_{name}_HOME"] = str(path / name.lower())
     return subprocess.check_output(
         ["git", "-C", str(path), *args],
         stderr=subprocess.DEVNULL,
-        env=env,
+        env=child,
+        cwd=path,
         text=True,
         timeout=10,
     ).strip()

@@ -218,13 +218,6 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         check_settings, resolved, (*protected, *full_denies(run, resolved))
     )
     clone = Path(repo.clone_path(run.home, run.request.repo))
-    policy.protect_paths(
-        (
-            *(str(run.home / p) for p in check_settings.sandbox.write_roots),
-            *(str(run.home / p) for p in check_settings.sandbox.agy.build_write),
-        ),
-        (str(clone), str(clone.resolve())),
-    )
     write_roots = (
         resolved.codex_home,
         resolved.worktree,
@@ -234,6 +227,8 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         *check_settings.sandbox.write_roots,
         *check_settings.sandbox.agy.build_write,
     )
+    worktree.validate_writes(Path(resolved.worktree), clone, write_roots)
+    worktree.validate_hooks(Path(resolved.worktree), write_roots)
     name = (
         "agy-agent"
         if run.request.harness is Harness.AGY and run.request.profile is Profile.BUILD

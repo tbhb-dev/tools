@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import stat
 import subprocess  # nosec B404
 from functools import partial
 from pathlib import Path
@@ -47,6 +48,7 @@ recurse = false
 [remote "origin"]
 url = {url}
 """
+CHECKOUT_SCAN_DEPTH = 3
 
 
 def git(clone: Path, *args: str) -> str:
@@ -179,23 +181,97 @@ def fetch_commit(mirror: Path, request: RunRequest) -> str:
 def install_hooks(workspace: Path) -> None:
     hooks = workspace / ".git" / "hooks"
     hooks.mkdir(mode=0o700, exist_ok=True)
+    hooks.chmod(hooks.stat().st_mode | stat.S_IWUSR)
     prek = shlex.quote(host_tools.resolve("prek"))
+    scripts: dict[Path, str] = {}
     for name in ("pre-commit", "pre-push", *(p[0] for p in install.IDENTITY_HOOKS)):
         hook = hooks / (
             f"{name}.prek" if name not in ("pre-commit", "pre-push") else name
         )
-        hook.write_text(
-            f'#!/bin/sh\nexec {prek} hook-impl --hook-type {name} -- "$@"\n'
-        )
-        hook.chmod(0o755)
+        scripts[hook] = f'#!/bin/sh\nexec {prek} hook-impl --hook-type {name} -- "$@"\n'
     for name, verb in install.IDENTITY_HOOKS:
-        hook = hooks / name
-        hook.write_text(
-            install.SHIM.format(
-                mark=install.SHIM_MARK, verb=verb, hook=name, origin=install.ORIGIN_GREP
-            )
+        scripts[hooks / name] = install.SHIM.format(
+            mark=install.SHIM_MARK, verb=verb, hook=name, origin=install.ORIGIN_GREP
         )
-        hook.chmod(0o755)
+    for hook, content in scripts.items():
+        if hook.exists():
+            hook.chmod(hook.stat().st_mode | stat.S_IWUSR)
+        hook.write_text(content)
+    for entry in (*hooks.rglob("*"), hooks):
+        executable = entry.is_dir() or entry in scripts or entry.stat().st_mode & 0o111
+        entry.chmod(0o555 if executable else 0o444)
+
+
+def is_main_checkout(directory: Path) -> bool:
+    git_dir = directory / ".git"
+    common = git_dir / "commondir"
+    return git_dir.is_dir(follow_symlinks=False) and (
+        not common.exists()
+        or (git_dir / common.read_text().strip()).resolve() == git_dir.resolve()
+    )
+
+
+def _contained_checkouts(root: Path, workspace: Path | None) -> None:
+    for directory, children, _files in root.walk():
+        if directory != workspace and is_main_checkout(directory):
+            message = f"write root {root} contains main checkout {directory}"
+            raise Invalid(message)
+        if len(directory.relative_to(root).parts) >= CHECKOUT_SCAN_DEPTH:
+            children.clear()
+        if ".git" in children:
+            children.remove(".git")
+
+
+def validate_writes(workspace: Path, source: Path, writes: tuple[str, ...]) -> None:
+    """Check real paths on disk before granting any run a writable directory."""
+    workspace, source = workspace.resolve(), source.resolve()
+    own = workspace if workspace.parent == source / ".worktrees" else None
+    for root in (workspace, *(Path(p).resolve() for p in writes)):
+        for ancestor in (root, *root.parents):
+            if ancestor == own:
+                break
+            if is_main_checkout(ancestor):
+                message = f"write root {root} reaches main checkout {ancestor}"
+                raise Invalid(message)
+        if source.is_relative_to(root):
+            message = f"write root {root} contains main checkout {source}"
+            raise Invalid(message)
+        _contained_checkouts(root, own)
+
+
+def validate_hooks(workspace: Path, writes: tuple[str, ...]) -> None:
+    """Read every Git config scope with the host environment, before launch."""
+    if not (workspace / ".git").is_dir():
+        return
+    # The final command override disables hooks for this host-side query. Drop
+    # just that value from the result, retaining earlier command-scope values.
+    values = subprocess.check_output(  # nosec B603
+        [
+            host_tools.resolve("git"),
+            "-c",
+            "core.hooksPath=/dev/null",
+            "config",
+            "--path",
+            "--null",
+            "--get-all",
+            "core.hooksPath",
+        ],
+        cwd=workspace,
+        text=True,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+    ).split("\0")[:-2]
+    allowed = {(workspace / ".git/hooks").resolve(), Path("/dev/null")}
+    for value in values:
+        path = (workspace / value).resolve()
+        if path in allowed:
+            continue
+        writable = next(
+            (p for p in writes if path.is_relative_to(Path(p).resolve())), None
+        )
+        reason = "" if writable is None else f" under write root {writable}"
+        message = f"core.hooksPath {path}{reason} is not the workspace hooks directory"
+        raise Invalid(message)
 
 
 def clone_run(mirror: Path, workspace: Path, url: str) -> None:

@@ -360,6 +360,31 @@ def hook_marker(workspace: Path, root: Path) -> Path:
     return marker
 
 
+def hooks_write_probe(workspace: Path) -> tuple[str, ...]:
+    hooks = workspace / ".git/hooks"
+    hooks.mkdir(parents=True)
+    existing = hooks / "probe-existing"
+    existing.write_text("original\n")
+    existing.chmod(0o444)
+    hooks.chmod(0o555)
+    return (
+        sys.executable,
+        "-c",
+        (
+            "import sys\nfrom pathlib import Path\n"
+            "allowed = False\n"
+            "for name in sys.argv[1:]:\n"
+            " try:\n"
+            "  with Path(name).open('a') as stream: stream.write('changed')\n"
+            "  allowed = True\n"
+            " except OSError: pass\n"
+            "sys.exit(0 if allowed else 1)\n"
+        ),
+        str(hooks / "probe-new"),
+        str(existing),
+    )
+
+
 def live_extra(
     mirrors: tuple[MirrorProbe, ...], control_file: Path, curl: str, control: Proxy
 ) -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -497,9 +522,6 @@ def run_probe(
     results = run.tmpdir / "observed"
     curl = shutil.which("curl")
     assert curl, "curl is required for live probes"
-    calls = probe_calls(
-        sockets, curl, results, live_extra(mirrors, control_file, curl, control)
-    )
     run = dataclasses.replace(
         run,
         settings=dataclasses.replace(
@@ -514,6 +536,15 @@ def run_probe(
         ),
     )
     value, installed = run_host.checked_policy(run, paths)
+    calls = probe_calls(
+        sockets,
+        curl,
+        results,
+        (
+            *live_extra(mirrors, control_file, curl, control),
+            ("hooks-write", hooks_write_probe(Path(paths.worktree))),
+        ),
+    )
     for call in calls:
         script = root / f"{call.label}.sh"
         script.write_text(call.text)
