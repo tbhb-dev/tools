@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import grp
+import hashlib
 import io
 import json
 import os
@@ -494,6 +495,79 @@ def test_finish_orders_cleanup_auth_agent_index_and_atomic_rc(
         assert entries[0]["worktree"] == prepared.paths.worktree
         assert entries[0]["state"] == "running"
         assert entries[0]["rc"] is None
+
+
+@pytest.mark.parametrize("code", [0, 7], ids=["finished", "failed"])
+def test_finished_run_writes_host_audit_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    run = make_run(tmp_path)
+    prepared = preparation(run)
+    _, workspace = repository(tmp_path / "repository")
+    prepared = dataclasses.replace(
+        prepared, paths=dataclasses.replace(prepared.paths, worktree=str(workspace))
+    )
+    head = subprocess.check_output(
+        ["git", "-C", str(workspace), "rev-parse", "HEAD"], text=True
+    ).strip()
+
+    def harness(*_args: object) -> int:
+        audit = Path(prepared.paths.audit_dir)
+        (audit / "nested").mkdir(parents=True)
+        (audit / "nested" / "event.json").write_bytes(b"event\n")
+        (audit / "empty").write_bytes(b"")
+        (audit / "link").symlink_to(workspace / "tracked")
+        return code
+
+    monkeypatch.setattr(run_host, "preflight", constant(None))
+    monkeypatch.setattr(process_group, "prepare", constant(prepared))
+    monkeypatch.setattr(run_host, "run_harness", harness)
+    assert run_host.execute(run, "example") == code
+    summary = run.files.path("audit.json")
+    assert summary.parent == run.files.path("rc").parent
+    assert summary.stat().st_mode & 0o777 == 0o600
+    assert json.loads(summary.read_text()) == {
+        "rc": code,
+        "head": head,
+        "branch": "main",
+        "files": {
+            "empty": hashlib.sha256(b"").hexdigest(),
+            "nested/event.json": hashlib.sha256(b"event\n").hexdigest(),
+        },
+    }
+
+
+def test_failed_preparation_still_writes_host_audit_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+
+    def refuse(_run: run_host.Run) -> None:
+        message = "preflight refused"
+        raise Invalid(message)
+
+    monkeypatch.setattr(run_host, "preflight", refuse)
+    assert run_host.execute(run, "example") == 1
+    assert json.loads(run.files.path("audit.json").read_text()) == {
+        "rc": 1,
+        "head": None,
+        "branch": None,
+        "files": {},
+    }
+
+
+def test_audit_summary_error_preserves_the_runs_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+
+    def fail(*_args: object) -> None:
+        raise OSError
+
+    monkeypatch.setattr(run_host, "audit_summary", fail)
+    assert run_host.finish(run, None, None, 7) == 7
+    assert run.files.path("rc").read_text() == "7\n"
+    assert run.files.path("log").read_text() == "audit summary write failed\n"
 
 
 def test_interrupt_and_agent_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
