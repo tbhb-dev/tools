@@ -154,6 +154,7 @@ class Settings:
     ssh_connect_timeout: int = 15
     ssh_keepalive_seconds: int = 30
     ssh_keepalive_count_max: int = 3
+    public_repos: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

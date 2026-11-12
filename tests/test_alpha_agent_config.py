@@ -31,6 +31,23 @@ STRINGS = "must be a non-empty list of non-blank strings"
 POSITIVE = "must be a positive integer"
 DURATION = "must be bare seconds or a number ending in s, m or h, up to 7 days"
 
+
+@pytest.mark.parametrize("entries", [[], ["tbhb-dev/tools", "github.com/a/b"]])
+def test_public_repositories(entries: list[str]) -> None:
+    assert config.parse(GOOD | {"public_repos": entries}).public_repos == tuple(entries)
+    assert config.parse(GOOD).public_repos == ()
+
+
+@pytest.mark.parametrize("entries", [None, "a/b", [1], [""], ["../b"]])
+def test_public_repositories_refuse_invalid_entries(entries: object) -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(GOOD | {"public_repos": entries})
+    reason = (
+        "must contain valid repository arguments" if entries == ["../b"] else STRINGS
+    )
+    assert str(caught.value) == f"[agent] public_repos {reason}"
+
+
 UNSAFE_REFERENCES = [
     "a b/c/d",
     "a/b c/d",
