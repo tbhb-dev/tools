@@ -43,7 +43,7 @@ def helper(fd: int) -> str:
         'while IFS= read -r line && [ -n "$line" ]; do case "$line" in '
         "protocol=https) protocol=yes ;; host=github.com) host=yes ;; esac; done; "
         '[ "$protocol:$host" = yes:yes ] || exit 1; '
-        f"IFS= read -r token <&{fd} || exit 1; "
+        f"IFS= read -r token </dev/fd/{fd} || exit 1; "
         'printf "username=x-access-token\\npassword=%s\\n\\n" "$token"; }; f'
     )
 
