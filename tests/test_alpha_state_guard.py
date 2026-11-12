@@ -1263,7 +1263,7 @@ def fill_pipe(read_fd: int, write_fd: int, free: int) -> None:
 
 
 @pytest.mark.parametrize(("extra", "tagged"), [(0, True), (1, False)])
-def test_the_tagged_output_cap_never_blocks_on_an_undrained_pipe(
+def test_the_tagged_output_cap_never_blocks_on_a_pipe_nobody_reads(
     config_file: Path, extra: int, tagged: bool
 ) -> None:
     read_fd, write_fd = os.pipe()
