@@ -278,3 +278,7 @@ def test_one_widening_rule_fails_the_differential(
 
 def test_head_judges_every_grid_sentence_as_main_does() -> None:
     assert all(main_blocks(s) == head_blocks(s) for s in generated_corpus())
+
+
+def test_the_exemption_set_is_empty() -> None:
+    assert state_guard.EXEMPTIONS == ()
