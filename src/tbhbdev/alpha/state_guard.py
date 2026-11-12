@@ -104,9 +104,6 @@ SUBJECT = (
     r"(?:(?:the|a|an|this|that|our|your|my)\s+\w+|"
     r"(?:it|that|there|he|she|what|who|here)['\u2019]s|\w+)"
 )
-STATUS_ADVERBS = (
-    r"(?:(?:not|never|soon|still|also|just|now|then|perhaps|already|\w+ly)\s+)*"
-)
 CLAIM_QUALIFIER = re.compile(
     r"(?:\b(?:not(?!\s+(?:only|just)\b)|never|no(?=\s+longer\b))|n['\u2019]t)\s*"
     r"(?:longer\s+|approved[,\s]+|or\s+)*"
