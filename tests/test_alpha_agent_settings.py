@@ -262,6 +262,31 @@ def test_config_check_accepts_unrelated_write_paths(
     assert capsys.readouterr() == ("example agent: configuration valid\n", "")
 
 
+def test_config_check_refuses_write_paths_under_the_shell_config_directory(
+    config_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = config_file.parent.parent / "agent"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("ZDOTDIR", ".shell-config")
+    config_file.write_text(
+        EXAMPLE.replace(
+            'audit_dir = ".local/state/example-audit"',
+            'audit_dir = ".shell-config/audit"',
+        )
+    )
+
+    assert agent.main([], "example agent") == 1
+    assert capsys.readouterr() == (
+        "",
+        (
+            f"example agent: protected host path {home}/.shell-config "
+            f"overlaps write root {home}/.shell-config/audit; narrow that write root\n"
+        ),
+    )
+
+
 @pytest.mark.parametrize(
     ("argv", "rc"), [(["--help"], 0), (["exec", "x"], 2), (["-x"], 2)]
 )
