@@ -269,14 +269,16 @@ testpaths = ["tests"]
 [tool.mutmut]
 source_paths = ["src"]
 do_not_mutate = ["tests/*"]
-# The alpha pr tests read the repository's own PR template, schemas and lint
-# configs, which mutmut doesn't copy into mutants/ by itself.
+# Tests read the repository's own PR template, schemas, lint configs, hook
+# config and docs pages, which mutmut doesn't copy into mutants/ by itself.
 also_copy = [
   ".cspell-words.txt",
   ".cspell.jsonc",
   ".github",
+  ".pre-commit-config.yaml",
   ".rumdl.toml",
   ".vale.ini",
+  "docs",
 ]
 
 [tool.ruff]
