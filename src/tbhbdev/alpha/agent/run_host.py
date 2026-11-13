@@ -608,14 +608,19 @@ def argv_log_line(command: tuple[str, ...]) -> str:
     the run's environment hold credential-adjacent values, so they stay out.
     """
     shown: list[str] = []
-    previous = ""
-    for word in command:
-        if previous == "-c" and word.startswith(ENV_OVERRIDE):
+    for index, word in enumerate(command):
+        if index and command[index - 1] == "-c" and word.startswith(ENV_OVERRIDE):
             shown.pop()
         else:
             shown.append(word)
-        previous = word
     return "argv: " + shlex.join(shown)
+
+
+def log_argv(run: Run, command: tuple[str, ...]) -> None:
+    if run.request.harness is Harness.CODEX:
+        # A failed log write must not stop the run, as with the cleanup notices.
+        with suppress(OSError):
+            run.files.write("log", argv_log_line(command) + "\n")
 
 
 def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
@@ -623,10 +628,7 @@ def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
     value, executable = checked_policy(run, paths)
     env = value.env | prepared.delivery.env
     command = harness_command(run, prepared, value, executable)
-    if run.request.harness is Harness.CODEX:
-        # A failed log write must not stop the run, as with the cleanup notices.
-        with suppress(OSError):
-            run.files.write("log", argv_log_line(command) + "\n")
+    log_argv(run, command)
     headless = run.request.kind is RunKind.EXEC
     terminal = None if headless else sys.stdin.fileno()
     streams = (None, None, None)

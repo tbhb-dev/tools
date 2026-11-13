@@ -10,6 +10,7 @@ import itertools
 import json
 import shlex
 import tomllib
+from pathlib import PurePosixPath
 
 import pytest
 from agent_example import (
@@ -286,6 +287,24 @@ def test_the_codex_profile_is_valid_toml_with_the_policy_entries(
     assert fs[":root"] == "read"
     writes = [p for p, mode in fs.items() if mode == "write"]
     assert (WORKTREE in writes) is (profile is Profile.BUILD)
+
+
+@pytest.mark.parametrize("profile", Profile)
+def test_codex_table_denies_a_token_child_through_its_parent(profile: Profile) -> None:
+    original = settings()
+    parent = PurePosixPath(HOME) / PurePosixPath(TOKEN_DIR).parent
+    child = PurePosixPath(HOME) / TOKEN_DIR
+    sandbox = dataclasses.replace(
+        original.sandbox, denied_home_paths=(str(parent.relative_to(HOME)),)
+    )
+    config = dataclasses.replace(original, sandbox=sandbox)
+    result = built(Harness.CODEX, RunKind.EXEC, profile, os=Os.LINUX, config=config)
+    flag = f"permissions.{profile.value}="
+    value = next(a for a in result if a.startswith(flag)).removeprefix(flag)
+    fs = tomllib.loads(f"profile = {value}")["profile"]["filesystem"]
+    assert fs[str(parent)] == "none"
+    assert str(child) not in fs
+    assert parent in child.parents
 
 
 def test_macos_codex_denies_the_private_alias_too() -> None:
