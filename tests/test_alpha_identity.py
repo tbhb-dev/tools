@@ -8039,3 +8039,82 @@ def test_cmd_trailer_in_a_rebase_is_never_a_pick(
         (line,) = ai.llm_trailers(after)
         assert line[0] == ai.KEY_GEN
         assert claims_of(repo)
+
+
+def test_agy_1_5_7_session_record_renders_the_spike_trailer(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spike S-000001 (agy 1.5.7): a hook with no version or surface in its env.
+
+    The hook stores the raw `modelName` key. The commit's env supplies the
+    version and surface, and the trailer maps the model and effort.
+    """
+    data = agy_post(workspacePaths=[str(repo)], modelName="gemini-4-argon-high")
+    feed(monkeypatch, data)
+    assert ai.cmd_record("antigravity", {}) == 0
+    rec = ai.load_record(ai.sha256_64(CONV))
+    assert rec["model"] == "gemini-4-argon-high"
+    commit_env = {"ANTIGRAVITY_LS_VERSION": "cli-1.5.7"}
+    ident = ai.agy_ident(CONV, rec, commit_env)
+    session = ai.sha256_64(CONV)
+    assert ai.format_value(ident.attrs()) == (
+        "LLM effort=high;harness=antigravity:1.5.7;model=gcp.gemini:gemini-4-argon;"
+        f"session={session};surface=cli"
+    )
+
+
+def test_agy_1_5_7_commit_path_stamps_the_spike_trailer(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (repo / "hello.txt").write_text("hi\n", encoding="utf-8")
+    data = agy_post(workspacePaths=[str(repo)], modelName="gemini-4-argon-high")
+    feed(monkeypatch, data)
+    assert ai.cmd_record("antigravity", {}) == 0
+    stage(repo, "hello.txt", "hi\n")
+    env = {
+        "ANTIGRAVITY_CONVERSATION_ID": CONV,
+        "ANTIGRAVITY_LS_VERSION": "cli-1.5.7",
+    }
+    path = msg_file(tmp_path)
+    assert ai.cmd_trailer(str(path), None, env) == 0
+    session = ai.sha256_64(CONV)
+    assert path.read_text(encoding="utf-8") == (
+        "subject\n\nbody\n\n"
+        "Generated-by: LLM effort=high;harness=antigravity:1.5.7;"
+        f"model=gcp.gemini:gemini-4-argon;session={session};surface=cli\n"
+    )
+
+
+AGY_TABLE_ROWS = {
+    "claude-opus-5-5-high": ("anthropic", "claude-opus-5-5", "high"),
+    "claude-opus-5-5-low": ("anthropic", "claude-opus-5-5", "low"),
+    "claude-opus-5-5-medium": ("anthropic", "claude-opus-5-5", "medium"),
+    "claude-sonnet-5-5-high": ("anthropic", "claude-sonnet-5-5", "high"),
+    "claude-sonnet-5-5-low": ("anthropic", "claude-sonnet-5-5", "low"),
+    "claude-sonnet-5-5-medium": ("anthropic", "claude-sonnet-5-5", "medium"),
+    "gemini-3.8-flash-high": ("gcp.gemini", "gemini-3.8-flash", "high"),
+    "gemini-3.8-flash-low": ("gcp.gemini", "gemini-3.8-flash", "low"),
+    "gemini-3.8-flash-medium": ("gcp.gemini", "gemini-3.8-flash", "medium"),
+    "gemini-4-argon-high": ("gcp.gemini", "gemini-4-argon", "high"),
+    "gemini-4-argon-low": ("gcp.gemini", "gemini-4-argon", "low"),
+    "gemini-4-argon-medium": ("gcp.gemini", "gemini-4-argon", "medium"),
+    "gemini-4-carbon-high": ("gcp.gemini", "gemini-4-carbon", "high"),
+    "gemini-4-carbon-low": ("gcp.gemini", "gemini-4-carbon", "low"),
+    "gemini-4-carbon-medium": ("gcp.gemini", "gemini-4-carbon", "medium"),
+    "gemini-4-hydrogen-high": ("gcp.gemini", "gemini-4-hydrogen", "high"),
+    "gemini-4-hydrogen-low": ("gcp.gemini", "gemini-4-hydrogen", "low"),
+    "gemini-4-hydrogen-medium": ("gcp.gemini", "gemini-4-hydrogen", "medium"),
+    "gemini-4-hydrogen-xhigh": ("gcp.gemini", "gemini-4-hydrogen", "xhigh"),
+    "gemini-pro-orchestrator": ("gcp.gemini", "gemini-pro-orchestrator", None),
+    "gemini-pro-orchestrator-argon": (
+        "gcp.gemini",
+        "gemini-pro-orchestrator-argon",
+        None,
+    ),
+    "gpt-oss-120b-medium": ("openai", "gpt-oss-120b", "medium"),
+}
+
+
+def test_agy_models_table_rows_are_exact() -> None:
+    """Every row, so swapped ids or efforts between keys fail."""
+    assert ai.AGY_MODELS == AGY_TABLE_ROWS
