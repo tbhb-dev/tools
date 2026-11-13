@@ -17,6 +17,7 @@ import tempfile
 import time
 import tomllib
 from contextlib import ExitStack, contextmanager
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -26,6 +27,8 @@ from agent_host_example import (
     constant,
     host_settings,
     isolate_host_git,
+    local_mirror_fetches,
+    preparation_failure,
     repository,
     run_request,
     trusted_host_stat,
@@ -188,6 +191,141 @@ def preparation(run: run_host.Run) -> run_host.Prepared:
     )
 
 
+@pytest.mark.parametrize("hook_tools", ["missing", "directory", "file"])
+@pytest.mark.parametrize("kind", RunKind)
+def test_preflight_prepares_and_stops_signing_without_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: RunKind, hook_tools: str
+) -> None:
+    run = make_run(tmp_path, kind=kind.value)
+    (run.home / ".bazel_env" / "bin").mkdir(parents=True)
+    prepared = dataclasses.replace(
+        preparation(run),
+        delivery=credentials.Delivery(
+            {}, "example-key", gh_fallback=False, claude_profile=None
+        ),
+    )
+    events: list[str] = []
+    original_harness = run_host.run_harness
+
+    def harness(
+        value: run_host.Run,
+        ready: run_host.Prepared,
+        stack: ExitStack,
+        *,
+        preflight_only: bool = False,
+    ) -> int:
+        assert isinstance(stack, ExitStack)
+        assert preflight_only is True
+        return original_harness(value, ready, stack, preflight_only=preflight_only)
+
+    def prepare(operation: Callable[[], object], *_args: object) -> object:
+        events.append("prepare")
+        return operation()
+
+    def workspace(value: run_host.Run) -> run_host.Prepared:
+        assert value is run
+        events.append("workspace")
+        tools = Path(prepared.paths.worktree) / ".bazel_env" / "bin"
+        tools.parent.mkdir()
+        if hook_tools == "directory":
+            tools.mkdir()
+        elif hook_tools == "file":
+            tools.touch()
+        return prepared
+
+    def sign(key: str, tmpdir: Path, deadline: float) -> Child:
+        assert (key, tmpdir, deadline) == ("example-key", run.tmpdir, run.deadline)
+        events.append("sign")
+        return Child()
+
+    def stop(child: Child) -> bool:
+        assert child.pid == Child.pid
+        events.append("stop")
+        return True
+
+    def command(
+        value: run_host.Run, ready: run_host.Prepared, policy: Policy, executable: str
+    ) -> tuple[str, ...]:
+        assert value is run
+        assert ready is prepared
+        assert policy.env
+        assert Path(executable).is_absolute()
+        events.append("command")
+        return (executable,)
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("preflight must never launch or push")
+
+    monkeypatch.setattr(process_group, "prepare", prepare)
+    monkeypatch.setattr(run_host, "prepare_workspace", workspace)
+    monkeypatch.setattr(run_host, "run_harness", harness)
+    monkeypatch.setattr(credentials, "signing_agent", sign)
+    monkeypatch.setattr(run_host, "stop_agent", stop)
+    monkeypatch.setattr(run_host, "harness_command", command)
+    monkeypatch.setattr(process_group, "launch_owned", unexpected)
+    monkeypatch.setattr(run_host.push, "run", unexpected)
+    assert run_host.execute(run, "example", preflight_only=True) == 0
+    assert events == ["prepare", "workspace", "sign", "command", "stop"]
+    status = (
+        "present"
+        if hook_tools == "directory"
+        else "missing; commit hooks that call .bazel_env/bin will fail in this run"
+    )
+    assert run.files.path("log").read_text() == (
+        f"preflight: .bazel_env {status}\n"
+        f"preflight ok: {run.home.parent / 'host-bin' / 'true'}\n"
+    )
+    assert run.files.path("rc").read_text() == "0\n"
+    assert run.files.path("phase").read_text() == "ended"
+    assert runfiles.latest(run.files.root)["example"]["rc"] == 0
+    assert not run.files.path("launched").exists()
+
+
+def test_hook_tools_checks_the_exact_run_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    prepared = preparation(run)
+    expected = Path(prepared.paths.worktree) / ".bazel_env" / "bin"
+    checked: list[Path] = []
+    original = Path.is_dir
+
+    def is_dir(path: Path) -> bool:
+        checked.append(path)
+        return original(path)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir)
+    run_host.log_hook_tools(run, prepared.paths)
+    assert expected in checked
+
+
+@pytest.mark.parametrize(
+    "step", ["credential delivery", "audit directory", "codex auth copy"]
+)
+@pytest.mark.parametrize(
+    "error", [OSError, ValueError, Invalid, subprocess.CalledProcessError]
+)
+def test_workspace_failure_names_only_its_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, error: type[Exception]
+) -> None:
+    run = make_run(tmp_path)
+    monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
+    monkeypatch.setattr(run_host.worktree, "create", constant(run.home / "workspace"))
+
+    fail = partial(preparation_failure, error)
+
+    if step == "credential delivery":
+        monkeypatch.setattr(credentials, "deliver", fail)
+    elif step == "audit directory":
+        monkeypatch.setattr(runfiles, "private_dir", fail)
+    else:
+        monkeypatch.setattr(credentials, "auth_copy", fail)
+    with pytest.raises(Invalid) as caught:
+        run_host.prepare_workspace(run)
+    assert str(caught.value) == f"run preparation failed at {step}"
+    assert "sensitive" not in str(caught.value)
+
+
 @pytest.mark.parametrize("harness", Harness)
 def test_prepare_uses_one_worktree_and_private_destinations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
@@ -204,9 +342,7 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     _, clone = repository(run.home / "Code" / "github.com" / "example-org")
     clone.rename(clone.parent / "example-repo")
     clone = clone.parent / "example-repo"
-    monkeypatch.setattr(
-        run_host.worktree.repo, "ssh_url", constant(str(clone.parent / "origin"))
-    )
+    local_mirror_fetches(monkeypatch, clone.parent / "origin")
     commit = subprocess.check_output(
         ["git", "-C", str(clone), "rev-parse", "HEAD"], text=True
     ).strip()
@@ -263,7 +399,13 @@ def test_build_preparation_has_the_run_socket(
 ) -> None:
     run = make_run(tmp_path)
 
-    def create(_clone: Path, _name: str, _value: run_host.RunRequest) -> Path:
+    def create(
+        _clone: Path,
+        _name: str,
+        _value: run_host.RunRequest,
+        public_repos: tuple[str, ...],
+    ) -> Path:
+        assert public_repos == run.settings.public_repos
         return runfiles.private_dir(run.home / "worktree")
 
     monkeypatch.setattr(run_host.worktree, "create", create)
@@ -382,6 +524,7 @@ def test_launch_uses_the_policy_and_marks_only_after_spawn(
         ("phase", "exited"),
         ("phase", "stopped"),
     ]
+    assert not any("preflight:" in text for suffix, text in metadata if suffix == "log")
     assert child.waits == [60 if kind is RunKind.EXEC else 900, None]
     assert run.files.path("out").exists() is (kind is RunKind.EXEC)
 
@@ -611,7 +754,15 @@ def test_hidden_dispatch_reads_request_and_restores_handlers(
         s: signal.getsignal(s) for s in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
     }
 
-    def execute(run: run_host.Run, text: str) -> int:
+    def execute(
+        run: run_host.Run,
+        text: str,
+        push_token: str | None = None,
+        *,
+        preflight_only: bool = False,
+    ) -> int:
+        assert preflight_only is False
+        assert push_token is None
         assert run.settings == expected_settings
         assert run.request.claude_profile == "primary"
         assert run.files.root == files.root
@@ -818,9 +969,7 @@ def test_startup_deadline_stops_the_recorded_setup_group(
     run = make_run(tmp_path)
     _, clone = repository(run.home / "Code" / "github.com" / "example-org")
     clone.rename(clone.parent / "example-repo")
-    monkeypatch.setattr(
-        run_host.worktree.repo, "ssh_url", constant(str(clone.parent / "origin"))
-    )
+    local_mirror_fetches(monkeypatch, clone.parent / "origin")
     run = dataclasses.replace(run, deadline=time.monotonic() + 5)
     original = run_host.worktree.git
     ready = tmp_path / "setup-child.json"
@@ -1079,7 +1228,15 @@ def test_host_defaults_use_fake_home_and_configured_machine(
     files.receive(run_request())
     files.write("prompt", "example task")
 
-    def execute(run: run_host.Run, text: str) -> int:
+    def execute(
+        run: run_host.Run,
+        text: str,
+        push_token: str | None = None,
+        *,
+        preflight_only: bool = False,
+    ) -> int:
+        assert preflight_only is False
+        assert push_token is None
         assert run.files.root == root
         assert run.host.name == "example-linux"
         assert text == "example task"
@@ -1121,7 +1278,15 @@ def test_host_passes_configured_full_access_authorization(
     )
     files.write("prompt", "example task")
 
-    def execute(run: run_host.Run, _text: str) -> int:
+    def execute(
+        run: run_host.Run,
+        _text: str,
+        push_token: str | None = None,
+        *,
+        preflight_only: bool = False,
+    ) -> int:
+        assert preflight_only is False
+        assert push_token is None
         assert run.request.unsandboxed is True
         assert run.request.authorized_by == "operator-chat-2026-11-09"
         return 37
@@ -1942,9 +2107,15 @@ def test_execute_scopes_the_mac_host_path(
     before = host_tools.search()
 
     def execute(
-        actual: run_host.Run, text: str, stack: ExitStack, push_token: str | None = None
+        actual: run_host.Run,
+        text: str,
+        stack: ExitStack,
+        push_token: str | None = None,
+        *,
+        preflight_only: bool = False,
     ) -> int:
         assert push_token is None
+        assert preflight_only is False
         assert actual is run
         assert text == "task"
         assert isinstance(stack, ExitStack)
@@ -2892,7 +3063,15 @@ def test_late_temporary_cleanup_keeps_finished_records(
             yield value
         raise OSError
 
-    def execute(_run: run_host.Run, _text: str) -> int:
+    def execute(
+        _run: run_host.Run,
+        _text: str,
+        push_token: str | None = None,
+        *,
+        preflight_only: bool = False,
+    ) -> int:
+        assert preflight_only is False
+        assert push_token is None
         run.files.write("log", "harness log\n")
         run.files.write("phase", "ended")
         run.files.write("rc", "7\n")
@@ -3978,7 +4157,14 @@ def test_main_passes_in_memory_push_token(
     synthetic = "synthetic-push-value"
     monkeypatch.setattr(run_host, "_load", constant((run, "task")))
 
-    def execute(actual: run_host.Run, text: str, push_token: str | None = None) -> int:
+    def execute(
+        actual: run_host.Run,
+        text: str,
+        push_token: str | None = None,
+        *,
+        preflight_only: bool = False,
+    ) -> int:
+        assert preflight_only is False
         assert actual is run
         assert text == "task"
         assert push_token == synthetic
@@ -4217,6 +4403,98 @@ def test_main_logs_build_provenance(
         f"tbhbdev tools_commit={expected['tools_commit']} "
         f"wheel_commit={expected['wheel_commit']}\n"
     )
+
+
+def test_preflight_flag_reaches_execute(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file.write_text(EXAMPLE)
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev" / "agent-runs", "example"
+    )
+    files.receive(run_request())
+    files.write("prompt", "example")
+
+    def execute(
+        run: run_host.Run,
+        text: str,
+        push_token: str | None = None,
+        *,
+        preflight_only: bool = False,
+    ) -> int:
+        assert run.files.name == "example"
+        assert text == "example"
+        assert push_token is None
+        assert preflight_only is True
+        return 0
+
+    monkeypatch.setattr(run_host, "execute", execute)
+    assert (
+        run_host.main(["example", "--host", "example-linux", "--preflight"], "run-host")
+        == 0
+    )
+
+
+@pytest.mark.parametrize("kind", RunKind)
+def test_codex_preflight_without_github_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: RunKind
+) -> None:
+    run = make_run(tmp_path, kind=kind.value)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            credentials=tuple(
+                dataclasses.replace(c, gh=None) for c in run.settings.credentials
+            ),
+        ),
+    )
+    prepared = preparation(run)
+    original_command = run_host.harness_command
+    commands: list[tuple[str, ...]] = []
+
+    def command(
+        value: run_host.Run, ready: run_host.Prepared, policy: Policy, executable: str
+    ) -> tuple[str, ...]:
+        result = original_command(value, ready, policy, executable)
+        overrides = "\n".join(
+            value for index, value in enumerate(result) if result[index - 1] == "-c"
+        )
+        env = tomllib.loads(overrides)["shell_environment_policy"]["set"]
+        assert env["GH_CONFIG_DIR"] == str(run.tmpdir / "gh")
+        assert env["GH_CONFIG_DIR"] == f"{env['TMPDIR']}/gh"
+        commands.append(result)
+        return result
+
+    monkeypatch.setattr(process_group, "prepare", constant(prepared))
+    monkeypatch.setattr(run_host, "harness_command", command)
+    assert run_host.execute(run, "example", preflight_only=True) == 0
+    assert len(commands) == 1
+    assert f"preflight ok: {commands[0][0]}\n" in run.files.path("log").read_text()
+    assert run.files.path("rc").read_text() == "0\n"
+    assert not run.files.path("launched").exists()
+
+
+@pytest.mark.parametrize("error", [KeyError, TypeError])
+@pytest.mark.parametrize("preflight_only", [False, True])
+def test_harness_command_failure_names_only_its_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: type[Exception],
+    preflight_only: bool,
+) -> None:
+    run = make_run(tmp_path)
+    monkeypatch.setattr(process_group, "prepare", constant(preparation(run)))
+    monkeypatch.setattr(
+        run_host, "harness_command", partial(preparation_failure, error)
+    )
+    assert run_host.execute(run, "example", preflight_only=preflight_only) == 1
+    assert run.files.path("log").read_text() == (
+        "run failed while building the harness command\n"
+    )
+    assert run.files.path("rc").read_text() == "1\n"
+    assert run.files.path("phase").read_text() == "ended"
+    assert not run.files.path("launched").exists()
 
 
 @pytest.mark.parametrize(
