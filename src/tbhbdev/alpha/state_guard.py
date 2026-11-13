@@ -338,26 +338,31 @@ def tag_sentences(text: str) -> tuple[str, list[str]]:
     return "".join(parts), sentences
 
 
-def open_log(directory: Path, name: str = "tagged.jsonl") -> int:
-    """A descriptor for the private log NAME; refuses symlinks and special files.
+def open_directory(directory: Path) -> int:
+    """A descriptor for the private state DIRECTORY; refuses a symlinked leaf.
 
-    O_NOFOLLOW covers the last directory and the file only. A symlinked parent of
-    the state directory still redirects the log, so the state home must be trusted.
+    O_NOFOLLOW covers the last directory only. A symlinked parent of the state
+    directory still redirects the log, so the state home must be trusted.
     """
     # fchmod below fixes the mode, so the mkdir mode and the read flag can't matter.
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)  # pragma: no mutate
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    dir_fd = os.open(directory, flags)
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fchmod(dir_fd, 0o700)
-        fd = os.open(
-            name,
-            os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
-            0o600,
-            dir_fd=dir_fd,
-        )
-    finally:
+    except BaseException:
         os.close(dir_fd)
+        raise
+    return dir_fd
+
+
+def open_log_in(dir_fd: int, name: str) -> int:
+    """A descriptor for the private log NAME in DIR_FD; refuses special files."""
+    fd = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
+        0o600,
+        dir_fd=dir_fd,
+    )
     try:
         info = os.fstat(fd)
         if (
@@ -377,21 +382,31 @@ def open_log(directory: Path, name: str = "tagged.jsonl") -> int:
     return fd
 
 
-def prune_blocks(directory: Path, today: datetime) -> None:
-    """Delete block logs dated before the retention window; skip invalid dates."""
+def open_log(directory: Path, name: str = "tagged.jsonl") -> int:
+    """A descriptor for the private log NAME; refuses symlinks and special files."""
+    dir_fd = open_directory(directory)
+    try:
+        return open_log_in(dir_fd, name)
+    finally:
+        os.close(dir_fd)
+
+
+def prune_blocks(dir_fd: int, today: datetime) -> None:
+    """Delete block logs in DIR_FD dated before the window; skip invalid dates."""
     oldest = today.date() - timedelta(days=RETENTION_DAYS)
-    for path in directory.glob("blocks-*.jsonl"):
-        match = BLOCK_LOG_NAME.fullmatch(path.name)
-        if not match:
-            continue
-        try:
-            dated = date.fromisoformat(match.group(1))
-        except ValueError:
-            continue
-        if dated < oldest:
-            # Only a race or a directory with this name fails; the rest still prune.
-            with contextlib.suppress(OSError):
-                path.unlink()
+    with os.scandir(dir_fd) as entries:
+        for entry in entries:
+            match = BLOCK_LOG_NAME.fullmatch(entry.name)
+            if not match:
+                continue
+            try:
+                dated = date.fromisoformat(match.group(1))
+            except ValueError:
+                continue
+            if dated < oldest:
+                # Only a race or a directory with this name fails; the rest prune.
+                with contextlib.suppress(OSError):
+                    os.unlink(entry.name, dir_fd=dir_fd)  # dir_fd
 
 
 def lock_log(fd: int) -> bool:
@@ -427,10 +442,14 @@ def log_blocks(event: str, sentences: list[str]) -> None:
     try:
         now = datetime.now(UTC)
         directory = Path.home().joinpath(*LOG_DIRECTORY)
-        # A failed prune must not cost today's record.
-        with contextlib.suppress(Exception):
-            prune_blocks(directory, now)
-        fd = open_log(directory, f"blocks-{now:%Y-%m-%d}.jsonl")
+        dir_fd = open_directory(directory)
+        try:
+            # A failed prune must not cost today's record.
+            with contextlib.suppress(Exception):
+                prune_blocks(dir_fd, now)
+            fd = open_log_in(dir_fd, f"blocks-{now:%Y-%m-%d}.jsonl")
+        finally:
+            os.close(dir_fd)
         try:
             out = os.fdopen(fd, "ab")
         except BaseException:

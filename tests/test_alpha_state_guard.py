@@ -2,6 +2,7 @@
 # Copyright Tony Burns
 """Tests for tbhbdev alpha state-guard, against a config in a temporary XDG dir."""
 
+import contextlib
 import io
 import json
 import os
@@ -15,7 +16,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
-from typing import BinaryIO, override
+from typing import Any, BinaryIO, override
 lazy from pathlib import Path
 
 import pytest
@@ -2013,6 +2014,14 @@ def test_an_existing_log_gets_mode_0600_on_every_open(home: Path, umask: int) ->
     assert stat.S_IMODE(log.stat().st_mode) == 0o600
 
 
+def prune(directory: Path, today: datetime) -> None:
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        state_guard.prune_blocks(dir_fd, today)
+    finally:
+        os.close(dir_fd)
+
+
 def test_pruning_only_touches_exactly_dated_block_logs(tmp_path: Path) -> None:
     names = [
         "blocks-2020-01-01.jsonl",
@@ -2024,7 +2033,7 @@ def test_pruning_only_touches_exactly_dated_block_logs(tmp_path: Path) -> None:
     logs.mkdir()
     for name in names:
         (logs / name).write_text("x")
-    state_guard.prune_blocks(logs, datetime(2024, 1, 1, tzinfo=UTC))
+    prune(logs, datetime(2024, 1, 1, tzinfo=UTC))
     assert sorted(path.name for path in logs.iterdir()) == sorted(names[1:])
 
 
@@ -2042,7 +2051,7 @@ def test_pruning_keeps_a_name_that_is_not_a_calendar_date(
     tmp_path: Path, name: str
 ) -> None:
     (tmp_path / name).write_text("x")
-    state_guard.prune_blocks(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    prune(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
     assert (tmp_path / name).exists()
 
 
@@ -2053,7 +2062,7 @@ def test_pruning_keeps_a_log_on_the_cutoff_day_and_drops_the_day_before(
     drop = tmp_path / "blocks-2026-12-01.jsonl"
     for path in (keep, drop):
         path.write_text("x")
-    state_guard.prune_blocks(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    prune(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
     assert keep.exists()
     assert not drop.exists()
 
@@ -2062,7 +2071,7 @@ def test_an_old_dated_directory_does_not_stop_the_prune(tmp_path: Path) -> None:
     (tmp_path / "blocks-2020-01-01.jsonl").mkdir()
     (tmp_path / "blocks-2020-01-01.jsonl" / "child").write_text("x")
     (tmp_path / "blocks-2020-01-02.jsonl").write_text("x")
-    state_guard.prune_blocks(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    prune(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
     assert (tmp_path / "blocks-2020-01-01.jsonl" / "child").exists()
     assert not (tmp_path / "blocks-2020-01-02.jsonl").exists()
 
@@ -2111,11 +2120,14 @@ def test_an_invalid_name_does_not_stop_the_prune_of_later_names(
     for path in (invalid, old):
         path.write_text("x")
 
-    def ordered_glob(self: Path, _pattern: str) -> Iterator[Path]:
-        return iter(sorted(self.iterdir()))
+    real = os.scandir
 
-    monkeypatch.setattr(Path, "glob", ordered_glob)
-    state_guard.prune_blocks(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    def ordered_scandir(fd: int) -> contextlib.AbstractContextManager[Any]:
+        with real(fd) as entries:
+            return contextlib.nullcontext(sorted(entries, key=lambda e: e.name))
+
+    monkeypatch.setattr(os, "scandir", ordered_scandir)
+    prune(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
     assert invalid.exists()
     assert not old.exists()
 
@@ -2168,7 +2180,7 @@ def test_a_failed_fdopen_closes_the_descriptor(
 def test_a_name_without_dashes_in_its_date_is_not_pruned(tmp_path: Path) -> None:
     keep = tmp_path / "blocks-20200101.jsonl"
     keep.write_text("x")
-    state_guard.prune_blocks(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    prune(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
     assert keep.exists()
 
 
@@ -2206,3 +2218,36 @@ def test_a_writer_gives_up_on_a_lock_another_process_holds(home: Path) -> None:
         holder.wait(5)
     assert state_guard.LOCK_WAIT * 0.9 <= elapsed < state_guard.LOCK_WAIT * 3
     assert log.stat().st_size == before
+
+
+def test_a_symlinked_state_directory_is_never_pruned_or_written(
+    home: Path,
+) -> None:
+    elsewhere = home / "elsewhere"
+    elsewhere.mkdir(parents=True)
+    victim = elsewhere / "blocks-2020-01-01.jsonl"
+    victim.write_text("x")
+    directory = home.joinpath(*state_guard.LOG_DIRECTORY)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    directory.symlink_to(elsewhere)
+    state_guard.log_blocks("Stop", ["It was merged."])
+    assert victim.read_text() == "x"
+    assert [path.name for path in elsewhere.iterdir()] == [victim.name]
+
+
+def test_the_lock_wait_is_half_a_second_and_polls_every_hundredth() -> None:
+    assert state_guard.LOCK_WAIT == 0.5
+    assert state_guard.LOCK_POLL == 0.01
+
+
+def test_open_directory_closes_its_descriptor_when_fchmod_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(_fd: int, _mode: int) -> None:
+        raise OSError
+
+    monkeypatch.setattr(os, "fchmod", fail)
+    before = open_descriptors()
+    with pytest.raises(OSError):  # noqa: PT011  # the injected failure
+        state_guard.open_directory(tmp_path / "d")
+    assert open_descriptors() == before
