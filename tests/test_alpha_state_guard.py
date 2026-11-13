@@ -1724,3 +1724,11 @@ def test_a_repeated_claim_glued_to_a_nested_tag_is_tagged() -> None:
     tagged, sentences = state_guard.tag_sentences(text)
     assert tagged.count(TAG) >= 2 or tagged == f"{TAG} {text}"
     assert sentences
+
+
+def test_a_message_of_exactly_the_judging_limit_is_still_judged() -> None:
+    text = "x" * state_guard.MAX_JUDGED
+    assert state_guard.tag_sentences(text) == (text, [])
+    tagged, sentences = state_guard.tag_sentences(text + "x")
+    assert tagged == f"{TAG} {text}x"
+    assert sentences
