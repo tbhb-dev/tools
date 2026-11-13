@@ -2549,6 +2549,30 @@ def test_git_init_in_a_plain_directory_finishes_its_user_record(
     assert sorted((plain / ".git").iterdir()) == before
 
 
+@pytest.mark.parametrize("agent", [None, "child"])
+@pytest.mark.parametrize("post", ["PostToolUse", "PostToolUseFailure"])
+def test_git_init_in_a_plain_directory_finishes_each_agents_record(
+    plain: Path, monkeypatch: pytest.MonkeyPatch, agent: str | None, post: str
+) -> None:
+    data = {
+        "session_id": "s",
+        "agent_id": agent,
+        "agent_type": "general-purpose" if agent else None,
+        "cwd": str(plain),
+        "tool_name": "Bash",
+        "tool_input": {"command": "git init"},
+    }
+    feed(monkeypatch, {**data, "hook_event_name": "PreToolUse"})
+    assert ai.cmd_record("claude", {}) == 0
+    subprocess.run(["git", "init", "-q", str(plain)], check=True)
+    feed(monkeypatch, {**data, "hook_event_name": post})
+    assert ai.cmd_record("claude", {}) == 0
+    (path,) = (ai.user_store() / "cmds" / ai.hx(ai.sha256_64("s"))).glob("*.json")
+    rec = loaded(path)
+    assert rec["done"] is not None
+    assert rec["agent"] == (ai.sha256_64(agent) if agent else None)
+
+
 @pytest.mark.parametrize("tool", ["Bash", "Edit"])
 @pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse"])
 @pytest.mark.parametrize("agent", [None, "child"])
