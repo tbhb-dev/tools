@@ -9,6 +9,7 @@ from typing import Literal, TypedDict, Unpack
 
 import pytest
 from agent_host_example import (
+    bounded_file_reads,
     commit,
     git,
     isolate_host_git,
@@ -1590,8 +1591,7 @@ def test_unusual_git_metadata_is_only_an_audit_finding(
     assert any(f"{entry} is not a regular file" in line for line in findings)
     recorded = worktree.validate_writes(workspace, source, (str(root),))
     assert any("cannot audit main checkout" in line for line in recorded)
-    assert all("\n" not in line for line in recorded)
-    assert any(r"writable\nforged" in line for line in recorded)
+    assert any("writable\nforged" in line for line in recorded)
 
 
 @pytest.mark.parametrize(
@@ -1634,3 +1634,87 @@ def test_common_directory_replaced_with_fifo_is_not_read(
             f"{tmp_path / '.git/commondir'} is not a regular file"
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        (b".\0\n", "embedded null"),
+        (b"\xff", "utf-8"),
+        (b"." + b" " * 4096, "is longer than 4096 bytes"),
+    ],
+)
+def test_invalid_common_directory_is_only_a_finding(
+    checkout_paths: tuple[Path, Path], content: bytes, reason: str
+) -> None:
+    source, workspace = checkout_paths
+    (source / ".git/commondir").write_bytes(content)
+    findings: list[str] = []
+    assert not worktree.is_main_checkout(source, findings)
+    assert len(findings) == 1
+    assert findings[0].startswith(f"cannot audit main checkout {source}: ")
+    assert reason in findings[0]
+    assert not worktree.is_main_checkout(source)
+    assert findings[0] in worktree.validate_writes(workspace, source, (str(source),))
+
+
+def test_common_directory_at_byte_limit_is_still_audited(
+    checkout_paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, workspace = checkout_paths
+    (source / ".git/commondir").write_bytes(b"." + b" " * 4095)
+    bounded_file_reads(monkeypatch, 4097)
+    findings: list[str] = []
+    assert worktree.is_main_checkout(source, findings)
+    assert findings == []
+    assert (
+        f"write root {source} reaches main checkout {source}"
+        in worktree.validate_writes(workspace, source, (str(source),))
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read mode 000 directories")
+def test_unreadable_child_directory_is_an_audit_finding(
+    tmp_path: Path, checkout_paths: tuple[Path, Path]
+) -> None:
+    source, workspace = checkout_paths
+    root = tmp_path / "writable"
+    blocked = root / "unreadable"
+    blocked.mkdir(parents=True)
+    blocked.chmod(0)
+    try:
+        findings = worktree.validate_writes(workspace, source, (str(root),))
+    finally:
+        blocked.chmod(0o700)
+    assert any(
+        line.startswith(f"cannot audit write root {root}: cannot read {blocked}: ")
+        for line in findings
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read mode 000 directories")
+@pytest.mark.parametrize("entry", [".", ".git"])
+def test_unreadable_git_directory_is_an_audit_finding(
+    checkout_paths: tuple[Path, Path], entry: str
+) -> None:
+    source, workspace = checkout_paths
+    blocked = source / entry
+    blocked.chmod(0)
+    try:
+        findings: list[str] = []
+        assert not worktree.is_main_checkout(source, findings)
+        assert len(findings) == 1
+        assert findings[0].startswith(f"cannot audit main checkout {source}: ")
+        assert findings[0] in worktree.validate_writes(
+            workspace, source, (str(source),)
+        )
+    finally:
+        blocked.chmod(0o700)
+
+
+def test_git_directory_under_a_file_is_no_checkout(tmp_path: Path) -> None:
+    path = tmp_path / "ordinary-file"
+    path.touch()
+    findings: list[str] = []
+    assert not worktree.is_main_checkout(path, findings)
+    assert findings == []

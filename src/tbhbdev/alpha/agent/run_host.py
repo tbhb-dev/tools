@@ -214,19 +214,26 @@ def resolved_settings(run: Run) -> Settings:
     )
 
 
+def _audit_findings(run: Run) -> list[str]:
+    record = run.files.path("would_refuse")
+    if not record.is_file():
+        return []
+    return [json.loads(line) for line in record.read_text().split("\n") if line]
+
+
 def audit_writes(
     run: Run, workspace: Path, clone: Path, write_roots: tuple[str, ...]
 ) -> None:
     """Record the write roots a stricter policy would refuse, and refuse none."""
-    record = run.files.path("would_refuse")
-    findings = dict.fromkeys(record.read_text().splitlines() if record.exists() else ())
-    for line in worktree.validate_writes(workspace, clone, write_roots):
-        finding = line.replace("\r", r"\r").replace("\n", r"\n")
+    findings = dict.fromkeys(_audit_findings(run))
+    for finding in worktree.validate_writes(workspace, clone, write_roots):
         if finding not in findings:
             findings[finding] = None
-            run.files.write("log", f"audit: would refuse: {finding}\n")
+            run.files.write("log", f"audit: would refuse: {json.dumps(finding)}\n")
     if findings:
-        run.files.write("would_refuse", "".join(f"{line}\n" for line in findings))
+        run.files.write(
+            "would_refuse", "".join(f"{json.dumps(line)}\n" for line in findings)
+        )
 
 
 def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
@@ -755,8 +762,7 @@ def audit_summary(run: Run, prepared: Prepared | None, rc: int) -> None:
                 files[path.relative_to(audit).as_posix()] = hashlib.file_digest(
                     stream, hashlib.sha256
                 ).hexdigest()
-    refused = run.files.path("would_refuse")
-    would_refuse = refused.read_text().splitlines() if refused.is_file() else []
+    would_refuse = _audit_findings(run)
     run.files.write(
         "audit.json",
         json.dumps({"rc": rc, "files": files, "would_refuse": would_refuse}) + "\n",

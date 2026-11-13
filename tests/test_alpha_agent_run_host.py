@@ -2677,9 +2677,11 @@ def test_host_state_cannot_be_a_configured_write_root(
     )
     if entry == "clone":
         run_host.checked_policy(run, preparation(run).paths)
-        recorded = run.files.path("would_refuse").read_text()
-        assert f"write root {root} reaches main checkout {clone}\n" in recorded
-        assert f"audit: would refuse: {recorded.splitlines()[0]}\n" in (
+        recorded = run.files.path("would_refuse").read_text().split("\n")[:-1]
+        assert f"write root {root} reaches main checkout {clone}" in [
+            json.loads(line) for line in recorded
+        ]
+        assert f"audit: would refuse: {recorded[0]}\n" in (
             run.files.path("log").read_text()
         )
         return
@@ -3917,10 +3919,10 @@ def test_unusual_git_metadata_launches_with_a_finding(
     with ExitStack() as stack:
         assert run_host.run_harness(run, prepared, stack) == 0
     assert run.files.path("launched").exists()
-    recorded = run.files.path("would_refuse").read_text().splitlines()
+    recorded = run.files.path("would_refuse").read_text().split("\n")[:-1]
     log = run.files.path("log").read_text().splitlines()
     assert any(f"{entry} is not a regular file" in line for line in recorded)
-    assert any(r"writable\nforged" in line for line in recorded)
+    assert any("writable\nforged" in json.loads(line) for line in recorded)
     assert all(log.count(f"audit: would refuse: {line}") == 1 for line in recorded)
     assert "forged" not in log
 
@@ -3931,14 +3933,63 @@ def test_policy_audit_merges_findings_across_calls(
     run = make_run(tmp_path)
     paths = preparation(run).paths
     for findings, expected in [
-        (("A", "A"), "A\n"),
-        ((), "A\n"),
-        (("B", "A", "B"), "A\nB\n"),
-        (("A", "B"), "A\nB\n"),
+        (("A", "A"), '"A"\n'),
+        ((), '"A"\n'),
+        (("B", "A", "B"), '"A"\n"B"\n'),
+        (("A", "B"), '"A"\n"B"\n'),
     ]:
         monkeypatch.setattr(run_host.worktree, "validate_writes", constant(findings))
         run_host.checked_policy(run, paths)
         assert run.files.path("would_refuse").read_text() == expected
         assert run.files.path("log").read_text() == "".join(
-            f"audit: would refuse: {line}\n" for line in expected.splitlines()
+            f"audit: would refuse: {line}\n" for line in expected.split("\n")[:-1]
         )
+
+
+def test_null_in_common_directory_is_audited_without_refusing(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    workspace = tmp_path / "writable"
+    (workspace / ".git").mkdir(parents=True)
+    (workspace / ".git/HEAD").write_text("ref: refs/heads/main\n")
+    (workspace / ".git/commondir").write_bytes(b".\0\n")
+    run_host.audit_writes(run, workspace, workspace.parent.parent, ())
+    findings = [
+        json.loads(line)
+        for line in run.files.path("would_refuse").read_text().split("\n")[:-1]
+    ]
+    assert any(
+        line.startswith(f"cannot audit main checkout {workspace}: ")
+        and "embedded null" in line
+        for line in findings
+    )
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_audit_findings_round_trip_losslessly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, prepared: bool
+) -> None:
+    run = make_run(tmp_path)
+    findings = [
+        f"finding{value}path"
+        for value in ("\r", "\n", "\u2028", "\u2029", "\\", r"\n", "\0")
+    ]
+    monkeypatch.setattr(run_host.worktree, "validate_writes", constant(tuple(findings)))
+    paths = run_host.planned_paths(run)
+    workspace = Path(paths.worktree)
+    run_host.audit_writes(run, workspace, workspace.parent.parent, ())
+    encoded = run.files.path("would_refuse").read_text()
+    assert encoded == "".join(f"{json.dumps(line)}\n" for line in findings)
+    assert [json.loads(line) for line in encoded.split("\n")[:-1]] == findings
+    # Existing JSON can spell the same decoded value differently.
+    run.files.write("would_refuse", encoded.replace(r"\u2028", "\u2028"))
+    run_host.audit_writes(run, workspace, workspace.parent.parent, ())
+    assert run.files.path("would_refuse").read_text() == encoded
+    assert run.files.path("log").read_text() == "".join(
+        f"audit: would refuse: {json.dumps(line)}\n" for line in findings
+    )
+    run_host.audit_summary(run, preparation(run) if prepared else None, 7)
+    assert json.loads(run.files.path("audit.json").read_text()) == {
+        "rc": 7,
+        "files": {},
+        "would_refuse": findings,
+    }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import re
 import shlex
@@ -50,6 +51,7 @@ recurse = false
 url = {url}
 """
 CHECKOUT_SCAN_DEPTH = 3
+COMMON_DIRECTORY_LIMIT = 4096
 
 
 def git(clone: Path, *args: str) -> str:
@@ -214,12 +216,23 @@ def _own_common_directory(git_dir: Path) -> bool:
         raise OSError(message)
     # Do not follow a replacement link or block on a replacement FIFO.
     fd = os.open(common, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd) as stream:
+    with os.fdopen(fd, "rb") as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
             message = f"{common} is not a regular file"
             raise OSError(message)
-        target = stream.read(4096).strip()
+        content = stream.read(COMMON_DIRECTORY_LIMIT + 1)
+    if len(content) > COMMON_DIRECTORY_LIMIT:
+        message = f"{common} is longer than {COMMON_DIRECTORY_LIMIT} bytes"
+        raise OSError(message)
+    target = content.decode("utf-8").strip()
     return (git_dir / target).resolve() == git_dir.resolve()
+
+
+def _is_git_directory(git_dir: Path) -> bool:
+    try:
+        return stat.S_ISDIR(git_dir.lstat().st_mode)
+    except FileNotFoundError, NotADirectoryError:
+        return False
 
 
 def is_main_checkout(directory: Path, findings: list[str] | None = None) -> bool:
@@ -231,7 +244,7 @@ def is_main_checkout(directory: Path, findings: list[str] | None = None) -> bool
     git_dir = directory / ".git"
     head = git_dir / "HEAD"
     try:
-        if not git_dir.is_dir(follow_symlinks=False):
+        if not _is_git_directory(git_dir):
             return False
         try:
             metadata = head.lstat()
@@ -245,7 +258,7 @@ def is_main_checkout(directory: Path, findings: list[str] | None = None) -> bool
                 )
             return False
         return metadata.st_size > 0 and _own_common_directory(git_dir)
-    except (OSError, UnicodeError) as exc:
+    except (OSError, UnicodeError, ValueError) as exc:
         if findings is not None:
             findings.append(f"cannot audit main checkout {directory}: {exc}")
         return False
@@ -253,7 +266,15 @@ def is_main_checkout(directory: Path, findings: list[str] | None = None) -> bool
 
 def _contained_checkouts(root: Path, workspace: Path | None) -> list[str]:
     found: list[str] = []
-    for directory, children, _files in root.walk():
+
+    def unreadable(error: OSError) -> None:
+        # A vanished path or a closed descriptor (under /dev/fd) hides nothing.
+        if error.errno not in {errno.ENOENT, errno.ENOTDIR, errno.EBADF}:
+            found.append(
+                f"cannot audit write root {root}: cannot read {error.filename}: {error}"
+            )
+
+    for directory, children, _files in root.walk(on_error=unreadable):
         if directory != workspace and is_main_checkout(directory, found):
             found.append(f"write root {root} contains main checkout {directory}")
         if len(directory.relative_to(root).parts) >= CHECKOUT_SCAN_DEPTH:
@@ -303,7 +324,7 @@ def validate_writes(
         if source.is_relative_to(root):
             found.append(f"write root {root} contains main checkout {source}")
         found.extend(_contained_checkouts(root, own))
-    return tuple(line.replace("\r", r"\r").replace("\n", r"\n") for line in found)
+    return tuple(found)
 
 
 def validate_hooks(workspace: Path, writes: tuple[str, ...]) -> None:
