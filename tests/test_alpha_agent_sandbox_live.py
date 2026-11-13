@@ -334,6 +334,14 @@ def domain_observation(
     )
 
 
+def socket_verdict(
+    location: str, listener: Listener, observations: dict[str, str]
+) -> str:
+    if listener.connections or observations.get(location) == "0":
+        return "connected"
+    return "refused" if location in observations else "missing"
+
+
 def assert_observations(
     harness: Harness,
     sockets: dict[str, Listener],
@@ -356,13 +364,7 @@ def assert_observations(
 
     judgments = Judgments(harness, proven, failures)
     for location, listener in sockets.items():
-        verdict = (
-            "connected"
-            if listener.connections or observations.get(location) == "0"
-            else "refused"
-            if location in observations
-            else "missing"
-        )
+        verdict = socket_verdict(location, listener, observations)
         judgments.record(location, verdict == "refused", failure=verdict)
         report(f"{location}: {verdict}")
     for domain, allowed in (("api.github.com", True), ("example.com", False)):
