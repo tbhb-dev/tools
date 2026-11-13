@@ -1375,6 +1375,11 @@ def check_launch_contract(
             run.settings, run.host, harness, prepared.paths, run.request.account
         )
         | env
+        | {
+            "OTEL_RESOURCE_ATTRIBUTES": (
+                f"host.name={run.host.name},tbhb.account={run.request.account}"
+            )
+        }
     )
     assert kwargs["env"] == expected
     assert all(
@@ -4752,3 +4757,15 @@ def test_config_check_protects_the_configured_startup_directory(
             Invalid, match=r"protected host path .* overlaps write root"
         ):
             run_host.check_config(configured)
+
+
+def test_resource_attributes_name_host_and_account(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    assert run_host.resource_attributes(run) == {
+        "OTEL_RESOURCE_ATTRIBUTES": (
+            f"host.name={run.host.name},tbhb.account={run.request.account}"
+        )
+    }
+    assert (
+        run.host.name in run_host.resource_attributes(run)["OTEL_RESOURCE_ATTRIBUTES"]
+    )

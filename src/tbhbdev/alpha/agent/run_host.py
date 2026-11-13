@@ -649,12 +649,21 @@ def log_argv(run: Run, command: tuple[str, ...]) -> None:
             run.files.write("log", argv_log_line(command) + "\n")
 
 
+def resource_attributes(run: Run) -> dict[str, str]:
+    """OpenTelemetry resource attributes that name the host and the account."""
+    return {
+        "OTEL_RESOURCE_ATTRIBUTES": (
+            f"host.name={run.host.name},tbhb.account={run.request.account}"
+        )
+    }
+
+
 def run_harness(
     run: Run, prepared: Prepared, stack: ExitStack, *, preflight_only: bool = False
 ) -> int:
     paths = prepared.paths
     value, executable = checked_policy(run, paths)
-    env = value.env | prepared.delivery.env
+    env = value.env | prepared.delivery.env | resource_attributes(run)
     command = checked_harness_command(run, prepared, value, executable)
     if preflight_only:
         log_hook_tools(run, paths)
