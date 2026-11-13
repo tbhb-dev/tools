@@ -68,6 +68,7 @@ name. ``tbhbdev alpha
 gh-shim`` budgets the gh calls a script makes, which no hook can see.
 """
 
+import datetime as dt
 import itertools
 import json
 import re
@@ -111,6 +112,19 @@ LIST_PATH = re.compile(
 )
 RUNS_PATH = re.compile(r"(?:.*/)?repos/[^/]+/[^/]+/actions/runs")
 SHA = re.compile(r"[0-9a-fA-F]{40}")
+# The one-pass exception for `gh run list` that tbhb granted on 2026-11-13
+# (Decisions/2026-11-13-capped-gh-run-list-exception.md): this exact command
+# for a tbhb-dev repository, through the end of this UTC day. Remove it once
+# the pass is done.
+SUBSTITUTION = re.compile(r"\$[({]|`")
+CAPPED_RUN_LIST_UNTIL = dt.date(2026, 11, 14)
+CAPPED_RUN_LIST_REPO = re.compile(r"tbhb-dev/[A-Za-z0-9._-]+")
+CAPPED_RUN_LIST_TAIL = [
+    "--limit",
+    "100",
+    "--json",
+    "conclusion,createdAt,startedAt,updatedAt,workflowName,attempt,event",
+]
 LOOPS = {"while", "until", "for"}
 # env's long options, each with the short option it spells ("" for the rest).
 ENV_LONG = {
@@ -185,13 +199,37 @@ def bulk_api(args: list[str]) -> bool:
     return False
 
 
-def github_poll(args: list[str]) -> bool:
-    """Whether the words after ``gh``, past its global flags, poll GitHub."""
+def today() -> dt.date:
+    """The current UTC date."""
+    return dt.datetime.now(dt.UTC).date()
+
+
+def capped_run_list(args: list[str]) -> bool:
+    """Whether the words after ``run list`` are the one capped pass, unexpired."""
+    if today() > CAPPED_RUN_LIST_UNTIL or len(args) != 2 + len(CAPPED_RUN_LIST_TAIL):
+        return False
+    flag, repo, *tail = args
+    return (
+        flag == "-R"
+        and CAPPED_RUN_LIST_REPO.fullmatch(repo) is not None
+        and repo.rpartition("/")[2] not in {".", ".."}
+        and tail == CAPPED_RUN_LIST_TAIL
+    )
+
+
+def github_poll(args: list[str], *, bare: bool = False) -> bool:
+    """Whether the words after ``gh``, past its global flags, poll GitHub.
+
+    ``bare`` says nothing, such as an env assignment, came before ``gh``. Only a
+    bare ``gh run list`` with no flag before ``run`` may be the capped pass.
+    """
     i = 0
     while i < len(args) and args[i].startswith("-"):
         i += 2 if args[i] in VALUE_FLAGS else 1
     rest = args[i:]
-    if rest[:2] in (["run", "watch"], ["run", "list"]):
+    if rest[:2] == ["run", "list"]:
+        return not (bare and i == 0 and capped_run_list(rest[2:]))
+    if rest[:2] == ["run", "watch"]:
         return True
     if rest[:2] == ["pr", "checks"]:
         return any(w.partition("=")[0] == "--watch" for w in rest[2:])
@@ -337,8 +375,14 @@ def inner_script(words: list[str], body: str | None) -> str | None:
     return None
 
 
-def denial(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
-    """One simple command's deny reason, and the programs it runs."""
+def denial(
+    command: list[str], body: str | None, *, plain: bool = False
+) -> tuple[str | None, set[str]]:
+    """One simple command's deny reason, and the programs it runs.
+
+    ``plain`` says this is the only command of the top-level text, with no substitution.
+    Only then may a bare ``gh`` be the capped run list.
+    """
     words = unwrapped(command)
     if words is None:
         return UNSET_REASON, set()
@@ -348,16 +392,17 @@ def denial(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
     unset = program == "unset" and any(names_token(word) for word in words[1:])
     if unset or clears_token(program, words[1:]):
         return UNSET_REASON, set()
-    if program == "gh" and github_poll(words[1:]):
+    bare = plain and words == command and words[0] == "gh"
+    if program == "gh" and github_poll(words[1:], bare=bare):
         return POLL_REASON, set()
     script = inner_script(words, body)
     if script is None:
         return None, {program}
-    message, inner = inspect(script)
+    message, inner = inspect(script, top=False)
     return message, {program, *inner}
 
 
-def inspect(text: str) -> tuple[str | None, set[str]]:
+def inspect(text: str, *, top: bool = True) -> tuple[str | None, set[str]]:
     """The deny reason for a shell command, or None, and the programs it runs.
 
     Each open loop collects the programs run from its keyword to its
@@ -366,10 +411,12 @@ def inspect(text: str) -> tuple[str | None, set[str]]:
     loops: list[set[str]] = []
     programs: set[str] = set()
     scanner = BodyScanner(text)
-    for index, command in enumerate(scanner.run()):
+    commands = scanner.run()
+    plain = top and len(commands) == 1 and SUBSTITUTION.search(text) is None
+    for index, command in enumerate(commands):
         if opens_loop(command):
             loops.append(set())
-        message, seen = denial(command, scanner.bodies.get(index))
+        message, seen = denial(command, scanner.bodies.get(index), plain=plain)
         if message:
             return message, programs
         programs |= seen

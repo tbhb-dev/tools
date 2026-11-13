@@ -2,6 +2,7 @@
 # Copyright Tony Burns
 """Tests for tbhbdev alpha guard-gh-poll, which shares guard-gh-pr's scanner."""
 
+import datetime as dt
 import io
 import itertools
 import json
@@ -711,3 +712,109 @@ def test_deep_nesting_fails_open(
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
     assert guard.main() == 0
     assert capsys.readouterr() == ("", "")
+
+
+RUN_LIST_CMD = (
+    "gh run list -R tbhb-dev/{} --limit 100 --json "
+    "conclusion,createdAt,startedAt,updatedAt,workflowName,attempt,event"
+)
+
+
+@pytest.mark.parametrize("repo", ["tools", "other-repo", "a.b_c-1"])
+def test_capped_pass_is_allowed_through_its_last_day(
+    monkeypatch: pytest.MonkeyPatch, repo: str
+) -> None:
+    for day in (dt.date(2026, 11, 13), guard.CAPPED_RUN_LIST_UNTIL):
+        monkeypatch.setattr(guard, "today", lambda day=day: day)
+        assert guard.inspect(RUN_LIST_CMD.format(repo))[0] is None
+
+
+def test_capped_pass_ends_on_a_pinned_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert dt.date(2026, 11, 14) == guard.CAPPED_RUN_LIST_UNTIL
+    monkeypatch.setattr(guard, "today", lambda: dt.date(2026, 11, 14))
+    assert guard.inspect(RUN_LIST_CMD.format("tools"))[0] is None
+
+
+def test_capped_pass_allows_a_trailing_newline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(guard, "today", lambda: dt.date(2026, 11, 13))
+    assert guard.inspect(RUN_LIST_CMD.format("tools") + "\n")[0] is None
+
+
+def test_capped_pass_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    day = dt.date(2026, 11, 15)
+    monkeypatch.setattr(guard, "today", lambda: day)
+    assert guard.inspect(RUN_LIST_CMD.format("tools"))[0] == guard.POLL_REASON
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh run list",
+        (
+            "gh run list -R other-org/tools --limit 100 --json "
+            "conclusion,createdAt,startedAt,updatedAt,workflowName,attempt,event"
+        ),
+        RUN_LIST_CMD.format("tools").replace("100", "101"),
+        RUN_LIST_CMD.format("tools").replace(",event", ""),
+        RUN_LIST_CMD.format("tools") + " --paginate",
+        RUN_LIST_CMD.format("tools") + " --watch",
+        RUN_LIST_CMD.format("tools/x"),
+        RUN_LIST_CMD.format("."),
+        RUN_LIST_CMD.format(".."),
+        (
+            "gh run list '-R tbhb-dev/tools --limit 100 --json "
+            "conclusion,createdAt,startedAt,updatedAt,workflowName,attempt,event'"
+        ),
+        RUN_LIST_CMD.format("tools").replace("--limit 100 ", ""),
+        "gh run watch 1",
+        "gh --hostname evil.example.com run list" + RUN_LIST_CMD.format("tools")[11:],
+        "gh --all --branch=main --jq=.[0] run list" + RUN_LIST_CMD.format("tools")[11:],
+        "gh -R other-org/repo run list" + RUN_LIST_CMD.format("tools")[11:],
+        "GH_HOST=x " + RUN_LIST_CMD.format("tools"),
+        "env " + RUN_LIST_CMD.format("tools"),
+        RUN_LIST_CMD.format("tools") + " $()",
+        RUN_LIST_CMD.format("tools") + " $(true)",
+        RUN_LIST_CMD.format("tools") + " `true`",
+        RUN_LIST_CMD.format("tools") + " $(echo --paginate)",
+        RUN_LIST_CMD.format("tools") + " ${X}",
+        "GH_HOST=x eval '" + RUN_LIST_CMD.format("tools") + "'",
+        "env GH_HOST=x bash -c '" + RUN_LIST_CMD.format("tools") + "'",
+        "export GH_HOST=x; " + RUN_LIST_CMD.format("tools"),
+        "eval '" + RUN_LIST_CMD.format("tools") + "'",
+        "/opt/" + RUN_LIST_CMD.format("tools"),
+        "./" + RUN_LIST_CMD.format("tools"),
+        "while true; do " + RUN_LIST_CMD.format("tools") + "; done",
+        RUN_LIST_CMD.format("tools").replace("-R ", "--repo "),
+        RUN_LIST_CMD.format("tools").replace("-R ", "-R="),
+        RUN_LIST_CMD.format("tools").replace("tbhb-dev", "TBHB-dev"),
+        (
+            "gh run list --limit 100 -R tbhb-dev/tools --json "
+            "conclusion,createdAt,startedAt,updatedAt,workflowName,attempt,event"
+        ),
+        (
+            "gh run list -R tbhb-dev/tools --limit 100 --json "
+            "event,attempt,workflowName,updatedAt,startedAt,createdAt,conclusion"
+        ),
+    ],
+)
+def test_capped_pass_is_only_that_command(
+    monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    monkeypatch.setattr(guard, "today", lambda: dt.date(2026, 11, 13))
+    assert guard.inspect(command)[0] == guard.POLL_REASON
+
+
+def test_today_reads_the_utc_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    instant = dt.datetime(2026, 11, 15, 3, 0, tzinfo=dt.UTC)
+    local = dt.timezone(dt.timedelta(hours=-5))
+
+    class Clock(dt.datetime):
+        @classmethod
+        def now(cls, tz: dt.tzinfo | None = None) -> Clock:  # type: ignore[override]
+            return cls.fromtimestamp(instant.timestamp(), tz or local)
+
+    monkeypatch.setattr(guard.dt, "datetime", Clock)
+    # The local date would be 14 November; UTC is already the 15th.
+    assert guard.today() == dt.date(2026, 11, 15)
