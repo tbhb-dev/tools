@@ -95,7 +95,8 @@ unreadable metadata are refused. It doesn't read a draft.
 ``checks --pr N`` prints pull request N's head SHA, then one line per check
 with its name and conclusion. Unfinished checks print ``PENDING``. Any
 conclusion other than ``SUCCESS``, ``NEUTRAL``, ``SKIPPED`` or ``PENDING``
-exits 1; pending checks alone exit 0.
+exits 1, and so does a check with no name or an unknown value. Pending checks
+alone exit 3, and only all-green checks exit 0.
 
 ``backfill-opened OWNER`` reads the body of every pull request, open or not,
 in every repository of OWNER, and adds each one to the ledger of every
@@ -1304,29 +1305,53 @@ def rerun(number: int) -> int:
 
 
 GREEN_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
-UNFINISHED = frozenset({"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"})
+UNFINISHED = frozenset({"QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "PENDING"})
 PENDING_CODE = 3
 
 
-def check_outcome(job: Mapping[str, object]) -> tuple[str, str, bool]:
-    """A check's name, the label to print and whether it is still unfinished.
+def check_outcome(job: object) -> tuple[str, str, str]:
+    """A check's name, the label to print and its kind: green, pending or failed.
 
-    A check run reads from its status and, once COMPLETED, its conclusion. A commit
-    status reads from its state. Anything outside the known values is a failure,
-    printed as written.
+    A check run reads its conclusion only once its status is COMPLETED, and is
+    pending only for an unfinished status. A commit status reads from its state.
+    Anything outside the known values is a failure, printed as written.
 
     Raises:
-        SystemExit: the check has neither a name nor a context.
+        SystemExit: the entry isn't a mapping, has no usable name or context, or
+            names both.
     """
-    name = job.get("name") or job.get("context")
-    if not isinstance(name, str) or not name:
-        message = f"a check of the rollup has no name or context: {dict(job)}"
+    if not isinstance(job, dict):
+        message = f"a check of the rollup isn't an object: {job!r}"
         raise SystemExit(message)
-    value = job.get("state") if "context" in job else job.get("status")
-    if value == "COMPLETED":
-        value = job.get("conclusion")
+    job = cast("dict[str, object]", job)  # pragma: no mutate
+    kind = job.get("__typename")
+    if kind is None:
+        kind = "CheckRun" if job.get("context") is None else "StatusContext"
+        if job.get("name") is not None and job.get("context") is not None:
+            kind = "both"
+    name = job.get("context" if kind == "StatusContext" else "name")
+    if (
+        kind not in {"CheckRun", "StatusContext"}
+        or not isinstance(name, str)
+        or not name
+    ):
+        message = f"a check of the rollup has no usable name or context: {job}"
+        raise SystemExit(message)
+    if kind == "StatusContext":
+        value = job.get("state")
+        unfinished = value == "PENDING"
+    else:
+        value = job.get("status")
+        unfinished = value in UNFINISHED
+        if value == "COMPLETED":
+            value = job.get("conclusion")
     label = value if isinstance(value, str) and value else "(none)"
-    return name, ("PENDING" if label in UNFINISHED else label), label in UNFINISHED
+    if unfinished:
+        return name, "PENDING", "pending"
+    green = label in GREEN_CONCLUSIONS and (
+        kind == "StatusContext" or job.get("status") == "COMPLETED"
+    )
+    return name, label, "green" if green else "failed"
 
 
 def checks(number: int) -> int:
@@ -1363,10 +1388,10 @@ def checks(number: int) -> int:
         return 1
     failed = pending = False
     for job in jobs:
-        name, label, unfinished = check_outcome(job)
+        name, label, kind = check_outcome(job)
         print(f"{name}: {label}")
-        pending = pending or unfinished
-        failed = failed or not (unfinished or label in GREEN_CONCLUSIONS)
+        pending = pending or kind == "pending"
+        failed = failed or kind == "failed"
     if failed:
         return 1
     return PENDING_CODE if pending else 0

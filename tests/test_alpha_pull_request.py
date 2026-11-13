@@ -3189,6 +3189,60 @@ def test_rerun_requires_a_numeric_pr_number(argv: tuple[str, ...]) -> None:
             1,
         ),
         ([{"name": "tests"}], "tests: (none)\n", 1),
+        *[
+            ([{"name": "tests", "status": status, "conclusion": "FAILURE"}], out, 1)
+            for status, out in [
+                ("SUCCESS", "tests: SUCCESS\n"),
+                ("NEUTRAL", "tests: NEUTRAL\n"),
+                ("SKIPPED", "tests: SKIPPED\n"),
+            ]
+        ],
+        (
+            [{"name": "tests", "status": "COMPLETED", "conclusion": "PENDING"}],
+            "tests: PENDING\n",
+            1,
+        ),
+        (
+            [
+                {
+                    "__typename": "CheckRun",
+                    "name": "tests",
+                    "context": None,
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+            ],
+            "tests: SUCCESS\n",
+            0,
+        ),
+        (
+            [
+                {
+                    "__typename": "CheckRun",
+                    "name": "tests",
+                    "context": "other",
+                    "state": "SUCCESS",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                }
+            ],
+            "tests: FAILURE\n",
+            1,
+        ),
+        (
+            [
+                {
+                    "__typename": "StatusContext",
+                    "name": "ignored",
+                    "context": "external CI",
+                    "state": "SUCCESS",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                }
+            ],
+            "external CI: SUCCESS\n",
+            0,
+        ),
         ([{"context": "external CI", "state": "mystery"}], "external CI: mystery\n", 1),
     ],
 )
@@ -3228,15 +3282,35 @@ def test_checks_fails_without_any_check(
     assert (captured.out, captured.err) == (f"{sha}\n", "no checks on PR 45\n")
 
 
-@pytest.mark.parametrize("job", [{"status": "COMPLETED"}, {"name": ""}, {"name": 4}])
+@pytest.mark.parametrize(
+    "job",
+    [
+        {"status": "COMPLETED"},
+        {"name": ""},
+        {"name": 4},
+        {"__typename": "StatusContext", "name": "tests", "state": "SUCCESS"},
+        {"__typename": "Other", "name": "tests"},
+        {"name": "tests", "context": "other", "state": "SUCCESS"},
+    ],
+)
 def test_checks_names_a_check_without_a_name(
     world: World, job: dict[str, object]
 ) -> None:
     data = {"headRefOid": "a1b2c3d4" * 5, "statusCheckRollup": [job]}
     world.fake("gh", stdout=json.dumps(data))
     with pytest.raises(
-        SystemExit, match=r"^a check of the rollup has no name or context"
+        SystemExit, match=r"^a check of the rollup has no usable name or context"
     ):
+        run_main("checks", "--pr", "45")
+
+
+@pytest.mark.parametrize("job", [None, "bad", 7, []])
+def test_checks_refuses_an_entry_that_is_not_an_object(
+    world: World, job: object
+) -> None:
+    data = {"headRefOid": "a1b2c3d4" * 5, "statusCheckRollup": [job]}
+    world.fake("gh", stdout=json.dumps(data))
+    with pytest.raises(SystemExit, match=r"^a check of the rollup isn't an object"):
         run_main("checks", "--pr", "45")
 
 
