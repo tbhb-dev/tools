@@ -1166,15 +1166,29 @@ def test_a_claim_hidden_by_splitting_a_word_is_still_judged() -> None:
     assert state_guard.renderings(f"do{TAG}ne") == ("do ne", "done")
 
 
-def test_invisible_characters_are_the_ones_that_render_as_nothing() -> None:
-    chars = [chr(n) for n in range(0x110000) if not chr(n).isspace()]
-    hidden = {c for c in chars if state_guard.invisible(c)}
-    for category in ("Cf", "Mn", "Me", "Cc"):
-        assert all(
-            state_guard.invisible(c)
-            for c in chars
-            if unicodedata.category(c) == category
-        )
+@pytest.fixture(scope="module")
+def invisible_characters() -> tuple[dict[str, list[str]], set[str]]:
+    """Scan Unicode once, outside the per-test hook execution budget."""
+    categories: dict[str, list[str]] = {c: [] for c in ("Cf", "Mn", "Me", "Cc")}
+    hidden = set[str]()
+    for codepoint in range(0x110000):
+        char = chr(codepoint)
+        if char.isspace():
+            continue
+        category = unicodedata.category(char)
+        if category in categories:
+            categories[category].append(char)
+        if state_guard.invisible(char):
+            hidden.add(char)
+    return categories, hidden
+
+
+def test_invisible_characters_are_the_ones_that_render_as_nothing(
+    invisible_characters: tuple[dict[str, list[str]], set[str]],
+) -> None:
+    categories, hidden = invisible_characters
+    for chars in categories.values():
+        assert all(state_guard.invisible(c) for c in chars)
     assert {
         "\u115f",
         "\u1160",
