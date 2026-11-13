@@ -93,7 +93,10 @@ request in origin's repository. Fork heads, main, protected branches and
 unreadable metadata are refused. It doesn't read a draft.
 
 ``checks --pr N`` prints pull request N's head SHA, then one line per check
-with its name and conclusion. Unfinished checks print ``PENDING``. Any
+with its name and conclusion. A check run that hasn't COMPLETED reads its
+status, never its conclusion; unfinished checks
+print ``PENDING``. A commit status reads only its state, and only ``SUCCESS``
+is green. Any
 conclusion other than ``SUCCESS``, ``NEUTRAL``, ``SKIPPED`` or ``PENDING``
 exits 1, and so does a check with no name or an unknown value. Pending checks
 alone exit 3, and only all-green checks exit 0.
@@ -1334,6 +1337,14 @@ def check_kind(job: object) -> tuple[dict[str, object], str, str]:
     return job, kind, name
 
 
+def status_outcome(name: str, state: object) -> tuple[str, str, str]:
+    """A commit status reads only its state, and only SUCCESS is green."""
+    label = state if isinstance(state, str) and state else "(none)"
+    if state == "SUCCESS":
+        return name, label, "green"
+    return name, label, "pending" if state == "PENDING" else "failed"
+
+
 def check_outcome(job: object) -> tuple[str, str, str]:
     """A check's name, the label to print and its kind: green, pending or failed.
 
@@ -1342,15 +1353,15 @@ def check_outcome(job: object) -> tuple[str, str, str]:
     Anything outside the known values is a failure, printed as written.
     """
     job, kind, name = check_kind(job)
-    status = job.get("state" if kind == "StatusContext" else "status")
+    if kind == "StatusContext":
+        return status_outcome(name, job.get("state"))
+    status = job.get("status")
     value = job.get("conclusion") if status == "COMPLETED" else status
     label = value if isinstance(value, str) and value else "(none)"
-    if isinstance(status, str) and status in (
-        UNFINISHED if kind == "CheckRun" else {"PENDING"}
-    ):
+    if isinstance(status, str) and status in UNFINISHED:
         return name, "PENDING", "pending"
-    done = kind == "StatusContext" or status == "COMPLETED"
-    return name, label, "green" if done and label in GREEN_CONCLUSIONS else "failed"
+    green = status == "COMPLETED" and label in GREEN_CONCLUSIONS
+    return name, label, "green" if green else "failed"
 
 
 def checks(number: int) -> int:
@@ -1378,10 +1389,10 @@ def checks(number: int) -> int:
         raise SystemExit(message)
     data = cast("dict[str, object]", data)  # pragma: no mutate
     print(data["headRefOid"])
-    jobs = cast(
-        "list[dict[str, object]]",  # pragma: no mutate
-        data["statusCheckRollup"] or [],
-    )
+    jobs = data["statusCheckRollup"] or []
+    if not isinstance(jobs, list):
+        message = f"the checks of PR {number} aren't a list: {jobs!r}"
+        raise SystemExit(message)
     if not jobs:
         print(f"no checks on PR {number}", file=sys.stderr)
         return 1

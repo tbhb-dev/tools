@@ -3197,6 +3197,31 @@ def test_rerun_requires_a_numeric_pr_number(argv: tuple[str, ...]) -> None:
                 ("SKIPPED", "tests: SKIPPED\n"),
             ]
         ],
+        *[
+            ([{"context": "ci", "state": state, "conclusion": "SUCCESS"}], out, 1)
+            for state, out in [
+                ("NEUTRAL", "ci: NEUTRAL\n"),
+                ("SKIPPED", "ci: SKIPPED\n"),
+                ("COMPLETED", "ci: COMPLETED\n"),
+            ]
+        ],
+        (
+            [
+                {"name": "slow", "status": "QUEUED"},
+                {"name": "tests", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            ],
+            "slow: PENDING\ntests: SUCCESS\n",
+            3,
+        ),
+        (
+            [
+                {"name": "tests", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"name": "slow", "status": "QUEUED"},
+                {"name": "other", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            ],
+            "tests: SUCCESS\nslow: PENDING\nother: SUCCESS\n",
+            3,
+        ),
         ([{"name": "tests", "status": ["QUEUED"]}], "tests: (none)\n", 1),
         ([{"name": "tests", "status": {"a": 1}}], "tests: (none)\n", 1),
         ([{"context": "ci", "state": ["PENDING"]}], "ci: (none)\n", 1),
@@ -3306,6 +3331,16 @@ def test_checks_names_a_check_without_a_name(
     with pytest.raises(
         SystemExit, match=r"^a check of the rollup has no usable name or context"
     ):
+        run_main("checks", "--pr", "45")
+
+
+@pytest.mark.parametrize("rollup", [7, True, "bad", {"a": 1}])
+def test_checks_refuses_a_rollup_that_is_not_a_list(
+    world: World, rollup: object
+) -> None:
+    data = {"headRefOid": "a1b2c3d4" * 5, "statusCheckRollup": rollup}
+    world.fake("gh", stdout=json.dumps(data))
+    with pytest.raises(SystemExit, match=r"^the checks of PR 45 aren't a list"):
         run_main("checks", "--pr", "45")
 
 
