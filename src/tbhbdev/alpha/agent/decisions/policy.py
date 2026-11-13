@@ -142,13 +142,11 @@ def environment(
         "TMPDIR": paths.tmpdir,
         "TMPPREFIX": resolve(paths.tmpdir, "zsh"),
         "DOCKER_CONFIG": resolve(paths.tmpdir, DOCKER_CONFIG_SUBDIR),
+        "GH_CONFIG_DIR": resolve(paths.tmpdir, GH_CONFIG_SUBDIR),
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_COUNT": "8",
     }
-    references = next(c for c in settings.credentials if c.account == account)
-    if references.gh is not None:
-        env["GH_CONFIG_DIR"] = resolve(paths.tmpdir, GH_CONFIG_SUBDIR)
     overrides = (
         ("core.fsmonitor", "false"),
         ("core.hooksPath", "/dev/null"),

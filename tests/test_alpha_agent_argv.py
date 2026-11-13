@@ -791,3 +791,16 @@ def test_harness_output_options_belong_to_run_host() -> None:
     parameters = inspect.signature(argv.harness).parameters
     assert "output_file" not in parameters
     assert {"schema_file", "schema_text"} <= parameters.keys()
+
+
+@pytest.mark.parametrize("kind", RunKind)
+def test_codex_build_without_github_credential(kind: RunKind) -> None:
+    original = settings()
+    config = dataclasses.replace(
+        original,
+        credentials=tuple(
+            dataclasses.replace(c, gh=None) for c in original.credentials
+        ),
+    )
+    result = built(Harness.CODEX, kind, Profile.BUILD, config=config)
+    assert f'shell_environment_policy.set.GH_CONFIG_DIR="{TMP}/gh"' in result
