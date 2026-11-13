@@ -518,7 +518,7 @@ def test_launch_uses_the_policy_and_marks_only_after_spawn(
         "stop",
         *(["foreground"] if kind is RunKind.START else []),
     ]
-    assert metadata == [
+    assert [entry for entry in metadata if not entry[1].startswith("argv: ")] == [
         ("launched", "\n"),
         ("phase", "running"),
         ("phase", "exited"),
@@ -1667,9 +1667,9 @@ def test_signal_at_launch_handoff_records_and_stops_child(
     assert child.waits == [None]
     assert run.files.path("rc").read_text() == "143\n"
     if terminal_lost:
-        assert (
-            run.files.path("log").read_text() == "terminal unavailable during cleanup\n"
-        )
+        log = run.files.path("log").read_text().splitlines()
+        assert log[0].startswith("argv: ")
+        assert log[1:] == ["terminal unavailable during cleanup"]
 
 
 def test_auth_skip_reason_is_logged_with_failure_status(
@@ -2518,6 +2518,84 @@ def test_startup_and_socket_parents_are_protected(tmp_path: Path, entry: str) ->
         run_host.checked_policy(run, preparation(run).paths)
 
 
+@pytest.mark.parametrize(
+    ("harness", "kind"),
+    [
+        (Harness.CODEX, RunKind.EXEC),
+        (Harness.CODEX, RunKind.START),
+        (Harness.CLAUDE, RunKind.EXEC),
+    ],
+)
+def test_codex_argv_is_logged_without_environment_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    harness: Harness,
+    kind: RunKind,
+) -> None:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        kind=kind.value,
+        reason="test",
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+    )
+    run.files.write("prompt", "raw brief")
+    prepared = preparation(run)
+    value, _ = run_host.checked_policy(run, prepared.paths)
+
+    class Child:
+        pid = 99124
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self, **_kwargs: object) -> int:
+            return 0
+
+    def launch(
+        _spec: process_group.Launch, *, started: Callable[[Child], None]
+    ) -> Child:
+        child = Child()
+        started(child)
+        return child
+
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "record", constant(None))
+    monkeypatch.setattr(process_group, "stop_started", constant(None))
+    monkeypatch.setattr(sys, "stdin", sys.__stdin__)
+    with ExitStack() as stack:
+        assert run_host.run_harness(run, prepared, stack) == 0
+    log = run.files.path("log").read_text()
+    if harness is not Harness.CODEX:
+        assert "argv:" not in log
+        return
+    assert log.startswith("argv: ")
+    assert log.count("argv: ") == 1
+    assert "default_permissions=" in log
+    assert "permissions.build=" in log
+    assert "raw brief" not in log
+    assert "shell_environment_policy.set." not in log
+    assert value.tool_path not in log
+    assert "shell_environment_policy.exclude=" in log
+
+
+def test_argv_log_line_keeps_other_overrides() -> None:
+    command = (
+        "codex",
+        "-c",
+        "shell_environment_policy.set.HOME='x y'",
+        "-c",
+        "model_reasoning_effort='high'",
+        "-c",
+        "shell_environment_policy.set.PATH='p'",
+        "-m",
+        "-c",
+    )
+    assert run_host.argv_log_line(command) == (
+        "argv: codex -c 'model_reasoning_effort='\"'\"'high'\"'\"'' -m -c"
+    )
+
+
 @pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
 def test_driver_schema_file_reaches_harness(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
@@ -2764,9 +2842,9 @@ def test_unproven_harness_stop_keeps_rc_and_withholds_auth(
     assert run_host.execute(run, "example") == 7
     assert run.files.path("phase").read_text() == "unknown"
     assert run.files.path("rc").read_text() == "7\n"
-    assert (
-        run.files.path("log").read_text() == "run group stop unproven; phase unknown\n"
-    )
+    log = run.files.path("log").read_text().splitlines()
+    assert log[0].startswith("argv: ")
+    assert log[1:] == ["run group stop unproven; phase unknown"]
     assert not (run.home / ".codex" / "auth.json").exists()
 
 

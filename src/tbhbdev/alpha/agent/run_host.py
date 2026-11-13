@@ -7,6 +7,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -620,6 +621,34 @@ def log_hook_tools(run: Run, paths: RunPaths) -> None:
     run.files.write("log", f"preflight: .bazel_env {status}\n")
 
 
+ENV_OVERRIDE = "shell_environment_policy.set."
+
+
+def argv_log_line(command: tuple[str, ...]) -> str:
+    """COMMAND as one log line, without the environment values it sets.
+
+    A Codex run's argv carries the permissions table, which is what a sandbox
+    failure needs, and the brief by path or on stdin. The `-c` overrides that set
+    the run's environment hold credential-adjacent values, so they stay out.
+    """
+    shown: list[str] = []
+    previous = ""
+    for word in command:
+        if previous == "-c" and word.startswith(ENV_OVERRIDE):
+            shown.pop()
+        else:
+            shown.append(word)
+        previous = word
+    return "argv: " + shlex.join(shown)
+
+
+def log_argv(run: Run, command: tuple[str, ...]) -> None:
+    if run.request.harness is Harness.CODEX:
+        # A failed log write must not stop the run, as with the cleanup notices.
+        with suppress(OSError):
+            run.files.write("log", argv_log_line(command) + "\n")
+
+
 def run_harness(
     run: Run, prepared: Prepared, stack: ExitStack, *, preflight_only: bool = False
 ) -> int:
@@ -631,6 +660,7 @@ def run_harness(
         log_hook_tools(run, paths)
         run.files.write("log", f"preflight ok: {executable}\n")
         return 0
+    log_argv(run, command)
     headless = run.request.kind is RunKind.EXEC
     terminal = None if headless else sys.stdin.fileno()
     streams = (None, None, None)
