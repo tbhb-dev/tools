@@ -54,6 +54,7 @@ import stat
 import sys
 import tomllib
 import unicodedata
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -193,8 +194,16 @@ def invisible(char: str) -> bool:
 
 
 def visible(text: str) -> str:
-    """TEXT without the characters that render as nothing."""
-    return "".join(char for char in text if not invisible(char))
+    """TEXT as it reads: zero-width characters gone, blank fillers a space.
+
+    A filler such as U+2800 takes the width of a space, so "done<filler>next" is
+    two words, while a zero-width character inside a word joins nothing.
+    """
+    return "".join(
+        " " if char in BLANKS else char
+        for char in text
+        if char in BLANKS or not invisible(char)
+    )
 
 
 def strip_tags(text: str, fill: str = " ") -> str:
@@ -289,14 +298,14 @@ def tag_sentences(text: str) -> tuple[str, list[str]]:
         return f"{TAG} {text}", [text.strip()[:MAX_QUOTED]]
     parts = sentence_parts(text)
     sentences: list[str] = []
-    covered: set[str] = set()
+    covered: Counter[str] = Counter()
     for index, chunk in enumerate(parts):
         found = judged_claims(chunk)
         if found:
             parts[index] = SENTENCE_PREFIX.sub(r"\g<0>" + TAG + " ", chunk)
             sentences.append(chunk.strip())
             covered.update(found)
-    if not set(judged_claims(text)) <= covered:
+    if not Counter(judged_claims(text)) <= covered:
         return f"{TAG} {text}", [*sentences, text.strip()]
     return "".join(parts), sentences
 

@@ -1705,3 +1705,22 @@ def test_other_hook_events_refuse_instead_of_tagging(
     data["hook_event_name"] = event
     assert refused(run(data))
     assert data["tool_input"] == {"message": UNSUPPORTED_CLAIM}
+
+
+@pytest.mark.parametrize("blank", sorted(state_guard.BLANKS))
+def test_a_blank_filler_between_words_is_a_word_boundary(blank: str) -> None:
+    assert state_guard.visible(f"done{blank}next") == "done next"
+    assert state_guard.judged_claims(f"It was done{blank}next.") == [
+        "It was done next."
+    ]
+    assert state_guard.visible("do\u200bne") == "done"
+
+
+def test_a_repeated_claim_glued_to_a_nested_tag_is_tagged() -> None:
+    text = (
+        "It was done.\nIt was done.[state-\n[state-guard: unverified]guard: unverified]"
+    )
+    assert len(state_guard.judged_claims(text)) == 2
+    tagged, sentences = state_guard.tag_sentences(text)
+    assert tagged.count(TAG) >= 2 or tagged == f"{TAG} {text}"
+    assert sentences
