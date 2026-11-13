@@ -17,6 +17,7 @@ awrel
 bazelisk
 bazelrc
 bazelversion
+bged
 bsdinfo
 buildcop
 buildifier
@@ -28,6 +29,7 @@ capsys
 cgnat
 checkpointed
 claudecode
+cmerged
 commondir
 complexipy
 conftest
@@ -291,3 +293,5 @@ nullglob
 precheck
 shopt
 sshcommand
+wаit
+thеy
