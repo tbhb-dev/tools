@@ -61,7 +61,7 @@ class Gh:
             return subprocess.CompletedProcess(
                 argv, self.list_rc, self.list_out, "no list"
             )
-        if argv[:2] == ["api", "user"]:
+        if argv[:4] == ["api", "--hostname", "github.com", "user"]:
             return subprocess.CompletedProcess(
                 argv, self.me_rc, f"{self.me}\n", "no me"
             )
@@ -129,24 +129,30 @@ def test_a_pr_without_opened_by_by_the_agent_account_is_closed_on_that_basis(
 ) -> None:
     gh.view["body"] = "Why.\n"
     assert close.main(["pr", "close", "7", "--reason", "stale"], env=ENV) == 0
-    assert ["api", "user", "--jq", ".login"] in gh.calls
+    assert ["api", "--hostname", "github.com", "user", "--jq", ".login"] in gh.calls
     assert gh.calls[-1][-1] == (
         "Closed on the basis that its GitHub author is the agent account tbhb-agent"
         f" and it has no Opened-by line.\n\nstale\n\n{trailer_line()}\n"
     )
 
 
-@pytest.mark.parametrize(
-    "author", [{"login": "tbhb"}, {"login": ""}, {}, None, "tbhb-agent"]
-)
-def test_a_pr_without_opened_by_by_anyone_else_is_refused(
+@pytest.mark.parametrize("author", [{"login": ""}, {}, None, "tbhb-agent"])
+def test_a_pr_with_no_readable_author_is_refused_without_asking_gh(
     gh: Gh, author: object
 ) -> None:
     gh.view["body"] = "Why.\n"
     gh.view["author"] = author
     with pytest.raises(SystemExit, match="no Opened-by line"):
         close.main(["pr", "close", "7", "--reason", "x"], env=ENV)
-    assert all(call[1] == "view" or call[0] == "api" for call in gh.calls)
+    assert [call[1] for call in gh.calls] == ["view"]
+
+
+def test_a_pr_by_another_login_is_refused_after_one_account_lookup(gh: Gh) -> None:
+    gh.view["body"] = "Why.\n"
+    gh.view["author"] = {"login": "tbhb"}
+    with pytest.raises(SystemExit, match="no Opened-by line"):
+        close.main(["pr", "close", "7", "--reason", "x"], env=ENV)
+    assert [call[0] for call in gh.calls] == ["pr", "api"]
 
 
 def test_a_pr_without_opened_by_is_refused_when_the_account_cannot_be_read(

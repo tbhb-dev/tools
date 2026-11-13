@@ -96,7 +96,7 @@ def agent_author(data: Mapping[str, object]) -> str | None:
     login = author.get("login") if isinstance(author, dict) else None
     if not isinstance(login, str) or not login:
         return None
-    me = gh(["api", "user", "--jq", ".login"])
+    me = gh(["api", "--hostname", "github.com", "user", "--jq", ".login"])
     return login if me.returncode == 0 and me.stdout.strip() == login else None
 
 
