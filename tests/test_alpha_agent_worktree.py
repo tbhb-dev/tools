@@ -5,16 +5,13 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict, Unpack
+from typing import Literal, TypedDict, Unpack
 
 import pytest
 from agent_host_example import commit, git, isolate_host_git, repository, run_request
 
 from tbhbdev.alpha.agent import worktree
 from tbhbdev.alpha.agent.model import Invalid
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 
 class GitOptions(TypedDict, closed=True):
@@ -1206,6 +1203,17 @@ def test_an_empty_git_directory_is_no_main_checkout(tmp_path: Path) -> None:
     assert worktree.is_main_checkout(mount)
 
 
+def test_sandbox_placeholders_inside_git_are_no_main_checkout(tmp_path: Path) -> None:
+    mount = tmp_path / "mount"
+    (mount / ".git" / "hooks").mkdir(parents=True)
+    (mount / ".git" / "config").write_text("")
+    assert not worktree.is_main_checkout(mount)
+    (mount / ".git" / "HEAD").write_text("")
+    assert not worktree.is_main_checkout(mount)
+    (mount / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    assert worktree.is_main_checkout(mount)
+
+
 def test_sandbox_mount_points_above_a_write_root_are_allowed(
     checkout_paths: tuple[Path, Path],
 ) -> None:
@@ -1330,6 +1338,7 @@ def test_main_checkout_requires_its_own_common_directory(
     other = tmp_path / "other"
     (other / ".git").mkdir(parents=True)
     (other / ".git/commondir").write_text(target + "\n")
+    (other / ".git/HEAD").write_text("ref: refs/heads/main\n")
     if target == ".":
         with pytest.raises(Invalid, match="main checkout"):
             worktree.validate_writes(workspace, source, (str(other),))
@@ -1480,26 +1489,20 @@ def test_hook_lock_preserves_executable_type(tmp_path: Path, mode: int) -> None:
     assert executable.stat().st_mode & 0o777 == 0o555
 
 
-def test_checkout_detection_spells_metadata_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_checkout_detection_reads_head_of_a_real_git_directory(
+    tmp_path: Path,
 ) -> None:
-    def directory(path: Path, **kwargs: object) -> bool:
-        assert path == tmp_path / ".git"
-        assert kwargs == {"follow_symlinks": False}
-        return True
-
-    def exists(path: Path) -> bool:
-        assert path == tmp_path / ".git/commondir"
-        return False
-
-    def entries(path: Path) -> Iterator[Path]:
-        assert path == tmp_path / ".git"
-        return iter([path / "HEAD"])
-
-    monkeypatch.setattr(Path, "is_dir", directory)
-    monkeypatch.setattr(Path, "exists", exists)
-    monkeypatch.setattr(Path, "iterdir", entries)
-    assert worktree.is_main_checkout(tmp_path)
+    real = tmp_path / "real"
+    (real / ".git").mkdir(parents=True)
+    (real / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    link = tmp_path / "link"
+    link.mkdir()
+    (link / ".git").symlink_to(real / ".git")
+    assert worktree.is_main_checkout(real)
+    assert not worktree.is_main_checkout(link)
+    head_dir = tmp_path / "head-dir"
+    (head_dir / ".git" / "HEAD").mkdir(parents=True)
+    assert not worktree.is_main_checkout(head_dir)
 
 
 def test_hooks_query_spells_git_directory(
