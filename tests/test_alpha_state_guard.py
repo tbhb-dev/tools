@@ -2110,9 +2110,11 @@ def test_an_invalid_name_does_not_stop_the_prune_of_later_names(
     old = tmp_path / "blocks-2020-01-01.jsonl"
     for path in (invalid, old):
         path.write_text("x")
-    monkeypatch.setattr(
-        Path, "glob", lambda self, _pattern: iter(sorted(self.iterdir()))
-    )
+
+    def ordered_glob(self: Path, _pattern: str) -> Iterator[Path]:
+        return iter(sorted(self.iterdir()))
+
+    monkeypatch.setattr(Path, "glob", ordered_glob)
     state_guard.prune_blocks(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
     assert invalid.exists()
     assert not old.exists()
