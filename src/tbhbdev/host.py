@@ -192,6 +192,7 @@ GITLEAKS_RULES = {
     "tailnet-name": "The tailnet's name",
     "tailnet-host": "A tailnet host name",
     "tailnet-stem": "The stem a family of tailnet host names shares",
+    "tailnet-short": "A short form of a tailnet host name",
     "tailnet-ipv4": "A tailnet IPv4 address",
     "tailnet-ipv6": "A tailnet IPv6 address",
     "home-path": "A path into the operator's or the agent's home",
@@ -1835,11 +1836,11 @@ def gitleaks_facts(
     )
 
 
-def _common(name: str, words: frozenset[str]) -> bool:
+def _common(name: str, words: frozenset[str], minimum: int = NAME_MIN) -> bool:
     """Whether NAME is too short, or too common a word, to match alone."""
     word = name.lower().removeprefix(".")
     forms = {word, word.removesuffix("s"), word.removesuffix("es")}
-    return len(word) < NAME_MIN or not forms.isdisjoint(words)
+    return len(word) < minimum or not forms.isdisjoint(words)
 
 
 def _bound(text: str, at: int) -> str:
@@ -1853,11 +1854,14 @@ def _literal(value: str) -> str:
 
 
 def _named(
-    category: str, values: Iterable[str], words: frozenset[str]
+    category: str,
+    values: Iterable[str],
+    words: frozenset[str],
+    minimum: int = NAME_MIN,
 ) -> tuple[list[Rule], int]:
     """A rule for each of VALUES that isn't common, and how many were."""
     every = sorted(set(values))
-    kept = [v for v in every if not _common(v, words)]
+    kept = [v for v in every if not _common(v, words, minimum)]
     return [Rule(category, _literal(v)) for v in kept], len(every) - len(kept)
 
 
@@ -1900,6 +1904,22 @@ def stems(hosts: Iterable[str]) -> list[str]:
     return sorted(found)
 
 
+def _shorts(hosts: Sequence[str]) -> set[str]:
+    """Stem-stripped names and first DNS labels, excluding full host names."""
+    families: dict[str, list[str]] = {}
+    for host in hosts:
+        families.setdefault(host[:STEM_MIN], []).append(host)
+    found: set[str] = set()
+    for family in families.values():
+        shared = stems(family)
+        for host in family:
+            if shared:
+                found.add(host.removeprefix(shared[0]))
+            if "." in host:
+                found.add(host.partition(".")[0])
+    return found.difference(hosts)
+
+
 def _ipv4(category: str, *addresses: str) -> list[Rule]:
     return [Rule(category, _IPV4.format(a)) for a in addresses]
 
@@ -1921,6 +1941,10 @@ def gitleaks_rules(facts: Facts) -> tuple[list[Rule], dict[str, int]]:
     kept = [s for s in every if not _common(s, facts.words)]
     omitted["tailnet-stem"] = len(every) - len(kept)
     rules += [Rule("tailnet-stem", f"(?i){_bound(s, 0)}{re.escape(s)}") for s in kept]
+    short_at = len(rules)
+    short_rules, omitted["tailnet-short"] = _named(
+        "tailnet-short", _shorts(net.hosts).difference(kept), facts.words, minimum=3
+    )
     rules += _ipv4(
         "tailnet-ipv4",
         rf"100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])(?:\.{_OCTET}){{2}}",
@@ -1969,7 +1993,12 @@ def gitleaks_rules(facts: Facts) -> tuple[list[Rule], dict[str, int]]:
     ):
         found, omitted[category] = _named(category, values, facts.words)
         rules += found
-    return rules, omitted
+    covered = {rule.regex for rule in rules}
+    rules[short_at:short_at] = [r for r in short_rules if r.regex not in covered]
+    unique: dict[str, Rule] = {}
+    for rule in rules:
+        unique.setdefault(rule.regex, rule)
+    return list(unique.values()), omitted
 
 
 def _rule_lines(rule_id: str, description: str, regex: str) -> list[str]:
