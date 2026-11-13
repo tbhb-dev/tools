@@ -40,7 +40,7 @@ that follows other text still blocks. Text after an exempt sentence makes it a
 claim again.
 
 Every block is recorded in a JSON Lines file under
-~/.local/state/tbhb/state-guard/ as a rule id, near-rule hints and a length,
+$XDG_STATE_HOME/tbhbdev/state-guard/ as a rule id, near-rule hints and a length,
 never the text. The log never changes the verdict.
 
 A command is a `git commit` only when one of its simple commands is one. The
@@ -327,7 +327,6 @@ NEAR = {
     ),
     "quotation": re.compile(r"[\"\u201c]"),
 }
-LOG_DIRECTORY = (".local", "state", "tbhb", "state-guard")
 # The most bytes one day's block log may hold, and the days it is kept.
 MAX_LOG_BYTES = 1_000_000
 RETENTION_DAYS = 30
@@ -498,6 +497,11 @@ def excerpt_rule(sentence: str) -> str:
     return rule
 
 
+def log_directory() -> Path:
+    """The private directory for both audit logs, under the XDG state home."""
+    return state_home(Path.home()) / "tbhbdev" / "state-guard"
+
+
 def log_blocks(event: str, sentences: list[str]) -> None:
     """Append one record per blocked sentence: rule id, near rules, length.
 
@@ -507,7 +511,7 @@ def log_blocks(event: str, sentences: list[str]) -> None:
     """
     try:
         now = datetime.now(UTC)
-        directory = Path.home().joinpath(*LOG_DIRECTORY)
+        directory = log_directory()
         dir_fd = open_directory(directory)
         try:
             # A failed prune must not cost today's record.
@@ -546,7 +550,7 @@ def log_blocks(event: str, sentences: list[str]) -> None:
 def log_tagged(data: Json, tool_input: Json, sentences: list[str]) -> None:
     """Append private audit records; a logging failure must still send the message."""
     try:
-        fd = open_log(state_home(Path.home()) / "tbhbdev" / "state-guard")
+        fd = open_log(log_directory())
         with os.fdopen(fd, "ab") as out:
             os.fchmod(out.fileno(), 0o600)
             for sentence in sentences:
