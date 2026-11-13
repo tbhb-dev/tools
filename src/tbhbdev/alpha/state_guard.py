@@ -212,7 +212,9 @@ def unsupported_claims(text: str) -> list[str]:
     does.
     """
     chunks = SENTENCE_END.split(text)
-    last = max((i for i, chunk in enumerate(chunks) if TEXT.search(chunk)), default=-1)
+    # With no word at all there is no claim, so the default can't change the result.
+    words = (i for i, chunk in enumerate(chunks) if TEXT.search(chunk))
+    last = max(words, default=-1)  # pragma: no mutate
     return [
         chunk.strip()[:MAX_QUOTED]
         for i, chunk in enumerate(chunks)
