@@ -3389,11 +3389,126 @@ def test_checks_requires_a_pr_number(argv: tuple[str, ...]) -> None:
     assert info.value.code == 2
 
 
+READY_VIEW = "pr view 45 --repo github.com/tbhb-dev/example --json author --jq"
+READY_ME = "api --hostname github.com user --jq .login"
+READY_REPO = "github.com/tbhb-dev/example"
+
+
+def ready_cases(
+    author: str = "agent", me: str = "agent"
+) -> dict[str, dict[str, object]]:
+    return {
+        "repo view": branch_cases()["repo view"],
+        READY_VIEW: {"rc": 0, "stdout": f"{author}\n", "stderr": ""},
+        READY_ME: {"rc": 0, "stdout": f"{me}\n", "stderr": ""},
+    }
+
+
+def gh_argvs(world: World) -> list[list[str]]:
+    calls = world.calls("gh.repo") + world.calls("gh")
+    return [cast("list[str]", c["argv"]) for c in calls]
+
+
 def test_ready_marks_the_pull_request_ready(world: World) -> None:
+    world.fake("gh", cases=ready_cases())
     assert run_main("ready", "--pr", "45") == 0
-    (call,) = world.calls("gh")
-    assert call["argv"] == ["pr", "ready", "45"]
-    assert call["stdin"] == ""
+    assert gh_argvs(world) == [
+        ["repo", "view", ORIGIN, "--json", "nameWithOwner,url"],
+        [
+            "pr",
+            "view",
+            "45",
+            "--repo",
+            READY_REPO,
+            "--json",
+            "author",
+            "--jq",
+            ".author.login",
+        ],
+        ["api", "--hostname", "github.com", "user", "--jq", ".login"],
+        ["pr", "ready", "45", "--repo", READY_REPO],
+    ]
+    assert [c["stdin"] for c in world.calls("gh")] == ["", "", ""]
+
+
+def test_refusal_reason_decodes_invalid_bytes_and_joins_streams() -> None:
+    assert pr.refusal_reason(b"bad \xff byte\n", b"and\r\nmore") == (
+        "bad \ufffd byte and more"
+    )
+
+
+@pytest.mark.parametrize(
+    ("author", "me"),
+    [
+        ("human", "agent"),
+        ("app/some-bot", "agent"),
+        ("app/", "agent"),
+        ("null", "agent"),
+        ("Agent", "agent"),
+        (" agent", "agent"),
+        ("agent ", "agent"),
+        ("", ""),
+        (" ", " "),
+        ("agent\r", "agent"),
+        ("agent", "agent\r"),
+    ],
+)
+def test_ready_refuses_a_login_that_is_not_the_agents(
+    world: World, author: str, me: str
+) -> None:
+    cases = ready_cases(author=author, me=me)
+    world.fake("gh", cases=cases)
+    with pytest.raises(SystemExit, match=r"isn't this agent's account$"):
+        run_main("ready", "--pr", "45")
+    assert not any(a[:2] == ["pr", "ready"] for a in gh_argvs(world))
+
+
+@pytest.mark.parametrize("failing", [READY_VIEW, READY_ME])
+def test_ready_refuses_when_a_login_is_unreadable(world: World, failing: str) -> None:
+    cases = ready_cases()
+    cases[failing] = {"rc": 1, "stdout": "agent\n", "stderr": "bad\n token"}
+    world.fake("gh", cases=cases)
+    with pytest.raises(SystemExit, match=r"isn't this agent's account: bad token$"):
+        run_main("ready", "--pr", "45")
+    assert not any(a[:2] == ["pr", "ready"] for a in gh_argvs(world))
+
+
+@pytest.mark.parametrize(
+    ("stderr", "shown"),
+    [
+        ("see https://example.test/x?token=abc now", "see <redacted> now"),
+        (
+            "bad " + "gh" + "p_" + "0123456789abcdefABCDEF" + " token",
+            "bad <redacted> token",
+        ),
+        ("a" * 19, "a" * 19),
+        ("z" * 20, "<redacted>"),
+        ("w " * 150, "w " * 100),
+    ],
+)
+def test_ready_refusal_redacts_and_bounds_gh_stderr(
+    world: World, stderr: str, shown: str
+) -> None:
+    cases = ready_cases()
+    cases[READY_VIEW] = {"rc": 1, "stdout": "agent\n", "stderr": stderr}
+    world.fake("gh", cases=cases)
+    with pytest.raises(SystemExit) as info:
+        run_main("ready", "--pr", "45")
+    message = str(info.value)
+    assert message.endswith(f"account: {shown}")
+
+
+def test_ready_acts_on_origin_even_when_gh_defaults_elsewhere(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The author read and the ready call name origin, not GH_REPO or GH_HOST."""
+    monkeypatch.setenv("GH_REPO", "other.example/someone/else")
+    monkeypatch.setenv("GH_HOST", "other.example")
+    world.fake("gh", cases=ready_cases())
+    assert run_main("ready", "--pr", "45") == 0
+    pinned = [a for a in gh_argvs(world) if a[:2] in (["pr", "view"], ["pr", "ready"])]
+    assert len(pinned) == 2
+    assert all(a[a.index("--repo") + 1] == READY_REPO for a in pinned)
 
 
 @pytest.mark.parametrize(
@@ -3577,7 +3692,9 @@ def test_delete_branch_passes_gh_output_and_exit_code_through(
 def test_ready_passes_gh_output_and_exit_code_through(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    world.fake("gh", rc=3, stdout="out\n", stderr="err\n")
+    cases = ready_cases()
+    cases["pr ready"] = {"rc": 3, "stdout": "out\n", "stderr": "err\n"}
+    world.fake("gh", cases=cases)
     assert run_main("ready", "--pr", "45") == 3
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == ("out\n", "err\n")

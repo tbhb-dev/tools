@@ -81,7 +81,8 @@ request exists only warns. ``edit`` copies the live body's ``Opened-by`` line un
 and adds none when the live body has none. ``check`` rejects a draft that
 contains one.
 
-``ready --pr N`` marks pull request N ready for review with ``gh pr ready``. It
+``ready --pr N`` marks pull request N ready for review with ``gh pr ready``, but only
+when its GitHub author is the account this ``gh`` runs as. It
 doesn't read a draft.
 
 ``rerun N`` reruns only the failed jobs of the latest run for pull request N's
@@ -1155,6 +1156,71 @@ def closed_pr_head(number: int, repo: str) -> str:
     return branch
 
 
+SECRET_SHAPED = re.compile(r"\S+://\S+|\b[A-Za-z0-9_-]{20,}\b")
+WHY_LIMIT = 200
+
+
+def refusal_reason(*raw: bytes) -> str:
+    """The captured stderr, with URLs and long token-like words redacted and cut."""
+    # Python spells the codec error handler case-blind, so no test can tell "REPLACE".
+    text = " ".join(
+        b" ".join(raw).decode(errors="replace").split()  # pragma: no mutate
+    )
+    return SECRET_SHAPED.sub("<redacted>", text)[:WHY_LIMIT]
+
+
+def run_bytes(argv: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
+    """Run a command and keep its output as bytes, so line endings stay as written."""
+    # Argv comes from fixed names and a validated pull request number.
+    return subprocess.run(  # nosec B603
+        list(argv),
+        capture_output=True,
+        check=False,  # pragma: no mutate -- the default, spelled for the linter
+        # An inherited stdin behaves like the empty pipe for these gh reads.
+        input=b"",  # pragma: no mutate
+    )
+
+
+def require_own_author(number: int, repo: str) -> None:
+    """Refuse unless PR N's GitHub author is the account this ``gh`` runs as.
+
+    Both reads name github.com and ``repo``, the repository ``gh pr ready``
+    acts on, so no ``GH_HOST`` or ``GH_REPO`` setting can split them. The two
+    logins must match byte for byte. The check isn't atomic with ``gh pr ready``.
+
+    Raises:
+        SystemExit: The author or the account can't be read, or they differ.
+    """
+    author = run_bytes(
+        [
+            find_tool(GH),
+            "pr",
+            "view",
+            str(number),
+            "--repo",
+            f"github.com/{repo}",
+            "--json",
+            "author",
+            "--jq",
+            ".author.login",
+        ]
+    )
+    me = run_bytes(
+        [find_tool(GH), "api", "--hostname", "github.com", "user", "--jq", ".login"]
+    )
+    if (
+        author.returncode
+        or me.returncode
+        or not author.stdout.strip()
+        or me.stdout != author.stdout
+    ):
+        why = refusal_reason(author.stderr, me.stderr)
+        message = (
+            f"not marking PR {number} ready: its author isn't this agent's account"
+        )
+        raise SystemExit(f"{message}: {why}" if why else message)
+
+
 def delete_pr_branch(number: int) -> int:
     """Delete a finished PR's unprotected head branch from origin only.
 
@@ -1591,9 +1657,12 @@ def main(
     if args.command in by_pr:
         return by_pr[args.command](args.pr)
     if args.command == "ready":
+        repo = origin_repository()
+        require_own_author(args.pr, repo)
         # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
         # empty body: no test can tell `None` from `""`.
-        return invoke_gh([GH, "pr", "ready", str(args.pr)], "")[0]  # pragma: no mutate
+        words = [GH, "pr", "ready", str(args.pr), "--repo", f"github.com/{repo}"]
+        return invoke_gh(words, "")[0]  # pragma: no mutate
     try:
         return command(args, env)
     except agent_identity.AttributionError:
