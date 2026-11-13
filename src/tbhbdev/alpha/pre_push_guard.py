@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+import shutil
 import subprocess  # nosec B404
 import sys
 from pathlib import Path
@@ -164,14 +165,25 @@ def linked_worktree() -> Path | None:
     return Path(lines[2])
 
 
+def bazelisk_path() -> str | None:
+    """Find bazelisk on the absolute PATH entries only."""
+    dirs = [
+        d for d in os.environ.get("PATH", "").split(os.pathsep) if Path(d).is_absolute()
+    ]
+    return shutil.which("bazelisk", path=os.pathsep.join(dirs))
+
+
 def stop_bazel() -> None:
     """Ask a linked worktree's Bazel server to stop, without waiting for it."""
     top = linked_worktree()
-    if top is None or not (top / "MODULE.bazel").is_file():
+    if top is None:
         return
     try:
-        subprocess.Popen(  # nosec B603 B607
-            ["bazelisk", "shutdown"],
+        exe = bazelisk_path()
+        if exe is None or not (top / "MODULE.bazel").is_file():
+            return
+        subprocess.Popen(  # nosec B603
+            [exe, "shutdown"],
             cwd=top,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -688,10 +689,24 @@ def test_tracking_main_is_refused_for_any_push_default(
     assert "refs/heads/main: push to a protected" in capsys.readouterr().err
 
 
+GIT_DIR = str(Path(shutil.which("git") or "/usr/bin/git").parent)
+
+
+@pytest.fixture
+def fake_bazelisk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    exe = tmp_path / "bin" / "bazelisk"
+    exe.parent.mkdir()
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(exe.parent), GIT_DIR]))
+    return exe
+
+
 @pytest.fixture
 def started(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, fake_bazelisk: Path
 ) -> list[tuple[list[str], dict[str, object]]]:
+    del fake_bazelisk
     calls: list[tuple[list[str], dict[str, object]]] = []
 
     def popen(args: list[str], **kwargs: object) -> None:
@@ -727,7 +742,7 @@ def test_linked_worktree_stops_bazel_after_a_clean_push(
     assert guard(monkeypatch, commit(path)) == 0
     assert len(started) == 1
     args, kwargs = started[0]
-    assert args == ["bazelisk", "shutdown"]
+    assert args == [str(tmp_path / "bin" / "bazelisk"), "shutdown"]
     assert kwargs["cwd"] == path.resolve()
     assert kwargs["start_new_session"] is True
     assert kwargs["stdout"] is subprocess.DEVNULL
@@ -824,9 +839,52 @@ def test_refused_push_keeps_bazel_running(
     assert started == []
 
 
-def test_missing_bazelisk_never_fails_a_push(
-    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_relative_path_entries_never_supply_bazelisk(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[tuple[list[str], dict[str, object]]],
 ) -> None:
+    path = linked(repo, tmp_path)
+    fake = path / "bazelisk"
+    fake.write_text("#!/bin/sh\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f".{os.pathsep}{GIT_DIR}")
+    monkeypatch.chdir(path)
+    pg.stop_bazel()
+    assert started == []
+
+
+def test_absent_bazelisk_stops_nothing(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[tuple[list[str], dict[str, object]]],
+) -> None:
+    monkeypatch.setenv("PATH", GIT_DIR)
+    monkeypatch.chdir(linked(repo, tmp_path))
+    pg.stop_bazel()
+    assert started == []
+
+
+def test_unreadable_module_file_never_fails_a_push(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_bazelisk: Path
+) -> None:
+    del fake_bazelisk
+
+    def deny(_self: Path) -> bool:
+        raise PermissionError
+
+    monkeypatch.setattr(Path, "is_file", deny)
+    monkeypatch.chdir(linked(repo, tmp_path))
+    pg.stop_bazel()
+
+
+def test_missing_bazelisk_never_fails_a_push(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_bazelisk: Path
+) -> None:
+    del fake_bazelisk
+
     def refuse(*_args: object, **_kwargs: object) -> None:
         raise FileNotFoundError
 
