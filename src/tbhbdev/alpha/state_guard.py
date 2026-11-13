@@ -29,9 +29,17 @@ SessionStart. It reads the hook payload on stdin.
   and the block names `decisions_dir`. Without either key it does nothing.
 
 Evidence is a git sha (7 to 40 hex characters, with a digit and a letter), a
-PR or issue number, a log path, inline code, "output" or "read-back", or
-attribution ("says", "said", "reports"). A claim marked "unverified", or "not
-done", also passes.
+PR or issue number, a log path, inline code, "output" or "read-back", a URL, a
+check-run or job id, or attribution ("says", "said", "reports", "confirmed",
+"according to", "per <source>" opening a clause, "<name>'s log"). A claim
+marked "unverified", or "not done", also passes.
+
+Evidence is judged by item: a paragraph, or one list item, and a lead-in line
+that ends in ":" shares its evidence with the list items under it. A claim also
+passes when it is a status word after a time or condition word, after a modal
+or "to be", inside quotation marks, or in a clause with one negation (see
+EXEMPTIONS). Every block is appended to a JSONL file under
+~/.local/state/tbhb/state-guard/, which never changes the verdict.
 
 A command is a `git commit` only when one of its simple commands is one. The
 scan drops heredoc bodies and splits shell commands outside quotes. It also
@@ -99,7 +107,10 @@ CLAIM = re.compile(
 )
 EVIDENCE = re.compile(
     r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b|#\d+|\bsays\b|\bsaid\b|\breports?\b|\.log\b|`[^`]+`"
-    r"|\boutput\b|\bread-back\b|\bunverified\b|\bnot (?:done|applied|merged)\b",
+    r"|\boutput\b|\bread-back\b|\bunverified\b|\bnot (?:done|applied|merged)\b"
+    r"|\baccording to\b|\bconfirmed\b|\b[\w-]+['\u2019]s\s+logs?\b|https?://\S+|\b\d{9,16}\b"
+    r"|\b(?:check[- ]?run|job|task)\s+(?:id\s+)?\d{5,}\b"
+    r"|(?:^|[.!?,;:(\u2014\u2013]\s*|\s-\s)per\s+(?![A-Z0-9]\b)\S",
     re.IGNORECASE,
 )
 TRAILER = re.compile(r"(?i)(signed-off-by|co-authored-by)\s*:")
@@ -111,6 +122,8 @@ SENTENCE_PARTS = re.compile(f"({SENTENCE_END.pattern})")
 SENTENCE_PREFIX = re.compile(
     r"^\s*(?:(?:[-+*]|\d+[.)])\s+)?(?:\*\*[^*\n]+(?::\*\*|\*\*:)\s*)?"
 )
+PARAGRAPH_END = re.compile(r"\n\s*\n")
+LIST_ITEM = re.compile(r"\s*(?:[-*+]|\d+[.)])\s")
 SEPARATORS = frozenset("&|;\n(){}`")
 GIT_OPTIONS = frozenset(
     {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
@@ -136,25 +149,188 @@ SHORT_VALUES = frozenset("mFCctU")
 SHORT_OPTIONAL_VALUES = frozenset("Su")
 MAX_QUOTED = 160
 MAX_LISTED = 3
+STATUS = (
+    r"done|applied|merged|shipped|deployed|live|fixed|complete|completed|"
+    r"installed|running|verified|started|landed"
+)
+TIME_WORDS = r"\b(?:when|once|until|after|before|if|while|as soon as)\b"
+# A time or condition word opens the clause that holds the claim.
+TIMED = re.compile(
+    TIME_WORDS + r"(?:(?!\b(?:but|so|because|then)\b)[^,;:()\u2014\u2013])*$",
+    re.IGNORECASE,
+)
+# A past or present verb ahead of the time word makes a report, not a request or
+# a plan: "Its jobs were cancelled when the push landed" still claims it landed.
+REPORTED = re.compile(r"\b(?:is|are|was|were|has|have|had|\w+ed)\b", re.IGNORECASE)
+# A modal or "to be" leads straight to the claim, through only filler and
+# other status words, so "can confirm the fix is merged" stays a claim.
+MODAL = re.compile(
+    r"(?:\b(?:will|should|must|can)\b|\bto\s+be\b)"
+    rf"(?:\s+(?:be|been|have|already|also|now|still|then|and|or|{STATUS}))*\s*$",
+    re.IGNORECASE,
+)
+NEGATION = re.compile(
+    r"(?<![/\w-])(?:not(?!\s+only\b)|never|nothing|no|none|nobody|neither|nor)\b"
+    r"|n['\u2019]t\b",
+    re.IGNORECASE,
+)
+YET = re.compile(r"\byet\s*(?:[.,;?!]|$)", re.IGNORECASE)
+CLAUSE_BREAK = re.compile(r"[,;:()\u2014\u2013]|\b(?:and|but|or)\b", re.IGNORECASE)
+# Looser versions of the rules above, used only to say in the block log which
+# rule a blocked sentence came close to.
+NEAR = {
+    "time-or-condition": re.compile(TIME_WORDS, re.IGNORECASE),
+    "modal": re.compile(r"\b(?:will|should|must|can|to be)\b", re.IGNORECASE),
+    "negation": re.compile(NEGATION.pattern + "|" + YET.pattern, re.IGNORECASE),
+    "quotation": re.compile(r"[\"\u201c]"),
+}
+LOG_DIRECTORY = (".local", "state", "tbhb", "state-guard")
+
+
+def timed(chunk: str, match: re.Match[str]) -> bool:
+    """Whether MATCH follows a time or condition word in its clause.
+
+    A sentence that already reports something before the time word isn't exempt.
+    """
+    found = TIMED.search(chunk[: match.start()])
+    return bool(found) and not REPORTED.search(chunk[: found.start()])
+
+
+def modal(chunk: str, match: re.Match[str]) -> bool:
+    """Whether MATCH follows a modal or "to be" with only filler between."""
+    return bool(MODAL.search(chunk[: match.start()]))
+
+
+def negated(chunk: str, match: re.Match[str]) -> bool:
+    """Whether MATCH sits in a clause with exactly one negation.
+
+    Two negations make an assertion, so they don't exempt. A trailing "yet"
+    counts as the negation only when the clause has no other.
+    """
+    start = 0  # pragma: no mutate -- None slices from 0 too
+    for brk in CLAUSE_BREAK.finditer(chunk):
+        if brk.end() > match.start():
+            break
+        start = brk.end()
+    end = next(
+        (brk.start() for brk in CLAUSE_BREAK.finditer(chunk, match.end())),
+        len(chunk),  # pragma: no mutate -- None slices to the end too
+    )
+    clause = chunk[start:end]
+    count = len(NEGATION.findall(clause))
+    return count == 1 or (count == 0 and bool(YET.search(clause)))
+
+
+def quoted(chunk: str, match: re.Match[str]) -> bool:
+    """Whether MATCH sits inside double or curly quotation marks."""
+    before = chunk[: match.start()]
+    return before.count('"') % 2 == 1 or before.count("\u201c") > before.count("\u201d")
+
+
 # Exemptions from the baseline claim judge. Each rule takes a sentence and one
-# claim match in it and returns True to exempt that match. A rule is added in its
-# own pull request, with its sentences listed in the differential test.
-EXEMPTIONS: tuple[Callable[[str, re.Match[str]], bool], ...] = ()
+# claim match in it and returns True to exempt that match. Each rule's passing
+# sentences are listed in the differential test.
+EXEMPTIONS: tuple[Callable[[str, re.Match[str]], bool], ...] = (
+    timed,
+    modal,
+    negated,
+    quoted,
+)
 
 
 def exempt(chunk: str, match: re.Match[str]) -> bool:
-    """Whether any exemption rule exempts MATCH in CHUNK; the set is empty."""
+    """Whether any exemption rule exempts MATCH in CHUNK."""
     return any(rule(chunk, match) for rule in EXEMPTIONS)
+
+
+def judging_units(text: str) -> list[str]:
+    """TEXT cut into the paragraphs and list items that share evidence.
+
+    A lead-in line that ends in ":" and opens a list joins its list items into
+    one unit. Without one, each list item is its own unit. A line that doesn't
+    start a list item continues the item above it.
+    """
+    units: list[str] = []
+    for paragraph in PARAGRAPH_END.split(text):
+        items: list[list[str]] = []
+        for line in paragraph.split("\n"):
+            if not items or LIST_ITEM.match(line):
+                items.append([line])
+            else:
+                items[-1].append(line)
+        lead = items[0][-1].rstrip().endswith(":")
+        if lead and not LIST_ITEM.match(items[0][0]):
+            units.append(paragraph)
+        else:
+            units.extend("\n".join(item) for item in items)
+    return units
+
+
+def blocked_claims(text: str) -> list[tuple[str, str, list[str]]]:
+    """The (sentence, matched word, near rules) of each claim in TEXT to block.
+
+    A unit with evidence anywhere has no blocked claim. The near rules name the
+    looser exemption rules the sentence resembles, or "evidence-elsewhere"
+    when another unit of TEXT has evidence.
+    """
+    elsewhere = bool(EVIDENCE.search(text))
+    found: list[tuple[str, str, list[str]]] = []
+    for unit in judging_units(text):
+        if EVIDENCE.search(unit):
+            continue
+        for chunk in SENTENCE_END.split(unit):
+            word = next(
+                (m.group(0) for m in CLAIM.finditer(chunk) if not exempt(chunk, m)),
+                None,
+            )
+            if word is not None:
+                near = [name for name, rule in NEAR.items() if rule.search(chunk)]
+                found.append(
+                    (
+                        chunk.strip()[:MAX_QUOTED],
+                        word,
+                        [*near, "evidence-elsewhere"] if elsewhere else near,
+                    )
+                )
+    return found
 
 
 def unsupported_claims(text: str) -> list[str]:
     """The sentences or lines of TEXT with a status claim and no evidence."""
-    return [
-        chunk.strip()[:MAX_QUOTED]
-        for chunk in SENTENCE_END.split(text)
-        if not EVIDENCE.search(chunk)
-        and any(not exempt(chunk, match) for match in CLAIM.finditer(chunk))
-    ]
+    return [sentence for sentence, _word, _near in blocked_claims(text)]
+
+
+def log_blocks(event: str, text: str) -> None:
+    """Append one JSONL record per blocked claim in TEXT to the block log.
+
+    The log is a diagnostic. A failure here, of any kind, must never turn a
+    block into an allow, so every error is swallowed.
+    """
+    try:
+        directory = Path.home().joinpath(*LOG_DIRECTORY)
+        directory.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(UTC)
+        lines = "".join(
+            json.dumps(
+                {
+                    "time": now.isoformat(timespec="seconds"),
+                    "event": event,
+                    "sentence": sentence,
+                    "word": word,
+                    "near_rules": near,
+                }
+            )
+            + "\n"
+            for sentence, word, near in blocked_claims(text)
+        )
+        with (directory / f"blocks-{now:%Y-%m-%d}.jsonl").open(
+            "a",
+            # json.dumps escapes non-ASCII, so no test can tell the codec.
+            encoding="utf-8",  # pragma: no mutate
+        ) as log:
+            log.write(lines)
+    except Exception:  # noqa: BLE001  # the log must never change the verdict
+        return
 
 
 def final_claim_reason(bad: list[str]) -> str:
@@ -231,7 +407,12 @@ def strip_tags(text: str, fill: str = " ") -> str:
 
 
 def collapse(run: str, fill: str) -> str:
-    """One gap run as it renders: a line break, a space, or FILL for a removed tag."""
+    """One gap run as it renders: a paragraph or line break, a space, or FILL.
+
+    A blank line stays a paragraph break because evidence covers one paragraph.
+    """
+    if run.count("\n") > 1:
+        return "\n\n"
     if "\n" in run:
         return "\n"
     return " " if any(c.isspace() for c in run) else fill
@@ -299,13 +480,18 @@ def tag_sentences(text: str) -> tuple[str, list[str]]:
     parts = sentence_parts(text)
     sentences: list[str] = []
     covered: Counter[str] = Counter()
+    # Evidence covers a paragraph, so a sentence alone may look unsupported when
+    # the message judges it supported. Tag only what the whole message judges.
+    judged = Counter(judged_claims(text))
+    remaining = judged.copy()
     for index, chunk in enumerate(parts):
         found = judged_claims(chunk)
-        if found:
+        if found and not Counter(found) - remaining:
             parts[index] = SENTENCE_PREFIX.sub(r"\g<0>" + TAG + " ", chunk)
             sentences.append(chunk.strip())
             covered.update(found)
-    if not Counter(judged_claims(text)) <= covered:
+            remaining.subtract(found)
+    if not judged <= covered:
         return f"{TAG} {text}", [*sentences, text.strip()]
     return "".join(parts), sentences
 
@@ -429,6 +615,7 @@ def send_message_reason(data: Json, tool_input: Json) -> str | None:
     bad = judged_claims(original)
     if not bad:
         return None
+    log_blocks("PreToolUse:SendMessage", original)
     try:
         output = tagged_input(data, tool_input, original)
         if output is not None:
@@ -691,6 +878,8 @@ def stop_reason(data: Json) -> str | None:
     if not message:
         message = last_assistant_text(str(data.get("transcript_path", "")))
     bad = judged_claims(str(message))
+    if bad:
+        log_blocks("Stop", str(message))
     return final_claim_reason(bad) if bad else None
 
 

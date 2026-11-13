@@ -78,6 +78,13 @@ def _bounded_hook() -> Iterator[None]:
         signal.signal(signal.Signals(14), previous)
 
 
+@pytest.fixture(autouse=True)
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep the block log out of the real home directory."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    return tmp_path / "home"
+
+
 @pytest.fixture
 def run(
     capsys: pytest.CaptureFixture[str],
@@ -297,9 +304,13 @@ def test_each_kind_of_claim_is_blocked(run: Runner, claim: str) -> None:
     assert json.loads(run(stop(last_assistant_message=claim))[1])["decision"] == "block"
 
 
-def test_evidence_in_another_sentence_does_not_cover_a_claim(run: Runner) -> None:
-    message = "It was applied. See #12 for the other one."
+def test_evidence_in_another_paragraph_does_not_cover_a_claim(run: Runner) -> None:
+    message = "It was applied.\n\nSee #12 for the other one."
     assert_tagged(run(send(message)), f"{TAG} {message}")
+
+
+def test_evidence_in_the_same_paragraph_covers_a_claim(run: Runner) -> None:
+    assert run(send("It was applied. See #12 for the other one.")) == (0, "", "")
 
 
 def test_other_tools_and_odd_inputs_pass(run: Runner) -> None:
@@ -908,7 +919,7 @@ def test_corpus_measurement(
 ) -> None:
     rows = [
         (1, "A", "bare_claim", "The build is done."),
-        (2, "A", "negation", "No build is running."),
+        (2, "A", "negation", "No build is running but the fix merged."),
         (3, "B", "evidence_missed", "PR #12 merged."),
         (4, "B", "evidence_missed", "The fix merged."),
         (5, "C", "future", "Tell me when it is merged."),
@@ -942,29 +953,21 @@ def test_corpus_measurement(
     )
     runpy.run_path(str(script), run_name="__main__")
     expected = (
-        "verdict A: 2/2\nverdict B: 1/2\nverdict C: 2/2\n"
+        "verdict A: 2/2\nverdict B: 1/2\nverdict C: 1/2\n"
         "shape bare_claim: 1/1\nshape evidence_missed: 1/2\n"
-        "shape future: 1/1\nshape negation: 1/1\nshape other: 1/1\n"
+        "shape future: 0/1\nshape negation: 1/1\nshape other: 1/1\n"
         "A anchors: 2/2\n"
     )
     if ids:
-        expected += "A pass ids: []\nB block ids: [4]\nC block ids: [5, 6]\n"
+        expected += "A pass ids: []\nB block ids: [4]\nC block ids: [6]\n"
     assert capsys.readouterr().out == expected
 
 
 @pytest.mark.parametrize(
     "text",
     [
-        "Nothing merged yet.",
-        "Once the fix is merged, check again.",
-        "When the fix is merged, check again.",
-        "If the fix is merged, check again.",
-        "After the fix is merged, check again.",
-        "Before the fix is merged, check again.",
-        "Until the fix is merged, wait.",
         "Unless the fix is merged, wait.",
         "Whether the fix is merged matters.",
-        "As soon as the fix is merged, check.",
     ],
 )
 def test_claim_scope_and_evidence(text: str) -> None:
@@ -988,30 +991,98 @@ def test_additional_scoped_exceptions_and_evidence(text: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "text", ["When it's merged, check again.", "If it merged, check again."]
+    "text",
+    [
+        "Bring it to me when it's merged.",
+        "Hold steps 2b\u20132e until the follow-up PR has merged.",
+        "Yes, it moved fast, but nothing is running on the NASes yet.",
+        "Nothing merged yet.",
+        "Once the fix is merged, check again.",
+        "As soon as the fix is merged, check.",
+        "If it merged, check again.",
+        "It will be merged after review.",
+        "It should have deployed by tomorrow.",
+        "It needs to be merged and deployed.",
+        'The word list holds "merged", "shipped" and "deployed".',
+        "The word list holds \u201cmerged\u201d and \u201cshipped\u201d.",
+    ],
 )
-def test_scoped_qualifiers_and_attached_evidence_pass(text: str) -> None:
+def test_grammar_exemptions_pass(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The fix is deployed.",
+        "I can confirm the fix is deployed.",
+        "It will be merged, and the PR is merged.",
+        "Once it ships we waited, and the fix is merged.",
+        "It isn't not deployed.",
+        "Nothing is deployed but the fix is merged.",
+        "Neither service isn't deployed.",
+        "The fix is deployed (the build isn't).",
+        'He wrote "ok" and the fix merged.',
+        "Before: the fix is merged.",
+    ],
+)
+def test_true_positives_still_block(text: str) -> None:
     assert state_guard.unsupported_claims(text) == [text]
 
 
 @pytest.mark.parametrize(
-    "text", ["It will be merged after review.", "It should have deployed by tomorrow."]
+    "text",
+    [
+        "The fix merged, per coord-assistant's log.",
+        "The fix merged, per research.",
+        "The fix merged. Per research.",
+        "The fix merged - per research.",
+        "The fix merged (per research).",
+        "The fix merged, according to research.",
+        "The fix merged and the owner confirmed it.",
+        "The fix merged, see ops's log.",
+        "The fix merged: https://example.com/run/1",
+        "Staging is deployed (check run 130431017311).",
+        "The job 12345 is done.",
+        "The task id 98765 is running.",
+        "The check-run 55555 is done.",
+        "The fix merged, id 130431017311.",
+    ],
 )
-def test_review_legitimate_shapes_pass(text: str) -> None:
+def test_the_new_kinds_of_evidence_pass(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The worker is running at 20 requests per review.",
+        "The fix merged; per N workers.",
+        "The fix merged, per 5.",
+        "The fix merged, id 1234567890123456789.",
+        "The fix merged, job 1234.",
+        "The fix merged, see ops's logic.",
+        "The fix merged at http://",
+        "The fix merged, ac cording to nobody.",
+    ],
+)
+def test_lookalike_evidence_still_blocks(text: str) -> None:
     assert state_guard.unsupported_claims(text) == [text]
 
 
 def test_tagged_input_copies_all_fields_and_each_flagged_occurrence(
     run: Runner,
 ) -> None:
-    message = "A note. It was done. It was merged in #12. It was done. It shipped."
+    note = "A note."
+    merged = "It was merged in #12."
+    message = f"{note}\n\nIt was done.\n\n{merged}\n\nIt was done.\n\nIt shipped."
     fields = {"to": "peer-example", "summary": "note", "extra": {"n": 3}, "flag": False}
     data = send(message)
     data["tool_input"] = {"message": message, **fields}
     assert_tagged(
         run(data),
-        f"A note. {TAG} It was done. It was merged in #12. "
-        f"{TAG} It was done. {TAG} It shipped.",
+        f"A note.\n\n{TAG} It was done.\n\nIt was merged in #12.\n\n"
+        f"{TAG} It was done.\n\n{TAG} It shipped.",
         **fields,
     )
     assert data["tool_input"] == {"message": message, **fields}
@@ -1163,7 +1234,7 @@ def test_a_tag_inside_a_word_is_judged_split_and_joined(text: str, tag: str) -> 
 def test_a_claim_hidden_by_splitting_a_word_is_still_judged() -> None:
     assert state_guard.judged_claims(f"It was do{TAG}ne.")
     assert state_guard.judged_claims(f"It was mer{TAG}ged.")
-    assert state_guard.judged_claims(f"It was no{TAG}t merged.")
+    assert state_guard.judged_claims(f"It was ne{TAG}ver merged.")
     assert not state_guard.judged_claims(f"A not{TAG}e.")
     assert state_guard.renderings(f"do{TAG}ne") == ("do ne", "done")
 
@@ -1376,9 +1447,10 @@ def test_logging_failure_still_sends_once(tmp_path: Path, run: Runner) -> None:
 
 def test_long_sentences_preserve_full_text_and_evidence(run: Runner) -> None:
     sentence = "It was done " + "x" * 200
-    message = f"{sentence}. {sentence}. {sentence} in #12."
+    message = f"{sentence}.\n\n{sentence}.\n\n{sentence} in #12."
     assert_tagged(
-        run(send(message)), f"{TAG} {sentence}. {TAG} {sentence}. {sentence} in #12."
+        run(send(message)),
+        f"{TAG} {sentence}.\n\n{TAG} {sentence}.\n\n{sentence} in #12.",
     )
 
 
@@ -1734,3 +1806,206 @@ def test_a_message_of_exactly_the_judging_limit_is_still_judged() -> None:
     tagged, sentences = state_guard.tag_sentences(text + "x")
     assert tagged == f"{TAG} {text}x"
     assert sentences
+
+
+def test_evidence_in_a_list_items_lead_in_covers_its_sub_items() -> None:
+    text = "**Merged,** per coord-assistant's log:\n- Fix A merged.\n- Fix B merged.\n"
+    assert state_guard.unsupported_claims(text) == []
+
+
+def test_evidence_in_a_sub_item_covers_its_lead_in_and_siblings() -> None:
+    text = "These merged:\n- Fix A merged.\n- Fix B merged in abc1234.\n"
+    assert state_guard.unsupported_claims(text) == []
+
+
+def test_each_list_item_without_a_lead_in_is_judged_alone() -> None:
+    text = "- Fix A merged in abc1234.\n- Fix B merged.\n"
+    assert state_guard.unsupported_claims(text) == ["- Fix B merged."]
+
+
+def test_a_numbered_item_continues_on_an_unmarked_line() -> None:
+    text = "1. Fix A\n   merged in abc1234.\n2) Fix B merged.\n"
+    assert state_guard.unsupported_claims(text) == ["2) Fix B merged."]
+
+
+def test_a_lead_in_that_ends_with_a_colon_but_opens_no_list_is_one_unit() -> None:
+    assert state_guard.unsupported_claims("Fix A merged:\nsee abc1234.") == []
+
+
+def test_a_lead_in_without_a_colon_does_not_share_evidence() -> None:
+    text = "These are in abc1234.\n- Fix B merged.\n"
+    assert state_guard.unsupported_claims(text) == ["- Fix B merged."]
+
+
+def test_blank_lines_separate_paragraphs() -> None:
+    text = "Fix A merged in abc1234.\n\n\nFix B merged."
+    assert state_guard.unsupported_claims(text) == ["Fix B merged."]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Its jobs were cancelled when the new push landed.",
+        "So main is green after the changes merged.",
+        "Both conflict with main, which moved when other ops PRs merged.",
+        "I also cleaned up after the merged and closed PRs:",
+        "The PR is open until the fix has merged and the PR is done.",
+        "It will be merged, and the PR is merged.",
+        "I can confirm the fix is deployed.",
+        "Nothing is deployed but the fix is merged.",
+        "No one merged it and the fix is merged.",
+        "Not only is the fix merged.",
+        "The fix is deployed (the build isn't).",
+        "The fix merged. The worker isn't running.",
+        'The team noted "x" while the fix merged.',
+    ],
+)
+def test_reports_and_assertions_still_block(text: str) -> None:
+    assert state_guard.unsupported_claims(text) != []
+
+
+@pytest.mark.parametrize(
+    ("text", "word"),
+    [
+        ("Once it's merged, tell me.", "merged"),
+        ('The doc says "merged".', "merged"),
+        ("Nothing is running yet.", "running"),
+        ("It hasn't merged yet.", "merged"),
+        ("Merged yet?", "Merged"),
+        ("It should now be merged.", "merged"),
+        ("It must already have been deployed.", "deployed"),
+        ("It's meant to be already shipped.", "shipped"),
+        ("The note \u201cmerged\u201d is quoted.", "merged"),
+    ],
+)
+def test_each_exemption_passes_its_shape(text: str, word: str) -> None:
+    assert word.lower() in text.lower()
+    assert state_guard.unsupported_claims(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Isn't it never merged?",
+        'The team wrote "x" and the fix merged "y" later.',
+        "The fix merged \u201cx\u201d and then deployed.",
+        "It isn't merged. Yet the fix is deployed.",
+    ],
+)
+def test_double_negation_and_closed_quotes_do_not_exempt(text: str) -> None:
+    assert state_guard.unsupported_claims(text) != []
+
+
+def block_lines(home: Path) -> list[dict[str, object]]:
+    files = sorted((home / ".local/state/tbhb/state-guard").glob("blocks-*.jsonl"))
+    assert len(files) == 1
+    return [json.loads(line) for line in files[0].read_text().splitlines()]
+
+
+def test_a_blocked_message_is_logged_with_its_word_and_near_rules(
+    run: Runner, home: Path
+) -> None:
+    run(
+        send(
+            'It was applied.\n\nThe team wrote "x" and the fix merged "y".\n\nSee #12.'
+        )
+    )
+    records = block_lines(home)
+    assert [r["event"] for r in records] == ["PreToolUse:SendMessage"] * 2
+    assert records[0]["sentence"] == "It was applied."
+    assert records[0]["word"] == "was applied"
+    assert records[0]["near_rules"] == ["evidence-elsewhere"]
+    assert records[1]["near_rules"] == ["quotation", "evidence-elsewhere"]
+    assert str(records[0]["time"]).endswith("+00:00")
+
+
+def test_a_blocked_reply_is_logged_with_the_stop_event(run: Runner, home: Path) -> None:
+    status, out, _ = run(stop(last_assistant_message="Nobody knows, and it is done."))
+    assert status == 0
+    assert json.loads(out)["decision"] == "block"
+    (record,) = block_lines(home)
+    assert record["event"] == "Stop"
+    assert record["near_rules"] == ["negation"]
+
+
+def test_a_message_that_passes_writes_no_log(run: Runner, home: Path) -> None:
+    assert run(send("Nothing merged yet.")) == (0, "", "")
+    assert not home.exists()
+
+
+def test_the_log_appends_one_line_per_block(run: Runner, home: Path) -> None:
+    run(send("It was applied."))
+    run(send("It was applied."))
+    assert len(block_lines(home)) == 2
+
+
+def test_an_unwritable_log_never_changes_the_verdict(
+    run: Runner, home: Path, config_file: Path
+) -> None:
+    config_file.write_text("")
+    home.parent.mkdir(parents=True, exist_ok=True)
+    home.write_text("a file where the directory should go")
+    status, _, err = run(send("It was applied."))
+    assert status == 2
+    assert "Offending: It was applied." in err
+
+
+def test_a_log_that_raises_never_changes_the_verdict(
+    run: Runner, monkeypatch: pytest.MonkeyPatch, config_file: Path
+) -> None:
+    config_file.write_text("")
+
+    def fail() -> Path:
+        message = "no home"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(Path, "home", fail)
+    assert run(send("It was applied."))[0] == 2
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Not x,merged.",
+        "He wrote \u201cx\u201d then the fix merged.",
+    ],
+)
+def test_a_clause_start_and_a_closed_curly_quote_do_not_exempt(text: str) -> None:
+    assert state_guard.unsupported_claims(text) != []
+
+
+def test_a_negated_claim_passes_when_a_clause_break_follows_it() -> None:
+    assert state_guard.unsupported_claims("Nothing merged, so wait.") == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Lead:\n- a\n- b", "Lead:\n- a", "Lead:  \n- a\n- b"],
+)
+def test_a_lead_in_joins_its_list_items_even_with_trailing_space(text: str) -> None:
+    assert state_guard.judging_units(text) == [text]
+
+
+@pytest.mark.parametrize(
+    ("run", "fill", "expected"),
+    [("\n", "", "\n"), ("\n\n", "", "\n\n"), (" \n \n ", "", "\n\n"), (" ", "", " ")],
+)
+def test_collapse_keeps_line_and_paragraph_breaks(
+    run: str, fill: str, expected: str
+) -> None:
+    assert state_guard.collapse(run, fill) == expected
+
+
+def test_tag_sentences_skips_a_sentence_its_paragraph_supports() -> None:
+    text = "It was done. See #12.\n\nIt shipped."
+    tagged, sentences = state_guard.tag_sentences(text)
+    assert sentences == ["It shipped."]
+    assert tagged == f"It was done. See #12.\n\n{TAG} It shipped."
+
+
+def test_tag_sentences_tags_no_more_sentences_than_the_message_judges() -> None:
+    tagged, sentences = state_guard.tag_sentences(
+        "It was done. See #12.\n\nIt was done."
+    )
+    assert len(sentences) == 1
+    assert tagged.count(TAG) == 1
