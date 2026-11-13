@@ -11,10 +11,11 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 import unicodedata
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
-from typing import override
+from typing import BinaryIO, override
 lazy from pathlib import Path
 
 import pytest
@@ -1906,7 +1907,11 @@ def test_open_log_defaults_to_the_tagged_log_and_refuses_a_shared_file(
 
 
 def day_log(home: Path) -> Path:
-    (log,) = home.joinpath(*state_guard.LOG_DIRECTORY).glob("blocks-*.jsonl")
+    (log,) = (
+        path
+        for path in home.joinpath(*state_guard.LOG_DIRECTORY).glob("blocks-*.jsonl")
+        if path.is_file()
+    )
     return log
 
 
@@ -1947,12 +1952,20 @@ def test_concurrent_writers_share_one_cap(
     assert day_log(home).stat().st_size == record * 6
 
 
-def test_a_writer_waits_for_the_log_lock(home: Path) -> None:
+def hold_lock(log: Path) -> BinaryIO:
+    held = log.open("ab")
+    state_guard.fcntl.flock(held.fileno(), state_guard.fcntl.LOCK_EX)
+    return held
+
+
+def test_a_writer_waits_for_a_lock_released_in_time(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     state_guard.log_blocks("Stop", ["Merged."])
     log = day_log(home)
     before = log.stat().st_size
-    with log.open("ab") as held:
-        state_guard.fcntl.flock(held.fileno(), state_guard.fcntl.LOCK_EX)
+    monkeypatch.setattr(state_guard, "LOCK_WAIT", 5)
+    with hold_lock(log):
         writer = threading.Thread(
             target=state_guard.log_blocks, args=("Stop", ["Merged."])
         )
@@ -1962,6 +1975,29 @@ def test_a_writer_waits_for_the_log_lock(home: Path) -> None:
         assert log.stat().st_size == before
     writer.join()
     assert log.stat().st_size > before
+
+
+def test_a_writer_gives_up_on_a_lock_held_too_long(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_guard.log_blocks("Stop", ["Merged."])
+    log = day_log(home)
+    before = log.stat().st_size
+    monkeypatch.setattr(state_guard, "LOCK_WAIT", 0.05)
+    with hold_lock(log):
+        started = time.monotonic()
+        state_guard.log_blocks("Stop", ["Merged."])
+        assert time.monotonic() - started < 2
+    assert log.stat().st_size == before
+
+
+def test_a_held_lock_never_changes_the_hook_verdict(
+    run: Runner, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    free = run(send("It was applied."))
+    monkeypatch.setattr(state_guard, "LOCK_WAIT", 0.05)
+    with hold_lock(day_log(home)):
+        assert run(send("It was applied.")) == free
 
 
 @pytest.mark.parametrize("umask", [0o000, 0o022])
@@ -1990,3 +2026,78 @@ def test_pruning_only_touches_exactly_dated_block_logs(tmp_path: Path) -> None:
         (logs / name).write_text("x")
     state_guard.prune_blocks(logs, datetime(2024, 1, 1, tzinfo=UTC))
     assert sorted(path.name for path in logs.iterdir()) == sorted(names[1:])
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "blocks-0000-00-00.jsonl",
+        "blocks-2026-13-45.jsonl",
+        "blocks-2020-02-30.jsonl",
+        "blocks-2020-00-10.jsonl",
+        "blocks-2020-01-32.jsonl",
+    ],
+)
+def test_pruning_keeps_a_name_that_is_not_a_calendar_date(
+    tmp_path: Path, name: str
+) -> None:
+    (tmp_path / name).write_text("x")
+    state_guard.prune_blocks(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    assert (tmp_path / name).exists()
+
+
+def test_pruning_keeps_a_log_on_the_cutoff_day_and_drops_the_day_before(
+    tmp_path: Path,
+) -> None:
+    keep = tmp_path / "blocks-2026-12-02.jsonl"
+    drop = tmp_path / "blocks-2026-12-01.jsonl"
+    for path in (keep, drop):
+        path.write_text("x")
+    state_guard.prune_blocks(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    assert keep.exists()
+    assert not drop.exists()
+
+
+def test_an_old_dated_directory_does_not_stop_the_prune(tmp_path: Path) -> None:
+    (tmp_path / "blocks-2020-01-01.jsonl").mkdir()
+    (tmp_path / "blocks-2020-01-01.jsonl" / "child").write_text("x")
+    (tmp_path / "blocks-2020-01-02.jsonl").write_text("x")
+    state_guard.prune_blocks(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    assert (tmp_path / "blocks-2020-01-01.jsonl" / "child").exists()
+    assert not (tmp_path / "blocks-2020-01-02.jsonl").exists()
+
+
+def test_a_block_is_logged_next_to_an_old_dated_directory(
+    run: Runner, home: Path
+) -> None:
+    directory = home.joinpath(*state_guard.LOG_DIRECTORY)
+    (directory / "blocks-2020-01-01.jsonl").mkdir(parents=True)
+    run(send("It was applied."))
+    assert logged_rules(home) == ["was applied"]
+
+
+def logged_rules(home: Path) -> list[str]:
+    return [json.loads(line)["rule"] for line in day_log(home).read_text().splitlines()]
+
+
+def test_a_cut_excerpt_that_hides_its_match_logs_its_own_rule(home: Path) -> None:
+    state_guard.log_blocks("Stop", ["x" * state_guard.MAX_QUOTED])
+    state_guard.log_blocks("Stop", ["x" * (state_guard.MAX_QUOTED - 1)])
+    state_guard.log_blocks("Stop", ["It was merged."])
+    assert logged_rules(home) == ["beyond-excerpt", "undecidable", "was merged"]
+
+
+def test_open_log_opens_the_state_directory_as_a_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flags: list[int] = []
+    real = os.open
+
+    def spy(path: object, flag: int, *args: object, **kwargs: object) -> int:
+        flags.append(flag)
+        return real(path, flag, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "open", spy)
+    os.close(state_guard.open_log(tmp_path / "d"))
+    assert flags[0] & os.O_DIRECTORY
+    assert flags[0] & os.O_NOFOLLOW

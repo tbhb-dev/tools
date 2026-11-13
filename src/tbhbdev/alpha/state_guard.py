@@ -48,6 +48,7 @@ allows the call: a broken hook must not stop the agent's work. The one
 exception is a failure while tagging a SendMessage, which keeps the refusal.
 """
 
+import contextlib
 import fcntl
 import functools
 import io
@@ -57,10 +58,11 @@ import re
 import shlex
 import stat
 import sys
+import time
 import tomllib
 import unicodedata
 from collections import Counter
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import cast
 lazy from collections.abc import Callable
@@ -263,7 +265,9 @@ LOG_DIRECTORY = (".local", "state", "tbhb", "state-guard")
 # The most bytes one day's block log may hold, and the days it is kept.
 MAX_LOG_BYTES = 1_000_000
 RETENTION_DAYS = 30
-BLOCK_LOG_NAME = re.compile(r"blocks-\d{4}-\d{2}-\d{2}\.jsonl")
+BLOCK_LOG_NAME = re.compile(r"blocks-(\d{4}-\d{2}-\d{2})\.jsonl")
+LOCK_WAIT = 0.5
+LOCK_POLL = 0.01
 
 
 def judged_claims(text: str) -> list[str]:
@@ -342,7 +346,7 @@ def open_log(directory: Path, name: str = "tagged.jsonl") -> int:
     """
     # fchmod below fixes the mode, so the mkdir mode and the read flag can't matter.
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)  # pragma: no mutate
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW  # pragma: no mutate
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     dir_fd = os.open(directory, flags)
     try:
         os.fchmod(dir_fd, 0o700)
@@ -369,11 +373,42 @@ def open_log(directory: Path, name: str = "tagged.jsonl") -> int:
 
 
 def prune_blocks(directory: Path, today: datetime) -> None:
-    """Delete block logs older than RETENTION_DAYS; dated names sort as dates."""
-    oldest = f"blocks-{today - timedelta(days=RETENTION_DAYS):%Y-%m-%d}.jsonl"
+    """Delete block logs dated before the retention window; skip invalid dates."""
+    oldest = today.date() - timedelta(days=RETENTION_DAYS)
     for path in directory.glob("blocks-*.jsonl"):
-        if BLOCK_LOG_NAME.fullmatch(path.name) and path.name < oldest:
-            path.unlink(missing_ok=True)  # pragma: no mutate -- only a race differs
+        match = BLOCK_LOG_NAME.fullmatch(path.name)
+        if not match:
+            continue
+        try:
+            dated = date.fromisoformat(match.group(1))
+        except ValueError:
+            continue
+        if dated < oldest:
+            # Only a race or a directory with this name fails; the rest still prune.
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
+
+
+def lock_log(fd: int) -> bool:
+    """Take the exclusive lock on FD within LOCK_WAIT seconds, or give up."""
+    deadline = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(LOCK_POLL)
+        else:
+            return True
+
+
+def excerpt_rule(sentence: str) -> str:
+    """The log rule for SENTENCE; a cut excerpt that hides its match says so."""
+    rule = rule_of(sentence)
+    if rule == "undecidable" and len(sentence) >= MAX_QUOTED:
+        return "beyond-excerpt"
+    return rule
 
 
 def log_blocks(event: str, sentences: list[str]) -> None:
@@ -389,13 +424,14 @@ def log_blocks(event: str, sentences: list[str]) -> None:
         fd = open_log(directory, f"blocks-{now:%Y-%m-%d}.jsonl")
         prune_blocks(directory, now)
         with os.fdopen(fd, "ab") as out:
-            fcntl.flock(out.fileno(), fcntl.LOCK_EX)
+            if not lock_log(out.fileno()):
+                return
             size = os.fstat(out.fileno()).st_size
             for sentence in sentences:
                 record: Json = {
                     "time": now.isoformat(timespec="seconds"),
                     "event": event,
-                    "rule": rule_of(sentence),
+                    "rule": excerpt_rule(sentence),
                     "near_rules": [n for n, r in NEAR.items() if r.search(sentence)],
                     "length": len(sentence),
                 }
