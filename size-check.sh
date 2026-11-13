@@ -5,7 +5,7 @@ cd -- "$(dirname -- "$0")"
 git rev-parse --git-dir >/dev/null
 # Each listing goes to a file first, so a failing find or git fails the check
 # instead of hiding behind a process substitution.
-list=$(mktemp)
+list=$(mktemp "${TMPDIR:-/tmp}/size-check.XXXXXX")
 trap 'rm -f -- "$list"' EXIT
 failed=0
 find . -path './.git' -prune -o -type f -size +20000000c -print0 >"$list"
