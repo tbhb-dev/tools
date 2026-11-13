@@ -664,3 +664,24 @@ def test_similar_names_are_not_protected(
     head = commit(repo)
     monkeypatch.setattr(sys, "stdin", io.StringIO(f"HEAD {head} {ref} {ZERO}\n"))
     assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 0
+
+
+@pytest.mark.parametrize("default", ["upstream", "simple", "current"])
+def test_tracking_main_is_refused_for_any_push_default(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    default: str,
+) -> None:
+    git(repo, "checkout", "-q", "-b", "topic", "origin/main")
+    git(repo, "config", "push.default", default)
+    assert git(repo, "config", "branch.topic.merge") == "refs/heads/main"
+    head = commit(repo)
+    base = git(repo, "rev-parse", "origin/main")
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(f"refs/heads/topic {head} refs/heads/main {base}\n"),
+    )
+    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    assert "refs/heads/main: push to a protected" in capsys.readouterr().err
