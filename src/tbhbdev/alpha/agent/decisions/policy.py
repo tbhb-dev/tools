@@ -112,8 +112,15 @@ def denied_paths(
     paths.append(resolve(home, settings.sockets_dir))
     paths.extend(resolve(home, p) for p in settings.sandbox.denied_home_paths)
     paths.extend(c.signing for c in settings.credentials if c.signing.startswith("/"))
-    return tuple(
+    unique = tuple(
         dict.fromkeys(alias for path in paths for alias in _with_aliases(host.os, path))
+    )
+    # A child under a denied parent is already hidden. Masking it as well makes
+    # bwrap mkdir its mount point inside the parent's read-only mask and fail.
+    return tuple(
+        path
+        for path in unique
+        if not any(str(parent) in unique for parent in PurePosixPath(path).parents)
     )
 
 
