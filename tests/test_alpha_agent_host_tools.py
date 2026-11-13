@@ -646,8 +646,16 @@ def test_git_shim_only_applies_to_system_git_on_macos(
     if operating_system is Os.MACOS and executable == "/usr/bin/git":
         return
 
-    def readlink(_path: str | os.PathLike[str]) -> str:
-        pytest.fail("other git executables must not inspect the developer directory")
+    original = os.readlink
+
+    def readlink(path: str | os.PathLike[str]) -> str:
+        # Coverage resolves newly traced files through os.readlink, so only the
+        # developer-directory selector link may fail the test.
+        if str(path) == host_tools._XCODE_SELECT_LINK:  # noqa: SLF001
+            pytest.fail(
+                "other git executables must not inspect the developer directory"
+            )
+        return original(path)
 
     monkeypatch.setattr(os, "readlink", readlink)
     assert host_tools.git_shim_paths(executable, operating_system, 1000, ()) == ()
