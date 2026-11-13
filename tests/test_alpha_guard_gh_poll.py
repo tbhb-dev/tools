@@ -748,6 +748,12 @@ def test_capped_pass_expires(monkeypatch: pytest.MonkeyPatch) -> None:
         RUN_LIST_CMD.format("tools") + " --paginate",
         RUN_LIST_CMD.format("tools") + " --watch",
         RUN_LIST_CMD.format("tools/x"),
+        RUN_LIST_CMD.format("."),
+        RUN_LIST_CMD.format(".."),
+        (
+            "gh run list '-R tbhb-dev/tools --limit 100 --json "
+            "conclusion,createdAt,startedAt,updatedAt,workflowName,attempt,event'"
+        ),
         RUN_LIST_CMD.format("tools").replace("--limit 100 ", ""),
         "gh run watch 1",
     ],
@@ -759,5 +765,15 @@ def test_capped_pass_is_only_that_command(
     assert guard.inspect(command)[0] == guard.POLL_REASON
 
 
-def test_today_is_a_utc_date() -> None:
-    assert isinstance(guard.today(), dt.date)
+def test_today_reads_the_utc_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    instant = dt.datetime(2026, 11, 15, 3, 0, tzinfo=dt.UTC)
+    local = dt.timezone(dt.timedelta(hours=-5))
+
+    class Clock(dt.datetime):
+        @classmethod
+        def now(cls, tz: dt.tzinfo | None = None) -> Clock:  # type: ignore[override]
+            return cls.fromtimestamp(instant.timestamp(), tz or local)
+
+    monkeypatch.setattr(guard.dt, "datetime", Clock)
+    # The local date would be 14 November; UTC is already the 15th.
+    assert guard.today() == dt.date(2026, 11, 15)

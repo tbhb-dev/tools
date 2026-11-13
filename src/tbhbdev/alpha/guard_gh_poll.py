@@ -117,10 +117,13 @@ SHA = re.compile(r"[0-9a-fA-F]{40}")
 # for a tbhb-dev repository, through the end of this UTC day. Remove it once
 # the pass is done.
 CAPPED_RUN_LIST_UNTIL = dt.date(2026, 11, 14)
-CAPPED_RUN_LIST = re.compile(
-    r"-R tbhb-dev/[A-Za-z0-9._-]+ --limit 100 --json "
-    r"conclusion,createdAt,startedAt,updatedAt,workflowName,attempt,event"
-)
+CAPPED_RUN_LIST_REPO = re.compile(r"tbhb-dev/[A-Za-z0-9._-]+")
+CAPPED_RUN_LIST_TAIL = [
+    "--limit",
+    "100",
+    "--json",
+    "conclusion,createdAt,startedAt,updatedAt,workflowName,attempt,event",
+]
 LOOPS = {"while", "until", "for"}
 # env's long options, each with the short option it spells ("" for the rest).
 ENV_LONG = {
@@ -202,8 +205,14 @@ def today() -> dt.date:
 
 def capped_run_list(args: list[str]) -> bool:
     """Whether the words after ``run list`` are the one capped pass, unexpired."""
-    return today() <= CAPPED_RUN_LIST_UNTIL and bool(
-        CAPPED_RUN_LIST.fullmatch(" ".join(args))
+    if today() > CAPPED_RUN_LIST_UNTIL or len(args) != 2 + len(CAPPED_RUN_LIST_TAIL):
+        return False
+    flag, repo, *tail = args
+    return (
+        flag == "-R"
+        and CAPPED_RUN_LIST_REPO.fullmatch(repo) is not None
+        and repo.rpartition("/")[2] not in {".", ".."}
+        and tail == CAPPED_RUN_LIST_TAIL
     )
 
 
