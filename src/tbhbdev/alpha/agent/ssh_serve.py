@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import re
 import shlex
 import sys
+from itertools import accumulate
 from pathlib import Path
 
 from tbhbdev.alpha.agent import build_info, ownership, process_group, run_host, runfiles
@@ -17,6 +19,21 @@ MACOS_LAUNCH_KEY = Path("/Library/Application Support/tbhbdev/agent-launch/id_ed
 LINUX_LAUNCH_KEY = Path("/etc/tbhbdev/agent-launch/id_ed25519")
 INPUT_LIMIT = 1024 * 1024
 COMMAND_WORDS = 2
+MAX_DEPTH = 32
+JSON_TOKEN = re.compile(rb'"(?:[^"\\]|\\.)*"|[\[\]{}]')
+
+
+def too_deep(raw: bytes) -> bool:
+    """Whether RAW nests arrays or objects past MAX_DEPTH, outside strings.
+
+    The decoder's own recursion limit differs between platforms, so the bound
+    is checked here instead of relying on it.
+    """
+    steps = (
+        1 if token in {b"[", b"{"} else -1 if token in {b"]", b"}"} else 0
+        for token in JSON_TOKEN.findall(raw)
+    )
+    return max(accumulate(steps, initial=0)) > MAX_DEPTH
 
 
 def command(arguments: list[str]) -> tuple[str, str]:
@@ -45,10 +62,12 @@ def envelope() -> tuple[dict[str, object], str | None]:
     if len(raw) > INPUT_LIMIT:
         message = "stdin exceeds 1 MiB"
         raise Invalid(message)
+    message = "invalid envelope"
+    if too_deep(raw):
+        raise Invalid(message)
     try:
         data: object = json.loads(raw)
     except RecursionError:
-        message = "invalid envelope"
         raise Invalid(message) from None
     if not isinstance(data, dict) or data.keys() != {"v", "request", "push_token"}:
         message = "expected v, request and push_token"
