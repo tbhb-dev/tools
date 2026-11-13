@@ -551,49 +551,99 @@ def test_deeply_nested_envelope_is_refused(
     assert not files_for("example").path("request.json").exists()
 
 
+def refused_untouched(
+    capsys: pytest.CaptureFixture[str], reason: str = "invalid envelope"
+) -> None:
+    assert capsys.readouterr().err == f"ssh-serve: refused: {reason}\n"
+    assert not files_for("example").path("request.json").exists()
+    assert not files_for("example").path("owner").exists()
+
+
 def test_depth_is_checked_before_the_decoder_runs(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def decoder_must_not_run(_raw: bytes) -> None:
+    def decoder_must_not_run(_text: str) -> None:
         raise AssertionError
 
     monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "run-host example")
     monkeypatch.setattr(ssh_serve.json, "loads", decoder_must_not_run)
     incoming(monkeypatch, b"[" * 33 + b"0" + b"]" * 33)
     assert ssh_serve.main([], "ssh-serve") == 2
-    assert capsys.readouterr().err == "ssh-serve: refused: invalid envelope\n"
+    refused_untouched(capsys)
 
 
 def test_decoder_recursion_error_is_refused(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def overflow(_raw: bytes) -> None:
+    def overflow(_text: str) -> None:
         raise RecursionError
 
     monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "run-host example")
     monkeypatch.setattr(ssh_serve.json, "loads", overflow)
     incoming(monkeypatch, b"{}")
     assert ssh_serve.main([], "ssh-serve") == 2
-    assert capsys.readouterr().err == "ssh-serve: refused: invalid envelope\n"
+    refused_untouched(capsys)
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-32"])
+def test_non_utf8_envelope_is_refused(
+    encoding: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    text = (
+        json.dumps(
+            {
+                "v": 1,
+                "request": {"a": "[" * 100000 + "0" + "]" * 100000},
+                "push_token": None,
+            }
+        )
+        .replace('"[', "[")
+        .replace(']"', "]")
+    )
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "run-host example")
+    incoming(monkeypatch, text.encode(encoding))
+    assert ssh_serve.main([], "ssh-serve") == 2
+    refused_untouched(capsys)
+
+
+def test_unserializable_request_is_refused_before_claiming(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def overflow(_value: object) -> None:
+        raise RecursionError
+
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "run-host example")
+    monkeypatch.setattr(ssh_serve.json, "dumps", overflow)
+    incoming(monkeypatch, b'{"v": 1, "request": {}, "push_token": null}')
+    assert ssh_serve.main([], "ssh-serve") == 2
+    refused_untouched(capsys, "invalid command or run data")
 
 
 @pytest.mark.parametrize(
-    ("raw", "expected"),
+    ("text", "expected"),
     [
-        (b"[" * 32 + b"]" * 32, False),
-        (b"[" * 33 + b"]" * 33, True),
-        (b"{" * 33 + b"}" * 33, True),
-        (b'["' + b"[" * 40 + b'"]', False),
-        (b'["\\"' + b"[" * 40 + b'"]', False),
-        (b"", False),
-        (b"[]" * 40, False),
-        (b"X" * 40 + b"[" * 33, True),
-        (b"X" * 40, False),
-        (b"[" * 32 + b"]" + b"[[", True),
-        (b'"a"' * 40 + b"[" * 33, True),
-        (b'"a"' * 40, False),
-        (b"{}" * 40, False),
+        ("[" * 32 + "]" * 32, False),
+        ("[" * 33 + "]" * 33, True),
+        ("{" * 33 + "}" * 33, True),
+        ('["' + "[" * 40 + '"]', False),
+        ('["\\\\"' + "[" * 40 + '"]', True),
+        ('["\\"' + "[" * 40 + '"]', False),
+        ("", False),
+        ("[]" * 40, False),
+        ("X" * 40 + "[" * 33, True),
+        ("X" * 40, False),
+        ("[" * 32 + "]" + "[[", True),
+        ('"a"' * 40 + "[" * 33, True),
+        ('"a"' * 40, False),
+        ("{}" * 40, False),
+        ('"' + "[" * 40, False),
+        ('"\\"' + "[" * 33, False),
+        ("\\" + "[" * 33, True),
     ],
 )
-def test_too_deep(raw: bytes, *, expected: bool) -> None:
-    assert ssh_serve.too_deep(raw) is expected
+def test_too_deep(text: str, *, expected: bool) -> None:
+    assert ssh_serve.too_deep(text) is expected
+
+
+def test_too_deep_is_linear() -> None:
+    assert not ssh_serve.too_deep('"' + "\\" * 500000 + '"')
