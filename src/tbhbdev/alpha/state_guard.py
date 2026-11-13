@@ -33,6 +33,12 @@ PR or issue number, a log path, inline code, "output" or "read-back", or
 attribution ("says", "said", "reports"). A claim marked "unverified", or "not
 done", also passes.
 
+Two narrow lead-ins excuse the claim word right after them: "Wait until
+<subject> is|are|has|have", and "the word", "the term", "the verb" or "look at"
+before a quoted word. Anything else in the sentence still counts, and a claim
+that follows other text still blocks. Text after an exempt sentence makes it a
+claim again.
+
 Every block is recorded in a JSON Lines file under
 ~/.local/state/tbhb/state-guard/ as a rule id, near-rule hints and a length,
 never the text. The log never changes the verdict.
@@ -143,24 +149,84 @@ SHORT_VALUES = frozenset("mFCctU")
 SHORT_OPTIONAL_VALUES = frozenset("Su")
 MAX_QUOTED = 160
 MAX_LISTED = 3
-# Exemptions from the baseline claim judge. Each rule takes a sentence and one
-# claim match in it and returns True to exempt that match. A rule is added in its
-# own pull request, with its sentences listed in the differential test.
-EXEMPTIONS: tuple[Callable[[str, re.Match[str]], bool], ...] = ()
+# Each exemption rule takes a sentence and one claim match in it and returns True
+# to exempt that match. A rule covers only a claim word that sits right after a
+# fixed lead-in, so it can't excuse a claim elsewhere in the sentence.
+WAIT_LEAD = re.compile(r"\s*wait until(?: [\w'\u2019-]+){1,3} ", re.IGNORECASE)
+# A bare claim word is a condition only after "has" or "have" and a subject.
+WAIT_BARE = re.compile(
+    r"\s*wait until(?: [\w'\u2019-]+){1,2} (?:has|have) ", re.IGNORECASE
+)
+WAIT_AUX = re.compile(r"(?:is|are|has been|have been)\s", re.IGNORECASE)
+WORD_LEAD = re.compile(
+    r"\s*(?:the (?:word|term|verb)|look at) [\"\u201c]", re.IGNORECASE
+)
+CLOSING_QUOTES = ('"', "\u201d")
+# A rule never excuses a claim that a qualifier ties to the present: "already",
+# "now" and the like say the state holds, so the sentence reports it.
+PRESENT = re.compile(r"\b(?:now|already|yet|still|currently|just)\b", re.IGNORECASE)
+TEXT = re.compile(r"\w")
+CLAUSE_END = re.compile(r"[\s\"\u201d'.!?,;:)]*")
+MENTION_END = re.compile(r"\s*(?:now\s*)?[.!?]*\s*", re.IGNORECASE)
+
+
+def awaited(chunk: str, match: re.Match[str]) -> bool:
+    """MATCH ends "Wait until <subject> is|are|has|have <claim word>".
+
+    Any other form blocks, such as "Wait until Bob merged": a bare past verb
+    reports what someone did. The condition's words carry no qualifier, and
+    nothing follows MATCH, so MATCH can't be an adjective on a noun the
+    sentence goes on to use.
+    """
+    before = chunk[: match.start()]
+    lead = WAIT_LEAD if WAIT_AUX.match(match.group()) else WAIT_BARE
+    return bool(
+        lead.fullmatch(before)
+        and not PRESENT.search(before + match.group())
+        and CLAUSE_END.fullmatch(chunk[match.end() :])
+    )
+
+
+def mentioned(chunk: str, match: re.Match[str]) -> bool:
+    """MATCH is the whole quoted word after "the word" or "look at", and no more.
+
+    Only the closing quote and an optional "now" may follow, so the sentence
+    can't go on to assert what the word says about the present.
+    """
+    return bool(
+        WORD_LEAD.fullmatch(chunk[: match.start()])
+        and chunk.startswith(CLOSING_QUOTES, match.end())
+        and MENTION_END.fullmatch(chunk[match.end() + 1 :])
+    )
+
+
+EXEMPTIONS: tuple[Callable[[str, re.Match[str]], bool], ...] = (
+    awaited,
+    mentioned,
+)
 
 
 def exempt(chunk: str, match: re.Match[str]) -> bool:
-    """Whether any exemption rule exempts MATCH in CHUNK; the set is empty."""
+    """Whether any exemption rule exempts MATCH in CHUNK."""
     return any(rule(chunk, match) for rule in EXEMPTIONS)
 
 
 def unsupported_claims(text: str) -> list[str]:
-    """The sentences or lines of TEXT with a status claim and no evidence."""
+    """The sentences or lines of TEXT with a status claim and no evidence.
+
+    An exemption applies only to the last sentence that has words, so text that
+    follows an exempt sentence can't ride on it: that sentence is judged as main
+    does.
+    """
+    chunks = SENTENCE_END.split(text)
+    # With no word at all there is no claim, so the default can't change the result.
+    words = (i for i, chunk in enumerate(chunks) if TEXT.search(chunk))
+    last = max(words, default=-1)  # pragma: no mutate
     return [
         chunk.strip()[:MAX_QUOTED]
-        for chunk in SENTENCE_END.split(text)
+        for i, chunk in enumerate(chunks)
         if not EVIDENCE.search(chunk)
-        and any(not exempt(chunk, match) for match in CLAIM.finditer(chunk))
+        and any(not (i >= last and exempt(chunk, m)) for m in CLAIM.finditer(chunk))
     ]
 
 

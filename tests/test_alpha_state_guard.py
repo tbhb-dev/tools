@@ -1005,10 +1005,13 @@ def test_scoped_qualifiers_and_attached_evidence_pass(text: str) -> None:
     assert state_guard.unsupported_claims(text) == [text]
 
 
-@pytest.mark.parametrize(
-    "text", ["It will be merged after review.", "It should have deployed by tomorrow."]
-)
-def test_review_legitimate_shapes_pass(text: str) -> None:
+def test_a_future_sentence_with_a_claim_word_still_blocks() -> None:
+    text = "It will be merged."
+    assert state_guard.unsupported_claims(text) == [text]
+
+
+def test_other_future_shapes_still_block() -> None:
+    text = "It should have deployed by tomorrow."
     assert state_guard.unsupported_claims(text) == [text]
 
 
