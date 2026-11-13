@@ -441,12 +441,26 @@ def test_agy_model_table() -> None:
         "gcp.gemini:gemini-3.8-flash",
         "low",
     )
-    assert len(ai.AGY_MODELS) == 13
+    assert ai.agy_model("gemini-4-carbon-low") == ("gcp.gemini:gemini-4-carbon", "low")
+    assert ai.agy_model("gemini-4-hydrogen-xhigh") == (
+        "gcp.gemini:gemini-4-hydrogen",
+        "xhigh",
+    )
+    assert ai.agy_model("gemini-pro-orchestrator") == (
+        "gcp.gemini:gemini-pro-orchestrator",
+        None,
+    )
+    assert ai.agy_model("gemini-pro-orchestrator-argon") == (
+        "gcp.gemini:gemini-pro-orchestrator-argon",
+        None,
+    )
+    assert len(ai.AGY_MODELS) == 22
     for key in (
         "gemini-4-argon-cyber-permissive",
         "gemini-3.8-flash-tiered",
         "gemini-3.8-flash",
         "gemini-4-argon-xhigh",
+        "gemini-4-carbon-xhigh",
         "",
     ):
         assert ai.agy_model(key) == (key, None)
@@ -518,6 +532,39 @@ def test_make_ident_agy_effort_only_from_table() -> None:
     assert ai.make_ident("antigravity", ROOT, ai.Seen()).effort is None
     other = ai.make_ident("codex", ROOT, ai.Seen(model="gemini-3.8-flash-low"))
     assert other.effort is None
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        (
+            "gemini-4-hydrogen-xhigh",
+            (
+                "effort=xhigh;harness=antigravity:1.5.7;"
+                "model=gcp.gemini:gemini-4-hydrogen;session={s};surface=cli"
+            ),
+        ),
+        (
+            "gemini-4-carbon-medium",
+            (
+                "effort=medium;harness=antigravity:1.5.7;"
+                "model=gcp.gemini:gemini-4-carbon;session={s};surface=cli"
+            ),
+        ),
+        (
+            "gemini-pro-orchestrator-argon",
+            (
+                "harness=antigravity:1.5.7;"
+                "model=gcp.gemini:gemini-pro-orchestrator-argon;session={s};surface=cli"
+            ),
+        ),
+    ],
+)
+def test_agy_1_5_7_models_render_a_complete_trailer(model: str, expected: str) -> None:
+    ident = ai.make_ident(
+        "antigravity", ROOT, ai.Seen(model=model, version="1.5.7", surface="cli")
+    )
+    assert ai.format_value(ident.attrs()) == "LLM " + expected.format(s=ROOT)
 
 
 def test_ident_attrs_and_keys() -> None:
