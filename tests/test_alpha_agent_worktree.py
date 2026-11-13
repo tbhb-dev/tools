@@ -5,13 +5,16 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
-from typing import Literal, TypedDict, Unpack
+from typing import TYPE_CHECKING, Literal, TypedDict, Unpack
 
 import pytest
 from agent_host_example import commit, git, isolate_host_git, repository, run_request
 
 from tbhbdev.alpha.agent import worktree
 from tbhbdev.alpha.agent.model import Invalid
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 class GitOptions(TypedDict, closed=True):
@@ -1189,9 +1192,31 @@ def test_git_shape_writes_exact_paths_before_launch(
     worktree.prepare_git(tmp_path)
     assert calls == [
         ("write", str(directory / "config.worktree"), ""),
+        ("mkdir", str(directory / "info"), ""),
         ("mkdir", str(directory / "modules"), ""),
         ("write", str(directory / "commondir"), ".\n"),
     ]
+
+
+def test_an_empty_git_directory_is_no_main_checkout(tmp_path: Path) -> None:
+    mount = tmp_path / "mount"
+    (mount / ".git").mkdir(parents=True)
+    assert not worktree.is_main_checkout(mount)
+    (mount / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    assert worktree.is_main_checkout(mount)
+
+
+def test_sandbox_mount_points_above_a_write_root_are_allowed(
+    checkout_paths: tuple[Path, Path],
+) -> None:
+    source, workspace = checkout_paths
+    shared = source.parent / "scratch" / "tools"
+    (shared / ".git").mkdir(parents=True)
+    (shared / "run").mkdir()
+    worktree.validate_writes(workspace, source, (str(shared / "run"),))
+    (shared / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    with pytest.raises(Invalid, match=r"reaches main checkout"):
+        worktree.validate_writes(workspace, source, (str(shared / "run"),))
 
 
 @pytest.fixture
@@ -1379,6 +1404,7 @@ def test_symlinked_tmp_alias_cannot_hide_a_clone(
     temporary = tmp_path / "private/tmp"
     temporary.mkdir(parents=True)
     (temporary / "clone/.git").mkdir(parents=True)
+    (temporary / "clone/.git/HEAD").write_text("ref: refs/heads/main\n")
     alias = tmp_path / "tmp"
     alias.symlink_to(temporary, target_is_directory=True)
     with pytest.raises(Invalid, match="main checkout") as caught:
@@ -1466,8 +1492,13 @@ def test_checkout_detection_spells_metadata_paths(
         assert path == tmp_path / ".git/commondir"
         return False
 
+    def entries(path: Path) -> Iterator[Path]:
+        assert path == tmp_path / ".git"
+        return iter([path / "HEAD"])
+
     monkeypatch.setattr(Path, "is_dir", directory)
     monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(Path, "iterdir", entries)
     assert worktree.is_main_checkout(tmp_path)
 
 

@@ -2664,6 +2664,7 @@ def test_host_state_cannot_be_a_configured_write_root(
     root = roots.get(entry, run.home / entry)
     if entry == "clone":
         (clone / ".git").mkdir(parents=True)
+        (clone / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     run = dataclasses.replace(
         run,
         settings=dataclasses.replace(
