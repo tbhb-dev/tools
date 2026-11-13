@@ -2233,6 +2233,9 @@ def test_pruning_only_touches_exactly_dated_block_logs(tmp_path: Path) -> None:
         "The fix merged confirmed by nobody.",
         "THE FIX MERGED CONFIRMED BY THE PLAN.",
         "Once the fix is deployed it is merged.",
+        "If the old fix once merged.",
+        "Built, and merged some old changes nothing.",
+        "The word \u201cx\u201d and the fix merged.",
     ],
 )
 def test_review_round_two_sentences_still_block(text: str) -> None:
