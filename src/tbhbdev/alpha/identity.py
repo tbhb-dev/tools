@@ -794,9 +794,9 @@ def record_command(
     root: str, agent: str | None, cmd: object, cwd: Path | None = None
 ) -> None:
     """Record a Bash command about to run, by hash, with the agent running it."""
-    state = state_dir(cwd)
-    if not state or not isinstance(cmd, str):
+    if not isinstance(cmd, str):
         return
+    state = state_dir(cwd)
     name = f"{uuid.uuid4().hex}.json"
     rec: Json = {
         "agent": agent,
@@ -804,36 +804,50 @@ def record_command(
         "ts": time.time(),
         "done": None,
     }
-    write_json(state / "cmds" / hx(root) / name, rec)
-    # A copy in the user's store lets a commit in another clone find the agent.
+    if state:
+        write_json(state / "cmds" / hx(root) / name, rec)
+    # A copy in the user's store lets a commit in another clone find the agent,
+    # and is the only record of a session whose directory is no repository.
     try:
         user_cmds = user_store() / "cmds" / hx(root)
         # The chmod below sets the mode whatever this one was, so the pragma
         # hides equivalent mutants.
         user_cmds.mkdir(mode=0o700, parents=True, exist_ok=True)  # pragma: no mutate
         user_store().chmod(0o700)
-        references = user_store() / "cmd-stores" / hx(root)
-        references.mkdir(mode=0o700, parents=True, exist_ok=True)
-        write_private_json(
-            references / f"{hx(sha256_64(str(state)))}.json", {"store": str(state)}
-        )
+        if state:
+            references = user_store() / "cmd-stores" / hx(root)
+            references.mkdir(mode=0o700, parents=True, exist_ok=True)
+            write_private_json(
+                references / f"{hx(sha256_64(str(state)))}.json", {"store": str(state)}
+            )
         write_private_json(user_cmds / name, rec)
     except OSError:
         return
 
 
 def finish_command(
-    root: str, cmd: object, agent: str | None, cwd: Path | None = None
+    root: str,
+    cmd: object,
+    agent: str | None,
+    cwd: Path | None = None,
+    *,
+    user_only: bool = False,
 ) -> None:
     """Mark the newest pending record for (agent, command) done.
 
-    A later identical command is then unambiguous.
+    A later identical command is then unambiguous. ``user_only`` leaves the
+    directory's repository alone, as in another owner's repository.
     """
-    state = state_dir(cwd)
-    if not state or not isinstance(cmd, str):
+    if not isinstance(cmd, str):
         return
+    if user_only and not user_store().exists():
+        return
+    state = None if user_only else state_dir(cwd)
     hashes, done = set(cmd_hashes(cmd)), time.time()
-    for store, write in ((state, write_json), (user_store(), write_private_json)):
+    stores = [(user_store(), write_private_json)]
+    if state:
+        stores.insert(0, (state, write_json))
+    for store, write in stores:
         try:
             with locked(store):
                 candidates = [
@@ -1188,7 +1202,12 @@ def write_bash_edits(
 
 
 def handle_claude_bash(
-    event: str, data: Json, env: Mapping[str, str], agent: str | None
+    event: str,
+    data: Json,
+    env: Mapping[str, str],
+    agent: str | None,
+    *,
+    user_only: bool = False,
 ) -> None:
     """Bash command records, plus edit receipts when Claude reports a bash edit."""
     root, cwd = sha256_64(data["session_id"]), hook_cwd(data)
@@ -1205,8 +1224,8 @@ def handle_claude_bash(
     # A command moved to the background (run_in_background, or past its
     # timeout) is still running, and no later event says when it ends.
     if not (isinstance(response, dict) and response.get("backgroundTaskId")):
-        finish_command(root, cmd, agent, cwd)
-    if event == "PostToolUse":
+        finish_command(root, cmd, agent, cwd, user_only=user_only)
+    if event == "PostToolUse" and not user_only:
         write_bash_edits(data, env, cmd, cwd)
 
 
@@ -1232,13 +1251,25 @@ def claude_main_record(data: Json, env: Mapping[str, str]) -> Json:
     return {k: v for k, v in rec.items() if v}
 
 
+def finish_user_only(data: Json, env: Mapping[str, str], agent: str | None) -> None:
+    """Finish the user-store record of a Bash command that has just ended."""
+    event = data.get("hook_event_name")
+    if (
+        data.get("tool_name") == "Bash"
+        and isinstance(event, str)
+        and event in {"PostToolUse", "PostToolUseFailure"}
+    ):
+        handle_claude_bash(event, data, env, agent, user_only=True)
+
+
 def handle_claude(
     data: Json, env: Mapping[str, str], *, user_only: bool = False
 ) -> None:
     """Record a Claude hook, or just its main session in the user's store."""
-    if user_only and data.get("agent_id"):
-        return
     event, tool = data.get("hook_event_name"), data.get("tool_name")
+    if user_only and data.get("agent_id"):
+        finish_user_only(data, env, sha256_64(data["agent_id"]))
+        return
     effort = parse_stdin(data)[2]
     agent = None
     if data.get("agent_id"):
@@ -1248,6 +1279,9 @@ def handle_claude(
         root = sha256_64(data["session_id"])
         if user_only:
             write_user_record(root, rec)
+            # A command begun outside any repository can end inside one, as
+            # `git init` does, so its user record must still be finished.
+            finish_user_only(data, env, None)
             return
         write_record(root, rec, hook_cwd(data))
     if tool == "Bash" and event in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}:

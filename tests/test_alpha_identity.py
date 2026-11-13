@@ -1118,6 +1118,22 @@ def test_a_user_store_it_cant_write_keeps_the_command_records(
     assert ai.user_store().read_text() == "not a directory"
 
 
+def test_commands_from_a_directory_outside_a_repository_still_match(
+    repo: Path, plain: Path
+) -> None:
+    # A teammate runs in a session whose directory is no repository, and commits
+    # in a clone: its command is found through the user store alone.
+    ai.record_command(ROOT, CHILD, "git commit -m x", plain)
+    assert list(plain.iterdir()) == []
+    assert not (ai.user_store() / "cmd-stores").exists()
+    match = ai.match_command_agent
+    assert match(ROOT, ["sh -c eval 'git commit -m x'"], repo) == (CHILD, False)
+    ai.finish_command(ROOT, "git commit -m x", CHILD, plain)
+    assert match(ROOT, ["sh -c eval 'git commit -m x'"], repo) == (None, False)
+    (path,) = (ai.user_store() / "cmds" / ("a" * 16)).glob("*.json")
+    assert loaded(path)["done"] is not None
+
+
 def time_of(repo: Path) -> float:
     (path,) = (repo / ".git" / "tbhb-alpha" / "cmds" / ("a" * 16)).glob("*.json")
     return float(cast("float", loaded(path)["ts"]))
@@ -2509,6 +2525,52 @@ def test_cmd_record_uses_the_hook_cwd_in_another_owners_repository(
     assert run_git(foreign, "status", "--porcelain") == status
     assert sorted((foreign / ".git").iterdir()) == entries
     assert list(plain.iterdir()) == []
+
+
+def test_git_init_in_a_plain_directory_finishes_its_user_record(
+    plain: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The directory is no repository before the command and another owner's
+    # repository after it: the finish must still reach the user's store alone.
+    data = {
+        "session_id": "s",
+        "cwd": str(plain),
+        "tool_name": "Bash",
+        "tool_input": {"command": "git init"},
+    }
+    feed(monkeypatch, {**data, "hook_event_name": "PreToolUse"})
+    assert ai.cmd_record("claude", {}) == 0
+    subprocess.run(["git", "init", "-q", str(plain)], check=True)
+    before = sorted((plain / ".git").iterdir())
+    feed(monkeypatch, {**data, "hook_event_name": "PostToolUse"})
+    assert ai.cmd_record("claude", {}) == 0
+    (path,) = (ai.user_store() / "cmds" / ai.hx(ai.sha256_64("s"))).glob("*.json")
+    assert loaded(path)["done"] is not None
+    assert sorted((plain / ".git").iterdir()) == before
+
+
+@pytest.mark.parametrize("agent", [None, "child"])
+@pytest.mark.parametrize("post", ["PostToolUse", "PostToolUseFailure"])
+def test_git_init_in_a_plain_directory_finishes_each_agents_record(
+    plain: Path, monkeypatch: pytest.MonkeyPatch, agent: str | None, post: str
+) -> None:
+    data = {
+        "session_id": "s",
+        "agent_id": agent,
+        "agent_type": "general-purpose" if agent else None,
+        "cwd": str(plain),
+        "tool_name": "Bash",
+        "tool_input": {"command": "git init"},
+    }
+    feed(monkeypatch, {**data, "hook_event_name": "PreToolUse"})
+    assert ai.cmd_record("claude", {}) == 0
+    subprocess.run(["git", "init", "-q", str(plain)], check=True)
+    feed(monkeypatch, {**data, "hook_event_name": post})
+    assert ai.cmd_record("claude", {}) == 0
+    (path,) = (ai.user_store() / "cmds" / ai.hx(ai.sha256_64("s"))).glob("*.json")
+    rec = loaded(path)
+    assert rec["done"] is not None
+    assert rec["agent"] == (ai.sha256_64(agent) if agent else None)
 
 
 @pytest.mark.parametrize("tool", ["Bash", "Edit"])
