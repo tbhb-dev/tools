@@ -3143,7 +3143,7 @@ FACTS = host_tool.Facts(
     tailnet=host_tool.Tailnet(
         "example.ts.net",
         "Fake Tailnet (example)",
-        ("box", "fakehost-01", "fakehost-02", "lone-node", "zorbCar", "zorbBus"),
+        ("box", "fakehost-01", "fakehost-02", "lone-node", "fuzzCar", "fuzzBus"),
     ),
     words=frozenset({"box", "gadget", "host", "operator", "widget"}),
     operators=("fakeop", "operator"),
