@@ -108,6 +108,17 @@ def commit_problems(sha: str, names: pn.Names) -> list[str]:
     return problems
 
 
+def new_commit_problems(
+    remote: str, local: str, names: pn.Names, scanned: set[str]
+) -> list[str]:
+    problems: list[str] = []
+    for sha in read_git("rev-list", local, "--not", f"--remotes={remote}").splitlines():
+        if sha not in scanned:
+            scanned.add(sha)
+            problems.extend(commit_problems(sha, names))
+    return problems
+
+
 def push_problems(remote: str, url: str, lines: Sequence[str]) -> list[str]:
     names = pn.names_for_repository(
         pn.repository_name(url or read_git("remote", "get-url", "--push", remote))
@@ -130,12 +141,7 @@ def push_problems(remote: str, url: str, lines: Sequence[str]) -> list[str]:
             )
         if names is None:
             continue
-        for sha in read_git(
-            "rev-list", local, "--not", f"--remotes={remote}"
-        ).splitlines():
-            if sha not in scanned:
-                scanned.add(sha)
-                problems.extend(commit_problems(sha, names))
+        problems.extend(new_commit_problems(remote, local, names, scanned))
     return problems
 
 
