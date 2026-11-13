@@ -831,3 +831,16 @@ def test_codex_without_github_reference_has_private_config(
     )
     env = tomllib.loads(overrides)["shell_environment_policy"]["set"]
     assert env["GH_CONFIG_DIR"] == f"{env['TMPDIR']}/gh"
+
+
+@pytest.mark.parametrize("kind", RunKind)
+def test_codex_build_without_github_credential(kind: RunKind) -> None:
+    original = settings()
+    config = dataclasses.replace(
+        original,
+        credentials=tuple(
+            dataclasses.replace(c, gh=None) for c in original.credentials
+        ),
+    )
+    result = built(Harness.CODEX, kind, Profile.BUILD, config=config)
+    assert f'shell_environment_policy.set.GH_CONFIG_DIR="{TMP}/gh"' in result

@@ -101,8 +101,8 @@ def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
             raise Invalid(message) from None
     else:
         gh_token = read(references.gh, label="gh") if references.gh else None
+    gh = runfiles.private_dir(tmpdir / "gh")
     if gh_token is not None:
-        gh = runfiles.private_dir(tmpdir / "gh")
         host = repo.parts(request.repo)[0]
         runfiles.atomic(
             gh / "hosts.yml",

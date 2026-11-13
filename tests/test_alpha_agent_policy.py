@@ -1689,7 +1689,7 @@ def test_claude_file_tools_deny_each_protected_path(profile: Profile) -> None:
 @pytest.mark.parametrize("harness", Harness)
 @pytest.mark.parametrize("profile", Profile)
 @pytest.mark.parametrize("configured", [False, True])
-def test_github_config_always_uses_private_directory(
+def test_github_config_for_every_run(
     harness: Harness,
     profile: Profile,
     configured: bool,

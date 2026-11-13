@@ -883,7 +883,8 @@ def test_without_build_github_credential(
     )
     gh = tmp_path / "gh"
     if profile is Profile.BUILD:
-        assert not gh.exists()
+        assert gh.stat().st_mode & 0o777 == 0o700
+        assert list(gh.iterdir()) == []
         assert not (gh / "hosts.yml").exists()
     else:
         assert yaml.safe_load((gh / "hosts.yml").read_text()) == {
