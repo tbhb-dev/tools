@@ -315,3 +315,14 @@ Wait until сhe merged.
 It will be merged when tests pass as of now.
 It will be merged when tests pass at present.
 It will be merged when tests pass as we speak.
+After a while the host is live.
+Done, after the PR is applied, it is merged.
+It ran after the PR is applied, which it is.
+Wait for it, after the PR is now applied.
+Hold until the PR is applied, and the host is live.
+Hold after the PR is applied. It is.
+Hold, after the PR is applied.
+Hold after the PR was applied.
+Hold after the PR applied.
+Hold after the PR is already applied.
+Hold after the PR is applied and it is merged.
