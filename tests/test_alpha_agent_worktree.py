@@ -8,7 +8,14 @@ from pathlib import Path
 from typing import Literal, TypedDict, Unpack
 
 import pytest
-from agent_host_example import commit, git, isolate_host_git, repository, run_request
+from agent_host_example import (
+    commit,
+    git,
+    isolate_host_git,
+    repository,
+    run_request,
+    unusual_git_metadata,
+)
 
 from tbhbdev.alpha.agent import worktree
 from tbhbdev.alpha.agent.model import Invalid
@@ -1577,18 +1584,7 @@ def test_unusual_git_metadata_is_only_an_audit_finding(
     tmp_path: Path, checkout_paths: tuple[Path, Path], entry: str, kind: str
 ) -> None:
     source, workspace = checkout_paths
-    root = tmp_path / "writable\nforged"
-    metadata = root / ".git"
-    metadata.mkdir(parents=True)
-    if entry != "HEAD":
-        (metadata / "HEAD").write_text("ref: refs/heads/main\n")
-    target = metadata / entry
-    if kind == "directory":
-        target.mkdir()
-    else:
-        if not hasattr(os, "mkfifo"):
-            pytest.skip("platform has no mkfifo")
-        os.mkfifo(target)
+    root = unusual_git_metadata(tmp_path, entry, kind)
     findings: list[str] = []
     assert not worktree.is_main_checkout(root, findings)
     assert any(f"{entry} is not a regular file" in line for line in findings)

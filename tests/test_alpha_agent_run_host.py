@@ -28,6 +28,7 @@ from agent_host_example import (
     repository,
     run_request,
     trusted_host_stat,
+    unusual_git_metadata,
 )
 from test_alpha_agent_codex_install import release
 from test_alpha_agent_credentials import VALUES
@@ -3891,18 +3892,7 @@ def test_unusual_git_metadata_launches_with_a_finding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str, kind: str
 ) -> None:
     run = make_run(tmp_path)
-    root = tmp_path / "writable\nforged"
-    metadata = root / ".git"
-    metadata.mkdir(parents=True)
-    if entry != "HEAD":
-        (metadata / "HEAD").write_text("ref: refs/heads/main\n")
-    target = metadata / entry
-    if kind == "directory":
-        target.mkdir()
-    else:
-        if not hasattr(os, "mkfifo"):
-            pytest.skip("platform has no mkfifo")
-        os.mkfifo(target)
+    root = unusual_git_metadata(tmp_path, entry, kind)
     run = dataclasses.replace(
         run,
         settings=dataclasses.replace(

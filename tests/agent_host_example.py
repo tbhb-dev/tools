@@ -10,10 +10,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, TypedDict, Unpack
 
+import pytest
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
-
-    import pytest
 
 from agent_example import settings
 from test_alpha_agent_request import BUILD
@@ -94,6 +94,22 @@ def repository(root: Path) -> tuple[Path, Path]:
     git(seed, "push", "-u", "origin", "main")
     git(root, "clone", str(origin), str(clone))
     return seed, clone
+
+
+def unusual_git_metadata(tmp_path: Path, entry: str, kind: str) -> Path:
+    root = tmp_path / "writable\nforged"
+    metadata = root / ".git"
+    metadata.mkdir(parents=True)
+    if entry != "HEAD":
+        (metadata / "HEAD").write_text("ref: refs/heads/main\n")
+    target = metadata / entry
+    if kind == "directory":
+        target.mkdir()
+    else:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("platform has no mkfifo")
+        os.mkfifo(target)
+    return root
 
 
 def run_request(**changes: object) -> model.RunRequest:
