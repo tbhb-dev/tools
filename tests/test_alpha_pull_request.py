@@ -3428,7 +3428,13 @@ def test_ready_marks_the_pull_request_ready(world: World) -> None:
         ["api", "--hostname", "github.com", "user", "--jq", ".login"],
         ["pr", "ready", "45", "--repo", READY_REPO],
     ]
-    assert world.calls("gh")[-1]["stdin"] == ""
+    assert [c["stdin"] for c in world.calls("gh")] == ["", "", ""]
+
+
+def test_refusal_reason_decodes_invalid_bytes_and_joins_streams() -> None:
+    assert pr.refusal_reason(b"bad \xff byte\n", b"and\r\nmore") == (
+        "bad \ufffd byte and more"
+    )
 
 
 @pytest.mark.parametrize(
@@ -3436,12 +3442,15 @@ def test_ready_marks_the_pull_request_ready(world: World) -> None:
     [
         ("human", "agent"),
         ("app/some-bot", "agent"),
+        ("app/", "agent"),
         ("null", "agent"),
         ("Agent", "agent"),
         (" agent", "agent"),
         ("agent ", "agent"),
         ("", ""),
         (" ", " "),
+        ("agent\r", "agent"),
+        ("agent", "agent\r"),
     ],
 )
 def test_ready_refuses_a_login_that_is_not_the_agents(
@@ -3462,6 +3471,31 @@ def test_ready_refuses_when_a_login_is_unreadable(world: World, failing: str) ->
     with pytest.raises(SystemExit, match=r"isn't this agent's account: bad token$"):
         run_main("ready", "--pr", "45")
     assert not any(a[:2] == ["pr", "ready"] for a in gh_argvs(world))
+
+
+@pytest.mark.parametrize(
+    ("stderr", "shown"),
+    [
+        ("see https://example.test/x?token=abc now", "see <redacted> now"),
+        (
+            "bad " + "gh" + "p_" + "0123456789abcdefABCDEF" + " token",
+            "bad <redacted> token",
+        ),
+        ("a" * 19, "a" * 19),
+        ("z" * 20, "<redacted>"),
+        ("w " * 150, "w " * 100),
+    ],
+)
+def test_ready_refusal_redacts_and_bounds_gh_stderr(
+    world: World, stderr: str, shown: str
+) -> None:
+    cases = ready_cases()
+    cases[READY_VIEW] = {"rc": 1, "stdout": "agent\n", "stderr": stderr}
+    world.fake("gh", cases=cases)
+    with pytest.raises(SystemExit) as info:
+        run_main("ready", "--pr", "45")
+    message = str(info.value)
+    assert message.endswith(f"account: {shown}")
 
 
 def test_ready_acts_on_origin_even_when_gh_defaults_elsewhere(
