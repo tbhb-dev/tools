@@ -16,7 +16,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
-from typing import Any, BinaryIO, override
+from typing import BinaryIO, override
 lazy from pathlib import Path
 
 import pytest
@@ -2122,7 +2122,9 @@ def test_an_invalid_name_does_not_stop_the_prune_of_later_names(
 
     real = os.scandir
 
-    def ordered_scandir(fd: int) -> contextlib.AbstractContextManager[Any]:
+    def ordered_scandir(
+        fd: int,
+    ) -> contextlib.AbstractContextManager[list[os.DirEntry[str]]]:
         with real(fd) as entries:
             return contextlib.nullcontext(sorted(entries, key=lambda e: e.name))
 
