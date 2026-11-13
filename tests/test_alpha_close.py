@@ -37,10 +37,13 @@ class Gh:
             "state": "OPEN",
             "url": URL,
             "body": BODY,
+            "author": {"login": "tbhb-agent"},
             "headRefName": "feat/x y",
             "isCrossRepository": False,
         }
     )
+    me: str = "tbhb-agent"
+    me_rc: int = 0
     view_rc: int = 0
     close_rc: int = 0
     delete_rc: int = 0
@@ -57,6 +60,10 @@ class Gh:
         if argv[1] == "list":
             return subprocess.CompletedProcess(
                 argv, self.list_rc, self.list_out, "no list"
+            )
+        if argv[:2] == ["api", "user"]:
+            return subprocess.CompletedProcess(
+                argv, self.me_rc, f"{self.me}\n", "no me"
             )
         if argv[0] == "api":
             return subprocess.CompletedProcess(
@@ -117,11 +124,45 @@ def test_close_another_sessions_pr_records_that_in_the_comment(gh: Gh) -> None:
     )
 
 
-def test_a_pr_without_opened_by_is_refused(gh: Gh) -> None:
+def test_a_pr_without_opened_by_by_the_agent_account_is_closed_on_that_basis(
+    gh: Gh,
+) -> None:
     gh.view["body"] = "Why.\n"
+    assert close.main(["pr", "close", "7", "--reason", "stale"], env=ENV) == 0
+    assert ["api", "user", "--jq", ".login"] in gh.calls
+    assert gh.calls[-1][-1] == (
+        "Closed on the basis that its GitHub author is the agent account tbhb-agent"
+        f" and it has no Opened-by line.\n\nstale\n\n{trailer_line()}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "author", [{"login": "tbhb"}, {"login": ""}, {}, None, "tbhb-agent"]
+)
+def test_a_pr_without_opened_by_by_anyone_else_is_refused(
+    gh: Gh, author: object
+) -> None:
+    gh.view["body"] = "Why.\n"
+    gh.view["author"] = author
     with pytest.raises(SystemExit, match="no Opened-by line"):
         close.main(["pr", "close", "7", "--reason", "x"], env=ENV)
-    assert all(call[1] == "view" for call in gh.calls)
+    assert all(call[1] == "view" or call[0] == "api" for call in gh.calls)
+
+
+def test_a_pr_without_opened_by_is_refused_when_the_account_cannot_be_read(
+    gh: Gh,
+) -> None:
+    gh.view["body"] = "Why.\n"
+    gh.me_rc = 1
+    with pytest.raises(SystemExit, match="no Opened-by line"):
+        close.main(["pr", "close", "7", "--reason", "x"], env=ENV)
+
+
+def test_a_pr_without_opened_by_is_refused_when_the_account_differs(gh: Gh) -> None:
+    gh.view["body"] = "Why.\n"
+    gh.me = "someone-else"
+    with pytest.raises(SystemExit, match="no Opened-by line"):
+        close.main(["pr", "close", "7", "--reason", "x"], env=ENV)
 
 
 def test_a_pr_that_is_not_open_is_refused(gh: Gh) -> None:
@@ -357,7 +398,7 @@ def test_view_asks_gh_for_the_state_url_and_body(gh: Gh) -> None:
 
 def test_view_of_a_pr_also_asks_for_the_head_branch(gh: Gh) -> None:
     close.view("pr", 7)
-    fields = "state,url,body,headRefName,isCrossRepository"
+    fields = "state,url,body,author,headRefName,isCrossRepository"
     assert gh.calls == [["pr", "view", "7", "--json", fields]]
 
 
@@ -515,6 +556,7 @@ def test_without_the_flag_no_list_is_read(gh: Gh) -> None:
 
 def test_the_refusal_messages_are_exact(gh: Gh) -> None:
     gh.view["body"] = "Why.\n"
+    gh.view["author"] = {"login": "tbhb"}
     with pytest.raises(SystemExit) as exc:
         close.main(["pr", "close", "7", "--reason", "x"], env=ENV)
     assert exc.value.code == (
