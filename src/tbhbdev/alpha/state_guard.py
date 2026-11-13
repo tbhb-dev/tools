@@ -266,6 +266,26 @@ def judging_units(text: str) -> list[str]:
     return units
 
 
+def unit_blocks(unit: str, *, elsewhere: bool) -> list[tuple[str, str, list[str]]]:
+    """The (sentence, matched word, near rules) of each claim in UNIT to block."""
+    found: list[tuple[str, str, list[str]]] = []
+    for chunk in SENTENCE_END.split(unit):
+        word = next(
+            (m.group(0) for m in CLAIM.finditer(chunk) if not exempt(chunk, m)),
+            None,
+        )
+        if word is not None:
+            near = [name for name, rule in NEAR.items() if rule.search(chunk)]
+            found.append(
+                (
+                    chunk.strip()[:MAX_QUOTED],
+                    word,
+                    [*near, "evidence-elsewhere"] if elsewhere else near,
+                )
+            )
+    return found
+
+
 def blocked_claims(text: str) -> list[tuple[str, str, list[str]]]:
     """The (sentence, matched word, near rules) of each claim in TEXT to block.
 
@@ -274,25 +294,12 @@ def blocked_claims(text: str) -> list[tuple[str, str, list[str]]]:
     when another unit of TEXT has evidence.
     """
     elsewhere = bool(EVIDENCE.search(text))
-    found: list[tuple[str, str, list[str]]] = []
-    for unit in judging_units(text):
-        if EVIDENCE.search(unit):
-            continue
-        for chunk in SENTENCE_END.split(unit):
-            word = next(
-                (m.group(0) for m in CLAIM.finditer(chunk) if not exempt(chunk, m)),
-                None,
-            )
-            if word is not None:
-                near = [name for name, rule in NEAR.items() if rule.search(chunk)]
-                found.append(
-                    (
-                        chunk.strip()[:MAX_QUOTED],
-                        word,
-                        [*near, "evidence-elsewhere"] if elsewhere else near,
-                    )
-                )
-    return found
+    return [
+        block
+        for unit in judging_units(text)
+        if not EVIDENCE.search(unit)
+        for block in unit_blocks(unit, elsewhere=elsewhere)
+    ]
 
 
 def unsupported_claims(text: str) -> list[str]:
