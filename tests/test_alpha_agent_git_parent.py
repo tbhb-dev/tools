@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import agent_git_plants
 import pytest
 from agent_git_plants import PLANTS, plant
-from agent_host_example import commit, git, repository
+from agent_host_example import commit, git, local_mirror_fetches, repository
 from agent_live_evidence import codex_auth
 from agent_live_host_probe import checked_live_policy, codex_sandbox_command
 from test_alpha_agent_run_host import make_run
@@ -53,10 +53,7 @@ def real_clone(
     origin = parent / "origin"
     clone = clone.rename(parent / "example-repo")
 
-    def origin_url(_repo: str) -> str:
-        return str(origin)
-
-    monkeypatch.setattr(worktree.repo, "ssh_url", origin_url)
+    local_mirror_fetches(monkeypatch, origin)
     directory = tmp_path / "host-tools"
     directory.mkdir()
     prek = directory / "prek"
@@ -67,7 +64,9 @@ def real_clone(
         run, settings=dataclasses.replace(run.settings, sandbox=sandbox)
     )
     with host_tools.configured(run.settings, run.host.os):
-        workspace = worktree.create(clone, run.files.name, run.request)
+        workspace = worktree.create(
+            clone, run.files.name, run.request, ("example-org/example-repo",)
+        )
     return run, dataclasses.replace(
         run_host.planned_paths(run), worktree=str(workspace)
     )

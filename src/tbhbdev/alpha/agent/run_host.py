@@ -22,10 +22,13 @@ from pathlib import Path
 
 from tbhbdev import userconfig
 from tbhbdev.alpha.agent import (
+    build_info,
     codex_install,
     credentials,
     host_tools,
+    ownership,
     process_group,
+    push,
     render,
     runfiles,
     settings,
@@ -47,6 +50,7 @@ from tbhbdev.alpha.agent.model import (
     RunRequest,
     Settings,
 )
+from tbhbdev.alpha.agent.ownership import RunExistsError
 
 
 @dataclass(frozen=True)
@@ -481,8 +485,11 @@ def prepare_workspace(run: Run) -> Prepared:
     clone = Path(repo.clone_path(run.home, run.request.repo))
     paths = planned_paths(run)
     checked_policy(run, paths)
-    workspace = worktree.create(clone, run.files.name, run.request)
-    delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
+    workspace = worktree.create(
+        clone, run.files.name, run.request, run.settings.public_repos
+    )
+    with worktree.preparation_step("credential delivery"):
+        delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
     paths = RunPaths(
         home=str(run.home),
         worktree=str(workspace),
@@ -495,12 +502,14 @@ def prepare_workspace(run: Run) -> Prepared:
         if delivery.signing is not None
         else None,
     )
-    runfiles.private_dir(Path(paths.audit_dir))
+    with worktree.preparation_step("audit directory"):
+        runfiles.private_dir(Path(paths.audit_dir))
     before = None
     if run.request.harness is Harness.CODEX:
-        runfiles.private_dir(Path(paths.codex_home))
-        source = runfiles.private_dir(run.home / ".codex") / "auth.json"
-        before = credentials.auth_copy(source, Path(paths.codex_home) / "auth.json")
+        with worktree.preparation_step("codex auth copy"):
+            runfiles.private_dir(Path(paths.codex_home))
+            source = runfiles.private_dir(run.home / ".codex") / "auth.json"
+            before = credentials.auth_copy(source, Path(paths.codex_home) / "auth.json")
     return Prepared(paths, delivery, before)
 
 
@@ -592,11 +601,36 @@ def harness_command(
     return command
 
 
-def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
+def checked_harness_command(
+    run: Run, prepared: Prepared, value: Policy, executable: str
+) -> tuple[str, ...]:
+    try:
+        return harness_command(run, prepared, value, executable)
+    except KeyError, TypeError:
+        message = "run failed while building the harness command"
+        raise Invalid(message) from None
+
+
+def log_hook_tools(run: Run, paths: RunPaths) -> None:
+    status = (
+        "present"
+        if (Path(paths.worktree) / ".bazel_env" / "bin").is_dir()
+        else "missing; commit hooks that call .bazel_env/bin will fail in this run"
+    )
+    run.files.write("log", f"preflight: .bazel_env {status}\n")
+
+
+def run_harness(
+    run: Run, prepared: Prepared, stack: ExitStack, *, preflight_only: bool = False
+) -> int:
     paths = prepared.paths
     value, executable = checked_policy(run, paths)
     env = value.env | prepared.delivery.env
-    command = harness_command(run, prepared, value, executable)
+    command = checked_harness_command(run, prepared, value, executable)
+    if preflight_only:
+        log_hook_tools(run, paths)
+        run.files.write("log", f"preflight ok: {executable}\n")
+        return 0
     headless = run.request.kind is RunKind.EXEC
     terminal = None if headless else sys.stdin.fileno()
     streams = (None, None, None)
@@ -671,13 +705,22 @@ def prepared_result(result: object) -> Prepared:
     return result
 
 
-def execute(run: Run, text: str) -> int:
+def execute(
+    run: Run, text: str, push_token: str | None = None, *, preflight_only: bool = False
+) -> int:
     """Keep cleanup protected until the completion record is durable."""
     with host_tools.configured(run.settings, run.host.os), ExitStack() as stack:
-        return _execute(run, text, stack)
+        return _execute(run, text, stack, push_token, preflight_only=preflight_only)
 
 
-def _execute(run: Run, text: str, stack: ExitStack) -> int:
+def _execute(
+    run: Run,
+    text: str,
+    stack: ExitStack,
+    push_token: str | None = None,
+    *,
+    preflight_only: bool,
+) -> int:
     prepared = None
     rc = 1
     agent = None
@@ -701,7 +744,11 @@ def _execute(run: Run, text: str, stack: ExitStack) -> int:
             agent = credentials.signing_agent(
                 prepared.delivery.signing, run.tmpdir, run.deadline
             )
-        rc = run_harness(run, prepared, stack)
+        rc = (
+            run_harness(run, prepared, stack, preflight_only=True)
+            if preflight_only
+            else push.run(run, prepared, stack, run_harness, push_token)
+        )
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
     except RunInterruptedError, EOFError:
@@ -818,23 +865,26 @@ def interrupt(_number: int, _frame: object) -> None:
     raise RunInterruptedError
 
 
-class RunExistsError(Invalid):
-    """A refused rerun must preserve its previous owner's records."""
-
-
 def refuse_started(files: runfiles.RunFiles) -> None:
     if files.path("rc").exists() or files.path("pgid").exists():
         message = f"run {files.name!r} has already started"
         raise RunExistsError(message)
 
 
-def main(arguments: list[str], prog: str) -> int:
+def main(
+    arguments: list[str],
+    prog: str,
+    *,
+    push_token: str | None = None,
+    claimed: bool = False,
+) -> int:
     os.environ["PATH"] = host_tools.search()
     parser = argparse.ArgumentParser(prog=prog)
     parser.add_argument("name", nargs="?")
     parser.add_argument("request", nargs="?")
     parser.add_argument("--host", default=socket.gethostname())
     parser.add_argument("--prompt")
+    parser.add_argument("--preflight", action="store_true")
     args = parser.parse_args(arguments)
     if args.name is None:
         print(f"{prog}: run name is required", file=sys.stderr)
@@ -846,13 +896,15 @@ def main(arguments: list[str], prog: str) -> int:
         with process_group.defer_signals():
             files = _files(args.name)
             refuse_started(files)
+            ownership.claim(files, claimed=claimed)
         with (
             runfiles.locked(files.path("run.lock")),
             tempfile.TemporaryDirectory() as tmpdir,
         ):
             refuse_started(files)
             run, text = _load(args, Path(tmpdir).resolve())
-            completed = execute(run, text)
+            run.files.write("log", build_info.line() + "\n")
+            completed = execute(run, text, push_token, preflight_only=args.preflight)
     except (
         Invalid,
         userconfig.ConfigError,
