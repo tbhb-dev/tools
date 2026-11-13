@@ -1156,8 +1156,11 @@ def closed_pr_head(number: int, repo: str) -> str:
     return branch
 
 
-def require_own_author(number: int) -> None:
+def require_own_author(number: int, repo: str) -> None:
     """Refuse unless PR N's GitHub author is the account this ``gh`` runs as.
+
+    Both reads name github.com and ``repo``, the repository ``gh pr ready``
+    acts on, so no ``GH_HOST`` or ``GH_REPO`` setting can split them.
 
     Raises:
         SystemExit: The author or the account can't be read, or they differ.
@@ -1168,6 +1171,8 @@ def require_own_author(number: int) -> None:
             "pr",
             "view",
             str(number),
+            "--repo",
+            f"github.com/{repo}",
             "--json",
             "author",
             "--jq",
@@ -1177,12 +1182,17 @@ def require_own_author(number: int) -> None:
     me = run(
         [find_tool(GH), "api", "--hostname", "github.com", "user", "--jq", ".login"]
     )
-    login = author.stdout.strip()
-    if author.returncode or me.returncode or not login or me.stdout.strip() != login:
+    if (
+        author.returncode
+        or me.returncode
+        or not author.stdout.strip()
+        or me.stdout != author.stdout
+    ):
+        why = " ".join((author.stderr + me.stderr).split())
         message = (
             f"not marking PR {number} ready: its author isn't this agent's account"
         )
-        raise SystemExit(message)
+        raise SystemExit(f"{message}: {why}" if why else message)
 
 
 def delete_pr_branch(number: int) -> int:
@@ -1621,10 +1631,12 @@ def main(
     if args.command in by_pr:
         return by_pr[args.command](args.pr)
     if args.command == "ready":
-        require_own_author(args.pr)
+        repo = origin_repository()
+        require_own_author(args.pr, repo)
         # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
         # empty body: no test can tell `None` from `""`.
-        return invoke_gh([GH, "pr", "ready", str(args.pr)], "")[0]  # pragma: no mutate
+        words = [GH, "pr", "ready", str(args.pr), "--repo", f"github.com/{repo}"]
+        return invoke_gh(words, "")[0]  # pragma: no mutate
     try:
         return command(args, env)
     except agent_identity.AttributionError:

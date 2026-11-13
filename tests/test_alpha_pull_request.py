@@ -3389,52 +3389,91 @@ def test_checks_requires_a_pr_number(argv: tuple[str, ...]) -> None:
     assert info.value.code == 2
 
 
-READY_VIEW = "pr view 45 --json author --jq .author.login"
+READY_VIEW = "pr view 45 --repo github.com/tbhb-dev/example --json author --jq"
 READY_ME = "api --hostname github.com user --jq .login"
+READY_REPO = "github.com/tbhb-dev/example"
 
 
 def ready_cases(
     author: str = "agent", me: str = "agent"
 ) -> dict[str, dict[str, object]]:
     return {
+        "repo view": branch_cases()["repo view"],
         READY_VIEW: {"rc": 0, "stdout": f"{author}\n", "stderr": ""},
         READY_ME: {"rc": 0, "stdout": f"{me}\n", "stderr": ""},
     }
 
 
+def gh_argvs(world: World) -> list[list[str]]:
+    return [c["argv"] for c in world.calls("gh.repo") + world.calls("gh")]
+
+
 def test_ready_marks_the_pull_request_ready(world: World) -> None:
     world.fake("gh", cases=ready_cases())
     assert run_main("ready", "--pr", "45") == 0
-    assert [c["argv"] for c in world.calls("gh")] == [
-        ["pr", "view", "45", "--json", "author", "--jq", ".author.login"],
+    assert gh_argvs(world) == [
+        ["repo", "view", ORIGIN, "--json", "nameWithOwner,url"],
+        [
+            "pr",
+            "view",
+            "45",
+            "--repo",
+            READY_REPO,
+            "--json",
+            "author",
+            "--jq",
+            ".author.login",
+        ],
         ["api", "--hostname", "github.com", "user", "--jq", ".login"],
-        ["pr", "ready", "45"],
+        ["pr", "ready", "45", "--repo", READY_REPO],
     ]
-    assert world.calls("gh")[2]["stdin"] == ""
+    assert world.calls("gh")[-1]["stdin"] == ""
 
 
-def test_ready_refuses_another_authors_pull_request(world: World) -> None:
-    world.fake("gh", cases=ready_cases(author="human"))
-    with pytest.raises(SystemExit, match="isn't this agent's account"):
+@pytest.mark.parametrize(
+    ("author", "me"),
+    [
+        ("human", "agent"),
+        ("app/some-bot", "agent"),
+        ("null", "agent"),
+        ("Agent", "agent"),
+        (" agent", "agent"),
+        ("agent ", "agent"),
+        ("", ""),
+        (" ", " "),
+    ],
+)
+def test_ready_refuses_a_login_that_is_not_the_agents(
+    world: World, author: str, me: str
+) -> None:
+    cases = ready_cases(author=author, me=me)
+    world.fake("gh", cases=cases)
+    with pytest.raises(SystemExit, match=r"isn't this agent's account$"):
         run_main("ready", "--pr", "45")
-    assert ["pr", "ready", "45"] not in [c["argv"] for c in world.calls("gh")]
+    assert not any(a[:2] == ["pr", "ready"] for a in gh_argvs(world))
 
 
 @pytest.mark.parametrize("failing", [READY_VIEW, READY_ME])
 def test_ready_refuses_when_a_login_is_unreadable(world: World, failing: str) -> None:
     cases = ready_cases()
-    cases[failing] = {"rc": 1, "stdout": "agent\n", "stderr": "boom"}
+    cases[failing] = {"rc": 1, "stdout": "agent\n", "stderr": "bad\n token"}
     world.fake("gh", cases=cases)
-    with pytest.raises(SystemExit, match="isn't this agent's account"):
+    with pytest.raises(SystemExit, match=r"isn't this agent's account: bad token$"):
         run_main("ready", "--pr", "45")
-    assert ["pr", "ready", "45"] not in [c["argv"] for c in world.calls("gh")]
+    assert not any(a[:2] == ["pr", "ready"] for a in gh_argvs(world))
 
 
-def test_ready_refuses_an_empty_login(world: World) -> None:
-    cases = ready_cases(author="", me="")
-    world.fake("gh", cases=cases)
-    with pytest.raises(SystemExit, match="isn't this agent's account"):
-        run_main("ready", "--pr", "45")
+def test_ready_acts_on_origin_even_when_gh_defaults_elsewhere(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The author read and the ready call name origin, not GH_REPO or GH_HOST."""
+    monkeypatch.setenv("GH_REPO", "other.example/someone/else")
+    monkeypatch.setenv("GH_HOST", "other.example")
+    world.fake("gh", cases=ready_cases())
+    assert run_main("ready", "--pr", "45") == 0
+    pinned = [a for a in gh_argvs(world) if a[:2] in (["pr", "view"], ["pr", "ready"])]
+    assert len(pinned) == 2
+    assert all(a[a.index("--repo") + 1] == READY_REPO for a in pinned)
 
 
 @pytest.mark.parametrize(
