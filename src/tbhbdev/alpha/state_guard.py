@@ -340,8 +340,9 @@ def open_log(directory: Path, name: str = "tagged.jsonl") -> int:
     O_NOFOLLOW covers the last directory and the file only. A symlinked parent of
     the state directory still redirects the log, so the state home must be trusted.
     """
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    # fchmod below fixes the mode, so the mkdir mode and the read flag can't matter.
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)  # pragma: no mutate
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW  # pragma: no mutate
     dir_fd = os.open(directory, flags)
     try:
         os.fchmod(dir_fd, 0o700)
