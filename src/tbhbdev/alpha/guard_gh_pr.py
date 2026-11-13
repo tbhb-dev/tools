@@ -12,6 +12,7 @@ the command to run instead:
     gh pr create  ->  tbhbdev alpha pr check, then tbhbdev alpha pr create
     gh pr edit    ->  tbhbdev alpha pr edit --pr N
     gh pr merge   ->  tbhbdev alpha merge N   (--dry-run previews)
+    gh pr ready   ->  tbhbdev alpha pr ready N [N...]
 
 It reads the hook payload on stdin and takes no arguments. The payload shape
 alone picks the output contract, so the hook behaves the same whoever runs it:
@@ -97,7 +98,7 @@ if TYPE_CHECKING:
 
 type Json = dict[str, object]
 
-SUBCOMMANDS = ("create", "edit", "merge")
+SUBCOMMANDS = ("create", "edit", "merge", "ready")
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 WRAPPERS = {"env", "command", "exec", "sudo", "nohup", "time", "builtin", "xargs"}
 KEYWORDS = {"if", "then", "do", "else", "elif", "while", "until", "!", "{", "}"}
@@ -615,6 +616,8 @@ def hint(found: Match) -> str:
         return (
             f"{blocked} Update {DRAFT}, then run `tbhbdev alpha pr edit --pr {number}`."
         )
+    if found.sub == "ready":
+        return f"{blocked} Run `tbhbdev alpha pr ready {number}` instead."
     return (
         f"{blocked} Once the PR is approved, run `tbhbdev alpha merge {number}` "
         "(add `--dry-run` to preview the squash message first)."
