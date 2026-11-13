@@ -1,6 +1,10 @@
 """Compare exemptions against a frozen baseline on a synthetic sentence grid."""
 
+import ast
+import hashlib
 import re
+import subprocess
+from pathlib import Path
 
 import pytest
 import state_guard_baseline as baseline
@@ -28,10 +32,20 @@ CANDIDATES = (
     "Nothing merged.",
     "Tell me when it is merged.",
     "Whether the fix is merged.",
+    'The word "merged".',
+    'Look at "merged" now.',
 )
 
 # Each exemption pull request adds its passing sentences here, with the reason.
-INTENDED_PASSES: dict[str, str] = {}
+INTENDED_PASSES: dict[str, str] = {
+    sentence.replace("\\t", "\t"): reason
+    for sentence, reason in (
+        line.split("\t")
+        for line in (Path(__file__).parent / "state_guard_intended_passes.tsv")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+}
 
 PROBES = (
     "4 deployed services yesterday.",
@@ -140,6 +154,8 @@ BASE_SENTENCES = (
     "The branch landed.",
     *CANDIDATES,
     *PROBES,
+    'The   word   "merged".',
+    'The\tword\t"merged".',
     "The report describes the merged PR.",
     "The report on the deployed application needs editing.",
 )
@@ -225,11 +241,18 @@ def generated_corpus() -> set[str]:
 
 
 def main_blocks(sentence: str) -> bool:
-    return bool(baseline.unsupported_claims(sentence))
+    """Main's judge, fed the renderings the hooks build (normalization included)."""
+    try:
+        spaced, joined = state_guard.renderings(sentence)
+    except state_guard.UndecidableError:
+        return True
+    return bool(
+        baseline.unsupported_claims(spaced) or baseline.unsupported_claims(joined)
+    )
 
 
 def head_blocks(sentence: str) -> bool:
-    return bool(state_guard.unsupported_claims(sentence))
+    return bool(state_guard.judged_claims(sentence))
 
 
 def test_only_intended_simple_sentences_gain_exemptions() -> None:
@@ -276,9 +299,304 @@ def test_one_widening_rule_fails_the_differential(
     assert newly_passing() != INTENDED_PASSES.keys()
 
 
-def test_head_judges_every_grid_sentence_as_main_does() -> None:
-    assert all(main_blocks(s) == head_blocks(s) for s in generated_corpus())
+def test_head_judges_every_other_grid_sentence_as_main_does() -> None:
+    assert all(
+        main_blocks(s) == head_blocks(s)
+        for s in generated_corpus()
+        if s not in INTENDED_PASSES
+    )
 
 
-def test_the_exemption_set_is_empty() -> None:
-    assert state_guard.EXEMPTIONS == ()
+def test_the_exemption_set_is_exactly_the_two_rules() -> None:
+    assert (state_guard.awaited, state_guard.mentioned) == state_guard.EXEMPTIONS
+
+
+MAIN_SHA = "d604159f7fb7382426be353a940121051fd080d9"
+# Hash of the three judge patterns and their flags on main at MAIN_SHA.
+MAIN_PATTERNS_SHA256 = (
+    "5bb435c05d11f76ccc858fb3de6693bd7e8ac6a512f0c6b7c50e92ad1810421e"
+)
+JUDGE_PATTERNS = ("CLAIM", "EVIDENCE", "SENTENCE_END")
+
+
+def pattern_digest(patterns: dict[str, re.Pattern[str]], max_quoted: int) -> str:
+    text = "\n".join(
+        f"{name}={patterns[name].pattern!r}|{patterns[name].flags}"
+        for name in JUDGE_PATTERNS
+    )
+    return hashlib.sha256(f"{text}\nMAX_QUOTED={max_quoted}".encode()).hexdigest()
+
+
+DRIFT_HELP = (
+    f"The judge patterns or MAX_QUOTED differ from main at {MAIN_SHA}. "
+    "To rebase this change on a newer main, set MAIN_SHA to that commit, run "
+    "this test's pattern_digest on main's values and paste it into "
+    "MAIN_PATTERNS_SHA256, then rebuild tests/state_guard_baseline.py from "
+    "main's file."
+)
+
+
+def main_patterns() -> tuple[dict[str, re.Pattern[str]], int] | None:
+    """The judge patterns and MAX_QUOTED from main at MAIN_SHA, or None."""
+    path = "src/tbhbdev/alpha/state_guard.py"
+    root = Path(__file__).parent.parent
+    shown = subprocess.run(  # fixed argv, a pinned sha
+        ["git", "-C", str(root), "show", f"{MAIN_SHA}:{path}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if shown.returncode:
+        return None
+    found: dict[str, re.Pattern[str]] = {}
+    max_quoted = -1
+    for node in ast.parse(shown.stdout).body:
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            if name == "MAX_QUOTED":
+                max_quoted = ast.literal_eval(node.value)
+            if name in JUDGE_PATTERNS:
+                code = compile(ast.Expression(node.value), name, "eval")
+                found[name] = eval(code, {"re": re})  # noqa: S307  # re.compile call
+    return found, max_quoted
+
+
+def head_patterns() -> dict[str, re.Pattern[str]]:
+    return {name: getattr(state_guard, name) for name in JUDGE_PATTERNS}
+
+
+def test_the_head_judge_patterns_are_main_s_at_the_pinned_sha() -> None:
+    digest = pattern_digest(head_patterns(), state_guard.MAX_QUOTED)
+    assert digest == MAIN_PATTERNS_SHA256, DRIFT_HELP
+
+
+def test_the_pinned_digest_is_main_s_when_the_commit_is_present() -> None:
+    main = main_patterns()
+    if main is not None:
+        assert pattern_digest(*main) == MAIN_PATTERNS_SHA256, DRIFT_HELP
+
+
+def test_the_baseline_patterns_are_the_head_s() -> None:
+    for name in JUDGE_PATTERNS:
+        assert getattr(baseline, name) == getattr(state_guard, name), DRIFT_HELP
+    assert baseline.MAX_QUOTED == state_guard.MAX_QUOTED, DRIFT_HELP
+
+
+REVIEWED = (Path(__file__).parent / "state_guard_must_block.txt").read_text(
+    encoding="utf-8"
+)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        line.replace("\\n", "\n").replace("\\u200b", "\u200b")
+        for line in REVIEWED.splitlines()
+    ],
+)
+def test_reviewed_bypass_sentences_block_on_main_and_head(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert head_blocks(sentence)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Wait until the fix is deployed.",
+        "Wait until a b c is deployed.",
+        "  Wait until the fix is deployed.",
+        "WAIT UNTIL THE FIX IS DEPLOYED.",
+        "Wait until the fix's PR is deployed.",
+        "Wait until the fix\u2019s PR is deployed.",
+        "Wait until the well-known fix is deployed.",
+        'The word "merged".',
+        'The term "merged".',
+        'The verb "merged".',
+        'Look at "is merged" now.',
+        "The word \u201cmerged\u201d.",
+        'The word "merged\u201d.',
+        'The word \u201cmerged".',
+        'THE WORD "merged".',
+        '  The word "merged".',
+    ],
+)
+def test_each_lead_in_excuses_its_claim_word(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert not head_blocks(sentence)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Wait until deployed.",
+        "Wait until a b c d is deployed.",
+        "Wait until, the fix is deployed.",
+        "Wait until the fix merged and I deployed it.",
+        "Wait until it is merged and then it is deployed.",
+        "Wait: the fix is deployed.",
+        "I will wait until the fix is deployed.",
+        "It will be merged and deployed.",
+        "It will be merged, then deployed.",
+        "Fix will be merged.",
+        "The fix and I will be merged.",
+        "The fix will have been merged.",
+        "It will not be merged.",
+        "The word merged.",
+        'The word "merged.',
+        'The word "merged .',
+        'The word "x" and the fix merged.',
+        'The words "merged".',
+        'The service called "merged".',
+        'Look at the "merged" now.',
+        'Look at "x" merged.',
+        'The word "merged" and "deployed".',
+        "Look at it merged.",
+    ],
+)
+def test_text_beside_a_lead_in_still_blocks(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert head_blocks(sentence)
+
+
+def test_one_excused_claim_does_not_excuse_a_second() -> None:
+    sentence = 'The word "merged". The fix is deployed.'
+    assert state_guard.unsupported_claims(sentence) == [
+        'The word "merged".',
+        "The fix is deployed.",
+    ]
+    both = 'The word "merged" and the fix is deployed.'
+    assert state_guard.unsupported_claims(both) == [both]
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Wait until the fix is deployed.",
+        "Wait until the fix is deployed!",
+        "Wait until the fix is deployed)",
+        'The word "merged"',
+        'The word "merged"!',
+        'The word "merged" now',
+        'The word "merged" NOW.',
+        'Look at "merged"   now  .',
+    ],
+)
+def test_each_tail_a_rule_allows_still_passes(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert not head_blocks(sentence)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Wait until the fix is deployed and verified.",
+        "Wait until the fix is deployed, please",
+        'Wait until the "fix is deployed".',
+        "Wait until the now deployed fix responds.",
+        "Wait until it is already deployed.",
+        "Wait until it is still deployed.",
+        "It will be already merged.",
+        "It will be merged now.",
+        "It will be merged yet.",
+        "It will be merged currently.",
+        "It will be merged, current state.",
+        "It will be merged today.",
+        "It will be merged by Friday.",
+        "It will be merged soon.",
+        "It will be merged after review.",
+        "It will be merged at this point.",
+        "It will be merged just now.",
+        'The word "merged" now applies.',
+        'The word "merged" is true.',
+        'The word "merged" is current.',
+        'The word "merged", now confirmed.',
+        'The word "merged"x.',
+        'The word "merged"; done.',
+    ],
+)
+def test_a_qualifier_or_a_trailing_assertion_blocks(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert head_blocks(sentence)
+
+
+@pytest.mark.parametrize(
+    "word", ["now", "already", "yet", "still", "currently", "just"]
+)
+@pytest.mark.parametrize("upper", [False, True])
+def test_each_present_word_before_the_claim_blocks_a_wait(
+    word: str, *, upper: bool
+) -> None:
+    shown = word.upper() if upper else word
+    assert head_blocks(f"Wait until it is {shown} deployed.")
+
+
+@pytest.mark.parametrize(
+    "word", ["now", "already", "yet", "still", "currently", "just"]
+)
+@pytest.mark.parametrize("upper", [False, True])
+def test_each_present_word_before_the_auxiliary_blocks_a_wait(
+    word: str, *, upper: bool
+) -> None:
+    shown = word.upper() if upper else word
+    assert head_blocks(f"Wait until it {shown} is deployed.")
+
+
+@pytest.mark.parametrize("pronoun", ["I", "we", "you", "he", "she", "they", "it", "WE"])
+def test_a_bare_past_verb_after_a_pronoun_blocks_a_wait(pronoun: str) -> None:
+    sentence = f"Wait until {pronoun} merged."
+    assert main_blocks(sentence)
+    assert head_blocks(sentence)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Wait until it has merged.",
+        "Wait until the fix has merged.",
+        "Wait until they have merged.",
+        "Wait until it has been merged.",
+        "Wait until they have been merged.",
+        "Wait until she is merged.",
+        "Wait until they are deployed.",
+    ],
+)
+def test_an_auxiliary_before_the_claim_word_makes_a_condition(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert not head_blocks(sentence)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Wait until Bob merged.",
+        "Wait until the fix merged.",
+        "Wait until I had merged.",
+        "Wait until I've merged.",
+        "Wait until it was deployed.",
+        "Wait until it was merged.",
+        "Wait until a b c has merged.",
+        "Wait until has merged.",
+    ],
+)
+def test_any_other_form_after_wait_until_blocks(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert head_blocks(sentence)
+
+
+@pytest.mark.parametrize("pause", [". ", "\n", ".\n", "! ", " ... ", "?\n\n"])
+@pytest.mark.parametrize(
+    "exempt_sentence", ['The word "merged"', "Wait until it is merged"]
+)
+def test_text_after_an_exempt_sentence_makes_it_a_claim_again(
+    exempt_sentence: str, pause: str
+) -> None:
+    assert head_blocks(f"{exempt_sentence}{pause}Next.")
+    assert not head_blocks(f"{exempt_sentence}{pause}")
+    assert not head_blocks(f"{exempt_sentence}{pause}  .  \n")
+
+
+def test_an_exempt_sentence_before_a_clean_sentence_blocks_alone() -> None:
+    assert state_guard.unsupported_claims('The word "merged". Fine.') == [
+        'The word "merged".'
+    ]
+    assert state_guard.unsupported_claims('Fine. The word "merged".') == []

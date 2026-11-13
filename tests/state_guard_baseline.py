@@ -1,4 +1,4 @@
-"""Verbatim sentence judge from origin/main 714fef3b6a8fbc2286a9542dd848898b9f4d1a52."""
+"""Verbatim sentence judge from origin/main d604159f7fb7382426be353a940121051fd080d9."""
 
 import re
 

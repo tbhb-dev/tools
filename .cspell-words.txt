@@ -17,6 +17,7 @@ awrel
 bazelisk
 bazelrc
 bazelversion
+bged
 bsdinfo
 buildcop
 buildifier
@@ -28,6 +29,7 @@ capsys
 cgnat
 checkpointed
 claudecode
+cmerged
 commondir
 complexipy
 conftest
@@ -200,6 +202,7 @@ testdata
 testpaths
 textconv
 tfstate
+timespec
 timestamptz
 tmpprefix
 tombi
@@ -221,6 +224,7 @@ unsandboxed
 unsets
 unstampable
 unvalidated
+unwritable
 uploadpack
 usefixtures
 userconfig
@@ -289,3 +293,5 @@ nullglob
 precheck
 shopt
 sshcommand
+wаit
+thеy

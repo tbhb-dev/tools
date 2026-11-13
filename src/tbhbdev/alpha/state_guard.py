@@ -33,6 +33,16 @@ PR or issue number, a log path, inline code, "output" or "read-back", or
 attribution ("says", "said", "reports"). A claim marked "unverified", or "not
 done", also passes.
 
+Two narrow lead-ins excuse the claim word right after them: "Wait until
+<subject> is|are|has|have", and "the word", "the term", "the verb" or "look at"
+before a quoted word. Anything else in the sentence still counts, and a claim
+that follows other text still blocks. Text after an exempt sentence makes it a
+claim again.
+
+Every block is recorded in a JSON Lines file under
+$XDG_STATE_HOME/tbhbdev/state-guard/ as a rule id, near-rule hints and a length,
+never the text. The log never changes the verdict.
+
 A command is a `git commit` only when one of its simple commands is one. The
 scan drops heredoc bodies and splits shell commands outside quotes. It also
 checks shell `-c` scripts and substitutions inside double quotes. Single
@@ -44,6 +54,8 @@ allows the call: a broken hook must not stop the agent's work. The one
 exception is a failure while tagging a SendMessage, which keeps the refusal.
 """
 
+import contextlib
+import fcntl
 import functools
 import io
 import json
@@ -52,10 +64,11 @@ import re
 import shlex
 import stat
 import sys
+import time
 import tomllib
 import unicodedata
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import cast
 lazy from collections.abc import Callable
@@ -136,24 +149,84 @@ SHORT_VALUES = frozenset("mFCctU")
 SHORT_OPTIONAL_VALUES = frozenset("Su")
 MAX_QUOTED = 160
 MAX_LISTED = 3
-# Exemptions from the baseline claim judge. Each rule takes a sentence and one
-# claim match in it and returns True to exempt that match. A rule is added in its
-# own pull request, with its sentences listed in the differential test.
-EXEMPTIONS: tuple[Callable[[str, re.Match[str]], bool], ...] = ()
+# Each exemption rule takes a sentence and one claim match in it and returns True
+# to exempt that match. A rule covers only a claim word that sits right after a
+# fixed lead-in, so it can't excuse a claim elsewhere in the sentence.
+WAIT_LEAD = re.compile(r"\s*wait until(?: [\w'\u2019-]+){1,3} ", re.IGNORECASE)
+# A bare claim word is a condition only after "has" or "have" and a subject.
+WAIT_BARE = re.compile(
+    r"\s*wait until(?: [\w'\u2019-]+){1,2} (?:has|have) ", re.IGNORECASE
+)
+WAIT_AUX = re.compile(r"(?:is|are|has been|have been)\s", re.IGNORECASE)
+WORD_LEAD = re.compile(
+    r"\s*(?:the (?:word|term|verb)|look at) [\"\u201c]", re.IGNORECASE
+)
+CLOSING_QUOTES = ('"', "\u201d")
+# A rule never excuses a claim that a qualifier ties to the present: "already",
+# "now" and the like say the state holds, so the sentence reports it.
+PRESENT = re.compile(r"\b(?:now|already|yet|still|currently|just)\b", re.IGNORECASE)
+TEXT = re.compile(r"\w")
+CLAUSE_END = re.compile(r"[\s\"\u201d'.!?,;:)]*")
+MENTION_END = re.compile(r"\s*(?:now\s*)?[.!?]*\s*", re.IGNORECASE)
+
+
+def awaited(chunk: str, match: re.Match[str]) -> bool:
+    """MATCH ends "Wait until <subject> is|are|has|have <claim word>".
+
+    Any other form blocks, such as "Wait until Bob merged": a bare past verb
+    reports what someone did. The condition's words carry no qualifier, and
+    nothing follows MATCH, so MATCH can't be an adjective on a noun the
+    sentence goes on to use.
+    """
+    before = chunk[: match.start()]
+    lead = WAIT_LEAD if WAIT_AUX.match(match.group()) else WAIT_BARE
+    return bool(
+        lead.fullmatch(before)
+        and not PRESENT.search(before + match.group())
+        and CLAUSE_END.fullmatch(chunk[match.end() :])
+    )
+
+
+def mentioned(chunk: str, match: re.Match[str]) -> bool:
+    """MATCH is the whole quoted word after "the word" or "look at", and no more.
+
+    Only the closing quote and an optional "now" may follow, so the sentence
+    can't go on to assert what the word says about the present.
+    """
+    return bool(
+        WORD_LEAD.fullmatch(chunk[: match.start()])
+        and chunk.startswith(CLOSING_QUOTES, match.end())
+        and MENTION_END.fullmatch(chunk[match.end() + 1 :])
+    )
+
+
+EXEMPTIONS: tuple[Callable[[str, re.Match[str]], bool], ...] = (
+    awaited,
+    mentioned,
+)
 
 
 def exempt(chunk: str, match: re.Match[str]) -> bool:
-    """Whether any exemption rule exempts MATCH in CHUNK; the set is empty."""
+    """Whether any exemption rule exempts MATCH in CHUNK."""
     return any(rule(chunk, match) for rule in EXEMPTIONS)
 
 
 def unsupported_claims(text: str) -> list[str]:
-    """The sentences or lines of TEXT with a status claim and no evidence."""
+    """The sentences or lines of TEXT with a status claim and no evidence.
+
+    An exemption applies only to the last sentence that has words, so text that
+    follows an exempt sentence can't ride on it: that sentence is judged as main
+    does.
+    """
+    chunks = SENTENCE_END.split(text)
+    # With no word at all there is no claim, so the default can't change the result.
+    words = (i for i, chunk in enumerate(chunks) if TEXT.search(chunk))
+    last = max(words, default=-1)  # pragma: no mutate
     return [
         chunk.strip()[:MAX_QUOTED]
-        for chunk in SENTENCE_END.split(text)
+        for i, chunk in enumerate(chunks)
         if not EVIDENCE.search(chunk)
-        and any(not exempt(chunk, match) for match in CLAIM.finditer(chunk))
+        and any(not (i >= last and exempt(chunk, m)) for m in CLAIM.finditer(chunk))
     ]
 
 
@@ -242,6 +315,26 @@ def renderings(text: str) -> tuple[str, str]:
     return strip_tags(text), strip_tags(text, "")
 
 
+# Loose hints, used only to say in the block log what kind of wording a blocked
+# sentence held; they never change a verdict.
+NEAR = {
+    "time-or-condition": re.compile(
+        r"\b(?:after|once|until|when|if|before)\b", re.IGNORECASE
+    ),
+    "modal": re.compile(r"\b(?:will|should|must|can|to be)\b", re.IGNORECASE),
+    "negation": re.compile(
+        r"\b(?:no|not|never|none|nothing|nobody)\b|n't", re.IGNORECASE
+    ),
+    "quotation": re.compile(r"[\"\u201c]"),
+}
+# The most bytes one day's block log may hold, and the days it is kept.
+MAX_LOG_BYTES = 1_000_000
+RETENTION_DAYS = 30
+BLOCK_LOG_NAME = re.compile(r"blocks-(\d{4}-\d{2}-\d{2})\.jsonl")
+LOCK_WAIT = 0.5
+LOCK_POLL = 0.01
+
+
 def judged_claims(text: str) -> list[str]:
     """Unsupported claims of TEXT in either rendering: evidence needs both.
 
@@ -310,41 +403,154 @@ def tag_sentences(text: str) -> tuple[str, list[str]]:
     return "".join(parts), sentences
 
 
-def open_log(directory: Path) -> int:
-    """A descriptor for the private audit log; refuses symlinks and special files.
+def open_directory(directory: Path) -> int:
+    """A descriptor for the private state DIRECTORY; refuses a symlinked leaf.
 
-    O_NOFOLLOW covers the last directory and the file only. A symlinked parent of
-    the state directory still redirects the log, so the state home must be trusted.
+    O_NOFOLLOW covers the last directory only. A symlinked parent of the state
+    directory still redirects the log, so the state home must be trusted.
     """
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    dir_fd = os.open(directory, flags)
+    # fchmod below fixes the mode, so the mkdir mode and the read flag can't matter.
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)  # pragma: no mutate
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fchmod(dir_fd, 0o700)
-        fd = os.open(
-            "tagged.jsonl",
-            os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
-            0o600,
-            dir_fd=dir_fd,
-        )
+    except BaseException:
+        os.close(dir_fd)
+        raise
+    return dir_fd
+
+
+def open_log_in(dir_fd: int, name: str) -> int:
+    """A descriptor for the private log NAME in DIR_FD; refuses special files."""
+    fd = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
+        0o600,
+        dir_fd=dir_fd,
+    )
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink > 1
+            or info.st_uid != os.getuid()
+        ):
+            message = (
+                "the audit log is not a single-link regular file owned by this user"
+            )
+            raise OSError(message)  # noqa: TRY301  # one handler closes FD
+        # A log that an older version or another umask created keeps its mode.
+        os.fchmod(fd, 0o600)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def open_log(directory: Path, name: str = "tagged.jsonl") -> int:
+    """A descriptor for the private log NAME; refuses symlinks and special files."""
+    dir_fd = open_directory(directory)
+    try:
+        return open_log_in(dir_fd, name)
     finally:
         os.close(dir_fd)
-    info = os.fstat(fd)
-    if (
-        not stat.S_ISREG(info.st_mode)
-        or info.st_nlink > 1
-        or info.st_uid != os.getuid()
-    ):
-        os.close(fd)
-        message = "the audit log is not a single-link regular file owned by this user"
-        raise OSError(message)
-    return fd
+
+
+def prune_blocks(dir_fd: int, today: datetime) -> None:
+    """Delete block logs in DIR_FD dated before the window; skip invalid dates."""
+    oldest = today.date() - timedelta(days=RETENTION_DAYS)
+    with os.scandir(dir_fd) as entries:
+        for entry in entries:
+            match = BLOCK_LOG_NAME.fullmatch(entry.name)
+            if not match:
+                continue
+            try:
+                dated = date.fromisoformat(match.group(1))
+            except ValueError:
+                continue
+            if dated < oldest:
+                # Only a race or a directory with this name fails; the rest prune.
+                with contextlib.suppress(OSError):
+                    os.unlink(entry.name, dir_fd=dir_fd)  # dir_fd
+
+
+def lock_log(fd: int) -> bool:
+    """Take the exclusive lock on FD within LOCK_WAIT seconds, or give up."""
+    deadline = time.monotonic() + LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # The clock never reads equal twice in a row, so > and >= can't differ.
+            if time.monotonic() >= deadline:  # pragma: no mutate
+                return False
+            time.sleep(LOCK_POLL)
+        else:
+            return True
+
+
+def excerpt_rule(sentence: str) -> str:
+    """The log rule for SENTENCE; a cut excerpt that hides its match says so."""
+    rule = rule_of(sentence)
+    if rule == "undecidable" and len(sentence) >= MAX_QUOTED:
+        return "beyond-excerpt"
+    return rule
+
+
+def log_directory() -> Path:
+    """The private directory for both audit logs, under the XDG state home."""
+    return state_home(Path.home()) / "tbhbdev" / "state-guard"
+
+
+def log_blocks(event: str, sentences: list[str]) -> None:
+    """Append one record per blocked sentence: rule id, near rules, length.
+
+    The record never holds the text. The size check and the writes share one
+    lock, so concurrent writers can't pass the cap together. A failure here, of
+    any kind, must never turn a block into an allow, so every error is swallowed.
+    """
+    try:
+        now = datetime.now(UTC)
+        directory = log_directory()
+        dir_fd = open_directory(directory)
+        try:
+            # A failed prune must not cost today's record.
+            with contextlib.suppress(Exception):
+                prune_blocks(dir_fd, now)
+            fd = open_log_in(dir_fd, f"blocks-{now:%Y-%m-%d}.jsonl")
+        finally:
+            os.close(dir_fd)
+        try:
+            out = os.fdopen(fd, "ab")
+        except BaseException:
+            os.close(fd)
+            raise
+        with out:
+            if not lock_log(out.fileno()):
+                return
+            size = os.fstat(out.fileno()).st_size
+            for sentence in sentences:
+                record: Json = {
+                    "time": now.isoformat(timespec="seconds"),
+                    "event": event,
+                    "rule": excerpt_rule(sentence),
+                    "near_rules": [n for n, r in NEAR.items() if r.search(sentence)],
+                    "length": len(sentence),
+                }
+                line = (json.dumps(record) + "\n").encode()
+                if size + len(line) > MAX_LOG_BYTES:
+                    return
+                size += len(line)
+                out.write(line)
+            out.flush()
+    except Exception:  # noqa: BLE001  # the log must never change the verdict
+        return
 
 
 def log_tagged(data: Json, tool_input: Json, sentences: list[str]) -> None:
     """Append private audit records; a logging failure must still send the message."""
     try:
-        fd = open_log(state_home(Path.home()) / "tbhbdev" / "state-guard")
+        fd = open_log(log_directory())
         with os.fdopen(fd, "ab") as out:
             os.fchmod(out.fileno(), 0o600)
             for sentence in sentences:
@@ -429,6 +635,7 @@ def send_message_reason(data: Json, tool_input: Json) -> str | None:
     bad = judged_claims(original)
     if not bad:
         return None
+    log_blocks("PreToolUse:SendMessage", bad)
     try:
         output = tagged_input(data, tool_input, original)
         if output is not None:
@@ -691,6 +898,8 @@ def stop_reason(data: Json) -> str | None:
     if not message:
         message = last_assistant_text(str(data.get("transcript_path", "")))
     bad = judged_claims(str(message))
+    if bad:
+        log_blocks("Stop", bad)
     return final_claim_reason(bad) if bad else None
 
 
