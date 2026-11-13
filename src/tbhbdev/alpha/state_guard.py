@@ -54,7 +54,6 @@ exception is a failure while tagging a SendMessage, which keeps the refusal.
 """
 
 import functools
-import hashlib
 import io
 import json
 import os
@@ -110,8 +109,9 @@ CLAIM = re.compile(
 EVIDENCE = re.compile(
     r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b|#\d+|\bsays\b|\bsaid\b|\breports?\b|\.log\b|`[^`]+`"
     r"|\boutput\b|\bread-back\b|\bunverified\b|\bnot (?:done|applied|merged)\b"
-    r"|\baccording to\s+(?-i:(?!(?:Me|My|The|This|That|It)\b)[`@A-Z]\w?)"
-    r"|\bconfirmed by\s+(?!(?:me|myself|i|us|we)\b)\S"
+    r"|\b(?:according to|confirmed by)\s+"
+    r"(?!(?i:me|my|myself|i|us|we|our|the|this|that|it|nobody|no|none)\b)"
+    r"(?-i:[`@A-Z0-9])"
     r"|\bhttps?://(?:www\.)?github\.com/[\w.-]+/[\w.-]+/"
     r"(?:pull|issues|commit|commits|actions/runs|runs|releases)/\S"
     r"|\b(?:check[- ]?run|job|task)\s+(?:id\s+)?\d{5,}\b",
@@ -178,6 +178,20 @@ OWN_VERB = re.compile(
 # not counting auxiliary verbs and joiners.
 MAX_SUBJECT = 3
 AUXILIARY = frozenset({"is", "are", "has", "have", "been", "and", "or"})
+# A time clause of two or more words is a subject: it opens with a determiner and
+# doesn't end in a pronoun that starts the main clause ("After review it merged").
+SUBJECT_START = re.compile(
+    r"(?:the|an?|th(?:is|at|ese|ose)|my|our|its|their|your|his|her|every|each|all|"
+    r"both|any)",
+    re.IGNORECASE,
+)
+SUBJECT_END = re.compile(
+    r"(?:it|they|he|she|we|i|you|everything|everyone)", re.IGNORECASE
+)
+# The fewest words that make a time clause a subject of its own.
+SUBJECT_WORDS = 2
+# The negators that deny a claim from after it: "I merged nothing".
+OBJECT_NEGATORS = frozenset({"nothing", "no"})
 # The most words between a negation and the claim it negates.
 MAX_NEGATION_GAP = 1
 # What follows a modal status word and makes it a recommendation to act now.
@@ -188,11 +202,12 @@ MODAL = re.compile(
     r"(?:\b(?:will|should|must|can)\b"
     r"|\b(?:going|need|needs|needed|want|wants|wanted|about|ought|supposed|expected"
     r"|due|set|likely|meant)\s+to\s+be\b)"
-    rf"(?:\s+(?:be|been|have|already|also|now|still|then|and|or|{STATUS}))*\s*$",
+    rf"(?:\s+(?:be|been|and|or|{STATUS}))*\s*$",
     re.IGNORECASE,
 )
 NEGATION = re.compile(
-    r"(?<![/\w-])(?:not(?!\s+only\b)|never|nothing|no|none|nobody|neither|nor)\b"
+    r"(?<![/\w-])(?:not(?!\s+(?:only|just|long|even|least|merely|simply|necessarily|always|quite|too|so)\b)"
+    r"|never|nothing|no(?!\s+(?:thanks|sooner|matter|doubt|wonder)\b)|none|nobody|neither|nor)\b"
     r"|n['\u2019]t\b",
     re.IGNORECASE,
 )
@@ -203,9 +218,16 @@ CLAUSE_BREAK = re.compile(
     r"[,;:()\u2014\u2013]|\b(?:and|but|or|so|because|since|then|without|while)\b",
     re.IGNORECASE,
 )
-# A copula or "as" before a quotation mark asserts the quoted word: it doesn't
-# mention it.
-ASSERTS = re.compile(r"\b(?:is|are|was|were|be|been|as)\s*$", re.IGNORECASE)
+# A quotation mark mentions a word only where something marks it as one: it opens
+# the sentence or follows a colon, a comma, a bracket, another quotation or a word
+# like "word" or "called". After a subject, a verb or an adverb it asserts the
+# word: `I "merged" the PR`.
+MENTIONS = re.compile(
+    r"(?:^|[:,;(\[]|[\"\u201d]\s*(?:and|or)?|\b(?:words?|terms?|strings?|keywords?|labels?|"
+    r"notes?|status(?:es)?|phrases?|text|called|named|reads?|titled|marked|contains?|"
+    r"matches|holds?|list|token|verb|value|for|at))\s*$",
+    re.IGNORECASE,
+)
 # Looser versions of the rules above, used only to say in the block log which
 # rule a blocked sentence came close to.
 NEAR = {
@@ -218,6 +240,7 @@ LOG_DIRECTORY = (".local", "state", "tbhb", "state-guard")
 # The most bytes one day's block log may hold, and the days it is kept.
 MAX_LOG_BYTES = 1_000_000
 RETENTION_DAYS = 30
+BLOCK_LOG_NAME = re.compile(r"blocks-\d{4}-\d{2}-\d{2}\.jsonl")
 
 
 def timed(chunk: str, match: re.Match[str]) -> bool:
@@ -234,7 +257,17 @@ def timed(chunk: str, match: re.Match[str]) -> bool:
     # A status word is the state the condition names, not a verb of its own.
     between = STATUS_WORD.sub(" ", between)
     words = [word for word in between.lower().split() if word not in AUXILIARY]
-    return not OWN_VERB.search(between) and len(words) <= MAX_SUBJECT
+    return (
+        not OWN_VERB.search(between)
+        and len(words) <= MAX_SUBJECT
+        and (
+            len(words) < SUBJECT_WORDS
+            or (
+                bool(SUBJECT_START.fullmatch(words[0]))
+                and not SUBJECT_END.fullmatch(words[-1])
+            )
+        )
+    )
 
 
 def modal(chunk: str, match: re.Match[str]) -> bool:
@@ -280,8 +313,11 @@ def negated(chunk: str, match: re.Match[str]) -> bool:
     before = negation.start() < match.start() - start  # pragma: no mutate
     if before:
         gap = clause[negation.end() : match.start() - start]
-    else:
+    elif negation.group(0).lower() in OBJECT_NEGATORS:
         gap = clause[match.end() - start : negation.start()]
+    else:
+        # "merged not long ago" has a negator that doesn't deny the claim.
+        return False
     return len(gap.split()) <= MAX_NEGATION_GAP
 
 
@@ -294,7 +330,7 @@ def quoted(chunk: str, match: re.Match[str]) -> bool:
         opening = before.rindex("\u201c")
     else:
         return False
-    return not ASSERTS.search(before[:opening])
+    return bool(MENTIONS.search(before[:opening]))
 
 
 # Exemptions from the baseline claim judge. Each rule takes a sentence and one
@@ -327,12 +363,12 @@ def prune_blocks(directory: Path, today: datetime) -> None:
     """Delete block logs older than RETENTION_DAYS; dated names sort as dates."""
     oldest = f"blocks-{today - timedelta(days=RETENTION_DAYS):%Y-%m-%d}.jsonl"
     for path in directory.glob("blocks-*.jsonl"):
-        if path.name < oldest:
+        if BLOCK_LOG_NAME.fullmatch(path.name) and path.name < oldest:
             path.unlink(missing_ok=True)  # pragma: no mutate -- only a race differs
 
 
 def log_blocks(event: str, sentences: list[str]) -> None:
-    """Append one record per blocked sentence: rule id, near rules, hash, length.
+    """Append one record per blocked sentence: rule id, near rules, length.
 
     The record never holds the text. A failure here, of any kind, must never
     turn a block into an allow, so every error is swallowed.
@@ -343,18 +379,20 @@ def log_blocks(event: str, sentences: list[str]) -> None:
         fd = open_log(directory, f"blocks-{now:%Y-%m-%d}.jsonl")
         prune_blocks(directory, now)
         with os.fdopen(fd, "ab") as out:
-            if os.fstat(out.fileno()).st_size >= MAX_LOG_BYTES:
-                return
+            size = os.fstat(out.fileno()).st_size
             for sentence in sentences:
                 record: Json = {
                     "time": now.isoformat(timespec="seconds"),
                     "event": event,
                     "rule": rule_of(sentence),
                     "near_rules": [n for n, r in NEAR.items() if r.search(sentence)],
-                    "sha256": hashlib.sha256(sentence.encode()).hexdigest(),
                     "length": len(sentence),
                 }
-                out.write((json.dumps(record) + "\n").encode())
+                line = (json.dumps(record) + "\n").encode()
+                if size + len(line) > MAX_LOG_BYTES:
+                    return
+                size += len(line)
+                out.write(line)
     except Exception:  # noqa: BLE001  # the log must never change the verdict
         return
 
@@ -541,6 +579,8 @@ def open_log(directory: Path, name: str = "tagged.jsonl") -> int:
         os.close(fd)
         message = "the audit log is not a single-link regular file owned by this user"
         raise OSError(message)
+    # A log that an older version or another umask created keeps its mode otherwise.
+    os.fchmod(fd, 0o600)
     return fd
 
 

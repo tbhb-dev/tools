@@ -52,13 +52,11 @@ INTENDED_PASSES: dict[str, str] = {
     "Nobody deployed the fix.": NEGATED,
     "Not everything is deployed.": NEGATED,
     "Nothing merged.": NEGATED,
-    "Once the fix is deployed it is merged.": TIMED,
     "Once the fix is deployed.": TIMED,
     "Tell me when it is merged.": TIMED,
     "The fix isn't deployed.": NEGATED,
     "The fix never merged.": NEGATED,
     "The fix is not merged.": NEGATED,
-    "The fix should already be deployed.": MODAL,
     "WILL merged.": MODAL,
     "Wait until the fix is deployed.": TIMED,
     "What if the fix is merged?": TIMED,
@@ -343,3 +341,105 @@ def test_head_judges_every_other_grid_sentence_as_main_does() -> None:
 def test_the_exemption_set_is_the_documented_one() -> None:
     names = [rule.__name__ for rule in state_guard.EXEMPTIONS]
     assert names == ["timed", "modal", "negated", "quoted"]
+
+
+# The wrapper grid: each template wraps a status claim in a time, negation, modal,
+# quotation or evidence phrase, and each sentence runs in three letter cases. A
+# template that main blocks and the head passes must be on ALLOWED_TEMPLATES, so
+# every widening is a deliberate line here.
+CORES = (
+    "the fix merged",
+    "it is merged",
+    "the PR is deployed",
+    "I merged the PR",
+    "the build is running",
+    "the patch shipped",
+    "it is already live",
+)
+WORDS = ("merged", "deployed", "shipped")
+TEMPLATES = (
+    "After review {c}.",
+    "Once tests pass {c}.",
+    "When CI passed {c}.",
+    "Until review ends {c}.",
+    "If it works {c}.",
+    "Before launch {c}.",
+    "After review, {c}.",
+    "Once tests pass, {c}.",
+    "Tell me when {c}.",
+    "Wait until {c}.",
+    "While we wait {c}.",
+    "{c} not long ago.",
+    "{c} no thanks to CI.",
+    "{c} not just on staging.",
+    "{c} not only on staging.",
+    "{c} not yesterday but today.",
+    "{c} not.",
+    "Not long ago {c}.",
+    "Not just that, {c}.",
+    "No thanks to CI {c}.",
+    "{c}, not rejected.",
+    "{c} never.",
+    "{c} must have.",
+    "{c}, which should now be true.",
+    "The PR should now be merged.",
+    "The fix must have merged.",
+    "It will now be merged.",
+    "It should by now be deployed.",
+    "It should already be deployed.",
+    "It will be merged.",
+    "It should be merged.",
+    'I "{w}" the PR.',
+    'The fix is already "{w}".',
+    'The fix was just "{w}".',
+    'It has also "{w}".',
+    'The fix "{w}".',
+    'Status: "{w}".',
+    'The word "{w}".',
+    'We "{w}" it.',
+    'Look at "{w}" now.',
+    'He "{w}" it.',
+    "{c} according to ME.",
+    "{c} according to THE PLAN.",
+    "{c} according to the plan.",
+    "{c} confirmed by the plan.",
+    "{c} confirmed by nobody.",
+    "{c}, confirmed by Pat.",
+    "{c} according to Pat.",
+    "{c} confirmed by us.",
+)
+ALLOWED_TEMPLATES = {
+    "Tell me when {c}.",
+    "Wait until {c}.",
+    "It will be merged.",
+    "It should be merged.",
+    'Status: "{w}".',
+    'The word "{w}".',
+    'Look at "{w}" now.',
+    "{c}, confirmed by Pat.",
+    "{c} according to Pat.",
+}
+
+
+def grid_variants(template: str) -> set[str]:
+    sentences = {template.format(c=core, w=word) for core in CORES for word in WORDS}
+    sentences = {s[0].upper() + s[1:] for s in sentences}
+    return {v for s in sentences for v in (s, s.upper(), s.lower())}
+
+
+def passing_templates() -> set[str]:
+    return {
+        t
+        for t in TEMPLATES
+        if any(main_blocks(s) and not head_blocks(s) for s in grid_variants(t))
+    }
+
+
+def test_the_wrapper_grid_widens_only_through_allowed_templates() -> None:
+    assert passing_templates() == ALLOWED_TEMPLATES
+
+
+def test_a_widened_template_never_passes_in_one_case_only() -> None:
+    for template in ALLOWED_TEMPLATES:
+        variants = grid_variants(template)
+        assert all(main_blocks(s) for s in variants)

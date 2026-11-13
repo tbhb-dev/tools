@@ -2,12 +2,12 @@
 # Copyright Tony Burns
 """Tests for tbhbdev alpha state-guard, against a config in a temporary XDG dir."""
 
-import hashlib
 import io
 import json
 import os
 import runpy
 import signal
+import stat
 import subprocess
 import sys
 import unicodedata
@@ -1003,7 +1003,6 @@ def test_additional_scoped_exceptions_and_evidence(text: str) -> None:
         "As soon as the fix is merged, check.",
         "If it merged, check again.",
         "It will be merged after review.",
-        "It should have deployed by tomorrow.",
         "It needs to be merged and deployed.",
         'The word list holds "merged", "shipped" and "deployed".',
         "The word list holds \u201cmerged\u201d and \u201cshipped\u201d.",
@@ -1923,8 +1922,6 @@ def test_reports_and_assertions_still_block(text: str) -> None:
         ("Nothing is running yet.", "running"),
         ("It hasn't merged yet.", "merged"),
         ("Merged yet?", "Merged"),
-        ("It should now be merged.", "merged"),
-        ("It must already have been deployed.", "deployed"),
         ("It's meant to be already shipped.", "shipped"),
         ("The note \u201cmerged\u201d is quoted.", "merged"),
     ],
@@ -1961,7 +1958,7 @@ def test_a_blocked_message_is_logged_without_its_text(run: Runner, home: Path) -
     assert records[0]["rule"] == "was applied"
     assert records[0]["near_rules"] == []
     assert records[1]["near_rules"] == ["quotation"]
-    assert records[0]["sha256"] == hashlib.sha256(b"It was applied.").hexdigest()
+    assert "sha256" not in records[0]
     assert records[0]["length"] == len("It was applied.")
     assert str(records[0]["time"]).endswith("+00:00")
     (log,) = (home / ".local/state/tbhb/state-guard").glob("blocks-*.jsonl")
@@ -2122,7 +2119,7 @@ def test_quantifier_denials_that_report_a_state_still_block(text: str) -> None:
     ("text", "blocks"),
     [
         ("Built, but not merged.", False),
-        ("Built, and merged not.", False),
+        ("Built, and merged not.", True),
         ("Built, but not at all merged.", True),
         ("Built, and merged, as if not at all.", True),
         ("Built, and merged as if not.", True),
@@ -2150,7 +2147,7 @@ def test_open_log_defaults_to_the_tagged_log_and_refuses_a_shared_file(
     tmp_path: Path,
 ) -> None:
     state_guard.os.close(state_guard.open_log(tmp_path / "d"))
-    assert (tmp_path / "d" / "tagged.jsonl").exists()
+    assert [path.name for path in (tmp_path / "d").iterdir()] == ["tagged.jsonl"]
     state_guard.os.link(tmp_path / "d" / "tagged.jsonl", tmp_path / "d" / "twin")
     with pytest.raises(
         OSError,
@@ -2168,3 +2165,89 @@ def test_a_log_at_exactly_the_size_cap_gets_no_record(
     monkeypatch.setattr(state_guard, "MAX_LOG_BYTES", log.stat().st_size)
     state_guard.log_blocks("Stop", ["Merged."])
     assert len(log.read_text().splitlines()) == 1
+
+
+def test_one_message_can_not_push_a_log_past_the_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    state_guard.log_blocks("Stop", ["Merged."])
+    (log,) = (tmp_path.joinpath(*state_guard.LOG_DIRECTORY)).glob("blocks-*.jsonl")
+    record = log.stat().st_size
+    monkeypatch.setattr(state_guard, "MAX_LOG_BYTES", record * 3)
+    state_guard.log_blocks("Stop", ["Merged."] * 50)
+    assert log.stat().st_size == record * 3
+
+
+@pytest.mark.parametrize("umask", [0o000, 0o022])
+def test_an_existing_log_gets_mode_0600_on_every_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, umask: int
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    state_guard.log_blocks("Stop", ["Merged."])
+    (log,) = (tmp_path.joinpath(*state_guard.LOG_DIRECTORY)).glob("blocks-*.jsonl")
+    log.chmod(0o666)
+    old = os.umask(umask)
+    try:
+        state_guard.log_blocks("Stop", ["Merged."])
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+
+
+def test_pruning_only_touches_exactly_dated_block_logs(tmp_path: Path) -> None:
+    names = [
+        "blocks-2020-01-01.jsonl",
+        "blocks-0000-important.jsonl",
+        "blocks-2020-01-01.jsonl.keep",
+        "blocks-x2020-01-01.jsonl",
+    ]
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for name in names:
+        (logs / name).write_text("x")
+    state_guard.prune_blocks(logs, datetime(2024, 1, 1, tzinfo=UTC))
+    assert sorted(path.name for path in logs.iterdir()) == sorted(names[1:])
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "After review it merged.",
+        "Once tests pass it merged.",
+        "Until review ends it is merged.",
+        "The fix merged not long ago.",
+        "The fix merged no thanks to CI.",
+        "The fix is deployed not just staged.",
+        "It merged not yesterday but today.",
+        "The fix must have merged.",
+        "The PR should now be merged.",
+        "It should already be deployed.",
+        'I "merged" the PR.',
+        'The fix is already "merged".',
+        'The fix "merged".',
+        "I \u201cmerged\u201d the PR.",
+        "The fix merged according to ME.",
+        "The fix merged according to THE PLAN.",
+        "The fix merged confirmed by the plan.",
+        "The fix merged confirmed by nobody.",
+        "THE FIX MERGED CONFIRMED BY THE PLAN.",
+        "Once the fix is deployed it is merged.",
+    ],
+)
+def test_review_round_two_sentences_still_block(text: str) -> None:
+    assert state_guard.unsupported_claims(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The fix merged according to Pat.",
+        "The fix merged, confirmed by Pat.",
+        'Look at "merged" now.',
+        "Tell me when the fix merged.",
+        "Wait until it is already live.",
+    ],
+)
+def test_review_round_two_neighbors_still_pass(text: str) -> None:
+    assert state_guard.unsupported_claims(text) == []
