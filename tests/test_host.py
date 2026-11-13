@@ -3143,7 +3143,7 @@ FACTS = host_tool.Facts(
     tailnet=host_tool.Tailnet(
         "example.ts.net",
         "Fake Tailnet (example)",
-        ("box", "fakehost-01", "fakehost-02", "lone-node"),
+        ("box", "fakehost-01", "fakehost-02", "lone-node", "zorbCar", "zorbBus"),
     ),
     words=frozenset({"box", "gadget", "host", "operator", "widget"}),
     operators=("fakeop", "operator"),
@@ -3158,8 +3158,8 @@ COUNTS = {
     "private-repo": (8, 5),
     "tailnet-suffix": (1, 0),
     "tailnet-name": (1, 0),
-    "tailnet-host": (3, 1),
-    "tailnet-stem": (1, 0),
+    "tailnet-host": (5, 1),
+    "tailnet-stem": (2, 0),
     "tailnet-short": (2, 0),
     "tailnet-ipv4": (1, 0),
     "tailnet-ipv6": (1, 0),
@@ -3434,29 +3434,21 @@ def test_a_short_stem_gets_no_rule() -> None:
                 "solo.example.test",
                 "lone-node",
             ),
-            {
-                "Car",
-                "Bus",
-                "Car.example.test",
-                "Bus.example.test",
-                "nodeCar",
-                "nodeBus",
-                "solo",
-            },
+            {"Car", "Bus", "nodeCar", "nodeBus", "solo"},
             0,
         ),
-        (("fakeTo", "fakeBox", "fakeWidgets"), set(), 3),
+        (("fakeTo", "fakeBox", "fakeWidgets"), set(), 2),
         (
             ("fakeCar", "fakeBus", "moreCar", "moreBus", "makeCat", "makeDog"),
             {"Car", "Bus", "Cat", "Dog"},
             0,
         ),
-        (("solo", "solo.example.test"), {".example.test"}, 1),
+        (("solo", "solo.example.test"), set(), 0),
         (("fakeop.example.test",), set(), 0),
         (("example.ts.net",), {"example"}, 0),
-        (("fakeNode", "fakePath", "Node1", "Node2"), {"Path"}, 2),
-        (("car1Bus", "car1Dog", "carSolo"), {"1Bus", "1Dog"}, 0),
-        (("abcd", "abcd1"), set(), 2),
+        (("fakeNode", "fakePath", "Node1", "Node2"), {"Path"}, 0),
+        (("car1Bus", "car1Dog", "carSolo"), {"Bus", "Dog"}, 0),
+        (("abcd", "abcd1"), set(), 0),
         ((), set(), 0),
     ],
 )
@@ -3499,6 +3491,44 @@ def test_short_forms_match_words_and_run_names_with_real_gitleaks(
     ]
     found = scan(tmp_path, generated(facts), caught + clean)
     assert found == {number: {"tailnet-short"} for number in range(1, len(caught) + 1)}
+
+
+@pytest.mark.parametrize(
+    ("text", "form"),
+    [
+        ("bus", "bus"),
+        ("-bus", "bus"),
+        ("._-09bus", "bus"),
+        ("ab", ""),
+        ("2026-01-13", ""),
+        ("-02", ""),
+        ("bus-02", ""),
+        ("bu5s", ""),
+        ("bus.x", ""),
+        ("", ""),
+    ],
+)
+def test_a_short_form_is_three_or_more_letters_after_leading_junk(
+    text: str, form: str
+) -> None:
+    assert host_tool._short_form(text) == form  # noqa: SLF001
+
+
+@pytest.mark.usefixtures("configured")
+def test_short_forms_ignore_dates_numbers_and_ordinary_prose(tmp_path: Path) -> None:
+    net = dataclasses.replace(FACTS.tailnet, hosts=("fake-01", "fake-02", "fake-bus"))
+    facts = dataclasses.replace(FACTS, tailnet=net)
+    assert host_tool._shorts(net.hosts) == {"bus"}  # noqa: SLF001
+    texts = [
+        "bus",
+        "2026-01-13",
+        "release-02",
+        "release 01 and 02",
+        "The team shipped the schedule in January.",
+        "Read the docs about api and cli usage.",
+        "Numbers 01 02 9 and separators - _ . stay clean.",
+    ]
+    assert scan(tmp_path, generated(facts), texts) == {1: {"tailnet-short"}}
 
 
 def test_a_config_that_fails_its_check_is_never_published(
@@ -3897,7 +3927,7 @@ def test_bootstrap_publishes_the_generated_config(
         "tailnet-name: 1 rule(s)",
         "tailnet-host: 2 rule(s)",
         "tailnet-stem: 0 rule(s), 1 too common or short to match alone",
-        "tailnet-short: 0 rule(s), 2 too common or short to match alone",
+        "tailnet-short: 0 rule(s)",
         "tailnet-ipv4: 1 rule(s)",
         "tailnet-ipv6: 1 rule(s)",
         "home-path: 3 rule(s)",

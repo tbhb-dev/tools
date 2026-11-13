@@ -175,10 +175,31 @@ fi
 REPO_LIMIT = 1000
 # A name shorter than NAME_MIN, or a common word, would match too much on its
 # own: a repository's then matches only as owner/name, and other names get no
-# rule. WORDS is the system dictionary, which lacks plurals and these terms.
+# rule. A short form of a host name needs SHORT_MIN letters instead, because
+# stripping a shared stem leaves short words. WORDS is the system dictionary,
+# which lacks plurals and these terms.
 NAME_MIN = 4
+SHORT_MIN = 3
 WORDS = Path("/usr/share/dict/words")
-TECH_WORDS = frozenset({"config", "dotfiles", "github", "infra", "monorepo", "website"})
+TECH_WORDS = frozenset(
+    {
+        "api",
+        "cli",
+        "config",
+        "dns",
+        "dotfiles",
+        "github",
+        "infra",
+        "monorepo",
+        "npm",
+        "sdk",
+        "ssh",
+        "tls",
+        "url",
+        "vpn",
+        "website",
+    }
+)
 # Tailnet host names that share their first STEM_MIN characters give a stem,
 # which matches the names to come as well.
 STEM_MIN = 4
@@ -1904,8 +1925,14 @@ def stems(hosts: Iterable[str]) -> list[str]:
     return sorted(found)
 
 
+def _short_form(text: str) -> str:
+    """TEXT without leading separators and digits, or "" unless only letters remain."""
+    form = text.lstrip("-._0123456789")
+    return form if re.fullmatch(rf"[A-Za-z]{{{SHORT_MIN},}}", form) else ""
+
+
 def _shorts(hosts: Sequence[str]) -> set[str]:
-    """Stem-stripped names and first DNS labels, excluding full host names."""
+    """Letters-only stem-stripped names and first DNS labels, not full host names."""
     families: dict[str, list[str]] = {}
     for host in hosts:
         families.setdefault(host[:STEM_MIN], []).append(host)
@@ -1914,10 +1941,10 @@ def _shorts(hosts: Sequence[str]) -> set[str]:
         shared = stems(family)
         for host in family:
             if shared:
-                found.add(host.removeprefix(shared[0]))
+                found.add(_short_form(host.removeprefix(shared[0])))
             if "." in host:
-                found.add(host.partition(".")[0])
-    return found.difference(hosts)
+                found.add(_short_form(host.partition(".")[0]))
+    return found.difference(hosts, {""})
 
 
 def _ipv4(category: str, *addresses: str) -> list[Rule]:
@@ -1943,7 +1970,10 @@ def gitleaks_rules(facts: Facts) -> tuple[list[Rule], dict[str, int]]:
     rules += [Rule("tailnet-stem", f"(?i){_bound(s, 0)}{re.escape(s)}") for s in kept]
     short_at = len(rules)
     short_rules, omitted["tailnet-short"] = _named(
-        "tailnet-short", _shorts(net.hosts).difference(kept), facts.words, minimum=3
+        "tailnet-short",
+        _shorts(net.hosts).difference(kept),
+        facts.words,
+        minimum=SHORT_MIN,
     )
     rules += _ipv4(
         "tailnet-ipv4",
