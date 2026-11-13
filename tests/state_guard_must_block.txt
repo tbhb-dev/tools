@@ -192,8 +192,6 @@ It will be merged\nwhen tests pass.
 WAIT UNTIL I MERGED.
 Wait   until   I   merged.
 Wait	until	I	merged.
-The   word   "merged".
-The	word	"merged".
 It will be merged when tests pass； it is.
 It will be merged when tests pass， it is.
 It will be merged when tests pass。 it is.
@@ -266,3 +264,54 @@ It will be merged， it is.
 It will be merged － it is.
 Wait until we merged.
 Wait until they merged.
+The word "merged"\nin fact, it is.
+The word "merged"\nit has been.
+The word "merged"\nit is.
+The word "merged"\nthat is its present state.
+The word "merged"\nthat is the status.
+The word "merged"\nthe build finished.
+The word "merged". It is.
+The word "merged". in fact, it is.
+The word "merged". it has been.
+The word "merged". it is.
+The word "merged". that is its present state.
+The word "merged". that is the status.
+The word "merged". the build finished.
+WAIT UNTIL BOB MERGED
+WAIT UNTIL I HAD MERGED
+WAIT UNTIL I'VE MERGED
+Wait	until	Bob	merged
+Wait	until	I	had	merged
+Wait	until	I've	merged
+Wait until Bob merged
+Wait until Bob mer\u200bged
+Wait until I had merged
+Wait until I had mer\u200bged
+Wait until I've merged
+Wait until I've mer\u200bged
+Wait until it is deployed\nit is.
+Wait until it is deployed. It is.
+Wait until it is merged\nin fact, it is.
+Wait until it is merged\nit has been.
+Wait until it is merged\nit is.
+Wait until it is merged\nthat is its present state.
+Wait until it is merged\nthat is the status.
+Wait until it is merged\nthe build finished.
+Wait until it is merged. It is.
+Wait until it is merged. in fact, it is.
+Wait until it is merged. it has been.
+Wait until it is merged. it is.
+Wait until it is merged. that is its present state.
+Wait until it is merged. that is the status.
+Wait until it is merged. the build finished.
+Wait until sit merged.
+Wait until the fix merged.
+Wait until thеy deployed
+Wait until І had merged
+Wait until І've merged
+Wait until ѕhe merged
+Wаit until she merged.
+Wait until сhe merged.
+It will be merged when tests pass as of now.
+It will be merged when tests pass at present.
+It will be merged when tests pass as we speak.

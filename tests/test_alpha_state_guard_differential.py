@@ -37,12 +37,15 @@ CANDIDATES = (
 )
 
 # Each exemption pull request adds its passing sentences here, with the reason.
-INTENDED_PASSES: dict[str, str] = dict(
-    line.split("\t")
-    for line in (Path(__file__).parent / "state_guard_intended_passes.tsv")
-    .read_text(encoding="utf-8")
-    .splitlines()
-)
+INTENDED_PASSES: dict[str, str] = {
+    sentence.replace("\\t", "\t"): reason
+    for sentence, reason in (
+        line.split("\t")
+        for line in (Path(__file__).parent / "state_guard_intended_passes.tsv")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+}
 
 PROBES = (
     "4 deployed services yesterday.",
@@ -151,6 +154,8 @@ BASE_SENTENCES = (
     "The branch landed.",
     *CANDIDATES,
     *PROBES,
+    'The   word   "merged".',
+    'The\tword\t"merged".',
     "The report describes the merged PR.",
     "The report on the deployed application needs editing.",
 )
@@ -236,11 +241,18 @@ def generated_corpus() -> set[str]:
 
 
 def main_blocks(sentence: str) -> bool:
-    return bool(baseline.unsupported_claims(sentence))
+    """Main's judge, fed the renderings the hooks build (normalization included)."""
+    try:
+        spaced, joined = state_guard.renderings(sentence)
+    except state_guard.UndecidableError:
+        return True
+    return bool(
+        baseline.unsupported_claims(spaced) or baseline.unsupported_claims(joined)
+    )
 
 
 def head_blocks(sentence: str) -> bool:
-    return bool(state_guard.unsupported_claims(sentence))
+    return bool(state_guard.judged_claims(sentence))
 
 
 def test_only_intended_simple_sentences_gain_exemptions() -> None:
@@ -376,7 +388,11 @@ REVIEWED = (Path(__file__).parent / "state_guard_must_block.txt").read_text(
 
 
 @pytest.mark.parametrize(
-    "sentence", [line.replace("\\n", "\n") for line in REVIEWED.splitlines()]
+    "sentence",
+    [
+        line.replace("\\n", "\n").replace("\\u200b", "\u200b")
+        for line in REVIEWED.splitlines()
+    ],
 )
 def test_reviewed_bypass_sentences_block_on_main_and_head(sentence: str) -> None:
     assert main_blocks(sentence)
@@ -444,7 +460,10 @@ def test_text_beside_a_lead_in_still_blocks(sentence: str) -> None:
 
 def test_one_excused_claim_does_not_excuse_a_second() -> None:
     sentence = 'The word "merged". The fix is deployed.'
-    assert state_guard.unsupported_claims(sentence) == ["The fix is deployed."]
+    assert state_guard.unsupported_claims(sentence) == [
+        'The word "merged".',
+        "The fix is deployed.",
+    ]
     both = 'The word "merged" and the fix is deployed.'
     assert state_guard.unsupported_claims(both) == [both]
 
@@ -519,7 +538,54 @@ def test_a_bare_past_verb_after_a_pronoun_blocks_a_wait(pronoun: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "sentence", ["Wait until sit merged.", "Wait until the fix merged."]
+    "sentence",
+    [
+        "Wait until it has merged.",
+        "Wait until the fix has merged.",
+        "Wait until they have merged.",
+        "Wait until it has been merged.",
+        "Wait until they have been merged.",
+        "Wait until she is merged.",
+        "Wait until they are deployed.",
+    ],
 )
-def test_a_word_ending_in_a_pronoun_does_not_block_a_wait(sentence: str) -> None:
+def test_an_auxiliary_before_the_claim_word_makes_a_condition(sentence: str) -> None:
+    assert main_blocks(sentence)
     assert not head_blocks(sentence)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Wait until Bob merged.",
+        "Wait until the fix merged.",
+        "Wait until I had merged.",
+        "Wait until I've merged.",
+        "Wait until it was deployed.",
+        "Wait until it was merged.",
+        "Wait until a b c has merged.",
+        "Wait until has merged.",
+    ],
+)
+def test_any_other_form_after_wait_until_blocks(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert head_blocks(sentence)
+
+
+@pytest.mark.parametrize("pause", [". ", "\n", ".\n", "! ", " ... ", "?\n\n"])
+@pytest.mark.parametrize(
+    "exempt_sentence", ['The word "merged"', "Wait until it is merged"]
+)
+def test_text_after_an_exempt_sentence_makes_it_a_claim_again(
+    exempt_sentence: str, pause: str
+) -> None:
+    assert head_blocks(f"{exempt_sentence}{pause}Next.")
+    assert not head_blocks(f"{exempt_sentence}{pause}")
+    assert not head_blocks(f"{exempt_sentence}{pause}  .  \n")
+
+
+def test_an_exempt_sentence_before_a_clean_sentence_blocks_alone() -> None:
+    assert state_guard.unsupported_claims('The word "merged". Fine.') == [
+        'The word "merged".'
+    ]
+    assert state_guard.unsupported_claims('Fine. The word "merged".') == []

@@ -33,10 +33,11 @@ PR or issue number, a log path, inline code, "output" or "read-back", or
 attribution ("says", "said", "reports"). A claim marked "unverified", or "not
 done", also passes.
 
-Three narrow lead-ins excuse the claim word right after them: "Wait until" and
-up to three words, "it will be" (or "this", "that", "the <noun>"), and "the
-word", "the term", "the verb" or "look at" before a quoted word. Anything else
-in the sentence still counts, and a claim that follows other text still blocks.
+Two narrow lead-ins excuse the claim word right after them: "Wait until
+<subject> is|are|has|have", and "the word", "the term", "the verb" or "look at"
+before a quoted word. Anything else in the sentence still counts, and a claim
+that follows other text still blocks. Text after an exempt sentence makes it a
+claim again.
 
 A command is a `git commit` only when one of its simple commands is one. The
 scan drops heredoc bodies and splits shell commands outside quotes. It also
@@ -145,6 +146,11 @@ MAX_LISTED = 3
 # to exempt that match. A rule covers only a claim word that sits right after a
 # fixed lead-in, so it can't excuse a claim elsewhere in the sentence.
 WAIT_LEAD = re.compile(r"\s*wait until(?: [\w'\u2019-]+){1,3} ", re.IGNORECASE)
+# A bare claim word is a condition only after "has" or "have" and a subject.
+WAIT_BARE = re.compile(
+    r"\s*wait until(?: [\w'\u2019-]+){1,2} (?:has|have) ", re.IGNORECASE
+)
+WAIT_AUX = re.compile(r"(?:is|are|has been|have been)\s", re.IGNORECASE)
 WORD_LEAD = re.compile(
     r"\s*(?:the (?:word|term|verb)|look at) [\"\u201c]", re.IGNORECASE
 )
@@ -152,24 +158,24 @@ CLOSING_QUOTES = ('"', "\u201d")
 # A rule never excuses a claim that a qualifier ties to the present: "already",
 # "now" and the like say the state holds, so the sentence reports it.
 PRESENT = re.compile(r"\b(?:now|already|yet|still|currently|just)\b", re.IGNORECASE)
-# "Wait until I merged." says what a person did, so a bare past verb after one
-# of these words is a report.
-SUBJECT = re.compile(r".*\b(?:i|we|you|he|she|they|it)\s*", re.IGNORECASE | re.DOTALL)
+TEXT = re.compile(r"\w")
 CLAUSE_END = re.compile(r"[\s\"\u201d'.!?,;:)]*")
 MENTION_END = re.compile(r"\s*(?:now\s*)?[.!?]*\s*", re.IGNORECASE)
 
 
 def awaited(chunk: str, match: re.Match[str]) -> bool:
-    """MATCH ends the condition in "Wait until ..." and asserts nothing.
+    """MATCH ends "Wait until <subject> is|are|has|have <claim word>".
 
-    The condition's words before MATCH carry no qualifier, and nothing follows
-    MATCH, so MATCH can't be an adjective on a noun the sentence goes on to use.
+    Any other form blocks, such as "Wait until Bob merged": a bare past verb
+    reports what someone did. The condition's words carry no qualifier, and
+    nothing follows MATCH, so MATCH can't be an adjective on a noun the
+    sentence goes on to use.
     """
     before = chunk[: match.start()]
+    lead = WAIT_LEAD if WAIT_AUX.match(match.group()) else WAIT_BARE
     return bool(
-        WAIT_LEAD.fullmatch(before)
+        lead.fullmatch(before)
         and not PRESENT.search(before + match.group())
-        and not (match.group().isalpha() and SUBJECT.fullmatch(before))
         and CLAUSE_END.fullmatch(chunk[match.end() :])
     )
 
@@ -199,12 +205,19 @@ def exempt(chunk: str, match: re.Match[str]) -> bool:
 
 
 def unsupported_claims(text: str) -> list[str]:
-    """The sentences or lines of TEXT with a status claim and no evidence."""
+    """The sentences or lines of TEXT with a status claim and no evidence.
+
+    An exemption applies only to the last sentence that has words, so text that
+    follows an exempt sentence can't ride on it: that sentence is judged as main
+    does.
+    """
+    chunks = SENTENCE_END.split(text)
+    last = max((i for i, chunk in enumerate(chunks) if TEXT.search(chunk)), default=-1)
     return [
         chunk.strip()[:MAX_QUOTED]
-        for chunk in SENTENCE_END.split(text)
+        for i, chunk in enumerate(chunks)
         if not EVIDENCE.search(chunk)
-        and any(not exempt(chunk, match) for match in CLAIM.finditer(chunk))
+        and any(not (i >= last and exempt(chunk, m)) for m in CLAIM.finditer(chunk))
     ]
 
 
