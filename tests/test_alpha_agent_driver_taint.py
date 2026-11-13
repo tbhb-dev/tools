@@ -186,6 +186,8 @@ def test_host_marker_read_error_refuses_review(
         *(["--ref", "a" * 40] if profile == "review" else []),
     ) == (65 if profile == "review" else 0)
     assert len(remote.records("ssh")) == (1 if profile == "review" else 5)
+    # The unreadable marker counts as a real one: the host is recorded tainted.
+    assert taint_store.load("example-linux").status == "tainted"
     output = capsys.readouterr()
     if profile == "review":
         assert output.err == (
@@ -194,6 +196,37 @@ def test_host_marker_read_error_refuses_review(
         )
     else:
         assert "untrusted-host" in output.out
+
+
+@pytest.mark.parametrize("profile", ["review", "build"])
+def test_failed_marker_transport_is_not_a_taint(
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    profile: str,
+) -> None:
+    assert clear() == 0
+
+    def fail(*_args: object, **_kwargs: object) -> str:
+        message = "ssh failed"
+        raise driver.transport.TransportError(message)
+
+    monkeypatch.setattr(driver.transport, "shell", fail)
+    assert (
+        launch(
+            remote,
+            "--profile",
+            profile,
+            *(["--ref", "a" * 40] if profile == "review" else []),
+        )
+        == 66
+    )
+    assert capsys.readouterr().err == (
+        "cannot read marker (transport): example-linux not reachable over ssh\n"
+    )
+    loaded = taint_store.load("example-linux")
+    assert loaded.status == "clean"
+    assert loaded.taint is None
 
 
 def test_marker_read_is_bounded(remote: Remote) -> None:

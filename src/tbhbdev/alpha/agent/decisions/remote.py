@@ -121,11 +121,13 @@ def installed(host: Host) -> str:
 
 def host_marker(account: str) -> str:
     """Read bounded evidence of host taint, never a remote clearance."""
+    # A marker that exists but can't be read prints a sentinel and exits 0, so
+    # it counts as a real marker. A nonzero exit then means the ssh call failed.
     read = (
-        'open my $f, "<", $ARGV[0] or do { '
-        'exit 0 if $!{ENOENT}; die "host marker read failed"; }; '
-        'defined(read($f, my $b, 65536)) or die "host marker read failed"; '
-        'print $b; close($f) or die "host marker read failed";'
+        'sub bad { print "unreadable\\n"; exit 0 } '
+        'open my $f, "<", $ARGV[0] or do { exit 0 if $!{ENOENT}; bad(); }; '
+        "defined(read($f, my $b, 65536)) or bad(); "
+        "print $b; close($f) or bad();"
     )
     marker = PurePosixPath("/var", "tmp", "tbhbdev-agent-taint", f"{account}.jsonl")
     return PREFIX + "perl -e " + shlex.quote(read) + " " + shlex.quote(str(marker))

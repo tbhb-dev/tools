@@ -137,7 +137,9 @@ def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
                 timeout=deadline - time.monotonic(),
             )
         except transport.TransportError:
-            state = taint.State(run.host.name, "tainted")
+            decision = taint.unreadable_marker(run.host.name)
+            print(decision.message, file=sys.stderr)
+            return decision.status
         else:
             if marker:
                 record = taint.Taint(

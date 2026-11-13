@@ -115,6 +115,11 @@ def check_launch(profile: Profile, *, tainted: State) -> Launch:
     return Launch(label="untrusted-host" if tainted.tainted else None)
 
 
+def unreadable_marker(host: str) -> Launch:
+    """The ssh call that reads the host marker failed: neither clean nor tainted."""
+    return Launch(66, f"cannot read marker (transport): {host} not reachable over ssh")
+
+
 def request_flag(tainted: State) -> bool:
     """Value of the run-host request field `tainted_host`."""
     return tainted.tainted

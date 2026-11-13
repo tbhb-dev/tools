@@ -2,9 +2,11 @@
 description: Agent isolation constraints, coordination, and cleanup.
 generated:
   - role: generated
-    harness: codex
-    model: openai:gpt-6
-    at: "2026-11-12T03:35:46Z"
+    harness: claude-code
+    model: anthropic:claude-sonnet-5-5
+    effort: medium
+    surface: cli
+    at: "2026-11-13T21:52:00Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -49,7 +51,7 @@ Each coordinator writes a per-host taint record to `$XDG_STATE_HOME/tbhbdev/agen
 
 Before a `--unsandboxed` launch, the coordinator appends a durable record using local run and authorization values. Failure to append refuses the launch. The last appended record decides trust, regardless of its timestamp. Only `clear-taint HOST --reason TEXT` clears local taint and prints the new state. A host needs an initial clearance before its first review. If the last line is incomplete, clearance moves the incomplete file aside in the same directory and starts a new file.
 
-Run-host appends `--unsandboxed` marks to `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` on the run host. A coordinator whose local record is clean reads at most 64 KiB of that marker before preflight. Any line records local taint and refuses review. A missing marker supplies no evidence of cleanliness. Read errors also refuse review. Clearance changes only this coordinator's record. An existing host marker marks it again. Operators must rebuild or check the host and address its marker before clearing the local record.
+Run-host appends `--unsandboxed` marks to `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` on the run host. A coordinator whose local record is clean reads at most 64 KiB of that marker before preflight. Any line records local taint and refuses review. A missing marker supplies no evidence of cleanliness, and a marker that exists but can't be read counts as a marker. If the ssh call that reads it fails, the launch stops with exit 66 and the message `cannot read marker (transport)`. The local record is unchanged. Clearance changes only this coordinator's record. An existing host marker marks it again. Operators must rebuild or check the host and address its marker before clearing the local record.
 
 The coordinator stores metadata under `$XDG_STATE_HOME/tbhbdev/agent-runs/` on the coordinator. The remote directory uses the same location under the run account, with `.local/state` under home as the default state directory. The transfer claims `<name>.owner` with `set -C` before extracting inputs. It refuses an existing session or any `<name>.*` file with exit status 73. A collision never kills the existing session.
 
