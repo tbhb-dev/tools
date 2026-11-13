@@ -152,23 +152,51 @@ WORD_LEAD = re.compile(
     r"\s*(?:the (?:word|term|verb)|look at) [\"\u201c]", re.IGNORECASE
 )
 CLOSING_QUOTES = ('"', "\u201d")
+# A rule never excuses a claim that a qualifier ties to the present: "already",
+# "now" and the like say the state holds, so the sentence reports it.
+PRESENT = re.compile(r"\b(?:now|already|yet|still|currently|just)\b", re.IGNORECASE)
+LATER_QUALIFIER = re.compile(
+    r"\b(?:now|already|yet|currently|current|as of|by|at this point|today|"
+    r"yesterday|just)\b",
+    re.IGNORECASE,
+)
+CLAUSE_END = re.compile(r"[\s\"\u201d'.!?,;:)]*")
+MENTION_END = re.compile(r"\s*(?:now\s*)?[.!?]*\s*", re.IGNORECASE)
 
 
 def awaited(chunk: str, match: re.Match[str]) -> bool:
-    """MATCH is the condition in "Wait until ..." and asserts nothing."""
-    return bool(WAIT_LEAD.fullmatch(chunk[: match.start()]))
+    """MATCH ends the condition in "Wait until ..." and asserts nothing.
+
+    The condition's words before MATCH carry no qualifier, and nothing follows
+    MATCH, so MATCH can't be an adjective on a noun the sentence goes on to use.
+    """
+    before = chunk[: match.start()]
+    return bool(
+        WAIT_LEAD.fullmatch(before)
+        and not PRESENT.search(before + match.group())
+        and CLAUSE_END.fullmatch(chunk[match.end() :])
+    )
 
 
 def forecast(chunk: str, match: re.Match[str]) -> bool:
-    """MATCH follows "it will be" and predicts instead of reporting."""
-    return bool(FORECAST_LEAD.fullmatch(chunk[: match.start()]))
+    """MATCH follows "it will be" and predicts, with no tie to the present."""
+    return bool(
+        FORECAST_LEAD.fullmatch(chunk[: match.start()])
+        and not PRESENT.search(match.group())
+        and not LATER_QUALIFIER.search(chunk[match.end() :])
+    )
 
 
 def mentioned(chunk: str, match: re.Match[str]) -> bool:
-    """MATCH is the whole quoted word after "the word" or "look at"."""
+    """MATCH is the whole quoted word after "the word" or "look at", and no more.
+
+    Only the closing quote and an optional "now" may follow, so the sentence
+    can't go on to assert what the word says about the present.
+    """
     return bool(
         WORD_LEAD.fullmatch(chunk[: match.start()])
         and chunk.startswith(CLOSING_QUOTES, match.end())
+        and MENTION_END.fullmatch(chunk[match.end() + 1 :])
     )
 
 

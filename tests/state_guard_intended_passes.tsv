@@ -1,29 +1,3 @@
-Wait until the fix deployed/live.	a condition, not a report
-Wait until the fix is deployed (src/app.py unchanged).	a condition, not a report
-Wait until the fix is deployed - can you check?	a condition, not a report
-Wait until the fix is deployed although the build failed.	a condition, not a report
-Wait until the fix is deployed and the build failed.	a condition, not a report
-Wait until the fix is deployed but the build failed.	a condition, not a report
-Wait until the fix is deployed except the build failed.	a condition, not a report
-Wait until the fix is deployed however the build failed.	a condition, not a report
-Wait until the fix is deployed though the build failed.	a condition, not a report
-Wait until the fix is deployed whereas the build failed.	a condition, not a report
-Wait until the fix is deployed while the build failed.	a condition, not a report
-Wait until the fix is deployed yet the build failed.	a condition, not a report
-Wait until the fix is deployed – can you check?	a condition, not a report
-Wait until the fix is deployed — can you check?	a condition, not a report
-Wait until the fix is deployed, "please check later".	a condition, not a report
-Wait until the fix is deployed, 2 commands printed "please check later".	a condition, not a report
-Wait until the fix is deployed, can you check?	a condition, not a report
-Wait until the fix is deployed.	a condition, not a report
-Wait until the fix is deployed; Source: N/A.	a condition, not a report
-Wait until the fix is deployed; at 20 requests per review.	a condition, not a report
-Wait until the fix is deployed; build 12345 failed.	a condition, not a report
-Wait until the fix is deployed; can I read back the result?	a condition, not a report
-Wait until the fix is deployed; can you check?	a condition, not a report
-Wait until the fix is deployed; per N workers.	a condition, not a report
-Wait until the fix merged-into-main.	a condition, not a report
-Wait until the fix merged/verified.	a condition, not a report
 It will be deployed/live.	a forecast, not a report
 It will be merged (src/app.py unchanged).	a forecast, not a report
 It will be merged - can you check?	a forecast, not a report
@@ -35,7 +9,6 @@ It will be merged however the build failed.	a forecast, not a report
 It will be merged though the build failed.	a forecast, not a report
 It will be merged whereas the build failed.	a forecast, not a report
 It will be merged while the build failed.	a forecast, not a report
-It will be merged yet the build failed.	a forecast, not a report
 It will be merged – can you check?	a forecast, not a report
 It will be merged — can you check?	a forecast, not a report
 It will be merged, "please check later".	a forecast, not a report
@@ -50,49 +23,6 @@ It will be merged; build 12345 failed.	a forecast, not a report
 It will be merged; can I read back the result?	a forecast, not a report
 It will be merged; can you check?	a forecast, not a report
 It will be merged; per N workers.	a forecast, not a report
-The word "merged" (src/app.py unchanged).	a word mention
-The word "merged" - can you check?	a word mention
-The word "merged" although the build failed.	a word mention
-The word "merged" and the build failed.	a word mention
-The word "merged" but the build failed.	a word mention
-The word "merged" except the build failed.	a word mention
-The word "merged" however the build failed.	a word mention
-The word "merged" though the build failed.	a word mention
-The word "merged" whereas the build failed.	a word mention
-The word "merged" while the build failed.	a word mention
-The word "merged" yet the build failed.	a word mention
-The word "merged" – can you check?	a word mention
-The word "merged" — can you check?	a word mention
-The word "merged", "please check later".	a word mention
-The word "merged", 2 commands printed "please check later".	a word mention
-The word "merged", can you check?	a word mention
-The word "merged".	a word mention
-The word "merged"; Source: N/A.	a word mention
-The word "merged"; at 20 requests per review.	a word mention
-The word "merged"; build 12345 failed.	a word mention
-The word "merged"; can I read back the result?	a word mention
-The word "merged"; can you check?	a word mention
-The word "merged"; per N workers.	a word mention
-Look at "merged" now (src/app.py unchanged).	a word mention
-Look at "merged" now - can you check?	a word mention
-Look at "merged" now although the build failed.	a word mention
-Look at "merged" now and the build failed.	a word mention
-Look at "merged" now but the build failed.	a word mention
-Look at "merged" now except the build failed.	a word mention
-Look at "merged" now however the build failed.	a word mention
-Look at "merged" now though the build failed.	a word mention
-Look at "merged" now whereas the build failed.	a word mention
-Look at "merged" now while the build failed.	a word mention
-Look at "merged" now yet the build failed.	a word mention
-Look at "merged" now – can you check?	a word mention
-Look at "merged" now — can you check?	a word mention
-Look at "merged" now, "please check later".	a word mention
-Look at "merged" now, 2 commands printed "please check later".	a word mention
-Look at "merged" now, can you check?	a word mention
 Look at "merged" now.	a word mention
-Look at "merged" now; Source: N/A.	a word mention
-Look at "merged" now; at 20 requests per review.	a word mention
-Look at "merged" now; build 12345 failed.	a word mention
-Look at "merged" now; can I read back the result?	a word mention
-Look at "merged" now; can you check?	a word mention
-Look at "merged" now; per N workers.	a word mention
+The word "merged".	a word mention
+Wait until the fix is deployed.	a condition, not a report

@@ -78,3 +78,31 @@ I found the fix to be deployed.
 The fix is "merged".
 Fix A merged. Fix B merged. Fix C merged, sha abc1234.
 The fix merged. A different fix is tracked in #12.
+The word "merged" is accurate.
+Wait until the already merged fix reaches production.
+Wait until the already deployed service responds.
+Wait until the merged fix reaches production.
+Wait until the deployed service responds.
+Wait until the applied patch finishes booting.
+Wait until the shipped release reaches customers.
+Wait until the rolled out version restarts.
+Wait until the now live service responds.
+Wait until the already fixed service responds.
+Wait until I merged it yesterday.
+The word "merged" accurately describes the PR's current status.
+The word "merged" is the PR's current status.
+Look at "merged" — that's the PR's current status.
+The term "deployed" describes the fix's current state.
+The word "merged" applies to this PR right now.
+It will be merged by now.
+The fix will be merged by now.
+It will be deployed already.
+It will be merged as of yesterday.
+The fix merged not long ago.
+The fix merged no thanks to CI.
+The fix must have merged.
+The PR should now be merged.
+I "merged" the PR.
+The fix is already "merged".
+It isn't just merged.
+The fix is merged as of yesterday.

@@ -1,6 +1,9 @@
 """Compare exemptions against a frozen baseline on a synthetic sentence grid."""
 
+import ast
+import hashlib
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -300,8 +303,60 @@ def test_the_exemption_set_is_exactly_the_three_rules() -> None:
     ) == state_guard.EXEMPTIONS
 
 
-def test_the_baseline_is_main_s_judge() -> None:
-    for name in ("CLAIM", "EVIDENCE", "SENTENCE_END"):
+MAIN_SHA = "d604159f7fb7382426be353a940121051fd080d9"
+# Hash of the three judge patterns and their flags on main at MAIN_SHA.
+MAIN_PATTERNS_SHA256 = (
+    "60320053b52b13b07bba1181508c312df6bfe3ce19477e8f6f991c23f8f461fa"
+)
+JUDGE_PATTERNS = ("CLAIM", "EVIDENCE", "SENTENCE_END")
+
+
+def pattern_digest(patterns: dict[str, re.Pattern[str]]) -> str:
+    text = "\n".join(
+        f"{name}={patterns[name].pattern!r}|{patterns[name].flags}"
+        for name in JUDGE_PATTERNS
+    )
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def main_patterns() -> dict[str, re.Pattern[str]] | None:
+    """The judge patterns from main's file at MAIN_SHA, or None without that commit."""
+    path = "src/tbhbdev/alpha/state_guard.py"
+    root = Path(__file__).parent.parent
+    shown = subprocess.run(  # fixed argv, a pinned sha
+        ["git", "-C", str(root), "show", f"{MAIN_SHA}:{path}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if shown.returncode:
+        return None
+    found: dict[str, re.Pattern[str]] = {}
+    for node in ast.parse(shown.stdout).body:
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            if name in JUDGE_PATTERNS:
+                code = compile(ast.Expression(node.value), name, "eval")
+                found[name] = eval(code, {"re": re})  # noqa: S307  # re.compile call
+    return found
+
+
+def head_patterns() -> dict[str, re.Pattern[str]]:
+    return {name: getattr(state_guard, name) for name in JUDGE_PATTERNS}
+
+
+def test_the_head_judge_patterns_are_main_s_at_the_pinned_sha() -> None:
+    assert pattern_digest(head_patterns()) == MAIN_PATTERNS_SHA256
+
+
+def test_the_pinned_digest_is_main_s_when_the_commit_is_present() -> None:
+    patterns = main_patterns()
+    if patterns is not None:
+        assert pattern_digest(patterns) == MAIN_PATTERNS_SHA256
+
+
+def test_the_baseline_patterns_are_the_head_s() -> None:
+    for name in JUDGE_PATTERNS:
         assert getattr(baseline, name) == getattr(state_guard, name)
     assert baseline.MAX_QUOTED == state_guard.MAX_QUOTED
 
@@ -389,3 +444,53 @@ def test_one_excused_claim_does_not_excuse_a_second() -> None:
     assert state_guard.unsupported_claims(sentence) == ["The fix is deployed."]
     both = 'The word "merged" and the fix is deployed.'
     assert state_guard.unsupported_claims(both) == [both]
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Wait until the fix is deployed.",
+        "Wait until the fix is deployed!",
+        "Wait until the fix is deployed)",
+        "It will be merged when tests pass.",
+        "It will be merged after review.",
+        "It will be merged soon.",
+        'The word "merged"',
+        'The word "merged"!',
+        'The word "merged" now',
+        'The word "merged" NOW.',
+        'Look at "merged"   now  .',
+    ],
+)
+def test_each_tail_a_rule_allows_still_passes(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert not head_blocks(sentence)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Wait until the fix is deployed and verified.",
+        "Wait until the fix is deployed, please",
+        'Wait until the "fix is deployed".',
+        "Wait until the now deployed fix responds.",
+        "Wait until it is already deployed.",
+        "Wait until it is still deployed.",
+        "It will be already merged.",
+        "It will be merged now.",
+        "It will be merged yet.",
+        "It will be merged currently.",
+        "It will be merged, current state.",
+        "It will be merged today.",
+        "It will be merged by Friday.",
+        "It will be merged at this point.",
+        "It will be merged just now.",
+        'The word "merged" now applies.',
+        'The word "merged" is true.',
+        'The word "merged" is current.',
+        'The word "merged", now confirmed.',
+    ],
+)
+def test_a_qualifier_or_a_trailing_assertion_blocks(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert head_blocks(sentence)
