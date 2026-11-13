@@ -3143,7 +3143,7 @@ FACTS = host_tool.Facts(
     tailnet=host_tool.Tailnet(
         "example.ts.net",
         "Fake Tailnet (example)",
-        ("box", "fakehost-01", "fakehost-02", "lone-node"),
+        ("box", "fakehost-01", "fakehost-02", "lone-node", "fuzzCar", "fuzzBus"),
     ),
     words=frozenset({"box", "gadget", "host", "operator", "widget"}),
     operators=("fakeop", "operator"),
@@ -3158,8 +3158,9 @@ COUNTS = {
     "private-repo": (8, 5),
     "tailnet-suffix": (1, 0),
     "tailnet-name": (1, 0),
-    "tailnet-host": (3, 1),
-    "tailnet-stem": (1, 0),
+    "tailnet-host": (5, 1),
+    "tailnet-stem": (2, 0),
+    "tailnet-short": (2, 0),
     "tailnet-ipv4": (1, 0),
     "tailnet-ipv6": (1, 0),
     "home-path": (3, 0),
@@ -3375,6 +3376,7 @@ def test_the_rules_count_what_they_left_out() -> None:
         "private-repo",
         "tailnet-host",
         "tailnet-stem",
+        "tailnet-short",
         "account-name",
         "op-vault",
         "op-item",
@@ -3417,6 +3419,140 @@ def test_a_short_stem_gets_no_rule() -> None:
     net = host_tool.Tailnet("example.ts.net", "Fake", ("zz9-1", "zz9-2"))
     _, omitted = host_tool.gitleaks_rules(dataclasses.replace(FACTS, tailnet=net))
     assert omitted["tailnet-stem"] == 1
+
+
+@pytest.mark.usefixtures("configured")
+@pytest.mark.parametrize(
+    ("hosts", "wanted", "left"),
+    [
+        (
+            (
+                "fakeCar",
+                "fakeBus",
+                "nodeCar.example.test",
+                "nodeBus.example.test",
+                "solo.example.test",
+                "lone-node",
+            ),
+            {"Car", "Bus", "nodeCar", "nodeBus", "solo"},
+            0,
+        ),
+        (("fakeTo", "fakeBox", "fakeWidgets"), set(), 2),
+        (
+            ("fakeCar", "fakeBus", "moreCar", "moreBus", "makeCat", "makeDog"),
+            {"Car", "Bus", "Cat", "Dog"},
+            0,
+        ),
+        (("solo", "solo.example.test"), set(), 0),
+        (("fakeop.example.test",), set(), 0),
+        (("example.ts.net",), {"example"}, 0),
+        (("fakeNode", "fakePath", "Node1", "Node2"), {"Path"}, 0),
+        (("car1Bus", "car1Dog", "carSolo"), {"Bus", "Dog"}, 0),
+        (("abcd", "abcd1"), set(), 0),
+        ((), set(), 0),
+    ],
+)
+def test_short_forms_use_their_own_family_and_skip_covered_names(
+    hosts: tuple[str, ...], wanted: set[str], left: int
+) -> None:
+    net = dataclasses.replace(FACTS.tailnet, hosts=hosts)
+    rules, omitted = host_tool.gitleaks_rules(dataclasses.replace(FACTS, tailnet=net))
+    shorts = [r.regex for r in rules if r.category == "tailnet-short"]
+    assert len(shorts) == len(wanted)
+    assert {
+        value for value in wanted if any(re.fullmatch(r, value) for r in shorts)
+    } == wanted
+    assert omitted["tailnet-short"] == left
+    assert len({r.regex for r in rules}) == len(rules)
+
+
+@pytest.mark.usefixtures("configured")
+def test_a_dictionary_word_leaves_out_its_short_form() -> None:
+    net = dataclasses.replace(FACTS.tailnet, hosts=("fakeCar", "fakeBus"))
+    words = FACTS.words | {"bus", "car"}
+    facts = dataclasses.replace(FACTS, tailnet=net, words=words)
+    rules, omitted = host_tool.gitleaks_rules(facts)
+    assert [r for r in rules if r.category == "tailnet-short"] == []
+    assert omitted["tailnet-short"] == 2
+
+
+@pytest.mark.usefixtures("configured")
+def test_short_technical_words_narrow_only_short_forms() -> None:
+    hosts = ("urls01", "urls02", "fake-url", "fake-bus")
+    net = dataclasses.replace(FACTS.tailnet, hosts=hosts)
+    rules, _ = host_tool.gitleaks_rules(dataclasses.replace(FACTS, tailnet=net))
+    stems = [r.regex for r in rules if r.category == "tailnet-stem"]
+    shorts = [r.regex for r in rules if r.category == "tailnet-short"]
+    assert any(re.search(r, "urls") for r in stems)
+    assert all(not re.search(r, "url") for r in shorts)
+    assert any(re.search(r, "bus") for r in shorts)
+    assert "url" in host_tool.SHORT_TECH_WORDS
+    assert host_tool.SHORT_TECH_WORDS.isdisjoint(host_tool.TECH_WORDS)
+
+
+@pytest.mark.usefixtures("configured")
+def test_short_forms_match_words_and_run_names_with_real_gitleaks(
+    tmp_path: Path,
+) -> None:
+    net = dataclasses.replace(
+        FACTS.tailnet, hosts=("fakeCar", "fakeBus", "solo.example.test", "lone-node")
+    )
+    facts = dataclasses.replace(FACTS, tailnet=net)
+    caught = [
+        text
+        for short in ("car", "bus", "solo")
+        for text in (
+            short,
+            short.upper(),
+            f"lab-{short}",
+            f"run-{short}-2",
+            f"{short}.",
+            f"({short})",
+        )
+    ]
+    clean = [
+        text for short in ("car", "bus", "solo") for text in (f"{short}x", f"x{short}")
+    ]
+    found = scan(tmp_path, generated(facts), caught + clean)
+    assert found == {number: {"tailnet-short"} for number in range(1, len(caught) + 1)}
+
+
+@pytest.mark.parametrize(
+    ("text", "form"),
+    [
+        ("bus", "bus"),
+        ("-bus", "bus"),
+        ("._-09bus", "bus"),
+        ("ab", ""),
+        ("2026-01-13", ""),
+        ("-02", ""),
+        ("bus-02", ""),
+        ("bu5s", ""),
+        ("bus.x", ""),
+        ("", ""),
+    ],
+)
+def test_a_short_form_is_three_or_more_letters_after_leading_junk(
+    text: str, form: str
+) -> None:
+    assert host_tool._short_form(text) == form  # noqa: SLF001
+
+
+@pytest.mark.usefixtures("configured")
+def test_short_forms_ignore_dates_numbers_and_ordinary_prose(tmp_path: Path) -> None:
+    net = dataclasses.replace(FACTS.tailnet, hosts=("fake-01", "fake-02", "fake-bus"))
+    facts = dataclasses.replace(FACTS, tailnet=net)
+    assert host_tool._shorts(net.hosts) == {"bus"}  # noqa: SLF001
+    texts = [
+        "bus",
+        "2026-01-13",
+        "release-02",
+        "release 01 and 02",
+        "The team shipped the schedule in January.",
+        "Read the docs about api and cli usage.",
+        "Numbers 01 02 9 and separators - _ . stay clean.",
+    ]
+    assert scan(tmp_path, generated(facts), texts) == {1: {"tailnet-short"}}
 
 
 def test_a_config_that_fails_its_check_is_never_published(
@@ -3815,6 +3951,7 @@ def test_bootstrap_publishes_the_generated_config(
         "tailnet-name: 1 rule(s)",
         "tailnet-host: 2 rule(s)",
         "tailnet-stem: 0 rule(s), 1 too common or short to match alone",
+        "tailnet-short: 0 rule(s)",
         "tailnet-ipv4: 1 rule(s)",
         "tailnet-ipv6: 1 rule(s)",
         "home-path: 3 rule(s)",
