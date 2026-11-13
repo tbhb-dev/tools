@@ -96,6 +96,11 @@ def denied_paths(
 
     That's the Connect token store, the session socket directory and the
     config's `denied_home_paths`, each with its `/private` twin on macOS.
+
+    A path under another denied path is dropped, because the sandbox can't
+    mount a denied child under a denied parent. The test compares path strings,
+    not resolved targets, so a symlink inside a denied directory that points
+    elsewhere isn't denied by this function.
     """
     paths: list[str] = []
     if host.os is Os.LINUX:

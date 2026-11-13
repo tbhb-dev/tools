@@ -5,10 +5,8 @@ from __future__ import annotations
 import json
 import os
 import pwd
-import re
 import shlex
 import sys
-from itertools import accumulate
 from pathlib import Path
 
 from tbhbdev.alpha.agent import build_info, ownership, process_group, run_host, runfiles
@@ -20,20 +18,32 @@ LINUX_LAUNCH_KEY = Path("/etc/tbhbdev/agent-launch/id_ed25519")
 INPUT_LIMIT = 1024 * 1024
 COMMAND_WORDS = 2
 MAX_DEPTH = 32
-JSON_TOKEN = re.compile(rb'"(?:[^"\\]|\\.)*"|[\[\]{}]')
 
 
-def too_deep(raw: bytes) -> bool:
-    """Whether RAW nests arrays or objects past MAX_DEPTH, outside strings.
+def too_deep(text: str) -> bool:
+    """Whether TEXT nests arrays or objects past MAX_DEPTH, outside strings.
 
     The decoder's own recursion limit differs between platforms, so the bound
-    is checked here instead of relying on it.
+    is checked here in one linear pass instead of relying on it.
     """
-    steps = (
-        1 if token in {b"[", b"{"} else -1 if token in {b"]", b"}"} else 0
-        for token in JSON_TOKEN.findall(raw)
-    )
-    return max(accumulate(steps, initial=0)) > MAX_DEPTH
+    depth = 0
+    quoted = False  # pragma: no mutate -- None is as falsy as False here
+    escaped = False  # pragma: no mutate -- None is as falsy as False here
+    for char in text:
+        if escaped:
+            escaped = False  # pragma: no mutate -- None is as falsy as False
+        elif quoted:
+            escaped = char == "\\"
+            quoted = char != '"'
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_DEPTH:
+                return True
+        elif char in "]}":
+            depth -= 1
+    return False
 
 
 def command(arguments: list[str]) -> tuple[str, str]:
@@ -63,11 +73,14 @@ def envelope() -> tuple[dict[str, object], str | None]:
         message = "stdin exceeds 1 MiB"
         raise Invalid(message)
     message = "invalid envelope"
-    if too_deep(raw):
-        raise Invalid(message)
     try:
-        data: object = json.loads(raw)
-    except RecursionError:
+        # Strict UTF-8 only: the decoder would also accept UTF-16 or UTF-32,
+        # which hides brackets from a scan of the text.
+        text = raw.decode("utf-8")  # pragma: no mutate -- same codec, other spelling
+        if too_deep(text):
+            raise Invalid(message)
+        data: object = json.loads(text)
+    except UnicodeDecodeError, RecursionError:
         raise Invalid(message) from None
     if not isinstance(data, dict) or data.keys() != {"v", "request", "push_token"}:
         message = "expected v, request and push_token"
@@ -92,6 +105,7 @@ def envelope() -> tuple[dict[str, object], str | None]:
 
 def start(files: runfiles.RunFiles, prog: str) -> int:
     request, token = envelope()
+    body = json.dumps(request) + "\n"
     run_host.refuse_started(files)
     ownership.claim(files)
     # Exclusive creation preserves the request of an existing run.
@@ -99,7 +113,7 @@ def start(files: runfiles.RunFiles, prog: str) -> int:
         files.path("request.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
     )
     with os.fdopen(fd, "w") as stream:
-        stream.write(json.dumps(request) + "\n")
+        stream.write(body)
         stream.flush()
         os.fsync(stream.fileno())
     return run_host.main(
@@ -165,7 +179,7 @@ def main(arguments: list[str], prog: str) -> int:
     except Invalid as exc:
         print(f"ssh-serve: refused: {exc}", file=sys.stderr)
         return 2
-    except OSError, ValueError, TypeError, KeyError:
+    except OSError, ValueError, TypeError, KeyError, RecursionError:
         # Never echo untrusted JSON or an exception that might contain its token.
         print("ssh-serve: refused: invalid command or run data", file=sys.stderr)
         return 2
