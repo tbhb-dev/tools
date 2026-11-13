@@ -2,17 +2,21 @@
 # Copyright Tony Burns
 """Tests for tbhbdev alpha state-guard, against a config in a temporary XDG dir."""
 
+import contextlib
 import io
 import json
 import os
 import runpy
 import signal
+import stat
 import subprocess
 import sys
+import threading
+import time
 import unicodedata
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
-from typing import override
+from datetime import UTC, datetime, timedelta
+from typing import BinaryIO, override
 lazy from pathlib import Path
 
 import pytest
@@ -76,6 +80,13 @@ def _bounded_hook() -> Iterator[None]:
     finally:
         signal.alarm(0)
         signal.signal(signal.Signals(14), previous)
+
+
+@pytest.fixture(autouse=True)
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep the block log out of the real home directory."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    return tmp_path / "home"
 
 
 @pytest.fixture
@@ -1677,7 +1688,7 @@ def test_log_is_private_at_creation(
         assert_tagged(run(send("It was done.")), f"{TAG} It was done.")
     finally:
         os.umask(previous)
-    assert modes == [0o600]
+    assert modes == [0o600, 0o600]
 
 
 def test_log_failures_write_nothing_to_stderr(
@@ -1734,3 +1745,511 @@ def test_a_message_of_exactly_the_judging_limit_is_still_judged() -> None:
     tagged, sentences = state_guard.tag_sentences(text + "x")
     assert tagged == f"{TAG} {text}x"
     assert sentences
+
+
+def block_lines(home: Path) -> list[dict[str, object]]:
+    files = sorted((home / ".local/state/tbhb/state-guard").glob("blocks-*.jsonl"))
+    assert len(files) == 1
+    return [json.loads(line) for line in files[0].read_text().splitlines()]
+
+
+def test_a_blocked_message_is_logged_without_its_text(run: Runner, home: Path) -> None:
+    sentence = 'The team wrote "x" and nobody knows the fix merged.'
+    run(send(f"It was applied.\n{sentence}\nSee #12."))
+    records = block_lines(home)
+    assert [r["event"] for r in records] == ["PreToolUse:SendMessage"] * 2
+    assert records[0]["rule"] == "was applied"
+    assert records[0]["near_rules"] == []
+    assert records[1]["near_rules"] == ["negation", "quotation"]
+    assert sorted(records[0]) == ["event", "length", "near_rules", "rule", "time"]
+    assert records[0]["length"] == len("It was applied.")
+    assert str(records[0]["time"]).endswith("+00:00")
+    (log,) = (home / ".local/state/tbhb/state-guard").glob("blocks-*.jsonl")
+    assert "wrote" not in log.read_text()
+    assert "It was" not in log.read_text()
+
+
+@pytest.mark.parametrize(
+    ("sentence", "near"),
+    [
+        ("It merged after review.", ["time-or-condition"]),
+        ("It should be merged.", ["modal"]),
+        ("Nothing else, but it merged.", ["negation"]),
+        ("It merged \u201cx\u201d.", ["quotation"]),
+    ],
+)
+def test_near_rules_name_the_wording_a_block_held(
+    run: Runner, home: Path, sentence: str, near: list[str]
+) -> None:
+    run(send(sentence))
+    (record,) = block_lines(home)
+    assert record["near_rules"] == near
+
+
+def test_a_block_that_only_the_rendering_finds_is_logged(
+    run: Runner, home: Path
+) -> None:
+    run(send("It was do[state-guard: unverified]ne."))
+    (record,) = block_lines(home)
+    assert record["rule"] == "was done"
+
+
+def test_the_block_log_is_private_and_refuses_links(
+    run: Runner, home: Path, tmp_path: Path, config_file: Path
+) -> None:
+    config_file.write_text("")
+    previous = os.umask(0)
+    try:
+        run(send("It was applied."))
+    finally:
+        os.umask(previous)
+    directory = home / ".local/state/tbhb/state-guard"
+    (log,) = directory.glob("blocks-*.jsonl")
+    assert log.stat().st_mode & 0o777 == 0o600
+    assert directory.stat().st_mode & 0o777 == 0o700
+    target = tmp_path / "elsewhere"
+    target.write_text("keep")
+    log.unlink()
+    log.symlink_to(target)
+    assert run(send("It was applied."))[0] == 2
+    assert target.read_text() == "keep"
+
+
+def test_the_block_log_never_blocks_on_a_fifo(
+    run: Runner, home: Path, config_file: Path
+) -> None:
+    config_file.write_text("")
+    directory = home / ".local/state/tbhb/state-guard"
+    directory.mkdir(parents=True)
+    today = datetime.now(UTC)
+    os.mkfifo(directory / f"blocks-{today:%Y-%m-%d}.jsonl")
+    assert run(send("It was applied."))[0] == 2
+
+
+def test_the_block_log_stops_at_its_size_cap(
+    run: Runner, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run(send("It was applied."))
+    monkeypatch.setattr(state_guard, "MAX_LOG_BYTES", 1)
+    run(send("It was applied."))
+    assert len(block_lines(home)) == 1
+
+
+def test_the_block_log_prunes_old_days(run: Runner, home: Path) -> None:
+    directory = home / ".local/state/tbhb/state-guard"
+    directory.mkdir(parents=True)
+    now = datetime.now(UTC)
+    old = directory / f"blocks-{now - timedelta(days=31):%Y-%m-%d}.jsonl"
+    recent = directory / f"blocks-{now - timedelta(days=30):%Y-%m-%d}.jsonl"
+    other = directory / "notes.txt"
+    for path in (old, recent, other):
+        path.write_text("x")
+    run(send("It was applied."))
+    assert not old.exists()
+    assert recent.exists()
+    assert other.exists()
+
+
+def test_a_blocked_reply_is_logged_with_the_stop_event(run: Runner, home: Path) -> None:
+    status, out, _ = run(stop(last_assistant_message="Nobody knows, and it is done."))
+    assert status == 0
+    assert json.loads(out)["decision"] == "block"
+    (record,) = block_lines(home)
+    assert record["event"] == "Stop"
+    assert record["near_rules"] == ["negation"]
+
+
+def test_a_message_that_passes_writes_no_log(run: Runner, home: Path) -> None:
+    assert run(send("The fix is in #12."))[0] == 0
+    assert not home.exists()
+
+
+def test_the_log_appends_one_line_per_block(run: Runner, home: Path) -> None:
+    run(send("It was applied."))
+    run(send("It was applied."))
+    assert len(block_lines(home)) == 2
+
+
+def test_an_unwritable_log_never_changes_the_verdict(
+    run: Runner, home: Path, config_file: Path
+) -> None:
+    config_file.write_text("")
+    home.parent.mkdir(parents=True, exist_ok=True)
+    home.write_text("a file where the directory should go")
+    status, _, err = run(send("It was applied."))
+    assert status == 2
+    assert "Offending: It was applied." in err
+
+
+def test_a_log_that_raises_never_changes_the_verdict(
+    run: Runner, monkeypatch: pytest.MonkeyPatch, config_file: Path
+) -> None:
+    config_file.write_text("")
+
+    def fail() -> Path:
+        message = "no home"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(Path, "home", fail)
+    assert run(send("It was applied."))[0] == 2
+
+
+def test_open_log_defaults_to_the_tagged_log_and_refuses_a_shared_file(
+    tmp_path: Path,
+) -> None:
+    os.close(state_guard.open_log(tmp_path / "d"))
+    assert [path.name for path in (tmp_path / "d").iterdir()] == ["tagged.jsonl"]
+    os.link(tmp_path / "d" / "tagged.jsonl", tmp_path / "d" / "twin")
+    with pytest.raises(
+        OSError,
+        match=r"^the audit log is not a single-link regular file owned by this user$",
+    ):
+        state_guard.open_log(tmp_path / "d")
+
+
+def day_log(home: Path) -> Path:
+    (log,) = (
+        path
+        for path in home.joinpath(*state_guard.LOG_DIRECTORY).glob("blocks-*.jsonl")
+        if path.is_file()
+    )
+    return log
+
+
+def test_a_log_at_exactly_the_size_cap_gets_no_record(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_guard.log_blocks("Stop", ["Merged."])
+    log = day_log(home)
+    monkeypatch.setattr(state_guard, "MAX_LOG_BYTES", log.stat().st_size)
+    state_guard.log_blocks("Stop", ["Merged."])
+    assert len(log.read_text().splitlines()) == 1
+
+
+def test_one_message_can_not_push_a_log_past_the_cap(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_guard.log_blocks("Stop", ["Merged."])
+    record = day_log(home).stat().st_size
+    monkeypatch.setattr(state_guard, "MAX_LOG_BYTES", record * 3)
+    state_guard.log_blocks("Stop", ["Merged."] * 50)
+    assert day_log(home).stat().st_size == record * 3
+
+
+def test_concurrent_writers_share_one_cap(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_guard.log_blocks("Stop", ["Merged."])
+    record = day_log(home).stat().st_size
+    monkeypatch.setattr(state_guard, "MAX_LOG_BYTES", record * 6)
+    writers = [
+        threading.Thread(target=state_guard.log_blocks, args=("Stop", ["Merged."] * 20))
+        for _ in range(4)
+    ]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join()
+    assert day_log(home).stat().st_size == record * 6
+
+
+def hold_lock(log: Path) -> BinaryIO:
+    held = log.open("ab")
+    state_guard.fcntl.flock(held.fileno(), state_guard.fcntl.LOCK_EX)
+    return held
+
+
+def test_a_writer_waits_for_a_lock_released_in_time(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_guard.log_blocks("Stop", ["Merged."])
+    log = day_log(home)
+    before = log.stat().st_size
+    monkeypatch.setattr(state_guard, "LOCK_WAIT", 5)
+    with hold_lock(log):
+        writer = threading.Thread(
+            target=state_guard.log_blocks, args=("Stop", ["Merged."])
+        )
+        writer.start()
+        writer.join(0.2)
+        assert writer.is_alive()
+        assert log.stat().st_size == before
+    writer.join()
+    assert log.stat().st_size > before
+
+
+def test_a_writer_gives_up_on_a_lock_held_too_long(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_guard.log_blocks("Stop", ["Merged."])
+    log = day_log(home)
+    before = log.stat().st_size
+    monkeypatch.setattr(state_guard, "LOCK_WAIT", 0.05)
+    with hold_lock(log):
+        started = time.monotonic()
+        state_guard.log_blocks("Stop", ["Merged."])
+        assert time.monotonic() - started < 2
+    assert log.stat().st_size == before
+
+
+def test_a_held_lock_never_changes_the_hook_verdict(
+    run: Runner, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    free = run(send("It was applied."))
+    monkeypatch.setattr(state_guard, "LOCK_WAIT", 0.05)
+    with hold_lock(day_log(home)):
+        assert run(send("It was applied.")) == free
+
+
+@pytest.mark.parametrize("umask", [0o000, 0o022])
+def test_an_existing_log_gets_mode_0600_on_every_open(home: Path, umask: int) -> None:
+    state_guard.log_blocks("Stop", ["Merged."])
+    log = day_log(home)
+    log.chmod(0o666)
+    old = os.umask(umask)
+    try:
+        state_guard.log_blocks("Stop", ["Merged."])
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+
+
+def prune(directory: Path, today: datetime) -> None:
+    dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        state_guard.prune_blocks(dir_fd, today)
+    finally:
+        os.close(dir_fd)
+
+
+def test_pruning_only_touches_exactly_dated_block_logs(tmp_path: Path) -> None:
+    names = [
+        "blocks-2020-01-01.jsonl",
+        "blocks-0000-important.jsonl",
+        "blocks-2020-01-01.jsonl.keep",
+        "blocks-x2020-01-01.jsonl",
+    ]
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    for name in names:
+        (logs / name).write_text("x")
+    prune(logs, datetime(2024, 1, 1, tzinfo=UTC))
+    assert sorted(path.name for path in logs.iterdir()) == sorted(names[1:])
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "blocks-0000-00-00.jsonl",
+        "blocks-2026-13-45.jsonl",
+        "blocks-2020-02-30.jsonl",
+        "blocks-2020-00-10.jsonl",
+        "blocks-2020-01-32.jsonl",
+    ],
+)
+def test_pruning_keeps_a_name_that_is_not_a_calendar_date(
+    tmp_path: Path, name: str
+) -> None:
+    (tmp_path / name).write_text("x")
+    prune(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    assert (tmp_path / name).exists()
+
+
+def test_pruning_keeps_a_log_on_the_cutoff_day_and_drops_the_day_before(
+    tmp_path: Path,
+) -> None:
+    keep = tmp_path / "blocks-2026-12-02.jsonl"
+    drop = tmp_path / "blocks-2026-12-01.jsonl"
+    for path in (keep, drop):
+        path.write_text("x")
+    prune(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    assert keep.exists()
+    assert not drop.exists()
+
+
+def test_an_old_dated_directory_does_not_stop_the_prune(tmp_path: Path) -> None:
+    (tmp_path / "blocks-2020-01-01.jsonl").mkdir()
+    (tmp_path / "blocks-2020-01-01.jsonl" / "child").write_text("x")
+    (tmp_path / "blocks-2020-01-02.jsonl").write_text("x")
+    prune(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    assert (tmp_path / "blocks-2020-01-01.jsonl" / "child").exists()
+    assert not (tmp_path / "blocks-2020-01-02.jsonl").exists()
+
+
+def test_a_block_is_logged_next_to_an_old_dated_directory(
+    run: Runner, home: Path
+) -> None:
+    directory = home.joinpath(*state_guard.LOG_DIRECTORY)
+    (directory / "blocks-2020-01-01.jsonl").mkdir(parents=True)
+    run(send("It was applied."))
+    assert logged_rules(home) == ["was applied"]
+
+
+def logged_rules(home: Path) -> list[str]:
+    return [json.loads(line)["rule"] for line in day_log(home).read_text().splitlines()]
+
+
+def test_a_cut_excerpt_that_hides_its_match_logs_its_own_rule(home: Path) -> None:
+    state_guard.log_blocks("Stop", ["x" * state_guard.MAX_QUOTED])
+    state_guard.log_blocks("Stop", ["x" * (state_guard.MAX_QUOTED - 1)])
+    state_guard.log_blocks("Stop", ["It was merged."])
+    assert logged_rules(home) == ["beyond-excerpt", "undecidable", "was merged"]
+
+
+def test_open_log_opens_the_state_directory_as_a_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flags: list[int] = []
+    real = os.open
+
+    def spy(path: object, flag: int, *args: object, **kwargs: object) -> int:
+        flags.append(flag)
+        return real(path, flag, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "open", spy)
+    os.close(state_guard.open_log(tmp_path / "d"))
+    assert flags[0] & os.O_DIRECTORY
+    assert flags[0] & os.O_NOFOLLOW
+
+
+def test_an_invalid_name_does_not_stop_the_prune_of_later_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invalid = tmp_path / "blocks-0000-00-00.jsonl"
+    old = tmp_path / "blocks-2020-01-01.jsonl"
+    for path in (invalid, old):
+        path.write_text("x")
+
+    real = os.scandir
+
+    def ordered_scandir(
+        fd: int,
+    ) -> contextlib.AbstractContextManager[list[os.DirEntry[str]]]:
+        with real(fd) as entries:
+            return contextlib.nullcontext(sorted(entries, key=lambda e: e.name))
+
+    monkeypatch.setattr(os, "scandir", ordered_scandir)
+    prune(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    assert invalid.exists()
+    assert not old.exists()
+
+
+def open_descriptors() -> int:
+    return len(os.listdir("/dev/fd"))  # noqa: PTH208  # counts this process's fds
+
+
+def test_a_failed_prune_still_writes_todays_record(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(_directory: Path, _today: datetime) -> None:
+        message = "prune broke"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(state_guard, "prune_blocks", fail)
+    state_guard.log_blocks("Stop", ["It was merged."])
+    assert logged_rules(home) == ["was merged"]
+
+
+def test_a_failed_check_on_the_opened_log_closes_its_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(_fd: int, mode: int) -> None:
+        if mode == 0o600:
+            message = "fchmod broke"
+            raise OSError(message)
+
+    before = open_descriptors()
+    monkeypatch.setattr(os, "fchmod", fail)
+    with pytest.raises(OSError, match="fchmod broke"):
+        state_guard.open_log(tmp_path / "logs", "blocks.jsonl")
+    assert open_descriptors() == before
+
+
+def test_a_failed_fdopen_closes_the_descriptor(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(_fd: int, _mode: str) -> None:
+        message = "fdopen broke"
+        raise OSError(message)
+
+    before = open_descriptors()
+    monkeypatch.setattr(os, "fdopen", fail)
+    state_guard.log_blocks("Stop", ["Merged."])
+    assert open_descriptors() == before
+    assert day_log(home).stat().st_size == 0
+
+
+def test_a_name_without_dashes_in_its_date_is_not_pruned(tmp_path: Path) -> None:
+    keep = tmp_path / "blocks-20200101.jsonl"
+    keep.write_text("x")
+    prune(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    assert keep.exists()
+
+
+HOLDER = """
+import fcntl, sys
+held = open(sys.argv[1], "ab")
+fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+print("held", flush=True)
+sys.stdin.read()
+"""
+
+
+def test_a_writer_gives_up_on_a_lock_another_process_holds(home: Path) -> None:
+    state_guard.log_blocks("Stop", ["Merged."])
+    log = day_log(home)
+    before = log.stat().st_size
+    holder = subprocess.Popen(  # fixed argv, this interpreter
+        [sys.executable, "-I", "-c", HOLDER, str(log)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline() == "held\n"
+        # An external deadline replaces the fixture's: a writer that never gives
+        # up swallows the alarm's error inside the hook and runs on past it.
+        signal.alarm(3)
+        start = time.monotonic()
+        state_guard.log_blocks("Stop", ["Merged."])
+        elapsed = time.monotonic() - start
+    finally:
+        assert holder.stdin is not None
+        holder.stdin.close()
+        holder.wait(5)
+    assert state_guard.LOCK_WAIT * 0.9 <= elapsed < state_guard.LOCK_WAIT * 3
+    assert log.stat().st_size == before
+
+
+def test_a_symlinked_state_directory_is_never_pruned_or_written(
+    home: Path,
+) -> None:
+    elsewhere = home / "elsewhere"
+    elsewhere.mkdir(parents=True)
+    victim = elsewhere / "blocks-2020-01-01.jsonl"
+    victim.write_text("x")
+    directory = home.joinpath(*state_guard.LOG_DIRECTORY)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    directory.symlink_to(elsewhere)
+    state_guard.log_blocks("Stop", ["It was merged."])
+    assert victim.read_text() == "x"
+    assert [path.name for path in elsewhere.iterdir()] == [victim.name]
+
+
+def test_the_lock_wait_is_half_a_second_and_polls_every_hundredth() -> None:
+    assert state_guard.LOCK_WAIT == 0.5
+    assert state_guard.LOCK_POLL == 0.01
+
+
+def test_open_directory_closes_its_descriptor_when_fchmod_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(_fd: int, _mode: int) -> None:
+        raise OSError
+
+    monkeypatch.setattr(os, "fchmod", fail)
+    before = open_descriptors()
+    with pytest.raises(OSError):  # noqa: PT011  # the injected failure
+        state_guard.open_directory(tmp_path / "d")
+    assert open_descriptors() == before
