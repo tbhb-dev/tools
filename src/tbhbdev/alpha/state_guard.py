@@ -66,12 +66,23 @@ type Json = dict[str, object]
 TABLE = "harness"
 TAG = "[state-guard: unverified]"
 GAP = "\x00"  # stands for a removed tag until the text stops changing
-SPACES = r"(?:[^\S\n]|\x00)*"
+# Every Unicode format character (category Cf), which renders as nothing: soft
+# hyphen, Arabic marks, ZWSP and the other zero-width and bidi controls, BOM, the
+# interlinear and tag characters.
+FORMAT_CHARS = (
+    "\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f"
+    "\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd"
+    "\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001"
+    "\U000e0020-\U000e007f"
+)
+# A gap is anything a reader sees as nothing or as space, line breaks included.
+SPACES = rf"[\s\x00{FORMAT_CHARS}]*"
 # A tag cut by tags or spaces, as in "[state-gu ard:", is still a tag fragment.
 OPEN = r"\[" + SPACES + SPACES.join(re.escape(c) for c in "state-guard:")
 BODY = rf"{OPEN}{SPACES}(?:unverified{SPACES})*"
-CLOSED = re.compile(BODY + r"\]")
-FRAGMENT = re.compile(BODY)
+CLOSED = re.compile(BODY + r"\]", re.IGNORECASE)
+FRAGMENT = re.compile(BODY, re.IGNORECASE)
+GAPS = re.compile(rf"[\s\x00{FORMAT_CHARS}]+")
 CLAIM = re.compile(
     r"\b(?:is|are|was|were|now|already|has been|have been)\s+"
     r"(?:done|applied|merged|shipped|deployed|live|fixed|complete|completed|"
@@ -163,26 +174,49 @@ def claim_reason(bad: list[str]) -> str:
     )
 
 
-def strip_tags(text: str) -> str:
+def strip_tags(text: str, fill: str = " ") -> str:
     """Judge a message as if its sender-written tags weren't there.
 
-    Each tag, and any leftover `[state-guard:` fragment with its optional bare
-    "unverified" and closing bracket, becomes one space, so a sender can't leave an
-    "unverified" behind as evidence. Removal repeats because a removal can join the
-    text around it into a new tag. Runs of spaces collapse, but line breaks stay
-    because they end sentences, so a word-splitting tag leaves the sender's words
-    in order.
+    Each tag, and any leftover `[state-guard:` fragment with its bare "unverified"
+    words and closing bracket, becomes FILL, in any case and with any whitespace or
+    format character inside, so a sender can't leave an "unverified" behind as
+    evidence. Closed tags go first, innermost out, so an outer opener keeps its own
+    "unverified" until the fragment pass takes both. Removal repeats because a
+    removal can join the text around it into a new tag. Then each run of spaces and
+    format characters collapses to one space, except that line breaks stay because
+    they end sentences.
     """
-    previous = None
-    while previous != text:
-        previous = text
-        text = text.replace(TAG, GAP)
-        # Closed tags go first, innermost out, so an outer opener keeps its own
-        # "unverified" until the fragment pass takes both.
-        text = CLOSED.sub(GAP, text)
-        if text == previous.replace(TAG, GAP):
-            text = FRAGMENT.sub(GAP, text)
-    return re.sub(r"(?:[^\S\n]|\x00)+", " ", text)
+    while True:
+        new = CLOSED.sub(GAP, text)
+        if new == text:
+            new = FRAGMENT.sub(GAP, text)
+        if new == text:
+            break
+        text = new
+    return GAPS.sub(lambda run: collapse(run.group(), fill), text)
+
+
+def collapse(run: str, fill: str) -> str:
+    """One gap run as it renders: a line break, a space, or FILL for hidden text."""
+    if "\n" in run:
+        return "\n"
+    return " " if any(c.isspace() for c in run) else fill
+
+
+def renderings(text: str) -> tuple[str, str]:
+    """TEXT with tags replaced by a space, and with tags removed and words joined."""
+    return strip_tags(text), strip_tags(text, "")
+
+
+def judged_claims(text: str) -> list[str]:
+    """Unsupported claims of TEXT in either rendering: evidence needs both.
+
+    A tag inside a word splits it in one rendering and joins it in the other, as in
+    "do[tag]ne" and "no[tag]t merged", so a claim in either one counts.
+    """
+    spaced, joined = renderings(text)
+    found = unsupported_claims(spaced)
+    return found + [claim for claim in unsupported_claims(joined) if claim not in found]
 
 
 def tag_sentences(text: str) -> tuple[str, list[str]]:
@@ -190,7 +224,7 @@ def tag_sentences(text: str) -> tuple[str, list[str]]:
     parts = SENTENCE_PARTS.split(text)
     sentences: list[str] = []
     for index, chunk in enumerate(parts):
-        if unsupported_claims(strip_tags(chunk)):
+        if judged_claims(chunk):
             parts[index] = SENTENCE_PREFIX.sub(r"\g<0>" + TAG + " ", chunk)
             sentences.append(chunk.strip())
     return "".join(parts), sentences
@@ -237,7 +271,11 @@ def log_tagged(data: Json, tool_input: Json, sentences: list[str]) -> None:
                 record: Json = {
                     "time": datetime.now(UTC).isoformat(),
                     "session_id": data.get("session_id"),
-                    "rule": next(CLAIM.finditer(strip_tags(sentence))).group(),
+                    "rule": next(
+                        m.group()
+                        for r in renderings(sentence)
+                        for m in CLAIM.finditer(r)
+                    ),
                     "sentence": sentence,
                 }
                 if "to" in tool_input:
@@ -312,7 +350,7 @@ def send_message_reason(data: Json, tool_input: Json) -> str | None:
     main()'s fail-open exit.
     """
     original = str(tool_input.get("message", ""))
-    bad = unsupported_claims(strip_tags(original))
+    bad = judged_claims(original)
     if not bad:
         return None
     try:
@@ -576,7 +614,7 @@ def stop_reason(data: Json) -> str | None:
     message = data.get("last_assistant_message")
     if not message:
         message = last_assistant_text(str(data.get("transcript_path", "")))
-    bad = unsupported_claims(strip_tags(str(message)))
+    bad = judged_claims(str(message))
     return final_claim_reason(bad) if bad else None
 
 
