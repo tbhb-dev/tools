@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fake_tool import PRIVATE_REPO as PRIVATE
@@ -685,3 +686,166 @@ def test_tracking_main_is_refused_for_any_push_default(
     )
     assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
     assert "refs/heads/main: push to a protected" in capsys.readouterr().err
+
+
+@pytest.fixture
+def started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[list[str], dict[str, object]]]:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def popen(args: list[str], **kwargs: object) -> None:
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(
+        pg,
+        "subprocess",
+        SimpleNamespace(
+            Popen=popen,
+            DEVNULL=subprocess.DEVNULL,
+        ),
+    )
+    return calls
+
+
+def linked(repo: Path, tmp_path: Path, *, module: bool = True) -> Path:
+    path = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", "-b", "topic", str(path))
+    if module:
+        (path / "MODULE.bazel").write_text("")
+    return path
+
+
+def test_linked_worktree_stops_bazel_after_a_clean_push(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[tuple[list[str], dict[str, object]]],
+) -> None:
+    path = linked(repo, tmp_path)
+    monkeypatch.chdir(path)
+    assert guard(monkeypatch, commit(path)) == 0
+    assert len(started) == 1
+    args, kwargs = started[0]
+    assert args == ["bazelisk", "shutdown"]
+    assert kwargs["cwd"] == path.resolve()
+    assert kwargs["start_new_session"] is True
+    assert kwargs["stdout"] is subprocess.DEVNULL
+    assert kwargs["stderr"] is subprocess.DEVNULL
+    assert kwargs["stdin"] is subprocess.DEVNULL
+
+
+def test_stop_looks_for_module_bazel_by_its_exact_name(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[tuple[list[str], dict[str, object]]],
+) -> None:
+    # A case-insensitive filesystem finds MODULE.bazel under any spelling, so
+    # the name is checked on the lookup itself.
+    names: list[str] = []
+
+    def is_file(self: Path) -> bool:
+        names.append(self.name)
+        return True
+
+    monkeypatch.chdir(linked(repo, tmp_path))
+    monkeypatch.setattr(Path, "is_file", is_file)
+    pg.stop_bazel()
+    assert names == ["MODULE.bazel"]
+    assert len(started) == 1
+
+
+def test_main_checkout_keeps_its_bazel_server(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[tuple[list[str], dict[str, object]]],
+) -> None:
+    (repo / "MODULE.bazel").write_text("")
+    assert guard(monkeypatch, commit(repo)) == 0
+    assert started == []
+
+
+def test_main_checkout_subdirectory_keeps_its_bazel_server(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[tuple[list[str], dict[str, object]]],
+) -> None:
+    (repo / "MODULE.bazel").write_text("")
+    sub = repo / "sub"
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+    pg.stop_bazel()
+    assert started == []
+
+
+@pytest.mark.parametrize(
+    ("code", "out"),
+    [(0, ""), (0, "a\nb\n"), (0, "a\nb\nc\nd\n"), (1, "a\nb\nc\n")],
+)
+def test_odd_git_answers_stop_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[tuple[list[str], dict[str, object]]],
+    code: int,
+    out: str,
+) -> None:
+    def answer(*_args: str) -> tuple[int, str]:
+        return code, out
+
+    monkeypatch.setattr(pg, "git", answer)
+    assert pg.linked_worktree() is None
+    pg.stop_bazel()
+    assert started == []
+
+
+def test_worktree_without_a_module_file_is_left_alone(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[tuple[list[str], dict[str, object]]],
+) -> None:
+    path = linked(repo, tmp_path, module=False)
+    monkeypatch.chdir(path)
+    assert guard(monkeypatch, commit(path)) == 0
+    assert started == []
+
+
+def test_refused_push_keeps_bazel_running(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[tuple[list[str], dict[str, object]]],
+) -> None:
+    path = linked(repo, tmp_path)
+    monkeypatch.chdir(path)
+    base = git(path, "rev-parse", "HEAD")
+    head = commit(path)
+    assert guard(monkeypatch, base, head) == 1
+    assert started == []
+
+
+def test_missing_bazelisk_never_fails_a_push(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise FileNotFoundError
+
+    monkeypatch.setattr(
+        pg, "subprocess", SimpleNamespace(Popen=refuse, DEVNULL=subprocess.DEVNULL)
+    )
+    path = linked(repo, tmp_path)
+    monkeypatch.chdir(path)
+    assert guard(monkeypatch, commit(path)) == 0
+
+
+def test_unreadable_git_state_stops_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[tuple[list[str], dict[str, object]]],
+) -> None:
+
+    def failing(*_args: str) -> tuple[int, str]:
+        return 128, ""
+
+    monkeypatch.setattr(pg, "git", failing)
+    pg.stop_bazel()
+    assert started == []
