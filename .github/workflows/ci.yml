@@ -35,6 +35,12 @@ jobs:
     name: bazel
     runs-on: ubuntu-26.04
     timeout-minutes: 45
+    # The push to main run writes the shared action cache with the main
+    # token, a secret of the main-only `cache` environment that no pull
+    # request can read. Pull requests use the org's PR token, which writes
+    # only their own namespace. This job stays in this file because a job in
+    # a reusable workflow doesn't get its environment's secrets.
+    environment: ${{ github.event_name == 'push' && 'cache' || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -43,12 +49,22 @@ jobs:
 
       # Hardens the runner (Linux), sets up Bazel and its caches, builds
       # complexipy's source wheel on Linux arm64, and fetches the targets
-      # with retries.
+      # with retries. The push to main run skips the disk cache: Bazel
+      # uploads only the results it runs, never a disk cache hit, so that
+      # run runs every action and fills the remote cache.
       - name: Set up Bazel for CI
         uses: tbhb-dev/rules/.github/actions/setup-bazel-ci@fe9c1e56c33233cf7974de1cf38aa888fb5c7790  # main
         with:
-          disk-cache: ${{ github.workflow }}-ubuntu-26.04
+          disk-cache: ${{ github.event_name == 'push' && 'false' || format('{0}-ubuntu-26.04', github.workflow) }}
           cache-save: ${{ github.event_name != 'pull_request' }}
+
+      # The bazel-r2-cache remote cache, through its shared action. A fork's
+      # pull request gets no secrets and builds without the cache.
+      - name: Use the remote cache
+        uses: tbhb-dev/bazel-r2-cache/.github/actions/remote-cache@7b7c1c129366cc6ea7d1817f7b2d82df6550162c  # main
+        with:
+          token: ${{ github.event_name == 'push' && secrets.BAZEL_CACHE_TOKEN || secrets.BAZEL_CACHE_PR_TOKEN }}
+          pull-request: ${{ github.event.pull_request.number }}
 
       # //... covers the @tbhb_rules lint, format, shell and docs tests over
       # the whole tree, the buildifier_test, and the preset.update_test that
