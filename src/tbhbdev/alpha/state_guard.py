@@ -44,6 +44,7 @@ allows the call: a broken hook must not stop the agent's work. The one
 exception is a failure while tagging a SendMessage, which keeps the refusal.
 """
 
+import functools
 import io
 import json
 import os
@@ -52,6 +53,7 @@ import shlex
 import stat
 import sys
 import tomllib
+import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -66,28 +68,27 @@ type Json = dict[str, object]
 TABLE = "harness"
 TAG = "[state-guard: unverified]"
 GAP = "\x00"  # stands for a removed tag until the text stops changing
-# Every Unicode format character (category Cf), which renders as nothing: soft
-# hyphen, Arabic marks, zero-width space and the other zero-width and bidi
-# controls, BOM, the interlinear and tag characters.
-FORMAT_RANGES = (
-    (0x00AD, 0x00AD), (0x0600, 0x0605), (0x061C, 0x061C), (0x06DD, 0x06DD),
-    (0x070F, 0x070F), (0x0890, 0x0891), (0x08E2, 0x08E2), (0x180E, 0x180E),
-    (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x2064), (0x2066, 0x206F),
-    (0xFEFF, 0xFEFF), (0xFFF9, 0xFFFB), (0x110BD, 0x110BD), (0x110CD, 0x110CD),
-    (0x13430, 0x1343F), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0001, 0xE0001),
-    (0xE0020, 0xE007F),
-)  # fmt: skip
-FORMAT_CHARS = "".join(
-    re.escape(chr(low)) + "-" + re.escape(chr(high)) for low, high in FORMAT_RANGES
-)
-# A gap is anything a reader sees as nothing or as space, line breaks included.
-SPACES = rf"[\s\x00{FORMAT_CHARS}]*"
+# Characters that render as nothing: format characters (soft hyphen, zero-width and
+# bidi controls, tag characters), combining and enclosing marks (variation
+# selectors, the grapheme joiner), controls, unassigned and private code points,
+# and the blank fillers that are letters or symbols (Hangul and braille).
+INVISIBLE_CATEGORIES = frozenset({"Cf", "Mn", "Me", "Cc", "Cs", "Co", "Cn"})
+BLANKS = frozenset("\u115f\u1160\u2800\u3164" + chr(0xFFA0))
+# A gap is anything a reader sees as space, line breaks included, or a removed tag.
+SPACES = r"[\s\x00]*"
 # A tag cut by tags or spaces, as in "[state-gu ard:", is still a tag fragment.
 OPEN = r"\[" + SPACES + SPACES.join(re.escape(c) for c in "state-guard:")
-BODY = rf"{OPEN}{SPACES}(?:unverified{SPACES})*"
+WORD = SPACES.join("unverified")
+BODY = rf"{OPEN}{SPACES}(?:{WORD}{SPACES})*"
 CLOSED = re.compile(BODY + r"\]", re.IGNORECASE)
 FRAGMENT = re.compile(BODY, re.IGNORECASE)
-GAPS = re.compile(rf"[\s\x00{FORMAT_CHARS}]+")
+GAPS = re.compile(r"[\s\x00]+")
+# The most characters judged, and the most removal passes, so a nested tag can't
+# cost quadratic time. Over either limit the message can't be judged and counts as
+# an unsupported claim.
+MAX_JUDGED = 100_000
+MAX_PASSES = 64
+UNDECIDABLE = "the message is too large or too deeply nested to judge"
 CLAIM = re.compile(
     r"\b(?:is|are|was|were|now|already|has been|have been)\s+"
     r"(?:done|applied|merged|shipped|deployed|live|fixed|complete|completed|"
@@ -179,30 +180,49 @@ def claim_reason(bad: list[str]) -> str:
     )
 
 
+class UndecidableError(ValueError):
+    """The text has more nested tags than MAX_PASSES removals can clear."""
+
+
+@functools.cache
+def invisible(char: str) -> bool:
+    """Whether CHAR renders as nothing, so a reader sees the text without it."""
+    return not char.isspace() and (
+        char in BLANKS or unicodedata.category(char) in INVISIBLE_CATEGORIES
+    )
+
+
+def visible(text: str) -> str:
+    """TEXT without the characters that render as nothing."""
+    return "".join(char for char in text if not invisible(char))
+
+
 def strip_tags(text: str, fill: str = " ") -> str:
     """Judge a message as if its sender-written tags weren't there.
 
-    Each tag, and any leftover `[state-guard:` fragment with its bare "unverified"
-    words and closing bracket, becomes FILL, in any case and with any whitespace or
-    format character inside, so a sender can't leave an "unverified" behind as
-    evidence. Closed tags go first, innermost out, so an outer opener keeps its own
-    "unverified" until the fragment pass takes both. Removal repeats because a
-    removal can join the text around it into a new tag. Then each run of spaces and
-    format characters collapses to one space, except that line breaks stay because
-    they end sentences.
+    Invisible characters go first. Each tag, and any leftover `[state-guard:`
+    fragment with its bare "unverified" words and closing bracket, becomes a gap
+    in any case and with any whitespace inside, even inside the word, so a sender
+    can't leave an "unverified" behind as evidence. Closed tags go first,
+    innermost out, so an outer opener keeps its own "unverified" until the
+    fragment pass takes both. Removal repeats because a removal can join the text
+    around it into a new tag, up to MAX_PASSES times. Then each run of spaces and
+    gaps collapses to one space, except that line breaks stay because they end
+    sentences, and a gap with no space in it becomes FILL.
     """
-    while True:
+    text = visible(text)
+    for _ in range(MAX_PASSES):
         new = CLOSED.sub(GAP, text)
         if new == text:
             new = FRAGMENT.sub(GAP, text)
         if new == text:
-            break
+            return GAPS.sub(lambda run: collapse(run.group(), fill), text)
         text = new
-    return GAPS.sub(lambda run: collapse(run.group(), fill), text)
+    raise UndecidableError
 
 
 def collapse(run: str, fill: str) -> str:
-    """One gap run as it renders: a line break, a space, or FILL for hidden text."""
+    """One gap run as it renders: a line break, a space, or FILL for a removed tag."""
     if "\n" in run:
         return "\n"
     return " " if any(c.isspace() for c in run) else fill
@@ -217,21 +237,67 @@ def judged_claims(text: str) -> list[str]:
     """Unsupported claims of TEXT in either rendering: evidence needs both.
 
     A tag inside a word splits it in one rendering and joins it in the other, as in
-    "do[tag]ne" and "no[tag]t merged", so a claim in either one counts.
+    "do[tag]ne" and "no[tag]t merged", so a claim in either one counts. Text too
+    large or too nested to judge is one claim, so it can't pass.
     """
-    spaced, joined = renderings(text)
+    if len(text) > MAX_JUDGED:
+        return [UNDECIDABLE]
+    try:
+        spaced, joined = renderings(text)
+    except UndecidableError:
+        return [UNDECIDABLE]
     found = unsupported_claims(spaced)
     return found + [claim for claim in unsupported_claims(joined) if claim not in found]
 
 
+def rule_of(sentence: str) -> str:
+    """The first claim wording that makes SENTENCE a claim, for the log."""
+    try:
+        return next(m.group() for r in renderings(sentence) for m in CLAIM.finditer(r))
+    except StopIteration, UndecidableError:
+        return "undecidable"
+
+
+def sentence_parts(text: str) -> list[str]:
+    """TEXT cut into sentences and separators without cutting inside a tag.
+
+    Where the sender wrote a tag across a line break, the cut that judging
+    doesn't make isn't made here either.
+    """
+    kept = [(index, char) for index, char in enumerate(text) if not invisible(char)]
+    probe = list(text)
+    for match in FRAGMENT.finditer("".join(char for _, char in kept)):
+        for position in range(kept[match.start()][0], kept[match.end() - 1][0] + 1):
+            if probe[position].isspace():
+                probe[position] = " "
+    parts = SENTENCE_PARTS.split("".join(probe))
+    start = 0
+    for index, part in enumerate(parts):
+        parts[index] = text[start : start + len(part)]
+        start += len(part)
+    return parts
+
+
 def tag_sentences(text: str) -> tuple[str, list[str]]:
-    """Tag unsupported sentences while preserving their full text and separators."""
-    parts = SENTENCE_PARTS.split(text)
+    """Tag unsupported sentences while preserving their full text and separators.
+
+    A claim judging finds that no tagged sentence holds, such as one a nested tag
+    makes by joining text, tags the whole message, so a message that is refused
+    with tagging off is never sent unchanged with it on.
+    """
+    if len(text) > MAX_JUDGED:
+        return f"{TAG} {text}", [text.strip()[:MAX_QUOTED]]
+    parts = sentence_parts(text)
     sentences: list[str] = []
+    covered: set[str] = set()
     for index, chunk in enumerate(parts):
-        if judged_claims(chunk):
+        found = judged_claims(chunk)
+        if found:
             parts[index] = SENTENCE_PREFIX.sub(r"\g<0>" + TAG + " ", chunk)
             sentences.append(chunk.strip())
+            covered.update(found)
+    if not set(judged_claims(text)) <= covered:
+        return f"{TAG} {text}", [*sentences, text.strip()]
     return "".join(parts), sentences
 
 
@@ -276,11 +342,7 @@ def log_tagged(data: Json, tool_input: Json, sentences: list[str]) -> None:
                 record: Json = {
                     "time": datetime.now(UTC).isoformat(),
                     "session_id": data.get("session_id"),
-                    "rule": next(
-                        m.group()
-                        for r in renderings(sentence)
-                        for m in CLAIM.finditer(r)
-                    ),
+                    "rule": rule_of(sentence),
                     "sentence": sentence,
                 }
                 if "to" in tool_input:

@@ -5,7 +5,6 @@
 import io
 import json
 import os
-import re
 import runpy
 import signal
 import subprocess
@@ -1167,15 +1166,132 @@ def test_a_claim_hidden_by_splitting_a_word_is_still_judged() -> None:
     assert state_guard.renderings(f"do{TAG}ne") == ("do ne", "done")
 
 
-def test_the_format_character_class_matches_unicode() -> None:
-    gap = re.compile(rf"[{state_guard.FORMAT_CHARS}]")
-    cf = [chr(n) for n in range(0x110000) if unicodedata.category(chr(n)) == "Cf"]
-    assert [c for c in cf if not gap.fullmatch(c)] == []
-    assert [
-        c
-        for c in map(chr, range(0x110000))
-        if gap.fullmatch(c) and unicodedata.category(c) != "Cf"
-    ] == []
+def test_invisible_characters_are_the_ones_that_render_as_nothing() -> None:
+    chars = [chr(n) for n in range(0x110000) if not chr(n).isspace()]
+    hidden = {c for c in chars if state_guard.invisible(c)}
+    for category in ("Cf", "Mn", "Me", "Cc"):
+        assert all(
+            state_guard.invisible(c)
+            for c in chars
+            if unicodedata.category(c) == category
+        )
+    assert {
+        "\u115f",
+        "\u1160",
+        "\u2800",
+        "\u3164",
+        chr(0xFFA0),
+    } <= hidden
+    assert not any(state_guard.invisible(c) for c in "aZ0 .-:[]\n\u00e9\u2014")
+    assert state_guard.visible("a\u200bb\ufe0fc\x00d") == "abcd"
+
+
+INVISIBLE_IN_TAG = [
+    "\u115f",
+    "\u1160",
+    "\u3164",
+    chr(0xFFA0),
+    "\u2800",
+    "\ufe0f",
+    "\u034f",
+    "\u180b",
+    "\u0301",
+    "\x01",
+    chr(0xE0100),
+]
+
+
+@pytest.mark.parametrize("char", INVISIBLE_IN_TAG)
+def test_invisible_characters_in_a_tag_leave_the_claim_judged(char: str) -> None:
+    for tag in (
+        f"[state-{char}guard: unverified]",
+        f"[state-guard:{char} unverified]",
+        f"[state-guard: un{char}verified]",
+        f"[state-guard: unverified{char}]",
+    ):
+        assert state_guard.judged_claims(f"{tag} It was done."), tag
+        assert state_guard.judged_claims(f"It was do{tag}ne."), tag
+        assert not state_guard.judged_claims(f"{tag} A note."), tag
+
+
+@pytest.mark.parametrize("gap", [" ", "\n", "\u200b", "\t", "\u00a0", "\r\n"])
+def test_a_gap_inside_the_word_leaves_the_claim_judged(gap: str) -> None:
+    tag = f"[state-guard: un{gap}verified]"
+    assert state_guard.judged_claims(f"It was do{tag}ne.")
+    assert state_guard.judged_claims(f"{tag} It was done.")
+    assert state_guard.judged_claims(f"It was {tag}done.")
+    assert not state_guard.judged_claims(f"A not{tag}e.")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "[state-\nguard: unverified] It was done.",
+        "[state-guard:\nunverified] It was done.",
+        "It is in [state-\nguard: unverified] place.",
+        "It was do[state-\nguard: unverified]ne.",
+        "It was do[state-guard: un\nverified]ne.",
+        "[state-gu\n\nard: unverified]\nIt was done.",
+    ],
+)
+def test_a_tag_cut_by_a_line_break_is_tagged_not_passed(text: str) -> None:
+    assert state_guard.judged_claims(text)
+    tagged, sentences = state_guard.tag_sentences(text)
+    assert tagged != text
+    assert TAG in tagged
+    assert sentences
+
+
+def test_a_tag_across_a_line_break_keeps_its_sentence_whole() -> None:
+    tagged, sentences = state_guard.tag_sentences(
+        "Intro.\n[state-\nguard: unverified] It was done.\nEnd."
+    )
+    assert tagged == (f"Intro.\n{TAG} [state-\nguard: unverified] It was done.\nEnd.")
+    assert sentences == ["[state-\nguard: unverified] It was done."]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Intro.\n[state-\n[state-guard: unverified]guard: unverified] It was done.",
+        "Intro.\nIt was do[state-\n[state-guard: unverified]guard: unverified]ne.",
+    ],
+)
+def test_a_claim_no_sentence_holds_tags_the_whole_message(text: str) -> None:
+    assert state_guard.judged_claims(text)
+    tagged, sentences = state_guard.tag_sentences(text)
+    assert tagged == f"{TAG} {text}"
+    assert sentences[-1] == text.strip()
+
+
+def test_deeply_nested_tags_are_undecidable_and_fast() -> None:
+    nested = TAG
+    for _ in range(state_guard.MAX_PASSES + 5):
+        nested = f"[state-guard: unverified {nested}]"
+    assert state_guard.judged_claims(nested) == [state_guard.UNDECIDABLE]
+    assert state_guard.judged_claims(f"It was done. {nested}") == [
+        state_guard.UNDECIDABLE
+    ]
+    tagged, sentences = state_guard.tag_sentences(nested)
+    assert tagged.startswith(TAG)
+    assert sentences
+    assert state_guard.rule_of(nested) == "undecidable"
+
+
+def test_an_oversized_message_is_undecidable() -> None:
+    big = "A note. " * (state_guard.MAX_JUDGED // 8 + 1)
+    assert state_guard.judged_claims(big) == [state_guard.UNDECIDABLE]
+    tagged, sentences = state_guard.tag_sentences(big)
+    assert tagged == f"{TAG} {big}"
+    assert sentences == [big.strip()[: state_guard.MAX_QUOTED]]
+
+
+def test_nesting_within_the_pass_limit_is_still_judged() -> None:
+    nested = TAG
+    for _ in range(12):
+        nested = f"[state-guard: unverified {nested}]"
+    assert state_guard.judged_claims(f"{nested} It was done.") == ["It was done."]
+    assert state_guard.rule_of("It was done.") == "was done"
 
 
 @pytest.mark.parametrize("tag", [TAG, *NESTED_TAGS[::25]])
