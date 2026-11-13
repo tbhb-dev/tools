@@ -204,11 +204,20 @@ def install_hooks(workspace: Path) -> None:
 
 
 def is_main_checkout(directory: Path) -> bool:
+    """Whether DIRECTORY has a git directory of its own.
+
+    An empty ``.git`` directory is not one: a sandbox creates empty directories
+    as the mount points of its read-only Git paths, and no repository is empty.
+    """
     git_dir = directory / ".git"
     common = git_dir / "commondir"
-    return git_dir.is_dir(follow_symlinks=False) and (
-        not common.exists()
-        or (git_dir / common.read_text().strip()).resolve() == git_dir.resolve()
+    return (
+        git_dir.is_dir(follow_symlinks=False)
+        and next(git_dir.iterdir(), None) is not None
+        and (
+            not common.exists()
+            or (git_dir / common.read_text().strip()).resolve() == git_dir.resolve()
+        )
     )
 
 
@@ -316,6 +325,7 @@ def prepare_git(workspace: Path) -> None:
     directory = workspace / ".git"
     for name, content in (
         ("config.worktree", ""),
+        ("info", None),
         ("modules", None),
         ("commondir", ".\n"),
     ):
