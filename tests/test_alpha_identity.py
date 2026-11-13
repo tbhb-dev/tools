@@ -2527,6 +2527,28 @@ def test_cmd_record_uses_the_hook_cwd_in_another_owners_repository(
     assert list(plain.iterdir()) == []
 
 
+def test_git_init_in_a_plain_directory_finishes_its_user_record(
+    plain: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The directory is no repository before the command and another owner's
+    # repository after it: the finish must still reach the user's store alone.
+    data = {
+        "session_id": "s",
+        "cwd": str(plain),
+        "tool_name": "Bash",
+        "tool_input": {"command": "git init"},
+    }
+    feed(monkeypatch, {**data, "hook_event_name": "PreToolUse"})
+    assert ai.cmd_record("claude", {}) == 0
+    subprocess.run(["git", "init", "-q", str(plain)], check=True)
+    before = sorted((plain / ".git").iterdir())
+    feed(monkeypatch, {**data, "hook_event_name": "PostToolUse"})
+    assert ai.cmd_record("claude", {}) == 0
+    (path,) = (ai.user_store() / "cmds" / ai.hx(ai.sha256_64("s"))).glob("*.json")
+    assert loaded(path)["done"] is not None
+    assert sorted((plain / ".git").iterdir()) == before
+
+
 @pytest.mark.parametrize("tool", ["Bash", "Edit"])
 @pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse"])
 @pytest.mark.parametrize("agent", [None, "child"])

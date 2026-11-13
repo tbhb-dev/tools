@@ -826,15 +826,21 @@ def record_command(
 
 
 def finish_command(
-    root: str, cmd: object, agent: str | None, cwd: Path | None = None
+    root: str,
+    cmd: object,
+    agent: str | None,
+    cwd: Path | None = None,
+    *,
+    user_only: bool = False,
 ) -> None:
     """Mark the newest pending record for (agent, command) done.
 
-    A later identical command is then unambiguous.
+    A later identical command is then unambiguous. ``user_only`` leaves the
+    directory's repository alone, as in another owner's repository.
     """
     if not isinstance(cmd, str):
         return
-    state = state_dir(cwd)
+    state = None if user_only else state_dir(cwd)
     hashes, done = set(cmd_hashes(cmd)), time.time()
     stores = [(user_store(), write_private_json)]
     if state:
@@ -1194,7 +1200,12 @@ def write_bash_edits(
 
 
 def handle_claude_bash(
-    event: str, data: Json, env: Mapping[str, str], agent: str | None
+    event: str,
+    data: Json,
+    env: Mapping[str, str],
+    agent: str | None,
+    *,
+    user_only: bool = False,
 ) -> None:
     """Bash command records, plus edit receipts when Claude reports a bash edit."""
     root, cwd = sha256_64(data["session_id"]), hook_cwd(data)
@@ -1211,8 +1222,8 @@ def handle_claude_bash(
     # A command moved to the background (run_in_background, or past its
     # timeout) is still running, and no later event says when it ends.
     if not (isinstance(response, dict) and response.get("backgroundTaskId")):
-        finish_command(root, cmd, agent, cwd)
-    if event == "PostToolUse":
+        finish_command(root, cmd, agent, cwd, user_only=user_only)
+    if event == "PostToolUse" and not user_only:
         write_bash_edits(data, env, cmd, cwd)
 
 
@@ -1254,6 +1265,10 @@ def handle_claude(
         root = sha256_64(data["session_id"])
         if user_only:
             write_user_record(root, rec)
+            # A command begun outside any repository can end inside one, as
+            # `git init` does, so its user record must still be finished.
+            if tool == "Bash" and event in {"PostToolUse", "PostToolUseFailure"}:
+                handle_claude_bash(event, data, env, None, user_only=True)
             return
         write_record(root, rec, hook_cwd(data))
     if tool == "Bash" and event in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}:
