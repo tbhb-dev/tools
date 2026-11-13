@@ -203,31 +203,58 @@ def install_hooks(workspace: Path) -> None:
         entry.chmod(0o555 if executable else 0o444)
 
 
-def is_main_checkout(directory: Path) -> bool:
-    """Whether DIRECTORY has a git directory of its own.
+def _own_common_directory(git_dir: Path) -> bool:
+    common = git_dir / "commondir"
+    try:
+        metadata = common.lstat()
+    except FileNotFoundError:
+        return True
+    if not stat.S_ISREG(metadata.st_mode):
+        message = f"{common} is not a regular file"
+        raise OSError(message)
+    # Do not follow a replacement link or block on a replacement FIFO.
+    fd = os.open(common, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            message = f"{common} is not a regular file"
+            raise OSError(message)
+        target = stream.read(4096).strip()
+    return (git_dir / target).resolve() == git_dir.resolve()
 
-    A ``.git`` directory without a non-empty ``HEAD`` is not one: a sandbox
-    creates empty directories and files as the mount points of its read-only
-    Git paths, and every repository has a ``HEAD`` that names a ref or a commit.
+
+def is_main_checkout(directory: Path, findings: list[str] | None = None) -> bool:
+    """Whether DIRECTORY has a regular non-empty HEAD and no foreign commondir.
+
+    Sandbox placeholders are not checkouts. Unreadable or non-regular Git
+    metadata produces an audit finding instead of interrupting the launch.
     """
     git_dir = directory / ".git"
-    common = git_dir / "commondir"
     head = git_dir / "HEAD"
-    return (
-        git_dir.is_dir(follow_symlinks=False)
-        and head.is_file()
-        and head.stat().st_size > 0
-        and (
-            not common.exists()
-            or (git_dir / common.read_text().strip()).resolve() == git_dir.resolve()
-        )
-    )
+    try:
+        if not git_dir.is_dir(follow_symlinks=False):
+            return False
+        try:
+            metadata = head.lstat()
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(metadata.st_mode):
+            if findings is not None:
+                findings.append(
+                    f"cannot audit main checkout {directory}: "
+                    f"{head} is not a regular file"
+                )
+            return False
+        return metadata.st_size > 0 and _own_common_directory(git_dir)
+    except (OSError, UnicodeError) as exc:
+        if findings is not None:
+            findings.append(f"cannot audit main checkout {directory}: {exc}")
+        return False
 
 
 def _contained_checkouts(root: Path, workspace: Path | None) -> list[str]:
     found: list[str] = []
     for directory, children, _files in root.walk():
-        if directory != workspace and is_main_checkout(directory):
+        if directory != workspace and is_main_checkout(directory, found):
             found.append(f"write root {root} contains main checkout {directory}")
         if len(directory.relative_to(root).parts) >= CHECKOUT_SCAN_DEPTH:
             children.clear()
@@ -270,13 +297,13 @@ def validate_writes(
         for ancestor in (root, *root.parents):
             if ancestor == own:
                 break
-            if is_main_checkout(ancestor):
+            if is_main_checkout(ancestor, found):
                 found.append(f"write root {root} reaches main checkout {ancestor}")
                 break
         if source.is_relative_to(root):
             found.append(f"write root {root} contains main checkout {source}")
         found.extend(_contained_checkouts(root, own))
-    return tuple(found)
+    return tuple(line.replace("\r", r"\r").replace("\n", r"\n") for line in found)
 
 
 def validate_hooks(workspace: Path, writes: tuple[str, ...]) -> None:

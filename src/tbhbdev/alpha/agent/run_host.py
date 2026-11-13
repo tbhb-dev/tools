@@ -218,12 +218,15 @@ def audit_writes(
     run: Run, workspace: Path, clone: Path, write_roots: tuple[str, ...]
 ) -> None:
     """Record the write roots a stricter policy would refuse, and refuse none."""
-    would_refuse = worktree.validate_writes(workspace, clone, write_roots)
-    if would_refuse:
-        run.files.write("would_refuse", "".join(f"{line}\n" for line in would_refuse))
-        run.files.write(
-            "log", "".join(f"audit: would refuse: {line}\n" for line in would_refuse)
-        )
+    record = run.files.path("would_refuse")
+    findings = dict.fromkeys(record.read_text().splitlines() if record.exists() else ())
+    for line in worktree.validate_writes(workspace, clone, write_roots):
+        finding = line.replace("\r", r"\r").replace("\n", r"\n")
+        if finding not in findings:
+            findings[finding] = None
+            run.files.write("log", f"audit: would refuse: {finding}\n")
+    if findings:
+        run.files.write("would_refuse", "".join(f"{line}\n" for line in findings))
 
 
 def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:

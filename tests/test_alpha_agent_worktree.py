@@ -1567,3 +1567,74 @@ def test_mount_point_that_cannot_be_removed_is_skipped(
     monkeypatch.setattr(Path, "rmdir", refuse)
     worktree.clear_mount_points((str(tmp_path),))
     assert (tmp_path / ".agents").is_dir()
+
+
+@pytest.mark.parametrize(
+    ("entry", "kind"),
+    [("commondir", "directory"), ("commondir", "fifo"), ("HEAD", "fifo")],
+)
+def test_unusual_git_metadata_is_only_an_audit_finding(
+    tmp_path: Path, checkout_paths: tuple[Path, Path], entry: str, kind: str
+) -> None:
+    source, workspace = checkout_paths
+    root = tmp_path / "writable\nforged"
+    metadata = root / ".git"
+    metadata.mkdir(parents=True)
+    if entry != "HEAD":
+        (metadata / "HEAD").write_text("ref: refs/heads/main\n")
+    target = metadata / entry
+    if kind == "directory":
+        target.mkdir()
+    else:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("platform has no mkfifo")
+        os.mkfifo(target)
+    findings: list[str] = []
+    assert not worktree.is_main_checkout(root, findings)
+    assert any(f"{entry} is not a regular file" in line for line in findings)
+    recorded = worktree.validate_writes(workspace, source, (str(root),))
+    assert any("cannot audit main checkout" in line for line in recorded)
+    assert all("\n" not in line for line in recorded)
+    assert any(r"writable\nforged" in line for line in recorded)
+
+
+@pytest.mark.parametrize(
+    "failure", [PermissionError("unreadable"), UnicodeError("invalid text")]
+)
+def test_checkout_audit_records_metadata_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git/HEAD").write_text("ref: refs/heads/main\n")
+
+    def refuse(_directory: Path) -> bool:
+        raise failure
+
+    monkeypatch.setattr(worktree, "_own_common_directory", refuse)
+    findings: list[str] = []
+    assert not worktree.is_main_checkout(tmp_path, findings)
+    assert findings == [f"cannot audit main checkout {tmp_path}: {failure}"]
+    assert not worktree.is_main_checkout(tmp_path)
+
+
+def test_common_directory_replaced_with_fifo_is_not_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git/HEAD").write_text("ref: refs/heads/main\n")
+    (tmp_path / ".git/commondir").write_text(".\n")
+    regular_fstat = os.fstat
+
+    def fifo_stat(fd: int) -> os.stat_result:
+        metadata = regular_fstat(fd)
+        return os.stat_result((0o010600, *metadata[1:]))
+
+    monkeypatch.setattr(os, "fstat", fifo_stat)
+    findings: list[str] = []
+    assert not worktree.is_main_checkout(tmp_path, findings)
+    assert findings == [
+        (
+            f"cannot audit main checkout {tmp_path}: "
+            f"{tmp_path / '.git/commondir'} is not a regular file"
+        )
+    ]

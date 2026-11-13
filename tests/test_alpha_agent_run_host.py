@@ -3881,3 +3881,74 @@ def test_checked_policy_checks_effective_hooks_before_launch(
     monkeypatch.setattr(subprocess, "check_output", output)
     with pytest.raises(Invalid, match="under write root"):
         run_host.checked_policy(run, paths)
+
+
+@pytest.mark.parametrize(
+    ("entry", "kind"),
+    [("commondir", "directory"), ("commondir", "fifo"), ("HEAD", "fifo")],
+)
+def test_unusual_git_metadata_launches_with_a_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str, kind: str
+) -> None:
+    run = make_run(tmp_path)
+    root = tmp_path / "writable\nforged"
+    metadata = root / ".git"
+    metadata.mkdir(parents=True)
+    if entry != "HEAD":
+        (metadata / "HEAD").write_text("ref: refs/heads/main\n")
+    target = metadata / entry
+    if kind == "directory":
+        target.mkdir()
+    else:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("platform has no mkfifo")
+        os.mkfifo(target)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(run.settings.sandbox, write_roots=(str(root),)),
+        ),
+    )
+    run_host.preflight(run)
+    prepared = preparation(run)
+    run.files.write("prompt", "fixture")
+    child = Child(code=0)
+
+    def launch(
+        _spec: process_group.Launch, *, started: Callable[[Child], None]
+    ) -> Child:
+        started(child)
+        return child
+
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "record", constant(None))
+    monkeypatch.setattr(process_group, "stop_started", constant(None))
+    with ExitStack() as stack:
+        assert run_host.run_harness(run, prepared, stack) == 0
+    assert run.files.path("launched").exists()
+    recorded = run.files.path("would_refuse").read_text().splitlines()
+    log = run.files.path("log").read_text().splitlines()
+    assert any(f"{entry} is not a regular file" in line for line in recorded)
+    assert any(r"writable\nforged" in line for line in recorded)
+    assert all(log.count(f"audit: would refuse: {line}") == 1 for line in recorded)
+    assert "forged" not in log
+
+
+def test_policy_audit_merges_findings_across_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    paths = preparation(run).paths
+    for findings, expected in [
+        (("A", "A"), "A\n"),
+        ((), "A\n"),
+        (("B", "A", "B"), "A\nB\n"),
+        (("A", "B"), "A\nB\n"),
+    ]:
+        monkeypatch.setattr(run_host.worktree, "validate_writes", constant(findings))
+        run_host.checked_policy(run, paths)
+        assert run.files.path("would_refuse").read_text() == expected
+        assert run.files.path("log").read_text() == "".join(
+            f"audit: would refuse: {line}\n" for line in expected.splitlines()
+        )
