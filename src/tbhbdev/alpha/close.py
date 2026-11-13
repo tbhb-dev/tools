@@ -11,8 +11,10 @@ Provisional, until @tbhb decides open question 11 of the alpha-review
 proposal: a session closes a pull request it opened freely, which the opened
 ledger decides. It closes another agent's pull request only with a reason,
 which the comment records along with the fact that the closer isn't the opener.
-A pull request with no ``Opened-by`` line, such as a human's, is refused. Any
-session may close an issue with a reason.
+A pull request with no ``Opened-by`` line, such as one opened before the line
+existed, is closed only when its GitHub author is the account this ``gh`` runs
+as, and the comment records that basis. A human's is refused. Any session may
+close an issue with a reason.
 """
 
 import argparse
@@ -41,14 +43,15 @@ def gh(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
 def view(kind: str, number: int, repo: str | None = None) -> dict[str, object]:
     """The ``state``, ``url`` and ``body`` of a pull request or an issue.
 
-    A pull request also reports ``headRefName`` and ``isCrossRepository``.
+    A pull request also reports ``author``, ``headRefName`` and
+    ``isCrossRepository``.
 
     Raises:
         SystemExit: gh can't read it, or it isn't open.
     """
     fields = "state,url,body"
     if kind == "pr":
-        fields += ",headRefName,isCrossRepository"
+        fields += ",author,headRefName,isCrossRepository"
     pin = [] if repo is None else ["--repo", f"github.com/{repo}"]
     done = gh([kind, "view", str(number), *pin, "--json", fields])
     data = pr.gh_data(done)
@@ -87,16 +90,34 @@ def ref_of(url: str) -> str:
     return f"{found[1]}#{found[2]}"
 
 
+def agent_author(data: Mapping[str, object]) -> str | None:
+    """The pull request's author login when it is this ``gh``'s own account."""
+    author = data.get("author")
+    login = author.get("login") if isinstance(author, dict) else None
+    if not isinstance(login, str) or not login:
+        return None
+    me = gh(["api", "--hostname", "github.com", "user", "--jq", ".login"])
+    return login if me.returncode == 0 and me.stdout.strip() == login else None
+
+
 def opener_note(data: Mapping[str, object], env: Mapping[str, str]) -> str:
     """The comment line a close by a session other than the opener needs, or ''.
 
+    A pull request with no ``Opened-by`` line takes the author basis instead.
+
     Raises:
-        SystemExit: The pull request has no ``Opened-by`` line, or the ledger
-            can't be read.
+        SystemExit: The pull request has no ``Opened-by`` line and isn't the
+            agent account's, or the ledger can't be read.
     """
     if pr.opened_line(str(data.get("body") or "")) is None:  # pragma: no mutate
-        message = "not closing: the pull request has no Opened-by line (a human's?)"
-        raise SystemExit(message)
+        login = agent_author(data)
+        if login is None:
+            message = "not closing: the pull request has no Opened-by line (a human's?)"
+            raise SystemExit(message)
+        return (
+            f"Closed on the basis that its GitHub author is the agent account {login}"
+            " and it has no Opened-by line.\n\n"
+        )
     ident = opened.opener(env)
     try:
         own = ident is not None and ref_of(str(data["url"])) in opened.read_ledger(
