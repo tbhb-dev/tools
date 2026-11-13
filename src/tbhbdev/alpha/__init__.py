@@ -90,6 +90,8 @@ commands:
   agent        exec | wait | status | kill | clean | keep: headless runs
   pre-push-guard REMOTE URL: refuse rewritten history and private names
   brief        new | check: peer-run briefs with required safeguards
+  worktree-prune [--apply] [--max-idle-days N] [--repo PATH]: remove finished
+               worktrees under .worktrees (dry run by default)
   install      install the git hooks and the user-level harness hooks
 """
 
@@ -161,6 +163,12 @@ def repo_command(argv: list[str], prog: str) -> int:
     return repo_bootstrap.main(argv, prog=prog)
 
 
+def worktree_prune_command(argv: list[str], prog: str) -> int:
+    from tbhbdev.alpha import worktree_prune  # noqa: PLC0415 -- see the docstring
+
+    return worktree_prune.main(argv, prog)
+
+
 def merge(argv: list[str], prog: str) -> int:
     from tbhbdev.alpha import squash_merge  # noqa: PLC0415 -- see the docstring
 
@@ -188,6 +196,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "gh-app": gh_app_command,
     "repo": repo_command,
     "merge": merge,
+    "worktree-prune": worktree_prune_command,
     "verify-range": verify_range.main,
     "install": install_command,
     "pre-push-guard": pre_push_guard.main,
