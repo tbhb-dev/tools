@@ -269,7 +269,8 @@ def _contained_checkouts(root: Path, workspace: Path | None) -> list[str]:
 
     def unreadable(error: OSError) -> None:
         # A vanished path or a closed descriptor (under /dev/fd) hides nothing.
-        if error.errno not in {errno.ENOENT, errno.ENOTDIR, errno.EBADF}:
+        benign = isinstance(error, FileNotFoundError | NotADirectoryError)
+        if not benign and error.errno != errno.EBADF:
             found.append(
                 f"cannot audit write root {root}: cannot read {error.filename}: {error}"
             )
