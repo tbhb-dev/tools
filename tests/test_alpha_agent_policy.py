@@ -592,6 +592,39 @@ def test_write_roots_keep_the_first_occurrence(os: Os, profile: Profile) -> None
 
 
 @pytest.mark.parametrize("os", Os)
+def test_denied_paths_drop_children_of_denied_parents(os: Os) -> None:
+    parent = ".config/example-parent"
+    sandbox = dataclasses.replace(
+        SANDBOX, denied_home_paths=(f"{parent}/nested/deeper", parent, DENIED)
+    )
+    config = settings(sandbox=sandbox)
+    home = "/example/home/agent"
+    denied = policy.denied_paths(config, HOSTS[os], home, 123)
+    assert f"{home}/{parent}" in denied
+    assert f"{home}/{DENIED}" in denied
+    assert f"{home}/{parent}/nested/deeper" not in denied
+    assert (f"{home}/{TOKEN_DIR}" in denied) is (os is Os.LINUX)
+
+
+def test_denied_paths_hide_the_token_directory_under_a_denied_parent() -> None:
+    home = "/example/home/agent"
+    parent = str(PurePosixPath(TOKEN_DIR).parent)
+    sandbox = dataclasses.replace(SANDBOX, denied_home_paths=(parent,))
+    denied = policy.denied_paths(settings(sandbox=sandbox), HOSTS[Os.LINUX], home, 123)
+    assert f"{home}/{parent}" in denied
+    assert f"{home}/{TOKEN_DIR}" not in denied
+
+
+def test_denied_paths_keep_a_sibling_with_a_shared_name_prefix() -> None:
+    sandbox = dataclasses.replace(SANDBOX, denied_home_paths=(".cfg", ".cfg-other"))
+    denied = policy.denied_paths(
+        settings(sandbox=sandbox), HOSTS[Os.LINUX], "/example/home/agent", 123
+    )
+    assert "/example/home/agent/.cfg" in denied
+    assert "/example/home/agent/.cfg-other" in denied
+
+
+@pytest.mark.parametrize("os", Os)
 @pytest.mark.parametrize("profile", Profile)
 def test_denied_paths_keep_the_first_occurrence(os: Os, profile: Profile) -> None:
     sandbox = dataclasses.replace(
@@ -1651,6 +1684,48 @@ def test_claude_file_tools_deny_each_protected_path(profile: Profile) -> None:
     assert not any(
         "/.git" in rule for rule in strings(dig(detail, "permissions", "allow"))
     )
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("configured", [False, True])
+def test_github_config_for_every_run(
+    harness: Harness,
+    profile: Profile,
+    configured: bool,
+) -> None:
+    original = settings()
+    config = dataclasses.replace(
+        original,
+        credentials=tuple(
+            dataclasses.replace(c, gh=c.gh if configured else None)
+            for c in original.credentials
+        ),
+    )
+    result = made(Os.LINUX, profile, harness, "agent", config=config)
+    gh = f"{paths('agent').tmpdir}/gh"
+    assert result.env["GH_CONFIG_DIR"] == gh
+    if harness is Harness.CLAUDE:
+        claude_env = dig(claude_settings_of(result), "env")
+        assert isinstance(claude_env, dict)
+        assert claude_env["GH_CONFIG_DIR"] == gh
+    if isinstance(result.detail, model.AgyPolicy):
+        assert f"read_file({gh})" in result.detail.grants
+
+
+@pytest.mark.parametrize("os", Os)
+def test_signing_file_is_denied_with_aliases(os: Os) -> None:
+    original = settings()
+    config = dataclasses.replace(
+        original,
+        credentials=tuple(
+            dataclasses.replace(c, signing="/tmp/example-key")
+            for c in original.credentials
+        ),
+    )
+    denied = policy.denied_paths(config, HOSTS[os], paths("agent").home, 123)
+    assert "/tmp/example-key" in denied
+    assert ("/private/tmp/example-key" in denied) is (os is Os.MACOS)
 
 
 @pytest.mark.parametrize("field", ["tmpdir", "audit_dir", "configured", "agy"])

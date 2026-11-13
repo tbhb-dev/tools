@@ -1,4 +1,4 @@
-"""Opt-in probes observe disposable listeners and sandboxed command results."""
+"""Opt-in probes include denied-sockets-dir and Linux denied-run-user listeners."""
 
 from __future__ import annotations
 
@@ -89,6 +89,32 @@ def listen(path: str) -> Generator[Listener]:
             assert not worker.is_alive()
 
 
+RUN_USER_ROOT = Path("/run/user")
+
+
+def denied_servers(stack: ExitStack, config: Settings) -> dict[str, Listener]:
+    sockets: dict[str, Listener] = {}
+    configured = (Path.home() / config.sockets_dir).resolve()
+    locations = [("denied-sockets-dir", configured)]
+    if sys.platform == "linux":
+        locations.append(("denied-run-user", RUN_USER_ROOT / str(os.getuid())))
+    for label, parent in locations:
+        try:
+            if label == "denied-sockets-dir" and not parent.exists():
+                parent.mkdir(mode=0o700)
+                stack.callback(parent.rmdir)
+            directory = Path(
+                stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix="ag-", dir=parent)
+                )
+            )
+            directory.chmod(0o700)
+            sockets[label] = stack.enter_context(listen(str(directory / "s")))
+        except OSError as exc:
+            pytest.fail(f"{label}: cannot create listener ({type(exc).__name__})")
+    return sockets
+
+
 def scratch_servers(stack: ExitStack) -> dict[str, Listener]:
     sockets: dict[str, Listener] = {}
     for location, parent in (
@@ -101,6 +127,7 @@ def scratch_servers(stack: ExitStack) -> dict[str, Listener]:
         )
         directory.chmod(0o700)
         sockets[location] = stack.enter_context(listen(str(directory / "s")))
+    sockets.update(denied_servers(stack, settings()))
     return sockets
 
 
@@ -307,6 +334,14 @@ def domain_observation(
     )
 
 
+def socket_verdict(
+    location: str, listener: Listener, observations: dict[str, str]
+) -> str:
+    if listener.connections or observations.get(location) == "0":
+        return "connected"
+    return "refused" if location in observations else "missing"
+
+
 def assert_observations(
     harness: Harness,
     sockets: dict[str, Listener],
@@ -329,7 +364,9 @@ def assert_observations(
 
     judgments = Judgments(harness, proven, failures)
     for location, listener in sockets.items():
-        judgments.record(location, not listener.connections)
+        verdict = socket_verdict(location, listener, observations)
+        judgments.record(location, verdict == "refused", failure=verdict)
+        report(f"{location}: {verdict}")
     for domain, allowed in (("api.github.com", True), ("example.com", False)):
         judgments.record(domain, *domain_observation(domain, allowed, observations))
     for label in extra:
@@ -895,3 +932,94 @@ def test_linux_control_refuses_malformed_bridge_frames(frame: bytes) -> None:
         sender.shutdown(socket.SHUT_WR)
         with pytest.raises(ValueError, match=r"^invalid bridge"):
             request_header(receiver)
+
+
+@pytest.fixture
+def short_probe_home() -> Generator[Path]:
+    with tempfile.TemporaryDirectory(prefix="ag-") as directory:
+        yield Path(directory)
+
+
+@pytest.mark.parametrize("linux", [False, True])
+@pytest.mark.parametrize("existing", [False, True])
+def test_denied_listener_locations(
+    short_probe_home: Path, monkeypatch: pytest.MonkeyPatch, linux: bool, existing: bool
+) -> None:
+    home = short_probe_home / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    configured = home / "sockets"
+    runtime = short_probe_home / "runtime"
+    runtime.mkdir()
+    monkeypatch.setattr(sys, "platform", "linux" if linux else "darwin")
+    monkeypatch.setattr(sys.modules[__name__], "RUN_USER_ROOT", runtime)
+    user = runtime / str(os.getuid())
+    user.mkdir()
+    if existing:
+        configured.mkdir()
+    config = dataclasses.replace(settings(), sockets_dir="sockets")
+    with ExitStack() as stack:
+        listeners = denied_servers(stack, config)
+        assert set(listeners) == {
+            "denied-sockets-dir",
+            *(["denied-run-user"] if linux else []),
+        }
+        for label, listener in listeners.items():
+            path = Path(listener.path)
+            assert path.parent.name.startswith("ag-")
+            assert path.parent.stat().st_mode & 0o777 == 0o700
+            assert path.parent.parent == (
+                configured.resolve() if label == "denied-sockets-dir" else user
+            )
+            assert path.is_socket()
+    assert configured.exists() is existing
+    assert user.is_dir()
+    assert list(user.iterdir()) == []
+    assert list(configured.glob("*")) == []
+    assert list(home.iterdir()) == ([configured] if existing else [])
+
+
+@pytest.mark.parametrize("label", ["denied-sockets-dir", "denied-run-user"])
+def test_denied_listener_creation_failure(
+    short_probe_home: Path, monkeypatch: pytest.MonkeyPatch, label: str
+) -> None:
+    tmp_path = short_probe_home
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys.modules[__name__], "RUN_USER_ROOT", tmp_path / "absent")
+    config = dataclasses.replace(settings(), sockets_dir="sockets")
+    if label == "denied-sockets-dir":
+        (tmp_path / "sockets").write_text("blocked")
+    with ExitStack() as stack, pytest.raises(pytest.fail.Exception, match=label):
+        denied_servers(stack, config)
+
+
+@pytest.mark.parametrize("label", ["denied-sockets-dir", "denied-run-user"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("refused", False, "7"),
+        ("connected", True, "7"),
+        ("connected", False, "0"),
+        ("missing", False, None),
+    ],
+)
+def test_denied_listener_observations(
+    tmp_path: Path,
+    label: str,
+    case: tuple[str, bool, str | None],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    status, arrived, code = case
+    results = tmp_path / "observed"
+    lines = "api.github.com 0\nexample.com 7\n"
+    if code is not None:
+        lines += f"{label} {code}\n"
+    results.write_text(lines)
+    sockets = {label: Listener("unused", [True] if arrived else [])}
+    if status == "refused":
+        assert_observations(Harness.CODEX, sockets, results)
+    else:
+        with pytest.raises(AssertionError):
+            assert_observations(Harness.CODEX, sockets, results)
+    assert f"{label}: {status}\n" in capsys.readouterr().out

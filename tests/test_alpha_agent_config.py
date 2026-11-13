@@ -480,13 +480,15 @@ def _credential_errors() -> list[Case]:
     cases: list[Case] = []
     account = "[agent.credentials.agent]"
     for key in REFERENCE_KEYS:
-        if key == "docker":
+        if key in ("gh", "docker"):
             continue
         _add(cases, ("credentials", "agent", key), MISSING, "is required", account)
     for key in REFERENCE_KEYS:
         for bad in ("a/b", "a/b/c/d", "a//c", "a/ /c", "", 5, None, "op://a/b/c"):
             _add(cases, ("credentials", "agent", key), bad, REFERENCE, account)
         for bad in UNSAFE_REFERENCES:
+            if key == "signing" and bad == "/b/c":
+                continue
             _add(cases, ("credentials", "agent", key), bad, REFERENCE, account)
     return cases
 
@@ -629,10 +631,10 @@ def test_credentials_account_must_be_a_table() -> None:
 
 
 def test_each_account_has_its_own_table_label() -> None:
-    table = edited("credentials", value={"agent": GOOD_ACCOUNT, "ops": {}})
-    assert refused(table) == "[agent.credentials.ops] gh is required"
-    table = edited("credentials", value={"agent": GOOD_ACCOUNT, "ops": GOOD_ACCOUNT})
-    assert [c.account for c in config.parse(table).credentials] == ["agent", "ops"]
+    table = edited("credentials", value={"agent": GOOD_ACCOUNT, "other": {}})
+    assert refused(table) == "[agent.credentials.other] signing is required"
+    table = edited("credentials", value={"agent": GOOD_ACCOUNT, "other": GOOD_ACCOUNT})
+    assert [c.account for c in config.parse(table).credentials] == ["agent", "other"]
 
 
 def test_profiles_need_one() -> None:
@@ -954,6 +956,23 @@ def test_claude_references_refuse_openssh_query(key: str) -> None:
         value="vault/item/key?ssh-format=openssh",
     )
     assert REFERENCE in refused(table)
+
+
+def test_github_credential_is_optional() -> None:
+    parsed = config.parse(edited("credentials", "agent", "gh"))
+    assert parsed.credentials[0].gh is None
+
+
+@pytest.mark.parametrize("value", ["/example/key", "/key with spaces"])
+def test_signing_accepts_absolute_key_path(value: str) -> None:
+    table = edited("credentials", "agent", "signing", value=value)
+    assert config.parse(table).credentials[0].signing == value
+
+
+@pytest.mark.parametrize("value", ["./key", "key", "../key", "/a/../key", "/key\x00"])
+def test_signing_refuses_unsafe_key_path(value: str) -> None:
+    table = edited("credentials", "agent", "signing", value=value)
+    assert (PATHS if value.startswith("/") else REFERENCE) in refused(table)
 
 
 @pytest.mark.parametrize(

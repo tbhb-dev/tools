@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 from agent_example import settings
 from test_alpha_agent_request import BUILD
 
-from tbhbdev.alpha.agent import host_tools, model
+from tbhbdev.alpha.agent import build_info, host_tools, model
 from tbhbdev.alpha.agent.decisions import request
 
 
@@ -181,3 +181,38 @@ def trusted_host_stat(
 
     monkeypatch.setattr(host_tools, "lstat", checked)
     return overrides
+
+
+def build_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, present: bool
+) -> dict[str, str]:
+    checkout = tmp_path / "tools"
+    checkout.mkdir()
+    monkeypatch.setattr(
+        build_info, "__file__", str(checkout / "src/tbhbdev/alpha/agent/build_info.py")
+    )
+    if present:
+        (checkout / ".git").write_text("gitdir: metadata\n")
+
+    def distribution(name: str) -> SimpleNamespace:
+        assert name == "tbhbdev"
+        if not present:
+            raise build_info.metadata.PackageNotFoundError
+
+        def read_text(name: str) -> str:
+            assert name == "direct_url.json"
+            return '{"vcs_info": {"commit_id": "' + "b" * 40 + '"}}'
+
+        return SimpleNamespace(read_text=read_text)
+
+    def output(command: list[str], **kwargs: object) -> str:
+        assert command == ["git", "-C", str(checkout), "rev-parse", "HEAD"]
+        assert kwargs == {"text": True, "stderr": subprocess.DEVNULL, "timeout": 5}
+        return "a" * 40 + "\n"
+
+    monkeypatch.setattr(build_info.metadata, "distribution", distribution)
+    monkeypatch.setattr(subprocess, "check_output", output)
+    return {
+        "tools_commit": "a" * 40 if present else "unknown",
+        "wheel_commit": "b" * 40 if present else "unknown",
+    }

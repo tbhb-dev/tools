@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 from fake_tool import PRIVATE_REPO, break_host_names, write_host_names
 
+from tbhbdev import userconfig
 from tbhbdev.alpha import private_names as pn
 from tbhbdev.alpha import pull_request as pr
+from tbhbdev.alpha.private_names import _configured
 
 NAMES = ["example-lab", PRIVATE_REPO]
 
@@ -395,3 +397,46 @@ def test_header_restricts_configured_names_too(
         (2, PRIVATE_REPO),
         (3, f"{PRIVATE_REPO.upper()}.git"),
     ]
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("error", [OSError, UnicodeError, userconfig.ConfigError])
+def test_configured_read_errors(
+    monkeypatch: pytest.MonkeyPatch, error: type[Exception], *, strict: bool
+) -> None:
+    def fail(*_args: object) -> None:
+        if error is UnicodeError:
+            b"\xff".decode()
+        message = "unavailable"
+        raise error(message)
+
+    monkeypatch.setattr(userconfig, "optional_strings", fail)
+    if strict:
+        with pytest.raises(
+            pn.NameListError, match=r"^cannot read supplemental private-name list$"
+        ):
+            _configured(strict=True)
+    else:
+        assert _configured() == []
+
+
+def test_strict_configured_checks_access_before_optional_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def denied(_path: Path, *, follow_symlinks: bool = True) -> None:
+        del follow_symlinks
+        raise PermissionError
+
+    with monkeypatch.context() as context:
+        context.setattr(Path, "stat", denied)
+        with pytest.raises(
+            pn.NameListError, match=r"^cannot read supplemental private-name list$"
+        ):
+            _configured(strict=True)
+
+
+def test_strict_configured_allows_absent_supplemental_list(home: Path) -> None:
+    config = home / ".config/tbhbdev/config.toml"
+    if config.exists():
+        config.rename(config.with_suffix(".saved"))
+    assert _configured(strict=True) == []

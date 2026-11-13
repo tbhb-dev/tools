@@ -27,7 +27,7 @@ from tbhbdev.alpha.agent.model import Harness, Invalid, Profile
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
-    from typing import Literal
+    from typing import BinaryIO, Literal
 
 
 VALUES = {
@@ -323,7 +323,10 @@ def check_installation_calls(
     assert {p.name for p in tmp_path.iterdir()} == {"xdg"}
 
 
-def test_signing_key_is_loaded_over_stdin_and_agent_stops(tmp_path: Path) -> None:
+@pytest.mark.parametrize("source", ["file", "reference"])
+def test_signing_key_is_loaded_over_stdin_and_agent_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, fake_reader: list[str]
+) -> None:
     key = tmp_path / "disposable-key"
     subprocess.run(
         [
@@ -341,9 +344,26 @@ def test_signing_key_is_loaded_over_stdin_and_agent_stops(tmp_path: Path) -> Non
         check=True,
         timeout=10,
     )
+    original = host_settings()
+    config = dataclasses.replace(
+        original,
+        credentials=(
+            dataclasses.replace(
+                original.credentials[0],
+                signing=str(key) if source == "file" else "example/signing/key",
+            ),
+        ),
+    )
+    monkeypatch.setitem(VALUES, "example/signing/key", key.read_text())
     with tempfile.TemporaryDirectory(prefix="ag-test-") as directory:
         tmpdir = Path(directory)
-        agent = credentials.signing_agent(key.read_text(), tmpdir, time.monotonic() + 5)
+        delivery = credentials.deliver(run_request(), config, tmpdir)
+        assert delivery.signing == key.read_text()
+        assert delivery.signing is not None
+        assert ("example/signing/key" in fake_reader) is (source == "reference")
+        agent = credentials.signing_agent(
+            delivery.signing, tmpdir, time.monotonic() + 5
+        )
         try:
             env = {"SSH_AUTH_SOCK": str(tmpdir / "ssh.sock")}
             result = subprocess.check_output(
@@ -354,7 +374,7 @@ def test_signing_key_is_loaded_over_stdin_and_agent_stops(tmp_path: Path) -> Non
             )
             assert result.strip() == key.with_suffix(".pub").read_text().strip()
             assert agent.poll() is None
-            assert [p.name for p in tmpdir.iterdir()] == ["ssh.sock"]
+            assert {p.name for p in tmpdir.iterdir()} == {"ssh.sock", "gh", "docker"}
         finally:
             process_group.stop_started(agent.pid, 0)
             agent.wait(timeout=5)
@@ -826,3 +846,151 @@ def test_auth_file_refusal_names_json_type_without_value(
         f"codex auth write-back skipped: auth: found {kind}; expected object\n"
     )
     assert source.read_text() == "{}"
+
+
+@pytest.mark.parametrize("profile", Profile)
+def test_without_build_github_credential(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_reader: list[str],
+    profile: Profile,
+) -> None:
+    original = host_settings()
+    config = dataclasses.replace(
+        original,
+        credentials=(dataclasses.replace(original.credentials[0], gh=None),),
+    )
+
+    def installation(actual: object, repository: str) -> str:
+        assert actual == config.credentials[0]
+        assert repository == "example-org/example-repo"
+        return "example-installation"
+
+    monkeypatch.setattr(credentials, "installation_token", installation)
+    result = credentials.deliver(
+        run_request(
+            profile=profile.value,
+            commit="0" * 40 if profile is Profile.REVIEW else None,
+        ),
+        config,
+        tmp_path,
+    )
+    assert result.gh_fallback is False
+    assert fake_reader == (
+        ["example/docker/value", "example/signing/key"]
+        if profile is Profile.BUILD
+        else ["example/docker/value"]
+    )
+    gh = tmp_path / "gh"
+    if profile is Profile.BUILD:
+        assert gh.stat().st_mode & 0o777 == 0o700
+        assert list(gh.iterdir()) == []
+        assert not (gh / "hosts.yml").exists()
+    else:
+        assert yaml.safe_load((gh / "hosts.yml").read_text()) == {
+            "github.com": {
+                "oauth_token": "example-installation",
+                "git_protocol": "https",
+            }
+        }
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "group",
+        "world",
+        "owner",
+        "symlink",
+        "fifo",
+        "directory",
+        "missing",
+        "oversized",
+        "unicode",
+    ],
+)
+def test_signing_file_refuses_unsafe_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, attack: str
+) -> None:
+    key = tmp_path / "key"
+    key.write_text("example-key")
+    key.chmod(0o600)
+    if attack in ("group", "world"):
+        key.chmod(0o640 if attack == "group" else 0o604)
+    elif attack == "owner":
+        monkeypatch.setattr(os, "getuid", constant(os.getuid() + 1))
+    elif attack in ("symlink", "fifo", "directory", "missing"):
+        key.rename(tmp_path / "saved")
+        if attack == "symlink":
+            key.symlink_to(tmp_path / "saved")
+        elif attack == "fifo":
+            os.mkfifo(key, 0o600)
+        elif attack == "directory":
+            key.mkdir(mode=0o700)
+    elif attack == "oversized":
+        key.write_bytes(b"k" * (64 * 1024 + 1))
+    else:
+        key.write_bytes(b"\xff")
+    original = host_settings()
+    config = dataclasses.replace(
+        original,
+        credentials=(dataclasses.replace(original.credentials[0], signing=str(key)),),
+    )
+    with pytest.raises(Invalid) as caught:
+        credentials.deliver(run_request(), config, tmp_path / "run")
+    assert str(caught.value) == (
+        "signing key file exceeds 64 KiB"
+        if attack == "oversized"
+        else "signing key file cannot be read"
+        if attack in ("symlink", "missing", "unicode", "directory")
+        else "signing key file must be an owned private regular file"
+    )
+
+
+@pytest.mark.parametrize("permission", [0o001, 0o002, 0o004, 0o010, 0o020, 0o040])
+def test_signing_file_refuses_every_external_permission(
+    tmp_path: Path, permission: int
+) -> None:
+    key = tmp_path / "key"
+    key.write_text("example-key")
+    key.chmod(0o600 | permission)
+    with pytest.raises(Invalid, match="owned private regular file"):
+        credentials.signing_key(str(key))
+
+
+def test_signing_file_accepts_size_limit_with_safe_open_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = tmp_path / "key"
+    text = "k" * (64 * 1024)
+    key.write_text(text)
+    key.chmod(0o600)
+    original = os.open
+    original_fdopen = os.fdopen
+    calls: list[str] = []
+
+    def opened(source: str, flags: int) -> int:
+        assert source == str(key)
+        assert flags == os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        calls.append(source)
+        return original(source, flags)
+
+    @contextmanager
+    def open_binary(fd: int, mode: str) -> Generator[BinaryIO]:
+        assert mode == "rb"
+        with original_fdopen(fd, mode) as incoming:
+            original_read = incoming.read
+
+            def bounded(size: int) -> bytes:
+                assert size == 64 * 1024 + 1
+                data = original_read(size)
+                assert isinstance(data, bytes)
+                return data
+
+            monkeypatch.setattr(incoming, "read", bounded)
+            yield incoming
+
+    monkeypatch.setattr(os, "open", opened)
+    monkeypatch.setattr(os, "fdopen", open_binary)
+    assert credentials.signing_key(str(key)) == text
+    assert calls == [str(key)]
