@@ -1251,16 +1251,24 @@ def claude_main_record(data: Json, env: Mapping[str, str]) -> Json:
     return {k: v for k, v in rec.items() if v}
 
 
+def finish_user_only(data: Json, env: Mapping[str, str], agent: str | None) -> None:
+    """Finish the user-store record of a Bash command that has just ended."""
+    event = data.get("hook_event_name")
+    if (
+        data.get("tool_name") == "Bash"
+        and isinstance(event, str)
+        and event in {"PostToolUse", "PostToolUseFailure"}
+    ):
+        handle_claude_bash(event, data, env, agent, user_only=True)
+
+
 def handle_claude(
     data: Json, env: Mapping[str, str], *, user_only: bool = False
 ) -> None:
     """Record a Claude hook, or just its main session in the user's store."""
     event, tool = data.get("hook_event_name"), data.get("tool_name")
-    finishes = tool == "Bash" and event in {"PostToolUse", "PostToolUseFailure"}
     if user_only and data.get("agent_id"):
-        if finishes:
-            agent = sha256_64(data["agent_id"])
-            handle_claude_bash(event, data, env, agent, user_only=True)
+        finish_user_only(data, env, sha256_64(data["agent_id"]))
         return
     effort = parse_stdin(data)[2]
     agent = None
@@ -1273,8 +1281,7 @@ def handle_claude(
             write_user_record(root, rec)
             # A command begun outside any repository can end inside one, as
             # `git init` does, so its user record must still be finished.
-            if finishes:
-                handle_claude_bash(event, data, env, None, user_only=True)
+            finish_user_only(data, env, None)
             return
         write_record(root, rec, hook_cwd(data))
     if tool == "Bash" and event in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}:
