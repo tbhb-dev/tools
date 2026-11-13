@@ -172,6 +172,13 @@ def test_allowed(text: str) -> None:
         ("gh pr merge feature-branch", MERGE.format(n="<N>")),
         ("gh pr ready 399", READY.format(n=399)),
         ("gh pr ready", READY.format(n="<N>")),
+        (
+            "gh pr ready 399 --undo",
+            (
+                "`gh pr ready` is blocked. `tbhbdev alpha pr ready` has no undo. "
+                "Ask the operator to return the PR to draft."
+            ),
+        ),
     ],
 )
 def test_hint(text: str, expected: str) -> None:

@@ -616,6 +616,11 @@ def hint(found: Match) -> str:
         return (
             f"{blocked} Update {DRAFT}, then run `tbhbdev alpha pr edit --pr {number}`."
         )
+    if found.sub == "ready" and "--undo" in found.args:
+        return (
+            f"{blocked} `tbhbdev alpha pr ready` has no undo. Ask the operator to "
+            "return the PR to draft."
+        )
     if found.sub == "ready":
         return f"{blocked} Run `tbhbdev alpha pr ready {number}` instead."
     return (
