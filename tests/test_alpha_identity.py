@@ -1118,6 +1118,22 @@ def test_a_user_store_it_cant_write_keeps_the_command_records(
     assert ai.user_store().read_text() == "not a directory"
 
 
+def test_commands_from_a_directory_outside_a_repository_still_match(
+    repo: Path, plain: Path
+) -> None:
+    # A teammate runs in a session whose directory is no repository, and commits
+    # in a clone: its command is found through the user store alone.
+    ai.record_command(ROOT, CHILD, "git commit -m x", plain)
+    assert list(plain.iterdir()) == []
+    assert not (ai.user_store() / "cmd-stores").exists()
+    match = ai.match_command_agent
+    assert match(ROOT, ["sh -c eval 'git commit -m x'"], repo) == (CHILD, False)
+    ai.finish_command(ROOT, "git commit -m x", CHILD, plain)
+    assert match(ROOT, ["sh -c eval 'git commit -m x'"], repo) == (None, False)
+    (path,) = (ai.user_store() / "cmds" / ("a" * 16)).glob("*.json")
+    assert loaded(path)["done"] is not None
+
+
 def time_of(repo: Path) -> float:
     (path,) = (repo / ".git" / "tbhb-alpha" / "cmds" / ("a" * 16)).glob("*.json")
     return float(cast("float", loaded(path)["ts"]))

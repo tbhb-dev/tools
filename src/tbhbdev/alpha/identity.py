@@ -794,9 +794,9 @@ def record_command(
     root: str, agent: str | None, cmd: object, cwd: Path | None = None
 ) -> None:
     """Record a Bash command about to run, by hash, with the agent running it."""
-    state = state_dir(cwd)
-    if not state or not isinstance(cmd, str):
+    if not isinstance(cmd, str):
         return
+    state = state_dir(cwd)
     name = f"{uuid.uuid4().hex}.json"
     rec: Json = {
         "agent": agent,
@@ -804,19 +804,22 @@ def record_command(
         "ts": time.time(),
         "done": None,
     }
-    write_json(state / "cmds" / hx(root) / name, rec)
-    # A copy in the user's store lets a commit in another clone find the agent.
+    if state:
+        write_json(state / "cmds" / hx(root) / name, rec)
+    # A copy in the user's store lets a commit in another clone find the agent,
+    # and is the only record of a session whose directory is no repository.
     try:
         user_cmds = user_store() / "cmds" / hx(root)
         # The chmod below sets the mode whatever this one was, so the pragma
         # hides equivalent mutants.
         user_cmds.mkdir(mode=0o700, parents=True, exist_ok=True)  # pragma: no mutate
         user_store().chmod(0o700)
-        references = user_store() / "cmd-stores" / hx(root)
-        references.mkdir(mode=0o700, parents=True, exist_ok=True)
-        write_private_json(
-            references / f"{hx(sha256_64(str(state)))}.json", {"store": str(state)}
-        )
+        if state:
+            references = user_store() / "cmd-stores" / hx(root)
+            references.mkdir(mode=0o700, parents=True, exist_ok=True)
+            write_private_json(
+                references / f"{hx(sha256_64(str(state)))}.json", {"store": str(state)}
+            )
         write_private_json(user_cmds / name, rec)
     except OSError:
         return
@@ -829,11 +832,14 @@ def finish_command(
 
     A later identical command is then unambiguous.
     """
-    state = state_dir(cwd)
-    if not state or not isinstance(cmd, str):
+    if not isinstance(cmd, str):
         return
+    state = state_dir(cwd)
     hashes, done = set(cmd_hashes(cmd)), time.time()
-    for store, write in ((state, write_json), (user_store(), write_private_json)):
+    stores = [(user_store(), write_private_json)]
+    if state:
+        stores.insert(0, (state, write_json))
+    for store, write in stores:
         try:
             with locked(store):
                 candidates = [
