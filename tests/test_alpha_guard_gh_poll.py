@@ -2,6 +2,7 @@
 # Copyright Tony Burns
 """Tests for tbhbdev alpha guard-gh-poll, which shares guard-gh-pr's scanner."""
 
+import datetime as dt
 import io
 import itertools
 import json
@@ -711,3 +712,52 @@ def test_deep_nesting_fails_open(
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
     assert guard.main() == 0
     assert capsys.readouterr() == ("", "")
+
+
+RUN_LIST_CMD = (
+    "gh run list -R tbhb-dev/{} --limit 100 --json "
+    "conclusion,createdAt,startedAt,updatedAt,workflowName,attempt,event"
+)
+
+
+@pytest.mark.parametrize("repo", ["tools", "other-repo", "a.b_c-1"])
+def test_capped_pass_is_allowed_through_its_last_day(
+    monkeypatch: pytest.MonkeyPatch, repo: str
+) -> None:
+    for day in (dt.date(2026, 11, 13), guard.CAPPED_RUN_LIST_UNTIL):
+        monkeypatch.setattr(guard, "today", lambda day=day: day)
+        assert guard.inspect(RUN_LIST_CMD.format(repo))[0] is None
+
+
+def test_capped_pass_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    day = guard.CAPPED_RUN_LIST_UNTIL + dt.timedelta(days=1)
+    monkeypatch.setattr(guard, "today", lambda: day)
+    assert guard.inspect(RUN_LIST_CMD.format("tools"))[0] == guard.POLL_REASON
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh run list",
+        (
+            "gh run list -R other-org/tools --limit 100 --json "
+            "conclusion,createdAt,startedAt,updatedAt,workflowName,attempt,event"
+        ),
+        RUN_LIST_CMD.format("tools").replace("100", "101"),
+        RUN_LIST_CMD.format("tools").replace(",event", ""),
+        RUN_LIST_CMD.format("tools") + " --paginate",
+        RUN_LIST_CMD.format("tools") + " --watch",
+        RUN_LIST_CMD.format("tools/x"),
+        RUN_LIST_CMD.format("tools").replace("--limit 100 ", ""),
+        "gh run watch 1",
+    ],
+)
+def test_capped_pass_is_only_that_command(
+    monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    monkeypatch.setattr(guard, "today", lambda: dt.date(2026, 11, 13))
+    assert guard.inspect(command)[0] == guard.POLL_REASON
+
+
+def test_today_is_a_utc_date() -> None:
+    assert isinstance(guard.today(), dt.date)

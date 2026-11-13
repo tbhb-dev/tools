@@ -68,6 +68,7 @@ name. ``tbhbdev alpha
 gh-shim`` budgets the gh calls a script makes, which no hook can see.
 """
 
+import datetime as dt
 import itertools
 import json
 import re
@@ -111,6 +112,15 @@ LIST_PATH = re.compile(
 )
 RUNS_PATH = re.compile(r"(?:.*/)?repos/[^/]+/[^/]+/actions/runs")
 SHA = re.compile(r"[0-9a-fA-F]{40}")
+# The one-pass exception for `gh run list` that tbhb granted on 2026-11-13
+# (Decisions/2026-11-13-capped-gh-run-list-exception.md): this exact command
+# for a tbhb-dev repository, through the end of this UTC day. Remove it once
+# the pass is done.
+CAPPED_RUN_LIST_UNTIL = dt.date(2026, 11, 14)
+CAPPED_RUN_LIST = re.compile(
+    r"-R tbhb-dev/[A-Za-z0-9._-]+ --limit 100 --json "
+    r"conclusion,createdAt,startedAt,updatedAt,workflowName,attempt,event"
+)
 LOOPS = {"while", "until", "for"}
 # env's long options, each with the short option it spells ("" for the rest).
 ENV_LONG = {
@@ -185,13 +195,27 @@ def bulk_api(args: list[str]) -> bool:
     return False
 
 
+def today() -> dt.date:
+    """The current UTC date."""
+    return dt.datetime.now(dt.UTC).date()
+
+
+def capped_run_list(args: list[str]) -> bool:
+    """Whether the words after ``run list`` are the one capped pass, unexpired."""
+    return today() <= CAPPED_RUN_LIST_UNTIL and bool(
+        CAPPED_RUN_LIST.fullmatch(" ".join(args))
+    )
+
+
 def github_poll(args: list[str]) -> bool:
     """Whether the words after ``gh``, past its global flags, poll GitHub."""
     i = 0
     while i < len(args) and args[i].startswith("-"):
         i += 2 if args[i] in VALUE_FLAGS else 1
     rest = args[i:]
-    if rest[:2] in (["run", "watch"], ["run", "list"]):
+    if rest[:2] == ["run", "list"]:
+        return not capped_run_list(rest[2:])
+    if rest[:2] == ["run", "watch"]:
         return True
     if rest[:2] == ["pr", "checks"]:
         return any(w.partition("=")[0] == "--watch" for w in rest[2:])
