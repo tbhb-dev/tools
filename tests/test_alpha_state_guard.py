@@ -1171,8 +1171,8 @@ def invisible_characters() -> tuple[dict[str, list[str]], set[str]]:
     """Scan Unicode once, outside the per-test hook execution budget."""
     categories: dict[str, list[str]] = {c: [] for c in ("Cf", "Mn", "Me", "Cc")}
     hidden = set[str]()
-    for codepoint in range(0x110000):
-        char = chr(codepoint)
+    for number in range(0x110000):
+        char = chr(number)
         if char.isspace():
             continue
         category = unicodedata.category(char)
