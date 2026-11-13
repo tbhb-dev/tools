@@ -116,6 +116,7 @@ SHA = re.compile(r"[0-9a-fA-F]{40}")
 # (Decisions/2026-11-13-capped-gh-run-list-exception.md): this exact command
 # for a tbhb-dev repository, through the end of this UTC day. Remove it once
 # the pass is done.
+SUBSTITUTION = re.compile(r"\$[({]|`")
 CAPPED_RUN_LIST_UNTIL = dt.date(2026, 11, 14)
 CAPPED_RUN_LIST_REPO = re.compile(r"tbhb-dev/[A-Za-z0-9._-]+")
 CAPPED_RUN_LIST_TAIL = [
@@ -374,8 +375,14 @@ def inner_script(words: list[str], body: str | None) -> str | None:
     return None
 
 
-def denial(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
-    """One simple command's deny reason, and the programs it runs."""
+def denial(
+    command: list[str], body: str | None, *, plain: bool = False
+) -> tuple[str | None, set[str]]:
+    """One simple command's deny reason, and the programs it runs.
+
+    ``plain`` says this is the only command of the top-level text, with no substitution.
+    Only then may a bare ``gh`` be the capped run list.
+    """
     words = unwrapped(command)
     if words is None:
         return UNSET_REASON, set()
@@ -385,16 +392,17 @@ def denial(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
     unset = program == "unset" and any(names_token(word) for word in words[1:])
     if unset or clears_token(program, words[1:]):
         return UNSET_REASON, set()
-    if program == "gh" and github_poll(words[1:], bare=words == command):
+    bare = plain and words == command and words[0] == "gh"
+    if program == "gh" and github_poll(words[1:], bare=bare):
         return POLL_REASON, set()
     script = inner_script(words, body)
     if script is None:
         return None, {program}
-    message, inner = inspect(script)
+    message, inner = inspect(script, top=False)
     return message, {program, *inner}
 
 
-def inspect(text: str) -> tuple[str | None, set[str]]:
+def inspect(text: str, *, top: bool = True) -> tuple[str | None, set[str]]:
     """The deny reason for a shell command, or None, and the programs it runs.
 
     Each open loop collects the programs run from its keyword to its
@@ -403,10 +411,12 @@ def inspect(text: str) -> tuple[str | None, set[str]]:
     loops: list[set[str]] = []
     programs: set[str] = set()
     scanner = BodyScanner(text)
-    for index, command in enumerate(scanner.run()):
+    commands = scanner.run()
+    plain = top and len(commands) == 1 and SUBSTITUTION.search(text) is None
+    for index, command in enumerate(commands):
         if opens_loop(command):
             loops.append(set())
-        message, seen = denial(command, scanner.bodies.get(index))
+        message, seen = denial(command, scanner.bodies.get(index), plain=plain)
         if message:
             return message, programs
         programs |= seen
