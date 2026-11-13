@@ -8,6 +8,10 @@ This is tbhb-dev/tools, the public repository of shared tools for tbhb-dev work.
 - Secrets live in 1Password only. Never paste one into chat or commit one to git.
 - A tool that one repository needs for its own checks or releases belongs in that repository or in tbhb-dev/rules, not here.
 
+## Models
+
+Before choosing a model for a subagent or peer run, read models/README.md in tbhb-dev/wiki (<https://github.com/tbhb-dev/wiki/blob/main/models/README.md>).
+
 ## Commits and pull requests
 
 - Branch first. Every change lands through a pull request.
