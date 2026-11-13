@@ -1309,49 +1309,48 @@ UNFINISHED = frozenset({"QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "PENDIN
 PENDING_CODE = 3
 
 
-def check_outcome(job: object) -> tuple[str, str, str]:
-    """A check's name, the label to print and its kind: green, pending or failed.
-
-    A check run reads its conclusion only once its status is COMPLETED, and is
-    pending only for an unfinished status. A commit status reads from its state.
-    Anything outside the known values is a failure, printed as written.
+def check_kind(job: object) -> tuple[dict[str, object], str, str]:
+    """A rollup entry as a mapping, its kind (CheckRun or StatusContext) and name.
 
     Raises:
         SystemExit: the entry isn't a mapping, has no usable name or context, or
-            names both.
+            names both without a ``__typename``.
     """
     if not isinstance(job, dict):
         message = f"a check of the rollup isn't an object: {job!r}"
         raise SystemExit(message)
     job = cast("dict[str, object]", job)  # pragma: no mutate
     kind = job.get("__typename")
-    if kind is None:
+    if kind is None and (job.get("name") is None) != (job.get("context") is None):
         kind = "CheckRun" if job.get("context") is None else "StatusContext"
-        if job.get("name") is not None and job.get("context") is not None:
-            kind = "both"
     name = job.get("context" if kind == "StatusContext" else "name")
     if (
-        kind not in {"CheckRun", "StatusContext"}
+        kind not in ("CheckRun", "StatusContext")
         or not isinstance(name, str)
         or not name
     ):
         message = f"a check of the rollup has no usable name or context: {job}"
         raise SystemExit(message)
-    if kind == "StatusContext":
-        value = job.get("state")
-        unfinished = value == "PENDING"
-    else:
-        value = job.get("status")
-        unfinished = value in UNFINISHED
-        if value == "COMPLETED":
-            value = job.get("conclusion")
+    return job, kind, name
+
+
+def check_outcome(job: object) -> tuple[str, str, str]:
+    """A check's name, the label to print and its kind: green, pending or failed.
+
+    A check run reads its conclusion only once its status is COMPLETED, and is
+    pending only for an unfinished status. A commit status reads from its state.
+    Anything outside the known values is a failure, printed as written.
+    """
+    job, kind, name = check_kind(job)
+    status = job.get("state" if kind == "StatusContext" else "status")
+    value = job.get("conclusion") if status == "COMPLETED" else status
     label = value if isinstance(value, str) and value else "(none)"
-    if unfinished:
+    if isinstance(status, str) and status in (
+        UNFINISHED if kind == "CheckRun" else {"PENDING"}
+    ):
         return name, "PENDING", "pending"
-    green = label in GREEN_CONCLUSIONS and (
-        kind == "StatusContext" or job.get("status") == "COMPLETED"
-    )
-    return name, label, "green" if green else "failed"
+    done = kind == "StatusContext" or status == "COMPLETED"
+    return name, label, "green" if done and label in GREEN_CONCLUSIONS else "failed"
 
 
 def checks(number: int) -> int:

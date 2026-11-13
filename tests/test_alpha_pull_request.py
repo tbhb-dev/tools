@@ -3197,6 +3197,9 @@ def test_rerun_requires_a_numeric_pr_number(argv: tuple[str, ...]) -> None:
                 ("SKIPPED", "tests: SKIPPED\n"),
             ]
         ],
+        ([{"name": "tests", "status": ["QUEUED"]}], "tests: (none)\n", 1),
+        ([{"name": "tests", "status": {"a": 1}}], "tests: (none)\n", 1),
+        ([{"context": "ci", "state": ["PENDING"]}], "ci: (none)\n", 1),
         (
             [{"name": "tests", "status": "COMPLETED", "conclusion": "PENDING"}],
             "tests: PENDING\n",
@@ -3290,6 +3293,8 @@ def test_checks_fails_without_any_check(
         {"name": 4},
         {"__typename": "StatusContext", "name": "tests", "state": "SUCCESS"},
         {"__typename": "Other", "name": "tests"},
+        {"__typename": ["CheckRun"], "name": "tests"},
+        {"__typename": {"x": 1}, "name": "tests"},
         {"name": "tests", "context": "other", "state": "SUCCESS"},
     ],
 )
