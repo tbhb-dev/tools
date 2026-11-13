@@ -628,6 +628,27 @@ def test_protected_branch_refused_beside_other_refs(
     assert capsys.readouterr().err.startswith("refs/heads/main: push to a protected")
 
 
+def test_protected_branch_does_not_hide_later_refs(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    base = git(repo, "rev-parse", "HEAD")
+    head = commit(repo)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            f"refs/heads/topic {head} refs/heads/main {base}\n"
+            f"refs/heads/topic {base} refs/heads/topic {head}\n"
+        ),
+    )
+    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    err = capsys.readouterr().err
+    assert "refs/heads/main: push to a protected" in err
+    assert "refs/heads/topic: non-fast-forward push refused" in err
+
+
 @pytest.mark.parametrize(
     "ref",
     [
