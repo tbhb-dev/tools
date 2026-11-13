@@ -1389,10 +1389,11 @@ def checks(number: int) -> int:
         raise SystemExit(message)
     data = cast("dict[str, object]", data)  # pragma: no mutate
     print(data["headRefOid"])
-    jobs = data["statusCheckRollup"] or []
-    if not isinstance(jobs, list):
-        message = f"the checks of PR {number} aren't a list: {jobs!r}"
+    rollup: object = data["statusCheckRollup"] or []
+    if not isinstance(rollup, list):
+        message = f"the checks of PR {number} aren't a list: {rollup!r}"
         raise SystemExit(message)
+    jobs = cast("list[object]", rollup)  # pragma: no mutate
     if not jobs:
         print(f"no checks on PR {number}", file=sys.stderr)
         return 1
