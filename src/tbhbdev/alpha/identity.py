@@ -184,24 +184,33 @@ CODEX_TAIL = 1024 * 1024
 CODEX_HEAD = 1024 * 1024
 CODEX_MAX_AGE = 3 * 86400
 
-# Antigravity model keys -> (provider, canonical model id, effort).
-# Source of every entry: `agy models` on 1.4.12 (key plus display name, such as
+# Antigravity model keys -> (provider, canonical model id, effort or None).
+# Source of every entry: `agy models` on 1.5.7 (key plus display name, such as
 # "Gemini 3.8 Flash (Medium)"). Effort is the key suffix, confirmed by the
-# display-name parenthetical in each case. The gemini-* canonical IDs are
-# inferred from display names and the old design, NOT verified against Google's
-# API. Never regex-strip: unknown keys (gemini-3.8-flash-tiered, ...) pass
-# through whole.
-AGY_MODELS: dict[str, tuple[str, str, str]] = {
+# display-name parenthetical in each case. Each base has its own effort set:
+# gemini-4-hydrogen has xhigh, and the other bases stop at high. The two
+# orchestrator keys carry no effort suffix, so their entries have no effort, and
+# their model id is the key itself: the display name ("Orchestrator (Carbon)")
+# names an underlying model, but nothing observed says which model answers. The
+# gemini-* canonical IDs are inferred from display names and the old design,
+# NOT verified against Google's API. Never regex-strip: unknown keys
+# (gemini-3.8-flash-tiered, ...) pass through whole.
+AGY_EFFORTS = ("low", "medium", "high")
+AGY_MODELS: dict[str, tuple[str, str, str | None]] = {
     f"{base}-{effort}": (provider, base, effort)
-    for base, provider in (
-        ("gemini-4-argon", "gcp.gemini"),
-        ("gemini-3.8-flash", "gcp.gemini"),
-        ("claude-opus-5-5", "anthropic"),
-        ("claude-sonnet-5-5", "anthropic"),
+    for base, provider, efforts in (
+        ("gemini-4-argon", "gcp.gemini", AGY_EFFORTS),
+        ("gemini-4-carbon", "gcp.gemini", AGY_EFFORTS),
+        ("gemini-4-hydrogen", "gcp.gemini", (*AGY_EFFORTS, "xhigh")),
+        ("gemini-3.8-flash", "gcp.gemini", AGY_EFFORTS),
+        ("claude-opus-5-5", "anthropic", AGY_EFFORTS),
+        ("claude-sonnet-5-5", "anthropic", AGY_EFFORTS),
     )
-    for effort in ("low", "medium", "high")
+    for effort in efforts
 }
 AGY_MODELS["gpt-oss-120b-medium"] = ("openai", "gpt-oss-120b", "medium")
+for _orchestrator in ("gemini-pro-orchestrator", "gemini-pro-orchestrator-argon"):
+    AGY_MODELS[_orchestrator] = ("gcp.gemini", _orchestrator, None)
 
 type Json = dict[str, object]
 
