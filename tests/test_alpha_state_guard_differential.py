@@ -14,12 +14,10 @@ CANDIDATES = (
     "I'll tell you once the fix is deployed.",
     "The fix isn't deployed.",
     "The fix never merged.",
-    "No build is running.",
     "I applied nothing.",
     "Please get the fix merged.",
     "Can you confirm the fix is merged?",
     "Could you get it merged?",
-    "I merged none.",
     "I merged nothing.",
     "It hasn't merged",
     "It never merged.",
@@ -36,35 +34,31 @@ CANDIDATES = (
 TIMED = "a status word after a time or condition word"
 MODAL = "a status word after a modal or 'to be'"
 NEGATED = "a status word in a clause with one negation"
+RULE_NAMES = {TIMED: "timed", MODAL: "modal", NEGATED: "negated"}
 INTENDED_PASSES: dict[str, str] = {
     "I applied nothing.": NEGATED,
-    "I merged none.": NEGATED,
     "I merged nothing.": NEGATED,
     "I'll tell you once the fix is deployed and merged.": TIMED,
     "I'll tell you once the fix is deployed.": TIMED,
     "If it merged I'm done.": TIMED,
     "If the fix is deployed, tell me.": TIMED,
     "If the fix is deployed.": TIMED,
-    "Isn't the fix merged?": NEGATED,
     "It hasn't merged": NEGATED,
     "It never merged.": NEGATED,
     "It will be merged and deployed.": MODAL,
     "It will be merged.": MODAL,
     "Never merged.": NEGATED,
-    "No build is running.": NEGATED,
     "No fix merged.": NEGATED,
     "Nobody deployed the fix.": NEGATED,
     "Not everything is deployed.": NEGATED,
     "Nothing merged.": NEGATED,
-    "Once the fix is deployed it is merged.": NEGATED,
+    "Once the fix is deployed it is merged.": TIMED,
     "Once the fix is deployed.": TIMED,
     "Tell me when it is merged.": TIMED,
     "The fix isn't deployed.": NEGATED,
     "The fix never merged.": NEGATED,
     "The fix is not merged.": NEGATED,
     "The fix should already be deployed.": MODAL,
-    "The service Never is deployed.": NEGATED,
-    "The service Not is deployed.": NEGATED,
     "WILL merged.": MODAL,
     "Wait until the fix is deployed.": TIMED,
     "What if the fix is merged?": TIMED,
@@ -93,7 +87,6 @@ PROBES = (
     "Everything is deployed.",
     "Fix merged?",
     "How was the fix merged?",
-    "I merged none.",
     "I merged nothing.",
     "I'll get it merged and the PR is merged.",
     "I'll tell you once the fix is deployed and merged.",
@@ -149,8 +142,6 @@ PROBES = (
     "The fix will be deployed, it merged.",
     "The merged PR is merged.",
     "The merged code is live.",
-    "The service Never is deployed.",
-    "The service Not is deployed.",
     "The site /never is deployed.",
     "The site /not is live.",
     "The two merged PRs are open.",
@@ -309,6 +300,23 @@ def newly_passing() -> set[str]:
 def new_pass_roots() -> set[str]:
     roots = corpus_roots()
     return {roots[s] for s in newly_passing()}
+
+
+def responsible_rules(sentence: str) -> set[str]:
+    """The exemption rules that exempt at least one claim match in SENTENCE."""
+    return {
+        rule.__name__
+        for rule in state_guard.EXEMPTIONS
+        for match in state_guard.CLAIM.finditer(sentence)
+        if rule(sentence, match)
+    }
+
+
+def test_each_new_pass_comes_from_its_roots_rule() -> None:
+    roots = corpus_roots()
+    for sentence in newly_passing():
+        expected = RULE_NAMES[INTENDED_PASSES[roots[sentence]]]
+        assert expected in responsible_rules(sentence), sentence
 
 
 def exempt_everything(_chunk: str, _match: re.Match[str]) -> bool:
