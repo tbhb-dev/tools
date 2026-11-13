@@ -5,7 +5,10 @@ from __future__ import annotations
 import ast
 import os
 import re
+import shutil
+import subprocess  # nosec B404
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tbhbdev.alpha import private_names as pn
@@ -26,6 +29,7 @@ SAFE = (
 )
 HOOK_ARGUMENTS = 2
 PROTECTED = frozenset({"refs/heads/main", "refs/heads/master"})
+GIT_PATHS = 3
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
@@ -145,6 +149,51 @@ def push_problems(remote: str, url: str, lines: Sequence[str]) -> list[str]:
     return problems
 
 
+def linked_worktree() -> Path | None:
+    """Return the top of the current linked worktree, or None in a main checkout."""
+    code, out = git(
+        *SAFE,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-dir",
+        "--git-common-dir",
+        "--show-toplevel",
+    )
+    lines = out.splitlines()
+    if code or len(lines) != GIT_PATHS or lines[0] == lines[1]:
+        return None
+    return Path(lines[2])
+
+
+def bazelisk_path() -> str | None:
+    """Find bazelisk on the absolute PATH entries only."""
+    dirs = [
+        d for d in os.environ.get("PATH", "").split(os.pathsep) if Path(d).is_absolute()
+    ]
+    return shutil.which("bazelisk", path=os.pathsep.join(dirs))
+
+
+def stop_bazel() -> None:
+    """Ask a linked worktree's Bazel server to stop, without waiting for it."""
+    top = linked_worktree()
+    if top is None:
+        return
+    try:
+        exe = bazelisk_path()
+        if exe is None or not (top / "MODULE.bazel").is_file():
+            return
+        subprocess.Popen(  # nosec B603
+            [exe, "shutdown"],
+            cwd=top,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return
+
+
 def main(argv: list[str], prog: str) -> int:
     if len(argv) != HOOK_ARGUMENTS:
         print(f"usage: {prog} REMOTE URL", file=sys.stderr)
@@ -163,4 +212,6 @@ def main(argv: list[str], prog: str) -> int:
         problems = ["pre-push-guard: cannot inspect push; push refused"]
     for problem in problems:
         print(problem, file=sys.stderr)
+    if not problems:
+        stop_bazel()
     return int(bool(problems))
