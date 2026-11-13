@@ -1,28 +1,4 @@
-It will be deployed/live.	a forecast, not a report
-It will be merged (src/app.py unchanged).	a forecast, not a report
-It will be merged - can you check?	a forecast, not a report
-It will be merged although the build failed.	a forecast, not a report
-It will be merged and the build failed.	a forecast, not a report
-It will be merged but the build failed.	a forecast, not a report
-It will be merged except the build failed.	a forecast, not a report
-It will be merged however the build failed.	a forecast, not a report
-It will be merged though the build failed.	a forecast, not a report
-It will be merged whereas the build failed.	a forecast, not a report
-It will be merged while the build failed.	a forecast, not a report
-It will be merged – can you check?	a forecast, not a report
-It will be merged — can you check?	a forecast, not a report
-It will be merged, "please check later".	a forecast, not a report
-It will be merged, 2 commands printed "please check later".	a forecast, not a report
-It will be merged, can you check?	a forecast, not a report
-It will be merged-into-main.	a forecast, not a report
 It will be merged.	a forecast, not a report
-It will be merged/verified.	a forecast, not a report
-It will be merged; Source: N/A.	a forecast, not a report
-It will be merged; at 20 requests per review.	a forecast, not a report
-It will be merged; build 12345 failed.	a forecast, not a report
-It will be merged; can I read back the result?	a forecast, not a report
-It will be merged; can you check?	a forecast, not a report
-It will be merged; per N workers.	a forecast, not a report
 Look at "merged" now.	a word mention
 The word "merged".	a word mention
 Wait until the fix is deployed.	a condition, not a report

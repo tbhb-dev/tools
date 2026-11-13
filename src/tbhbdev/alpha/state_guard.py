@@ -155,12 +155,12 @@ CLOSING_QUOTES = ('"', "\u201d")
 # A rule never excuses a claim that a qualifier ties to the present: "already",
 # "now" and the like say the state holds, so the sentence reports it.
 PRESENT = re.compile(r"\b(?:now|already|yet|still|currently|just)\b", re.IGNORECASE)
-LATER_QUALIFIER = re.compile(
-    r"\b(?:now|already|yet|currently|current|as of|by|at this point|today|"
-    r"yesterday|just)\b",
-    re.IGNORECASE,
-)
 CLAUSE_END = re.compile(r"[\s\"\u201d'.!?,;:)]*")
+# What may follow a forecast: end punctuation, or one "when", "if" or "once"
+# clause with no sentence break inside it.
+FORECAST_END = re.compile(
+    r"(?:\s+(?:when|if|once)\b[^.!?;,\u2013\u2014]*)?[\s.!?]*", re.IGNORECASE
+)
 MENTION_END = re.compile(r"\s*(?:now\s*)?[.!?]*\s*", re.IGNORECASE)
 
 
@@ -179,11 +179,17 @@ def awaited(chunk: str, match: re.Match[str]) -> bool:
 
 
 def forecast(chunk: str, match: re.Match[str]) -> bool:
-    """MATCH follows "it will be" and predicts, with no tie to the present."""
+    """MATCH follows "it will be" and predicts, with no tie to the present.
+
+    Only end punctuation or one "when", "if" or "once" clause without a claim
+    word may follow, so nothing after MATCH can assert the present state.
+    """
+    tail = chunk[match.end() :]
     return bool(
         FORECAST_LEAD.fullmatch(chunk[: match.start()])
         and not PRESENT.search(match.group())
-        and not LATER_QUALIFIER.search(chunk[match.end() :])
+        and FORECAST_END.fullmatch(tail)
+        and not CLAIM.search(tail)
     )
 
 

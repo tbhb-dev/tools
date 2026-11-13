@@ -106,3 +106,22 @@ I "merged" the PR.
 The fix is already "merged".
 It isn't just merged.
 The fix is merged as of yesterday.
+It will be merged anymore.
+It will be merged since Monday.
+It will be merged so far.
+It will be merged still.
+It will be merged these days.
+Wait until I merged it.
+It will be merged as it stands.
+It will be merged at present.
+It will be merged and that is true.
+It will be merged and that is the status.
+It will be merged and it is.
+It will be merged – it is.
+It will be merged — that is its present state.
+It will be merged as we speak.
+It will be merged at this very moment.
+It will be merged but the build failed.
+It will be merged while the build failed.
+It will be merged and the status is final.
+It will be merged and which it is.

@@ -306,21 +306,30 @@ def test_the_exemption_set_is_exactly_the_three_rules() -> None:
 MAIN_SHA = "d604159f7fb7382426be353a940121051fd080d9"
 # Hash of the three judge patterns and their flags on main at MAIN_SHA.
 MAIN_PATTERNS_SHA256 = (
-    "60320053b52b13b07bba1181508c312df6bfe3ce19477e8f6f991c23f8f461fa"
+    "5bb435c05d11f76ccc858fb3de6693bd7e8ac6a512f0c6b7c50e92ad1810421e"
 )
 JUDGE_PATTERNS = ("CLAIM", "EVIDENCE", "SENTENCE_END")
 
 
-def pattern_digest(patterns: dict[str, re.Pattern[str]]) -> str:
+def pattern_digest(patterns: dict[str, re.Pattern[str]], max_quoted: int) -> str:
     text = "\n".join(
         f"{name}={patterns[name].pattern!r}|{patterns[name].flags}"
         for name in JUDGE_PATTERNS
     )
-    return hashlib.sha256(text.encode()).hexdigest()
+    return hashlib.sha256(f"{text}\nMAX_QUOTED={max_quoted}".encode()).hexdigest()
 
 
-def main_patterns() -> dict[str, re.Pattern[str]] | None:
-    """The judge patterns from main's file at MAIN_SHA, or None without that commit."""
+DRIFT_HELP = (
+    f"The judge patterns or MAX_QUOTED differ from main at {MAIN_SHA}. "
+    "To rebase this change on a newer main, set MAIN_SHA to that commit, run "
+    "this test's pattern_digest on main's values and paste it into "
+    "MAIN_PATTERNS_SHA256, then rebuild tests/state_guard_baseline.py from "
+    "main's file."
+)
+
+
+def main_patterns() -> tuple[dict[str, re.Pattern[str]], int] | None:
+    """The judge patterns and MAX_QUOTED from main at MAIN_SHA, or None."""
     path = "src/tbhbdev/alpha/state_guard.py"
     root = Path(__file__).parent.parent
     shown = subprocess.run(  # fixed argv, a pinned sha
@@ -332,13 +341,16 @@ def main_patterns() -> dict[str, re.Pattern[str]] | None:
     if shown.returncode:
         return None
     found: dict[str, re.Pattern[str]] = {}
+    max_quoted = -1
     for node in ast.parse(shown.stdout).body:
         if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
             name = node.targets[0].id
+            if name == "MAX_QUOTED":
+                max_quoted = ast.literal_eval(node.value)
             if name in JUDGE_PATTERNS:
                 code = compile(ast.Expression(node.value), name, "eval")
                 found[name] = eval(code, {"re": re})  # noqa: S307  # re.compile call
-    return found
+    return found, max_quoted
 
 
 def head_patterns() -> dict[str, re.Pattern[str]]:
@@ -346,13 +358,14 @@ def head_patterns() -> dict[str, re.Pattern[str]]:
 
 
 def test_the_head_judge_patterns_are_main_s_at_the_pinned_sha() -> None:
-    assert pattern_digest(head_patterns()) == MAIN_PATTERNS_SHA256
+    digest = pattern_digest(head_patterns(), state_guard.MAX_QUOTED)
+    assert digest == MAIN_PATTERNS_SHA256, DRIFT_HELP
 
 
 def test_the_pinned_digest_is_main_s_when_the_commit_is_present() -> None:
-    patterns = main_patterns()
-    if patterns is not None:
-        assert pattern_digest(patterns) == MAIN_PATTERNS_SHA256
+    main = main_patterns()
+    if main is not None:
+        assert pattern_digest(*main) == MAIN_PATTERNS_SHA256, DRIFT_HELP
 
 
 def test_the_baseline_patterns_are_the_head_s() -> None:
@@ -453,8 +466,6 @@ def test_one_excused_claim_does_not_excuse_a_second() -> None:
         "Wait until the fix is deployed!",
         "Wait until the fix is deployed)",
         "It will be merged when tests pass.",
-        "It will be merged after review.",
-        "It will be merged soon.",
         'The word "merged"',
         'The word "merged"!',
         'The word "merged" now',
@@ -483,6 +494,8 @@ def test_each_tail_a_rule_allows_still_passes(sentence: str) -> None:
         "It will be merged, current state.",
         "It will be merged today.",
         "It will be merged by Friday.",
+        "It will be merged soon.",
+        "It will be merged after review.",
         "It will be merged at this point.",
         "It will be merged just now.",
         'The word "merged" now applies.',
@@ -496,3 +509,58 @@ def test_each_tail_a_rule_allows_still_passes(sentence: str) -> None:
 def test_a_qualifier_or_a_trailing_assertion_blocks(sentence: str) -> None:
     assert main_blocks(sentence)
     assert head_blocks(sentence)
+
+
+@pytest.mark.parametrize(
+    "word", ["now", "already", "yet", "still", "currently", "just"]
+)
+@pytest.mark.parametrize("upper", [False, True])
+def test_each_present_word_before_the_claim_blocks_a_wait(
+    word: str, *, upper: bool
+) -> None:
+    shown = word.upper() if upper else word
+    assert head_blocks(f"Wait until it is {shown} deployed.")
+
+
+@pytest.mark.parametrize("word", ["NOW", "ALREADY"])
+def test_a_present_word_in_a_forecast_claim_blocks(word: str) -> None:
+    assert head_blocks(f"It will be {word} done.")
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "It will be merged anymore.",
+        "It will be merged since Monday.",
+        "It will be merged so far.",
+        "It will be merged still.",
+        "It will be merged these days.",
+        "Wait until I merged it.",
+        "It will be merged as it stands.",
+        "It will be merged at present.",
+        "It will be merged and that is true.",
+        "It will be merged \u2013 it is.",
+        "It will be merged \u2014 that is the status.",
+        "It will be merged if CI passes, thanks.",
+        "It will be merged once it is merged.",
+        "It will be merged when the fix is deployed.",
+    ],
+)
+def test_a_forecast_continuation_that_asserts_the_present_blocks(
+    sentence: str,
+) -> None:
+    assert head_blocks(sentence)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "It will be merged when tests pass.",
+        "It will be merged if CI passes.",
+        "It will be merged once review ends!",
+        "It will be merged IF CI passes.",
+    ],
+)
+def test_a_forecast_with_one_clean_condition_passes(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert not head_blocks(sentence)

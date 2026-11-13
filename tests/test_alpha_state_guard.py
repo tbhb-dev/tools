@@ -995,7 +995,7 @@ def test_scoped_qualifiers_and_attached_evidence_pass(text: str) -> None:
 
 
 def test_a_forecast_after_it_will_be_passes() -> None:
-    assert state_guard.unsupported_claims("It will be merged after review.") == []
+    assert state_guard.unsupported_claims("It will be merged when tests pass.") == []
 
 
 def test_other_future_shapes_still_block() -> None:
