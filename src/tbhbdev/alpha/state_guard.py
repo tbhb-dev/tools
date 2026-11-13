@@ -170,7 +170,7 @@ REPORTED = re.compile(r"\b(?:is|are|was|were|has|have|had|\w+ed)\b", re.IGNORECA
 # claim makes a clause that reports something: "Once CI passed it merged",
 # "After review I merged it".
 OWN_VERB = re.compile(
-    r"\b(?:\w+ed|\w+ished|ran|went|came|got|built|made|took|saw|found|wrote|sent|left|did|"
+    r"\b(?:\w+ed|ran|went|came|got|built|made|took|saw|found|wrote|sent|left|did|"
     r"was|were|had|i|we)\b",
     re.IGNORECASE,
 )
