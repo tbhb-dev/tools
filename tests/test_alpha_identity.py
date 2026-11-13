@@ -8063,6 +8063,28 @@ def test_agy_1_5_7_session_record_renders_the_spike_trailer(
     )
 
 
+def test_agy_1_5_7_commit_path_stamps_the_spike_trailer(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (repo / "hello.txt").write_text("hi\n", encoding="utf-8")
+    data = agy_post(workspacePaths=[str(repo)], modelName="gemini-4-argon-high")
+    feed(monkeypatch, data)
+    assert ai.cmd_record("antigravity", {}) == 0
+    stage(repo, "hello.txt", "hi\n")
+    env = {
+        "ANTIGRAVITY_CONVERSATION_ID": CONV,
+        "ANTIGRAVITY_LS_VERSION": "cli-1.5.7",
+    }
+    path = msg_file(tmp_path)
+    assert ai.cmd_trailer(str(path), None, env) == 0
+    session = ai.sha256_64(CONV)
+    assert path.read_text(encoding="utf-8") == (
+        "subject\n\nbody\n\n"
+        "Generated-by: LLM effort=high;harness=antigravity:1.5.7;"
+        f"model=gcp.gemini:gemini-4-argon;session={session};surface=cli\n"
+    )
+
+
 AGY_TABLE_ROWS = {
     "claude-opus-5-5-high": ("anthropic", "claude-opus-5-5", "high"),
     "claude-opus-5-5-low": ("anthropic", "claude-opus-5-5", "low"),
