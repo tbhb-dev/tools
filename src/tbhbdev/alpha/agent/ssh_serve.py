@@ -45,7 +45,11 @@ def envelope() -> tuple[dict[str, object], str | None]:
     if len(raw) > INPUT_LIMIT:
         message = "stdin exceeds 1 MiB"
         raise Invalid(message)
-    data: object = json.loads(raw)
+    try:
+        data: object = json.loads(raw)
+    except RecursionError:
+        message = "invalid envelope"
+        raise Invalid(message) from None
     if not isinstance(data, dict) or data.keys() != {"v", "request", "push_token"}:
         message = "expected v, request and push_token"
         raise Invalid(message)

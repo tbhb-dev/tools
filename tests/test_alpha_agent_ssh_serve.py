@@ -504,3 +504,13 @@ def test_result_reports_build_provenance(
     assert ssh_serve.main([], "ssh-serve") == 0
     data = json.loads(capsys.readouterr().out)
     assert {key: data[key] for key in expected} == expected
+
+
+def test_deeply_nested_envelope_is_refused(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("SSH_ORIGINAL_COMMAND", "run-host example")
+    incoming(monkeypatch, b"[" * 100000 + b"0" + b"]" * 100000)
+    assert ssh_serve.main([], "ssh-serve") == 2
+    assert capsys.readouterr().err == ("ssh-serve: refused: invalid envelope\n")
+    assert not files_for("example").path("request.json").exists()
