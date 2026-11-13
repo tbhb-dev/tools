@@ -276,9 +276,8 @@ def negated(chunk: str, match: re.Match[str]) -> bool:
         negation.group(0).lower() == "no" and "running" in match.group(0).lower()
     ):
         return False
-    before = (
-        negation.start() < match.start() - start
-    )  # pragma: no mutate -- they can't tie
+    # A negation and a claim never start at the same place, so < and <= agree.
+    before = negation.start() < match.start() - start  # pragma: no mutate
     if before:
         gap = clause[negation.end() : match.start() - start]
     else:

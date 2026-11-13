@@ -2125,6 +2125,8 @@ def test_quantifier_denials_that_report_a_state_still_block(text: str) -> None:
         ("Built, and merged not.", False),
         ("Built, but not at all merged.", True),
         ("Built, and merged, as if not at all.", True),
+        ("Built, and merged as if not.", True),
+        ("Once after review the fix merged.", True),
     ],
 )
 def test_a_negation_must_sit_next_to_its_claim_inside_its_own_clause(
@@ -2150,7 +2152,10 @@ def test_open_log_defaults_to_the_tagged_log_and_refuses_a_shared_file(
     state_guard.os.close(state_guard.open_log(tmp_path / "d"))
     assert (tmp_path / "d" / "tagged.jsonl").exists()
     state_guard.os.link(tmp_path / "d" / "tagged.jsonl", tmp_path / "d" / "twin")
-    with pytest.raises(OSError, match="single-link regular file owned by this user"):
+    with pytest.raises(
+        OSError,
+        match=r"^the audit log is not a single-link regular file owned by this user$",
+    ):
         state_guard.open_log(tmp_path / "d")
 
 
