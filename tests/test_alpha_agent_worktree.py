@@ -5,16 +5,21 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict, Unpack
+from typing import Literal, TypedDict, Unpack
 
 import pytest
-from agent_host_example import commit, git, isolate_host_git, repository, run_request
+from agent_host_example import (
+    bounded_file_reads,
+    commit,
+    git,
+    isolate_host_git,
+    repository,
+    run_request,
+    unusual_git_metadata,
+)
 
 from tbhbdev.alpha.agent import worktree
 from tbhbdev.alpha.agent.model import Invalid
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
 
 
 class GitOptions(TypedDict, closed=True):
@@ -1206,6 +1211,17 @@ def test_an_empty_git_directory_is_no_main_checkout(tmp_path: Path) -> None:
     assert worktree.is_main_checkout(mount)
 
 
+def test_sandbox_placeholders_inside_git_are_no_main_checkout(tmp_path: Path) -> None:
+    mount = tmp_path / "mount"
+    (mount / ".git" / "hooks").mkdir(parents=True)
+    (mount / ".git" / "config").write_text("")
+    assert not worktree.is_main_checkout(mount)
+    (mount / ".git" / "HEAD").write_text("")
+    assert not worktree.is_main_checkout(mount)
+    (mount / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    assert worktree.is_main_checkout(mount)
+
+
 def test_sandbox_mount_points_above_a_write_root_are_allowed(
     checkout_paths: tuple[Path, Path],
 ) -> None:
@@ -1215,8 +1231,8 @@ def test_sandbox_mount_points_above_a_write_root_are_allowed(
     (shared / "run").mkdir()
     worktree.validate_writes(workspace, source, (str(shared / "run"),))
     (shared / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
-    with pytest.raises(Invalid, match=r"reaches main checkout"):
-        worktree.validate_writes(workspace, source, (str(shared / "run"),))
+    found = worktree.validate_writes(workspace, source, (str(shared / "run"),))
+    assert any("reaches main checkout" in line for line in found)
 
 
 @pytest.fixture
@@ -1242,12 +1258,9 @@ def test_write_roots_refuse_main_checkout_paths(
         link = tmp_path / "tmp-alias"
         link.symlink_to(source, target_is_directory=True)
         root = link / suffix
-    with pytest.raises(Invalid, match="main checkout") as caught:
-        worktree.validate_writes(workspace, source, (str(root),))
-    assert (
-        str(caught.value)
-        == f"write root {root.resolve()} reaches main checkout {source}"
-    )
+    found = worktree.validate_writes(workspace, source, (str(root),))
+    assert any("main checkout" in line for line in found)
+    assert found[0] == f"write root {root.resolve()} reaches main checkout {source}"
 
 
 @pytest.mark.parametrize("suffix", ["", ".git", ".git/hooks", "src"])
@@ -1256,8 +1269,8 @@ def test_workspace_cannot_be_a_main_checkout(
 ) -> None:
     source, _ = checkout_paths
     workspace = source / suffix
-    with pytest.raises(Invalid, match="main checkout"):
-        worktree.validate_writes(workspace, source, ())
+    found = worktree.validate_writes(workspace, source, ())
+    assert any("main checkout" in line for line in found)
 
 
 @pytest.mark.parametrize("depth", [0, 1, 2, 3])
@@ -1269,19 +1282,19 @@ def test_write_roots_scan_three_levels_for_other_clones(
     clone = root.joinpath(*[f"level-{index}" for index in range(depth)])
     (clone / ".git").mkdir(parents=True)
     (clone / ".git/HEAD").write_text("ref: refs/heads/main\n")
-    with pytest.raises(Invalid, match="main checkout") as caught:
-        worktree.validate_writes(workspace, source, (str(root),))
+    found = worktree.validate_writes(workspace, source, (str(root),))
+    assert any("main checkout" in line for line in found)
     relation = "reaches" if depth == 0 else "contains"
-    assert str(caught.value) == f"write root {root} {relation} main checkout {clone}"
+    assert found[0] == f"write root {root} {relation} main checkout {clone}"
 
 
 def test_source_ancestors_are_refused_without_scanning(
     tmp_path: Path, checkout_paths: tuple[Path, Path]
 ) -> None:
     source, workspace = checkout_paths
-    with pytest.raises(Invalid, match="main checkout") as caught:
-        worktree.validate_writes(workspace, source, (str(tmp_path),))
-    assert str(caught.value) == f"write root {tmp_path} contains main checkout {source}"
+    found = worktree.validate_writes(workspace, source, (str(tmp_path),))
+    assert any("main checkout" in line for line in found)
+    assert found[0] == f"write root {tmp_path} contains main checkout {source}"
 
 
 def test_only_this_workspace_is_allowed_under_main_checkout(
@@ -1291,8 +1304,8 @@ def test_only_this_workspace_is_allowed_under_main_checkout(
     worktree.validate_writes(workspace, source, (str(workspace / "src"),))
     other = workspace.parent / "agent-other"
     (other / ".git").mkdir(parents=True)
-    with pytest.raises(Invalid, match="main checkout"):
-        worktree.validate_writes(workspace, source, (str(other),))
+    found = worktree.validate_writes(workspace, source, (str(other),))
+    assert any("main checkout" in line for line in found)
 
 
 def test_scan_is_bounded_and_does_not_follow_links(
@@ -1330,9 +1343,10 @@ def test_main_checkout_requires_its_own_common_directory(
     other = tmp_path / "other"
     (other / ".git").mkdir(parents=True)
     (other / ".git/commondir").write_text(target + "\n")
+    (other / ".git/HEAD").write_text("ref: refs/heads/main\n")
     if target == ".":
-        with pytest.raises(Invalid, match="main checkout"):
-            worktree.validate_writes(workspace, source, (str(other),))
+        found = worktree.validate_writes(workspace, source, (str(other),))
+        assert any("main checkout" in line for line in found)
     else:
         worktree.validate_writes(workspace, source, (str(other),))
 
@@ -1407,9 +1421,9 @@ def test_symlinked_tmp_alias_cannot_hide_a_clone(
     (temporary / "clone/.git/HEAD").write_text("ref: refs/heads/main\n")
     alias = tmp_path / "tmp"
     alias.symlink_to(temporary, target_is_directory=True)
-    with pytest.raises(Invalid, match="main checkout") as caught:
-        worktree.validate_writes(workspace, source, (str(alias),))
-    assert str(temporary) in str(caught.value)
+    found = worktree.validate_writes(workspace, source, (str(alias),))
+    assert any("main checkout" in line for line in found)
+    assert any(str(temporary) in line for line in found)
 
 
 def test_hooks_query_uses_host_environment_and_disables_execution(
@@ -1480,26 +1494,20 @@ def test_hook_lock_preserves_executable_type(tmp_path: Path, mode: int) -> None:
     assert executable.stat().st_mode & 0o777 == 0o555
 
 
-def test_checkout_detection_spells_metadata_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_checkout_detection_reads_head_of_a_real_git_directory(
+    tmp_path: Path,
 ) -> None:
-    def directory(path: Path, **kwargs: object) -> bool:
-        assert path == tmp_path / ".git"
-        assert kwargs == {"follow_symlinks": False}
-        return True
-
-    def exists(path: Path) -> bool:
-        assert path == tmp_path / ".git/commondir"
-        return False
-
-    def entries(path: Path) -> Iterator[Path]:
-        assert path == tmp_path / ".git"
-        return iter([path / "HEAD"])
-
-    monkeypatch.setattr(Path, "is_dir", directory)
-    monkeypatch.setattr(Path, "exists", exists)
-    monkeypatch.setattr(Path, "iterdir", entries)
-    assert worktree.is_main_checkout(tmp_path)
+    real = tmp_path / "real"
+    (real / ".git").mkdir(parents=True)
+    (real / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    link = tmp_path / "link"
+    link.mkdir()
+    (link / ".git").symlink_to(real / ".git")
+    assert worktree.is_main_checkout(real)
+    assert not worktree.is_main_checkout(link)
+    head_dir = tmp_path / "head-dir"
+    (head_dir / ".git" / "HEAD").mkdir(parents=True)
+    assert not worktree.is_main_checkout(head_dir)
 
 
 def test_hooks_query_spells_git_directory(
@@ -1537,8 +1545,8 @@ def test_mount_point_holding_a_file_stays_and_still_refuses(
     (root / ".git/HEAD").write_text("ref: refs/heads/main\n")
     (root / ".codex").mkdir()
     (root / ".codex/auth").touch()
-    with pytest.raises(Invalid, match="main checkout"):
-        worktree.validate_writes(workspace, source, (str(root),))
+    found = worktree.validate_writes(workspace, source, (str(root),))
+    assert any("main checkout" in line for line in found)
     assert (root / ".codex/auth").exists()
 
 
@@ -1567,3 +1575,146 @@ def test_mount_point_that_cannot_be_removed_is_skipped(
     monkeypatch.setattr(Path, "rmdir", refuse)
     worktree.clear_mount_points((str(tmp_path),))
     assert (tmp_path / ".agents").is_dir()
+
+
+@pytest.mark.parametrize(
+    ("entry", "kind"),
+    [("commondir", "directory"), ("commondir", "fifo"), ("HEAD", "fifo")],
+)
+def test_unusual_git_metadata_is_only_an_audit_finding(
+    tmp_path: Path, checkout_paths: tuple[Path, Path], entry: str, kind: str
+) -> None:
+    source, workspace = checkout_paths
+    root = unusual_git_metadata(tmp_path, entry, kind)
+    findings: list[str] = []
+    assert not worktree.is_main_checkout(root, findings)
+    assert any(f"{entry} is not a regular file" in line for line in findings)
+    recorded = worktree.validate_writes(workspace, source, (str(root),))
+    assert any("cannot audit main checkout" in line for line in recorded)
+    assert any("writable\nforged" in line for line in recorded)
+
+
+@pytest.mark.parametrize(
+    "failure", [PermissionError("unreadable"), UnicodeError("invalid text")]
+)
+def test_checkout_audit_records_metadata_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git/HEAD").write_text("ref: refs/heads/main\n")
+
+    def refuse(_directory: Path) -> bool:
+        raise failure
+
+    monkeypatch.setattr(worktree, "_own_common_directory", refuse)
+    findings: list[str] = []
+    assert not worktree.is_main_checkout(tmp_path, findings)
+    assert findings == [f"cannot audit main checkout {tmp_path}: {failure}"]
+    assert not worktree.is_main_checkout(tmp_path)
+
+
+def test_common_directory_replaced_with_fifo_is_not_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git/HEAD").write_text("ref: refs/heads/main\n")
+    (tmp_path / ".git/commondir").write_text(".\n")
+    regular_fstat = os.fstat
+
+    def fifo_stat(fd: int) -> os.stat_result:
+        metadata = regular_fstat(fd)
+        return os.stat_result((0o010600, *metadata[1:]))
+
+    monkeypatch.setattr(os, "fstat", fifo_stat)
+    findings: list[str] = []
+    assert not worktree.is_main_checkout(tmp_path, findings)
+    assert findings == [
+        (
+            f"cannot audit main checkout {tmp_path}: "
+            f"{tmp_path / '.git/commondir'} is not a regular file"
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        (b".\0\n", "embedded null"),
+        (b"\xff", "utf-8"),
+        (b"." + b" " * 4096, "is longer than 4096 bytes"),
+    ],
+)
+def test_invalid_common_directory_is_only_a_finding(
+    checkout_paths: tuple[Path, Path], content: bytes, reason: str
+) -> None:
+    source, workspace = checkout_paths
+    (source / ".git/commondir").write_bytes(content)
+    findings: list[str] = []
+    assert not worktree.is_main_checkout(source, findings)
+    assert len(findings) == 1
+    assert findings[0].startswith(f"cannot audit main checkout {source}: ")
+    assert reason in findings[0]
+    assert not worktree.is_main_checkout(source)
+    assert findings[0] in worktree.validate_writes(workspace, source, (str(source),))
+
+
+def test_common_directory_at_byte_limit_is_still_audited(
+    checkout_paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, workspace = checkout_paths
+    (source / ".git/commondir").write_bytes(b"." + b" " * 4095)
+    bounded_file_reads(monkeypatch, 4097)
+    findings: list[str] = []
+    assert worktree.is_main_checkout(source, findings)
+    assert findings == []
+    assert (
+        f"write root {source} reaches main checkout {source}"
+        in worktree.validate_writes(workspace, source, (str(source),))
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read mode 000 directories")
+def test_unreadable_child_directory_is_an_audit_finding(
+    tmp_path: Path, checkout_paths: tuple[Path, Path]
+) -> None:
+    source, workspace = checkout_paths
+    root = tmp_path / "writable"
+    blocked = root / "unreadable"
+    blocked.mkdir(parents=True)
+    blocked.chmod(0)
+    try:
+        findings = worktree.validate_writes(workspace, source, (str(root),))
+    finally:
+        blocked.chmod(0o700)
+    assert any(
+        line.startswith(f"cannot audit write root {root}: cannot read {blocked}: ")
+        for line in findings
+    )
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read mode 000 directories")
+@pytest.mark.parametrize("entry", [".", ".git"])
+def test_unreadable_git_directory_is_an_audit_finding(
+    checkout_paths: tuple[Path, Path], entry: str
+) -> None:
+    source, workspace = checkout_paths
+    blocked = source / entry
+    blocked.chmod(0)
+    try:
+        findings: list[str] = []
+        assert not worktree.is_main_checkout(source, findings)
+        assert len(findings) == 1
+        assert findings[0].startswith(f"cannot audit main checkout {source}: ")
+        assert findings[0] in worktree.validate_writes(
+            workspace, source, (str(source),)
+        )
+    finally:
+        blocked.chmod(0o700)
+
+
+def test_git_directory_under_a_file_is_no_checkout(tmp_path: Path) -> None:
+    path = tmp_path / "ordinary-file"
+    path.touch()
+    findings: list[str] = []
+    assert not worktree.is_main_checkout(path, findings)
+    assert findings == []

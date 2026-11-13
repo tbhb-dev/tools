@@ -28,6 +28,7 @@ from agent_host_example import (
     repository,
     run_request,
     trusted_host_stat,
+    unusual_git_metadata,
 )
 from test_alpha_agent_codex_install import release
 from test_alpha_agent_credentials import VALUES
@@ -526,6 +527,7 @@ def test_finished_run_writes_host_audit_summary(
             "empty": hashlib.sha256(b"").hexdigest(),
             "nested/event.json": hashlib.sha256(b"event\n").hexdigest(),
         },
+        "would_refuse": [],
     }
 
 
@@ -543,6 +545,7 @@ def test_failed_preparation_still_writes_host_audit_summary(
     assert json.loads(run.files.path("audit.json").read_text()) == {
         "rc": 1,
         "files": {},
+        "would_refuse": [],
     }
 
 
@@ -2672,9 +2675,17 @@ def test_host_state_cannot_be_a_configured_write_root(
             sandbox=dataclasses.replace(run.settings.sandbox, write_roots=(str(root),)),
         ),
     )
-    with pytest.raises(
-        Invalid, match="main checkout" if entry == "clone" else "protected host path"
-    ):
+    if entry == "clone":
+        run_host.checked_policy(run, preparation(run).paths)
+        recorded = run.files.path("would_refuse").read_text().split("\n")[:-1]
+        assert f"write root {root} reaches main checkout {clone}" in [
+            json.loads(line) for line in recorded
+        ]
+        assert f"audit: would refuse: {recorded[0]}\n" in (
+            run.files.path("log").read_text()
+        )
+        return
+    with pytest.raises(Invalid, match="protected host path"):
         run_host.checked_policy(run, preparation(run).paths)
 
 
@@ -2898,9 +2909,11 @@ def test_checkout_validation_receives_aliases_and_all_write_roots(
     calls: list[tuple[Path, Path, tuple[str, ...]]] = []
     original = run_host.worktree.validate_writes
 
-    def validate(workspace: Path, source: Path, writes: tuple[str, ...]) -> None:
+    def validate(
+        workspace: Path, source: Path, writes: tuple[str, ...]
+    ) -> tuple[str, ...]:
         calls.append((workspace, source, writes))
-        original(workspace, source, writes)
+        return original(workspace, source, writes)
 
     monkeypatch.setattr(run_host.worktree, "validate_writes", validate)
     paths = preparation(run).paths
@@ -3824,14 +3837,14 @@ def test_checked_policy_still_refuses_executable_link_and_parent_overlap(
     )
 
 
-def test_checked_policy_refuses_workspace_in_main_checkout(tmp_path: Path) -> None:
+def test_checked_policy_audits_workspace_in_main_checkout(tmp_path: Path) -> None:
     run = make_run(tmp_path)
     clone = run.home / "other-clone"
     (clone / ".git").mkdir(parents=True)
     (clone / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     paths = dataclasses.replace(preparation(run).paths, worktree=str(clone))
-    with pytest.raises(Invalid, match="main checkout"):
-        run_host.checked_policy(run, paths)
+    run_host.checked_policy(run, paths)
+    assert "main checkout" in run.files.path("would_refuse").read_text()
 
 
 def test_checked_policy_allows_configured_workspace_subdirectory(
@@ -3871,3 +3884,112 @@ def test_checked_policy_checks_effective_hooks_before_launch(
     monkeypatch.setattr(subprocess, "check_output", output)
     with pytest.raises(Invalid, match="under write root"):
         run_host.checked_policy(run, paths)
+
+
+@pytest.mark.parametrize(
+    ("entry", "kind"),
+    [("commondir", "directory"), ("commondir", "fifo"), ("HEAD", "fifo")],
+)
+def test_unusual_git_metadata_launches_with_a_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str, kind: str
+) -> None:
+    run = make_run(tmp_path)
+    root = unusual_git_metadata(tmp_path, entry, kind)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(run.settings.sandbox, write_roots=(str(root),)),
+        ),
+    )
+    run_host.preflight(run)
+    prepared = preparation(run)
+    run.files.write("prompt", "fixture")
+    child = Child(code=0)
+
+    def launch(
+        _spec: process_group.Launch, *, started: Callable[[Child], None]
+    ) -> Child:
+        started(child)
+        return child
+
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "record", constant(None))
+    monkeypatch.setattr(process_group, "stop_started", constant(None))
+    with ExitStack() as stack:
+        assert run_host.run_harness(run, prepared, stack) == 0
+    assert run.files.path("launched").exists()
+    recorded = run.files.path("would_refuse").read_text().split("\n")[:-1]
+    log = run.files.path("log").read_text().splitlines()
+    assert any(f"{entry} is not a regular file" in line for line in recorded)
+    assert any("writable\nforged" in json.loads(line) for line in recorded)
+    assert all(log.count(f"audit: would refuse: {line}") == 1 for line in recorded)
+    assert "forged" not in log
+
+
+def test_policy_audit_merges_findings_across_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    paths = preparation(run).paths
+    for findings, expected in [
+        (("A", "A"), '"A"\n'),
+        ((), '"A"\n'),
+        (("B", "A", "B"), '"A"\n"B"\n'),
+        (("A", "B"), '"A"\n"B"\n'),
+    ]:
+        monkeypatch.setattr(run_host.worktree, "validate_writes", constant(findings))
+        run_host.checked_policy(run, paths)
+        assert run.files.path("would_refuse").read_text() == expected
+        assert run.files.path("log").read_text() == "".join(
+            f"audit: would refuse: {line}\n" for line in expected.split("\n")[:-1]
+        )
+
+
+def test_null_in_common_directory_is_audited_without_refusing(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    workspace = tmp_path / "writable"
+    (workspace / ".git").mkdir(parents=True)
+    (workspace / ".git/HEAD").write_text("ref: refs/heads/main\n")
+    (workspace / ".git/commondir").write_bytes(b".\0\n")
+    run_host.audit_writes(run, workspace, workspace.parent.parent, ())
+    findings = [
+        json.loads(line)
+        for line in run.files.path("would_refuse").read_text().split("\n")[:-1]
+    ]
+    assert any(
+        line.startswith(f"cannot audit main checkout {workspace}: ")
+        and "embedded null" in line
+        for line in findings
+    )
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_audit_findings_round_trip_losslessly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, prepared: bool
+) -> None:
+    run = make_run(tmp_path)
+    findings = [
+        f"finding{value}path"
+        for value in ("\r", "\n", "\u2028", "\u2029", "\\", r"\n", "\0")
+    ]
+    monkeypatch.setattr(run_host.worktree, "validate_writes", constant(tuple(findings)))
+    paths = run_host.planned_paths(run)
+    workspace = Path(paths.worktree)
+    run_host.audit_writes(run, workspace, workspace.parent.parent, ())
+    encoded = run.files.path("would_refuse").read_text()
+    assert encoded == "".join(f"{json.dumps(line)}\n" for line in findings)
+    assert [json.loads(line) for line in encoded.split("\n")[:-1]] == findings
+    # Existing JSON can spell the same decoded value differently.
+    run.files.write("would_refuse", encoded.replace(r"\u2028", "\u2028"))
+    run_host.audit_writes(run, workspace, workspace.parent.parent, ())
+    assert run.files.path("would_refuse").read_text() == encoded
+    assert run.files.path("log").read_text() == "".join(
+        f"audit: would refuse: {json.dumps(line)}\n" for line in findings
+    )
+    run_host.audit_summary(run, preparation(run) if prepared else None, 7)
+    assert json.loads(run.files.path("audit.json").read_text()) == {
+        "rc": 7,
+        "files": {},
+        "would_refuse": findings,
+    }
