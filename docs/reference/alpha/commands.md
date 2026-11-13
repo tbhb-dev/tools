@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6
-    at: "2026-11-12T18:39:20Z"
+    at: "2026-11-12T18:44:55Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -37,6 +37,8 @@ type: Reference
 - `agent precheck CLONE --reference REF [--host HOST]` compares a clone's hooks with a local reference and checks its Git config for risky keys. Paths may be absolute or relative to the home directory. Collection uses one SSH call with `--host` and reads locally otherwise. It never runs Git. Exit codes are 0 for a match, 1 for mismatches, and 2 for usage or collection errors. The Python API `precheck(clone_data, reference)` returns the result for callers.
 - `agent` coordinates runs with `exec`, `wait`, `status`, `log`, `diff`, `kill`, `clean` and `keep`. `clear-taint HOST --reason TEXT` records local host clearance. The package also includes the run request's schema and the repo argument rules.
 - `install` installs the git hooks and the user-level harness hooks. `--hooks-only` installs only this clone's git hooks without writing user-level config.
+
+`tbhbdev alpha pr checks --pr N` reads pull request N in the current repository. It prints the head commit hash on the first line, then one `name: CONCLUSION` line per check, including commit statuses. Unfinished checks (`PENDING`, `QUEUED`, `IN_PROGRESS`, `WAITING`, `REQUESTED` or a pending commit status) print `PENDING`. Exit code 0 means every check is green: `SUCCESS`, `NEUTRAL` or `SKIPPED`. Exit code 1 means a failed check, any value the command doesn't know (including lowercase ones, a commit status of `EXPECTED`, or a completed check with no conclusion), or no checks at all. Exit code 3 means nothing failed but a check is still unfinished. A check run that hasn't completed reads its status and never its conclusion. A commit status is green only for `SUCCESS`. A missing pull request, a failed read or a check with no name exits nonzero with an error.
 
 `tbhbdev alpha verify-range BASE TIP [-C PATH]` checks each commit in `BASE..TIP`, oldest first. A commit passes when the agent is its author and committer, it has a signature header and valid attribution trailers, and it has exactly one parent. Sign-off trailers, co-author trailers and GitHub's no-reply addresses fail it. Exit codes are 0 when every commit passes, 1 when any fails and 2 for usage or Git errors.
 

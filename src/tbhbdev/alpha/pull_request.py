@@ -15,6 +15,7 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr ready --pr N
     tbhbdev alpha pr rerun N
     tbhbdev alpha pr delete-branch N
+    tbhbdev alpha pr checks --pr N
     tbhbdev alpha pr hook claude|codex|antigravity
     tbhbdev alpha pr backfill-opened OWNER
 
@@ -90,6 +91,15 @@ that run hasn't failed or no run exists. It doesn't read a draft.
 ``delete-branch N`` deletes only the head branch of a closed or merged pull
 request in origin's repository. Fork heads, main, protected branches and
 unreadable metadata are refused. It doesn't read a draft.
+
+``checks --pr N`` prints pull request N's head SHA, then one line per check
+with its name and conclusion. A check run that hasn't COMPLETED reads its
+status, never its conclusion; unfinished checks
+print ``PENDING``. A commit status reads only its state, and only ``SUCCESS``
+is green. Any
+conclusion other than ``SUCCESS``, ``NEUTRAL``, ``SKIPPED`` or ``PENDING``
+exits 1, and so does a check with no name or an unknown value. Pending checks
+alone exit 3, and only all-green checks exit 0.
 
 ``backfill-opened OWNER`` reads the body of every pull request, open or not,
 in every repository of OWNER, and adds each one to the ledger of every
@@ -1297,6 +1307,107 @@ def rerun(number: int) -> int:
     ]
 
 
+GREEN_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
+UNFINISHED = frozenset({"QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "PENDING"})
+PENDING_CODE = 3
+
+
+def check_kind(job: object) -> tuple[dict[str, object], str, str]:
+    """A rollup entry as a mapping, its kind (CheckRun or StatusContext) and name.
+
+    Raises:
+        SystemExit: the entry isn't a mapping, has no usable name or context, or
+            names both without a ``__typename``.
+    """
+    if not isinstance(job, dict):
+        message = f"a check of the rollup isn't an object: {job!r}"
+        raise SystemExit(message)
+    job = cast("dict[str, object]", job)  # pragma: no mutate
+    kind = job.get("__typename")
+    if kind is None and (job.get("name") is None) != (job.get("context") is None):
+        kind = "CheckRun" if job.get("context") is None else "StatusContext"
+    name = job.get("context" if kind == "StatusContext" else "name")
+    if (
+        kind not in ("CheckRun", "StatusContext")
+        or not isinstance(name, str)
+        or not name
+    ):
+        message = f"a check of the rollup has no usable name or context: {job}"
+        raise SystemExit(message)
+    return job, kind, name
+
+
+def status_outcome(name: str, state: object) -> tuple[str, str, str]:
+    """A commit status reads only its state, and only SUCCESS is green."""
+    label = state if isinstance(state, str) and state else "(none)"
+    if state == "SUCCESS":
+        return name, label, "green"
+    return name, label, "pending" if state == "PENDING" else "failed"
+
+
+def check_outcome(job: object) -> tuple[str, str, str]:
+    """A check's name, the label to print and its kind: green, pending or failed.
+
+    A check run reads its conclusion only once its status is COMPLETED, and is
+    pending only for an unfinished status. A commit status reads from its state.
+    Anything outside the known values is a failure, printed as written.
+    """
+    job, kind, name = check_kind(job)
+    if kind == "StatusContext":
+        return status_outcome(name, job.get("state"))
+    status = job.get("status")
+    value = job.get("conclusion") if status == "COMPLETED" else status
+    label = value if isinstance(value, str) and value else "(none)"
+    if isinstance(status, str) and status in UNFINISHED:
+        return name, "PENDING", "pending"
+    green = status == "COMPLETED" and label in GREEN_CONCLUSIONS
+    return name, label, "green" if green else "failed"
+
+
+def checks(number: int) -> int:
+    """Print a PR's head SHA and checks; exit 0 only when all are green.
+
+    Exit 1 for a failed or unknown check or no checks, and 3 when the rest are
+    still unfinished.
+
+    Raises:
+        SystemExit: gh can't read the pull request, or a check has no name.
+    """
+    argv = [
+        find_tool(GH),
+        "pr",
+        "view",
+        str(number),
+        "--json",
+        "headRefOid,statusCheckRollup",
+    ]
+    done = run(argv)
+    data = gh_data(done)
+    if not isinstance(data, dict):
+        why = " ".join((done.stderr or done.stdout).split())
+        message = f"cannot read checks of PR {number}: {why}"
+        raise SystemExit(message)
+    data = cast("dict[str, object]", data)  # pragma: no mutate
+    print(data["headRefOid"])
+    rollup: object = data["statusCheckRollup"] or []
+    if not isinstance(rollup, list):
+        message = f"the checks of PR {number} aren't a list: {rollup!r}"
+        raise SystemExit(message)
+    jobs = cast("list[object]", rollup)  # pragma: no mutate
+    if not jobs:
+        print(f"no checks on PR {number}", file=sys.stderr)
+        return 1
+    failed = pending = False
+    for job in jobs:
+        name, label, kind = check_outcome(job)
+        print(f"{name}: {label}")
+        pending = pending or kind == "pending"
+        failed = failed or kind == "failed"
+    if failed:
+        return 1
+    return PENDING_CODE if pending else 0
+
+
 def body_roots(body: str) -> set[str]:
     """Every ``session=`` root hash on a body's LLM trailer lines."""
     found = (BACKFILL_KEYS.fullmatch(line.strip()) for line in body.splitlines())
@@ -1453,6 +1564,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub.add_parser("ready").add_argument("--pr", type=int, required=True)
     sub.add_parser("rerun").add_argument("pr", type=int)
     sub.add_parser("delete-branch").add_argument("pr", type=int)
+    sub.add_parser("checks").add_argument("--pr", type=int, required=True)
     for name in ("check", "create", "edit"):
         one = sub.add_parser(name)
         one.add_argument("draft", nargs="?", type=Path, default=DRAFT)
@@ -1475,7 +1587,7 @@ def main(
         return hook(args.harness)
     if args.command == "backfill-opened":
         return backfill(args.owner)
-    by_pr = {"rerun": rerun, "delete-branch": delete_pr_branch}
+    by_pr = {"rerun": rerun, "delete-branch": delete_pr_branch, "checks": checks}
     if args.command in by_pr:
         return by_pr[args.command](args.pr)
     if args.command == "ready":
