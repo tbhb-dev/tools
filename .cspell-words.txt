@@ -17,6 +17,7 @@ awrel
 bazelisk
 bazelrc
 bazelversion
+bged
 bsdinfo
 buildcop
 buildifier
@@ -290,3 +291,5 @@ nullglob
 precheck
 shopt
 sshcommand
+wаit
+thеy
