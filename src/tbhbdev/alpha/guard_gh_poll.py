@@ -216,14 +216,18 @@ def capped_run_list(args: list[str]) -> bool:
     )
 
 
-def github_poll(args: list[str]) -> bool:
-    """Whether the words after ``gh``, past its global flags, poll GitHub."""
+def github_poll(args: list[str], *, bare: bool = False) -> bool:
+    """Whether the words after ``gh``, past its global flags, poll GitHub.
+
+    ``bare`` says nothing, such as an env assignment, came before ``gh``. Only a
+    bare ``gh run list`` with no flag before ``run`` may be the capped pass.
+    """
     i = 0
     while i < len(args) and args[i].startswith("-"):
         i += 2 if args[i] in VALUE_FLAGS else 1
     rest = args[i:]
     if rest[:2] == ["run", "list"]:
-        return not capped_run_list(rest[2:])
+        return not (bare and i == 0 and capped_run_list(rest[2:]))
     if rest[:2] == ["run", "watch"]:
         return True
     if rest[:2] == ["pr", "checks"]:
@@ -381,7 +385,7 @@ def denial(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
     unset = program == "unset" and any(names_token(word) for word in words[1:])
     if unset or clears_token(program, words[1:]):
         return UNSET_REASON, set()
-    if program == "gh" and github_poll(words[1:]):
+    if program == "gh" and github_poll(words[1:], bare=words == command):
         return POLL_REASON, set()
     script = inner_script(words, body)
     if script is None:

@@ -729,8 +729,21 @@ def test_capped_pass_is_allowed_through_its_last_day(
         assert guard.inspect(RUN_LIST_CMD.format(repo))[0] is None
 
 
+def test_capped_pass_ends_on_a_pinned_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert dt.date(2026, 11, 14) == guard.CAPPED_RUN_LIST_UNTIL
+    monkeypatch.setattr(guard, "today", lambda: dt.date(2026, 11, 14))
+    assert guard.inspect(RUN_LIST_CMD.format("tools"))[0] is None
+
+
+def test_capped_pass_allows_a_trailing_newline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(guard, "today", lambda: dt.date(2026, 11, 13))
+    assert guard.inspect(RUN_LIST_CMD.format("tools") + "\n")[0] is None
+
+
 def test_capped_pass_expires(monkeypatch: pytest.MonkeyPatch) -> None:
-    day = guard.CAPPED_RUN_LIST_UNTIL + dt.timedelta(days=1)
+    day = dt.date(2026, 11, 15)
     monkeypatch.setattr(guard, "today", lambda: day)
     assert guard.inspect(RUN_LIST_CMD.format("tools"))[0] == guard.POLL_REASON
 
@@ -756,6 +769,23 @@ def test_capped_pass_expires(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
         RUN_LIST_CMD.format("tools").replace("--limit 100 ", ""),
         "gh run watch 1",
+        "gh --hostname evil.example.com run list" + RUN_LIST_CMD.format("tools")[11:],
+        "gh --all --branch=main --jq=.[0] run list" + RUN_LIST_CMD.format("tools")[11:],
+        "gh -R other-org/repo run list" + RUN_LIST_CMD.format("tools")[11:],
+        "GH_HOST=x " + RUN_LIST_CMD.format("tools"),
+        "env " + RUN_LIST_CMD.format("tools"),
+        "while true; do " + RUN_LIST_CMD.format("tools") + "; done",
+        RUN_LIST_CMD.format("tools").replace("-R ", "--repo "),
+        RUN_LIST_CMD.format("tools").replace("-R ", "-R="),
+        RUN_LIST_CMD.format("tools").replace("tbhb-dev", "TBHB-dev"),
+        (
+            "gh run list --limit 100 -R tbhb-dev/tools --json "
+            "conclusion,createdAt,startedAt,updatedAt,workflowName,attempt,event"
+        ),
+        (
+            "gh run list -R tbhb-dev/tools --limit 100 --json "
+            "event,attempt,workflowName,updatedAt,startedAt,createdAt,conclusion"
+        ),
     ],
 )
 def test_capped_pass_is_only_that_command(
