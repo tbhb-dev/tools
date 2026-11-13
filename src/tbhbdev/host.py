@@ -181,24 +181,11 @@ REPO_LIMIT = 1000
 NAME_MIN = 4
 SHORT_MIN = 3
 WORDS = Path("/usr/share/dict/words")
-TECH_WORDS = frozenset(
-    {
-        "api",
-        "cli",
-        "config",
-        "dns",
-        "dotfiles",
-        "github",
-        "infra",
-        "monorepo",
-        "npm",
-        "sdk",
-        "ssh",
-        "tls",
-        "url",
-        "vpn",
-        "website",
-    }
+TECH_WORDS = frozenset({"config", "dotfiles", "github", "infra", "monorepo", "website"})
+# Three-letter terms that only a short form of a host name skips. Every other
+# category keeps NAME_MIN, so these terms never widen what it leaves out.
+SHORT_TECH_WORDS = frozenset(
+    {"api", "cli", "dns", "npm", "sdk", "ssh", "tls", "url", "vpn"}
 )
 # Tailnet host names that share their first STEM_MIN characters give a stem,
 # which matches the names to come as well.
@@ -1972,7 +1959,7 @@ def gitleaks_rules(facts: Facts) -> tuple[list[Rule], dict[str, int]]:
     short_rules, omitted["tailnet-short"] = _named(
         "tailnet-short",
         _shorts(net.hosts).difference(kept),
-        facts.words,
+        facts.words | SHORT_TECH_WORDS,
         minimum=SHORT_MIN,
     )
     rules += _ipv4(

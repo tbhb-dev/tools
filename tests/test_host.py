@@ -3467,6 +3467,30 @@ def test_short_forms_use_their_own_family_and_skip_covered_names(
 
 
 @pytest.mark.usefixtures("configured")
+def test_a_dictionary_word_leaves_out_its_short_form() -> None:
+    net = dataclasses.replace(FACTS.tailnet, hosts=("fakeCar", "fakeBus"))
+    words = FACTS.words | {"bus", "car"}
+    facts = dataclasses.replace(FACTS, tailnet=net, words=words)
+    rules, omitted = host_tool.gitleaks_rules(facts)
+    assert [r for r in rules if r.category == "tailnet-short"] == []
+    assert omitted["tailnet-short"] == 2
+
+
+@pytest.mark.usefixtures("configured")
+def test_short_technical_words_narrow_only_short_forms() -> None:
+    hosts = ("urls01", "urls02", "fake-url", "fake-bus")
+    net = dataclasses.replace(FACTS.tailnet, hosts=hosts)
+    rules, _ = host_tool.gitleaks_rules(dataclasses.replace(FACTS, tailnet=net))
+    stems = [r.regex for r in rules if r.category == "tailnet-stem"]
+    shorts = [r.regex for r in rules if r.category == "tailnet-short"]
+    assert any(re.search(r, "urls") for r in stems)
+    assert all(not re.search(r, "url") for r in shorts)
+    assert any(re.search(r, "bus") for r in shorts)
+    assert "url" in host_tool.SHORT_TECH_WORDS
+    assert host_tool.SHORT_TECH_WORDS.isdisjoint(host_tool.TECH_WORDS)
+
+
+@pytest.mark.usefixtures("configured")
 def test_short_forms_match_words_and_run_names_with_real_gitleaks(
     tmp_path: Path,
 ) -> None:
