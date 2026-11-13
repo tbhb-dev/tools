@@ -270,8 +270,7 @@ testpaths = ["tests"]
 source_paths = ["src"]
 do_not_mutate = ["tests/*"]
 # Tests read the repository's own PR template, schemas, lint configs, hook
-# config and docs pages, and the corpus script, which mutmut doesn't copy into
-# mutants/ by itself.
+# config and docs pages, which mutmut doesn't copy into mutants/ by itself.
 also_copy = [
   ".cspell-words.txt",
   ".cspell.jsonc",
@@ -280,7 +279,6 @@ also_copy = [
   ".rumdl.toml",
   ".vale.ini",
   "docs",
-  "state_guard_corpus.py",
 ]
 
 [tool.ruff]

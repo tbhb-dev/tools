@@ -29,18 +29,14 @@ SessionStart. It reads the hook payload on stdin.
   and the block names `decisions_dir`. Without either key it does nothing.
 
 Evidence is a git sha (7 to 40 hex characters, with a digit and a letter), a
-PR or issue number, a log path, inline code, "output" or "read-back", a GitHub
-URL for a pull request, issue, commit or run, a check-run or job id, or
-attribution ("says", "said", "reports", "according to <named source>",
-"confirmed by <someone>"). A claim marked "unverified", or "not
-done", also passes. Evidence covers only the sentence or line that holds it.
+PR or issue number, a log path, inline code, "output" or "read-back", or
+attribution ("says", "said", "reports"). A claim marked "unverified", or "not
+done", also passes.
 
-A claim also passes when it is a present state after a time or condition word,
-after a modal or "to be" that doesn't recommend acting now, inside quotation
-marks it doesn't assert, or in a clause with one negation ahead of it (see
-EXEMPTIONS). Every block is recorded in a JSON Lines file under
-~/.local/state/tbhb/state-guard/ as a rule id, a hash and a length, never the
-text. The log never changes the verdict.
+Three narrow lead-ins excuse the claim word right after them: "Wait until" and
+up to three words, "it will be" (or "this", "that", "the <noun>"), and "the
+word", "the term", "the verb" or "look at" before a quoted word. Anything else
+in the sentence still counts, and a claim that follows other text still blocks.
 
 A command is a `git commit` only when one of its simple commands is one. The
 scan drops heredoc bodies and splits shell commands outside quotes. It also
@@ -64,7 +60,7 @@ import sys
 import tomllib
 import unicodedata
 from collections import Counter
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 lazy from collections.abc import Callable
@@ -108,13 +104,7 @@ CLAIM = re.compile(
 )
 EVIDENCE = re.compile(
     r"\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b|#\d+|\bsays\b|\bsaid\b|\breports?\b|\.log\b|`[^`]+`"
-    r"|\boutput\b|\bread-back\b|\bunverified\b|\bnot (?:done|applied|merged)\b"
-    r"|\b(?:according to|confirmed by)\s+"
-    r"(?!(?i:me|my|myself|i|us|we|our|the|this|that|it|nobody|no|none)\b)"
-    r"(?-i:[`@A-Z0-9])"
-    r"|\bhttps?://(?:www\.)?github\.com/[\w.-]+/[\w.-]+/"
-    r"(?:pull|issues|commit|commits|actions/runs|runs|releases)/\S"
-    r"|\b(?:check[- ]?run|job|task)\s+(?:id\s+)?\d{5,}\b",
+    r"|\boutput\b|\bread-back\b|\bunverified\b|\bnot (?:done|applied|merged)\b",
     re.IGNORECASE,
 )
 TRAILER = re.compile(r"(?i)(signed-off-by|co-authored-by)\s*:")
@@ -151,196 +141,41 @@ SHORT_VALUES = frozenset("mFCctU")
 SHORT_OPTIONAL_VALUES = frozenset("Su")
 MAX_QUOTED = 160
 MAX_LISTED = 3
-STATUS = (
-    r"done|applied|merged|shipped|deployed|live|fixed|complete|completed|"
-    r"installed|running|verified|started|landed"
+# Each exemption rule takes a sentence and one claim match in it and returns True
+# to exempt that match. A rule covers only a claim word that sits right after a
+# fixed lead-in, so it can't excuse a claim elsewhere in the sentence.
+WAIT_LEAD = re.compile(r"\s*wait until(?: [\w'\u2019-]+){1,3} ", re.IGNORECASE)
+FORECAST_LEAD = re.compile(
+    r"\s*(?:it|this|that|the [\w'\u2019-]+) will be ", re.IGNORECASE
 )
-TIME_WORDS = r"\b(?:when|once|until|after|before|if|while|as soon as)\b"
-# A time or condition word opens the clause that holds the claim.
-STATUS_WORD = re.compile(rf"\b(?:{STATUS})\b", re.IGNORECASE)
-TIME_WORD = re.compile(TIME_WORDS, re.IGNORECASE)
-TIMED = re.compile(
-    TIME_WORDS + r"(?:(?!\b(?:but|so|because|then)\b)[^,;:()\u2014\u2013])*$",
-    re.IGNORECASE,
+WORD_LEAD = re.compile(
+    r"\s*(?:the (?:word|term|verb)|look at) [\"\u201c]", re.IGNORECASE
 )
-# A past or present verb ahead of the time word makes a report, not a request or
-# a plan: "Its jobs were cancelled when the push landed" still claims it landed.
-REPORTED = re.compile(r"\b(?:is|are|was|were|has|have|had|\w+ed)\b", re.IGNORECASE)
-# A verb of its own, or a first-person subject, between the time word and the
-# claim makes a clause that reports something: "Once CI passed it merged",
-# "After review I merged it".
-OWN_VERB = re.compile(
-    r"\b(?:\w+ed|ran|went|came|got|built|made|took|saw|found|wrote|sent|left|did|"
-    r"was|were|had|i|we)\b",
-    re.IGNORECASE,
-)
-# The most words between a time word and its claim that still read as a subject,
-# not counting auxiliary verbs and joiners.
-MAX_SUBJECT = 3
-AUXILIARY = frozenset({"is", "are", "has", "have", "been", "and", "or"})
-# A time clause of two or more words is a subject: it opens with a determiner and
-# doesn't end in a pronoun that starts the main clause ("After review it merged").
-SUBJECT_START = re.compile(
-    r"(?:the|an?|th(?:is|at|ese|ose)|my|our|its|their|your|his|her|every|each|all|"
-    r"both|any)",
-    re.IGNORECASE,
-)
-SUBJECT_END = re.compile(
-    r"(?:it|they|he|she|we|i|you|everything|everyone)", re.IGNORECASE
-)
-# The fewest words that make a time clause a subject of its own.
-SUBJECT_WORDS = 2
-# The negators that deny a claim from after it: "I merged nothing".
-OBJECT_NEGATORS = frozenset({"nothing", "no"})
-# The most words between a negation and the claim it negates.
-MAX_NEGATION_GAP = 1
-# What follows a modal status word and makes it a recommendation to act now.
-NOW = re.compile(r"\s*(?:now|already|today|yesterday|just)\b", re.IGNORECASE)
-# A modal or "to be" leads straight to the claim, through only filler and
-# other status words, so "can confirm the fix is merged" stays a claim.
-MODAL = re.compile(
-    r"(?:\b(?:will|should|must|can)\b"
-    r"|\b(?:going|need|needs|needed|want|wants|wanted|about|ought|supposed|expected"
-    r"|due|set|likely|meant)\s+to\s+be\b)"
-    rf"(?:\s+(?:be|been|and|or|{STATUS}))*\s*$",
-    re.IGNORECASE,
-)
-NEGATION = re.compile(
-    r"(?<![/\w-])(?:not(?!\s+(?:only|just|long|even|least|merely|simply|necessarily|always|quite|too|so)\b)"
-    r"|never|nothing|no(?!\s+(?:thanks|sooner|matter|doubt|wonder)\b)|none|nobody|neither|nor)\b"
-    r"|n['\u2019]t\b",
-    re.IGNORECASE,
-)
-# "none is running" and "no jobs were running" report a state, so they block.
-QUANTIFIER = re.compile(r"none", re.IGNORECASE)
-YET = re.compile(r"\byet\s*(?:[.,;?!]|$)", re.IGNORECASE)
-CLAUSE_BREAK = re.compile(
-    r"[,;:()\u2014\u2013]|\b(?:and|but|or|so|because|since|then|without|while)\b",
-    re.IGNORECASE,
-)
-# A quotation mark mentions a word only where something marks it as one: it opens
-# the sentence or follows a colon, a comma, a bracket, another quotation or a word
-# like "word" or "called". After a subject, a verb or an adverb it asserts the
-# word: `I "merged" the PR`.
-MENTIONS = re.compile(
-    r"(?:^|[:,;(\[]|[\"\u201d]\s*(?:and|or)?|\b(?:words?|terms?|strings?|keywords?|labels?|"
-    r"notes?|status(?:es)?|phrases?|text|called|named|reads?|titled|marked|contains?|"
-    r"matches|holds?|list|token|verb|value|for|at))\s*$",
-    re.IGNORECASE,
-)
-# Looser versions of the rules above, used only to say in the block log which
-# rule a blocked sentence came close to.
-NEAR = {
-    "time-or-condition": re.compile(TIME_WORDS, re.IGNORECASE),
-    "modal": re.compile(r"\b(?:will|should|must|can|to be)\b", re.IGNORECASE),
-    "negation": re.compile(NEGATION.pattern + "|" + YET.pattern, re.IGNORECASE),
-    "quotation": re.compile(r"[\"\u201c]"),
-}
-LOG_DIRECTORY = (".local", "state", "tbhb", "state-guard")
-# The most bytes one day's block log may hold, and the days it is kept.
-MAX_LOG_BYTES = 1_000_000
-RETENTION_DAYS = 30
-BLOCK_LOG_NAME = re.compile(r"blocks-\d{4}-\d{2}-\d{2}\.jsonl")
+CLOSING_QUOTES = ('"', "\u201d")
 
 
-def timed(chunk: str, match: re.Match[str]) -> bool:
-    """Whether MATCH follows a time or condition word in its clause.
+def awaited(chunk: str, match: re.Match[str]) -> bool:
+    """MATCH is the condition in "Wait until ..." and asserts nothing."""
+    return bool(WAIT_LEAD.fullmatch(chunk[: match.start()]))
 
-    A sentence that already reports something before the time word isn't exempt,
-    and neither is a clause with a verb or a long subject of its own.
-    """
-    found = TIMED.search(chunk[: match.start()])
-    if not found or REPORTED.search(chunk[: found.start()]):
-        return False
-    # TIMED runs to the claim, so the words between are those after the time word.
-    between = TIME_WORD.sub("", found.group(0), count=1)
-    # A status word is the state the condition names, not a verb of its own.
-    between = STATUS_WORD.sub(" ", between)
-    words = [word for word in between.lower().split() if word not in AUXILIARY]
-    return (
-        not OWN_VERB.search(between)
-        and len(words) <= MAX_SUBJECT
-        and (
-            len(words) < SUBJECT_WORDS
-            or (
-                bool(SUBJECT_START.fullmatch(words[0]))
-                and not SUBJECT_END.fullmatch(words[-1])
-            )
-        )
+
+def forecast(chunk: str, match: re.Match[str]) -> bool:
+    """MATCH follows "it will be" and predicts instead of reporting."""
+    return bool(FORECAST_LEAD.fullmatch(chunk[: match.start()]))
+
+
+def mentioned(chunk: str, match: re.Match[str]) -> bool:
+    """MATCH is the whole quoted word after "the word" or "look at"."""
+    return bool(
+        WORD_LEAD.fullmatch(chunk[: match.start()])
+        and chunk.startswith(CLOSING_QUOTES, match.end())
     )
 
 
-def modal(chunk: str, match: re.Match[str]) -> bool:
-    """Whether MATCH follows a modal or "to be" with only filler between.
-
-    A status word that a trailing "now" turns into a recommendation to act
-    now still claims it.
-    """
-    return bool(MODAL.search(chunk[: match.start()])) and not NOW.match(
-        chunk, match.end()
-    )
-
-
-def negated(chunk: str, match: re.Match[str]) -> bool:
-    """Whether MATCH sits in a clause with exactly one negation.
-
-    Two negations make an assertion, so they don't exempt. A trailing "yet"
-    counts as the negation only when the clause has no other.
-    """
-    start = 0  # pragma: no mutate -- None slices from 0 too
-    for brk in CLAUSE_BREAK.finditer(chunk):
-        if brk.end() > match.start():
-            break
-        start = brk.end()
-    end = next(
-        (brk.start() for brk in CLAUSE_BREAK.finditer(chunk, match.end())),
-        len(chunk),  # pragma: no mutate -- None slices to the end too
-    )
-    clause = chunk[start:end]
-    negations = list(NEGATION.finditer(clause))
-    if len(negations) != 1:
-        # A negation elsewhere in the sentence ("none of them or merged yet")
-        # means the clause is only half of a denial, so "yet" alone doesn't count.
-        return not NEGATION.search(chunk) and bool(YET.search(clause))
-    # The negation has to sit next to the claim: "none of the others merged"
-    # doesn't deny that the last one did.
-    negation = negations[0]
-    if QUANTIFIER.fullmatch(negation.group(0)) or (
-        negation.group(0).lower() == "no" and "running" in match.group(0).lower()
-    ):
-        return False
-    # A negation and a claim never start at the same place, so < and <= agree.
-    before = negation.start() < match.start() - start  # pragma: no mutate
-    if before:
-        gap = clause[negation.end() : match.start() - start]
-    elif negation.group(0).lower() in OBJECT_NEGATORS:
-        gap = clause[match.end() - start : negation.start()]
-    else:
-        # "merged not long ago" has a negator that doesn't deny the claim.
-        return False
-    return len(gap.split()) <= MAX_NEGATION_GAP
-
-
-def quoted(chunk: str, match: re.Match[str]) -> bool:
-    """Whether MATCH sits inside double or curly quotation marks."""
-    before = chunk[: match.start()]
-    if before.count('"') % 2 == 1:
-        opening = before.rindex('"')
-    elif before.count("\u201c") > before.count("\u201d"):
-        opening = before.rindex("\u201c")
-    else:
-        return False
-    return bool(MENTIONS.search(before[:opening]))
-
-
-# Exemptions from the baseline claim judge. Each rule takes a sentence and one
-# claim match in it and returns True to exempt that match. Each rule's passing
-# sentences are listed in the differential test.
 EXEMPTIONS: tuple[Callable[[str, re.Match[str]], bool], ...] = (
-    timed,
-    modal,
-    negated,
-    quoted,
+    awaited,
+    forecast,
+    mentioned,
 )
 
 
@@ -357,44 +192,6 @@ def unsupported_claims(text: str) -> list[str]:
         if not EVIDENCE.search(chunk)
         and any(not exempt(chunk, match) for match in CLAIM.finditer(chunk))
     ]
-
-
-def prune_blocks(directory: Path, today: datetime) -> None:
-    """Delete block logs older than RETENTION_DAYS; dated names sort as dates."""
-    oldest = f"blocks-{today - timedelta(days=RETENTION_DAYS):%Y-%m-%d}.jsonl"
-    for path in directory.glob("blocks-*.jsonl"):
-        if BLOCK_LOG_NAME.fullmatch(path.name) and path.name < oldest:
-            path.unlink(missing_ok=True)  # pragma: no mutate -- only a race differs
-
-
-def log_blocks(event: str, sentences: list[str]) -> None:
-    """Append one record per blocked sentence: rule id, near rules, length.
-
-    The record never holds the text. A failure here, of any kind, must never
-    turn a block into an allow, so every error is swallowed.
-    """
-    try:
-        now = datetime.now(UTC)
-        directory = Path.home().joinpath(*LOG_DIRECTORY)
-        fd = open_log(directory, f"blocks-{now:%Y-%m-%d}.jsonl")
-        prune_blocks(directory, now)
-        with os.fdopen(fd, "ab") as out:
-            size = os.fstat(out.fileno()).st_size
-            for sentence in sentences:
-                record: Json = {
-                    "time": now.isoformat(timespec="seconds"),
-                    "event": event,
-                    "rule": rule_of(sentence),
-                    "near_rules": [n for n, r in NEAR.items() if r.search(sentence)],
-                    "length": len(sentence),
-                }
-                line = (json.dumps(record) + "\n").encode()
-                if size + len(line) > MAX_LOG_BYTES:
-                    return
-                size += len(line)
-                out.write(line)
-    except Exception:  # noqa: BLE001  # the log must never change the verdict
-        return
 
 
 def final_claim_reason(bad: list[str]) -> str:
@@ -550,20 +347,19 @@ def tag_sentences(text: str) -> tuple[str, list[str]]:
     return "".join(parts), sentences
 
 
-def open_log(directory: Path, name: str = "tagged.jsonl") -> int:
-    """A descriptor for the private log NAME; refuses symlinks and special files.
+def open_log(directory: Path) -> int:
+    """A descriptor for the private audit log; refuses symlinks and special files.
 
     O_NOFOLLOW covers the last directory and the file only. A symlinked parent of
     the state directory still redirects the log, so the state home must be trusted.
     """
-    # fchmod below fixes the mode, so the mkdir mode and the read flag can't matter.
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)  # pragma: no mutate
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW  # pragma: no mutate
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     dir_fd = os.open(directory, flags)
     try:
         os.fchmod(dir_fd, 0o700)
         fd = os.open(
-            name,
+            "tagged.jsonl",
             os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK,
             0o600,
             dir_fd=dir_fd,
@@ -579,8 +375,6 @@ def open_log(directory: Path, name: str = "tagged.jsonl") -> int:
         os.close(fd)
         message = "the audit log is not a single-link regular file owned by this user"
         raise OSError(message)
-    # A log that an older version or another umask created keeps its mode otherwise.
-    os.fchmod(fd, 0o600)
     return fd
 
 
@@ -672,7 +466,6 @@ def send_message_reason(data: Json, tool_input: Json) -> str | None:
     bad = judged_claims(original)
     if not bad:
         return None
-    log_blocks("PreToolUse:SendMessage", bad)
     try:
         output = tagged_input(data, tool_input, original)
         if output is not None:
@@ -935,8 +728,6 @@ def stop_reason(data: Json) -> str | None:
     if not message:
         message = last_assistant_text(str(data.get("transcript_path", "")))
     bad = judged_claims(str(message))
-    if bad:
-        log_blocks("Stop", bad)
     return final_claim_reason(bad) if bad else None
 
 

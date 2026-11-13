@@ -1,6 +1,7 @@
 """Compare exemptions against a frozen baseline on a synthetic sentence grid."""
 
 import re
+from pathlib import Path
 
 import pytest
 import state_guard_baseline as baseline
@@ -14,10 +15,12 @@ CANDIDATES = (
     "I'll tell you once the fix is deployed.",
     "The fix isn't deployed.",
     "The fix never merged.",
+    "No build is running.",
     "I applied nothing.",
     "Please get the fix merged.",
     "Can you confirm the fix is merged?",
     "Could you get it merged?",
+    "I merged none.",
     "I merged nothing.",
     "It hasn't merged",
     "It never merged.",
@@ -26,43 +29,17 @@ CANDIDATES = (
     "Nothing merged.",
     "Tell me when it is merged.",
     "Whether the fix is merged.",
+    'The word "merged".',
+    'Look at "merged" now.',
 )
 
-# The grid sentences that gain an exemption, each with the rule that exempts it.
-# The grid derives variants of each root (suffixes, replaced status words), and a
-# variant passes only through its root's rule.
-TIMED = "a status word after a time or condition word"
-MODAL = "a status word after a modal or 'to be'"
-NEGATED = "a status word in a clause with one negation"
-RULE_NAMES = {TIMED: "timed", MODAL: "modal", NEGATED: "negated"}
-INTENDED_PASSES: dict[str, str] = {
-    "I applied nothing.": NEGATED,
-    "I merged nothing.": NEGATED,
-    "I'll tell you once the fix is deployed and merged.": TIMED,
-    "I'll tell you once the fix is deployed.": TIMED,
-    "If it merged I'm done.": TIMED,
-    "If the fix is deployed, tell me.": TIMED,
-    "If the fix is deployed.": TIMED,
-    "It hasn't merged": NEGATED,
-    "It never merged.": NEGATED,
-    "It will be merged and deployed.": MODAL,
-    "It will be merged.": MODAL,
-    "Never merged.": NEGATED,
-    "No fix merged.": NEGATED,
-    "Nobody deployed the fix.": NEGATED,
-    "Not everything is deployed.": NEGATED,
-    "Nothing merged.": NEGATED,
-    "Once the fix is deployed.": TIMED,
-    "Tell me when it is merged.": TIMED,
-    "The fix isn't deployed.": NEGATED,
-    "The fix never merged.": NEGATED,
-    "The fix is not merged.": NEGATED,
-    "WILL merged.": MODAL,
-    "Wait until the fix is deployed.": TIMED,
-    "What if the fix is merged?": TIMED,
-    "Why wait when the fix is merged?": TIMED,
-    "will merged.": MODAL,
-}
+# Each exemption pull request adds its passing sentences here, with the reason.
+INTENDED_PASSES: dict[str, str] = dict(
+    line.split("\t")
+    for line in (Path(__file__).parent / "state_guard_intended_passes.tsv")
+    .read_text(encoding="utf-8")
+    .splitlines()
+)
 
 PROBES = (
     "4 deployed services yesterday.",
@@ -85,6 +62,7 @@ PROBES = (
     "Everything is deployed.",
     "Fix merged?",
     "How was the fix merged?",
+    "I merged none.",
     "I merged nothing.",
     "I'll get it merged and the PR is merged.",
     "I'll tell you once the fix is deployed and merged.",
@@ -140,6 +118,8 @@ PROBES = (
     "The fix will be deployed, it merged.",
     "The merged PR is merged.",
     "The merged code is live.",
+    "The service Never is deployed.",
+    "The service Not is deployed.",
     "The site /never is deployed.",
     "The site /not is live.",
     "The two merged PRs are open.",
@@ -215,16 +195,15 @@ MUST_BLOCK = (
 )
 
 
-def corpus_roots() -> dict[str, str]:
-    """Each grid sentence with the root sentence it derives from."""
-    roots = {sentence: sentence for sentence in (*BASE_SENTENCES, *MUST_BLOCK)}
-    roots.update(
-        (sentence.rstrip(".?") + suffix, sentence)
+def generated_corpus() -> set[str]:
+    sentences = set(BASE_SENTENCES) | set(MUST_BLOCK)
+    sentences.update(
+        sentence.rstrip(".?") + suffix
         for sentence in BASE_SENTENCES
         for suffix in SUFFIXES
     )
-    roots.update(
-        (re.sub(r"\b(?:is deployed|merged)\b", replacement, sentence), sentence)
+    sentences.update(
+        re.sub(r"\b(?:is deployed|merged)\b", replacement, sentence)
         for sentence in BASE_SENTENCES
         for replacement in (
             "isn't not deployed",
@@ -236,13 +215,13 @@ def corpus_roots() -> dict[str, str]:
             "deployed/live",
         )
     )
-    roots.update(
-        (f"{subject}'s {status} code into main.", f"{subject}'s {status} code")
+    sentences.update(
+        f"{subject}'s {status} code into main."
         for subject in ("Pat", "Sam", "Alex")
         for status in ("merged", "applied", "deployed")
     )
-    roots.update(
-        (sentence.rstrip(".") + suffix, sentence)
+    sentences.update(
+        sentence.rstrip(".") + suffix
         for sentence in BASE_SENTENCES[:8]
         for suffix in (
             " at 20 requests per review.",
@@ -250,11 +229,7 @@ def corpus_roots() -> dict[str, str]:
             " build 12345 failed.",
         )
     )
-    return roots
-
-
-def generated_corpus() -> set[str]:
-    return set(corpus_roots())
+    return sentences
 
 
 def main_blocks(sentence: str) -> bool:
@@ -266,8 +241,10 @@ def head_blocks(sentence: str) -> bool:
 
 
 def test_only_intended_simple_sentences_gain_exemptions() -> None:
-    assert len(generated_corpus()) >= 300
-    assert new_pass_roots() == INTENDED_PASSES.keys()
+    corpus = generated_corpus()
+    assert len(corpus) >= 300
+    new_passes = {s for s in corpus if main_blocks(s) and not head_blocks(s)}
+    assert new_passes == INTENDED_PASSES.keys()
 
 
 @pytest.mark.parametrize("sentence", MUST_BLOCK)
@@ -295,28 +272,6 @@ def newly_passing() -> set[str]:
     return {s for s in generated_corpus() if main_blocks(s) and not head_blocks(s)}
 
 
-def new_pass_roots() -> set[str]:
-    roots = corpus_roots()
-    return {roots[s] for s in newly_passing()}
-
-
-def responsible_rules(sentence: str) -> set[str]:
-    """The exemption rules that exempt at least one claim match in SENTENCE."""
-    return {
-        rule.__name__
-        for rule in state_guard.EXEMPTIONS
-        for match in state_guard.CLAIM.finditer(sentence)
-        if rule(sentence, match)
-    }
-
-
-def test_each_new_pass_comes_from_its_roots_rule() -> None:
-    roots = corpus_roots()
-    for sentence in newly_passing():
-        expected = RULE_NAMES[INTENDED_PASSES[roots[sentence]]]
-        assert expected in responsible_rules(sentence), sentence
-
-
 def exempt_everything(_chunk: str, _match: re.Match[str]) -> bool:
     return True
 
@@ -324,122 +279,113 @@ def exempt_everything(_chunk: str, _match: re.Match[str]) -> bool:
 def test_one_widening_rule_fails_the_differential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert new_pass_roots() == INTENDED_PASSES.keys()
+    assert newly_passing() == INTENDED_PASSES.keys()
     monkeypatch.setattr(state_guard, "EXEMPTIONS", (exempt_everything,))
-    assert new_pass_roots() != INTENDED_PASSES.keys()
+    assert newly_passing() != INTENDED_PASSES.keys()
 
 
 def test_head_judges_every_other_grid_sentence_as_main_does() -> None:
-    roots = corpus_roots()
     assert all(
         main_blocks(s) == head_blocks(s)
         for s in generated_corpus()
-        if roots[s] not in INTENDED_PASSES
+        if s not in INTENDED_PASSES
     )
 
 
-def test_the_exemption_set_is_the_documented_one() -> None:
-    names = [rule.__name__ for rule in state_guard.EXEMPTIONS]
-    assert names == ["timed", "modal", "negated", "quoted"]
+def test_the_exemption_set_is_exactly_the_three_rules() -> None:
+    assert (
+        state_guard.awaited,
+        state_guard.forecast,
+        state_guard.mentioned,
+    ) == state_guard.EXEMPTIONS
 
 
-# The wrapper grid: each template wraps a status claim in a time, negation, modal,
-# quotation or evidence phrase, and each sentence runs in three letter cases. A
-# template that main blocks and the head passes must be on ALLOWED_TEMPLATES, so
-# every widening is a deliberate line here.
-CORES = (
-    "the fix merged",
-    "it is merged",
-    "the PR is deployed",
-    "I merged the PR",
-    "the build is running",
-    "the patch shipped",
-    "it is already live",
+def test_the_baseline_is_main_s_judge() -> None:
+    for name in ("CLAIM", "EVIDENCE", "SENTENCE_END"):
+        assert getattr(baseline, name) == getattr(state_guard, name)
+    assert baseline.MAX_QUOTED == state_guard.MAX_QUOTED
+
+
+REVIEWED = (Path(__file__).parent / "state_guard_must_block.txt").read_text(
+    encoding="utf-8"
 )
-WORDS = ("merged", "deployed", "shipped")
-TEMPLATES = (
-    "After review {c}.",
-    "Once tests pass {c}.",
-    "When CI passed {c}.",
-    "Until review ends {c}.",
-    "If it works {c}.",
-    "Before launch {c}.",
-    "After review, {c}.",
-    "Once tests pass, {c}.",
-    "Tell me when {c}.",
-    "Wait until {c}.",
-    "While we wait {c}.",
-    "{c} not long ago.",
-    "{c} no thanks to CI.",
-    "{c} not just on staging.",
-    "{c} not only on staging.",
-    "{c} not yesterday but today.",
-    "{c} not.",
-    "Not long ago {c}.",
-    "Not just that, {c}.",
-    "No thanks to CI {c}.",
-    "{c}, not rejected.",
-    "{c} never.",
-    "{c} must have.",
-    "{c}, which should now be true.",
-    "The PR should now be merged.",
-    "The fix must have merged.",
-    "It will now be merged.",
-    "It should by now be deployed.",
-    "It should already be deployed.",
-    "It will be merged.",
-    "It should be merged.",
-    'I "{w}" the PR.',
-    'The fix is already "{w}".',
-    'The fix was just "{w}".',
-    'It has also "{w}".',
-    'The fix "{w}".',
-    'Status: "{w}".',
-    'The word "{w}".',
-    'We "{w}" it.',
-    'Look at "{w}" now.',
-    'He "{w}" it.',
-    "{c} according to ME.",
-    "{c} according to THE PLAN.",
-    "{c} according to the plan.",
-    "{c} confirmed by the plan.",
-    "{c} confirmed by nobody.",
-    "{c}, confirmed by Pat.",
-    "{c} according to Pat.",
-    "{c} confirmed by us.",
+
+
+@pytest.mark.parametrize("sentence", REVIEWED.splitlines())
+def test_reviewed_bypass_sentences_block_on_main_and_head(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert head_blocks(sentence)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Wait until the fix is deployed.",
+        "Wait until a b c is deployed.",
+        "  Wait until the fix is deployed.",
+        "WAIT UNTIL THE FIX IS DEPLOYED.",
+        "Wait until the fix's PR is deployed.",
+        "Wait until the fix\u2019s PR is deployed.",
+        "Wait until the well-known fix is deployed.",
+        "It will be merged.",
+        "This will be merged.",
+        "That will be merged.",
+        "The fix will be merged.",
+        "  it will be merged.",
+        "IT WILL BE MERGED.",
+        "The follow-up will be merged.",
+        "The fix\u2019s will be merged.",
+        'The word "merged".',
+        'The term "merged".',
+        'The verb "merged".',
+        'Look at "is merged" now.',
+        "The word \u201cmerged\u201d.",
+        'The word "merged\u201d.',
+        'The word \u201cmerged".',
+        'THE WORD "merged".',
+        '  The word "merged".',
+    ],
 )
-ALLOWED_TEMPLATES = {
-    "Tell me when {c}.",
-    "Wait until {c}.",
-    "It will be merged.",
-    "It should be merged.",
-    'Status: "{w}".',
-    'The word "{w}".',
-    'Look at "{w}" now.',
-    "{c}, confirmed by Pat.",
-    "{c} according to Pat.",
-}
+def test_each_lead_in_excuses_its_claim_word(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert not head_blocks(sentence)
 
 
-def grid_variants(template: str) -> set[str]:
-    sentences = {template.format(c=core, w=word) for core in CORES for word in WORDS}
-    sentences = {s[0].upper() + s[1:] for s in sentences}
-    return {v for s in sentences for v in (s, s.upper(), s.lower())}
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "Wait until deployed.",
+        "Wait until a b c d is deployed.",
+        "Wait until, the fix is deployed.",
+        "Wait until the fix merged and I deployed it.",
+        "Wait until it is merged and then it is deployed.",
+        "Wait: the fix is deployed.",
+        "I will wait until the fix is deployed.",
+        "It will be merged and deployed.",
+        "It will be merged, then deployed.",
+        "Fix will be merged.",
+        "The fix and I will be merged.",
+        "The fix will have been merged.",
+        "It will not be merged.",
+        "The word merged.",
+        'The word "merged.',
+        'The word "merged .',
+        'The word "x" and the fix merged.',
+        'The words "merged".',
+        'The service called "merged".',
+        'Look at the "merged" now.',
+        'Look at "x" merged.',
+        'The word "merged" and "deployed".',
+        "Look at it merged.",
+    ],
+)
+def test_text_beside_a_lead_in_still_blocks(sentence: str) -> None:
+    assert main_blocks(sentence)
+    assert head_blocks(sentence)
 
 
-def passing_templates() -> set[str]:
-    return {
-        t
-        for t in TEMPLATES
-        if any(main_blocks(s) and not head_blocks(s) for s in grid_variants(t))
-    }
-
-
-def test_the_wrapper_grid_widens_only_through_allowed_templates() -> None:
-    assert passing_templates() == ALLOWED_TEMPLATES
-
-
-def test_a_widened_template_never_passes_in_one_case_only() -> None:
-    for template in ALLOWED_TEMPLATES:
-        variants = grid_variants(template)
-        assert all(main_blocks(s) for s in variants)
+def test_one_excused_claim_does_not_excuse_a_second() -> None:
+    sentence = "It will be merged. The fix is deployed."
+    assert state_guard.unsupported_claims(sentence) == ["The fix is deployed."]
+    both = 'The word "merged" and the fix is deployed.'
+    assert state_guard.unsupported_claims(both) == [both]

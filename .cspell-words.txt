@@ -28,14 +28,12 @@ capsys
 cgnat
 checkpointed
 claudecode
-cmerged
 commondir
 complexipy
 conftest
 cpus
 creat
 CREATEROLE
-cshipped
 cuda
 cwds
 dbus
@@ -202,7 +200,6 @@ testdata
 testpaths
 textconv
 tfstate
-timespec
 timestamptz
 tmpprefix
 tombi
@@ -224,7 +221,6 @@ unsandboxed
 unsets
 unstampable
 unvalidated
-unwritable
 uploadpack
 usefixtures
 userconfig

@@ -1,0 +1,80 @@
+After the fix merged, CI failed.
+After the fix merged CI failed.
+When the fix merged, CI failed.
+Once the fix merged, CI failed.
+Before the fix merged, CI failed.
+While the fix is deployed, CI is failing.
+As soon as the fix merged, CI failed.
+I remember when the fix merged.
+I know when the fix merged.
+CI fails after the fix merged.
+Why wait when the fix is merged?
+The fix merged with no conflicts.
+The fix merged with no issues.
+The fix merged no problem.
+The fix merged despite no approval.
+The fix isn't just merged.
+The fix merged nothing changed.
+It is deployed yet.
+The fix can be merged.
+The fix must be merged.
+The fix should be merged.
+The fix will have been merged.
+The fix should have been merged.
+The fix is supposed to be merged.
+The fix is expected to be merged.
+The fix is likely to be merged.
+The fix is meant to be already shipped.
+The fix should be merged by now.
+The fix must be merged by now.
+The fix should be merged at this point.
+The fix must be merged as of yesterday.
+The fix is expected to be merged by now.
+The fix must have been merged.
+The fix should have been deployed by yesterday.
+Status: "merged".
+Status: “merged”.
+The fix is marked "merged".
+The fix is marked “merged”.
+The status reads "merged".
+The fix is, "merged".
+The fix is ("merged").
+"The fix merged", I confirm.
+“The fix merged”, I confirm.
+"The fix merged" is true.
+The service called "merged" is fine.
+The fix merged, according to Pat.
+The fix merged, according to Plans.
+The fix merged, according to Instructions.
+The fix merged, confirmed by Someone.
+The fix merged, confirmed by Nothing.
+The fix merged, confirmed by Automation.
+The fix merged, according to 0.
+The fix merged, confirmed by 0.
+The fix merged, according to @me.
+The fix merged, according to @the-plan.
+The fix merged, according to CI.
+The fix merged, confirmed by CI.
+After review it merged.
+Once tests pass it merged.
+The fix is deployed not just staged.
+The fix merged, according to ME.
+The fix merged, according to THE PLAN.
+The fix merged, confirmed by the plan.
+Once CI passed it merged.
+After the rebase the PR merged.
+Nobody objected so it merged.
+No one objected so I merged it.
+I confirmed the fix is merged.
+Merged, per me.
+Merged. 1234567890
+Merged, according to the plan.
+The PR should be merged now.
+Once the checks finished the service is deployed.
+After review I merged it.
+I merged it without waiting because nobody objected.
+No errors occurred so the service is deployed.
+I found the fix to be deployed.
+The fix is "merged".
+Fix A merged. Fix B merged. Fix C merged, sha abc1234.
+The fix merged. A different fix is tracked in #12.
