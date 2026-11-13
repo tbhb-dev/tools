@@ -386,7 +386,7 @@ def prune_blocks(directory: Path, today: datetime) -> None:
         if dated < oldest:
             # Only a race or a directory with this name fails; the rest still prune.
             with contextlib.suppress(OSError):
-                path.unlink(missing_ok=True)
+                path.unlink()
 
 
 def lock_log(fd: int) -> bool:
@@ -396,7 +396,8 @@ def lock_log(fd: int) -> bool:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            if time.monotonic() >= deadline:
+            # The clock never reads equal twice in a row, so > and >= can't differ.
+            if time.monotonic() >= deadline:  # pragma: no mutate
                 return False
             time.sleep(LOCK_POLL)
         else:

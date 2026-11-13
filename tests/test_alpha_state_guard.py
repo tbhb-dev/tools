@@ -2101,3 +2101,18 @@ def test_open_log_opens_the_state_directory_as_a_directory(
     os.close(state_guard.open_log(tmp_path / "d"))
     assert flags[0] & os.O_DIRECTORY
     assert flags[0] & os.O_NOFOLLOW
+
+
+def test_an_invalid_name_does_not_stop_the_prune_of_later_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invalid = tmp_path / "blocks-0000-00-00.jsonl"
+    old = tmp_path / "blocks-2020-01-01.jsonl"
+    for path in (invalid, old):
+        path.write_text("x")
+    monkeypatch.setattr(
+        Path, "glob", lambda self, _pattern: iter(sorted(self.iterdir()))
+    )
+    state_guard.prune_blocks(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    assert invalid.exists()
+    assert not old.exists()
