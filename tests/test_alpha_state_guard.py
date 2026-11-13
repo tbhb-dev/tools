@@ -1115,20 +1115,20 @@ def test_a_tag_in_a_negated_claim_keeps_its_negation() -> None:
     assert state_guard.strip_tags(tagged) == "It was not done."
 
 
-ZWSP = "\u200b"
+ZERO_WIDTH = chr(0x200B)
 CODEX_TAGS = [
     "[STATE-GUARD: UNVERIFIED]",
     "[State-guard: unverified]",
     "[state-guard: Unverified]",
     "[state-\nguard: unverified]",
     "[state-guard:\nunverified]",
-    f"[state-{ZWSP}guard: unverified]",
-    f"[state-guard:{ZWSP}unverified]",
+    f"[state-{ZERO_WIDTH}guard: unverified]",
+    f"[state-guard:{ZERO_WIDTH}unverified]",
     "[state-guard:\u00a0unverified]",
     "[state-guard:\tunverified]",
     "[state-guard:\r\nunverified]",
     "[state-guard:\u2028unverified]",
-    "[state-guard:\ufeffunverified]",
+    f"[state-guard:{chr(0xFEFF)}unverified]",
 ]
 
 
@@ -1169,11 +1169,7 @@ def test_a_claim_hidden_by_splitting_a_word_is_still_judged() -> None:
 
 def test_the_format_character_class_matches_unicode() -> None:
     gap = re.compile(rf"[{state_guard.FORMAT_CHARS}]")
-    cf = [
-        chr(n)
-        for n in range(sys.maxunicode + 1)
-        if unicodedata.category(chr(n)) == "Cf"
-    ]
+    cf = [chr(n) for n in range(0x110000) if unicodedata.category(chr(n)) == "Cf"]
     assert [c for c in cf if not gap.fullmatch(c)] == []
     assert [
         c

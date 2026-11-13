@@ -67,13 +67,18 @@ TABLE = "harness"
 TAG = "[state-guard: unverified]"
 GAP = "\x00"  # stands for a removed tag until the text stops changing
 # Every Unicode format character (category Cf), which renders as nothing: soft
-# hyphen, Arabic marks, ZWSP and the other zero-width and bidi controls, BOM, the
-# interlinear and tag characters.
-FORMAT_CHARS = (
-    "\u00ad\u0600-\u0605\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\u200b-\u200f"
-    "\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb\U000110bd\U000110cd"
-    "\U00013430-\U0001343f\U0001bca0-\U0001bca3\U0001d173-\U0001d17a\U000e0001"
-    "\U000e0020-\U000e007f"
+# hyphen, Arabic marks, zero-width space and the other zero-width and bidi
+# controls, BOM, the interlinear and tag characters.
+FORMAT_RANGES = (
+    (0x00AD, 0x00AD), (0x0600, 0x0605), (0x061C, 0x061C), (0x06DD, 0x06DD),
+    (0x070F, 0x070F), (0x0890, 0x0891), (0x08E2, 0x08E2), (0x180E, 0x180E),
+    (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x2064), (0x2066, 0x206F),
+    (0xFEFF, 0xFEFF), (0xFFF9, 0xFFFB), (0x110BD, 0x110BD), (0x110CD, 0x110CD),
+    (0x13430, 0x1343F), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0001, 0xE0001),
+    (0xE0020, 0xE007F),
+)  # fmt: skip
+FORMAT_CHARS = "".join(
+    re.escape(chr(low)) + "-" + re.escape(chr(high)) for low, high in FORMAT_RANGES
 )
 # A gap is anything a reader sees as nothing or as space, line breaks included.
 SPACES = rf"[\s\x00{FORMAT_CHARS}]*"
