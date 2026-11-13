@@ -1760,3 +1760,79 @@ def test_git_directory_under_a_file_is_no_checkout(tmp_path: Path) -> None:
     findings: list[str] = []
     assert not worktree.is_main_checkout(path, findings)
     assert findings == []
+
+
+def test_a_one_byte_head_is_a_main_checkout(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text("x")
+    assert worktree.is_main_checkout(tmp_path)
+
+
+def test_commondir_opens_without_following_or_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (tmp_path / ".git" / "commondir").write_text(".")
+    opened: list[int] = []
+    real_open = os.open
+
+    def record(path: Path, flags: int) -> int:
+        opened.append(flags)
+        return real_open(path, flags)
+
+    monkeypatch.setattr(worktree.os, "open", record)
+    assert worktree.is_main_checkout(tmp_path)
+    assert opened == [os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK]
+
+
+def contained_findings(checkout_paths: tuple[Path, Path], root: Path) -> list[str]:
+    source, workspace = checkout_paths
+    found = worktree.validate_writes(workspace, source, (str(root),))
+    return [line for line in found if str(root) in line]
+
+
+def test_contained_scan_reports_a_nested_checkout_it_cannot_audit(
+    tmp_path: Path, checkout_paths: tuple[Path, Path]
+) -> None:
+    root = tmp_path / "shared"
+    (root / "inner" / ".git" / "HEAD").mkdir(parents=True)
+    head = root / "inner" / ".git" / "HEAD"
+    message = (
+        f"cannot audit main checkout {root / 'inner'}: {head} is not a regular file"
+    )
+    assert contained_findings(checkout_paths, root) == [message]
+
+
+def test_contained_scan_stops_below_the_scan_depth(
+    tmp_path: Path, checkout_paths: tuple[Path, Path]
+) -> None:
+    root = tmp_path / "shared"
+    at_limit = root.joinpath(*"abc")
+    beyond = root.joinpath(*"def", "g")
+    for checkout in (at_limit, beyond):
+        (checkout / ".git").mkdir(parents=True)
+        (checkout / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    assert worktree.CHECKOUT_SCAN_DEPTH == 3
+    assert contained_findings(checkout_paths, root) == [
+        f"write root {root} contains main checkout {at_limit}"
+    ]
+
+
+def test_contained_scan_never_descends_into_a_git_directory(
+    tmp_path: Path, checkout_paths: tuple[Path, Path]
+) -> None:
+    root = tmp_path / "shared"
+    inner = root / "a" / ".git" / "inner"
+    (inner / ".git").mkdir(parents=True)
+    (inner / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    assert contained_findings(checkout_paths, root) == []
+
+
+def test_a_write_root_over_the_own_workspace_is_not_a_finding(
+    checkout_paths: tuple[Path, Path],
+) -> None:
+    source, workspace = checkout_paths
+    (workspace / ".git" / "HEAD").write_text("ref: refs/heads/agent\n")
+    found = worktree.validate_writes(workspace, source, (str(workspace.parent),))
+    assert not any(f"contains main checkout {workspace}" in line for line in found)
