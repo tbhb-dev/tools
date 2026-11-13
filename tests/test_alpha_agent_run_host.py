@@ -2579,6 +2579,58 @@ def test_codex_argv_is_logged_without_environment_values(
     assert "shell_environment_policy.exclude=" in log
 
 
+@pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
+def test_log_argv_writes_one_complete_line_only_for_codex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
+) -> None:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        reason="example",
+    )
+    writes: list[tuple[str, str]] = []
+
+    def write(suffix: str, text: str) -> None:
+        writes.append((suffix, text))
+
+    monkeypatch.setattr(run.files, "write", write)
+    run_host.log_argv(run, ("codex", "a b"))
+    assert writes == (
+        [("log", "argv: codex 'a b'\n")] if harness is Harness.CODEX else []
+    )
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ((), "argv: "),
+        (
+            ("shell_environment_policy.set.EXAMPLE=one",),
+            "argv: shell_environment_policy.set.EXAMPLE=one",
+        ),
+        (("-c", "shell_environment_policy.set.EXAMPLE=one"), "argv: "),
+        (
+            ("codex", "shell_environment_policy.set.EXAMPLE=one"),
+            "argv: codex shell_environment_policy.set.EXAMPLE=one",
+        ),
+        (
+            (
+                "-c",
+                "-c",
+                "shell_environment_policy.set.EXAMPLE=one",
+                "shell_environment_policy.set.EXAMPLE=two",
+            ),
+            "argv: -c shell_environment_policy.set.EXAMPLE=two",
+        ),
+    ],
+)
+def test_argv_log_line_drops_only_environment_override_pairs(
+    command: tuple[str, ...], expected: str
+) -> None:
+    assert run_host.argv_log_line(command) == expected
+
+
 def test_argv_log_line_keeps_other_overrides() -> None:
     command = (
         "codex",
@@ -4443,3 +4495,31 @@ def test_harness_command_failure_names_only_its_step(
     assert run.files.path("rc").read_text() == "1\n"
     assert run.files.path("phase").read_text() == "ended"
     assert not run.files.path("launched").exists()
+
+
+@pytest.mark.parametrize(
+    ("write", "startup"),
+    [
+        (".cache", None),
+        (".cache", ".example-startup"),
+        (".example-startup/cache", ".example-startup"),
+    ],
+)
+def test_config_check_protects_the_configured_startup_directory(
+    monkeypatch: pytest.MonkeyPatch, write: str, startup: str | None
+) -> None:
+    if startup is None:
+        monkeypatch.delenv("ZDOTDIR", raising=False)
+    else:
+        monkeypatch.setenv("ZDOTDIR", startup)
+    original = host_settings()
+    configured = dataclasses.replace(
+        original, sandbox=dataclasses.replace(original.sandbox, audit_dir=write)
+    )
+    if write == ".cache":
+        run_host.check_config(configured)
+    else:
+        with pytest.raises(
+            Invalid, match=r"protected host path .* overlaps write root"
+        ):
+            run_host.check_config(configured)
