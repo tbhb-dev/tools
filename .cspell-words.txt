@@ -200,6 +200,7 @@ testdata
 testpaths
 textconv
 tfstate
+timespec
 timestamptz
 tmpprefix
 tombi
@@ -221,6 +222,7 @@ unsandboxed
 unsets
 unstampable
 unvalidated
+unwritable
 uploadpack
 usefixtures
 userconfig
