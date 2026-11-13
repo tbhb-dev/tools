@@ -358,17 +358,22 @@ def open_log(directory: Path, name: str = "tagged.jsonl") -> int:
         )
     finally:
         os.close(dir_fd)
-    info = os.fstat(fd)
-    if (
-        not stat.S_ISREG(info.st_mode)
-        or info.st_nlink > 1
-        or info.st_uid != os.getuid()
-    ):
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink > 1
+            or info.st_uid != os.getuid()
+        ):
+            message = (
+                "the audit log is not a single-link regular file owned by this user"
+            )
+            raise OSError(message)  # noqa: TRY301  # one handler closes FD
+        # A log that an older version or another umask created keeps its mode.
+        os.fchmod(fd, 0o600)
+    except BaseException:
         os.close(fd)
-        message = "the audit log is not a single-link regular file owned by this user"
-        raise OSError(message)
-    # A log that an older version or another umask created keeps its mode otherwise.
-    os.fchmod(fd, 0o600)
+        raise
     return fd
 
 
@@ -422,9 +427,16 @@ def log_blocks(event: str, sentences: list[str]) -> None:
     try:
         now = datetime.now(UTC)
         directory = Path.home().joinpath(*LOG_DIRECTORY)
+        # A failed prune must not cost today's record.
+        with contextlib.suppress(Exception):
+            prune_blocks(directory, now)
         fd = open_log(directory, f"blocks-{now:%Y-%m-%d}.jsonl")
-        prune_blocks(directory, now)
-        with os.fdopen(fd, "ab") as out:
+        try:
+            out = os.fdopen(fd, "ab")
+        except BaseException:
+            os.close(fd)
+            raise
+        with out:
             if not lock_log(out.fileno()):
                 return
             size = os.fstat(out.fileno()).st_size

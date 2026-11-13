@@ -2118,3 +2118,91 @@ def test_an_invalid_name_does_not_stop_the_prune_of_later_names(
     state_guard.prune_blocks(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
     assert invalid.exists()
     assert not old.exists()
+
+
+def open_descriptors() -> int:
+    return len(os.listdir("/dev/fd"))  # noqa: PTH208  # counts this process's fds
+
+
+def test_a_failed_prune_still_writes_todays_record(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(_directory: Path, _today: datetime) -> None:
+        message = "prune broke"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(state_guard, "prune_blocks", fail)
+    state_guard.log_blocks("Stop", ["It was merged."])
+    assert logged_rules(home) == ["was merged"]
+
+
+def test_a_failed_check_on_the_opened_log_closes_its_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(_fd: int, mode: int) -> None:
+        if mode == 0o600:
+            message = "fchmod broke"
+            raise OSError(message)
+
+    before = open_descriptors()
+    monkeypatch.setattr(os, "fchmod", fail)
+    with pytest.raises(OSError, match="fchmod broke"):
+        state_guard.open_log(tmp_path / "logs", "blocks.jsonl")
+    assert open_descriptors() == before
+
+
+def test_a_failed_fdopen_closes_the_descriptor(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(_fd: int, _mode: str) -> None:
+        message = "fdopen broke"
+        raise OSError(message)
+
+    before = open_descriptors()
+    monkeypatch.setattr(os, "fdopen", fail)
+    state_guard.log_blocks("Stop", ["Merged."])
+    assert open_descriptors() == before
+    assert day_log(home).stat().st_size == 0
+
+
+def test_a_name_without_dashes_in_its_date_is_not_pruned(tmp_path: Path) -> None:
+    keep = tmp_path / "blocks-20200101.jsonl"
+    keep.write_text("x")
+    state_guard.prune_blocks(tmp_path, datetime(2027, 1, 1, tzinfo=UTC))
+    assert keep.exists()
+
+
+HOLDER = """
+import fcntl, sys
+held = open(sys.argv[1], "ab")
+fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+print("held", flush=True)
+sys.stdin.read()
+"""
+
+
+def test_a_writer_gives_up_on_a_lock_another_process_holds(home: Path) -> None:
+    state_guard.log_blocks("Stop", ["Merged."])
+    log = day_log(home)
+    before = log.stat().st_size
+    holder = subprocess.Popen(  # fixed argv, this interpreter
+        [sys.executable, "-I", "-c", HOLDER, str(log)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline() == "held\n"
+        # An external deadline replaces the fixture's: a writer that never gives
+        # up swallows the alarm's error inside the hook and runs on past it.
+        signal.alarm(3)
+        start = time.monotonic()
+        state_guard.log_blocks("Stop", ["Merged."])
+        elapsed = time.monotonic() - start
+    finally:
+        assert holder.stdin is not None
+        holder.stdin.close()
+        holder.wait(5)
+    assert state_guard.LOCK_WAIT * 0.9 <= elapsed < state_guard.LOCK_WAIT * 3
+    assert log.stat().st_size == before
