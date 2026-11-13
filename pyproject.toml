@@ -272,13 +272,22 @@ do_not_mutate = ["tests/*"]
 # Tests read the repository's own PR template, schemas, lint configs, hook
 # config and docs pages, which mutmut doesn't copy into mutants/ by itself.
 also_copy = [
+  ".codex",
   ".cspell-words.txt",
   ".cspell.jsonc",
+  ".gitattributes",
   ".github",
+  ".gitleaks.toml",
   ".pre-commit-config.yaml",
   ".rumdl.toml",
+  ".vale",
   ".vale.ini",
+  "AGENTS.md",
+  "CLAUDE.md",
+  "README.md",
   "docs",
+  "mise.toml",
+  "state_guard_corpus.py",
 ]
 
 [tool.ruff]
