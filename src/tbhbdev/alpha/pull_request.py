@@ -1303,14 +1303,40 @@ def rerun(number: int) -> int:
     ]
 
 
-GREEN_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED", "PENDING"})
+GREEN_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
+UNFINISHED = frozenset({"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"})
+PENDING_CODE = 3
+
+
+def check_outcome(job: Mapping[str, object]) -> tuple[str, str, bool]:
+    """A check's name, the label to print and whether it is still unfinished.
+
+    A check run reads from its status and, once COMPLETED, its conclusion. A commit
+    status reads from its state. Anything outside the known values is a failure,
+    printed as written.
+
+    Raises:
+        SystemExit: the check has neither a name nor a context.
+    """
+    name = job.get("name") or job.get("context")
+    if not isinstance(name, str) or not name:
+        message = f"a check of the rollup has no name or context: {dict(job)}"
+        raise SystemExit(message)
+    value = job.get("state") if "context" in job else job.get("status")
+    if value == "COMPLETED":
+        value = job.get("conclusion")
+    label = value if isinstance(value, str) and value else "(none)"
+    return name, ("PENDING" if label in UNFINISHED else label), label in UNFINISHED
 
 
 def checks(number: int) -> int:
-    """Print a PR's head SHA and job conclusions, failing unless all are green.
+    """Print a PR's head SHA and checks; exit 0 only when all are green.
+
+    Exit 1 for a failed or unknown check or no checks, and 3 when the rest are
+    still unfinished.
 
     Raises:
-        SystemExit: gh can't read the pull request.
+        SystemExit: gh can't read the pull request, or a check has no name.
     """
     argv = [
         find_tool(GH),
@@ -1332,14 +1358,18 @@ def checks(number: int) -> int:
         "list[dict[str, object]]",  # pragma: no mutate
         data["statusCheckRollup"] or [],
     )
-    code = 0
+    if not jobs:
+        print(f"no checks on PR {number}", file=sys.stderr)
+        return 1
+    failed = pending = False
     for job in jobs:
-        name = job.get("name") or job["context"]
-        conclusion = job.get("conclusion") or job.get("state") or "PENDING"
-        print(f"{name}: {conclusion}")
-        if conclusion not in GREEN_CONCLUSIONS:
-            code = 1
-    return code
+        name, label, unfinished = check_outcome(job)
+        print(f"{name}: {label}")
+        pending = pending or unfinished
+        failed = failed or not (unfinished or label in GREEN_CONCLUSIONS)
+    if failed:
+        return 1
+    return PENDING_CODE if pending else 0
 
 
 def body_roots(body: str) -> set[str]:

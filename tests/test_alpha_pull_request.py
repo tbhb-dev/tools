@@ -3054,50 +3054,142 @@ def test_rerun_requires_a_numeric_pr_number(argv: tuple[str, ...]) -> None:
     [
         (
             [
-                {"name": "lint", "conclusion": "SUCCESS"},
-                {"name": "unit tests", "conclusion": "SUCCESS"},
+                {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"name": "unit tests", "status": "COMPLETED", "conclusion": "SUCCESS"},
             ],
             "lint: SUCCESS\nunit tests: SUCCESS\n",
             0,
         ),
         (
             [
-                {"name": "lint", "conclusion": "FAILURE"},
-                {"name": "unit tests", "conclusion": "SUCCESS"},
+                {"name": "lint", "status": "COMPLETED", "conclusion": "FAILURE"},
+                {"name": "unit tests", "status": "COMPLETED", "conclusion": "SUCCESS"},
             ],
             "lint: FAILURE\nunit tests: SUCCESS\n",
             1,
         ),
         (
-            [{"name": "unit tests", "conclusion": "", "status": "IN_PROGRESS"}],
-            "unit tests: PENDING\n",
-            0,
+            [{"name": "tests", "status": "QUEUED", "conclusion": ""}],
+            "tests: PENDING\n",
+            3,
         ),
         (
-            [{"name": "unit tests", "conclusion": None, "status": "QUEUED"}],
-            "unit tests: PENDING\n",
-            0,
+            [{"name": "tests", "status": "IN_PROGRESS", "conclusion": ""}],
+            "tests: PENDING\n",
+            3,
         ),
-        ([{"name": "optional", "conclusion": "SKIPPED"}], "optional: SKIPPED\n", 0),
-        ([{"context": "external CI", "state": "SUCCESS"}], "external CI: SUCCESS\n", 0),
-        ([{"context": "external CI", "state": "FAILURE"}], "external CI: FAILURE\n", 1),
-        ([{"context": "external CI", "state": "PENDING"}], "external CI: PENDING\n", 0),
-        ([{"name": "docs", "conclusion": "NEUTRAL"}], "docs: NEUTRAL\n", 0),
-        ([{"name": "tests", "conclusion": "TIMED_OUT"}], "tests: TIMED_OUT\n", 1),
-        ([{"name": "tests", "conclusion": "CANCELLED"}], "tests: CANCELLED\n", 1),
         (
-            [{"name": "deploy", "conclusion": "ACTION_REQUIRED"}],
-            "deploy: ACTION_REQUIRED\n",
+            [{"name": "tests", "status": "WAITING", "conclusion": ""}],
+            "tests: PENDING\n",
+            3,
+        ),
+        (
+            [{"name": "tests", "status": "REQUESTED", "conclusion": ""}],
+            "tests: PENDING\n",
+            3,
+        ),
+        (
+            [{"name": "tests", "status": "PENDING", "conclusion": ""}],
+            "tests: PENDING\n",
+            3,
+        ),
+        (
+            [{"name": "tests", "status": "IN_PROGRESS", "conclusion": None}],
+            "tests: PENDING\n",
+            3,
+        ),
+        (
+            [
+                {"name": "a", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"name": "b", "status": "QUEUED", "conclusion": None},
+            ],
+            "a: SUCCESS\nb: PENDING\n",
+            3,
+        ),
+        (
+            [
+                {"name": "a", "status": "COMPLETED", "conclusion": "FAILURE"},
+                {"name": "b", "status": "QUEUED", "conclusion": None},
+            ],
+            "a: FAILURE\nb: PENDING\n",
             1,
         ),
         (
-            [{"name": "tests", "conclusion": "STARTUP_FAILURE"}],
+            [{"name": "optional", "status": "COMPLETED", "conclusion": "SKIPPED"}],
+            "optional: SKIPPED\n",
+            0,
+        ),
+        (
+            [{"name": "optional", "status": "COMPLETED", "conclusion": "NEUTRAL"}],
+            "optional: NEUTRAL\n",
+            0,
+        ),
+        ([{"context": "external CI", "state": "SUCCESS"}], "external CI: SUCCESS\n", 0),
+        ([{"context": "external CI", "state": "FAILURE"}], "external CI: FAILURE\n", 1),
+        ([{"context": "external CI", "state": "ERROR"}], "external CI: ERROR\n", 1),
+        (
+            [{"context": "external CI", "state": "EXPECTED"}],
+            "external CI: EXPECTED\n",
+            1,
+        ),
+        ([{"context": "external CI", "state": "PENDING"}], "external CI: PENDING\n", 3),
+        (
+            [{"name": "tests", "status": "COMPLETED", "conclusion": "TIMED_OUT"}],
+            "tests: TIMED_OUT\n",
+            1,
+        ),
+        (
+            [{"name": "tests", "status": "COMPLETED", "conclusion": "CANCELLED"}],
+            "tests: CANCELLED\n",
+            1,
+        ),
+        (
+            [{"name": "tests", "status": "COMPLETED", "conclusion": "ACTION_REQUIRED"}],
+            "tests: ACTION_REQUIRED\n",
+            1,
+        ),
+        (
+            [{"name": "tests", "status": "COMPLETED", "conclusion": "STARTUP_FAILURE"}],
             "tests: STARTUP_FAILURE\n",
             1,
         ),
-        ([{"context": "external CI", "state": "ERROR"}], "external CI: ERROR\n", 1),
-        ([], "", 0),
-        (None, "", 0),
+        (
+            [{"name": "tests", "status": "COMPLETED", "conclusion": "STALE"}],
+            "tests: STALE\n",
+            1,
+        ),
+        (
+            [{"name": "tests", "status": "COMPLETED", "conclusion": "success"}],
+            "tests: success\n",
+            1,
+        ),
+        (
+            [{"name": "tests", "status": "COMPLETED", "conclusion": "MYSTERY"}],
+            "tests: MYSTERY\n",
+            1,
+        ),
+        (
+            [{"name": "tests", "status": "COMPLETED", "conclusion": ""}],
+            "tests: (none)\n",
+            1,
+        ),
+        (
+            [{"name": "tests", "status": "COMPLETED", "conclusion": None}],
+            "tests: (none)\n",
+            1,
+        ),
+        (
+            [{"name": "tests", "status": "in_progress", "conclusion": ""}],
+            "tests: in_progress\n",
+            1,
+        ),
+        (
+            [{"name": "tests", "status": "MYSTERY", "conclusion": ""}],
+            "tests: MYSTERY\n",
+            1,
+        ),
+        ([{"name": "tests"}], "tests: (none)\n", 1),
+        ([{"context": "external CI", "state": "mystery"}], "external CI: mystery\n", 1),
     ],
 )
 def test_checks_prints_the_head_and_each_job(
@@ -3123,6 +3215,29 @@ def test_checks_prints_the_head_and_each_job(
     ]
     assert call["stdin"] == ""
     assert call["cwd"] == str(world.root)
+
+
+@pytest.mark.parametrize("jobs", [[], None])
+def test_checks_fails_without_any_check(
+    world: World, capsys: pytest.CaptureFixture[str], jobs: list[object] | None
+) -> None:
+    sha = "a1b2c3d4" * 5
+    world.fake("gh", stdout=json.dumps({"headRefOid": sha, "statusCheckRollup": jobs}))
+    assert run_main("checks", "--pr", "45") == 1
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == (f"{sha}\n", "no checks on PR 45\n")
+
+
+@pytest.mark.parametrize("job", [{"status": "COMPLETED"}, {"name": ""}, {"name": 4}])
+def test_checks_names_a_check_without_a_name(
+    world: World, job: dict[str, object]
+) -> None:
+    data = {"headRefOid": "a1b2c3d4" * 5, "statusCheckRollup": [job]}
+    world.fake("gh", stdout=json.dumps(data))
+    with pytest.raises(
+        SystemExit, match=r"^a check of the rollup has no name or context"
+    ):
+        run_main("checks", "--pr", "45")
 
 
 @pytest.mark.parametrize(
