@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import subprocess  # nosec B404
 import tempfile
 import threading
@@ -127,23 +128,29 @@ def run(
 ) -> int:
     if token is None:
         return harness(run, prepared, stack)
+    try:
+        names = read_names(run.home / PRIVATE_NAMES)
+        names.private.extend(_configured(strict=True))
+    except (PushRefusedError, private_names.NameListError) as refusal:
+        run.files.write("log", f"push refused: {refusal}\n")
+        return 4
     workspace = Path(prepared.paths.worktree)
     branch = f"agent/{run.files.name}"
     before = head(workspace, branch)
     rc = harness(run, prepared, stack)
-    if run.files.uncertain:
-        return rc
-    commit = head(workspace, branch)
-    if commit is None or commit == before:
+    if (
+        run.files.uncertain
+        or (commit := head(workspace, branch)) is None
+        or commit == before
+    ):
         return rc
     run.files.write("head", commit)
     if rc:
         run.files.write("log", f"push skipped: harness exited {rc}\n")
         return rc
     try:
-        names = read_names(run.home / PRIVATE_NAMES)
         with publication(run.files.root, workspace, commit) as directory:
-            scan(directory, before, commit, names)
+            scan(directory, before, commit, names, branch)
             status, error = send(directory, url(run.request.repo), branch, token)
     except PushRefusedError as refusal:
         run.files.write("log", f"push refused: {refusal}\n")
@@ -162,8 +169,25 @@ def run(
 
 def read_names(source: Path) -> private_names.Names:
     try:
-        text = runfiles.read_owned(source, 1024 * 1024, "private-name list")
-    except OSError, ValueError:
+        with os.fdopen(
+            os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb"
+        ) as incoming:
+            metadata = os.fstat(incoming.fileno())
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o022
+            ):
+                message = (
+                    "private-name list must be owned, regular and protected from writes"
+                )
+                raise PushRefusedError(message)
+            data = incoming.read(1024 * 1024 + 1)
+            if len(data) > 1024 * 1024:
+                message = "private-name list exceeds 1 MiB"
+                raise PushRefusedError(message)
+        text = data.decode()
+    except OSError, UnicodeError:
         text = ""
     names = [
         name
@@ -179,11 +203,21 @@ def read_names(source: Path) -> private_names.Names:
         if line.strip().startswith(private_names.PATH_HEADER)
         for word in line.strip().removeprefix(private_names.PATH_HEADER).split()
     }
+    if any(
+        re.fullmatch(r"[\w.-]+", name, re.ASCII) is None
+        for name in [*names, *path_only]
+    ):
+        message = "invalid private-name list"
+        raise PushRefusedError(message)
     return private_names.Names(names, path_only)
 
 
 def scan(
-    directory: Path, before: str | None, commit: str, names: private_names.Names
+    directory: Path,
+    before: str | None,
+    commit: str,
+    names: private_names.Names,
+    branch: str,
 ) -> None:
     if before is None:
         message = "no base commit"
@@ -207,23 +241,50 @@ def scan(
             "PATH": host_tools.search(),
         }
     )
+    command = [
+        host_tools.resolve("git"),
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.quotePath=false",
+        "-C",
+        str(directory),
+    ]
     try:
+        objects = subprocess.run(  # nosec B603
+            [*command, "rev-list", "--objects", f"{before}..{commit}"],
+            cwd=directory,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        ).stdout
+        # Raw objects include merge results, binary blobs and both identities.
+        # List paths separately too: a renamed file can reuse an old blob or
+        # tree. Separate diffs against every merge parent include result paths.
         result = subprocess.run(  # nosec B603
+            [*command, "cat-file", "--batch"],
+            cwd=directory,
+            env=env,
+            input=b"".join(
+                line.partition(b" ")[0] + b"\n" for line in objects.splitlines()
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+        paths = subprocess.run(  # nosec B603
             [
-                host_tools.resolve("git"),
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                "core.fsmonitor=false",
-                "-c",
-                "diff.external=",
-                "-c",
-                "core.pager=cat",
-                "-C",
-                str(directory),
+                *command,
                 "log",
-                "--format=commit %H%n%B",
-                "-p",
+                "--format=",
+                "--name-only",
+                "-z",
+                "-m",
+                "--no-renames",
                 "--no-ext-diff",
                 "--no-text" + "conv",
                 f"{before}..{commit}",
@@ -233,16 +294,22 @@ def scan(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
-            errors="replace",
             check=True,
-        )
+        ).stdout
     except OSError, subprocess.SubprocessError:
-        message = "git log unavailable"
+        message = "git object scan unavailable"
         raise PushRefusedError(message) from None
-    lines = result.stdout.splitlines()
+    lines = [
+        f"refs/heads/{branch}",
+        *(
+            f"tree/{path.decode(errors='replace')}"
+            for path in paths.split(b"\0")
+            if path
+        ),
+        *result.stdout.decode(errors="replace").splitlines(),
+    ]
     hits = private_names.private_name_problems(
-        lines, names.private + list(_configured()), path_only=names.path_only
+        lines, names.private, path_only=names.path_only
     )
     if hits:
         message = f"{len(hits)} private-name hit(s)" + "".join(

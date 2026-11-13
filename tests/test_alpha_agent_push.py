@@ -96,23 +96,27 @@ def local_run(
     return run, prepared, target
 
 
-def git(directory: Path, *args: str) -> str:
-    return subprocess.check_output(
-        ["git", "-c", "core.hooksPath=/dev/null", "-C", str(directory), *args],
-        cwd=directory,
-        env={
-            "PATH": os.environ["PATH"],
-            "HOME": str(Path.home()),
-            "XDG_CONFIG_HOME": str(Path.home() / ".config"),
-            "XDG_STATE_HOME": str(Path.home() / ".local/state"),
-            "XDG_CACHE_HOME": str(Path.home() / ".cache"),
-            "XDG_DATA_HOME": str(Path.home() / ".local/share"),
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-        },
-        text=True,
-        stderr=subprocess.DEVNULL,
-    ).strip()
+def git(directory: Path, *args: str, data: bytes | None = None) -> str:
+    return (
+        subprocess.check_output(
+            ["git", "-c", "core.hooksPath=/dev/null", "-C", str(directory), *args],
+            cwd=directory,
+            env={
+                "PATH": os.environ["PATH"],
+                "HOME": str(Path.home()),
+                "XDG_CONFIG_HOME": str(Path.home() / ".config"),
+                "XDG_STATE_HOME": str(Path.home() / ".local/state"),
+                "XDG_CACHE_HOME": str(Path.home() / ".cache"),
+                "XDG_DATA_HOME": str(Path.home() / ".local/share"),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+            },
+            input=data,
+            stderr=subprocess.DEVNULL,
+        )
+        .decode()
+        .strip()
+    )
 
 
 def commit(directory: Path, text: str) -> None:
@@ -599,7 +603,7 @@ def test_private_name_list_required(
     assert run.files.path("log").read_text() == (
         f"push refused: no private-name list at {source}\n"
     )
-    assert run.files.path("head").exists()
+    assert not run.files.path("head").exists()
     assert not run.files.path("branch").exists()
 
 
@@ -653,53 +657,65 @@ def test_private_name_refuses_push(
 def test_scan_isolates_git_and_checks_only_own_range(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def log(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    calls: list[list[str]] = []
+
+    def objects(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append(command)
         assert command[:1] == [host_tools.resolve("git")]
-        assert command[1:9] == [
+        assert command[1:7] == [
             part
             for option in (
                 "core.hooksPath=/dev/null",
                 "core.fsmonitor=false",
-                "diff.external=",
-                "core.pager=cat",
+                "core.quotePath=false",
             )
             for part in ("-c", option)
         ]
-        assert command[9:12] == ["-C", str(tmp_path), "log"]
-        assert command[12:] == [
-            "--format=commit %H%n%B",
-            "-p",
-            "--no-ext-diff",
+        assert command[7:9] == ["-C", str(tmp_path)]
+        assert kwargs["cwd"] == tmp_path
+        assert kwargs["env"] == {
+            "HOME": str(tmp_path),
+            "XDG_CACHE_HOME": str(tmp_path),
+            "XDG_CONFIG_HOME": str(tmp_path),
+            "XDG_DATA_HOME": str(tmp_path),
+            "XDG_STATE_HOME": str(tmp_path),
+            "GIT_ASKPASS": "/bin/false",
+            "PATH": host_tools.search(),
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+        assert kwargs["stdout"] == subprocess.PIPE
+        assert kwargs["stderr"] == subprocess.DEVNULL
+        assert kwargs["check"] is True
+        if command[9] == "rev-list":
+            assert kwargs["stdin"] == subprocess.DEVNULL
+            assert command[9:] == ["rev-list", "--objects", "base..head"]
+            return subprocess.CompletedProcess(command, 0, b"abc path\ndef\n")
+        if command[9] == "cat-file":
+            assert command[9:] == ["cat-file", "--batch"]
+            assert kwargs["input"] == b"abc\ndef\n"
+            return subprocess.CompletedProcess(command, 0, b"clean\n")
+        assert command[9:] == [
+            "log",
+            *["--format=", "--name-only", "-z", "-m", "--no-renames", "--no-ext-diff"],
             "--no-text" + "conv",
             "base..head",
         ]
-        assert kwargs == {
-            "cwd": tmp_path,
-            "env": {
-                "HOME": str(tmp_path),
-                "XDG_CACHE_HOME": str(tmp_path),
-                "XDG_CONFIG_HOME": str(tmp_path),
-                "XDG_DATA_HOME": str(tmp_path),
-                "XDG_STATE_HOME": str(tmp_path),
-                "GIT_ASKPASS": "/bin/false",
-                "PATH": host_tools.search(),
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_TERMINAL_PROMPT": "0",
-            },
-            "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.PIPE,
-            "stderr": subprocess.DEVNULL,
-            "text": True,
-            "errors": "replace",
-            "check": True,
-        }
-        return subprocess.CompletedProcess(command, 0, "clean\n")
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        return subprocess.CompletedProcess(command, 0, b"clean.txt\0")
 
-    monkeypatch.setattr(subprocess, "run", log)
+    monkeypatch.setattr(subprocess, "run", objects)
     push.scan(
-        tmp_path, "base", "head", private_names.Names(["fixture" + "repo"], set())
+        tmp_path,
+        "base",
+        "head",
+        private_names.Names(["fixture" + "repo"], set()),
+        "example",
     )
+    assert len(calls) == 3
 
 
 def test_scan_reports_every_hit_with_its_line(
@@ -707,15 +723,22 @@ def test_scan_reports_every_hit_with_its_line(
 ) -> None:
     name = "fixture" + "repo"
     path = "example/path-fixture"
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        constant(subprocess.CompletedProcess([], 0, f"clean\n{path}\n{name}\n")),
-    )
+
+    def scan_data(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        data = f"{path}\n{name}\n".encode() if "cat-file" in command else b""
+        return subprocess.CompletedProcess(command, 0, data)
+
+    monkeypatch.setattr(subprocess, "run", scan_data)
     monkeypatch.setattr(push, "_configured", constant([]))
     with pytest.raises(push.PushRefusedError) as caught:
         push.scan(
-            tmp_path, "base", "head", private_names.Names([name], {"path-fixture"})
+            tmp_path,
+            "base",
+            "head",
+            private_names.Names([name], {"path-fixture"}),
+            "example",
         )
     assert str(caught.value) == (
         "2 private-name hit(s)\nline 2: 'path-fixture' names a private repository; "
@@ -745,7 +768,9 @@ def test_no_base_commit_refuses_push(
     assert not run.files.path("branch").exists()
 
 
-def test_git_log_failure_refuses_push(
+@pytest.mark.parametrize("operation", ["rev-list", "cat-file", "log"])
+def test_git_object_failure_refuses_push(
+    operation: str,
     local_run: tuple[run_host.Run, run_host.Prepared, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -755,7 +780,7 @@ def test_git_log_failure_refuses_push(
     def fail_log(
         command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
-        if "log" in command:
+        if operation in command:
             raise subprocess.CalledProcessError(1, command)
         return original(command, **kwargs)
 
@@ -763,5 +788,292 @@ def test_git_log_failure_refuses_push(
     with ExitStack() as stack:
         assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
     assert git(target, "for-each-ref") == ""
-    assert run.files.path("log").read_text() == "push refused: git log unavailable\n"
+    assert (
+        run.files.path("log").read_text()
+        == "push refused: git object scan unavailable\n"
+    )
     assert not run.files.path("branch").exists()
+
+
+@pytest.mark.parametrize(
+    "position",
+    [
+        "merge",
+        "binary",
+        "author-name",
+        "author-email",
+        "committer-name",
+        "committer-email",
+        "ref",
+        "root-path",
+        "reused-blob-path",
+        "path-bytes",
+    ],
+)
+def test_publication_scans_all_outgoing_data(
+    position: str,
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+    marker = "fixture" + "repo"
+    if position == "ref":
+        run.files.name = "destination-fixture"
+        git(workspace, "branch", "-m", f"agent/{run.files.name}")
+        (run.home / push.PRIVATE_NAMES).write_text(run.files.name + "\n")
+    if position == "reused-blob-path":
+        (workspace / "clean.txt").write_text("clean")
+        git(workspace, "add", ".")
+        commit(workspace, "base file")
+
+    def changed(
+        actual: run_host.Run, paths: run_host.Prepared, stack: ExitStack
+    ) -> int:
+        if position == "merge":
+            git(workspace, "checkout", "-b", "side")
+            commit(workspace, "side change")
+            git(workspace, "checkout", "agent/example")
+            commit(workspace, "main change")
+            git(workspace, "merge", "--no-commit", "--no-ff", "side")
+            (workspace / "example.txt").write_text(marker)
+            git(workspace, "add", ".")
+        elif position in ("root-path", "reused-blob-path"):
+            source = workspace / "path-fixture"
+            if position == "reused-blob-path":
+                (workspace / "clean.txt").rename(source)
+            else:
+                source.write_text("clean")
+            git(workspace, "add", ".")
+        elif position == "path-bytes":
+            blob = git(workspace, "hash-object", "-w", "--stdin", data=b"clean")
+            tree = git(
+                workspace,
+                "mktree",
+                "-z",
+                data=f"100644 blob {blob}\tprefix".encode()
+                + b"\xff"
+                + marker.encode()
+                + b"\0",
+            )
+            outgoing = git(
+                workspace, "commit-tree", tree, "-p", "HEAD", "-m", "agent change"
+            )
+            git(workspace, "update-ref", "HEAD", outgoing)
+            return 0
+        elif position == "binary":
+            (workspace / "example.bin").write_bytes(
+                b"\0prefix\xff" + marker.encode() + b"\xff" + b"suffix"
+            )
+            git(workspace, "add", ".")
+        elif position.startswith(("author", "committer")):
+            field, part = position.split("-")
+            value = marker if part == "name" else f"{marker}@example.com"
+            git(workspace, "config", f"{field}.{part}", value)
+        return harness(actual, paths, stack)
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, changed, SYNTHETIC) == 4
+    assert git(target, "for-each-ref") == ""
+    assert "private-name hit(s)" in run.files.path("log").read_text()
+
+
+@pytest.mark.parametrize(
+    "error", [OSError, UnicodeDecodeError, private_names.userconfig.ConfigError]
+)
+def test_supplemental_read_error_refuses_push(
+    error: type[Exception],
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, target = local_run
+
+    def fail(*_args: object) -> None:
+        if error is UnicodeDecodeError:
+            b"\xff".decode()
+        message = "unavailable"
+        raise error(message)
+
+    monkeypatch.setattr(private_names.userconfig, "optional_strings", fail)
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
+    assert git(target, "for-each-ref") == ""
+    assert "push refused:" in run.files.path("log").read_text()
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "group",
+        "world",
+        "owner",
+        "symlink",
+        "directory",
+        "fifo",
+        "unreadable",
+        "encoding",
+        "non-ascii",
+        "invalid",
+    ],
+)
+def test_primary_list_rejects_unsafe_input(
+    kind: str,
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, target = local_run
+    source = run.home / push.PRIVATE_NAMES
+    if kind in ("group", "world"):
+        source.chmod(0o664 if kind == "group" else 0o646)
+    elif kind == "owner":
+        original = os.fstat
+
+        def metadata(fd: int) -> os.stat_result:
+            result = original(fd)
+            if result.st_ino == source.stat().st_ino:
+                fields = list(result)
+                fields[4] = os.getuid() + 1
+                return os.stat_result(fields)
+            return result
+
+        monkeypatch.setattr(os, "fstat", metadata)
+    elif kind in ("symlink", "directory", "fifo"):
+        saved = source.with_suffix(".saved")
+        source.rename(saved)
+        if kind == "symlink":
+            source.symlink_to(saved)
+        elif kind == "fifo":
+            os.mkfifo(source)
+        else:
+            source.mkdir()
+    elif kind == "unreadable":
+        source.chmod(0)
+    elif kind == "encoding":
+        source.write_bytes(b"\xff")
+    elif kind == "non-ascii":
+        source.write_text("fixture" + chr(233))
+    else:
+        source.write_text("invalid/name\n")
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
+    assert git(target, "for-each-ref") == ""
+    protected = "private-name list must be owned, regular and protected from writes"
+    expected = {
+        "group": protected,
+        "world": protected,
+        "owner": protected,
+        "fifo": protected,
+        "invalid": "invalid private-name list",
+        "non-ascii": "invalid private-name list",
+    }.get(kind, f"no private-name list at {source}")
+    assert run.files.path("log").read_text() == f"push refused: {expected}\n"
+
+
+@pytest.mark.parametrize("supplemental", [False, True])
+def test_rules_captured_before_harness(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    supplemental: bool,
+) -> None:
+    run, prepared, target = local_run
+    marker = "fixture" + "repo"
+    config = run.home / "supplemental.toml"
+    config.write_text(f'[pr_check]\nprivate_repos = ["{marker}"]\n')
+    monkeypatch.setattr(private_names.userconfig, "path", constant(config))
+    if supplemental:
+        (run.home / push.PRIVATE_NAMES).write_text("other-fixture\n")
+
+    def rewrite(
+        _actual: run_host.Run, paths: run_host.Prepared, _stack: ExitStack
+    ) -> int:
+        (run.home / push.PRIVATE_NAMES).write_text("other-fixture\n")
+        config.write_text('[pr_check]\nprivate_repos = ["other-fixture"]\n')
+        commit(Path(paths.paths.worktree), marker)
+        return 0
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, rewrite, SYNTHETIC) == 4
+    assert git(target, "for-each-ref") == ""
+    assert "private-name hit(s)" in run.files.path("log").read_text()
+
+
+def test_primary_list_size_limit(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    run, _prepared, _target = local_run
+    source = run.home / push.PRIVATE_NAMES
+    source.write_text("#" + " " * (1024 * 1024 - 4) + "\nok")
+    assert source.stat().st_size == 1024 * 1024
+    assert push.read_names(source).private == ["ok"]
+    with source.open("a") as stream:
+        stream.write("x")
+    with pytest.raises(
+        push.PushRefusedError, match=r"^private-name list exceeds 1 MiB$"
+    ):
+        push.read_names(source)
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o644, 0o755])
+def test_primary_list_accepts_safe_permissions(
+    mode: int, local_run: tuple[run_host.Run, run_host.Prepared, Path]
+) -> None:
+    run, _prepared, _target = local_run
+    source = run.home / push.PRIVATE_NAMES
+    source.chmod(mode)
+    assert push.read_names(source).private == ["fixturerepo"]
+
+
+def test_primary_reader_pins_file_and_bounds_read(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, _prepared, _target = local_run
+    source = run.home / push.PRIVATE_NAMES
+    original_open = os.open
+    original_stream = os.fdopen
+
+    def opened(path: Path, flags: int) -> int:
+        assert path == source
+        assert flags == os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        return original_open(path, flags)
+
+    @contextmanager
+    def stream(fd: int, mode: str) -> Generator[SimpleNamespace]:
+        assert mode == "rb"
+        with original_stream(fd, "rb") as incoming:
+
+            def read(limit: int) -> bytes:
+                assert limit == 1024 * 1024 + 1
+                return incoming.read(limit)
+
+            yield SimpleNamespace(fileno=incoming.fileno, read=read)
+
+    monkeypatch.setattr(os, "open", opened)
+    monkeypatch.setattr(os, "fdopen", stream)
+    assert push.read_names(source).private == ["fixturerepo"]
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        b"\xff",
+        b"[",
+        b'[pr_check]\nprivate_repos = "example"',
+        b"[pr_check]\nprivate_repos = []",
+    ],
+)
+def test_invalid_supplemental_list_refuses_push(
+    document: bytes,
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, target = local_run
+    config = run.home / "supplemental.toml"
+    config.write_bytes(document)
+    monkeypatch.setattr(private_names.userconfig, "path", constant(config))
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
+    assert git(target, "for-each-ref") == ""
+    assert run.files.path("log").read_text() == (
+        "push refused: cannot read supplemental private-name list\n"
+    )

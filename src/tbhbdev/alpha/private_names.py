@@ -13,6 +13,7 @@ host list reports a problem.
 from __future__ import annotations
 
 import re
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -111,11 +112,17 @@ def _host_names() -> Names:
     return Names(names, path_only)
 
 
-def _configured() -> list[str]:
-    """The configured private names; none when the config can't supply them."""
+def _configured(*, strict: bool = False) -> list[str]:
+    """Configured names; optionally refuse a config that cannot supply them."""
     try:
+        if strict:
+            with suppress(FileNotFoundError):
+                userconfig.path().stat()
         return userconfig.optional_strings("pr_check", "private_repos") or []
     except userconfig.ConfigError, OSError, UnicodeDecodeError:
+        if strict:
+            message = "cannot read supplemental private-name list"
+            raise NameListError(message) from None
         return []
 
 
