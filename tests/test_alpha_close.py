@@ -136,7 +136,9 @@ def test_a_pr_without_opened_by_by_the_agent_account_is_closed_on_that_basis(
     )
 
 
-@pytest.mark.parametrize("author", [{"login": ""}, {}, None, "tbhb-agent"])
+@pytest.mark.parametrize(
+    "author", [{"login": ""}, {"login": 1}, {}, None, "tbhb-agent"]
+)
 def test_a_pr_with_no_readable_author_is_refused_without_asking_gh(
     gh: Gh, author: object
 ) -> None:
