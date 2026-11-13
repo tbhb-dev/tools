@@ -81,7 +81,8 @@ request exists only warns. ``edit`` copies the live body's ``Opened-by`` line un
 and adds none when the live body has none. ``check`` rejects a draft that
 contains one.
 
-``ready --pr N`` marks pull request N ready for review with ``gh pr ready``. It
+``ready --pr N`` marks pull request N ready for review with ``gh pr ready``, but only
+when its GitHub author is the account this ``gh`` runs as. It
 doesn't read a draft.
 
 ``rerun N`` reruns only the failed jobs of the latest run for pull request N's
@@ -1155,6 +1156,35 @@ def closed_pr_head(number: int, repo: str) -> str:
     return branch
 
 
+def require_own_author(number: int) -> None:
+    """Refuse unless PR N's GitHub author is the account this ``gh`` runs as.
+
+    Raises:
+        SystemExit: The author or the account can't be read, or they differ.
+    """
+    author = run(
+        [
+            find_tool(GH),
+            "pr",
+            "view",
+            str(number),
+            "--json",
+            "author",
+            "--jq",
+            ".author.login",
+        ]
+    )
+    me = run(
+        [find_tool(GH), "api", "--hostname", "github.com", "user", "--jq", ".login"]
+    )
+    login = author.stdout.strip()
+    if author.returncode or me.returncode or not login or me.stdout.strip() != login:
+        message = (
+            f"not marking PR {number} ready: its author isn't this agent's account"
+        )
+        raise SystemExit(message)
+
+
 def delete_pr_branch(number: int) -> int:
     """Delete a finished PR's unprotected head branch from origin only.
 
@@ -1591,6 +1621,7 @@ def main(
     if args.command in by_pr:
         return by_pr[args.command](args.pr)
     if args.command == "ready":
+        require_own_author(args.pr)
         # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
         # empty body: no test can tell `None` from `""`.
         return invoke_gh([GH, "pr", "ready", str(args.pr)], "")[0]  # pragma: no mutate

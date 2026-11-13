@@ -3389,11 +3389,52 @@ def test_checks_requires_a_pr_number(argv: tuple[str, ...]) -> None:
     assert info.value.code == 2
 
 
+READY_VIEW = "pr view 45 --json author --jq .author.login"
+READY_ME = "api --hostname github.com user --jq .login"
+
+
+def ready_cases(
+    author: str = "agent", me: str = "agent"
+) -> dict[str, dict[str, object]]:
+    return {
+        READY_VIEW: {"rc": 0, "stdout": f"{author}\n", "stderr": ""},
+        READY_ME: {"rc": 0, "stdout": f"{me}\n", "stderr": ""},
+    }
+
+
 def test_ready_marks_the_pull_request_ready(world: World) -> None:
+    world.fake("gh", cases=ready_cases())
     assert run_main("ready", "--pr", "45") == 0
-    (call,) = world.calls("gh")
-    assert call["argv"] == ["pr", "ready", "45"]
-    assert call["stdin"] == ""
+    assert [c["argv"] for c in world.calls("gh")] == [
+        ["pr", "view", "45", "--json", "author", "--jq", ".author.login"],
+        ["api", "--hostname", "github.com", "user", "--jq", ".login"],
+        ["pr", "ready", "45"],
+    ]
+    assert world.calls("gh")[2]["stdin"] == ""
+
+
+def test_ready_refuses_another_authors_pull_request(world: World) -> None:
+    world.fake("gh", cases=ready_cases(author="human"))
+    with pytest.raises(SystemExit, match="isn't this agent's account"):
+        run_main("ready", "--pr", "45")
+    assert ["pr", "ready", "45"] not in [c["argv"] for c in world.calls("gh")]
+
+
+@pytest.mark.parametrize("failing", [READY_VIEW, READY_ME])
+def test_ready_refuses_when_a_login_is_unreadable(world: World, failing: str) -> None:
+    cases = ready_cases()
+    cases[failing] = {"rc": 1, "stdout": "agent\n", "stderr": "boom"}
+    world.fake("gh", cases=cases)
+    with pytest.raises(SystemExit, match="isn't this agent's account"):
+        run_main("ready", "--pr", "45")
+    assert ["pr", "ready", "45"] not in [c["argv"] for c in world.calls("gh")]
+
+
+def test_ready_refuses_an_empty_login(world: World) -> None:
+    cases = ready_cases(author="", me="")
+    world.fake("gh", cases=cases)
+    with pytest.raises(SystemExit, match="isn't this agent's account"):
+        run_main("ready", "--pr", "45")
 
 
 @pytest.mark.parametrize(
@@ -3577,7 +3618,9 @@ def test_delete_branch_passes_gh_output_and_exit_code_through(
 def test_ready_passes_gh_output_and_exit_code_through(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    world.fake("gh", rc=3, stdout="out\n", stderr="err\n")
+    cases = ready_cases()
+    cases["pr ready"] = {"rc": 3, "stdout": "out\n", "stderr": "err\n"}
+    world.fake("gh", cases=cases)
     assert run_main("ready", "--pr", "45") == 3
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == ("out\n", "err\n")
