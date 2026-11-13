@@ -37,13 +37,14 @@ Controllers select their key and turn off the identity agent:
 
 ```sh
 ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'run-host NAME'
+ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'preflight NAME'
 ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'result NAME'
 ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'kill NAME'
 ```
 
 On macOS, the controller uses `/Library/Application Support/tbhbdev/agent-launch/id_ed25519` (`ssh_serve.MACOS_LAUNCH_KEY`). Linux uses `/etc/tbhbdev/agent-launch/id_ed25519` (`ssh_serve.LINUX_LAUNCH_KEY`). Quote the macOS path when passing it to `-i`.
 
-`run-host NAME` reads one JSON object from stdin, at most 1 MiB:
+`run-host NAME` and `preflight NAME` read one JSON object from stdin, at most 1 MiB:
 
 ```json
 {"v": 1, "request": {"v": 2}, "push_token": null}
