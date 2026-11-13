@@ -25,6 +25,7 @@ SAFE = (
     "core.pager=cat",
 )
 HOOK_ARGUMENTS = 2
+PROTECTED = frozenset({"refs/heads/main", "refs/heads/master"})
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
@@ -115,6 +116,12 @@ def push_problems(remote: str, url: str, lines: Sequence[str]) -> list[str]:
     scanned: set[str] = set()
     for line in lines:
         _, local, ref, old = line.split()
+        if ref in PROTECTED:
+            problems.append(
+                f"{ref}: push to a protected branch refused; "
+                "push a new branch and open a pull request"
+            )
+            continue
         if not local.strip("0"):
             continue
         if old.strip("0") and git(*SAFE, "merge-base", "--is-ancestor", old, local)[0]:

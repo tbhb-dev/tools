@@ -79,7 +79,7 @@ def guard(
     monkeypatch.setattr(
         sys,
         "stdin",
-        io.StringIO(f"refs/heads/topic {local} refs/heads/main {remote}\n"),
+        io.StringIO(f"refs/heads/topic {local} refs/heads/topic {remote}\n"),
     )
     return alpha.main(["pre-push-guard", "origin", url], "tbhbdev alpha")
 
@@ -106,7 +106,7 @@ def test_ancestry(
     assert out == ""
     if denied:
         assert (
-            err == "refs/heads/main: non-fast-forward push refused; "
+            err == "refs/heads/topic: non-fast-forward push refused; "
             "push a new branch instead\n"
         )
     else:
@@ -420,7 +420,7 @@ def test_private_target_checks_every_ref(
         "stdin",
         io.StringIO(
             f"refs/heads/new {head} refs/heads/new {ZERO}\n"
-            f"refs/heads/main {base} refs/heads/main {head}\n"
+            f"refs/heads/topic {base} refs/heads/topic {head}\n"
         ),
     )
     assert (
@@ -581,3 +581,65 @@ def test_fallback_uses_push_url(
         PUBLIC if public_push else private,
     )
     assert guard(monkeypatch, commit(repo, PRIVATE), url="") == int(public_push)
+
+
+@pytest.mark.parametrize("ref", ["refs/heads/main", "refs/heads/master"])
+@pytest.mark.parametrize("kind", ["forward", "new", "delete"])
+def test_protected_branch_refused(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    ref: str,
+    kind: str,
+) -> None:
+    base = git(repo, "rev-parse", "HEAD")
+    head = commit(repo)
+    local, remote = {
+        "forward": (head, base),
+        "new": (head, ZERO),
+        "delete": (ZERO, base),
+    }[kind]
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"HEAD {local} {ref} {remote}\n"))
+    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err == (
+        f"{ref}: push to a protected branch refused; "
+        "push a new branch and open a pull request\n"
+    )
+
+
+def test_protected_branch_refused_beside_other_refs(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    base = git(repo, "rev-parse", "HEAD")
+    head = commit(repo)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            f"refs/heads/topic {head} refs/heads/topic {ZERO}\n"
+            f"refs/heads/topic {head} refs/heads/main {base}\n"
+        ),
+    )
+    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    assert capsys.readouterr().err.startswith("refs/heads/main: push to a protected")
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "refs/heads/maintenance",
+        "refs/heads/main2",
+        "refs/tags/main",
+        "refs/heads/x/main",
+    ],
+)
+def test_similar_names_are_not_protected(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, ref: str
+) -> None:
+    head = commit(repo)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"HEAD {head} {ref} {ZERO}\n"))
+    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 0
