@@ -295,12 +295,8 @@ def test_head_judges_every_other_grid_sentence_as_main_does() -> None:
     )
 
 
-def test_the_exemption_set_is_exactly_the_three_rules() -> None:
-    assert (
-        state_guard.awaited,
-        state_guard.forecast,
-        state_guard.mentioned,
-    ) == state_guard.EXEMPTIONS
+def test_the_exemption_set_is_exactly_the_two_rules() -> None:
+    assert (state_guard.awaited, state_guard.mentioned) == state_guard.EXEMPTIONS
 
 
 MAIN_SHA = "d604159f7fb7382426be353a940121051fd080d9"
@@ -370,8 +366,8 @@ def test_the_pinned_digest_is_main_s_when_the_commit_is_present() -> None:
 
 def test_the_baseline_patterns_are_the_head_s() -> None:
     for name in JUDGE_PATTERNS:
-        assert getattr(baseline, name) == getattr(state_guard, name)
-    assert baseline.MAX_QUOTED == state_guard.MAX_QUOTED
+        assert getattr(baseline, name) == getattr(state_guard, name), DRIFT_HELP
+    assert baseline.MAX_QUOTED == state_guard.MAX_QUOTED, DRIFT_HELP
 
 
 REVIEWED = (Path(__file__).parent / "state_guard_must_block.txt").read_text(
@@ -379,7 +375,9 @@ REVIEWED = (Path(__file__).parent / "state_guard_must_block.txt").read_text(
 )
 
 
-@pytest.mark.parametrize("sentence", REVIEWED.splitlines())
+@pytest.mark.parametrize(
+    "sentence", [line.replace("\\n", "\n") for line in REVIEWED.splitlines()]
+)
 def test_reviewed_bypass_sentences_block_on_main_and_head(sentence: str) -> None:
     assert main_blocks(sentence)
     assert head_blocks(sentence)
@@ -395,14 +393,6 @@ def test_reviewed_bypass_sentences_block_on_main_and_head(sentence: str) -> None
         "Wait until the fix's PR is deployed.",
         "Wait until the fix\u2019s PR is deployed.",
         "Wait until the well-known fix is deployed.",
-        "It will be merged.",
-        "This will be merged.",
-        "That will be merged.",
-        "The fix will be merged.",
-        "  it will be merged.",
-        "IT WILL BE MERGED.",
-        "The follow-up will be merged.",
-        "The fix\u2019s will be merged.",
         'The word "merged".',
         'The term "merged".',
         'The verb "merged".',
@@ -453,7 +443,7 @@ def test_text_beside_a_lead_in_still_blocks(sentence: str) -> None:
 
 
 def test_one_excused_claim_does_not_excuse_a_second() -> None:
-    sentence = "It will be merged. The fix is deployed."
+    sentence = 'The word "merged". The fix is deployed.'
     assert state_guard.unsupported_claims(sentence) == ["The fix is deployed."]
     both = 'The word "merged" and the fix is deployed.'
     assert state_guard.unsupported_claims(both) == [both]
@@ -465,7 +455,6 @@ def test_one_excused_claim_does_not_excuse_a_second() -> None:
         "Wait until the fix is deployed.",
         "Wait until the fix is deployed!",
         "Wait until the fix is deployed)",
-        "It will be merged when tests pass.",
         'The word "merged"',
         'The word "merged"!',
         'The word "merged" now',
@@ -522,45 +511,15 @@ def test_each_present_word_before_the_claim_blocks_a_wait(
     assert head_blocks(f"Wait until it is {shown} deployed.")
 
 
-@pytest.mark.parametrize("word", ["NOW", "ALREADY"])
-def test_a_present_word_in_a_forecast_claim_blocks(word: str) -> None:
-    assert head_blocks(f"It will be {word} done.")
-
-
-@pytest.mark.parametrize(
-    "sentence",
-    [
-        "It will be merged anymore.",
-        "It will be merged since Monday.",
-        "It will be merged so far.",
-        "It will be merged still.",
-        "It will be merged these days.",
-        "Wait until I merged it.",
-        "It will be merged as it stands.",
-        "It will be merged at present.",
-        "It will be merged and that is true.",
-        "It will be merged \u2013 it is.",
-        "It will be merged \u2014 that is the status.",
-        "It will be merged if CI passes, thanks.",
-        "It will be merged once it is merged.",
-        "It will be merged when the fix is deployed.",
-    ],
-)
-def test_a_forecast_continuation_that_asserts_the_present_blocks(
-    sentence: str,
-) -> None:
+@pytest.mark.parametrize("pronoun", ["I", "we", "you", "he", "she", "they", "it", "WE"])
+def test_a_bare_past_verb_after_a_pronoun_blocks_a_wait(pronoun: str) -> None:
+    sentence = f"Wait until {pronoun} merged."
+    assert main_blocks(sentence)
     assert head_blocks(sentence)
 
 
 @pytest.mark.parametrize(
-    "sentence",
-    [
-        "It will be merged when tests pass.",
-        "It will be merged if CI passes.",
-        "It will be merged once review ends!",
-        "It will be merged IF CI passes.",
-    ],
+    "sentence", ["Wait until sit merged.", "Wait until the fix merged."]
 )
-def test_a_forecast_with_one_clean_condition_passes(sentence: str) -> None:
-    assert main_blocks(sentence)
+def test_a_word_ending_in_a_pronoun_does_not_block_a_wait(sentence: str) -> None:
     assert not head_blocks(sentence)

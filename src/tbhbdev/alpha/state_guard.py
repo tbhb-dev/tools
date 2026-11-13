@@ -145,9 +145,6 @@ MAX_LISTED = 3
 # to exempt that match. A rule covers only a claim word that sits right after a
 # fixed lead-in, so it can't excuse a claim elsewhere in the sentence.
 WAIT_LEAD = re.compile(r"\s*wait until(?: [\w'\u2019-]+){1,3} ", re.IGNORECASE)
-FORECAST_LEAD = re.compile(
-    r"\s*(?:it|this|that|the [\w'\u2019-]+) will be ", re.IGNORECASE
-)
 WORD_LEAD = re.compile(
     r"\s*(?:the (?:word|term|verb)|look at) [\"\u201c]", re.IGNORECASE
 )
@@ -155,12 +152,10 @@ CLOSING_QUOTES = ('"', "\u201d")
 # A rule never excuses a claim that a qualifier ties to the present: "already",
 # "now" and the like say the state holds, so the sentence reports it.
 PRESENT = re.compile(r"\b(?:now|already|yet|still|currently|just)\b", re.IGNORECASE)
+# "Wait until I merged." says what a person did, so a bare past verb after one
+# of these words is a report.
+SUBJECT = re.compile(r".*\b(?:i|we|you|he|she|they|it)\s*", re.IGNORECASE | re.DOTALL)
 CLAUSE_END = re.compile(r"[\s\"\u201d'.!?,;:)]*")
-# What may follow a forecast: end punctuation, or one "when", "if" or "once"
-# clause with no sentence break inside it.
-FORECAST_END = re.compile(
-    r"(?:\s+(?:when|if|once)\b[^.!?;,\u2013\u2014]*)?[\s.!?]*", re.IGNORECASE
-)
 MENTION_END = re.compile(r"\s*(?:now\s*)?[.!?]*\s*", re.IGNORECASE)
 
 
@@ -174,22 +169,8 @@ def awaited(chunk: str, match: re.Match[str]) -> bool:
     return bool(
         WAIT_LEAD.fullmatch(before)
         and not PRESENT.search(before + match.group())
+        and not (match.group().isalpha() and SUBJECT.fullmatch(before))
         and CLAUSE_END.fullmatch(chunk[match.end() :])
-    )
-
-
-def forecast(chunk: str, match: re.Match[str]) -> bool:
-    """MATCH follows "it will be" and predicts, with no tie to the present.
-
-    Only end punctuation or one "when", "if" or "once" clause without a claim
-    word may follow, so nothing after MATCH can assert the present state.
-    """
-    tail = chunk[match.end() :]
-    return bool(
-        FORECAST_LEAD.fullmatch(chunk[: match.start()])
-        and not PRESENT.search(match.group())
-        and FORECAST_END.fullmatch(tail)
-        and not CLAIM.search(tail)
     )
 
 
@@ -208,7 +189,6 @@ def mentioned(chunk: str, match: re.Match[str]) -> bool:
 
 EXEMPTIONS: tuple[Callable[[str, re.Match[str]], bool], ...] = (
     awaited,
-    forecast,
     mentioned,
 )
 

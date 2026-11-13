@@ -125,3 +125,144 @@ It will be merged but the build failed.
 It will be merged while the build failed.
 It will be merged and the status is final.
 It will be merged and which it is.
+It will be merged\nin fact, it is.
+It will be merged\nit is.
+It will be merged\nit has been.
+It will be merged\nthat is its present state.
+It will be merged\nthat is the status.
+It will be merged if tests pass.
+It will be merged once CI is green.
+It will be merged once it has been reviewed.
+It will be merged when tests pass. It is.
+It will be merged when tests pass at the moment.
+It will be merged if it is.
+It will be merged if it has been.
+It will be merged when the build finished.
+It will be merged once I did.
+It will be merged when tests pass (it is).
+The fix will be merged when tests pass.
+Wait until I merged.
+The fix will be merged once CI passed.
+It will be merged when?
+It will be merged when the build went out.
+It will be merged when the build got in.
+It will be merged when the build is in.
+It will be merged when the build is up.
+It will be merged when the build is green.
+It will be merged when the build passed.
+It will be merged when the build succeeded.
+It will be merged when the build completed.
+It will be merged when the build is ready.
+It will be merged when the build works.
+It will be merged when tests pass and it is.
+It will be merged when tests pass and it has been.
+It will be merged when tests pass and that is its present state.
+It will be merged when tests pass and the build finished.
+It will be merged when tests pass because they already passed.
+It will be merged when tests pass when CI is green.
+It will be merged if tests pass then it is.
+It will be merged if tests pass then it has been.
+It will be merged when tests pass if review ends.
+It will be merged once tests pass once review ends.
+It will be merged when tests pass but it is.
+It will be merged when tests pass so it is.
+It will be merged when tests pass because it is.
+It will be merged once CI passed.
+It will be merged when CI passed yesterday.
+It will be merged when CI passed already.
+It will be merged when CI passes as of now.
+It will be merged when CI passes at present.
+It will be merged when CI passes as we speak.
+It will be merged when CI passes at this very moment.
+It will be merged when tests pass - done.
+It will be merged when tests pass: it is.
+It will be merged when tests pass (which they did).
+It will be merged when 'finished' appears.
+It will be merged when “finished” appears.
+It will be merged when tests pass. It is merged in abc1234.
+"It will be merged when " + "tests pass and " × 400 + "it is."
+IT WILL BE MERGED WHEN TESTS PASS AND IT IS.
+It   will   be   merged   when   tests   pass   and   it   is.
+It	will	be	merged	when	tests	pass	and	it	is.
+It will be merged\nwhen tests pass and it is.
+IT WILL BE MERGED WHEN TESTS PASS.
+It   will   be   merged   when   tests   pass.
+It	will	be	merged	when	tests	pass.
+It will be merged\nwhen tests pass.
+WAIT UNTIL I MERGED.
+Wait   until   I   merged.
+Wait	until	I	merged.
+The   word   "merged".
+The	word	"merged".
+It will be merged when tests pass； it is.
+It will be merged when tests pass， it is.
+It will be merged when tests pass。 it is.
+It will be merged, it is.
+It will be merged, it has been.
+It will be merged, that is its present state.
+It will be merged, that is the status.
+It will be merged, in fact, it is.
+It will be merged ; it is.
+It will be merged ; it has been.
+It will be merged ; that is its present state.
+It will be merged ; that is the status.
+It will be merged ; in fact, it is.
+It will be merged - it is.
+It will be merged - it has been.
+It will be merged - that is its present state.
+It will be merged - that is the status.
+It will be merged - in fact, it is.
+It will be merged – it has been.
+It will be merged – that is its present state.
+It will be merged – that is the status.
+It will be merged – in fact, it is.
+It will be merged — it is.
+It will be merged — it has been.
+It will be merged — that is the status.
+It will be merged — in fact, it is.
+It will be merged and it has been.
+It will be merged and that is its present state.
+It will be merged and in fact, it is.
+It will be merged but it is.
+It will be merged but it has been.
+It will be merged but that is its present state.
+It will be merged but that is the status.
+It will be merged but in fact, it is.
+It will be merged so it is.
+It will be merged so it has been.
+It will be merged so that is its present state.
+It will be merged so that is the status.
+It will be merged so in fact, it is.
+It will be merged because it is.
+It will be merged because it has been.
+It will be merged because that is its present state.
+It will be merged because that is the status.
+It will be merged because in fact, it is.
+It will be merged; it is.
+It will be merged; it has been.
+It will be merged; that is its present state.
+It will be merged; that is the status.
+It will be merged; in fact, it is.
+It will be merged. it is.
+It will be merged. it has been.
+It will be merged. that is its present state.
+It will be merged. that is the status.
+It will be merged. in fact, it is.
+It will be merged(it is.
+It will be merged(it has been.
+It will be merged(that is its present state.
+It will be merged(that is the status.
+It will be merged(in fact, it is.
+It will be merged: it is.
+It will be merged: it has been.
+It will be merged: that is its present state.
+It will be merged: that is the status.
+It will be merged: in fact, it is.
+It will be merged;  in fact, it is.
+It will be merged at the moment.
+It will be merged.
+It will be merged； it is.
+It will be merged， it is.
+It will be merged － it is.
+Wait until we merged.
+Wait until they merged.
