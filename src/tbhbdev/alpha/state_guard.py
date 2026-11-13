@@ -167,6 +167,26 @@ CLOSING_QUOTES = ('"', "\u201d")
 PRESENT = re.compile(r"\b(?:now|already|yet|still|currently|just)\b", re.IGNORECASE)
 TEXT = re.compile(r"\w")
 CLAUSE_END = re.compile(r"[\s\"\u201d'.!?,;:)]*")
+# A condition word that follows a word or "(" starts a condition after a main clause.
+DEFER_HEAD = (
+    r"(?:(?<=[\w\u2019')\]] )|(?<=\())"
+    r"(?<!wait )(?:after|until)(?: [\w'\u2019:./-]+){1,6} "
+)
+DEFER_WORDS = (
+    r"(?:done|applied|merged|shipped|deployed|live|fixed|complete|completed|"
+    r"installed|running|verified|in place|started)"
+)
+DEFER_AUX = re.compile(DEFER_HEAD + r"$", re.IGNORECASE)
+DEFER_AND = re.compile(
+    DEFER_HEAD + r"(?:is|are|has been|have been) " + DEFER_WORDS + r" and $",
+    re.IGNORECASE,
+)
+DEFER_TAIL = re.compile(
+    rf"(?:\s+and\s+{DEFER_WORDS})?"
+    r"(?:,\s*not\s+(?:by\s+)?[\w'\u2019-]+(?:\s[\w'\u2019-]+){0,2})?"
+    r"[\s\"\u201d'.!?,;:)]*",
+    re.IGNORECASE,
+)
 MENTION_END = re.compile(r"\s*(?:now\s*)?[.!?]*\s*", re.IGNORECASE)
 
 
@@ -187,6 +207,29 @@ def awaited(chunk: str, match: re.Match[str]) -> bool:
     )
 
 
+def deferred(chunk: str, match: re.Match[str]) -> bool:
+    """MATCH is a present-tense claim that "after" or "until" makes a condition.
+
+    "<main clause> after|until <subject> is|are|has been|have
+    been <claim word>" with the condition after a main clause, and only a closing
+    clause, "and <claim word>" or ", not by <who>" following. The condition's words
+    carry no qualifier and no comma, so the claim can't be a report.
+    """
+    before = chunk[: match.start()]
+    if WAIT_AUX.match(match.group()):
+        lead = DEFER_AUX.search(before)
+        tail = DEFER_TAIL
+    else:
+        # The second word of "is merged and applied".
+        lead = DEFER_AND.search(before)
+        tail = CLAUSE_END
+    return bool(
+        lead
+        and not PRESENT.search(lead.group() + match.group())
+        and tail.fullmatch(chunk[match.end() :])
+    )
+
+
 def mentioned(chunk: str, match: re.Match[str]) -> bool:
     """MATCH is the whole quoted word after "the word" or "look at", and no more.
 
@@ -203,6 +246,7 @@ def mentioned(chunk: str, match: re.Match[str]) -> bool:
 EXEMPTIONS: tuple[Callable[[str, re.Match[str]], bool], ...] = (
     awaited,
     mentioned,
+    deferred,
 )
 
 

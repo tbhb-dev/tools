@@ -3,3 +3,8 @@ The word "merged".	a word mention
 Wait until the fix is deployed.	a condition, not a report
 The   word   "merged".	a word mention
 The\tword\t"merged".	a word mention
+Create nothing yet: the Decision orders it after the tag:deploy policy PR is applied.	a deferred step, not a report
+- the second Tailscale OAuth client for the deploy account (after the deploy-account policy PR is applied);	a deferred step, not a report
+Send me each PR number and head as they open; no hands-on asks for tbhb on D1 or the token script until the da-policy PR is merged and applied.	a deferred step, not a report
+So D1's second client (tag:deploy only) is created by admin-vm after the tag:deploy policy PR is applied, not by tbhb.	a deferred step, not a report
+Hold until the build is done.	a deferred step, not a report

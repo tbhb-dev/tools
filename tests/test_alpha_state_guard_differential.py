@@ -47,6 +47,13 @@ INTENDED_PASSES: dict[str, str] = {
     )
 }
 
+# Sentences with a claim word inside an "after" or "until" condition.
+DEFERRED_SENTENCES = tuple(
+    sentence
+    for sentence, reason in INTENDED_PASSES.items()
+    if reason == "a deferred step, not a report"
+)
+
 PROBES = (
     "4 deployed services yesterday.",
     "A deployed worker is running.",
@@ -204,7 +211,7 @@ MUST_BLOCK = (
 
 
 def generated_corpus() -> set[str]:
-    sentences = set(BASE_SENTENCES) | set(MUST_BLOCK)
+    sentences = set(BASE_SENTENCES) | set(MUST_BLOCK) | set(DEFERRED_SENTENCES)
     sentences.update(
         sentence.rstrip(".?") + suffix
         for sentence in BASE_SENTENCES
@@ -308,7 +315,11 @@ def test_head_judges_every_other_grid_sentence_as_main_does() -> None:
 
 
 def test_the_exemption_set_is_exactly_the_two_rules() -> None:
-    assert (state_guard.awaited, state_guard.mentioned) == state_guard.EXEMPTIONS
+    assert (
+        state_guard.awaited,
+        state_guard.mentioned,
+        state_guard.deferred,
+    ) == state_guard.EXEMPTIONS
 
 
 MAIN_SHA = "d604159f7fb7382426be353a940121051fd080d9"
