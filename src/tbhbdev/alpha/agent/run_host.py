@@ -194,6 +194,38 @@ def executable_parents(executables: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(parents)
 
 
+def resolved_settings(run: Run) -> Settings:
+    """Run settings with the home-relative write roots made absolute."""
+    sandbox = run.settings.sandbox
+    return dataclasses.replace(
+        run.settings,
+        sandbox=dataclasses.replace(
+            sandbox,
+            write_roots=tuple(
+                str((run.home / p).resolve()) for p in sandbox.write_roots
+            ),
+            agy=dataclasses.replace(
+                sandbox.agy,
+                build_write=tuple(
+                    str((run.home / p).resolve()) for p in sandbox.agy.build_write
+                ),
+            ),
+        ),
+    )
+
+
+def audit_writes(
+    run: Run, workspace: Path, clone: Path, write_roots: tuple[str, ...]
+) -> None:
+    """Record the write roots a stricter policy would refuse, and refuse none."""
+    would_refuse = worktree.validate_writes(workspace, clone, write_roots)
+    if would_refuse:
+        run.files.write("would_refuse", "".join(f"{line}\n" for line in would_refuse))
+        run.files.write(
+            "log", "".join(f"audit: would refuse: {line}\n" for line in would_refuse)
+        )
+
+
 def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
     """Check directories before even inspecting or invoking an executable."""
     directories = host_tools.search_path(run.settings, run.host.os)
@@ -222,22 +254,7 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         if paths.git_common_dir is None
         else str(Path(paths.git_common_dir).resolve()),
     )
-    sandbox = run.settings.sandbox
-    check_settings = dataclasses.replace(
-        run.settings,
-        sandbox=dataclasses.replace(
-            sandbox,
-            write_roots=tuple(
-                str((run.home / p).resolve()) for p in sandbox.write_roots
-            ),
-            agy=dataclasses.replace(
-                sandbox.agy,
-                build_write=tuple(
-                    str((run.home / p).resolve()) for p in sandbox.agy.build_write
-                ),
-            ),
-        ),
-    )
+    check_settings = resolved_settings(run)
     policy.protect_host(
         check_settings, resolved, (*protected, *full_denies(run, resolved))
     )
@@ -251,12 +268,7 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         *check_settings.sandbox.write_roots,
         *check_settings.sandbox.agy.build_write,
     )
-    would_refuse = worktree.validate_writes(Path(resolved.worktree), clone, write_roots)
-    if would_refuse:
-        run.files.write("would_refuse", "".join(f"{line}\n" for line in would_refuse))
-        run.files.write(
-            "log", "".join(f"audit: would refuse: {line}\n" for line in would_refuse)
-        )
+    audit_writes(run, Path(resolved.worktree), clone, write_roots)
     worktree.validate_hooks(Path(resolved.worktree), write_roots)
     name = (
         "agy-agent"
