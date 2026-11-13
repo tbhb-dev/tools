@@ -3405,7 +3405,8 @@ def ready_cases(
 
 
 def gh_argvs(world: World) -> list[list[str]]:
-    return [c["argv"] for c in world.calls("gh.repo") + world.calls("gh")]
+    calls = world.calls("gh.repo") + world.calls("gh")
+    return [cast("list[str]", c["argv"]) for c in calls]
 
 
 def test_ready_marks_the_pull_request_ready(world: World) -> None:
