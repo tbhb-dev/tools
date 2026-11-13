@@ -1653,6 +1653,51 @@ def test_claude_file_tools_deny_each_protected_path(profile: Profile) -> None:
     )
 
 
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("configured", [False, True])
+def test_github_config_only_for_delivered_token(
+    harness: Harness,
+    profile: Profile,
+    configured: bool,
+) -> None:
+    original = settings()
+    config = dataclasses.replace(
+        original,
+        credentials=tuple(
+            dataclasses.replace(c, gh=c.gh if configured else None)
+            for c in original.credentials
+        ),
+    )
+    result = made(Os.LINUX, profile, harness, "agent", config=config)
+    gh = f"{paths('agent').tmpdir}/gh"
+    expected = configured or profile is Profile.REVIEW
+    assert (result.env.get("GH_CONFIG_DIR") == gh) is expected
+    if not expected:
+        assert "GH_CONFIG_DIR" not in result.env
+    if harness is Harness.CLAUDE:
+        claude_env = dig(claude_settings_of(result), "env")
+        assert isinstance(claude_env, dict)
+        assert ("GH_CONFIG_DIR" in claude_env) is expected
+    if isinstance(result.detail, model.AgyPolicy):
+        assert (f"read_file({gh})" in result.detail.grants) is expected
+
+
+@pytest.mark.parametrize("os", Os)
+def test_signing_file_is_denied_with_aliases(os: Os) -> None:
+    original = settings()
+    config = dataclasses.replace(
+        original,
+        credentials=tuple(
+            dataclasses.replace(c, signing="/tmp/example-key")
+            for c in original.credentials
+        ),
+    )
+    denied = policy.denied_paths(config, HOSTS[os], paths("agent").home, 123)
+    assert "/tmp/example-key" in denied
+    assert ("/private/tmp/example-key" in denied) is (os is Os.MACOS)
+
+
 @pytest.mark.parametrize("field", ["tmpdir", "audit_dir", "configured", "agy"])
 @pytest.mark.parametrize("suffix", ["", "/nested", "/../"])
 def test_hooks_directory_refuses_extra_write_grants(field: str, suffix: str) -> None:

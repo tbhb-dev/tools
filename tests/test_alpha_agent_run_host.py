@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from agent_host_example import (
+    build_provenance,
     constant,
     host_settings,
     isolate_host_git,
@@ -140,21 +141,18 @@ def fake_secrets(
 
 
 @pytest.fixture(autouse=True)
-def portable_run_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+def portable_run_protocol(
+    monkeypatch: pytest.MonkeyPatch, agent_suffix_case: None
+) -> None:
     """Check protocol spelling even on a case-insensitive filesystem."""
-    original_path = runfiles.RunFiles.path
+    del agent_suffix_case
     original_copy = runfiles.copy_final
-
-    def path(files: runfiles.RunFiles, suffix: str) -> Path:
-        assert suffix == suffix.lower()
-        return original_path(files, suffix)
 
     def copy(source: Path, destination: Path) -> None:
         assert source.name == "out.final"
         assert destination.name.endswith(".out.final")
         original_copy(source, destination)
 
-    monkeypatch.setattr(runfiles.RunFiles, "path", path)
     monkeypatch.setattr(runfiles, "copy_final", copy)
 
 
@@ -1943,7 +1941,10 @@ def test_execute_scopes_the_mac_host_path(
     run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=Os.MACOS))
     before = host_tools.search()
 
-    def execute(actual: run_host.Run, text: str, stack: ExitStack) -> int:
+    def execute(
+        actual: run_host.Run, text: str, stack: ExitStack, push_token: str | None = None
+    ) -> int:
+        assert push_token is None
         assert actual is run
         assert text == "task"
         assert isinstance(stack, ExitStack)
@@ -2281,7 +2282,7 @@ def test_linux_denies_resolve_links_drop_missing_and_deduplicate(
 
 
 @pytest.mark.parametrize("request_file", [False, True])
-@pytest.mark.parametrize("marker", ["rc", "pgid"])
+@pytest.mark.parametrize("marker", ["rc", "pgid", "owner"])
 def test_refused_rerun_preserves_every_file(
     config_file: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2774,7 +2775,10 @@ def test_late_temporary_cleanup_keeps_finished_records(
     assert run_host.main(["example"], "example") == 7
     assert run.files.path("rc").read_text() == "7\n"
     assert run.files.path("phase").read_text() == "ended"
-    assert run.files.path("log").read_text() == "harness log\n"
+    assert (
+        run.files.path("log").read_text()
+        == run_host.build_info.line() + "\nharness log\n"
+    )
 
 
 def test_signer_stop_denial_keeps_harness_rc(
@@ -3837,6 +3841,78 @@ def test_checked_policy_still_refuses_executable_link_and_parent_overlap(
     )
 
 
+def test_main_passes_in_memory_push_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    synthetic = "synthetic-push-value"
+    monkeypatch.setattr(run_host, "_load", constant((run, "task")))
+
+    def execute(actual: run_host.Run, text: str, push_token: str | None = None) -> int:
+        assert actual is run
+        assert text == "task"
+        assert push_token == synthetic
+        return 4
+
+    monkeypatch.setattr(run_host, "execute", execute)
+    assert run_host.main(["example"], "run-host", push_token=synthetic) == 4
+
+
+def test_push_failure_reaches_durable_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
+    runtime = HostRuntime(run, prepared, None)
+    runtime.patch(monkeypatch)
+    synthetic = "synthetic-push-value"
+
+    def publish(
+        actual: run_host.Run,
+        ready: run_host.Prepared,
+        stack: ExitStack,
+        harness: object,
+        token: str | None,
+    ) -> int:
+        assert actual is run
+        assert ready == prepared
+        assert isinstance(stack, ExitStack)
+        assert harness == run_host.run_harness
+        assert token == synthetic
+        return 4
+
+    monkeypatch.setattr(run_host.push, "run", publish)
+    assert run_host.execute(run, "example", synthetic) == 4
+    assert run.files.path("rc").read_text() == "4\n"
+    assert run.files.path("phase").read_text() == "ended"
+    assert runfiles.latest(run.files.root)["example"]["rc"] == 4
+
+
+@pytest.mark.parametrize("claimed", [False, True])
+def test_main_claims_owner_before_loading(
+    monkeypatch: pytest.MonkeyPatch,
+    claimed: bool,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+
+    if claimed:
+        files.write("owner", "host\n")
+    calls: list[bool] = []
+
+    def load(_args: object, _temporary: Path) -> tuple[run_host.Run, str]:
+        assert files.path("owner").read_text() == "host\n"
+        assert files.path("owner").stat().st_mode & 0o777 == 0o600
+        calls.append(True)
+        message = "test refusal"
+        raise Invalid(message)
+
+    monkeypatch.setattr(run_host, "_load", load)
+    assert run_host.main(["example"], "run-host", claimed=claimed) == 1
+    assert calls == [True]
+
+
 def test_checked_policy_audits_workspace_in_main_checkout(tmp_path: Path) -> None:
     run = make_run(tmp_path)
     clone = run.home / "other-clone"
@@ -3993,3 +4069,21 @@ def test_audit_findings_round_trip_losslessly(
         "files": {},
         "would_refuse": findings,
     }
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_main_logs_build_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    present: bool,
+) -> None:
+    run = make_run(tmp_path)
+    expected = build_provenance(tmp_path, monkeypatch, present=present)
+    monkeypatch.setattr(run_host, "_load", constant((run, "task")))
+    monkeypatch.setattr(run_host, "execute", constant(7))
+    assert run_host.main(["example"], "run-host") == 7
+    assert run.files.path("log").read_text() == (
+        f"tbhbdev tools_commit={expected['tools_commit']} "
+        f"wheel_commit={expected['wheel_commit']}\n"
+    )

@@ -97,10 +97,10 @@ class Codex:
 
 @dataclass(frozen=True)
 class Credentials:
-    """One account's secret references, each in `vault/item/field` form."""
+    """One account's secret references and signing key source."""
 
     account: str
-    gh: str
+    gh: str | None
     docker: str | None
     reviews_app_id: str | None
     reviews_app_client_id: str | None
