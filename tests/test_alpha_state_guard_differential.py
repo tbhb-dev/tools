@@ -489,6 +489,8 @@ def test_each_tail_a_rule_allows_still_passes(sentence: str) -> None:
         'The word "merged" is true.',
         'The word "merged" is current.',
         'The word "merged", now confirmed.',
+        'The word "merged"x.',
+        'The word "merged"; done.',
     ],
 )
 def test_a_qualifier_or_a_trailing_assertion_blocks(sentence: str) -> None:
