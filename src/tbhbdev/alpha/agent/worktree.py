@@ -224,15 +224,16 @@ def is_main_checkout(directory: Path) -> bool:
     )
 
 
-def _contained_checkouts(root: Path, workspace: Path | None) -> None:
+def _contained_checkouts(root: Path, workspace: Path | None) -> list[str]:
+    found: list[str] = []
     for directory, children, _files in root.walk():
         if directory != workspace and is_main_checkout(directory):
-            message = f"write root {root} contains main checkout {directory}"
-            raise Invalid(message)
+            found.append(f"write root {root} contains main checkout {directory}")
         if len(directory.relative_to(root).parts) >= CHECKOUT_SCAN_DEPTH:
             children.clear()
         if ".git" in children:
             children.remove(".git")
+    return found
 
 
 SANDBOX_MOUNT_POINTS = (".git", ".agents", ".aws", ".codex")
@@ -253,22 +254,29 @@ def clear_mount_points(writes: tuple[str, ...]) -> None:
                     entry.rmdir()
 
 
-def validate_writes(workspace: Path, source: Path, writes: tuple[str, ...]) -> None:
-    """Check real paths on disk before granting any run a writable directory."""
+def validate_writes(
+    workspace: Path, source: Path, writes: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Report the write roots that overlap a main checkout, and refuse none.
+
+    The decision of 2026-11-12 makes the directory write allowlist audit-only:
+    the launcher records what it would have refused and starts the run.
+    """
     clear_mount_points(writes)
     workspace, source = workspace.resolve(), source.resolve()
     own = workspace if workspace.parent == source / ".worktrees" else None
+    found: list[str] = []
     for root in (workspace, *(Path(p).resolve() for p in writes)):
         for ancestor in (root, *root.parents):
             if ancestor == own:
                 break
             if is_main_checkout(ancestor):
-                message = f"write root {root} reaches main checkout {ancestor}"
-                raise Invalid(message)
+                found.append(f"write root {root} reaches main checkout {ancestor}")
+                break
         if source.is_relative_to(root):
-            message = f"write root {root} contains main checkout {source}"
-            raise Invalid(message)
-        _contained_checkouts(root, own)
+            found.append(f"write root {root} contains main checkout {source}")
+        found.extend(_contained_checkouts(root, own))
+    return tuple(found)
 
 
 def validate_hooks(workspace: Path, writes: tuple[str, ...]) -> None:

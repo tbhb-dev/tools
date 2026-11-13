@@ -251,7 +251,12 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         *check_settings.sandbox.write_roots,
         *check_settings.sandbox.agy.build_write,
     )
-    worktree.validate_writes(Path(resolved.worktree), clone, write_roots)
+    would_refuse = worktree.validate_writes(Path(resolved.worktree), clone, write_roots)
+    if would_refuse:
+        run.files.write("would_refuse", "".join(f"{line}\n" for line in would_refuse))
+        run.files.write(
+            "log", "".join(f"audit: would refuse: {line}\n" for line in would_refuse)
+        )
     worktree.validate_hooks(Path(resolved.worktree), write_roots)
     name = (
         "agy-agent"
@@ -735,9 +740,11 @@ def audit_summary(run: Run, prepared: Prepared | None, rc: int) -> None:
                 files[path.relative_to(audit).as_posix()] = hashlib.file_digest(
                     stream, hashlib.sha256
                 ).hexdigest()
+    refused = run.files.path("would_refuse")
+    would_refuse = refused.read_text().splitlines() if refused.is_file() else []
     run.files.write(
         "audit.json",
-        json.dumps({"rc": rc, "files": files}) + "\n",
+        json.dumps({"rc": rc, "files": files, "would_refuse": would_refuse}) + "\n",
     )
 
 

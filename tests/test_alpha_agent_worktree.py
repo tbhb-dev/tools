@@ -1223,8 +1223,8 @@ def test_sandbox_mount_points_above_a_write_root_are_allowed(
     (shared / "run").mkdir()
     worktree.validate_writes(workspace, source, (str(shared / "run"),))
     (shared / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
-    with pytest.raises(Invalid, match=r"reaches main checkout"):
-        worktree.validate_writes(workspace, source, (str(shared / "run"),))
+    found = worktree.validate_writes(workspace, source, (str(shared / "run"),))
+    assert any("reaches main checkout" in line for line in found)
 
 
 @pytest.fixture
@@ -1250,12 +1250,9 @@ def test_write_roots_refuse_main_checkout_paths(
         link = tmp_path / "tmp-alias"
         link.symlink_to(source, target_is_directory=True)
         root = link / suffix
-    with pytest.raises(Invalid, match="main checkout") as caught:
-        worktree.validate_writes(workspace, source, (str(root),))
-    assert (
-        str(caught.value)
-        == f"write root {root.resolve()} reaches main checkout {source}"
-    )
+    found = worktree.validate_writes(workspace, source, (str(root),))
+    assert any("main checkout" in line for line in found)
+    assert found[0] == f"write root {root.resolve()} reaches main checkout {source}"
 
 
 @pytest.mark.parametrize("suffix", ["", ".git", ".git/hooks", "src"])
@@ -1264,8 +1261,8 @@ def test_workspace_cannot_be_a_main_checkout(
 ) -> None:
     source, _ = checkout_paths
     workspace = source / suffix
-    with pytest.raises(Invalid, match="main checkout"):
-        worktree.validate_writes(workspace, source, ())
+    found = worktree.validate_writes(workspace, source, ())
+    assert any("main checkout" in line for line in found)
 
 
 @pytest.mark.parametrize("depth", [0, 1, 2, 3])
@@ -1277,19 +1274,19 @@ def test_write_roots_scan_three_levels_for_other_clones(
     clone = root.joinpath(*[f"level-{index}" for index in range(depth)])
     (clone / ".git").mkdir(parents=True)
     (clone / ".git/HEAD").write_text("ref: refs/heads/main\n")
-    with pytest.raises(Invalid, match="main checkout") as caught:
-        worktree.validate_writes(workspace, source, (str(root),))
+    found = worktree.validate_writes(workspace, source, (str(root),))
+    assert any("main checkout" in line for line in found)
     relation = "reaches" if depth == 0 else "contains"
-    assert str(caught.value) == f"write root {root} {relation} main checkout {clone}"
+    assert found[0] == f"write root {root} {relation} main checkout {clone}"
 
 
 def test_source_ancestors_are_refused_without_scanning(
     tmp_path: Path, checkout_paths: tuple[Path, Path]
 ) -> None:
     source, workspace = checkout_paths
-    with pytest.raises(Invalid, match="main checkout") as caught:
-        worktree.validate_writes(workspace, source, (str(tmp_path),))
-    assert str(caught.value) == f"write root {tmp_path} contains main checkout {source}"
+    found = worktree.validate_writes(workspace, source, (str(tmp_path),))
+    assert any("main checkout" in line for line in found)
+    assert found[0] == f"write root {tmp_path} contains main checkout {source}"
 
 
 def test_only_this_workspace_is_allowed_under_main_checkout(
@@ -1299,8 +1296,8 @@ def test_only_this_workspace_is_allowed_under_main_checkout(
     worktree.validate_writes(workspace, source, (str(workspace / "src"),))
     other = workspace.parent / "agent-other"
     (other / ".git").mkdir(parents=True)
-    with pytest.raises(Invalid, match="main checkout"):
-        worktree.validate_writes(workspace, source, (str(other),))
+    found = worktree.validate_writes(workspace, source, (str(other),))
+    assert any("main checkout" in line for line in found)
 
 
 def test_scan_is_bounded_and_does_not_follow_links(
@@ -1340,8 +1337,8 @@ def test_main_checkout_requires_its_own_common_directory(
     (other / ".git/commondir").write_text(target + "\n")
     (other / ".git/HEAD").write_text("ref: refs/heads/main\n")
     if target == ".":
-        with pytest.raises(Invalid, match="main checkout"):
-            worktree.validate_writes(workspace, source, (str(other),))
+        found = worktree.validate_writes(workspace, source, (str(other),))
+        assert any("main checkout" in line for line in found)
     else:
         worktree.validate_writes(workspace, source, (str(other),))
 
@@ -1416,9 +1413,9 @@ def test_symlinked_tmp_alias_cannot_hide_a_clone(
     (temporary / "clone/.git/HEAD").write_text("ref: refs/heads/main\n")
     alias = tmp_path / "tmp"
     alias.symlink_to(temporary, target_is_directory=True)
-    with pytest.raises(Invalid, match="main checkout") as caught:
-        worktree.validate_writes(workspace, source, (str(alias),))
-    assert str(temporary) in str(caught.value)
+    found = worktree.validate_writes(workspace, source, (str(alias),))
+    assert any("main checkout" in line for line in found)
+    assert any(str(temporary) in line for line in found)
 
 
 def test_hooks_query_uses_host_environment_and_disables_execution(
@@ -1540,8 +1537,8 @@ def test_mount_point_holding_a_file_stays_and_still_refuses(
     (root / ".git/HEAD").write_text("ref: refs/heads/main\n")
     (root / ".codex").mkdir()
     (root / ".codex/auth").touch()
-    with pytest.raises(Invalid, match="main checkout"):
-        worktree.validate_writes(workspace, source, (str(root),))
+    found = worktree.validate_writes(workspace, source, (str(root),))
+    assert any("main checkout" in line for line in found)
     assert (root / ".codex/auth").exists()
 
 

@@ -526,6 +526,7 @@ def test_finished_run_writes_host_audit_summary(
             "empty": hashlib.sha256(b"").hexdigest(),
             "nested/event.json": hashlib.sha256(b"event\n").hexdigest(),
         },
+        "would_refuse": [],
     }
 
 
@@ -543,6 +544,7 @@ def test_failed_preparation_still_writes_host_audit_summary(
     assert json.loads(run.files.path("audit.json").read_text()) == {
         "rc": 1,
         "files": {},
+        "would_refuse": [],
     }
 
 
@@ -2672,9 +2674,15 @@ def test_host_state_cannot_be_a_configured_write_root(
             sandbox=dataclasses.replace(run.settings.sandbox, write_roots=(str(root),)),
         ),
     )
-    with pytest.raises(
-        Invalid, match="main checkout" if entry == "clone" else "protected host path"
-    ):
+    if entry == "clone":
+        run_host.checked_policy(run, preparation(run).paths)
+        recorded = run.files.path("would_refuse").read_text()
+        assert f"write root {root} reaches main checkout {clone}\n" in recorded
+        assert f"audit: would refuse: {recorded.splitlines()[0]}\n" in (
+            run.files.path("log").read_text()
+        )
+        return
+    with pytest.raises(Invalid, match="protected host path"):
         run_host.checked_policy(run, preparation(run).paths)
 
 
@@ -2898,9 +2906,11 @@ def test_checkout_validation_receives_aliases_and_all_write_roots(
     calls: list[tuple[Path, Path, tuple[str, ...]]] = []
     original = run_host.worktree.validate_writes
 
-    def validate(workspace: Path, source: Path, writes: tuple[str, ...]) -> None:
+    def validate(
+        workspace: Path, source: Path, writes: tuple[str, ...]
+    ) -> tuple[str, ...]:
         calls.append((workspace, source, writes))
-        original(workspace, source, writes)
+        return original(workspace, source, writes)
 
     monkeypatch.setattr(run_host.worktree, "validate_writes", validate)
     paths = preparation(run).paths
@@ -3824,14 +3834,14 @@ def test_checked_policy_still_refuses_executable_link_and_parent_overlap(
     )
 
 
-def test_checked_policy_refuses_workspace_in_main_checkout(tmp_path: Path) -> None:
+def test_checked_policy_audits_workspace_in_main_checkout(tmp_path: Path) -> None:
     run = make_run(tmp_path)
     clone = run.home / "other-clone"
     (clone / ".git").mkdir(parents=True)
     (clone / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     paths = dataclasses.replace(preparation(run).paths, worktree=str(clone))
-    with pytest.raises(Invalid, match="main checkout"):
-        run_host.checked_policy(run, paths)
+    run_host.checked_policy(run, paths)
+    assert "main checkout" in run.files.path("would_refuse").read_text()
 
 
 def test_checked_policy_allows_configured_workspace_subdirectory(
