@@ -230,8 +230,7 @@ def timed(chunk: str, match: re.Match[str]) -> bool:
     if not found or REPORTED.search(chunk[: found.start()]):
         return False
     # TIMED runs to the claim, so the words between are those after the time word.
-    word = TIME_WORD.match(found.group(0))
-    between = found.group(0)[word.end() :] if word else ""
+    between = TIME_WORD.sub("", found.group(0), count=1)
     # A status word is the state the condition names, not a verb of its own.
     between = STATUS_WORD.sub(" ", between)
     words = [word for word in between.lower().split() if word not in AUXILIARY]
@@ -277,10 +276,13 @@ def negated(chunk: str, match: re.Match[str]) -> bool:
         negation.group(0).lower() == "no" and "running" in match.group(0).lower()
     ):
         return False
-    if start + negation.start() < match.start():
-        gap = chunk[start + negation.end() : match.start()]
+    before = (
+        negation.start() < match.start() - start
+    )  # pragma: no mutate -- they can't tie
+    if before:
+        gap = clause[negation.end() : match.start() - start]
     else:
-        gap = chunk[match.end() : start + negation.start()]
+        gap = clause[match.end() - start : negation.start()]
     return len(gap.split()) <= MAX_NEGATION_GAP
 
 
@@ -327,7 +329,7 @@ def prune_blocks(directory: Path, today: datetime) -> None:
     oldest = f"blocks-{today - timedelta(days=RETENTION_DAYS):%Y-%m-%d}.jsonl"
     for path in directory.glob("blocks-*.jsonl"):
         if path.name < oldest:
-            path.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)  # pragma: no mutate -- only a race differs
 
 
 def log_blocks(event: str, sentences: list[str]) -> None:
@@ -517,8 +519,9 @@ def open_log(directory: Path, name: str = "tagged.jsonl") -> int:
     O_NOFOLLOW covers the last directory and the file only. A symlinked parent of
     the state directory still redirects the log, so the state home must be trusted.
     """
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    # fchmod below fixes the mode, so the mkdir mode and the read flag can't matter.
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)  # pragma: no mutate
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW  # pragma: no mutate
     dir_fd = os.open(directory, flags)
     try:
         os.fchmod(dir_fd, 0o700)

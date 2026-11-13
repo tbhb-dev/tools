@@ -2116,3 +2116,50 @@ def test_tag_sentences_tags_by_position_not_by_count() -> None:
 )
 def test_quantifier_denials_that_report_a_state_still_block(text: str) -> None:
     assert state_guard.unsupported_claims(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "blocks"),
+    [
+        ("Built, but not merged.", False),
+        ("Built, and merged not.", False),
+        ("Built, but not at all merged.", True),
+        ("Built, and merged, as if not at all.", True),
+    ],
+)
+def test_a_negation_must_sit_next_to_its_claim_inside_its_own_clause(
+    text: str, *, blocks: bool
+) -> None:
+    assert bool(state_guard.unsupported_claims(text)) is blocks
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'Look at "x" and the fix is "merged".',
+        "Look at \u201cx\u201d and the fix is \u201cmerged\u201d.",
+    ],
+)
+def test_the_last_opening_quote_decides_what_the_claim_sits_in(text: str) -> None:
+    assert state_guard.unsupported_claims(text)
+
+
+def test_open_log_defaults_to_the_tagged_log_and_refuses_a_shared_file(
+    tmp_path: Path,
+) -> None:
+    state_guard.os.close(state_guard.open_log(tmp_path / "d"))
+    assert (tmp_path / "d" / "tagged.jsonl").exists()
+    state_guard.os.link(tmp_path / "d" / "tagged.jsonl", tmp_path / "d" / "twin")
+    with pytest.raises(OSError, match="single-link regular file owned by this user"):
+        state_guard.open_log(tmp_path / "d")
+
+
+def test_a_log_at_exactly_the_size_cap_gets_no_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    state_guard.log_blocks("Stop", ["Merged."])
+    (log,) = (tmp_path.joinpath(*state_guard.LOG_DIRECTORY)).glob("blocks-*.jsonl")
+    monkeypatch.setattr(state_guard, "MAX_LOG_BYTES", log.stat().st_size)
+    state_guard.log_blocks("Stop", ["Merged."])
+    assert len(log.read_text().splitlines()) == 1
