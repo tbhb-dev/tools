@@ -237,7 +237,7 @@ def test_worktree_git_contract_under_one_stable_lock(
         path / ".git" / "hooks" / "prepare-commit-msg"
     ).read_text() == worktree.install.SHIM.format(
         mark=worktree.install.SHIM_MARK,
-        verb="trailer",
+        verb="identity trailer",
         hook="prepare-commit-msg",
         origin=worktree.install.ORIGIN_GREP,
     )

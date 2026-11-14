@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, cast
 import jsonschema
 import pytest
 import yaml
-from fake_tool import pythonpath
+from fake_tool import pythonpath, write_private_config
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -3951,7 +3951,11 @@ def test_install_writes_plain_identity_hooks(wired: Path) -> None:
 
 @pytest.fixture
 def wired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A tbhb-dev repository with `tbhbdev alpha install`'s git hooks."""
+    """A tbhb-dev repository with `tbhbdev alpha install`'s git hooks.
+
+    The pre-commit shim's secret scan needs the host's private gitleaks config.
+    """
+    write_private_config(Path.home())
     path = init_repo(tmp_path / "wired")
     (path / ".pre-commit-config.yaml").write_text(
         yaml.safe_dump(PREK_CONFIG), encoding="utf-8"

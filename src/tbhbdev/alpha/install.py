@@ -8,25 +8,36 @@ pushes require a readable, nonempty `~/.local/state/tbhb/private-repos.txt`,
 combined with `[pr_check] private_repos`. The list's header defines words
 flagged only in path positions. Nonempty SKIP or PREK_SKIP refuses a push.
 Without tbhbdev on PATH, it refuses pushes targeting a tbhb-dev repository,
-using the hook URL argument or the named remote's URL. The pre-commit hook and
-the agent identity hooks (prepare-commit-msg, commit-msg, post-commit) are
-plain shims: pre-commit runs `tbhbdev alpha pre-commit-scan`, the scan of the
-staged changes under the host's private gitleaks config, and the others run
-`tbhbdev alpha identity`. They aren't prek hooks because prek stashes unstaged
-changes around every stage and fails a hook whenever the work tree changes
-while it runs, so a concurrent agent's edit during a commit would fail the
-commit or be reverted. When the prek config also has hooks for one of those
-stages, prek's own shim for it is installed as `<hook>.prek` and the plain
-shim runs it afterwards. Both always run, and either failing fails the commit.
-Without tbhbdev on PATH, the tbhbdev part of a shim fails the commit when
-origin is a tbhb-dev repository, by repo.py's own pattern, and does nothing
-elsewhere.
+using the hook URL argument or the named remote's URL. The pre-commit and
+pre-merge-commit hooks and the agent identity hooks (prepare-commit-msg,
+commit-msg, post-commit) are plain shims. They aren't prek hooks because prek
+stashes unstaged changes around every stage and fails a hook whenever the work
+tree changes while it runs, so a concurrent agent's edit during a commit would
+fail the commit or be reverted. When the prek config has hooks for one of
+those stages, prek's own shim for it is installed as `<hook>.prek` and the
+plain shim chains it.
+
+The pre-commit and pre-merge-commit shims run `tbhbdev alpha pre-commit-scan`,
+the scan of the staged changes under the host's private gitleaks config, last:
+first the chained `<hook>.prek`, or without one a `<hook>.legacy`, and the scan
+only when that hook passed, so the scan sees the index any earlier hook left.
+The scan's status is the shim's. A foreign hook for either stage moves to
+`<hook>.legacy`, with a warning, and keeps running: prek's chained hook runs
+it, or the shim does when prek has no hooks for the stage. The shim is written
+to a temporary file and renamed into place, so a failed `prek install` still
+leaves the scan-only shim, reported as a failure, and a failed write puts the
+previous hook back.
+
+The identity shims run `tbhbdev alpha identity` and then the chained hook. Both
+always run, and either failing fails the commit. A foreign identity hook stays
+in place, without the shim. Without tbhbdev on PATH, the tbhbdev part of a shim
+fails the commit when origin is a tbhb-dev repository, by repo.py's own
+pattern, and does nothing elsewhere.
 
 core.hooksPath set means prek won't install, so that case warns and leaves the
-hooks alone. A foreign pre-commit hook moves to `pre-commit.legacy`, with a
-warning, and prek's chained hook runs it after the scan; any other foreign hook
-stays in place. A foreign pre-push hook fails the
-install and must be moved aside before retrying. Session starts can overlap,
+hooks alone. A foreign pre-push hook fails the install and must be moved aside
+before retrying. A `<hook>.legacy` is never overwritten: one in the way is
+first moved to a backup name. Session starts can overlap,
 so a lock directory in the hooks directory holds its owner's PID and lets one
 run at a time touch the hooks. A run waits up to TBHB_INSTALL_LOCK_TIMEOUT
 seconds (default 15) and breaks a lock whose owner is no longer running. The
@@ -166,10 +177,14 @@ IDENTITY_HOOKS = (
     ("commit-msg", "identity check"),
     ("post-commit", "identity consume"),
 )
-SHIM_HOOKS = (("pre-commit", "pre-commit-scan"), *IDENTITY_HOOKS)
-# The one stage whose foreign hook moves to `<hook>.legacy`, as `prek install`
-# does, so the scan always runs.
-MOVE_FOREIGN = "pre-commit"
+# The stages whose shim scans the staged changes. A foreign hook for one moves
+# to `<hook>.legacy`, as `prek install` does, so the scan always runs.
+SCAN_HOOKS = ("pre-commit", "pre-merge-commit")
+SHIM_HOOKS = (*((name, "pre-commit-scan") for name in SCAN_HOOKS), *IDENTITY_HOOKS)
+# Where chain_prek keeps `<hook>.legacy` while `prek install -f` runs.
+ASIDE = ".legacy.tbhb-aside"
+# Where a shim's previous hook waits while prek's hook is installed.
+PREVIOUS = ".tbhb-previous"
 # Names live at module level, where mutmut leaves them alone: git config keys
 # are case-insensitive and --get is git config's default action, so a mutant of
 # this one would be equivalent.
@@ -221,6 +236,28 @@ if [ -x "$next" ]; then
   "$next" "$@" || status=$?
 fi
 exit $status
+"""
+# The scan shim: the chained hook first, then the scan of the index it left,
+# only when the chained hook passed.
+SCAN_SHIM = """#!/bin/sh
+{mark}
+dir=$(dirname "$0")
+if [ -x "$dir/{hook}.prek" ]; then
+  "$dir/{hook}.prek" "$@" || exit $?
+elif [ -x "$dir/{hook}.legacy" ]; then
+  "$dir/{hook}.legacy" "$@" || exit $?
+fi
+if command -v tbhbdev >/dev/null 2>&1; then
+  exec tbhbdev alpha {verb}
+fi
+if origin=$(git remote get-url origin 2>/dev/null) &&
+  printf '%s' "$origin" | LC_ALL=C tr '\\n' ' ' |
+  LC_ALL=C grep -Eqi '{origin}'; then
+  echo "{hook}: tbhbdev is not on PATH, so the tbhbdev git hooks can't run" >&2
+  echo "{hook}: install it with uv tool install, and put ~/.local/bin on PATH" >&2
+  exit 1
+fi
+exit 0
 """
 
 
@@ -1267,14 +1304,11 @@ def replaceable(hook: Path) -> bool:
     return any(mark in text for mark in REPLACEABLE)
 
 
-def back_up_legacy(legacy: Path) -> None:
-    """Move a `.legacy` hook aside, since `prek install -f` would delete it."""
+def back_up_legacy(legacy: Path, why: str = "prek install -f would delete it") -> None:
+    """Move a `.legacy` hook to a backup name, saying WHY."""
     backup = free_name(legacy.with_name(f"{legacy.name}.tbhb-backup.{stamp()}"))
     legacy.rename(backup)
-    print(
-        f"{PROG}: moved {legacy} to {backup}; prek install -f would delete it",
-        file=sys.stderr,
-    )
+    print(f"{PROG}: moved {legacy} to {backup}; {why}", file=sys.stderr)
 
 
 def is_shim(path: Path) -> bool:
@@ -1284,17 +1318,19 @@ def is_shim(path: Path) -> bool:
     )
 
 
-def move_foreign(hook: Path, legacy: Path) -> None:
-    """Move someone's own hook to `<hook>.legacy`, as `prek install` does.
+def to_legacy(path: Path, legacy: Path) -> None:
+    """Rename PATH to LEGACY, first backing up anything already at LEGACY."""
+    if legacy.exists() or legacy.is_symlink():
+        back_up_legacy(legacy, "another hook is moving there")
+    path.rename(legacy)
 
-    A `.legacy` that isn't a shim is backed up first, so nothing is lost.
-    """
-    if legacy.is_file() and not is_shim(legacy):
-        back_up_legacy(legacy)
-    hook.rename(legacy)
+
+def move_foreign(hook: Path, legacy: Path) -> None:
+    """Move someone's own hook to `<hook>.legacy`, as `prek install` does."""
+    to_legacy(hook, legacy)
     print(
-        f"{PROG}: warning: moved {hook} to {legacy}; prek's hook runs it after "
-        "the tbhbdev hook",
+        f"{PROG}: warning: moved {hook} to {legacy}; it still runs, before the "
+        "secret scan",
         file=sys.stderr,
     )
 
@@ -1308,7 +1344,7 @@ def chain_prek(prek: list[str], top: Path, hook: Path, *, keep: bool) -> None:
     """
     name = hook.name
     legacy = hook.with_name(f"{name}.legacy")
-    aside = hook.with_name(f"{name}.legacy.tbhb-aside")
+    aside = hook.with_name(f"{name}{ASIDE}")
     if keep:
         legacy.rename(aside)
     elif legacy.is_file():
@@ -1317,7 +1353,7 @@ def chain_prek(prek: list[str], top: Path, hook: Path, *, keep: bool) -> None:
         prek_install(prek, top, "-f", "--hook-type", name)
     finally:
         if keep:
-            aside.rename(legacy)
+            to_legacy(aside, legacy)
     try:
         hook.rename(hook.with_name(f"{name}.prek"))
     except FileNotFoundError as exc:
@@ -1325,38 +1361,104 @@ def chain_prek(prek: list[str], top: Path, hook: Path, *, keep: bool) -> None:
         raise InstallError(message) from exc
 
 
+def prek_has_hooks(prek: list[str], top: Path, stage: str) -> bool:
+    """Whether prek finds a config with hooks for STAGE."""
+    listed = prek_run(prek, top, "list", "--hook-stage", stage)
+    return listed.returncode == 0 and bool(listed.stdout.strip())
+
+
+def write_hook(hook: Path, text: str) -> None:
+    """Write an executable hook through a temporary file renamed into place."""
+    tmp = hook.with_name(f".{hook.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text)
+        tmp.chmod(0o755)
+        tmp.replace(hook)
+    except OSError:
+        with suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def chain_stage(prek: list[str], top: Path, hook: Path, *, keep: bool) -> Path | None:
+    """Chain prek's hook for the stage when it has any; return the saved hook.
+
+    prek's install overwrites the hook, so a copy of it waits at
+    `<hook>.tbhb-previous` for install_identity_hook to put back if the shim
+    can't be written. Without prek hooks, or when prek's install fails, no
+    `<hook>.prek` is left, and the failure is raised once the shim is written.
+    """
+    chained = hook.with_name(f"{hook.name}.prek")
+    if not prek_has_hooks(prek, top, hook.name):
+        chained.unlink(missing_ok=True)
+        return None
+    previous = hook.with_name(f"{hook.name}{PREVIOUS}")
+    if hook.is_file():
+        shutil.copy2(hook, previous)
+    try:
+        chain_prek(prek, top, hook, keep=keep)
+    except InstallError:
+        chained.unlink(missing_ok=True)
+        raise
+    return previous
+
+
 def install_identity_hook(
     prek: list[str], top: Path, hooks: Path, pair: tuple[str, str]
 ) -> None:
     """Write one plain shim, chaining prek's own hook for the stage, if any.
 
-    Someone's own pre-commit hook moves to `pre-commit.legacy`, so the scan
-    runs, and prek's chained hook runs the moved one. A foreign hook for any
-    other stage stays, without the shim.
+    Someone's own pre-commit or pre-merge-commit hook moves to `<hook>.legacy`,
+    so the scan runs, and the chained hook or the shim runs the moved one. A
+    foreign hook for any other stage stays, without the shim. The shim is
+    written even when chaining prek fails, and that failure is raised after.
     """
     name, verb = pair
     hook = hooks / name
     legacy = hooks / f"{name}.legacy"
-    if not replaceable(hook):
-        if name != MOVE_FOREIGN:
-            print(f"{PROG}: warning: {hook} is not ours; leaving it", file=sys.stderr)
-            return
-        move_foreign(hook, legacy)
-    hook.unlink(missing_ok=True)
-    (hooks / f"{name}.prek").unlink(missing_ok=True)
-    # prek moves a hook it doesn't own to <hook>.legacy, so an overlapping
-    # run could leave a shim there. Any other .legacy may be someone's own
-    # hook: a moved pre-commit hook is kept, any other is backed up below.
+    scan = name in SCAN_HOOKS
+    # A run killed inside chain_prek leaves the kept hook only as the aside
+    # file, which nothing would run, so it goes back before .legacy is touched.
+    aside = hooks / f"{name}{ASIDE}"
+    if aside.is_file():
+        to_legacy(aside, legacy)
+        print(f"{PROG}: restored {legacy} from {aside}", file=sys.stderr)
+    foreign = not replaceable(hook)
+    if foreign and not scan:
+        print(f"{PROG}: warning: {hook} is not ours; leaving it", file=sys.stderr)
+        return
+    # prek moves a hook it doesn't own to <hook>.legacy, so an overlapping run
+    # could leave a shim there, which the scan shim would chain to itself.
+    # Any other .legacy may be someone's own hook: a scan stage keeps it, and
+    # chain_prek backs up any other.
     if is_shim(legacy):
         legacy.unlink()
-    keep = name == MOVE_FOREIGN and legacy.is_file()
-    staged = prek_run(prek, top, "list", "--hook-stage", name)
-    if keep or (staged.returncode == 0 and staged.stdout.strip()):
-        chain_prek(prek, top, hook, keep=keep)
-    hook.write_text(
-        SHIM.format(mark=SHIM_MARK, verb=verb, hook=name, origin=ORIGIN_GREP)
-    )
-    hook.chmod(0o755)
+    if foreign:
+        move_foreign(hook, legacy)
+    previous = None
+    failure = None
+    try:
+        previous = chain_stage(prek, top, hook, keep=scan and legacy.is_file())
+    except InstallError as exc:
+        failure = exc
+        previous = hook.with_name(f"{name}{PREVIOUS}")
+    template = SCAN_SHIM if scan else SHIM
+    try:
+        write_hook(
+            hook,
+            template.format(mark=SHIM_MARK, verb=verb, hook=name, origin=ORIGIN_GREP),
+        )
+    except OSError as exc:
+        if previous is not None and previous.is_file():
+            previous.replace(hook)
+        elif foreign:
+            legacy.rename(hook)
+        message = f"cannot write {hook}: {exc}"
+        raise InstallError(message) from exc
+    if previous is not None:
+        previous.unlink(missing_ok=True)
+    if failure is not None:
+        raise failure
 
 
 def require_pre_push_hook(hooks: Path) -> None:
@@ -1422,15 +1524,35 @@ def install_git_hooks(
         hooks.mkdir(exist_ok=True)
         with hooks_lock(hooks, timeout):
             require_pre_push_hook(hooks)
-            prek_install(prek, top, "--hook-type", "pre-push")
-            install_pre_push_hook(hooks)
-            for pair in SHIM_HOOKS:
-                install_identity_hook(prek, top, hooks, pair)
+            failures = install_hooks(prek, top, hooks)
     except InstallError as exc:
-        print(f"{PROG}: error: {exc}", file=sys.stderr)
+        failures = [exc]
+    for failure in failures:
+        print(f"{PROG}: error: {failure}", file=sys.stderr)
+    if failures:
         return 1
     print(f"{PROG}: installed git hooks in {hooks}")
     return 0
+
+
+def install_hooks(prek: list[str], top: Path, hooks: Path) -> list[InstallError]:
+    """Install every hook, going on past a failure; return the failures.
+
+    A failed `prek install` for one stage doesn't stop the others, so each
+    scan shim is still written.
+    """
+    failures: list[InstallError] = []
+    try:
+        prek_install(prek, top, "--hook-type", "pre-push")
+        install_pre_push_hook(hooks)
+    except InstallError as exc:
+        failures.append(exc)
+    for pair in SHIM_HOOKS:
+        try:
+            install_identity_hook(prek, top, hooks, pair)
+        except InstallError as exc:
+            failures.append(exc)
+    return failures
 
 
 # ---------------------------------------------------------------- command line

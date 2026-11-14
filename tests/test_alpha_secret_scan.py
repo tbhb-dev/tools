@@ -8,6 +8,7 @@ import os
 import shutil
 import tomllib
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fake_tool import PRIVATE_CONFIG, write_fake, write_private_config
@@ -23,6 +24,7 @@ regex = '''committed-secret-[0-9]{8}'''
 """
 CANARY_HIT = "test-canary-0123456789abcdef"
 COMMITTED_HIT = "committed-secret-12345678"
+CANARY = secret_scan.GITLEAKS_CANARY
 FIX = "Install it with the host's provisioning tooling."
 
 
@@ -105,13 +107,69 @@ def test_a_missing_private_config_names_the_path_and_the_fix(root: Path) -> None
     )
 
 
+def not_private() -> str:
+    return (
+        f"cannot scan the text for secrets: {secret_scan.private_config()} does "
+        f"not parse to rules with the id {CANARY} and at least one "
+        f"other, so it is not the private gitleaks config. {FIX}"
+    )
+
+
 def test_a_private_config_without_the_canary_is_refused(root: Path) -> None:
     write_private_config(Path.home(), PRIVATE_CONFIG.replace("tbhb-private", "x"))
-    assert refusal("clean\n", root) == (
-        f"cannot scan the text for secrets: {secret_scan.private_config()} has no "
-        "rule with the id tbhb-private-canary, so it is not the private gitleaks "
-        f"config. {FIX}"
+    assert refusal("clean\n", root) == not_private()
+
+
+# Each is refused before gitleaks runs: the canary only in a comment or in a
+# table that isn't a rule, the canary as the only rule, no rules list, and
+# text that isn't TOML.
+NOT_PRIVATE_TEMPLATES = [
+    (
+        '[extend]\npath = ".gitleaks.toml"\n# id = "CANARY_ID"\n'
+        '[[rules]]\nid = "a"\nregex = "a"\n[[rules]]\nid = "b"\nregex = "b"\n'
+    ),
+    '[canary]\nid = "CANARY_ID"\n[[rules]]\nid = "a"\nregex = "a"\n',
+    '[[rules]]\nid = "CANARY_ID"\nregex = "x"\n',
+    (
+        '[[rules]]\nid = "CANARY_ID"\nregex = "x"\n'
+        '[[rules]]\nid = "CANARY_ID"\nregex = "y"\n'
+    ),
+    '[[rules]]\nid = "CANARY_ID"\nregex = "x"\n[[rules]]\nregex = "y"\n',
+    '[[rules]]\nid = "CANARY_ID"\nregex = "x"\n[[rules]]\nid = 3\n',
+    'rules = "CANARY_ID"\n',
+    'id = "CANARY_ID"\n',
+    PRIVATE_CONFIG + "\nrules = [\n",
+]
+NOT_PRIVATE = [config.replace("CANARY_ID", CANARY) for config in NOT_PRIVATE_TEMPLATES]
+
+
+@pytest.mark.parametrize("config", NOT_PRIVATE)
+def test_a_config_without_the_canary_rule_and_another_is_refused(
+    root: Path, tmp_path: Path, config: str
+) -> None:
+    write_private_config(Path.home(), config)
+    ran = tmp_path / "ran"
+    write_fake(tmp_path / "gitleaks", f"open({str(ran)!r}, 'w')\n")
+    assert refusal("clean\n", root, str(tmp_path / "gitleaks")) == not_private()
+    assert not ran.exists()
+
+
+def test_parse_private_counts_only_rules_that_are_tables() -> None:
+    data = secret_scan.parse_private(PRIVATE_CONFIG)
+    assert data is not None
+    rules = cast("list[dict[str, str]]", data["rules"])
+    assert [rule["id"] for rule in rules] == [
+        CANARY,
+        "fixture-rule",
+    ]
+    assert (
+        secret_scan.parse_private(
+            'rules = [1, {id = "CANARY_ID"}]'.replace("CANARY_ID", CANARY)
+        )
+        is None
     )
+    two = 'rules = [1, {id = "CANARY_ID"}, {id = "x"}]'.replace("CANARY_ID", CANARY)
+    assert secret_scan.parse_private(two) is not None
 
 
 def test_a_missing_committed_config_is_refused(root: Path) -> None:
@@ -121,14 +179,26 @@ def test_a_missing_committed_config_is_refused(root: Path) -> None:
     )
 
 
-def test_gitleaks_failing_is_refused_with_its_log_and_no_color(root: Path) -> None:
+def test_gitleaks_failing_is_refused_with_its_exit_status_only(root: Path) -> None:
     (root / ".gitleaks.toml").write_text("rules = [\n")
+    assert refusal("clean\n", root) == (
+        "cannot scan the text for secrets: gitleaks failed (exit 1)"
+    )
+
+
+def test_a_private_regex_gitleaks_rejects_never_reaches_the_message(
+    root: Path,
+) -> None:
+    """The message gives only the exit status, not the regex gitleaks quotes."""
+    regex = "fakehost-" + "(unclosed"
+    rule = f"\n[[rules]]\nid = \"tailnet-host-9\"\nregex = '{regex}'\n"
+    write_private_config(Path.home(), PRIVATE_CONFIG + rule)
     message = refusal("clean\n", root)
     assert message.startswith(
-        "cannot scan the text for secrets: gitleaks failed (exit 1): "
+        "cannot scan the text for secrets: gitleaks failed (exit "
     )
-    assert "failed to load extended config" in message
-    assert "\x1b" not in message
+    assert message.endswith(")")
+    assert "fakehost" not in message
 
 
 @pytest.mark.parametrize(
@@ -146,21 +216,19 @@ def test_a_report_that_is_not_a_clean_scan_is_refused(
     )
     write_fake(fake, body)
     assert refusal("clean\n", root, str(fake)) == (
-        f"cannot scan the text for secrets: gitleaks failed (exit {rc}): bad config"
+        f"cannot scan the text for secrets: gitleaks failed (exit {rc})"
     )
 
 
 def test_gitleaks_runs_from_the_root_with_the_private_config(
     root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The scan must set NO_COLOR itself, not inherit it from the test runner.
-    monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("SECRET_SCAN_PASSED", "yes")
     fake = tmp_path / "gitleaks"
     log = tmp_path / "log"
     body = (
         "import os, sys\n"
-        "env = [os.environ.get(k) for k in ('NO_COLOR', 'SECRET_SCAN_PASSED')]\n"
+        "env = [os.environ.get(k) for k in ('SECRET_SCAN_PASSED',)]\n"
         f"open({str(log)!r}, 'w').write("
         "repr((sys.argv[1:], os.getcwd(), sys.stdin.read(), env)))\n"
         "sys.stdout.write('[]')\n"
@@ -174,7 +242,7 @@ def test_gitleaks_runs_from_the_root_with_the_private_config(
         argv,
         os.path.realpath(root),
         "text\n",
-        ["1", "yes"],
+        ["yes"],
     )
 
 
@@ -329,8 +397,8 @@ def test_the_copy_is_private_holds_no_name_rule_and_is_gone_afterwards(
     assert not Path(path).exists()
     assert not Path(path).parent.exists()
     ids = [rule["id"] for rule in tomllib.loads(text)["rules"]]
-    assert ids == ["tbhb-private-canary", "tailnet-ipv4-1", "op-reference-1",
-                   "op-vault-1", "op-item-1"]  # fmt: skip
+    assert ids == [CANARY, "fixture-rule", "tailnet-ipv4-1",
+                   "op-reference-1", "op-vault-1", "op-item-1"]  # fmt: skip
 
 
 def test_the_copy_is_gone_after_a_refusal(families: Path, tmp_path: Path) -> None:
@@ -345,7 +413,7 @@ def test_the_copy_is_gone_after_a_refusal(families: Path, tmp_path: Path) -> Non
     )
     write_fake(fake, body)
     assert refusal("text\n", families, str(fake), "PRIVATE") == (
-        "cannot scan the text for secrets: gitleaks failed (exit 3): boom"
+        "cannot scan the text for secrets: gitleaks failed (exit 3)"
     )
     assert not Path(log.read_text()).exists()
 
@@ -357,8 +425,7 @@ def test_the_copy_parses_back_to_the_private_config_minus_the_name_rules() -> No
         for rule in expected["rules"]
         if rule["id"] not in {"tailnet-host-1", "private-repo-12", "tool-dir-1"}
     ]
-    copy = secret_scan.without_name_rules(FAMILIES)
-    assert copy is not None
+    copy = secret_scan.without_name_rules(tomllib.loads(FAMILIES))
     assert tomllib.loads(copy) == expected
     assert expected["rules"][-1]["allowlists"] == [
         {"description": "One allowed item", "regexes": ["fake-item-ok"]}
@@ -400,42 +467,3 @@ def test_the_name_rule_families_are_the_ids_without_their_number(
 
 def test_a_rule_without_an_id_is_not_a_name_rule() -> None:
     assert secret_scan.is_name_rule({}) is False
-
-
-def test_a_private_config_without_rules_gets_an_empty_rule_list() -> None:
-    copy = secret_scan.without_name_rules("title = 'x'\n")
-    assert copy is not None
-    assert tomllib.loads(copy) == {"title": "x", "rules": []}
-
-
-def test_a_private_config_with_the_canary_but_no_rules_table_still_scans(
-    root: Path, tmp_path: Path
-) -> None:
-    # The canary check reads lines, not the rules table, so this config passes it.
-    config = (
-        '[extend]\npath = ".gitleaks.toml"\n\n[canary]\nid = "tbhb-private-canary"\n'
-    )
-    write_private_config(Path.home(), config)
-    scan("clean\n", root, visibility="PRIVATE")
-    assert refusal(f"{COMMITTED_HIT}\n", root, visibility="PRIVATE") == (
-        "refusing the text: gitleaks finds a secret: rule committed-rule on line 1"
-    )
-    fake = tmp_path / "gitleaks"
-    log = tmp_path / "log"
-    body = (
-        "import sys\n"
-        "path = sys.argv[sys.argv.index('--config') + 1]\n"
-        f"open({str(log)!r}, 'w').write(open(path).read())\n"
-        "sys.stdout.write('[]')\n"
-    )
-    write_fake(fake, body)
-    scan("text\n", root, str(fake), "PRIVATE")
-    assert tomllib.loads(log.read_text()) == {**tomllib.loads(config), "rules": []}
-
-
-def test_a_private_config_that_is_not_toml_is_left_to_gitleaks(root: Path) -> None:
-    write_private_config(Path.home(), PRIVATE_CONFIG + "\nrules = [\n")
-    message = refusal("clean\n", root, visibility="PRIVATE")
-    assert message.startswith(
-        "cannot scan the text for secrets: gitleaks failed (exit 1): "
-    )

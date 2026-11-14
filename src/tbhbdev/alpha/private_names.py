@@ -91,7 +91,7 @@ def _path_private(token: str, line: str, restricted: set[str]) -> bool:
     )
 
 
-def _host_names() -> Names:
+def host_names() -> Names:
     """Read the required host list without including its contents in errors."""
     path = Path.home() / ".local/state/tbhb/private-repos.txt"
     message = f"private names: cannot read a nonempty list from {path}"
@@ -145,7 +145,7 @@ def names_for_repository(name: str | None) -> Names | None:
         name.endswith(SUFFIX) or name in {item.lower() for item in configured}
     ):
         return None
-    host = _host_names()
+    host = host_names()
     if name in {item.lower() for item in host.private} | host.path_only:
         return None
     return Names(configured + host.private, host.path_only)
