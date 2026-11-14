@@ -411,12 +411,7 @@ def claude_file_tool_denies(
 ) -> list[str]:
     if profile is Profile.REVIEW:
         protected = [worktree, *protected]
-    return [
-        f"{tool}(/{path}{suffix})"
-        for path in protected
-        for suffix in ("", "/**")
-        for tool in ("Edit", "Write")
-    ]
+    return [f"Edit(/{path}{suffix})" for path in protected for suffix in ("", "/**")]
 
 
 def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]:
@@ -525,6 +520,17 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
 def test_claude_settings(os: Os, profile: Profile, account: str) -> None:
     result = made(os, profile, Harness.CLAUDE, account)
     assert result.detail == model.ClaudePolicy(claude_expected(os, profile, account))
+
+
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("os", Os)
+def test_claude_settings_emit_no_path_write_rules(os: Os, profile: Profile) -> None:
+    # Claude warns that `Write(path)` rules are not matched by file permission
+    # checks and ignores them; `Edit(path)` rules cover every file-writing tool.
+    result = made(os, profile, Harness.CLAUDE, "agent")
+    permissions = dig(claude_settings_of(result), "permissions")
+    rules = [*strings(dig(permissions, "allow")), *strings(dig(permissions, "deny"))]
+    assert not [rule for rule in rules if rule.startswith(("Write(", "NotebookEdit("))]
 
 
 def agy_expected(profile: Profile, account: str) -> tuple[str, ...]:
