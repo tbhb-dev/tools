@@ -10,6 +10,7 @@ import json
 import os
 import shlex
 import tarfile
+from pathlib import PurePosixPath
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -28,7 +29,7 @@ from tbhbdev import version
 from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import driver, model, render, taint_store, transport
 from tbhbdev.alpha.agent.decisions import remote as remote_commands
-from tbhbdev.alpha.agent.decisions import request, runfiles_names, taint
+from tbhbdev.alpha.agent.decisions import repo, request, runfiles_names, taint
 from tbhbdev.alpha.agent.model import Invalid, RunKind
 
 if TYPE_CHECKING:
@@ -54,6 +55,22 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
         driver, "time", SimpleNamespace(monotonic=lambda: next(ticks), sleep=no_sleep)
     )
     return result
+
+
+@pytest.fixture
+def no_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+
+    def settled(_settings: model.Settings, _run: driver.Run, _result: int) -> None:
+        pass
+
+    monkeypatch.setattr(driver, "settle", settled)
+
+
+def kept() -> str:
+    tree = repo.clone_path(
+        PurePosixPath("."), driver.load(CONFIG, "sample").request.repo
+    )
+    return f"sample: worktree kept at example-linux:~/{tree}/.worktrees/agent-sample\n"
 
 
 def arguments(remote: Remote, *options: str) -> list[str]:
@@ -400,13 +417,15 @@ def test_wait_success(
     remote.file(".out", "stream answer\n")
     if final:
         remote.file(".out.final", "final answer\n")
+    expected = kept()
     assert command("wait") == 4
     assert capsys.readouterr() == (
         "sample: rc=4\n"
         + ("final answer\n" if final else "stream answer\n")
         + "\n"
         + render.INSPECTION_WARNING
-        + "\n",
+        + "\n"
+        + expected,
         "",
     )
 
@@ -429,9 +448,10 @@ def test_wait_unknown(remote: Remote, capsys: pytest.CaptureFixture[str]) -> Non
     assert launch(remote) == 0
     capsys.readouterr()
     remote.configure(session=False)
+    expected = kept()
     assert command("wait") == 1
     assert capsys.readouterr() == (
-        "sample: rc=unknown\n\n" + render.INSPECTION_WARNING + "\n",
+        "sample: rc=unknown\n\n" + render.INSPECTION_WARNING + "\n" + expected,
         "",
     )
 
@@ -576,8 +596,11 @@ def test_stream_transport_failure_never_kills(
     assert not (remote.state / "sample.rc").exists()
 
 
+@pytest.mark.usefixtures("no_clean")
 def test_wait_retries_and_resets_failure_time(
-    remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     assert launch(remote) == 0
     capsys.readouterr()
@@ -685,6 +708,7 @@ def test_metadata_name_and_default_state(
     assert driver.directory() == remote.root / ".local/state/tbhbdev/agent-runs"
 
 
+@pytest.mark.usefixtures("no_clean")
 @pytest.mark.parametrize("poll", ["0.1", "2.5"])
 def test_wait_poll_and_transport_budget(
     remote: Remote,
@@ -1060,6 +1084,7 @@ def test_review_version_mismatch_precedes_clone_read(
     assert remote.records("git") == []
 
 
+@pytest.mark.usefixtures("no_clean")
 def test_successful_wait_resets_failure_for_a_short_window(
     remote: Remote, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1684,3 +1709,58 @@ def test_unsandboxed_unconfirmed_reports_sandbox(
         f"sample: launch unconfirmed host=example-linux phase={phase}"
         " sandbox=none authorized_by=o/r#1 untrusted-host\n"
     )
+
+
+@pytest.mark.parametrize(
+    ("rc", "branch", "cleaned"),
+    [("0\n", True, True), ("0\n", False, False), ("4\n", True, False)],
+)
+def test_wait_cleans_a_successful_run_with_its_branch(
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    rc: str,
+    branch: bool,
+    cleaned: bool,
+) -> None:
+    assert launch(remote) == 0
+    capsys.readouterr()
+    remote.configure(session=False, branch=branch)
+    remote.file(".rc", rc)
+    expected = kept()
+    assert command("wait") == int(rc)
+    output = capsys.readouterr()
+    assert (expected in output.out) is not cleaned
+    assert driver.metadata_path("sample").exists() is not cleaned
+    assert ("branch agent/sample does not exist on origin" in output.err) is (
+        rc == "0\n" and not branch
+    )
+
+
+def test_wait_keeps_an_unsandboxed_success(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
+    capsys.readouterr()
+    remote.configure(session=False)
+    remote.file(".rc", "0\n")
+    expected = kept()
+    assert command("wait") == 0
+    assert expected in capsys.readouterr().out
+    assert driver.metadata_path("sample").exists()
+
+
+def test_wait_never_forces_the_clean(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert launch(remote) == 0
+    remote.configure(session=False)
+    remote.file(".rc", "0\n")
+    forced: list[object] = []
+
+    def clean(_settings: model.Settings, _run: driver.Run, *, force: object) -> int:
+        forced.append(force)
+        return 0
+
+    monkeypatch.setattr(driver, "clean", clean)
+    assert command("wait") == 0
+    assert forced == [False]
