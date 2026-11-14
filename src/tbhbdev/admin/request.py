@@ -137,7 +137,8 @@ class Environment(NamedTuple):
 def whole_number(value: object) -> int:
     """A JSON integer; a bool, float or string would truncate or convert."""
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(value)  # noqa: TRY004
+        # The caller maps any ValueError to a refusal and drops its text.
+        raise ValueError(value)  # noqa: TRY004  # pragma: no mutate
     return value
 
 
