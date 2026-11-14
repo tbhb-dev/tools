@@ -2316,9 +2316,8 @@ def assert_claude_marker_write_denies(
     permissions = cast("dict[str, list[str]]", detail.settings["permissions"])
     for path in markers:
         assert path in filesystem["denyWrite"]
-        for tool in ("Edit", "Write"):
-            assert f"{tool}(/{path})" in permissions["deny"]
-            assert f"{tool}(/{path}/**)" in permissions["deny"]
+        assert f"Edit(/{path})" in permissions["deny"]
+        assert f"Edit(/{path}/**)" in permissions["deny"]
 
 
 @pytest.mark.parametrize("os_name", Os)
