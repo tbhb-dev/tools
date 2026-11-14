@@ -46,11 +46,23 @@ def test_otel_endpoint() -> None:
     assert config.parse(GOOD).otel_endpoint is None
 
 
+def test_otel_endpoint_accepts_the_letter_x_in_a_path() -> None:
+    endpoint = "https://otlp.example.net:4318/X"
+    assert (
+        config.parse(GOOD | {"otel": {"endpoint": endpoint}}).otel_endpoint == endpoint
+    )
+
+
 @pytest.mark.parametrize(
     ("table", "reason"),
     [
         ({"endpoint": "http://otlp.example.net"}, HTTPS),
         ({"endpoint": "https://user:pw@otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://user@otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://:pw@otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/a b"}, HTTPS),
+        ({"endpoint": 'https://otlp.example.net/a"b'}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/a\\b"}, HTTPS),
         ({"endpoint": "https://otlp.example.net/?k=v"}, HTTPS),
         ({"endpoint": "https://otlp.example.net/#f"}, HTTPS),
         ({"endpoint": 1}, NON_BLANK),

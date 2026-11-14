@@ -421,6 +421,8 @@ def test_codex_run_config_holds_the_otel_table(
     run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
     result = run_host.prepare_workspace(run)
     config_path = Path(result.paths.codex_home) / "config.toml"
+    # The macOS filesystem ignores case, so name the file as written.
+    assert "config.toml" in [p.name for p in config_path.parent.iterdir()]
     assert tomllib.loads(config_path.read_text()) == {
         "otel": {
             "exporter": {
