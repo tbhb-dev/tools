@@ -521,7 +521,7 @@ def brace_items(body: str) -> list[str]:
     )
     if not span or span.group(1).isalpha() != span.group(2).isalpha():
         return body.split(",")
-    letters = span.group(1).isalpha()
+    letters = span.group(1).isalpha()  # pragma: no mutate  # ends match above
     first, last = (ord(e) if letters else int(e) for e in span.group(1, 2))
     sign = direction(first, last)
     step = sign * (abs(int(span.group(3) or 1)) or 1)
@@ -550,7 +550,8 @@ def names_state_dir(word: str) -> bool:
     """
     home = word.replace("${HOME}", "~").replace("$HOME", "~")
     targets = (*STATE_FILES, *STATE_DIRS)
-    spellings = list(itertools.islice(braced(home), SPELLING_LIMIT + 1))
+    limit = SPELLING_LIMIT + 1  # pragma: no mutate  # any larger count denies too
+    spellings = list(itertools.islice(braced(home), limit))  # pragma: no mutate
     if len(spellings) > SPELLING_LIMIT:
         return True  # too many to check, so deny
     for spelling in spellings:
@@ -582,7 +583,7 @@ def pipes_state_dir(text: str) -> bool:
 def attached(word: str) -> str:
     """A path word without ``--target-directory=`` or ``-t``, such as ``-tPATH``."""
     if word.startswith("--"):
-        return word.partition("=")[2] or word
+        return word.partition("=")[2] or word  # pragma: no mutate  # one = splits
     return word.removeprefix("-t")
 
 

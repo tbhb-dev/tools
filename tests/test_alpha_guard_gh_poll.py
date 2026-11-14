@@ -784,6 +784,7 @@ def test_allowance_passes_through_a_wrapper(grant_file: Path) -> None:
         f"gh run list -R example/one --limit 100 --json {FIELDS} --paginate",
         f"gh run list -R example/one --limit 100 --json {FIELDS} --branch x",
         "gh run list -R example/one --limit 100",
+        f"gh run -x list -R example/one --limit 100 --json {FIELDS}",
         "gh run list",
         listing("example/one").replace("gh run", "gh --hostname=example.com run"),
         f"gh run watch -R example/one --limit 100 --json {FIELDS}",
@@ -792,6 +793,10 @@ def test_allowance_passes_through_a_wrapper(grant_file: Path) -> None:
 def test_allowance_refuses_any_other_shape(command: str, grant_file: Path) -> None:
     assert guard.inspect(command)[0] == guard.POLL_REASON
     assert not (grant_file.parent / "allowance.count").exists()
+
+
+def test_checked_accepts_an_empty_command() -> None:
+    assert guard.checked([], None) == (None, set())
 
 
 def test_a_loop_around_a_granted_listing_is_denied() -> None:
@@ -1332,6 +1337,7 @@ def test_other_paths_and_programs_pass_the_state_directory_check(command: str) -
         ("{/x,~}/.local/state/tbhb", True),
         ("{/x,/y}/.local/state/tbhb", False),
         ("/{0..9999999999}/c", False),
+        ("~/{a..p}{a..p}{a..p}/x", False),
         ("tbhb", False),
         ("-rf", False),
     ],
