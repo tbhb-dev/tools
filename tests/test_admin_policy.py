@@ -928,6 +928,8 @@ def test_a_ruleset_may_hold_fewer_rules_and_no_conditions() -> None:
         {**live_ruleset(), "rules": []},
         {**live_ruleset(), "rules": "deletion"},
         {key: v for key, v in live_ruleset().items() if key != "rules"},
+        with_rules({"type": ["deletion"]}),
+        with_rules({"type": {"a": 1}}),
         with_rules({"type": "creation"}),
         with_rules({"type": "update"}),
         with_rules({"type": "deletion"}, "deletion"),

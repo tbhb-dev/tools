@@ -108,6 +108,21 @@ def fake(tmp_path: Path) -> Fake:
             "public_visibility",
         ),
         ("GET", "/graphql", None, "endpoint_denied"),
+        *[
+            (
+                "POST",
+                "/repos/tbhb-dev/widget/rulesets",
+                {
+                    "name": "main",
+                    "target": "branch",
+                    "enforcement": "active",
+                    "bypass_actors": [],
+                    "rules": [{"type": kind}],
+                },
+                "protection_weakening",
+            )
+            for kind in (["deletion"], {"a": 1})
+        ],
     ],
 )
 def test_no_io_on_refusal(

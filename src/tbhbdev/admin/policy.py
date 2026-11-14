@@ -206,6 +206,8 @@ def safe_ruleset_rule(rule: object) -> bool:
         return False
     item: dict[str, object] = rule
     kind = item.get("type")
+    if not isinstance(kind, str):
+        return False
     if kind in RULESET_PLAIN_RULES:
         return item.keys() == {"type"}
     if kind == "pull_request":
