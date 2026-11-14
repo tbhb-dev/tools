@@ -134,6 +134,13 @@ class Environment(NamedTuple):
     wait_timer: int
 
 
+def whole_number(value: object) -> int:
+    """A JSON integer; a bool, float or string would truncate or convert."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(value)  # noqa: TRY004
+    return value
+
+
 def existing_environment(
     runtime: Runtime, path: str, reason: str
 ) -> Environment | None:
@@ -156,7 +163,11 @@ def existing_environment(
         # A body can't carry wait_timer, so a PUT resets the timer to 0 and an
         # environment without a wait_timer rule has none to lose.
         timer = max(
-            (int(rule["wait_timer"]) for rule in rules if rule["type"] == "wait_timer"),
+            (
+                whole_number(rule["wait_timer"])
+                for rule in rules
+                if rule["type"] == "wait_timer"
+            ),
             default=0,
         )
         return Environment(reviewers, data["deployment_branch_policy"], timer)

@@ -558,6 +558,39 @@ def test_environment_put_that_adds_drops_or_swaps_a_reviewer_is_refused(
         httpx.Response(
             200,
             json={
+                "protection_rules": [{"type": "wait_timer", "wait_timer": 0.5}],
+                "deployment_branch_policy": None,
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "protection_rules": [{"type": "wait_timer", "wait_timer": True}],
+                "deployment_branch_policy": None,
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "protection_rules": [{"type": "wait_timer", "wait_timer": "5"}],
+                "deployment_branch_policy": None,
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "protection_rules": [{"type": "wait_timer", "wait_timer": None}],
+                "deployment_branch_policy": None,
+            },
+        ),
+        httpx.Response(
+            200,
+            content=b'{"protection_rules": [{"type": "wait_timer",'
+            b' "wait_timer": 1e309}], "deployment_branch_policy": null}',
+        ),
+        httpx.Response(
+            200,
+            json={
                 "protection_rules": [{"type": "wait_timer"}],
                 "deployment_branch_policy": None,
             },
