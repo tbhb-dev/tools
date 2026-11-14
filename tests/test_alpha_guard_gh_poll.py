@@ -1076,3 +1076,66 @@ def test_an_existing_unrelated_file_is_not_protected(grant_file: Path) -> None:
     other = grant_file.parent / "notes.txt"
     other.write_text("x")
     assert not guard.protects(str(other))
+
+
+def test_granted_repos_rejects_a_dotted_path_among_valid_ones() -> None:
+    with pytest.raises(ValueError, match=r"^malformed grant$"):
+        guard.granted_repos({"repos": ["example/one", "../x"]})
+
+
+def test_allowance_refuses_a_grant_that_lists_a_dotted_path_with_a_valid_one(
+    grant_file: Path,
+) -> None:
+    grant_file.write_text(
+        json.dumps({"repos": ["example/one", "../x"], "expires": "2999-01-01"})
+    )
+    assert guard.inspect(listing("example/one"))[0] == guard.POLL_REASON
+
+
+def test_allowance_creates_missing_parents_and_a_named_lock(
+    grant_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    count = grant_file.parent / "a" / "b" / "allowance.count"
+    monkeypatch.setattr(guard, "ALLOWANCE_COUNT", count)
+    assert guard.inspect(listing("example/one"))[0] is None
+    assert count.exists()
+    assert count.with_name("allowance.count.lock").exists()
+
+
+def test_defaults_treat_a_call_as_not_repeated(grant_file: Path) -> None:
+    repos = ["example/a", "example/b", "example/c", "example/d"]
+    grant_file.write_text(json.dumps({"repos": repos, "expires": "2999-01-01"}))
+    words = ["-R", repos[0], *guard.ALLOWANCE_TAIL]
+    assert guard.github_poll(["run", "list", *words]) is False
+    assert guard.scan_commands(listing(repos[1]))[0] is None
+    assert guard.denial(shlex.split(listing(repos[2])), None)[0] is None
+    assert guard.checked(shlex.split(listing(repos[3])), None)[0] is None
+
+
+def test_unwrap_of_no_words_reports_no_repeater() -> None:
+    assert guard.unwrap([]) == ([], False)
+
+
+def test_repeated_scan_collects_the_programs_of_every_suffix() -> None:
+    assert guard.repeated_scan(["echo", "ls"]) == (None, {"echo", "ls"})
+
+
+def test_edited_file_names_nothing_for_other_calls() -> None:
+    assert guard.edited_file({}) == ""
+    assert guard.edited_file({"tool_input": {"file_path": 5}}) == ""
+    assert guard.edited_file({"tool_input": {"file_path": "/a/b"}}) == "/a/b"
+
+
+def test_protects_matches_the_link_name_and_the_target_name_in_any_case(
+    tmp_path: Path,
+) -> None:
+    plain = tmp_path / "plain.txt"
+    plain.write_text("x")
+    by_link = tmp_path / "GH-POLL-ALLOWANCE.json"
+    by_link.symlink_to(plain)
+    assert guard.protects(str(by_link))
+    target = tmp_path / "GH-POLL-ALLOWANCE.COUNT"
+    target.write_text("x")
+    link = tmp_path / "innocent"
+    link.symlink_to(target)
+    assert guard.protects(str(link))
