@@ -622,6 +622,30 @@ def test_the_digest_reads_in_chunks_and_refuses_a_package_over_the_cap(
     assert install.package_digest(tmp_path) is None
 
 
+def test_the_digest_asks_for_one_chunk_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a.js").write_bytes(b"x" * 10)
+    monkeypatch.setattr(install, "STATUSLINE_CHUNK", 4)
+    sizes: list[object] = []
+    real = Path.open
+
+    def spy(self: Path, mode: str = "r", *args: object, **kwargs: object):  # noqa: ANN202
+        handle = real(self, mode, *args, **kwargs)  # type: ignore[call-overload]
+        read = handle.read
+
+        def counted(size: object = -1) -> bytes:
+            sizes.append(size)
+            return read(size)
+
+        handle.read = counted  # type: ignore[method-assign]
+        return handle
+
+    monkeypatch.setattr(Path, "open", spy)
+    assert install.package_digest(tmp_path) is not None
+    assert sizes == [4, 4, 4, 4]
+
+
 def test_a_huge_marker_is_read_only_as_far_as_the_version(
     setup: Setup,
 ) -> None:
