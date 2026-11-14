@@ -472,7 +472,7 @@ def flattened(words: list[str], depth: int = 4) -> list[str]:
     """
     out: list[str] = []
     for word in words:
-        parts = split_string(word) if re.search(r"[\s'\"\\]", word) else [word]
+        parts = split_string(word)
         if parts == [word] or depth == 0:
             out.append(word)
         else:

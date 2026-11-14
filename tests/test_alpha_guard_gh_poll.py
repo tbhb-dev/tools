@@ -1268,3 +1268,26 @@ def test_a_grant_matches_only_the_listed_repository(grant_file: Path) -> None:
 )
 def test_a_repeater_still_scans_what_it_runs(command: str) -> None:
     assert guard.inspect(command)[0] is not None
+
+
+def test_flattened_splits_nested_words_four_levels_deep() -> None:
+    levels = [shlex.join(["a", "t1"])]
+    for n in range(2, 7):
+        levels.append(shlex.join([levels[-1], f"t{n}"]))
+    # Splitting the sixth level peels it and the three below it; the second stays whole.
+    assert guard.flattened([levels[5]]) == [levels[1], "t3", "t4", "t5", "t6"]
+
+
+def test_checked_passes_the_repeated_flag_to_the_listing_check(
+    grant_file: Path,
+) -> None:
+    command = listing(REPOS[0]).split()
+    assert guard.checked(command, None, repeated=True)[0] == guard.POLL_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+    assert guard.checked(command, None)[0] is None
+    assert (grant_file.parent / "allowance.count").exists()
+
+
+@pytest.mark.parametrize("program", ["/bin/rm", "/usr/bin/env rm"])
+def test_a_program_path_does_not_hide_a_state_directory_removal(program: str) -> None:
+    assert guard.protected_words([*program.split(), "-rf", "~/.local/state/tbhb"])
