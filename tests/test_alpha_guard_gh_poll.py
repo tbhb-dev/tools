@@ -1156,3 +1156,8 @@ def test_protects_matches_the_link_name_and_the_target_name_in_any_case(
     link = tmp_path / "innocent"
     link.symlink_to(target)
     assert guard.protects(str(link))
+
+
+def test_a_count_key_in_another_case_still_counts_as_spent(grant_file: Path) -> None:
+    (grant_file.parent / "allowance.count").write_text('{"Example/One": 1}')
+    assert guard.inspect(listing("example/one"))[0] == guard.POLL_REASON

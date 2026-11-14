@@ -279,7 +279,7 @@ def spend_allowance(args: list[str]) -> bool:
                 else {}
             )
             key = args[1].lower()
-            if not isinstance(spent, dict) or key in spent:
+            if not isinstance(spent, dict) or key in {k.lower() for k in spent}:
                 return False
             spent[key] = 1
             ALLOWANCE_COUNT.write_text(json.dumps(spent) + "\n")
