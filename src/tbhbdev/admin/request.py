@@ -126,41 +126,51 @@ def send(
         raise RefusedError(msg) from None
 
 
-def existing_reviewers(
+def existing_environment(
     runtime: Runtime, path: str, reason: str
-) -> frozenset[tuple[str, int]]:
-    """The environment's current required reviewers; none when it is new."""
+) -> tuple[frozenset[tuple[str, int]], object] | None:
+    """The environment's reviewers and branch policy, or None when it is new."""
     status, text = call(runtime, "GET", path, None, reason)
     if status == HTTP_NOT_FOUND:
-        return frozenset()
+        return None
     if status != HTTP_OK:
         msg = "environment_unreadable"
         raise RefusedError(msg)
     try:
-        rules = json.loads(text)["protection_rules"]
-        return frozenset(
+        data = json.loads(text)
+        reviewers = frozenset(
             (who["type"], who["reviewer"]["id"])
-            for rule in rules
+            for rule in data["protection_rules"]
             if rule["type"] == "required_reviewers"
             for who in rule["reviewers"]
         )
+        return reviewers, data["deployment_branch_policy"]
     except ValueError, KeyError, TypeError:
         msg = "environment_unreadable"
         raise RefusedError(msg) from None
 
 
-def keep_reviewers(runtime: Runtime, path: str, body: object, reason: str) -> None:
-    """An environment write may add reviewers but never drop or swap one.
+def keep_environment(runtime: Runtime, path: str, body: object, reason: str) -> None:
+    """A write to an existing environment may not change who approves or where.
 
-    Otherwise a different user could replace a security team as the deployment
-    authorizer. The lookup and the write are separate calls, so a change between
-    them is not caught.
+    One listed reviewer is enough to authorize a deployment, so adding, dropping
+    or swapping one is refused when the environment already has reviewers. A
+    current branch policy must be unset (every branch) or the safe one the policy
+    requires, because custom branch policies can't be compared with the body.
+    The lookup and the write are separate calls, so a change between them is not
+    caught.
     """
+    current = existing_environment(runtime, path, reason)
+    if current is None:
+        return
+    reviewers, branches = current
     # The cast string has no runtime effect, so mutating it changes nothing.
-    kept = policy.requested_reviewers(
+    wanted = policy.requested_reviewers(
         cast("dict[str, object]", body)  # pragma: no mutate
     )
-    if not existing_reviewers(runtime, path, reason) <= kept:
+    if (reviewers and reviewers != wanted) or (
+        branches is not None and not policy.safe_branch_policy(branches)
+    ):
         msg = "protection_weakening"
         raise RefusedError(msg)
 
@@ -191,7 +201,7 @@ def call(  # noqa: PLR0913  # Explicit one-call inputs and optional dry run.
         return 0, ""
     try:
         if method == "PUT" and policy.ENVIRONMENT.fullmatch(decision.path):
-            keep_reviewers(runtime, wire, body, reason)
+            keep_environment(runtime, wire, body, reason)
         status, response = send(runtime, method, wire, encoded, decision)
     except RefusedError as exc:
         runtime.audit.append({**entry, "phase": "after", "code": str(exc)})

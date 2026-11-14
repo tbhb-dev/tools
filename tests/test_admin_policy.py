@@ -3,19 +3,16 @@
 # cspell:words ulesets nvitations idget illing fwidget EVIEWS MERG
 
 import pytest
+from conftest import SAFE_ENVIRONMENT
 
 from tbhbdev.admin import policy
 
-SAFE_ENVIRONMENT: dict[str, object] = {
-    "reviewers": [{"type": "User", "id": 1}],
-    "can_admins_bypass": False,
-    "prevent_self_review": True,
-    "deployment_branch_policy": {
-        "protected_branches": True,
-        "custom_branch_policies": False,
-    },
-}
 ENVIRONMENT_PATH = "/repos/tbhb-dev/widget/environments/test"
+
+
+def without(key: str) -> dict[str, object]:
+    return {k: v for k, v in SAFE_ENVIRONMENT.items() if k != key}
+
 
 # Rule, method, endpoint, body. Every rule includes an encoded/case variant.
 REFUSALS: list[tuple[str, str, str, object]] = [
@@ -128,6 +125,8 @@ REFUSALS: list[tuple[str, str, str, object]] = [
         )
         for reviewers in (
             [{"type": "Bogus", "id": 1}],
+            [{"type": ["User"], "id": 1}],
+            [{"type": {"User": 1}, "id": 1}],
             [{"type": "Null", "id": None}],
             [{"type": "Team", "id": 0}],
             [{"type": "User", "id": -3}],
@@ -231,46 +230,26 @@ REFUSALS: list[tuple[str, str, str, object]] = [
         "protection_weakening",
         "PUT",
         "/repos/tbhb-dev/widget/environments/test",
-        {
-            "reviewers": [{"type": "User", "id": 1}],
-            "prevent_self_review": True,
-            "deployment_branch_policy": {
-                "protected_branches": True,
-                "custom_branch_policies": False,
-            },
-        },
+        without("can_admins_bypass"),
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        without("prevent_self_review"),
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        without("deployment_branch_policy"),
     ),
     (
         "protection_weakening",
         "PUT",
         "/repos/tbhb-dev/widget/environments/test",
         {
-            "reviewers": [{"type": "User", "id": 1}],
-            "can_admins_bypass": False,
-            "deployment_branch_policy": {
-                "protected_branches": True,
-                "custom_branch_policies": False,
-            },
-        },
-    ),
-    (
-        "protection_weakening",
-        "PUT",
-        "/repos/tbhb-dev/widget/environments/test",
-        {
-            "reviewers": [{"type": "User", "id": 1}],
-            "can_admins_bypass": False,
-            "prevent_self_review": True,
-        },
-    ),
-    (
-        "protection_weakening",
-        "PUT",
-        "/repos/tbhb-dev/widget/environments/test",
-        {
-            "reviewers": [{"type": "User", "id": 1}],
-            "can_admins_bypass": False,
-            "prevent_self_review": True,
+            **SAFE_ENVIRONMENT,
             "deployment_branch_policy": {
                 "protected_branches": False,
                 "custom_branch_policies": True,
@@ -281,43 +260,19 @@ REFUSALS: list[tuple[str, str, str, object]] = [
         "protection_weakening",
         "PUT",
         "/repos/tbhb-dev/widget/environments/test",
-        {
-            "reviewers": [{"type": "User", "id": 1, "extra": 1}],
-            "can_admins_bypass": False,
-            "prevent_self_review": True,
-            "deployment_branch_policy": {
-                "protected_branches": True,
-                "custom_branch_policies": False,
-            },
-        },
+        {**SAFE_ENVIRONMENT, "reviewers": [{"type": "User", "id": 1, "extra": 1}]},
     ),
     (
         "protection_weakening",
         "PUT",
         "/repos/tbhb-dev/widget/environments/test",
-        {
-            "reviewers": [{"type": "User"}],
-            "can_admins_bypass": False,
-            "prevent_self_review": True,
-            "deployment_branch_policy": {
-                "protected_branches": True,
-                "custom_branch_policies": False,
-            },
-        },
+        {**SAFE_ENVIRONMENT, "reviewers": [{"type": "User"}]},
     ),
     (
         "protection_weakening",
         "PUT",
         "/repos/tbhb-dev/widget/environments/test",
-        {
-            "reviewers": [],
-            "can_admins_bypass": False,
-            "prevent_self_review": True,
-            "deployment_branch_policy": {
-                "protected_branches": True,
-                "custom_branch_policies": False,
-            },
-        },
+        {**SAFE_ENVIRONMENT, "reviewers": []},
     ),
     (
         "broad_visibility",
@@ -366,6 +321,8 @@ REFUSALS: list[tuple[str, str, str, object]] = [
         "/orgs/tbhb-dev/actions/runner-groups/7/runners/5",
         None,
     ),
+    ("broad_visibility", "DELETE", "/orgs/tbhb-dev/actions/runner-groups/7", None),
+    ("broad_visibility", "DELETE", "/ORGS/TBHB-DEV/ACTIONS/RUNNER-GROUPS/7/", None),
     ("endpoint_denied", "POST", "/repos/tbhb-dev/widget/hooks", {}),
     ("endpoint_denied", "GET", "/repos/tbhb-dev/widget/hooks/7/pings", None),
     ("endpoint_denied", "POST", "/orgs/tbhb-dev/hooks", {}),

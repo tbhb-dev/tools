@@ -18,6 +18,7 @@ SHARED = re.compile(
     rf"{ORG}/actions/(?:secrets/{PART}|variables(?:/{PART})?|runner-groups(?:/[0-9]+)?)"
 )
 ORG_REPOS = re.compile(rf"{ORG}/repos")
+RUNNER_GROUP = re.compile(rf"{ORG}/actions/runner-groups/[0-9]+")
 RUNNER_MOVE = re.compile(rf"{ORG}/actions/runner-groups/[0-9]+/runners(?:/[0-9]+)?")
 REPO_SETTINGS = re.compile(rf"{REPO}|{ORG}/repos")
 # The mutant that swaps a-z for A-Z survives: IGNORECASE makes them one set.
@@ -231,6 +232,7 @@ def valid_reviewer(item: object) -> bool:
     number = reviewer.get("id")
     return (
         reviewer.keys() == REVIEWER_KEYS
+        and isinstance(reviewer["type"], str)
         and reviewer["type"] in REVIEWER_TYPES
         and isinstance(number, int)
         and not isinstance(number, bool)
@@ -305,13 +307,16 @@ def sharing_refusal(method: str, path: str, body: dict[str, object]) -> str:
 def deployment_refusal(method: str, path: str, body: dict[str, object]) -> str:
     """Refuse environment changes that drop protection and broad org sharing.
 
-    Moving a runner between groups widens who can use it, so it is refused.
+    Moving a runner between groups widens who can use it, so it is refused, and
+    so is deleting a group, which moves its runners to the default group.
     Adding a repository to a group stays allowed: a group never admits public
     repositories, because ``allows_public_repositories`` is refused.
     """
     if ENVIRONMENT.fullmatch(path) and weakens_environment(method, body):
         return "protection_weakening"
-    if RUNNER_MOVE.fullmatch(path):
+    if RUNNER_MOVE.fullmatch(path) or (
+        method == "DELETE" and RUNNER_GROUP.fullmatch(path)
+    ):
         return "broad_visibility"
     return sharing_refusal(method, path, body)
 

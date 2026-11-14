@@ -539,3 +539,14 @@ def agent_suffix_case(monkeypatch: pytest.MonkeyPatch) -> None:
         return original(files, suffix)
 
     monkeypatch.setattr(runfiles.RunFiles, "path", path)
+
+
+SAFE_ENVIRONMENT: dict[str, object] = {
+    "reviewers": [{"type": "User", "id": 1}],
+    "can_admins_bypass": False,
+    "prevent_self_review": True,
+    "deployment_branch_policy": {
+        "protected_branches": True,
+        "custom_branch_policies": False,
+    },
+}

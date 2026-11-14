@@ -11,6 +11,7 @@ lazy from collections.abc import Callable
 
 import httpx
 import pytest
+from conftest import SAFE_ENVIRONMENT
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -392,17 +393,14 @@ def test_reused_mint_preserves_installation_arguments(fake: Fake) -> None:
 
 ENVIRONMENT = "/repos/tbhb-dev/widget/environments/prod"
 ENVIRONMENT_BODY = {
+    **SAFE_ENVIRONMENT,
     "reviewers": [{"type": "Team", "id": 5}, {"type": "User", "id": 1}],
-    "can_admins_bypass": False,
-    "prevent_self_review": True,
-    "deployment_branch_policy": {
-        "protected_branches": True,
-        "custom_branch_policies": False,
-    },
 }
 
 
-def environment_with(*people: tuple[str, int]) -> httpx.Response:
+def environment_with(
+    *people: tuple[str, int], branches: object = None
+) -> httpx.Response:
     rules = [
         {
             "type": "required_reviewers",
@@ -410,15 +408,17 @@ def environment_with(*people: tuple[str, int]) -> httpx.Response:
         },
         {"type": "wait_timer", "wait_timer": 0},
     ]
-    return httpx.Response(200, json={"protection_rules": rules})
+    return httpx.Response(
+        200, json={"protection_rules": rules, "deployment_branch_policy": branches}
+    )
 
 
 def put_environment(fake: Fake) -> tuple[int, str]:
     return request.call(fake.runtime, "PUT", ENVIRONMENT, ENVIRONMENT_BODY, "test")
 
 
-def test_environment_put_may_keep_and_add_reviewers(fake: Fake) -> None:
-    fake.by_method["GET"] = environment_with(("User", 1))
+def test_environment_put_looks_up_then_writes(fake: Fake) -> None:
+    fake.by_method["GET"] = environment_with(("User", 1), ("Team", 5))
     assert put_environment(fake)[0] == 200
     assert [r.method for r in fake.requests if "environments" in r.url.path] == [
         "GET",
@@ -432,7 +432,7 @@ def test_environment_put_may_send_exactly_the_current_reviewers(fake: Fake) -> N
 
 
 def test_the_reviewer_lookup_carries_the_callers_reason(fake: Fake) -> None:
-    fake.by_method["GET"] = environment_with(("User", 1))
+    fake.by_method["GET"] = environment_with(("User", 1), ("Team", 5))
     request.call(fake.runtime, "PUT", ENVIRONMENT, ENVIRONMENT_BODY, "why-env")
     entries = [
         json.loads(line)
@@ -446,6 +446,45 @@ def test_the_reviewer_lookup_carries_the_callers_reason(fake: Fake) -> None:
     }
 
 
+def test_environment_put_may_set_reviewers_on_one_without(fake: Fake) -> None:
+    fake.by_method["GET"] = httpx.Response(
+        200, json={"protection_rules": [], "deployment_branch_policy": None}
+    )
+    assert put_environment(fake)[0] == 200
+
+
+@pytest.mark.parametrize(
+    "branches", [None, SAFE_ENVIRONMENT["deployment_branch_policy"]]
+)
+def test_environment_put_keeps_or_narrows_the_branch_policy(
+    fake: Fake, branches: object
+) -> None:
+    fake.by_method["GET"] = environment_with(
+        ("User", 1), ("Team", 5), branches=branches
+    )
+    assert put_environment(fake)[0] == 200
+
+
+@pytest.mark.parametrize(
+    "branches",
+    [
+        {"protected_branches": False, "custom_branch_policies": True},
+        {"protected_branches": True, "custom_branch_policies": True},
+        {"protected_branches": False, "custom_branch_policies": False},
+        {},
+    ],
+)
+def test_environment_put_that_widens_a_branch_policy_is_refused(
+    fake: Fake, branches: object
+) -> None:
+    fake.by_method["GET"] = environment_with(
+        ("User", 1), ("Team", 5), branches=branches
+    )
+    with pytest.raises(RefusedError, match=r"^protection_weakening$"):
+        put_environment(fake)
+    assert "PUT" not in [r.method for r in fake.requests]
+
+
 def test_environment_put_on_a_new_environment_passes(fake: Fake) -> None:
     fake.by_method["GET"] = httpx.Response(404, json={})
     assert put_environment(fake)[0] == 200
@@ -457,9 +496,11 @@ def test_environment_put_on_a_new_environment_passes(fake: Fake) -> None:
         environment_with(("User", 9)),
         environment_with(("User", 1), ("Team", 6)),
         environment_with(("Team", 1)),
+        environment_with(("User", 1)),
+        environment_with(("User", 1), ("Team", 5), ("User", 2)),
     ],
 )
-def test_environment_put_that_drops_or_swaps_a_reviewer_is_refused(
+def test_environment_put_that_adds_drops_or_swaps_a_reviewer_is_refused(
     fake: Fake, existing: httpx.Response
 ) -> None:
     fake.by_method["GET"] = existing
@@ -475,6 +516,7 @@ def test_environment_put_that_drops_or_swaps_a_reviewer_is_refused(
         httpx.Response(200, content=b"not json"),
         httpx.Response(200, json={}),
         httpx.Response(200, json={"protection_rules": 3}),
+        httpx.Response(200, json={"protection_rules": []}),
         httpx.Response(
             200,
             json={
