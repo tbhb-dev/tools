@@ -983,6 +983,23 @@ def test_a_count_of_deeply_nested_json_denies_a_listing(grant_file: Path) -> Non
     assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf 'list -R example/one --limit 100 --json "
+        + FIELDS
+        + "\\n' | xargs -L1 gh run",
+        "xargs -L1 -a args gh run",
+        "parallel gh run :::: args",
+    ],
+)
+def test_a_repeater_cannot_take_the_listing_words_from_input(
+    command: str, grant_file: Path
+) -> None:
+    assert guard.inspect(command)[0] == guard.REPEAT_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
 def test_xargs_may_run_other_gh_commands() -> None:
     assert guard.inspect("echo 1 2 | xargs -n1 gh pr view")[0] is None
 

@@ -132,7 +132,7 @@ PROTECT_REASON = (
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 DOTS = {".", ".."}
 REPEATERS = {"xargs", "parallel"}
-LISTING = re.compile(r"\bgh\b.*\brun\b.*\blist\b", re.DOTALL)
+GH_RUN = re.compile(r"\bgh\b.*\brun\b", re.DOTALL)
 REDIRECT = re.compile(r"\d*(?:>>?|<|>&|&>)")
 REPEAT_REASON = (
     "Don't run a CI listing through xargs or parallel; each repeat is a separate "
@@ -458,9 +458,12 @@ def inner_script(words: list[str], body: str | None) -> str | None:
 
 
 def repeats(command: list[str]) -> bool:
-    """Whether xargs or parallel would run a ``gh run list`` more than once."""
+    """Whether xargs or parallel would run a ``gh run`` command more than once.
+
+    The listing words can arrive from stdin or ``-a``, so ``gh run`` alone counts.
+    """
     names = {word.rpartition("/")[2] for word in command}
-    return bool(REPEATERS & names) and bool(LISTING.search(" ".join(command)))
+    return bool(REPEATERS & names) and bool(GH_RUN.search(" ".join(command)))
 
 
 def repeated_scan(args: list[str]) -> tuple[str | None, set[str]]:
