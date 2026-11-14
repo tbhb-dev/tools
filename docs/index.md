@@ -6,6 +6,7 @@ okf_version: "0.2"
 
 ## Reference
 
+* [GitHub administration](reference/admin.md) - Administrative REST calls, refusal codes, token scope, and audit records.
 * [Frontmatter reference](reference/frontmatter.md) - The frontmatter fields of a Markdown file, their values, and how they map to commit trailers.
 * [Config](reference/config.md) - The user configuration file and deployment settings.
 * [Analytics](reference/analytics.md) - Database migrations, catalog checks, connection settings, and server tests.
