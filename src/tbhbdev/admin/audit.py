@@ -14,6 +14,7 @@ lazy from tbhbdev.admin.policy import Decision
 
 FILE_MODE = 0o600
 DIRECTORY_MODE = 0o700
+LOG_NAME = "calls.jsonl"
 
 
 class RefusedError(Exception):
@@ -90,7 +91,7 @@ class Audit:
     def same_file(directory: int, descriptor: int) -> None:
         """Refuse a log that was replaced between the open and the lock."""
         held = os.fstat(descriptor)
-        current = os.stat("calls.jsonl", dir_fd=directory, follow_symlinks=False)
+        current = os.lstat(LOG_NAME, dir_fd=directory)
         if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
             code = "audit_unavailable"
             raise RefusedError(code)
@@ -104,7 +105,7 @@ class Audit:
     @staticmethod
     def write(directory: int, record: dict[str, object]) -> None:
         descriptor = os.open(
-            "calls.jsonl",
+            LOG_NAME,
             os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
             0o600,
             dir_fd=directory,

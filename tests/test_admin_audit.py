@@ -132,6 +132,54 @@ def test_failed_write_cuts_off_the_partial_line(
     assert [json.loads(line) for line in lines] == [{"n": 1}, {"n": 3}]
 
 
+def test_a_log_swapped_for_a_symlink_to_the_held_file_is_refused(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "admin"
+    directory.mkdir()
+    log = directory / "calls.jsonl"
+    log.write_text("")
+    directory_fd = os.open(directory, os.O_RDONLY)
+    descriptor = os.open(log, os.O_RDWR)
+    try:
+        log.rename(directory / "old.jsonl")
+        log.symlink_to("old.jsonl")
+        with pytest.raises(RefusedError, match=r"^audit_unavailable$"):
+            Audit.same_file(directory_fd, descriptor)
+    finally:
+        os.close(descriptor)
+        os.close(directory_fd)
+
+
+def test_same_file_resolves_the_log_inside_the_directory_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "admin"
+    directory.mkdir()
+    (directory / "calls.jsonl").write_text("")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "calls.jsonl").write_text("")
+    monkeypatch.chdir(elsewhere)
+    directory_fd = os.open(directory, os.O_RDONLY)
+    descriptor = os.open(directory / "calls.jsonl", os.O_RDWR)
+    try:
+        Audit.same_file(directory_fd, descriptor)
+    finally:
+        os.close(descriptor)
+        os.close(directory_fd)
+
+
+def test_new_directories_are_private_whatever_the_umask(tmp_path: Path) -> None:
+    previous = os.umask(0o022)
+    try:
+        directory = tmp_path / "a/admin"
+        Audit(directory).append({"n": 1})
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+
 def test_created_directories_and_their_parents_are_synced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -6,6 +6,17 @@ import pytest
 
 from tbhbdev.admin import policy
 
+SAFE_ENVIRONMENT: dict[str, object] = {
+    "reviewers": [{"type": "User", "id": 1}],
+    "can_admins_bypass": False,
+    "prevent_self_review": True,
+    "deployment_branch_policy": {
+        "protected_branches": True,
+        "custom_branch_policies": False,
+    },
+}
+ENVIRONMENT_PATH = "/repos/tbhb-dev/widget/environments/test"
+
 # Rule, method, endpoint, body. Every rule includes an encoded/case variant.
 REFUSALS: list[tuple[str, str, str, object]] = [
     (
@@ -102,6 +113,14 @@ REFUSALS: list[tuple[str, str, str, object]] = [
         {},
     ),
     ("protection_weakening", "PUT", "/repos/tbhb-dev/widget/environments/test", {}),
+    (
+        "protection_weakening",
+        "PUT",
+        ENVIRONMENT_PATH,
+        {**SAFE_ENVIRONMENT, "wait_timer": 0},
+    ),
+    ("protection_weakening", "POST", ENVIRONMENT_PATH, SAFE_ENVIRONMENT),
+    ("protection_weakening", "PATCH", ENVIRONMENT_PATH, SAFE_ENVIRONMENT),
     (
         "protection_weakening",
         "PUT",
