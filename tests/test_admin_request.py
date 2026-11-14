@@ -108,6 +108,21 @@ def fake(tmp_path: Path) -> Fake:
             "public_visibility",
         ),
         ("GET", "/graphql", None, "endpoint_denied"),
+        *[
+            (
+                "POST",
+                "/repos/tbhb-dev/widget/rulesets",
+                {
+                    "name": "main",
+                    "target": "branch",
+                    "enforcement": "active",
+                    "bypass_actors": [],
+                    "rules": [{"type": kind}],
+                },
+                "protection_weakening",
+            )
+            for kind in (["deletion"], {"a": 1})
+        ],
     ],
 )
 def test_no_io_on_refusal(
@@ -697,3 +712,26 @@ def test_audit_logs_the_path_as_sent(fake: Fake) -> None:
         .splitlines()
     ]
     assert {e["path"] for e in entries} == {"/repos/tbhb-dev/widget/contents/README.md"}
+
+
+def test_a_ruleset_create_logs_a_before_and_an_after_record(fake: Fake) -> None:
+    path = "/repos/tbhb-dev/widget/rulesets"
+    body: dict[str, object] = {
+        "name": "main",
+        "target": "branch",
+        "enforcement": "active",
+        "bypass_actors": [],
+        "rules": [{"type": "deletion"}],
+    }
+    request.call(fake.runtime, "POST", path, body, "test")
+    entries = [
+        json.loads(line)
+        for line in (fake.runtime.audit.directory / "calls.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert next(e["decision"] for e in entries) == "allow"
+    assert {e["path"] for e in entries} == {path}
+    assert len(entries) == 2
+    assert fake.requests[-1].method == "POST"
+    assert fake.requests[-1].url.path == path

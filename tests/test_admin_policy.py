@@ -843,3 +843,250 @@ def test_public_visibility_is_refused_on_any_path(value: str) -> None:
     assert not policy.visibility_refusal(
         "PATCH", "/orgs/tbhb-dev/other", {"visibility": "private"}
     )
+
+
+RULESET_PATH = "/repos/tbhb-dev/widget/rulesets"
+
+
+def live_ruleset() -> dict[str, object]:
+    """The shape of the live `main` ruleset on tbhb-dev/tools."""
+    return {
+        "name": "main",
+        "target": "branch",
+        "enforcement": "active",
+        "conditions": {"ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]}},
+        "bypass_actors": [],
+        "rules": [
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
+            {"type": "required_linear_history"},
+            {"type": "required_signatures"},
+            {
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 1,
+                    "allowed_merge_methods": ["squash"],
+                },
+            },
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "required_status_checks": [
+                        {"context": "conclusion", "integration_id": 15368}
+                    ]
+                },
+            },
+        ],
+    }
+
+
+def with_rules(*rules: object) -> dict[str, object]:
+    return {**live_ruleset(), "rules": list(rules)}
+
+
+def pull_request(count: object) -> dict[str, object]:
+    return {
+        "type": "pull_request",
+        "parameters": {"required_approving_review_count": count},
+    }
+
+
+def pull_request_with(**parameters: object) -> dict[str, object]:
+    return {
+        "type": "pull_request",
+        "parameters": {"required_approving_review_count": 1, **parameters},
+    }
+
+
+def pull_request_methods(methods: object) -> dict[str, object]:
+    return {
+        "type": "pull_request",
+        "parameters": {
+            "required_approving_review_count": 1,
+            "allowed_merge_methods": methods,
+        },
+    }
+
+
+def status_checks(*entries: object) -> dict[str, object]:
+    return {
+        "type": "required_status_checks",
+        "parameters": {"required_status_checks": list(entries)},
+    }
+
+
+def test_the_live_ruleset_shape_may_be_created() -> None:
+    assert policy.check("POST", RULESET_PATH, live_ruleset()).allowed
+
+
+def test_a_check_and_a_pull_request_rule_may_leave_the_optional_fields_out() -> None:
+    body = with_rules(pull_request(1), status_checks({"context": "conclusion"}))
+    assert policy.check("POST", RULESET_PATH, body).allowed
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"require_code_owner_review": False},
+        {"required_reviewers": []},
+        {"dismiss_stale_reviews_on_push": True, "require_last_push_approval": True},
+    ],
+)
+def test_a_pull_request_rule_may_carry_the_live_review_options(
+    parameters: dict[str, object],
+) -> None:
+    body = with_rules(pull_request_with(**parameters))
+    assert policy.check("POST", RULESET_PATH, body).allowed
+
+
+def test_a_pull_request_rule_may_carry_every_live_review_option() -> None:
+    rule = pull_request_with(
+        dismiss_stale_reviews_on_push=True,
+        required_reviewers=[],
+        require_code_owner_review=False,
+        dismissal_restriction={"enabled": False, "allowed_actors": []},
+        require_last_push_approval=True,
+        required_review_thread_resolution=True,
+        require_extra_approval_for_unattributed_changes=True,
+        allowed_merge_methods=["squash"],
+    )
+    assert set(rule["parameters"]) == policy.RULESET_REVIEW_KEYS  # type: ignore[arg-type]
+    assert policy.check("POST", RULESET_PATH, with_rules(rule)).allowed
+
+
+def test_a_ruleset_may_hold_fewer_rules_and_no_conditions() -> None:
+    body = with_rules({"type": "deletion"})
+    del body["conditions"]
+    assert policy.check("POST", RULESET_PATH, body).allowed
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {**live_ruleset(), "enforcement": "evaluate"},
+        {**live_ruleset(), "enforcement": "disabled"},
+        {**live_ruleset(), "enforcement": "ACTIVE"},
+        {**live_ruleset(), "target": "tag"},
+        {**live_ruleset(), "target": "push"},
+        {key: v for key, v in live_ruleset().items() if key != "target"},
+        {**live_ruleset(), "bypass_actors": [{"actor_id": 5, "actor_type": "Team"}]},
+        {key: v for key, v in live_ruleset().items() if key != "bypass_actors"},
+        {**live_ruleset(), "bypass_actors": None},
+        {**live_ruleset(), "unknown": True},
+        {
+            **live_ruleset(),
+            "conditions": {"ref_name": {"exclude": ["main"], "include": ["~ALL"]}},
+        },
+        {**live_ruleset(), "rules": []},
+        {**live_ruleset(), "rules": "deletion"},
+        {key: v for key, v in live_ruleset().items() if key != "rules"},
+        with_rules({"type": ["deletion"]}),
+        with_rules({"type": {"a": 1}}),
+        with_rules({"type": "creation"}),
+        with_rules({"type": "update"}),
+        with_rules({"type": "deletion"}, "deletion"),
+        with_rules({"type": "deletion", "parameters": {}}),
+        with_rules({"type": "workflows", "parameters": {}}),
+        with_rules(pull_request(0)),
+        with_rules(pull_request(count=True)),
+        with_rules(pull_request("1")),
+        with_rules({"type": "pull_request"}),
+        with_rules({"type": "pull_request", "parameters": [1]}),
+        with_rules({**pull_request(1), "extra": 1}),
+        with_rules(status_checks()),
+        with_rules(status_checks({"context": "bazel"})),
+        with_rules(status_checks({"context": "conclusion", "extra": 1})),
+        with_rules(status_checks({"context": "conclusion"}, "bazel")),
+        with_rules({"type": "required_status_checks"}),
+        with_rules({"type": "required_status_checks", "parameters": {}}),
+        with_rules(
+            {
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": "conclusion"},
+            }
+        ),
+        with_rules({"type": "required_status_checks", "parameters": 3}),
+        with_rules({**status_checks({"context": "conclusion"}), "extra": 1}),
+        with_rules(status_checks({"context": "conclusion", "integration_id": -1})),
+        with_rules(status_checks({"context": "conclusion", "integration_id": 1})),
+        with_rules(status_checks({"context": "conclusion", "integration_id": None})),
+        with_rules(
+            status_checks({"context": "conclusion", "integration_id": {"a": 1}})
+        ),
+        with_rules(
+            status_checks(
+                {"context": "conclusion", "integration_id": 15368},
+                {"context": "conclusion", "integration_id": 7},
+            )
+        ),
+        with_rules(pull_request(2)),
+        with_rules(pull_request_with(require_code_owner_review=True)),
+        with_rules(pull_request_with(require_code_owner_review=None)),
+        with_rules(pull_request_with(require_code_owner_review=0)),
+        with_rules(
+            pull_request_with(
+                required_reviewers=[
+                    {
+                        "minimum_approvals": 5,
+                        "file_patterns": ["*"],
+                        "reviewer": {"id": 1, "type": "Team"},
+                    }
+                ]
+            )
+        ),
+        with_rules(pull_request_with(required_reviewers=None)),
+        with_rules(pull_request_with(required_reviewers=0)),
+        with_rules(pull_request_with(unknown_option=True)),
+        with_rules(
+            pull_request_with(
+                dismissal_restriction={"enabled": True, "allowed_actors": []}
+            )
+        ),
+        with_rules(pull_request_with(dismissal_restriction="x")),
+        with_rules(pull_request_with(dismissal_restriction=None)),
+        with_rules(
+            pull_request_with(
+                dismissal_restriction={"enabled": 0, "allowed_actors": []}
+            )
+        ),
+        with_rules(
+            pull_request_with(
+                dismissal_restriction={"enabled": False, "allowed_actors": ["x"]}
+            )
+        ),
+        with_rules(pull_request_with(dismissal_restriction={"enabled": False})),
+        with_rules(
+            pull_request_with(
+                dismissal_restriction={"enabled": False, "allowed_actors": [], "x": 1}
+            )
+        ),
+        with_rules(status_checks({"context": "conclusion", "integration_id": 15368.0})),
+        with_rules(pull_request(10**9)),
+        with_rules(pull_request_methods(["merge"])),
+        with_rules(pull_request_methods(["rebase"])),
+        with_rules(pull_request_methods(["squash", "merge"])),
+        with_rules(pull_request_methods([])),
+        with_rules(pull_request_methods("squash")),
+    ],
+)
+def test_other_ruleset_creates_are_refused(body: dict[str, object]) -> None:
+    decision = policy.check("POST", RULESET_PATH, body)
+    assert decision == policy.Decision(
+        allowed=False, code="protection_weakening", path=RULESET_PATH
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "code"),
+    [
+        ("POST", "/orgs/tbhb-dev/rulesets", "protection_weakening"),
+        ("POST", "/repos/tbhb-dev/widget/rulesets/7", "protection_weakening"),
+        ("PUT", RULESET_PATH, "protection_weakening"),
+        ("PUT", "/repos/tbhb-dev/widget/rulesets/7", "protection_weakening"),
+        ("POST", "/repos/other-org/widget/rulesets", "foreign_owner"),
+    ],
+)
+def test_the_create_rule_covers_only_a_repository_ruleset(
+    method: str, path: str, code: str
+) -> None:
+    assert policy.check(method, path, live_ruleset()).code == code
