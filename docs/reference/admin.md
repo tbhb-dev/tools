@@ -31,14 +31,14 @@ The allowlist covers settings, protection, Actions secrets and variables, enviro
 
 Path normalization folds names to lower case to check the policy and decodes percent escapes once. The request sends the path with its original case, which keeps a contents path such as `README.md` intact. It drops query strings and strips trailing slashes before checking for routing ambiguity. GitHub receives the path alone. Encoded separators, repeated slashes, dot segments, fragments, and absolute URLs fail closed. The request uses that normalized path. Write parameters belong in JSON bodies. HTTP calls have a timeout and a 1 MiB response cap. Redirects fail closed.
 
-An environment write that targets an existing environment first reads that environment. The write must list the reviewers the environment already has. The environment's branch policy must be unset or `{"protected_branches": true, "custom_branch_policies": false}`. A positive wait timer refuses the write, because the write would reset the timer to 0. These refusals use the `protection_weakening` code. The read and the write are two calls, and GitHub provides no conditional write. A change between them goes unseen, and the tool accepts that risk.
+Before an environment write to an existing environment, the tool reads that environment. Its reviewers must match the reviewers in the write. Its branch policy must be unset or `{"protected_branches": true, "custom_branch_policies": false}`. A positive wait timer refuses the write, because a write would reset the timer to 0. These refusals use the `protection_weakening` code. GitHub offers only unconditional writes between the read and the write. The tool doesn't see a concurrent change in that window and accepts that risk.
 
 A refusal exits 3 with its code on standard error. Usage errors exit 2. HTTP error responses exit 1 with the response body.
 
 | Code | Meaning |
 | --- | --- |
 | `protection_weakening` | Protection deletion, bypass actors, an unclassified protection write, or an environment write unless it's a `PUT` that lists reviewers with only `type` and `id` keys and omits `wait_timer`. The body must also state `can_admins_bypass: false` and `prevent_self_review: true`, plus the deployment branch policy `{"protected_branches": true, "custom_branch_policies": false}`. A repository `default_branch` change, `allow_auto_merge: true`, or `web_commit_signoff_required: false` also counts |
-| `environment_unreadable` | An environment write where the lookup returned a status other than 200 or 404. Also a lookup whose JSON lacks the expected fields, carries a malformed reviewer id or wait timer, or nests too deeply |
+| `environment_unreadable` | An environment write where the lookup returned a status other than 200 or 404. Also a lookup whose JSON has a missing field or a malformed reviewer id or wait timer, or whose nesting is too deep. |
 | `broad_visibility` | An organization secret, variable, or runner group whose visibility isn't `selected`, a new runner group that omits it, a runner group that allows public repositories, a runner group whose `restricted_to_workflows` isn't true, or any `selected_workflows` change |
 | `membership_change` | Membership, invitations, collaborators, or role changes |
 | `repository_removal` | Repository deletion, transfer, or archiving |
