@@ -891,6 +891,16 @@ def pull_request(count: object) -> dict[str, object]:
     }
 
 
+def pull_request_methods(methods: object) -> dict[str, object]:
+    return {
+        "type": "pull_request",
+        "parameters": {
+            "required_approving_review_count": 1,
+            "allowed_merge_methods": methods,
+        },
+    }
+
+
 def status_checks(*entries: object) -> dict[str, object]:
     return {
         "type": "required_status_checks",
@@ -900,6 +910,11 @@ def status_checks(*entries: object) -> dict[str, object]:
 
 def test_the_live_ruleset_shape_may_be_created() -> None:
     assert policy.check("POST", RULESET_PATH, live_ruleset()).allowed
+
+
+def test_a_check_and_a_pull_request_rule_may_leave_the_optional_fields_out() -> None:
+    body = with_rules(pull_request(1), status_checks({"context": "conclusion"}))
+    assert policy.check("POST", RULESET_PATH, body).allowed
 
 
 def test_a_ruleset_may_hold_fewer_rules_and_no_conditions() -> None:
@@ -955,6 +970,25 @@ def test_a_ruleset_may_hold_fewer_rules_and_no_conditions() -> None:
         ),
         with_rules({"type": "required_status_checks", "parameters": 3}),
         with_rules({**status_checks({"context": "conclusion"}), "extra": 1}),
+        with_rules(status_checks({"context": "conclusion", "integration_id": -1})),
+        with_rules(status_checks({"context": "conclusion", "integration_id": 1})),
+        with_rules(status_checks({"context": "conclusion", "integration_id": None})),
+        with_rules(
+            status_checks({"context": "conclusion", "integration_id": {"a": 1}})
+        ),
+        with_rules(
+            status_checks(
+                {"context": "conclusion", "integration_id": 15368},
+                {"context": "conclusion", "integration_id": 7},
+            )
+        ),
+        with_rules(pull_request(2)),
+        with_rules(pull_request(10**9)),
+        with_rules(pull_request_methods(["merge"])),
+        with_rules(pull_request_methods(["rebase"])),
+        with_rules(pull_request_methods(["squash", "merge"])),
+        with_rules(pull_request_methods([])),
+        with_rules(pull_request_methods("squash")),
     ],
 )
 def test_other_ruleset_creates_are_refused(body: dict[str, object]) -> None:

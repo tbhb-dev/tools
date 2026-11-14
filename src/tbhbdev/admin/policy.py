@@ -167,6 +167,10 @@ RULESET_PLAIN_RULES = {
     "required_linear_history",
     "required_signatures",
 }
+# From .github/rulesets/main.json: one approval, squash only, the Actions app.
+RULESET_APPROVALS = 1
+RULESET_MERGE_METHODS = ["squash"]
+RULESET_CHECKS_APP = 15368
 RULESET_CONDITIONS: dict[str, dict[str, list[str]]] = {
     "ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]}
 }
@@ -179,7 +183,25 @@ def safe_pull_request_rule(rule: dict[str, object]) -> bool:
         return False
     options: dict[str, object] = parameters
     count = options.get("required_approving_review_count")
-    return isinstance(count, int) and not isinstance(count, bool) and count >= 1
+    methods = options.get("allowed_merge_methods", RULESET_MERGE_METHODS)
+    return (
+        isinstance(count, int)
+        and not isinstance(count, bool)
+        and 1 <= count <= RULESET_APPROVALS
+        and methods == RULESET_MERGE_METHODS
+    )
+
+
+def safe_status_check(entry: object) -> bool:
+    """A `conclusion` check, bound to no app or to the Actions app."""
+    if not isinstance(entry, dict):
+        return False
+    item: dict[str, object] = entry
+    return (
+        item.get("context") == "conclusion"
+        and set(item) <= {"context", "integration_id"}
+        and item.get("integration_id", RULESET_CHECKS_APP) == RULESET_CHECKS_APP
+    )
 
 
 def safe_status_checks_rule(rule: dict[str, object]) -> bool:
@@ -192,12 +214,7 @@ def safe_status_checks_rule(rule: dict[str, object]) -> bool:
     if not isinstance(checks, list) or not checks:
         return False
     entries: list[object] = checks
-    return all(
-        isinstance(entry, dict)
-        and entry.get("context") == "conclusion"
-        and set(entry) <= {"context", "integration_id"}
-        for entry in entries
-    )
+    return all(safe_status_check(entry) for entry in entries)
 
 
 def safe_ruleset_rule(rule: object) -> bool:
