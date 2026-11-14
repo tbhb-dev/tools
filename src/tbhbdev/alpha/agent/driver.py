@@ -383,8 +383,10 @@ def settle(settings: Settings, run: Run, result: int) -> None:
         try:
             if clean(settings, run, force=False) == 0:
                 return
-        except (Invalid, transport.TransportError) as error:
+        except Invalid as error:
             print(error, file=sys.stderr)
+        except Exception as error:  # noqa: BLE001 -- the result is final; a failed clean must not replace it
+            print(f"cleanup state unknown: {error}", file=sys.stderr)
     tree = repo.clone_path(PurePosixPath("."), run.request.repo)
     print(
         f"{run.name}: worktree kept at "

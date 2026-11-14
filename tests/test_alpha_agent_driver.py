@@ -1772,6 +1772,28 @@ def test_wait_keeps_a_success_when_the_clean_loses_transport(
     assert driver.metadata_path("sample").exists()
 
 
+def test_wait_keeps_a_success_when_the_clean_fails_unexpectedly(
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert launch(remote) == 0
+    capsys.readouterr()
+    remote.configure(session=False)
+    remote.file(".rc", "0\n")
+    expected = kept()
+
+    def clean(_settings: model.Settings, _run: driver.Run, **_options: object) -> int:
+        message = "disk gone"
+        raise OSError(message)
+
+    monkeypatch.setattr(driver, "clean", clean)
+    assert command("wait") == 0
+    output = capsys.readouterr()
+    assert expected in output.out
+    assert "cleanup state unknown: disk gone" in output.err
+
+
 def test_wait_never_forces_the_clean(
     remote: Remote, monkeypatch: pytest.MonkeyPatch
 ) -> None:
