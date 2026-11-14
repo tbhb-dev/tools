@@ -2452,8 +2452,11 @@ def test_linux_denies_resolve_links_drop_missing_and_deduplicate(
     assert value.detail.deny == (str(socket),)
 
 
-@pytest.mark.parametrize("request_file", [False, True])
-@pytest.mark.parametrize("marker", ["rc", "pgid", "owner"])
+@pytest.mark.parametrize(
+    ("marker", "request_file"),
+    # Without a request argument the owner file is the driver's own claim.
+    [("rc", False), ("rc", True), ("pgid", False), ("pgid", True), ("owner", True)],
+)
 def test_refused_rerun_preserves_every_file(
     config_file: Path,
     monkeypatch: pytest.MonkeyPatch,
