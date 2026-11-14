@@ -504,7 +504,9 @@ def names_state_dir(word: str) -> bool:
     text = str(Path(home).expanduser())
     wild = re.search(r"[*?\[{]", text)
     if wild:
-        prefix = text[: wild.start()].lower()
+        # "x" keeps normpath from eating the prefix's trailing slash.
+        lead = os.path.normpath(text[: wild.start()] + "x")[:-1]
+        prefix = re.sub(r"^/+", "/", lead).lower()
         return prefix.startswith("/") and any(
             name.startswith(prefix) for name in STATE_FILES
         )
