@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass
+from typing import cast
 from urllib.parse import unquote, urlsplit
 
 METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
@@ -219,23 +220,57 @@ def write_refusal(method: str, path: str, body: dict[str, object]) -> str:
 
 SAFE_BRANCH_POLICY = {"protected_branches": True, "custom_branch_policies": False}
 REVIEWER_KEYS = {"type", "id"}
+REVIEWER_TYPES = {"User", "Team"}
+
+
+def valid_reviewer(item: object) -> bool:
+    """A reviewer is a User or Team with a positive integer id (not a bool)."""
+    if not isinstance(item, dict):
+        return False
+    reviewer: dict[str, object] = item
+    number = reviewer.get("id")
+    return (
+        reviewer.keys() == REVIEWER_KEYS
+        and reviewer["type"] in REVIEWER_TYPES
+        and isinstance(number, int)
+        and not isinstance(number, bool)
+        and number > 0
+    )
+
+
+def safe_branch_policy(value: object) -> bool:
+    """Compare by identity, because ``1 == True`` and ``0 == False`` in Python."""
+    if not isinstance(value, dict):
+        return False
+    mapping: dict[str, object] = value
+    return mapping.keys() == SAFE_BRANCH_POLICY.keys() and all(
+        mapping[key] is flag for key, flag in SAFE_BRANCH_POLICY.items()
+    )
 
 
 def weakens_environment(method: str, body: dict[str, object]) -> bool:
-    """Only a PUT that states every guard, safely, passes."""
+    """Only a PUT that states every guard, safely, passes.
+
+    Who the reviewers are can't be judged here, because the policy performs no
+    I/O. The request layer compares them with the existing environment.
+    """
     reviewers: object = body.get("reviewers")
     if method != "PUT" or not isinstance(reviewers, list) or not reviewers:
         return True
     items: list[object] = reviewers
     return (
-        any(
-            not isinstance(item, dict) or item.keys() != REVIEWER_KEYS for item in items
-        )
+        not all(valid_reviewer(item) for item in items)
         or "wait_timer" in body
         or body.get("can_admins_bypass") is not False
         or body.get("prevent_self_review") is not True
-        or body.get("deployment_branch_policy") != SAFE_BRANCH_POLICY
+        or not safe_branch_policy(body.get("deployment_branch_policy"))
     )
+
+
+def requested_reviewers(body: dict[str, object]) -> frozenset[tuple[str, int]]:
+    """Reviewers of a body that weakens_environment already accepted."""
+    items = cast("list[dict[str, object]]", body["reviewers"])
+    return frozenset((str(item["type"]), int(str(item["id"]))) for item in items)
 
 
 def runner_group_broad(method: str, path: str, body: dict[str, object]) -> bool:

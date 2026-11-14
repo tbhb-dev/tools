@@ -5,6 +5,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import httpx
 
@@ -14,6 +15,8 @@ from tbhbdev.admin.audit import Audit, RefusedError, record
 from tbhbdev.alpha import gh_app
 
 MAX_RESPONSE = 1024 * 1024
+HTTP_OK = 200
+HTTP_NOT_FOUND = 404
 AUTHORIZATION = "Authorization"
 HEADERS = {
     "Accept": "application/vnd.github+json",
@@ -123,6 +126,42 @@ def send(
         raise RefusedError(msg) from None
 
 
+def existing_reviewers(
+    runtime: Runtime, path: str, reason: str
+) -> frozenset[tuple[str, int]]:
+    """The environment's current required reviewers; none when it is new."""
+    status, text = call(runtime, "GET", path, None, reason)
+    if status == HTTP_NOT_FOUND:
+        return frozenset()
+    if status != HTTP_OK:
+        msg = "environment_unreadable"
+        raise RefusedError(msg)
+    try:
+        rules = json.loads(text)["protection_rules"]
+        return frozenset(
+            (who["type"], who["reviewer"]["id"])
+            for rule in rules
+            if rule["type"] == "required_reviewers"
+            for who in rule["reviewers"]
+        )
+    except ValueError, KeyError, TypeError:
+        msg = "environment_unreadable"
+        raise RefusedError(msg) from None
+
+
+def keep_reviewers(runtime: Runtime, path: str, body: object, reason: str) -> None:
+    """An environment write may add reviewers but never drop or swap one.
+
+    Otherwise a different user could replace a security team as the deployment
+    authorizer. The lookup and the write are separate calls, so a change between
+    them is not caught.
+    """
+    kept = policy.requested_reviewers(cast("dict[str, object]", body))
+    if not existing_reviewers(runtime, path, reason) <= kept:
+        msg = "protection_weakening"
+        raise RefusedError(msg)
+
+
 def call(  # noqa: PLR0913  # Explicit one-call inputs and optional dry run.
     runtime: Runtime,
     method: str,
@@ -139,15 +178,17 @@ def call(  # noqa: PLR0913  # Explicit one-call inputs and optional dry run.
         if body is None
         else json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
     )
-    entry = record(method, decision, reason, encoded)
+    # fold=None survives: None is as falsy as False.
+    wire = policy.normalize(path, fold=False)  # pragma: no mutate
+    entry = record(method, decision, reason, encoded, wire)
     runtime.audit.append(entry)
     if not decision.allowed:
         raise RefusedError(decision.code)
     if dry_run:
         return 0, ""
-    # fold=None survives: None is as falsy as False.
-    wire = policy.normalize(path, fold=False)  # pragma: no mutate
     try:
+        if method == "PUT" and policy.ENVIRONMENT.fullmatch(decision.path):
+            keep_reviewers(runtime, wire, body, reason)
         status, response = send(runtime, method, wire, encoded, decision)
     except RefusedError as exc:
         runtime.audit.append({**entry, "phase": "after", "code": str(exc)})

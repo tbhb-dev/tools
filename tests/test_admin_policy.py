@@ -119,6 +119,40 @@ REFUSALS: list[tuple[str, str, str, object]] = [
         ENVIRONMENT_PATH,
         {**SAFE_ENVIRONMENT, "wait_timer": 0},
     ),
+    *(
+        (
+            "protection_weakening",
+            "PUT",
+            ENVIRONMENT_PATH,
+            {**SAFE_ENVIRONMENT, "reviewers": reviewers},
+        )
+        for reviewers in (
+            [{"type": "Bogus", "id": 1}],
+            [{"type": "Null", "id": None}],
+            [{"type": "Team", "id": 0}],
+            [{"type": "User", "id": -3}],
+            [{"type": "User", "id": "abc"}],
+            [{"type": "User", "id": True}],
+            [{"type": "User", "id": 1, "extra": 1}],
+            [{"type": "User"}],
+            ["User"],
+        )
+    ),
+    *(
+        (
+            "protection_weakening",
+            "PUT",
+            ENVIRONMENT_PATH,
+            {**SAFE_ENVIRONMENT, "deployment_branch_policy": value},
+        )
+        for value in (
+            {"protected_branches": 1, "custom_branch_policies": 0},
+            {"protected_branches": True, "custom_branch_policies": False, "x": 1},
+            {"protected_branches": False, "custom_branch_policies": False},
+            {"protected_branches": True, "custom_branch_policies": True},
+            None,
+        )
+    ),
     ("protection_weakening", "POST", ENVIRONMENT_PATH, SAFE_ENVIRONMENT),
     ("protection_weakening", "PATCH", ENVIRONMENT_PATH, SAFE_ENVIRONMENT),
     (
@@ -805,3 +839,10 @@ def test_complete_setting_lists() -> None:
 )
 def test_first_and_last_empty_or_dot_segments(path: str) -> None:
     assert policy.normalize(path) == ""
+
+
+def test_requested_reviewers_lists_each_user_and_team() -> None:
+    body: dict[str, object] = {
+        "reviewers": [{"type": "User", "id": 1}, {"type": "Team", "id": 2}]
+    }
+    assert policy.requested_reviewers(body) == {("User", 1), ("Team", 2)}

@@ -46,7 +46,7 @@ def test_log_flags_modes_and_fields(
     decision = policy.check(
         "PATCH", "/repos/tbhb-dev/widget", {"description": "example"}
     )
-    entry = record("PATCH", decision, "maintenance", body)
+    entry = record("PATCH", decision, "maintenance", body, "/repos/tbhb-dev/widget")
     audit.append(entry)
     audit.append({**entry, "phase": "after", "status": 200})
     own = [call for call in calls if call[0] in {str(directory), "calls.jsonl"}]
@@ -439,3 +439,32 @@ def test_validate_file_owner_and_kind(
     path.chmod(0o700)
     with pytest.raises(RefusedError, match=r"^audit_unavailable$"):
         Audit.validate(path.stat(), mode=0o700)
+
+
+def test_a_log_rotated_during_the_write_refuses_the_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "admin"
+    audit = Audit(directory)
+    audit.append({"n": 0})
+    original = Audit.write_all
+
+    def rotate(descriptor: int, data: bytes) -> None:
+        original(descriptor, data)
+        (directory / "calls.jsonl").rename(directory / "old.jsonl")
+        (directory / "calls.jsonl").write_text("")
+
+    monkeypatch.setattr(Audit, "write_all", staticmethod(rotate))
+    with pytest.raises(RefusedError, match=r"^audit_unavailable$"):
+        audit.append({"n": 1})
+    # The record stays in the rotated file; it is not cut off by a rollback.
+    assert (directory / "old.jsonl").read_text().count("\n") == 2
+    assert (directory / "calls.jsonl").read_text() == ""
+
+
+def test_record_keeps_the_path_it_is_given() -> None:
+    decision = policy.check("GET", "/repos/tbhb-dev/widget/contents/README.md")
+    entry = record(
+        "GET", decision, "test", b"", "/repos/tbhb-dev/widget/contents/README.md"
+    )
+    assert entry["path"] == "/repos/tbhb-dev/widget/contents/README.md"

@@ -35,6 +35,7 @@ class Fake:
         default_factory=lambda: httpx.Response(200, json={"ok": True})
     )
     failure: str = ""
+    by_method: dict[str, httpx.Response] = field(default_factory=dict)
 
 
 @pytest.fixture
@@ -65,7 +66,13 @@ def fake(tmp_path: Path) -> Fake:
             json.loads(line)
             for line in (tmp_path / "audit/calls.jsonl").read_text().splitlines()
         ]
-        assert entries[-1]["phase"] == "before"
+        # Each request has its own durable before record, even when a lookup
+        # for the same call finished in between.
+        assert any(
+            e["phase"] == "before" and e["method"] == req.method
+            for e in entries
+            if not req.url.path.endswith(("/installation", "/access_tokens"))
+        ) or req.url.path.endswith(("/installation", "/access_tokens"))
         if result.failure == "network":
             raise httpx.ReadError(TOKEN)
         if req.url.path.endswith("/installation"):
@@ -76,7 +83,7 @@ def fake(tmp_path: Path) -> Fake:
             )
         if result.failure == "call":
             raise httpx.ReadError(TOKEN)
-        return result.reply
+        return result.by_method.get(req.method, result.reply)
 
     env = gh_app.Env(
         tmp_path,
@@ -381,3 +388,103 @@ def test_reused_mint_preserves_installation_arguments(fake: Fake) -> None:
     assert found == [7]
     assert len(fake.requests) == 1
     assert fake.requests[0].url.path == "/app/installations/7/access_tokens"
+
+
+ENVIRONMENT = "/repos/tbhb-dev/widget/environments/prod"
+ENVIRONMENT_BODY = {
+    "reviewers": [{"type": "Team", "id": 5}, {"type": "User", "id": 1}],
+    "can_admins_bypass": False,
+    "prevent_self_review": True,
+    "deployment_branch_policy": {
+        "protected_branches": True,
+        "custom_branch_policies": False,
+    },
+}
+
+
+def environment_with(*people: tuple[str, int]) -> httpx.Response:
+    rules = [
+        {
+            "type": "required_reviewers",
+            "reviewers": [{"type": t, "reviewer": {"id": i}} for t, i in people],
+        },
+        {"type": "wait_timer", "wait_timer": 0},
+    ]
+    return httpx.Response(200, json={"protection_rules": rules})
+
+
+def put_environment(fake: Fake) -> tuple[int, str]:
+    return request.call(fake.runtime, "PUT", ENVIRONMENT, ENVIRONMENT_BODY, "test")
+
+
+def test_environment_put_may_keep_and_add_reviewers(fake: Fake) -> None:
+    fake.by_method["GET"] = environment_with(("User", 1))
+    assert put_environment(fake)[0] == 200
+    assert [r.method for r in fake.requests if "environments" in r.url.path] == [
+        "GET",
+        "PUT",
+    ]
+
+
+def test_environment_put_on_a_new_environment_passes(fake: Fake) -> None:
+    fake.by_method["GET"] = httpx.Response(404, json={})
+    assert put_environment(fake)[0] == 200
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        environment_with(("User", 9)),
+        environment_with(("User", 1), ("Team", 6)),
+        environment_with(("Team", 1)),
+    ],
+)
+def test_environment_put_that_drops_or_swaps_a_reviewer_is_refused(
+    fake: Fake, existing: httpx.Response
+) -> None:
+    fake.by_method["GET"] = existing
+    with pytest.raises(RefusedError, match=r"^protection_weakening$"):
+        put_environment(fake)
+    assert "PUT" not in [r.method for r in fake.requests]
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        httpx.Response(500, json={}),
+        httpx.Response(200, content=b"not json"),
+        httpx.Response(200, json={}),
+        httpx.Response(200, json={"protection_rules": 3}),
+        httpx.Response(
+            200,
+            json={
+                "protection_rules": [{"type": "required_reviewers", "reviewers": [{}]}]
+            },
+        ),
+    ],
+)
+def test_environment_put_with_an_unreadable_environment_is_refused(
+    fake: Fake, existing: httpx.Response
+) -> None:
+    fake.by_method["GET"] = existing
+    with pytest.raises(RefusedError, match=r"^environment_unreadable$"):
+        put_environment(fake)
+    assert "PUT" not in [r.method for r in fake.requests]
+
+
+def test_environment_dry_run_makes_no_lookup(fake: Fake) -> None:
+    request.call(fake.runtime, "PUT", ENVIRONMENT, ENVIRONMENT_BODY, "t", dry_run=True)
+    assert fake.requests == []
+
+
+def test_audit_logs_the_path_as_sent(fake: Fake) -> None:
+    request.call(
+        fake.runtime, "PUT", "/repos/tbhb-dev/widget/contents/README.md", {}, "test"
+    )
+    entries = [
+        json.loads(line)
+        for line in (fake.runtime.audit.directory / "calls.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert {e["path"] for e in entries} == {"/repos/tbhb-dev/widget/contents/README.md"}

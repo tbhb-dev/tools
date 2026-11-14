@@ -125,20 +125,24 @@ class Audit:
             except OSError, RefusedError:
                 Audit.roll_back(descriptor, start)
                 raise
+            # A rotation after the first check leaves the record in a file that
+            # is no longer the log, so the call is refused rather than unlogged.
+            Audit.same_file(directory, descriptor)
         finally:
             os.close(descriptor)
 
 
 def record(
-    method: str, decision: Decision, reason: str, body: bytes
+    method: str, decision: Decision, reason: str, body: bytes, path: str
 ) -> dict[str, object]:
+    """``path`` is the path as sent, because the policy path is lowercased."""
     return {
         "id": uuid4().hex,
         "time": datetime.now(UTC).isoformat(),
         "uid": os.getuid(),
         "reason": reason,
         "method": method,
-        "path": decision.path,
+        "path": path,
         "decision": "allow" if decision.allowed else "refuse",
         "code": decision.code,
         "status": None,
