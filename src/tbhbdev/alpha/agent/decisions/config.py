@@ -232,7 +232,9 @@ _OTEL_SHAPE = "must be an https URL with no credentials, path, query or fragment
 # The whole URL is matched, so no other character, such as a quote, a control
 # character or an `@`, can reach the config file, and no parser error can quote
 # the value.
-_OTEL_URL = re.compile(r"https://(?P<host>[a-z0-9.-]+)(?::(?P<port>[0-9]{1,5}))?/?")
+_OTEL_URL = re.compile(
+    r"https://(?P<host>[a-z0-9.-]+)(?::(?P<port>[1-9][0-9]{0,4}))?/?"
+)
 MAX_PORT = 65535
 
 

@@ -55,7 +55,7 @@ def with_otel(table: Table) -> Table:
         "https://otlp.example.net:4318",
         "https://otlp.example.net/",
         "https://otlp.example.net:65535",
-        "https://otlp.example.net:0",
+        "https://otlp.example.net:1",
     ],
 )
 def test_otel_endpoint(endpoint: str) -> None:
@@ -85,6 +85,9 @@ def test_otel_endpoint(endpoint: str) -> None:
         ({"endpoint": "https://otlp.example.net/#f"}, HTTPS),
         ({"endpoint": "https://u:p@[::1"}, HTTPS),
         ({"endpoint": "https://otlp.example.net:65536"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:0"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:00080"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:080"}, HTTPS),
         ({"endpoint": "https://otlp.example.net:"}, HTTPS),
         ({"endpoint": "https://otlp.example.net:123456"}, HTTPS),
         ({"endpoint": "https://OTLP.example.net"}, HTTPS),
