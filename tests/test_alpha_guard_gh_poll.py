@@ -1344,3 +1344,36 @@ def test_checked_passes_the_repeated_flag_to_the_listing_check(
 @pytest.mark.parametrize("program", ["/bin/rm", "/usr/bin/env rm"])
 def test_a_program_path_does_not_hide_a_state_directory_removal(program: str) -> None:
     assert guard.protected_words([*program.split(), "-rf", "~/.local/state/tbhb"])
+
+
+def test_inspect_passes_the_repeated_flag_to_the_scan(grant_file: Path) -> None:
+    assert guard.inspect(listing(REPOS[0]), repeated=True)[0] == guard.POLL_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+    assert guard.inspect(listing(REPOS[0]))[0] is None
+
+
+def test_inspect_denies_a_protected_name_before_scanning() -> None:
+    assert guard.inspect("cat x/gh-poll-allowance.json") == (
+        guard.PROTECT_REASON,
+        set(),
+    )
+
+
+@pytest.mark.parametrize("name", ["gh-poll-allowance.json", "GH-POLL-ALLOWANCE.COUNT"])
+def test_protected_words_reads_a_protected_name_in_any_case(name: str) -> None:
+    assert guard.protected_words(["cat", name])
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("xargs rm ~/.local/state/tbhb", True),
+        ("rm ~/.local/state/tbhb", False),
+        ("xargs echo ~/.local/state/tbhb", False),
+        ("xargs rm /tmp/x", False),
+    ],
+)
+def test_pipes_state_dir_needs_a_repeater_a_mover_and_a_state_path(
+    text: str, *, expected: bool
+) -> None:
+    assert guard.pipes_state_dir(text) is expected
