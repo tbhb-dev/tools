@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -30,6 +32,11 @@ def fifo(path: Path) -> None:
 
 def directory(path: Path) -> None:
     path.mkdir()
+
+
+def private_directory(path: Path) -> None:
+    path.mkdir(mode=0o700)
+    path.chmod(0o600)
 
 
 def dangling(path: Path) -> None:
@@ -60,6 +67,7 @@ def test_matching_private_owner_is_accepted(tmp_path: Path) -> None:
         (dangling, "no usable owner file"),
         (linked, "no usable owner file"),
         (directory, "different owner"),
+        (private_directory, "different owner"),
         (fifo, "different owner"),
         (partial(regular, text="other\n"), "different owner"),
         (partial(regular, text="run-id"), "different owner"),
@@ -95,6 +103,30 @@ def test_empty_expected_id_is_still_verified(tmp_path: Path) -> None:
     regular(files.path("owner"))
     with pytest.raises(ownership.RunExistsError, match="different owner"):
         ownership.claim(files, expected="")
+
+
+def test_fifo_owner_is_refused_without_blocking(tmp_path: Path) -> None:
+    files = run_files(tmp_path)
+    fifo(files.path("owner"))
+    # A blocking open of a FIFO with no writer never returns, so run the
+    # check in a child with a bounded wait.
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from tbhbdev.alpha.agent import ownership, runfiles\n"
+        "files = runfiles.RunFiles(Path(sys.argv[1]), 'example')\n"
+        "try:\n"
+        "    ownership.verify(files, 'run-id')\n"
+        "except ownership.RunExistsError:\n"
+        "    sys.exit(0)\n"
+        "sys.exit(1)\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code, str(files.root)],
+        timeout=30,
+        check=False,
+    )
+    assert done.returncode == 0
 
 
 def test_newline_only_owner_never_matches_an_empty_id(tmp_path: Path) -> None:

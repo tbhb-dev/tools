@@ -920,61 +920,68 @@ def main(
     if args.name is None:
         print(f"{prog}: run name is required", file=sys.stderr)
         return 1
-    files = None
     completed = None
-    holding = False
     previous = {s: signal.signal(s, interrupt) for s in process_group.INTERRUPTS}
     try:
         with process_group.defer_signals():
             files = _files(args.name)
             refuse_started(files)
             ownership.claim(files, claimed=claimed, expected=args.owner)
+        # Anything that fails before this lock is held, including taking the
+        # lock, belongs to a waiter and writes nothing: the records are the
+        # run that holds the lock.
         with (
             runfiles.locked(files.path("run.lock")),
             tempfile.TemporaryDirectory() as tmpdir,
         ):
-            # A signal between taking the lock and this line is recorded as
-            # a waiter's interrupt: it writes nothing, which never overwrites
-            # another run's files, and the run has not started either way.
-            holding = True
-            refuse_started(files)
-            run, text = _load(args, Path(tmpdir).resolve())
-            run.files.write("log", build_info.line() + "\n")
-            completed = execute(run, text, push_token, preflight_only=args.preflight)
-    except (
-        Invalid,
-        userconfig.ConfigError,
-        OSError,
-        ValueError,
-        RunInterruptedError,
-    ) as exc:
+            try:
+                refuse_started(files)
+                run, text = _load(args, Path(tmpdir).resolve())
+                run.files.write("log", build_info.line() + "\n")
+                completed = execute(
+                    run, text, push_token, preflight_only=args.preflight
+                )
+            except _REFUSALS as exc:
+                if completed is None and not isinstance(exc, RunExistsError):
+                    _record_failure(files, exc)
+                raise
+    except _REFUSALS as exc:
         if completed is not None:
             return completed
-        rc = 143 if isinstance(exc, RunInterruptedError) else 1
-        with process_group.ignore_signals():
-            # A waiter that was interrupted before it took the run lock must
-            # not write over the records of the run that holds it.
-            if (
-                files is not None
-                and not isinstance(exc, RunExistsError)
-                and (holding or not isinstance(exc, RunInterruptedError))
-            ):
-                try:
-                    reason = (
-                        "interrupted during load"
-                        if isinstance(exc, RunInterruptedError)
-                        else str(exc)
-                    )
-                    files.write("log", f"run refused: {reason}\n")
-                finally:
-                    files.write("rc", f"{rc}\n")
         print(f"{prog}: {exc}", file=sys.stderr)
-        return rc
+        return _failure_rc(exc)
     else:
         return completed
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)
+
+
+_REFUSALS = (
+    Invalid,
+    userconfig.ConfigError,
+    OSError,
+    ValueError,
+    RunInterruptedError,
+)
+
+
+def _failure_rc(exc: Exception) -> int:
+    return 143 if isinstance(exc, RunInterruptedError) else 1
+
+
+def _record_failure(files: runfiles.RunFiles, exc: Exception) -> None:
+    """Write the failed run's records while the caller holds the run lock."""
+    with process_group.ignore_signals():
+        try:
+            reason = (
+                "interrupted during load"
+                if isinstance(exc, RunInterruptedError)
+                else str(exc)
+            )
+            files.write("log", f"run refused: {reason}\n")
+        finally:
+            files.write("rc", f"{_failure_rc(exc)}\n")
 
 
 def _files(name: str) -> runfiles.RunFiles:

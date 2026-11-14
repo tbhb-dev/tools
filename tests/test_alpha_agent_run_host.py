@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import grp
 import hashlib
 import io
@@ -4270,6 +4271,57 @@ def test_main_with_request_refuses_an_existing_owner(
     assert "already has an owner" in capsys.readouterr().err
     assert not files.path("log").exists()
     assert not files.path("rc").exists()
+
+
+def test_lock_acquisition_failure_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    files.write("log", "original output\n")
+
+    def refuse(_path: Path) -> None:
+        raise OSError(errno.EIO, "lock unavailable")
+
+    monkeypatch.setattr(run_host.runfiles, "locked", refuse)
+    assert run_host.main(["example"], "run-host") == 1
+    assert "lock unavailable" in capsys.readouterr().err
+    assert files.path("log").read_text() == "original output\n"
+    assert not files.path("rc").exists()
+
+
+def test_failure_records_are_written_while_the_lock_is_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    held: list[bool] = []
+    state = {"held": False}
+    real = runfiles.locked
+
+    @contextmanager
+    def tracking(path: Path) -> Generator[None]:
+        with real(path):
+            state["held"] = True
+            try:
+                yield
+            finally:
+                state["held"] = False
+
+    real_write = runfiles.RunFiles.write
+
+    def write(self: runfiles.RunFiles, suffix: str, text: str) -> None:
+        held.append(state["held"])
+        real_write(self, suffix, text)
+
+    def load(_args: object, _tmpdir: Path) -> None:
+        os.kill(os.getpid(), signal.SIGHUP)
+
+    monkeypatch.setattr(run_host.runfiles, "locked", tracking)
+    monkeypatch.setattr(runfiles.RunFiles, "write", write)
+    monkeypatch.setattr(run_host, "_load", load)
+    assert run_host.main(["example"], "run-host") == 143
+    assert held == [True, True]
 
 
 def test_waiter_interrupted_before_the_lock_leaves_the_run_alone(
