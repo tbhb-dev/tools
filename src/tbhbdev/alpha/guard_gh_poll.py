@@ -128,6 +128,7 @@ ALLOWANCE_GRANT = Path.home() / ".local/state/tbhb/gh-poll-allowance.json"
 ALLOWANCE_COUNT = Path.home() / ".local/state/tbhb/gh-poll-allowance.count"
 PROTECTED = (ALLOWANCE_GRANT.name, ALLOWANCE_COUNT.name)
 STATE_DIR = ALLOWANCE_GRANT.parent
+STATE_FILES = (str(ALLOWANCE_GRANT).lower(), str(ALLOWANCE_COUNT).lower())
 STATE_MOVERS = {"rm", "mv", "cp", "rsync", "ditto", "ln"}
 PROTECT_REASON = (
     "The CI listing allowance's grant and count files are the operator's to "
@@ -493,10 +494,24 @@ def repeats(command: list[str]) -> bool:
 
 
 def names_state_dir(word: str) -> bool:
-    """Whether an absolute path word is the state directory or one of its parents."""
+    """Whether an absolute path word is, or globs to, the state directory or its files.
+
+    The volume ignores case, so every comparison is lower-cased. A word with a
+    glob or brace counts when its text before the first wildcard is a prefix
+    of a protected file's path, such as ``state/tbhb/*`` or ``gh-poll-*``.
+    """
     home = word.replace("${HOME}", "~").replace("$HOME", "~")
-    path = Path(os.path.normpath(Path(home).expanduser()))
-    return path.is_absolute() and path in (STATE_DIR, *STATE_DIR.parents)
+    text = str(Path(home).expanduser())
+    wild = re.search(r"[*?\[{]", text)
+    if wild:
+        prefix = text[: wild.start()].lower()
+        return prefix.startswith("/") and any(
+            name.startswith(prefix) for name in STATE_FILES
+        )
+    path = str(Path(os.path.normpath(text))).lower()
+    return path.startswith("/") and path in {
+        str(parent).lower() for parent in (STATE_DIR, *STATE_DIR.parents)
+    }
 
 
 def protected_words(command: list[str]) -> bool:
@@ -508,7 +523,7 @@ def protected_words(command: list[str]) -> bool:
     words = flattened(command)
     if any(name in word.lower() for word in words for name in PROTECTED):
         return True
-    moves = any(word.rpartition("/")[2] in STATE_MOVERS for word in words)
+    moves = any(word.rpartition("/")[2].lower() in STATE_MOVERS for word in words)
     return moves and any(names_state_dir(word) for word in words)
 
 
