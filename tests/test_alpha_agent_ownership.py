@@ -98,7 +98,7 @@ def test_owner_of_another_user_is_refused(
         ownership.claim(files, expected="run-id")
 
 
-def test_owner_longer_than_the_id_is_refused_for_multibyte_ids(
+def test_owner_longer_than_the_id_is_refused_for_non_ascii_ids(
     tmp_path: Path,
 ) -> None:
     files = run_files(tmp_path)
@@ -107,7 +107,7 @@ def test_owner_longer_than_the_id_is_refused_for_multibyte_ids(
         ownership.claim(files, expected="é")
 
 
-def test_multibyte_owner_id_is_accepted(tmp_path: Path) -> None:
+def test_non_ascii_owner_id_is_accepted(tmp_path: Path) -> None:
     files = run_files(tmp_path)
     regular(files.path("owner"), text="éé\n")
     ownership.claim(files, expected="éé")
