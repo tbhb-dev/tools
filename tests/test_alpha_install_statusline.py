@@ -4,13 +4,14 @@
 """Tests for the pinned ccstatusline install, with no network, home or bun."""
 
 import hashlib
+import io
 import json
 import os
 import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import pytest
 
@@ -607,7 +608,11 @@ def test_the_digest_hashes_a_name_with_undecodable_bytes(
 ) -> None:
     (tmp_path / "a.js").write_bytes(b"x")
     odd = b"a" + bytes([255]) + b"b"
-    monkeypatch.setattr(Path, "relative_to", lambda *_: Path(os.fsdecode(odd)))
+
+    def odd_name(*_: object) -> Path:
+        return Path(os.fsdecode(odd))
+
+    monkeypatch.setattr(Path, "relative_to", odd_name)
     expected = hashlib.sha256(odd + b"\0x\0").hexdigest()
     assert install.package_digest(tmp_path) == expected
 
@@ -628,19 +633,18 @@ def test_the_digest_asks_for_one_chunk_at_a_time(
 ) -> None:
     (tmp_path / "a.js").write_bytes(b"x" * 10)
     monkeypatch.setattr(install, "STATUSLINE_CHUNK", 4)
-    sizes: list[object] = []
-    real = Path.open
+    sizes: list[int | None] = []
 
-    def spy(self: Path, mode: str = "r", *args: object, **kwargs: object):  # noqa: ANN202
-        handle = real(self, mode, *args, **kwargs)  # type: ignore[call-overload]
-        read = handle.read
-
-        def counted(size: object = -1) -> bytes:
+    class Counted(io.BytesIO):
+        @override
+        def read(self, size: int | None = -1, /) -> bytes:
             sizes.append(size)
-            return read(size)
+            return super().read(size)
 
-        handle.read = counted  # type: ignore[method-assign]
-        return handle
+    def spy(self: Path, mode: str = "r") -> Counted:
+        assert mode == "rb"
+        with open(self, mode) as handle:  # noqa: PTH123  # Path.open is patched.
+            return Counted(handle.read())
 
     monkeypatch.setattr(Path, "open", spy)
     assert install.package_digest(tmp_path) is not None
