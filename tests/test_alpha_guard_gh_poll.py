@@ -987,6 +987,10 @@ def test_xargs_may_run_other_gh_commands() -> None:
     assert guard.inspect("echo 1 2 | xargs -n1 gh pr view")[0] is None
 
 
+def test_parallel_may_run_other_commands() -> None:
+    assert guard.inspect("parallel -j2 echo ::: a b")[0] is None
+
+
 @pytest.mark.parametrize(
     "prefix", ["> result ", ">result ", "2>/dev/null ", "2> err ", "< in ", ">> log "]
 )
