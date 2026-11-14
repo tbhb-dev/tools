@@ -926,7 +926,9 @@ def main(
         with process_group.defer_signals():
             files = _files(args.name)
             refuse_started(files)
-            ownership.claim(files, claimed=claimed)
+            # A tmux start has no request argument: the driver's transfer
+            # already wrote the owner file, so claiming it again would refuse.
+            ownership.claim(files, claimed=claimed or args.request is None)
         with (
             runfiles.locked(files.path("run.lock")),
             tempfile.TemporaryDirectory() as tmpdir,

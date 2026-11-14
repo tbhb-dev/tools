@@ -4225,8 +4225,42 @@ def test_main_claims_owner_before_loading(
         raise Invalid(message)
 
     monkeypatch.setattr(run_host, "_load", load)
-    assert run_host.main(["example"], "run-host", claimed=claimed) == 1
+    arguments = ["example"] if claimed else ["example", "request.json"]
+    assert run_host.main(arguments, "run-host", claimed=claimed) == 1
     assert calls == [True]
+
+
+def test_main_without_request_accepts_the_driver_written_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    files.write("owner", "run-id\n")
+    calls: list[bool] = []
+
+    def load(_args: object, _temporary: Path) -> tuple[run_host.Run, str]:
+        calls.append(True)
+        message = "test refusal"
+        raise Invalid(message)
+
+    monkeypatch.setattr(run_host, "_load", load)
+    assert run_host.main(["example", "--host", "h"], "run-host") == 1
+    assert calls == [True]
+    assert files.path("owner").read_text() == "run-id\n"
+
+
+def test_main_with_request_refuses_an_existing_owner(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    files.write("owner", "other\n")
+    assert run_host.main(["example", "request.json"], "run-host") == 1
+    assert "already has an owner" in capsys.readouterr().err
+    assert not files.path("log").exists()
+    assert not files.path("rc").exists()
 
 
 def test_checked_policy_audits_workspace_in_main_checkout(tmp_path: Path) -> None:
