@@ -2,9 +2,13 @@
 description: Interim agent commands, installation, and harness hooks.
 generated:
   - role: generated
-    harness: codex
-    model: openai:gpt-6
-    at: "2026-11-12T18:44:55Z"
+    harness: claude-code:2.1.322
+    model: anthropic:claude-sonnet-5-5
+    effort: medium
+    surface: cli
+    session: sha-256-64:a906bd79703e4c35
+    subagent: sha-256-64:871bb0bbccc99c95
+    at: "2026-11-14T00:20:30Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
