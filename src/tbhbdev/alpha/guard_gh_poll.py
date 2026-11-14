@@ -432,13 +432,18 @@ def denial(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
 
 
 def inspect(text: str) -> tuple[str | None, set[str]]:
-    """The deny reason for a shell command, or None, and the programs it runs.
+    """The deny reason for a shell command, or None, and the programs it runs."""
+    if any(name in text for name in PROTECTED):
+        return PROTECT_REASON, set()
+    return scan_commands(text)
+
+
+def scan_commands(text: str) -> tuple[str | None, set[str]]:
+    """Scan each command of a shell text for a denial.
 
     Each open loop collects the programs run from its keyword to its
     ``done``; an outer loop also collects its inner loops' programs.
     """
-    if any(name in text for name in PROTECTED):
-        return PROTECT_REASON, set()
     loops: list[set[str]] = []
     programs: set[str] = set()
     scanner = BodyScanner(text)
