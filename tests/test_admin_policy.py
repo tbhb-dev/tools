@@ -649,6 +649,12 @@ def test_unknown_settings(path: str) -> None:
             "organization_self_hosted_runners",
         ),
         (
+            "GET",
+            "/orgs/tbhb-dev/actions/runner-groups/7/repositories",
+            None,
+            "organization_self_hosted_runners",
+        ),
+        (
             "DELETE",
             "/orgs/tbhb-dev/actions/runner-groups/7/repositories/8",
             None,
