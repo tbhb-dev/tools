@@ -482,6 +482,29 @@ def preflight(run: Run) -> None:
         mark_host(run)
 
 
+def otel_config(endpoint: str) -> str:
+    """A Codex config with an `[otel]` table that exports traces and metrics.
+
+    ENDPOINT is a base URL, and each signal gets its own OTLP/HTTP path. The
+    table leaves out the log exporter on purpose: Codex logs tool arguments and
+    an output preview, so `log_user_prompt = false`, which guards only the
+    prompt text, wouldn't keep a credential or a file out of the export.
+    The table has no headers, so it holds no secret.
+    """
+    base = endpoint.removesuffix("/")
+
+    def exporter(signal_path: str) -> str:
+        url = json.dumps(f"{base}/v1/{signal_path}")
+        return f'{{ otlp-http = {{ endpoint = {url}, protocol = "binary" }} }}'
+
+    return (
+        "[otel]\n"
+        f"trace_exporter = {exporter('traces')}\n"
+        f"metrics_exporter = {exporter('metrics')}\n"
+        "log_user_prompt = false\n"
+    )
+
+
 def prepare_workspace(run: Run) -> Prepared:
     clone = Path(repo.clone_path(run.home, run.request.repo))
     paths = planned_paths(run)
@@ -511,6 +534,12 @@ def prepare_workspace(run: Run) -> Prepared:
             runfiles.private_dir(Path(paths.codex_home))
             source = runfiles.private_dir(run.home / ".codex") / "auth.json"
             before = credentials.auth_copy(source, Path(paths.codex_home) / "auth.json")
+        if run.settings.otel_endpoint is not None:
+            with worktree.preparation_step("codex config"):
+                runfiles.atomic(
+                    Path(paths.codex_home) / "config.toml",
+                    otel_config(run.settings.otel_endpoint),
+                )
     return Prepared(paths, delivery, before)
 
 
@@ -649,12 +678,26 @@ def log_argv(run: Run, command: tuple[str, ...]) -> None:
             run.files.write("log", argv_log_line(command) + "\n")
 
 
+def resource_attributes(run: Run) -> dict[str, str]:
+    """OpenTelemetry resource attributes that name the host and the account.
+
+    A run without a configured endpoint gets none, so it stays as it was.
+    """
+    if run.settings.otel_endpoint is None:
+        return {}
+    return {
+        "OTEL_RESOURCE_ATTRIBUTES": (
+            f"host.name={run.host.name},tbhb.account={run.request.account}"
+        )
+    }
+
+
 def run_harness(
     run: Run, prepared: Prepared, stack: ExitStack, *, preflight_only: bool = False
 ) -> int:
     paths = prepared.paths
     value, executable = checked_policy(run, paths)
-    env = value.env | prepared.delivery.env
+    env = value.env | prepared.delivery.env | resource_attributes(run)
     command = checked_harness_command(run, prepared, value, executable)
     if preflight_only:
         log_hook_tools(run, paths)

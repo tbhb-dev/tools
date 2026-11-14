@@ -155,6 +155,7 @@ class Settings:
     ssh_keepalive_seconds: int = 30
     ssh_keepalive_count_max: int = 3
     public_repos: tuple[str, ...] = ()
+    otel_endpoint: str | None = None
 
 
 @dataclass(frozen=True)

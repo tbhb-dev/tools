@@ -395,6 +395,98 @@ def test_prepare_uses_one_worktree_and_private_destinations(
         assert {p.name for p in copied_auth.parent.iterdir()} == {"auth.json"}
 
 
+def otel_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
+) -> run_host.Run:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        reason="example" if harness is Harness.CLAUDE else None,
+    )
+    settings = dataclasses.replace(
+        run.settings, otel_endpoint="https://otlp.example.net:4318"
+    )
+    run = dataclasses.replace(run, settings=settings)
+    runfiles.private_dir(run.home / ".codex")
+    monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
+    monkeypatch.setattr(run_host.worktree, "create", constant(run.home / "workspace"))
+    monkeypatch.setattr(credentials, "auth_copy", constant(None))
+    return run
+
+
+def test_codex_run_config_holds_the_otel_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
+    result = run_host.prepare_workspace(run)
+    config_path = Path(result.paths.codex_home) / "config.toml"
+    # The macOS filesystem ignores case, so name the file as written.
+    assert "config.toml" in [p.name for p in config_path.parent.iterdir()]
+    assert tomllib.loads(config_path.read_text()) == {
+        "otel": {
+            "trace_exporter": {
+                "otlp-http": {
+                    "endpoint": "https://otlp.example.net:4318/v1/traces",
+                    "protocol": "binary",
+                }
+            },
+            "metrics_exporter": {
+                "otlp-http": {
+                    "endpoint": "https://otlp.example.net:4318/v1/metrics",
+                    "protocol": "binary",
+                }
+            },
+            "log_user_prompt": False,
+        }
+    }
+    assert "headers" not in config_path.read_text()
+    assert config_path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    "endpoint", ["https://otlp.example.net/", "https://otlp.example.net"]
+)
+def test_otel_config_derives_signal_paths_from_the_base(endpoint: str) -> None:
+    table = tomllib.loads(run_host.otel_config(endpoint))["otel"]
+    assert table["trace_exporter"]["otlp-http"]["endpoint"] == (
+        "https://otlp.example.net/v1/traces"
+    )
+    assert table["metrics_exporter"]["otlp-http"]["endpoint"] == (
+        "https://otlp.example.net/v1/metrics"
+    )
+
+
+def test_codex_run_without_an_endpoint_writes_no_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
+    run = dataclasses.replace(
+        run, settings=dataclasses.replace(run.settings, otel_endpoint=None)
+    )
+    result = run_host.prepare_workspace(run)
+    assert not (Path(result.paths.codex_home) / "config.toml").exists()
+
+
+def test_claude_run_writes_no_codex_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = otel_run(tmp_path, monkeypatch, Harness.CLAUDE)
+    result = run_host.prepare_workspace(run)
+    assert not (Path(result.paths.codex_home) / "config.toml").exists()
+
+
+@pytest.mark.parametrize("error", [OSError, ValueError])
+def test_codex_config_failure_names_its_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
+    monkeypatch.setattr(runfiles, "atomic", partial(preparation_failure, error))
+    with pytest.raises(Invalid) as caught:
+        run_host.prepare_workspace(run)
+    assert str(caught.value) == "run preparation failed at codex config"
+
+
 def test_build_preparation_has_the_run_socket(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4752,3 +4844,24 @@ def test_config_check_protects_the_configured_startup_directory(
             Invalid, match=r"protected host path .* overlaps write root"
         ):
             run_host.check_config(configured)
+
+
+def test_resource_attributes_name_host_and_account(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings, otel_endpoint="https://otlp.example.net"
+        ),
+    )
+    assert run_host.resource_attributes(run) == {
+        "OTEL_RESOURCE_ATTRIBUTES": (
+            f"host.name={run.host.name},tbhb.account={run.request.account}"
+        )
+    }
+
+
+def test_resource_attributes_need_an_endpoint(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    assert run.settings.otel_endpoint is None
+    assert run_host.resource_attributes(run) == {}

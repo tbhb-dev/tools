@@ -478,11 +478,12 @@ def test_probe_token_environment_only_reaches_the_claude_calls(
                     if key == credentials.CLAUDE_TOKEN_ENV
                 }
             )
-            assert sent == (
+            expected = (
                 {credentials.CLAUDE_TOKEN_ENV: fingerprint(FAKE_TOKEN)}
                 if carried
                 else {}
             )
+            assert sent == expected
             assert not [i for i, arg in enumerate(call.command) if FAKE_TOKEN in arg]
         assert FAKE_TOKEN not in repr(calls)
         captured = capsys.readouterr()
@@ -509,7 +510,8 @@ def test_probe_token_environment_strips_and_skips_blank(
         if value.strip() and harness is Harness.CLAUDE
         else {}
     )
-    assert fingerprints(live.probe_token_env(harness)) == expected
+    actual = fingerprints(live.probe_token_env(harness))
+    assert actual == expected
 
 
 @pytest.mark.parametrize("with_environment", [True, False], ids=["env", "no-env"])
