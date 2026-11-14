@@ -892,3 +892,116 @@ def test_main_allows_other_edits(
     monkeypatch.setattr(guard, "read_hook_stdin", lambda: payload)
     assert guard.main() == 0
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "echo x > ~/.local/state/tbhb/GH-POLL-ALLOWANCE.JSON",
+        "rm Gh-Poll-Allowance.Count",
+    ],
+)
+def test_shell_commands_naming_the_files_in_another_case_are_denied(
+    template: str,
+) -> None:
+    assert guard.inspect(template)[0] == guard.PROTECT_REASON
+
+
+@pytest.mark.parametrize("name", ["GH-POLL-ALLOWANCE.JSON", "Gh-Poll-Allowance.Count"])
+def test_main_denies_an_edit_to_the_files_in_another_case(
+    name: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = {"tool_input": {"file_path": f"/home/x/.local/state/tbhb/{name}"}}
+    monkeypatch.setattr(guard, "read_hook_stdin", lambda: payload)
+    assert guard.main() == 0
+    assert guard.PROTECT_REASON in capsys.readouterr().out
+
+
+def test_main_denies_an_edit_through_a_link(
+    grant_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    symlink = grant_file.parent / "notes.txt"
+    symlink.symlink_to(grant_file)
+    hardlink = grant_file.parent / "other.txt"
+    hardlink.hardlink_to(grant_file)
+    for path in (symlink, hardlink):
+        payload = {"tool_input": {"file_path": str(path)}}
+        monkeypatch.setattr(guard, "read_hook_stdin", lambda p=payload: p)
+        assert guard.main() == 0
+        assert guard.PROTECT_REASON in capsys.readouterr().out
+
+
+def test_protects_ignores_an_empty_path_and_a_missing_file() -> None:
+    assert not guard.protects("")
+    assert not guard.protects("/nonexistent/notes.md")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"printf 'a\\nb\\n' | xargs -n1 sh -c '{listing('example/one')}'",
+        f"xargs -n 1 {listing('example/one')}",
+        f"parallel {listing('example/one')}",
+        f"seq 2 | /usr/bin/xargs -I{{}} {listing('example/one')}",
+    ],
+)
+def test_xargs_and_parallel_cannot_repeat_a_listing(
+    command: str, grant_file: Path
+) -> None:
+    assert guard.inspect(command)[0] == guard.REPEAT_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+def test_xargs_may_run_other_gh_commands() -> None:
+    assert guard.inspect("echo 1 2 | xargs -n1 gh pr view")[0] is None
+
+
+@pytest.mark.parametrize(
+    "prefix", ["> result ", ">result ", "2>/dev/null ", "2> err ", "< in ", ">> log "]
+)
+def test_a_leading_redirect_still_spends_the_allowance(
+    prefix: str, grant_file: Path
+) -> None:
+    assert guard.inspect(prefix + listing(REPOS[0]))[0] is None
+    count = json.loads((grant_file.parent / "allowance.count").read_text())
+    assert count == {REPOS[0]: 1}
+    assert guard.inspect(prefix + listing(REPOS[0]))[0] == guard.POLL_REASON
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"repos": {"example/one": 1}, "expires": "2999-01-01"}',
+        '{"repos": ["example/one", 3], "expires": "2999-01-01"}',
+        '{"repos": "example/one", "expires": "2999-01-01"}',
+        '{"repos": ["", "example/one/"], "expires": "2999-01-01"}',
+        '{"repos": ["."], "expires": "2999-01-01"}',
+        '{"repos": ["../.."], "expires": "2999-01-01"}',
+        '{"repos": ["./.", "example/.."], "expires": "2999-01-01"}',
+        '{"repos": ["exämple/one"], "expires": "2999-01-01"}',
+        '{"repos": ["example/one", "x"], "expires": "2999-01-01"}',
+    ],
+)
+def test_allowance_refuses_a_grant_with_a_malformed_repository_list(
+    text: str, grant_file: Path
+) -> None:
+    grant_file.write_text(text)
+    assert guard.inspect(listing("example/one"))[0] == guard.POLL_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+def test_allowance_counts_case_variants_of_a_repository_once(
+    grant_file: Path,
+) -> None:
+    assert guard.inspect(listing("example/one"))[0] is None
+    for variant in ("Example/One", "EXAMPLE/ONE", "example/One"):
+        assert guard.inspect(listing(variant))[0] == guard.POLL_REASON
+    count = json.loads((grant_file.parent / "allowance.count").read_text())
+    assert count == {"example/one": 1}
+
+
+def test_allowance_matches_a_grant_in_another_case(grant_file: Path) -> None:
+    grant_file.write_text('{"repos": ["Example/One"], "expires": "2999-01-01"}')
+    assert guard.inspect(listing("example/one"))[0] is None

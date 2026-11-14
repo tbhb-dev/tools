@@ -129,10 +129,20 @@ PROTECT_REASON = (
     "The CI listing allowance's grant and count files are the operator's to "
     "write. Ask the coordinator."
 )
+REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+DOTS = {".", ".."}
+REPEATERS = {"xargs", "parallel"}
+LISTING = re.compile(r"\bgh\b.*\brun\b.*\blist\b")
+REDIRECT = re.compile(r"\d*(?:>>?|<|>&|&>)")
+REPEAT_REASON = (
+    "Don't run a CI listing through xargs or parallel; each repeat is a separate "
+    "call. Ask the coordinator."
+)
 ALLOWANCE_FIELDS = (
     "databaseId,event,conclusion,createdAt,startedAt,updatedAt,"
     "workflowName,attempt,headBranch"
 )
+ALLOWANCE_TAIL = ["--limit", "100", "--json", ALLOWANCE_FIELDS]
 # The token's variable, split because the repository's gitleaks config flags
 # the name written out in full.
 TOKEN = "OP_SERVICE_" + "ACCOUNT_TOKEN"
@@ -218,25 +228,44 @@ def bulk_api(args: list[str]) -> bool:
     return False
 
 
+def granted_repos(grant: object) -> set[str]:
+    """The lowercase repositories a grant lists; ValueError when it is malformed."""
+    repos = grant.get("repos") if isinstance(grant, dict) else None
+    if not isinstance(repos, list) or not all(
+        isinstance(repo, str)
+        and REPO.fullmatch(repo)
+        and not DOTS & set(repo.split("/"))
+        for repo in repos
+    ):
+        message = "malformed grant"
+        raise ValueError(message)
+    return {repo.lower() for repo in repos}
+
+
+def allowed_call(args: list[str], repos: set[str]) -> bool:
+    """Whether the words are exactly the allowed listing for a granted repository."""
+    return (
+        len(args) == len(ALLOWANCE_TAIL) + 2
+        and args[0] == "-R"
+        and args[1].lower() in repos
+        and args[2:] == ALLOWANCE_TAIL
+    )
+
+
 def spend_allowance(args: list[str]) -> bool:
     """Whether ``gh run list``'s words after ``list`` use the granted allowance.
 
     The words must be exactly ``-R OWNER/REPO --limit 100 --json FIELDS`` for a
-    repository the grant file lists. A match spends that repository's one call,
-    recorded in the count file under a file lock. A missing, expired or
-    malformed grant, a repository already spent, and an unreadable or
-    unwritable count refuse it. The caller passes only a call with no global
-    flag before ``run``.
+    repository the grant file lists, whatever the repository name's case. A
+    match spends that repository's one call, recorded in the count file under
+    a file lock. A missing, expired or malformed grant, a repository already
+    spent, and an unreadable or unwritable count refuse it. The caller passes
+    only a call with no global flag before ``run``.
     """
     try:
         grant = json.loads(ALLOWANCE_GRANT.read_text())
-        repos = grant["repos"]
-        shapes = [
-            ["-R", repo, "--limit", "100", "--json", ALLOWANCE_FIELDS] for repo in repos
-        ]
-        if (
-            args not in shapes
-            or datetime.now().astimezone().date() > date.fromisoformat(grant["expires"])
+        if not allowed_call(args, granted_repos(grant)) or (
+            datetime.now().astimezone().date() > date.fromisoformat(grant["expires"])
         ):
             return False
         ALLOWANCE_COUNT.parent.mkdir(parents=True, exist_ok=True)
@@ -248,9 +277,10 @@ def spend_allowance(args: list[str]) -> bool:
                 if ALLOWANCE_COUNT.exists()
                 else {}
             )
-            if not isinstance(spent, dict) or args[1] in spent:
+            key = args[1].lower()
+            if not isinstance(spent, dict) or key in spent:
                 return False
-            spent[args[1]] = 1
+            spent[key] = 1
             ALLOWANCE_COUNT.write_text(json.dumps(spent) + "\n")
     except OSError, ValueError, KeyError, TypeError:
         return False
@@ -362,7 +392,9 @@ def unwrapped(words: list[str]) -> list[str] | None:
         wrapper = program_of(rest)
         if word == f"{TOKEN}=":
             return None
-        if word in KEYWORDS or ASSIGNMENT.match(word):
+        if REDIRECT.match(word):
+            rest = rest[1 if REDIRECT.fullmatch(word) is None else 2 :]
+        elif word in KEYWORDS or ASSIGNMENT.match(word):
             rest = rest[1:]
         elif wrapper == "env":
             rest = env_rest(rest[1:])
@@ -411,6 +443,12 @@ def inner_script(words: list[str], body: str | None) -> str | None:
     return None
 
 
+def repeats(command: list[str]) -> bool:
+    """Whether xargs or parallel would run a ``gh run list`` more than once."""
+    names = {word.rpartition("/")[2] for word in command}
+    return bool(REPEATERS & names) and bool(LISTING.search(" ".join(command)))
+
+
 def denial(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
     """One simple command's deny reason, and the programs it runs."""
     words = unwrapped(command)
@@ -433,7 +471,7 @@ def denial(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
 
 def inspect(text: str) -> tuple[str | None, set[str]]:
     """The deny reason for a shell command, or None, and the programs it runs."""
-    if any(name in text for name in PROTECTED):
+    if any(name in text.lower() for name in PROTECTED):
         return PROTECT_REASON, set()
     return scan_commands(text)
 
@@ -450,7 +488,11 @@ def scan_commands(text: str) -> tuple[str | None, set[str]]:
     for index, command in enumerate(scanner.run()):
         if opens_loop(command):
             loops.append(set())
-        message, seen = denial(command, scanner.bodies.get(index))
+        message, seen = (
+            (REPEAT_REASON, set())
+            if repeats(command)
+            else denial(command, scanner.bodies.get(index))
+        )
         if message:
             return message, programs
         programs |= seen
@@ -472,13 +514,27 @@ def edited_file(data: dict[str, object]) -> str:
     return path if isinstance(path, str) else ""
 
 
+def protects(path: str) -> bool:
+    """Whether an edit target is a protected file, by name in any case or by link."""
+    if not path:
+        return False
+    names = {Path(path).name.lower(), Path(path).resolve().name.lower()}
+    try:
+        linked = any(
+            Path(path).samefile(target) for target in (ALLOWANCE_GRANT, ALLOWANCE_COUNT)
+        )
+    except OSError:  # the target or the protected file doesn't exist
+        linked = False
+    return linked or bool(names & set(PROTECTED))
+
+
 def main() -> int:
     """Read the payload on stdin; print a deny decision for a blocked call."""
     try:
         data = read_hook_stdin()
         text, antigravity = command_of(data)
         message = inspect(text)[0]
-        if Path(edited_file(data)).name in PROTECTED:
+        if protects(edited_file(data)):
             message = PROTECT_REASON
         if message:
             print(json.dumps(decision(message, antigravity=antigravity)))
