@@ -30,8 +30,11 @@ included, an empty one or a failed read, gets the full private config.
 There is no public-only fallback. A missing or unreadable private config, one
 without the canary rule, or a missing .gitleaks.toml stops the command, and so
 does any finding or gitleaks error. A finding is reported by its rule ID and
-line only: gitleaks redacts its JSON report, and nothing else it prints about a
-finding is passed on.
+line only, with the file for a scan of staged changes: gitleaks redacts its
+JSON report, and nothing else it prints about a finding is passed on.
+
+``tbhbdev alpha pre-commit-scan`` scans a commit's staged changes the same way,
+with ``STAGED`` in place of ``STDIN`` (see ``tbhbdev.alpha.pre_commit_scan``).
 """
 
 import json
@@ -50,6 +53,11 @@ from tbhbdev.host import CANARY, GITLEAKS_CANARY, GITLEAKS_EXTENDS, GITLEAKS_FIL
 # The remedy for a missing private config: the host's provisioning installs it.
 FETCH = "Install it with the host's provisioning tooling."
 
+
+# What gitleaks scans: the text on stdin, or the staged changes of the work
+# tree it runs in, which `git diff --staged` reads from the index.
+STDIN = ("stdin",)
+STAGED = ("git", "--pre-commit", "--staged")
 
 # The only visibility that skips the name rules. Anything else, even a
 # lower-case "private", gets the full private config.
@@ -80,10 +88,11 @@ def private_config() -> Path:
     return Path.home() / GITLEAKS_FILE
 
 
-def findings(report: str) -> list[tuple[int, str]] | None:
-    """Each finding's line and rule ID from gitleaks' JSON report, or None.
+def findings(report: str) -> list[tuple[str, int, str]] | None:
+    """Each finding's file, line and rule ID from gitleaks' JSON report, or None.
 
-    They are sorted, since gitleaks reports them in no fixed order.
+    They are sorted, since gitleaks reports them in no fixed order. The file is
+    empty for text scanned on stdin.
 
     None means the report is not a JSON list, so gitleaks did not scan.
     """
@@ -94,7 +103,15 @@ def findings(report: str) -> list[tuple[int, str]] | None:
     if not isinstance(data, list):
         return None
     entries = cast("list[dict[str, int | str]]", data)  # pragma: no mutate
-    return sorted((int(entry["StartLine"]), str(entry["RuleID"])) for entry in entries)
+    return sorted(
+        (str(entry.get("File", "")), int(entry["StartLine"]), str(entry["RuleID"]))
+        for entry in entries
+    )
+
+
+def place(path: str, line: int) -> str:
+    """Where a finding is: ``on line N`` for stdin, ``in PATH:N`` for a file."""
+    return f"in {path}:{line}" if path else f"on line {line}"
 
 
 def is_name_rule(rule: dict[str, object]) -> bool:
@@ -117,12 +134,18 @@ def without_name_rules(private: str) -> str | None:
     return tomlkit.dumps(data)
 
 
-def run_gitleaks(
-    text: str, what: str, config: Path, *, root: Path, gitleaks: str
+def run_gitleaks(  # noqa: PLR0913 -- the scan inputs, keyword-only past two
+    text: str,
+    what: str,
+    config: Path,
+    *,
+    root: Path,
+    gitleaks: str,
+    source: tuple[str, ...] = STDIN,
 ) -> None:
-    """Refuse text that gitleaks flags under a config, or when it fails."""
+    """Refuse what gitleaks flags under a config, or when it fails."""
     argv = [
-        gitleaks, "stdin", "--redact", "--no-banner", "--config", str(config),
+        gitleaks, *source, "--redact", "--no-banner", "--config", str(config),
         "--report-format", "json", "--report-path", "-",
     ]  # fmt: skip
     # Argv is the found gitleaks and fixed flags; text goes on stdin. NO_COLOR
@@ -138,7 +161,9 @@ def run_gitleaks(
     )
     found = findings(done.stdout)
     if found:
-        where = "; ".join(f"rule {rule} on line {line}" for line, rule in found)
+        where = "; ".join(
+            f"rule {rule} {place(path, line)}" for path, line, rule in found
+        )
         message = f"refusing {what}: gitleaks finds a secret: {where}"
         raise SystemExit(message)
     if done.returncode != 0 or found is None:
@@ -150,11 +175,19 @@ def run_gitleaks(
         raise SystemExit(message)
 
 
-def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) -> None:
+def scan(  # noqa: PLR0913 -- the scan inputs, keyword-only past two
+    text: str,
+    what: str,
+    *,
+    root: Path,
+    gitleaks: str,
+    visibility: str,
+    source: tuple[str, ...] = STDIN,
+) -> None:
     """Refuse text that gitleaks flags under the private config.
 
     Args:
-        text: The text to scan.
+        text: The text to scan, sent on stdin; ignored for ``STAGED``.
         what: What the text is, for the refusal message.
         root: The repository root, which holds .gitleaks.toml.
         gitleaks: The gitleaks executable.
@@ -162,6 +195,8 @@ def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) ->
             text is posted to, not the working directory's. Only
             ``PRIVATE`` skips the name rules; anything else, including an
             empty value, scans under the full private config.
+        source: ``STDIN`` for the text, or ``STAGED`` for the staged changes of
+            the work tree at ``root``.
 
     Raises:
         SystemExit: The private config or .gitleaks.toml is missing or wrong,
@@ -189,11 +224,11 @@ def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) ->
         raise SystemExit(message)
     reduced = without_name_rules(private) if visibility == PRIVATE else None
     if reduced is None:
-        run_gitleaks(text, what, config, root=root, gitleaks=gitleaks)
+        run_gitleaks(text, what, config, root=root, gitleaks=gitleaks, source=source)
         return
     with tempfile.TemporaryDirectory() as directory:  # mode 0700
         copy = Path(directory) / "private.toml"
         copy.touch()
         copy.chmod(0o600)  # touch's mode is cut by the umask, chmod's is not
         copy.write_text(reduced)
-        run_gitleaks(text, what, copy, root=root, gitleaks=gitleaks)
+        run_gitleaks(text, what, copy, root=root, gitleaks=gitleaks, source=source)

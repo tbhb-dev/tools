@@ -180,7 +180,7 @@ def test_gitleaks_runs_from_the_root_with_the_private_config(
 
 def test_findings_reads_rule_and_line() -> None:
     report = '[{"RuleID": "r", "StartLine": 4, "Secret": "REDACTED"}]'
-    assert secret_scan.findings(report) == [(4, "r")]
+    assert secret_scan.findings(report) == [("", 4, "r")]
     assert secret_scan.findings("[]") == []
     assert secret_scan.findings("{}") is None
     assert secret_scan.findings("") is None
