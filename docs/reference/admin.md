@@ -27,7 +27,7 @@ Both commands accept `--app` (default `tbhb-dev-admin`), `--app-id` (default `57
 
 ## Policy and exits
 
-The allowlist covers settings, protection, Actions secrets and variables, environments, self-hosted runners and runner groups, webhooks, custom properties, contents, and pull requests. Unknown endpoints fail closed. The policy only passes the `tbhb-dev` owner, and it never approves or merges a pull request. Protection writes pass only when they activate a ruleset with `{"enforcement":"active"}` or enable required signatures or administrator enforcement. Other protection writes fail closed because the tool can't classify them without previous state. Security analysis settings fail closed on all repositories. Settings updates accept explicit field lists.
+The allowlist covers settings, protection, Actions secrets and variables, environments, self-hosted runners and runner groups, custom properties, contents, and pull requests. Unknown endpoints fail closed. The policy only passes the `tbhb-dev` owner, and it never approves or merges a pull request. Protection writes pass only when they activate a ruleset with `{"enforcement":"active"}` or enable required signatures or administrator enforcement. Other protection writes fail closed because the tool can't classify them without previous state. Security analysis settings fail closed on all repositories. Settings updates accept explicit field lists.
 
 Path normalization folds names to lower case to check the policy and decodes percent escapes once. The request sends the path with its original case, which keeps a contents path such as `README.md` intact. It drops query strings and strips trailing slashes before checking for routing ambiguity. GitHub receives the path alone. Encoded separators, repeated slashes, dot segments, fragments, and absolute URLs fail closed. The request uses that normalized path. Write parameters belong in JSON bodies. HTTP calls have a timeout and a 1 MiB response cap. Redirects fail closed.
 
@@ -35,13 +35,13 @@ A refusal exits 3 with its code on standard error. Usage errors exit 2. HTTP err
 
 | Code | Meaning |
 | --- | --- |
-| `protection_weakening` | Protection deletion, bypass actors, an unclassified protection write, or an environment delete or change that drops reviewers, the wait timer, a deployment branch policy, or self-review prevention |
-| `broad_visibility` | An organization secret or variable whose visibility isn't `selected` |
+| `protection_weakening` | Protection deletion, bypass actors, an unclassified protection write, or an environment delete or change that drops reviewers, the wait timer, a deployment branch policy, or self-review prevention, or a repository `default_branch` or `allow_auto_merge: true` change |
+| `broad_visibility` | An organization secret, variable, or runner group whose visibility isn't `selected`, or a new runner group that omits it |
 | `membership_change` | Membership, invitations, collaborators, or role changes |
 | `repository_removal` | Repository deletion, transfer, or archiving |
 | `paid_feature` | Security analysis, larger runners, Codespaces, Copilot, billing, or spending |
-| `public_visibility` | Public visibility or `private: false` |
-| `approval_or_merge` | A `POST` to a pull request's `reviews`, or any request to its `merge` endpoint |
+| `public_visibility` | Public visibility, `private: false`, or a new organization repository that omits `private: true` or `visibility: private` |
+| `approval_or_merge` | A write to a pull request's `reviews`, or any request to its `merge` endpoint |
 | `foreign_owner` | A repository or organization path whose owner isn't `tbhb-dev` |
 | `ambiguous_path` | Routing ambiguity or an invalid identifier |
 | `invalid_method` | Method outside `GET`, `POST`, `PUT`, `PATCH`, `DELETE` |

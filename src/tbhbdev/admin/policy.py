@@ -13,7 +13,11 @@ OWNED = re.compile(rf"/(?:repos|orgs)/({PART})(?:/|$)")
 REVIEW = re.compile(rf"{REPO}/pulls/[0-9]+/reviews(?:/|$)")
 MERGE = re.compile(rf"{REPO}/pulls/[0-9]+/merge")
 ENVIRONMENT = re.compile(rf"{REPO}/environments/{PART}")
-SHARED = re.compile(rf"{ORG}/actions/(?:secrets|variables)/{PART}")
+SHARED = re.compile(
+    rf"{ORG}/actions/(?:secrets/{PART}|variables(?:/{PART})?|runner-groups(?:/[0-9]+)?)"
+)
+ORG_REPOS = re.compile(rf"{ORG}/repos")
+REPO_ONLY = re.compile(REPO)
 # The mutant that swaps a-z for A-Z survives: IGNORECASE makes them one set.
 ROUTABLE = re.compile(r"/[a-z0-9_./-]+", re.IGNORECASE | re.ASCII)  # pragma: no mutate
 PAID = frozenset(
@@ -46,7 +50,6 @@ SETTINGS = frozenset(
         "has_projects",
         "has_wiki",
         "is_template",
-        "default_branch",
         "allow_squash_merge",
         "allow_merge_commit",
         "allow_rebase_merge",
@@ -90,8 +93,7 @@ FAMILIES = (
         rf"{ORG}/actions/runner-groups(?:/[0-9]+)?(?:/(?:repositories|runners)(?:/[0-9]+)?)?",
         "organization_self_hosted_runners",
     ),
-    (rf"{REPO}/hooks(?:/[0-9]+)?(?:/(?:pings|tests))?", "repository_hooks"),
-    (rf"{ORG}/hooks(?:/[0-9]+)?(?:/pings)?", "organization_hooks"),
+    # Webhook endpoints are absent until a rule can check config.url (egress).
     (rf"{REPO}/properties/values", "custom_properties"),
     (
         rf"{ORG}/properties/(?:schema(?:/{PART})?|values)",
@@ -163,6 +165,22 @@ def protection(method: str, path: str, body: dict[str, object]) -> bool:
     )
 
 
+def visibility_refusal(method: str, path: str, body: dict[str, object]) -> bool:
+    """Public repositories are refused, and a new one must say it is private."""
+    visibility = str(body.get("visibility")).lower()
+    if visibility == "public" or body.get("private") is False:
+        return True
+    explicit = body.get("private") is True or visibility == "private"
+    return method == "POST" and bool(ORG_REPOS.fullmatch(path)) and not explicit
+
+
+def unsafe_setting(path: str, body: dict[str, object]) -> bool:
+    """A new default branch or auto-merge would route around the merge flow."""
+    return bool(REPO_ONLY.fullmatch(path)) and (
+        "default_branch" in body or body.get("allow_auto_merge") is True
+    )
+
+
 def write_refusal(method: str, path: str, body: dict[str, object]) -> str:
     if set(path.split("/")) & MEMBERSHIP or fields(body) & {
         "role",
@@ -177,10 +195,11 @@ def write_refusal(method: str, path: str, body: dict[str, object]) -> str:
         return "repository_removal"
     if re.fullmatch(rf"{REPO}/transfer", path):
         return "repository_removal"
-    if body.get("visibility") == "public" or body.get("private") is False:
+    if visibility_refusal(method, path, body):
         return "public_visibility"
-    if ("/rulesets" in path or "/protection" in path) and not protection(
-        method, path, body
+    if unsafe_setting(path, body) or (
+        ("/rulesets" in path or "/protection" in path)
+        and not protection(method, path, body)
     ):
         return "protection_weakening"
     return ""
@@ -199,9 +218,13 @@ def deployment_refusal(method: str, path: str, body: dict[str, object]) -> str:
         or body.get("prevent_self_review") is False
     ):
         return "protection_weakening"
-    # A default of "SELECTED" survives: .lower() makes its case moot.
-    visibility = str(body.get("visibility", "selected")).lower()  # pragma: no mutate
-    if SHARED.fullmatch(path) and visibility != "selected":
+    if not SHARED.fullmatch(path):
+        return ""
+    # A new runner group defaults to every repository, so it must say selected.
+    created = method == "POST" and path.endswith("/runner-groups")
+    if "visibility" not in body and not created:
+        return ""
+    if str(body.get("visibility")).lower() != "selected":
         return "broad_visibility"
     return ""
 
@@ -211,7 +234,7 @@ def explicit_refusal(method: str, path: str, body: dict[str, object]) -> str:
         return "paid_feature"
     if fields(body) & {"actions_spending_limit", "spending_limit", "use_static_ip"}:
         return "paid_feature"
-    if MERGE.fullmatch(path) or (method == "POST" and REVIEW.match(path)):
+    if MERGE.fullmatch(path) or (method != "GET" and REVIEW.match(path)):
         return "approval_or_merge"
     if method == "GET":
         return ""

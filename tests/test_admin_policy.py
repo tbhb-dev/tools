@@ -81,6 +81,53 @@ REFUSALS: list[tuple[str, str, str, object]] = [
         {"visibility": "all"},
     ),
     (
+        "protection_weakening",
+        "PATCH",
+        "/repos/tbhb-dev/widget",
+        {"default_branch": "x"},
+    ),
+    (
+        "protection_weakening",
+        "PATCH",
+        "/repos/tbhb-dev/widget",
+        {"allow_auto_merge": True},
+    ),
+    ("approval_or_merge", "PUT", "/repos/tbhb-dev/widget/pulls/7/reviews/8", {}),
+    ("approval_or_merge", "PATCH", "/repos/tbhb-dev/widget/pulls/7/reviews/8", {}),
+    ("approval_or_merge", "DELETE", "/repos/tbhb-dev/widget/pulls/7/reviews/8", None),
+    (
+        "approval_or_merge",
+        "PUT",
+        "/repos/tbhb-dev/widget/pulls/7/reviews/8/dismissals",
+        {},
+    ),
+    ("public_visibility", "POST", "/orgs/tbhb-dev/repos", {"name": "x"}),
+    ("public_visibility", "POST", "/orgs/tbhb-dev/repos", {"name": "x", "private": 1}),
+    ("public_visibility", "PATCH", "/repos/tbhb-dev/widget", {"visibility": "Public"}),
+    ("endpoint_denied", "POST", "/repos/tbhb-dev/widget/hooks", {}),
+    ("endpoint_denied", "GET", "/repos/tbhb-dev/widget/hooks/7/pings", None),
+    ("endpoint_denied", "POST", "/orgs/tbhb-dev/hooks", {}),
+    ("endpoint_denied", "PATCH", "/orgs/tbhb-dev/hooks/7", {}),
+    ("broad_visibility", "POST", "/orgs/tbhb-dev/actions/runner-groups", {"name": "g"}),
+    (
+        "broad_visibility",
+        "POST",
+        "/orgs/tbhb-dev/actions/runner-groups",
+        {"name": "g", "visibility": "all"},
+    ),
+    (
+        "broad_visibility",
+        "PATCH",
+        "/orgs/tbhb-dev/actions/runner-groups/7",
+        {"visibility": "ALL"},
+    ),
+    (
+        "broad_visibility",
+        "POST",
+        "/orgs/tbhb-dev/actions/variables",
+        {"name": "n", "value": "v", "visibility": "all"},
+    ),
+    (
         "approval_or_merge",
         "POST",
         "/repos/tbhb-dev/widget/pulls/7/reviews",
@@ -356,8 +403,42 @@ def test_unknown_settings(path: str) -> None:
             None,
             "organization_self_hosted_runners",
         ),
-        ("POST", "/repos/tbhb-dev/widget/hooks", {}, "repository_hooks"),
-        ("POST", "/orgs/tbhb-dev/hooks", {}, "organization_hooks"),
+        (
+            "POST",
+            "/orgs/tbhb-dev/repos",
+            {"name": "widget", "visibility": "PRIVATE"},
+            "administration",
+        ),
+        (
+            "PATCH",
+            "/repos/tbhb-dev/widget",
+            {"allow_auto_merge": False, "description": "d"},
+            "administration",
+        ),
+        (
+            "POST",
+            "/orgs/tbhb-dev/actions/runner-groups",
+            {"name": "g", "visibility": "selected"},
+            "organization_self_hosted_runners",
+        ),
+        (
+            "PATCH",
+            "/orgs/tbhb-dev/actions/runner-groups/7",
+            {"name": "g"},
+            "organization_self_hosted_runners",
+        ),
+        (
+            "POST",
+            "/orgs/tbhb-dev/actions/variables",
+            {"name": "n", "value": "v"},
+            "organization_variables",
+        ),
+        (
+            "POST",
+            "/orgs/tbhb-dev/actions/variables",
+            {"name": "n", "value": "v", "visibility": "selected"},
+            "organization_variables",
+        ),
         ("PATCH", "/repos/tbhb-dev/widget/properties/values", {}, "custom_properties"),
         (
             "PUT",
@@ -443,7 +524,9 @@ def test_get_settings_has_no_write_field_restriction(path: str) -> None:
 
 def test_complete_setting_lists() -> None:
     repository: dict[str, object] = dict.fromkeys(policy.SETTINGS, True)
-    repository.update(archived=False, private=True, visibility="private")
+    repository.update(
+        allow_auto_merge=False, archived=False, private=True, visibility="private"
+    )
     assert policy.check("PATCH", "/repos/tbhb-dev/widget", repository).allowed is True
     organization = dict.fromkeys(
         ["name", "description", "company", "blog", "email", "location"], "example"
