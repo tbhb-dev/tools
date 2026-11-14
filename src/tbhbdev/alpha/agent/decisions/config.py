@@ -15,6 +15,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import NoReturn
 
+from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import (
     HOST_NAME,
     NAME,
@@ -212,6 +213,19 @@ def _network_domains(table: _Table) -> tuple[str, ...]:
     if any(not HOST_NAME.fullmatch(e) for e in entries):
         table.fail("network_domains", "must contain exact host names without wildcards")
     return entries
+
+
+def _public_repos(table: _Table) -> tuple[str, ...]:
+    entries = table.values.get("public_repos", [])
+    if entries == []:
+        return ()
+    values = table.strings("public_repos")
+    for value in values:
+        try:
+            repo.parts(value)
+        except Invalid:
+            table.fail("public_repos", "must contain valid repository arguments")
+    return values
 
 
 def _sandbox(table: _Table) -> Sandbox:
@@ -446,6 +460,7 @@ def parse(agent: dict[str, object]) -> Settings:
         "kill_grace_seconds",
         "max_run_minutes",
         "sockets_dir",
+        "public_repos",
         "sandbox",
         "codex",
         "credentials",
@@ -478,6 +493,7 @@ def parse(agent: dict[str, object]) -> Settings:
         ssh_keepalive_count_max=root.integer("ssh_keepalive_count_max")
         if "ssh_keepalive_count_max" in agent
         else 3,
+        public_repos=_public_repos(root),
     )
     _check_host_accounts(settings)
     return settings
