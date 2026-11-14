@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import NoReturn
-from urllib.parse import SplitResult, urlsplit
 
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import (
@@ -229,37 +228,32 @@ def _public_repos(table: _Table) -> tuple[str, ...]:
     return values
 
 
-def _has_valid_port(parts: SplitResult) -> bool:
-    """Whether the URL's port is absent or a number from 0 to 65535."""
-    try:
-        parts.port  # noqa: B018 -- reading the property raises on a bad port
-    except ValueError:
-        return False
-    return True
+_OTEL_SHAPE = "must be an https URL with no credentials, path, query or fragment"
+# The whole URL is matched, so no other character, such as a quote, a control
+# character or an `@`, can reach the config file, and no parser error can quote
+# the value.
+_OTEL_URL = re.compile(r"https://(?P<host>[a-z0-9.-]+)(?::(?P<port>[0-9]{1,5}))?/?")
+MAX_PORT = 65535
 
 
-def _otel_endpoint(root: _Table) -> str | None:
-    """The OTLP endpoint a harness exports to, which carries no credential."""
+def _otel_endpoint(root: _Table, network_domains: tuple[str, ...]) -> str | None:
+    """The base URL a harness exports telemetry to, which carries no credential.
+
+    The URL has no path, so a token can't ride in it, and its host must be one
+    the runs may already reach.
+    """
     if "otel" not in root.values:
         return None
     table = root.table("otel")
     table.only("endpoint")
     endpoint = table.text("endpoint")
-    parts = urlsplit(endpoint)
-    if (
-        parts.scheme != "https"
-        or not parts.hostname
-        or not _has_valid_port(parts)
-        or parts.username is not None
-        or parts.password is not None
-        or parts.query
-        or parts.fragment
-        or any(
-            not (c.isascii() and c.isprintable()) or c.isspace() or c in '"\\'
-            for c in endpoint
-        )
-    ):
-        table.fail("endpoint", "must be an https URL without credentials or a query")
+    match = _OTEL_URL.fullmatch(endpoint)
+    if match is None:
+        table.fail("endpoint", _OTEL_SHAPE)
+    if match["port"] and int(match["port"]) > MAX_PORT:
+        table.fail("endpoint", _OTEL_SHAPE)
+    if match["host"] not in network_domains:
+        table.fail("endpoint", "host must be listed in [agent.sandbox] network_domains")
     return endpoint
 
 
@@ -507,6 +501,7 @@ def parse(agent: dict[str, object]) -> Settings:
         "ssh_keepalive_count_max",
         "host_tag",  # Another command reads this key.
     )
+    sandbox = _sandbox(root.table("sandbox"))
     settings = Settings(
         launch_wait_seconds=root.integer("launch_wait_seconds"),
         agy_timeout_seconds=root.duration("agy_timeout"),
@@ -515,7 +510,7 @@ def parse(agent: dict[str, object]) -> Settings:
             root.integer("max_run_minutes") if "max_run_minutes" in agent else None
         ),
         sockets_dir=root.path("sockets_dir"),
-        sandbox=_sandbox(root.table("sandbox")),
+        sandbox=sandbox,
         codex=_codex(root.table("codex") if "codex" in agent else None),
         credentials=_credentials(root.table("credentials")),
         claude=_claude(root.table("claude")),
@@ -530,7 +525,7 @@ def parse(agent: dict[str, object]) -> Settings:
         if "ssh_keepalive_count_max" in agent
         else 3,
         public_repos=_public_repos(root),
-        otel_endpoint=_otel_endpoint(root),
+        otel_endpoint=_otel_endpoint(root, sandbox.network_domains),
     )
     _check_host_accounts(settings)
     return settings

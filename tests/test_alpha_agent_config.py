@@ -29,7 +29,8 @@ PATHS = "must not contain a NUL or '..' part"
 NON_BLANK = "must be a non-blank string"
 STRINGS = "must be a non-empty list of non-blank strings"
 POSITIVE = "must be a positive integer"
-HTTPS = "must be an https URL without credentials or a query"
+HTTPS = "must be an https URL with no credentials, path, query or fragment"
+OTEL_HOST = "otlp.example.net"
 DURATION = "must be bare seconds or a number ending in s, m or h, up to 7 days"
 
 
@@ -39,18 +40,28 @@ def test_public_repositories(entries: list[str]) -> None:
     assert config.parse(GOOD).public_repos == ()
 
 
-def test_otel_endpoint() -> None:
-    endpoint = "https://otlp.example.net:4318"
-    parsed = config.parse(GOOD | {"otel": {"endpoint": endpoint}})
+def with_otel(table: Table) -> Table:
+    sandbox = GOOD["sandbox"]
+    assert isinstance(sandbox, dict)
+    return GOOD | {
+        "sandbox": sandbox | {"network_domains": [OTEL_HOST]},
+        "otel": table,
+    }
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://otlp.example.net:4318",
+        "https://otlp.example.net/",
+        "https://otlp.example.net:65535",
+        "https://otlp.example.net:0",
+    ],
+)
+def test_otel_endpoint(endpoint: str) -> None:
+    parsed = config.parse(with_otel({"endpoint": endpoint}))
     assert parsed.otel_endpoint == endpoint
     assert config.parse(GOOD).otel_endpoint is None
-
-
-def test_otel_endpoint_accepts_the_letter_x_in_a_path() -> None:
-    endpoint = "https://otlp.example.net:4318/X"
-    assert (
-        config.parse(GOOD | {"otel": {"endpoint": endpoint}}).otel_endpoint == endpoint
-    )
 
 
 @pytest.mark.parametrize(
@@ -60,6 +71,7 @@ def test_otel_endpoint_accepts_the_letter_x_in_a_path() -> None:
         ({"endpoint": "https://user:pw@otlp.example.net"}, HTTPS),
         ({"endpoint": "https://user@otlp.example.net"}, HTTPS),
         ({"endpoint": "https://:pw@otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/token"}, HTTPS),
         ({"endpoint": "https://otlp.example.net/a b"}, HTTPS),
         ({"endpoint": "https://otlp.example.net/a\x00b"}, HTTPS),
         ({"endpoint": "https://otlp.example.net/a\x01b"}, HTTPS),
@@ -71,19 +83,45 @@ def test_otel_endpoint_accepts_the_letter_x_in_a_path() -> None:
         ({"endpoint": "https://otlp.example.net/a\\b"}, HTTPS),
         ({"endpoint": "https://otlp.example.net/?k=v"}, HTTPS),
         ({"endpoint": "https://otlp.example.net/#f"}, HTTPS),
+        ({"endpoint": "https://u:p@[::1"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:65536"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:123456"}, HTTPS),
+        ({"endpoint": "https://OTLP.example.net"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net\n"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net//"}, HTTPS),
+        ({"endpoint": " https://otlp.example.net"}, HTTPS),
+        (
+            {"endpoint": "https://other.example.net"},
+            "host must be listed in [agent.sandbox] network_domains",
+        ),
         ({"endpoint": 1}, NON_BLANK),
         ({}, "is required"),
     ],
 )
 def test_otel_endpoint_refuses_invalid_values(table: Table, reason: str) -> None:
     with pytest.raises(Invalid) as caught:
-        config.parse(GOOD | {"otel": table})
+        config.parse(with_otel(table))
     assert str(caught.value) == f"[agent.otel] endpoint {reason}"
+
+
+def test_otel_endpoint_error_never_quotes_the_credential() -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(with_otel({"endpoint": "https://user:s3cret@[::1"}))
+    assert "s3cret" not in str(caught.value)
+
+
+def test_otel_endpoint_needs_a_network_domain() -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(GOOD | {"otel": {"endpoint": "https://otlp.example.net"}})
+    assert str(caught.value) == (
+        "[agent.otel] endpoint host must be listed in [agent.sandbox] network_domains"
+    )
 
 
 def test_otel_refuses_other_keys() -> None:
     with pytest.raises(Invalid) as caught:
-        config.parse(GOOD | {"otel": {"endpoint": "https://a.example.net", "x": 1}})
+        config.parse(with_otel({"endpoint": "https://otlp.example.net", "x": 1}))
     assert str(caught.value) == "[agent.otel] x not recognized"
 
 

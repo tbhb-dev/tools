@@ -425,21 +425,15 @@ def test_codex_run_config_holds_the_otel_table(
     assert "config.toml" in [p.name for p in config_path.parent.iterdir()]
     assert tomllib.loads(config_path.read_text()) == {
         "otel": {
-            "exporter": {
-                "otlp-http": {
-                    "endpoint": "https://otlp.example.net:4318",
-                    "protocol": "binary",
-                }
-            },
             "trace_exporter": {
                 "otlp-http": {
-                    "endpoint": "https://otlp.example.net:4318",
+                    "endpoint": "https://otlp.example.net:4318/v1/traces",
                     "protocol": "binary",
                 }
             },
             "metrics_exporter": {
                 "otlp-http": {
-                    "endpoint": "https://otlp.example.net:4318",
+                    "endpoint": "https://otlp.example.net:4318/v1/metrics",
                     "protocol": "binary",
                 }
             },
@@ -448,6 +442,19 @@ def test_codex_run_config_holds_the_otel_table(
     }
     assert "headers" not in config_path.read_text()
     assert config_path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    "endpoint", ["https://otlp.example.net/", "https://otlp.example.net"]
+)
+def test_otel_config_derives_signal_paths_from_the_base(endpoint: str) -> None:
+    table = tomllib.loads(run_host.otel_config(endpoint))["otel"]
+    assert table["trace_exporter"]["otlp-http"]["endpoint"] == (
+        "https://otlp.example.net/v1/traces"
+    )
+    assert table["metrics_exporter"]["otlp-http"]["endpoint"] == (
+        "https://otlp.example.net/v1/metrics"
+    )
 
 
 def test_codex_run_without_an_endpoint_writes_no_config(
@@ -1460,11 +1467,6 @@ def check_launch_contract(
             run.settings, run.host, harness, prepared.paths, run.request.account
         )
         | env
-        | {
-            "OTEL_RESOURCE_ATTRIBUTES": (
-                f"host.name={run.host.name},tbhb.account={run.request.account}"
-            )
-        }
     )
     assert kwargs["env"] == expected
     assert all(
@@ -4846,11 +4848,20 @@ def test_config_check_protects_the_configured_startup_directory(
 
 def test_resource_attributes_name_host_and_account(tmp_path: Path) -> None:
     run = make_run(tmp_path)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings, otel_endpoint="https://otlp.example.net"
+        ),
+    )
     assert run_host.resource_attributes(run) == {
         "OTEL_RESOURCE_ATTRIBUTES": (
             f"host.name={run.host.name},tbhb.account={run.request.account}"
         )
     }
-    assert (
-        run.host.name in run_host.resource_attributes(run)["OTEL_RESOURCE_ATTRIBUTES"]
-    )
+
+
+def test_resource_attributes_need_an_endpoint(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    assert run.settings.otel_endpoint is None
+    assert run_host.resource_attributes(run) == {}

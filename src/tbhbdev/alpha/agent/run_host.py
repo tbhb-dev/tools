@@ -483,17 +483,24 @@ def preflight(run: Run) -> None:
 
 
 def otel_config(endpoint: str) -> str:
-    """A Codex config with an `[otel]` table that exports to ENDPOINT.
+    """A Codex config with an `[otel]` table that exports traces and metrics.
 
-    The table has no headers, so it holds no secret, and it keeps prompts out of
-    the export.
+    ENDPOINT is a base URL, and each signal gets its own OTLP/HTTP path. The
+    table leaves out the log exporter on purpose: Codex logs tool arguments and
+    an output preview, so `log_user_prompt = false`, which guards only the
+    prompt text, wouldn't keep a credential or a file out of the export.
+    The table has no headers, so it holds no secret.
     """
-    exporter = f'{{ otlp-http = {{ endpoint = "{endpoint}", protocol = "binary" }} }}'
+    base = endpoint.removesuffix("/")
+
+    def exporter(signal_path: str) -> str:
+        url = json.dumps(f"{base}/v1/{signal_path}")
+        return f'{{ otlp-http = {{ endpoint = {url}, protocol = "binary" }} }}'
+
     return (
         "[otel]\n"
-        f"exporter = {exporter}\n"
-        f"trace_exporter = {exporter}\n"
-        f"metrics_exporter = {exporter}\n"
+        f"trace_exporter = {exporter('traces')}\n"
+        f"metrics_exporter = {exporter('metrics')}\n"
         "log_user_prompt = false\n"
     )
 
@@ -672,7 +679,12 @@ def log_argv(run: Run, command: tuple[str, ...]) -> None:
 
 
 def resource_attributes(run: Run) -> dict[str, str]:
-    """OpenTelemetry resource attributes that name the host and the account."""
+    """OpenTelemetry resource attributes that name the host and the account.
+
+    A run without a configured endpoint gets none, so it stays as it was.
+    """
+    if run.settings.otel_endpoint is None:
+        return {}
     return {
         "OTEL_RESOURCE_ATTRIBUTES": (
             f"host.name={run.host.name},tbhb.account={run.request.account}"
