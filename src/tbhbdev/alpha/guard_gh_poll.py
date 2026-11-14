@@ -230,8 +230,9 @@ def bulk_api(args: list[str]) -> bool:
 
 def granted_repos(grant: object) -> set[str]:
     """The lowercase repositories a grant lists; ValueError when it is malformed."""
-    repos = grant.get("repos") if isinstance(grant, dict) else None
-    if not isinstance(repos, list) or not all(
+    entries = grant.get("repos") if isinstance(grant, dict) else None
+    repos: list[str] | None = entries if isinstance(entries, list) else None
+    if repos is None or not all(
         isinstance(repo, str)
         and REPO.fullmatch(repo)
         and not DOTS & set(repo.split("/"))
