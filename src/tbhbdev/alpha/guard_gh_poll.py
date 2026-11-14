@@ -283,19 +283,22 @@ def spend_allowance(args: list[str]) -> bool:
                 return False
             spent[key] = 1
             ALLOWANCE_COUNT.write_text(json.dumps(spent) + "\n")
-    except OSError, ValueError, KeyError, TypeError:
+    except OSError, ValueError, KeyError, TypeError, RecursionError:
         return False
     return True
 
 
-def github_poll(args: list[str]) -> bool:
-    """Whether the words after ``gh``, past its global flags, poll GitHub."""
+def github_poll(args: list[str], *, repeated: bool = False) -> bool:
+    """Whether the words after ``gh``, past its global flags, poll GitHub.
+
+    A repeated listing never spends the allowance.
+    """
     i = 0
     while i < len(args) and args[i].startswith("-"):
         i += 2 if args[i] in VALUE_FLAGS else 1
     rest = args[i:]
     if rest[:2] == ["run", "list"]:
-        return i > 0 or not spend_allowance(rest[2:])
+        return i > 0 or repeated or not spend_allowance(rest[2:])
     if rest[:2] == ["run", "watch"]:
         return True
     if rest[:2] == ["pr", "checks"]:
@@ -381,18 +384,28 @@ def clears_token(program: str, args: list[str]) -> bool:
 
 
 def unwrapped(words: list[str]) -> list[str] | None:
-    """The program's words after prefixes; None when they unset the token.
+    """The program's words after prefixes; None when they unset the token."""
+    return unwrap(words)[0]
+
+
+def unwrap(words: list[str]) -> tuple[list[str] | None, bool]:
+    """The program's words after prefixes, and whether a repeater was passed.
+
+    The words are None when the prefixes unset the token. A repeater is
+    xargs or parallel as a prefix, or inside env's ``-S`` string.
 
     Prefixes are guard_gh_pr's: ``NAME=value`` words, shell keywords and its
     wrappers with their options. env's options are parsed as env does.
     ``TOKEN=`` empties the token.
     """
     rest: list[str] | None = words
+    repeating = False
     while rest:
         word = rest[0]
         wrapper = program_of(rest)
+        repeating = repeating or wrapper in REPEATERS
         if word == f"{TOKEN}=":
-            return None
+            return None, repeating
         if REDIRECT.match(word):
             rest = rest[1 if REDIRECT.fullmatch(word) is None else 2 :]
         elif word in KEYWORDS or ASSIGNMENT.match(word):
@@ -405,7 +418,7 @@ def unwrapped(words: list[str]) -> list[str] | None:
                 rest = rest[1:]
         else:
             break
-    return rest
+    return rest, repeating
 
 
 def remote_command(args: list[str]) -> str | None:
@@ -450,9 +463,32 @@ def repeats(command: list[str]) -> bool:
     return bool(REPEATERS & names) and bool(LISTING.search(" ".join(command)))
 
 
-def denial(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
-    """One simple command's deny reason, and the programs it runs."""
-    words = unwrapped(command)
+def repeated_scan(args: list[str]) -> tuple[str | None, set[str]]:
+    """Scan what a repeater may run: each suffix of its words, as repeated shell text.
+
+    The repeater's own options and the program they lead to aren't told
+    apart, so every suffix is read as a command; a suffix that isn't one
+    finds nothing.
+    """
+    programs: set[str] = set()
+    for i in range(len(args)):
+        message, seen = inspect(shlex.join(args[i:]), repeated=True)
+        if message:
+            return message, programs
+        programs |= seen
+    return None, programs
+
+
+def denial(
+    command: list[str], body: str | None, *, repeated: bool = False
+) -> tuple[str | None, set[str]]:
+    """One simple command's deny reason, and the programs it runs.
+
+    ``repeated`` is set when xargs or parallel runs the command more than once,
+    so a ``gh run list`` can't spend the one-call allowance.
+    """
+    words, passed = unwrap(command)
+    repeated = repeated or passed
     if words is None:
         return UNSET_REASON, set()
     if not words:
@@ -461,30 +497,35 @@ def denial(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
     unset = program == "unset" and any(names_token(word) for word in words[1:])
     if unset or clears_token(program, words[1:]):
         return UNSET_REASON, set()
-    if program == "gh" and github_poll(words[1:]):
+    if program == "gh" and github_poll(words[1:], repeated=repeated):
         return POLL_REASON, set()
     script = inner_script(words, body)
-    if script is None:
+    if program in REPEATERS:
+        message, inner = repeated_scan(words[1:])
+    elif script is None:
         return None, {program}
-    message, inner = inspect(script)
+    else:
+        message, inner = inspect(script, repeated=repeated)
     return message, {program, *inner}
 
 
-def inspect(text: str) -> tuple[str | None, set[str]]:
+def inspect(text: str, *, repeated: bool = False) -> tuple[str | None, set[str]]:
     """The deny reason for a shell command, or None, and the programs it runs."""
     if any(name in text.lower() for name in PROTECTED):
         return PROTECT_REASON, set()
-    return scan_commands(text)
+    return scan_commands(text, repeated=repeated)
 
 
-def checked(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
+def checked(
+    command: list[str], body: str | None, *, repeated: bool = False
+) -> tuple[str | None, set[str]]:
     """One simple command's deny reason, refusing a repeated listing first."""
     if repeats(command):
         return REPEAT_REASON, set()
-    return denial(command, body)
+    return denial(command, body, repeated=repeated)
 
 
-def scan_commands(text: str) -> tuple[str | None, set[str]]:
+def scan_commands(text: str, *, repeated: bool = False) -> tuple[str | None, set[str]]:
     """Scan each command of a shell text for a denial.
 
     Each open loop collects the programs run from its keyword to its
@@ -496,7 +537,7 @@ def scan_commands(text: str) -> tuple[str | None, set[str]]:
     for index, command in enumerate(scanner.run()):
         if opens_loop(command):
             loops.append(set())
-        message, seen = checked(command, scanner.bodies.get(index))
+        message, seen = checked(command, scanner.bodies.get(index), repeated=repeated)
         if message:
             return message, programs
         programs |= seen

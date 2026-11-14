@@ -951,6 +951,38 @@ def test_xargs_and_parallel_cannot_repeat_a_listing(
     assert not (grant_file.parent / "allowance.count").exists()
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        'xargs -n1 sh -c \'gh r""un list -R example/one --limit 100 --json '
+        + FIELDS
+        + "'",
+        "env -S 'xargs -n1 sh -c \"" + listing("example/one") + "\"'",
+        'env xargs -n1 sh -c \'gh r""un list -R example/one --limit 100 --json '
+        + FIELDS
+        + "'",
+        'parallel sh -c \'gh r""un list -R example/one --limit 100 --json '
+        + FIELDS
+        + "'",
+    ],
+)
+def test_a_repeater_cannot_spend_the_allowance_through_wrapping_or_quoting(
+    command: str, grant_file: Path
+) -> None:
+    assert guard.inspect(command)[0] is not None
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+def test_a_grant_of_deeply_nested_json_denies_a_listing(grant_file: Path) -> None:
+    grant_file.write_text("[" * 100_000)
+    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+
+
+def test_a_count_of_deeply_nested_json_denies_a_listing(grant_file: Path) -> None:
+    (grant_file.parent / "allowance.count").write_text("[" * 100_000)
+    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+
+
 def test_xargs_may_run_other_gh_commands() -> None:
     assert guard.inspect("echo 1 2 | xargs -n1 gh pr view")[0] is None
 
