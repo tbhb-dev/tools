@@ -90,7 +90,7 @@ import shlex
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import override
+from typing import TYPE_CHECKING, override
 from urllib.parse import parse_qs, urlsplit
 
 from tbhbdev.alpha.guard_gh_pr import (
@@ -111,6 +111,9 @@ from tbhbdev.alpha.guard_gh_pr import (
 )
 from tbhbdev.alpha.repo import read_hook_stdin
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 POLL_REASON = (
     "Don't poll GitHub. Subscribe to the awrel event instead, for example "
     "check_run conclusion events for the repository through awrel, and act when "
@@ -129,9 +132,13 @@ ALLOWANCE_GRANT = Path.home() / ".local/state/tbhb/gh-poll-allowance.json"
 ALLOWANCE_COUNT = Path.home() / ".local/state/tbhb/gh-poll-allowance.count"
 PROTECTED = (ALLOWANCE_GRANT.name, ALLOWANCE_COUNT.name)
 STATE_DIR = ALLOWANCE_GRANT.parent
-STATE_FILES = (str(ALLOWANCE_GRANT).lower(), str(ALLOWANCE_COUNT).lower())
+ALLOWANCE_LOCK = ALLOWANCE_COUNT.with_name(ALLOWANCE_COUNT.name + ".lock")
+STATE_FILES = tuple(
+    str(path).lower() for path in (ALLOWANCE_GRANT, ALLOWANCE_COUNT, ALLOWANCE_LOCK)
+)
 STATE_DIRS = tuple(str(path).lower() for path in (STATE_DIR, *STATE_DIR.parents))
 BRACE_LIMIT = 256
+SPELLING_LIMIT = 4096
 STATE_MOVERS = {"rm", "mv", "cp", "rsync", "ditto", "ln"}
 PROTECT_REASON = (
     "The CI listing allowance's grant and count files are the operator's to "
@@ -218,7 +225,7 @@ def bulk_api(args: list[str]) -> bool:
     flags, endpoints = split_args(args, API_VALUE_FLAGS)
     if any(flag.partition("=")[0] == "--paginate" for flag in flags):
         return True
-    methods = flag_values(args, {"-X", "--method"}, API_VALUE_FLAGS)
+    methods = [m for m in flag_values(args, {"-X", "--method"}, API_VALUE_FLAGS) if m]
     if methods:
         if methods[-1].upper() not in {"GET", "HEAD"}:
             return False
@@ -308,10 +315,16 @@ def github_poll(args: list[str], *, repeated: bool = False) -> bool:
     while i < len(args) and args[i].startswith("-"):
         i += 2 if args[i] in VALUE_FLAGS else 1
     rest = args[i:]
-    if rest[:2] == ["run", "list"]:
-        return i > 0 or repeated or not spend_allowance(rest[2:])
-    if rest[:2] == ["run", "watch"]:
-        return True
+    if rest[:1] == ["run"]:
+        j = 1
+        while j < len(rest) and rest[j].startswith("-"):
+            j += 2 if rest[j] in VALUE_FLAGS else 1
+        verb = rest[j : j + 1]
+        if verb == ["watch"]:
+            return True
+        if verb in (["list"], ["ls"]):
+            return i > 0 or j > 1 or repeated or not spend_allowance(rest[j + 1 :])
+        return False
     if rest[:2] == ["pr", "checks"]:
         return any(w.partition("=")[0] == "--watch" for w in rest[2:])
     return rest[:1] in (["api"], ["query"]) and bulk_api(rest[1:])
@@ -503,28 +516,27 @@ def direction(first: int, last: int) -> int:
 
 def brace_items(body: str) -> list[str]:
     """The items of one brace body: a comma list, or a character or integer range."""
-    span = re.fullmatch(r"(-?\d+)\.\.(-?\d+)|([A-Za-z])\.\.([A-Za-z])", body)
-    if not span:
+    span = re.fullmatch(
+        r"(-?\d{1,9}|[A-Za-z])\.\.(-?\d{1,9}|[A-Za-z])(?:\.\.(-?\d{1,9}))?", body
+    )
+    if not span or span.group(1).isalpha() != span.group(2).isalpha():
         return body.split(",")
-    if span.group(3):  # pragma: no mutate (groups 3 and 4 are set together)
-        first, last = ord(span.group(3)), ord(span.group(4))
-        step = direction(first, last)
-        return [chr(code) for code in range(first, last + step, step)]
-    first, last = int(span.group(1)), int(span.group(2))
-    step = direction(first, last)
-    return [str(number) for number in range(first, last + step, step)[:BRACE_LIMIT]]
+    letters = span.group(1).isalpha()
+    first, last = (ord(e) if letters else int(e) for e in span.group(1, 2))
+    sign = direction(first, last)
+    step = sign * (abs(int(span.group(3) or 1)) or 1)
+    items = range(first, last + sign, step)[:BRACE_LIMIT]
+    return [chr(n) if letters else str(n) for n in items]
 
 
-def braced(text: str) -> list[str]:
+def braced(text: str) -> Iterator[str]:
     """Every spelling of text after shell brace expansion, such as ``{count,json}``."""
     match = re.search(r"\{([^{}]*)\}", text)
     if not match:
-        return [text]
-    return [
-        spelling
-        for part in brace_items(match.group(1))
-        for spelling in braced(text[: match.start()] + part + text[match.end() :])
-    ]
+        yield text
+        return
+    for part in brace_items(match.group(1)):
+        yield from braced(text[: match.start()] + part + text[match.end() :])
 
 
 def names_state_dir(word: str) -> bool:
@@ -538,7 +550,10 @@ def names_state_dir(word: str) -> bool:
     """
     home = word.replace("${HOME}", "~").replace("$HOME", "~")
     targets = (*STATE_FILES, *STATE_DIRS)
-    for spelling in braced(home):
+    spellings = list(itertools.islice(braced(home), SPELLING_LIMIT + 1))
+    if len(spellings) > SPELLING_LIMIT:
+        return True  # too many to check, so deny
+    for spelling in spellings:
         expanded = str(Path(spelling).expanduser())
         pattern = re.sub(r"^/+", "/", os.path.normpath(expanded)).lower()
         if pattern.startswith("/") and any(
@@ -564,6 +579,13 @@ def pipes_state_dir(text: str) -> bool:
     )
 
 
+def attached(word: str) -> str:
+    """A path word without ``--target-directory=`` or ``-t``, such as ``-tPATH``."""
+    if word.startswith("--"):
+        return word.partition("=")[2] or word
+    return word.removeprefix("-t")
+
+
 def protected_words(command: list[str]) -> bool:
     """Whether a command's unquoted words name a protected file.
 
@@ -574,7 +596,7 @@ def protected_words(command: list[str]) -> bool:
     if any(name in word.lower() for word in words for name in PROTECTED):
         return True
     moves = any(word.rpartition("/")[2].lower() in STATE_MOVERS for word in words)
-    return moves and any(names_state_dir(word) for word in words)
+    return moves and any(names_state_dir(attached(word)) for word in words)
 
 
 def repeated_scan(args: list[str]) -> tuple[str | None, set[str]]:
@@ -634,6 +656,7 @@ def checked(
     command: list[str], body: str | None, *, repeated: bool = False
 ) -> tuple[str | None, set[str]]:
     """One simple command's deny reason, refusing a repeated listing first."""
+    command = [command[0].removeprefix("$"), *command[1:]] if command else command
     if protected_words(command):
         return PROTECT_REASON, set()
     if repeats(command):
@@ -685,7 +708,7 @@ def protects(path: str) -> bool:
     names = {Path(path).name.lower(), Path(path).resolve().name.lower()}
     if any(name.startswith(PROTECTED) for name in names):
         return True
-    for target in (ALLOWANCE_GRANT, ALLOWANCE_COUNT):
+    for target in (ALLOWANCE_GRANT, ALLOWANCE_COUNT, ALLOWANCE_LOCK):
         try:
             if Path(path).samefile(target):
                 return True

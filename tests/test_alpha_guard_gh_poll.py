@@ -16,6 +16,11 @@ import pytest
 from tbhbdev import alpha
 from tbhbdev.alpha import guard_gh_poll as guard
 
+# The guard builds its paths from Path.home(), so the tests do too.
+HOME = str(guard.STATE_DIR.parents[2])
+OWNER = guard.STATE_DIR.parents[2].name
+ROOT = str(guard.STATE_DIR.parents[2].parent).rstrip("/")
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -54,6 +59,13 @@ def grant_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     [
         # watch and list commands
         "gh run watch 42",
+        "gh run ls",
+        "gh run ls -R org/repo --limit 100",
+        "gh run -R org/repo list",
+        "gh run --repo=org/repo ls",
+        "gh run -R org/repo watch 1",
+        "$'gh' run list",
+        "gh api --method='' repos/o/r/actions/runs",
         "gh run list",
         "gh pr checks --watch",
         "gh pr checks 3 --watch=true",
@@ -166,6 +178,9 @@ def test_denies_polling(command: str) -> None:
         "gh api -f name=x repos/o/r/actions/runs",
         "gh api --input body.json repos/o/r/check-runs",
         "gh pr list",
+        "gh run view 5",
+        "gh run -R org/repo view 5",
+        "gh api --method='' -f name=x repos/o/r/actions/runs",
         # quoted text and heredoc bodies are data
         "echo 'gh run list'",
         "git commit -m 'while gh run list'",
@@ -1205,13 +1220,20 @@ def test_flattened_splits_quoted_words_to_a_depth() -> None:
         "mv /tmp/snap ~/.local/state/tbhb",
         "env rm -rf ~/.local",
         "rm -rf ~/.local/state/TBHB",
-        "rm -rf /USERS/TONY/.local/state/tbhb",
+        f"rm -rf {HOME.upper()}/.local/state/tbhb",
         "RM -rf ~/.local/state/tbhb",
         "/BIN/RM -rf ~/.local/state/tbhb",
         "rm -rf ~/.local/state/tbhb/*",
         "rm ~/.local/state/tbhb/gh-poll-*",
         "rm ~/.local/state/tbhb/gh-poll-allowance.{count,json}",
         "rm ~/.local/state/{t..t}bhb/*",
+        "rm ~/.local/state/{t..t..1}bhb/*",
+        "rm ~/.local/state/{b..z..2}bhb/*",
+        "cp x --target-directory=~/.local/state/tbhb",
+        "cp x -t$HOME/.local/state/tbhb",
+        'echo go | r""m -r $HOME/.local/state/tbhb',
+        "rm ~/.local/state/tbhb/*.lock",
+        "rm ~/.local/state/tbhb/gh-poll-allowance.count.lock",
         "rm ~/.local/state/tbhb/gh-poll-allowance.{c..c}o{u..u}nt",
         "rm ~/.local/state/tbhb/gh-poll-allowance.{j..k}son",
         "rm ~/.local/state/tbhb/gh-poll-allowance.{k..j}son",
@@ -1225,20 +1247,20 @@ def test_flattened_splits_quoted_words_to_a_depth() -> None:
         "rm ~/.local/state/tbhb/./*",
         "rm $HOME/.local/state/./tbhb//*",
         "rm ${HOME}/.local/state/x/../tbhb/gh-poll-allowance.{count,json}",
-        "rm //Users/tony/.local/state/tbhb/*",
-        "rm /Users/tony/.local/state/tbhb/../tbhb/*",
+        f"rm /{HOME}/.local/state/tbhb/*",
+        f"rm {HOME}/.local/state/tbhb/../tbhb/*",
         "rm $HOME/.local/state/tbhb/../tbhb/*",
         "rm ${HOME}/.local/state/x/../tbhb/gh-poll-*",
-        "sh -c 'rm /Users/tony/.local/state/tbhb/../tbhb/*'",
+        f"sh -c 'rm {HOME}/.local/state/tbhb/../tbhb/*'",
         "eval 'rm ~/.local/state/x/../tbhb/gh-poll-*'",
-        "rm -rf /Users/*/.local/state/tbhb",
+        f"rm -rf {ROOT}/*/.local/state/tbhb",
         "rm -rf /*/*/.local/state/tbhb",
-        "rm -rf /Users/t*/.local/state",
-        "rm -rf /Us{ers,x}/tony/.local/state/tbhb",
-        "echo /Users/tony/.local/state/tbhb/* | xargs rm",
+        f"rm -rf {ROOT}/{OWNER[0]}*/.local/state",
+        f"rm -rf {HOME[:3]}{{{HOME[3:5]},x}}{HOME[5:]}/.local/state/tbhb",
+        f"echo {HOME}/.local/state/tbhb/* | xargs rm",
         "ls ~/.local/state/tbhb/* | parallel rm -f",
         "echo '~/.local/state/tbhb/*' | xargs -n1 /bin/rm",
-        "rm /Users/tony/.local/state/tbhb/x/../*",
+        f"rm {HOME}/.local/state/tbhb/x/../*",
         "rm ~/.local/state/tbhb/.//?h-poll-allowance.json",
         "rm -rf ~/.local/st[a]te/tbhb",
         "rm -rf ~/.local/state/tbhb/?h-poll-allowance.json",
@@ -1262,10 +1284,10 @@ def test_protected_names_are_read_after_unquoting_and_the_state_directory_is_kep
         "rm -rf /tmp/*",
         "rm -rf ~/.local/state/other/*",
         "rm *",
-        "echo /Users/tony/.local/state/other/* | xargs rm",
+        f"echo {HOME}/.local/state/other/* | xargs rm",
         "ls ~/.local/state/tbhb | xargs echo",
-        "rm /Users/tony/.local/state/tbhb/../other/*",
-        "rm -rf /Users/*/Library",
+        f"rm {HOME}/.local/state/tbhb/../other/*",
+        f"rm -rf {ROOT}/*/Library",
         "rm /{a,b}/c",
     ],
 )
@@ -1289,13 +1311,18 @@ def test_other_paths_and_programs_pass_the_state_directory_check(command: str) -
         ("~/.local/state/tbhb/../tbhb/*", True),
         ("~/.local/state/x/../tbhb/gh-poll-*", True),
         ("~/.local/state/tbhb/../other/*", False),
-        ("//Users/tony/.local/state/tbhb/*", True),
-        ("/Users/*/.local/state/tbhb", True),
-        ("/Users/tony/.local/state/tbhb/../tbhb/*", True),
-        ("/Users/tony/.local/{state,bin}/tbhb", True),
-        ("/Users/tony/.local/state/tbhb/../other/*", False),
+        (f"/{HOME}/.local/state/tbhb/*", True),
+        (f"{ROOT}/*/.local/state/tbhb", True),
+        (f"{HOME}/.local/state/tbhb/../tbhb/*", True),
+        (f"{HOME}/.local/{{state,bin}}/tbhb", True),
+        (f"{HOME}/.local/state/tbhb/../other/*", False),
         ("/{a,b}/c", False),
         ("~/.local/state/{t..t}bhb/*", True),
+        ("~/.local/state/{b..z..2}bhb/*", True),
+        ("~/.local/state/{a..z..2}bhb/*", False),
+        ("~/.local/state/tbhb/*.lock", True),
+        ("~/{a..z}{a..z}{a..z}/x", True),
+        ("~/{1..99999999999}/x", False),
         ("~/.local/state/{a..z}bhb", True),
         ("~/.local/state/{z..a}bhb", True),
         ("~/.local/state/tbhb/gh-poll-allowance.{c..d}o{u..u}nt", True),
@@ -1408,6 +1435,12 @@ def test_pipes_state_dir_needs_a_repeater_a_mover_and_a_state_path(
         ("3..1", ["3", "2", "1"]),
         ("-1..1", ["-1", "0", "1"]),
         ("1..a", ["1..a"]),
+        ("1..10..3", ["1", "4", "7", "10"]),
+        ("10..1..4", ["10", "6", "2"]),
+        ("a..e..2", ["a", "c", "e"]),
+        ("1..3..0", ["1", "2", "3"]),
+        ("1..3..-2", ["1", "3"]),
+        ("1..9999999999", ["1..9999999999"]),
         ("ab..c", ["ab..c"]),
     ],
 )
@@ -1418,4 +1451,4 @@ def test_brace_items_expands_a_character_or_integer_range(
 
 
 def test_brace_items_caps_a_long_integer_range() -> None:
-    assert len(guard.brace_items("1..9999999999")) == guard.BRACE_LIMIT
+    assert len(guard.brace_items("1..999999999")) == guard.BRACE_LIMIT
