@@ -510,7 +510,7 @@ def braced(text: str) -> list[str]:
 def names_state_dir(word: str) -> bool:
     """Whether an absolute path word is, or globs to, the state directory or its files.
 
-    The word is expanded (``~``, ``$HOME``, braces) and normalised (``.``,
+    The word is expanded (``~``, ``$HOME``, braces) and normalized (``.``,
     ``..``, ``//``) first. The volume ignores case, so the glob match is
     lower-cased. A glob matches when it fits the state directory, one of its
     parents or a protected file, such as ``/*/*/.local/state/tbhb``,
