@@ -90,8 +90,9 @@ For Claude Code it also pins ccstatusline (see install_statusline): a
 `statusLine.command` that is exactly the known `bunx -y ccstatusline@latest`
 form becomes `node` running a copy installed once, at an exact version, in
 `$XDG_DATA_HOME/tbhbdev/ccstatusline/<version>`, because bunx asks the registry
-on every refresh. The install is staged and moved into place after a marker is
-written, so a failed bun leaves nothing to reuse. Another command stays. It
+on every refresh. The install is staged in a private directory and moved into place
+after its files match a pinned digest and a marker is written, so a failed or
+altered install is not reused. Another command stays. It
 backs up the file and reads the written command back.
 
 `--harness` limits the config merge to one harness. `--dry-run` writes
@@ -109,6 +110,7 @@ blocks a session.
 
 import argparse
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -117,6 +119,7 @@ import shutil
 import stat
 import subprocess  # nosec B404
 import sys
+import tempfile
 import time
 from contextlib import contextmanager, redirect_stdout, suppress
 from datetime import UTC, datetime
@@ -525,6 +528,13 @@ def open_tmp(tmp: Path, mode: int | None) -> IO[str]:
     return os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode), "w")
 
 
+def check_unchanged(target: Path, old: str | None) -> None:
+    """Raise InstallError when TARGET no longer holds OLD (None: not checked)."""
+    if old is not None and target.read_text() != old:
+        message = f"{target} changed while it was being written"
+        raise InstallError(message)
+
+
 def write_config(
     path: Path, old: str | None, new: str, mode: int | None = None
 ) -> Path | None:
@@ -533,7 +543,9 @@ def write_config(
     The new text is synced to disk before it replaces the old. On any failure
     the temporary file goes, and the OSError becomes an InstallError. A MODE
     sets the permissions of the new file and the backup from creation on;
-    without one, both keep the old file's.
+    without one, both keep the old file's. The file is read again just before
+    the replace, and an edit since OLD was read aborts the write. An edit in the
+    gap between that read and the replace is still lost; the backup keeps it.
     """
     target = path.resolve()
     tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
@@ -550,8 +562,9 @@ def write_config(
             os.fsync(out.fileno())
         if old is not None and mode is None:
             shutil.copymode(target, tmp)
+        check_unchanged(target, old)
         tmp.replace(target)
-    except OSError as exc:
+    except (OSError, InstallError) as exc:
         # The temporary file may never have been made, or its directory may not
         # exist, so whatever unlink says is beside the point.
         with suppress(OSError):
@@ -667,8 +680,11 @@ OLD_STATUSLINES = (
 )
 STATUSLINE_TIMEOUT = 300
 STATUSLINE_TOKENS = 2  # the node path and the script
-# Written into a staged install once bun exited cleanly and the script exists.
+# Written into a staged install once bun exited cleanly and the package checked out.
 STATUSLINE_MARKER = ".complete"
+# SHA-256 of ccstatusline 2.2.33's files as package_digest reads them. A version
+# bump changes it, so a registry release with other files fails the install.
+STATUSLINE_DIGEST = "920e056560d0dd296363b145d96c91bf727934adf2831fd80647c55665478cd3"
 
 
 def statusline_root() -> Path:
@@ -686,51 +702,84 @@ def statusline_command(node: str, script: Path) -> str:
     return f"{COLUMNS_PREFIX} {shlex.quote(node)} {shlex.quote(str(script))}"
 
 
+def statusline_package(root: Path) -> Path:
+    """The installed package's directory."""
+    return root / "node_modules" / "ccstatusline"
+
+
+def package_digest(package: Path) -> str | None:
+    """SHA-256 of every file's relative name and bytes, or None past a symlink.
+
+    The package's bin imports sibling chunks, so the digest covers the whole
+    directory. A link or any entry that isn't a file or directory gives None.
+    """
+    digest = hashlib.sha256()
+    for entry in sorted(package.rglob("*")):
+        if entry.is_symlink():
+            return None
+        if entry.is_file():
+            name = entry.relative_to(package).as_posix().encode()
+            digest.update(name + b"\0" + entry.read_bytes() + b"\0")
+        elif not entry.is_dir():
+            return None
+    return digest.hexdigest()
+
+
 def statusline_installed(root: Path) -> bool:
-    """Whether ROOT holds a complete install: marker and script, no symlinks."""
-    script = statusline_script(root)
+    """Whether ROOT is a complete, unaltered install of the pinned version.
+
+    The marker names the version, no path from ROOT down to the package is a
+    symlink, and the package's files hash to the pinned digest, so a truncated,
+    replaced or relinked file fails.
+    """
+    package = statusline_package(root)
+    path = (root, root / STATUSLINE_MARKER, root / "node_modules", package)
+    marker = root / STATUSLINE_MARKER
     return (
-        not root.is_symlink()
-        and (root / STATUSLINE_MARKER).is_file()
-        and script.is_file()
-        and not script.is_symlink()
+        not any(entry.is_symlink() for entry in path)
+        and marker.is_file()
+        and marker.read_text() == STATUSLINE_VERSION
+        and statusline_script(root).is_file()
+        and package_digest(package) == STATUSLINE_DIGEST
     )
 
 
 def add_statusline(root: Path, bun: str | None, run: Callable[..., object]) -> None:
-    """Install the pinned ccstatusline in a staging directory, then move it to ROOT.
+    """Install the pinned ccstatusline in a private staging directory, then move it.
 
-    ROOT appears only after bun exited cleanly and the script and marker are in
-    place, so a bun that wrote the script and then died or timed out leaves no
-    install that a later run could trust. A leftover staging directory from such
-    a run is removed first.
+    Each run stages in a directory of its own, so concurrent installers can't
+    promote each other's half-written files. ROOT appears only after bun exited
+    cleanly and the staged package passed the same check a later run applies, so
+    a bun that wrote files and then died or timed out leaves no install that a
+    later run could trust. The staging directory goes on every outcome.
     """
-    staging = root.with_name(f".{root.name}.staging")
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True)
-    run(
-        [
-            bun,
-            "add",
-            "--exact",
-            "--ignore-scripts",
-            f"ccstatusline@{STATUSLINE_VERSION}",
-        ],
-        cwd=staging,
-        check=True,
-        capture_output=True,
-        timeout=STATUSLINE_TIMEOUT,
-    )
-    script = statusline_script(staging)
-    if script.is_symlink() or not script.is_file():
-        message = f"{script} is missing after the install"
-        raise InstallError(message)
-    (staging / STATUSLINE_MARKER).write_text(STATUSLINE_VERSION)
-    if root.is_symlink():
-        root.unlink()
-    else:
-        shutil.rmtree(root, ignore_errors=True)
-    staging.replace(root)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{root.name}.staging-", dir=root.parent))
+    try:
+        run(
+            [
+                bun,
+                "add",
+                "--exact",
+                "--ignore-scripts",
+                f"ccstatusline@{STATUSLINE_VERSION}",
+            ],
+            cwd=staging,
+            check=True,
+            capture_output=True,
+            timeout=STATUSLINE_TIMEOUT,
+        )
+        (staging / STATUSLINE_MARKER).write_text(STATUSLINE_VERSION)
+        if not statusline_installed(staging):
+            message = f"ccstatusline {STATUSLINE_VERSION} in {staging} failed its check"
+            raise InstallError(message)
+        if root.is_symlink():
+            root.unlink()
+        else:
+            shutil.rmtree(root, ignore_errors=True)
+        staging.replace(root)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def missing_tool(node: str | None, bun: str | None, *, installed: bool) -> str | None:

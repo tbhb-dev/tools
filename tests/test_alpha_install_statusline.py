@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 OLD = install.OLD_STATUSLINES[0]
 BARE = install.OLD_STATUSLINES[1]
+PACKAGE_FILE = "console.log(1)\n"
 FOREIGN: dict[str, object] = {"model": "opus", "env": {"A": "b"}, "hooks": {"Stop": []}}
 
 pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
@@ -38,12 +39,14 @@ class Tools:
     fail_after_write: Exception | None = None
     skip_script: bool = False
     during: Callable[[], None] | None = None
+    cwd: Path | None = None
 
     def which(self, name: str) -> str | None:
         return self.found.get(name)
 
     def run(self, argv: list[str], **kwargs: object) -> None:
         self.calls.append((argv, kwargs))
+        self.cwd = Path(str(kwargs["cwd"]))
         if self.during:
             self.during()
         if self.fail:
@@ -51,7 +54,7 @@ class Tools:
         if not self.skip_script:
             script = install.statusline_script(Path(str(kwargs["cwd"])))
             script.parent.mkdir(parents=True)
-            script.write_text("")
+            script.write_text(PACKAGE_FILE)
         if self.fail_after_write:
             raise self.fail_after_write
 
@@ -81,13 +84,21 @@ def preinstall(root: Path) -> Path:
     """Make ROOT a complete install, as a clean bun run leaves it."""
     script = install.statusline_script(root)
     script.parent.mkdir(parents=True)
-    script.write_text("")
+    script.write_text(PACKAGE_FILE)
     (root / install.STATUSLINE_MARKER).write_text(install.STATUSLINE_VERSION)
     return script
 
 
 @pytest.fixture
 def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Setup:
+    reference = tmp_path / "reference"
+    install.statusline_script(reference).parent.mkdir(parents=True)
+    install.statusline_script(reference).write_text(PACKAGE_FILE)
+    monkeypatch.setattr(
+        install,
+        "STATUSLINE_DIGEST",
+        install.package_digest(install.statusline_package(reference)),
+    )
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     config = tmp_path / "claude"
     root = install.statusline_root()
@@ -117,13 +128,17 @@ def test_pins_the_known_command_and_keeps_every_other_key(
         (
             ["/x/bun", "add", "--exact", "--ignore-scripts", "ccstatusline@2.2.33"],
             {
-                "cwd": setup.tools.root.with_name(".2.2.33.staging"),
+                "cwd": setup.tools.cwd,
                 "check": True,
                 "capture_output": True,
                 "timeout": install.STATUSLINE_TIMEOUT,
             },
         )
     ]
+    assert setup.tools.cwd is not None
+    assert setup.tools.cwd.parent == setup.tools.root.parent
+    assert setup.tools.cwd.name.startswith(".2.2.33.staging-")
+    assert not setup.tools.cwd.exists()
     assert setup.tools.root.parts[-3:] == ("tbhbdev", "ccstatusline", "2.2.33")
     after = json.loads(setup.path.read_text())
     assert {k: v for k, v in after.items() if k != "statusLine"} == FOREIGN
@@ -383,7 +398,6 @@ def test_a_reinstall_into_an_existing_root_succeeds(setup: Setup) -> None:
     assert setup.go() == 0
     assert command(setup) == wanted(setup)
     assert not (setup.tools.root / "stale").exists()
-    assert not setup.tools.root.with_name(".2.2.33.staging").exists()
 
 
 @pytest.mark.parametrize(
@@ -452,9 +466,8 @@ def test_a_staged_script_that_is_a_symlink_fails(
     target.write_text("")
 
     def link() -> None:
-        script = install.statusline_script(
-            setup.tools.root.with_name(".2.2.33.staging")
-        )
+        assert setup.tools.cwd is not None
+        script = install.statusline_script(setup.tools.cwd)
         script.parent.mkdir(parents=True)
         script.symlink_to(target)
 
@@ -463,7 +476,7 @@ def test_a_staged_script_that_is_a_symlink_fails(
     setup.write({"statusLine": {"type": "command", "command": OLD}})
     assert setup.go() == 1
     assert not setup.tools.root.exists()
-    assert "is missing after the install" in capsys.readouterr().err
+    assert "failed its check" in capsys.readouterr().err
 
 
 def test_dry_run_writes_and_installs_nothing(
@@ -498,16 +511,85 @@ def test_a_failed_install_leaves_the_old_command(
     assert "cannot pin ccstatusline" in capsys.readouterr().err
 
 
-def test_a_stale_staging_directory_is_cleared_before_the_install(
-    setup: Setup,
-) -> None:
-    staging = setup.tools.root.with_name(".2.2.33.staging")
-    staging.mkdir(parents=True)
-    (staging / "left-over").write_text("")
+def test_another_installers_staging_directory_is_left_alone(setup: Setup) -> None:
+    other = setup.tools.root.with_name(".2.2.33.staging-other")
+    other.mkdir(parents=True)
+    (other / "half-written").write_text("")
     setup.write({"statusLine": {"type": "command", "command": OLD}})
     assert setup.go() == 0
-    assert not staging.exists()
-    assert not (setup.tools.root / "left-over").exists()
+    assert (other / "half-written").is_file()
+    assert not (setup.tools.root / "half-written").exists()
+    assert setup.tools.cwd != other
+
+
+def test_a_wrong_marker_or_altered_file_is_not_a_complete_install(
+    setup: Setup,
+) -> None:
+    script = preinstall(setup.tools.root)
+    assert statusline_installed(setup)
+    marker = setup.tools.root / install.STATUSLINE_MARKER
+    marker.write_text("2.2.0")
+    assert not statusline_installed(setup)
+    marker.write_text(install.STATUSLINE_VERSION)
+    script.write_text("evil()\n")
+    assert not statusline_installed(setup)
+    script.write_text(PACKAGE_FILE)
+    (script.parent / "extra.js").write_text("evil()\n")
+    assert not statusline_installed(setup)
+
+
+def test_an_altered_install_is_replaced_not_reused(setup: Setup) -> None:
+    script = preinstall(setup.tools.root)
+    script.write_text("evil()\n")
+    setup.write({"statusLine": {"type": "command", "command": OLD}})
+    assert setup.go() == 0
+    assert len(setup.tools.calls) == 1
+    assert script.read_text() == PACKAGE_FILE
+
+
+@pytest.mark.parametrize("name", [".complete", "node_modules", "ccstatusline", "dist"])
+def test_a_symlink_anywhere_in_the_install_is_not_trusted(
+    setup: Setup, tmp_path: Path, name: str
+) -> None:
+    preinstall(setup.tools.root)
+    root = setup.tools.root
+    entry = {
+        ".complete": root / ".complete",
+        "node_modules": root / "node_modules",
+        "ccstatusline": root / "node_modules" / "ccstatusline",
+        "dist": root / "node_modules" / "ccstatusline" / "dist",
+    }[name]
+    moved = tmp_path / "moved"
+    entry.rename(moved)
+    entry.symlink_to(moved)
+    assert not statusline_installed(setup)
+
+
+def test_a_socket_or_fifo_in_the_package_is_not_trusted(setup: Setup) -> None:
+    script = preinstall(setup.tools.root)
+    os.mkfifo(script.parent / "pipe")
+    assert not statusline_installed(setup)
+
+
+def test_a_settings_edit_between_the_read_and_the_replace_aborts(
+    setup: Setup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    setup.write({"statusLine": {"type": "command", "command": OLD}})
+    edited = {"model": "sonnet", "statusLine": {"type": "command", "command": OLD}}
+    real = install.check_unchanged
+
+    def edit_then_check(target: Path, old: str | None) -> None:
+        setup.write(edited)
+        real(target, old)
+
+    install.check_unchanged, saved = edit_then_check, real
+    try:
+        assert setup.go() == 1
+    finally:
+        install.check_unchanged = saved
+    assert json.loads(setup.path.read_text()) == edited
+    assert "changed while it was being written" in capsys.readouterr().err
+    assert not list(setup.path.parent.glob("*.tmp"))
 
 
 def test_an_install_that_leaves_no_script_fails(
@@ -517,7 +599,7 @@ def test_an_install_that_leaves_no_script_fails(
     setup.tools.skip_script = True
     assert setup.go() == 1
     assert setup.path.read_text() == before
-    assert "is missing after the install" in capsys.readouterr().err
+    assert "failed its check" in capsys.readouterr().err
 
 
 def test_a_written_value_that_reads_back_differently_fails_loudly(
