@@ -227,7 +227,10 @@ def safe_ruleset_create(body: dict[str, object]) -> bool:
         and body.get("conditions", RULESET_CONDITIONS) == RULESET_CONDITIONS
         and isinstance(rules, list)
         and bool(rules)
-        and all(safe_ruleset_rule(rule) for rule in cast("list[object]", rules))
+        and all(
+            safe_ruleset_rule(rule)
+            for rule in cast("list[object]", rules)  # pragma: no mutate
+        )
     )
 
 
