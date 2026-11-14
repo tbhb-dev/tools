@@ -1099,7 +1099,7 @@ def test_allowance_creates_missing_parents_and_a_named_lock(
     monkeypatch.setattr(guard, "ALLOWANCE_COUNT", count)
     assert guard.inspect(listing("example/one"))[0] is None
     assert count.exists()
-    assert count.with_name("allowance.count.lock").exists()
+    assert "allowance.count.lock" in {p.name for p in count.parent.iterdir()}
 
 
 def test_defaults_treat_a_call_as_not_repeated(grant_file: Path) -> None:
