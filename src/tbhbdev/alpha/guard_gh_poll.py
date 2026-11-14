@@ -21,8 +21,12 @@ These rules apply in every repository, and deny:
 
 The one exception is a granted allowance for a measurement pass: ``gh run list
 -R OWNER/REPO --limit 100 --json FIELDS``, in exactly that order, for each
-repository in a grant file under ``~/.local/state/tbhb``, once per repository
-and not after the grant's expiry date. A count file beside it keeps the tally.
+repository in a grant file under ``~/.local/state/tbhb``, one call for each
+repository, and not after the grant's expiry date. A count file beside it
+keeps the tally per repository. Only the operator writes either file: the guard
+denies a Write or Edit to them and any shell command that names them. That
+doesn't cover a script file or a computed path, so the allowance is a speed
+bump against accidents, not a barrier.
 
 The loop rule covers the self-matching wait, ``while pgrep -f fetch.py; do
 sleep 5; done``: pgrep -f matches its own shell's command line, so the loop
@@ -75,6 +79,7 @@ name. ``tbhbdev alpha
 gh-shim`` budgets the gh calls a script makes, which no hook can see.
 """
 
+import fcntl
 import itertools
 import json
 import re
@@ -112,10 +117,18 @@ POLL_REASON = (
 # The capped allowance for one measurement pass. The operator writes the grant
 # file, JSON with `expires` (an ISO date) and `repos` (OWNER/REPO names); without
 # the file, or after `expires`, nothing is allowed. The names stay out of this
-# repository. Each allowed call adds one to the count file, and the grant allows
-# one call per listed repository. Deleting the grant file revokes it.
+# repository. The grant allows one call per listed repository, and the count
+# file records each repository once spent. Only the operator writes either file:
+# the guard denies an agent's Write or Edit to them and a shell command that
+# names them. It can't see a script file or a computed path, so this is a speed
+# bump against accidents, not a barrier.
 ALLOWANCE_GRANT = Path.home() / ".local/state/tbhb/gh-poll-allowance.json"
 ALLOWANCE_COUNT = Path.home() / ".local/state/tbhb/gh-poll-allowance.count"
+PROTECTED = (ALLOWANCE_GRANT.name, ALLOWANCE_COUNT.name)
+PROTECT_REASON = (
+    "The CI listing allowance's grant and count files are the operator's to "
+    "write. Ask the coordinator."
+)
 ALLOWANCE_FIELDS = (
     "databaseId,event,conclusion,createdAt,startedAt,updatedAt,"
     "workflowName,attempt,headBranch"
@@ -209,10 +222,11 @@ def spend_allowance(args: list[str]) -> bool:
     """Whether ``gh run list``'s words after ``list`` use the granted allowance.
 
     The words must be exactly ``-R OWNER/REPO --limit 100 --json FIELDS`` for a
-    repository the grant file lists. A match spends one of the grant's calls,
-    one per listed repository. A missing, expired or malformed grant, a spent
-    allowance, and an unreadable or unwritable count refuse it. The caller
-    passes only a call with no global flag before ``run``.
+    repository the grant file lists. A match spends that repository's one call,
+    recorded in the count file under a file lock. A missing, expired or
+    malformed grant, a repository already spent, and an unreadable or
+    unwritable count refuse it. The caller passes only a call with no global
+    flag before ``run``.
     """
     try:
         grant = json.loads(ALLOWANCE_GRANT.read_text())
@@ -225,11 +239,19 @@ def spend_allowance(args: list[str]) -> bool:
             or datetime.now().astimezone().date() > date.fromisoformat(grant["expires"])
         ):
             return False
-        used = int(ALLOWANCE_COUNT.read_text()) if ALLOWANCE_COUNT.exists() else 0
-        if used >= len(repos):
-            return False
         ALLOWANCE_COUNT.parent.mkdir(parents=True, exist_ok=True)
-        ALLOWANCE_COUNT.write_text(f"{used + 1}\n")
+        lock = ALLOWANCE_COUNT.with_name(ALLOWANCE_COUNT.name + ".lock")
+        with lock.open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            spent = (
+                json.loads(ALLOWANCE_COUNT.read_text())
+                if ALLOWANCE_COUNT.exists()
+                else {}
+            )
+            if not isinstance(spent, dict) or args[1] in spent:
+                return False
+            spent[args[1]] = 1
+            ALLOWANCE_COUNT.write_text(json.dumps(spent) + "\n")
     except OSError, ValueError, KeyError, TypeError:
         return False
     return True
@@ -415,6 +437,8 @@ def inspect(text: str) -> tuple[str | None, set[str]]:
     Each open loop collects the programs run from its keyword to its
     ``done``; an outer loop also collects its inner loops' programs.
     """
+    if any(name in text for name in PROTECTED):
+        return PROTECT_REASON, set()
     loops: list[set[str]] = []
     programs: set[str] = set()
     scanner = BodyScanner(text)
@@ -434,11 +458,23 @@ def inspect(text: str) -> tuple[str | None, set[str]]:
     return None, programs
 
 
+def edited_file(data: dict[str, object]) -> str:
+    """The path a Write, Edit or NotebookEdit call targets, or "" for another call."""
+    inputs = data.get("tool_input")
+    if not isinstance(inputs, dict):
+        return ""
+    path = inputs.get("file_path") or inputs.get("notebook_path")
+    return path if isinstance(path, str) else ""
+
+
 def main() -> int:
     """Read the payload on stdin; print a deny decision for a blocked call."""
     try:
-        text, antigravity = command_of(read_hook_stdin())
+        data = read_hook_stdin()
+        text, antigravity = command_of(data)
         message = inspect(text)[0]
+        if Path(edited_file(data)).name in PROTECTED:
+            message = PROTECT_REASON
         if message:
             print(json.dumps(decision(message, antigravity=antigravity)))
     except Exception:  # noqa: BLE001  # fail open on any crash

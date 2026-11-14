@@ -247,6 +247,10 @@ def test_claude_hooks() -> None:
                 "hooks": [{"type": "command", "command": marked("guard-gh-poll")}],
             },
             {
+                "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+                "hooks": [{"type": "command", "command": marked("guard-gh-poll")}],
+            },
+            {
                 "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
                 "hooks": [{"type": "command", "command": marked("guard-scripts")}],
             },

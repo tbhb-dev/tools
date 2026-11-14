@@ -747,13 +747,14 @@ def test_allowance_lets_each_granted_repository_list_once(grant_file: Path) -> N
     count = grant_file.parent / "allowance.count"
     for repo in REPOS:
         assert guard.inspect(listing(repo))[0] is None
-    assert count.read_text() == f"{len(REPOS)}\n"
-    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+        assert guard.inspect(listing(repo))[0] == guard.POLL_REASON
+    assert json.loads(count.read_text()) == dict.fromkeys(REPOS, 1)
 
 
 def test_allowance_passes_through_a_wrapper(grant_file: Path) -> None:
     assert guard.inspect(f"bash -c '{listing(REPOS[0])}'")[0] is None
-    assert (grant_file.parent / "allowance.count").read_text() == "1\n"
+    count = json.loads((grant_file.parent / "allowance.count").read_text())
+    assert count == {REPOS[0]: 1}
 
 
 @pytest.mark.parametrize(
@@ -822,7 +823,7 @@ def test_allowance_refuses_without_a_grant(grant_file: Path) -> None:
     assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
 
 
-@pytest.mark.parametrize("text", ["many\n", ""])
+@pytest.mark.parametrize("text", ["many\n", "", "[]", "3"])
 def test_allowance_refuses_an_unreadable_count(text: str, grant_file: Path) -> None:
     count = grant_file.parent / "allowance.count"
     count.write_text(text)
@@ -843,3 +844,51 @@ def test_run_view_of_one_run_still_passes_without_spending(grant_file: Path) -> 
     command = "gh run view 42 -R example/one --json databaseId,jobs"
     assert guard.inspect(command)[0] is None
     assert not (grant_file.parent / "allowance.count").exists()
+
+
+@pytest.mark.parametrize("name", ["gh-poll-allowance.json", "gh-poll-allowance.count"])
+@pytest.mark.parametrize(
+    "template",
+    [
+        "echo x > ~/.local/state/tbhb/{}",
+        "rm {}",
+        "cp a ~/.local/state/tbhb/{}",
+        "sed -i s/a/b/ {}",
+        "bash -c 'echo x | tee {}'",
+    ],
+)
+def test_shell_commands_naming_the_allowance_files_are_denied(
+    name: str, template: str
+) -> None:
+    assert guard.inspect(template.format(name))[0] == guard.PROTECT_REASON
+
+
+def test_main_denies_a_write_to_an_allowance_file(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for key in ("file_path", "notebook_path"):
+        payload = {
+            "tool_input": {key: "/home/x/.local/state/tbhb/gh-poll-allowance.json"}
+        }
+        monkeypatch.setattr(guard, "read_hook_stdin", lambda p=payload: p)
+        assert guard.main() == 0
+        assert guard.PROTECT_REASON in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"tool_input": {"file_path": "/home/x/notes.md"}},
+        {"tool_input": {"file_path": 3}},
+        {"tool_input": "text"},
+        {},
+    ],
+)
+def test_main_allows_other_edits(
+    payload: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(guard, "read_hook_stdin", lambda: payload)
+    assert guard.main() == 0
+    assert capsys.readouterr().out == ""
