@@ -216,6 +216,25 @@ def test_a_pinned_command_without_node_is_not_ours_to_judge(setup: Setup) -> Non
     assert setup.path.read_text() == before
 
 
+def test_a_command_built_without_node_is_left_alone_silently(
+    setup: Setup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    script = install.statusline_script(setup.tools.root)
+    other = install.statusline_command("None", script)
+    before = setup.write({"statusLine": {"type": "command", "command": other}})
+    del setup.tools.found["node"]
+    assert setup.go() == 0
+    assert setup.path.read_text() == before
+    assert capsys.readouterr().err == ""
+
+
+def test_a_reinstall_into_an_existing_root_succeeds(setup: Setup) -> None:
+    setup.tools.root.mkdir(parents=True)
+    setup.write({"statusLine": {"type": "command", "command": OLD}})
+    assert setup.go() == 0
+    assert command(setup) == wanted(setup)
+
+
 def test_dry_run_writes_and_installs_nothing(
     setup: Setup, capsys: pytest.CaptureFixture[str]
 ) -> None:

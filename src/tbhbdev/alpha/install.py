@@ -684,7 +684,7 @@ def statusline_command(node: str, script: Path) -> str:
 
 
 def add_statusline(
-    root: Path, script: Path, bun: str, run: Callable[..., object]
+    root: Path, script: Path, bun: str | None, run: Callable[..., object]
 ) -> None:
     """Install the pinned ccstatusline into ROOT and check its script exists."""
     root.mkdir(parents=True, exist_ok=True)
@@ -736,8 +736,9 @@ def install_statusline(  # noqa: PLR0911 -- one early return per outcome
         print(f"{PROG}: claude: cannot read {path}: {exc}", file=sys.stderr)
         return 1
     line = config.get("statusLine")
-    current = line.get("command") if isinstance(line, dict) else None
-    if not isinstance(current, str):
+    if not isinstance(line, dict) or not isinstance(
+        current := line.get("command"), str
+    ):
         return 0
     root = statusline_root()
     script = statusline_script(root)
@@ -761,8 +762,8 @@ def install_statusline(  # noqa: PLR0911 -- one early return per outcome
         return 0
     try:
         if not installed:
-            add_statusline(root, script, cast("str", bun), run)
-        merged = {**config, "statusLine": {**cast("Json", line), "command": wanted}}
+            add_statusline(root, script, bun, run)
+        merged = {**config, "statusLine": {**line, "command": wanted}}
         backup = write_config(path, old, json.dumps(merged, indent=2) + "\n")
         if read_config(path)[1] != merged:
             message = f"the written file differs; the old one is {backup}"
