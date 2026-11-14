@@ -4301,12 +4301,12 @@ def test_temp_directory_failure_leaves_log_and_rc(
     )
 
     def full(*_args: object, **_kwargs: object) -> None:
-        raise OSError(errno.ENOSPC, "no space for the temp directory")
+        raise OSError(errno.EIO, "temp directory unavailable")
 
     monkeypatch.setattr(run_host.tempfile, "TemporaryDirectory", full)
     assert run_host.main(["example"], "run-host") == 1
-    assert "no space for the temp directory" in capsys.readouterr().err
-    assert "no space for the temp directory" in files.path("log").read_text()
+    assert "temp directory unavailable" in capsys.readouterr().err
+    assert "temp directory unavailable" in files.path("log").read_text()
     assert files.path("rc").read_text().strip() == "1"
 
 
