@@ -20,7 +20,9 @@ OWNER_MODE = 0o600
 def verify(files: RunFiles, expected: str) -> None:
     """Refuse unless the owner file is the driver's own private regular file."""
     try:
-        descriptor = os.open(files.path("owner"), os.O_RDONLY | os.O_NOFOLLOW)
+        # O_NONBLOCK keeps a FIFO planted at the path from blocking the open.
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        descriptor = os.open(files.path("owner"), flags)
     except OSError:
         message = f"run {files.name!r} has no usable owner file"
         raise RunExistsError(message) from None
@@ -35,7 +37,7 @@ def verify(files: RunFiles, expected: str) -> None:
         text = os.read(descriptor, len(expected) + 2) if private else b""
     finally:
         os.close(descriptor)
-    if not private or text != f"{expected}\n".encode():
+    if not expected or not private or text != f"{expected}\n".encode():
         message = f"run {files.name!r} has a different owner"
         raise RunExistsError(message)
 

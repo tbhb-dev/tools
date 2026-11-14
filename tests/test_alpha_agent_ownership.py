@@ -23,6 +23,10 @@ def regular(path: Path, text: str = "run-id\n", mode: int = 0o600) -> None:
     path.chmod(mode)
 
 
+def fifo(path: Path) -> None:
+    os.mkfifo(path, 0o600)
+
+
 def directory(path: Path) -> None:
     path.mkdir()
 
@@ -51,6 +55,7 @@ def test_matching_private_owner_is_accepted(tmp_path: Path) -> None:
         (dangling, "no usable owner file"),
         (linked, "no usable owner file"),
         (directory, "different owner"),
+        (fifo, "different owner"),
         (lambda path: regular(path, "other\n"), "different owner"),
         (lambda path: regular(path, "run-id"), "different owner"),
         (lambda path: regular(path, "run-id\nmore\n"), "different owner"),
@@ -83,6 +88,13 @@ def test_owner_of_another_user_is_refused(
 def test_empty_expected_id_is_still_verified(tmp_path: Path) -> None:
     files = run_files(tmp_path)
     regular(files.path("owner"))
+    with pytest.raises(ownership.RunExistsError, match="different owner"):
+        ownership.claim(files, expected="")
+
+
+def test_newline_only_owner_never_matches_an_empty_id(tmp_path: Path) -> None:
+    files = run_files(tmp_path)
+    regular(files.path("owner"), "\n")
     with pytest.raises(ownership.RunExistsError, match="different owner"):
         ownership.claim(files, expected="")
 

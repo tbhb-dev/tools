@@ -933,6 +933,9 @@ def main(
             runfiles.locked(files.path("run.lock")),
             tempfile.TemporaryDirectory() as tmpdir,
         ):
+            # A signal between taking the lock and this line is recorded as
+            # a waiter's interrupt: it writes nothing, which never overwrites
+            # another run's files, and the run has not started either way.
             holding = True
             refuse_started(files)
             run, text = _load(args, Path(tmpdir).resolve())
