@@ -1353,10 +1353,9 @@ def test_inspect_passes_the_repeated_flag_to_the_scan(grant_file: Path) -> None:
 
 
 def test_inspect_denies_a_protected_name_before_scanning() -> None:
-    assert guard.inspect("cat x/gh-poll-allowance.json") == (
-        guard.PROTECT_REASON,
-        set(),
-    )
+    text = "cat <<EOF\ngh-poll-allowance.json\nEOF"
+    assert guard.scan_commands(text, repeated=False)[0] is None
+    assert guard.inspect(text) == (guard.PROTECT_REASON, set())
 
 
 @pytest.mark.parametrize("name", ["gh-poll-allowance.json", "GH-POLL-ALLOWANCE.COUNT"])
