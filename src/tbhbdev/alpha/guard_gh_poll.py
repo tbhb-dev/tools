@@ -132,7 +132,7 @@ PROTECT_REASON = (
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 DOTS = {".", ".."}
 REPEATERS = {"xargs", "parallel"}
-LISTING = re.compile(r"\bgh\b.*\brun\b.*\blist\b")
+LISTING = re.compile(r"\bgh\b.*\brun\b.*\blist\b", re.DOTALL)
 REDIRECT = re.compile(r"\d*(?:>>?|<|>&|&>)")
 REPEAT_REASON = (
     "Don't run a CI listing through xargs or parallel; each repeat is a separate "
@@ -515,17 +515,22 @@ def edited_file(data: dict[str, object]) -> str:
 
 
 def protects(path: str) -> bool:
-    """Whether an edit target is a protected file, by name in any case or by link."""
+    """Whether an edit target is a protected file, by name in any case or by link.
+
+    A name that starts with a protected name also counts, such as a lock or backup copy.
+    """
     if not path:
         return False
     names = {Path(path).name.lower(), Path(path).resolve().name.lower()}
-    try:
-        linked = any(
-            Path(path).samefile(target) for target in (ALLOWANCE_GRANT, ALLOWANCE_COUNT)
-        )
-    except OSError:  # the target or the protected file doesn't exist
-        linked = False
-    return linked or bool(names & set(PROTECTED))
+    if any(name.startswith(PROTECTED) for name in names):
+        return True
+    for target in (ALLOWANCE_GRANT, ALLOWANCE_COUNT):
+        try:
+            if Path(path).samefile(target):
+                return True
+        except OSError:  # the target or the protected file doesn't exist
+            continue
+    return False
 
 
 def main() -> int:

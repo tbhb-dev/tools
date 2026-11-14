@@ -1006,3 +1006,41 @@ def test_allowance_counts_case_variants_of_a_repository_once(
 def test_allowance_matches_a_grant_in_another_case(grant_file: Path) -> None:
     grant_file.write_text('{"repos": ["Example/One"], "expires": "2999-01-01"}')
     assert guard.inspect(listing("example/one"))[0] is None
+
+
+def test_xargs_cannot_repeat_a_listing_split_by_a_line_continuation(
+    grant_file: Path,
+) -> None:
+    script = listing("example/one").replace("run list", "run \\\nlist")
+    command = f"printf 'a\\nb\\n' | xargs -n1 sh -c '{script}'"
+    assert guard.inspect(command)[0] == guard.REPEAT_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+def test_a_link_to_the_count_file_is_protected_without_a_grant(
+    grant_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    count = grant_file.parent / "allowance.count"
+    count.write_text("{}\n")
+    link = grant_file.parent / "tally.txt"
+    os.link(count, link)
+    grant_file.unlink()
+    payload = {"tool_input": {"file_path": str(link)}}
+    monkeypatch.setattr(guard, "read_hook_stdin", lambda: payload)
+    assert guard.main() == 0
+    assert guard.PROTECT_REASON in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "name", ["gh-poll-allowance.count.lock", "gh-poll-allowance.json.bak"]
+)
+def test_a_lock_or_backup_copy_of_a_protected_file_is_protected(name: str) -> None:
+    assert guard.protects(f"/home/x/.local/state/tbhb/{name}")
+
+
+def test_an_existing_unrelated_file_is_not_protected(grant_file: Path) -> None:
+    other = grant_file.parent / "notes.txt"
+    other.write_text("x")
+    assert not guard.protects(str(other))
