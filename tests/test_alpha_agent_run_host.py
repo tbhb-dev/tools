@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import grp
 import hashlib
 import io
@@ -4227,6 +4228,213 @@ def test_main_claims_owner_before_loading(
     monkeypatch.setattr(run_host, "_load", load)
     assert run_host.main(["example"], "run-host", claimed=claimed) == 1
     assert calls == [True]
+
+
+@pytest.mark.parametrize("owner", ["run-id", "other"])
+def test_main_with_owner_flag_verifies_the_drivers_file(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    owner: str,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    files.write("owner", "run-id\n")
+    calls: list[bool] = []
+
+    def load(_args: object, _temporary: Path) -> tuple[run_host.Run, str]:
+        calls.append(True)
+        message = "test refusal"
+        raise Invalid(message)
+
+    monkeypatch.setattr(run_host, "_load", load)
+    arguments = ["example", "--host", "h", "--owner", owner]
+    assert run_host.main(arguments, "run-host") == 1
+    assert files.path("owner").read_text() == "run-id\n"
+    if owner == "run-id":
+        assert calls == [True]
+    else:
+        assert calls == []
+        assert "different owner" in capsys.readouterr().err
+        assert not files.path("log").exists()
+        assert not files.path("rc").exists()
+
+
+def test_main_with_request_refuses_an_existing_owner(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    files.write("owner", "other\n")
+    assert run_host.main(["example", "request.json"], "run-host") == 1
+    assert "already has an owner" in capsys.readouterr().err
+    assert not files.path("log").exists()
+    assert not files.path("rc").exists()
+
+
+def test_lock_acquisition_failure_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    files.write("log", "original output\n")
+
+    def refuse(_path: Path) -> None:
+        raise OSError(errno.EIO, "lock unavailable")
+
+    monkeypatch.setattr(run_host.runfiles, "locked", refuse)
+    assert run_host.main(["example"], "run-host") == 1
+    assert "lock unavailable" in capsys.readouterr().err
+    assert files.path("log").read_text() == "original output\n"
+    assert not files.path("rc").exists()
+
+
+def test_temp_directory_failure_leaves_log_and_rc(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+
+    def full(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.EIO, "temp directory unavailable")
+
+    monkeypatch.setattr(run_host.tempfile, "TemporaryDirectory", full)
+    assert run_host.main(["example"], "run-host") == 1
+    assert "temp directory unavailable" in capsys.readouterr().err
+    assert "temp directory unavailable" in files.path("log").read_text()
+    assert files.path("rc").read_text().strip() == "1"
+
+
+def test_failure_records_are_written_while_the_lock_is_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    held: list[bool] = []
+    state = {"held": False}
+    real = runfiles.locked
+
+    @contextmanager
+    def tracking(path: Path) -> Generator[None]:
+        with real(path):
+            state["held"] = True
+            try:
+                yield
+            finally:
+                state["held"] = False
+
+    real_write = runfiles.RunFiles.write
+
+    def write(self: runfiles.RunFiles, suffix: str, text: str) -> None:
+        held.append(state["held"])
+        real_write(self, suffix, text)
+
+    def load(_args: object, _tmpdir: Path) -> None:
+        os.kill(os.getpid(), signal.SIGHUP)
+
+    monkeypatch.setattr(run_host.runfiles, "locked", tracking)
+    monkeypatch.setattr(runfiles.RunFiles, "write", write)
+    monkeypatch.setattr(run_host, "_load", load)
+    assert run_host.main(["example"], "run-host") == 143
+    assert held == [True, True]
+
+
+def test_interrupted_second_admission_leaves_the_completed_run_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    real = run_host.refuse_started
+    calls: list[int] = []
+
+    def admit(checked: runfiles.RunFiles) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            return
+        # The earlier run finished while this one waited for the lock.
+        files.write("log", "original output\n")
+        files.write("rc", "0\n")
+        try:
+            real(checked)
+        except run_host.RunExistsError:
+            raise run_host.RunInterruptedError from None
+
+    monkeypatch.setattr(run_host, "refuse_started", admit)
+    assert run_host.main(["example"], "run-host") == 143
+    assert files.path("log").read_text() == "original output\n"
+    assert files.path("rc").read_text() == "0\n"
+
+
+def test_interrupt_while_releasing_the_lock_keeps_the_recorded_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+
+    @contextmanager
+    def interrupted_release(_path: Path) -> Generator[None]:
+        try:
+            yield
+        finally:
+            raise run_host.RunInterruptedError
+
+    def load(_args: object, _tmpdir: Path) -> None:
+        raise OSError(errno.EIO, "load unavailable")
+
+    monkeypatch.setattr(run_host.runfiles, "locked", interrupted_release)
+    monkeypatch.setattr(run_host, "_load", load)
+    assert run_host.main(["example"], "run-host") == 1
+    assert files.path("rc").read_text().strip() == "1"
+
+
+def test_signal_after_recording_a_failure_keeps_the_recorded_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    record = run_host._record_failure  # noqa: SLF001
+
+    def record_then_terminate(files: runfiles.RunFiles, exc: Exception) -> None:
+        record(files, exc)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    def load(_args: object, _tmpdir: Path) -> None:
+        raise OSError(errno.EIO, "load unavailable")
+
+    monkeypatch.setattr(run_host, "_record_failure", record_then_terminate)
+    monkeypatch.setattr(run_host, "_load", load)
+    assert run_host.main(["example"], "run-host") == 1
+    assert files.path("rc").read_text().strip() == "1"
+
+
+def test_waiter_interrupted_before_the_lock_leaves_the_run_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    files.write("log", "original output\n")
+
+    class Waiting:
+        def __enter__(self) -> None:
+            raise run_host.RunInterruptedError
+
+        def __exit__(self, *_exception: object) -> None:
+            return None
+
+    def waiting(_path: Path) -> Waiting:
+        return Waiting()
+
+    monkeypatch.setattr(run_host.runfiles, "locked", waiting)
+    assert run_host.main(["example"], "run-host") == 143
+    assert files.path("log").read_text() == "original output\n"
+    assert not files.path("rc").exists()
 
 
 def test_checked_policy_audits_workspace_in_main_checkout(tmp_path: Path) -> None:
