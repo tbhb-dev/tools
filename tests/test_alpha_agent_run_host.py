@@ -62,7 +62,7 @@ from tbhbdev.alpha.agent.model import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator
+    from collections.abc import Callable, Generator, Iterator
     from typing import TextIO
 
     from tbhbdev.alpha.agent.model import Policy, RunRequest, Settings
@@ -2452,11 +2452,8 @@ def test_linux_denies_resolve_links_drop_missing_and_deduplicate(
     assert value.detail.deny == (str(socket),)
 
 
-@pytest.mark.parametrize(
-    ("marker", "request_file"),
-    # Without a request argument the owner file is the driver's own claim.
-    [("rc", False), ("rc", True), ("pgid", False), ("pgid", True), ("owner", True)],
-)
+@pytest.mark.parametrize("request_file", [False, True])
+@pytest.mark.parametrize("marker", ["rc", "pgid", "owner"])
 def test_refused_rerun_preserves_every_file(
     config_file: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4228,13 +4225,15 @@ def test_main_claims_owner_before_loading(
         raise Invalid(message)
 
     monkeypatch.setattr(run_host, "_load", load)
-    arguments = ["example"] if claimed else ["example", "request.json"]
-    assert run_host.main(arguments, "run-host", claimed=claimed) == 1
+    assert run_host.main(["example"], "run-host", claimed=claimed) == 1
     assert calls == [True]
 
 
-def test_main_without_request_accepts_the_driver_written_owner(
+@pytest.mark.parametrize("owner", ["run-id", "other"])
+def test_main_with_owner_flag_verifies_the_drivers_file(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    owner: str,
 ) -> None:
     files = runfiles.RunFiles(
         runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
@@ -4248,9 +4247,16 @@ def test_main_without_request_accepts_the_driver_written_owner(
         raise Invalid(message)
 
     monkeypatch.setattr(run_host, "_load", load)
-    assert run_host.main(["example", "--host", "h"], "run-host") == 1
-    assert calls == [True]
+    arguments = ["example", "--host", "h", "--owner", owner]
+    assert run_host.main(arguments, "run-host") == 1
     assert files.path("owner").read_text() == "run-id\n"
+    if owner == "run-id":
+        assert calls == [True]
+    else:
+        assert calls == []
+        assert "different owner" in capsys.readouterr().err
+        assert not files.path("log").exists()
+        assert not files.path("rc").exists()
 
 
 def test_main_with_request_refuses_an_existing_owner(
@@ -4263,6 +4269,25 @@ def test_main_with_request_refuses_an_existing_owner(
     assert run_host.main(["example", "request.json"], "run-host") == 1
     assert "already has an owner" in capsys.readouterr().err
     assert not files.path("log").exists()
+    assert not files.path("rc").exists()
+
+
+def test_waiter_interrupted_before_the_lock_leaves_the_run_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    files.write("log", "original output\n")
+
+    @contextmanager
+    def waiting(_path: Path) -> Iterator[None]:
+        raise run_host.RunInterruptedError
+        yield
+
+    monkeypatch.setattr(run_host.runfiles, "locked", waiting)
+    assert run_host.main(["example"], "run-host") == 143
+    assert files.path("log").read_text() == "original output\n"
     assert not files.path("rc").exists()
 
 

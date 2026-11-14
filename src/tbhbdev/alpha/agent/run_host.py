@@ -915,24 +915,25 @@ def main(
     parser.add_argument("--host", default=socket.gethostname())
     parser.add_argument("--prompt")
     parser.add_argument("--preflight", action="store_true")
+    parser.add_argument("--owner")
     args = parser.parse_args(arguments)
     if args.name is None:
         print(f"{prog}: run name is required", file=sys.stderr)
         return 1
     files = None
     completed = None
+    holding = False
     previous = {s: signal.signal(s, interrupt) for s in process_group.INTERRUPTS}
     try:
         with process_group.defer_signals():
             files = _files(args.name)
             refuse_started(files)
-            # A tmux start has no request argument: the driver's transfer
-            # already wrote the owner file, so claiming it again would refuse.
-            ownership.claim(files, claimed=claimed or args.request is None)
+            ownership.claim(files, claimed=claimed, expected=args.owner)
         with (
             runfiles.locked(files.path("run.lock")),
             tempfile.TemporaryDirectory() as tmpdir,
         ):
+            holding = True
             refuse_started(files)
             run, text = _load(args, Path(tmpdir).resolve())
             run.files.write("log", build_info.line() + "\n")
@@ -948,7 +949,13 @@ def main(
             return completed
         rc = 143 if isinstance(exc, RunInterruptedError) else 1
         with process_group.ignore_signals():
-            if files is not None and not isinstance(exc, RunExistsError):
+            # A waiter that was interrupted before it took the run lock must
+            # not write over the records of the run that holds it.
+            if (
+                files is not None
+                and not isinstance(exc, RunExistsError)
+                and (holding or not isinstance(exc, RunInterruptedError))
+            ):
                 try:
                     reason = (
                         "interrupted during load"

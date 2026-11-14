@@ -167,7 +167,9 @@ tar -xf - -C "$d"
 
 
 def start(name: str, sockets_dir: str, host: Host, *, owner: str) -> tuple[str, ...]:
-    command = shlex.join(("alpha", "agent", "run-host", name, "--host", host.name))
+    command = shlex.join(
+        ("alpha", "agent", "run-host", name, "--host", host.name, "--owner", owner)
+    )
     return (
         "/bin/sh",
         "-c",
