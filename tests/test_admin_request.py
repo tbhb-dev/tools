@@ -3,7 +3,9 @@
 # cspell:words Jheader
 
 import base64
+import dataclasses
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -337,12 +339,13 @@ def test_default_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     runtime = request.default_runtime()
     assert isinstance(runtime.env, gh_app.Env)
-    assert runtime.audit.directory == tmp_path / "tbhbdev/admin"
+    assert runtime.audit.directory == tmp_path / "tbhb/admin-app"
+    assert runtime.marker == tmp_path / "tbhb/admin-app/enabled"
     monkeypatch.delenv("XDG_STATE_HOME")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     assert (
         request.default_runtime().audit.directory
-        == tmp_path / ".local/state/tbhbdev/admin"
+        == tmp_path / ".local/state/tbhb/admin-app"
     )
 
 
@@ -735,3 +738,38 @@ def test_a_ruleset_create_logs_a_before_and_an_after_record(fake: Fake) -> None:
     assert len(entries) == 2
     assert fake.requests[-1].method == "POST"
     assert fake.requests[-1].url.path == path
+
+
+def marked(fake: Fake, marker: Path) -> request.Runtime:
+    return dataclasses.replace(fake.runtime, marker=marker)
+
+
+def test_key_is_not_read_without_the_marker(fake: Fake, tmp_path: Path) -> None:
+    runtime = marked(fake, tmp_path / "enabled")
+    with pytest.raises(RefusedError, match=r"^credential_unavailable$"):
+        request.call(runtime, "GET", "/repos/tbhb-dev/widget", None, "test")
+    assert fake.reads == fake.requests == []
+
+
+def test_key_is_read_with_the_marker(fake: Fake, tmp_path: Path) -> None:
+    marker = tmp_path / "enabled"
+    marker.touch()
+    status, _ = request.call(
+        marked(fake, marker), "GET", "/repos/tbhb-dev/widget", None, "test"
+    )
+    assert status == 200
+    assert fake.reads
+
+
+def test_marker_must_be_a_regular_file_of_this_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.touch()
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    assert not request.enabled(link)
+    assert not request.enabled(tmp_path)
+    assert request.enabled(target)
+    monkeypatch.setattr(os, "getuid", lambda: target.stat().st_uid + 1)
+    assert not request.enabled(target)

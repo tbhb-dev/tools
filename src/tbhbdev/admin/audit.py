@@ -15,6 +15,7 @@ lazy from tbhbdev.admin.policy import Decision
 FILE_MODE = 0o600
 DIRECTORY_MODE = 0o700
 LOG_NAME = "calls.jsonl"
+GENESIS = "0" * 64
 
 
 class RefusedError(Exception):
@@ -88,6 +89,13 @@ class Audit:
             Audit.write_all(descriptor, b"\n")
 
     @staticmethod
+    def chain_head(descriptor: int) -> str:
+        """The SHA-256 of the last line, or ``GENESIS`` for an empty log."""
+        data = os.pread(descriptor, os.fstat(descriptor).st_size, 0)
+        last = data.rstrip(b"\n").rpartition(b"\n")[2]
+        return hashlib.sha256(last).hexdigest() if last else GENESIS
+
+    @staticmethod
     def same_file(directory: int, descriptor: int) -> None:
         """Refuse a log that was replaced between the open and the lock."""
         held = os.fstat(descriptor)
@@ -116,8 +124,9 @@ class Audit:
             # writer can't cut off another writer's durable record.
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             Audit.same_file(directory, descriptor)
-            data = (json.dumps(record) + "\n").encode()
             Audit.heal_tail(descriptor)
+            chained = {**record, "prev": Audit.chain_head(descriptor)}
+            data = (json.dumps(chained) + "\n").encode()
             start = os.fstat(descriptor).st_size
             try:
                 Audit.write_all(descriptor, data)
