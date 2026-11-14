@@ -5,7 +5,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple, cast
+from typing import Any, NamedTuple, cast
 
 import httpx
 
@@ -142,6 +142,13 @@ def whole_number(value: object) -> int:
     return value
 
 
+def json_list(value: object) -> list[Any]:
+    """A JSON array; iterating an object or a string would skip or misread it."""
+    if not isinstance(value, list):
+        raise ValueError(value)  # noqa: TRY004  # pragma: no mutate
+    return value
+
+
 def existing_environment(
     runtime: Runtime, path: str, reason: str
 ) -> Environment | None:
@@ -154,12 +161,12 @@ def existing_environment(
         raise RefusedError(msg)
     try:
         data = json.loads(text)
-        rules = data["protection_rules"]
+        rules = json_list(data["protection_rules"])
         reviewers = frozenset(
-            (who["type"], who["reviewer"]["id"])
+            (who["type"], whole_number(who["reviewer"]["id"]))
             for rule in rules
             if rule["type"] == "required_reviewers"
-            for who in rule["reviewers"]
+            for who in json_list(rule["reviewers"])
         )
         # A body can't carry wait_timer, so a PUT resets the timer to 0 and an
         # environment without a wait_timer rule has none to lose.
@@ -172,7 +179,7 @@ def existing_environment(
             default=0,
         )
         return Environment(reviewers, data["deployment_branch_policy"], timer)
-    except ValueError, KeyError, TypeError:
+    except ValueError, KeyError, TypeError, RecursionError:
         msg = "environment_unreadable"
         raise RefusedError(msg) from None
 

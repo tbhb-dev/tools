@@ -549,6 +549,75 @@ def test_environment_put_that_adds_drops_or_swaps_a_reviewer_is_refused(
         httpx.Response(200, json={"protection_rules": 3}),
         httpx.Response(200, json={"protection_rules": []}),
         httpx.Response(
+            200, json={"protection_rules": {}, "deployment_branch_policy": None}
+        ),
+        httpx.Response(
+            200, json={"protection_rules": "", "deployment_branch_policy": None}
+        ),
+        httpx.Response(
+            200,
+            json={
+                "protection_rules": [{"type": "required_reviewers", "reviewers": {}}],
+                "deployment_branch_policy": None,
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "protection_rules": [{"type": "required_reviewers", "reviewers": ""}],
+                "deployment_branch_policy": None,
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "protection_rules": [
+                    {
+                        "type": "required_reviewers",
+                        "reviewers": [{"type": "User", "reviewer": {"id": True}}],
+                    }
+                ],
+                "deployment_branch_policy": None,
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "protection_rules": [
+                    {
+                        "type": "required_reviewers",
+                        "reviewers": [{"type": "User", "reviewer": {"id": 1.0}}],
+                    }
+                ],
+                "deployment_branch_policy": None,
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "protection_rules": [
+                    {
+                        "type": "required_reviewers",
+                        "reviewers": [{"type": "User", "reviewer": {"id": "1"}}],
+                    }
+                ],
+                "deployment_branch_policy": None,
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "protection_rules": [
+                    {
+                        "type": "required_reviewers",
+                        "reviewers": [{"type": "User", "reviewer": {"id": None}}],
+                    }
+                ],
+                "deployment_branch_policy": None,
+            },
+        ),
+        httpx.Response(200, content=b"[" * 100000),
+        httpx.Response(
             200,
             json={
                 "protection_rules": [{"type": "wait_timer", "wait_timer": "soon"}],
