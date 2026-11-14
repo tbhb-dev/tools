@@ -395,6 +395,89 @@ def test_prepare_uses_one_worktree_and_private_destinations(
         assert {p.name for p in copied_auth.parent.iterdir()} == {"auth.json"}
 
 
+def otel_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
+) -> run_host.Run:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        reason="example" if harness is Harness.CLAUDE else None,
+    )
+    settings = dataclasses.replace(
+        run.settings, otel_endpoint="https://otlp.example.net:4318"
+    )
+    run = dataclasses.replace(run, settings=settings)
+    runfiles.private_dir(run.home / ".codex")
+    monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
+    monkeypatch.setattr(run_host.worktree, "create", constant(run.home / "workspace"))
+    monkeypatch.setattr(credentials, "auth_copy", constant(None))
+    return run
+
+
+def test_codex_run_config_holds_the_otel_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
+    result = run_host.prepare_workspace(run)
+    config_path = Path(result.paths.codex_home) / "config.toml"
+    assert tomllib.loads(config_path.read_text()) == {
+        "otel": {
+            "exporter": {
+                "otlp-http": {
+                    "endpoint": "https://otlp.example.net:4318",
+                    "protocol": "binary",
+                }
+            },
+            "trace_exporter": {
+                "otlp-http": {
+                    "endpoint": "https://otlp.example.net:4318",
+                    "protocol": "binary",
+                }
+            },
+            "metrics_exporter": {
+                "otlp-http": {
+                    "endpoint": "https://otlp.example.net:4318",
+                    "protocol": "binary",
+                }
+            },
+            "log_user_prompt": False,
+        }
+    }
+    assert "headers" not in config_path.read_text()
+    assert config_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_codex_run_without_an_endpoint_writes_no_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
+    run = dataclasses.replace(
+        run, settings=dataclasses.replace(run.settings, otel_endpoint=None)
+    )
+    result = run_host.prepare_workspace(run)
+    assert not (Path(result.paths.codex_home) / "config.toml").exists()
+
+
+def test_claude_run_writes_no_codex_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = otel_run(tmp_path, monkeypatch, Harness.CLAUDE)
+    result = run_host.prepare_workspace(run)
+    assert not (Path(result.paths.codex_home) / "config.toml").exists()
+
+
+@pytest.mark.parametrize("error", [OSError, ValueError])
+def test_codex_config_failure_names_its_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
+    monkeypatch.setattr(runfiles, "atomic", partial(preparation_failure, error))
+    with pytest.raises(Invalid) as caught:
+        run_host.prepare_workspace(run)
+    assert str(caught.value) == "run preparation failed at codex config"
+
+
 def test_build_preparation_has_the_run_socket(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

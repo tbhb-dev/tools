@@ -29,6 +29,7 @@ PATHS = "must not contain a NUL or '..' part"
 NON_BLANK = "must be a non-blank string"
 STRINGS = "must be a non-empty list of non-blank strings"
 POSITIVE = "must be a positive integer"
+HTTPS = "must be an https URL without credentials or a query"
 DURATION = "must be bare seconds or a number ending in s, m or h, up to 7 days"
 
 
@@ -36,6 +37,36 @@ DURATION = "must be bare seconds or a number ending in s, m or h, up to 7 days"
 def test_public_repositories(entries: list[str]) -> None:
     assert config.parse(GOOD | {"public_repos": entries}).public_repos == tuple(entries)
     assert config.parse(GOOD).public_repos == ()
+
+
+def test_otel_endpoint() -> None:
+    endpoint = "https://otlp.example.net:4318"
+    parsed = config.parse(GOOD | {"otel": {"endpoint": endpoint}})
+    assert parsed.otel_endpoint == endpoint
+    assert config.parse(GOOD).otel_endpoint is None
+
+
+@pytest.mark.parametrize(
+    ("table", "reason"),
+    [
+        ({"endpoint": "http://otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://user:pw@otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/?k=v"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/#f"}, HTTPS),
+        ({"endpoint": 1}, NON_BLANK),
+        ({}, "is required"),
+    ],
+)
+def test_otel_endpoint_refuses_invalid_values(table: Table, reason: str) -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(GOOD | {"otel": table})
+    assert str(caught.value) == f"[agent.otel] endpoint {reason}"
+
+
+def test_otel_refuses_other_keys() -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(GOOD | {"otel": {"endpoint": "https://a.example.net", "x": 1}})
+    assert str(caught.value) == "[agent.otel] x not recognized"
 
 
 @pytest.mark.parametrize("entries", [None, "a/b", [1], [""], ["../b"]])

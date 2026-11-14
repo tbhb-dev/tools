@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import NoReturn
+from urllib.parse import urlsplit
 
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import (
@@ -226,6 +227,27 @@ def _public_repos(table: _Table) -> tuple[str, ...]:
         except Invalid:
             table.fail("public_repos", "must contain valid repository arguments")
     return values
+
+
+def _otel_endpoint(root: _Table) -> str | None:
+    """The OTLP endpoint a harness exports to, which carries no credential."""
+    if "otel" not in root.values:
+        return None
+    table = root.table("otel")
+    table.only("endpoint")
+    endpoint = table.text("endpoint")
+    parts = urlsplit(endpoint)
+    if (
+        parts.scheme != "https"
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+        or any(c.isspace() or c in '"\\' for c in endpoint)
+    ):
+        table.fail("endpoint", "must be an https URL without credentials or a query")
+    return endpoint
 
 
 def _sandbox(table: _Table) -> Sandbox:
@@ -461,6 +483,7 @@ def parse(agent: dict[str, object]) -> Settings:
         "max_run_minutes",
         "sockets_dir",
         "public_repos",
+        "otel",
         "sandbox",
         "codex",
         "credentials",
@@ -494,6 +517,7 @@ def parse(agent: dict[str, object]) -> Settings:
         if "ssh_keepalive_count_max" in agent
         else 3,
         public_repos=_public_repos(root),
+        otel_endpoint=_otel_endpoint(root),
     )
     _check_host_accounts(settings)
     return settings

@@ -482,6 +482,22 @@ def preflight(run: Run) -> None:
         mark_host(run)
 
 
+def otel_config(endpoint: str) -> str:
+    """A Codex config with an `[otel]` table that exports to ENDPOINT.
+
+    The table has no headers, so it holds no secret, and it keeps prompts out of
+    the export.
+    """
+    exporter = f'{{ otlp-http = {{ endpoint = "{endpoint}", protocol = "binary" }} }}'
+    return (
+        "[otel]\n"
+        f"exporter = {exporter}\n"
+        f"trace_exporter = {exporter}\n"
+        f"metrics_exporter = {exporter}\n"
+        "log_user_prompt = false\n"
+    )
+
+
 def prepare_workspace(run: Run) -> Prepared:
     clone = Path(repo.clone_path(run.home, run.request.repo))
     paths = planned_paths(run)
@@ -511,6 +527,12 @@ def prepare_workspace(run: Run) -> Prepared:
             runfiles.private_dir(Path(paths.codex_home))
             source = runfiles.private_dir(run.home / ".codex") / "auth.json"
             before = credentials.auth_copy(source, Path(paths.codex_home) / "auth.json")
+        if run.settings.otel_endpoint is not None:
+            with worktree.preparation_step("codex config"):
+                runfiles.atomic(
+                    Path(paths.codex_home) / "config.toml",
+                    otel_config(run.settings.otel_endpoint),
+                )
     return Prepared(paths, delivery, before)
 
 
