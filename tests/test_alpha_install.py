@@ -191,6 +191,27 @@ def test_every_command_is_marked_and_runs_tbhbdev_alpha_from_path() -> None:
         assert text.endswith(f" {MARK}")
 
 
+def test_a_rerun_drops_the_removed_stop_and_send_message_registrations() -> None:
+    desired = install.claude_hooks()
+    guard = {"type": "command", "command": marked("state-guard"), "timeout": 10}
+    theirs = {"type": "command", "command": "theirs"}
+    old: Json = {
+        "hooks": {
+            "Stop": [{"hooks": [theirs]}, {"hooks": [guard]}],
+            "PreToolUse": [
+                {"matcher": "Bash|SendMessage|Write|Edit", "hooks": [guard]},
+                {"matcher": "SendMessage", "hooks": [theirs]},
+            ],
+        }
+    }
+    events = cast("dict[str, list[Json]]", install.merge_events(old, desired)["hooks"])
+    assert events["Stop"] == [{"hooks": [theirs]}]
+    assert {"matcher": "SendMessage", "hooks": [theirs]} in events["PreToolUse"]
+    matchers = [g.get("matcher") for g in events["PreToolUse"]]
+    assert "Bash|SendMessage|Write|Edit" not in matchers
+    assert "Bash|Write|Edit" in matchers
+
+
 def test_claude_hooks() -> None:
     record = {"type": "command", "command": marked("identity record claude")}
     guard = {"type": "command", "command": marked("state-guard"), "timeout": 10}
@@ -229,7 +250,7 @@ def test_claude_hooks() -> None:
                 "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
                 "hooks": [{"type": "command", "command": marked("guard-scripts")}],
             },
-            {"matcher": "Bash|SendMessage|Write|Edit", "hooks": [guard]},
+            {"matcher": "Bash|Write|Edit", "hooks": [guard]},
             {
                 "matcher": "Bash",
                 "hooks": [
@@ -237,7 +258,6 @@ def test_claude_hooks() -> None:
                 ],
             },
         ],
-        "Stop": [{"hooks": [guard]}],
         "PostToolUse": [
             {"matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash", "hooks": [record]},
             {
@@ -257,7 +277,7 @@ def test_the_harness_guards_are_ours_and_a_rerun_replaces_them() -> None:
     once = install.merge_events(old, desired)
     assert install.merge_events(once, desired) == once
     events = cast("dict[str, list[Json]]", once["hooks"])
-    assert events["Stop"] == [{"hooks": [theirs]}, *desired["Stop"]]
+    assert events["Stop"] == [{"hooks": [theirs]}]
     guards = [
         h
         for groups in events.values()
@@ -265,7 +285,7 @@ def test_the_harness_guards_are_ours_and_a_rerun_replaces_them() -> None:
         for h in cast("list[Json]", g["hooks"])
         if cast("str", h["command"]).startswith("tbhbdev alpha state-guard")
     ]
-    assert len(guards) == 3
+    assert len(guards) == 2
     assert all(install.ours(h) and h["timeout"] == 10 for h in guards)
 
 
@@ -732,6 +752,54 @@ def test_install_config_writes_then_is_up_to_date(
     assert [p.name for p in path.parent.iterdir()] == ["settings.json"]
 
 
+def installed_claude_hooks(world: World) -> dict[str, list[Json]]:
+    path = world.home / ".claude" / "settings.json"
+    return cast("dict[str, list[Json]]", json.loads(path.read_text())["hooks"])
+
+
+def test_a_fresh_claude_install_has_no_send_message_or_stop_guard(
+    world: World,
+) -> None:
+    assert install.install_config("claude", {}, dry_run=False) == 0
+    events = installed_claude_hooks(world)
+    assert "Stop" not in events
+    guard = marked("state-guard")
+    matchers = [
+        g.get("matcher")
+        for g in events["PreToolUse"]
+        for h in cast("list[Json]", g["hooks"])
+        if h["command"] == guard
+    ]
+    assert matchers == ["Bash|Write|Edit"]
+    assert "SendMessage" not in json.dumps(events)
+
+
+def test_a_claude_install_strips_the_old_send_message_and_stop_guards(
+    world: World,
+) -> None:
+    path = world.home / ".claude" / "settings.json"
+    path.parent.mkdir()
+    guard = {"type": "command", "command": marked("state-guard"), "timeout": 10}
+    old = {
+        "hooks": {
+            "Stop": [{"hooks": [THEIRS]}, {"hooks": [guard]}],
+            "PreToolUse": [
+                {"matcher": "Bash|SendMessage|Write|Edit", "hooks": [guard]},
+                {"matcher": "SendMessage", "hooks": [THEIRS]},
+            ],
+        }
+    }
+    path.write_text(json.dumps(old))
+    assert install.install_config("claude", {}, dry_run=False) == 0
+    events = installed_claude_hooks(world)
+    assert events["Stop"] == [{"hooks": [THEIRS]}]
+    pre = events["PreToolUse"]
+    assert {"matcher": "SendMessage", "hooks": [THEIRS]} in pre
+    matchers = [g.get("matcher") for g in pre]
+    assert "Bash|SendMessage|Write|Edit" not in matchers
+    assert "Bash|Write|Edit" in matchers
+
+
 def test_install_config_keeps_the_users_settings_and_backs_up(
     world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -750,7 +818,7 @@ def test_install_config_keeps_the_users_settings_and_backs_up(
         "model": "opus",
         "hooks": {
             **install.claude_hooks(),
-            "Stop": [{"hooks": [THEIRS]}, *install.claude_hooks()["Stop"]],
+            "Stop": [{"hooks": [THEIRS]}],
         },
         "env": {"SSH_AUTH_SOCK": ""},
     }

@@ -56,10 +56,10 @@ drops the other's keys.
 
 Claude Code also gets two hooks with optional `[harness]` settings in the
 tbhbdev user config (see tbhbdev.userconfig): `alpha state-guard`, on
-PreToolUse for Bash, SendMessage, Write and Edit, on Stop and on SessionStart,
-and `alpha session-context`, on SessionStart. Both run with a 10 second timeout.
-Sign-off and claim checks run without config. Only checks that need a setting
-are silent when it is absent. Both hooks run regardless of repository origin.
+PreToolUse for Bash, Write and Edit and on SessionStart, and
+`alpha session-context`, on SessionStart. Both run with a 10 second timeout.
+The sign-off check runs without config. Only checks that need a setting are
+silent when it is absent. Both hooks run regardless of repository origin.
 
 Every command it writes ends in the shell comment `# tbhbdev alpha install`,
 which marks it as this command's. A rerun replaces its own entries where they
@@ -287,10 +287,9 @@ def claude_hooks() -> dict[str, list[Json]]:
             group("Write|Edit|MultiEdit|NotebookEdit", handler("guard-op")),
             group("Bash", handler("guard-gh-poll")),
             group("Write|Edit|MultiEdit|NotebookEdit|Bash", handler("guard-scripts")),
-            group("Bash|SendMessage|Write|Edit", guard),
+            group("Bash|Write|Edit", guard),
             group("Bash", handler("guard-gh-config-dir")),
         ],
-        "Stop": [group(None, guard)],
         "PostToolUse": [
             group("Write|Edit|MultiEdit|NotebookEdit|Bash", record),
             group("Write|Edit|MultiEdit", handler("pr hook claude")),
