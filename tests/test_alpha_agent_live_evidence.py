@@ -310,6 +310,11 @@ class SocketProbeRunner:
         return subprocess.CompletedProcess(command, 0, "", "")
 
 
+@pytest.fixture(autouse=True)
+def no_ambient_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(credentials.CLAUDE_TOKEN_ENV, raising=False)
+
+
 @pytest.fixture
 def token_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
@@ -474,6 +479,33 @@ def test_probe_token_file_only_reaches_the_claude_environment(
             for path in tmp_path.rglob("*")
             if path.is_file() and path != token_file
         )
+
+
+@pytest.mark.parametrize("harness", [Harness.CLAUDE, Harness.CODEX])
+@pytest.mark.parametrize("value", ["", " \t\n", " example-env-token \n"])
+def test_probe_token_environment_reaches_only_the_claude_environment(
+    monkeypatch: pytest.MonkeyPatch, harness: Harness, value: str
+) -> None:
+    monkeypatch.delenv("TBHBDEV_LIVE_CLAUDE_TOKEN_FILE", raising=False)
+    monkeypatch.setenv(credentials.CLAUDE_TOKEN_ENV, value)
+    expected = (
+        {credentials.CLAUDE_TOKEN_ENV: "example-env-token"}
+        if value.strip() and harness is Harness.CLAUDE
+        else {}
+    )
+    assert live.probe_token_env(harness) == expected
+
+
+def test_probe_token_file_wins_over_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token_file = tmp_path / "token"
+    token_file.write_text("example-file-token\n")
+    monkeypatch.setenv("TBHBDEV_LIVE_CLAUDE_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv(credentials.CLAUDE_TOKEN_ENV, "example-env-token")
+    assert live.probe_token_env(Harness.CLAUDE) == {
+        credentials.CLAUDE_TOKEN_ENV: "example-file-token"
+    }
 
 
 @pytest.mark.parametrize("harness", [Harness.CLAUDE])
