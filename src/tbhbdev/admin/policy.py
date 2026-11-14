@@ -314,14 +314,14 @@ def deployment_refusal(method: str, path: str, body: dict[str, object]) -> str:
     so is deleting a group, which moves its runners to the default group.
     Changing a group's repositories is refused too, because the tool can't tell
     whether an existing group admits public repositories or any workflow.
-    Removing a repository narrows the group and passes.
+    Removing a repository narrows the group and passes. A GET never gets here.
     """
     if ENVIRONMENT.fullmatch(path) and weakens_environment(method, body):
         return "protection_weakening"
     if (
         RUNNER_MOVE.fullmatch(path)
         or (method == "DELETE" and RUNNER_GROUP.fullmatch(path))
-        or (method not in {"GET", "DELETE"} and RUNNER_REPOS.fullmatch(path))
+        or (method != "DELETE" and RUNNER_REPOS.fullmatch(path))
     ):
         return "broad_visibility"
     return sharing_refusal(method, path, body)
