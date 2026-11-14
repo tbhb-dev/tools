@@ -17,7 +17,7 @@ SHARED = re.compile(
     rf"{ORG}/actions/(?:secrets/{PART}|variables(?:/{PART})?|runner-groups(?:/[0-9]+)?)"
 )
 ORG_REPOS = re.compile(rf"{ORG}/repos")
-REPO_ONLY = re.compile(REPO)
+REPO_SETTINGS = re.compile(rf"{REPO}|{ORG}/repos")
 # The mutant that swaps a-z for A-Z survives: IGNORECASE makes them one set.
 ROUTABLE = re.compile(r"/[a-z0-9_./-]+", re.IGNORECASE | re.ASCII)  # pragma: no mutate
 PAID = frozenset(
@@ -176,8 +176,13 @@ def visibility_refusal(method: str, path: str, body: dict[str, object]) -> bool:
 
 def unsafe_setting(path: str, body: dict[str, object]) -> bool:
     """A new default branch or auto-merge would route around the merge flow."""
-    return bool(REPO_ONLY.fullmatch(path)) and (
-        "default_branch" in body or body.get("allow_auto_merge") is True
+    return bool(REPO_SETTINGS.fullmatch(path)) and (
+        "default_branch" in body
+        or bool(body.get("allow_auto_merge"))
+        or (
+            "web_commit_signoff_required" in body
+            and not body["web_commit_signoff_required"]
+        )
     )
 
 
@@ -205,21 +210,30 @@ def write_refusal(method: str, path: str, body: dict[str, object]) -> str:
     return ""
 
 
-def deployment_refusal(method: str, path: str, body: dict[str, object]) -> str:
-    """Refuse environment changes that drop protection and broad org sharing."""
-    if ENVIRONMENT.fullmatch(path) and (
-        method == "DELETE"
-        or ("reviewers" in body and not body["reviewers"])
-        or ("wait_timer" in body and not body["wait_timer"])
+def weakens_environment(method: str, body: dict[str, object]) -> bool:
+    """Only a PUT that states reviewers and keeps every checkable guard passes."""
+    reviewers: object = body.get("reviewers")
+    if method != "PUT" or not isinstance(reviewers, list) or not reviewers:
+        return True
+    items: list[object] = reviewers
+    return (
+        any(not isinstance(item, dict) for item in items)
+        or "wait_timer" in body
+        or ("can_admins_bypass" in body and body["can_admins_bypass"] is not False)
+        or ("prevent_self_review" in body and body["prevent_self_review"] is not True)
         or (
             "deployment_branch_policy" in body
             and body["deployment_branch_policy"] is None
         )
-        or body.get("prevent_self_review") is False
-    ):
-        return "protection_weakening"
+    )
+
+
+def sharing_refusal(method: str, path: str, body: dict[str, object]) -> str:
+    """Refuse broad organization sharing of secrets, variables, and runners."""
     if not SHARED.fullmatch(path):
         return ""
+    if body.get("allows_public_repositories"):
+        return "broad_visibility"
     # A new runner group defaults to every repository, so it must say selected.
     created = method == "POST" and path.endswith("/runner-groups")
     if "visibility" not in body and not created:
@@ -227,6 +241,13 @@ def deployment_refusal(method: str, path: str, body: dict[str, object]) -> str:
     if str(body.get("visibility")).lower() != "selected":
         return "broad_visibility"
     return ""
+
+
+def deployment_refusal(method: str, path: str, body: dict[str, object]) -> str:
+    """Refuse environment changes that drop protection and broad org sharing."""
+    if ENVIRONMENT.fullmatch(path) and weakens_environment(method, body):
+        return "protection_weakening"
+    return sharing_refusal(method, path, body)
 
 
 def explicit_refusal(method: str, path: str, body: dict[str, object]) -> str:

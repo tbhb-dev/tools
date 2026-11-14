@@ -143,10 +143,10 @@ def test_no_io_on_refusal(
             {"contents": "read"},
         ),
         (
-            "PUT",
+            "GET",
             "/repos/tbhb-dev/widget/environments/test",
             "tbhb-dev/widget",
-            {"environments": "write"},
+            {"environments": "read"},
         ),
         (
             "POST",

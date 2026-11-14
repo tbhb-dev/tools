@@ -2,6 +2,7 @@
 
 # cspell:words fspath
 
+import fcntl
 import hashlib
 import json
 import os
@@ -46,19 +47,21 @@ def test_log_flags_modes_and_fields(
     entry = record("PATCH", decision, "maintenance", body)
     audit.append(entry)
     audit.append({**entry, "phase": "after", "status": 200})
+    own = [call for call in calls if call[0] in {str(directory), "calls.jsonl"}]
+    # Each call syncs the directory chain twice over: once while checking
+    # ancestors and once for the opened directory, so only the log open matters.
     assert (
-        calls
-        == [
-            (str(directory), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, 0o777),
-            (
-                "calls.jsonl",
-                os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
-                0o600,
-            ),
-        ]
-        * 2
-    )
-    assert len(syncs) == 4
+        "calls.jsonl",
+        os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
+        0o600,
+    ) in own
+    opens = [call for call in own if call[0] == str(directory)]
+    assert opens
+    assert {call[1:] for call in opens} == {
+        (os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, 0o777)
+    }
+    chain = len((directory, *directory.parents))
+    assert len(syncs) == 2 * (chain + 2)
     assert stat.S_IMODE(directory.stat().st_mode) == 0o700
     logfile = directory / "calls.jsonl"
     assert stat.S_IMODE(logfile.stat().st_mode) == 0o600
@@ -91,7 +94,11 @@ def test_short_writes_finish_one_whole_line(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     original = os.write
-    monkeypatch.setattr(os, "write", lambda fd, data: original(fd, bytes(data)[:5]))
+
+    def short(fd: int, data: bytes) -> int:
+        return original(fd, data[:5])
+
+    monkeypatch.setattr(os, "write", short)
     Audit(tmp_path / "admin").append({"first": "record with a long value"})
     monkeypatch.undo()
     lines = (tmp_path / "admin/calls.jsonl").read_text().splitlines()
@@ -112,7 +119,7 @@ def test_failed_write_cuts_off_the_partial_line(
         calls.append(1)
         if len(calls) == 2:
             raise OSError
-        return original(fd, bytes(data)[:4])
+        return original(fd, data[:4])
 
     monkeypatch.setattr(os, "write", flaky)
     with pytest.raises(RefusedError, match=r"^audit_unavailable$"):
@@ -131,15 +138,115 @@ def test_created_directories_and_their_parents_are_synced(
     directory = tmp_path / "a/b/c"
     audit = Audit(directory)
     audit.append({"n": 1})
-    assert set(synced) == {
-        directory,
-        directory.parent,
-        directory.parent.parent,
-        tmp_path,
-    }
+    assert set(synced) == {directory, *directory.parents}
     synced.clear()
     audit.append({"n": 2})
-    assert not synced
+    assert set(synced) == {directory, *directory.parents}
+
+
+def test_failed_ancestor_sync_is_retried_on_the_next_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "a/b"
+    audit = Audit(directory)
+    real = Audit.sync_directory
+
+    def failing(path: Path) -> None:
+        if path == directory.parent:
+            raise OSError
+        real(path)
+
+    monkeypatch.setattr(Audit, "sync_directory", staticmethod(failing))
+    with pytest.raises(RefusedError, match=r"^audit_unavailable$"):
+        audit.append({"n": 1})
+    synced: list[Path] = []
+    monkeypatch.setattr(Audit, "sync_directory", staticmethod(synced.append))
+    audit.append({"n": 2})
+    assert directory.parent in synced
+
+
+def skip(path: Path) -> None:
+    """Stand in for a directory sync."""
+
+
+def test_log_file_is_synced_after_each_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced: list[int] = []
+    original = os.fsync
+
+    def recording(fd: int) -> None:
+        synced.append(fd)
+        original(fd)
+
+    monkeypatch.setattr(os, "fsync", recording)
+    monkeypatch.setattr(Audit, "sync_directory", staticmethod(skip))
+    Audit(tmp_path / "admin").append({"n": 1})
+    # One sync for the log file and one for its directory.
+    assert len(synced) == 2
+
+
+def test_rollback_is_synced_and_cannot_cut_another_writers_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit = Audit(tmp_path / "admin")
+    audit.append({"n": 1})
+    logfile = tmp_path / "admin/calls.jsonl"
+    synced: list[int] = []
+    original_fsync = os.fsync
+    original_write = os.write
+    other = Audit(tmp_path / "admin")
+    state = {"calls": 0}
+
+    def write(fd: int, data: bytes) -> int:
+        state["calls"] += 1
+        if state["calls"] == 1:
+            original_write(fd, data[:3])
+            raise OSError
+        return original_write(fd, data)
+
+    def sync(fd: int) -> None:
+        synced.append(fd)
+        original_fsync(fd)
+
+    monkeypatch.setattr(os, "write", write)
+    monkeypatch.setattr(os, "fsync", sync)
+    with pytest.raises(RefusedError, match=r"^audit_unavailable$"):
+        audit.append({"n": 2})
+    after_rollback = len(synced)
+    other.append({"n": 3})
+    monkeypatch.undo()
+    lines = logfile.read_text().splitlines()
+    assert [json.loads(line) for line in lines] == [{"n": 1}, {"n": 3}]
+    assert after_rollback > 0
+
+
+def test_writers_hold_an_exclusive_lock_over_the_whole_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    modes: list[int] = []
+    original = fcntl.flock
+
+    def recording(fd: int, operation: int) -> None:
+        modes.append(operation)
+        original(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", recording)
+    Audit(tmp_path / "admin").append({"n": 1})
+    assert modes == [fcntl.LOCK_EX]
+
+
+def test_unfinished_tail_is_ended_before_the_next_record(tmp_path: Path) -> None:
+    directory = tmp_path / "admin"
+    directory.mkdir(mode=0o700)
+    logfile = directory / "calls.jsonl"
+    logfile.write_text('{"n": 1}\n{"par')
+    logfile.chmod(0o600)
+    Audit(directory).append({"n": 2})
+    lines = logfile.read_text().splitlines()
+    assert lines[0] == '{"n": 1}'
+    assert lines[1] == '{"par'
+    assert json.loads(lines[2]) == {"n": 2}
 
 
 def test_sync_directory_opens_without_following_links(

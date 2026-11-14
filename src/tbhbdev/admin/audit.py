@@ -1,5 +1,6 @@
 """Durable append-only audit records, required before any secret or HTTP call."""
 
+import fcntl
 import hashlib
 import json
 import os
@@ -26,15 +27,12 @@ class Audit:
     def append(self, record: dict[str, object]) -> None:
         """Append and sync without following a directory or file symlink."""
         try:
-            created = [
-                path
-                for path in (self.directory, *self.directory.parents)
-                if not path.exists()
-            ]
             self.directory.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
-            for path in created:
-                self.sync_directory(path)
-                self.sync_directory(path.parent)
+            # Every call syncs the whole chain, so a sync that failed after the
+            # mkdir is retried instead of skipped because the paths now exist.
+            for path in (self.directory, *self.directory.parents):
+                if not path.is_symlink():
+                    self.sync_directory(path)
             directory = os.open(
                 self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
             )
@@ -81,23 +79,40 @@ class Audit:
             view = view[written:]
 
     @staticmethod
+    def heal_tail(descriptor: int) -> None:
+        """End a line that an earlier failed rollback left unfinished."""
+        size = os.fstat(descriptor).st_size
+        # Reading one byte or two at size - 1 returns the same byte.
+        if size and os.pread(descriptor, 1, size - 1) != b"\n":  # pragma: no mutate
+            Audit.write_all(descriptor, b"\n")
+
+    @staticmethod
+    def roll_back(descriptor: int, start: int) -> None:
+        # A partial line would glue to the next record, so cut it off.
+        os.ftruncate(descriptor, start)
+        os.fsync(descriptor)
+
+    @staticmethod
     def write(directory: int, record: dict[str, object]) -> None:
         descriptor = os.open(
             "calls.jsonl",
-            os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
+            os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
             0o600,
             dir_fd=directory,
         )
         try:
             Audit.validate(os.fstat(descriptor), mode=FILE_MODE)
+            # The lock covers the size snapshot through the rollback, so a failed
+            # writer can't cut off another writer's durable record.
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
             data = (json.dumps(record) + "\n").encode()
+            Audit.heal_tail(descriptor)
             start = os.fstat(descriptor).st_size
             try:
                 Audit.write_all(descriptor, data)
                 os.fsync(descriptor)
             except OSError, RefusedError:
-                # A partial line would glue to the next record, so cut it off.
-                os.ftruncate(descriptor, start)
+                Audit.roll_back(descriptor, start)
                 raise
         finally:
             os.close(descriptor)
