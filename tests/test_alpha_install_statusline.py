@@ -606,8 +606,9 @@ def test_the_digest_hashes_a_name_with_undecodable_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "a.js").write_bytes(b"x")
-    monkeypatch.setattr(Path, "relative_to", lambda *_: Path("a\udcffb"))
-    expected = hashlib.sha256(b"a\xffb\0x\0").hexdigest()
+    odd = b"a" + bytes([255]) + b"b"
+    monkeypatch.setattr(Path, "relative_to", lambda *_: Path(os.fsdecode(odd)))
+    expected = hashlib.sha256(odd + b"\0x\0").hexdigest()
     assert install.package_digest(tmp_path) == expected
 
 
