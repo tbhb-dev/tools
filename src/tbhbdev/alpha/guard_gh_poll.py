@@ -24,9 +24,10 @@ The one exception is a granted allowance for a measurement pass: ``gh run list
 repository in a grant file under ``~/.local/state/tbhb``, one call for each
 repository, and not after the grant's expiry date. A count file beside it
 keeps the tally per repository. Only the operator writes either file: the guard
-denies a Write or Edit to them and any shell command that names them. That
-doesn't cover a script file or a computed path, so the allowance is a speed
-bump against accidents, not a barrier.
+denies a Claude Code Write or Edit to them, and any shell command that names
+them or moves their directory. The apply_patch and Antigravity edit tools
+aren't covered. That doesn't cover a script file or a computed path, so the
+allowance is a speed bump against accidents, not a barrier.
 
 The loop rule covers the self-matching wait, ``while pgrep -f fetch.py; do
 sleep 5; done``: pgrep -f matches its own shell's command line, so the loop
@@ -82,6 +83,7 @@ gh-shim`` budgets the gh calls a script makes, which no hook can see.
 import fcntl
 import itertools
 import json
+import os
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -125,6 +127,8 @@ POLL_REASON = (
 ALLOWANCE_GRANT = Path.home() / ".local/state/tbhb/gh-poll-allowance.json"
 ALLOWANCE_COUNT = Path.home() / ".local/state/tbhb/gh-poll-allowance.count"
 PROTECTED = (ALLOWANCE_GRANT.name, ALLOWANCE_COUNT.name)
+STATE_DIR = ALLOWANCE_GRANT.parent
+STATE_MOVERS = {"rm", "mv", "cp", "rsync", "ditto", "ln"}
 PROTECT_REASON = (
     "The CI listing allowance's grant and count files are the operator's to "
     "write. Ask the coordinator."
@@ -460,13 +464,52 @@ def inner_script(words: list[str], body: str | None) -> str | None:
     return None
 
 
+def flattened(words: list[str], depth: int = 4) -> list[str]:
+    """The words with each quoted or spaced word split as the shell would.
+
+    ``env -S 'xargs gh run'``, ``sh -c 'gh r""un'`` and ``x.c""ount`` come out
+    as the words they run or name. Splitting goes ``depth`` levels deep.
+    """
+    out: list[str] = []
+    for word in words:
+        parts = split_string(word) if re.search(r"[\s'\"\\]", word) else [word]
+        if parts == [word] or depth == 0:
+            out.append(word)
+        else:
+            out.extend(flattened(parts, depth - 1))
+    return out
+
+
 def repeats(command: list[str]) -> bool:
     """Whether xargs or parallel would run a ``gh run`` command more than once.
 
     The listing words can arrive from stdin or ``-a``, so ``gh run`` alone counts.
+    The words are read after unquoting, including an option's value and env's
+    ``-S`` string.
     """
-    names = {word.rpartition("/")[2] for word in command}
-    return bool(REPEATERS & names) and bool(GH_RUN.search(" ".join(command)))
+    words = flattened(command)
+    names = {word.rpartition("/")[2] for word in words}
+    return bool(REPEATERS & names) and bool(GH_RUN.search(" ".join(words)))
+
+
+def names_state_dir(word: str) -> bool:
+    """Whether an absolute path word is the state directory or one of its parents."""
+    home = word.replace("${HOME}", "~").replace("$HOME", "~")
+    path = Path(os.path.normpath(Path(home).expanduser()))
+    return path.is_absolute() and path in (STATE_DIR, *STATE_DIR.parents)
+
+
+def protected_words(command: list[str]) -> bool:
+    """Whether a command's unquoted words name a protected file.
+
+    ``rm``, ``mv``, ``cp`` and the like also count when they name the state
+    directory or a parent, because that removes or restores the files.
+    """
+    words = flattened(command)
+    if any(name in word.lower() for word in words for name in PROTECTED):
+        return True
+    moves = any(word.rpartition("/")[2] in STATE_MOVERS for word in words)
+    return moves and any(names_state_dir(word) for word in words)
 
 
 def repeated_scan(args: list[str]) -> tuple[str | None, set[str]]:
@@ -526,6 +569,8 @@ def checked(
     command: list[str], body: str | None, *, repeated: bool = False
 ) -> tuple[str | None, set[str]]:
     """One simple command's deny reason, refusing a repeated listing first."""
+    if protected_words(command):
+        return PROTECT_REASON, set()
     if repeats(command):
         return REPEAT_REASON, set()
     return denial(command, body, repeated=repeated)

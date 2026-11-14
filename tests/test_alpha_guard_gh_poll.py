@@ -983,6 +983,9 @@ def test_a_count_of_deeply_nested_json_denies_a_listing(grant_file: Path) -> Non
     assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
 
 
+QUOTED_LIST = "'gh r\"\"un list -R example/three --json databaseId'"
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -1161,3 +1164,107 @@ def test_protects_matches_the_link_name_and_the_target_name_in_any_case(
 def test_a_count_key_in_another_case_still_counts_as_spent(grant_file: Path) -> None:
     (grant_file.parent / "allowance.count").write_text('{"Example/One": 1}')
     assert guard.inspect(listing("example/one"))[0] == guard.POLL_REASON
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf 'list\\nlist\\n' | env -S 'xargs -L1 gh run'",
+        "env -S 'parallel gh run'",
+        "printf 'a\\nb\\n' | xargs -n 1 sh -c " + QUOTED_LIST,
+        "printf 'a\\nb\\n' | xargs -L 1 sh -c 'gh r\"\"un list -R example/three'",
+    ],
+)
+def test_a_repeater_hidden_in_an_option_value_or_env_string_is_denied(
+    command: str, grant_file: Path
+) -> None:
+    assert guard.inspect(command)[0] is not None
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+def test_flattened_splits_quoted_words_to_a_depth() -> None:
+    assert guard.flattened(["env", "-S", "xargs gh r''un"]) == [
+        "env", "-S", "xargs", "gh", "run",
+    ]  # fmt: skip
+    assert guard.flattened(["a b"], depth=0) == ["a b"]
+    assert guard.flattened(["'a b'"], depth=0) == ["'a b'"]
+    assert guard.flattened(['x.c""ount']) == ["x.count"]
+    assert guard.flattened(["plain"]) == ["plain"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'rm ~/.local/state/tbhb/gh-poll-allowance.c""ount',
+        "rm ~/.local/state/tbhb/gh-poll-allowance.'count'",
+        "rm -rf ~/.local/state/tbhb",
+        "rm -rf ~/.local/state/tbhb/",
+        "rm -rf $HOME/.local/state/tbhb",
+        "rm -rf ${HOME}/.local/state",
+        "cp -a ~/.local/state/tbhb /tmp/snap",
+        "mv /tmp/snap ~/.local/state/tbhb",
+        "env rm -rf ~/.local",
+    ],
+)
+def test_protected_names_are_read_after_unquoting_and_the_state_directory_is_kept(
+    command: str,
+) -> None:
+    assert guard.inspect(command)[0] == guard.PROTECT_REASON
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf /tmp/snap",
+        "rm -rf ~/.local/state/other",
+        "ls ~/.local/state/tbhb",
+        "cp -a /tmp/a /tmp/b",
+        "rm -rf relative/dir",
+    ],
+)
+def test_other_paths_and_programs_pass_the_state_directory_check(command: str) -> None:
+    assert guard.inspect(command)[0] is None
+
+
+@pytest.mark.parametrize(
+    ("word", "expected"),
+    [
+        ("~/.local/state/tbhb", True),
+        ("~/.local/state/tbhb/", True),
+        ("$HOME/.local/state", True),
+        ("${HOME}/.local", True),
+        ("~/.local/state/tbhb/sub", False),
+        ("~/.local/state/other", False),
+        ("tbhb", False),
+        ("-rf", False),
+    ],
+)
+def test_names_state_dir(word: str, *, expected: bool) -> None:
+    assert guard.names_state_dir(word) is expected
+
+
+def test_a_grant_matches_only_the_listed_repository(grant_file: Path) -> None:
+    other = "example/unlisted"
+    assert guard.inspect(listing(other))[0] == guard.POLL_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+    assert guard.allowed_call(
+        ["-R", REPOS[0].upper(), *guard.ALLOWANCE_TAIL], {REPOS[0].lower()}
+    )
+    assert not guard.allowed_call(["-R", REPOS[0], *guard.ALLOWANCE_TAIL], {other})
+    assert not guard.allowed_call(
+        ["-R", REPOS[0].upper(), *guard.ALLOWANCE_TAIL], {REPOS[0].upper()}
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "xargs gh api repos/o/r/actions/runs",
+        "parallel gh api repos/o/r/actions/runs",
+        "parallel gh pr checks 1 --watch",
+        "xargs gh pr checks 1 --watch",
+        "xargs env -u " + TOKEN + " true",
+    ],
+)
+def test_a_repeater_still_scans_what_it_runs(command: str) -> None:
+    assert guard.inspect(command)[0] is not None
