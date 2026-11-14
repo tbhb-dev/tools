@@ -843,3 +843,136 @@ def test_public_visibility_is_refused_on_any_path(value: str) -> None:
     assert not policy.visibility_refusal(
         "PATCH", "/orgs/tbhb-dev/other", {"visibility": "private"}
     )
+
+
+RULESET_PATH = "/repos/tbhb-dev/widget/rulesets"
+
+
+def live_ruleset() -> dict[str, object]:
+    """The shape of the live `main` ruleset on tbhb-dev/tools."""
+    return {
+        "name": "main",
+        "target": "branch",
+        "enforcement": "active",
+        "conditions": {"ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]}},
+        "bypass_actors": [],
+        "rules": [
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
+            {"type": "required_linear_history"},
+            {"type": "required_signatures"},
+            {
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 1,
+                    "allowed_merge_methods": ["squash"],
+                },
+            },
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "required_status_checks": [
+                        {"context": "conclusion", "integration_id": 15368}
+                    ]
+                },
+            },
+        ],
+    }
+
+
+def with_rules(*rules: object) -> dict[str, object]:
+    return {**live_ruleset(), "rules": list(rules)}
+
+
+def pull_request(count: object) -> dict[str, object]:
+    return {
+        "type": "pull_request",
+        "parameters": {"required_approving_review_count": count},
+    }
+
+
+def status_checks(*entries: object) -> dict[str, object]:
+    return {
+        "type": "required_status_checks",
+        "parameters": {"required_status_checks": list(entries)},
+    }
+
+
+def test_the_live_ruleset_shape_may_be_created() -> None:
+    assert policy.check("POST", RULESET_PATH, live_ruleset()).allowed
+
+
+def test_a_ruleset_may_hold_fewer_rules_and_no_conditions() -> None:
+    body = with_rules({"type": "deletion"})
+    del body["conditions"]
+    assert policy.check("POST", RULESET_PATH, body).allowed
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {**live_ruleset(), "enforcement": "evaluate"},
+        {**live_ruleset(), "enforcement": "disabled"},
+        {**live_ruleset(), "enforcement": "ACTIVE"},
+        {**live_ruleset(), "target": "tag"},
+        {**live_ruleset(), "target": "push"},
+        {key: v for key, v in live_ruleset().items() if key != "target"},
+        {**live_ruleset(), "bypass_actors": [{"actor_id": 5, "actor_type": "Team"}]},
+        {key: v for key, v in live_ruleset().items() if key != "bypass_actors"},
+        {**live_ruleset(), "bypass_actors": None},
+        {**live_ruleset(), "unknown": True},
+        {
+            **live_ruleset(),
+            "conditions": {"ref_name": {"exclude": ["main"], "include": ["~ALL"]}},
+        },
+        {**live_ruleset(), "rules": []},
+        {**live_ruleset(), "rules": "deletion"},
+        {key: v for key, v in live_ruleset().items() if key != "rules"},
+        with_rules({"type": "creation"}),
+        with_rules({"type": "update"}),
+        with_rules({"type": "deletion"}, "deletion"),
+        with_rules({"type": "deletion", "parameters": {}}),
+        with_rules({"type": "workflows", "parameters": {}}),
+        with_rules(pull_request(0)),
+        with_rules(pull_request(count=True)),
+        with_rules(pull_request("1")),
+        with_rules({"type": "pull_request"}),
+        with_rules({"type": "pull_request", "parameters": [1]}),
+        with_rules({**pull_request(1), "extra": 1}),
+        with_rules(status_checks()),
+        with_rules(status_checks({"context": "bazel"})),
+        with_rules(status_checks({"context": "conclusion", "extra": 1})),
+        with_rules(status_checks({"context": "conclusion"}, "bazel")),
+        with_rules({"type": "required_status_checks"}),
+        with_rules({"type": "required_status_checks", "parameters": {}}),
+        with_rules(
+            {
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": "conclusion"},
+            }
+        ),
+        with_rules({"type": "required_status_checks", "parameters": 3}),
+        with_rules({**status_checks({"context": "conclusion"}), "extra": 1}),
+    ],
+)
+def test_other_ruleset_creates_are_refused(body: dict[str, object]) -> None:
+    decision = policy.check("POST", RULESET_PATH, body)
+    assert decision == policy.Decision(
+        allowed=False, code="protection_weakening", path=RULESET_PATH
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "code"),
+    [
+        ("POST", "/orgs/tbhb-dev/rulesets", "protection_weakening"),
+        ("POST", "/repos/tbhb-dev/widget/rulesets/7", "protection_weakening"),
+        ("PUT", RULESET_PATH, "protection_weakening"),
+        ("PUT", "/repos/tbhb-dev/widget/rulesets/7", "protection_weakening"),
+        ("POST", "/repos/other-org/widget/rulesets", "foreign_owner"),
+    ],
+)
+def test_the_create_rule_covers_only_a_repository_ruleset(
+    method: str, path: str, code: str
+) -> None:
+    assert policy.check(method, path, live_ruleset()).code == code

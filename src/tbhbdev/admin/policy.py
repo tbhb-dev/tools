@@ -160,8 +160,81 @@ def fields(body: object) -> set[str]:
     return set()
 
 
+RULESET_KEYS = {"name", "target", "enforcement", "conditions", "bypass_actors", "rules"}
+RULESET_PLAIN_RULES = {
+    "deletion",
+    "non_fast_forward",
+    "required_linear_history",
+    "required_signatures",
+}
+RULESET_CONDITIONS: dict[str, dict[str, list[str]]] = {
+    "ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]}
+}
+
+
+def safe_pull_request_rule(rule: dict[str, object]) -> bool:
+    """A pull request rule that asks for at least one approval."""
+    parameters = rule.get("parameters")
+    if rule.keys() != {"type", "parameters"} or not isinstance(parameters, dict):
+        return False
+    options: dict[str, object] = parameters
+    count = options.get("required_approving_review_count")
+    return isinstance(count, int) and not isinstance(count, bool) and count >= 1
+
+
+def safe_status_checks_rule(rule: dict[str, object]) -> bool:
+    """A status check rule that names only `conclusion`."""
+    parameters = rule.get("parameters")
+    if rule.keys() != {"type", "parameters"} or not isinstance(parameters, dict):
+        return False
+    options: dict[str, object] = parameters
+    checks = options.get("required_status_checks")
+    if not isinstance(checks, list) or not checks:
+        return False
+    entries: list[object] = checks
+    return all(
+        isinstance(entry, dict)
+        and entry.get("context") == "conclusion"
+        and set(entry) <= {"context", "integration_id"}
+        for entry in entries
+    )
+
+
+def safe_ruleset_rule(rule: object) -> bool:
+    """One rule type from the live `main` ruleset, in its restrictive form."""
+    if not isinstance(rule, dict):
+        return False
+    item: dict[str, object] = rule
+    kind = item.get("type")
+    if kind in RULESET_PLAIN_RULES:
+        return item.keys() == {"type"}
+    if kind == "pull_request":
+        return safe_pull_request_rule(item)
+    return kind == "required_status_checks" and safe_status_checks_rule(item)
+
+
+def safe_ruleset_create(body: dict[str, object]) -> bool:
+    """A new active branch ruleset with no bypass actor and only the live rules.
+
+    A ruleset can only add restrictions, so creating one never weakens a repository.
+    """
+    rules = body.get("rules")
+    return (
+        set(body) <= RULESET_KEYS
+        and body.get("target") == "branch"
+        and body.get("enforcement") == "active"
+        and body.get("bypass_actors") == []
+        and body.get("conditions", RULESET_CONDITIONS) == RULESET_CONDITIONS
+        and isinstance(rules, list)
+        and bool(rules)
+        and all(safe_ruleset_rule(rule) for rule in cast("list[object]", rules))
+    )
+
+
 def protection(method: str, path: str, body: dict[str, object]) -> bool:
     """Only operations that can be classified without previous state pass."""
+    if method == "POST" and re.fullmatch(rf"{REPO}/rulesets", path):
+        return safe_ruleset_create(body)
     if "/rulesets" in path:
         return method in {"PUT", "PATCH"} and body == {"enforcement": "active"}
     return (
