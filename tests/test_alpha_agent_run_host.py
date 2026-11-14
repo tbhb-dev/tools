@@ -2413,6 +2413,28 @@ def test_main_defaults_to_the_current_host(
     assert run_host.main(["example"], "example") == 7
 
 
+def test_signal_after_the_run_is_recorded_keeps_its_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+
+    @contextmanager
+    def configured(*_args: object) -> Generator[None]:
+        yield
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    def execute(run: run_host.Run, *_args: object, **_kwargs: object) -> int:
+        run.files.write("rc", "7\n")
+        return 7
+
+    monkeypatch.setattr(run_host, "_files", constant(run.files))
+    monkeypatch.setattr(run_host, "_load", constant((run, "task")))
+    monkeypatch.setattr(host_tools, "configured", configured)
+    monkeypatch.setattr(run_host, "_execute", execute)
+    assert run_host.main(["example"], "example") == 7
+    assert run.files.path("rc").read_text() == "7\n"
+
+
 def test_preparation_checks_paths_before_creation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

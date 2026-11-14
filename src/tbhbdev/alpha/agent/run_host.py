@@ -949,8 +949,10 @@ def main(
                     # Ignored until `recorded` is set: a signal in between
                     # would return a different status than the rc file holds.
                     with process_group.ignore_signals():
-                        _record_failure(files, exc)
-                        recorded = _failure_rc(exc)
+                        recorded = _recorded_rc(files)
+                        if recorded is None:
+                            _record_failure(files, exc)
+                            recorded = _failure_rc(exc)
                 raise
     except _REFUSALS as exc:
         if completed is not None:
@@ -991,6 +993,12 @@ def _record_failure(files: runfiles.RunFiles, exc: Exception) -> None:
             files.write("log", f"run refused: {reason}\n")
         finally:
             files.write("rc", f"{_failure_rc(exc)}\n")
+
+
+def _recorded_rc(files: runfiles.RunFiles) -> int | None:
+    """The status `execute` already wrote, when a signal hit before main saw it."""
+    path = files.path("rc")
+    return int(path.read_text()) if path.exists() else None
 
 
 def _files(name: str) -> runfiles.RunFiles:
