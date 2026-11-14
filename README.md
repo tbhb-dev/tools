@@ -37,13 +37,14 @@ Controllers select their key and turn off the identity agent:
 
 ```sh
 ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'run-host NAME'
+ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'preflight NAME'
 ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'result NAME'
 ssh -i KEY -o IdentitiesOnly=yes -o IdentityAgent=none agent@HOST 'kill NAME'
 ```
 
 On macOS, the controller uses `/Library/Application Support/tbhbdev/agent-launch/id_ed25519` (`ssh_serve.MACOS_LAUNCH_KEY`). Linux uses `/etc/tbhbdev/agent-launch/id_ed25519` (`ssh_serve.LINUX_LAUNCH_KEY`). Quote the macOS path when passing it to `-i`.
 
-`run-host NAME` reads one JSON object from stdin, at most 1 MiB:
+`run-host NAME` and `preflight NAME` read one JSON object from stdin, at most 1 MiB:
 
 ```json
 {"v": 1, "request": {"v": 2}, "push_token": null}
@@ -51,7 +52,7 @@ On macOS, the controller uses `/Library/Application Support/tbhbdev/agent-launch
 
 Replace `request` with the complete existing run-host request for a public GitHub repository. Request and envelope versions are separate. Prepare `NAME.prompt` in the existing run state directory before connecting. This interface uses run-host's current prompt and configuration files. It creates `NAME.request.json` with mode `0600` under `$XDG_STATE_HOME/tbhbdev/agent-runs`, which defaults to `$HOME/.local/state/tbhbdev/agent-runs`. Each entry claims `NAME.owner` with exclusive creation before launch. An existing owner or request refuses a second run of that name.
 
-Supply a short-lived push token as `push_token`, or `null` to skip pushing. One SSH connection remains open until the run finishes. It shows run-host's normal output. After the harness exits with a new commit on `agent/NAME`, the host pushes that branch over GitHub HTTPS. A one-shot credential helper reads the token through an inherited pipe. Tokens stay out of arguments, environment variables, config files, and run files. The host requires a nonempty private-name list and scans the outgoing commit messages and patches with the configured private-name rules before pushing. Push disables git hooks. A failed push records one error line and doesn't retry. After a failed harness, nothing pushes.
+Supply a short-lived push token as `push_token`, or `null` to skip pushing. One SSH connection remains open until the run finishes. It shows run-host's normal output. After the harness exits with a new commit on `agent/NAME`, the host pushes that branch over GitHub HTTPS. A one-shot credential helper reads the token through an inherited pipe. Tokens stay out of arguments, environment variables, config files, and run files. The host requires a nonempty private-name list and scans the outgoing commit messages and patches with the configured private-name rules before pushing. Push disables git hooks. A failed push records one error line and doesn't retry. After a failed harness, nothing pushes. The `preflight` verb takes only a JSON `null` push token and refuses any other value.
 
 `result NAME` prints one JSON object with `v`, `name`, `rc`, `state`, `report`, `log_tail`, `branch`, `head`, `tools_commit` and `wheel_commit`. It reads the existing run files and limits the log to its last 200 lines. While a run continues, `rc` is `null`. Missing output fields use `null`. The `branch` field names only a branch the host pushed. `tools_commit` and `wheel_commit` identify the tools checkout and installed distribution, and absent provenance prints `unknown`. Run-host records both identities in its log header.
 
