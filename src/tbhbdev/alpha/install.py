@@ -686,6 +686,9 @@ OLD_STATUSLINES = (
     BUNX_COMMAND,
 )
 STATUSLINE_TIMEOUT = 300
+# The pinned package is about 3 MiB, so a package far past this isn't it.
+STATUSLINE_MAX_BYTES = 32 * 1024 * 1024
+STATUSLINE_CHUNK = 1024 * 1024
 STATUSLINE_TOKENS = 2  # the node path and the script
 # Written into a staged install once bun exited cleanly and the package checked out.
 STATUSLINE_MARKER = ".complete"
@@ -717,19 +720,35 @@ def statusline_package(root: Path) -> Path:
 def package_digest(package: Path) -> str | None:
     """SHA-256 of every file's relative name and bytes, or None past a symlink.
 
+    Files are read in chunks, and a package over STATUSLINE_MAX_BYTES gives None.
+
     The package's bin imports sibling chunks, so the digest covers the whole
     directory. A link or any entry that isn't a file or directory gives None.
     """
     digest = hashlib.sha256()
+    remaining = STATUSLINE_MAX_BYTES
     for entry in sorted(package.rglob("*")):
         if entry.is_symlink():
             return None
         if entry.is_file():
-            name = entry.relative_to(package).as_posix().encode()
-            digest.update(name + b"\0" + entry.read_bytes() + b"\0")
+            name = os.fsencode(entry.relative_to(package).as_posix())
+            digest.update(name + b"\0")
+            with entry.open("rb") as handle:
+                while chunk := handle.read(STATUSLINE_CHUNK):
+                    remaining -= len(chunk)
+                    if remaining < 0:
+                        return None
+                    digest.update(chunk)
+            digest.update(b"\0")
         elif not entry.is_dir():
             return None
     return digest.hexdigest()
+
+
+def marker_text(marker: Path) -> bytes:
+    """The marker's first bytes, one more than the version needs."""
+    with marker.open("rb") as handle:
+        return handle.read(len(STATUSLINE_VERSION) + 1)
 
 
 def statusline_installed(root: Path) -> bool:
@@ -746,12 +765,12 @@ def statusline_installed(root: Path) -> bool:
         return (
             not any(entry.is_symlink() for entry in path)
             and marker.is_file()
-            and marker.read_text() == STATUSLINE_VERSION
+            and marker_text(marker) == STATUSLINE_VERSION.encode()
             and statusline_script(root).is_file()
             and package_digest(package) == STATUSLINE_DIGEST
         )
-    except OSError, UnicodeDecodeError:
-        # An unreadable or non-text file is no install, and a rerun replaces it.
+    except OSError:
+        # An unreadable file is no install, and a rerun replaces it.
         return False
 
 

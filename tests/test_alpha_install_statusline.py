@@ -3,6 +3,7 @@
 
 """Tests for the pinned ccstatusline install, with no network, home or bun."""
 
+import hashlib
 import json
 import os
 import shlex
@@ -582,6 +583,69 @@ def test_an_unreadable_or_non_text_file_is_no_install_and_a_rerun_repairs_it(
     assert setup.go() == 0
     assert len(setup.tools.calls) == 1
     assert statusline_installed(setup)
+
+
+def test_the_package_lives_in_node_modules_under_the_root(tmp_path: Path) -> None:
+    assert install.statusline_package(tmp_path).relative_to(tmp_path).parts == (
+        "node_modules",
+        "ccstatusline",
+    )
+
+
+def test_the_digest_covers_each_name_and_content_with_separators(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.js").write_bytes(b"x")
+    (tmp_path / "sub" / "b.js").write_bytes(b"y")
+    expected = hashlib.sha256(b"a.js\0x\0" + b"sub/b.js\0y\0").hexdigest()
+    assert install.package_digest(tmp_path) == expected
+
+
+def test_the_digest_hashes_a_name_with_undecodable_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a.js").write_bytes(b"x")
+    monkeypatch.setattr(Path, "relative_to", lambda *_: Path("a\udcffb"))
+    expected = hashlib.sha256(b"a\xffb\0x\0").hexdigest()
+    assert install.package_digest(tmp_path) == expected
+
+
+def test_the_digest_reads_in_chunks_and_refuses_a_package_over_the_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a.js").write_bytes(b"x" * 10)
+    monkeypatch.setattr(install, "STATUSLINE_CHUNK", 3)
+    monkeypatch.setattr(install, "STATUSLINE_MAX_BYTES", 10)
+    assert install.package_digest(tmp_path) is not None
+    monkeypatch.setattr(install, "STATUSLINE_MAX_BYTES", 9)
+    assert install.package_digest(tmp_path) is None
+
+
+def test_a_huge_marker_is_read_only_as_far_as_the_version(
+    setup: Setup,
+) -> None:
+    preinstall(setup.tools.root)
+    marker = setup.tools.root / install.STATUSLINE_MARKER
+    marker.write_text(install.STATUSLINE_VERSION + "x" * 10_000_000)
+    assert not statusline_installed(setup)
+    assert install.marker_text(marker) == (install.STATUSLINE_VERSION + "x").encode()
+
+
+def test_the_symlink_check_covers_the_node_modules_directory(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preinstall(setup.tools.root)
+    seen: list[Path] = []
+    real = Path.is_symlink
+
+    def spy(self: Path) -> bool:
+        seen.append(self)
+        return real(self)
+
+    monkeypatch.setattr(Path, "is_symlink", spy)
+    assert statusline_installed(setup)
+    assert setup.tools.root / "node_modules" in seen
 
 
 def test_a_socket_or_fifo_in_the_package_is_not_trusted(setup: Setup) -> None:
