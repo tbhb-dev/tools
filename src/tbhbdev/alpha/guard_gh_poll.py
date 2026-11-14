@@ -81,6 +81,7 @@ gh-shim`` budgets the gh calls a script makes, which no hook can see.
 """
 
 import fcntl
+import fnmatch
 import itertools
 import json
 import os
@@ -129,6 +130,7 @@ ALLOWANCE_COUNT = Path.home() / ".local/state/tbhb/gh-poll-allowance.count"
 PROTECTED = (ALLOWANCE_GRANT.name, ALLOWANCE_COUNT.name)
 STATE_DIR = ALLOWANCE_GRANT.parent
 STATE_FILES = (str(ALLOWANCE_GRANT).lower(), str(ALLOWANCE_COUNT).lower())
+STATE_DIRS = tuple(str(path).lower() for path in (STATE_DIR, *STATE_DIR.parents))
 STATE_MOVERS = {"rm", "mv", "cp", "rsync", "ditto", "ln"}
 PROTECT_REASON = (
     "The CI listing allowance's grant and count files are the operator's to "
@@ -493,27 +495,53 @@ def repeats(command: list[str]) -> bool:
     return bool(REPEATERS & names) and bool(GH_RUN.search(" ".join(words)))
 
 
+def braced(text: str) -> list[str]:
+    """Every spelling of text after shell brace expansion, such as ``{count,json}``."""
+    match = re.search(r"\{([^{}]*)\}", text)
+    if not match:
+        return [text]
+    return [
+        spelling
+        for part in match.group(1).split(",")
+        for spelling in braced(text[: match.start()] + part + text[match.end() :])
+    ]
+
+
 def names_state_dir(word: str) -> bool:
     """Whether an absolute path word is, or globs to, the state directory or its files.
 
-    The volume ignores case, so every comparison is lower-cased. A word with a
-    glob or brace counts when its text before the first wildcard is a prefix
-    of a protected file's path, such as ``state/tbhb/*`` or ``gh-poll-*``.
+    The word is expanded (``~``, ``$HOME``, braces) and normalised (``.``,
+    ``..``, ``//``) first. The volume ignores case, so the glob match is
+    lower-cased. A glob matches when it fits the state directory, one of its
+    parents or a protected file, such as ``/*/*/.local/state/tbhb``,
+    ``state/tbhb/*`` or ``gh-poll-*``.
     """
     home = word.replace("${HOME}", "~").replace("$HOME", "~")
     text = str(Path(home).expanduser())
-    wild = re.search(r"[*?\[{]", text)
-    if wild:
-        # "x" keeps normpath from eating the prefix's trailing slash.
-        lead = os.path.normpath(text[: wild.start()] + "x")[:-1]
-        prefix = re.sub(r"^/+", "/", lead).lower()
-        return prefix.startswith("/") and any(
-            name.startswith(prefix) for name in STATE_FILES
-        )
-    path = str(Path(os.path.normpath(text))).lower()
-    return path.startswith("/") and path in {
-        str(parent).lower() for parent in (STATE_DIR, *STATE_DIR.parents)
-    }
+    targets = (*STATE_FILES, *STATE_DIRS)
+    for spelling in braced(text):
+        pattern = re.sub(r"^/+", "/", os.path.normpath(spelling)).lower()
+        if pattern.startswith("/") and any(
+            fnmatch.fnmatchcase(target, pattern) for target in targets
+        ):
+            return True
+    return False
+
+
+def pipes_state_dir(text: str) -> bool:
+    """Whether xargs or parallel could feed a mover a path in the state directory.
+
+    The shell expands a glob before ``xargs`` sees it, as in
+    ``echo ~/.local/state/tbhb/* | xargs rm``, so the words are read across the
+    whole command text, not one simple command.
+    """
+    tokens = [token for token in re.split(r"[\s|;&()<>'\"]+", text) if token]
+    names = {token.rpartition("/")[2].lower() for token in tokens}
+    return (
+        bool(REPEATERS & names)
+        and bool(STATE_MOVERS & names)
+        and any(names_state_dir(token) for token in tokens)
+    )
 
 
 def protected_words(command: list[str]) -> bool:
@@ -577,7 +605,7 @@ def denial(
 
 def inspect(text: str, *, repeated: bool = False) -> tuple[str | None, set[str]]:
     """The deny reason for a shell command, or None, and the programs it runs."""
-    if any(name in text.lower() for name in PROTECTED):
+    if any(name in text.lower() for name in PROTECTED) or pipes_state_dir(text):
         return PROTECT_REASON, set()
     return scan_commands(text, repeated=repeated)
 
