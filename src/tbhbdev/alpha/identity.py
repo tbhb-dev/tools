@@ -2213,6 +2213,8 @@ YAML_WORDS = {"null", "true", "false", "yes", "no", "on", "off", "y", "n"}
 BARE_DOCS = {"AGENTS.md", "CLAUDE.md", "index.md", "log.md"}
 # Fixtures, not documents: skipped like the docs checker (and Go's tooling) does.
 TESTDATA = "testdata"
+# The file git keeps while a merge waits for its commit.
+MERGE_HEAD = "MERGE_HEAD"
 ITEM_LINE = re.compile(r"( *)- ([a-z]+): (.*)")
 FIELD_LINE = re.compile(r"( *)([a-z]+): (.*)")
 QUOTED = re.compile(r'"((?:[^"\\]|\\["\\])*)"')
@@ -2493,7 +2495,27 @@ def staged_docs(top: Path) -> list[tuple[str, str, str]]:
         ):
             modes = meta.split()
             docs.append((path, modes[1], modes[3]))
-    return docs
+    head = merge_head(top)
+    return docs if head is None else not_from_merge(top, docs, head)
+
+
+def merge_head(top: Path) -> str | None:
+    """The commit a merge brings in, or None when no merge is under way."""
+    code, out = git("rev-list", "-n", "1", MERGE_HEAD, cwd=top)
+    return out if code == 0 else None
+
+
+def not_from_merge(
+    top: Path, docs: list[tuple[str, str, str]], head: str
+) -> list[tuple[str, str, str]]:
+    """The documents the merge commit itself changes.
+
+    A file that merely matches the merged-in parent came from that parent as
+    committed, so stamping it would rewrite someone else's provenance.
+    """
+    _, out = git("diff", "--cached", "--name-only", "-z", head, cwd=top)
+    changed = set(out.split("\0"))
+    return [doc for doc in docs if doc[0] in changed]
 
 
 def decode(raw: bytes) -> str:

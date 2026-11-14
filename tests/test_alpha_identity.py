@@ -6244,6 +6244,52 @@ def test_staged_docs_modes_and_changes(repo: Path) -> None:
     assert {r: m for r, m, _ in ai.staged_docs(repo)}["docs/run.md"] == "100755"
 
 
+def test_staged_docs_reads_the_repository_it_is_given(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage_doc(repo, "docs/a.md", "x\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert [d[0] for d in ai.staged_docs(repo)] == ["docs/a.md"]
+
+
+def test_staged_docs_skips_files_a_merge_brings_in_unchanged(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage_doc(repo, "docs/shared.md", "base\n")
+    commit(repo)
+    run_git(repo, "switch", "-q", "-c", "side")
+    stage_doc(repo, "docs/side.md", "side\n")
+    stage_doc(repo, "docs/both.md", "side\n")
+    commit(repo)
+    run_git(repo, "switch", "-q", "-")
+    stage_doc(repo, "docs/main.md", "main\n")
+    stage_doc(repo, "docs/shared.md", "main change\n")
+    commit(repo)
+    run_git(repo, "merge", "-q", "--no-commit", "--no-ff", "side")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    (repo / "docs" / "side.md").write_text("edited after the merge\n", encoding="utf-8")
+    assert ai.staged_docs(repo) == []
+    stage_doc(repo, "docs/resolved.md", "by the merge\n")
+    assert [d[0] for d in ai.staged_docs(repo)] == ["docs/resolved.md"]
+
+
+def test_staged_docs_keeps_a_file_that_differs_from_both_parents(repo: Path) -> None:
+    stage_doc(repo, "docs/a.md", "1\n2\n3\n4\n5\n")
+    commit(repo)
+    run_git(repo, "switch", "-q", "-c", "side")
+    stage_doc(repo, "docs/a.md", "one\n2\n3\n4\n5\n")
+    commit(repo)
+    run_git(repo, "switch", "-q", "-")
+    stage_doc(repo, "docs/a.md", "1\n2\n3\n4\nfive\n")
+    commit(repo)
+    run_git(repo, "merge", "-q", "--no-commit", "--no-ff", "side")
+    assert [d[0] for d in ai.staged_docs(repo)] == ["docs/a.md"]
+
+
 def test_staged_docs_empty_without_staged_changes(repo: Path) -> None:
     assert ai.staged_docs(repo) == []
 
