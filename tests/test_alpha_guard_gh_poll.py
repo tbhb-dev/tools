@@ -7,15 +7,45 @@ import itertools
 import json
 import shlex
 import sys
+from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 
 from tbhbdev import alpha
 from tbhbdev.alpha import guard_gh_poll as guard
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 SHA = "abcdef0123456789abcdef0123456789abcdef01"
 # The 1Password service account token's variable, split for gitleaks.
 TOKEN = "OP_SERVICE_" + "ACCOUNT_TOKEN"
+FIELDS = (
+    "databaseId,event,conclusion,createdAt,startedAt,updatedAt,"
+    "workflowName,attempt,headBranch"
+)
+
+
+REPOS = ["example/one", "example/two"]
+
+
+def listing(repo: str) -> str:
+    return f"gh run list -R {repo} --limit 100 --json {FIELDS}"
+
+
+def today() -> date:
+    return datetime.now().astimezone().date()
+
+
+@pytest.fixture(autouse=True)
+def grant_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "state" / "allowance.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"repos": REPOS, "expires": date.max.isoformat()}))
+    monkeypatch.setattr(guard, "ALLOWANCE_GRANT", path)
+    monkeypatch.setattr(guard, "ALLOWANCE_COUNT", path.parent / "allowance.count")
+    return path
 
 
 @pytest.mark.parametrize(
@@ -711,3 +741,105 @@ def test_deep_nesting_fails_open(
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
     assert guard.main() == 0
     assert capsys.readouterr() == ("", "")
+
+
+def test_allowance_lets_each_granted_repository_list_once(grant_file: Path) -> None:
+    count = grant_file.parent / "allowance.count"
+    for repo in REPOS:
+        assert guard.inspect(listing(repo))[0] is None
+    assert count.read_text() == f"{len(REPOS)}\n"
+    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+
+
+def test_allowance_passes_through_a_wrapper(grant_file: Path) -> None:
+    assert guard.inspect(f"bash -c '{listing(REPOS[0])}'")[0] is None
+    assert (grant_file.parent / "allowance.count").read_text() == "1\n"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"gh run list -R example/three --limit 100 --json {FIELDS}",
+        f"gh run list -R one --limit 100 --json {FIELDS}",
+        f"gh run list -R example/one --limit 99 --json {FIELDS}",
+        f"gh run list -R example/one --limit 100 --json {FIELDS},url",
+        f"gh run list --limit 100 -R example/one --json {FIELDS}",
+        f"gh run list -R example/one --limit 100 --json {FIELDS} --paginate",
+        f"gh run list -R example/one --limit 100 --json {FIELDS} --branch x",
+        "gh run list -R example/one --limit 100",
+        "gh run list",
+        listing("example/one").replace("gh run", "gh --hostname=example.com run"),
+        f"gh run watch -R example/one --limit 100 --json {FIELDS}",
+    ],
+)
+def test_allowance_refuses_any_other_shape(command: str, grant_file: Path) -> None:
+    assert guard.inspect(command)[0] == guard.POLL_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+def test_a_loop_around_a_granted_listing_is_denied() -> None:
+    command = f"while true; do {listing(REPOS[0])}; done"
+    assert guard.inspect(command)[0] == guard.POLL_REASON
+
+
+@pytest.mark.parametrize(
+    ("expires", "allowed"),
+    [
+        (date(2000, 1, 1), False),
+        (today() - timedelta(days=1), False),
+        (today(), True),
+    ],
+)
+def test_allowance_ends_after_its_expiry_date(
+    grant_file: Path, expires: date, *, allowed: bool
+) -> None:
+    grant_file.write_text(json.dumps({"repos": REPOS, "expires": expires.isoformat()}))
+    expected = None if allowed else guard.POLL_REASON
+    assert guard.inspect(listing(REPOS[0]))[0] == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "not json",
+        "[]",
+        "{}",
+        '{"repos": ["example/one"]}',
+        '{"expires": "2999-01-01"}',
+        '{"repos": null, "expires": "2999-01-01"}',
+        '{"repos": ["example/one"], "expires": "soon"}',
+        '{"repos": ["example/one"], "expires": 20991231}',
+    ],
+)
+def test_allowance_refuses_a_malformed_grant(text: str, grant_file: Path) -> None:
+    grant_file.write_text(text)
+    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+
+
+def test_allowance_refuses_without_a_grant(grant_file: Path) -> None:
+    grant_file.unlink()
+    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+
+
+@pytest.mark.parametrize("text", ["many\n", ""])
+def test_allowance_refuses_an_unreadable_count(text: str, grant_file: Path) -> None:
+    count = grant_file.parent / "allowance.count"
+    count.write_text(text)
+    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+    assert count.read_text() == text
+
+
+def test_allowance_refuses_when_the_count_cannot_be_written(
+    grant_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blocker = grant_file.parent / "blocker"
+    blocker.write_text("a file where the directory should be")
+    monkeypatch.setattr(guard, "ALLOWANCE_COUNT", blocker / "allowance.count")
+    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+
+
+def test_run_view_of_one_run_still_passes_without_spending(grant_file: Path) -> None:
+    command = "gh run view 42 -R example/one --json databaseId,jobs"
+    assert guard.inspect(command)[0] is None
+    assert not (grant_file.parent / "allowance.count").exists()

@@ -9,6 +9,8 @@ relays webhook events into a session, so an agent never needs to poll GitHub.
 These rules apply in every repository, and deny:
 
     gh run watch, gh run list, gh pr checks --watch
+                                                 except the capped allowance
+                                                 below
     gh api|query --paginate                      any endpoint
     gh api|query repos/O/R/actions/runs          and the other list endpoints:
                                                  actions/workflows/W/runs,
@@ -16,6 +18,11 @@ These rules apply in every repository, and deny:
                                                  check-suites
     while|until|for loops whose condition or body runs gh, or runs both
                                                  sleep and pgrep
+
+The one exception is a granted allowance for a measurement pass: ``gh run list
+-R OWNER/REPO --limit 100 --json FIELDS``, in exactly that order, for each
+repository in a grant file under ``~/.local/state/tbhb``, once per repository
+and not after the grant's expiry date. A count file beside it keeps the tally.
 
 The loop rule covers the self-matching wait, ``while pgrep -f fetch.py; do
 sleep 5; done``: pgrep -f matches its own shell's command line, so the loop
@@ -73,6 +80,8 @@ import json
 import re
 import shlex
 from dataclasses import dataclass, field
+from datetime import date, datetime
+from pathlib import Path
 from typing import override
 from urllib.parse import parse_qs, urlsplit
 
@@ -99,6 +108,17 @@ POLL_REASON = (
     "check_run conclusion events for the repository through awrel, and act when "
     "it arrives. Bulk and polling GitHub reads are blocked; ask the operator "
     "for a capped exception."
+)
+# The capped allowance for one measurement pass. The operator writes the grant
+# file, JSON with `expires` (an ISO date) and `repos` (OWNER/REPO names); without
+# the file, or after `expires`, nothing is allowed. The names stay out of this
+# repository. Each allowed call adds one to the count file, and the grant allows
+# one call per listed repository. Deleting the grant file revokes it.
+ALLOWANCE_GRANT = Path.home() / ".local/state/tbhb/gh-poll-allowance.json"
+ALLOWANCE_COUNT = Path.home() / ".local/state/tbhb/gh-poll-allowance.count"
+ALLOWANCE_FIELDS = (
+    "databaseId,event,conclusion,createdAt,startedAt,updatedAt,"
+    "workflowName,attempt,headBranch"
 )
 # The token's variable, split because the repository's gitleaks config flags
 # the name written out in full.
@@ -185,13 +205,45 @@ def bulk_api(args: list[str]) -> bool:
     return False
 
 
+def spend_allowance(args: list[str]) -> bool:
+    """Whether ``gh run list``'s words after ``list`` use the granted allowance.
+
+    The words must be exactly ``-R OWNER/REPO --limit 100 --json FIELDS`` for a
+    repository the grant file lists. A match spends one of the grant's calls,
+    one per listed repository. A missing, expired or malformed grant, a spent
+    allowance, and an unreadable or unwritable count refuse it. The caller
+    passes only a call with no global flag before ``run``.
+    """
+    try:
+        grant = json.loads(ALLOWANCE_GRANT.read_text())
+        repos = grant["repos"]
+        shapes = [
+            ["-R", repo, "--limit", "100", "--json", ALLOWANCE_FIELDS] for repo in repos
+        ]
+        if (
+            args not in shapes
+            or datetime.now().astimezone().date() > date.fromisoformat(grant["expires"])
+        ):
+            return False
+        used = int(ALLOWANCE_COUNT.read_text()) if ALLOWANCE_COUNT.exists() else 0
+        if used >= len(repos):
+            return False
+        ALLOWANCE_COUNT.parent.mkdir(parents=True, exist_ok=True)
+        ALLOWANCE_COUNT.write_text(f"{used + 1}\n")
+    except OSError, ValueError, KeyError, TypeError:
+        return False
+    return True
+
+
 def github_poll(args: list[str]) -> bool:
     """Whether the words after ``gh``, past its global flags, poll GitHub."""
     i = 0
     while i < len(args) and args[i].startswith("-"):
         i += 2 if args[i] in VALUE_FLAGS else 1
     rest = args[i:]
-    if rest[:2] in (["run", "watch"], ["run", "list"]):
+    if rest[:2] == ["run", "list"]:
+        return i > 0 or not spend_allowance(rest[2:])
+    if rest[:2] == ["run", "watch"]:
         return True
     if rest[:2] == ["pr", "checks"]:
         return any(w.partition("=")[0] == "--watch" for w in rest[2:])
