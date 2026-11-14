@@ -5,6 +5,7 @@
 import io
 import itertools
 import json
+import os
 import shlex
 import sys
 from datetime import date, datetime, timedelta
@@ -925,7 +926,7 @@ def test_main_denies_an_edit_through_a_link(
     symlink = grant_file.parent / "notes.txt"
     symlink.symlink_to(grant_file)
     second_link = grant_file.parent / "other.txt"
-    second_link.second_link_to(grant_file)
+    os.link(grant_file, second_link)
     for path in (symlink, second_link):
         payload = {"tool_input": {"file_path": str(path)}}
         monkeypatch.setattr(guard, "read_hook_stdin", lambda p=payload: p)
