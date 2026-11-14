@@ -63,7 +63,7 @@ commands:
   guard-gh-pr  PreToolUse hook: block gh pr create|edit|merge and
                a session's approval of a pull request it opened
   guard-op     PreToolUse hook: require the configured 1Password account
-  state-guard  Claude Code hook: block status claims that carry no evidence
+  state-guard  Claude Code hook: block sign-off commits and unchecked open items
   session-context
                SessionStart hook: name the host, the other hosts and the time
   guard-gh-poll PreToolUse hook: block bulk GitHub reads and token unsets

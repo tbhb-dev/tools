@@ -2,9 +2,13 @@
 description: Interim agent commands, installation, and harness hooks.
 generated:
   - role: generated
-    harness: codex
-    model: openai:gpt-6
-    at: "2026-11-12T18:44:55Z"
+    harness: claude-code:2.1.322
+    model: anthropic:claude-sonnet-5-5
+    effort: medium
+    surface: cli
+    session: sha-256-64:a906bd79703e4c35
+    subagent: sha-256-64:871bb0bbccc99c95
+    at: "2026-11-14T00:20:30Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -21,7 +25,7 @@ type: Reference
 - `identity` records which agent and model made each edit and writes the `Generated-by` trailers.
 - `guard-op` requires the configured `[op] account` flag on shell calls and proposed writes in every directory. `PreToolUse` covers Claude `Bash` and `Write|Edit|MultiEdit|NotebookEdit`, Codex `Bash`/`shell`/`apply_patch` and Antigravity `run_command`/edit tools. The guard scans shell files, Markdown shell fences, Python command expressions, notebook code cells, and YAML command fields. It allows unrelated edits to existing offenders. `OP_ACCOUNT` alone doesn't pass the guard. The module docstring lists the allowed command forms that the scanner misses. Check the Codex `apply_patch` PreToolUse matcher live after install. Its behavior remains unverified against Codex's documentation.
 - `guard-gh-pr` is a PreToolUse hook that blocks `gh pr create`, `gh pr edit`, `gh pr merge` and `gh pr ready`, and names the `tbhbdev alpha` command to run instead.
-- `state-guard` is a Claude Code hook that refuses a status claim with no evidence in a SendMessage call, or tags it when the user config turns tagging on. It blocks these claims in a final reply, and a `git commit` that adds a sign-off or co-author trailer.
+- `state-guard` is a Claude Code hook that blocks a `git commit` that adds a sign-off or co-author trailer, and a new open-note item without a `Decisions checked:` line. It doesn't judge status claims in replies or messages.
 - `session-context` is a Claude Code SessionStart hook that reports the host, its role, the other hosts, and the local time.
 - `guard-gh-poll` is a PreToolUse hook that blocks GitHub polling and unsetting the 1Password service account token's variable.
 - `guard-scripts` is a PreToolUse hook that keeps scripts for the operator in `~/.local/libexec/tbhb/`. It reads the common ways an agent writes a file, so it misses the rest. It denies a script written anywhere else under the home directory, `/tmp` or `/private/tmp`, and any script in a drafts repository. Git work trees, this session's scratchpad and a run-scoped `$TMPDIR` pass. Name each file `YYYY-MM-DD-<owner>-<slug>[.vN].sh` or `YYYY-MM-DD-<owner>-<slug>[.vN].py`. The guard refuses a write to an existing file. Give each revision a new name. Both suffixes and any content starting with `#!` count as scripts. When the hook can read the content, a new `.py` file there must start with exactly `#!/usr/bin/env -S python3 -I`. Make it executable with `chmod 0755`. Known gaps include unknown content (such as `echo` output) and the executable bit, which the hook can't check at write time. Run logs go in `~/.local/state/tbhb/<same name>/`.
@@ -55,7 +59,7 @@ Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev reposi
 
 It never prompts, runs `op` or needs the 1Password app, so configuration management can run it unattended, and a second run doesn't change anything. Each hook command it writes ends in `# tbhbdev alpha install`. A rerun replaces only those entries, and keeps everything else in place. Before it changes a config, `config.toml` included, it saves the old one beside it as `<name>.tbhbdev-backup.<time>`. `--dry-run` prints the changes without writing them, and `--harness claude|codex|antigravity` limits the merge to one harness. `--hooks-only` installs only this clone's git hooks without writing user-level config and accepts `--dry-run` but rejects `--hook` and `--harness`.
 
-For Claude Code it also installs `state-guard` (PreToolUse for Bash, SendMessage, Write and Edit, plus Stop and SessionStart) and `session-context` (SessionStart), each with a 10 second timeout. Their private values come from an optional `[harness]` table in the user config, and a missing table or key turns off the check that needs it, never blocks:
+For Claude Code it also installs `state-guard` (PreToolUse for Bash, Write and Edit, plus SessionStart) and `session-context` (SessionStart), each with a 10 second timeout. Their private values come from an optional `[harness]` table in the user config, and a missing table or key turns off the check that needs it, never blocks:
 
 ```toml
 [harness]
@@ -74,11 +78,7 @@ private_repos = ["example-lab", "example-notes"]   # optional
 
 The check flags a whole repository-name token in the title and body that equals a listed name, and any token ending in `-private`, such as `example-private`. The suffix rule works without config. Matching ignores case and a trailing `.git`. A clone URL matches. It ignores substrings of longer names. A token that starts with a hyphen, such as `--private`, passes, but the check flags a word such as `non-private`. It skips a working repository whose own name ends in `-private` or appears in the list. If `origin` is unreadable, the check runs. It covers the title and body only, not commit messages.
 
-Commit and claim checks run without config. For commits, the command guard checks arguments for trailers and sign-off flags. Message bodies in here documents or `-F` files pass this guard. The commit-msg identity check catches trailers in those bodies.
-
-Evidence can be a `#N` reference or a commit hash of 7 to 40 hex characters. Hashes must contain a digit and a letter from a to f. A log path or inline code can supply evidence as well, as can command output. Claims can attribute a result with `says` or `reports`, or mark it `unverified`.
-
-On SendMessage, the guard refuses a message with an unsupported claim unless the user config sets `[state_guard] tag_messages = true`. With that setting, on PreToolUse it inserts `[state-guard: unverified]` before each sentence it flags, preserving the other input fields. A sender-written tag can't replace the guard's tag. The guard judges each message twice, once with every tag or tag fragment replaced by a space and once with them removed, so a tag nested inside another tag, written in another case, split by whitespace or invisible characters, or placed inside a word doesn't hide a claim. A claim in either rendering counts, and evidence counts only when both renderings have it. The guard puts its tag before the sentence's first word, so a sender's own markup, such as a bold label or an HTML comment around the sentence, can still sit in front of it and hide it from a reader. Each tagged sentence goes to `$XDG_STATE_HOME/tbhbdev/state-guard/tagged.jsonl`, where the state directory defaults to `~/.local/state`. Any other value, a config error, another hook event, or a tagged message whose hook output exceeds 4096 bytes, newline included, keeps the refusal, with the same single stderr message as with tagging off. The log opens without following symlinks in the last directory or the file, and only as a single-link regular file. A log failure of any kind is silent and the message still goes out, because the log isn't the verdict. The log write has no time limit on a regular file that's slow to respond, and a log that's a named pipe, which opens without blocking, fails silently. With tagging off, the guard also ignores a sender-written tag when it judges a message. The Stop hook still blocks final replies with claims that lack evidence.
+The commit check runs without config. The command guard checks arguments for trailers and sign-off flags. Message bodies in here documents or `-F` files pass this guard. The commit-msg identity check catches trailers in those bodies.
 
 These user-level hooks run in every repository. Before acting, the identity, pull request, approval guard, and install hooks check that `origin` names a tbhb-dev repository on GitHub. Outside a repository, the identity record hook still writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Both `state-guard` and `session-context` run regardless of origin. At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, which puts the `gh` shim first on PATH for the session's commands and reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 

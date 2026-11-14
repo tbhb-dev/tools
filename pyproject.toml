@@ -287,7 +287,6 @@ also_copy = [
   "README.md",
   "docs",
   "mise.toml",
-  "state_guard_corpus.py",
 ]
 
 [tool.ruff]
