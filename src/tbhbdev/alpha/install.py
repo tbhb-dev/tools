@@ -762,7 +762,9 @@ def is_ours(command: str) -> bool:
         node.is_absolute()
         and node.name == "node"
         and script.is_absolute()
-        and script.parts[-4:] == statusline_script(Path("/")).parts[-4:]
+        # Any root gives the same last four parts, so mutating "/" changes nothing.
+        and script.parts[-4:]
+        == statusline_script(Path("/")).parts[-4:]  # pragma: no mutate
         and script.parents[3].parent == statusline_root().parent
         and command == statusline_command(tokens[0], script)
     )
@@ -826,7 +828,9 @@ def install_statusline(  # noqa: PLR0911 -- one early return per outcome
     if line is None:
         return 0
     bun, node = which("bun"), which("node")
-    wanted = statusline_command(node, script) if node else None
+    # With no node, shlex.quote turns None into '', which no replaceable line
+    # equals, so dropping the guard changes nothing.
+    wanted = statusline_command(node, script) if node else None  # pragma: no mutate
     installed = statusline_installed(root)
     if line["command"] == wanted and installed:
         print(f"claude: statusLine in {path} is up to date")
