@@ -90,8 +90,9 @@ For Claude Code it also pins ccstatusline (see install_statusline): a
 `statusLine.command` that is exactly the known `bunx -y ccstatusline@latest`
 form becomes `node` running a copy installed once, at an exact version, in
 `$XDG_DATA_HOME/tbhbdev/ccstatusline/<version>`, because bunx asks the registry
-on every refresh. Another command stays. It backs up the file and reads
-the written command back.
+on every refresh. The install is staged and moved into place after a marker is
+written, so a failed bun leaves nothing to reuse. Another command stays. It
+backs up the file and reads the written command back.
 
 `--harness` limits the config merge to one harness. `--dry-run` writes
 nothing: it prints each config's diff, with one diff of Codex's `config.toml`
@@ -665,6 +666,9 @@ OLD_STATUSLINES = (
     BUNX_COMMAND,
 )
 STATUSLINE_TIMEOUT = 300
+STATUSLINE_TOKENS = 2  # the node path and the script
+# Written into a staged install once bun exited cleanly and the script exists.
+STATUSLINE_MARKER = ".complete"
 
 
 def statusline_root() -> Path:
@@ -682,11 +686,28 @@ def statusline_command(node: str, script: Path) -> str:
     return f"{COLUMNS_PREFIX} {shlex.quote(node)} {shlex.quote(str(script))}"
 
 
-def add_statusline(
-    root: Path, script: Path, bun: str | None, run: Callable[..., object]
-) -> None:
-    """Install the pinned ccstatusline into ROOT and check its script exists."""
-    root.mkdir(parents=True, exist_ok=True)
+def statusline_installed(root: Path) -> bool:
+    """Whether ROOT holds a complete install: marker and script, no symlinks."""
+    script = statusline_script(root)
+    return (
+        not root.is_symlink()
+        and (root / STATUSLINE_MARKER).is_file()
+        and script.is_file()
+        and not script.is_symlink()
+    )
+
+
+def add_statusline(root: Path, bun: str | None, run: Callable[..., object]) -> None:
+    """Install the pinned ccstatusline in a staging directory, then move it to ROOT.
+
+    ROOT appears only after bun exited cleanly and the script and marker are in
+    place, so a bun that wrote the script and then died or timed out leaves no
+    install that a later run could trust. A leftover staging directory from such
+    a run is removed first.
+    """
+    staging = root.with_name(f".{root.name}.staging")
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
     run(
         [
             bun,
@@ -695,14 +716,21 @@ def add_statusline(
             "--ignore-scripts",
             f"ccstatusline@{STATUSLINE_VERSION}",
         ],
-        cwd=root,
+        cwd=staging,
         check=True,
         capture_output=True,
         timeout=STATUSLINE_TIMEOUT,
     )
-    if not script.is_file():
+    script = statusline_script(staging)
+    if script.is_symlink() or not script.is_file():
         message = f"{script} is missing after the install"
         raise InstallError(message)
+    (staging / STATUSLINE_MARKER).write_text(STATUSLINE_VERSION)
+    if root.is_symlink():
+        root.unlink()
+    else:
+        shutil.rmtree(root, ignore_errors=True)
+    staging.replace(root)
 
 
 def missing_tool(node: str | None, bun: str | None, *, installed: bool) -> str | None:
@@ -712,18 +740,35 @@ def missing_tool(node: str | None, bun: str | None, *, installed: bool) -> str |
     return "bun" if not installed and not bun else None
 
 
-def is_ours(command: str, script: Path) -> bool:
-    """Whether COMMAND is what this installer wrote, up to the node path."""
-    head, tail = f"{COLUMNS_PREFIX} ", f" {shlex.quote(str(script))}"
-    if not (command.startswith(head) and command.endswith(tail)):
+def is_ours(command: str) -> bool:
+    """Whether COMMAND is exactly what this installer writes, for any node and version.
+
+    The node slot must be an absolute path named `node`, the script the pinned
+    package's bin under a version directory beside the current one, and the
+    quoting the installer's own. So `$MY_STATUS_NODE` and `evil-binary` don't match,
+    and a command written for an older version does.
+    """
+    head = f"{COLUMNS_PREFIX} "
+    if not command.startswith(head):
         return False
     try:
-        return len(shlex.split(command[len(head) : -len(tail)])) == 1
+        tokens = shlex.split(command[len(head) :])
     except ValueError:
         return False
+    if len(tokens) != STATUSLINE_TOKENS:
+        return False
+    node, script = Path(tokens[0]), Path(tokens[1])
+    return (
+        node.is_absolute()
+        and node.name == "node"
+        and script.is_absolute()
+        and script.parts[-4:] == statusline_script(Path("/")).parts[-4:]
+        and script.parents[3].parent == statusline_root().parent
+        and command == statusline_command(tokens[0], script)
+    )
 
 
-def replaceable_line(config: Json, script: Path) -> Json | None:
+def replaceable_line(config: Json) -> Json | None:
     """The `statusLine` object when its command is a known or our own one."""
     line = config.get("statusLine")
     if not isinstance(line, dict):
@@ -731,18 +776,18 @@ def replaceable_line(config: Json, script: Path) -> Json | None:
     command = line.get("command")
     if not isinstance(command, str):
         return None
-    known = command in OLD_STATUSLINES or is_ours(command, script)
+    known = command in OLD_STATUSLINES or is_ours(command)
     return line if known else None
 
 
-def pin_statusline(path: Path, script: Path, wanted: str | None) -> Path | None:
+def pin_statusline(path: Path, wanted: str | None) -> Path | None:
     """Write WANTED into the config as it is now; None when it's no longer ours.
 
     The file is read again here, after the install, so an edit made while bun
     ran is kept. Raises InstallError when the write can't be read back.
     """
     old, config = read_config(path)
-    line = replaceable_line(config, script)
+    line = replaceable_line(config)
     if line is None:
         return None
     merged = {**config, "statusLine": {**line, "command": wanted}}
@@ -777,12 +822,12 @@ def install_statusline(  # noqa: PLR0911 -- one early return per outcome
         return 1
     root = statusline_root()
     script = statusline_script(root)
-    line = replaceable_line(config, script)
+    line = replaceable_line(config)
     if line is None:
         return 0
     bun, node = which("bun"), which("node")
     wanted = statusline_command(node, script) if node else None
-    installed = script.is_file()
+    installed = statusline_installed(root)
     if line["command"] == wanted and installed:
         print(f"claude: statusLine in {path} is up to date")
         return 0
@@ -798,8 +843,8 @@ def install_statusline(  # noqa: PLR0911 -- one early return per outcome
         return 0
     try:
         if not installed:
-            add_statusline(root, script, bun, run)
-        backup = pin_statusline(path, script, wanted)
+            add_statusline(root, bun, run)
+        backup = pin_statusline(path, wanted)
     except (OSError, subprocess.SubprocessError, InstallError) as exc:
         print(f"{PROG}: claude: cannot pin ccstatusline: {exc}", file=sys.stderr)
         return 1
