@@ -981,7 +981,7 @@ def test_a_leading_redirect_still_spends_the_allowance(
         '{"repos": ["."], "expires": "2999-01-01"}',
         '{"repos": ["../.."], "expires": "2999-01-01"}',
         '{"repos": ["./.", "example/.."], "expires": "2999-01-01"}',
-        '{"repos": ["ex\u00e4mple/one"], "expires": "2999-01-01"}',
+        '{"repos": ["example\u00e4/one"], "expires": "2999-01-01"}',
         '{"repos": ["example/one", "x"], "expires": "2999-01-01"}',
     ],
 )
