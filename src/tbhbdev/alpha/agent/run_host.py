@@ -930,17 +930,17 @@ def main(
         # Anything that fails before this lock is held, including taking the
         # lock, belongs to a waiter and writes nothing: the records are the
         # run that holds the lock.
-        with (
-            runfiles.locked(files.path("run.lock")),
-            tempfile.TemporaryDirectory() as tmpdir,
-        ):
+        with runfiles.locked(files.path("run.lock")):
             try:
                 refuse_started(files)
-                run, text = _load(args, Path(tmpdir).resolve())
-                run.files.write("log", build_info.line() + "\n")
-                completed = execute(
-                    run, text, push_token, preflight_only=args.preflight
-                )
+                # Inside the try so a failure to create the temp directory
+                # leaves a record like any other refusal.
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    run, text = _load(args, Path(tmpdir).resolve())
+                    run.files.write("log", build_info.line() + "\n")
+                    completed = execute(
+                        run, text, push_token, preflight_only=args.preflight
+                    )
             except _REFUSALS as exc:
                 if completed is None and not isinstance(exc, RunExistsError):
                     _record_failure(files, exc)

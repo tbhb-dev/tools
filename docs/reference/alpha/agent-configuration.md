@@ -6,7 +6,6 @@ generated:
     model: anthropic:claude-sonnet-5-5
     effort: medium
     surface: cli
-    session: sha-256-64:24ed779d56b187de
     at: "2026-11-14T02:16:00Z"
 status: stable
 tags: [alpha]

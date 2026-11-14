@@ -4292,6 +4292,24 @@ def test_lock_acquisition_failure_writes_nothing(
     assert not files.path("rc").exists()
 
 
+def test_temp_directory_failure_leaves_log_and_rc(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+
+    def full(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.ENOSPC, "no space for the temp directory")
+
+    monkeypatch.setattr(run_host.tempfile, "TemporaryDirectory", full)
+    assert run_host.main(["example"], "run-host") == 1
+    assert "no space for the temp directory" in capsys.readouterr().err
+    assert "no space for the temp directory" in files.path("log").read_text()
+    assert files.path("rc").read_text().strip() == "1"
+
+
 def test_failure_records_are_written_while_the_lock_is_held(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
