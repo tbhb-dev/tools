@@ -721,3 +721,34 @@ def test_a_failed_prek_install_still_leaves_a_scanning_shim(
     stage(repo, "README.md", f"# Example\nThe node is at {ADDRESS}.\n")
     done = commit(repo, env, "commit", "-qm", "x")
     assert (done.returncode, done.stdout, done.stderr) == (1, "", TAILNET)
+
+
+@pytest.mark.usefixtures("repo")
+def test_the_origin_is_read_with_git_config_get(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(*args: str) -> tuple[int, str]:
+        calls.append(args)
+        return 1, ""
+
+    monkeypatch.setattr(pre_commit_scan, "git", fake_git)
+    assert pre_commit_scan.visibility() == ""
+    assert calls == [("config", "--get", "remote.origin.url")]
+
+
+def test_the_scan_gets_the_repository_root_from_a_subdirectory(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sub = repo / "sub"
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+    seen: list[object] = []
+
+    def fake_scan(*_args: object, **kwargs: object) -> None:
+        seen.append(kwargs["root"])
+
+    monkeypatch.setattr(secret_scan, "scan", fake_scan)
+    assert pre_commit_scan.main([], "tbhbdev alpha pre-commit-scan") == 0
+    assert seen == [repo.resolve()]

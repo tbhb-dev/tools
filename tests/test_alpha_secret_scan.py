@@ -467,3 +467,118 @@ def test_the_name_rule_families_are_the_ids_without_their_number(
 
 def test_a_rule_without_an_id_is_not_a_name_rule() -> None:
     assert secret_scan.is_name_rule({}) is False
+
+
+def test_a_staged_scan_names_the_path_gitleaks_scans(
+    root: Path, tmp_path: Path
+) -> None:
+    fake = tmp_path / "gitleaks"
+    log = tmp_path / "log"
+    body = (
+        f"import sys\nopen({str(log)!r}, 'w').write(repr(sys.argv[1:]))\nprint('[]')\n"
+    )
+    write_fake(fake, body)
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    secret_scan.run_gitleaks(
+        "",
+        "the staged changes",
+        tmp_path / "config.toml",
+        root=root,
+        gitleaks=str(fake),
+        source=secret_scan.STAGED,
+        tree=tree,
+    )
+    argv = ast.literal_eval(log.read_text())
+    assert argv[: len(secret_scan.STAGED)] == list(secret_scan.STAGED)
+    assert argv[-1] == str(tree)
+
+
+def test_a_staged_scan_passes_its_inputs_on(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[object, ...]] = []
+
+    def fake(_data: object, private: str, what: str, **kwargs: object) -> None:
+        seen.append((private, what, kwargs))
+
+    monkeypatch.setattr(secret_scan, "scan_staged", fake)
+    secret_scan.scan(
+        "",
+        "the staged changes",
+        root=root,
+        gitleaks="the-gitleaks",
+        visibility="THE-VISIBILITY",
+        source=secret_scan.STAGED,
+    )
+    expected = {
+        "root": root,
+        "gitleaks": "the-gitleaks",
+        "visibility": "THE-VISIBILITY",
+    }
+    assert seen == [
+        (secret_scan.private_config().read_text(), "the staged changes", expected)
+    ]
+
+
+@pytest.mark.parametrize("extends", [None, "[extend]\nx = 1\n"])
+@pytest.mark.parametrize("visibility", [secret_scan.PRIVATE, ""])
+def test_scan_staged_builds_the_private_directory_and_calls_gitleaks(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extends: str | None,
+    visibility: str,
+) -> None:
+    private = secret_scan.private_config().read_text()
+    data = secret_scan.parse_private(private)
+    assert data is not None
+    staged_calls: list[tuple[object, ...]] = []
+    seen: dict[str, object] = {}
+
+    def fake_file(where: Path, name: str, what: str) -> str | None:
+        staged_calls.append((where, name, what))
+        return extends if name == secret_scan.GITLEAKS_EXTENDS else "ignore\n"
+
+    def fake_env(where: Path, what: str) -> dict[str, str]:
+        staged_calls.append((where, what))
+        return {"ENV": "yes"}
+
+    def fake_gitleaks(text: str, what: str, config: Path, **kwargs: object) -> None:
+        here = cast("Path", kwargs["root"])
+        seen["call"] = (text, what, kwargs)
+        seen["config"] = (config.name, config.parent == here, config.read_text())
+        seen["files"] = {item.name: item.read_text() for item in here.iterdir()}
+
+    monkeypatch.setattr(secret_scan, "staged_file", fake_file)
+    monkeypatch.setattr(secret_scan, "staged_env", fake_env)
+    monkeypatch.setattr(secret_scan, "run_gitleaks", fake_gitleaks)
+    secret_scan.scan_staged(
+        data,
+        private,
+        "the staged changes",
+        root=root,
+        gitleaks="the-gitleaks",
+        visibility=visibility,
+    )
+    what = "the staged changes"
+    assert staged_calls == [
+        (root, secret_scan.GITLEAKS_EXTENDS, what),
+        (root, secret_scan.GITLEAKS_IGNORE, what),
+        (root, what),
+    ]
+    text, called_what, kwargs = cast("tuple[str, str, dict[str, object]]", seen["call"])
+    assert (text, called_what) == ("", what)
+    assert kwargs["tree"] == kwargs["root"]
+    assert kwargs["gitleaks"] == "the-gitleaks"
+    assert kwargs["source"] == secret_scan.STAGED
+    assert kwargs["env"] == {"ENV": "yes"}
+    base = data if extends is not None else {**data, "extend": {"useDefault": True}}
+    expected = (
+        secret_scan.without_name_rules(base)
+        if visibility == secret_scan.PRIVATE
+        else (private if extends is not None else secret_scan.tomlkit.dumps(base))
+    )
+    assert seen["config"] == ("private.toml", True, expected)
+    files = cast("dict[str, str]", seen["files"])
+    assert files[secret_scan.GITLEAKS_IGNORE] == "ignore\n"
+    assert files.get(secret_scan.GITLEAKS_EXTENDS) == extends
