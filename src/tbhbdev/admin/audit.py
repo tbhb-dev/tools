@@ -87,6 +87,15 @@ class Audit:
             Audit.write_all(descriptor, b"\n")
 
     @staticmethod
+    def same_file(directory: int, descriptor: int) -> None:
+        """Refuse a log that was replaced between the open and the lock."""
+        held = os.fstat(descriptor)
+        current = os.stat("calls.jsonl", dir_fd=directory, follow_symlinks=False)
+        if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+            code = "audit_unavailable"
+            raise RefusedError(code)
+
+    @staticmethod
     def roll_back(descriptor: int, start: int) -> None:
         # A partial line would glue to the next record, so cut it off.
         os.ftruncate(descriptor, start)
@@ -105,6 +114,7 @@ class Audit:
             # The lock covers the size snapshot through the rollback, so a failed
             # writer can't cut off another writer's durable record.
             fcntl.flock(descriptor, fcntl.LOCK_EX)
+            Audit.same_file(directory, descriptor)
             data = (json.dumps(record) + "\n").encode()
             Audit.heal_tail(descriptor)
             start = os.fstat(descriptor).st_size

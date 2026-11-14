@@ -168,6 +168,122 @@ REFUSALS: list[tuple[str, str, str, object]] = [
         "/orgs/tbhb-dev/actions/runner-groups/7",
         {"allows_public_repositories": True},
     ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {"reviewers": [{"type": "User", "id": 1}]},
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {
+            "reviewers": [{"type": "User", "id": 1}],
+            "prevent_self_review": True,
+            "deployment_branch_policy": {
+                "protected_branches": True,
+                "custom_branch_policies": False,
+            },
+        },
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {
+            "reviewers": [{"type": "User", "id": 1}],
+            "can_admins_bypass": False,
+            "deployment_branch_policy": {
+                "protected_branches": True,
+                "custom_branch_policies": False,
+            },
+        },
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {
+            "reviewers": [{"type": "User", "id": 1}],
+            "can_admins_bypass": False,
+            "prevent_self_review": True,
+        },
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {
+            "reviewers": [{"type": "User", "id": 1}],
+            "can_admins_bypass": False,
+            "prevent_self_review": True,
+            "deployment_branch_policy": {
+                "protected_branches": False,
+                "custom_branch_policies": True,
+            },
+        },
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {
+            "reviewers": [{"type": "User", "id": 1, "extra": 1}],
+            "can_admins_bypass": False,
+            "prevent_self_review": True,
+            "deployment_branch_policy": {
+                "protected_branches": True,
+                "custom_branch_policies": False,
+            },
+        },
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {
+            "reviewers": [{"type": "User"}],
+            "can_admins_bypass": False,
+            "prevent_self_review": True,
+            "deployment_branch_policy": {
+                "protected_branches": True,
+                "custom_branch_policies": False,
+            },
+        },
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {
+            "reviewers": [],
+            "can_admins_bypass": False,
+            "prevent_self_review": True,
+            "deployment_branch_policy": {
+                "protected_branches": True,
+                "custom_branch_policies": False,
+            },
+        },
+    ),
+    (
+        "broad_visibility",
+        "PATCH",
+        "/orgs/tbhb-dev/actions/runner-groups/7",
+        {"restricted_to_workflows": False},
+    ),
+    (
+        "broad_visibility",
+        "PATCH",
+        "/orgs/tbhb-dev/actions/runner-groups/7",
+        {"selected_workflows": ["x"]},
+    ),
+    (
+        "broad_visibility",
+        "POST",
+        "/orgs/tbhb-dev/actions/runner-groups",
+        {"name": "g", "visibility": "selected"},
+    ),
     ("public_visibility", "POST", "/orgs/tbhb-dev/repos", {"name": "x"}),
     ("public_visibility", "POST", "/orgs/tbhb-dev/repos", {"name": "x", "private": 1}),
     ("public_visibility", "PATCH", "/repos/tbhb-dev/widget", {"visibility": "Public"}),
@@ -419,7 +535,10 @@ def test_unknown_settings(path: str) -> None:
                 "reviewers": [{"type": "User", "id": 1}],
                 "can_admins_bypass": False,
                 "prevent_self_review": True,
-                "deployment_branch_policy": {"protected_branches": True},
+                "deployment_branch_policy": {
+                    "protected_branches": True,
+                    "custom_branch_policies": False,
+                },
             },
             "environments",
         ),
@@ -484,7 +603,7 @@ def test_unknown_settings(path: str) -> None:
         (
             "POST",
             "/orgs/tbhb-dev/actions/runner-groups",
-            {"name": "g", "visibility": "selected"},
+            {"name": "g", "visibility": "selected", "restricted_to_workflows": True},
             "organization_self_hosted_runners",
         ),
         (
@@ -497,6 +616,12 @@ def test_unknown_settings(path: str) -> None:
             "PATCH",
             "/orgs/tbhb-dev/actions/runner-groups/7",
             {"allows_public_repositories": False},
+            "organization_self_hosted_runners",
+        ),
+        (
+            "PATCH",
+            "/orgs/tbhb-dev/actions/runner-groups/7",
+            {"restricted_to_workflows": True},
             "organization_self_hosted_runners",
         ),
         (

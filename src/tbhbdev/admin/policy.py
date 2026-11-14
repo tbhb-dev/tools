@@ -210,21 +210,38 @@ def write_refusal(method: str, path: str, body: dict[str, object]) -> str:
     return ""
 
 
+SAFE_BRANCH_POLICY = {"protected_branches": True, "custom_branch_policies": False}
+REVIEWER_KEYS = {"type", "id"}
+
+
 def weakens_environment(method: str, body: dict[str, object]) -> bool:
-    """Only a PUT that states reviewers and keeps every checkable guard passes."""
+    """Only a PUT that states every guard, safely, passes."""
     reviewers: object = body.get("reviewers")
     if method != "PUT" or not isinstance(reviewers, list) or not reviewers:
         return True
     items: list[object] = reviewers
     return (
-        any(not isinstance(item, dict) for item in items)
-        or "wait_timer" in body
-        or ("can_admins_bypass" in body and body["can_admins_bypass"] is not False)
-        or ("prevent_self_review" in body and body["prevent_self_review"] is not True)
-        or (
-            "deployment_branch_policy" in body
-            and body["deployment_branch_policy"] is None
+        any(
+            not isinstance(item, dict) or item.keys() != REVIEWER_KEYS for item in items
         )
+        or "wait_timer" in body
+        or body.get("can_admins_bypass") is not False
+        or body.get("prevent_self_review") is not True
+        or body.get("deployment_branch_policy") != SAFE_BRANCH_POLICY
+    )
+
+
+def runner_group_broad(method: str, path: str, body: dict[str, object]) -> bool:
+    """A new runner group defaults to every repository and every workflow."""
+    created = method == "POST" and path.endswith("/runner-groups")
+    return (
+        bool(body.get("allows_public_repositories"))
+        or "selected_workflows" in body
+        or (
+            "restricted_to_workflows" in body
+            and body["restricted_to_workflows"] is not True
+        )
+        or (created and body.get("restricted_to_workflows") is not True)
     )
 
 
@@ -232,9 +249,8 @@ def sharing_refusal(method: str, path: str, body: dict[str, object]) -> str:
     """Refuse broad organization sharing of secrets, variables, and runners."""
     if not SHARED.fullmatch(path):
         return ""
-    if body.get("allows_public_repositories"):
+    if runner_group_broad(method, path, body):
         return "broad_visibility"
-    # A new runner group defaults to every repository, so it must say selected.
     created = method == "POST" and path.endswith("/runner-groups")
     if "visibility" not in body and not created:
         return ""

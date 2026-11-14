@@ -35,8 +35,8 @@ A refusal exits 3 with its code on standard error. Usage errors exit 2. HTTP err
 
 | Code | Meaning |
 | --- | --- |
-| `protection_weakening` | Protection deletion, bypass actors, an unclassified protection write, or an environment write unless it's a `PUT` that lists reviewers and omits `wait_timer`, with administrator bypass off, self-review prevention on, and a deployment branch policy present. A repository `default_branch` change, `allow_auto_merge: true`, or `web_commit_signoff_required: false` also counts |
-| `broad_visibility` | An organization secret, variable, or runner group whose visibility isn't `selected`, a new runner group that omits it, or a runner group that allows public repositories |
+| `protection_weakening` | Protection deletion, bypass actors, an unclassified protection write, or an environment write unless it's a `PUT` that lists reviewers with only `type` and `id` keys and omits `wait_timer`. The body must also state `can_admins_bypass: false` and `prevent_self_review: true`, plus the deployment branch policy `{"protected_branches": true, "custom_branch_policies": false}`. A repository `default_branch` change, `allow_auto_merge: true`, or `web_commit_signoff_required: false` also counts |
+| `broad_visibility` | An organization secret, variable, or runner group whose visibility isn't `selected`, a new runner group that omits it, a runner group that allows public repositories, a runner group whose `restricted_to_workflows` isn't true, or any `selected_workflows` change |
 | `membership_change` | Membership, invitations, collaborators, or role changes |
 | `repository_removal` | Repository deletion, transfer, or archiving |
 | `paid_feature` | Security analysis, larger runners, Codespaces, Copilot, billing, or spending |
@@ -61,7 +61,7 @@ A refusal exits 3 with its code on standard error. Usage errors exit 2. HTTP err
 
 ## Append-only audit log
 
-The log path is `$XDG_STATE_HOME/tbhbdev/admin/calls.jsonl`, defaulting to `~/.local/state/tbhbdev/admin/calls.jsonl`. Its directory must belong to the caller with mode `0700`. Each open requires a caller-owned regular file with mode `0600` and one hard link. Symlinks fail closed. Opens always use append, create, and no-follow flags. No command edits the log. Each write holds an exclusive lock from the size snapshot through its rollback. A failed write then cuts off only its own partial line and syncs the cut. If the last line is unfinished, the next writer ends it first. Every call syncs the log directory and each of its ancestors.
+The log path is `$XDG_STATE_HOME/tbhbdev/admin/calls.jsonl`, defaulting to `~/.local/state/tbhbdev/admin/calls.jsonl`. Its directory must belong to the caller with mode `0700`. Each open requires a caller-owned regular file with mode `0600` and one hard link. Symlinks fail closed. Opens always use append, create, and no-follow flags. No command edits the log. Each write holds an exclusive lock from the size snapshot through its rollback. A failed write then cuts off only its own partial line and syncs the cut. If the last line is unfinished, the next writer ends it with a newline and leaves the fragment as a line that's not JSON, so readers must skip lines that aren't valid JSON. A writer refuses a log file that another process replaced between its open and its lock. Every call syncs the log directory and each of its ancestors.
 
 Each JSON line contains `id`, `time` in Coordinated Universal Time (UTC), caller `uid`, `reason`, `method`, normalized `path`, `decision` (`allow` or `refuse`), `code`, HTTP `status` or null, `phase`, and `body_sha256`. The hash covers canonical JSON bytes sent to GitHub, or empty bytes for an absent body. Records never contain request bodies or credentials. Keep secrets out of reasons.
 

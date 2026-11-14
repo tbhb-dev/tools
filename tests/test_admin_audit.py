@@ -2,11 +2,13 @@
 
 # cspell:words fspath
 
+import contextlib
 import fcntl
 import hashlib
 import json
 import os
 import stat
+import threading
 from datetime import datetime
 lazy from pathlib import Path
 
@@ -186,39 +188,72 @@ def test_log_file_is_synced_after_each_record(
     assert len(synced) == 2
 
 
-def test_rollback_is_synced_and_cannot_cut_another_writers_record(
+def test_overlapping_writer_waits_and_the_rollback_is_synced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    audit = Audit(tmp_path / "admin")
-    audit.append({"n": 1})
-    logfile = tmp_path / "admin/calls.jsonl"
-    synced: list[int] = []
-    original_fsync = os.fsync
-    original_write = os.write
-    other = Audit(tmp_path / "admin")
-    state = {"calls": 0}
-
-    def write(fd: int, data: bytes) -> int:
-        state["calls"] += 1
-        if state["calls"] == 1:
-            original_write(fd, data[:3])
-            raise OSError
-        return original_write(fd, data)
+    directory = tmp_path / "admin"
+    Audit(directory).append({"n": 1})
+    logfile = directory / "calls.jsonl"
+    log_inode = logfile.stat().st_ino
+    entered = threading.Event()
+    release = threading.Event()
+    log_syncs: list[str] = []
+    original = os.fsync
 
     def sync(fd: int) -> None:
-        synced.append(fd)
-        original_fsync(fd)
+        if stat.S_ISREG(os.fstat(fd).st_mode) and os.fstat(fd).st_ino == log_inode:
+            name = threading.current_thread().name
+            log_syncs.append(name)
+            if name == "writer-a" and log_syncs.count("writer-a") == 1:
+                entered.set()
+                assert release.wait(timeout=10)
+                raise OSError
+        original(fd)
 
-    monkeypatch.setattr(os, "write", write)
+    def write_a() -> None:
+        with contextlib.suppress(RefusedError):
+            Audit(directory).append({"n": 2})
+
     monkeypatch.setattr(os, "fsync", sync)
-    with pytest.raises(RefusedError, match=r"^audit_unavailable$"):
-        audit.append({"n": 2})
-    after_rollback = len(synced)
-    other.append({"n": 3})
+    writer_a = threading.Thread(target=write_a, name="writer-a")
+    writer_b = threading.Thread(
+        target=lambda: Audit(directory).append({"n": 3}), name="writer-b"
+    )
+    writer_a.start()
+    assert entered.wait(timeout=10)
+    writer_b.start()
+    writer_b.join(timeout=0.5)
+    assert writer_b.is_alive()
+    release.set()
+    writer_a.join(timeout=10)
+    writer_b.join(timeout=10)
     monkeypatch.undo()
     lines = logfile.read_text().splitlines()
     assert [json.loads(line) for line in lines] == [{"n": 1}, {"n": 3}]
-    assert after_rollback > 0
+    # A syncs once for the failed write and once after the rollback.
+    assert log_syncs.count("writer-a") == 2
+
+
+def test_a_log_replaced_before_the_lock_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "admin"
+    audit = Audit(directory)
+    audit.append({"n": 1})
+    original = fcntl.flock
+
+    def swapping(fd: int, operation: int) -> None:
+        original(fd, operation)
+        (directory / "calls.jsonl").rename(directory / "old.jsonl")
+        replacement = directory / "calls.jsonl"
+        replacement.write_text("")
+        replacement.chmod(0o600)
+
+    monkeypatch.setattr(fcntl, "flock", swapping)
+    with pytest.raises(RefusedError, match=r"^audit_unavailable$"):
+        audit.append({"n": 2})
+    monkeypatch.undo()
+    assert (directory / "calls.jsonl").read_text() == ""
 
 
 def test_writers_hold_an_exclusive_lock_over_the_whole_write(
