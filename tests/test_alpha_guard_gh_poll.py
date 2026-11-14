@@ -1211,6 +1211,13 @@ def test_flattened_splits_quoted_words_to_a_depth() -> None:
         "rm -rf ~/.local/state/tbhb/*",
         "rm ~/.local/state/tbhb/gh-poll-*",
         "rm ~/.local/state/tbhb/gh-poll-allowance.{count,json}",
+        "rm ~/.local/state/{t..t}bhb/*",
+        "rm ~/.local/state/tbhb/gh-poll-allowance.{c..c}ount",
+        "rm ~/.local/state/tbhb/gh-poll-allowance.{j..k}son",
+        "rm ~/.local/state/tbhb/gh-poll-allowance.{k..j}son",
+        "rm -r {~,/x}/.local/state/tbhb",
+        "rm {~,/x}/.local/state/tbhb/*",
+        "rm {/x,$HOME}/.local/state/tbhb",
         "rm ~/.local/state/tbhb/gh-poll-allowance.*",
         "rm -rf ~/.local/state/tb*",
         "rm ~/.local/state/tbhb/../tbhb/*",
@@ -1288,6 +1295,16 @@ def test_other_paths_and_programs_pass_the_state_directory_check(command: str) -
         ("/Users/tony/.local/{state,bin}/tbhb", True),
         ("/Users/tony/.local/state/tbhb/../other/*", False),
         ("/{a,b}/c", False),
+        ("~/.local/state/{t..t}bhb/*", True),
+        ("~/.local/state/{a..z}bhb", True),
+        ("~/.local/state/{z..a}bhb", True),
+        ("~/.local/state/tbhb/gh-poll-allowance.{c..d}ount", True),
+        ("~/.local/state/tbhb/gh-poll-allowance.{1..-1}x", False),
+        ("~/.local/state/{x..y}/z", False),
+        ("{~,/x}/.local/state/tbhb", True),
+        ("{/x,~}/.local/state/tbhb", True),
+        ("{/x,/y}/.local/state/tbhb", False),
+        ("/{0..9999999999}/c", False),
         ("tbhb", False),
         ("-rf", False),
     ],
@@ -1376,3 +1393,27 @@ def test_pipes_state_dir_needs_a_repeater_a_mover_and_a_state_path(
     text: str, *, expected: bool
 ) -> None:
     assert guard.pipes_state_dir(text) is expected
+
+
+@pytest.mark.parametrize(
+    ("body", "items"),
+    [
+        ("a,b", ["a", "b"]),
+        ("t..t", ["t"]),
+        ("a..c", ["a", "b", "c"]),
+        ("c..a", ["c", "b", "a"]),
+        ("1..3", ["1", "2", "3"]),
+        ("3..1", ["3", "2", "1"]),
+        ("-1..1", ["-1", "0", "1"]),
+        ("1..a", ["1..a"]),
+        ("ab..c", ["ab..c"]),
+    ],
+)
+def test_brace_items_expands_a_character_or_integer_range(
+    body: str, items: list[str]
+) -> None:
+    assert guard.brace_items(body) == items
+
+
+def test_brace_items_caps_a_long_integer_range() -> None:
+    assert len(guard.brace_items("1..9999999999")) == guard.BRACE_LIMIT

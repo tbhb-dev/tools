@@ -131,6 +131,7 @@ PROTECTED = (ALLOWANCE_GRANT.name, ALLOWANCE_COUNT.name)
 STATE_DIR = ALLOWANCE_GRANT.parent
 STATE_FILES = (str(ALLOWANCE_GRANT).lower(), str(ALLOWANCE_COUNT).lower())
 STATE_DIRS = tuple(str(path).lower() for path in (STATE_DIR, *STATE_DIR.parents))
+BRACE_LIMIT = 256
 STATE_MOVERS = {"rm", "mv", "cp", "rsync", "ditto", "ln"}
 PROTECT_REASON = (
     "The CI listing allowance's grant and count files are the operator's to "
@@ -495,6 +496,20 @@ def repeats(command: list[str]) -> bool:
     return bool(REPEATERS & names) and bool(GH_RUN.search(" ".join(words)))
 
 
+def brace_items(body: str) -> list[str]:
+    """The items of one brace body: a comma list, or a character or integer range."""
+    span = re.fullmatch(r"(-?\d+)\.\.(-?\d+)|([A-Za-z])\.\.([A-Za-z])", body)
+    if not span:
+        return body.split(",")
+    if span.group(3):
+        first, last = ord(span.group(3)), ord(span.group(4))
+        step = 1 if first <= last else -1
+        return [chr(code) for code in range(first, last + step, step)]
+    first, last = int(span.group(1)), int(span.group(2))
+    step = 1 if first <= last else -1
+    return [str(number) for number in range(first, last + step, step)[:BRACE_LIMIT]]
+
+
 def braced(text: str) -> list[str]:
     """Every spelling of text after shell brace expansion, such as ``{count,json}``."""
     match = re.search(r"\{([^{}]*)\}", text)
@@ -502,7 +517,7 @@ def braced(text: str) -> list[str]:
         return [text]
     return [
         spelling
-        for part in match.group(1).split(",")
+        for part in brace_items(match.group(1))
         for spelling in braced(text[: match.start()] + part + text[match.end() :])
     ]
 
@@ -517,10 +532,10 @@ def names_state_dir(word: str) -> bool:
     ``state/tbhb/*`` or ``gh-poll-*``.
     """
     home = word.replace("${HOME}", "~").replace("$HOME", "~")
-    text = str(Path(home).expanduser())
     targets = (*STATE_FILES, *STATE_DIRS)
-    for spelling in braced(text):
-        pattern = re.sub(r"^/+", "/", os.path.normpath(spelling)).lower()
+    for spelling in braced(home):
+        expanded = str(Path(spelling).expanduser())
+        pattern = re.sub(r"^/+", "/", os.path.normpath(expanded)).lower()
         if pattern.startswith("/") and any(
             fnmatch.fnmatchcase(target, pattern) for target in targets
         ):
