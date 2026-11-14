@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import NoReturn
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import (
@@ -229,6 +229,15 @@ def _public_repos(table: _Table) -> tuple[str, ...]:
     return values
 
 
+def _has_valid_port(parts: SplitResult) -> bool:
+    """Whether the URL's port is absent or a number from 0 to 65535."""
+    try:
+        parts.port  # noqa: B018 -- reading the property raises on a bad port
+    except ValueError:
+        return False
+    return True
+
+
 def _otel_endpoint(root: _Table) -> str | None:
     """The OTLP endpoint a harness exports to, which carries no credential."""
     if "otel" not in root.values:
@@ -240,11 +249,15 @@ def _otel_endpoint(root: _Table) -> str | None:
     if (
         parts.scheme != "https"
         or not parts.hostname
+        or not _has_valid_port(parts)
         or parts.username is not None
         or parts.password is not None
         or parts.query
         or parts.fragment
-        or any(c.isspace() or c in '"\\' for c in endpoint)
+        or any(
+            not (c.isascii() and c.isprintable()) or c.isspace() or c in '"\\'
+            for c in endpoint
+        )
     ):
         table.fail("endpoint", "must be an https URL without credentials or a query")
     return endpoint
