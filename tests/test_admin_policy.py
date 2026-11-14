@@ -939,6 +939,20 @@ def test_a_pull_request_rule_may_carry_the_live_review_options(
     assert policy.check("POST", RULESET_PATH, body).allowed
 
 
+def test_a_pull_request_rule_may_carry_every_live_review_option() -> None:
+    rule = pull_request_with(
+        **dict.fromkeys(
+            policy.RULESET_REVIEW_KEYS - {"required_approving_review_count"}
+        ),
+    )
+    rule["parameters"].update(  # type: ignore[union-attr]
+        required_reviewers=[],
+        require_code_owner_review=False,
+        allowed_merge_methods=["squash"],
+    )
+    assert policy.check("POST", RULESET_PATH, with_rules(rule)).allowed
+
+
 def test_a_ruleset_may_hold_fewer_rules_and_no_conditions() -> None:
     body = with_rules({"type": "deletion"})
     del body["conditions"]
