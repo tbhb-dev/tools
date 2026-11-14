@@ -308,6 +308,8 @@ def signing_input(app_id: str, now: int) -> bytes:
 
 
 def lookup_paths(repo: str) -> list[str]:
+    if "/" not in repo:
+        return [f"/orgs/{repo}/installation"]
     owner, _ = split_repo(repo)
     return [f"/repos/{repo}/installation", f"/orgs/{owner}/installation"]
 
@@ -591,6 +593,8 @@ def mint_token(  # noqa: PLR0913  # Explicit credentials and installation cache.
 ) -> Minted:
     """Mint a token with explicit scope, keeping the key and token in memory.
 
+    REPOSITORY names OWNER/REPO, or just OWNER for organization permissions.
+
     Raises:
         GhAppError: Permissions, signing or the token exchange failed.
     """
@@ -612,10 +616,9 @@ def mint_token(  # noqa: PLR0913  # Explicit credentials and installation cache.
     data = signing_input(app_id, env.now())
     signature = key.sign(data, padding.PKCS1v15(), hashes.SHA256())
     jwt = f"{data.decode()}.{b64url(signature)}"
-    body: Json = {
-        "repositories": [split_repo(repository)[1]],
-        "permissions": dict(permissions),
-    }
+    body: Json = {"permissions": dict(permissions)}
+    if "/" in repository:
+        body["repositories"] = [split_repo(repository)[1]]
     try:
         return exchange_token(
             env,

@@ -66,6 +66,7 @@ flatmap
 frontmatter
 fsmonitor
 fstat
+ftruncate
 genpkey
 genrule
 getent
