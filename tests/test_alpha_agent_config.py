@@ -107,8 +107,8 @@ def test_otel_endpoint_refuses_invalid_values(table: Table, reason: str) -> None
 
 def test_otel_endpoint_error_never_quotes_the_credential() -> None:
     with pytest.raises(Invalid) as caught:
-        config.parse(with_otel({"endpoint": "https://user:s3cret@[::1"}))
-    assert "s3cret" not in str(caught.value)
+        config.parse(with_otel({"endpoint": "https://user:hunter2@[::1"}))
+    assert "hunter2" not in str(caught.value)
 
 
 def test_otel_endpoint_needs_a_network_domain() -> None:
