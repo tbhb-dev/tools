@@ -1749,6 +1749,29 @@ def test_wait_keeps_an_unsandboxed_success(
     assert driver.metadata_path("sample").exists()
 
 
+def test_wait_keeps_a_success_when_the_clean_loses_transport(
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert launch(remote) == 0
+    capsys.readouterr()
+    remote.configure(session=False)
+    remote.file(".rc", "0\n")
+    expected = kept()
+
+    def clean(_settings: model.Settings, _run: driver.Run, **_options: object) -> int:
+        message = "ssh lost"
+        raise transport.TransportError(message)
+
+    monkeypatch.setattr(driver, "clean", clean)
+    assert command("wait") == 0
+    output = capsys.readouterr()
+    assert expected in output.out
+    assert "ssh lost" in output.err
+    assert driver.metadata_path("sample").exists()
+
+
 def test_wait_never_forces_the_clean(
     remote: Remote, monkeypatch: pytest.MonkeyPatch
 ) -> None:

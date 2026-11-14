@@ -383,7 +383,7 @@ def settle(settings: Settings, run: Run, result: int) -> None:
         try:
             if clean(settings, run, force=False) == 0:
                 return
-        except Invalid as error:
+        except (Invalid, transport.TransportError) as error:
             print(error, file=sys.stderr)
     tree = repo.clone_path(PurePosixPath("."), run.request.repo)
     print(
