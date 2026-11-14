@@ -9,6 +9,78 @@ from tbhbdev.admin import policy
 # Rule, method, endpoint, body. Every rule includes an encoded/case variant.
 REFUSALS: list[tuple[str, str, str, object]] = [
     (
+        "protection_weakening",
+        "DELETE",
+        "/repos/tbhb-dev/widget/environments/test",
+        None,
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {"reviewers": []},
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {"reviewers": None},
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {"wait_timer": 0},
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {"wait_timer": None},
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {"deployment_branch_policy": None},
+    ),
+    (
+        "protection_weakening",
+        "PUT",
+        "/repos/tbhb-dev/widget/environments/test",
+        {"prevent_self_review": False},
+    ),
+    (
+        "protection_weakening",
+        "DELETE",
+        "/REPOS/TBHB-DEV/WIDGET/ENVIRONMENTS/TEST/",
+        None,
+    ),
+    (
+        "broad_visibility",
+        "PUT",
+        "/orgs/tbhb-dev/actions/secrets/build",
+        {"visibility": "all"},
+    ),
+    (
+        "broad_visibility",
+        "PUT",
+        "/orgs/tbhb-dev/actions/secrets/build",
+        {"visibility": "ALL"},
+    ),
+    (
+        "broad_visibility",
+        "PATCH",
+        "/orgs/tbhb-dev/actions/secrets/build",
+        {"visibility": "private"},
+    ),
+    (
+        "broad_visibility",
+        "PUT",
+        "/orgs/tbhb-dev/actions/variables/name",
+        {"visibility": "all"},
+    ),
+    (
         "approval_or_merge",
         "POST",
         "/repos/tbhb-dev/widget/pulls/7/reviews",
@@ -228,6 +300,29 @@ def test_unknown_settings(path: str) -> None:
         ),
         ("PUT", "/repos/tbhb-dev/widget/environments/test", {}, "environments"),
         (
+            "PUT",
+            "/repos/tbhb-dev/widget/environments/test",
+            {
+                "reviewers": [{"type": "User", "id": 1}],
+                "wait_timer": 5,
+                "prevent_self_review": True,
+                "deployment_branch_policy": {"protected_branches": True},
+            },
+            "environments",
+        ),
+        (
+            "PUT",
+            "/orgs/tbhb-dev/actions/secrets/build",
+            {"visibility": "selected"},
+            "organization_secrets",
+        ),
+        (
+            "PUT",
+            "/orgs/tbhb-dev/actions/secrets/build",
+            {"key_id": "1"},
+            "organization_secrets",
+        ),
+        (
             "PATCH",
             "/repos/tbhb-dev/widget",
             {"archived": False, "visibility": "private"},
@@ -292,6 +387,15 @@ def test_owner_check_ignores_paths_outside_repos_and_orgs() -> None:
 def test_a_repository_named_merge_or_reviews_is_not_a_refusal() -> None:
     assert policy.check("GET", "/repos/tbhb-dev/merge").allowed is True
     assert policy.check("PATCH", "/repos/tbhb-dev/reviews", {}).allowed is True
+
+
+def test_fold_false_keeps_case_and_still_refuses_non_ascii_fold() -> None:
+    assert policy.normalize("/Repos/Acme/README.md?x=1", fold=False) == (
+        "/Repos/Acme/README.md"
+    )
+    assert policy.normalize("/REPOS/ACME/README.MD") == "/repos/acme/readme.md"
+    assert policy.normalize("/repos/\u212aacme/x") == ""
+    assert policy.normalize("/repos/\u212aacme/x", fold=False) == ""
 
 
 def test_normalization_and_nested_fields() -> None:

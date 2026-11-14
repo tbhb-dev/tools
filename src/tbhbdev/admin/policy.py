@@ -12,6 +12,10 @@ ORG = rf"/orgs/{PART}"
 OWNED = re.compile(rf"/(?:repos|orgs)/({PART})(?:/|$)")
 REVIEW = re.compile(rf"{REPO}/pulls/[0-9]+/reviews(?:/|$)")
 MERGE = re.compile(rf"{REPO}/pulls/[0-9]+/merge")
+ENVIRONMENT = re.compile(rf"{REPO}/environments/{PART}")
+SHARED = re.compile(rf"{ORG}/actions/(?:secrets|variables)/{PART}")
+# The mutant that swaps a-z for A-Z survives: IGNORECASE makes them one set.
+ROUTABLE = re.compile(r"/[a-z0-9_./-]+", re.IGNORECASE | re.ASCII)  # pragma: no mutate
 PAID = frozenset(
     {"billing", "copilot", "codespaces", "hosted-runners", "larger-runners"}
 )
@@ -110,9 +114,12 @@ class Decision:
 
 
 def normalize(  # Reject each ambiguous routing form.
-    path: str,
+    path: str, *, fold: bool = True
 ) -> str:
-    """Canonical ASCII path; reject encodings that can change routing."""
+    """Canonical ASCII path, lowercase unless ``fold`` is false.
+
+    A query string is dropped. Reject encodings that can change routing.
+    """
     try:
         parsed = urlsplit(path)
     except ValueError:
@@ -122,14 +129,14 @@ def normalize(  # Reject each ambiguous routing form.
     if parsed.scheme or parsed.netloc or parsed.fragment:
         return ""
     raw = parsed.path.removesuffix("/")
-    decoded = unquote(raw).lower()
-    if not re.fullmatch(r"/[a-z0-9_./-]+", decoded):
+    decoded = unquote(raw)
+    if not ROUTABLE.fullmatch(decoded):
         return ""
     if raw.count("/") != decoded.count("/") or any(
         part in {".", "..", ""} for part in decoded.split("/")[1:]
     ):
         return ""
-    return decoded
+    return decoded.lower() if fold else decoded
 
 
 def fields(body: object) -> set[str]:
@@ -179,6 +186,26 @@ def write_refusal(method: str, path: str, body: dict[str, object]) -> str:
     return ""
 
 
+def deployment_refusal(method: str, path: str, body: dict[str, object]) -> str:
+    """Refuse environment changes that drop protection and broad org sharing."""
+    if ENVIRONMENT.fullmatch(path) and (
+        method == "DELETE"
+        or ("reviewers" in body and not body["reviewers"])
+        or ("wait_timer" in body and not body["wait_timer"])
+        or (
+            "deployment_branch_policy" in body
+            and body["deployment_branch_policy"] is None
+        )
+        or body.get("prevent_self_review") is False
+    ):
+        return "protection_weakening"
+    # A default of "SELECTED" survives: .lower() makes its case moot.
+    visibility = str(body.get("visibility", "selected")).lower()  # pragma: no mutate
+    if SHARED.fullmatch(path) and visibility != "selected":
+        return "broad_visibility"
+    return ""
+
+
 def explicit_refusal(method: str, path: str, body: dict[str, object]) -> str:
     if set(path.split("/")) & PAID or "security_and_analysis" in fields(body):
         return "paid_feature"
@@ -186,7 +213,9 @@ def explicit_refusal(method: str, path: str, body: dict[str, object]) -> str:
         return "paid_feature"
     if MERGE.fullmatch(path) or (method == "POST" and REVIEW.match(path)):
         return "approval_or_merge"
-    return "" if method == "GET" else write_refusal(method, path, body)
+    if method == "GET":
+        return ""
+    return write_refusal(method, path, body) or deployment_refusal(method, path, body)
 
 
 def permission_for(path: str) -> str:

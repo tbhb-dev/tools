@@ -29,13 +29,14 @@ Both commands accept `--app` (default `tbhb-dev-admin`), `--app-id` (default `57
 
 The allowlist covers settings, protection, Actions secrets and variables, environments, self-hosted runners and runner groups, webhooks, custom properties, contents, and pull requests. Unknown endpoints fail closed. The policy only passes the `tbhb-dev` owner, and it never approves or merges a pull request. Protection writes pass only when they activate a ruleset with `{"enforcement":"active"}` or enable required signatures or administrator enforcement. Other protection writes fail closed because the tool can't classify them without previous state. Security analysis settings fail closed on all repositories. Settings updates accept explicit field lists.
 
-Path normalization converts names to lowercase and decodes percent escapes once. It strips query strings and trailing slashes before checking for routing ambiguity. Encoded separators, repeated slashes, dot segments, fragments, and absolute URLs fail closed. The request uses that normalized path. Write parameters belong in JSON bodies. HTTP calls have a timeout and a 1 MiB response cap. Redirects fail closed.
+Path normalization lowercases names to check the policy and decodes percent escapes once. The request sends the path with its original case, so a contents path such as `README.md` keeps it. It drops query strings, so a query never reaches GitHub, and strips trailing slashes before checking for routing ambiguity. Encoded separators, repeated slashes, dot segments, fragments, and absolute URLs fail closed. The request uses that normalized path. Write parameters belong in JSON bodies. HTTP calls have a timeout and a 1 MiB response cap. Redirects fail closed.
 
 A refusal exits 3 with its code on standard error. Usage errors exit 2. HTTP error responses exit 1 with the response body.
 
 | Code | Meaning |
 | --- | --- |
-| `protection_weakening` | Protection deletion, bypass actors, or an unclassified protection write |
+| `protection_weakening` | Protection deletion, bypass actors, an unclassified protection write, or an environment delete or change that drops reviewers, the wait timer, a deployment branch policy, or self-review prevention |
+| `broad_visibility` | An organization secret or variable whose visibility isn't `selected` |
 | `membership_change` | Membership, invitations, collaborators, or role changes |
 | `repository_removal` | Repository deletion, transfer, or archiving |
 | `paid_feature` | Security analysis, larger runners, Codespaces, Copilot, billing, or spending |

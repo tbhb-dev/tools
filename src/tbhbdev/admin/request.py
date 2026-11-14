@@ -145,8 +145,10 @@ def call(  # noqa: PLR0913  # Explicit one-call inputs and optional dry run.
         raise RefusedError(decision.code)
     if dry_run:
         return 0, ""
+    # fold=None survives: None is as falsy as False.
+    wire = policy.normalize(path, fold=False)  # pragma: no mutate
     try:
-        status, response = send(runtime, method, decision.path, encoded, decision)
+        status, response = send(runtime, method, wire, encoded, decision)
     except RefusedError as exc:
         runtime.audit.append({**entry, "phase": "after", "code": str(exc)})
         raise

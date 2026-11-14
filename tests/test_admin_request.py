@@ -287,6 +287,19 @@ def test_redaction_and_json_body(
     assert fake.key not in repr(fake)
 
 
+def test_wire_path_keeps_case_and_drops_the_query(fake: Fake) -> None:
+    request.call(
+        fake.runtime,
+        "PUT",
+        "/repos/TBHB-dev/widget/contents/README.md?ref=x",
+        {},
+        "test",
+    )
+    assert fake.requests[-1].url.raw_path == (
+        b"/repos/TBHB-dev/widget/contents/README.md"
+    )
+
+
 def test_response_cap_boundary(fake: Fake) -> None:
     fake.reply = httpx.Response(200, content=b"x" * request.MAX_RESPONSE)
     assert (

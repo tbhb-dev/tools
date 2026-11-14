@@ -21,6 +21,7 @@ def test_log_flags_modes_and_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     directory = tmp_path / "state/tbhbdev/admin"
+    directory.mkdir(mode=0o700, parents=True)
     audit = Audit(directory)
     original_open = os.open
     calls: list[tuple[str, int, int]] = []
@@ -84,6 +85,76 @@ def test_log_flags_modes_and_fields(
     assert offset is not None
     assert offset.total_seconds() == 0
     assert "private request text" not in logfile.read_text()
+
+
+def test_short_writes_finish_one_whole_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = os.write
+    monkeypatch.setattr(os, "write", lambda fd, data: original(fd, bytes(data)[:5]))
+    Audit(tmp_path / "admin").append({"first": "record with a long value"})
+    monkeypatch.undo()
+    lines = (tmp_path / "admin/calls.jsonl").read_text().splitlines()
+    assert [json.loads(line) for line in lines] == [
+        {"first": "record with a long value"}
+    ]
+
+
+def test_failed_write_cuts_off_the_partial_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    audit = Audit(tmp_path / "admin")
+    audit.append({"n": 1})
+    original = os.write
+    calls: list[int] = []
+
+    def flaky(fd: int, data: bytes) -> int:
+        calls.append(1)
+        if len(calls) == 2:
+            raise OSError
+        return original(fd, bytes(data)[:4])
+
+    monkeypatch.setattr(os, "write", flaky)
+    with pytest.raises(RefusedError, match=r"^audit_unavailable$"):
+        audit.append({"n": 2})
+    monkeypatch.undo()
+    audit.append({"n": 3})
+    lines = (tmp_path / "admin/calls.jsonl").read_text().splitlines()
+    assert [json.loads(line) for line in lines] == [{"n": 1}, {"n": 3}]
+
+
+def test_created_directories_and_their_parents_are_synced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced: list[Path] = []
+    monkeypatch.setattr(Audit, "sync_directory", staticmethod(synced.append))
+    directory = tmp_path / "a/b/c"
+    audit = Audit(directory)
+    audit.append({"n": 1})
+    assert set(synced) == {
+        directory,
+        directory.parent,
+        directory.parent.parent,
+        tmp_path,
+    }
+    synced.clear()
+    audit.append({"n": 2})
+    assert not synced
+
+
+def test_sync_directory_opens_without_following_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flags: list[int] = []
+    original = os.open
+
+    def opened(path: Path, mode: int) -> int:
+        flags.append(mode)
+        return original(path, mode)
+
+    monkeypatch.setattr(os, "open", opened)
+    Audit.sync_directory(tmp_path)
+    assert flags == [os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW]
 
 
 @pytest.mark.parametrize(

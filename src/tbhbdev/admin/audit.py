@@ -26,7 +26,15 @@ class Audit:
     def append(self, record: dict[str, object]) -> None:
         """Append and sync without following a directory or file symlink."""
         try:
+            created = [
+                path
+                for path in (self.directory, *self.directory.parents)
+                if not path.exists()
+            ]
             self.directory.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
+            for path in created:
+                self.sync_directory(path)
+                self.sync_directory(path.parent)
             directory = os.open(
                 self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
             )
@@ -39,6 +47,14 @@ class Audit:
         except OSError:
             msg = "audit_unavailable"
             raise RefusedError(msg) from None
+
+    @staticmethod
+    def sync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     @staticmethod
     def validate(info: os.stat_result, *, mode: int) -> None:
@@ -55,6 +71,16 @@ class Audit:
             raise RefusedError(msg)
 
     @staticmethod
+    def write_all(descriptor: int, data: bytes) -> None:
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if not written:
+                msg = "audit_unavailable"
+                raise RefusedError(msg)
+            view = view[written:]
+
+    @staticmethod
     def write(directory: int, record: dict[str, object]) -> None:
         descriptor = os.open(
             "calls.jsonl",
@@ -65,11 +91,14 @@ class Audit:
         try:
             Audit.validate(os.fstat(descriptor), mode=FILE_MODE)
             data = (json.dumps(record) + "\n").encode()
-            # One append system call prevents concurrent records from interleaving.
-            if os.write(descriptor, data) != len(data):
-                msg = "audit_unavailable"
-                raise RefusedError(msg)
-            os.fsync(descriptor)
+            start = os.fstat(descriptor).st_size
+            try:
+                Audit.write_all(descriptor, data)
+                os.fsync(descriptor)
+            except OSError, RefusedError:
+                # A partial line would glue to the next record, so cut it off.
+                os.ftruncate(descriptor, start)
+                raise
         finally:
             os.close(descriptor)
 
