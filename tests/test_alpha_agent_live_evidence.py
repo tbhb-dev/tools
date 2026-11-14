@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import shlex
 import subprocess
 import sys
@@ -310,6 +311,11 @@ class SocketProbeRunner:
         return subprocess.CompletedProcess(command, 0, "", "")
 
 
+@pytest.fixture(autouse=True)
+def no_ambient_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(credentials.CLAUDE_TOKEN_ENV, raising=False)
+
+
 @pytest.fixture
 def token_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
@@ -432,9 +438,22 @@ def token_probe(
     return run, paths, calls
 
 
+FILE_VARIABLE = "TBHBDEV_LIVE_CLAUDE_TOKEN_FILE"
+FAKE_TOKEN = "example-token-value"  # noqa: S105
+
+
+def fingerprint(value: str) -> str:
+    """A digest, so a failed assert never prints the fake token."""
+    return hashlib.sha256(value.encode()).hexdigest()[:12]
+
+
+def fingerprints(environment: dict[str, str]) -> dict[str, str]:
+    return {key: fingerprint(value) for key, value in environment.items()}
+
+
 @pytest.mark.parametrize("harness", [Harness.CLAUDE, Harness.CODEX])
-@pytest.mark.parametrize("configured", [True, False])
-def test_probe_token_file_only_reaches_the_claude_environment(
+@pytest.mark.parametrize("configured", [True, False], ids=["set", "unset"])
+def test_probe_token_environment_only_reaches_the_claude_calls(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     token_probe: TokenProbe,
@@ -443,83 +462,107 @@ def test_probe_token_file_only_reaches_the_claude_environment(
 ) -> None:
     run, paths, calls = token_probe
     tmp_path = run.tmpdir.parent
-    token_file = tmp_path / "token"
-    token_file.write_text(" example-token-value \t\n\n")
     if configured:
-        monkeypatch.setenv("TBHBDEV_LIVE_CLAUDE_TOKEN_FILE", str(token_file))
-    else:
-        monkeypatch.delenv("TBHBDEV_LIVE_CLAUDE_TOKEN_FILE", raising=False)
+        monkeypatch.setenv(credentials.CLAUDE_TOKEN_ENV, f" {FAKE_TOKEN} \t\n\n")
+    carried = configured and harness is Harness.CLAUDE
     with ExitStack() as stack:
         live.run_probe(run, paths, "/example/harness", stack)
         assert calls
         for call in calls:
-            environment = call.kwargs["env"]
-            assert isinstance(environment, dict)
-            assert (credentials.CLAUDE_TOKEN_ENV in environment) is (
-                configured and harness is Harness.CLAUDE
+            environment = cast("dict[str, str]", call.kwargs["env"])
+            assert (credentials.CLAUDE_TOKEN_ENV in environment) is carried
+            sent = fingerprints(
+                {
+                    key: value
+                    for key, value in environment.items()
+                    if key == credentials.CLAUDE_TOKEN_ENV
+                }
             )
-            matches = environment.get(credentials.CLAUDE_TOKEN_ENV) == (
-                "example-token-value"
-                if configured and harness is Harness.CLAUDE
-                else None
+            assert sent == (
+                {credentials.CLAUDE_TOKEN_ENV: fingerprint(FAKE_TOKEN)}
+                if carried
+                else {}
             )
-            assert matches
-            assert all("example-token-value" not in arg for arg in call.command)
-        assert "example-token-value" not in repr(calls)
+            assert not [i for i, arg in enumerate(call.command) if FAKE_TOKEN in arg]
+        assert FAKE_TOKEN not in repr(calls)
         captured = capsys.readouterr()
-        assert all("example-token-value" not in text for text in captured)
+        assert not [i for i, text in enumerate(captured) if FAKE_TOKEN in text]
         assert (run.tmpdir / "observed").is_file()
-        assert all(
-            b"example-token-value" not in path.read_bytes()
+        assert not [
+            str(path)
             for path in tmp_path.rglob("*")
-            if path.is_file() and path != token_file
-        )
+            if path.is_file() and FAKE_TOKEN.encode() in path.read_bytes()
+        ]
+
+
+@pytest.mark.parametrize("harness", [Harness.CLAUDE, Harness.CODEX])
+@pytest.mark.parametrize(
+    "value", ["", " \t\n", f" {FAKE_TOKEN} \n"], ids=["empty", "blank", "token"]
+)
+def test_probe_token_environment_strips_and_skips_blank(
+    monkeypatch: pytest.MonkeyPatch, harness: Harness, value: str
+) -> None:
+    monkeypatch.delenv(FILE_VARIABLE, raising=False)
+    monkeypatch.setenv(credentials.CLAUDE_TOKEN_ENV, value)
+    expected = (
+        {credentials.CLAUDE_TOKEN_ENV: fingerprint(FAKE_TOKEN)}
+        if value.strip() and harness is Harness.CLAUDE
+        else {}
+    )
+    assert fingerprints(live.probe_token_env(harness)) == expected
+
+
+@pytest.mark.parametrize("with_environment", [True, False], ids=["env", "no-env"])
+def test_probe_token_file_variable_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_environment: bool,
+) -> None:
+    token_file = tmp_path / "token"
+    token_file.write_text(f"{FAKE_TOKEN}\n")
+    monkeypatch.setenv(FILE_VARIABLE, str(token_file))
+    if with_environment:
+        monkeypatch.setenv(credentials.CLAUDE_TOKEN_ENV, FAKE_TOKEN)
+    with pytest.raises(ValueError, match=FILE_VARIABLE) as error:
+        live.probe_token_env(Harness.CLAUDE)
+    message = str(error.value)
+    assert credentials.CLAUDE_TOKEN_ENV in message
+    assert str(token_file) not in message
+    assert FAKE_TOKEN not in message
+
+
+def test_probe_token_file_variable_does_not_affect_codex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(FILE_VARIABLE, str(tmp_path / "token"))
+    assert live.probe_token_env(Harness.CODEX) == {}
 
 
 @pytest.mark.parametrize("harness", [Harness.CLAUDE])
-@pytest.mark.parametrize("failure", ["missing", "unreadable"])
-def test_probe_token_file_errors_name_only_the_variable_and_path(
-    tmp_path: Path,
+def test_run_probe_refuses_the_token_file_before_any_call(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     token_probe: TokenProbe,
-    failure: str,
 ) -> None:
-    token_file = tmp_path / "token"
-    monkeypatch.setenv("TBHBDEV_LIVE_CLAUDE_TOKEN_FILE", str(token_file))
-    if failure == "unreadable":
-        token_file.write_text("example-token-value\n")
-        original = Path.read_text
-
-        def read(path: Path) -> str:
-            if path == token_file:
-                msg = "example-token-value"
-                raise PermissionError(msg)
-            return original(path)
-
-        monkeypatch.setattr(Path, "read_text", read)
     run, paths, calls = token_probe
+    monkeypatch.setenv(FILE_VARIABLE, str(run.tmpdir.parent / "token"))
+    monkeypatch.setenv(credentials.CLAUDE_TOKEN_ENV, FAKE_TOKEN)
     with (
         ExitStack() as stack,
-        pytest.raises(ValueError, match="TBHBDEV_LIVE_CLAUDE_TOKEN_FILE") as error,
+        pytest.raises(ValueError, match=FILE_VARIABLE) as error,
     ):
         live.run_probe(run, paths, "/example/harness", stack)
-    message = str(error.value)
-    assert "TBHBDEV_LIVE_CLAUDE_TOKEN_FILE" in message
-    assert str(token_file) in message
-    assert all(
-        "example-token-value" not in text for text in (message, *capsys.readouterr())
-    )
+    assert FAKE_TOKEN not in str(error.value)
+    assert not [i for i, text in enumerate(capsys.readouterr()) if FAKE_TOKEN in text]
     assert not calls
 
 
 @pytest.mark.parametrize("harness", [Harness.CLAUDE])
-def test_live_entry_preserves_the_token_file_error(
+def test_live_entry_preserves_the_token_file_refusal(
     monkeypatch: pytest.MonkeyPatch, token_probe: TokenProbe
 ) -> None:
     run, paths, _calls = token_probe
-    token_file = run.tmpdir.parent / "missing-token"
-    monkeypatch.setenv("TBHBDEV_LIVE_CLAUDE_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv(FILE_VARIABLE, str(run.tmpdir.parent / "token"))
     monkeypatch.setenv("CODEX_SANDBOX", "")
     original = live.shutil.which
 
@@ -533,10 +576,9 @@ def test_live_entry_preserves_the_token_file_error(
 
     monkeypatch.setattr(live.shutil, "which", installed)
     monkeypatch.setattr(live, "probe_run", prepared)
-    with pytest.raises(ValueError, match="TBHBDEV_LIVE_CLAUDE_TOKEN_FILE") as error:
+    with pytest.raises(ValueError, match=FILE_VARIABLE) as error:
         live.test_build_sandboxes_refuse_user_sockets(run.tmpdir.parent, Harness.CLAUDE)
-    assert "TBHBDEV_LIVE_CLAUDE_TOKEN_FILE" in str(error.value)
-    assert str(token_file) in str(error.value)
+    assert credentials.CLAUDE_TOKEN_ENV in str(error.value)
 
 
 @pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])

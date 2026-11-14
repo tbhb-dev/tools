@@ -21,11 +21,13 @@ bged
 bsdinfo
 buildcop
 buildifier
+bunx
 bxox
 cacheinfo
 cand
 capfd
 capsys
+ccstatusline
 cgnat
 checkpointed
 claudecode
@@ -66,6 +68,7 @@ flatmap
 frontmatter
 fsmonitor
 fstat
+ftruncate
 genpkey
 genrule
 getent
@@ -190,6 +193,8 @@ shfmt
 srcs
 stampable
 starlark
+statusline
+statuslines
 strerror
 stubtool
 subagentstart
@@ -295,3 +300,5 @@ shopt
 sshcommand
 wаit
 thеy
+getbasetemp
+pytestmark

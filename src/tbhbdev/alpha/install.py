@@ -86,6 +86,15 @@ writes PATH into a harness config: Claude's SessionStart hook puts the shim
 on PATH (below), and Codex and Antigravity get it from `tbhbdev alpha
 agent-env`.
 
+For Claude Code it also pins ccstatusline (see install_statusline): a
+`statusLine.command` that is exactly the known `bunx -y ccstatusline@latest`
+form becomes `node` running a copy installed once, at an exact version, in
+`$XDG_DATA_HOME/tbhbdev/ccstatusline/<version>`, because bunx asks the registry
+on every refresh. The install is staged in a private directory and moved into place
+after its files match a pinned digest and a marker is written, so a failed or
+altered install is not reused. Another command stays. It
+backs up the file and reads the written command back.
+
 `--harness` limits the config merge to one harness. `--dry-run` writes
 nothing: it prints each config's diff, with one diff of Codex's `config.toml`
 for its trust and environment, and the git hooks it would install.
@@ -101,6 +110,7 @@ blocks a session.
 
 import argparse
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -109,6 +119,7 @@ import shutil
 import stat
 import subprocess  # nosec B404
 import sys
+import tempfile
 import time
 from contextlib import contextmanager, redirect_stdout, suppress
 from datetime import UTC, datetime
@@ -128,7 +139,7 @@ from tbhbdev.alpha.repo import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Mapping
+    from collections.abc import Callable, Generator, Mapping
     from typing import IO
 
 type Json = dict[str, object]
@@ -518,6 +529,20 @@ def open_tmp(tmp: Path, mode: int | None) -> IO[str]:
     return os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode), "w")
 
 
+def check_unchanged(target: Path, old: str | None) -> None:
+    """Raise InstallError when TARGET no longer holds OLD (None: not checked).
+
+    Text that isn't UTF-8 can't equal OLD, so it counts as a change.
+    """
+    try:
+        changed = old is not None and target.read_text() != old
+    except UnicodeDecodeError:
+        changed = True
+    if changed:
+        message = f"{target} changed while it was being written"
+        raise InstallError(message)
+
+
 def write_config(
     path: Path, old: str | None, new: str, mode: int | None = None
 ) -> Path | None:
@@ -526,7 +551,9 @@ def write_config(
     The new text is synced to disk before it replaces the old. On any failure
     the temporary file goes, and the OSError becomes an InstallError. A MODE
     sets the permissions of the new file and the backup from creation on;
-    without one, both keep the old file's.
+    without one, both keep the old file's. The file is read again just before
+    the replace, and an edit since OLD was read aborts the write. An edit in the
+    gap between that read and the replace is still lost; the backup keeps it.
     """
     target = path.resolve()
     tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
@@ -543,8 +570,9 @@ def write_config(
             os.fsync(out.fileno())
         if old is not None and mode is None:
             shutil.copymode(target, tmp)
+        check_unchanged(target, old)
         tmp.replace(target)
-    except OSError as exc:
+    except (OSError, InstallError) as exc:
         # The temporary file may never have been made, or its directory may not
         # exist, so whatever unlink says is beside the point.
         with suppress(OSError):
@@ -642,6 +670,279 @@ def apply_config(
         return 1
     saved = f"; the old one is {backup}" if backup else ""
     print(f"{harness}: wrote {path}{saved}")
+    return 0
+
+
+# --------------------------------------------------------------- statusline
+
+STATUSLINE_VERSION = "2.2.33"
+COLUMNS_PREFIX = (
+    "COLUMNS=${COLUMNS:-$(tmux display-message -p '#{pane_width}' 2>/dev/null"
+    " || echo 80)}"
+)
+BUNX_COMMAND = "bunx -y ccstatusline@latest"
+# The two forms of the registry-resolving command this installer replaces.
+OLD_STATUSLINES = (
+    f"PATH=/opt/homebrew/bin:$PATH {COLUMNS_PREFIX} {BUNX_COMMAND}",
+    BUNX_COMMAND,
+)
+STATUSLINE_TIMEOUT = 300
+# The pinned package is about 3 MiB, so a package far past this isn't it.
+STATUSLINE_MAX_BYTES = 32 * 1024 * 1024
+STATUSLINE_CHUNK = 1024 * 1024
+STATUSLINE_TOKENS = 2  # the node path and the script
+# Written into a staged install once bun exited cleanly and the package checked out.
+STATUSLINE_MARKER = ".complete"
+# SHA-256 of ccstatusline 2.2.33's files as package_digest reads them. A version
+# bump changes it, so a registry release with other files fails the install.
+STATUSLINE_DIGEST = "920e056560d0dd296363b145d96c91bf727934adf2831fd80647c55665478cd3"
+
+
+def statusline_root() -> Path:
+    """The directory the pinned ccstatusline is installed in."""
+    base = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
+    return Path(base) / "tbhbdev" / "ccstatusline" / STATUSLINE_VERSION
+
+
+def statusline_script(root: Path) -> Path:
+    """The package's bin, `dist/ccstatusline.js` in its package.json."""
+    return root / "node_modules" / "ccstatusline" / "dist" / "ccstatusline.js"
+
+
+def statusline_command(node: str, script: Path) -> str:
+    return f"{COLUMNS_PREFIX} {shlex.quote(node)} {shlex.quote(str(script))}"
+
+
+def statusline_package(root: Path) -> Path:
+    """The installed package's directory."""
+    return root / "node_modules" / "ccstatusline"
+
+
+def package_digest(package: Path) -> str | None:
+    """SHA-256 of every file's relative name and bytes, or None past a symlink.
+
+    Files are read in chunks, and a package over STATUSLINE_MAX_BYTES gives None.
+
+    The package's bin imports sibling chunks, so the digest covers the whole
+    directory. A link or any entry that isn't a file or directory gives None.
+    """
+    digest = hashlib.sha256()
+    remaining = STATUSLINE_MAX_BYTES
+    for entry in sorted(package.rglob("*")):
+        if entry.is_symlink():
+            return None
+        if entry.is_file():
+            name = os.fsencode(entry.relative_to(package).as_posix())
+            digest.update(name + b"\0")
+            with entry.open("rb") as handle:
+                while chunk := handle.read(STATUSLINE_CHUNK):
+                    remaining -= len(chunk)
+                    if remaining < 0:
+                        return None
+                    digest.update(chunk)
+            digest.update(b"\0")
+        elif not entry.is_dir():
+            return None
+    return digest.hexdigest()
+
+
+def marker_text(marker: Path) -> bytes:
+    """The marker's first bytes, one more than the version needs."""
+    with marker.open("rb") as handle:
+        return handle.read(len(STATUSLINE_VERSION) + 1)
+
+
+def statusline_installed(root: Path) -> bool:
+    """Whether ROOT is a complete, unaltered install of the pinned version.
+
+    The marker names the version, no path from ROOT down to the package is a
+    symlink, and the package's files hash to the pinned digest, so a truncated,
+    replaced or relinked file fails.
+    """
+    package = statusline_package(root)
+    path = (root, root / STATUSLINE_MARKER, root / "node_modules", package)
+    marker = root / STATUSLINE_MARKER
+    try:
+        return (
+            not any(entry.is_symlink() for entry in path)
+            and marker.is_file()
+            and marker_text(marker) == STATUSLINE_VERSION.encode()
+            and statusline_script(root).is_file()
+            and package_digest(package) == STATUSLINE_DIGEST
+        )
+    except OSError:
+        # An unreadable file is no install, and a rerun replaces it.
+        return False
+
+
+def add_statusline(root: Path, bun: str | None, run: Callable[..., object]) -> None:
+    """Install the pinned ccstatusline in a private staging directory, then move it.
+
+    Each run stages in a directory of its own, so concurrent installers can't
+    promote each other's half-written files. ROOT appears only after bun exited
+    cleanly and the staged package passed the same check a later run applies, so
+    a bun that wrote files and then died or timed out leaves no install that a
+    later run could trust. The staging directory goes on every outcome.
+    """
+    root.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{root.name}.staging-", dir=root.parent))
+    try:
+        run(
+            [
+                bun,
+                "add",
+                "--exact",
+                "--ignore-scripts",
+                f"ccstatusline@{STATUSLINE_VERSION}",
+            ],
+            cwd=staging,
+            check=True,
+            capture_output=True,
+            timeout=STATUSLINE_TIMEOUT,
+        )
+        (staging / STATUSLINE_MARKER).write_text(STATUSLINE_VERSION)
+        if not statusline_installed(staging):
+            message = f"ccstatusline {STATUSLINE_VERSION} in {staging} failed its check"
+            raise InstallError(message)
+        if root.is_symlink():
+            root.unlink()
+        else:
+            shutil.rmtree(root, ignore_errors=True)
+        staging.replace(root)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def missing_tool(node: str | None, bun: str | None, *, installed: bool) -> str | None:
+    """Name the tool the pin can't run without, or None when it has both."""
+    if not node:
+        return "node"
+    return "bun" if not installed and not bun else None
+
+
+def is_ours(command: str) -> bool:
+    """Whether COMMAND is exactly what this installer writes, for any node and version.
+
+    The node slot must be an absolute path named `node`, the script the pinned
+    package's bin under a version directory beside the current one, and the
+    quoting the installer's own. So `$MY_STATUS_NODE` and `evil-binary` don't match,
+    and a command written for an older version does.
+    """
+    head = f"{COLUMNS_PREFIX} "
+    if not command.startswith(head):
+        return False
+    try:
+        tokens = shlex.split(command[len(head) :])
+    except ValueError:
+        return False
+    if len(tokens) != STATUSLINE_TOKENS:
+        return False
+    node, script = Path(tokens[0]), Path(tokens[1])
+    return (
+        node.is_absolute()
+        and node.name == "node"
+        and script.is_absolute()
+        # Any root gives the same last four parts, so mutating "/" changes nothing.
+        and script.parts[-4:]
+        == statusline_script(Path("/")).parts[-4:]  # pragma: no mutate
+        and script.parents[3].parent == statusline_root().parent
+        and command == statusline_command(tokens[0], script)
+    )
+
+
+def replaceable_line(config: Json) -> Json | None:
+    """The `statusLine` object when its command is a known or our own one."""
+    line = config.get("statusLine")
+    if not isinstance(line, dict):
+        return None
+    command = line.get("command")
+    if not isinstance(command, str):
+        return None
+    known = command in OLD_STATUSLINES or is_ours(command)
+    return line if known else None
+
+
+def pin_statusline(path: Path, wanted: str | None) -> Path | None:
+    """Write WANTED into the config as it is now; None when it's no longer ours.
+
+    The file is read again here, after the install, so an edit made while bun
+    ran is kept. Raises InstallError when the write can't be read back.
+    """
+    old, config = read_config(path)
+    line = replaceable_line(config)
+    if line is None:
+        return None
+    merged = {**config, "statusLine": {**line, "command": wanted}}
+    backup = write_config(path, old, json.dumps(merged, indent=2) + "\n")
+    if read_config(path)[1] != merged:
+        message = f"the written file differs; the old one is {backup}"
+        raise InstallError(message)
+    return backup
+
+
+def install_statusline(  # noqa: PLR0911 -- one early return per outcome
+    env: Mapping[str, str],
+    *,
+    dry_run: bool,
+    run: Callable[..., object] = subprocess.run,
+    which: Callable[[str], str | None] = shutil.which,
+) -> int:
+    """Pin ccstatusline and point Claude's `statusLine.command` at it.
+
+    Only the known `bunx -y ccstatusline@latest` command, and a command this
+    installer wrote with another node path, are replaced. Any other command,
+    and a config with no status line, stays as it is. Without bun (to install)
+    or node (to run it) the old command stays and the reason is printed. The
+    old file is backed up, only `statusLine.command` changes, the config is read
+    again just before the write, and the written value is read back.
+    """
+    path = config_path(CLAUDE, env)
+    try:
+        _, config = read_config(path)
+    except InstallError as exc:
+        print(f"{PROG}: claude: cannot read {path}: {exc}", file=sys.stderr)
+        return 1
+    root = statusline_root()
+    script = statusline_script(root)
+    line = replaceable_line(config)
+    if line is None:
+        return 0
+    bun, node = which("bun"), which("node")
+    # With no node, shlex.quote turns None into '', which no replaceable line
+    # equals, so dropping the guard changes nothing.
+    wanted = statusline_command(node, script) if node else None  # pragma: no mutate
+    installed = statusline_installed(root)
+    if line["command"] == wanted and installed:
+        print(f"claude: statusLine in {path} is up to date")
+        return 0
+    missing = missing_tool(node, bun, installed=installed)
+    if missing:
+        print(
+            f"claude: {missing} not found; left the statusLine command in {path}",
+            file=sys.stderr,
+        )
+        return 0
+    if dry_run:
+        print(f"claude: would install ccstatusline {STATUSLINE_VERSION} in {root}")
+        return 0
+    try:
+        if not installed:
+            add_statusline(root, bun, run)
+        backup = pin_statusline(path, wanted)
+    except (OSError, subprocess.SubprocessError, InstallError) as exc:
+        print(f"{PROG}: claude: cannot pin ccstatusline: {exc}", file=sys.stderr)
+        return 1
+    if backup is None:
+        print(
+            f"claude: statusLine in {path} changed while ccstatusline installed;"
+            " left as it is",
+            file=sys.stderr,
+        )
+        return 0
+    print(
+        f"claude: pinned ccstatusline {STATUSLINE_VERSION} in {path}; "
+        f"the old one is {backup}"
+    )
     return 0
 
 
@@ -1149,6 +1450,8 @@ def main(argv: list[str], prog: str) -> int:
     for harness in [args.harness] if args.harness else HARNESSES:
         result = install_config(harness, env, dry_run=args.dry_run)
         status |= result
+        if harness == CLAUDE:
+            status |= install_statusline(env, dry_run=args.dry_run)
         if harness == CODEX:
             status |= install_codex_environment(
                 env, dry_run=args.dry_run, in_trust_diff=result == 0
