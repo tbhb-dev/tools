@@ -81,10 +81,13 @@ other key, comment and the layout, and gets the same backup and up-to-date
 rules. And it writes the gh shim (see gh_shim): an executable `gh` in
 `$XDG_DATA_HOME/tbhbdev/agent-bin`, left alone when it is already current.
 None of this prompts, runs op or needs the 1Password app, so configuration
-management can run it unattended, and a rerun changes nothing. It never
-writes PATH into a harness config: Claude's SessionStart hook puts the shim
-on PATH (below), and Codex and Antigravity get it from `tbhbdev alpha
-agent-env`.
+management can run it unattended, and a rerun changes nothing. For Claude
+Code it also writes `env.PATH` into settings.json with the shim's directory
+first, followed by the PATH already there, or by the install run's PATH, so
+hook processes, which get no `$CLAUDE_ENV_FILE`, run the shim's `gh` too. That
+PATH is fixed at install time, so a rerun refreshes it. Claude's SessionStart
+hook also puts the shim on PATH for commands (below), and Codex and
+Antigravity get it from `tbhbdev alpha agent-env`.
 
 For Claude Code it also pins ccstatusline (see install_statusline): a
 `statusLine.command` that is exactly the known `bunx -y ccstatusline@latest`
@@ -451,8 +454,28 @@ def merge_groups(config: Json, desired: Json) -> Json:
     return {**config, **desired}
 
 
-def merged_config(harness: str, config: Json) -> Json:
-    """A harness config with this command's hooks merged in."""
+def settings_path(current: object, base: str | None) -> str | None:
+    """Claude's settings ``env.PATH`` with the gh shim's directory first.
+
+    The entries come from the PATH already in settings when it is a string,
+    else from BASE (the PATH of the install run). A hook process gets no
+    ``$CLAUDE_ENV_FILE``, so this is the only way the shim reaches it. Without
+    either, there is no PATH to write.
+    """
+    source = current if isinstance(current, str) else base
+    if source is None:
+        return None
+    shim = str(bin_dir())
+    kept = [entry for entry in source.split(os.pathsep) if entry and entry != shim]
+    return os.pathsep.join([shim, *kept])
+
+
+def merged_config(harness: str, config: Json, base_path: str | None = None) -> Json:
+    """A harness config with this command's hooks merged in.
+
+    Claude's ``env.PATH`` gets the gh shim first when BASE_PATH or the config
+    names a PATH.
+    """
     if harness == CLAUDE:
         env = config.get("env", {})
         if not isinstance(env, dict):
@@ -460,7 +483,9 @@ def merged_config(harness: str, config: Json) -> Json:
             raise InstallError(message)
         fields = cast("Json", env)  # pragma: no mutate
         merged = merge_events(config, claude_hooks())
-        return {**merged, "env": {**fields, **AGENT_ENVIRONMENT}}
+        path = settings_path(fields.get("PATH"), base_path)
+        shimmed = {} if path is None else {"PATH": path}
+        return {**merged, "env": {**fields, **shimmed, **AGENT_ENVIRONMENT}}
     if harness == CODEX:
         return merge_events(config, codex_hooks())
     return merge_groups(config, agy_hooks())
@@ -641,7 +666,7 @@ def install_config(harness: str, env: Mapping[str, str], *, dry_run: bool) -> in
     path = config_path(harness, env)
     try:
         old, config = read_config(path)
-        merged = merged_config(harness, config)
+        merged = merged_config(harness, config, env.get("PATH"))
     except InstallError as exc:
         print(f"{PROG}: {harness}: cannot merge into {path}: {exc}", file=sys.stderr)
         return 1

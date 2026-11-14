@@ -12,7 +12,10 @@ reads the hook payload on stdin.
   config.
 - SessionStart prints `[harness] rule` from the user config (see
   tbhbdev.userconfig), which Claude Code adds to the model's context. Without
-  that key it prints nothing.
+  that key it prints nothing. It also prints a warning when the hook's own
+  PATH doesn't start with the gh shim's directory: every hook inherits that
+  PATH, so a `gh` in a hook would then skip the call budget. `tbhbdev alpha
+  install` writes it into Claude's settings.
 - PreToolUse on Write and Edit, when both `[harness] open_note` and
   `[harness] decisions_dir` are set: a file whose path ends in `open_note`
   can't gain a `- **item**` line unless the text holds `Decisions checked:`,
@@ -32,11 +35,13 @@ The hook never blocks for lack of config, and a crash or invalid config
 allows the call: a broken hook must not stop the agent's work.
 """
 
+import os
 import re
 import shlex
 import sys
 
 from tbhbdev import userconfig
+from tbhbdev.alpha.gh_shim import bin_dir
 from tbhbdev.alpha.repo import read_hook_stdin
 
 type Json = dict[str, object]
@@ -282,6 +287,12 @@ def pre_tool_reason(data: Json) -> str | None:
 def run(data: Json) -> int:
     """Handle one hook payload; the exit status."""
     if data.get("hook_event_name") == "SessionStart":
+        if os.environ.get("PATH", "").split(os.pathsep)[0] != str(bin_dir()):
+            print(
+                f"state-guard: this hook's PATH doesn't start with {bin_dir()}, "
+                "so a gh call in any hook skips the gh budget shim. Run "
+                "`tbhbdev alpha install` and restart the session."
+            )
         rule = userconfig.optional_string(TABLE, "rule")
         if rule:
             print(rule)

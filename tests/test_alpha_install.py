@@ -577,6 +577,25 @@ def test_merged_config_per_harness() -> None:
     assert install.merged_config("codex", {}) == {"hooks": install.codex_hooks()}
 
 
+def test_settings_path_puts_the_shim_first_once() -> None:
+    shim = str(gh_shim.bin_dir())
+    sep = os.pathsep
+    assert install.settings_path(None, None) is None
+    assert install.settings_path(None, f"/a{sep}{sep}/b") == f"{shim}{sep}/a{sep}/b"
+    assert (
+        install.settings_path(f"/x{sep}{shim}{sep}/y", "/a") == f"{shim}{sep}/x{sep}/y"
+    )
+    assert install.settings_path(7, "/a") == f"{shim}{sep}/a"
+
+
+def test_merged_config_writes_the_shim_path_for_claude_only() -> None:
+    shim = str(gh_shim.bin_dir())
+    claude = install.merged_config("claude", {}, "/a")
+    assert claude["env"] == {"PATH": f"{shim}{os.pathsep}/a", "SSH_AUTH_SOCK": ""}
+    assert install.merged_config("claude", claude, None)["env"] == claude["env"]
+    assert "env" not in install.merged_config("codex", {}, "/a")
+
+
 def test_merged_config_refuses_an_env_that_is_not_an_object() -> None:
     with pytest.raises(install.InstallError, match=r"^its env key is not an object$"):
         install.merged_config("claude", {"env": []})
@@ -3010,8 +3029,12 @@ def test_main_twice_changes_nothing_the_second_time(
     assert after == before
     assert not [p for p in world.home.rglob("*") if "tbhbdev-backup" in p.name]
     settings = json.loads((world.home / ".claude" / "settings.json").read_text())
-    assert settings["env"] == {"SSH_AUTH_SOCK": ""}
-    assert "PATH" not in settings["env"]
+    assert settings["env"] == {
+        "PATH": os.pathsep.join(
+            [str(gh_shim.bin_dir()), str(world.bin), str(world.bin.parent / "git_dir")]
+        ),
+        "SSH_AUTH_SOCK": "",
+    }
     codex = tomllib.loads((world.home / ".codex" / "config.toml").read_text())
     assert (
         codex.pop("hooks")["state"].keys()
@@ -3035,7 +3058,11 @@ def test_main_keeps_existing_settings_and_codex_keys(
     assert install.main([], "p") == 0
     capsys.readouterr()
     merged = json.loads(settings.read_text())
-    assert merged["env"] == {"FOO": "1", "SSH_AUTH_SOCK": ""}
+    assert merged["env"] == {
+        "FOO": "1",
+        "PATH": os.pathsep.join([str(gh_shim.bin_dir()), os.environ["PATH"]]),
+        "SSH_AUTH_SOCK": "",
+    }
     assert merged["model"] == "opus"
     text = config.read_text()
     assert text.startswith('# keep me\nmodel = "o3"\n')
@@ -3069,7 +3096,11 @@ def test_main_twice_with_existing_configs_changes_nothing_the_second_time(
         for p in [*world.home.rglob("*"), *gh_shim.bin_dir().rglob("*")]
         if p.is_file()
     }
-    assert json.loads(settings.read_text())["env"] == {"FOO": "1", "SSH_AUTH_SOCK": ""}
+    assert json.loads(settings.read_text())["env"] == {
+        "FOO": "1",
+        "PATH": os.pathsep.join([str(gh_shim.bin_dir()), os.environ["PATH"]]),
+        "SSH_AUTH_SOCK": "",
+    }
     assert 'SSH_AUTH_SOCK = ""' in config.read_text()
     assert install.main([], "p") == 0
     out = capsys.readouterr().out

@@ -4,12 +4,13 @@
 
 import io
 import json
+import os
 from collections.abc import Callable
 lazy from pathlib import Path
 
 import pytest
 
-from tbhbdev.alpha import state_guard
+from tbhbdev.alpha import gh_shim, state_guard
 
 CONFIG = """[harness]
 rule = "Example rule: claims carry evidence."
@@ -24,6 +25,11 @@ TRAILER_MESSAGE = (
 
 type Result = tuple[int, str, str]
 type Runner = Callable[[object], Result]
+
+
+@pytest.fixture(autouse=True)
+def _shim_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PATH", f"{gh_shim.bin_dir()}{os.pathsep}/usr/bin")
 
 
 @pytest.fixture
@@ -121,6 +127,23 @@ def test_session_start_prints_the_rule(run: Runner) -> None:
         0,
         "Example rule: claims carry evidence.\n",
         "",
+    )
+
+
+@pytest.mark.parametrize("path", [None, "", "/usr/bin", f"/usr/bin{os.pathsep}x"])
+def test_session_start_warns_when_the_shim_is_not_first_on_path(
+    run: Runner, monkeypatch: pytest.MonkeyPatch, path: str | None
+) -> None:
+    if path is None:
+        monkeypatch.delenv("PATH")
+    else:
+        monkeypatch.setenv("PATH", path)
+    status, out, err = run({"hook_event_name": "SessionStart"})
+    assert (status, err) == (0, "")
+    assert out == (
+        f"state-guard: this hook's PATH doesn't start with {gh_shim.bin_dir()}, "
+        "so a gh call in any hook skips the gh budget shim. Run "
+        "`tbhbdev alpha install` and restart the session.\n"
     )
 
 
