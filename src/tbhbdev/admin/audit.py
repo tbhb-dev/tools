@@ -126,7 +126,7 @@ class Audit:
                 Audit.roll_back(descriptor, start)
                 raise
             # A rotation after the first check leaves the record in a file that
-            # is no longer the log, so the call is refused rather than unlogged.
+            # is no longer the log, so the call is refused rather than left unrecorded.
             Audit.same_file(directory, descriptor)
         finally:
             os.close(descriptor)
