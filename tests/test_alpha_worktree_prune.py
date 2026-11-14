@@ -260,6 +260,7 @@ def fail_git(
 
 def set_which(monkeypatch: pytest.MonkeyPatch, *, found: bool) -> None:
     def which(name: str) -> str | None:
+        assert name in {"gh", "bazelisk"}
         return f"/bin/{name}" if found else None
 
     monkeypatch.setattr(wp.shutil, "which", which)
@@ -309,25 +310,23 @@ def test_parse_ignores_blank_and_flags() -> None:
 
 def test_last_activity_errors(clone: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = add(clone, "q")
-    head = sh(path, "rev-parse", "HEAD")
-    assert wp.last_activity(path, head) is not None
+    assert wp.last_activity(path) is not None
     real = wp.git
     fail_git(monkeypatch, "rev-parse", (1, ""))
-    assert wp.last_activity(path, head) is None
+    assert wp.last_activity(path) is None
     monkeypatch.setattr(wp, "git", real)
     fail_git(monkeypatch, "log", (0, "nan-x"))
-    assert wp.last_activity(path, head) is None
+    assert wp.last_activity(path) is None
 
 
 def test_last_activity_stat_error(clone: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = add(clone, "q")
-    head = sh(path, "rev-parse", "HEAD")
 
     def refuse(_self: Path, **_kwargs: object) -> os.stat_result:
         raise OSError
 
     monkeypatch.setattr(Path, "stat", refuse)
-    assert wp.last_activity(path, head) is None
+    assert wp.last_activity(path) is None
 
 
 def test_on_a_remote_unreadable(clone: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -348,7 +347,13 @@ def stub_gh(monkeypatch: pytest.MonkeyPatch, outcome_: object) -> list[list[str]
 
     def fake(argv: list[str], **kwargs: object) -> object:
         seen.append(argv)
-        assert kwargs["timeout"] == wp.GH_TIMEOUT
+        assert kwargs == {
+            "capture_output": True,
+            "text": True,
+            "check": False,
+            "input": "",
+            "timeout": wp.GH_TIMEOUT,
+        }
         if isinstance(outcome_, BaseException):
             raise outcome_
         return outcome_
@@ -411,7 +416,12 @@ def test_shutdown_bazel(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
 
     def record(argv: list[str], **kwargs: object) -> None:
         calls.append((argv, kwargs["cwd"]))
-        assert kwargs["timeout"] == wp.BAZEL_TIMEOUT
+        assert kwargs == {
+            "cwd": tmp_path,
+            "check": False,
+            "timeout": wp.BAZEL_TIMEOUT,
+            "capture_output": True,
+        }
 
     set_which(monkeypatch, found=True)
     monkeypatch.setattr(wp.subprocess, "run", record)
@@ -450,3 +460,140 @@ def test_report_and_exit(
 def test_negative_idle_days(capsys: pytest.CaptureFixture[str]) -> None:
     assert wp.main(["--max-idle-days", "-1"], "p") == 2
     assert "nonnegative" in capsys.readouterr().err
+
+
+def spy_git(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
+    """Record every git call's arguments while running them for real."""
+    seen: list[tuple[str, ...]] = []
+    real = wp.git
+
+    def record(*args: str, cwd: Path | None = None) -> tuple[int, str]:
+        seen.append(args)
+        return real(*args, cwd=cwd)
+
+    monkeypatch.setattr(wp, "git", record)
+    return seen
+
+
+def test_parse_blank_record_between_and_missing_keys() -> None:
+    first, second, third = wp.parse_worktrees(
+        "worktree /a b\0HEAD " + "1" * 40 + "\0\0\0\0"
+        "branch refs/heads/x\0\0"
+        "worktree /c\0HEAD " + "3" * 40
+    )
+    assert (first.path, first.head) == (Path("/a b"), "1" * 40)
+    assert (second.path, second.head, second.branch) == (Path(), "", "x")
+    assert third.path == Path("/c")
+
+
+def test_unreadable_list_with_output(
+    clone: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fail_git(monkeypatch, "worktree", (1, "partial"))
+    assert wp.list_worktrees(clone) is None
+
+
+def test_git_arguments(clone: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = add(clone, "g", commit=True, push=True)
+    head = sh(path, "rev-parse", "HEAD")
+    seen = spy_git(monkeypatch)
+    wp.is_dirty(path)
+    wp.head_in_main(path, head)
+    wp.on_a_remote(path, head)
+    wp.last_activity(path)
+    assert ("status", "--porcelain", "--untracked-files=all") in seen
+    assert ("merge-base", "--is-ancestor", head, "origin/main") in seen
+    assert (
+        "for-each-ref", "--contains", head, "--format=%(refname)", "refs/remotes",
+    ) in seen  # fmt: skip
+    assert ("log", "-1", "--format=%ct") in seen
+
+
+def test_last_activity_reads_index(
+    clone: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = add(clone, "i")
+    names: list[str] = []
+    real = Path.stat
+
+    def record(self: Path, **kwargs: bool) -> os.stat_result:
+        names.append(self.name)
+        return real(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", record)
+    wp.last_activity(path)
+    assert "index" in names
+
+
+def test_idle_boundary_removes(monkeypatch: pytest.MonkeyPatch) -> None:
+    def idle(_path: Path) -> float:
+        return NOW - 14 * DAY
+
+    monkeypatch.setattr(wp, "last_activity", idle)
+    wt = wp.Worktree(Path("/x"), "1" * 40, "b", locked=False, prunable=False)
+    assert wp.idle_verdict(wt, 14, NOW)[0] == "remove"
+
+
+def test_detached_head_has_no_pr_lookup() -> None:
+    wt = wp.Worktree(Path("/x"), "1" * 40, None, locked=False, prunable=False)
+    assert wp.pr_verdict(wt, "o/r") == ("keep", "detached head")
+
+
+def test_tree_bytes_empty(tmp_path: Path) -> None:
+    assert wp.tree_bytes(tmp_path) == 0
+
+
+def test_run_sizes(clone: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    add(clone, "gone", commit=True, push=True)
+    add(clone, "stay", commit=True, push=True)
+
+    def merged(_slug: str, branch: str, _head: str) -> bool:
+        return branch == "gone"
+
+    monkeypatch.setattr(wp, "merged_pull_request", merged)
+    sizes = {r.path.name: r.size_bytes for r in wp.run(clone, 14, apply=False)}
+    assert sizes["gone"] > 0
+    assert sizes["stay"] == 0
+    sizes = {r.path.name: r.size_bytes for r in wp.run(clone, 14, apply=True)}
+    assert sizes["gone"] > 0
+
+
+def test_report_text(capsys: pytest.CaptureFixture[str]) -> None:
+    done = wp.Result(Path("/a"), "removed", "removed", 5)
+    would = wp.Result(Path("/b"), "would remove", "merged", 7)
+    kept = wp.Result(Path("/c"), "keep", "dirty", 100)
+    wp.report([would, kept])
+    assert capsys.readouterr().out == (
+        "would remove: /b: merged\nkeep: /c: dirty\nwould free 7 bytes\n"
+    )
+    wp.report([done, would, kept])
+    assert capsys.readouterr().out == (
+        "removed: /a: removed\nwould remove: /b: merged\nkeep: /c: dirty\n"
+        "freed 12 bytes\n"
+    )
+
+
+def test_help_text(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        wp.main(["--help"], "prog")
+    out = " ".join(capsys.readouterr().out.split())
+    assert "usage: prog" in out
+    assert " ".join((wp.__doc__ or "").split()[:12]) in out
+    assert "remove, not just report" in out
+    assert "a worktree of the clone" in out
+
+
+def test_zero_idle_days_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def nothing(_path: Path, _days: int, *, apply: bool) -> list[wp.Result]:  # noqa: ARG001
+        return []
+
+    monkeypatch.setattr(wp, "run", nothing)
+    assert wp.main(["--max-idle-days", "0"], "p") == 0
+    assert wp.main(["--max-idle-days", "1"], "p") == 0
+
+
+def test_error_messages(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert wp.main(["--repo", str(tmp_path)], "p") == 2
+    assert capsys.readouterr().err == "p: cannot read the worktree list\n"
+    assert wp.main(["--max-idle-days", "-1"], "p") == 2
+    assert capsys.readouterr().err == "p: --max-idle-days must be nonnegative\n"

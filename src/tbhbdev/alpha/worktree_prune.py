@@ -24,7 +24,6 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 from tbhbdev.alpha.guard_gh_pr import origin_repo
 from tbhbdev.alpha.repo import git
@@ -74,8 +73,10 @@ def parse_worktrees(text: str) -> list[Worktree]:
         path = ""
         head = ""
         branch = None
+        keys: list[str] = []
         for field in fields:
             key, _, value = field.partition(" ")
+            keys.append(key)
             if key == "worktree":
                 path = value
             elif key == "HEAD":
@@ -87,8 +88,8 @@ def parse_worktrees(text: str) -> list[Worktree]:
                 Path(path),
                 head,
                 branch,
-                locked=any(field.split(" ")[0] == "locked" for field in fields),
-                prunable=any(field.split(" ")[0] == "prunable" for field in fields),
+                locked="locked" in keys,
+                prunable="prunable" in keys,
             )
         )
     return found
@@ -125,9 +126,9 @@ def on_a_remote(path: Path, head: str) -> bool | None:
     return bool(out) if code == 0 else None
 
 
-def last_activity(path: Path, head: str) -> float | None:
-    """Return the newest of the head's commit time and the tree's own change times."""
-    code, stamp = git("log", "-1", "--format=%ct", head, cwd=path)
+def last_activity(path: Path) -> float | None:
+    """Return the newest of the commit time and the tree's own change times."""
+    code, stamp = git("log", "-1", "--format=%ct", cwd=path)
     code_dir, gitdir = git("rev-parse", "--absolute-git-dir", cwd=path)
     if code or code_dir:
         return None
@@ -179,11 +180,12 @@ def merged_pull_request(slug: str, branch: str, head: str) -> bool | None:
         return None
     if done.returncode or not isinstance(data, list):
         return None
+    items: list[object] = [*data]
     return any(
         isinstance(item, dict)
         and item.get("headRefOid") == head
         and item.get("isCrossRepository") is False
-        for item in cast("list[object]", data)
+        for item in items
     )
 
 
@@ -210,7 +212,7 @@ def keep_reason(wt: Worktree, root: Path, cwd: Path) -> str | None:
 
 def idle_verdict(wt: Worktree, days: int, now: float) -> tuple[str, str]:
     """Judge a head that origin/main already holds by how long the tree sat idle."""
-    seen = last_activity(wt.path, wt.head)
+    seen = last_activity(wt.path)
     if seen is None:
         return "keep", "git state unreadable"
     if now - seen < days * DAY:
@@ -222,7 +224,9 @@ def pr_verdict(wt: Worktree, slug: str | None) -> tuple[str, str]:
     """Judge a head beyond origin/main by its branch's merged pull request."""
     if slug is None:
         return "keep", "origin unreadable"
-    merged = merged_pull_request(slug, wt.branch or "", wt.head)
+    if wt.branch is None:
+        return "keep", "detached head"
+    merged = merged_pull_request(slug, wt.branch, wt.head)
     if merged is None:
         return "keep", "pull request state unreadable"
     if merged:
@@ -245,7 +249,7 @@ def finished(wt: Worktree, policy: Policy) -> tuple[str, str]:
 
 def decide(wt: Worktree, policy: Policy) -> tuple[str, str]:
     reason = keep_reason(wt, policy.root, policy.cwd)
-    if reason:
+    if reason is not None:
         return "keep", reason
     dirty = is_dirty(wt.path)
     if dirty is None:
