@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple, cast
@@ -42,12 +43,14 @@ class Settings:
 class Runtime:
     audit: Audit
     env: gh_app.Env = field(repr=False)
+    marker: Path
     settings: Settings = Settings()
 
 
 def default_runtime() -> Runtime:
     root = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
-    return Runtime(Audit(root / "tbhbdev/admin"), gh_app.default_env())
+    directory = root / "tbhb/admin-app"
+    return Runtime(Audit(directory), gh_app.default_env(), marker=directory / "enabled")
 
 
 def scope(decision: policy.Decision, method: str) -> tuple[str, dict[str, str]]:
@@ -61,9 +64,24 @@ def scope(decision: policy.Decision, method: str) -> tuple[str, dict[str, str]]:
     return target, {permission: "read" if method == "GET" else "write"}
 
 
+def enabled(marker: Path) -> bool:
+    try:
+        info = marker.lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+
+
 def private_key(runtime: Runtime) -> str:
-    """Use only the service's Connect reader, never a caller credential."""
+    """Read the key only on the host that opted in, never with a caller credential.
+
+    ``marker`` is the file that ops creates on the one host that uses the App.
+    Every runtime names one, so a missing marker refuses.
+    """
     settings = runtime.settings
+    if not enabled(runtime.marker):
+        msg = "credential_unavailable"
+        raise RefusedError(msg)
     try:
         reader: gh_app.Reader = runtime.env.store()
         key = reader.read(f"op://{settings.vault}/{settings.item}/private_key")
