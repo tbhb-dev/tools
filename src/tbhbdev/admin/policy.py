@@ -171,6 +171,7 @@ RULESET_PLAIN_RULES = {
 RULESET_APPROVALS = 1
 RULESET_MERGE_METHODS = ["squash"]
 RULESET_CHECKS_APP = 15368
+OFF_DISMISSAL: dict[str, object] = {"enabled": False, "allowed_actors": []}
 RULESET_REVIEW_KEYS = {
     "required_approving_review_count", "dismiss_stale_reviews_on_push",
     "required_reviewers", "require_code_owner_review", "dismissal_restriction",
@@ -180,6 +181,15 @@ RULESET_REVIEW_KEYS = {
 RULESET_CONDITIONS: dict[str, dict[str, list[str]]] = {
     "ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]}
 }
+
+
+def safe_dismissal(value: object) -> bool:
+    """A dismissal restriction that is off with no actors, or absent."""
+    return (
+        isinstance(value, dict)
+        and value == OFF_DISMISSAL
+        and value["enabled"] is False  # 0 equals False, so check the type
+    )
 
 
 def safe_pull_request_rule(rule: dict[str, object]) -> bool:
@@ -198,6 +208,7 @@ def safe_pull_request_rule(rule: dict[str, object]) -> bool:
         and set(options) <= RULESET_REVIEW_KEYS
         and options.get("require_code_owner_review", False) is False
         and options.get("required_reviewers", []) == []
+        and safe_dismissal(options.get("dismissal_restriction", OFF_DISMISSAL))
     )
 
 

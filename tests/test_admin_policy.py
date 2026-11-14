@@ -941,15 +941,16 @@ def test_a_pull_request_rule_may_carry_the_live_review_options(
 
 def test_a_pull_request_rule_may_carry_every_live_review_option() -> None:
     rule = pull_request_with(
-        **dict.fromkeys(
-            policy.RULESET_REVIEW_KEYS - {"required_approving_review_count"}
-        ),
-    )
-    rule["parameters"].update(  # type: ignore[union-attr]
+        dismiss_stale_reviews_on_push=True,
         required_reviewers=[],
         require_code_owner_review=False,
+        dismissal_restriction={"enabled": False, "allowed_actors": []},
+        require_last_push_approval=True,
+        required_review_thread_resolution=True,
+        require_extra_approval_for_unattributed_changes=True,
         allowed_merge_methods=["squash"],
     )
+    assert set(rule["parameters"]) == policy.RULESET_REVIEW_KEYS  # type: ignore[arg-type]
     assert policy.check("POST", RULESET_PATH, with_rules(rule)).allowed
 
 
@@ -1036,6 +1037,29 @@ def test_a_ruleset_may_hold_fewer_rules_and_no_conditions() -> None:
         with_rules(pull_request_with(required_reviewers=None)),
         with_rules(pull_request_with(required_reviewers=0)),
         with_rules(pull_request_with(unknown_option=True)),
+        with_rules(
+            pull_request_with(
+                dismissal_restriction={"enabled": True, "allowed_actors": []}
+            )
+        ),
+        with_rules(pull_request_with(dismissal_restriction="x")),
+        with_rules(pull_request_with(dismissal_restriction=None)),
+        with_rules(
+            pull_request_with(
+                dismissal_restriction={"enabled": 0, "allowed_actors": []}
+            )
+        ),
+        with_rules(
+            pull_request_with(
+                dismissal_restriction={"enabled": False, "allowed_actors": ["x"]}
+            )
+        ),
+        with_rules(pull_request_with(dismissal_restriction={"enabled": False})),
+        with_rules(
+            pull_request_with(
+                dismissal_restriction={"enabled": False, "allowed_actors": [], "x": 1}
+            )
+        ),
         with_rules(status_checks({"context": "conclusion", "integration_id": 15368.0})),
         with_rules(pull_request(10**9)),
         with_rules(pull_request_methods(["merge"])),
