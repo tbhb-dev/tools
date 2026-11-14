@@ -534,15 +534,11 @@ def probe_token_env(harness: Harness) -> dict[str, str]:
     variable = "TBHBDEV_LIVE_CLAUDE_TOKEN_FILE"
     if harness is not Harness.CLAUDE:
         return {}
-    if not (path := os.environ.get(variable)):
-        token = os.environ.get(credentials.CLAUDE_TOKEN_ENV, "").strip()
-        return {credentials.CLAUDE_TOKEN_ENV: token} if token else {}
-    try:
-        token = Path(path).read_text().strip()
-    except OSError:
-        msg = f"cannot read {variable}: {path}"
-        raise ValueError(msg) from None
-    return {credentials.CLAUDE_TOKEN_ENV: token}
+    if os.environ.get(variable):
+        msg = f"{variable} is no longer read; set {credentials.CLAUDE_TOKEN_ENV}"
+        raise ValueError(msg)
+    token = os.environ.get(credentials.CLAUDE_TOKEN_ENV, "").strip()
+    return {credentials.CLAUDE_TOKEN_ENV: token} if token else {}
 
 
 def run_probe(
