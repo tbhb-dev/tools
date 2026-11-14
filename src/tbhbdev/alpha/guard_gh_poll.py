@@ -476,6 +476,13 @@ def inspect(text: str) -> tuple[str | None, set[str]]:
     return scan_commands(text)
 
 
+def checked(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
+    """One simple command's deny reason, refusing a repeated listing first."""
+    if repeats(command):
+        return REPEAT_REASON, set()
+    return denial(command, body)
+
+
 def scan_commands(text: str) -> tuple[str | None, set[str]]:
     """Scan each command of a shell text for a denial.
 
@@ -488,11 +495,7 @@ def scan_commands(text: str) -> tuple[str | None, set[str]]:
     for index, command in enumerate(scanner.run()):
         if opens_loop(command):
             loops.append(set())
-        message, seen = (
-            (REPEAT_REASON, set())
-            if repeats(command)
-            else denial(command, scanner.bodies.get(index))
-        )
+        message, seen = checked(command, scanner.bodies.get(index))
         if message:
             return message, programs
         programs |= seen
