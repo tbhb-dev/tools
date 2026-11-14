@@ -529,7 +529,11 @@ def test_the_head_reads_a_last_line_of_any_length(tmp_path: Path, length: int) -
 def test_a_short_read_of_the_tail_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(os, "pread", lambda _fd, _count, _offset: b"")
+
+    def empty_read(_fd: int, _count: int, _offset: int) -> bytes:
+        return b""
+
+    monkeypatch.setattr(os, "pread", empty_read)
     with pytest.raises(RefusedError, match=r"^audit_unavailable$"):
         head_of(b"abc\n", tmp_path)
 
