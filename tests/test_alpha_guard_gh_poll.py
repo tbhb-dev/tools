@@ -20,6 +20,8 @@ from tbhbdev.alpha import guard_gh_poll as guard
 HOME = str(guard.STATE_DIR.parents[2])
 OWNER = guard.STATE_DIR.parents[2].name
 ROOT = str(guard.STATE_DIR.parents[2].parent).rstrip("/")
+# One `*` per directory of the home path, so the glob reaches the state directory.
+HOME_GLOB = "/" + "/".join("*" for _ in guard.STATE_DIR.parents[2].parts[1:])
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,6 +68,8 @@ def grant_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "gh run -R org/repo watch 1",
         "$'gh' run list",
         "gh api --method='' repos/o/r/actions/runs",
+        "gh api -X POST --method='' repos/o/r/actions/runs",
+        "gh api --method='' -X POST --method='' repos/o/r/actions/runs",
         "gh run list",
         "gh pr checks --watch",
         "gh pr checks 3 --watch=true",
@@ -1259,7 +1263,7 @@ def test_flattened_splits_quoted_words_to_a_depth() -> None:
         f"sh -c 'rm {HOME}/.local/state/tbhb/../tbhb/*'",
         "eval 'rm ~/.local/state/x/../tbhb/gh-poll-*'",
         f"rm -rf {ROOT}/*/.local/state/tbhb",
-        "rm -rf /*/*/.local/state/tbhb",
+        f"rm -rf {HOME_GLOB}/.local/state/tbhb",
         f"rm -rf {ROOT}/{OWNER[0]}*/.local/state",
         f"rm -rf {HOME[:3]}{{{HOME[3:5]},x}}{HOME[5:]}/.local/state/tbhb",
         f"echo {HOME}/.local/state/tbhb/* | xargs rm",
@@ -1286,7 +1290,7 @@ def test_protected_names_are_read_after_unquoting_and_the_state_directory_is_kep
         "cp -a /tmp/a /tmp/b",
         "rm -rf relative/dir",
         "rm ~/.local/state/tbhb/other-*",
-        "rm -rf /tmp/*",
+        "rm -rf /srv-unrelated/*",
         "rm -rf ~/.local/state/other/*",
         "rm *",
         f"echo {HOME}/.local/state/other/* | xargs rm",

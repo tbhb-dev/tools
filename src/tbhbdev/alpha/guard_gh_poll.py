@@ -220,16 +220,24 @@ class BodyScanner(Scanner):
         self.pending = []
 
 
+def writes(args: list[str], flags: list[str]) -> bool:
+    """Whether ``gh api`` arguments send a write: a method other than GET or fields."""
+    methods = flag_values(args, {"-X", "--method"}, API_VALUE_FLAGS)
+    if methods and not methods[-1]:
+        methods = list[str]()  # an empty last value resets gh to its default method
+    if methods:
+        return methods[-1].upper() not in {"GET", "HEAD"}
+    return bool(
+        flag_values(args, API_FIELD_FLAGS, API_VALUE_FLAGS) or "--input" in flags
+    )
+
+
 def bulk_api(args: list[str]) -> bool:
     """Whether ``gh api`` arguments page, or read a list endpoint."""
     flags, endpoints = split_args(args, API_VALUE_FLAGS)
     if any(flag.partition("=")[0] == "--paginate" for flag in flags):
         return True
-    methods = [m for m in flag_values(args, {"-X", "--method"}, API_VALUE_FLAGS) if m]
-    if methods:
-        if methods[-1].upper() not in {"GET", "HEAD"}:
-            return False
-    elif flag_values(args, API_FIELD_FLAGS, API_VALUE_FLAGS) or "--input" in flags:
+    if writes(args, flags):
         return False
     for endpoint in endpoints:
         parsed = urlsplit(endpoint)
@@ -306,6 +314,19 @@ def spend_allowance(args: list[str]) -> bool:
     return True
 
 
+def run_poll(rest: list[str], i: int, *, repeated: bool) -> bool:
+    """Whether ``gh run`` words poll; ``i`` counts the flags before ``run``."""
+    j = 1
+    while j < len(rest) and rest[j].startswith("-"):
+        j += 2 if rest[j] in VALUE_FLAGS else 1
+    verb = rest[j : j + 1]
+    if verb == ["watch"]:
+        return True
+    if verb in (["list"], ["ls"]):
+        return i > 0 or j > 1 or repeated or not spend_allowance(rest[j + 1 :])
+    return False
+
+
 def github_poll(args: list[str], *, repeated: bool = False) -> bool:
     """Whether the words after ``gh``, past its global flags, poll GitHub.
 
@@ -316,15 +337,7 @@ def github_poll(args: list[str], *, repeated: bool = False) -> bool:
         i += 2 if args[i] in VALUE_FLAGS else 1
     rest = args[i:]
     if rest[:1] == ["run"]:
-        j = 1
-        while j < len(rest) and rest[j].startswith("-"):
-            j += 2 if rest[j] in VALUE_FLAGS else 1
-        verb = rest[j : j + 1]
-        if verb == ["watch"]:
-            return True
-        if verb in (["list"], ["ls"]):
-            return i > 0 or j > 1 or repeated or not spend_allowance(rest[j + 1 :])
-        return False
+        return run_poll(rest, i, repeated=repeated)
     if rest[:2] == ["pr", "checks"]:
         return any(w.partition("=")[0] == "--watch" for w in rest[2:])
     return rest[:1] in (["api"], ["query"]) and bulk_api(rest[1:])
