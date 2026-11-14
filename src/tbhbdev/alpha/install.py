@@ -86,6 +86,13 @@ writes PATH into a harness config: Claude's SessionStart hook puts the shim
 on PATH (below), and Codex and Antigravity get it from `tbhbdev alpha
 agent-env`.
 
+For Claude Code it also pins ccstatusline (see install_statusline): a
+`statusLine.command` that is exactly the known `bunx -y ccstatusline@latest`
+form becomes `node` running a copy installed once, at an exact version, in
+`$XDG_DATA_HOME/tbhbdev/ccstatusline/<version>`, because bunx asks the registry
+on every refresh. Another command stays. It backs up the file and reads
+the written command back.
+
 `--harness` limits the config merge to one harness. `--dry-run` writes
 nothing: it prints each config's diff, with one diff of Codex's `config.toml`
 for its trust and environment, and the git hooks it would install.
@@ -128,7 +135,7 @@ from tbhbdev.alpha.repo import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Mapping
+    from collections.abc import Callable, Generator, Mapping
     from typing import IO
 
 type Json = dict[str, object]
@@ -645,6 +652,117 @@ def apply_config(
     return 0
 
 
+# --------------------------------------------------------------- statusline
+
+STATUSLINE_VERSION = "2.2.33"
+COLUMNS_PREFIX = (
+    "COLUMNS=${COLUMNS:-$(tmux display-message -p '#{pane_width}' 2>/dev/null"
+    " || echo 80)}"
+)
+BUNX_COMMAND = "bunx -y ccstatusline@latest"
+# The two forms of the registry-resolving command this installer replaces.
+OLD_STATUSLINES = (
+    f"PATH=/opt/homebrew/bin:$PATH {COLUMNS_PREFIX} {BUNX_COMMAND}",
+    BUNX_COMMAND,
+)
+STATUSLINE_TIMEOUT = 300
+
+
+def statusline_root() -> Path:
+    """The directory the pinned ccstatusline is installed in."""
+    base = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
+    return Path(base) / "tbhbdev" / "ccstatusline" / STATUSLINE_VERSION
+
+
+def statusline_script(root: Path) -> Path:
+    """The package's bin, `dist/ccstatusline.js` in its package.json."""
+    return root / "node_modules" / "ccstatusline" / "dist" / "ccstatusline.js"
+
+
+def statusline_command(node: str, script: Path) -> str:
+    return f"{COLUMNS_PREFIX} {shlex.quote(node)} {shlex.quote(str(script))}"
+
+
+def install_statusline(  # noqa: PLR0911 -- one early return per outcome
+    env: Mapping[str, str],
+    *,
+    dry_run: bool,
+    run: Callable[..., object] = subprocess.run,
+    which: Callable[[str], str | None] = shutil.which,
+) -> int:
+    """Pin ccstatusline and point Claude's `statusLine.command` at it.
+
+    Only the known `bunx -y ccstatusline@latest` command is replaced, because
+    bunx asks the registry on every refresh. Any other command, and a config
+    with no status line, stays as it is. Without bun (to install) or node (to
+    run it) the old command stays and the reason is printed. The old file is
+    backed up, only `statusLine.command` changes, and the written value is read
+    back and must match.
+    """
+    path = config_path(CLAUDE, env)
+    try:
+        old, config = read_config(path)
+    except InstallError as exc:
+        print(f"{PROG}: claude: cannot read {path}: {exc}", file=sys.stderr)
+        return 1
+    line = config.get("statusLine")
+    current = line.get("command") if isinstance(line, dict) else None
+    if not isinstance(current, str):
+        return 0
+    root = statusline_root()
+    script = statusline_script(root)
+    bun, node = which("bun"), which("node")
+    wanted = statusline_command(node, script) if node else None
+    if current != wanted and current not in OLD_STATUSLINES:
+        return 0
+    installed = script.is_file()
+    if current == wanted and installed:
+        print(f"claude: statusLine in {path} is up to date")
+        return 0
+    if not node or (not installed and not bun):
+        missing = "node" if not node else "bun"
+        print(
+            f"claude: {missing} not found; left the statusLine command in {path}",
+            file=sys.stderr,
+        )
+        return 0
+    if dry_run:
+        print(f"claude: would install ccstatusline {STATUSLINE_VERSION} in {root}")
+        return 0
+    try:
+        if not installed:
+            root.mkdir(parents=True, exist_ok=True)
+            run(
+                [
+                    cast("str", bun),
+                    "add",
+                    "--exact",
+                    "--ignore-scripts",
+                    f"ccstatusline@{STATUSLINE_VERSION}",
+                ],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                timeout=STATUSLINE_TIMEOUT,
+            )
+        if not script.is_file():
+            message = f"{script} is missing after the install"
+            raise InstallError(message)  # noqa: TRY301
+        merged = {**config, "statusLine": {**cast("Json", line), "command": wanted}}
+        backup = write_config(path, old, json.dumps(merged, indent=2) + "\n")
+        if read_config(path)[1] != merged:
+            message = f"the written file differs; the old one is {backup}"
+            raise InstallError(message)  # noqa: TRY301
+    except (OSError, subprocess.SubprocessError, InstallError) as exc:
+        print(f"{PROG}: claude: cannot pin ccstatusline: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"claude: pinned ccstatusline {STATUSLINE_VERSION} in {path}; "
+        f"the old one is {backup}"
+    )
+    return 0
+
+
 # ------------------------------------------------------------ private files
 
 # Config names a plugin may supply, and where each goes relative to HOME.
@@ -1149,6 +1267,8 @@ def main(argv: list[str], prog: str) -> int:
     for harness in [args.harness] if args.harness else HARNESSES:
         result = install_config(harness, env, dry_run=args.dry_run)
         status |= result
+        if harness == CLAUDE:
+            status |= install_statusline(env, dry_run=args.dry_run)
         if harness == CODEX:
             status |= install_codex_environment(
                 env, dry_run=args.dry_run, in_trust_diff=result == 0
