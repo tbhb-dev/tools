@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 OLD = install.OLD_STATUSLINES[0]
 BARE = install.OLD_STATUSLINES[1]
-FOREIGN = {"model": "opus", "env": {"A": "b"}, "hooks": {"Stop": []}}
+FOREIGN: dict[str, object] = {"model": "opus", "env": {"A": "b"}, "hooks": {"Stop": []}}
 
 
 @dataclass
@@ -78,7 +78,7 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Setup:
 
 
 def command(setup: Setup) -> str:
-    return json.loads(setup.path.read_text())["statusLine"]["command"]
+    return str(json.loads(setup.path.read_text())["statusLine"]["command"])
 
 
 def wanted(setup: Setup) -> str:
@@ -117,6 +117,17 @@ def test_pins_the_known_command_and_keeps_every_other_key(
     assert capsys.readouterr().out == (
         f"claude: pinned ccstatusline 2.2.33 in {setup.path}; the old one is {backup}\n"
     )
+
+
+def test_an_existing_install_is_reused_without_bun(setup: Setup) -> None:
+    script = install.statusline_script(setup.tools.root)
+    script.parent.mkdir(parents=True)
+    script.write_text("")
+    del setup.tools.found["bun"]
+    setup.write({"statusLine": {"type": "command", "command": OLD}})
+    assert setup.go() == 0
+    assert not setup.tools.calls
+    assert command(setup) == wanted(setup)
 
 
 def test_a_rerun_changes_nothing(
