@@ -14,3 +14,4 @@ tbhbdev
 tmux
 uv
 worktrees?
+ccstatusline
