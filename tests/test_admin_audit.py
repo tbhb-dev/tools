@@ -39,7 +39,9 @@ def test_log_flags_modes_and_fields(
     monkeypatch.setattr(os, "open", opened)
     monkeypatch.setattr(os, "fsync", syncs.append)
     body = b'{"description":"private request text"}'
-    decision = policy.check("PATCH", "/repos/acme/widget", {"description": "example"})
+    decision = policy.check(
+        "PATCH", "/repos/tbhb-dev/widget", {"description": "example"}
+    )
     entry = record("PATCH", decision, "maintenance", body)
     audit.append(entry)
     audit.append({**entry, "phase": "after", "status": 200})
@@ -70,7 +72,7 @@ def test_log_flags_modes_and_fields(
         "uid": os.getuid(),
         "reason": "maintenance",
         "method": "PATCH",
-        "path": "/repos/acme/widget",
+        "path": "/repos/tbhb-dev/widget",
         "decision": "allow",
         "code": "allowed",
         "status": None,
@@ -161,7 +163,7 @@ def test_fail_closed_before_any_io(
             unavailable,
         )
     with pytest.raises(RefusedError, match=r"^audit_unavailable$"):
-        request.call(runtime, "GET", "/repos/acme/widget", None, "test")
+        request.call(runtime, "GET", "/repos/tbhb-dev/widget", None, "test")
 
 
 def test_validate_file_owner_and_kind(

@@ -92,8 +92,13 @@ def fake(tmp_path: Path) -> Fake:
 @pytest.mark.parametrize(
     ("method", "path", "body", "code"),
     [
-        ("DELETE", "/repos/acme/widget", None, "repository_removal"),
-        ("PATCH", "/repos/acme/widget", {"visibility": "public"}, "public_visibility"),
+        ("DELETE", "/repos/tbhb-dev/widget", None, "repository_removal"),
+        (
+            "PATCH",
+            "/repos/tbhb-dev/widget",
+            {"visibility": "public"},
+            "public_visibility",
+        ),
         ("GET", "/graphql", None, "endpoint_denied"),
     ],
 )
@@ -112,33 +117,43 @@ def test_no_io_on_refusal(
 @pytest.mark.parametrize(
     ("method", "path", "target", "permissions"),
     [
-        ("GET", "/repos/acme/widget", "acme/widget", {"metadata": "read"}),
-        ("PATCH", "/repos/acme/widget", "acme/widget", {"administration": "write"}),
+        ("GET", "/repos/tbhb-dev/widget", "tbhb-dev/widget", {"metadata": "read"}),
+        (
+            "PATCH",
+            "/repos/tbhb-dev/widget",
+            "tbhb-dev/widget",
+            {"administration": "write"},
+        ),
         (
             "GET",
-            "/orgs/acme/actions/secrets/build",
-            "acme",
+            "/orgs/tbhb-dev/actions/secrets/build",
+            "tbhb-dev",
             {"organization_secrets": "read"},
         ),
         (
             "PUT",
-            "/orgs/acme/actions/secrets/build/repositories/8",
-            "acme",
+            "/orgs/tbhb-dev/actions/secrets/build/repositories/8",
+            "tbhb-dev",
             {"organization_secrets": "write"},
         ),
         (
             "GET",
-            "/repos/acme/widget/contents/file",
-            "acme/widget",
+            "/repos/tbhb-dev/widget/contents/file",
+            "tbhb-dev/widget",
             {"contents": "read"},
         ),
         (
             "PUT",
-            "/repos/acme/widget/environments/test",
-            "acme/widget",
+            "/repos/tbhb-dev/widget/environments/test",
+            "tbhb-dev/widget",
             {"environments": "write"},
         ),
-        ("POST", "/repos/acme/widget/pulls", "acme/widget", {"pull_requests": "write"}),
+        (
+            "POST",
+            "/repos/tbhb-dev/widget/pulls",
+            "tbhb-dev/widget",
+            {"pull_requests": "write"},
+        ),
     ],
 )
 def test_scope_and_real_mint(
@@ -200,7 +215,7 @@ def test_failures_are_safe(
     fake.failure = failure
     assert (
         admin.main(
-            ["call", "GET", "/repos/acme/widget", "--reason", "test"],
+            ["call", "GET", "/repos/tbhb-dev/widget", "--reason", "test"],
             "admin",
             runtime=fake.runtime,
         )
@@ -218,7 +233,7 @@ def test_failures_are_safe(
 
 def test_dry_run(fake: Fake) -> None:
     assert request.call(
-        fake.runtime, "GET", "/repos/acme/widget", None, "test", dry_run=True
+        fake.runtime, "GET", "/repos/tbhb-dev/widget", None, "test", dry_run=True
     ) == (0, "")
     assert fake.reads == fake.requests == []
 
@@ -239,7 +254,7 @@ def test_dry_run(fake: Fake) -> None:
 def test_response_limits(fake: Fake, reply: httpx.Response, code: str) -> None:
     fake.reply = reply
     with pytest.raises(RefusedError, match=f"^{code}$"):
-        request.call(fake.runtime, "GET", "/repos/acme/widget", None, "test")
+        request.call(fake.runtime, "GET", "/repos/tbhb-dev/widget", None, "test")
     assert len(fake.requests) == 3
 
 
@@ -256,7 +271,7 @@ def test_redaction_and_json_body(
             [
                 "call",
                 "PATCH",
-                "/repos/acme/widget",
+                "/repos/tbhb-dev/widget",
                 "--json",
                 str(source),
                 "--reason",
@@ -275,7 +290,9 @@ def test_redaction_and_json_body(
 def test_response_cap_boundary(fake: Fake) -> None:
     fake.reply = httpx.Response(200, content=b"x" * request.MAX_RESPONSE)
     assert (
-        len(request.call(fake.runtime, "GET", "/repos/acme/widget", None, "test")[1])
+        len(
+            request.call(fake.runtime, "GET", "/repos/tbhb-dev/widget", None, "test")[1]
+        )
         == request.MAX_RESPONSE
     )
 
@@ -303,7 +320,7 @@ def test_explicit_http_options(fake: Fake, monkeypatch: pytest.MonkeyPatch) -> N
         return original(**kwargs)
 
     monkeypatch.setattr(httpx, "Client", client)
-    request.call(fake.runtime, "GET", "/repos/acme/widget", None, "test")
+    request.call(fake.runtime, "GET", "/repos/tbhb-dev/widget", None, "test")
     last = options[-1]
     assert last["timeout"] == gh_app.TIMEOUT
     assert last["follow_redirects"] is False
@@ -327,7 +344,9 @@ def test_redaction_without_pem_structure() -> None:
 
 def test_invalid_utf8_response(fake: Fake) -> None:
     fake.reply = httpx.Response(200, content=b"\xff")
-    assert request.call(fake.runtime, "GET", "/repos/acme/widget", None, "test") == (
+    assert request.call(
+        fake.runtime, "GET", "/repos/tbhb-dev/widget", None, "test"
+    ) == (
         200,
         "\ufffd",
     )
@@ -340,7 +359,7 @@ def test_reused_mint_preserves_installation_arguments(fake: Fake) -> None:
         fake.runtime.env,
         app_id="5733271",
         pem=fake.key,
-        repository="acme/widget",
+        repository="tbhb-dev/widget",
         permissions={"administration": "write"},
         known_installation=7,
         installation_found=found.append,

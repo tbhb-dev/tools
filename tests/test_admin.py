@@ -22,7 +22,7 @@ fake = admin_fake
     [
         (["--help"], 0, "out"),
         ([], 2, "err"),
-        (["call", "GET", "/repos/acme/widget"], 2, "err"),
+        (["call", "GET", "/repos/tbhb-dev/widget"], 2, "err"),
         (["secret-repos", "remove"], 2, "err"),
     ],
 )
@@ -46,7 +46,9 @@ def test_invalid_options(
 ) -> None:
     assert (
         admin.main(
-            ["call", "GET", "/repos/acme/widget", *args], "admin", runtime=fake.runtime
+            ["call", "GET", "/repos/tbhb-dev/widget", *args],
+            "admin",
+            runtime=fake.runtime,
         )
         == 3
     )
@@ -58,7 +60,9 @@ def test_default_runtime_dispatch(fake: Fake, monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(admin, "default_runtime", lambda: fake.runtime)
     fake.reply = httpx.Response(404, text="missing")
     assert (
-        admin.main(["call", "GET", "/repos/acme/widget", "--reason", "test"], "admin")
+        admin.main(
+            ["call", "GET", "/repos/tbhb-dev/widget", "--reason", "test"], "admin"
+        )
         == 1
     )
 
@@ -102,13 +106,13 @@ def test_secret_repos_add(fake: Fake) -> None:
     runtime = selected_transport(
         fake,
         {
-            "/orgs/acme/actions/secrets/build": httpx.Response(
+            "/orgs/tbhb-dev/actions/secrets/build": httpx.Response(
                 200, json={"visibility": "selected"}
             ),
-            "/repos/acme/widget": httpx.Response(200, json={"id": 1}),
-            "/repos/acme/other": httpx.Response(200, json={"id": 9}),
-            "/orgs/acme/actions/secrets/build/repositories/1": httpx.Response(204),
-            "/orgs/acme/actions/secrets/build/repositories/9": httpx.Response(204),
+            "/repos/tbhb-dev/widget": httpx.Response(200, json={"id": 1}),
+            "/repos/tbhb-dev/other": httpx.Response(200, json={"id": 9}),
+            "/orgs/tbhb-dev/actions/secrets/build/repositories/1": httpx.Response(204),
+            "/orgs/tbhb-dev/actions/secrets/build/repositories/9": httpx.Response(204),
         },
     )
     assert (
@@ -117,11 +121,11 @@ def test_secret_repos_add(fake: Fake) -> None:
                 "secret-repos",
                 "add",
                 "--org",
-                "acme",
+                "tbhb-dev",
                 "--secret",
                 "build",
                 "widget",
-                "acme/other",
+                "tbhb-dev/other",
             ],
             "admin",
             runtime=runtime,
@@ -129,11 +133,11 @@ def test_secret_repos_add(fake: Fake) -> None:
         == 0
     )
     assert [(r.method, r.url.path) for r in fake.requests[2::3]] == [
-        ("GET", "/orgs/acme/actions/secrets/build"),
-        ("GET", "/repos/acme/widget"),
-        ("PUT", "/orgs/acme/actions/secrets/build/repositories/1"),
-        ("GET", "/repos/acme/other"),
-        ("PUT", "/orgs/acme/actions/secrets/build/repositories/9"),
+        ("GET", "/orgs/tbhb-dev/actions/secrets/build"),
+        ("GET", "/repos/tbhb-dev/widget"),
+        ("PUT", "/orgs/tbhb-dev/actions/secrets/build/repositories/1"),
+        ("GET", "/repos/tbhb-dev/other"),
+        ("PUT", "/orgs/tbhb-dev/actions/secrets/build/repositories/9"),
     ]
     entries = [
         json.loads(line)
@@ -164,7 +168,7 @@ def test_secret_visibility_refused(
     )
     assert (
         admin.main(
-            ["secret-repos", "add", "--org", "acme", "--secret", "build", "widget"],
+            ["secret-repos", "add", "--org", "tbhb-dev", "--secret", "build", "widget"],
             "admin",
             runtime=fake.runtime,
         )
@@ -184,7 +188,7 @@ def test_secret_visibility_refused(
     [
         ("other/widget", 8, 204, "repository_mismatch"),
         ("../widget", 8, 204, "repository_mismatch"),
-        ("acme/a/b", 8, 204, "repository_mismatch"),
+        ("tbhb-dev/a/b", 8, 204, "repository_mismatch"),
         ("widget", None, 204, "invalid_response"),
         ("widget", True, 204, "invalid_response"),
         ("widget", 0, 204, "invalid_response"),
@@ -203,16 +207,18 @@ def test_repository_selection_errors(  # noqa: PLR0913, PLR0917  # Table plus fi
     runtime = selected_transport(
         fake,
         {
-            "/orgs/acme/actions/secrets/build": httpx.Response(
+            "/orgs/tbhb-dev/actions/secrets/build": httpx.Response(
                 200, json={"visibility": "selected"}
             ),
-            "/repos/acme/widget": httpx.Response(200, json={"id": ident}),
-            "/orgs/acme/actions/secrets/build/repositories/1": httpx.Response(status),
+            "/repos/tbhb-dev/widget": httpx.Response(200, json={"id": ident}),
+            "/orgs/tbhb-dev/actions/secrets/build/repositories/1": httpx.Response(
+                status
+            ),
         },
     )
     assert (
         admin.main(
-            ["secret-repos", "add", "--org", "acme", "--secret", "build", repo],
+            ["secret-repos", "add", "--org", "tbhb-dev", "--secret", "build", repo],
             "admin",
             runtime=runtime,
         )
@@ -224,7 +230,15 @@ def test_repository_selection_errors(  # noqa: PLR0913, PLR0917  # Table plus fi
 def test_invalid_org(fake: Fake, capsys: pytest.CaptureFixture[str]) -> None:
     assert (
         admin.main(
-            ["secret-repos", "add", "--org", "../acme", "--secret", "build", "widget"],
+            [
+                "secret-repos",
+                "add",
+                "--org",
+                "../tbhb-dev",
+                "--secret",
+                "build",
+                "widget",
+            ],
             "admin",
             runtime=fake.runtime,
         )
@@ -237,12 +251,12 @@ def test_invalid_org(fake: Fake, capsys: pytest.CaptureFixture[str]) -> None:
 def test_parser_contract() -> None:
     parser = admin.parser()
     direct = parser.parse_args(
-        ["call", "PUT", "/repos/acme/widget", "--reason", "test", "--dry-run"]
+        ["call", "PUT", "/repos/tbhb-dev/widget", "--reason", "test", "--dry-run"]
     )
     assert vars(direct) == {
         "command": "call",
         "method": "PUT",
-        "path": "/repos/acme/widget",
+        "path": "/repos/tbhb-dev/widget",
         "json": None,
         "reason": "test",
         "dry_run": True,
@@ -252,12 +266,12 @@ def test_parser_contract() -> None:
         "app_id": "5733271",
     }
     selected = parser.parse_args(
-        ["secret-repos", "add", "--org", "acme", "--secret", "build", "widget"]
+        ["secret-repos", "add", "--org", "tbhb-dev", "--secret", "build", "widget"]
     )
     assert vars(selected) == {
         "command": "secret-repos",
         "action": "add",
-        "org": "acme",
+        "org": "tbhb-dev",
         "secret": "build",
         "repos": ["widget"],
         "reason": "add repositories to selected secret",
@@ -272,8 +286,8 @@ def test_parser_contract() -> None:
     "argv",
     [
         ["secret-repos", "add", "--secret", "build", "widget"],
-        ["secret-repos", "add", "--org", "acme", "widget"],
-        ["secret-repos", "remove", "--org", "acme", "--secret", "build", "widget"],
+        ["secret-repos", "add", "--org", "tbhb-dev", "widget"],
+        ["secret-repos", "remove", "--org", "tbhb-dev", "--secret", "build", "widget"],
     ],
 )
 def test_required_secret_arguments(argv: list[str]) -> None:
@@ -304,7 +318,7 @@ def test_custom_settings_and_dry_run(
             [
                 "call",
                 "POST",
-                "/repos/acme/widget/pulls",
+                "/repos/tbhb-dev/widget/pulls",
                 "--reason",
                 "maintenance",
                 "--dry-run",
@@ -326,7 +340,7 @@ def test_custom_settings_and_dry_run(
         (
             request.Settings("other-app", "other-item", "other-vault", "42"),
             "POST",
-            "/repos/acme/widget/pulls",
+            "/repos/tbhb-dev/widget/pulls",
             None,
             "maintenance",
             True,

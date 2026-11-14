@@ -5,9 +5,13 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
 METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
+OWNER = "tbhb-dev"
 PART = r"[a-z0-9_.-]+"
 REPO = rf"/repos/{PART}/{PART}"
 ORG = rf"/orgs/{PART}"
+OWNED = re.compile(rf"/(?:repos|orgs)/({PART})(?:/|$)")
+REVIEW = re.compile(rf"{REPO}/pulls/[0-9]+/reviews(?:/|$)")
+MERGE = re.compile(rf"{REPO}/pulls/[0-9]+/merge")
 PAID = frozenset(
     {"billing", "copilot", "codespaces", "hosted-runners", "larger-runners"}
 )
@@ -91,7 +95,7 @@ FAMILIES = (
     ),
     (rf"{REPO}/contents(?:/{PART})*", "contents"),
     (
-        rf"{REPO}/pulls(?:/[0-9]+)?(?:/(?:merge|reviews|comments|requested_reviewers)(?:/[0-9]+)?)?",
+        rf"{REPO}/pulls(?:/[0-9]+)?(?:/(?:reviews|comments|requested_reviewers)(?:/[0-9]+)?)?",
         "pull_requests",
     ),
 )
@@ -160,6 +164,8 @@ def explicit_refusal(  # noqa: PLR0911  # One stable code per policy rule.
         return "paid_feature"
     if fields(body) & {"actions_spending_limit", "spending_limit", "use_static_ip"}:
         return "paid_feature"
+    if MERGE.fullmatch(path) or (method == "POST" and REVIEW.match(path)):
+        return "approval_or_merge"
     if method == "GET":
         return ""
     if parts & MEMBERSHIP or fields(body) & {
@@ -202,6 +208,9 @@ def check(  # noqa: PLR0911  # Ordered default-deny decisions.
         return Decision(allowed=False, code="invalid_method", path=canonical)
     if body is not None and not isinstance(body, dict):
         return Decision(allowed=False, code="invalid_body", path=canonical)
+    owner = OWNED.match(canonical)
+    if owner and owner[1] != OWNER:
+        return Decision(allowed=False, code="foreign_owner", path=canonical)
     payload: dict[str, object] = body or {}
     code = explicit_refusal(method, canonical, payload)
     if code:
