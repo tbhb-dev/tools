@@ -496,17 +496,22 @@ def repeats(command: list[str]) -> bool:
     return bool(REPEATERS & names) and bool(GH_RUN.search(" ".join(words)))
 
 
+def direction(first: int, last: int) -> int:
+    """The step of a brace range, which counts down when it ends below its start."""
+    return 1 if first <= last else -1  # pragma: no mutate (equal ends give one item)
+
+
 def brace_items(body: str) -> list[str]:
     """The items of one brace body: a comma list, or a character or integer range."""
     span = re.fullmatch(r"(-?\d+)\.\.(-?\d+)|([A-Za-z])\.\.([A-Za-z])", body)
     if not span:
         return body.split(",")
-    if span.group(3):
+    if span.group(3):  # pragma: no mutate (groups 3 and 4 are set together)
         first, last = ord(span.group(3)), ord(span.group(4))
-        step = 1 if first <= last else -1
+        step = direction(first, last)
         return [chr(code) for code in range(first, last + step, step)]
     first, last = int(span.group(1)), int(span.group(2))
-    step = 1 if first <= last else -1
+    step = direction(first, last)
     return [str(number) for number in range(first, last + step, step)[:BRACE_LIMIT]]
 
 

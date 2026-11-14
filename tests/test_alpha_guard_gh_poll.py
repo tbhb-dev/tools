@@ -1401,6 +1401,8 @@ def test_pipes_state_dir_needs_a_repeater_a_mover_and_a_state_path(
         ("a,b", ["a", "b"]),
         ("t..t", ["t"]),
         ("a..c", ["a", "b", "c"]),
+        ("A..C", ["A", "B", "C"]),
+        ("Z..X", ["Z", "Y", "X"]),
         ("c..a", ["c", "b", "a"]),
         ("1..3", ["1", "2", "3"]),
         ("3..1", ["3", "2", "1"]),
