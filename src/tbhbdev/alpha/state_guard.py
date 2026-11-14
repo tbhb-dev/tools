@@ -287,7 +287,10 @@ def pre_tool_reason(data: Json) -> str | None:
 def run(data: Json) -> int:
     """Handle one hook payload; the exit status."""
     if data.get("hook_event_name") == "SessionStart":
-        if os.environ.get("PATH", "").split(os.pathsep)[0] != str(bin_dir()):
+        # An unset PATH warns with any default, so the default is equivalent.
+        if os.environ.get("PATH", "").split(os.pathsep)[0] != str(  # pragma: no mutate
+            bin_dir()
+        ):
             print(
                 f"state-guard: this hook's PATH doesn't start with {bin_dir()}, "
                 "so a gh call in any hook skips the gh budget shim. Run "

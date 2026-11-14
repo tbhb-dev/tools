@@ -593,6 +593,8 @@ def test_merged_config_writes_the_shim_path_for_claude_only() -> None:
     claude = install.merged_config("claude", {}, "/a")
     assert claude["env"] == {"PATH": f"{shim}{os.pathsep}/a", "SSH_AUTH_SOCK": ""}
     assert install.merged_config("claude", claude, None)["env"] == claude["env"]
+    kept = install.merged_config("claude", {"env": {"PATH": "/x:/y"}}, "/a")
+    assert kept["env"]["PATH"] == f"{shim}{os.pathsep}/x:/y"
     assert "env" not in install.merged_config("codex", {}, "/a")
 
 
