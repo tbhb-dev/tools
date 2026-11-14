@@ -529,8 +529,15 @@ def open_tmp(tmp: Path, mode: int | None) -> IO[str]:
 
 
 def check_unchanged(target: Path, old: str | None) -> None:
-    """Raise InstallError when TARGET no longer holds OLD (None: not checked)."""
-    if old is not None and target.read_text() != old:
+    """Raise InstallError when TARGET no longer holds OLD (None: not checked).
+
+    Text that isn't UTF-8 can't equal OLD, so it counts as a change.
+    """
+    try:
+        changed = old is not None and target.read_text() != old
+    except UnicodeDecodeError:
+        changed = True
+    if changed:
         message = f"{target} changed while it was being written"
         raise InstallError(message)
 
@@ -735,13 +742,17 @@ def statusline_installed(root: Path) -> bool:
     package = statusline_package(root)
     path = (root, root / STATUSLINE_MARKER, root / "node_modules", package)
     marker = root / STATUSLINE_MARKER
-    return (
-        not any(entry.is_symlink() for entry in path)
-        and marker.is_file()
-        and marker.read_text() == STATUSLINE_VERSION
-        and statusline_script(root).is_file()
-        and package_digest(package) == STATUSLINE_DIGEST
-    )
+    try:
+        return (
+            not any(entry.is_symlink() for entry in path)
+            and marker.is_file()
+            and marker.read_text() == STATUSLINE_VERSION
+            and statusline_script(root).is_file()
+            and package_digest(package) == STATUSLINE_DIGEST
+        )
+    except OSError, UnicodeDecodeError:
+        # An unreadable or non-text file is no install, and a rerun replaces it.
+        return False
 
 
 def add_statusline(root: Path, bun: str | None, run: Callable[..., object]) -> None:

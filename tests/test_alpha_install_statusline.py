@@ -565,6 +565,25 @@ def test_a_symlink_anywhere_in_the_install_is_not_trusted(
     assert not statusline_installed(setup)
 
 
+@pytest.mark.parametrize("damage", ["marker_bytes", "marker_mode", "script_mode"])
+def test_an_unreadable_or_non_text_file_is_no_install_and_a_rerun_repairs_it(
+    setup: Setup, damage: str
+) -> None:
+    script = preinstall(setup.tools.root)
+    marker = setup.tools.root / ".complete"
+    if damage == "marker_bytes":
+        marker.write_bytes(b"\xff\xfe")
+    elif damage == "marker_mode":
+        marker.chmod(0)
+    else:
+        script.chmod(0)
+    assert not statusline_installed(setup)
+    setup.write({"statusLine": {"type": "command", "command": wanted(setup)}})
+    assert setup.go() == 0
+    assert len(setup.tools.calls) == 1
+    assert statusline_installed(setup)
+
+
 def test_a_socket_or_fifo_in_the_package_is_not_trusted(setup: Setup) -> None:
     script = preinstall(setup.tools.root)
     os.mkfifo(script.parent / "pipe")
@@ -588,6 +607,26 @@ def test_a_settings_edit_between_the_read_and_the_replace_aborts(
     finally:
         install.check_unchanged = saved
     assert json.loads(setup.path.read_text()) == edited
+    assert "changed while it was being written" in capsys.readouterr().err
+    assert not list(setup.path.parent.glob("*.tmp"))
+
+
+def test_a_settings_file_swapped_for_non_text_aborts_and_removes_the_temp_file(
+    setup: Setup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    setup.write({"statusLine": {"type": "command", "command": OLD}})
+    real = install.check_unchanged
+
+    def swap_then_check(target: Path, old: str | None) -> None:
+        target.write_bytes(b"\xff\xfe")
+        real(target, old)
+
+    install.check_unchanged, saved = swap_then_check, real
+    try:
+        assert setup.go() == 1
+    finally:
+        install.check_unchanged = saved
+    assert setup.path.read_bytes() == b"\xff\xfe"
     assert "changed while it was being written" in capsys.readouterr().err
     assert not list(setup.path.parent.glob("*.tmp"))
 
