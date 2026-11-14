@@ -33,11 +33,12 @@ def verify(files: RunFiles, expected: str) -> None:
             and stat.S_IMODE(info.st_mode) == OWNER_MODE
             and info.st_uid == os.getuid()
         )
-        # Read one byte past the expected text so a longer file never matches.
-        text = os.read(descriptor, len(expected) + 2) if private else b""
+        # Read one byte past the expected bytes so a longer file never matches.
+        wanted = f"{expected}\n".encode()
+        text = os.read(descriptor, len(wanted) + 1) if private else b""
     finally:
         os.close(descriptor)
-    if not expected or not private or text != f"{expected}\n".encode():
+    if not expected or not private or text != wanted:
         message = f"run {files.name!r} has a different owner"
         raise RunExistsError(message)
 

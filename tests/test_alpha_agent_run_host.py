@@ -4342,6 +4342,56 @@ def test_failure_records_are_written_while_the_lock_is_held(
     assert held == [True, True]
 
 
+def test_interrupted_second_admission_leaves_the_completed_run_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    real = run_host.refuse_started
+    calls: list[int] = []
+
+    def admit(checked: runfiles.RunFiles) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            return
+        # The earlier run finished while this one waited for the lock.
+        files.write("log", "original output\n")
+        files.write("rc", "0\n")
+        try:
+            real(checked)
+        except run_host.RunExistsError:
+            raise run_host.RunInterruptedError from None
+
+    monkeypatch.setattr(run_host, "refuse_started", admit)
+    assert run_host.main(["example"], "run-host") == 143
+    assert files.path("log").read_text() == "original output\n"
+    assert files.path("rc").read_text() == "0\n"
+
+
+def test_interrupt_while_releasing_the_lock_keeps_the_recorded_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+
+    @contextmanager
+    def interrupted_release(_path: Path) -> Generator[None]:
+        try:
+            yield
+        finally:
+            raise run_host.RunInterruptedError
+
+    def load(_args: object, _tmpdir: Path) -> None:
+        raise OSError(errno.EIO, "load unavailable")
+
+    monkeypatch.setattr(run_host.runfiles, "locked", interrupted_release)
+    monkeypatch.setattr(run_host, "_load", load)
+    assert run_host.main(["example"], "run-host") == 1
+    assert files.path("rc").read_text().strip() == "1"
+
+
 def test_waiter_interrupted_before_the_lock_leaves_the_run_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

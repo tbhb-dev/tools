@@ -98,6 +98,21 @@ def test_owner_of_another_user_is_refused(
         ownership.claim(files, expected="run-id")
 
 
+def test_owner_longer_than_the_id_is_refused_for_multibyte_ids(
+    tmp_path: Path,
+) -> None:
+    files = run_files(tmp_path)
+    regular(files.path("owner"), text="é\nextra")
+    with pytest.raises(ownership.RunExistsError, match="different owner"):
+        ownership.claim(files, expected="é")
+
+
+def test_multibyte_owner_id_is_accepted(tmp_path: Path) -> None:
+    files = run_files(tmp_path)
+    regular(files.path("owner"), text="éé\n")
+    ownership.claim(files, expected="éé")
+
+
 def test_empty_expected_id_is_still_verified(tmp_path: Path) -> None:
     files = run_files(tmp_path)
     regular(files.path("owner"))

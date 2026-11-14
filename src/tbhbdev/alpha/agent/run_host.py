@@ -921,6 +921,7 @@ def main(
         print(f"{prog}: run name is required", file=sys.stderr)
         return 1
     completed = None
+    recorded = None
     previous = {s: signal.signal(s, interrupt) for s in process_group.INTERRUPTS}
     try:
         with process_group.defer_signals():
@@ -931,8 +932,10 @@ def main(
         # lock, belongs to a waiter and writes nothing: the records are the
         # run that holds the lock.
         with runfiles.locked(files.path("run.lock")):
+            # Outside the try below: a refusal here, or an interrupt that
+            # replaces it, must leave the earlier run's records alone.
+            refuse_started(files)
             try:
-                refuse_started(files)
                 # Inside the try so a failure to create the temp directory
                 # leaves a record like any other refusal.
                 with tempfile.TemporaryDirectory() as tmpdir:
@@ -944,12 +947,15 @@ def main(
             except _REFUSALS as exc:
                 if completed is None and not isinstance(exc, RunExistsError):
                     _record_failure(files, exc)
+                    recorded = _failure_rc(exc)
                 raise
     except _REFUSALS as exc:
         if completed is not None:
             return completed
         print(f"{prog}: {exc}", file=sys.stderr)
-        return _failure_rc(exc)
+        # An interrupt while the lock is released replaces the exception but
+        # not the result already written to the rc file.
+        return recorded if recorded is not None else _failure_rc(exc)
     else:
         return completed
     finally:
