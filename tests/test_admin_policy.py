@@ -1,6 +1,6 @@
 """The refusal table is the administrative boundary, including routing tricks."""
 
-# cspell:words ulesets nvitations idget illing fwidget
+# cspell:words ulesets nvitations idget illing fwidget EVIEWS MERG
 
 import pytest
 
