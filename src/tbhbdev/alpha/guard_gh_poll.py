@@ -467,7 +467,7 @@ def inner_script(words: list[str], body: str | None) -> str | None:
 def flattened(words: list[str], depth: int = 4) -> list[str]:
     """The words with each quoted or spaced word split as the shell would.
 
-    ``env -S 'xargs gh run'``, ``sh -c 'gh r""un'`` and ``x.c""ount`` come out
+    ``env -S 'xargs gh run'``, ``sh -c 'gh r""un'`` and ``x."count"`` come out
     as the words they run or name. Splitting goes ``depth`` levels deep.
     """
     out: list[str] = []

@@ -1188,14 +1188,14 @@ def test_flattened_splits_quoted_words_to_a_depth() -> None:
     ]  # fmt: skip
     assert guard.flattened(["a b"], depth=0) == ["a b"]
     assert guard.flattened(["'a b'"], depth=0) == ["'a b'"]
-    assert guard.flattened(['x.c""ount']) == ["x.count"]
+    assert guard.flattened(['x."count"']) == ["x.count"]
     assert guard.flattened(["plain"]) == ["plain"]
 
 
 @pytest.mark.parametrize(
     "command",
     [
-        'rm ~/.local/state/tbhb/gh-poll-allowance.c""ount',
+        'rm ~/.local/state/tbhb/gh-poll-allowance."count"',
         "rm ~/.local/state/tbhb/gh-poll-allowance.'count'",
         "rm -rf ~/.local/state/tbhb",
         "rm -rf ~/.local/state/tbhb/",
