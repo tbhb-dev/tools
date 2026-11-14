@@ -254,6 +254,27 @@ def test_findings_reads_rule_and_line() -> None:
     assert secret_scan.findings("") is None
 
 
+@pytest.mark.parametrize(
+    "report",
+    [
+        "[1]",
+        '[{"RuleID": "r"}]',
+        '[{"StartLine": 4}]',
+        '[{"RuleID": "r", "StartLine": "4"}]',
+        '[{"RuleID": 7, "StartLine": 4}]',
+        '[{"RuleID": "r", "StartLine": 4}, {"RuleID": "r"}]',
+    ],
+)
+def test_findings_without_a_line_and_rule_mean_no_scan(report: str) -> None:
+    assert secret_scan.findings(report) is None
+
+
+def test_place_escapes_what_a_filename_could_forge() -> None:
+    assert secret_scan.place("", 3) == "on line 3"
+    assert secret_scan.place("a/b.txt", 3) == "in a/b.txt:3"
+    assert secret_scan.place("a\nrule x\u00e9", 3) == "in a\\nrule x\\xe9:3"
+
+
 # A stand-in private config with one rule of each family that matters: names
 # the scan skips in a private repository, and rules it keeps. The kept
 # op-item-1 rule carries a rule allowlist, a bool, an int, a list and

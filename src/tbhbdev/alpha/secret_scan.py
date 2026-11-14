@@ -107,7 +107,8 @@ def findings(report: str) -> list[tuple[str, int, str]] | None:
     They are sorted, since gitleaks reports them in no fixed order. The file is
     empty for text scanned on stdin.
 
-    None means the report is not a JSON list, so gitleaks did not scan.
+    None means the report is not a JSON list of findings that each have an
+    integer ``StartLine`` and a string ``RuleID``, so gitleaks did not scan.
     """
     try:
         data = json.loads(report)
@@ -115,16 +116,27 @@ def findings(report: str) -> list[tuple[str, int, str]] | None:
         return None
     if not isinstance(data, list):
         return None
-    entries = cast("list[dict[str, int | str]]", data)  # pragma: no mutate
-    return sorted(
-        (str(entry.get("File", "")), int(entry["StartLine"]), str(entry["RuleID"]))
-        for entry in entries
-    )
+    entries = cast("list[object]", data)  # pragma: no mutate
+    found: list[tuple[str, int, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None
+        line = entry.get("StartLine")
+        rule = entry.get("RuleID")
+        if not isinstance(line, int) or not isinstance(rule, str):
+            return None
+        found.append((str(entry.get("File", "")), line, rule))
+    return sorted(found)
 
 
 def place(path: str, line: int) -> str:
-    """Where a finding is: ``on line N`` for stdin, ``in PATH:N`` for a file."""
-    return f"in {path}:{line}" if path else f"on line {line}"
+    """Where a finding is: ``on line N`` for stdin, ``in PATH:N`` for a file.
+
+    A path shows with control characters and non-ASCII escaped, so a filename
+    can't forge output lines.
+    """
+    shown = path.encode("unicode_escape").decode("ascii")
+    return f"in {shown}:{line}" if path else f"on line {line}"
 
 
 def is_name_rule(rule: dict[str, object]) -> bool:
