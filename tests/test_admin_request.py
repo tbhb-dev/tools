@@ -399,14 +399,14 @@ ENVIRONMENT_BODY = {
 
 
 def environment_with(
-    *people: tuple[str, int], branches: object = None
+    *people: tuple[str, int], branches: object = None, timer: int = 0
 ) -> httpx.Response:
     rules = [
         {
             "type": "required_reviewers",
             "reviewers": [{"type": t, "reviewer": {"id": i}} for t, i in people],
         },
-        {"type": "wait_timer", "wait_timer": 0},
+        {"type": "wait_timer", "wait_timer": timer},
     ]
     return httpx.Response(
         200, json={"protection_rules": rules, "deployment_branch_policy": branches}
@@ -485,6 +485,37 @@ def test_environment_put_that_widens_a_branch_policy_is_refused(
     assert "PUT" not in [r.method for r in fake.requests]
 
 
+@pytest.mark.parametrize("timer", [1, 30, 43200])
+def test_environment_put_that_would_reset_a_wait_timer_is_refused(
+    fake: Fake, timer: int
+) -> None:
+    fake.by_method["GET"] = environment_with(("User", 1), ("Team", 5), timer=timer)
+    with pytest.raises(RefusedError, match=r"^protection_weakening$"):
+        put_environment(fake)
+    assert "PUT" not in [r.method for r in fake.requests]
+
+
+def test_environment_put_passes_with_a_zero_or_absent_wait_timer(fake: Fake) -> None:
+    fake.by_method["GET"] = environment_with(("User", 1), ("Team", 5), timer=0)
+    assert put_environment(fake)[0] == 200
+    fake.by_method["GET"] = httpx.Response(
+        200, json={"protection_rules": [], "deployment_branch_policy": None}
+    )
+    assert put_environment(fake)[0] == 200
+
+
+def test_the_largest_wait_timer_rule_counts(fake: Fake) -> None:
+    rules = [
+        {"type": "wait_timer", "wait_timer": 0},
+        {"type": "wait_timer", "wait_timer": 5},
+    ]
+    fake.by_method["GET"] = httpx.Response(
+        200, json={"protection_rules": rules, "deployment_branch_policy": None}
+    )
+    with pytest.raises(RefusedError, match=r"^protection_weakening$"):
+        put_environment(fake)
+
+
 def test_environment_put_on_a_new_environment_passes(fake: Fake) -> None:
     fake.by_method["GET"] = httpx.Response(404, json={})
     assert put_environment(fake)[0] == 200
@@ -517,6 +548,20 @@ def test_environment_put_that_adds_drops_or_swaps_a_reviewer_is_refused(
         httpx.Response(200, json={}),
         httpx.Response(200, json={"protection_rules": 3}),
         httpx.Response(200, json={"protection_rules": []}),
+        httpx.Response(
+            200,
+            json={
+                "protection_rules": [{"type": "wait_timer", "wait_timer": "soon"}],
+                "deployment_branch_policy": None,
+            },
+        ),
+        httpx.Response(
+            200,
+            json={
+                "protection_rules": [{"type": "wait_timer"}],
+                "deployment_branch_policy": None,
+            },
+        ),
         httpx.Response(
             200,
             json={

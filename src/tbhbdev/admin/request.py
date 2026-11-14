@@ -5,7 +5,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import NamedTuple, cast
 
 import httpx
 
@@ -126,10 +126,18 @@ def send(
         raise RefusedError(msg) from None
 
 
+class Environment(NamedTuple):
+    """What a write to an existing environment could undo."""
+
+    reviewers: frozenset[tuple[str, int]]
+    branches: object
+    wait_timer: int
+
+
 def existing_environment(
     runtime: Runtime, path: str, reason: str
-) -> tuple[frozenset[tuple[str, int]], object] | None:
-    """The environment's reviewers and branch policy, or None when it is new."""
+) -> Environment | None:
+    """The environment's reviewers, branch policy and wait timer; None when new."""
     status, text = call(runtime, "GET", path, None, reason)
     if status == HTTP_NOT_FOUND:
         return None
@@ -138,13 +146,20 @@ def existing_environment(
         raise RefusedError(msg)
     try:
         data = json.loads(text)
+        rules = data["protection_rules"]
         reviewers = frozenset(
             (who["type"], who["reviewer"]["id"])
-            for rule in data["protection_rules"]
+            for rule in rules
             if rule["type"] == "required_reviewers"
             for who in rule["reviewers"]
         )
-        return reviewers, data["deployment_branch_policy"]
+        # A body can't carry wait_timer, so a PUT resets the timer to 0 and an
+        # environment without a wait_timer rule has none to lose.
+        timer = max(
+            (int(rule["wait_timer"]) for rule in rules if rule["type"] == "wait_timer"),
+            default=0,
+        )
+        return Environment(reviewers, data["deployment_branch_policy"], timer)
     except ValueError, KeyError, TypeError:
         msg = "environment_unreadable"
         raise RefusedError(msg) from None
@@ -157,19 +172,24 @@ def keep_environment(runtime: Runtime, path: str, body: object, reason: str) -> 
     or swapping one is refused when the environment already has reviewers. A
     current branch policy must be unset (every branch) or the safe one the policy
     requires, because custom branch policies can't be compared with the body.
+    A positive wait timer is refused, because the write would reset it to 0.
     The lookup and the write are separate calls, so a change between them is not
     caught.
     """
     current = existing_environment(runtime, path, reason)
     if current is None:
         return
-    reviewers, branches = current
     # The cast string has no runtime effect, so mutating it changes nothing.
     wanted = policy.requested_reviewers(
         cast("dict[str, object]", body)  # pragma: no mutate
     )
-    if (reviewers and reviewers != wanted) or (
-        branches is not None and not policy.safe_branch_policy(branches)
+    if (
+        (current.reviewers and current.reviewers != wanted)
+        or (
+            current.branches is not None
+            and not policy.safe_branch_policy(current.branches)
+        )
+        or current.wait_timer > 0
     ):
         msg = "protection_weakening"
         raise RefusedError(msg)
