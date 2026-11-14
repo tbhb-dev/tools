@@ -924,9 +924,9 @@ def test_main_denies_an_edit_through_a_link(
 ) -> None:
     symlink = grant_file.parent / "notes.txt"
     symlink.symlink_to(grant_file)
-    hardlink = grant_file.parent / "other.txt"
-    hardlink.hardlink_to(grant_file)
-    for path in (symlink, hardlink):
+    second_link = grant_file.parent / "other.txt"
+    second_link.second_link_to(grant_file)
+    for path in (symlink, second_link):
         payload = {"tool_input": {"file_path": str(path)}}
         monkeypatch.setattr(guard, "read_hook_stdin", lambda p=payload: p)
         assert guard.main() == 0
@@ -980,7 +980,7 @@ def test_a_leading_redirect_still_spends_the_allowance(
         '{"repos": ["."], "expires": "2999-01-01"}',
         '{"repos": ["../.."], "expires": "2999-01-01"}',
         '{"repos": ["./.", "example/.."], "expires": "2999-01-01"}',
-        '{"repos": ["exämple/one"], "expires": "2999-01-01"}',
+        '{"repos": ["ex\u00e4mple/one"], "expires": "2999-01-01"}',
         '{"repos": ["example/one", "x"], "expires": "2999-01-01"}',
     ],
 )
