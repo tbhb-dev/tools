@@ -79,6 +79,8 @@ for i, arg in enumerate(args):
     print("prek installed " + args[i + 1])
 """
 
+pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
+
 
 @dataclass
 class World:
@@ -2128,6 +2130,9 @@ def test_main_passes_a_dry_run_to_the_statusline_step(
 ) -> None:
     seen: list[object] = []
 
+    def step(_name: str, *_args: object, **_kwargs: object) -> int:
+        return 0
+
     def statusline(_env: object, *, dry_run: object) -> int:
         seen.append(dry_run)
         return 0
@@ -2139,7 +2144,7 @@ def test_main_passes_a_dry_run_to_the_statusline_step(
         "install_codex_environment",
         "install_private_files",
     ):
-        monkeypatch.setattr(install, name, lambda *_a, **_k: 0)
+        monkeypatch.setattr(install, name, partial(step, name))
     monkeypatch.setattr(install, "install_statusline", statusline)
     assert install.main(["--dry-run"], "p") == 0
     assert seen == [True]

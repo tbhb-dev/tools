@@ -299,3 +299,5 @@ shopt
 sshcommand
 wаit
 thеy
+getbasetemp
+pytestmark

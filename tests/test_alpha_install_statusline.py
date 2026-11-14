@@ -4,6 +4,7 @@
 """Tests for the pinned ccstatusline install, with no network, home or bun."""
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
 OLD = install.OLD_STATUSLINES[0]
 BARE = install.OLD_STATUSLINES[1]
 FOREIGN: dict[str, object] = {"model": "opus", "env": {"A": "b"}, "hooks": {"Stop": []}}
+
+pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
 
 
 @dataclass
@@ -220,7 +223,7 @@ def test_a_command_built_without_node_is_left_alone_silently(
     setup: Setup, capsys: pytest.CaptureFixture[str]
 ) -> None:
     script = install.statusline_script(setup.tools.root)
-    other = install.statusline_command("None", script)
+    other = install.statusline_command("", script)
     before = setup.write({"statusLine": {"type": "command", "command": other}})
     del setup.tools.found["node"]
     assert setup.go() == 0
@@ -348,3 +351,15 @@ def test_the_command_quotes_its_paths_and_keeps_the_width_fallback() -> None:
     assert install.statusline_script(Path("/r")) == Path(
         "/r/node_modules/ccstatusline/dist/ccstatusline.js"
     )
+
+
+def test_home_derived_paths_stay_inside_the_temporary_directory(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+
+    paths = (
+        Path.home(),
+        install.config_path(install.CLAUDE, os.environ),
+        install.statusline_root(),
+    )
+    assert all(path.is_relative_to(tmp_path_factory.getbasetemp()) for path in paths)
