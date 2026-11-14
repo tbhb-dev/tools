@@ -5,7 +5,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, NamedTuple, cast
+from typing import NamedTuple, cast
 
 import httpx
 
@@ -142,8 +142,8 @@ def whole_number(value: object) -> int:
     return value
 
 
-def json_list(value: object) -> list[Any]:
-    """A JSON array; iterating an object or a string would skip or misread it."""
+def json_list[T](value: T) -> T:
+    """VALUE itself once it is a JSON array; an object or string would be misread."""
     if not isinstance(value, list):
         raise ValueError(value)  # noqa: TRY004  # pragma: no mutate
     return value
