@@ -156,7 +156,10 @@ def keep_reviewers(runtime: Runtime, path: str, body: object, reason: str) -> No
     authorizer. The lookup and the write are separate calls, so a change between
     them is not caught.
     """
-    kept = policy.requested_reviewers(cast("dict[str, object]", body))
+    # The cast string has no runtime effect, so mutating it changes nothing.
+    kept = policy.requested_reviewers(
+        cast("dict[str, object]", body)  # pragma: no mutate
+    )
     if not existing_reviewers(runtime, path, reason) <= kept:
         msg = "protection_weakening"
         raise RefusedError(msg)

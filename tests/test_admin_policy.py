@@ -846,3 +846,13 @@ def test_requested_reviewers_lists_each_user_and_team() -> None:
         "reviewers": [{"type": "User", "id": 1}, {"type": "Team", "id": 2}]
     }
     assert policy.requested_reviewers(body) == {("User", 1), ("Team", 2)}
+
+
+@pytest.mark.parametrize("value", ["public", "PUBLIC", "Public"])
+def test_public_visibility_is_refused_on_any_path(value: str) -> None:
+    assert policy.visibility_refusal(
+        "PATCH", "/orgs/tbhb-dev/other", {"visibility": value}
+    )
+    assert not policy.visibility_refusal(
+        "PATCH", "/orgs/tbhb-dev/other", {"visibility": "private"}
+    )

@@ -269,7 +269,8 @@ def weakens_environment(method: str, body: dict[str, object]) -> bool:
 
 def requested_reviewers(body: dict[str, object]) -> frozenset[tuple[str, int]]:
     """Reviewers of a body that weakens_environment already accepted."""
-    items = cast("list[dict[str, object]]", body["reviewers"])
+    # The cast string has no runtime effect, so mutating it changes nothing.
+    items = cast("list[dict[str, object]]", body["reviewers"])  # pragma: no mutate
     return frozenset((str(item["type"]), int(str(item["id"]))) for item in items)
 
 

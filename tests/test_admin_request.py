@@ -426,6 +426,26 @@ def test_environment_put_may_keep_and_add_reviewers(fake: Fake) -> None:
     ]
 
 
+def test_environment_put_may_send_exactly_the_current_reviewers(fake: Fake) -> None:
+    fake.by_method["GET"] = environment_with(("User", 1), ("Team", 5))
+    assert put_environment(fake)[0] == 200
+
+
+def test_the_reviewer_lookup_carries_the_callers_reason(fake: Fake) -> None:
+    fake.by_method["GET"] = environment_with(("User", 1))
+    request.call(fake.runtime, "PUT", ENVIRONMENT, ENVIRONMENT_BODY, "why-env")
+    entries = [
+        json.loads(line)
+        for line in (fake.runtime.audit.directory / "calls.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert {(e["method"], e["reason"]) for e in entries} == {
+        ("GET", "why-env"),
+        ("PUT", "why-env"),
+    }
+
+
 def test_environment_put_on_a_new_environment_passes(fake: Fake) -> None:
     fake.by_method["GET"] = httpx.Response(404, json={})
     assert put_environment(fake)[0] == 200
