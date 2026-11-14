@@ -4,6 +4,7 @@
 
 import base64
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -37,6 +38,7 @@ class Fake:
     )
     failure: str = ""
     by_method: dict[str, httpx.Response] = field(default_factory=dict)
+    stores: list[int] = field(default_factory=list)
 
 
 @pytest.fixture
@@ -52,6 +54,7 @@ def fake(tmp_path: Path) -> Fake:
     )
     reads: list[str] = []
     requests: list[httpx.Request] = []
+    stores: list[int] = []
 
     class Reader:
         def read(self, ref: str, /) -> str:
@@ -86,14 +89,21 @@ def fake(tmp_path: Path) -> Fake:
             raise httpx.ReadError(TOKEN)
         return result.by_method.get(req.method, result.reply)
 
+    (tmp_path / "enabled").touch()
     env = gh_app.Env(
         tmp_path,
         lambda: 1800000000,
-        Reader,
+        lambda: (stores.append(1), Reader())[1],
         gh_app.run_openssl,
         httpx.MockTransport(transport),
     )
-    result = Fake(request.Runtime(Audit(tmp_path / "audit"), env), key, reads, requests)
+    result = Fake(
+        request.Runtime(Audit(tmp_path / "audit"), env, tmp_path / "enabled"),
+        key,
+        reads,
+        requests,
+        stores=stores,
+    )
     return result
 
 
@@ -337,12 +347,13 @@ def test_default_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     runtime = request.default_runtime()
     assert isinstance(runtime.env, gh_app.Env)
-    assert runtime.audit.directory == tmp_path / "tbhbdev/admin"
+    assert runtime.audit.directory == tmp_path / "tbhb/admin-app"
+    assert runtime.marker == tmp_path / "tbhb/admin-app/enabled"
     monkeypatch.delenv("XDG_STATE_HOME")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     assert (
         request.default_runtime().audit.directory
-        == tmp_path / ".local/state/tbhbdev/admin"
+        == tmp_path / ".local/state/tbhb/admin-app"
     )
 
 
@@ -735,3 +746,42 @@ def test_a_ruleset_create_logs_a_before_and_an_after_record(fake: Fake) -> None:
     assert len(entries) == 2
     assert fake.requests[-1].method == "POST"
     assert fake.requests[-1].url.path == path
+
+
+def test_key_is_not_read_without_the_marker(fake: Fake) -> None:
+    fake.runtime.marker.unlink()
+    with pytest.raises(RefusedError, match=r"^credential_unavailable$"):
+        request.call(fake.runtime, "GET", "/repos/tbhb-dev/widget", None, "test")
+    assert fake.reads == fake.requests == fake.stores == []
+    records = [
+        json.loads(line)
+        for line in (fake.runtime.audit.directory / "calls.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [(e["phase"], e["decision"], e["code"]) for e in records] == [
+        ("before", "allow", "allowed"),
+        ("after", "allow", "credential_unavailable"),
+    ]
+
+
+def test_key_is_read_with_the_marker(fake: Fake) -> None:
+    status, _ = request.call(
+        fake.runtime, "GET", "/repos/tbhb-dev/widget", None, "test"
+    )
+    assert status == 200
+    assert fake.reads
+
+
+def test_marker_must_be_a_regular_file_of_this_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.touch()
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    assert not request.enabled(link)
+    assert not request.enabled(tmp_path)
+    assert request.enabled(target)
+    monkeypatch.setattr(os, "getuid", lambda: target.stat().st_uid + 1)
+    assert not request.enabled(target)

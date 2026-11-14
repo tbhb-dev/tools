@@ -16,8 +16,16 @@ import httpx
 import pytest
 
 from tbhbdev.admin import policy, request
-from tbhbdev.admin.audit import Audit, RefusedError, record
+from tbhbdev.admin.audit import GENESIS, Audit, RefusedError, record
 from tbhbdev.alpha import gh_app
+
+
+def unchained(lines: list[str]) -> list[dict[str, object]]:
+    """Parsed records without their ``prev`` link."""
+    return [
+        {key: value for key, value in json.loads(line).items() if key != "prev"}
+        for line in lines
+    ]
 
 
 def test_log_flags_modes_and_fields(
@@ -68,7 +76,7 @@ def test_log_flags_modes_and_fields(
     logfile = directory / "calls.jsonl"
     assert stat.S_IMODE(logfile.stat().st_mode) == 0o600
     lines = logfile.read_text().splitlines()
-    assert [json.loads(line) for line in lines] == [
+    assert unchained(lines) == [
         entry,
         {**entry, "phase": "after", "status": 200},
     ]
@@ -104,9 +112,7 @@ def test_short_writes_finish_one_whole_line(
     Audit(tmp_path / "admin").append({"first": "record with a long value"})
     monkeypatch.undo()
     lines = (tmp_path / "admin/calls.jsonl").read_text().splitlines()
-    assert [json.loads(line) for line in lines] == [
-        {"first": "record with a long value"}
-    ]
+    assert unchained(lines) == [{"first": "record with a long value"}]
 
 
 def test_failed_write_cuts_off_the_partial_line(
@@ -129,7 +135,8 @@ def test_failed_write_cuts_off_the_partial_line(
     monkeypatch.undo()
     audit.append({"n": 3})
     lines = (tmp_path / "admin/calls.jsonl").read_text().splitlines()
-    assert [json.loads(line) for line in lines] == [{"n": 1}, {"n": 3}]
+    assert unchained(lines) == [{"n": 1}, {"n": 3}]
+    assert json.loads(lines[1])["prev"] == hashlib.sha256(lines[0].encode()).hexdigest()
 
 
 def test_a_log_swapped_for_a_symlink_to_the_held_file_is_refused(
@@ -277,7 +284,7 @@ def test_overlapping_writer_waits_and_the_rollback_is_synced(
     writer_b.join(timeout=10)
     monkeypatch.undo()
     lines = logfile.read_text().splitlines()
-    assert [json.loads(line) for line in lines] == [{"n": 1}, {"n": 3}]
+    assert unchained(lines) == [{"n": 1}, {"n": 3}]
     # A syncs once for the failed write and once after the rollback.
     assert log_syncs.count("writer-a") == 2
 
@@ -329,7 +336,19 @@ def test_unfinished_tail_is_ended_before_the_next_record(tmp_path: Path) -> None
     lines = logfile.read_text().splitlines()
     assert lines[0] == '{"n": 1}'
     assert lines[1] == '{"par'
-    assert json.loads(lines[2]) == {"n": 2}
+    assert unchained(lines[2:]) == [{"n": 2}]
+    assert json.loads(lines[2])["prev"] == hashlib.sha256(b'{"par').hexdigest()
+
+
+def test_records_form_a_hash_chain(tmp_path: Path) -> None:
+    audit = Audit(tmp_path / "admin")
+    for number in range(3):
+        audit.append({"n": number})
+    lines = (tmp_path / "admin/calls.jsonl").read_text().splitlines()
+    links = [json.loads(line)["prev"] for line in lines]
+    assert links[0] == "0" * 64
+    digests = [hashlib.sha256(line.encode()).hexdigest() for line in lines[:2]]
+    assert links[1:] == digests
 
 
 def test_sync_directory_opens_without_following_links(
@@ -410,7 +429,7 @@ def test_fail_closed_before_any_io(
         gh_app.run_openssl,
         httpx.MockTransport(no_network),
     )
-    runtime = request.Runtime(Audit(tmp_path / "admin"), env)
+    runtime = request.Runtime(Audit(tmp_path / "admin"), env, tmp_path / "enabled")
 
     def short_write(_descriptor: int, _data: bytes) -> int:
         return 0
@@ -468,3 +487,59 @@ def test_record_keeps_the_path_it_is_given() -> None:
         "GET", decision, "test", b"", "/repos/tbhb-dev/widget/contents/README.md"
     )
     assert entry["path"] == "/repos/tbhb-dev/widget/contents/README.md"
+
+
+@pytest.mark.parametrize("last", [b'{"n": 1} ', b'{"n": "X"}X', b"\t"])
+def test_chain_covers_the_whole_last_line(tmp_path: Path, last: bytes) -> None:
+    logfile = tmp_path / "calls.jsonl"
+    logfile.write_bytes(b'{"n": 0}\n' + last + b"\n")
+    descriptor = os.open(logfile, os.O_RDONLY)
+    try:
+        assert Audit.chain_head(descriptor) == hashlib.sha256(last).hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def head_of(content: bytes, tmp_path: Path) -> str:
+    logfile = tmp_path / "head.jsonl"
+    logfile.write_bytes(content)
+    descriptor = os.open(logfile, os.O_RDONLY)
+    try:
+        return Audit.chain_head(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def test_an_empty_log_starts_the_chain_and_an_empty_line_does_not(
+    tmp_path: Path,
+) -> None:
+    assert head_of(b"", tmp_path) == GENESIS
+    assert head_of(b"\n", tmp_path) == hashlib.sha256(b"").hexdigest()
+    assert head_of(b'{"n": 0}\n\n', tmp_path) == hashlib.sha256(b"").hexdigest()
+
+
+@pytest.mark.parametrize("length", [1, 4095, 4096, 4097, 12288, 12289])
+def test_the_head_reads_a_last_line_of_any_length(tmp_path: Path, length: int) -> None:
+    last = b"x" * length
+    content = b'{"n": 0}\n' + b'{"n": 1}\n' * 3 + last + b"\n"
+    assert head_of(content, tmp_path) == hashlib.sha256(last).hexdigest()
+    assert head_of(last + b"\n", tmp_path) == hashlib.sha256(last).hexdigest()
+
+
+def test_a_short_read_of_the_tail_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+
+    def empty_read(_fd: int, _count: int, _offset: int) -> bytes:
+        return b""
+
+    monkeypatch.setattr(os, "pread", empty_read)
+    with pytest.raises(RefusedError, match=r"^audit_unavailable$"):
+        head_of(b"abc\n", tmp_path)
+
+
+def test_a_caller_supplied_prev_is_replaced(tmp_path: Path) -> None:
+    audit = Audit(tmp_path / "admin")
+    audit.append({"n": 1, "prev": "forged"})
+    entry = json.loads((tmp_path / "admin/calls.jsonl").read_text())
+    assert entry["prev"] == GENESIS
