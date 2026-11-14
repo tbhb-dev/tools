@@ -683,6 +683,36 @@ def statusline_command(node: str, script: Path) -> str:
     return f"{COLUMNS_PREFIX} {shlex.quote(node)} {shlex.quote(str(script))}"
 
 
+def add_statusline(
+    root: Path, script: Path, bun: str, run: Callable[..., object]
+) -> None:
+    """Install the pinned ccstatusline into ROOT and check its script exists."""
+    root.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            bun,
+            "add",
+            "--exact",
+            "--ignore-scripts",
+            f"ccstatusline@{STATUSLINE_VERSION}",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        timeout=STATUSLINE_TIMEOUT,
+    )
+    if not script.is_file():
+        message = f"{script} is missing after the install"
+        raise InstallError(message)
+
+
+def missing_tool(node: str | None, bun: str | None, *, installed: bool) -> str | None:
+    """Name the tool the pin can't run without, or None when it has both."""
+    if not node:
+        return "node"
+    return "bun" if not installed and not bun else None
+
+
 def install_statusline(  # noqa: PLR0911 -- one early return per outcome
     env: Mapping[str, str],
     *,
@@ -719,8 +749,8 @@ def install_statusline(  # noqa: PLR0911 -- one early return per outcome
     if current == wanted and installed:
         print(f"claude: statusLine in {path} is up to date")
         return 0
-    if not node or (not installed and not bun):
-        missing = "node" if not node else "bun"
+    missing = missing_tool(node, bun, installed=installed)
+    if missing:
         print(
             f"claude: {missing} not found; left the statusLine command in {path}",
             file=sys.stderr,
@@ -731,23 +761,7 @@ def install_statusline(  # noqa: PLR0911 -- one early return per outcome
         return 0
     try:
         if not installed:
-            root.mkdir(parents=True, exist_ok=True)
-            run(
-                [
-                    cast("str", bun),
-                    "add",
-                    "--exact",
-                    "--ignore-scripts",
-                    f"ccstatusline@{STATUSLINE_VERSION}",
-                ],
-                cwd=root,
-                check=True,
-                capture_output=True,
-                timeout=STATUSLINE_TIMEOUT,
-            )
-        if not script.is_file():
-            message = f"{script} is missing after the install"
-            raise InstallError(message)  # noqa: TRY301
+            add_statusline(root, script, cast("str", bun), run)
         merged = {**config, "statusLine": {**cast("Json", line), "command": wanted}}
         backup = write_config(path, old, json.dumps(merged, indent=2) + "\n")
         if read_config(path)[1] != merged:
