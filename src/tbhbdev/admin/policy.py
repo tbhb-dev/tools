@@ -156,19 +156,8 @@ def protection(method: str, path: str, body: dict[str, object]) -> bool:
     )
 
 
-def explicit_refusal(  # noqa: PLR0911  # One stable code per policy rule.
-    method: str, path: str, body: dict[str, object]
-) -> str:
-    parts = set(path.split("/"))
-    if parts & PAID or "security_and_analysis" in fields(body):
-        return "paid_feature"
-    if fields(body) & {"actions_spending_limit", "spending_limit", "use_static_ip"}:
-        return "paid_feature"
-    if MERGE.fullmatch(path) or (method == "POST" and REVIEW.match(path)):
-        return "approval_or_merge"
-    if method == "GET":
-        return ""
-    if parts & MEMBERSHIP or fields(body) & {
+def write_refusal(method: str, path: str, body: dict[str, object]) -> str:
+    if set(path.split("/")) & MEMBERSHIP or fields(body) & {
         "role",
         "permission",
         "permissions",
@@ -188,6 +177,16 @@ def explicit_refusal(  # noqa: PLR0911  # One stable code per policy rule.
     ):
         return "protection_weakening"
     return ""
+
+
+def explicit_refusal(method: str, path: str, body: dict[str, object]) -> str:
+    if set(path.split("/")) & PAID or "security_and_analysis" in fields(body):
+        return "paid_feature"
+    if fields(body) & {"actions_spending_limit", "spending_limit", "use_static_ip"}:
+        return "paid_feature"
+    if MERGE.fullmatch(path) or (method == "POST" and REVIEW.match(path)):
+        return "approval_or_merge"
+    return "" if method == "GET" else write_refusal(method, path, body)
 
 
 def permission_for(path: str) -> str:
