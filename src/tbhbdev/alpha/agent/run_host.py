@@ -946,8 +946,11 @@ def main(
                     )
             except _REFUSALS as exc:
                 if completed is None and not isinstance(exc, RunExistsError):
-                    _record_failure(files, exc)
-                    recorded = _failure_rc(exc)
+                    # Ignored until `recorded` is set: a signal in between
+                    # would return a different status than the rc file holds.
+                    with process_group.ignore_signals():
+                        _record_failure(files, exc)
+                        recorded = _failure_rc(exc)
                 raise
     except _REFUSALS as exc:
         if completed is not None:

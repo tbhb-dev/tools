@@ -60,6 +60,23 @@ def test_matching_private_owner_is_accepted(tmp_path: Path) -> None:
     assert files.path("owner").read_text() == "run-id\n"
 
 
+def test_owner_read_stops_one_byte_past_the_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = run_files(tmp_path)
+    regular(files.path("owner"))
+    sizes: list[int] = []
+    read = os.read
+
+    def spy(descriptor: int, size: int) -> bytes:
+        sizes.append(size)
+        return read(descriptor, size)
+
+    monkeypatch.setattr(ownership.os, "read", spy)
+    ownership.claim(files, expected="run-id")
+    assert sizes == [len("run-id\n") + 1]
+
+
 @pytest.mark.parametrize(
     ("make", "message"),
     [

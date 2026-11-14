@@ -4392,6 +4392,27 @@ def test_interrupt_while_releasing_the_lock_keeps_the_recorded_result(
     assert files.path("rc").read_text().strip() == "1"
 
 
+def test_signal_after_recording_a_failure_keeps_the_recorded_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    record = run_host._record_failure  # noqa: SLF001
+
+    def record_then_terminate(files: runfiles.RunFiles, exc: Exception) -> None:
+        record(files, exc)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    def load(_args: object, _tmpdir: Path) -> None:
+        raise OSError(errno.EIO, "load unavailable")
+
+    monkeypatch.setattr(run_host, "_record_failure", record_then_terminate)
+    monkeypatch.setattr(run_host, "_load", load)
+    assert run_host.main(["example"], "run-host") == 1
+    assert files.path("rc").read_text().strip() == "1"
+
+
 def test_waiter_interrupted_before_the_lock_leaves_the_run_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
