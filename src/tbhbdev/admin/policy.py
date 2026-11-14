@@ -17,6 +17,7 @@ SHARED = re.compile(
     rf"{ORG}/actions/(?:secrets/{PART}|variables(?:/{PART})?|runner-groups(?:/[0-9]+)?)"
 )
 ORG_REPOS = re.compile(rf"{ORG}/repos")
+RUNNER_MOVE = re.compile(rf"{ORG}/actions/runner-groups/[0-9]+/runners(?:/[0-9]+)?")
 REPO_SETTINGS = re.compile(rf"{REPO}|{ORG}/repos")
 # The mutant that swaps a-z for A-Z survives: IGNORECASE makes them one set.
 ROUTABLE = re.compile(r"/[a-z0-9_./-]+", re.IGNORECASE | re.ASCII)  # pragma: no mutate
@@ -168,9 +169,15 @@ def protection(method: str, path: str, body: dict[str, object]) -> bool:
 def visibility_refusal(method: str, path: str, body: dict[str, object]) -> bool:
     """Public repositories are refused, and a new one must say it is private."""
     visibility = str(body.get("visibility")).lower()
-    if visibility == "public" or body.get("private") is False:
+    private = body.get("private")
+    if visibility == "public" or private is False:
         return True
-    explicit = body.get("private") is True or visibility == "private"
+    if REPO_SETTINGS.fullmatch(path) and (
+        ("private" in body and private is not True)
+        or ("visibility" in body and visibility != "private")
+    ):
+        return True
+    explicit = private is True or visibility == "private"
     return method == "POST" and bool(ORG_REPOS.fullmatch(path)) and not explicit
 
 
@@ -260,9 +267,16 @@ def sharing_refusal(method: str, path: str, body: dict[str, object]) -> str:
 
 
 def deployment_refusal(method: str, path: str, body: dict[str, object]) -> str:
-    """Refuse environment changes that drop protection and broad org sharing."""
+    """Refuse environment changes that drop protection and broad org sharing.
+
+    Moving a runner between groups widens who can use it, so it is refused.
+    Adding a repository to a group stays allowed: a group never admits public
+    repositories, because ``allows_public_repositories`` is refused.
+    """
     if ENVIRONMENT.fullmatch(path) and weakens_environment(method, body):
         return "protection_weakening"
+    if RUNNER_MOVE.fullmatch(path):
+        return "broad_visibility"
     return sharing_refusal(method, path, body)
 
 
