@@ -149,6 +149,26 @@ def guard_account_codex_writes(
     return check_account_codex_write
 
 
+@pytest.fixture
+def isolated_home(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Point HOME, the XDG directories and CLAUDE_CONFIG_DIR into pytest's tmp.
+
+    The directory sits beside tmp_path, not inside it, because tests list that.
+    A module opts in with `pytestmark`.
+
+    A test that reaches the install code without its own fixture then reads and
+    writes a temporary home, never the operator's settings.
+    """
+    home = tmp_path_factory.mktemp("isolated-home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    for name in ("CONFIG", "DATA", "STATE", "CACHE"):
+        monkeypatch.setenv(f"XDG_{name}_HOME", str(home / f".xdg-{name.lower()}"))
+    return home
+
+
 @pytest.fixture(autouse=True)
 def no_operator_credentials(
     tmp_path: Path,
