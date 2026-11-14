@@ -171,13 +171,19 @@ RULESET_PLAIN_RULES = {
 RULESET_APPROVALS = 1
 RULESET_MERGE_METHODS = ["squash"]
 RULESET_CHECKS_APP = 15368
+RULESET_REVIEW_KEYS = {
+    "required_approving_review_count", "dismiss_stale_reviews_on_push",
+    "required_reviewers", "require_code_owner_review", "dismissal_restriction",
+    "require_last_push_approval", "required_review_thread_resolution",
+    "require_extra_approval_for_unattributed_changes", "allowed_merge_methods",
+}  # fmt: skip
 RULESET_CONDITIONS: dict[str, dict[str, list[str]]] = {
     "ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]}
 }
 
 
 def safe_pull_request_rule(rule: dict[str, object]) -> bool:
-    """A pull request rule that asks for at least one approval."""
+    """A pull request rule with one approval, no code owner or team requirement."""
     parameters = rule.get("parameters")
     if rule.keys() != {"type", "parameters"} or not isinstance(parameters, dict):
         return False
@@ -189,6 +195,9 @@ def safe_pull_request_rule(rule: dict[str, object]) -> bool:
         and not isinstance(count, bool)
         and 1 <= count <= RULESET_APPROVALS
         and methods == RULESET_MERGE_METHODS
+        and set(options) <= RULESET_REVIEW_KEYS
+        and options.get("require_code_owner_review", False) is False
+        and options.get("required_reviewers", []) == []
     )
 
 
@@ -200,6 +209,7 @@ def safe_status_check(entry: object) -> bool:
     return (
         item.get("context") == "conclusion"
         and set(item) <= {"context", "integration_id"}
+        and type(item.get("integration_id", RULESET_CHECKS_APP)) is int
         and item.get("integration_id", RULESET_CHECKS_APP) == RULESET_CHECKS_APP
     )
 

@@ -891,6 +891,13 @@ def pull_request(count: object) -> dict[str, object]:
     }
 
 
+def pull_request_with(**parameters: object) -> dict[str, object]:
+    return {
+        "type": "pull_request",
+        "parameters": {"required_approving_review_count": 1, **parameters},
+    }
+
+
 def pull_request_methods(methods: object) -> dict[str, object]:
     return {
         "type": "pull_request",
@@ -914,6 +921,21 @@ def test_the_live_ruleset_shape_may_be_created() -> None:
 
 def test_a_check_and_a_pull_request_rule_may_leave_the_optional_fields_out() -> None:
     body = with_rules(pull_request(1), status_checks({"context": "conclusion"}))
+    assert policy.check("POST", RULESET_PATH, body).allowed
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"require_code_owner_review": False},
+        {"required_reviewers": []},
+        {"dismiss_stale_reviews_on_push": True, "require_last_push_approval": True},
+    ],
+)
+def test_a_pull_request_rule_may_carry_the_live_review_options(
+    parameters: dict[str, object],
+) -> None:
+    body = with_rules(pull_request_with(**parameters))
     assert policy.check("POST", RULESET_PATH, body).allowed
 
 
@@ -983,6 +1005,24 @@ def test_a_ruleset_may_hold_fewer_rules_and_no_conditions() -> None:
             )
         ),
         with_rules(pull_request(2)),
+        with_rules(pull_request_with(require_code_owner_review=True)),
+        with_rules(pull_request_with(require_code_owner_review=None)),
+        with_rules(pull_request_with(require_code_owner_review=0)),
+        with_rules(
+            pull_request_with(
+                required_reviewers=[
+                    {
+                        "minimum_approvals": 5,
+                        "file_patterns": ["*"],
+                        "reviewer": {"id": 1, "type": "Team"},
+                    }
+                ]
+            )
+        ),
+        with_rules(pull_request_with(required_reviewers=None)),
+        with_rules(pull_request_with(required_reviewers=0)),
+        with_rules(pull_request_with(unknown_option=True)),
+        with_rules(status_checks({"context": "conclusion", "integration_id": 15368.0})),
         with_rules(pull_request(10**9)),
         with_rules(pull_request_methods(["merge"])),
         with_rules(pull_request_methods(["rebase"])),
