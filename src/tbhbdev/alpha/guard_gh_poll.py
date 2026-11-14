@@ -224,9 +224,7 @@ def writes(args: list[str], flags: list[str]) -> bool:
     """Whether ``gh api`` arguments send a write: a method other than GET or fields."""
     methods = flag_values(args, {"-X", "--method"}, API_VALUE_FLAGS)
     if methods and not methods[-1]:
-        methods = list[
-            str
-        ]()  # pragma: no mutate  # resets gh to its default method; None is falsy too
+        methods = list[str]()  # pragma: no mutate  # None is falsy too
     if methods:
         return methods[-1].upper() not in {"GET", "HEAD"}
     return bool(
