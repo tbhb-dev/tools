@@ -784,17 +784,13 @@ def test_a_loop_around_a_granted_listing_is_denied() -> None:
     assert guard.inspect(command)[0] == guard.POLL_REASON
 
 
-@pytest.mark.parametrize(
-    ("expires", "allowed"),
-    [
-        (date(2000, 1, 1), False),
-        (today() - timedelta(days=1), False),
-        (today(), True),
-    ],
-)
+@pytest.mark.parametrize(("days", "allowed"), [(-10000, False), (-1, False), (0, True)])
 def test_allowance_ends_after_its_expiry_date(
-    grant_file: Path, expires: date, *, allowed: bool
+    grant_file: Path, days: int, *, allowed: bool
 ) -> None:
+    # The date is taken at run time: a collection-time date goes stale if the
+    # run crosses local midnight.
+    expires = today() + timedelta(days=days)
     grant_file.write_text(json.dumps({"repos": REPOS, "expires": expires.isoformat()}))
     expected = None if allowed else guard.POLL_REASON
     assert guard.inspect(listing(REPOS[0]))[0] == expected
