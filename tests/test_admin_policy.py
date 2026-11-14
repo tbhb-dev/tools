@@ -296,6 +296,12 @@ REFUSALS: list[tuple[str, str, str, object]] = [
         "broad_visibility",
         "POST",
         "/orgs/tbhb-dev/actions/runner-groups",
+        {"name": "g", "restricted_to_workflows": True},
+    ),
+    (
+        "broad_visibility",
+        "POST",
+        "/orgs/tbhb-dev/actions/runner-groups",
         {"name": "g", "visibility": "all"},
     ),
     (
