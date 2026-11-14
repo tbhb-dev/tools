@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
@@ -41,6 +42,10 @@ def linked(path: Path) -> None:
     path.symlink_to(target)
 
 
+def absent(_path: Path) -> None:
+    return None
+
+
 def test_matching_private_owner_is_accepted(tmp_path: Path) -> None:
     files = run_files(tmp_path)
     regular(files.path("owner"))
@@ -51,18 +56,18 @@ def test_matching_private_owner_is_accepted(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("make", "message"),
     [
-        (lambda _path: None, "no usable owner file"),
+        (absent, "no usable owner file"),
         (dangling, "no usable owner file"),
         (linked, "no usable owner file"),
         (directory, "different owner"),
         (fifo, "different owner"),
-        (lambda path: regular(path, "other\n"), "different owner"),
-        (lambda path: regular(path, "run-id"), "different owner"),
-        (lambda path: regular(path, "run-id\nmore\n"), "different owner"),
-        (lambda path: regular(path, "run-idx\n"), "different owner"),
-        (lambda path: regular(path, mode=0o644), "different owner"),
-        (lambda path: regular(path, mode=0o777), "different owner"),
-        (lambda path: regular(path, mode=0o400), "different owner"),
+        (partial(regular, text="other\n"), "different owner"),
+        (partial(regular, text="run-id"), "different owner"),
+        (partial(regular, text="run-id\nmore\n"), "different owner"),
+        (partial(regular, text="run-idx\n"), "different owner"),
+        (partial(regular, mode=0o644), "different owner"),
+        (partial(regular, mode=0o777), "different owner"),
+        (partial(regular, mode=0o400), "different owner"),
     ],
 )
 def test_unusable_owner_is_refused(

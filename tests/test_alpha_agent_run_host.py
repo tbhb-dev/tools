@@ -62,7 +62,7 @@ from tbhbdev.alpha.agent.model import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterator
+    from collections.abc import Callable, Generator
     from typing import TextIO
 
     from tbhbdev.alpha.agent.model import Policy, RunRequest, Settings
@@ -4280,10 +4280,15 @@ def test_waiter_interrupted_before_the_lock_leaves_the_run_alone(
     )
     files.write("log", "original output\n")
 
-    @contextmanager
-    def waiting(_path: Path) -> Iterator[None]:
-        raise run_host.RunInterruptedError
-        yield
+    class Waiting:
+        def __enter__(self) -> None:
+            raise run_host.RunInterruptedError
+
+        def __exit__(self, *_exception: object) -> None:
+            return None
+
+    def waiting(_path: Path) -> Waiting:
+        return Waiting()
 
     monkeypatch.setattr(run_host.runfiles, "locked", waiting)
     assert run_host.main(["example"], "run-host") == 143
