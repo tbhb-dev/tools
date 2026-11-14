@@ -40,7 +40,28 @@ MERGE = (
     "`tbhbdev alpha merge {n}` (add `--dry-run` to preview the squash message first)."
 )
 
+CLOSE_PR = (
+    '`gh pr close` is blocked. Run `tbhbdev alpha pr close {n} --reason "<why>"` '
+    "instead (`--delete-branch` also deletes the branch, `--dry-run` previews)."
+)
+CLOSE_ISSUE = (
+    "`gh issue close` is blocked. Run `tbhbdev alpha issue close {n} "
+    "--reason completed|not-planned` instead."
+)
+
 BLOCKED = [
+    "gh pr close 3",
+    "gh pr close 3 -c 'why'",
+    "gh issue close 3",
+    "gh issue close 3 -r 'not planned'",
+    "gh -R a/b pr close 3",
+    "gh --repo a/b issue close 3",
+    "env FOO=1 gh pr close 3",
+    "sudo -n gh issue close 3",
+    "bash -c 'gh pr close 3'",
+    "bash -c 'cd x && gh issue close 3'",
+    "gh pr close https://github.com/a/b/pull/3",
+    "gh issue close https://github.com/a/b/issues/3",
     "gh pr create",
     "gh pr create --title x --body y",
     "gh pr edit 3",
@@ -99,6 +120,16 @@ BLOCKED = [
 ]
 
 ALLOWED = [
+    "gh issue list",
+    "gh issue view 3",
+    "gh issue",
+    "gh issue --help",
+    "gh pr checkout 3",
+    "gh pr comment 3 -b x",
+    "git commit -m 'docs: gh pr close'",
+    "git commit -m 'docs: gh issue close 3'",
+    'echo "gh issue close 3"',
+    "echo 'gh pr close 3'",
     "",
     "ls",
     "gh pr view 1",
@@ -170,6 +201,12 @@ def test_allowed(text: str) -> None:
         ("gh pr merge --auto 8", MERGE.format(n=8)),
         ("gh pr merge", MERGE.format(n="<N>")),
         ("gh pr merge feature-branch", MERGE.format(n="<N>")),
+        ("gh pr close 5 -c why", CLOSE_PR.format(n=5)),
+        ("gh pr close", CLOSE_PR.format(n="<N>")),
+        ("gh pr close '#6'", CLOSE_PR.format(n=6)),
+        ("gh pr close https://github.com/a/b/pull/7", CLOSE_PR.format(n=7)),
+        ("gh issue close 8 -r completed", CLOSE_ISSUE.format(n=8)),
+        ("gh issue close", CLOSE_ISSUE.format(n="<N>")),
         ("gh pr ready 399", READY.format(n=399)),
         ("gh pr ready", READY.format(n="<N>")),
         (

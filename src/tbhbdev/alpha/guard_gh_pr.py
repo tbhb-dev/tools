@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
-"""`tbhbdev alpha guard-gh-pr`: block direct `gh pr` writes and self-approval.
+"""`tbhbdev alpha guard-gh-pr`: block `gh pr` and `gh issue` writes, self-approval.
 
 A PreToolUse hook, ported from an earlier interim toolset. Outside a tbhb-dev
-repository only the approval rules below apply. Inside one, agents open, edit
-and merge pull requests through `tbhbdev alpha pr` and
-`tbhbdev alpha merge`, which add the machine-written trailers and
-the plain-text squash message. This hook blocks the direct `gh` call and names
-the command to run instead:
+repository only the approval rules below apply. Inside one, agents open, edit,
+merge and close pull requests, and close issues, through `tbhbdev alpha pr`,
+`tbhbdev alpha merge` and `tbhbdev alpha issue`, which add the machine-written
+trailers, the plain-text squash message and the closing comment. This hook
+blocks the direct `gh` call and names the command to run instead:
 
     gh pr create  ->  tbhbdev alpha pr check, then tbhbdev alpha pr create
     gh pr edit    ->  tbhbdev alpha pr edit --pr N
     gh pr merge   ->  tbhbdev alpha merge N   (--dry-run previews)
     gh pr ready   ->  tbhbdev alpha pr ready N [N...]
+    gh pr close   ->  tbhbdev alpha pr close N --reason WHY
+    gh issue close -> tbhbdev alpha issue close N --reason completed|not-planned
 
 It reads the hook payload on stdin and takes no arguments. The payload shape
 alone picks the output contract, so the hook behaves the same whoever runs it:
@@ -57,9 +59,9 @@ removes quoting. A simple command matches when, after leading ``NAME=value``
 words, shell keywords and the wrappers env, command, exec, sudo, nohup, time,
 builtin and xargs (with their options), the program is ``gh`` (any path) and,
 after its global flags (``-R x``, ``--repo x``, ``--hostname x``, other
-``-x``), the words are ``pr create|edit|merge``. ``bash|sh|zsh|dash|ksh -c
-SCRIPT`` and ``eval ...`` are scanned recursively. Text inside a quoted
-argument to any other command is not a command, so
+``-x``), the words are ``pr create|edit|merge|ready|close`` or ``issue close``.
+``bash|sh|zsh|dash|ksh -c SCRIPT`` and ``eval ...`` are scanned recursively.
+Text inside a quoted argument to any other command is not a command, so
 ``git commit -m 'docs: mention gh pr merge'`` and ``echo "gh pr merge"`` pass.
 
 Known gaps, none of which the permission rules close either:
@@ -98,7 +100,9 @@ if TYPE_CHECKING:
 
 type Json = dict[str, object]
 
-SUBCOMMANDS = ("create", "edit", "merge", "ready")
+SUBCOMMANDS = ("create", "edit", "merge", "ready", "close")
+# The (group, subcommand) pairs of `gh` that the guard blocks.
+GUARDED = {("pr", sub) for sub in SUBCOMMANDS} | {("issue", "close")}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 WRAPPERS = {"env", "command", "exec", "sudo", "nohup", "time", "builtin", "xargs"}
 KEYWORDS = {"if", "then", "do", "else", "elif", "while", "until", "!", "{", "}"}
@@ -106,6 +110,16 @@ VALUE_FLAGS = {"-R", "--repo", "--hostname"}
 ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
 PR_NUMBER = re.compile(r"(?:\S*/pull/|#)?(\d+)")
 SEPARATORS = ";&|"
+
+CLOSE_HINTS = {
+    "pr": (
+        'Run `tbhbdev alpha pr close {n} --reason "<why>"` instead '
+        "(`--delete-branch` also deletes the branch, `--dry-run` previews)."
+    ),
+    "issue": (
+        "Run `tbhbdev alpha issue close {n} --reason completed|not-planned` instead."
+    ),
+}
 
 DRAFT = ".github/PULL_REQUEST_DRAFT.md"
 TEMPLATE = ".github/PULL_REQUEST_TEMPLATE.md"
@@ -131,10 +145,11 @@ REVIEWS = re.compile(
 
 
 class Match(NamedTuple):
-    """A blocked `gh pr` call: the subcommand and the words after it."""
+    """A blocked `gh pr` or `gh issue` call: the subcommand and the words after it."""
 
     sub: str
     args: list[str]
+    group: str = "pr"
 
 
 @dataclass
@@ -316,12 +331,13 @@ def skip_prefix(words: list[str]) -> list[str]:
 
 
 def gh_match(rest: list[str]) -> Match | None:
-    """Match the words after ``gh``: global flags, then ``pr create|edit|merge``."""
+    """Match the words after ``gh``: global flags, then a guarded group and sub."""
     i = 0
     while i < len(rest) and rest[i].startswith("-"):
         i += 2 if rest[i] in VALUE_FLAGS else 1
-    if rest[i : i + 1] == ["pr"] and rest[i + 1 : i + 2] and rest[i + 1] in SUBCOMMANDS:
-        return Match(rest[i + 1], rest[i + 2 :])
+    pair = tuple(rest[i : i + 2])
+    if pair in GUARDED:
+        return Match(pair[1], rest[i + 2 :], pair[0])
     return None
 
 
@@ -372,7 +388,7 @@ def simple_commands(text: str) -> Iterator[Simple]:
 
 
 def find(text: str) -> Match | None:
-    """The first direct `gh pr create|edit|merge` call in a shell command."""
+    """The first direct guarded `gh pr` or `gh issue` call in a shell command."""
     for _, words in simple_commands(text):
         found = gh_match(words[1:]) if program_of(words) == "gh" else None
         if found:
@@ -605,8 +621,10 @@ def denial(found: list[Approval], data: Json, env: Mapping[str, str]) -> str | N
 
 def hint(found: Match) -> str:
     """The block message: what was blocked and the command to run instead."""
-    blocked = f"`gh pr {found.sub}` is blocked."
+    blocked = f"`gh {found.group} {found.sub}` is blocked."
     number = next((m[1] for w in found.args if (m := PR_NUMBER.fullmatch(w))), "<N>")
+    if found.sub == "close":
+        return f"{blocked} {CLOSE_HINTS[found.group].format(n=number)}"
     if found.sub == "create":
         return (
             f"{blocked} Write {DRAFT} from {TEMPLATE}, check it with "
