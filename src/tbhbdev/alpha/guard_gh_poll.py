@@ -273,13 +273,16 @@ def spend_allowance(args: list[str]) -> bool:
         lock = ALLOWANCE_COUNT.with_name(ALLOWANCE_COUNT.name + ".lock")
         with lock.open("a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
-            spent = (
+            counts: object = (
                 json.loads(ALLOWANCE_COUNT.read_text())
                 if ALLOWANCE_COUNT.exists()
                 else {}
             )
             key = args[1].lower()
-            if not isinstance(spent, dict) or key in {k.lower() for k in spent}:
+            if not isinstance(counts, dict):
+                return False
+            spent: dict[str, object] = counts
+            if key in {k.lower() for k in spent}:
                 return False
             spent[key] = 1
             ALLOWANCE_COUNT.write_text(json.dumps(spent) + "\n")
