@@ -2,9 +2,12 @@
 description: Agent settings, run requests, and host preparation.
 generated:
   - role: generated
-    harness: codex
-    model: openai:gpt-6.1-sol
-    at: "2026-11-14T00:28:06Z"
+    harness: claude-code:2.1.322
+    model: anthropic:claude-sonnet-5-5
+    effort: medium
+    surface: cli
+    session: sha-256-64:24ed779d56b187de
+    at: "2026-11-14T00:48:15Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
