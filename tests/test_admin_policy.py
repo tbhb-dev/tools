@@ -394,8 +394,8 @@ def test_fold_false_keeps_case_and_still_refuses_non_ascii_fold() -> None:
         "/Repos/Acme/README.md"
     )
     assert policy.normalize("/REPOS/ACME/README.MD") == "/repos/acme/readme.md"
-    assert policy.normalize("/repos/\u212aabcd/x") == ""
-    assert policy.normalize("/repos/\u212aabcd/x", fold=False) == ""
+    assert policy.normalize(f"/repos/{chr(0x212A)}acme/x") == ""
+    assert policy.normalize(f"/repos/{chr(0x212A)}acme/x", fold=False) == ""
 
 
 def test_normalization_and_nested_fields() -> None:
