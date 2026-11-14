@@ -16,6 +16,7 @@ FILE_MODE = 0o600
 DIRECTORY_MODE = 0o700
 LOG_NAME = "calls.jsonl"
 GENESIS = "0" * 64
+TAIL_BLOCK = 4096
 
 
 class RefusedError(Exception):
@@ -90,10 +91,25 @@ class Audit:
 
     @staticmethod
     def chain_head(descriptor: int) -> str:
-        """The SHA-256 of the last line, or ``GENESIS`` for an empty log."""
-        data = os.pread(descriptor, os.fstat(descriptor).st_size, 0)
-        last = data.rstrip(b"\n").rpartition(b"\n")[2]
-        return hashlib.sha256(last).hexdigest() if last else GENESIS
+        """The SHA-256 of the last line, or ``GENESIS`` for an empty log.
+
+        The log ends with one newline, because ``heal_tail`` ran first. The read
+        goes backward in blocks from just before that newline.
+        """
+        size = os.fstat(descriptor).st_size
+        if not size:
+            return GENESIS
+        data = b""
+        position = size - 1
+        while position and b"\n" not in data:
+            start = max(0, position - TAIL_BLOCK)
+            block = os.pread(descriptor, position - start, start)
+            if len(block) != position - start:
+                msg = "audit_unavailable"
+                raise RefusedError(msg)
+            data = block + data
+            position = start
+        return hashlib.sha256(data.rpartition(b"\n")[2]).hexdigest()
 
     @staticmethod
     def same_file(directory: int, descriptor: int) -> None:

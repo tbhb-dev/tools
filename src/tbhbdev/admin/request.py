@@ -43,7 +43,7 @@ class Settings:
 class Runtime:
     audit: Audit
     env: gh_app.Env = field(repr=False)
-    marker: Path | None = None
+    marker: Path
     settings: Settings = Settings()
 
 
@@ -75,11 +75,11 @@ def enabled(marker: Path) -> bool:
 def private_key(runtime: Runtime) -> str:
     """Read the key only on the host that opted in, never with a caller credential.
 
-    ``marker`` is the file that ops creates on the one host that uses the App. A
-    runtime without one, as in the tests, always reads.
+    ``marker`` is the file that ops creates on the one host that uses the App.
+    Every runtime names one, so a missing marker refuses.
     """
     settings = runtime.settings
-    if runtime.marker is not None and not enabled(runtime.marker):
+    if not enabled(runtime.marker):
         msg = "credential_unavailable"
         raise RefusedError(msg)
     try:

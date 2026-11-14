@@ -16,7 +16,7 @@ import httpx
 import pytest
 
 from tbhbdev.admin import policy, request
-from tbhbdev.admin.audit import Audit, RefusedError, record
+from tbhbdev.admin.audit import GENESIS, Audit, RefusedError, record
 from tbhbdev.alpha import gh_app
 
 
@@ -136,6 +136,7 @@ def test_failed_write_cuts_off_the_partial_line(
     audit.append({"n": 3})
     lines = (tmp_path / "admin/calls.jsonl").read_text().splitlines()
     assert unchained(lines) == [{"n": 1}, {"n": 3}]
+    assert json.loads(lines[1])["prev"] == hashlib.sha256(lines[0].encode()).hexdigest()
 
 
 def test_a_log_swapped_for_a_symlink_to_the_held_file_is_refused(
@@ -428,7 +429,7 @@ def test_fail_closed_before_any_io(
         gh_app.run_openssl,
         httpx.MockTransport(no_network),
     )
-    runtime = request.Runtime(Audit(tmp_path / "admin"), env)
+    runtime = request.Runtime(Audit(tmp_path / "admin"), env, tmp_path / "enabled")
 
     def short_write(_descriptor: int, _data: bytes) -> int:
         return 0
@@ -497,3 +498,44 @@ def test_chain_covers_the_whole_last_line(tmp_path: Path, last: bytes) -> None:
         assert Audit.chain_head(descriptor) == hashlib.sha256(last).hexdigest()
     finally:
         os.close(descriptor)
+
+
+def head_of(content: bytes, tmp_path: Path) -> str:
+    logfile = tmp_path / "head.jsonl"
+    logfile.write_bytes(content)
+    descriptor = os.open(logfile, os.O_RDONLY)
+    try:
+        return Audit.chain_head(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def test_an_empty_log_starts_the_chain_and_an_empty_line_does_not(
+    tmp_path: Path,
+) -> None:
+    assert head_of(b"", tmp_path) == GENESIS
+    assert head_of(b"\n", tmp_path) == hashlib.sha256(b"").hexdigest()
+    assert head_of(b'{"n": 0}\n\n', tmp_path) == hashlib.sha256(b"").hexdigest()
+
+
+@pytest.mark.parametrize("length", [1, 4095, 4096, 4097, 12288, 12289])
+def test_the_head_reads_a_last_line_of_any_length(tmp_path: Path, length: int) -> None:
+    last = b"x" * length
+    content = b'{"n": 0}\n' + b'{"n": 1}\n' * 3 + last + b"\n"
+    assert head_of(content, tmp_path) == hashlib.sha256(last).hexdigest()
+    assert head_of(last + b"\n", tmp_path) == hashlib.sha256(last).hexdigest()
+
+
+def test_a_short_read_of_the_tail_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(os, "pread", lambda _fd, _count, _offset: b"")
+    with pytest.raises(RefusedError, match=r"^audit_unavailable$"):
+        head_of(b"abc\n", tmp_path)
+
+
+def test_a_caller_supplied_prev_is_replaced(tmp_path: Path) -> None:
+    audit = Audit(tmp_path / "admin")
+    audit.append({"n": 1, "prev": "forged"})
+    entry = json.loads((tmp_path / "admin/calls.jsonl").read_text())
+    assert entry["prev"] == GENESIS
