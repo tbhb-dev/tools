@@ -2,13 +2,12 @@
 description: Interim agent commands, installation, and harness hooks.
 generated:
   - role: generated
-    harness: claude-code:2.1.322
-    model: anthropic:claude-sonnet-5-5
-    effort: medium
-    surface: cli
-    session: sha-256-64:a906bd79703e4c35
-    subagent: sha-256-64:871bb0bbccc99c95
-    at: "2026-11-14T00:20:30Z"
+    harness: codex:0.164.0
+    model: openai:gpt-6.1-sol
+    effort: high
+    surface: exec
+    session: sha-256-64:ec3c1d143950d992
+    at: "2026-11-15T15:52:34Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -81,6 +80,8 @@ private_repos = ["example-lab", "example-notes"]   # optional
 ```
 
 The check flags a whole repository-name token in the title and body that equals a listed name, and any token ending in `-private`, such as `example-private`. The suffix rule works without config. Matching ignores case and a trailing `.git`. A clone URL matches. It ignores substrings of longer names. A token that starts with a hyphen, such as `--private`, passes, but the check flags a word such as `non-private`. It skips a working repository whose own name ends in `-private` or appears in the list. If `origin` is unreadable, the check runs. It covers the title and body only, not commit messages.
+
+The public rule IDs `mailgun-private-api-token`, `shopify-private-app-access-token`, and `tbhb-private-canary` pass unless listed as private names. This exemption ignores case and requires the whole token to match exactly.
 
 The commit check runs without config. The command guard checks arguments for trailers and sign-off flags. Message bodies in here documents or `-F` files pass this guard. The commit-msg identity check catches trailers in those bodies.
 

@@ -33,6 +33,57 @@ def test_configured_name_is_flagged() -> None:
     assert tokens(["moved to example-lab today"]) == []
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "mailgun-private-api-token",
+        "shopify-private-app-access-token",
+        "tbhb-private-canary",
+    ],
+)
+def test_public_rule_ids_are_allowed(name: str) -> None:
+    assert tokens([name]) == []
+    assert tokens([name.upper()]) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "mailgun-private-api-token",
+        "shopify-private-app-access-token",
+        "tbhb-private-canary",
+    ],
+)
+def test_configured_private_names_override_public_rule_ids(name: str) -> None:
+    assert tokens([name], [name]) == [name]
+    assert tokens([name.upper()], [name]) == [name.upper()]
+    assert tokens([name], [name.upper()]) == [name]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "mailgun-private-api-token" + "-x",
+        "shopify-private-app-access-token" + "-x",
+        "tbhb-private-canary" + "-x",
+        "mailgun-private-api-token" + ".git",
+        "example-private" + "-thing-x",
+    ],
+)
+def test_public_rule_id_near_misses_are_flagged(name: str) -> None:
+    assert tokens([name]) == [name]
+
+
+@pytest.mark.parametrize("names", [[], ["mailgun-private-api-token"]])
+def test_public_rule_ids_preserve_path_only_rules(names: list[str]) -> None:
+    name = "mailgun-private-api-token"
+    lines = [name, f"org/{name}", f"{name}.git"]
+    found = pn.private_name_problems(lines, names, path_only={name})
+    assert [(number, message.split("'")[1]) for number, message in found] == (
+        [(2, name), (3, f"{name}.git")] if names else [(3, f"{name}.git")]
+    )
+
+
 def test_message_says_private_and_generic() -> None:
     [(_, message)] = pn.private_name_problems([PRIVATE_REPO], NAMES)
     assert message == (
