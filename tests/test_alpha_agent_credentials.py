@@ -456,6 +456,16 @@ def test_delivered_token_that_is_a_link_is_refused_and_removed(
     assert target.read_text() == "example-delivered"
 
 
+def test_delivered_token_that_is_a_dangling_link_is_refused_and_removed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "run.review-token"
+    path.symlink_to(tmp_path / "missing")
+    with pytest.raises(OSError):  # noqa: PT011 -- O_NOFOLLOW's symlink loop
+        credentials.delivered_token(path)
+    assert not path.is_symlink()
+
+
 @pytest.mark.parametrize("source", ["file", "reference"])
 def test_signing_key_is_loaded_over_stdin_and_agent_stops(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, fake_reader: list[str]

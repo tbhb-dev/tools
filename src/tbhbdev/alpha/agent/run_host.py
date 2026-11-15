@@ -1005,6 +1005,10 @@ def main(
                             _record_failure(files, exc)
                             recorded = _failure_rc(exc)
                 raise
+            finally:
+                # A run that fails before credential delivery must not leave
+                # the driver's token in the run directory.
+                files.path("review-token").unlink(missing_ok=True)
     except _REFUSALS as exc:
         if completed is not None:
             return completed

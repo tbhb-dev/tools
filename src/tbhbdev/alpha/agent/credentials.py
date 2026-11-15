@@ -110,7 +110,7 @@ def launcher_token(settings: Settings, request: RunRequest) -> str | None:
 
 def delivered_token(path: Path) -> str | None:
     """Take the driver's token from PATH, and remove the file before any use."""
-    if not path.exists():
+    if not (path.exists() or path.is_symlink()):
         return None
     try:
         text = runfiles.read_owned(path, REVIEW_TOKEN_LIMIT, "review token")

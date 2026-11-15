@@ -3475,6 +3475,32 @@ def test_build_preflight_ignores_a_review_token_file(tmp_path: Path) -> None:
     run_host.preflight(run)
 
 
+@pytest.mark.parametrize("stage", ["load", "preflight", "preparation"])
+def test_main_removes_a_delivered_token_when_the_run_fails_early(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    run = keyless(make_run(tmp_path, profile="review", commit="0" * 40))
+    path = run.files.path("review-token")
+    path.write_text("example-delivered")
+
+    def refuse(*_args: object) -> None:
+        raise Invalid
+
+    monkeypatch.setattr(run_host, "_files", constant(run.files))
+    if stage == "load":
+        monkeypatch.setattr(run_host, "_load", refuse)
+    else:
+        monkeypatch.setattr(run_host, "_load", constant((run, "task")))
+        monkeypatch.setattr(
+            run_host,
+            "preflight" if stage == "preflight" else "prepare_workspace",
+            refuse,
+        )
+        run.files.receive(run.request)
+    assert run_host.main(["example"], "example") == 1
+    assert not path.exists()
+
+
 @pytest.mark.parametrize("profile", ["build", "review"])
 def test_prepare_takes_a_review_token_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str
