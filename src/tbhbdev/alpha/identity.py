@@ -135,12 +135,24 @@ PROVIDERS = {CLAUDE: "anthropic", CODEX: "openai", ANTIGRAVITY: "gcp.gemini"}
 EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 EDITS = "edits"
 CLAIMS = "claims"
-ATTR_ORDER = ["effort", "harness", "model", "session", "subagent", "surface"]
+ATTR_ORDER = [
+    "effort",
+    "harness",
+    "launch",
+    "model",
+    "session",
+    "started_at",
+    "subagent",
+    "surface",
+]
 # Attributes every trailer value needs, in the order a missing one is reported.
 REQUIRED = ("harness", "model")
 BAD_VALUE = re.compile(r"[\s;,]")
 SURFACE_VALUE = re.compile(r"[^\s;,=]+")
 HASH_RE = re.compile(r"sha-256-64:[0-9a-f]{16}")
+START_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+START_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", re.ASCII)
+LAUNCH_FILE = "launch.json"
 CODEX_MODEL = re.compile(r"(gpt-|o\d|codex-)")
 THREAD_ID = re.compile(r"[0-9a-fA-F-]{8,64}")
 # A control character, or the octal escape macOS ps writes for one.
@@ -225,6 +237,8 @@ class Ident:
     model: str | None = None
     effort: str | None = None
     surface: str | None = None
+    launch: str | None = None
+    started_at: str | None = None
 
     @classmethod
     def from_receipt(cls, receipt: Json) -> Ident:
@@ -243,8 +257,10 @@ class Ident:
         found = {
             "effort": self.effort,
             "harness": self.harness,
+            "launch": self.launch,
             "model": self.model,
             "session": self.root,
+            "started_at": self.started_at,
             "subagent": self.subagent,
             "surface": self.surface,
         }
@@ -432,6 +448,22 @@ def clean_value(value: object) -> str | None:
     return text
 
 
+def start_ok(value: object) -> str | None:
+    """A ``started_at`` value (case preserved) if it is a real UTC time."""
+    if not isinstance(value, str) or not START_RE.fullmatch(value):
+        return None
+    try:
+        datetime.strptime(value, START_FORMAT).replace(tzinfo=UTC)  # DTZ007
+    except ValueError:
+        return None
+    return value
+
+
+def hash_ok(value: object) -> str | None:
+    """A ``sha-256-64:`` hash, or None for anything else."""
+    return value if isinstance(value, str) and HASH_RE.fullmatch(value) else None
+
+
 def surface_ok(value: object) -> str | None:
     """A raw vendor surface value (case preserved) if the grammar allows it."""
     if isinstance(value, str) and SURFACE_VALUE.fullmatch(value):
@@ -617,30 +649,80 @@ def write_private_json(path: Path, obj: Json) -> None:
     tmp.replace(path)
 
 
-def write_record(sid_hash: str, updates: Json, cwd: Path | None = None) -> None:
+def write_record(
+    sid_hash: str, updates: Json, cwd: Path | None = None, once: Json | None = None
+) -> None:
     """Merge the non-empty ``updates`` into an agent's session record.
 
     The record goes to the store of the worktree containing ``cwd``, if any,
-    and to the user's store.
+    and to the user's store. The non-empty ``once`` fields are set only where
+    the record lacks them, so a resumed session keeps its first values.
     """
     known = {
         k: v for k, v in updates.items() if v
     }  # never overwrite known with missing
+    first = {k: v for k, v in (once or {}).items() if v}
     state = state_dir(cwd)
     if state:
         path = state / "sessions" / f"{hx(sid_hash)}.json"
         with locked(state):
             rec = read_record(path)
             rec.update(known)
-            write_json(path, rec)
-    write_user_record(sid_hash, known)
+            write_json(path, {**first, **rec})
+    write_user_record(sid_hash, known, first)
 
 
-def write_user_record(sid_hash: str, updates: Json) -> None:
+def claim_launch(root: str, cwd: Path | None = None) -> Json:
+    """Claim the worktree's launch file for a root session; its launch fields.
+
+    The launcher writes ``launch`` and ``started_at`` there before the harness
+    starts. The first root session to run a hook writes its hash in as
+    ``session``. A file another session claimed, or one with invalid fields,
+    gives an empty dict.
+    """
+    state = state_dir(cwd)
+    if not state:
+        return {}
+    path = state / LAUNCH_FILE
+    with locked(state):
+        rec = read_record(path)
+        fields: Json = {
+            "launch": hash_ok(rec.get("launch")),
+            "started_at": start_ok(rec.get("started_at")),
+        }
+        if not all(fields.values()) or rec.get("session", root) != root:
+            return {}
+        if "session" not in rec:
+            write_json(path, {**rec, "session": root})
+    return fields
+
+
+def start_fields(agent: str, root: str, cwd: Path | None = None) -> Json:
+    """The set-once launch fields an agent's hook event gives its record.
+
+    A root session takes them from the launch file it claims, or the time of
+    this event when it has none to claim. A subagent takes the time of this
+    event and its root's ``launch``. An agent whose record has a
+    ``started_at`` already gets an empty dict, or only the ``launch`` it lacks.
+    """
+    rec = load_record(agent, cwd, root=root)
+    if start_ok(rec.get("started_at")):
+        # A root that began elsewhere still claims its launch file for ``launch``.
+        claiming = agent == root and not rec.get("launch")
+        launch = claim_launch(root, cwd) if claiming else None
+        return {"launch": launch["launch"]} if launch else {}
+    now = utc(time.time())
+    if agent != root:
+        return {"started_at": now, "launch": load_record(root, cwd).get("launch")}
+    return claim_launch(root, cwd) or {"started_at": now}
+
+
+def write_user_record(sid_hash: str, updates: Json, once: Json | None = None) -> None:
     """Merge ``updates`` into the user's store, a 0700 directory of 0600 files.
 
     A store the hook can't write, such as one outside a sandbox, is skipped,
-    since the repository's store already holds the record.
+    since the repository's store already holds the record. ``once`` fields are
+    set only where the record lacks them.
     """
     user = user_store()
     path = user / f"{hx(sid_hash)}.json"
@@ -652,7 +734,9 @@ def write_user_record(sid_hash: str, updates: Json) -> None:
         with locked(user):
             rec = read_record(path)
             rec.update(updates)
-            write_private_json(path, rec)
+            write_private_json(
+                path, {**{k: v for k, v in (once or {}).items() if v}, **rec}
+            )
     except OSError:
         return
 
@@ -738,19 +822,21 @@ def rewrite_output(agent_hash: str, tool_input: Json) -> Json | None:
 
 def record_child(data: Json, effort: str | None) -> str:
     """Record a Claude subagent from hook stdin; return its agent hash."""
-    agent = sha256_64(data["agent_id"])
+    agent, root = sha256_64(data["agent_id"]), sha256_64(data["session_id"])
     transcript = child_transcript(data)
+    cwd = hook_cwd(data)
     write_record(
         agent,
         {
             "harness": SLUGS[CLAUDE],
-            "root": sha256_64(data["session_id"]),
+            "root": root,
             "agent_type": data.get("agent_type"),
             "model": transcript_model(transcript),
             "effort": effort,
             "transcript": transcript,
         },
-        hook_cwd(data),
+        cwd,
+        start_fields(agent, root, cwd),
     )
     return agent
 
@@ -1278,12 +1364,13 @@ def handle_claude(
         rec = claude_main_record(data, env)
         root = sha256_64(data["session_id"])
         if user_only:
-            write_user_record(root, rec)
+            write_user_record(root, rec, {"started_at": utc(time.time())})
             # A command begun outside any repository can end inside one, as
             # `git init` does, so its user record must still be finished.
             finish_user_only(data, env, None)
             return
-        write_record(root, rec, hook_cwd(data))
+        cwd = hook_cwd(data)
+        write_record(root, rec, cwd, start_fields(root, root, cwd))
     if tool == "Bash" and event in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}:
         handle_claude_bash(event, data, env, agent)
     elif event == "PostToolUse" and tool in CLAUDE_EDIT_TOOLS:
@@ -1540,6 +1627,7 @@ def handle_codex(data: Json, env: Mapping[str, str]) -> None:
                 "transcript": data.get("transcript_path"),
             },
             cwd,
+            start_fields(ident.subagent or ident.root, ident.root, cwd),
         )
         return
     for path in patch_paths(tool_input_of(data).get("command")):
@@ -1658,6 +1746,51 @@ def record_agy(sid: str, data: Json, rec: Json, env: Mapping[str, str]) -> None:
             )
 
 
+def without(rec: Json, drop: Mapping[str, object]) -> Json:
+    """A record without the keys of ``drop``."""
+    return {k: v for k, v in rec.items() if k not in drop}
+
+
+def save_agy_session(
+    harness: str,
+    sid: str,
+    data: Json,
+    seen: tuple[str | None, str | None],
+    env: Mapping[str, str],
+) -> Json | None:
+    """Write an agy session's record to the clone and the user stores.
+
+    Nothing is written, and None returned, outside a worktree.
+    """
+    model, effort = seen
+    state = state_dir(hook_cwd(data))
+    if not state:
+        return None
+    path = state / "sessions" / f"{hx(sha256_64(sid))}.json"
+    # The executing conversation can be a subagent: only its root claims the launch.
+    artifacts = as_str(data.get("artifactDirectoryPath"))
+    brain = (
+        Path(artifacts).parent if artifacts else agy_brain_root(read_record(path), env)
+    )
+    root = sha256_64(agy_root(brain, sid) if brain else sid)
+    once = start_fields(sha256_64(sid), root, hook_cwd(data))
+    with locked(state):
+        rec = read_record(path)
+        rec.update({k: v for k, v in once.items() if v and k not in rec})
+        rec["harness"] = SLUGS[harness]
+        if model and not model.startswith("<"):
+            rec["model"] = model
+        if effort:
+            rec["effort"] = effort
+        brain = as_str(data.get("artifactDirectoryPath"))
+        if brain:
+            rec["brain_root"] = str(Path(brain).parent)
+        write_json(path, rec)
+    fixed = {k: rec.get(k) for k in ("started_at", "launch")}
+    write_user_record(sha256_64(sid), without(rec, fixed), fixed)
+    return rec
+
+
 def cmd_record(harness: str, env: Mapping[str, str]) -> int:
     """Harness hook entry point: persist what the event reveals."""
     if harness not in SLUGS:
@@ -1679,23 +1812,11 @@ def cmd_record(harness: str, env: Mapping[str, str]) -> int:
             handle_claude({**data, "session_id": sid}, env, user_only=user_only)
         return 0
     sid = sid or (detect(env) or (None, None))[1]
-    state = state_dir(hook_cwd(data))
-    if not sid or not state:
+    if not sid:
         return 0
-    path = state / "sessions" / f"{hx(sha256_64(sid))}.json"
-    with locked(state):
-        rec = read_record(path)
-        rec["harness"] = SLUGS[harness]
-        if model and not model.startswith("<"):
-            rec["model"] = model
-        if effort:
-            rec["effort"] = effort
-        brain = as_str(data.get("artifactDirectoryPath"))
-        if brain:
-            rec["brain_root"] = str(Path(brain).parent)
-        write_json(path, rec)
-    write_user_record(sha256_64(sid), rec)
-    record_agy(sid, data, rec, env)
+    rec = save_agy_session(harness, sid, data, (model, effort), env)
+    if rec is not None:
+        record_agy(sid, data, rec, env)
     return 0
 
 
@@ -1880,14 +2001,16 @@ def enrich(ident: Ident, committer: Committer) -> Ident:
     return ident
 
 
-LLM_LINE = re.compile(r"^(Generated-by|Assisted-by): (LLM\b.*)$", re.MULTILINE)
-LLM_LINES = re.compile(r"^(?:Generated-by|Assisted-by): LLM\b.*\n?", re.MULTILINE)
+LLM_LINE = re.compile(r"^(Generated-by|Assisted-by):[ \t]*(LLM\b.*)$", re.MULTILINE)
+LLM_LINES = re.compile(r"^(?:Generated-by|Assisted-by):[ \t]*LLM\b.*\n?", re.MULTILINE)
 AGENT_ATTR = re.compile(r"(?<![^\s;])(session|subagent)=([^\s;]+)")
 AMEND_FLAGS = {"--am", "--ame", "--amen", "--amend"}  # git takes unique prefixes
 PICKED_FROM = re.compile(
     r"^\(cherry picked from commit ([0-9a-f]{40})\)$", re.MULTILINE
 )
 MODEL_ATTR = re.compile(r"(?<![^\s;])model=[^\s;]")
+START_ATTR = re.compile(r"(?<![^\s;])started_at=([^\s;]+)")
+ATTR_PAIR = re.compile(r"(?<![^\s;])([a-z_]+)=([^\s;]+)")
 IDENT_EMAIL = re.compile(r"<([^>]*)>")
 
 type Trailer = tuple[str, str]
@@ -1904,16 +2027,97 @@ def trailer_agent(value: str) -> tuple[str | None, str | None]:
     return attrs.get("session"), attrs.get("subagent")
 
 
+def without_start(value: str) -> str:
+    """A trailer value with its ``started_at`` attribute left out."""
+    parts = value.split(";")
+    return ";".join(p for p in parts if not p.startswith("started_at="))
+
+
+def trailer_start(value: str) -> str:
+    """A trailer value's valid ``started_at``, or an empty string without one."""
+    found = START_ATTR.search(value)
+    return (found and start_ok(found[1])) or ""
+
+
+def with_record(value: str) -> str:
+    """A trailer value with the ``launch`` and ``started_at`` of its session record.
+
+    The record is the machine's word, so its fields replace whatever the line
+    says. Invalid lines stay untouched for commit-msg to reject. Other text,
+    including prose around the attribute blob, stays byte-for-byte as written.
+    """
+    if check_value(value):
+        return value
+    attrs = dict(ATTR_PAIR.findall(value))
+    root, sub = hash_ok(attrs.get("session")), hash_ok(attrs.get("subagent"))
+    if not root:
+        return value
+    root_rec = load_record(root)
+    rec = load_record(sub, root=root) if sub else root_rec
+    if not (rec or root_rec):
+        return value
+    fields = {
+        "launch": hash_ok(rec.get("launch")) or hash_ok(root_rec.get("launch")),
+        "started_at": start_ok(rec.get("started_at")),
+    }
+    # Replace only these two attributes; absent record fields remove forged ones.
+    blob = next(token for token in value.split() if "=" in token)
+    pairs = [
+        pair
+        for pair in blob.split(";")
+        if not pair.startswith(("launch=", "started_at="))
+    ]
+    pairs.extend(f"{key}={field}" for key, field in fields.items() if field)
+    return value.replace(blob, ";".join(sorted(pairs)))
+
+
+def earliest_starts(found: list[Trailer]) -> list[Trailer]:
+    """Each trailer replaced by its twin with the earliest start.
+
+    Twins have the same key and the same value apart from ``started_at``, so
+    the hook's re-stamp of an amended commit collapses onto the original line.
+    A line that differs in any other attribute stays apart, which means a
+    hand-written early time cannot replace the hook's line and drop its
+    ``launch``. The twin with the earliest ``started_at`` replaces the rest, so
+    a value with the field beats one without it.
+    """
+    best: dict[tuple[str, str], str] = {}
+    for key, value in found:
+        twin = (key, without_start(value))
+        start = trailer_start(value)
+        if start and (twin not in best or start < trailer_start(best[twin])):
+            best[twin] = value
+    return [(k, best.get((k, without_start(v)), v)) for k, v in found]
+
+
 def merge_trailers(found: list[Trailer]) -> list[Trailer]:
     """Deduplicated, ``Generated-by`` first; Generated-by beats Assisted-by.
 
-    An agent with any ``Generated-by`` loses its ``Assisted-by`` lines.
+    An agent with any ``Generated-by`` loses its ``Assisted-by`` lines, and
+    one agent's lines merge into the one with the earliest ``started_at``.
     """
     generated = {trailer_agent(v) for k, v in found if k == KEY_GEN}
     kept = [
-        (k, v) for k, v in found if k == KEY_GEN or trailer_agent(v) not in generated
+        (k, v)
+        for k, v in earliest_starts(found)
+        if k == KEY_GEN or trailer_agent(v) not in generated
     ]
     return sorted(dict.fromkeys(kept), key=lambda kv: kv[0] != KEY_GEN)
+
+
+def with_start(ident: Ident) -> Ident:
+    """An identity with the ``launch`` and ``started_at`` of its session record.
+
+    A subagent's record has its own ``started_at``, and its ``launch`` falls
+    back to its root's.
+    """
+    root_rec = load_record(ident.root)
+    rec = load_record(ident.subagent, root=ident.root) if ident.subagent else root_rec
+    return replace(
+        ident,
+        launch=hash_ok(rec.get("launch")) or hash_ok(root_rec.get("launch")),
+        started_at=start_ok(rec.get("started_at")),
+    )
 
 
 def add_trailers(
@@ -1925,14 +2129,22 @@ def add_trailers(
     """Rewrite the message's ``LLM`` trailers as one merged, ordered set.
 
     The set is the message's own ``LLM`` trailers, ``kept`` (an amended
-    commit's) and the new ones. A human's Signed-off-by (if any) is left where
-    git put it.
+    commit's) and the new ones. A new line replaces the older lines of its own
+    agent, so nothing typed in a message overrides what the hook stamps, and a
+    session record's ``launch`` and ``started_at`` replace any line's.
+    A human's Signed-off-by (if any) is left where git put it.
     """
     text = msgfile.read_text()
     new = [(KEY_GEN, format_value(i.attrs())) for i in gen] + [
         (KEY_ASSIST, format_value(i.attrs())) for i in assisted
     ]
-    merged = merge_trailers([*llm_trailers(text), *(kept or []), *new])
+    made = {(k, trailer_agent(v)) for k, v in new}
+    older = [
+        (k, v)
+        for k, v in [*llm_trailers(text), *(kept or [])]
+        if (k, trailer_agent(v)) not in made
+    ]
+    merged = merge_trailers([(k, with_record(v)) for k, v in [*older, *new]])
     args = [f"--trailer={key}: {value}" for key, value in merged]
     bare = msgfile.with_name(msgfile.name + ".ascm")
     bare.write_text(LLM_LINES.sub("", text))
@@ -2087,14 +2299,35 @@ def write_claim(repo: Repo, root: str, receipts: list[Path]) -> None:
         )
 
 
+SQUASH_MARK = " This is a combination of"
+COMMENT_CHAR_CONFIG = "core.commentChar"
+
+
+def amend_only(path: Path, text: str, kept: list[Trailer]) -> None:
+    """Rewrite the trailers of a message with no committer: keep, then merge.
+
+    A message whose lines differ in no start time stays as written, so a human
+    commit is never reordered.
+    """
+    found = llm_trailers(text)
+    # A squash joins the messages, so each one's lines sit in its own block.
+    _, comment = git("config", COMMENT_CHAR_CONFIG)
+    # Git chooses auto from this candidate list after inspecting the message.
+    markers = "#;@!$%^&|:" if comment == "auto" else (comment or "#")
+    joined = bool(found) and re.search(
+        rf"^[{re.escape(markers)}]{re.escape(SQUASH_MARK)}", text, re.MULTILINE
+    )
+    if kept or joined or earliest_starts(found) != found:
+        add_trailers(path, [], [], kept)
+
+
 def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int:
     """prepare-commit-msg: stamp ``Generated-by`` and ``Assisted-by``.
 
     An amend keeps every ``LLM`` trailer of the commit it replaces, even with a
     new ``-m``: post-commit consumed that commit's receipts, so they cannot be
-    rebuilt. When no receipt matches and the message already has a
-    ``Generated-by`` (such as a message-only amend), the committer fallback is
-    left out.
+    rebuilt. With no matching receipt, only an amended commit's trailers or a
+    rebase's replayed message can suppress the committer fallback.
 
     A cherry-pick keeps the picked commit's ``LLM`` trailers, read from that
     commit, and never credits the picker as ``Generated-by``: the picker is
@@ -2122,11 +2355,10 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
     path = Path(msgfile)
     kept = amended_trailers(repo.top)
     committer = committer_identity(env)
-    if not committer:
-        if kept:
-            add_trailers(path, [], [], kept)
-        return 0
     text = path.read_text()
+    if not committer:
+        amend_only(path, text, kept)
+        return 0
     picked = None if replaying else picked_commit(head, text, repo.top)
     problem = picked and pick_refusal(picked, text, repo.top)
     if problem:
@@ -2139,14 +2371,15 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
         load_edits(repo, committer.ident.root), staged, unstaged_blobs(repo.top, staged)
     )
     gen, assisted = decide(committer, [rec for _, rec in edits], staged, blobs)
+    inherited = kept + (llm_trailers(text) if replaying else [])
     if picked:
         gen, assisted = pick_roles(committer, edited=bool(edits))
         kept = [*kept, *usable_trailers(picked[1])]
-    elif not edits and any(key == KEY_GEN for key, _ in [*llm_trailers(text), *kept]):
+    elif not edits and any(key == KEY_GEN for key, _ in inherited):
         gen, assisted = list[Ident](), list[Ident]()
     # Enriching can make two identities of one agent equal, so deduplicate again.
-    gen = list(dict.fromkeys(enrich(i, committer) for i in gen))
-    add_trailers(path, gen, assisted, kept)
+    gen = list(dict.fromkeys(with_start(enrich(i, committer)) for i in gen))
+    add_trailers(path, gen, [with_start(i) for i in assisted], kept)
     write_claim(repo, committer.ident.root, [p for p, _ in edits])
     return 0
 
@@ -2631,7 +2864,8 @@ SIGNOFF = re.compile(
 SIGNOFF_ERROR = (
     "agent commits carry no Signed-off-by or Co-authored-by; the operator signs off"
 )
-PAIR = re.compile(r"[a-z]+=[^\s;,]+")
+START_WARNING = "a Generated-by line lacks started_at"
+PAIR = re.compile(r"[a-z_]+=[^\s;,]+")
 
 
 def check_pair(pair: str) -> str | None:
@@ -2644,8 +2878,10 @@ def check_pair(pair: str) -> str | None:
         problem = f"unknown attribute {key}"
     elif key == "effort" and value not in EFFORTS:
         problem = f"bad effort {value}"
-    elif key in {"session", "subagent"} and not HASH_RE.fullmatch(value):
+    elif key in {"launch", "session", "subagent"} and not HASH_RE.fullmatch(value):
         problem = f"bad {key} hash"
+    elif key == "started_at" and not start_ok(value):
+        problem = f"bad started_at {value}"
     elif key == "harness" and value.partition(":")[0] not in SLUGS.values():
         problem = f"unknown harness {value}"
     return problem
@@ -2726,6 +2962,10 @@ def cmd_check(msgfile: str, env: Mapping[str, str]) -> int:
     errs = check_message(text) + ident_problems(text, env)
     for err in errs:
         print(err if err == SESSION_ERROR else f"{PROG}: {err}", file=sys.stderr)
+    if detect(env) and any(
+        k == KEY_GEN and not trailer_start(v) for k, v in llm_trailers(text)
+    ):
+        print(f"{PROG}: warning: {START_WARNING}", file=sys.stderr)
     return 1 if errs else 0
 
 
