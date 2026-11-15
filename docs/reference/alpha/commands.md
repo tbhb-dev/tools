@@ -27,6 +27,7 @@ type: Reference
 - `guard-gh-pr` is a PreToolUse hook that blocks `gh pr create`, `gh pr edit`, `gh pr merge` and `gh pr ready`, and names the `tbhbdev alpha` command to run instead.
 - `state-guard` is a Claude Code hook that blocks a `git commit` that adds a sign-off or co-author trailer, and a new open-note item without a `Decisions checked:` line. It doesn't judge status claims in replies or messages.
 - `session-context` is a Claude Code SessionStart hook that reports the host, its role, the other hosts, and the local time.
+- `chase-context` is a Claude Code UserPromptSubmit hook that lists the open pull requests of the session's repositories that have been silent too long. The model chases their owners first.
 - `guard-gh-poll` is a PreToolUse hook that blocks GitHub polling and unsetting the 1Password service account token's variable.
 - `guard-scripts` is a PreToolUse hook that keeps scripts for the operator in `~/.local/libexec/tbhb/`. It reads the common ways an agent writes a file, so it misses the rest. It denies a script written anywhere else under the home directory, `/tmp` or `/private/tmp`, and any script in a drafts repository. Git work trees, this session's scratchpad and a run-scoped `$TMPDIR` pass. Name each file `YYYY-MM-DD-<owner>-<slug>[.vN].sh` or `YYYY-MM-DD-<owner>-<slug>[.vN].py`. The guard refuses a write to an existing file. Give each revision a new name. Both suffixes and any content starting with `#!` count as scripts. When the hook can read the content, a new `.py` file there must start with exactly `#!/usr/bin/env -S python3 -I`. Make it executable with `chmod 0755`. Known gaps include unknown content (such as `echo` output) and the executable bit, which the hook can't check at write time. Run logs go in `~/.local/state/tbhb/<same name>/`.
 - `gh-shim` is the `gh` that agent sessions find first on PATH. It budgets their `gh` calls as a backstop.
@@ -68,6 +69,8 @@ rule = "Example rule: a status claim carries its evidence."   # SessionStart tex
 decisions_dir = "/example/decisions"   # the path the open-note block names
 open_note = "/example/Open.md"         # a path suffix; a new item needs "Decisions checked:"
 hosts = ["example-a=peer Mac", "example-b=Linux VM", "example-c"]   # "name=role"
+watchdog_producer = "~/example/chase-rows.sh"   # prints `CHASE name#N sha 25m ...` rows
+watchdog_repos = ["example-project=repo-a,repo-b"]   # project directory name = repositories
 ```
 
 `tbhbdev alpha pr check` reads one more optional table. `private_repos` lists private repository names that must not appear in a public repository's draft:
@@ -80,6 +83,8 @@ private_repos = ["example-lab", "example-notes"]   # optional
 The check flags a whole repository-name token in the title and body that equals a listed name, and any token ending in `-private`, such as `example-private`. The suffix rule works without config. Matching ignores case and a trailing `.git`. A clone URL matches. It ignores substrings of longer names. A token that starts with a hyphen, such as `--private`, passes, but the check flags a word such as `non-private`. It skips a working repository whose own name ends in `-private` or appears in the list. If `origin` is unreadable, the check runs. It covers the title and body only, not commit messages.
 
 The commit check runs without config. The command guard checks arguments for trailers and sign-off flags. Message bodies in here documents or `-F` files pass this guard. The commit-msg identity check catches trailers in those bodies.
+
+`chase-context` runs on UserPromptSubmit with a 45 second timeout. It runs `watchdog_producer` and keeps the well-formed `CHASE` rows under a day old, except Renovate's. The rows live for ten minutes in `~/.local/state/tbhbdev/chase-context.cache`, which every session of the user shares, and the producer waits while the GitHub budget has nothing left. A session prints the rows of the repositories that `watchdog_repos` lists for the base name of its project directory (`CLAUDE_PROJECT_DIR`, else the hook input's `cwd`). A session without a matching entry prints every row. To check it, seed the cache and pipe a hook input in: `echo '{"cwd":"/x/example-project"}' | tbhbdev alpha chase-context`.
 
 These user-level hooks run in every repository. Before acting, the identity, pull request, approval guard, and install hooks check that `origin` names a tbhb-dev repository on GitHub. Outside a repository, the identity record hook still writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Both `state-guard` and `session-context` run regardless of origin. At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, which puts the `gh` shim first on PATH for the session's commands and reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 

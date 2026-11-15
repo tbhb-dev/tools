@@ -111,7 +111,7 @@ def test_guard_runs_from_the_top(
     assert capsys.readouterr() == ("", "")
 
 
-@pytest.mark.parametrize("command", ["state-guard", "session-context"])
+@pytest.mark.parametrize("command", ["state-guard", "session-context", "chase-context"])
 def test_harness_hooks_run_from_the_top_without_config(
     command: str,
     config_file: object,

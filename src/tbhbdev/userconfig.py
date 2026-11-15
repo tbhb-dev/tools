@@ -22,6 +22,9 @@ check runs without configuration.
     open_note     path suffix of the note it holds to the item rule
     hosts         `["name=role", ...]`, which `alpha session-context` lists;
                   a name alone, with no `=`, has no role
+    watchdog_producer path of the script `alpha chase-context` runs for CHASE rows
+    watchdog_repos  `["project=repo,repo", ...]`: the repositories whose rows a
+                  session in that project directory sees
 
 The optional `[pr_check]` table has one key, `private_repos`, a list of private
 repository names that `tbhbdev alpha pr check` flags in a draft's title and

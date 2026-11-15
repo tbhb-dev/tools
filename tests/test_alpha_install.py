@@ -230,6 +230,17 @@ def test_claude_hooks() -> None:
             }
         ],
         "SubagentStart": [{"hooks": [record]}],
+        "UserPromptSubmit": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": marked("chase-context"),
+                        "timeout": 45,
+                    }
+                ]
+            }
+        ],
         "PreToolUse": [
             {"matcher": "Bash|Agent", "hooks": [record]},
             {

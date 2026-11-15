@@ -58,6 +58,8 @@ Claude Code also gets two hooks with optional `[harness]` settings in the
 tbhbdev user config (see tbhbdev.userconfig): `alpha state-guard`, on
 PreToolUse for Bash, Write and Edit and on SessionStart, and
 `alpha session-context`, on SessionStart. Both run with a 10 second timeout.
+`alpha chase-context`, on UserPromptSubmit, runs with 45 seconds, since it may run
+its configured producer.
 The sign-off check runs without config. Only checks that need a setting are
 silent when it is absent. Both hooks run regardless of repository origin.
 
@@ -186,6 +188,7 @@ POLICY = "shell_environment_policy"
 GH_SHIM_MODE = 0o755
 AGY_PR_TIMEOUT = 120
 HARNESS_TIMEOUT = 10
+CHASE_TIMEOUT = 45  # the producer's own limit is 40 seconds
 # Codex's documented default hook timeout, written out so the trusted hash covers
 # exactly what is on disk.
 CODEX_TIMEOUT = 600
@@ -291,6 +294,7 @@ def claude_hooks() -> dict[str, list[Json]]:
             )
         ],
         "SubagentStart": [group(None, record)],
+        "UserPromptSubmit": [group(None, handler("chase-context", CHASE_TIMEOUT))],
         "PreToolUse": [
             group("Bash|Agent", record),
             group("Bash", handler("guard-gh-pr")),
