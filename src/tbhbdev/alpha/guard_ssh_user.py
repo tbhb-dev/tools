@@ -27,7 +27,7 @@ alias counts only when it is listed. Known gaps: `sftp`, `mosh`, `git` over ssh,
 `ssh -G` expansion of Host blocks, a host held in a variable or fed on stdin
 (`xargs ssh`), and a clustered rsync `-ae` shell option.
 """
-# cspell:ignore proxyjump
+# cspell:ignore proxyjump proxycommand caffeinate sshpass
 
 import json
 import re
