@@ -17,6 +17,10 @@ DIRECTORY_MODE = 0o700
 LOG_NAME = "calls.jsonl"
 GENESIS = "0" * 64
 TAIL_BLOCK = 4096
+MAX_LINE = 65536
+BEFORE_LIMIT = MAX_LINE - 1024
+AFTER_LIMIT = 1024
+SHRINKABLE = ("reason", "path")
 
 
 class RefusedError(Exception):
@@ -27,8 +31,16 @@ class RefusedError(Exception):
 class Audit:
     directory: Path
 
-    def append(self, record: dict[str, object]) -> None:
-        """Append and sync without following a directory or file symlink."""
+    def append(
+        self, record: dict[str, object], limit: int = MAX_LINE, *, shrink: bool = False
+    ) -> int:
+        """Append and sync without following a directory or file symlink.
+
+        Returns the position of the new line, counted under the lock. A line
+        longer than ``limit`` bytes, line feed included, is refused with
+        ``audit_record_too_large``, or with ``shrink`` set first cut down by
+        shortening its free-text fields.
+        """
         try:
             self.directory.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
             # Every call syncs the whole chain, so a sync that failed after the
@@ -41,13 +53,14 @@ class Audit:
             )
             try:
                 self.validate(os.fstat(directory), mode=DIRECTORY_MODE)
-                self.write(directory, record)
+                position = self.write(directory, record, limit, shrink=shrink)
                 os.fsync(directory)
             finally:
                 os.close(directory)
         except OSError:
             msg = "audit_unavailable"
             raise RefusedError(msg) from None
+        return position
 
     @staticmethod
     def sync_directory(path: Path) -> None:
@@ -112,6 +125,34 @@ class Audit:
         return hashlib.sha256(data.rpartition(b"\n")[2]).hexdigest()
 
     @staticmethod
+    def line_count(descriptor: int) -> int:
+        """The number of complete lines; ``heal_tail`` has ended the last one."""
+        size = os.fstat(descriptor).st_size
+        count = 0
+        for start in range(0, size, MAX_LINE):
+            count += os.pread(descriptor, min(MAX_LINE, size - start), start).count(
+                b"\n"
+            )
+        return count
+
+    @staticmethod
+    def encode(record: dict[str, object]) -> bytes:
+        return (json.dumps(record) + "\n").encode()
+
+    @staticmethod
+    def shorten(record: dict[str, object], limit: int) -> bytes:
+        """Halve the longest free-text field until the line fits, else refuse."""
+        fitted = dict(record)
+        while len(data := Audit.encode(fitted)) > limit:
+            texts = [name for name in SHRINKABLE if fitted.get(name)]
+            if not texts or not all(isinstance(fitted[name], str) for name in texts):
+                msg = "audit_record_too_large"
+                raise RefusedError(msg)
+            longest = max(texts, key=lambda name: len(str(fitted[name])))
+            fitted[longest] = str(fitted[longest])[: len(str(fitted[longest])) // 2]
+        return data
+
+    @staticmethod
     def same_file(directory: int, descriptor: int) -> None:
         """Refuse a log that was replaced between the open and the lock."""
         held = os.fstat(descriptor)
@@ -127,7 +168,9 @@ class Audit:
         os.fsync(descriptor)
 
     @staticmethod
-    def write(directory: int, record: dict[str, object]) -> None:
+    def write(
+        directory: int, record: dict[str, object], limit: int, *, shrink: bool
+    ) -> int:
         descriptor = os.open(
             LOG_NAME,
             os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
@@ -142,7 +185,13 @@ class Audit:
             Audit.same_file(directory, descriptor)
             Audit.heal_tail(descriptor)
             chained = {**record, "prev": Audit.chain_head(descriptor)}
-            data = (json.dumps(chained) + "\n").encode()
+            data = Audit.encode(chained)
+            if len(data) > limit:
+                if not shrink:
+                    msg = "audit_record_too_large"
+                    raise RefusedError(msg)
+                data = Audit.shorten(chained, limit)
+            position = Audit.line_count(descriptor) + 1
             start = os.fstat(descriptor).st_size
             try:
                 Audit.write_all(descriptor, data)
@@ -153,6 +202,7 @@ class Audit:
             # A rotation after the first check leaves the record in a file that
             # is no longer the log, so the call is refused rather than left unrecorded.
             Audit.same_file(directory, descriptor)
+            return position
         finally:
             os.close(descriptor)
 

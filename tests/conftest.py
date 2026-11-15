@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, cast, override
 import pytest
 
 from tbhbdev import host, plugins, secrets
+from tbhbdev.admin.audit import RefusedError
 from tbhbdev.alpha.agent import credentials, host_tools, runfiles
 
 if TYPE_CHECKING:
@@ -570,3 +571,27 @@ SAFE_ENVIRONMENT: dict[str, object] = {
         "custom_branch_policies": False,
     },
 }
+
+
+@dataclass
+class AckingCopy:
+    """An audit copy that acknowledges every line and records what it saw."""
+
+    gated: list[int] = field(default_factory=list)
+    trailed: list[int] = field(default_factory=list)
+    refuse: str = ""
+    ready: bool = True
+
+    def configured(self) -> bool:
+        return self.ready
+
+    def gate(self, position: int) -> None:
+        self.gated.append(position)
+        if self.refuse:
+            raise RefusedError(self.refuse)
+
+    def trail(self, position: int) -> None:
+        self.trailed.append(position)
+
+    def catch_up(self) -> str:
+        return "receiver count 0, nothing left to send"

@@ -14,6 +14,7 @@ lazy from pathlib import Path
 
 import httpx
 import pytest
+from conftest import AckingCopy
 
 from tbhbdev.admin import policy, request
 from tbhbdev.admin.audit import GENESIS, Audit, RefusedError, record
@@ -429,7 +430,9 @@ def test_fail_closed_before_any_io(
         gh_app.run_openssl,
         httpx.MockTransport(no_network),
     )
-    runtime = request.Runtime(Audit(tmp_path / "admin"), env, tmp_path / "enabled")
+    runtime = request.Runtime(
+        Audit(tmp_path / "admin"), env, tmp_path / "enabled", copy=AckingCopy()
+    )
 
     def short_write(_descriptor: int, _data: bytes) -> int:
         return 0
@@ -543,3 +546,66 @@ def test_a_caller_supplied_prev_is_replaced(tmp_path: Path) -> None:
     audit.append({"n": 1, "prev": "forged"})
     entry = json.loads((tmp_path / "admin/calls.jsonl").read_text())
     assert entry["prev"] == GENESIS
+
+
+def test_append_returns_the_position_of_the_new_line(tmp_path: Path) -> None:
+    audit = Audit(tmp_path / "admin")
+    assert [audit.append({"n": number}) for number in range(1, 4)] == [1, 2, 3]
+    logfile = tmp_path / "admin/calls.jsonl"
+    # A fragment that heal_tail ends counts as a line of its own.
+    logfile.write_bytes(logfile.read_bytes() + b'{"partial')
+    assert audit.append({"n": 4}) == 5
+    assert len(logfile.read_bytes().splitlines()) == 5
+
+
+def test_the_position_spans_blocks_of_the_line_count(tmp_path: Path) -> None:
+    audit = Audit(tmp_path / "admin")
+    big = "x" * 3000
+    positions = [audit.append({"pad": big}) for _ in range(5)]
+    assert positions == [1, 2, 3, 4, 5]
+
+
+def test_a_record_over_the_limit_is_refused_and_not_written(tmp_path: Path) -> None:
+    audit = Audit(tmp_path / "admin")
+    audit.append({"n": 1})
+    logfile = tmp_path / "admin/calls.jsonl"
+    before = logfile.read_bytes()
+    with pytest.raises(RefusedError, match=r"^audit_record_too_large$"):
+        audit.append({"reason": "x" * 70000})
+    assert logfile.read_bytes() == before
+    assert audit.append({"n": 2}) == 2
+
+
+def test_the_limit_counts_the_chain_link_and_the_line_feed(tmp_path: Path) -> None:
+    audit = Audit(tmp_path / "admin")
+    probe = len(json.dumps({"p": "", "prev": GENESIS})) + 1
+    exact: dict[str, object] = {"p": "x" * (200 - probe)}
+    assert audit.append(exact, limit=200) == 1
+    line = (tmp_path / "admin/calls.jsonl").read_bytes()
+    assert len(line) == 200
+    with pytest.raises(RefusedError, match=r"^audit_record_too_large$"):
+        audit.append({"p": "x" * (201 - probe)}, limit=200)
+
+
+def test_a_shrinking_record_loses_free_text_until_it_fits(tmp_path: Path) -> None:
+    audit = Audit(tmp_path / "admin")
+    entry: dict[str, object] = {"reason": "r" * 900, "path": "/p" * 900, "code": "kept"}
+    assert audit.append(entry, limit=1024, shrink=True) == 1
+    line = (tmp_path / "admin/calls.jsonl").read_bytes()
+    assert len(line) <= 1024
+    parsed = json.loads(line)
+    assert parsed["code"] == "kept"
+    assert parsed["reason"].startswith("r")
+    assert parsed["path"].startswith("/p")
+
+
+def test_a_record_that_cannot_shrink_is_still_refused(tmp_path: Path) -> None:
+    audit = Audit(tmp_path / "admin")
+    with pytest.raises(RefusedError, match=r"^audit_record_too_large$"):
+        audit.append({"code": "c" * 2000}, limit=1024, shrink=True)
+    with pytest.raises(RefusedError, match=r"^audit_record_too_large$"):
+        audit.append(
+            {"reason": "r" * 2000, "path": 5, "code": "c" * 1100},
+            limit=1024,
+            shrink=True,
+        )

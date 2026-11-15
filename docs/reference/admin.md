@@ -69,6 +69,10 @@ A refusal exits 3 with its code on standard error. Usage errors exit 2. HTTP err
 | `repository_mismatch` | Invalid repository or another organization |
 | `reason_required` | Empty reason |
 | `invalid_setting` | Invalid credential setting |
+| `audit_copy_unacknowledged` | The receiver didn't acknowledge the `before` record in time |
+| `audit_copy_diverged` | An acknowledgment or line disagrees with the local log |
+| `audit_copy_damaged` | A local line fails the receiver's structural checks |
+| `audit_record_too_large` | A record exceeds its size limit |
 
 ## Append-only audit log
 
@@ -76,6 +80,6 @@ The log path is `$XDG_STATE_HOME/tbhb/admin-app/calls.jsonl`, defaulting to `~/.
 
 Each JSON line contains `prev`, the Secure Hash Algorithm (SHA) 256 digest of the previous line (64 zeros for the first line). Each line also contains `id`, `time` in Coordinated Universal Time (UTC), caller `uid`, `reason`, `method`, normalized `path`, `decision` (`allow` or `refuse`), `code`, HTTP `status` or null, `phase`, and `body_sha256`. The hash covers canonical JSON bytes sent to GitHub, or empty bytes for an absent body. Records never contain request bodies or credentials. Keep secrets out of reasons.
 
-The tool doesn't verify the chain yet. A verifier could find an edit to an earlier record, because the edited line no longer matches the next `prev`. It would miss a cut at the end of the log and a changed last record. It would also miss a full rewrite that recomputes every `prev`. The off-host copy in the design draft at tbhb-dev/wiki#55 would cover those cases. Computing the head reads the log backward from the end in blocks.
+The tool doesn't verify the chain yet. A verifier could find an edit to an earlier record, because the edited line no longer matches the next `prev`. It would miss a cut at the end of the log and a changed last record. It would also miss a full rewrite that recomputes every `prev`. The off-host copy covers those cases. See [Administrator audit copy](admin-audit-copy.md). Computing the head reads the log backward from the end in blocks.
 
-Before reading credentials or making HTTP requests, the command appends and syncs a `before` record. Refusals and dry runs need only that record. An attempted call adds an `after` record with the same ID and its status or failure code. A missing second record can mean an interrupted call. An audit failure stops the command, though a failure after the request can't undo an operation GitHub already accepted.
+Before reading credentials or making HTTP requests, the command appends and syncs a `before` record, then waits for the receiver to acknowledge it. Refusals and dry runs need only that record. An attempted call adds an `after` record with the same ID and its status or failure code. A missing second record can mean an interrupted call. An audit failure stops the command, though a failure after the request can't undo an operation GitHub already accepted.

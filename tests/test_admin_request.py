@@ -12,13 +12,14 @@ lazy from collections.abc import Callable
 
 import httpx
 import pytest
-from conftest import SAFE_ENVIRONMENT
+from conftest import SAFE_ENVIRONMENT, AckingCopy
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from tbhbdev import admin, secrets
 from tbhbdev.admin import policy, request
 from tbhbdev.admin.audit import Audit, RefusedError
+from tbhbdev.admin.audit_copy import AuditCopy, Unconfigured
 from tbhbdev.alpha import gh_app
 
 if TYPE_CHECKING:
@@ -98,7 +99,9 @@ def fake(tmp_path: Path) -> Fake:
         httpx.MockTransport(transport),
     )
     result = Fake(
-        request.Runtime(Audit(tmp_path / "audit"), env, tmp_path / "enabled"),
+        request.Runtime(
+            Audit(tmp_path / "audit"), env, tmp_path / "enabled", copy=AckingCopy()
+        ),
         key,
         reads,
         requests,
@@ -785,3 +788,111 @@ def test_marker_must_be_a_regular_file_of_this_user(
     assert request.enabled(target)
     monkeypatch.setattr(os, "getuid", lambda: target.stat().st_uid + 1)
     assert not request.enabled(target)
+
+
+def copy_of(fake: Fake) -> AckingCopy:
+    assert isinstance(fake.runtime.copy, AckingCopy)
+    return fake.runtime.copy
+
+
+def records(fake: Fake) -> list[dict[str, object]]:
+    text = (fake.runtime.audit.directory / "calls.jsonl").read_text()
+    return [json.loads(line) for line in text.splitlines()]
+
+
+def test_the_key_is_read_only_after_the_gate_passes_the_before_record(
+    fake: Fake,
+) -> None:
+    request.call(fake.runtime, "GET", "/repos/tbhb-dev/widget", None, "test")
+    copy = copy_of(fake)
+    # Each lookup is a call of its own, so the gate saw each before record.
+    assert copy.gated[0] == 1
+    assert copy.gated == sorted(copy.gated)
+    assert copy.trailed[-1] == len(records(fake))
+    assert fake.reads
+
+
+def test_a_gate_refusal_reads_no_key_and_records_the_code(fake: Fake) -> None:
+    copy_of(fake).refuse = "audit_copy_unacknowledged"
+    with pytest.raises(RefusedError, match=r"^audit_copy_unacknowledged$"):
+        request.call(fake.runtime, "GET", "/repos/tbhb-dev/widget", None, "test")
+    assert fake.reads == fake.requests == []
+    before, after = records(fake)
+    assert before["phase"] == "before"
+    assert after["phase"] == "after"
+    assert after["code"] == "audit_copy_unacknowledged"
+    assert copy_of(fake).trailed == [2]
+
+
+def test_a_dry_run_and_a_policy_refusal_try_to_send_and_never_gate(
+    fake: Fake,
+) -> None:
+    request.call(
+        fake.runtime, "GET", "/repos/tbhb-dev/widget", None, "test", dry_run=True
+    )
+    with pytest.raises(RefusedError, match=r"^protection_weakening$"):
+        request.call(
+            fake.runtime,
+            "POST",
+            "/repos/tbhb-dev/widget/rulesets",
+            {
+                "name": "main",
+                "target": "branch",
+                "enforcement": "active",
+                "bypass_actors": [],
+                "rules": [{"type": ["deletion"]}],
+            },
+            "test",
+        )
+    copy = copy_of(fake)
+    assert copy.gated == []
+    assert copy.trailed == [1, 2]
+
+
+def test_a_refusal_is_raised_even_when_the_send_would_fail(fake: Fake) -> None:
+    copy_of(fake).refuse = "audit_copy_unacknowledged"
+    with pytest.raises(RefusedError, match=r"^protection_weakening$"):
+        request.call(
+            fake.runtime,
+            "POST",
+            "/repos/tbhb-dev/widget/rulesets",
+            {
+                "name": "main",
+                "target": "branch",
+                "enforcement": "active",
+                "bypass_actors": [],
+                "rules": [{"type": ["deletion"]}],
+            },
+            "test",
+        )
+
+
+def test_an_unconfigured_receiver_makes_the_key_unavailable(fake: Fake) -> None:
+    copy_of(fake).ready = False
+    with pytest.raises(RefusedError, match=r"^credential_unavailable$"):
+        request.call(fake.runtime, "GET", "/repos/tbhb-dev/widget", None, "test")
+    assert fake.reads == []
+
+
+def test_an_oversized_reason_is_shortened_in_the_after_record_only(
+    fake: Fake,
+) -> None:
+    request.call(fake.runtime, "GET", "/repos/tbhb-dev/widget", None, "r" * 800)
+    after = records(fake)[-1]
+    assert after["phase"] == "after"
+    assert len(json.dumps(after)) < 1024
+
+
+def test_the_default_runtime_wires_the_audit_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    runtime = request.default_runtime()
+    assert isinstance(runtime.copy, AuditCopy)
+    assert runtime.copy.directory == runtime.audit.directory
+    assert not runtime.copy.configured()
+
+
+def test_a_runtime_without_a_copy_refuses_the_key() -> None:
+    runtime = request.Runtime(Audit(Path("x")), None, Path("y"))  # type: ignore[arg-type]
+    assert isinstance(runtime.copy, Unconfigured)

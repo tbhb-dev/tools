@@ -20,7 +20,7 @@ uv tool install git+https://github.com/tbhb-dev/tools
 
 ## Tools
 
-- `admin` makes policy-controlled GitHub administration calls with an append-only audit log. See [GitHub administration](docs/reference/admin.md).
+- `admin` makes policy-controlled GitHub administration calls with an append-only audit log and an off-host copy. See [GitHub administration](docs/reference/admin.md) and [Administrator audit copy](docs/reference/admin-audit-copy.md).
 - `analytics` applies PostgreSQL migrations and checks the installed catalog contract.
 - `secret` reads and manages 1Password items through the `tbhbdev.secrets` library.
 - `host` manages agent hosts from the operator's Mac.

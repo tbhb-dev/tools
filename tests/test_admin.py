@@ -12,6 +12,7 @@ from test_admin_request import fake as admin_fake
 lazy from test_admin_request import Fake
 
 from tbhbdev import admin
+from tbhbdev.admin.audit import Audit
 lazy from tbhbdev.admin import request
 
 fake = admin_fake
@@ -347,3 +348,18 @@ def test_custom_settings_and_dry_run(
         )
     ]
     assert capsys.readouterr() == ("bad request", "")
+
+
+def test_catch_up_prints_where_the_receiver_stands(
+    fake: Fake, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert admin.main(["catch-up"], "admin", runtime=fake.runtime) == 0
+    assert capsys.readouterr().out == "receiver count 0, nothing left to send\n"
+
+
+def test_catch_up_refusal_exits_three(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime = request.Runtime(Audit(Path("x")), None, Path("y"))  # type: ignore[arg-type]
+    assert admin.main(["catch-up"], "admin", runtime=runtime) == 3
+    assert "audit_copy_unacknowledged" in capsys.readouterr().err

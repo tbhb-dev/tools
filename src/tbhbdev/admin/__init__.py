@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 USAGE = """usage: {prog} call METHOD PATH [--json FILE|-] --reason TEXT [--dry-run]
+       {prog} catch-up
        {prog} secret-repos add --org ORG --secret NAME REPO... [--reason TEXT]
 Settings on either command: --app NAME --item NAME --vault NAME --app-id ID
 """
@@ -27,6 +28,7 @@ COMPONENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
 def parser() -> argparse.ArgumentParser:
     result = gh_app.Parser()
     commands = result.add_subparsers(dest="command", required=True)
+    commands.add_parser("catch-up")
     direct = commands.add_parser("call")
     direct.add_argument("method")
     direct.add_argument("path")
@@ -104,6 +106,9 @@ def secret_repos(runtime: Runtime, args: argparse.Namespace) -> int:
 
 
 def dispatch(runtime: Runtime, args: argparse.Namespace) -> int:
+    if args.command == "catch-up":
+        sys.stdout.write(f"{runtime.copy.catch_up()}\n")
+        return 0
     if not args.reason.strip():
         msg = "reason_required"
         raise RefusedError(msg)

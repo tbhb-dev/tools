@@ -12,7 +12,14 @@ import httpx
 
 from tbhbdev import secrets
 from tbhbdev.admin import policy
-from tbhbdev.admin.audit import Audit, RefusedError, record
+from tbhbdev.admin.audit import (
+    AFTER_LIMIT,
+    BEFORE_LIMIT,
+    Audit,
+    RefusedError,
+    record,
+)
+from tbhbdev.admin.audit_copy import AuditCopy, Copy, Unconfigured, ssh_transport
 from tbhbdev.alpha import gh_app
 
 MAX_RESPONSE = 1024 * 1024
@@ -45,12 +52,18 @@ class Runtime:
     env: gh_app.Env = field(repr=False)
     marker: Path
     settings: Settings = Settings()
+    copy: Copy = field(default_factory=Unconfigured)
 
 
 def default_runtime() -> Runtime:
     root = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
     directory = root / "tbhb/admin-app"
-    return Runtime(Audit(directory), gh_app.default_env(), marker=directory / "enabled")
+    return Runtime(
+        Audit(directory),
+        gh_app.default_env(),
+        marker=directory / "enabled",
+        copy=AuditCopy(directory, ssh_transport(directory)),
+    )
 
 
 def scope(decision: policy.Decision, method: str) -> tuple[str, dict[str, str]]:
@@ -76,10 +89,12 @@ def private_key(runtime: Runtime) -> str:
     """Read the key only on the host that opted in, never with a caller credential.
 
     ``marker`` is the file that ops creates on the one host that uses the App.
-    Every runtime names one, so a missing marker refuses.
+    Every runtime names one, so a missing marker refuses. A host also needs a
+    receiver setting, and ``call`` reads the key only after the receiver
+    acknowledged the call's own ``before`` record.
     """
     settings = runtime.settings
-    if not enabled(runtime.marker):
+    if not enabled(runtime.marker) or not runtime.copy.configured():
         msg = "credential_unavailable"
         raise RefusedError(msg)
     try:
@@ -232,6 +247,12 @@ def keep_environment(runtime: Runtime, path: str, body: object, reason: str) -> 
         raise RefusedError(msg)
 
 
+def finish(runtime: Runtime, entry: dict[str, object]) -> None:
+    """Append the ``after`` record, shortened to fit, and try to send it."""
+    position = runtime.audit.append(entry, AFTER_LIMIT, shrink=True)
+    runtime.copy.trail(position)
+
+
 def call(  # noqa: PLR0913  # Explicit one-call inputs and optional dry run.
     runtime: Runtime,
     method: str,
@@ -251,17 +272,24 @@ def call(  # noqa: PLR0913  # Explicit one-call inputs and optional dry run.
     # fold=None survives: None is as falsy as False.
     wire = policy.normalize(path, fold=False)  # pragma: no mutate
     entry = record(method, decision, reason, encoded, wire)
-    runtime.audit.append(entry)
-    if not decision.allowed:
-        raise RefusedError(decision.code)
-    if dry_run:
+    position = runtime.audit.append(entry, BEFORE_LIMIT)
+    if not decision.allowed or dry_run:
+        # A failed send doesn't stop a refusal or a dry run.
+        runtime.copy.trail(position)
+        if not decision.allowed:
+            raise RefusedError(decision.code)
         return 0, ""
+    try:
+        runtime.copy.gate(position)
+    except RefusedError as exc:
+        finish(runtime, {**entry, "phase": "after", "code": str(exc)})
+        raise
     try:
         if method == "PUT" and policy.ENVIRONMENT.fullmatch(decision.path):
             keep_environment(runtime, wire, body, reason)
         status, response = send(runtime, method, wire, encoded, decision)
     except RefusedError as exc:
-        runtime.audit.append({**entry, "phase": "after", "code": str(exc)})
+        finish(runtime, {**entry, "phase": "after", "code": str(exc)})
         raise
-    runtime.audit.append({**entry, "phase": "after", "status": status})
+    finish(runtime, {**entry, "phase": "after", "status": status})
     return status, response
