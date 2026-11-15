@@ -5185,7 +5185,7 @@ def test_add_trailers_asks_git_to_add_only_different_values(
     ai.add_trailers(
         path, [make_ident(model=None)], [make_ident(model=None, root=OTHER)]
     )
-    assert calls == [
+    assert [call for call in calls if call[0] == "interpret-trailers"] == [
         (
             "interpret-trailers",
             "--if-exists",
@@ -8448,6 +8448,51 @@ def test_start_fields_for_a_root_and_a_subagent(launch_file: Path) -> None:
     assert loaded(launch_file)["session"] == ROOT
 
 
+@pytest.mark.usefixtures("clock")
+def test_start_fields_claims_the_launch_for_a_root_that_began_elsewhere(
+    launch_file: Path,
+) -> None:
+    ai.write_record(ROOT, {}, once={"started_at": LATE})
+    assert ai.start_fields(ROOT, ROOT) == {"launch": LAUNCH}
+    assert loaded(launch_file)["session"] == ROOT
+    # A subagent or a root that has its launch asks for nothing more.
+    ai.write_record(CHILD, {"root": ROOT}, once={"started_at": LATE})
+    assert ai.start_fields(CHILD, ROOT) == {}
+    ai.write_record(ROOT, {}, once={"launch": LAUNCH})
+    assert ai.start_fields(ROOT, ROOT) == {}
+    # A start that is not a valid time counts as no start.
+    ai.write_record(OTHER, {}, once={"started_at": "0"})
+    assert ai.start_fields(OTHER, OTHER) == {"started_at": NOW_UTC}
+
+
+def test_cmd_record_agy_claims_the_launch_and_keeps_the_start(
+    repo: Path, launch_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (repo / "hello.txt").write_text("hi\n", encoding="utf-8")
+    brain = repo.parent / "brain"
+    brain.mkdir()
+    data = agy_post(
+        workspacePaths=[str(repo)], artifactDirectoryPath=f"{brain / CONV}/"
+    )
+    monkeypatch.setattr(ai.time, "time", returning(NOW))
+    feed(monkeypatch, data)
+    assert ai.cmd_record("antigravity", {}) == 0
+    sid = ai.sha256_64(CONV)
+    want = {"launch": LAUNCH, "started_at": EARLY}
+    assert {k: ai.load_record(sid).get(k) for k in want} == want
+    assert loaded(launch_file)["session"] == sid
+    monkeypatch.setattr(ai.time, "time", returning(NOW + 60))
+    feed(monkeypatch, data)
+    assert ai.cmd_record("antigravity", {}) == 0
+    assert {k: ai.load_record(sid).get(k) for k in want} == want
+    name = f"{ai.hx(sid)}.json"
+    for store in (
+        ai.user_store() / name,
+        repo / ".git" / "tbhb-alpha" / "sessions" / name,
+    ):
+        assert {k: loaded(store).get(k) for k in want} == want
+
+
 def claude_event(repo: Path, session: str, agent: str | None = None) -> None:
     data: Json = {"session_id": session, "hook_event_name": "SessionStart"}
     ai.handle_claude(
@@ -8502,6 +8547,9 @@ def test_with_start_reads_the_record_and_the_roots_launch() -> None:
     ai.write_record(ROOT, {"launch": "bad"})
     assert ai.with_start(sub) == dataclasses.replace(sub, launch=OTHER)
     assert ai.with_start(root) == dataclasses.replace(root, started_at=EARLY)
+    ai.write_record(ROOT, {"launch": LAUNCH})
+    ai.write_record(CHILD, {"launch": "bad"})
+    assert ai.with_start(sub) == dataclasses.replace(sub, launch=LAUNCH)
     value = ai.format_value(
         dataclasses.replace(sub, launch=LAUNCH, started_at=EARLY).attrs()
     )
@@ -8539,6 +8587,14 @@ def test_without_start_and_trailer_start() -> None:
     assert ai.trailer_start(value) == EARLY
     assert ai.trailer_start(f"LLM x_started_at={EARLY}") == ""
     assert ai.trailer_start("LLM harness=h") == ""
+    assert ai.trailer_start("LLM started_at=0") == ""
+    assert ai.trailer_start("LLM started_at=2026-02-30T00:00:00Z") == ""
+    assert ai.trailer_identity(f"LLM harness=h;model=m;session={ROOT}") == (
+        "h",
+        "m",
+        ROOT,
+        None,
+    )
 
 
 def test_merge_trailers_keeps_the_earliest_start_per_identity() -> None:
@@ -8582,7 +8638,7 @@ def test_merge_trailers_keeps_the_earliest_start_per_identity() -> None:
     assert ai.earliest_starts(mixed) == mixed
 
 
-def test_cmd_trailer_amend_keeps_the_earliest_start(
+def test_cmd_trailer_amend_takes_the_start_from_the_record(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     session = ai.sha256_64("session-raw")
@@ -8591,31 +8647,42 @@ def test_cmd_trailer_amend_keeps_the_earliest_start(
     commit(repo, f"s\n\nGenerated-by: LLM {base};started_at={EARLY};surface=cli\n")
     ai.write_record(session, {}, once={"started_at": LATE, "launch": LAUNCH})
     monkeypatch.setattr(ai, "ancestry", returning(["git commit --amend -m x"]))
+    hook = (
+        f"Generated-by: LLM harness=claude-code:2.1.316;launch={LAUNCH};"
+        f"model=anthropic:m;session={session};started_at={LATE};surface=cli\n"
+    )
     stage(repo, "b.txt")
     put_receipt(
         repo, "b.json", make_receipt("b.txt", make_ident(root=session)), session
     )
     path = msg_file(tmp_path, "reworded\n")
     assert ai.cmd_trailer(str(path), "message", CLAUDE_COMMIT_ENV) == 0
-    text = path.read_text(encoding="utf-8")
-    hook = (
-        f"Generated-by: LLM harness=claude-code:2.1.316;launch={LAUNCH};"
-        f"model=anthropic:m;session={session};started_at={LATE};surface=cli\n"
-    )
-    kept = f"Generated-by: LLM {base};started_at={EARLY};surface=cli\n"
-    # The hook's line differs in its launch, so the older line stays beside it.
-    assert text == f"reworded\n\n{kept}{hook}"
-    # An amended line without the field stays beside the hook's line.
+    # The hook's line replaces the amended line of its own agent.
+    assert path.read_text(encoding="utf-8") == f"reworded\n\n{hook}"
+    # With no receipt the amended line still takes the record's fields.
     commit(repo, f"s\n\nGenerated-by: LLM {base};surface=cli\n")
-    stage(repo, "c.txt")
-    put_receipt(
-        repo, "c.json", make_receipt("c.txt", make_ident(root=session)), session
-    )
     path = msg_file(tmp_path, "reworded\n")
     assert ai.cmd_trailer(str(path), "message", CLAUDE_COMMIT_ENV) == 0
-    plain = f"Generated-by: LLM {base};surface=cli\n"
-    assert path.read_text(encoding="utf-8") == f"reworded\n\n{plain}{hook}"
+    assert path.read_text(encoding="utf-8") == f"reworded\n\n{hook}"
     assert ai.check_message(path.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.usefixtures("repo")
+def test_with_record_overrides_a_forged_line() -> None:
+    session = ai.sha256_64("session-raw")
+    ai.write_record(session, {}, once={"started_at": LATE, "launch": LAUNCH})
+    forged = (
+        f"LLM harness=h;launch=sha-256-64:{'f' * 16};model=m;session={session};"
+        f"started_at={EARLY}"
+    )
+    stamped = (
+        f"LLM harness=h;launch={LAUNCH};model=m;session={session};started_at={LATE}"
+    )
+    assert ai.with_record(forged) == stamped
+    assert ai.with_record(stamped) == stamped
+    other = f"LLM harness=h;model=m;session={OTHER};started_at={EARLY}"
+    assert ai.with_record(other) == other
+    assert ai.with_record("LLM harness=h;model=m") == "LLM harness=h;model=m"
 
 
 @pytest.mark.usefixtures("repo")

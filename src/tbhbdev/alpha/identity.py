@@ -703,10 +703,13 @@ def start_fields(agent: str, root: str, cwd: Path | None = None) -> Json:
     A root session takes them from the launch file it claims, or the time of
     this event when it has none to claim. A subagent takes the time of this
     event and its root's ``launch``. An agent whose record has a
-    ``started_at`` already gets an empty dict.
+    ``started_at`` already gets an empty dict, or only the ``launch`` it lacks.
     """
-    if load_record(agent, cwd, root=root).get("started_at"):
-        return {}
+    rec = load_record(agent, cwd, root=root)
+    if start_ok(rec.get("started_at")):
+        # A root that began elsewhere still claims its launch file for ``launch``.
+        launch = {} if agent != root or rec.get("launch") else claim_launch(root, cwd)
+        return {"launch": launch["launch"]} if launch else {}
     now = utc(time.time())
     if agent != root:
         return {"started_at": now, "launch": load_record(root, cwd).get("launch")}
@@ -730,7 +733,9 @@ def write_user_record(sid_hash: str, updates: Json, once: Json | None = None) ->
         with locked(user):
             rec = read_record(path)
             rec.update(updates)
-            write_private_json(path, {**(once or {}), **rec})
+            write_private_json(
+                path, {**{k: v for k, v in (once or {}).items() if v}, **rec}
+            )
     except OSError:
         return
 
@@ -1740,6 +1745,11 @@ def record_agy(sid: str, data: Json, rec: Json, env: Mapping[str, str]) -> None:
             )
 
 
+def without(rec: Json, drop: Mapping[str, object]) -> Json:
+    """A record without the keys of ``drop``."""
+    return {k: v for k, v in rec.items() if k not in drop}
+
+
 def cmd_record(harness: str, env: Mapping[str, str]) -> int:
     """Harness hook entry point: persist what the event reveals."""
     if harness not in SLUGS:
@@ -1765,10 +1775,10 @@ def cmd_record(harness: str, env: Mapping[str, str]) -> int:
     if not sid or not state:
         return 0
     path = state / "sessions" / f"{hx(sha256_64(sid))}.json"
-    now = utc(time.time())
+    once = start_fields(sha256_64(sid), sha256_64(sid), hook_cwd(data))
     with locked(state):
         rec = read_record(path)
-        rec.setdefault("started_at", now)
+        rec.update({k: v for k, v in once.items() if v and k not in rec})
         rec["harness"] = SLUGS[harness]
         if model and not model.startswith("<"):
             rec["model"] = model
@@ -1778,9 +1788,8 @@ def cmd_record(harness: str, env: Mapping[str, str]) -> int:
         if brain:
             rec["brain_root"] = str(Path(brain).parent)
         write_json(path, rec)
-    stable = dict(rec)
-    started = stable.pop("started_at")
-    write_user_record(sha256_64(sid), stable, {"started_at": started})
+    fixed = {k: rec.get(k) for k in ("started_at", "launch")}
+    write_user_record(sha256_64(sid), without(rec, fixed), fixed)
     record_agy(sid, data, rec, env)
     return 0
 
@@ -1975,6 +1984,7 @@ PICKED_FROM = re.compile(
 )
 MODEL_ATTR = re.compile(r"(?<![^\s;])model=[^\s;]")
 START_ATTR = re.compile(r"(?<![^\s;])started_at=([^\s;]+)")
+ATTR_PAIR = re.compile(r"(?<![^\s;])([a-z_]+)=([^\s;]+)")
 IDENT_EMAIL = re.compile(r"<([^>]*)>")
 
 type Trailer = tuple[str, str]
@@ -1997,10 +2007,36 @@ def without_start(value: str) -> str:
     return ";".join(p for p in parts if not p.startswith("started_at="))
 
 
+def trailer_identity(value: str) -> tuple[str | None, ...]:
+    """(harness, model, session, subagent) of a trailer value; None where absent."""
+    attrs = dict(ATTR_PAIR.findall(value))
+    return tuple(attrs.get(key) for key in ("harness", "model", "session", "subagent"))
+
+
 def trailer_start(value: str) -> str:
-    """A trailer value's ``started_at``, or an empty string when it has none."""
+    """A trailer value's valid ``started_at``, or an empty string without one."""
     found = START_ATTR.search(value)
-    return found[1] if found else ""
+    return (found and start_ok(found[1])) or ""
+
+
+def with_record(value: str) -> str:
+    """A trailer value with the ``launch`` and ``started_at`` of its session record.
+
+    The record is the machine's word, so its fields replace whatever the line
+    says. A line whose session has no record here stays as it is.
+    """
+    attrs = dict(ATTR_PAIR.findall(value))
+    root, sub = hash_ok(attrs.get("session")), hash_ok(attrs.get("subagent"))
+    if not root:
+        return value
+    root_rec = load_record(root)
+    rec = load_record(sub, root=root) if sub else root_rec
+    fields = {
+        "launch": hash_ok(rec.get("launch")) or hash_ok(root_rec.get("launch")),
+        "started_at": start_ok(rec.get("started_at")),
+    }
+    found = {k: v for k, v in fields.items() if v and attrs.get(k) != v}
+    return format_value({**attrs, **found}) if found else value
 
 
 def earliest_starts(found: list[Trailer]) -> list[Trailer]:
@@ -2047,7 +2083,7 @@ def with_start(ident: Ident) -> Ident:
     rec = load_record(ident.subagent, root=ident.root) if ident.subagent else root_rec
     return replace(
         ident,
-        launch=hash_ok(rec.get("launch") or root_rec.get("launch")),
+        launch=hash_ok(rec.get("launch")) or hash_ok(root_rec.get("launch")),
         started_at=start_ok(rec.get("started_at")),
     )
 
@@ -2061,14 +2097,22 @@ def add_trailers(
     """Rewrite the message's ``LLM`` trailers as one merged, ordered set.
 
     The set is the message's own ``LLM`` trailers, ``kept`` (an amended
-    commit's) and the new ones. A human's Signed-off-by (if any) is left where
-    git put it.
+    commit's) and the new ones. A new line replaces the older lines of its own
+    agent, so nothing typed in a message overrides what the hook stamps, and a
+    session record's ``launch`` and ``started_at`` replace any line's.
+    A human's Signed-off-by (if any) is left where git put it.
     """
     text = msgfile.read_text()
     new = [(KEY_GEN, format_value(i.attrs())) for i in gen] + [
         (KEY_ASSIST, format_value(i.attrs())) for i in assisted
     ]
-    merged = merge_trailers([*llm_trailers(text), *(kept or []), *new])
+    made = {(k, trailer_identity(v)) for k, v in new}
+    older = [
+        (k, v)
+        for k, v in [*llm_trailers(text), *(kept or [])]
+        if (k, trailer_identity(v)) not in made
+    ]
+    merged = merge_trailers([(k, with_record(v)) for k, v in [*older, *new]])
     args = [f"--trailer={key}: {value}" for key, value in merged]
     bare = msgfile.with_name(msgfile.name + ".ascm")
     bare.write_text(LLM_LINES.sub("", text))
