@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from importlib import metadata
+from types import ModuleType
 from typing import TYPE_CHECKING
 
 import pytest
@@ -132,7 +134,7 @@ def test_line_without_direct_url_is_unknown(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_line_of_the_installed_package() -> None:
     dist = metadata.distribution("tbhbdev")
-    build = version.identity(dist.read_text("direct_url.json"))
+    build = version.identity(dist.read_text("direct_url.json"), version.build_module())
     assert version.line() == f"tbhbdev {metadata.version('tbhbdev')} ({build})"
 
 
@@ -179,3 +181,71 @@ def test_an_unknown_option_still_fails(
 
 def test_usage_lists_the_version_flag() -> None:
     assert "tbhbdev --version\n" in cli.usage(cli.TOOLS)
+
+
+def stamp_module(commit: object) -> ModuleType:
+    module = ModuleType("tbhbdev._build")
+    module.COMMIT = commit  # type: ignore[attr-defined]
+    return module
+
+
+@pytest.mark.parametrize(
+    ("build", "expected"),
+    [
+        (None, None),
+        (ModuleType("empty"), None),
+        (stamp_module(None), None),
+        (stamp_module(7), None),
+        (stamp_module(""), None),
+        (stamp_module(COMMIT[:39]), None),
+        (stamp_module(COMMIT + "0"), None),
+        (stamp_module(COMMIT.upper()), None),
+        (stamp_module("g" * 40), None),
+        (stamp_module(f"x{COMMIT}"), None),
+        (stamp_module(f"{COMMIT}\n"), None),
+        (stamp_module(COMMIT), COMMIT),
+    ],
+)
+def test_stamped(build: ModuleType | None, expected: str | None) -> None:
+    assert version.stamped(build) == expected
+
+
+def test_a_stamp_outranks_direct_url() -> None:
+    other = "a" * 40
+    text = json.dumps({"vcs_info": {"commit_id": other}})
+    assert version.identity(text, stamp_module(COMMIT)) == COMMIT
+    assert version.identity(None, stamp_module(COMMIT)) == COMMIT
+
+
+def test_a_missing_or_bad_stamp_falls_back_to_direct_url() -> None:
+    text = json.dumps({"vcs_info": {"commit_id": "b" * 40}})
+    assert version.identity(text, None) == "b" * 40
+    assert version.identity(text, stamp_module("nope")) == "b" * 40
+    assert version.identity(None, stamp_module("nope")) == "unknown"
+
+
+def test_build_module_imports_the_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = stamp_module(COMMIT)
+    monkeypatch.setitem(sys.modules, "tbhbdev._build", module)
+    assert version.build_module() is module
+
+
+def test_build_module_is_none_without_the_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "tbhbdev._build", None)
+    assert version.build_module() is None
+
+
+def test_line_reports_the_stamp_over_direct_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other = "c" * 40
+    dist = FakeDist("0", json.dumps({"vcs_info": {"commit_id": other}}))
+
+    def distribution(_name: str) -> FakeDist:
+        return dist
+
+    monkeypatch.setattr(metadata, "distribution", distribution)
+    monkeypatch.setattr(version, "build_module", lambda: stamp_module(COMMIT))
+    assert version.line() == f"tbhbdev 0 ({COMMIT})"

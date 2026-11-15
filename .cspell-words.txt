@@ -302,3 +302,5 @@ wаit
 thеy
 getbasetemp
 pytestmark
+usdholt
+usdhowv
