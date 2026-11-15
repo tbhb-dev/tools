@@ -67,7 +67,7 @@ Supply a short-lived push token as `push_token`, or `null` to skip pushing. One 
 | 4 | Branch push failed. |
 | Other | The run-host exit status, including 1 for a refused run, 124 for a timeout, and 143 for an interrupted run. |
 
-The GitHub credential (`gh`) is optional. Without it, a build run mints its GitHub token from the pull-requests App when `pull_requests_app_client_id` and `pull_requests_app_pem` are set, and gets none otherwise. The `signing` setting also accepts an absolute path to an account-owned OpenSSH key file with no group or world access. Sandbox rules deny access to that path.
+The GitHub credential (`gh`) is optional. Without it, a build run requests its GitHub token from the pull-requests App when the config sets `pull_requests_app_client_id` and `pull_requests_app_pem`, and otherwise has no GitHub credential. The `signing` setting also accepts an absolute path to an account-owned OpenSSH key file with no group or world access. Sandbox rules deny access to that path.
 
 ## Documentation
 
