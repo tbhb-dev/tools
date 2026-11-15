@@ -812,8 +812,10 @@ def close_hint(found: Match, blocked: str, number: str, *, pinned: bool) -> str:
     text = f"{blocked} {CLOSE_HINTS[found.group].format(n=number)}"
     if found.repo is None and found.moved:
         return (
-            f"{text} A `cd` or `pushd` runs before it, so the guard can't tell which "
-            "repository it targets. Run it again with `--repo OWNER/REPO`."
+            f"{text} A `cd` or `pushd` runs before it, and the guard can't tell which "
+            f"repository it targets. Run `tbhbdev alpha {found.group} close` in a "
+            "clone of that repository, with no `cd` or `pushd` before it. It acts "
+            "on that clone's origin."
         )
     if found.repo is None:
         return text

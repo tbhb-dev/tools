@@ -6,6 +6,7 @@
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 from contextlib import redirect_stdout
@@ -18,9 +19,9 @@ from fake_tool import pythonpath
 from hypothesis import given
 from hypothesis import strategies as st
 
+from tbhbdev.alpha import close, install, opened
 from tbhbdev.alpha import guard_gh_pr as guard
 from tbhbdev.alpha import identity as ai
-from tbhbdev.alpha import install, opened
 
 DATA = Path(__file__).parent / "testdata" / "alpha"
 SRC = Path(guard.__file__).parents[2]
@@ -50,6 +51,11 @@ FOREIGN = (
 UNPINNED = (
     " It acts on the origin of the current directory, so run it in a clone of "
     "the repository it targets, which the command doesn't show."
+)
+MOVED = (
+    " A `cd` or `pushd` runs before it, and the guard can't tell which repository "
+    "it targets. Run `tbhbdev alpha {g} close` in a clone of that repository, "
+    "with no `cd` or `pushd` before it. It acts on that clone's origin."
 )
 CLOSE_ISSUE = (
     "`gh issue close` is blocked. Run `tbhbdev alpha issue close {n} "
@@ -1591,12 +1597,30 @@ def test_env_unset_of_another_name_keeps_gh_repo() -> None:
 @pytest.mark.parametrize(
     "move", ["cd ../wiki", "pushd ../wiki", "git -C ../wiki status"]
 )
-def test_a_directory_change_before_close_asks_for_repo(move: str) -> None:
+def test_a_directory_change_before_close_asks_for_a_clone(move: str) -> None:
     found = run_find(f"{move} && gh pr close 3")
     assert found is not None
-    message = guard.hint(found)
-    assert "`--repo OWNER/REPO`" in message
-    assert "origin of the current directory" not in message
+    assert guard.hint(found) == CLOSE_PR.format(n=3) + MOVED.format(g="pr")
+
+
+def test_a_directory_change_before_an_issue_close_asks_for_a_clone() -> None:
+    found = run_find("cd ../wiki && gh issue close 3")
+    assert found is not None
+    assert guard.hint(found) == CLOSE_ISSUE.format(n=3) + MOVED.format(g="issue")
+
+
+@pytest.mark.parametrize("group", ["pr", "issue"])
+def test_the_close_hint_offers_only_options_the_command_takes(
+    group: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    found = run_find(f"cd ../wiki && gh {group} close 3")
+    assert found is not None
+    offered = set(re.findall(r"--[a-z-]+", guard.hint(found)))
+    with pytest.raises(SystemExit):
+        close.build_parser().parse_args([group, "close", "--help"])
+    taken = set(re.findall(r"--[a-z-]+", capsys.readouterr().out))
+    assert offered
+    assert offered <= taken
 
 
 def test_a_directory_change_after_close_or_with_repo_is_unchanged() -> None:
