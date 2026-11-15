@@ -1836,3 +1836,75 @@ def test_a_write_root_over_the_own_workspace_is_not_a_finding(
     (workspace / ".git" / "HEAD").write_text("ref: refs/heads/agent\n")
     found = worktree.validate_writes(workspace, source, (str(workspace.parent),))
     assert not any(f"contains main checkout {workspace}" in line for line in found)
+
+
+class Stop(Exception):  # noqa: N818 -- a test sentinel, not an error type
+    pass
+
+
+def test_private_fetch_retries_over_ssh_with_the_account_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, clone = repository(tmp_path)
+    key = tmp_path / "key"
+    key.write_text("synthetic\n")
+    monkeypatch.setattr(worktree, "host_key", lambda: key)
+    urls: list[str] = []
+    calls: list[int] = []
+    original = worktree.configure_mirror
+
+    def configure(mirror: Path, url: str) -> None:
+        urls.append(url)
+        original(mirror, url)
+
+    def fetch(_mirror: Path, _request: object) -> str:
+        calls.append(1)
+        if len(calls) == 1:
+            raise subprocess.CalledProcessError(128, "git")
+        raise Stop
+
+    monkeypatch.setattr(worktree, "configure_mirror", configure)
+    monkeypatch.setattr(worktree, "fetch_commit", fetch)
+    with pytest.raises(Stop):
+        worktree.create(clone, "p1", run_request(), ("example-org/example-repo",))
+    assert urls == [
+        "https://github.com/example-org/example-repo.git",
+        "ssh://git@github.com/example-org/example-repo.git",
+    ]
+
+
+def test_failed_fetch_without_an_account_key_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, clone = repository(tmp_path)
+    monkeypatch.setattr(worktree, "host_key", lambda: tmp_path / "absent")
+
+    def fetch(_mirror: Path, _request: object) -> str:
+        raise subprocess.CalledProcessError(128, "git")
+
+    monkeypatch.setattr(worktree, "fetch_commit", fetch)
+    with pytest.raises(Invalid, match="run preparation failed at mirror fetch"):
+        worktree.create(clone, "p2", run_request(), ("example-org/example-repo",))
+
+
+def test_git_offers_the_account_key_to_ssh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = tmp_path / "my key"
+    key.write_text("synthetic\n")
+    monkeypatch.setattr(worktree, "host_key", lambda: key)
+    seen: list[dict[str, str]] = []
+
+    def check_output(_command: object, **kwargs: object) -> str:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        seen.append(env)
+        return ""
+
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+    worktree.git(tmp_path, "init")
+    assert "-i '" + str(key) + "'" in seen[0]["GIT_SSH_COMMAND"]
+    assert "IdentitiesOnly=yes" in seen[0]["GIT_SSH_COMMAND"]
+    monkeypatch.setattr(worktree, "host_key", lambda: tmp_path / "absent")
+    worktree.git(tmp_path, "init")
+    assert "GIT_SSH_COMMAND" not in seen[1]
