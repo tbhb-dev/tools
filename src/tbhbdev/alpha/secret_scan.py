@@ -39,7 +39,8 @@ status: its error output can quote a private rule's regex.
 with ``STAGED`` in place of ``STDIN`` (see ``tbhbdev.alpha.pre_commit_scan``).
 That scan reads .gitleaks.toml and .gitleaksignore from the index, not the
 work tree, so an unstaged edit to either can't loosen the scan of what the
-commit records. gitleaks runs in, and scans, a 0700 directory that holds the
+commit records. A staged change to either file does apply to the commit that
+stages it. gitleaks runs in, and scans, a 0700 directory that holds the
 index copies beside the private config, or its copy without the name rules,
 and ``GIT_DIR`` and ``GIT_WORK_TREE`` point its git at the repository.
 Without .gitleaks.toml in the index, the private config's ``[extend]`` path
@@ -204,12 +205,14 @@ DIFF_CONFIG = (
 
 
 def diff_env(root: Path, what: str, attributes: Path) -> dict[str, str]:
-    """The environment that makes gitleaks' ``git diff`` show every addition.
+    """The environment that makes gitleaks' ``git diff`` show the additions.
 
     ATTRIBUTES is a file that marks every path as text, so that a NUL byte or
     a ``binary`` attribute does not reduce an addition to "Binary files
     differ". The committed ``.gitattributes`` is ignored by reading attributes
-    from the empty tree.
+    from the empty tree. A repository's ``.git/info/attributes`` still applies,
+    because ``GIT_ATTR_SOURCE`` doesn't cover it, so this is hardening against
+    committed files only, and a local write to ``.git`` can defeat it.
     """
     try:
         start = int(os.environ.get("GIT_CONFIG_COUNT") or "0")
