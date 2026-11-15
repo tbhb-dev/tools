@@ -97,3 +97,90 @@ jobs:
         uses: tbhb-dev/rules/.github/actions/ci-conclusion@d3b22ae1b01ea934ab9b014058752eb2aec5bcbf  # main
         with:
           needs: ${{ toJSON(needs) }}
+
+  # The release build, only for a push to main whose `conclusion` passed. It
+  # writes the merge sha into the wheel as `tbhbdev/_build.py`, which
+  # `tbhbdev --version` reads first, then installs the wheel in a fresh
+  # environment and checks the stamp and the alpha commands before anything
+  # is published. It holds no write access.
+  wheel:
+    name: wheel
+    if: github.event_name == 'push'
+    needs: [conclusion]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # uv 0.13.7's Linux x86-64 archive and its sha256, from mise.lock; move
+      # them together with the uv pin in mise.toml.
+      UV_URL: https://github.com/astral-sh/uv/releases/download/0.13.7/uv-x86_64-unknown-linux-gnu.tar.gz
+      UV_SHA256: c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        run: |
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/uv.tar.gz" "$UV_URL"
+          echo "$UV_SHA256  $RUNNER_TEMP/uv.tar.gz" | sha256sum --check --strict
+          mkdir "$RUNNER_TEMP/uv"
+          tar --extract --gzip --strip-components=1 --directory "$RUNNER_TEMP/uv" --file "$RUNNER_TEMP/uv.tar.gz"
+          echo "$RUNNER_TEMP/uv" >>"$GITHUB_PATH"  # zizmor: ignore[github-env]
+
+      - name: Build the stamped wheel
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          printf '"""Written by the release build."""\n\nCOMMIT = "%s"\n' "$SHA" >src/tbhbdev/_build.py
+          uv build --wheel --out-dir dist
+          (cd dist && sha256sum tbhbdev-0-py3-none-any.whl >tbhbdev-0-py3-none-any.whl.sha256)
+
+      - name: Smoke-test the built wheel
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          uv venv --python 3.15 "$RUNNER_TEMP/smoke"
+          uv pip install --python "$RUNNER_TEMP/smoke/bin/python" dist/tbhbdev-0-py3-none-any.whl
+          version=$("$RUNNER_TEMP/smoke/bin/tbhbdev" --version)
+          [ "$version" = "tbhbdev 0 ($SHA)" ]
+          "$RUNNER_TEMP/smoke/bin/tbhbdev" alpha --help >/dev/null
+
+      - name: Keep the wheel
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: wheel
+          path: dist/
+          if-no-files-found: error
+
+  # The only job with write access: one GitHub release per merge, tagged
+  # `sha-<12 hex>` and marked latest, with the wheel and its sha256 sidecar.
+  release:
+    name: release
+    needs: [wheel]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write  # Create the release and attach the files.
+    steps:
+      - name: Download the wheel
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: wheel
+          path: dist
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          tag="sha-${SHA:0:12}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag exists"
+            exit 0
+          fi
+          gh release create "$tag" dist/* --target "$SHA" --latest \
+            --title "$tag" --notes "Merge of $SHA on main."
