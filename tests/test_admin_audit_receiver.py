@@ -98,26 +98,42 @@ def test_append_adds_one_line_and_acknowledges_it(tmp_path: Path) -> None:
     assert run(directory, "head")[1] == f"ack 1 2 {digest(second)}\n".encode()
 
 
-def test_a_replayed_position_answers_with_the_head_and_writes_nothing(
-    tmp_path: Path,
-) -> None:
+def test_a_replay_of_the_newest_line_needs_that_line(tmp_path: Path) -> None:
     directory = fresh(tmp_path)
     line = record(GENESIS)
     run(directory, "append 1", line)
-    other = record("f" * 64, ', "different": true')
-    assert run(directory, "append 1", other) == (
+    assert run(directory, "append 1", line) == (
         0,
         f"ack 1 1 {digest(line)}\n".encode(),
     )
+    other = record("f" * 64, ', "different": true')
+    assert run(directory, "append 1", other) == (1, b"")
     assert (directory / "segment-1.jsonl").read_bytes() == line
 
 
-def test_a_replay_still_checks_size_and_byte_range_but_not_json(
+def test_a_replay_of_an_older_line_answers_with_the_head_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    line = record(GENESIS)
+    second = record(digest(line))
+    run(directory, "append 1", line)
+    run(directory, "append 2", second)
+    other = record("f" * 64, ', "different": true')
+    assert run(directory, "append 1", other) == (
+        0,
+        f"ack 1 2 {digest(second)}\n".encode(),
+    )
+    assert (directory / "segment-1.jsonl").read_bytes() == line + second
+
+
+def test_an_older_replay_still_checks_size_and_byte_range_but_not_json(
     tmp_path: Path,
 ) -> None:
     directory = fresh(tmp_path)
     line = record(GENESIS)
     run(directory, "append 1", line)
+    run(directory, "append 2", record(digest(line)))
     assert run(directory, "append 1", b"not json at all\n")[0] == 0
     assert run(directory, "append 1", b"caf\xc3\xa9\n") == (1, b"")
     assert run(directory, "append 1", b"x" * 65536 + b"\n") == (1, b"")

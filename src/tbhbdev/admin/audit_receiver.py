@@ -5,7 +5,11 @@ where DIR holds the receiver's files, SEGMENT is the segment size in bytes and
 QUOTA the total size of all segments. The module imports only the standard
 library, so the receiver host needs nothing else. It reads one request from
 ``SSH_ORIGINAL_COMMAND``, either ``head`` or ``append K``, and prints
-``ack 1 <n> <digest>`` once the line it names is durable.
+``ack 1 <n> <digest>`` once the line it names is durable. The digest names
+line n, the newest line, whatever K was. A replay of the newest line (K equal to
+n) succeeds only when the line hashes to that digest. A replay of an older line
+(K below n) checks only the line's form, because the receiver keeps no index of
+older digests, so a sender compares the acknowledged digest with its own line n.
 
 Every digest is the SHA-256 of a line's bytes without its final line feed. The
 directory holds numbered segments, a ``lock`` file and a ``head`` file of one
@@ -268,7 +272,10 @@ def handle(
             message = "a position past the next line"
             raise RejectedError(message)
         if position <= head[1]:
-            structural(data)
+            body = structural(data)
+            if position == head[1] and digest(body) != head[2]:
+                message = "the replayed line is not the head's line"
+                raise RejectedError(message)
             return acknowledge(directory, head)
         validate(data, head[2])
         return acknowledge(directory, append(directory, head, data, quota, size))
