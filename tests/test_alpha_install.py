@@ -638,6 +638,22 @@ def test_settings_path_with_no_entries_or_a_relative_shim_writes_nothing(
     assert install.settings_path(None, "/a") is None
 
 
+def test_settings_path_drops_relative_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sep = os.pathsep
+    shim = str(gh_shim.bin_dir())
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "git"))
+    monkeypatch.setenv("PATH", full)
+    assert install.settings_path(None, f"rel{sep}/a{sep}.{sep}bin") == (
+        f"{shim}{sep}/a{sep}{full}"
+    )
+    # A tool found through a relative PATH entry is stored with its absolute dir.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", "full")
+    assert install.settings_path(None, "/a") == f"{shim}{sep}/a{sep}{full}"
+
+
 def test_merged_config_writes_the_shim_path_for_claude_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

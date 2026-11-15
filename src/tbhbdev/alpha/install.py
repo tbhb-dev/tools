@@ -465,19 +465,23 @@ def settings_path(current: object, base: str | None) -> str | None:
     string. A hook process gets no ``$CLAUDE_ENV_FILE``, so this is the only
     way the shim reaches it. Hooks run ``tbhbdev`` and ``git``, so a directory
     that holds either is added from the installing process's PATH when the
-    entries lack it. There is no PATH to write without entries, or when the
-    shim directory is relative (a relative XDG_DATA_HOME).
+    entries lack it. Relative entries are dropped, because a hook resolves
+    them in whatever clone it runs in. There is no PATH to write without
+    entries, or when the shim directory is relative (a relative
+    XDG_DATA_HOME).
     """
     source = base if base is not None else current if isinstance(current, str) else None
     shim = bin_dir()
     if source is None or not shim.is_absolute():
         return None
-    entries = [e for e in source.split(os.pathsep) if e and e != str(shim)]
+    entries = [
+        e for e in source.split(os.pathsep) if Path(e).is_absolute() and e != str(shim)
+    ]
     for tool in REQUIRED_TOOLS:
         if shutil.which(tool, path=os.pathsep.join(entries)) is None:
             found = shutil.which(tool)
             if found:
-                entries.append(str(Path(found).parent))
+                entries.append(str(Path(found).absolute().parent))
     return os.pathsep.join([str(shim), *entries]) if entries else None
 
 
