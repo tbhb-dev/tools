@@ -111,7 +111,7 @@ def test_a_merged_pull_request_ends_at_merged_at_not_closed_at() -> None:
 
 
 def test_started_at_must_stand_alone_as_an_attribute() -> None:
-    text = f"{line()};xstarted_at={EARLY}"
+    text = f"{line()};late_started_at={EARLY}"
     assert pr_stats.line_starts(text) == ([], 1)
 
 
