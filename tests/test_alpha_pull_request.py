@@ -24,7 +24,7 @@ from hypothesis import strategies as st
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import identity as agent_identity
-from tbhbdev.alpha import opened, private_names
+from tbhbdev.alpha import opened, private_names, size_gate
 from tbhbdev.alpha import pull_request as pr
 
 # mutmut runs the tests from a copy of the source tree, so everything resolves
@@ -167,6 +167,11 @@ def host_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     """A repository with the real schema and sections and stub configs."""
+    monkeypatch.setattr(
+        size_gate,
+        "size_counts",
+        Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None)),
+    )
     root = tmp_path / "repo"
     tools_dir = tmp_path / "bin"
     tools_dir.mkdir()
@@ -1450,7 +1455,9 @@ def write_draft(world: World, text: str = BASE) -> Path:
 def test_check_prints_ok(world: World, capsys: pytest.CaptureFixture[str]) -> None:
     write_draft(world)
     assert run_main("check") == 0
-    assert capsys.readouterr().out == "OK: the draft conforms\n"
+    assert capsys.readouterr().out == (
+        "0 code lines, limit 400\n0 raw lines, limit 1500\nOK: the draft conforms\n"
+    )
 
 
 def test_check_prints_problems_with_paths(
@@ -1460,6 +1467,7 @@ def test_check_prints_problems_with_paths(
     assert run_main("check", str(path)) == 1
     assert capsys.readouterr().out == (
         f"{path}:5: HTML comment left in the description\n"
+        "0 code lines, limit 400\n0 raw lines, limit 1500\n"
     )
 
 
@@ -1472,6 +1480,7 @@ def test_check_defaults_to_the_draft_path(
     assert out == (
         ".github/PULL_REQUEST_DRAFT.md:1: "
         "cannot read the draft: No such file or directory\n"
+        "0 code lines, limit 400\n0 raw lines, limit 1500\n"
     )
 
 
@@ -1993,6 +2002,7 @@ def test_run_uses_the_given_directory(tmp_path: Path) -> None:
 
 def test_runs_as_tbhbdev_alpha_pr(world: World) -> None:
     write_draft(world)
+    write_fake(world.bin / "bazelisk", "raise SystemExit('missing target')")
     env = {**os.environ, "PYTHONPATH": pythonpath(SRC)}
     env.pop("MUTANT_UNDER_TEST", None)
     done = subprocess.run(
@@ -2003,7 +2013,10 @@ def test_runs_as_tbhbdev_alpha_pr(world: World) -> None:
         check=False,
         env=env,
     )
-    assert (done.returncode, done.stderr) == (0, "")
+    assert (done.returncode, done.stderr) == (
+        0,
+        "size count unavailable: missing target\n",
+    )
 
 
 # ------------------------------------------------------- mutation-killing pins
