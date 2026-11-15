@@ -530,21 +530,45 @@ def simple_commands(text: str) -> Iterator[Simple]:
     for command in Scanner(text).run():
         words = skip_prefix(command)
         prefix = command[: len(command) - len(words)]
-        split = env_split_string(prefix)
-        program = program_of(words) if words else ""
-        if split is not None:
-            inner = simple_commands(" ".join([split, *words]))
-        elif program in SHELLS:
-            script = shell_script(words[1:])
-            inner = simple_commands(script) if script is not None else iter(())
-        elif program == "eval":
-            inner = simple_commands(" ".join(words[1:]))
-        else:
+        inner = inner_commands(prefix, words)
+        if inner is None:
             if words:
                 yield Simple(prefix, words)
             continue
         for found in inner:
             yield Simple(prefix + found.prefix, found.words)
+
+
+def inner_commands(prefix: list[str], words: list[str]) -> Iterator[Simple] | None:
+    """The commands an ``env -S`` string, ``-c`` script or ``eval`` runs, or None."""
+    split = env_split_string(prefix)
+    program = program_of(words) if words else ""
+    if split is not None:
+        return simple_commands(" ".join([split, *words]))
+    if program in SHELLS:
+        script = shell_script(words[1:])
+        return simple_commands(script) if script is not None else iter(())
+    if program == "eval":
+        return simple_commands(" ".join(words[1:]))
+    return None
+
+
+def long_split_string(word: str, words: Iterator[str]) -> str | None:
+    """The value of ``--split-string`` or ``--split-string=VALUE``, else None."""
+    flag, equals, value = word.partition("=")
+    if flag != "--split-string":
+        return None
+    return value if equals else next(words, "")
+
+
+def short_split_string(word: str, words: Iterator[str]) -> str | None:
+    """The value of ``-S`` in a short cluster, attached or next; None without one."""
+    for index, char in enumerate(word[1:], 2):
+        if char in "uC":  # the rest of the word is that option's value
+            return None
+        if char == "S":
+            return word[index:] or next(words, "")
+    return None
 
 
 def env_split_string(prefix: list[str]) -> str | None:
@@ -558,16 +582,11 @@ def env_split_string(prefix: list[str]) -> str | None:
         name = word.rsplit("/", 1)[-1]
         if name in WRAPPERS:
             in_env = name == "env"
-        elif in_env and word.startswith("--"):
-            flag, equals, value = word.partition("=")
-            if flag == "--split-string":
-                return value if equals else next(words, "")
         elif in_env and word.startswith("-"):
-            for index, char in enumerate(word[1:], 2):
-                if char in "uC":  # the rest of the word is that option's value
-                    break
-                if char == "S":
-                    return word[index:] or next(words, "")
+            split = long_split_string if word.startswith("--") else short_split_string
+            value = split(word, words)
+            if value is not None:
+                return value
     return None
 
 
