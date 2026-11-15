@@ -306,3 +306,5 @@ rcfile
 pipefail
 nounset
 extglob
+smhd
+UFFFFFFFF
