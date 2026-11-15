@@ -22,6 +22,7 @@ from tbhbdev.alpha import (
     guard_gh_pr,
     guard_op,
     guard_scripts,
+    guard_ssh_user,
     identity,
     install,
     loop,
@@ -44,6 +45,7 @@ __all__ = [
     "guard_gh_pr",
     "guard_op",
     "guard_scripts",
+    "guard_ssh_user",
     "identity",
     "install",
     "loop",
@@ -70,6 +72,8 @@ commands:
                SessionStart hook: name the host, the other hosts and the time
   guard-gh-poll PreToolUse hook: block bulk GitHub reads and token unsets
   guard-gh-config-dir PreToolUse hook: require nonempty GH_CONFIG_DIR for gh
+  guard-ssh-user PreToolUse hook: require agent@ or ops@ on ssh, scp and
+               rsync to configured hosts
   guard-scripts PreToolUse hook: keep scripts for the operator in
                ~/.local/libexec/tbhb
   gh-shim      budget gh calls made by agent sessions and their scripts
@@ -124,6 +128,10 @@ def poll_command(_argv: list[str], _prog: str) -> int:
 
 def gh_config_dir_command(_argv: list[str], _prog: str) -> int:
     return guard_gh_config_dir.main()
+
+
+def ssh_user_command(_argv: list[str], _prog: str) -> int:
+    return guard_ssh_user.main()
 
 
 def scripts_command(_argv: list[str], _prog: str) -> int:
@@ -183,6 +191,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "session-context": session_context_command,
     "guard-gh-poll": poll_command,
     "guard-gh-config-dir": gh_config_dir_command,
+    "guard-ssh-user": ssh_user_command,
     "guard-scripts": scripts_command,
     "gh-shim": gh_shim.main,
     "agent-env": gh_shim.agent_env,
