@@ -112,6 +112,7 @@ blocks a session.
 """
 
 import argparse
+import contextlib
 import difflib
 import hashlib
 import json
@@ -462,11 +463,6 @@ def absolute_entries(path: str) -> list[str]:
     return [e for e in path.split(os.pathsep) if Path(e).is_absolute()]
 
 
-def unsafe_path(path: str) -> bool:
-    """True for a saved PATH string with a relative or ``.`` entry."""
-    return any(not Path(e).is_absolute() for e in path.split(os.pathsep))
-
-
 def running_dirs() -> list[str]:
     """The directory the running ``tbhbdev`` was started from, symlinks kept.
 
@@ -476,23 +472,46 @@ def running_dirs() -> list[str]:
     return [str(Path(command).absolute().parent)] if os.sep in command else []
 
 
-def clone_roots() -> list[Path]:
-    """The current directory and, in a clone, its work tree and main checkout.
+def checkout_roots(cwd: Path) -> list[Path]:
+    """The checkout holding CWD, its main checkout and every linked worktree.
 
-    A sibling worktree sits under the main checkout, so that root covers it.
-    A root that holds the home directory, such as `/` or the home itself,
-    names no clone and is left out.
+    Read from the ``.git`` entries, never by running git, because the git on
+    PATH may be one of the clone's own. A linked worktree's ``.git`` file names
+    its git directory, whose ``commondir`` names the shared one, and the shared
+    one lists each worktree's ``.git`` file under ``worktrees``.
+    """
+    for top in (cwd, *cwd.parents):
+        marker = top / ".git"
+        if marker.is_dir():
+            common = marker
+        elif marker.is_file():
+            try:
+                text = marker.read_text().strip()
+                gitdir = (top / text.removeprefix("gitdir:").strip()).resolve()
+                common = (gitdir / (gitdir / "commondir").read_text().strip()).resolve()
+            except OSError, UnicodeDecodeError:
+                return [top]
+        else:
+            continue
+        roots = [top, common.parent]
+        with contextlib.suppress(OSError, UnicodeDecodeError):
+            roots.extend(
+                Path((entry / "gitdir").read_text().strip()).parent
+                for entry in (common / "worktrees").iterdir()
+            )
+        return roots
+    return []
+
+
+def clone_roots() -> list[Path]:
+    """The current directory and, in a clone, its checkouts.
+
+    A checkout is the work tree, the main checkout and each linked worktree,
+    wherever it sits. A root that holds the home directory, such as `/` or the
+    home itself, names no clone and is left out.
     """
     cwd = Path.cwd().resolve()
-    roots = [cwd]
-    code, top = git("rev-parse", "--show-toplevel", cwd=cwd)
-    if code == 0 and top:
-        roots.append(Path(top).resolve())
-    code, common = git(
-        "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=cwd
-    )
-    if code == 0 and common:
-        roots.append(Path(common).resolve().parent)
+    roots = [cwd, *(root.resolve() for root in checkout_roots(cwd))]
     home = Path.home().resolve()
     return [root for root in roots if not home.is_relative_to(root)]
 
@@ -501,11 +520,13 @@ def durable(directory: str) -> bool:
     """False for a directory inside a clone of the current directory, such as its venv.
 
     Such a directory goes away with its clone, and a hook can't rely on it.
-    That covers the current directory, the work tree and the main checkout
-    that holds it. When one of them holds the home directory, it is ignored.
+    That covers the current directory and the checkouts of its clone. Both the
+    path as written and where it resolves count, so a symlink into a clone and
+    a clone's symlink out of it are each refused. When a root holds the home
+    directory, it is ignored.
     """
-    path = Path(directory).resolve()
-    return not any(path.is_relative_to(root) for root in clone_roots())
+    paths = (Path(os.path.normpath(directory)), Path(directory).resolve())
+    return not any(p.is_relative_to(root) for root in clone_roots() for p in paths)
 
 
 def find_tool(tool: str, path: str) -> str | None:
@@ -568,11 +589,11 @@ def settings_path(current: object, base: str | None) -> str | None:
 
 
 def clean_saved_path(fields: Json) -> Json:
-    """FIELDS with a saved PATH reduced to its absolute entries, or dropped if none."""
+    """FIELDS with a saved PATH cut to its durable absolute entries, or dropped."""
     saved = fields.get("PATH")
-    if not (isinstance(saved, str) and unsafe_path(saved)):
+    if not isinstance(saved, str):
         return fields
-    clean = os.pathsep.join(absolute_entries(saved))
+    clean = os.pathsep.join(e for e in absolute_entries(saved) if durable(e))
     kept = {k: v for k, v in fields.items() if k != "PATH"}
     return kept | {"PATH": clean} if clean else kept
 

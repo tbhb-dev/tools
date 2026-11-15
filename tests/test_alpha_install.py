@@ -717,6 +717,97 @@ def test_settings_path_never_saves_a_venv_of_the_clone_or_a_sibling_worktree(
         assert saved == f"{shim}{sep}{full}{sep}{real_git}"
 
 
+def make_clone(tmp_path: Path) -> Path:
+    clone = tmp_path / "clone"
+    (clone / "src").mkdir(parents=True)
+    run_git = ("git", "-C", str(clone))
+    subprocess.run([*run_git, "init", "-q", "-b", "main"], check=True)
+    subprocess.run(
+        [
+            *run_git,
+            *("-c", "user.name=t", "-c", "user.email=t@e"),
+            *("commit", "-q", "--allow-empty", "-m", "x"),
+        ],
+        check=True,
+    )
+    return clone
+
+
+def test_clone_roots_never_runs_the_git_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clone = make_clone(tmp_path)
+    marker = tmp_path / "ran"
+    venv = Path(tool_dir(clone, ".venv/bin", ()))
+    (venv / "git").write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+    (venv / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", str(venv))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(clone / "src")
+    assert clone.resolve() in install.clone_roots()
+    assert not marker.exists()
+
+
+def test_settings_path_never_saves_an_external_sibling_worktree_venv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clone = make_clone(tmp_path)
+    other = tmp_path / "other"
+    third = tmp_path / "third"
+    for name in (other, third):
+        subprocess.run(
+            ["git", "-C", str(clone), "worktree", "add", "-q", str(name)], check=True
+        )
+    venvs = [tool_dir(d, ".venv/bin", ("git",)) for d in (other, third)]
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "gh", "git"))
+    monkeypatch.setenv("PATH", full)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    shim = str(gh_shim.bin_dir())
+    base = os.pathsep.join([*venvs, full])
+    for current in (clone, other):
+        monkeypatch.chdir(current)
+        assert install.settings_path(None, base) == f"{shim}{os.pathsep}{full}"
+
+
+def test_durable_refuses_a_clone_path_that_is_a_symlink_out_of_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clone = tmp_path / "clone"
+    external = tool_dir(tmp_path, "external/bin", ("git",))
+    (clone / ".venv").mkdir(parents=True)
+    (clone / ".venv/bin").symlink_to(external)
+    monkeypatch.chdir(clone)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert not install.durable(str(clone / ".venv/bin"))
+    assert install.durable(external)
+
+
+def test_clone_roots_survives_a_broken_git_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    (broken / ".git").write_text("gitdir: nowhere\n")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(broken)
+    assert install.clone_roots() == [broken.resolve(), broken.resolve()]
+
+
+def test_a_saved_path_keeps_no_directory_of_the_clone_when_none_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clone = tmp_path / "clone"
+    venv = tool_dir(clone, ".venv/bin", ("prek",))
+    monkeypatch.chdir(clone)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PATH", venv)
+    only = install.merged_config("claude", {"env": {"PATH": venv}}, venv)
+    assert "PATH" not in cast("dict[str, str]", only["env"])
+    mixed = install.clean_saved_path({"PATH": f"{venv}:/usr/bin:rel"})
+    assert mixed == {"PATH": "/usr/bin"}
+    assert install.clean_saved_path({"PATH": 7}) == {"PATH": 7}
+
+
 def test_clone_roots_leaves_out_a_root_that_holds_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -857,18 +948,6 @@ def test_running_dirs_keeps_the_symlink_and_skips_a_bare_command(
     assert install.running_dirs() == [str(link.parent)]
     monkeypatch.setattr(sys, "argv", ["tbhbdev"])
     assert install.running_dirs() == []
-
-
-@pytest.mark.parametrize(
-    ("value", "unsafe"),
-    [
-        ("relative-data/tbhbdev/agent-bin:.:/usr/bin", True),
-        ("/a:/b", False),
-        ("", True),
-    ],
-)
-def test_unsafe_path(value: str, *, unsafe: bool) -> None:
-    assert install.unsafe_path(value) is unsafe
 
 
 def test_a_saved_path_loses_its_relative_entries_when_none_is_written(
