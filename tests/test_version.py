@@ -257,3 +257,14 @@ def test_line_reports_direct_url_over_a_stamp(
     monkeypatch.setattr(metadata, "distribution", distribution)
     monkeypatch.setattr(version, "build_module", lambda: stamp_module(COMMIT))
     assert version.line() == f"tbhbdev 0 ({other})"
+
+
+def test_line_falls_back_to_the_stamp_without_direct_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def distribution(_name: str) -> FakeDist:
+        return FakeDist("0", None)
+
+    monkeypatch.setattr(metadata, "distribution", distribution)
+    monkeypatch.setattr(version, "build_module", lambda: stamp_module(COMMIT))
+    assert version.line() == f"tbhbdev 0 ({COMMIT})"
