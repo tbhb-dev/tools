@@ -29,7 +29,8 @@ variable or fed on stdin (`xargs ssh`), a host built by expansion, a script file
 or piped script, a here-document body, a shell run with options before `-c`, an
 opaque ProxyCommand, and a clustered rsync `-ae` option.
 """
-# cspell:ignore proxyjump proxycommand caffeinate sshpass autossh sshfs runuser doas
+# cspell:ignore proxyjump proxycommand caffeinate sshpass autossh sshfs
+# cspell:ignore runuser doas okdir
 
 import json
 import re

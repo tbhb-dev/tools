@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
 """Tests for the ssh account guard."""
-# cspell:ignore caffeinate sshpass autossh sshfs runuser doas
+# cspell:ignore caffeinate sshpass autossh sshfs runuser doas extglob
 
 import io
 import json
