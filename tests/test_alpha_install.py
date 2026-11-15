@@ -1984,6 +1984,32 @@ def test_a_shim_that_cannot_be_written_after_a_failed_prek_install_restores_it(
     )
 
 
+def test_a_failed_chain_leaves_the_saved_hook_for_a_failed_write_to_restore(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The saved hook is found at its own name even when the chain raised."""
+    world.hooks.mkdir(exist_ok=True)
+    hook = world.hooks / "pre-commit"
+    hook.write_text(f"#!/bin/sh\n{install.SHIM_MARK}\nold\n")
+
+    def chain(_prek: list[str], _top: Path, hook: Path, *, keep: bool) -> None:
+        assert not keep
+        hook.with_name(f"{hook.name}{install.PREVIOUS}").write_text("saved\n")
+        hook.write_text("clobbered by prek\n")
+        message = "prek failed"
+        raise install.InstallError(message)
+
+    def fail(_hook: Path, _text: str) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(install, "chain_stage", chain)
+    monkeypatch.setattr(install, "write_hook", fail)
+    with pytest.raises(install.InstallError, match=r"^cannot write "):
+        scan_hook(world)
+    assert hook.read_text() == "saved\n"
+    assert not (world.hooks / f"pre-commit{install.PREVIOUS}").exists()
+
+
 def test_write_hook_removes_its_temporary_file_on_a_failure(tmp_path: Path) -> None:
     hooks = tmp_path / "hooks"
     hook = hooks / "pre-commit"
