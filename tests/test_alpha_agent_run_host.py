@@ -1329,7 +1329,7 @@ def test_unreadable_launch_file_refuses_the_run(tmp_path: Path, text: str) -> No
     run, prepared, path = launch_run(tmp_path)
     path.parent.mkdir(parents=True)
     path.write_text(text)
-    with pytest.raises(Invalid, match="launch file is unreadable"):
+    with pytest.raises(Invalid, match=r"^launch file is unreadable$"):
         run_host.write_launch(run, prepared)
     assert path.read_text() == text
 
