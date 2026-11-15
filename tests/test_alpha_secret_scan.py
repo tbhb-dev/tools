@@ -460,3 +460,10 @@ def test_a_private_config_that_is_not_toml_is_left_to_gitleaks(root: Path) -> No
     assert message.startswith(
         "cannot scan the text for secrets: gitleaks failed (exit 1): "
     )
+
+
+def test_a_github_token_is_refused_in_a_repository_without_extend(root: Path) -> None:
+    # The scan must carry gitleaks' default rules, or it passes every secret.
+    (root / ".gitleaks.toml").write_text(OVERRIDE)
+    token = "gh" + "p_" + "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5"
+    assert "github-pat" in refusal(f"the token is {token}\n", root)

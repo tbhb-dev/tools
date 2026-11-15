@@ -69,6 +69,11 @@ record = {{
     "cwd": os.getcwd(),
     "stdin": sys.stdin.read(),
     "stdin_tty": sys.stdin.isatty(),
+    "config": (
+        open(sys.argv[sys.argv.index("--config") + 1]).read()
+        if "--config" in sys.argv
+        else None
+    ),
     "draft": open(draft).read() if os.path.exists(draft) else None,
     "links": {{n: os.readlink(n) for n in os.listdir(".") if os.path.islink(n)}},
 }}
@@ -700,6 +705,18 @@ def test_line_numbers_follow_the_frontmatter() -> None:
 
 def test_find_tool_prefers_path(world: World) -> None:
     assert pr.find_tool("vale") == str(world.bin / "vale")
+
+
+def test_find_tool_can_skip_the_bazel_shims(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shim = tmp_path / "repo" / ".bazel_env" / "bin"
+    shim.mkdir(parents=True)
+    (shim / "vale").write_text("")
+    (shim / "vale").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{world.bin}")
+    assert pr.find_tool("vale") == str(shim / "vale")
+    assert pr.find_tool("vale", unwrapped=True) == str(world.bin / "vale")
 
 
 def test_find_tool_falls_back_to_mise(world: World, tmp_path: Path) -> None:
@@ -1828,16 +1845,21 @@ def test_the_base_visibility_counts_only_with_a_parsed_name(
     assert read["argv"] == ["repo", "view", "--json", "nameWithOwner,visibility"]
 
 
+def without_path(config: str) -> str:
+    """A config with its ``path`` lines dropped: the scan points them at a copy."""
+    return re.sub(r"^\s*path\s*=.*$", "", config, flags=re.MULTILINE)
+
+
 def scan_config(world: World) -> str:
-    """The config the one gitleaks call ran under."""
+    """The text of the config the one gitleaks call ran under, minus its paths."""
     (call,) = world.calls("gitleaks")
-    argv = cast("list[str]", call["argv"])
-    return argv[argv.index("--config") + 1]
+    return without_path(str(call["config"]))
 
 
 def full_config() -> str:
-    """The private config, under the test's HOME."""
-    return str(Path.home() / ".config" / "gitleaks" / "private.toml")
+    """The private config under the test's HOME, minus its paths."""
+    path = Path.home() / ".config" / "gitleaks" / "private.toml"
+    return without_path(path.read_text())
 
 
 VISIBILITIES = [
