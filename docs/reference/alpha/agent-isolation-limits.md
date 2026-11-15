@@ -24,6 +24,7 @@ Every run's sandbox policy denies writes to the marker directory.
 
 - A run can read anything that its deny list doesn't cover, including other runs' temp directories.
 - Build runs have access to the account's `gh` token and Docker config.
+- Build runs set `TBHB_GH_NO_REVIEW=1`, so the `gh-shim` refuses `gh pr review` and a `gh api` write to a pull request's reviews endpoint. This guard works only when the host's tool path lists the shim's directory before the real `gh`. It misses a `gh` run by absolute path and a request that sends the token through another client, so it catches an accident and doesn't bound the token. The ruleset and the App's permissions bound it.
 - A run's tools can read its private Codex auth file.
 - The agent can write the final answer file.
 - Run-host sets Codex's `web_search` mode and removes the private `CODEX_HOME` at finish. It has no separate web search store or cleanup for any state that Codex or its provider keeps outside that home.

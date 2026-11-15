@@ -175,7 +175,9 @@ def environment(
 def review_environment(profile: Profile, paths: RunPaths) -> dict[str, str]:
     if profile is Profile.REVIEW:
         return {"GH_CONFIG_DIR": resolve(paths.tmpdir, GH_CONFIG_SUBDIR)}
-    return {}
+    # A build run opens pull requests and never reviews them; the gh shim
+    # refuses a review call when it sees this marker.
+    return {"TBHB_GH_NO_REVIEW": "1"}
 
 
 def _write_roots(
@@ -281,6 +283,7 @@ def _claude(
                     "DOCKER_CONFIG",
                     "GIT_NO_LAZY_FETCH",
                     "SSH_AUTH_SOCK",
+                    "TBHB_GH_NO_REVIEW",
                 )
                 if k in env
             },

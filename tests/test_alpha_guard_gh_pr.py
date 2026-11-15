@@ -1278,3 +1278,37 @@ def test_a_non_utf8_ledger_denies(
         f"{RULE}, and the guard can't read this session's ledger, "
         f"so it refuses `tbhb-approve`: {path} is not UTF-8"
     )
+
+
+@pytest.mark.parametrize(
+    "rest",
+    [
+        ["pr", "review", "5"],
+        ["pr", "review", "5", "--approve"],
+        ["--repo", "o/r", "pr", "review", "5", "-c", "-b", "text"],
+        ["api", "-X", "POST", "repos/o/r/pulls/5/reviews"],
+        ["api", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE"],
+        ["api", "repos/o/r/pulls/5/reviews", "--input", "body.json"],
+        ["api", "--method", "PUT", "repos/o/r/pulls/5/reviews/9/events"],
+    ],
+)
+def test_writes_review_refuses(rest: list[str]) -> None:
+    assert guard.writes_review(rest)
+
+
+@pytest.mark.parametrize(
+    "rest",
+    [
+        ["pr", "create", "--fill"],
+        ["pr", "view", "5"],
+        ["pr"],
+        [],
+        ["api", "repos/o/r/pulls/5/reviews"],
+        ["api", "-X", "GET", "repos/o/r/pulls/5/reviews"],
+        ["api", "-X", "POST", "repos/o/r/pulls/5/comments"],
+        ["api", "repos/o/r/pulls/5/comments", "-f", "body=x"],
+        ["api"],
+    ],
+)
+def test_writes_review_allows(rest: list[str]) -> None:
+    assert not guard.writes_review(rest)
