@@ -2196,6 +2196,18 @@ P1_BLOCKED = [
     'cat <<$"EOF"\nx\nEOF\ngh pr merge 1',
     "echo $((1 << 2))\ngh pr close 3",
     "(( 1 << 2 ))\ngh pr close 3",
+    'gh pr cl"\\o"se 3',
+    "cat <<<\ngh pr close 3",
+    "echo $((1 <<(1)))\ngh pr close 3",
+    "cat << EOF\nx\nEOF\ngh pr close 3",
+    "cat <<\tEOF\nx\nEOF\ngh pr close 3",
+    "cat <<   EOF\nx\nEOF\ngh pr close 3",
+    "cat <<EXIT\nx\nEXIT\ngh pr close 3",
+    "cat <<'A B'\nx\nA B\ngh pr close 3",
+    "cat <<A$B\nx\nA$B\ngh pr close 3",
+    'echo $(("1" << 2))\ngh pr close 3',
+    '(("1" << 2))\ngh pr close 3',
+    "echo $((1 + (1 << 2)))\ngh pr close 3",
     "echo $'a\\c\\\\'; gh pr close 3",
     "env -S '-u' FOO gh pr close 3",
 ]
@@ -2229,4 +2241,22 @@ def test_a_value_flag_before_api_still_finds_the_approval(text: str) -> None:
 def test_a_flag_between_pr_and_its_verb_is_a_known_gap(text: str) -> None:
     """Pins a gap: gh itself rejects these flags before `pr`, so none runs."""
     assert run_find(text) is None
+    assert guard.approvals(text, None) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "$'' gh pr close 3",
+        '$"" gh pr close 3',
+        "-x gh pr close 3",
+    ],
+)
+def test_an_empty_or_unwrapped_word_before_gh_is_the_program(text: str) -> None:
+    """An empty quoted word or a stray flag is the program, so gh is its argument."""
+    assert run_find(text) is None
+
+
+def test_another_group_s_review_is_not_an_approval() -> None:
+    text = "gh issue review 7 --approve -R tbhb-dev/tools"
     assert guard.approvals(text, None) == []

@@ -296,12 +296,12 @@ class Scanner:
         while self.text[self.pos : self.pos + 1] in {" ", "\t"}:
             self.pos += 1
         delim: list[str] = []
-        quote = ""
+        quote = ""  # pragma: no mutate -- falsy either way
         while self.pos < len(self.text):
             char = self.text[self.pos]
             if quote:
                 if char == quote:
-                    quote = ""
+                    quote = ""  # pragma: no mutate -- falsy either way
                 else:
                     delim.append(char)
             elif char in "'\"":
@@ -333,14 +333,14 @@ class Scanner:
     def quoted(self, char: str) -> None:
         """One character inside single or double quotes."""
         if char == self.quote:
-            self.quote = ""
+            self.quote = ""  # pragma: no mutate -- falsy either way
         elif self.quote == '"' and char == "\\":
             following = self.text[self.pos + 1 : self.pos + 2]
             if following != "\n":  # a backslash-newline is a line continuation
                 self.add(following)
             self.pos += 1
         elif self.quote == '"' and self.text.startswith("$(", self.pos):
-            self.open_nesting("$", 2)
+            self.open_nesting("$", 2)  # pragma: no mutate -- label is never read
             return
         elif self.quote == '"' and char == "`":
             self.backtick()
@@ -375,12 +375,14 @@ class Scanner:
             self.quote, self.in_word = '"', True
             self.pos += 2
         elif self.text.startswith("$((", self.pos):
-            self.open_nesting("$", 2)
+            self.open_nesting("$", 2)  # pragma: no mutate -- only "(" and "a" are read
             self.open_nesting("a", 1)
-        elif self.text.startswith("$(", self.pos):
-            self.open_nesting("$", 2)
+        elif self.text.startswith(  # pragma: no mutate -- same commands without it
+            "$(", self.pos
+        ):
+            self.open_nesting("$", 2)  # pragma: no mutate -- only "(" and "a" are read
         elif self.text.startswith("((", self.pos) and not self.in_word:
-            self.open_nesting("(", 1)
+            self.open_nesting("(", 1)  # pragma: no mutate -- only "(" and "a" are read
             self.open_nesting("a", 1)
         elif self.text.startswith("<<", self.pos):
             self.shift_or_heredoc()
@@ -527,11 +529,11 @@ def skip_prefix(words: list[str]) -> list[str]:
     A wrapper's options are skipped with their values. When the word after a
     wrapper still isn't ``gh``, the parse is unsure (``timeout 5 gh``, an
     option the table doesn't know), so a ``gh`` that only options, option
-    values and durations precede becomes the program.
+    values and durations precede becomes the program; ``resync`` keeps the index
+    when ``gh`` is already next.
     """
     i, wrapped = skip_wrappers(words)
-    unsure = wrapped and words[i : i + 1] and program_of(words[i:]) != "gh"
-    if unsure and env_split_string(words[:i]) is None:  # -S's words are exact
+    if wrapped and env_split_string(words[:i]) is None:  # -S's words are exact
         i = resync(words, i)
     return words[i:]
 
