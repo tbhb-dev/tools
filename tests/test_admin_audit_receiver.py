@@ -403,6 +403,9 @@ def test_the_module_imports_only_the_standard_library() -> None:
         for line in source.splitlines()
         if line.startswith(("import ", "from "))
     }
+    if "mutants" in Path(receiver.__file__).parts:
+        # The mutation runner's trampoline adds this import to a mutated copy.
+        imports.discard("mutmut")
     assert imports <= {
         "__future__",
         "fcntl",
