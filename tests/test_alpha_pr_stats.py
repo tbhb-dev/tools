@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -52,6 +53,10 @@ def test_parse_time(value: object, good: bool) -> None:
     assert (pr_stats.parse_time(value) is not None) is good
 
 
+def test_parse_time_returns_the_exact_utc_instant() -> None:
+    assert pr_stats.parse_time(EARLY) == datetime(2026, 11, 14, tzinfo=UTC)
+
+
 def test_line_starts_counts_lines_without_one() -> None:
     text = f"x\n\n{line(start=MID)}\n{line('Assisted-by')}\n{line(start='bad')}\n"
     starts, missing = pr_stats.line_starts(text)
@@ -94,6 +99,18 @@ def test_no_trailers_falls_back_to_the_earliest_commit() -> None:
     assert (got["start_source"], got["lines_without_started_at"]) == ("commit", 1)
 
 
+def test_missing_starts_accumulate_across_body_and_commits() -> None:
+    got = pr_stats.row(
+        "o/r",
+        pull(
+            body=line(),
+            commits=[commit(MID, line()), commit(EARLY, line("Assisted-by"))],
+        ),
+    )
+    assert got is not None
+    assert got["lines_without_started_at"] == 3
+
+
 def test_a_closed_pull_request_ends_at_closed_at() -> None:
     got = pr_stats.row("o/r", pull(state="CLOSED", mergedAt=None, closedAt=LATE))
     assert got is not None
@@ -130,7 +147,8 @@ def test_main_prints_a_row_per_pull_request(
     monkeypatch.setattr(pr, "gh_json", listed)
     assert pr_stats.main(["o/r", "--limit", "5"], "prog") == 0
     out = capsys.readouterr()
-    assert [json.loads(x)["number"] for x in out.out.splitlines()] == [7]
+    (printed,) = [json.loads(x) for x in out.out.splitlines()]
+    assert (printed["number"], printed["repo"]) == (7, "o/r")
     assert out.err == "prog: no start for #9\n"
     assert seen == [
         [
@@ -148,6 +166,34 @@ def test_main_prints_a_row_per_pull_request(
     ]
     assert pr_stats.main(["o/r"], "prog") == 0
     assert seen[1][7] == "200"
+
+
+def test_help_describes_the_command(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        pr_stats.main(["--help"], "stats")
+    assert stopped.value.code == 0
+    out = capsys.readouterr()
+    assert out.err == ""
+    assert out.out.startswith("usage: stats ")
+    lines = [" ".join(value.split()) for value in out.out.splitlines()]
+    assert "repo OWNER/REPO" in lines
+    assert "--limit LIMIT pull requests to read" in lines
+    assert "cycle time of merged and closed pull requests." in " ".join(lines)
+
+
+def test_limit_requires_an_integer(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def listed(_argv: list[str]) -> list[dict[str, object]]:
+        pytest.fail("invalid limits must not query pull requests")
+
+    monkeypatch.setattr(pr, "gh_json", listed)
+    with pytest.raises(SystemExit) as stopped:
+        pr_stats.main(["o/r", "--limit", "many"], "stats")
+    assert stopped.value.code == 2
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert "stats: error: argument --limit: invalid int value: 'many'" in out.err
 
 
 def test_the_command_runs_the_module(monkeypatch: pytest.MonkeyPatch) -> None:

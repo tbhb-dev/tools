@@ -41,7 +41,11 @@ def line_starts(text: object) -> tuple[list[datetime], int]:
     """The valid ``started_at`` times in a text, and its identity lines without one."""
     starts: list[datetime] = []
     missing = 0
-    for _key, value in identity.llm_trailers(text if isinstance(text, str) else ""):
+    for _key, value in identity.llm_trailers(
+        text
+        if isinstance(text, str)
+        else ""  # pragma: no mutate -- any non-trailer fallback has no identity lines
+    ):
         found = START_ATTR.search(value)
         when = parse_time(found[1]) if found else None
         if when is None:
@@ -55,7 +59,10 @@ def row(repo: str, data: Mapping[str, object]) -> dict[str, object] | None:
     """One stats row, or None for an open pull request or one with no start."""
     merged = parse_time(data.get("mergedAt"))
     end = merged or parse_time(data.get("closedAt"))
-    commits = cast("list[Mapping[str, object]]", data.get("commits") or [])
+    commits = cast(
+        "list[Mapping[str, object]]",  # pragma: no mutate -- cast ignores its type
+        data.get("commits") or [],
+    )
     starts, missing = line_starts(data.get("body"))
     for commit in commits:
         found, lacking = line_starts(commit.get("messageBody"))
@@ -69,7 +76,13 @@ def row(repo: str, data: Mapping[str, object]) -> dict[str, object] | None:
     if first_line is not None and (first_commit is None or first_line <= first_commit):
         start, source = first_line, "started_at"
     else:
-        start, source = cast("datetime", first_commit), "commit"
+        start, source = (
+            cast(
+                "datetime",  # pragma: no mutate -- cast ignores its type
+                first_commit,
+            ),
+            "commit",
+        )
     return {
         "repo": repo,
         "number": data.get("number"),
