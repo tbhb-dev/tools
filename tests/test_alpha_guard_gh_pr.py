@@ -2060,3 +2060,126 @@ def test_target_number_reads_issue_urls(text: str, number: str) -> None:
 )
 def test_first_unflagged(words: list[str], found: int | None) -> None:
     assert guard.first_unflagged(words, 0, {"view"}) == found
+
+
+@pytest.mark.parametrize(
+    ("prefix", "repo"),
+    [
+        (["GH_REPO=a/b", "-i"], "a/b"),
+        (["GH_REPO=a/b", "FOO=1", "env", "-u", "GH_REPO"], None),
+        (["GH_REPO=a/b", "nice", "-n", "5", "env", "-u", "GH_REPO"], None),
+        (["GH_REPO=a/b", "/usr/bin/env", "-u", "GH_REPO"], None),
+        (["GH_REPO=a/b", "/usr/bin/env", "-i"], None),
+        (["GH_REPO=a/b", "/usr/bin/env", "--ignore-environment"], None),
+        (["GH_REPO=a/b", "env", "--unset", "FOO"], "a/b"),
+        (["GH_REPO=a/b", "env", "--unset"], "a/b"),
+        (["GH_REPO=a/b", "env", "--unset", "GH_REPO"], None),
+        (["GH_REPO=a/b", "env", "--default-signal=INT"], "a/b"),
+        (["GH_REPO=a/b", "env", "--block-signal"], "a/b"),
+        (["GH_REPO=a/b", "env", "X=i"], "a/b"),
+        (["GH_REPO=a/b", "env", "X=u"], "a/b"),
+        (["GH_REPO=a/b", "sudo", "-i"], "a/b"),
+    ],
+)
+def test_prefix_repo(prefix: list[str], repo: str | None) -> None:
+    assert guard.prefix_repo(prefix) == repo
+
+
+@pytest.mark.parametrize(
+    ("word", "rest", "name", "result", "left"),
+    [
+        ("-X", ["a", "b"], "a/b", "a/b", ["a", "b"]),
+        ("-C", [], "a/b", "a/b", []),
+        ("-u", [], "a/b", "a/b", []),
+        ("-S", ["x"], "a/b", "a/b", []),
+        ("-Sx", ["y"], "a/b", "a/b", ["y"]),
+        ("-iX", ["y"], "a/b", None, ["y"]),
+    ],
+)
+def test_cluster_repo(
+    word: str, rest: list[str], name: str, result: str | None, left: list[str]
+) -> None:
+    words = iter(rest)
+    assert guard.cluster_repo(word, words, name) == result
+    assert list(words) == left
+
+
+def test_short_split_string_ignores_other_letters() -> None:
+    words = iter(["-S", "x"])
+    assert guard.short_split_string("-X", words) is None
+    assert list(words) == ["-S", "x"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "gh pr -R a/b close 3",
+        "GH_REPO=x/y gh pr -R a/b close 3",
+        "GH_REPO=x/y gh pr close 3 -R a/b",
+        "GH_REPO=x/y gh pr close https://github.com/a/b/pull/3",
+    ],
+)
+def test_an_explicit_repository_beats_gh_repo(text: str) -> None:
+    found = run_find(text)
+    assert found is not None
+    assert found.repo == "a/b"
+
+
+@pytest.mark.parametrize(
+    ("word", "base"),
+    [("/usr/bin/env", "env"), ("env", "env"), ("a/b/", ""), ("", "")],
+)
+def test_base_name(word: str, base: str) -> None:
+    assert guard.base_name(word) == base
+
+
+@pytest.mark.parametrize(
+    ("prefix", "moved"),
+    [
+        (["-XXXX"], False),
+        (["nice", "-XXXX"], False),
+        (["env", "-C", "d"], True),
+        (["sudo", "-D", "d"], True),
+        (["sudo", "-C", "d"], False),
+        (["env", "-D", "d"], False),
+    ],
+)
+def test_wrapper_moves(prefix: list[str], moved: bool) -> None:
+    assert guard.wrapper_moves(prefix) is moved
+
+
+@pytest.mark.parametrize(
+    ("words", "result"),
+    [
+        ([], (0, False)),
+        (["gh"], (0, False)),
+        (["FOO=1"], (1, False)),
+        (["FOO=1", "gh"], (1, False)),
+        (["env", "gh"], (1, True)),
+        (["env", "-i", "gh"], (2, True)),
+        (["/usr/bin/env", "gh"], (1, True)),
+        (["sudo", "-u", "root", "gh"], (3, True)),
+        (["timeout", "5", "gh"], (2, True)),
+        (["FOO=1", "env", "BAR=2", "gh"], (3, True)),
+    ],
+)
+def test_skip_wrappers(words: list[str], result: tuple[int, bool]) -> None:
+    assert guard.skip_wrappers(words) == result
+
+
+@pytest.mark.parametrize(
+    ("words", "start", "wrapper", "index"),
+    [
+        (["env", "gh"], 1, "env", 1),
+        (["env", "-i", "gh"], 1, "env", 2),
+        (["env", "-i", "-i", "gh"], 1, "env", 3),
+        (["env", "-S", "x", "gh"], 1, "env", 3),
+        (["env", "-i"], 1, "env", 2),
+        (["sudo", "-u", "root", "gh"], 1, "sudo", 3),
+        (["timeout", "5", "gh"], 1, "timeout", 2),
+        (["timeout", "-s", "KILL", "5", "gh"], 1, "timeout", 4),
+        (["nice", "gh"], 1, "nice", 1),
+    ],
+)
+def test_skip_options(words: list[str], start: int, wrapper: str, index: int) -> None:
+    assert guard.skip_options(words, start, wrapper) == index

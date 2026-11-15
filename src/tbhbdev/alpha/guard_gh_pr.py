@@ -458,13 +458,18 @@ def skip_options(words: list[str], start: int, wrapper: str) -> int:
     return i + (wrapper in WRAPPER_ARGUMENT)  # timeout's DURATION, whatever it is
 
 
+def base_name(word: str) -> str:
+    """The last path component of a program word: ``/usr/bin/env`` is ``env``."""
+    return word.rpartition("/")[2]
+
+
 def skip_wrappers(words: list[str]) -> tuple[int, bool]:
     """The index after env assignments, keywords and wrappers, and whether one ran."""
     i = 0
     wrapped = False
     while i < len(words):
         word = words[i]
-        name = word.rsplit("/", 1)[-1]
+        name = base_name(word)
         if word in KEYWORDS or ASSIGNMENT.match(word):
             i += 1
         elif name in WRAPPERS:
@@ -663,7 +668,7 @@ def env_split_string(prefix: list[str]) -> str | None:
     in_env = False
     words = iter(prefix)
     for word in words:
-        name = word.rsplit("/", 1)[-1]
+        name = base_name(word)
         if name in WRAPPERS:
             in_env = name == "env"
         elif in_env and word.startswith("-"):
@@ -692,13 +697,13 @@ def cluster_repo(word: str, words: Iterator[str], name: str | None) -> str | Non
 def prefix_repo(prefix: list[str]) -> str | None:
     """The ``GH_REPO`` the prefix leaves set, after any ``env -u`` or ``env -i``."""
     name = None
-    in_env = False
+    in_env = False  # pragma: no mutate -- None is as falsy as False here
     words = iter(prefix)
     for word in words:
         if word.startswith("GH_REPO="):
             name = word.removeprefix("GH_REPO=")
-        elif word.rsplit("/", 1)[-1] in WRAPPERS:
-            in_env = word.rsplit("/", 1)[-1] == "env"
+        elif base_name(word) in WRAPPERS:
+            in_env = base_name(word) == "env"
         elif not in_env:
             continue
         elif word in {"--ignore-environment", "--unset=GH_REPO"}:
@@ -712,7 +717,7 @@ def prefix_repo(prefix: list[str]) -> str | None:
 
 def find(text: str) -> Match | None:
     """The first direct guarded `gh pr` or `gh issue` call in a shell command."""
-    moved = False
+    moved = False  # pragma: no mutate -- None is as falsy as False here
     for prefix, words in simple_commands(text):
         found = gh_match(words[1:]) if program_of(words) == "gh" else None
         if found:
@@ -895,13 +900,16 @@ def default_repo(
     return repo
 
 
+CHDIR_LETTER = {"env": "C", "sudo": "D"}  # the short option that sets the directory
+
+
 def wrapper_moves(prefix: list[str]) -> bool:
     """Whether ``env -C DIR`` or ``sudo -D DIR`` runs the command elsewhere."""
-    letter = ""
+    letter = ""  # pragma: no mutate -- None is as falsy as ""
     for word in prefix:
-        name = word.rsplit("/", 1)[-1]
+        name = base_name(word)
         if name in WRAPPERS:
-            letter = {"env": "C", "sudo": "D"}.get(name, "")
+            letter = CHDIR_LETTER.get(name, "")  # pragma: no mutate -- ditto
         elif word.startswith("--chdir") or (
             letter and re.fullmatch(rf"-[^-]*{letter}.*", word)
         ):
