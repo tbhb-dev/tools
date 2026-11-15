@@ -53,7 +53,7 @@ UNPINNED = (
 )
 CLOSE_ISSUE = (
     "`gh issue close` is blocked. Run `tbhbdev alpha issue close {n} "
-    "--reason completed|not-planned` instead."
+    "--reason completed` instead (use the reason `not-planned` when it won't be done)."
 )
 
 BLOCKED = [
@@ -426,7 +426,7 @@ def test_malformed_input_fails_open_silently(
     assert run_main(monkeypatch, capsys, stdin) == (0, "", "")
 
 
-def test_internal_error_fails_open_silently(
+def test_a_parse_error_in_find_denies(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     def boom(_text: str) -> guard.Match | None:
@@ -435,7 +435,10 @@ def test_internal_error_fails_open_silently(
 
     monkeypatch.setattr(guard, "find", boom)
     stdin = json.dumps(with_command(CLAUDE_PAYLOAD, "gh pr merge 1"))
-    assert run_main(monkeypatch, capsys, stdin) == (0, "", "")
+    code, out, _ = run_main(monkeypatch, capsys, stdin)
+    assert code == 0
+    assert "can't parse" in out
+    assert '"permissionDecision": "deny"' in out
 
 
 @pytest.mark.parametrize("payload", [CLAUDE_PAYLOAD, CODEX_PAYLOAD, AGY_PAYLOAD])
@@ -1514,3 +1517,80 @@ def test_ansi_c_quotes_end_at_the_closing_quote_and_keep_other_text() -> None:
         "c",
     ]
     assert next(iter(guard.simple_commands("echo $'a\\"))).words == ["echo", "a\\"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [r"gh pr close 3 $'\x'", r"gh pr close 3 $'\u'", r"gh pr close 3 $'\U'"],
+)
+def test_an_incomplete_ansi_escape_still_denies(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    text: str,
+) -> None:
+    stdin = json.dumps(with_command(CLAUDE_PAYLOAD, text))
+    code, out, _ = run_main(monkeypatch, capsys, stdin)
+    assert code == 0
+    assert '"permissionDecision": "deny"' in out
+
+
+def test_an_incomplete_ansi_escape_stays_as_written() -> None:
+    words = next(iter(guard.simple_commands(r"echo $'a\x' $'\u' $'\U'"))).words
+    assert words == ["echo", "a\\x", "\\u", "\\U"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        r"gh pr $'close\0suffix' 3",
+        r"gh pr $'close\x00suffix' 3",
+        r"gh pr $'close\000\'x' 3",
+        r"gh pr $'close\u0000suffix' 3",
+    ],
+)
+def test_an_ansi_word_ends_at_a_nul(text: str) -> None:
+    found = run_find(text)
+    assert found is not None
+    assert found.sub == "close"
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "env -uGH_REPO",
+        "env -u GH_REPO",
+        "env -iuGH_REPO",
+        "env --unset=GH_REPO",
+        "env --unset GH_REPO",
+    ],
+)
+def test_env_unset_drops_gh_repo(prefix: str) -> None:
+    found = run_find(f"GH_REPO=a/b {prefix} gh pr close 3")
+    assert found is not None
+    assert found.repo is None
+
+
+def test_env_unset_of_another_name_keeps_gh_repo() -> None:
+    found = run_find("GH_REPO=a/b env -uFOO gh pr close 3")
+    assert found is not None
+    assert found.repo == "a/b"
+
+
+@pytest.mark.parametrize(
+    "move", ["cd ../wiki", "pushd ../wiki", "git -C ../wiki status"]
+)
+def test_a_directory_change_before_close_asks_for_repo(move: str) -> None:
+    found = run_find(f"{move} && gh pr close 3")
+    assert found is not None
+    message = guard.hint(found)
+    assert "`--repo OWNER/REPO`" in message
+    assert "origin of the current directory" not in message
+
+
+def test_a_directory_change_after_close_or_with_repo_is_unchanged() -> None:
+    after = run_find("gh pr close 3; cd x")
+    assert after is not None
+    assert guard.hint(after) == CLOSE_PR.format(n=3)
+    pinned = run_find("cd x && gh pr close 3 -R a/b")
+    assert pinned is not None
+    assert guard.hint(pinned) == CLOSE_PR.format(n=3) + FOREIGN.format(r="a/b")

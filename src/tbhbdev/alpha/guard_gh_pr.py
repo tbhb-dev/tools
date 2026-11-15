@@ -147,7 +147,8 @@ CLOSE_HINTS = {
         "(`--delete-branch` also deletes the branch, `--dry-run` previews)."
     ),
     "issue": (
-        "Run `tbhbdev alpha issue close {n} --reason completed|not-planned` instead."
+        "Run `tbhbdev alpha issue close {n} --reason completed` instead "
+        "(use the reason `not-planned` when it won't be done)."
     ),
 }
 
@@ -181,6 +182,7 @@ class Match(NamedTuple):
     args: list[str]
     group: str = "pr"
     repo: str | None = None
+    moved: bool = False
 
 
 @dataclass
@@ -197,6 +199,8 @@ class Scanner:
     # One (kind, quote to restore) per open `$(`, `(` or backtick.
     nesting: list[tuple[str, str]] = field(default_factory=list)
     heredocs: list[tuple[str, bool]] = field(default_factory=list)
+    # Bash ends an ANSI-C word at a NUL: the rest up to the closing quote is dropped.
+    truncated: bool = False
 
     def end_word(self) -> None:
         """Close the word being read, if any."""
@@ -296,12 +300,16 @@ class Scanner:
         """One character inside ``$'...'``, with the escapes bash decodes."""
         escape = ANSI_ESCAPE.match(self.text, self.pos) if char == "\\" else None
         if escape:
-            self.add(ansi_char(escape[1]))
+            decoded = ansi_char(escape[1])
+            self.truncated = self.truncated or decoded == "\0"
+            if not self.truncated:
+                self.add(decoded)
             self.pos = escape.end()
             return
         if char == "'":
             self.quote = ""
-        else:
+            self.truncated = False
+        elif not self.truncated:
             self.add(char)
         self.pos += 1
 
@@ -368,8 +376,10 @@ def ansi_char(escape: str) -> str:
     head = escape[0]
     if head in ANSI_SIMPLE:
         return ANSI_SIMPLE[head]
-    if head == "x" or head in "uU":
-        return chr(min(int(escape[1:], 16), 0x10FFFF))
+    if head in "xuU":
+        # Without a hex digit bash keeps the escape as written.
+        digits = escape[1:]
+        return chr(min(int(digits, 16), 0x10FFFF)) if digits else "\\" + head
     if head in "01234567":
         return chr(int(escape, 8) & 255)
     return head if head in "\\'\"?" else "\\" + head
@@ -539,24 +549,36 @@ def prefix_repo(prefix: list[str]) -> str | None:
     for word in words:
         if word.startswith("GH_REPO="):
             name = word.removeprefix("GH_REPO=")
-        elif word in {"-i", "--ignore-environment", "--unset=GH_REPO"}:
+        elif word in {"--ignore-environment", "--unset=GH_REPO"}:
             name = None
-        elif word in {"-u", "--unset"}:
+        elif word == "--unset":
             name = None if next(words, None) == "GH_REPO" else name
+        elif word.startswith("-") and not word.startswith("--"):
+            # A short cluster such as -i, -uNAME, -u NAME or -iuNAME.
+            for index, char in enumerate(word[1:], 2):
+                if char == "i":
+                    name = None
+                elif char == "u":
+                    value = word[index:] or next(words, None)
+                    name = None if value == "GH_REPO" else name
+                    break
     return name
 
 
 def find(text: str) -> Match | None:
     """The first direct guarded `gh pr` or `gh issue` call in a shell command."""
+    moved = False
     for prefix, words in simple_commands(text):
         found = gh_match(words[1:]) if program_of(words) == "gh" else None
         if found:
             name = prefix_repo(prefix)
+            found = found._replace(moved=moved)
             return (
                 found
                 if found.repo is not None or name is None
                 else found._replace(repo=name)
             )
+        moved = moved or changes_directory(words)
     return None
 
 
@@ -784,6 +806,11 @@ def denial(found: list[Approval], data: Json, env: Mapping[str, str]) -> str | N
 def close_hint(found: Match, blocked: str, number: str, *, pinned: bool) -> str:
     """The block message for ``close``, which acts on the current directory's origin."""
     text = f"{blocked} {CLOSE_HINTS[found.group].format(n=number)}"
+    if found.repo is None and found.moved:
+        return (
+            f"{text} A `cd` or `pushd` runs before it, so the guard can't tell which "
+            "repository it targets. Run it again with `--repo OWNER/REPO`."
+        )
     if found.repo is None:
         return text
     where = (
@@ -881,7 +908,12 @@ def main() -> int:
             return 0
         if not in_tbhb_dev(hook_cwd(data)):
             return 0
-        found = find(text)
+        try:
+            found = find(text)
+        except Exception:  # noqa: BLE001  # fail closed once the guard is in scope
+            message = "The guard can't parse this command, so it refuses it."
+            print(json.dumps(decision(message, antigravity=antigravity)))
+            return 0
         if found:
             print(json.dumps(decision(hint(found), antigravity=antigravity)))
     except Exception:  # noqa: BLE001  # fail open on any crash
