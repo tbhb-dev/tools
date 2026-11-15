@@ -704,6 +704,9 @@ def test_the_diff_config_follows_the_callers_own(
     root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    for index in range(2):
+        monkeypatch.setenv(f"GIT_CONFIG_KEY_{index}", "color.ui")
+        monkeypatch.setenv(f"GIT_CONFIG_VALUE_{index}", "never")
     env = secret_scan.diff_env(root, "x", tmp_path / "attributes")
     assert env["GIT_CONFIG_KEY_2"] == "color.ui"
     assert env["GIT_CONFIG_COUNT"] == str(2 + len(secret_scan.DIFF_CONFIG) + 1)
@@ -721,6 +724,10 @@ def test_a_bad_config_count_is_refused(
 def test_an_unnameable_empty_tree_is_refused(
     root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(secret_scan, "git", lambda *_a, **_k: (1, ""))
+
+    def no_tree(*_args: str, **_kwargs: Path) -> tuple[int, str]:
+        return 1, ""
+
+    monkeypatch.setattr(secret_scan, "git", no_tree)
     with pytest.raises(SystemExit, match="empty tree"):
         secret_scan.diff_env(root, "x", tmp_path / "attributes")
