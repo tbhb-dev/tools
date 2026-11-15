@@ -404,6 +404,7 @@ STANDARD = {
     "os",
     "pathlib",
     "re",
+    "stat",
     "sys",
     "typing",
 }
@@ -478,3 +479,50 @@ def test_a_failed_write_during_rotation_leaves_the_head_on_the_old_segment(
     assert run(directory, "head", segment=size)[0] == 0
     assert not (directory / "segment-2.jsonl").exists()
     assert (directory / "segment-1.jsonl").read_bytes() == first
+
+
+@pytest.mark.parametrize("name", ["segment-1.jsonl", "head", "lock"])
+def test_a_symbolic_link_in_the_directory_is_never_followed(
+    tmp_path: Path, name: str
+) -> None:
+    directory = fresh(tmp_path)
+    target = tmp_path / "outside"
+    target.write_bytes(b"keep")
+    (directory / name).unlink(missing_ok=True)
+    (directory / name).symlink_to(target)
+    assert run(directory, "append 1", record(GENESIS))[0] == 1
+    assert target.read_bytes() == b"keep"
+
+
+def test_a_head_that_is_not_a_regular_file_is_refused(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    (directory / "head").unlink()
+    os.mkfifo(directory / "head")
+    assert run(directory, "head") == (1, b"")
+
+
+def test_files_are_made_private_even_when_they_began_open(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    (directory / "segment-1.jsonl").chmod(0o644)
+    (directory / "head").chmod(0o644)
+    (directory / "lock").write_bytes(b"")
+    (directory / "lock").chmod(0o666)
+    first = record(GENESIS, ', "pad": "' + "x" * 40 + '"')
+    second = record(digest(first))
+    size = len(first)
+    run(directory, "append 1", first, segment=size)
+    run(directory, "append 2", second, segment=size)
+    for name in ("segment-1.jsonl", "segment-2.jsonl", "head", "lock"):
+        assert (directory / name).stat().st_mode & 0o777 == 0o600
+
+
+def test_a_file_that_cannot_be_made_private_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = fresh(tmp_path)
+
+    def denied(_descriptor: int, _mode: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(os, "fchmod", denied)
+    assert run(directory, "head") == (1, b"")

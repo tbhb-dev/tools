@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import BinaryIO
@@ -32,6 +33,7 @@ ARGUMENTS = 3
 FIRST_BYTE = 32
 LAST_BYTE = 126
 PROTOCOL = 1
+PRIVATE = 0o600
 SEGMENT = re.compile(r"segment-([1-9][0-9]*)\.jsonl")
 NUMBER = r"(?:0|[1-9][0-9]*)"
 HEAD = re.compile(rf"([1-9][0-9]*) ({NUMBER}) ([0-9a-f]{{64}}) ({NUMBER})\n")
@@ -52,6 +54,21 @@ def segment_name(number: int) -> str:
     return f"segment-{number}.jsonl"
 
 
+def open_regular(path: str, flags: int) -> int:
+    """Open PATH as a private regular file, never through a symbolic link."""
+    descriptor = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, PRIVATE)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        message = "not a regular file"
+        raise RejectedError(message)
+    try:
+        os.fchmod(descriptor, PRIVATE)
+    except OSError:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 def sync_directory(directory: str) -> None:
     descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -63,8 +80,11 @@ def sync_directory(directory: str) -> None:
 def read_head(directory: str) -> tuple[int, int, str, int]:
     """The segment, count, digest and length the head file records."""
     try:
-        with (Path(directory) / "head").open("rb") as handle:
-            text = handle.read(512).decode("ascii")
+        descriptor = open_regular(str(Path(directory) / "head"), os.O_RDONLY)
+        try:
+            text = os.read(descriptor, 512).decode("ascii")
+        finally:
+            os.close(descriptor)
     except OSError, UnicodeDecodeError:
         message = "no readable head file"
         raise RejectedError(message) from None
@@ -79,7 +99,7 @@ def read_head(directory: str) -> tuple[int, int, str, int]:
 def commit_head(directory: str, head: tuple[int, int, str, int]) -> None:
     """Replace the head file: temporary name, sync, rename, directory sync."""
     temporary = str(Path(directory) / "head.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    descriptor = open_regular(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
     try:
         data = "{} {} {} {}\n".format(*head).encode("ascii")
         if os.write(descriptor, data) != len(data):
@@ -107,15 +127,15 @@ def recover(directory: str, head: tuple[int, int, str, int]) -> None:
     current, _count, _last, length = head
     path = str(Path(directory) / segment_name(current))
     try:
-        size = Path(path).stat().st_size
+        descriptor = open_regular(path, os.O_WRONLY)
     except OSError:
         message = "the current segment is missing"
         raise RejectedError(message) from None
-    if size < length:
-        message = "the current segment is shorter than its head"
-        raise RejectedError(message)
-    descriptor = os.open(path, os.O_WRONLY)
     try:
+        size = os.fstat(descriptor).st_size
+        if size < length:
+            message = "the current segment is shorter than its head"
+            raise RejectedError(message)
         if size > length:
             os.ftruncate(descriptor, length)
         os.fsync(descriptor)
@@ -174,7 +194,7 @@ def validate(line: bytes, last: str) -> None:
 
 def used(directory: str) -> int:
     """The total size of every segment."""
-    return sum(Path(path).stat().st_size for path in segments(directory).values())
+    return sum(Path(path).lstat().st_size for path in segments(directory).values())
 
 
 def append(
@@ -188,14 +208,13 @@ def append(
     if length + len(line) > size:
         current += 1
         length = 0
-        descriptor = os.open(
+        descriptor = open_regular(
             str(Path(directory) / segment_name(current)),
             os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-            0o600,
         )
         os.close(descriptor)
         sync_directory(directory)
-    descriptor = os.open(
+    descriptor = open_regular(
         str(Path(directory) / segment_name(current)), os.O_WRONLY | os.O_APPEND
     )
     try:
@@ -212,7 +231,7 @@ def append(
 
 def acknowledge(directory: str, head: tuple[int, int, str, int]) -> bytes:
     """Sync the head file and the directory, then the acknowledgment text."""
-    descriptor = os.open(str(Path(directory) / "head"), os.O_RDONLY)
+    descriptor = open_regular(str(Path(directory) / "head"), os.O_RDONLY)
     try:
         os.fsync(descriptor)
     finally:
@@ -234,7 +253,7 @@ def handle(
         message = "not head or append K"
         raise RejectedError(message)
     data = stdin.read(MAX_LINE + 1)
-    lock = os.open(str(Path(directory) / "lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    lock = open_regular(str(Path(directory) / "lock"), os.O_RDWR | os.O_CREAT)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
         head = read_head(directory)
