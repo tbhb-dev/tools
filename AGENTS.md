@@ -26,7 +26,7 @@ Before choosing a model for a subagent or peer run, read models/README.md in tbh
 
 ## Alpha commands
 
-`tbhbdev alpha` holds the interim agent tools, such as the agent identity hooks and the pull request commands `tbhbdev alpha pr` and `tbhbdev alpha merge`. They may change without notice. The harness hooks are user level, not in this repository: install `tbhbdev` with `uv tool install git+https://github.com/tbhb-dev/tools`, then run `tbhbdev alpha install` in a clone. See [Alpha commands](docs/reference/alpha/commands.md) for what it writes.
+`tbhbdev alpha` holds the interim agent tools, such as the agent identity hooks and the pull request commands `tbhbdev alpha pr` and `tbhbdev alpha merge`. Mark a pull request ready with `tbhbdev alpha pr ready N`, because the hooks refuse raw `gh pr ready`. They may change without notice. The harness hooks are user level, not in this repository: install `tbhbdev` with `uv tool install git+https://github.com/tbhb-dev/tools`, then run `tbhbdev alpha install` in a clone. See [Alpha commands](docs/reference/alpha/commands.md) for what it writes.
 
 ## Checks
 

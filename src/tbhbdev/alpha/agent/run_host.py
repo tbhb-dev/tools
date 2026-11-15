@@ -482,12 +482,38 @@ def preflight(run: Run) -> None:
         mark_host(run)
 
 
+def otel_config(endpoint: str) -> str:
+    """A Codex config with an `[otel]` table that exports traces and metrics.
+
+    ENDPOINT is a base URL, and each signal gets its own OTLP/HTTP path. The
+    table leaves out the log exporter on purpose: Codex logs tool arguments and
+    an output preview, so `log_user_prompt = false`, which guards only the
+    prompt text, wouldn't keep a credential or a file out of the export.
+    The table has no headers, so it holds no secret.
+    """
+    base = endpoint.removesuffix("/")
+
+    def exporter(signal_path: str) -> str:
+        url = json.dumps(f"{base}/v1/{signal_path}")
+        return f'{{ otlp-http = {{ endpoint = {url}, protocol = "binary" }} }}'
+
+    return (
+        "[otel]\n"
+        f"trace_exporter = {exporter('traces')}\n"
+        f"metrics_exporter = {exporter('metrics')}\n"
+        "log_user_prompt = false\n"
+    )
+
+
 def prepare_workspace(run: Run) -> Prepared:
     clone = Path(repo.clone_path(run.home, run.request.repo))
     paths = planned_paths(run)
     checked_policy(run, paths)
-    workspace = worktree.create(clone, run.files.name, run.request)
-    delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
+    workspace = worktree.create(
+        clone, run.files.name, run.request, run.settings.public_repos
+    )
+    with worktree.preparation_step("credential delivery"):
+        delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
     paths = RunPaths(
         home=str(run.home),
         worktree=str(workspace),
@@ -500,12 +526,20 @@ def prepare_workspace(run: Run) -> Prepared:
         if delivery.signing is not None
         else None,
     )
-    runfiles.private_dir(Path(paths.audit_dir))
+    with worktree.preparation_step("audit directory"):
+        runfiles.private_dir(Path(paths.audit_dir))
     before = None
     if run.request.harness is Harness.CODEX:
-        runfiles.private_dir(Path(paths.codex_home))
-        source = runfiles.private_dir(run.home / ".codex") / "auth.json"
-        before = credentials.auth_copy(source, Path(paths.codex_home) / "auth.json")
+        with worktree.preparation_step("codex auth copy"):
+            runfiles.private_dir(Path(paths.codex_home))
+            source = runfiles.private_dir(run.home / ".codex") / "auth.json"
+            before = credentials.auth_copy(source, Path(paths.codex_home) / "auth.json")
+        if run.settings.otel_endpoint is not None:
+            with worktree.preparation_step("codex config"):
+                runfiles.atomic(
+                    Path(paths.codex_home) / "config.toml",
+                    otel_config(run.settings.otel_endpoint),
+                )
     return Prepared(paths, delivery, before)
 
 
@@ -597,6 +631,25 @@ def harness_command(
     return command
 
 
+def checked_harness_command(
+    run: Run, prepared: Prepared, value: Policy, executable: str
+) -> tuple[str, ...]:
+    try:
+        return harness_command(run, prepared, value, executable)
+    except KeyError, TypeError:
+        message = "run failed while building the harness command"
+        raise Invalid(message) from None
+
+
+def log_hook_tools(run: Run, paths: RunPaths) -> None:
+    status = (
+        "present"
+        if (Path(paths.worktree) / ".bazel_env" / "bin").is_dir()
+        else "missing; commit hooks that call .bazel_env/bin will fail in this run"
+    )
+    run.files.write("log", f"preflight: .bazel_env {status}\n")
+
+
 ENV_OVERRIDE = "shell_environment_policy.set."
 
 
@@ -608,11 +661,13 @@ def argv_log_line(command: tuple[str, ...]) -> str:
     the run's environment hold credential-adjacent values, so they stay out.
     """
     shown: list[str] = []
-    for index, word in enumerate(command):
-        if index and command[index - 1] == "-c" and word.startswith(ENV_OVERRIDE):
+    previous = ""
+    for word in command:
+        if previous == "-c" and word.startswith(ENV_OVERRIDE):
             shown.pop()
         else:
             shown.append(word)
+        previous = word
     return "argv: " + shlex.join(shown)
 
 
@@ -623,11 +678,31 @@ def log_argv(run: Run, command: tuple[str, ...]) -> None:
             run.files.write("log", argv_log_line(command) + "\n")
 
 
-def run_harness(run: Run, prepared: Prepared, stack: ExitStack) -> int:
+def resource_attributes(run: Run) -> dict[str, str]:
+    """OpenTelemetry resource attributes that name the host and the account.
+
+    A run without a configured endpoint gets none, so it stays as it was.
+    """
+    if run.settings.otel_endpoint is None:
+        return {}
+    return {
+        "OTEL_RESOURCE_ATTRIBUTES": (
+            f"host.name={run.host.name},tbhb.account={run.request.account}"
+        )
+    }
+
+
+def run_harness(
+    run: Run, prepared: Prepared, stack: ExitStack, *, preflight_only: bool = False
+) -> int:
     paths = prepared.paths
     value, executable = checked_policy(run, paths)
-    env = value.env | prepared.delivery.env
-    command = harness_command(run, prepared, value, executable)
+    env = value.env | prepared.delivery.env | resource_attributes(run)
+    command = checked_harness_command(run, prepared, value, executable)
+    if preflight_only:
+        log_hook_tools(run, paths)
+        run.files.write("log", f"preflight ok: {executable}\n")
+        return 0
     log_argv(run, command)
     headless = run.request.kind is RunKind.EXEC
     terminal = None if headless else sys.stdin.fileno()
@@ -703,14 +778,21 @@ def prepared_result(result: object) -> Prepared:
     return result
 
 
-def execute(run: Run, text: str, push_token: str | None = None) -> int:
+def execute(
+    run: Run, text: str, push_token: str | None = None, *, preflight_only: bool = False
+) -> int:
     """Keep cleanup protected until the completion record is durable."""
     with host_tools.configured(run.settings, run.host.os), ExitStack() as stack:
-        return _execute(run, text, stack, push_token)
+        return _execute(run, text, stack, push_token, preflight_only=preflight_only)
 
 
 def _execute(
-    run: Run, text: str, stack: ExitStack, push_token: str | None = None
+    run: Run,
+    text: str,
+    stack: ExitStack,
+    push_token: str | None = None,
+    *,
+    preflight_only: bool,
 ) -> int:
     prepared = None
     rc = 1
@@ -735,7 +817,11 @@ def _execute(
             agent = credentials.signing_agent(
                 prepared.delivery.signing, run.tmpdir, run.deadline
             )
-        rc = push.run(run, prepared, stack, run_harness, push_token)
+        rc = (
+            run_harness(run, prepared, stack, preflight_only=True)
+            if preflight_only
+            else push.run(run, prepared, stack, run_harness, push_token)
+        )
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
     except RunInterruptedError, EOFError:
@@ -871,58 +957,91 @@ def main(
     parser.add_argument("request", nargs="?")
     parser.add_argument("--host", default=socket.gethostname())
     parser.add_argument("--prompt")
+    parser.add_argument("--preflight", action="store_true")
+    parser.add_argument("--owner")
     args = parser.parse_args(arguments)
     if args.name is None:
         print(f"{prog}: run name is required", file=sys.stderr)
         return 1
-    files = None
     completed = None
+    recorded = None
     previous = {s: signal.signal(s, interrupt) for s in process_group.INTERRUPTS}
     try:
         with process_group.defer_signals():
             files = _files(args.name)
             refuse_started(files)
-            ownership.claim(files, claimed=claimed)
-        with (
-            runfiles.locked(files.path("run.lock")),
-            tempfile.TemporaryDirectory() as tmpdir,
-        ):
+            ownership.claim(files, claimed=claimed, expected=args.owner)
+        # Anything that fails before this lock is held, including taking the
+        # lock, belongs to a waiter and writes nothing: the records are the
+        # run that holds the lock.
+        with runfiles.locked(files.path("run.lock")):
+            # Outside the try below: a refusal here, or an interrupt that
+            # replaces it, must leave the earlier run's records alone.
             refuse_started(files)
-            run, text = _load(args, Path(tmpdir).resolve())
-            run.files.write("log", build_info.line() + "\n")
-            completed = (
-                execute(run, text)
-                if push_token is None
-                else execute(run, text, push_token)
-            )
-    except (
-        Invalid,
-        userconfig.ConfigError,
-        OSError,
-        ValueError,
-        RunInterruptedError,
-    ) as exc:
+            try:
+                # Inside the try so a failure to create the temp directory
+                # leaves a record like any other refusal.
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    run, text = _load(args, Path(tmpdir).resolve())
+                    run.files.write("log", build_info.line() + "\n")
+                    completed = execute(
+                        run, text, push_token, preflight_only=args.preflight
+                    )
+            except _REFUSALS as exc:
+                if completed is None and not isinstance(exc, RunExistsError):
+                    # Ignored until `recorded` is set: a signal in between
+                    # would return a different status than the rc file holds.
+                    with process_group.ignore_signals():
+                        recorded = _recorded_rc(files)
+                        if recorded is None:
+                            _record_failure(files, exc)
+                            recorded = _failure_rc(exc)
+                raise
+    except _REFUSALS as exc:
         if completed is not None:
             return completed
-        rc = 143 if isinstance(exc, RunInterruptedError) else 1
-        with process_group.ignore_signals():
-            if files is not None and not isinstance(exc, RunExistsError):
-                try:
-                    reason = (
-                        "interrupted during load"
-                        if isinstance(exc, RunInterruptedError)
-                        else str(exc)
-                    )
-                    files.write("log", f"run refused: {reason}\n")
-                finally:
-                    files.write("rc", f"{rc}\n")
         print(f"{prog}: {exc}", file=sys.stderr)
-        return rc
+        # An interrupt while the lock is released replaces the exception but
+        # not the result already written to the rc file.
+        return recorded if recorded is not None else _failure_rc(exc)
     else:
         return completed
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)
+
+
+_REFUSALS = (
+    Invalid,
+    userconfig.ConfigError,
+    OSError,
+    ValueError,
+    RunInterruptedError,
+)
+
+
+def _failure_rc(exc: Exception) -> int:
+    return 143 if isinstance(exc, RunInterruptedError) else 1
+
+
+def _record_failure(files: runfiles.RunFiles, exc: Exception) -> None:
+    """Write the failed run's records while the caller holds the run lock."""
+    with process_group.ignore_signals():
+        try:
+            reason = (
+                "interrupted during load"
+                if isinstance(exc, RunInterruptedError)
+                else str(exc)
+            )
+            files.write("log", f"run refused: {reason}\n")
+        finally:
+            files.write("rc", f"{_failure_rc(exc)}\n")
+
+
+def _recorded_rc(files: runfiles.RunFiles) -> int | None:
+    """The status `execute` already wrote, when a signal hit before main saw it."""
+    path = files.path("rc")
+    return int(path.read_text()) if path.exists() else None
 
 
 def _files(name: str) -> runfiles.RunFiles:

@@ -106,6 +106,8 @@ class Credentials:
     reviews_app_client_id: str | None
     reviews_app_pem: str | None
     signing: str
+    pull_requests_app_client_id: str | None = None
+    pull_requests_app_pem: str | None = None
 
 
 @dataclass(frozen=True)
@@ -154,6 +156,8 @@ class Settings:
     ssh_connect_timeout: int = 15
     ssh_keepalive_seconds: int = 30
     ssh_keepalive_count_max: int = 3
+    public_repos: tuple[str, ...] = ()
+    otel_endpoint: str | None = None
 
 
 @dataclass(frozen=True)

@@ -5,17 +5,55 @@
 import io
 import itertools
 import json
+import os
 import shlex
 import sys
+from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 
 from tbhbdev import alpha
 from tbhbdev.alpha import guard_gh_poll as guard
 
+# The guard builds its paths from Path.home(), so the tests do too.
+HOME = str(guard.STATE_DIR.parents[2])
+OWNER = guard.STATE_DIR.parents[2].name
+ROOT = str(guard.STATE_DIR.parents[2].parent).rstrip("/")
+# One `*` per directory of the home path, so the glob reaches the state directory.
+HOME_GLOB = "/" + "/".join("*" for _ in guard.STATE_DIR.parents[2].parts[1:])
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
 SHA = "abcdef0123456789abcdef0123456789abcdef01"
 # The 1Password service account token's variable, split for gitleaks.
 TOKEN = "OP_SERVICE_" + "ACCOUNT_TOKEN"
+FIELDS = (
+    "databaseId,event,conclusion,createdAt,startedAt,updatedAt,"
+    "workflowName,attempt,headBranch"
+)
+
+
+REPOS = ["example/one", "example/two"]
+
+
+def listing(repo: str) -> str:
+    return f"gh run list -R {repo} --limit 100 --json {FIELDS}"
+
+
+def today() -> date:
+    return datetime.now().astimezone().date()
+
+
+@pytest.fixture(autouse=True)
+def grant_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "state" / "allowance.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"repos": REPOS, "expires": date.max.isoformat()}))
+    monkeypatch.setattr(guard, "ALLOWANCE_GRANT", path)
+    monkeypatch.setattr(guard, "ALLOWANCE_COUNT", path.parent / "allowance.count")
+    return path
 
 
 @pytest.mark.parametrize(
@@ -23,6 +61,15 @@ TOKEN = "OP_SERVICE_" + "ACCOUNT_TOKEN"
     [
         # watch and list commands
         "gh run watch 42",
+        "gh run ls",
+        "gh run ls -R org/repo --limit 100",
+        "gh run -R org/repo list",
+        "gh run --repo=org/repo ls",
+        "gh run -R org/repo watch 1",
+        "$'gh' run list",
+        "gh api --method='' repos/o/r/actions/runs",
+        "gh api -X POST --method='' repos/o/r/actions/runs",
+        "gh api --method='' -X POST --method='' repos/o/r/actions/runs",
         "gh run list",
         "gh pr checks --watch",
         "gh pr checks 3 --watch=true",
@@ -135,6 +182,9 @@ def test_denies_polling(command: str) -> None:
         "gh api -f name=x repos/o/r/actions/runs",
         "gh api --input body.json repos/o/r/check-runs",
         "gh pr list",
+        "gh run view 5",
+        "gh run -R org/repo view 5",
+        "gh api --method='' -f name=x repos/o/r/actions/runs",
         # quoted text and heredoc bodies are data
         "echo 'gh run list'",
         "git commit -m 'while gh run list'",
@@ -711,3 +761,704 @@ def test_deep_nesting_fails_open(
     monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
     assert guard.main() == 0
     assert capsys.readouterr() == ("", "")
+
+
+def test_allowance_lets_each_granted_repository_list_once(grant_file: Path) -> None:
+    count = grant_file.parent / "allowance.count"
+    for repo in REPOS:
+        assert guard.inspect(listing(repo))[0] is None
+        assert guard.inspect(listing(repo))[0] == guard.POLL_REASON
+    assert json.loads(count.read_text()) == dict.fromkeys(REPOS, 1)
+
+
+def test_allowance_passes_through_a_wrapper(grant_file: Path) -> None:
+    assert guard.inspect(f"bash -c '{listing(REPOS[0])}'")[0] is None
+    count = json.loads((grant_file.parent / "allowance.count").read_text())
+    assert count == {REPOS[0]: 1}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"gh run list -R example/three --limit 100 --json {FIELDS}",
+        f"gh run list -R one --limit 100 --json {FIELDS}",
+        f"gh run list -R example/one --limit 99 --json {FIELDS}",
+        f"gh run list -R example/one --limit 100 --json {FIELDS},url",
+        f"gh run list --limit 100 -R example/one --json {FIELDS}",
+        f"gh run list -R example/one --limit 100 --json {FIELDS} --paginate",
+        f"gh run list -R example/one --limit 100 --json {FIELDS} --branch x",
+        "gh run list -R example/one --limit 100",
+        f"gh run -x list -R example/one --limit 100 --json {FIELDS}",
+        "gh run list",
+        listing("example/one").replace("gh run", "gh --hostname=example.com run"),
+        f"gh run watch -R example/one --limit 100 --json {FIELDS}",
+    ],
+)
+def test_allowance_refuses_any_other_shape(command: str, grant_file: Path) -> None:
+    assert guard.inspect(command)[0] == guard.POLL_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+def test_checked_accepts_an_empty_command() -> None:
+    assert guard.checked([], None) == (None, set())
+
+
+def test_a_loop_around_a_granted_listing_is_denied() -> None:
+    command = f"while true; do {listing(REPOS[0])}; done"
+    assert guard.inspect(command)[0] == guard.POLL_REASON
+
+
+@pytest.mark.parametrize(("days", "allowed"), [(-10000, False), (-1, False), (0, True)])
+def test_allowance_ends_after_its_expiry_date(
+    grant_file: Path, days: int, *, allowed: bool
+) -> None:
+    # The date is taken at run time: a collection-time date goes stale if the
+    # run crosses local midnight.
+    expires = today() + timedelta(days=days)
+    grant_file.write_text(json.dumps({"repos": REPOS, "expires": expires.isoformat()}))
+    expected = None if allowed else guard.POLL_REASON
+    assert guard.inspect(listing(REPOS[0]))[0] == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "not json",
+        "[]",
+        "{}",
+        '{"repos": ["example/one"]}',
+        '{"expires": "2999-01-01"}',
+        '{"repos": null, "expires": "2999-01-01"}',
+        '{"repos": ["example/one"], "expires": "soon"}',
+        '{"repos": ["example/one"], "expires": 20991231}',
+    ],
+)
+def test_allowance_refuses_a_malformed_grant(text: str, grant_file: Path) -> None:
+    grant_file.write_text(text)
+    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+
+
+def test_allowance_refuses_without_a_grant(grant_file: Path) -> None:
+    grant_file.unlink()
+    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+
+
+@pytest.mark.parametrize("text", ["many\n", "", "[]", "3"])
+def test_allowance_refuses_an_unreadable_count(text: str, grant_file: Path) -> None:
+    count = grant_file.parent / "allowance.count"
+    count.write_text(text)
+    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+    assert count.read_text() == text
+
+
+def test_allowance_refuses_when_the_count_cannot_be_written(
+    grant_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    blocker = grant_file.parent / "blocker"
+    blocker.write_text("a file where the directory should be")
+    monkeypatch.setattr(guard, "ALLOWANCE_COUNT", blocker / "allowance.count")
+    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+
+
+def test_run_view_of_one_run_still_passes_without_spending(grant_file: Path) -> None:
+    command = "gh run view 42 -R example/one --json databaseId,jobs"
+    assert guard.inspect(command)[0] is None
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+@pytest.mark.parametrize("name", ["gh-poll-allowance.json", "gh-poll-allowance.count"])
+@pytest.mark.parametrize(
+    "template",
+    [
+        "echo x > ~/.local/state/tbhb/{}",
+        "rm {}",
+        "cp a ~/.local/state/tbhb/{}",
+        "sed -i s/a/b/ {}",
+        "bash -c 'echo x | tee {}'",
+    ],
+)
+def test_shell_commands_naming_the_allowance_files_are_denied(
+    name: str, template: str
+) -> None:
+    assert guard.inspect(template.format(name))[0] == guard.PROTECT_REASON
+
+
+def test_main_denies_a_write_to_an_allowance_file(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for key in ("file_path", "notebook_path"):
+        payload = {
+            "tool_input": {key: "/home/x/.local/state/tbhb/gh-poll-allowance.json"}
+        }
+        monkeypatch.setattr(guard, "read_hook_stdin", lambda p=payload: p)
+        assert guard.main() == 0
+        assert guard.PROTECT_REASON in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"tool_input": {"file_path": "/home/x/notes.md"}},
+        {"tool_input": {"file_path": 3}},
+        {"tool_input": "text"},
+        {},
+    ],
+)
+def test_main_allows_other_edits(
+    payload: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(guard, "read_hook_stdin", lambda: payload)
+    assert guard.main() == 0
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "echo x > ~/.local/state/tbhb/GH-POLL-ALLOWANCE.JSON",
+        "rm Gh-Poll-Allowance.Count",
+    ],
+)
+def test_shell_commands_naming_the_files_in_another_case_are_denied(
+    template: str,
+) -> None:
+    assert guard.inspect(template)[0] == guard.PROTECT_REASON
+
+
+@pytest.mark.parametrize("name", ["GH-POLL-ALLOWANCE.JSON", "Gh-Poll-Allowance.Count"])
+def test_main_denies_an_edit_to_the_files_in_another_case(
+    name: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = {"tool_input": {"file_path": f"/home/x/.local/state/tbhb/{name}"}}
+    monkeypatch.setattr(guard, "read_hook_stdin", lambda: payload)
+    assert guard.main() == 0
+    assert guard.PROTECT_REASON in capsys.readouterr().out
+
+
+def test_main_denies_an_edit_through_a_link(
+    grant_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    symlink = grant_file.parent / "notes.txt"
+    symlink.symlink_to(grant_file)
+    second_link = grant_file.parent / "other.txt"
+    os.link(grant_file, second_link)
+    for path in (symlink, second_link):
+        payload = {"tool_input": {"file_path": str(path)}}
+        monkeypatch.setattr(guard, "read_hook_stdin", lambda p=payload: p)
+        assert guard.main() == 0
+        assert guard.PROTECT_REASON in capsys.readouterr().out
+
+
+def test_protects_ignores_an_empty_path_and_a_missing_file() -> None:
+    assert not guard.protects("")
+    assert not guard.protects("/nonexistent/notes.md")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"printf 'a\\nb\\n' | xargs -n1 sh -c '{listing('example/one')}'",
+        f"xargs -n 1 {listing('example/one')}",
+        f"parallel {listing('example/one')}",
+        f"seq 2 | /usr/bin/xargs -I{{}} {listing('example/one')}",
+    ],
+)
+def test_xargs_and_parallel_cannot_repeat_a_listing(
+    command: str, grant_file: Path
+) -> None:
+    assert guard.inspect(command)[0] == guard.REPEAT_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'xargs -n1 sh -c \'gh r""un list -R example/one --limit 100 --json '
+        + FIELDS
+        + "'",
+        "env -S 'xargs -n1 sh -c \"" + listing("example/one") + "\"'",
+        'env xargs -n1 sh -c \'gh r""un list -R example/one --limit 100 --json '
+        + FIELDS
+        + "'",
+        'parallel sh -c \'gh r""un list -R example/one --limit 100 --json '
+        + FIELDS
+        + "'",
+    ],
+)
+def test_a_repeater_cannot_spend_the_allowance_through_wrapping_or_quoting(
+    command: str, grant_file: Path
+) -> None:
+    assert guard.inspect(command)[0] is not None
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+def test_a_grant_of_deeply_nested_json_denies_a_listing(grant_file: Path) -> None:
+    grant_file.write_text("[" * 100_000)
+    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+
+
+def test_a_count_of_deeply_nested_json_denies_a_listing(grant_file: Path) -> None:
+    (grant_file.parent / "allowance.count").write_text("[" * 100_000)
+    assert guard.inspect(listing(REPOS[0]))[0] == guard.POLL_REASON
+
+
+QUOTED_LIST = "'gh r\"\"un list -R example/three --json databaseId'"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf 'list -R example/one --limit 100 --json "
+        + FIELDS
+        + "\\n' | xargs -L1 gh run",
+        "xargs -L1 -a args gh run",
+        "parallel gh run :::: args",
+    ],
+)
+def test_a_repeater_cannot_take_the_listing_words_from_input(
+    command: str, grant_file: Path
+) -> None:
+    assert guard.inspect(command)[0] == guard.REPEAT_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+def test_xargs_may_run_other_gh_commands() -> None:
+    assert guard.inspect("echo 1 2 | xargs -n1 gh pr view")[0] is None
+
+
+def test_parallel_may_run_other_commands() -> None:
+    assert guard.inspect("parallel -j2 echo ::: a b")[0] is None
+
+
+@pytest.mark.parametrize(
+    "prefix", ["> result ", ">result ", "2>/dev/null ", "2> err ", "< in ", ">> log "]
+)
+def test_a_leading_redirect_still_spends_the_allowance(
+    prefix: str, grant_file: Path
+) -> None:
+    assert guard.inspect(prefix + listing(REPOS[0]))[0] is None
+    count = json.loads((grant_file.parent / "allowance.count").read_text())
+    assert count == {REPOS[0]: 1}
+    assert guard.inspect(prefix + listing(REPOS[0]))[0] == guard.POLL_REASON
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"repos": {"example/one": 1}, "expires": "2999-01-01"}',
+        '{"repos": ["example/one", 3], "expires": "2999-01-01"}',
+        '{"repos": "example/one", "expires": "2999-01-01"}',
+        '{"repos": ["", "example/one/"], "expires": "2999-01-01"}',
+        '{"repos": ["."], "expires": "2999-01-01"}',
+        '{"repos": ["../.."], "expires": "2999-01-01"}',
+        '{"repos": ["./.", "example/.."], "expires": "2999-01-01"}',
+        '{"repos": ["example\u00e4/one"], "expires": "2999-01-01"}',
+        '{"repos": ["example/one", "x"], "expires": "2999-01-01"}',
+    ],
+)
+def test_allowance_refuses_a_grant_with_a_malformed_repository_list(
+    text: str, grant_file: Path
+) -> None:
+    grant_file.write_text(text)
+    assert guard.inspect(listing("example/one"))[0] == guard.POLL_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+def test_allowance_counts_case_variants_of_a_repository_once(
+    grant_file: Path,
+) -> None:
+    assert guard.inspect(listing("example/one"))[0] is None
+    for variant in ("Example/One", "EXAMPLE/ONE", "example/One"):
+        assert guard.inspect(listing(variant))[0] == guard.POLL_REASON
+    count = json.loads((grant_file.parent / "allowance.count").read_text())
+    assert count == {"example/one": 1}
+
+
+def test_allowance_matches_a_grant_in_another_case(grant_file: Path) -> None:
+    grant_file.write_text('{"repos": ["Example/One"], "expires": "2999-01-01"}')
+    assert guard.inspect(listing("example/one"))[0] is None
+
+
+def test_xargs_cannot_repeat_a_listing_split_by_a_line_continuation(
+    grant_file: Path,
+) -> None:
+    script = listing("example/one").replace("run list", "run \\\nlist")
+    command = f"printf 'a\\nb\\n' | xargs -n1 sh -c '{script}'"
+    assert guard.inspect(command)[0] == guard.REPEAT_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+def test_a_link_to_the_count_file_is_protected_without_a_grant(
+    grant_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    count = grant_file.parent / "allowance.count"
+    count.write_text("{}\n")
+    link = grant_file.parent / "tally.txt"
+    os.link(count, link)
+    grant_file.unlink()
+    payload = {"tool_input": {"file_path": str(link)}}
+    monkeypatch.setattr(guard, "read_hook_stdin", lambda: payload)
+    assert guard.main() == 0
+    assert guard.PROTECT_REASON in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "name", ["gh-poll-allowance.count.lock", "gh-poll-allowance.json.bak"]
+)
+def test_a_lock_or_backup_copy_of_a_protected_file_is_protected(name: str) -> None:
+    assert guard.protects(f"/home/x/.local/state/tbhb/{name}")
+
+
+def test_an_existing_unrelated_file_is_not_protected(grant_file: Path) -> None:
+    other = grant_file.parent / "notes.txt"
+    other.write_text("x")
+    assert not guard.protects(str(other))
+
+
+def test_granted_repos_rejects_a_dotted_path_among_valid_ones() -> None:
+    with pytest.raises(ValueError, match=r"^malformed grant$"):
+        guard.granted_repos({"repos": ["example/one", "../x"]})
+
+
+def test_allowance_refuses_a_grant_that_lists_a_dotted_path_with_a_valid_one(
+    grant_file: Path,
+) -> None:
+    grant_file.write_text(
+        json.dumps({"repos": ["example/one", "../x"], "expires": "2999-01-01"})
+    )
+    assert guard.inspect(listing("example/one"))[0] == guard.POLL_REASON
+
+
+def test_allowance_creates_missing_parents_and_a_named_lock(
+    grant_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    count = grant_file.parent / "a" / "b" / "allowance.count"
+    monkeypatch.setattr(guard, "ALLOWANCE_COUNT", count)
+    assert guard.inspect(listing("example/one"))[0] is None
+    assert count.exists()
+    assert "allowance.count.lock" in {p.name for p in count.parent.iterdir()}
+
+
+def test_defaults_treat_a_call_as_not_repeated(grant_file: Path) -> None:
+    repos = ["example/a", "example/b", "example/c", "example/d"]
+    grant_file.write_text(json.dumps({"repos": repos, "expires": "2999-01-01"}))
+    words = ["-R", repos[0], *guard.ALLOWANCE_TAIL]
+    assert guard.github_poll(["run", "list", *words]) is False
+    assert guard.scan_commands(listing(repos[1]))[0] is None
+    assert guard.denial(shlex.split(listing(repos[2])), None)[0] is None
+    assert guard.checked(shlex.split(listing(repos[3])), None)[0] is None
+
+
+def test_unwrap_of_no_words_reports_no_repeater() -> None:
+    assert guard.unwrap([]) == ([], False)
+
+
+def test_repeated_scan_collects_the_programs_of_every_suffix() -> None:
+    assert guard.repeated_scan(["echo", "ls"]) == (None, {"echo", "ls"})
+
+
+def test_edited_file_names_nothing_for_other_calls() -> None:
+    assert guard.edited_file({}) == ""
+    assert guard.edited_file({"tool_input": {"file_path": 5}}) == ""
+    assert guard.edited_file({"tool_input": {"file_path": "/a/b"}}) == "/a/b"
+
+
+def test_protects_matches_the_link_name_and_the_target_name_in_any_case(
+    tmp_path: Path,
+) -> None:
+    plain = tmp_path / "plain.txt"
+    plain.write_text("x")
+    by_link = tmp_path / "GH-POLL-ALLOWANCE.json"
+    by_link.symlink_to(plain)
+    assert guard.protects(str(by_link))
+    target = tmp_path / "GH-POLL-ALLOWANCE.COUNT"
+    target.write_text("x")
+    link = tmp_path / "innocent"
+    link.symlink_to(target)
+    assert guard.protects(str(link))
+
+
+def test_a_count_key_in_another_case_still_counts_as_spent(grant_file: Path) -> None:
+    (grant_file.parent / "allowance.count").write_text('{"Example/One": 1}')
+    assert guard.inspect(listing("example/one"))[0] == guard.POLL_REASON
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "printf 'list\\nlist\\n' | env -S 'xargs -L1 gh run'",
+        "env -S 'parallel gh run'",
+        "printf 'a\\nb\\n' | xargs -n 1 sh -c " + QUOTED_LIST,
+        "printf 'a\\nb\\n' | xargs -L 1 sh -c 'gh r\"\"un list -R example/three'",
+    ],
+)
+def test_a_repeater_hidden_in_an_option_value_or_env_string_is_denied(
+    command: str, grant_file: Path
+) -> None:
+    assert guard.inspect(command)[0] is not None
+    assert not (grant_file.parent / "allowance.count").exists()
+
+
+def test_flattened_splits_quoted_words_to_a_depth() -> None:
+    assert guard.flattened(["env", "-S", "xargs gh r''un"]) == [
+        "env", "-S", "xargs", "gh", "run",
+    ]  # fmt: skip
+    assert guard.flattened(["a b"], depth=0) == ["a b"]
+    assert guard.flattened(["'a b'"], depth=0) == ["'a b'"]
+    assert guard.flattened(['x."count"']) == ["x.count"]
+    assert guard.flattened(["plain"]) == ["plain"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'rm ~/.local/state/tbhb/gh-poll-allowance."count"',
+        "rm ~/.local/state/tbhb/gh-poll-allowance.'count'",
+        "rm -rf ~/.local/state/tbhb",
+        "rm -rf ~/.local/state/tbhb/",
+        "rm -rf $HOME/.local/state/tbhb",
+        "rm -rf ${HOME}/.local/state",
+        "cp -a ~/.local/state/tbhb /tmp/snap",
+        "mv /tmp/snap ~/.local/state/tbhb",
+        "env rm -rf ~/.local",
+        "rm -rf ~/.local/state/TBHB",
+        f"rm -rf {HOME.upper()}/.local/state/tbhb",
+        "RM -rf ~/.local/state/tbhb",
+        "/BIN/RM -rf ~/.local/state/tbhb",
+        "rm -rf ~/.local/state/tbhb/*",
+        "rm ~/.local/state/tbhb/gh-poll-*",
+        "rm ~/.local/state/tbhb/gh-poll-allowance.{count,json}",
+        "rm ~/.local/state/{t..t}bhb/*",
+        "rm ~/.local/state/{t..t..1}bhb/*",
+        "rm ~/.local/state/{b..z..2}bhb/*",
+        "cp x --target-directory=~/.local/state/tbhb",
+        "cp x -t$HOME/.local/state/tbhb",
+        'echo go | r""m -r $HOME/.local/state/tbhb',
+        "rm ~/.local/state/tbhb/*.lock",
+        "rm ~/.local/state/tbhb/gh-poll-allowance.count.lock",
+        "rm ~/.local/state/tbhb/gh-poll-allowance.{c..c}o{u..u}nt",
+        "rm ~/.local/state/tbhb/gh-poll-allowance.{j..k}son",
+        "rm ~/.local/state/tbhb/gh-poll-allowance.{k..j}son",
+        "rm -r {~,/x}/.local/state/tbhb",
+        "rm {~,/x}/.local/state/tbhb/*",
+        "rm {/x,$HOME}/.local/state/tbhb",
+        "rm ~/.local/state/tbhb/gh-poll-allowance.*",
+        "rm -rf ~/.local/state/tb*",
+        "rm ~/.local/state/tbhb/../tbhb/*",
+        "rm ~/.local/state/x/../tbhb/gh-poll-*",
+        "rm ~/.local/state/tbhb/./*",
+        "rm $HOME/.local/state/./tbhb//*",
+        "rm ${HOME}/.local/state/x/../tbhb/gh-poll-allowance.{count,json}",
+        f"rm /{HOME}/.local/state/tbhb/*",
+        f"rm {HOME}/.local/state/tbhb/../tbhb/*",
+        "rm $HOME/.local/state/tbhb/../tbhb/*",
+        "rm ${HOME}/.local/state/x/../tbhb/gh-poll-*",
+        f"sh -c 'rm {HOME}/.local/state/tbhb/../tbhb/*'",
+        "eval 'rm ~/.local/state/x/../tbhb/gh-poll-*'",
+        f"rm -rf {ROOT}/*/.local/state/tbhb",
+        f"rm -rf {HOME_GLOB}/.local/state/tbhb",
+        f"rm -rf {ROOT}/{OWNER[0]}*/.local/state",
+        f"rm -rf {HOME[:3]}{{{HOME[3:5]},x}}{HOME[5:]}/.local/state/tbhb",
+        f"echo {HOME}/.local/state/tbhb/* | xargs rm",
+        "ls ~/.local/state/tbhb/* | parallel rm -f",
+        "echo '~/.local/state/tbhb/*' | xargs -n1 /bin/rm",
+        f"rm {HOME}/.local/state/tbhb/x/../*",
+        "rm ~/.local/state/tbhb/.//?h-poll-allowance.json",
+        "rm -rf ~/.local/st[a]te/tbhb",
+        "rm -rf ~/.local/state/tbhb/?h-poll-allowance.json",
+    ],
+)
+def test_protected_names_are_read_after_unquoting_and_the_state_directory_is_kept(
+    command: str,
+) -> None:
+    assert guard.inspect(command)[0] == guard.PROTECT_REASON
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf /tmp/snap",
+        "rm -rf ~/.local/state/other",
+        "ls ~/.local/state/tbhb",
+        "cp -a /tmp/a /tmp/b",
+        "rm -rf relative/dir",
+        "rm ~/.local/state/tbhb/other-*",
+        "rm -rf /srv-unrelated/*",
+        "rm -rf ~/.local/state/other/*",
+        "rm *",
+        f"echo {HOME}/.local/state/other/* | xargs rm",
+        "ls ~/.local/state/tbhb | xargs echo",
+        f"rm {HOME}/.local/state/tbhb/../other/*",
+        f"rm -rf {ROOT}/*/Library",
+        "rm /{a,b}/c",
+    ],
+)
+def test_other_paths_and_programs_pass_the_state_directory_check(command: str) -> None:
+    assert guard.inspect(command)[0] is None
+
+
+@pytest.mark.parametrize(
+    ("word", "expected"),
+    [
+        ("~/.local/state/tbhb", True),
+        ("~/.local/state/tbhb/", True),
+        ("$HOME/.local/state", True),
+        ("${HOME}/.local", True),
+        ("~/.local/state/tbhb/sub", False),
+        ("~/.local/state/other", False),
+        ("~/.local/state/TBHB", True),
+        ("~/.local/state/tbhb/*", True),
+        ("~/.local/state/tbhb/other-*", False),
+        ("*", False),
+        ("~/.local/state/tbhb/../tbhb/*", True),
+        ("~/.local/state/x/../tbhb/gh-poll-*", True),
+        ("~/.local/state/tbhb/../other/*", False),
+        (f"/{HOME}/.local/state/tbhb/*", True),
+        (f"{ROOT}/*/.local/state/tbhb", True),
+        (f"{HOME}/.local/state/tbhb/../tbhb/*", True),
+        (f"{HOME}/.local/{{state,bin}}/tbhb", True),
+        (f"{HOME}/.local/state/tbhb/../other/*", False),
+        ("/{a,b}/c", False),
+        ("~/.local/state/{t..t}bhb/*", True),
+        ("~/.local/state/{b..z..2}bhb/*", True),
+        ("~/.local/state/{a..z..2}bhb/*", False),
+        ("~/.local/state/tbhb/*.lock", True),
+        ("~/{a..z}{a..z}{a..z}/x", True),
+        ("~/{1..99999999999}/x", False),
+        ("~/.local/state/{a..z}bhb", True),
+        ("~/.local/state/{z..a}bhb", True),
+        ("~/.local/state/tbhb/gh-poll-allowance.{c..d}o{u..u}nt", True),
+        ("~/.local/state/tbhb/gh-poll-allowance.{1..-1}x", False),
+        ("~/.local/state/{x..y}/z", False),
+        ("{~,/x}/.local/state/tbhb", True),
+        ("{/x,~}/.local/state/tbhb", True),
+        ("{/x,/y}/.local/state/tbhb", False),
+        ("/{0..9999999999}/c", False),
+        ("~/{a..p}{a..p}{a..p}/x", False),
+        ("tbhb", False),
+        ("-rf", False),
+    ],
+)
+def test_names_state_dir(word: str, *, expected: bool) -> None:
+    assert guard.names_state_dir(word) is expected
+
+
+def test_a_grant_matches_only_the_listed_repository(grant_file: Path) -> None:
+    other = "example/unlisted"
+    assert guard.inspect(listing(other))[0] == guard.POLL_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+    assert guard.allowed_call(
+        ["-R", REPOS[0].upper(), *guard.ALLOWANCE_TAIL], {REPOS[0].lower()}
+    )
+    assert not guard.allowed_call(["-R", REPOS[0], *guard.ALLOWANCE_TAIL], {other})
+    assert not guard.allowed_call(
+        ["-R", REPOS[0].upper(), *guard.ALLOWANCE_TAIL], {REPOS[0].upper()}
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "xargs gh api repos/o/r/actions/runs",
+        "parallel gh api repos/o/r/actions/runs",
+        "parallel gh pr checks 1 --watch",
+        "xargs gh pr checks 1 --watch",
+        "xargs env -u " + TOKEN + " true",
+    ],
+)
+def test_a_repeater_still_scans_what_it_runs(command: str) -> None:
+    assert guard.inspect(command)[0] is not None
+
+
+def test_flattened_splits_nested_words_four_levels_deep() -> None:
+    levels = [shlex.join(["a", "t1"])]
+    for n in range(2, 7):
+        levels.append(shlex.join([levels[-1], f"t{n}"]))
+    # Splitting the sixth level peels it and the three below it; the second stays whole.
+    assert guard.flattened([levels[5]]) == [levels[1], "t3", "t4", "t5", "t6"]
+
+
+def test_checked_passes_the_repeated_flag_to_the_listing_check(
+    grant_file: Path,
+) -> None:
+    command = listing(REPOS[0]).split()
+    assert guard.checked(command, None, repeated=True)[0] == guard.POLL_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+    assert guard.checked(command, None)[0] is None
+    assert (grant_file.parent / "allowance.count").exists()
+
+
+@pytest.mark.parametrize("program", ["/bin/rm", "/usr/bin/env rm"])
+def test_a_program_path_does_not_hide_a_state_directory_removal(program: str) -> None:
+    assert guard.protected_words([*program.split(), "-rf", "~/.local/state/tbhb"])
+
+
+def test_inspect_passes_the_repeated_flag_to_the_scan(grant_file: Path) -> None:
+    assert guard.inspect(listing(REPOS[0]), repeated=True)[0] == guard.POLL_REASON
+    assert not (grant_file.parent / "allowance.count").exists()
+    assert guard.inspect(listing(REPOS[0]))[0] is None
+
+
+def test_inspect_denies_a_protected_name_before_scanning() -> None:
+    text = "cat <<EOF\ngh-poll-allowance.json\nEOF"
+    assert guard.scan_commands(text, repeated=False)[0] is None
+    assert guard.inspect(text) == (guard.PROTECT_REASON, set())
+
+
+@pytest.mark.parametrize("name", ["gh-poll-allowance.json", "GH-POLL-ALLOWANCE.COUNT"])
+def test_protected_words_reads_a_protected_name_in_any_case(name: str) -> None:
+    assert guard.protected_words(["cat", name])
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("xargs rm ~/.local/state/tbhb", True),
+        ("rm ~/.local/state/tbhb", False),
+        ("xargs echo ~/.local/state/tbhb", False),
+        ("xargs rm /tmp/x", False),
+    ],
+)
+def test_pipes_state_dir_needs_a_repeater_a_mover_and_a_state_path(
+    text: str, *, expected: bool
+) -> None:
+    assert guard.pipes_state_dir(text) is expected
+
+
+@pytest.mark.parametrize(
+    ("body", "items"),
+    [
+        ("a,b", ["a", "b"]),
+        ("t..t", ["t"]),
+        ("a..c", ["a", "b", "c"]),
+        ("A..C", ["A", "B", "C"]),
+        ("Z..X", ["Z", "Y", "X"]),
+        ("c..a", ["c", "b", "a"]),
+        ("1..3", ["1", "2", "3"]),
+        ("3..1", ["3", "2", "1"]),
+        ("-1..1", ["-1", "0", "1"]),
+        ("1..a", ["1..a"]),
+        ("1..10..3", ["1", "4", "7", "10"]),
+        ("10..1..4", ["10", "6", "2"]),
+        ("a..e..2", ["a", "c", "e"]),
+        ("1..3..0", ["1", "2", "3"]),
+        ("1..3..-2", ["1", "3"]),
+        ("1..9999999999", ["1..9999999999"]),
+        ("ab..c", ["ab..c"]),
+    ],
+)
+def test_brace_items_expands_a_character_or_integer_range(
+    body: str, items: list[str]
+) -> None:
+    assert guard.brace_items(body) == items
+
+
+def test_brace_items_caps_a_long_integer_range() -> None:
+    assert len(guard.brace_items("1..999999999")) == guard.BRACE_LIMIT

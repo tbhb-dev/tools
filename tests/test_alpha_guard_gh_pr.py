@@ -34,6 +34,7 @@ EDIT = (
     "`gh pr edit` is blocked. Update .github/PULL_REQUEST_DRAFT.md, "
     "then run `tbhbdev alpha pr edit --pr {n}`."
 )
+READY = "`gh pr ready` is blocked. Run `tbhbdev alpha pr ready {n}` instead."
 MERGE = (
     "`gh pr merge` is blocked. Once the PR is approved, run "
     "`tbhbdev alpha merge {n}` (add `--dry-run` to preview the squash message first)."
@@ -169,6 +170,15 @@ def test_allowed(text: str) -> None:
         ("gh pr merge --auto 8", MERGE.format(n=8)),
         ("gh pr merge", MERGE.format(n="<N>")),
         ("gh pr merge feature-branch", MERGE.format(n="<N>")),
+        ("gh pr ready 399", READY.format(n=399)),
+        ("gh pr ready", READY.format(n="<N>")),
+        (
+            "gh pr ready 399 --undo",
+            (
+                "`gh pr ready` is blocked. `tbhbdev alpha pr ready` has no undo. "
+                "Ask the operator to return the PR to draft."
+            ),
+        ),
     ],
 )
 def test_hint(text: str, expected: str) -> None:
@@ -461,7 +471,7 @@ def test_property_quoted_text_of_a_plain_command_is_not_run(
 
 
 @given(
-    verb=st.sampled_from(["view", "list", "checks", "diff", "status", "ready"]),
+    verb=st.sampled_from(["view", "list", "checks", "diff", "status"]),
     gh=GH,
 )
 def test_property_other_pr_subcommands_are_allowed(verb: str, gh: str) -> None:

@@ -56,10 +56,11 @@ def command(arguments: list[str]) -> tuple[str, str]:
     words = shlex.split(os.environ["SSH_ORIGINAL_COMMAND"])
     if len(words) != COMMAND_WORDS or words[0] not in (
         "run-host",
+        "preflight",
         "result",
         "kill",
     ):
-        message = "expected run-host NAME, result NAME or kill NAME"
+        message = "expected run-host NAME, preflight NAME, result NAME or kill NAME"
         raise Invalid(message)
     if not NAME.fullmatch(words[1]):
         message = "invalid run name"
@@ -103,8 +104,11 @@ def envelope() -> tuple[dict[str, object], str | None]:
     return request_fields, token
 
 
-def start(files: runfiles.RunFiles, prog: str) -> int:
+def start(files: runfiles.RunFiles, prog: str, *, preflight_only: bool) -> int:
     request, token = envelope()
+    if preflight_only and token is not None:
+        message = "preflight requires a null push_token"
+        raise Invalid(message)
     body = json.dumps(request) + "\n"
     run_host.refuse_started(files)
     ownership.claim(files)
@@ -116,9 +120,9 @@ def start(files: runfiles.RunFiles, prog: str) -> int:
         stream.write(body)
         stream.flush()
         os.fsync(stream.fileno())
-    return run_host.main(
-        [files.name], f"{prog} run-host", push_token=token, claimed=True
-    )
+    arguments = [files.name, "--preflight"] if preflight_only else [files.name]
+    verb = "preflight" if preflight_only else "run-host"
+    return run_host.main(arguments, f"{prog} {verb}", push_token=token, claimed=True)
 
 
 def optional(path: Path) -> str | None:
@@ -171,8 +175,8 @@ def main(arguments: list[str], prog: str) -> int:
         files = runfiles.RunFiles(
             runfiles.state_home(Path.home()) / "tbhbdev" / "agent-runs", name
         )
-        if verb == "run-host":
-            return start(files, prog)
+        if verb in ("run-host", "preflight"):
+            return start(files, prog, preflight_only=verb == "preflight")
         if not files.path("request.json").exists():
             return 3
         return result(files) if verb == "result" else kill(files)

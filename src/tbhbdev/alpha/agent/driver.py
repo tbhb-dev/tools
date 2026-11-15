@@ -9,13 +9,13 @@ import sys
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NoReturn
 
 from tbhbdev import version
 from tbhbdev.alpha.agent import render, runfiles, taint_store, transport
 from tbhbdev.alpha.agent.decisions import driver as rules
-from tbhbdev.alpha.agent.decisions import remote, request, taint
+from tbhbdev.alpha.agent.decisions import remote, repo, request, taint
 from tbhbdev.alpha.agent.decisions import runfiles_names as files
 from tbhbdev.alpha.agent.model import Harness, Invalid, Profile, RunKind, RunRequest
 
@@ -137,7 +137,9 @@ def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
                 timeout=deadline - time.monotonic(),
             )
         except transport.TransportError:
-            state = taint.State(run.host.name, "tainted")
+            decision = taint.unreadable_marker(run.host.name)
+            print(decision.message, file=sys.stderr)
+            return decision.status
         else:
             if marker:
                 record = taint.Taint(
@@ -371,8 +373,25 @@ def wait(settings: Settings, run: Run) -> int:
                     end="",
                 )
                 print("\n" + render.INSPECTION_WARNING)
+                settle(settings, run, result)
                 return result
         time.sleep(max(0.5, poll))
+
+
+def settle(settings: Settings, run: Run, result: int) -> None:
+    if result == 0:
+        try:
+            if clean(settings, run, force=False) == 0:
+                return
+        except Invalid as error:
+            print(error, file=sys.stderr)
+        except Exception as error:  # noqa: BLE001 -- the result is final; a failed clean must not replace it
+            print(f"cleanup state unknown: {error}", file=sys.stderr)
+    tree = repo.clone_path(PurePosixPath("."), run.request.repo)
+    print(
+        f"{run.name}: worktree kept at "
+        f"{run.host.name}:~/{tree}/.worktrees/agent-{run.name}"
+    )
 
 
 def status(settings: Settings, run: Run) -> int:

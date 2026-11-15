@@ -1,6 +1,7 @@
 """Exclusive host-side claims for run names."""
 
 import os
+import stat
 from typing import TYPE_CHECKING
 
 from tbhbdev.alpha.agent.model import Invalid
@@ -13,7 +14,41 @@ class RunExistsError(Invalid):
     """A refused rerun must preserve its previous owner's records."""
 
 
-def claim(files: RunFiles, *, claimed: bool = False) -> None:
+OWNER_MODE = 0o600
+
+
+def verify(files: RunFiles, expected: str) -> None:
+    """Refuse unless the owner file is the driver's own private regular file."""
+    try:
+        # O_NONBLOCK keeps a FIFO planted at the path from blocking the open.
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        descriptor = os.open(files.path("owner"), flags)
+    except OSError:
+        message = f"run {files.name!r} has no usable owner file"
+        raise RunExistsError(message) from None
+    try:
+        info = os.fstat(descriptor)
+        private = (
+            stat.S_ISREG(info.st_mode)
+            and stat.S_IMODE(info.st_mode) == OWNER_MODE
+            and info.st_uid == os.getuid()
+        )
+        # Read one byte past the expected bytes so a longer file never matches.
+        wanted = f"{expected}\n".encode()
+        text = os.read(descriptor, len(wanted) + 1) if private else b""
+    finally:
+        os.close(descriptor)
+    if not expected or not private or text != wanted:
+        message = f"run {files.name!r} has a different owner"
+        raise RunExistsError(message)
+
+
+def claim(
+    files: RunFiles, *, claimed: bool = False, expected: str | None = None
+) -> None:
+    if expected is not None:
+        verify(files, expected)
+        return
     if claimed:
         return
     try:

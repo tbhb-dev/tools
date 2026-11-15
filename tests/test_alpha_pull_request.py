@@ -3284,7 +3284,7 @@ def test_checks_prints_the_head_and_each_job(
     sha = "a1b2c3d4" * 5
     data = {"headRefOid": sha, "statusCheckRollup": jobs}
     world.fake("gh", stdout=json.dumps(data))
-    assert run_main("checks", "--pr", "45") == code
+    assert run_main("checks", "45") == code
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == (f"{sha}\n{expected}", "")
     (call,) = world.calls("gh")
@@ -3305,7 +3305,7 @@ def test_checks_fails_without_any_check(
 ) -> None:
     sha = "a1b2c3d4" * 5
     world.fake("gh", stdout=json.dumps({"headRefOid": sha, "statusCheckRollup": jobs}))
-    assert run_main("checks", "--pr", "45") == 1
+    assert run_main("checks", "45") == 1
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == (f"{sha}\n", "no checks on PR 45\n")
 
@@ -3331,7 +3331,7 @@ def test_checks_names_a_check_without_a_name(
     with pytest.raises(
         SystemExit, match=r"^a check of the rollup has no usable name or context"
     ):
-        run_main("checks", "--pr", "45")
+        run_main("checks", "45")
 
 
 @pytest.mark.parametrize("rollup", [7, True, "bad", {"a": 1}])
@@ -3341,7 +3341,7 @@ def test_checks_refuses_a_rollup_that_is_not_a_list(
     data = {"headRefOid": "a1b2c3d4" * 5, "statusCheckRollup": rollup}
     world.fake("gh", stdout=json.dumps(data))
     with pytest.raises(SystemExit, match=r"^the checks of PR 45 aren't a list"):
-        run_main("checks", "--pr", "45")
+        run_main("checks", "45")
 
 
 @pytest.mark.parametrize("job", [None, "bad", 7, []])
@@ -3351,7 +3351,7 @@ def test_checks_refuses_an_entry_that_is_not_an_object(
     data = {"headRefOid": "a1b2c3d4" * 5, "statusCheckRollup": [job]}
     world.fake("gh", stdout=json.dumps(data))
     with pytest.raises(SystemExit, match=r"^a check of the rollup isn't an object"):
-        run_main("checks", "--pr", "45")
+        run_main("checks", "45")
 
 
 @pytest.mark.parametrize(
@@ -3377,12 +3377,12 @@ def test_checks_stops_when_the_pr_cannot_be_read(
     with pytest.raises(
         SystemExit, match=f"^cannot read checks of PR 45: {re.escape(why)}$"
     ):
-        run_main("checks", "--pr", "45")
+        run_main("checks", "45")
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == ("", "")
 
 
-@pytest.mark.parametrize("argv", [(), ("--pr", "abc")])
+@pytest.mark.parametrize("argv", [(), ("abc",)])
 def test_checks_requires_a_pr_number(argv: tuple[str, ...]) -> None:
     with pytest.raises(SystemExit) as info:
         run_main("checks", *argv)
@@ -3411,7 +3411,7 @@ def gh_argvs(world: World) -> list[list[str]]:
 
 def test_ready_marks_the_pull_request_ready(world: World) -> None:
     world.fake("gh", cases=ready_cases())
-    assert run_main("ready", "--pr", "45") == 0
+    assert run_main("ready", "45") == 0
     assert gh_argvs(world) == [
         ["repo", "view", ORIGIN, "--json", "nameWithOwner,url"],
         [
@@ -3459,7 +3459,7 @@ def test_ready_refuses_a_login_that_is_not_the_agents(
     cases = ready_cases(author=author, me=me)
     world.fake("gh", cases=cases)
     with pytest.raises(SystemExit, match=r"isn't this agent's account$"):
-        run_main("ready", "--pr", "45")
+        run_main("ready", "45")
     assert not any(a[:2] == ["pr", "ready"] for a in gh_argvs(world))
 
 
@@ -3469,7 +3469,7 @@ def test_ready_refuses_when_a_login_is_unreadable(world: World, failing: str) ->
     cases[failing] = {"rc": 1, "stdout": "agent\n", "stderr": "bad\n token"}
     world.fake("gh", cases=cases)
     with pytest.raises(SystemExit, match=r"isn't this agent's account: bad token$"):
-        run_main("ready", "--pr", "45")
+        run_main("ready", "45")
     assert not any(a[:2] == ["pr", "ready"] for a in gh_argvs(world))
 
 
@@ -3493,7 +3493,7 @@ def test_ready_refusal_redacts_and_bounds_gh_stderr(
     cases[READY_VIEW] = {"rc": 1, "stdout": "agent\n", "stderr": stderr}
     world.fake("gh", cases=cases)
     with pytest.raises(SystemExit) as info:
-        run_main("ready", "--pr", "45")
+        run_main("ready", "45")
     message = str(info.value)
     assert message.endswith(f"account: {shown}")
 
@@ -3505,7 +3505,7 @@ def test_ready_acts_on_origin_even_when_gh_defaults_elsewhere(
     monkeypatch.setenv("GH_REPO", "other.example/someone/else")
     monkeypatch.setenv("GH_HOST", "other.example")
     world.fake("gh", cases=ready_cases())
-    assert run_main("ready", "--pr", "45") == 0
+    assert run_main("ready", "45") == 0
     pinned = [a for a in gh_argvs(world) if a[:2] in (["pr", "view"], ["pr", "ready"])]
     assert len(pinned) == 2
     assert all(a[a.index("--repo") + 1] == READY_REPO for a in pinned)
@@ -3689,13 +3689,31 @@ def test_delete_branch_passes_gh_output_and_exit_code_through(
     assert capsys.readouterr() == ("out\n", "err\n")
 
 
+def test_ready_marks_each_pull_request_in_order(world: World) -> None:
+    cases = ready_cases()
+    cases[READY_VIEW.replace("view 45", "view 46")] = cases[READY_VIEW]
+    world.fake("gh", cases=cases)
+    assert run_main("ready", "45", "46") == 0
+    marked = [a[2] for a in gh_argvs(world) if a[:2] == ["pr", "ready"]]
+    assert marked == ["45", "46"]
+
+
+def test_ready_stops_at_the_first_failure(world: World) -> None:
+    cases = ready_cases()
+    cases["pr ready"] = {"rc": 3, "stdout": "", "stderr": ""}
+    world.fake("gh", cases=cases)
+    assert run_main("ready", "45", "46") == 3
+    assert [a[2] for a in gh_argvs(world) if a[:2] == ["pr", "ready"]] == ["45"]
+    assert not any(a[:3] == ["pr", "view", "46"] for a in gh_argvs(world))
+
+
 def test_ready_passes_gh_output_and_exit_code_through(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
     cases = ready_cases()
     cases["pr ready"] = {"rc": 3, "stdout": "out\n", "stderr": "err\n"}
     world.fake("gh", cases=cases)
-    assert run_main("ready", "--pr", "45") == 3
+    assert run_main("ready", "45") == 3
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == ("out\n", "err\n")
 
@@ -3708,7 +3726,7 @@ def test_ready_requires_a_pr_number() -> None:
 
 def test_ready_rejects_a_pr_that_is_not_a_number() -> None:
     with pytest.raises(SystemExit) as info:
-        run_main("ready", "--pr", "abc")
+        run_main("ready", "abc")
     assert info.value.code == 2
 
 

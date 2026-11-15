@@ -11,6 +11,10 @@ common --repo_env=DO_NOT_TRACK=1
 # hidden directories. Clones keep their old bazel-* links until Bazel runs again.
 common --symlink_prefix=.bazel-
 
+# Stop an idle Bazel server after ten minutes, so a finished agent run or an
+# abandoned worktree doesn't leave its server holding memory until a reboot.
+startup --max_idle_secs=600
+
 common --lockfile_mode=error
 
 # Fail when a bazel_dep version is lower than what the module graph resolves

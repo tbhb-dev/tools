@@ -29,7 +29,114 @@ PATHS = "must not contain a NUL or '..' part"
 NON_BLANK = "must be a non-blank string"
 STRINGS = "must be a non-empty list of non-blank strings"
 POSITIVE = "must be a positive integer"
+HTTPS = "must be an https URL with no credentials, path, query or fragment"
+OTEL_HOST = "otlp.example.net"
 DURATION = "must be bare seconds or a number ending in s, m or h, up to 7 days"
+
+
+@pytest.mark.parametrize("entries", [[], ["tbhb-dev/tools", "github.com/a/b"]])
+def test_public_repositories(entries: list[str]) -> None:
+    assert config.parse(GOOD | {"public_repos": entries}).public_repos == tuple(entries)
+    assert config.parse(GOOD).public_repos == ()
+
+
+def with_otel(table: Table) -> Table:
+    sandbox = GOOD["sandbox"]
+    assert isinstance(sandbox, dict)
+    return GOOD | {
+        "sandbox": sandbox | {"network_domains": [OTEL_HOST]},
+        "otel": table,
+    }
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://otlp.example.net:4318",
+        "https://otlp.example.net/",
+        "https://otlp.example.net:65535",
+        "https://otlp.example.net:1",
+    ],
+)
+def test_otel_endpoint(endpoint: str) -> None:
+    parsed = config.parse(with_otel({"endpoint": endpoint}))
+    assert parsed.otel_endpoint == endpoint
+    assert config.parse(GOOD).otel_endpoint is None
+
+
+@pytest.mark.parametrize(
+    ("table", "reason"),
+    [
+        ({"endpoint": "http://otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://user:pw@otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://user@otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://:pw@otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/token"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/a b"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/a\x00b"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/a\x01b"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/a\x7fb"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/\u00e9"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:abc"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:99999"}, HTTPS),
+        ({"endpoint": 'https://otlp.example.net/a"b'}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/a\\b"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/?k=v"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/#f"}, HTTPS),
+        ({"endpoint": "https://u:p@[::1"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:65536"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:0"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:00080"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:080"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:123456"}, HTTPS),
+        ({"endpoint": "https://OTLP.example.net"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net\n"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net//"}, HTTPS),
+        ({"endpoint": " https://otlp.example.net"}, HTTPS),
+        (
+            {"endpoint": "https://other.example.net"},
+            "host must be listed in [agent.sandbox] network_domains",
+        ),
+        ({"endpoint": 1}, NON_BLANK),
+        ({}, "is required"),
+    ],
+)
+def test_otel_endpoint_refuses_invalid_values(table: Table, reason: str) -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(with_otel(table))
+    assert str(caught.value) == f"[agent.otel] endpoint {reason}"
+
+
+def test_otel_endpoint_error_never_quotes_the_credential() -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(with_otel({"endpoint": "https://user:hunter2@[::1"}))
+    assert "hunter2" not in str(caught.value)
+
+
+def test_otel_endpoint_needs_a_network_domain() -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(GOOD | {"otel": {"endpoint": "https://otlp.example.net"}})
+    assert str(caught.value) == (
+        "[agent.otel] endpoint host must be listed in [agent.sandbox] network_domains"
+    )
+
+
+def test_otel_refuses_other_keys() -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(with_otel({"endpoint": "https://otlp.example.net", "x": 1}))
+    assert str(caught.value) == "[agent.otel] x not recognized"
+
+
+@pytest.mark.parametrize("entries", [None, "a/b", [1], [""], ["../b"]])
+def test_public_repositories_refuse_invalid_entries(entries: object) -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(GOOD | {"public_repos": entries})
+    reason = (
+        "must contain valid repository arguments" if entries == ["../b"] else STRINGS
+    )
+    assert str(caught.value) == f"[agent] public_repos {reason}"
+
 
 UNSAFE_REFERENCES = [
     "a b/c/d",
@@ -77,11 +184,12 @@ GOOD: Table = {
     "codex": {"web_search": {"build": "cached", "review": "disabled"}},
     "credentials": {
         "agent": {
-            "gh": "example-vault/example-gh/token",
             "docker": "example-vault/example-docker/config",
             "reviews_app_id": "example-vault/example-app/app_id",
             "reviews_app_client_id": "example-vault/example-app/client_id",
             "reviews_app_pem": "example-vault/example-app/private_key",
+            "pull_requests_app_client_id": "example-vault/example-pr/client_id",
+            "pull_requests_app_pem": "example-vault/example-pr/private_key",
             "signing": "example-vault/example-signing/private_key",
         }
     },
@@ -132,11 +240,13 @@ EXPECTED = model.Settings(
     credentials=(
         model.Credentials(
             account="agent",
-            gh="example-vault/example-gh/token",
+            gh=None,
             docker="example-vault/example-docker/config",
             reviews_app_id="example-vault/example-app/app_id",
             reviews_app_client_id="example-vault/example-app/client_id",
             reviews_app_pem="example-vault/example-app/private_key",
+            pull_requests_app_client_id="example-vault/example-pr/client_id",
+            pull_requests_app_pem="example-vault/example-pr/private_key",
             signing="example-vault/example-signing/private_key",
         ),
     ),
@@ -174,6 +284,19 @@ def edited(*path: str | int, value: object = MISSING) -> Table:
         del holder[path[-1]]
     else:
         holder[path[-1]] = value
+    return table
+
+
+GH_REFERENCE = "example-vault/example-gh/token"
+GOOD_ACCOUNT = cast("Table", cast("Table", GOOD["credentials"])["agent"])
+
+
+def gh_only() -> Table:
+    """GOOD with `gh` in place of the pull-requests App keys."""
+    table = edited("credentials", "agent", "gh", value=GH_REFERENCE)
+    account = cast("Table", cast("Table", table["credentials"])["agent"])
+    del account["pull_requests_app_client_id"]
+    del account["pull_requests_app_pem"]
     return table
 
 
@@ -480,7 +603,7 @@ def _credential_errors() -> list[Case]:
     cases: list[Case] = []
     account = "[agent.credentials.agent]"
     for key in REFERENCE_KEYS:
-        if key in ("gh", "docker"):
+        if key in ("gh", "docker") or key.startswith("pull_requests_app"):
             continue
         _add(cases, ("credentials", "agent", key), MISSING, "is required", account)
     for key in REFERENCE_KEYS:
@@ -959,8 +1082,8 @@ def test_claude_references_refuse_openssh_query(key: str) -> None:
 
 
 def test_github_credential_is_optional() -> None:
-    parsed = config.parse(edited("credentials", "agent", "gh"))
-    assert parsed.credentials[0].gh is None
+    assert config.parse(GOOD).credentials[0].gh is None
+    assert config.parse(gh_only()).credentials[0].gh == GH_REFERENCE
 
 
 @pytest.mark.parametrize("value", ["/example/key", "/key with spaces"])
@@ -1008,3 +1131,38 @@ def test_host_tbhbdev_path(program: str | None) -> None:
             config.parse(value)
         why = "must be an absolute path" if program == "relative" else PATHS
         assert str(caught.value) == f"[[agent.host]] tbhbdev {why}"
+
+
+def test_pull_requests_app_references_are_optional() -> None:
+    table = edited("credentials", "agent", "pull_requests_app_client_id")
+    account = cast("Table", cast("Table", table["credentials"])["agent"])
+    del account["pull_requests_app_pem"]
+    parsed = config.parse(table).credentials[0]
+    assert parsed.pull_requests_app_client_id is None
+    assert parsed.pull_requests_app_pem is None
+    assert config.parse(GOOD).credentials[0].pull_requests_app_pem == (
+        "example-vault/example-pr/private_key"
+    )
+
+
+@pytest.mark.parametrize(
+    ("present", "missing"),
+    [
+        ("pull_requests_app_pem", "pull_requests_app_client_id"),
+        ("pull_requests_app_client_id", "pull_requests_app_pem"),
+    ],
+)
+def test_partial_pull_requests_app_configuration_is_refused(
+    present: str, missing: str
+) -> None:
+    assert present in GOOD_ACCOUNT
+    table = edited("credentials", "agent", missing)
+    assert refused(table) == f"[agent.credentials.agent] {missing} is required"
+
+
+def test_gh_with_the_pull_requests_app_is_refused() -> None:
+    table = edited("credentials", "agent", "gh", value=GH_REFERENCE)
+    assert refused(table) == (
+        "[agent.credentials.agent] gh must not be set with the pull_requests_app keys"
+    )
+    assert config.parse(gh_only()).credentials[0].pull_requests_app_pem is None

@@ -1,0 +1,1042 @@
+"""The audit receiver: wire contract, validation, durability and quota."""
+
+import hashlib
+import io
+import os
+import signal
+import stat
+import threading
+import time
+from pathlib import Path
+from typing import override
+lazy from collections.abc import Buffer, Callable
+
+import pytest
+
+from tbhbdev.admin import audit_receiver as receiver
+
+GENESIS = "0" * 64
+SEGMENT = 70000
+QUOTA = 200000
+
+
+def digest(line: bytes) -> str:
+    return hashlib.sha256(line.removesuffix(b"\n")).hexdigest()
+
+
+def fresh(tmp_path: Path) -> Path:
+    directory = tmp_path / "receiver"
+    directory.mkdir(mode=0o700)
+    (directory / "segment-1.jsonl").write_bytes(b"")
+    (directory / "head").write_text(f"1 0 {GENESIS} 0\n")
+    return directory
+
+
+def run(
+    directory: Path,
+    command: str | None,
+    data: bytes = b"",
+    *,
+    segment: int = SEGMENT,
+    quota: int = QUOTA,
+) -> tuple[int, bytes]:
+    out = io.BytesIO()
+    code = receiver.serve(
+        str(directory), segment, quota, command, io.BytesIO(data), out
+    )
+    return code, out.getvalue()
+
+
+def record(prev: str, extra: str = "") -> bytes:
+    return f'{{"prev": "{prev}"{extra}}}\n'.encode()
+
+
+def head_of(directory: Path) -> list[str]:
+    return (directory / "head").read_text().split()
+
+
+def test_head_of_a_fresh_receiver(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    previous = signal.getsignal(signal.SIGALRM)
+    assert run(directory, "head") == (0, f"ack 1 0 {GENESIS}\n".encode())
+    assert signal.getsignal(signal.SIGALRM) == previous
+    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        None,
+        "",
+        "heads",
+        "head ",
+        "head 1",
+        "append",
+        "append 0",
+        "append 01",
+        "append -1",
+        "append 1 2",
+        "append  1",
+        "APPEND 1",
+        "append 1\n",
+        "head\nappend 1",
+    ],
+)
+def test_other_commands_exit_nonzero_with_empty_output(
+    tmp_path: Path, command: str | None
+) -> None:
+    directory = fresh(tmp_path)
+    assert run(directory, command, record(GENESIS)) == (1, b"")
+
+
+def test_head_refuses_any_input(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    assert run(directory, "head", b"x") == (1, b"")
+
+
+@pytest.mark.parametrize(
+    ("command", "data"), [("head", b""), ("append 1", record(GENESIS))]
+)
+def test_input_without_eof_times_out_without_changing_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, data: bytes
+) -> None:
+    directory = fresh(tmp_path)
+    (directory / "segment-1.jsonl").write_bytes(b'{"partial')
+    before = {path.name: path.read_bytes() for path in directory.iterdir()}
+    monkeypatch.setattr(receiver, "READ_SECONDS", 0.05)
+    previous = signal.getsignal(signal.SIGALRM)
+    reader, writer = os.pipe()
+    out = io.BytesIO()
+    with os.fdopen(reader, "rb") as stdin, os.fdopen(writer, "wb") as sender:
+        sender.write(data)
+        sender.flush()
+        fallback = threading.Timer(0.5, sender.close)
+        fallback.start()
+        try:
+            start = time.monotonic()
+            code = receiver.serve(str(directory), SEGMENT, QUOTA, command, stdin, out)
+            assert (code, out.getvalue()) == (1, b"")
+            with pytest.raises(receiver.RejectedError, match=r"^stdin read timed out$"):
+                receiver.handle(str(directory), SEGMENT, QUOTA, command, stdin)
+            elapsed = time.monotonic() - start
+        finally:
+            fallback.cancel()
+            fallback.join()
+    assert elapsed < 0.4
+    assert signal.getsignal(signal.SIGALRM) == previous
+    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+
+
+def test_append_adds_one_line_and_acknowledges_it(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    line = record(GENESIS, ', "a": 1')
+    code, out = run(directory, "append 1", line)
+    assert (code, out) == (0, f"ack 1 1 {digest(line)}\n".encode())
+    assert (directory / "segment-1.jsonl").read_bytes() == line
+    assert head_of(directory) == ["1", "1", digest(line), str(len(line))]
+    second = record(digest(line))
+    assert run(directory, "append 2", second)[0] == 0
+    assert (directory / "segment-1.jsonl").read_bytes() == line + second
+    assert run(directory, "head")[1] == f"ack 1 2 {digest(second)}\n".encode()
+
+
+def test_a_replay_of_the_newest_line_needs_that_line(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    line = record(GENESIS)
+    run(directory, "append 1", line)
+    assert run(directory, "append 1", line) == (
+        0,
+        f"ack 1 1 {digest(line)}\n".encode(),
+    )
+    other = record("f" * 64, ', "different": true')
+    assert run(directory, "append 1", other) == (1, b"")
+    assert (directory / "segment-1.jsonl").read_bytes() == line
+
+
+def test_a_replay_of_an_older_line_answers_with_the_head_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    line = record(GENESIS)
+    second = record(digest(line))
+    run(directory, "append 1", line)
+    run(directory, "append 2", second)
+    other = record("f" * 64, ', "different": true')
+    assert run(directory, "append 1", other) == (
+        0,
+        f"ack 1 2 {digest(second)}\n".encode(),
+    )
+    assert (directory / "segment-1.jsonl").read_bytes() == line + second
+
+
+def test_an_older_replay_still_checks_size_and_byte_range_but_not_json(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    line = record(GENESIS)
+    run(directory, "append 1", line)
+    run(directory, "append 2", record(digest(line)))
+    assert run(directory, "append 1", b"not json at all\n")[0] == 0
+    assert run(directory, "append 1", b"caf\xc3\xa9\n") == (1, b"")
+    assert run(directory, "append 1", b"x" * 65536 + b"\n") == (1, b"")
+
+
+def test_a_position_past_the_next_one_is_refused(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    assert run(directory, "append 2", record(GENESIS)) == (1, b"")
+    assert head_of(directory)[1] == "0"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        b"",
+        b"\n",
+        b'{"prev": "' + b"0" * 64 + b'"}',
+        b'{"prev": "' + b"0" * 64 + b'"}\n\n',
+        b'{"prev": "' + b"0" * 64 + b'"}\n{}\n',
+        b'{"prev": "' + b"0" * 64 + b'", "a": "\xc3\xa9"}\n',
+        b'{"prev": "' + b"0" * 64 + b'", "a": "\t"}\n',
+        b'{"prev": "' + b"0" * 64 + b'", "a": "\x7f"}\n',
+        b"[]\n",
+        b'"x"\n',
+        b"{}\n",
+        b'{"prev": 1}\n',
+        b'{"prev": "' + b"0" * 63 + b'"}\n',
+        b'{"prev": "' + b"A" * 64 + b'"}\n',
+        b'{"prev": "' + b"1" * 64 + b'"}\n',
+        b'{"prev": "' + b"0" * 64 + b'", "n": NaN}\n',
+        b'{"prev": "' + b"0" * 64 + b'", "n": Infinity}\n',
+        b'{"prev": "' + b"0" * 64 + b'", "n": -Infinity}\n',
+        b'{"prev": "' + b"0" * 64 + b'", "a": 1, "a": 2}\n',
+        b'{"prev": "' + b"0" * 64 + b'", "o": {"b": 1, "b": 2}}\n',
+        b'{"prev": "' + b"0" * 64 + b'", "o": [{"b": 1, "b": 2}]}\n',
+        b'{"prev": "' + b"0" * 64 + b'",}\n',
+        b"{" * 100000 + b"\n",
+        b"x" * 65536 + b"\n",
+    ],
+)
+def test_invalid_lines_are_refused_and_change_nothing(
+    tmp_path: Path, line: bytes
+) -> None:
+    directory = fresh(tmp_path)
+    assert run(directory, "append 1", line) == (1, b"")
+    assert (directory / "segment-1.jsonl").read_bytes() == b""
+    assert head_of(directory) == ["1", "0", GENESIS, "0"]
+
+
+def test_the_largest_valid_line_is_accepted(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    prefix = b'{"prev": "' + b"0" * 64 + b'", "pad": "'
+    line = prefix + b"x" * (65536 - len(prefix) - 3) + b'"}\n'
+    assert len(line) == 65536
+    assert run(directory, "append 1", line)[0] == 0
+    too_long = prefix + b"x" * (65537 - len(prefix) - 3) + b'"}\n'
+    assert run(directory, "append 1", too_long) == (1, b"")
+
+
+def test_input_past_one_line_is_refused(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    data = record(GENESIS) + b"x" * 70000
+    assert run(directory, "append 1", data) == (1, b"")
+
+
+def test_decimal_digits_only_name_a_position(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    assert run(directory, "append " + chr(0x661), record(GENESIS)) == (1, b"")
+
+
+def test_a_missing_or_malformed_head_file_refuses(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    for text in (
+        "",
+        "1 0 " + GENESIS + "\n",
+        "1 0 " + GENESIS + " 0",
+        "0 0 " + GENESIS + " 0\n",
+        "1 -1 " + GENESIS + " 0\n",
+        "1 00 " + GENESIS + " 0\n",
+        "1 0 " + "g" * 64 + " 0\n",
+        "1 0 " + GENESIS + " 00\n",
+        "1 0 " + GENESIS + " x\n",
+        "1 0 " + GENESIS + " 0 9\n",
+    ):
+        (directory / "head").write_text(text)
+        assert run(directory, "head") == (1, b"")
+    (directory / "head").unlink()
+    assert run(directory, "head") == (1, b"")
+
+
+def test_a_head_file_that_is_not_text_refuses(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    (directory / "head").write_bytes(b"\xff\xfe\n")
+    assert run(directory, "head") == (1, b"")
+
+
+def test_recovery_truncates_a_longer_segment_and_keeps_an_equal_one(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    line = record(GENESIS)
+    run(directory, "append 1", line)
+    segment = directory / "segment-1.jsonl"
+    segment.write_bytes(line + b'{"partial')
+    assert run(directory, "head")[0] == 0
+    assert segment.read_bytes() == line
+    assert run(directory, "head")[0] == 0
+    assert segment.read_bytes() == line
+
+
+def committed(directory: Path, count: int) -> list[bytes]:
+    """Append COUNT chained lines through the receiver and return them."""
+    lines: list[bytes] = []
+    last = GENESIS
+    for _ in range(count):
+        line = record(last)
+        assert run(directory, f"append {len(lines) + 1}", line)[0] == 0
+        lines.append(line)
+        last = digest(line)
+    return lines
+
+
+def test_a_stale_head_behind_several_committed_lines_truncates_nothing(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    lines = committed(directory, 4)
+    stale = f"1 1 {digest(lines[0])} {len(lines[0])}\n"
+    (directory / "head").write_text(stale)
+    assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "more than one line follows the head"
+    assert run(directory, "append 2", lines[1]) == (1, b"")
+    assert (directory / "segment-1.jsonl").read_bytes() == b"".join(lines)
+    assert (directory / "head").read_text() == stale
+
+
+def test_recovery_drops_one_whole_uncommitted_line(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    first, second = committed(directory, 2)
+    stale = f"1 1 {digest(first)} {len(first)}\n"
+    (directory / "head").write_text(stale)
+    assert run(directory, "head")[0] == 0
+    assert (directory / "segment-1.jsonl").read_bytes() == first
+    del second
+
+
+def test_recovery_drops_an_uncommitted_line_from_an_empty_head(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    (directory / "segment-1.jsonl").write_bytes(record(GENESIS))
+    assert run(directory, "head") == (0, f"ack 1 0 {GENESIS}\n".encode())
+    assert (directory / "segment-1.jsonl").read_bytes() == b""
+
+
+def test_a_tail_of_two_lines_from_an_empty_head_refuses(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    data = record(GENESIS) + record(GENESIS)
+    (directory / "segment-1.jsonl").write_bytes(data)
+    assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "more than one line follows the head"
+    assert (directory / "segment-1.jsonl").read_bytes() == data
+
+
+def test_a_tail_longer_than_one_line_refuses(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    data = b"x" * (receiver.MAX_LINE + 2)
+    (directory / "segment-1.jsonl").write_bytes(data)
+    assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "more than one line follows the head"
+    assert (directory / "segment-1.jsonl").read_bytes() == data
+
+
+def test_a_tail_of_the_longest_line_recovers(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    (directory / "segment-1.jsonl").write_bytes(b"x" * receiver.MAX_LINE + b"\n")
+    assert run(directory, "head")[0] == 0
+    assert (directory / "segment-1.jsonl").read_bytes() == b""
+
+
+def test_a_head_length_inside_a_line_refuses_without_truncation(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    (line,) = committed(directory, 1)
+    (directory / "head").write_text(f"1 1 {digest(line)} {len(line) - 5}\n")
+    assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "the head does not end on its last line"
+    assert (directory / "segment-1.jsonl").read_bytes() == line
+
+
+def test_a_head_digest_that_names_another_line_refuses(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    first, second = committed(directory, 2)
+    (directory / "head").write_text(f"1 2 {digest(first)} {len(first + second)}\n")
+    assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "the head does not end on its last line"
+    assert (directory / "segment-1.jsonl").read_bytes() == first + second
+
+
+def test_a_head_after_a_line_over_the_limit_refuses(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    long = b"x" * receiver.MAX_LINE + b"\n"
+    (directory / "segment-1.jsonl").write_bytes(long)
+    (directory / "head").write_text(f"1 1 {digest(long)} {len(long)}\n")
+    assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "the head does not end on its last line"
+
+
+def test_a_head_after_a_line_longer_than_the_window_refuses(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    first = record(GENESIS)
+    long = b"x" * (receiver.MAX_LINE + 5) + b"\n"
+    (directory / "segment-1.jsonl").write_bytes(first + long)
+    total = len(first + long)
+    (directory / "head").write_text(f"1 2 {digest(long)} {total}\n")
+    assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "the head does not end on its last line"
+
+
+def test_a_shorter_segment_refuses_without_truncation(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    line = record(GENESIS)
+    run(directory, "append 1", line)
+    segment = directory / "segment-1.jsonl"
+    segment.write_bytes(line[:10])
+    assert run(directory, "head") == (1, b"")
+    assert run(directory, "append 2", record(digest(line))) == (1, b"")
+    assert segment.read_bytes() == line[:10]
+
+
+def test_a_missing_current_segment_refuses(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    (directory / "segment-1.jsonl").unlink()
+    assert run(directory, "head") == (1, b"")
+
+
+def test_recovery_removes_a_temporary_head_and_later_segments(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    (directory / "head.tmp").write_text("junk")
+    (directory / "segment-2.jsonl").write_bytes(b"orphan")
+    (directory / "segment-10.jsonl").write_bytes(b"orphan")
+    (directory / "notes.txt").write_text("keep")
+    (directory / "segment-x.jsonl").write_text("keep")
+    assert run(directory, "head")[0] == 0
+    names = sorted(p.name for p in directory.iterdir())
+    assert names == ["head", "lock", "notes.txt", "segment-1.jsonl", "segment-x.jsonl"]
+
+
+def test_a_full_segment_rotates_with_the_chain_continuing(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    first = record(GENESIS, ', "pad": "' + "x" * 40 + '"')
+    second = record(digest(first), ', "pad": "' + "y" * 40 + '"')
+    size = len(first) + len(second) - 1
+    assert run(directory, "append 1", first, segment=size)[0] == 0
+    assert run(directory, "append 2", second, segment=size)[0] == 0
+    assert (directory / "segment-1.jsonl").read_bytes() == first
+    assert (directory / "segment-2.jsonl").read_bytes() == second
+    assert head_of(directory) == ["2", "2", digest(second), str(len(second))]
+
+
+def test_a_line_that_just_fits_does_not_rotate(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    first = record(GENESIS)
+    second = record(digest(first))
+    size = len(first) + len(second)
+    run(directory, "append 1", first, segment=size)
+    run(directory, "append 2", second, segment=size)
+    assert not (directory / "segment-2.jsonl").exists()
+
+
+def test_rotation_truncates_a_leftover_file_of_the_new_name(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    first = record(GENESIS, ', "pad": "' + "x" * 40 + '"')
+    run(directory, "append 1", first, segment=len(first))
+    second = record(digest(first))
+    (directory / "segment-2.jsonl").write_bytes(b"stale")
+    # The stale file is removed by recovery first, then created empty.
+    assert run(directory, "append 2", second, segment=len(first))[0] == 0
+    assert (directory / "segment-2.jsonl").read_bytes() == second
+
+
+def test_a_full_quota_refuses_an_append_but_answers_head_and_replays(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    first = record(GENESIS)
+    quota = len(first) + len(record(digest(first))) - 1
+    assert run(directory, "append 1", first, quota=quota)[0] == 0
+    assert run(directory, "append 2", record(digest(first)), quota=quota) == (1, b"")
+    assert run(directory, "head", quota=quota)[0] == 0
+    assert run(directory, "append 1", first, quota=quota)[0] == 0
+    assert not (directory / "segment-2.jsonl").exists()
+
+
+def test_the_quota_counts_every_segment_and_the_rotation_case(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    first = record(GENESIS, ', "pad": "' + "x" * 40 + '"')
+    second = record(digest(first))
+    size = len(first)
+    quota = len(first) + len(second) - 1
+    run(directory, "append 1", first, segment=size, quota=quota)
+    assert run(directory, "append 2", second, segment=size, quota=quota) == (1, b"")
+    assert not (directory / "segment-2.jsonl").exists()
+    assert head_of(directory)[0] == "1"
+    exact = len(first) + len(second)
+    assert run(directory, "append 2", second, segment=size, quota=exact)[0] == 0
+
+
+def test_a_failed_sync_ends_the_request_without_an_acknowledgment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = fresh(tmp_path)
+
+    def broken(_descriptor: int) -> None:
+        raise OSError
+
+    monkeypatch.setattr(os, "fsync", broken)
+    assert run(directory, "head") == (1, b"")
+    assert run(directory, "append 1", record(GENESIS)) == (1, b"")
+
+
+def test_a_failed_write_leaves_the_head_alone_and_the_next_request_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = fresh(tmp_path)
+    line = record(GENESIS)
+    real = os.replace
+
+    def broken(*_args: object, **_kwargs: object) -> None:
+        raise OSError
+
+    monkeypatch.setattr(os, "replace", broken)
+    assert run(directory, "append 1", line) == (1, b"")
+    monkeypatch.setattr(os, "replace", real)
+    assert (directory / "segment-1.jsonl").read_bytes() == line
+    assert head_of(directory) == ["1", "0", GENESIS, "0"]
+    assert run(directory, "head")[0] == 0
+    assert (directory / "segment-1.jsonl").read_bytes() == b""
+    assert not (directory / "head.tmp").exists()
+
+
+def test_the_lock_is_held_for_the_whole_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = fresh(tmp_path)
+    import fcntl  # noqa: PLC0415
+
+    seen: list[int] = []
+    real = fcntl.flock
+
+    def spy(descriptor: int, operation: int) -> None:
+        seen.append(operation)
+        real(descriptor, operation)
+
+    monkeypatch.setattr(fcntl, "flock", spy)
+    run(directory, "head")
+    assert seen == [fcntl.LOCK_EX]
+
+
+def test_a_missing_directory_refuses(tmp_path: Path) -> None:
+    assert run(tmp_path / "nothing", "head") == (1, b"")
+
+
+def test_main_checks_the_arguments_then_serves(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    out = io.BytesIO()
+    bad: list[list[str]] = [
+        [],
+        [str(directory)],
+        [str(directory), "x", "1"],
+        [str(directory), "\u0661", "131072"],
+        [str(directory), "65535", "131072"],
+        [str(directory), "65536", "131071"],
+        [str(directory), "65536", "131072", "extra"],
+    ]
+    for argv in bad:
+        assert receiver.main(argv, "head", io.BytesIO(), out) == 1
+    assert out.getvalue() == b""
+    good = [str(directory), "65536", "131072"]
+    assert receiver.main(good, "head", io.BytesIO(), out) == 0
+    assert out.getvalue() == f"ack 1 0 {GENESIS}\n".encode()
+
+
+STANDARD = {
+    "__future__",
+    "fcntl",
+    "hashlib",
+    "json",
+    "os",
+    "pathlib",
+    "re",
+    "signal",
+    "stat",
+    "sys",
+    "typing",
+}
+
+
+def foreign_imports(source: str, path: Path) -> set[str]:
+    imports = {
+        line.split()[1].split(".")[0]
+        for line in source.splitlines()
+        if line.startswith(("import ", "from "))
+    }
+    if "mutants" in path.parts:
+        # The mutation runner's trampoline adds this import to a mutated copy.
+        imports.discard("mutmut")
+    return imports - STANDARD
+
+
+def test_the_module_imports_only_the_standard_library() -> None:
+    path = Path(receiver.__file__)
+    assert foreign_imports(path.read_text(), path) == set()
+
+
+def test_the_import_check_flags_a_real_foreign_import() -> None:
+    source = "import os\nimport httpx\nfrom cryptography import x\n"
+    assert foreign_imports(source, Path("src/audit_receiver.py")) == {
+        "httpx",
+        "cryptography",
+    }
+    assert foreign_imports("import mutmut\n", Path("src/audit_receiver.py")) == {
+        "mutmut"
+    }
+    assert foreign_imports("import mutmut\n", Path("mutants/src/r.py")) == set()
+    assert foreign_imports("import httpx\n", Path("mutants/src/r.py")) == {"httpx"}
+
+
+@pytest.mark.parametrize("is_line", [True, False])
+def test_a_short_write_refuses_the_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, is_line: bool
+) -> None:
+    directory = fresh(tmp_path)
+    real = os.write
+
+    def short(descriptor: int, data: bytes) -> int:
+        if data.startswith(b"{") is is_line:
+            return real(descriptor, data[:1])
+        return real(descriptor, data)
+
+    monkeypatch.setattr(os, "write", short)
+    assert run(directory, "append 1", record(GENESIS)) == (1, b"")
+
+
+def test_a_failed_write_during_rotation_leaves_the_head_on_the_old_segment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = fresh(tmp_path)
+    first = record(GENESIS, ', "pad": "' + "x" * 40 + '"')
+    second = record(digest(first))
+    size = len(first)
+    run(directory, "append 1", first, segment=size)
+    before = (directory / "head").read_text()
+    real = os.write
+
+    def broken(descriptor: int, data: bytes) -> int:
+        if data == second:
+            raise OSError
+        return real(descriptor, data)
+
+    monkeypatch.setattr(os, "write", broken)
+    assert run(directory, "append 2", second, segment=size) == (1, b"")
+    monkeypatch.undo()
+    assert (directory / "head").read_text() == before
+    assert run(directory, "head", segment=size)[0] == 0
+    assert not (directory / "segment-2.jsonl").exists()
+    assert (directory / "segment-1.jsonl").read_bytes() == first
+
+
+@pytest.mark.parametrize("name", ["segment-1.jsonl", "head", "lock", "head.tmp"])
+def test_a_symbolic_link_in_the_directory_is_never_followed(
+    tmp_path: Path, name: str
+) -> None:
+    directory = fresh(tmp_path)
+    target = tmp_path / "outside"
+    target.write_bytes(b"keep")
+    (directory / name).unlink(missing_ok=True)
+    (directory / name).symlink_to(target)
+    if name == "head.tmp":
+        with pytest.raises(OSError, match="symbolic links"):
+            receiver.commit_head(str(directory), (1, 0, GENESIS, 0))
+    else:
+        assert run(directory, "append 1", record(GENESIS))[0] == 1
+    assert target.read_bytes() == b"keep"
+
+
+def test_a_head_that_is_not_a_regular_file_is_refused(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    (directory / "head").unlink()
+    os.mkfifo(directory / "head")
+    assert run(directory, "head") == (1, b"")
+
+
+def test_files_are_made_private_even_when_they_began_open(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    (directory / "segment-1.jsonl").chmod(0o644)
+    (directory / "head").chmod(0o644)
+    (directory / "lock").write_bytes(b"")
+    (directory / "lock").chmod(0o666)
+    first = record(GENESIS, ', "pad": "' + "x" * 40 + '"')
+    second = record(digest(first))
+    size = len(first)
+    run(directory, "append 1", first, segment=size)
+    run(directory, "append 2", second, segment=size)
+    for name in ("segment-1.jsonl", "segment-2.jsonl", "head", "lock"):
+        assert (directory / name).stat().st_mode & 0o777 == 0o600
+
+
+def test_a_file_that_cannot_be_made_private_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = fresh(tmp_path)
+
+    def denied(_descriptor: int, _mode: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(os, "fchmod", denied)
+    assert run(directory, "head") == (1, b"")
+
+
+def test_a_count_of_thousands_of_digits_is_refused_without_a_traceback(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    assert run(directory, "append 1" + "0" * 5000, record(GENESIS)) == (1, b"")
+    assert run(directory, "append " + "9" * 19, record(GENESIS)) == (1, b"")
+    assert head_of(directory)[1] == "0"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"1 5 {'a' * 64} 0\n",
+        f"2 0 {GENESIS} 0\n",
+        f"1 0 {'a' * 64} 0\n",
+        f"1 0 {GENESIS} 9\n",
+    ],
+)
+def test_a_head_whose_fields_contradict_each_other_is_refused(
+    tmp_path: Path, text: str
+) -> None:
+    directory = fresh(tmp_path)
+    (directory / "head").write_text(text)
+    assert run(directory, "head") == (1, b"")
+
+
+def test_a_missing_earlier_segment_is_refused(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    (directory / "segment-1.jsonl").unlink()
+    (directory / "segment-2.jsonl").write_bytes(b"x")
+    (directory / "head").write_text(f"2 1 {'a' * 64} 1\n")
+    assert run(directory, "head") == (1, b"")
+
+
+def test_head_reads_at_most_one_byte_of_input(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    sizes: list[int] = []
+
+    class Spy(io.BytesIO):
+        @override
+        def read(self, size: int | None = -1) -> bytes:
+            sizes.append(-1 if size is None else size)
+            return super().read(size)
+
+    code = receiver.serve(
+        str(directory), SEGMENT, QUOTA, "head", Spy(b"x" * 100), io.BytesIO()
+    )
+    assert code == 1
+    assert sizes == [1]
+
+
+def test_a_broken_output_pipe_exits_nonzero_without_a_traceback(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+
+    class Broken(io.BytesIO):
+        @override
+        def write(self, buffer: Buffer, /) -> int:
+            raise BrokenPipeError
+
+    code = receiver.serve(
+        str(directory), SEGMENT, QUOTA, "head", io.BytesIO(), Broken()
+    )
+    assert code == 1
+
+
+def test_a_deeply_nested_line_within_the_size_limit_is_refused(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    line = b"[" * 30000 + b"]" * 30000 + b"\n"
+    assert len(line) <= receiver.MAX_LINE
+    assert run(directory, "append 1", line) == (1, b"")
+
+
+def sync_kinds(directory: Path, command: str, data: bytes = b"") -> list[str]:
+    """Each fsync of a request, as ``file`` or ``dir``, in order."""
+    kinds: list[str] = []
+    real = os.fsync
+
+    def spy(descriptor: int) -> None:
+        mode = os.fstat(descriptor).st_mode
+        kinds.append("dir" if stat.S_ISDIR(mode) else "file")
+        real(descriptor)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "fsync", spy)
+        assert run(directory, command, data)[0] == 0
+    return kinds
+
+
+def test_every_step_of_a_head_request_is_synced(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    assert sync_kinds(directory, "head") == ["file", "dir", "file", "dir"]
+
+
+def test_every_step_of_an_append_is_synced(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    kinds = sync_kinds(directory, "append 1", record(GENESIS))
+    # recovery file and dir, line, head file, rename dir, ack file and dir
+    assert kinds == ["file", "dir", "file", "file", "dir", "file", "dir"]
+
+
+def test_a_rotating_append_syncs_the_new_name_before_the_line(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    first = record(GENESIS, ', "pad": "' + "x" * 40 + '"')
+    run(directory, "append 1", first, segment=len(first))
+    kinds: list[str] = []
+    real = os.fsync
+
+    def spy(descriptor: int) -> None:
+        kinds.append("dir" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file")
+        real(descriptor)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "fsync", spy)
+        assert (
+            run(directory, "append 2", record(digest(first)), segment=len(first))[0]
+            == 0
+        )
+    assert kinds == ["file", "dir", "dir", "file", "file", "dir", "file", "dir"]
+
+
+def reason(
+    directory: Path,
+    command: str | None,
+    data: bytes = b"",
+    *,
+    segment: int = SEGMENT,
+    quota: int = QUOTA,
+) -> str:
+    """Why a request is refused."""
+    with pytest.raises(receiver.RejectedError) as caught:
+        receiver.handle(str(directory), segment, quota, command, io.BytesIO(data))
+    return str(caught.value)
+
+
+def break_head(directory: Path, text: str) -> None:
+    (directory / "head").write_text(text)
+
+
+def lose_head(directory: Path) -> None:
+    (directory / "head").unlink()
+
+
+def make_head_a_pipe(directory: Path) -> None:
+    (directory / "head").unlink()
+    os.mkfifo(directory / "head")
+
+
+def garble_head(directory: Path) -> None:
+    break_head(directory, "garbage\n")
+
+
+def contradict_head(directory: Path) -> None:
+    break_head(directory, f"1 5 {'a' * 64} 0\n")
+
+
+def lose_segment(directory: Path) -> None:
+    (directory / "segment-1.jsonl").unlink()
+
+
+def shorten_segment(directory: Path) -> None:
+    break_head(directory, f"1 1 {'a' * 64} 5\n")
+
+
+def lose_earlier_segment(directory: Path) -> None:
+    lose_segment(directory)
+    line = record("a" * 64)
+    (directory / "segment-2.jsonl").write_bytes(line)
+    break_head(directory, f"2 1 {digest(line)} {len(line)}\n")
+
+
+@pytest.mark.parametrize(
+    ("damage", "expected"),
+    [
+        (make_head_a_pipe, "not a regular file"),
+        (lose_head, "no readable head file"),
+        (garble_head, "malformed head file"),
+        (contradict_head, "head fields contradict each other"),
+        (lose_segment, "the current segment is missing"),
+        (shorten_segment, "the current segment is shorter than its head"),
+        (lose_earlier_segment, "an earlier segment is missing"),
+    ],
+)
+def test_a_damaged_directory_names_its_reason(
+    tmp_path: Path, damage: Callable[[Path], None], expected: str
+) -> None:
+    directory = fresh(tmp_path)
+    damage(directory)
+    assert reason(directory, "head") == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "data", "expected"),
+    [
+        (None, b"", "not head or append K"),
+        ("heads", b"", "not head or append K"),
+        ("head", b"x", "head takes no input"),
+        ("append 3", record(GENESIS), "a position past the next line"),
+        ("append 1", b"x" * 70000 + b"\n", "not one line within the size limit"),
+        ("append 1", b"{}", "not one line within the size limit"),
+        ("append 1", b'{"a": "\x01"}\n', "a byte outside 32 through 126"),
+        ("append 1", b'{"a": 1, "a": 2}\n', "a duplicate member name"),
+        ("append 1", b'{"a": NaN}\n', "NaN and Infinity are not JSON"),
+        ("append 1", b"not json\n", "not JSON"),
+        ("append 1", b"[1]\n", "prev is not the head digest"),
+        ("append 1", record("f" * 64), "prev is not the head digest"),
+    ],
+)
+def test_a_refused_request_names_its_reason(
+    tmp_path: Path, command: str | None, data: bytes, expected: str
+) -> None:
+    directory = fresh(tmp_path)
+    assert reason(directory, command, data) == expected
+
+
+def test_a_replay_that_is_not_the_head_line_names_its_reason(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    run(directory, "append 1", record(GENESIS))
+    other = record("f" * 64, ', "different": true')
+    assert reason(directory, "append 1", other) == (
+        "the replayed line is not the head's line"
+    )
+
+
+def test_a_full_quota_names_its_reason(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    assert reason(directory, "append 1", record(GENESIS), quota=10) == (
+        "the quota is full"
+    )
+
+
+@pytest.mark.parametrize("is_line", [True, False])
+def test_a_short_write_names_its_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, is_line: bool
+) -> None:
+    directory = fresh(tmp_path)
+    real = os.write
+
+    def short(descriptor: int, data: bytes) -> int:
+        if data.startswith(b"{") is is_line:
+            return real(descriptor, data[:1])
+        return real(descriptor, data)
+
+    monkeypatch.setattr(os, "write", short)
+    assert reason(directory, "append 1", record(GENESIS)) == "short write"
+
+
+def test_a_byte_of_126_is_inside_the_range(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    line = record(GENESIS, ', "tilde": "~ "')
+    assert run(directory, "append 1", line)[0] == 0
+
+
+def test_a_head_that_matches_its_whole_segment_is_consistent(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    line = record(GENESIS)
+    (directory / "segment-1.jsonl").write_bytes(line)
+    break_head(directory, f"1 1 {digest(line)} {len(line)}\n")
+    assert run(directory, "head") == (0, f"ack 1 1 {digest(line)}\n".encode())
+
+
+def test_the_head_file_read_is_bounded_at_512_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = fresh(tmp_path)
+    sizes: list[int] = []
+    real = os.read
+
+    def spy(descriptor: int, size: int) -> bytes:
+        sizes.append(size)
+        return real(descriptor, size)
+
+    monkeypatch.setattr(os, "read", spy)
+    assert run(directory, "head")[0] == 0
+    assert sizes == [512]
+
+
+def test_the_input_read_is_bounded_at_one_line_and_a_byte(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    sizes: list[int] = []
+
+    class Spy(io.BytesIO):
+        @override
+        def read(self, size: int | None = -1) -> bytes:
+            sizes.append(-1 if size is None else size)
+            return super().read(size)
+
+    receiver.serve(
+        str(directory), SEGMENT, QUOTA, "append 1", Spy(record(GENESIS)), io.BytesIO()
+    )
+    assert sizes == [receiver.MAX_LINE + 1]
+
+
+def test_every_file_is_opened_inside_the_directory_private_and_without_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = fresh(tmp_path)
+    calls: list[tuple[Path, int, int]] = []
+    real = os.open
+
+    def spy(path: str, flags: int, mode: int = 0o777) -> int:
+        calls.append((Path(path), flags, mode))
+        return real(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", spy)
+    run(directory, "append 1", record(GENESIS))
+    assert {path.parent for path, _flags, _mode in calls} == {directory, tmp_path}
+    names = {path.name for path, _flags, _mode in calls}
+    assert names == {"receiver", "head", "head.tmp", "lock", "segment-1.jsonl"}
+    for path, flags, mode in calls:
+        if path == directory:
+            assert flags & os.O_DIRECTORY
+        else:
+            assert mode == receiver.PRIVATE
+            assert flags & os.O_NOFOLLOW
+            assert flags & os.O_NONBLOCK
+
+
+def test_main_passes_the_segment_size_and_quota_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[object, ...]] = []
+
+    def capture(*args: object) -> int:
+        seen.append(args)
+        return 0
+
+    monkeypatch.setattr(receiver, "serve", capture)
+    stdin, stdout = io.BytesIO(), io.BytesIO()
+    assert receiver.main(["d", "65536", "131072"], "head", stdin, stdout) == 0
+    assert seen == [("d", 65536, 131072, "head", stdin, stdout)]

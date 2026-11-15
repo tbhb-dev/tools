@@ -2,9 +2,11 @@
 description: Agent isolation constraints, coordination, and cleanup.
 generated:
   - role: generated
-    harness: codex
-    model: openai:gpt-6
-    at: "2026-11-12T03:35:46Z"
+    harness: claude-code
+    model: anthropic:claude-sonnet-5-5
+    effort: medium
+    surface: cli
+    at: "2026-11-14T02:00:00Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -49,7 +51,7 @@ Each coordinator writes a per-host taint record to `$XDG_STATE_HOME/tbhbdev/agen
 
 Before a `--unsandboxed` launch, the coordinator appends a durable record using local run and authorization values. Failure to append refuses the launch. The last appended record decides trust, regardless of its timestamp. Only `clear-taint HOST --reason TEXT` clears local taint and prints the new state. A host needs an initial clearance before its first review. If the last line is incomplete, clearance moves the incomplete file aside in the same directory and starts a new file.
 
-Run-host appends `--unsandboxed` marks to `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` on the run host. A coordinator whose local record is clean reads at most 64 KiB of that marker before preflight. Any line records local taint and refuses review. A missing marker supplies no evidence of cleanliness. Read errors also refuse review. Clearance changes only this coordinator's record. An existing host marker marks it again. Operators must rebuild or check the host and address its marker before clearing the local record.
+Run-host appends `--unsandboxed` marks to `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` on the run host. A coordinator whose local record is clean reads at most 64 KiB of that marker before preflight. Any line records local taint and refuses review. A missing marker supplies no evidence of cleanliness, and a marker that exists but can't be read counts as a marker. If the ssh call that reads it fails, the launch stops with exit 66 and the message `cannot read marker (transport)`. The local record is unchanged. Clearance changes only this coordinator's record. An existing host marker marks it again. Operators must rebuild or check the host and address its marker before clearing the local record.
 
 The coordinator stores metadata under `$XDG_STATE_HOME/tbhbdev/agent-runs/` on the coordinator. The remote directory uses the same location under the run account, with `.local/state` under home as the default state directory. The transfer claims `<name>.owner` with `set -C` before extracting inputs. It refuses an existing session or any `<name>.*` file with exit status 73. A collision never kills the existing session.
 
@@ -57,7 +59,7 @@ The tmux socket is `-S <sockets_dir>/agents`. The driver creates the configured 
 
 `wait` prefers the final answer and returns the run's exit status. Its poll interval defaults to 30 seconds (`TBHB_AGENT_WAIT_POLL`). Consecutive connection failures stop after 240 seconds (`TBHB_AGENT_WAIT_UNREACHABLE`) with exit status 75. Exit codes 1 and 75 overlap with harness exit codes. Read the first result line to distinguish an unknown or unreachable run from a harness result. Agent text follows that line.
 
-Each claim writes a random run ID to the local metadata and the remote `<name>.owner` file before extracting inputs. Later commands check that ID before they act. A mismatch or missing owner archives local metadata and reports `not owner`. After a transfer error, the driver retains metadata only when a remote owner check succeeds. The driver sends the raw brief and starts run-host with the configured `--host`. Every tmux call uses `-f /dev/null`, and session creation passes an absolute executable with separate arguments.
+Each claim writes a random run ID to the local metadata and the remote `<name>.owner` file before extracting inputs. The tmux start passes that ID to run-host as `--owner`. Run-host checks `<name>.owner` first. The file must be a regular file, never a symlink. Its mode must be 0600 and its owner the running user. Its content must be the ID followed by a newline. An empty ID, a missing file, a directory, a named pipe or any other content refuses the start with exit status 1 and leaves the earlier run's files untouched. Run-host writes its log and return code for a failed start only while it holds `<name>.run.lock`. A refusal before that point leaves every record unchanged. Later commands check that ID before they act. A mismatch or missing owner archives local metadata and reports `not owner`. After a transfer error, the driver retains metadata only when a remote owner check succeeds. The driver sends the raw brief and starts run-host with the configured `--host`. Every tmux call uses `-f /dev/null`, and session creation passes an absolute executable with separate arguments.
 
 `kill` closes the tmux session to notify the supervisor with SIGHUP. The supervisor stops its children before it records the return code. The coordinator writes 137 only after the session closes and the grace period elapses without a return code. It also writes `<name>.rc.fallback`, which makes `clean` require `--force` because processes might still run.
 
@@ -80,3 +82,5 @@ The taint record is per coordinator, and the host marker is a hint that the mark
 The driver refuses reviews on a host with no record until `clear-taint`.
 
 The driver's mirror receives agent-pushed objects.
+
+A run's push reads the private-name list at `.local/state/tbhb/private-repos.txt` in the agent home. The file must belong to the agent account, and its mode must clear the group and other write bits. On a host whose file-creation mask is 002, which is the Ubuntu default, create the file with mode 0644 or tighter, or the push refuses.

@@ -2,9 +2,11 @@
 description: Agent settings, run requests, and host preparation.
 generated:
   - role: generated
-    harness: codex
-    model: openai:gpt-6
-    at: "2026-11-12T03:35:46Z"
+    harness: claude-code:2.1.322
+    model: anthropic:claude-sonnet-5-5
+    effort: medium
+    surface: cli
+    at: "2026-11-14T18:27:49Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -13,9 +15,13 @@ type: Reference
 
 # Agent configuration
 
-`tbhbdev alpha agent` reads the optional `[agent]` table from the user config. Calling this command requires the table and every key shown below except `max_run_minutes`, `docker`, `expires`, the host’s `tbhbdev` path, and the `[agent.codex]` table. Unreadable config fails with its path. Missing or invalid settings fail with the path, the full table name and the key, as `[agent.sandbox] audit_dir is required`. Unknown keys fail the same way at any level. `exec` validates a headless run before it contacts the host. It checks the remote version, then claims the name before it streams the inputs. A tmux session runs the host supervisor. Install that supervisor separately. `wait`, `status`, `kill`, `clean`, `keep`, `log` and `diff` use the recorded target. The parser allows and ignores `host_tag` in `[agent]` because another command reads it.
+`tbhbdev alpha agent` reads the optional `[agent]` table from the user config. Calling this command requires the table and every key shown below except `public_repos`, `[agent.otel]`, `max_run_minutes`, `docker`, `expires`, `pull_requests_app_client_id`, `pull_requests_app_pem`, the host’s `tbhbdev` path, and the `[agent.codex]` table. Unreadable config fails with its path. Missing or invalid settings fail with the path, the full table name and the key, as `[agent.sandbox] audit_dir is required`. Unknown keys fail the same way at any level. `exec` validates a headless run before it contacts the host. It checks the remote version, then claims the name before it streams the inputs. A tmux session runs the host supervisor. Install that supervisor separately. `wait`, `status`, `kill`, `clean`, `keep`, `log` and `diff` use the recorded target. The parser allows and ignores `host_tag` in `[agent]` because another command reads it.
 
-Use the hidden host command as `tbhbdev alpha agent run-host NAME [REQUEST] --host HOST [--prompt FILE]`. Supply a versioned JSON request through `REQUEST`, stdin with `REQUEST` set to `-`, or `<name>.request.json` by leaving out the path. A prompt path defaults to the run's recorded prompt. Config must list the host. During setup, run-host fetches a bare mirror under `$XDG_STATE_HOME/tbhbdev/agent-mirrors/<owner>/<repo>.git` and creates a separate clone at `<account clone>/.worktrees/agent-<name>`. It reads credentials through the secrets library. It then starts the harness with the policy's explicit environment and records its exit. Run files and the index live under `tbhbdev/agent-runs` in the state directory. SIGHUP, SIGTERM, and SIGINT stop the harness group and refresh Codex auth before run-host writes `<name>.rc`.
+Use the hidden host command as `tbhbdev alpha agent run-host NAME [REQUEST] --host HOST [--prompt FILE] [--preflight] [--owner ID]`. The driver's tmux start passes `--owner ID`, the run ID it wrote to `<name>.owner`. With the flag, run-host verifies that file and doesn't create it. Without the flag, run-host creates the owner file and refuses a name that already has one. Supply a versioned JSON request through `REQUEST`, stdin with `REQUEST` set to `-`, or `<name>.request.json` by leaving out the path. A prompt path defaults to the run's recorded prompt. Config must list the host. During setup, run-host fetches a bare mirror over HTTPS under `$XDG_STATE_HOME/tbhbdev/agent-mirrors/github.com/<owner>/<repo>.git` and creates a separate clone at `<account clone>/.worktrees/agent-<name>`. It reads credentials through the secrets library. It then starts the harness with the policy's explicit environment and records its exit. Run files and the index live under `tbhbdev/agent-runs` in the state directory. SIGHUP, SIGTERM, and SIGINT stop the harness group and refresh Codex auth before run-host writes `<name>.rc`.
+
+`public_repos` defaults to an empty list, which refuses every repository. A host launches only after its user config lists the repositories it runs. List each public repository as `owner/name` or `github.com/owner/name`, using the same form as a request's `repo`. Run-host compares the parsed repository parts and refuses unlisted repositories before creating a mirror. Mirrors fetch from `https://github.com/<owner>/<name>.git` without credentials, prompts, SSH, or token fallback. Existing mirror configs switch to HTTPS on the next run.
+
+The ssh verb `preflight NAME` requires a null `push_token` and refuses a request with a token. The local `--preflight` flag ignores any `push_token`. It prepares the workspace and credentials and loads the signing agent. It logs whether the run worktree has `.bazel_env/bin` and warns that commit hooks fail when the directory is missing, without changing the exit status. After checking the policy and harness command, it writes `preflight ok: <executable path>` to the log. It stops the signing agent and records the exit status, phase, and index entry without launching the harness. Use a fresh name for the next run. Preparation errors specify the failed step without including upstream error details.
 
 The run clone has its own copy of the mirror's object store. The mirror never prunes objects. Run-host installs the identity and pre-commit hooks from its own templates without running code from the checkout. It finishes all git operations before starting the harness. Plain git in a run clone is unsafe for host processes.
 
@@ -31,11 +37,12 @@ launch_wait_seconds = 120
 agy_timeout = "900s"
 kill_grace_seconds = 10
 max_run_minutes = 120
+public_repos = ["example-org/example-repo"]
 sockets_dir = "/example/sockets"
 
 [agent.sandbox]
 write_roots = [".cache", ".local/share/mise", ".local/state/mise"]
-network_domains = ["api.github.com"]
+network_domains = ["api.github.com", "otlp.example.net"]
 # host_path = ["/opt/agent-host/bin"]
 # codex_network_proxy_opt_out = "named reason for this host"
 # agy_unsandboxed_opt_out = "named reason for this host"
@@ -55,12 +62,16 @@ build_write = [".local/state/mise", ".local/share/mise"]
 [agent.codex]
 web_search = { build = "live", review = "live" }
 
+[agent.otel]
+endpoint = "https://otlp.example.net:4318"
+
 [agent.credentials.agent]
-gh = "example-vault/example-gh/token"
 docker = "example-vault/example-docker/config"
 reviews_app_id = "example-vault/example-app/app_id"
 reviews_app_client_id = "example-vault/example-app/client_id"
 reviews_app_pem = "example-vault/example-app/private_key"
+pull_requests_app_client_id = "example-vault/example-pr/client_id"
+pull_requests_app_pem = "example-vault/example-pr/private_key"
 signing = "example-vault/example-signing/private_key"
 
 [agent.claude]
@@ -110,9 +121,10 @@ During the build probe, the installed identity hook stamps a commit with a `Gene
 The settings have these constraints:
 
 - The connection settings default to `ssh_connect_timeout = 15`, `ssh_keepalive_seconds = 30` and `ssh_keepalive_count_max = 3`. Each is a positive integer. Codex's `web_search` also has a default. The `[agent.codex]` table and each of its keys are optional, and each profile, `build` and `review`, defaults to `live`. A key can narrow it to `cached` or `disabled`.
+- `[agent.otel]` is optional and takes one key, `endpoint`, a base `https` URL with no credentials, path, query or fragment, such as `https://otlp.example.net:4318`. Its host must also appear in `[agent.sandbox] network_domains`. That list matches hosts only, so it limits no port. The parser refuses control characters, a non-numeric, zero, zero-padded or out-of-range port and a malformed authority and quotes nothing from the value in its error. With it set, each Codex run's private `CODEX_HOME` gets a `config.toml` with an `[otel]` table that exports traces to `<endpoint>/v1/traces` and metrics to `<endpoint>/v1/metrics` over `otlp-http`. The table has no headers and sets `log_user_prompt = false`. It leaves the log exporter off, because Codex logs tool arguments and an output preview, which can hold a credential or a file's contents, and `log_user_prompt` guards only the prompt text. Whether to export logs is a later decision. Every run with an endpoint also gets `OTEL_RESOURCE_ATTRIBUTES` with `host.name` and `tbhb.account`, and a run without one gets neither the file nor the variable. Tests check the generated file and the variable. A live check against codex-cli 0.167.2 loaded the generated file from a scratch `CODEX_HOME` and accepted it, and the same file with `protocol` set to an invalid value failed with `unknown variant` at `otel.trace_exporter.protocol`, so Codex reads the exporter tables as written. The export itself is unverified end to end, as are two claims about Codex: that it honors the endpoint, and that its traces leave out tool arguments. The private `CODEX_HOME` has mode `0700`. The table contains only the endpoint URL and the prompt flag, so the endpoint's reachability is the boundary.
 - `launch_wait_seconds`, `kill_grace_seconds` and `max_run_minutes` are positive integers. `agy_timeout` is bare seconds or a duration ending in `s`, `m` or `h`, up to 7 days.
 - Path settings are non-blank strings without a null byte or a `..` part. The sandbox lists must be non-empty.
-- Every credential and profile `token` is a `vault/item/field` reference, and each part starts with a letter or digit, then continues with letters, digits, dots, `_` or `-`. `[agent.credentials.<account>]` takes one table for each account, and `docker` is optional.
+- Every credential and profile `token` is a `vault/item/field` reference, and each part starts with a letter or digit, then continues with letters, digits, dots, `_` or `-`. `[agent.credentials.<account>]` takes one table for each account, and `docker` and `gh` are optional. `pull_requests_app_client_id` and `pull_requests_app_pem` are optional too, and a table sets both or neither. A table that sets them can't also set `gh`. A build run whose account has no `gh` requests a GitHub token from that App, limited to the run's repository and to the `contents: read` permission, and writes it to the run's `gh/hosts.yml`. A build run whose account has neither doesn't get a GitHub credential. If the request fails, the launcher refuses the run with `pull-requests App token unavailable; build refused`. The token expires after an hour, and the launcher neither refreshes nor revokes it.
 - Only `signing` also accepts a field label with internal spaces and `?ssh-format=openssh`, which converts the private key to OpenSSH format in memory.
 - `default_profile` names one of the profiles, matching without regard to case, so `Primary` selects `primary`. Profile names that differ only in case fail validation. Display uses the name as written.
 - `[[agent.host]]` lists at least one host. Its `name` is lower-case, dot-separated labels, `os` is `linux` or `macos`, `shell` is `bash` or `zsh`, `account` must be one of `accounts`, and host names are unique. Every name in `accounts` needs an `[agent.credentials.<name>]` table. `proven_harnesses` is a typed list of harness names. Add a harness only after a passing live run on that host. Remove it when upgrading that harness. Run-host refuses Claude while separate tool paths for Claude (H3) and the Claude credential decision remain open.

@@ -12,10 +12,10 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr check [DRAFT]
     tbhbdev alpha pr create [DRAFT] [--dry-run]
     tbhbdev alpha pr edit [DRAFT] --pr N
-    tbhbdev alpha pr ready --pr N
+    tbhbdev alpha pr ready N [N...]
     tbhbdev alpha pr rerun N
     tbhbdev alpha pr delete-branch N
-    tbhbdev alpha pr checks --pr N
+    tbhbdev alpha pr checks N
     tbhbdev alpha pr hook claude|codex|antigravity
     tbhbdev alpha pr backfill-opened OWNER
 
@@ -81,9 +81,9 @@ request exists only warns. ``edit`` copies the live body's ``Opened-by`` line un
 and adds none when the live body has none. ``check`` rejects a draft that
 contains one.
 
-``ready --pr N`` marks pull request N ready for review with ``gh pr ready``, but only
-when its GitHub author is the account this ``gh`` runs as. It
-doesn't read a draft.
+``ready N [N...]`` marks each pull request ready for review with ``gh pr ready``,
+in order, but only when its GitHub author is the account this ``gh`` runs as. It
+stops at the first failure and doesn't read a draft.
 
 ``rerun N`` reruns only the failed jobs of the latest run for pull request N's
 current head commit with ``gh run rerun --failed``. It reports an error when
@@ -93,7 +93,7 @@ that run hasn't failed or no run exists. It doesn't read a draft.
 request in origin's repository. Fork heads, main, protected branches and
 unreadable metadata are refused. It doesn't read a draft.
 
-``checks --pr N`` prints pull request N's head SHA, then one line per check
+``checks N`` prints pull request N's head SHA, then one line per check
 with its name and conclusion. A check run that hasn't COMPLETED reads its
 status, never its conclusion; unfinished checks
 print ``PENDING``. A commit status reads only its state, and only ``SUCCESS``
@@ -1221,6 +1221,24 @@ def require_own_author(number: int, repo: str) -> None:
         raise SystemExit(f"{message}: {why}" if why else message)
 
 
+def ready(numbers: Sequence[int]) -> int:
+    """Mark each pull request ready, in order, stopping at the first failure.
+
+    Raises:
+        SystemExit: A pull request's author isn't this agent's account.
+    """
+    repo = origin_repository()
+    for number in numbers:
+        require_own_author(number, repo)
+        # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
+        # empty body: no test can tell `None` from `""`.
+        words = [GH, "pr", "ready", str(number), "--repo", f"github.com/{repo}"]
+        status = invoke_gh(words, "")[0]  # pragma: no mutate
+        if status:
+            return status
+    return 0
+
+
 def delete_pr_branch(number: int) -> int:
     """Delete a finished PR's unprotected head branch from origin only.
 
@@ -1627,10 +1645,10 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("hook").add_argument("harness", choices=[CLAUDE, CODEX, ANTIGRAVITY])
     sub.add_parser("backfill-opened").add_argument("owner")
-    sub.add_parser("ready").add_argument("--pr", type=int, required=True)
+    sub.add_parser("ready").add_argument("pr", type=int, nargs="+")
     sub.add_parser("rerun").add_argument("pr", type=int)
     sub.add_parser("delete-branch").add_argument("pr", type=int)
-    sub.add_parser("checks").add_argument("--pr", type=int, required=True)
+    sub.add_parser("checks").add_argument("pr", type=int)
     for name in ("check", "create", "edit"):
         one = sub.add_parser(name)
         one.add_argument("draft", nargs="?", type=Path, default=DRAFT)
@@ -1657,12 +1675,7 @@ def main(
     if args.command in by_pr:
         return by_pr[args.command](args.pr)
     if args.command == "ready":
-        repo = origin_repository()
-        require_own_author(args.pr, repo)
-        # `gh pr ready` never reads stdin, so an inherited stdin behaves like the
-        # empty body: no test can tell `None` from `""`.
-        words = [GH, "pr", "ready", str(args.pr), "--repo", f"github.com/{repo}"]
-        return invoke_gh(words, "")[0]  # pragma: no mutate
+        return ready(args.pr)
     try:
         return command(args, env)
     except agent_identity.AttributionError:

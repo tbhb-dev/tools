@@ -73,11 +73,3 @@ def clone_path(home: PurePath, argument: str) -> PurePath:
         Invalid: See `parts`.
     """
     return home.joinpath("Code", *parts(argument))
-
-
-def ssh_url(argument: str) -> str:
-    host, owner, name = parts(argument)
-    if host != DEFAULT_GIT_HOST:
-        message = "agent mirrors require a GitHub repository"
-        raise Invalid(message)
-    return f"git@{host}:{owner}/{name}.git"

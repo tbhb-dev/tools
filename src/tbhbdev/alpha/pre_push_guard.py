@@ -25,6 +25,7 @@ SAFE = (
     "core.pager=cat",
 )
 HOOK_ARGUMENTS = 2
+PROTECTED = frozenset({"refs/heads/main", "refs/heads/master"})
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
@@ -107,6 +108,17 @@ def commit_problems(sha: str, names: pn.Names) -> list[str]:
     return problems
 
 
+def new_commit_problems(
+    remote: str, local: str, names: pn.Names, scanned: set[str]
+) -> list[str]:
+    problems: list[str] = []
+    for sha in read_git("rev-list", local, "--not", f"--remotes={remote}").splitlines():
+        if sha not in scanned:
+            scanned.add(sha)
+            problems.extend(commit_problems(sha, names))
+    return problems
+
+
 def push_problems(remote: str, url: str, lines: Sequence[str]) -> list[str]:
     names = pn.names_for_repository(
         pn.repository_name(url or read_git("remote", "get-url", "--push", remote))
@@ -115,6 +127,12 @@ def push_problems(remote: str, url: str, lines: Sequence[str]) -> list[str]:
     scanned: set[str] = set()
     for line in lines:
         _, local, ref, old = line.split()
+        if ref in PROTECTED:
+            problems.append(
+                f"{ref}: push to a protected branch refused; "
+                "push a new branch and open a pull request"
+            )
+            continue
         if not local.strip("0"):
             continue
         if old.strip("0") and git(*SAFE, "merge-base", "--is-ancestor", old, local)[0]:
@@ -123,12 +141,7 @@ def push_problems(remote: str, url: str, lines: Sequence[str]) -> list[str]:
             )
         if names is None:
             continue
-        for sha in read_git(
-            "rev-list", local, "--not", f"--remotes={remote}"
-        ).splitlines():
-            if sha not in scanned:
-                scanned.add(sha)
-                problems.extend(commit_problems(sha, names))
+        problems.extend(new_commit_problems(remote, local, names, scanned))
     return problems
 
 

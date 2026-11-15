@@ -283,7 +283,8 @@ def test_start_command_and_absolute_program() -> None:
     assert command[:2] == ("/bin/sh", "-c")
     assert shlex.split(command[2].splitlines()[-1]) == shlex.split(
         "tmux -S '$s/agents' -f /dev/null new-session -d -s ag-example "
-        "'$HOME/.local/bin/tbhbdev' alpha agent run-host example --host example-linux"
+        "'$HOME/.local/bin/tbhbdev' alpha agent run-host example --host example-linux "
+        "--owner example-owner"
     )
     host = replace(LINUX, tbhbdev="/example path/bin/tbhbdev")
     assert remote.program(host) == "'/example path/bin/tbhbdev'"
@@ -621,7 +622,7 @@ def test_start_and_keep_with_matching_owner(host: Path) -> None:
         "from pathlib import Path\nimport sys\n"
         "assert sys.argv[3:] == ['-f', '/dev/null', 'new-session', '-d', '-s',\n"
         "    'ag-sample', '/example path/bin/tbhbdev', 'alpha', 'agent', 'run-host',\n"
-        "    'sample', '--host', 'example-linux']\n"
+        "    'sample', '--host', 'example-linux', '--owner', 'example-owner']\n"
         f"Path({str(marker)!r}).write_text('started')\n",
     )
     config = replace(LINUX, tbhbdev="/example path/bin/tbhbdev")

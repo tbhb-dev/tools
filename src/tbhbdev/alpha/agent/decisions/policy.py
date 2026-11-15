@@ -237,11 +237,9 @@ def _claude(
     # An absolute path in a Claude rule starts with a second slash.
     denied_tools = [f"{tool}(/{p}/**)" for p in deny for tool in ("Read", "Edit")]
     deny_write = (*_claude_write_denies(profile, paths), *protected)
+    # Claude ignores `Write(path)` rules and warns; `Edit(path)` covers Write.
     denied_tools.extend(
-        f"{tool}(/{p}{suffix})"
-        for p in deny_write
-        for suffix in ("", "/**")
-        for tool in ("Edit", "Write")
+        f"Edit(/{p}{suffix})" for p in deny_write for suffix in ("", "/**")
     )
     sandbox: dict[str, object] = {
         "enabled": True,

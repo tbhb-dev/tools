@@ -15,6 +15,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import NoReturn
 
+from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import (
     HOST_NAME,
     NAME,
@@ -214,6 +215,50 @@ def _network_domains(table: _Table) -> tuple[str, ...]:
     return entries
 
 
+def _public_repos(table: _Table) -> tuple[str, ...]:
+    entries = table.values.get("public_repos", [])
+    if entries == []:
+        return ()
+    values = table.strings("public_repos")
+    for value in values:
+        try:
+            repo.parts(value)
+        except Invalid:
+            table.fail("public_repos", "must contain valid repository arguments")
+    return values
+
+
+_OTEL_SHAPE = "must be an https URL with no credentials, path, query or fragment"
+# The whole URL is matched, so no other character, such as a quote, a control
+# character or an `@`, can reach the config file, and no parser error can quote
+# the value.
+_OTEL_URL = re.compile(
+    r"https://(?P<host>[a-z0-9.-]+)(?::(?P<port>[1-9][0-9]{0,4}))?/?"
+)
+MAX_PORT = 65535
+
+
+def _otel_endpoint(root: _Table, network_domains: tuple[str, ...]) -> str | None:
+    """The base URL a harness exports telemetry to, which carries no credential.
+
+    The URL has no path, so a token can't ride in it, and its host must be one
+    the runs may already reach.
+    """
+    if "otel" not in root.values:
+        return None
+    table = root.table("otel")
+    table.only("endpoint")
+    endpoint = table.text("endpoint")
+    match = _OTEL_URL.fullmatch(endpoint)
+    if match is None:
+        table.fail("endpoint", _OTEL_SHAPE)
+    if match["port"] and int(match["port"]) > MAX_PORT:
+        table.fail("endpoint", _OTEL_SHAPE)
+    if match["host"] not in network_domains:
+        table.fail("endpoint", "host must be listed in [agent.sandbox] network_domains")
+    return endpoint
+
+
 def _sandbox(table: _Table) -> Sandbox:
     table.only(
         "write_roots",
@@ -286,6 +331,13 @@ def _reviews_app(table: _Table) -> tuple[str | None, str | None, str | None]:
     )
 
 
+def _pull_requests_app(table: _Table) -> tuple[str | None, str | None]:
+    keys = ("pull_requests_app_client_id", "pull_requests_app_pem")
+    if not table.values.keys() & set(keys):
+        return None, None
+    return table.reference(keys[0]), table.reference(keys[1])
+
+
 def _credentials(table: _Table) -> tuple[Credentials, ...]:
     if not table.values:
         table.fail("account", "is required")
@@ -298,18 +350,26 @@ def _credentials(table: _Table) -> tuple[Credentials, ...]:
             "reviews_app_id",
             "reviews_app_client_id",
             "reviews_app_pem",
+            "pull_requests_app_client_id",
+            "pull_requests_app_pem",
             "signing",
         )
         app_id, client_id, pem = _reviews_app(entry)
+        pull_requests_client_id, pull_requests_pem = _pull_requests_app(entry)
+        gh = entry.reference("gh") if "gh" in entry.values else None
+        if gh is not None and pull_requests_pem is not None:
+            entry.fail("gh", "must not be set with the pull_requests_app keys")
         accounts.append(
             Credentials(
                 account=account,
-                gh=entry.reference("gh") if "gh" in entry.values else None,
+                gh=gh,
                 docker=entry.reference("docker") if "docker" in entry.values else None,
                 reviews_app_id=app_id,
                 reviews_app_client_id=client_id,
                 reviews_app_pem=pem,
                 signing=entry.reference("signing"),
+                pull_requests_app_client_id=pull_requests_client_id,
+                pull_requests_app_pem=pull_requests_pem,
             )
         )
     return tuple(accounts)
@@ -446,6 +506,8 @@ def parse(agent: dict[str, object]) -> Settings:
         "kill_grace_seconds",
         "max_run_minutes",
         "sockets_dir",
+        "public_repos",
+        "otel",
         "sandbox",
         "codex",
         "credentials",
@@ -456,6 +518,7 @@ def parse(agent: dict[str, object]) -> Settings:
         "ssh_keepalive_count_max",
         "host_tag",  # Another command reads this key.
     )
+    sandbox = _sandbox(root.table("sandbox"))
     settings = Settings(
         launch_wait_seconds=root.integer("launch_wait_seconds"),
         agy_timeout_seconds=root.duration("agy_timeout"),
@@ -464,7 +527,7 @@ def parse(agent: dict[str, object]) -> Settings:
             root.integer("max_run_minutes") if "max_run_minutes" in agent else None
         ),
         sockets_dir=root.path("sockets_dir"),
-        sandbox=_sandbox(root.table("sandbox")),
+        sandbox=sandbox,
         codex=_codex(root.table("codex") if "codex" in agent else None),
         credentials=_credentials(root.table("credentials")),
         claude=_claude(root.table("claude")),
@@ -478,6 +541,8 @@ def parse(agent: dict[str, object]) -> Settings:
         ssh_keepalive_count_max=root.integer("ssh_keepalive_count_max")
         if "ssh_keepalive_count_max" in agent
         else 3,
+        public_repos=_public_repos(root),
+        otel_endpoint=_otel_endpoint(root, sandbox.network_domains),
     )
     _check_host_accounts(settings)
     return settings

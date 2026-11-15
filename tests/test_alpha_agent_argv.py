@@ -813,6 +813,27 @@ def test_harness_output_options_belong_to_run_host() -> None:
 
 
 @pytest.mark.parametrize("kind", RunKind)
+@pytest.mark.parametrize("profile", Profile)
+def test_codex_without_github_reference_has_private_config(
+    kind: RunKind, profile: Profile
+) -> None:
+    original = settings()
+    config = dataclasses.replace(
+        original,
+        credentials=tuple(
+            dataclasses.replace(c, gh=None) for c in original.credentials
+        ),
+    )
+    command = built(Harness.CODEX, kind, profile, config=config)
+    assert command == expected(Harness.CODEX, kind, profile)
+    overrides = "\n".join(
+        value for flag, value in itertools.pairwise(command) if flag == "-c"
+    )
+    env = tomllib.loads(overrides)["shell_environment_policy"]["set"]
+    assert env["GH_CONFIG_DIR"] == f"{env['TMPDIR']}/gh"
+
+
+@pytest.mark.parametrize("kind", RunKind)
 def test_codex_build_without_github_credential(kind: RunKind) -> None:
     original = settings()
     config = dataclasses.replace(
