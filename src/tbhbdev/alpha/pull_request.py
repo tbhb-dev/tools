@@ -585,9 +585,18 @@ def key_line(error: ValidationError, frontmatter: Sequence[str]) -> int:
     )
 
 
-def find_tool(name: str) -> str:
-    """Find a tool on PATH, then through mise; exit with a clear message."""
-    found = shutil.which(name)
+def find_tool(name: str, *, unwrapped: bool = False) -> str:
+    """Find a tool on PATH, then through mise; exit with a clear message.
+
+    ``unwrapped`` skips the Bazel shims in ``.bazel_env``. For gitleaks the shim
+    is the rules wrapper, which refuses a config with ``[extend]``, and the text
+    scan writes one that has it, so the scan needs the real binary.
+    """
+    path = None
+    if unwrapped:
+        entries = os.environ.get("PATH", "").split(os.pathsep)
+        path = os.pathsep.join(e for e in entries if ".bazel_env" not in e)
+    found = shutil.which(name, path=path)
     if found:
         return found
     mise = shutil.which(MISE)
@@ -1026,7 +1035,7 @@ def scan_secrets(text: str, what: str, visibility: str) -> None:
         text,
         what,
         root=root(),
-        gitleaks=find_tool(GITLEAKS),
+        gitleaks=find_tool(GITLEAKS, unwrapped=True),
         visibility=visibility,
     )
 
