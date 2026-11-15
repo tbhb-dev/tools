@@ -1,4 +1,4 @@
-"""The argv builders are tables over literal values: no process, no file, no secret."""
+"""The argv builders use literal values and an isolated session-key path."""
 
 # ruff: noqa: S108 -- the paths are test data under /tmp that no test creates
 
@@ -10,7 +10,8 @@ import itertools
 import json
 import shlex
 import tomllib
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+from unittest.mock import patch
 
 import pytest
 from agent_example import (
@@ -28,6 +29,8 @@ from agent_example import (
 from tbhbdev.alpha.agent import model
 from tbhbdev.alpha.agent.decisions import argv, policy
 from tbhbdev.alpha.agent.model import Harness, Invalid, Os, Profile, RunKind
+
+pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
 
 
 @pytest.fixture(autouse=True)
@@ -548,12 +551,28 @@ def test_a_policy_for_another_harness_or_profile_is_refused(
     )
 
 
-def test_ssh() -> None:
-    result = argv.ssh(
-        LINUX,
-        ("example-tool", "run", "a b"),
-        connect_timeout=15,
-        keepalive=30,
+@pytest.mark.parametrize("hostname", ["example-local", "example-local.example.com"])
+@pytest.mark.parametrize("key_kind", ["missing", "file", "directory"])
+def test_ssh(isolated_home: Path, hostname: str, key_kind: str) -> None:
+    key = isolated_home / ".ssh" / "sessions" / "example-local_ed25519"
+    key.parent.mkdir(parents=True)
+    # Another machine's key must never be selected as a fallback.
+    (key.parent / "example-other_ed25519").touch()
+    if key_kind == "file":
+        key.touch()
+    elif key_kind == "directory":
+        key.mkdir()
+    with patch("socket.gethostname", return_value=hostname):
+        result = argv.ssh(
+            LINUX,
+            ("example-tool", "run", "a b"),
+            connect_timeout=15,
+            keepalive=30,
+        )
+    identity = (
+        ("-i", str(key), "-o", "IdentityAgent=none", "-o", "IdentitiesOnly=yes")
+        if key_kind == "file"
+        else ()
     )
     assert result == (
         "/usr/bin/ssh",
@@ -565,6 +584,7 @@ def test_ssh() -> None:
         "ServerAliveInterval=30",
         "-o",
         "ServerAliveCountMax=3",
+        *identity,
         "-l",
         "agent",
         "example-linux",

@@ -17,6 +17,8 @@ from tbhbdev.alpha.agent import driver, taint_store
 if TYPE_CHECKING:
     from pathlib import Path
 
+pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
+
 
 @pytest.fixture
 def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
