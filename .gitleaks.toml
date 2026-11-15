@@ -145,6 +145,14 @@ regex = '''(?:[A-Za-z]:[\\/]|/|~/)(?:[^\s"'`<>]{0,500}[\\/])?(?:\.config|\.ssh|\
 keywords = [".config", ".ssh", ".aws", ".gnupg", ".codex", ".claude"]
 
 [[rules.allowlists]]
+description = "This file states the rule's own pattern, which matches the directory names it looks for"
+paths = ['''^\.gitleaks\.toml$''']
+
+[[rules.allowlists]]
+description = "Tests that build agent paths as input for the hooks they test; the paths are fixtures, not credentials"
+paths = ['''^tests/test_alpha_(codex_trust|guard_gh_config_dir)\.py$''']
+
+[[rules.allowlists]]
 description = "The awrel MCP server reads its connect token from a file; .mcp.json names the file, not the token"
 paths = ['''^\.mcp\.json$''']
 regexTarget = "line"
