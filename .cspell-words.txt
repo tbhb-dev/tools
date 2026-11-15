@@ -302,3 +302,7 @@ wаit
 thеy
 getbasetemp
 pytestmark
+rcfile
+pipefail
+nounset
+extglob
