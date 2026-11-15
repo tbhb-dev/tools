@@ -2477,6 +2477,19 @@ def git_bytes(*args: str, cwd: Path, data: bytes | None = None) -> bytes:
     ).stdout
 
 
+def git_status_bytes(*args: str, cwd: Path) -> tuple[int, bytes]:
+    """Run git; return its exit code and raw stdout, so a path needn't be UTF-8."""
+    # No mutant of the call itself matters: `check` defaults to False and macOS
+    # finds `GIT`.
+    done = subprocess.run(  # nosec B603 B607  # pragma: no mutate
+        ["git", *args],  # pragma: no mutate
+        capture_output=True,
+        cwd=cwd,
+        check=False,  # pragma: no mutate
+    )
+    return done.returncode, done.stdout
+
+
 def staged_docs(top: Path) -> list[tuple[str, str, str]]:
     """(path, mode, blob) of each staged added or modified stampable document."""
     _, out = git(
@@ -2522,7 +2535,7 @@ def not_from_merge(
     """
     changed = []
     for head in heads:
-        code, out = git(
+        code, raw = git_status_bytes(
             "diff", "--cached", "--raw", "-z", "--no-renames", head, cwd=top
         )
         if code != 0:
@@ -2531,7 +2544,7 @@ def not_from_merge(
                 file=sys.stderr,
             )
             return docs
-        changed.append(set(out.split("\0")[1::2]))
+        changed.append({decode(path) for path in raw.split(b"\0")[1::2]})
     return [doc for doc in docs if all(doc[0] in paths for paths in changed)]
 
 

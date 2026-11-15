@@ -6337,6 +6337,24 @@ def test_staged_docs_keeps_a_file_the_merge_moved_and_edited(repo: Path) -> None
     assert [d[0] for d in ai.staged_docs(repo)] == ["docs/new.md"]
 
 
+def test_staged_docs_compares_paths_that_are_not_utf8(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Work trees on some file systems can't hold such a name, so git's output is faked.
+    stage_doc(repo, "docs/a.md", "x\n")
+    (repo / ".git" / "MERGE_HEAD").write_text("0" * 40 + "\n", encoding="ascii")
+    raw = (
+        b":100644 000000 1111111 0000000 D\0non-doc-\xff.txt\0"
+        b":100644 100644 1111111 2222222 M\0docs/a.md\0"
+    )
+
+    def fake(*_args: str, **_kwargs: Path) -> tuple[int, bytes]:
+        return 0, raw
+
+    monkeypatch.setattr(ai, "git_status_bytes", fake)
+    assert [d[0] for d in ai.staged_docs(repo)] == ["docs/a.md"]
+
+
 def test_staged_docs_after_a_cherry_pick_stamps_the_picked_file(repo: Path) -> None:
     stage_doc(repo, "docs/base.md", "base\n")
     commit(repo)
