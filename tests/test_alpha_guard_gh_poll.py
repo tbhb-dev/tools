@@ -1482,3 +1482,22 @@ def test_brace_items_expands_a_character_or_integer_range(
 
 def test_brace_items_caps_a_long_integer_range() -> None:
     assert len(guard.brace_items("1..999999999")) == guard.BRACE_LIMIT
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "seq 2 | xargs -I{} gh api 'repos/o/r/actions/runs?per_page=1'",
+        "gh run list --limit 1 --limit 100",
+        "gh run list -L 1 -L 100",
+        "gh run list -L1 -L100",
+    ],
+)
+def test_a_single_read_allowance_does_not_cover_repeats_or_a_later_limit(
+    command: str,
+) -> None:
+    assert guard.inspect(command)[0] is not None
+
+
+def test_an_attached_short_limit_of_one_is_a_single_read() -> None:
+    assert guard.inspect("gh run list -L1")[0] is None
