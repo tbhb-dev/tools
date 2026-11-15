@@ -77,6 +77,7 @@ commands:
                | rerun N: rerun failed jobs for the current head
                | delete-branch N: delete a finished PR's head branch on origin
                | close N --reason TEXT: close a pull request (--comment is an alias)
+  pr-stats     OWNER/REPO [--limit N]: cycle time of merged and closed pull requests
   review       draft N [--force] | check N: the review draft
   issue        close N --reason completed|not-planned: close an issue
   gh-app       APP OWNER/REPO [--fresh] [--dry-run] [--all-repos]: mint a GitHub
@@ -137,6 +138,12 @@ def pr(argv: list[str], prog: str) -> int:
     return pull_request.main(argv, prog=prog)
 
 
+def pr_stats_command(argv: list[str], prog: str) -> int:
+    from tbhbdev.alpha import pr_stats  # noqa: PLC0415 -- see the docstring
+
+    return pr_stats.main(argv, prog=prog)
+
+
 def review_command(argv: list[str], prog: str) -> int:
     from tbhbdev.alpha import review  # noqa: PLC0415 -- see the docstring
 
@@ -183,6 +190,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "gh-shim": gh_shim.main,
     "agent-env": gh_shim.agent_env,
     "pr": pr,
+    "pr-stats": pr_stats_command,
     "review": review_command,
     "issue": issue,
     "gh-app": gh_app_command,
