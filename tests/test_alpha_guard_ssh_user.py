@@ -27,7 +27,7 @@ NAMES = ["lab1", "lab2"]
         "ssh -qT lab1",
         "ssh tony@lab1",
         "ssh -l tony lab1",
-        "ssh -lbob lab1",
+        "ssh -l bob lab1",
         "ssh -o User=tony lab1",
         "ssh -oUser=tony lab1",
         "ssh -o 'User tony' lab1",
