@@ -63,6 +63,14 @@ def grant_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "gh run watch 42",
         "gh run ls",
         "gh run ls -R org/repo --limit 100",
+        "gh run list --limit 2",
+        "gh run list --limit 10",
+        "gh run list -L 1x",
+        "gh run list --limit",
+        "gh api 'repos/o/r/actions/runs?per_page=2'",
+        "gh api 'repos/o/r/actions/runs?per_page=1' --paginate",
+        "gh api 'repos/o/r/actions/runs?per_page=1&per_page=1'",
+        "for r in a b; do gh run list -R $r --limit 1; done",
         "gh run -R org/repo list",
         "gh run --repo=org/repo ls",
         "gh run -R org/repo watch 1",
@@ -175,6 +183,11 @@ def test_denies_polling(command: str) -> None:
         f"gh api repos/o/r/commits/{SHA}/check-runs",
         f"gh api repos/o/r/actions/runs?head_sha={SHA}",
         f"gh api 'repos/o/r/actions/runs?head_sha={SHA}&per_page=5'",
+        "gh api 'repos/o/r/actions/runs?per_page=1'",
+        "gh api 'repos/o/r/actions/workflows/w.yml/runs?per_page=1'",
+        "gh run list --limit 1",
+        "gh run list -L 1",
+        "gh run list --limit=1 -R o/r",
         "gh api rate_limit",
         "gh query rate_limit",
         "gh api -X POST repos/o/r/actions/runs",
@@ -1483,3 +1496,22 @@ def test_brace_items_caps_a_long_integer_range() -> None:
 )
 def test_a_bare_slash_word_is_not_a_state_directory(command: str) -> None:
     assert guard.inspect(command)[0] is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "seq 2 | xargs -I{} gh api 'repos/o/r/actions/runs?per_page=1'",
+        "gh run list --limit 1 --limit 100",
+        "gh run list -L 1 -L 100",
+        "gh run list -L1 -L100",
+    ],
+)
+def test_a_single_read_allowance_does_not_cover_repeats_or_a_later_limit(
+    command: str,
+) -> None:
+    assert guard.inspect(command)[0] is not None
+
+
+def test_an_attached_short_limit_of_one_is_a_single_read() -> None:
+    assert guard.inspect("gh run list -L1")[0] is None

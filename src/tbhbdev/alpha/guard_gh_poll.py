@@ -33,7 +33,8 @@ The loop rule covers the self-matching wait, ``while pgrep -f fetch.py; do
 sleep 5; done``: pgrep -f matches its own shell's command line, so the loop
 never ends. Single-object reads pass: ``actions/runs/ID``,
 ``actions/runs/ID/jobs``, ``actions/jobs/ID``, ``check-runs/ID``,
-``actions/runs?head_sha=SHA`` for one full 40-hex SHA, ``pulls/N``,
+``actions/runs?head_sha=SHA`` for one full 40-hex SHA, a list endpoint with
+``per_page=1``, ``gh run list --limit 1``, ``pulls/N``,
 ``commits/SHA/check-runs`` and ``rate_limit``. A list endpoint with an
 explicit non-GET method (``-X POST``), or with fields and no method, which gh
 sends as a POST, is a write, not a read, and passes too. The deny reason tells the
@@ -232,8 +233,11 @@ def writes(args: list[str], flags: list[str]) -> bool:
     )
 
 
-def bulk_api(args: list[str]) -> bool:
-    """Whether ``gh api`` arguments page, or read a list endpoint."""
+def bulk_api(args: list[str], *, repeated: bool = False) -> bool:
+    """Whether ``gh api`` arguments page, or read a list endpoint.
+
+    ``per_page=1`` allows a single read, never a repeated one.
+    """
     flags, endpoints = split_args(args, API_VALUE_FLAGS)
     if any(flag.partition("=")[0] == "--paginate" for flag in flags):
         return True
@@ -246,7 +250,8 @@ def bulk_api(args: list[str]) -> bool:
             continue
         heads = parse_qs(parsed.query).get("head_sha", [])
         one_sha = len(heads) == 1 and SHA.fullmatch(heads[0])
-        if not (RUNS_PATH.fullmatch(path) and one_sha):
+        one_page = not repeated and parse_qs(parsed.query).get("per_page") == ["1"]
+        if not (one_page or (RUNS_PATH.fullmatch(path) and one_sha)):
             return True
     return False
 
@@ -314,6 +319,21 @@ def spend_allowance(args: list[str]) -> bool:
     return True
 
 
+def limits_to_one(words: list[str]) -> bool:
+    """Whether ``gh run list`` words ask for one run: ``--limit 1`` or ``-L 1``.
+
+    The last limit wins, as it does in gh, and ``-L1`` counts.
+    """
+    limit = None
+    for at, word in enumerate(words):
+        flag, equals, value = word.partition("=")
+        if flag in ("--limit", "-L"):
+            limit = value if equals else "".join(words[at + 1 : at + 2])
+        elif word.startswith("-L") and not word.startswith("--"):
+            limit = word[2:]
+    return limit == "1"
+
+
 def run_poll(rest: list[str], i: int, *, repeated: bool) -> bool:
     """Whether ``gh run`` words poll; ``i`` counts the flags before ``run``."""
     j = 1
@@ -323,7 +343,10 @@ def run_poll(rest: list[str], i: int, *, repeated: bool) -> bool:
     if verb == ["watch"]:
         return True
     if verb in (["list"], ["ls"]):
-        return i > 0 or j > 1 or repeated or not spend_allowance(rest[j + 1 :])
+        tail = rest[j + 1 :]
+        if not repeated and limits_to_one(tail):
+            return False
+        return i > 0 or j > 1 or repeated or not spend_allowance(tail)
     return False
 
 
@@ -340,7 +363,7 @@ def github_poll(args: list[str], *, repeated: bool = False) -> bool:
         return run_poll(rest, i, repeated=repeated)
     if rest[:2] == ["pr", "checks"]:
         return any(w.partition("=")[0] == "--watch" for w in rest[2:])
-    return rest[:1] in (["api"], ["query"]) and bulk_api(rest[1:])
+    return rest[:1] in (["api"], ["query"]) and bulk_api(rest[1:], repeated=repeated)
 
 
 def names_token(word: str) -> bool:
