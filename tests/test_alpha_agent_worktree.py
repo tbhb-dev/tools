@@ -117,9 +117,40 @@ def test_review_detaches_at_resolved_commit(tmp_path: Path) -> None:
     assert git(path, "branch", "--show-current") == ""
 
 
+def test_seeded_commit_is_taken_from_the_clone_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed, clone = repository(tmp_path)
+    head = commit(seed, "private change")
+    git(seed, "push", "origin", "main")
+    git(clone, "fetch", "origin")
+    calls: list[tuple[str, ...]] = []
+    original = worktree.git
+
+    def offline(path: Path, *args: str) -> str:
+        calls.append(args)
+        if args[0] == "ls-remote" or "origin" in args:
+            pytest.fail("the seeded commit must not touch the network")
+        return original(path, *args)
+
+    monkeypatch.setattr(worktree, "git", offline)
+    path = worktree.create(
+        clone,
+        "seeded",
+        run_request(profile="review", commit=head),
+        ("example-org/example-repo",),
+    )
+    assert git(path, "rev-parse", "HEAD") == head
+    assert any(args[0] == "fetch" for args in calls)
+
+
 def test_missing_commit_is_refused(tmp_path: Path) -> None:
     _, clone = repository(tmp_path)
-    with pytest.raises(Invalid, match="run preparation failed at mirror fetch"):
+    with pytest.raises(
+        Invalid,
+        match=r"run preparation failed at mirror fetch \(.*\); "
+        "the commit is not in the seeded clone either",
+    ):
         worktree.create(
             clone,
             "missing",
@@ -452,15 +483,19 @@ def test_fetch_resolves_only_a_full_commit(
     def run(path: Path, *args: str) -> str:
         assert path == tmp_path
         calls.append(args)
+        if str(tmp_path / "seeded") in args:
+            raise subprocess.CalledProcessError(128, "git")
         return "ref: refs/heads/main\tHEAD" if args[0] == "ls-remote" else commit_id
 
     monkeypatch.setattr(worktree, "git", run)
     request = run_request(profile="review", commit="0" * 40)
     if commit_id == "invalid":
         with pytest.raises(Invalid, match=r"^mirror did not resolve a full commit$"):
-            worktree.fetch_commit(tmp_path, request)
+            worktree.fetch_commit(tmp_path, request, tmp_path / "seeded")
     else:
-        assert worktree.fetch_commit(tmp_path, request) == commit_id
+        assert (
+            worktree.fetch_commit(tmp_path, request, tmp_path / "seeded") == commit_id
+        )
     options = (
         "--no-recurse-submodules",
         "--no-write-fetch-head",
@@ -468,6 +503,13 @@ def test_fetch_resolves_only_a_full_commit(
         "--upload-pack=git-upload-pack",
     )
     assert calls == [
+        (
+            "fetch",
+            *options,
+            "--no-prune",
+            str(tmp_path / "seeded"),
+            f"+{'0' * 40}:refs/heads/tbhbdev-review",
+        ),
         ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD"),
         ("check-ref-format", "--branch", "main"),
         (
@@ -740,26 +782,35 @@ def test_prelaunch_git_protocol(
         "--no-tags",
         "--upload-pack=git-upload-pack",
     )
+    local = (
+        mirror,
+        (
+            "fetch",
+            *options,
+            "--no-prune",
+            str(clone),
+            f"+{full_sha}:refs/heads/tbhbdev-review",
+        ),
+    )
     common = [
         (mirror, ("init", "--bare", "--template=")),
-        (mirror, ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD")),
-        (mirror, ("check-ref-format", "--branch", "main")),
-        (
-            mirror,
+        *([local] if profile == "review" else []),
+    ]
+    if profile == "build":
+        common += [
+            (mirror, ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD")),
+            (mirror, ("check-ref-format", "--branch", "main")),
             (
-                "fetch",
-                *options,
-                "--no-prune",
-                "origin",
-                "+refs/heads/main:refs/heads/main",
-                *(
-                    (f"+{full_sha}:refs/heads/tbhbdev-review",)
-                    if profile == "review"
-                    else ()
+                mirror,
+                (
+                    "fetch",
+                    *options,
+                    "--no-prune",
+                    "origin",
+                    "+refs/heads/main:refs/heads/main",
                 ),
             ),
-        ),
-    ]
+        ]
     reference = "refs/heads/main" if profile == "build" else full_sha
     checkout = (
         ("checkout", "-b", "agent/protocol", full_sha, "--")

@@ -157,19 +157,39 @@ def default_branch(mirror: Path) -> str:
     raise Invalid(message)
 
 
-def fetch_commit(mirror: Path, request: RunRequest) -> str:
+def fetch_commit(mirror: Path, request: RunRequest, seeded: Path) -> str:
     options = (
         "--no-recurse-submodules",
         "--no-write-fetch-head",
         "--no-tags",
         "--upload-pack=git-upload-pack",
     )
+    if request.commit is not None and request.profile is not Profile.BUILD:
+        # A seeded clone may already hold the commit; try it before the network.
+        try:
+            git(
+                mirror,
+                "fetch",
+                *options,
+                "--no-prune",
+                str(seeded),
+                f"+{request.commit}:refs/heads/tbhbdev-review",
+            )
+        except subprocess.CalledProcessError:
+            pass
+        else:
+            return resolve_commit(mirror, request.commit)
     branch = default_branch(mirror)
     references = [f"+{branch}:{branch}"]
     if request.commit is not None:
         references.append(f"+{request.commit}:refs/heads/tbhbdev-review")
     git(mirror, "fetch", *options, "--no-prune", "origin", *references)
-    reference = branch if request.profile is Profile.BUILD else request.commit
+    return resolve_commit(
+        mirror, branch if request.profile is Profile.BUILD else request.commit
+    )
+
+
+def resolve_commit(mirror: Path, reference: str | None) -> str:
     commit = git(
         mirror, "rev-parse", "--verify", "--end-of-options", f"{reference}^{{commit}}"
     )
@@ -446,8 +466,13 @@ def create(
             stack.enter_context(runfiles.locked(mirror / "agent-mirror.lock"))
         with preparation_step("mirror init"):
             configure_mirror(mirror, url)
-        with preparation_step(f"mirror fetch ({url})"):
-            commit = fetch_commit(mirror, request)
+        note = (
+            ""
+            if request.commit is None or request.profile is Profile.BUILD
+            else "; the commit is not in the seeded clone either"
+        )
+        with preparation_step(f"mirror fetch ({url}){note}"):
+            commit = fetch_commit(mirror, request, clone)
         with preparation_step("clone"):
             worktree.parent.mkdir(exist_ok=True)
             clone_run(mirror, worktree, url)
