@@ -1309,7 +1309,6 @@ def test_launch_file_holds_only_the_hash_and_the_launch_time(
         ({"launch": EXAMPLE_LAUNCH, "started_at": "old", "session": "s"}, True),
         ({"launch": EXAMPLE_LAUNCH, "started_at": "old"}, True),
         ({"launch": "sha-256-64:0000000000000000", "started_at": "old"}, False),
-        ("not json", False),
     ],
 )
 def test_launch_file_keeps_its_own_launch_and_replaces_an_unclaimed_one(
@@ -1323,6 +1322,26 @@ def test_launch_file_keeps_its_own_launch_and_replaces_an_unclaimed_one(
     after = path.read_text()
     assert (after == before) is kept
     assert json.loads(after)["launch"] == EXAMPLE_LAUNCH
+
+
+@pytest.mark.parametrize("text", ["not json", "[]", "{}", ""])
+def test_unreadable_launch_file_refuses_the_run(tmp_path: Path, text: str) -> None:
+    run, prepared, path = launch_run(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+    with pytest.raises(Invalid, match="launch file is unreadable"):
+        run_host.write_launch(run, prepared)
+    assert path.read_text() == text
+
+
+def test_index_entry_holds_the_hash_and_never_the_raw_launch_id(
+    tmp_path: Path,
+) -> None:
+    run = dataclasses.replace(make_run(tmp_path), launch_id="example-launch")
+    entry = run_host.index_entry(run, preparation(run), None)
+    assert entry["launch"] == EXAMPLE_LAUNCH
+    assert "launch_id" not in entry
+    assert "example-launch" not in json.dumps(entry)
 
 
 def test_launch_file_claimed_by_another_launch_refuses_the_run(
@@ -1399,7 +1418,6 @@ def test_index_metadata_records_complete_outcome(
     monkeypatch.setattr(time, "time", lambda: 2000)
     assert run_host.index_entry(run, workspace if prepared else None, rc) == {
         "effort": run.request.effort,
-        "launch_id": "example-launch",
         "launch": EXAMPLE_LAUNCH,
         "v": 2,
         "kind": "exec",

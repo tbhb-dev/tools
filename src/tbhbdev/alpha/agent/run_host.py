@@ -572,7 +572,6 @@ def index_entry(
         "host": run.host.name,
         "worktree": prepared.paths.worktree if prepared is not None else None,
         "started": run.started,
-        "launch_id": run.launch_id,
         "launch": identity.sha256_64(run.launch_id),
         "ended": None if rc is None else time.time(),
         "rc": rc,
@@ -601,6 +600,9 @@ def write_launch(run: Run, prepared: Prepared) -> None:
     path = runfiles.private_dir(store) / "launch.json"
     launch = identity.sha256_64(run.launch_id)
     existing = identity.read_record(path)
+    if path.exists() and not existing:
+        message = "launch file is unreadable"
+        raise Invalid(message)
     if existing.get("launch") == launch:
         return
     if "session" in existing:
