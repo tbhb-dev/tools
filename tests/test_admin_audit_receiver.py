@@ -379,7 +379,7 @@ def test_a_missing_directory_refuses(tmp_path: Path) -> None:
 def test_main_checks_the_arguments_then_serves(tmp_path: Path) -> None:
     directory = fresh(tmp_path)
     out = io.BytesIO()
-    bad = [
+    bad: list[list[str]] = [
         [],
         [str(directory)],
         [str(directory), "x", "1"],
