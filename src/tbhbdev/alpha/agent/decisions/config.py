@@ -475,19 +475,13 @@ def _host(table: _Table) -> Host:
 
 
 def _check_host_accounts(settings: Settings) -> None:
-    known = {c.account: c for c in settings.credentials}
+    known = {c.account for c in settings.credentials}
     for host in settings.hosts:
         for account in host.accounts:
             if account not in known:
                 message = (
                     f"[[agent.host]] accounts names {account}, "
                     f"which has no [agent.credentials.{account}]"
-                )
-                raise Invalid(message)
-            if host.unsandboxed and known[account].reviews_app_id is not None:
-                message = (
-                    f"[[agent.host]] unsandboxed host {host.name} "
-                    f"has reviews App credentials for {account}"
                 )
                 raise Invalid(message)
 
