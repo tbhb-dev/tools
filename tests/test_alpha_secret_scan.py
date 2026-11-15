@@ -593,7 +593,13 @@ def test_scan_staged_builds_the_private_directory_and_calls_gitleaks(
     assert kwargs["tree"] == kwargs["root"]
     assert kwargs["gitleaks"] == "the-gitleaks"
     assert kwargs["source"] == secret_scan.STAGED
-    assert kwargs["env"] == {"ENV": "yes"}
+    env = cast("dict[str, str]", kwargs["env"])
+    assert env["ENV"] == "yes"
+    assert env["GIT_ATTR_SOURCE"]
+    last = int(env["GIT_CONFIG_COUNT"]) - 1
+    attributes = Path(env[f"GIT_CONFIG_VALUE_{last}"])
+    assert env[f"GIT_CONFIG_KEY_{last}"] == "core.attributesFile"
+    assert attributes.parent == kwargs["root"]
     base = data if extends is not None else {**data, "extend": {"useDefault": True}}
     expected = (
         secret_scan.without_name_rules(base)
@@ -604,3 +610,117 @@ def test_scan_staged_builds_the_private_directory_and_calls_gitleaks(
     files = cast("dict[str, str]", seen["files"])
     assert files[secret_scan.GITLEAKS_IGNORE] == "ignore\n"
     assert files.get(secret_scan.GITLEAKS_EXTENDS) == extends
+
+
+# A key shape the default gitleaks rules flag, split so this file holds none.
+KEY = "AKIA" + "IOSFODNN7ABCDEFG"
+KEY_LINE = f'k = "{KEY}"\n'
+
+
+def run_git(repo: Path, *args: str) -> None:
+    import subprocess  # noqa: PLC0415 -- test-only, beside its one use
+
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def repo(root: Path) -> Path:
+    """A repository with one commit and its committed config staged-clean."""
+    run_git(root, "init", "-q")
+    run_git(root, "config", "user.email", "t@example.invalid")
+    run_git(root, "config", "user.name", "t")
+    (root / ".gitleaks.toml").write_text("[extend]\nuseDefault = true\n")
+    run_git(root, "add", ".gitleaks.toml")
+    run_git(root, "commit", "-qm", "init")
+    return root
+
+
+def staged_scan(repo: Path) -> None:
+    secret_scan.scan(
+        "",
+        "the staged changes",
+        root=repo,
+        gitleaks=gitleaks(),
+        visibility="PUBLIC",
+        source=secret_scan.STAGED,
+    )
+
+
+def test_a_staged_secret_is_refused(repo: Path) -> None:
+    (repo / "a.txt").write_text(KEY_LINE)
+    run_git(repo, "add", "a.txt")
+    with pytest.raises(SystemExit, match=r"a.txt"):
+        staged_scan(repo)
+
+
+@pytest.mark.parametrize("setting", ["always", "true"])
+def test_a_colour_setting_does_not_hide_a_staged_secret(
+    repo: Path, setting: str
+) -> None:
+    run_git(repo, "config", "color.ui", setting)
+    run_git(repo, "config", "color.diff", "always")
+    (repo / "a.txt").write_text(KEY_LINE)
+    run_git(repo, "add", "a.txt")
+    with pytest.raises(SystemExit, match=r"a.txt"):
+        staged_scan(repo)
+
+
+def test_a_staged_binary_is_scanned(repo: Path) -> None:
+    (repo / "blob.dat").write_bytes(b"x\0\n" + KEY_LINE.encode())
+    run_git(repo, "add", "blob.dat")
+    with pytest.raises(SystemExit, match=r"blob.dat"):
+        staged_scan(repo)
+
+
+def test_a_binary_attribute_does_not_hide_a_staged_secret(repo: Path) -> None:
+    (repo / ".gitattributes").write_text("c.dat binary\n")
+    (repo / "c.dat").write_text(KEY_LINE)
+    run_git(repo, "add", ".gitattributes", "c.dat")
+    with pytest.raises(SystemExit, match=r"c.dat"):
+        staged_scan(repo)
+
+
+def test_a_rename_is_scanned_at_its_new_path(repo: Path) -> None:
+    (repo / "old.txt").write_text(KEY_LINE)
+    (repo / ".gitleaksignore").write_text("")
+    run_git(repo, "add", "-f", "old.txt", ".gitleaksignore")
+    run_git(repo, "commit", "-qm", "old", "--no-verify")
+    run_git(repo, "mv", "old.txt", "new.txt")
+    with pytest.raises(SystemExit, match=r"new.txt"):
+        staged_scan(repo)
+
+
+def test_a_clean_staged_change_passes(repo: Path) -> None:
+    (repo / "a.txt").write_text("nothing here\n")
+    run_git(repo, "add", "a.txt")
+    staged_scan(repo)
+
+
+def test_the_diff_config_follows_the_callers_own(
+    root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    env = secret_scan.diff_env(root, "x", tmp_path / "attributes")
+    assert env["GIT_CONFIG_KEY_2"] == "color.ui"
+    assert env["GIT_CONFIG_COUNT"] == str(2 + len(secret_scan.DIFF_CONFIG) + 1)
+    assert (tmp_path / "attributes").read_text() == "* diff\n"
+
+
+def test_a_bad_config_count_is_refused(
+    root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "many")
+    with pytest.raises(SystemExit, match="GIT_CONFIG_COUNT"):
+        secret_scan.diff_env(root, "x", tmp_path / "attributes")
+
+
+def test_an_unnameable_empty_tree_is_refused(
+    root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(secret_scan, "git", lambda *_a, **_k: (1, ""))
+    with pytest.raises(SystemExit, match="empty tree"):
+        secret_scan.diff_env(root, "x", tmp_path / "attributes")

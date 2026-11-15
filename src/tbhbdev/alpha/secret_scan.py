@@ -192,6 +192,46 @@ def staged_file(root: Path, name: str, what: str) -> str | None:
     raise SystemExit(message)
 
 
+# What gitleaks' own ``git diff --staged`` must not do: colour its output
+# (``always`` makes gitleaks read no diff and report nothing) or pair a
+# removal with an addition (a rename moves content out of an allowlisted path
+# unscanned).
+DIFF_CONFIG = (
+    ("color.ui", "never"),
+    ("color.diff", "never"),
+    ("diff.renames", "false"),
+)
+
+
+def diff_env(root: Path, what: str, attributes: Path) -> dict[str, str]:
+    """The environment that makes gitleaks' ``git diff`` show every addition.
+
+    ATTRIBUTES is a file that marks every path as text, so that a NUL byte or
+    a ``binary`` attribute does not reduce an addition to "Binary files
+    differ". The committed ``.gitattributes`` is ignored by reading attributes
+    from the empty tree.
+    """
+    try:
+        start = int(os.environ.get("GIT_CONFIG_COUNT") or "0")
+    except ValueError:
+        message = f"cannot scan {what} for secrets: GIT_CONFIG_COUNT is not a number"
+        raise SystemExit(message) from None
+    code, empty = git("hash-object", "-t", "tree", "/dev/null", cwd=root)
+    if code != 0 or not empty:
+        message = f"cannot scan {what} for secrets: git cannot name the empty tree"
+        raise SystemExit(message)
+    private_file(attributes, "* diff\n")
+    settings = (*DIFF_CONFIG, ("core.attributesFile", str(attributes)))
+    env = {
+        "GIT_ATTR_SOURCE": empty,
+        "GIT_CONFIG_COUNT": str(start + len(settings)),
+    }
+    for offset, (key, value) in enumerate(settings):
+        env[f"GIT_CONFIG_KEY_{start + offset}"] = key
+        env[f"GIT_CONFIG_VALUE_{start + offset}"] = value
+    return env
+
+
 def staged_env(root: Path, what: str) -> dict[str, str]:
     """The environment that points gitleaks' git at the repository at ROOT.
 
@@ -359,6 +399,7 @@ def scan_staged(  # noqa: PLR0913 -- the scan inputs, keyword-only past three
             private_file(here / GITLEAKS_EXTENDS, extends)
             text = without_name_rules(data) if reduced else private
         copy = private_file(here / "private.toml", text)
+        env = env | diff_env(root, what, here / "attributes")
         run_gitleaks(
             "",
             what,

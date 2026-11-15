@@ -49,6 +49,9 @@ with open(os.path.join(here, "prek.cwd"), "a") as log:
     log.write(os.getcwd() + "\\n")
 stages_file = os.path.join(here, "prek.stages")
 stages = open(stages_file).read().split() if os.path.exists(stages_file) else []
+if args[0] == "list" and os.path.exists(os.path.join(here, "prek.list-fail")):
+    print("error: Failed to parse config", file=sys.stderr)
+    sys.exit(2)
 if args[0] == "list":
     stage = args[args.index("--hook-stage") + 1]
     if stage in stages:
@@ -3744,3 +3747,44 @@ def test_missing_tool_uses_named_remote_push_url(world: World) -> None:
     )
     assert done.returncode == 1
     assert done.stderr == b"pre-push: tbhbdev is not on PATH; push refused\n"
+
+
+@pytest.mark.parametrize("config", [None, "prek.toml", ".pre-commit-config.yaml"])
+def test_a_failed_prek_listing_is_an_error_when_a_config_exists(
+    world: World, config: str | None
+) -> None:
+    """An unreadable config must not read as no hooks and drop the chained hook."""
+    (world.bin / "prek.list-fail").write_text("")
+    world.hooks.mkdir(exist_ok=True)
+    chained = world.hooks / "commit-msg.prek"
+    chained.write_text("kept\n")
+    if config is None:
+        identity_hook(world)
+        assert not chained.exists()
+        return
+    (world.repo / config).write_text("not: [valid\n")
+    with pytest.raises(install.InstallError, match="prek list --hook-stage"):
+        identity_hook(world)
+    assert chained.read_text() == "kept\n"
+    assert install.SHIM_MARK in (world.hooks / "commit-msg").read_text()
+
+
+def test_a_failed_prek_listing_finds_a_config_in_a_parent(world: World) -> None:
+    (world.bin / "prek.list-fail").write_text("")
+    (world.repo.parent / "prek.toml").write_text("")
+    with pytest.raises(install.InstallError, match="prek list"):
+        install.prek_has_hooks(["prek"], world.repo, "commit-msg")
+
+
+@pytest.mark.parametrize("name", install.SCAN_HOOKS)
+def test_a_foreign_hook_that_runs_its_own_legacy_name_is_not_moved(
+    world: World, name: str
+) -> None:
+    """Moved to `.legacy`, it would exec itself and the commit would hang."""
+    world.hooks.mkdir(exist_ok=True)
+    loop = f'#!/bin/sh\nexec "$(dirname "$0")/{name}.legacy" "$@"\n'
+    (world.hooks / name).write_text(loop)
+    with pytest.raises(install.InstallError, match="would loop"):
+        scan_hook(world, name)
+    assert (world.hooks / name).read_text() == loop
+    assert not (world.hooks / f"{name}.legacy").exists()
