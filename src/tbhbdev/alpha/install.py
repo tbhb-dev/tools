@@ -1464,8 +1464,10 @@ def install_identity_hook(
     failure = None
     try:
         previous = chain_stage(prek, top, hook, keep=scan and legacy.is_file())
-    except InstallError as exc:
-        failure = exc
+    except (InstallError, OSError) as exc:
+        # An OSError must not skip the shim: the foreign hook has moved to
+        # .legacy, so nothing would run at all, scan included.
+        failure = exc if isinstance(exc, InstallError) else InstallError(str(exc))
         previous = hook.with_name(f"{name}{PREVIOUS}")
     template = SCAN_SHIM if scan else SHIM
     try:

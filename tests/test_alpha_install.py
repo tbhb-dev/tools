@@ -3788,3 +3788,22 @@ def test_a_foreign_hook_that_runs_its_own_legacy_name_is_not_moved(
         scan_hook(world, name)
     assert (world.hooks / name).read_text() == loop
     assert not (world.hooks / f"{name}.legacy").exists()
+
+
+@pytest.mark.parametrize("name", install.SCAN_HOOKS)
+def test_an_oserror_while_chaining_still_writes_the_shim(
+    world: World, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """The foreign hook already moved to `.legacy`; no shim would mean no scan."""
+    world.hooks.mkdir(exist_ok=True)
+    (world.hooks / name).write_text(FOREIGN)
+
+    def boom(*_a: object, **_k: object) -> None:
+        msg = "disk trouble"
+        raise OSError(msg)
+
+    monkeypatch.setattr(install, "chain_stage", boom)
+    with pytest.raises(install.InstallError, match="disk trouble"):
+        scan_hook(world, name)
+    assert SCANS in (world.hooks / name).read_text()
+    assert (world.hooks / f"{name}.legacy").read_text() == FOREIGN
