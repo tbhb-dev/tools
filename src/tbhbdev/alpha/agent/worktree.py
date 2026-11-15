@@ -157,6 +157,22 @@ def default_branch(mirror: Path) -> str:
     raise Invalid(message)
 
 
+def published(clone: Path, commit: str) -> bool:
+    """Whether a ref the clone took from origin reaches the commit."""
+    try:
+        listing = git(
+            clone,
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            f"--contains={commit}",
+            "refs/remotes/origin/",
+        )
+    except OSError, subprocess.SubprocessError:
+        return False
+    return listing != ""
+
+
 def fetch_commit(mirror: Path, request: RunRequest, seeded: Path) -> str:
     options = (
         "--no-recurse-submodules",
@@ -164,7 +180,11 @@ def fetch_commit(mirror: Path, request: RunRequest, seeded: Path) -> str:
         "--no-tags",
         "--upload-pack=git-upload-pack",
     )
-    if request.commit is not None and request.profile is not Profile.BUILD:
+    if (
+        request.commit is not None
+        and request.profile is not Profile.BUILD
+        and published(seeded, request.commit)
+    ):
         # A seeded clone may already hold the commit; try it before the network.
         try:
             git(
@@ -470,7 +490,7 @@ def create(
         note = (
             ""
             if request.commit is None or request.profile is Profile.BUILD
-            else "; the seeded clone was tried first"
+            else "; the seeded clone serves only origin-reachable commits"
         )
         with preparation_step(f"mirror fetch ({url}){note}"):
             commit = fetch_commit(mirror, request, clone)

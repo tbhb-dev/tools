@@ -144,12 +144,35 @@ def test_seeded_commit_is_taken_from_the_clone_without_network(
     assert any(args[0] == "fetch" for args in calls)
 
 
+def test_unpushed_clone_commit_is_refused_and_stays_out_of_the_mirror(
+    tmp_path: Path,
+) -> None:
+    _, clone = repository(tmp_path)
+    (clone / "tracked").write_text("local only\n")
+    head = commit(clone, "unpushed")
+    with pytest.raises(
+        Invalid,
+        match="seeded clone serves only origin-reachable commits",
+    ):
+        worktree.create(
+            clone,
+            "unpushed",
+            run_request(profile="review", commit=head),
+            ("example-org/example-repo",),
+        )
+    mirror = worktree.mirror_path(tmp_path, run_request().repo)
+    assert subprocess.run(
+        ["git", "--git-dir", str(mirror), "cat-file", "-e", head], check=False
+    ).returncode
+    assert not (clone / ".worktrees" / "agent-unpushed").exists()
+
+
 def test_missing_commit_is_refused(tmp_path: Path) -> None:
     _, clone = repository(tmp_path)
     with pytest.raises(
         Invalid,
         match=r"run preparation failed at mirror fetch \(.*\); "
-        "the seeded clone was tried first",
+        "the seeded clone serves only origin-reachable commits",
     ):
         worktree.create(
             clone,
@@ -242,7 +265,7 @@ def test_worktree_git_contract_under_one_stable_lock(
     original = worktree.git
 
     def checked(path: Path, *args: str) -> str:
-        assert path != clone
+        assert path != clone or args[0] == "for-each-ref"
         calls.append((path, args))
         return original(path, *args)
 
@@ -252,7 +275,7 @@ def test_worktree_git_contract_under_one_stable_lock(
     )
     path = worktree.create(clone, "example", request, ("example-org/example-repo",))
     mirror = worktree.mirror_path(tmp_path, request.repo)
-    assert all(directory in (mirror, path) for directory, _args in calls)
+    assert all(directory in (mirror, path, clone) for directory, _args in calls)
     assert (mirror / "agent-mirror.lock").is_file()
     assert (mirror.stat().st_mode & 0o777) == 0o700
     assert git(path, "rev-parse", "HEAD") == commit_id
@@ -492,8 +515,11 @@ def test_fetch_resolves_only_a_full_commit(
     calls: list[tuple[str, ...]] = []
 
     def run(path: Path, *args: str) -> str:
+        calls.append((str(path == tmp_path / "seeded"), *args))
+        if args[0] == "for-each-ref":
+            assert path == tmp_path / "seeded"
+            return "refs/remotes/origin/main"
         assert path == tmp_path
-        calls.append(args)
         if str(tmp_path / "seeded") in args:
             raise failure
         return "ref: refs/heads/main\tHEAD" if args[0] == "ls-remote" else commit_id
@@ -515,6 +541,15 @@ def test_fetch_resolves_only_a_full_commit(
     )
     assert calls == [
         (
+            "True",
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            f"--contains={'0' * 40}",
+            "refs/remotes/origin/",
+        ),
+        (
+            "False",
             "fetch",
             *options,
             "--no-prune",
@@ -522,9 +557,10 @@ def test_fetch_resolves_only_a_full_commit(
             str(tmp_path / "seeded"),
             f"+{'0' * 40}:refs/heads/tbhbdev-review",
         ),
-        ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD"),
-        ("check-ref-format", "--branch", "main"),
+        ("False", "ls-remote", "--symref", "--end-of-options", "origin", "HEAD"),
+        ("False", "check-ref-format", "--branch", "main"),
         (
+            "False",
             "fetch",
             *options,
             "--no-prune",
@@ -532,8 +568,41 @@ def test_fetch_resolves_only_a_full_commit(
             "+refs/heads/main:refs/heads/main",
             f"+{'0' * 40}:refs/heads/tbhbdev-review",
         ),
-        ("rev-parse", "--verify", "--end-of-options", f"{'0' * 40}^{{commit}}"),
+        (
+            "False",
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{'0' * 40}^{{commit}}",
+        ),
     ]
+
+
+@pytest.mark.parametrize(
+    "listing",
+    ["", subprocess.CalledProcessError(128, "git"), OSError("unreadable")],
+)
+def test_unpublished_seeded_commit_is_never_fetched_from_the_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, listing: str | Exception
+) -> None:
+    seeded = tmp_path / "seeded"
+    calls: list[tuple[Path, str]] = []
+
+    def run(path: Path, *args: str) -> str:
+        calls.append((path, args[0]))
+        if path == seeded:
+            if isinstance(listing, Exception):
+                raise listing
+            return listing
+        return "ref: refs/heads/main\tHEAD" if args[0] == "ls-remote" else "a" * 40
+
+    monkeypatch.setattr(worktree, "git", run)
+    request = run_request(profile="review", commit="a" * 40)
+    assert worktree.fetch_commit(tmp_path, request, seeded) == "a" * 40
+    assert (seeded, "for-each-ref") in calls
+    assert (seeded, "fetch") not in calls
+    assert all(path == seeded for path, name in calls if name == "for-each-ref")
+    assert (tmp_path, "ls-remote") in calls
 
 
 def test_existing_clone_symlink_is_refused_without_following_it(tmp_path: Path) -> None:
@@ -780,6 +849,8 @@ def test_prelaunch_git_protocol(
             (workspace / ".git").mkdir()
         if args[0] == "ls-remote":
             return "ref: refs/heads/main\tHEAD"
+        if args[0] == "for-each-ref":
+            return "refs/remotes/origin/main"
         return full_sha if args[0] == "rev-parse" else ""
 
     monkeypatch.setattr(worktree, "git", checked)
@@ -805,9 +876,19 @@ def test_prelaunch_git_protocol(
             f"+{full_sha}:refs/heads/tbhbdev-review",
         ),
     )
+    published = (
+        clone,
+        (
+            "for-each-ref",
+            "--count=1",
+            "--format=%(refname)",
+            f"--contains={full_sha}",
+            "refs/remotes/origin/",
+        ),
+    )
     common = [
         (mirror, ("init", "--bare", "--template=")),
-        *([local] if profile == "review" else []),
+        *([published, local] if profile == "review" else []),
     ]
     if profile == "build":
         common += [
