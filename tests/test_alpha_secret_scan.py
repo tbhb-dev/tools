@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
+# cspell:words noprefix
 
 """Tests for the secret scan of PR text, against the pinned gitleaks."""
 
