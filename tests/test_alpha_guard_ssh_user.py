@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from tbhbdev import alpha, userconfig
+from tbhbdev.alpha import guard_gh_pr
 from tbhbdev.alpha import guard_ssh_user as guard
 
 if TYPE_CHECKING:
@@ -73,6 +74,66 @@ NAMES = ["lab1", "lab2"]
         'rsync --rsh="ssh -l \'unterminated" dir lab1:dst',
         "rsync -a rsync://lab1/mod dir",
         "rsync -a rsync://tony@lab1/mod dir",
+        # wrappers in front of the program
+        "timeout 5 ssh lab1",
+        "timeout -s KILL 5 ssh lab1",
+        "timeout -- 5 ssh lab1",
+        "nice ssh lab1",
+        "nice -n 5 ssh lab1",
+        "setsid ssh lab1",
+        "caffeinate ssh lab1",
+        "caffeinate -t 5 ssh lab1",
+        "sshpass -p x ssh lab1",
+        "sudo -u root ssh lab1",
+        "sudo -- ssh lab1",
+        "env -u X ssh lab1",
+        "env -C /tmp ssh lab1",
+        "env X=1 timeout 5 ssh lab1",
+        "/usr/bin/env ssh lab1",
+        "xargs -n 1 ssh lab1",
+        "stdbuf -o0 ssh lab1",
+        "nohup ssh lab1",
+        # the first -l or -o User wins over user@, as ssh -G reads it
+        "ssh -l tony agent@lab1",
+        "ssh -o User=tony agent@lab1",
+        "ssh agent@lab1 -l tony",
+        "ssh -l tony -l agent lab1",
+        "scp -o User=tony file agent@lab1:",
+        "rsync -e 'ssh -l tony' dir agent@lab1:dst",
+        # jump hosts of scp and of the rsync remote shell
+        "scp -o ProxyJump=lab1 file other:",
+        "scp -o 'ProxyJump lab1' file other:",
+        "scp -o ProxyJump=tony@lab1 file other:",
+        "rsync -e 'ssh -J lab1' dir other:dst",
+        "rsync -e 'ssh -o ProxyJump=tony@lab1' dir other:dst",
+        # a redirect next to the host or before the program
+        "ssh lab1>o",
+        "ssh lab1<in",
+        "ssh lab1 >o",
+        "ssh 2>&1 lab1",
+        "ssh >o lab1",
+        "ssh > o lab1",
+        "ssh >> o lab1",
+        "ssh &>o lab1",
+        "ssh &>>o lab1",
+        "ssh >&2 lab1",
+        ">o ssh lab1",
+        "2>/dev/null ssh lab1",
+        "ssh -l tony>o agent@lab1",
+        "scp file lab1:>o",
+        # rsync reads its last remote shell option
+        "rsync -e 'ssh -l agent' -e 'ssh -l tony' dir lab1:dst",
+        "rsync -e 'ssh -l agent' --rsh='ssh -l tony' dir lab1:dst",
+        "rsync --rsh='ssh -l agent' -e 'ssh -l tony' dir lab1:dst",
+        "rsync -e 'ssh -l agent' --rsh=\"ssh -l 'x\" dir lab1:dst",
+        # HostName and ProxyCommand reach a host the destination doesn't name
+        "ssh -o HostName=lab1 alias",
+        "ssh -o 'HostName lab1' alias",
+        "ssh -o HostName=lab1 -l tony agent@alias",
+        "ssh -o ProxyCommand='nc lab1 22' alias",
+        "ssh -o 'ProxyCommand=ssh -W %h:%p lab1' other",
+        "scp -o HostName=lab1 file other:",
+        "rsync -e 'ssh -o HostName=lab1' dir other:dst",
     ],
 )
 def test_denied(command: str) -> None:
@@ -132,6 +193,35 @@ def test_denied(command: str) -> None:
         "rsync -e",
         "ssh agent@lab2 ssh lab1",
         "ssh -o User=agent -l tony lab1",
+        "timeout 5 ssh agent@lab1",
+        "sudo -u root ssh agent@lab1",
+        "env -u X ssh agent@lab1",
+        "xargs -n 1 ssh agent@lab1",
+        "echo timeout 5 ssh lab1",
+        "timeout 5 echo ssh lab1",
+        "env -C /tmp echo ssh lab1",
+        "timeout",
+        "env -u",
+        "sudo --",
+        "ssh -l agent tony@lab1",
+        "ssh -o User=ops tony@lab1",
+        "scp -l 100 file agent@lab1:",
+        "scp -o User=agent file tony@lab1:",
+        "rsync -e 'ssh -l agent' dir tony@lab1:dst",
+        "scp -o ProxyJump=agent@lab1 file other:",
+        "rsync -e 'ssh -J agent@lab1' dir other:dst",
+        "ssh agent@lab1>o",
+        "ssh agent@lab1 2>&1",
+        "ssh other>o",
+        "ssh >o",
+        "rsync -e 'ssh -l tony' -e 'ssh -l agent' dir lab1:dst",
+        "rsync --rsh='ssh -l tony' --rsh='ssh -l agent' dir lab1:dst",
+        "ssh -o HostName=lab1 agent@alias",
+        "ssh -l agent -o HostName=lab1 alias",
+        "ssh -o HostName=other alias",
+        "ssh -o ProxyCommand='nc other 22' alias",
+        "ssh -o 'ProxyCommand=ssh -W %h:%p agent@lab1' other",
+        "ssh -o 'ProxyCommand=\"nc lab1' other",
         "git status",
         "echo ssh lab1",
         "echo 'ssh lab1'",
@@ -285,3 +375,18 @@ def test_a_broken_config_fails_open(
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
     assert guard.main() == 0
     assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize(
+    ("words", "expected"),
+    [
+        (["env", "-u", "X", "gh"], ["X", "gh"]),
+        (["timeout", "5", "gh"], ["timeout", "5", "gh"]),
+        (["sudo", "-u", "root", "gh"], ["root", "gh"]),
+        (["xargs", "-n", "1", "gh"], ["1", "gh"]),
+    ],
+)
+def test_the_gh_guard_keeps_its_own_wrapper_rules(
+    words: list[str], expected: list[str]
+) -> None:
+    assert guard_gh_pr.skip_prefix(words) == expected

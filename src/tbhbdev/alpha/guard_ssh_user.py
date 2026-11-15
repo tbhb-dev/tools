@@ -13,14 +13,19 @@ matches a host of that name and its subdomains, ignoring case. A missing table
 or key turns the guard off. Allowing prints nothing, and unreadable input, a
 broken config or a crash fails open, like the other guards.
 
-An account counts when it is the `user@` of the target, else the first `-l` or
-`-o User=` of an ssh command, or of the `-e`/`--rsh` ssh command of rsync. Jump
-hosts (`-J`, `-o ProxyJump=`) are targets too. Operands in `host:path`,
-`scp://` and `rsync://` form are read, and `ssh://` for ssh.
+An account counts when it is the first `-l` or `-o User=` of an ssh command, or
+of the `-e`/`--rsh` ssh command of rsync (the last one given), as `ssh -G` reads
+it. Without one it is the `user@` of the target. scp's own `-l` limits
+bandwidth, so only its `-o User=` counts. Jump hosts (`-J`, `-o ProxyJump=`),
+the `-o HostName=` host and the words of an `-o ProxyCommand=` are targets too.
+Operands in `host:path`, `scp://` and `rsync://` form are read, and `ssh://` for
+ssh. Wrappers such as `timeout`, `nice`, `sudo`, `env` and `xargs` are skipped
+with their options, redirections are dropped, and a redirection cut off a word.
 
 An ssh config alias isn't resolved: the guard sees only the name typed, so an
 alias counts only when it is listed. Known gaps: `sftp`, `mosh`, `git` over ssh,
-`ssh -G` expansion of Host blocks, and a host held in a variable.
+`ssh -G` expansion of Host blocks, a host held in a variable or fed on stdin
+(`xargs ssh`), and a clustered rsync `-ae` shell option.
 """
 # cspell:ignore proxyjump
 
@@ -31,6 +36,8 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from tbhbdev import userconfig
 from tbhbdev.alpha.guard_gh_pr import (
+    ASSIGNMENT,
+    KEYWORDS,
     command_of,
     decision,
     program_of,
@@ -48,6 +55,28 @@ PROGRAMS = {"ssh", "scp", "rsync"}
 # ssh options that take a value; the value is the rest of the word or the next.
 SSH_VALUE_FLAGS = set("bcDEeFIiJLlmOoPpQRSWw")
 RSH_FLAGS = {"-e", "--rsh"}
+# Programs that run another one: option flags that take a value, and the
+# operands that come before the program. guard-gh-pr's list is its own.
+WRAPPERS = {
+    "env": ({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}, 0),
+    "sudo": ({"-u", "-g", "-C", "-D", "-h", "-p", "-R", "-T", "-U", "--user"}, 0),
+    "timeout": ({"-s", "-k", "--signal", "--kill-after"}, 1),
+    "nice": ({"-n", "--adjustment"}, 0),
+    "ionice": ({"-c", "-n", "-p"}, 0),
+    "stdbuf": ({"-i", "-o", "-e"}, 0),
+    "caffeinate": ({"-t", "-w"}, 0),
+    "sshpass": ({"-p", "-f", "-d", "-P"}, 0),
+    "xargs": ({"-n", "-L", "-P", "-I", "-s", "-E", "-d", "-a", "-J", "-R"}, 0),
+    "setsid": (set(), 0),
+    "nohup": (set(), 0),
+    "time": (set(), 0),
+    "command": (set(), 0),
+    "exec": (set(), 0),
+    "builtin": (set(), 0),
+}
+REDIRECT = re.compile(r"\d*(?:>>|<<|<>|[<>])")
+# The & of 2>&1 and &> belongs to the redirection; the scanner would split there.
+AMPERSAND = re.compile(r"(?<=[<>])&|&(?=>)")
 REASON = (
     "The command reaches {host} without an agent@ or ops@ account, so it would "
     "log in as the local user. Write agent@{host} or ops@{host}."
@@ -75,10 +104,16 @@ def split_target(text: str) -> tuple[str | None, str]:
     return (user if at else None), PORT.sub("", host).strip("[]")
 
 
+def option_pair(option: str) -> tuple[str, str]:
+    """The lowercase key and the value of an ``-o`` word like ``User=agent``."""
+    key, _, value = option.replace("=", " ", 1).partition(" ")
+    return key.lower(), value.strip()
+
+
 def option_user(option: str) -> str | None:
     """The account of an ``-o`` value like ``User=agent`` or ``User agent``."""
-    key, _, value = option.replace("=", " ", 1).partition(" ")
-    return value.strip() if key.lower() == "user" and value.strip() else None
+    key, value = option_pair(option)
+    return value if key == "user" and value else None
 
 
 def option_of(word: str, args: list[str], i: int) -> tuple[tuple[str, str] | None, int]:
@@ -111,14 +146,25 @@ def ssh_words(args: list[str]) -> Iterator[tuple[str, str]]:
             yield found
 
 
-def ssh_login(args: list[str]) -> str | None:
-    """The first account an ssh command line sets with ``-l`` or ``-o User=``."""
+def ssh_login(args: list[str], letters: str = "lo") -> str | None:
+    """The first account set with ``-l`` or ``-o User=``, as ``ssh -G`` reads it.
+
+    ``letters`` names the options that count: scp's ``-l`` limits bandwidth.
+    """
     for letter, value in ssh_words(args):
-        if letter == "l":
+        if letter == "l" and "l" in letters:
             return value
         if letter == "o" and (user := option_user(value)):
             return user
     return None
+
+
+def shell_words(text: str) -> list[str]:
+    """``text`` split like a shell, or no words when a quote never closes."""
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return []
 
 
 def jump_targets(value: str) -> Iterator[Target]:
@@ -128,25 +174,45 @@ def jump_targets(value: str) -> Iterator[Target]:
         yield Target(host, user)
 
 
-def ssh_targets(args: list[str]) -> Iterator[Target]:
-    """The destination and jump hosts of an ssh command line."""
-    login = ssh_login(args)
-    destination = False
+def option_targets(value: str, user: str | None) -> Iterator[Target]:
+    """The hosts an ``-o`` value names: ``ProxyJump``, ``HostName``, ``ProxyCommand``.
+
+    ``user`` is the account the connection itself uses, which a ``HostName``
+    host receives. Each word of a ``ProxyCommand`` counts as a target.
+    """
+    key, rest = option_pair(value)
+    if key == "proxyjump":
+        yield from jump_targets(rest)
+    elif key == "hostname":
+        yield Target(rest, user)
+    elif key == "proxycommand":
+        for word in shell_words(rest):
+            account, host = split_target(word)
+            yield Target(host, account)
+
+
+def option_hosts(args: list[str], user: str | None) -> Iterator[Target]:
+    """The jump and option-named hosts of an ssh command line."""
     for letter, value in ssh_words(args):
         if letter == "J":
             yield from jump_targets(value)
-        elif letter == "o" and value.lower().replace("=", " ").startswith("proxyjump "):
-            yield from jump_targets(
-                value.replace("=", " ", 1).partition(" ")[2].strip()
-            )
-        elif letter == "" and not destination:
-            destination = True
-            user, host = split_target(value)
-            yield Target(host, user or login)
+        elif letter == "o":
+            yield from option_targets(value, user)
+
+
+def ssh_targets(args: list[str]) -> Iterator[Target]:
+    """The destination and the other hosts of an ssh command line."""
+    destination = next((v for letter, v in ssh_words(args) if letter == ""), None)
+    user, host = split_target(destination) if destination else (None, "")
+    user = ssh_login(args) or user
+    yield from option_hosts(args, user)
+    if destination:
+        yield Target(host, user)
 
 
 def remote_shell(args: list[str]) -> list[str]:
-    """The words of an rsync ``-e`` or ``--rsh`` command, or none."""
+    """The words of the last rsync ``-e`` or ``--rsh`` command, or none."""
+    shell: list[str] = []
     for i, word in enumerate(args):
         value = None
         if word in RSH_FLAGS and i + 1 < len(args):
@@ -156,38 +222,76 @@ def remote_shell(args: list[str]) -> list[str]:
         elif word.startswith("-e") and not word.startswith("--"):
             value = word[2:]
         if value is not None:
-            try:
-                return shlex.split(value)[1:]
-            except ValueError:
-                return []
-    return []
+            shell = shell_words(value)[1:]
+    return shell
 
 
-def operand_target(word: str, fallback: str | None) -> Target | None:
-    """The target of an scp or rsync operand, or None for a local path."""
+def operand_target(word: str, login: str | None) -> Target | None:
+    """The target of an scp or rsync operand, or None for a local path.
+
+    A ``login`` from the ssh options wins over the operand's ``user@``.
+    """
     found = URL.match(word) or REMOTE.match(word)
     if not found:
         return None
-    return Target(found["host"].strip("[]"), found["user"] or fallback)
+    return Target(found["host"].strip("[]"), login or found["user"])
 
 
 def copy_targets(program: str, args: list[str]) -> Iterator[Target]:
-    """Every remote operand of an scp or rsync command line."""
+    """Every remote operand and jump host of an scp or rsync command line."""
     shell = remote_shell(args) if program == "rsync" else args
-    fallback = ssh_login(shell)
+    login = ssh_login(shell, "lo" if program == "rsync" else "o")
     for word in args:
-        target = operand_target(word, fallback)
+        target = operand_target(word, login)
         if target:
             yield target
-    if program == "scp":
-        for letter, value in ssh_words(args):
-            if letter == "J":
-                yield from jump_targets(value)
+    yield from option_hosts(shell, login)
 
 
-def targets(words: list[str]) -> Iterator[Target]:
+def strip_redirects(words: list[str]) -> list[str]:
+    """``words`` without shell redirections, and with any redirection cut off a word."""
+    kept: list[str] = []
+    target_next = False
+    for word in words:
+        found = REDIRECT.match(word)
+        if target_next:
+            target_next = False
+        elif found:
+            target_next = found.end() == len(word)
+        else:
+            kept.append(re.split("[<>]", word, maxsplit=1)[0])
+    return kept
+
+
+def after_wrapper(words: list[str], i: int, name: str) -> int:
+    """The index after a wrapper's options and its fixed operands."""
+    value_flags, operands = WRAPPERS[name]
+    while i < len(words) and words[i].startswith("-") and words[i] != "-":
+        if words[i] == "--":
+            i += 1
+            break
+        i += 2 if words[i] in value_flags else 1
+    return min(i + operands, len(words))
+
+
+def program_words(words: list[str]) -> list[str]:
+    """The words from the program, after assignments, keywords and wrappers."""
+    i = 0
+    while i < len(words):
+        name = program_of(words[i:])
+        if words[i] in KEYWORDS or ASSIGNMENT.match(words[i]):
+            i += 1
+        elif name in WRAPPERS:
+            i = after_wrapper(words, i + 1, name)
+        else:
+            break
+    return words[i:]
+
+
+def targets(command: list[str]) -> Iterator[Target]:
     """The hosts a simple command reaches, for ssh, scp and rsync."""
-    program = program_of(words)
+    words = program_words(strip_redirects(command))
+    program = program_of(words) if words else ""
     if program == "ssh":
         yield from ssh_targets(words[1:])
     elif program in PROGRAMS:
@@ -202,8 +306,8 @@ def guarded(host: str, names: list[str]) -> bool:
 
 def verdict(text: str, names: list[str]) -> str | None:
     """The deny reason for a command, or None to allow it."""
-    for _, words in simple_commands(text):
-        for target in targets(words):
+    for simple in simple_commands(AMPERSAND.sub("", text)):
+        for target in targets([*simple.prefix, *simple.words]):
             if guarded(target.host, names) and target.user not in ALLOWED_USERS:
                 return REASON.format(host=target.host)
     return None
