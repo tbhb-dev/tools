@@ -1361,16 +1361,25 @@ def chain_prek(prek: list[str], top: Path, hook: Path, *, keep: bool) -> None:
         legacy.rename(aside)
     elif legacy.is_file():
         back_up_legacy(legacy)
+    # prek writes into a scratch git dir, so the shim at HOOK stays in place and
+    # a commit from another worktree never meets prek's bare hook, which has no
+    # scan. The scratch dir is beside HOOK, so the rename is atomic.
+    scratch = Path(tempfile.mkdtemp(prefix=".tbhb-prek.", dir=hook.parent))
     try:
-        prek_install(prek, top, "-f", "--hook-type", name)
+        try:
+            prek_install(
+                prek, top, "-f", "--git-dir", str(scratch), "--hook-type", name
+            )
+        finally:
+            if keep:
+                to_legacy(aside, legacy)
+        try:
+            (scratch / "hooks" / name).replace(hook.with_name(f"{name}.prek"))
+        except FileNotFoundError as exc:
+            message = f"prek install -f --hook-type {name} wrote no {hook}"
+            raise InstallError(message) from exc
     finally:
-        if keep:
-            to_legacy(aside, legacy)
-    try:
-        hook.rename(hook.with_name(f"{name}.prek"))
-    except FileNotFoundError as exc:
-        message = f"prek install -f --hook-type {name} wrote no {hook}"
-        raise InstallError(message) from exc
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def prek_has_hooks(prek: list[str], top: Path, stage: str) -> bool:
