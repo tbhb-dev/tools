@@ -20,6 +20,9 @@ committed lines, the digest of the last one, and the segment's byte length up
 to it. Each request runs under an exclusive lock and first returns the
 directory to what the head file names, so an acknowledgment covers only
 durable history.
+
+Each stdin read has a five-second deadline (``READ_SECONDS``). A timeout refuses
+the request before opening or changing any receiver files.
 """
 
 import fcntl
@@ -27,6 +30,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import stat
 import sys
 from pathlib import Path
@@ -41,6 +45,7 @@ LAST_BYTE = 126
 PROTOCOL = 1
 PRIVATE = 0o600
 HEAD_LIMIT = 512
+READ_SECONDS = 5.0
 ASCII = "ascii"
 SEGMENT = re.compile(r"segment-([1-9][0-9]*)\.jsonl")
 NUMBER = r"(?:0|[1-9][0-9]*)"
@@ -283,6 +288,22 @@ def acknowledge(directory: str, head: tuple[int, int, str, int]) -> bytes:
     return f"ack {PROTOCOL} {head[1]} {head[2]}\n".encode(ASCII)
 
 
+def read_input(stdin: BinaryIO, size: int) -> bytes:
+    """Read at most SIZE bytes, refusing if stdin stalls past READ_SECONDS."""
+
+    def timed_out(_signum: int, _frame: object) -> None:
+        message = "stdin read timed out"
+        raise RejectedError(message)
+
+    previous = signal.signal(signal.SIGALRM, timed_out)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, READ_SECONDS)
+        return stdin.read(size)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def handle(
     directory: str,
     size: int,
@@ -295,7 +316,7 @@ def handle(
     if command != "head" and not request:
         message = "not head or append K"
         raise RejectedError(message)
-    data = stdin.read(1 if request is None else MAX_LINE + 1)
+    data = read_input(stdin, 1 if request is None else MAX_LINE + 1)
     lock = open_regular(str(Path(directory) / "lock"), os.O_RDWR | os.O_CREAT)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)

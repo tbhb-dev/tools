@@ -3,7 +3,10 @@
 import hashlib
 import io
 import os
+import signal
 import stat
+import threading
+import time
 from pathlib import Path
 from typing import override
 lazy from collections.abc import Buffer, Callable
@@ -54,7 +57,10 @@ def head_of(directory: Path) -> list[str]:
 
 def test_head_of_a_fresh_receiver(tmp_path: Path) -> None:
     directory = fresh(tmp_path)
+    previous = signal.getsignal(signal.SIGALRM)
     assert run(directory, "head") == (0, f"ack 1 0 {GENESIS}\n".encode())
+    assert signal.getsignal(signal.SIGALRM) == previous
+    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
 
 
 @pytest.mark.parametrize(
@@ -86,6 +92,40 @@ def test_other_commands_exit_nonzero_with_empty_output(
 def test_head_refuses_any_input(tmp_path: Path) -> None:
     directory = fresh(tmp_path)
     assert run(directory, "head", b"x") == (1, b"")
+
+
+@pytest.mark.parametrize(
+    ("command", "data"), [("head", b""), ("append 1", record(GENESIS))]
+)
+def test_input_without_eof_times_out_without_changing_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, data: bytes
+) -> None:
+    directory = fresh(tmp_path)
+    (directory / "segment-1.jsonl").write_bytes(b'{"partial')
+    before = {path.name: path.read_bytes() for path in directory.iterdir()}
+    monkeypatch.setattr(receiver, "READ_SECONDS", 0.05)
+    previous = signal.getsignal(signal.SIGALRM)
+    reader, writer = os.pipe()
+    out = io.BytesIO()
+    with os.fdopen(reader, "rb") as stdin, os.fdopen(writer, "wb") as sender:
+        sender.write(data)
+        sender.flush()
+        fallback = threading.Timer(0.5, sender.close)
+        fallback.start()
+        try:
+            start = time.monotonic()
+            code = receiver.serve(str(directory), SEGMENT, QUOTA, command, stdin, out)
+            assert (code, out.getvalue()) == (1, b"")
+            with pytest.raises(receiver.RejectedError, match=r"^stdin read timed out$"):
+                receiver.handle(str(directory), SEGMENT, QUOTA, command, stdin)
+            elapsed = time.monotonic() - start
+        finally:
+            fallback.cancel()
+            fallback.join()
+    assert elapsed < 0.4
+    assert signal.getsignal(signal.SIGALRM) == previous
+    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
 
 
 def test_append_adds_one_line_and_acknowledges_it(tmp_path: Path) -> None:
@@ -267,6 +307,7 @@ def test_a_stale_head_behind_several_committed_lines_truncates_nothing(
     stale = f"1 1 {digest(lines[0])} {len(lines[0])}\n"
     (directory / "head").write_text(stale)
     assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "more than one line follows the head"
     assert run(directory, "append 2", lines[1]) == (1, b"")
     assert (directory / "segment-1.jsonl").read_bytes() == b"".join(lines)
     assert (directory / "head").read_text() == stale
@@ -296,6 +337,7 @@ def test_a_tail_of_two_lines_from_an_empty_head_refuses(tmp_path: Path) -> None:
     data = record(GENESIS) + record(GENESIS)
     (directory / "segment-1.jsonl").write_bytes(data)
     assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "more than one line follows the head"
     assert (directory / "segment-1.jsonl").read_bytes() == data
 
 
@@ -304,6 +346,7 @@ def test_a_tail_longer_than_one_line_refuses(tmp_path: Path) -> None:
     data = b"x" * (receiver.MAX_LINE + 2)
     (directory / "segment-1.jsonl").write_bytes(data)
     assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "more than one line follows the head"
     assert (directory / "segment-1.jsonl").read_bytes() == data
 
 
@@ -321,6 +364,7 @@ def test_a_head_length_inside_a_line_refuses_without_truncation(
     (line,) = committed(directory, 1)
     (directory / "head").write_text(f"1 1 {digest(line)} {len(line) - 5}\n")
     assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "the head does not end on its last line"
     assert (directory / "segment-1.jsonl").read_bytes() == line
 
 
@@ -329,6 +373,7 @@ def test_a_head_digest_that_names_another_line_refuses(tmp_path: Path) -> None:
     first, second = committed(directory, 2)
     (directory / "head").write_text(f"1 2 {digest(first)} {len(first + second)}\n")
     assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "the head does not end on its last line"
     assert (directory / "segment-1.jsonl").read_bytes() == first + second
 
 
@@ -338,6 +383,7 @@ def test_a_head_after_a_line_over_the_limit_refuses(tmp_path: Path) -> None:
     (directory / "segment-1.jsonl").write_bytes(long)
     (directory / "head").write_text(f"1 1 {digest(long)} {len(long)}\n")
     assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "the head does not end on its last line"
 
 
 def test_a_head_after_a_line_longer_than_the_window_refuses(tmp_path: Path) -> None:
@@ -348,6 +394,7 @@ def test_a_head_after_a_line_longer_than_the_window_refuses(tmp_path: Path) -> N
     total = len(first + long)
     (directory / "head").write_text(f"1 2 {digest(long)} {total}\n")
     assert run(directory, "head") == (1, b"")
+    assert reason(directory, "head") == "the head does not end on its last line"
 
 
 def test_a_shorter_segment_refuses_without_truncation(tmp_path: Path) -> None:
@@ -526,6 +573,7 @@ STANDARD = {
     "os",
     "pathlib",
     "re",
+    "signal",
     "stat",
     "sys",
     "typing",
@@ -603,7 +651,7 @@ def test_a_failed_write_during_rotation_leaves_the_head_on_the_old_segment(
     assert (directory / "segment-1.jsonl").read_bytes() == first
 
 
-@pytest.mark.parametrize("name", ["segment-1.jsonl", "head", "lock"])
+@pytest.mark.parametrize("name", ["segment-1.jsonl", "head", "lock", "head.tmp"])
 def test_a_symbolic_link_in_the_directory_is_never_followed(
     tmp_path: Path, name: str
 ) -> None:
@@ -612,7 +660,11 @@ def test_a_symbolic_link_in_the_directory_is_never_followed(
     target.write_bytes(b"keep")
     (directory / name).unlink(missing_ok=True)
     (directory / name).symlink_to(target)
-    assert run(directory, "append 1", record(GENESIS))[0] == 1
+    if name == "head.tmp":
+        with pytest.raises(OSError, match="symbolic links"):
+            receiver.commit_head(str(directory), (1, 0, GENESIS, 0))
+    else:
+        assert run(directory, "append 1", record(GENESIS))[0] == 1
     assert target.read_bytes() == b"keep"
 
 
