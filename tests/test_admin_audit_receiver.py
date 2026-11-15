@@ -845,24 +845,29 @@ def test_the_input_read_is_bounded_at_one_line_and_a_byte(tmp_path: Path) -> Non
     assert sizes == [receiver.MAX_LINE + 1]
 
 
-def test_every_file_is_opened_private_and_directories_by_directory_flag(
+def test_every_file_is_opened_inside_the_directory_private_and_without_links(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     directory = fresh(tmp_path)
-    calls: list[tuple[str, int, int]] = []
+    calls: list[tuple[Path, int, int]] = []
     real = os.open
 
     def spy(path: str, flags: int, mode: int = 0o777) -> int:
-        calls.append((Path(path).name, flags, mode))
+        calls.append((Path(path), flags, mode))
         return real(path, flags, mode)
 
     monkeypatch.setattr(os, "open", spy)
     run(directory, "append 1", record(GENESIS))
-    for name, flags, mode in calls:
-        if name == "receiver":
+    assert {path.parent for path, _flags, _mode in calls} == {directory, tmp_path}
+    names = {path.name for path, _flags, _mode in calls}
+    assert names == {"receiver", "head", "head.tmp", "lock", "segment-1.jsonl"}
+    for path, flags, mode in calls:
+        if path == directory:
             assert flags & os.O_DIRECTORY
         else:
             assert mode == receiver.PRIVATE
+            assert flags & os.O_NOFOLLOW
+            assert flags & os.O_NONBLOCK
 
 
 def test_main_passes_the_segment_size_and_quota_on(
