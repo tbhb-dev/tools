@@ -28,8 +28,13 @@ type Runner = Callable[[object], Result]
 
 
 @pytest.fixture(autouse=True)
-def _shim_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PATH", f"{gh_shim.bin_dir()}{os.pathsep}/usr/bin")
+def _shim_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for name in ("tbhbdev", "prek", "gh"):
+        (tools / name).write_text("#!/bin/sh\n")
+        (tools / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{gh_shim.bin_dir()}{os.pathsep}{tools}")
 
 
 @pytest.fixture
@@ -140,11 +145,52 @@ def test_session_start_warns_when_the_shim_is_not_first_on_path(
         monkeypatch.setenv("PATH", path)
     status, out, err = run({"hook_event_name": "SessionStart"})
     assert (status, err) == (0, "")
-    assert out == (
+    assert out.startswith(
         f"state-guard: this hook's PATH doesn't start with {gh_shim.bin_dir()}, "
         "so a gh call in any hook skips the gh budget shim. Run "
         "`tbhbdev alpha install` and restart the session.\n"
     )
+
+
+@pytest.mark.parametrize(
+    ("gone", "added", "named"),
+    [
+        (("tbhbdev",), (), "tbhbdev"),
+        (("prek",), (), "prek or mise"),
+        (("gh",), (), "gh"),
+        (("tbhbdev", "prek", "gh"), (), "tbhbdev, prek or mise, gh"),
+        (("prek",), ("mise",), None),
+    ],
+)
+def test_session_start_warns_when_the_path_lacks_a_tool_hooks_run(
+    run: Runner,
+    tmp_path: Path,
+    gone: tuple[str, ...],
+    added: tuple[str, ...],
+    named: str | None,
+) -> None:
+    tools = tmp_path / "tools"
+    for name in gone:
+        (tools / name).unlink()
+    for name in added:
+        (tools / name).write_text("#!/bin/sh\n")
+        (tools / name).chmod(0o755)
+    status, out, err = run({"hook_event_name": "SessionStart"})
+    assert (status, err) == (0, "")
+    expected = (
+        f"state-guard: this hook's PATH has no {named}, so "
+        "hooks that need it fail without blocking. Run `tbhbdev alpha "
+        "install` from a shell that has it and restart the session.\n"
+    )
+    assert out == ("" if named is None else expected)
+
+
+def test_session_start_does_not_count_the_shim_as_gh(
+    run: Runner, tmp_path: Path
+) -> None:
+    (tmp_path / "tools" / "gh").write_text(f"#!/bin/sh\n{gh_shim.SHIM_MARK}\n")
+    _, out, _ = run({"hook_event_name": "SessionStart"})
+    assert "PATH has no gh," in out
 
 
 def test_session_start_without_a_rule_prints_nothing(

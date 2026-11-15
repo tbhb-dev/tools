@@ -15,7 +15,9 @@ reads the hook payload on stdin.
   that key it prints nothing. It also prints a warning when the hook's own
   PATH doesn't start with the gh shim's directory: every hook inherits that
   PATH, so a `gh` in a hook would then skip the call budget. `tbhbdev alpha
-  install` writes it into Claude's settings.
+  install` writes it into Claude's settings. And it prints a warning when
+  that PATH reaches no `tbhbdev`, neither `prek` nor `mise`, or no `gh`
+  besides the shim, because a hook that needs one then fails open.
 - PreToolUse on Write and Edit, when both `[harness] open_note` and
   `[harness] decisions_dir` are set: a file whose path ends in `open_note`
   can't gain a `- **item**` line unless the text holds `Decisions checked:`,
@@ -38,10 +40,11 @@ allows the call: a broken hook must not stop the agent's work.
 import os
 import re
 import shlex
+import shutil
 import sys
 
 from tbhbdev import userconfig
-from tbhbdev.alpha.gh_shim import bin_dir
+from tbhbdev.alpha.gh_shim import bin_dir, real_gh
 from tbhbdev.alpha.repo import read_hook_stdin
 
 type Json = dict[str, object]
@@ -284,6 +287,16 @@ def pre_tool_reason(data: Json) -> str | None:
     return None
 
 
+def missing_tools() -> list[str]:
+    """The tools the hooks run that this hook's PATH doesn't reach."""
+    missing = [] if shutil.which("tbhbdev") else ["tbhbdev"]
+    if not shutil.which("prek") and not shutil.which("mise"):
+        missing.append("prek or mise")
+    if real_gh() is None:
+        missing.append("gh")
+    return missing
+
+
 def run(data: Json) -> int:
     """Handle one hook payload; the exit status."""
     if data.get("hook_event_name") == "SessionStart":
@@ -295,6 +308,13 @@ def run(data: Json) -> int:
                 f"state-guard: this hook's PATH doesn't start with {bin_dir()}, "
                 "so a gh call in any hook skips the gh budget shim. Run "
                 "`tbhbdev alpha install` and restart the session."
+            )
+        missing = missing_tools()
+        if missing:
+            print(
+                f"state-guard: this hook's PATH has no {', '.join(missing)}, so "
+                "hooks that need it fail without blocking. Run `tbhbdev alpha "
+                "install` from a shell that has it and restart the session."
             )
         rule = userconfig.optional_string(TABLE, "rule")
         if rule:
