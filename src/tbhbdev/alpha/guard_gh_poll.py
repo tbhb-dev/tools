@@ -69,6 +69,11 @@ other heredoc body, and a quoted argument to any other command, is data:
 pass. A loop that runs ``bash -c 'gh ...'``
 counts as running gh.
 
+It also runs ``guard_git_hooks.verdict``, which denies a command that skips
+or redirects git hooks (``git -c core.hooksPath``, writing the key,
+``--no-verify``). That check rides this hook because every harness already
+installs it.
+
 Allowing prints nothing. Like ``guard-gh-pr``, unreadable input or any crash
 allows the command and prints nothing, because a broken hook must never stop
 the agent's work. This is an accident guard, not a security boundary. It
@@ -94,6 +99,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, override
 from urllib.parse import parse_qs, urlsplit
 
+from tbhbdev.alpha import guard_git_hooks
 from tbhbdev.alpha.guard_gh_pr import (
     API_FIELD_FLAGS,
     API_VALUE_FLAGS,
@@ -781,7 +787,7 @@ def main() -> int:
     try:
         data = read_hook_stdin()
         text, antigravity = command_of(data)
-        message = inspect(text)[0]
+        message = inspect(text)[0] or guard_git_hooks.verdict(text)
         if protects(edited_file(data)):
             message = PROTECT_REASON
         if message:
