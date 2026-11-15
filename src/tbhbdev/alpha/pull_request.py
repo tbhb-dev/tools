@@ -11,7 +11,7 @@ Usage, from anywhere in a worktree:
 
     tbhbdev alpha pr check [DRAFT]
     tbhbdev alpha pr create [DRAFT] [--dry-run]
-    tbhbdev alpha pr edit [DRAFT] --pr N
+    tbhbdev alpha pr edit DRAFT --pr N
     tbhbdev alpha pr ready N [N...]
     tbhbdev alpha pr rerun N
     tbhbdev alpha pr delete-branch N
@@ -20,10 +20,10 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr backfill-opened OWNER
 
 The repository is the worktree the command runs in: its schema, section
-scheme and lint configs are the ones checked against. DRAFT defaults to that
-worktree's .github/PULL_REQUEST_DRAFT.md, so each worktree has its own. Every
-failure prints as `path:line: problem`, and the exit code is 1 when there is
-any.
+scheme and lint configs are the ones checked against. For ``check`` and
+``create``, DRAFT defaults to that worktree's .github/PULL_REQUEST_DRAFT.md.
+``edit`` requires an explicit DRAFT path. Every failure prints as
+`path:line: problem`, and the exit code is 1 when there is any.
 
 ``check`` validates the frontmatter against the schema, requires a title that
 ``cog verify`` accepts and that fits 64 characters (a squash merge appends
@@ -198,7 +198,7 @@ NAME_WITH_OWNER = re.compile(REPO)
 PR_PAGE = re.compile(rf"https://github\.com/({REPO})/pull/[0-9]+")
 REPO_LIMIT = 1000
 PR_LIMIT = 10000
-EDIT_DRAFT = "run `tbhbdev alpha pr edit --pr {number}` to apply the draft"
+EDIT_DRAFT = "run `tbhbdev alpha pr edit DRAFT --pr {number}` to apply the draft"
 BACKFILL_KEYS = re.compile(r"(?:Generated-by|Assisted-by|Opened-by):\s*(LLM\b.*)")
 SESSION_ATTR = re.compile(r"(?<![^\s;])session=(sha-256-64:[0-9a-f]{16})(?![^\s;])")
 LIST_ITEM = re.compile(r" *(?:[-*+]|\d+[.)]) +\S")
@@ -1651,7 +1651,10 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub.add_parser("checks").add_argument("pr", type=int)
     for name in ("check", "create", "edit"):
         one = sub.add_parser(name)
-        one.add_argument("draft", nargs="?", type=Path, default=DRAFT)
+        if name == "edit":
+            one.add_argument("draft", type=Path)
+        else:
+            one.add_argument("draft", nargs="?", type=Path, default=DRAFT)
         if name == "create":
             one.add_argument("--dry-run", action="store_true")
         if name == "edit":
