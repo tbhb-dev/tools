@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 # Split the spelling because the repository's leak scanner also flags the name.
 CLAUDE_TOKEN_ENV = "CLAUDE_CODE_" + "OAUTH_TOKEN"
-PULL_REQUESTS_PERMISSIONS = {"contents": "read", "pull_requests": "write"}
+PULL_REQUESTS_PERMISSIONS = {"contents": "read"}
 
 
 @dataclass(frozen=True)
@@ -72,7 +72,7 @@ def installation_token(references: Credentials, repository: str) -> str:
 
 
 def pull_requests_token(references: Credentials, repository: str) -> str:
-    """Mint the pull-requests App token for one repository: read contents, write PRs."""
+    """Mint the pull-requests App token for one repository, contents read only."""
     if (
         references.pull_requests_app_client_id is None
         or references.pull_requests_app_pem is None

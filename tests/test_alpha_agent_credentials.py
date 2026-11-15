@@ -1032,7 +1032,7 @@ def test_build_without_gh_mints_from_the_pull_requests_app(
             "app_id": VALUES["example/app/client"],
             "pem": VALUES["example/app/pem"],
             "repository": "example-org/example-repo",
-            "permissions": {"contents": "read", "pull_requests": "write"},
+            "permissions": {"contents": "read"},
         }
     ]
     assert yaml.safe_load((tmp_path / "gh" / "hosts.yml").read_text()) == {
@@ -1043,7 +1043,7 @@ def test_build_without_gh_mints_from_the_pull_requests_app(
     }
 
 
-def test_build_token_request_names_one_repository_and_pull_requests_only(
+def test_build_token_request_names_one_repository_and_contents_read_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -1087,7 +1087,7 @@ def test_build_token_request_names_one_repository_and_pull_requests_only(
     credentials.deliver(run_request(), pull_requests_settings(), tmp_path)
     assert [(request.method, request.url.path) for request in requests] == list(replies)
     assert json.loads(requests[1].content) == {
-        "permissions": {"contents": "read", "pull_requests": "write"},
+        "permissions": {"contents": "read"},
         "repositories": ["example-repo"],
     }
     assert (
