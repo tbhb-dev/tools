@@ -396,27 +396,47 @@ def test_main_checks_the_arguments_then_serves(tmp_path: Path) -> None:
     assert out.getvalue() == f"ack 1 0 {GENESIS}\n".encode()
 
 
-def test_the_module_imports_only_the_standard_library() -> None:
-    source = Path(receiver.__file__).read_text()
+STANDARD = {
+    "__future__",
+    "fcntl",
+    "hashlib",
+    "json",
+    "os",
+    "pathlib",
+    "re",
+    "sys",
+    "typing",
+}
+
+
+def foreign_imports(source: str, path: Path) -> set[str]:
     imports = {
         line.split()[1].split(".")[0]
         for line in source.splitlines()
         if line.startswith(("import ", "from "))
     }
-    if "mutants" in Path(receiver.__file__).parts:
+    if "mutants" in path.parts:
         # The mutation runner's trampoline adds this import to a mutated copy.
         imports.discard("mutmut")
-    assert imports <= {
-        "__future__",
-        "fcntl",
-        "hashlib",
-        "json",
-        "os",
-        "pathlib",
-        "re",
-        "sys",
-        "typing",
+    return imports - STANDARD
+
+
+def test_the_module_imports_only_the_standard_library() -> None:
+    path = Path(receiver.__file__)
+    assert foreign_imports(path.read_text(), path) == set()
+
+
+def test_the_import_check_flags_a_real_foreign_import() -> None:
+    source = "import os\nimport httpx\nfrom cryptography import x\n"
+    assert foreign_imports(source, Path("src/audit_receiver.py")) == {
+        "httpx",
+        "cryptography",
     }
+    assert foreign_imports("import mutmut\n", Path("src/audit_receiver.py")) == {
+        "mutmut"
+    }
+    assert foreign_imports("import mutmut\n", Path("mutants/src/r.py")) == set()
+    assert foreign_imports("import httpx\n", Path("mutants/src/r.py")) == {"httpx"}
 
 
 @pytest.mark.parametrize("is_line", [True, False])
