@@ -136,6 +136,28 @@ def test_a_pr_without_opened_by_by_the_agent_account_is_closed_on_that_basis(
     )
 
 
+def test_a_bot_authored_pr_without_opened_by_is_closed_on_that_basis(gh: Gh) -> None:
+    gh.view["body"] = "Why.\n"
+    gh.view["author"] = {"is_bot": True, "login": "app/tbhb-dev-renovate"}
+    assert close.main(["pr", "close", "7", "--reason", "stale"], env=ENV) == 0
+    assert gh.calls[-1][-1] == (
+        "Closed on the basis that its GitHub author is the bot account"
+        f" app/tbhb-dev-renovate and it has no Opened-by line.\n\nstale\n\n"
+        f"{trailer_line()}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "author",
+    [{"is_bot": True}, {"is_bot": True, "login": ""}, {"is_bot": "yes", "login": "x"}],
+)
+def test_a_bot_author_needs_a_flag_and_a_login(gh: Gh, author: object) -> None:
+    gh.view["body"] = "Why.\n"
+    gh.view["author"] = author
+    with pytest.raises(SystemExit, match="no Opened-by line"):
+        close.main(["pr", "close", "7", "--reason", "x"], env=ENV)
+
+
 @pytest.mark.parametrize(
     "author", [{"login": ""}, {"login": 1}, {}, None, "tbhb-agent"]
 )

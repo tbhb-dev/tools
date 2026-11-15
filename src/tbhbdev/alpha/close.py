@@ -13,7 +13,8 @@ ledger decides. It closes another agent's pull request only with a reason,
 which the comment records along with the fact that the closer isn't the opener.
 A pull request with no ``Opened-by`` line, such as one opened before the line
 existed, is closed only when its GitHub author is the account this ``gh`` runs
-as, and the comment records that basis. A human's is refused. Any session may
+as or a bot account, such as Renovate's, and the comment records that basis. A
+human's is refused. Any session may
 close an issue with a reason.
 """
 
@@ -100,6 +101,15 @@ def agent_author(data: Mapping[str, object]) -> str | None:
     return login if me.returncode == 0 and me.stdout.strip() == login else None
 
 
+def bot_author(data: Mapping[str, object]) -> str | None:
+    """The pull request's author login when GitHub marks the author a bot."""
+    author = data.get("author")
+    if not isinstance(author, dict) or author.get("is_bot") is not True:
+        return None
+    login = author.get("login")
+    return login if isinstance(login, str) and login else None
+
+
 def opener_note(data: Mapping[str, object], env: Mapping[str, str]) -> str:
     """The comment line a close by a session other than the opener needs, or ''.
 
@@ -111,11 +121,17 @@ def opener_note(data: Mapping[str, object], env: Mapping[str, str]) -> str:
     """
     if pr.opened_line(str(data.get("body") or "")) is None:  # pragma: no mutate
         login = agent_author(data)
+        if login is not None:
+            return (
+                "Closed on the basis that its GitHub author is the agent account"
+                f" {login} and it has no Opened-by line.\n\n"
+            )
+        login = bot_author(data)
         if login is None:
             message = "not closing: the pull request has no Opened-by line (a human's?)"
             raise SystemExit(message)
         return (
-            f"Closed on the basis that its GitHub author is the agent account {login}"
+            f"Closed on the basis that its GitHub author is the bot account {login}"
             " and it has no Opened-by line.\n\n"
         )
     ident = opened.opener(env)
