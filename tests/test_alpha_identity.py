@@ -6337,21 +6337,36 @@ def test_staged_docs_keeps_a_file_the_merge_moved_and_edited(repo: Path) -> None
     assert [d[0] for d in ai.staged_docs(repo)] == ["docs/new.md"]
 
 
-def test_staged_docs_compares_paths_that_are_not_utf8(
+def test_staged_docs_reads_git_output_as_bytes(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Work trees on some file systems can't hold such a name, so git's output is faked.
+    # Work trees on some file systems can't hold a non-UTF-8 name, so the bytes git
+    # would print are faked under the helper: raw bytes unless text mode is asked.
     stage_doc(repo, "docs/a.md", "x\n")
     (repo / ".git" / "MERGE_HEAD").write_text("0" * 40 + "\n", encoding="ascii")
     raw = (
-        b":100644 000000 1111111 0000000 D\0non-doc-\xff.txt\0"
-        b":100644 100644 1111111 2222222 M\0docs/a.md\0"
+        b":000000 100644 0000000 1111111 A\0non-doc-\xff.txt\0"
+        b":100644 100644 aaaaaaa bbbbbbb M\0docs/a.md\0"
     )
+    real = subprocess.run
 
-    def fake(*_args: str, **_kwargs: Path) -> tuple[int, bytes]:
-        return 0, raw
+    def fake_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        text: bool = False,
+        capture_output: bool = False,
+        check: bool = False,
+    ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+        if cmd[1] != "diff":
+            return real(
+                cmd, cwd=cwd, text=True, capture_output=capture_output, check=check
+            )
+        if text:
+            return subprocess.CompletedProcess(cmd, 0, stdout=raw.decode())
+        return subprocess.CompletedProcess(cmd, 0, stdout=raw)
 
-    monkeypatch.setattr(ai, "git_status_bytes", fake)
+    monkeypatch.setattr(subprocess, "run", fake_run)
     assert [d[0] for d in ai.staged_docs(repo)] == ["docs/a.md"]
 
 

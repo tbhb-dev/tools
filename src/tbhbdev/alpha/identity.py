@@ -2492,11 +2492,11 @@ def git_status_bytes(*args: str, cwd: Path) -> tuple[int, bytes]:
 
 def staged_docs(top: Path) -> list[tuple[str, str, str]]:
     """(path, mode, blob) of each staged added or modified stampable document."""
-    _, out = git(
+    _, raw = git_status_bytes(
         "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames",
         "--diff-filter=AM", cwd=top,
     )  # fmt: skip
-    fields = out.split("\0")
+    fields = decode(raw).split("\0")
     docs = []
     for meta, path in zip(fields[::2], fields[1::2], strict=False):  # pragma: no mutate
         pure = PurePosixPath(path)
