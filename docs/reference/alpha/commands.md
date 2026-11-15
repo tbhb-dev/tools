@@ -5,16 +5,9 @@ generated:
   effort: high
   harness: codex:0.164.0
   model: openai:gpt-6.1-sol
-  session: sha-256-64:78f9bc32cc3691e0
+  session: sha-256-64:9fa208639bb640db
   surface: exec
-  at: '2026-11-15T14:20:53Z'
-- role: generated
-  effort: high
-  harness: codex:0.164.0
-  model: openai:gpt-6.1-sol
-  session: sha-256-64:ec3c1d143950d992
-  surface: exec
-  at: '2026-11-15T15:52:34Z'
+  at: '2026-11-15T19:18:44Z'
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -38,7 +31,7 @@ type: Reference
 - `gh-shim` is the `gh` that agent sessions find first on PATH. It budgets their `gh` calls as a backstop.
 - `guard-gh-config-dir` is a PreToolUse hook that blocks `gh` commands when `GH_CONFIG_DIR` is unset or empty in the hook's environment. It scans the command string without running `gh` and accepts any nonempty value.
 - `agent-env` runs Codex or Antigravity with the `gh` shim first on PATH.
-- `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it. `pr ready N [N...]` marks each one ready for review, only when the pull request's GitHub author is the account the agent's own `gh` runs as. `pr rerun N` reruns only the failed jobs of the latest run for pull request N's current head commit. It reports an error when that run hasn't failed or no run exists. `pr close N --reason TEXT` (or `--comment TEXT`) closes it after the agent-session, open-state and opened-ledger checks, in origin's repository. `pr delete-branch N` deletes only the head branch of a closed or merged pull request in origin's GitHub repository. It refuses fork heads, `main`, protected branches, and unreadable metadata.
+- `pr check [DRAFT]` checks a draft, and `pr create [DRAFT]` opens a pull request from it. Both default to `.github/PULL_REQUEST_DRAFT.md`. `pr edit DRAFT --pr N` updates pull request N and requires the draft path. `pr ready N [N...]` marks each one ready for review, only when the pull request's GitHub author is the account the agent's own `gh` runs as. `pr rerun N` reruns only the failed jobs of the latest run for pull request N's current head commit. It reports an error when that run hasn't failed or no run exists. `pr close N --reason TEXT` (or `--comment TEXT`) closes it after the agent-session, open-state and opened-ledger checks, in origin's repository. `pr delete-branch N` deletes only the head branch of a closed or merged pull request in origin's GitHub repository. It refuses fork heads, `main`, protected branches, and unreadable metadata.
 - `review` drafts and checks a pull request review.
 - `version-check [--host NAME ...] [--expect SHA|latest] [--json]` compares the installed build on each host, read-only. For each host it runs `$HOME/.local/bin/tbhbdev --version` over `ssh -n -o BatchMode=yes -o ConnectTimeout=5` (directly on this host) and prints `<host> <sha-or-unknown> <state>`, where the state is `ok`, `stale`, `unknown` or `unreachable`. `--json` prints a list of objects with `host`, `version` and `state`. Hosts come from `--host` or the names in `[harness] hosts` of the user config, and exits 2 with neither source. `--expect SHA` compares every host to that 40-hex commit, `--expect latest` to the head of origin's main, and with neither the reference is the build most hosts run (the first host's on a tie). It exits 0 when every host is `ok`, 1 when any is stale or unknown, 2 for a usage error, and 3 when a host is unreachable and none is stale (or `latest` is unavailable). The build is the commit in the `direct_url.json` of the install, else the 40-hex `COMMIT` of `tbhbdev/_build.py`, a stamp the repository never commits and that nothing writes yet, so a wheel install without one reports `unknown`.
 - `gh-app` requests a GitHub App installation token, reading the App's id and RSA key through Connect, and keeps it under `$XDG_STATE_HOME/gh-app/VAULT/APP`. The command serves a cached token with more than ten minutes left, even during a cooldown, and a cooldown refuses any other request. Only a 404 sends the installation lookup from the repository to its owner. The command syncs each file to disk before it replaces the old one.
