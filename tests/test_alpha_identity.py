@@ -8713,7 +8713,6 @@ def test_with_record_overrides_a_forged_line() -> None:
 
 
 @pytest.mark.usefixtures("repo")
-@pytest.mark.usefixtures("repo")
 def test_cmd_trailer_interactive_squash_of_two_sessions_moves_every_line(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -8740,6 +8739,7 @@ def test_cmd_trailer_interactive_squash_of_two_sessions_moves_every_line(
     assert path.read_bytes() == before
 
 
+@pytest.mark.usefixtures("repo")
 def test_cmd_trailer_interactive_squash_keeps_the_earliest_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
