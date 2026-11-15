@@ -454,7 +454,7 @@ def merge_groups(config: Json, desired: Json) -> Json:
     return {**config, **desired}
 
 
-REQUIRED_TOOLS = ("tbhbdev", "git")
+REQUIRED_TOOLS = ("tbhbdev", "gh", "git")
 
 
 def absolute_entries(path: str) -> list[str]:
@@ -462,62 +462,94 @@ def absolute_entries(path: str) -> list[str]:
     return [e for e in path.split(os.pathsep) if Path(e).is_absolute()]
 
 
-def unsafe_path(path: object) -> bool:
+def unsafe_path(path: str) -> bool:
     """True for a saved PATH string with a relative or ``.`` entry."""
-    return isinstance(path, str) and any(
-        not Path(e).is_absolute() for e in path.split(os.pathsep)
-    )
+    return any(not Path(e).is_absolute() for e in path.split(os.pathsep))
 
 
 def running_dirs() -> list[str]:
-    """The directories of the running ``tbhbdev`` entry point and interpreter."""
-    return [
-        str(Path(sys.argv[0]).resolve().parent),
-        str(Path(sys.executable).parent),
-    ]
+    """The directory the running ``tbhbdev`` was started from, symlinks kept.
+
+    A bare ``tbhbdev`` was found through PATH, so it adds nothing.
+    """
+    command = sys.argv[0]
+    return [str(Path(command).absolute().parent)] if os.sep in command else []
+
+
+def durable(directory: str) -> bool:
+    """False for a directory inside the current directory, such as a clone's venv.
+
+    Such a directory goes away with its clone, and a hook can't rely on it.
+    """
+    return not Path(directory).is_relative_to(Path.cwd())
+
+
+def complete(entries: list[str]) -> list[str]:
+    """ENTRIES plus the directory of each required tool they lack.
+
+    Raises InstallError when a tool is on neither the entries nor a durable
+    directory of the running command or installing process.
+    """
+    process = os.pathsep.join(
+        d
+        for d in [*running_dirs(), *absolute_entries(os.environ.get("PATH", ""))]
+        if durable(d)
+    )
+    done = list(entries)
+    for tool in REQUIRED_TOOLS:
+        if shutil.which(tool, path=os.pathsep.join(done)) is None:
+            on_process = shutil.which(tool, path=process)
+            if on_process:
+                done.append(str(Path(on_process).parent))
+        if shutil.which(tool, path=os.pathsep.join(done)) is None:
+            message = f"{tool} is not on PATH, so the hooks could not run it"
+            raise InstallError(message)
+    return done
 
 
 def settings_path(current: object, base: str | None) -> str | None:
     """Claude's settings ``env.PATH`` with the gh shim's directory first.
 
     The entries come from BASE (the PATH of the install run), so a rerun
-    with a different PATH rewrites them, else from the PATH already in
-    settings when it is a string. A hook process gets no ``$CLAUDE_ENV_FILE``,
-    so this is the only way the shim reaches it. Hooks run ``tbhbdev`` and
-    ``git``, so a directory that holds either is added when the entries lack
-    it, taken from the running executable's directory and the installing
-    process's absolute PATH entries. Relative entries are dropped, because a
-    hook resolves them in whatever clone it runs in. There is no PATH to
-    write without entries, or when the shim directory is relative (a relative
-    XDG_DATA_HOME). When entries remain but ``tbhbdev`` can't be found,
-    writing the PATH would break every hook, so the install refuses.
+    with a different PATH rewrites them. When BASE has no absolute entry,
+    they come from the PATH already in settings when it is a string. A hook
+    process gets no ``$CLAUDE_ENV_FILE``, so this is the only way the shim
+    reaches it. Hooks run ``tbhbdev``, ``gh`` and ``git``, so a directory
+    that holds one is added when the entries lack it, taken from the running
+    command's directory and the installing process's absolute PATH entries,
+    except a directory inside the current one. Relative entries are dropped,
+    because a hook resolves them in whatever clone it runs in. There is no
+    PATH to write without entries, or when the shim directory is relative (a
+    relative XDG_DATA_HOME). When entries remain and one of the three tools
+    still can't be found on the PATH that would be written, writing it would
+    break the hooks, so the install refuses.
     """
-    source = base if base is not None else current if isinstance(current, str) else None
+    saved = current if isinstance(current, str) else ""
     shim = bin_dir()
-    if source is None or not shim.is_absolute():
+    found = absolute_entries(base or "") or absolute_entries(saved)
+    entries = [e for e in found if e != str(shim)]
+    if not entries or not shim.is_absolute():
         return None
-    entries = [e for e in absolute_entries(source) if e != str(shim)]
-    if not entries:
-        return None
-    process = os.pathsep.join(
-        [*running_dirs(), *absolute_entries(os.environ.get("PATH", ""))]
-    )
-    for tool in REQUIRED_TOOLS:
-        if shutil.which(tool, path=os.pathsep.join(entries)) is None:
-            found = shutil.which(tool, path=process)
-            if found:
-                entries.append(str(Path(found).parent))
-    if shutil.which("tbhbdev", path=os.pathsep.join(entries)) is None:
-        message = "tbhbdev is not on PATH, so the hooks could not run it"
-        raise InstallError(message)
-    return os.pathsep.join([str(shim), *entries])
+    with_tools = complete(entries)
+    return os.pathsep.join([str(shim), *with_tools])
+
+
+def clean_saved_path(fields: Json) -> Json:
+    """FIELDS with a saved PATH reduced to its absolute entries, or dropped if none."""
+    saved = fields.get("PATH")
+    if not (isinstance(saved, str) and unsafe_path(saved)):
+        return fields
+    clean = os.pathsep.join(absolute_entries(saved))
+    kept = {k: v for k, v in fields.items() if k != "PATH"}
+    return kept | {"PATH": clean} if clean else kept
 
 
 def merged_config(harness: str, config: Json, base_path: str | None = None) -> Json:
     """A harness config with this command's hooks merged in.
 
     Claude's ``env.PATH`` gets the gh shim first when BASE_PATH or the config
-    names a PATH.
+    names a PATH. A saved PATH that isn't rewritten loses its relative
+    entries.
     """
     if harness == CLAUDE:
         env = config.get("env", {})
@@ -528,11 +560,7 @@ def merged_config(harness: str, config: Json, base_path: str | None = None) -> J
         merged = merge_events(config, claude_hooks())
         path = settings_path(fields.get("PATH"), base_path)
         shimmed = {} if path is None else {"PATH": path}
-        kept = {
-            k: v
-            for k, v in fields.items()
-            if path is not None or k != "PATH" or not unsafe_path(v)
-        }
+        kept = fields if path is not None else clean_saved_path(fields)
         return {**merged, "env": {**kept, **shimmed, **AGENT_ENVIRONMENT}}
     if harness == CODEX:
         return merge_events(config, codex_hooks())

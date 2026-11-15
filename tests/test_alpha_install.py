@@ -148,6 +148,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     bin_dir.mkdir()
     write_fake(bin_dir / "prek", FAKE_PREK)
     write_fake(bin_dir / "tbhbdev", "#!/bin/sh\n")
+    write_fake(bin_dir / "gh", "#!/bin/sh\n")
     link_git(tmp_path / "git_dir")
     # Besides git and dirname, a shim without tbhbdev matches origin with these.
     (tmp_path / "shim_bin").mkdir()
@@ -586,7 +587,7 @@ def no_running_dirs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def tool_dir(tmp_path: Path, name: str, tools: tuple[str, ...]) -> str:
     folder = tmp_path / name
-    folder.mkdir()
+    folder.mkdir(parents=True)
     for tool in tools:
         (folder / tool).write_text("#!/bin/sh\n")
         (folder / tool).chmod(0o755)
@@ -598,7 +599,7 @@ def test_settings_path_puts_the_shim_first_once(
 ) -> None:
     shim = str(gh_shim.bin_dir())
     sep = os.pathsep
-    full = tool_dir(tmp_path, "full", ("tbhbdev", "git"))
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "gh", "git"))
     monkeypatch.setenv("PATH", full)
     assert install.settings_path(None, None) is None
     assert install.settings_path(None, f"/a{sep}{sep}/b") == (
@@ -613,7 +614,7 @@ def test_settings_path_puts_the_shim_first_once(
 def test_settings_path_refreshes_from_the_install_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    full = tool_dir(tmp_path, "full", ("tbhbdev", "git"))
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "gh", "git"))
     monkeypatch.setenv("PATH", "/unused")
     shim = str(gh_shim.bin_dir())
     assert install.settings_path(f"/stale{os.pathsep}/old", full) == (
@@ -621,13 +622,13 @@ def test_settings_path_refreshes_from_the_install_run(
     )
 
 
-def test_settings_path_adds_the_dirs_of_tbhbdev_and_git(
+def test_settings_path_adds_the_dirs_of_the_tools_it_lacks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sep = os.pathsep
     shim = str(gh_shim.bin_dir())
     one = tool_dir(tmp_path, "one", ("tbhbdev",))
-    two = tool_dir(tmp_path, "two", ("git",))
+    two = tool_dir(tmp_path, "two", ("gh", "git"))
     monkeypatch.setenv("PATH", f"{one}{sep}{two}")
     minimal = install.settings_path(None, "/usr/bin-minimal")
     assert minimal == f"{shim}{sep}/usr/bin-minimal{sep}{one}{sep}{two}"
@@ -641,6 +642,7 @@ def test_settings_path_with_no_entries_or_a_relative_shim_writes_nothing(
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     assert install.settings_path("", None) is None
     assert install.settings_path(None, os.pathsep) is None
+    assert install.settings_path(7, "") is None
     monkeypatch.setenv("XDG_DATA_HOME", "relative")
     assert install.settings_path(None, "/a") is None
 
@@ -650,7 +652,7 @@ def test_settings_path_drops_relative_entries(
 ) -> None:
     sep = os.pathsep
     shim = str(gh_shim.bin_dir())
-    full = tool_dir(tmp_path, "full", ("tbhbdev", "git"))
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "gh", "git"))
     monkeypatch.setenv("PATH", full)
     assert install.settings_path(None, f"rel{sep}/a{sep}.{sep}bin") == (
         f"{shim}{sep}/a{sep}{full}"
@@ -662,19 +664,35 @@ def test_settings_path_drops_relative_entries(
         install.settings_path(None, "/a")
 
 
-def test_settings_path_refuses_when_tbhbdev_cannot_be_found(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("missing", ["tbhbdev", "gh", "git"])
+def test_settings_path_refuses_when_a_required_tool_cannot_be_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
 ) -> None:
-    git_only = tool_dir(tmp_path, "git-only", ("git",))
-    monkeypatch.setenv("PATH", git_only)
-    with pytest.raises(install.InstallError, match="tbhbdev is not on PATH"):
-        install.settings_path(None, "/usr/bin")
+    others = tuple(t for t in ("tbhbdev", "gh", "git") if t != missing)
+    folder = tool_dir(tmp_path, "others", others)
+    monkeypatch.setenv("PATH", folder)
+    with pytest.raises(install.InstallError, match=rf"^{missing} is not on PATH"):
+        install.settings_path(None, "/usr/bin-minimal")
 
 
-def test_settings_path_adds_the_running_executables_directory(
+def test_settings_path_uses_the_saved_path_when_the_run_has_no_absolute_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    running = tool_dir(tmp_path, "running", ("tbhbdev", "git"))
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "gh", "git"))
+    monkeypatch.setenv("PATH", full)
+    shim = str(gh_shim.bin_dir())
+    sep = os.pathsep
+    # A run with PATH="" and a saved PATH that lacks tbhbdev gets it added.
+    assert install.settings_path("/usr/bin", "") == (f"{shim}{sep}/usr/bin{sep}{full}")
+    monkeypatch.setenv("PATH", "")
+    with pytest.raises(install.InstallError, match=r"^tbhbdev is not on PATH"):
+        install.settings_path("/usr/bin", "")
+
+
+def test_settings_path_adds_the_running_commands_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    running = tool_dir(tmp_path, "running", ("tbhbdev", "gh", "git"))
     monkeypatch.setattr(install, "running_dirs", lambda: [running])
     monkeypatch.setenv("PATH", "/usr/bin")
     shim = str(gh_shim.bin_dir())
@@ -684,21 +702,31 @@ def test_settings_path_adds_the_running_executables_directory(
     )
 
 
-def test_running_dirs_names_the_entry_point_and_the_interpreter(
+def test_settings_path_skips_a_directory_inside_the_current_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clone = tmp_path / "clone"
+    venv = tool_dir(clone, ".venv/bin", ("tbhbdev", "gh", "git"))
+    monkeypatch.chdir(clone)
+    monkeypatch.setenv("PATH", venv)
+    with pytest.raises(install.InstallError, match=r"^tbhbdev is not on PATH"):
+        install.settings_path(None, "/usr/bin-minimal")
+
+
+def test_running_dirs_keeps_the_symlink_and_skips_a_bare_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.undo()
-    entry = tmp_path / "bin" / "tbhbdev"
-    entry.parent.mkdir()
+    entry = tmp_path / "venv" / "bin" / "tbhbdev"
+    entry.parent.mkdir(parents=True)
     entry.write_text("")
-    link = tmp_path / "link"
+    link = tmp_path / "link" / "tbhbdev"
+    link.parent.mkdir()
     link.symlink_to(entry)
     monkeypatch.setattr(sys, "argv", [str(link)])
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "py" / "python"))
-    assert install.running_dirs() == [
-        str(entry.parent.resolve()),
-        str(tmp_path / "py"),
-    ]
+    assert install.running_dirs() == [str(link.parent)]
+    monkeypatch.setattr(sys, "argv", ["tbhbdev"])
+    assert install.running_dirs() == []
 
 
 @pytest.mark.parametrize(
@@ -707,21 +735,23 @@ def test_running_dirs_names_the_entry_point_and_the_interpreter(
         ("relative-data/tbhbdev/agent-bin:.:/usr/bin", True),
         ("/a:/b", False),
         ("", True),
-        (7, False),
     ],
 )
-def test_unsafe_path(value: object, *, unsafe: bool) -> None:
+def test_unsafe_path(value: str, *, unsafe: bool) -> None:
     assert install.unsafe_path(value) is unsafe
 
 
-def test_a_saved_path_with_a_relative_entry_is_removed_when_none_is_written(
+def test_a_saved_path_loses_its_relative_entries_when_none_is_written(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", "relative-data")
     unsafe = "relative-data/tbhbdev/agent-bin:.:/usr/bin"
     merged = install.merged_config("claude", {"env": {"PATH": unsafe, "X": "1"}})
-    assert cast("dict[str, str]", merged["env"]).get("PATH") is None
-    assert cast("dict[str, str]", merged["env"])["X"] == "1"
+    env = cast("dict[str, str]", merged["env"])
+    assert env["PATH"] == "/usr/bin"
+    assert env["X"] == "1"
+    only_relative = install.merged_config("claude", {"env": {"PATH": ".:rel"}})
+    assert "PATH" not in cast("dict[str, str]", only_relative["env"])
     safe = install.merged_config("claude", {"env": {"PATH": "/usr/bin"}})
     assert cast("dict[str, str]", safe["env"])["PATH"] == "/usr/bin"
 
@@ -731,7 +761,7 @@ def test_merged_config_writes_the_shim_path_for_claude_only(
 ) -> None:
     shim = str(gh_shim.bin_dir())
     sep = os.pathsep
-    full = tool_dir(tmp_path, "full", ("tbhbdev", "git"))
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "gh", "git"))
     monkeypatch.setenv("PATH", full)
     claude = install.merged_config("claude", {}, "/a")
     assert claude["env"] == {
