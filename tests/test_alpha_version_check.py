@@ -274,6 +274,11 @@ def test_a_broken_config_is_a_usage_error(
         "-u@h",
         "u@-h",
         "a@b@c",
+        pytest.param("-h", id="a leading dash would pass as an ssh option"),
+        pytest.param("h_", id="a host takes no underscore"),
+        pytest.param("h:22", id="a host takes no port"),
+        pytest.param("h/x", id="a host takes no path"),
+        pytest.param("a b@h", id="a login takes no space"),
     ],
 )
 def test_a_bad_host_name_is_a_usage_error(
@@ -284,6 +289,25 @@ def test_a_bad_host_name_is_a_usage_error(
     assert (status, out) == (2, "")
     assert err == f"{PROG}: not a host name: {name!r}\n"
     assert fake.calls == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("a", id="a one-character host"),
+        pytest.param("a.b-c", id="a host holds dots and dashes"),
+        pytest.param("agent@a", id="a login before a one-character host"),
+        pytest.param("ag.ent-1@h", id="a login holds dots, dashes and digits"),
+        pytest.param("a_b@h", id="a login holds an underscore"),
+        pytest.param("u@host-name", id="a dashed host after a login"),
+    ],
+)
+def test_a_valid_host_name_is_checked(
+    name: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = Fake({name: (0, line(A))})
+    status, out, err = run_main(["--host", name], fake, capsys)
+    assert (status, out, err) == (0, f"{name} {A} ok\n", "")
 
 
 @pytest.mark.parametrize("expect", ["", "abc", A.upper(), A + "0", "Latest"])
