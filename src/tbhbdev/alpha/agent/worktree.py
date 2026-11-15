@@ -172,10 +172,11 @@ def fetch_commit(mirror: Path, request: RunRequest, seeded: Path) -> str:
                 "fetch",
                 *options,
                 "--no-prune",
+                "--end-of-options",
                 str(seeded),
                 f"+{request.commit}:refs/heads/tbhbdev-review",
             )
-        except subprocess.CalledProcessError:
+        except OSError, subprocess.SubprocessError:
             pass
         else:
             return resolve_commit(mirror, request.commit)
@@ -469,7 +470,7 @@ def create(
         note = (
             ""
             if request.commit is None or request.profile is Profile.BUILD
-            else "; the commit is not in the seeded clone either"
+            else "; the seeded clone was tried first"
         )
         with preparation_step(f"mirror fetch ({url}){note}"):
             commit = fetch_commit(mirror, request, clone)

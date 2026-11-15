@@ -149,7 +149,7 @@ def test_missing_commit_is_refused(tmp_path: Path) -> None:
     with pytest.raises(
         Invalid,
         match=r"run preparation failed at mirror fetch \(.*\); "
-        "the commit is not in the seeded clone either",
+        "the seeded clone was tried first",
     ):
         worktree.create(
             clone,
@@ -475,8 +475,19 @@ def test_default_branch_requires_a_branch_symref(
 
 
 @pytest.mark.parametrize("commit_id", ["a" * 40, "b" * 64, "invalid"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.CalledProcessError(128, "git"),
+        subprocess.TimeoutExpired("git", 30),
+        OSError("unreadable"),
+    ],
+)
 def test_fetch_resolves_only_a_full_commit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commit_id: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    commit_id: str,
+    failure: Exception,
 ) -> None:
     calls: list[tuple[str, ...]] = []
 
@@ -484,7 +495,7 @@ def test_fetch_resolves_only_a_full_commit(
         assert path == tmp_path
         calls.append(args)
         if str(tmp_path / "seeded") in args:
-            raise subprocess.CalledProcessError(128, "git")
+            raise failure
         return "ref: refs/heads/main\tHEAD" if args[0] == "ls-remote" else commit_id
 
     monkeypatch.setattr(worktree, "git", run)
@@ -507,6 +518,7 @@ def test_fetch_resolves_only_a_full_commit(
             "fetch",
             *options,
             "--no-prune",
+            "--end-of-options",
             str(tmp_path / "seeded"),
             f"+{'0' * 40}:refs/heads/tbhbdev-review",
         ),
@@ -788,6 +800,7 @@ def test_prelaunch_git_protocol(
             "fetch",
             *options,
             "--no-prune",
+            "--end-of-options",
             str(clone),
             f"+{full_sha}:refs/heads/tbhbdev-review",
         ),
