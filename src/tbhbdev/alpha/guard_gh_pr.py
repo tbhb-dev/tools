@@ -104,6 +104,8 @@ SUBCOMMANDS = ("create", "edit", "merge", "ready", "close")
 # The (group, subcommand) pairs of `gh` that the guard blocks.
 GUARDED = {("pr", sub) for sub in SUBCOMMANDS} | {("issue", "close")}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+# Shell options whose value is the next word, so it is not the script.
+SHELL_VALUE_OPTIONS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
 WRAPPERS = {"env", "command", "exec", "sudo", "nohup", "time", "builtin", "xargs"}
 KEYWORDS = {"if", "then", "do", "else", "elif", "while", "until", "!", "{", "}"}
 VALUE_FLAGS = {"-R", "--repo", "--hostname"}
@@ -150,6 +152,7 @@ class Match(NamedTuple):
     sub: str
     args: list[str]
     group: str = "pr"
+    repo: str | None = None
 
 
 @dataclass
@@ -330,24 +333,38 @@ def skip_prefix(words: list[str]) -> list[str]:
     return words[i:]
 
 
+def skip_flags(words: list[str], start: int) -> int:
+    """The index of the first word from ``start`` that is not a flag or its value."""
+    i = start
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] in VALUE_FLAGS else 1
+    return i
+
+
 def gh_match(rest: list[str]) -> Match | None:
-    """Match the words after ``gh``: global flags, then a guarded group and sub."""
-    i = 0
-    while i < len(rest) and rest[i].startswith("-"):
-        i += 2 if rest[i] in VALUE_FLAGS else 1
-    pair = tuple(rest[i : i + 2])
+    """Match the words after ``gh``: a guarded group and sub, flags allowed between."""
+    i = skip_flags(rest, 0)
+    j = skip_flags(rest, i + 1)
+    pair = tuple(rest[i : i + 1] + rest[j : j + 1])
     if pair in GUARDED:
-        return Match(pair[1], rest[i + 2 :], pair[0])
+        repos = flag_values(rest, {"-R", "--repo"}, VALUE_FLAGS)
+        return Match(pair[1], rest[j + 1 :], pair[0], repos[-1] if repos else None)
     return None
 
 
 def shell_script(rest: list[str]) -> str | None:
     """The script word of ``-c`` among a shell's options, if it has one."""
-    for i, word in enumerate(rest):
-        if not word.startswith("-"):
+    i = 0
+    while i < len(rest):
+        word = rest[i]
+        if word in SHELL_VALUE_OPTIONS:
+            i += 2
+            continue
+        if not word.startswith(("-", "+")):
             return None
-        if not word.startswith("--") and "c" in word:
+        if not word.startswith(("--", "+")) and "c" in word:
             return rest[i + 1] if i + 1 < len(rest) else None
+        i += 1
     return None
 
 
@@ -624,7 +641,14 @@ def hint(found: Match) -> str:
     blocked = f"`gh {found.group} {found.sub}` is blocked."
     number = next((m[1] for w in found.args if (m := PR_NUMBER.fullmatch(w))), "<N>")
     if found.sub == "close":
-        return f"{blocked} {CLOSE_HINTS[found.group].format(n=number)}"
+        text = f"{blocked} {CLOSE_HINTS[found.group].format(n=number)}"
+        where = (
+            ""
+            if found.repo is None
+            else " It acts on the origin of the current directory, so run it "
+            f"in a clone of {found.repo}."
+        )
+        return text + where
     if found.sub == "create":
         return (
             f"{blocked} Write {DRAFT} from {TEMPLATE}, check it with "

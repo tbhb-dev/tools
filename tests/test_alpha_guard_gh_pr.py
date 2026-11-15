@@ -44,6 +44,9 @@ CLOSE_PR = (
     '`gh pr close` is blocked. Run `tbhbdev alpha pr close {n} --reason "<why>"` '
     "instead (`--delete-branch` also deletes the branch, `--dry-run` previews)."
 )
+FOREIGN = (
+    " It acts on the origin of the current directory, so run it in a clone of {r}."
+)
 CLOSE_ISSUE = (
     "`gh issue close` is blocked. Run `tbhbdev alpha issue close {n} "
     "--reason completed|not-planned` instead."
@@ -62,6 +65,14 @@ BLOCKED = [
     "bash -c 'cd x && gh issue close 3'",
     "gh pr close https://github.com/a/b/pull/3",
     "gh issue close https://github.com/a/b/issues/3",
+    "gh pr --repo a/b close 3",
+    "gh issue -R a/b close 3",
+    "gh -R a/b pr --repo c/d merge 3",
+    "gh pr --repo=a/b edit 3",
+    "bash -o pipefail -c 'gh issue close 3'",
+    "bash -o pipefail -c 'gh pr close 3'",
+    "sh +o nounset -O extglob -c 'gh pr merge 3'",
+    "zsh --rcfile x -c 'gh pr create'",
     "gh pr create",
     "gh pr create --title x --body y",
     "gh pr edit 3",
@@ -207,6 +218,15 @@ def test_allowed(text: str) -> None:
         ("gh pr close https://github.com/a/b/pull/7", CLOSE_PR.format(n=7)),
         ("gh issue close 8 -r completed", CLOSE_ISSUE.format(n=8)),
         ("gh issue close", CLOSE_ISSUE.format(n="<N>")),
+        ("gh pr --repo a/b close 3", CLOSE_PR.format(n=3) + FOREIGN.format(r="a/b")),
+        (
+            "gh -R a/b issue close 4",
+            CLOSE_ISSUE.format(n=4) + FOREIGN.format(r="a/b"),
+        ),
+        (
+            "gh issue close 5 --repo=c/d --repo e/f",
+            CLOSE_ISSUE.format(n=5) + FOREIGN.format(r="e/f"),
+        ),
         ("gh pr ready 399", READY.format(n=399)),
         ("gh pr ready", READY.format(n="<N>")),
         (
