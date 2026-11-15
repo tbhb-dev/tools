@@ -708,7 +708,8 @@ def start_fields(agent: str, root: str, cwd: Path | None = None) -> Json:
     rec = load_record(agent, cwd, root=root)
     if start_ok(rec.get("started_at")):
         # A root that began elsewhere still claims its launch file for ``launch``.
-        launch = {} if agent != root or rec.get("launch") else claim_launch(root, cwd)
+        claiming = agent == root and not rec.get("launch")
+        launch = claim_launch(root, cwd) if claiming else None
         return {"launch": launch["launch"]} if launch else {}
     now = utc(time.time())
     if agent != root:
@@ -1750,6 +1751,30 @@ def without(rec: Json, drop: Mapping[str, object]) -> Json:
     return {k: v for k, v in rec.items() if k not in drop}
 
 
+def save_agy_session(
+    harness: str, sid: str, state: Path, data: Json, seen: tuple[str | None, str | None]
+) -> Json:
+    """Write an agy session's record to the clone and the user stores."""
+    model, effort = seen
+    path = state / "sessions" / f"{hx(sha256_64(sid))}.json"
+    once = start_fields(sha256_64(sid), sha256_64(sid), hook_cwd(data))
+    with locked(state):
+        rec = read_record(path)
+        rec.update({k: v for k, v in once.items() if v and k not in rec})
+        rec["harness"] = SLUGS[harness]
+        if model and not model.startswith("<"):
+            rec["model"] = model
+        if effort:
+            rec["effort"] = effort
+        brain = as_str(data.get("artifactDirectoryPath"))
+        if brain:
+            rec["brain_root"] = str(Path(brain).parent)
+        write_json(path, rec)
+    fixed = {k: rec.get(k) for k in ("started_at", "launch")}
+    write_user_record(sha256_64(sid), without(rec, fixed), fixed)
+    return rec
+
+
 def cmd_record(harness: str, env: Mapping[str, str]) -> int:
     """Harness hook entry point: persist what the event reveals."""
     if harness not in SLUGS:
@@ -1774,22 +1799,7 @@ def cmd_record(harness: str, env: Mapping[str, str]) -> int:
     state = state_dir(hook_cwd(data))
     if not sid or not state:
         return 0
-    path = state / "sessions" / f"{hx(sha256_64(sid))}.json"
-    once = start_fields(sha256_64(sid), sha256_64(sid), hook_cwd(data))
-    with locked(state):
-        rec = read_record(path)
-        rec.update({k: v for k, v in once.items() if v and k not in rec})
-        rec["harness"] = SLUGS[harness]
-        if model and not model.startswith("<"):
-            rec["model"] = model
-        if effort:
-            rec["effort"] = effort
-        brain = as_str(data.get("artifactDirectoryPath"))
-        if brain:
-            rec["brain_root"] = str(Path(brain).parent)
-        write_json(path, rec)
-    fixed = {k: rec.get(k) for k in ("started_at", "launch")}
-    write_user_record(sha256_64(sid), without(rec, fixed), fixed)
+    rec = save_agy_session(harness, sid, state, data, (model, effort))
     record_agy(sid, data, rec, env)
     return 0
 
