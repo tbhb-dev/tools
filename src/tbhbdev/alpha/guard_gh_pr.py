@@ -982,20 +982,21 @@ def blocked_message(text: str) -> str | None:
         return "The guard can't parse this command, so it refuses it."
 
 
+def deny(message: str, *, antigravity: bool) -> None:
+    """Print the deny decision for ``message``."""
+    print(json.dumps(decision(message, antigravity=antigravity)))
+
+
 def main() -> int:
     """Read the payload on stdin; print a deny decision for a blocked call."""
     try:
         data = read_hook_stdin()
         text, antigravity = command_of(data)
         message = approval_message(data, text)
+        if message is None and in_tbhb_dev(hook_cwd(data)):
+            message = blocked_message(text)
         if message:
-            print(json.dumps(decision(message, antigravity=antigravity)))
-            return 0
-        if not in_tbhb_dev(hook_cwd(data)):
-            return 0
-        message = blocked_message(text)
-        if message:
-            print(json.dumps(decision(message, antigravity=antigravity)))
+            deny(message, antigravity=antigravity)
     except Exception:  # noqa: BLE001  # fail open on any crash
         return 0
     return 0
