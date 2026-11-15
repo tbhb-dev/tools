@@ -476,17 +476,36 @@ def running_dirs() -> list[str]:
     return [str(Path(command).absolute().parent)] if os.sep in command else []
 
 
-def durable(directory: str) -> bool:
-    """False for a directory inside the current directory, such as a clone's venv.
+def clone_roots() -> list[Path]:
+    """The current directory and, in a clone, its work tree and main checkout.
 
-    Such a directory goes away with its clone, and a hook can't rely on it.
-    When the current directory holds the home directory, such as `/` or the
-    home itself, it names no clone, and every directory is kept.
+    A sibling worktree sits under the main checkout, so that root covers it.
+    A root that holds the home directory, such as `/` or the home itself,
+    names no clone and is left out.
     """
     cwd = Path.cwd().resolve()
-    return Path.home().resolve().is_relative_to(cwd) or not (
-        Path(directory).resolve().is_relative_to(cwd)
+    roots = [cwd]
+    code, top = git("rev-parse", "--show-toplevel", cwd=cwd)
+    if code == 0 and top:
+        roots.append(Path(top).resolve())
+    code, common = git(
+        "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=cwd
     )
+    if code == 0 and common:
+        roots.append(Path(common).resolve().parent)
+    home = Path.home().resolve()
+    return [root for root in roots if not home.is_relative_to(root)]
+
+
+def durable(directory: str) -> bool:
+    """False for a directory inside a clone of the current directory, such as its venv.
+
+    Such a directory goes away with its clone, and a hook can't rely on it.
+    That covers the current directory, the work tree and the main checkout
+    that holds it. When one of them holds the home directory, it is ignored.
+    """
+    path = Path(directory).resolve()
+    return not any(path.is_relative_to(root) for root in clone_roots())
 
 
 def find_tool(tool: str, path: str) -> str | None:

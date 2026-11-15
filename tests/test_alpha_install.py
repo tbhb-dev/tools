@@ -686,6 +686,59 @@ def test_settings_path_never_saves_an_alias_of_a_directory_inside_the_current_on
     assert install.settings_path(None, base) == f"{shim}{sep}{full}"
 
 
+def test_settings_path_never_saves_a_venv_of_the_clone_or_a_sibling_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clone = tmp_path / "clone"
+    (clone / "src").mkdir(parents=True)
+    run_git = ("git", "-C", str(clone))
+    subprocess.run([*run_git, "init", "-q", "-b", "main"], check=True)
+    subprocess.run(
+        [
+            *run_git,
+            *("-c", "user.name=t", "-c", "user.email=t@e"),
+            *("commit", "-q", "--allow-empty", "-m", "x"),
+        ],
+        check=True,
+    )
+    subprocess.run([*run_git, "worktree", "add", "-q", ".worktrees/other"], check=True)
+    venv = tool_dir(clone, ".venv/bin", ("git",))
+    sibling = tool_dir(clone / ".worktrees/other", ".venv/bin", ("git",))
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "gh"))
+    real_git = str(Path(shutil.which("git") or "").parent)
+    sep = os.pathsep
+    monkeypatch.setenv("PATH", f"{full}{sep}{real_git}")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    shim = str(gh_shim.bin_dir())
+    base = f"{venv}{sep}{sibling}{sep}{full}{sep}{real_git}"
+    for current in (clone / "src", clone / ".worktrees/other", clone):
+        monkeypatch.chdir(current)
+        saved = install.settings_path(None, base)
+        assert saved == f"{shim}{sep}{full}{sep}{real_git}"
+
+
+def test_clone_roots_leaves_out_a_root_that_holds_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    subprocess.run(["git", "-C", str(home), "init", "-q"], check=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(home)
+    assert install.clone_roots() == []
+
+
+def test_clone_roots_is_the_current_directory_outside_a_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.chdir(plain)
+    assert install.clone_roots() == [plain.resolve()]
+
+
 def test_settings_path_refuses_a_stale_gh_shim_as_the_real_gh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
