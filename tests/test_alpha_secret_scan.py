@@ -550,9 +550,10 @@ def test_scan_staged_builds_the_private_directory_and_calls_gitleaks(
     extends: str | None,
     visibility: str,
 ) -> None:
-    private = secret_scan.private_config().read_text()
+    private = FAMILIES  # holds name rules, so a reduced copy differs from the full one
     data = secret_scan.parse_private(private)
     assert data is not None
+    assert secret_scan.without_name_rules(data) != secret_scan.tomlkit.dumps(data)
     staged_calls: list[tuple[object, ...]] = []
     seen: dict[str, object] = {}
 

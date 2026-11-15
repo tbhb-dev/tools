@@ -1950,6 +1950,40 @@ def test_a_shim_that_cannot_be_written_after_a_failed_prek_install(
     assert not (world.hooks / f"pre-commit{install.PREVIOUS}").exists()
 
 
+def test_write_hook_raises_its_own_failure_when_the_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hook = tmp_path / "pre-commit"
+    (hook / "in-the-way").mkdir(parents=True)
+
+    def refuse(_self: Path, **_kwargs: bool) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    with pytest.raises(IsADirectoryError):
+        install.write_hook(hook, "#!/bin/sh\n")
+
+
+def test_a_shim_that_cannot_be_written_after_a_failed_prek_install_restores_it(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed chain keeps the saved hook, and a failed write puts it back."""
+    world.stages("pre-commit")
+    world.hooks.mkdir(exist_ok=True)
+    (world.hooks / "pre-commit").write_text(f"#!/bin/sh\n{install.SHIM_MARK}\nold\n")
+    (world.bin / "prek.fail").write_text("")
+
+    def fail(_hook: Path, _text: str) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(install, "write_hook", fail)
+    with pytest.raises(install.InstallError, match=r"^cannot write "):
+        scan_hook(world)
+    assert (world.hooks / "pre-commit").read_text() == (
+        f"#!/bin/sh\n{install.SHIM_MARK}\nold\n"
+    )
+
+
 def test_write_hook_removes_its_temporary_file_on_a_failure(tmp_path: Path) -> None:
     hooks = tmp_path / "hooks"
     hook = hooks / "pre-commit"

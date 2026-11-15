@@ -121,11 +121,12 @@ def findings(report: str) -> list[tuple[str, int, str]] | None:
     for entry in entries:
         if not isinstance(entry, dict):
             return None
-        line = entry.get("StartLine")
-        rule = entry.get("RuleID")
+        fields = cast("dict[str, object]", entry)  # pragma: no mutate
+        line = fields.get("StartLine")
+        rule = fields.get("RuleID")
         if not isinstance(line, int) or not isinstance(rule, str):
             return None
-        found.append((str(entry.get("File", "")), line, rule))
+        found.append((str(fields.get("File", "")), line, rule))
     return sorted(found)
 
 
@@ -135,7 +136,8 @@ def place(path: str, line: int) -> str:
     A path shows with control characters and non-ASCII escaped, so a filename
     can't forge output lines.
     """
-    shown = path.encode("unicode_escape").decode("ascii")
+    # Codec names match without regard to case, so upper-casing one is equivalent.
+    shown = path.encode("unicode_escape").decode("ascii")  # pragma: no mutate
     return f"in {shown}:{line}" if path else f"on line {line}"
 
 

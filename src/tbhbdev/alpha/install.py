@@ -1435,7 +1435,6 @@ def install_identity_hook(
         legacy.unlink()
     if foreign:
         move_foreign(hook, legacy)
-    previous = None
     failure = None
     try:
         previous = chain_stage(prek, top, hook, keep=scan and legacy.is_file())
