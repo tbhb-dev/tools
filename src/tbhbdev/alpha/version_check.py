@@ -95,7 +95,7 @@ def latest(runner: Runner) -> str | None:
 def reference(stamps: list[str | None]) -> str | None:
     """The build most hosts run, the earliest host's on a tie."""
     counts = Counter(stamp for stamp in stamps if stamp is not None)
-    return counts.most_common(1)[0][0] if counts else None
+    return max(counts, key=counts.__getitem__) if counts else None
 
 
 def state(stamp: str | None, *, reached: bool, expect: str | None) -> str:
@@ -117,7 +117,7 @@ def exit_status(states: list[str]) -> int:
 def parser(prog: str) -> argparse.ArgumentParser:
     """The command line."""
     result = argparse.ArgumentParser(prog=prog, description=__doc__)
-    result.add_argument("--host", action="append", default=[], metavar="NAME")
+    result.add_argument("--host", action="append", metavar="NAME")
     result.add_argument("--expect", metavar="SHA|latest")
     result.add_argument("--json", action="store_true")
     return result
@@ -176,13 +176,16 @@ def report(
     hosts: list[str], stamps: list[str | None], states: list[str], *, as_json: bool
 ) -> None:
     """Print one line per host, or one JSON list."""
-    builds = [stamp or version.UNKNOWN for stamp in stamps]
+    rows = [
+        {
+            "host": host,
+            "version": stamps[index] or version.UNKNOWN,
+            "state": states[index],
+        }
+        for index, host in enumerate(hosts)
+    ]
     if as_json:
-        rows = [
-            {"host": host, "version": build, "state": state}
-            for host, build, state in zip(hosts, builds, states, strict=True)
-        ]
         print(json.dumps(rows))
         return
-    for host, build, state in zip(hosts, builds, states, strict=True):
-        print(f"{host} {build} {state}")
+    for row in rows:
+        print(f"{row['host']} {row['version']} {row['state']}")

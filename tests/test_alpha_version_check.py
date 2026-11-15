@@ -256,6 +256,8 @@ def test_a_broken_config_is_a_usage_error(
     assert (status, out) == (2, "")
     assert err.startswith(f"{PROG}: ")
     assert err.endswith("\n")
+    assert "None" not in err
+    assert "hosts" in err
 
 
 @pytest.mark.parametrize("name", ["-oProxyCommand=x", "a b", "", "h;x", ".h"])
@@ -290,6 +292,9 @@ def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     status, out, _ = run_main(["--help"], Fake({}), capsys)
     assert status == 0
     assert out.startswith(f"usage: {PROG}")
+    assert "[--host NAME]" in out
+    assert "[--expect SHA|latest]" in out
+    assert "compare the installed build on each host." in out
 
 
 def test_run_returns_status_and_stdout(
