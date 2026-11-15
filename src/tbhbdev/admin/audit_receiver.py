@@ -195,7 +195,6 @@ def append(
         )
         os.close(descriptor)
         sync_directory(directory)
-        commit_head(directory, (current, count, head[2], 0))
     descriptor = os.open(
         str(Path(directory) / segment_name(current)), os.O_WRONLY | os.O_APPEND
     )

@@ -453,3 +453,28 @@ def test_a_short_write_refuses_the_request(
 
     monkeypatch.setattr(os, "write", short)
     assert run(directory, "append 1", record(GENESIS)) == (1, b"")
+
+
+def test_a_failed_write_during_rotation_leaves_the_head_on_the_old_segment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = fresh(tmp_path)
+    first = record(GENESIS, ', "pad": "' + "x" * 40 + '"')
+    second = record(digest(first))
+    size = len(first)
+    run(directory, "append 1", first, segment=size)
+    before = (directory / "head").read_text()
+    real = os.write
+
+    def broken(descriptor: int, data: bytes) -> int:
+        if data == second:
+            raise OSError
+        return real(descriptor, data)
+
+    monkeypatch.setattr(os, "write", broken)
+    assert run(directory, "append 2", second, segment=size) == (1, b"")
+    monkeypatch.undo()
+    assert (directory / "head").read_text() == before
+    assert run(directory, "head", segment=size)[0] == 0
+    assert not (directory / "segment-2.jsonl").exists()
+    assert (directory / "segment-1.jsonl").read_bytes() == first
