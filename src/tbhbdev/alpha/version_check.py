@@ -4,9 +4,10 @@ Read-only. For each host it runs `tbhbdev --version` (over ssh, or directly on
 this host), takes the build stamp from the output and prints one line:
 `<host> <sha-or-unknown> ok|stale|unknown|unreachable`.
 
-Hosts come from `--host`, else the names in `[harness] hosts` of the user
-config. Without `--expect`, the reference is the build most hosts
-run (the first host's on a tie). `--expect latest` reads origin's main.
+Hosts come from `--host` (`login@name` logs in as that account over ssh), else the
+names in `[harness] hosts` of the user config. Without `--expect`, the
+reference is the build most hosts run (the first host's on a tie).
+`--expect latest` reads origin's main.
 
 Exit status: 0 when every host is ok, 1 when any host is stale or unknown, 2
 for a usage error, 3 when a host is unreachable and none is stale.
@@ -32,7 +33,8 @@ SSH = ("ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5")
 REMOTE_COMMAND = "$HOME/.local/bin/tbhbdev --version"
 SSH_FAILED = 255
 TIMEOUT = 30
-HOST_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*")
+# An optional login@ picks the ssh account, for hosts where it isn't this one's.
+HOST_NAME = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*@)?[A-Za-z0-9][A-Za-z0-9.-]*")
 SHA = re.compile(r"[0-9a-f]{40}")
 LS_REMOTE = re.compile(r"([0-9a-f]{40})\trefs/heads/main")
 VERSION_LINE = re.compile(r"tbhbdev \S+ \((.*)\)")

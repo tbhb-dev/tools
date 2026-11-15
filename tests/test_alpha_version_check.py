@@ -260,7 +260,22 @@ def test_a_broken_config_is_a_usage_error(
     assert "hosts" in err
 
 
-@pytest.mark.parametrize("name", ["-oProxyCommand=x", "a b", "", "h;x", ".h"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "-oProxyCommand=x",
+        "a b",
+        "",
+        "h;x",
+        ".h",
+        "@h",
+        "u@",
+        "u@@h",
+        "-u@h",
+        "u@-h",
+        "a@b@c",
+    ],
+)
 def test_a_bad_host_name_is_a_usage_error(
     name: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -379,3 +394,21 @@ def test_the_alpha_dispatcher_runs_version_check(
 def test_the_alpha_usage_lists_version_check() -> None:
     assert "version-check [--host NAME ...]" in alpha.USAGE
     assert alpha.COMMANDS["version-check"] is version_check.main
+
+
+def test_a_user_at_host_is_the_ssh_target_and_the_reported_name(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake = Fake({"agent@lab1": (0, line(A))})
+    status, out, err = run_main(["--host", "agent@lab1"], fake, capsys)
+    assert (status, out, err) == (0, f"agent@lab1 {A} ok\n", "")
+    assert fake.calls == [ssh("agent@lab1")]
+
+
+def test_a_user_at_this_host_still_goes_over_ssh(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake = Fake({"agent@here": (0, line(A))})
+    status, out, _ = run_main(["--host", "agent@here"], fake, capsys)
+    assert (status, out) == (0, f"agent@here {A} ok\n")
+    assert fake.calls == [ssh("agent@here")]
