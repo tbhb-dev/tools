@@ -165,6 +165,9 @@ def test_git_suppresses_command_errors_and_returns_text(
             "GIT_NO_LAZY_FETCH": "1",
             "GIT_ASKPASS": "/bin/false",
             "SSH_ASKPASS": "/bin/false",
+            "GIT_SSH_COMMAND": (
+                "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+            ),
         }
         assert kwargs["cwd"] == "/"
         assert kwargs["timeout"] == 30
@@ -1836,3 +1839,66 @@ def test_a_write_root_over_the_own_workspace_is_not_a_finding(
     (workspace / ".git" / "HEAD").write_text("ref: refs/heads/agent\n")
     found = worktree.validate_writes(workspace, source, (str(workspace.parent),))
     assert not any(f"contains main checkout {workspace}" in line for line in found)
+
+
+class Stop(Exception):  # noqa: N818 -- a test sentinel, not an error type
+    pass
+
+
+def test_private_fetch_retries_over_ssh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, clone = repository(tmp_path)
+    urls: list[str] = []
+    calls: list[int] = []
+    original = worktree.configure_mirror
+
+    def configure(mirror: Path, url: str) -> None:
+        urls.append(url)
+        original(mirror, url)
+
+    def fetch(_mirror: Path, _request: object) -> str:
+        calls.append(1)
+        if len(calls) == 1:
+            raise subprocess.CalledProcessError(128, "git")
+        raise Stop
+
+    monkeypatch.setattr(worktree, "configure_mirror", configure)
+    monkeypatch.setattr(worktree, "fetch_commit", fetch)
+    with pytest.raises(Stop):
+        worktree.create(clone, "p1", run_request(), ("example-org/example-repo",))
+    assert urls == [
+        "https://github.com/example-org/example-repo.git",
+        "ssh://git@github.com/example-org/example-repo.git",
+    ]
+
+
+def test_failed_retry_over_ssh_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, clone = repository(tmp_path)
+
+    def fetch(_mirror: Path, _request: object) -> str:
+        raise subprocess.CalledProcessError(128, "git")
+
+    monkeypatch.setattr(worktree, "fetch_commit", fetch)
+    with pytest.raises(Invalid, match="run preparation failed at mirror fetch"):
+        worktree.create(clone, "p2", run_request(), ("example-org/example-repo",))
+
+
+def test_git_runs_ssh_without_prompts_and_with_the_account_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[dict[str, str]] = []
+
+    def check_output(_command: object, **kwargs: object) -> str:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        seen.append(env)
+        return ""
+
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+    worktree.git(tmp_path, "init")
+    command = seen[0]["GIT_SSH_COMMAND"]
+    assert "BatchMode=yes" in command
+    assert " -F " not in command
