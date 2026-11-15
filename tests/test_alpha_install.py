@@ -677,12 +677,12 @@ def test_settings_path_never_saves_an_alias_of_a_directory_inside_the_current_on
     alias = tmp_path / "alias"
     alias.symlink_to(clone)
     full = tool_dir(tmp_path, "full", ("tbhbdev", "gh", "git"))
-    dotdot = f"{tmp_path}/other/../clone/.venv/bin"
+    parent_hop = f"{tmp_path}/other/../clone/.venv/bin"
     monkeypatch.chdir(clone)
     monkeypatch.setenv("PATH", full)
     shim = str(gh_shim.bin_dir())
     sep = os.pathsep
-    base = f"{alias}/.venv/bin{sep}{dotdot}{sep}{venv}{sep}{full}"
+    base = f"{alias}/.venv/bin{sep}{parent_hop}{sep}{venv}{sep}{full}"
     assert install.settings_path(None, base) == f"{shim}{sep}{full}"
 
 
