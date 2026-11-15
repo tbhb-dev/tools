@@ -574,7 +574,7 @@ SAFE_ENVIRONMENT: dict[str, object] = {
 
 
 @dataclass
-class AckingCopy:
+class AcknowledgingCopy:
     """An audit copy that acknowledges every line and records what it saw."""
 
     gated: list[int] = field(default_factory=list)

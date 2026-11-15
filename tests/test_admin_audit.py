@@ -14,7 +14,7 @@ lazy from pathlib import Path
 
 import httpx
 import pytest
-from conftest import AckingCopy
+from conftest import AcknowledgingCopy
 
 from tbhbdev.admin import policy, request
 from tbhbdev.admin.audit import GENESIS, Audit, RefusedError, record
@@ -431,7 +431,7 @@ def test_fail_closed_before_any_io(
         httpx.MockTransport(no_network),
     )
     runtime = request.Runtime(
-        Audit(tmp_path / "admin"), env, tmp_path / "enabled", copy=AckingCopy()
+        Audit(tmp_path / "admin"), env, tmp_path / "enabled", copy=AcknowledgingCopy()
     )
 
     def short_write(_descriptor: int, _data: bytes) -> int:

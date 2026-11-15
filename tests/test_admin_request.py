@@ -12,7 +12,7 @@ lazy from collections.abc import Callable
 
 import httpx
 import pytest
-from conftest import SAFE_ENVIRONMENT, AckingCopy
+from conftest import SAFE_ENVIRONMENT, AcknowledgingCopy
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -100,7 +100,10 @@ def fake(tmp_path: Path) -> Fake:
     )
     result = Fake(
         request.Runtime(
-            Audit(tmp_path / "audit"), env, tmp_path / "enabled", copy=AckingCopy()
+            Audit(tmp_path / "audit"),
+            env,
+            tmp_path / "enabled",
+            copy=AcknowledgingCopy(),
         ),
         key,
         reads,
@@ -790,8 +793,8 @@ def test_marker_must_be_a_regular_file_of_this_user(
     assert not request.enabled(target)
 
 
-def copy_of(fake: Fake) -> AckingCopy:
-    assert isinstance(fake.runtime.copy, AckingCopy)
+def copy_of(fake: Fake) -> AcknowledgingCopy:
+    assert isinstance(fake.runtime.copy, AcknowledgingCopy)
     return fake.runtime.copy
 
 

@@ -282,7 +282,7 @@ class AuditCopy:
     def confirm(self, reply: bytes, lines: list[bytes]) -> int:
         """Check the acknowledgment against the local log and cache it."""
         match = ACK.fullmatch(reply)
-        assert match  # noqa: S101  # ask returns only matched text
+        assert match  # noqa: S101  # nosec B101 - ask returns only matched text
         count = Count(int(match.group(1)), match.group(2).decode())
         if not self.matches(lines, count):
             raise RefusedError(DIVERGED)
