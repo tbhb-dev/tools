@@ -489,6 +489,11 @@ def _check_host_accounts(settings: Settings) -> None:
                     f"has a reviews App key for {account}"
                 )
                 raise Invalid(message)
+    _check_minters(settings)
+
+
+def _check_minters(settings: Settings) -> None:
+    known = {c.account: c for c in settings.credentials}
     for entry in settings.credentials:
         if entry.reviews_minter is None:
             continue
