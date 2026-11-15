@@ -180,7 +180,7 @@ def published(clone: Path, commit: str) -> bool:
 
 
 def clone_base(mirror: Path, clone: Path) -> list[str]:
-    """Refspec for the default branch the clone took from origin, if it names one."""
+    """Fetch spec for the default branch the clone took from origin, if it names one."""
     try:
         target = git(
             clone, "for-each-ref", "--format=%(symref)", "refs/remotes/origin/HEAD"

@@ -171,7 +171,7 @@ def test_seeded_review_without_an_origin_head_has_no_base_branch(
     git(clone, "remote", "set-head", "origin", "--delete")
     path = worktree.create(
         clone,
-        "seeded-nobase",
+        "seeded-no-base",
         run_request(profile="review", commit=head),
         ("example-org/example-repo",),
     )
