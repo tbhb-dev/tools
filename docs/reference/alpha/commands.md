@@ -110,4 +110,4 @@ The `trailer` hook writes both attributes from the session record. Where lines f
 
 The `check` hook and `verify-range` accept both attributes. They require a real Coordinated Universal Time in the exact format for `started_at` and the hash format for `launch`. An agent commit whose `Generated-by` line lacks `started_at` passes with a warning.
 
-The `commit_identity` check in the rules repository must accept both attributes before a host installs this version of the hooks. Until it does, commits with the new attributes fail CI.
+The rules `commit_identity` check must accept both attributes before a host installs these hooks. Until it does, commits with them fail CI.
