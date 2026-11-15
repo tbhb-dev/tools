@@ -349,3 +349,15 @@ def test_prepare_alone_fails_closed(
         "clean" if cleared else "unknown"
     )
     assert remote.records("ssh") == []
+
+
+def test_unsandboxed_review_launches_on_unknown_host(remote: Remote) -> None:
+    assert (
+        launch(
+            remote, "--profile", "review", "--ref", "a" * 40, "--unsandboxed", "o/r#1"
+        )
+        == 0
+    )
+    wire = json.loads((remote.state / "sample.request.json").read_text())
+    assert wire["unsandboxed"] is True
+    assert wire["tainted_host"] is True

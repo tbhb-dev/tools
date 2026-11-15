@@ -336,7 +336,12 @@ def test_unsandboxed_codex_is_full_access_with_no_profile(kind: RunKind) -> None
         "danger-full-access",
         "-c",
         f'projects={{"{WORKTREE}"={{trust_level="untrusted"}}}}',
-        *CODEX_TAIL,
+        *(
+            "features.network_proxy.enabled=false"
+            if arg.startswith("features.network_proxy=")
+            else arg
+            for arg in CODEX_TAIL
+        ),
         *CODEX_HANDOFF,
         *MODEL,
         "-" if kind is RunKind.EXEC else POINTER,
@@ -844,3 +849,24 @@ def test_codex_build_without_github_credential(kind: RunKind) -> None:
     )
     result = built(Harness.CODEX, kind, Profile.BUILD, config=config)
     assert f'shell_environment_policy.set.GH_CONFIG_DIR="{TMP}/gh"' in result
+
+
+@pytest.mark.parametrize("harness", [Harness.CLAUDE, Harness.AGY])
+@pytest.mark.parametrize("profile", Profile)
+def test_unsandboxed_argv_skips_harness_sandbox(
+    harness: Harness, profile: Profile
+) -> None:
+    run = request(harness, RunKind.EXEC, profile, unsandboxed=True)
+    value = policy_for(harness, profile, unsandboxed=True)
+    command = argv.harness(
+        run,
+        value,
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+        agy_project=PROJECT,
+        agy_brief=BRIEF,
+    )
+    if harness is Harness.CLAUDE:
+        assert command[command.index("--permission-mode") + 1] == "bypassPermissions"
+    else:
+        assert "--sandbox" not in command

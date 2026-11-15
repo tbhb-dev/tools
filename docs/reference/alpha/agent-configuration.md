@@ -2,11 +2,11 @@
 description: Agent settings, run requests, and host preparation.
 generated:
   - role: generated
-    harness: claude-code:2.1.322
-    model: anthropic:claude-sonnet-5-5
-    effort: medium
-    surface: cli
-    at: "2026-11-14T18:27:49Z"
+    harness: codex:0.164.0
+    model: openai:gpt-6.1-sol
+    effort: high
+    surface: exec
+    at: "2026-11-15T16:37:22Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -127,6 +127,10 @@ The settings have these constraints:
 - Every credential and profile `token` is a `vault/item/field` reference, and each part starts with a letter or digit, then continues with letters, digits, dots, `_` or `-`. `[agent.credentials.<account>]` takes one table for each account, and `docker` and `gh` are optional. `pull_requests_app_client_id` and `pull_requests_app_pem` are optional too, and a table sets both or neither. A table that sets them can't also set `gh`. A build run whose account has no `gh` requests a GitHub token from that App, limited to the run's repository and to the `contents: read` permission, and writes it to the run's `gh/hosts.yml`. A build run whose account has neither doesn't get a GitHub credential. If the request fails, the launcher refuses the run with `pull-requests App token unavailable; build refused`. The token expires after an hour, and the launcher neither refreshes nor revokes it.
 - Only `signing` also accepts a field label with internal spaces and `?ssh-format=openssh`, which converts the private key to OpenSSH format in memory.
 - `default_profile` names one of the profiles, matching without regard to case, so `Primary` selects `primary`. Profile names that differ only in case fail validation. Display uses the name as written.
-- `[[agent.host]]` lists at least one host. Its `name` is lower-case, dot-separated labels, `os` is `linux` or `macos`, `shell` is `bash` or `zsh`, `account` must be one of `accounts`, and host names are unique. Every name in `accounts` needs an `[agent.credentials.<name>]` table. `proven_harnesses` is a typed list of harness names. Add a harness only after a passing live run on that host. Remove it when upgrading that harness. Run-host refuses Claude while separate tool paths for Claude (H3) and the Claude credential decision remain open.
+- `[[agent.host]]` lists at least one host. Its `name` is lower-case, dot-separated labels, `os` is `linux` or `macos`, `shell` is `bash` or `zsh`, `account` must be one of `accounts`, and host names are unique. Every name in `accounts` needs an `[agent.credentials.<name>]` table. `proven_harnesses` records `codex`, `claude` and `agy` names. Add a harness after one successful, real `agent exec --unsandboxed` run on that host. An empty list never refuses a run. Remove the recorded fact when upgrading that harness.
 
-The run request is a versioned JSON object. Version 2 lists every run field, including the required boolean `tainted_host`, and no credential. Readers refuse version 1 and requests missing `tainted_host`. A reader refuses unknown versions, unknown or missing fields, and any `unsandboxed` request unless the harness is Codex, the profile is `build`, the host's `unsandboxed` is true and the authorization has the form `owner/repo#N` or `operator-chat-YYYY-MM-DD`. The repo argument takes the form `org/repo` or `<git host>/<org>/<repo>`, with `github.com` as the default git host, and resolves to `Code/<git host>/<org>/<repo>` under the home directory. A repo name can't be `.` or `..` or end in `.git`.
+The run request is a versioned JSON object. Version 2 lists every run field, including the required boolean `tainted_host`, and no credential. Readers refuse version 1 and requests missing `tainted_host`. A reader refuses unknown versions, unknown or missing fields, and any `unsandboxed` request unless the host's `unsandboxed` is true and the authorization has the form `owner/repo#N` or `operator-chat-YYYY-MM-DD`. The repo argument takes the form `org/repo` or `<git host>/<org>/<repo>`, with `github.com` as the default git host, and resolves to `Code/<git host>/<org>/<repo>` under the home directory. A repo name can't be `.` or `..` or end in `.git`.
+
+Set `unsandboxed = true` in the matching `[[agent.host]]` table in the agent account’s `config.toml` on the run host and in the coordinator’s config. Pass `--unsandboxed operator-chat-YYYY-MM-DD` or `--unsandboxed owner/repo#N` to launch Codex, Claude, or agy with either the build or review profile. Run-host reads that account’s config before parsing the request. Reviews App credentials can remain configured on a host with `unsandboxed = true`.
+
+Codex runs with `--unsandboxed` use the account’s existing `codex` executable on PATH. The search also checks the configured host and tool directories. They skip the standalone release layout and its copy step. A missing executable fails with `host executable codex was not found`. Codex uses full access with its network proxy off. Claude turns off its sandbox and uses `bypassPermissions`. An agy review omits `--sandbox`. These runs skip executable trust checks and the recorded sandbox pass gate. The parser accepts legacy named sandbox opt-out reasons. Neither agy nor Codex with `--unsandboxed` requires them.

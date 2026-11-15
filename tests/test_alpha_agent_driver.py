@@ -245,14 +245,6 @@ def test_launch_stream_and_metadata(
             ("--unsandboxed", "o/r#1", "--host", "example-macos"),
             "isn't enabled on this host",
         ),
-        (
-            ("--unsandboxed", "o/r#1", "--profile", "review"),
-            "applies only to a build run",
-        ),
-        (
-            ("--unsandboxed", "o/r#1", "--harness", "claude", "--reason", "example"),
-            "applies only to a codex run",
-        ),
         (("--harness", "agy"), "agy requires a gemini-*"),
         (("--model", "bad model"), "model must match"),
         (("--effort", "bad effort"), "effort must match"),
@@ -1694,7 +1686,7 @@ def test_unsandboxed_unconfirmed_reports_sandbox(
 
         monkeypatch.setattr(transport, "call", lost_reply)
     else:
-        ticks = iter([0, 0, 0, 0, 0, 0, 120, 120, 120, 134, 134, 134])
+        ticks = iter([0, 0, 0, 0, 0, 120, 120, 120, 134, 134, 134])
         monkeypatch.setattr(
             driver,
             "time",

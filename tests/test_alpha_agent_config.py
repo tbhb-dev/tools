@@ -822,7 +822,9 @@ def test_credentials_is_not_a_host_key() -> None:
     assert refused(table) == "[[agent.host]] credentials not recognized"
 
 
-@pytest.mark.parametrize("names", [[], ["codex"], ["claude"], ["codex", "claude"]])
+@pytest.mark.parametrize(
+    "names", [[], ["codex"], ["claude"], ["agy"], ["codex", "claude", "agy"]]
+)
 def test_host_records_proven_harnesses(names: list[str]) -> None:
     table = edited("host", 0, "proven_harnesses", value=names)
     assert config.parse(table).hosts[0].proven_harnesses == tuple(
@@ -831,11 +833,11 @@ def test_host_records_proven_harnesses(names: list[str]) -> None:
 
 
 @pytest.mark.parametrize(
-    "value", [None, "codex", [1], ["agy"], ["Codex"], ["codex", "codex"]]
+    "value", [None, "codex", [1], ["unknown"], ["Codex"], ["codex", "codex"]]
 )
 def test_host_refuses_invalid_proven_harnesses(value: object) -> None:
     assert refused(edited("host", 0, "proven_harnesses", value=value)) == (
-        "[[agent.host]] proven_harnesses must list distinct codex or claude names"
+        "[[agent.host]] proven_harnesses must list distinct codex, claude or agy names"
     )
 
 
@@ -992,11 +994,10 @@ def test_execution_options_name_the_invalid_path(
     assert str(caught.value) == f"[agent.sandbox] {key} {why}"
 
 
-def test_unsandboxed_host_refuses_reviews_app_delivery() -> None:
-    assert refused(edited("host", 0, "unsandboxed", value=True)) == (
-        "[[agent.host]] unsandboxed host example-linux "
-        "has reviews App credentials for agent"
-    )
+def test_unsandboxed_host_accepts_reviews_app_delivery() -> None:
+    parsed = config.parse(edited("host", 0, "unsandboxed", value=True))
+    assert parsed.hosts[0].unsandboxed is True
+    assert parsed.credentials[0].reviews_app_id is not None
 
 
 def test_unsandboxed_host_without_reviews_app_is_allowed() -> None:

@@ -214,7 +214,13 @@ def _claude(
     request: RunRequest, policy: Policy, detail: ClaudePolicy, brief_file: str
 ) -> tuple[str, ...]:
     headless = request.kind is RunKind.EXEC
-    mode = "auto" if policy.profile is Profile.BUILD else "dontAsk"
+    mode = (
+        "bypassPermissions"
+        if request.unsandboxed
+        else "auto"
+        if policy.profile is Profile.BUILD
+        else "dontAsk"
+    )
     settings = json.dumps(detail.settings, separators=(",", ":"), sort_keys=True)
     argv = ["claude", *(["-p"] if headless else [])]
     argv += ["--model", request.model, "--effort", request.effort]
@@ -240,7 +246,9 @@ def _agy(  # noqa: PLR0913, PLR0917 -- one value per fact agy's argv depends on
     argv = ["agy" if review else "agy-agent", "--project", project]
     argv += ["--model", request.model]
     if review:
-        argv += ["--mode", "plan", "--sandbox"]
+        argv += ["--mode", "plan"]
+        if not request.unsandboxed:
+            argv.append("--sandbox")
     if request.kind is RunKind.START:
         return (*argv, "--prompt-interactive", POINTER.format(path=brief_file))
     if brief is None:
