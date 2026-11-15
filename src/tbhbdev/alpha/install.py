@@ -480,8 +480,11 @@ def durable(directory: str) -> bool:
     """False for a directory inside the current directory, such as a clone's venv.
 
     Such a directory goes away with its clone, and a hook can't rely on it.
+    When the current directory holds the home directory, such as `/` or the
+    home itself, it names no clone, and every directory is kept.
     """
-    return not Path(directory).is_relative_to(Path.cwd())
+    cwd = Path.cwd()
+    return Path.home().is_relative_to(cwd) or not Path(directory).is_relative_to(cwd)
 
 
 def complete(entries: list[str]) -> list[str]:

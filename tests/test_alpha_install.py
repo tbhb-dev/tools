@@ -656,6 +656,19 @@ def test_settings_path_never_saves_a_directory_inside_the_current_one(
     assert install.settings_path(venv, f"{venv}{sep}{full}") == f"{shim}{sep}{full}"
 
 
+def test_settings_path_keeps_every_directory_when_the_current_one_holds_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    full = tool_dir(home, ".local/bin", ("tbhbdev", "gh", "git"))
+    shim = str(gh_shim.bin_dir())
+    monkeypatch.setenv("PATH", full)
+    for current in (home, tmp_path):
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(current)
+        assert install.settings_path(None, full) == f"{shim}{os.pathsep}{full}"
+
+
 def test_settings_path_adds_the_dirs_of_the_tools_it_lacks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
