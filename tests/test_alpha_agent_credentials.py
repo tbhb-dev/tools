@@ -450,7 +450,7 @@ def test_delivered_token_that_is_a_link_is_refused_and_removed(
     target.write_text("example-delivered")
     path = tmp_path / "run.review-token"
     path.symlink_to(target)
-    with pytest.raises(OSError):  # noqa: PT011 -- O_NOFOLLOW's ELOOP
+    with pytest.raises(OSError):  # noqa: PT011 -- O_NOFOLLOW's symlink loop
         credentials.delivered_token(path)
     assert not path.is_symlink()
     assert target.read_text() == "example-delivered"
