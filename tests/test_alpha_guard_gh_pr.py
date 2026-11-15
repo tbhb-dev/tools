@@ -2215,3 +2215,18 @@ def test_p1_forms_are_blocked(text: str) -> None:
 )
 def test_a_value_flag_before_api_still_finds_the_approval(text: str) -> None:
     assert guard.approvals(text, None) == [guard.Approval(AN_API, TARGET)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "gh pr -m merge 3",
+        "gh pr -r merge 3",
+        "gh pr -a review 7 -R tbhb-dev/tools",
+        "gh pr --approve review 7 -R tbhb-dev/tools",
+    ],
+)
+def test_a_flag_between_pr_and_its_verb_is_a_known_gap(text: str) -> None:
+    """Pins a gap: gh itself rejects these flags before `pr`, so none runs."""
+    assert run_find(text) is None
+    assert guard.approvals(text, None) == []
