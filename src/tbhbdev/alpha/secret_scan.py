@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
+# cspell:words noprefix
 """Secret scan of agent-written text, ported from an earlier interim toolset.
 
 ``tbhbdev alpha pr`` scans a pull request's final title and body, and
@@ -28,9 +29,9 @@ visibility ``PRIVATE`` skips them. Any other value, ``PUBLIC`` and ``INTERNAL``
 included, an empty one or a failed read, gets the full private config.
 
 There is no public-only fallback. A missing or unreadable private config, one
-that doesn't parse or lacks the canary rule and one other rule, or a missing
-.gitleaks.toml stops the command, and so does any finding or gitleaks error. A
-finding is reported by its rule ID and line only, with the file for a scan of
+that doesn't parse or lacks the canary and a rule kept in private scans, or a
+missing .gitleaks.toml stops the command, and so does any finding or gitleaks
+error. A finding is reported by its rule ID and line only, with the file for a scan of
 staged changes: gitleaks redacts its JSON report. Nothing else gitleaks prints
 is passed on, not even on a failure, where the message gives only its exit
 status: its error output can quote a private rule's regex.
@@ -156,10 +157,11 @@ def without_name_rules(data: dict[str, object]) -> str:
 
 
 def parse_private(private: str) -> dict[str, object] | None:
-    """The private config, or None unless it holds the canary and another rule.
+    """The private config, or None unless it holds the canary and a kept rule.
 
-    The canary must be a rule's ``id``, not just text somewhere in the file,
-    and a config of the canary alone has no rule to scan with.
+    Every rule must be a table with a string ``id``. The canary must be a
+    rule's ``id``, not just text somewhere in the file, and at least one
+    other rule must remain after removing the name rules for a private scan.
     """
     try:
         data = tomllib.loads(private)
@@ -169,12 +171,19 @@ def parse_private(private: str) -> dict[str, object] | None:
     if not isinstance(rules, list):
         return None
     listed = cast("list[object]", rules)  # pragma: no mutate
-    ids = [
-        cast("dict[str, object]", rule).get("id")  # pragma: no mutate
-        for rule in listed
-        if isinstance(rule, dict)
-    ]
-    other = any(isinstance(id_, str) and id_ != GITLEAKS_CANARY for id_ in ids)
+    ids: list[str] = []
+    # Only truthiness matters until a kept rule sets True; None is equivalent.
+    other = False  # pragma: no mutate
+    for rule in listed:
+        if not isinstance(rule, dict):
+            return None
+        fields = cast("dict[str, object]", rule)  # pragma: no mutate
+        id_ = fields.get("id")
+        if not isinstance(id_, str):
+            return None
+        ids.append(id_)
+        if id_ != GITLEAKS_CANARY and not is_name_rule(fields):
+            other = True
     if GITLEAKS_CANARY not in ids or not other:
         return None
     return data
@@ -183,9 +192,9 @@ def parse_private(private: str) -> dict[str, object] | None:
 def staged_file(root: Path, name: str, what: str) -> str | None:
     """The file NAME in the index at ROOT, or None when the index has none.
 
-    A path that is unmerged or a symlink is refused: the first has no stage 0
-    to read, so reading none would drop the repository's rules, and the second
-    holds only its target's name, not the target's rules.
+    A directory, an unmerged path or a symlink is refused. An unmerged path has
+    no stage 0 to read, so reading none would drop the repository's rules. A
+    symlink holds only its target's name, not the target's rules.
     """
     message = f"cannot scan {what} for secrets: git cannot read {name} from the index"
     code, listed = git("ls-files", "--stage", "--", f":(literal){name}", cwd=root)
@@ -194,7 +203,12 @@ def staged_file(root: Path, name: str, what: str) -> str | None:
     if not listed:
         return None
     entries = [line.split(None, 3) for line in listed.splitlines()]
-    if len(entries) != 1 or entries[0][0] == "120000" or entries[0][2] != "0":
+    if (
+        len(entries) != 1
+        or entries[0][0] == "120000"
+        or entries[0][2] != "0"
+        or entries[0][3] != name
+    ):
         raise SystemExit(message)
     code, text = git("cat-file", "blob", entries[0][1], cwd=root)
     if code != 0:
@@ -205,11 +219,17 @@ def staged_file(root: Path, name: str, what: str) -> str | None:
 # What gitleaks' own ``git diff --staged`` must not do: colour its output
 # (``always`` makes gitleaks read no diff and report nothing) or pair a
 # removal with an addition (a rename moves content out of an allowlisted path
-# unscanned).
+# unscanned). Paths must use the a/ and b/ prefixes gitleaks expects and stay
+# relative to the repository root so its findings and allowlists name real paths.
 DIFF_CONFIG = (
     ("color.ui", "never"),
     ("color.diff", "never"),
     ("diff.renames", "false"),
+    ("diff.noprefix", "false"),
+    ("diff.mnemonicPrefix", "false"),
+    ("diff.srcPrefix", "a/"),
+    ("diff.dstPrefix", "b/"),
+    ("diff.relative", "false"),
 )
 
 
