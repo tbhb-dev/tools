@@ -1,14 +1,13 @@
 ---
 description: Interim agent commands, installation, and harness hooks.
 generated:
-  - role: generated
-    harness: claude-code:2.1.322
-    model: anthropic:claude-sonnet-5-5
-    effort: medium
-    surface: cli
-    session: sha-256-64:a906bd79703e4c35
-    subagent: sha-256-64:871bb0bbccc99c95
-    at: "2026-11-14T00:20:30Z"
+- role: generated
+  effort: high
+  harness: codex:0.164.0
+  model: openai:gpt-6.1-sol
+  session: sha-256-64:78f9bc32cc3691e0
+  surface: exec
+  at: '2026-11-15T14:20:53Z'
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -106,7 +105,7 @@ The `record` hooks set both fields once in the session record, and a resumed ses
 - A session with no launch file to claim takes `started_at` from its first hook event and omits `launch`.
 - A subagent takes `started_at` from the first hook event with its agent id, and inherits `launch` from its root session.
 
-The `trailer` hook writes both attributes from the session record. Where lines for the same agent meet, on an amend, a rebase, or an interactive squash, the hook merges them. Lines with the same key, harness, model, session, and subagent become one line, the one with the earliest `started_at`. A line with the attribute replaces one without it.
+The `trailer` hook writes both attributes from the session record. Where lines for the same agent meet, on an amend, a rebase, or an interactive squash, the hook merges them. Lines with the same key and every attribute except `started_at` become one line, the one with the earliest `started_at`. Lines that differ in another attribute, including `effort`, remain distinct. A line with the attribute replaces one without it.
 
 The `check` hook and `verify-range` accept both attributes. They require a real Coordinated Universal Time in the exact format for `started_at` and the hash format for `launch`. An agent commit whose `Generated-by` line lacks `started_at` passes with a warning.
 

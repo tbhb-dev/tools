@@ -2033,12 +2033,6 @@ def without_start(value: str) -> str:
     return ";".join(p for p in parts if not p.startswith("started_at="))
 
 
-def trailer_identity(value: str) -> tuple[str | None, ...]:
-    """(harness, model, session, subagent) of a trailer value; None where absent."""
-    attrs = dict(ATTR_PAIR.findall(value))
-    return tuple(attrs.get(key) for key in ("harness", "model", "session", "subagent"))
-
-
 def trailer_start(value: str) -> str:
     """A trailer value's valid ``started_at``, or an empty string without one."""
     found = START_ATTR.search(value)
@@ -2049,24 +2043,32 @@ def with_record(value: str) -> str:
     """A trailer value with the ``launch`` and ``started_at`` of its session record.
 
     The record is the machine's word, so its fields replace whatever the line
-    says. A line whose session has no record here stays as it is.
+    says. Invalid lines stay untouched for commit-msg to reject. Other text,
+    including prose around the attribute blob, stays byte-for-byte as written.
     """
+    if check_value(value):
+        return value
     attrs = dict(ATTR_PAIR.findall(value))
     root, sub = hash_ok(attrs.get("session")), hash_ok(attrs.get("subagent"))
     if not root:
         return value
     root_rec = load_record(root)
     rec = load_record(sub, root=root) if sub else root_rec
+    if not (rec or root_rec):
+        return value
     fields = {
         "launch": hash_ok(rec.get("launch")) or hash_ok(root_rec.get("launch")),
         "started_at": start_ok(rec.get("started_at")),
     }
-    found = {k: v for k, v in fields.items() if v and attrs.get(k) != v}
-    # A session with a record but no launch ran without one: a line's own is forged.
-    if (rec or root_rec) and not fields["launch"]:
-        attrs.pop("launch", None)
-    changed = {**attrs, **found}
-    return format_value(changed) if changed != dict(ATTR_PAIR.findall(value)) else value
+    # Replace only these two attributes; absent record fields remove forged ones.
+    blob = next(token for token in value.split() if "=" in token)
+    pairs = [
+        pair
+        for pair in blob.split(";")
+        if not pair.startswith(("launch=", "started_at="))
+    ]
+    pairs.extend(f"{key}={field}" for key, field in fields.items() if field)
+    return value.replace(blob, ";".join(sorted(pairs)))
 
 
 def earliest_starts(found: list[Trailer]) -> list[Trailer]:
@@ -2136,11 +2138,11 @@ def add_trailers(
     new = [(KEY_GEN, format_value(i.attrs())) for i in gen] + [
         (KEY_ASSIST, format_value(i.attrs())) for i in assisted
     ]
-    made = {(k, trailer_identity(v)) for k, v in new}
+    made = {(k, trailer_agent(v)) for k, v in new}
     older = [
         (k, v)
         for k, v in [*llm_trailers(text), *(kept or [])]
-        if (k, trailer_identity(v)) not in made
+        if (k, trailer_agent(v)) not in made
     ]
     merged = merge_trailers([(k, with_record(v)) for k, v in [*older, *new]])
     args = [f"--trailer={key}: {value}" for key, value in merged]
@@ -2297,7 +2299,8 @@ def write_claim(repo: Repo, root: str, receipts: list[Path]) -> None:
         )
 
 
-SQUASH_MARK = "# This is a combination of"
+SQUASH_MARK = " This is a combination of"
+COMMENT_CHAR_CONFIG = "core.commentChar"
 
 
 def amend_only(path: Path, text: str, kept: list[Trailer]) -> None:
@@ -2308,7 +2311,12 @@ def amend_only(path: Path, text: str, kept: list[Trailer]) -> None:
     """
     found = llm_trailers(text)
     # A squash joins the messages, so each one's lines sit in its own block.
-    joined = SQUASH_MARK in text and len(found) > 1
+    _, comment = git("config", COMMENT_CHAR_CONFIG)
+    # Git chooses auto from this candidate list after inspecting the message.
+    markers = "#;@!$%^&|:" if comment == "auto" else (comment or "#")
+    joined = bool(found) and re.search(
+        rf"^[{re.escape(markers)}]{re.escape(SQUASH_MARK)}", text, re.MULTILINE
+    )
     if kept or joined or earliest_starts(found) != found:
         add_trailers(path, [], [], kept)
 
@@ -2318,9 +2326,8 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
 
     An amend keeps every ``LLM`` trailer of the commit it replaces, even with a
     new ``-m``: post-commit consumed that commit's receipts, so they cannot be
-    rebuilt. When no receipt matches and the message already has a
-    ``Generated-by`` (such as a message-only amend), the committer fallback is
-    left out.
+    rebuilt. With no matching receipt, only an amended commit's trailers or a
+    rebase's replayed message can suppress the committer fallback.
 
     A cherry-pick keeps the picked commit's ``LLM`` trailers, read from that
     commit, and never credits the picker as ``Generated-by``: the picker is
@@ -2364,10 +2371,11 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
         load_edits(repo, committer.ident.root), staged, unstaged_blobs(repo.top, staged)
     )
     gen, assisted = decide(committer, [rec for _, rec in edits], staged, blobs)
+    inherited = kept + (llm_trailers(text) if replaying else [])
     if picked:
         gen, assisted = pick_roles(committer, edited=bool(edits))
         kept = [*kept, *usable_trailers(picked[1])]
-    elif not edits and any(key == KEY_GEN for key, _ in [*llm_trailers(text), *kept]):
+    elif not edits and any(key == KEY_GEN for key, _ in inherited):
         gen, assisted = list[Ident](), list[Ident]()
     # Enriching can make two identities of one agent equal, so deduplicate again.
     gen = list(dict.fromkeys(with_start(enrich(i, committer)) for i in gen))
