@@ -8367,6 +8367,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> None:
         ("2026-02-30T00:00:00Z", None),
         ("2026-11-14T24:00:00Z", None),
         ("2026-11-14t00:02:41z", None),
+        ("\u0662\u0660\u0662\u0666-11-14T00:02:41Z", None),
         ("2026-11-14T00:02:41", None),
         ("2026-11-14T00:02:41+00:00", None),
         ("2026-11-14T00:02:41.5Z", None),
@@ -8528,10 +8529,13 @@ def line_of(start: str | None = None, extra: str = "", who: str = ROOT) -> str:
     return f"{base};session={who};{stamp}surface=cli"
 
 
-def test_trailer_identity_and_start() -> None:
+def test_without_start_and_trailer_start() -> None:
     value = f"LLM harness=h;model=m;session={ROOT};started_at={EARLY};subagent={CHILD}"
-    assert ai.trailer_identity(value) == ("h", "m", ROOT, CHILD)
-    assert ai.trailer_identity("LLM x_harness=h") == (None, None, None, None)
+    assert (
+        ai.without_start(value)
+        == f"LLM harness=h;model=m;session={ROOT};subagent={CHILD}"
+    )
+    assert ai.without_start(f"LLM x_started_at={EARLY}") == f"LLM x_started_at={EARLY}"
     assert ai.trailer_start(value) == EARLY
     assert ai.trailer_start(f"LLM x_started_at={EARLY}") == ""
     assert ai.trailer_start("LLM harness=h") == ""
@@ -8551,6 +8555,7 @@ def test_merge_trailers_keeps_the_earliest_start_per_identity() -> None:
         (assist, line_of(EARLY, who=H + "e" * 16)),
     ]
     assert ai.merge_trailers(found) == [
+        (gen, line_of(EARLY)),
         (gen, line_of(EARLY, "effort=low;")),
         (gen, line_of(LATE, who=OTHER)),
         (gen, line_of(who=CHILD)),
@@ -8568,6 +8573,11 @@ def test_merge_trailers_keeps_the_earliest_start_per_identity() -> None:
         ),
     ]
     assert ai.earliest_starts(apart) == apart
+    # A line that differs in any other attribute never takes another's place,
+    # so a hand-written earlier time cannot drop the hook's launch or effort.
+    real = (gen, line_of(LATE, f"launch={LAUNCH};"))
+    forged = (gen, line_of(EARLY))
+    assert ai.merge_trailers([real, forged]) == [real, forged]
     mixed = [(assist, line_of(EARLY)), (gen, line_of(LATE, who=OTHER))]
     assert ai.earliest_starts(mixed) == mixed
 
@@ -8628,6 +8638,15 @@ def test_cmd_trailer_interactive_squash_keeps_the_earliest_start(
         ]
     # A human's message whose lines need no merge stays byte for byte.
     path = msg_file(tmp_path, f"one\n\n\nGenerated-by: {line_of(LATE)}\n")
+    before = path.read_bytes()
+    assert ai.cmd_trailer(str(path), "message", {}) == 0
+    assert path.read_bytes() == before
+    # So does one with repeated or unordered lines that no start time separates.
+    path = msg_file(
+        tmp_path,
+        f"one\n\nAssisted-by: {line_of(LATE)}\nGenerated-by: {line_of(LATE)}\n"
+        f"Generated-by: {line_of(LATE)}\n",
+    )
     before = path.read_bytes()
     assert ai.cmd_trailer(str(path), "message", {}) == 0
     assert path.read_bytes() == before
