@@ -542,6 +542,17 @@ def simple_commands(text: str) -> Iterator[Simple]:
             yield Simple(prefix + found.prefix, found.words)
 
 
+def cluster_repo(word: str, words: Iterator[str], name: str | None) -> str | None:
+    """``name`` after a short ``env`` cluster: -i, -uNAME, -u NAME or -iuNAME."""
+    for index, char in enumerate(word[1:], 2):
+        if char == "i":
+            name = None
+        elif char == "u":
+            value = word[index:] or next(words, None)
+            return None if value == "GH_REPO" else name
+    return name
+
+
 def prefix_repo(prefix: list[str]) -> str | None:
     """The ``GH_REPO`` the prefix leaves set, after any ``env -u`` or ``env -i``."""
     name = None
@@ -554,14 +565,7 @@ def prefix_repo(prefix: list[str]) -> str | None:
         elif word == "--unset":
             name = None if next(words, None) == "GH_REPO" else name
         elif word.startswith("-") and not word.startswith("--"):
-            # A short cluster such as -i, -uNAME, -u NAME or -iuNAME.
-            for index, char in enumerate(word[1:], 2):
-                if char == "i":
-                    name = None
-                elif char == "u":
-                    value = word[index:] or next(words, None)
-                    name = None if value == "GH_REPO" else name
-                    break
+            name = cluster_repo(word, words, name)
     return name
 
 

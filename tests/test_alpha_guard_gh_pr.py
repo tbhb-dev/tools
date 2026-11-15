@@ -441,6 +441,18 @@ def test_a_parse_error_in_find_denies(
     assert '"permissionDecision": "deny"' in out
 
 
+def test_a_crash_before_the_match_fails_open(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def boom(_cwd: Path | None) -> bool:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(guard, "in_tbhb_dev", boom)
+    stdin = json.dumps(with_command(CLAUDE_PAYLOAD, "gh pr merge 1"))
+    assert run_main(monkeypatch, capsys, stdin) == (0, "", "")
+
+
 @pytest.mark.parametrize("payload", [CLAUDE_PAYLOAD, CODEX_PAYLOAD, AGY_PAYLOAD])
 def test_the_gate_asks_about_the_payloads_repository(
     monkeypatch: pytest.MonkeyPatch,
