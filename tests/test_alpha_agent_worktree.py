@@ -165,6 +165,9 @@ def test_git_suppresses_command_errors_and_returns_text(
             "GIT_NO_LAZY_FETCH": "1",
             "GIT_ASKPASS": "/bin/false",
             "SSH_ASKPASS": "/bin/false",
+            "GIT_SSH_COMMAND": (
+                "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+            ),
         }
         assert kwargs["cwd"] == "/"
         assert kwargs["timeout"] == 30
@@ -1842,13 +1845,10 @@ class Stop(Exception):  # noqa: N818 -- a test sentinel, not an error type
     pass
 
 
-def test_private_fetch_retries_over_ssh_with_the_account_key(
+def test_private_fetch_retries_over_ssh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, clone = repository(tmp_path)
-    key = tmp_path / "key"
-    key.write_text("synthetic\n")
-    monkeypatch.setattr(worktree, "host_key", lambda: key)
     urls: list[str] = []
     calls: list[int] = []
     original = worktree.configure_mirror
@@ -1873,11 +1873,10 @@ def test_private_fetch_retries_over_ssh_with_the_account_key(
     ]
 
 
-def test_failed_fetch_without_an_account_key_is_refused(
+def test_failed_retry_over_ssh_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, clone = repository(tmp_path)
-    monkeypatch.setattr(worktree, "host_key", lambda: tmp_path / "absent")
 
     def fetch(_mirror: Path, _request: object) -> str:
         raise subprocess.CalledProcessError(128, "git")
@@ -1887,12 +1886,9 @@ def test_failed_fetch_without_an_account_key_is_refused(
         worktree.create(clone, "p2", run_request(), ("example-org/example-repo",))
 
 
-def test_git_offers_the_account_key_to_ssh(
+def test_git_runs_ssh_without_prompts_and_with_the_account_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    key = tmp_path / "my key"
-    key.write_text("synthetic\n")
-    monkeypatch.setattr(worktree, "host_key", lambda: key)
     seen: list[dict[str, str]] = []
 
     def check_output(_command: object, **kwargs: object) -> str:
@@ -1903,8 +1899,6 @@ def test_git_offers_the_account_key_to_ssh(
 
     monkeypatch.setattr(subprocess, "check_output", check_output)
     worktree.git(tmp_path, "init")
-    assert "-i '" + str(key) + "'" in seen[0]["GIT_SSH_COMMAND"]
-    assert "IdentitiesOnly=yes" in seen[0]["GIT_SSH_COMMAND"]
-    monkeypatch.setattr(worktree, "host_key", lambda: tmp_path / "absent")
-    worktree.git(tmp_path, "init")
-    assert "GIT_SSH_COMMAND" not in seen[1]
+    command = seen[0]["GIT_SSH_COMMAND"]
+    assert "BatchMode=yes" in command
+    assert " -F " not in command
