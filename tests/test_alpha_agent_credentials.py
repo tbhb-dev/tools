@@ -1032,7 +1032,7 @@ def test_build_without_gh_mints_from_the_pull_requests_app(
             "app_id": VALUES["example/app/client"],
             "pem": VALUES["example/app/pem"],
             "repository": "example-org/example-repo",
-            "permissions": {"pull_requests": "write"},
+            "permissions": {"contents": "read", "pull_requests": "write"},
         }
     ]
     assert yaml.safe_load((tmp_path / "gh" / "hosts.yml").read_text()) == {
@@ -1087,7 +1087,7 @@ def test_build_token_request_names_one_repository_and_pull_requests_only(
     credentials.deliver(run_request(), pull_requests_settings(), tmp_path)
     assert [(request.method, request.url.path) for request in requests] == list(replies)
     assert json.loads(requests[1].content) == {
-        "permissions": {"pull_requests": "write"},
+        "permissions": {"contents": "read", "pull_requests": "write"},
         "repositories": ["example-repo"],
     }
     assert (
