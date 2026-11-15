@@ -42,11 +42,11 @@ from tbhbdev.alpha.guard_gh_pr import (
     ASSIGNMENT,
     KEYWORDS,
     SHELLS,
+    Scanner,
     command_of,
     decision,
     program_of,
     shell_script,
-    simple_commands,
 )
 from tbhbdev.alpha.repo import read_hook_stdin
 
@@ -289,6 +289,27 @@ def after_wrapper(words: list[str], i: int, name: str) -> int:
     return min(i + operands, len(words))
 
 
+def env_split(words: list[str], i: int) -> list[str]:
+    """``words`` with the ``-S`` strings among env's options split in place."""
+    out = words[:i]
+    while i < len(words) and words[i].startswith("-") and words[i] != "--":
+        word = words[i]
+        i += 1
+        if word in {"-S", "--split-string"}:
+            out += shell_words(words[i] if i < len(words) else "")
+            i += 1
+        elif word.startswith("--split-string="):
+            out += shell_words(word.partition("=")[2])
+        elif word.startswith("-S") and not word.startswith("--"):
+            out += shell_words(word[2:])
+        else:
+            out.append(word)
+            if word in WRAPPERS["env"][0] and i < len(words):
+                out.append(words[i])
+                i += 1
+    return out + words[i:]
+
+
 def program_words(words: list[str]) -> list[str]:
     """The words from the program, after assignments, keywords and wrappers."""
     i = 0
@@ -297,6 +318,8 @@ def program_words(words: list[str]) -> list[str]:
         if words[i] in KEYWORDS or ASSIGNMENT.match(words[i]):
             i += 1
         elif name in WRAPPERS:
+            if name == "env":
+                words = env_split(words, i + 1)
             i = after_wrapper(words, i + 1, name)
         else:
             break
@@ -331,10 +354,9 @@ def scripts_of(program: str, words: list[str]) -> list[str]:
 
 
 def commands_of(text: str) -> Iterator[list[str]]:
-    """The words of each simple command in ``text``, redirections made scannable."""
+    """The words of each command in ``text``, redirections made scannable."""
     text = AMPERSAND.sub("", text).replace(HERE_STRING, "<")
-    for simple in simple_commands(text):
-        yield [*simple.prefix, *simple.words]
+    yield from Scanner(text).run()
 
 
 def targets(command: list[str]) -> Iterator[Target]:
