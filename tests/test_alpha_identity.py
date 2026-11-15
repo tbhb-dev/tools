@@ -88,6 +88,8 @@ def isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_bin: Path) ->
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # A hook with no cwd reads and writes the cwd's repository: keep it out of ours.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.delenv("XDG_STATE_HOME", raising=False)
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
