@@ -302,3 +302,5 @@ wаit
 thеy
 getbasetemp
 pytestmark
+unscanned
+IOSFODNN
