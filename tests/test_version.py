@@ -13,6 +13,8 @@ import pytest
 from tbhbdev import cli, version
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from conftest import Installed
 
 COMMIT = "135933fb00d166e18826bd61de5d4a5a8626b22d"
@@ -268,3 +270,31 @@ def test_line_falls_back_to_the_stamp_without_direct_url(
     monkeypatch.setattr(metadata, "distribution", distribution)
     monkeypatch.setattr(version, "build_module", lambda: stamp_module(COMMIT))
     assert version.line() == f"tbhbdev 0 ({COMMIT})"
+
+
+@pytest.mark.parametrize("source", ["COMMIT = (\n", 'raise RuntimeError("x")\n'])
+def test_build_module_skips_a_stamp_that_cannot_import(
+    source: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "_build.py").write_text(source)
+    monkeypatch.setattr(version, "BUILD_MODULE", "_build")
+    monkeypatch.syspath_prepend(str(package))
+    monkeypatch.delitem(sys.modules, "_build", raising=False)
+    assert version.build_module() is None
+
+
+def test_line_leaves_the_stamp_alone_when_direct_url_names_the_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    other = "c" * 40
+    dist = FakeDist("0", json.dumps({"vcs_info": {"commit_id": other}}))
+
+    def broken() -> ModuleType:
+        msg = "the stamp was imported"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(metadata, "distribution", lambda _name: dist)
+    monkeypatch.setattr(version, "build_module", broken)
+    assert version.line() == f"tbhbdev 0 ({other})"

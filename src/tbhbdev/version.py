@@ -32,7 +32,7 @@ def build_module() -> ModuleType | None:
     """The release stamp module, or None in a tree or install without one."""
     try:
         return import_module(BUILD_MODULE)
-    except ImportError:
+    except Exception:  # noqa: BLE001  # a bad stamp must never break --version
         return None
 
 
@@ -78,5 +78,6 @@ def direct_url_identity(text: str | None) -> str:
 def line() -> str:
     """The `--version` line for the installed distribution."""
     dist = metadata.distribution(NAME)
-    build = identity(dist.read_text("direct_url.json"), build_module())
+    recorded = direct_url_identity(dist.read_text("direct_url.json"))
+    build = recorded if recorded != UNKNOWN else identity(None, build_module())
     return f"{NAME} {dist.version} ({build})"
