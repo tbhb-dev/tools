@@ -1812,10 +1812,11 @@ def cmd_record(harness: str, env: Mapping[str, str]) -> int:
             handle_claude({**data, "session_id": sid}, env, user_only=user_only)
         return 0
     sid = sid or (detect(env) or (None, None))[1]
-    rec = save_agy_session(harness, sid, data, (model, effort), env) if sid else None
-    if rec is None:
+    if not sid:
         return 0
-    record_agy(sid, data, rec, env)
+    rec = save_agy_session(harness, sid, data, (model, effort), env)
+    if rec is not None:
+        record_agy(sid, data, rec, env)
     return 0
 
 
