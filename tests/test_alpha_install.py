@@ -669,6 +669,36 @@ def test_settings_path_keeps_every_directory_when_the_current_one_holds_home(
         assert install.settings_path(None, full) == f"{shim}{os.pathsep}{full}"
 
 
+def test_settings_path_never_saves_an_alias_of_a_directory_inside_the_current_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clone = tmp_path / "clone"
+    venv = tool_dir(clone, ".venv/bin", ("git",))
+    alias = tmp_path / "alias"
+    alias.symlink_to(clone)
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "gh", "git"))
+    dotdot = f"{tmp_path}/other/../clone/.venv/bin"
+    monkeypatch.chdir(clone)
+    monkeypatch.setenv("PATH", full)
+    shim = str(gh_shim.bin_dir())
+    sep = os.pathsep
+    base = f"{alias}/.venv/bin{sep}{dotdot}{sep}{venv}{sep}{full}"
+    assert install.settings_path(None, base) == f"{shim}{sep}{full}"
+
+
+def test_settings_path_refuses_a_stale_gh_shim_as_the_real_gh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    (stale / "gh").write_text(gh_shim.wrapper_text())
+    (stale / "gh").chmod(0o755)
+    others = tool_dir(tmp_path, "others", ("tbhbdev", "git"))
+    monkeypatch.setenv("PATH", f"{stale}{os.pathsep}{others}")
+    with pytest.raises(install.InstallError, match=r"^gh is not on PATH"):
+        install.settings_path(None, f"{stale}{os.pathsep}{others}")
+
+
 def test_settings_path_adds_the_dirs_of_the_tools_it_lacks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

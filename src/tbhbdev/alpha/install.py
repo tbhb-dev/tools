@@ -130,7 +130,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from tbhbdev import plugins
-from tbhbdev.alpha.gh_shim import bin_dir, wrapper_text
+from tbhbdev.alpha.gh_shim import bin_dir, real_gh, wrapper_text
 from tbhbdev.alpha.identity import codex_home
 from tbhbdev.alpha.repo import (
     TBHB_DEV_ORIGIN,
@@ -483,8 +483,17 @@ def durable(directory: str) -> bool:
     When the current directory holds the home directory, such as `/` or the
     home itself, it names no clone, and every directory is kept.
     """
-    cwd = Path.cwd()
-    return Path.home().is_relative_to(cwd) or not Path(directory).is_relative_to(cwd)
+    cwd = Path.cwd().resolve()
+    return Path.home().resolve().is_relative_to(cwd) or not (
+        Path(directory).resolve().is_relative_to(cwd)
+    )
+
+
+def find_tool(tool: str, path: str) -> str | None:
+    """TOOL on PATH; for gh, the first one that isn't one of this command's shims."""
+    if tool == "gh":
+        return real_gh({"PATH": path})
+    return shutil.which(tool, path=path)
 
 
 def complete(entries: list[str]) -> list[str]:
@@ -500,11 +509,11 @@ def complete(entries: list[str]) -> list[str]:
     )
     done = list(entries)
     for tool in REQUIRED_TOOLS:
-        if shutil.which(tool, path=os.pathsep.join(done)) is None:
-            on_process = shutil.which(tool, path=process)
+        if find_tool(tool, os.pathsep.join(done)) is None:
+            on_process = find_tool(tool, process)
             if on_process:
                 done.append(str(Path(on_process).parent))
-        if shutil.which(tool, path=os.pathsep.join(done)) is None:
+        if find_tool(tool, os.pathsep.join(done)) is None:
             message = f"{tool} is not on PATH, so the hooks could not run it"
             raise InstallError(message)
     return done
