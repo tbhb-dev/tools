@@ -2277,6 +2277,9 @@ def write_claim(repo: Repo, root: str, receipts: list[Path]) -> None:
         )
 
 
+SQUASH_MARK = "# This is a combination of"
+
+
 def amend_only(path: Path, text: str, kept: list[Trailer]) -> None:
     """Rewrite the trailers of a message with no committer: keep, then merge.
 
@@ -2284,7 +2287,9 @@ def amend_only(path: Path, text: str, kept: list[Trailer]) -> None:
     commit is never reordered.
     """
     found = llm_trailers(text)
-    if kept or earliest_starts(found) != found:
+    # A squash joins the messages, so each one's lines sit in its own block.
+    joined = SQUASH_MARK in text and len(found) > 1
+    if kept or joined or earliest_starts(found) != found:
         add_trailers(path, [], [], kept)
 
 

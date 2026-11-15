@@ -8713,6 +8713,33 @@ def test_with_record_overrides_a_forged_line() -> None:
 
 
 @pytest.mark.usefixtures("repo")
+@pytest.mark.usefixtures("repo")
+def test_cmd_trailer_interactive_squash_of_two_sessions_moves_every_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ai, "ancestry", returning(["git rebase -i main"]))
+    one, two = line_of(LATE), line_of(EARLY, who=OTHER)
+    joined = (
+        "# This is a combination of 2 commits.\n# This is the 1st commit message:\n\n"
+        f"one\n\nGenerated-by: {one}\n\n"
+        "# This is the commit message #2:\n\n"
+        f"two\n\nGenerated-by: {two}\n"
+    )
+    envs: tuple[dict[str, str], ...] = ({}, CLAUDE_COMMIT_ENV)
+    for env in envs:
+        path = msg_file(tmp_path, joined)
+        assert ai.cmd_trailer(str(path), "message", env) == 0
+        text = path.read_text(encoding="utf-8")
+        assert ai.llm_trailers(text) == [("Generated-by", one), ("Generated-by", two)]
+        assert text.rstrip().endswith(f"Generated-by: {one}\nGenerated-by: {two}")
+    # A message with no squash marker keeps lines where its author put them.
+    plain = f"one\n\nGenerated-by: {one}\n\ntwo\n\nGenerated-by: {two}\n"
+    path = msg_file(tmp_path, plain)
+    before = path.read_bytes()
+    assert ai.cmd_trailer(str(path), "message", {}) == 0
+    assert path.read_bytes() == before
+
+
 def test_cmd_trailer_interactive_squash_keeps_the_earliest_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
