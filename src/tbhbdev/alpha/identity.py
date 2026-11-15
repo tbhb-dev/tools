@@ -1752,12 +1752,28 @@ def without(rec: Json, drop: Mapping[str, object]) -> Json:
 
 
 def save_agy_session(
-    harness: str, sid: str, state: Path, data: Json, seen: tuple[str | None, str | None]
-) -> Json:
-    """Write an agy session's record to the clone and the user stores."""
+    harness: str,
+    sid: str,
+    data: Json,
+    seen: tuple[str | None, str | None],
+    env: Mapping[str, str],
+) -> Json | None:
+    """Write an agy session's record to the clone and the user stores.
+
+    Nothing is written, and None returned, outside a worktree.
+    """
     model, effort = seen
+    state = state_dir(hook_cwd(data))
+    if not state:
+        return None
     path = state / "sessions" / f"{hx(sha256_64(sid))}.json"
-    once = start_fields(sha256_64(sid), sha256_64(sid), hook_cwd(data))
+    # The executing conversation can be a subagent: only its root claims the launch.
+    artifacts = as_str(data.get("artifactDirectoryPath"))
+    brain = (
+        Path(artifacts).parent if artifacts else agy_brain_root(read_record(path), env)
+    )
+    root = sha256_64(agy_root(brain, sid) if brain else sid)
+    once = start_fields(sha256_64(sid), root, hook_cwd(data))
     with locked(state):
         rec = read_record(path)
         rec.update({k: v for k, v in once.items() if v and k not in rec})
@@ -1796,10 +1812,9 @@ def cmd_record(harness: str, env: Mapping[str, str]) -> int:
             handle_claude({**data, "session_id": sid}, env, user_only=user_only)
         return 0
     sid = sid or (detect(env) or (None, None))[1]
-    state = state_dir(hook_cwd(data))
-    if not sid or not state:
+    rec = save_agy_session(harness, sid, data, (model, effort), env) if sid else None
+    if rec is None:
         return 0
-    rec = save_agy_session(harness, sid, state, data, (model, effort))
     record_agy(sid, data, rec, env)
     return 0
 

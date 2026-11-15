@@ -8520,6 +8520,32 @@ def test_cmd_record_agy_claims_the_launch_and_keeps_the_start(
         assert {k: loaded(store).get(k) for k in want} == want
 
 
+def test_cmd_record_agy_subagent_never_claims_the_launch(
+    repo: Path, launch_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A child can run its hook first, so only the root conversation claims."""
+    brain = tmp_path / "brain"
+    write_message(brain, SUB, "m.json", invoke(CONV, SUB))
+    (repo / "hello.txt").write_text("hi\n", encoding="utf-8")
+    monkeypatch.setattr(ai.time, "time", returning(NOW))
+    child = agy_post(
+        conversationId=SUB, cwd=str(repo), artifactDirectoryPath=f"{brain / SUB}/"
+    )
+    feed(monkeypatch, child)
+    assert ai.cmd_record("antigravity", {}) == 0
+    kid = ai.load_record(ai.sha256_64(SUB), repo, root=ai.sha256_64(CONV))
+    assert kid["started_at"] == ai.utc(NOW) != EARLY
+    assert "launch" not in kid
+    assert "session" not in loaded(launch_file)
+    root = agy_post(
+        conversationId=CONV, cwd=str(repo), artifactDirectoryPath=f"{brain / CONV}/"
+    )
+    feed(monkeypatch, root)
+    assert ai.cmd_record("antigravity", {}) == 0
+    assert loaded(launch_file)["session"] == ai.sha256_64(CONV)
+    assert ai.load_record(ai.sha256_64(CONV), repo)["launch"] == LAUNCH
+
+
 def claude_event(repo: Path, session: str, agent: str | None = None) -> None:
     data: Json = {"session_id": session, "hook_event_name": "SessionStart"}
     ai.handle_claude(
