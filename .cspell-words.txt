@@ -302,3 +302,8 @@ wаit
 thеy
 getbasetemp
 pytestmark
+getitimer
+itimer
+setitimer
+sigalrm
+signum
