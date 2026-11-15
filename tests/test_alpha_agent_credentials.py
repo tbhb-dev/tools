@@ -1196,6 +1196,26 @@ def test_build_refuses_when_one_pull_requests_app_reference_is_missing(
     assert str(caught.value) == "pull-requests App token unavailable; build refused"
 
 
+@pytest.mark.parametrize("reference", ["example/app/client", "example/app/pem"])
+def test_pull_requests_token_names_the_unreadable_reference(
+    monkeypatch: pytest.MonkeyPatch, reference: str
+) -> None:
+    def read(actual: str) -> str:
+        return "" if actual == reference else VALUES[actual]
+
+    monkeypatch.setattr(secrets, "read", read)
+    monkeypatch.setitem(VALUES, "example/app/pem", "example-pem")
+    monkeypatch.setitem(VALUES, "example/app/client", "example-client")
+    with pytest.raises(Invalid) as caught:
+        credentials.pull_requests_token(
+            pull_requests_settings().credentials[0], "example-org/example-repo"
+        )
+    assert (
+        str(caught.value)
+        == f"pull-requests app cannot read credential reference {reference}"
+    )
+
+
 def test_pull_requests_token_refuses_a_host_other_than_github(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
