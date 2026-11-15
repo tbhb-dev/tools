@@ -30,7 +30,7 @@ FIX = "Install it with the host's provisioning tooling."
 
 
 @pytest.fixture
-def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_git: None) -> Path:  # noqa: ARG001 -- requested for its isolation
     """A repository root with the committed config, and HOME with the private one."""
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
@@ -629,16 +629,8 @@ def run_git(repo: Path, *args: str) -> None:
 
 
 @pytest.fixture
-def repo(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A repository with one commit and its committed config staged-clean.
-
-    Git here reads no user or system config and no GIT_* variable of the run
-    that runs the tests, such as a hook's GIT_INDEX_FILE.
-    """
-    for name in [n for n in os.environ if n.startswith("GIT_")]:
-        monkeypatch.delenv(name)
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+def repo(root: Path) -> Path:
+    """A repository with one commit and its committed config staged-clean."""
     run_git(root, "init", "-q")
     run_git(root, "config", "user.email", "t@example.invalid")
     run_git(root, "config", "user.name", "t")

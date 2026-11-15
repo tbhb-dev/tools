@@ -74,10 +74,8 @@ def git(cwd: Path, *args: str) -> str:
 
 
 @pytest.fixture
-def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_git: None) -> Path:  # noqa: ARG001 -- requested for its isolation
     """A public tbhb-dev work tree with the committed config, as the cwd."""
-    for name in [key for key in os.environ if key.startswith("GIT_")]:
-        monkeypatch.delenv(name)
     for role in ("AUTHOR", "COMMITTER"):
         monkeypatch.setenv(f"GIT_{role}_NAME", "Example")
         monkeypatch.setenv(f"GIT_{role}_EMAIL", "example@example.test")
