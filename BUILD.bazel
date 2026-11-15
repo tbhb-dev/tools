@@ -193,7 +193,7 @@ pytest_test(
     # tests run the pinned gitleaks.
     path_tools = [
         "@tbhb_rules_cog//:cog",
-        "@tbhb_rules//lint:gitleaks",
+        "@tbhb_rules_gitleaks//:gitleaks",
     ],
 )
 
