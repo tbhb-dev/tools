@@ -181,16 +181,25 @@ def parse_private(private: str) -> dict[str, object] | None:
 
 
 def staged_file(root: Path, name: str, what: str) -> str | None:
-    """The file NAME in the index at ROOT, or None when the index has none."""
-    code, blob = git("rev-parse", "--verify", "--quiet", f":{name}", cwd=root)
-    if code == 1 and not blob:
-        return None
-    if code == 0:
-        code, text = git("cat-file", "blob", blob, cwd=root)
-        if code == 0:
-            return text
+    """The file NAME in the index at ROOT, or None when the index has none.
+
+    A path that is unmerged or a symlink is refused: the first has no stage 0
+    to read, so reading none would drop the repository's rules, and the second
+    holds only its target's name, not the target's rules.
+    """
     message = f"cannot scan {what} for secrets: git cannot read {name} from the index"
-    raise SystemExit(message)
+    code, listed = git("ls-files", "--stage", "--", f":(literal){name}", cwd=root)
+    if code != 0:
+        raise SystemExit(message)
+    if not listed:
+        return None
+    entries = [line.split(None, 3) for line in listed.splitlines()]
+    if len(entries) != 1 or entries[0][0] == "120000" or entries[0][2] != "0":
+        raise SystemExit(message)
+    code, text = git("cat-file", "blob", entries[0][1], cwd=root)
+    if code != 0:
+        raise SystemExit(message)
+    return text
 
 
 # What gitleaks' own ``git diff --staged`` must not do: colour its output
@@ -227,9 +236,13 @@ def diff_env(root: Path, what: str, attributes: Path) -> dict[str, str]:
         raise SystemExit(message)
     private_file(attributes, "* diff\n")
     settings = (*DIFF_CONFIG, ("core.attributesFile", str(attributes)))
+    # GIT_CONFIG_PARAMETERS (what `git -c` sets) outranks GIT_CONFIG_COUNT, so a
+    # `git -c color.diff=always commit` would colour the diff and hide the
+    # additions from gitleaks. Emptying it drops those settings from this scan.
     env = {
         "GIT_ATTR_SOURCE": empty,
         "GIT_CONFIG_COUNT": str(start + len(settings)),
+        "GIT_CONFIG_PARAMETERS": "",
     }
     for offset, (key, value) in enumerate(settings):
         env[f"GIT_CONFIG_KEY_{start + offset}"] = key

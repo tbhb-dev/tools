@@ -7,6 +7,7 @@
 import ast
 import os
 import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 from typing import cast
@@ -28,9 +29,11 @@ COMMITTED_HIT = "committed-secret-12345678"
 CANARY = secret_scan.GITLEAKS_CANARY
 FIX = "Install it with the host's provisioning tooling."
 
+pytestmark = pytest.mark.usefixtures("isolated_git")  # noqa: V107
+
 
 @pytest.fixture
-def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_git: None) -> Path:  # noqa: ARG001 -- requested for its isolation
+def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A repository root with the committed config, and HOME with the private one."""
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
@@ -780,6 +783,45 @@ def test_a_diff_format_setting_does_not_change_what_is_scanned(
     run_git(repo, "config", key, value)
     stage_secret(repo)
     assert refused(repo) == found("a.txt")
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        "'color.ui=always'",
+        "'color.diff=always'",
+        "'diff.renames=true'",
+        "'diff.external=true'",
+        "'diff.noprefix=true'",
+    ],
+)
+def test_git_config_parameters_do_not_hide_a_staged_secret(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, parameters: str
+) -> None:
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", parameters)
+    stage_secret(repo)
+    assert refused(repo) == found("a.txt")
+
+
+def test_a_symlinked_config_in_the_index_is_refused(repo: Path) -> None:
+    (repo / "real.toml").write_text("[extend]\nuseDefault = true\n")
+    (repo / ".gitleaksignore").symlink_to("real.toml")
+    run_git(repo, "add", ".gitleaksignore", "real.toml")
+    stage_secret(repo)
+    assert "git cannot read .gitleaksignore" in refused(repo)
+
+
+def test_an_unmerged_config_in_the_index_is_refused(repo: Path) -> None:
+    run_git(repo, "checkout", "-qb", "other")
+    (repo / ".gitleaks.toml").write_text("# other\n")
+    run_git(repo, "commit", "-qam", "other")
+    run_git(repo, "checkout", "-q", "-")
+    (repo / ".gitleaks.toml").write_text("# main\n")
+    run_git(repo, "commit", "-qam", "main")
+    with pytest.raises(subprocess.CalledProcessError):
+        run_git(repo, "merge", "other")
+    stage_secret(repo)
+    assert "git cannot read .gitleaks.toml" in refused(repo)
 
 
 def test_a_negative_config_count_is_refused(

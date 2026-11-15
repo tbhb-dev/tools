@@ -3732,6 +3732,25 @@ def test_foreign_push_hook_checked_before_dependencies(
     assert str(hook) in capsys.readouterr().err
 
 
+def test_a_missing_prek_still_installs_the_scan_shims(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def unavailable() -> list[str]:
+        message = "prek not found; install it, or install mise"
+        raise install.InstallError(message)
+
+    monkeypatch.setattr(install, "find_prek", unavailable)
+    monkeypatch.setattr(install, "prek_run", missing_prek)
+    assert install.install_git_hooks(None, {}, dry_run=False) == 1
+    assert "prek not found" in capsys.readouterr().err
+    for name in ("pre-commit", "pre-merge-commit"):
+        assert "pre-commit-scan" in (world.hooks / name).read_text()
+
+
+def missing_prek(prek: list[str], *_: object) -> subprocess.CompletedProcess[str]:
+    raise FileNotFoundError(prek[0])
+
+
 def test_foreign_push_hook_appearing_during_lock(
     world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -1557,7 +1557,12 @@ def install_git_hooks(
     hooks = common / "hooks"
     try:
         require_pre_push_hook(hooks)
-        prek = find_prek()
+        # Without prek the scan and identity shims still go in, so a commit is
+        # scanned; the missing prek is reported as a failure after them.
+        try:
+            prek, missing = find_prek(), None
+        except InstallError as exc:
+            prek, missing = ["prek"], exc
         timeout = lock_timeout(env)
         if dry_run:
             names = ", ".join(name for name, _ in SHIM_HOOKS)
@@ -1569,6 +1574,8 @@ def install_git_hooks(
         with hooks_lock(hooks, timeout):
             require_pre_push_hook(hooks)
             failures = install_hooks(prek, top, hooks)
+        if missing is not None:
+            failures = [missing, *failures]
     except InstallError as exc:
         failures = [exc]
     for failure in failures:
@@ -1591,6 +1598,8 @@ def install_hooks(prek: list[str], top: Path, hooks: Path) -> list[InstallError]
         install_pre_push_hook(hooks)
     except InstallError as exc:
         failures.append(exc)
+    except OSError as exc:
+        failures.append(InstallError(str(exc)))
     for pair in SHIM_HOOKS:
         try:
             install_identity_hook(prek, top, hooks, pair)

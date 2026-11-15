@@ -73,8 +73,11 @@ def git(cwd: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+pytestmark = pytest.mark.usefixtures("isolated_git")  # noqa: V107
+
+
 @pytest.fixture
-def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_git: None) -> Path:  # noqa: ARG001 -- requested for its isolation
+def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A public tbhb-dev work tree with the committed config, as the cwd."""
     for role in ("AUTHOR", "COMMITTER"):
         monkeypatch.setenv(f"GIT_{role}_NAME", "Example")
@@ -303,7 +306,13 @@ def test_without_a_committed_config_in_the_index_the_defaults_apply(
 
 
 @pytest.mark.parametrize(
-    "answers", [[(128, "")], [(1, "abc")], [(0, "abc"), (128, "")]]
+    "answers",
+    [
+        [(128, "")],
+        [(0, "100644 abc 1\t.gitleaks.toml")],
+        [(0, "120000 abc 0\t.gitleaks.toml")],
+        [(0, "100644 abc 0\t.gitleaks.toml"), (128, "")],
+    ],
 )
 def test_an_index_git_cannot_read_refuses_the_commit(
     repo: Path, monkeypatch: pytest.MonkeyPatch, answers: list[tuple[int, str]]
@@ -322,7 +331,7 @@ def test_an_index_git_cannot_read_refuses_the_commit(
         "cannot scan the staged changes for secrets: git cannot read "
         ".gitleaks.toml from the index"
     )
-    assert calls[0] == ("rev-parse", "--verify", "--quiet", ":.gitleaks.toml")
+    assert calls[0] == ("ls-files", "--stage", "--", ":(literal).gitleaks.toml")
     assert calls[1:] == [("cat-file", "blob", "abc")][: len(answers) - 1]
 
 
