@@ -825,7 +825,7 @@ def test_a_crash_while_checking_an_approval_denies(
     )
 
 
-def test_a_crash_while_matching_an_approval_fails_open(
+def test_a_crash_while_matching_an_approval_fails_closed(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     def boom(_text: str, _cwd: Path | None) -> list[guard.Approval]:
@@ -833,10 +833,13 @@ def test_a_crash_while_matching_an_approval_fails_open(
         raise RuntimeError(msg)
 
     monkeypatch.setattr(guard, "approvals", boom)
-    opened.record_opened(ROOT, [TARGET])
-    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, ROUTES[2][0]) is None
-    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, "gh pr merge 1") == (
-        MERGE.format(n=1)
+    expected = (
+        f"{RULE}, and the guard failed while reading the command, "
+        "so it refuses it: boom"
+    )
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, ROUTES[2][0]) == expected
+    assert (
+        guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, "gh pr close 3") == expected
     )
 
 
@@ -2183,3 +2186,32 @@ def test_skip_wrappers(words: list[str], result: tuple[int, bool]) -> None:
 )
 def test_skip_options(words: list[str], start: int, wrapper: str, index: int) -> None:
     assert guard.skip_options(words, start, wrapper) == index
+
+
+P1_BLOCKED = [
+    '"g\\\nh" pr close 3',
+    "cat <<\\EOF\nx\nEOF\ngh pr merge 1",
+    "cat <<E\\OF\nx\nEOF\ngh pr merge 1",
+    "cat <<$'EOF'\nx\nEOF\ngh pr merge 1",
+    'cat <<$"EOF"\nx\nEOF\ngh pr merge 1',
+    "echo $((1 << 2))\ngh pr close 3",
+    "(( 1 << 2 ))\ngh pr close 3",
+    "echo $'a\\c\\\\'; gh pr close 3",
+    "env -S '-u' FOO gh pr close 3",
+]
+
+
+@pytest.mark.parametrize("text", P1_BLOCKED)
+def test_p1_forms_are_blocked(text: str) -> None:
+    assert run_find(text) is not None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "gh -X POST api repos/tbhb-dev/tools/pulls/7/reviews -f event=APPROVE",
+        "gh --method POST api repos/tbhb-dev/tools/pulls/7/reviews -f event=APPROVE",
+    ],
+)
+def test_a_value_flag_before_api_still_finds_the_approval(text: str) -> None:
+    assert guard.approvals(text, None) == [guard.Approval(AN_API, TARGET)]

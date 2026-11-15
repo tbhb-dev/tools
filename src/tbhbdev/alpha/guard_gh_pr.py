@@ -119,7 +119,7 @@ SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 # ones, -o and -O, may sit in a cluster (``-euo pipefail``).
 DURATION = re.compile(r"\d+(\.\d+)?[smhd]?")
 ANSI_ESCAPE = re.compile(
-    r"\\(x[0-9a-fA-F]{1,2}|[0-7]{1,3}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|c.|.)",
+    r"\\(x[0-9a-fA-F]{1,2}|[0-7]{1,3}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|c(?:\\\\|.)|.)",
     re.DOTALL,
 )
 ANSI_SIMPLE = {
@@ -273,6 +273,21 @@ class Scanner:
         else:
             self.open_nesting("`", 1)
 
+    def in_arithmetic(self) -> bool:
+        """Whether the innermost open command or substitution is ``$((`` or ``((``."""
+        kinds = [kind for kind, _ in self.nesting if kind != "("]
+        return bool(kinds) and kinds[-1] == "a"
+
+    def shift_or_heredoc(self) -> None:
+        """``<<<`` and a shift inside arithmetic are not heredocs; ``<<`` is."""
+        self.end_word()
+        if self.text.startswith("<<<", self.pos):
+            self.pos += 3
+        elif self.in_arithmetic():
+            self.pos += 2
+        else:
+            self.heredoc()
+
     def heredoc(self) -> None:
         """Read the delimiter after ``<<`` and queue the body to be skipped."""
         self.pos += 2
@@ -291,6 +306,11 @@ class Scanner:
                     delim.append(char)
             elif char in "'\"":
                 quote = char
+            elif char == "\\":  # <<\EOF and <<E\OF quote the delimiter too
+                self.pos += 1
+                delim.append(self.text[self.pos : self.pos + 1])
+            elif char == "$" and self.text[self.pos + 1 : self.pos + 2] in {"'", '"'}:
+                pass  # <<$'EOF' and <<$"EOF": the quote that follows is the quoting
             elif char.isspace() or char in SEPARATORS + "()<>":
                 break
             else:
@@ -315,7 +335,9 @@ class Scanner:
         if char == self.quote:
             self.quote = ""
         elif self.quote == '"' and char == "\\":
-            self.add(self.text[self.pos + 1 : self.pos + 2])
+            following = self.text[self.pos + 1 : self.pos + 2]
+            if following != "\n":  # a backslash-newline is a line continuation
+                self.add(following)
             self.pos += 1
         elif self.quote == '"' and self.text.startswith("$(", self.pos):
             self.open_nesting("$", 2)
@@ -352,14 +374,16 @@ class Scanner:
         elif self.text.startswith('$"', self.pos):  # locale quoting: a plain "..."
             self.quote, self.in_word = '"', True
             self.pos += 2
+        elif self.text.startswith("$((", self.pos):
+            self.open_nesting("$", 2)
+            self.open_nesting("a", 1)
         elif self.text.startswith("$(", self.pos):
             self.open_nesting("$", 2)
-        elif self.text.startswith("<<<", self.pos):
-            self.end_word()
-            self.pos += 3
+        elif self.text.startswith("((", self.pos) and not self.in_word:
+            self.open_nesting("(", 1)
+            self.open_nesting("a", 1)
         elif self.text.startswith("<<", self.pos):
-            self.end_word()
-            self.heredoc()
+            self.shift_or_heredoc()
         elif char == "`":
             self.backtick()
         elif char == "(":
@@ -506,7 +530,8 @@ def skip_prefix(words: list[str]) -> list[str]:
     values and durations precede becomes the program.
     """
     i, wrapped = skip_wrappers(words)
-    if wrapped and words[i : i + 1] and program_of(words[i:]) != "gh":
+    unsure = wrapped and words[i : i + 1] and program_of(words[i:]) != "gh"
+    if unsure and env_split_string(words[:i]) is None:  # -S's words are exact
         i = resync(words, i)
     return words[i:]
 
@@ -861,7 +886,7 @@ def gh_approval(rest: list[str], default: Callable[[], str | None]) -> Approval 
     """
     i = 0
     while i < len(rest) and rest[i].startswith("-"):
-        i += 2 if rest[i] in VALUE_FLAGS else 1
+        i += 2 if rest[i] in VALUE_FLAGS | {"-X", "--method"} else 1
     review = (
         first_unflagged(rest, i + 1, {"review"}) if rest[i : i + 1] == ["pr"] else None
     )
@@ -1054,13 +1079,16 @@ def decision(message: str, *, antigravity: bool) -> Json:
 def approval_message(data: Json, text: str) -> str | None:
     """The deny message for the approval routes in ``text``, or None.
 
-    Matching fails open with the rest of the guard; once a route matches, a
-    crash denies.
+    A crash while reading the command or checking a route denies and names the
+    error: the guard fails closed, per the 2026-11-15 gh-close decision.
     """
     try:
         found = approvals(text, hook_cwd(data))
-    except Exception:  # noqa: BLE001  # fail open on any crash
-        return None
+    except Exception as exc:  # noqa: BLE001  # fail closed: the command is unread
+        return (
+            f"{RULE}, and the guard failed while reading the command, "
+            f"so it refuses it: {exc}"
+        )
     if not found:
         return None
     try:
