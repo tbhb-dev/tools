@@ -454,20 +454,31 @@ def merge_groups(config: Json, desired: Json) -> Json:
     return {**config, **desired}
 
 
+REQUIRED_TOOLS = ("tbhbdev", "git")
+
+
 def settings_path(current: object, base: str | None) -> str | None:
     """Claude's settings ``env.PATH`` with the gh shim's directory first.
 
-    The entries come from the PATH already in settings when it is a string,
-    else from BASE (the PATH of the install run). A hook process gets no
-    ``$CLAUDE_ENV_FILE``, so this is the only way the shim reaches it. Without
-    either, there is no PATH to write.
+    The entries come from BASE (the PATH of the install run), so a rerun
+    refreshes them, else from the PATH already in settings when it is a
+    string. A hook process gets no ``$CLAUDE_ENV_FILE``, so this is the only
+    way the shim reaches it. Hooks run ``tbhbdev`` and ``git``, so a directory
+    that holds either is added from the installing process's PATH when the
+    entries lack it. There is no PATH to write without entries, or when the
+    shim directory is relative (a relative XDG_DATA_HOME).
     """
-    source = current if isinstance(current, str) else base
-    if source is None:
+    source = base if base is not None else current if isinstance(current, str) else None
+    shim = bin_dir()
+    if source is None or not shim.is_absolute():
         return None
-    shim = str(bin_dir())
-    kept = [entry for entry in source.split(os.pathsep) if entry and entry != shim]
-    return os.pathsep.join([shim, *kept])
+    entries = [e for e in source.split(os.pathsep) if e and e != str(shim)]
+    for tool in REQUIRED_TOOLS:
+        if shutil.which(tool, path=os.pathsep.join(entries)) is None:
+            found = shutil.which(tool)
+            if found:
+                entries.append(str(Path(found).parent))
+    return os.pathsep.join([str(shim), *entries]) if entries else None
 
 
 def merged_config(harness: str, config: Json, base_path: str | None = None) -> Json:

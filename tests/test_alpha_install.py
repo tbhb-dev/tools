@@ -577,24 +577,82 @@ def test_merged_config_per_harness() -> None:
     assert install.merged_config("codex", {}) == {"hooks": install.codex_hooks()}
 
 
-def test_settings_path_puts_the_shim_first_once() -> None:
+def tool_dir(tmp_path: Path, name: str, tools: tuple[str, ...]) -> str:
+    folder = tmp_path / name
+    folder.mkdir()
+    for tool in tools:
+        (folder / tool).write_text("#!/bin/sh\n")
+        (folder / tool).chmod(0o755)
+    return str(folder)
+
+
+def test_settings_path_puts_the_shim_first_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     shim = str(gh_shim.bin_dir())
     sep = os.pathsep
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "git"))
+    monkeypatch.setenv("PATH", full)
     assert install.settings_path(None, None) is None
-    assert install.settings_path(None, f"/a{sep}{sep}/b") == f"{shim}{sep}/a{sep}/b"
-    assert (
-        install.settings_path(f"/x{sep}{shim}{sep}/y", "/a") == f"{shim}{sep}/x{sep}/y"
+    assert install.settings_path(None, f"/a{sep}{sep}/b") == (
+        f"{shim}{sep}/a{sep}/b{sep}{full}"
     )
-    assert install.settings_path(7, "/a") == f"{shim}{sep}/a"
+    assert install.settings_path(f"/x{sep}{shim}{sep}/y", None) == (
+        f"{shim}{sep}/x{sep}/y{sep}{full}"
+    )
+    assert install.settings_path(7, "/a") == f"{shim}{sep}/a{sep}{full}"
 
 
-def test_merged_config_writes_the_shim_path_for_claude_only() -> None:
+def test_settings_path_refreshes_from_the_install_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "git"))
+    monkeypatch.setenv("PATH", "/unused")
     shim = str(gh_shim.bin_dir())
+    assert install.settings_path(f"/stale{os.pathsep}/old", full) == (
+        f"{shim}{os.pathsep}{full}"
+    )
+
+
+def test_settings_path_adds_the_dirs_of_tbhbdev_and_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sep = os.pathsep
+    shim = str(gh_shim.bin_dir())
+    one = tool_dir(tmp_path, "one", ("tbhbdev",))
+    two = tool_dir(tmp_path, "two", ("git",))
+    monkeypatch.setenv("PATH", f"{one}{sep}{two}")
+    minimal = install.settings_path(None, "/usr/bin-minimal")
+    assert minimal == f"{shim}{sep}/usr/bin-minimal{sep}{one}{sep}{two}"
+    # A directory that already holds the tool isn't added twice.
+    assert install.settings_path(None, one) == f"{shim}{sep}{one}{sep}{two}"
+
+
+def test_settings_path_with_no_entries_or_a_relative_shim_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert install.settings_path("", None) is None
+    assert install.settings_path(None, os.pathsep) is None
+    monkeypatch.setenv("XDG_DATA_HOME", "relative")
+    assert install.settings_path(None, "/a") is None
+
+
+def test_merged_config_writes_the_shim_path_for_claude_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shim = str(gh_shim.bin_dir())
+    sep = os.pathsep
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "git"))
+    monkeypatch.setenv("PATH", full)
     claude = install.merged_config("claude", {}, "/a")
-    assert claude["env"] == {"PATH": f"{shim}{os.pathsep}/a", "SSH_AUTH_SOCK": ""}
+    assert claude["env"] == {
+        "PATH": f"{shim}{sep}/a{sep}{full}",
+        "SSH_AUTH_SOCK": "",
+    }
     assert install.merged_config("claude", claude, None)["env"] == claude["env"]
-    kept = install.merged_config("claude", {"env": {"PATH": "/x:/y"}}, "/a")
-    assert kept["env"]["PATH"] == f"{shim}{os.pathsep}/x:/y"
+    kept = install.merged_config("claude", {"env": {"PATH": f"/x{sep}/y"}}, None)
+    assert kept["env"]["PATH"] == f"{shim}{sep}/x{sep}/y{sep}{full}"
     assert "env" not in install.merged_config("codex", {}, "/a")
 
 
