@@ -56,11 +56,6 @@ CHECKOUT_SCAN_DEPTH = 3
 COMMON_DIRECTORY_LIMIT = 4096
 
 
-def host_key() -> Path:
-    """The account's own ssh key, which a private mirror fetch offers to GitHub."""
-    return Path.home() / ".ssh" / "id_ed25519"
-
-
 def git(clone: Path, *args: str) -> str:
     env = {key: os.environ[key] for key in ("HOME", "LANG") if key in os.environ}
     env.update(
@@ -73,11 +68,8 @@ def git(clone: Path, *args: str) -> str:
         GIT_ASKPASS="/bin/false",
         SSH_ASKPASS="/bin/false",
     )
-    if (key := host_key()).is_file():
-        env["GIT_SSH_COMMAND"] = (
-            f"ssh -i {shlex.quote(str(key))} -o IdentitiesOnly=yes "
-            "-o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-        )
+    # ssh still reads the account's own ssh config, so its GitHub key applies.
+    env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
     command = [host_tools.resolve("git")]
     command += [item for value in GIT_OVERRIDES for item in ("-c", value)]
     directory = clone / ".git"
@@ -461,9 +453,7 @@ def create(
                 commit = fetch_commit(mirror, request)
             except subprocess.SubprocessError:
                 # A private repository refuses the anonymous fetch. Retry over
-                # ssh with the account's own key, when it has one.
-                if not host_key().is_file():
-                    raise
+                # ssh, which uses the account's own GitHub key from its ssh config.
                 configure_mirror(
                     mirror, f"ssh://git@github.com/{owner}/{repository}.git"
                 )
