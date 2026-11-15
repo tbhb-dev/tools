@@ -47,6 +47,10 @@ CLOSE_PR = (
 FOREIGN = (
     " It acts on the origin of the current directory, so run it in a clone of {r}."
 )
+UNPINNED = (
+    " It acts on the origin of the current directory, so the command doesn't "
+    "show which repository it targets, so run it in a clone of that repository."
+)
 CLOSE_ISSUE = (
     "`gh issue close` is blocked. Run `tbhbdev alpha issue close {n} "
     "--reason completed|not-planned` instead."
@@ -66,6 +70,15 @@ BLOCKED = [
     "gh pr close https://github.com/a/b/pull/3",
     "gh issue close https://github.com/a/b/issues/3",
     "gh pr --repo a/b close 3",
+    "env -u FOO gh pr close 3",
+    "env -C /tmp gh issue close 3",
+    "sudo -u root gh pr merge 3",
+    "timeout 5 gh pr close 3",
+    "env -i -x gh pr close 3",
+    "gh pr --comment why close 3",
+    "gh issue --reason completed close 3",
+    "bash -c -- 'gh pr close 3'",
+    "bash -ec -o pipefail 'gh issue close 3'",
     "gh issue -R a/b close 3",
     "gh -R a/b pr --repo c/d merge 3",
     "gh pr --repo=a/b edit 3",
@@ -131,6 +144,13 @@ BLOCKED = [
 ]
 
 ALLOWED = [
+    "gh pr comment 3 --body close",
+    "gh pr view --json close 3",
+    "echo gh pr close 3",
+    "env -u FOO ls",
+    "sudo -n ls",
+    "bash -c -- true",
+    "bash -x script.sh 'gh pr close 3'",
     "gh issue list",
     "gh issue view 3",
     "gh issue",
@@ -215,7 +235,20 @@ def test_allowed(text: str) -> None:
         ("gh pr close 5 -c why", CLOSE_PR.format(n=5)),
         ("gh pr close", CLOSE_PR.format(n="<N>")),
         ("gh pr close '#6'", CLOSE_PR.format(n=6)),
-        ("gh pr close https://github.com/a/b/pull/7", CLOSE_PR.format(n=7)),
+        (
+            "gh pr close https://github.com/a/b/pull/7",
+            CLOSE_PR.format(n=7) + FOREIGN.format(r="a/b"),
+        ),
+        (
+            "gh issue close https://github.com/a/b/issues/7",
+            CLOSE_ISSUE.format(n="<N>") + FOREIGN.format(r="a/b"),
+        ),
+        ("GH_REPO=a/b gh pr close 3", CLOSE_PR.format(n=3) + FOREIGN.format(r="a/b")),
+        ("gh pr close -c 99 3", CLOSE_PR.format(n=3)),
+        ("gh issue close --comment 99 3", CLOSE_ISSUE.format(n=3)),
+        ("gh pr close --delete-branch 3", CLOSE_PR.format(n=3)),
+        ("GH_REPO=$R gh pr close 3", CLOSE_PR.format(n="<N>") + UNPINNED),
+        ("GH_REPO= gh pr close 3", CLOSE_PR.format(n="<N>") + UNPINNED),
         ("gh issue close 8 -r completed", CLOSE_ISSUE.format(n=8)),
         ("gh issue close", CLOSE_ISSUE.format(n="<N>")),
         ("gh pr --repo a/b close 3", CLOSE_PR.format(n=3) + FOREIGN.format(r="a/b")),

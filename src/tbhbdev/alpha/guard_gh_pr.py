@@ -57,20 +57,20 @@ the command into simple commands at ``;``, ``&``, ``|``, newlines, parentheses,
 ``$(...)`` and backticks (inside double quotes too), drops heredoc bodies, and
 removes quoting. A simple command matches when, after leading ``NAME=value``
 words, shell keywords and the wrappers env, command, exec, sudo, nohup, time,
-builtin and xargs (with their options), the program is ``gh`` (any path) and,
-after its global flags (``-R x``, ``--repo x``, ``--hostname x``, other
-``-x``), the words are ``pr create|edit|merge|ready|close`` or ``issue close``.
+builtin, xargs, timeout and nice (with their options and option values), the
+program is ``gh`` (any path) and, after its global flags (``-R x``,
+``--repo x``, ``--hostname x``, other ``-x``), the words are
+``pr create|edit|merge|ready|close`` or ``issue close``.
 ``bash|sh|zsh|dash|ksh -c SCRIPT`` and ``eval ...`` are scanned recursively.
 Text inside a quoted argument to any other command is not a command, so
 ``git commit -m 'docs: mention gh pr merge'`` and ``echo "gh pr merge"`` pass.
 
 Known gaps, none of which the permission rules close either:
 
-- Misses: a wrapper outside the list (``timeout 5 gh ...``, ``mise x -- gh
-  ...``, ``sudo -u root gh ...``), a script file or alias that runs gh, code a
-  command runs from a quoted argument (``python -c``, ``ssh host '...'``), and
-  ``gh api`` calls that do the same work. Substitutions inside an unquoted
-  heredoc body are not scanned.
+- Misses: a wrapper outside the list (``mise x -- gh ...``), a script file or
+  alias that runs gh, code a command runs from a quoted argument
+  (``python -c``, ``ssh host '...'``), and ``gh api`` calls that do the same
+  work. Substitutions inside an unquoted heredoc body are not scanned.
 - Approvals it misses: ``gh api graphql`` with an ``addPullRequestReview`` or
   ``submitPullRequestReview`` mutation, ``gh api --input FILE`` and
   ``-F event=@file``, curl, httpx or any client other than gh, a script or
@@ -103,14 +103,34 @@ type Json = dict[str, object]
 SUBCOMMANDS = ("create", "edit", "merge", "ready", "close")
 # The (group, subcommand) pairs of `gh` that the guard blocks.
 GUARDED = {("pr", sub) for sub in SUBCOMMANDS} | {("issue", "close")}
+GROUPS = {group for group, _ in GUARDED}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 # Shell options whose value is the next word, so it is not the script.
 SHELL_VALUE_OPTIONS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
-WRAPPERS = {"env", "command", "exec", "sudo", "nohup", "time", "builtin", "xargs"}
+WRAPPERS = {
+    "env", "command", "exec", "sudo", "nohup", "time", "builtin", "xargs",
+    "timeout", "nice",
+}  # fmt: skip
+# Wrapper options whose value is the next word, so it is not the program.
+WRAPPER_VALUE_OPTIONS = {
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U"},
+    "xargs": {"-n", "-I", "-L", "-P", "-s", "-E", "-d", "-a"},
+    "exec": {"-a"},
+    "nice": {"-n"},
+}
 KEYWORDS = {"if", "then", "do", "else", "elif", "while", "until", "!", "{", "}"}
 VALUE_FLAGS = {"-R", "--repo", "--hostname"}
 ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
 PR_NUMBER = re.compile(r"(?:\S*/pull/|#)?(\d+)")
+TARGET_URL = re.compile(r"https?://[^/\s]+/([^/\s]+/[^/\s]+)/(?:pull|issues)/\d+\S*")
+# Flags of the guarded gh pr and gh issue verbs that take a value.
+ARG_VALUE_FLAGS = {
+    "-c", "--comment", "-r", "--reason", "-b", "--body", "-t", "--title",
+    "-F", "--body-file", "-B", "--base", "-R", "--repo", "-m", "--milestone",
+    "-a", "--add-assignee", "-l", "--add-label", "-A", "--author",
+    "--match-head-commit", "--subject", "--body-text",
+}  # fmt: skip
 SEPARATORS = ";&|"
 
 CLOSE_HINTS = {
@@ -318,52 +338,102 @@ class Scanner:
 
 
 def skip_prefix(words: list[str]) -> list[str]:
-    """The command's words after env assignments, keywords and wrappers."""
+    """The command's words after env assignments, keywords and wrappers.
+
+    A wrapper's options are skipped with their values. When the word after a
+    wrapper still isn't ``gh``, the parse is unsure (``timeout 5 gh``, an
+    option the table doesn't know), so the first later word that is ``gh``
+    becomes the program.
+    """
     i = 0
+    wrapped = False
     while i < len(words):
         word = words[i]
+        name = word.rsplit("/", 1)[-1]
         if word in KEYWORDS or ASSIGNMENT.match(word):
             i += 1
-        elif word.rsplit("/", 1)[-1] in WRAPPERS:
+        elif name in WRAPPERS:
+            wrapped = True
             i += 1
+            values = WRAPPER_VALUE_OPTIONS.get(name, set())
             while i < len(words) and words[i].startswith("-"):
-                i += 1
+                i += 2 if words[i] in values else 1
         else:
             break
+    if wrapped and words[i : i + 1] and program_of(words[i:]) != "gh":
+        later = [k for k in range(i, len(words)) if program_of(words[k:]) == "gh"]
+        i = later[0] if later else i
     return words[i:]
 
 
-def skip_flags(words: list[str], start: int) -> int:
-    """The index of the first word from ``start`` that is not a flag or its value."""
-    i = start
-    while i < len(words) and words[i].startswith("-"):
-        i += 2 if words[i] in VALUE_FLAGS else 1
-    return i
+def first_unflagged(words: list[str], start: int, wanted: set[str]) -> int | None:
+    """The index of the first word in ``wanted`` that follows only flags and values.
+
+    A word that isn't a flag may be a flag's value, so the scan goes on past
+    it only when the word before it is a flag. The first word that follows a
+    non-flag and isn't wanted ends the scan.
+    """
+    after_flag = False
+    for k in range(start, len(words)):
+        if words[k].startswith("-"):
+            after_flag = True
+        elif words[k] in wanted:
+            return k
+        elif after_flag:
+            after_flag = False
+        else:
+            return None
+    return None
 
 
 def gh_match(rest: list[str]) -> Match | None:
     """Match the words after ``gh``: a guarded group and sub, flags allowed between."""
-    i = skip_flags(rest, 0)
-    j = skip_flags(rest, i + 1)
-    pair = tuple(rest[i : i + 1] + rest[j : j + 1])
-    if pair in GUARDED:
-        repos = flag_values(rest, {"-R", "--repo"}, VALUE_FLAGS)
-        return Match(pair[1], rest[j + 1 :], pair[0], repos[-1] if repos else None)
+    i = first_unflagged(rest, 0, GROUPS)
+    if i is None:
+        return None
+    group = rest[i]
+    j = first_unflagged(rest, i + 1, {sub for g, sub in GUARDED if g == group})
+    if j is None:
+        return None
+    args = rest[j + 1 :]
+    repo = target_repo(args)
+    repos = flag_values(rest, {"-R", "--repo"}, VALUE_FLAGS)
+    return Match(rest[j], args, group, repos[-1] if repos else repo)
+
+
+def target_repo(args: list[str]) -> str | None:
+    """``owner/repo`` of a pull request or issue URL among the arguments."""
+    urls = (TARGET_URL.fullmatch(word) for word in args)
+    return next((url[1] for url in urls if url), None)
+
+
+def target_number(args: list[str]) -> str | None:
+    """The first positional argument that reads as a number, flag values aside."""
+    i = 0
+    while i < len(args):
+        if args[i].startswith("-"):
+            i += 2 if args[i] in ARG_VALUE_FLAGS else 1
+        elif number := PR_NUMBER.fullmatch(args[i]):
+            return number[1]
+        else:
+            i += 1
     return None
 
 
 def shell_script(rest: list[str]) -> str | None:
-    """The script word of ``-c`` among a shell's options, if it has one."""
+    """The script of ``-c`` among a shell's options: its first non-option word."""
+    has_c = False
     i = 0
     while i < len(rest):
         word = rest[i]
+        if word == "--":
+            return rest[i + 1] if has_c and i + 1 < len(rest) else None
         if word in SHELL_VALUE_OPTIONS:
             i += 2
             continue
         if not word.startswith(("-", "+")):
-            return None
-        if not word.startswith(("--", "+")) and "c" in word:
-            return rest[i + 1] if i + 1 < len(rest) else None
+            return word if has_c else None
+        has_c = has_c or (not word.startswith(("--", "+")) and "c" in word)
         i += 1
     return None
 
@@ -406,10 +476,17 @@ def simple_commands(text: str) -> Iterator[Simple]:
 
 def find(text: str) -> Match | None:
     """The first direct guarded `gh pr` or `gh issue` call in a shell command."""
-    for _, words in simple_commands(text):
+    for prefix, words in simple_commands(text):
         found = gh_match(words[1:]) if program_of(words) == "gh" else None
         if found:
-            return found
+            names = [
+                w.removeprefix("GH_REPO=") for w in prefix if w.startswith("GH_REPO=")
+            ]
+            return (
+                found
+                if found.repo is not None or not names
+                else found._replace(repo=names[-1])
+            )
     return None
 
 
@@ -636,19 +713,27 @@ def denial(found: list[Approval], data: Json, env: Mapping[str, str]) -> str | N
     return None
 
 
+def close_hint(found: Match, blocked: str, number: str, *, pinned: bool) -> str:
+    """The block message for ``close``, which acts on the current directory's origin."""
+    text = f"{blocked} {CLOSE_HINTS[found.group].format(n=number)}"
+    if found.repo is None:
+        return text
+    where = (
+        f"run it in a clone of {found.repo}"
+        if pinned
+        else "the command doesn't show which repository it targets, so run it "
+        "in a clone of that repository"
+    )
+    return f"{text} It acts on the origin of the current directory, so {where}."
+
+
 def hint(found: Match) -> str:
     """The block message: what was blocked and the command to run instead."""
     blocked = f"`gh {found.group} {found.sub}` is blocked."
-    number = next((m[1] for w in found.args if (m := PR_NUMBER.fullmatch(w))), "<N>")
+    pinned = found.repo is None or (bool(found.repo) and "$" not in found.repo)
+    number = (target_number(found.args) if pinned else None) or "<N>"
     if found.sub == "close":
-        text = f"{blocked} {CLOSE_HINTS[found.group].format(n=number)}"
-        where = (
-            ""
-            if found.repo is None
-            else " It acts on the origin of the current directory, so run it "
-            f"in a clone of {found.repo}."
-        )
-        return text + where
+        return close_hint(found, blocked, number, pinned=pinned)
     if found.sub == "create":
         return (
             f"{blocked} Write {DRAFT} from {TEMPLATE}, check it with "
