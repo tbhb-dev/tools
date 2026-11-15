@@ -22,6 +22,7 @@ An ssh config alias isn't resolved: the guard sees only the name typed, so an
 alias counts only when it is listed. Known gaps: `sftp`, `mosh`, `git` over ssh,
 `ssh -G` expansion of Host blocks, and a host held in a variable.
 """
+# cspell:ignore proxyjump
 
 import json
 import re
@@ -80,6 +81,18 @@ def option_user(option: str) -> str | None:
     return value.strip() if key.lower() == "user" and value.strip() else None
 
 
+def option_of(word: str, args: list[str], i: int) -> tuple[tuple[str, str] | None, int]:
+    """The first value-taking option in a ``-xyz`` word, and the next index."""
+    for offset, letter in enumerate(word[1:], start=2):
+        if letter in SSH_VALUE_FLAGS:
+            value = word[offset:]
+            if not value and i < len(args):
+                value = args[i]
+                i += 1
+            return (letter, value), i
+    return None, i
+
+
 def ssh_words(args: list[str]) -> Iterator[tuple[str, str]]:
     """Each ssh option as ``(letter, value)``, then the operands as ``("", word)``."""
     i = 0
@@ -93,15 +106,9 @@ def ssh_words(args: list[str]) -> Iterator[tuple[str, str]]:
         if not word.startswith("-") or word == "-":
             yield "", word
             continue
-        for offset, letter in enumerate(word[1:], start=2):
-            if letter not in SSH_VALUE_FLAGS:
-                continue
-            value = word[offset:]
-            if not value and i < len(args):
-                value = args[i]
-                i += 1
-            yield letter, value
-            break
+        found, i = option_of(word, args, i)
+        if found:
+            yield found
 
 
 def ssh_login(args: list[str]) -> str | None:
@@ -212,10 +219,9 @@ def main() -> int:
     """Read the payload on stdin; print a deny decision for a blocked call."""
     try:
         text, antigravity = command_of(read_hook_stdin())
-        names = hosts()
-        reason = verdict(text, names) if names else None
-        if reason:
-            print(json.dumps(decision(reason, antigravity=antigravity)))
+        reason = verdict(text, hosts())
     except Exception:  # noqa: BLE001  # fail open on any crash
         return 0
+    if reason:
+        print(json.dumps(decision(reason, antigravity=antigravity)))
     return 0

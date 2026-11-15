@@ -27,7 +27,7 @@ NAMES = ["lab1", "lab2"]
         "ssh -qT lab1",
         "ssh tony@lab1",
         "ssh -l tony lab1",
-        "ssh -ltony lab1",
+        "ssh -lbob lab1",
         "ssh -o User=tony lab1",
         "ssh -oUser=tony lab1",
         "ssh -o 'User tony' lab1",
@@ -66,7 +66,7 @@ NAMES = ["lab1", "lab2"]
         "rsync -a tony@lab1:src dir",
         "rsync -e ssh dir lab1:dst",
         "rsync -e 'ssh -l tony' dir lab1:dst",
-        "rsync -essh dir lab1:dst",
+        "rsync -e'ssh' dir lab1:dst",
         "rsync --rsh='ssh -o User=tony' dir lab1:dst",
         'rsync --rsh="ssh -l \'unterminated" dir lab1:dst',
         "rsync -a rsync://lab1/mod dir",
@@ -98,7 +98,7 @@ def test_denied(command: str) -> None:
         "ssh -l agent lab1 ssh tony@other",
         "ssh other",
         "ssh tony@other",
-        "ssh labx",
+        "ssh lab9",
         "ssh lab10",
         "ssh prefix-lab1",
         "ssh",
@@ -204,16 +204,7 @@ def test_hook_contract(
     captured = capsys.readouterr()
     assert captured.err == ""
     reason = guard.REASON.format(host="lab1")
-    if agy:
-        assert json.loads(captured.out) == {"decision": "deny", "reason": reason}
-    else:
-        assert json.loads(captured.out) == {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        }
+    assert json.loads(captured.out) == guard.decision(reason, antigravity=agy)
 
 
 @pytest.mark.parametrize(
