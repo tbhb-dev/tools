@@ -189,6 +189,8 @@ GOOD: Table = {
             "reviews_app_id": "example-vault/example-app/app_id",
             "reviews_app_client_id": "example-vault/example-app/client_id",
             "reviews_app_pem": "example-vault/example-app/private_key",
+            "pull_requests_app_client_id": "example-vault/example-pr/client_id",
+            "pull_requests_app_pem": "example-vault/example-pr/private_key",
             "signing": "example-vault/example-signing/private_key",
         }
     },
@@ -244,6 +246,8 @@ EXPECTED = model.Settings(
             reviews_app_id="example-vault/example-app/app_id",
             reviews_app_client_id="example-vault/example-app/client_id",
             reviews_app_pem="example-vault/example-app/private_key",
+            pull_requests_app_client_id="example-vault/example-pr/client_id",
+            pull_requests_app_pem="example-vault/example-pr/private_key",
             signing="example-vault/example-signing/private_key",
         ),
     ),
@@ -587,7 +591,7 @@ def _credential_errors() -> list[Case]:
     cases: list[Case] = []
     account = "[agent.credentials.agent]"
     for key in REFERENCE_KEYS:
-        if key in ("gh", "docker"):
+        if key in ("gh", "docker") or key.startswith("pull_requests_app"):
             continue
         _add(cases, ("credentials", "agent", key), MISSING, "is required", account)
     for key in REFERENCE_KEYS:
@@ -1115,3 +1119,30 @@ def test_host_tbhbdev_path(program: str | None) -> None:
             config.parse(value)
         why = "must be an absolute path" if program == "relative" else PATHS
         assert str(caught.value) == f"[[agent.host]] tbhbdev {why}"
+
+
+def test_pull_requests_app_references_are_optional() -> None:
+    table = edited("credentials", "agent", "pull_requests_app_client_id")
+    account = cast("Table", cast("Table", table["credentials"])["agent"])
+    del account["pull_requests_app_pem"]
+    parsed = config.parse(table).credentials[0]
+    assert parsed.pull_requests_app_client_id is None
+    assert parsed.pull_requests_app_pem is None
+    assert config.parse(GOOD).credentials[0].pull_requests_app_pem == (
+        "example-vault/example-pr/private_key"
+    )
+
+
+@pytest.mark.parametrize(
+    ("present", "missing"),
+    [
+        ("pull_requests_app_pem", "pull_requests_app_client_id"),
+        ("pull_requests_app_client_id", "pull_requests_app_pem"),
+    ],
+)
+def test_partial_pull_requests_app_configuration_is_refused(
+    present: str, missing: str
+) -> None:
+    assert present != missing
+    table = edited("credentials", "agent", missing)
+    assert refused(table) == f"[agent.credentials.agent] {missing} is required"

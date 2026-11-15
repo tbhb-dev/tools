@@ -106,6 +106,8 @@ class Credentials:
     reviews_app_client_id: str | None
     reviews_app_pem: str | None
     signing: str
+    pull_requests_app_client_id: str | None = None
+    pull_requests_app_pem: str | None = None
 
 
 @dataclass(frozen=True)

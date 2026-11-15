@@ -29,6 +29,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator
     from typing import BinaryIO, Literal
 
+    from tbhbdev.alpha.agent.model import Settings
+
 
 VALUES = {
     "example/gh/value": "example-gh-credential",
@@ -994,3 +996,110 @@ def test_signing_file_accepts_size_limit_with_safe_open_flags(
     monkeypatch.setattr(os, "fdopen", open_binary)
     assert credentials.signing_key(str(key)) == text
     assert calls == [str(key)]
+
+
+def pull_requests_settings(*, gh: str | None = None) -> Settings:
+    original = host_settings()
+    return dataclasses.replace(
+        original,
+        credentials=(
+            dataclasses.replace(
+                original.credentials[0],
+                gh=gh,
+                pull_requests_app_client_id="example/app/client",
+                pull_requests_app_pem="example/app/pem",
+            ),
+        ),
+    )
+
+
+def test_build_without_gh_mints_from_the_pull_requests_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[str, str, str, str]] = []
+
+    def mint(app: str, client: str, pem: str, repository: str) -> str:
+        seen.append((app, client, pem, repository))
+        return "example-build-token"
+
+    monkeypatch.setattr(credentials, "app_token", mint)
+    credentials.deliver(run_request(), pull_requests_settings(), tmp_path)
+    assert seen == [
+        (
+            "pull-requests",
+            "example/app/client",
+            "example/app/pem",
+            "example-org/example-repo",
+        )
+    ]
+    assert yaml.safe_load((tmp_path / "gh" / "hosts.yml").read_text()) == {
+        "github.com": {
+            "oauth_token": "example-build-token",
+            "git_protocol": "https",
+        }
+    }
+
+
+def test_build_with_gh_ignores_the_pull_requests_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*_args: object) -> str:
+        raise AssertionError
+
+    monkeypatch.setattr(credentials, "app_token", refuse)
+    credentials.deliver(
+        run_request(), pull_requests_settings(gh="example/gh/value"), tmp_path
+    )
+    assert (
+        yaml.safe_load((tmp_path / "gh" / "hosts.yml").read_text())["github.com"][
+            "oauth_token"
+        ]
+        == VALUES["example/gh/value"]
+    )
+
+
+def test_build_refuses_when_the_pull_requests_app_token_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*_args: object) -> str:
+        message = "never-log"
+        raise gh_app.GhAppError(message)
+
+    monkeypatch.setattr(credentials, "app_token", fail)
+    with pytest.raises(Invalid) as caught:
+        credentials.deliver(run_request(), pull_requests_settings(), tmp_path)
+    assert str(caught.value) == "pull-requests App token unavailable; build refused"
+    assert caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize("missing", ["client", "pem"])
+def test_pull_requests_app_without_references_is_refused(missing: str) -> None:
+    references = pull_requests_settings().credentials[0]
+    references = dataclasses.replace(
+        references,
+        pull_requests_app_client_id=None
+        if missing == "client"
+        else references.pull_requests_app_client_id,
+        pull_requests_app_pem=None
+        if missing == "pem"
+        else references.pull_requests_app_pem,
+    )
+    with pytest.raises(Invalid) as caught:
+        credentials.pull_requests_token(references, "example-org/example-repo")
+    assert str(caught.value) == "pull-requests App credentials are not configured"
+
+
+def test_pull_requests_token_names_its_app(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+    monkeypatch.setattr(
+        credentials, "app_token", lambda app, *_rest: seen.append(app) or "t"
+    )
+    references = pull_requests_settings().credentials[0]
+    assert credentials.pull_requests_token(references, "o/r") == "t"
+    assert seen == ["pull-requests"]
+
+
+def test_app_token_names_its_app_when_the_host_is_not_github() -> None:
+    with pytest.raises(Invalid) as caught:
+        credentials.app_token("pull-requests", "c", "p", "example.com/o/r")
+    assert str(caught.value) == "pull-requests app supports github.com repositories"

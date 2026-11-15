@@ -331,6 +331,13 @@ def _reviews_app(table: _Table) -> tuple[str | None, str | None, str | None]:
     )
 
 
+def _pull_requests_app(table: _Table) -> tuple[str | None, str | None]:
+    keys = ("pull_requests_app_client_id", "pull_requests_app_pem")
+    if not table.values.keys() & set(keys):
+        return None, None
+    return table.reference(keys[0]), table.reference(keys[1])
+
+
 def _credentials(table: _Table) -> tuple[Credentials, ...]:
     if not table.values:
         table.fail("account", "is required")
@@ -343,9 +350,12 @@ def _credentials(table: _Table) -> tuple[Credentials, ...]:
             "reviews_app_id",
             "reviews_app_client_id",
             "reviews_app_pem",
+            "pull_requests_app_client_id",
+            "pull_requests_app_pem",
             "signing",
         )
         app_id, client_id, pem = _reviews_app(entry)
+        pull_requests_client_id, pull_requests_pem = _pull_requests_app(entry)
         accounts.append(
             Credentials(
                 account=account,
@@ -355,6 +365,8 @@ def _credentials(table: _Table) -> tuple[Credentials, ...]:
                 reviews_app_client_id=client_id,
                 reviews_app_pem=pem,
                 signing=entry.reference("signing"),
+                pull_requests_app_client_id=pull_requests_client_id,
+                pull_requests_app_pem=pull_requests_pem,
             )
         )
     return tuple(accounts)

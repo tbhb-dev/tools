@@ -58,19 +58,45 @@ def require_reviews_app(references: Credentials) -> None:
 
 
 def installation_token(references: Credentials, repository: str) -> str:
-    """Reuse the app signer and request a token restricted to one repository."""
-    host, owner, name = repo.parts(repository)
-    if host != "github.com":
-        message = "reviews app supports github.com repositories"
-        raise Invalid(message)
+    """Mint the reviews App's token for one repository."""
     if references.reviews_app_client_id is None or references.reviews_app_pem is None:
         message = "reviews App credentials are not configured"
         raise Invalid(message)
-    client_id = read(references.reviews_app_client_id, label="reviews app")
-    pem = read(references.reviews_app_pem, label="reviews app")
+    return app_token(
+        "reviews",
+        references.reviews_app_client_id,
+        references.reviews_app_pem,
+        repository,
+    )
+
+
+def pull_requests_token(references: Credentials, repository: str) -> str:
+    """Mint the pull-requests App's token for one repository."""
+    if (
+        references.pull_requests_app_client_id is None
+        or references.pull_requests_app_pem is None
+    ):
+        message = "pull-requests App credentials are not configured"
+        raise Invalid(message)
+    return app_token(
+        "pull-requests",
+        references.pull_requests_app_client_id,
+        references.pull_requests_app_pem,
+        repository,
+    )
+
+
+def app_token(app: str, client_id_ref: str, pem_ref: str, repository: str) -> str:
+    """Reuse the app signer and request a token restricted to one repository."""
+    host, owner, name = repo.parts(repository)
+    if host != "github.com":
+        message = f"{app} app supports github.com repositories"
+        raise Invalid(message)
+    client_id = read(client_id_ref, label=f"{app} app")
+    pem = read(pem_ref, label=f"{app} app")
     env = gh_app.default_env()
     args = gh_app.Args(
-        app="reviews",
+        app=app,
         repo=f"{owner}/{name}",
         fresh=True,
         dry_run=False,
@@ -99,8 +125,24 @@ def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
         ):
             message = "reviews App token unavailable; review refused"
             raise Invalid(message) from None
+    elif references.gh:
+        gh_token = read(references.gh, label="gh")
+    elif references.pull_requests_app_pem is not None:
+        try:
+            gh_token = pull_requests_token(references, request.repo)
+        except (
+            Invalid,
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            httpx.HTTPError,
+            gh_app.GhAppError,
+        ):
+            message = "pull-requests App token unavailable; build refused"
+            raise Invalid(message) from None
     else:
-        gh_token = read(references.gh, label="gh") if references.gh else None
+        gh_token = None
     gh = runfiles.private_dir(tmpdir / "gh")
     if gh_token is not None:
         host = repo.parts(request.repo)[0]
