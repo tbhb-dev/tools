@@ -347,6 +347,23 @@ def connect() -> Iterator[Callable[[], FakeConnect]]:
 
 
 @pytest.fixture
+def isolated_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Git and prek read and write only under tmp_path.
+
+    No GIT_* variable of the run that runs the tests (a hook's GIT_INDEX_FILE,
+    GIT_CONFIG_COUNT) reaches git, which reads no system or user config, and
+    prek keeps its cache and config in tmp_path.
+    """
+    for name in [key for key in os.environ if key.startswith("GIT_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("PREK_HOME", str(tmp_path / "prek-home"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+
+
+@pytest.fixture
 def plain(monkeypatch: pytest.MonkeyPatch) -> None:
     """Help and usage at 80 columns, without color, even under -E or FORCE_COLOR."""
     monkeypatch.setenv("NO_COLOR", "1")

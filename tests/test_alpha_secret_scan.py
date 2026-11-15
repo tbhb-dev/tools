@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
+# cspell:words noprefix
 
 """Tests for the secret scan of PR text, against the pinned gitleaks."""
 
 import ast
 import os
 import shutil
+import subprocess
 import tomllib
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fake_tool import PRIVATE_CONFIG, write_fake, write_private_config
@@ -23,7 +26,10 @@ regex = '''committed-secret-[0-9]{8}'''
 """
 CANARY_HIT = "test-canary-0123456789abcdef"
 COMMITTED_HIT = "committed-secret-12345678"
+CANARY = secret_scan.GITLEAKS_CANARY
 FIX = "Install it with the host's provisioning tooling."
+
+pytestmark = pytest.mark.usefixtures("isolated_git")  # noqa: V107
 
 
 @pytest.fixture
@@ -105,13 +111,95 @@ def test_a_missing_private_config_names_the_path_and_the_fix(root: Path) -> None
     )
 
 
+def not_private() -> str:
+    return (
+        f"cannot scan the text for secrets: {secret_scan.private_config()} does "
+        f"not parse to rules with the id {CANARY} and at least one "
+        f"other, so it is not the private gitleaks config. {FIX}"
+    )
+
+
 def test_a_private_config_without_the_canary_is_refused(root: Path) -> None:
     write_private_config(Path.home(), PRIVATE_CONFIG.replace("tbhb-private", "x"))
-    assert refusal("clean\n", root) == (
-        f"cannot scan the text for secrets: {secret_scan.private_config()} has no "
-        "rule with the id tbhb-private-canary, so it is not the private gitleaks "
-        f"config. {FIX}"
+    assert refusal("clean\n", root) == not_private()
+
+
+# Each is refused before gitleaks runs: the canary only in a comment or in a
+# table that isn't a rule, the canary as the only rule, no rules list, and
+# text that isn't TOML.
+NOT_PRIVATE_TEMPLATES = [
+    (
+        '[extend]\npath = ".gitleaks.toml"\n# id = "CANARY_ID"\n'
+        '[[rules]]\nid = "a"\nregex = "a"\n[[rules]]\nid = "b"\nregex = "b"\n'
+    ),
+    '[canary]\nid = "CANARY_ID"\n[[rules]]\nid = "a"\nregex = "a"\n',
+    '[[rules]]\nid = "CANARY_ID"\nregex = "x"\n',
+    (
+        '[[rules]]\nid = "CANARY_ID"\nregex = "x"\n'
+        '[[rules]]\nid = "CANARY_ID"\nregex = "y"\n'
+    ),
+    '[[rules]]\nid = "CANARY_ID"\nregex = "x"\n[[rules]]\nregex = "y"\n',
+    '[[rules]]\nid = "CANARY_ID"\nregex = "x"\n[[rules]]\nid = 3\n',
+    'rules = "CANARY_ID"\n',
+    'id = "CANARY_ID"\n',
+    PRIVATE_CONFIG + "\nrules = [\n",
+]
+NOT_PRIVATE = [config.replace("CANARY_ID", CANARY) for config in NOT_PRIVATE_TEMPLATES]
+
+
+@pytest.mark.parametrize("config", NOT_PRIVATE)
+def test_a_config_without_the_canary_rule_and_another_is_refused(
+    root: Path, tmp_path: Path, config: str
+) -> None:
+    write_private_config(Path.home(), config)
+    ran = tmp_path / "ran"
+    write_fake(tmp_path / "gitleaks", f"open({str(ran)!r}, 'w')\n")
+    assert refusal("clean\n", root, str(tmp_path / "gitleaks")) == not_private()
+    assert not ran.exists()
+
+
+def test_parse_private_requires_every_rule_to_be_a_table() -> None:
+    data = secret_scan.parse_private(PRIVATE_CONFIG)
+    assert data is not None
+    rules = cast("list[dict[str, str]]", data["rules"])
+    assert [rule["id"] for rule in rules] == [
+        CANARY,
+        "fixture-rule",
+    ]
+    assert (
+        secret_scan.parse_private(
+            'rules = [1, {id = "CANARY_ID"}]'.replace("CANARY_ID", CANARY)
+        )
+        is None
     )
+    two = 'rules = [1, {id = "CANARY_ID"}, {id = "x"}]'.replace("CANARY_ID", CANARY)
+    assert secret_scan.parse_private(two) is None
+
+
+@pytest.mark.parametrize("entry", ["1", '"rule"', "{}", "{id = 3}"])
+@pytest.mark.parametrize("visibility", ["PUBLIC", "PRIVATE"])
+def test_a_malformed_rule_refuses_the_config_before_gitleaks_runs(
+    root: Path, tmp_path: Path, entry: str, visibility: str
+) -> None:
+    config = f'rules = [{{id = "{CANARY}"}}, {{id = "x"}}, {entry}]\n'
+    write_private_config(Path.home(), config)
+    ran = tmp_path / "ran"
+    fake = tmp_path / "gitleaks"
+    write_fake(fake, f"open({str(ran)!r}, 'w')\n")
+    assert secret_scan.parse_private(config) is None
+    assert refusal("clean\n", root, str(fake), visibility) == not_private()
+    assert not ran.exists()
+
+
+@pytest.mark.parametrize("family", secret_scan.NAME_RULES)
+@pytest.mark.parametrize("suffix", ["", "-1"])
+def test_the_canary_and_only_name_rules_are_not_a_private_config(
+    root: Path, family: str, suffix: str
+) -> None:
+    config = f'rules = [{{id = "{CANARY}"}}, {{id = "{family}{suffix}"}}]\n'
+    write_private_config(Path.home(), config)
+    assert secret_scan.parse_private(config) is None
+    assert refusal("clean\n", root, visibility="PRIVATE") == not_private()
 
 
 def test_a_missing_committed_config_is_refused(root: Path) -> None:
@@ -121,14 +209,26 @@ def test_a_missing_committed_config_is_refused(root: Path) -> None:
     )
 
 
-def test_gitleaks_failing_is_refused_with_its_log_and_no_color(root: Path) -> None:
+def test_gitleaks_failing_is_refused_with_its_exit_status_only(root: Path) -> None:
     (root / ".gitleaks.toml").write_text("rules = [\n")
+    assert refusal("clean\n", root) == (
+        "cannot scan the text for secrets: gitleaks failed (exit 1)"
+    )
+
+
+def test_a_private_regex_gitleaks_rejects_never_reaches_the_message(
+    root: Path,
+) -> None:
+    """The message gives only the exit status, not the regex gitleaks quotes."""
+    regex = "fakehost-" + "(unclosed"
+    rule = f"\n[[rules]]\nid = \"tailnet-host-9\"\nregex = '{regex}'\n"
+    write_private_config(Path.home(), PRIVATE_CONFIG + rule)
     message = refusal("clean\n", root)
     assert message.startswith(
-        "cannot scan the text for secrets: gitleaks failed (exit 1): "
+        "cannot scan the text for secrets: gitleaks failed (exit "
     )
-    assert "failed to load extended config" in message
-    assert "\x1b" not in message
+    assert message.endswith(")")
+    assert "fakehost" not in message
 
 
 @pytest.mark.parametrize(
@@ -146,21 +246,19 @@ def test_a_report_that_is_not_a_clean_scan_is_refused(
     )
     write_fake(fake, body)
     assert refusal("clean\n", root, str(fake)) == (
-        f"cannot scan the text for secrets: gitleaks failed (exit {rc}): bad config"
+        f"cannot scan the text for secrets: gitleaks failed (exit {rc})"
     )
 
 
 def test_gitleaks_runs_from_the_root_with_the_private_config(
     root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The scan must set NO_COLOR itself, not inherit it from the test runner.
-    monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setenv("SECRET_SCAN_PASSED", "yes")
     fake = tmp_path / "gitleaks"
     log = tmp_path / "log"
     body = (
         "import os, sys\n"
-        "env = [os.environ.get(k) for k in ('NO_COLOR', 'SECRET_SCAN_PASSED')]\n"
+        "env = [os.environ.get(k) for k in ('SECRET_SCAN_PASSED',)]\n"
         f"open({str(log)!r}, 'w').write("
         "repr((sys.argv[1:], os.getcwd(), sys.stdin.read(), env)))\n"
         "sys.stdout.write('[]')\n"
@@ -174,16 +272,37 @@ def test_gitleaks_runs_from_the_root_with_the_private_config(
         argv,
         os.path.realpath(root),
         "text\n",
-        ["1", "yes"],
+        ["yes"],
     )
 
 
 def test_findings_reads_rule_and_line() -> None:
     report = '[{"RuleID": "r", "StartLine": 4, "Secret": "REDACTED"}]'
-    assert secret_scan.findings(report) == [(4, "r")]
+    assert secret_scan.findings(report) == [("", 4, "r")]
     assert secret_scan.findings("[]") == []
     assert secret_scan.findings("{}") is None
     assert secret_scan.findings("") is None
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        "[1]",
+        '[{"RuleID": "r"}]',
+        '[{"StartLine": 4}]',
+        '[{"RuleID": "r", "StartLine": "4"}]',
+        '[{"RuleID": 7, "StartLine": 4}]',
+        '[{"RuleID": "r", "StartLine": 4}, {"RuleID": "r"}]',
+    ],
+)
+def test_findings_without_a_line_and_rule_mean_no_scan(report: str) -> None:
+    assert secret_scan.findings(report) is None
+
+
+def test_place_escapes_what_a_filename_could_forge() -> None:
+    assert secret_scan.place("", 3) == "on line 3"
+    assert secret_scan.place("a/b.txt", 3) == "in a/b.txt:3"
+    assert secret_scan.place("a\nrule x\u00e9", 3) == "in a\\nrule x\\xe9:3"
 
 
 # A stand-in private config with one rule of each family that matters: names
@@ -329,8 +448,8 @@ def test_the_copy_is_private_holds_no_name_rule_and_is_gone_afterwards(
     assert not Path(path).exists()
     assert not Path(path).parent.exists()
     ids = [rule["id"] for rule in tomllib.loads(text)["rules"]]
-    assert ids == ["tbhb-private-canary", "tailnet-ipv4-1", "op-reference-1",
-                   "op-vault-1", "op-item-1"]  # fmt: skip
+    assert ids == [CANARY, "fixture-rule", "tailnet-ipv4-1",
+                   "op-reference-1", "op-vault-1", "op-item-1"]  # fmt: skip
 
 
 def test_the_copy_is_gone_after_a_refusal(families: Path, tmp_path: Path) -> None:
@@ -345,7 +464,7 @@ def test_the_copy_is_gone_after_a_refusal(families: Path, tmp_path: Path) -> Non
     )
     write_fake(fake, body)
     assert refusal("text\n", families, str(fake), "PRIVATE") == (
-        "cannot scan the text for secrets: gitleaks failed (exit 3): boom"
+        "cannot scan the text for secrets: gitleaks failed (exit 3)"
     )
     assert not Path(log.read_text()).exists()
 
@@ -357,8 +476,7 @@ def test_the_copy_parses_back_to_the_private_config_minus_the_name_rules() -> No
         for rule in expected["rules"]
         if rule["id"] not in {"tailnet-host-1", "private-repo-12", "tool-dir-1"}
     ]
-    copy = secret_scan.without_name_rules(FAMILIES)
-    assert copy is not None
+    copy = secret_scan.without_name_rules(tomllib.loads(FAMILIES))
     assert tomllib.loads(copy) == expected
     assert expected["rules"][-1]["allowlists"] == [
         {"description": "One allowed item", "regexes": ["fake-item-ok"]}
@@ -402,40 +520,405 @@ def test_a_rule_without_an_id_is_not_a_name_rule() -> None:
     assert secret_scan.is_name_rule({}) is False
 
 
-def test_a_private_config_without_rules_gets_an_empty_rule_list() -> None:
-    copy = secret_scan.without_name_rules("title = 'x'\n")
-    assert copy is not None
-    assert tomllib.loads(copy) == {"title": "x", "rules": []}
-
-
-def test_a_private_config_with_the_canary_but_no_rules_table_still_scans(
+def test_a_staged_scan_names_the_path_gitleaks_scans(
     root: Path, tmp_path: Path
 ) -> None:
-    # The canary check reads lines, not the rules table, so this config passes it.
-    config = (
-        '[extend]\npath = ".gitleaks.toml"\n\n[canary]\nid = "tbhb-private-canary"\n'
-    )
-    write_private_config(Path.home(), config)
-    scan("clean\n", root, visibility="PRIVATE")
-    assert refusal(f"{COMMITTED_HIT}\n", root, visibility="PRIVATE") == (
-        "refusing the text: gitleaks finds a secret: rule committed-rule on line 1"
-    )
     fake = tmp_path / "gitleaks"
     log = tmp_path / "log"
     body = (
-        "import sys\n"
-        "path = sys.argv[sys.argv.index('--config') + 1]\n"
-        f"open({str(log)!r}, 'w').write(open(path).read())\n"
-        "sys.stdout.write('[]')\n"
+        f"import sys\nopen({str(log)!r}, 'w').write(repr(sys.argv[1:]))\nprint('[]')\n"
     )
     write_fake(fake, body)
-    scan("text\n", root, str(fake), "PRIVATE")
-    assert tomllib.loads(log.read_text()) == {**tomllib.loads(config), "rules": []}
-
-
-def test_a_private_config_that_is_not_toml_is_left_to_gitleaks(root: Path) -> None:
-    write_private_config(Path.home(), PRIVATE_CONFIG + "\nrules = [\n")
-    message = refusal("clean\n", root, visibility="PRIVATE")
-    assert message.startswith(
-        "cannot scan the text for secrets: gitleaks failed (exit 1): "
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    secret_scan.run_gitleaks(
+        "",
+        "the staged changes",
+        tmp_path / "config.toml",
+        root=root,
+        gitleaks=str(fake),
+        source=secret_scan.STAGED,
+        tree=tree,
     )
+    argv = ast.literal_eval(log.read_text())
+    assert argv[: len(secret_scan.STAGED)] == list(secret_scan.STAGED)
+    assert argv[-1] == str(tree)
+
+
+def test_a_staged_scan_passes_its_inputs_on(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[object, ...]] = []
+
+    def fake(_data: object, private: str, what: str, **kwargs: object) -> None:
+        seen.append((private, what, kwargs))
+
+    monkeypatch.setattr(secret_scan, "scan_staged", fake)
+    secret_scan.scan(
+        "",
+        "the staged changes",
+        root=root,
+        gitleaks="the-gitleaks",
+        visibility="THE-VISIBILITY",
+        source=secret_scan.STAGED,
+    )
+    expected = {
+        "root": root,
+        "gitleaks": "the-gitleaks",
+        "visibility": "THE-VISIBILITY",
+    }
+    assert seen == [
+        (secret_scan.private_config().read_text(), "the staged changes", expected)
+    ]
+
+
+@pytest.mark.parametrize("extends", [None, "[extend]\nx = 1\n"])
+@pytest.mark.parametrize("visibility", [secret_scan.PRIVATE, ""])
+def test_scan_staged_builds_the_private_directory_and_calls_gitleaks(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extends: str | None,
+    visibility: str,
+) -> None:
+    private = FAMILIES  # holds name rules, so a reduced copy differs from the full one
+    data = secret_scan.parse_private(private)
+    assert data is not None
+    assert secret_scan.without_name_rules(data) != secret_scan.tomlkit.dumps(data)
+    staged_calls: list[tuple[object, ...]] = []
+    seen: dict[str, object] = {}
+
+    def fake_file(where: Path, name: str, what: str) -> str | None:
+        staged_calls.append((where, name, what))
+        return extends if name == secret_scan.GITLEAKS_EXTENDS else "ignore\n"
+
+    def fake_env(where: Path, what: str) -> dict[str, str]:
+        staged_calls.append((where, what))
+        return {"ENV": "yes"}
+
+    def fake_gitleaks(text: str, what: str, config: Path, **kwargs: object) -> None:
+        here = cast("Path", kwargs["root"])
+        seen["call"] = (text, what, kwargs)
+        seen["config"] = (config.name, config.parent == here, config.read_text())
+        seen["files"] = {item.name: item.read_text() for item in here.iterdir()}
+
+    monkeypatch.setattr(secret_scan, "staged_file", fake_file)
+    monkeypatch.setattr(secret_scan, "staged_env", fake_env)
+    monkeypatch.setattr(secret_scan, "run_gitleaks", fake_gitleaks)
+    secret_scan.scan_staged(
+        data,
+        private,
+        "the staged changes",
+        root=root,
+        gitleaks="the-gitleaks",
+        visibility=visibility,
+    )
+    what = "the staged changes"
+    assert staged_calls == [
+        (root, secret_scan.GITLEAKS_EXTENDS, what),
+        (root, secret_scan.GITLEAKS_IGNORE, what),
+        (root, what),
+    ]
+    text, called_what, kwargs = cast("tuple[str, str, dict[str, object]]", seen["call"])
+    assert (text, called_what) == ("", what)
+    assert kwargs["tree"] == kwargs["root"]
+    assert kwargs["gitleaks"] == "the-gitleaks"
+    assert kwargs["source"] == secret_scan.STAGED
+    env = cast("dict[str, str]", kwargs["env"])
+    assert env["ENV"] == "yes"
+    assert env["GIT_ATTR_SOURCE"]
+    last = int(env["GIT_CONFIG_COUNT"]) - 1
+    attributes = Path(env[f"GIT_CONFIG_VALUE_{last}"])
+    assert env[f"GIT_CONFIG_KEY_{last}"] == "core.attributesFile"
+    assert attributes.parent == kwargs["root"]
+    base = data if extends is not None else {**data, "extend": {"useDefault": True}}
+    expected = (
+        secret_scan.without_name_rules(base)
+        if visibility == secret_scan.PRIVATE
+        else (private if extends is not None else secret_scan.tomlkit.dumps(base))
+    )
+    assert seen["config"] == ("private.toml", True, expected)
+    files = cast("dict[str, str]", seen["files"])
+    assert files[secret_scan.GITLEAKS_IGNORE] == "ignore\n"
+    assert files.get(secret_scan.GITLEAKS_EXTENDS) == extends
+
+
+# A key shape the default gitleaks rules flag, split so this file holds none.
+KEY = "AKIA" + "IOSFODNN7ABCDEFG"
+KEY_LINE = f'k = "{KEY}"\n'
+
+
+def run_git(repo: Path, *args: str) -> None:
+    import subprocess  # noqa: PLC0415 -- test-only, beside its one use
+
+    subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def repo(root: Path) -> Path:
+    """A repository with one commit and its committed config staged-clean."""
+    run_git(root, "init", "-q")
+    run_git(root, "config", "user.email", "t@example.invalid")
+    run_git(root, "config", "user.name", "t")
+    (root / ".gitleaks.toml").write_text("[extend]\nuseDefault = true\n")
+    run_git(root, "add", ".gitleaks.toml")
+    run_git(root, "commit", "-qm", "init")
+    return root
+
+
+def staged_scan(repo: Path) -> None:
+    secret_scan.scan(
+        "",
+        "the staged changes",
+        root=repo,
+        gitleaks=gitleaks(),
+        visibility="PUBLIC",
+        source=secret_scan.STAGED,
+    )
+
+
+def refused(repo: Path) -> str:
+    with pytest.raises(SystemExit) as info:
+        staged_scan(repo)
+    return str(info.value)
+
+
+def found(path: str, line: int = 1) -> str:
+    return (
+        "refusing the staged changes: gitleaks finds a secret: "
+        f"rule aws-access-token in {path}:{line}"
+    )
+
+
+def test_a_staged_secret_is_refused(repo: Path) -> None:
+    (repo / "a.txt").write_text(KEY_LINE)
+    run_git(repo, "add", "a.txt")
+    assert refused(repo) == found("a.txt")
+
+
+@pytest.mark.parametrize("setting", ["always", "true"])
+def test_a_colour_setting_does_not_hide_a_staged_secret(
+    repo: Path, setting: str
+) -> None:
+    run_git(repo, "config", "color.ui", setting)
+    run_git(repo, "config", "color.diff", "always")
+    (repo / "a.txt").write_text(KEY_LINE)
+    run_git(repo, "add", "a.txt")
+    assert refused(repo) == found("a.txt")
+
+
+def test_a_staged_binary_is_scanned(repo: Path) -> None:
+    (repo / "blob.dat").write_bytes(b"x\0\n" + KEY_LINE.encode())
+    run_git(repo, "add", "blob.dat")
+    assert refused(repo) == found("blob.dat", 2)
+
+
+def test_a_binary_attribute_does_not_hide_a_staged_secret(repo: Path) -> None:
+    (repo / ".gitattributes").write_text("c.dat binary\n")
+    (repo / "c.dat").write_text(KEY_LINE)
+    run_git(repo, "add", ".gitattributes", "c.dat")
+    assert refused(repo) == found("c.dat")
+
+
+def test_a_rename_is_scanned_at_its_new_path(repo: Path) -> None:
+    (repo / "old.txt").write_text(KEY_LINE)
+    (repo / ".gitleaksignore").write_text("")
+    run_git(repo, "add", "-f", "old.txt", ".gitleaksignore")
+    run_git(repo, "commit", "-qm", "old", "--no-verify")
+    run_git(repo, "mv", "old.txt", "new.txt")
+    assert refused(repo) == found("new.txt")
+
+
+def test_a_clean_staged_change_passes(repo: Path) -> None:
+    (repo / "a.txt").write_text("nothing here\n")
+    run_git(repo, "add", "a.txt")
+    staged_scan(repo)
+
+
+def test_the_diff_config_follows_the_callers_own(
+    root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    for index in range(2):
+        monkeypatch.setenv(f"GIT_CONFIG_KEY_{index}", "color.ui")
+        monkeypatch.setenv(f"GIT_CONFIG_VALUE_{index}", "never")
+    env = secret_scan.diff_env(root, "x", tmp_path / "attributes")
+    assert env["GIT_CONFIG_KEY_2"] == "color.ui"
+    assert env["GIT_CONFIG_COUNT"] == str(2 + len(secret_scan.DIFF_CONFIG) + 1)
+    settings = {
+        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"]
+        for index in range(2, int(env["GIT_CONFIG_COUNT"]))
+    }
+    assert settings == {
+        "color.ui": "never",
+        "color.diff": "never",
+        "diff.renames": "false",
+        "diff.noprefix": "false",
+        "diff.mnemonicPrefix": "false",
+        "diff.srcPrefix": "a/",
+        "diff.dstPrefix": "b/",
+        "diff.relative": "false",
+        "core.attributesFile": str(tmp_path / "attributes"),
+    }
+    assert (tmp_path / "attributes").read_text() == "* diff\n"
+
+
+def test_a_bad_config_count_is_refused(
+    root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "many")
+    with pytest.raises(SystemExit, match="GIT_CONFIG_COUNT"):
+        secret_scan.diff_env(root, "x", tmp_path / "attributes")
+
+
+def test_an_unnameable_empty_tree_is_refused(
+    root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+
+    def no_tree(*_args: str, **_kwargs: Path) -> tuple[int, str]:
+        return 1, ""
+
+    monkeypatch.setattr(secret_scan, "git", no_tree)
+    with pytest.raises(SystemExit, match="empty tree"):
+        secret_scan.diff_env(root, "x", tmp_path / "attributes")
+
+
+def stage_secret(repo: Path) -> None:
+    (repo / "a.txt").write_text(KEY_LINE)
+    run_git(repo, "add", "a.txt")
+
+
+@pytest.mark.parametrize("helper", ["true", "false"])
+def test_an_external_diff_does_not_hide_a_staged_secret(
+    repo: Path, helper: str
+) -> None:
+    run_git(repo, "config", "diff.external", helper)
+    stage_secret(repo)
+    assert refused(repo) == found("a.txt")
+
+
+def test_the_external_diff_variable_does_not_hide_a_staged_secret(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GIT_EXTERNAL_DIFF", "true")
+    stage_secret(repo)
+    assert refused(repo) == found("a.txt")
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicPrefix", "true"),
+        ("diff.srcPrefix", "old/prefix/"),
+        ("diff.dstPrefix", "new/prefix/"),
+        ("diff.relative", "true"),
+    ],
+)
+def test_a_diff_format_setting_does_not_change_what_is_scanned(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, key: str, value: str
+) -> None:
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", key)
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", value)
+    (repo / "nested").mkdir()
+    (repo / "nested" / "a.txt").write_text(KEY_LINE)
+    run_git(repo, "add", "nested/a.txt")
+    assert refused(repo) == found("nested/a.txt")
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        "'color.ui=always'",
+        "'color.diff=always'",
+        "'diff.renames=true'",
+        "'diff.external=true'",
+        "'diff.noprefix=true'",
+    ],
+)
+def test_git_config_parameters_do_not_hide_a_staged_secret(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, parameters: str
+) -> None:
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", parameters)
+    stage_secret(repo)
+    assert refused(repo) == found("a.txt")
+
+
+@pytest.mark.parametrize("variable", ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"])
+def test_a_config_file_does_not_hide_a_staged_secret(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variable: str
+) -> None:
+    config = tmp_path / "hostile.gitconfig"
+    config.write_text(
+        "[color]\n\tdiff = always\n\tui = always\n[diff]\n\trenames = true\n"
+    )
+    monkeypatch.setenv(variable, str(config))
+    monkeypatch.delenv("GIT_CONFIG_NOSYSTEM")
+    stage_secret(repo)
+    assert refused(repo) == found("a.txt")
+
+
+def test_a_symlinked_config_in_the_index_is_refused(repo: Path) -> None:
+    (repo / "real.toml").write_text("[extend]\nuseDefault = true\n")
+    (repo / ".gitleaksignore").symlink_to("real.toml")
+    run_git(repo, "add", ".gitleaksignore", "real.toml")
+    stage_secret(repo)
+    assert "git cannot read .gitleaksignore" in refused(repo)
+
+
+@pytest.mark.parametrize("name", [".gitleaks.toml", ".gitleaksignore"])
+def test_a_directory_in_place_of_an_indexed_config_is_refused(
+    repo: Path, name: str
+) -> None:
+    path = repo / name
+    if path.exists():
+        path.unlink()
+    path.mkdir()
+    (path / "rules.toml").write_text("[extend]\nuseDefault = true\n")
+    run_git(repo, "add", name)
+    with pytest.raises(SystemExit, match=f"git cannot read {name}"):
+        secret_scan.staged_file(repo, name, "the staged changes")
+
+
+def test_an_indexed_path_with_spaces_is_read_in_full(repo: Path) -> None:
+    name = "scan config.toml"
+    text = "[extend]\nuseDefault = true"
+    (repo / name).write_text(text)
+    run_git(repo, "add", name)
+    assert secret_scan.staged_file(repo, name, "the staged changes") == text
+
+
+def test_an_unmerged_config_in_the_index_is_refused(repo: Path) -> None:
+    run_git(repo, "checkout", "-qb", "other")
+    (repo / ".gitleaks.toml").write_text("# other\n")
+    run_git(repo, "commit", "-qam", "other")
+    run_git(repo, "checkout", "-q", "-")
+    (repo / ".gitleaks.toml").write_text("# main\n")
+    run_git(repo, "commit", "-qam", "main")
+    with pytest.raises(subprocess.CalledProcessError):
+        run_git(repo, "merge", "other")
+    stage_secret(repo)
+    assert "git cannot read .gitleaks.toml" in refused(repo)
+
+
+def test_a_negative_config_count_is_refused(
+    root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "-4")
+    with pytest.raises(SystemExit, match="GIT_CONFIG_COUNT"):
+        secret_scan.diff_env(root, "x", tmp_path / "attributes")
+
+
+def test_a_relative_index_file_is_read_from_the_repository_root(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stage_secret(repo)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("GIT_INDEX_FILE", ".git/index")
+    assert refused(repo) == found("a.txt")

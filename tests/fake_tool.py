@@ -59,6 +59,11 @@ path = ".gitleaks.toml"
 id = "tbhb-private-canary"
 description = "Test canary"
 regex = '''test-canary-[0-9a-f]{16}'''
+
+[[rules]]
+id = "fixture-rule"
+description = "Test private rule"
+regex = '''fixture-secret-[0-9]{8}'''
 """
 
 

@@ -5,8 +5,8 @@ only the tbhb-dev harness hooks and agents in tbhb-dev repositories should
 call them.
 
 The harness hooks run on every tool call, so this module imports pr, review,
-gh_app and merge, which load yaml, jsonschema and the Connect client, only when
-one of them runs.
+gh_app, merge and pre-commit-scan, which load yaml, jsonschema and the Connect
+client, only when one of them runs.
 """
 
 import os
@@ -94,6 +94,8 @@ commands:
   loop         validate loop configuration (runner not yet available)
   agent        exec | wait | status | kill | clean | keep: headless runs
   pre-push-guard REMOTE URL: refuse rewritten history and private names
+  pre-commit-scan
+               pre-commit hook: scan the staged changes for secrets
   brief        new | check: peer-run briefs with required safeguards
   install      install the git hooks and the user-level harness hooks
 """
@@ -178,6 +180,12 @@ def merge(argv: list[str], prog: str) -> int:
     return squash_merge.main(argv, prog=prog)
 
 
+def pre_commit_scan_command(argv: list[str], prog: str) -> int:
+    from tbhbdev.alpha import pre_commit_scan  # noqa: PLC0415 -- see the docstring
+
+    return pre_commit_scan.main(argv, prog)
+
+
 def install_command(argv: list[str], prog: str) -> int:
     return install.main(argv, prog)
 
@@ -204,6 +212,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "version-check": version_check.main,
     "install": install_command,
     "pre-push-guard": pre_push_guard.main,
+    "pre-commit-scan": pre_commit_scan_command,
     "loop": loop.main,
     "agent": agent.main,
     "brief": brief.main,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
+# cspell:words noprefix
 """Secret scan of agent-written text, ported from an earlier interim toolset.
 
 ``tbhbdev alpha pr`` scans a pull request's final title and body, and
@@ -28,10 +29,23 @@ visibility ``PRIVATE`` skips them. Any other value, ``PUBLIC`` and ``INTERNAL``
 included, an empty one or a failed read, gets the full private config.
 
 There is no public-only fallback. A missing or unreadable private config, one
-without the canary rule, or a missing .gitleaks.toml stops the command, and so
-does any finding or gitleaks error. A finding is reported by its rule ID and
-line only: gitleaks redacts its JSON report, and nothing else it prints about a
-finding is passed on.
+that doesn't parse or lacks the canary and a rule kept in private scans, or a
+missing .gitleaks.toml stops the command, and so does any finding or gitleaks
+error. A finding is reported by its rule ID and line only, with the file for a scan of
+staged changes: gitleaks redacts its JSON report. Nothing else gitleaks prints
+is passed on, not even on a failure, where the message gives only its exit
+status: its error output can quote a private rule's regex.
+
+``tbhbdev alpha pre-commit-scan`` scans a commit's staged changes the same way,
+with ``STAGED`` in place of ``STDIN`` (see ``tbhbdev.alpha.pre_commit_scan``).
+That scan reads .gitleaks.toml and .gitleaksignore from the index, not the
+work tree, so an unstaged edit to either can't loosen the scan of what the
+commit records. A staged change to either file does apply to the commit that
+stages it. gitleaks runs in, and scans, a 0700 directory that holds the
+index copies beside the private config, or its copy without the name rules,
+and ``GIT_DIR`` and ``GIT_WORK_TREE`` point its git at the repository.
+Without .gitleaks.toml in the index, the private config's ``[extend]`` path
+gives way to gitleaks' default rules, so no work tree file is read.
 """
 
 import json
@@ -45,11 +59,20 @@ from typing import cast
 
 import tomlkit
 
-from tbhbdev.host import CANARY, GITLEAKS_CANARY, GITLEAKS_EXTENDS, GITLEAKS_FILE
+from tbhbdev.alpha.repo import git
+from tbhbdev.host import GITLEAKS_CANARY, GITLEAKS_EXTENDS, GITLEAKS_FILE
 
 # The remedy for a missing private config: the host's provisioning installs it.
 FETCH = "Install it with the host's provisioning tooling."
 
+
+# What gitleaks scans: the text on stdin, or the staged changes of the work
+# tree named after these flags, which `git diff --staged` reads from the index.
+STDIN = ("stdin",)
+STAGED = ("git", "--pre-commit", "--staged")
+
+# The fingerprints gitleaks ignores, read from the path it scans.
+GITLEAKS_IGNORE = ".gitleaksignore"
 
 # The only visibility that skips the name rules. Anything else, even a
 # lower-case "private", gets the full private config.
@@ -80,12 +103,14 @@ def private_config() -> Path:
     return Path.home() / GITLEAKS_FILE
 
 
-def findings(report: str) -> list[tuple[int, str]] | None:
-    """Each finding's line and rule ID from gitleaks' JSON report, or None.
+def findings(report: str) -> list[tuple[str, int, str]] | None:
+    """Each finding's file, line and rule ID from gitleaks' JSON report, or None.
 
-    They are sorted, since gitleaks reports them in no fixed order.
+    They are sorted, since gitleaks reports them in no fixed order. The file is
+    empty for text scanned on stdin.
 
-    None means the report is not a JSON list, so gitleaks did not scan.
+    None means the report is not a JSON list of findings that each have an
+    integer ``StartLine`` and a string ``RuleID``, so gitleaks did not scan.
     """
     try:
         data = json.loads(report)
@@ -93,8 +118,29 @@ def findings(report: str) -> list[tuple[int, str]] | None:
         return None
     if not isinstance(data, list):
         return None
-    entries = cast("list[dict[str, int | str]]", data)  # pragma: no mutate
-    return sorted((int(entry["StartLine"]), str(entry["RuleID"])) for entry in entries)
+    entries = cast("list[object]", data)  # pragma: no mutate
+    found: list[tuple[str, int, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None
+        fields = cast("dict[str, object]", entry)  # pragma: no mutate
+        line = fields.get("StartLine")
+        rule = fields.get("RuleID")
+        if not isinstance(line, int) or not isinstance(rule, str):
+            return None
+        found.append((str(fields.get("File", "")), line, rule))
+    return sorted(found)
+
+
+def place(path: str, line: int) -> str:
+    """Where a finding is: ``on line N`` for stdin, ``in PATH:N`` for a file.
+
+    A path shows with control characters and non-ASCII escaped, so a filename
+    can't forge output lines.
+    """
+    # Codec names match without regard to case, so upper-casing one is equivalent.
+    shown = path.encode("unicode_escape").decode("ascii")  # pragma: no mutate
+    return f"in {shown}:{line}" if path else f"on line {line}"
 
 
 def is_name_rule(rule: dict[str, object]) -> bool:
@@ -102,31 +148,170 @@ def is_name_rule(rule: dict[str, object]) -> bool:
     return re.sub(r"-\d+$", "", str(rule.get("id"))) in NAME_RULES
 
 
-def without_name_rules(private: str) -> str | None:
-    """The private config minus its name rules, or None if it doesn't parse.
+def without_name_rules(data: dict[str, object]) -> str:
+    """The parsed private config minus its name rules, as TOML."""
+    rules = cast("list[dict[str, object]]", data["rules"])  # pragma: no mutate
+    return tomlkit.dumps(
+        {**data, "rules": [rule for rule in rules if not is_name_rule(rule)]}
+    )
 
-    None sends the scan to the full config, where gitleaks reports the
-    parse failure itself.
+
+def parse_private(private: str) -> dict[str, object] | None:
+    """The private config, or None unless it holds the canary and a kept rule.
+
+    Every rule must be a table with a string ``id``. The canary must be a
+    rule's ``id``, not just text somewhere in the file, and at least one
+    other rule must remain after removing the name rules for a private scan.
     """
     try:
         data = tomllib.loads(private)
     except tomllib.TOMLDecodeError:
         return None
-    rules = data.get("rules", [])
-    data["rules"] = [rule for rule in rules if not is_name_rule(rule)]
-    return tomlkit.dumps(data)
+    rules = data.get("rules")
+    if not isinstance(rules, list):
+        return None
+    listed = cast("list[object]", rules)  # pragma: no mutate
+    ids: list[str] = []
+    # Only truthiness matters until a kept rule sets True; None is equivalent.
+    other = False  # pragma: no mutate
+    for rule in listed:
+        if not isinstance(rule, dict):
+            return None
+        fields = cast("dict[str, object]", rule)  # pragma: no mutate
+        id_ = fields.get("id")
+        if not isinstance(id_, str):
+            return None
+        ids.append(id_)
+        if id_ != GITLEAKS_CANARY and not is_name_rule(fields):
+            other = True
+    if GITLEAKS_CANARY not in ids or not other:
+        return None
+    return data
 
 
-def run_gitleaks(
-    text: str, what: str, config: Path, *, root: Path, gitleaks: str
+def staged_file(root: Path, name: str, what: str) -> str | None:
+    """The file NAME in the index at ROOT, or None when the index has none.
+
+    A directory, an unmerged path or a symlink is refused. An unmerged path has
+    no stage 0 to read, so reading none would drop the repository's rules. A
+    symlink holds only its target's name, not the target's rules.
+    """
+    message = f"cannot scan {what} for secrets: git cannot read {name} from the index"
+    code, listed = git("ls-files", "--stage", "--", f":(literal){name}", cwd=root)
+    if code != 0:
+        raise SystemExit(message)
+    if not listed:
+        return None
+    entries = [line.split(None, 3) for line in listed.splitlines()]
+    if (
+        len(entries) != 1
+        or entries[0][0] == "120000"
+        or entries[0][2] != "0"
+        or entries[0][3] != name
+    ):
+        raise SystemExit(message)
+    code, text = git("cat-file", "blob", entries[0][1], cwd=root)
+    if code != 0:
+        raise SystemExit(message)
+    return text
+
+
+# What gitleaks' own ``git diff --staged`` must not do: colour its output
+# (``always`` makes gitleaks read no diff and report nothing) or pair a
+# removal with an addition (a rename moves content out of an allowlisted path
+# unscanned). Paths must use the a/ and b/ prefixes gitleaks expects and stay
+# relative to the repository root so its findings and allowlists name real paths.
+DIFF_CONFIG = (
+    ("color.ui", "never"),
+    ("color.diff", "never"),
+    ("diff.renames", "false"),
+    ("diff.noprefix", "false"),
+    ("diff.mnemonicPrefix", "false"),
+    ("diff.srcPrefix", "a/"),
+    ("diff.dstPrefix", "b/"),
+    ("diff.relative", "false"),
+)
+
+
+def diff_env(root: Path, what: str, attributes: Path) -> dict[str, str]:
+    """The environment that makes gitleaks' ``git diff`` show the additions.
+
+    ATTRIBUTES is a file that marks every path as text, so that a NUL byte or
+    a ``binary`` attribute does not reduce an addition to "Binary files
+    differ". The committed ``.gitattributes`` is ignored by reading attributes
+    from the empty tree. A repository's ``.git/info/attributes`` still applies,
+    because ``GIT_ATTR_SOURCE`` doesn't cover it, so this is hardening against
+    committed files only, and a local write to ``.git`` can defeat it.
+    """
+    try:
+        start = int(os.environ.get("GIT_CONFIG_COUNT") or "0")
+    except ValueError:
+        start = -1
+    if start < 0:
+        message = f"cannot scan {what} for secrets: GIT_CONFIG_COUNT is not a count"
+        raise SystemExit(message)
+    code, empty = git("hash-object", "-t", "tree", "/dev/null", cwd=root)
+    if code != 0 or not empty:
+        message = f"cannot scan {what} for secrets: git cannot name the empty tree"
+        raise SystemExit(message)
+    private_file(attributes, "* diff\n")
+    settings = (*DIFF_CONFIG, ("core.attributesFile", str(attributes)))
+    # GIT_CONFIG_PARAMETERS (what `git -c` sets) outranks GIT_CONFIG_COUNT, so a
+    # `git -c color.diff=always commit` would colour the diff and hide the
+    # additions from gitleaks. Emptying it drops those settings from this scan.
+    env = {
+        "GIT_ATTR_SOURCE": empty,
+        "GIT_CONFIG_COUNT": str(start + len(settings)),
+        "GIT_CONFIG_PARAMETERS": "",
+    }
+    for offset, (key, value) in enumerate(settings):
+        env[f"GIT_CONFIG_KEY_{start + offset}"] = key
+        env[f"GIT_CONFIG_VALUE_{start + offset}"] = value
+    return env
+
+
+def staged_env(root: Path, what: str) -> dict[str, str]:
+    """The environment that points gitleaks' git at the repository at ROOT.
+
+    gitleaks reads ``.gitleaksignore`` from the path it scans, so it scans the
+    private directory, and ``GIT_DIR`` and ``GIT_WORK_TREE`` lead its git to
+    the repository. A relative ``GIT_INDEX_FILE`` from the hook becomes
+    absolute against ROOT, where the hook's git ran and where staged_file reads.
+    """
+    code, git_dir = git("rev-parse", "--absolute-git-dir", cwd=root)
+    if code != 0:
+        message = f"cannot scan {what} for secrets: git cannot find the repository"
+        raise SystemExit(message)
+    env = os.environ | {"GIT_DIR": git_dir, "GIT_WORK_TREE": str(root)}
+    index = os.environ.get("GIT_INDEX_FILE")
+    if index:
+        env["GIT_INDEX_FILE"] = os.path.abspath(root / index)  # noqa: PTH100 -- a str
+    return env
+
+
+def run_gitleaks(  # noqa: PLR0913 -- the scan inputs, keyword-only past two
+    text: str,
+    what: str,
+    config: Path,
+    *,
+    root: Path,
+    gitleaks: str,
+    source: tuple[str, ...] = STDIN,
+    tree: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> None:
-    """Refuse text that gitleaks flags under a config, or when it fails."""
+    """Refuse what gitleaks flags under a config, or when it fails.
+
+    gitleaks runs in ROOT with ENV, or this process's environment. A
+    ``STAGED`` scan also names TREE, the path it scans.
+    """
     argv = [
-        gitleaks, "stdin", "--redact", "--no-banner", "--config", str(config),
+        gitleaks, *source, "--redact", "--no-banner", "--config", str(config),
         "--report-format", "json", "--report-path", "-",
+        *([] if tree is None else [str(tree)]),
     ]  # fmt: skip
-    # Argv is the found gitleaks and fixed flags; text goes on stdin. NO_COLOR
-    # keeps escape codes out of the log lines a failure passes on.
+    # Argv is the found gitleaks, fixed flags and the path it scans; text goes
+    # on stdin. Its output is captured and never shown.
     done = subprocess.run(  # nosec B603
         argv,
         capture_output=True,
@@ -134,27 +319,35 @@ def run_gitleaks(
         check=False,  # pragma: no mutate -- the default, spelled for the linter
         cwd=root,
         input=text,
-        env=os.environ | {"NO_COLOR": "1"},
+        env=env,
     )
     found = findings(done.stdout)
     if found:
-        where = "; ".join(f"rule {rule} on line {line}" for line, rule in found)
+        where = "; ".join(
+            f"rule {rule} {place(path, line)}" for path, line, rule in found
+        )
         message = f"refusing {what}: gitleaks finds a secret: {where}"
         raise SystemExit(message)
     if done.returncode != 0 or found is None:
-        output = " ".join(done.stderr.split())
         message = (
-            f"cannot scan {what} for secrets: gitleaks failed "
-            f"(exit {done.returncode}): {output}"
+            f"cannot scan {what} for secrets: gitleaks failed (exit {done.returncode})"
         )
         raise SystemExit(message)
 
 
-def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) -> None:
+def scan(  # noqa: PLR0913 -- the scan inputs, keyword-only past two
+    text: str,
+    what: str,
+    *,
+    root: Path,
+    gitleaks: str,
+    visibility: str,
+    source: tuple[str, ...] = STDIN,
+) -> None:
     """Refuse text that gitleaks flags under the private config.
 
     Args:
-        text: The text to scan.
+        text: The text to scan, sent on stdin; ignored for ``STAGED``.
         what: What the text is, for the refusal message.
         root: The repository root, which holds .gitleaks.toml.
         gitleaks: The gitleaks executable.
@@ -162,6 +355,8 @@ def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) ->
             text is posted to, not the working directory's. Only
             ``PRIVATE`` skips the name rules; anything else, including an
             empty value, scans under the full private config.
+        source: ``STDIN`` for the text, or ``STAGED`` for the staged changes of
+            the work tree at ``root``.
 
     Raises:
         SystemExit: The private config or .gitleaks.toml is missing or wrong,
@@ -176,24 +371,80 @@ def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) ->
             f"{config} cannot be read ({exc.strerror}). {FETCH}"
         )
         raise SystemExit(message) from None
-    if not CANARY.search(private):
+    data = parse_private(private)
+    if data is None:
         message = (
-            f"cannot scan {what} for secrets: {config} has no rule with the id "
-            f"{GITLEAKS_CANARY}, so it is not the private gitleaks config. {FETCH}"
+            f"cannot scan {what} for secrets: {config} does not parse to rules "
+            f"with the id {GITLEAKS_CANARY} and at least one other, so it is not "
+            f"the private gitleaks config. {FETCH}"
         )
         raise SystemExit(message)
+    if source == STAGED:
+        scan_staged(
+            data, private, what, root=root, gitleaks=gitleaks, visibility=visibility
+        )
+        return
     if not (root / GITLEAKS_EXTENDS).is_file():
         message = (
             f"cannot scan {what} for secrets: {root / GITLEAKS_EXTENDS} does not exist"
         )
         raise SystemExit(message)
-    reduced = without_name_rules(private) if visibility == PRIVATE else None
-    if reduced is None:
+    if visibility != PRIVATE:
         run_gitleaks(text, what, config, root=root, gitleaks=gitleaks)
         return
     with tempfile.TemporaryDirectory() as directory:  # mode 0700
-        copy = Path(directory) / "private.toml"
-        copy.touch()
-        copy.chmod(0o600)  # touch's mode is cut by the umask, chmod's is not
-        copy.write_text(reduced)
+        copy = private_file(Path(directory) / "private.toml", without_name_rules(data))
         run_gitleaks(text, what, copy, root=root, gitleaks=gitleaks)
+
+
+def private_file(path: Path, text: str) -> Path:
+    """Write TEXT to a new 0600 file at PATH and return PATH."""
+    path.touch()
+    path.chmod(0o600)  # touch's mode is cut by the umask, chmod's is not
+    path.write_text(text)
+    return path
+
+
+def scan_staged(  # noqa: PLR0913 -- the scan inputs, keyword-only past three
+    data: dict[str, object],
+    private: str,
+    what: str,
+    *,
+    root: Path,
+    gitleaks: str,
+    visibility: str,
+) -> None:
+    """Refuse staged changes that gitleaks flags, with its files from the index.
+
+    gitleaks resolves the ``[extend]`` path from its working directory and
+    reads ``.gitleaksignore`` from the path it scans, so it runs in, and scans,
+    a private directory that holds the index's copies of both beside the
+    config. Without .gitleaks.toml in the index, the config extends gitleaks'
+    default rules instead.
+    """
+    extends = staged_file(root, GITLEAKS_EXTENDS, what)
+    ignore = staged_file(root, GITLEAKS_IGNORE, what)
+    env = staged_env(root, what)
+    reduced = visibility == PRIVATE
+    with tempfile.TemporaryDirectory() as directory:  # mode 0700
+        here = Path(directory)
+        if ignore is not None:
+            private_file(here / GITLEAKS_IGNORE, ignore)
+        if extends is None:
+            data = {**data, "extend": {"useDefault": True}}
+            text = without_name_rules(data) if reduced else tomlkit.dumps(data)
+        else:
+            private_file(here / GITLEAKS_EXTENDS, extends)
+            text = without_name_rules(data) if reduced else private
+        copy = private_file(here / "private.toml", text)
+        env = env | diff_env(root, what, here / "attributes")
+        run_gitleaks(
+            "",
+            what,
+            copy,
+            root=here,
+            gitleaks=gitleaks,
+            source=STAGED,
+            tree=here,
+            env=env,
+        )

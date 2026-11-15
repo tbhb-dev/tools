@@ -49,6 +49,9 @@ with open(os.path.join(here, "prek.cwd"), "a") as log:
     log.write(os.getcwd() + "\\n")
 stages_file = os.path.join(here, "prek.stages")
 stages = open(stages_file).read().split() if os.path.exists(stages_file) else []
+if args[0] == "list" and os.path.exists(os.path.join(here, "prek.list-fail")):
+    print("error: Failed to parse config", file=sys.stderr)
+    sys.exit(2)
 if args[0] == "list":
     stage = args[args.index("--hook-stage") + 1]
     if stage in stages:
@@ -61,10 +64,14 @@ common = subprocess.run(
     ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
     capture_output=True, text=True, check=True,
 ).stdout.strip()
+hooks_dir = os.path.join(common, "hooks")
+if "--git-dir" in args:
+    hooks_dir = os.path.join(args[args.index("--git-dir") + 1], "hooks")
+    os.makedirs(hooks_dir, exist_ok=True)
 for i, arg in enumerate(args):
     if arg != "--hook-type":
         continue
-    hook = os.path.join(common, "hooks", args[i + 1])
+    hook = os.path.join(hooks_dir, args[i + 1])
     legacy = hook + ".legacy"
     if "-f" in args:
         if os.path.exists(legacy):
@@ -94,6 +101,15 @@ class World:
         log = self.bin / "prek.log"
         if not log.exists():
             return []
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        # The scratch git dir is checked on its own, by the window tests below.
+        return [
+            [a for i, a in enumerate(c) if "--git-dir" not in (a, c[i - 1])]
+            for c in calls
+        ]
+
+    def prek_args(self) -> list[list[str]]:
+        log = self.bin / "prek.log"
         return [json.loads(line) for line in log.read_text().splitlines()]
 
     def prek_cwds(self) -> set[str]:
@@ -1630,12 +1646,19 @@ def test_back_up_legacy(
         f"tbhbdev alpha install: moved {legacy} to {backup}; "
         "prek install -f would delete it\n"
     )
+    legacy.write_text("again")
+    install.back_up_legacy(legacy, "why")
+    assert capsys.readouterr().err == (
+        f"tbhbdev alpha install: moved {legacy} to {backup}.1; why\n"
+    )
 
 
 # ------------------------------------------------------- identity shims
 
 
-def identity_hook(world: World, name: str = "commit-msg", verb: str = "check") -> None:
+def identity_hook(
+    world: World, name: str = "commit-msg", verb: str = "identity check"
+) -> None:
     world.hooks.mkdir(exist_ok=True)
     install.install_identity_hook(["prek"], world.repo, world.hooks, (name, verb))
 
@@ -1645,7 +1668,7 @@ def test_identity_hook_without_prek_hooks_for_its_stage(world: World) -> None:
     hook = world.hooks / "commit-msg"
     assert hook.read_text() == install.SHIM.format(
         mark=install.SHIM_MARK,
-        verb="check",
+        verb="identity check",
         hook="commit-msg",
         origin=install.ORIGIN_GREP,
     )
@@ -1694,6 +1717,393 @@ def test_identity_hook_keeps_a_legacy_hook_when_prek_has_nothing_to_chain(
     (world.hooks / "commit-msg.legacy").write_text("someone's\n")
     identity_hook(world)
     assert (world.hooks / "commit-msg.legacy").read_text() == "someone's\n"
+
+
+FOREIGN = "#!/bin/sh\nmine\n"
+# What a scan shim runs once its chained hook passed.
+SCANS = "exec tbhbdev alpha pre-commit-scan\n"
+MOVED_ASIDE = "another hook is moving there"
+
+
+def moved_warning(world: World, name: str = "pre-commit") -> str:
+    hook = world.hooks / name
+    return (
+        f"tbhbdev alpha install: warning: moved {hook} to {hook}.legacy; it still "
+        "runs, before the secret scan\n"
+    )
+
+
+def backed_up(world: World, name: str = "pre-commit") -> str:
+    legacy = world.hooks / f"{name}.legacy"
+    return (
+        f"tbhbdev alpha install: moved {legacy} to {legacy}.tbhb-backup.T; "
+        f"{MOVED_ASIDE}\n"
+    )
+
+
+def scan_hook(world: World, name: str = "pre-commit") -> None:
+    identity_hook(world, name, "pre-commit-scan")
+
+
+def hook_names(world: World, name: str) -> list[str]:
+    return sorted(
+        p.name
+        for p in world.hooks.iterdir()
+        if p.name.startswith(f"{name}.") or p.name == name
+        if not p.name.endswith(".sample")
+    )
+
+
+@pytest.mark.parametrize("name", install.SCAN_HOOKS)
+def test_a_scan_shim_runs_the_chained_hook_first_and_the_scan_last(
+    world: World, name: str
+) -> None:
+    world.stages(name)
+    scan_hook(world, name)
+    assert (world.hooks / name).read_text() == install.SCAN_SHIM.format(
+        mark=install.SHIM_MARK,
+        verb="pre-commit-scan",
+        hook=name,
+        origin=install.ORIGIN_GREP,
+    )
+    assert stat.S_IMODE((world.hooks / name).stat().st_mode) == 0o755
+    done = run_shim(world, name, "0")
+    assert (done.returncode, done.stdout) == (
+        0,
+        f"prek-{name}\ntbhbdev alpha pre-commit-scan\n",
+    )
+    done = run_shim(world, name, "3")
+    assert (done.returncode, done.stdout) == (
+        3,
+        f"prek-{name}\ntbhbdev alpha pre-commit-scan\n",
+    )
+    (world.hooks / f"{name}.prek").write_text("#!/bin/sh\necho chained\nexit 4\n")
+    done = run_shim(world, name, "0")
+    assert (done.returncode, done.stdout) == (4, "chained\n")
+
+
+def test_a_scan_shim_without_prek_runs_the_legacy_hook_then_the_scan(
+    world: World,
+) -> None:
+    world.hooks.mkdir(exist_ok=True)
+    (world.hooks / "pre-commit").write_text("#!/bin/sh\necho mine\n")
+    (world.hooks / "pre-commit").chmod(0o755)
+    scan_hook(world)
+    assert not (world.hooks / "pre-commit.prek").exists()
+    done = run_shim(world, "pre-commit", "0")
+    assert (done.returncode, done.stdout) == (
+        0,
+        "mine\ntbhbdev alpha pre-commit-scan\n",
+    )
+    (world.hooks / "pre-commit.legacy").write_text("#!/bin/sh\necho mine\nexit 5\n")
+    done = run_shim(world, "pre-commit", "0")
+    assert (done.returncode, done.stdout) == (5, "mine\n")
+    (world.hooks / "pre-commit.legacy").chmod(0o644)
+    done = run_shim(world, "pre-commit", "0")
+    assert (done.returncode, done.stdout) == (0, "tbhbdev alpha pre-commit-scan\n")
+
+
+def test_a_scan_shim_without_tbhbdev_refuses_after_the_chained_hook(
+    world: World,
+) -> None:
+    world.stages("pre-commit")
+    scan_hook(world)
+    done = run_shim(world, "pre-commit", None)
+    assert (done.returncode, done.stdout, done.stderr) == (
+        1,
+        "prek-pre-commit\n",
+        (
+            "pre-commit: tbhbdev is not on PATH, so the tbhbdev git hooks can't run\n"
+            "pre-commit: install it with uv tool install, and put ~/.local/bin "
+            "on PATH\n"
+        ),
+    )
+    done = run_shim(world, "pre-commit", None, cwd=world.home)
+    assert (done.returncode, done.stdout, done.stderr) == (0, "prek-pre-commit\n", "")
+
+
+@pytest.mark.parametrize("staged", [True, False])
+@pytest.mark.parametrize("name", install.SCAN_HOOKS)
+def test_a_foreign_scan_stage_hook_moves_to_legacy_and_keeps_running(
+    world: World, capsys: pytest.CaptureFixture[str], name: str, *, staged: bool
+) -> None:
+    """The scan always runs; a rerun keeps the moved hook and piles up nothing.
+
+    prek's chained hook runs the moved one when prek has hooks for the stage;
+    otherwise there is no `<hook>.prek` and the shim runs it.
+    """
+    if staged:
+        world.stages(name)
+    world.hooks.mkdir(exist_ok=True)
+    (world.hooks / name).write_text(FOREIGN)
+    scan_hook(world, name)
+    assert capsys.readouterr().err == moved_warning(world, name)
+    scan_hook(world, name)
+    assert capsys.readouterr().err == ""
+    assert SCANS in (world.hooks / name).read_text()
+    assert (world.hooks / f"{name}.legacy").read_text() == FOREIGN
+    chained = [f"{name}.prek"] if staged else []
+    assert hook_names(world, name) == sorted([name, f"{name}.legacy", *chained])
+    installs = world.prek_calls().count(["install", "-f", "--hook-type", name])
+    assert installs == (2 if staged else 0)
+
+
+def test_a_foreign_pre_commit_hook_backs_up_someones_legacy_hook(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(install, "stamp", lambda: "T")
+    world.hooks.mkdir(exist_ok=True)
+    (world.hooks / "pre-commit").write_text(FOREIGN)
+    (world.hooks / "pre-commit.legacy").write_text("older\n")
+    scan_hook(world)
+    assert (world.hooks / "pre-commit.legacy").read_text() == FOREIGN
+    backup = world.hooks / "pre-commit.legacy.tbhb-backup.T"
+    assert backup.read_text() == "older\n"
+    assert capsys.readouterr().err == backed_up(world) + moved_warning(world)
+
+
+def test_a_foreign_pre_commit_hook_replaces_a_legacy_shim(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A shim at `.legacy` would chain the scan shim to itself, so it goes."""
+    world.hooks.mkdir(exist_ok=True)
+    (world.hooks / "pre-commit").write_text(FOREIGN)
+    (world.hooks / "pre-commit.legacy").write_text(f"#!/bin/sh\n{install.SHIM_MARK}\n")
+    scan_hook(world)
+    assert (world.hooks / "pre-commit.legacy").read_text() == FOREIGN
+    assert [p.name for p in world.hooks.iterdir() if "backup" in p.name] == []
+    assert capsys.readouterr().err == moved_warning(world)
+
+
+def test_a_failed_prek_install_leaves_the_scan_only_shim_and_the_moved_hook(
+    world: World,
+) -> None:
+    world.stages("pre-commit")
+    world.hooks.mkdir(exist_ok=True)
+    (world.hooks / "pre-commit").write_text(FOREIGN)
+    (world.hooks / "pre-commit.prek").write_text("stale\n")
+    (world.bin / "prek.fail").write_text("")
+    with pytest.raises(
+        install.InstallError,
+        match=r"^prek install -f --git-dir \S+ --hook-type pre-commit failed$",
+    ):
+        scan_hook(world)
+    assert SCANS in (world.hooks / "pre-commit").read_text()
+    assert stat.S_IMODE((world.hooks / "pre-commit").stat().st_mode) == 0o755
+    assert (world.hooks / "pre-commit.legacy").read_text() == FOREIGN
+    assert hook_names(world, "pre-commit") == ["pre-commit", "pre-commit.legacy"]
+
+
+def test_a_failed_prek_install_still_installs_every_shim_and_fails(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.stages("pre-commit", "commit-msg")
+    (world.bin / "prek.fail").write_text("")
+    assert install.install_git_hooks(None, {}, dry_run=False) == 1
+    err = capsys.readouterr().err
+    assert err.count("tbhbdev alpha install: error: prek install") == 3
+    for name in install.SCAN_HOOKS:
+        assert SCANS in (world.hooks / name).read_text()
+    for name, verb in install.IDENTITY_HOOKS:
+        assert f"tbhbdev alpha {verb} " in (world.hooks / name).read_text()
+    assert not (world.hooks / install.LOCK).exists()
+
+
+@pytest.mark.parametrize("staged", [True, False])
+def test_a_shim_that_cannot_be_written_puts_the_previous_hook_back(
+    world: World, monkeypatch: pytest.MonkeyPatch, *, staged: bool
+) -> None:
+    if staged:
+        world.stages("pre-commit")
+    world.hooks.mkdir(exist_ok=True)
+    (world.hooks / "pre-commit").write_text(f"#!/bin/sh\n{install.SHIM_MARK}\nold\n")
+
+    def fail(_hook: Path, _text: str) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(install, "write_hook", fail)
+    with pytest.raises(install.InstallError) as raised:
+        scan_hook(world)
+    hook = world.hooks / "pre-commit"
+    assert str(raised.value) == (
+        f"cannot write {hook}: [Errno 28] No space left on device"
+    )
+    assert hook.read_text() == f"#!/bin/sh\n{install.SHIM_MARK}\nold\n"
+    assert not (world.hooks / f"pre-commit{install.PREVIOUS}").exists()
+
+
+@pytest.mark.parametrize("staged", [True, False])
+def test_a_shim_that_cannot_be_written_puts_a_moved_foreign_hook_back(
+    world: World, monkeypatch: pytest.MonkeyPatch, *, staged: bool
+) -> None:
+    if staged:
+        world.stages("pre-commit")
+    world.hooks.mkdir(exist_ok=True)
+    (world.hooks / "pre-commit").write_text(FOREIGN)
+
+    def fail(_hook: Path, _text: str) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(install, "write_hook", fail)
+    with pytest.raises(install.InstallError, match=r"^cannot write "):
+        scan_hook(world)
+    assert (world.hooks / "pre-commit").read_text() == FOREIGN
+    assert not (world.hooks / "pre-commit.legacy").exists()
+
+
+def test_a_shim_that_cannot_be_written_after_a_failed_prek_install(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no previous hook to put back, the write's failure is the one raised."""
+    world.stages("pre-commit")
+    (world.bin / "prek.fail").write_text("")
+
+    def fail(_hook: Path, _text: str) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(install, "write_hook", fail)
+    with pytest.raises(install.InstallError, match=r"^cannot write "):
+        scan_hook(world)
+    assert not (world.hooks / f"pre-commit{install.PREVIOUS}").exists()
+
+
+def test_write_hook_raises_its_own_failure_when_the_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hook = tmp_path / "pre-commit"
+    (hook / "in-the-way").mkdir(parents=True)
+
+    def refuse(_self: Path, **_kwargs: bool) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    with pytest.raises(IsADirectoryError):
+        install.write_hook(hook, "#!/bin/sh\n")
+
+
+def test_a_shim_that_cannot_be_written_after_a_failed_prek_install_restores_it(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed chain keeps the saved hook, and a failed write puts it back."""
+    world.stages("pre-commit")
+    world.hooks.mkdir(exist_ok=True)
+    (world.hooks / "pre-commit").write_text(f"#!/bin/sh\n{install.SHIM_MARK}\nold\n")
+    (world.bin / "prek.fail").write_text("")
+
+    def fail(_hook: Path, _text: str) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(install, "write_hook", fail)
+    with pytest.raises(install.InstallError, match=r"^cannot write "):
+        scan_hook(world)
+    assert (world.hooks / "pre-commit").read_text() == (
+        f"#!/bin/sh\n{install.SHIM_MARK}\nold\n"
+    )
+
+
+def test_a_failed_chain_leaves_the_saved_hook_for_a_failed_write_to_restore(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The saved hook is found at its own name even when the chain raised."""
+    world.hooks.mkdir(exist_ok=True)
+    hook = world.hooks / "pre-commit"
+    hook.write_text(f"#!/bin/sh\n{install.SHIM_MARK}\nold\n")
+
+    def chain(_prek: list[str], _top: Path, hook: Path, *, keep: bool) -> None:
+        assert not keep
+        hook.with_name(f"{hook.name}{install.PREVIOUS}").write_text("saved\n")
+        hook.write_text("clobbered by prek\n")
+        message = "prek failed"
+        raise install.InstallError(message)
+
+    def fail(_hook: Path, _text: str) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(install, "chain_stage", chain)
+    monkeypatch.setattr(install, "write_hook", fail)
+    with pytest.raises(install.InstallError, match=r"^cannot write "):
+        scan_hook(world)
+    assert hook.read_text() == "saved\n"
+    assert not (world.hooks / f"pre-commit{install.PREVIOUS}").exists()
+
+
+def test_write_hook_removes_its_temporary_file_on_a_failure(tmp_path: Path) -> None:
+    hooks = tmp_path / "hooks"
+    hook = hooks / "pre-commit"
+    (hook / "in-the-way").mkdir(parents=True)
+    with pytest.raises(IsADirectoryError):
+        install.write_hook(hook, "#!/bin/sh\n")
+    assert sorted(p.name for p in hooks.iterdir()) == ["pre-commit"]
+
+
+def test_prek_has_hooks_needs_prek_to_find_a_config(world: World) -> None:
+    world.stages("pre-commit")
+    assert install.prek_has_hooks(["prek"], world.repo, "pre-commit")
+    assert not install.prek_has_hooks(["prek"], world.repo, "commit-msg")
+    failing = [sys.executable, "-c", "print('hook'); raise SystemExit(2)"]
+    assert not install.prek_has_hooks(failing, world.repo, "pre-commit")
+
+
+@pytest.mark.parametrize("staged", [True, False])
+def test_a_leftover_aside_hook_goes_back_to_legacy_and_keeps_running(
+    world: World, capsys: pytest.CaptureFixture[str], *, staged: bool
+) -> None:
+    """A run killed between chain_prek's renames leaves only the aside file."""
+    if staged:
+        world.stages("pre-commit")
+    world.hooks.mkdir(exist_ok=True)
+    aside = world.hooks / f"pre-commit{install.ASIDE}"
+    aside.write_text(FOREIGN)
+    scan_hook(world)
+    legacy = world.hooks / "pre-commit.legacy"
+    assert capsys.readouterr().err == (
+        f"tbhbdev alpha install: restored {legacy} from {aside}\n"
+    )
+    assert legacy.read_text() == FOREIGN
+    assert not aside.exists()
+    assert (world.hooks / "pre-commit.prek").exists() is staged
+
+
+@pytest.mark.parametrize("older", ["older\n", f"#!/bin/sh\n{install.SHIM_MARK}\n"])
+def test_a_leftover_aside_hook_never_overwrites_a_legacy_hook(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    older: str,
+) -> None:
+    monkeypatch.setattr(install, "stamp", lambda: "T")
+    world.hooks.mkdir(exist_ok=True)
+    aside = world.hooks / f"pre-commit{install.ASIDE}"
+    aside.write_text(FOREIGN)
+    (world.hooks / "pre-commit.legacy").write_text(older)
+    scan_hook(world)
+    legacy = world.hooks / "pre-commit.legacy"
+    assert legacy.read_text() == FOREIGN
+    assert (world.hooks / "pre-commit.legacy.tbhb-backup.T").read_text() == older
+    assert capsys.readouterr().err == (
+        backed_up(world) + f"tbhbdev alpha install: restored {legacy} from {aside}\n"
+    )
+
+
+def test_chain_prek_never_overwrites_a_legacy_hook_prek_left(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(install, "stamp", lambda: "T")
+    world.hooks.mkdir(exist_ok=True)
+    hook = world.hooks / "pre-commit"
+    legacy = world.hooks / "pre-commit.legacy"
+    legacy.write_text(FOREIGN)
+
+    def leaves_a_legacy(_prek: list[str], _top: Path, *args: str) -> None:
+        legacy.write_text("prek's\n")
+        scratch = Path(args[args.index("--git-dir") + 1]) / "hooks"
+        scratch.mkdir()
+        (scratch / "pre-commit").write_text("#!/bin/sh\n# File generated by prek\n")
+
+    monkeypatch.setattr(install, "prek_install", leaves_a_legacy)
+    install.chain_prek(["prek"], world.repo, hook, keep=True)
+    assert legacy.read_text() == FOREIGN
+    assert (world.hooks / "pre-commit.legacy.tbhb-backup.T").read_text() == "prek's\n"
 
 
 def test_identity_hook_leaves_a_foreign_hook(
@@ -1787,13 +2197,13 @@ def test_the_shim_runs_tbhbdev_then_prek(world: World) -> None:
 
 
 def test_the_shim_fails_without_tbhbdev_on_path(world: World) -> None:
-    identity_hook(world, "post-commit", "consume")
+    identity_hook(world, "post-commit", "identity consume")
     done = run_shim(world, "post-commit", None)
     assert (done.returncode, done.stdout, done.stderr) == (
         1,
         "",
         (
-            "post-commit: tbhbdev is not on PATH, so the identity hooks can't run\n"
+            "post-commit: tbhbdev is not on PATH, so the tbhbdev git hooks can't run\n"
             "post-commit: install it with uv tool install, and put ~/.local/bin "
             "on PATH\n"
         ),
@@ -1801,7 +2211,8 @@ def test_the_shim_fails_without_tbhbdev_on_path(world: World) -> None:
 
 
 NOT_ON_PATH = (
-    "prepare-commit-msg: tbhbdev is not on PATH, so the identity hooks can't run\n"
+    "prepare-commit-msg: tbhbdev is not on PATH, so the tbhbdev git hooks "
+    "can't run\n"
     "prepare-commit-msg: install it with uv tool install, and put ~/.local/bin "
     "on PATH\n"
 )
@@ -1914,21 +2325,35 @@ def test_install_git_hooks(world: World, capsys: pytest.CaptureFixture[str]) -> 
         "commit-msg",
         "post-commit",
         "pre-commit",
+        "pre-merge-commit",
         "pre-push",
         "prepare-commit-msg",
     ]
     for name, verb in install.IDENTITY_HOOKS:
-        assert f"tbhbdev alpha identity {verb} " in (world.hooks / name).read_text()
-    assert world.prek_calls()[0] == [
-        "install",
-        "--hook-type",
-        "pre-commit",
-        "--hook-type",
-        "pre-push",
-    ]
+        assert f"tbhbdev alpha {verb} " in (world.hooks / name).read_text()
+    for name in install.SCAN_HOOKS:
+        assert SCANS in (world.hooks / name).read_text()
+    assert SCANS in (world.hooks / "pre-commit").read_text()
+    assert world.prek_calls()[0] == ["install", "--hook-type", "pre-push"]
     assert not (world.hooks / install.LOCK).exists()
     assert "pre-push.prek" in {path.name for path in world.hooks.iterdir()}
     assert stat.S_IMODE((world.hooks / "pre-push").stat().st_mode) == 0o755
+
+
+def test_install_git_hooks_chains_prek_pre_commit_before_the_scan(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A rerun leaves the scan shim in place and no shim behind as `.legacy`."""
+    world.stages("pre-commit")
+    for _ in range(2):
+        assert install.install_git_hooks(None, {}, dry_run=False) == 0
+    capsys.readouterr()
+    shim = (world.hooks / "pre-commit").read_text()
+    assert SCANS in shim
+    assert "File generated by prek" in (world.hooks / "pre-commit.prek").read_text()
+    assert not (world.hooks / "pre-commit.legacy").exists()
+    assert ["install", "-f", "--hook-type", "pre-commit"] in world.prek_calls()
+    assert ["install", "--hook-type", "pre-commit"] not in world.prek_calls()
 
 
 def test_install_git_hooks_from_a_worktree_uses_the_shared_hooks(
@@ -1999,8 +2424,8 @@ def test_install_git_hooks_dry_run(
 ) -> None:
     assert install.install_git_hooks(None, {}, dry_run=True) == 0
     assert capsys.readouterr().out == (
-        "would install prek's pre-commit and pre-push hooks and the "
-        "prepare-commit-msg, commit-msg, post-commit identity hooks in "
+        "would install prek's pre-push hook and the pre-commit, pre-merge-commit, "
+        "prepare-commit-msg, commit-msg, post-commit shims in "
         f"{world.hooks}\n"
     )
     assert world.prek_calls() == []
@@ -2051,7 +2476,7 @@ def test_install_git_hooks_leaves_a_hooks_path_alone(
             False,
             "TBHB_INSTALL_LOCK_TIMEOUT must be a whole number of seconds, not 'x'",
         ),
-        ({}, True, "prek install --hook-type pre-commit --hook-type pre-push failed"),
+        ({}, True, "prek install --hook-type pre-push failed"),
     ],
 )
 def test_install_git_hooks_reports_a_failure(
@@ -2133,8 +2558,8 @@ def test_main_hooks_only_dry_run_writes_nothing(
     assert install.main(["--hooks-only", "--dry-run"], "p") == 0
     assert capsys.readouterr() == (
         (
-            "would install prek's pre-commit and pre-push hooks and the "
-            "prepare-commit-msg, commit-msg, post-commit identity hooks "
+            "would install prek's pre-push hook and the pre-commit, pre-merge-commit, "
+            "prepare-commit-msg, commit-msg, post-commit shims "
             f"in {world.hooks}\n"
         ),
         "",
@@ -2378,7 +2803,7 @@ def test_main_hook_installs_only_the_payloads_git_hooks(
     assert install.main(["--hook"], "p") == 0
     out, err = capsys.readouterr()
     assert out == ""
-    assert err.startswith("prek installed pre-commit\nprek installed pre-push\n")
+    assert err.startswith("prek installed pre-push\n")
     assert err.endswith(f"git hooks in {world.hooks}\n")
     assert (world.hooks / "commit-msg").is_file()
     assert list(world.home.iterdir()) == []
@@ -2405,7 +2830,7 @@ def test_main_hook_reports_a_failure_on_stderr_and_exits_0(
         "",
         (
             "prek: boom\ntbhbdev alpha install: error: prek install --hook-type "
-            "pre-commit --hook-type pre-push failed\n"
+            "pre-push failed\n"
         ),
     )
 
@@ -3307,6 +3732,25 @@ def test_foreign_push_hook_checked_before_dependencies(
     assert str(hook) in capsys.readouterr().err
 
 
+def test_a_missing_prek_still_installs_the_scan_shims(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def unavailable() -> list[str]:
+        message = "prek not found; install it, or install mise"
+        raise install.InstallError(message)
+
+    monkeypatch.setattr(install, "find_prek", unavailable)
+    monkeypatch.setattr(install, "prek_run", missing_prek)
+    assert install.install_git_hooks(None, {}, dry_run=False) == 1
+    assert "prek not found" in capsys.readouterr().err
+    for name in ("pre-commit", "pre-merge-commit"):
+        assert "pre-commit-scan" in (world.hooks / name).read_text()
+
+
+def missing_prek(prek: list[str], *_: object) -> subprocess.CompletedProcess[str]:
+    raise FileNotFoundError(prek[0])
+
+
 def test_foreign_push_hook_appearing_during_lock(
     world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3338,3 +3782,125 @@ def test_missing_tool_uses_named_remote_push_url(world: World) -> None:
     )
     assert done.returncode == 1
     assert done.stderr == b"pre-push: tbhbdev is not on PATH; push refused\n"
+
+
+@pytest.mark.parametrize("config", [None, "prek.toml", ".pre-commit-config.yaml"])
+def test_a_failed_prek_listing_is_an_error_when_a_config_exists(
+    world: World, config: str | None
+) -> None:
+    """An unreadable config must not read as no hooks and drop the chained hook."""
+    (world.bin / "prek.list-fail").write_text("")
+    world.hooks.mkdir(exist_ok=True)
+    chained = world.hooks / "commit-msg.prek"
+    chained.write_text("kept\n")
+    if config is None:
+        identity_hook(world)
+        assert not chained.exists()
+        return
+    (world.repo / config).write_text("not: [valid\n")
+    with pytest.raises(install.InstallError, match="prek list --hook-stage"):
+        identity_hook(world)
+    assert chained.read_text() == "kept\n"
+    assert install.SHIM_MARK in (world.hooks / "commit-msg").read_text()
+
+
+def test_a_failed_prek_listing_finds_a_config_in_a_parent(world: World) -> None:
+    (world.bin / "prek.list-fail").write_text("")
+    (world.repo.parent / "prek.toml").write_text("")
+    with pytest.raises(install.InstallError, match="prek list"):
+        install.prek_has_hooks(["prek"], world.repo, "commit-msg")
+
+
+@pytest.mark.parametrize("name", install.SCAN_HOOKS)
+def test_a_foreign_hook_that_runs_its_own_legacy_name_is_not_moved(
+    world: World, name: str
+) -> None:
+    """Moved to `.legacy`, it would exec itself and the commit would hang."""
+    world.hooks.mkdir(exist_ok=True)
+    loop = f'#!/bin/sh\nexec "$(dirname "$0")/{name}.legacy" "$@"\n'
+    (world.hooks / name).write_text(loop)
+    with pytest.raises(install.InstallError, match="would loop"):
+        scan_hook(world, name)
+    assert (world.hooks / name).read_text() == loop
+    assert not (world.hooks / f"{name}.legacy").exists()
+
+
+@pytest.mark.parametrize("name", install.SCAN_HOOKS)
+def test_an_oserror_while_chaining_still_writes_the_shim(
+    world: World, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """The foreign hook already moved to `.legacy`; no shim would mean no scan."""
+    world.hooks.mkdir(exist_ok=True)
+    (world.hooks / name).write_text(FOREIGN)
+
+    def boom(*_a: object, **_k: object) -> None:
+        msg = "disk trouble"
+        raise OSError(msg)
+
+    monkeypatch.setattr(install, "chain_stage", boom)
+    with pytest.raises(install.InstallError, match="disk trouble"):
+        scan_hook(world, name)
+    assert SCANS in (world.hooks / name).read_text()
+    assert (world.hooks / f"{name}.legacy").read_text() == FOREIGN
+
+
+@pytest.mark.parametrize("name", install.SCAN_HOOKS)
+def test_a_failed_scratch_allocation_keeps_the_foreign_hook_and_fails_closed(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+) -> None:
+    world.stages(name)
+    world.hooks.mkdir(exist_ok=True)
+    hook = world.hooks / name
+    foreign = "#!/bin/sh\necho mine\nexit 5\n"
+    hook.write_text(foreign)
+    hook.chmod(0o755)
+
+    def fail(**_kwargs: object) -> str:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(install.tempfile, "mkdtemp", fail)
+    assert install.install_git_hooks(world.repo, {}, dry_run=False) == 1
+    assert "error: [Errno 28] No space left on device" in capsys.readouterr().err
+    assert SCANS in hook.read_text()
+    legacy = world.hooks / f"{name}.legacy"
+    assert legacy.read_text() == foreign
+    assert stat.S_IMODE(legacy.stat().st_mode) == 0o755
+    assert hook_names(world, name) == [name, f"{name}.legacy"]
+    done = run_shim(world, name, "0")
+    assert (done.returncode, done.stdout) == (5, "mine\n")
+    legacy.write_text("#!/bin/sh\necho mine\n")
+    done = run_shim(world, name, "7")
+    assert (done.returncode, done.stdout) == (
+        7,
+        "mine\ntbhbdev alpha pre-commit-scan\n",
+    )
+
+
+@pytest.mark.parametrize("name", install.SCAN_HOOKS)
+def test_the_hook_is_never_prek_bare_hook_while_prek_installs(
+    world: World, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """A commit from a sibling worktree in the reinstall window must meet the scan."""
+    world.stages(name)
+    world.hooks.mkdir(exist_ok=True)
+    shim = world.hooks / name
+    install.write_hook(shim, f"#!/bin/sh\n{install.SHIM_MARK}\n")
+    seen: list[str] = []
+    real = install.prek_install
+
+    def watch(prek: list[str], top: Path, *args: str) -> None:
+        real(prek, top, *args)
+        seen.append(shim.read_text())  # right after prek wrote its hook
+
+    monkeypatch.setattr(install, "prek_install", watch)
+    scan_hook(world, name)
+    assert seen
+    assert all(install.SHIM_MARK in text for text in seen)
+    install_call = next(c for c in world.prek_args() if c[0] == "install")
+    scratch = Path(install_call[install_call.index("--git-dir") + 1])
+    assert scratch.parent == world.hooks
+    assert not scratch.exists()
+    assert "File generated by prek" in (world.hooks / f"{name}.prek").read_text()
