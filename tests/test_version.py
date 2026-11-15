@@ -280,7 +280,7 @@ def test_build_module_skips_a_stamp_that_cannot_import(
     package.mkdir()
     (package / "_build.py").write_text(source)
     monkeypatch.setattr(version, "BUILD_MODULE", "_build")
-    monkeypatch.syspath_prepend(str(package))
+    monkeypatch.setattr(sys, "path", [str(package), *sys.path])
     monkeypatch.delitem(sys.modules, "_build", raising=False)
     assert version.build_module() is None
 
@@ -295,6 +295,9 @@ def test_line_leaves_the_stamp_alone_when_direct_url_names_the_build(
         msg = "the stamp was imported"
         raise AssertionError(msg)
 
-    monkeypatch.setattr(metadata, "distribution", lambda _name: dist)
+    def distribution(_name: str) -> FakeDist:
+        return dist
+
+    monkeypatch.setattr(metadata, "distribution", distribution)
     monkeypatch.setattr(version, "build_module", broken)
     assert version.line() == f"tbhbdev 0 ({other})"
