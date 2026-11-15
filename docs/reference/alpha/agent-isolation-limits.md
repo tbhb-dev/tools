@@ -82,3 +82,5 @@ The taint record is per coordinator, and the host marker is a hint that the mark
 The driver refuses reviews on a host with no record until `clear-taint`.
 
 The driver's mirror receives agent-pushed objects.
+
+A run's push reads the private-name list at `.local/state/tbhb/private-repos.txt` in the agent home. The file must belong to the agent account, and its mode must clear the group and other write bits. On a host whose file-creation mask is 002, which is the Ubuntu default, create the file with mode 0644 or tighter, or the push refuses.
