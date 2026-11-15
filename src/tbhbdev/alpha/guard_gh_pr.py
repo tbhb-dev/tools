@@ -106,6 +106,7 @@ GUARDED = {("pr", sub) for sub in SUBCOMMANDS} | {("issue", "close")}
 GROUPS = {group for group, _ in GUARDED}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 # Shell options whose value is the next word, so it is not the script.
+DURATION = re.compile(r"\d+(\.\d+)?[smhd]?")
 SHELL_VALUE_OPTIONS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
 WRAPPERS = {
     "env", "command", "exec", "sudo", "nohup", "time", "builtin", "xargs",
@@ -337,14 +338,8 @@ class Scanner:
         return self.commands
 
 
-def skip_prefix(words: list[str]) -> list[str]:
-    """The command's words after env assignments, keywords and wrappers.
-
-    A wrapper's options are skipped with their values. When the word after a
-    wrapper still isn't ``gh``, the parse is unsure (``timeout 5 gh``, an
-    option the table doesn't know), so the first later word that is ``gh``
-    becomes the program.
-    """
+def skip_wrappers(words: list[str]) -> tuple[int, bool]:
+    """The index after env assignments, keywords and wrappers, and whether one ran."""
     i = 0
     wrapped = False
     while i < len(words):
@@ -360,9 +355,37 @@ def skip_prefix(words: list[str]) -> list[str]:
                 i += 2 if words[i] in values else 1
         else:
             break
+    return i, wrapped
+
+
+def resync(words: list[str], start: int) -> int:
+    """The index of the first ``gh`` that only option-like words precede, else start.
+
+    An option-like word is a flag, a flag's value or a duration (``timeout 5``).
+    Any other word is a program, so it ends the search and ``gh`` after it is
+    only an argument.
+    """
+    for k in range(start, len(words)):
+        if program_of(words[k:]) == "gh":
+            return k
+        word = words[k]
+        option_like = word.startswith("-") or DURATION.fullmatch(word)
+        if not (option_like or words[k - 1].startswith("-")):
+            return start
+    return start
+
+
+def skip_prefix(words: list[str]) -> list[str]:
+    """The command's words after env assignments, keywords and wrappers.
+
+    A wrapper's options are skipped with their values. When the word after a
+    wrapper still isn't ``gh``, the parse is unsure (``timeout 5 gh``, an
+    option the table doesn't know), so a ``gh`` that only options, option
+    values and durations precede becomes the program.
+    """
+    i, wrapped = skip_wrappers(words)
     if wrapped and words[i : i + 1] and program_of(words[i:]) != "gh":
-        later = [k for k in range(i, len(words)) if program_of(words[k:]) == "gh"]
-        i = later[0] if later else i
+        i = resync(words, i)
     return words[i:]
 
 
@@ -403,8 +426,15 @@ def gh_match(rest: list[str]) -> Match | None:
 
 def target_repo(args: list[str]) -> str | None:
     """``owner/repo`` of a pull request or issue URL among the arguments."""
-    urls = (TARGET_URL.fullmatch(word) for word in args)
-    return next((url[1] for url in urls if url), None)
+    i = 0
+    while i < len(args):
+        if args[i].startswith("-"):
+            i += 2 if args[i] in ARG_VALUE_FLAGS else 1
+        elif url := TARGET_URL.fullmatch(args[i]):
+            return url[1]
+        else:
+            i += 1
+    return None
 
 
 def target_number(args: list[str]) -> str | None:
@@ -420,21 +450,24 @@ def target_number(args: list[str]) -> str | None:
     return None
 
 
+def sets_c(word: str) -> bool:
+    """Whether a short option cluster such as ``-lc`` includes ``c``."""
+    return not word.startswith(("--", "+")) and "c" in word
+
+
 def shell_script(rest: list[str]) -> str | None:
     """The script of ``-c`` among a shell's options: its first non-option word."""
     has_c = False
-    i = 0
-    while i < len(rest):
-        word = rest[i]
+    words = iter(rest)
+    for word in words:
         if word == "--":
-            return rest[i + 1] if has_c and i + 1 < len(rest) else None
+            return next(words, None) if has_c else None
         if word in SHELL_VALUE_OPTIONS:
-            i += 2
-            continue
-        if not word.startswith(("-", "+")):
+            next(words, None)
+        elif not word.startswith(("-", "+")):
             return word if has_c else None
-        has_c = has_c or (not word.startswith(("--", "+")) and "c" in word)
-        i += 1
+        else:
+            has_c = has_c or sets_c(word)
     return None
 
 
@@ -721,8 +754,8 @@ def close_hint(found: Match, blocked: str, number: str, *, pinned: bool) -> str:
     where = (
         f"run it in a clone of {found.repo}"
         if pinned
-        else "the command doesn't show which repository it targets, so run it "
-        "in a clone of that repository"
+        else "run it in a clone of the repository it targets, which the command "
+        "doesn't show"
     )
     return f"{text} It acts on the origin of the current directory, so {where}."
 

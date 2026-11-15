@@ -48,8 +48,8 @@ FOREIGN = (
     " It acts on the origin of the current directory, so run it in a clone of {r}."
 )
 UNPINNED = (
-    " It acts on the origin of the current directory, so the command doesn't "
-    "show which repository it targets, so run it in a clone of that repository."
+    " It acts on the origin of the current directory, so run it in a clone of "
+    "the repository it targets, which the command doesn't show."
 )
 CLOSE_ISSUE = (
     "`gh issue close` is blocked. Run `tbhbdev alpha issue close {n} "
@@ -1368,3 +1368,39 @@ def test_a_non_utf8_ledger_denies(
         f"{RULE}, and the guard can't read this session's ledger, "
         f"so it refuses `tbhb-approve`: {path} is not UTF-8"
     )
+
+
+def test_a_url_that_is_a_flag_value_does_not_name_the_target_repository() -> None:
+    url = "https://github.com/a/b/pull/9"
+    assert guard.target_repo(["3", "--comment", url]) is None
+    assert guard.target_repo(["3", "--draft", url]) == "a/b"
+    assert guard.target_repo(["-c", "x", url]) == "a/b"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "timeout 5 echo gh pr close 3",
+        "nice grep gh pr close 3",
+        "timeout -s KILL 5 echo gh pr close 3",
+    ],
+)
+def test_a_program_between_a_wrapper_and_gh_makes_gh_an_argument(command: str) -> None:
+    assert guard.find(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "timeout 5 gh pr close 3",
+        "timeout 1.5s gh pr close 3",
+        "timeout -s KILL 5 gh pr close 3",
+        "sudo --unknown-option value gh pr close 3",
+    ],
+)
+def test_options_and_durations_between_a_wrapper_and_gh_still_match(
+    command: str,
+) -> None:
+    found = guard.find(command)
+    assert found is not None
+    assert found.sub == "close"
