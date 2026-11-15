@@ -137,12 +137,36 @@ def segments(directory: str) -> dict[int, str]:
     return found
 
 
+def check_head(descriptor: int, size: int, head: tuple[int, int, str, int]) -> None:
+    """Refuse a head that the segment's bytes do not bear out.
+
+    A crash leaves at most one line past the head. So the head's length ends
+    on a line with the head's digest, and no more than one line follows it.
+    """
+    _current, _count, last, length = head
+    if length:
+        window = os.pread(
+            descriptor, min(length, MAX_LINE + 1), max(0, length - MAX_LINE - 1)
+        )
+        line = window[window.rfind(b"\n", 0, -1) + 1 :]
+        if not window.endswith(b"\n") or len(line) > MAX_LINE or digest(line) != last:
+            message = "the head does not end on its last line"
+            raise RejectedError(message)
+    if size - length > MAX_LINE + 1:
+        message = "more than one line follows the head"
+        raise RejectedError(message)
+    tail = os.pread(descriptor, size - length, length)
+    if tail.find(b"\n") not in {-1, len(tail) - 1}:
+        message = "more than one line follows the head"
+        raise RejectedError(message)
+
+
 def recover(directory: str, head: tuple[int, int, str, int]) -> None:
     """Return the directory to what the head file names."""
     current, _count, _last, length = head
     path = str(Path(directory) / segment_name(current))
     try:
-        descriptor = open_regular(path, os.O_WRONLY)
+        descriptor = open_regular(path, os.O_RDWR)
     except OSError:
         message = "the current segment is missing"
         raise RejectedError(message) from None
@@ -151,6 +175,7 @@ def recover(directory: str, head: tuple[int, int, str, int]) -> None:
         if size < length:
             message = "the current segment is shorter than its head"
             raise RejectedError(message)
+        check_head(descriptor, size, head)
         os.ftruncate(descriptor, length)
         os.fsync(descriptor)
     finally:

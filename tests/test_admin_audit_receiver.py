@@ -247,6 +247,109 @@ def test_recovery_truncates_a_longer_segment_and_keeps_an_equal_one(
     assert segment.read_bytes() == line
 
 
+def committed(directory: Path, count: int) -> list[bytes]:
+    """Append COUNT chained lines through the receiver and return them."""
+    lines: list[bytes] = []
+    last = GENESIS
+    for _ in range(count):
+        line = record(last)
+        assert run(directory, f"append {len(lines) + 1}", line)[0] == 0
+        lines.append(line)
+        last = digest(line)
+    return lines
+
+
+def test_a_stale_head_behind_several_committed_lines_truncates_nothing(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    lines = committed(directory, 4)
+    stale = f"1 1 {digest(lines[0])} {len(lines[0])}\n"
+    (directory / "head").write_text(stale)
+    assert run(directory, "head") == (1, b"")
+    assert run(directory, "append 2", lines[1]) == (1, b"")
+    assert (directory / "segment-1.jsonl").read_bytes() == b"".join(lines)
+    assert (directory / "head").read_text() == stale
+
+
+def test_recovery_drops_one_whole_uncommitted_line(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    first, second = committed(directory, 2)
+    stale = f"1 1 {digest(first)} {len(first)}\n"
+    (directory / "head").write_text(stale)
+    assert run(directory, "head")[0] == 0
+    assert (directory / "segment-1.jsonl").read_bytes() == first
+    del second
+
+
+def test_recovery_drops_an_uncommitted_line_from_an_empty_head(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    (directory / "segment-1.jsonl").write_bytes(record(GENESIS))
+    assert run(directory, "head") == (0, f"ack 1 0 {GENESIS}\n".encode())
+    assert (directory / "segment-1.jsonl").read_bytes() == b""
+
+
+def test_a_tail_of_two_lines_from_an_empty_head_refuses(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    data = record(GENESIS) + record(GENESIS)
+    (directory / "segment-1.jsonl").write_bytes(data)
+    assert run(directory, "head") == (1, b"")
+    assert (directory / "segment-1.jsonl").read_bytes() == data
+
+
+def test_a_tail_longer_than_one_line_refuses(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    data = b"x" * (receiver.MAX_LINE + 2)
+    (directory / "segment-1.jsonl").write_bytes(data)
+    assert run(directory, "head") == (1, b"")
+    assert (directory / "segment-1.jsonl").read_bytes() == data
+
+
+def test_a_tail_of_the_longest_line_recovers(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    (directory / "segment-1.jsonl").write_bytes(b"x" * receiver.MAX_LINE + b"\n")
+    assert run(directory, "head")[0] == 0
+    assert (directory / "segment-1.jsonl").read_bytes() == b""
+
+
+def test_a_head_length_inside_a_line_refuses_without_truncation(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    (line,) = committed(directory, 1)
+    (directory / "head").write_text(f"1 1 {digest(line)} {len(line) - 5}\n")
+    assert run(directory, "head") == (1, b"")
+    assert (directory / "segment-1.jsonl").read_bytes() == line
+
+
+def test_a_head_digest_that_names_another_line_refuses(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    first, second = committed(directory, 2)
+    (directory / "head").write_text(f"1 2 {digest(first)} {len(first + second)}\n")
+    assert run(directory, "head") == (1, b"")
+    assert (directory / "segment-1.jsonl").read_bytes() == first + second
+
+
+def test_a_head_after_a_line_over_the_limit_refuses(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    long = b"x" * receiver.MAX_LINE + b"\n"
+    (directory / "segment-1.jsonl").write_bytes(long)
+    (directory / "head").write_text(f"1 1 {digest(long)} {len(long)}\n")
+    assert run(directory, "head") == (1, b"")
+
+
+def test_a_head_after_a_line_longer_than_the_window_refuses(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    first = record(GENESIS)
+    long = b"x" * (receiver.MAX_LINE + 5) + b"\n"
+    (directory / "segment-1.jsonl").write_bytes(first + long)
+    total = len(first + long)
+    (directory / "head").write_text(f"1 2 {digest(long)} {total}\n")
+    assert run(directory, "head") == (1, b"")
+
+
 def test_a_shorter_segment_refuses_without_truncation(tmp_path: Path) -> None:
     directory = fresh(tmp_path)
     line = record(GENESIS)
@@ -716,8 +819,9 @@ def shorten_segment(directory: Path) -> None:
 
 def lose_earlier_segment(directory: Path) -> None:
     lose_segment(directory)
-    (directory / "segment-2.jsonl").write_bytes(b"x")
-    break_head(directory, f"2 1 {'a' * 64} 1\n")
+    line = record("a" * 64)
+    (directory / "segment-2.jsonl").write_bytes(line)
+    break_head(directory, f"2 1 {digest(line)} {len(line)}\n")
 
 
 @pytest.mark.parametrize(
@@ -804,13 +908,14 @@ def test_a_byte_of_126_is_inside_the_range(tmp_path: Path) -> None:
     assert run(directory, "append 1", line)[0] == 0
 
 
-def test_a_head_of_one_byte_in_a_one_byte_segment_is_consistent(
+def test_a_head_that_matches_its_whole_segment_is_consistent(
     tmp_path: Path,
 ) -> None:
     directory = fresh(tmp_path)
-    (directory / "segment-1.jsonl").write_bytes(b"\n")
-    break_head(directory, f"1 1 {'a' * 64} 1\n")
-    assert run(directory, "head") == (0, f"ack 1 1 {'a' * 64}\n".encode())
+    line = record(GENESIS)
+    (directory / "segment-1.jsonl").write_bytes(line)
+    break_head(directory, f"1 1 {digest(line)} {len(line)}\n")
+    assert run(directory, "head") == (0, f"ack 1 1 {digest(line)}\n".encode())
 
 
 def test_the_head_file_read_is_bounded_at_512_bytes(
