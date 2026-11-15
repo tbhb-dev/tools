@@ -144,6 +144,70 @@ def test_seeded_commit_is_taken_from_the_clone_without_network(
     assert any(args[0] == "fetch" for args in calls)
 
 
+def test_seeded_review_keeps_the_clone_default_branch_as_base(
+    tmp_path: Path,
+) -> None:
+    seed, clone = repository(tmp_path)
+    head = commit(seed, "private change")
+    git(seed, "push", "origin", "main")
+    git(clone, "fetch", "origin")
+    path = worktree.create(
+        clone,
+        "seeded-base",
+        run_request(profile="review", commit=head),
+        ("example-org/example-repo",),
+    )
+    assert git(path, "rev-parse", "origin/main") == head
+    assert git(path, "rev-parse", "origin/tbhbdev-review") == head
+
+
+def test_seeded_review_without_an_origin_head_has_no_base_branch(
+    tmp_path: Path,
+) -> None:
+    seed, clone = repository(tmp_path)
+    head = commit(seed, "private change")
+    git(seed, "push", "origin", "main")
+    git(clone, "fetch", "origin")
+    git(clone, "remote", "set-head", "origin", "--delete")
+    path = worktree.create(
+        clone,
+        "seeded-nobase",
+        run_request(profile="review", commit=head),
+        ("example-org/example-repo",),
+    )
+    assert git(path, "rev-parse", "HEAD") == head
+    assert git(path, "branch", "-r", "--format=%(refname:short)") == (
+        "origin/tbhbdev-review"
+    )
+
+
+@pytest.mark.parametrize(
+    "failure", [subprocess.CalledProcessError(128, "git"), OSError("unreadable")]
+)
+def test_unreadable_clone_base_is_skipped_not_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    def run(_path: Path, *args: str) -> str:
+        if args[:2] == ("for-each-ref", "--format=%(symref)"):
+            raise failure
+        return "a" * 40
+
+    monkeypatch.setattr(worktree, "git", run)
+    assert worktree.clone_base(tmp_path, tmp_path / "seeded") == []
+
+
+def test_invalid_clone_base_name_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(_path: Path, *args: str) -> str:
+        if args[0] == "check-ref-format":
+            raise subprocess.CalledProcessError(1, "git")
+        return "refs/remotes/origin/bad..name"
+
+    monkeypatch.setattr(worktree, "git", run)
+    assert worktree.clone_base(tmp_path, tmp_path / "seeded") == []
+
+
 def test_unpushed_clone_commit_is_refused_and_stays_out_of_the_mirror(
     tmp_path: Path,
 ) -> None:
@@ -543,12 +607,20 @@ def test_fetch_resolves_only_a_full_commit(
             "refs/remotes/origin/",
         ),
         (
+            "True",
+            "for-each-ref",
+            "--format=%(symref)",
+            "refs/remotes/origin/HEAD",
+        ),
+        ("False", "check-ref-format", "--branch", "main"),
+        (
             "False",
             "fetch",
             *worktree.FETCH_OPTIONS,
             "--no-prune",
             "--end-of-options",
             str(tmp_path / "seeded"),
+            "+refs/remotes/origin/main:refs/heads/main",
             f"+{'0' * 40}:refs/heads/tbhbdev-review",
         ),
         ("False", "ls-remote", "--symref", "--end-of-options", "origin", "HEAD"),
@@ -853,6 +925,10 @@ def test_prelaunch_git_protocol(
         worktree.create(clone, "protocol", request, ("example-org/example-repo",))
         == workspace
     )
+    base = (
+        clone,
+        ("for-each-ref", "--format=%(symref)", "refs/remotes/origin/HEAD"),
+    )
     local = (
         mirror,
         (
@@ -861,6 +937,7 @@ def test_prelaunch_git_protocol(
             "--no-prune",
             "--end-of-options",
             str(clone),
+            "+refs/remotes/origin/main:refs/heads/main",
             f"+{full_sha}:refs/heads/tbhbdev-review",
         ),
     )
@@ -876,7 +953,11 @@ def test_prelaunch_git_protocol(
     )
     common = [
         (mirror, ("init", "--bare", "--template=")),
-        *([published, local] if profile == "review" else []),
+        *(
+            [published, base, (mirror, ("check-ref-format", "--branch", "main")), local]
+            if profile == "review"
+            else []
+        ),
     ]
     if profile == "build":
         common += [

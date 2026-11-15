@@ -179,12 +179,23 @@ def published(clone: Path, commit: str) -> bool:
     return listing != ""
 
 
+def clone_base(mirror: Path, clone: Path) -> list[str]:
+    """Refspec for the default branch the clone took from origin, if it names one."""
+    try:
+        target = git(
+            clone, "for-each-ref", "--format=%(symref)", "refs/remotes/origin/HEAD"
+        )
+        match = re.fullmatch(r"refs/remotes/origin/([^\s]+)", target)
+        if match is None:
+            return []
+        git(mirror, "check-ref-format", "--branch", match[1])
+    except OSError, subprocess.SubprocessError:
+        return []
+    return [f"+refs/remotes/origin/{match[1]}:refs/heads/{match[1]}"]
+
+
 def fetch_commit(mirror: Path, request: RunRequest, seeded: Path) -> str:
-    if (
-        request.commit is not None
-        and request.profile is not Profile.BUILD
-        and published(seeded, request.commit)
-    ):
+    if request.commit is not None and published(seeded, request.commit):
         # A seeded clone may already hold the commit; try it before the network.
         try:
             git(
@@ -194,6 +205,7 @@ def fetch_commit(mirror: Path, request: RunRequest, seeded: Path) -> str:
                 "--no-prune",
                 "--end-of-options",
                 str(seeded),
+                *clone_base(mirror, seeded),
                 f"+{request.commit}:refs/heads/tbhbdev-review",
             )
         except OSError, subprocess.SubprocessError:
@@ -489,7 +501,7 @@ def create(
             configure_mirror(mirror, url)
         note = (
             ""
-            if request.commit is None or request.profile is Profile.BUILD
+            if request.commit is None
             else "; the seeded clone serves only origin-reachable commits"
         )
         with preparation_step(f"mirror fetch ({url}){note}"):
