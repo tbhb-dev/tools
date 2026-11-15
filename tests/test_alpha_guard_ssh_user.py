@@ -23,6 +23,8 @@ NAMES = ["lab1", "lab2"]
     [
         "ssh lab1",
         "ssh lab1 uptime",
+        "git archive HEAD | ssh lab1 tar -x",
+        "git archive HEAD | ssh -l tony lab1 tar -x",
         "ssh -v lab1",
         "ssh -qT lab1",
         "ssh tony@lab1",
@@ -84,6 +86,7 @@ def test_denied(command: str) -> None:
     "command",
     [
         "ssh agent@lab1",
+        "git archive HEAD | ssh agent@lab1 tar -x",
         "ssh ops@lab1 uptime",
         "ssh -l agent lab1",
         "ssh -lops lab1",
