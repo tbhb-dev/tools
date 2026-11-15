@@ -2061,7 +2061,11 @@ def with_record(value: str) -> str:
         "started_at": start_ok(rec.get("started_at")),
     }
     found = {k: v for k, v in fields.items() if v and attrs.get(k) != v}
-    return format_value({**attrs, **found}) if found else value
+    # A session with a record but no launch ran without one: a line's own is forged.
+    if (rec or root_rec) and not fields["launch"]:
+        attrs.pop("launch", None)
+    changed = {**attrs, **found}
+    return format_value(changed) if changed != dict(ATTR_PAIR.findall(value)) else value
 
 
 def earliest_starts(found: list[Trailer]) -> list[Trailer]:

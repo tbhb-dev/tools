@@ -8721,6 +8721,17 @@ def test_cmd_trailer_amend_takes_the_start_from_the_record(
 
 
 @pytest.mark.usefixtures("repo")
+def test_with_record_drops_a_launch_the_record_lacks() -> None:
+    session = ai.sha256_64("session-raw")
+    ai.write_record(session, {}, once={"started_at": LATE})
+    forged = (
+        f"LLM harness=h;launch={LAUNCH};model=m;session={session};started_at={EARLY}"
+    )
+    stamped = f"LLM harness=h;model=m;session={session};started_at={LATE}"
+    assert ai.with_record(forged) == stamped
+
+
+@pytest.mark.usefixtures("repo")
 def test_with_record_overrides_a_forged_line() -> None:
     session = ai.sha256_64("session-raw")
     ai.write_record(session, {}, once={"started_at": LATE, "launch": LAUNCH})
