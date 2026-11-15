@@ -112,6 +112,7 @@ class Inputs:
     prompt: str
     schema: str | None
     owner: str
+    review_token: str | None = None
 
 
 def stream(
@@ -125,6 +126,8 @@ def stream(
     entries = {files.REQUEST: inputs.request, files.PROMPT: inputs.prompt}
     if inputs.schema is not None:
         entries[files.SCHEMA] = inputs.schema
+    if inputs.review_token is not None:
+        entries[files.REVIEW_TOKEN] = inputs.review_token
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as archive:
         for suffix, text in entries.items():

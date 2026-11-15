@@ -17,7 +17,9 @@ type Table = dict[str, object]
 MISSING = object()
 EMPTY: list[str] = []
 REFERENCE_KEYS = [
-    f.name for f in dataclasses.fields(model.Credentials) if f.name != "account"
+    f.name
+    for f in dataclasses.fields(model.Credentials)
+    if f.name not in ("account", "reviews_minter")
 ]
 NAME_RULE = "[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
 HOST_RULE = (
@@ -978,8 +980,7 @@ def test_execution_options_name_the_invalid_path(
 
 def test_unsandboxed_host_refuses_reviews_app_delivery() -> None:
     assert refused(edited("host", 0, "unsandboxed", value=True)) == (
-        "[[agent.host]] unsandboxed host example-linux "
-        "has reviews App credentials for agent"
+        "[[agent.host]] unsandboxed host example-linux has a reviews App key for agent"
     )
 
 
@@ -994,6 +995,69 @@ def test_unsandboxed_host_without_reviews_app_is_allowed() -> None:
     assert parsed.credentials[0].reviews_app_id is None
     assert parsed.credentials[0].reviews_app_client_id is None
     assert parsed.credentials[0].reviews_app_pem is None
+
+
+KEY_NAMES = ("reviews_app_id", "reviews_app_client_id", "reviews_app_pem")
+
+
+def with_minter(minter: object = "minter") -> Table:
+    """An unsandboxed host whose account holds no key and names a minter."""
+    table = edited("host", 0, "unsandboxed", value=True)
+    accounts = cast("Table", table["credentials"])
+    keyed = cast("Table", accounts["agent"])
+    accounts["minter"] = copy.deepcopy(keyed)
+    for key in KEY_NAMES:
+        del keyed[key]
+    keyed["reviews_minter"] = minter
+    return table
+
+
+def test_unsandboxed_host_may_run_reviews_with_a_minted_token() -> None:
+    parsed = config.parse(with_minter())
+    assert parsed.hosts[0].unsandboxed is True
+    assert [(c.account, c.reviews_minter) for c in parsed.credentials] == [
+        ("agent", "minter"),
+        ("minter", None),
+    ]
+    assert parsed.credentials[0].reviews_app_pem is None
+
+
+@pytest.mark.parametrize("name", ["missing", "agent"])
+def test_minter_must_name_an_account_with_a_reviews_app_key(name: str) -> None:
+    assert refused(with_minter(name)) == (
+        f"[agent.credentials.agent] reviews_minter names {name}, "
+        "which has no reviews App key"
+    )
+
+
+def test_minter_with_a_key_on_an_unsandboxed_host_is_refused() -> None:
+    table = with_minter()
+    cast("Table", table["host"][0])["accounts"] = ["agent", "minter"]  # ty: ignore
+    assert refused(table) == (
+        "[[agent.host]] unsandboxed host example-linux has a reviews App key for minter"
+    )
+
+
+def test_minter_is_refused_beside_the_account_s_own_key() -> None:
+    table = edited("credentials", "agent", "reviews_minter", value="agent")
+    assert refused(table) == (
+        "[agent.credentials.agent] reviews_minter "
+        "must not be set with the reviews_app keys"
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "why"),
+    [
+        ("bad name", f"must match {NAME_RULE}"),
+        ("", "must be a non-blank string"),
+        (5, "must be a non-blank string"),
+    ],
+)
+def test_minter_must_be_an_account_name(value: object, why: str) -> None:
+    assert (
+        refused(with_minter(value)) == f"[agent.credentials.agent] reviews_minter {why}"
+    )
 
 
 @pytest.mark.parametrize(

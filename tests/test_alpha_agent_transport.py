@@ -175,6 +175,44 @@ def test_stream_modes_and_budget(
     )
 
 
+def test_stream_carries_the_review_token_as_a_private_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def shell(
+        _config: model.Settings,
+        _host: model.Host,
+        script: str,
+        *,
+        data: bytes,
+        timeout: float,
+    ) -> str:
+        assert "example-delivered" not in script
+        assert timeout == 4.5
+        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+            members = archive.getmembers()
+            assert [m.name for m in members] == [
+                "example.request.json",
+                "example.prompt",
+                "example.review-token",
+            ]
+            assert all(m.mode == 0o600 for m in members)
+            stream = archive.extractfile(members[-1])
+            assert stream is not None
+            assert stream.read() == b"example-delivered"
+        return ""
+
+    monkeypatch.setattr(transport, "shell", shell)
+    transport.stream(
+        settings(),
+        LINUX,
+        "example",
+        inputs=transport.Inputs(
+            "request", "brief", None, "example-owner", "example-delivered"
+        ),
+        timeout=4.5,
+    )
+
+
 @pytest.mark.parametrize("timeout", [None, 7.5])
 @pytest.mark.parametrize("answer", [False, True])
 def test_read_budget(

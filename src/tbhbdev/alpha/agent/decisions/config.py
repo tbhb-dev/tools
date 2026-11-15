@@ -343,9 +343,17 @@ def _credentials(table: _Table) -> tuple[Credentials, ...]:
             "reviews_app_id",
             "reviews_app_client_id",
             "reviews_app_pem",
+            "reviews_minter",
             "signing",
         )
         app_id, client_id, pem = _reviews_app(entry)
+        minter = (
+            _check_name(entry, "reviews_minter", entry.text("reviews_minter"), NAME)
+            if "reviews_minter" in entry.values
+            else None
+        )
+        if minter is not None and pem is not None:
+            entry.fail("reviews_minter", "must not be set with the reviews_app keys")
         accounts.append(
             Credentials(
                 account=account,
@@ -355,6 +363,7 @@ def _credentials(table: _Table) -> tuple[Credentials, ...]:
                 reviews_app_client_id=client_id,
                 reviews_app_pem=pem,
                 signing=entry.reference("signing"),
+                reviews_minter=minter,
             )
         )
     return tuple(accounts)
@@ -472,9 +481,19 @@ def _check_host_accounts(settings: Settings) -> None:
             if host.unsandboxed and known[account].reviews_app_id is not None:
                 message = (
                     f"[[agent.host]] unsandboxed host {host.name} "
-                    f"has reviews App credentials for {account}"
+                    f"has a reviews App key for {account}"
                 )
                 raise Invalid(message)
+    for entry in settings.credentials:
+        if entry.reviews_minter is None:
+            continue
+        minter = known.get(entry.reviews_minter)
+        if minter is None or minter.reviews_app_pem is None:
+            message = (
+                f"[agent.credentials.{entry.account}] reviews_minter "
+                f"names {entry.reviews_minter}, which has no reviews App key"
+            )
+            raise Invalid(message)
 
 
 def parse(agent: dict[str, object]) -> Settings:

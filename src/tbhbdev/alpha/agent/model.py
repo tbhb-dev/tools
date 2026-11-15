@@ -106,6 +106,7 @@ class Credentials:
     reviews_app_client_id: str | None
     reviews_app_pem: str | None
     signing: str
+    reviews_minter: str | None = None
 
 
 @dataclass(frozen=True)

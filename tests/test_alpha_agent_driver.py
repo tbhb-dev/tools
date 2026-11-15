@@ -27,7 +27,14 @@ from agent_example import MARKER, settings
 
 from tbhbdev import version
 from tbhbdev.alpha import agent
-from tbhbdev.alpha.agent import driver, model, render, taint_store, transport
+from tbhbdev.alpha.agent import (
+    credentials,
+    driver,
+    model,
+    render,
+    taint_store,
+    transport,
+)
 from tbhbdev.alpha.agent.decisions import remote as remote_commands
 from tbhbdev.alpha.agent.decisions import repo, request, runfiles_names, taint
 from tbhbdev.alpha.agent.model import Invalid, RunKind
@@ -299,7 +306,8 @@ def test_version_mismatch(remote: Remote, capsys: pytest.CaptureFixture[str]) ->
 
 
 @pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT, "HEAD"])
-def test_review_ref(remote: Remote, ref: str) -> None:
+def test_review_ref(remote: Remote, monkeypatch: pytest.MonkeyPatch, ref: str) -> None:
+    monkeypatch.setattr(credentials, "launcher_token", lambda *_: None)
     remote.configure(refs=f"{COMMIT}\t{ref}\n")
     options = ("--ref", ref) if ref != "HEAD" else ()
     assert launch(remote, "--profile", "review", *options) == 0
@@ -328,6 +336,74 @@ def test_review_ref(remote: Remote, ref: str) -> None:
                 "stdin": "",
             }
         ]
+
+
+def streamed_names(remote: Remote) -> list[str]:
+    archive = base64.b64decode(str(remote.records("ssh")[2]["stdin"]))
+    with tarfile.open(fileobj=io.BytesIO(archive)) as stream:
+        return stream.getnames()
+
+
+def test_review_sends_the_minted_token_only_in_the_private_stream(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[object, object]] = []
+
+    def mint(settings: object, value: object) -> str:
+        seen.append((settings, value))
+        return "example-minted"
+
+    monkeypatch.setattr(credentials, "launcher_token", mint)
+    remote.configure(refs=f"{COMMIT}\tHEAD\n")
+    assert launch(remote, "--profile", "review") == 0
+    assert len(seen) == 1
+    assert streamed_names(remote) == [
+        "sample.request.json",
+        "sample.prompt",
+        "sample.review-token",
+    ]
+    assert (remote.state / "sample.review-token").read_text() == "example-minted"
+    assert (remote.state / "sample.review-token").stat().st_mode & 0o777 == 0o600
+    meta = remote.local / "tbhbdev/agent-runs/sample.json"
+    assert "example-minted" not in meta.read_text()
+    for tool in ("ssh", "tmux", "git"):
+        for record in remote.records(tool):
+            assert "example-minted" not in json.dumps(record["args"])
+
+
+def test_review_without_a_driver_key_sends_no_token(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(credentials, "launcher_token", lambda *_: None)
+    remote.configure(refs=f"{COMMIT}\tHEAD\n")
+    assert launch(remote, "--profile", "review") == 0
+    assert streamed_names(remote) == ["sample.request.json", "sample.prompt"]
+
+
+def test_review_mint_failure_refuses_before_any_stream(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail(*_: object) -> str:
+        message = "reviews App token unavailable; review refused"
+        raise Invalid(message)
+
+    monkeypatch.setattr(credentials, "launcher_token", fail)
+    remote.configure(refs=f"{COMMIT}\tHEAD\n")
+    assert launch(remote, "--profile", "review") == 1
+    assert "reviews App token unavailable; review refused" in capsys.readouterr().err
+    assert len(remote.records("ssh")) == 2
+    assert not (remote.local / "tbhbdev/agent-runs/sample.json").exists()
+
+
+def test_build_never_asks_for_a_review_token(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(*_: object) -> str:
+        raise AssertionError
+
+    monkeypatch.setattr(credentials, "launcher_token", fail)
+    assert launch(remote) == 0
+    assert streamed_names(remote) == ["sample.request.json", "sample.prompt"]
 
 
 @pytest.mark.parametrize("profile", [None, "Primary", "PRIMARY"])

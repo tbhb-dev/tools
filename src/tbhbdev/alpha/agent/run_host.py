@@ -446,7 +446,10 @@ def preflight(run: Run) -> None:
     if run.request.profile is Profile.REVIEW and run.request.tainted_host:
         message = "review runs are refused on a tainted host"
         raise Invalid(message)
-    if run.request.profile is Profile.REVIEW:
+    if (
+        run.request.profile is Profile.REVIEW
+        and not run.files.path("review-token").exists()
+    ):
         references = next(
             c for c in run.settings.credentials if c.account == run.request.account
         )
@@ -513,7 +516,12 @@ def prepare_workspace(run: Run) -> Prepared:
         clone, run.files.name, run.request, run.settings.public_repos
     )
     with worktree.preparation_step("credential delivery"):
-        delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
+        token = (
+            credentials.delivered_token(run.files.path("review-token"))
+            if run.request.profile is Profile.REVIEW
+            else None
+        )
+        delivery = credentials.deliver(run.request, run.settings, run.tmpdir, token)
     paths = RunPaths(
         home=str(run.home),
         worktree=str(workspace),

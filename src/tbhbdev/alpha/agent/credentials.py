@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 
 # Split the spelling because the repository's leak scanner also flags the name.
 CLAUDE_TOKEN_ENV = "CLAUDE_CODE_" + "OAUTH_TOKEN"
+# A review needs to fetch the repository and to submit its verdict.
+REVIEW_PERMISSIONS = {"contents": "read", "pull_requests": "write"}
+REVIEW_TOKEN_LIMIT = 512
 
 
 @dataclass(frozen=True)
@@ -57,8 +60,21 @@ def require_reviews_app(references: Credentials) -> None:
         raise Invalid(message)
 
 
+def minting_account(settings: Settings, account: str) -> Credentials | None:
+    """The credentials whose reviews App key mints ACCOUNT's review token."""
+    entry = next(c for c in settings.credentials if c.account == account)
+    if entry.reviews_app_pem is not None:
+        return entry
+    if entry.reviews_minter is None:
+        return None
+    return next(c for c in settings.credentials if c.account == entry.reviews_minter)
+
+
 def installation_token(references: Credentials, repository: str) -> str:
-    """Reuse the app signer and request a token restricted to one repository."""
+    """Mint a reviews App token for one repository, in memory.
+
+    The token holds only `REVIEW_PERMISSIONS`, whatever the App is granted.
+    """
     host, owner, name = repo.parts(repository)
     if host != "github.com":
         message = "reviews app supports github.com repositories"
@@ -68,37 +84,66 @@ def installation_token(references: Credentials, repository: str) -> str:
         raise Invalid(message)
     client_id = read(references.reviews_app_client_id, label="reviews app")
     pem = read(references.reviews_app_pem, label="reviews app")
-    env = gh_app.default_env()
-    args = gh_app.Args(
-        app="reviews",
-        repo=f"{owner}/{name}",
-        fresh=True,
-        dry_run=False,
-        all_repos=False,
-        vault="",
-        cooldown_until=None,
-        cooldown_status=False,
-    )
-    jwt = gh_app.sign(env, client_id, gh_app.rebuild_pem(pem))
-    return gh_app.request_token(env, args, jwt).token
+    return gh_app.mint_token(
+        gh_app.default_env(),
+        app_id=client_id,
+        pem=pem,
+        repository=f"{owner}/{name}",
+        permissions=REVIEW_PERMISSIONS,
+    ).token
 
 
-def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
+def mint(references: Credentials, repository: str) -> str:
+    """The token for one review run, with every failure one refusal."""
+    try:
+        return installation_token(references, repository)
+    except TOKEN_ERRORS:
+        message = "reviews App token unavailable; review refused"
+        raise Invalid(message) from None
+
+
+def launcher_token(settings: Settings, request: RunRequest) -> str | None:
+    """The driver's token for a review run, or None when it holds no key."""
+    references = minting_account(settings, request.account)
+    return None if references is None else mint(references, request.repo)
+
+
+def delivered_token(path: Path) -> str | None:
+    """Take the driver's token from PATH, and remove the file before any use."""
+    if not path.exists():
+        return None
+    try:
+        text = runfiles.read_owned(path, REVIEW_TOKEN_LIMIT, "review token")
+    finally:
+        path.unlink()
+    value = text.strip()
+    if not value or any(c.isspace() or not c.isprintable() for c in value):
+        message = "delivered review token is malformed"
+        raise Invalid(message)
+    return value
+
+
+TOKEN_ERRORS = (
+    Invalid,
+    OSError,
+    ValueError,
+    KeyError,
+    TypeError,
+    httpx.HTTPError,
+    gh_app.GhAppError,
+)
+
+
+def deliver(
+    request: RunRequest,
+    settings: Settings,
+    tmpdir: Path,
+    review_token: str | None = None,
+) -> Delivery:
     references = next(c for c in settings.credentials if c.account == request.account)
     if request.profile is Profile.REVIEW:
-        try:
-            gh_token = installation_token(references, request.repo)
-        except (
-            Invalid,
-            OSError,
-            ValueError,
-            KeyError,
-            TypeError,
-            httpx.HTTPError,
-            gh_app.GhAppError,
-        ):
-            message = "reviews App token unavailable; review refused"
-            raise Invalid(message) from None
+        # Only the account's own key mints here, never another account's.
+        gh_token = review_token or mint(references, request.repo)
     else:
         gh_token = read(references.gh, label="gh") if references.gh else None
     gh = runfiles.private_dir(tmpdir / "gh")

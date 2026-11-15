@@ -199,71 +199,55 @@ def test_unknown_claude_profile(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("failure", [None, "host", "sign", "request"])
-def test_installation_reuses_app_signer_without_storing_token(
-    tmp_path: Path,
+PERMISSIONS = {"contents": "read", "pull_requests": "write"}
+
+
+def test_installation_token_mints_in_memory_with_only_review_permissions(
     monkeypatch: pytest.MonkeyPatch,
-    failure: str | None,
     fake_reader: list[str],
+    tmp_path: Path,
 ) -> None:
-    pem = "example-pem"
-    monkeypatch.setitem(VALUES, "example/app/pem", pem)
+    monkeypatch.setitem(VALUES, "example/app/pem", "example-pem")
     env = gh_app.Env(tmp_path, lambda: 1000, secrets.Store, gh_app.run_openssl)
     monkeypatch.setattr(gh_app, "default_env", lambda: env)
-    calls: list[str] = []
+    seen: list[dict[str, object]] = []
 
-    def sign(actual: gh_app.Env, client_id: str, key: str) -> str:
+    def mint(actual: gh_app.Env, **kwargs: object) -> gh_app.Minted:
         assert actual is env
-        assert client_id == "example-client"
-        assert key == pem
-        calls.append("sign")
-        if failure == "sign":
-            message = "signing failed"
-            raise gh_app.GhAppError(message)
-        return "example-jwt"
-
-    def token(actual: gh_app.Env, args: gh_app.Args, jwt: str) -> gh_app.Minted:
-        assert actual is env
-        assert dataclasses.asdict(args) == {
-            "app": "reviews",
-            "repo": "example-org/example-repo",
-            "fresh": True,
-            "dry_run": False,
-            "all_repos": False,
-            "vault": "",
-            "cooldown_until": None,
-            "cooldown_status": False,
-        }
-        assert jwt == "example-jwt"
-        calls.append("request")
-        if failure == "request":
-            message = "request failed"
-            raise gh_app.GhAppError(message)
+        seen.append(kwargs)
         return gh_app.Minted("example-installation", 2000)
 
-    monkeypatch.setattr(gh_app, "sign", sign)
-    monkeypatch.setattr(gh_app, "request_token", token)
-    repository = (
-        "example.com/example-org/example-repo"
-        if failure == "host"
-        else "example-org/example-repo"
-    )
-    if failure:
-        with pytest.raises(
-            Invalid if failure == "host" else gh_app.GhAppError
-        ) as caught:
-            credentials.installation_token(host_settings().credentials[0], repository)
-        if failure == "host":
-            assert str(caught.value) == "reviews app supports github.com repositories"
-    else:
-        assert (
-            credentials.installation_token(host_settings().credentials[0], repository)
-            == "example-installation"
+    monkeypatch.setattr(gh_app, "mint_token", mint)
+    assert (
+        credentials.installation_token(
+            host_settings().credentials[0], "example-org/example-repo"
         )
-    check_installation_calls(calls, fake_reader, failure, tmp_path)
+        == "example-installation"
+    )
+    assert seen == [
+        {
+            "app_id": "example-client",
+            "pem": "example-pem",
+            "repository": "example-org/example-repo",
+            "permissions": PERMISSIONS,
+        }
+    ]
+    assert fake_reader == ["example/app/client", "example/app/pem"]
+    assert {p.name for p in tmp_path.iterdir()} == {"xdg"}
 
 
-def test_review_token_request_keeps_installed_permissions_for_only_run_repository(
+def test_installation_token_refuses_another_host_before_reading_anything(
+    fake_reader: list[str],
+) -> None:
+    with pytest.raises(Invalid) as caught:
+        credentials.installation_token(
+            host_settings().credentials[0], "example.com/example-org/example-repo"
+        )
+    assert str(caught.value) == "reviews app supports github.com repositories"
+    assert fake_reader == []
+
+
+def test_review_token_request_holds_contents_read_and_pull_requests_write_for_one_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -299,28 +283,177 @@ def test_review_token_request_keeps_installed_permissions_for_only_run_repositor
         httpx.MockTransport(respond),
     )
     monkeypatch.setattr(gh_app, "default_env", lambda: env)
-    monkeypatch.setattr(gh_app, "sign", constant("example-jwt"))
     credentials.deliver(
         run_request(profile="review", commit="0" * 40), host_settings(), tmp_path
     )
     assert [(request.method, request.url.path) for request in requests] == list(replies)
-    assert json.loads(requests[1].content) == {"repositories": ["example-repo"]}
+    assert json.loads(requests[1].content) == {
+        "permissions": PERMISSIONS,
+        "repositories": ["example-repo"],
+    }
+    assert {p.name for p in tmp_path.iterdir()} == {"gh", "docker", "xdg"}
 
 
-def check_installation_calls(
-    calls: list[str], fake_reader: list[str], failure: str | None, tmp_path: Path
+def test_delivered_review_token_skips_every_app_read(
+    tmp_path: Path, fake_reader: list[str]
 ) -> None:
-    assert calls == (
-        []
-        if failure == "host"
-        else ["sign"]
-        if failure == "sign"
-        else ["sign", "request"]
+    result = credentials.deliver(
+        run_request(profile="review", commit="0" * 40),
+        host_settings(),
+        tmp_path,
+        "example-delivered",
     )
-    assert fake_reader == (
-        [] if failure == "host" else ["example/app/client", "example/app/pem"]
+    gh = yaml.safe_load((tmp_path / "gh" / "hosts.yml").read_text())
+    assert gh == {
+        "github.com": {"oauth_token": "example-delivered", "git_protocol": "https"}
+    }
+    assert "example-delivered" not in repr(result)
+    assert fake_reader == ["example/docker/value"]
+
+
+def test_review_without_a_delivered_token_mints_from_its_own_key_only(
+    tmp_path: Path,
+) -> None:
+    keyless = dataclasses.replace(
+        host_settings().credentials[0],
+        reviews_app_id=None,
+        reviews_app_client_id=None,
+        reviews_app_pem=None,
+        reviews_minter="minter",
     )
-    assert {p.name for p in tmp_path.iterdir()} == {"xdg"}
+    minter = dataclasses.replace(host_settings().credentials[0], account="minter")
+    settings = dataclasses.replace(host_settings(), credentials=(keyless, minter))
+    with pytest.raises(Invalid) as caught:
+        credentials.deliver(
+            run_request(profile="review", commit="0" * 40), settings, tmp_path
+        )
+    assert str(caught.value) == "reviews App token unavailable; review refused"
+
+
+def test_minting_account_prefers_own_key_then_minter_then_none() -> None:
+    own = host_settings().credentials[0]
+    keyless = dataclasses.replace(
+        own,
+        account="keyless",
+        reviews_app_id=None,
+        reviews_app_client_id=None,
+        reviews_app_pem=None,
+    )
+    delegated = dataclasses.replace(
+        keyless, account="delegated", reviews_minter="agent"
+    )
+    minter_first = dataclasses.replace(own, account="other")
+    settings = dataclasses.replace(
+        host_settings(), credentials=(own, keyless, delegated, minter_first)
+    )
+    assert credentials.minting_account(settings, "agent") is own
+    assert credentials.minting_account(settings, "keyless") is None
+    assert credentials.minting_account(settings, "delegated") is own
+    assert credentials.minting_account(settings, "other") is minter_first
+
+
+def test_launcher_token_mints_for_the_minting_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    own = host_settings().credentials[0]
+    keyless = dataclasses.replace(
+        own,
+        account="keyless",
+        reviews_app_id=None,
+        reviews_app_client_id=None,
+        reviews_app_pem=None,
+        reviews_minter="agent",
+    )
+    settings = dataclasses.replace(host_settings(), credentials=(own, keyless))
+    seen: list[tuple[object, str]] = []
+
+    def installation(references: object, repository: str) -> str:
+        seen.append((references, repository))
+        return "example-installation"
+
+    monkeypatch.setattr(credentials, "installation_token", installation)
+    value = run_request(profile="review", commit="0" * 40, account="keyless")
+    assert credentials.launcher_token(settings, value) == "example-installation"
+    assert seen == [(own, value.repo)]
+
+
+def test_launcher_token_is_none_without_a_key() -> None:
+    own = host_settings().credentials[0]
+    keyless = dataclasses.replace(
+        own,
+        reviews_app_id=None,
+        reviews_app_client_id=None,
+        reviews_app_pem=None,
+    )
+    settings = dataclasses.replace(host_settings(), credentials=(keyless,))
+    value = run_request(profile="review", commit="0" * 40)
+    assert credentials.launcher_token(settings, value) is None
+
+
+def test_launcher_token_failure_refuses_without_the_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_: object) -> str:
+        message = "unprinted-app-material"
+        raise gh_app.GhAppError(message)
+
+    monkeypatch.setattr(credentials, "installation_token", fail)
+    with pytest.raises(Invalid) as caught:
+        credentials.launcher_token(
+            host_settings(), run_request(profile="review", commit="0" * 40)
+        )
+    assert str(caught.value) == "reviews App token unavailable; review refused"
+    assert caught.value.__cause__ is None
+
+
+def test_delivered_token_is_read_once_and_removed(tmp_path: Path) -> None:
+    path = tmp_path / "run.review-token"
+    path.write_text("example-delivered\n")
+    assert credentials.delivered_token(path) == "example-delivered"
+    assert not path.exists()
+
+
+def test_delivered_token_absent_is_none(tmp_path: Path) -> None:
+    assert credentials.delivered_token(tmp_path / "run.review-token") is None
+
+
+@pytest.mark.parametrize("text", ["", "  \n", "two words", "tab\there", "bell\a"])
+def test_malformed_delivered_token_is_refused_and_removed(
+    tmp_path: Path, text: str
+) -> None:
+    path = tmp_path / "run.review-token"
+    path.write_text(text)
+    with pytest.raises(Invalid) as caught:
+        credentials.delivered_token(path)
+    assert str(caught.value) == "delivered review token is malformed"
+    assert not path.exists()
+
+
+def test_oversized_delivered_token_is_refused_and_removed(tmp_path: Path) -> None:
+    path = tmp_path / "run.review-token"
+    path.write_text("a" * 513)
+    with pytest.raises(Invalid):
+        credentials.delivered_token(path)
+    assert not path.exists()
+
+
+def test_delivered_token_at_the_limit_is_accepted(tmp_path: Path) -> None:
+    path = tmp_path / "run.review-token"
+    path.write_text("a" * 512)
+    assert credentials.delivered_token(path) == "a" * 512
+
+
+def test_delivered_token_that_is_a_link_is_refused_and_removed(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.write_text("example-delivered")
+    path = tmp_path / "run.review-token"
+    path.symlink_to(target)
+    with pytest.raises(OSError):  # noqa: PT011 -- O_NOFOLLOW's ELOOP
+        credentials.delivered_token(path)
+    assert not path.is_symlink()
+    assert target.read_text() == "example-delivered"
 
 
 @pytest.mark.parametrize("source", ["file", "reference"])
@@ -748,18 +881,14 @@ def test_app_token_scope_ignores_planted_origin(
         "remote.origin.url",
         "https://github.com/example-other/other.git",
     )
-    env = gh_app.Env(tmp_path, lambda: 1000, secrets.Store, gh_app.run_openssl)
-    monkeypatch.setattr(gh_app, "default_env", lambda: env)
-    monkeypatch.setattr(gh_app, "rebuild_pem", constant("fake pem"))
-    monkeypatch.setattr(gh_app, "sign", constant("fake jwt"))
     monkeypatch.setitem(VALUES, "example/app/pem", "fake pem")
-    scopes: list[str] = []
+    scopes: list[object] = []
 
-    def token(_env: gh_app.Env, args: gh_app.Args, _jwt: str) -> gh_app.Minted:
-        scopes.append(args.repo)
+    def mint(_env: gh_app.Env, **kwargs: object) -> gh_app.Minted:
+        scopes.append(kwargs["repository"])
         return gh_app.Minted("fake installation", 2000)
 
-    monkeypatch.setattr(gh_app, "request_token", token)
+    monkeypatch.setattr(gh_app, "mint_token", mint)
     value = run_request(profile="review", commit="0" * 40)
     credentials.deliver(value, host_settings(), tmp_path)
     assert scopes == ["example-org/example-repo"]

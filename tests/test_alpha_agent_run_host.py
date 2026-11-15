@@ -364,7 +364,10 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     deliver = credentials.deliver
 
     def after_git_shape(
-        request: RunRequest, settings: Settings, tmpdir: Path
+        request: RunRequest,
+        settings: Settings,
+        tmpdir: Path,
+        review_token: str | None,
     ) -> credentials.Delivery:
         workspace = clone / ".worktrees" / "agent-example"
         assert (workspace / "tracked").is_file()
@@ -372,7 +375,7 @@ def test_prepare_uses_one_worktree_and_private_destinations(
         assert (workspace / ".git/config.worktree").read_text() == ""
         assert (workspace / ".git/commondir").read_text() == ".\n"
         assert list((workspace / ".git/modules").iterdir()) == []
-        return deliver(request, settings, tmpdir)
+        return deliver(request, settings, tmpdir, review_token)
 
     monkeypatch.setattr(credentials, "deliver", after_git_shape)
     result = run_host.prepare_workspace(run)
@@ -3434,6 +3437,68 @@ def test_preflight_refuses_review_without_app_references(
     with pytest.raises(Invalid) as caught:
         run_host.preflight(run)
     assert str(caught.value) == "reviews App credentials are not configured"
+
+
+def keyless(run: run_host.Run) -> run_host.Run:
+    original = run.settings.credentials[0]
+    references = dataclasses.replace(
+        original,
+        reviews_app_id=None,
+        reviews_app_client_id=None,
+        reviews_app_pem=None,
+    )
+    return dataclasses.replace(
+        run, settings=dataclasses.replace(run.settings, credentials=(references,))
+    )
+
+
+def test_preflight_accepts_a_delivered_token_without_app_references(
+    tmp_path: Path,
+) -> None:
+    run = keyless(make_run(tmp_path, profile="review", commit="0" * 40))
+    run.files.path("review-token").write_text("example-delivered")
+    run_host.preflight(run)
+    assert run.files.path("review-token").exists()
+
+
+def test_preflight_still_refuses_a_keyless_review_with_no_token(
+    tmp_path: Path,
+) -> None:
+    run = keyless(make_run(tmp_path, profile="review", commit="0" * 40))
+    with pytest.raises(Invalid) as caught:
+        run_host.preflight(run)
+    assert str(caught.value) == "reviews App credentials are not configured"
+
+
+def test_build_preflight_ignores_a_review_token_file(tmp_path: Path) -> None:
+    run = keyless(make_run(tmp_path))
+    run_host.preflight(run)
+
+
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_prepare_takes_a_review_token_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: str
+) -> None:
+    run = make_run(
+        tmp_path, profile=profile, commit="0" * 40 if profile == "review" else None
+    )
+    path = run.files.path("review-token")
+    path.write_text("example-delivered")
+    monkeypatch.setattr(run_host.worktree, "create", constant(tmp_path / "worktree"))
+    monkeypatch.setattr(run_host, "checked_policy", constant(None))
+    seen: list[str | None] = []
+
+    def deliver(
+        _request: object, _settings: object, _tmpdir: object, token: str | None
+    ) -> credentials.Delivery:
+        seen.append(token)
+        raise Invalid
+
+    monkeypatch.setattr(credentials, "deliver", deliver)
+    with pytest.raises(Invalid):
+        run_host.prepare_workspace(run)
+    assert seen == ["example-delivered" if profile == "review" else None]
+    assert path.exists() is (profile == "build")
 
 
 def test_preflight_checks_the_requested_accounts_app(tmp_path: Path) -> None:

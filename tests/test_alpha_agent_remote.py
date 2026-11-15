@@ -15,6 +15,7 @@ def test_file_names() -> None:
         ".request.json",
         ".prompt",
         ".schema.json",
+        ".review-token",
         ".pgid",
         ".launched",
         ".phase",

@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NoReturn
 
 from tbhbdev import version
-from tbhbdev.alpha.agent import render, runfiles, taint_store, transport
+from tbhbdev.alpha.agent import credentials, render, runfiles, taint_store, transport
 from tbhbdev.alpha.agent.decisions import driver as rules
 from tbhbdev.alpha.agent.decisions import remote, repo, request, taint
 from tbhbdev.alpha.agent.decisions import runfiles_names as files
@@ -206,6 +206,11 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
     rules.same_version(version.line(), host_version)
     if run.request.profile is Profile.REVIEW:
         run.request = replace(run.request, commit=rules.resolve_ref(ref, refs))
+    review_token = (
+        credentials.launcher_token(settings, run.request)
+        if run.request.profile is Profile.REVIEW
+        else None
+    )
     save(run)
     try:
         transport.stream(
@@ -213,7 +218,11 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
             run.host,
             run.name,
             inputs=transport.Inputs(
-                json.dumps(request.to_dict(run.request)), prompt, schema, run.owner
+                json.dumps(request.to_dict(run.request)),
+                prompt,
+                schema,
+                run.owner,
+                review_token,
             ),
             timeout=deadline - time.monotonic(),
         )

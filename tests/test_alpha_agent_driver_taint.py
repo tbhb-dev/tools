@@ -12,7 +12,7 @@ from agent_driver_example import Remote, execution_arguments, setup
 from agent_example import settings
 
 from tbhbdev.alpha import agent
-from tbhbdev.alpha.agent import driver, taint_store
+from tbhbdev.alpha.agent import credentials, driver, taint_store
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     result = setup(tmp_path, monkeypatch)
     monkeypatch.setattr(agent.settings, "load", settings)
+    monkeypatch.setattr(credentials, "launcher_token", lambda *_: None)
     return result
 
 

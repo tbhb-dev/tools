@@ -4,6 +4,7 @@ DIRECTORY = "tbhbdev/agent-runs"
 REQUEST = ".request.json"
 PROMPT = ".prompt"
 SCHEMA = ".schema.json"
+REVIEW_TOKEN = ".review-token"  # noqa: S105  # nosec B105 -- a file name
 PGID = ".pgid"
 LAUNCHED = ".launched"
 PHASE = ".phase"
@@ -21,6 +22,7 @@ SUFFIXES = (
     REQUEST,
     PROMPT,
     SCHEMA,
+    REVIEW_TOKEN,
     PGID,
     LAUNCHED,
     PHASE,
