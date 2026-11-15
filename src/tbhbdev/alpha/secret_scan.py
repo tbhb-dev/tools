@@ -217,8 +217,10 @@ def diff_env(root: Path, what: str, attributes: Path) -> dict[str, str]:
     try:
         start = int(os.environ.get("GIT_CONFIG_COUNT") or "0")
     except ValueError:
-        message = f"cannot scan {what} for secrets: GIT_CONFIG_COUNT is not a number"
-        raise SystemExit(message) from None
+        start = -1
+    if start < 0:
+        message = f"cannot scan {what} for secrets: GIT_CONFIG_COUNT is not a count"
+        raise SystemExit(message)
     code, empty = git("hash-object", "-t", "tree", "/dev/null", cwd=root)
     if code != 0 or not empty:
         message = f"cannot scan {what} for secrets: git cannot name the empty tree"
@@ -241,7 +243,7 @@ def staged_env(root: Path, what: str) -> dict[str, str]:
     gitleaks reads ``.gitleaksignore`` from the path it scans, so it scans the
     private directory, and ``GIT_DIR`` and ``GIT_WORK_TREE`` lead its git to
     the repository. A relative ``GIT_INDEX_FILE`` from the hook becomes
-    absolute, since gitleaks' git runs in that directory.
+    absolute against ROOT, where the hook's git ran and where staged_file reads.
     """
     code, git_dir = git("rev-parse", "--absolute-git-dir", cwd=root)
     if code != 0:
@@ -250,7 +252,7 @@ def staged_env(root: Path, what: str) -> dict[str, str]:
     env = os.environ | {"GIT_DIR": git_dir, "GIT_WORK_TREE": str(root)}
     index = os.environ.get("GIT_INDEX_FILE")
     if index:
-        env["GIT_INDEX_FILE"] = os.path.abspath(index)  # noqa: PTH100 -- a str for env
+        env["GIT_INDEX_FILE"] = os.path.abspath(root / index)  # noqa: PTH100 -- a str
     return env
 
 

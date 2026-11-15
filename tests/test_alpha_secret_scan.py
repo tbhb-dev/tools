@@ -628,8 +628,16 @@ def run_git(repo: Path, *args: str) -> None:
 
 
 @pytest.fixture
-def repo(root: Path) -> Path:
-    """A repository with one commit and its committed config staged-clean."""
+def repo(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A repository with one commit and its committed config staged-clean.
+
+    Git here reads no user or system config and no GIT_* variable of the run
+    that runs the tests, such as a hook's GIT_INDEX_FILE.
+    """
+    for name in [n for n in os.environ if n.startswith("GIT_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     run_git(root, "init", "-q")
     run_git(root, "config", "user.email", "t@example.invalid")
     run_git(root, "config", "user.name", "t")
@@ -650,11 +658,23 @@ def staged_scan(repo: Path) -> None:
     )
 
 
+def refused(repo: Path) -> str:
+    with pytest.raises(SystemExit) as info:
+        staged_scan(repo)
+    return str(info.value)
+
+
+def found(path: str, line: int = 1) -> str:
+    return (
+        "refusing the staged changes: gitleaks finds a secret: "
+        f"rule aws-access-token in {path}:{line}"
+    )
+
+
 def test_a_staged_secret_is_refused(repo: Path) -> None:
     (repo / "a.txt").write_text(KEY_LINE)
     run_git(repo, "add", "a.txt")
-    with pytest.raises(SystemExit, match=r"a.txt"):
-        staged_scan(repo)
+    assert refused(repo) == found("a.txt")
 
 
 @pytest.mark.parametrize("setting", ["always", "true"])
@@ -665,23 +685,20 @@ def test_a_colour_setting_does_not_hide_a_staged_secret(
     run_git(repo, "config", "color.diff", "always")
     (repo / "a.txt").write_text(KEY_LINE)
     run_git(repo, "add", "a.txt")
-    with pytest.raises(SystemExit, match=r"a.txt"):
-        staged_scan(repo)
+    assert refused(repo) == found("a.txt")
 
 
 def test_a_staged_binary_is_scanned(repo: Path) -> None:
     (repo / "blob.dat").write_bytes(b"x\0\n" + KEY_LINE.encode())
     run_git(repo, "add", "blob.dat")
-    with pytest.raises(SystemExit, match=r"blob.dat"):
-        staged_scan(repo)
+    assert refused(repo) == found("blob.dat", 2)
 
 
 def test_a_binary_attribute_does_not_hide_a_staged_secret(repo: Path) -> None:
     (repo / ".gitattributes").write_text("c.dat binary\n")
     (repo / "c.dat").write_text(KEY_LINE)
     run_git(repo, "add", ".gitattributes", "c.dat")
-    with pytest.raises(SystemExit, match=r"c.dat"):
-        staged_scan(repo)
+    assert refused(repo) == found("c.dat")
 
 
 def test_a_rename_is_scanned_at_its_new_path(repo: Path) -> None:
@@ -690,8 +707,7 @@ def test_a_rename_is_scanned_at_its_new_path(repo: Path) -> None:
     run_git(repo, "add", "-f", "old.txt", ".gitleaksignore")
     run_git(repo, "commit", "-qm", "old", "--no-verify")
     run_git(repo, "mv", "old.txt", "new.txt")
-    with pytest.raises(SystemExit, match=r"new.txt"):
-        staged_scan(repo)
+    assert refused(repo) == found("new.txt")
 
 
 def test_a_clean_staged_change_passes(repo: Path) -> None:
@@ -731,3 +747,62 @@ def test_an_unnameable_empty_tree_is_refused(
     monkeypatch.setattr(secret_scan, "git", no_tree)
     with pytest.raises(SystemExit, match="empty tree"):
         secret_scan.diff_env(root, "x", tmp_path / "attributes")
+
+
+def stage_secret(repo: Path) -> None:
+    (repo / "a.txt").write_text(KEY_LINE)
+    run_git(repo, "add", "a.txt")
+
+
+@pytest.mark.parametrize("helper", ["true", "false"])
+def test_an_external_diff_does_not_hide_a_staged_secret(
+    repo: Path, helper: str
+) -> None:
+    run_git(repo, "config", "diff.external", helper)
+    stage_secret(repo)
+    assert refused(repo) == found("a.txt")
+
+
+def test_the_external_diff_variable_does_not_hide_a_staged_secret(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GIT_EXTERNAL_DIFF", "true")
+    stage_secret(repo)
+    assert refused(repo) == found("a.txt")
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicPrefix", "true"),
+        ("diff.srcPrefix", "x/"),
+        ("diff.dstPrefix", "y/"),
+        ("diff.relative", "true"),
+    ],
+)
+def test_a_diff_format_setting_does_not_change_what_is_scanned(
+    repo: Path, key: str, value: str
+) -> None:
+    run_git(repo, "config", key, value)
+    stage_secret(repo)
+    assert refused(repo) == found("a.txt")
+
+
+def test_a_negative_config_count_is_refused(
+    root: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "-4")
+    with pytest.raises(SystemExit, match="GIT_CONFIG_COUNT"):
+        secret_scan.diff_env(root, "x", tmp_path / "attributes")
+
+
+def test_a_relative_index_file_is_read_from_the_repository_root(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    stage_secret(repo)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("GIT_INDEX_FILE", ".git/index")
+    assert refused(repo) == found("a.txt")
