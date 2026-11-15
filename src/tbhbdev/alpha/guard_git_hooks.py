@@ -36,7 +36,7 @@ SETTERS = {"export", "declare", "typeset", "readonly", "local"}
 NO_VERIFY = "--no-verify"
 FLAG_LETTERS = ["a", "i", "s", "v", "q", "e", "z", "o", "p"]
 SHORT_N = re.compile(
-    "-[" + "".join(FLAG_LETTERS) + "]*n[" + "".join(FLAG_LETTERS) + "]*"
+    "-[" + "".join(FLAG_LETTERS) + "]*n[" + "".join(FLAG_LETTERS) + "]*m?"
 )
 # Options whose next word is a value, never a flag.
 VALUE_OPTIONS = {"-m", "--message", "--author", "--date", "-F", "-C", "-t"}
@@ -46,7 +46,7 @@ READ_WORDS = {"get", "list", "unset"}
 ENV_PREFIX = "git_config_"
 ENV_ASSIGN = re.compile(r"(?:^|[\s;&|(])git_config_\w*=")
 # A quoted span, blanked before ENV_ASSIGN looks: prose in a commit message isn't one.
-QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
 # Git options whose next word is a value, so it is not the subcommand.
 GLOBAL_VALUE_OPTIONS = {
     "-c",
@@ -84,10 +84,30 @@ def names_key_setting(value: str) -> bool:
     return value.lower().partition("=")[0].strip() == KEY
 
 
+def assigns_key(lower: str) -> bool:
+    """Whether the text assigns a ``GIT_CONFIG_*`` variable a value naming the key.
+
+    The assignment itself must sit outside quotes, as prose in a message doesn't
+    set anything. The value runs to the next unquoted space.
+    """
+    blank = QUOTED.sub(lambda found: " " * len(found.group()), lower)
+    for found in ENV_ASSIGN.finditer(blank):
+        end = found.end()
+        while end < len(lower) and (
+            not blank[end].isspace() or lower[end] != blank[end]
+        ):
+            end += 1
+        if KEY in lower[found.end() : end]:
+            return True
+    return False
+
+
 def assigns_env(prefix: list[str]) -> bool:
     """Whether a command's prefix assigns ``GIT_CONFIG_*`` and names the key."""
-    assigned = any(w.lower().startswith(ENV_PREFIX) and "=" in w for w in prefix)
-    return assigned and names_key(prefix)
+    return any(
+        w.lower().startswith(ENV_PREFIX) and "=" in w and KEY in w.lower()
+        for w in prefix
+    )
 
 
 def subcommand(words: list[str]) -> tuple[int, str]:
@@ -163,7 +183,7 @@ def bypasses(words: list[str]) -> bool:
 def verdict(text: str) -> str | None:
     """The deny reason for a command, or None to allow it."""
     lower = text.lower()
-    if ENV_ASSIGN.search(QUOTED.sub(" ", lower)) and KEY in lower:
+    if assigns_key(lower):
         return REASON
     for prefix, words in simple_commands(text):
         if assigns_env(prefix) or bypasses(words):
