@@ -138,7 +138,10 @@ def github_token(request: RunRequest, references: Credentials) -> str | None:
             raise Invalid(message) from None
     if references.gh:
         return read(references.gh, label="gh")
-    if references.pull_requests_app_pem is None:
+    if (
+        references.pull_requests_app_client_id is None
+        and references.pull_requests_app_pem is None
+    ):
         return None
     try:
         return pull_requests_token(references, request.repo)

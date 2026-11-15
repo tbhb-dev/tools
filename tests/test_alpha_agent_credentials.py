@@ -1176,6 +1176,26 @@ def test_pull_requests_app_without_references_is_refused(missing: str) -> None:
     assert str(caught.value) == "pull-requests App credentials are not configured"
 
 
+@pytest.mark.parametrize("missing", ["client", "pem"])
+def test_build_refuses_when_one_pull_requests_app_reference_is_missing(
+    tmp_path: Path, missing: str
+) -> None:
+    settings = pull_requests_settings()
+    references = dataclasses.replace(
+        settings.credentials[0],
+        pull_requests_app_client_id=None
+        if missing == "client"
+        else settings.credentials[0].pull_requests_app_client_id,
+        pull_requests_app_pem=None
+        if missing == "pem"
+        else settings.credentials[0].pull_requests_app_pem,
+    )
+    settings = dataclasses.replace(settings, credentials=(references,))
+    with pytest.raises(Invalid) as caught:
+        credentials.deliver(run_request(), settings, tmp_path)
+    assert str(caught.value) == "pull-requests App token unavailable; build refused"
+
+
 def test_pull_requests_token_refuses_a_host_other_than_github(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
