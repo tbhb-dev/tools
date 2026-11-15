@@ -1630,3 +1630,81 @@ def test_a_directory_change_after_close_or_with_repo_is_unchanged() -> None:
     pinned = run_find("cd x && gh pr close 3 -R a/b")
     assert pinned is not None
     assert guard.hint(pinned) == CLOSE_PR.format(n=3) + FOREIGN.format(r="a/b")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "env -S 'gh pr close 5'",
+        "env -S'gh pr close 5'",
+        "env --split-string='gh pr close 5'",
+        "env --split-string 'gh pr close 5'",
+        "env -iS 'gh pr close 5'",
+        "env -iS'gh pr close 5'",
+        "env -S 'gh pr' close 5",
+        "env -S 'FOO=1 gh pr close 5'",
+        "sudo env -S 'gh pr close 5'",
+        "/usr/bin/env -S 'gh pr close 5'",
+    ],
+)
+def test_env_split_string_is_scanned(text: str) -> None:
+    found = run_find(text)
+    assert found is not None
+    assert found.sub == "close"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "env -S 'echo gh pr close 5'",
+        "env -S",
+        "env --split-string",
+        "env -uS gh pr view 5",
+        "env -CS gh pr view 5",
+        "sudo -S gh pr view 5",
+        "nice -S gh pr view 5",
+        "env FOO=1 gh pr view 5",
+    ],
+)
+def test_env_split_string_other_uses_stay_allowed(text: str) -> None:
+    assert run_find(text) is None
+
+
+@pytest.mark.parametrize(
+    ("prefix", "value"),
+    [
+        (["env", "-S", "a b"], "a b"),
+        (["env", "-Sa b"], "a b"),
+        (["env", "--split-string=x"], "x"),
+        (["env", "--split-string", "y"], "y"),
+        (["env", "-S"], ""),
+        (["env", "--split-string"], ""),
+        (["env", "-iSz"], "z"),
+        (["env", "--unset=A", "-S", "q"], "q"),
+        (["env", "-uS"], None),
+        (["env", "-CS"], None),
+        (["sudo", "-S", "x"], None),
+        (["sudo", "env", "-S", "x"], "x"),
+        (["env", "sudo", "-S", "x"], None),
+        (["env", "FOO=1"], None),
+        ([], None),
+    ],
+)
+def test_env_split_string_value(prefix: list[str], value: str | None) -> None:
+    assert guard.env_split_string(prefix) == value
+
+
+@pytest.mark.parametrize(
+    "repo", ["a/b; rm", "a b/c", "$R", "", "a/b\n/c", "a", "a/b/c/d"]
+)
+def test_an_odd_repo_is_not_echoed(repo: str) -> None:
+    found = guard.Match("close", ["3"], "pr", repo)
+    message = guard.hint(found)
+    assert "a clone of the repository it targets" in message
+    assert message.endswith("which the command doesn't show.")
+
+
+@pytest.mark.parametrize("repo", ["a/b", "github.com/a/b", "A_b.c/d-e"])
+def test_a_plain_repo_is_echoed(repo: str) -> None:
+    found = guard.Match("close", ["3"], "pr", repo)
+    assert guard.hint(found).endswith(f"run it in a clone of {repo}.")

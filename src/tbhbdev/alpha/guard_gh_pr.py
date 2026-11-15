@@ -47,9 +47,10 @@ for a root whose ledger lists any pull request, an approval whose target
 can't be read (``gh pr review --approve`` on the current branch, say) all
 deny. A root with no ledger opened nothing, so its approvals pass.
 
-Allowing prints nothing. Every other path fails open: unreadable input or any crash
-allows the command and prints nothing, because a broken hook must never stop
-the agent's work. The permission rules in .claude/settings.json and
+Allowing prints nothing. Every other path fails open: unreadable input or a
+crash outside the scan allows the command and prints nothing, because a broken
+hook must never stop the agent's work. A crash while scanning the command of
+a repository under tbhb-dev denies it. The permission rules in .claude/settings.json and
 .codex/rules/pull-request.rules stay as backstops.
 
 Matching is by shell word, not by regex over the text. A small scanner splits
@@ -129,6 +130,8 @@ WRAPPER_VALUE_OPTIONS = {
 }
 KEYWORDS = {"if", "then", "do", "else", "elif", "while", "until", "!", "{", "}"}
 VALUE_FLAGS = {"-R", "--repo", "--hostname"}
+# What may be echoed back as a repository: [HOST/]OWNER/REPO, plain characters.
+REPO_SAFE = re.compile(r"[\w.-]+(?:/[\w.-]+){1,2}")
 ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
 PR_NUMBER = re.compile(r"(?:\S*/pull/|#)?(\d+)")
 TARGET_URL = re.compile(r"https?://[^/\s]+/([^/\s]+/[^/\s]+)/(?:pull|issues)/\d+\S*")
@@ -521,25 +524,51 @@ class Simple(NamedTuple):
 def simple_commands(text: str) -> Iterator[Simple]:
     """Each simple command the shell would run, split from its prefix words.
 
-    ``bash -c SCRIPT`` and ``eval`` are scanned in their place, under the
-    shell's own prefix.
+    ``bash -c SCRIPT``, ``eval`` and ``env -S STRING`` are scanned in their
+    place, under the shell's own prefix.
     """
     for command in Scanner(text).run():
         words = skip_prefix(command)
-        if not words:
-            continue
         prefix = command[: len(command) - len(words)]
-        program = program_of(words)
-        if program in SHELLS:
+        split = env_split_string(prefix)
+        program = program_of(words) if words else ""
+        if split is not None:
+            inner = simple_commands(" ".join([split, *words]))
+        elif program in SHELLS:
             script = shell_script(words[1:])
             inner = simple_commands(script) if script is not None else iter(())
         elif program == "eval":
             inner = simple_commands(" ".join(words[1:]))
         else:
-            yield Simple(prefix, words)
+            if words:
+                yield Simple(prefix, words)
             continue
         for found in inner:
             yield Simple(prefix + found.prefix, found.words)
+
+
+def env_split_string(prefix: list[str]) -> str | None:
+    """The ``env -S`` or ``--split-string`` value in a prefix, else None.
+
+    ``env`` runs that string as a command line, so it is scanned like ``-c``.
+    """
+    in_env = False
+    words = iter(prefix)
+    for word in words:
+        name = word.rsplit("/", 1)[-1]
+        if name in WRAPPERS:
+            in_env = name == "env"
+        elif in_env and word.startswith("--"):
+            flag, equals, value = word.partition("=")
+            if flag == "--split-string":
+                return value if equals else next(words, "")
+        elif in_env and word.startswith("-"):
+            for index, char in enumerate(word[1:], 2):
+                if char in "uC":  # the rest of the word is that option's value
+                    break
+                if char == "S":
+                    return word[index:] or next(words, "")
+    return None
 
 
 def cluster_repo(word: str, words: Iterator[str], name: str | None) -> str | None:
@@ -831,7 +860,7 @@ def close_hint(found: Match, blocked: str, number: str, *, pinned: bool) -> str:
 def hint(found: Match) -> str:
     """The block message: what was blocked and the command to run instead."""
     blocked = f"`gh {found.group} {found.sub}` is blocked."
-    pinned = found.repo is None or (bool(found.repo) and "$" not in found.repo)
+    pinned = found.repo is None or bool(REPO_SAFE.fullmatch(found.repo))
     number = (target_number(found.args) if pinned else None) or "<N>"
     if found.sub == "close":
         return close_hint(found, blocked, number, pinned=pinned)
