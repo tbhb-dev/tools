@@ -186,6 +186,7 @@ POLICY = "shell_environment_policy"
 GH_SHIM_MODE = 0o755
 AGY_PR_TIMEOUT = 120
 HARNESS_TIMEOUT = 10
+COMPACT_SAVE_TIMEOUT = 60
 # Codex's documented default hook timeout, written out so the trusted hash covers
 # exactly what is on disk.
 CODEX_TIMEOUT = 600
@@ -288,8 +289,10 @@ def claude_hooks() -> dict[str, list[Json]]:
                 record,
                 guard,
                 handler("session-context", HARNESS_TIMEOUT),
-            )
+            ),
+            group("compact", handler("compact restore", HARNESS_TIMEOUT)),
         ],
+        "PreCompact": [group(None, handler("compact save", COMPACT_SAVE_TIMEOUT))],
         "SubagentStart": [group(None, record)],
         "PreToolUse": [
             group("Bash|Agent", record),

@@ -227,6 +227,27 @@ def test_claude_hooks() -> None:
                     guard,
                     context,
                 ]
+            },
+            {
+                "matcher": "compact",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": marked("compact restore"),
+                        "timeout": 10,
+                    }
+                ],
+            },
+        ],
+        "PreCompact": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": marked("compact save"),
+                        "timeout": 60,
+                    }
+                ]
             }
         ],
         "SubagentStart": [{"hooks": [record]}],

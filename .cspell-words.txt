@@ -1,4 +1,5 @@
 abce
+abprs
 addopts
 afakt
 akia
@@ -82,6 +83,7 @@ getppid
 getproxies
 gitdir
 gitdirs
+gmtime
 gpgsig
 gpgsign
 hardwrap
@@ -99,6 +101,7 @@ keygen
 keyrings
 killall
 kworker
+lastindex
 libc
 libexec
 libproc
@@ -190,6 +193,7 @@ setopt
 setsid
 shellcheck
 shfmt
+sidechain
 srcs
 stampable
 starlark
@@ -252,7 +256,6 @@ xsession
 xtbhb
 zizmor
 zqxw
-
 boottime
 getpgid
 getpgrp
@@ -288,7 +291,6 @@ CDXPXY
 ENXIO
 ttyname
 NOCTTY
-
 bwrap
 ENOENT
 esac
