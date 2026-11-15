@@ -75,9 +75,11 @@ Known gaps, none of which the permission rules close either:
   (``python -c``, ``ssh host '...'``), and ``gh api`` calls that do the same
   work. Substitutions inside an unquoted heredoc body are not scanned, and a
   here-string into a shell (``bash <<< 'gh pr close 5'``) is not either.
+  A ``case`` pattern's ``)`` inside ``"$( ... )"`` ends the substitution early.
 - Over-matches: after a wrapper the guard reads the first ``gh`` that only
   options and their values precede, so ``time -p echo -n gh pr close 5`` is
-  blocked as well. That errs toward denying.
+  blocked as well, and so is ``gh pr --json close view``, where an unknown
+  flag's value is read as the subcommand. That errs toward denying.
 - Approvals it misses: ``gh api graphql`` with an ``addPullRequestReview`` or
   ``submitPullRequestReview`` mutation, ``gh api --input FILE`` and
   ``-F event=@file``, curl, httpx or any client other than gh, a script or
@@ -95,6 +97,7 @@ Known gaps, none of which the permission rules close either:
 import json
 import os
 import re
+import shlex
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -112,33 +115,45 @@ SUBCOMMANDS = ("create", "edit", "merge", "ready", "close")
 GUARDED = {("pr", sub) for sub in SUBCOMMANDS} | {("issue", "close")}
 GROUPS = {group for group, _ in GUARDED}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
-# Shell options whose value is the next word, so it is not the script.
+# Shell options whose value is the next word, so it is not the script. The short
+# ones, -o and -O, may sit in a cluster (``-euo pipefail``).
 DURATION = re.compile(r"\d+(\.\d+)?[smhd]?")
 ANSI_ESCAPE = re.compile(
-    r"\\(x[0-9a-fA-F]{1,2}|[0-7]{1,3}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|.)", re.DOTALL
+    r"\\(x[0-9a-fA-F]{1,2}|[0-7]{1,3}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|c.|.)",
+    re.DOTALL,
 )
 ANSI_SIMPLE = {
     "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n",
     "r": "\r", "t": "\t", "v": "\v",
 }  # fmt: skip
-SHELL_VALUE_OPTIONS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
+SHELL_VALUE_OPTIONS = {"--rcfile", "--init-file"}
 WRAPPERS = {
     "env", "command", "exec", "sudo", "nohup", "time", "builtin", "xargs",
     "timeout", "nice", "setsid", "stdbuf", "ionice", "doas", "watch",
 }  # fmt: skip
 # Wrapper options whose value is the next word, so it is not the program.
+# fmt: off
 WRAPPER_VALUE_OPTIONS = {
-    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
-    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U"},
-    "xargs": {"-n", "-I", "-L", "-P", "-s", "-E", "-d", "-a"},
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string", "-a", "--argv0"},
+    "sudo": {
+        "-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U", "--user", "--group",
+        "--host", "--prompt", "--chdir", "--role", "--type", "--other-user",
+        "--close-from", "--command-timeout",
+    },
+    # cspell:ignore procs
+    "xargs": {
+        "-n", "-I", "-L", "-P", "-s", "-E", "-d", "-a", "--max-args", "--max-lines",
+        "--max-procs", "--max-chars", "--delimiter", "--arg-file", "--eof",
+    },
     "exec": {"-a"},
-    "nice": {"-n"},
+    "nice": {"-n", "--adjustment"},
     "timeout": {"-s", "--signal", "-k", "--kill-after"},
     "stdbuf": {"-i", "-o", "-e"},
     "ionice": {"-c", "-n", "-p", "-P", "-u"},
     "doas": {"-u", "-C"},
     "watch": {"-n", "--interval"},
 }
+# fmt: on
 # Wrappers whose first word after the options is an argument, not the program.
 WRAPPER_ARGUMENT = {"timeout"}
 KEYWORDS = {"if", "then", "do", "else", "elif", "while", "until", "!", "{", "}"}
@@ -146,7 +161,7 @@ VALUE_FLAGS = {"-R", "--repo", "--hostname"}
 # What may be echoed back as a repository: [HOST/]OWNER/REPO, plain characters.
 REPO_SAFE = re.compile(r"[\w.-]+(?:/[\w.-]+){1,2}")
 ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
-PR_NUMBER = re.compile(r"(?:\S*/pull/|#)?(\d+)")
+PR_NUMBER = re.compile(r"(?:\S*/(?:pull|issues)/|#)?(\d+)")
 TARGET_URL = re.compile(r"https?://[^/\s]+/([^/\s]+/[^/\s]+)/(?:pull|issues)/\d+\S*")
 # Flags of the guarded gh pr and gh issue verbs that take a value.
 ARG_VALUE_FLAGS = {
@@ -334,6 +349,9 @@ class Scanner:
         if self.text.startswith("$'", self.pos):
             self.quote, self.in_word = "$'", True
             self.pos += 2
+        elif self.text.startswith('$"', self.pos):  # locale quoting: a plain "..."
+            self.quote, self.in_word = '"', True
+            self.pos += 2
         elif self.text.startswith("$(", self.pos):
             self.open_nesting("$", 2)
         elif self.text.startswith("<<<", self.pos):
@@ -390,6 +408,8 @@ class Scanner:
 def ansi_char(escape: str) -> str:
     """The character a ``$'...'`` escape (without its backslash) stands for."""
     head = escape[0]
+    if head == "c" and len(escape) > 1:  # control character: \c@ is a NUL
+        return "\0" if ord(escape[1]) % 32 == 0 else "\x01"
     if head in ANSI_SIMPLE:
         return ANSI_SIMPLE[head]
     if head in "xuU":
@@ -401,12 +421,40 @@ def ansi_char(escape: str) -> str:
     return head if head in "\\'\"?" else "\\" + head
 
 
+def option_width(word: str, values: set[str]) -> int:
+    """The words an option takes: itself, and its value when that is the next word.
+
+    A long option takes the next word when it is in ``values`` (``--user=x``
+    is not). In a short cluster the first value letter decides: ``-uFOO`` has
+    its value attached, ``-iu`` and ``-Eu`` take the next word.
+    """
+    if word.startswith("--"):
+        return 2 if word in values else 1
+    letters = {value[1] for value in values if len(value) == 2}  # noqa: PLR2004
+    for index, char in enumerate(word[1:], 2):
+        if char in letters:
+            return 1 if word[index:] else 2
+    return 1
+
+
+def is_split_option(word: str) -> bool:
+    """Whether an ``env`` option word is ``-S`` or ``--split-string``."""
+    split = long_split_string if word.startswith("--") else short_split_string
+    return split(word, iter(())) is not None
+
+
 def skip_options(words: list[str], start: int, wrapper: str) -> int:
-    """The index after a wrapper's options, their values and its fixed argument."""
+    """The index after a wrapper's options, their values and its fixed argument.
+
+    ``env -S STRING`` ends them: the words after it are the string's command's.
+    """
     i = start
     values = WRAPPER_VALUE_OPTIONS.get(wrapper, set())
     while i < len(words) and words[i].startswith("-"):
-        i += 2 if words[i] in values else 1
+        width = option_width(words[i], values)
+        if wrapper == "env" and is_split_option(words[i]):
+            return i + width
+        i += width
     return i + (wrapper in WRAPPER_ARGUMENT)  # timeout's DURATION, whatever it is
 
 
@@ -461,15 +509,22 @@ def skip_prefix(words: list[str]) -> list[str]:
 def first_unflagged(words: list[str], start: int, wanted: set[str]) -> int | None:
     """The index of the first word in ``wanted`` that follows only flags and values.
 
-    A word that isn't a flag may be a flag's value, so the scan goes on past
-    it only when the word before it is a flag. The first word that follows a
-    non-flag and isn't wanted ends the scan.
+    A known value flag (``-R x``, ``-b x``) takes the next word whatever it is.
+    A flag with its value attached (``--repo=x``, ``-Rx``) takes nothing more.
+    After any other flag the next word may be its value, so it is skipped
+    unless it is wanted. The first word that follows a non-flag and isn't
+    wanted ends the scan.
     """
-    after_flag = False
+    after_flag = takes = False
     for k in range(start, len(words)):
-        if words[k].startswith("-"):
-            after_flag = True
-        elif words[k] in wanted:
+        word = words[k]
+        if takes:
+            takes = False
+        elif word.startswith("-"):
+            known = flag_word(word, ARG_VALUE_FLAGS | VALUE_FLAGS)
+            takes = known is not None and known[1] is None
+            after_flag = known is None
+        elif word in wanted:
             return k
         elif after_flag:
             after_flag = False
@@ -512,6 +567,11 @@ def sets_c(word: str) -> bool:
     return not word.startswith(("--", "+")) and "c" in word
 
 
+def takes_shell_value(word: str) -> bool:
+    """Whether a short option cluster such as ``-euo`` includes ``o`` or ``O``."""
+    return not word.startswith("--") and any(char in "oO" for char in word[1:])
+
+
 def shell_script(rest: list[str]) -> str | None:
     """The script of ``-c`` among a shell's options: its first non-option word."""
     has_c = False
@@ -519,12 +579,11 @@ def shell_script(rest: list[str]) -> str | None:
     for word in words:
         if word == "--":
             return next(words, None) if has_c else None
-        if word in SHELL_VALUE_OPTIONS:
-            next(words, None)
-        elif not word.startswith(("-", "+")):
+        if not word.startswith(("-", "+")):
             return word if has_c else None
-        else:
-            has_c = has_c or sets_c(word)
+        has_c = has_c or sets_c(word)
+        if word in SHELL_VALUE_OPTIONS or takes_shell_value(word):
+            next(words, None)
     return None
 
 
@@ -563,7 +622,9 @@ def inner_commands(prefix: list[str], words: list[str]) -> Iterator[Simple] | No
     split = env_split_string(prefix)
     program = program_of(words) if words else ""
     if split is not None:
-        return simple_commands(" ".join([split, *words]))
+        # env's own flags may open the string; the words after it are quoted
+        # so they stay words (a `;` in one is not a separator).
+        return simple_commands(" ".join(["env", split, *map(shlex.quote, words)]))
     if program in SHELLS:
         script = shell_script(words[1:])
         return simple_commands(script) if script is not None else iter(())
@@ -575,6 +636,8 @@ def inner_commands(prefix: list[str], words: list[str]) -> Iterator[Simple] | No
 def long_split_string(word: str, words: Iterator[str]) -> str | None:
     """The value of ``--split-string`` or ``--split-string=VALUE``, else None."""
     flag, equals, value = word.partition("=")
+    if flag in {"--unset", "--chdir"} and not equals:
+        next(words, None)  # its value is not an -S
     if flag != "--split-string":
         return None
     return value if equals else next(words, "")
@@ -583,7 +646,9 @@ def long_split_string(word: str, words: Iterator[str]) -> str | None:
 def short_split_string(word: str, words: Iterator[str]) -> str | None:
     """The value of ``-S`` in a short cluster, attached or next; None without one."""
     for index, char in enumerate(word[1:], 2):
-        if char in "uC":  # the rest of the word is that option's value
+        if char in "uC":  # the rest of the word, or the next word, is its value
+            if not word[index:]:
+                next(words, None)
             return None
         if char == "S":
             return word[index:] or next(words, "")
@@ -612,6 +677,10 @@ def env_split_string(prefix: list[str]) -> str | None:
 def cluster_repo(word: str, words: Iterator[str], name: str | None) -> str | None:
     """``name`` after a short ``env`` cluster: -i, -uNAME, -u NAME or -iuNAME."""
     for index, char in enumerate(word[1:], 2):
+        if char in "CS":  # the rest of the word, or the next word, is its value
+            if not word[index:]:
+                next(words, None)
+            return name
         if char == "i":
             name = None
         elif char == "u":
@@ -623,10 +692,15 @@ def cluster_repo(word: str, words: Iterator[str], name: str | None) -> str | Non
 def prefix_repo(prefix: list[str]) -> str | None:
     """The ``GH_REPO`` the prefix leaves set, after any ``env -u`` or ``env -i``."""
     name = None
+    in_env = False
     words = iter(prefix)
     for word in words:
         if word.startswith("GH_REPO="):
             name = word.removeprefix("GH_REPO=")
+        elif word.rsplit("/", 1)[-1] in WRAPPERS:
+            in_env = word.rsplit("/", 1)[-1] == "env"
+        elif not in_env:
+            continue
         elif word in {"--ignore-environment", "--unset=GH_REPO"}:
             name = None
         elif word == "--unset":
@@ -643,7 +717,7 @@ def find(text: str) -> Match | None:
         found = gh_match(words[1:]) if program_of(words) == "gh" else None
         if found:
             name = prefix_repo(prefix)
-            found = found._replace(moved=moved)
+            found = found._replace(moved=moved or wrapper_moves(prefix))
             return (
                 found
                 if found.repo is not None or name is None
@@ -783,8 +857,11 @@ def gh_approval(rest: list[str], default: Callable[[], str | None]) -> Approval 
     i = 0
     while i < len(rest) and rest[i].startswith("-"):
         i += 2 if rest[i] in VALUE_FLAGS else 1
-    if rest[i : i + 2] == ["pr", "review"]:
-        flags, args = split_args(rest[i + 2 :], REVIEW_VALUE_FLAGS)
+    review = (
+        first_unflagged(rest, i + 1, {"review"}) if rest[i : i + 1] == ["pr"] else None
+    )
+    if review is not None:
+        flags, args = split_args(rest[review + 1 :], REVIEW_VALUE_FLAGS)
         if any(approves(word) for word in flags):
             value_flags = VALUE_FLAGS | REVIEW_VALUE_FLAGS
             repos = flag_values(rest, {"-R", "--repo"}, value_flags)
@@ -818,6 +895,20 @@ def default_repo(
     return repo
 
 
+def wrapper_moves(prefix: list[str]) -> bool:
+    """Whether ``env -C DIR`` or ``sudo -D DIR`` runs the command elsewhere."""
+    letter = ""
+    for word in prefix:
+        name = word.rsplit("/", 1)[-1]
+        if name in WRAPPERS:
+            letter = {"env": "C", "sudo": "D"}.get(name, "")
+        elif word.startswith("--chdir") or (
+            letter and re.fullmatch(rf"-[^-]*{letter}.*", word)
+        ):
+            return True
+    return False
+
+
 def changes_directory(words: list[str]) -> bool:
     """Whether a command moves the shell, or git, to another directory."""
     program = program_of(words)
@@ -831,7 +922,10 @@ def approvals(text: str, cwd: Path | None) -> list[Approval]:
     for prefix, words in simple_commands(text):
         program = program_of(words)
         if program == "gh":
-            match = gh_approval(words[1:], default_repo(prefix, cwd, moved=moved))
+            match = gh_approval(
+                words[1:],
+                default_repo(prefix, cwd, moved=moved or wrapper_moves(prefix)),
+            )
         elif program == APPROVE_SCRIPT:
             match = script_approval(words[1:])
         else:

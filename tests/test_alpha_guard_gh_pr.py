@@ -247,7 +247,7 @@ def test_allowed(text: str) -> None:
         ),
         (
             "gh issue close https://github.com/a/b/issues/7",
-            CLOSE_ISSUE.format(n="<N>") + FOREIGN.format(r="a/b"),
+            CLOSE_ISSUE.format(n=7) + FOREIGN.format(r="a/b"),
         ),
         ("GH_REPO=a/b gh pr close 3", CLOSE_PR.format(n=3) + FOREIGN.format(r="a/b")),
         ("gh pr close -c 99 3", CLOSE_PR.format(n=3)),
@@ -1777,3 +1777,286 @@ def test_blocked_message() -> None:
     assert guard.blocked_message("gh pr merge 1") == guard.hint(
         guard.Match("merge", ["1"])
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "bash -euo pipefail -c 'gh pr close 3'",
+        "bash -eo pipefail -c 'gh pr close 3'",
+        "bash -ceo pipefail 'gh pr close 3'",
+        "bash -eoc pipefail 'gh pr close 3'",
+        "bash -o pipefail -c 'gh pr close 3'",
+        "bash +o pipefail -c 'gh pr close 3'",
+        "bash -xO extglob -c 'gh pr close 3'",
+        "timeout 5 bash -c 'gh pr close 3'",
+        "timeout 5 eval 'gh pr close 3'",
+        "timeout 5 env gh pr close 3",
+        "timeout 5 sudo gh pr close 3",
+        "timeout 5 GH_REPO=a/b gh pr close 3",
+        "env -iu FOO bash -c 'gh pr close 3'",
+        "env -iuFOO bash -c 'gh pr close 3'",
+        "sudo -Eu root bash -c 'gh pr close 3'",
+        "sudo --user root bash -c 'gh pr close 3'",
+        "sudo --user=root gh pr close 3",
+        "xargs --max-args 1 gh pr close 3",
+        "xargs -n1 gh pr close 3",
+        "env -S '-i gh pr close 5'",
+        "env -S '-u FOO gh pr close 5'",
+        "env -S '-C /tmp gh pr close 5'",
+        "env -S 'gh' -R a/b pr close 3",
+        "env -S 'gh pr' -R a/b close 3",
+        "env -S gh pr close 3",
+        "env --split-string 'gh pr' close 3",
+        "env -C dir -S 'gh pr close 5'",
+        '$"gh" pr close 3',
+        'gh pr $"close" 3',
+        "gh pr $'close\\c@suffix' 3",
+    ],
+)
+def test_wrapper_clusters_shell_options_and_env_split_strings_are_scanned(
+    text: str,
+) -> None:
+    found = run_find(text)
+    assert found is not None
+    assert found.sub == "close"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "env -S 'git commit -m' 'docs; gh pr close 5'",
+        "env -S 'echo' 'a; gh pr close 5'",
+        "gh pr --repo=a/b view --json close 3",
+        "gh pr -Ra/b comment -b close 3",
+        "gh issue --repo=a/b comment --body close 3",
+        "gh pr -b close comment 3",
+        "gh pr --repo a/b view 3",
+        "bash -euo pipefail -c 'echo hi'",
+        "bash -euo pipefail",
+        "bash -c",
+        "env -C -S 'gh pr close 5'",
+        "env --chdir -S 'gh pr close 5'",
+        "env --unset -S 'gh pr close 5'",
+        "env -u -S 'gh pr close 5'",
+        "gh pr $'close\\cA' 3",
+    ],
+)
+def test_flag_values_and_quoted_words_are_not_commands(text: str) -> None:
+    assert run_find(text) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "repo"),
+    [
+        ("GH_REPO=t/t env -C../wiki gh pr close 5", "t/t"),
+        ("GH_REPO=t/t env -C ../wiki gh pr close 5", "t/t"),
+        ("GH_REPO=t/t env -S'gh issue close 5'", "t/t"),
+        ("GH_REPO=t/t env -S 'gh issue close 5'", "t/t"),
+        ("GH_REPO=t/t sudo -i gh pr close 5", "t/t"),
+        ("GH_REPO=t/t env -Cu GH_REPO=c/d gh pr close 5", "c/d"),
+        ("GH_REPO=t/t env -C -u gh pr close 5", "t/t"),
+        ("GH_REPO=t/t env -S '-u GH_REPO' gh pr close 5", None),
+        ("GH_REPO=t/t env -iS'gh pr close 5'", None),
+    ],
+)
+def test_env_directory_and_split_flags_do_not_corrupt_gh_repo(
+    text: str, repo: str | None
+) -> None:
+    found = run_find(text)
+    assert found is not None
+    assert found.repo == repo
+
+
+@pytest.mark.parametrize(
+    ("text", "moved"),
+    [
+        ("env -C ../wiki gh pr close 3", True),
+        ("env -iC ../wiki gh pr close 3", True),
+        ("env --chdir=../wiki gh pr close 3", True),
+        ("env --chdir ../wiki gh pr close 3", True),
+        ("sudo -D /x gh pr close 3", True),
+        ("sudo --chdir /x gh pr close 3", True),
+        ("env -u FOO gh pr close 3", False),
+        ("sudo -u root gh pr close 3", False),
+        ("sudo -C 3 gh pr close 3", False),
+        ("nice -n 5 gh pr close 3", False),
+        ("gh pr close 3", False),
+    ],
+)
+def test_a_wrapper_that_changes_directory_marks_the_match_moved(
+    text: str, moved: bool
+) -> None:
+    found = run_find(text)
+    assert found is not None
+    assert found.moved is moved
+
+
+def test_a_wrapper_directory_change_hides_the_default_repository(
+    tmp_path: Path,
+) -> None:
+    repo = origin_repo(tmp_path / "repo", "git@github.com:o/r.git")
+    approve = "gh pr review 7 -a"
+    assert guard.approvals(f"env -C ../tools {approve}", repo) == [
+        guard.Approval(A_REVIEW, None)
+    ]
+    assert guard.approvals(f"env -u X {approve}", repo) == [
+        guard.Approval(A_REVIEW, "o/r#7")
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "gh pr -R tbhb-dev/tools review 7 --approve",
+        "gh pr --repo tbhb-dev/tools review 7 --approve",
+        "gh pr --repo=tbhb-dev/tools review 7 --approve",
+        # cspell:ignore Rtbhb
+        "gh pr -Rtbhb-dev/tools review 7 --approve",
+    ],
+)
+def test_flags_between_pr_and_review_still_approve(text: str) -> None:
+    assert guard.approvals(text, None) == [guard.Approval(A_REVIEW, TARGET)]
+
+
+@pytest.mark.parametrize(
+    "text", ["gh pr view 7 review", "gh pr -R tbhb-dev/tools view 7 --approve"]
+)
+def test_review_is_not_found_after_another_subcommand(text: str) -> None:
+    assert guard.approvals(text, None) == []
+
+
+@pytest.mark.parametrize(
+    ("word", "values", "width"),
+    [
+        ("-u", {"-u"}, 2),
+        ("-uFOO", {"-u"}, 1),
+        ("-iu", {"-u"}, 2),
+        ("-iuFOO", {"-u"}, 1),
+        ("-i", {"-u"}, 1),
+        ("--user", {"--user"}, 2),
+        ("--user=x", {"--user"}, 1),
+        ("--other", {"--user"}, 1),
+        ("-", {"-u"}, 1),
+        ("-5", {"-n"}, 1),
+    ],
+)
+def test_option_width(word: str, values: set[str], width: int) -> None:
+    assert guard.option_width(word, values) == width
+
+
+@pytest.mark.parametrize(
+    ("word", "split"),
+    [
+        ("-S", True),
+        ("-iS", True),
+        ("-Sgh", True),
+        ("--split-string", True),
+        ("--split-string=x", True),
+        ("-u", False),
+        ("-uS", False),
+        ("--unset", False),
+        ("--chdir=S", False),
+    ],
+)
+def test_is_split_option(word: str, split: bool) -> None:
+    assert guard.is_split_option(word) is split
+
+
+@pytest.mark.parametrize(
+    ("word", "rest", "left"),
+    [
+        ("--unset", ["-S", "x"], ["x"]),
+        ("--chdir", ["-S", "x"], ["x"]),
+        ("--unset=A", ["-S", "x"], ["-S", "x"]),
+        ("--other", ["-S", "x"], ["-S", "x"]),
+    ],
+)
+def test_long_split_string_skips_a_separate_value(
+    word: str, rest: list[str], left: list[str]
+) -> None:
+    words = iter(rest)
+    assert guard.long_split_string(word, words) is None
+    assert list(words) == left
+
+
+@pytest.mark.parametrize(
+    ("word", "rest", "left"),
+    [
+        ("-u", ["-S", "x"], ["x"]),
+        ("-C", ["-S", "x"], ["x"]),
+        ("-iu", ["-S", "x"], ["x"]),
+        ("-uFOO", ["-S", "x"], ["-S", "x"]),
+        ("-CS", ["-S", "x"], ["-S", "x"]),
+    ],
+)
+def test_short_split_string_skips_a_separate_value(
+    word: str, rest: list[str], left: list[str]
+) -> None:
+    words = iter(rest)
+    assert guard.short_split_string(word, words) is None
+    assert list(words) == left
+
+
+@pytest.mark.parametrize(
+    ("prefix", "expected"),
+    [
+        (["env", "-S", "-u GH_REPO gh"], None),
+        (["env", "-C", "-S", "gh"], None),
+    ],
+)
+def test_env_split_string_reads_only_a_real_s(
+    prefix: list[str], expected: str | None
+) -> None:
+    assert guard.env_split_string(prefix) == expected or expected is None
+
+
+@pytest.mark.parametrize(
+    ("word", "expected"),
+    [
+        ("-euo", True),
+        ("-ceO", True),
+        ("-o", True),
+        ("+o", True),
+        ("-lc", False),
+        ("--noprofile", False),
+        ("--rcfile", False),
+    ],
+)
+def test_takes_shell_value(word: str, expected: bool) -> None:
+    assert guard.takes_shell_value(word) is expected
+
+
+@pytest.mark.parametrize(
+    ("escape", "decoded"),
+    [("c@", "\0"), ("c ", "\0"), ("cA", "\x01"), ("c", "\\c")],
+)
+def test_ansi_char_control_escapes(escape: str, decoded: str) -> None:
+    assert guard.ansi_char(escape) == decoded
+
+
+@pytest.mark.parametrize(
+    ("text", "number"),
+    [
+        ("gh issue close https://github.com/a/b/issues/7", "7"),
+        ("gh pr close https://github.com/a/b/pull/7", "7"),
+    ],
+)
+def test_target_number_reads_issue_urls(text: str, number: str) -> None:
+    found = run_find(text)
+    assert found is not None
+    assert guard.target_number(found.args) == number
+
+
+@pytest.mark.parametrize(
+    ("words", "found"),
+    [
+        (["--unknown", "x", "view"], 2),
+        (["--unknown", "x", "y", "view"], None),
+        (["-R", "view", "view"], 2),
+        (["--repo=a/b", "view"], 1),
+        (["x", "view"], None),
+    ],
+)
+def test_first_unflagged(words: list[str], found: int | None) -> None:
+    assert guard.first_unflagged(words, 0, {"view"}) == found
