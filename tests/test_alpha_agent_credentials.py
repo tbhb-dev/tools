@@ -1119,13 +1119,18 @@ def test_build_with_gh_ignores_the_pull_requests_app(
 def test_build_refuses_when_the_pull_requests_app_token_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def fail(*_args: object, **_keywords: object) -> gh_app.Minted:
+    seen: list[dict[str, object]] = []
+
+    def fail(*_args: object, **keywords: object) -> gh_app.Minted:
+        seen.append(keywords)
         message = "never-log"
         raise gh_app.GhAppError(message)
 
     monkeypatch.setattr(gh_app, "mint_token", fail)
+    monkeypatch.setitem(VALUES, "example/app/pem", "example-pem")
     with pytest.raises(Invalid) as caught:
         credentials.deliver(run_request(), pull_requests_settings(), tmp_path)
+    assert len(seen) == 1
     assert str(caught.value) == "pull-requests App token unavailable; build refused"
     assert caught.value.__cause__ is None
     assert not (tmp_path / "gh" / "hosts.yml").exists()
