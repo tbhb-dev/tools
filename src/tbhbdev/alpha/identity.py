@@ -1778,11 +1778,9 @@ def cmd_record(harness: str, env: Mapping[str, str]) -> int:
         if brain:
             rec["brain_root"] = str(Path(brain).parent)
         write_json(path, rec)
-    write_user_record(
-        sha256_64(sid),
-        {k: v for k, v in rec.items() if k != "started_at"},
-        {"started_at": rec["started_at"]},
-    )
+    stable = dict(rec)
+    started = stable.pop("started_at")
+    write_user_record(sha256_64(sid), stable, {"started_at": started})
     record_agy(sid, data, rec, env)
     return 0
 
@@ -2224,6 +2222,13 @@ def write_claim(repo: Repo, root: str, receipts: list[Path]) -> None:
         )
 
 
+def amend_only(path: Path, text: str, kept: list[Trailer]) -> None:
+    """Rewrite the trailers of a message with no committer: keep, then merge."""
+    found = llm_trailers(text)
+    if kept or merge_trailers(found) != found:
+        add_trailers(path, [], [], kept)
+
+
 def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int:
     """prepare-commit-msg: stamp ``Generated-by`` and ``Assisted-by``.
 
@@ -2261,9 +2266,7 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
     committer = committer_identity(env)
     text = path.read_text()
     if not committer:
-        found = llm_trailers(text)
-        if kept or merge_trailers(found) != found:
-            add_trailers(path, [], [], kept)
+        amend_only(path, text, kept)
         return 0
     picked = None if replaying else picked_commit(head, text, repo.top)
     problem = picked and pick_refusal(picked, text, repo.top)

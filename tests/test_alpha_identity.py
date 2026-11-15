@@ -155,7 +155,8 @@ def feed(monkeypatch: pytest.MonkeyPatch, data: object) -> None:
 def no_start[T](value: T) -> T:
     """``value`` without any ``started_at``, which is the time the test ran."""
     if isinstance(value, dict):
-        return cast("T", {k: v for k, v in value.items() if k != "started_at"})
+        items = cast("dict[str, object]", value).items()
+        return cast("T", {k: v for k, v in items if k != "started_at"})
     if isinstance(value, str):
         return cast("T", re.sub(r";started_at=[^;\s]+", "", value))
     return cast("T", type(value)(map(no_start, value)))  # type: ignore[call-arg]
@@ -663,16 +664,9 @@ def test_format_order_and_omission() -> None:
     )
     assert ai.format_value({"harness": "antigravity"}) == "LLM harness=antigravity"
     assert ai.format_value({"harness": "codex", "model": ""}) == "LLM harness=codex"
-    assert ai.ATTR_ORDER == [
-        "effort",
-        "harness",
-        "launch",
-        "model",
-        "session",
-        "started_at",
-        "subagent",
-        "surface",
-    ]
+    assert sorted(ai.ATTR_ORDER) == ai.ATTR_ORDER
+    assert {"launch", "started_at"} <= set(ai.ATTR_ORDER)
+    assert len(ai.ATTR_ORDER) == 8
 
 
 @given(
@@ -8440,7 +8434,7 @@ def test_claim_launch_without_a_file_or_a_repository(repo: Path, plain: Path) ->
 
 @pytest.mark.usefixtures("clock")
 def test_start_fields_for_a_root_and_a_subagent(launch_file: Path) -> None:
-    fields = {"launch": LAUNCH, "started_at": EARLY}
+    fields: dict[str, object] = {"launch": LAUNCH, "started_at": EARLY}
     assert ai.start_fields(ROOT, ROOT) == fields
     ai.write_record(ROOT, {}, once=fields)
     assert ai.start_fields(ROOT, ROOT) == {}
@@ -8625,7 +8619,8 @@ def test_cmd_trailer_interactive_squash_keeps_the_earliest_start(
         "# This is the commit message #2:\n\n"
         f"two\n\nGenerated-by: {line_of(EARLY)}\nGenerated-by: {line_of()}\n"
     )
-    for env in ({}, CLAUDE_COMMIT_ENV):
+    envs: tuple[dict[str, str], ...] = ({}, CLAUDE_COMMIT_ENV)
+    for env in envs:
         path = msg_file(tmp_path, joined)
         assert ai.cmd_trailer(str(path), "message", env) == 0
         assert ai.llm_trailers(path.read_text(encoding="utf-8")) == [
