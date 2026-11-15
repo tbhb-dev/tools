@@ -992,11 +992,15 @@ def test_execution_options_name_the_invalid_path(
     assert str(caught.value) == f"[agent.sandbox] {key} {why}"
 
 
-def test_unsandboxed_host_refuses_reviews_app_delivery() -> None:
-    assert refused(edited("host", 0, "unsandboxed", value=True)) == (
-        "[[agent.host]] unsandboxed host example-linux "
-        "has reviews App credentials for agent"
+def test_unsandboxed_host_with_reviews_app_is_allowed() -> None:
+    parsed = config.parse(edited("host", 0, "unsandboxed", value=True))
+    assert parsed.hosts[0].unsandboxed is True
+    assert parsed.credentials[0].reviews_app_id == GOOD_ACCOUNT["reviews_app_id"]
+    assert (
+        parsed.credentials[0].reviews_app_client_id
+        == GOOD_ACCOUNT["reviews_app_client_id"]
     )
+    assert parsed.credentials[0].reviews_app_pem == GOOD_ACCOUNT["reviews_app_pem"]
 
 
 def test_unsandboxed_host_without_reviews_app_is_allowed() -> None:
