@@ -253,8 +253,15 @@ def group_identity(pid: int) -> Group:
 def test_local_arguments(capsys: pytest.CaptureFixture[str]) -> None:
     assert ssh_serve.main(["extra"], "ssh-serve") == 2
     assert (
-        capsys.readouterr().err == "ssh-serve: refused: ssh-serve takes no arguments\n"
+        capsys.readouterr().err
+        == "ssh-serve: refused: expected run-host NAME, preflight NAME, "
+        "result NAME or kill NAME\n"
     )
+
+
+def test_plain_login_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SSH_ORIGINAL_COMMAND", raising=False)
+    assert ssh_serve.command(["result", "example"]) == ("result", "example")
 
 
 @pytest.mark.parametrize("owned", [False, True])
