@@ -93,6 +93,33 @@ def test_a_tie_goes_to_started_at() -> None:
     assert got["start_source"] == "started_at"
 
 
+def test_the_earliest_of_several_started_at_times_wins() -> None:
+    got = pr_stats.row(
+        "o/r",
+        pull(body=line(start=MID), commits=[commit(LATE, line(start=EARLY))]),
+    )
+    assert got is not None
+    assert (got["start"], got["start_source"]) == (EARLY, "started_at")
+
+
+def test_a_merged_pull_request_ends_at_merged_at_not_closed_at() -> None:
+    got = pr_stats.row(
+        "o/r", pull(mergedAt=MID, closedAt=LATE, commits=[commit(EARLY)])
+    )
+    assert got is not None
+    assert (got["end"], got["cycle_seconds"]) == (MID, 3600)
+
+
+def test_started_at_must_stand_alone_as_an_attribute() -> None:
+    text = f"{line()};xstarted_at={EARLY}"
+    assert pr_stats.line_starts(text) == ([], 1)
+
+
+def test_an_empty_started_at_does_not_hide_a_later_one() -> None:
+    starts, missing = pr_stats.line_starts(f"{line()};started_at=;started_at={EARLY}")
+    assert ([s.hour for s in starts], missing) == ([0], 0)
+
+
 def test_no_trailers_falls_back_to_the_earliest_commit() -> None:
     got = pr_stats.row("o/r", pull(commits=[commit(MID), commit(EARLY, line())]))
     assert got is not None
