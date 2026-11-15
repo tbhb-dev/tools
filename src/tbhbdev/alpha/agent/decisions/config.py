@@ -356,10 +356,13 @@ def _credentials(table: _Table) -> tuple[Credentials, ...]:
         )
         app_id, client_id, pem = _reviews_app(entry)
         pull_requests_client_id, pull_requests_pem = _pull_requests_app(entry)
+        gh = entry.reference("gh") if "gh" in entry.values else None
+        if gh is not None and pull_requests_pem is not None:
+            entry.fail("gh", "must not be set with the pull_requests_app keys")
         accounts.append(
             Credentials(
                 account=account,
-                gh=entry.reference("gh") if "gh" in entry.values else None,
+                gh=gh,
                 docker=entry.reference("docker") if "docker" in entry.values else None,
                 reviews_app_id=app_id,
                 reviews_app_client_id=client_id,

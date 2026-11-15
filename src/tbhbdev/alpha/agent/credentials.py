@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 # Split the spelling because the repository's leak scanner also flags the name.
 CLAUDE_TOKEN_ENV = "CLAUDE_CODE_" + "OAUTH_TOKEN"
+PULL_REQUESTS_PERMISSIONS = {"pull_requests": "write"}
 
 
 @dataclass(frozen=True)
@@ -71,19 +72,27 @@ def installation_token(references: Credentials, repository: str) -> str:
 
 
 def pull_requests_token(references: Credentials, repository: str) -> str:
-    """Mint the pull-requests App's token for one repository."""
+    """Mint the pull-requests App's token for one repository, pull requests only."""
     if (
         references.pull_requests_app_client_id is None
         or references.pull_requests_app_pem is None
     ):
         message = "pull-requests App credentials are not configured"
         raise Invalid(message)
-    return app_token(
-        "pull-requests",
-        references.pull_requests_app_client_id,
-        references.pull_requests_app_pem,
-        repository,
-    )
+    host, owner, name = repo.parts(repository)
+    if host != "github.com":
+        message = "pull-requests app supports github.com repositories"
+        raise Invalid(message)
+    client_id = read(references.pull_requests_app_client_id, label="pull-requests app")
+    pem = read(references.pull_requests_app_pem, label="pull-requests app")
+    # Explicit permissions, so the token stays narrow whatever the App holds.
+    return gh_app.mint_token(
+        gh_app.default_env(),
+        app_id=client_id,
+        pem=pem,
+        repository=f"{owner}/{name}",
+        permissions=PULL_REQUESTS_PERMISSIONS,
+    ).token
 
 
 def app_token(app: str, client_id_ref: str, pem_ref: str, repository: str) -> str:

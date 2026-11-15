@@ -184,7 +184,6 @@ GOOD: Table = {
     "codex": {"web_search": {"build": "cached", "review": "disabled"}},
     "credentials": {
         "agent": {
-            "gh": "example-vault/example-gh/token",
             "docker": "example-vault/example-docker/config",
             "reviews_app_id": "example-vault/example-app/app_id",
             "reviews_app_client_id": "example-vault/example-app/client_id",
@@ -241,7 +240,7 @@ EXPECTED = model.Settings(
     credentials=(
         model.Credentials(
             account="agent",
-            gh="example-vault/example-gh/token",
+            gh=None,
             docker="example-vault/example-docker/config",
             reviews_app_id="example-vault/example-app/app_id",
             reviews_app_client_id="example-vault/example-app/client_id",
@@ -285,6 +284,19 @@ def edited(*path: str | int, value: object = MISSING) -> Table:
         del holder[path[-1]]
     else:
         holder[path[-1]] = value
+    return table
+
+
+GH_REFERENCE = "example-vault/example-gh/token"
+GOOD_ACCOUNT = cast("Table", cast("Table", GOOD["credentials"])["agent"])
+
+
+def gh_only() -> Table:
+    """GOOD with `gh` in place of the pull-requests App keys."""
+    table = edited("credentials", "agent", "gh", value=GH_REFERENCE)
+    account = cast("Table", cast("Table", table["credentials"])["agent"])
+    del account["pull_requests_app_client_id"]
+    del account["pull_requests_app_pem"]
     return table
 
 
@@ -1070,8 +1082,8 @@ def test_claude_references_refuse_openssh_query(key: str) -> None:
 
 
 def test_github_credential_is_optional() -> None:
-    parsed = config.parse(edited("credentials", "agent", "gh"))
-    assert parsed.credentials[0].gh is None
+    assert config.parse(GOOD).credentials[0].gh is None
+    assert config.parse(gh_only()).credentials[0].gh == GH_REFERENCE
 
 
 @pytest.mark.parametrize("value", ["/example/key", "/key with spaces"])
@@ -1143,6 +1155,14 @@ def test_pull_requests_app_references_are_optional() -> None:
 def test_partial_pull_requests_app_configuration_is_refused(
     present: str, missing: str
 ) -> None:
-    assert present != missing
+    assert present in GOOD_ACCOUNT
     table = edited("credentials", "agent", missing)
     assert refused(table) == f"[agent.credentials.agent] {missing} is required"
+
+
+def test_gh_with_the_pull_requests_app_is_refused() -> None:
+    table = edited("credentials", "agent", "gh", value=GH_REFERENCE)
+    assert refused(table) == (
+        "[agent.credentials.agent] gh must not be set with the pull_requests_app keys"
+    )
+    assert config.parse(gh_only()).credentials[0].pull_requests_app_pem is None
