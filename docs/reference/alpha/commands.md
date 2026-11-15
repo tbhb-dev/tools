@@ -1,14 +1,21 @@
 ---
 description: Interim agent commands, installation, and harness hooks.
 generated:
-  - role: generated
-    harness: claude-code:2.1.322
-    model: anthropic:claude-opus-5-5
-    effort: medium
-    surface: cli
-    session: sha-256-64:24ed779d56b187de
-    subagent: sha-256-64:16dc27c13810e8fc
-    at: "2026-11-14T20:09:32Z"
+- role: generated
+  effort: medium
+  harness: claude-code:2.1.322
+  model: anthropic:claude-opus-5-5
+  session: sha-256-64:24ed779d56b187de
+  subagent: sha-256-64:16dc27c13810e8fc
+  surface: cli
+  at: '2026-11-14T20:09:32Z'
+- role: generated
+  effort: high
+  harness: codex:0.164.0
+  model: openai:gpt-6.1-sol
+  session: sha-256-64:78f9bc32cc3691e0
+  surface: exec
+  at: '2026-11-15T14:20:53Z'
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -35,6 +42,7 @@ type: Reference
 - `agent-env` runs Codex or Antigravity with the `gh` shim first on PATH.
 - `pr` checks `.github/PULL_REQUEST_DRAFT.md` and opens or updates the pull request from it. `pr ready N [N...]` marks each one ready for review, only when the pull request's GitHub author is the account the agent's own `gh` runs as. `pr rerun N` reruns only the failed jobs of the latest run for pull request N's current head commit. It reports an error when that run hasn't failed or no run exists. `pr close N --reason TEXT` (or `--comment TEXT`) closes it after the agent-session, open-state and opened-ledger checks, in origin's repository. `pr delete-branch N` deletes only the head branch of a closed or merged pull request in origin's GitHub repository. It refuses fork heads, `main`, protected branches, and unreadable metadata.
 - `review` drafts and checks a pull request review.
+- `version-check [--host NAME ...] [--expect SHA|latest] [--json]` compares the installed build on each host, read-only. For each host it runs `$HOME/.local/bin/tbhbdev --version` over `ssh -n -o BatchMode=yes -o ConnectTimeout=5` (directly on this host) and prints `<host> <sha-or-unknown> <state>`, where the state is `ok`, `stale`, `unknown` or `unreachable`. `--json` prints a list of objects with `host`, `version` and `state`. Hosts come from `--host` or the names in `[harness] hosts` of the user config, and exits 2 with neither source. `--expect SHA` compares every host to that 40-hex commit, `--expect latest` to the head of origin's main, and with neither the reference is the build most hosts run (the first host's on a tie). It exits 0 when every host is `ok`, 1 when any is stale or unknown, 2 for a usage error, and 3 when a host is unreachable and none is stale (or `latest` is unavailable). The build is the commit in the `direct_url.json` of the install, else the 40-hex `COMMIT` of `tbhbdev/_build.py`, a stamp the repository never commits and that nothing writes yet, so a wheel install without one reports `unknown`.
 - `gh-app` requests a GitHub App installation token, reading the App's id and RSA key through Connect, and keeps it under `$XDG_STATE_HOME/gh-app/VAULT/APP`. The command serves a cached token with more than ten minutes left, even during a cooldown, and a cooldown refuses any other request. Only a 404 sends the installation lookup from the repository to its owner. The command syncs each file to disk before it replaces the old one.
 - `repo` holds repository commands. `repo bootstrap` applies the standard repository settings.
 - `merge` squash-merges an approved pull request.
@@ -44,6 +52,8 @@ type: Reference
 - `install` installs the git hooks and the user-level harness hooks. `--hooks-only` installs only this clone's git hooks without writing user-level config.
 
 `tbhbdev alpha pr checks N` reads pull request N in the current repository. It prints the head commit hash on the first line, then one `name: CONCLUSION` line per check, including commit statuses. Unfinished checks (`PENDING`, `QUEUED`, `IN_PROGRESS`, `WAITING`, `REQUESTED` or a pending commit status) print `PENDING`. Exit code 0 means every check is green: `SUCCESS`, `NEUTRAL` or `SKIPPED`. Exit code 1 means a failed check, any value the command doesn't know (including lowercase ones, a commit status of `EXPECTED`, or a completed check with no conclusion), or no checks at all. Exit code 3 means nothing failed but a check is still unfinished. A check run that hasn't completed reads its status and never its conclusion. A commit status is green only for `SUCCESS`. A missing pull request, a failed read or a check with no name exits nonzero with an error.
+
+`tbhbdev alpha pr-stats OWNER/REPO [--limit N]` prints one JSON row for each merged or closed pull request. The cycle time starts at the earliest of every `started_at` on its identity lines and its earliest commit's committer date, and ends at `mergedAt` or, for a pull request closed without merging, `closedAt`. A row's `start_source` is `started_at` or `commit`, and its `state` is `merged` or `closed`.
 
 `tbhbdev alpha verify-range BASE TIP [-C PATH]` checks each commit in `BASE..TIP`, oldest first. A commit passes when the agent is its author and committer, it has a signature header and valid attribution trailers, and it has exactly one parent. Sign-off trailers, co-author trailers and GitHub's no-reply addresses fail it. Exit codes are 0 when every commit passes, 1 when any fails and 2 for usage or Git errors.
 
@@ -85,3 +95,30 @@ The commit check runs without config. The command guard checks arguments for tra
 These user-level hooks run in every repository. Before acting, the identity, pull request, approval guard, and install hooks check that `origin` names a tbhb-dev repository on GitHub. Outside a repository, the identity record hook still writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Both `state-guard` and `session-context` run regardless of origin. At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, which puts the `gh` shim first on PATH for the session's commands and reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, and each worktree has its own pull request draft, so sessions in two worktrees of one clone don't overwrite each other.
+
+## Identity start time
+
+An identity line can record when its agent started and which launch it belongs to. Both attributes are optional. A line without them is still valid.
+
+| Attribute | Value |
+| --- | --- |
+| `launch` | The `sha-256-64:` hash of the launcher's run id. |
+| `started_at` | The agent's start time in Coordinated Universal Time with whole seconds, as `YYYY-MM-DDTHH:MM:SSZ`. The `T` and `Z` are capitals. |
+
+Order is alphabetical:
+
+```text
+Generated-by: LLM effort=high;harness=codex:0.164.0;launch=sha-256-64:0a1b2c3d4e5f6071;model=openai:gpt-6.1-sol;session=sha-256-64:fb2bbc10b42a2d56;started_at=2026-11-14T00:02:41Z;surface=exec
+```
+
+The `record` hooks set both fields once in the session record, and a resumed session keeps its first values.
+
+- A launcher writes `tbhb-alpha/launch.json` in the worktree's git directory, with a `launch` hash and a `started_at` time, before the harness starts. The first root session to run a hook there claims the file by adding its own hash as `session`, then copies both fields into its record. A later session finds the file claimed and inherits nothing from it.
+- A session with no launch file to claim takes `started_at` from its first hook event and omits `launch`.
+- A subagent takes `started_at` from the first hook event with its agent id, and inherits `launch` from its root session.
+
+The `trailer` hook writes both attributes from the session record. Where lines for the same agent meet, on an amend, a rebase, or an interactive squash, the hook merges them. Lines with the same key and every attribute except `started_at` become one line, the one with the earliest `started_at`. Lines that differ in another attribute, including `effort`, remain distinct. A line with the attribute replaces one without it.
+
+The `check` hook and `verify-range` accept both attributes. They require a real Coordinated Universal Time in the exact format for `started_at` and the hash format for `launch`. An agent commit whose `Generated-by` line lacks `started_at` passes with a warning.
+
+The rules `commit_identity` check must accept both attributes before a host installs these hooks. Until it does, commits with them fail CI.

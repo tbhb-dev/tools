@@ -23,6 +23,14 @@ SYNTHETIC = "distinctive-synthetic-push-value-7391"
 
 
 @pytest.fixture(autouse=True)
+def umask_022() -> Generator[None]:
+    """Create the private-name list as a 0644 file whatever the host umask is."""
+    previous = os.umask(0o022)
+    yield
+    os.umask(previous)
+
+
+@pytest.fixture(autouse=True)
 def push_account(
     isolated_agent_home: None, agent_suffix_case: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

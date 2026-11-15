@@ -304,3 +304,8 @@ getbasetemp
 pytestmark
 unscanned
 IOSFODNN
+getitimer
+itimer
+setitimer
+sigalrm
+signum
