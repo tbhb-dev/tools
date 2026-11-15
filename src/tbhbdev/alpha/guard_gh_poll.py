@@ -584,9 +584,9 @@ def plain_home_or_above(word: str) -> bool:
     fed to the mover, so ``pipes_state_dir`` skips these. ``~/.local`` and
     ``~/.local/state`` still count, and so does any glob.
     """
-    if any(char in word for char in "*?[{"):
-        return False
     home = word.replace("${HOME}", "~").replace("$HOME", "~")
+    if any(char in home for char in "*?[{"):
+        return False
     expanded = str(Path(home).expanduser())
     path = re.sub(r"^/+", "/", os.path.normpath(expanded)).lower()
     return path in STATE_DIRS[3:]
