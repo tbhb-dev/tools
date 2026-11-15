@@ -1032,7 +1032,8 @@ def test_minter_must_name_an_account_with_a_reviews_app_key(name: str) -> None:
 
 def test_minter_with_a_key_on_an_unsandboxed_host_is_refused() -> None:
     table = with_minter()
-    cast("Table", table["host"][0])["accounts"] = ["agent", "minter"]  # ty: ignore
+    hosts = cast("list[Table]", table["host"])
+    hosts[0]["accounts"] = ["agent", "minter"]
     assert refused(table) == (
         "[[agent.host]] unsandboxed host example-linux has a reviews App key for minter"
     )

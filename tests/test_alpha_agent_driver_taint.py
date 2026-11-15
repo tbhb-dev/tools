@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import pytest
 from agent_driver_example import Remote, execution_arguments, setup
 from agent_example import settings
+from agent_host_example import constant
 
 from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import credentials, driver, taint_store
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     result = setup(tmp_path, monkeypatch)
     monkeypatch.setattr(agent.settings, "load", settings)
-    monkeypatch.setattr(credentials, "launcher_token", lambda *_: None)
+    monkeypatch.setattr(credentials, "launcher_token", constant(None))
     return result
 
 

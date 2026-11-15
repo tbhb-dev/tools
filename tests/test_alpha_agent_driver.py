@@ -24,6 +24,7 @@ from agent_driver_example import (
     write_standalone_fake,
 )
 from agent_example import MARKER, settings
+from agent_host_example import constant
 
 from tbhbdev import version
 from tbhbdev.alpha import agent
@@ -307,7 +308,7 @@ def test_version_mismatch(remote: Remote, capsys: pytest.CaptureFixture[str]) ->
 
 @pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT, "HEAD"])
 def test_review_ref(remote: Remote, monkeypatch: pytest.MonkeyPatch, ref: str) -> None:
-    monkeypatch.setattr(credentials, "launcher_token", lambda *_: None)
+    monkeypatch.setattr(credentials, "launcher_token", constant(None))
     remote.configure(refs=f"{COMMIT}\t{ref}\n")
     options = ("--ref", ref) if ref != "HEAD" else ()
     assert launch(remote, "--profile", "review", *options) == 0
@@ -378,7 +379,7 @@ def test_review_sends_the_minted_token_only_in_the_private_stream(
 def test_review_without_a_driver_key_sends_no_token(
     remote: Remote, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(credentials, "launcher_token", lambda *_: None)
+    monkeypatch.setattr(credentials, "launcher_token", constant(None))
     remote.configure(refs=f"{COMMIT}\tHEAD\n")
     assert launch(remote, "--profile", "review") == 0
     assert streamed_names(remote) == ["sample.request.json", "sample.prompt"]
