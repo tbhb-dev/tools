@@ -1708,3 +1708,72 @@ def test_an_odd_repo_is_not_echoed(repo: str) -> None:
 def test_a_plain_repo_is_echoed(repo: str) -> None:
     found = guard.Match("close", ["3"], "pr", repo)
     assert guard.hint(found).endswith(f"run it in a clone of {repo}.")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "timeout 5 sh -c 'gh pr close 5'",
+        "timeout 5 env -S 'gh pr close 5'",
+        "timeout 5 timeout 5 gh pr close 5",
+        "timeout .5 gh pr close 5",
+        "timeout infinity gh pr close 5",
+        "timeout 5 eval 'gh pr close 5'",
+        "timeout -s KILL 5 sh -c 'gh pr close 5'",
+        "timeout --signal=KILL 5 gh pr close 5",
+        "timeout -k 2 5 gh pr close 5",
+        "timeout --kill-after 2 5 gh pr close 5",
+        "timeout --foreground 1m gh pr close 5",
+        "setsid gh pr close 5",
+        "setsid -w gh pr close 5",
+        "stdbuf -o0 gh pr close 5",
+        "stdbuf -o 0 gh pr close 5",
+        "ionice -c3 gh pr close 5",
+        "ionice -c 3 gh pr close 5",
+        "doas gh pr close 5",
+        "doas -u root gh pr close 5",
+        "watch gh pr close 5",
+        "watch -n 5 gh pr close 5",
+        "watch --interval 5 gh pr close 5",
+    ],
+)
+def test_more_wrappers_and_timeout_durations_are_scanned(text: str) -> None:
+    found = run_find(text)
+    assert found is not None
+    assert found.sub == "close"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "timeout 5 echo gh pr close 5",
+        "timeout 5 sh -c 'echo hi'",
+        "timeout 5 sh",
+        "timeout",
+        "watch -n 5 gh pr view 5",
+    ],
+)
+def test_the_new_wrappers_pass_other_commands(text: str) -> None:
+    assert run_find(text) is None
+
+
+def test_a_crash_in_hint_denies(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def boom(_found: guard.Match) -> str:
+        msg = "boom"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(guard, "hint", boom)
+    stdin = json.dumps(with_command(CLAUDE_PAYLOAD, "gh pr merge 1"))
+    code, out, _ = run_main(monkeypatch, capsys, stdin)
+    assert code == 0
+    assert "can't parse" in out
+    assert '"permissionDecision": "deny"' in out
+
+
+def test_blocked_message() -> None:
+    assert guard.blocked_message("echo hi") is None
+    assert guard.blocked_message("gh pr merge 1") == guard.hint(
+        guard.Match("merge", ["1"])
+    )

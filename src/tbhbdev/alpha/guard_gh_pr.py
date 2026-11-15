@@ -58,11 +58,13 @@ the command into simple commands at ``;``, ``&``, ``|``, newlines, parentheses,
 ``$(...)`` and backticks (inside double quotes too), drops heredoc bodies, and
 removes quoting. A simple command matches when, after leading ``NAME=value``
 words, shell keywords and the wrappers env, command, exec, sudo, nohup, time,
-builtin, xargs, timeout and nice (with their options and option values), the
+builtin, xargs, timeout (and its duration), nice, setsid, stdbuf, ionice, doas
+and watch (with their options and option values), the
 program is ``gh`` (any path) and, after its global flags (``-R x``,
 ``--repo x``, ``--hostname x``, other ``-x``), the words are
 ``pr create|edit|merge|ready|close`` or ``issue close``.
-``bash|sh|zsh|dash|ksh -c SCRIPT`` and ``eval ...`` are scanned recursively.
+``bash|sh|zsh|dash|ksh -c SCRIPT``, ``eval ...`` and ``env -S STRING`` are
+scanned recursively.
 Text inside a quoted argument to any other command is not a command, so
 ``git commit -m 'docs: mention gh pr merge'`` and ``echo "gh pr merge"`` pass.
 
@@ -71,7 +73,11 @@ Known gaps, none of which the permission rules close either:
 - Misses: a wrapper outside the list (``mise x -- gh ...``), a script file or
   alias that runs gh, code a command runs from a quoted argument
   (``python -c``, ``ssh host '...'``), and ``gh api`` calls that do the same
-  work. Substitutions inside an unquoted heredoc body are not scanned.
+  work. Substitutions inside an unquoted heredoc body are not scanned, and a
+  here-string into a shell (``bash <<< 'gh pr close 5'``) is not either.
+- Over-matches: after a wrapper the guard reads the first ``gh`` that only
+  options and their values precede, so ``time -p echo -n gh pr close 5`` is
+  blocked as well. That errs toward denying.
 - Approvals it misses: ``gh api graphql`` with an ``addPullRequestReview`` or
   ``submitPullRequestReview`` mutation, ``gh api --input FILE`` and
   ``-F event=@file``, curl, httpx or any client other than gh, a script or
@@ -118,7 +124,7 @@ ANSI_SIMPLE = {
 SHELL_VALUE_OPTIONS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
 WRAPPERS = {
     "env", "command", "exec", "sudo", "nohup", "time", "builtin", "xargs",
-    "timeout", "nice",
+    "timeout", "nice", "setsid", "stdbuf", "ionice", "doas", "watch",
 }  # fmt: skip
 # Wrapper options whose value is the next word, so it is not the program.
 WRAPPER_VALUE_OPTIONS = {
@@ -127,7 +133,14 @@ WRAPPER_VALUE_OPTIONS = {
     "xargs": {"-n", "-I", "-L", "-P", "-s", "-E", "-d", "-a"},
     "exec": {"-a"},
     "nice": {"-n"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "stdbuf": {"-i", "-o", "-e"},
+    "ionice": {"-c", "-n", "-p", "-P", "-u"},
+    "doas": {"-u", "-C"},
+    "watch": {"-n", "--interval"},
 }
+# Wrappers whose first word after the options is an argument, not the program.
+WRAPPER_ARGUMENT = {"timeout"}
 KEYWORDS = {"if", "then", "do", "else", "elif", "while", "until", "!", "{", "}"}
 VALUE_FLAGS = {"-R", "--repo", "--hostname"}
 # What may be echoed back as a repository: [HOST/]OWNER/REPO, plain characters.
@@ -388,6 +401,15 @@ def ansi_char(escape: str) -> str:
     return head if head in "\\'\"?" else "\\" + head
 
 
+def skip_options(words: list[str], start: int, wrapper: str) -> int:
+    """The index after a wrapper's options, their values and its fixed argument."""
+    i = start
+    values = WRAPPER_VALUE_OPTIONS.get(wrapper, set())
+    while i < len(words) and words[i].startswith("-"):
+        i += 2 if words[i] in values else 1
+    return i + (wrapper in WRAPPER_ARGUMENT)  # timeout's DURATION, whatever it is
+
+
 def skip_wrappers(words: list[str]) -> tuple[int, bool]:
     """The index after env assignments, keywords and wrappers, and whether one ran."""
     i = 0
@@ -399,10 +421,7 @@ def skip_wrappers(words: list[str]) -> tuple[int, bool]:
             i += 1
         elif name in WRAPPERS:
             wrapped = True
-            i += 1
-            values = WRAPPER_VALUE_OPTIONS.get(name, set())
-            while i < len(words) and words[i].startswith("-"):
-                i += 2 if words[i] in values else 1
+            i = skip_options(words, i + 1, name)
         else:
             break
     return i, wrapped
@@ -951,6 +970,18 @@ def approval_message(data: Json, text: str) -> str | None:
         )
 
 
+def blocked_message(text: str) -> str | None:
+    """The deny message for a blocked ``gh`` call in ``text``, or None.
+
+    Fails closed: a crash while matching or while writing the message denies.
+    """
+    try:
+        found = find(text)
+        return hint(found) if found else None
+    except Exception:  # noqa: BLE001  # fail closed once the guard is in scope
+        return "The guard can't parse this command, so it refuses it."
+
+
 def main() -> int:
     """Read the payload on stdin; print a deny decision for a blocked call."""
     try:
@@ -962,14 +993,9 @@ def main() -> int:
             return 0
         if not in_tbhb_dev(hook_cwd(data)):
             return 0
-        try:
-            found = find(text)
-        except Exception:  # noqa: BLE001  # fail closed once the guard is in scope
-            message = "The guard can't parse this command, so it refuses it."
+        message = blocked_message(text)
+        if message:
             print(json.dumps(decision(message, antigravity=antigravity)))
-            return 0
-        if found:
-            print(json.dumps(decision(hint(found), antigravity=antigravity)))
     except Exception:  # noqa: BLE001  # fail open on any crash
         return 0
     return 0
