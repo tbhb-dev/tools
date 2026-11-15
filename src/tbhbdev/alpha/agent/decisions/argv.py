@@ -195,12 +195,11 @@ def _codex(
     ]
     for name in _HANDOFF:
         argv += ["-c", f"shell_environment_policy.set.{name}={_toml(policy.env[name])}"]
-    for name in ("TBHB_GH_NO_REVIEW", "SSH_AUTH_SOCK"):
-        if name in policy.env:
-            argv += [
-                "-c",
-                f"shell_environment_policy.set.{name}={_toml(policy.env[name])}",
-            ]
+    if "SSH_AUTH_SOCK" in policy.env:
+        argv += [
+            "-c",
+            f"shell_environment_policy.set.SSH_AUTH_SOCK={_toml(policy.env['SSH_AUTH_SOCK'])}",
+        ]
     argv += [
         "-m",
         request.model,

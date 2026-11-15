@@ -85,7 +85,6 @@ from typing import TYPE_CHECKING
 
 from tbhbdev import userconfig
 from tbhbdev.alpha.guard_gh_poll import POLL_REASON
-from tbhbdev.alpha.guard_gh_pr import writes_review
 from tbhbdev.alpha.identity import locked, write_private_json
 
 if TYPE_CHECKING:
@@ -97,8 +96,6 @@ PROG = "gh-shim"
 SHIM_MARK = "# tbhbdev alpha gh-shim (tbhbdev alpha install)"
 ROOT_ENV = "TBHB_GH_ROOT_SESSION"
 AGENT_ENV = "TBHB_GH_AGENT"
-NO_REVIEW_ENV = "TBHB_GH_NO_REVIEW"
-NO_REVIEW = "refused, this run holds a pull-requests token and may not submit a review"
 # Variables whose value names a root session, most specific first.
 ROOT_IDS = (
     ROOT_ENV,
@@ -344,9 +341,6 @@ def main(argv: list[str], _prog: str) -> int:  # noqa: RET503 -- execv doesn't r
     if gh is None:
         print(f"{PROG}: no gh on PATH besides the shim", file=sys.stderr)
         return NOT_FOUND
-    if os.environ.get(NO_REVIEW_ENV) == "1" and writes_review(argv):
-        print(f"{PROG}: {NO_REVIEW}", file=sys.stderr)
-        return REFUSED
     root = session_root(os.environ)
     if root is not None:
         try:

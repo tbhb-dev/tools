@@ -110,9 +110,7 @@ def denied(os: Os, home: str) -> tuple[str, ...]:
     )
 
 
-def env_of(
-    os: Os, harness: Harness, account: str, profile: Profile = Profile.BUILD
-) -> dict[str, str]:
+def env_of(os: Os, harness: Harness, account: str) -> dict[str, str]:
     home = f"/example/home/{account}"
     tmp = f"{home}/.local/state/example-runs/run1.tmp"
     env = {
@@ -148,8 +146,6 @@ def env_of(
     }
     if harness is Harness.CODEX:
         env["CODEX_HOME"] = f"{tmp}/codex"
-    if profile is Profile.BUILD:
-        env["TBHB_GH_NO_REVIEW"] = "1"
     return env
 
 
@@ -178,7 +174,7 @@ def test_environment_is_exactly_the_allowlist(
     ):
         monkeypatch.setenv(name, "/parent-value")
     result = made(os, profile, harness, account)
-    assert result.env == env_of(os, harness, account, profile)
+    assert result.env == env_of(os, harness, account)
     assert result.env["TMPPREFIX"] == result.env["TMPDIR"] + "/zsh"
 
 
@@ -477,7 +473,6 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
             "GH_CONFIG_DIR": f"{tmp}/gh",
             "DOCKER_CONFIG": f"{tmp}/docker",
             "GIT_NO_LAZY_FETCH": "1",
-            **({"TBHB_GH_NO_REVIEW": "1"} if profile is Profile.BUILD else {}),
         },
         "disableAllHooks": True,
         "permissions": {"allow": allow, "deny": [*rules, "WebFetch", "WebSearch"]},
@@ -1765,24 +1760,3 @@ def test_hooks_directory_refuses_extra_write_grants(field: str, suffix: str) -> 
         )
     with pytest.raises(Invalid, match="hooks"):
         policy.protect_host(configured, run, ())
-
-
-@pytest.mark.parametrize(
-    ("profile", "marked"), [(Profile.BUILD, True), (Profile.REVIEW, False)]
-)
-def test_only_build_runs_carry_the_no_review_marker(
-    profile: Profile, marked: bool
-) -> None:
-    result = made(Os.LINUX, profile, Harness.CODEX, "agent")
-    assert result.env.get("TBHB_GH_NO_REVIEW") == ("1" if marked else None)
-
-
-def test_claude_build_settings_carry_the_no_review_marker() -> None:
-    result = made(Os.LINUX, Profile.BUILD, Harness.CLAUDE, "agent")
-    assert isinstance(result.detail, model.ClaudePolicy)
-    assert dig(result.detail.settings, "env", "TBHB_GH_NO_REVIEW") == "1"
-    review = made(Os.LINUX, Profile.REVIEW, Harness.CLAUDE, "agent")
-    assert isinstance(review.detail, model.ClaudePolicy)
-    review_env = dig(review.detail.settings, "env")
-    assert isinstance(review_env, dict)
-    assert "TBHB_GH_NO_REVIEW" not in review_env

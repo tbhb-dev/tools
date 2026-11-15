@@ -1466,7 +1466,6 @@ def check_launch_contract(
         run_host.policy.environment(
             run.settings, run.host, harness, prepared.paths, run.request.account
         )
-        | run_host.policy.review_environment(run.request.profile, prepared.paths)
         | env
     )
     assert kwargs["env"] == expected

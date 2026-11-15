@@ -62,10 +62,6 @@ HANDOFF = (
     "-c",
     f'shell_environment_policy.set.TMPPREFIX="{TMP}/zsh"',
 )
-NO_REVIEW_FLAGS = (
-    "-c",
-    'shell_environment_policy.set.TBHB_GH_NO_REVIEW="1"',
-)
 CODEX_HANDOFF = (
     "-c",
     'shell_environment_policy.exclude=["GIT_*"]',
@@ -223,7 +219,6 @@ def expected(harness: Harness, kind: RunKind, profile: Profile) -> tuple[str, ..
             f'projects={{"{WORKTREE}"={{trust_level="untrusted"}}}}',
             *CODEX_TAIL,
             *CODEX_HANDOFF,
-            *(() if review else NO_REVIEW_FLAGS),
             *MODEL,
             "-" if headless else POINTER,
         )
@@ -343,7 +338,6 @@ def test_unsandboxed_codex_is_full_access_with_no_profile(kind: RunKind) -> None
         f'projects={{"{WORKTREE}"={{trust_level="untrusted"}}}}',
         *CODEX_TAIL,
         *CODEX_HANDOFF,
-        *NO_REVIEW_FLAGS,
         *MODEL,
         "-" if kind is RunKind.EXEC else POINTER,
     )
@@ -850,23 +844,3 @@ def test_codex_build_without_github_credential(kind: RunKind) -> None:
     )
     result = built(Harness.CODEX, kind, Profile.BUILD, config=config)
     assert f'shell_environment_policy.set.GH_CONFIG_DIR="{TMP}/gh"' in result
-
-
-def test_codex_build_sets_the_no_review_marker() -> None:
-    pol = policy_for(Harness.CODEX, Profile.BUILD)
-    result = argv.harness(
-        request(Harness.CODEX, RunKind.EXEC, Profile.BUILD),
-        pol,
-        worktree=WORKTREE,
-        brief_file=BRIEF_FILE,
-    )
-    flag = 'shell_environment_policy.set.TBHB_GH_NO_REVIEW="1"'
-    assert result[result.index(flag) - 1] == "-c"
-    assert result.count(flag) == 1
-    review = argv.harness(
-        request(Harness.CODEX, RunKind.EXEC, Profile.REVIEW),
-        policy_for(Harness.CODEX, Profile.REVIEW),
-        worktree=WORKTREE,
-        brief_file=BRIEF_FILE,
-    )
-    assert not any("TBHB_GH_NO_REVIEW" in element for element in review)

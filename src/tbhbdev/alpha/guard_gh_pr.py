@@ -521,26 +521,6 @@ def gh_approval(rest: list[str], default: Callable[[], str | None]) -> Approval 
     return None
 
 
-def writes_review(rest: list[str]) -> bool:
-    """Whether gh args are ``pr review`` or a ``gh api`` write to a reviews endpoint."""
-    i = 0
-    while i < len(rest) and rest[i].startswith("-"):
-        i += 2 if rest[i] in VALUE_FLAGS else 1
-    if rest[i : i + 2] == ["pr", "review"]:
-        return True
-    if rest[i : i + 1] != ["api"]:
-        return False
-    args = rest[i + 1 :]
-    endpoints = split_args(args, API_VALUE_FLAGS)[1]
-    if not endpoints or REVIEWS.fullmatch(endpoints[0]) is None:
-        return False
-    methods = flag_values(args, {"-X", "--method"}, API_VALUE_FLAGS)
-    if methods:
-        return methods[-1].upper() != "GET"
-    body = flag_values(args, API_FIELD_FLAGS | {"--input"}, API_VALUE_FLAGS)
-    return bool(body)
-
-
 def script_approval(args: list[str]) -> Approval | None:
     """``tbhb-approve REPO N SHA``, read as ``tbhb-dev/REPO#N``."""
     if len(args) < 2 or not args[1].isdecimal():  # noqa: PLR2004 -- REPO and N
