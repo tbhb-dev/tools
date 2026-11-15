@@ -87,14 +87,14 @@ The alpha commands write each worktree's state under `$(git rev-parse --git-dir)
 
 ## Identity start time
 
-An identity line can record when its agent started and which launch it belongs to. Both attributes are optional, and a line without them stays valid.
+An identity line can record when its agent started and which launch it belongs to. Both attributes are optional. A line without them is still valid.
 
 | Attribute | Value |
 | --- | --- |
 | `launch` | The `sha-256-64:` hash of the launcher's run id. |
-| `started_at` | The agent's start time in UTC with whole seconds, as `YYYY-MM-DDTHH:MM:SSZ`. The `T` and `Z` stay in capitals. |
+| `started_at` | The agent's start time in Coordinated Universal Time with whole seconds, as `YYYY-MM-DDTHH:MM:SSZ`. The `T` and `Z` are capitals. |
 
-Attributes stay in alphabetical order, so `launch` follows `harness` and `started_at` follows `session`:
+Order is alphabetical:
 
 ```text
 Generated-by: LLM effort=high;harness=codex:0.164.0;launch=sha-256-64:0a1b2c3d4e5f6071;model=openai:gpt-6.1-sol;session=sha-256-64:fb2bbc10b42a2d56;started_at=2026-11-14T00:02:41Z;surface=exec
@@ -108,6 +108,6 @@ The `record` hooks set both fields once in the session record, and a resumed ses
 
 The `trailer` hook writes both attributes from the session record. Where lines for the same agent meet, on an amend, a rebase, or an interactive squash, the hook merges them. Lines with the same key, harness, model, session, and subagent become one line, the one with the earliest `started_at`. A line with the attribute replaces one without it.
 
-The `check` hook and `verify-range` accept both attributes. They require a real UTC time in the exact format for `started_at` and the hash format for `launch`. An agent commit whose `Generated-by` line lacks `started_at` passes with a warning.
+The `check` hook and `verify-range` accept both attributes. They require a real Coordinated Universal Time in the exact format for `started_at` and the hash format for `launch`. An agent commit whose `Generated-by` line lacks `started_at` passes with a warning.
 
 The `commit_identity` check in the rules repository must accept both attributes before a host installs this version of the hooks. Until it does, commits with the new attributes fail CI.

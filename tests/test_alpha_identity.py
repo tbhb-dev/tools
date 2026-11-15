@@ -8537,9 +8537,9 @@ def line_of(start: str | None = None, extra: str = "", who: str = ROOT) -> str:
 def test_trailer_identity_and_start() -> None:
     value = f"LLM harness=h;model=m;session={ROOT};started_at={EARLY};subagent={CHILD}"
     assert ai.trailer_identity(value) == ("h", "m", ROOT, CHILD)
-    assert ai.trailer_identity("LLM xharness=h") == (None, None, None, None)
+    assert ai.trailer_identity("LLM x_harness=h") == (None, None, None, None)
     assert ai.trailer_start(value) == EARLY
-    assert ai.trailer_start(f"LLM xstarted_at={EARLY}") == ""
+    assert ai.trailer_start(f"LLM x_started_at={EARLY}") == ""
     assert ai.trailer_start("LLM harness=h") == ""
 
 
