@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
 """Tests for the ssh account guard."""
-# cspell:ignore caffeinate sshpass
+# cspell:ignore caffeinate sshpass autossh sshfs runuser doas
 
 import io
 import json
@@ -134,6 +134,39 @@ NAMES = ["lab1", "lab2"]
         "ssh -o ProxyCommand='nc lab1 22' alias",
         "ssh -o 'ProxyCommand=ssh -W %h:%p lab1' other",
         "scp -o HostName=lab1 file other:",
+        # wrappers in front of a shell or eval
+        "timeout 5 bash -c 'ssh lab1'",
+        "timeout 5 sh -c 'ssh lab1'",
+        "nice bash -c 'ssh lab1'",
+        "nice -n 5 bash -c 'ssh lab1'",
+        "timeout 5 eval 'ssh lab1'",
+        "timeout 5 bash -c 'timeout 5 ssh lab1'",
+        # commands that run a command or a command string
+        "watch ssh lab1",
+        "watch -n 5 ssh lab1",
+        "watch 'ssh lab1'",
+        "find . -exec ssh lab1 \\;",
+        "find . -execdir ssh lab1 {} +",
+        "find . -exec ssh lab1",
+        "find . -type f -exec echo {} \\; -exec ssh lab1 \\;",
+        "tmux new 'ssh lab1'",
+        "tmux new-session -d 'ssh lab1'",
+        "script -c 'ssh lab1' out",
+        "su -c 'ssh lab1' bob",
+        "parallel ssh lab1 ::: a",
+        "parallel -j 2 ssh lab1 ::: a",
+        "parallel 'ssh lab1' ::: a",
+        "busybox ssh lab1",
+        "doas ssh lab1",
+        "env -P /bin ssh lab1",
+        # a here-string before the host
+        "ssh <<<hi lab1",
+        "ssh <<< hi lab1",
+        "ssh <<<'a b' lab1",
+        # a jump list with spaces, and ssh-copy-id
+        "ssh -J 'other, lab1' x",
+        "ssh-copy-id lab1",
+        "ssh-copy-id -i key lab1",
         "rsync -e 'ssh -o HostName=lab1' dir other:dst",
     ],
 )
@@ -223,6 +256,33 @@ def test_denied(command: str) -> None:
         "ssh -o ProxyCommand='nc other 22' alias",
         "ssh -o 'ProxyCommand=ssh -W %h:%p agent@lab1' other",
         "ssh -o 'ProxyCommand=\"nc lab1' other",
+        "timeout 5 bash -c 'ssh agent@lab1'",
+        "timeout 5 bash -c 'echo ssh lab1'",
+        "timeout 5 bash -c",
+        "timeout 5 eval",
+        "watch ssh agent@lab1",
+        "watch 'echo hi'",
+        "find . -exec ssh agent@lab1 \\;",
+        "find . -exec echo ssh lab1 \\;",
+        "find . -name x",
+        "find . -exec",
+        "tmux new 'ssh agent@lab1'",
+        "tmux new 'echo ssh lab1'",
+        "tmux ls",
+        "script -c 'ssh agent@lab1' out",
+        "parallel ssh agent@lab1 ::: a",
+        "busybox ls",
+        "ssh <<<hi agent@lab1",
+        "ssh -J 'other, agent@lab1' x",
+        "ssh-copy-id agent@lab1",
+        # known gaps, pinned so a change to them is deliberate
+        "git clone lab1:x",
+        "ssh $H",
+        "xargs ssh",
+        "bash script.sh",
+        "echo ssh lab1 | sh",
+        "parallel -j 2 ssh {} ::: lab1",
+        "bash -O extglob -c 'ssh lab1'",
         "git status",
         "echo ssh lab1",
         "echo 'ssh lab1'",

@@ -23,11 +23,13 @@ ssh. Wrappers such as `timeout`, `nice`, `sudo`, `env` and `xargs` are skipped
 with their options, redirections are dropped, and a redirection cut off a word.
 
 An ssh config alias isn't resolved: the guard sees only the name typed, so an
-alias counts only when it is listed. Known gaps: `sftp`, `mosh`, `git` over ssh,
-`ssh -G` expansion of Host blocks, a host held in a variable or fed on stdin
-(`xargs ssh`), and a clustered rsync `-ae` shell option.
+alias counts only when it is listed. Known gaps: `sftp`, `mosh`, `sshfs`,
+`autossh`, `git` over ssh, `ssh -G` expansion of Host blocks, a host held in a
+variable or fed on stdin (`xargs ssh`), a host built by expansion, a script file
+or piped script, a here-document body, a shell run with options before `-c`, an
+opaque ProxyCommand, and a clustered rsync `-ae` option.
 """
-# cspell:ignore proxyjump proxycommand caffeinate sshpass
+# cspell:ignore proxyjump proxycommand caffeinate sshpass autossh sshfs runuser doas
 
 import json
 import re
@@ -38,9 +40,11 @@ from tbhbdev import userconfig
 from tbhbdev.alpha.guard_gh_pr import (
     ASSIGNMENT,
     KEYWORDS,
+    SHELLS,
     command_of,
     decision,
     program_of,
+    shell_script,
     simple_commands,
 )
 from tbhbdev.alpha.repo import read_hook_stdin
@@ -51,14 +55,19 @@ if TYPE_CHECKING:
 TABLE = "harness"
 KEY = "agent_user_hosts"
 ALLOWED_USERS = {"agent", "ops"}
-PROGRAMS = {"ssh", "scp", "rsync"}
+SSH_PROGRAMS = {"ssh", "ssh-copy-id"}
+COPY_PROGRAMS = {"scp", "rsync"}
+# Programs that run a command string given as an argument.
+STRING_RUNNERS = {"tmux", "screen", "script", "su", "runuser"}
+EXEC_FLAGS = {"-exec", "-execdir", "-ok", "-okdir"}
+SPACE = re.compile(r"\s")
 # ssh options that take a value; the value is the rest of the word or the next.
 SSH_VALUE_FLAGS = set("bcDEeFIiJLlmOoPpQRSWw")
 RSH_FLAGS = {"-e", "--rsh"}
 # Programs that run another one: option flags that take a value, and the
 # operands that come before the program. guard-gh-pr's list is its own.
 WRAPPERS = {
-    "env": ({"-u", "-C", "-S", "--unset", "--chdir", "--split-string"}, 0),
+    "env": ({"-u", "-C", "-S", "-P", "--unset", "--chdir", "--split-string"}, 0),
     "sudo": ({"-u", "-g", "-C", "-D", "-h", "-p", "-R", "-T", "-U", "--user"}, 0),
     "timeout": ({"-s", "-k", "--signal", "--kill-after"}, 1),
     "nice": ({"-n", "--adjustment"}, 0),
@@ -67,6 +76,10 @@ WRAPPERS = {
     "caffeinate": ({"-t", "-w"}, 0),
     "sshpass": ({"-p", "-f", "-d", "-P"}, 0),
     "xargs": ({"-n", "-L", "-P", "-I", "-s", "-E", "-d", "-a", "-J", "-R"}, 0),
+    "watch": ({"-n", "--interval"}, 0),
+    "parallel": ({"-j", "-n", "-S", "-a", "-N", "--jobs"}, 0),
+    "doas": ({"-u", "-C"}, 0),
+    "busybox": (set(), 0),
     "setsid": (set(), 0),
     "nohup": (set(), 0),
     "time": (set(), 0),
@@ -77,6 +90,7 @@ WRAPPERS = {
 REDIRECT = re.compile(r"\d*(?:>>|<<|<>|[<>])")
 # The & of 2>&1 and &> belongs to the redirection; the scanner would split there.
 AMPERSAND = re.compile(r"(?<=[<>])&|&(?=>)")
+HERE_STRING = "<<<"
 REASON = (
     "The command reaches {host} without an agent@ or ops@ account, so it would "
     "log in as the local user. Write agent@{host} or ops@{host}."
@@ -170,7 +184,7 @@ def shell_words(text: str) -> list[str]:
 def jump_targets(value: str) -> Iterator[Target]:
     """The targets of a ``-J`` or ``ProxyJump`` list."""
     for hop in value.split(","):
-        user, host = split_target(hop)
+        user, host = split_target(hop.strip())
         yield Target(host, user)
 
 
@@ -288,14 +302,57 @@ def program_words(words: list[str]) -> list[str]:
     return words[i:]
 
 
+def exec_commands(words: list[str]) -> Iterator[list[str]]:
+    """The command of each ``find -exec`` style action, up to its ``;`` or ``+``."""
+    current: list[str] | None = None
+    for word in words:
+        if word in EXEC_FLAGS:
+            current = []
+        elif current is not None and word in {";", "+"}:
+            yield current
+            current = None
+        elif current is not None:
+            current.append(word)
+    if current:
+        yield current
+
+
+def scripts_of(program: str, words: list[str]) -> list[str]:
+    """The command strings a program runs: a shell's ``-c``, ``eval`` and the like."""
+    if program in SHELLS:
+        script = shell_script(words[1:])
+        return [script] if script is not None else []
+    if program == "eval":
+        return [" ".join(words[1:])]
+    if program in STRING_RUNNERS:
+        return [word for word in words[1:] if SPACE.search(word)]
+    return [words[0]] if SPACE.search(words[0]) else []
+
+
+def commands_of(text: str) -> Iterator[list[str]]:
+    """The words of each simple command in ``text``, redirections made scannable."""
+    text = AMPERSAND.sub("", text).replace(HERE_STRING, "<")
+    for simple in simple_commands(text):
+        yield [*simple.prefix, *simple.words]
+
+
 def targets(command: list[str]) -> Iterator[Target]:
-    """The hosts a simple command reaches, for ssh, scp and rsync."""
+    """The hosts a simple command reaches, for ssh, scp and rsync and what they run."""
     words = program_words(strip_redirects(command))
-    program = program_of(words) if words else ""
-    if program == "ssh":
+    if not words:
+        return
+    program = program_of(words)
+    if program in SSH_PROGRAMS:
         yield from ssh_targets(words[1:])
-    elif program in PROGRAMS:
+    elif program in COPY_PROGRAMS:
         yield from copy_targets(program, words[1:])
+    else:
+        for script in scripts_of(program, words):
+            for inner in commands_of(script):
+                yield from targets(inner)
+        if program == "find":
+            for inner in exec_commands(words[1:]):
+                yield from targets(inner)
 
 
 def guarded(host: str, names: list[str]) -> bool:
@@ -306,8 +363,8 @@ def guarded(host: str, names: list[str]) -> bool:
 
 def verdict(text: str, names: list[str]) -> str | None:
     """The deny reason for a command, or None to allow it."""
-    for simple in simple_commands(AMPERSAND.sub("", text)):
-        for target in targets([*simple.prefix, *simple.words]):
+    for command in commands_of(text):
+        for target in targets(command):
             if guarded(target.host, names) and target.user not in ALLOWED_USERS:
                 return REASON.format(host=target.host)
     return None
