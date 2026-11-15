@@ -6,7 +6,7 @@ generated:
     model: openai:gpt-6.1-sol
     effort: high
     surface: exec
-    at: "2026-11-15T15:04:07Z"
+    at: "2026-11-15T16:37:22Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -19,8 +19,8 @@ Run-host runs git in a run clone only during `clone_run` and `create`, before la
 
 Run-host doesn't set upstream tracking before launch. It checks out a new build branch from a commit. Because `.git/config` stays read-only to the run, `git switch -c x origin/main` and `git push -u` can't record tracking. Use `git switch --no-track -c x origin/main` and push with an explicit destination branch, such as `git push origin HEAD:refs/heads/x`.
 
-An `unsandboxed` run can read the account's 1Password Connect token and every secret it can read. It can write anything the account can. The host marker at `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` is only a hint. The marked account can delete it. A child can leave the process group and keep running after the run ends. Run-host refuses Claude while separate tool paths for Claude (H3) and the Claude credential decision remain open.
-Every run's sandbox policy denies writes to the marker directory.
+An `unsandboxed` run can read the account's 1Password Connect token and every secret it can read. It can write anything the account can. The host marker at `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` is only a hint. The marked account can delete it. Build and review runs with `--unsandboxed` can use any harness on an unknown or tainted host. A child can leave the process group and keep running after the run ends.
+Sandboxed runs deny writes to the marker directory. A run with `--unsandboxed` has the account’s full access and skips executable trust checks.
 
 - A run can read anything that its deny list doesn't cover, including other runs' temp directories.
 - Build runs have access to the account's `gh` token and Docker config.
@@ -47,11 +47,11 @@ Reviews accept `--ref` and resolve it before launch. `--schema` streams a JSON s
 
 The optional `[[agent.host]] tbhbdev` key names an absolute executable path on that host. Its default is `$HOME/.local/bin/tbhbdev`, using the remote account’s home. Local `ssh` and `tmux` resolve against a fixed system PATH. Remote scripts use that PATH, add the standard package directories on macOS, and skip login shell startup.
 
-Each coordinator writes a per-host taint record to `$XDG_STATE_HOME/tbhbdev/agent-runs/taint/<host>.jsonl` in this phase. A mark from any account taints the entire host. The account remains in the record as information. Missing or empty records mean `unknown`. The coordinator refuses review runs on unknown or tainted hosts before SSH. Build runs can proceed, labelled `untrusted-host`. `status` shows `host=unknown` or `host=tainted` when applicable.
+Each coordinator writes a per-host taint record to `$XDG_STATE_HOME/tbhbdev/agent-runs/taint/<host>.jsonl` in this phase. A mark from any account taints the entire host. The account remains in the record as information. Missing or empty records mean `unknown`. The coordinator refuses sandboxed review runs on unknown or tainted hosts before SSH. Reviews with `--unsandboxed` proceed and record taint. Build runs can proceed, labelled `untrusted-host`. `status` shows `host=unknown` or `host=tainted` when applicable.
 
-Before a `--unsandboxed` launch, the coordinator appends a durable record using local run and authorization values. Failure to append refuses the launch. The last appended record decides trust, regardless of its timestamp. Only `clear-taint HOST --reason TEXT` clears local taint and prints the new state. A host needs an initial clearance before its first review. If the last line is incomplete, clearance moves the incomplete file aside in the same directory and starts a new file.
+Before a `--unsandboxed` launch, the coordinator appends a durable record using local run and authorization values. Failure to append refuses the launch. The last appended record decides trust, regardless of its timestamp. Only `clear-taint HOST --reason TEXT` clears local taint and prints the new state. A host needs an initial clearance before its first sandboxed review. If the last line is incomplete, clearance moves the incomplete file aside in the same directory and starts a new file.
 
-Run-host appends `--unsandboxed` marks to `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` on the run host. A coordinator whose local record is clean reads at most 64 KiB of that marker before preflight. Any line records local taint and refuses review. A missing marker supplies no evidence of cleanliness, and a marker that exists but can't be read counts as a marker. If the ssh call that reads it fails, the launch stops with exit 66 and the message `cannot read marker (transport)`. The local record is unchanged. Clearance changes only this coordinator's record. An existing host marker marks it again. Operators must rebuild or check the host and address its marker before clearing the local record.
+Run-host appends `--unsandboxed` marks to `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` on the run host. For a sandboxed launch, a coordinator whose local record is clean reads at most 64 KiB of that marker before preflight. Launches with `--unsandboxed` skip that read. Any line records local taint and refuses a sandboxed review. A missing marker supplies no evidence of cleanliness, and a marker that exists but can't be read counts as a marker. If the ssh call that reads it fails, the launch stops with exit 66 and the message `cannot read marker (transport)`. The local record is unchanged. Clearance changes only this coordinator's record. An existing host marker marks it again. Operators must rebuild or check the host and address its marker before clearing the local record.
 
 The coordinator stores metadata under `$XDG_STATE_HOME/tbhbdev/agent-runs/` on the coordinator. The remote directory uses the same location under the run account, with `.local/state` under home as the default state directory. The transfer claims `<name>.owner` with `set -C` before extracting inputs. It refuses an existing session or any `<name>.*` file with exit status 73. A collision never kills the existing session.
 
@@ -77,10 +77,12 @@ Ref resolution runs outside the clone against the SSH URL from the repository ar
 
 ## Risk
 
-The taint record is per coordinator, and the host marker is a hint that the marked account can delete.
+Each coordinator writes a separate taint record. A marked account can delete its host marker.
 
-The driver refuses reviews on a host with no record until `clear-taint`.
+Hosts with no record need `clear-taint` before sandboxed reviews.
 
-The driver's mirror receives agent-pushed objects.
+The driver’s mirror receives agent-pushed objects.
 
-A run's push reads the private-name list at `.local/state/tbhb/private-repos.txt` in the agent home. The file must belong to the agent account, and its mode must clear the group and other write bits. On a host whose file-creation mask is 002, which is the Ubuntu default, create the file with mode 0644 or tighter, or the push refuses.
+Before pushing, a run reads the private-name list at `.local/state/tbhb/private-repos.txt` in the agent home. The file must belong to the agent account, and its mode must clear the group and other write bits. On a host whose file-creation mask is 002, which is the Ubuntu default, create the file with mode 0644 or tighter, or the push refuses.
+
+One successful, real `agent exec --unsandboxed` run on a host proves that harness. `proven_harnesses` records this fact without refusing unproven harnesses. A sandbox failure never prevents an explicitly `--unsandboxed` launch. Codex uses the existing account executable on PATH for `--unsandboxed` runs and doesn't require a standalone release layout.

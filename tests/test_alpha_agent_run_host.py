@@ -132,6 +132,10 @@ def fake_secrets(
             return str(Path(name).resolve() if follow_symlinks else Path(name))
         return str(fake_host_bin / ("env" if name == "env" else "true"))
 
+    binary = fake_host_bin / "codex"
+    binary.write_bytes(b"binary")
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_host_bin}:{os.environ['PATH']}")
     monkeypatch.setattr(host_tools, "resolve", resolve)
     monkeypatch.setattr(host_tools, "codex_proxy_supported", constant(value=True))
     original_prepare = codex_install.prepare
@@ -1107,7 +1111,7 @@ def test_startup_deadline_stops_the_recorded_setup_group(
     assert process_group.leader_start(group) is None
 
 
-def test_refused_claude_review_never_starts_helpers_or_writes_auth(
+def test_claude_review_reaches_preparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = make_run(
@@ -1120,14 +1124,19 @@ def test_refused_claude_review_never_starts_helpers_or_writes_auth(
         reason="example review",
     )
 
-    def unexpected(*_args: object) -> None:
-        pytest.fail("refused Claude must not start preparation or a harness")
+    reached = []
 
-    monkeypatch.setattr(process_group, "prepare", unexpected)
-    monkeypatch.setattr(run_host, "run_harness", unexpected)
+    def prepare(*_args: object) -> None:
+        reached.append(True)
+        message = "preparation reached"
+        raise Invalid(message)
+
+    monkeypatch.setattr(process_group, "prepare", prepare)
     run.files.receive(run.request)
     assert run_host.execute(run, "example") == 1
     assert run.files.path("rc").read_text() == "1\n"
+    assert reached == [True]
+    assert "preparation reached" in run.files.path("log").read_text()
     assert not (run.tmpdir / "ssh.sock").exists()
     assert not (run.home / ".codex").exists()
     assert runfiles.latest(run.files.root)["example"]["state"] == "ended"
@@ -1356,10 +1365,8 @@ def test_host_passes_configured_full_access_authorization(
     config_file: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    text = "\n".join(
-        line for line in EXAMPLE.splitlines() if not line.startswith("reviews_app_")
-    )
-    config_file.write_text(text.replace("unsandboxed = false", "unsandboxed = true"))
+    config_file.write_text(EXAMPLE.replace("unsandboxed = false", "unsandboxed = true"))
+    account_path = os.environ["PATH"]
     root = Path(os.environ["XDG_STATE_HOME"]) / "tbhbdev" / "agent-runs"
     files = runfiles.RunFiles(root, "example")
     files.receive(
@@ -1380,6 +1387,7 @@ def test_host_passes_configured_full_access_authorization(
     ) -> int:
         assert preflight_only is False
         assert push_token is None
+        assert os.environ["PATH"] == account_path
         assert run.request.unsandboxed is True
         assert run.request.authorized_by == "operator-chat-2026-11-09"
         return 37
@@ -1972,12 +1980,13 @@ def test_preflight_version_and_named_exceptions(
         return False
 
     monkeypatch.setattr(host_tools, "codex_proxy_supported", supported)
-    if harness in {Harness.AGY, Harness.CLAUDE} or (
-        not opt_out and harness is Harness.CODEX
-    ):
+    if not opt_out and harness is Harness.CODEX:
         with pytest.raises(Invalid) as caught:
             run_host.preflight(run)
-        assert str(caught.value) == preflight_failure_message(harness)
+        assert str(caught.value) == (
+            "Codex network_proxy support required (minimum 0.164.0); "
+            "upgrade or configure codex_network_proxy_opt_out"
+        )
     else:
         run_host.preflight(run)
         if opt_out and harness is Harness.CODEX:
@@ -1999,20 +2008,6 @@ def test_preflight_version_and_named_exceptions(
         if harness is Harness.CODEX and not opt_out
         else []
     )
-
-
-def preflight_failure_message(harness: Harness) -> str:
-    if harness is Harness.CODEX:
-        return (
-            "Codex network_proxy support required (minimum 0.164.0); "
-            "upgrade or configure codex_network_proxy_opt_out"
-        )
-    if harness is Harness.CLAUDE:
-        return (
-            "claude runs are refused: separate tool paths for Claude (H3) "
-            "and the Claude credential decision remain open"
-        )
-    return "agy runs are refused: no OS sandbox"
 
 
 def test_mac_host_commands_are_resolved_before_launch(
@@ -2828,7 +2823,7 @@ def test_full_access_is_available_behind_the_existing_gate(tmp_path: Path) -> No
 
 @pytest.mark.parametrize("profile", ["build", "review"])
 @pytest.mark.parametrize("opt_out", [None, "isolated account"])
-def test_agy_preflight_always_refuses(
+def test_agy_preflight_launches_without_opt_out(
     tmp_path: Path, profile: str, opt_out: str | None
 ) -> None:
     run = make_run(
@@ -2847,55 +2842,7 @@ def test_agy_preflight_always_refuses(
             ),
         ),
     )
-    with pytest.raises(Invalid) as caught:
-        run_host.preflight(run)
-    assert str(caught.value) == "agy runs are refused: no OS sandbox"
-
-
-@pytest.mark.parametrize("harness", [Harness.AGY])
-def test_unconfined_run_is_refused_before_workspace_preparation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
-) -> None:
-    run = make_run(tmp_path, harness=harness.value, timeout=900)
-    run = dataclasses.replace(
-        run,
-        settings=dataclasses.replace(
-            run.settings,
-            sandbox=dataclasses.replace(
-                run.settings.sandbox,
-                agy_unsandboxed_opt_out=None,
-            ),
-        ),
-    )
-
-    def unexpected(*_args: object) -> None:
-        pytest.fail("a run without its opt-out must not prepare or launch a workspace")
-
-    monkeypatch.setattr(process_group, "prepare", unexpected)
-    assert run_host.execute(run, "probe") == 1
-    assert run.files.path("rc").read_text() == "1\n"
-    assert run.files.path("log").read_text() == (
-        "agy runs are refused: no OS sandbox\n"
-    )
-
-
-@pytest.mark.parametrize("os_name", Os)
-def test_resolved_denies_preserve_macos_aliases_and_empty_linux_data(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, os_name: Os
-) -> None:
-    run = make_run(tmp_path)
-    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=os_name))
-    missing = (str(tmp_path / "missing"),)
-    monkeypatch.setattr(run_host.policy, "denied_paths", constant(missing))
-    assert run_host.resolved_denies(run, preparation(run).paths) == (
-        ()
-        if os_name is Os.LINUX
-        else (
-            *missing,
-            str(run_host.worktree.mirror_path(run.home, run.request.repo)),
-            str(run.home / ".codex-recovery"),
-        )
-    )
+    run_host.preflight(run)
 
 
 def test_startup_symlink_target_is_protected(tmp_path: Path) -> None:
@@ -3151,13 +3098,13 @@ def test_sandbox_path_must_be_outside_write_roots(
         run_host.checked_policy(run, preparation(run).paths)
 
 
-def test_main_sets_host_path_before_loading(
+def test_main_keeps_account_path_until_request_loaded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PATH", str(tmp_path / "untrusted"))
 
     def load(_args: object, _tmpdir: Path) -> None:
-        assert os.environ["PATH"] == host_tools.search()
+        assert os.environ["PATH"] == str(tmp_path / "untrusted")
         message = "loading probe"
         raise Invalid(message)
 
@@ -3448,7 +3395,7 @@ def test_preflight_checks_the_requested_accounts_app(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
-def test_preflight_refuses_harness_without_recorded_pass(
+def test_preflight_accepts_harness_without_recorded_pass(
     tmp_path: Path, harness: Harness
 ) -> None:
     run = make_run(
@@ -3460,12 +3407,7 @@ def test_preflight_refuses_harness_without_recorded_pass(
     run = dataclasses.replace(
         run, host=dataclasses.replace(run.host, proven_harnesses=())
     )
-    with pytest.raises(Invalid) as caught:
-        run_host.preflight(run)
-    assert (
-        str(caught.value)
-        == f"{harness} has no recorded sandbox pass on {run.host.name}"
-    )
+    run_host.preflight(run)
 
 
 @pytest.mark.parametrize("unsandboxed", [False, True])
@@ -3984,9 +3926,7 @@ def test_codex_home_defaults_to_account_state(
 
 
 @pytest.mark.parametrize("profile", ["build", "review"])
-def test_claude_preflight_names_both_open_conditions(
-    tmp_path: Path, profile: str
-) -> None:
+def test_claude_preflight_launches(tmp_path: Path, profile: str) -> None:
     run = make_run(
         tmp_path,
         harness="claude",
@@ -3995,12 +3935,7 @@ def test_claude_preflight_names_both_open_conditions(
         claude_profile="primary",
         reason="phase refusal",
     )
-    with pytest.raises(Invalid) as caught:
-        run_host.preflight(run)
-    assert str(caught.value) == (
-        "claude runs are refused: separate tool paths for Claude (H3) "
-        "and the Claude credential decision remain open"
-    )
+    run_host.preflight(run)
 
 
 @pytest.mark.parametrize("root", ["parent", "self", "child"])
@@ -4865,3 +4800,62 @@ def test_resource_attributes_need_an_endpoint(tmp_path: Path) -> None:
     run = make_run(tmp_path)
     assert run.settings.otel_endpoint is None
     assert run_host.resource_attributes(run) == {}
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_unsandboxed_preflight_launches_every_harness(
+    tmp_path: Path, harness: Harness, profile: str
+) -> None:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        profile=profile,
+        commit="0" * 40 if profile == "review" else None,
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        reason="operator approval",
+        timeout=900,
+        unsandboxed=True,
+        authorized_by="operator-chat-2026-11-15",
+        tainted_host=True,
+    )
+    run = dataclasses.replace(
+        run, host=dataclasses.replace(run.host, proven_harnesses=())
+    )
+    run_host.preflight(run)
+
+
+@pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.parametrize("configured", [False, True])
+def test_unsandboxed_codex_uses_account_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: bool, configured: bool
+) -> None:
+    run = make_run(tmp_path, unsandboxed=True, authorized_by="operator-chat-2026-11-15")
+    directory = run.home / ".local/bin"
+    directory.mkdir(parents=True)
+    binary = directory / "codex"
+    if not missing:
+        binary.write_bytes(b"binary")
+        binary.chmod(0o755)
+    inherited_path = str(tmp_path / "empty") if configured else str(directory)
+    monkeypatch.setenv("PATH", inherited_path)
+    sandbox_path = dataclasses.replace(
+        run.settings.sandbox.path, linux=(str(directory),)
+    )
+    sandbox = dataclasses.replace(run.settings.sandbox, path=sandbox_path)
+    run = dataclasses.replace(
+        run, settings=dataclasses.replace(run.settings, sandbox=sandbox)
+    )
+
+    def unexpected(*_args: object) -> None:
+        pytest.fail("unsandboxed runs must use the installed binary")
+
+    monkeypatch.setattr(codex_install, "prepare", unexpected)
+    if missing:
+        with pytest.raises(Invalid, match=r"^host executable codex was not found$"):
+            run_host.checked_policy(run, run_host.planned_paths(run))
+    else:
+        value, executable = run_host.checked_policy(run, run_host.planned_paths(run))
+        assert executable == str(binary)
+        assert value.env["PATH"].split(":")[0] == inherited_path
+        assert str(directory) in value.env["PATH"].split(":")

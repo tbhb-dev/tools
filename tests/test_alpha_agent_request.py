@@ -450,12 +450,21 @@ def test_unsandboxed_rule() -> None:
     assert refused(made(BUILD, authorized_by="o/r#1")) == (
         "request authorized_by requires unsandboxed"
     )
-    claude = made(CLAUDE, unsandboxed=True, authorized_by="o/r#1")
-    assert refused(claude) == "request unsandboxed applies only to a codex run"
-    agy = made(AGY, unsandboxed=True, authorized_by="o/r#1")
-    assert refused(agy) == "request unsandboxed applies only to a codex run"
-    review = made(REVIEW, unsandboxed=True, authorized_by="o/r#1")
-    assert refused(review) == "request unsandboxed applies only to a build run"
+
+
+@pytest.mark.parametrize("base", [BUILD, CLAUDE, AGY], ids=["codex", "claude", "agy"])
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_unsandboxed_accepts_every_harness_and_profile(
+    base: Data, profile: str
+) -> None:
+    data = made(
+        base,
+        profile=profile,
+        commit=COMMIT if profile == "review" else None,
+        unsandboxed=True,
+        authorized_by="o/r#1",
+    )
+    assert request.parse(data, host_allows_unsandboxed=True).unsandboxed
 
 
 def test_the_host_flag_does_not_matter_without_unsandboxed() -> None:

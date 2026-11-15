@@ -737,13 +737,11 @@ def test_terminal_kernel_refusal_is_a_passing_observation(
         assert "blocked by kernel" in capsys.readouterr().out
 
 
-def test_host_live_probes_refuse_agy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+@pytest.mark.usefixtures("fake_host_tools")
+def test_host_live_probes_allow_agy(tmp_path: Path) -> None:
     run, paths = probe_run(tmp_path, Harness.AGY)
-    with pytest.raises(Invalid, match="agy has no OS sandbox"):
-        checked_live_policy(run, paths)
+    value, _executable = checked_live_policy(run, paths)
+    assert value.harness is Harness.AGY
 
 
 def test_terminal_prompt_reaches_the_harness_with_terminal_stdin(

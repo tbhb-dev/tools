@@ -345,7 +345,7 @@ def test_unsandboxed_selects_full_access_for_a_codex_build(os: Os) -> None:
         deny=denied(os, "/example/home/ops"),
         approval_policy="never",
         web_search=WebSearch.LIVE,
-        network_proxy=policy.network_proxy(settings()),
+        network_proxy=None,
     )
     assert result.env == env_of(os, Harness.CODEX, "ops")
     assert result.deny == denied(os, "/example/home/ops")
@@ -360,9 +360,6 @@ def test_a_host_that_allows_it_still_sandboxes_unless_asked() -> None:
 @pytest.mark.parametrize(
     ("host", "harness", "profile", "account", "why"),
     [
-        (LINUX, Harness.CLAUDE, Profile.BUILD, "agent", "applies only to a codex run"),
-        (LINUX, Harness.AGY, Profile.BUILD, "agent", "applies only to a codex run"),
-        (LINUX, Harness.CODEX, Profile.REVIEW, "agent", "applies only to a build run"),
         (
             dataclasses.replace(LINUX, unsandboxed=False),
             Harness.CODEX,
@@ -1429,22 +1426,15 @@ def test_codex_protects_git_configuration_inside_build_write_root(
 
 @pytest.mark.parametrize("profile", Profile)
 @pytest.mark.parametrize("reason", [None, "isolated test machine"])
-def test_agy_requires_named_opt_out(profile: Profile, reason: str | None) -> None:
+def test_agy_needs_no_named_opt_out(profile: Profile, reason: str | None) -> None:
     configured = settings(
         sandbox=dataclasses.replace(SANDBOX, agy_unsandboxed_opt_out=reason)
     )
-    if reason is None:
-        with pytest.raises(Invalid) as caught:
-            made(Os.LINUX, profile, Harness.AGY, "agent", config=configured)
-        assert str(caught.value) == (
-            "agy has no OS sandbox; configure agy_unsandboxed_opt_out "
-            "with a named reason"
-        )
-    else:
-        assert isinstance(
-            made(Os.LINUX, profile, Harness.AGY, "agent", config=configured).detail,
-            model.AgyPolicy,
-        )
+    assert configured.sandbox.agy_unsandboxed_opt_out == reason
+    assert isinstance(
+        made(Os.LINUX, profile, Harness.AGY, "agent", config=configured).detail,
+        model.AgyPolicy,
+    )
 
 
 @pytest.mark.parametrize("reason", [None, "explicit network exception"])
@@ -1605,39 +1595,37 @@ def test_git_entry_and_all_configuration_paths_are_protected() -> None:
 
 
 @pytest.mark.parametrize("reason", [None, "isolated test host"])
-def test_codex_full_access_requires_named_opt_out(reason: str | None) -> None:
-    configured = settings()
-    configured = dataclasses.replace(
-        configured,
-        sandbox=dataclasses.replace(
-            configured.sandbox, codex_unsandboxed_opt_out=reason
-        ),
+def test_codex_full_access_needs_no_named_opt_out(reason: str | None) -> None:
+    configured = settings(
+        sandbox=dataclasses.replace(SANDBOX, codex_unsandboxed_opt_out=reason)
     )
-    if reason is None:
-        with pytest.raises(Invalid) as caught:
-            made(
-                os=Os.LINUX,
-                profile=Profile.BUILD,
-                harness=Harness.CODEX,
-                account="agent",
-                unsandboxed=True,
-                config=configured,
-            )
-        assert str(caught.value) == (
-            "codex has no OS sandbox; configure codex_unsandboxed_opt_out "
-            "with a named reason"
-        )
-    else:
-        value = made(
-            os=Os.LINUX,
-            profile=Profile.BUILD,
-            harness=Harness.CODEX,
-            account="agent",
-            unsandboxed=True,
-            config=configured,
-        )
-        assert isinstance(value.detail, model.CodexPolicy)
+    assert configured.sandbox.codex_unsandboxed_opt_out == reason
+    value = made(
+        Os.LINUX,
+        Profile.BUILD,
+        Harness.CODEX,
+        "agent",
+        unsandboxed=True,
+        config=configured,
+    )
+    assert isinstance(value.detail, model.CodexPolicy)
+    assert value.detail.mode is model.CodexMode.FULL_ACCESS
+    assert value.detail.network_proxy is None
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", Profile)
+def test_unsandboxed_policy_for_every_harness(
+    harness: Harness, profile: Profile
+) -> None:
+    value = made(Os.LINUX, profile, harness, "agent", unsandboxed=True)
+    if isinstance(value.detail, model.ClaudePolicy):
+        assert value.detail.settings["sandbox"] == {"enabled": False}
+    elif isinstance(value.detail, model.CodexPolicy):
         assert value.detail.mode is model.CodexMode.FULL_ACCESS
+        assert value.detail.network_proxy is None
+    else:
+        assert isinstance(value.detail, model.AgyPolicy)
 
 
 @pytest.mark.parametrize("harness", Harness)
