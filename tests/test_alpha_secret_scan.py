@@ -803,6 +803,20 @@ def test_git_config_parameters_do_not_hide_a_staged_secret(
     assert refused(repo) == found("a.txt")
 
 
+@pytest.mark.parametrize("variable", ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"])
+def test_a_config_file_does_not_hide_a_staged_secret(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variable: str
+) -> None:
+    config = tmp_path / "hostile.gitconfig"
+    config.write_text(
+        "[color]\n\tdiff = always\n\tui = always\n[diff]\n\trenames = true\n"
+    )
+    monkeypatch.setenv(variable, str(config))
+    monkeypatch.delenv("GIT_CONFIG_NOSYSTEM")
+    stage_secret(repo)
+    assert refused(repo) == found("a.txt")
+
+
 def test_a_symlinked_config_in_the_index_is_refused(repo: Path) -> None:
     (repo / "real.toml").write_text("[extend]\nuseDefault = true\n")
     (repo / ".gitleaksignore").symlink_to("real.toml")
