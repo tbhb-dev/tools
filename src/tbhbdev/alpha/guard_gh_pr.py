@@ -23,27 +23,23 @@ alone picks the output contract, so the hook behaves the same whoever runs it:
   ``hookSpecificOutput.permissionDecision`` and
   ``permissionDecisionReason``, which both harnesses show to the model.
 
-A session can't approve a pull request it or its subagents opened. The guard
-reads the caller's root session from the payload (see ``tbhbdev.alpha.opened``)
-and denies these approval routes when that root's opened ledger lists the
-target, in any repository, tbhb-dev or not:
+No session approves through gh, whoever opened the pull request: the guard
+denies these routes in any repository, tbhb-dev or not, and tells the agent to
+post a COMMENT review instead:
 
     gh pr review N --approve|-a      repo from -R/--repo or a PR URL, else origin
     gh api repos/O/R/pulls/N/reviews  a POST (-X/--method POST, or any
                                       -f/-F/--field/--raw-field) whose fields
                                       hold event=APPROVE; also .../reviews/ID/events
-    tbhb-approve REPO N SHA           read as tbhb-dev/REPO#N
 
-Without ``-R``, the repository is a ``GH_REPO=`` prefix on the command, else
-the hook cwd's origin, which also fills ``{owner}`` and ``{repo}`` in a
-``gh api`` path, as gh does. After a ``cd``, ``pushd``, ``popd`` or
-``git -C`` earlier in the command line the cwd is unknown, and so is a target
-that would come from it. PR numbers lose leading zeros. These routes fail
-closed: a ledger that exists but can't be read, a payload whose root session
-can't be resolved, a crash while checking, and,
-for a root whose ledger lists any pull request, an approval whose target
-can't be read (``gh pr review --approve`` on the current branch, say) all
-deny. A root with no ledger opened nothing, so its approvals pass.
+Approval comes only from ``tbhb-approve REPO N SHA``, read as tbhb-dev/REPO#N. A
+session can't approve a pull request it or its subagents opened: the guard reads
+the caller's root session from the payload (see ``tbhbdev.alpha.opened``) and
+denies the script when that root's opened ledger lists the target.
+
+The ledger check fails closed: a ledger that exists but can't be read, a payload
+whose root session can't be resolved and a crash while checking all deny. A root
+with no ledger opened nothing, so its ``tbhb-approve`` passes.
 
 Allowing prints nothing. Every other path fails open: unreadable input or any crash
 allows the command and prints nothing, because a broken hook must never stop
@@ -111,6 +107,11 @@ DRAFT = ".github/PULL_REQUEST_DRAFT.md"
 TEMPLATE = ".github/PULL_REQUEST_TEMPLATE.md"
 
 RULE = "A session can't approve a pull request it or its subagents opened"
+GH_RULE = (
+    "An agent can't approve a pull request through gh, whoever opened it. "
+    "Approval comes only from `tbhb-approve`, run by the coordinator. "
+    "Post the verdict as a COMMENT review instead"
+)
 APPROVE_SCRIPT = "tbhb-approve"
 APPROVE_OWNER = "tbhb-dev"
 # gh pr review's flags that take a value; the next word is not the PR.
@@ -574,8 +575,13 @@ def approvals(text: str, cwd: Path | None) -> list[Approval]:
 def denial(found: list[Approval], data: Json, env: Mapping[str, str]) -> str | None:
     """The deny message for approval routes, or None when the caller may approve.
 
-    Fails closed: an unknown root or an unreadable ledger denies.
+    Fails closed: an unknown root or an unreadable ledger denies. A gh approval
+    denies for every session, which stops a review run's own GO from becoming
+    an approval.
     """
+    for approval in found:
+        if approval.route != f"`{APPROVE_SCRIPT}`":
+            return f"{GH_RULE}: it refuses {approval.route}."
     root = caller_root(data, env)
     if root is None:
         return (
@@ -590,11 +596,7 @@ def denial(found: list[Approval], data: Json, env: Mapping[str, str]) -> str | N
             f"so it refuses {found[0].route}: {exc}"
         )
     for approval in found:
-        if approval.target is None and opened:
-            return (
-                f"{RULE}, and the guard can't tell which pull request {approval.route} "
-                "approves. Name it as OWNER/REPO and number."
-            )
+        # Only `tbhb-approve` reaches here, and it always names its target.
         if approval.target and approval.target.lower() in opened:
             return (
                 f"{RULE}: this session opened {approval.target}, "

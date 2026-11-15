@@ -27,6 +27,13 @@ if TYPE_CHECKING:
 # Split the spelling because the repository's leak scanner also flags the name.
 CLAUDE_TOKEN_ENV = "CLAUDE_CODE_" + "OAUTH_TOKEN"
 PULL_REQUESTS_PERMISSIONS = {"contents": "read"}
+# A review run returns its verdict as text, so its token can read and never write.
+REVIEW_PERMISSIONS = {
+    "contents": "read",
+    "pull_requests": "read",
+    "checks": "read",
+    "statuses": "read",
+}
 
 
 @dataclass(frozen=True)
@@ -59,16 +66,24 @@ def require_reviews_app(references: Credentials) -> None:
 
 
 def installation_token(references: Credentials, repository: str) -> str:
-    """Mint the reviews App's token for one repository."""
+    """Mint the reviews App's read-only token for one repository."""
     if references.reviews_app_client_id is None or references.reviews_app_pem is None:
         message = "reviews App credentials are not configured"
         raise Invalid(message)
-    return app_token(
-        "reviews",
-        references.reviews_app_client_id,
-        references.reviews_app_pem,
-        repository,
-    )
+    host, owner, name = repo.parts(repository)
+    if host != "github.com":
+        message = "reviews app supports github.com repositories"
+        raise Invalid(message)
+    client_id = read(references.reviews_app_client_id, label="reviews app")
+    pem = read(references.reviews_app_pem, label="reviews app")
+    # Explicit permissions, so the token stays read-only whatever the App holds.
+    return gh_app.mint_token(
+        gh_app.default_env(),
+        app_id=client_id,
+        pem=pem,
+        repository=f"{owner}/{name}",
+        permissions=REVIEW_PERMISSIONS,
+    ).token
 
 
 def pull_requests_token(references: Credentials, repository: str) -> str:
@@ -93,29 +108,6 @@ def pull_requests_token(references: Credentials, repository: str) -> str:
         repository=f"{owner}/{name}",
         permissions=PULL_REQUESTS_PERMISSIONS,
     ).token
-
-
-def app_token(app: str, client_id_ref: str, pem_ref: str, repository: str) -> str:
-    """Reuse the app signer and request a token restricted to one repository."""
-    host, owner, name = repo.parts(repository)
-    if host != "github.com":
-        message = f"{app} app supports github.com repositories"
-        raise Invalid(message)
-    client_id = read(client_id_ref, label=f"{app} app")
-    pem = read(pem_ref, label=f"{app} app")
-    env = gh_app.default_env()
-    args = gh_app.Args(
-        app=app,
-        repo=f"{owner}/{name}",
-        fresh=True,
-        dry_run=False,
-        all_repos=False,
-        vault="",
-        cooldown_until=None,
-        cooldown_status=False,
-    )
-    jwt = gh_app.sign(env, client_id, gh_app.rebuild_pem(pem))
-    return gh_app.request_token(env, args, jwt).token
 
 
 TOKEN_ERRORS = (

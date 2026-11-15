@@ -23,7 +23,7 @@ SCHEMA = {
             "pattern": "^[0-9a-fA-F]{40}$",
             "maxLength": 40,
         },
-        "event": {"enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"]},
+        "event": {"enum": ["REQUEST_CHANGES", "COMMENT"]},
     },
 }
 LINT_PATH = Path(".github") / "PULL_REQUEST_REVIEW_DRAFT.md"
