@@ -455,6 +455,25 @@ def merge_groups(config: Json, desired: Json) -> Json:
     return {**config, **desired}
 
 
+def runs_other_chase(config: Json) -> bool:
+    """Whether another UserPromptSubmit handler runs a chase-context command."""
+    hooks = config.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    groups = cast("Json", hooks).get("UserPromptSubmit")  # pragma: no mutate
+    if not isinstance(groups, list):
+        return False
+    for entry in cast("list[object]", groups):  # pragma: no mutate
+        handlers = entry.get("hooks") if isinstance(entry, dict) else None
+        if not isinstance(handlers, list):
+            continue
+        for handler_ in cast("list[object]", handlers):  # pragma: no mutate
+            text = handler_.get("command") if isinstance(handler_, dict) else None
+            if isinstance(text, str) and not ours(handler_) and "chase-context" in text:
+                return True
+    return False
+
+
 def merged_config(harness: str, config: Json) -> Json:
     """A harness config with this command's hooks merged in."""
     if harness == CLAUDE:
@@ -463,7 +482,15 @@ def merged_config(harness: str, config: Json) -> Json:
             message = "its env key is not an object"
             raise InstallError(message)
         fields = cast("Json", env)  # pragma: no mutate
-        merged = merge_events(config, claude_hooks())
+        desired = claude_hooks()
+        if runs_other_chase(config):
+            del desired["UserPromptSubmit"]
+            print(
+                "tbhbdev alpha install: another UserPromptSubmit hook already "
+                "runs a chase-context command, so it adds none and leaves that one.",
+                file=sys.stderr,
+            )
+        merged = merge_events(config, desired)
         return {**merged, "env": {**fields, **AGENT_ENVIRONMENT}}
     if harness == CODEX:
         return merge_events(config, codex_hooks())

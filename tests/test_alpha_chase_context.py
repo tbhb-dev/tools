@@ -212,6 +212,11 @@ def test_project_dir_falls_back_to_the_hook_input(
         (["p=repo-a"], "", None),
         (None, "/x/p", None),
         ([], "/x/p", None),
+        (["p=repo-a", "p-docs=repo-b"], "/x/p-docs", {"repo-b"}),
+        (["p-docs=repo-b", "p=repo-a"], "/x/p-docs-fix", {"repo-b"}),
+        (["p=repo-a"], "/x/p-feature", {"repo-a"}),
+        (["p=repo-a", "p=repo-b"], "/x/p", {"repo-a"}),
+        (["p=repo-a"], "/x/pq", None),
     ],
 )
 def test_own_repos_picks_the_entry_for_the_project_directory_name(
@@ -291,6 +296,50 @@ def test_main_fails_open_on_a_broken_config(
     config_file: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config_file.write_text("[harness\n")
+    assert chase_context.main() == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("chase-context: ")
+
+
+def test_main_fails_open_on_output_that_is_not_utf8(
+    tmp_path: Path, config_file: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    configure(config_file, script(tmp_path, "printf '\\377\\376\\n'"))
+    assert chase_context.main() == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("chase-context: ")
+
+
+def test_main_fails_open_when_the_producer_hangs(
+    tmp_path: Path,
+    config_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(chase_context, "PRODUCER_SECONDS", 0.2)
+    configure(config_file, script(tmp_path, "sleep 5"))
+    assert chase_context.main() == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_main_fails_open_when_the_producer_is_missing(
+    tmp_path: Path, config_file: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    configure(config_file, tmp_path / "missing.sh")
+    assert chase_context.main() == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_main_fails_open_when_the_cache_is_unreadable(
+    tmp_path: Path,
+    config_file: Path,
+    state: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure(config_file, script(tmp_path, echo(ROW_A)))
+    (state / "chase-context.cache").mkdir(parents=True)
     assert chase_context.main() == 0
     captured = capsys.readouterr()
     assert captured.out == ""

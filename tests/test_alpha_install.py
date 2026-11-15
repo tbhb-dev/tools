@@ -3349,3 +3349,68 @@ def test_missing_tool_uses_named_remote_push_url(world: World) -> None:
     )
     assert done.returncode == 1
     assert done.stderr == b"pre-push: tbhbdev is not on PATH; push refused\n"
+
+
+CHASE_ENTRY = {"type": "command", "command": "/example/bin/chase-context.sh"}
+
+
+def chase_config(*handlers: object) -> dict[str, object]:
+    return {"hooks": {"UserPromptSubmit": [{"hooks": list(handlers)}]}}
+
+
+def test_install_adds_its_chase_hook_when_no_other_runs_one(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    other = {"type": "command", "command": "/example/bin/other.sh"}
+    merged = install.merged_config("claude", chase_config(other))
+    groups = merged["hooks"]["UserPromptSubmit"]
+    assert groups == [
+        {"hooks": [other]},
+        *install.claude_hooks()["UserPromptSubmit"],
+    ]
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        chase_config(CHASE_ENTRY),
+        chase_config({"type": "command", "command": "tbhbdev alpha chase-context"}),
+    ],
+)
+def test_install_leaves_another_chase_hook_and_adds_none(
+    config: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    merged = install.merged_config("claude", config)
+    assert merged["hooks"]["UserPromptSubmit"] == config["hooks"]["UserPromptSubmit"]
+    assert "already runs a chase-context command" in capsys.readouterr().err
+
+
+def test_install_drops_its_own_chase_hook_once_another_one_appears() -> None:
+    first = install.merged_config("claude", {})
+    ours_only = first["hooks"]["UserPromptSubmit"]
+    config = {"hooks": {"UserPromptSubmit": [*ours_only, {"hooks": [CHASE_ENTRY]}]}}
+    merged = install.merged_config("claude", config)
+    assert merged["hooks"]["UserPromptSubmit"] == [{"hooks": [CHASE_ENTRY]}]
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [
+        None,
+        [],
+        {},
+        {"UserPromptSubmit": "x"},
+        {"UserPromptSubmit": ["x"]},
+        {"UserPromptSubmit": [{"hooks": "x"}]},
+        {"UserPromptSubmit": [{"hooks": ["x"]}]},
+        {"UserPromptSubmit": [{"hooks": [{"type": "command"}]}]},
+        {"UserPromptSubmit": [{"hooks": [{"command": 3}]}]},
+        {"UserPromptSubmit": [{"hooks": [{"command": "/example/other.sh"}]}]},
+    ],
+)
+def test_runs_other_chase_ignores_what_is_not_a_chase_command(
+    hooks: object,
+) -> None:
+    assert install.runs_other_chase({"hooks": hooks}) is False
+    assert install.runs_other_chase({}) is False

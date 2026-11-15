@@ -26,7 +26,7 @@ Exit 2 would block the user's prompt.
 import json
 import os
 import re
-import subprocess
+import subprocess  # nosec B404 -- runs the user's own configured script
 import sys
 import time
 from pathlib import Path
@@ -64,7 +64,7 @@ def produce(producer: str) -> list[str]:
     """The rows PRODUCER prints that pass `keep`; none when it fails or hangs."""
     env = {**os.environ, "PATH": gh_shim.prefixed_path(os.environ.get("PATH", ""))}
     try:
-        done = subprocess.run(
+        done = subprocess.run(  # nosec B603 -- argv is one configured path
             [str(Path(producer).expanduser())],
             capture_output=True,
             text=True,
@@ -108,15 +108,23 @@ def project_dir() -> str | None:
 
 
 def own_repos(entries: list[str] | None, project: str | None) -> set[str] | None:
-    """The repository names ENTRIES give PROJECT's base name; None means all."""
+    """The repositories of the entry whose key best matches PROJECT's base name.
+
+    A key matches a base name equal to it or starting with `key-`. The longest
+    key wins and the first entry wins a tie. None means all rows.
+    """
     if not entries or not project:
         return None
     name = Path(project).name
+    best = -1
+    found: set[str] | None = None
     for entry in entries:
         key, _, repos = entry.partition("=")
-        if key.strip() == name:
-            return {repo.strip() for repo in repos.split(",")}
-    return None
+        key = key.strip()
+        if (name == key or name.startswith(f"{key}-")) and len(key) > best:
+            best = len(key)
+            found = {repo.strip() for repo in repos.split(",")}
+    return found
 
 
 def main() -> int:
