@@ -34,7 +34,15 @@ KEY = "core.hookspath"
 READ_FLAGS = {"--get", "--get-all", "--get-regexp", "--show-origin", "--list", "-l"}
 SETTERS = {"export", "declare", "typeset", "readonly", "local"}
 NO_VERIFY = "--no-verify"
-SHORT_N = re.compile(r"-[A-Za-z]*n[A-Za-z]*")
+FLAG_LETTERS = ["a", "i", "s", "v", "q", "e", "z", "o", "p"]
+SHORT_N = re.compile(
+    "-[" + "".join(FLAG_LETTERS) + "]*n[" + "".join(FLAG_LETTERS) + "]*"
+)
+# Options whose next word is a value, never a flag.
+VALUE_OPTIONS = {"-m", "--message", "--grep", "-F", "-C", "-c", "-e", "-S", "-G"}
+FILE_OPTIONS = {"-f", "--file", "--blob", "--default", "--type"}
+READ_WORDS = {"get", "list"}
+ENV_PREFIX = "git_config_"
 REASON = (
     "Blocked: never bypass a git hook or guard. Do not use `-c core.hooksPath`, "
     "write core.hooksPath or pass `--no-verify`. If a push is refused, push the "
@@ -51,7 +59,11 @@ def sets_key_inline(words: list[str]) -> bool:
     """Whether git's own options set the key: ``-c``, ``-cKEY=V``, ``--config-env``."""
     for at, word in enumerate(words):
         lower = word.lower()
-        if lower == "-c" and at + 1 < len(words) and KEY in words[at + 1].lower():
+        if (
+            lower in ("-c", "--config-env")
+            and at + 1 < len(words)
+            and KEY in words[at + 1].lower()
+        ):
             return True
         if lower.startswith(("-c" + KEY, "--config-env=" + KEY)):
             return True
@@ -61,22 +73,31 @@ def sets_key_inline(words: list[str]) -> bool:
 def writes_key(words: list[str]) -> bool:
     """Whether ``git config`` names the key with more than the key alone."""
     rest = words[words.index("config") + 1 :]
-    if READ_FLAGS.intersection(rest):
+    if READ_FLAGS.union(READ_WORDS).intersection(rest):
         return False
-    return len([word for word in rest if not word.startswith("-")]) > 1
+    values = [
+        word
+        for at, word in enumerate(rest)
+        if not word.startswith("-") and (at == 0 or rest[at - 1] not in FILE_OPTIONS)
+    ]
+    return len(values) > 1
 
 
 def skips_verification(words: list[str]) -> bool:
     """Whether a git command passes --no-verify, an abbreviation or commit -n."""
-    for word in words:
-        if word.startswith("--no-ve") and NO_VERIFY.startswith(word):
-            return True
-    return "commit" in words and any(SHORT_N.fullmatch(word) for word in words)
+    flags = [
+        word
+        for at, word in enumerate(words)
+        if at == 0 or words[at - 1] not in VALUE_OPTIONS
+    ]
+    if any(w.startswith("--no-ve") and NO_VERIFY.startswith(w) for w in flags):
+        return True
+    return "commit" in words and any(SHORT_N.fullmatch(word) for word in flags)
 
 
-def bypasses(prefix: list[str], words: list[str]) -> bool:
+def bypasses(words: list[str]) -> bool:
     """Whether a simple command skips or redirects git hooks."""
-    if names_key(prefix) or (program_of(words) in SETTERS and names_key(words)):
+    if program_of(words) in SETTERS and names_key(words):
         return True
     if program_of(words) != "git":
         return False
@@ -87,7 +108,10 @@ def bypasses(prefix: list[str], words: list[str]) -> bool:
 
 def verdict(text: str) -> str | None:
     """The deny reason for a command, or None to allow it."""
-    for prefix, words in simple_commands(text):
-        if bypasses(prefix, words):
+    lower = text.lower()
+    if ENV_PREFIX in lower and KEY in lower:
+        return REASON
+    for _prefix, words in simple_commands(text):
+        if bypasses(words):
             return REASON
     return None
