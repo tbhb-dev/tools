@@ -622,13 +622,17 @@ def protected_words(command: list[str]) -> bool:
     """Whether a command's unquoted words name a protected file.
 
     ``rm``, ``mv``, ``cp`` and the like also count when they name the state
-    directory or a parent, because that removes or restores the files.
+    directory or a parent, because that removes or restores the files. A bare
+    ``/`` word doesn't: prose such as a ledger line has one, and it names no
+    state file.
     """
     words = flattened(command)
     if any(name in word.lower() for word in words for name in PROTECTED):
         return True
     moves = any(word.rpartition("/")[2].lower() in STATE_MOVERS for word in words)
-    return moves and any(names_state_dir(attached(word)) for word in words)
+    return moves and any(
+        word != "/" and names_state_dir(attached(word)) for word in words
+    )
 
 
 def repeated_scan(args: list[str]) -> tuple[str | None, set[str]]:

@@ -1469,3 +1469,17 @@ def test_brace_items_expands_a_character_or_integer_range(
 
 def test_brace_items_caps_a_long_integer_range() -> None:
     assert len(guard.brace_items("1..999999999")) == guard.BRACE_LIMIT
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        (
+            "ssh ops@h 'cd ~/d && mv a b && ls'; "
+            'echo "deploy (h): x / y; mv a back" >> ~/.local/state/other/ledger.md'
+        ),
+        'echo "a / b mv" >> ~/notes.md',
+    ],
+)
+def test_a_bare_slash_word_is_not_a_state_directory(command: str) -> None:
+    assert guard.inspect(command)[0] is None
