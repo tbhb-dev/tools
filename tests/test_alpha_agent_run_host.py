@@ -1261,6 +1261,121 @@ sys.exit(run_host.main(["example", "--host", "example-linux"], "example run-host
         supervisor.communicate(timeout=10)
 
 
+EXAMPLE_LAUNCH = "sha-256-64:" + hashlib.sha256(b"example-launch").hexdigest()[:16]
+
+
+def launch_run(tmp_path: Path) -> tuple[run_host.Run, run_host.Prepared, Path]:
+    run = dataclasses.replace(make_run(tmp_path), launch_id="example-launch")
+    prepared = preparation(run)
+    git_dir = run.tmpdir.parent / "git-dir"
+    paths = dataclasses.replace(prepared.paths, git_common_dir=str(git_dir))
+    prepared = dataclasses.replace(prepared, paths=paths)
+    return run, prepared, git_dir / "tbhb-alpha" / "launch.json"
+
+
+def test_preparation_without_a_git_directory_writes_no_launch_file(
+    tmp_path: Path,
+) -> None:
+    run = make_run(tmp_path)
+    prepared = preparation(run)
+    run_host.write_launch(run, prepared)
+    assert not list(Path(prepared.paths.worktree).iterdir())
+
+
+def test_each_run_gets_its_own_random_launch_id(tmp_path: Path) -> None:
+    first = make_run(tmp_path).launch_id
+    second = make_run(tmp_path).launch_id
+    assert first != second
+    assert len(first) == 32
+    assert int(first, 16) >= 0
+
+
+def test_launch_file_holds_only_the_hash_and_the_launch_time(
+    tmp_path: Path,
+) -> None:
+    run, prepared, path = launch_run(tmp_path)
+    run_host.write_launch(run, prepared)
+    assert path.read_text() == json.dumps(
+        {"launch": EXAMPLE_LAUNCH, "started_at": "1970-01-01T00:16:40Z"}
+    )
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert "example-launch" not in path.read_text()
+
+
+@pytest.mark.parametrize(
+    ("existing", "kept"),
+    [
+        ({"launch": EXAMPLE_LAUNCH, "started_at": "old", "session": "s"}, True),
+        ({"launch": EXAMPLE_LAUNCH, "started_at": "old"}, True),
+        ({"launch": "sha-256-64:0000000000000000", "started_at": "old"}, False),
+        ("not json", False),
+    ],
+)
+def test_launch_file_keeps_its_own_launch_and_replaces_an_unclaimed_one(
+    tmp_path: Path, existing: object, kept: bool
+) -> None:
+    run, prepared, path = launch_run(tmp_path)
+    path.parent.mkdir(parents=True)
+    before = existing if isinstance(existing, str) else json.dumps(existing)
+    path.write_text(before)
+    run_host.write_launch(run, prepared)
+    after = path.read_text()
+    assert (after == before) is kept
+    assert json.loads(after)["launch"] == EXAMPLE_LAUNCH
+
+
+def test_launch_file_claimed_by_another_launch_refuses_the_run(
+    tmp_path: Path,
+) -> None:
+    run, prepared, path = launch_run(tmp_path)
+    path.parent.mkdir(parents=True)
+    before = json.dumps(
+        {"launch": "sha-256-64:0000000000000000", "started_at": "old", "session": "s"}
+    )
+    path.write_text(before)
+    with pytest.raises(Invalid, match=r"^launch file is claimed by another launch$"):
+        run_host.write_launch(run, prepared)
+    assert path.read_text() == before
+
+
+def test_launch_file_exists_before_the_harness_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared, path = launch_run(tmp_path)
+    run.files.receive(run.request)
+    monkeypatch.setattr(process_group, "prepare", constant(prepared))
+    seen: list[object] = []
+
+    def launch(*_args: object, **_kwargs: object) -> None:
+        seen.append(json.loads(path.read_text()))
+        seen.append(runfiles.latest(run.files.root)["example"]["launch"])
+        raise OSError
+
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    assert run_host.execute(run, "example") == 1
+    assert seen == [
+        {"launch": EXAMPLE_LAUNCH, "started_at": "1970-01-01T00:16:40Z"},
+        EXAMPLE_LAUNCH,
+    ]
+
+
+def test_refused_launch_file_stops_the_run_before_the_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared, path = launch_run(tmp_path)
+    run.files.receive(run.request)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"launch": "sha-256-64:1", "session": "s"}))
+    monkeypatch.setattr(process_group, "prepare", constant(prepared))
+    monkeypatch.setattr(process_group, "launch_owned", None)
+    assert run_host.execute(run, "example") == 1
+    assert (
+        "launch file is claimed by another launch\n"
+        in run.files.path("log").read_text()
+    )
+
+
 @pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize("rc", [None, 0, 7])
 def test_index_metadata_records_complete_outcome(
@@ -1273,6 +1388,7 @@ def test_index_metadata_records_complete_outcome(
         reason="example reason",
         **{"class": "example-class", "variant": "example-variant", "role": "worker"},
     )
+    run = dataclasses.replace(run, launch_id="example-launch")
     workspace = preparation(run)
     workspace = dataclasses.replace(
         workspace,
@@ -1282,6 +1398,9 @@ def test_index_metadata_records_complete_outcome(
     )
     monkeypatch.setattr(time, "time", lambda: 2000)
     assert run_host.index_entry(run, workspace if prepared else None, rc) == {
+        "effort": run.request.effort,
+        "launch_id": "example-launch",
+        "launch": EXAMPLE_LAUNCH,
         "v": 2,
         "kind": "exec",
         "harness": "claude",

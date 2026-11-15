@@ -16,12 +16,14 @@ import subprocess  # nosec B404
 import sys
 import tempfile
 import time
+import uuid
 from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from tbhbdev import userconfig
+from tbhbdev.alpha import identity
 from tbhbdev.alpha.agent import (
     build_info,
     codex_install,
@@ -64,6 +66,7 @@ class Run:
     tmpdir: Path
     started: float
     deadline: float
+    launch_id: str = dataclasses.field(default_factory=lambda: uuid.uuid4().hex)
 
 
 @dataclass(frozen=True)
@@ -554,6 +557,7 @@ def index_entry(
             "kind",
             "harness",
             "model",
+            "effort",
             "account",
             "repo",
             "class",
@@ -568,6 +572,8 @@ def index_entry(
         "host": run.host.name,
         "worktree": prepared.paths.worktree if prepared is not None else None,
         "started": run.started,
+        "launch_id": run.launch_id,
+        "launch": identity.sha256_64(run.launch_id),
         "ended": None if rc is None else time.time(),
         "rc": rc,
         "cleaned": None,
@@ -579,6 +585,29 @@ def index_entry(
         "state": "running" if rc is None else "ended",
         "gh_fallback": prepared.delivery.gh_fallback if prepared is not None else False,
     }
+
+
+def write_launch(run: Run, prepared: Prepared) -> None:
+    """Write the launch hash and time where the identity hook reads them.
+
+    The file is in the run clone's git directory, so it holds the hash and
+    never the raw launch id. A file that already has this launch stays as it
+    is, which keeps its first time and any session that claimed it.
+    """
+    git_dir = prepared.paths.git_common_dir
+    if git_dir is None:
+        return
+    store = Path(git_dir) / identity.STORE
+    path = runfiles.private_dir(store) / "launch.json"
+    launch = identity.sha256_64(run.launch_id)
+    existing = identity.read_record(path)
+    if existing.get("launch") == launch:
+        return
+    if "session" in existing:
+        message = "launch file is claimed by another launch"
+        raise Invalid(message)
+    record = {"launch": launch, "started_at": identity.utc(run.started)}
+    runfiles.atomic(path, json.dumps(record))
 
 
 def _agy_project(run: Run, prepared: Prepared, grants: AgyPolicy) -> str:
@@ -809,6 +838,7 @@ def _execute(
             run.settings.kill_grace_seconds,
         )
         prepared = prepared_result(result)
+        write_launch(run, prepared)
         runfiles.append(run.files.root, index_entry(run, prepared, None))
         run.files.write("phase", "workspace")
         run.files.write("prompt", render.brief(run.request.kind, text))
