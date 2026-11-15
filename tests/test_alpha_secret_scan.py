@@ -167,15 +167,33 @@ def test_gitleaks_runs_from_the_root_with_the_private_config(
     )
     write_fake(fake, body)
     scan("text\n", root, str(fake))
-    argv = ["stdin", "--redact", "--no-banner", "--config"]
-    argv += [str(secret_scan.private_config()), "--report-format", "json"]
-    argv += ["--report-path", "-"]
-    assert ast.literal_eval(log.read_text()) == (
-        argv,
-        os.path.realpath(root),
-        "text\n",
-        ["1", "yes"],
+    seen = ast.literal_eval(log.read_text())
+    argv, config = seen[0][:4], Path(seen[0][4])
+    assert argv == ["stdin", "--redact", "--no-banner", "--config"]
+    assert config.name == "private.toml"
+    assert config != secret_scan.private_config()
+    assert seen[0][5:] == ["--report-format", "json", "--report-path", "-"]
+    assert seen[1:] == (os.path.realpath(root), "text\n", ["1", "yes"])
+
+
+OVERRIDE = (
+    "[[rules]]\nid = \"generic-api-key\"\n[[rules.allowlists]]\nregexes = ['fake-ok']\n"
+)
+
+
+def test_a_committed_config_without_extend_gets_the_default_rules(root: Path) -> None:
+    # An allowlist-only override of a default rule fails to load without a base.
+    (root / ".gitleaks.toml").write_text(OVERRIDE)
+    scan("text\n", root)
+    assert "generic-api-key" in refusal(
+        'api_key = "' + "Zx9fKq3LmN8p" + "R2sT5vW7yB1cD4eG6hJ0" + '"\n', root
     )
+
+
+def test_with_base_adds_the_defaults_once() -> None:
+    assert secret_scan.with_base(OVERRIDE).endswith("[extend]\nuseDefault = true\n")
+    own = "[extend]\nuseDefault = true\n" + OVERRIDE
+    assert secret_scan.with_base(own) == own
 
 
 def test_findings_reads_rule_and_line() -> None:
@@ -430,7 +448,10 @@ def test_a_private_config_with_the_canary_but_no_rules_table_still_scans(
     )
     write_fake(fake, body)
     scan("text\n", root, str(fake), "PRIVATE")
-    assert tomllib.loads(log.read_text()) == {**tomllib.loads(config), "rules": []}
+    seen = tomllib.loads(log.read_text())
+    assert seen["rules"] == []
+    assert seen["canary"] == tomllib.loads(config)["canary"]
+    assert seen["extend"]["path"].endswith("committed.toml")
 
 
 def test_a_private_config_that_is_not_toml_is_left_to_gitleaks(root: Path) -> None:
