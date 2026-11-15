@@ -161,13 +161,13 @@ def ssh_words(args: list[str]) -> Iterator[tuple[str, str]]:
             yield found
 
 
-def ssh_login(args: list[str], letters: str = "lo") -> str | None:
+def ssh_login(args: list[str], *, dash_l: bool = True) -> str | None:
     """The first account set with ``-l`` or ``-o User=``, as ``ssh -G`` reads it.
 
-    ``letters`` names the options that count: scp's ``-l`` limits bandwidth.
+    ``dash_l`` is False for scp, whose ``-l`` limits bandwidth.
     """
     for letter, value in ssh_words(args):
-        if letter == "l" and "l" in letters:
+        if letter == "l" and dash_l:
             return value
         if letter == "o" and (user := option_user(value)):
             return user
@@ -234,7 +234,7 @@ def remote_shell(args: list[str]) -> list[str]:
             value = args[i + 1]
         elif word.startswith("--rsh="):
             value = word[len("--rsh=") :]
-        elif word.startswith("-e") and not word.startswith("--"):
+        elif word.startswith("-e"):
             value = word[2:]
         if value is not None:
             shell = shell_words(value)[1:]
@@ -255,7 +255,7 @@ def operand_target(word: str, login: str | None) -> Target | None:
 def copy_targets(program: str, args: list[str]) -> Iterator[Target]:
     """Every remote operand and jump host of an scp or rsync command line."""
     shell = remote_shell(args) if program == "rsync" else args
-    login = ssh_login(shell, "lo" if program == "rsync" else "o")
+    login = ssh_login(shell, dash_l=program == "rsync")
     for word in args:
         target = operand_target(word, login)
         if target:
@@ -266,15 +266,13 @@ def copy_targets(program: str, args: list[str]) -> Iterator[Target]:
 def strip_redirects(words: list[str]) -> list[str]:
     """``words`` without shell redirections, and with any redirection cut off a word."""
     kept: list[str] = []
-    target_next = False
-    for word in words:
+    rest = iter(words)
+    for word in rest:
         found = REDIRECT.match(word)
-        if target_next:
-            target_next = False
-        elif found:
-            target_next = found.end() == len(word)
-        else:
-            kept.append(re.split("[<>]", word, maxsplit=1)[0])
+        if not found:
+            kept.append(re.split("[<>]", word)[0])
+        elif found.end() == len(word):
+            next(rest, None)  # the word after a bare redirection is its target
     return kept
 
 
@@ -296,11 +294,12 @@ def env_split(words: list[str], i: int) -> list[str]:
         word = words[i]
         i += 1
         if word in {"-S", "--split-string"}:
-            out += shell_words(words[i] if i < len(words) else "")
+            if i < len(words):
+                out += shell_words(words[i])
             i += 1
         elif word.startswith("--split-string="):
             out += shell_words(word.partition("=")[2])
-        elif word.startswith("-S") and not word.startswith("--"):
+        elif word.startswith("-S"):
             out += shell_words(word[2:])
         else:
             out.append(word)
@@ -380,7 +379,7 @@ def targets(command: list[str]) -> Iterator[Target]:
 
 def guarded(host: str, names: list[str]) -> bool:
     """Whether ``host`` is a listed name or a subdomain of one."""
-    lowered = host.lower().rstrip(".")
+    lowered = host.lower()
     return any(lowered == name or lowered.startswith(f"{name}.") for name in names)
 
 
