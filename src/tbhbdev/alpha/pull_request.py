@@ -1649,6 +1649,9 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub.add_parser("rerun").add_argument("pr", type=int)
     sub.add_parser("delete-branch").add_argument("pr", type=int)
     sub.add_parser("checks").add_argument("pr", type=int)
+    # `tbhbdev alpha pr close` runs in close.py before this parser sees it, so
+    # this entry only lists the verb in --help.
+    sub.add_parser("close", help="close N --reason TEXT: close a pull request")
     for name in ("check", "create", "edit"):
         one = sub.add_parser(name)
         one.add_argument("draft", nargs="?", type=Path, default=DRAFT)

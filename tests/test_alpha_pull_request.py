@@ -3782,6 +3782,12 @@ def test_help_uses_the_program_name(capsys: pytest.CaptureFixture[str]) -> None:
     assert capsys.readouterr().out.startswith("usage: tbhbdev alpha pr ")
 
 
+def test_help_lists_close(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        pr.main(["--help"], {}, prog="tbhbdev alpha pr")
+    assert "close N --reason TEXT: close a pull request" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("make", ["file", "bytes"])
 def test_create_warns_when_the_ledger_cant_be_written(
     world: World,
