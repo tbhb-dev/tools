@@ -425,12 +425,12 @@ def _hosts(root: _Table) -> tuple[Host, ...]:
 def _proven_harnesses(table: _Table) -> tuple[Harness, ...]:
     value = table.value("proven_harnesses")
     if not isinstance(value, list):
-        table.fail("proven_harnesses", "must list distinct codex or claude names")
+        table.fail("proven_harnesses", "must list distinct codex, claude or agy names")
     entries: list[object] = value
-    if any(name not in ("codex", "claude") for name in entries) or len(entries) != len(
-        set(entries)
-    ):
-        table.fail("proven_harnesses", "must list distinct codex or claude names")
+    if any(name not in ("codex", "claude", "agy") for name in entries) or len(
+        entries
+    ) != len(set(entries)):
+        table.fail("proven_harnesses", "must list distinct codex, claude or agy names")
     return tuple(Harness(str(name)) for name in entries)
 
 

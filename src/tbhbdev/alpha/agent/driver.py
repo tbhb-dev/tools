@@ -128,7 +128,7 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
 def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
     """Consult coordinator evidence before contacting the run host."""
     state = taint_store.load(run.host.name)
-    if state.status == "clean":
+    if state.status == "clean" and not run.request.unsandboxed:
         try:
             marker = transport.shell(
                 settings,
@@ -152,7 +152,7 @@ def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
                 taint_store.record_taint(record)
                 state = taint.State(run.host.name, "tainted")
     decision = taint.check_launch(run.request.profile, tainted=state)
-    if decision.status:
+    if decision.status and not run.request.unsandboxed:
         print(decision.message, file=sys.stderr)
         return decision.status
     if run.request.unsandboxed:

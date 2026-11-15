@@ -241,8 +241,40 @@ def audit_writes(
         )
 
 
+def unsandboxed_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
+    value = policy.build(
+        run.settings,
+        run.host,
+        harness=run.request.harness,
+        profile=run.request.profile,
+        account=run.request.account,
+        unsandboxed=True,
+        paths=paths,
+    )
+    search_path = ":".join(
+        (os.environ.get("PATH", os.defpath), value.env["PATH"], value.tool_path)
+    )
+    name = (
+        "agy-agent"
+        if run.request.harness is Harness.AGY and run.request.profile is Profile.BUILD
+        else run.request.harness.value
+    )
+    executable = (
+        shutil.which(name, path=search_path)
+        if run.request.harness is Harness.CODEX
+        else host_tools.resolve(name, follow_symlinks=False)
+    )
+    if executable is None:
+        message = f"host executable {name} was not found"
+        raise Invalid(message)
+    value = dataclasses.replace(value, env=value.env | {"PATH": search_path})
+    return value, executable
+
+
 def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
     """Check directories before even inspecting or invoking an executable."""
+    if run.request.unsandboxed:
+        return unsandboxed_policy(run, paths)
     directories = host_tools.search_path(run.settings, run.host.os)
     entries = run.settings.sandbox.path
     sandbox_directories = tuple(
@@ -434,16 +466,12 @@ def announce_access(run: Run) -> None:
 
 def preflight(run: Run) -> None:
     announce_access(run)
-    if run.request.harness is Harness.AGY:
-        message = "agy runs are refused: no OS sandbox"
-        raise Invalid(message)
-    if run.request.harness not in run.host.proven_harnesses:
-        message = (
-            f"{run.request.harness} has no recorded sandbox pass on {run.host.name}"
-        )
-        raise Invalid(message)
     _value, executable = checked_policy(run, planned_paths(run))
-    if run.request.profile is Profile.REVIEW and run.request.tainted_host:
+    if (
+        run.request.profile is Profile.REVIEW
+        and run.request.tainted_host
+        and not run.request.unsandboxed
+    ):
         message = "review runs are refused on a tainted host"
         raise Invalid(message)
     if run.request.profile is Profile.REVIEW:
@@ -464,6 +492,7 @@ def preflight(run: Run) -> None:
     if (
         run.request.harness is Harness.CODEX
         and sandbox.codex_network_proxy_opt_out is None
+        and not run.request.unsandboxed
         and not host_tools.codex_proxy_supported(executable, run.tmpdir)
     ):
         message = (
@@ -472,12 +501,6 @@ def preflight(run: Run) -> None:
         )
         raise Invalid(message)
 
-    if run.request.harness is Harness.CLAUDE:
-        message = (
-            "claude runs are refused: separate tool paths for Claude (H3) "
-            "and the Claude credential decision remain open"
-        )
-        raise Invalid(message)
     if run.request.unsandboxed:
         mark_host(run)
 
@@ -782,6 +805,8 @@ def execute(
     run: Run, text: str, push_token: str | None = None, *, preflight_only: bool = False
 ) -> int:
     """Keep cleanup protected until the completion record is durable."""
+    if not run.request.unsandboxed:
+        os.environ["PATH"] = host_tools.search()
     with host_tools.configured(run.settings, run.host.os), ExitStack() as stack:
         return _execute(run, text, stack, push_token, preflight_only=preflight_only)
 
@@ -951,7 +976,6 @@ def main(
     push_token: str | None = None,
     claimed: bool = False,
 ) -> int:
-    os.environ["PATH"] = host_tools.search()
     parser = argparse.ArgumentParser(prog=prog)
     parser.add_argument("name", nargs="?")
     parser.add_argument("request", nargs="?")

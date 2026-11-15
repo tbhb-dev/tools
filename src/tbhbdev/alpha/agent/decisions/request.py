@@ -85,10 +85,6 @@ def _check_unsandboxed(request: RunRequest, *, host_allows: bool) -> None:
         if request.authorized_by is not None:
             _fail("authorized_by", "requires unsandboxed")
         return
-    if request.harness is not Harness.CODEX:
-        _fail("unsandboxed", "applies only to a codex run")
-    if request.profile is not Profile.BUILD:
-        _fail("unsandboxed", "applies only to a build run")
     if not host_allows:
         _fail("unsandboxed", "isn't enabled on this host")
     if not _authorization_ok(str(request.authorized_by)):

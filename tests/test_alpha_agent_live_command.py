@@ -52,16 +52,16 @@ def test_docs_document_limits_and_twelve_parent_git_starts() -> None:
     limits = (docs / "agent-isolation-limits.md").read_text()
     text = (docs / "agent-configuration.md").read_text() + limits
     for phrase in (
-        "typed list",
-        "Remove it when upgrading",
+        "An empty list never refuses a run",
+        "Remove the recorded fact when upgrading",
         "other runs' temp directories",
         "account's `gh` token",
         "Docker config",
         "private Codex auth file",
         "final answer file",
         "web_search",
-        "H3",
-        "credential decision",
+        "bypassPermissions",
+        "agent exec --unsandboxed",
         "mise/shims",
         "--no-track",
         "0.166.0",

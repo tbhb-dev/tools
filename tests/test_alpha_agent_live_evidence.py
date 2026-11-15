@@ -238,7 +238,7 @@ def test_default_suite_runs_harness_free_sandbox_probes(tmp_path: Path) -> None:
         "test_probe_cannot_trust_model_claims",
         "test_proxy_relays_the_control_and_records_direct_connections",
         "test_refusals_require_an_observed_positive_control",
-        "test_agy_live_request_reaches_the_policy_refusal",
+        "test_agy_live_request_reports_no_sandbox",
     )
     result = run_default_pytest(
         tmp_path, "-v", str(Path(live.__file__)), "-k", " or ".join(names)
@@ -638,11 +638,11 @@ def test_live_entry_runs_the_selected_harness(
     assert bool(auth_calls) is (harness is Harness.CODEX)
 
 
-def test_agy_live_entry_reports_the_policy_refusal(
+def test_agy_live_entry_reports_no_sandbox(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    original = live.report_agy_refusals
+    original = live.report_agy_unproven
 
     def report(
         config: run_host.Settings, host: run_host.Host, paths: run_host.RunPaths
@@ -650,10 +650,10 @@ def test_agy_live_entry_reports_the_policy_refusal(
         assert isinstance(paths, run_host.RunPaths)
         original(config, host, paths)
 
-    monkeypatch.setattr(live, "report_agy_refusals", report)
+    monkeypatch.setattr(live, "report_agy_unproven", report)
     live.test_build_sandboxes_refuse_user_sockets(tmp_path, Harness.AGY)
     assert capsys.readouterr().out == (
-        "agy build: refused by policy\nagy review: refused by policy\n"
+        "agy build: unproven (no OS sandbox)\nagy review: unproven (no OS sandbox)\n"
     )
 
 

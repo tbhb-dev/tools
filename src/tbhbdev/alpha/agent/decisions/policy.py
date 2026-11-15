@@ -63,20 +63,12 @@ def resolve(home: str, path: str) -> str:
     return str(PurePosixPath(home) / path)
 
 
-def _check(
-    host: Host, harness: Harness, profile: Profile, *, account: str, full: bool
-) -> None:
+def _check(host: Host, *, account: str, full: bool) -> None:
     if account not in host.accounts:
         message = f"policy account {account!r} isn't one of the accounts of {host.name}"
         raise Invalid(message)
     if not full:
         return
-    if harness is not Harness.CODEX:
-        message = "policy unsandboxed applies only to a codex run"
-        raise Invalid(message)
-    if profile is not Profile.BUILD:
-        message = "policy unsandboxed applies only to a build run"
-        raise Invalid(message)
     if not host.unsandboxed:
         message = f"policy unsandboxed isn't enabled on {host.name}"
         raise Invalid(message)
@@ -202,7 +194,7 @@ def _codex(
     proxy = network_proxy(settings)
     if full:
         return CodexPolicy(
-            CodexMode.FULL_ACCESS, (), (), deny, APPROVAL_POLICY, search, proxy
+            CodexMode.FULL_ACCESS, (), (), deny, APPROVAL_POLICY, search, None
         )
     return CodexPolicy(
         CodexMode.PROFILE,
@@ -225,12 +217,14 @@ def _claude_write_denies(profile: Profile, paths: RunPaths) -> tuple[str, ...]:
     return (paths.worktree, *protected_git(paths))
 
 
-def _claude(
+def _claude(  # noqa: PLR0913 -- one value per policy input
     profile: Profile,
     paths: RunPaths,
     access: tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]],
     env: dict[str, str],
     domains: tuple[str, ...],
+    *,
+    full: bool,
 ) -> ClaudePolicy:
     writes, deny, protected = access
     review = profile is Profile.REVIEW
@@ -293,7 +287,7 @@ def _claude(
                     "WebSearch",
                 ],
             },
-            "sandbox": sandbox,
+            "sandbox": {"enabled": False} if full else sandbox,
         }
     )
 
@@ -411,33 +405,17 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
 ) -> Policy:
     """The policy of a run of HARNESS with PROFILE on HOST, as ACCOUNT.
 
-    UNSANDBOXED selects Codex's full-access mode, for the one case that
-    `decisions/request.py` allows. A build run writes the worktree, the private
+    UNSANDBOXED disables the harness sandbox for either profile.
+    A build run writes the worktree, the private
     TMPDIR and the config's `write_roots`. A review run reads the worktree and
     writes the private TMPDIR and the audit directory.
 
     Raises:
         Invalid: ACCOUNT isn't one of the host's accounts, UNSANDBOXED applies
-            to anything but a Codex build run on a host that allows it, or a
+            on a host that does not allow it, or a
             write path, signing socket or an agy read grant reaches a denied path.
     """
-    _check(host, harness, profile, account=account, full=unsandboxed)
-    if harness is Harness.AGY and settings.sandbox.agy_unsandboxed_opt_out is None:
-        message = (
-            "agy has no OS sandbox; configure agy_unsandboxed_opt_out "
-            "with a named reason"
-        )
-        raise Invalid(message)
-    if (
-        harness is Harness.CODEX
-        and unsandboxed
-        and settings.sandbox.codex_unsandboxed_opt_out is None
-    ):
-        message = (
-            "codex has no OS sandbox; configure codex_unsandboxed_opt_out "
-            "with a named reason"
-        )
-        raise Invalid(message)
+    _check(host, account=account, full=unsandboxed)
     protect_host(settings, paths, protected)
     deny = (
         denied_paths(settings, host, paths.home, paths.uid)
@@ -481,6 +459,7 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
             (writes, deny, protected),
             env | {"PATH": tools_path},
             settings.sandbox.network_domains,
+            full=unsandboxed,
         )
     else:
         detail = _agy(settings, profile, paths, env, deny)
