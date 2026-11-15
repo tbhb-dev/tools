@@ -182,6 +182,7 @@ NAMES = ["lab1", "lab2"]
         "ssh-copy-id -i key lab1",
         "rsync -e 'ssh -o HostName=lab1' dir other:dst",
         # mutation survivors: forms that reach a host through a rarely seen word
+        "env - ssh lab1",
         "rsync '-es -J lab1' x other:y",
         "rsync -e 'ssh -J lab1'",
         "env --split-string='ssh lab1 -o X=y'",

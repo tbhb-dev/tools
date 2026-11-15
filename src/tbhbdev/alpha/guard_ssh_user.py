@@ -281,7 +281,7 @@ def strip_redirects(words: list[str]) -> list[str]:
 def after_wrapper(words: list[str], i: int, name: str) -> int:
     """The index after a wrapper's options and its fixed operands."""
     value_flags, operands = WRAPPERS[name]
-    while i < len(words) and words[i].startswith("-") and words[i] != "-":
+    while i < len(words) and words[i].startswith("-"):
         if words[i] == "--":
             i += 1
             break
