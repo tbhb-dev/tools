@@ -3354,8 +3354,13 @@ def test_missing_tool_uses_named_remote_push_url(world: World) -> None:
 CHASE_ENTRY = {"type": "command", "command": "/example/bin/chase-context.sh"}
 
 
-def chase_config(*handlers: object) -> dict[str, object]:
+def chase_config(*handlers: object) -> Json:
     return {"hooks": {"UserPromptSubmit": [{"hooks": list(handlers)}]}}
+
+
+def prompt_groups(config: Json) -> list[object]:
+    hooks = cast("dict[str, list[object]]", config["hooks"])
+    return hooks["UserPromptSubmit"]
 
 
 def test_install_adds_its_chase_hook_when_no_other_runs_one(
@@ -3363,8 +3368,7 @@ def test_install_adds_its_chase_hook_when_no_other_runs_one(
 ) -> None:
     other = {"type": "command", "command": "/example/bin/other.sh"}
     merged = install.merged_config("claude", chase_config(other))
-    groups = merged["hooks"]["UserPromptSubmit"]
-    assert groups == [
+    assert prompt_groups(merged) == [
         {"hooks": [other]},
         *install.claude_hooks()["UserPromptSubmit"],
     ]
@@ -3379,19 +3383,20 @@ def test_install_adds_its_chase_hook_when_no_other_runs_one(
     ],
 )
 def test_install_leaves_another_chase_hook_and_adds_none(
-    config: dict[str, object], capsys: pytest.CaptureFixture[str]
+    config: Json, capsys: pytest.CaptureFixture[str]
 ) -> None:
     merged = install.merged_config("claude", config)
-    assert merged["hooks"]["UserPromptSubmit"] == config["hooks"]["UserPromptSubmit"]
+    assert prompt_groups(merged) == prompt_groups(config)
     assert "already runs a chase-context command" in capsys.readouterr().err
 
 
 def test_install_drops_its_own_chase_hook_once_another_one_appears() -> None:
-    first = install.merged_config("claude", {})
-    ours_only = first["hooks"]["UserPromptSubmit"]
-    config = {"hooks": {"UserPromptSubmit": [*ours_only, {"hooks": [CHASE_ENTRY]}]}}
+    ours_only = prompt_groups(install.merged_config("claude", {}))
+    config: Json = {
+        "hooks": {"UserPromptSubmit": [*ours_only, {"hooks": [CHASE_ENTRY]}]}
+    }
     merged = install.merged_config("claude", config)
-    assert merged["hooks"]["UserPromptSubmit"] == [{"hooks": [CHASE_ENTRY]}]
+    assert prompt_groups(merged) == [{"hooks": [CHASE_ENTRY]}]
 
 
 @pytest.mark.parametrize(

@@ -455,23 +455,31 @@ def merge_groups(config: Json, desired: Json) -> Json:
     return {**config, **desired}
 
 
+def group_handlers(entry: object) -> list[object]:
+    """The handlers a hook group lists; none when it is not a group."""
+    handlers = cast("Json", entry).get("hooks") if isinstance(entry, dict) else None
+    return cast("list[object]", handlers) if isinstance(handlers, list) else []
+
+
+def is_other_chase(handler_: object) -> bool:
+    """Whether a handler that isn't ours runs a chase-context command."""
+    text = cast("Json", handler_).get("command") if isinstance(handler_, dict) else None
+    return isinstance(text, str) and not ours(handler_) and "chase-context" in text
+
+
 def runs_other_chase(config: Json) -> bool:
     """Whether another UserPromptSubmit handler runs a chase-context command."""
     hooks = config.get("hooks")
-    if not isinstance(hooks, dict):
-        return False
-    groups = cast("Json", hooks).get("UserPromptSubmit")  # pragma: no mutate
+    groups = (
+        cast("Json", hooks).get("UserPromptSubmit") if isinstance(hooks, dict) else None
+    )
     if not isinstance(groups, list):
         return False
-    for entry in cast("list[object]", groups):  # pragma: no mutate
-        handlers = entry.get("hooks") if isinstance(entry, dict) else None
-        if not isinstance(handlers, list):
-            continue
-        for handler_ in cast("list[object]", handlers):  # pragma: no mutate
-            text = handler_.get("command") if isinstance(handler_, dict) else None
-            if isinstance(text, str) and not ours(handler_) and "chase-context" in text:
-                return True
-    return False
+    return any(
+        is_other_chase(handler_)
+        for entry in cast("list[object]", groups)
+        for handler_ in group_handlers(entry)
+    )
 
 
 def merged_config(harness: str, config: Json) -> Json:
