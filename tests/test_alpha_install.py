@@ -611,15 +611,49 @@ def test_settings_path_puts_the_shim_first_once(
     assert install.settings_path(7, "/a") == f"{shim}{sep}/a{sep}{full}"
 
 
-def test_settings_path_refreshes_from_the_install_run(
+def test_settings_path_puts_the_install_run_first_and_keeps_the_saved_entries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     full = tool_dir(tmp_path, "full", ("tbhbdev", "gh", "git"))
     monkeypatch.setenv("PATH", "/unused")
     shim = str(gh_shim.bin_dir())
-    assert install.settings_path(f"/stale{os.pathsep}/old", full) == (
-        f"{shim}{os.pathsep}{full}"
+    sep = os.pathsep
+    assert install.settings_path(f"/saved{sep}/old{sep}{full}", full) == (
+        f"{shim}{sep}{full}{sep}/saved{sep}/old"
     )
+
+
+def test_a_short_path_rerun_keeps_the_directories_saved_earlier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "gh", "git"))
+    extra = tool_dir(tmp_path, "extra", ("prek", "mise"))
+    monkeypatch.setenv("PATH", full)
+    shim = str(gh_shim.bin_dir())
+    sep = os.pathsep
+    saved = f"{shim}{sep}{full}{sep}{extra}"
+    assert install.settings_path(saved, full) == saved
+    assert install.settings_path(saved, "/usr/bin") == (
+        f"{shim}{sep}/usr/bin{sep}{full}{sep}{extra}"
+    )
+    # Rerunning from different PATHs doesn't flip the saved value back and forth.
+    first = install.settings_path(saved, "/usr/bin")
+    assert install.settings_path(first, full) == (
+        f"{shim}{sep}{full}{sep}/usr/bin{sep}{extra}"
+    )
+
+
+def test_settings_path_never_saves_a_directory_inside_the_current_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clone = tmp_path / "clone"
+    venv = tool_dir(clone, ".venv/bin", ("prek",))
+    full = tool_dir(tmp_path, "full", ("tbhbdev", "gh", "git"))
+    monkeypatch.chdir(clone)
+    monkeypatch.setenv("PATH", full)
+    shim = str(gh_shim.bin_dir())
+    sep = os.pathsep
+    assert install.settings_path(venv, f"{venv}{sep}{full}") == f"{shim}{sep}{full}"
 
 
 def test_settings_path_adds_the_dirs_of_the_tools_it_lacks(

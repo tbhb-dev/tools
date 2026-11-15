@@ -83,7 +83,7 @@ rules. And it writes the gh shim (see gh_shim): an executable `gh` in
 None of this prompts, runs op or needs the 1Password app, so configuration
 management can run it unattended, and a rerun changes nothing. For Claude
 Code it also writes `env.PATH` into settings.json with the shim's directory
-first, followed by the PATH already there, or by the install run's PATH, so
+first, followed by the install run's PATH and then the PATH already there, so
 hook processes, which get no `$CLAUDE_ENV_FILE`, run the shim's `gh` too. That
 PATH is fixed at install time, so a rerun refreshes it. Claude's SessionStart
 hook also puts the shim on PATH for commands (below), and Codex and
@@ -510,9 +510,11 @@ def complete(entries: list[str]) -> list[str]:
 def settings_path(current: object, base: str | None) -> str | None:
     """Claude's settings ``env.PATH`` with the gh shim's directory first.
 
-    The entries come from BASE (the PATH of the install run), so a rerun
-    with a different PATH rewrites them. When BASE has no absolute entry,
-    they come from the PATH already in settings when it is a string. A hook
+    The entries are BASE's (the PATH of the install run) followed by the
+    PATH already in settings when it is a string, without repeats, so a rerun
+    from a short PATH keeps the directories of prek, mise and the real gh that
+    an earlier run saved. A directory inside the current one, such as a
+    clone's venv that `uv run` puts first, is never saved. A hook
     process gets no ``$CLAUDE_ENV_FILE``, so this is the only way the shim
     reaches it. Hooks run ``tbhbdev``, ``gh`` and ``git``, so a directory
     that holds one is added when the entries lack it, taken from the running
@@ -526,8 +528,8 @@ def settings_path(current: object, base: str | None) -> str | None:
     """
     saved = current if isinstance(current, str) else ""
     shim = bin_dir()
-    found = absolute_entries(base or "") or absolute_entries(saved)
-    entries = [e for e in found if e != str(shim)]
+    found = [*absolute_entries(base or ""), *absolute_entries(saved)]
+    entries = list(dict.fromkeys(e for e in found if e != str(shim) and durable(e)))
     if not entries or not shim.is_absolute():
         return None
     with_tools = complete(entries)
