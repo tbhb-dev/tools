@@ -118,40 +118,38 @@ def app_token(app: str, client_id_ref: str, pem_ref: str, repository: str) -> st
     return gh_app.request_token(env, args, jwt).token
 
 
-def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
-    references = next(c for c in settings.credentials if c.account == request.account)
+TOKEN_ERRORS = (
+    Invalid,
+    OSError,
+    ValueError,
+    KeyError,
+    TypeError,
+    httpx.HTTPError,
+    gh_app.GhAppError,
+)
+
+
+def github_token(request: RunRequest, references: Credentials) -> str | None:
     if request.profile is Profile.REVIEW:
         try:
-            gh_token = installation_token(references, request.repo)
-        except (
-            Invalid,
-            OSError,
-            ValueError,
-            KeyError,
-            TypeError,
-            httpx.HTTPError,
-            gh_app.GhAppError,
-        ):
+            return installation_token(references, request.repo)
+        except TOKEN_ERRORS:
             message = "reviews App token unavailable; review refused"
             raise Invalid(message) from None
-    elif references.gh:
-        gh_token = read(references.gh, label="gh")
-    elif references.pull_requests_app_pem is not None:
-        try:
-            gh_token = pull_requests_token(references, request.repo)
-        except (
-            Invalid,
-            OSError,
-            ValueError,
-            KeyError,
-            TypeError,
-            httpx.HTTPError,
-            gh_app.GhAppError,
-        ):
-            message = "pull-requests App token unavailable; build refused"
-            raise Invalid(message) from None
-    else:
-        gh_token = None
+    if references.gh:
+        return read(references.gh, label="gh")
+    if references.pull_requests_app_pem is None:
+        return None
+    try:
+        return pull_requests_token(references, request.repo)
+    except TOKEN_ERRORS:
+        message = "pull-requests App token unavailable; build refused"
+        raise Invalid(message) from None
+
+
+def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
+    references = next(c for c in settings.credentials if c.account == request.account)
+    gh_token = github_token(request, references)
     gh = runfiles.private_dir(tmpdir / "gh")
     if gh_token is not None:
         host = repo.parts(request.repo)[0]

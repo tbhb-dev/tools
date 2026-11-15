@@ -1139,11 +1139,12 @@ def test_review_ignores_the_pull_requests_app(
 
     seen: list[str] = []
     monkeypatch.setattr(gh_app, "mint_token", refuse)
-    monkeypatch.setattr(
-        credentials,
-        "app_token",
-        lambda app, *_rest: seen.append(app) or REVIEW_TOKEN,
-    )
+
+    def record(app: str, *_rest: str) -> str:
+        seen.append(app)
+        return REVIEW_TOKEN
+
+    monkeypatch.setattr(credentials, "app_token", record)
     credentials.deliver(
         run_request(profile="review", commit="0" * 40),
         pull_requests_settings(),
