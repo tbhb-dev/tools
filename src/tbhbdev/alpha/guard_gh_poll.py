@@ -577,6 +577,21 @@ def names_state_dir(word: str) -> bool:
     return False
 
 
+def plain_home_or_above(word: str) -> bool:
+    """Whether a word with no glob is the home directory or a directory above it.
+
+    ``cd ~`` or ``$HOME`` beside ``xargs rm`` in one command text is not a path
+    fed to the mover, so ``pipes_state_dir`` skips these. ``~/.local`` and
+    ``~/.local/state`` still count, and so does any glob.
+    """
+    home = word.replace("${HOME}", "~").replace("$HOME", "~")
+    if any(char in home for char in "*?[{"):
+        return False
+    expanded = str(Path(home).expanduser())
+    path = re.sub(r"^/+", "/", os.path.normpath(expanded)).lower()
+    return path in STATE_DIRS[3:]
+
+
 def pipes_state_dir(text: str) -> bool:
     """Whether xargs or parallel could feed a mover a path in the state directory.
 
@@ -589,7 +604,10 @@ def pipes_state_dir(text: str) -> bool:
     return (
         bool(REPEATERS & names)
         and bool(STATE_MOVERS & names)
-        and any(names_state_dir(token) for token in tokens)
+        and any(
+            names_state_dir(token) and not plain_home_or_above(token)
+            for token in tokens
+        )
     )
 
 
