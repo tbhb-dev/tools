@@ -84,3 +84,30 @@ The commit check runs without config. The command guard checks arguments for tra
 These user-level hooks run in every repository. Before acting, the identity, pull request, approval guard, and install hooks check that `origin` names a tbhb-dev repository on GitHub. Outside a repository, the identity record hook still writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Both `state-guard` and `session-context` run regardless of origin. At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, which puts the `gh` shim first on PATH for the session's commands and reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, and each worktree has its own pull request draft, so sessions in two worktrees of one clone don't overwrite each other.
+
+## Identity start time
+
+An identity line can record when its agent started and which launch it belongs to. Both attributes are optional, and a line without them stays valid.
+
+| Attribute | Value |
+| --- | --- |
+| `launch` | The `sha-256-64:` hash of the launcher's run id. |
+| `started_at` | The agent's start time in UTC with whole seconds, as `YYYY-MM-DDTHH:MM:SSZ`. The `T` and `Z` stay in capitals. |
+
+Attributes stay in alphabetical order, so `launch` follows `harness` and `started_at` follows `session`:
+
+```text
+Generated-by: LLM effort=high;harness=codex:0.164.0;launch=sha-256-64:0a1b2c3d4e5f6071;model=openai:gpt-6.1-sol;session=sha-256-64:fb2bbc10b42a2d56;started_at=2026-11-14T00:02:41Z;surface=exec
+```
+
+The `record` hooks set both fields once in the session record, and a resumed session keeps its first values.
+
+- A launcher writes `tbhb-alpha/launch.json` in the worktree's git directory, with a `launch` hash and a `started_at` time, before the harness starts. The first root session to run a hook there claims the file by adding its own hash as `session`, then copies both fields into its record. A later session finds the file claimed and inherits nothing from it.
+- A session with no launch file to claim takes `started_at` from its first hook event and omits `launch`.
+- A subagent takes `started_at` from the first hook event with its agent id, and inherits `launch` from its root session.
+
+The `trailer` hook writes both attributes from the session record. Where lines for the same agent meet, on an amend, a rebase, or an interactive squash, the hook merges them. Lines with the same key, harness, model, session, and subagent become one line, the one with the earliest `started_at`. A line with the attribute replaces one without it.
+
+The `check` hook and `verify-range` accept both attributes. They require a real UTC time in the exact format for `started_at` and the hash format for `launch`. An agent commit whose `Generated-by` line lacks `started_at` passes with a warning.
+
+The `commit_identity` check in the rules repository must accept both attributes before a host installs this version of the hooks. Until it does, commits with the new attributes fail CI.

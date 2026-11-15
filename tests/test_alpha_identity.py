@@ -152,6 +152,15 @@ def feed(monkeypatch: pytest.MonkeyPatch, data: object) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO(text))
 
 
+def no_start[T](value: T) -> T:
+    """``value`` without any ``started_at``, which is the time the test ran."""
+    if isinstance(value, dict):
+        return cast("T", {k: v for k, v in value.items() if k != "started_at"})
+    if isinstance(value, str):
+        return cast("T", re.sub(r";started_at=[^;\s]+", "", value))
+    return cast("T", type(value)(map(no_start, value)))  # type: ignore[call-arg]
+
+
 def make_ident(
     sub: str | None = None,
     model: str | None = "anthropic:m",
@@ -657,8 +666,10 @@ def test_format_order_and_omission() -> None:
     assert ai.ATTR_ORDER == [
         "effort",
         "harness",
+        "launch",
         "model",
         "session",
+        "started_at",
         "subagent",
         "surface",
     ]
@@ -985,7 +996,7 @@ def test_record_child_stores_hashes_only(repo: Path) -> None:
     agent = ai.record_child(data, "high")
     assert agent == ai.sha256_64("agent-raw")
     record = ai.load_record(agent)
-    assert record == {
+    assert no_start(record) == {
         "harness": "claude-code",
         "root": ai.sha256_64("session-raw"),
         "agent_type": "beta",
@@ -1577,7 +1588,7 @@ def test_main_agent_events_record_the_session_and_commands(
     repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ai.handle_claude(claude_data(repo), CLAUDE_HOOK_ENV)
-    assert ai.load_record(SESSION_HASH) == {
+    assert no_start(ai.load_record(SESSION_HASH)) == {
         "harness": "claude-code",
         "version": "2.1.316",
         "model": "claude-opus-5-5",
@@ -2401,8 +2412,10 @@ def test_cmd_record_agy_edit(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         "model": "gemini-3.8-flash-low",
         "brain_root": str(brain),
     }
-    assert loaded(ai.user_store() / name) == expected
-    assert loaded(repo / ".git" / "tbhb-alpha" / "sessions" / name) == expected
+    assert no_start(loaded(ai.user_store() / name)) == expected
+    assert (
+        no_start(loaded(repo / ".git" / "tbhb-alpha" / "sessions" / name)) == expected
+    )
     (got,) = receipts_of(repo, ai.sha256_64(CONV))
     assert (got["path"], got["effort"], got["surface"]) == ("hello.txt", "low", "cli")
     assert got["model"] == "gcp.gemini:gemini-3.8-flash"
@@ -2442,10 +2455,10 @@ def test_cmd_record_session_from_env_and_filters(
     feed(monkeypatch, {"model": "<synthetic>", "effort": {"level": "high"}})
     assert ai.cmd_record("antigravity", {"ANTIGRAVITY_CONVERSATION_ID": CONV}) == 0
     rec = ai.load_record(ai.sha256_64(CONV))
-    assert rec == {"harness": "antigravity", "effort": "high"}
+    assert no_start(rec) == {"harness": "antigravity", "effort": "high"}
     feed(monkeypatch, {"model": "gpt-5.6-sol", "session_id": CONV})
     assert ai.cmd_record("antigravity", {}) == 0
-    assert ai.load_record(ai.sha256_64(CONV)) == {
+    assert no_start(ai.load_record(ai.sha256_64(CONV))) == {
         "harness": "antigravity",
         "effort": "high",
         "model": "gpt-5.6-sol",
@@ -2516,11 +2529,11 @@ def test_cmd_record_uses_the_hook_cwd_in_another_owners_repository(
     if event == "PostModelSwitch":
         expected.update(switch_model=SONNET, switch_at=123.0)
     user_record = ai.user_store() / f"{ai.hx(ai.sha256_64('s'))}.json"
-    assert loaded(user_record) == expected
+    assert no_start(loaded(user_record)) == expected
     # Missing values in later hooks must preserve a known model and switch.
     feed(monkeypatch, {"session_id": "s", "cwd": str(foreign)})
     assert ai.cmd_record("claude", {}) == 0
-    assert loaded(user_record) == expected
+    assert no_start(loaded(user_record)) == expected
     assert not (foreign / ".git" / "tbhb-alpha").exists()
     assert run_git(foreign, "status", "--porcelain") == status
     assert sorted((foreign / ".git").iterdir()) == entries
@@ -2680,7 +2693,7 @@ def test_foreign_root_session_supplies_the_commit_trailer_model(
     stage(repo, "a.txt")
     path = msg_file(tmp_path, "fix: record foreign session\n")
     assert ai.cmd_trailer(str(path), "message", CLAUDE_COMMIT_ENV) == 0
-    assert ai.llm_trailers(path.read_text(encoding="utf-8")) == [
+    assert no_start(ai.llm_trailers(path.read_text(encoding="utf-8"))) == [
         (
             ai.KEY_GEN,
             (
@@ -3770,8 +3783,19 @@ def test_check_agent_session_keeps_existing_trailer_rules(
     before = path.read_bytes()
     assert b"Generated-by: LLM" in before
     assert ai.cmd_check(str(path), CLAUDE_COMMIT_ENV) == 0
-    assert capsys.readouterr() == ("", "")
+    # A new agent commit that lacks started_at stays valid, with a warning.
+    assert capsys.readouterr() == (
+        "",
+        "tbhbdev alpha identity: warning: a Generated-by line lacks started_at\n",
+    )
     assert path.read_bytes() == before
+    assert ai.cmd_check(str(path), {}) == 0
+    assert capsys.readouterr() == ("", "")
+    stamped = before.decode().replace(";surface=", f";started_at={EARLY};surface=")
+    assert stamped != before.decode()
+    path.write_text(stamped, encoding="utf-8")
+    assert ai.cmd_check(str(path), CLAUDE_COMMIT_ENV) == 0
+    assert capsys.readouterr() == ("", "")
 
 
 @pytest.mark.usefixtures("repo")
@@ -4110,9 +4134,10 @@ def test_e2e_claude_edit_then_commit(wired: Path) -> None:
     session = ai.sha256_64("session-raw")
     (line,) = trailers(wired)
     assert (
-        line == "Generated-by: LLM harness=claude-code:2.1.316;"
+        no_start(line) == "Generated-by: LLM harness=claude-code:2.1.316;"
         f"model=anthropic:claude-opus-5-5;session={session};surface=cli"
     )
+    assert ai.start_ok(ai.trailer_start(line)) is not None
     receipts = list((wired / ".git" / "tbhb-alpha" / "edits").rglob("*.json"))
     assert [loaded(p)["consumed"] for p in receipts] == [True]
     # Consumed: a later commit of another file falls back to the committer.
@@ -4433,7 +4458,7 @@ def test_e2e_agy_edit_then_commit(wired: Path) -> None:
     env = {"ANTIGRAVITY_CONVERSATION_ID": CONV, "ANTIGRAVITY_LS_VERSION": "cli-1.4.12"}
     done = git_commit(wired, "feat: hello", env)
     assert done.returncode == 0, done.stderr
-    assert trailers(wired) == [
+    assert no_start(trailers(wired)) == [
         (
             "Generated-by: LLM effort=low;harness=antigravity:1.4.12;"
             f"model=gcp.gemini:gemini-3.8-flash;session={ai.sha256_64(CONV)};"
@@ -4467,7 +4492,7 @@ def test_e2e_two_sessions_in_two_worktrees_commit_apart(
             tree, "feat: x", {**CLAUDE_E2E, "CLAUDE_CODE_SESSION_ID": raw}
         )
         assert done.returncode == 0, done.stderr
-        assert trailers(tree) == [
+        assert no_start(trailers(tree)) == [
             (
                 "Generated-by: LLM harness=claude-code:2.1.316;"
                 f"model=anthropic:claude-opus-5-5;session={ai.sha256_64(raw)};"
@@ -6765,7 +6790,7 @@ def test_codex_sessionstart_records_the_root_thread(
 ) -> None:
     root, _ = hook_rollouts(tmp_path / "codex", repo)
     run_hook(monkeypatch, hook_data("codex-hook-sessionstart.json", repo, root))
-    assert ai.load_record(ai.sha256_64(ROOT_THREAD)) == {
+    assert no_start(ai.load_record(ai.sha256_64(ROOT_THREAD))) == {
         "harness": "codex:0.166.0",
         "root": ai.sha256_64(ROOT_THREAD),
         "model": "openai:gpt-5.6-sol",
@@ -6781,7 +6806,7 @@ def test_codex_subagentstart_records_the_executing_thread(
     _, child = hook_rollouts(tmp_path / "codex", repo)
     run_hook(monkeypatch, hook_data("codex-hook-subagentstart.json", repo, child))
     # Keyed by the subagent; the model is stdin's, effort the rollout's.
-    assert ai.load_record(ai.sha256_64(CHILD_THREAD)) == {
+    assert no_start(ai.load_record(ai.sha256_64(CHILD_THREAD))) == {
         "harness": "codex:0.166.0",
         "root": ai.sha256_64(ROOT_THREAD),
         "agent_type": "default",
@@ -7081,7 +7106,7 @@ def test_e2e_codex_hooks_then_commit(wired: Path, tmp_path: Path) -> None:
     done = git_commit(wired, "feat: both", env)
     assert done.returncode == 0, done.stderr
     session = ai.sha256_64(ROOT_THREAD)
-    assert sorted(trailers(wired)) == [
+    assert no_start(sorted(trailers(wired))) == [
         (
             "Generated-by: LLM effort=high;harness=codex:0.166.0;"
             f"model=openai:gpt-5.6-sol;session={session};surface=exec"
@@ -7896,7 +7921,7 @@ def test_e2e_conflict_resolution_credits_the_picker_as_assisted(wired: Path) -> 
     done = git_run(wired, "cherry-pick", "--continue")
     assert done.returncode == 0, done.stderr
     session = ai.sha256_64("session-raw")
-    assert trailers(wired) == [
+    assert no_start(trailers(wired)) == [
         f"Generated-by: {SRC_GEN}",
         (
             "Assisted-by: LLM harness=claude-code:2.1.316;"
@@ -8277,7 +8302,7 @@ def test_agy_1_5_7_commit_path_stamps_the_spike_trailer(
     path = msg_file(tmp_path)
     assert ai.cmd_trailer(str(path), None, env) == 0
     session = ai.sha256_64(CONV)
-    assert path.read_text(encoding="utf-8") == (
+    assert no_start(path.read_text(encoding="utf-8")) == (
         "subject\n\nbody\n\n"
         "Generated-by: LLM effort=high;harness=antigravity:1.5.7;"
         f"model=gcp.gemini:gemini-4-argon;session={session};surface=cli\n"
@@ -8317,3 +8342,297 @@ AGY_TABLE_ROWS = {
 def test_agy_models_table_rows_are_exact() -> None:
     """Every row, so swapped ids or efforts between keys fail."""
     assert ai.AGY_MODELS == AGY_TABLE_ROWS
+
+
+# ------------------------------------------------------------- start time
+
+LAUNCH = H + "0a1b2c3d4e5f6071"
+EARLY, LATE = "2026-11-14T00:02:41Z", "2026-11-14T00:09:00Z"
+NOW = 1_794_614_400.0
+NOW_UTC = "2026-11-14T00:00:00Z"
+
+
+@pytest.fixture
+def launch_file(repo: Path) -> Path:
+    """The launch file a launcher writes before its harness starts."""
+    path = repo / ".git" / "tbhb-alpha" / "launch.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"launch": LAUNCH, "started_at": EARLY}))
+    return path
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ai.time, "time", returning(NOW))
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (EARLY, EARLY),
+        ("2026-02-30T00:00:00Z", None),
+        ("2026-11-14T24:00:00Z", None),
+        ("2026-11-14t00:02:41z", None),
+        ("2026-11-14T00:02:41", None),
+        ("2026-11-14T00:02:41+00:00", None),
+        ("2026-11-14T00:02:41.5Z", None),
+        (" " + EARLY, None),
+        (EARLY + "Z", None),
+        (None, None),
+        (5, None),
+    ],
+)
+def test_start_ok(value: object, expected: str | None) -> None:
+    assert ai.start_ok(value) == expected
+
+
+def test_hash_ok() -> None:
+    assert ai.hash_ok(LAUNCH) == LAUNCH
+    assert ai.hash_ok(LAUNCH + "0") is None
+    assert ai.hash_ok("x" + LAUNCH) is None
+    assert ai.hash_ok(None) is None
+
+
+def test_write_record_sets_once_fields_only_where_absent(repo: Path) -> None:
+    ai.write_record(ROOT, {"model": "m"}, once={"started_at": EARLY, "launch": None})
+    ai.write_record(ROOT, {"model": "n"}, once={"started_at": LATE, "launch": LAUNCH})
+    expected = {"model": "n", "started_at": EARLY, "launch": LAUNCH}
+    name = f"{'a' * 16}.json"
+    assert loaded(repo / ".git" / "tbhb-alpha" / "sessions" / name) == expected
+    assert loaded(ai.user_store() / name) == expected
+    ai.write_user_record(ROOT, {"model": "o"})
+    assert loaded(ai.user_store() / name) == {**expected, "model": "o"}
+
+
+def test_claim_launch_goes_to_the_first_root_session(launch_file: Path) -> None:
+    fields = {"launch": LAUNCH, "started_at": EARLY}
+    assert ai.claim_launch(ROOT) == fields
+    assert loaded(launch_file) == {**fields, "session": ROOT}
+    assert not list(launch_file.parent.glob("*.tmp"))
+    assert ai.claim_launch(OTHER) == {}
+    assert ai.claim_launch(ROOT) == fields
+    assert loaded(launch_file) == {**fields, "session": ROOT}
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        {"launch": LAUNCH},
+        {"started_at": EARLY},
+        {"launch": "nope", "started_at": EARLY},
+        {"launch": LAUNCH, "started_at": "2026-02-30T00:00:00Z"},
+    ],
+)
+def test_claim_launch_leaves_an_invalid_file_alone(
+    launch_file: Path, content: Json
+) -> None:
+    launch_file.write_text(json.dumps(content))
+    assert ai.claim_launch(ROOT) == {}
+    assert loaded(launch_file) == content
+
+
+def test_claim_launch_without_a_file_or_a_repository(repo: Path, plain: Path) -> None:
+    assert ai.claim_launch(ROOT) == {}
+    assert ai.claim_launch(ROOT, plain) == {}
+    assert ai.claim_launch(ROOT, repo) == {}
+    assert not (repo / ".git" / "tbhb-alpha" / "launch.json").exists()
+
+
+@pytest.mark.usefixtures("clock")
+def test_start_fields_for_a_root_and_a_subagent(launch_file: Path) -> None:
+    fields = {"launch": LAUNCH, "started_at": EARLY}
+    assert ai.start_fields(ROOT, ROOT) == fields
+    ai.write_record(ROOT, {}, once=fields)
+    assert ai.start_fields(ROOT, ROOT) == {}
+    # A later session finds the file claimed and starts at its own first event.
+    assert ai.start_fields(OTHER, OTHER) == {"started_at": NOW_UTC}
+    assert ai.start_fields(CHILD, ROOT) == {"started_at": NOW_UTC, "launch": LAUNCH}
+    assert ai.start_fields(CHILD, OTHER) == {"started_at": NOW_UTC, "launch": None}
+    ai.write_record(CHILD, {"root": ROOT}, once={"started_at": LATE})
+    assert ai.start_fields(CHILD, ROOT) == {}
+    assert loaded(launch_file)["session"] == ROOT
+
+
+def claude_event(repo: Path, session: str, agent: str | None = None) -> None:
+    data: Json = {"session_id": session, "hook_event_name": "SessionStart"}
+    ai.handle_claude(
+        {**data, "cwd": str(repo), **({"agent_id": agent} if agent else {})}, {}
+    )
+
+
+def test_claude_hooks_copy_the_launch_fields_once(
+    repo: Path, launch_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ai.time, "time", returning(NOW))
+    first, later = ai.sha256_64("one"), ai.sha256_64("two")
+    claude_event(repo, "one")
+    assert loaded(launch_file)["session"] == first
+    monkeypatch.setattr(ai.time, "time", returning(NOW + 60))
+    claude_event(repo, "one")  # a resumed session keeps its first values
+    rec = ai.load_record(first)
+    assert (rec["launch"], rec["started_at"]) == (LAUNCH, EARLY)
+    claude_event(repo, "two")
+    assert ai.load_record(later)["started_at"] == "2026-11-14T00:01:00Z"
+    assert "launch" not in ai.load_record(later)
+    claude_event(repo, "one", "kid")
+    monkeypatch.setattr(ai.time, "time", returning(NOW + 120))
+    claude_event(repo, "one", "kid")
+    kid = ai.load_record(ai.sha256_64("kid"))
+    assert (kid["launch"], kid["started_at"]) == (LAUNCH, "2026-11-14T00:01:00Z")
+    assert loaded(launch_file)["session"] == first
+
+
+@pytest.mark.usefixtures("repo", "clock")
+def test_an_interactive_session_starts_at_its_first_hook_event() -> None:
+    claude_event(Path.cwd(), "one")
+    rec = ai.load_record(ai.sha256_64("one"))
+    assert rec["started_at"] == NOW_UTC
+    assert "launch" not in rec
+
+
+@pytest.mark.usefixtures("repo")
+def test_with_start_reads_the_record_and_the_roots_launch() -> None:
+    root, sub = make_ident(), make_ident(CHILD)
+    assert ai.with_start(root) == root
+    ai.write_record(ROOT, {}, once={"started_at": EARLY, "launch": LAUNCH})
+    assert ai.with_start(root) == dataclasses.replace(
+        root, launch=LAUNCH, started_at=EARLY
+    )
+    assert ai.with_start(sub) == dataclasses.replace(sub, launch=LAUNCH)
+    ai.write_record(CHILD, {"root": ROOT}, once={"started_at": LATE})
+    assert ai.with_start(sub) == dataclasses.replace(
+        sub, launch=LAUNCH, started_at=LATE
+    )
+    ai.write_record(CHILD, {"launch": OTHER, "started_at": "bad"})
+    ai.write_record(ROOT, {"launch": "bad"})
+    assert ai.with_start(sub) == dataclasses.replace(sub, launch=OTHER)
+    assert ai.with_start(root) == dataclasses.replace(root, started_at=EARLY)
+    value = ai.format_value(
+        dataclasses.replace(sub, launch=LAUNCH, started_at=EARLY).attrs()
+    )
+    assert value == (
+        f"LLM harness=claude-code;launch={LAUNCH};model=anthropic:m;"
+        f"session={ROOT};started_at={EARLY};subagent={CHILD}"
+    )
+    assert ai.check_value(value) is None
+
+
+def test_check_pair_validates_the_launch_fields() -> None:
+    assert ai.check_pair(f"started_at={EARLY}") is None
+    assert ai.check_pair(f"launch={LAUNCH}") is None
+    assert ai.check_pair("launch=sha-256-64:XYZ") == "bad launch hash"
+    bad = "2026-02-30T00:00:00Z"
+    assert ai.check_pair(f"started_at={bad}") == f"bad started_at {bad}"
+    assert ai.check_pair("started_at=2026-11-14t00:02:41z") is not None
+    assert ai.check_pair("Started_at=x") == "bad attribute 'Started_at=x'"
+    assert ai.check_pair("a_b=x") == "unknown attribute a_b"
+
+
+def line_of(start: str | None = None, extra: str = "", who: str = ROOT) -> str:
+    stamp = f"started_at={start};" if start else ""
+    base = f"LLM {extra}harness=claude-code;model=anthropic:m"
+    return f"{base};session={who};{stamp}surface=cli"
+
+
+def test_trailer_identity_and_start() -> None:
+    value = f"LLM harness=h;model=m;session={ROOT};started_at={EARLY};subagent={CHILD}"
+    assert ai.trailer_identity(value) == ("h", "m", ROOT, CHILD)
+    assert ai.trailer_identity("LLM xharness=h") == (None, None, None, None)
+    assert ai.trailer_start(value) == EARLY
+    assert ai.trailer_start(f"LLM xstarted_at={EARLY}") == ""
+    assert ai.trailer_start("LLM harness=h") == ""
+
+
+def test_merge_trailers_keeps_the_earliest_start_per_identity() -> None:
+    gen, assist = "Generated-by", "Assisted-by"
+    found = [
+        (gen, line_of()),
+        (gen, line_of(LATE)),
+        (gen, line_of(EARLY, "effort=low;")),
+        (gen, line_of(EARLY)),
+        (gen, line_of(LATE, who=OTHER)),
+        (gen, line_of(who=CHILD)),
+        (gen, line_of(extra="effort=low;", who=CHILD)),
+        (assist, line_of(LATE, who=H + "e" * 16)),
+        (assist, line_of(EARLY, who=H + "e" * 16)),
+    ]
+    assert ai.merge_trailers(found) == [
+        (gen, line_of(EARLY, "effort=low;")),
+        (gen, line_of(LATE, who=OTHER)),
+        (gen, line_of(who=CHILD)),
+        (gen, line_of(extra="effort=low;", who=CHILD)),
+        (assist, line_of(EARLY, who=H + "e" * 16)),
+    ]
+    # The key is part of the identity, and each attribute of it counts.
+    apart = [
+        (gen, f"LLM harness=a;model=m;session={ROOT};started_at={LATE}"),
+        (gen, f"LLM harness=b;model=m;session={ROOT};started_at={EARLY}"),
+        (gen, f"LLM harness=a;model=n;session={ROOT};started_at={EARLY}"),
+        (
+            gen,
+            f"LLM harness=a;model=m;session={ROOT};started_at={EARLY};subagent={CHILD}",
+        ),
+    ]
+    assert ai.earliest_starts(apart) == apart
+    mixed = [(assist, line_of(EARLY)), (gen, line_of(LATE, who=OTHER))]
+    assert ai.earliest_starts(mixed) == mixed
+
+
+def test_cmd_trailer_amend_keeps_the_earliest_start(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = ai.sha256_64("session-raw")
+    base = f"harness=claude-code:2.1.316;model=anthropic:m;session={session}"
+    stage(repo, "a.txt")
+    commit(repo, f"s\n\nGenerated-by: LLM {base};started_at={EARLY};surface=cli\n")
+    ai.write_record(session, {}, once={"started_at": LATE, "launch": LAUNCH})
+    monkeypatch.setattr(ai, "ancestry", returning(["git commit --amend -m x"]))
+    stage(repo, "b.txt")
+    put_receipt(
+        repo, "b.json", make_receipt("b.txt", make_ident(root=session)), session
+    )
+    path = msg_file(tmp_path, "reworded\n")
+    assert ai.cmd_trailer(str(path), "message", CLAUDE_COMMIT_ENV) == 0
+    text = path.read_text(encoding="utf-8")
+    assert text == (
+        f"reworded\n\nGenerated-by: LLM {base};started_at={EARLY};surface=cli\n"
+    )
+    # An amended line without the field gives way to the hook's line with it.
+    commit(repo, f"s\n\nGenerated-by: LLM {base};surface=cli\n")
+    stage(repo, "c.txt")
+    put_receipt(
+        repo, "c.json", make_receipt("c.txt", make_ident(root=session)), session
+    )
+    path = msg_file(tmp_path, "reworded\n")
+    assert ai.cmd_trailer(str(path), "message", CLAUDE_COMMIT_ENV) == 0
+    assert path.read_text(encoding="utf-8") == (
+        "reworded\n\nGenerated-by: LLM harness=claude-code:2.1.316;"
+        f"launch={LAUNCH};model=anthropic:m;session={session};"
+        f"started_at={LATE};surface=cli\n"
+    )
+    assert ai.check_message(path.read_text(encoding="utf-8")) == []
+
+
+@pytest.mark.usefixtures("repo")
+def test_cmd_trailer_interactive_squash_keeps_the_earliest_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Git joins the squashed commits' messages, and the hook merges their lines."""
+    monkeypatch.setattr(ai, "ancestry", returning(["git rebase -i main"]))
+    joined = (
+        "# This is a combination of 2 commits.\n# This is the 1st commit message:\n\n"
+        f"one\n\nGenerated-by: {line_of(LATE)}\n\n"
+        "# This is the commit message #2:\n\n"
+        f"two\n\nGenerated-by: {line_of(EARLY)}\nGenerated-by: {line_of()}\n"
+    )
+    for env in ({}, CLAUDE_COMMIT_ENV):
+        path = msg_file(tmp_path, joined)
+        assert ai.cmd_trailer(str(path), "message", env) == 0
+        assert ai.llm_trailers(path.read_text(encoding="utf-8")) == [
+            ("Generated-by", line_of(EARLY))
+        ]
+    # A human's message whose lines need no merge stays byte for byte.
+    path = msg_file(tmp_path, f"one\n\n\nGenerated-by: {line_of(LATE)}\n")
+    before = path.read_bytes()
+    assert ai.cmd_trailer(str(path), "message", {}) == 0
+    assert path.read_bytes() == before
