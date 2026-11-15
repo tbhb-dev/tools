@@ -34,7 +34,7 @@ jobs:
   bazel:
     name: bazel
     runs-on: ubuntu-26.04
-    timeout-minutes: 45
+    timeout-minutes: 35
     # The push to main run writes the shared action cache with the main
     # token, a secret of the main-only `cache` environment that no pull
     # request can read. Pull requests use the org's PR token, which writes
@@ -107,7 +107,7 @@ jobs:
     if: always()
     needs: [bazel, repo]
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Fail if any needed job did not succeed
         uses: tbhb-dev/rules/.github/actions/ci-conclusion@b6f375a670601f5e505138c7ee86f9e259149c65  # main
