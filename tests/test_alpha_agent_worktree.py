@@ -533,12 +533,6 @@ def test_fetch_resolves_only_a_full_commit(
         assert (
             worktree.fetch_commit(tmp_path, request, tmp_path / "seeded") == commit_id
         )
-    options = (
-        "--no-recurse-submodules",
-        "--no-write-fetch-head",
-        "--no-tags",
-        "--upload-pack=git-upload-pack",
-    )
     assert calls == [
         (
             "True",
@@ -551,7 +545,7 @@ def test_fetch_resolves_only_a_full_commit(
         (
             "False",
             "fetch",
-            *options,
+            *worktree.FETCH_OPTIONS,
             "--no-prune",
             "--end-of-options",
             str(tmp_path / "seeded"),
@@ -562,7 +556,7 @@ def test_fetch_resolves_only_a_full_commit(
         (
             "False",
             "fetch",
-            *options,
+            *worktree.FETCH_OPTIONS,
             "--no-prune",
             "origin",
             "+refs/heads/main:refs/heads/main",
@@ -859,17 +853,11 @@ def test_prelaunch_git_protocol(
         worktree.create(clone, "protocol", request, ("example-org/example-repo",))
         == workspace
     )
-    options = (
-        "--no-recurse-submodules",
-        "--no-write-fetch-head",
-        "--no-tags",
-        "--upload-pack=git-upload-pack",
-    )
     local = (
         mirror,
         (
             "fetch",
-            *options,
+            *worktree.FETCH_OPTIONS,
             "--no-prune",
             "--end-of-options",
             str(clone),
@@ -898,7 +886,7 @@ def test_prelaunch_git_protocol(
                 mirror,
                 (
                     "fetch",
-                    *options,
+                    *worktree.FETCH_OPTIONS,
                     "--no-prune",
                     "origin",
                     "+refs/heads/main:refs/heads/main",

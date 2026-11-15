@@ -35,6 +35,12 @@ GIT_OVERRIDES = (
     "fetch.recurseSubmodules=false",
     "submodule.recurse=false",
 )
+FETCH_OPTIONS = (
+    "--no-recurse-submodules",
+    "--no-write-fetch-head",
+    "--no-tags",
+    "--upload-pack=git-upload-pack",
+)
 MIRROR_CONFIG = """\
 [core]
 repositoryformatversion = 0
@@ -174,12 +180,6 @@ def published(clone: Path, commit: str) -> bool:
 
 
 def fetch_commit(mirror: Path, request: RunRequest, seeded: Path) -> str:
-    options = (
-        "--no-recurse-submodules",
-        "--no-write-fetch-head",
-        "--no-tags",
-        "--upload-pack=git-upload-pack",
-    )
     if (
         request.commit is not None
         and request.profile is not Profile.BUILD
@@ -190,7 +190,7 @@ def fetch_commit(mirror: Path, request: RunRequest, seeded: Path) -> str:
             git(
                 mirror,
                 "fetch",
-                *options,
+                *FETCH_OPTIONS,
                 "--no-prune",
                 "--end-of-options",
                 str(seeded),
@@ -204,7 +204,7 @@ def fetch_commit(mirror: Path, request: RunRequest, seeded: Path) -> str:
     references = [f"+{branch}:{branch}"]
     if request.commit is not None:
         references.append(f"+{request.commit}:refs/heads/tbhbdev-review")
-    git(mirror, "fetch", *options, "--no-prune", "origin", *references)
+    git(mirror, "fetch", *FETCH_OPTIONS, "--no-prune", "origin", *references)
     return resolve_commit(
         mirror, branch if request.profile is Profile.BUILD else request.commit
     )
