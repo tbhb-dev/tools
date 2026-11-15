@@ -1985,8 +1985,8 @@ def enrich(ident: Ident, committer: Committer) -> Ident:
     return ident
 
 
-LLM_LINE = re.compile(r"^(Generated-by|Assisted-by): (LLM\b.*)$", re.MULTILINE)
-LLM_LINES = re.compile(r"^(?:Generated-by|Assisted-by): LLM\b.*\n?", re.MULTILINE)
+LLM_LINE = re.compile(r"^(Generated-by|Assisted-by):[ \t]*(LLM\b.*)$", re.MULTILINE)
+LLM_LINES = re.compile(r"^(?:Generated-by|Assisted-by):[ \t]*LLM\b.*\n?", re.MULTILINE)
 AGENT_ATTR = re.compile(r"(?<![^\s;])(session|subagent)=([^\s;]+)")
 AMEND_FLAGS = {"--am", "--ame", "--amen", "--amend"}  # git takes unique prefixes
 PICKED_FROM = re.compile(

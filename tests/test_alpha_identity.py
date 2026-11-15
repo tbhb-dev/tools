@@ -3232,6 +3232,31 @@ def test_llm_trailers_reads_only_llm_trailer_lines() -> None:
     assert ai.llm_trailers(text) == [GEN_ROOT, ASSIST_OTHER]
 
 
+@pytest.mark.parametrize("gap", ["", "  ", "\t"])
+def test_trailer_lines_read_any_gap_after_the_colon(gap: str) -> None:
+    text = f"s\n\nGenerated-by:{gap}{GEN_ROOT[1]}\n"
+    assert ai.llm_trailers(text) == [GEN_ROOT]
+    assert ai.LLM_LINES.sub("", text) == "s\n\n"
+
+
+def test_check_warns_about_a_missing_start_whatever_the_gap(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seed_claude(repo)
+    path = msg_file(tmp_path)
+    assert ai.cmd_trailer(str(path), "message", CLAUDE_COMMIT_ENV) == 0
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("Generated-by: ", "Generated-by:"),
+        encoding="utf-8",
+    )
+    capsys.readouterr()
+    assert ai.cmd_check(str(path), CLAUDE_COMMIT_ENV) == 0
+    assert capsys.readouterr() == (
+        "",
+        "tbhbdev alpha identity: warning: a Generated-by line lacks started_at\n",
+    )
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
