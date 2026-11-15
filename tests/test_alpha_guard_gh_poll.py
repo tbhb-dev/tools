@@ -1424,6 +1424,12 @@ def test_protected_words_reads_a_protected_name_in_any_case(name: str) -> None:
         ("rm ~/.local/state/tbhb", False),
         ("xargs echo ~/.local/state/tbhb", False),
         ("xargs rm /tmp/x", False),
+        ("cd ~ && cat list | xargs rm -rf", False),
+        ("cd $HOME && cat list | xargs rm -rf", False),
+        ("cd /; cat list | xargs rm -rf", False),
+        ("echo ~/.local | xargs rm -rf", True),
+        ("echo ~/.local/state | xargs rm -rf", True),
+        ("echo ~/* | xargs rm -rf", True),
     ],
 )
 def test_pipes_state_dir_needs_a_repeater_a_mover_and_a_state_path(
