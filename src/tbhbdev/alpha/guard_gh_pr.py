@@ -107,6 +107,13 @@ GROUPS = {group for group, _ in GUARDED}
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 # Shell options whose value is the next word, so it is not the script.
 DURATION = re.compile(r"\d+(\.\d+)?[smhd]?")
+ANSI_ESCAPE = re.compile(
+    r"\\(x[0-9a-fA-F]{1,2}|[0-7]{1,3}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|.)", re.DOTALL
+)
+ANSI_SIMPLE = {
+    "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n",
+    "r": "\r", "t": "\t", "v": "\v",
+}  # fmt: skip
 SHELL_VALUE_OPTIONS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
 WRAPPERS = {
     "env", "command", "exec", "sudo", "nohup", "time", "builtin", "xargs",
@@ -130,7 +137,7 @@ ARG_VALUE_FLAGS = {
     "-c", "--comment", "-r", "--reason", "-b", "--body", "-t", "--title",
     "-F", "--body-file", "-B", "--base", "-R", "--repo", "-m", "--milestone",
     "-a", "--add-assignee", "-l", "--add-label", "-A", "--author",
-    "--match-head-commit", "--subject", "--body-text",
+    "--match-head-commit", "--subject", "--body-text", "--duplicate-of",
 }  # fmt: skip
 SEPARATORS = ";&|"
 
@@ -285,9 +292,25 @@ class Scanner:
             self.add(char)
         self.pos += 1
 
+    def ansi_quoted(self, char: str) -> None:
+        """One character inside ``$'...'``, with the escapes bash decodes."""
+        escape = ANSI_ESCAPE.match(self.text, self.pos) if char == "\\" else None
+        if escape:
+            self.add(ansi_char(escape[1]))
+            self.pos = escape.end()
+            return
+        if char == "'":
+            self.quote = ""
+        else:
+            self.add(char)
+        self.pos += 1
+
     def unquoted(self, char: str) -> None:
         """One character outside quotes."""
-        if self.text.startswith("$(", self.pos):
+        if self.text.startswith("$'", self.pos):
+            self.quote, self.in_word = "$'", True
+            self.pos += 2
+        elif self.text.startswith("$(", self.pos):
             self.open_nesting("$", 2)
         elif self.text.startswith("<<<", self.pos):
             self.end_word()
@@ -330,12 +353,26 @@ class Scanner:
         """Scan the whole text."""
         while self.pos < len(self.text):
             char = self.text[self.pos]
-            if self.quote:
+            if self.quote == "$'":
+                self.ansi_quoted(char)
+            elif self.quote:
                 self.quoted(char)
             else:
                 self.unquoted(char)
         self.end_command()
         return self.commands
+
+
+def ansi_char(escape: str) -> str:
+    """The character a ``$'...'`` escape (without its backslash) stands for."""
+    head = escape[0]
+    if head in ANSI_SIMPLE:
+        return ANSI_SIMPLE[head]
+    if head == "x" or head in "uU":
+        return chr(min(int(escape[1:], 16), 0x10FFFF))
+    if head in "01234567":
+        return chr(int(escape, 8) & 255)
+    return head if head in "\\'\"?" else "\\" + head
 
 
 def skip_wrappers(words: list[str]) -> tuple[int, bool]:
@@ -420,34 +457,22 @@ def gh_match(rest: list[str]) -> Match | None:
         return None
     args = rest[j + 1 :]
     repo = target_repo(args)
-    repos = flag_values(rest, {"-R", "--repo"}, VALUE_FLAGS)
-    return Match(rest[j], args, group, repos[-1] if repos else repo)
+    repos = flag_values(rest, {"-R", "--repo"}, ARG_VALUE_FLAGS | VALUE_FLAGS)
+    return Match(rest[j], args, group, repo or (repos[-1] if repos else None))
 
 
 def target_repo(args: list[str]) -> str | None:
-    """``owner/repo`` of a pull request or issue URL among the arguments."""
-    i = 0
-    while i < len(args):
-        if args[i].startswith("-"):
-            i += 2 if args[i] in ARG_VALUE_FLAGS else 1
-        elif url := TARGET_URL.fullmatch(args[i]):
-            return url[1]
-        else:
-            i += 1
-    return None
+    """``owner/repo`` of a pull request or issue URL among the positional arguments."""
+    positional = split_args(args, ARG_VALUE_FLAGS)[1]
+    urls = (TARGET_URL.fullmatch(word) for word in positional)
+    return next((url[1] for url in urls if url), None)
 
 
 def target_number(args: list[str]) -> str | None:
     """The first positional argument that reads as a number, flag values aside."""
-    i = 0
-    while i < len(args):
-        if args[i].startswith("-"):
-            i += 2 if args[i] in ARG_VALUE_FLAGS else 1
-        elif number := PR_NUMBER.fullmatch(args[i]):
-            return number[1]
-        else:
-            i += 1
-    return None
+    positional = split_args(args, ARG_VALUE_FLAGS)[1]
+    numbers = (PR_NUMBER.fullmatch(word) for word in positional)
+    return next((number[1] for number in numbers if number), None)
 
 
 def sets_c(word: str) -> bool:
@@ -507,18 +532,30 @@ def simple_commands(text: str) -> Iterator[Simple]:
             yield Simple(prefix + found.prefix, found.words)
 
 
+def prefix_repo(prefix: list[str]) -> str | None:
+    """The ``GH_REPO`` the prefix leaves set, after any ``env -u`` or ``env -i``."""
+    name = None
+    words = iter(prefix)
+    for word in words:
+        if word.startswith("GH_REPO="):
+            name = word.removeprefix("GH_REPO=")
+        elif word in {"-i", "--ignore-environment", "--unset=GH_REPO"}:
+            name = None
+        elif word in {"-u", "--unset"}:
+            name = None if next(words, None) == "GH_REPO" else name
+    return name
+
+
 def find(text: str) -> Match | None:
     """The first direct guarded `gh pr` or `gh issue` call in a shell command."""
     for prefix, words in simple_commands(text):
         found = gh_match(words[1:]) if program_of(words) == "gh" else None
         if found:
-            names = [
-                w.removeprefix("GH_REPO=") for w in prefix if w.startswith("GH_REPO=")
-            ]
+            name = prefix_repo(prefix)
             return (
                 found
-                if found.repo is not None or not names
-                else found._replace(repo=names[-1])
+                if found.repo is not None or name is None
+                else found._replace(repo=name)
             )
     return None
 
@@ -678,13 +715,11 @@ def default_repo(
 
     After a directory change the cwd is unknown, so the origin is too.
     """
-    names = [
-        word.removeprefix("GH_REPO=") for word in prefix if word.startswith("GH_REPO=")
-    ]
+    name = prefix_repo(prefix)
 
     def repo() -> str | None:
-        if names:
-            return repo_name(names[-1])
+        if name is not None:
+            return repo_name(name)
         return None if moved else origin_repo(cwd)
 
     return repo

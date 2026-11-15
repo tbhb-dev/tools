@@ -1404,3 +1404,113 @@ def test_options_and_durations_between_a_wrapper_and_gh_still_match(
     found = guard.find(command)
     assert found is not None
     assert found.sub == "close"
+
+
+@pytest.mark.parametrize(
+    ("command", "number"),
+    [
+        ("gh pr close -dc 99 3", "3"),
+        ("gh issue close --duplicate-of 99 3", "3"),
+        ("gh pr close --comment=99 3", "3"),
+    ],
+)
+def test_numeric_flag_values_never_become_the_target(command: str, number: str) -> None:
+    found = guard.find(command)
+    assert found is not None
+    assert guard.target_number(found.args) == number
+    assert f" {number} " in guard.hint(found)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr close -c '--repo=tbhb-dev/wiki' 3",
+        "gh pr close -c https://github.com/tbhb-dev/wiki/pull/9 3",
+        "gh pr close --comment '-R tbhb-dev/wiki' 3",
+    ],
+)
+def test_comment_text_never_names_the_repository(command: str) -> None:
+    found = guard.find(command)
+    assert found is not None
+    assert found.repo is None
+
+
+def test_a_positional_url_wins_over_the_repo_flag() -> None:
+    url = "https://github.com/tbhb-dev/wiki/pull/3"
+    found = guard.find(f"gh pr close {url} -R tbhb-dev/tools")
+    assert found is not None
+    assert found.repo == "tbhb-dev/wiki"
+    flagged = guard.find("gh pr close 3 -R tbhb-dev/tools")
+    assert flagged is not None
+    assert flagged.repo == "tbhb-dev/tools"
+
+
+@pytest.mark.parametrize(
+    ("prefix", "repo"),
+    [
+        (["GH_REPO=a/b"], "a/b"),
+        (["GH_REPO=a/b", "env", "-u", "GH_REPO"], None),
+        (["GH_REPO=a/b", "env", "--unset", "GH_REPO"], None),
+        (["GH_REPO=a/b", "env", "--unset=GH_REPO"], None),
+        (["GH_REPO=a/b", "env", "-i"], None),
+        (["GH_REPO=a/b", "env", "--ignore-environment"], None),
+        (["GH_REPO=a/b", "env", "-u", "OTHER"], "a/b"),
+        (["GH_REPO=a/b", "env", "-u", "GH_REPO", "GH_REPO=c/d"], "c/d"),
+        (["env"], None),
+    ],
+)
+def test_prefix_repo_follows_env_unsets(prefix: list[str], repo: str | None) -> None:
+    assert guard.prefix_repo(prefix) == repo
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "$'gh' pr close 3",
+        r"$'\x67h' pr close 3",
+        r"$'\147h' pr close 3",
+        r"$'g\x68' pr close 3",
+        "x=1 $'gh' pr close 3",
+        "echo ok; $'gh' pr close 3",
+        "gh $'pr' $'close' 3",
+    ],
+)
+def test_ansi_c_quoting_does_not_hide_gh(command: str) -> None:
+    found = guard.find(command)
+    assert found is not None
+    assert found.sub == "close"
+
+
+@pytest.mark.parametrize(
+    ("escape", "char"),
+    [
+        ("n", "\n"),
+        ("x41", "A"),
+        ("x4", "\x04"),
+        ("101", "A"),
+        ("u0041", "A"),
+        ("U00000041", "A"),
+        ("UFFFFFFFF", "\U0010ffff"),
+        ("\\", "\\"),
+        ("'", "'"),
+        ('"', '"'),
+        ("?", "?"),
+        ("q", "\\q"),
+    ],
+)
+def test_ansi_char(escape: str, char: str) -> None:
+    assert guard.ansi_char(escape) == char
+
+
+def test_ansi_c_quotes_end_at_the_closing_quote_and_keep_other_text() -> None:
+    assert next(iter(guard.simple_commands("echo $'a b' c"))).words == [
+        "echo",
+        "a b",
+        "c",
+    ]
+    assert next(iter(guard.simple_commands("echo $'a\\'b' c"))).words == [
+        "echo",
+        "a'b",
+        "c",
+    ]
+    assert next(iter(guard.simple_commands("echo $'a\\"))).words == ["echo", "a\\"]
