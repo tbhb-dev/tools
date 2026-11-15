@@ -2213,6 +2213,8 @@ YAML_WORDS = {"null", "true", "false", "yes", "no", "on", "off", "y", "n"}
 BARE_DOCS = {"AGENTS.md", "CLAUDE.md", "index.md", "log.md"}
 # Fixtures, not documents: skipped like the docs checker (and Go's tooling) does.
 TESTDATA = "testdata"
+# The file git keeps while a merge waits for its commit.
+MERGE_HEAD = "MERGE_HEAD"
 ITEM_LINE = re.compile(r"( *)- ([a-z]+): (.*)")
 FIELD_LINE = re.compile(r"( *)([a-z]+): (.*)")
 QUOTED = re.compile(r'"((?:[^"\\]|\\["\\])*)"')
@@ -2475,13 +2477,26 @@ def git_bytes(*args: str, cwd: Path, data: bytes | None = None) -> bytes:
     ).stdout
 
 
+def git_status_bytes(*args: str, cwd: Path) -> tuple[int, bytes]:
+    """Run git; return its exit code and raw stdout, so a path needn't be UTF-8."""
+    # No mutant of the call itself matters: `check` defaults to False and macOS
+    # finds `GIT`.
+    done = subprocess.run(  # nosec B603 B607  # pragma: no mutate
+        ["git", *args],  # pragma: no mutate
+        capture_output=True,
+        cwd=cwd,
+        check=False,  # pragma: no mutate
+    )
+    return done.returncode, done.stdout
+
+
 def staged_docs(top: Path) -> list[tuple[str, str, str]]:
     """(path, mode, blob) of each staged added or modified stampable document."""
-    _, out = git(
+    _, raw = git_status_bytes(
         "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames",
         "--diff-filter=AM", cwd=top,
     )  # fmt: skip
-    fields = out.split("\0")
+    fields = decode(raw).split("\0")
     docs = []
     for meta, path in zip(fields[::2], fields[1::2], strict=False):  # pragma: no mutate
         pure = PurePosixPath(path)
@@ -2493,7 +2508,44 @@ def staged_docs(top: Path) -> list[tuple[str, str, str]]:
         ):
             modes = meta.split()
             docs.append((path, modes[1], modes[3]))
-    return docs
+    return not_from_merge(top, docs, merge_heads(top))
+
+
+def merge_heads(top: Path) -> list[str]:
+    """The commits a merge brings in, one per line of MERGE_HEAD; none outside a merge.
+
+    Reads the file, because `rev-parse MERGE_HEAD` also matches a branch of that
+    name and `rev-list` reads only the first parent of an octopus merge.
+    """
+    _, path = git("rev-parse", "--git-path", MERGE_HEAD, cwd=top)
+    try:
+        return (top / path).read_text().split()
+    except OSError:
+        return []
+
+
+def not_from_merge(
+    top: Path, docs: list[tuple[str, str, str]], heads: list[str]
+) -> list[tuple[str, str, str]]:
+    """The documents the merge commit itself changes.
+
+    A file that matches any merged-in parent came from that parent as
+    committed, so stamping it would rewrite someone else's provenance. When git
+    can't compare, every document stays in, as outside a merge.
+    """
+    changed = []
+    for head in heads:
+        code, raw = git_status_bytes(
+            "diff", "--cached", "--raw", "-z", "--no-renames", head, cwd=top
+        )
+        if code != 0:
+            print(
+                f"{PROG}: can't compare with {head}; stamping every staged document",
+                file=sys.stderr,
+            )
+            return docs
+        changed.append({decode(path) for path in raw.split(b"\0")[1::2]})
+    return [doc for doc in docs if all(doc[0] in paths for paths in changed)]
 
 
 def decode(raw: bytes) -> str:
