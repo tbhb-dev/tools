@@ -181,6 +181,14 @@ NAMES = ["lab1", "lab2"]
         "ssh-copy-id lab1",
         "ssh-copy-id -i key lab1",
         "rsync -e 'ssh -o HostName=lab1' dir other:dst",
+        # mutation survivors: forms that reach a host through a rarely seen word
+        "rsync '-es -J lab1' x other:y",
+        "rsync -e 'ssh -J lab1'",
+        "env --split-string='ssh lab1 -o X=y'",
+        "find -exec ssh lab1 \\;",
+        "eval ssh lab1",
+        "screen 'ssh lab1'",
+        "ssh lab1 >",
     ],
 )
 def test_denied(command: str) -> None:
@@ -297,6 +305,21 @@ def test_denied(command: str) -> None:
         "ssh <<<hi agent@lab1",
         "ssh -J 'other, agent@lab1' x",
         "ssh-copy-id agent@lab1",
+        # mutation survivors: words that only look like they reach a host
+        "nice -- -n 5 ssh lab1",
+        "ssh - lab1",
+        "ssh -- agent@lab1 -l bob",
+        "scp -o User=agent -o HostName=lab1 x other:y",
+        "rsync -e 'ssh -o User=agent -o HostName=lab1' x other:y",
+        "env -- -S 'ssh lab1'",
+        "find . -name x \\; -exec ssh agent@lab1 \\;",
+        "find . -exec ssh -l \\; lab1",
+        "find . -exec ssh -l + lab1",
+        "find . -exec ls \\; -name x",
+        "ssh -o 'ProxyCommand=ssh agent@lab1 -W %h:%p -o A=lab1' agent@other",
+        "ssh lab1X",
+        "ssh ssh://lab1X",
+        "scp x lab1X:y",
         # known gaps, pinned so a change to them is deliberate
         "git clone lab1:x",
         "ssh $H",
