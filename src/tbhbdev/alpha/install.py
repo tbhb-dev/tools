@@ -1429,6 +1429,21 @@ def chain_stage(prek: list[str], top: Path, hook: Path, *, keep: bool) -> Path |
     return previous
 
 
+def chain_or_fail(
+    prek: list[str], top: Path, hook: Path, *, keep: bool
+) -> tuple[Path | None, InstallError | None]:
+    """Run chain_stage; return the saved hook and the failure, if any.
+
+    An OSError must not skip the shim: a foreign hook has already moved to
+    `.legacy`, so with no shim nothing would run at all, the scan included.
+    """
+    try:
+        return chain_stage(prek, top, hook, keep=keep), None
+    except (InstallError, OSError) as exc:
+        failure = exc if isinstance(exc, InstallError) else InstallError(str(exc))
+        return hook.with_name(f"{hook.name}{PREVIOUS}"), failure
+
+
 def install_identity_hook(
     prek: list[str], top: Path, hooks: Path, pair: tuple[str, str]
 ) -> None:
@@ -1461,14 +1476,7 @@ def install_identity_hook(
         legacy.unlink()
     if foreign:
         move_foreign(hook, legacy)
-    failure = None
-    try:
-        previous = chain_stage(prek, top, hook, keep=scan and legacy.is_file())
-    except (InstallError, OSError) as exc:
-        # An OSError must not skip the shim: the foreign hook has moved to
-        # .legacy, so nothing would run at all, scan included.
-        failure = exc if isinstance(exc, InstallError) else InstallError(str(exc))
-        previous = hook.with_name(f"{name}{PREVIOUS}")
+    previous, failure = chain_or_fail(prek, top, hook, keep=scan and legacy.is_file())
     template = SCAN_SHIM if scan else SHIM
     try:
         write_hook(
