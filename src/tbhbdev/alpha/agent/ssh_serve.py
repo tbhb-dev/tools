@@ -47,13 +47,12 @@ def too_deep(text: str) -> bool:
 
 
 def command(arguments: list[str]) -> tuple[str, str]:
-    if arguments:
-        message = "ssh-serve takes no arguments"
-        raise Invalid(message)
     if pwd.getpwuid(os.getuid()).pw_name != "agent":
         message = "requires agent account"
         raise Invalid(message)
-    words = shlex.split(os.environ["SSH_ORIGINAL_COMMAND"])
+    # A forced command passes the verb in SSH_ORIGINAL_COMMAND. A plain login
+    # passes it as arguments: `ssh-serve run-host NAME`.
+    words = arguments or shlex.split(os.environ["SSH_ORIGINAL_COMMAND"])
     if len(words) != COMMAND_WORDS or words[0] not in (
         "run-host",
         "preflight",
