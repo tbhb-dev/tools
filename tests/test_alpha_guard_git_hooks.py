@@ -22,6 +22,11 @@ DENIED = [
     "git push --no-verify",
     "true && git -c core.hooksPath=/x push",
     "bash -c 'git -c core.hooksPath=/x push'",
+    "git commit -n -m x",
+    "git commit -an -m x",
+    "git push --no-ver",
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git push",
+    "git -c\x63ore.hooksPath=/x push",
 ]
 ALLOWED = [
     "git push origin new-branch",
@@ -31,6 +36,14 @@ ALLOWED = [
     "git log -1",
     "echo core.hooksPath",
     "ls .git/hooks",
+    "git config core.hooksPath",
+    "git config --unset core.hooksPath",
+    "git log --grep=core.hooksPath",
+    "git commit -m core.hooksPath",
+    "git push -n origin x",
+    "git push --no-thin",
+    "git -c user.name=x log",
+    "git -c",
 ]
 
 
