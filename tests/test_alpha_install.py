@@ -652,7 +652,9 @@ def test_merged_config_writes_the_shim_path_for_claude_only(
     }
     assert install.merged_config("claude", claude, None)["env"] == claude["env"]
     kept = install.merged_config("claude", {"env": {"PATH": f"/x{sep}/y"}}, None)
-    assert kept["env"]["PATH"] == f"{shim}{sep}/x{sep}/y{sep}{full}"
+    env = kept["env"]
+    assert isinstance(env, dict)
+    assert env["PATH"] == f"{shim}{sep}/x{sep}/y{sep}{full}"
     assert "env" not in install.merged_config("codex", {}, "/a")
 
 
