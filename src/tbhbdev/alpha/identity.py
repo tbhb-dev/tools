@@ -2495,27 +2495,44 @@ def staged_docs(top: Path) -> list[tuple[str, str, str]]:
         ):
             modes = meta.split()
             docs.append((path, modes[1], modes[3]))
-    head = merge_head(top)
-    return docs if head is None else not_from_merge(top, docs, head)
+    return not_from_merge(top, docs, merge_heads(top))
 
 
-def merge_head(top: Path) -> str | None:
-    """The commit a merge brings in, or None when no merge is under way."""
-    code, out = git("rev-list", "-n", "1", MERGE_HEAD, cwd=top)
-    return out if code == 0 else None
+def merge_heads(top: Path) -> list[str]:
+    """The commits a merge brings in, one per line of MERGE_HEAD; none outside a merge.
+
+    Reads the file, because `rev-parse MERGE_HEAD` also matches a branch of that
+    name and `rev-list` reads only the first parent of an octopus merge.
+    """
+    _, path = git("rev-parse", "--git-path", MERGE_HEAD, cwd=top)
+    try:
+        return (top / path).read_text().split()
+    except OSError:
+        return []
 
 
 def not_from_merge(
-    top: Path, docs: list[tuple[str, str, str]], head: str
+    top: Path, docs: list[tuple[str, str, str]], heads: list[str]
 ) -> list[tuple[str, str, str]]:
     """The documents the merge commit itself changes.
 
-    A file that merely matches the merged-in parent came from that parent as
-    committed, so stamping it would rewrite someone else's provenance.
+    A file that matches any merged-in parent came from that parent as
+    committed, so stamping it would rewrite someone else's provenance. When git
+    can't compare, every document stays in, as outside a merge.
     """
-    _, out = git("diff", "--cached", "--name-only", "-z", head, cwd=top)
-    changed = set(out.split("\0"))
-    return [doc for doc in docs if doc[0] in changed]
+    changed = []
+    for head in heads:
+        code, out = git(
+            "diff", "--cached", "--raw", "-z", "--no-renames", head, cwd=top
+        )
+        if code != 0:
+            print(
+                f"{PROG}: can't compare with {head}; stamping every staged document",
+                file=sys.stderr,
+            )
+            return docs
+        changed.append(set(out.split("\0")[1::2]))
+    return [doc for doc in docs if all(doc[0] in paths for paths in changed)]
 
 
 def decode(raw: bytes) -> str:

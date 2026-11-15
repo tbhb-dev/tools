@@ -6290,6 +6290,64 @@ def test_staged_docs_keeps_a_file_that_differs_from_both_parents(repo: Path) -> 
     assert [d[0] for d in ai.staged_docs(repo)] == ["docs/a.md"]
 
 
+def test_staged_docs_skips_files_any_octopus_parent_brings_in(repo: Path) -> None:
+    stage_doc(repo, "docs/base.md", "base\n")
+    commit(repo)
+    for name in ("one", "two"):
+        run_git(repo, "switch", "-q", "-c", name, "HEAD")
+        stage_doc(repo, f"docs/{name}.md", f"{name}\n")
+        commit(repo)
+        run_git(repo, "switch", "-q", "-")
+    stage_doc(repo, "docs/main.md", "main\n")
+    commit(repo)
+    run_git(repo, "merge", "-q", "--no-commit", "one", "two")
+    assert ai.staged_docs(repo) == []
+    stage_doc(repo, "docs/resolved.md", "by the merge\n")
+    assert [d[0] for d in ai.staged_docs(repo)] == ["docs/resolved.md"]
+
+
+def test_staged_docs_warns_and_keeps_all_when_git_cannot_compare(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stage_doc(repo, "docs/a.md", "x\n")
+    (repo / ".git" / "MERGE_HEAD").write_text("0" * 40 + "\n", encoding="ascii")
+    assert [d[0] for d in ai.staged_docs(repo)] == ["docs/a.md"]
+    assert "can't compare with " + "0" * 40 in capsys.readouterr().err
+
+
+def test_staged_docs_ignores_a_branch_named_merge_head(repo: Path) -> None:
+    stage_doc(repo, "docs/a.md", "x\n")
+    commit(repo)
+    run_git(repo, "branch", "MERGE_HEAD")
+    stage_doc(repo, "docs/b.md", "y\n")
+    assert [d[0] for d in ai.staged_docs(repo)] == ["docs/b.md"]
+
+
+def test_staged_docs_keeps_a_file_the_merge_moved_and_edited(repo: Path) -> None:
+    body = "".join(f"line {n}\n" for n in range(20))
+    stage_doc(repo, "docs/old.md", body)
+    commit(repo)
+    run_git(repo, "switch", "-q", "-c", "side")
+    stage_doc(repo, "docs/old.md", body + "tail\n")
+    commit(repo)
+    run_git(repo, "switch", "-q", "-")
+    run_git(repo, "mv", "docs/old.md", "docs/new.md")
+    commit(repo)
+    run_git(repo, "merge", "-q", "--no-commit", "--no-ff", "side")
+    assert [d[0] for d in ai.staged_docs(repo)] == ["docs/new.md"]
+
+
+def test_staged_docs_after_a_cherry_pick_stamps_the_picked_file(repo: Path) -> None:
+    stage_doc(repo, "docs/base.md", "base\n")
+    commit(repo)
+    run_git(repo, "switch", "-q", "-c", "side")
+    stage_doc(repo, "docs/picked.md", "picked\n")
+    commit(repo)
+    run_git(repo, "switch", "-q", "-")
+    run_git(repo, "cherry-pick", "--no-commit", "side")
+    assert [d[0] for d in ai.staged_docs(repo)] == ["docs/picked.md"]
+
+
 def test_staged_docs_empty_without_staged_changes(repo: Path) -> None:
     assert ai.staged_docs(repo) == []
 
