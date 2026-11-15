@@ -8598,10 +8598,14 @@ def test_cmd_trailer_amend_keeps_the_earliest_start(
     path = msg_file(tmp_path, "reworded\n")
     assert ai.cmd_trailer(str(path), "message", CLAUDE_COMMIT_ENV) == 0
     text = path.read_text(encoding="utf-8")
-    assert text == (
-        f"reworded\n\nGenerated-by: LLM {base};started_at={EARLY};surface=cli\n"
+    hook = (
+        f"Generated-by: LLM harness=claude-code:2.1.316;launch={LAUNCH};"
+        f"model=anthropic:m;session={session};started_at={LATE};surface=cli\n"
     )
-    # An amended line without the field gives way to the hook's line with it.
+    kept = f"Generated-by: LLM {base};started_at={EARLY};surface=cli\n"
+    # The hook's line differs in its launch, so the older line stays beside it.
+    assert text == f"reworded\n\n{kept}{hook}"
+    # An amended line without the field stays beside the hook's line.
     commit(repo, f"s\n\nGenerated-by: LLM {base};surface=cli\n")
     stage(repo, "c.txt")
     put_receipt(
@@ -8609,11 +8613,8 @@ def test_cmd_trailer_amend_keeps_the_earliest_start(
     )
     path = msg_file(tmp_path, "reworded\n")
     assert ai.cmd_trailer(str(path), "message", CLAUDE_COMMIT_ENV) == 0
-    assert path.read_text(encoding="utf-8") == (
-        "reworded\n\nGenerated-by: LLM harness=claude-code:2.1.316;"
-        f"launch={LAUNCH};model=anthropic:m;session={session};"
-        f"started_at={LATE};surface=cli\n"
-    )
+    plain = f"Generated-by: LLM {base};surface=cli\n"
+    assert path.read_text(encoding="utf-8") == f"reworded\n\n{plain}{hook}"
     assert ai.check_message(path.read_text(encoding="utf-8")) == []
 
 

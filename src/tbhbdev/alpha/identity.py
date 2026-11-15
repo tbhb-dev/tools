@@ -151,7 +151,7 @@ BAD_VALUE = re.compile(r"[\s;,]")
 SURFACE_VALUE = re.compile(r"[^\s;,=]+")
 HASH_RE = re.compile(r"sha-256-64:[0-9a-f]{16}")
 START_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-START_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+START_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", re.ASCII)
 LAUNCH_FILE = "launch.json"
 CODEX_MODEL = re.compile(r"(gpt-|o\d|codex-)")
 THREAD_ID = re.compile(r"[0-9a-fA-F-]{8,64}")
@@ -453,7 +453,7 @@ def start_ok(value: object) -> str | None:
     if not isinstance(value, str) or not START_RE.fullmatch(value):
         return None
     try:
-        datetime.strptime(value, START_FORMAT).replace(tzinfo=UTC)
+        datetime.strptime(value, START_FORMAT).replace(tzinfo=UTC)  # DTZ007
     except ValueError:
         return None
     return value
@@ -1974,7 +1974,6 @@ PICKED_FROM = re.compile(
     r"^\(cherry picked from commit ([0-9a-f]{40})\)$", re.MULTILINE
 )
 MODEL_ATTR = re.compile(r"(?<![^\s;])model=[^\s;]")
-IDENTITY_ATTR = re.compile(r"(?<![^\s;])(harness|model|session|subagent)=([^\s;]+)")
 START_ATTR = re.compile(r"(?<![^\s;])started_at=([^\s;]+)")
 IDENT_EMAIL = re.compile(r"<([^>]*)>")
 
@@ -1992,10 +1991,10 @@ def trailer_agent(value: str) -> tuple[str | None, str | None]:
     return attrs.get("session"), attrs.get("subagent")
 
 
-def trailer_identity(value: str) -> tuple[str | None, ...]:
-    """(harness, model, session, subagent) of a trailer value; None where absent."""
-    attrs = dict(IDENTITY_ATTR.findall(value))
-    return tuple(attrs.get(key) for key in ("harness", "model", "session", "subagent"))
+def without_start(value: str) -> str:
+    """A trailer value with its ``started_at`` attribute left out."""
+    parts = value.split(";")
+    return ";".join(p for p in parts if not p.startswith("started_at="))
 
 
 def trailer_start(value: str) -> str:
@@ -2005,20 +2004,22 @@ def trailer_start(value: str) -> str:
 
 
 def earliest_starts(found: list[Trailer]) -> list[Trailer]:
-    """Each trailer replaced by its identity's value with the earliest start.
+    """Each trailer replaced by its twin with the earliest start.
 
-    Values with the same key, harness, model, session, and subagent are one
-    agent's. The one with the earliest ``started_at`` replaces the rest, so a
-    value with the field beats one without it. Identities with no
-    ``started_at`` at all stay as they are.
+    Twins have the same key and the same value apart from ``started_at``, so
+    the hook's re-stamp of an amended commit collapses onto the original line.
+    A line that differs in any other attribute stays apart, which means a
+    hand-written early time cannot replace the hook's line and drop its
+    ``launch``. The twin with the earliest ``started_at`` replaces the rest, so
+    a value with the field beats one without it.
     """
-    best: dict[tuple[str | None, ...], str] = {}
+    best: dict[tuple[str, str], str] = {}
     for key, value in found:
-        who = (key, *trailer_identity(value))
+        twin = (key, without_start(value))
         start = trailer_start(value)
-        if start and (who not in best or start < trailer_start(best[who])):
-            best[who] = value
-    return [(k, best.get((k, *trailer_identity(v)), v)) for k, v in found]
+        if start and (twin not in best or start < trailer_start(best[twin])):
+            best[twin] = value
+    return [(k, best.get((k, without_start(v)), v)) for k, v in found]
 
 
 def merge_trailers(found: list[Trailer]) -> list[Trailer]:
@@ -2223,9 +2224,13 @@ def write_claim(repo: Repo, root: str, receipts: list[Path]) -> None:
 
 
 def amend_only(path: Path, text: str, kept: list[Trailer]) -> None:
-    """Rewrite the trailers of a message with no committer: keep, then merge."""
+    """Rewrite the trailers of a message with no committer: keep, then merge.
+
+    A message whose lines differ in no start time stays as written, so a human
+    commit is never reordered.
+    """
     found = llm_trailers(text)
-    if kept or merge_trailers(found) != found:
+    if kept or earliest_starts(found) != found:
         add_trailers(path, [], [], kept)
 
 
