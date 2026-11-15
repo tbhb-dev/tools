@@ -1357,16 +1357,16 @@ def chain_prek(prek: list[str], top: Path, hook: Path, *, keep: bool) -> None:
     name = hook.name
     legacy = hook.with_name(f"{name}.legacy")
     aside = hook.with_name(f"{name}{ASIDE}")
-    if keep:
-        legacy.rename(aside)
-    elif legacy.is_file():
-        back_up_legacy(legacy)
     # prek writes into a scratch git dir, so the shim at HOOK stays in place and
     # a commit from another worktree never meets prek's bare hook, which has no
     # scan. The scratch dir is beside HOOK, so the rename is atomic.
     scratch = Path(tempfile.mkdtemp(prefix=".tbhb-prek.", dir=hook.parent))
     try:
         try:
+            if keep:
+                legacy.rename(aside)
+            elif legacy.is_file():
+                back_up_legacy(legacy)
             prek_install(
                 prek, top, "-f", "--git-dir", str(scratch), "--hook-type", name
             )

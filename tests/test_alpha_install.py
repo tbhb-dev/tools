@@ -3845,6 +3845,41 @@ def test_an_oserror_while_chaining_still_writes_the_shim(
 
 
 @pytest.mark.parametrize("name", install.SCAN_HOOKS)
+def test_a_failed_scratch_allocation_keeps_the_foreign_hook_and_fails_closed(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+) -> None:
+    world.stages(name)
+    world.hooks.mkdir(exist_ok=True)
+    hook = world.hooks / name
+    foreign = "#!/bin/sh\necho mine\nexit 5\n"
+    hook.write_text(foreign)
+    hook.chmod(0o755)
+
+    def fail(**_kwargs: object) -> str:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(install.tempfile, "mkdtemp", fail)
+    assert install.install_git_hooks(world.repo, {}, dry_run=False) == 1
+    assert "error: [Errno 28] No space left on device" in capsys.readouterr().err
+    assert SCANS in hook.read_text()
+    legacy = world.hooks / f"{name}.legacy"
+    assert legacy.read_text() == foreign
+    assert stat.S_IMODE(legacy.stat().st_mode) == 0o755
+    assert hook_names(world, name) == [name, f"{name}.legacy"]
+    done = run_shim(world, name, "0")
+    assert (done.returncode, done.stdout) == (5, "mine\n")
+    legacy.write_text("#!/bin/sh\necho mine\n")
+    done = run_shim(world, name, "7")
+    assert (done.returncode, done.stdout) == (
+        7,
+        "mine\ntbhbdev alpha pre-commit-scan\n",
+    )
+
+
+@pytest.mark.parametrize("name", install.SCAN_HOOKS)
 def test_the_hook_is_never_prek_bare_hook_while_prek_installs(
     world: World, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
