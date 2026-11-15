@@ -35,6 +35,8 @@ from tbhbdev.alpha.agent.model import Invalid, RunKind
 if TYPE_CHECKING:
     from pathlib import Path
 
+pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
+
 CONFIG = settings(reference=f"{MARKER}/{MARKER}/{MARKER}")
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 

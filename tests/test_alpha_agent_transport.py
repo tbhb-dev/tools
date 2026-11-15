@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable
     from pathlib import Path
 
+pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
+
 
 @pytest.fixture(autouse=True)
 def fixed_tools(monkeypatch: pytest.MonkeyPatch) -> None:
