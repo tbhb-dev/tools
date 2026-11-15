@@ -468,6 +468,11 @@ def _host(table: _Table) -> Host:
     )
 
 
+def is_unsandboxed(host: Host) -> bool:
+    """Whether HOST runs without the sandbox: the one place that decides."""
+    return host.unsandboxed
+
+
 def _check_host_accounts(settings: Settings) -> None:
     known = {c.account: c for c in settings.credentials}
     for host in settings.hosts:
@@ -478,7 +483,7 @@ def _check_host_accounts(settings: Settings) -> None:
                     f"which has no [agent.credentials.{account}]"
                 )
                 raise Invalid(message)
-            if host.unsandboxed and known[account].reviews_app_id is not None:
+            if is_unsandboxed(host) and known[account].reviews_app_id is not None:
                 message = (
                     f"[[agent.host]] unsandboxed host {host.name} "
                     f"has a reviews App key for {account}"

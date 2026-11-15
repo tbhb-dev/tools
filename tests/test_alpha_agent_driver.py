@@ -369,6 +369,10 @@ def test_review_sends_the_minted_token_only_in_the_private_stream(
     for tool in ("ssh", "tmux", "git"):
         for record in remote.records(tool):
             assert "example-minted" not in json.dumps(record["args"])
+    # No key reference reaches the run host: not the request, not any call.
+    assert MARKER not in (remote.state / "sample.request.json").read_text()
+    for tool in ("ssh", "tmux", "git"):
+        assert MARKER not in json.dumps(remote.records(tool))
 
 
 def test_review_without_a_driver_key_sends_no_token(
