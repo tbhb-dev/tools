@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess
 from pathlib import Path
@@ -181,31 +182,73 @@ def test_seeded_review_without_an_origin_head_has_no_base_branch(
     )
 
 
+@pytest.mark.parametrize("step", ["for-each-ref", "check-ref-format", "fetch"])
 @pytest.mark.parametrize(
     "failure", [subprocess.CalledProcessError(128, "git"), OSError("unreadable")]
 )
 def test_unreadable_clone_base_is_skipped_not_fatal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, failure: Exception
 ) -> None:
     def run(_path: Path, *args: str) -> str:
-        if args[:2] == ("for-each-ref", "--format=%(symref)"):
+        if args[0] == step:
             raise failure
-        return "a" * 40
+        return "refs/remotes/origin/main"
 
     monkeypatch.setattr(worktree, "git", run)
-    assert worktree.clone_base(tmp_path, tmp_path / "seeded") == []
+    worktree.fetch_clone_base(tmp_path, tmp_path / "seeded")
 
 
-def test_invalid_clone_base_name_is_skipped(
+def test_clone_base_that_names_no_branch_is_not_fetched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    calls: list[str] = []
+
     def run(_path: Path, *args: str) -> str:
-        if args[0] == "check-ref-format":
-            raise subprocess.CalledProcessError(1, "git")
-        return "refs/remotes/origin/bad..name"
+        calls.append(args[0])
+        return ""
 
     monkeypatch.setattr(worktree, "git", run)
-    assert worktree.clone_base(tmp_path, tmp_path / "seeded") == []
+    worktree.fetch_clone_base(tmp_path, tmp_path / "seeded")
+    assert calls == ["for-each-ref"]
+
+
+def test_stale_clone_base_never_rewinds_the_mirror_branch(tmp_path: Path) -> None:
+    seed, clone = repository(tmp_path)
+    old = git(clone, "rev-parse", "origin/main")
+    newer = commit(seed, "newer main")
+    git(seed, "push", "origin", "main")
+    mirror = worktree.mirror_path(tmp_path, run_request().repo)
+    worktree.create(
+        clone,
+        "first",
+        run_request(profile="review", commit=old),
+        ("example-org/example-repo",),
+    )
+    git(mirror, "fetch", str(seed), "+refs/heads/main:refs/heads/main")
+    assert git(mirror, "rev-parse", "refs/heads/main") == newer
+    worktree.create(
+        clone,
+        "second",
+        run_request(profile="review", commit=old),
+        ("example-org/example-repo",),
+    )
+    assert git(mirror, "rev-parse", "refs/heads/main") == newer
+
+
+def test_direct_build_request_with_a_commit_never_uses_the_seeded_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeded = tmp_path / "seeded"
+    calls: list[Path] = []
+
+    def run(path: Path, *args: str) -> str:
+        calls.append(path)
+        return "ref: refs/heads/main\tHEAD" if args[0] == "ls-remote" else "a" * 40
+
+    monkeypatch.setattr(worktree, "git", run)
+    request = dataclasses.replace(run_request(profile="build"), commit="a" * 40)
+    assert worktree.fetch_commit(tmp_path, request, seeded) == "a" * 40
+    assert seeded not in calls
 
 
 def test_unpushed_clone_commit_is_refused_and_stays_out_of_the_mirror(
@@ -607,20 +650,12 @@ def test_fetch_resolves_only_a_full_commit(
             "refs/remotes/origin/",
         ),
         (
-            "True",
-            "for-each-ref",
-            "--format=%(symref)",
-            "refs/remotes/origin/HEAD",
-        ),
-        ("False", "check-ref-format", "--branch", "main"),
-        (
             "False",
             "fetch",
             *worktree.FETCH_OPTIONS,
             "--no-prune",
             "--end-of-options",
             str(tmp_path / "seeded"),
-            "+refs/remotes/origin/main:refs/heads/main",
             f"+{'0' * 40}:refs/heads/tbhbdev-review",
         ),
         ("False", "ls-remote", "--symref", "--end-of-options", "origin", "HEAD"),
@@ -937,8 +972,18 @@ def test_prelaunch_git_protocol(
             "--no-prune",
             "--end-of-options",
             str(clone),
-            "+refs/remotes/origin/main:refs/heads/main",
             f"+{full_sha}:refs/heads/tbhbdev-review",
+        ),
+    )
+    base_fetch = (
+        mirror,
+        (
+            "fetch",
+            *worktree.FETCH_OPTIONS,
+            "--no-prune",
+            "--end-of-options",
+            str(clone),
+            "refs/remotes/origin/main:refs/heads/main",
         ),
     )
     published = (
@@ -954,7 +999,13 @@ def test_prelaunch_git_protocol(
     common = [
         (mirror, ("init", "--bare", "--template=")),
         *(
-            [published, base, (mirror, ("check-ref-format", "--branch", "main")), local]
+            [
+                published,
+                local,
+                base,
+                (mirror, ("check-ref-format", "--branch", "main")),
+                base_fetch,
+            ]
             if profile == "review"
             else []
         ),

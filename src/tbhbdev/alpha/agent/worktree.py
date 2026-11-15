@@ -179,23 +179,37 @@ def published(clone: Path, commit: str) -> bool:
     return listing != ""
 
 
-def clone_base(mirror: Path, clone: Path) -> list[str]:
-    """Fetch spec for the default branch the clone took from origin, if it names one."""
+def fetch_clone_base(mirror: Path, clone: Path) -> None:
+    """Best effort: take the default branch the clone took from origin.
+
+    The fetch has no force, so a clone behind the mirror never rewinds the branch.
+    """
     try:
         target = git(
             clone, "for-each-ref", "--format=%(symref)", "refs/remotes/origin/HEAD"
         )
         match = re.fullmatch(r"refs/remotes/origin/([^\s]+)", target)
-        if match is None:
-            return []
-        git(mirror, "check-ref-format", "--branch", match[1])
+        if match is not None:
+            git(mirror, "check-ref-format", "--branch", match[1])
+            git(
+                mirror,
+                "fetch",
+                *FETCH_OPTIONS,
+                "--no-prune",
+                "--end-of-options",
+                str(clone),
+                f"refs/remotes/origin/{match[1]}:refs/heads/{match[1]}",
+            )
     except OSError, subprocess.SubprocessError:
-        return []
-    return [f"+refs/remotes/origin/{match[1]}:refs/heads/{match[1]}"]
+        pass
 
 
 def fetch_commit(mirror: Path, request: RunRequest, seeded: Path) -> str:
-    if request.commit is not None and published(seeded, request.commit):
+    if (
+        request.commit is not None
+        and request.profile is not Profile.BUILD
+        and published(seeded, request.commit)
+    ):
         # A seeded clone may already hold the commit; try it before the network.
         try:
             git(
@@ -205,12 +219,12 @@ def fetch_commit(mirror: Path, request: RunRequest, seeded: Path) -> str:
                 "--no-prune",
                 "--end-of-options",
                 str(seeded),
-                *clone_base(mirror, seeded),
                 f"+{request.commit}:refs/heads/tbhbdev-review",
             )
         except OSError, subprocess.SubprocessError:
             pass
         else:
+            fetch_clone_base(mirror, seeded)
             return resolve_commit(mirror, request.commit)
     branch = default_branch(mirror)
     references = [f"+{branch}:{branch}"]
