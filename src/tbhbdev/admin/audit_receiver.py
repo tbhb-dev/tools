@@ -3,8 +3,10 @@
 Run it as an ssh forced command: ``python -I audit_receiver.py DIR SEGMENT QUOTA``,
 where DIR holds the receiver's files, SEGMENT is the segment size in bytes and
 QUOTA the total size of all segments. The module imports only the standard
-library, so the receiver host needs nothing else. It reads one request from
-``SSH_ORIGINAL_COMMAND``, either ``head`` or ``append K``, and prints
+library, so the receiver host needs nothing else but Python 3.14 or newer (it
+uses unparenthesized ``except A, B:``). Pair the forced command with ``restrict``
+in ``authorized_keys`` so the key gets no terminal and no forwarding. It reads
+one request from ``SSH_ORIGINAL_COMMAND``, either ``head`` or ``append K``, and prints
 ``ack 1 <n> <digest>`` once the line it names is durable. The digest names
 line n, the newest line, whatever K was. A replay of the newest line (K equal to
 n) succeeds only when the line hashes to that digest. A replay of an older line
@@ -41,7 +43,7 @@ PRIVATE = 0o600
 SEGMENT = re.compile(r"segment-([1-9][0-9]*)\.jsonl")
 NUMBER = r"(?:0|[1-9][0-9]*)"
 HEAD = re.compile(rf"([1-9][0-9]*) ({NUMBER}) ([0-9a-f]{{64}}) ({NUMBER})\n")
-APPEND = re.compile(r"append ([1-9][0-9]*)")
+APPEND = re.compile(r"append ([1-9][0-9]{0,17})")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -97,6 +99,13 @@ def read_head(directory: str) -> tuple[int, int, str, int]:
         message = "malformed head file"
         raise RejectedError(message)
     segment, count, last, length = match.groups()
+    if int(count) == 0:
+        consistent = segment == "1" and last == GENESIS and int(length) == 0
+    else:
+        consistent = int(length) > 0
+    if not consistent:
+        message = "head fields contradict each other"
+        raise RejectedError(message)
     return int(segment), int(count), last, int(length)
 
 
@@ -145,7 +154,11 @@ def recover(directory: str, head: tuple[int, int, str, int]) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-    for number, other in segments(directory).items():
+    found = segments(directory)
+    if not set(range(1, current + 1)) <= found.keys():
+        message = "an earlier segment is missing"
+        raise RejectedError(message)
+    for number, other in found.items():
         if number > current:
             Path(other).unlink()
     leftover = str(Path(directory) / "head.tmp")
@@ -256,7 +269,7 @@ def handle(
     if command != "head" and not request:
         message = "not head or append K"
         raise RejectedError(message)
-    data = stdin.read(MAX_LINE + 1)
+    data = stdin.read(1 if request is None else MAX_LINE + 1)
     lock = open_regular(str(Path(directory) / "lock"), os.O_RDWR | os.O_CREAT)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -294,10 +307,10 @@ def serve(  # noqa: PLR0913, PLR0917 - one request, all of its inputs
     """Answer one request; the exit status is 0 only with an acknowledgment."""
     try:
         reply = handle(directory, size, quota, command, stdin)
+        stdout.write(reply)
+        stdout.flush()
     except RejectedError, OSError:
         return 1
-    stdout.write(reply)
-    stdout.flush()
     return 0
 
 

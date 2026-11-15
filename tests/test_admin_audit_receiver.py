@@ -3,6 +3,7 @@
 import hashlib
 import io
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -542,3 +543,125 @@ def test_a_file_that_cannot_be_made_private_is_refused(
 
     monkeypatch.setattr(os, "fchmod", denied)
     assert run(directory, "head") == (1, b"")
+
+
+def test_a_count_of_thousands_of_digits_is_refused_without_a_traceback(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    assert run(directory, "append 1" + "0" * 5000, record(GENESIS)) == (1, b"")
+    assert run(directory, "append " + "9" * 19, record(GENESIS)) == (1, b"")
+    assert head_of(directory)[1] == "0"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"1 5 {'a' * 64} 0\n",
+        f"2 0 {GENESIS} 0\n",
+        f"1 0 {'a' * 64} 0\n",
+        f"1 0 {GENESIS} 9\n",
+    ],
+)
+def test_a_head_whose_fields_contradict_each_other_is_refused(
+    tmp_path: Path, text: str
+) -> None:
+    directory = fresh(tmp_path)
+    (directory / "head").write_text(text)
+    assert run(directory, "head") == (1, b"")
+
+
+def test_a_missing_earlier_segment_is_refused(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    (directory / "segment-1.jsonl").unlink()
+    (directory / "segment-2.jsonl").write_bytes(b"x")
+    (directory / "head").write_text(f"2 1 {'a' * 64} 1\n")
+    assert run(directory, "head") == (1, b"")
+
+
+def test_head_reads_at_most_one_byte_of_input(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    sizes: list[int] = []
+
+    class Spy(io.BytesIO):
+        def read(self, size: int | None = -1) -> bytes:
+            sizes.append(-1 if size is None else size)
+            return super().read(size)
+
+    code = receiver.serve(
+        str(directory), SEGMENT, QUOTA, "head", Spy(b"x" * 100), io.BytesIO()
+    )
+    assert code == 1
+    assert sizes == [1]
+
+
+def test_a_broken_output_pipe_exits_nonzero_without_a_traceback(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+
+    class Broken(io.BytesIO):
+        def write(self, _data: bytes | bytearray | memoryview, /) -> int:
+            raise BrokenPipeError
+
+    code = receiver.serve(
+        str(directory), SEGMENT, QUOTA, "head", io.BytesIO(), Broken()
+    )
+    assert code == 1
+
+
+def test_a_deeply_nested_line_within_the_size_limit_is_refused(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    line = b"[" * 30000 + b"]" * 30000 + b"\n"
+    assert len(line) <= receiver.MAX_LINE
+    assert run(directory, "append 1", line) == (1, b"")
+
+
+def sync_kinds(directory: Path, command: str, data: bytes = b"") -> list[str]:
+    """Each fsync of a request, as ``file`` or ``dir``, in order."""
+    kinds: list[str] = []
+    real = os.fsync
+
+    def spy(descriptor: int) -> None:
+        mode = os.fstat(descriptor).st_mode
+        kinds.append("dir" if stat.S_ISDIR(mode) else "file")
+        real(descriptor)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "fsync", spy)
+        assert run(directory, command, data)[0] == 0
+    return kinds
+
+
+def test_every_step_of_a_head_request_is_synced(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    assert sync_kinds(directory, "head") == ["file", "dir", "file", "dir"]
+
+
+def test_every_step_of_an_append_is_synced(tmp_path: Path) -> None:
+    directory = fresh(tmp_path)
+    kinds = sync_kinds(directory, "append 1", record(GENESIS))
+    # recovery file and dir, line, head file, rename dir, ack file and dir
+    assert kinds == ["file", "dir", "file", "file", "dir", "file", "dir"]
+
+
+def test_a_rotating_append_syncs_the_new_name_before_the_line(
+    tmp_path: Path,
+) -> None:
+    directory = fresh(tmp_path)
+    first = record(GENESIS, ', "pad": "' + "x" * 40 + '"')
+    run(directory, "append 1", first, segment=len(first))
+    kinds: list[str] = []
+    real = os.fsync
+
+    def spy(descriptor: int) -> None:
+        kinds.append("dir" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file")
+        real(descriptor)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "fsync", spy)
+        assert (
+            run(directory, "append 2", record(digest(first)), segment=len(first))[0]
+            == 0
+        )
+    assert kinds == ["file", "dir", "dir", "file", "file", "dir", "file", "dir"]
