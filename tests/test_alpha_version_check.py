@@ -43,6 +43,7 @@ def _here(monkeypatch: pytest.MonkeyPatch) -> None:
 def ssh(host: str) -> list[str]:
     return [
         "ssh",
+        "-n",
         "-o",
         "BatchMode=yes",
         "-o",
@@ -175,18 +176,35 @@ def test_the_version_line_may_follow_other_output(
 
 
 def test_the_local_host_runs_the_command_without_ssh(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    home = Path("/home/example")
-    monkeypatch.setattr(Path, "home", lambda: home)
-    path = str(home / ".local" / "bin" / "tbhbdev")
+    path = tmp_path / ".local" / "bin" / "tbhbdev"
+    path.parent.mkdir(parents=True)
+    path.touch()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     def runner(argv: list[str]) -> tuple[int, str]:
-        assert argv == [path, "--version"]
+        assert argv == [str(path), "--version"]
         return 0, line(A)
 
     status = version_check.main(["--host", "HERE"], PROG, runner)
     assert (status, capsys.readouterr().out) == (0, f"HERE {A} ok\n")
+
+
+def test_a_missing_local_binary_is_unknown_not_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    def runner(argv: list[str]) -> tuple[int, str]:
+        raise AssertionError(argv)
+
+    status = version_check.main(["--host", "here"], PROG, runner)
+    assert (status, capsys.readouterr().out) == (1, "here unknown unknown\n")
 
 
 def test_json_lists_host_version_and_state(

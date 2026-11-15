@@ -5,10 +5,10 @@ build is named by PEP 610's `direct_url.json` in the installed dist-info: the
 commit for an install from a git URL, or the directory for an editable or
 local install. Reading it takes no subprocess and no network.
 
-A release build names itself first: the release workflow writes
-`tbhbdev/_build.py` with `COMMIT`, the 40-character merge sha, into the wheel.
-That file is never committed, and it outranks `direct_url.json` because a wheel
-install has no `vcs_info`.
+A build can also carry a stamp: `tbhbdev/_build.py` with `COMMIT`, the
+40-character sha. Nothing writes it yet, and it is never committed. It names
+the build only when `direct_url.json` doesn't (a wheel install has no
+`vcs_info`), so a stray copy in a checkout can't mask what an install records.
 """
 
 from __future__ import annotations
@@ -45,9 +45,9 @@ def stamped(build: ModuleType | None) -> str | None:
 
 
 def identity(text: str | None, build: ModuleType | None = None) -> str:
-    """Name the build: BUILD's stamp, else what `direct_url.json` TEXT records."""
-    commit = stamped(build)
-    return direct_url_identity(text) if commit is None else commit
+    """Name the build: what `direct_url.json` TEXT records, else BUILD's stamp."""
+    recorded = direct_url_identity(text)
+    return recorded if recorded != UNKNOWN else stamped(build) or UNKNOWN
 
 
 def direct_url_identity(text: str | None) -> str:

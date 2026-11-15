@@ -210,11 +210,19 @@ def test_stamped(build: ModuleType | None, expected: str | None) -> None:
     assert version.stamped(build) == expected
 
 
-def test_a_stamp_outranks_direct_url() -> None:
+def test_a_recorded_install_outranks_a_stamp() -> None:
+    """A leftover stamp in a checkout must not mask what pip recorded."""
     other = "a" * 40
-    text = json.dumps({"vcs_info": {"commit_id": other}})
-    assert version.identity(text, stamp_module(COMMIT)) == COMMIT
+    vcs = json.dumps({"vcs_info": {"commit_id": other}})
+    editable = json.dumps({"url": "file:///src/x", "dir_info": {"editable": True}})
+    assert version.identity(vcs, stamp_module(COMMIT)) == other
+    assert version.identity(editable, stamp_module(COMMIT)) == "editable /src/x"
+
+
+def test_a_stamp_names_an_install_with_no_vcs_or_directory() -> None:
+    archive = json.dumps({"url": "https://x/y.whl", "archive_info": {}})
     assert version.identity(None, stamp_module(COMMIT)) == COMMIT
+    assert version.identity(archive, stamp_module(COMMIT)) == COMMIT
 
 
 def test_a_missing_or_bad_stamp_falls_back_to_direct_url() -> None:
@@ -237,7 +245,7 @@ def test_build_module_is_none_without_the_stamp(
     assert version.build_module() is None
 
 
-def test_line_reports_the_stamp_over_direct_url(
+def test_line_reports_direct_url_over_a_stamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     other = "c" * 40
@@ -248,4 +256,4 @@ def test_line_reports_the_stamp_over_direct_url(
 
     monkeypatch.setattr(metadata, "distribution", distribution)
     monkeypatch.setattr(version, "build_module", lambda: stamp_module(COMMIT))
-    assert version.line() == f"tbhbdev 0 ({COMMIT})"
+    assert version.line() == f"tbhbdev 0 ({other})"

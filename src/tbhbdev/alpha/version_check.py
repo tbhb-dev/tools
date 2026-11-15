@@ -26,7 +26,8 @@ from tbhbdev import userconfig, version
 from tbhbdev.alpha import session_context
 
 REPO_URL = "https://github.com/tbhb-dev/tools"
-SSH = ("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5")
+# -n keeps ssh off this process's stdin, which a pipeline may feed.
+SSH = ("ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5")
 # Plain ssh has no ~/.local/bin on PATH, and the remote shell expands $HOME.
 REMOTE_COMMAND = "$HOME/.local/bin/tbhbdev --version"
 SSH_FAILED = 255
@@ -72,7 +73,10 @@ def parse_stamp(output: str) -> str | None:
 def probe(host: str, runner: Runner, here: str) -> tuple[str | None, bool]:
     """HOST's build stamp (or None) and whether HOST could be reached."""
     if host.lower() == here:
-        argv = [str(Path.home() / ".local" / "bin" / "tbhbdev"), "--version"]
+        binary = Path.home() / ".local" / "bin" / "tbhbdev"
+        if not binary.is_file():
+            return None, True
+        argv = [str(binary), "--version"]
     else:
         argv = [*SSH, host, REMOTE_COMMAND]
     status, output = runner(argv)
