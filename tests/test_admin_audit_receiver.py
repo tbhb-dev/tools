@@ -5,6 +5,8 @@ import io
 import os
 import stat
 from pathlib import Path
+from typing import override
+lazy from collections.abc import Buffer
 
 import pytest
 
@@ -584,6 +586,7 @@ def test_head_reads_at_most_one_byte_of_input(tmp_path: Path) -> None:
     sizes: list[int] = []
 
     class Spy(io.BytesIO):
+        @override
         def read(self, size: int | None = -1) -> bytes:
             sizes.append(-1 if size is None else size)
             return super().read(size)
@@ -601,7 +604,8 @@ def test_a_broken_output_pipe_exits_nonzero_without_a_traceback(
     directory = fresh(tmp_path)
 
     class Broken(io.BytesIO):
-        def write(self, _data: bytes | bytearray | memoryview, /) -> int:
+        @override
+        def write(self, buffer: Buffer, /) -> int:
             raise BrokenPipeError
 
     code = receiver.serve(
