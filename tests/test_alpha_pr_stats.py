@@ -1,8 +1,8 @@
 import json
-from typing import cast
 
 import pytest
 
+from tbhbdev import alpha
 from tbhbdev.alpha import pr_stats
 from tbhbdev.alpha import pull_request as pr
 
@@ -146,5 +146,18 @@ def test_main_prints_a_row_per_pull_request(
             pr_stats.FIELDS,
         ]
     ]
-    assert cast("int", pr_stats.main(["o/r"], "prog")) == 0
+    assert pr_stats.main(["o/r"], "prog") == 0
     assert seen[1][7] == "200"
+
+
+def test_the_command_runs_the_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[list[str], str]] = []
+
+    def fake(argv: list[str], prog: str) -> int:
+        calls.append((argv, prog))
+        return 7
+
+    monkeypatch.setattr(pr_stats, "main", fake)
+    assert alpha.COMMANDS["pr-stats"] is alpha.pr_stats_command
+    assert alpha.pr_stats_command(["o/r"], "prog") == 7
+    assert calls == [(["o/r"], "prog")]
