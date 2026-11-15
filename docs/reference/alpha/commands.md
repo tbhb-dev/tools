@@ -8,6 +8,13 @@ generated:
   session: sha-256-64:78f9bc32cc3691e0
   surface: exec
   at: '2026-11-15T14:20:53Z'
+- role: generated
+  effort: high
+  harness: codex:0.164.0
+  model: openai:gpt-6.1-sol
+  session: sha-256-64:ec3c1d143950d992
+  surface: exec
+  at: '2026-11-15T15:52:34Z'
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -80,6 +87,8 @@ private_repos = ["example-lab", "example-notes"]   # optional
 ```
 
 The check flags a whole repository-name token in the title and body that equals a listed name, and any token ending in `-private`, such as `example-private`. The suffix rule works without config. Matching ignores case and a trailing `.git`. A clone URL matches. It ignores substrings of longer names. A token that starts with a hyphen, such as `--private`, passes, but the check flags a word such as `non-private`. It skips a working repository whose own name ends in `-private` or appears in the list. If `origin` is unreadable, the check runs. It covers the title and body only, not commit messages.
+
+The public rule IDs `mailgun-private-api-token`, `shopify-private-app-access-token`, and `tbhb-private-canary` pass unless listed as private names. This exemption ignores case and requires the whole token to match exactly.
 
 The commit check runs without config. The command guard checks arguments for trailers and sign-off flags. Message bodies in here documents or `-F` files pass this guard. The commit-msg identity check catches trailers in those bodies.
 
