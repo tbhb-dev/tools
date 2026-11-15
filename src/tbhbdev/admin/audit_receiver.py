@@ -40,6 +40,8 @@ FIRST_BYTE = 32
 LAST_BYTE = 126
 PROTOCOL = 1
 PRIVATE = 0o600
+HEAD_LIMIT = 512
+ASCII = "ascii"
 SEGMENT = re.compile(r"segment-([1-9][0-9]*)\.jsonl")
 NUMBER = r"(?:0|[1-9][0-9]*)"
 HEAD = re.compile(rf"([1-9][0-9]*) ({NUMBER}) ([0-9a-f]{{64}}) ({NUMBER})\n")
@@ -88,7 +90,7 @@ def read_head(directory: str) -> tuple[int, int, str, int]:
     try:
         descriptor = open_regular(str(Path(directory) / "head"), os.O_RDONLY)
         try:
-            text = os.read(descriptor, 512).decode("ascii")
+            text = os.read(descriptor, HEAD_LIMIT).decode(ASCII)
         finally:
             os.close(descriptor)
     except OSError, UnicodeDecodeError:
@@ -114,7 +116,7 @@ def commit_head(directory: str, head: tuple[int, int, str, int]) -> None:
     temporary = str(Path(directory) / "head.tmp")
     descriptor = open_regular(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
     try:
-        data = "{} {} {} {}\n".format(*head).encode("ascii")
+        data = "{} {} {} {}\n".format(*head).encode(ASCII)
         if os.write(descriptor, data) != len(data):
             message = "short write"
             raise RejectedError(message)
@@ -149,8 +151,7 @@ def recover(directory: str, head: tuple[int, int, str, int]) -> None:
         if size < length:
             message = "the current segment is shorter than its head"
             raise RejectedError(message)
-        if size > length:
-            os.ftruncate(descriptor, length)
+        os.ftruncate(descriptor, length)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
@@ -196,7 +197,7 @@ def validate(line: bytes, last: str) -> None:
     body = structural(line)
     try:
         value = json.loads(
-            body.decode("ascii"),
+            body.decode(ASCII),
             object_pairs_hook=no_duplicates,
             parse_constant=refuse_constant,
         )
@@ -254,7 +255,7 @@ def acknowledge(directory: str, head: tuple[int, int, str, int]) -> bytes:
     finally:
         os.close(descriptor)
     sync_directory(directory)
-    return f"ack {PROTOCOL} {head[1]} {head[2]}\n".encode("ascii")
+    return f"ack {PROTOCOL} {head[1]} {head[2]}\n".encode(ASCII)
 
 
 def handle(
