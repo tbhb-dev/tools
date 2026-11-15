@@ -147,6 +147,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_fake(bin_dir / "prek", FAKE_PREK)
+    write_fake(bin_dir / "tbhbdev", "#!/bin/sh\n")
     link_git(tmp_path / "git_dir")
     # Besides git and dirname, a shim without tbhbdev matches origin with these.
     (tmp_path / "shim_bin").mkdir()
@@ -577,6 +578,12 @@ def test_merged_config_per_harness() -> None:
     assert install.merged_config("codex", {}) == {"hooks": install.codex_hooks()}
 
 
+@pytest.fixture(autouse=True)
+def no_running_dirs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the test interpreter's own directory out of the PATH lookups."""
+    monkeypatch.setattr(install, "running_dirs", list)
+
+
 def tool_dir(tmp_path: Path, name: str, tools: tuple[str, ...]) -> str:
     folder = tmp_path / name
     folder.mkdir()
@@ -648,10 +655,75 @@ def test_settings_path_drops_relative_entries(
     assert install.settings_path(None, f"rel{sep}/a{sep}.{sep}bin") == (
         f"{shim}{sep}/a{sep}{full}"
     )
-    # A tool found through a relative PATH entry is stored with its absolute dir.
+    # A tool found only through a relative PATH entry doesn't count.
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PATH", "full")
-    assert install.settings_path(None, "/a") == f"{shim}{sep}/a{sep}{full}"
+    with pytest.raises(install.InstallError, match="tbhbdev is not on PATH"):
+        install.settings_path(None, "/a")
+
+
+def test_settings_path_refuses_when_tbhbdev_cannot_be_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    git_only = tool_dir(tmp_path, "git-only", ("git",))
+    monkeypatch.setenv("PATH", git_only)
+    with pytest.raises(install.InstallError, match="tbhbdev is not on PATH"):
+        install.settings_path(None, "/usr/bin")
+
+
+def test_settings_path_adds_the_running_executables_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    running = tool_dir(tmp_path, "running", ("tbhbdev", "git"))
+    monkeypatch.setattr(install, "running_dirs", lambda: [running])
+    monkeypatch.setenv("PATH", "/usr/bin")
+    shim = str(gh_shim.bin_dir())
+    sep = os.pathsep
+    assert install.settings_path(None, "/usr/bin") == (
+        f"{shim}{sep}/usr/bin{sep}{running}"
+    )
+
+
+def test_running_dirs_names_the_entry_point_and_the_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.undo()
+    entry = tmp_path / "bin" / "tbhbdev"
+    entry.parent.mkdir()
+    entry.write_text("")
+    link = tmp_path / "link"
+    link.symlink_to(entry)
+    monkeypatch.setattr(sys, "argv", [str(link)])
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "py" / "python"))
+    assert install.running_dirs() == [
+        str(entry.parent.resolve()),
+        str(tmp_path / "py"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "unsafe"),
+    [
+        ("relative-data/tbhbdev/agent-bin:.:/usr/bin", True),
+        ("/a:/b", False),
+        ("", True),
+        (7, False),
+    ],
+)
+def test_unsafe_path(value: object, *, unsafe: bool) -> None:
+    assert install.unsafe_path(value) is unsafe
+
+
+def test_a_saved_path_with_a_relative_entry_is_removed_when_none_is_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", "relative-data")
+    unsafe = "relative-data/tbhbdev/agent-bin:.:/usr/bin"
+    merged = install.merged_config("claude", {"env": {"PATH": unsafe, "X": "1"}})
+    assert cast("dict[str, str]", merged["env"]).get("PATH") is None
+    assert cast("dict[str, str]", merged["env"])["X"] == "1"
+    safe = install.merged_config("claude", {"env": {"PATH": "/usr/bin"}})
+    assert cast("dict[str, str]", safe["env"])["PATH"] == "/usr/bin"
 
 
 def test_merged_config_writes_the_shim_path_for_claude_only(
@@ -2791,7 +2863,7 @@ def test_install_gh_shim_writes_then_is_up_to_date(
 
 
 def test_install_gh_shim_needs_no_tbhbdev_on_path(world: World) -> None:
-    del world
+    (world.bin / "tbhbdev").unlink()
     assert shutil.which("tbhbdev") is None
     assert install.install_gh_shim(dry_run=False) == 0
     assert shlex.quote(sys.executable) in shim_path().read_text()

@@ -457,32 +457,60 @@ def merge_groups(config: Json, desired: Json) -> Json:
 REQUIRED_TOOLS = ("tbhbdev", "git")
 
 
+def absolute_entries(path: str) -> list[str]:
+    """The absolute entries of a PATH string."""
+    return [e for e in path.split(os.pathsep) if Path(e).is_absolute()]
+
+
+def unsafe_path(path: object) -> bool:
+    """True for a saved PATH string with a relative or ``.`` entry."""
+    return isinstance(path, str) and any(
+        not Path(e).is_absolute() for e in path.split(os.pathsep)
+    )
+
+
+def running_dirs() -> list[str]:
+    """The directories of the running ``tbhbdev`` entry point and interpreter."""
+    return [
+        str(Path(sys.argv[0]).resolve().parent),
+        str(Path(sys.executable).parent),
+    ]
+
+
 def settings_path(current: object, base: str | None) -> str | None:
     """Claude's settings ``env.PATH`` with the gh shim's directory first.
 
     The entries come from BASE (the PATH of the install run), so a rerun
-    refreshes them, else from the PATH already in settings when it is a
-    string. A hook process gets no ``$CLAUDE_ENV_FILE``, so this is the only
-    way the shim reaches it. Hooks run ``tbhbdev`` and ``git``, so a directory
-    that holds either is added from the installing process's PATH when the
-    entries lack it. Relative entries are dropped, because a hook resolves
-    them in whatever clone it runs in. There is no PATH to write without
-    entries, or when the shim directory is relative (a relative
-    XDG_DATA_HOME).
+    with a different PATH rewrites them, else from the PATH already in
+    settings when it is a string. A hook process gets no ``$CLAUDE_ENV_FILE``,
+    so this is the only way the shim reaches it. Hooks run ``tbhbdev`` and
+    ``git``, so a directory that holds either is added when the entries lack
+    it, taken from the running executable's directory and the installing
+    process's absolute PATH entries. Relative entries are dropped, because a
+    hook resolves them in whatever clone it runs in. There is no PATH to
+    write without entries, or when the shim directory is relative (a relative
+    XDG_DATA_HOME). When entries remain but ``tbhbdev`` can't be found,
+    writing the PATH would break every hook, so the install refuses.
     """
     source = base if base is not None else current if isinstance(current, str) else None
     shim = bin_dir()
     if source is None or not shim.is_absolute():
         return None
-    entries = [
-        e for e in source.split(os.pathsep) if Path(e).is_absolute() and e != str(shim)
-    ]
+    entries = [e for e in absolute_entries(source) if e != str(shim)]
+    if not entries:
+        return None
+    process = os.pathsep.join(
+        [*running_dirs(), *absolute_entries(os.environ.get("PATH", ""))]
+    )
     for tool in REQUIRED_TOOLS:
         if shutil.which(tool, path=os.pathsep.join(entries)) is None:
-            found = shutil.which(tool)
+            found = shutil.which(tool, path=process)
             if found:
-                entries.append(str(Path(found).absolute().parent))
-    return os.pathsep.join([str(shim), *entries]) if entries else None
+                entries.append(str(Path(found).parent))
+    if shutil.which("tbhbdev", path=os.pathsep.join(entries)) is None:
+        message = "tbhbdev is not on PATH, so the hooks could not run it"
+        raise InstallError(message)
+    return os.pathsep.join([str(shim), *entries])
 
 
 def merged_config(harness: str, config: Json, base_path: str | None = None) -> Json:
@@ -500,7 +528,12 @@ def merged_config(harness: str, config: Json, base_path: str | None = None) -> J
         merged = merge_events(config, claude_hooks())
         path = settings_path(fields.get("PATH"), base_path)
         shimmed = {} if path is None else {"PATH": path}
-        return {**merged, "env": {**fields, **shimmed, **AGENT_ENVIRONMENT}}
+        kept = {
+            k: v
+            for k, v in fields.items()
+            if path is not None or k != "PATH" or not unsafe_path(v)
+        }
+        return {**merged, "env": {**kept, **shimmed, **AGENT_ENVIRONMENT}}
     if harness == CODEX:
         return merge_events(config, codex_hooks())
     return merge_groups(config, agy_hooks())
