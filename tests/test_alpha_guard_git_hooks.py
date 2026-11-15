@@ -34,6 +34,9 @@ DENIED = [
     "git config core.hooksPath list",
     "git -C repo commit --no-verify -m x",
     "git --config-env=core.hooksPath=VAR push",
+    'git -c "core.hooksPath = /tmp/h" push',
+    "bash -c 'GIT_CONFIG_PARAMETERS=\"core.hooksPath=/x\" git push'",
+    "git commit -S --no-verify -m x",
 ]
 ALLOWED = [
     "git push origin new-branch",
@@ -64,6 +67,10 @@ ALLOWED = [
     "git -c 'alias.hookspath=config --get core.hooksPath' log",
     "git -C repo log --version",
     "git --no-pager log",
+    "git log --grep '-c\x63ore.hooksPath=/dev/null'",
+    "git commit -m 'docs: GIT_CONFIG_PARAMETERS= overrides core.hooksPath'",
+    "git config -t path core.hooksPath",
+    "git config unset core.hooksPath",
     "git -c\x75ser.name=x log",
 ]
 

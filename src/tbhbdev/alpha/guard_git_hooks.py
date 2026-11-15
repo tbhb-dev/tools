@@ -39,11 +39,14 @@ SHORT_N = re.compile(
     "-[" + "".join(FLAG_LETTERS) + "]*n[" + "".join(FLAG_LETTERS) + "]*"
 )
 # Options whose next word is a value, never a flag.
-VALUE_OPTIONS = {"-m", "--message", "--author", "--date", "-F", "-C", "-t", "-S"}
-FILE_OPTIONS = {"-f", "--file", "--blob", "--default", "--type"}
-READ_WORDS = {"get", "list"}
+VALUE_OPTIONS = {"-m", "--message", "--author", "--date", "-F", "-C", "-t"}
+FILE_OPTIONS = {"-f", "--file", "--blob", "--default", "--type", "-t"}
+READ_WORDS = {"get", "list", "unset"}
 # A word that assigns a GIT_CONFIG_* variable, anywhere in the command text.
+ENV_PREFIX = "git_config_"
 ENV_ASSIGN = re.compile(r"(?:^|[\s;&|(])git_config_\w*=")
+# A quoted span, blanked before ENV_ASSIGN looks: prose in a commit message isn't one.
+QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
 # Git options whose next word is a value, so it is not the subcommand.
 GLOBAL_VALUE_OPTIONS = {
     "-c",
@@ -78,7 +81,13 @@ def names_key(words: Iterable[str]) -> bool:
 
 def names_key_setting(value: str) -> bool:
     """Whether ``KEY`` or ``KEY=VALUE`` names the hooks path key itself."""
-    return value.lower().partition("=")[0] == KEY
+    return value.lower().partition("=")[0].strip() == KEY
+
+
+def assigns_env(prefix: list[str]) -> bool:
+    """Whether a command's prefix assigns ``GIT_CONFIG_*`` and names the key."""
+    assigned = any(w.lower().startswith(ENV_PREFIX) and "=" in w for w in prefix)
+    return assigned and names_key(prefix)
 
 
 def subcommand(words: list[str]) -> tuple[int, str]:
@@ -142,9 +151,9 @@ def bypasses(words: list[str]) -> bool:
         return True
     if program_of(words) != "git":
         return False
-    if sets_key_inline(words):
-        return True
     at, name = subcommand(words)
+    if sets_key_inline(words[:at]):
+        return True
     rest = words[at + 1 :]
     if skips_verification(name, rest):
         return True
@@ -154,9 +163,9 @@ def bypasses(words: list[str]) -> bool:
 def verdict(text: str) -> str | None:
     """The deny reason for a command, or None to allow it."""
     lower = text.lower()
-    if ENV_ASSIGN.search(lower) and KEY in lower:
+    if ENV_ASSIGN.search(QUOTED.sub(" ", lower)) and KEY in lower:
         return REASON
-    for _prefix, words in simple_commands(text):
-        if bypasses(words):
+    for prefix, words in simple_commands(text):
+        if assigns_env(prefix) or bypasses(words):
             return REASON
     return None
