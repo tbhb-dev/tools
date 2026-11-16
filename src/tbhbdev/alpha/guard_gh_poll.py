@@ -17,7 +17,8 @@ These rules apply in every repository, and deny:
                                                  actions/jobs, check-runs,
                                                  check-suites
     while|until|for loops whose condition or body runs gh, or runs both
-                                                 sleep and pgrep
+                                                 sleep and a self-matching
+                                                 pgrep -f
 
 The one exception is a granted allowance for a measurement pass: ``gh run list
 -R OWNER/REPO --limit 100 --json FIELDS``, in exactly that order, for each
@@ -121,6 +122,8 @@ from tbhbdev.alpha.repo import read_hook_stdin
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+# Stands for `pgrep -f` with a pattern that matches its own shell, in a loop's programs.
+SELF_MATCHING_PGREP = "pgrep -f"
 POLL_REASON = (
     "Don't poll GitHub. Subscribe to the awrel event instead, for example "
     "check_run conclusion events for the repository through awrel, and act when "
@@ -704,10 +707,26 @@ def denial(
     if program in REPEATERS:
         message, inner = repeated_scan(words[1:])
     elif script is None:
-        return None, {program}
+        return None, {SELF_MATCHING_PGREP if self_matching(program, words) else program}
     else:
         message, inner = inspect(script, repeated=repeated)
     return message, {program, *inner}
+
+
+def self_matching(program: str, words: list[str]) -> bool:
+    """Whether a command is ``pgrep -f`` with a pattern that matches its own shell.
+
+    A bracket in the pattern, as in ``pgrep -f '[f]etch.py'``, keeps the pattern
+    from matching its own command line, so that form is not self-matching.
+    """
+    if program != "pgrep":
+        return False
+    args = words[1:]
+    full = any(
+        word == "--full" or (word[:1] == "-" and word[1:2] != "-" and "f" in word)
+        for word in args
+    )
+    return full and not any("[" in word for word in args)
 
 
 def inspect(text: str, *, repeated: bool = False) -> tuple[str | None, set[str]]:
@@ -747,7 +766,7 @@ def scan_commands(text: str, *, repeated: bool = False) -> tuple[str | None, set
         programs |= seen
         for loop in loops:
             loop.update(seen)
-            if "gh" in loop or {"sleep", "pgrep"} <= loop:
+            if "gh" in loop or {"sleep", SELF_MATCHING_PGREP} <= loop:
                 return POLL_REASON, programs
         if seen == {"done"} and loops:
             loops.pop()
