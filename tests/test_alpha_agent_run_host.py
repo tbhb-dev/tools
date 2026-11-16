@@ -4883,9 +4883,7 @@ def test_full_access_finds_every_harness_in_the_run_accounts_directories(
         reason="test run",
         timeout=900,
     )
-    name = (
-        "agy-agent" if harness is Harness.AGY and profile == "build" else harness.value
-    )
+    name = harness.value
     binary = run.home / directory / name
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b"binary")
@@ -4942,7 +4940,7 @@ def test_full_access_keeps_the_mise_shim_refusal(
     )
     directory = run.home / ".local/share/mise/shims"
     directory.mkdir(parents=True)
-    name = "agy-agent" if harness is Harness.AGY else harness.value
+    name = harness.value
     binary = directory / name
     binary.write_bytes(b"binary")
     binary.chmod(0o755)

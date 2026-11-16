@@ -900,4 +900,5 @@ def test_unsandboxed_argv_skips_harness_sandbox(
     if harness is Harness.CLAUDE:
         assert command[command.index("--permission-mode") + 1] == "bypassPermissions"
     else:
+        assert command[0] == "agy"
         assert "--sandbox" not in command
