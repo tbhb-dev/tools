@@ -157,7 +157,7 @@ def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
         read(references.docker, label="docker") if references.docker else '{"auths":{}}'
     )
     runfiles.atomic(docker / "config.json", docker_text)
-    env: dict[str, str] = {}
+    env: dict[str, str] = {gh_app.RUN_ENV: "1"}
     profile_name = None
     if request.harness is Harness.CLAUDE:
         profile = config.find_profile(

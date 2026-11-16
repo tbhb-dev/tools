@@ -87,7 +87,7 @@ def test_each_credential_only_reaches_its_destination(
         VALUES["example/signing/key"] if profile is Profile.BUILD else None
     )
     assert result.claude_profile == ("primary" if harness is Harness.CLAUDE else None)
-    assert result.env == (
+    assert result.env == {"TBHBDEV_AGENT_RUN": "1"} | (
         {credentials.CLAUDE_TOKEN_ENV: VALUES["example/primary/token"]}
         if harness is Harness.CLAUDE
         else {}

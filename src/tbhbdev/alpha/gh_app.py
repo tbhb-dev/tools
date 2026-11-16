@@ -56,6 +56,7 @@ if TYPE_CHECKING:
 type Json = dict[str, object]
 
 EXIT_FAILURE = 1
+RUN_ENV = "TBHBDEV_AGENT_RUN"  # Set by exec in every run's environment.
 EXIT_USAGE = 2
 EXIT_COOLDOWN = 75
 APP_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*[a-z0-9]")
@@ -708,6 +709,11 @@ def main(argv: list[str], prog: str, *, env: Env | None = None) -> int:
     except UsageError as exc:
         sys.stderr.write(f"{prog}: {exc}\n{USAGE.format(prog=prog)}")
         return EXIT_USAGE
+    if os.environ.get(RUN_ENV):
+        sys.stderr.write(
+            f"{prog}: refused inside an agent run; a run never mints an App token\n"
+        )
+        return EXIT_FAILURE
     try:
         return dispatch(args, env or default_env())
     except GhAppError as exc:
