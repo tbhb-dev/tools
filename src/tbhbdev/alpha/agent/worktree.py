@@ -430,6 +430,15 @@ def preparation_step(step: str) -> Generator[None]:
         raise Invalid(message) from None
 
 
+def ensure_clone_directory(clone: Path) -> None:
+    if any(p.is_symlink() for p in (clone, *clone.parents[:3])):
+        message = "repo clone paths must not be symbolic links"
+        raise Invalid(message)
+    with preparation_step("repo clone directory"):
+        # The run's clone is standalone, so the account's own clone is only a parent.
+        clone.mkdir(parents=True, exist_ok=True)
+
+
 def create(
     clone: Path,
     name: str,
@@ -449,9 +458,7 @@ def create(
         message = "agent mirrors require a GitHub repository"
         raise Invalid(message)
     url = f"https://github.com/{owner}/{repository}.git"
-    if not clone.is_dir():
-        message = f"repo clone {clone} does not exist"
-        raise Invalid(message)
+    ensure_clone_directory(clone)
     worktree = clone / ".worktrees" / f"agent-{name}"
     if worktree.parent.is_symlink():
         message = "run clone parent must not be a symbolic link"

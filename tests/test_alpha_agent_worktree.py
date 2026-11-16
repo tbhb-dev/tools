@@ -130,12 +130,34 @@ def test_missing_commit_is_refused(tmp_path: Path) -> None:
     assert not (clone / ".worktrees" / "agent-missing").exists()
 
 
-def test_missing_clone_is_not_created(tmp_path: Path) -> None:
-    clone = tmp_path / "missing"
-    with pytest.raises(Invalid) as caught:
+def test_missing_clone_directory_is_created(tmp_path: Path) -> None:
+    repository(tmp_path)
+    clone = tmp_path / "missing" / "example-repo"
+    request = run_request()
+    workspace = worktree.create(
+        clone, "example", request, ("example-org/example-repo",)
+    )
+    assert workspace == clone / ".worktrees" / "agent-example"
+    assert (workspace / ".git").is_dir()
+
+
+def test_symbolic_link_clone_is_refused(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    clone = tmp_path / "link"
+    clone.symlink_to(real)
+    with pytest.raises(Invalid, match="repo clone paths must not be symbolic links"):
         worktree.create(clone, "example", run_request(), ("example-org/example-repo",))
-    assert str(caught.value) == f"repo clone {clone} does not exist"
-    assert not clone.exists()
+    assert not (real / ".worktrees").exists()
+
+
+def test_unwritable_clone_parent_is_refused(tmp_path: Path) -> None:
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    with pytest.raises(Invalid, match="run preparation failed at repo clone directory"):
+        worktree.create(
+            blocker / "repo", "example", run_request(), ("example-org/example-repo",)
+        )
 
 
 def test_git_suppresses_command_errors_and_returns_text(
