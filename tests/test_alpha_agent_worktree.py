@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import subprocess
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 from agent_host_example import (
     bounded_file_reads,
     commit,
+    constant,
     git,
     isolate_host_git,
     local_mirror_fetches,
@@ -1871,6 +1873,103 @@ def test_private_fetch_retries_over_ssh(
         "https://github.com/example-org/example-repo.git",
         "ssh://git@github.com/example-org/example-repo.git",
     ]
+
+
+def test_private_fetch_retries_over_https_with_the_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, clone = repository(tmp_path)
+    urls: list[str] = []
+    tokens: list[str | None] = []
+    original = worktree.configure_mirror
+
+    def configure(mirror: Path, url: str) -> None:
+        urls.append(url)
+        original(mirror, url)
+
+    def fetch(_mirror: Path, _request: object, token: str | None = None) -> str:
+        tokens.append(token)
+        if token is None:
+            raise subprocess.CalledProcessError(128, "git")
+        raise Stop
+
+    monkeypatch.setattr(worktree, "configure_mirror", configure)
+    monkeypatch.setattr(worktree, "fetch_commit", fetch)
+    with pytest.raises(Stop):
+        worktree.create(
+            clone,
+            "p3",
+            run_request(),
+            ("example-org/example-repo",),
+            lambda: "example-token",
+        )
+    assert urls == ["https://github.com/example-org/example-repo.git"]
+    assert tokens == [None, "example-token"]
+
+
+def test_private_fetch_without_a_token_falls_back_to_ssh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, clone = repository(tmp_path)
+    urls: list[str] = []
+    original = worktree.configure_mirror
+
+    def configure(mirror: Path, url: str) -> None:
+        urls.append(url)
+        original(mirror, url)
+
+    def fetch(_mirror: Path, _request: object, token: str | None = None) -> str:
+        assert token is None
+        if len(urls) == 1:
+            raise subprocess.CalledProcessError(128, "git")
+        raise Stop
+
+    monkeypatch.setattr(worktree, "configure_mirror", configure)
+    monkeypatch.setattr(worktree, "fetch_commit", fetch)
+    with pytest.raises(Stop):
+        worktree.create(
+            clone, "p4", run_request(), ("example-org/example-repo",), lambda: None
+        )
+    assert urls[-1] == "ssh://git@github.com/example-org/example-repo.git"
+
+
+def test_fetch_commit_passes_the_token_to_the_fetch_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, str | None]] = []
+
+    def git(_path: Path, *args: str, token: str | None = None) -> str:
+        calls.append((args[0], token))
+        return "a" * 40
+
+    monkeypatch.setattr(worktree, "git", git)
+    monkeypatch.setattr(worktree, "default_branch", constant("refs/heads/main"))
+    value = "example-credential"
+    worktree.fetch_commit(tmp_path, run_request(), value)
+    assert calls == [("fetch", value), ("rev-parse", None)]
+
+
+def test_git_sends_the_token_as_an_environment_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[object, dict[str, str]]] = []
+
+    def check_output(command: object, **kwargs: object) -> str:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        seen.append((command, env))
+        return ""
+
+    monkeypatch.setattr(subprocess, "check_output", check_output)
+    value = "example-credential"
+    worktree.git(tmp_path, "init", token=value)
+    command, env = seen[0]
+    basic = base64.b64encode(b"x-access-token:example-credential").decode()
+    assert env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+    assert env["GIT_CONFIG_VALUE_0"] == f"Authorization: Basic {basic}"
+    assert "example-credential" not in " ".join(map(str, command))  # type: ignore[call-overload]
+    worktree.git(tmp_path, "init")
+    assert "GIT_CONFIG_COUNT" not in seen[1][1]
 
 
 def test_failed_retry_over_ssh_is_refused(
