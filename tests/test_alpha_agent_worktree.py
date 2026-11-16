@@ -12,7 +12,6 @@ import pytest
 from agent_host_example import (
     bounded_file_reads,
     commit,
-    constant,
     git,
     isolate_host_git,
     local_mirror_fetches,
@@ -1940,13 +1939,19 @@ def test_fetch_commit_passes_the_token_to_the_fetch_only(
 
     def git(_path: Path, *args: str, token: str | None = None) -> str:
         calls.append((args[0], token))
+        if args[0] == "ls-remote":
+            return "ref: refs/heads/main\tHEAD"
         return "a" * 40
 
     monkeypatch.setattr(worktree, "git", git)
-    monkeypatch.setattr(worktree, "default_branch", constant("refs/heads/main"))
     value = "example-credential"
     worktree.fetch_commit(tmp_path, run_request(), value)
-    assert calls == [("fetch", value), ("rev-parse", None)]
+    assert calls == [
+        ("ls-remote", value),
+        ("check-ref-format", None),
+        ("fetch", value),
+        ("rev-parse", None),
+    ]
 
 
 def test_git_sends_the_token_as_an_environment_header(

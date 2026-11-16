@@ -151,8 +151,9 @@ def configure_mirror(mirror: Path, url: str) -> None:
     )
 
 
-def default_branch(mirror: Path) -> str:
-    listing = git(mirror, "ls-remote", "--symref", "--end-of-options", "origin", "HEAD")
+def default_branch(mirror: Path, token: str | None = None) -> str:
+    query = ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD")
+    listing = git(mirror, *query) if token is None else git(mirror, *query, token=token)
     for line in listing.splitlines():
         match = re.fullmatch(r"ref: (refs/heads/[^\s]+)\tHEAD", line)
         if match is not None:
@@ -175,7 +176,7 @@ def fetch_commit(mirror: Path, request: RunRequest, token: str | None = None) ->
         "--no-tags",
         "--upload-pack=git-upload-pack",
     )
-    branch = default_branch(mirror)
+    branch = default_branch(mirror, token)
     references = [f"+{branch}:{branch}"]
     if request.commit is not None:
         references.append(f"+{request.commit}:refs/heads/tbhbdev-review")
