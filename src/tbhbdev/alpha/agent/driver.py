@@ -372,14 +372,15 @@ def wait(settings: Settings, run: Run) -> int:
 
 
 def settle(settings: Settings, run: Run, result: int) -> None:
-    if result == 0:
+    if result == 0 and not run.request.unsandboxed:
         try:
-            if clean(settings, run, force=False) == 0:
-                return
+            clean(settings, run, force=False)
         except Invalid as error:
             print(error, file=sys.stderr)
         except Exception as error:  # noqa: BLE001 -- the result is final; a failed clean must not replace it
             print(f"cleanup state unknown: {error}", file=sys.stderr)
+        else:
+            return
     tree = repo.clone_path(PurePosixPath("."), run.request.repo)
     print(
         f"{run.name}: worktree kept at "
@@ -447,16 +448,13 @@ def archive_metadata(name: str, stamp: str) -> None:
 
 
 def clean(settings: Settings, run: Run, *, force: bool) -> int:
-    if run.request.unsandboxed and not force:
-        print("unsandboxed run: pass --force to move it to trash", file=sys.stderr)
-        return 65
     reading = transport.read(
         settings,
         run.host,
         (run.name, run.owner),
     )
     rules.clean(reading.rc, session=reading.session, force=force or run.cleaning)
-    if not force:
+    if not force and not run.request.unsandboxed:
         branch = transport.shell(
             settings,
             run.host,

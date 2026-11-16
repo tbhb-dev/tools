@@ -252,12 +252,9 @@ def unsandboxed_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         paths=paths,
     )
     search_path = ":".join((os.environ.get("PATH", os.defpath), value.tool_path))
-    name = (
-        "agy-agent"
-        if run.request.harness is Harness.AGY and run.request.profile is Profile.BUILD
-        else run.request.harness.value
+    executable = host_tools.resolve(
+        run.request.harness.value, search_path, follow_symlinks=False
     )
-    executable = host_tools.resolve(name, search_path, follow_symlinks=False)
     value = dataclasses.replace(value, env=value.env | {"PATH": search_path})
     return value, executable
 

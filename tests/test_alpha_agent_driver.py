@@ -103,18 +103,14 @@ def command(verb: str, *options: str) -> int:
     return agent.main([verb, "sample", *options], "example agent")
 
 
-def test_unsandboxed_clean_refuses_before_ssh(
+def test_unsandboxed_clean_refuses_a_run_without_a_result(
     remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
-    before = {tool: remote.records(tool) for tool in ("ssh", "git", "tmux")}
     capsys.readouterr()
-    assert command("clean") == 65
-    assert capsys.readouterr() == (
-        "",
-        "unsandboxed run: pass --force to move it to trash\n",
-    )
-    assert {tool: remote.records(tool) for tool in before} == before
+    assert command("clean") == 1
+    assert "clean refused" in capsys.readouterr().err
+    assert driver.metadata_path("sample").exists()
 
 
 @pytest.mark.parametrize("verb", ["log", "diff"])
@@ -128,14 +124,15 @@ def test_unsandboxed_inspection_reads_the_host_output(
     assert "verdict text" in capsys.readouterr().out
 
 
-def test_unsandboxed_force_clean_only_moves_to_trash(
+def test_unsandboxed_clean_of_an_ended_run_only_moves_to_trash(
     remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
     remote.configure(session=False)
+    remote.file(".rc", "0")
     before = {tool: remote.records(tool) for tool in ("ssh", "git", "tmux")}
     capsys.readouterr()
-    assert command("clean", "--force") == 0
+    assert command("clean") == 0
     assert capsys.readouterr() == ("", "")
     assert remote.records("git") == before["git"]
     assert len(remote.records("tmux")) == len(before["tmux"]) + 2

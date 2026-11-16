@@ -258,7 +258,11 @@ def _agy(  # noqa: PLR0913, PLR0917 -- one value per fact agy's argv depends on
         message = "argv agy run requires agy_project"
         raise Invalid(message)
     review = policy.profile is Profile.REVIEW
-    argv = ["agy" if review else "agy-agent", "--project", project]
+    argv = [
+        "agy" if review or request.unsandboxed else "agy-agent",
+        "--project",
+        project,
+    ]
     argv += ["--model", request.model]
     if review:
         argv += ["--mode", "plan"]
