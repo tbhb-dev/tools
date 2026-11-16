@@ -901,4 +901,5 @@ def test_unsandboxed_argv_skips_harness_sandbox(
         assert command[command.index("--permission-mode") + 1] == "bypassPermissions"
     else:
         assert command[0] == "agy"
+        assert "--dangerously-skip-permissions" in command
         assert "--sandbox" not in command

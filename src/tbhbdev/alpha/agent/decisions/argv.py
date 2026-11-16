@@ -264,6 +264,9 @@ def _agy(  # noqa: PLR0913, PLR0917 -- one value per fact agy's argv depends on
         project,
     ]
     argv += ["--model", request.model]
+    if request.unsandboxed:
+        # Headless agy auto-denies any tool that needs a permission prompt.
+        argv.append("--dangerously-skip-permissions")
     if review:
         argv += ["--mode", "plan"]
         if not request.unsandboxed:
