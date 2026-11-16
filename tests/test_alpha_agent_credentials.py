@@ -23,7 +23,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from tbhbdev import secrets
 from tbhbdev.alpha import gh_app
 from tbhbdev.alpha.agent import credentials, process_group, runfiles
-from tbhbdev.alpha.agent.model import Harness, Invalid, Profile
+from tbhbdev.alpha.agent.model import Credentials, Harness, Invalid, Profile
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -1207,6 +1207,46 @@ def test_pull_requests_token_refuses_a_host_other_than_github(
     assert str(caught.value) == "pull-requests app supports github.com repositories"
 
 
-def test_fetch_token_reads_the_account_credentials() -> None:
+def test_build_fetch_uses_the_read_only_reviews_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def installation(references: Credentials, repository: str) -> str:
+        seen.append((str(references.reviews_app_client_id), repository))
+        return "example-reviews-token"
+
+    monkeypatch.setattr(credentials, "installation_token", installation)
     value = run_request()
-    assert credentials.fetch_token(value, host_settings()) == VALUES["example/gh/value"]
+    assert credentials.fetch_token(value, host_settings()) == "example-reviews-token"
+    assert seen == [("example/app/client", value.repo)]
+
+
+def test_build_fetch_refuses_when_the_reviews_token_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_: object) -> str:
+        message = "unprinted-app-material"
+        raise OSError(message)
+
+    monkeypatch.setattr(credentials, "installation_token", fail)
+    with pytest.raises(Invalid) as caught:
+        credentials.fetch_token(run_request(), host_settings())
+    assert str(caught.value) == "reviews App token unavailable; build fetch refused"
+
+
+def test_fetch_token_without_reviews_refs_reads_the_account_credentials() -> None:
+    original = host_settings()
+    settings = dataclasses.replace(
+        original,
+        credentials=(
+            dataclasses.replace(
+                original.credentials[0],
+                reviews_app_client_id=None,
+                reviews_app_pem=None,
+            ),
+        ),
+    )
+    assert (
+        credentials.fetch_token(run_request(), settings) == VALUES["example/gh/value"]
+    )

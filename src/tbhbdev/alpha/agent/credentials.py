@@ -145,6 +145,18 @@ def github_token(request: RunRequest, references: Credentials) -> str | None:
 def fetch_token(request: RunRequest, settings: Settings) -> str | None:
     """The token for the mirror's https fetch of a private repository."""
     references = next(c for c in settings.credentials if c.account == request.account)
+    if (
+        request.profile is Profile.BUILD
+        and references.reviews_app_client_id is not None
+        and references.reviews_app_pem is not None
+    ):
+        # A build fetches with the read-only reviews token, so its account needs
+        # no pull-requests App key. Pushes use the account's own ssh key.
+        try:
+            return installation_token(references, request.repo)
+        except TOKEN_ERRORS:
+            message = "reviews App token unavailable; build fetch refused"
+            raise Invalid(message) from None
     return github_token(request, references)
 
 
