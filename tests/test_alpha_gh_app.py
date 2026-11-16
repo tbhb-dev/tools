@@ -83,6 +83,7 @@ def ec_key(tmp_path_factory: pytest.TempPathFactory) -> Key:
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail at once on any request that no MockTransport answers."""
+    monkeypatch.delenv(gh_app.RUN_ENV, raising=False)
 
     def refuse(*_args: object, **_kwargs: object) -> httpx.Response:
         message = "a test reached the real network"
