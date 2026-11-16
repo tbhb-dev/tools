@@ -309,11 +309,18 @@ def test_version_mismatch(remote: Remote, capsys: pytest.CaptureFixture[str]) ->
     assert len(remote.records("ssh")) == 2
 
 
-@pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT, "HEAD"])
+def test_review_without_ref_starts_nothing(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert launch(remote, "--profile", "review") == 1
+    assert "a review run needs --ref" in capsys.readouterr().err
+    assert remote.records("ssh") == []
+
+
+@pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT])
 def test_review_ref(remote: Remote, ref: str) -> None:
     remote.configure(refs=f"{COMMIT}\t{ref}\n")
-    options = ("--ref", ref) if ref != "HEAD" else ()
-    assert launch(remote, "--profile", "review", *options) == 0
+    assert launch(remote, "--profile", "review", "--ref", ref) == 0
     assert (
         json.loads((remote.state / "sample.request.json").read_text())["commit"]
         == COMMIT

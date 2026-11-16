@@ -103,7 +103,7 @@ def test_unknown_build_label_and_required_request(
 def test_clear_host_and_launch_review(remote: Remote) -> None:
     assert clear() == 0
     remote.configure(refs="a" * 40 + "\tHEAD\n")
-    assert launch(remote, "--profile", "review") == 0
+    assert launch(remote, "--profile", "review", "--ref", "HEAD") == 0
     assert taint_store.load("example-linux").status == "tainted"
     calls = remote.records("ssh")
     assert "--version" in str(calls[0])
