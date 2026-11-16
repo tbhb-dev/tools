@@ -503,11 +503,16 @@ def test_build_preparation_has_the_run_socket(
         _name: str,
         _value: run_host.RunRequest,
         public_repos: tuple[str, ...],
+        token_source: Callable[[], str | None],
     ) -> Path:
         assert public_repos == run.settings.public_repos
+        assert token_source() == "example-credential"
         return runfiles.private_dir(run.home / "worktree")
 
     monkeypatch.setattr(run_host.worktree, "create", create)
+    monkeypatch.setattr(
+        run_host.credentials, "fetch_token", constant("example-credential")
+    )
     result = run_host.prepare_workspace(run)
     assert result.paths.signing_socket == str(run.tmpdir / "ssh.sock")
     assert result.delivery.signing == "example-signing"

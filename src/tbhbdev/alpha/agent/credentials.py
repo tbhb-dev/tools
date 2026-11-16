@@ -142,6 +142,12 @@ def github_token(request: RunRequest, references: Credentials) -> str | None:
         raise Invalid(message) from None
 
 
+def fetch_token(request: RunRequest, settings: Settings) -> str | None:
+    """The token for the mirror's https fetch of a private repository."""
+    references = next(c for c in settings.credentials if c.account == request.account)
+    return github_token(request, references)
+
+
 def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
     references = next(c for c in settings.credentials if c.account == request.account)
     gh_token = github_token(request, references)

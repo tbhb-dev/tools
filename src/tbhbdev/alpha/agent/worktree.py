@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import errno
 import os
@@ -12,7 +13,7 @@ import subprocess  # nosec B404
 from contextlib import ExitStack, contextmanager
 from functools import partial
 from pathlib import Path
-lazy from collections.abc import Generator
+lazy from collections.abc import Callable, Generator
 
 from tbhbdev.alpha import install
 from tbhbdev.alpha.agent import host_tools, runfiles
@@ -56,7 +57,7 @@ CHECKOUT_SCAN_DEPTH = 3
 COMMON_DIRECTORY_LIMIT = 4096
 
 
-def git(clone: Path, *args: str) -> str:
+def git(clone: Path, *args: str, token: str | None = None) -> str:
     env = {key: os.environ[key] for key in ("HOME", "LANG") if key in os.environ}
     env.update(
         PATH=host_tools.search(),
@@ -70,6 +71,14 @@ def git(clone: Path, *args: str) -> str:
     )
     # ssh still reads the account's own ssh config, so its GitHub key applies.
     env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+    if token is not None:
+        # The header travels in the environment, so no argument list shows it.
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        env.update(
+            GIT_CONFIG_COUNT="1",
+            GIT_CONFIG_KEY_0="http.extraheader",
+            GIT_CONFIG_VALUE_0=f"Authorization: Basic {basic}",
+        )
     command = [host_tools.resolve("git")]
     command += [item for value in GIT_OVERRIDES for item in ("-c", value)]
     directory = clone / ".git"
@@ -159,7 +168,7 @@ def default_branch(mirror: Path) -> str:
     raise Invalid(message)
 
 
-def fetch_commit(mirror: Path, request: RunRequest) -> str:
+def fetch_commit(mirror: Path, request: RunRequest, token: str | None = None) -> str:
     options = (
         "--no-recurse-submodules",
         "--no-write-fetch-head",
@@ -170,7 +179,11 @@ def fetch_commit(mirror: Path, request: RunRequest) -> str:
     references = [f"+{branch}:{branch}"]
     if request.commit is not None:
         references.append(f"+{request.commit}:refs/heads/tbhbdev-review")
-    git(mirror, "fetch", *options, "--no-prune", "origin", *references)
+    fetch = ("fetch", *options, "--no-prune", "origin", *references)
+    if token is None:
+        git(mirror, *fetch)
+    else:
+        git(mirror, *fetch, token=token)
     reference = branch if request.profile is Profile.BUILD else request.commit
     commit = git(
         mirror, "rev-parse", "--verify", "--end-of-options", f"{reference}^{{commit}}"
@@ -417,7 +430,11 @@ def preparation_step(step: str) -> Generator[None]:
 
 
 def create(
-    clone: Path, name: str, request: RunRequest, public_repos: tuple[str, ...]
+    clone: Path,
+    name: str,
+    request: RunRequest,
+    public_repos: tuple[str, ...],
+    token_source: Callable[[], str | None] | None = None,
 ) -> Path:
     parts = repo.parts(request.repo)
     if parts not in tuple(repo.parts(value) for value in public_repos):
@@ -453,11 +470,16 @@ def create(
                 commit = fetch_commit(mirror, request)
             except subprocess.SubprocessError:
                 # A private repository refuses the anonymous fetch. Retry over
-                # ssh, which uses the account's own GitHub key from its ssh config.
-                configure_mirror(
-                    mirror, f"ssh://git@github.com/{owner}/{repository}.git"
-                )
-                commit = fetch_commit(mirror, request)
+                # https with the run's App token. An account with no token falls
+                # back to ssh, which uses its own GitHub key from its ssh config.
+                token = token_source() if token_source is not None else None
+                if token is None:
+                    configure_mirror(
+                        mirror, f"ssh://git@github.com/{owner}/{repository}.git"
+                    )
+                    commit = fetch_commit(mirror, request)
+                else:
+                    commit = fetch_commit(mirror, request, token)
         with preparation_step("clone"):
             worktree.parent.mkdir(exist_ok=True)
             clone_run(mirror, worktree, url)
