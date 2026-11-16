@@ -426,9 +426,11 @@ def test_minimal_values_are_valid() -> None:
     table["kill_grace_seconds"] = 1
     table["max_run_minutes"] = 1
     table["agy_timeout"] = 1
+    table["agy_build_timeout"] = 1
     parsed = config.parse(table)
     assert (parsed.launch_wait_seconds, parsed.kill_grace_seconds) == (1, 1)
     assert (parsed.max_run_minutes, parsed.agy_timeout_seconds) == (1, 1)
+    assert parsed.agy_build_timeout_seconds == 1
 
 
 @pytest.mark.parametrize(
@@ -533,6 +535,8 @@ def _root_errors() -> list[Case]:
             _add(cases, (key,), bad, POSITIVE, root)
     for bad in (0, "0", "0s", "abc", "", "5d", True, 1.5, [5], None, 604801, "169h"):
         _add(cases, ("agy_timeout",), bad, DURATION, root)
+    for bad in (0, "0s", "abc", True, 604801):
+        _add(cases, ("agy_build_timeout",), bad, DURATION, root)
     for key in ("launch_wait_seconds", "agy_timeout", "kill_grace_seconds"):
         _add(cases, (key,), MISSING, "is required", root)
     _add(cases, ("sockets_dir",), MISSING, "is required", root)

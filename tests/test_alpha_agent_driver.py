@@ -360,12 +360,27 @@ def test_claude_case(remote: Remote, profile: str | None) -> None:
     )
 
 
+def test_agy_review_uses_the_review_timeout(remote: Remote) -> None:
+    remote.configure(refs=f"{COMMIT}\ttopic\n")
+    options = ("--harness", "agy", "--model", "gemini-example")
+    assert launch(remote, *options, "--profile", "review", "--ref", "topic") == 0
+    record = json.loads((remote.state / "sample.request.json").read_text())
+    assert record["timeout"] == 900
+
+
 @pytest.mark.parametrize(
     ("options", "timeout"),
     [
         (("--ops", "--unsandboxed", "o/r#1"), None),
-        (("--harness", "agy", "--model", "gemini-example"), 900),
+        (("--harness", "agy", "--model", "gemini-example"), 3600),
         (("--harness", "agy", "--allow-non-gemini", "--timeout", "1h"), 3600),
+        (
+            (
+                *("--harness", "agy", "--model", "gemini-example"),
+                *("--profile", "build", "--timeout", "5m"),
+            ),
+            300,
+        ),
     ],
 )
 def test_request_options(

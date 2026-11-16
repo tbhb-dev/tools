@@ -497,6 +497,7 @@ def parse(agent: dict[str, object]) -> Settings:
     root.only(
         "launch_wait_seconds",
         "agy_timeout",
+        "agy_build_timeout",
         "kill_grace_seconds",
         "max_run_minutes",
         "sockets_dir",
@@ -526,6 +527,9 @@ def parse(agent: dict[str, object]) -> Settings:
         credentials=_credentials(root.table("credentials")),
         claude=_claude(root.table("claude")),
         hosts=_hosts(root),
+        agy_build_timeout_seconds=root.duration("agy_build_timeout")
+        if "agy_build_timeout" in agent
+        else 3600,
         ssh_connect_timeout=root.integer("ssh_connect_timeout")
         if "ssh_connect_timeout" in agent
         else 15,

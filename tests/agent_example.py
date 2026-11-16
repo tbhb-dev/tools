@@ -74,6 +74,7 @@ def settings(
     return model.Settings(
         launch_wait_seconds=120,
         agy_timeout_seconds=900,
+        agy_build_timeout_seconds=3600,
         kill_grace_seconds=10,
         max_run_minutes=None,
         sockets_dir="/tmp/example-sockets",

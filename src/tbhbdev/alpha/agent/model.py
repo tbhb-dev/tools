@@ -153,6 +153,7 @@ class Settings:
     credentials: tuple[Credentials, ...]
     claude: Claude
     hosts: tuple[Host, ...]
+    agy_build_timeout_seconds: int = 3600
     ssh_connect_timeout: int = 15
     ssh_keepalive_seconds: int = 30
     ssh_keepalive_count_max: int = 3
