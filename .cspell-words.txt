@@ -58,6 +58,7 @@ execdir
 execpath
 executescript
 execv
+extraheader
 execve
 fakehost
 fakeop

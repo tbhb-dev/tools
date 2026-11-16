@@ -1205,3 +1205,8 @@ def test_pull_requests_token_refuses_a_host_other_than_github(
     with pytest.raises(Invalid) as caught:
         credentials.pull_requests_token(references, "example.com/o/r")
     assert str(caught.value) == "pull-requests app supports github.com repositories"
+
+
+def test_fetch_token_reads_the_account_credentials() -> None:
+    value = run_request()
+    assert credentials.fetch_token(value, host_settings()) == VALUES["example/gh/value"]

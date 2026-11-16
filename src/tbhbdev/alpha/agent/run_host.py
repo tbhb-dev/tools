@@ -514,7 +514,11 @@ def prepare_workspace(run: Run) -> Prepared:
     paths = planned_paths(run)
     checked_policy(run, paths)
     workspace = worktree.create(
-        clone, run.files.name, run.request, run.settings.public_repos
+        clone,
+        run.files.name,
+        run.request,
+        run.settings.public_repos,
+        lambda: credentials.fetch_token(run.request, run.settings),
     )
     with worktree.preparation_step("credential delivery"):
         delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
