@@ -39,6 +39,7 @@ pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
 
 CONFIG = settings(reference=f"{MARKER}/{MARKER}/{MARKER}")
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
+PREPARE = driver.prepare
 
 
 @pytest.fixture
@@ -48,6 +49,21 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
         taint.Clearance("example-linux", "Test host rebuilt", "2026-11-10T00:00:00Z")
     )
     monkeypatch.setattr(agent.settings, "load", lambda: CONFIG)
+
+    # Keep coverage of management for recorded runs from before the new default.
+    def legacy_prepare(
+        config: model.Settings, args: agent.argparse.Namespace
+    ) -> driver.Run:
+        run = PREPARE(config, args)
+        run.request = dataclasses.replace(
+            run.request,
+            unsandboxed=args.unsandboxed is not None,
+            tainted_host=args.unsandboxed is not None
+            or taint.request_flag(taint_store.load(run.host.name)),
+        )
+        return run
+
+    monkeypatch.setattr(driver, "prepare", legacy_prepare)
 
     def no_sleep(_seconds: float) -> None:
         pass
@@ -87,21 +103,29 @@ def command(verb: str, *options: str) -> int:
     return agent.main([verb, "sample", *options], "example agent")
 
 
-@pytest.mark.parametrize("verb", ["log", "diff", "clean"])
-def test_unsandboxed_refuses_inspection_before_ssh(
-    remote: Remote, capsys: pytest.CaptureFixture[str], verb: str
+def test_unsandboxed_clean_refuses_before_ssh(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
     before = {tool: remote.records(tool) for tool in ("ssh", "git", "tmux")}
     capsys.readouterr()
-    assert command(verb) == 65
-    message = (
-        "unsandboxed run: pass --force to move it to trash"
-        if verb == "clean"
-        else "unsandboxed run: inspect agent/sample on GitHub"
+    assert command("clean") == 65
+    assert capsys.readouterr() == (
+        "",
+        "unsandboxed run: pass --force to move it to trash\n",
     )
-    assert capsys.readouterr() == ("", f"{message}\n")
     assert {tool: remote.records(tool) for tool in before} == before
+
+
+@pytest.mark.parametrize("verb", ["log", "diff"])
+def test_unsandboxed_inspection_reads_the_host_output(
+    remote: Remote, capsys: pytest.CaptureFixture[str], verb: str
+) -> None:
+    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
+    remote.file(".out.final", "verdict text\n")
+    capsys.readouterr()
+    assert command(verb) == 0
+    assert "verdict text" in capsys.readouterr().out
 
 
 def test_unsandboxed_force_clean_only_moves_to_trash(
@@ -243,10 +267,6 @@ def test_launch_stream_and_metadata(
         ),
         (("--harness", "claude"), "reason is required"),
         (("--unsandboxed", "bad"), "request authorized_by must be"),
-        (
-            ("--unsandboxed", "o/r#1", "--host", "example-macos"),
-            "isn't enabled on this host",
-        ),
         (("--harness", "agy"), "agy requires a gemini-*"),
         (("--model", "bad model"), "model must match"),
         (("--effort", "bad effort"), "effort must match"),
@@ -1629,23 +1649,19 @@ def test_unsandboxed_verbs_after_host_setting_disabled(
     if verb in {"kill", "clean"}:
         remote.configure(session=False)
         remote.file(".rc", "0")
-    before = remote.records("ssh")
-    assert command(verb, *(["--force"] if verb == "clean" else [])) == (
-        65 if verb in {"log", "diff"} else 0
-    )
+    if verb in {"log", "diff"}:
+        remote.file(".out.final", "verdict\n")
+    assert command(verb, *(["--force"] if verb == "clean" else [])) == 0
     output = capsys.readouterr()
     if verb == "status":
         assert "sandbox=none authorized_by=o/r#1" in output.out
-    if verb in {"log", "diff"}:
-        assert "unsandboxed run: inspect agent/sample on GitHub" in output.err
-        assert remote.records("ssh") == before
     if verb == "clean":
         assert not driver.metadata_path("sample").exists()
     if verb == "kill":
         assert any("kill-session" in str(call) for call in remote.records("tmux"))
 
 
-def test_unsandboxed_new_launch_after_host_setting_disabled(
+def test_unsandboxed_new_launch_ignores_host_setting(
     remote: Remote,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1657,9 +1673,9 @@ def test_unsandboxed_new_launch_after_host_setting_disabled(
         ),
     )
     monkeypatch.setattr(agent.settings, "load", lambda: disabled)
-    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 1
-    assert "isn't enabled on this host" in capsys.readouterr().err
-    assert remote.records("ssh") == []
+    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
+    assert capsys.readouterr().err == ""
+    assert remote.records("ssh")
 
 
 @pytest.mark.parametrize("failure", ["transfer", "deadline"])

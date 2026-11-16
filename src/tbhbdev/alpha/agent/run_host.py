@@ -251,22 +251,13 @@ def unsandboxed_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
         unsandboxed=True,
         paths=paths,
     )
-    search_path = ":".join(
-        (os.environ.get("PATH", os.defpath), value.env["PATH"], value.tool_path)
-    )
+    search_path = ":".join((os.environ.get("PATH", os.defpath), value.tool_path))
     name = (
         "agy-agent"
         if run.request.harness is Harness.AGY and run.request.profile is Profile.BUILD
         else run.request.harness.value
     )
-    executable = (
-        shutil.which(name, path=search_path)
-        if run.request.harness is Harness.CODEX
-        else host_tools.resolve(name, follow_symlinks=False)
-    )
-    if executable is None:
-        message = f"host executable {name} was not found"
-        raise Invalid(message)
+    executable = host_tools.resolve(name, search_path, follow_symlinks=False)
     value = dataclasses.replace(value, env=value.env | {"PATH": search_path})
     return value, executable
 
@@ -467,13 +458,6 @@ def announce_access(run: Run) -> None:
 def preflight(run: Run) -> None:
     announce_access(run)
     _value, executable = checked_policy(run, planned_paths(run))
-    if (
-        run.request.profile is Profile.REVIEW
-        and run.request.tainted_host
-        and not run.request.unsandboxed
-    ):
-        message = "review runs are refused on a tainted host"
-        raise Invalid(message)
     if run.request.profile is Profile.REVIEW:
         references = next(
             c for c in run.settings.credentials if c.account == run.request.account

@@ -63,14 +63,9 @@ def resolve(home: str, path: str) -> str:
     return str(PurePosixPath(home) / path)
 
 
-def _check(host: Host, *, account: str, full: bool) -> None:
+def _check(host: Host, *, account: str) -> None:
     if account not in host.accounts:
         message = f"policy account {account!r} isn't one of the accounts of {host.name}"
-        raise Invalid(message)
-    if not full:
-        return
-    if not host.unsandboxed:
-        message = f"policy unsandboxed isn't enabled on {host.name}"
         raise Invalid(message)
 
 
@@ -226,6 +221,8 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
     *,
     full: bool,
 ) -> ClaudePolicy:
+    if full:
+        return ClaudePolicy({"disableAllHooks": True, "sandbox": {"enabled": False}})
     writes, deny, protected = access
     review = profile is Profile.REVIEW
     # An absolute path in a Claude rule starts with a second slash.
@@ -287,7 +284,7 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
                     "WebSearch",
                 ],
             },
-            "sandbox": {"enabled": False} if full else sandbox,
+            "sandbox": sandbox,
         }
     )
 
@@ -411,11 +408,23 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
     writes the private TMPDIR and the audit directory.
 
     Raises:
-        Invalid: ACCOUNT isn't one of the host's accounts, UNSANDBOXED applies
-            on a host that does not allow it, or a
+        Invalid: ACCOUNT isn't one of the host's accounts, or a sandboxed
             write path, signing socket or an agy read grant reaches a denied path.
     """
-    _check(host, account=account, full=unsandboxed)
+    _check(host, account=account)
+    if unsandboxed:
+        env = environment(settings, host, harness, paths, account) | review_environment(
+            profile, paths
+        )
+        tools_path = ":".join(host_tools.account_path(paths.home))
+        env["PATH"] = tools_path
+        if harness is Harness.CODEX:
+            detail = _codex(settings, profile, (), (), full=True)
+        elif harness is Harness.CLAUDE:
+            detail = _claude(profile, paths, ((), (), ()), env, (), full=True)
+        else:
+            detail = AgyPolicy(())
+        return Policy(harness, profile, env, (), detail, tools_path)
     protect_host(settings, paths, protected)
     deny = (
         denied_paths(settings, host, paths.home, paths.uid)
@@ -437,8 +446,8 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
     _refuse_overlaps((*writes, *agy_writes), deny, "write path")
     detail: CodexPolicy | ClaudePolicy | AgyPolicy
     if harness is Harness.CODEX:
-        codex_detail = _codex(settings, profile, writes, deny, full=unsandboxed)
-        if profile is Profile.BUILD and not unsandboxed:
+        codex_detail = _codex(settings, profile, writes, deny, full=False)
+        if profile is Profile.BUILD:
             codex_detail = replace(
                 codex_detail,
                 read_roots=(
@@ -459,7 +468,7 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
             (writes, deny, protected),
             env | {"PATH": tools_path},
             settings.sandbox.network_domains,
-            full=unsandboxed,
+            full=False,
         )
     else:
         detail = _agy(settings, profile, paths, env, deny)

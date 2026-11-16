@@ -39,6 +39,22 @@ def search_path(settings: Settings, os: Os) -> tuple[str, ...]:
     return (*entries, *settings.sandbox.host_path)
 
 
+def account_path(home: str) -> tuple[str, ...]:
+    """Search the run account's tool directories without sandbox settings."""
+    return (
+        f"{home}/.local/bin",
+        f"{home}/.local/gh-bin",
+        f"{home}/.bun/bin",
+        f"{home}/.npm-global/bin",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    )
+
+
 def search() -> str:
     return _SEARCH.get()
 

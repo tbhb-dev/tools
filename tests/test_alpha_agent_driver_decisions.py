@@ -257,10 +257,10 @@ def test_model(harness: Harness, model: str, allow: bool, valid: bool) -> None:
         )
 
 
-def test_unsandboxed_host_permission_reaches_validation() -> None:
-    run = dataclasses.replace(RUN, unsandboxed=True, authorized_by="o/r#1")
+def test_unsandboxed_host_flag_does_not_gate_validation() -> None:
+    run = dataclasses.replace(RUN, unsandboxed=True, authorized_by=None)
     assert driver.check(run, CONFIG, LINUX, ref=None, exists=False) == run
-    with pytest.raises(Invalid, match="isn't enabled on this host"):
+    assert (
         driver.check(
             run,
             CONFIG,
@@ -268,6 +268,8 @@ def test_unsandboxed_host_permission_reaches_validation() -> None:
             ref=None,
             exists=False,
         )
+        == run
+    )
 
 
 def test_peeled_tag_does_not_hide_an_ambiguous_branch() -> None:

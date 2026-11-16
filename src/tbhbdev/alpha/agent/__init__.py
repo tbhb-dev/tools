@@ -41,7 +41,10 @@ def parser(prog: str) -> argparse.ArgumentParser:
     execute.add_argument("--profile", choices=("build", "review"), required=True)
     execute.add_argument("--reason")
     execute.add_argument("--claude-profile")
-    execute.add_argument("--unsandboxed")
+    execute.add_argument(
+        "--unsandboxed",
+        help="authorization: owner/repo#N or operator-chat-YYYY-MM-DD",
+    )
     execute.add_argument("--timeout", type=duration)
     execute.add_argument("--schema")
     execute.add_argument("--class", dest="class_")

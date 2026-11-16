@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 
 PREFIX = """PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
+PATH="$HOME/.local/bin:$PATH"
+export PATH
 LC_ALL=C
 LANG=C
 export LC_ALL LANG

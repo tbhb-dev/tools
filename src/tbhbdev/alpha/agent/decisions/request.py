@@ -3,8 +3,7 @@
 The request is a JSON object with the schema version `v` and every run field.
 `parse` reads one, as run-host does, and `validate` checks one the driver
 built. Both refuse an unknown version, a field of the wrong format, a Claude
-run without its reason or profile, and an `--unsandboxed` run that the rule
-doesn't allow.
+run without its reason or profile, and an invalid authorization reference.
 """
 
 from __future__ import annotations
@@ -78,16 +77,10 @@ def _authorization_ok(text: str) -> bool:
     return True
 
 
-def _check_unsandboxed(request: RunRequest, *, host_allows: bool) -> None:
-    if request.unsandboxed and request.authorized_by is None:
-        _fail("unsandboxed", "requires authorized_by")
-    if not request.unsandboxed:
-        if request.authorized_by is not None:
-            _fail("authorized_by", "requires unsandboxed")
-        return
-    if not host_allows:
-        _fail("unsandboxed", "isn't enabled on this host")
-    if not _authorization_ok(str(request.authorized_by)):
+def _check_unsandboxed(request: RunRequest) -> None:
+    if request.authorized_by is not None and not _authorization_ok(
+        request.authorized_by
+    ):
         _fail("authorized_by", "must be owner/repo#N or operator-chat-YYYY-MM-DD")
 
 
@@ -115,10 +108,14 @@ def _check_commit(request: RunRequest) -> None:
         _fail("commit", "applies only to a review run")
 
 
-def validate(request: RunRequest, *, host_allows_unsandboxed: bool) -> None:
+def validate(
+    request: RunRequest,
+    *,
+    host_allows_unsandboxed: bool,  # noqa: ARG001 -- accepted for older callers
+) -> None:
     """Refuse REQUEST unless every field and every rule holds.
 
-    HOST_ALLOWS_UNSANDBOXED is the `unsandboxed` key of the run's host in config.
+    HOST_ALLOWS_UNSANDBOXED remains accepted for older callers and has no effect.
 
     Raises:
         Invalid: The message names the field.
@@ -145,7 +142,7 @@ def validate(request: RunRequest, *, host_allows_unsandboxed: bool) -> None:
         _fail("startup_deadline_seconds", "must be a positive number of seconds")
     _check_commit(request)
     _check_harness(request)
-    _check_unsandboxed(request, host_allows=host_allows_unsandboxed)
+    _check_unsandboxed(request)
 
 
 def to_dict(request: RunRequest) -> dict[str, object]:

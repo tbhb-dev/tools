@@ -62,6 +62,8 @@ from tbhbdev.alpha.agent.model import (
     RunKind,
 )
 
+RESOLVE = host_tools.resolve
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
     from typing import TextIO
@@ -3340,7 +3342,7 @@ def test_checked_policy_codex_table_has_unique_keys(
 
 @pytest.mark.parametrize("profile", ["build", "review"])
 @pytest.mark.parametrize("tainted", [False, True])
-def test_preflight_refuses_review_on_tainted_host(
+def test_preflight_allows_review_on_tainted_host(
     tmp_path: Path, profile: str, tainted: bool
 ) -> None:
     run = make_run(
@@ -3349,12 +3351,7 @@ def test_preflight_refuses_review_on_tainted_host(
         commit="0" * 40 if profile == "review" else None,
         tainted_host=tainted,
     )
-    if profile == "review" and tainted:
-        with pytest.raises(Invalid) as caught:
-            run_host.preflight(run)
-        assert str(caught.value) == "review runs are refused on a tainted host"
-    else:
-        run_host.preflight(run)
+    run_host.preflight(run)
 
 
 @pytest.mark.parametrize(
@@ -4830,6 +4827,7 @@ def test_unsandboxed_preflight_launches_every_harness(
 def test_unsandboxed_codex_uses_account_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: bool, configured: bool
 ) -> None:
+    monkeypatch.setattr(host_tools, "resolve", RESOLVE)
     run = make_run(tmp_path, unsandboxed=True, authorized_by="operator-chat-2026-11-15")
     directory = run.home / ".local/bin"
     directory.mkdir(parents=True)
@@ -4859,3 +4857,95 @@ def test_unsandboxed_codex_uses_account_path(
         assert executable == str(binary)
         assert value.env["PATH"].split(":")[0] == inherited_path
         assert str(directory) in value.env["PATH"].split(":")
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", ["build", "review"])
+@pytest.mark.parametrize(
+    "directory", [".local/bin", ".local/gh-bin", ".bun/bin", ".npm-global/bin"]
+)
+def test_full_access_finds_every_harness_in_the_run_accounts_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    harness: Harness,
+    profile: str,
+    directory: str,
+) -> None:
+    monkeypatch.setattr(host_tools, "resolve", RESOLVE)
+    run = make_run(
+        tmp_path,
+        unsandboxed=True,
+        authorized_by=None,
+        harness=harness.value,
+        profile=profile,
+        commit="0" * 40 if profile == "review" else None,
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        reason="test run",
+        timeout=900,
+    )
+    name = (
+        "agy-agent" if harness is Harness.AGY and profile == "build" else harness.value
+    )
+    binary = run.home / directory / name
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"binary")
+    binary.chmod(0o755)
+    inherited = str(tmp_path / "empty")
+    monkeypatch.setenv("PATH", inherited)
+    sandbox = dataclasses.replace(
+        run.settings.sandbox,
+        write_roots=(str(run.home),),
+        denied_home_paths=(".config/gh",),
+        agy=dataclasses.replace(
+            run.settings.sandbox.agy,
+            build_read=(".config/gh",),
+            review_read=(".config/gh",),
+        ),
+        path=dataclasses.replace(
+            run.settings.sandbox.path, linux=("/missing",), macos=("/missing",)
+        ),
+    )
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(run.settings, sandbox=sandbox),
+        host=dataclasses.replace(run.host, unsandboxed=False),
+    )
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("full access must skip sandbox executable and write-root checks")
+
+    monkeypatch.setattr(run_host, "audit_writes", unexpected)
+    monkeypatch.setattr(run_host.policy, "tool_path", unexpected)
+    monkeypatch.setattr(host_tools, "executable_paths", unexpected)
+    monkeypatch.setattr(codex_install, "prepare", unexpected)
+    value, executable = run_host.checked_policy(run, run_host.planned_paths(run))
+    assert executable == str(binary)
+    assert value.env["PATH"] == ":".join(
+        (inherited, *host_tools.account_path(str(run.home)))
+    )
+    assert not run.files.path("would_refuse").exists()
+    assert not run.files.path("log").exists()
+
+
+@pytest.mark.parametrize("harness", Harness)
+def test_full_access_keeps_the_mise_shim_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
+) -> None:
+    monkeypatch.setattr(host_tools, "resolve", RESOLVE)
+    run = make_run(
+        tmp_path,
+        unsandboxed=True,
+        harness=harness.value,
+        timeout=900,
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        reason="test run",
+    )
+    directory = run.home / ".local/share/mise/shims"
+    directory.mkdir(parents=True)
+    name = "agy-agent" if harness is Harness.AGY else harness.value
+    binary = directory / name
+    binary.write_bytes(b"binary")
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", str(directory))
+    with pytest.raises(Invalid, match=f"host executable {name} is a mise shim"):
+        run_host.checked_policy(run, run_host.planned_paths(run))
