@@ -1323,7 +1323,10 @@ def install_pre_push_hook(hooks: Path) -> None:
         legacy.unlink()
     hook.write_text(
         PRE_PUSH_SHIM.format(
-            python=sys.executable,
+            # The hooks directory is shared by every worktree, so the shebang can't name
+            # a venv inside the worktree this install ran from; its base interpreter
+            # outlives that worktree.
+            python=Path(sys.base_prefix, "bin", "python3"),
             mark=SHIM_MARK,
             pattern=TBHB_DEV_ORIGIN.pattern,
         )

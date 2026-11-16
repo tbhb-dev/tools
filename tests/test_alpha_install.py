@@ -1931,6 +1931,16 @@ def test_install_git_hooks(world: World, capsys: pytest.CaptureFixture[str]) -> 
     assert stat.S_IMODE((world.hooks / "pre-push").stat().st_mode) == 0o755
 
 
+def test_pre_push_shebang_names_the_base_interpreter_not_the_venv(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "executable", "/work/tree/.venv/bin/python")
+    monkeypatch.setattr(sys, "base_prefix", "/base")
+    assert install.install_git_hooks(None, {}, dry_run=False) == 0
+    first = (world.hooks / "pre-push").read_text().splitlines()[0]
+    assert first == "#!/base/bin/python3"
+
+
 def test_install_git_hooks_from_a_worktree_uses_the_shared_hooks(
     world: World, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
