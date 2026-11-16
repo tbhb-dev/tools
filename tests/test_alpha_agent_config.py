@@ -654,7 +654,7 @@ def _claude_errors() -> list[Case]:
 def _host_errors() -> list[Case]:
     cases: list[Case] = []
     host = "[[agent.host]]"
-    for key in ("name", "os", "shell", "account", "unsandboxed", "accounts"):
+    for key in ("name", "os", "shell", "account", "accounts"):
         _add(cases, ("host", 0, key), MISSING, "is required", host)
     for bad in ("", " ", 5):
         _add(cases, ("host", 0, "name"), bad, NON_BLANK, host)
@@ -1172,3 +1172,8 @@ def test_gh_with_the_pull_requests_app_is_refused() -> None:
         "[agent.credentials.agent] gh must not be set with the pull_requests_app keys"
     )
     assert config.parse(gh_only()).credentials[0].pull_requests_app_pem is None
+
+
+def test_host_unsandboxed_key_is_optional() -> None:
+    parsed = config.parse(edited("host", 0, "unsandboxed", value=MISSING))
+    assert parsed.hosts[0].unsandboxed is True

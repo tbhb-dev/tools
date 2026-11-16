@@ -35,16 +35,57 @@ def clear(host: str = "example-linux", reason: str = "Host rebuilt") -> int:
     return agent.main(["clear-taint", host, "--reason", reason], "example agent")
 
 
-def test_unknown_review_refused_before_ssh(
-    remote: Remote, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("state", ["unknown", "tainted", "clean", "broken"])
+@pytest.mark.parametrize("profile", ["build", "review"])
+@pytest.mark.parametrize("harness", ["codex", "claude", "agy"])
+@pytest.mark.parametrize("authorization", [None, "o/r#1"])
+def test_default_launch_ignores_host_taint_and_records_full_access(  # noqa: PLR0913, PLR0917 -- launch matrix
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+    profile: str,
+    harness: str,
+    authorization: str | None,
 ) -> None:
-    assert launch(remote, "--profile", "review", "--ref", "a" * 40) == 65
-    assert remote.records("ssh") == []
-    output = capsys.readouterr()
-    assert output.out == ""
-    assert "example-linux" in output.err
-    assert "unknown" in output.err
-    assert "clear-taint example-linux --reason" in output.err
+    if state == "clean":
+        assert clear() == 0
+    elif state == "tainted":
+        taint_store.record_taint(
+            driver.taint.Taint(
+                "example-linux", "ops", "previous", "o/r#2", "2026-11-15T00:00:00Z"
+            )
+        )
+    elif state == "broken":
+        path = driver.directory() / "taint/example-linux.jsonl"
+        path.parent.mkdir(parents=True, mode=0o700)
+        path.parent.parent.chmod(0o700)
+        path.write_text("broken\n")
+        path.chmod(0o600)
+    options = ["--profile", profile, "--harness", harness]
+    if profile == "review":
+        options += ["--ref", "a" * 40]
+    if harness == "claude":
+        options += ["--reason", "test run"]
+    if harness == "agy":
+        options += ["--model", "gemini-test"]
+    if authorization is not None:
+        options += ["--unsandboxed", authorization]
+    capsys.readouterr()
+    assert launch(remote, *options) == 0
+    wire = json.loads((remote.state / "sample.request.json").read_text())
+    assert wire["unsandboxed"] is True
+    assert wire["tainted_host"] is True
+    assert wire["authorized_by"] == authorization
+    saved = taint_store.load("example-linux")
+    assert saved.status == "tainted"
+    recorded = json.loads(
+        (driver.directory() / "taint/example-linux.jsonl").read_text().splitlines()[-1]
+    )
+    assert recorded["authorized_by"] == (authorization or "agent-exec-default")
+    assert recorded["run"] == "sample"
+    assert recorded["account"] == "agent"
+    assert "untrusted-host" in capsys.readouterr().out
+    assert len(remote.records("ssh")) == 4
 
 
 def test_unknown_build_label_and_required_request(
@@ -56,19 +97,18 @@ def test_unknown_build_label_and_required_request(
     assert wire["v"] == 2
     assert wire["tainted_host"] is True
     assert agent.main(["status", "sample"], "example agent") == 0
-    assert "host=unknown" in capsys.readouterr().out
+    assert "host=tainted" in capsys.readouterr().out
 
 
 def test_clear_host_and_launch_review(remote: Remote) -> None:
     assert clear() == 0
     remote.configure(refs="a" * 40 + "\tHEAD\n")
     assert launch(remote, "--profile", "review") == 0
-    assert taint_store.load("example-linux").status == "clean"
+    assert taint_store.load("example-linux").status == "tainted"
     calls = remote.records("ssh")
-    assert "tbhbdev-agent-taint/agent.jsonl" in str(calls[0])
-    assert "--version" in str(calls[1])
+    assert "--version" in str(calls[0])
     wire = json.loads((remote.state / "sample.request.json").read_text())
-    assert wire["tainted_host"] is False
+    assert wire["tainted_host"] is True
     assert wire["v"] == 2
 
 
@@ -107,27 +147,6 @@ def test_unsandboxed_append_precedes_preparation(
     assert agent.main(["status", "sample"], "example agent") == 0
 
 
-def test_tainted_host_refuses_other_account_before_ssh(
-    remote: Remote, capsys: pytest.CaptureFixture[str]
-) -> None:
-    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
-    driver.metadata_path("sample").rename(driver.directory() / "saved.json")
-    before = remote.records("ssh")
-    assert (
-        launch(remote, "--account", "agent", "--profile", "review", "--ref", "a" * 40)
-        == 65
-    )
-    assert remote.records("ssh") == before
-    assert "example-linux host=tainted" in capsys.readouterr().err
-    assert (
-        agent.main(
-            ["clear-taint", "example-linux", "ops", "--reason", "Rebuilt"],
-            "example agent",
-        )
-        == 2
-    )
-
-
 def test_append_failure_refuses_launch(
     remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -142,93 +161,48 @@ def test_append_failure_refuses_launch(
     assert not driver.metadata_path("sample").exists()
 
 
-@pytest.mark.parametrize("marker", ["\n", '{"untrusted":"bytes"}\n', "x" * 70000])
+@pytest.mark.parametrize("marker", ["", "marked", "directory"])
 @pytest.mark.parametrize("profile", ["review", "build"])
-def test_host_marker_is_evidence_only(
-    remote: Remote, capsys: pytest.CaptureFixture[str], marker: str, profile: str
+def test_legacy_host_marker_never_refuses_for_taint(
+    remote: Remote, marker: str, profile: str
 ) -> None:
     assert clear() == 0
     path = remote.root / "markers/agent.jsonl"
-    path.write_text(marker)
+    if marker == "directory":
+        path.mkdir()
+    else:
+        path.write_text(marker)
+    args = agent.parser("example agent").parse_args(execution_arguments(remote.prompt))
+    run = driver.prepare(settings(), args)
+    run.request = driver.replace(
+        run.request, unsandboxed=False, profile=agent.driver.Profile(profile)
+    )
+    assert driver.launch_trust(settings(), run, driver.time.monotonic() + 30) == 0
+    assert taint_store.load("example-linux").status == (
+        "tainted" if marker else "clean"
+    )
+    assert run.request.tainted_host is bool(marker)
+
+
+def test_legacy_marker_transport_failure_keeps_transport_refusal(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert clear() == 0
     capsys.readouterr()
-    assert launch(
-        remote,
-        "--profile",
-        profile,
-        *(["--ref", "a" * 40] if profile == "review" else []),
-    ) == (65 if profile == "review" else 0)
-    calls = remote.records("ssh")
-    assert len(calls) == (1 if profile == "review" else 5)
-    loaded = taint_store.load("example-linux")
-    assert loaded.status == "tainted"
-    assert loaded.taint is not None
-    assert loaded.taint.run == "host-marker"
-    assert loaded.taint.authorized_by == "host-marker"
-    assert loaded.taint.account == "agent"
-    if profile == "review":
-        assert capsys.readouterr().err == (
-            "review runs refused: example-linux host=tainted; "
-            "clear with: tbhbdev alpha agent clear-taint example-linux --reason …\n"
-        )
-    else:
-        assert "untrusted-host" in capsys.readouterr().out
-
-
-@pytest.mark.parametrize("profile", ["review", "build"])
-def test_host_marker_read_error_refuses_review(
-    remote: Remote, capsys: pytest.CaptureFixture[str], profile: str
-) -> None:
-    assert clear() == 0
-    # A directory cannot be read as a marker, on either supported host OS.
-    (remote.root / "markers/agent.jsonl").mkdir()
-    assert launch(
-        remote,
-        "--profile",
-        profile,
-        *(["--ref", "a" * 40] if profile == "review" else []),
-    ) == (65 if profile == "review" else 0)
-    assert len(remote.records("ssh")) == (1 if profile == "review" else 5)
-    # The unreadable marker counts as a real one: the host is recorded tainted.
-    assert taint_store.load("example-linux").status == "tainted"
-    output = capsys.readouterr()
-    if profile == "review":
-        assert output.err == (
-            "review runs refused: example-linux host=tainted; "
-            "clear with: tbhbdev alpha agent clear-taint example-linux --reason …\n"
-        )
-    else:
-        assert "untrusted-host" in output.out
-
-
-@pytest.mark.parametrize("profile", ["review", "build"])
-def test_failed_marker_transport_is_not_a_taint(
-    remote: Remote,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-    profile: str,
-) -> None:
-    assert clear() == 0
+    args = agent.parser("example agent").parse_args(execution_arguments(remote.prompt))
+    run = driver.prepare(settings(), args)
+    run.request = driver.replace(run.request, unsandboxed=False)
 
     def fail(*_args: object, **_kwargs: object) -> str:
         message = "ssh failed"
         raise driver.transport.TransportError(message)
 
     monkeypatch.setattr(driver.transport, "shell", fail)
-    assert (
-        launch(
-            remote,
-            "--profile",
-            profile,
-            *(["--ref", "a" * 40] if profile == "review" else []),
-        )
-        == 66
-    )
+    assert driver.launch_trust(settings(), run, driver.time.monotonic() + 30) == 66
     assert capsys.readouterr().err == (
         "cannot read marker (transport): example-linux not reachable over ssh\n"
     )
-    loaded = taint_store.load("example-linux")
-    assert loaded.status == "clean"
-    assert loaded.taint is None
+    assert taint_store.load("example-linux").status == "clean"
 
 
 def test_marker_read_is_bounded(remote: Remote) -> None:
@@ -247,8 +221,6 @@ def test_clearance_prints_state_and_repairs_partial_line(
     assert capsys.readouterr().out == "example-linux: host=clean\n"
     path = driver.directory() / "taint/example-linux.jsonl"
     path.write_text('{"kind":')
-    assert launch(remote, "--profile", "review", "--ref", "a" * 40) == 65
-    assert remote.records("ssh") == []
     assert clear(reason="Host rebuilt again") == 0
     assert taint_store.load("example-linux").status == "clean"
     assert list(path.parent.glob("example-linux.jsonl.broken-*"))
@@ -303,7 +275,7 @@ def test_prepare_reads_local_host_trust(remote: Remote, *, cleared: bool) -> Non
         assert clear() == 0
     args = agent.parser("example agent").parse_args(execution_arguments(remote.prompt))
     run = driver.prepare(settings(), args)
-    assert run.request.tainted_host is (not cleared)
+    assert run.request.tainted_host is True
     assert remote.records("ssh") == []
 
 
@@ -330,8 +302,8 @@ def test_empty_marker_for_run_account_allows_review(
         launch(remote, "--account", account, "--profile", "review", "--ref", "a" * 40)
         == 0
     )
-    assert len(remote.records("ssh")) == 5
-    assert taint_store.load("example-linux").status == "clean"
+    assert len(remote.records("ssh")) == 4
+    assert taint_store.load("example-linux").status == "tainted"
 
 
 @pytest.mark.parametrize("cleared", [False, True])
@@ -346,7 +318,7 @@ def test_prepare_alone_fails_closed(
         execution_arguments(remote.prompt, *options)
     )
     run = driver.prepare(settings(), args)
-    assert run.request.tainted_host is (unsandboxed or not cleared)
+    assert run.request.tainted_host is True
     assert taint_store.load("example-linux").status == (
         "clean" if cleared else "unknown"
     )

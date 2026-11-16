@@ -76,6 +76,12 @@ CODEX_HANDOFF = (
     f'shell_environment_policy.set.CODEX_HOME="{TMP}/codex"',
     *HANDOFF,
 )
+UNSANDBOXED_PATH = (
+    f'shell_environment_policy.set.PATH="{HOME}/.local/bin:{HOME}/.local/gh-bin:'
+    f"{HOME}/.bun/bin:{HOME}/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:"
+    '/usr/bin:/bin:/usr/sbin:/sbin"'
+)
+
 CODEX_TAIL = (
     "-c",
     "sandbox_workspace_write.network_access=true",
@@ -345,7 +351,12 @@ def test_unsandboxed_codex_is_full_access_with_no_profile(kind: RunKind) -> None
             else arg
             for arg in CODEX_TAIL
         ),
-        *CODEX_HANDOFF,
+        *(
+            UNSANDBOXED_PATH
+            if arg.startswith("shell_environment_policy.set.PATH=")
+            else arg
+            for arg in CODEX_HANDOFF
+        ),
         *MODEL,
         "-" if kind is RunKind.EXEC else POINTER,
     )

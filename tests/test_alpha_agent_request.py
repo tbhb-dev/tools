@@ -438,18 +438,18 @@ def test_unsandboxed_refuses_other_authorizations(authorization: str) -> None:
     )
 
 
-def test_unsandboxed_rule() -> None:
-    assert request.parse(UNSANDBOXED, host_allows_unsandboxed=True).unsandboxed
-    assert (
-        refused(UNSANDBOXED, host=False)
-        == "request unsandboxed isn't enabled on this host"
+@pytest.mark.parametrize("host", [False, True])
+@pytest.mark.parametrize("full", [False, True])
+@pytest.mark.parametrize("authorization", [None, "o/r#1"])
+def test_unsandboxed_needs_no_host_flag_or_authorization(
+    host: bool, full: bool, authorization: str | None
+) -> None:
+    parsed = request.parse(
+        made(BUILD, unsandboxed=full, authorized_by=authorization),
+        host_allows_unsandboxed=host,
     )
-    assert refused(made(UNSANDBOXED, authorized_by=None)) == (
-        "request unsandboxed requires authorized_by"
-    )
-    assert refused(made(BUILD, authorized_by="o/r#1")) == (
-        "request authorized_by requires unsandboxed"
-    )
+    assert parsed.unsandboxed is full
+    assert parsed.authorized_by == authorization
 
 
 @pytest.mark.parametrize("base", [BUILD, CLAUDE, AGY], ids=["codex", "claude", "agy"])
@@ -480,8 +480,7 @@ def test_validate_checks_a_built_request() -> None:
             dataclasses.replace(built, model="a b"), host_allows_unsandboxed=False
         )
     unsandboxed = dataclasses.replace(built, unsandboxed=True)
-    with pytest.raises(Invalid, match="requires authorized_by"):
-        request.validate(unsandboxed, host_allows_unsandboxed=True)
+    request.validate(unsandboxed, host_allows_unsandboxed=False)
 
 
 def test_the_request_holds_no_credential_field() -> None:

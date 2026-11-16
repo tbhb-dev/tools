@@ -68,6 +68,7 @@ def inspect_output(
     monkeypatch.setattr(transport, "execute", run)
     args = agent.parser("example").parse_args(execution_arguments("example.md"))
     run = driver.prepare(settings(), args)
+    run.request = replace(run.request, unsandboxed=False, tainted_host=False)
     run.owner = "example-owner"
     assert driver.inspect(settings(), run, limit=limit) == 0
     return capsys.readouterr().out
@@ -234,6 +235,7 @@ def test_scripts_have_fixed_path_socket_and_git_environment() -> None:
     ]
     for script in scripts:
         assert script.startswith("PATH=/usr/bin:/bin:/usr/sbin:/sbin\nexport PATH\n")
+        assert 'PATH="$HOME/.local/bin:$PATH"' in script
         assert 'PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"' in script
         assert 'tmux -S "$s/agents" -f /dev/null' in script
         assert "tmux -L" not in script
@@ -1171,3 +1173,14 @@ def test_remote_state_matches_run_host(
     expected = host / ("state" if xdg == "absolute" else ".local/state")
     assert result.returncode == 0
     assert result.stdout.decode() == str(expected / "tbhbdev/agent-runs")
+
+
+def test_launch_finds_tmux_in_the_agent_accounts_local_bin(host: Path) -> None:
+    directory = host / ".local/bin"
+    directory.mkdir(parents=True)
+    write_standalone_fake(directory / "tmux", 'print("account-tmux")\n')
+    result = execute(
+        remote.start("sample", settings().sockets_dir, LINUX, owner="example-owner")[2]
+    )
+    assert result.returncode == 0
+    assert result.stdout == b"account-tmux\n"

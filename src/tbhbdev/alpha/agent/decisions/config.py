@@ -451,7 +451,7 @@ def _host(table: _Table) -> Host:
     if shell not in _PROGRAMS:
         table.fail("shell", f"must be one of {', '.join(_PROGRAMS)}")
     account = _check_name(table, "account", table.text("account"), NAME)
-    unsandboxed = table.flag("unsandboxed")
+    unsandboxed = table.flag("unsandboxed") if "unsandboxed" in table.values else True
     accounts = table.strings("accounts")
     if not all(NAME.fullmatch(a) for a in accounts):
         table.fail("accounts", f"must list names matching {NAME.pattern}")

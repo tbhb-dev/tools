@@ -342,47 +342,23 @@ def test_unsandboxed_selects_full_access_for_a_codex_build(os: Os) -> None:
         mode=model.CodexMode.FULL_ACCESS,
         read_roots=(),
         write_roots=(),
-        deny=denied(os, "/example/home/ops"),
+        deny=(),
         approval_policy="never",
         web_search=WebSearch.LIVE,
         network_proxy=None,
     )
-    assert result.env == env_of(os, Harness.CODEX, "ops")
-    assert result.deny == denied(os, "/example/home/ops")
+    assert result.env == env_of(os, Harness.CODEX, "ops") | {
+        "PATH": ":".join(
+            host_tools.account_path(env_of(os, Harness.CODEX, "ops")["HOME"])
+        )
+    }
+    assert result.deny == ()
 
 
 def test_a_host_that_allows_it_still_sandboxes_unless_asked() -> None:
     result = made(Os.LINUX, Profile.BUILD, Harness.CODEX, "agent")
     assert isinstance(result.detail, model.CodexPolicy)
     assert result.detail.mode is model.CodexMode.PROFILE
-
-
-@pytest.mark.parametrize(
-    ("host", "harness", "profile", "account", "why"),
-    [
-        (
-            dataclasses.replace(LINUX, unsandboxed=False),
-            Harness.CODEX,
-            Profile.BUILD,
-            "agent",
-            "isn't enabled on example-linux",
-        ),
-    ],
-)
-def test_unsandboxed_is_refused_outside_its_one_case(
-    host: model.Host, harness: Harness, profile: Profile, account: str, why: str
-) -> None:
-    with pytest.raises(Invalid) as caught:
-        policy.build(
-            settings(),
-            host,
-            harness=harness,
-            profile=profile,
-            account=account,
-            unsandboxed=True,
-            paths=paths(account),
-        )
-    assert str(caught.value) == f"policy unsandboxed {why}"
 
 
 @pytest.mark.parametrize("unsandboxed", [False, True])
@@ -1157,21 +1133,54 @@ def test_dev_fd_cannot_reach_a_denied_path(
     )
 
 
-def test_unsandboxed_still_refuses_overlapping_write_roots() -> None:
-    sandbox = dataclasses.replace(SANDBOX, write_roots=(".example-denied",))
-    with pytest.raises(Invalid) as caught:
-        made(
-            Os.LINUX,
-            Profile.BUILD,
-            Harness.CODEX,
-            "agent",
-            unsandboxed=True,
-            config=settings(sandbox=sandbox),
-        )
-    assert str(caught.value) == (
-        "policy write path /example/home/agent/.example-denied "
-        "overlaps the denied path /example/home/agent/.example-denied"
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("os", Os)
+def test_unsandboxed_skips_all_sandbox_checks(
+    harness: Harness, profile: Profile, os: Os, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sandbox = dataclasses.replace(
+        SANDBOX,
+        write_roots=(".example-denied",),
+        agy=model.AgySandbox(
+            (".example-denied",), (".example-denied",), (".example-denied",)
+        ),
     )
+    run_paths = dataclasses.replace(paths("agent"), signing_socket="/example/denied")
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("full access must skip sandbox policy checks")
+
+    for name in (
+        "protect_host",
+        "denied_paths",
+        "tool_path",
+        "_refuse_overlaps",
+        "_agy",
+    ):
+        monkeypatch.setattr(policy, name, unexpected)
+    value = policy.build(
+        settings(sandbox=sandbox),
+        dataclasses.replace(HOSTS[os], unsandboxed=False),
+        harness=harness,
+        profile=profile,
+        account="agent",
+        unsandboxed=True,
+        paths=run_paths,
+        protected=(run_paths.worktree,),
+        denied=("/example/denied",),
+    )
+    assert value.deny == ()
+    assert value.tool_path == ":".join(host_tools.account_path(run_paths.home))
+    assert value.env["PATH"] == value.tool_path
+    assert value.env["SSH_AUTH_SOCK"] == "/example/denied"
+    if isinstance(value.detail, model.ClaudePolicy):
+        assert value.detail.settings == {
+            "disableAllHooks": True,
+            "sandbox": {"enabled": False},
+        }
+    elif isinstance(value.detail, model.AgyPolicy):
+        assert value.detail.grants == ()
 
 
 @pytest.mark.parametrize("os", Os)

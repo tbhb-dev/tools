@@ -765,3 +765,13 @@ def test_git_shim_checks_selected_developer_chain(
         )
     assert reads
     assert all(path == str(selector) for path in reads)
+
+
+def test_account_path_uses_the_run_home() -> None:
+    paths = host_tools.account_path("/example/agent")
+    assert paths[:4] == tuple(
+        f"/example/agent/{tail}"
+        for tail in (".local/bin", ".local/gh-bin", ".bun/bin", ".npm-global/bin")
+    )
+    assert paths[4:6] == ("/usr/local/bin", "/opt/homebrew/bin")
+    assert paths[6:] == ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
