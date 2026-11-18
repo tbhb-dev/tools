@@ -85,6 +85,14 @@ def load(settings: Settings, name: str) -> Run:
     return result
 
 
+def agy_timeout(settings: Settings, harness: Harness, profile: Profile) -> int | None:
+    if harness is not Harness.AGY:
+        return None
+    if profile is Profile.BUILD:
+        return settings.agy_build_timeout_seconds
+    return settings.agy_timeout_seconds
+
+
 def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     rules.check_name(args.name)
     host = rules.select_host(settings, args.host, args.account)
@@ -106,7 +114,7 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         account=host.account,
         timeout=args.timeout
         if args.timeout is not None
-        else (settings.agy_timeout_seconds if harness is Harness.AGY else None),
+        else agy_timeout(settings, harness, profile),
         class_=args.class_,
         variant=args.variant,
         role=args.role,
