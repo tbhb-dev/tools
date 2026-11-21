@@ -53,7 +53,7 @@ jobs:
       # uploads only the results it runs, never a disk cache hit, so that
       # run runs every action and fills the remote cache.
       - name: Set up Bazel for CI
-        uses: tbhb-dev/rules/.github/actions/setup-bazel-ci@90c4054c67304574d83c82e0b7a4763ceaa85748  # main
+        uses: tbhb-dev/rules/.github/actions/setup-bazel-ci@60295689201c97560855aebec77af4ff8c836ae9  # main
         with:
           disk-cache: ${{ github.event_name == 'push' && 'false' || format('{0}-ubuntu-26.04', github.workflow) }}
           cache-save: ${{ github.event_name != 'pull_request' }}
@@ -92,7 +92,7 @@ jobs:
     name: repo
     permissions:
       contents: read
-    uses: tbhb-dev/rules/.github/workflows/repo-checks.yml@90c4054c67304574d83c82e0b7a4763ceaa85748  # main
+    uses: tbhb-dev/rules/.github/workflows/repo-checks.yml@60295689201c97560855aebec77af4ff8c836ae9  # main
     with:
       runs-on: ubuntu-26.04
       timeout-minutes: 10
@@ -110,7 +110,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Fail if any needed job did not succeed
-        uses: tbhb-dev/rules/.github/actions/ci-conclusion@90c4054c67304574d83c82e0b7a4763ceaa85748  # main
+        uses: tbhb-dev/rules/.github/actions/ci-conclusion@60295689201c97560855aebec77af4ff8c836ae9  # main
         with:
           needs: ${{ toJSON(needs) }}
 
