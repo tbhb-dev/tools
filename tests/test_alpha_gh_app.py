@@ -83,6 +83,7 @@ def ec_key(tmp_path_factory: pytest.TempPathFactory) -> Key:
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail at once on any request that no MockTransport answers."""
+    monkeypatch.delenv(gh_app.RUN_ENV, raising=False)
 
     def refuse(*_args: object, **_kwargs: object) -> httpx.Response:
         message = "a test reached the real network"
@@ -1715,3 +1716,16 @@ def test_mint_token_errors_never_disclose_tokens(
     assert capsys.readouterr() == ("", "")
     assert list(tmp_path.rglob("*")) == before
     assert all(TOKEN not in p.read_text() for p in tmp_path.rglob("*") if p.is_file())
+
+
+def test_a_run_never_mints(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    monkeypatch.setenv("TBHBDEV_AGENT_RUN", "1")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    assert gh_app.main(["bot", REPO], "gh-app") == 1
+    assert capsys.readouterr() == (
+        "",
+        "gh-app: refused inside an agent run; a run never mints an App token\n",
+    )
+    assert not (tmp_path / "gh-app").exists()
