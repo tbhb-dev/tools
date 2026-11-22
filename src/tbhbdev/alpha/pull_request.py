@@ -26,7 +26,7 @@ scheme and lint configs are the ones checked against. For ``check`` and
 `path:line: problem`, and the exit code is 1 when there is any.
 
 ``check`` validates the frontmatter against the schema, requires a title that
-``cog verify`` accepts and that fits 64 characters (a squash merge appends
+``cog verify`` accepts and that fits 64 characters (a merge appends
 `` (#N)`` and the commit header must fit 72), checks the H2 sections against
 .github/pull-request-sections.toml (names, order, required, word limits), rejects
 leftover HTML comments and bare ``#N`` references, and lints the description
@@ -43,7 +43,7 @@ the worktree the payload names it runs ``check``'s checks and, on problems, exit
 with them on stderr so the agent fixes the draft. Other calls exit 0 at once.
 
 ``create`` and ``edit`` run ``check``, then append the ``Generated-by`` and
-``Assisted-by`` trailers as the body's last paragraph, so a squash merge carries
+``Assisted-by`` trailers as the body's last paragraph, so a merge carries
 them into the commit. They are the LLM trailers of the commits on the branch,
 deduplicated by identity, plus the posting agent as ``Assisted-by``. They are
 machine-written: a draft that contains one fails ``check``, because a person
@@ -146,7 +146,7 @@ SCHEMA = Path(".github") / "schemas" / "pull-request-draft.schema.json"
 SECTIONS = Path(".github") / "pull-request-sections.toml"
 # Config files each linter reads, mirrored into the temp tree by symlink.
 CONFIGS = (".vale.ini", ".vale", ".cspell.jsonc", ".cspell-words.txt", ".rumdl.toml")
-# A squash merge appends " (#N)" and the header must fit 72; 64 leaves room
+# A merge appends " (#N)" and the header must fit 72; 64 leaves room
 # for a pull request number of up to four digits.
 MAX_TITLE = 72 - len(" (#9999)")
 BAZEL = "bazelisk"
@@ -554,7 +554,7 @@ def ref_problems(lines: Sequence[Line]) -> list[Problem]:
     """Reject ``#N`` references that don't name their repository.
 
     GitHub links a bare ``#N`` to the repository it appears in, which is wrong
-    for another repository's pull request and ambiguous once the squash commit
+    for another repository's pull request and ambiguous once the merge commit
     is read elsewhere, so every reference is ``owner/repo#N``. Code and links
     are exempt: neither becomes a reference.
     """

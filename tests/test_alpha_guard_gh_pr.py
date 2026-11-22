@@ -55,7 +55,7 @@ DELETE_BRANCH = (
 )
 MERGE = (
     "`gh pr merge` is blocked. Once the PR is approved, run "
-    "`tbhbdev alpha merge {n}` (add `--dry-run` to preview the squash message first)."
+    "`tbhbdev alpha merge {n}` (add `--dry-run` to preview the commit message first)."
 )
 
 BLOCKED = [
