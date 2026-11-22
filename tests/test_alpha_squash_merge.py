@@ -50,9 +50,11 @@ else:
 logname = "gh.methods.log" if methods else "gh.repo.log" if repo else "gh.log"
 with open(os.path.join(here, logname), "a") as log:
     log.write(json.dumps({{"argv": sys.argv[1:], "stdin": sys.stdin.read()}}) + "\\n")
-sys.stdout.write(spec[kind + "_out"])
-sys.stderr.write(spec[kind + "_err"])
-sys.exit(spec[kind + "_rc"])
+# A ruleset can refuse the merge flag while the squash flag goes through.
+refused = kind == "merge" and "--merge" in sys.argv and "merge_refused" in spec
+sys.stdout.write("" if refused else spec[kind + "_out"])
+sys.stderr.write(spec["merge_refused"] if refused else spec[kind + "_err"])
+sys.exit(1 if refused else spec[kind + "_rc"])
 """
 GITLEAKS = """import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
@@ -584,6 +586,7 @@ def test_merge_reports_gh_output_and_exit_code(
     tools.view()
     spec = json.loads((tools.bin / "gh.spec").read_text())
     tools.gh(**{**spec, "merge_rc": 4, "merge_out": "o\n", "merge_err": "e\n"})
+    amend(tools, methods_out=allowed(merge=False, squash=True))
     assert run_main("3")[0] == 4
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == ("o\n", "e\n")
@@ -1400,6 +1403,37 @@ def test_unknown_or_no_allowed_method_refuses(
     code, _ = run_main("12")
     assert reason in str(code)
     assert [call["argv"][1] for call in tools.calls()] == ["view"]  # type: ignore[index]
+
+
+def test_a_refused_merge_commit_retries_with_squash_and_the_same_message(
+    tools: Tools, capsys: pytest.CaptureFixture[str]
+) -> None:
+    amend(tools, merge_refused="Merge commits are not allowed on this branch.\n")
+    assert run_main("12")[0] == 0
+    _, first, second = tools.calls()
+    assert first["argv"][3] == "--merge"  # type: ignore[index]
+    assert second["argv"][3] == "--squash"  # type: ignore[index]
+    assert second["argv"][:3] == first["argv"][:3]  # type: ignore[index]
+    assert second["argv"][4:] == first["argv"][4:]  # type: ignore[index]
+    assert second["stdin"] == first["stdin"]
+    captured = capsys.readouterr()
+    assert captured.out == "merged\n"
+    assert captured.err == (
+        "Merge commits are not allowed on this branch.\n"
+        "--merge failed; retrying with --squash\n"
+    )
+
+
+def test_a_refused_merge_commit_with_squash_off_does_not_retry(
+    tools: Tools,
+) -> None:
+    amend(
+        tools,
+        methods_out=allowed(merge=True, squash=False),
+        merge_refused="refused\n",
+    )
+    assert run_main("12")[0] == 1
+    assert [call["argv"][1] for call in tools.calls()] == ["view", "merge"]  # type: ignore[index]
 
 
 def test_an_empty_body_refuses_the_merge_method(tools: Tools) -> None:

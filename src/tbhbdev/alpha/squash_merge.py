@@ -554,8 +554,11 @@ def fetch(number: int) -> PullRequest:
     )
 
 
-def merge_method(target: str) -> str:
-    """``--merge`` or ``--squash``, by what the repository ``target`` allows.
+def merge_methods(target: str) -> list[str]:
+    """The merge flags to try, in order, by what the repository ``target`` allows.
+
+    Merge commits come first. Squash follows when it is allowed too, because a
+    ruleset can still refuse a merge commit that the repository setting allows.
 
     Raises:
         SystemExit: The read fails or is malformed, or neither is allowed.
@@ -572,10 +575,16 @@ def merge_method(target: str) -> str:
         stop("gh repo view returned no usable merge settings")
     if not all(isinstance(value, bool) for value in allowed.values()):
         stop("gh repo view returned no usable merge settings")
-    if allowed["mergeCommitAllowed"]:
-        return "--merge"
-    if allowed["squashMergeAllowed"]:
-        return "--squash"
+    methods = [
+        flag
+        for flag, name in (
+            ("--merge", "mergeCommitAllowed"),
+            ("--squash", "squashMergeAllowed"),
+        )
+        if allowed[name]
+    ]
+    if methods:
+        return methods
     stop(f"not merging: {target} allows neither merge commits nor squash merges")
 
 
@@ -596,12 +605,12 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
     request = fetch(args.number)
     if reasons := refusals(request):
         stop(f"not merging PR #{args.number}: " + "; ".join(reasons))
-    method = merge_method(pr.target_of_pr(request.url))
+    methods = merge_methods(pr.target_of_pr(request.url))
     body = renovate_body(request.body) if request.renovate else request.body
     message = build_message(
         request.title, args.number, body, agent=request.agent and not request.renovate
     )
-    if method == "--merge" and (
+    if methods[0] == "--merge" and (
         not message.body or message.subject.startswith(DEFAULT_MERGE_TITLES)
     ):
         stop(
@@ -614,7 +623,7 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
         pr.repo_visibility(pr.target_of_pr(request.url)),
     )
     argv_gh = [
-        GH, "pr", "merge", str(args.number), method, "--subject", message.subject,
+        GH, "pr", "merge", str(args.number), methods[0], "--subject", message.subject,
         "--body-file", "-", "--match-head-commit", request.head,
     ]  # fmt: skip
     if args.dry_run:
@@ -624,6 +633,11 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
         return 0
     argv_gh[0] = pr.find_tool(GH)
     done = pr.run(argv_gh, stdin=message.body)
+    if done.returncode != 0 and len(methods) > 1:
+        print(done.stderr, end="", file=sys.stderr)
+        print(f"{methods[0]} failed; retrying with {methods[1]}", file=sys.stderr)
+        argv_gh[argv_gh.index(methods[0])] = methods[1]
+        done = pr.run(argv_gh, stdin=message.body)
     print(done.stdout, end="")
     print(done.stderr, end="", file=sys.stderr)
     return done.returncode
