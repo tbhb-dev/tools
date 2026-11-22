@@ -42,9 +42,9 @@ def test_checklist_has_every_floor_item() -> None:
     assert ids == [f"R{n}" for n in range(1, 14)]
 
 
-def test_checklist_escalation_ids_are_unique_and_reserved() -> None:
+def test_checklist_escalation_ids_are_unique_and_floor_prefixed() -> None:
     frontmatter = yaml.safe_load(_checklist().split("---\n")[1])
     ids = [rule["id"] for rule in frontmatter["escalate"]]
     assert ids
     assert len(ids) == len(set(ids))
-    assert all(int(i[1:]) < 100 for i in ids)
+    assert all(re.fullmatch(r"FE\d+", i) for i in ids)

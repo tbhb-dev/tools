@@ -3,38 +3,38 @@ schema: 1
 reviewer: standard
 lenses: [correctness, security]
 escalate:
-  - id: E1
+  - id: FE1
     class: law
-    reason: The change may harm property or people, expose tbhb, their hosts or private networks to attack or legal liability, expose a credential, spend money, add a payment method or API key, or weaken a stop or the means to stop an agent.
-  - id: E2
+    reason: The change may cause foreseeable harm to property or people, expose tbhb, their hosts or networks to attack or legal liability, expose a credential, spend money or work around a limit, add a payment method or API key, or weaken, hide or work around a stop or the means to stop an agent.
+  - id: FE2
     class: authority
     reason: The change adds, removes or widens anyone's authority over decisions, an agent's included, or touches tbhb's own data beyond the access given.
-  - id: E3
+  - id: FE3
     class: reserved
     reason: The change decides a matter reserved for tbhb, namely changing the Laws, irreversibly destroying anything tbhb-dev didn't create, or destroying the last working copy of anything.
-  - id: E4
+  - id: FE4
     class: weakens-review
     reason: The change weakens the control that reviews it, such as review files, rulesets, CI gates, the broker's rules or this floor.
-  - id: E5
+  - id: FE5
     class: conflicts-with-decision
     reason: The change contradicts a recorded decision of tbhb.
-  - id: E6
+  - id: FE6
     class: credential-grant
     reason: A new credential or a wider grant is a one-way door.
-  - id: E7
+  - id: FE7
     class: network-boundary
     reason: A firewall or NAS change, or loosening a trust boundary, is a one-way door.
-  - id: E8
+  - id: FE8
     class: spend
     reason: A change that spends or commits to spending is a one-way door.
-  - id: E9
+  - id: FE9
     class: public-release
     reason: A public release can't be taken back.
 ---
 
 # Pull request review checklist: the org floor
 
-<!-- Floor items R1 to R99 and escalation IDs E1 to E99 are reserved. A repository's checklist adds items from R100 and escalation rules from E100, and can't remove or reword any of these. -->
+<!-- The floor reserves item IDs R1 to R99. Floor escalation IDs start with FE, and a repository's own start with E. A repository's checklist adds items from R100 and escalation rules, and can't remove or reword any of these. -->
 
 ## Context
 
@@ -52,7 +52,7 @@ This is the organization's floor. It applies to every repository, and a reposito
 - **R8** The pull request's description matches the diff. A mismatch is a finding.
 - **R9** The output lists every escalation rule that applies, with the reason for each.
 - **R10** Laws (constitution section 2). The change can't cause foreseeable harm to property or people. It doesn't expose tbhb, their hosts or networks to attack or legal liability, and doesn't expose a credential. It doesn't spend money or work around a limit, and it doesn't add a payment method or API key. It doesn't weaken, hide or work around a stop or the means to stop an agent. A change that may do any of these escalates under `law`.
-- **R11** The operator (constitution section 3). The change doesn't add, remove or widen anyone's authority, an agent's included. It touches none of tbhb's own data beyond the access given, and decides no reserved matter. Widening authority escalates under `authority`, and a reserved matter under `reserved`.
+- **R11** The operator (constitution section 3). The change doesn't add, remove or widen anyone's authority, an agent's included. It touches none of tbhb's own data beyond the access given, and decides no reserved matter. The constitution reserves exactly these for tbhb: changing the Laws, irreversibly destroying anything tbhb-dev didn't create, and destroying the last working copy of anything. Widening authority escalates under `authority`, and a reserved matter under `reserved`.
 - **R12** Change (constitution section 5). The change doesn't weaken the control that reviews it, including review files, rulesets, CI gates, the broker's rules and this floor. A weakening escalates under `weakens-review`.
 - **R13** Evidence (constitution section 4). Every claim in the pull request says how its author knows it. The change cites authority for what it does, such as a task, a role, a decision or the silence of the rules. A gap is a finding. It escalates only when the authority would have to come from tbhb.
 
