@@ -927,13 +927,52 @@ def bazel_bases(home: Path, worktree: str) -> tuple[Path, ...]:
     )
 
 
-def _owned_base(base: Path) -> bool:
-    """Whether the base is a real directory the agent owns, not a symlink."""
-    try:
-        status = base.lstat()
-    except OSError:
-        return False
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _owned_dir(status: os.stat_result) -> bool:
     return stat.S_ISDIR(status.st_mode) and status.st_uid == os.getuid()
+
+
+def _open_owned(home: Path, base: Path) -> tuple[int, os.stat_result] | None:
+    """Open the base's parent and return its fd with the base's status.
+
+    Every directory below the trusted anchor is opened with O_NOFOLLOW relative
+    to the one before, and must be owned by the agent's uid, so a symlinked
+    ancestor cannot redirect a deletion and the returned fd pins the validated
+    chain even if a path is replaced later. The caller closes the fd.
+    """
+    anchor = next((a for a, root in _bazel_roots(home) if base.parent == root), None)
+    if anchor is None or ".." in base.parts:
+        return None
+    names = base.relative_to(anchor).parts
+    try:
+        fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    try:
+        for name in names[:-1]:
+            child = os.open(name, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            if not _owned_dir(os.fstat(fd)):
+                raise NotADirectoryError(name)
+        status = os.stat(names[-1], dir_fd=fd, follow_symlinks=False)
+        if not _owned_dir(status):
+            raise NotADirectoryError(names[-1])
+    except OSError:
+        os.close(fd)
+        return None
+    return fd, status
+
+
+def _owned_base(home: Path, base: Path) -> os.stat_result | None:
+    """Return the base's lstat when it is a real directory the agent owns."""
+    opened = _open_owned(home, base)
+    if opened is None:
+        return None
+    os.close(opened[0])
+    return opened[1]
 
 
 def _server_alive(base: Path) -> bool:
@@ -979,29 +1018,157 @@ def _shutdown_base(tool: str, base: Path, worktree: str) -> str:
     return result
 
 
-def shutdown_bazel(run: Run, prepared: Prepared | None) -> dict[Path, str]:
-    """Stop the Bazel server of each recorded base that is the agent's own.
+def shutdown_bazel(
+    run: Run, prepared: Prepared | None
+) -> dict[Path, tuple[str, tuple[int, int]]]:
+    """Stop the Bazel server of each recorded base, which must be the agent's own.
 
-    Maps each base to its shutdown status.
+    Maps each base to its shutdown status and its (st_dev, st_ino) at that time.
     """
     if prepared is None:
         return {}
     tool = _bazel_tool(run)
-    stopped: dict[Path, str] = {}
+    stopped: dict[Path, tuple[str, tuple[int, int]]] = {}
     for base in prepared.bases:
-        if not _owned_base(base):
+        status = _owned_base(run.home, base)
+        if status is None:
             if os.path.lexists(base):
-                run.files.write("log", f"bazel shutdown: refused {base}\n")
+                run.files.write("log", f"bazel cleanup: refused {base}\n")
             continue
-        if tool is not None:
-            stopped[base] = _shutdown_base(tool, base, prepared.paths.worktree)
+        if tool is None:
+            continue
+        result = _shutdown_base(tool, base, prepared.paths.worktree)
+        stopped[base] = (result, (status.st_dev, status.st_ino))
     return stopped
+
+
+def _remove_base(parent_fd: int, name: str) -> None:
+    """Delete a base relative to its parent's fd, unlocking only inside it.
+
+    shutil.rmtree opens each directory through dir_fd where the platform allows,
+    so it does not follow a symlink swapped in during the walk. The unlock chmod
+    goes through the same fd and only touches directories the agent owns.
+    """
+
+    def unlock(_function: object, path: str, _error: BaseException) -> None:
+        for target in {path, str(Path(path).parent)} - {"."}:
+            with suppress(OSError):
+                if _owned_dir(os.stat(target, dir_fd=parent_fd, follow_symlinks=False)):
+                    os.chmod(target, 0o700, dir_fd=parent_fd)
+
+    for _attempt in range(3):
+        shutil.rmtree(name, onexc=unlock, dir_fd=parent_fd)
+        if not _exists(parent_fd, name):
+            return
+
+
+def _exists(parent_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _space(fd: int) -> tuple[int, int]:
+    status = os.fstatvfs(fd)
+    return status.f_bavail * status.f_frsize, status.f_favail
+
+
+def _delete_base(
+    run: Run, parent_fd: int, name: str, identity: tuple[int, int]
+) -> tuple[int, int] | None:
+    """Delete a base, returning the (bytes, inodes) freed, or None on failure.
+
+    Re-checks the base's identity through the pinned parent fd just before removal.
+    """
+    try:
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != identity:
+            raise FileNotFoundError(name)
+        before = _space(parent_fd)
+        _remove_base(parent_fd, name)
+        after = _space(parent_fd)
+    except OSError:
+        run.files.write("log", "bazel cleanup failed\n")
+        return None
+    if _exists(parent_fd, name):
+        run.files.write("log", "bazel cleanup failed\n")
+        return None
+    return max(0, after[0] - before[0]), max(0, after[1] - before[1])
+
+
+def _unlink_bazel_links(worktree: Path, deleted: list[Path]) -> None:
+    for link in (*worktree.glob("bazel-*"), *worktree.glob(".bazel-*")):
+        if not link.is_symlink():
+            continue
+        target = Path(os.path.normpath(link.parent / link.readlink()))
+        if any(target.is_relative_to(base) for base in deleted):
+            with suppress(OSError):
+                link.unlink()
+
+
+def _clean_base(
+    run: Run, base: Path, result: str, identity: tuple[int, int]
+) -> tuple[int, int] | None:
+    """Delete one base unless it changed, its shutdown failed, or a server holds it."""
+    opened = _open_owned(run.home, base)
+    if opened is None:
+        run.files.write("log", f"bazel cleanup: kept {base} ({result})\n")
+        return None
+    fd, status = opened
+    try:
+        if result != "rc=0" or (status.st_dev, status.st_ino) != identity:
+            reason = result
+        elif _server_alive(base):
+            reason = "server alive"
+        else:
+            return _delete_base(run, fd, base.name, identity)
+        run.files.write("log", f"bazel cleanup: kept {base} ({reason})\n")
+        return None
+    finally:
+        os.close(fd)
+
+
+def cleanup_bazel(
+    run: Run,
+    prepared: Prepared | None,
+    stopped: dict[Path, tuple[str, tuple[int, int]]],
+) -> dict[str, int]:
+    """Delete the recorded output bases whose server is gone, and the links into them.
+
+    A base is deleted only when its shutdown returned 0 and its server pid is
+    dead at that moment, it is still the same directory (st_dev, st_ino) as at
+    shutdown, and it is owned by the agent with no symlinked ancestor. The
+    deletion runs relative to an fd that pins the validated ancestors. The freed
+    counts are the statvfs delta on the base's filesystem across the deletion, so
+    they include any other writer on that host, and a failed deletion adds nothing.
+    """
+    freed = {"bytes": 0, "inodes": 0, "bases": 0}
+    if prepared is None:
+        return freed
+    deleted: list[Path] = []
+    for base, (result, identity) in stopped.items():
+        space = _clean_base(run, base, result, identity)
+        if space is None:
+            continue
+        freed["bytes"] += space[0]
+        freed["inodes"] += space[1]
+        freed["bases"] += 1
+        deleted.append(base)
+    worktree = Path(prepared.paths.worktree)
+    if deleted and not worktree.is_symlink():
+        _unlink_bazel_links(worktree, deleted)
+    if freed["bases"]:
+        run.files.write("log", f"bazel cleanup: freed {freed}\n")
+    return freed
 
 
 def finish(
     run: Run, prepared: Prepared | None, agent: subprocess.Popen[str] | None, rc: int
 ) -> int:
     bazel = ""
+    cleanup: dict[str, int] = {}
     try:
         try:
             reason = finish_auth(run, prepared)
@@ -1019,11 +1186,13 @@ def finish(
             process_group.unknown(run.files)
         finally:
             try:
-                bazel = ",".join(sorted(set(shutdown_bazel(run, prepared).values())))
+                stopped = shutdown_bazel(run, prepared)
+                bazel = ",".join(sorted({result for result, _ in stopped.values()}))
+                cleanup = cleanup_bazel(run, prepared, stopped)
             except Exception:  # noqa: BLE001
-                # The Bazel shutdown must not block the rc and completion record.
+                # Nothing from the Bazel cleanup may block the rc and completion record.
                 with suppress(Exception):
-                    run.files.write("log", "bazel shutdown failed\n")
+                    run.files.write("log", "bazel cleanup failed\n")
             bazel = bazel or "skipped"
             try:
                 phase = "unknown" if run.files.uncertain else "ended"
@@ -1037,7 +1206,10 @@ def finish(
     except OSError, ValueError:
         run.files.write("log", "audit summary write failed\n")
     try:
-        entry = index_entry(run, prepared, rc) | {"bazel_shutdown": bazel}
+        entry = index_entry(run, prepared, rc) | {
+            "bazel_shutdown": bazel,
+            "bazel_cleanup": cleanup,
+        }
         runfiles.append(run.files.root, entry)
     except OSError, ValueError:
         run.files.write("log", "completion index append failed\n")
