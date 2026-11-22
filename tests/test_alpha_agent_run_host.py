@@ -1918,6 +1918,7 @@ def test_terminal_setup_failure_keeps_registered_cleanup_owner(
     monkeypatch.setattr(process_group, "prepare", constant(prepared))
     child = Child()
     monkeypatch.setattr(subprocess, "Popen", constant(child))
+    monkeypatch.setattr(run_host, "shutdown_bazel", constant("skipped"))
     events: list[str] = []
 
     def record(files: runfiles.RunFiles, pid: int) -> None:
