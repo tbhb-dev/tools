@@ -1454,4 +1454,4 @@ def test_a_squash_fallback_allows_an_empty_body(tools: Tools) -> None:
     tools.view(title="fix: x", body="")
     amend(tools, methods_out=allowed(merge=False, squash=True))
     assert run_main("12")[0] == 0
-    assert tools.calls()[1]["argv"][3] == "--squash"
+    assert tools.calls()[1]["argv"][3] == "--squash"  # type: ignore[index]
