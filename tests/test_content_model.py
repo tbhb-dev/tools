@@ -150,16 +150,16 @@ def test_visible_metrics_and_metadata() -> None:
     metadata: dict[str, object] = {"labels": ["one"], "nested": {"flag": True}}
     result = normalize(source, object="pr", variant="test", metadata=metadata)
     assert result["metadata"] is metadata
-    assert _at(result, "blocks", "body", "visible") == "Body\n\nlink alt code & café"
+    assert _at(result, "blocks", "body", "visible") == "link alt code & café"
     assert _at(result, "blocks", "body", "metrics", "visible") == {
-        "characters": 26,
-        "words": 5,
-        "paragraphs": 2,
+        "characters": 20,
+        "words": 4,
+        "paragraphs": 1,
     }
     assert _at(result, "metrics", "visible") == {
-        "characters": 29,
-        "words": 6,
-        "paragraphs": 3,
+        "characters": 20,
+        "words": 4,
+        "paragraphs": 1,
     }
     assert _at(result, "metrics", "source", "characters") == len(source)
     assert _at(result, "metrics", "codeLines") == 1
@@ -256,3 +256,31 @@ def test_escaped_table_cell() -> None:
         _at(result, "blocks", "table", "content", 0, "header", "cells", 0, "visible")
         == "a|b"
     )
+
+
+def test_section_heading_is_not_text() -> None:
+    result = _normalize("# Title here\n\n## Outcome\n\nOne two three.\n")
+    section = _at(result, "blocks", "outcome")
+    assert section["metrics"]["visible"]["words"] == 3
+    assert section["metrics"]["visible"]["characters"] == len("One two three.")
+    assert section["metrics"]["source"]["characters"] == len("\nOne two three.\n")
+    assert section["metrics"]["atxHeadings"] == 1
+    assert section["source"].startswith("## Outcome")
+    assert _at(result, "metrics", "visible", "words") == 3
+
+
+def test_issue_comment_has_no_title() -> None:
+    result = normalize(
+        "Fixed in abc.\n\n## Evidence\n\nrun log\n",
+        object="issue-comment",
+        variant="work-note",
+        metadata={},
+    )
+    assert result["blockOrder"] == ["preamble", "evidence"]
+    assert _at(result, "blocks", "preamble", "kind") == "text"
+    assert (
+        normalize("", object="issue-comment", variant="x", metadata={})["blockOrder"]
+        == []
+    )
+    with pytest.raises(ValueError, match="heading"):
+        normalize("plain", object="issue", variant="x", metadata={})

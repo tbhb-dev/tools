@@ -276,6 +276,24 @@ def _validate_title(nodes: list[SyntaxTreeNode]) -> None:
         raise ValueError(message)
 
 
+def _without_heading(
+    block: dict[str, object],
+    heading_source: str,
+    body: list[SyntaxTreeNode],
+) -> None:
+    """Drop a section heading from the block's visible and source text metrics.
+
+    The structure counts keep the heading (atxHeadings stays 1), so only the
+    word, character and paragraph counts describe the body.
+    """
+    visible = "\n\n".join(text for n in body if (text := _visible(n).strip()))
+    metrics = cast("dict[str, object]", block["metrics"])
+    source = cast("str", block["source"])
+    metrics["visible"] = _text_metrics(visible)
+    metrics["source"] = _text_metrics(source.removeprefix(heading_source))
+    block["visible"] = visible
+
+
 def normalize(
     markdown: str,
     *,
@@ -283,30 +301,36 @@ def normalize(
     variant: str,
     metadata: dict[str, builtins.object],
 ) -> dict[str, builtins.object]:
-    """Return a core.cue Draft; input starts with a nonempty level-one ATX title.
+    """Return a core.cue Draft.
 
-    Metadata must already contain JSON values. Frontmatter is the caller's job.
+    Input starts with a nonempty level-one ATX title, except for the
+    `issue-comment` object, which has no title and keeps leading text as a
+    `preamble` block. Section and draft word, character and paragraph metrics
+    exclude headings. Metadata must already contain JSON values. Frontmatter is
+    the caller's job.
     """
+    titled = object != "issue-comment"
     parser = (
         MarkdownIt("commonmark", {"inline_definitions": True})
         .enable(["table", "strikethrough"])
         .use(tasklists_plugin)
     )
     nodes = SyntaxTreeNode(parser.parse(markdown)).children
-    _validate_title(nodes)
     doc = _Document(markdown)
     blocks: dict[str, dict[str, builtins.object]] = {}
-    title_end = cast("tuple[int, int]", nodes[0].map)[1]
-    title = doc.value(nodes[:1], 0, doc.offsets[title_end])
-    title.update(
-        kind="heading",
-        heading=_visible(nodes[0]).strip(),
-        level=1,
-        inline={"elements": [], "repositoryReferences": []},
-        content=[],
-    )
-    blocks["title"] = title
-    groups = _groups(nodes[1:])
+    if titled:
+        _validate_title(nodes)
+        title_end = cast("tuple[int, int]", nodes[0].map)[1]
+        title = doc.value(nodes[:1], 0, doc.offsets[title_end])
+        title.update(
+            kind="heading",
+            heading=_visible(nodes[0]).strip(),
+            level=1,
+            inline={"elements": [], "repositoryReferences": []},
+            content=[],
+        )
+        blocks["title"] = title
+    groups = _groups(nodes[1:] if titled else nodes)
     for index, group in enumerate(groups):
         first = group[0]
         section = first.type == "heading" and first.tag == "h2"
@@ -329,13 +353,24 @@ def normalize(
                 message = "Section headings must have visible text"
                 raise ValueError(message)
             block.update(heading=heading, level=2)
+            heading_end = cast("tuple[int, int]", first.map)[1]
+            _without_heading(
+                block,
+                markdown[start : doc.offsets[heading_end]],
+                group[1:],
+            )
             key = re.sub(r"[\W_]+", "-", heading.lower()).strip("-") or "section"
         candidate, suffix = key, 1
         while candidate in blocks:
             suffix += 1
             candidate = f"{key}-{suffix}"
         blocks[candidate] = block
-    visible = "\n\n".join(text for n in nodes if (text := _visible(n).strip()))
+    visible = "\n\n".join(
+        text
+        for n in nodes
+        if not (n.type == "heading" and n.tag in {"h1", "h2"})
+        and (text := _visible(n).strip())
+    )
     return {
         "schemaVersion": 1,
         "object": object,
