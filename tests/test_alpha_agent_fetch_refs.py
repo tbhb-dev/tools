@@ -87,7 +87,7 @@ def test_invalid_ref_is_refused_by_controller_and_host(
         worktree.fetch_commit(tmp_path, forged)
     assert str(caught.value) == expected
     with pytest.raises(Invalid) as caught:
-        worktree.create(tmp_path, "sample", forged, (forged.repo,))
+        worktree.create(tmp_path, "sample", forged)
     assert str(caught.value) == expected
     assert list(tmp_path.rglob("*")) == before
 
@@ -126,7 +126,7 @@ def test_ninth_ref_is_refused_by_controller_and_host(
     with pytest.raises(Invalid, match=r"^request fetch_refs allows at most 8 refs$"):
         worktree.fetch_commit(tmp_path, forged)
     with pytest.raises(Invalid, match=r"^request fetch_refs allows at most 8 refs$"):
-        worktree.create(tmp_path, "sample", forged, (forged.repo,))
+        worktree.create(tmp_path, "sample", forged)
     assert list(tmp_path.rglob("*")) == before
 
 

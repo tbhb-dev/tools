@@ -98,8 +98,11 @@ def git(clone: Path, *args: str, token: str | None = None) -> str:
         else ["--git-dir", str(clone)]
     )
     offline = ["-c", "protocol.allow=never"]
+    # A moved repository answers with a redirect, and the owner gate checks only
+    # the requested name, so an online command never follows one.
+    online_only = ["-c", "http.followRedirects=false"]
     online = args[0] in ("fetch", "ls-remote")
-    invocation = [*command, *([] if online else offline), *args]
+    invocation = [*command, *(online_only if online else offline), *args]
     output = partial(
         subprocess.check_output,
         env=env,
@@ -482,30 +485,21 @@ def ensure_clone_directory(clone: Path) -> None:
         clone.mkdir(parents=True, exist_ok=True)
 
 
-# Every repository of this GitHub organization is fetchable without a list entry.
-DEFAULT_ORG = "tbhb-dev"
-
-
 def create(
     clone: Path,
     name: str,
     request: RunRequest,
-    public_repos: tuple[str, ...],
     token_source: Callable[[], str | None] | None = None,
 ) -> Path:
     check_fetch_refs(request.fetch_refs)
     parts = repo.parts(request.repo)
-    in_org = (parts[0], parts[1].lower()) == (repo.DEFAULT_GIT_HOST, DEFAULT_ORG)
-    if not in_org and parts not in tuple(repo.parts(value) for value in public_repos):
+    if (parts[0], parts[1].lower()) != (repo.DEFAULT_GIT_HOST, repo.DEFAULT_ORG):
         message = (
-            f"repository {request.repo}: agent mirrors fetch only {DEFAULT_ORG} "
-            "repositories and those listed in public_repos"
+            f"repository {request.repo}: agent mirrors fetch only "
+            f"{repo.DEFAULT_ORG} repositories"
         )
         raise Invalid(message)
-    host, owner, repository = parts
-    if host != repo.DEFAULT_GIT_HOST:
-        message = "agent mirrors require a GitHub repository"
-        raise Invalid(message)
+    _, owner, repository = parts
     url = f"https://github.com/{owner}/{repository}.git"
     ensure_clone_directory(clone)
     worktree = clone / ".worktrees" / f"agent-{name}"
