@@ -314,3 +314,8 @@ itimer
 setitimer
 sigalrm
 signum
+refspec
+refspecs
+unfetched
+forc
+ofoo
