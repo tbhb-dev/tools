@@ -431,7 +431,7 @@ def repo_name(value: str) -> str | None:
 
 def origin_repo(cwd: Path | None) -> str | None:
     """``owner/repo`` of the origin remote of ``cwd``, or None."""
-    code, url = git("remote", "get-url", "origin", cwd=cwd)
+    code, url = git("remote", "get-url", "--push", "origin", cwd=cwd)
     return repo_name(url.strip().replace(":", "/")) if code == 0 else None
 
 

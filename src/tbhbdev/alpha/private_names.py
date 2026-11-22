@@ -253,7 +253,7 @@ def names_for_repository(name: str | None) -> Names | None:
 
 def private_names() -> Names | None:
     """Names to flag for origin; an unreadable origin counts as public."""
-    code, url = git("config", "--get", "remote.origin.url")
+    code, url = git("remote", "get-url", "--push", "origin")
     return names_for_repository(repository_name(url) if code == 0 else None)
 
 

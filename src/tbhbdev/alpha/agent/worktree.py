@@ -408,7 +408,6 @@ def clone_run(mirror: Path, workspace: Path, url: str) -> None:
         str(mirror),
         str(workspace),
     )
-    git(workspace, "config", "remote.origin.url", url)
     git(workspace, "config", "remote.origin.pushurl", url)
     git(workspace, "config", "core.hooksPath", str(workspace / ".git" / "hooks"))
 

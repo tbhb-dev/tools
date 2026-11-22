@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -352,7 +353,7 @@ def set_origin(monkeypatch: pytest.MonkeyPatch, code: int, url: str) -> None:
 
     def fake(*args: str, **kwargs: object) -> tuple[int, str]:
         del kwargs
-        assert args == ("config", "--get", "remote.origin.url")
+        assert args == ("remote", "get-url", "--push", "origin")
         return code, url
 
     monkeypatch.setattr(pn, "git", fake)
@@ -431,6 +432,23 @@ def test_private_origin_skips_the_check(
 ) -> None:
     set_origin(monkeypatch, 0, url)
     write_config(home, '[pr_check]\nprivate_repos = ["example-lab"]\n')
+    assert pn.private_names() is None
+    assert pn.draft_problems([PRIVATE_REPO], 1) == []
+
+
+def test_a_run_checkout_reads_the_push_url(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    for args in (
+        ["init", "-q"],
+        ["remote", "add", "origin", str(tmp_path / "mirror.git")],
+        ["config", "remote.origin.pushurl", "git@github.com:org/example-lab.git"],
+    ):
+        subprocess.run(["git", "-C", str(checkout), *args], check=True)
+    write_config(home, '[pr_check]\nprivate_repos = ["example-lab"]\n')
+    monkeypatch.chdir(checkout)
     assert pn.private_names() is None
     assert pn.draft_problems([PRIVATE_REPO], 1) == []
 

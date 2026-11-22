@@ -65,7 +65,7 @@ def is_tbhb_dev_url(url: str) -> bool:
 
 def in_tbhb_dev(cwd: Path | None = None) -> bool:
     """Whether `cwd` is in a repository whose origin is a tbhb-dev repository."""
-    code, url = git("remote", "get-url", "origin", cwd=cwd)
+    code, url = git("remote", "get-url", "--push", "origin", cwd=cwd)
     return code == 0 and is_tbhb_dev_url(url)
 
 
