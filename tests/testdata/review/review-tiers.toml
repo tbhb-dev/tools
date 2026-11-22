@@ -1,0 +1,5 @@
+[tier.2]
+paths = [".github/workflows/**", "**/rulesets/**", "**/permissions/**", ".claude/**", ".codex/**",
+         "**/deploy/**", "**/credentials.py", "**/review*.py", "**/*merge*.py"]
+patterns = ['\brmtree\b', '\brm\s+-[rf]*r[rf]*f\b|\brm\s+-[rf]*f[rf]*r\b', '\bgit\s+branch\s+-D\b',
+            '\bgit\s+push\b.*(?:--force(?:-with-lease)?\b|\s-f\b)', '(?i)\b(?:credentials?|tokens?|permissions?)\b']

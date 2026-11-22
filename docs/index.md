@@ -23,5 +23,6 @@ okf_version: "0.2"
 * [Secret scan](reference/alpha/secret-scan.md) - Secret scanning for pull request and merge messages.
 * [No self-approval](reference/alpha/no-self-approval.md) - Pull request authorship, approval guards, and closing commands.
 * [Review drafts](reference/alpha/review-drafts.md) - Drafting and checking pull request reviews.
+* [Review tier](reference/review-tier.md) - Compute and post the review tier for a pull request.
 * [Repository settings](reference/alpha/repository-settings.md) - Standard repository settings and bootstrap behavior.
 * [GitHub polling](reference/alpha/github-polling.md) - GitHub event delivery, polling guards, and request budgets.
