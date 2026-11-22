@@ -700,7 +700,9 @@ def protected_words(command: list[str]) -> bool:
     directory or a parent, because that removes or restores the files. Each
     command of a quoted ``a; b`` text counts alone, so a mover in one command
     doesn't make an awk match operator or an echoed ``/`` in another read as a
-    path. A bare ``/`` operand still doesn't count.
+    path. A bare ``/`` operand still doesn't count. The command's own words
+    count too, as given, because an unquoted word that holds a ``;`` or a space
+    is a literal operand there, not shell text.
     """
     words = flattened(command)
     if any(name in word.lower() for word in words for name in PROTECTED):
@@ -708,7 +710,7 @@ def protected_words(command: list[str]) -> bool:
     return any(
         any(word.rpartition("/")[2].lower() in STATE_MOVERS for word in part)
         and any(word != "/" and names_state_dir(attached(word)) for word in part)
-        for part in segments(command)
+        for part in [command, *segments(command)]
     )
 
 
