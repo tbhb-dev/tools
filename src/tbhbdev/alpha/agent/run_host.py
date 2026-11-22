@@ -900,10 +900,19 @@ def audit_summary(run: Run, prepared: Prepared | None, rc: int) -> None:
     )
 
 
-def shutdown_bazel(prepared: Prepared | None) -> str:
+def shutdown_bazel(run: Run, prepared: Prepared | None) -> str:
     """Stop the Bazel server the run left behind, however the run ended."""
-    tool = shutil.which("bazelisk") or shutil.which("bazel")
-    if prepared is None or tool is None:
+    if prepared is None:
+        return "skipped"
+    # The harness ran with the configured tool path, so search it as well.
+    search = ":".join(
+        (
+            os.environ.get("PATH", os.defpath),
+            policy.tool_path(run.settings, run.host, str(run.home)),
+        )
+    )
+    tool = shutil.which("bazelisk", path=search) or shutil.which("bazel", path=search)
+    if tool is None:
         return "skipped"
     try:
         done = subprocess.run(  # nosec B603
@@ -940,7 +949,7 @@ def finish(
         except OSError, Invalid:
             process_group.unknown(run.files)
         finally:
-            bazel = shutdown_bazel(prepared)
+            bazel = shutdown_bazel(run, prepared)
             try:
                 phase = "unknown" if run.files.uncertain else "ended"
                 run.files.write("phase", phase)

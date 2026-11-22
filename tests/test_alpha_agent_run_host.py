@@ -51,7 +51,7 @@ from tbhbdev.alpha.agent import (
     run_host,
     runfiles,
 )
-from tbhbdev.alpha.agent.decisions import request
+from tbhbdev.alpha.agent.decisions import policy, request
 from tbhbdev.alpha.agent.decisions.run_state import Group
 from tbhbdev.alpha.agent.model import (
     AgyPolicy,
@@ -4978,8 +4978,9 @@ class FakePrepared:
 
 
 def test_shutdown_bazel_runs_in_the_worktree(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    searched: list[str | None] = []
     calls: list[tuple[list[str], str | None, int]] = []
 
     def run(
@@ -4988,10 +4989,21 @@ def test_shutdown_bazel_runs_in_the_worktree(
         calls.append((command, cwd, timeout))
         return subprocess.CompletedProcess(command, 3)
 
-    monkeypatch.setattr(shutil, "which", lambda name: f"/bin/{name}")
+    def which(name: str, path: str | None = None) -> str:
+        searched.append(path)
+        return f"/bin/{name}"
+
+    run_value = make_run(tmp_path)
+    monkeypatch.setattr(shutil, "which", which)
     monkeypatch.setattr(subprocess, "run", run)
-    assert run_host.shutdown_bazel(cast("run_host.Prepared", FakePrepared())) == "rc=3"
+    assert (
+        run_host.shutdown_bazel(run_value, cast("run_host.Prepared", FakePrepared()))
+        == "rc=3"
+    )
     assert calls == [(["/bin/bazelisk", "shutdown"], "/work/agent-x", 60)]
+    tools = policy.tool_path(run_value.settings, run_value.host, str(run_value.home))
+    assert searched[0] is not None
+    assert searched[0].endswith(":" + tools)
 
 
 @pytest.mark.parametrize(
@@ -5003,19 +5015,22 @@ def test_shutdown_bazel_runs_in_the_worktree(
     ],
 )
 def test_shutdown_bazel_skips_without_a_tool_or_workspace(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     available: tuple[str, ...],
     prepared: bool,
     expected: str,
 ) -> None:
     monkeypatch.setattr(
-        shutil, "which", lambda name: f"/bin/{name}" if name in available else None
+        shutil,
+        "which",
+        lambda name, path=None: f"/bin/{name}" if name in available else None,  # noqa: ARG005
     )
     monkeypatch.setattr(
         subprocess, "run", lambda command, **_o: subprocess.CompletedProcess(command, 0)
     )
     value = cast("run_host.Prepared", FakePrepared()) if prepared else None
-    assert run_host.shutdown_bazel(value) == expected
+    assert run_host.shutdown_bazel(make_run(tmp_path), value) == expected
 
 
 @pytest.mark.parametrize(
@@ -5026,15 +5041,18 @@ def test_shutdown_bazel_skips_without_a_tool_or_workspace(
     ],
 )
 def test_shutdown_bazel_reports_a_failed_shutdown(
-    monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
 ) -> None:
     def run(*_args: object, **_options: object) -> None:
         raise error
 
-    monkeypatch.setattr(shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name, path=None: f"/bin/{name}")  # noqa: ARG005
     monkeypatch.setattr(subprocess, "run", run)
     assert (
-        run_host.shutdown_bazel(cast("run_host.Prepared", FakePrepared())) == expected
+        run_host.shutdown_bazel(
+            make_run(tmp_path), cast("run_host.Prepared", FakePrepared())
+        )
+        == expected
     )
 
 
@@ -5045,9 +5063,13 @@ def test_finish_shuts_bazel_down_and_records_it(
     run = make_run(tmp_path)
     order: list[str] = []
     entries: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        run_host, "shutdown_bazel", lambda _prepared: order.append("bazel") or "rc=0"
-    )
+
+    def shutdown(_run: run_host.Run, _prepared: object) -> str:
+        assert not run.files.path("rc").exists()
+        order.append("bazel")
+        return "rc=0"
+
+    monkeypatch.setattr(run_host, "shutdown_bazel", shutdown)
     monkeypatch.setattr(runfiles, "append", lambda _root, entry: entries.append(entry))
     assert run_host.finish(run, None, None, rc) == rc
     assert order == ["bazel"]
