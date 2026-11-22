@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import getpass
 import hashlib
 import json
 import os
@@ -71,6 +72,7 @@ class Prepared:
     paths: RunPaths
     delivery: credentials.Delivery
     auth_before: str | None = dataclasses.field(repr=False)
+    bases: tuple[Path, ...] = ()
 
 
 def planned_paths(run: Run) -> RunPaths:
@@ -548,7 +550,7 @@ def prepare_workspace(run: Run) -> Prepared:
                     Path(paths.codex_home) / "config.toml",
                     otel_config(run.settings.otel_endpoint),
                 )
-    return Prepared(paths, delivery, before)
+    return Prepared(paths, delivery, before, bazel_bases(run.home, str(workspace)))
 
 
 def index_entry(
@@ -901,10 +903,53 @@ def audit_summary(run: Run, prepared: Prepared | None, rc: int) -> None:
     )
 
 
-def shutdown_bazel(run: Run, prepared: Prepared | None) -> str:
-    """Stop the Bazel server the run left behind, however the run ended."""
-    if prepared is None:
-        return "skipped"
+def _bazel_roots(home: Path) -> tuple[tuple[Path, Path], ...]:
+    """The (trusted anchor, cache root) pairs of the agent's own Bazel caches."""
+    user = f"_bazel_{getpass.getuser()}"
+    return (
+        (home, home / ".cache/bazel" / user),
+        (Path("/var/tmp"), Path("/var/tmp") / user),  # noqa: S108  # nosec B108 -- the trusted /var/tmp anchor, not a temp file
+    )
+
+
+def bazel_bases(home: Path, worktree: str) -> tuple[Path, ...]:
+    """Pin the output bases Bazel keys by the md5 of the workspace path.
+
+    Prepare time computes them once, so a worktree swapped later cannot name
+    another workspace's base. Custom --output_base locations are out of scope.
+    """
+    names = {
+        hashlib.md5(path.encode(), usedforsecurity=False).hexdigest()
+        for path in (worktree, os.path.realpath(worktree))
+    }
+    return tuple(
+        root / name for _, root in _bazel_roots(home) for name in sorted(names)
+    )
+
+
+def _owned_base(base: Path) -> bool:
+    """Whether the base is a real directory the agent owns, not a symlink."""
+    try:
+        status = base.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(status.st_mode) and status.st_uid == os.getuid()
+
+
+def _server_alive(base: Path) -> bool:
+    try:
+        pid = int((base / "server/server.pid.txt").read_text())
+        os.kill(pid, 0)
+    except PermissionError:
+        # A live process of another uid, or an unreadable pid file: keep the base.
+        return True
+    except OSError, ValueError:
+        # No readable pid file, or no such process, means no server we can see.
+        return False
+    return True
+
+
+def _bazel_tool(run: Run) -> str | None:
     # The harness ran with the configured tool path, so search it as well.
     search = ":".join(
         (
@@ -912,28 +957,51 @@ def shutdown_bazel(run: Run, prepared: Prepared | None) -> str:
             policy.tool_path(run.settings, run.host, str(run.home)),
         )
     )
-    tool = shutil.which("bazelisk", path=search) or shutil.which("bazel", path=search)
-    if tool is None:
-        return "skipped"
+    return shutil.which("bazelisk", path=search) or shutil.which("bazel", path=search)
+
+
+def _shutdown_base(tool: str, base: Path, worktree: str) -> str:
     try:
         done = subprocess.run(  # nosec B603
-            [tool, "shutdown"],
-            cwd=prepared.paths.worktree,
+            [tool, f"--output_base={base}", "shutdown"],
+            cwd=worktree,
             capture_output=True,
             timeout=_BAZEL_SHUTDOWN_SECONDS,
             check=False,
         )
+        result = f"rc={done.returncode}"
     except subprocess.TimeoutExpired:
-        return "timed out"
+        result = "timed out"
     except OSError:
-        return "failed to run"
-    return f"rc={done.returncode}"
+        result = "failed to run"
+    if result == "rc=0" and _server_alive(base):
+        result = "server alive"
+    return result
+
+
+def shutdown_bazel(run: Run, prepared: Prepared | None) -> dict[Path, str]:
+    """Stop the Bazel server of each recorded base that is the agent's own.
+
+    Maps each base to its shutdown status.
+    """
+    if prepared is None:
+        return {}
+    tool = _bazel_tool(run)
+    stopped: dict[Path, str] = {}
+    for base in prepared.bases:
+        if not _owned_base(base):
+            if os.path.lexists(base):
+                run.files.write("log", f"bazel shutdown: refused {base}\n")
+            continue
+        if tool is not None:
+            stopped[base] = _shutdown_base(tool, base, prepared.paths.worktree)
+    return stopped
 
 
 def finish(
     run: Run, prepared: Prepared | None, agent: subprocess.Popen[str] | None, rc: int
 ) -> int:
-    bazel = "skipped"
+    bazel = ""
     try:
         try:
             reason = finish_auth(run, prepared)
@@ -950,7 +1018,13 @@ def finish(
         except OSError, Invalid:
             process_group.unknown(run.files)
         finally:
-            bazel = shutdown_bazel(run, prepared)
+            try:
+                bazel = ",".join(sorted(set(shutdown_bazel(run, prepared).values())))
+            except Exception:  # noqa: BLE001
+                # The Bazel shutdown must not block the rc and completion record.
+                with suppress(Exception):
+                    run.files.write("log", "bazel shutdown failed\n")
+            bazel = bazel or "skipped"
             try:
                 phase = "unknown" if run.files.uncertain else "ended"
                 run.files.write("phase", phase)
