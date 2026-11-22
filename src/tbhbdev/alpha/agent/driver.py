@@ -13,8 +13,9 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NoReturn
 
 from tbhbdev import version
-from tbhbdev.alpha.agent import render, runfiles, taint_store, transport
+from tbhbdev.alpha.agent import launcher, render, runfiles, taint_store, transport
 from tbhbdev.alpha.agent.decisions import driver as rules
+from tbhbdev.alpha.agent.decisions import launcher as launch_rules
 from tbhbdev.alpha.agent.decisions import remote, repo, request, taint
 from tbhbdev.alpha.agent.decisions import runfiles_names as files
 from tbhbdev.alpha.agent.model import Harness, Invalid, Profile, RunKind, RunRequest
@@ -29,13 +30,19 @@ class Run:
     """The recorded target and request, with no settings or credential references."""
 
     def __init__(
-        self, name: str, host: Host, run: RunRequest, started: str, owner: str
+        self,
+        name: str,
+        host: Host,
+        run: RunRequest,
+        started: str,
+        owner: str,
     ) -> None:
         self.name = name
         self.host = host
         self.request = run
         self.started = started
         self.owner = owner
+        self.launched_by: tuple[str | None, str | None] = (None, None)
         self.cleaning = False
 
 
@@ -57,12 +64,18 @@ def save(run: Run) -> None:
         "host": run.host.name,
         "started": run.started,
         "owner": run.owner,
+        "launcher": run.launched_by[0],
+        "launcher_session": run.launched_by[1],
         "cleaning": run.cleaning,
     }
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as output:
         json.dump(record, output)
         output.write("\n")
+
+
+def _maybe_text(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def load(settings: Settings, name: str) -> Run:
@@ -76,11 +89,16 @@ def load(settings: Settings, name: str) -> Run:
         started = str(record.pop("started"))
         owner = str(record.pop("owner"))
         cleaning = record.pop("cleaning")
+        launched_by = (
+            _maybe_text(record.pop("launcher", None)),
+            _maybe_text(record.pop("launcher_session", None)),
+        )
         run = request.parse(record, host_allows_unsandboxed=True)
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         message = f"{path}: invalid run metadata"
         raise Invalid(message) from exc
     result = Run(name, host, run, started, owner)
+    result.launched_by = launched_by
     result.cleaning = bool(cleaning)
     return result
 
@@ -98,6 +116,9 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     host = rules.select_host(settings, args.host, args.account)
     harness = Harness(args.harness)
     profile = Profile(args.profile)
+    launched_by = launcher.session()
+    if launch_rules.is_reviewer(args.role, profile):
+        launch_rules.check(launched_by[0], args.repo, *launcher.load_table())
     rules.check_model(harness, args.model, allow_non_gemini=args.allow_non_gemini)
     # A review's final commit is read remotely after all local checks pass.
     commit = "0" * 40 if profile is Profile.REVIEW else None
@@ -127,9 +148,15 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     run = rules.check(
         run, settings, host, ref=args.ref, exists=metadata_path(args.name).exists()
     )
-    return Run(
-        args.name, host, run, datetime.now(UTC).isoformat(), secrets.token_hex(16)
+    result = Run(
+        args.name,
+        host,
+        run,
+        datetime.now(UTC).isoformat(),
+        secrets.token_hex(16),
     )
+    result.launched_by = launched_by
+    return result
 
 
 def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
@@ -409,7 +436,12 @@ def status(settings: Settings, run: Run) -> int:
             run.name,
             phase=reading.phase,
             rc=rules.state(reading.rc, session=reading.session),
-            target=(run.host.name, run.host.account, run.request.authorized_by),
+            target=(
+                run.host.name,
+                run.host.account,
+                run.request.authorized_by,
+                run.launched_by[0],
+            ),
             started=run.started,
         )
         + (f" host={state.status}" if state.tainted else "")
