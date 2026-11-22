@@ -19,6 +19,13 @@ from datetime import datetime
 from tbhbdev import userconfig
 
 TABLE = "harness"
+GITHUB_WRITES = (
+    "Use `tbhbdev alpha` for GitHub writes, never raw `gh`: "
+    "`tbhbdev alpha pr create|check [DRAFT]`, `pr ready N`, "
+    "`pr close N --reason TEXT`, `merge N`, `review draft N`, "
+    "`agent exec --host H --repo R --model M --effort E --profile build|review "
+    "NAME PROMPT_FILE`; `tbhbdev alpha --help` lists the rest."
+)
 
 
 def os_name() -> str:
@@ -58,6 +65,7 @@ def context(hosts: dict[str, str], host: str, now: datetime) -> str:
             f'"this machine" and "local" mean {host}.'
         )
     lines.append(f"Local time at session start: {now:%Y-%m-%d %H:%M %Z}.")
+    lines.append(GITHUB_WRITES)
     return "\n".join(lines)
 
 

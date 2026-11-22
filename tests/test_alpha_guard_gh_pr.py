@@ -6,6 +6,7 @@
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 from contextlib import redirect_stdout
@@ -18,9 +19,9 @@ from fake_tool import pythonpath
 from hypothesis import given
 from hypothesis import strategies as st
 
+from tbhbdev.alpha import close, install, opened, pull_request, squash_merge
 from tbhbdev.alpha import guard_gh_pr as guard
 from tbhbdev.alpha import identity as ai
-from tbhbdev.alpha import install, opened
 
 DATA = Path(__file__).parent / "testdata" / "alpha"
 SRC = Path(guard.__file__).parents[2]
@@ -32,9 +33,26 @@ CREATE = (
 )
 EDIT = (
     "`gh pr edit` is blocked. Update .github/PULL_REQUEST_DRAFT.md, "
-    "then run `tbhbdev alpha pr edit --pr {n}`."
+    "then run `tbhbdev alpha pr edit .github/PULL_REQUEST_DRAFT.md --pr {n}`."
 )
 READY = "`gh pr ready` is blocked. Run `tbhbdev alpha pr ready {n}` instead."
+PR_CLOSE = (
+    "`gh pr close` is blocked. From the repository clone, run "
+    "`tbhbdev alpha pr close {n} --reason TEXT` (no --repo)."
+)
+ISSUE_CLOSE = (
+    "`gh issue close` is blocked. From the repository clone, run "
+    "`tbhbdev alpha issue close {n} --reason completed|not-planned "
+    "[--comment TEXT]` (no --repo)."
+)
+RERUN = (
+    "`gh run rerun` is blocked. Run `tbhbdev alpha pr rerun N`, where N is the "
+    "pull request number, to rerun the failed jobs of its latest run."
+)
+DELETE_BRANCH = (
+    "A `gh api` branch delete is blocked. For a closed or merged PR, run "
+    "`tbhbdev alpha pr delete-branch {n}` instead."
+)
 MERGE = (
     "`gh pr merge` is blocked. Once the PR is approved, run "
     "`tbhbdev alpha merge {n}` (add `--dry-run` to preview the squash message first)."
@@ -170,6 +188,19 @@ def test_allowed(text: str) -> None:
         ("gh pr merge --auto 8", MERGE.format(n=8)),
         ("gh pr merge", MERGE.format(n="<N>")),
         ("gh pr merge feature-branch", MERGE.format(n="<N>")),
+        ("gh pr close 5 --repo a/b -c done", PR_CLOSE.format(n=5)),
+        ("gh pr close", PR_CLOSE.format(n="<N>")),
+        ("gh issue close 6 --reason 'not planned'", ISSUE_CLOSE.format(n=6)),
+        ("gh -R a/b issue close 6", ISSUE_CLOSE.format(n=6)),
+        ("gh run rerun 123 --failed", RERUN),
+        (
+            "gh api -X DELETE repos/a/b/git/refs/heads/feat/x",
+            DELETE_BRANCH.format(n="<N>"),
+        ),
+        (
+            "gh api repos/{owner}/{repo}/git/refs/heads/x --method delete",
+            DELETE_BRANCH.format(n="<N>"),
+        ),
         ("gh pr ready 399", READY.format(n=399)),
         ("gh pr ready", READY.format(n="<N>")),
         (
@@ -185,6 +216,76 @@ def test_hint(text: str, expected: str) -> None:
     found = run_find(text)
     assert found is not None
     assert guard.hint(found) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'echo "gh pr close 1"',
+        "echo 'gh issue close 1; gh run rerun 2'",
+        "gh issue list",
+        "gh run view 1",
+        "gh api repos/a/b/git/refs/heads/x",
+        "gh api -X GET repos/a/b/git/refs/heads/x",
+        "gh api -X DELETE repos/a/b/issues/1",
+        "gh api -X DELETE",
+    ],
+)
+def test_new_hints_leave_other_commands_alone(text: str) -> None:
+    assert run_find(text) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "named"),
+    [
+        ("gh pr create", "tbhbdev alpha pr create"),
+        ("gh pr edit 3", "tbhbdev alpha pr edit .github/PULL_REQUEST_DRAFT.md --pr 3"),
+        ("gh pr merge 3", "tbhbdev alpha merge 3"),
+        ("gh pr ready 3", "tbhbdev alpha pr ready 3"),
+        ("gh pr close 3", "tbhbdev alpha pr close 3 --reason TEXT"),
+        ("gh issue close 3", "tbhbdev alpha issue close 3 --reason"),
+        ("gh run rerun 9", "tbhbdev alpha pr rerun N"),
+        (
+            "gh api -X DELETE repos/a/b/git/refs/heads/x",
+            "tbhbdev alpha pr delete-branch",
+        ),
+    ],
+)
+def test_every_denial_names_the_command_and_the_alpha_footer(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    named: str,
+) -> None:
+    stdin = json.dumps(with_command(CLAUDE_PAYLOAD, command))
+    _, out, _ = run_main(monkeypatch, capsys, stdin)
+    message = reason(out)
+    assert message is not None
+    first, *_, last = message.split("\n")
+    assert first == "tbhbdev hint:"
+    assert named in message
+    assert last == (
+        "Use `tbhbdev alpha` for GitHub writes: `tbhbdev alpha --help` lists the "
+        "commands, and `tbhbdev alpha session-context` reports this session's context."
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git commit -m 'gh pr close 5'",
+        "git commit -m 'gh issue close 5'",
+        "git commit -m 'gh run rerun 5'",
+        "git commit -m 'gh api -X DELETE repos/a/b/git/refs/heads/x'",
+    ],
+)
+def test_a_lookalike_in_a_commit_message_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    stdin = json.dumps(with_command(CLAUDE_PAYLOAD, command))
+    assert run_main(monkeypatch, capsys, stdin) == (0, "", "")
 
 
 def test_first_match_wins() -> None:
@@ -273,7 +374,7 @@ def test_claude_and_codex_deny_contract(
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": CREATE,
+            "permissionDecisionReason": f"{guard.HINT_LINE}\n{CREATE}\n{guard.FOOTER}",
         }
     }
 
@@ -284,7 +385,10 @@ def test_antigravity_deny_contract(
     stdin = json.dumps(with_command(AGY_PAYLOAD, "gh pr merge 4"))
     code, out, err = run_main(monkeypatch, capsys, stdin)
     assert (code, err) == (0, "")
-    assert json.loads(out) == {"decision": "deny", "reason": MERGE.format(n=4)}
+    assert json.loads(out) == {
+        "decision": "deny",
+        "reason": f"{guard.HINT_LINE}\n{MERGE.format(n=4)}\n{guard.FOOTER}",
+    }
 
 
 @pytest.mark.parametrize("payload", [CLAUDE_PAYLOAD, CODEX_PAYLOAD, AGY_PAYLOAD])
@@ -751,7 +855,7 @@ def test_a_crash_while_matching_an_approval_fails_open(
         guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, SCRIPT_ROUTES[0][0]) is None
     )
     assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, "gh pr merge 1") == (
-        MERGE.format(n=1)
+        f"{guard.HINT_LINE}\n{MERGE.format(n=1)}\n{guard.FOOTER}"
     )
 
 
@@ -1276,3 +1380,43 @@ def test_a_non_utf8_ledger_denies(
         f"{RULE}, and the guard can't read this session's ledger, "
         f"so it refuses `tbhb-approve`: {path} is not UTF-8"
     )
+
+
+PLACEHOLDERS = {
+    "N": "7",
+    "<N>": "7",
+    "TEXT": "why",
+    "completed|not-planned": "completed",
+}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr create",
+        "gh pr edit 3",
+        "gh pr merge 3",
+        "gh pr ready 3",
+        "gh pr close 3",
+        "gh issue close 3",
+        "gh run rerun 9",
+        "gh api -X DELETE repos/a/b/git/refs/heads/x",
+    ],
+)
+def test_every_hinted_command_line_parses_with_the_real_cli(command: str) -> None:
+    found = run_find(command)
+    assert found is not None
+    spans = re.findall(r"`tbhbdev alpha ([^`]+)`", guard.hint(found))
+    assert spans
+    for span in spans:
+        words = [
+            PLACEHOLDERS.get(w, w) for w in re.sub(r"\s*\[[^\]]*\]", "", span).split()
+        ]
+        if words[0] == "merge":
+            squash_merge.build_parser("x").parse_args(words[1:])
+        elif words[:2] in (["pr", "close"], ["issue", "close"]):
+            close.build_parser("x").parse_args(words)
+        else:
+            pull_request.build_parser("x").parse_args(
+                words[1:] if words[0] == "pr" else words
+            )
