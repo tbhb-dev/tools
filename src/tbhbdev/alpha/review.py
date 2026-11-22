@@ -202,10 +202,6 @@ def main(argv: list[str], prog: str) -> int:
     """Run the review draft, check or policy command."""
     if argv[:1] == ["policy"]:
         return review_policy.main(argv[1:], f"{prog} policy")
-    if argv[:1] == ["create"]:
-        from tbhbdev.alpha.agent import review_post  # noqa: PLC0415 -- it imports this module
-
-        return review_post.main(argv[1:], f"{prog} create")
     parser = argparse.ArgumentParser(prog=prog, description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     create = sub.add_parser("draft")
@@ -213,7 +209,6 @@ def main(argv: list[str], prog: str) -> int:
     create.add_argument("--force", action="store_true")
     sub.add_parser("check").add_argument("number", type=int)
     sub.add_parser("policy", help="check a worktree's review policy files")
-    sub.add_parser("create", help="post the draft as a review; token on stdin")
     args = parser.parse_args(argv)
     if args.number < 1:
         parser.error("PR number must be at least 1")

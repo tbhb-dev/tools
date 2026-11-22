@@ -2,15 +2,12 @@
 
 The sandbox only writes the draft file. Run-host validates it, adds the run's
 identity to the body and posts it after the run ends. A run can comment or
-request changes; approval stays with a human-gated reviewer. `review create`
-is the same step as a command, with the token on stdin.
+request changes; approval stays with a human-gated reviewer.
 """
 
 from __future__ import annotations
 
-import argparse
 import re
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -27,8 +24,6 @@ if TYPE_CHECKING:
 ALLOWED_EVENTS = frozenset({"COMMENT", "REQUEST_CHANGES"})
 DRAFT_NAME = re.compile(r"review-(\d+)\.md")
 DRAFT_LIMIT = 64 * 1024
-PAGE = 100
-MAX_PAGES = 20
 TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 
 
@@ -128,32 +123,8 @@ def pull_head(data: object) -> str | None:
     return sha if isinstance(sha, str) else None
 
 
-def existing_review(base: str, token: str, stamp: str) -> int | None:
-    """The id of a review that already carries this run's stamp, if any.
-
-    Raises:
-        PostRefusedError: GitHub sends no list, or too many pages to read.
-    """
-    for page in range(1, MAX_PAGES + 1):
-        data = api("GET", f"{base}/reviews?per_page={PAGE}&page={page}", token)
-        if not isinstance(data, list):
-            message = "GitHub sent no review list"
-            raise PostRefusedError(message)
-        for item in cast("list[object]", data):
-            entry = cast("dict[str, object]", item) if isinstance(item, dict) else {}
-            found = entry.get("id")
-            if isinstance(found, int) and stamp in str(entry.get("body")):
-                return found
-        if len(data) < PAGE:
-            return None
-    message = "too many reviews to check for a duplicate"
-    raise PostRefusedError(message)
-
-
 def create(sub: Submission, token: str) -> int:
     """Validate, then post once; return the review id.
-
-    A repeat of the same run's post returns the existing review's id.
 
     Raises:
         PostRefusedError: A check fails, the head moved, or GitHub refuses.
@@ -164,9 +135,6 @@ def create(sub: Submission, token: str) -> int:
     if pull_head(api("GET", base, token)) != sub.commit:
         message = "the pull request head moved since the run judged it"
         raise PostRefusedError(message)
-    found = existing_review(base, token, sub.stamp)
-    if found is not None:
-        return found
     payload = {
         "commit_id": sub.commit,
         "body": f"{body}\n---\n{sub.stamp}\n",
@@ -207,24 +175,3 @@ def posted(run: Run, prepared: Prepared) -> bool:
         return False
     run.files.write("review", f"{run.request.repo}#{number} {identifier}")
     return True
-
-
-def main(argv: list[str], prog: str) -> int:
-    """Post this worktree's review draft; the token is on stdin."""
-    parser = argparse.ArgumentParser(prog=prog, description=main.__doc__)
-    parser.add_argument("number", type=int)
-    parser.add_argument("--repo", required=True)
-    parser.add_argument("--commit", required=True)
-    parser.add_argument("--stamp", required=True)
-    args = parser.parse_args(argv)
-    path = review.draft_path(args.number)
-    try:
-        sub = Submission(
-            args.repo, args.number, path.read_text(), args.commit, args.stamp
-        )
-        identifier = create(sub, sys.stdin.read().strip())
-    except (PostRefusedError, OSError, ValueError) as refusal:
-        print(f"{prog}: {refusal}", file=sys.stderr)
-        return 1
-    print(identifier)
-    return 0

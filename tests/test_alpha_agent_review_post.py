@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import io
-import sys
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import httpx
 import pytest
 
-from tbhbdev.alpha import review
 from tbhbdev.alpha.agent import credentials, review_post
 from tbhbdev.alpha.agent.model import Profile
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from pathlib import Path
 
     from tbhbdev.alpha.agent import run_host
@@ -85,29 +81,16 @@ class Api:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.calls: list[tuple[str, str, dict[str, str] | None]] = []
         self.pull: httpx.Response | Exception = reply(200, {"head": {"sha": HEAD}})
-        self.reviews: list[httpx.Response | Exception] = [reply(200, [])]
         self.created: httpx.Response | Exception = reply(201, {"id": 99})
         monkeypatch.setattr(httpx, "request", self.request)
 
     def request(self, method: str, url: str, **options: object) -> httpx.Response:
         payload = cast("dict[str, str] | None", options.get("json"))
         self.calls.append((method, url, payload))
-        if method == "POST":
-            outcome = self.created
-        elif url.startswith(f"{BASE}/reviews"):
-            outcome = self.reviews.pop(0)
-        else:
-            outcome = self.pull
+        outcome = self.created if method == "POST" else self.pull
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
-
-
-def draft_at(git_dir: Path) -> Callable[[int], Path]:
-    def path(number: int) -> Path:
-        return git_dir / "tbhb-alpha" / f"review-{number}.md"
-
-    return path
 
 
 def test_posts_the_comment_with_identity_in_the_body(
@@ -119,7 +102,6 @@ def test_posts_the_comment_with_identity_in_the_body(
     assert review_post.posted(run, prepared)
     assert [(m, u) for m, u, _ in api.calls] == [
         ("GET", BASE),
-        ("GET", f"{BASE}/reviews?per_page=100&page=1"),
         ("POST", f"{BASE}/reviews"),
     ]
     payload = api.calls[-1][2]
@@ -192,60 +174,6 @@ def test_a_moved_head_blocks_the_post(
     assert all(m == "GET" for m, _, _ in api.calls)
 
 
-def test_a_repeat_returns_the_existing_review(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, prepared, written = make(tmp_path, draft())
-    monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    api = Api(monkeypatch)
-    api.reviews = [
-        reply(200, [{"id": "x", "body": STAMP}, "junk", {"id": 5, "body": "other"}]),
-        reply(200, [{"id": 41, "body": f"text\n---\n{STAMP}\n"}]),
-    ]
-    api.reviews[0] = reply(200, [{"id": 1, "body": "z"}] * 99 + [{"id": 2}])
-    api.reviews.insert(0, api.reviews[0])
-    api.reviews.pop(0)
-    assert review_post.posted(run, prepared)
-    assert written == {"review": "github.com/o/r#7 41"}
-    assert not any(m == "POST" for m, _, _ in api.calls)
-
-
-def test_a_stamp_on_the_first_page_returns_that_review(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, prepared, written = make(tmp_path, draft())
-    monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    api = Api(monkeypatch)
-    api.reviews = [
-        reply(200, ["junk", {"id": "x", "body": STAMP}, {"id": 5, "body": STAMP}])
-    ]
-    assert review_post.posted(run, prepared)
-    assert written == {"review": "github.com/o/r#7 5"}
-
-
-def test_too_many_review_pages_block_the_post(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, prepared, written = make(tmp_path, draft())
-    monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    api = Api(monkeypatch)
-    full = reply(200, [{"id": 1, "body": "z"}] * review_post.PAGE)
-    api.reviews = [full] * review_post.MAX_PAGES
-    assert not review_post.posted(run, prepared)
-    assert "too many reviews" in written["log"]
-
-
-def test_a_review_list_that_is_not_a_list_blocks_the_post(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, prepared, written = make(tmp_path, draft())
-    monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    api = Api(monkeypatch)
-    api.reviews = [reply(200, {})]
-    assert not review_post.posted(run, prepared)
-    assert "no review list" in written["log"]
-
-
 def test_a_missing_token_blocks_the_post(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -289,48 +217,6 @@ def test_any_2xx_post_is_a_success(
     Api(monkeypatch).created = reply(202, {"id": 8})
     assert review_post.posted(run, prepared)
     assert written == {"review": "github.com/o/r#7 8"}
-
-
-def test_create_posts_this_worktrees_draft_with_the_stdin_token(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    make(tmp_path, draft())
-    git_dir = tmp_path / "ws" / ".git"
-    monkeypatch.setattr(review, "draft_path", draft_at(git_dir))
-    monkeypatch.setattr(sys, "stdin", io.StringIO("tok\n"))
-    Api(monkeypatch)
-    args = ["7", "--repo", "github.com/o/r", "--commit", HEAD, "--stamp", STAMP]
-    assert review.main(["create", *args], "review") == 0
-    assert capsys.readouterr().out == "99\n"
-
-
-def test_create_reports_a_refusal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    make(tmp_path, draft("APPROVE"))
-    git_dir = tmp_path / "ws" / ".git"
-    monkeypatch.setattr(review, "draft_path", draft_at(git_dir))
-    monkeypatch.setattr(sys, "stdin", io.StringIO("tok\n"))
-    monkeypatch.setattr(httpx, "request", forbidden)
-    args = ["7", "--repo", "github.com/o/r", "--commit", HEAD, "--stamp", STAMP]
-    assert review.main(["create", *args], "review") == 1
-    assert "can't post" in capsys.readouterr().err
-
-
-def test_create_reports_a_missing_draft(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    monkeypatch.setattr(review, "draft_path", draft_at(tmp_path / "x" / "y"))
-    monkeypatch.setattr(sys, "stdin", io.StringIO("tok\n"))
-    args = ["7", "--repo", "github.com/o/r", "--commit", HEAD, "--stamp", STAMP]
-    assert review.main(["create", *args], "review") == 1
-    assert "No such file" in capsys.readouterr().err
 
 
 def request_for(profile: Profile) -> RunRequest:
