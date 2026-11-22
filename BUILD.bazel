@@ -55,10 +55,11 @@ repo_files(
     ],
 )
 
-# The review template is package data, not an OKF document.
+# The review template and checklist are package data, not OKF documents.
 repo_files(
     name = "okf_repo_files",
     exclude = [
+        "src/tbhbdev/alpha/review_data/PULL_REQUEST_REVIEW_CHECKLIST.md",
         "src/tbhbdev/alpha/review_data/PULL_REQUEST_REVIEW_TEMPLATE.md",
         ".DS_Store",
         "**/.DS_Store",
