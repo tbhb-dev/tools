@@ -288,6 +288,30 @@ def _without_heading(
     block["visible"] = visible
 
 
+def _group_block(
+    doc: _Document, group: list[SyntaxTreeNode], start: int, end: int
+) -> tuple[str, dict[str, object]]:
+    """Return the key and block for a preamble or a level-two section."""
+    first = group[0]
+    section = first.type == "heading" and first.tag == "h2"
+    block = doc.value(group, start, end)
+    block.update(
+        kind="section" if section else "text",
+        inline={"elements": [], "repositoryReferences": []},
+        content=[doc.block(n) for n in group[int(section) :]],
+    )
+    if not section:
+        return "preamble", block
+    heading = _visible(first).strip()
+    if not heading:
+        message = "Section headings must have visible text"
+        raise ValueError(message)
+    block.update(heading=heading, level=2)
+    heading_end = cast("tuple[int, int]", first.map)[1]
+    _without_heading(block, doc.source[start : doc.offsets[heading_end]], group[1:])
+    return re.sub(r"[\W_]+", "-", heading.lower()).strip("-") or "section", block
+
+
 def normalize(
     markdown: str,
     *,
@@ -325,35 +349,11 @@ def normalize(
         )
         blocks["title"] = title
     groups = _groups(nodes[1:] if titled else nodes)
-    for index, group in enumerate(groups):
-        first = group[0]
-        section = first.type == "heading" and first.tag == "h2"
-        start = doc.offsets[cast("tuple[int, int]", first.map)[0]]
-        end = (
-            doc.offsets[cast("tuple[int, int]", groups[index + 1][0].map)[0]]
-            if index + 1 < len(groups)
-            else len(markdown)
-        )
-        block = doc.value(group, start, end)
-        block.update(
-            kind="section" if section else "text",
-            inline={"elements": [], "repositoryReferences": []},
-            content=[doc.block(n) for n in group[int(section) :]],
-        )
-        key = "preamble"
-        if section:
-            heading = _visible(first).strip()
-            if not heading:
-                message = "Section headings must have visible text"
-                raise ValueError(message)
-            block.update(heading=heading, level=2)
-            heading_end = cast("tuple[int, int]", first.map)[1]
-            _without_heading(
-                block,
-                markdown[start : doc.offsets[heading_end]],
-                group[1:],
-            )
-            key = re.sub(r"[\W_]+", "-", heading.lower()).strip("-") or "section"
+    starts = [doc.offsets[cast("tuple[int, int]", g[0].map)[0]] for g in groups]
+    for group, start, end in zip(
+        groups, starts, [*starts[1:], len(markdown)], strict=True
+    ):
+        key, block = _group_block(doc, group, start, end)
         candidate, suffix = key, 1
         while candidate in blocks:
             suffix += 1
