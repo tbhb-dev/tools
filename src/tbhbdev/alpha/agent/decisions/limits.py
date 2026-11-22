@@ -1,0 +1,74 @@
+"""Launch limits over host numbers; no I/O."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tbhbdev.alpha.agent.model import Host
+
+_FIELDS = 6
+
+
+@dataclass(frozen=True)
+class Reading:
+    """The host's 1-minute load and CPU count, with memory and swap in KiB."""
+
+    load: float
+    cpus: int
+    memory_total: int
+    memory_available: int
+    swap_total: int
+    swap_used: int
+
+
+def parse(text: str) -> Reading | str:
+    """The numbers in TEXT, or the cause of failure when TEXT isn't six numbers."""
+    parts = text.split()
+    try:
+        if len(parts) != _FIELDS:
+            raise ValueError  # noqa: TRY301 -- one cause for every bad shape
+        found = Reading(float(parts[0]), *(int(p) for p in parts[1:]))
+    except ValueError:
+        return "unparsable output"
+    sizes = (found.memory_available, found.swap_total, found.swap_used)
+    if not (
+        math.isfinite(found.load)
+        and found.load >= 0
+        and found.cpus > 0
+        and found.memory_total > 0
+        and min(sizes) >= 0
+    ):
+        return "unparsable output"
+    return found
+
+
+def decide(host: Host, found: Reading | str, *, ignore: bool) -> tuple[bool, str]:
+    """Whether to refuse the launch, and the message to print, empty if none.
+
+    FOUND is the reading, or the cause of a failed read. A warn-only host and
+    IGNORE turn a refusal into a warning.
+    """
+    if isinstance(found, str):
+        problems = [f"cannot read host limits: {found}"]
+    else:
+        limit = found.cpus if host.load_limit is None else host.load_limit
+        memory = 100 * found.memory_available / found.memory_total
+        problems = []
+        if found.load >= limit:
+            problems.append(f"load {found.load:g} >= limit {limit}")
+        if memory < host.min_memory_available_percent:
+            problems.append(
+                f"memory available {memory:.0f}% < {host.min_memory_available_percent}%"
+            )
+        if 100 * found.swap_used > host.max_swap_used_percent * found.swap_total:
+            swap = 100 * found.swap_used / found.swap_total
+            problems.append(f"swap used {swap:.0f}% > {host.max_swap_used_percent}%")
+    if not problems:
+        return False, ""
+    message = f"{host.name}: " + "; ".join(problems)
+    if host.limits_warn_only or ignore:
+        return False, f"warning: {message}"
+    return True, f"{message}; pass --ignore-limits to launch anyway"

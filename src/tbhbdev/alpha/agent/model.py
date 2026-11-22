@@ -137,6 +137,10 @@ class Host:
     accounts: tuple[str, ...]
     proven_harnesses: tuple[Harness, ...]
     tbhbdev: str | None = None
+    load_limit: int | None = None
+    min_memory_available_percent: int = 20
+    max_swap_used_percent: int = 80
+    limits_warn_only: bool = False
 
 
 @dataclass(frozen=True)
