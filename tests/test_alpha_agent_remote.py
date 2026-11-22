@@ -27,6 +27,8 @@ def test_file_names() -> None:
         ".rc.fallback",
         ".rc",
         ".owner",
+        ".audit.json",
+        ".would_refuse",
     )
 
 
@@ -58,5 +60,7 @@ def test_runfile_suffixes_cover_run_host_1a222fa() -> None:
         ".log",
         ".rc",
         ".run.lock",
+        ".audit.json",
+        ".would_refuse",
     )
     assert set(written) <= set(files.SUFFIXES)
