@@ -19,6 +19,7 @@
     },
     "event": {
       "enum": [
+        "APPROVE",
         "REQUEST_CHANGES",
         "COMMENT"
       ]
