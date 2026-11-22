@@ -12,6 +12,8 @@ dependencies = [
   # tbhbdev alpha pr validates the pull request draft's YAML frontmatter
   # against a JSON schema.
   "jsonschema[format]>=4.26.0",
+  "markdown-it-py>=4.0.0",
+  "mdit-py-plugins>=0.5.0",
   "onepasswordconnectsdk>=2.1.1",
   "psycopg[binary]>=3.3.4",
   "pyyaml>=6.0.3",
@@ -340,3 +342,8 @@ convention = "google"
 paths = ["src", "tests"]
 # pytest calls fixtures by name, which vulture cannot see.
 ignore_decorators = ["@pytest.fixture"]
+
+[tool.deptry.per_rule_ignores]
+# The Markdown parser is imported by the next change in this stack; drop this
+# once that change has merged.
+DEP002 = ["markdown-it-py", "mdit-py-plugins"]
