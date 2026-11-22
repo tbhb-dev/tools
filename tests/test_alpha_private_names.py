@@ -20,6 +20,42 @@ def tokens(lines: list[str], names: list[str] | None = None) -> list[str]:
     return [message.split("'")[1] for _, message in found]
 
 
+# cspell:ignore bazelbuild
+# The directory in Bazel's source tree, built in parts so the push scan accepts it.
+PUBLIC_DIRECTORY = "dev" + "tools"
+BAZEL_URL = (
+    "# https://github.com/bazelbuild/bazel/blob/master/src/main/java/com/google/"
+    f"{PUBLIC_DIRECTORY}/build/lib/bazel/rules/BUILD"
+)
+
+
+def test_the_bazel_source_url_is_not_a_hit() -> None:
+    assert (
+        tokens([BAZEL_URL, BAZEL_URL.removeprefix("# https://")], [PUBLIC_DIRECTORY])
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    ("line", "flagged"),
+    [
+        ("see github.com/bazelbuild/bazel/blob/main/example-lab/x", []),
+        ("see https://github.com/tbhb-dev/example-lab", ["example-lab"]),
+        ("see https://github.com/other-org/example-lab", ["example-lab"]),
+        ("see tbhb-dev/example-lab and example-lab", ["example-lab"]),
+        (
+            "https://github.com/bazelbuild/bazel/blob/main/x example-lab",
+            ["example-lab"],
+        ),
+        ("a/example-lab/b/c", ["example-lab"]),
+    ],
+)
+def test_a_name_inside_another_repos_path_is_not_a_hit(
+    line: str, flagged: list[str]
+) -> None:
+    assert tokens([line], NAMES) == flagged
+
+
 def test_suffix_rule_flags_without_config(home: Path) -> None:
     del home
     name = "other-private"

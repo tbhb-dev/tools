@@ -3,7 +3,9 @@
 `private_name_problems` checks whole tokens, ignoring case and a trailing
 `.git`. A `-private` component or a configured name is private. The exact,
 case-sensitive token `example-private` is a reviewed placeholder exemption.
-Public rule IDs are exempt unless configured as private names.
+Public rule IDs are exempt unless configured as private names. A token inside the
+file path of a URL, after its host, owner and repository, is exempt, because it
+names something in that repository.
 
 `draft_problems` combines `[pr_check] private_repos` with the required list in
 `~/.local/state/tbhb/private-repos.txt`. Its header can restrict words to path
@@ -40,6 +42,13 @@ PUBLIC_RULE_IDS = frozenset(
 )
 PRIVATE_COMPONENT = re.compile(r"-private(?:-|$)")
 PATH_TOKEN = re.compile(r"(?<=[\w.-])/([\w-]+(?:\.[\w-]+)*)(?![\w-])", re.ASCII)
+# A host path with owner and repository, then the file path inside that repository.
+# Segments of the file path are another repository's own names, not repository names.
+URL_FILE_PATH = re.compile(
+    r"(?<![\w./-])(?:[a-z][a-z0-9+.-]*://)?[\w-]+(?:\.[\w-]+)+(?::\d+)?"
+    r"/[\w.-]+/[\w.-]+/(?P<inside>[^\s/][^\s]*)",
+    re.ASCII | re.IGNORECASE,
+)
 PATH_HEADER = "# Bare-word exempt, flagged only in path position:"
 
 
@@ -76,13 +85,23 @@ def private_name_problems(
     return [
         (number, MESSAGE.format(token))
         for number, line in enumerate(lines, first)
-        for token in dict.fromkeys(TOKEN.findall(line))
+        for token in dict.fromkeys(_outside_file_paths(line))
         if token != PLACEHOLDER
         and (token.lower() not in PUBLIC_RULE_IDS or token.lower() in wanted)
         and (
             _path_private(token, line, restricted)
             or (token.lower() not in restricted and _is_private(token, wanted))
         )
+    ]
+
+
+def _outside_file_paths(line: str) -> list[str]:
+    """The tokens of LINE, minus those inside a URL's repository file path."""
+    inside = [match.span("inside") for match in URL_FILE_PATH.finditer(line)]
+    return [
+        match.group()
+        for match in TOKEN.finditer(line)
+        if not any(start <= match.start() < end for start, end in inside)
     ]
 
 
