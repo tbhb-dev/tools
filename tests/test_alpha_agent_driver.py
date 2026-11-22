@@ -113,15 +113,39 @@ def test_unsandboxed_clean_refuses_a_run_without_a_result(
     assert driver.metadata_path("sample").exists()
 
 
-@pytest.mark.parametrize("verb", ["log", "diff"])
+@pytest.mark.parametrize(("verb", "profile"), [("log", "build"), ("diff", "review")])
 def test_unsandboxed_inspection_reads_the_host_output(
-    remote: Remote, capsys: pytest.CaptureFixture[str], verb: str
+    remote: Remote, capsys: pytest.CaptureFixture[str], verb: str, profile: str
 ) -> None:
-    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
+    options = ["--ref", COMMIT] if profile == "review" else []
+    assert (
+        launch(
+            remote, "--ops", "--unsandboxed", "o/r#1", "--profile", profile, *options
+        )
+        == 0
+    )
     remote.file(".out.final", "verdict text\n")
     capsys.readouterr()
     assert command(verb) == 0
     assert "verdict text" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("ops", [False, True])
+def test_unsandboxed_build_diff_inspects_commits(
+    remote: Remote, capsys: pytest.CaptureFixture[str], ops: bool
+) -> None:
+    options = ["--ops"] if ops else []
+    assert launch(remote, "--unsandboxed", "o/r#1", *options) == 0
+    remote.file(".out.final", "report without patches\n")
+    capsys.readouterr()
+    assert command("diff") == 0
+    assert capsys.readouterr() == ("diff output\n", "")
+    call = remote.records("ssh")[-1]["args"]
+    assert isinstance(call, list)
+    assert call[call.index("-l") + 1 : -1] == [
+        driver.load(CONFIG, "sample").host.account,
+        "example-linux",
+    ]
 
 
 def test_unsandboxed_clean_of_an_ended_run_only_moves_to_trash(
@@ -1518,6 +1542,10 @@ def test_inspection_uses_recorded_target_and_mirror(
     assert command(verb) == 0
     assert capsys.readouterr() == (verb + " output\n", "")
     calls = [record["args"] for record in remote.records("git")]
+    if verb == "diff":
+        query = calls.pop(0)
+        assert isinstance(query, list)
+        assert "ls-remote" in query
     assert len(calls) == 2
     assert isinstance(calls[0], list)
     assert isinstance(calls[1], list)
@@ -1621,7 +1649,11 @@ def test_inspection_fetch_failure_stops_before_read(remote: Remote, verb: str) -
     assert launch(remote) == 0
     remote.configure(fetch_error=74)
     assert command(verb) == 1
-    assert len(remote.records("git")) == 1
+    calls = remote.records("git")
+    assert len(calls) == (2 if verb == "diff" else 1)
+    args = calls[-1]["args"]
+    assert isinstance(args, list)
+    assert "fetch" in args
 
 
 @pytest.mark.parametrize(

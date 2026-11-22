@@ -322,10 +322,47 @@ def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str
         f"{MIRROR_GIT} -c diff.external= --no-optional-locks {command} "
         f"--no-ext-diff --no-textconv --no-color {comparison} --"
     )
+    fallback = ""
+    if limit is None:
+        tree = (
+            repo.clone_path(PurePosixPath("."), repository)
+            / ".worktrees"
+            / f"agent-{name}"
+        )
+        paths = " ".join(
+            '"$HOME"/' + shlex.quote(str(path))
+            for path in (*reversed(tree.parents[:-1]), tree, tree / ".git")
+        )
+        patch = (
+            f"{GIT} GIT_CONFIG_GLOBAL=/dev/null {GIT_FLAGS} "
+            "-c protocol.allow=never -c diff.external= --no-optional-locks "
+            f'--git-dir="$HOME"/{shlex.quote(str(tree / ".git"))} '
+            "format-patch --stdout --no-ext-diff --no-textconv --no-color "
+            '"$1..HEAD" --'
+        )
+        fallback = (
+            f"pushed=$({MIRROR_GIT} ls-remote --end-of-options origin {branch}) "
+            '|| exit "$?"\n'
+            'if test -z "$pushed"; then\n'
+            f"    default=$({MIRROR_GIT} ls-remote --symref "
+            '--end-of-options origin HEAD) || exit "$?"\n'
+            "    base=$(printf '%s\\n' \"$default\" | "
+            'awk \'$1 == "ref:" && $2 ~ /^refs\\/heads\\// && $3 == "HEAD" '
+            '{sub(/^refs\\/heads\\//, "refs/remotes/origin/", $2); print $2}\')\n'
+            '    test -n "$base" || exit 65\n'
+            f"    for p in {paths}; do\n"
+            '        test ! -L "$p" && test -d "$p" || exit 65\n'
+            "    done\n"
+            f"    perl -e {shlex.quote(INSPECTION_OUTPUT)} "
+            f'/bin/sh -c {shlex.quote(patch)} -- "$base"\n'
+            '    exit "$?"\n'
+            "fi\n"
+        )
     return mirror_command(
         repository,
         name,
-        f"{MIRROR_GIT} -c transfer.fsckObjects=true -c core.logAllRefUpdates=false "
+        fallback
+        + f"{MIRROR_GIT} -c transfer.fsckObjects=true -c core.logAllRefUpdates=false "
         "fetch --no-write-fetch-head --no-tags --no-prune --no-prune-tags "
         f"--end-of-options origin +HEAD:{base} +{branch}:{branch} "
         '|| exit "$?"\n'

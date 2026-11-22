@@ -59,6 +59,8 @@ def inspect_output(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     limit: int | None,
+    *,
+    unsandboxed: bool = False,
 ) -> str:
     async def run(args: tuple[str, ...], _data: bytes) -> tuple[int, bytes]:
         command = shlex.split(shlex.split(args[-1])[2])
@@ -68,7 +70,7 @@ def inspect_output(
     monkeypatch.setattr(transport, "execute", run)
     args = agent.parser("example").parse_args(execution_arguments("example.md"))
     run = driver.prepare(settings(), args)
-    run.request = replace(run.request, unsandboxed=False, tainted_host=False)
+    run.request = replace(run.request, unsandboxed=unsandboxed, tainted_host=False)
     run.owner = "example-owner"
     assert driver.inspect(settings(), run, limit=limit) == 0
     return capsys.readouterr().out
@@ -831,7 +833,9 @@ def test_inspection_caps_remote_output(
     mirror_in(host)
     write_standalone_fake(
         host / "bin/git",
-        f"import sys\nif 'fetch' not in sys.argv: sys.stdout.write('x' * {size})\n",
+        "import sys\n"
+        "if 'ls-remote' in sys.argv: print('pushed')\n"
+        f"elif 'fetch' not in sys.argv: sys.stdout.write('x' * {size})\n",
     )
     result = execute(
         remote.inspect(
@@ -850,7 +854,9 @@ def test_inspection_preserves_read_failure(host: Path, limit: int | None) -> Non
     mirror_in(host)
     write_standalone_fake(
         host / "bin/git",
-        "import sys\nsys.exit(0 if 'fetch' in sys.argv else 74)\n",
+        "import sys\n"
+        "if 'ls-remote' in sys.argv: print('pushed')\n"
+        "sys.exit(0 if 'fetch' in sys.argv or 'ls-remote' in sys.argv else 74)\n",
     )
     assert (
         execute(
@@ -1079,11 +1085,20 @@ def test_run_clone_config_never_executes(host: Path, verb: str) -> None:
         ).read_text() == config
 
 
-@pytest.mark.parametrize("limit", [None, 10])
+@pytest.mark.parametrize(
+    ("limit", "unpublished"), [(None, False), (10, False), (None, True)]
+)
 def test_inspection_disables_external_diff_and_text_conversion(
-    host: Path, limit: int | None
+    host: Path, limit: int | None, unpublished: bool
 ) -> None:
-    mirror = mirror_in(host)
+    if unpublished:
+        tree = unpublished_run(host)
+        (tree / "example").write_text("local change\n")
+        git_in(tree, "add", "example")
+        commit_in(tree, "local change")
+        mirror = tree / ".git"
+    else:
+        mirror = mirror_in(host)
     marker = host / "executed"
     command = host / "plant"
     command.write_text(f"#!/bin/sh\nprintf planted > {shlex.quote(str(marker))}\n")
@@ -1115,6 +1130,193 @@ def test_inspection_refuses_missing_origin_branch(
         )
     )
     assert result.returncode != 0
+    assert result.stdout == b""
+
+
+def unpublished_run(host: Path) -> Path:
+    mirror = mirror_in(host)
+    # A mirror initialized before fetching need not have a valid default HEAD.
+    git_in(mirror, "symbolic-ref", "HEAD", "refs/heads/unborn")
+    tree = host / "Code/github.com/example-org/example-repo/.worktrees/agent-sample"
+    git_in(host, "clone", str(mirror), str(tree))
+    git_in(tree, "checkout", "-b", "agent/sample", "origin/main")
+    git_in(host / "origin.git", "update-ref", "-d", "refs/heads/agent/sample")
+    return tree
+
+
+@pytest.mark.parametrize("unsandboxed", [False, True])
+@pytest.mark.parametrize("commits", [0, 2])
+def test_diff_returns_unpublished_commits(
+    host: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    unsandboxed: bool,
+    commits: int,
+) -> None:
+    tree = unpublished_run(host)
+    base = git_in(tree, "rev-parse", "origin/main")
+    for index in range(commits):
+        (tree / "example").write_text(f"local change {index}\n")
+        git_in(tree, "add", "example")
+        commit_in(tree, f"local commit {index} \x1b[31m")
+    tip = git_in(tree, "rev-parse", "HEAD")
+    (tree / "example").write_text("uncommitted change\n")
+    (tree / "untracked").write_text("untracked change\n")
+    source = host / "source"
+    (source / "upstream-only").write_text("new default tip\n")
+    git_in(source, "add", "upstream-only")
+    commit_in(source, "upstream only")
+    git_in(source, "push", str(host / "origin.git"), "main")
+    # The mirror still has the old pushed agent branch; it must not be used.
+    before = git_in(tree, "status", "--porcelain")
+    output = inspect_output(monkeypatch, capsys, None, unsandboxed=unsandboxed)
+    assert "\x1b" not in output
+    assert "upstream-only" not in output
+    assert "pushed change" not in output
+    assert "uncommitted" not in output
+    assert "untracked" not in output
+    assert git_in(tree, "status", "--porcelain") == before
+    assert git_in(tree, "rev-parse", "origin/main") == base
+    if commits == 0:
+        assert output == ""
+    else:
+        assert output.count("Subject: [PATCH") == commits
+        assert f"From {tip} " in output
+        patch = host / "commits.patch"
+        patch.write_text(output)
+        target = host / "apply"
+        git_in(host, "clone", str(host / "origin.git"), str(target))
+        git_in(target, "reset", "--hard", base)
+        git_in(
+            target,
+            "-c",
+            "user.name=Example",
+            "-c",
+            "user.email=example@example.com",
+            "am",
+            str(patch),
+        )
+        assert (target / "example").read_text() == "local change 1\n"
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_unpublished_diff_bounds_output_and_preserves_failure(
+    host: Path, failure: bool
+) -> None:
+    unpublished_run(host)
+    write_standalone_fake(
+        host / "bin/git",
+        "import sys\n"
+        "if '--symref' in sys.argv:\n"
+        "    print('ref: refs/heads/main\\tHEAD'); sys.exit(0)\n"
+        "if 'ls-remote' in sys.argv: sys.exit(0)\n"
+        "assert 'format-patch' in sys.argv\n"
+        "assert 'diff.external=' in sys.argv\n"
+        "assert '--no-ext-diff' in sys.argv and '--no-textconv' in sys.argv\n"
+        "assert '--stdout' in sys.argv and '--no-optional-locks' in sys.argv\n"
+        "sys.stdout.write('x' * 200000)\n"
+        f"sys.exit({74 if failure else 0})\n",
+    )
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
+        )
+    )
+    assert result.returncode == (74 if failure else 0)
+    assert result.stdout == b"x" * 65536 + b"\n[output truncated at 65536 bytes]\n"
+
+
+@pytest.mark.parametrize(
+    "component",
+    [
+        "Code",
+        "github.com",
+        "example-org",
+        "example-repo",
+        ".worktrees",
+        "agent-sample",
+        ".git",
+    ],
+)
+def test_unpublished_diff_refuses_symlink_paths(host: Path, component: str) -> None:
+    tree = unpublished_run(host)
+    path = next(
+        path for path in (tree / ".git", tree, *tree.parents) if path.name == component
+    )
+    path.rename(host / "saved")
+    path.symlink_to(host / "saved", target_is_directory=True)
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
+        )
+    )
+    assert result.returncode == 65
+    assert result.stdout == b""
+
+
+def test_unpublished_diff_refuses_missing_base(host: Path) -> None:
+    tree = unpublished_run(host)
+    git_in(tree, "update-ref", "-d", "refs/remotes/origin/main")
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
+        )
+    )
+    assert result.returncode != 0
+    assert result.stdout == b""
+
+
+def test_unpublished_diff_uses_named_default_branch(host: Path) -> None:
+    tree = unpublished_run(host)
+    git_in(tree, "update-ref", "refs/remotes/origin/trunk", "origin/main")
+    git_in(tree, "update-ref", "-d", "refs/remotes/origin/main")
+    origin = host / "origin.git"
+    git_in(origin, "update-ref", "refs/heads/trunk", "main")
+    git_in(origin, "symbolic-ref", "HEAD", "refs/heads/trunk")
+    (tree / "example").write_text("local trunk change\n")
+    git_in(tree, "add", "example")
+    commit_in(tree, "local trunk change")
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
+        )
+    )
+    assert result.returncode == 0, result.stderr
+    assert b"+local trunk change" in result.stdout
+
+
+@pytest.mark.parametrize("listing", [None, "", "abc\\tHEAD"])
+def test_unpublished_diff_requires_default_branch(
+    host: Path, listing: str | None
+) -> None:
+    unpublished_run(host)
+    write_standalone_fake(
+        host / "bin/git",
+        "import sys\nassert 'ls-remote' in sys.argv\n"
+        "if '--symref' in sys.argv:\n"
+        f"    print({listing!r}); sys.exit({74 if listing is None else 0})\n",
+    )
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
+        )
+    )
+    assert result.returncode == (74 if listing is None else 65)
+    assert result.stdout == b""
+
+
+def test_diff_refuses_failed_branch_query(host: Path) -> None:
+    unpublished_run(host)
+    write_standalone_fake(
+        host / "bin/git",
+        "import sys\nassert 'ls-remote' in sys.argv\nsys.exit(74)\n",
+    )
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
+        )
+    )
+    assert result.returncode == 74
     assert result.stdout == b""
 
 
