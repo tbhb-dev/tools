@@ -31,6 +31,7 @@ from tbhbdev.alpha.agent import (
     process_group,
     push,
     render,
+    review_post,
     runfiles,
     settings,
     worktree,
@@ -835,6 +836,13 @@ def _execute(
             if preflight_only
             else push.run(run, prepared, stack, run_harness, push_token)
         )
+        if (
+            rc == 0
+            and not preflight_only
+            and run.request.profile is Profile.REVIEW
+            and not review_post.posted(run, prepared)
+        ):
+            rc = 5
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
     except RunInterruptedError, EOFError:
