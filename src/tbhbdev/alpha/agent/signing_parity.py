@@ -10,7 +10,7 @@ import argparse
 import base64
 import hashlib
 import json
-import subprocess
+import subprocess  # nosec B404
 import sys
 import tempfile
 import time
