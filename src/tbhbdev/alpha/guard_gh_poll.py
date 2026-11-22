@@ -659,7 +659,7 @@ def commands(text: str) -> list[list[str]]:
     argument. Quoted words come out as the words they hold.
     """
     lexer = shlex.shlex(text, posix=False, punctuation_chars="".join(SEPARATORS_CHARS))
-    lexer.whitespace_split = True
+    lexer.whitespace_split = True  # noqa: V101  # shlex reads this setting.
     try:
         tokens = list(lexer)
     except ValueError:  # an unbalanced quote
