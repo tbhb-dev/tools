@@ -20,7 +20,7 @@ from tbhbdev.alpha.agent.decisions import repo
 if TYPE_CHECKING:
     from tbhbdev.alpha.agent.run_host import Prepared, Run
 
-POSTABLE = frozenset({"COMMENT", "REQUEST_CHANGES"})
+ALLOWED_EVENTS = frozenset({"COMMENT", "REQUEST_CHANGES"})
 DRAFT_NAME = re.compile(r"review-(\d+)\.md")
 DRAFT_LIMIT = 64 * 1024
 TIMEOUT = httpx.Timeout(20.0, connect=5.0)
@@ -68,7 +68,7 @@ def validate(text: str, number: int, commit: str | None) -> tuple[str, str]:
     meta, body = pull_request.parse_frontmatter(text)
     fields = cast("dict[str, object]", meta)
     event = fields["event"]
-    if event not in POSTABLE:
+    if event not in ALLOWED_EVENTS:
         message = f"a run can't post a {event} review"
         raise PostRefusedError(message)
     if commit is None or str(fields["commit_id"]).lower() != commit.lower():

@@ -99,9 +99,7 @@ def test_posts_the_comment_with_identity_in_the_body(
     assert written == {"review": "github.com/o/r#7 99"}
 
 
-def test_request_changes_is_postable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_request_changes_posts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run, prepared, _ = make(tmp_path, draft("REQUEST_CHANGES", findings=True))
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
     monkeypatch.setattr(httpx, "post", accepted)
@@ -219,7 +217,7 @@ def test_the_post_token_is_scoped_to_pull_request_writes(
     assert seen == [{"pull_requests": "write"}]
 
 
-def test_an_unmintable_post_token_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_failed_token_request_gives_none(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail(*_args: object) -> str:
         message = "no"
         raise credentials.Invalid(message)
