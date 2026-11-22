@@ -120,7 +120,19 @@ def test_the_table_adds_launchers_and_owners() -> None:
     assert owners == {"two-hidden": "alpha"}
 
 
-@pytest.mark.parametrize("text", ["not json", "[1]", '{"launchers": [1]}'])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "not json",
+        "[1]",
+        '{"launchers": [1]}',
+        '{"owners": [1]}',
+        '{"launchers": {"helper": "org/repo"}}',
+        '{"launchers": {"helper": [1]}}',
+        '{"owners": {"example-repo": null}}',
+        '{"owners": {"example-repo": 3}}',
+    ],
+)
 def test_a_malformed_table_is_refused(text: str) -> None:
     path = launcher.table_path()
     path.parent.mkdir(parents=True)
