@@ -308,6 +308,35 @@ def test_state_root() -> None:
     )
 
 
+def test_permissions_parse_sort_and_split_the_cache_directory() -> None:
+    args = gh_app.parse_args(
+        ["bot", REPO, "--permissions", "pull_requests:write,contents:read"]
+    )
+    assert args.permissions == (("contents", "read"), ("pull_requests", "write"))
+    assert gh_app.parse_args(["bot", REPO]).permissions == ()
+    state = Path("/s")
+    assert gh_app.out_dir(state, replace(args, repo="o/r")) == Path(
+        "/s/tbhb-dev/bot/o/r+contents-read+pull-requests-write"
+    )
+    assert gh_app.token_body("o/r", all_repos=False, permissions=args.permissions) == {
+        "repositories": ["r"],
+        "permissions": {"contents": "read", "pull_requests": "write"},
+    }
+
+
+@pytest.mark.parametrize(
+    "value", ["", "contents", "contents:admin", "Contents:read", "a:read,a:write"]
+)
+def test_bad_permissions_are_refused(value: str) -> None:
+    with pytest.raises(gh_app.UsageError, match="--permissions entry"):
+        gh_app.parse_args(["bot", REPO, "--permissions", value])
+
+
+def test_a_cooldown_option_refuses_permissions() -> None:
+    with pytest.raises(gh_app.UsageError, match="takes only the app"):
+        gh_app.parse_args(["bot", "--cooldown-status", "--permissions", "a:read"])
+
+
 def test_layout() -> None:
     state = Path("/s")
     args = replace(BASE, repo="o/r")
@@ -1063,6 +1092,27 @@ def test_all_repos_asks_for_every_repo_and_uses_its_own_dir(
     assert out == f"{out_path(tmp_path, '+all')}\n"
     assert json.loads(github.requests[-1].content) == {}
     assert (out_path(tmp_path, "+all") / "hosts.yml").is_file()
+    assert not out_path(tmp_path, "widget").exists()
+
+
+def test_permissions_narrow_the_token_request_and_use_their_own_dir(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, rsa: Key
+) -> None:
+    github = Github()
+    code, out, _ = run(
+        capsys,
+        env_for(tmp_path, app_store(rsa.pem), github),
+        "bot",
+        REPO,
+        "--permissions",
+        "contents:read",
+    )
+    assert code == 0
+    assert out == f"{out_path(tmp_path, 'widget+contents-read')}\n"
+    assert json.loads(github.requests[-1].content) == {
+        "repositories": ["widget"],
+        "permissions": {"contents": "read"},
+    }
     assert not out_path(tmp_path, "widget").exists()
 
 

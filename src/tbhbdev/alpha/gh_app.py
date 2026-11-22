@@ -62,6 +62,7 @@ EXIT_COOLDOWN = 75
 APP_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*[a-z0-9]")
 REPO_PATTERN = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 # Eleven digits reach the year 5138, which datetime still formats.
+PERMISSION_PATTERN = re.compile(r"[a-z][a-z_]*:(?:read|write)", re.ASCII)
 EPOCH_PATTERN = re.compile(r"[0-9]{1,11}", re.ASCII)
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_.~+/=-]+")
 PEM_PATTERN = re.compile(
@@ -91,6 +92,7 @@ NO_CHECK = False
 HEADER = {"alg": "RS256", "typ": "JWT"}
 MINT_FAILURE = "GitHub App token mint failed"
 USAGE = """usage: {prog} APP OWNER/REPO [--fresh] [--dry-run] [--all-repos] [--vault V]
+                                 [--permissions NAME:LEVEL,...]
        {prog} APP --cooldown-until EPOCH
        {prog} APP --cooldown-status
 """
@@ -136,6 +138,7 @@ class Args:
     vault: str
     cooldown_until: int | None
     cooldown_status: bool
+    permissions: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -178,6 +181,7 @@ def parse_args(argv: Sequence[str]) -> Args:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--all-repos", action="store_true")
     parser.add_argument("--vault", default=DEFAULT_VAULT)
+    parser.add_argument("--permissions")
     parser.add_argument("--cooldown-until")
     parser.add_argument("--cooldown-status", action="store_true")
     ns = parser.parse_args(argv)
@@ -194,7 +198,13 @@ def parse_args(argv: Sequence[str]) -> Args:
         message = "--cooldown-until and --cooldown-status are exclusive"
         raise UsageError(message)
     if until is not None or ns.cooldown_status:
-        if ns.repo is not None or ns.fresh or ns.dry_run or ns.all_repos:
+        if (
+            ns.repo is not None
+            or ns.fresh
+            or ns.dry_run
+            or ns.all_repos
+            or ns.permissions is not None
+        ):
             message = "a cooldown option takes only the app"
             raise UsageError(message)
     elif ns.repo is None:
@@ -206,6 +216,7 @@ def parse_args(argv: Sequence[str]) -> Args:
     if not valid_vault(ns.vault):
         message = f"vault {ns.vault!r} cannot be a directory name"
         raise UsageError(message)
+    permissions = parse_permissions(ns.permissions)
     return Args(
         ns.app,
         ns.repo or "",
@@ -215,7 +226,31 @@ def parse_args(argv: Sequence[str]) -> Args:
         ns.vault,
         until,
         ns.cooldown_status,
+        permissions,
     )
+
+
+def parse_permissions(text: str | None) -> tuple[tuple[str, str], ...]:
+    """NAME:LEVEL pairs from a comma list, sorted; empty for no option.
+
+    Raises:
+        UsageError: An entry isn't NAME:read or NAME:write, or a name repeats.
+    """
+    if text is None:
+        return ()
+    pairs: dict[str, str] = {}
+    for entry in text.split(","):
+        if (
+            PERMISSION_PATTERN.fullmatch(entry) is None
+            or entry.partition(":")[0] in pairs
+        ):
+            message = (
+                f"--permissions entry {entry!r} must be NAME:read or NAME:write, once"
+            )
+            raise UsageError(message)
+        name, _, level = entry.partition(":")
+        pairs[name] = level
+    return tuple(sorted(pairs.items()))
 
 
 def valid_repo(repo: str) -> bool:
@@ -241,12 +276,14 @@ def split_repo(repo: str) -> tuple[str, str]:
 
 def out_dir(state: Path, args: Args) -> Path:
     owner, name = split_repo(args.repo)
+    # A narrowed token has its own directory: `+` can't appear in a repository name.
+    narrowed = "".join(f"+{n.replace('_', '-')}-{v}" for n, v in args.permissions)
     return (
         state
         / args.vault
         / args.app
         / owner
-        / (ALL_REPOS_DIR if args.all_repos else name)
+        / ((ALL_REPOS_DIR if args.all_repos else name) + narrowed)
     )
 
 
@@ -315,8 +352,13 @@ def lookup_paths(repo: str) -> list[str]:
     return [f"/repos/{repo}/installation", f"/orgs/{owner}/installation"]
 
 
-def token_body(repo: str, *, all_repos: bool) -> Json:
-    return {} if all_repos else {"repositories": [split_repo(repo)[1]]}
+def token_body(
+    repo: str, *, all_repos: bool, permissions: tuple[tuple[str, str], ...] = ()
+) -> Json:
+    body: Json = {} if all_repos else {"repositories": [split_repo(repo)[1]]}
+    if permissions:
+        body["permissions"] = dict(permissions)
+    return body
 
 
 def json_object(response: httpx.Response) -> Json:
@@ -574,7 +616,12 @@ def exchange_token(  # noqa: PLR0913  # Optional installation cache seams.
 def request_token(env: Env, args: Args, jwt: str) -> Minted:
     try:
         return exchange_token(
-            env, args.repo, jwt, token_body(args.repo, all_repos=args.all_repos)
+            env,
+            args.repo,
+            jwt,
+            token_body(
+                args.repo, all_repos=args.all_repos, permissions=args.permissions
+            ),
         )
     except InstallationMissingError:
         owner, _ = split_repo(args.repo)
