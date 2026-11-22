@@ -7,7 +7,8 @@ import json
 import shutil
 import subprocess
 import urllib.error
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Self, override
+from unittest.mock import Mock
 
 import pytest
 from agent_example import LINUX, MACOS, settings
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 
     from tbhbdev.alpha.agent.model import Host, Settings
 
-pytestmark = pytest.mark.skipif(
+pytestmark = pytest.mark.skipif(  # noqa: V107
     shutil.which("ssh-keygen") is None, reason="needs ssh-keygen"
 )
 
@@ -99,6 +100,7 @@ def test_host_main_arguments(argv: list[str], code: int) -> None:
 
 
 class Reply(io.BytesIO):
+    @override
     def __enter__(self) -> Self:
         return self
 
@@ -178,14 +180,10 @@ def test_main_exit_status_follows_coverage(
 ) -> None:
     monkeypatch.setattr(signing_parity, "registered", lambda: {"SHA256:linux"})
     monkeypatch.setattr(
-        signing_parity,
-        "check",
-        lambda _settings, _known: (["x: SHA256:linux listed"], []),
+        signing_parity, "check", Mock(return_value=(["x: SHA256:linux listed"], []))
     )
     assert signing_parity.main(settings()) == 0
-    monkeypatch.setattr(
-        signing_parity, "check", lambda _settings, _known: (["y"], ["host-y"])
-    )
+    monkeypatch.setattr(signing_parity, "check", Mock(return_value=(["y"], ["host-y"])))
     assert signing_parity.main(settings()) == 1
     assert "not covered: host-y" in capsys.readouterr().err
 
@@ -194,7 +192,7 @@ def test_the_verb_and_the_host_command_are_wired(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(agent_settings, "load", settings)
-    monkeypatch.setattr(driver.signing_parity, "main", lambda _settings: 7)
+    monkeypatch.setattr(driver.signing_parity, "main", Mock(return_value=7))
     assert agent.main(["signing-parity"], "p") == 7
-    monkeypatch.setattr(signing_parity, "host_main", lambda _argv, _prog: 9)
+    monkeypatch.setattr(signing_parity, "host_main", Mock(return_value=9))
     assert agent.main(["signing-fingerprint", "agent"], "p") == 9

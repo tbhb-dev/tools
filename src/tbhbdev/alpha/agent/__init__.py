@@ -6,8 +6,9 @@ import argparse
 import sys
 
 from tbhbdev import userconfig
-from tbhbdev.alpha.agent import driver, precheck, settings, signing_parity
+from tbhbdev.alpha.agent import driver, precheck, settings
 from tbhbdev.alpha.agent import run_host as run_host
+from tbhbdev.alpha.agent import signing_parity as signing_parity
 from tbhbdev.alpha.agent import ssh_serve as ssh_serve
 from tbhbdev.alpha.agent.decisions import config
 
