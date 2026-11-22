@@ -122,6 +122,7 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         tainted_host=True,
         authorized_by=args.unsandboxed,
         startup_deadline_seconds=settings.launch_wait_seconds,
+        fetch_refs=tuple(args.fetch_ref),
     )
     run = rules.check(
         run, settings, host, ref=args.ref, exists=metadata_path(args.name).exists()

@@ -2,11 +2,9 @@
 description: Agent settings, run requests, and host preparation.
 generated:
   - role: generated
-    harness: codex:0.166.0
-    model: openai:gpt-6.1-sol
-    effort: high
-    surface: exec
-    at: "2026-11-16T03:01:44Z"
+    harness: codex
+    model: openai:gpt-6
+    at: "2026-11-22T00:25:33Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -16,6 +14,8 @@ type: Reference
 # Agent configuration
 
 `tbhbdev alpha agent` reads the optional `[agent]` table from the user config. Calling this command requires the table and every key shown below except `public_repos`, `[agent.otel]`, `max_run_minutes`, `docker`, `expires`, `pull_requests_app_client_id`, `pull_requests_app_pem`, the host’s `unsandboxed` flag and `tbhbdev` path, and the `[agent.codex]` table. Unreadable config fails with its path. Missing or invalid settings fail with the path, the full table name and the key, as `[agent.sandbox] audit_dir is required`. Unknown keys fail the same way at any level. `exec` validates a headless run before it contacts the host. It checks the remote version, then claims the name before it streams the inputs. A tmux session runs the host supervisor. Install that supervisor separately. `wait`, `status`, `kill`, `clean`, `keep`, `log` and `diff` use the recorded target. The parser allows and ignores `host_tag` in `[agent]` because another command reads it.
+
+`agent exec --fetch-ref REF` fetches a named ref during host preparation for either profile. Repeat the option up to eight times. Accepted refs are `refs/pull/<digits>/head` and `refs/heads/<branch>`. Branch names use only ASCII letters, digits, `.`, `_`, `/` and `-`; they cannot contain `..` or `//`, start or end with `/`, end with `.lock`, or start with `-`. The controller and host both validate these restrictions. For example, `--fetch-ref refs/pull/391/head --fetch-ref refs/heads/fix-392` makes `origin/fetched/pull/391/head` and `origin/fetched/heads/fix-392` available in the run clone. The host fetches these refs with the default branch in one Git fetch, using the existing authentication fallback. A missing requested ref fails preparation, and the error names the requested refs. The checkout stays on its usual build branch or review commit. No GitHub credential reaches the run through this option.
 
 Use the hidden host command as `tbhbdev alpha agent run-host NAME [REQUEST] --host HOST [--prompt FILE] [--preflight] [--owner ID]`. The driver's tmux start passes `--owner ID`, the run ID it wrote to `<name>.owner`. With the flag, run-host verifies that file and doesn't create it. Without the flag, run-host creates the owner file and refuses a name that already has one. Supply a versioned JSON request through `REQUEST`, stdin with `REQUEST` set to `-`, or `<name>.request.json` by leaving out the path. A prompt path defaults to the run's recorded prompt. Config must list the host. During setup, run-host fetches a bare mirror over HTTPS under `$XDG_STATE_HOME/tbhbdev/agent-mirrors/github.com/<owner>/<repo>.git` and creates a separate clone at `<account clone>/.worktrees/agent-<name>`. It reads credentials through the secrets library. It then starts the harness with the policy's explicit environment and records its exit. Run files and the index live under `tbhbdev/agent-runs` in the state directory. SIGHUP, SIGTERM, and SIGINT stop the harness group and refresh Codex auth before run-host writes `<name>.rc`.
 

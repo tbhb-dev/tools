@@ -265,3 +265,4 @@ class RunRequest:
     authorized_by: str | None
     startup_deadline_seconds: int
     tainted_host: bool
+    fetch_refs: tuple[str, ...] = ()
