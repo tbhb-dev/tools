@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import io
+import json
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import httpx
 import pytest
 
+from tbhbdev.alpha import review
 from tbhbdev.alpha.agent import credentials, review_post
 from tbhbdev.alpha.agent.model import Profile
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from tbhbdev.alpha.agent import run_host
@@ -56,7 +62,7 @@ def make(
 
 
 def reply(status: int, data: object) -> httpx.Response:
-    return httpx.Response(status, json=data, request=httpx.Request("POST", "https://x"))
+    return httpx.Response(status, json=data, request=httpx.Request("GET", "https://x"))
 
 
 def mint_token(_request: object, _settings: object) -> str | None:
@@ -71,8 +77,62 @@ def forbidden(*_args: object, **_options: object) -> httpx.Response:
     raise AssertionError
 
 
-def accepted(*_args: object, **_options: object) -> httpx.Response:
-    return reply(200, {"id": 1})
+BASE = "https://api.github.com/repos/o/r/pulls/7"
+STAMP = f"Run r1, codex m1, judged head {HEAD}."
+
+
+class Api:
+    """A fake GitHub: records calls and answers each by method and path."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.calls: list[tuple[str, str, dict[str, str] | None]] = []
+        self.pull: httpx.Response | Exception = reply(200, {"head": {"sha": HEAD}})
+        self.reviews: list[httpx.Response | Exception] = [reply(200, [])]
+        self.created: httpx.Response | Exception = reply(201, {"id": 99})
+        monkeypatch.setattr(httpx, "request", self.request)
+
+    def request(self, method: str, url: str, **options: object) -> httpx.Response:
+        payload = cast("dict[str, str] | None", options.get("json"))
+        self.calls.append((method, url, payload))
+        if method == "POST":
+            outcome = self.created
+        elif url.startswith(f"{BASE}/reviews"):
+            outcome = self.reviews.pop(0)
+        else:
+            outcome = self.pull
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def no_git(*_args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess([], 0, "", "")
+
+
+def git_with(files: dict[str, str]) -> Callable[..., subprocess.CompletedProcess[str]]:
+    def run(_git_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        if args[0] == "ls-tree":
+            listed = args[-1] in files
+            return subprocess.CompletedProcess([], 0, args[-1] if listed else "", "")
+        name = args[1].split(":", 1)[1]
+        return subprocess.CompletedProcess([], 0, files[name], "")
+
+    return run
+
+
+REAL_GIT_OUTPUT = review_post.git_output
+
+
+def draft_at(git_dir: Path) -> Callable[[int], Path]:
+    def path(number: int) -> Path:
+        return git_dir / "tbhb-alpha" / f"review-{number}.md"
+
+    return path
+
+
+@pytest.fixture(autouse=True)
+def judged_commit_has_no_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(review_post, "git_output", git_with({}))
 
 
 def test_posts_the_comment_with_identity_in_the_body(
@@ -80,30 +140,32 @@ def test_posts_the_comment_with_identity_in_the_body(
 ) -> None:
     run, prepared, written = make(tmp_path, draft())
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    seen: dict[str, object] = {}
-
-    def fake(url: str, **options: object) -> httpx.Response:
-        seen["url"] = url
-        seen.update(options)
-        return reply(200, {"id": 99})
-
-    monkeypatch.setattr(httpx, "post", fake)
+    api = Api(monkeypatch)
     assert review_post.posted(run, prepared)
-    assert seen["url"] == "https://api.github.com/repos/o/r/pulls/7/reviews"
-    assert cast("dict[str, str]", seen["headers"])["Authorization"] == "Bearer minted"
-    payload = cast("dict[str, str]", seen["json"])
+    assert [(m, u) for m, u, _ in api.calls] == [
+        ("GET", BASE),
+        ("GET", f"{BASE}/reviews?per_page=100&page=1"),
+        ("POST", f"{BASE}/reviews"),
+    ]
+    payload = api.calls[-1][2]
+    assert payload is not None
     assert payload["event"] == "COMMENT"
     assert payload["commit_id"] == HEAD
     assert payload["body"].startswith("## Verdict")
-    assert payload["body"].endswith(f"Run r1, codex m1, judged head {HEAD}.\n")
+    assert payload["body"].endswith(f"\n---\n{STAMP}\n")
     assert written == {"review": "github.com/o/r#7 99"}
 
 
 def test_request_changes_posts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run, prepared, _ = make(tmp_path, draft("REQUEST_CHANGES", findings=True))
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    monkeypatch.setattr(httpx, "post", accepted)
+    Api(monkeypatch)
     assert review_post.posted(run, prepared)
+
+
+APPROVE_THEN_COMMENT = draft("APPROVE").replace(
+    "event: APPROVE", "event: APPROVE\nevent: COMMENT"
+)
 
 
 @pytest.mark.parametrize(
@@ -112,6 +174,7 @@ def test_request_changes_posts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         (None, "review-7.md", "found 0"),
         (draft(), "notes.md", "found 0"),
         (draft("APPROVE"), "review-7.md", "can't post a APPROVE"),
+        (APPROVE_THEN_COMMENT, "review-7.md", "duplicate key"),
         (draft(head="b" * 40), "review-7.md", "isn't the commit"),
         ("---\npr: 7\n---\n", "review-7.md", "fails its checks"),
     ],
@@ -125,7 +188,7 @@ def test_a_bad_draft_posts_nothing(
 ) -> None:
     run, prepared, written = make(tmp_path, text, name)
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    monkeypatch.setattr(httpx, "post", forbidden)
+    monkeypatch.setattr(httpx, "request", forbidden)
     assert not review_post.posted(run, prepared)
     assert message in written["log"]
 
@@ -138,17 +201,180 @@ def test_two_drafts_are_refused(tmp_path: Path) -> None:
     assert "found 2" in written["log"]
 
 
-def test_a_policy_finding_blocks_the_post(
+def test_a_policy_finding_in_the_judged_commit_blocks_the_post(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run, prepared, written = make(tmp_path, draft())
+    monkeypatch.setattr(
+        review_post,
+        "git_output",
+        git_with({".github/pull_request_review.toml": "schema = 2\n"}),
+    )
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    monkeypatch.setattr(httpx, "request", forbidden)
+    assert not review_post.posted(run, prepared)
+    assert "config-schema" in written["log"]
+
+
+def test_the_working_tree_policy_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared, _ = make(tmp_path, draft())
     github = tmp_path / "ws" / ".github"
     github.mkdir()
     (github / "pull_request_review.toml").write_text("schema = 2\n")
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    monkeypatch.setattr(httpx, "post", forbidden)
+    Api(monkeypatch)
+    assert review_post.posted(run, prepared)
+
+
+SCHEMA = json.dumps(
+    {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"event": {"const": "REQUEST_CHANGES"}},
+    }
+)
+
+
+def test_the_repository_draft_schema_is_enforced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared, written = make(tmp_path, draft())
+    monkeypatch.setattr(
+        review_post,
+        "git_output",
+        git_with({".github/schemas/pull-request-review-draft.schema.json": SCHEMA}),
+    )
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    monkeypatch.setattr(httpx, "request", forbidden)
     assert not review_post.posted(run, prepared)
-    assert "config-schema" in written["log"]
+    assert "draft schema rejects" in written["log"]
+
+
+def test_a_matching_repository_draft_schema_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared, _ = make(tmp_path, draft("REQUEST_CHANGES", findings=True))
+    matching = json.dumps(
+        {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "pr": {"type": "integer"},
+                "commit_id": {"type": "string"},
+                "event": {"const": "REQUEST_CHANGES"},
+            },
+        }
+    )
+    monkeypatch.setattr(
+        review_post,
+        "git_output",
+        git_with({".github/schemas/pull-request-review-draft.schema.json": matching}),
+    )
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    Api(monkeypatch)
+    assert review_post.posted(run, prepared)
+
+
+@pytest.mark.parametrize(
+    ("failing", "message"),
+    [("ls-tree", "cannot read the judged commit"), ("show", "cannot read")],
+)
+def test_git_failures_block_the_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str, message: str
+) -> None:
+    run, prepared, written = make(tmp_path, draft())
+    ok = git_with({".github/pull_request_review.toml": "schema = 1\n"})
+
+    def fake(git_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        if args[0] == failing:
+            return subprocess.CompletedProcess([], 128, "", "bad")
+        return ok(git_dir, *args)
+
+    monkeypatch.setattr(review_post, "git_output", fake)
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    monkeypatch.setattr(httpx, "request", forbidden)
+    assert not review_post.posted(run, prepared)
+    assert message in written["log"]
+
+
+def test_git_output_runs_git_without_user_config(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    done = REAL_GIT_OUTPUT(tmp_path / ".git", "rev-parse", "--git-dir")
+    assert done.returncode == 0
+
+
+@pytest.mark.parametrize(
+    "pull",
+    [reply(200, {"head": {"sha": "b" * 40}}), reply(200, {}), reply(200, [])],
+)
+def test_a_moved_head_blocks_the_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pull: httpx.Response
+) -> None:
+    run, prepared, written = make(tmp_path, draft())
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    api.pull = pull
+    assert not review_post.posted(run, prepared)
+    assert "head moved" in written["log"]
+    assert all(m == "GET" for m, _, _ in api.calls)
+
+
+def test_a_repeat_returns_the_existing_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared, written = make(tmp_path, draft())
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    api.reviews = [
+        reply(200, [{"id": "x", "body": STAMP}, "junk", {"id": 5, "body": "other"}]),
+        reply(200, [{"id": 41, "body": f"text\n---\n{STAMP}\n"}]),
+    ]
+    api.reviews[0] = reply(200, [{"id": 1, "body": "z"}] * 99 + [{"id": 2}])
+    api.reviews.insert(0, api.reviews[0])
+    api.reviews.pop(0)
+    assert review_post.posted(run, prepared)
+    assert written == {"review": "github.com/o/r#7 41"}
+    assert not any(m == "POST" for m, _, _ in api.calls)
+
+
+def test_a_stamp_on_the_first_page_returns_that_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared, written = make(tmp_path, draft())
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    api.reviews = [
+        reply(200, ["junk", {"id": "x", "body": STAMP}, {"id": 5, "body": STAMP}])
+    ]
+    assert review_post.posted(run, prepared)
+    assert written == {"review": "github.com/o/r#7 5"}
+
+
+def test_too_many_review_pages_block_the_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared, written = make(tmp_path, draft())
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    full = reply(200, [{"id": 1, "body": "z"}] * review_post.PAGE)
+    api.reviews = [full] * review_post.MAX_PAGES
+    assert not review_post.posted(run, prepared)
+    assert "too many reviews" in written["log"]
+
+
+def test_a_review_list_that_is_not_a_list_blocks_the_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared, written = make(tmp_path, draft())
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    api.reviews = [reply(200, {})]
+    assert not review_post.posted(run, prepared)
+    assert "no review list" in written["log"]
 
 
 def test_a_missing_token_blocks_the_post(
@@ -156,7 +382,7 @@ def test_a_missing_token_blocks_the_post(
 ) -> None:
     run, prepared, written = make(tmp_path, draft())
     monkeypatch.setattr(credentials, "review_post_token", no_token)
-    monkeypatch.setattr(httpx, "post", forbidden)
+    monkeypatch.setattr(httpx, "request", forbidden)
     assert not review_post.posted(run, prepared)
     assert "token unavailable" in written["log"]
 
@@ -165,12 +391,13 @@ def test_a_missing_token_blocks_the_post(
     ("outcome", "message"),
     [
         (reply(403, {"message": "no"}), "status 403"),
-        (reply(200, {"id": "x"}), "status 200"),
+        (reply(201, {"id": "x"}), "no review id"),
+        (reply(201, []), "no review id"),
         (httpx.Response(200, text="not json"), "request failed"),
         (httpx.ConnectError("x"), "ConnectError"),
     ],
 )
-def test_api_failures_are_logged(
+def test_post_failures_are_logged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     outcome: httpx.Response | Exception,
@@ -178,16 +405,63 @@ def test_api_failures_are_logged(
 ) -> None:
     run, prepared, written = make(tmp_path, draft())
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
-
-    def fake(*_args: object, **_options: object) -> httpx.Response:
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
-
-    monkeypatch.setattr(httpx, "post", fake)
+    api = Api(monkeypatch)
+    api.created = outcome
     assert not review_post.posted(run, prepared)
     assert message in written["log"]
     assert "review" not in written
+
+
+def test_any_2xx_post_is_a_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared, written = make(tmp_path, draft())
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    Api(monkeypatch).created = reply(202, {"id": 8})
+    assert review_post.posted(run, prepared)
+    assert written == {"review": "github.com/o/r#7 8"}
+
+
+def test_create_posts_this_worktrees_draft_with_the_stdin_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    make(tmp_path, draft())
+    git_dir = tmp_path / "ws" / ".git"
+    monkeypatch.setattr(review, "draft_path", draft_at(git_dir))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("tok\n"))
+    Api(monkeypatch)
+    args = ["7", "--repo", "github.com/o/r", "--commit", HEAD, "--stamp", STAMP]
+    assert review.main(["create", *args], "review") == 0
+    assert capsys.readouterr().out == "99\n"
+
+
+def test_create_reports_a_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    make(tmp_path, draft("APPROVE"))
+    git_dir = tmp_path / "ws" / ".git"
+    monkeypatch.setattr(review, "draft_path", draft_at(git_dir))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("tok\n"))
+    monkeypatch.setattr(httpx, "request", forbidden)
+    args = ["7", "--repo", "github.com/o/r", "--commit", HEAD, "--stamp", STAMP]
+    assert review.main(["create", *args], "review") == 1
+    assert "can't post" in capsys.readouterr().err
+
+
+def test_create_reports_a_missing_draft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(review, "draft_path", draft_at(tmp_path / "x" / "y"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("tok\n"))
+    args = ["7", "--repo", "github.com/o/r", "--commit", HEAD, "--stamp", STAMP]
+    assert review.main(["create", *args], "review") == 1
+    assert "No such file" in capsys.readouterr().err
 
 
 def request_for(profile: Profile) -> RunRequest:
