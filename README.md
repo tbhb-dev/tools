@@ -21,6 +21,7 @@ uv tool install git+https://github.com/tbhb-dev/tools
 ## Tools
 
 - `admin` makes policy-controlled GitHub administration calls with an append-only audit log. See [GitHub administration](docs/reference/admin.md).
+- `agy` records plain-answer and file-tool runs as OpenTelemetry; `record --dir DIR -- agy ARGS` writes local traces and delta metrics, and `export DIR` sends them to `OTEL_EXPORTER_OTLP_ENDPOINT`.
 - `analytics` applies PostgreSQL migrations and checks the installed catalog contract.
 - `secret` reads and manages 1Password items through the `tbhbdev.secrets` library.
 - `host` manages agent hosts from the operator's Mac.

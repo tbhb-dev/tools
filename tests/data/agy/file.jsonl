@@ -1,0 +1,6 @@
+{"event":"init","conversation_id":"redacted"}
+{"event":"step_update","step_update":{"step_index":0,"state":"DONE","step_type":"user_input"}}
+{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"agent_response","duration_seconds":9.495149037000001,"usage":{"input_tokens":8663,"output_tokens":234,"thinking_tokens":171,"cache_read_tokens":0,"total_tokens":8897}}}
+{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"write_file","tool_info":{"name":"write_file"}}}
+{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"tool","tool_name":"write_file","duration_seconds":1.354839716,"tool_info":{"name":"write_file"}}}
+{"event":"result","result":{"status":"SUCCESS","duration_seconds":10.937965238,"num_turns":1,"response":"","usage":{"input_tokens":8663,"output_tokens":234,"thinking_tokens":171,"cache_read_tokens":0,"total_tokens":8897}}}
