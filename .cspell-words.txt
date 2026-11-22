@@ -318,3 +318,5 @@ inlines
 setext
 strikethrough
 timebox
+onexc
+execroot
