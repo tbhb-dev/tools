@@ -181,11 +181,11 @@ def reading(
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
     if title is not None:
         monkeypatch.setenv("TMUX_PANE", "%9")
-        monkeypatch.setattr(
-            launcher.subprocess,
-            "run",
-            lambda *_, **__: subprocess.CompletedProcess([], 0, f"{title}\n", ""),
-        )
+
+        def answer(*_: object, **__: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess([], 0, f"{title}\n", "")
+
+        monkeypatch.setattr(launcher.subprocess, "run", answer)
     return REAL_SESSION()
 
 

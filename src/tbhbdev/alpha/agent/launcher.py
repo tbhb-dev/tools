@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
+import subprocess  # nosec B404
 from pathlib import Path
 
 from tbhbdev.alpha.agent import runfiles
@@ -21,7 +21,7 @@ def session() -> tuple[str | None, str | None]:
     if not pane:
         return None, session_id
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 B607 -- fixed tmux argv
             ["tmux", "display-message", "-p", "-t", pane, "#{pane_title}"],
             capture_output=True,
             text=True,
