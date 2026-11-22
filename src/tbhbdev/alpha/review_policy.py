@@ -203,6 +203,14 @@ def check(root: Path) -> list[Finding]:
     return findings
 
 
+def fatal(prog: str, kind: str, message: str, *, as_json: bool) -> int:
+    """Report an exit-2 failure on stderr, and as a failed verdict with --json."""
+    print(f"{prog}: {message}", file=sys.stderr)
+    if as_json:
+        print(json.dumps({"ok": False, "error": kind, "message": message}))
+    return 2
+
+
 def main(argv: list[str], prog: str) -> int:
     """Run `check`: exit 0 clean, 1 findings, 2 if the floor or path fails to load."""
     parser = argparse.ArgumentParser(prog=prog, description=__doc__)
@@ -213,14 +221,16 @@ def main(argv: list[str], prog: str) -> int:
     args = parser.parse_args(argv)
     root = Path(args.path)
     if not root.is_dir():
-        print(f"{prog}: {root} is not a directory", file=sys.stderr)
-        return 2
+        return fatal(
+            prog, "not-a-directory", f"{root} is not a directory", as_json=args.json
+        )
     try:
         findings = check(root)
     except (OSError, UnicodeError) as exc:
         # Only the floor's own package data can raise here: repository reads are caught.
-        print(f"{prog}: cannot load the floor: {exc}", file=sys.stderr)
-        return 2
+        return fatal(
+            prog, "floor-load", f"cannot load the floor: {exc}", as_json=args.json
+        )
     if args.json:
         listed = [
             {"path": f.path, "id": f.rule, "message": f.message} for f in findings

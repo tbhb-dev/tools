@@ -210,3 +210,21 @@ def test_a_floor_file_that_is_missing_exits_two(tmp_path: Path) -> None:
 
     with patch.object(review_policy, "files", broken):
         assert review_policy.main(["check", str(tmp_path)], "p") == 2
+
+
+def test_json_output_stays_valid_on_each_exit_two_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert review_policy.main(["check", str(tmp_path / "none"), "--json"], "p") == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False,
+        "error": "not-a-directory",
+        "message": f"{tmp_path / 'none'} is not a directory",
+    }
+    with patch.object(review_policy, "floor_required", side_effect=OSError("gone")):
+        assert review_policy.main(["check", str(tmp_path), "--json"], "p") == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "ok": False,
+        "error": "floor-load",
+        "message": "cannot load the floor: gone",
+    }
