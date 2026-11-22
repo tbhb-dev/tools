@@ -77,6 +77,11 @@ VIEW = "github.com/bazelbuild/bazel/blob/main/src"
         "tbhb-dev%2fexample-lab",
         "TBHB-DEV%2Fexample-lab",
         "github.com/tbhb-dev/example-lab",
+        f"https://{VIEW}/f\u2014example-lab",
+        "https://github.com/o/r/blob/main/tbhb-dev:example-lab",
+        "https://github.com/o/r/blob/main/TBHB-DEV:example-lab",
+        "https://github.com/o/r/blob/main/P/tbhb-dev:example-lab",
+        "https://github.com/o/r/blob/main/P/git@github.com:tbhb-dev/example-lab",
     ],
 )
 def test_a_name_outside_a_file_view_path_is_caught(line: str) -> None:

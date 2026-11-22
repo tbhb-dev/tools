@@ -45,11 +45,11 @@ PUBLIC_RULE_IDS = frozenset(
 )
 PRIVATE_COMPONENT = re.compile(r"-private(?:-|$)")
 PATH_TOKEN = re.compile(r"(?<=[\w.-])/([\w-]+(?:\.[\w-]+)*)(?![\w-])", re.ASCII)
-# A URL's host and path. The path ends at whitespace, a closing delimiter, a comma,
-# a query or a fragment, so punctuation after a URL never extends it.
+# A URL's host and path. The path takes only ASCII URL path characters, so whitespace,
+# a closing delimiter, a comma, a query, a fragment or a non-ASCII dash ends it.
 URL_PATH = re.compile(
     r"(?<![\w./-])(?:[a-z][a-z0-9+.-]*://)?[\w-]+(?:\.[\w-]+)+(?::\d+)?"
-    r"(?P<path>/[^\s)>\]\"'`,?#]*)",
+    r"(?P<path>/[\w.~%!$&*+;=:@/-]*)",
     re.ASCII | re.IGNORECASE,
 )
 # A file view URL is /owner/repo/<view>/ref/file path; only its file path segments
@@ -119,7 +119,11 @@ def _file_spans(match: re.Match[str]) -> list[tuple[int, int]]:
     """The spans of the file path segments of a file view URL's path."""
     segments = list(re.finditer(r"[^/]+", match["path"]))
     names = [segment.group().lower() for segment in segments]
-    if len(names) <= FILE_START or names[2] not in FILE_VIEWS or ORG in names:
+    if (
+        len(names) <= FILE_START
+        or names[2] not in FILE_VIEWS
+        or ORG in match["path"].lower()
+    ):
         return []
     base = match.start("path")
     return [(base + seg.start(), base + seg.end()) for seg in segments[FILE_START:]]
