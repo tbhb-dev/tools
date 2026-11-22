@@ -31,6 +31,9 @@ PULL_REQUESTS_PERMISSIONS = {"contents": "read"}
 # token for the push and never puts it in the sandbox.
 PUSH_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
 # A review run returns its verdict as text, so its token can read and never write.
+# run-host posts the verdict after the run ends, so the posting token never reaches
+# the sandbox.
+REVIEW_POST_PERMISSIONS = {"pull_requests": "write"}
 REVIEW_PERMISSIONS = {
     "contents": "read",
     "pull_requests": "read",
@@ -68,8 +71,12 @@ def require_reviews_app(references: Credentials) -> None:
         raise Invalid(message)
 
 
-def installation_token(references: Credentials, repository: str) -> str:
-    """Mint the reviews App's read-only token for one repository."""
+def installation_token(
+    references: Credentials,
+    repository: str,
+    permissions: dict[str, str] = REVIEW_PERMISSIONS,
+) -> str:
+    """Mint the reviews App's token for one repository, read-only by default."""
     if references.reviews_app_client_id is None or references.reviews_app_pem is None:
         message = "reviews App credentials are not configured"
         raise Invalid(message)
@@ -79,13 +86,13 @@ def installation_token(references: Credentials, repository: str) -> str:
         raise Invalid(message)
     client_id = read(references.reviews_app_client_id, label="reviews app")
     pem = read(references.reviews_app_pem, label="reviews app")
-    # Explicit permissions, so the token stays read-only whatever the App holds.
+    # Explicit permissions, so the token stays narrow whatever the App holds.
     return gh_app.mint_token(
         gh_app.default_env(),
         app_id=client_id,
         pem=pem,
         repository=f"{owner}/{name}",
-        permissions=REVIEW_PERMISSIONS,
+        permissions=permissions,
     ).token
 
 
@@ -156,6 +163,17 @@ def push_token(request: RunRequest, settings: Settings) -> str | None:
     references = next(c for c in settings.credentials if c.account == request.account)
     try:
         return pull_requests_token(references, request.repo, PUSH_PERMISSIONS)
+    except TOKEN_ERRORS:
+        return None
+
+
+def review_post_token(request: RunRequest, settings: Settings) -> str | None:
+    """The run-scoped token that posts a review run's verdict, or None."""
+    if request.profile is not Profile.REVIEW:
+        return None
+    references = next(c for c in settings.credentials if c.account == request.account)
+    try:
+        return installation_token(references, request.repo, REVIEW_POST_PERMISSIONS)
     except TOKEN_ERRORS:
         return None
 

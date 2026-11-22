@@ -142,8 +142,11 @@ def draft(number: int, *, force: bool) -> Path:
     return path
 
 
-def check_text(text: str, number: int) -> list[pr.Problem]:
-    """Validate review metadata and its title-free body without reading GitHub."""
+def check_text(text: str, number: int, *, lint: bool = True) -> list[pr.Problem]:
+    """Validate review metadata and its title-free body without reading GitHub.
+
+    Run hosts lack the prose linters, so they pass ``lint=False``.
+    """
     try:
         data, body = pr.parse_frontmatter(text)
     except pr.FrontmatterError as exc:
@@ -174,7 +177,7 @@ def check_text(text: str, number: int) -> list[pr.Problem]:
     first_content = next(
         (index for index, line in enumerate(rendered, 1) if line.strip()), None
     )
-    if first_content is not None:
+    if lint and first_content is not None:
         problems += pr.lint(
             rendered,
             offset + 1,
