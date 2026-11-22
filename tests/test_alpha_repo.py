@@ -55,6 +55,23 @@ def test_in_tbhb_dev(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert not repo.in_tbhb_dev(tmp_path / "missing")
 
 
+def test_in_tbhb_dev_reads_the_push_url(tmp_path: Path) -> None:
+    run = init(tmp_path / "run", str(tmp_path / "mirror.git"))
+    assert not repo.in_tbhb_dev(run)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(run),
+            "config",
+            "remote.origin.pushurl",
+            "https://github.com/tbhb-dev/x.git",
+        ],
+        check=True,
+    )
+    assert repo.in_tbhb_dev(run)
+
+
 def test_in_tbhb_dev_in_a_linked_worktree(tmp_path: Path) -> None:
     ours = init(tmp_path / "ours", "git@github.com:tbhb-dev/x.git")
     # -c outranks the config files and any GIT_CONFIG_* the session sets, so

@@ -1884,6 +1884,14 @@ def test_without_tbhbdev_the_shim_passes_where_git_fails(world: World) -> None:
     assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
 
 
+def test_the_shim_reads_the_push_url(world: World) -> None:
+    git(world.repo, "config", "remote.origin.url", "/example/mirror.git")
+    git(world.repo, "config", "remote.origin.pushurl", TBHB_DEV_URLS[0])
+    identity_hook(world)
+    assert "get-url --push origin" in (world.hooks / "commit-msg").read_text()
+    assert run_shim(world, "commit-msg", None).returncode == 1
+
+
 @pytest.mark.parametrize(
     ("url", "expected"),
     [(url, True) for url in TBHB_DEV_URLS] + [(url, False) for url in OTHER_URLS],

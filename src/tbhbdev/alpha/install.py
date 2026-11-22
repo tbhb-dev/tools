@@ -199,7 +199,7 @@ SHIM = """#!/bin/sh
 if command -v tbhbdev >/dev/null 2>&1; then
   tbhbdev alpha identity {verb} "$@"
   status=$?
-elif origin=$(git remote get-url origin 2>/dev/null) &&
+elif origin=$(git remote get-url --push origin 2>/dev/null) &&
   printf '%s' "$origin" | LC_ALL=C tr '\\n' ' ' |
   LC_ALL=C grep -Eqi '{origin}'; then
   echo "{hook}: tbhbdev is not on PATH, so the identity hooks can't run" >&2
