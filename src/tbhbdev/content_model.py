@@ -3,7 +3,7 @@
 import re
 from bisect import bisect_right
 from collections import Counter
-from typing import cast
+from typing import Any, cast
 lazy import builtins
 
 from markdown_it import MarkdownIt
@@ -277,20 +277,12 @@ def _validate_title(nodes: list[SyntaxTreeNode]) -> None:
 
 
 def _without_heading(
-    block: dict[str, object],
-    heading_source: str,
-    body: list[SyntaxTreeNode],
+    block: dict[str, Any], heading: str, body: list[SyntaxTreeNode]
 ) -> None:
-    """Drop a section heading from the block's visible and source text metrics.
-
-    The structure counts keep the heading (atxHeadings stays 1), so only the
-    word, character and paragraph counts describe the body.
-    """
+    """Make the block's word, character and paragraph metrics describe the body."""
     visible = "\n\n".join(text for n in body if (text := _visible(n).strip()))
-    metrics = cast("dict[str, object]", block["metrics"])
-    source = cast("str", block["source"])
-    metrics["visible"] = _text_metrics(visible)
-    metrics["source"] = _text_metrics(source.removeprefix(heading_source))
+    block["metrics"]["visible"] = _text_metrics(visible)
+    block["metrics"]["source"] = _text_metrics(block["source"].removeprefix(heading))
     block["visible"] = visible
 
 
