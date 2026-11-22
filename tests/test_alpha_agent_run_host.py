@@ -5145,7 +5145,7 @@ def test_cleanup_deletes_only_the_recorded_base_and_its_links(
     fake_bazel(monkeypatch)
     spaces = iter([(100, 10), (4100, 14)])
 
-    def space(_path: Path) -> tuple[int, int]:
+    def space(_fd: int) -> tuple[int, int]:
         return next(spaces)
 
     monkeypatch.setattr(run_host, "_space", space)
@@ -5161,7 +5161,11 @@ def test_cleanup_deletes_only_the_recorded_base_and_its_links(
 
 
 def test_space_reads_statvfs(tmp_path: Path) -> None:
-    free_bytes, free_inodes = run_host._space(tmp_path)  # noqa: SLF001
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        free_bytes, free_inodes = run_host._space(fd)  # noqa: SLF001
+    finally:
+        os.close(fd)
     assert free_bytes > 0
     assert free_inodes >= 0
 
@@ -5298,6 +5302,144 @@ def test_cleanup_refuses_a_base_swapped_after_shutdown(
     (base / "file").write_text("replacement")
     assert run_host.cleanup_bazel(run, prepared, stopped)["bases"] == 0
     assert (base / "file").is_file()
+
+
+def test_server_alive_keeps_a_base_on_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "server").mkdir()
+    (tmp_path / "server/server.pid.txt").write_text("1")
+
+    def deny(_pid: int, _signal: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(os, "kill", deny)
+    assert run_host._server_alive(tmp_path)  # noqa: SLF001
+
+
+def test_cleanup_keeps_a_base_whose_server_restarted_after_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = bazel_run(tmp_path)
+    base = make_base(prepared)
+    fake_bazel(monkeypatch)
+    stopped = run_host.shutdown_bazel(run, prepared)
+    assert stopped[base][0] == "rc=0"
+    (base / "server").mkdir()
+    (base / "server/server.pid.txt").write_text(str(os.getpid()))
+    assert run_host.cleanup_bazel(run, prepared, stopped)["bases"] == 0
+    assert base.is_dir()
+    assert "(server alive)" in run.files.path("log").read_text()
+
+
+def test_cleanup_refuses_a_base_swapped_for_a_symlink_before_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = bazel_run(tmp_path)
+    base = make_base(prepared)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "file").write_text("keep")
+    fake_bazel(monkeypatch)
+    stopped = run_host.shutdown_bazel(run, prepared)
+    original = run_host._server_alive  # noqa: SLF001
+
+    def swap(path: Path) -> bool:
+        base.rename(base.with_name("moved"))
+        base.symlink_to(victim)
+        return original(path)
+
+    monkeypatch.setattr(run_host, "_server_alive", swap)
+    assert run_host.cleanup_bazel(run, prepared, stopped)["bases"] == 0
+    assert (victim / "file").read_text() == "keep"
+    assert "bazel cleanup failed" in run.files.path("log").read_text()
+
+
+def test_cleanup_deletes_through_the_validated_ancestors_after_a_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = bazel_run(tmp_path)
+    base = make_base(prepared)
+    (base / "mine").write_text("x")
+    root = base.parent
+    victim = tmp_path / "victim"
+    (victim / base.name).mkdir(parents=True)
+    (victim / base.name / "file").write_text("keep")
+    fake_bazel(monkeypatch)
+    stopped = run_host.shutdown_bazel(run, prepared)
+    original = run_host._server_alive  # noqa: SLF001
+
+    def swap(path: Path) -> bool:
+        root.rename(root.with_name("moved"))
+        root.symlink_to(victim)
+        return original(path)
+
+    monkeypatch.setattr(run_host, "_server_alive", swap)
+    assert run_host.cleanup_bazel(run, prepared, stopped)["bases"] == 1
+    assert (victim / base.name / "file").read_text() == "keep"
+    assert not (root.with_name("moved") / base.name).exists()
+
+
+def test_cleanup_refuses_a_base_replaced_by_another_directory_before_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = bazel_run(tmp_path)
+    base = make_base(prepared)
+    fake_bazel(monkeypatch)
+    stopped = run_host.shutdown_bazel(run, prepared)
+    original = run_host._server_alive  # noqa: SLF001
+
+    def swap(path: Path) -> bool:
+        base.rename(base.with_name("moved"))
+        base.mkdir()
+        (base / "file").write_text("replacement")
+        return original(path)
+
+    monkeypatch.setattr(run_host, "_server_alive", swap)
+    assert run_host.cleanup_bazel(run, prepared, stopped)["bases"] == 0
+    assert (base / "file").is_file()
+
+
+def test_cleanup_unlinks_relative_links_into_a_deleted_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = bazel_run(tmp_path)
+    worktree = Path(prepared.paths.worktree)
+    base = make_base(prepared)
+    (base / "execroot").mkdir()
+    (worktree / "bazel-rel").symlink_to(os.path.relpath(base / "execroot", worktree))
+    (worktree / "bazel-keep").symlink_to("../nowhere")
+    fake_bazel(monkeypatch)
+    assert stop_and_clean(run, prepared)["bases"] == 1
+    assert not (worktree / "bazel-rel").is_symlink()
+    assert (worktree / "bazel-keep").is_symlink()
+
+
+def test_cleanup_keeps_a_base_that_vanished_after_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = bazel_run(tmp_path)
+    base = make_base(prepared)
+    fake_bazel(monkeypatch)
+    stopped = run_host.shutdown_bazel(run, prepared)
+    base.rmdir()
+    assert run_host.cleanup_bazel(run, prepared, stopped)["bases"] == 0
+    assert "kept" in run.files.path("log").read_text()
+
+
+def test_owned_base_is_none_when_the_anchor_is_missing(tmp_path: Path) -> None:
+    home = tmp_path / "absent"
+    base = run_host.bazel_bases(home, str(tmp_path))[0]
+    assert run_host._owned_base(home, base) is None  # noqa: SLF001
+
+
+def test_owned_base_rejects_a_cache_root_and_dot_dot(tmp_path: Path) -> None:
+    run, prepared = bazel_run(tmp_path)
+    base = make_base(prepared)
+    root = base.parent
+    assert run_host._owned_base(run.home, root) is None  # noqa: SLF001
+    assert run_host._owned_base(run.home, root / "..") is None  # noqa: SLF001
+    assert run_host._owned_base(run.home, base) is not None  # noqa: SLF001
 
 
 @pytest.mark.parametrize("mode", ["error", "left"])

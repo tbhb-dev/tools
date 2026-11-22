@@ -324,3 +324,4 @@ statvfs
 bavail
 frsize
 favail
+fstatvfs
