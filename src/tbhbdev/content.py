@@ -175,8 +175,46 @@ def close_issue(  # noqa: PLR0913 -- Public plugin interface.
         "not-planned": "not_planned",
         "duplicate": "duplicate",
     }[reason]
+    return _change_state(
+        ref,
+        {"state": "closed", "state_reason": state_reason},
+        "close_issue",
+        comment,
+        client,
+        caller,
+        dry_run,
+    )
+
+
+def reopen_issue(
+    ref: IssueRef,
+    *,
+    comment: str | None = None,
+    client: Client | None = None,
+    caller: str = "tbhbdev",
+    dry_run: bool = False,
+) -> Json | None:
+    return _change_state(
+        ref,
+        {"state": "open"},
+        "reopen_issue",
+        comment,
+        client,
+        caller,
+        dry_run,
+    )
+
+
+def _change_state(  # noqa: PLR0913, PLR0917 -- Shared close/reopen implementation.
+    ref: IssueRef,
+    payload: Json,
+    verb: str,
+    comment: str | None,
+    client: Client | None,
+    caller: str,
+    dry_run: bool,  # noqa: FBT001 -- Internal forwarding of public keyword.
+) -> Json | None:
     api = client if client is not None else GhClient()
-    payload: Json = {"state": "closed", "state_reason": state_reason}
     if comment is not None:
         preview = add_comment(ref, comment, client=api, caller=caller, dry_run=dry_run)
         if dry_run:
@@ -184,7 +222,74 @@ def close_issue(  # noqa: PLR0913 -- Public plugin interface.
     if dry_run:
         return payload
     api.rest("PATCH", ref.path, payload)
-    _audit(ref, "close_issue", caller=caller)
+    _audit(ref, verb, caller=caller)
+    return None
+
+
+def _text_payload(title: str | None, body: str | None, what: str) -> Json:
+    payload: Json = {}
+    for key, text in (("title", title), ("body", body)):
+        if text is not None:
+            _scan(text, f"{what} {key}")
+            payload[key] = text
+    return payload
+
+
+def edit_issue(  # noqa: PLR0913 -- Public plugin interface.
+    ref: IssueRef,
+    *,
+    body: str | None = None,
+    title: str | None = None,
+    issue_type: str | None = None,
+    fields: Mapping[str, Json] | None = None,  # noqa: ARG001 -- Project lookup deferred.
+    client: Client | None = None,
+    caller: str = "tbhbdev",
+    dry_run: bool = False,
+) -> Json | None:
+    """Edit REST fields; Project field updates await item lookup support."""
+    payload = _text_payload(title, body, "issue")
+    if issue_type is not None:
+        payload["type"] = issue_type
+    if dry_run:
+        return payload
+    api = client if client is not None else GhClient()
+    api.rest("PATCH", ref.path, payload)
+    _audit(
+        ref,
+        "edit_issue",
+        "pass" if title is not None or body is not None else "not-needed",
+        caller=caller,
+    )
+    return None
+
+
+def write_pr_text(  # noqa: PLR0913 -- Public plugin interface.
+    owner: str,
+    repo: str,
+    number: int,
+    *,
+    body: str | None = None,
+    title: str | None = None,
+    comment: str | None = None,
+    client: Client | None = None,
+    caller: str = "tbhbdev",
+    dry_run: bool = False,
+) -> Json | None:
+    ref = IssueRef(owner, repo, number)
+    payload = _text_payload(title, body, "pull request")
+    if comment is not None:
+        _scan(comment, "pull request comment")
+    if dry_run:
+        if comment is not None:
+            return {"pull_request": payload, "comment": {"body": comment}}
+        return payload
+    api = client if client is not None else GhClient()
+    if payload:
+        api.rest("PATCH", f"/repos/{owner}/{repo}/pulls/{number}", payload)
+        _audit(ref, "write_pr_text", "pass", caller=caller)
+    if comment is not None:
+        api.rest("POST", f"{ref.path}/comments", {"body": comment})
+        _audit(ref, "add_comment", "pass", caller=caller)
     return None
 
 

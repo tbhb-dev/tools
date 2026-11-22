@@ -240,6 +240,9 @@ def test_default_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
         "query": cw.ADD_ITEM,
         "variables": {"project": "PROJECT", "content": "ISSUE"},
     }
+    cw.reopen_issue(REF)
+    cw.edit_issue(REF, title="Edited")
+    cw.write_pr_text("example", "demo", 7, body="Body", comment="Comment")
     monkeypatch.delenv("TBHBDEV_AUDIT_LOG")
     monkeypatch.setenv("HOME", str(tmp_path))
     cw.add_comment(REF, "Default audit")
@@ -382,6 +385,18 @@ def test_dry_run_ids(fields: dict[str, cw.Json] | None, tmp_path: Path) -> None:
 
 
 DRY_WRITES: list[Callable[[cw.Client, bool], object]] = [
+    lambda c, dry: cw.reopen_issue(REF, comment="refuse", client=c, dry_run=dry),
+    lambda c, dry: cw.edit_issue(REF, title="refuse", client=c, dry_run=dry),
+    lambda c, dry: cw.edit_issue(REF, body="refuse", client=c, dry_run=dry),
+    lambda c, dry: cw.write_pr_text(
+        "example", "demo", 7, title="refuse", client=c, dry_run=dry
+    ),
+    lambda c, dry: cw.write_pr_text(
+        "example", "demo", 7, body="refuse", client=c, dry_run=dry
+    ),
+    lambda c, dry: cw.write_pr_text(
+        "example", "demo", 7, title="Title", comment="refuse", client=c, dry_run=dry
+    ),
     lambda c, dry: cw.create_issue(
         "example/demo", "Title", "refuse", issue_type="Task", client=c, dry_run=dry
     ),
@@ -402,5 +417,169 @@ def test_dry_run_refused(
     client = RecordingClient()
     with pytest.raises(cw.Refused):
         write(client, dry_run)
+    assert client.calls == []
+    assert not (tmp_path / "audit.jsonl").exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("comment", [None, "Reopening"])
+def test_reopen_issue(
+    comment: str | None,
+    dry_run: bool,
+    scans: list[tuple[str, str]],
+    tmp_path: Path,
+) -> None:
+    client = RecordingClient()
+    result = cw.reopen_issue(
+        REF, comment=comment, client=client, caller="pm", dry_run=dry_run
+    )
+    assert scans == ([] if comment is None else [(comment, "issue comment")])
+    if dry_run:
+        expected: cw.Json = {"state": "open"}
+        if comment is not None:
+            expected = {"comment": {"body": comment}, "issue": expected}
+        assert result == expected
+        assert client.calls == []
+        assert not (tmp_path / "audit.jsonl").exists()
+    else:
+        assert result is None
+        prefix: list[Call] = (
+            []
+            if comment is None
+            else [("POST", f"{REF.path}/comments", {"body": comment})]
+        )
+        assert client.calls == [*prefix, ("PATCH", REF.path, {"state": "open"})]
+        assert [e["verb"] for e in audit(tmp_path)] == (
+            ["add_comment"] if comment else []
+        ) + ["reopen_issue"]
+        assert {e["caller"] for e in audit(tmp_path)} == {"pm"}
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    ("title", "body", "issue_type"),
+    [
+        ("Title", "Body", "Task"),
+        (None, "", None),
+        (None, None, "Bug"),
+        (None, None, None),
+    ],
+)
+def test_edit_issue(  # noqa: PLR0913, PLR0917 -- Parameters and fixtures.
+    title: str | None,
+    body: str | None,
+    issue_type: str | None,
+    dry_run: bool,
+    scans: list[tuple[str, str]],
+    tmp_path: Path,
+) -> None:
+    client = RecordingClient()
+    payload: cw.Json = {}
+    expected_scans: list[tuple[str, str]] = []
+    for key, value in (("title", title), ("body", body)):
+        if value is not None:
+            payload[key] = value
+            expected_scans.append((value, f"issue {key}"))
+    if issue_type is not None:
+        payload["type"] = issue_type
+    result = cw.edit_issue(
+        REF,
+        title=title,
+        body=body,
+        issue_type=issue_type,
+        fields={"FIELD": {"text": "deferred"}},
+        client=client,
+        caller="pm",
+        dry_run=dry_run,
+    )
+    assert scans == expected_scans
+    if dry_run:
+        assert result == payload
+        assert client.calls == []
+        assert not (tmp_path / "audit.jsonl").exists()
+    else:
+        assert result is None
+        assert client.calls == [("PATCH", REF.path, payload)]
+        entries = audit(tmp_path)
+        assert [(e["verb"], e["caller"], e["scan"]) for e in entries] == [
+            ("edit_issue", "pm", "pass" if expected_scans else "not-needed"),
+        ]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    ("title", "body", "comment"),
+    [
+        ("Title", "Body", "Comment"),
+        (None, None, "Only comment"),
+        ("Only title", None, None),
+        (None, "", None),
+        (None, None, ""),
+    ],
+)
+def test_write_pr_text(  # noqa: PLR0913, PLR0917 -- Parameters and fixtures.
+    title: str | None,
+    body: str | None,
+    comment: str | None,
+    dry_run: bool,
+    scans: list[tuple[str, str]],
+    tmp_path: Path,
+) -> None:
+    client = RecordingClient()
+    payload: cw.Json = {
+        key: value
+        for key, value in (("title", title), ("body", body))
+        if value is not None
+    }
+    result = cw.write_pr_text(
+        "example",
+        "demo",
+        7,
+        title=title,
+        body=body,
+        comment=comment,
+        client=client,
+        caller="sm",
+        dry_run=dry_run,
+    )
+    assert scans == [
+        (value, f"pull request {key}")
+        for key, value in (
+            ("title", title),
+            ("body", body),
+            ("comment", comment),
+        )
+        if value is not None
+    ]
+    if dry_run:
+        assert result == (
+            {"pull_request": payload, "comment": {"body": comment}}
+            if comment is not None
+            else payload
+        )
+        assert client.calls == []
+        assert not (tmp_path / "audit.jsonl").exists()
+        return
+    assert result is None
+    calls: list[Call] = []
+    verbs: list[str] = []
+    if payload:
+        calls.append(("PATCH", "/repos/example/demo/pulls/7", payload))
+        verbs.append("write_pr_text")
+    if comment is not None:
+        calls.append(("POST", f"{REF.path}/comments", {"body": comment}))
+        verbs.append("add_comment")
+    assert client.calls == calls
+    entries = audit(tmp_path)
+    assert [e["verb"] for e in entries] == verbs
+    assert {e["caller"] for e in entries} == {"sm"}
+    assert {e["scan"] for e in entries} == {"pass"}
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_write_pr_no_text(dry_run: bool, tmp_path: Path) -> None:
+    client = RecordingClient()
+    result = cw.write_pr_text("example", "demo", 7, client=client, dry_run=dry_run)
+    assert result == ({} if dry_run else None)
     assert client.calls == []
     assert not (tmp_path / "audit.jsonl").exists()
