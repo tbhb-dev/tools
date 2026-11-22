@@ -36,14 +36,19 @@ def check_prose(text: str, what: str, *, root: Path) -> None:
             from there.
 
     Raises:
-        ProseRefused: A linter found a problem or couldn't run. The message is
-            ``what`` plus one ``line N: <rule text>`` line per finding.
+        ProseRefused: A linter found a problem or couldn't run, a missing or
+            non-executable linter included. The message is ``what`` plus one
+            ``line N: <rule text>`` line per finding, or ``what`` and the OS
+            reason, never the text.
     """
     try:
         with contextlib.chdir(root):
             problems = pull_request.lint(text.splitlines(), 1, path=PATH)
     except SystemExit as exc:
         message = f"{what}\n{exc.code}"
+        raise ProseRefused(message) from None
+    except OSError as exc:
+        message = f"cannot check {what} for prose: a linter cannot run ({exc.strerror})"
         raise ProseRefused(message) from None
     if problems:
         lines = [f"line {number}: {rule}" for number, rule in problems]
