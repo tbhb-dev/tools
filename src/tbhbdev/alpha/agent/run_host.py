@@ -88,6 +88,7 @@ def planned_paths(run: Run) -> RunPaths:
 
 
 # These files can alter the next trusted shell or tool invocation.
+_BAZEL_SHUTDOWN_SECONDS = 60
 _STARTUP_FILES = (
     ".zshenv",
     ".zshrc",
@@ -899,9 +900,30 @@ def audit_summary(run: Run, prepared: Prepared | None, rc: int) -> None:
     )
 
 
+def shutdown_bazel(prepared: Prepared | None) -> str:
+    """Stop the Bazel server the run left behind, however the run ended."""
+    tool = shutil.which("bazelisk") or shutil.which("bazel")
+    if prepared is None or tool is None:
+        return "skipped"
+    try:
+        done = subprocess.run(  # nosec B603
+            [tool, "shutdown"],
+            cwd=prepared.paths.worktree,
+            capture_output=True,
+            timeout=_BAZEL_SHUTDOWN_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return "timed out"
+    except OSError:
+        return "failed to run"
+    return f"rc={done.returncode}"
+
+
 def finish(
     run: Run, prepared: Prepared | None, agent: subprocess.Popen[str] | None, rc: int
 ) -> int:
+    bazel = "skipped"
     try:
         try:
             reason = finish_auth(run, prepared)
@@ -918,6 +940,7 @@ def finish(
         except OSError, Invalid:
             process_group.unknown(run.files)
         finally:
+            bazel = shutdown_bazel(prepared)
             try:
                 phase = "unknown" if run.files.uncertain else "ended"
                 run.files.write("phase", phase)
@@ -930,7 +953,8 @@ def finish(
     except OSError, ValueError:
         run.files.write("log", "audit summary write failed\n")
     try:
-        runfiles.append(run.files.root, index_entry(run, prepared, rc))
+        entry = index_entry(run, prepared, rc) | {"bazel_shutdown": bazel}
+        runfiles.append(run.files.root, entry)
     except OSError, ValueError:
         run.files.write("log", "completion index append failed\n")
     return rc

@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import signal
 import socket
 import stat
@@ -4966,3 +4967,89 @@ def test_full_access_keeps_the_mise_shim_refusal(
     monkeypatch.setenv("PATH", str(directory))
     with pytest.raises(Invalid, match=f"host executable {name} is a mise shim"):
         run_host.checked_policy(run, run_host.planned_paths(run))
+
+
+class FakePaths:
+    worktree = "/work/agent-x"
+
+
+class FakePrepared:
+    paths = FakePaths()
+
+
+def test_shutdown_bazel_runs_in_the_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], str | None, int]] = []
+
+    def run(
+        command: list[str], *, cwd: str, timeout: int, **_options: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append((command, cwd, timeout))
+        return subprocess.CompletedProcess(command, 3)
+
+    monkeypatch.setattr(shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(subprocess, "run", run)
+    assert run_host.shutdown_bazel(cast("run_host.Prepared", FakePrepared())) == "rc=3"
+    assert calls == [(["/bin/bazelisk", "shutdown"], "/work/agent-x", 60)]
+
+
+@pytest.mark.parametrize(
+    ("available", "prepared", "expected"),
+    [
+        (("bazel",), True, "rc=0"),
+        ((), True, "skipped"),
+        (("bazelisk",), False, "skipped"),
+    ],
+)
+def test_shutdown_bazel_skips_without_a_tool_or_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    available: tuple[str, ...],
+    prepared: bool,
+    expected: str,
+) -> None:
+    monkeypatch.setattr(
+        shutil, "which", lambda name: f"/bin/{name}" if name in available else None
+    )
+    monkeypatch.setattr(
+        subprocess, "run", lambda command, **_o: subprocess.CompletedProcess(command, 0)
+    )
+    value = cast("run_host.Prepared", FakePrepared()) if prepared else None
+    assert run_host.shutdown_bazel(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (subprocess.TimeoutExpired("bazelisk", 60), "timed out"),
+        (OSError(), "failed to run"),
+    ],
+)
+def test_shutdown_bazel_reports_a_failed_shutdown(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
+) -> None:
+    def run(*_args: object, **_options: object) -> None:
+        raise error
+
+    monkeypatch.setattr(shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(subprocess, "run", run)
+    assert (
+        run_host.shutdown_bazel(cast("run_host.Prepared", FakePrepared())) == expected
+    )
+
+
+@pytest.mark.parametrize("rc", [0, 7])
+def test_finish_shuts_bazel_down_and_records_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rc: int
+) -> None:
+    run = make_run(tmp_path)
+    order: list[str] = []
+    entries: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        run_host, "shutdown_bazel", lambda _prepared: order.append("bazel") or "rc=0"
+    )
+    monkeypatch.setattr(runfiles, "append", lambda _root, entry: entries.append(entry))
+    assert run_host.finish(run, None, None, rc) == rc
+    assert order == ["bazel"]
+    assert entries[0]["bazel_shutdown"] == "rc=0"
+    assert run.files.path("rc").read_text() == f"{rc}\n"
