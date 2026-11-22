@@ -119,6 +119,9 @@ def checked_move(operation: Callable[..., None]) -> Callable[..., None]:
 def launching_session(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests run as a session on the reviewer list, whatever pane they run in."""
     monkeypatch.setattr(launcher, "session", lambda: ("coord-review-1", "session-1"))
+    monkeypatch.setattr(
+        launcher, "load_table", lambda: (dict(launcher.rules.REVIEW_LAUNCHERS), {})
+    )
 
 
 @pytest.fixture(autouse=True)

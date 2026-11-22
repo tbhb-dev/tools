@@ -42,7 +42,8 @@ def load_table() -> tuple[dict[str, frozenset[str] | None], dict[str, str]]:
 
     The table is a JSON object with optional ``launchers`` (session name to a
     list of ``org/name`` repositories, or null for any) and ``owners``
-    (repository name to its owner session). A missing file adds nothing.
+    (repository name to its owner session). A missing or unreadable file refuses
+    the launch, naming the path.
     """
     launchers = dict(rules.REVIEW_LAUNCHERS)
     try:
@@ -50,8 +51,6 @@ def load_table() -> tuple[dict[str, frozenset[str] | None], dict[str, str]]:
         for name, repos in table.get("launchers", {}).items():
             launchers[str(name)] = None if repos is None else frozenset(map(str, repos))
         owners = {str(k): str(v) for k, v in table.get("owners", {}).items()}
-    except FileNotFoundError:
-        return launchers, {}
     except (ValueError, AttributeError, TypeError, OSError) as exc:
         message = f"{table_path()}: invalid review-launcher table"
         raise Invalid(message) from exc

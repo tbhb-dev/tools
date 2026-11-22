@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 # The conftest replaces `launcher.session`; these tests read the real one.
 REAL_SESSION = launcher.session
+REAL_LOAD_TABLE = launcher.load_table
 
 pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
 
@@ -100,8 +101,9 @@ def test_repository_owner_sessions(repo: str, owner: str) -> None:
     assert rules.owner(repo, OWNERS) == owner
 
 
-def test_a_missing_table_adds_nothing() -> None:
-    assert launcher.load_table() == (rules.REVIEW_LAUNCHERS, {})
+def test_a_missing_table_is_refused_with_its_path() -> None:
+    with pytest.raises(Invalid, match=r"agent-review-launchers\.json: invalid"):
+        REAL_LOAD_TABLE()
 
 
 def test_the_table_adds_launchers_and_owners() -> None:
@@ -111,7 +113,7 @@ def test_the_table_adds_launchers_and_owners() -> None:
         '{"launchers": {"helper": ["org/one"], "any": null},'
         ' "owners": {"two-hidden": "alpha"}}'
     )
-    launchers, owners = launcher.load_table()
+    launchers, owners = REAL_LOAD_TABLE()
     assert launchers["helper"] == frozenset({"org/one"})
     assert launchers["any"] is None
     assert launchers["coord-review-1"] is None
@@ -124,7 +126,7 @@ def test_a_malformed_table_is_refused(text: str) -> None:
     path.parent.mkdir(parents=True)
     path.write_text(text)
     with pytest.raises(Invalid, match="invalid review-launcher table"):
-        launcher.load_table()
+        REAL_LOAD_TABLE()
 
 
 def test_a_reviewer_launch_from_an_unlisted_session_is_refused(
