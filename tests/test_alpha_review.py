@@ -194,7 +194,6 @@ def test_bad_yaml_stops_before_lint(text: str) -> None:
         (f"commit_id: '{HEAD}'\n", "", 1, "required property"),
         ("event: COMMENT", "event:", 4, "not one of"),
         ("event: COMMENT", "event: approve", 4, "not one of"),
-        ("event: COMMENT", "event: APPROVE", 4, "not one of"),
         ("event: COMMENT\n", "", 1, "required property"),
         ("event: COMMENT", "event: COMMENT\nextra: value", 1, "Additional properties"),
     ],
@@ -212,7 +211,7 @@ def test_non_mapping_frontmatter_fails(meta: str) -> None:
     assert "not of type 'object'" in structure(f"---\n{meta}\n---\n{BODY}")[0][1]
 
 
-@pytest.mark.parametrize("event", ["COMMENT", "REQUEST_CHANGES"])
+@pytest.mark.parametrize("event", ["COMMENT", "REQUEST_CHANGES", "APPROVE"])
 def test_events_and_uppercase_hex_pass(event: str) -> None:
     body = BODY.replace(
         "## Verification",
@@ -526,7 +525,7 @@ def test_schema_key_search_stays_in_the_frontmatter() -> None:
             1,
             (
                 "frontmatter $.event: 'invalid' is not one of "
-                "['REQUEST_CHANGES', 'COMMENT']"
+                "['APPROVE', 'REQUEST_CHANGES', 'COMMENT']"
             ),
         )
     ]
