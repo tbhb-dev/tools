@@ -1939,12 +1939,11 @@ class Stop(Exception):  # noqa: N818 -- a test sentinel, not an error type
     pass
 
 
-def test_private_fetch_retries_over_ssh(
+def test_private_fetch_without_a_token_source_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, clone = repository(tmp_path)
     urls: list[str] = []
-    calls: list[int] = []
     original = worktree.configure_mirror
 
     def configure(mirror: Path, url: str) -> None:
@@ -1952,19 +1951,13 @@ def test_private_fetch_retries_over_ssh(
         original(mirror, url)
 
     def fetch(_mirror: Path, _request: object) -> str:
-        calls.append(1)
-        if len(calls) == 1:
-            raise subprocess.CalledProcessError(128, "git")
-        raise Stop
+        raise subprocess.CalledProcessError(128, "git")
 
     monkeypatch.setattr(worktree, "configure_mirror", configure)
     monkeypatch.setattr(worktree, "fetch_commit", fetch)
-    with pytest.raises(Stop):
+    with pytest.raises(Invalid, match="mirror fetch"):
         worktree.create(clone, "p1", run_request())
-    assert urls == [
-        "https://github.com/tbhb-dev/example-repo.git",
-        "ssh://git@github.com/tbhb-dev/example-repo.git",
-    ]
+    assert urls == ["https://github.com/tbhb-dev/example-repo.git"]
 
 
 def test_private_fetch_retries_over_https_with_the_token(
@@ -1998,7 +1991,7 @@ def test_private_fetch_retries_over_https_with_the_token(
     assert tokens == [None, "example-token"]
 
 
-def test_private_fetch_without_a_token_falls_back_to_ssh(
+def test_private_fetch_with_no_token_fails_without_an_ssh_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, clone = repository(tmp_path)
@@ -2011,15 +2004,13 @@ def test_private_fetch_without_a_token_falls_back_to_ssh(
 
     def fetch(_mirror: Path, _request: object, token: str | None = None) -> str:
         assert token is None
-        if len(urls) == 1:
-            raise subprocess.CalledProcessError(128, "git")
-        raise Stop
+        raise subprocess.CalledProcessError(128, "git")
 
     monkeypatch.setattr(worktree, "configure_mirror", configure)
     monkeypatch.setattr(worktree, "fetch_commit", fetch)
-    with pytest.raises(Stop):
+    with pytest.raises(Invalid, match="mirror fetch"):
         worktree.create(clone, "p4", run_request(), lambda: None)
-    assert urls[-1] == "ssh://git@github.com/tbhb-dev/example-repo.git"
+    assert urls == ["https://github.com/tbhb-dev/example-repo.git"]
 
 
 def test_fetch_commit_passes_the_token_to_the_fetch_only(

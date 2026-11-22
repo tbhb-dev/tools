@@ -524,16 +524,12 @@ def create(
                 commit = fetch_commit(mirror, request)
             except subprocess.SubprocessError:
                 # A private repository refuses the anonymous fetch. Retry over
-                # https with the run's App token. An account with no token falls
-                # back to ssh, which uses its own GitHub key from its ssh config.
+                # https with the run's App token. With no token the fetch fails:
+                # an ssh retry could follow a transfer to another owner.
                 token = token_source() if token_source is not None else None
                 if token is None:
-                    configure_mirror(
-                        mirror, f"ssh://git@github.com/{owner}/{repository}.git"
-                    )
-                    commit = fetch_commit(mirror, request)
-                else:
-                    commit = fetch_commit(mirror, request, token)
+                    raise
+                commit = fetch_commit(mirror, request, token)
         with preparation_step("clone"):
             worktree.parent.mkdir(exist_ok=True)
             clone_run(mirror, worktree, url)
