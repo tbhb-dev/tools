@@ -285,7 +285,8 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
         transport.call(
             settings,
             run.host,
-            remote.start(run.name, settings.sockets_dir, run.host, owner=run.owner),
+            remote.start(run.name, settings.sockets_dir, run.host),
+            transport.Stdin(run.owner),
             timeout=deadline - time.monotonic(),
         )
     except transport.CollisionError:
@@ -315,7 +316,9 @@ def not_owner(run: Run) -> NoReturn:
 
 def recover_transfer(settings: Settings, run: Run) -> None:
     try:
-        transport.shell(settings, run.host, remote.owned(run.name, run.owner))
+        transport.shell(
+            settings, run.host, remote.owned(run.name), transport.Stdin(run.owner)
+        )
     except transport.CollisionError:
         not_owner(run)
     except transport.TransportError:
@@ -340,9 +343,8 @@ def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
             transport.shell(
                 settings,
                 run.host,
-                remote.session(
-                    run.name, "kill-session", settings.sockets_dir, owner=run.owner
-                ),
+                remote.session(run.name, "kill-session", settings.sockets_dir),
+                transport.Stdin(run.owner),
             )
             print(
                 f"{run.name}: rc={reading.rc}"
@@ -489,7 +491,8 @@ def kill(settings: Settings, run: Run) -> int:
     transport.shell(
         settings,
         run.host,
-        remote.session(run.name, "kill-session", settings.sockets_dir, owner=run.owner),
+        remote.session(run.name, "kill-session", settings.sockets_dir),
+        transport.Stdin(run.owner),
     )
     deadline = time.monotonic() + settings.kill_grace_seconds + 2
     while True:
@@ -509,7 +512,8 @@ def kill(settings: Settings, run: Run) -> int:
             transport.shell(
                 settings,
                 run.host,
-                remote.fallback(run.name, settings.sockets_dir, owner=run.owner),
+                remote.fallback(run.name, settings.sockets_dir),
+                transport.Stdin(run.owner),
             )
             return 0
         if action == "refuse":
@@ -535,7 +539,8 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
         branch = transport.shell(
             settings,
             run.host,
-            remote.origin_branch(run.request.repo, run.name, owner=run.owner),
+            remote.origin_branch(run.request.repo, run.name),
+            transport.Stdin(run.owner),
         )
         if not any(
             line.endswith(f"\trefs/heads/agent/{run.name}")
@@ -559,8 +564,9 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
             run.name,
             stamp,
             settings.sockets_dir,
-            decision=remote.Cleanup(run.owner, force),
+            force=force,
         ),
+        transport.Stdin(run.owner),
     )
     archive_metadata(run.name, stamp)
     return 0
@@ -580,9 +586,8 @@ def inspect(settings: Settings, run: Run, *, limit: int | None) -> int:
             transport.shell(
                 settings,
                 run.host,
-                remote.inspect(
-                    run.request.repo, run.name, owner=run.owner, limit=limit
-                ),
+                remote.inspect(run.request.repo, run.name, limit=limit),
+                transport.Stdin(run.owner),
             )
         ),
         end="",
@@ -591,7 +596,9 @@ def inspect(settings: Settings, run: Run, *, limit: int | None) -> int:
 
 
 def keep(settings: Settings, run: Run) -> int:
-    transport.shell(settings, run.host, remote.keep(run.name, owner=run.owner))
+    transport.shell(
+        settings, run.host, remote.keep(run.name), transport.Stdin(run.owner)
+    )
     return 0
 
 

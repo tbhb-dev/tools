@@ -1002,7 +1002,7 @@ def main(
     parser.add_argument("--host", default=socket.gethostname())
     parser.add_argument("--prompt")
     parser.add_argument("--preflight", action="store_true")
-    parser.add_argument("--owner")
+    parser.add_argument("--owned", action="store_true")
     args = parser.parse_args(arguments)
     if args.name is None:
         print(f"{prog}: run name is required", file=sys.stderr)
@@ -1014,7 +1014,7 @@ def main(
         with process_group.defer_signals():
             files = _files(args.name)
             refuse_started(files)
-            ownership.claim(files, claimed=claimed, expected=args.owner)
+            ownership.claim(files, claimed=claimed, owned=args.owned)
         # Anything that fails before this lock is held, including taking the
         # lock, belongs to a waiter and writes nothing: the records are the
         # run that holds the lock.

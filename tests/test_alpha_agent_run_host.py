@@ -4345,16 +4345,18 @@ def test_main_claims_owner_before_loading(
     assert calls == [True]
 
 
-@pytest.mark.parametrize("owner", ["run-id", "other"])
-def test_main_with_owner_flag_verifies_the_drivers_file(
+@pytest.mark.parametrize("present", [True, False])
+def test_main_with_owned_flag_requires_the_drivers_file(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    owner: str,
+    *,
+    present: bool,
 ) -> None:
     files = runfiles.RunFiles(
         runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
     )
-    files.write("owner", "run-id\n")
+    if present:
+        files.write("owner", "run-id\n")
     calls: list[bool] = []
 
     def load(_args: object, _temporary: Path) -> tuple[run_host.Run, str]:
@@ -4363,14 +4365,14 @@ def test_main_with_owner_flag_verifies_the_drivers_file(
         raise Invalid(message)
 
     monkeypatch.setattr(run_host, "_load", load)
-    arguments = ["example", "--host", "h", "--owner", owner]
+    arguments = ["example", "--host", "h", "--owned"]
     assert run_host.main(arguments, "run-host") == 1
-    assert files.path("owner").read_text() == "run-id\n"
-    if owner == "run-id":
+    if present:
+        assert files.path("owner").read_text() == "run-id\n"
         assert calls == [True]
     else:
         assert calls == []
-        assert "different owner" in capsys.readouterr().err
+        assert "no usable owner file" in capsys.readouterr().err
         assert not files.path("log").exists()
         assert not files.path("rc").exists()
 

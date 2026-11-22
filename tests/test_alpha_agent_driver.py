@@ -259,7 +259,8 @@ def test_launch_stream_and_metadata(
     assert meta.parent.stat().st_mode & 0o777 == 0o700
     calls = remote.records("ssh")
     assert len(calls) == 5
-    archive = base64.b64decode(str(calls[2]["stdin"]))
+    owner_line, archive = base64.b64decode(str(calls[2]["stdin"])).split(b"\n", 1)
+    assert owner_line.decode() == record["owner"]
     with tarfile.open(fileobj=io.BytesIO(archive)) as stream:
         assert stream.getnames() == [
             "sample.request.json",
@@ -268,6 +269,9 @@ def test_launch_stream_and_metadata(
         ]
     for tool in ("ssh", "tmux"):
         assert MARKER not in json.dumps(remote.records(tool))
+    for tool in ("ssh", "tmux"):
+        argv = [record["args"] for record in remote.records(tool)]
+        assert record["owner"] not in json.dumps(argv)
     assert MARKER not in meta.read_text()
     tmux = remote.records("tmux")[0]["args"]
     assert tmux == shlex.split(
@@ -906,9 +910,15 @@ def test_kill_grace_and_poll_bounds(
     scripts: list[str] = []
     timeouts: list[float] = []
 
-    def shell(settings: model.Settings, host: model.Host, script: str) -> str:
+    def shell(
+        settings: model.Settings,
+        host: model.Host,
+        script: str,
+        stdin: transport.Stdin | None = None,
+    ) -> str:
         assert settings == config
         assert host == run.host
+        assert stdin == transport.Stdin(run.owner)
         scripts.append(script)
         return ""
 
@@ -933,15 +943,8 @@ def test_kill_grace_and_poll_bounds(
     assert timeouts == [min(30, grace + 2), 1]
     assert sleeps == [0.5]
     assert scripts == [
-        remote_commands.session(
-            "sample",
-            "kill-session",
-            CONFIG.sockets_dir,
-            owner=driver.load(CONFIG, "sample").owner,
-        ),
-        remote_commands.fallback(
-            "sample", CONFIG.sockets_dir, owner=driver.load(CONFIG, "sample").owner
-        ),
+        remote_commands.session("sample", "kill-session", CONFIG.sockets_dir),
+        remote_commands.fallback("sample", CONFIG.sockets_dir),
     ]
 
 
@@ -1051,7 +1054,12 @@ def test_exec_spends_one_startup_budget(
     steps: list[str] = []
 
     def shell(
-        settings: model.Settings, host: model.Host, script: str, *, timeout: float
+        settings: model.Settings,
+        host: model.Host,
+        script: str,
+        _stdin: transport.Stdin | None = None,
+        *,
+        timeout: float,
     ) -> str:
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
@@ -1090,16 +1098,15 @@ def test_exec_spends_one_startup_budget(
         settings: model.Settings,
         host: model.Host,
         argv: tuple[str, ...],
+        stdin: transport.Stdin | None,
         *,
         timeout: float,
     ) -> str:
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
+        assert stdin == transport.Stdin(driver.load(CONFIG, "sample").owner)
         assert argv == remote_commands.start(
-            "sample",
-            CONFIG.sockets_dir,
-            CONFIG.hosts[0],
-            owner=driver.load(CONFIG, "sample").owner,
+            "sample", CONFIG.sockets_dir, CONFIG.hosts[0]
         )
         assert timeout == 70
         steps.append("start")
@@ -1376,11 +1383,11 @@ def test_lost_clean_reply_cannot_clean_new_owner(
         config: model.Settings,
         host: model.Host,
         script: str,
+        stdin: transport.Stdin | None = None,
         *,
         timeout: float = 30,
-        data: bytes = b"",
     ) -> str:
-        result = original(config, host, script, timeout=timeout, data=data)
+        result = original(config, host, script, stdin, timeout=timeout)
         if 'trash="$d/trash/' in script:
             remote.file(".owner", "new-owner\n")
             remote.file(".rc", "0\n")
@@ -1445,11 +1452,11 @@ def test_lost_start_reply_keeps_unreachable_run_reachable(
         config: model.Settings,
         host: model.Host,
         command: tuple[str, ...],
+        stdin: transport.Stdin | None = None,
         *,
-        data: bytes = b"",
         timeout: float = 30,
     ) -> str:
-        reply = original(config, host, command, data=data, timeout=timeout)
+        reply = original(config, host, command, stdin, timeout=timeout)
         if "new-session" in command[2]:
             remote.configure(ssh=[{"rc": 255}])
             message = "lost start reply"
@@ -1503,15 +1510,15 @@ def test_clean_retry_after_rc_was_trashed(
         config: model.Settings,
         host: model.Host,
         script: str,
+        stdin: transport.Stdin | None = None,
         *,
         timeout: float = 30,
-        data: bytes = b"",
     ) -> str:
         if 'trash="$d/trash/' in script:
             (remote.state / "sample.rc").rename(remote.root / "saved-rc")
             message = "failed before owner move"
             raise transport.TransportError(message)
-        return original(config, host, script, timeout=timeout, data=data)
+        return original(config, host, script, stdin, timeout=timeout)
 
     monkeypatch.setattr(transport, "shell", fail)
     assert command("clean") == 1
@@ -1755,11 +1762,11 @@ def test_unsandboxed_unconfirmed_reports_sandbox(
             config: model.Settings,
             host: model.Host,
             command: tuple[str, ...],
+            stdin: transport.Stdin | None = None,
             *,
-            data: bytes = b"",
             timeout: float = 30,
         ) -> str:
-            reply = original(config, host, command, data=data, timeout=timeout)
+            reply = original(config, host, command, stdin, timeout=timeout)
             if "new-session" in command[2]:
                 message = "lost start reply"
                 raise transport.TransportError(message)
