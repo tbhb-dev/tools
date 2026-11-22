@@ -223,6 +223,8 @@ def test_launch_stream_and_metadata(
         "host": "example-linux",
         "started": record["started"],
         "owner": record["owner"],
+        "launcher": "coord-review-1",
+        "launcher_session": "session-1",
         "cleaning": False,
     }
     assert len(record["owner"]) == 32
@@ -519,7 +521,7 @@ def test_status(
     started = json.loads(driver.metadata_path("sample").read_text())["started"]
     assert output.out == (
         f"sample: phase=running rc={expected} host=example-linux "
-        f"account=agent started={started}\n"
+        f"account=agent started={started} launcher=coord-review-1\n"
     )
 
 

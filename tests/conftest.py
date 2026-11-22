@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, cast, override
 import pytest
 
 from tbhbdev import host, plugins, secrets
-from tbhbdev.alpha.agent import credentials, host_tools, runfiles
+from tbhbdev.alpha.agent import credentials, host_tools, launcher, runfiles
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -113,6 +113,12 @@ def checked_move(operation: Callable[..., None]) -> Callable[..., None]:
         operation(source, destination, *args, **kwargs)
 
     return move
+
+
+@pytest.fixture(autouse=True)
+def launching_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests run as a session on the reviewer list, whatever pane they run in."""
+    monkeypatch.setattr(launcher, "session", lambda: ("coord-review-1", "session-1"))
 
 
 @pytest.fixture(autouse=True)

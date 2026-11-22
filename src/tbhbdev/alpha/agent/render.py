@@ -49,10 +49,11 @@ def status(
     *,
     phase: str,
     rc: str,
-    target: tuple[str, str, str | None],
+    target: tuple[str, str, str | None, str | None],
     started: str,
 ) -> str:
-    host, account, authorized_by = target
+    host, account, authorized_by, launcher = target
     return (
         f"{name}: phase={phase} rc={rc} host={host} account={account} started={started}"
+        f" launcher={launcher or 'unknown'}"
     ) + sandbox(authorized_by)
