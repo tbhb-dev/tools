@@ -908,7 +908,7 @@ def _bazel_roots(home: Path) -> tuple[tuple[Path, Path], ...]:
     user = f"_bazel_{getpass.getuser()}"
     return (
         (home, home / ".cache/bazel" / user),
-        (Path("/var/tmp"), Path("/var/tmp") / user),  # noqa: S108
+        (Path("/var/tmp"), Path("/var/tmp") / user),  # noqa: S108  # nosec B108 -- the trusted /var/tmp anchor, not a temp file
     )
 
 
