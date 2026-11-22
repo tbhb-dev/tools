@@ -6,7 +6,7 @@ generated:
     model: openai:gpt-6.1-sol
     effort: high
     surface: exec
-    at: "2026-11-16T03:01:44Z"
+    at: "2026-11-22T00:47:49Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -21,7 +21,9 @@ Use the hidden host command as `tbhbdev alpha agent run-host NAME [REQUEST] --ho
 
 `public_repos` defaults to an empty list, which refuses every repository. A host launches only after its user config lists the repositories it runs. List each public repository as `owner/name` or `github.com/owner/name`, using the same form as a request's `repo`. Run-host compares the parsed repository parts and refuses unlisted repositories before creating a mirror. Mirrors fetch from `https://github.com/<owner>/<name>.git` without credentials, prompts, SSH, or token fallback. Existing mirror configs switch to HTTPS on the next run.
 
-The ssh verb `preflight NAME` requires a null `push_token` and refuses a request with a token. The local `--preflight` flag ignores any `push_token`. It prepares the workspace and credentials and loads the signing agent. It logs whether the run worktree has `.bazel_env/bin` and warns that commit hooks fail when the directory is missing, without changing the exit status. After checking the policy and harness command, it writes `preflight ok: <executable path>` to the log. It stops the signing agent and records the exit status, phase, and index entry without launching the harness. Use a fresh name for the next run. Preparation errors specify the failed step without including upstream error details.
+The ssh verb `preflight NAME` requires a null `push_token` and refuses a request with a token. The local `--preflight` flag ignores any `push_token`. It prepares the workspace and credentials and loads the signing agent. It logs whether the run worktree has `.bazel_env/bin` and warns that commit hooks fail when the directory is missing, without changing the exit status. After checking the policy and harness command, it writes `preflight ok: <executable path>` to the log. It stops the signing agent and records the exit status, phase, and index entry without launching the harness. Use a fresh name for the next run. Preparation errors use `run preparation failed at <step>: <cause>`. The cause keeps the validation message, the operating system error with only the filename's basename, or the first line of git's standard error. It removes control characters, redacts environment values, credentials and URL user information, and limits the cause to 200 characters. Other value errors and git failures without standard error use a generic cause.
+
+A missing hook executable produces `run preparation failed at hook install: host executable prek was not found`. Install `prek` in a fixed directory on the host tools' search path, or add its directory to `host_path`.
 
 The run clone has its own copy of the mirror's object store. The mirror never prunes objects. Run-host installs the identity and pre-commit hooks from its own templates without running code from the checkout. It finishes all git operations before starting the harness. Plain git in a run clone is unsafe for host processes.
 
