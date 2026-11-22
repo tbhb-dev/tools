@@ -10,9 +10,17 @@ the plain-text squash message. This hook blocks the direct `gh` call and names
 the command to run instead:
 
     gh pr create  ->  tbhbdev alpha pr check, then tbhbdev alpha pr create
-    gh pr edit    ->  tbhbdev alpha pr edit --pr N
+    gh pr edit    ->  tbhbdev alpha pr edit DRAFT --pr N
     gh pr merge   ->  tbhbdev alpha merge N   (--dry-run previews)
     gh pr ready   ->  tbhbdev alpha pr ready N [N...]
+    gh pr close N ->  tbhbdev alpha pr close N --reason TEXT
+    gh issue close N
+                  ->  tbhbdev alpha issue close N --reason completed|not-planned
+    gh run rerun  ->  tbhbdev alpha pr rerun N   (N is the pull request)
+    gh api -X DELETE repos/O/R/git/refs/heads/B
+                  ->  tbhbdev alpha pr delete-branch N   (closed or merged PRs)
+
+The close commands run from the repository clone and take no ``--repo``.
 
 It reads the hook payload on stdin and takes no arguments. The payload shape
 alone picks the output contract, so the hook behaves the same whoever runs it:
@@ -53,9 +61,10 @@ removes quoting. A simple command matches when, after leading ``NAME=value``
 words, shell keywords and the wrappers env, command, exec, sudo, nohup, time,
 builtin and xargs (with their options), the program is ``gh`` (any path) and,
 after its global flags (``-R x``, ``--repo x``, ``--hostname x``, other
-``-x``), the words are ``pr create|edit|merge``. ``bash|sh|zsh|dash|ksh -c
-SCRIPT`` and ``eval ...`` are scanned recursively. Text inside a quoted
-argument to any other command is not a command, so
+``-x``), the words are ``pr create|edit|merge|ready|close``, ``issue close``,
+``run rerun``, or ``api`` with ``-X DELETE`` on a ``git/refs/heads/`` path.
+``bash|sh|zsh|dash|ksh -c SCRIPT`` and ``eval ...`` are scanned recursively.
+Text inside a quoted argument to any other command is not a command, so
 ``git commit -m 'docs: mention gh pr merge'`` and ``echo "gh pr merge"`` pass.
 
 Known gaps, none of which the permission rules close either:
@@ -94,7 +103,17 @@ if TYPE_CHECKING:
 
 type Json = dict[str, object]
 
-SUBCOMMANDS = ("create", "edit", "merge", "ready")
+SUBCOMMANDS = ("create", "edit", "merge", "ready", "close")
+# Blocked ``gh GROUP SUB`` pairs; ``gh api`` branch deletes are matched apart.
+GROUPS = {"pr": SUBCOMMANDS, "issue": ("close",), "run": ("rerun",)}
+# First line of every hint denial, so a transcript shows this hook spoke.
+HINT_LINE = "tbhbdev hint:"
+# Last line of every hint denial: where to find the other GitHub write commands.
+FOOTER = (
+    "Use `tbhbdev alpha` for GitHub writes: `tbhbdev alpha --help` lists the "
+    "commands, and `tbhbdev alpha session-context` reports this session's context."
+)
+BRANCH_REF = re.compile(r"(?:https?://[^/]+/)?/?repos/[^/]+/[^/]+/git/refs/heads/.+")
 SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 WRAPPERS = {"env", "command", "exec", "sudo", "nohup", "time", "builtin", "xargs"}
 KEYWORDS = {"if", "then", "do", "else", "elif", "while", "until", "!", "{", "}"}
@@ -132,10 +151,11 @@ REVIEWS = re.compile(
 
 
 class Match(NamedTuple):
-    """A blocked `gh pr` call: the subcommand and the words after it."""
+    """A blocked `gh` call: the subcommand, the words after it, and its group."""
 
     sub: str
     args: list[str]
+    group: str = "pr"
 
 
 @dataclass
@@ -316,13 +336,28 @@ def skip_prefix(words: list[str]) -> list[str]:
     return words[i:]
 
 
+def deletes_branch(args: list[str]) -> bool:
+    """Whether ``gh api`` args are a DELETE of a ``git/refs/heads/`` ref."""
+    methods = flag_values(args, {"-X", "--method"}, API_VALUE_FLAGS)
+    endpoints = split_args(args, API_VALUE_FLAGS)[1]
+    return bool(
+        methods
+        and methods[-1].upper() == "DELETE"
+        and endpoints
+        and BRANCH_REF.fullmatch(endpoints[0])
+    )
+
+
 def gh_match(rest: list[str]) -> Match | None:
-    """Match the words after ``gh``: global flags, then ``pr create|edit|merge``."""
+    """Match the words after ``gh``: global flags, then a blocked subcommand."""
     i = 0
     while i < len(rest) and rest[i].startswith("-"):
         i += 2 if rest[i] in VALUE_FLAGS else 1
-    if rest[i : i + 1] == ["pr"] and rest[i + 1 : i + 2] and rest[i + 1] in SUBCOMMANDS:
-        return Match(rest[i + 1], rest[i + 2 :])
+    group, sub = (rest[i : i + 1] or [""])[0], (rest[i + 1 : i + 2] or [""])[0]
+    if sub in GROUPS.get(group, ()):
+        return Match(sub, rest[i + 2 :], group)
+    if group == "api" and deletes_branch(rest[i + 1 :]):
+        return Match("delete-branch", rest[i + 1 :], group)
     return None
 
 
@@ -605,10 +640,39 @@ def denial(found: list[Approval], data: Json, env: Mapping[str, str]) -> str | N
     return None
 
 
+def other_hint(found: Match, number: str) -> str | None:
+    """The block message for a close, rerun or branch delete; None for others."""
+    if found.group == "api":
+        return (
+            "A `gh api` branch delete is blocked. For a closed or merged PR, run "
+            f"`tbhbdev alpha pr delete-branch {number}` instead."
+        )
+    blocked = f"`gh {found.group} {found.sub}` is blocked."
+    if found.group == "issue":
+        return (
+            f"{blocked} From the repository clone, run `tbhbdev alpha issue close "
+            f"{number} --reason completed|not-planned [--comment TEXT]` (no --repo)."
+        )
+    if found.group == "run":
+        return (
+            f"{blocked} Run `tbhbdev alpha pr rerun N`, where N is the pull request "
+            "number, to rerun the failed jobs of its latest run."
+        )
+    if found.sub == "close":
+        return (
+            f"{blocked} From the repository clone, run `tbhbdev alpha pr close "
+            f"{number} --reason TEXT` (no --repo)."
+        )
+    return None
+
+
 def hint(found: Match) -> str:
     """The block message: what was blocked and the command to run instead."""
-    blocked = f"`gh pr {found.sub}` is blocked."
     number = next((m[1] for w in found.args if (m := PR_NUMBER.fullmatch(w))), "<N>")
+    other = other_hint(found, number)
+    if other:
+        return other
+    blocked = f"`gh {found.group} {found.sub}` is blocked."
     if found.sub == "create":
         return (
             f"{blocked} Write {DRAFT} from {TEMPLATE}, check it with "
@@ -616,7 +680,8 @@ def hint(found: Match) -> str:
         )
     if found.sub == "edit":
         return (
-            f"{blocked} Update {DRAFT}, then run `tbhbdev alpha pr edit --pr {number}`."
+            f"{blocked} Update {DRAFT}, then run "
+            f"`tbhbdev alpha pr edit {DRAFT} --pr {number}`."
         )
     if found.sub == "ready" and "--undo" in found.args:
         return (
@@ -690,7 +755,8 @@ def main() -> int:
             return 0
         found = find(text)
         if found:
-            print(json.dumps(decision(hint(found), antigravity=antigravity)))
+            message = f"{HINT_LINE}\n{hint(found)}\n{FOOTER}"
+            print(json.dumps(decision(message, antigravity=antigravity)))
     except Exception:  # noqa: BLE001  # fail open on any crash
         return 0
     return 0

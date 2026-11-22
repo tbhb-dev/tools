@@ -62,7 +62,8 @@ Alpha commands are interim: they may change or go away without notice.
 commands:
   identity     agent identity: record <harness> | trailer MSGFILE [SOURCE]
                | consume | check MSGFILE | stamp-docs
-  guard-gh-pr  PreToolUse hook: block gh pr create|edit|merge and
+  guard-gh-pr  PreToolUse hook: block gh pr create|edit|merge|ready|close,
+               gh issue close, gh run rerun, gh api branch deletes and
                a session's approval of a pull request it opened
   guard-op     PreToolUse hook: require the configured 1Password account
   state-guard  Claude Code hook: block sign-off commits and unchecked open items
