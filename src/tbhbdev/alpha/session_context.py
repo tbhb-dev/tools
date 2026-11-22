@@ -20,7 +20,11 @@ from tbhbdev import userconfig
 
 TABLE = "harness"
 GITHUB_WRITES = (
-    "Use `tbhbdev alpha` for GitHub writes: `tbhbdev alpha --help` lists the commands."
+    "Use `tbhbdev alpha` for GitHub writes, never raw `gh`: "
+    "`tbhbdev alpha pr create|check [DRAFT]`, `pr ready N`, "
+    "`pr close N --reason TEXT`, `merge N`, `review draft N`, "
+    "`agent exec --host H --repo R --model M --effort E --profile build|review "
+    "NAME PROMPT_FILE`; `tbhbdev alpha --help` lists the rest."
 )
 
 

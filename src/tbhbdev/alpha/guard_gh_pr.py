@@ -10,7 +10,7 @@ the plain-text squash message. This hook blocks the direct `gh` call and names
 the command to run instead:
 
     gh pr create  ->  tbhbdev alpha pr check, then tbhbdev alpha pr create
-    gh pr edit    ->  tbhbdev alpha pr edit --pr N
+    gh pr edit    ->  tbhbdev alpha pr edit DRAFT --pr N
     gh pr merge   ->  tbhbdev alpha merge N   (--dry-run previews)
     gh pr ready   ->  tbhbdev alpha pr ready N [N...]
     gh pr close N ->  tbhbdev alpha pr close N --reason TEXT
@@ -680,7 +680,8 @@ def hint(found: Match) -> str:
         )
     if found.sub == "edit":
         return (
-            f"{blocked} Update {DRAFT}, then run `tbhbdev alpha pr edit --pr {number}`."
+            f"{blocked} Update {DRAFT}, then run "
+            f"`tbhbdev alpha pr edit {DRAFT} --pr {number}`."
         )
     if found.sub == "ready" and "--undo" in found.args:
         return (

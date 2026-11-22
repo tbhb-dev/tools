@@ -6,6 +6,7 @@
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 from contextlib import redirect_stdout
@@ -18,9 +19,9 @@ from fake_tool import pythonpath
 from hypothesis import given
 from hypothesis import strategies as st
 
+from tbhbdev.alpha import close, install, opened, pull_request, squash_merge
 from tbhbdev.alpha import guard_gh_pr as guard
 from tbhbdev.alpha import identity as ai
-from tbhbdev.alpha import install, opened
 
 DATA = Path(__file__).parent / "testdata" / "alpha"
 SRC = Path(guard.__file__).parents[2]
@@ -32,7 +33,7 @@ CREATE = (
 )
 EDIT = (
     "`gh pr edit` is blocked. Update .github/PULL_REQUEST_DRAFT.md, "
-    "then run `tbhbdev alpha pr edit --pr {n}`."
+    "then run `tbhbdev alpha pr edit .github/PULL_REQUEST_DRAFT.md --pr {n}`."
 )
 READY = "`gh pr ready` is blocked. Run `tbhbdev alpha pr ready {n}` instead."
 PR_CLOSE = (
@@ -238,7 +239,7 @@ def test_new_hints_leave_other_commands_alone(text: str) -> None:
     ("command", "named"),
     [
         ("gh pr create", "tbhbdev alpha pr create"),
-        ("gh pr edit 3", "tbhbdev alpha pr edit --pr 3"),
+        ("gh pr edit 3", "tbhbdev alpha pr edit .github/PULL_REQUEST_DRAFT.md --pr 3"),
         ("gh pr merge 3", "tbhbdev alpha merge 3"),
         ("gh pr ready 3", "tbhbdev alpha pr ready 3"),
         ("gh pr close 3", "tbhbdev alpha pr close 3 --reason TEXT"),
@@ -1379,3 +1380,43 @@ def test_a_non_utf8_ledger_denies(
         f"{RULE}, and the guard can't read this session's ledger, "
         f"so it refuses `tbhb-approve`: {path} is not UTF-8"
     )
+
+
+PLACEHOLDERS = {
+    "N": "7",
+    "<N>": "7",
+    "TEXT": "why",
+    "completed|not-planned": "completed",
+}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh pr create",
+        "gh pr edit 3",
+        "gh pr merge 3",
+        "gh pr ready 3",
+        "gh pr close 3",
+        "gh issue close 3",
+        "gh run rerun 9",
+        "gh api -X DELETE repos/a/b/git/refs/heads/x",
+    ],
+)
+def test_every_hinted_command_line_parses_with_the_real_cli(command: str) -> None:
+    found = run_find(command)
+    assert found is not None
+    spans = re.findall(r"`tbhbdev alpha ([^`]+)`", guard.hint(found))
+    assert spans
+    for span in spans:
+        words = [
+            PLACEHOLDERS.get(w, w) for w in re.sub(r"\s*\[[^\]]*\]", "", span).split()
+        ]
+        if words[0] == "merge":
+            squash_merge.build_parser("x").parse_args(words[1:])
+        elif words[:2] in (["pr", "close"], ["issue", "close"]):
+            close.build_parser("x").parse_args(words)
+        else:
+            pull_request.build_parser("x").parse_args(
+                words[1:] if words[0] == "pr" else words
+            )

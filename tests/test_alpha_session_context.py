@@ -10,7 +10,7 @@ lazy from pathlib import Path
 
 import pytest
 
-from tbhbdev.alpha import session_context
+from tbhbdev.alpha import agent, close, pull_request, session_context, squash_merge
 
 NOW = datetime(2026, 1, 2, 3, 4, tzinfo=UTC)
 
@@ -49,8 +49,7 @@ def test_it_names_the_host_its_role_the_others_and_the_time(
         "Other hosts: example-b, example-c. Reach them only over ssh; "
         '"this machine" and "local" mean example-a.\n'
         "Local time at session start: 2026-01-02 03:04 UTC.\n"
-        "Use `tbhbdev alpha` for GitHub writes: `tbhbdev alpha --help` lists "
-        "the commands.\n"
+        f"{session_context.GITHUB_WRITES}\n"
     )
 
 
@@ -152,4 +151,33 @@ def test_context_runs_outside_a_repository(
     assert session_context.main() == 0
     assert capsys.readouterr().out.startswith(
         "Session host: this session runs on example-a, "
+    )
+
+
+def test_the_reminder_lists_the_top_commands_with_real_argument_shapes() -> None:
+    text = session_context.GITHUB_WRITES
+    for named in ("pr create|check", "pr ready N", "merge N", "review draft N"):
+        assert named in text
+    assert text.endswith("`tbhbdev alpha --help` lists the rest.")
+    pull_request.build_parser("x").parse_args(["create"])
+    pull_request.build_parser("x").parse_args(["check"])
+    pull_request.build_parser("x").parse_args(["ready", "7"])
+    close.build_parser("x").parse_args(["pr", "close", "7", "--reason", "why"])
+    squash_merge.build_parser("x").parse_args(["7"])
+    agent.parser("x").parse_args(
+        [
+            "exec",
+            "--host",
+            "H",
+            "--repo",
+            "R",
+            "--model",
+            "M",
+            "--effort",
+            "E",
+            "--profile",
+            "build",
+            "NAME",
+            "FILE",
+        ]
     )
