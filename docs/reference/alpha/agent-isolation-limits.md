@@ -3,10 +3,8 @@ description: Agent isolation constraints, coordination, and cleanup.
 generated:
   - role: generated
     harness: codex:0.166.0
-    model: openai:gpt-6.1-sol
-    effort: high
-    surface: exec
-    at: "2026-11-16T03:01:44Z"
+    model: openai:gpt-6
+    at: "2026-11-22T00:35:22Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -15,7 +13,7 @@ type: Reference
 
 # Agent isolation limits
 
-Run-host runs git in a run clone only during `clone_run` and `create`, before launch. After the harness starts, run-host never runs git in that clone. An operator who runs `git add -A` or `git stash` in a run clone can run a nested repository's clean filter. The port never runs those commands in a run clone.
+Run-host runs git in a run clone only during `clone_run` and `create`, before launch. After the harness starts, run-host never runs git in that clone. The controller's `diff` command can read committed work there through the run account's SSH connection. An operator who runs `git add -A` or `git stash` in a run clone can run a nested repository's clean filter. The port never runs those commands in a run clone.
 
 Run-host checks out a new build branch from a commit and leaves upstream tracking unset before launch. The legacy sandbox probes keep `.git/config` read-only. In those probes, use `git switch --no-track -c x origin/main` and push with an explicit destination branch, such as `git push origin HEAD:refs/heads/x`.
 
@@ -61,15 +59,15 @@ Each claim writes a random run ID to the local metadata and the remote `<name>.o
 
 `kill` closes the tmux session to notify the supervisor with SIGHUP. The supervisor stops its children before it records the return code. The coordinator writes 137 only after the session closes and the grace period elapses without a return code. It also writes `<name>.rc.fallback`, which makes `clean` require `--force` because processes might still run.
 
-The host keeps a bare mirror at `$XDG_STATE_HOME/tbhbdev/agent-mirrors/<git host>/<owner>/<repo>.git`. An empty or unset `XDG_STATE_HOME` uses `~/.local/state`. Only host git touches the mirror, under its `agent-mirror.lock`. Before launch, the supervisor makes a separate run clone with `git clone --shared` at `<account clone>/.worktrees/agent-<name>`. That clone has its own `.git` directory. The sandbox denies writes to `.git/config`, `.git/hooks` and `.git/info`. After launch, host processes never run git in the run clone or trust its git state.
+The host keeps a bare mirror at `$XDG_STATE_HOME/tbhbdev/agent-mirrors/<git host>/<owner>/<repo>.git`. An empty or unset `XDG_STATE_HOME` uses `~/.local/state`. Only host git touches the mirror, under its `agent-mirror.lock`. Before launch, the supervisor makes a separate run clone at `<account clone>/.worktrees/agent-<name>`. That clone has its own `.git` directory. The legacy sandbox denies writes to `.git/config`, `.git/hooks` and `.git/info`. Inspection output from both repositories is untrusted.
 
 ```text
 Don't run git inside a run clone: it is agent-written. Use `tbhbdev alpha agent log|diff NAME`.
 ```
 
-`log NAME` shows up to ten commits by default. `log -n 5 NAME` changes that count. `diff NAME` shows changes from the default branch's merge base to the pushed branch. Both commands fetch the origin's default branch and `agent/<name>` into the mirror, then inspect those refs with external diff, text conversion, and color turned off. They show pushed work only. Neither `wait` nor `status` needs the mirror. The mirror never prunes, so disk use grows with history until a pruning follow-up.
+`log NAME` shows up to ten pushed commits by default. `log -n 5 NAME` changes that count. When `agent/<name>` exists on origin, `diff NAME` shows changes from the default branch's merge base to that pushed branch. These reads fetch the origin's default branch and `agent/<name>` into the mirror, then inspect those refs. If the branch is absent on origin, `diff NAME` reads the run's own clone through the recorded run account's SSH connection and prints `git format-patch --stdout refs/remotes/origin/<default>..HEAD`. It resolves the default branch name on origin and uses that branch’s ref saved in the run clone at startup. This includes local commits and omits uncommitted changes; no commits produces empty output. The fallback never lets Git read the run's own configuration. It reads `HEAD`, the loose ref files, and `packed-refs` as plain text and checks each value is a 40-digit hash. It then runs `format-patch` in a new empty bare repository in a temporary directory that borrows only the run's object directory, so settings such as `include.path`, `format.from`, `format.signatureFile`, and `commondir` in the run clone have no effect. The fallback refuses a symlink in the clone path, in the git files it reads, and anywhere under `objects` and `refs`, and it refuses an unreadable `objects` or `refs` directory, an `objects/info/alternates` file, and a multi-pack index. The new repository also skips the user's global Git configuration. It passes `--no-signature`, `--no-attach`, `--no-add-header`, and `--no-notes`. The symlink scan and the read aren't atomic, so a run that's still writing can swap a path between them. Both paths disable external diff, text conversion, and color, cap output at 65536 bytes, and filter terminal controls. Neither `wait` nor `status` needs the mirror. The mirror never prunes, so disk use grows with history until a pruning follow-up.
 
-Cleanup refuses an open session. Every new run requires `clean --force`, which moves the run clone and per-run files into dated trash without reading agent-written git state. Cleanup refuses a symlink in place of the run clone. Retries skip completed moves, and removing all files for the run permits name reuse. `keep` succeeds when the marker already exists. `log` and `diff` print a full-access run's final output (or its stream) from the host, the same as `wait` does, because a review run pushes no branch.
+Cleanup refuses an open session. Every new run requires `clean --force`, which moves the run clone and per-run files into dated trash without reading agent-written git state. Cleanup refuses a symlink in place of the run clone. Retries skip completed moves, and removing all files for the run permits name reuse. `keep` succeeds when the marker already exists. `log` prints a full-access run's final output (or its stream) from the host, the same as `wait` does. `diff` does the same for full-access review runs; full-access build runs inspect commits.
 
 Ref resolution runs outside the clone against the SSH URL from the repository argument. Remote Git uses an empty environment and explicit overrides for hooks, file monitoring, SSH, credentials, prompts, external protocols, paging, submodules, and automatic maintenance. It disables lazy fetching. Remote scripts use the C locale. Run file reads refuse symlinks, bound byte counts, check status fields, replace invalid UTF-8, and remove terminal control characters. Polls wait at least half a second between connections.
 

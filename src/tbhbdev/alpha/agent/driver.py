@@ -531,7 +531,9 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
 
 
 def inspect(settings: Settings, run: Run, *, limit: int | None) -> int:
-    if run.request.unsandboxed:
+    if run.request.unsandboxed and (
+        limit is not None or run.request.profile is Profile.REVIEW
+    ):
         reading = transport.read(
             settings, run.host, (run.name, run.owner), answer=True, timeout=30
         )
