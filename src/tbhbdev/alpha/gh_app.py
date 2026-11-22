@@ -63,6 +63,38 @@ APP_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*[a-z0-9]")
 REPO_PATTERN = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 # Eleven digits reach the year 5138, which datetime still formats.
 PERMISSION_PATTERN = re.compile(r"[a-z][a-z_]*:(?:read|write)", re.ASCII)
+# GitHub's repository permission names, so a typo fails before any network call.
+PERMISSION_NAMES = frozenset(
+    {
+        "actions",
+        "administration",
+        "checks",
+        "codespaces",
+        "contents",
+        "dependabot_secrets",
+        "deployments",
+        "discussions",
+        "environments",
+        "issues",
+        "merge_queues",
+        "metadata",
+        "packages",
+        "pages",
+        "pull_requests",
+        "repository_advisories",
+        "repository_hooks",
+        "repository_projects",
+        "secret_scanning_alerts",
+        "secrets",
+        "security_events",
+        "single_file",
+        "statuses",
+        "vulnerability_alerts",
+        "workflows",
+    }
+)
+# A run this long of token characters in a failure message may be a credential.
+SECRET_LIKE = re.compile(r"[A-Za-z0-9_.~+/=-]{20,}")
 EPOCH_PATTERN = re.compile(r"[0-9]{1,11}", re.ASCII)
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_.~+/=-]+")
 PEM_PATTERN = re.compile(
@@ -181,7 +213,7 @@ def parse_args(argv: Sequence[str]) -> Args:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--all-repos", action="store_true")
     parser.add_argument("--vault", default=DEFAULT_VAULT)
-    parser.add_argument("--permissions")
+    parser.add_argument("--permissions", action="append")
     parser.add_argument("--cooldown-until")
     parser.add_argument("--cooldown-status", action="store_true")
     ns = parser.parse_args(argv)
@@ -230,22 +262,29 @@ def parse_args(argv: Sequence[str]) -> Args:
     )
 
 
-def parse_permissions(text: str | None) -> tuple[tuple[str, str], ...]:
-    """NAME:LEVEL pairs from a comma list, sorted; empty for no option.
+def parse_permissions(values: list[str] | None) -> tuple[tuple[str, str], ...]:
+    """NAME:LEVEL pairs from the option's one comma list, sorted; empty for none.
 
     Raises:
-        UsageError: An entry isn't NAME:read or NAME:write, or a name repeats.
+        UsageError: The option repeats, an entry isn't NAME:read or NAME:write
+            with a known name, or a name repeats.
     """
-    if text is None:
+    if values is None:
         return ()
+    if len(values) > 1:
+        message = "--permissions can be given once"
+        raise UsageError(message)
+    text = values[0]
     pairs: dict[str, str] = {}
     for entry in text.split(","):
         if (
             PERMISSION_PATTERN.fullmatch(entry) is None
+            or entry.partition(":")[0] not in PERMISSION_NAMES
             or entry.partition(":")[0] in pairs
         ):
             message = (
-                f"--permissions entry {entry!r} must be NAME:read or NAME:write, once"
+                f"--permissions entry {entry!r} must be a known NAME:read "
+                "or NAME:write, once"
             )
             raise UsageError(message)
         name, _, level = entry.partition(":")
@@ -370,9 +409,11 @@ def json_object(response: httpx.Response) -> Json:
 
 
 def detail(payload: Json) -> str:
-    """GitHub's own `message` field, which is all a failure here quotes."""
+    """GitHub's own `message` field, minus anything that looks like a credential."""
     reason = payload.get("message")
-    return reason if isinstance(reason, str) and reason else "no message"
+    if not isinstance(reason, str) or not reason:
+        return "no message"
+    return SECRET_LIKE.sub("[redacted]", reason)
 
 
 def installation_id(response: httpx.Response) -> int | None:

@@ -325,11 +325,35 @@ def test_permissions_parse_sort_and_split_the_cache_directory() -> None:
 
 
 @pytest.mark.parametrize(
-    "value", ["", "contents", "contents:admin", "Contents:read", "a:read,a:write"]
+    "value",
+    [
+        "",
+        "contents",
+        "contents:admin",
+        "Contents:read",
+        "contents:read,contents:write",
+        "made_up_permission:read",
+    ],
 )
 def test_bad_permissions_are_refused(value: str) -> None:
     with pytest.raises(gh_app.UsageError, match="--permissions entry"):
         gh_app.parse_args(["bot", REPO, "--permissions", value])
+
+
+def test_a_repeated_permissions_option_is_refused() -> None:
+    with pytest.raises(gh_app.UsageError, match="given once"):
+        gh_app.parse_args(
+            ["bot", REPO, "--permissions", "contents:read", "--permissions", "bad"]
+        )
+
+
+def test_failure_details_hide_credential_like_text() -> None:
+    echoed = "ghs_" + "A1b2" * 10
+    assert gh_app.detail({"message": f"bad token {echoed} here"}) == (
+        "bad token [redacted] here"
+    )
+    assert gh_app.detail({"message": "Not Found"}) == "Not Found"
+    assert gh_app.detail({}) == "no message"
 
 
 def test_a_cooldown_option_refuses_permissions() -> None:
