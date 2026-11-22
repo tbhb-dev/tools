@@ -152,6 +152,27 @@ def test_a_single_segment_ref_slot_holding_a_private_name_is_flagged(
     assert prefixed([url.format("example-lab")]) == ["example-lab"]
 
 
+def test_a_name_inside_a_longer_spelled_name_is_still_flagged(home: Path) -> None:
+    del home
+    write_prefixes(SYNTHETIC)
+    url = "https://example.com/src/blob/lab/example-lab/x"
+    found = pn.private_name_problems(
+        [url], ["lab", "example-lab"], prefixes=pn.public_url_prefixes()
+    )
+    # The whole span is kept, so the literal's own name is reported with it.
+    assert [message.split("'")[1] for _, message in found] == ["lab", "example-lab"]
+
+
+def test_a_path_only_name_in_a_revision_slot_is_flagged(home: Path) -> None:
+    del home
+    write_prefixes(r"https://github\.com/bazelbuild/bazel/blob/[\w.-]+/")
+    url = "https://github.com/bazelbuild/bazel/blob/{}/x"
+    kwargs = {"path_only": {"widget"}, "prefixes": pn.public_url_prefixes()}
+    assert pn.private_name_problems([url.format("main")], NAMES, **kwargs) == []
+    found = pn.private_name_problems([url.format("widget")], NAMES, **kwargs)
+    assert [message.split("'")[1] for _, message in found] == ["widget"]
+
+
 def test_host_names_carry_the_prefixes(home: Path) -> None:
     del home
     write_prefixes(SYNTHETIC)

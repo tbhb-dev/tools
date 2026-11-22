@@ -88,7 +88,7 @@ def private_name_problems(
         (number, MESSAGE.format(token))
         for number, line in enumerate(lines, first)
         for token in dict.fromkeys(
-            TOKEN.findall(_without_prefixes(line, prefixes, wanted))
+            TOKEN.findall(_without_prefixes(line, prefixes, wanted | restricted))
         )
         if token != PLACEHOLDER
         and (token.lower() not in PUBLIC_RULE_IDS or token.lower() in wanted)
@@ -109,12 +109,12 @@ def _without_prefixes(
     """
     names = wanted or set()
     for prefix in prefixes:
-        literal = prefix.pattern.replace("\\", "").lower()
+        literal = set(TOKEN.findall(prefix.pattern.replace("\\", "").lower()))
         line = prefix.sub(partial(_span, literal=literal, wanted=names), line)
     return line
 
 
-def _span(match: re.Match[str], *, literal: str, wanted: set[str]) -> str:
+def _span(match: re.Match[str], *, literal: set[str], wanted: set[str]) -> str:
     """A space if MATCH may be exempt, else its text unchanged."""
     text = match.group()
     after = match.string[match.end() : match.end() + 1]
