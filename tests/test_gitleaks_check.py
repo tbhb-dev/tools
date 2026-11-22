@@ -70,12 +70,11 @@ def test_scan_refused_is_a_runtime_error() -> None:
 def test_a_scanner_that_cannot_run_is_refused_without_the_text(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_executable: bool
 ) -> None:
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
-    write_private_config(home)
-    repo = tmp_path / "repo"
+    repo = tmp_path / "checkout"
     repo.mkdir()
     (repo / ".gitleaks.toml").write_text("")
+    write_private_config(tmp_path / "scanner-home")
+    monkeypatch.setenv("HOME", str(tmp_path / "scanner-home"))
     scanner = tmp_path / "bin" / "scanner"
     if make_executable:
         scanner.parent.mkdir()
