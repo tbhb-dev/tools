@@ -20,7 +20,7 @@ def tokens(lines: list[str], names: list[str] | None = None) -> list[str]:
     return [message.split("'")[1] for _, message in found]
 
 
-# cspell:ignore bazelbuild
+# cspell:ignore bazelbuild fexample
 # The directory in Bazel's source tree, built in parts so the push scan accepts it.
 PUBLIC_DIRECTORY = "dev" + "tools"
 BAZEL_URL = (
@@ -54,6 +54,43 @@ def test_a_name_inside_another_repos_path_is_not_a_hit(
     line: str, flagged: list[str]
 ) -> None:
     assert tokens([line], NAMES) == flagged
+
+
+VIEW = "github.com/bazelbuild/bazel/blob/main/src"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "example.com/foo/tbhb-dev/example-lab",
+        "https://github.com/other/public/file?source=https://github.com/tbhb-dev/example-lab",
+        "https://github.com/other/public/file#github.com/tbhb-dev/example-lab",
+        "github.com/other/public/example-lab",
+        f"https://{VIEW}/f?x=example-lab",
+        f"https://{VIEW}/f#example-lab",
+        f"[public](https://{VIEW}/f),[private](https://github.com/tbhb-dev/example-lab)",
+        f"[public](https://{VIEW}/f),example-lab",
+        f"https://{VIEW}/f\u2014`example-lab`",
+        f'https://{VIEW}/f"example-lab',
+        "https://github.com/tbhb-dev/blob/main/src/example-lab",
+        "tbhb-dev:example-lab",
+        "tbhb-dev%2fexample-lab",
+        "TBHB-DEV%2Fexample-lab",
+        "github.com/tbhb-dev/example-lab",
+    ],
+)
+def test_a_name_outside_a_file_view_path_is_caught(line: str) -> None:
+    assert tokens([line], NAMES) == ["example-lab"]
+
+
+@pytest.mark.parametrize("view", ["blob", "tree", "raw", "blame"])
+def test_a_name_in_a_file_view_path_is_exempt(view: str) -> None:
+    assert tokens([f"https://github.com/o/r/{view}/main/a/example-lab/b"], NAMES) == []
+    assert tokens([f"see github.com/o/r/{view}/main/example-lab."], NAMES) == []
+
+
+def test_a_short_view_path_has_no_file_segment() -> None:
+    assert tokens(["github.com/o/r/blob/main"], ["main"]) == ["main"]
 
 
 def test_suffix_rule_flags_without_config(home: Path) -> None:

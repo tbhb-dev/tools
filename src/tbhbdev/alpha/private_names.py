@@ -3,9 +3,12 @@
 `private_name_problems` checks whole tokens, ignoring case and a trailing
 `.git`. A `-private` component or a configured name is private. The exact,
 case-sensitive token `example-private` is a reviewed placeholder exemption.
-Public rule IDs are exempt unless configured as private names. A token inside the
-file path of a URL, after its host, owner and repository, is exempt, because it
-names something in that repository.
+Public rule IDs are exempt unless configured as private names. A token that is a
+segment of the file path of a parsed file view URL (`/owner/repo/blob/ref/...`) is
+exempt, because it names something in that repository. It stays flagged when the
+URL's earlier segments include the organization, and in a query, a fragment or
+after the URL's end. The organization followed by `/`, `:` or `%2f` and a name is
+always flagged.
 
 `draft_problems` combines `[pr_check] private_repos` with the required list in
 `~/.local/state/tbhb/private-repos.txt`. Its header can restrict words to path
@@ -42,13 +45,19 @@ PUBLIC_RULE_IDS = frozenset(
 )
 PRIVATE_COMPONENT = re.compile(r"-private(?:-|$)")
 PATH_TOKEN = re.compile(r"(?<=[\w.-])/([\w-]+(?:\.[\w-]+)*)(?![\w-])", re.ASCII)
-# A host path with owner and repository, then the file path inside that repository.
-# Segments of the file path are another repository's own names, not repository names.
-URL_FILE_PATH = re.compile(
+# A URL's host and path. The path ends at whitespace, a closing delimiter, a comma,
+# a query or a fragment, so punctuation after a URL never extends it.
+URL_PATH = re.compile(
     r"(?<![\w./-])(?:[a-z][a-z0-9+.-]*://)?[\w-]+(?:\.[\w-]+)+(?::\d+)?"
-    r"/[\w.-]+/[\w.-]+/(?P<inside>[^\s/][^\s]*)",
+    r"(?P<path>/[^\s)>\]\"'`,?#]*)",
     re.ASCII | re.IGNORECASE,
 )
+# A file view URL is /owner/repo/<view>/ref/file path; only its file path segments
+# name things in that repository.
+FILE_VIEWS = frozenset({"blob", "tree", "raw", "blame"})
+ORG = "tbhb-dev"
+# Segments before the file path: owner, repository, view, ref.
+FILE_START = 4
 PATH_HEADER = "# Bare-word exempt, flagged only in path position:"
 
 
@@ -96,13 +105,24 @@ def private_name_problems(
 
 
 def _outside_file_paths(line: str) -> list[str]:
-    """The tokens of LINE, minus those inside a URL's repository file path."""
-    inside = [match.span("inside") for match in URL_FILE_PATH.finditer(line)]
+    """The tokens of LINE, minus those in a file view URL's file path."""
+    line = re.sub(r"%2f", "/", line, flags=re.IGNORECASE)
+    inside = [span for match in URL_PATH.finditer(line) for span in _file_spans(match)]
     return [
         match.group()
         for match in TOKEN.finditer(line)
         if not any(start <= match.start() < end for start, end in inside)
     ]
+
+
+def _file_spans(match: re.Match[str]) -> list[tuple[int, int]]:
+    """The spans of the file path segments of a file view URL's path."""
+    segments = list(re.finditer(r"[^/]+", match["path"]))
+    names = [segment.group().lower() for segment in segments]
+    if len(names) <= FILE_START or names[2] not in FILE_VIEWS or ORG in names:
+        return []
+    base = match.start("path")
+    return [(base + seg.start(), base + seg.end()) for seg in segments[FILE_START:]]
 
 
 def _is_private(token: str, wanted: set[str]) -> bool:
