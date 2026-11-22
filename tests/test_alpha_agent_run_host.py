@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import getpass
 import grp
 import hashlib
 import io
@@ -5109,6 +5110,76 @@ def test_shutdown_bazel_reports_a_failed_shutdown(
     )
 
 
+def bazel_base(run: run_host.Run, worktree: Path) -> Path:
+    name = hashlib.md5(
+        os.path.realpath(worktree).encode(), usedforsecurity=False
+    ).hexdigest()
+    return run.home / ".cache/bazel" / f"_bazel_{getpass.getuser()}" / name
+
+
+def test_cleanup_bazel_deletes_the_runs_output_base_and_links(
+    tmp_path: Path,
+) -> None:
+    run = make_run(tmp_path)
+    prepared = preparation(run)
+    worktree = Path(prepared.paths.worktree)
+    base = bazel_base(run, worktree)
+    other = base.parent / ("0" * 32)
+    (base / "execroot/ws/locked").mkdir(parents=True)
+    (base / "execroot/ws/locked/file").write_text("12345")
+    (base / "execroot/ws/locked").chmod(0o500)
+    other.mkdir()
+    (base / "execroot/ws/out").symlink_to(other)
+    (worktree / "bazel-out").symlink_to(base / "execroot/ws")
+    (worktree / ".bazel-ws").symlink_to(base)
+    (worktree / "bazel-other").symlink_to(other)
+    (worktree / "bazel-file").write_text("keep")
+    freed = run_host.cleanup_bazel(run, prepared)
+    assert freed == {"bytes": 5, "inodes": 5, "bases": 1}
+    assert not base.exists()
+    assert other.is_dir()
+    assert sorted(path.name for path in worktree.iterdir()) == [
+        "bazel-file",
+        "bazel-other",
+    ]
+    assert "bazel cleanup: freed" in run.files.path("log").read_text()
+
+
+def test_cleanup_bazel_skips_symlinked_bases_and_missing_runs(
+    tmp_path: Path,
+) -> None:
+    run = make_run(tmp_path)
+    prepared = preparation(run)
+    base = bazel_base(run, Path(prepared.paths.worktree))
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "file").write_text("keep")
+    base.parent.mkdir(parents=True)
+    base.symlink_to(victim)
+    assert run_host.cleanup_bazel(run, prepared) == {
+        "bytes": 0,
+        "inodes": 0,
+        "bases": 0,
+    }
+    assert (victim / "file").read_text() == "keep"
+    assert run_host.cleanup_bazel(run, None)["bases"] == 0
+
+
+def test_cleanup_bazel_logs_a_failed_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    prepared = preparation(run)
+    bazel_base(run, Path(prepared.paths.worktree)).mkdir(parents=True)
+
+    def rmtree(*_args: object, **_options: object) -> None:
+        raise OSError
+
+    monkeypatch.setattr(shutil, "rmtree", rmtree)
+    assert run_host.cleanup_bazel(run, prepared)["bases"] == 0
+    assert "bazel cleanup failed" in run.files.path("log").read_text()
+
+
 @pytest.mark.parametrize("rc", [0, 7])
 def test_finish_shuts_bazel_down_and_records_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rc: int
@@ -5123,6 +5194,7 @@ def test_finish_shuts_bazel_down_and_records_it(
         return "rc=0"
 
     monkeypatch.setattr(run_host, "shutdown_bazel", shutdown)
+    monkeypatch.setattr(run_host, "cleanup_bazel", constant({"bases": 2}))
 
     def append(_root: object, entry: dict[str, object]) -> None:
         entries.append(entry)
@@ -5131,4 +5203,5 @@ def test_finish_shuts_bazel_down_and_records_it(
     assert run_host.finish(run, None, None, rc) == rc
     assert order == ["bazel"]
     assert entries[0]["bazel_shutdown"] == "rc=0"
+    assert entries[0]["bazel_cleanup"] == {"bases": 2}
     assert run.files.path("rc").read_text() == f"{rc}\n"

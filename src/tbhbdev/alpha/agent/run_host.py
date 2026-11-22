@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import getpass
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+lazy from collections.abc import Callable
 
 from tbhbdev import userconfig
 from tbhbdev.alpha.agent import (
@@ -930,10 +932,67 @@ def shutdown_bazel(run: Run, prepared: Prepared | None) -> str:
     return f"rc={done.returncode}"
 
 
+def _bazel_bases(run: Run, worktree: str) -> list[Path]:
+    """Output bases Bazel keys by the md5 of the workspace path, as real directories."""
+    user = getpass.getuser()
+    roots = (
+        run.home / ".cache/bazel" / f"_bazel_{user}",
+        Path("/var/tmp") / f"_bazel_{user}",  # noqa: S108
+    )
+    names = {
+        hashlib.md5(path.encode(), usedforsecurity=False).hexdigest()
+        for path in (worktree, os.path.realpath(worktree))
+    }
+    return [
+        base
+        for root in roots
+        for name in sorted(names)
+        if not (base := root / name).is_symlink() and base.is_dir()
+    ]
+
+
+def _unlock(
+    function: Callable[[str], object], path: str, _error: BaseException
+) -> None:
+    Path(path).parent.chmod(0o700)
+    function(path)
+
+
+def cleanup_bazel(run: Run, prepared: Prepared | None) -> dict[str, int]:
+    """Delete the run's own Bazel output bases and the worktree links into them."""
+    freed = {"bytes": 0, "inodes": 0, "bases": 0}
+    if prepared is None:
+        return freed
+    worktree = Path(prepared.paths.worktree)
+    bases = _bazel_bases(run, str(worktree))
+    links = [
+        link
+        for link in (*worktree.glob("bazel-*"), *worktree.glob(".bazel-*"))
+        if link.is_symlink()
+        and any(Path(os.path.realpath(link)).is_relative_to(base) for base in bases)
+    ]
+    try:
+        for base in bases:
+            for _top, directories, files in os.walk(base):
+                top = Path(_top)
+                freed["inodes"] += len(directories) + len(files)
+                freed["bytes"] += sum((top / name).lstat().st_size for name in files)
+            shutil.rmtree(base, onexc=_unlock)
+            freed["bases"] += 1
+        for link in links:
+            link.unlink()
+    except OSError:
+        run.files.write("log", "bazel cleanup failed\n")
+    if freed["bases"]:
+        run.files.write("log", f"bazel cleanup: freed {freed}\n")
+    return freed
+
+
 def finish(
     run: Run, prepared: Prepared | None, agent: subprocess.Popen[str] | None, rc: int
 ) -> int:
     bazel = "skipped"
+    cleanup: dict[str, int] = {}
     try:
         try:
             reason = finish_auth(run, prepared)
@@ -951,6 +1010,7 @@ def finish(
             process_group.unknown(run.files)
         finally:
             bazel = shutdown_bazel(run, prepared)
+            cleanup = cleanup_bazel(run, prepared)
             try:
                 phase = "unknown" if run.files.uncertain else "ended"
                 run.files.write("phase", phase)
@@ -963,7 +1023,10 @@ def finish(
     except OSError, ValueError:
         run.files.write("log", "audit summary write failed\n")
     try:
-        entry = index_entry(run, prepared, rc) | {"bazel_shutdown": bazel}
+        entry = index_entry(run, prepared, rc) | {
+            "bazel_shutdown": bazel,
+            "bazel_cleanup": cleanup,
+        }
         runfiles.append(run.files.root, entry)
     except OSError, ValueError:
         run.files.write("log", "completion index append failed\n")
