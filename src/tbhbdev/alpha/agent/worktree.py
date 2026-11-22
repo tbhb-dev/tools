@@ -482,6 +482,10 @@ def ensure_clone_directory(clone: Path) -> None:
         clone.mkdir(parents=True, exist_ok=True)
 
 
+# Every repository of this GitHub organization is fetchable without a list entry.
+DEFAULT_ORG = "tbhb-dev"
+
+
 def create(
     clone: Path,
     name: str,
@@ -491,10 +495,11 @@ def create(
 ) -> Path:
     check_fetch_refs(request.fetch_refs)
     parts = repo.parts(request.repo)
-    if parts not in tuple(repo.parts(value) for value in public_repos):
+    in_org = (parts[0], parts[1].lower()) == (repo.DEFAULT_GIT_HOST, DEFAULT_ORG)
+    if not in_org and parts not in tuple(repo.parts(value) for value in public_repos):
         message = (
-            f"repository {request.repo}: agent mirrors fetch only "
-            "repositories listed in public_repos"
+            f"repository {request.repo}: agent mirrors fetch only {DEFAULT_ORG} "
+            "repositories and those listed in public_repos"
         )
         raise Invalid(message)
     host, owner, repository = parts

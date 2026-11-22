@@ -31,10 +31,36 @@ def test_unlisted_repository_has_no_side_effects(
     with pytest.raises(Invalid) as caught:
         worktree.create(tmp_path, "example", run_request(), allowed)
     assert str(caught.value) == (
-        "repository example-org/example-repo: agent mirrors fetch only "
-        "repositories listed in public_repos"
+        "repository example-org/example-repo: agent mirrors fetch only tbhb-dev "
+        "repositories and those listed in public_repos"
     )
     assert list(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize(
+    ("name", "reaches_fetch"),
+    [
+        ("tbhb-dev/new-repo", True),
+        ("github.com/TBHB-Dev/new-repo", True),
+        ("git.example.com/tbhb-dev/new-repo", False),
+        ("tbhb-dev-other/new-repo", False),
+    ],
+)
+def test_org_repositories_need_no_list_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    *,
+    reaches_fetch: bool,
+) -> None:
+    def reached(_clone: Path) -> None:
+        message = "reached the clone directory"
+        raise Invalid(message)
+
+    monkeypatch.setattr(worktree, "ensure_clone_directory", reached)
+    match = "reached the clone" if reaches_fetch else "only tbhb-dev repositories"
+    with pytest.raises(Invalid, match=match):
+        worktree.create(tmp_path, "example", run_request(repo=name), ())
 
 
 @pytest.mark.parametrize("existing", [False, True])
