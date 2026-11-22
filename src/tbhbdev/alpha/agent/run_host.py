@@ -827,6 +827,8 @@ def _execute(
             agent = credentials.signing_agent(
                 prepared.delivery.signing, run.tmpdir, run.deadline
             )
+        if push_token is None and not preflight_only:
+            push_token = credentials.push_token(run.request, run.settings)
         rc = (
             run_harness(run, prepared, stack, preflight_only=True)
             if preflight_only
