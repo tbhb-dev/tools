@@ -12,6 +12,8 @@ dependencies = [
   # tbhbdev alpha pr validates the pull request draft's YAML frontmatter
   # against a JSON schema.
   "jsonschema[format]>=4.26.0",
+  "markdown-it-py>=4.0.0",
+  "mdit-py-plugins>=0.5.0",
   "onepasswordconnectsdk>=2.1.1",
   "psycopg[binary]>=3.3.4",
   "pyyaml>=6.0.3",
