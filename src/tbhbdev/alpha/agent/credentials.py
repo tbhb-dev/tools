@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 # Split the spelling because the repository's leak scanner also flags the name.
 CLAUDE_TOKEN_ENV = "CLAUDE_CODE_" + "OAUTH_TOKEN"
 PULL_REQUESTS_PERMISSIONS = {"contents": "read"}
+# A build run pushes its own branch and opens its pull request; run-host holds this
+# token for the push and never puts it in the sandbox.
+PUSH_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
 # A review run returns its verdict as text, so its token can read and never write.
 REVIEW_PERMISSIONS = {
     "contents": "read",
@@ -86,8 +89,12 @@ def installation_token(references: Credentials, repository: str) -> str:
     ).token
 
 
-def pull_requests_token(references: Credentials, repository: str) -> str:
-    """Mint the pull-requests App token for one repository, contents read only."""
+def pull_requests_token(
+    references: Credentials,
+    repository: str,
+    permissions: dict[str, str] = PULL_REQUESTS_PERMISSIONS,
+) -> str:
+    """Mint the pull-requests App token for one repository, read-only by default."""
     if (
         references.pull_requests_app_client_id is None
         or references.pull_requests_app_pem is None
@@ -106,7 +113,7 @@ def pull_requests_token(references: Credentials, repository: str) -> str:
         app_id=client_id,
         pem=pem,
         repository=f"{owner}/{name}",
-        permissions=PULL_REQUESTS_PERMISSIONS,
+        permissions=permissions,
     ).token
 
 
@@ -140,6 +147,17 @@ def github_token(request: RunRequest, references: Credentials) -> str | None:
     except TOKEN_ERRORS:
         message = "pull-requests App token unavailable; build refused"
         raise Invalid(message) from None
+
+
+def push_token(request: RunRequest, settings: Settings) -> str | None:
+    """The run-scoped write token for a build's push, or None to skip the push."""
+    if request.profile is not Profile.BUILD:
+        return None
+    references = next(c for c in settings.credentials if c.account == request.account)
+    try:
+        return pull_requests_token(references, request.repo, PUSH_PERMISSIONS)
+    except TOKEN_ERRORS:
+        return None
 
 
 def fetch_token(request: RunRequest, settings: Settings) -> str | None:

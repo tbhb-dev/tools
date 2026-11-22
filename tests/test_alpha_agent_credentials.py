@@ -1250,3 +1250,46 @@ def test_fetch_token_without_reviews_refs_reads_the_account_credentials() -> Non
     assert (
         credentials.fetch_token(run_request(), settings) == VALUES["example/gh/value"]
     )
+
+
+def test_push_token_asks_for_write_on_the_one_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(VALUES, "example/app/pem", "example-pem")
+    seen: list[dict[str, object]] = []
+
+    def mint(_env: gh_app.Env, **keywords: object) -> gh_app.Minted:
+        seen.append(keywords)
+        return gh_app.Minted(REVIEW_TOKEN, 2000)
+
+    monkeypatch.setattr(gh_app, "mint_token", mint)
+    token = credentials.push_token(run_request(), pull_requests_settings())
+    assert token == REVIEW_TOKEN
+    assert [keywords["permissions"] for keywords in seen] == [
+        {"contents": "write", "pull_requests": "write"}
+    ]
+    assert [keywords["repository"] for keywords in seen] == ["example-org/example-repo"]
+
+
+def test_push_token_is_none_for_a_review_without_minting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse(_env: gh_app.Env, **_keywords: object) -> gh_app.Minted:
+        raise AssertionError
+
+    monkeypatch.setattr(gh_app, "mint_token", refuse)
+    request = run_request(profile="review", commit="0" * 40)
+    assert credentials.push_token(request, pull_requests_settings()) is None
+
+
+def test_push_token_is_none_when_the_app_refuses_the_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(VALUES, "example/app/pem", "example-pem")
+
+    def refuse(_env: gh_app.Env, **_keywords: object) -> gh_app.Minted:
+        message = "permissions refused"
+        raise gh_app.GhAppError(message)
+
+    monkeypatch.setattr(gh_app, "mint_token", refuse)
+    assert credentials.push_token(run_request(), pull_requests_settings()) is None

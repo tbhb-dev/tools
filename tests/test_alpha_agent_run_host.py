@@ -4269,6 +4269,55 @@ def test_push_failure_reaches_durable_completion(
     assert runfiles.latest(run.files.root)["example"]["rc"] == 4
 
 
+@pytest.mark.parametrize("given", [None, "given-value"])
+def test_execute_mints_a_push_token_only_when_none_was_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, given: str | None
+) -> None:
+    run = make_run(tmp_path)
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
+    runtime = HostRuntime(run, prepared, None)
+    runtime.patch(monkeypatch)
+    minted: list[object] = []
+
+    def mint(request: object, _settings: object) -> str:
+        minted.append(request)
+        return "minted-value"
+
+    tokens: list[str | None] = []
+
+    def publish(
+        _run: run_host.Run,
+        _ready: run_host.Prepared,
+        _stack: ExitStack,
+        _harness: object,
+        token: str | None,
+    ) -> int:
+        tokens.append(token)
+        return 0
+
+    monkeypatch.setattr(run_host.credentials, "push_token", mint)
+    monkeypatch.setattr(run_host.push, "run", publish)
+    assert run_host.execute(run, "example", given) == 0
+    assert tokens == [given or "minted-value"]
+    assert len(minted) == (0 if given else 1)
+
+
+def test_preflight_mints_no_push_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
+    runtime = HostRuntime(run, prepared, None)
+    runtime.patch(monkeypatch)
+
+    def refuse(_request: object, _settings: object) -> str:
+        raise AssertionError
+
+    monkeypatch.setattr(run_host.credentials, "push_token", refuse)
+    monkeypatch.setattr(run_host, "run_harness", constant(0))
+    assert run_host.execute(run, "example", preflight_only=True) == 0
+
+
 @pytest.mark.parametrize("claimed", [False, True])
 def test_main_claims_owner_before_loading(
     monkeypatch: pytest.MonkeyPatch,
