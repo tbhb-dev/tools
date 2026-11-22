@@ -16,8 +16,10 @@ host list reports a problem.
 from __future__ import annotations
 
 import re
+import sys
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -42,6 +44,11 @@ PUBLIC_RULE_IDS = frozenset(
 )
 PRIVATE_COMPONENT = re.compile(r"-private(?:-|$)")
 PATH_TOKEN = re.compile(r"(?<=[\w.-])/([\w-]+(?:\.[\w-]+)*)(?![\w-])", re.ASCII)
+PREFIX_FILE_LIMIT = 64 * 1024
+PREFIX_LINE_LIMIT = 512
+PROSE = "the quick brown fox"
+UNSAFE_WILDCARD = re.compile(r"(?:/|\(|\|)\.[*+]")
+NAME_CHAR = re.compile(r"[A-Za-z0-9._-]")
 PATH_HEADER = "# Bare-word exempt, flagged only in path position:"
 
 
@@ -80,7 +87,9 @@ def private_name_problems(
     return [
         (number, MESSAGE.format(token))
         for number, line in enumerate(lines, first)
-        for token in dict.fromkeys(TOKEN.findall(_without_prefixes(line, prefixes)))
+        for token in dict.fromkeys(
+            TOKEN.findall(_without_prefixes(line, prefixes, wanted))
+        )
         if token != PLACEHOLDER
         and (token.lower() not in PUBLIC_RULE_IDS or token.lower() in wanted)
         and (
@@ -90,11 +99,33 @@ def private_name_problems(
     ]
 
 
-def _without_prefixes(line: str, prefixes: Sequence[re.Pattern[str]]) -> str:
-    """LINE with each exempt public URL prefix replaced by a space."""
+def _without_prefixes(
+    line: str, prefixes: Sequence[re.Pattern[str]], wanted: set[str] | None = None
+) -> str:
+    """LINE with each exempt public URL prefix span replaced by a space.
+
+    A span is removed only if it ends at a name boundary and holds no private
+    name that the prefix does not itself spell out.
+    """
+    names = wanted or set()
     for prefix in prefixes:
-        line = prefix.sub(" ", line)
+        literal = prefix.pattern.replace("\\", "").lower()
+        line = prefix.sub(partial(_span, literal=literal, wanted=names), line)
     return line
+
+
+def _span(match: re.Match[str], *, literal: str, wanted: set[str]) -> str:
+    """A space if MATCH may be exempt, else its text unchanged."""
+    text = match.group()
+    after = match.string[match.end() : match.end() + 1]
+    if not text.endswith("/") and after and re.match(NAME_CHAR, after):
+        return text
+    if any(
+        _is_private(token, wanted) and token.lower() not in literal
+        for token in TOKEN.findall(text)
+    ):
+        return text
+    return " "
 
 
 def _is_private(token: str, wanted: set[str]) -> bool:
@@ -115,21 +146,49 @@ def _path_private(token: str, line: str, restricted: set[str]) -> bool:
 def public_url_prefixes() -> tuple[re.Pattern[str], ...]:
     """Exact public URL prefixes from the host file, one regex per line.
 
-    A missing or unreadable file means none, and a line that is not a valid
-    regex is skipped, so a fault exempts nothing.
+    A file problem (missing, unreadable, NUL byte, over the size cap) means no
+    prefixes. A line that is too long, does not start with `https://`, starts
+    a path segment with a `.*` or `.+` wildcard, does not compile, or matches
+    the empty string or ordinary prose is skipped with a warning naming only
+    its line number, so a fault exempts nothing.
     """
     path = Path.home() / ".local/state/tbhb/public-url-prefixes.txt"
     try:
-        lines = path.read_text().splitlines()
+        with path.open("rb") as handle:
+            data = handle.read(PREFIX_FILE_LIMIT + 1)
+        if len(data) > PREFIX_FILE_LIMIT or b"\0" in data:
+            return ()
+        lines = data.decode().splitlines()
     except OSError, UnicodeDecodeError:
         return ()
     found: list[re.Pattern[str]] = []
-    for raw in lines:
+    for number, raw in enumerate(lines, 1):
         line = raw.strip()
-        if line and not line.startswith("#"):
-            with suppress(re.error):
-                found.append(re.compile(rf"(?<![\w./-]){line}", re.ASCII))
+        if not line or line.startswith("#"):
+            continue
+        pattern = _prefix_pattern(line)
+        if pattern is None:
+            sys.stderr.write(f"public-url-prefixes: line {number} skipped\n")
+        else:
+            found.append(pattern)
     return tuple(found)
+
+
+def _prefix_pattern(line: str) -> re.Pattern[str] | None:
+    """The compiled prefix for LINE, or None if it is unsafe."""
+    if (
+        len(line) > PREFIX_LINE_LIMIT
+        or not line.startswith("https://")
+        or UNSAFE_WILDCARD.search(line)
+    ):
+        return None
+    try:
+        pattern = re.compile(rf"(?<![\w./-]){line}", re.ASCII)
+        if pattern.search("") or pattern.search(PROSE):
+            return None
+    except re.error, OverflowError, RecursionError:
+        return None
+    return pattern
 
 
 def _host_names() -> Names:
