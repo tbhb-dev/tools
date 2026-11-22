@@ -3,7 +3,7 @@
 import re
 from bisect import bisect_right
 from collections import Counter
-from typing import Any, cast
+from typing import cast
 lazy import builtins
 
 from markdown_it import MarkdownIt
@@ -277,12 +277,14 @@ def _validate_title(nodes: list[SyntaxTreeNode]) -> None:
 
 
 def _without_heading(
-    block: dict[str, Any], heading: str, body: list[SyntaxTreeNode]
+    block: dict[str, object], heading: str, body: list[SyntaxTreeNode]
 ) -> None:
     """Make the block's word, character and paragraph metrics describe the body."""
     visible = "\n\n".join(text for n in body if (text := _visible(n).strip()))
-    block["metrics"]["visible"] = _text_metrics(visible)
-    block["metrics"]["source"] = _text_metrics(block["source"].removeprefix(heading))
+    metrics = cast("dict[str, object]", block["metrics"])
+    metrics["visible"] = _text_metrics(visible)
+    source = cast("str", block["source"])
+    metrics["source"] = _text_metrics(source.removeprefix(heading))
     block["visible"] = visible
 
 
