@@ -149,6 +149,7 @@ STATE_FILES = tuple(
 STATE_DIRS = tuple(str(path).lower() for path in (STATE_DIR, *STATE_DIR.parents))
 BRACE_LIMIT = 256
 SPELLING_LIMIT = 4096
+SEPARATORS = {";", "&&", "||", "|", "&"}
 STATE_MOVERS = {"rm", "mv", "cp", "rsync", "ditto", "ln"}
 PROTECT_REASON = (
     "The CI listing allowance's grant and count files are the operator's to "
@@ -650,21 +651,35 @@ def attached(word: str) -> str:
     return word.removeprefix("-t")
 
 
+def segments(words: list[str]) -> list[list[str]]:
+    """The words split into the commands a quoted ``a; b && c`` text holds."""
+    out: list[list[str]] = [[]]
+    for word in words:
+        if word in SEPARATORS:
+            out.append([])
+            continue
+        out[-1].append(word.removesuffix(";"))
+        if word.endswith(";"):
+            out.append([])
+    return out
+
+
 def protected_words(command: list[str]) -> bool:
     """Whether a command's unquoted words name a protected file.
 
     ``rm``, ``mv``, ``cp`` and the like also count when they name the state
-    directory or a parent, because that removes or restores the files. A word
-    made only of slashes, or a bare ``~``, doesn't: prose such as a ledger line
-    or an awk match operator has one, and it names no state file.
+    directory or a parent, because that removes or restores the files. Each
+    command of a quoted ``a; b`` text counts alone, so a mover in one command
+    doesn't make an awk match operator or an echoed ``/`` in another read as a
+    path. A bare ``/`` operand still doesn't count.
     """
     words = flattened(command)
     if any(name in word.lower() for word in words for name in PROTECTED):
         return True
-    moves = any(word.rpartition("/")[2].lower() in STATE_MOVERS for word in words)
-    return moves and any(
-        word.strip("/") not in ("", "~") and names_state_dir(attached(word))
-        for word in words
+    return any(
+        any(word.rpartition("/")[2].lower() in STATE_MOVERS for word in part)
+        and any(word != "/" and names_state_dir(attached(word)) for word in part)
+        for part in segments(words)
     )
 
 
