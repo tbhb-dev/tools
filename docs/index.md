@@ -12,6 +12,7 @@ okf_version: "0.2"
 * [Analytics](reference/analytics.md) - Database migrations, catalog checks, connection settings, and server tests.
 * [Secrets](reference/secrets.md) - Secret storage, access, and item management through 1Password.
 * [Gitleaks check](reference/gitleaks-check.md) - The fail-closed gitleaks scan of text before it is posted.
+* [Prose check](reference/prose-check.md) - The vale, cspell and rumdl check of prose before it is posted.
 * [Agent hosts](reference/agent-hosts.md) - Agent host setup, upgrades, access, and configuration.
 * [Content writes](reference/content.md) - Shared GitHub issue and project writes for plugins.
 * [Plugins](reference/plugins.md) - Commands and configuration from installed packages.
