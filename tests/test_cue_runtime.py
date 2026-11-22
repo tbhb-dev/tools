@@ -1,8 +1,10 @@
 import hashlib
 import io
 import tarfile
+from typing import cast
 lazy from pathlib import Path
 
+import httpx
 import pytest
 
 from tbhbdev import cue_runtime as cr
@@ -37,10 +39,9 @@ def data_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 def test_shipped_pin_covers_the_supported_platforms() -> None:
     pin = cr.load_pin()
-    platforms = pin["platforms"]
-    assert isinstance(platforms, dict)
+    platforms = cast("dict[str, dict[str, str]]", pin["platforms"])
     assert {"darwin_arm64", "linux_amd64", "linux_arm64"} <= set(platforms)
-    assert all(len(p["sha256"]) == 64 for p in platforms.values())
+    assert all(len(entry["sha256"]) == 64 for entry in platforms.values())
 
 
 @pytest.mark.parametrize(
@@ -114,3 +115,35 @@ def test_resolve_refuses_a_wrong_version() -> None:
 def test_main_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
     assert cr.main([], "tbhbdev cue") == 2
     assert "usage" in capsys.readouterr().err
+
+
+def test_install_refuses_a_platform_without_an_archive() -> None:
+    with pytest.raises(cr.CueError, match="no pinned cue archive"):
+        cr.install(pin_for(archive()), key="darwin_arm64", fetch=lambda _: b"")
+
+
+def test_fetch_returns_the_response_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    def get(url: str, **_: object) -> httpx.Response:
+        return httpx.Response(200, content=b"body", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", get)
+    assert cr._fetch(URL) == b"body"  # noqa: SLF001 -- The download seam.
+
+
+def test_main_path_and_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data = archive()
+    pin = pin_for(data)
+    monkeypatch.setattr(cr, "load_pin", lambda: pin)
+    monkeypatch.setattr(cr, "platform_key", lambda *_: "linux_amd64")
+
+    def get(url: str, **_: object) -> httpx.Response:
+        return httpx.Response(200, content=data, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", get)
+    assert cr.main(["path"], "tbhbdev cue") == 1
+    assert "run tbhbdev cue install" in capsys.readouterr().err
+    assert cr.main(["install"], "tbhbdev cue") == 0
+    assert capsys.readouterr().out.strip().endswith("9.9.9/cue")
+    assert cr.main(["path"], "tbhbdev cue") == 0
