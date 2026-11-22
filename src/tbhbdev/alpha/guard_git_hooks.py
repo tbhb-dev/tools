@@ -96,19 +96,22 @@ INCLUDES = "--force-if-includes"
 MIN_ABBREVIATION = 4
 
 
-def push_flag(word: str) -> str:
-    """Classify a push option as ``lease``, ``includes``, ``force`` or ``""``."""
-    if word.startswith("--"):
-        name = word.partition("=")[0]
-        if name == LEASE:
-            return "lease"
-        if name == INCLUDES:
-            return "includes"
-        # Any other --force-* word is an abbreviation or unknown: fail closed.
-        for full in ("--force", "--mirror"):
-            if len(name) >= MIN_ABBREVIATION and full.startswith(name):
-                return "force"
-        return "force" if name.startswith("--force-") else ""
+def long_push_flag(word: str) -> str:
+    """Classify a ``--`` push option as ``lease``, ``includes``, ``force`` or ``""``."""
+    name = word.partition("=")[0]
+    if name == LEASE:
+        return "lease"
+    if name == INCLUDES:
+        return "includes"
+    # Any other --force-* word is an abbreviation or unknown: fail closed.
+    for full in ("--force", "--mirror"):
+        if len(name) >= MIN_ABBREVIATION and full.startswith(name):
+            return "force"
+    return "force" if name.startswith("--force-") else ""
+
+
+def short_push_flag(word: str) -> str:
+    """Classify a ``-x`` push option cluster as ``force`` or ``""``."""
     for letter in word[1:]:
         if letter == "f":
             return "force"
@@ -117,10 +120,15 @@ def push_flag(word: str) -> str:
     return ""
 
 
-def push_reason(name: str, rest: list[str]) -> str | None:
-    """The deny reason for a push that rewrites or targets protected history."""
-    if name != "push":
-        return None
+def push_flag(word: str) -> str:
+    """Classify a push option as ``lease``, ``includes``, ``force`` or ``""``."""
+    if word.startswith("--"):
+        return long_push_flag(word)
+    return short_push_flag(word)
+
+
+def split_push_args(rest: list[str]) -> tuple[set[str], list[str]]:
+    """The classified push options and the positional targets after them."""
     flags: set[str] = set()
     targets: list[str] = []
     options = True
@@ -135,15 +143,29 @@ def push_reason(name: str, rest: list[str]) -> str | None:
             skip = word in PUSH_VALUE_OPTIONS
         else:
             targets.append(word)
-    if "force" in flags or ("includes" in flags and "lease" not in flags):
-        return PUSH_REASON
-    for target in targets:
-        if target.startswith("+"):
-            return PUSH_REASON
+    return flags, targets
+
+
+def targets_protected(targets: list[str]) -> bool:
+    """Whether a push target is a ``+REF`` refspec or names a protected branch."""
+    if any(target.startswith("+") for target in targets):
+        return True
     for target in targets[1:]:
         destination = target.rpartition(":")[2].removeprefix("refs/heads/")
         if destination in PROTECTED_BRANCHES:
-            return PUSH_REASON
+            return True
+    return False
+
+
+def push_reason(name: str, rest: list[str]) -> str | None:
+    """The deny reason for a push that rewrites or targets protected history."""
+    if name != "push":
+        return None
+    flags, targets = split_push_args(rest)
+    if "force" in flags or ("includes" in flags and "lease" not in flags):
+        return PUSH_REASON
+    if targets_protected(targets):
+        return PUSH_REASON
     return None
 
 
