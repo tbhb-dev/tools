@@ -145,6 +145,7 @@ def result(files: runfiles.RunFiles) -> int:
                 "report": optional(files.path("out.final")),
                 "log_tail": "".join(log.splitlines(keepends=True)[-200:]),
                 "branch": optional(files.path("branch")),
+                "pr": optional(files.path("pr")),
                 "head": optional(files.path("head")),
             }
         )
