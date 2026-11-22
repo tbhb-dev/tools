@@ -368,8 +368,12 @@ def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str
             '    test "${#sha}" -eq 40 || return 65\n'
             "    printf '%s\\n' \"$sha\"\n"
             "}\n"
-            'test -z "$(find "$run/objects" "$run/refs" -type l -print -quit)" '
+            'links=$(find "$run/objects" "$run/refs" -type l -print -quit) '
             "|| exit 65\n"
+            'test -z "$links" || exit 65\n'
+            'midx=$(find "$run/objects/pack" -name "multi-pack-index*" '
+            "-print -quit) || exit 65\n"
+            'test -z "$midx" || exit 65\n'
             'test ! -e "$run/objects/info/alternates" || exit 65\n'
             'head=$(sed -n 1p "$run/HEAD")\n'
             'case "$head" in\n'
@@ -382,10 +386,12 @@ def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str
             'base=$(resolve "$1") || exit 65\n'
             "scratch=$(mktemp -d) || exit 65\n"
             "trap 'rm -rf \"$scratch\"' EXIT\n"
-            f'{GIT} {GIT_FLAGS} init -q --bare --template= "$scratch" || exit 65\n'
+            f"{GIT} GIT_CONFIG_GLOBAL=/dev/null {GIT_FLAGS} "
+            'init -q --bare --template= "$scratch" || exit 65\n'
             f'{GIT} GIT_CONFIG_GLOBAL=/dev/null GIT_DIR="$scratch" '
             f'GIT_OBJECT_DIRECTORY="$run/objects" {GIT_FLAGS} '
-            "-c protocol.allow=never -c diff.external= --no-optional-locks "
+            "-c protocol.allow=never -c diff.external= -c core.multiPackIndex=false "
+            "--no-optional-locks "
             "format-patch --stdout --no-ext-diff --no-textconv --no-color "
             "--no-signature --no-attach --no-add-header --no-notes "
             '"$base..$tip" --\n'

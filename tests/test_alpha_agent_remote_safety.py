@@ -1152,6 +1152,12 @@ def fallback_diff() -> subprocess.CompletedProcess[bytes]:
     )
 
 
+def assert_refused() -> None:
+    result = fallback_diff()
+    assert result.returncode == 65
+    assert result.stdout == b""
+
+
 @pytest.mark.parametrize("unsandboxed", [False, True])
 @pytest.mark.parametrize("commits", [0, 2])
 def test_diff_returns_unpublished_commits(
@@ -1252,16 +1258,23 @@ def test_unpublished_diff_refuses_symlink_paths(host: Path, component: str) -> N
     )
     path.rename(host / "saved")
     path.symlink_to(host / "saved", target_is_directory=True)
-    result = fallback_diff()
-    assert result.returncode == 65
-    assert result.stdout == b""
+    assert_refused()
 
 
-def test_unpublished_diff_ignores_signature_file_in_run_config(host: Path) -> None:
+@pytest.mark.parametrize(
+    ("key", "content"),
+    [
+        ("format.signatureFile", "SECRET-LINE\n"),
+        ("include.path", "[user]\n\temail = SECRET-LINE@example.invalid\n"),
+    ],
+)
+def test_unpublished_diff_ignores_the_run_config(
+    host: Path, key: str, content: str
+) -> None:
     tree = unpublished_run(host)
-    secret = host / "secret.txt"
-    secret.write_text("SECRET-SIGNATURE-LINE\n")
-    git_in(tree, "config", "format.signatureFile", str(secret))
+    (host / "private.cfg").write_text(content)
+    git_in(tree, "config", key, str(host / "private.cfg"))
+    git_in(tree, "config", "format.from", "true")
     git_in(tree, "config", "format.headers", "X-Leak: header-value")
     (tree / "example").write_text("local change\n")
     git_in(tree, "add", "example")
@@ -1269,23 +1282,8 @@ def test_unpublished_diff_ignores_signature_file_in_run_config(host: Path) -> No
     result = fallback_diff()
     assert result.returncode == 0, result.stderr
     assert b"Subject: [PATCH" in result.stdout
-    assert b"SECRET-SIGNATURE-LINE" not in result.stdout
+    assert b"SECRET-LINE" not in result.stdout
     assert b"X-Leak" not in result.stdout
-
-
-def test_unpublished_diff_ignores_an_included_config_file(host: Path) -> None:
-    tree = unpublished_run(host)
-    include = host / "private.gitconfig"
-    include.write_text("[user]\n\temail = private-address@example.invalid\n")
-    git_in(tree, "config", "include.path", str(include))
-    git_in(tree, "config", "format.from", "true")
-    (tree / "example").write_text("local change\n")
-    git_in(tree, "add", "example")
-    commit_in(tree, "local change")
-    result = fallback_diff()
-    assert result.returncode == 0, result.stderr
-    assert b"Subject: [PATCH" in result.stdout
-    assert b"private-address@example.invalid" not in result.stdout
 
 
 @pytest.mark.parametrize("nested", ["objects/pack", "objects/ab", "refs/heads/dir"])
@@ -1294,18 +1292,35 @@ def test_unpublished_diff_refuses_nested_symlinks(host: Path, nested: str) -> No
     target = tree / ".git" / nested
     target.mkdir(parents=True, exist_ok=True)
     (target / "link").symlink_to(host / "saved")
-    result = fallback_diff()
-    assert result.returncode == 65
-    assert result.stdout == b""
+    assert_refused()
 
 
-def test_unpublished_diff_refuses_an_alternates_file(host: Path) -> None:
+@pytest.mark.parametrize("hidden", ["objects", "refs", "objects/pack"])
+def test_unpublished_diff_refuses_unreadable_directories(
+    host: Path, hidden: str
+) -> None:
     tree = unpublished_run(host)
-    (tree / ".git/objects/info").mkdir(parents=True, exist_ok=True)
-    (tree / ".git/objects/info/alternates").write_text(str(host / "origin.git") + "\n")
-    result = fallback_diff()
-    assert result.returncode == 65
-    assert result.stdout == b""
+    target = tree / ".git" / hidden
+    target.chmod(0o100)
+    try:
+        assert_refused()
+    finally:
+        target.chmod(0o700)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "objects/info/alternates",
+        "objects/pack/multi-pack-index",
+        "objects/pack/multi-pack-index-abc.bitmap",
+    ],
+)
+def test_unpublished_diff_refuses_object_store_redirects(host: Path, name: str) -> None:
+    tree = unpublished_run(host)
+    (tree / ".git" / name).parent.mkdir(parents=True, exist_ok=True)
+    (tree / ".git" / name).write_text(str(host / "origin.git") + "\n")
+    assert_refused()
 
 
 def test_unpublished_diff_ignores_a_commondir_file(host: Path) -> None:
@@ -1331,9 +1346,7 @@ def test_unpublished_diff_refuses_symlinked_git_internals(
         path.write_text("")
     path.rename(host / "saved")
     path.symlink_to(host / "saved")
-    result = fallback_diff()
-    assert result.returncode == 65
-    assert result.stdout == b""
+    assert_refused()
 
 
 def test_unpublished_diff_refuses_missing_base(host: Path) -> None:
