@@ -41,9 +41,14 @@ def is_reviewer(role: str | None, profile: Profile) -> bool:
 
 
 def owner(repo: str, exceptions: Mapping[str, str]) -> str:
-    """The session that owns a repository given as ``org/name``."""
-    name = repo.rpartition("/")[2]
-    return exceptions.get(name, name)
+    """The session that owns a repository given as ``org/name``.
+
+    GitHub treats repository names as case-insensitive, so the name is folded
+    before the lookup and the exceptions match whatever case the table used.
+    """
+    name = repo.rpartition("/")[2].casefold()
+    folded = {key.casefold(): value for key, value in exceptions.items()}
+    return folded.get(name, name)
 
 
 def check(
@@ -63,13 +68,13 @@ def check(
         message = f"session {launcher!r} may not launch a reviewer-role run; {ASK}"
         raise Invalid(message)
     repos = launchers[launcher]
-    if repos is not None and repo not in repos:
+    if repos is not None and repo.casefold() not in {r.casefold() for r in repos}:
         message = (
             f"session {launcher!r} may launch reviewer-role runs only for "
             f"{', '.join(sorted(repos))}, not {repo}; {ASK}"
         )
         raise Invalid(message)
-    if launcher == owner(repo, exceptions or {}):
+    if launcher.casefold() == owner(repo, exceptions or {}).casefold():
         message = (
             f"session {launcher!r} owns {repo} and may not launch its own "
             f"reviewer-role run; {ASK}"

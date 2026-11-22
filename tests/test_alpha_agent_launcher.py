@@ -101,6 +101,35 @@ def test_repository_owner_sessions(repo: str, owner: str) -> None:
     assert rules.owner(repo, OWNERS) == owner
 
 
+@pytest.mark.parametrize(
+    ("launcher_name", "repo", "listed"),
+    [
+        ("tools", "o/Tools", None),
+        ("example-repo", "o/Example-Repo", None),
+        ("alpha", "o/Two-Hidden", None),
+        ("Alpha", "o/two-hidden", None),
+        ("helper", "O/Other", frozenset({"o/other"})),
+    ],
+)
+def test_names_match_without_regard_to_case(
+    launcher_name: str, repo: str, listed: frozenset[str] | None
+) -> None:
+    launchers = {launcher_name: listed}
+    refused = launcher_name.casefold() != "helper"
+    if refused:
+        with pytest.raises(Invalid, match="owns"):
+            rules.check(launcher_name, repo, launchers, {"Two-Hidden": "alpha"})
+    else:
+        rules.check(launcher_name, repo, launchers, OWNERS)
+
+
+def test_a_listed_repository_matches_in_any_case_and_others_are_refused() -> None:
+    launchers: dict[str, frozenset[str] | None] = {"helper": frozenset({"o/Other"})}
+    rules.check("helper", "O/other", launchers, OWNERS)
+    with pytest.raises(Invalid, match="only for"):
+        rules.check("helper", "o/else", launchers, OWNERS)
+
+
 def test_a_missing_table_is_refused_with_its_path() -> None:
     with pytest.raises(Invalid, match=r"agent-review-launchers\.json: invalid"):
         REAL_LOAD_TABLE()
