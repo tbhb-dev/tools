@@ -131,6 +131,7 @@ repo_layout_test(
         ".vale",
         "LICENSES",
         "docs",
+        "schemas",
         "src",
         "tests",
     ],
