@@ -224,7 +224,7 @@ def read_names(source: Path) -> private_names.Names:
     ):
         message = "invalid private-name list"
         raise PushRefusedError(message)
-    return private_names.Names(names, path_only)
+    return private_names.Names(names, path_only, private_names.public_url_prefixes())
 
 
 def scan(
@@ -324,7 +324,10 @@ def scan(
         *result.stdout.decode(errors="replace").splitlines(),
     ]
     hits = private_names.private_name_problems(
-        lines, names.private, path_only=names.path_only
+        lines,
+        names.private,
+        path_only=names.path_only,
+        prefixes=names.prefixes,
     )
     if hits:
         message = f"{len(hits)} private-name hit(s)" + "".join(

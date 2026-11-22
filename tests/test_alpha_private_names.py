@@ -20,6 +20,165 @@ def tokens(lines: list[str], names: list[str] | None = None) -> list[str]:
     return [message.split("'")[1] for _, message in found]
 
 
+PREFIX_FILE = ".local/state/tbhb/public-url-prefixes.txt"
+# A synthetic public prefix whose last directory is a configured private word.
+SYNTHETIC = r"https://example.com/src/blob/[\w.-]+/example-lab/"
+
+
+def write_prefixes(*lines: str) -> None:
+    path = Path.home() / PREFIX_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+
+
+def prefixed(lines: list[str]) -> list[str]:
+    found = pn.private_name_problems(lines, NAMES, prefixes=pn.public_url_prefixes())
+    return [message.split("'")[1] for _, message in found]
+
+
+def test_a_listed_prefix_is_not_a_hit(home: Path) -> None:
+    del home
+    write_prefixes("# a comment", "", SYNTHETIC)
+    url = "https://example.com/src/blob/{}/example-lab/a/B.java#L2"
+    assert prefixed([url.format("main"), f"see {url.format('v1.2')}"]) == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "https://example.com/src/tree/main/example-lab/",
+        "https://example.org/src/blob/main/example-lab/",
+        "https://example.com/src/blob/a/b/example-lab/",
+        "https://example.com/src/blob/main/example-lab",
+        "x/https://example.com/src/blob/main/example-lab/",
+    ],
+)
+def test_only_the_exact_prefix_is_exempt(home: Path, line: str) -> None:
+    del home
+    write_prefixes(SYNTHETIC)
+    assert prefixed([line]) == ["example-lab"]
+
+
+def test_a_name_after_the_prefix_is_still_caught(home: Path) -> None:
+    del home
+    write_prefixes(SYNTHETIC)
+    url = "https://example.com/src/blob/main/example-lab/example-lab/x"
+    assert prefixed([url, f"{url}?u=example-lab"]) == ["example-lab"] * 2
+
+
+def test_no_prefix_file_exempts_nothing(home: Path) -> None:
+    del home
+    assert pn.public_url_prefixes() == ()
+
+
+def test_a_bad_regex_line_is_skipped_with_a_line_number(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    del home
+    write_prefixes("https://(", SYNTHETIC)
+    assert len(pn.public_url_prefixes()) == 1
+    err = capsys.readouterr().err
+    assert "line 1" in err
+    assert "https" not in err
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "https://x{99999999999999999999}",
+        "https://" + "(" * 1000 + "x" + ")" * 1000,
+        "https://(",
+        ".*",
+        "https://.*",
+        "https://example.com/.+/x",
+        "https://example.com/(.*)",
+        "https://example.com/x|.*",
+        "https://example.com/x|",
+        "http://example.com/x",
+        "https://example.com/" + "a" * 600,
+    ],
+)
+def test_a_hostile_line_is_skipped_and_others_apply(home: Path, line: str) -> None:
+    del home
+    write_prefixes(line, SYNTHETIC)
+    found = pn.public_url_prefixes()
+    assert len(found) == 1
+    assert found[0].pattern.endswith(SYNTHETIC)
+    assert prefixed(["the quick brown fox example-lab"]) == ["example-lab"]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"a\0b\n" + SYNTHETIC.encode(), SYNTHETIC.encode() + b"\n" + b"#" * 70000],
+)
+def test_a_bad_file_gives_no_prefixes(home: Path, data: bytes) -> None:
+    del home
+    path = Path.home() / PREFIX_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    assert pn.public_url_prefixes() == ()
+
+
+def test_a_prefix_stops_at_a_name_boundary(home: Path) -> None:
+    del home
+    write_prefixes(r"https://example.com/src/example-lab")
+    url = "https://example.com/src/example-lab"
+    assert prefixed([url, f"{url}/x", f"{url}?a=1"]) == []
+    assert prefixed([f"{url}.git"]) == ["example-lab.git"]
+
+
+def test_a_prefix_never_swallows_another_private_name(home: Path) -> None:
+    del home
+    write_prefixes(SYNTHETIC)
+    url = f"https://example.com/src/blob/{PRIVATE_REPO}/example-lab/x"
+    assert prefixed([url]) == [PRIVATE_REPO, "example-lab"]
+
+
+def test_an_unreadable_prefix_file_exempts_nothing(home: Path) -> None:
+    del home
+    path = Path.home() / PREFIX_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfe")
+    assert pn.public_url_prefixes() == ()
+
+
+def test_a_single_segment_ref_slot_holding_a_private_name_is_flagged(
+    home: Path,
+) -> None:
+    del home
+    write_prefixes(r"https://github\.com/bazelbuild/bazel/blob/[\w.-]+/")
+    url = "https://github.com/bazelbuild/bazel/blob/{}/x"
+    assert prefixed([url.format("main")]) == []
+    assert prefixed([url.format("example-lab")]) == ["example-lab"]
+
+
+def test_a_name_inside_a_longer_spelled_name_is_still_flagged(home: Path) -> None:
+    del home
+    write_prefixes(SYNTHETIC)
+    url = "https://example.com/src/blob/lab/example-lab/x"
+    found = pn.private_name_problems(
+        [url], ["lab", "example-lab"], prefixes=pn.public_url_prefixes()
+    )
+    # The whole span is kept, so the literal's own name is reported with it.
+    assert [message.split("'")[1] for _, message in found] == ["lab", "example-lab"]
+
+
+def test_a_path_only_name_in_a_revision_slot_is_flagged(home: Path) -> None:
+    del home
+    write_prefixes(r"https://github\.com/bazelbuild/bazel/blob/[\w.-]+/")
+    url = "https://github.com/bazelbuild/bazel/blob/{}/x"
+    kwargs = {"path_only": {"widget"}, "prefixes": pn.public_url_prefixes()}
+    assert pn.private_name_problems([url.format("main")], NAMES, **kwargs) == []
+    found = pn.private_name_problems([url.format("widget")], NAMES, **kwargs)
+    assert [message.split("'")[1] for _, message in found] == ["widget"]
+
+
+def test_host_names_carry_the_prefixes(home: Path) -> None:
+    del home
+    write_prefixes(SYNTHETIC)
+    assert len(pn._host_names().prefixes) == 1  # noqa: SLF001
+
+
 def test_suffix_rule_flags_without_config(home: Path) -> None:
     del home
     name = "other-private"
