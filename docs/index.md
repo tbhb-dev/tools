@@ -12,6 +12,7 @@ okf_version: "0.2"
 * [Analytics](reference/analytics.md) - Database migrations, catalog checks, connection settings, and server tests.
 * [Secrets](reference/secrets.md) - Secret storage, access, and item management through 1Password.
 * [Agent hosts](reference/agent-hosts.md) - Agent host setup, upgrades, access, and configuration.
+* [Content writes](reference/content.md) - Shared GitHub issue and project writes for plugins.
 * [Plugins](reference/plugins.md) - Commands and configuration from installed packages.
 * [Alpha commands](reference/alpha/commands.md) - Interim agent commands, installation, and harness hooks.
 * [Loop configuration](reference/alpha/loop-configuration.md) - Loop settings, shadow rules, and store behavior.

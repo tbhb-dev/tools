@@ -27,6 +27,8 @@ uv tool install git+https://github.com/tbhb-dev/tools
 - `host` manages agent hosts from the operator's Mac.
 - `alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`. They may change or go away without notice. `tbhbdev alpha version-check` compares the installed build across hosts.
 
+The shared `tbhbdev.content` library provides scanned, audited GitHub issue and project writes for plugins. See [Content writes](docs/reference/content.md).
+
 ## Agent SSH interface
 
 `tbhbdev alpha agent ssh-serve` is the forced command for the `agent` account. Put the controller's public key in that account's `authorized_keys` behind this prefix, with `<agent home>` replaced by its absolute home path:
