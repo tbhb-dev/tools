@@ -796,11 +796,8 @@ def body_problems(
     return problems + trailer_problems(lines)
 
 
-def check_text(text: str, *, lint_prose: bool = True) -> Checked:
-    """Validate and lint a draft. The linters run only once there is a title.
-
-    ``lint_prose=False`` skips vale, cspell and rumdl, for a host that lacks them.
-    """
+def check_text(text: str) -> Checked:
+    """Validate and lint a draft. The linters run only once there is a title."""
     try:
         data, body = parse_frontmatter(text)
     except FrontmatterError as exc:
@@ -825,8 +822,7 @@ def check_text(text: str, *, lint_prose: bool = True) -> Checked:
     problems += body_problems(lines[start + 1 :], title)
     problems += ref_problems(lines[start:])
     rendered = [line.raw for line in lines[start:]]
-    if lint_prose:
-        problems += lint(rendered, title.no)
+    problems += lint(rendered, title.no)
     problems += private_names.draft_problems(rendered, title.no)
     return Checked(sorted(set(problems)), found[1], rendered, meta)
 
