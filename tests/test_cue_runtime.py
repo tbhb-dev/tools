@@ -136,7 +136,11 @@ def test_main_path_and_install(
     data = archive()
     pin = pin_for(data)
     monkeypatch.setattr(cr, "load_pin", lambda: pin)
-    monkeypatch.setattr(cr, "platform_key", lambda *_: "linux_amd64")
+
+    def key(*_: str) -> str:
+        return "linux_amd64"
+
+    monkeypatch.setattr(cr, "platform_key", key)
 
     def get(url: str, **_: object) -> httpx.Response:
         return httpx.Response(200, content=data, request=httpx.Request("GET", url))
