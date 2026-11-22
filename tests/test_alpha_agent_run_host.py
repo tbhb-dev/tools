@@ -5035,7 +5035,10 @@ def fake_bazel(
             calls.append(command)
         return subprocess.CompletedProcess(command, code)
 
-    monkeypatch.setattr(shutil, "which", lambda name, path=None: f"/bin/{name}")  # noqa: ARG005
+    def found(name: str, path: str | None = None) -> str:  # noqa: ARG001
+        return f"/bin/{name}"
+
+    monkeypatch.setattr(shutil, "which", found)
     monkeypatch.setattr(subprocess, "run", run)
 
 
@@ -5073,7 +5076,11 @@ def test_shutdown_bazel_skips_without_a_tool_or_workspace(
     make_base(value)
     fake_bazel(monkeypatch)
     if not available:
-        monkeypatch.setattr(shutil, "which", lambda name, path=None: None)  # noqa: ARG005
+
+        def missing(name: str, path: str | None = None) -> None:  # noqa: ARG001
+            return None
+
+        monkeypatch.setattr(shutil, "which", missing)
     assert run_host.shutdown_bazel(run, value if prepared else None) == {}
 
 
@@ -5137,7 +5144,11 @@ def test_cleanup_deletes_only_the_recorded_base_and_its_links(
     (worktree / "bazel-file").write_text("keep")
     fake_bazel(monkeypatch)
     spaces = iter([(100, 10), (4100, 14)])
-    monkeypatch.setattr(run_host, "_space", lambda _path: next(spaces))
+
+    def space(_path: Path) -> tuple[int, int]:
+        return next(spaces)
+
+    monkeypatch.setattr(run_host, "_space", space)
     freed = stop_and_clean(run, prepared)
     assert freed == {"bytes": 4000, "inodes": 4, "bases": 1}
     assert not base.exists()
@@ -5187,7 +5198,8 @@ def test_cleanup_refuses_a_symlinked_ancestor(
     (run.home / ".cache").symlink_to(victim)
     (victim / "bazel").mkdir()
     (victim / "bazel" / base.parent.name).symlink_to(victim / base.parent.name)
-    fake_bazel(monkeypatch, calls=(calls := []))
+    calls: list[list[str]] = []
+    fake_bazel(monkeypatch, calls=calls)
     assert stop_and_clean(run, prepared)["bases"] == 0
     assert victim_base.is_dir()
     assert calls == []
@@ -5314,7 +5326,11 @@ def test_finish_survives_a_locked_base_and_a_failing_cleanup(
     (base / "dead").chmod(0)
     fake_bazel(monkeypatch)
     entries: list[dict[str, object]] = []
-    monkeypatch.setattr(runfiles, "append", lambda _root, entry: entries.append(entry))
+
+    def record(_root: Path, entry: dict[str, object]) -> None:
+        entries.append(entry)
+
+    monkeypatch.setattr(runfiles, "append", record)
     assert run_host.finish(run, prepared, None, 0) == 0
     assert not base.exists()
     assert run.files.path("rc").read_text() == "0\n"
@@ -5333,7 +5349,11 @@ def test_finish_records_rc_phase_and_index_when_cleanup_raises(
         raise TypeError
 
     monkeypatch.setattr(run_host, "shutdown_bazel", explode)
-    monkeypatch.setattr(runfiles, "append", lambda _root, entry: entries.append(entry))
+
+    def record(_root: Path, entry: dict[str, object]) -> None:
+        entries.append(entry)
+
+    monkeypatch.setattr(runfiles, "append", record)
     assert run_host.finish(run, None, None, rc) == rc
     assert run.files.path("rc").read_text() == f"{rc}\n"
     assert run.files.path("phase").read_text().strip() == "ended"
