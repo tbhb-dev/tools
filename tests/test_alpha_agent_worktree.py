@@ -195,7 +195,7 @@ def test_git_suppresses_command_errors_and_returns_text(
         assert kwargs["cwd"] == "/"
         assert kwargs["timeout"] == 30
         assert kwargs["text"]
-        assert kwargs["stderr"] == subprocess.DEVNULL
+        assert kwargs["stderr"] == subprocess.PIPE
         if command[-1] == r"^(filter|merge)\.":
             assert command == [
                 *prefix,
@@ -1992,6 +1992,7 @@ def test_git_sends_the_token_as_an_environment_header(
     worktree.git(tmp_path, "init", token=value)
     command, env = seen[0]
     basic = base64.b64encode(b"x-access-token:example-credential").decode()
+    assert env["GIT_CONFIG_COUNT"] == "1"
     assert env["GIT_CONFIG_KEY_0"] == "http.extraheader"
     assert env["GIT_CONFIG_VALUE_0"] == f"Authorization: Basic {basic}"
     assert "example-credential" not in " ".join(map(str, command))  # type: ignore[call-overload]

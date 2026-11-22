@@ -310,11 +310,23 @@ def test_hook_tools_checks_the_exact_run_directory(
     "step", ["credential delivery", "audit directory", "codex auth copy"]
 )
 @pytest.mark.parametrize(
-    "error", [OSError, ValueError, Invalid, subprocess.CalledProcessError]
+    ("error", "cause"),
+    [
+        (OSError, "[redacted]"),
+        (ValueError, "invalid value"),
+        (Invalid, "[redacted]"),
+        (subprocess.CalledProcessError, "[redacted]"),
+    ],
 )
-def test_workspace_failure_names_only_its_step(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, error: type[Exception]
+def test_workspace_failure_names_its_step_and_safe_cause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step: str,
+    error: type[Exception],
+    cause: str,
 ) -> None:
+    monkeypatch.setenv("EXAMPLE_CREDENTIAL", "sensitive-exception")
+    monkeypatch.setenv("EXAMPLE_STDERR", "sensitive-stderr")
     run = make_run(tmp_path)
     monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
     monkeypatch.setattr(run_host.worktree, "create", constant(run.home / "workspace"))
@@ -329,7 +341,7 @@ def test_workspace_failure_names_only_its_step(
         monkeypatch.setattr(credentials, "auth_copy", fail)
     with pytest.raises(Invalid) as caught:
         run_host.prepare_workspace(run)
-    assert str(caught.value) == f"run preparation failed at {step}"
+    assert str(caught.value) == f"run preparation failed at {step}: {cause}"
     assert "sensitive" not in str(caught.value)
 
 
@@ -486,11 +498,13 @@ def test_claude_run_writes_no_codex_config(
 def test_codex_config_failure_names_its_step(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
 ) -> None:
+    monkeypatch.setenv("EXAMPLE_CREDENTIAL", "sensitive-exception")
     run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
     monkeypatch.setattr(runfiles, "atomic", partial(preparation_failure, error))
     with pytest.raises(Invalid) as caught:
         run_host.prepare_workspace(run)
-    assert str(caught.value) == "run preparation failed at codex config"
+    cause = "[redacted]" if error is OSError else "invalid value"
+    assert str(caught.value) == f"run preparation failed at codex config: {cause}"
 
 
 def test_build_preparation_has_the_run_socket(
