@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
-from tbhbdev.alpha import private_names
 from tbhbdev.alpha.agent import open_pr
 
 if TYPE_CHECKING:
@@ -45,21 +44,6 @@ None.
 
 Ran it.
 """
-
-
-@pytest.fixture(autouse=True)
-def host_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give the draft check a synthetic required host list, as a CI runner has none."""
-    home = tmp_path / "home"
-    path = home / ".local/state/tbhb/private-repos.txt"
-    path.parent.mkdir(parents=True)
-    path.write_text("example-host\n")
-    monkeypatch.setenv("HOME", str(home))
-
-    def public_origin(*_args: str) -> tuple[int, str]:
-        return 0, "https://example.test/public"
-
-    monkeypatch.setattr(private_names, "git", public_origin)
 
 
 def commit_draft(directory: Path, text: str | None) -> tuple[Path, str]:
@@ -129,10 +113,44 @@ def test_a_missing_draft_is_refused(tmp_path: Path) -> None:
         open_pr.open_pull_request(git_dir, commit, "github.com/o/r", "agent/r", "t")
 
 
-def test_a_draft_that_fails_its_check_is_refused(tmp_path: Path) -> None:
-    git_dir, commit = commit_draft(tmp_path, "# no front matter\n")
-    with pytest.raises(open_pr.OpenRefusedError, match="fails its check at line"):
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("# no front matter\n", "names no base branch"),
+        ("---\nbase: [\n---\n\n# t\n", "frontmatter is invalid"),
+        ("---\n# t\n", "frontmatter is invalid"),
+        ("---\ndraft: false\n---\n\n# t\n", "names no base branch"),
+        ("---\nbase: 3\n---\n\n# t\n", "names no base branch"),
+        ("---\nbase: main\n---\n\nplain text\n", "no H1 title"),
+        ("---\nbase: main\n---\n\n# \n", "no H1 title"),
+    ],
+)
+def test_a_malformed_draft_is_refused(tmp_path: Path, text: str, message: str) -> None:
+    git_dir, commit = commit_draft(tmp_path, text)
+    with pytest.raises(open_pr.OpenRefusedError, match=message):
         open_pr.open_pull_request(git_dir, commit, "github.com/o/r", "agent/r", "t")
+
+
+def test_the_frontmatter_sets_the_base_and_draft_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = "---\nbase: release\ndraft: true\n---\n\n# fix(x): y\n\n## Why\n\nZ.\n"
+    git_dir, commit = commit_draft(tmp_path, text)
+    seen: dict[str, object] = {}
+
+    def post(_url: str, **options: object) -> httpx.Response:
+        seen.update(options)
+        return reply(201, {"number": 3})
+
+    monkeypatch.setattr(httpx, "post", post)
+    open_pr.open_pull_request(git_dir, commit, "github.com/o/r", "agent/r", "t")
+    assert seen["json"] == {
+        "title": "fix(x): y",
+        "body": "## Why\n\nZ.\n",
+        "head": "agent/r",
+        "base": "release",
+        "draft": True,
+    }
 
 
 @pytest.mark.parametrize(

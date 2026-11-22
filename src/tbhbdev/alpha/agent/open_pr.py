@@ -6,7 +6,7 @@ The pushed commit already passed the push scan, and the draft is part of it.
 from __future__ import annotations
 
 import subprocess  # nosec B404
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import httpx
 
@@ -25,12 +25,50 @@ class OpenRefusedError(ValueError):
     """The draft or the API refused; the message is safe to log."""
 
 
-def read_draft(git_dir: Path, commit: str) -> pull_request.Checked:
-    """The draft as the pushed commit holds it, structure-checked.
+class Draft(NamedTuple):
+    """The parts of a draft that the API call needs."""
+
+    title: str
+    body: str
+    base: str
+    draft: bool
+
+
+def parse_draft(text: str) -> Draft:
+    """Split a draft into its title, body and frontmatter fields.
+
+    Only the frontmatter parser runs here. The schema, the section and prose
+    checks and the Conventional Commit check read the repository or need tools
+    that run hosts lack, so the run's own ``pr check`` and the push scan stand
+    for them.
+
+    Raises:
+        OpenRefusedError: The frontmatter is invalid or names no base, or the
+            body doesn't start with an H1 title.
+    """
+    try:
+        meta, body = pull_request.parse_frontmatter(text)
+    except pull_request.FrontmatterError as exc:
+        message = f"the draft frontmatter is invalid: {exc}"
+        raise OpenRefusedError(message) from exc
+    fields = cast("dict[str, object]", meta) if isinstance(meta, dict) else {}
+    base = fields.get("base")
+    if not isinstance(base, str) or not base:
+        message = "the draft frontmatter names no base branch"
+        raise OpenRefusedError(message)
+    heading, _, rest = body.lstrip().partition("\n")
+    title = heading.removeprefix("# ").strip()
+    if not heading.startswith("# ") or not title:
+        message = "the draft has no H1 title after its frontmatter"
+        raise OpenRefusedError(message)
+    return Draft(title, rest.strip("\n") + "\n", base, fields.get("draft") is True)
+
+
+def read_draft(git_dir: Path, commit: str) -> Draft:
+    """The draft as the pushed commit holds it.
 
     ``git_dir`` is the host-owned publication repository, never the run clone,
-    so git loads no configuration the sandbox wrote. The prose linters are
-    skipped: the run lints its own draft, and run hosts lack the tools.
+    so git loads no configuration the sandbox wrote.
     """
     done = subprocess.run(  # nosec B603
         [
@@ -53,12 +91,7 @@ def read_draft(git_dir: Path, commit: str) -> pull_request.Checked:
     if done.returncode:
         message = f"the pushed commit has no {DRAFT}"
         raise OpenRefusedError(message)
-    checked = pull_request.check_text(done.stdout, lint_prose=False)
-    if checked.problems:
-        line, why = checked.problems[0]
-        message = f"the draft fails its check at line {line}: {why}"
-        raise OpenRefusedError(message)
-    return checked
+    return parse_draft(done.stdout)
 
 
 def open_pull_request(
@@ -67,11 +100,10 @@ def open_pull_request(
     """Create the PR and return its number.
 
     Raises:
-        OpenRefusedError: The draft is missing or fails its check, or GitHub
+        OpenRefusedError: The draft is missing or malformed, or GitHub
             refuses or cannot be reached.
     """
-    checked = read_draft(git_dir, commit)
-    body = pull_request.body_of(checked.rendered)
+    draft = read_draft(git_dir, commit)
     _, owner, name = repo.parts(repository)
     try:
         response = httpx.post(
@@ -81,11 +113,11 @@ def open_pull_request(
                 "Accept": "application/vnd.github+json",
             },
             json={
-                "title": checked.title,
-                "body": body,
+                "title": draft.title,
+                "body": draft.body,
                 "head": branch,
-                "base": pull_request.base_of(checked.meta),
-                "draft": bool(checked.meta.get("draft")),
+                "base": draft.base,
+                "draft": draft.draft,
             },
             timeout=TIMEOUT,
         )
