@@ -518,7 +518,6 @@ def prepare_workspace(run: Run) -> Prepared:
         clone,
         run.files.name,
         run.request,
-        run.settings.public_repos,
         lambda: credentials.fetch_token(run.request, run.settings),
     )
     with worktree.preparation_step("credential delivery"):

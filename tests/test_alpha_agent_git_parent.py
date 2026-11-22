@@ -64,9 +64,7 @@ def real_clone(
         run, settings=dataclasses.replace(run.settings, sandbox=sandbox)
     )
     with host_tools.configured(run.settings, run.host.os):
-        workspace = worktree.create(
-            clone, run.files.name, run.request, ("example-org/example-repo",)
-        )
+        workspace = worktree.create(clone, run.files.name, run.request)
     return run, dataclasses.replace(
         run_host.planned_paths(run), worktree=str(workspace)
     )

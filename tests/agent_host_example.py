@@ -113,7 +113,10 @@ def unusual_git_metadata(tmp_path: Path, entry: str, kind: str) -> Path:
 
 
 def run_request(**changes: object) -> model.RunRequest:
-    return request.parse(BUILD | changes, host_allows_unsandboxed=True)
+    return request.parse(
+        BUILD | {"repo": "tbhb-dev/example-repo"} | changes,
+        host_allows_unsandboxed=True,
+    )
 
 
 def local_mirror_fetches(monkeypatch: pytest.MonkeyPatch, origin: Path) -> None:
@@ -141,7 +144,7 @@ def host_settings() -> model.Settings:
     return dataclasses.replace(
         original,
         credentials=(references,),
-        public_repos=("example-org/example-repo",),
+        public_repos=("tbhb-dev/example-repo",),
         sandbox=dataclasses.replace(
             original.sandbox,
             write_roots=(".cache", ".local/share/mise", ".local/state/mise"),

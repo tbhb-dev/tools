@@ -686,6 +686,12 @@ def test_frontmatter_invalid_yaml() -> None:
     )
 
 
+def test_frontmatter_refuses_a_repeated_key() -> None:
+    found = structure("---\nbase: main\nbase: dev\n---\n" + BASE)
+    assert [line for line, _ in found] == [1]
+    assert "duplicate key 'base'" in found[0][1]
+
+
 def test_frontmatter_must_be_a_mapping() -> None:
     found = structure("---\n- a\n---\n" + BASE)
     assert [line for line, _ in found] == [1]

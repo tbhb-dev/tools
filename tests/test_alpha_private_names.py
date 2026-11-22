@@ -20,82 +20,77 @@ def tokens(lines: list[str], names: list[str] | None = None) -> list[str]:
     return [message.split("'")[1] for _, message in found]
 
 
-# cspell:ignore bazelbuild fexample
-# The directory in Bazel's source tree, built in parts so the push scan accepts it.
-PUBLIC_DIRECTORY = "dev" + "tools"
-BAZEL_URL = (
-    "# https://github.com/bazelbuild/bazel/blob/master/src/main/java/com/google/"
-    f"{PUBLIC_DIRECTORY}/build/lib/bazel/rules/BUILD"
-)
+PREFIX_FILE = ".local/state/tbhb/public-url-prefixes.txt"
+# A synthetic public prefix whose last directory is a configured private word.
+SYNTHETIC = r"https://example.com/src/blob/[\w.-]+/example-lab/"
 
 
-def test_the_bazel_source_url_is_not_a_hit() -> None:
-    assert (
-        tokens([BAZEL_URL, BAZEL_URL.removeprefix("# https://")], [PUBLIC_DIRECTORY])
-        == []
+def write_prefixes(*lines: str) -> None:
+    path = Path.home() / PREFIX_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+
+
+def prefixed(lines: list[str]) -> list[str]:
+    found = pn.private_name_problems(
+        lines, ["example-lab"], prefixes=pn.public_url_prefixes()
     )
+    return [message.split("'")[1] for _, message in found]
 
 
-@pytest.mark.parametrize(
-    ("line", "flagged"),
-    [
-        ("see github.com/bazelbuild/bazel/blob/main/example-lab/x", []),
-        ("see https://github.com/tbhb-dev/example-lab", ["example-lab"]),
-        ("see https://github.com/other-org/example-lab", ["example-lab"]),
-        ("see tbhb-dev/example-lab and example-lab", ["example-lab"]),
-        (
-            "https://github.com/bazelbuild/bazel/blob/main/x example-lab",
-            ["example-lab"],
-        ),
-        ("a/example-lab/b/c", ["example-lab"]),
-    ],
-)
-def test_a_name_inside_another_repos_path_is_not_a_hit(
-    line: str, flagged: list[str]
-) -> None:
-    assert tokens([line], NAMES) == flagged
-
-
-VIEW = "github.com/bazelbuild/bazel/blob/main/src"
+def test_a_listed_prefix_is_not_a_hit(home: Path) -> None:
+    del home
+    write_prefixes("# a comment", "", SYNTHETIC)
+    url = "https://example.com/src/blob/{}/example-lab/a/B.java#L2"
+    assert prefixed([url.format("main"), f"see {url.format('v1.2')}"]) == []
 
 
 @pytest.mark.parametrize(
     "line",
     [
-        "example.com/foo/tbhb-dev/example-lab",
-        "https://github.com/other/public/file?source=https://github.com/tbhb-dev/example-lab",
-        "https://github.com/other/public/file#github.com/tbhb-dev/example-lab",
-        "github.com/other/public/example-lab",
-        f"https://{VIEW}/f?x=example-lab",
-        f"https://{VIEW}/f#example-lab",
-        f"[public](https://{VIEW}/f),[private](https://github.com/tbhb-dev/example-lab)",
-        f"[public](https://{VIEW}/f),example-lab",
-        f"https://{VIEW}/f\u2014`example-lab`",
-        f'https://{VIEW}/f"example-lab',
-        "https://github.com/tbhb-dev/blob/main/src/example-lab",
-        "tbhb-dev:example-lab",
-        "tbhb-dev%2fexample-lab",
-        "TBHB-DEV%2Fexample-lab",
-        "github.com/tbhb-dev/example-lab",
-        f"https://{VIEW}/f\u2014example-lab",
-        "https://github.com/o/r/blob/main/tbhb-dev:example-lab",
-        "https://github.com/o/r/blob/main/TBHB-DEV:example-lab",
-        "https://github.com/o/r/blob/main/P/tbhb-dev:example-lab",
-        "https://github.com/o/r/blob/main/P/git@github.com:tbhb-dev/example-lab",
+        "https://example.com/src/tree/main/example-lab/",
+        "https://example.org/src/blob/main/example-lab/",
+        "https://example.com/src/blob/a/b/example-lab/",
+        "https://example.com/src/blob/main/example-lab",
+        "x/https://example.com/src/blob/main/example-lab/",
     ],
 )
-def test_a_name_outside_a_file_view_path_is_caught(line: str) -> None:
-    assert tokens([line], NAMES) == ["example-lab"]
+def test_only_the_exact_prefix_is_exempt(home: Path, line: str) -> None:
+    del home
+    write_prefixes(SYNTHETIC)
+    assert prefixed([line]) == ["example-lab"]
 
 
-@pytest.mark.parametrize("view", ["blob", "tree", "raw", "blame"])
-def test_a_name_in_a_file_view_path_is_exempt(view: str) -> None:
-    assert tokens([f"https://github.com/o/r/{view}/main/a/example-lab/b"], NAMES) == []
-    assert tokens([f"see github.com/o/r/{view}/main/example-lab."], NAMES) == []
+def test_a_name_after_the_prefix_is_still_caught(home: Path) -> None:
+    del home
+    write_prefixes(SYNTHETIC)
+    url = "https://example.com/src/blob/main/example-lab/example-lab/x"
+    assert prefixed([url, f"{url}?u=example-lab"]) == ["example-lab"] * 2
 
 
-def test_a_short_view_path_has_no_file_segment() -> None:
-    assert tokens(["github.com/o/r/blob/main"], ["main"]) == ["main"]
+def test_no_prefix_file_exempts_nothing(home: Path) -> None:
+    del home
+    assert pn.public_url_prefixes() == ()
+
+
+def test_a_bad_regex_line_is_skipped(home: Path) -> None:
+    del home
+    write_prefixes("(", SYNTHETIC)
+    assert len(pn.public_url_prefixes()) == 1
+
+
+def test_an_unreadable_prefix_file_exempts_nothing(home: Path) -> None:
+    del home
+    path = Path.home() / PREFIX_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfe")
+    assert pn.public_url_prefixes() == ()
+
+
+def test_host_names_carry_the_prefixes(home: Path) -> None:
+    del home
+    write_prefixes(SYNTHETIC)
+    assert len(pn._host_names().prefixes) == 1  # noqa: SLF001
 
 
 def test_suffix_rule_flags_without_config(home: Path) -> None:

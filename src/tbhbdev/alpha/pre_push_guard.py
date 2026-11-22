@@ -44,7 +44,10 @@ def findings(text: str, names: pn.Names, sha: str, where: str) -> list[str]:
     return [
         f"{sha[:12]} {where}: {why}"
         for _, why in pn.private_name_problems(
-            text.splitlines(), names.private, path_only=names.path_only
+            text.splitlines(),
+            names.private,
+            path_only=names.path_only,
+            prefixes=names.prefixes,
         )
     ]
 

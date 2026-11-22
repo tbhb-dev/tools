@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from pathlib import PurePath
 
 DEFAULT_GIT_HOST = "github.com"
+DEFAULT_ORG = "tbhb-dev"
 
 # GitHub's rules: an owner is up to 39 letters, digits and single hyphens, and
 # neither starts nor ends with a hyphen. A repo is up to 100 letters, digits,

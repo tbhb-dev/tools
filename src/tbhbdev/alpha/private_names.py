@@ -3,12 +3,9 @@
 `private_name_problems` checks whole tokens, ignoring case and a trailing
 `.git`. A `-private` component or a configured name is private. The exact,
 case-sensitive token `example-private` is a reviewed placeholder exemption.
-Public rule IDs are exempt unless configured as private names. A token that is a
-segment of the file path of a parsed file view URL (`/owner/repo/blob/ref/...`) is
-exempt, because it names something in that repository. It stays flagged when the
-URL's earlier segments include the organization, and in a query, a fragment or
-after the URL's end. The organization followed by `/`, `:` or `%2f` and a name is
-always flagged.
+Public rule IDs are exempt unless configured as private names. Exact public
+URL prefixes listed in `~/.local/state/tbhb/public-url-prefixes.txt` are removed
+from a line before it is checked, so nothing else in a URL is exempt.
 
 `draft_problems` combines `[pr_check] private_repos` with the required list in
 `~/.local/state/tbhb/private-repos.txt`. Its header can restrict words to path
@@ -45,19 +42,6 @@ PUBLIC_RULE_IDS = frozenset(
 )
 PRIVATE_COMPONENT = re.compile(r"-private(?:-|$)")
 PATH_TOKEN = re.compile(r"(?<=[\w.-])/([\w-]+(?:\.[\w-]+)*)(?![\w-])", re.ASCII)
-# A URL's host and path. The path takes only ASCII URL path characters, so whitespace,
-# a closing delimiter, a comma, a query, a fragment or a non-ASCII dash ends it.
-URL_PATH = re.compile(
-    r"(?<![\w./-])(?:[a-z][a-z0-9+.-]*://)?[\w-]+(?:\.[\w-]+)+(?::\d+)?"
-    r"(?P<path>/[\w.~%!$&*+;=:@/-]*)",
-    re.ASCII | re.IGNORECASE,
-)
-# A file view URL is /owner/repo/<view>/ref/file path; only its file path segments
-# name things in that repository.
-FILE_VIEWS = frozenset({"blob", "tree", "raw", "blame"})
-ORG = "tbhb-dev"
-# Segments before the file path: owner, repository, view, ref.
-FILE_START = 4
 PATH_HEADER = "# Bare-word exempt, flagged only in path position:"
 
 
@@ -67,6 +51,7 @@ class Names:
 
     private: list[str]
     path_only: set[str]
+    prefixes: tuple[re.Pattern[str], ...] = ()
 
 
 class NameListError(Exception):
@@ -87,6 +72,7 @@ def private_name_problems(
     first: int = 1,
     *,
     path_only: set[str] | None = None,
+    prefixes: Sequence[re.Pattern[str]] = (),
 ) -> list[Problem]:
     """One problem per distinct private-looking token on each line."""
     restricted = path_only or set()
@@ -94,7 +80,7 @@ def private_name_problems(
     return [
         (number, MESSAGE.format(token))
         for number, line in enumerate(lines, first)
-        for token in dict.fromkeys(_outside_file_paths(line))
+        for token in dict.fromkeys(TOKEN.findall(_without_prefixes(line, prefixes)))
         if token != PLACEHOLDER
         and (token.lower() not in PUBLIC_RULE_IDS or token.lower() in wanted)
         and (
@@ -104,29 +90,11 @@ def private_name_problems(
     ]
 
 
-def _outside_file_paths(line: str) -> list[str]:
-    """The tokens of LINE, minus those in a file view URL's file path."""
-    line = re.sub(r"%2f", "/", line, flags=re.IGNORECASE)
-    inside = [span for match in URL_PATH.finditer(line) for span in _file_spans(match)]
-    return [
-        match.group()
-        for match in TOKEN.finditer(line)
-        if not any(start <= match.start() < end for start, end in inside)
-    ]
-
-
-def _file_spans(match: re.Match[str]) -> list[tuple[int, int]]:
-    """The spans of the file path segments of a file view URL's path."""
-    segments = list(re.finditer(r"[^/]+", match["path"]))
-    names = [segment.group().lower() for segment in segments]
-    if (
-        len(names) <= FILE_START
-        or names[2] not in FILE_VIEWS
-        or ORG in match["path"].lower()
-    ):
-        return []
-    base = match.start("path")
-    return [(base + seg.start(), base + seg.end()) for seg in segments[FILE_START:]]
+def _without_prefixes(line: str, prefixes: Sequence[re.Pattern[str]]) -> str:
+    """LINE with each exempt public URL prefix replaced by a space."""
+    for prefix in prefixes:
+        line = prefix.sub(" ", line)
+    return line
 
 
 def _is_private(token: str, wanted: set[str]) -> bool:
@@ -142,6 +110,26 @@ def _path_private(token: str, line: str, restricted: set[str]) -> bool:
     return token.lower().removesuffix(".git") in restricted and (
         token.lower().endswith(".git") or token in PATH_TOKEN.findall(line)
     )
+
+
+def public_url_prefixes() -> tuple[re.Pattern[str], ...]:
+    """Exact public URL prefixes from the host file, one regex per line.
+
+    A missing or unreadable file means none, and a line that is not a valid
+    regex is skipped, so a fault exempts nothing.
+    """
+    path = Path.home() / ".local/state/tbhb/public-url-prefixes.txt"
+    try:
+        lines = path.read_text().splitlines()
+    except OSError, UnicodeDecodeError:
+        return ()
+    found: list[re.Pattern[str]] = []
+    for raw in lines:
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            with suppress(re.error):
+                found.append(re.compile(rf"(?<![\w./-]){line}", re.ASCII))
+    return tuple(found)
 
 
 def _host_names() -> Names:
@@ -162,7 +150,7 @@ def _host_names() -> Names:
             names.append(line)
     if not names:
         raise NameListError(message)
-    return Names(names, path_only)
+    return Names(names, path_only, public_url_prefixes())
 
 
 def _configured(*, strict: bool = False) -> list[str]:
@@ -201,7 +189,7 @@ def names_for_repository(name: str | None) -> Names | None:
     host = _host_names()
     if name in {item.lower() for item in host.private} | host.path_only:
         return None
-    return Names(configured + host.private, host.path_only)
+    return Names(configured + host.private, host.path_only, host.prefixes)
 
 
 def private_names() -> Names | None:
@@ -220,6 +208,10 @@ def draft_problems(lines: Sequence[str], first: int) -> list[Problem]:
         []
         if names is None
         else private_name_problems(
-            lines, names.private, first, path_only=names.path_only
+            lines,
+            names.private,
+            first,
+            path_only=names.path_only,
+            prefixes=names.prefixes,
         )
     )

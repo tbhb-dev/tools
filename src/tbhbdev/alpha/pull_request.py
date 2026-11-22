@@ -121,7 +121,7 @@ import tempfile
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, override
 from urllib.parse import quote
 
 import yaml
@@ -261,7 +261,23 @@ def keep_text(loader: yaml.SafeLoader, node: yaml.Node) -> str:
 
 
 class Loader(yaml.SafeLoader):
-    """SafeLoader that keeps timestamps as text, so the schema can check them."""
+    """SafeLoader that keeps timestamps as text and refuses duplicate keys."""
+
+    @override
+    def construct_mapping(
+        self,
+        node: yaml.MappingNode,
+        deep: bool = False,
+    ) -> dict[object, object]:
+        """Refuse a key that appears twice, which plain YAML resolves silently."""
+        keys = [self.construct_object(key, deep=True) for key, _ in node.value]
+        for key in keys:
+            if keys.count(key) > 1:
+                message = f"duplicate key {key!r}"
+                raise yaml.constructor.ConstructorError(
+                    None, None, message, node.start_mark
+                )
+        return super().construct_mapping(node, deep)
 
 
 Loader.add_constructor("tag:yaml.org,2002:timestamp", keep_text)

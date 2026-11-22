@@ -34,7 +34,7 @@ OTEL_HOST = "otlp.example.net"
 DURATION = "must be bare seconds or a number ending in s, m or h, up to 7 days"
 
 
-@pytest.mark.parametrize("entries", [[], ["tbhb-dev/tools", "github.com/a/b"]])
+@pytest.mark.parametrize("entries", [[], ["tbhb-dev/tools", "github.com/TBHB-Dev/b"]])
 def test_public_repositories(entries: list[str]) -> None:
     assert config.parse(GOOD | {"public_repos": entries}).public_repos == tuple(entries)
     assert config.parse(GOOD).public_repos == ()
@@ -136,6 +136,15 @@ def test_public_repositories_refuse_invalid_entries(entries: object) -> None:
         "must contain valid repository arguments" if entries == ["../b"] else STRINGS
     )
     assert str(caught.value) == f"[agent] public_repos {reason}"
+
+
+@pytest.mark.parametrize("entry", ["a/b", "github.com/other-org/b", "tbhb-dev-x/b"])
+def test_public_repositories_refuse_other_owners(entry: str) -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(GOOD | {"public_repos": [entry]})
+    assert str(caught.value) == (
+        "[agent] public_repos must contain only tbhb-dev repositories"
+    )
 
 
 UNSAFE_REFERENCES = [

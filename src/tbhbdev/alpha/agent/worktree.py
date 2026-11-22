@@ -98,8 +98,11 @@ def git(clone: Path, *args: str, token: str | None = None) -> str:
         else ["--git-dir", str(clone)]
     )
     offline = ["-c", "protocol.allow=never"]
+    # A moved repository answers with a redirect, and the owner gate checks only
+    # the requested name, so an online command never follows one.
+    online_only = ["-c", "http.followRedirects=false"]
     online = args[0] in ("fetch", "ls-remote")
-    invocation = [*command, *([] if online else offline), *args]
+    invocation = [*command, *(online_only if online else offline), *args]
     output = partial(
         subprocess.check_output,
         env=env,
@@ -486,21 +489,17 @@ def create(
     clone: Path,
     name: str,
     request: RunRequest,
-    public_repos: tuple[str, ...],
     token_source: Callable[[], str | None] | None = None,
 ) -> Path:
     check_fetch_refs(request.fetch_refs)
     parts = repo.parts(request.repo)
-    if parts not in tuple(repo.parts(value) for value in public_repos):
+    if (parts[0], parts[1].lower()) != (repo.DEFAULT_GIT_HOST, repo.DEFAULT_ORG):
         message = (
             f"repository {request.repo}: agent mirrors fetch only "
-            "repositories listed in public_repos"
+            f"{repo.DEFAULT_ORG} repositories"
         )
         raise Invalid(message)
-    host, owner, repository = parts
-    if host != repo.DEFAULT_GIT_HOST:
-        message = "agent mirrors require a GitHub repository"
-        raise Invalid(message)
+    _, owner, repository = parts
     url = f"https://github.com/{owner}/{repository}.git"
     ensure_clone_directory(clone)
     worktree = clone / ".worktrees" / f"agent-{name}"
@@ -525,16 +524,12 @@ def create(
                 commit = fetch_commit(mirror, request)
             except subprocess.SubprocessError:
                 # A private repository refuses the anonymous fetch. Retry over
-                # https with the run's App token. An account with no token falls
-                # back to ssh, which uses its own GitHub key from its ssh config.
+                # https with the run's App token. With no token the fetch fails:
+                # an ssh retry could follow a transfer to another owner.
                 token = token_source() if token_source is not None else None
                 if token is None:
-                    configure_mirror(
-                        mirror, f"ssh://git@github.com/{owner}/{repository}.git"
-                    )
-                    commit = fetch_commit(mirror, request)
-                else:
-                    commit = fetch_commit(mirror, request, token)
+                    raise
+                commit = fetch_commit(mirror, request, token)
         with preparation_step("clone"):
             worktree.parent.mkdir(exist_ok=True)
             clone_run(mirror, worktree, url)
