@@ -525,7 +525,7 @@ def test_schema_key_search_stays_in_the_frontmatter() -> None:
             1,
             (
                 "frontmatter $.event: 'invalid' is not one of "
-                "['REQUEST_CHANGES', 'COMMENT']"
+                "['APPROVE', 'REQUEST_CHANGES', 'COMMENT']"
             ),
         )
     ]
