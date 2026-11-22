@@ -27,7 +27,7 @@ type: Reference
 
 `tbhbdev alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`:
 
-- `pre-push-guard REMOTE URL` refuses non-fast-forward pushes and scans public pushes for private names in commit messages, added lines, and added or renamed paths. The installed pre-push hook runs it before prek with the same arguments and input. Public pushes require a readable, nonempty `~/.local/state/tbhb/private-repos.txt` alongside `[pr_check] private_repos`. The list’s header defines words that only match in repository paths. Nonempty `SKIP` or `PREK_SKIP` refuses the push. Install fails when a foreign pre-push hook exists and asks you to move it aside. No setting bypasses the guard. Git’s `--no-verify` skips all hooks. Standing rules prohibit it.
+- `pre-push-guard REMOTE URL` refuses non-fast-forward pushes and pushes to a protected branch. The installed pre-push hook runs it before prek with the same arguments and input. Nonempty `SKIP` or `PREK_SKIP` refuses the push. Install fails when a foreign pre-push hook exists and asks you to move it aside. No setting bypasses the guard. Git’s `--no-verify` skips all hooks. Standing rules prohibit it.
 - `identity` records which agent and model made each edit and writes the `Generated-by` trailers.
 - `guard-op` requires the configured `[op] account` flag on shell calls and proposed writes in every directory. `PreToolUse` covers Claude `Bash` and `Write|Edit|MultiEdit|NotebookEdit`, Codex `Bash`/`shell`/`apply_patch` and Antigravity `run_command`/edit tools. The guard scans shell files, Markdown shell fences, Python command expressions, notebook code cells, and YAML command fields. It allows unrelated edits to existing offenders. `OP_ACCOUNT` alone doesn't pass the guard. The module docstring lists the allowed command forms that the scanner misses. Check the Codex `apply_patch` PreToolUse matcher live after install. Its behavior remains unverified against Codex's documentation.
 - `guard-gh-pr` is a PreToolUse hook that blocks `gh pr create`, `gh pr edit`, `gh pr merge`, `gh pr ready`, `gh pr close`, `gh issue close`, `gh run rerun` and a `gh api` DELETE of a branch ref, starts its denial with `tbhbdev hint:`, names the `tbhbdev alpha` command to run instead, and ends with a pointer to `tbhbdev alpha --help`.
@@ -83,17 +83,6 @@ decisions_dir = "/example/decisions"   # the path the open-note block names
 open_note = "/example/Open.md"         # a path suffix; a new item needs "Decisions checked:"
 hosts = ["example-a=peer Mac", "example-b=Linux VM", "example-c"]   # "name=role"
 ```
-
-`tbhbdev alpha pr check` reads one more optional table. `private_repos` lists private repository names that must not appear in a public repository's draft:
-
-```toml
-[pr_check]
-private_repos = ["example-lab", "example-notes"]   # optional
-```
-
-The check flags a whole repository-name token in the title and body that equals a listed name, and any token ending in `-private`, such as `example-private`. The suffix rule works without config. Matching ignores case and a trailing `.git`. A clone URL matches. It ignores substrings of longer names. A token that starts with a hyphen, such as `--private`, passes, but the check flags a word such as `non-private`. It skips a working repository whose own name ends in `-private` or appears in the list. If `origin` is unreadable, the check runs. It covers the title and body only, not commit messages.
-
-The public rule IDs `mailgun-private-api-token`, `shopify-private-app-access-token`, and `tbhb-private-canary` pass unless listed as private names. This exemption ignores case and requires the whole token to match exactly.
 
 The commit check runs without config. The command guard checks arguments for trailers and sign-off flags. Message bodies in here documents or `-F` files pass this guard. The commit-msg identity check catches trailers in those bodies.
 

@@ -94,7 +94,7 @@ commands:
                installed build on each host
   loop         validate loop configuration (runner not yet available)
   agent        exec | wait | status | kill | clean | keep: headless runs
-  pre-push-guard REMOTE URL: refuse rewritten history and private names
+  pre-push-guard REMOTE URL: refuse rewritten history and protected-branch pushes
   brief        new | check: peer-run briefs with required safeguards
   install      install the git hooks and the user-level harness hooks
 """

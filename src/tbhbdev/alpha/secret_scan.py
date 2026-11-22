@@ -17,11 +17,13 @@ rule families in ``NAME_RULES``. The visibility is that of the repository the
 text is posted to, not the working directory's; the caller reads it. The rules'
 gates apply the private config only to a repository that sets
 ``--@tbhb_rules//lint:gitleaks_private_config``, so text that names a private
-repository's own subject, such as a host it documents or a sibling private
-repository, passes there. The scan then runs gitleaks under a temporary copy of
-the private config without those rules, in a 0700 directory as a 0600 file,
-removed afterwards. The copy keeps the ``[extend]`` path, so the repository's
-.gitleaks.toml and gitleaks' default rules still apply. So do every other
+repository's own subject, such as a host it documents, passes there. The scan
+then runs gitleaks under a temporary copy of the private config without those
+rules, in a 0700 directory as a 0600 file, removed afterwards. Every scan, in
+any repository, also drops the ``private-repo`` rules in ``REPO_RULES``, since
+a private repository's name may appear in public text. The copy keeps the
+``[extend]`` path, so the repository's .gitleaks.toml and gitleaks' default
+rules still apply. So do every other
 private rule, such as the ``op-*`` rules, the tailnet and private addresses, the
 MAC address, the endpoint and keychain rules and the canary. Only the exact
 visibility ``PRIVATE`` skips them. Any other value, ``PUBLIC`` and ``INTERNAL``
@@ -57,14 +59,13 @@ PRIVATE = "PRIVATE"
 
 # The private config's name rules: each rule id without its trailing
 # ``-<digits>`` is one of these. They name a private repository's own
-# subject (its sibling repositories, hosts, tailnet, local names, home and
-# tool directories). The rules' gates apply the private config only to a
-# repository that sets the flag, so a private repository's text skips them.
+# subject (its hosts, tailnet, local names, home and tool directories). The
+# rules' gates apply the private config only to a repository that sets the
+# flag, so a private repository's text skips them.
 # Every other rule stays: the ``op-*`` rules, ``tailnet-ipv4``,
 # ``tailnet-ipv6``, ``private-ipv4``, ``mac-address``, ``endpoint``,
 # ``keychain``, the canary and whatever .gitleaks.toml defines.
 NAME_RULES = (
-    "private-repo",
     "tailnet-host",
     "tailnet-stem",
     "tailnet-name",
@@ -74,6 +75,10 @@ NAME_RULES = (
     "tool-dir",
 )
 
+
+# A private repository's name may appear in public text. An older private
+# config can still carry this rule family, so every scan drops it.
+REPO_RULES = ("private-repo",)
 
 # The private config's pointer to the committed config, and a committed
 # config's own [extend] table.
@@ -116,13 +121,13 @@ def findings(report: str) -> list[tuple[int, str]] | None:
     return sorted((int(entry["StartLine"]), str(entry["RuleID"])) for entry in entries)
 
 
-def is_name_rule(rule: dict[str, object]) -> bool:
-    """Whether a rule belongs to one of the ``NAME_RULES`` families."""
-    return re.sub(r"-\d+$", "", str(rule.get("id"))) in NAME_RULES
+def is_name_rule(rule: dict[str, object], families: tuple[str, ...]) -> bool:
+    """Whether a rule belongs to one of the FAMILIES."""
+    return re.sub(r"-\d+$", "", str(rule.get("id"))) in families
 
 
-def without_name_rules(private: str) -> str | None:
-    """The private config minus its name rules, or None if it doesn't parse.
+def without_name_rules(private: str, families: tuple[str, ...]) -> str | None:
+    """The private config minus the rules of FAMILIES, or None if it doesn't parse.
 
     None sends the scan to the full config, where gitleaks reports the
     parse failure itself.
@@ -132,7 +137,7 @@ def without_name_rules(private: str) -> str | None:
     except tomllib.TOMLDecodeError:
         return None
     rules = data.get("rules", [])
-    data["rules"] = [rule for rule in rules if not is_name_rule(rule)]
+    data["rules"] = [rule for rule in rules if not is_name_rule(rule, families)]
     return tomlkit.dumps(data)
 
 
@@ -206,7 +211,8 @@ def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) ->
             f"cannot scan {what} for secrets: {root / GITLEAKS_EXTENDS} does not exist"
         )
         raise SystemExit(message)
-    reduced = without_name_rules(private) if visibility == PRIVATE else None
+    dropped = (*REPO_RULES, *NAME_RULES) if visibility == PRIVATE else REPO_RULES
+    reduced = without_name_rules(private, dropped)
     with tempfile.TemporaryDirectory() as directory:  # mode 0700
         base = Path(directory) / "committed.toml"
         copy = Path(directory) / "private.toml"
