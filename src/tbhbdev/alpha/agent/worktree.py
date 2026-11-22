@@ -19,6 +19,7 @@ lazy from collections.abc import Callable, Generator
 from tbhbdev.alpha import install
 from tbhbdev.alpha.agent import host_tools, runfiles
 from tbhbdev.alpha.agent.decisions import repo
+from tbhbdev.alpha.agent.decisions.request import check_fetch_refs
 from tbhbdev.alpha.agent.model import Invalid, Profile, RunRequest
 
 GIT_OVERRIDES = (
@@ -179,6 +180,7 @@ def default_branch(mirror: Path, token: str | None = None) -> str:
 
 
 def fetch_commit(mirror: Path, request: RunRequest, token: str | None = None) -> str:
+    check_fetch_refs(request.fetch_refs)
     options = (
         "--no-recurse-submodules",
         "--no-write-fetch-head",
@@ -187,6 +189,10 @@ def fetch_commit(mirror: Path, request: RunRequest, token: str | None = None) ->
     )
     branch = default_branch(mirror, token)
     references = [f"+{branch}:{branch}"]
+    references.extend(
+        f"+{ref}:refs/heads/fetched/{ref.removeprefix('refs/')}"
+        for ref in request.fetch_refs
+    )
     if request.commit is not None:
         references.append(f"+{request.commit}:refs/heads/tbhbdev-review")
     fetch = ("fetch", *options, "--no-prune", "origin", *references)
@@ -483,6 +489,7 @@ def create(
     public_repos: tuple[str, ...],
     token_source: Callable[[], str | None] | None = None,
 ) -> Path:
+    check_fetch_refs(request.fetch_refs)
     parts = repo.parts(request.repo)
     if parts not in tuple(repo.parts(value) for value in public_repos):
         message = (
@@ -510,7 +517,10 @@ def create(
             stack.enter_context(runfiles.locked(mirror / "agent-mirror.lock"))
         with preparation_step("mirror init"):
             configure_mirror(mirror, url)
-        with preparation_step(f"mirror fetch ({url})"):
+        fetch_step = f"mirror fetch ({url})"
+        if request.fetch_refs:
+            fetch_step += f"; requested refs: {', '.join(request.fetch_refs)}"
+        with preparation_step(fetch_step):
             try:
                 commit = fetch_commit(mirror, request)
             except subprocess.SubprocessError:

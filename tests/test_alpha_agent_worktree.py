@@ -81,6 +81,83 @@ def test_build_fetches_default_and_creates_one_branch(tmp_path: Path) -> None:
     assert git(clone, "worktree", "list", "--porcelain").count("worktree ") == 1
 
 
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_requested_refs_reach_clone_without_changing_checkout(
+    tmp_path: Path, profile: str
+) -> None:
+    seed, clone = repository(tmp_path)
+    default = git(seed, "rev-parse", "HEAD")
+    (seed / "tracked").write_text("PR change\n")
+    head = commit(seed, "PR head")
+    git(seed, "push", "origin", "HEAD:refs/pull/391/head", "HEAD:refs/heads/fix-392")
+    request = run_request(
+        profile=profile,
+        commit=head if profile == "review" else None,
+        fetch_refs=["refs/pull/391/head", "refs/heads/fix-392", "refs/heads/main"],
+    )
+    path = worktree.create(clone, "refs", request, (request.repo,))
+    assert git(path, "rev-parse", "origin/fetched/pull/391/head") == head
+    assert git(path, "rev-parse", "origin/fetched/heads/fix-392") == head
+    assert git(path, "rev-parse", "origin/fetched/heads/main") == default
+    assert git(path, "rev-parse", "origin/main") == default
+    assert git(path, "rev-parse", "HEAD") == (head if profile == "review" else default)
+    assert git(path, "branch", "--show-current") == (
+        "" if profile == "review" else "agent/refs"
+    )
+    mirror = worktree.mirror_path(tmp_path, request.repo)
+    assert git(mirror, "rev-parse", "refs/heads/main") == default
+    assert not (mirror / "FETCH_HEAD").exists()
+
+
+@pytest.mark.parametrize("ref", ["refs/pull/392/head", "refs/heads/missing"])
+def test_missing_requested_ref_fails_preparation_with_its_name(
+    tmp_path: Path, ref: str
+) -> None:
+    _, clone = repository(tmp_path)
+    request = run_request(fetch_refs=[ref])
+    with pytest.raises(Invalid) as caught:
+        worktree.create(clone, "missing", request, (request.repo,))
+    assert str(caught.value).startswith(
+        "run preparation failed at mirror fetch "
+        "(https://github.com/example-org/example-repo.git); requested refs: " + ref
+    )
+    assert not (clone / ".worktrees" / "agent-missing").exists()
+
+
+@pytest.mark.parametrize("token", [None, "example-token"])
+def test_named_refs_share_the_default_fetch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, token: str | None
+) -> None:
+    calls: list[tuple[tuple[str, ...], str | None]] = []
+
+    def fetch(_path: Path, *args: str, token: str | None = None) -> str:
+        calls.append((args, token))
+        if args[0] == "ls-remote":
+            return "ref: refs/heads/main\tHEAD"
+        return "a" * 40
+
+    monkeypatch.setattr(worktree, "git", fetch)
+    request = run_request(fetch_refs=["refs/pull/391/head", "refs/heads/fix-392"])
+    assert worktree.fetch_commit(tmp_path, request, token) == "a" * 40
+    assert [call for call in calls if call[0][0] == "fetch"] == [
+        (
+            (
+                "fetch",
+                "--no-recurse-submodules",
+                "--no-write-fetch-head",
+                "--no-tags",
+                "--upload-pack=git-upload-pack",
+                "--no-prune",
+                "origin",
+                "+refs/heads/main:refs/heads/main",
+                "+refs/pull/391/head:refs/heads/fetched/pull/391/head",
+                "+refs/heads/fix-392:refs/heads/fetched/heads/fix-392",
+            ),
+            token,
+        )
+    ]
+
+
 @pytest.mark.parametrize("dirty", [False, True])
 def test_clone_work_is_preserved(tmp_path: Path, dirty: bool) -> None:
     seed, clone = repository(tmp_path)
