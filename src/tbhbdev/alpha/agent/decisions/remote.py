@@ -371,9 +371,9 @@ def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str
             'links=$(find "$run/objects" "$run/refs" -type l -print -quit) '
             "|| exit 65\n"
             'test -z "$links" || exit 65\n'
-            'midx=$(find "$run/objects/pack" -name "multi-pack-index*" '
+            'packidx=$(find "$run/objects/pack" -name "multi-pack-index*" '
             "-print -quit) || exit 65\n"
-            'test -z "$midx" || exit 65\n'
+            'test -z "$packidx" || exit 65\n'
             'test ! -e "$run/objects/info/alternates" || exit 65\n'
             'head=$(sed -n 1p "$run/HEAD")\n'
             'case "$head" in\n'
