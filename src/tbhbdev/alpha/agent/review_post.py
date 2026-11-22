@@ -21,7 +21,7 @@ from tbhbdev.alpha.agent.decisions import repo
 if TYPE_CHECKING:
     from tbhbdev.alpha.agent.run_host import Prepared, Run
 
-ALLOWED_EVENTS = frozenset({"COMMENT", "REQUEST_CHANGES"})
+ALLOWED_EVENTS = frozenset({"COMMENT"})
 DRAFT_NAME = re.compile(r"review-(\d+)\.md")
 DRAFT_LIMIT = 64 * 1024
 TIMEOUT = httpx.Timeout(20.0, connect=5.0)
@@ -29,10 +29,6 @@ TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 
 class PostRefusedError(ValueError):
     """The draft or the API refused; the message is safe to log."""
-
-
-class MovedHeadError(PostRefusedError):
-    """The head moved while the review posted, and the review was dismissed."""
 
 
 @dataclass(frozen=True)
@@ -127,11 +123,10 @@ def pull_head(data: object) -> str | None:
     return sha if isinstance(sha, str) else None
 
 
-def create(sub: Submission, token: str) -> int:
-    """Validate, then post once; return the review id.
+def create(sub: Submission, token: str) -> int | None:
+    """Validate, then post once; return the review id, or None if GitHub sent none.
 
     Raises:
-        MovedHeadError: The head moved during the post and the review was dismissed.
         PostRefusedError: A check fails, the head moved, or GitHub refuses.
     """
     fields, body = validate(sub)
@@ -147,22 +142,9 @@ def create(sub: Submission, token: str) -> int:
     }
     data = api("POST", f"{base}/reviews", token, payload)
     created = data.get("id") if isinstance(data, dict) else None
-    if not isinstance(created, int):
+    if data is not None and not isinstance(created, int):
         message = "GitHub returned no review id"
         raise PostRefusedError(message)
-    if payload["event"] == "REQUEST_CHANGES" and (
-        pull_head(api("GET", base, token)) != sub.commit
-    ):
-        # A changes-requested review stays the PR's verdict after a push, even
-        # though it is attached to the old commit, so take it back.
-        api(
-            "PUT",
-            f"{base}/reviews/{created}/dismissals",
-            token,
-            {"message": "head moved before posting; re-review needed"},
-        )
-        message = f"the head moved before posting; review {created} was dismissed"
-        raise MovedHeadError(message)
     return created
 
 
@@ -191,5 +173,5 @@ def posted(run: Run, prepared: Prepared) -> bool:
     except (PostRefusedError, OSError, ValueError) as refusal:
         run.files.write("log", f"review not posted: {refusal}\n")
         return False
-    run.files.write("review", f"{run.request.repo}#{number} {identifier}")
+    run.files.write("review", f"{run.request.repo}#{number} {identifier or 'unknown'}")
     return True

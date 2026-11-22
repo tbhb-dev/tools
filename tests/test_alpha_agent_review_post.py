@@ -117,43 +117,6 @@ def test_posts_the_comment_with_identity_in_the_body(
     assert written == {"review": "github.com/o/r#7 99"}
 
 
-def test_request_changes_posts_when_the_head_holds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, prepared, _ = make(tmp_path, draft("REQUEST_CHANGES", findings=True))
-    monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    api = Api(monkeypatch)
-    assert review_post.posted(run, prepared)
-    assert [m for m, _, _ in api.calls] == ["GET", "POST", "GET"]
-
-
-def test_request_changes_is_dismissed_when_the_head_moves_during_the_post(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, prepared, written = make(tmp_path, draft("REQUEST_CHANGES", findings=True))
-    monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    api = Api(monkeypatch)
-    api.later = reply(200, {"head": {"sha": "b" * 40}})
-    assert not review_post.posted(run, prepared)
-    assert [(m, u) for m, u, _ in api.calls][-1] == (
-        "PUT",
-        f"{BASE}/reviews/99/dismissals",
-    )
-    assert "review 99 was dismissed" in written["log"]
-    assert "review" not in written
-
-
-def test_comment_is_kept_when_the_head_moves_during_the_post(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, prepared, _ = make(tmp_path, draft())
-    monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    api = Api(monkeypatch)
-    api.later = reply(200, {"head": {"sha": "b" * 40}})
-    assert review_post.posted(run, prepared)
-    assert [m for m, _, _ in api.calls] == ["GET", "POST"]
-
-
 APPROVE_THEN_COMMENT = draft("APPROVE").replace(
     "event: APPROVE", "event: APPROVE\nevent: COMMENT"
 )
@@ -165,6 +128,11 @@ APPROVE_THEN_COMMENT = draft("APPROVE").replace(
         (None, "review-7.md", "found 0"),
         (draft(), "notes.md", "found 0"),
         (draft("APPROVE"), "review-7.md", "can't post a APPROVE"),
+        (
+            draft("REQUEST_CHANGES", findings=True),
+            "review-7.md",
+            "can't post a REQUEST",
+        ),
         (APPROVE_THEN_COMMENT, "review-7.md", "duplicate key"),
         (draft(head="b" * 40), "review-7.md", "isn't the commit"),
         ("---\npr: 7\n---\n", "review-7.md", "fails its checks"),
@@ -224,7 +192,6 @@ def test_a_missing_token_blocks_the_post(
         (reply(403, {"message": "no"}), "status 403"),
         (reply(201, {"id": "x"}), "no review id"),
         (reply(201, []), "no review id"),
-        (httpx.Response(204), "no review id"),
         (httpx.Response(200, text="not json"), "request failed"),
         (httpx.ConnectError("x"), "ConnectError"),
     ],
@@ -252,6 +219,16 @@ def test_any_2xx_post_is_a_success(
     Api(monkeypatch).created = reply(202, {"id": 8})
     assert review_post.posted(run, prepared)
     assert written == {"review": "github.com/o/r#7 8"}
+
+
+def test_an_empty_2xx_post_counts_as_posted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared, written = make(tmp_path, draft())
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    Api(monkeypatch).created = httpx.Response(204)
+    assert review_post.posted(run, prepared)
+    assert written == {"review": "github.com/o/r#7 unknown"}
 
 
 def request_for(profile: Profile) -> RunRequest:
