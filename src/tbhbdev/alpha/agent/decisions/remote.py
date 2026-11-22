@@ -145,8 +145,10 @@ def limits() -> str:
         "read l _ < /proc/loadavg || exit 1\n"
         "c=$(nproc) || exit 1\n"
         'awk -v l="$l" -v c="$c" \'/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} '
-        "/^SwapTotal:/{s=$2; h=1} /^SwapFree:/{f=$2; g=1} "
-        'END{if (t=="" || a=="" || !h || !g) exit 1; print l, c, t, a, s, s-f}\' '
+        "/^SwapTotal:/{s=$2} /^SwapFree:/{f=$2} "
+        "END{if (t!~/^[0-9]+$/ || a!~/^[0-9]+$/ "
+        "|| s!~/^[0-9]+$/ || f!~/^[0-9]+$/) exit 1; "
+        "print l, c, t, a, s, s-f}' "
         "/proc/meminfo\n"
     )
     macos = (
@@ -156,9 +158,10 @@ def limits() -> str:
         "u=$(sysctl -n vm.swapusage) || exit 1\n"
         "v=$(vm_stat) || exit 1\n"
         'printf "%s\\n" "$v" | awk -v l="$l" -v c="$c" -v m="$m" -v u="$u" \''
-        "/page size of/{z=$8} /^Pages (free|inactive|speculative|purgeable):/{p+=$NF} "
+        "/page size of/{z=$8} "
+        "/^Pages (free|inactive|speculative|purgeable):/{p+=$NF; n++} "
         'END{split(l,x," "); split(u,w,"[ =M]+"); '
-        'if (z=="" || x[2]=="" || w[1]!="total" || w[3]!="used" '
+        'if (z=="" || n!=4 || x[2]=="" || w[1]!="total" || w[3]!="used" '
         "|| w[2]!~/^[0-9.]+$/ || w[4]!~/^[0-9.]+$/) exit 1; "
         'printf "%s %s %d %d %d %d\\n", x[2], c, m/1024, p*z/1024, '
         "w[2]*1024, w[4]*1024}'\n"

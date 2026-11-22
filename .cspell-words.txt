@@ -111,6 +111,7 @@ logicalcpu
 logname
 mcpjson
 mdfile
+meminfo
 milestoned
 mkfifo
 mktree
@@ -203,6 +204,7 @@ strerror
 stubtool
 subagentstart
 surrogateescape
+swapless
 swapusage
 syslimits
 tailnet

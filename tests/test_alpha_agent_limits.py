@@ -149,15 +149,49 @@ def test_every_other_read_ends_the_script_nonzero_too(text: str) -> None:
     [
         ("/proc/loadavg", "/nonexistent"),
         ("$(nproc)", "$(false)"),
-        ("/proc/meminfo", "$TMPDIR/no-swap-fields"),
     ],
 )
-def test_a_failed_or_partial_linux_read_ends_the_script_nonzero(
-    old: str, new: str, tmp_path: Path
-) -> None:
-    (tmp_path / "no-swap-fields").write_text("MemTotal: 10 kB\nMemAvailable: 5 kB\n")
-    script = remote.limits().replace(old, new.replace("$TMPDIR", str(tmp_path)))
+def test_a_failed_linux_read_ends_the_script_nonzero(old: str, new: str) -> None:
+    script = remote.limits().replace(old, new)
     assert run_script(script) == (1, "")
+
+
+MEMINFO = {
+    "MemTotal": "10 kB",
+    "MemAvailable": "5 kB",
+    "SwapTotal": "0 kB",
+    "SwapFree": "0 kB",
+}
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc")
+@pytest.mark.parametrize("field", list(MEMINFO))
+@pytest.mark.parametrize("damage", ["missing", "empty", "word"])
+def test_each_linux_memory_field_must_be_a_number(
+    field: str, damage: str, tmp_path: Path
+) -> None:
+    lines = {
+        name: {"missing": None, "empty": f"{name}:", "word": f"{name}: x kB"}[damage]
+        if name == field
+        else f"{name}: {value}"
+        for name, value in MEMINFO.items()
+    }
+    (tmp_path / "meminfo").write_text(
+        "".join(f"{line}\n" for line in lines.values() if line)
+    )
+    script = remote.limits().replace("/proc/meminfo", str(tmp_path / "meminfo"))
+    assert run_script(script) == (1, "")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc")
+def test_a_swapless_linux_host_with_zero_fields_is_readable(tmp_path: Path) -> None:
+    (tmp_path / "meminfo").write_text(
+        "".join(f"{name}: {value}\n" for name, value in MEMINFO.items())
+    )
+    script = remote.limits().replace("/proc/meminfo", str(tmp_path / "meminfo"))
+    code, out = run_script(script)
+    assert code == 0
+    assert isinstance(limits.parse(out), limits.Reading)
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="reads sysctl and vm_stat")
@@ -165,6 +199,10 @@ def test_a_failed_or_partial_linux_read_ends_the_script_nonzero(
     ("old", "new"),
     [
         ("$(vm_stat)", "$(echo 'Pages free: 5.'; false)"),
+        (
+            "$(vm_stat)",
+            "$(echo 'Mach Virtual Memory Statistics: (page size of 16384 bytes)')",
+        ),
         ("sysctl -n vm.swapusage", "echo 'total =  used = 5.00M  free = 1.00M'"),
         ("sysctl -n vm.swapusage", "echo 'garbage'"),
     ],
