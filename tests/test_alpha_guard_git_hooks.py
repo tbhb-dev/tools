@@ -97,3 +97,78 @@ def test_poll_hook_denies_bypass(
     assert poll.main() == 0
     out = json.loads(capsys.readouterr().out)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+PUSH_DENIED = [
+    "git push --force",
+    "git push -f origin topic",
+    "git push origin topic -f",
+    "git push -fu origin topic",
+    "git push -uf origin topic",
+    "git push --forc origin topic",
+    "git push --force=x",
+    "git push --mirror",
+    "git push --mir origin",
+    "git push origin +topic",
+    "git push origin +HEAD:topic",
+    "git push origin -- +topic",
+    "git push --force-if-includes origin topic",
+    "git push --force-with-lease --force origin topic",
+    "git push --force-with-lease -f origin topic",
+    "git push --force-with-lease --force-with origin topic",
+    "git push --force-with-lease origin HEAD:main",
+    "git push --force-with-lease origin HEAD:refs/heads/master",
+    "git push origin main",
+    "git push origin topic main",
+    "git push origin :main",
+    "git push --delete origin main",
+    "git push -o ci.skip -f origin topic",
+    "git -C repo push --force origin topic",
+    "cd x && git push -f",
+    "bash -c 'git push --force-if-includes'",
+]
+PUSH_ALLOWED = [
+    "git push",
+    "git push origin topic",
+    "git push -u origin topic",
+    "git push --force-with-lease",
+    "git push --force-with-lease origin topic",
+    "git push --force-with-lease=topic origin topic",
+    "git push --force-with-lease=topic:abc123 origin topic",
+    "git push --force-with-lease --force-if-includes origin topic",
+    "git push --force-if-includes --force-with-lease=topic origin topic",
+    "git push -o force origin topic",
+    "git push -ofoo origin topic",
+    "git push --push-option -f origin topic",
+    "git push --repo -f HEAD",
+    "git push --follow-tags",
+    "git push -n origin topic",
+    "git push origin topic:feature/main",
+    "git push origin HEAD:refs/heads/topic",
+    "git push main topic",
+    "git push -- origin topic",
+    "git log --force -f",
+    "git fetch --force origin",
+    "echo git push --force",
+]
+
+
+@pytest.mark.parametrize("command", PUSH_DENIED)
+def test_push_denied(command: str) -> None:
+    assert guard.verdict(command) == guard.PUSH_REASON
+
+
+@pytest.mark.parametrize("command", PUSH_ALLOWED)
+def test_push_allowed(command: str) -> None:
+    assert guard.verdict(command) is None
+
+
+def test_poll_hook_denies_force_push(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = {"tool_input": {"command": "git push --force origin topic"}}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    assert poll.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert out["hookSpecificOutput"]["permissionDecisionReason"] == guard.PUSH_REASON

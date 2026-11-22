@@ -318,6 +318,11 @@ inlines
 setext
 strikethrough
 timebox
+refspec
+refspecs
+unfetched
+forc
+ofoo
 hardbreak
 mdit
 softbreak
