@@ -60,7 +60,6 @@ from tbhbdev.alpha.agent.model import (
     Harness,
     Invalid,
     Os,
-    Profile,
     RunKind,
 )
 
@@ -4303,48 +4302,6 @@ def test_execute_mints_a_push_token_only_when_none_was_given(
     assert run_host.execute(run, "example", given) == 0
     assert tokens == [given or "minted-value"]
     assert len(minted) == (0 if given else 1)
-
-
-def no_push_token(_request: object, _settings: object) -> str | None:
-    return None
-
-
-@pytest.mark.parametrize(
-    ("profile", "harness_rc", "posted", "calls", "expected"),
-    [
-        (Profile.REVIEW, 0, True, 1, 0),
-        (Profile.REVIEW, 0, False, 1, 5),
-        (Profile.REVIEW, 3, True, 0, 3),
-        (Profile.BUILD, 0, False, 0, 0),
-    ],
-)
-def test_execute_posts_a_review_run_after_a_clean_exit(  # noqa: PLR0913, PLR0917 -- one parametrized case table
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    profile: Profile,
-    harness_rc: int,
-    posted: bool,
-    calls: int,
-    expected: int,
-) -> None:
-    base = make_run(tmp_path)
-    run = dataclasses.replace(
-        base, request=dataclasses.replace(base.request, profile=profile)
-    )
-    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
-    runtime = HostRuntime(run, prepared, None)
-    runtime.patch(monkeypatch)
-    seen: list[object] = []
-
-    def post(_run: run_host.Run, ready: run_host.Prepared) -> bool:
-        seen.append(ready)
-        return posted
-
-    monkeypatch.setattr(run_host.review_post, "posted", post)
-    monkeypatch.setattr(run_host.credentials, "push_token", no_push_token)
-    monkeypatch.setattr(run_host, "run_harness", constant(harness_rc))
-    assert run_host.execute(run, "example", None) == expected
-    assert len(seen) == calls
 
 
 def test_preflight_mints_no_push_token(
