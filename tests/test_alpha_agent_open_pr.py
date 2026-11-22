@@ -46,7 +46,7 @@ Ran it.
 """
 
 
-def commit_draft(directory: Path, text: str | None) -> str:
+def commit_draft(directory: Path, text: str | None) -> tuple[Path, str]:
     def git(*args: str) -> str:
         return subprocess.check_output(
             ["git", "-c", "core.hooksPath=/dev/null", *args],
@@ -69,7 +69,7 @@ def commit_draft(directory: Path, text: str | None) -> str:
         "-qm",
         "x",
     )
-    return git("rev-parse", "HEAD")
+    return directory / ".git", git("rev-parse", "HEAD")
 
 
 def reply(status: int, data: object) -> httpx.Response:
@@ -79,7 +79,7 @@ def reply(status: int, data: object) -> httpx.Response:
 def test_opens_the_pr_from_the_pushed_draft(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    commit = commit_draft(tmp_path, DRAFT)
+    git_dir, commit = commit_draft(tmp_path, DRAFT)
     seen: dict[str, object] = {}
 
     def post(url: str, **options: object) -> httpx.Response:
@@ -89,7 +89,7 @@ def test_opens_the_pr_from_the_pushed_draft(
 
     monkeypatch.setattr(httpx, "post", post)
     number = open_pr.open_pull_request(
-        tmp_path, commit, "github.com/tbhb-dev/tools", "agent/r1", "tok"
+        git_dir, commit, "github.com/tbhb-dev/tools", "agent/r1", "tok"
     )
     assert number == 12
     assert seen["url"] == "https://api.github.com/repos/tbhb-dev/tools/pulls"
@@ -106,17 +106,17 @@ def test_opens_the_pr_from_the_pushed_draft(
 
 
 def test_a_missing_draft_is_refused(tmp_path: Path) -> None:
-    commit = commit_draft(tmp_path, None)
+    git_dir, commit = commit_draft(tmp_path, None)
     with pytest.raises(
         open_pr.OpenRefusedError, match=r"no \.github/PULL_REQUEST_DRAFT"
     ):
-        open_pr.open_pull_request(tmp_path, commit, "github.com/o/r", "agent/r", "t")
+        open_pr.open_pull_request(git_dir, commit, "github.com/o/r", "agent/r", "t")
 
 
 def test_a_draft_that_fails_its_check_is_refused(tmp_path: Path) -> None:
-    commit = commit_draft(tmp_path, "# no front matter\n")
+    git_dir, commit = commit_draft(tmp_path, "# no front matter\n")
     with pytest.raises(open_pr.OpenRefusedError, match="fails its check at line"):
-        open_pr.open_pull_request(tmp_path, commit, "github.com/o/r", "agent/r", "t")
+        open_pr.open_pull_request(git_dir, commit, "github.com/o/r", "agent/r", "t")
 
 
 @pytest.mark.parametrize(
@@ -132,25 +132,25 @@ def test_a_refusing_api_is_reported_without_its_text(
     response: httpx.Response,
     message: str,
 ) -> None:
-    commit = commit_draft(tmp_path, DRAFT)
+    git_dir, commit = commit_draft(tmp_path, DRAFT)
 
     def post(*_args: object, **_options: object) -> httpx.Response:
         return response
 
     monkeypatch.setattr(httpx, "post", post)
     with pytest.raises(open_pr.OpenRefusedError, match=message):
-        open_pr.open_pull_request(tmp_path, commit, "github.com/o/r", "agent/r", "t")
+        open_pr.open_pull_request(git_dir, commit, "github.com/o/r", "agent/r", "t")
 
 
 @pytest.mark.parametrize("failure", [httpx.ConnectError("down"), ValueError("x")])
 def test_a_transport_failure_is_reported_by_type(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
 ) -> None:
-    commit = commit_draft(tmp_path, DRAFT)
+    git_dir, commit = commit_draft(tmp_path, DRAFT)
 
     def post(*_args: object, **_options: object) -> httpx.Response:
         raise failure
 
     monkeypatch.setattr(httpx, "post", post)
     with pytest.raises(open_pr.OpenRefusedError, match=type(failure).__name__):
-        open_pr.open_pull_request(tmp_path, commit, "github.com/o/r", "agent/r", "t")
+        open_pr.open_pull_request(git_dir, commit, "github.com/o/r", "agent/r", "t")
