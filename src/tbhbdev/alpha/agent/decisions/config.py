@@ -223,9 +223,14 @@ def _public_repos(table: _Table) -> tuple[str, ...]:
     values = table.strings("public_repos")
     for value in values:
         try:
-            repo.parts(value)
+            parts = repo.parts(value)
         except Invalid:
             table.fail("public_repos", "must contain valid repository arguments")
+        else:
+            if parts[1].lower() != repo.DEFAULT_ORG:
+                table.fail(
+                    "public_repos", f"must contain only {repo.DEFAULT_ORG} repositories"
+                )
     return values
 
 

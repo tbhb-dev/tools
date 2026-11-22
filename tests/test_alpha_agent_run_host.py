@@ -359,7 +359,7 @@ def test_prepare_uses_one_worktree_and_private_destinations(
         claude_profile="primary" if harness is Harness.CLAUDE else None,
         reason="example" if harness is Harness.CLAUDE else None,
     )
-    _, clone = repository(run.home / "Code" / "github.com" / "example-org")
+    _, clone = repository(run.home / "Code" / "github.com" / "tbhb-dev")
     clone.rename(clone.parent / "example-repo")
     clone = clone.parent / "example-repo"
     local_mirror_fetches(monkeypatch, clone.parent / "origin")
@@ -517,10 +517,8 @@ def test_build_preparation_has_the_run_socket(
         _clone: Path,
         _name: str,
         _value: run_host.RunRequest,
-        public_repos: tuple[str, ...],
         token_source: Callable[[], str | None],
     ) -> Path:
-        assert public_repos == run.settings.public_repos
         assert token_source() == "example-credential"
         return runfiles.private_dir(run.home / "worktree")
 
@@ -1086,7 +1084,7 @@ def test_startup_deadline_stops_the_recorded_setup_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
 ) -> None:
     run = make_run(tmp_path)
-    _, clone = repository(run.home / "Code" / "github.com" / "example-org")
+    _, clone = repository(run.home / "Code" / "github.com" / "tbhb-dev")
     clone.rename(clone.parent / "example-repo")
     local_mirror_fetches(monkeypatch, clone.parent / "origin")
     run = dataclasses.replace(run, deadline=time.monotonic() + 5)
@@ -2832,7 +2830,7 @@ def test_full_access_is_available_behind_the_existing_gate(tmp_path: Path) -> No
     run = make_run(
         tmp_path,
         unsandboxed=True,
-        authorized_by="example-org/example-repo#1",
+        authorized_by="tbhb-dev/example-repo#1",
         reason="isolated host",
     )
     run_host.preflight(run)
@@ -3287,7 +3285,7 @@ def test_mirror_protection_uses_the_run_home_without_xdg_state(
         / "tbhbdev"
         / "agent-mirrors"
         / "github.com"
-        / "example-org"
+        / "tbhb-dev"
         / "example-repo.git"
     )
     assert str(mirror) in run_host.protected_home(run)
@@ -3439,13 +3437,13 @@ def test_preflight_announces_access_and_build_trust(
     run = make_run(
         tmp_path,
         unsandboxed=unsandboxed,
-        authorized_by="example-org/example-repo#1" if unsandboxed else None,
+        authorized_by="tbhb-dev/example-repo#1" if unsandboxed else None,
         tainted_host=tainted,
     )
     run_host.preflight(run)
     lines = ["untrusted-host"] if tainted else []
     if unsandboxed:
-        lines.append("unsandboxed full access authorized_by=example-org/example-repo#1")
+        lines.append("unsandboxed full access authorized_by=tbhb-dev/example-repo#1")
     expected = "".join(f"{line}\n" for line in lines)
     assert capsys.readouterr().err == expected
     assert (run.files.path("log").read_text() if lines else "") == expected
@@ -3509,9 +3507,7 @@ def test_preflight_appends_durable_host_marker(
 def test_marker_failure_refuses_launch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run = make_run(
-        tmp_path, unsandboxed=True, authorized_by="example-org/example-repo#1"
-    )
+    run = make_run(tmp_path, unsandboxed=True, authorized_by="tbhb-dev/example-repo#1")
 
     original = os.fsync
 

@@ -13,13 +13,12 @@ from agent_host_example import constant, preparation_failure, run_request
 from tbhbdev.alpha.agent import process_group, runfiles, worktree
 from tbhbdev.alpha.agent.model import Invalid
 
-PUBLIC = ("github.com/example-org/example-repo",)
-URL = "https://github.com/example-org/example-repo.git"
+PUBLIC = ("github.com/tbhb-dev/example-repo",)
+URL = "https://github.com/tbhb-dev/example-repo.git"
 
 
-@pytest.mark.parametrize("allowed", [(), ("other/repo",)])
-def test_unlisted_repository_has_no_side_effects(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allowed: tuple[str, ...]
+def test_outside_repository_has_no_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -29,12 +28,40 @@ def test_unlisted_repository_has_no_side_effects(
     monkeypatch.setattr(worktree, "git", unexpected)
     before = list(tmp_path.rglob("*"))
     with pytest.raises(Invalid) as caught:
-        worktree.create(tmp_path, "example", run_request(), allowed)
+        worktree.create(
+            tmp_path, "example", run_request(repo="example-org/example-repo")
+        )
     assert str(caught.value) == (
-        "repository example-org/example-repo: agent mirrors fetch only "
-        "repositories listed in public_repos"
+        "repository example-org/example-repo: agent mirrors fetch only tbhb-dev "
+        "repositories"
     )
     assert list(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize(
+    ("name", "reaches_fetch"),
+    [
+        ("tbhb-dev/new-repo", True),
+        ("github.com/TBHB-Dev/new-repo", True),
+        ("git.example.com/tbhb-dev/new-repo", False),
+        ("tbhb-dev-other/new-repo", False),
+    ],
+)
+def test_org_repositories_need_no_list_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    *,
+    reaches_fetch: bool,
+) -> None:
+    def reached(_clone: Path) -> None:
+        message = "reached the clone directory"
+        raise Invalid(message)
+
+    monkeypatch.setattr(worktree, "ensure_clone_directory", reached)
+    match = "reached the clone" if reaches_fetch else "only tbhb-dev repositories"
+    with pytest.raises(Invalid, match=match):
+        worktree.create(tmp_path, "example", run_request(repo=name))
 
 
 @pytest.mark.parametrize("existing", [False, True])
@@ -48,7 +75,7 @@ def test_public_mirror_uses_https_before_fetch(
     if existing:
         mirror.mkdir(parents=True)
         (mirror / "config").write_text(
-            '[remote "origin"]\nurl = git@github.com:example-org/example-repo.git\n'
+            '[remote "origin"]\nurl = git@github.com:tbhb-dev/example-repo.git\n'
         )
     calls: list[tuple[Path, tuple[str, ...]]] = []
 
@@ -65,7 +92,7 @@ def test_public_mirror_uses_https_before_fetch(
     monkeypatch.setattr(worktree, "git", git)
     monkeypatch.setattr(worktree, "install_hooks", constant(None))
     monkeypatch.setattr(worktree, "prepare_git", constant(None))
-    workspace = worktree.create(tmp_path, "example", request, PUBLIC)
+    workspace = worktree.create(tmp_path, "example", request)
     assert workspace == tmp_path / ".worktrees" / "agent-example"
     assert (
         (mirror, ("init", "--bare", "--template=")) in calls
@@ -122,7 +149,7 @@ def test_worktree_failure_names_its_step_and_safe_cause(
         worktree.runfiles if target == "private_dir" else worktree, target, fail
     )
     with pytest.raises(Invalid) as caught:
-        worktree.create(tmp_path, "example", run_request(), PUBLIC)
+        worktree.create(tmp_path, "example", run_request())
     assert str(caught.value) == f"run preparation failed at {step}: {cause}"
     assert "sensitive" not in str(caught.value)
 
@@ -260,7 +287,7 @@ def test_missing_prek_reaches_supervisor(
     files = runfiles.RunFiles(tmp_path / "runs", "example")
     with pytest.raises(Invalid) as caught:
         process_group.prepare(
-            lambda: worktree.create(tmp_path, "example", run_request(), PUBLIC),
+            lambda: worktree.create(tmp_path, "example", run_request()),
             files,
             time.monotonic() + 5,
             0,
@@ -295,10 +322,10 @@ def test_git_stderr_reaches_preparation(
     )
 
 
-def test_public_repository_requires_github(tmp_path: Path) -> None:
-    value = run_request(repo="git.example.com/example-org/example-repo")
-    with pytest.raises(Invalid, match=r"^agent mirrors require a GitHub repository$"):
-        worktree.create(tmp_path, "example", value, (value.repo,))
+def test_non_github_host_is_refused(tmp_path: Path) -> None:
+    value = run_request(repo="git.example.com/tbhb-dev/example-repo")
+    with pytest.raises(Invalid, match="only tbhb-dev repositories"):
+        worktree.create(tmp_path, "example", value)
 
 
 def test_fetch_never_receives_credentials(

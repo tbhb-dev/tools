@@ -221,9 +221,9 @@ def test_installation_token_is_read_only(
 
     monkeypatch.setattr(gh_app, "mint_token", mint)
     repository = (
-        "example.com/example-org/example-repo"
+        "example.com/tbhb-dev/example-repo"
         if failure == "host"
-        else "example-org/example-repo"
+        else "tbhb-dev/example-repo"
     )
     references = host_settings().credentials[0]
     if failure:
@@ -245,7 +245,7 @@ def test_installation_token_is_read_only(
             {
                 "app_id": "example-client",
                 "pem": VALUES["example/app/pem"],
-                "repository": "example-org/example-repo",
+                "repository": "tbhb-dev/example-repo",
                 "permissions": credentials.REVIEW_PERMISSIONS,
             }
         ]
@@ -267,7 +267,7 @@ def test_review_token_request_is_read_only_for_only_run_repository(
     monkeypatch.setitem(VALUES, "example/app/pem", pem)
     requests: list[httpx.Request] = []
     replies = {
-        ("GET", "/repos/example-org/example-repo/installation"): httpx.Response(
+        ("GET", "/repos/tbhb-dev/example-repo/installation"): httpx.Response(
             200, json={"id": 7}
         ),
         ("POST", "/app/installations/7/access_tokens"): httpx.Response(
@@ -606,7 +606,7 @@ def test_missing_credentials_report_only_label_and_reference(
     def perform() -> object:
         if profile == "app":
             return credentials.installation_token(
-                host_settings().credentials[0], "example-org/example-repo"
+                host_settings().credentials[0], "tbhb-dev/example-repo"
             )
         return credentials.deliver(
             run_request(
@@ -740,7 +740,7 @@ def test_app_token_scope_ignores_planted_origin(
     monkeypatch.setattr(gh_app, "mint_token", mint)
     value = run_request(profile="review", commit="0" * 40)
     credentials.deliver(value, host_settings(), tmp_path)
-    assert scopes == ["example-org/example-repo"]
+    assert scopes == ["tbhb-dev/example-repo"]
     assert fake_reader[:2] == ["example/app/client", "example/app/pem"]
 
 
@@ -799,7 +799,7 @@ def test_reviews_app_without_configured_references_is_refused(missing: str) -> N
         reviews_app_pem=None if missing == "pem" else references.reviews_app_pem,
     )
     with pytest.raises(Invalid) as caught:
-        credentials.installation_token(references, "example-org/example-repo")
+        credentials.installation_token(references, "tbhb-dev/example-repo")
     assert str(caught.value) == "reviews App credentials are not configured"
 
 
@@ -841,7 +841,7 @@ def test_without_build_github_credential(
 
     def installation(actual: object, repository: str) -> str:
         assert actual == config.credentials[0]
-        assert repository == "example-org/example-repo"
+        assert repository == "tbhb-dev/example-repo"
         return "example-installation"
 
     monkeypatch.setattr(credentials, "installation_token", installation)
@@ -1005,7 +1005,7 @@ def test_build_without_gh_mints_from_the_pull_requests_app(
         {
             "app_id": VALUES["example/app/client"],
             "pem": VALUES["example/app/pem"],
-            "repository": "example-org/example-repo",
+            "repository": "tbhb-dev/example-repo",
             "permissions": {"contents": "read"},
         }
     ]
@@ -1029,7 +1029,7 @@ def test_build_token_request_names_one_repository_and_contents_read_only(
     monkeypatch.setitem(VALUES, "example/app/pem", pem)
     requests: list[httpx.Request] = []
     replies = {
-        ("GET", "/repos/example-org/example-repo/installation"): httpx.Response(
+        ("GET", "/repos/tbhb-dev/example-repo/installation"): httpx.Response(
             200, json={"id": 7}
         ),
         ("POST", "/app/installations/7/access_tokens"): httpx.Response(
@@ -1150,7 +1150,7 @@ def test_pull_requests_app_without_references_is_refused(missing: str) -> None:
         else references.pull_requests_app_pem,
     )
     with pytest.raises(Invalid) as caught:
-        credentials.pull_requests_token(references, "example-org/example-repo")
+        credentials.pull_requests_token(references, "tbhb-dev/example-repo")
     assert str(caught.value) == "pull-requests App credentials are not configured"
 
 
@@ -1186,7 +1186,7 @@ def test_pull_requests_token_names_the_unreadable_reference(
     monkeypatch.setitem(VALUES, "example/app/client", "example-client")
     with pytest.raises(Invalid) as caught:
         credentials.pull_requests_token(
-            pull_requests_settings().credentials[0], "example-org/example-repo"
+            pull_requests_settings().credentials[0], "tbhb-dev/example-repo"
         )
     assert (
         str(caught.value)
@@ -1268,7 +1268,7 @@ def test_push_token_asks_for_write_on_the_one_repository(
     assert [keywords["permissions"] for keywords in seen] == [
         {"contents": "write", "pull_requests": "write"}
     ]
-    assert [keywords["repository"] for keywords in seen] == ["example-org/example-repo"]
+    assert [keywords["repository"] for keywords in seen] == ["tbhb-dev/example-repo"]
 
 
 def test_push_token_is_none_for_a_review_without_minting(
