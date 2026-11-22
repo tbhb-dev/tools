@@ -4314,7 +4314,7 @@ def test_preflight_mints_no_push_token(
         raise AssertionError
 
     monkeypatch.setattr(run_host.credentials, "push_token", refuse)
-    monkeypatch.setattr(run_host, "run_harness", lambda *_a, **_k: 0)
+    monkeypatch.setattr(run_host, "run_harness", constant(0))
     assert run_host.execute(run, "example", preflight_only=True) == 0
 
 
