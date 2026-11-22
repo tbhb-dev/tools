@@ -1499,10 +1499,24 @@ def test_brace_items_caps_a_long_integer_range() -> None:
             'echo "deploy (h): x / y; mv a back" >> ~/.local/state/other/ledger.md'
         ),
         'echo "a / b mv" >> ~/notes.md',
+        "sudo cp -p k k.bak-1 && echo //",
+        "sudo cp -p k k.bak-1; awk '{print ($1 ~ /^from/ ? 1 : 2)}' f",
     ],
 )
-def test_a_bare_slash_word_is_not_a_state_directory(command: str) -> None:
+def test_a_bare_slash_or_tilde_word_is_not_a_state_directory(command: str) -> None:
     assert guard.inspect(command)[0] is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cp -p k ~/.local/state/tbhb/gh-poll-allowance.json",
+        "mv k.bak-1 ~/.local/state/tbhb/gh-poll-allowance.count",
+        "rm -rf ~/.local/state/tbhb",
+    ],
+)
+def test_touching_the_allowance_files_is_still_denied(command: str) -> None:
+    assert guard.inspect(command)[0] is not None
 
 
 @pytest.mark.parametrize(
