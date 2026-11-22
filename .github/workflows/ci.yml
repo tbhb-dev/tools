@@ -128,10 +128,10 @@ jobs:
     permissions:
       contents: read
     env:
-      # uv 0.13.7's Linux x86-64 archive and its sha256, from mise.lock; move
+      # uv 0.13.8's Linux x86-64 archive and its sha256, from mise.lock; move
       # them together with the uv pin in mise.toml.
-      UV_URL: https://github.com/astral-sh/uv/releases/download/0.13.7/uv-x86_64-unknown-linux-gnu.tar.gz
-      UV_SHA256: c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83
+      UV_URL: https://github.com/astral-sh/uv/releases/download/0.13.8/uv-x86_64-unknown-linux-gnu.tar.gz
+      UV_SHA256: 5acfd9177cfecf0bf87578f059728215ccc884388988f55f7a65041b57387d91
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
