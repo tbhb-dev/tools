@@ -44,6 +44,7 @@ _SIGNING_REFERENCE = re.compile(
 )
 _REFERENCE_PARTS = 3
 _PROGRAMS = ("bash", "zsh")
+_MAX_PERCENT = 100
 
 
 def parse_duration(value: object) -> int | None:
@@ -434,6 +435,15 @@ def _proven_harnesses(table: _Table) -> tuple[Harness, ...]:
     return tuple(Harness(str(name)) for name in entries)
 
 
+def _percent(table: _Table, key: str, default: int) -> int:
+    if key not in table.values:
+        return default
+    value = table.integer(key)
+    if value > _MAX_PERCENT:
+        table.fail(key, "must be a positive integer of at most 100")
+    return value
+
+
 def _host(table: _Table) -> Host:
     table.only(
         "name",
@@ -444,6 +454,10 @@ def _host(table: _Table) -> Host:
         "accounts",
         "proven_harnesses",
         "tbhbdev",
+        "load_limit",
+        "min_memory_available_percent",
+        "max_swap_used_percent",
+        "limits_warn_only",
     )
     name = _check_name(table, "name", table.text("name"), HOST_NAME)
     os = table.choice("os", Os)
@@ -471,6 +485,16 @@ def _host(table: _Table) -> Host:
         accounts,
         _proven_harnesses(table),
         program,
+        load_limit=table.integer("load_limit")
+        if "load_limit" in table.values
+        else None,
+        min_memory_available_percent=_percent(
+            table, "min_memory_available_percent", 20
+        ),
+        max_swap_used_percent=_percent(table, "max_swap_used_percent", 80),
+        limits_warn_only=table.flag("limits_warn_only")
+        if "limits_warn_only" in table.values
+        else False,
     )
 
 
