@@ -1519,6 +1519,18 @@ def test_a_bare_slash_or_tilde_in_another_command_is_not_a_state_directory(
         "cp -a x ~",
         "ssh h 'echo a && cp -a x ~'",
         "ssh h 'cp -a x ~; echo hi'",
+        "rm -rf ';' ~/.local/state/tbhb",
+        'rm -rf ";" ~/.local/state/tbhb',
+        r"rm -rf \; ~/.local/state/tbhb",
+        "rm -rf '&&' ~/.local/state/tbhb",
+        "rm -rf '||' ~/.local/state/tbhb",
+        "rm -rf '|' ~/.local/state/tbhb",
+        "rm -rf '&' ~/.local/state/tbhb",
+        "rm -rf 'extra;' ~/.local/state/tbhb",
+        "cp -a /tmp/backup/. ';' ~/",
+        "cp -a /tmp/backup/. '&&' ~/",
+        "ssh h \"rm -rf ';' ~/.local/state/tbhb\"",
+        "sh -c \"ssh h 'cp -a x ~; echo hi'\"",
     ],
 )
 def test_touching_the_allowance_files_is_still_denied(command: str) -> None:

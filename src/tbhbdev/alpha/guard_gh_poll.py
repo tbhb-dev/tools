@@ -150,6 +150,7 @@ STATE_DIRS = tuple(str(path).lower() for path in (STATE_DIR, *STATE_DIR.parents)
 BRACE_LIMIT = 256
 SPELLING_LIMIT = 4096
 SEPARATORS = {";", "&&", "||", "|", "&"}
+SEPARATORS_CHARS = ";&|"
 STATE_MOVERS = {"rm", "mv", "cp", "rsync", "ditto", "ln"}
 PROTECT_REASON = (
     "The CI listing allowance's grant and count files are the operator's to "
@@ -651,16 +652,44 @@ def attached(word: str) -> str:
     return word.removeprefix("-t")
 
 
-def segments(words: list[str]) -> list[list[str]]:
-    """The words split into the commands a quoted ``a; b && c`` text holds."""
+def commands(text: str) -> list[list[str]]:
+    """The commands of a shell text, each as unquoted words.
+
+    A separator splits only when it stands unquoted, so ``';'`` stays an
+    argument. Quoted words come out as the words they hold.
+    """
+    lexer = shlex.shlex(text, posix=False, punctuation_chars="".join(SEPARATORS_CHARS))
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:  # an unbalanced quote
+        tokens = text.split()
+    out: list[list[str]] = [[]]
+    for token in tokens:
+        if token in SEPARATORS:
+            out.append([])
+        else:
+            out[-1].extend(split_string(token))
+    return out
+
+
+def segments(words: list[str], depth: int = 4) -> list[list[str]]:
+    """The words split into the commands that quoted ``a; b && c`` texts hold.
+
+    A word without quotes or spaces is an argument and never a separator, even
+    when it reads ``;``. Only the words of a quoted text can separate commands.
+    """
     out: list[list[str]] = [[]]
     for word in words:
-        if word in SEPARATORS:
-            out.append([])
+        if depth == 0 or split_string(word) == [word]:
+            out[-1].append(word)
             continue
-        out[-1].append(word.removesuffix(";"))
-        if word.endswith(";"):
-            out.append([])
+        for number, command in enumerate(commands(word)):
+            if number:
+                out.append([])
+            inner = segments(command, depth - 1)
+            out[-1].extend(inner[0])
+            out.extend(inner[1:])
     return out
 
 
@@ -679,7 +708,7 @@ def protected_words(command: list[str]) -> bool:
     return any(
         any(word.rpartition("/")[2].lower() in STATE_MOVERS for word in part)
         and any(word != "/" and names_state_dir(attached(word)) for word in part)
-        for part in segments(words)
+        for part in segments(command)
     )
 
 
