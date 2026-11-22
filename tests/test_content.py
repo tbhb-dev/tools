@@ -56,7 +56,7 @@ def audit(tmp_path: Path) -> list[cw.Json]:
         json.loads(line) for line in (tmp_path / "audit.jsonl").read_text().splitlines()
     ]
     for entry in entries:
-        assert set(entry) == {"time", "verb", "repo", "number", "scan"}
+        assert set(entry) == {"time", "verb", "repo", "number", "scan", "caller"}
         assert entry["repo"] == "example/demo"
         assert entry["number"] == 7
     return entries
@@ -201,7 +201,7 @@ def test_refused_sends_nothing(
 
 def test_scan_refused() -> None:
     with pytest.raises(cw.Refused, match=r"^rule test-rule on line 1$"):
-        cw._scan("refuse", "test")  # noqa: SLF001 -- Test the scan boundary.
+        cw.scan_text("refuse", "test")
 
 
 def test_default_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -268,4 +268,139 @@ def test_failed_writes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(cw.subprocess, "run", graph_error)
     with pytest.raises(RuntimeError, match="GitHub GraphQL write failed"):
         cw.add_to_project(REF, "PROJECT")
+    assert not (tmp_path / "audit.jsonl").exists()
+
+
+def test_scan_text(scans: list[tuple[str, str]], tmp_path: Path) -> None:
+    cw.scan_text("record", "plugin record")
+    assert scans == [("record", "plugin record")]
+    assert not (tmp_path / "audit.jsonl").exists()
+
+
+@pytest.mark.parametrize("caller", ["tbhbdev", "pm"])
+def test_audit_caller(caller: str, tmp_path: Path) -> None:
+    client = RecordingClient()
+    cw.create_issue(
+        "example/demo",
+        "Title",
+        "Body",
+        issue_type="Task",
+        project="PROJECT",
+        fields={"FIELD": {"text": "value"}},
+        client=client,
+        caller=caller,
+    )
+    cw.add_comment(REF, "Comment", client=client, caller=caller)
+    cw.close_issue(REF, "completed", comment="Done", client=client, caller=caller)
+    cw.link_sub_issue(REF, REF, client=client, caller=caller)
+    assert len(audit(tmp_path)) == 7
+    assert {entry["caller"] for entry in audit(tmp_path)} == {caller}
+
+
+@pytest.mark.parametrize("comment", [None, "Done"])
+def test_dry_run_text(comment: str | None, tmp_path: Path) -> None:
+    client = RecordingClient()
+    assert cw.create_issue(
+        "example/demo",
+        "Title",
+        "Body",
+        issue_type="Task",
+        client=client,
+        dry_run=True,
+    ) == {"title": "Title", "body": "Body", "type": "Task", "labels": []}
+    assert cw.add_comment(REF, "Comment", client=client, dry_run=True) == {
+        "body": "Comment"
+    }
+    payload: cw.Json = {"state": "closed", "state_reason": "completed"}
+    expected = {"comment": {"body": comment}, "issue": payload} if comment else payload
+    assert (
+        cw.close_issue(
+            REF,
+            "completed",
+            comment=comment,
+            client=client,
+            dry_run=True,
+        )
+        == expected
+    )
+    assert client.calls == []
+    assert not (tmp_path / "audit.jsonl").exists()
+
+
+@pytest.mark.parametrize("fields", [None, {"FIELD": {"text": "value"}}])
+def test_dry_run_ids(fields: dict[str, cw.Json] | None, tmp_path: Path) -> None:
+    client = RecordingClient()
+    project: cw.Json = {
+        "add_item": {
+            "query": cw.ADD_ITEM,
+            "variables": {"project": "PROJECT", "content": "ISSUE"},
+        },
+        "set_fields": [
+            {
+                "query": cw.SET_FIELD,
+                "variables": {
+                    "project": "PROJECT",
+                    "item": "<created-project-item-id>",
+                    "field": "FIELD",
+                    "value": {"text": "value"},
+                },
+            }
+        ]
+        if fields
+        else [],
+    }
+    assert (
+        cw.add_to_project(REF, "PROJECT", fields, client=client, dry_run=True)
+        == project
+    )
+    created = cw.create_issue(
+        "example/demo",
+        "Title",
+        "Body",
+        issue_type="Task",
+        project="PROJECT",
+        fields=fields,
+        client=client,
+        dry_run=True,
+    )
+    project["add_item"] = {
+        "query": cw.ADD_ITEM,
+        "variables": {
+            "project": "PROJECT",
+            "content": "<created-issue-node-id>",
+        },
+    }
+    assert created == {
+        "issue": {"title": "Title", "body": "Body", "type": "Task", "labels": []},
+        "project": project,
+    }
+    assert cw.link_sub_issue(REF, REF, client=client, dry_run=True) == {
+        "sub_issue_id": 123
+    }
+    assert client.calls == [("GET", REF.path, None)] * 2
+    assert not (tmp_path / "audit.jsonl").exists()
+
+
+DRY_WRITES: list[Callable[[cw.Client, bool], object]] = [
+    lambda c, dry: cw.create_issue(
+        "example/demo", "Title", "refuse", issue_type="Task", client=c, dry_run=dry
+    ),
+    lambda c, dry: cw.add_comment(REF, "refuse", client=c, dry_run=dry),
+    lambda c, dry: cw.close_issue(
+        REF, "completed", comment="refuse", client=c, dry_run=dry
+    ),
+]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("write", DRY_WRITES)
+def test_dry_run_refused(
+    write: Callable[[cw.Client, bool], object],
+    dry_run: bool,
+    tmp_path: Path,
+) -> None:
+    client = RecordingClient()
+    with pytest.raises(cw.Refused):
+        write(client, dry_run)
+    assert client.calls == []
     assert not (tmp_path / "audit.jsonl").exists()

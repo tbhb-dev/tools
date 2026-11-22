@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6
-    at: "2026-11-22T19:03:09Z"
+    at: "2026-11-22T19:21:50Z"
 status: stable
 tags: [plugins]
 title: Content writes
@@ -24,7 +24,19 @@ type: Reference
 
 `IssueRef(owner, repo, number)` is a frozen dataclass. Every write accepts an injected `Client` with `rest(method, path, payload=None)` and `graphql(query, variables)` methods returning dictionaries. The default `GhClient` runs `gh api` with JSON input and inherits gh's environment credentials. API errors propagate to the caller. Earlier successful writes remain applied if a later step fails.
 
+## Caller and dry run
+
+Every write accepts the keyword arguments `caller="tbhbdev"` and `dry_run=False`. The caller identifies the plugin in each audit entry, including nested comments and project writes. Existing calls keep their return values: `create_issue` returns an `IssueRef`, and other writes return `None`.
+
+With `dry_run=True`, text is scanned, no REST or GraphQL write is sent, and no audit line is written. The return value is a dictionary containing the payload that would be sent. `link_sub_issue` and `add_to_project` still perform a read to obtain the existing issue's ID. Multi-write previews use these keys:
+
+- Closing with a comment returns `{"comment": {"body": "..."}, "issue": {"state": "closed", "state_reason": "..."}}`.
+- Adding to a project returns `add_item` with a GraphQL `query` and `variables`, plus `set_fields`, a list of GraphQL payloads. Field updates use `<created-project-item-id>` for the ID returned by the addition.
+- Creating with a project returns `issue` with the REST payload and `project` with the project preview above. The addition uses `<created-issue-node-id>` for the ID returned by issue creation. Without a project, creation returns the REST payload directly.
+
 ## Secret scan
+
+`scan_text(text, what)` runs the same scan without rendering, sending, or auditing anything. Plugins can use it before committing a record.
 
 The library scans exact title, body, and comment text before sending it, through `tbhbdev.alpha.secret_scan.scan`. A refusal raises `Refused` with the scanner's diagnostic and sends no write. The library never rewrites refused text. Tests inject a recording client and replace the scanner; they need neither network access nor gitleaks.
 
@@ -32,7 +44,7 @@ The scan uses the current Git worktree root and finds the real gitleaks binary t
 
 ## Audit log
 
-Every successful REST or GraphQL write appends a JSON line to `TBHBDEV_AUDIT_LOG`, defaulting to `~/.local/state/tbhb/content-audit.jsonl`. Entries contain `time` in UTC, `verb`, `repo` as `owner/repo`, `number`, and `scan`: `pass` for scanned text writes or `not-needed` for writes without text. Titles and bodies never appear in the log. A refused scan produces no audit entry. A project addition and each field update get separate entries.
+Every successful REST or GraphQL write appends a JSON line to `TBHBDEV_AUDIT_LOG`, defaulting to `~/.local/state/tbhb/content-audit.jsonl`. Entries contain `time` in UTC, `verb`, `caller`, `repo` as `owner/repo`, `number`, and `scan`: `pass` for scanned text writes or `not-needed` for writes without text. Titles and bodies never appear in the log. A refused scan produces no audit entry. A project addition and each field update get separate entries.
 
 ## Deferred work
 

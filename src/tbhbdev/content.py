@@ -74,7 +74,9 @@ def _scan(text: str, what: str) -> None:
         raise Refused(str(exc)) from None
 
 
-def _audit(ref: IssueRef, verb: str, scan: str = "not-needed") -> None:
+def _audit(
+    ref: IssueRef, verb: str, scan: str = "not-needed", *, caller: str = "tbhbdev"
+) -> None:
     path = Path(
         os.environ.get(
             "TBHBDEV_AUDIT_LOG",
@@ -85,12 +87,18 @@ def _audit(ref: IssueRef, verb: str, scan: str = "not-needed") -> None:
     entry = {
         "time": datetime.now(UTC).isoformat(),
         "verb": verb,
+        "caller": caller,
         "repo": f"{ref.owner}/{ref.repo}",
         "number": ref.number,
         "scan": scan,
     }
     with path.open("a") as stream:
         stream.write(json.dumps(entry) + "\n")
+
+
+def scan_text(text: str, what: str) -> None:
+    """Scan a record before the caller commits it."""
+    _scan(text, what)
 
 
 def render(template_path: Path, data: Mapping[str, str]) -> str:
@@ -107,52 +115,77 @@ def create_issue(  # noqa: PLR0913 -- Public plugin interface.
     fields: Mapping[str, Json] | None = None,
     project: str | None = None,
     client: Client | None = None,
-) -> IssueRef:
+    caller: str = "tbhbdev",
+    dry_run: bool = False,
+) -> IssueRef | Json:
     _scan(title, "issue title")
     _scan(body, "issue body")
     api = client if client is not None else GhClient()
     owner, name = repo.split("/")
-    result = api.rest(
-        "POST",
-        f"/repos/{repo}/issues",
-        {
-            "title": title,
-            "body": body,
-            "type": issue_type,
-            "labels": list(labels),
-        },
-    )
+    payload: Json = {
+        "title": title,
+        "body": body,
+        "type": issue_type,
+        "labels": list(labels),
+    }
+    if dry_run:
+        if project is not None:
+            return {
+                "issue": payload,
+                "project": _project_preview(project, "<created-issue-node-id>", fields),
+            }
+        return payload
+    result = api.rest("POST", f"/repos/{repo}/issues", payload)
     ref = IssueRef(owner, name, cast("int", result["number"]))
-    _audit(ref, "create_issue", "pass")
+    _audit(ref, "create_issue", "pass", caller=caller)
     if project is not None:
-        add_to_project(ref, project, fields, client=api)
+        add_to_project(ref, project, fields, client=api, caller=caller)
     return ref
 
 
-def add_comment(ref: IssueRef, text: str, *, client: Client | None = None) -> None:
+def add_comment(
+    ref: IssueRef,
+    text: str,
+    *,
+    client: Client | None = None,
+    caller: str = "tbhbdev",
+    dry_run: bool = False,
+) -> Json | None:
     _scan(text, "issue comment")
     api = client if client is not None else GhClient()
-    api.rest("POST", f"{ref.path}/comments", {"body": text})
-    _audit(ref, "add_comment", "pass")
+    payload: Json = {"body": text}
+    if dry_run:
+        return payload
+    api.rest("POST", f"{ref.path}/comments", payload)
+    _audit(ref, "add_comment", "pass", caller=caller)
+    return None
 
 
-def close_issue(
+def close_issue(  # noqa: PLR0913 -- Public plugin interface.
     ref: IssueRef,
     reason: str,
     *,
     comment: str | None = None,
     client: Client | None = None,
-) -> None:
+    caller: str = "tbhbdev",
+    dry_run: bool = False,
+) -> Json | None:
     state_reason = {
         "completed": "completed",
         "not-planned": "not_planned",
         "duplicate": "duplicate",
     }[reason]
     api = client if client is not None else GhClient()
+    payload: Json = {"state": "closed", "state_reason": state_reason}
     if comment is not None:
-        add_comment(ref, comment, client=api)
-    api.rest("PATCH", ref.path, {"state": "closed", "state_reason": state_reason})
-    _audit(ref, "close_issue")
+        preview = add_comment(ref, comment, client=api, caller=caller, dry_run=dry_run)
+        if dry_run:
+            return {"comment": preview, "issue": payload}
+    if dry_run:
+        return payload
+    api.rest("PATCH", ref.path, payload)
+    _audit(ref, "close_issue", caller=caller)
+    return None
 
 
 def link_sub_issue(
@@ -160,11 +193,17 @@ def link_sub_issue(
     child: IssueRef,
     *,
     client: Client | None = None,
-) -> None:
+    caller: str = "tbhbdev",
+    dry_run: bool = False,
+) -> Json | None:
     api = client if client is not None else GhClient()
     issue = api.rest("GET", child.path)
-    api.rest("POST", f"{parent.path}/sub_issues", {"sub_issue_id": issue["id"]})
-    _audit(parent, "link_sub_issue")
+    payload = {"sub_issue_id": issue["id"]}
+    if dry_run:
+        return payload
+    api.rest("POST", f"{parent.path}/sub_issues", payload)
+    _audit(parent, "link_sub_issue", caller=caller)
+    return None
 
 
 ADD_ITEM = """mutation($project: ID!, $content: ID!) {
@@ -180,18 +219,46 @@ SET_FIELD = """mutation($project: ID!, $item: ID!, $field: ID!,
 }"""
 
 
-def add_to_project(
+def _project_preview(
+    project: str, content: object, fields: Mapping[str, Json] | None
+) -> Json:
+    return {
+        "add_item": {
+            "query": ADD_ITEM,
+            "variables": {"project": project, "content": content},
+        },
+        "set_fields": [
+            {
+                "query": SET_FIELD,
+                "variables": {
+                    "project": project,
+                    "item": "<created-project-item-id>",
+                    "field": field,
+                    "value": value,
+                },
+            }
+            for field, value in (fields or {}).items()
+        ],
+    }
+
+
+def add_to_project(  # noqa: PLR0913 -- Public plugin interface.
     ref: IssueRef,
     project: str,
     fields: Mapping[str, Json] | None = None,
     *,
     client: Client | None = None,
-) -> None:
+    caller: str = "tbhbdev",
+    dry_run: bool = False,
+) -> Json | None:
     """Accept a project node ID and field IDs mapped to GraphQL field values."""
     api = client if client is not None else GhClient()
     issue = api.rest("GET", ref.path)
-    response = api.graphql(ADD_ITEM, {"project": project, "content": issue["node_id"]})
-    _audit(ref, "add_to_project")
+    variables = {"project": project, "content": issue["node_id"]}
+    if dry_run:
+        return _project_preview(project, issue["node_id"], fields)
+    response = api.graphql(ADD_ITEM, variables)
+    _audit(ref, "add_to_project", caller=caller)
     data = cast("Json", response["data"])
     added = cast("Json", data["addProjectV2ItemById"])
     item = cast("Json", added["item"])
@@ -205,4 +272,5 @@ def add_to_project(
                 "value": value,
             },
         )
-        _audit(ref, "set_project_field")
+        _audit(ref, "set_project_field", caller=caller)
+    return None
