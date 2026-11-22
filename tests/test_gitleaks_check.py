@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+from fake_tool import write_private_config
 
 from tbhbdev import gitleaks_check
 from tbhbdev.alpha import secret_scan
@@ -63,3 +64,31 @@ def test_a_missing_private_config_fails_closed(
 
 def test_scan_refused_is_a_runtime_error() -> None:
     assert issubclass(gitleaks_check.ScanRefused, RuntimeError)
+
+
+@pytest.mark.parametrize("make_executable", [False, True])
+def test_a_scanner_that_cannot_run_is_refused_without_the_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_executable: bool
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    write_private_config(home)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".gitleaks.toml").write_text("")
+    scanner = tmp_path / "bin" / "scanner"
+    if make_executable:
+        scanner.parent.mkdir()
+        scanner.write_text("not a program\n")
+        scanner.chmod(0o600)
+    with pytest.raises(gitleaks_check.ScanRefused) as caught:
+        gitleaks_check.scan_text(
+            "the-scanned-text", "the body", root=repo, gitleaks=str(scanner),
+            visibility="PUBLIC",
+        )  # fmt: skip
+    message = str(caught.value)
+    assert message.startswith("cannot scan the body for secrets: the scanner ")
+    assert str(scanner) in message
+    assert "cannot run (" in message
+    assert "the-scanned-text" not in message
+    assert caught.value.__cause__ is None

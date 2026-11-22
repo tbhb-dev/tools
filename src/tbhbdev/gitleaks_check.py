@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class ScanRefused(RuntimeError):  # noqa: N818 - the public name callers import
-    """The text was not cleared: a finding, a gitleaks failure or a missing config."""
+    """The text was not cleared: a finding, a scanner failure or a missing config."""
 
 
 def scan_text(
@@ -34,8 +34,9 @@ def scan_text(
             text is posted to. Only ``PRIVATE`` skips the name rules.
 
     Raises:
-        ScanRefused: The scan found a secret or couldn't run. The message names
-            rule IDs and line numbers, never matched text.
+        ScanRefused: The scan found a secret or couldn't run, a missing or
+            non-executable scanner included. The message names rule IDs and line
+            numbers, or the executable and the OS reason, never matched text.
     """
     try:
         secret_scan.scan(
@@ -43,3 +44,9 @@ def scan_text(
         )
     except SystemExit as exc:
         raise ScanRefused(str(exc.code)) from None
+    except OSError as exc:
+        message = (
+            f"cannot scan {what} for secrets: the scanner {gitleaks} "
+            f"cannot run ({exc.strerror})"
+        )
+        raise ScanRefused(message) from None
