@@ -81,13 +81,17 @@ class Api:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.calls: list[tuple[str, str, dict[str, str] | None]] = []
         self.pull: httpx.Response | Exception = reply(200, {"head": {"sha": HEAD}})
+        self.later = reply(200, {"head": {"sha": HEAD}})
         self.created: httpx.Response | Exception = reply(201, {"id": 99})
         monkeypatch.setattr(httpx, "request", self.request)
 
     def request(self, method: str, url: str, **options: object) -> httpx.Response:
         payload = cast("dict[str, str] | None", options.get("json"))
         self.calls.append((method, url, payload))
+        gets = [c for c in self.calls if c[0] == "GET"]
         outcome = self.created if method == "POST" else self.pull
+        if method == "PUT" or len(gets) > 1:
+            outcome = self.later
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
@@ -113,11 +117,41 @@ def test_posts_the_comment_with_identity_in_the_body(
     assert written == {"review": "github.com/o/r#7 99"}
 
 
-def test_request_changes_posts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_request_changes_posts_when_the_head_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     run, prepared, _ = make(tmp_path, draft("REQUEST_CHANGES", findings=True))
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    Api(monkeypatch)
+    api = Api(monkeypatch)
     assert review_post.posted(run, prepared)
+    assert [m for m, _, _ in api.calls] == ["GET", "POST", "GET"]
+
+
+def test_request_changes_is_dismissed_when_the_head_moves_during_the_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared, written = make(tmp_path, draft("REQUEST_CHANGES", findings=True))
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    api.later = reply(200, {"head": {"sha": "b" * 40}})
+    assert not review_post.posted(run, prepared)
+    assert [(m, u) for m, u, _ in api.calls][-1] == (
+        "PUT",
+        f"{BASE}/reviews/99/dismissals",
+    )
+    assert "review 99 was dismissed" in written["log"]
+    assert "review" not in written
+
+
+def test_comment_is_kept_when_the_head_moves_during_the_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared, _ = make(tmp_path, draft())
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    api.later = reply(200, {"head": {"sha": "b" * 40}})
+    assert review_post.posted(run, prepared)
+    assert [m for m, _, _ in api.calls] == ["GET", "POST"]
 
 
 APPROVE_THEN_COMMENT = draft("APPROVE").replace(
@@ -190,6 +224,7 @@ def test_a_missing_token_blocks_the_post(
         (reply(403, {"message": "no"}), "status 403"),
         (reply(201, {"id": "x"}), "no review id"),
         (reply(201, []), "no review id"),
+        (httpx.Response(204), "no review id"),
         (httpx.Response(200, text="not json"), "request failed"),
         (httpx.ConnectError("x"), "ConnectError"),
     ],

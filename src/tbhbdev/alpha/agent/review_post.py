@@ -31,6 +31,10 @@ class PostRefusedError(ValueError):
     """The draft or the API refused; the message is safe to log."""
 
 
+class MovedHeadError(PostRefusedError):
+    """The head moved while the review posted, and the review was dismissed."""
+
+
 @dataclass(frozen=True)
 class Submission:
     """One review to post: the draft text and what the post must match."""
@@ -107,7 +111,7 @@ def api(
             json=payload,
             timeout=TIMEOUT,
         )
-        data = response.json()
+        data = response.json() if response.is_success and response.content else None
     except (httpx.HTTPError, ValueError) as exc:
         message = f"the {method} request failed: {type(exc).__name__}"
         raise PostRefusedError(message) from exc
@@ -127,6 +131,7 @@ def create(sub: Submission, token: str) -> int:
     """Validate, then post once; return the review id.
 
     Raises:
+        MovedHeadError: The head moved during the post and the review was dismissed.
         PostRefusedError: A check fails, the head moved, or GitHub refuses.
     """
     fields, body = validate(sub)
@@ -145,6 +150,19 @@ def create(sub: Submission, token: str) -> int:
     if not isinstance(created, int):
         message = "GitHub returned no review id"
         raise PostRefusedError(message)
+    if payload["event"] == "REQUEST_CHANGES" and (
+        pull_head(api("GET", base, token)) != sub.commit
+    ):
+        # A changes-requested review stays the PR's verdict after a push, even
+        # though it is attached to the old commit, so take it back.
+        api(
+            "PUT",
+            f"{base}/reviews/{created}/dismissals",
+            token,
+            {"message": "head moved before posting; re-review needed"},
+        )
+        message = f"the head moved before posting; review {created} was dismissed"
+        raise MovedHeadError(message)
     return created
 
 
