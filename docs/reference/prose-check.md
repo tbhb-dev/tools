@@ -2,7 +2,7 @@
 description: Vale, cspell and rumdl check of prose before it is posted.
 generated:
   - role: generated
-    harness: claude
+    harness: claude-code
     model: anthropic:claude-sonnet-5-5
     at: "2026-11-22T00:00:00Z"
 status: stable
