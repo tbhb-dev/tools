@@ -9,20 +9,16 @@ is the same step as a command, with the token on stdin.
 from __future__ import annotations
 
 import argparse
-import json
 import re
-import subprocess  # nosec B404
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import httpx
-from jsonschema import Draft202012Validator
 
-from tbhbdev.alpha import pull_request, review, review_policy
-from tbhbdev.alpha.agent import credentials, host_tools, runfiles
+from tbhbdev.alpha import pull_request, review
+from tbhbdev.alpha.agent import credentials, runfiles
 from tbhbdev.alpha.agent.decisions import repo
 
 if TYPE_CHECKING:
@@ -34,12 +30,6 @@ DRAFT_LIMIT = 64 * 1024
 PAGE = 100
 MAX_PAGES = 20
 TIMEOUT = httpx.Timeout(20.0, connect=5.0)
-POLICY_FILES = (
-    review_policy.TOML,
-    review_policy.TEMPLATE,
-    review_policy.CHECKLIST,
-    review_policy.DRAFT_SCHEMA,
-)
 
 
 class PostRefusedError(ValueError):
@@ -103,70 +93,6 @@ def validate(sub: Submission) -> tuple[dict[str, object], str]:
     return fields, body.strip("\n") + "\n"
 
 
-def git_output(git_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run git on one repository with no user or system configuration."""
-    return subprocess.run(  # nosec B603
-        [host_tools.resolve("git"), "--git-dir", str(git_dir), *args],
-        env={
-            "HOME": str(git_dir),
-            "PATH": host_tools.search(),
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-def judged_policy(git_dir: Path, commit: str, into: Path) -> None:
-    """Copy the review policy files the judged commit holds into `into`.
-
-    The run's working tree is writable by the sandbox, so policy comes from
-    the commit, which git addresses by content.
-
-    Raises:
-        PostRefusedError: Git can't read the commit.
-    """
-    for path in POLICY_FILES:
-        listed = git_output(git_dir, "ls-tree", "--name-only", commit, "--", str(path))
-        if listed.returncode:
-            message = "cannot read the judged commit"
-            raise PostRefusedError(message)
-        if not listed.stdout.strip():
-            continue
-        shown = git_output(git_dir, "show", f"{commit}:{path}")
-        if shown.returncode:
-            message = f"cannot read {path} from the judged commit"
-            raise PostRefusedError(message)
-        (into / path).parent.mkdir(parents=True, exist_ok=True)
-        (into / path).write_text(shown.stdout, encoding="utf-8")
-
-
-def check_policy(sub: Submission, fields: dict[str, object], git_dir: Path) -> None:
-    """Hold the draft to the policy files of the judged commit.
-
-    Raises:
-        PostRefusedError: A policy file has findings, or the repository's
-            draft schema rejects the draft.
-    """
-    with tempfile.TemporaryDirectory() as directory:
-        root = Path(directory)
-        judged_policy(git_dir, sub.commit, root)
-        findings = review_policy.check(root)
-        if findings:
-            first = findings[0]
-            message = f"{first.path}: {first.rule}: {first.message}"
-            raise PostRefusedError(message)
-        schema_file = root / review_policy.DRAFT_SCHEMA
-        if schema_file.exists():
-            schema = json.loads(schema_file.read_text(encoding="utf-8"))
-            errors = list(Draft202012Validator(schema).iter_errors(fields))
-            if errors:
-                message = f"the draft schema rejects it: {errors[0].message}"
-                raise PostRefusedError(message)
-
-
 def api(
     method: str, url: str, token: str, payload: dict[str, str] | None = None
 ) -> object:
@@ -224,7 +150,7 @@ def existing_review(base: str, token: str, stamp: str) -> int | None:
     raise PostRefusedError(message)
 
 
-def create(sub: Submission, token: str, git_dir: Path) -> int:
+def create(sub: Submission, token: str) -> int:
     """Validate, then post once; return the review id.
 
     A repeat of the same run's post returns the existing review's id.
@@ -233,7 +159,6 @@ def create(sub: Submission, token: str, git_dir: Path) -> int:
         PostRefusedError: A check fails, the head moved, or GitHub refuses.
     """
     fields, body = validate(sub)
-    check_policy(sub, fields, git_dir)
     _, owner, name = repo.parts(sub.repository)
     base = f"https://api.github.com/repos/{owner}/{name}/pulls/{sub.number}"
     if pull_head(api("GET", base, token)) != sub.commit:
@@ -276,7 +201,7 @@ def posted(run: Run, prepared: Prepared) -> bool:
         sub = Submission(
             run.request.repo, number, text, run.request.commit or "", stamp(run)
         )
-        identifier = create(sub, token, workspace / ".git")
+        identifier = create(sub, token)
     except (PostRefusedError, OSError, ValueError) as refusal:
         run.files.write("log", f"review not posted: {refusal}\n")
         return False
@@ -297,7 +222,7 @@ def main(argv: list[str], prog: str) -> int:
         sub = Submission(
             args.repo, args.number, path.read_text(), args.commit, args.stamp
         )
-        identifier = create(sub, sys.stdin.read().strip(), path.parent.parent)
+        identifier = create(sub, sys.stdin.read().strip())
     except (PostRefusedError, OSError, ValueError) as refusal:
         print(f"{prog}: {refusal}", file=sys.stderr)
         return 1

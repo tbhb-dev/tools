@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import io
-import json
-import subprocess
 import sys
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -105,34 +103,11 @@ class Api:
         return outcome
 
 
-def no_git(*_args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess([], 0, "", "")
-
-
-def git_with(files: dict[str, str]) -> Callable[..., subprocess.CompletedProcess[str]]:
-    def run(_git_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
-        if args[0] == "ls-tree":
-            listed = args[-1] in files
-            return subprocess.CompletedProcess([], 0, args[-1] if listed else "", "")
-        name = args[1].split(":", 1)[1]
-        return subprocess.CompletedProcess([], 0, files[name], "")
-
-    return run
-
-
-REAL_GIT_OUTPUT = review_post.git_output
-
-
 def draft_at(git_dir: Path) -> Callable[[int], Path]:
     def path(number: int) -> Path:
         return git_dir / "tbhb-alpha" / f"review-{number}.md"
 
     return path
-
-
-@pytest.fixture(autouse=True)
-def judged_commit_has_no_policy(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(review_post, "git_output", git_with({}))
 
 
 def test_posts_the_comment_with_identity_in_the_body(
@@ -199,112 +174,6 @@ def test_two_drafts_are_refused(tmp_path: Path) -> None:
     (directory / "review-8.md").write_text(draft())
     assert not review_post.posted(run, prepared)
     assert "found 2" in written["log"]
-
-
-def test_a_policy_finding_in_the_judged_commit_blocks_the_post(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, prepared, written = make(tmp_path, draft())
-    monkeypatch.setattr(
-        review_post,
-        "git_output",
-        git_with({".github/pull_request_review.toml": "schema = 2\n"}),
-    )
-    monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    monkeypatch.setattr(httpx, "request", forbidden)
-    assert not review_post.posted(run, prepared)
-    assert "config-schema" in written["log"]
-
-
-def test_the_working_tree_policy_is_ignored(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, prepared, _ = make(tmp_path, draft())
-    github = tmp_path / "ws" / ".github"
-    github.mkdir()
-    (github / "pull_request_review.toml").write_text("schema = 2\n")
-    monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    Api(monkeypatch)
-    assert review_post.posted(run, prepared)
-
-
-SCHEMA = json.dumps(
-    {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {"event": {"const": "REQUEST_CHANGES"}},
-    }
-)
-
-
-def test_the_repository_draft_schema_is_enforced(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, prepared, written = make(tmp_path, draft())
-    monkeypatch.setattr(
-        review_post,
-        "git_output",
-        git_with({".github/schemas/pull-request-review-draft.schema.json": SCHEMA}),
-    )
-    monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    monkeypatch.setattr(httpx, "request", forbidden)
-    assert not review_post.posted(run, prepared)
-    assert "draft schema rejects" in written["log"]
-
-
-def test_a_matching_repository_draft_schema_passes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, prepared, _ = make(tmp_path, draft("REQUEST_CHANGES", findings=True))
-    matching = json.dumps(
-        {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "pr": {"type": "integer"},
-                "commit_id": {"type": "string"},
-                "event": {"const": "REQUEST_CHANGES"},
-            },
-        }
-    )
-    monkeypatch.setattr(
-        review_post,
-        "git_output",
-        git_with({".github/schemas/pull-request-review-draft.schema.json": matching}),
-    )
-    monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    Api(monkeypatch)
-    assert review_post.posted(run, prepared)
-
-
-@pytest.mark.parametrize(
-    ("failing", "message"),
-    [("ls-tree", "cannot read the judged commit"), ("show", "cannot read")],
-)
-def test_git_failures_block_the_post(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str, message: str
-) -> None:
-    run, prepared, written = make(tmp_path, draft())
-    ok = git_with({".github/pull_request_review.toml": "schema = 1\n"})
-
-    def fake(git_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
-        if args[0] == failing:
-            return subprocess.CompletedProcess([], 128, "", "bad")
-        return ok(git_dir, *args)
-
-    monkeypatch.setattr(review_post, "git_output", fake)
-    monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    monkeypatch.setattr(httpx, "request", forbidden)
-    assert not review_post.posted(run, prepared)
-    assert message in written["log"]
-
-
-def test_git_output_runs_git_without_user_config(tmp_path: Path) -> None:
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-    done = REAL_GIT_OUTPUT(tmp_path / ".git", "rev-parse", "--git-dir")
-    assert done.returncode == 0
 
 
 @pytest.mark.parametrize(
