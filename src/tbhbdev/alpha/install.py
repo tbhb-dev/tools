@@ -2,11 +2,13 @@
 
 Run in a clone of a tbhb-dev repository, it installs that clone's git hooks
 into `$(git rev-parse --git-common-dir)/hooks`, which every worktree of the
-clone shares. The pre-push guard refuses rewritten history and private names
-before prek, replaying identical arguments and stdin bytes to both. Public
-pushes require a readable, nonempty `~/.local/state/tbhb/private-repos.txt`,
-combined with `[pr_check] private_repos`. The list's header defines words
-flagged only in path positions. Nonempty SKIP or PREK_SKIP refuses a push.
+clone shares. The pre-push guard refuses protected-branch pushes, unfetched
+rewrites and private names before prek, replaying identical arguments and
+stdin bytes to both. Public pushes require a readable, nonempty
+`~/.local/state/tbhb/private-repos.txt`, combined with
+`[pr_check] private_repos`. The list's header defines words flagged only in
+path positions. Nonempty SKIP or PREK_SKIP refuses a
+push.
 Without tbhbdev on PATH, it refuses pushes targeting a tbhb-dev repository,
 using the hook URL argument or the named remote's URL. prek also runs
 pre-commit. The agent identity hooks
