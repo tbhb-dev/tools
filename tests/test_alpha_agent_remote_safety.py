@@ -1144,6 +1144,14 @@ def unpublished_run(host: Path) -> Path:
     return tree
 
 
+def fallback_diff() -> subprocess.CompletedProcess[bytes]:
+    return execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
+        )
+    )
+
+
 @pytest.mark.parametrize("unsandboxed", [False, True])
 @pytest.mark.parametrize("commits", [0, 2])
 def test_diff_returns_unpublished_commits(
@@ -1220,11 +1228,7 @@ def test_unpublished_diff_bounds_output_and_preserves_failure(
         "sys.stdout.write('x' * 200000)\n"
         f"sys.exit({74 if failure else 0})\n",
     )
-    result = execute(
-        remote.inspect(
-            "example-org/example-repo", "sample", owner="example-owner", limit=None
-        )
-    )
+    result = fallback_diff()
     assert result.returncode == (74 if failure else 0)
     assert result.stdout == b"x" * 65536 + b"\n[output truncated at 65536 bytes]\n"
 
@@ -1248,11 +1252,7 @@ def test_unpublished_diff_refuses_symlink_paths(host: Path, component: str) -> N
     )
     path.rename(host / "saved")
     path.symlink_to(host / "saved", target_is_directory=True)
-    result = execute(
-        remote.inspect(
-            "example-org/example-repo", "sample", owner="example-owner", limit=None
-        )
-    )
+    result = fallback_diff()
     assert result.returncode == 65
     assert result.stdout == b""
 
@@ -1266,11 +1266,7 @@ def test_unpublished_diff_ignores_signature_file_in_run_config(host: Path) -> No
     (tree / "example").write_text("local change\n")
     git_in(tree, "add", "example")
     commit_in(tree, "local change")
-    result = execute(
-        remote.inspect(
-            "example-org/example-repo", "sample", owner="example-owner", limit=None
-        )
-    )
+    result = fallback_diff()
     assert result.returncode == 0, result.stderr
     assert b"Subject: [PATCH" in result.stdout
     assert b"SECRET-SIGNATURE-LINE" not in result.stdout
@@ -1286,11 +1282,7 @@ def test_unpublished_diff_ignores_an_included_config_file(host: Path) -> None:
     (tree / "example").write_text("local change\n")
     git_in(tree, "add", "example")
     commit_in(tree, "local change")
-    result = execute(
-        remote.inspect(
-            "example-org/example-repo", "sample", owner="example-owner", limit=None
-        )
-    )
+    result = fallback_diff()
     assert result.returncode == 0, result.stderr
     assert b"Subject: [PATCH" in result.stdout
     assert b"private-address@example.invalid" not in result.stdout
@@ -1302,11 +1294,7 @@ def test_unpublished_diff_refuses_nested_symlinks(host: Path, nested: str) -> No
     target = tree / ".git" / nested
     target.mkdir(parents=True, exist_ok=True)
     (target / "link").symlink_to(host / "saved")
-    result = execute(
-        remote.inspect(
-            "example-org/example-repo", "sample", owner="example-owner", limit=None
-        )
-    )
+    result = fallback_diff()
     assert result.returncode == 65
     assert result.stdout == b""
 
@@ -1315,11 +1303,7 @@ def test_unpublished_diff_refuses_an_alternates_file(host: Path) -> None:
     tree = unpublished_run(host)
     (tree / ".git/objects/info").mkdir(parents=True, exist_ok=True)
     (tree / ".git/objects/info/alternates").write_text(str(host / "origin.git") + "\n")
-    result = execute(
-        remote.inspect(
-            "example-org/example-repo", "sample", owner="example-owner", limit=None
-        )
-    )
+    result = fallback_diff()
     assert result.returncode == 65
     assert result.stdout == b""
 
@@ -1332,11 +1316,7 @@ def test_unpublished_diff_ignores_a_commondir_file(host: Path) -> None:
     git_in(tree, "add", "example")
     commit_in(tree, "local change")
     (tree / ".git/commondir").write_text(str(other) + "\n")
-    result = execute(
-        remote.inspect(
-            "example-org/example-repo", "sample", owner="example-owner", limit=None
-        )
-    )
+    result = fallback_diff()
     assert result.returncode == 0, result.stderr
     assert b"Subject: [PATCH" in result.stdout
 
@@ -1351,11 +1331,7 @@ def test_unpublished_diff_refuses_symlinked_git_internals(
         path.write_text("")
     path.rename(host / "saved")
     path.symlink_to(host / "saved")
-    result = execute(
-        remote.inspect(
-            "example-org/example-repo", "sample", owner="example-owner", limit=None
-        )
-    )
+    result = fallback_diff()
     assert result.returncode == 65
     assert result.stdout == b""
 
@@ -1363,11 +1339,7 @@ def test_unpublished_diff_refuses_symlinked_git_internals(
 def test_unpublished_diff_refuses_missing_base(host: Path) -> None:
     tree = unpublished_run(host)
     git_in(tree, "update-ref", "-d", "refs/remotes/origin/main")
-    result = execute(
-        remote.inspect(
-            "example-org/example-repo", "sample", owner="example-owner", limit=None
-        )
-    )
+    result = fallback_diff()
     assert result.returncode != 0
     assert result.stdout == b""
 
@@ -1382,11 +1354,7 @@ def test_unpublished_diff_uses_named_default_branch(host: Path) -> None:
     (tree / "example").write_text("local trunk change\n")
     git_in(tree, "add", "example")
     commit_in(tree, "local trunk change")
-    result = execute(
-        remote.inspect(
-            "example-org/example-repo", "sample", owner="example-owner", limit=None
-        )
-    )
+    result = fallback_diff()
     assert result.returncode == 0, result.stderr
     assert b"+local trunk change" in result.stdout
 
@@ -1402,11 +1370,7 @@ def test_unpublished_diff_requires_default_branch(
         "if '--symref' in sys.argv:\n"
         f"    print({listing!r}); sys.exit({74 if listing is None else 0})\n",
     )
-    result = execute(
-        remote.inspect(
-            "example-org/example-repo", "sample", owner="example-owner", limit=None
-        )
-    )
+    result = fallback_diff()
     assert result.returncode == (74 if listing is None else 65)
     assert result.stdout == b""
 
@@ -1417,11 +1381,7 @@ def test_diff_refuses_failed_branch_query(host: Path) -> None:
         host / "bin/git",
         "import sys\nassert 'ls-remote' in sys.argv\nsys.exit(74)\n",
     )
-    result = execute(
-        remote.inspect(
-            "example-org/example-repo", "sample", owner="example-owner", limit=None
-        )
-    )
+    result = fallback_diff()
     assert result.returncode == 74
     assert result.stdout == b""
 
