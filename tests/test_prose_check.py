@@ -71,3 +71,19 @@ def test_a_missing_config_is_refused(
 
 def test_prose_refused_is_a_runtime_error() -> None:
     assert issubclass(prose_check.ProseRefused, RuntimeError)
+
+
+def test_a_linter_that_cannot_run_is_refused_without_the_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def broken(*_args: object, **_kwargs: object) -> list[tuple[int, str]]:
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(pull_request, "lint", broken)
+    with pytest.raises(prose_check.ProseRefused) as caught:
+        prose_check.check_prose("the-checked-text", "the body", root=tmp_path)
+    assert str(caught.value) == (
+        "cannot check the body for prose: a linter cannot run "
+        "(No such file or directory)"
+    )
+    assert caught.value.__cause__ is None
