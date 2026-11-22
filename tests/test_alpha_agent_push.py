@@ -14,7 +14,14 @@ import pytest
 from agent_host_example import constant, host_settings, run_request
 
 from tbhbdev.alpha import private_names
-from tbhbdev.alpha.agent import credentials, host_tools, push, run_host, runfiles
+from tbhbdev.alpha.agent import (
+    credentials,
+    host_tools,
+    open_pr,
+    push,
+    run_host,
+    runfiles,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -28,6 +35,11 @@ def umask_022() -> Generator[None]:
     previous = os.umask(0o022)
     yield
     os.umask(previous)
+
+
+@pytest.fixture(autouse=True)
+def pull_request_opens(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(open_pr, "open_pull_request", constant(7))
 
 
 @pytest.fixture(autouse=True)
@@ -160,6 +172,7 @@ def test_push_success(
     head = git(target, "rev-parse", "refs/heads/agent/example")
     assert run.files.path("head").read_text() == head
     assert run.files.path("branch").read_text() == "agent/example"
+    assert run.files.path("pr").read_text() == f"{run.request.repo}#7"
 
 
 @pytest.mark.parametrize(
@@ -1085,3 +1098,24 @@ def test_invalid_supplemental_list_refuses_push(
     assert run.files.path("log").read_text() == (
         "push refused: cannot read supplemental private-name list\n"
     )
+
+
+@pytest.mark.parametrize(
+    "failure", [open_pr.OpenRefusedError("no draft"), OSError("x")]
+)
+def test_unopened_pull_request_fails_the_run_but_keeps_the_branch(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    run, prepared, _target = local_run
+
+    def refuse(*_args: object) -> int:
+        raise failure
+
+    monkeypatch.setattr(open_pr, "open_pull_request", refuse)
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
+    assert run.files.path("branch").read_text() == "agent/example"
+    assert not run.files.path("pr").exists()
+    assert "pull request not opened" in run.files.path("log").read_text()

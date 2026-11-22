@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tbhbdev.alpha import private_names
-from tbhbdev.alpha.agent import host_tools, runfiles
+from tbhbdev.alpha.agent import host_tools, open_pr, runfiles
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.private_names import _configured
 
@@ -164,7 +164,21 @@ def run(
         run.files.write("log", f"push failed: {line}\n")
     else:
         run.files.write("branch", branch)
+        status = not opened(run, workspace, commit, branch, token)
     return 4 if status else rc
+
+
+def opened(run: Run, workspace: Path, commit: str, branch: str, token: str) -> bool:
+    """Open the run's pull request and record it; False when it was not opened."""
+    try:
+        number = open_pr.open_pull_request(
+            workspace, commit, run.request.repo, branch, token
+        )
+    except (open_pr.OpenRefusedError, OSError) as refusal:
+        run.files.write("log", f"pull request not opened: {refusal}\n")
+        return False
+    run.files.write("pr", f"{run.request.repo}#{number}")
+    return True
 
 
 def read_names(source: Path) -> private_names.Names:

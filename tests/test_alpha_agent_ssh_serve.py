@@ -192,6 +192,7 @@ def test_result(
         files.write("out.final", "answer")
         files.write("branch", "agent/example")
         files.write("head", "a" * 40)
+        files.write("pr", "github.com/tbhb-dev/tools#12")
     assert ssh_serve.main([], "ssh-serve") == 0
     assert json.loads(capsys.readouterr().out) == {
         **build_info.identities(),
@@ -203,6 +204,7 @@ def test_result(
         "log_tail": "".join(f"line {n}\n" for n in range(10, 210)),
         "branch": "agent/example" if finished else None,
         "head": "a" * 40 if finished else None,
+        "pr": "github.com/tbhb-dev/tools#12" if finished else None,
     }
 
 
@@ -345,6 +347,7 @@ def test_result_before_first_phase(
         "log_tail": "",
         "branch": None,
         "head": None,
+        "pr": None,
     }
 
 
