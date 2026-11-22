@@ -13,7 +13,14 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NoReturn
 
 from tbhbdev import version
-from tbhbdev.alpha.agent import launcher, render, runfiles, taint_store, transport
+from tbhbdev.alpha.agent import (
+    launcher,
+    render,
+    runfiles,
+    signing_parity,
+    taint_store,
+    transport,
+)
 from tbhbdev.alpha.agent.decisions import driver as rules
 from tbhbdev.alpha.agent.decisions import launcher as launch_rules
 from tbhbdev.alpha.agent.decisions import limits, remote, repo, request, taint
@@ -605,6 +612,8 @@ def keep(settings: Settings, run: Run) -> int:
 def dispatch(settings: Settings, args: argparse.Namespace) -> int:
     if args.verb == "clear-taint":
         return clear_taint(args.host, args.reason)
+    if args.verb == "signing-parity":
+        return signing_parity.main(settings)
     if args.verb == "exec":
         return execute(settings, args)
     run = load(settings, args.name)

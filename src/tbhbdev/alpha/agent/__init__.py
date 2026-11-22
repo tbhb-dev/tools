@@ -8,6 +8,7 @@ import sys
 from tbhbdev import userconfig
 from tbhbdev.alpha.agent import driver, precheck, settings
 from tbhbdev.alpha.agent import run_host as run_host
+from tbhbdev.alpha.agent import signing_parity as signing_parity
 from tbhbdev.alpha.agent import ssh_serve as ssh_serve
 from tbhbdev.alpha.agent.decisions import config
 
@@ -72,6 +73,9 @@ def parser(prog: str) -> argparse.ArgumentParser:
             sub.add_argument("-n", type=int, default=10)
         if verb == "clean":
             sub.add_argument("--force", action="store_true")
+    verbs.add_parser(
+        "signing-parity", help="check each host's signing key is registered"
+    )
     clear = verbs.add_parser("clear-taint", help="clear local host taint with a reason")
     clear.add_argument("host")
     clear.add_argument("--reason", required=True)
@@ -83,6 +87,7 @@ def main(argv: list[str], prog: str) -> int:
         "run-host": run_host.main,
         "ssh-serve": ssh_serve.main,
         "precheck": precheck.main,
+        "signing-fingerprint": signing_parity.host_main,
     }
     if argv and argv[0] in host_commands:
         return host_commands[argv[0]](argv[1:], f"{prog} {argv[0]}")
