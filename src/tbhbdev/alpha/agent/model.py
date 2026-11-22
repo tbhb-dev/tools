@@ -106,6 +106,8 @@ class Credentials:
     reviews_app_client_id: str | None
     reviews_app_pem: str | None
     signing: str
+    pull_requests_app_client_id: str | None = None
+    pull_requests_app_pem: str | None = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +137,10 @@ class Host:
     accounts: tuple[str, ...]
     proven_harnesses: tuple[Harness, ...]
     tbhbdev: str | None = None
+    load_limit: int | None = None
+    min_memory_available_percent: int = 20
+    max_swap_used_percent: int = 80
+    limits_warn_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -151,10 +157,12 @@ class Settings:
     credentials: tuple[Credentials, ...]
     claude: Claude
     hosts: tuple[Host, ...]
+    agy_build_timeout_seconds: int = 3600
     ssh_connect_timeout: int = 15
     ssh_keepalive_seconds: int = 30
     ssh_keepalive_count_max: int = 3
     public_repos: tuple[str, ...] = ()
+    otel_endpoint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -261,3 +269,4 @@ class RunRequest:
     authorized_by: str | None
     startup_deadline_seconds: int
     tainted_host: bool
+    fetch_refs: tuple[str, ...] = ()

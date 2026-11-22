@@ -57,3 +57,6 @@ tmp/
 
 # A global ignore may cover .mcp.json; this repository's MCP config is shared.
 !.mcp.json
+
+# A build may write a stamp here; it is never committed.
+/src/tbhbdev/_build.py

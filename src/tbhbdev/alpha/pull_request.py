@@ -11,7 +11,7 @@ Usage, from anywhere in a worktree:
 
     tbhbdev alpha pr check [DRAFT]
     tbhbdev alpha pr create [DRAFT] [--dry-run]
-    tbhbdev alpha pr edit [DRAFT] --pr N
+    tbhbdev alpha pr edit DRAFT --pr N
     tbhbdev alpha pr ready N [N...]
     tbhbdev alpha pr rerun N
     tbhbdev alpha pr delete-branch N
@@ -20,10 +20,10 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr backfill-opened OWNER
 
 The repository is the worktree the command runs in: its schema, section
-scheme and lint configs are the ones checked against. DRAFT defaults to that
-worktree's .github/PULL_REQUEST_DRAFT.md, so each worktree has its own. Every
-failure prints as `path:line: problem`, and the exit code is 1 when there is
-any.
+scheme and lint configs are the ones checked against. For ``check`` and
+``create``, DRAFT defaults to that worktree's .github/PULL_REQUEST_DRAFT.md.
+``edit`` requires an explicit DRAFT path. Every failure prints as
+`path:line: problem`, and the exit code is 1 when there is any.
 
 ``check`` validates the frontmatter against the schema, requires a title that
 ``cog verify`` accepts and that fits 64 characters (a squash merge appends
@@ -121,14 +121,14 @@ import tempfile
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, override
 from urllib.parse import quote
 
 import yaml
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import identity as agent_identity
-from tbhbdev.alpha import opened, private_names, secret_scan
+from tbhbdev.alpha import opened, private_names, secret_scan, size_gate
 from tbhbdev.alpha.repo import git, hook_cwd, in_tbhb_dev, read_hook_stdin
 
 if TYPE_CHECKING:
@@ -198,7 +198,7 @@ NAME_WITH_OWNER = re.compile(REPO)
 PR_PAGE = re.compile(rf"https://github\.com/({REPO})/pull/[0-9]+")
 REPO_LIMIT = 1000
 PR_LIMIT = 10000
-EDIT_DRAFT = "run `tbhbdev alpha pr edit --pr {number}` to apply the draft"
+EDIT_DRAFT = "run `tbhbdev alpha pr edit DRAFT --pr {number}` to apply the draft"
 BACKFILL_KEYS = re.compile(r"(?:Generated-by|Assisted-by|Opened-by):\s*(LLM\b.*)")
 SESSION_ATTR = re.compile(r"(?<![^\s;])session=(sha-256-64:[0-9a-f]{16})(?![^\s;])")
 LIST_ITEM = re.compile(r" *(?:[-*+]|\d+[.)]) +\S")
@@ -261,7 +261,23 @@ def keep_text(loader: yaml.SafeLoader, node: yaml.Node) -> str:
 
 
 class Loader(yaml.SafeLoader):
-    """SafeLoader that keeps timestamps as text, so the schema can check them."""
+    """SafeLoader that keeps timestamps as text and refuses duplicate keys."""
+
+    @override
+    def construct_mapping(
+        self,
+        node: yaml.MappingNode,
+        deep: bool = False,
+    ) -> dict[object, object]:
+        """Refuse a key that appears twice, which plain YAML resolves silently."""
+        keys = [self.construct_object(key, deep=True) for key, _ in node.value]
+        for key in keys:
+            if keys.count(key) > 1:
+                message = f"duplicate key {key!r}"
+                raise yaml.constructor.ConstructorError(
+                    None, None, message, node.start_mark
+                )
+        return super().construct_mapping(node, deep)
 
 
 Loader.add_constructor("tag:yaml.org,2002:timestamp", keep_text)
@@ -585,9 +601,18 @@ def key_line(error: ValidationError, frontmatter: Sequence[str]) -> int:
     )
 
 
-def find_tool(name: str) -> str:
-    """Find a tool on PATH, then through mise; exit with a clear message."""
-    found = shutil.which(name)
+def find_tool(name: str, *, unwrapped: bool = False) -> str:
+    """Find a tool on PATH, then through mise; exit with a clear message.
+
+    ``unwrapped`` skips the Bazel shims in ``.bazel_env``. For gitleaks the shim
+    is the rules wrapper, which refuses a config with ``[extend]``, and the text
+    scan writes one that has it, so the scan needs the real binary.
+    """
+    path = None
+    if unwrapped:
+        entries = os.environ.get("PATH", "").split(os.pathsep)
+        path = os.pathsep.join(e for e in entries if ".bazel_env" not in e)
+    found = shutil.which(name, path=path)
     if found:
         return found
     mise = shutil.which(MISE)
@@ -1026,7 +1051,7 @@ def scan_secrets(text: str, what: str, visibility: str) -> None:
         text,
         what,
         root=root(),
-        gitleaks=find_tool(GITLEAKS),
+        gitleaks=find_tool(GITLEAKS, unwrapped=True),
         visibility=visibility,
     )
 
@@ -1562,6 +1587,23 @@ def opened_by(env: Mapping[str, str]) -> tuple[str | None, str | None]:
 def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     """Run the chosen subcommand."""
     checked = read_checked(args.draft)
+    if args.command == "check":
+        try:
+            counts = size_gate.size_counts("origin/main", "HEAD")
+        except size_gate.SizeCountError as exc:
+            print(f"size count unavailable: {exc}", file=sys.stderr)
+        else:
+            print(f"{counts.code_lines} code lines, limit {counts.code_limit}")
+            print(f"{counts.raw_lines} raw lines, limit {counts.raw_limit}")
+            if counts.failed is not None:
+                count, limit = (
+                    (counts.code_lines, counts.code_limit)
+                    if counts.failed == "code"
+                    else (counts.raw_lines, counts.raw_limit)
+                )
+                why = f"{count} lines, limit {limit}: split into stacked PRs"
+                checked.problems.append((1, why))
+                print(f"{args.draft}:1: {why}")
     if checked.problems:
         return 1
     if args.command == "check":
@@ -1649,9 +1691,15 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub.add_parser("rerun").add_argument("pr", type=int)
     sub.add_parser("delete-branch").add_argument("pr", type=int)
     sub.add_parser("checks").add_argument("pr", type=int)
+    # `tbhbdev alpha pr close` runs in close.py before this parser sees it, so
+    # this entry only lists the verb in --help.
+    sub.add_parser("close", help="close N --reason TEXT: close a pull request")
     for name in ("check", "create", "edit"):
         one = sub.add_parser(name)
-        one.add_argument("draft", nargs="?", type=Path, default=DRAFT)
+        if name == "edit":
+            one.add_argument("draft", type=Path)
+        else:
+            one.add_argument("draft", nargs="?", type=Path, default=DRAFT)
         if name == "create":
             one.add_argument("--dry-run", action="store_true")
         if name == "edit":

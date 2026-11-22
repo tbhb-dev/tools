@@ -21,11 +21,13 @@ bged
 bsdinfo
 buildcop
 buildifier
+bunx
 bxox
 cacheinfo
 cand
 capfd
 capsys
+ccstatusline
 cgnat
 checkpointed
 claudecode
@@ -56,6 +58,7 @@ execdir
 execpath
 executescript
 execv
+extraheader
 execve
 fakehost
 fakeop
@@ -66,6 +69,7 @@ flatmap
 frontmatter
 fsmonitor
 fstat
+ftruncate
 genpkey
 genrule
 getent
@@ -101,10 +105,13 @@ libexec
 libproc
 listy
 llmx
+loadavg
 lockfiles
+logicalcpu
 logname
 mcpjson
 mdfile
+meminfo
 milestoned
 mkfifo
 mktree
@@ -158,6 +165,7 @@ procargs
 proname
 pronamespace
 pubout
+purgeable
 pushd
 rdonly
 rdwr
@@ -190,10 +198,14 @@ shfmt
 srcs
 stampable
 starlark
+statusline
+statuslines
 strerror
 stubtool
 subagentstart
 surrogateescape
+swapless
+swapusage
 syslimits
 tailnet
 tbhb
@@ -295,3 +307,10 @@ shopt
 sshcommand
 wаit
 thеy
+getbasetemp
+pytestmark
+getitimer
+itimer
+setitimer
+sigalrm
+signum

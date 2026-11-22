@@ -3,8 +3,7 @@
 The request is a JSON object with the schema version `v` and every run field.
 `parse` reads one, as run-host does, and `validate` checks one the driver
 built. Both refuse an unknown version, a field of the wrong format, a Claude
-run without its reason or profile, and an `--unsandboxed` run that the rule
-doesn't allow.
+run without its reason or profile, and an invalid authorization reference.
 """
 
 from __future__ import annotations
@@ -31,6 +30,8 @@ _EFFORT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 _ISSUE = re.compile(rf"{repo.OWNER.pattern}/{repo.REPO.pattern}#[1-9][0-9]*")
 _CHAT = re.compile(r"operator-chat-([0-9]{4})-([0-9]{2})-([0-9]{2})")
 _REASON_LIMIT = 200
+_FETCH_REF = re.compile(r"refs/(?:pull/[0-9]+/head|heads/[A-Za-z0-9._/-]+)")
+_FETCH_REF_LIMIT = 8
 _FIELDS = frozenset(
     {
         "kind",
@@ -51,8 +52,12 @@ _FIELDS = frozenset(
         "tainted_host",
         "authorized_by",
         "startup_deadline_seconds",
+        "fetch_refs",
     }
 )
+
+# Requests saved before --fetch-ref lack this key and still load.
+_REQUIRED_FIELDS = _FIELDS - {"fetch_refs"}
 
 
 def _fail(field: str, why: str) -> NoReturn:
@@ -78,20 +83,10 @@ def _authorization_ok(text: str) -> bool:
     return True
 
 
-def _check_unsandboxed(request: RunRequest, *, host_allows: bool) -> None:
-    if request.unsandboxed and request.authorized_by is None:
-        _fail("unsandboxed", "requires authorized_by")
-    if not request.unsandboxed:
-        if request.authorized_by is not None:
-            _fail("authorized_by", "requires unsandboxed")
-        return
-    if request.harness is not Harness.CODEX:
-        _fail("unsandboxed", "applies only to a codex run")
-    if request.profile is not Profile.BUILD:
-        _fail("unsandboxed", "applies only to a build run")
-    if not host_allows:
-        _fail("unsandboxed", "isn't enabled on this host")
-    if not _authorization_ok(str(request.authorized_by)):
+def _check_unsandboxed(request: RunRequest) -> None:
+    if request.authorized_by is not None and not _authorization_ok(
+        request.authorized_by
+    ):
         _fail("authorized_by", "must be owner/repo#N or operator-chat-YYYY-MM-DD")
 
 
@@ -119,15 +114,34 @@ def _check_commit(request: RunRequest) -> None:
         _fail("commit", "applies only to a review run")
 
 
-def validate(request: RunRequest, *, host_allows_unsandboxed: bool) -> None:
+def check_fetch_refs(refs: tuple[str, ...]) -> None:
+    if len(refs) > _FETCH_REF_LIMIT:
+        _fail("fetch_refs", f"allows at most {_FETCH_REF_LIMIT} refs")
+    for ref in refs:
+        if (
+            _FETCH_REF.fullmatch(ref) is None
+            or ".." in ref
+            or "//" in ref
+            or ref.endswith(("/", ".lock"))
+            or ref.startswith("refs/heads/-")
+        ):
+            _fail("fetch_refs", f"contains invalid ref {ref!r}")
+
+
+def validate(
+    request: RunRequest,
+    *,
+    host_allows_unsandboxed: bool,  # noqa: ARG001 -- accepted for older callers
+) -> None:
     """Refuse REQUEST unless every field and every rule holds.
 
-    HOST_ALLOWS_UNSANDBOXED is the `unsandboxed` key of the run's host in config.
+    HOST_ALLOWS_UNSANDBOXED remains accepted for older callers and has no effect.
 
     Raises:
         Invalid: The message names the field.
     """
     repo.parts(request.repo)
+    check_fetch_refs(request.fetch_refs)
     _matches("commit", request.commit, _COMMIT)
     _matches("model", request.model, _MODEL)
     _matches("effort", request.effort, _EFFORT)
@@ -149,7 +163,7 @@ def validate(request: RunRequest, *, host_allows_unsandboxed: bool) -> None:
         _fail("startup_deadline_seconds", "must be a positive number of seconds")
     _check_commit(request)
     _check_harness(request)
-    _check_unsandboxed(request, host_allows=host_allows_unsandboxed)
+    _check_unsandboxed(request)
 
 
 def to_dict(request: RunRequest) -> dict[str, object]:
@@ -174,6 +188,7 @@ def to_dict(request: RunRequest) -> dict[str, object]:
         "tainted_host": request.tainted_host,
         "authorized_by": request.authorized_by,
         "startup_deadline_seconds": request.startup_deadline_seconds,
+        "fetch_refs": list(request.fetch_refs),
     }
 
 
@@ -214,6 +229,18 @@ def _choice[E: StrEnum](data: dict[str, object], key: str, kind: type[E]) -> E:
     return members[value]
 
 
+def _fetch_refs(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        _fail("fetch_refs", "must be a list of strings")
+    entries: list[object] = value
+    refs: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            _fail("fetch_refs", "must be a list of strings")
+        refs.append(entry)
+    return tuple(refs)
+
+
 def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunRequest:
     """The request DATA holds, the JSON object that `to_dict` writes.
 
@@ -233,7 +260,7 @@ def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunReque
             f"{version!r} is not a supported request version; "
             f"this build reads {REQUEST_VERSION}",
         )
-    missing = _FIELDS - data.keys()
+    missing = _REQUIRED_FIELDS - data.keys()
     if missing:
         message = f"request is missing fields: {', '.join(sorted(missing))}"
         raise Invalid(message)
@@ -260,6 +287,7 @@ def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunReque
         tainted_host=_flag(data, "tainted_host"),
         authorized_by=_maybe_text(data, "authorized_by"),
         startup_deadline_seconds=_number(data, "startup_deadline_seconds"),
+        fetch_refs=_fetch_refs(data.get("fetch_refs", [])),
     )
     validate(request, host_allows_unsandboxed=host_allows_unsandboxed)
     return request

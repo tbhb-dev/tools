@@ -55,6 +55,23 @@ repo_files(
     ],
 )
 
+# The review template and checklist are package data, not OKF documents.
+repo_files(
+    name = "okf_repo_files",
+    exclude = [
+        "src/tbhbdev/alpha/review_data/PULL_REQUEST_REVIEW_CHECKLIST.md",
+        "src/tbhbdev/alpha/review_data/PULL_REQUEST_REVIEW_TEMPLATE.md",
+        ".DS_Store",
+        "**/.DS_Store",
+        ".bazelrc.user",
+        ".coverage*",
+        ".env*",
+        ".github/PULL_REQUEST_DRAFT.md",
+        "coverage.*",
+        "mise.local.toml",
+    ],
+)
+
 # Generates preset.bazelrc, which .bazelrc imports. The content depends on the
 # Bazel version that runs the generator; the committed copy matches
 # .bazelversion, and `preset.update_test` fails when it is stale.
@@ -230,7 +247,7 @@ mutmut_test(
 # Validate the docs bundle and Markdown frontmatter against its schemas.
 okf_docs_test(
     name = "okf_docs_test",
-    srcs = [":repo_files"],
+    srcs = [":okf_repo_files"],
 )
 
 # Copyright and licensing information on every file (REUSE.toml, LICENSES/).
@@ -405,7 +422,7 @@ bazel_env(
         "buildifier": "@buildifier_prebuilt//:buildifier",
         "cog": "@tbhb_rules_cog//:cog",
         "editorconfig-checker": "@tbhb_rules_editorconfig_checker//:editorconfig-checker",
-        "gitleaks": "@tbhb_rules_gitleaks//:gitleaks",
+        "gitleaks": "@tbhb_rules//lint:gitleaks",
         "ruff": ":ruff",
         "rumdl": "@tbhb_rules_rumdl//:rumdl",
         "ryl": "@tbhb_rules_ryl//:ryl",

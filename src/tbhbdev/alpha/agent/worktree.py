@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import errno
 import os
@@ -9,14 +10,16 @@ import re
 import shlex
 import stat
 import subprocess  # nosec B404
+import unicodedata
 from contextlib import ExitStack, contextmanager
 from functools import partial
 from pathlib import Path
-lazy from collections.abc import Generator
+lazy from collections.abc import Callable, Generator
 
 from tbhbdev.alpha import install
 from tbhbdev.alpha.agent import host_tools, runfiles
 from tbhbdev.alpha.agent.decisions import repo
+from tbhbdev.alpha.agent.decisions.request import check_fetch_refs
 from tbhbdev.alpha.agent.model import Invalid, Profile, RunRequest
 
 GIT_OVERRIDES = (
@@ -54,9 +57,17 @@ url = {url}
 """
 CHECKOUT_SCAN_DEPTH = 3
 COMMON_DIRECTORY_LIMIT = 4096
+PREPARATION_CAUSE_LIMIT = 200
+URL_CREDENTIALS = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)[^/\s]*@")
+SECRET_DETAIL = re.compile(
+    r"(?i)\b(?:gh[pousr]_[\w]+|github_pat_[\w]+)"
+    r"|\b(?:authorization[=:]\s*(?:basic|bearer)\s+"
+    r"|(?:token|password|secret)[=:]\s*)[^\s,'\"]+"
+)
+ABSOLUTE_PATH = re.compile(r"(?<![\w:/])/(?:[^\s/'\"]+/)*([^\s/'\"]+)")
 
 
-def git(clone: Path, *args: str) -> str:
+def git(clone: Path, *args: str, token: str | None = None) -> str:
     env = {key: os.environ[key] for key in ("HOME", "LANG") if key in os.environ}
     env.update(
         PATH=host_tools.search(),
@@ -68,6 +79,16 @@ def git(clone: Path, *args: str) -> str:
         GIT_ASKPASS="/bin/false",
         SSH_ASKPASS="/bin/false",
     )
+    # ssh still reads the account's own ssh config, so its GitHub key applies.
+    env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+    if token is not None:
+        # The header travels in the environment, so no argument list shows it.
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        env.update(
+            GIT_CONFIG_COUNT="1",
+            GIT_CONFIG_KEY_0="http.extraheader",
+            GIT_CONFIG_VALUE_0=f"Authorization: Basic {basic}",
+        )
     command = [host_tools.resolve("git")]
     command += [item for value in GIT_OVERRIDES for item in ("-c", value)]
     directory = clone / ".git"
@@ -77,14 +98,17 @@ def git(clone: Path, *args: str) -> str:
         else ["--git-dir", str(clone)]
     )
     offline = ["-c", "protocol.allow=never"]
+    # A moved repository answers with a redirect, and the owner gate checks only
+    # the requested name, so an online command never follows one.
+    online_only = ["-c", "http.followRedirects=false"]
     online = args[0] in ("fetch", "ls-remote")
-    invocation = [*command, *([] if online else offline), *args]
+    invocation = [*command, *(online_only if online else offline), *args]
     output = partial(
         subprocess.check_output,
         env=env,
         cwd="/",
         text=True,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         timeout=30,
     )
     timeout = 300 if args[0] in ("fetch", "clone") else 30
@@ -140,8 +164,9 @@ def configure_mirror(mirror: Path, url: str) -> None:
     )
 
 
-def default_branch(mirror: Path) -> str:
-    listing = git(mirror, "ls-remote", "--symref", "--end-of-options", "origin", "HEAD")
+def default_branch(mirror: Path, token: str | None = None) -> str:
+    query = ("ls-remote", "--symref", "--end-of-options", "origin", "HEAD")
+    listing = git(mirror, *query) if token is None else git(mirror, *query, token=token)
     for line in listing.splitlines():
         match = re.fullmatch(r"ref: (refs/heads/[^\s]+)\tHEAD", line)
         if match is not None:
@@ -157,18 +182,27 @@ def default_branch(mirror: Path) -> str:
     raise Invalid(message)
 
 
-def fetch_commit(mirror: Path, request: RunRequest) -> str:
+def fetch_commit(mirror: Path, request: RunRequest, token: str | None = None) -> str:
+    check_fetch_refs(request.fetch_refs)
     options = (
         "--no-recurse-submodules",
         "--no-write-fetch-head",
         "--no-tags",
         "--upload-pack=git-upload-pack",
     )
-    branch = default_branch(mirror)
+    branch = default_branch(mirror, token)
     references = [f"+{branch}:{branch}"]
+    references.extend(
+        f"+{ref}:refs/heads/fetched/{ref.removeprefix('refs/')}"
+        for ref in request.fetch_refs
+    )
     if request.commit is not None:
         references.append(f"+{request.commit}:refs/heads/tbhbdev-review")
-    git(mirror, "fetch", *options, "--no-prune", "origin", *references)
+    fetch = ("fetch", *options, "--no-prune", "origin", *references)
+    if token is None:
+        git(mirror, *fetch)
+    else:
+        git(mirror, *fetch, token=token)
     reference = branch if request.profile is Profile.BUILD else request.commit
     commit = git(
         mirror, "rev-parse", "--verify", "--end-of-options", f"{reference}^{{commit}}"
@@ -409,29 +443,65 @@ def prepare_git(workspace: Path) -> None:
 def preparation_step(step: str) -> Generator[None]:
     try:
         yield
-    except OSError, ValueError, subprocess.SubprocessError:
-        message = f"run preparation failed at {step}"
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        message = f"run preparation failed at {step}: {preparation_cause(exc)}"
         raise Invalid(message) from None
 
 
+def preparation_cause(exc: OSError | ValueError | subprocess.SubprocessError) -> str:
+    if isinstance(exc, Invalid):
+        detail = str(exc)
+    elif isinstance(exc, OSError):
+        detail = exc.strerror or str(exc)
+        if exc.filename is not None:
+            detail += f": {Path(os.fsdecode(exc.filename)).name}"
+    elif isinstance(exc, subprocess.SubprocessError):
+        detail = getattr(exc, "stderr", None) or "git command failed"
+        if isinstance(detail, bytes):
+            detail = detail.decode(errors="replace")
+    else:
+        # Other ValueErrors can contain third-party inputs or credential values.
+        detail = "invalid value"
+    return safe_preparation_detail(detail)
+
+
+def safe_preparation_detail(detail: str) -> str:
+    detail = next(iter(detail.splitlines()), "")
+    detail = "".join(c for c in detail if not unicodedata.category(c).startswith("C"))
+    detail = URL_CREDENTIALS.sub(r"\1[redacted]@", detail)
+    detail = SECRET_DETAIL.sub("[redacted]", detail)
+    for value in sorted(set(os.environ.values()) - {""}, key=len, reverse=True):
+        detail = detail.replace(value, "[redacted]")
+    detail = ABSOLUTE_PATH.sub(r"\1", detail)
+    return detail[:PREPARATION_CAUSE_LIMIT] or "cause unavailable"
+
+
+def ensure_clone_directory(clone: Path) -> None:
+    if any(p.is_symlink() for p in (clone, *clone.parents[:3])):
+        message = "repo clone paths must not be symbolic links"
+        raise Invalid(message)
+    with preparation_step("repo clone directory"):
+        # The run's clone is standalone, so the account's own clone is only a parent.
+        clone.mkdir(parents=True, exist_ok=True)
+
+
 def create(
-    clone: Path, name: str, request: RunRequest, public_repos: tuple[str, ...]
+    clone: Path,
+    name: str,
+    request: RunRequest,
+    token_source: Callable[[], str | None] | None = None,
 ) -> Path:
+    check_fetch_refs(request.fetch_refs)
     parts = repo.parts(request.repo)
-    if parts not in tuple(repo.parts(value) for value in public_repos):
+    if (parts[0], parts[1].lower()) != (repo.DEFAULT_GIT_HOST, repo.DEFAULT_ORG):
         message = (
             f"repository {request.repo}: agent mirrors fetch only "
-            "repositories listed in public_repos"
+            f"{repo.DEFAULT_ORG} repositories"
         )
         raise Invalid(message)
-    host, owner, repository = parts
-    if host != repo.DEFAULT_GIT_HOST:
-        message = "agent mirrors require a GitHub repository"
-        raise Invalid(message)
+    _, owner, repository = parts
     url = f"https://github.com/{owner}/{repository}.git"
-    if not clone.is_dir():
-        message = f"repo clone {clone} does not exist"
-        raise Invalid(message)
+    ensure_clone_directory(clone)
     worktree = clone / ".worktrees" / f"agent-{name}"
     if worktree.parent.is_symlink():
         message = "run clone parent must not be a symbolic link"
@@ -446,8 +516,20 @@ def create(
             stack.enter_context(runfiles.locked(mirror / "agent-mirror.lock"))
         with preparation_step("mirror init"):
             configure_mirror(mirror, url)
-        with preparation_step(f"mirror fetch ({url})"):
-            commit = fetch_commit(mirror, request)
+        fetch_step = f"mirror fetch ({url})"
+        if request.fetch_refs:
+            fetch_step += f"; requested refs: {', '.join(request.fetch_refs)}"
+        with preparation_step(fetch_step):
+            try:
+                commit = fetch_commit(mirror, request)
+            except subprocess.SubprocessError:
+                # A private repository refuses the anonymous fetch. Retry over
+                # https with the run's App token. With no token the fetch fails:
+                # an ssh retry could follow a transfer to another owner.
+                token = token_source() if token_source is not None else None
+                if token is None:
+                    raise
+                commit = fetch_commit(mirror, request, token)
         with preparation_step("clone"):
             worktree.parent.mkdir(exist_ok=True)
             clone_run(mirror, worktree, url)

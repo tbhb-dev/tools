@@ -3,6 +3,7 @@
 `private_name_problems` checks whole tokens, ignoring case and a trailing
 `.git`. A `-private` component or a configured name is private. The exact,
 case-sensitive token `example-private` is a reviewed placeholder exemption.
+Public rule IDs are exempt unless configured as private names.
 
 `draft_problems` combines `[pr_check] private_repos` with the required list in
 `~/.local/state/tbhb/private-repos.txt`. Its header can restrict words to path
@@ -29,6 +30,14 @@ if TYPE_CHECKING:
 
 SUFFIX = "-private"
 PLACEHOLDER = "example-private"
+# Upstream gitleaks rule IDs, plus the canary already public on main.
+PUBLIC_RULE_IDS = frozenset(
+    {
+        "mailgun-private-api-token",
+        "shopify-private-app-access-token",
+        "tbhb-private-canary",
+    }
+)
 PRIVATE_COMPONENT = re.compile(r"-private(?:-|$)")
 PATH_TOKEN = re.compile(r"(?<=[\w.-])/([\w-]+(?:\.[\w-]+)*)(?![\w-])", re.ASCII)
 PATH_HEADER = "# Bare-word exempt, flagged only in path position:"
@@ -69,6 +78,7 @@ def private_name_problems(
         for number, line in enumerate(lines, first)
         for token in dict.fromkeys(TOKEN.findall(line))
         if token != PLACEHOLDER
+        and (token.lower() not in PUBLIC_RULE_IDS or token.lower() in wanted)
         and (
             _path_private(token, line, restricted)
             or (token.lower() not in restricted and _is_private(token, wanted))

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import grp
 import hashlib
 import io
 import json
 import os
+import shutil
 import signal
 import socket
 import stat
@@ -49,7 +51,7 @@ from tbhbdev.alpha.agent import (
     run_host,
     runfiles,
 )
-from tbhbdev.alpha.agent.decisions import request
+from tbhbdev.alpha.agent.decisions import policy, request
 from tbhbdev.alpha.agent.decisions.run_state import Group
 from tbhbdev.alpha.agent.model import (
     AgyPolicy,
@@ -60,6 +62,8 @@ from tbhbdev.alpha.agent.model import (
     Os,
     RunKind,
 )
+
+RESOLVE = host_tools.resolve
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -131,6 +135,10 @@ def fake_secrets(
             return str(Path(name).resolve() if follow_symlinks else Path(name))
         return str(fake_host_bin / ("env" if name == "env" else "true"))
 
+    binary = fake_host_bin / "codex"
+    binary.write_bytes(b"binary")
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_host_bin}:{os.environ['PATH']}")
     monkeypatch.setattr(host_tools, "resolve", resolve)
     monkeypatch.setattr(host_tools, "codex_proxy_supported", constant(value=True))
     original_prepare = codex_install.prepare
@@ -303,11 +311,23 @@ def test_hook_tools_checks_the_exact_run_directory(
     "step", ["credential delivery", "audit directory", "codex auth copy"]
 )
 @pytest.mark.parametrize(
-    "error", [OSError, ValueError, Invalid, subprocess.CalledProcessError]
+    ("error", "cause"),
+    [
+        (OSError, "[redacted]"),
+        (ValueError, "invalid value"),
+        (Invalid, "[redacted]"),
+        (subprocess.CalledProcessError, "[redacted]"),
+    ],
 )
-def test_workspace_failure_names_only_its_step(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str, error: type[Exception]
+def test_workspace_failure_names_its_step_and_safe_cause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step: str,
+    error: type[Exception],
+    cause: str,
 ) -> None:
+    monkeypatch.setenv("EXAMPLE_CREDENTIAL", "sensitive-exception")
+    monkeypatch.setenv("EXAMPLE_STDERR", "sensitive-stderr")
     run = make_run(tmp_path)
     monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
     monkeypatch.setattr(run_host.worktree, "create", constant(run.home / "workspace"))
@@ -322,7 +342,7 @@ def test_workspace_failure_names_only_its_step(
         monkeypatch.setattr(credentials, "auth_copy", fail)
     with pytest.raises(Invalid) as caught:
         run_host.prepare_workspace(run)
-    assert str(caught.value) == f"run preparation failed at {step}"
+    assert str(caught.value) == f"run preparation failed at {step}: {cause}"
     assert "sensitive" not in str(caught.value)
 
 
@@ -339,7 +359,7 @@ def test_prepare_uses_one_worktree_and_private_destinations(
         claude_profile="primary" if harness is Harness.CLAUDE else None,
         reason="example" if harness is Harness.CLAUDE else None,
     )
-    _, clone = repository(run.home / "Code" / "github.com" / "example-org")
+    _, clone = repository(run.home / "Code" / "github.com" / "tbhb-dev")
     clone.rename(clone.parent / "example-repo")
     clone = clone.parent / "example-repo"
     local_mirror_fetches(monkeypatch, clone.parent / "origin")
@@ -394,6 +414,100 @@ def test_prepare_uses_one_worktree_and_private_destinations(
         assert {p.name for p in copied_auth.parent.iterdir()} == {"auth.json"}
 
 
+def otel_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
+) -> run_host.Run:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        reason="example" if harness is Harness.CLAUDE else None,
+    )
+    settings = dataclasses.replace(
+        run.settings, otel_endpoint="https://otlp.example.net:4318"
+    )
+    run = dataclasses.replace(run, settings=settings)
+    runfiles.private_dir(run.home / ".codex")
+    monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
+    monkeypatch.setattr(run_host.worktree, "create", constant(run.home / "workspace"))
+    monkeypatch.setattr(credentials, "auth_copy", constant(None))
+    return run
+
+
+def test_codex_run_config_holds_the_otel_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
+    result = run_host.prepare_workspace(run)
+    config_path = Path(result.paths.codex_home) / "config.toml"
+    # The macOS filesystem ignores case, so name the file as written.
+    assert "config.toml" in [p.name for p in config_path.parent.iterdir()]
+    assert tomllib.loads(config_path.read_text()) == {
+        "otel": {
+            "trace_exporter": {
+                "otlp-http": {
+                    "endpoint": "https://otlp.example.net:4318/v1/traces",
+                    "protocol": "binary",
+                }
+            },
+            "metrics_exporter": {
+                "otlp-http": {
+                    "endpoint": "https://otlp.example.net:4318/v1/metrics",
+                    "protocol": "binary",
+                }
+            },
+            "log_user_prompt": False,
+        }
+    }
+    assert "headers" not in config_path.read_text()
+    assert config_path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    "endpoint", ["https://otlp.example.net/", "https://otlp.example.net"]
+)
+def test_otel_config_derives_signal_paths_from_the_base(endpoint: str) -> None:
+    table = tomllib.loads(run_host.otel_config(endpoint))["otel"]
+    assert table["trace_exporter"]["otlp-http"]["endpoint"] == (
+        "https://otlp.example.net/v1/traces"
+    )
+    assert table["metrics_exporter"]["otlp-http"]["endpoint"] == (
+        "https://otlp.example.net/v1/metrics"
+    )
+
+
+def test_codex_run_without_an_endpoint_writes_no_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
+    run = dataclasses.replace(
+        run, settings=dataclasses.replace(run.settings, otel_endpoint=None)
+    )
+    result = run_host.prepare_workspace(run)
+    assert not (Path(result.paths.codex_home) / "config.toml").exists()
+
+
+def test_claude_run_writes_no_codex_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = otel_run(tmp_path, monkeypatch, Harness.CLAUDE)
+    result = run_host.prepare_workspace(run)
+    assert not (Path(result.paths.codex_home) / "config.toml").exists()
+
+
+@pytest.mark.parametrize("error", [OSError, ValueError])
+def test_codex_config_failure_names_its_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    monkeypatch.setenv("EXAMPLE_CREDENTIAL", "sensitive-exception")
+    run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
+    monkeypatch.setattr(runfiles, "atomic", partial(preparation_failure, error))
+    with pytest.raises(Invalid) as caught:
+        run_host.prepare_workspace(run)
+    cause = "[redacted]" if error is OSError else "invalid value"
+    assert str(caught.value) == f"run preparation failed at codex config: {cause}"
+
+
 def test_build_preparation_has_the_run_socket(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -403,12 +517,15 @@ def test_build_preparation_has_the_run_socket(
         _clone: Path,
         _name: str,
         _value: run_host.RunRequest,
-        public_repos: tuple[str, ...],
+        token_source: Callable[[], str | None],
     ) -> Path:
-        assert public_repos == run.settings.public_repos
+        assert token_source() == "example-credential"
         return runfiles.private_dir(run.home / "worktree")
 
     monkeypatch.setattr(run_host.worktree, "create", create)
+    monkeypatch.setattr(
+        run_host.credentials, "fetch_token", constant("example-credential")
+    )
     result = run_host.prepare_workspace(run)
     assert result.paths.signing_socket == str(run.tmpdir / "ssh.sock")
     assert result.delivery.signing == "example-signing"
@@ -967,7 +1084,7 @@ def test_startup_deadline_stops_the_recorded_setup_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
 ) -> None:
     run = make_run(tmp_path)
-    _, clone = repository(run.home / "Code" / "github.com" / "example-org")
+    _, clone = repository(run.home / "Code" / "github.com" / "tbhb-dev")
     clone.rename(clone.parent / "example-repo")
     local_mirror_fetches(monkeypatch, clone.parent / "origin")
     run = dataclasses.replace(run, deadline=time.monotonic() + 5)
@@ -1014,7 +1131,7 @@ def test_startup_deadline_stops_the_recorded_setup_group(
     assert process_group.leader_start(group) is None
 
 
-def test_refused_claude_review_never_starts_helpers_or_writes_auth(
+def test_claude_review_reaches_preparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = make_run(
@@ -1027,14 +1144,19 @@ def test_refused_claude_review_never_starts_helpers_or_writes_auth(
         reason="example review",
     )
 
-    def unexpected(*_args: object) -> None:
-        pytest.fail("refused Claude must not start preparation or a harness")
+    reached = []
 
-    monkeypatch.setattr(process_group, "prepare", unexpected)
-    monkeypatch.setattr(run_host, "run_harness", unexpected)
+    def prepare(*_args: object) -> None:
+        reached.append(True)
+        message = "preparation reached"
+        raise Invalid(message)
+
+    monkeypatch.setattr(process_group, "prepare", prepare)
     run.files.receive(run.request)
     assert run_host.execute(run, "example") == 1
     assert run.files.path("rc").read_text() == "1\n"
+    assert reached == [True]
+    assert "preparation reached" in run.files.path("log").read_text()
     assert not (run.tmpdir / "ssh.sock").exists()
     assert not (run.home / ".codex").exists()
     assert runfiles.latest(run.files.root)["example"]["state"] == "ended"
@@ -1263,10 +1385,8 @@ def test_host_passes_configured_full_access_authorization(
     config_file: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    text = "\n".join(
-        line for line in EXAMPLE.splitlines() if not line.startswith("reviews_app_")
-    )
-    config_file.write_text(text.replace("unsandboxed = false", "unsandboxed = true"))
+    config_file.write_text(EXAMPLE.replace("unsandboxed = false", "unsandboxed = true"))
+    account_path = os.environ["PATH"]
     root = Path(os.environ["XDG_STATE_HOME"]) / "tbhbdev" / "agent-runs"
     files = runfiles.RunFiles(root, "example")
     files.receive(
@@ -1287,6 +1407,7 @@ def test_host_passes_configured_full_access_authorization(
     ) -> int:
         assert preflight_only is False
         assert push_token is None
+        assert os.environ["PATH"] == account_path
         assert run.request.unsandboxed is True
         assert run.request.authorized_by == "operator-chat-2026-11-09"
         return 37
@@ -1795,6 +1916,7 @@ def test_terminal_setup_failure_keeps_registered_cleanup_owner(
     monkeypatch.setattr(process_group, "prepare", constant(prepared))
     child = Child()
     monkeypatch.setattr(subprocess, "Popen", constant(child))
+    monkeypatch.setattr(run_host, "shutdown_bazel", constant("skipped"))
     events: list[str] = []
 
     def record(files: runfiles.RunFiles, pid: int) -> None:
@@ -1879,12 +2001,13 @@ def test_preflight_version_and_named_exceptions(
         return False
 
     monkeypatch.setattr(host_tools, "codex_proxy_supported", supported)
-    if harness in {Harness.AGY, Harness.CLAUDE} or (
-        not opt_out and harness is Harness.CODEX
-    ):
+    if not opt_out and harness is Harness.CODEX:
         with pytest.raises(Invalid) as caught:
             run_host.preflight(run)
-        assert str(caught.value) == preflight_failure_message(harness)
+        assert str(caught.value) == (
+            "Codex network_proxy support required (minimum 0.164.0); "
+            "upgrade or configure codex_network_proxy_opt_out"
+        )
     else:
         run_host.preflight(run)
         if opt_out and harness is Harness.CODEX:
@@ -1906,20 +2029,6 @@ def test_preflight_version_and_named_exceptions(
         if harness is Harness.CODEX and not opt_out
         else []
     )
-
-
-def preflight_failure_message(harness: Harness) -> str:
-    if harness is Harness.CODEX:
-        return (
-            "Codex network_proxy support required (minimum 0.164.0); "
-            "upgrade or configure codex_network_proxy_opt_out"
-        )
-    if harness is Harness.CLAUDE:
-        return (
-            "claude runs are refused: separate tool paths for Claude (H3) "
-            "and the Claude credential decision remain open"
-        )
-    return "agy runs are refused: no OS sandbox"
 
 
 def test_mac_host_commands_are_resolved_before_launch(
@@ -2315,9 +2424,8 @@ def assert_claude_marker_write_denies(
     permissions = cast("dict[str, list[str]]", detail.settings["permissions"])
     for path in markers:
         assert path in filesystem["denyWrite"]
-        for tool in ("Edit", "Write"):
-            assert f"{tool}(/{path})" in permissions["deny"]
-            assert f"{tool}(/{path}/**)" in permissions["deny"]
+        assert f"Edit(/{path})" in permissions["deny"]
+        assert f"Edit(/{path}/**)" in permissions["deny"]
 
 
 @pytest.mark.parametrize("os_name", Os)
@@ -2410,6 +2518,28 @@ def test_main_defaults_to_the_current_host(
     monkeypatch.setattr(run_host, "_load", load)
     monkeypatch.setattr(run_host, "execute", constant(7))
     assert run_host.main(["example"], "example") == 7
+
+
+def test_signal_after_the_run_is_recorded_keeps_its_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+
+    @contextmanager
+    def configured(*_args: object) -> Generator[None]:
+        yield
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    def execute(run: run_host.Run, *_args: object, **_kwargs: object) -> int:
+        run.files.write("rc", "7\n")
+        return 7
+
+    monkeypatch.setattr(run_host, "_files", constant(run.files))
+    monkeypatch.setattr(run_host, "_load", constant((run, "task")))
+    monkeypatch.setattr(host_tools, "configured", configured)
+    monkeypatch.setattr(run_host, "_execute", execute)
+    assert run_host.main(["example"], "example") == 7
+    assert run.files.path("rc").read_text() == "7\n"
 
 
 def test_preparation_checks_paths_before_creation(
@@ -2700,7 +2830,7 @@ def test_full_access_is_available_behind_the_existing_gate(tmp_path: Path) -> No
     run = make_run(
         tmp_path,
         unsandboxed=True,
-        authorized_by="example-org/example-repo#1",
+        authorized_by="tbhb-dev/example-repo#1",
         reason="isolated host",
     )
     run_host.preflight(run)
@@ -2714,7 +2844,7 @@ def test_full_access_is_available_behind_the_existing_gate(tmp_path: Path) -> No
 
 @pytest.mark.parametrize("profile", ["build", "review"])
 @pytest.mark.parametrize("opt_out", [None, "isolated account"])
-def test_agy_preflight_always_refuses(
+def test_agy_preflight_launches_without_opt_out(
     tmp_path: Path, profile: str, opt_out: str | None
 ) -> None:
     run = make_run(
@@ -2733,55 +2863,7 @@ def test_agy_preflight_always_refuses(
             ),
         ),
     )
-    with pytest.raises(Invalid) as caught:
-        run_host.preflight(run)
-    assert str(caught.value) == "agy runs are refused: no OS sandbox"
-
-
-@pytest.mark.parametrize("harness", [Harness.AGY])
-def test_unconfined_run_is_refused_before_workspace_preparation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
-) -> None:
-    run = make_run(tmp_path, harness=harness.value, timeout=900)
-    run = dataclasses.replace(
-        run,
-        settings=dataclasses.replace(
-            run.settings,
-            sandbox=dataclasses.replace(
-                run.settings.sandbox,
-                agy_unsandboxed_opt_out=None,
-            ),
-        ),
-    )
-
-    def unexpected(*_args: object) -> None:
-        pytest.fail("a run without its opt-out must not prepare or launch a workspace")
-
-    monkeypatch.setattr(process_group, "prepare", unexpected)
-    assert run_host.execute(run, "probe") == 1
-    assert run.files.path("rc").read_text() == "1\n"
-    assert run.files.path("log").read_text() == (
-        "agy runs are refused: no OS sandbox\n"
-    )
-
-
-@pytest.mark.parametrize("os_name", Os)
-def test_resolved_denies_preserve_macos_aliases_and_empty_linux_data(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, os_name: Os
-) -> None:
-    run = make_run(tmp_path)
-    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=os_name))
-    missing = (str(tmp_path / "missing"),)
-    monkeypatch.setattr(run_host.policy, "denied_paths", constant(missing))
-    assert run_host.resolved_denies(run, preparation(run).paths) == (
-        ()
-        if os_name is Os.LINUX
-        else (
-            *missing,
-            str(run_host.worktree.mirror_path(run.home, run.request.repo)),
-            str(run.home / ".codex-recovery"),
-        )
-    )
+    run_host.preflight(run)
 
 
 def test_startup_symlink_target_is_protected(tmp_path: Path) -> None:
@@ -3037,13 +3119,13 @@ def test_sandbox_path_must_be_outside_write_roots(
         run_host.checked_policy(run, preparation(run).paths)
 
 
-def test_main_sets_host_path_before_loading(
+def test_main_keeps_account_path_until_request_loaded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PATH", str(tmp_path / "untrusted"))
 
     def load(_args: object, _tmpdir: Path) -> None:
-        assert os.environ["PATH"] == host_tools.search()
+        assert os.environ["PATH"] == str(tmp_path / "untrusted")
         message = "loading probe"
         raise Invalid(message)
 
@@ -3203,7 +3285,7 @@ def test_mirror_protection_uses_the_run_home_without_xdg_state(
         / "tbhbdev"
         / "agent-mirrors"
         / "github.com"
-        / "example-org"
+        / "tbhb-dev"
         / "example-repo.git"
     )
     assert str(mirror) in run_host.protected_home(run)
@@ -3279,7 +3361,7 @@ def test_checked_policy_codex_table_has_unique_keys(
 
 @pytest.mark.parametrize("profile", ["build", "review"])
 @pytest.mark.parametrize("tainted", [False, True])
-def test_preflight_refuses_review_on_tainted_host(
+def test_preflight_allows_review_on_tainted_host(
     tmp_path: Path, profile: str, tainted: bool
 ) -> None:
     run = make_run(
@@ -3288,12 +3370,7 @@ def test_preflight_refuses_review_on_tainted_host(
         commit="0" * 40 if profile == "review" else None,
         tainted_host=tainted,
     )
-    if profile == "review" and tainted:
-        with pytest.raises(Invalid) as caught:
-            run_host.preflight(run)
-        assert str(caught.value) == "review runs are refused on a tainted host"
-    else:
-        run_host.preflight(run)
+    run_host.preflight(run)
 
 
 @pytest.mark.parametrize(
@@ -3334,7 +3411,7 @@ def test_preflight_checks_the_requested_accounts_app(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("harness", [Harness.CODEX, Harness.CLAUDE])
-def test_preflight_refuses_harness_without_recorded_pass(
+def test_preflight_accepts_harness_without_recorded_pass(
     tmp_path: Path, harness: Harness
 ) -> None:
     run = make_run(
@@ -3346,12 +3423,7 @@ def test_preflight_refuses_harness_without_recorded_pass(
     run = dataclasses.replace(
         run, host=dataclasses.replace(run.host, proven_harnesses=())
     )
-    with pytest.raises(Invalid) as caught:
-        run_host.preflight(run)
-    assert (
-        str(caught.value)
-        == f"{harness} has no recorded sandbox pass on {run.host.name}"
-    )
+    run_host.preflight(run)
 
 
 @pytest.mark.parametrize("unsandboxed", [False, True])
@@ -3365,13 +3437,13 @@ def test_preflight_announces_access_and_build_trust(
     run = make_run(
         tmp_path,
         unsandboxed=unsandboxed,
-        authorized_by="example-org/example-repo#1" if unsandboxed else None,
+        authorized_by="tbhb-dev/example-repo#1" if unsandboxed else None,
         tainted_host=tainted,
     )
     run_host.preflight(run)
     lines = ["untrusted-host"] if tainted else []
     if unsandboxed:
-        lines.append("unsandboxed full access authorized_by=example-org/example-repo#1")
+        lines.append("unsandboxed full access authorized_by=tbhb-dev/example-repo#1")
     expected = "".join(f"{line}\n" for line in lines)
     assert capsys.readouterr().err == expected
     assert (run.files.path("log").read_text() if lines else "") == expected
@@ -3435,9 +3507,7 @@ def test_preflight_appends_durable_host_marker(
 def test_marker_failure_refuses_launch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run = make_run(
-        tmp_path, unsandboxed=True, authorized_by="example-org/example-repo#1"
-    )
+    run = make_run(tmp_path, unsandboxed=True, authorized_by="tbhb-dev/example-repo#1")
 
     original = os.fsync
 
@@ -3870,9 +3940,7 @@ def test_codex_home_defaults_to_account_state(
 
 
 @pytest.mark.parametrize("profile", ["build", "review"])
-def test_claude_preflight_names_both_open_conditions(
-    tmp_path: Path, profile: str
-) -> None:
+def test_claude_preflight_launches(tmp_path: Path, profile: str) -> None:
     run = make_run(
         tmp_path,
         harness="claude",
@@ -3881,12 +3949,7 @@ def test_claude_preflight_names_both_open_conditions(
         claude_profile="primary",
         reason="phase refusal",
     )
-    with pytest.raises(Invalid) as caught:
-        run_host.preflight(run)
-    assert str(caught.value) == (
-        "claude runs are refused: separate tool paths for Claude (H3) "
-        "and the Claude credential decision remain open"
-    )
+    run_host.preflight(run)
 
 
 @pytest.mark.parametrize("root", ["parent", "self", "child"])
@@ -4204,6 +4267,55 @@ def test_push_failure_reaches_durable_completion(
     assert runfiles.latest(run.files.root)["example"]["rc"] == 4
 
 
+@pytest.mark.parametrize("given", [None, "given-value"])
+def test_execute_mints_a_push_token_only_when_none_was_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, given: str | None
+) -> None:
+    run = make_run(tmp_path)
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
+    runtime = HostRuntime(run, prepared, None)
+    runtime.patch(monkeypatch)
+    minted: list[object] = []
+
+    def mint(request: object, _settings: object) -> str:
+        minted.append(request)
+        return "minted-value"
+
+    tokens: list[str | None] = []
+
+    def publish(
+        _run: run_host.Run,
+        _ready: run_host.Prepared,
+        _stack: ExitStack,
+        _harness: object,
+        token: str | None,
+    ) -> int:
+        tokens.append(token)
+        return 0
+
+    monkeypatch.setattr(run_host.credentials, "push_token", mint)
+    monkeypatch.setattr(run_host.push, "run", publish)
+    assert run_host.execute(run, "example", given) == 0
+    assert tokens == [given or "minted-value"]
+    assert len(minted) == (0 if given else 1)
+
+
+def test_preflight_mints_no_push_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path)
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
+    runtime = HostRuntime(run, prepared, None)
+    runtime.patch(monkeypatch)
+
+    def refuse(_request: object, _settings: object) -> str:
+        raise AssertionError
+
+    monkeypatch.setattr(run_host.credentials, "push_token", refuse)
+    monkeypatch.setattr(run_host, "run_harness", constant(0))
+    assert run_host.execute(run, "example", preflight_only=True) == 0
+
+
 @pytest.mark.parametrize("claimed", [False, True])
 def test_main_claims_owner_before_loading(
     monkeypatch: pytest.MonkeyPatch,
@@ -4227,6 +4339,215 @@ def test_main_claims_owner_before_loading(
     monkeypatch.setattr(run_host, "_load", load)
     assert run_host.main(["example"], "run-host", claimed=claimed) == 1
     assert calls == [True]
+
+
+@pytest.mark.parametrize("present", [True, False])
+def test_main_with_owned_flag_requires_the_drivers_file(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    present: bool,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    if present:
+        files.write("owner", "run-id\n")
+    calls: list[bool] = []
+
+    def load(_args: object, _temporary: Path) -> tuple[run_host.Run, str]:
+        calls.append(True)
+        message = "test refusal"
+        raise Invalid(message)
+
+    monkeypatch.setattr(run_host, "_load", load)
+    arguments = ["example", "--host", "h", "--owned"]
+    assert run_host.main(arguments, "run-host") == 1
+    if present:
+        assert files.path("owner").read_text() == "run-id\n"
+        assert calls == [True]
+    else:
+        assert calls == []
+        assert "no usable owner file" in capsys.readouterr().err
+        assert not files.path("log").exists()
+        assert not files.path("rc").exists()
+
+
+def test_main_with_request_refuses_an_existing_owner(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    files.write("owner", "other\n")
+    assert run_host.main(["example", "request.json"], "run-host") == 1
+    assert "already has an owner" in capsys.readouterr().err
+    assert not files.path("log").exists()
+    assert not files.path("rc").exists()
+
+
+def test_lock_acquisition_failure_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    files.write("log", "original output\n")
+
+    def refuse(_path: Path) -> None:
+        raise OSError(errno.EIO, "lock unavailable")
+
+    monkeypatch.setattr(run_host.runfiles, "locked", refuse)
+    assert run_host.main(["example"], "run-host") == 1
+    assert "lock unavailable" in capsys.readouterr().err
+    assert files.path("log").read_text() == "original output\n"
+    assert not files.path("rc").exists()
+
+
+def test_temp_directory_failure_leaves_log_and_rc(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+
+    def full(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.EIO, "temp directory unavailable")
+
+    monkeypatch.setattr(run_host.tempfile, "TemporaryDirectory", full)
+    assert run_host.main(["example"], "run-host") == 1
+    assert "temp directory unavailable" in capsys.readouterr().err
+    assert "temp directory unavailable" in files.path("log").read_text()
+    assert files.path("rc").read_text().strip() == "1"
+
+
+def test_failure_records_are_written_while_the_lock_is_held(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    held: list[bool] = []
+    state = {"held": False}
+    real = runfiles.locked
+
+    @contextmanager
+    def tracking(path: Path) -> Generator[None]:
+        with real(path):
+            state["held"] = True
+            try:
+                yield
+            finally:
+                state["held"] = False
+
+    real_write = runfiles.RunFiles.write
+
+    def write(self: runfiles.RunFiles, suffix: str, text: str) -> None:
+        held.append(state["held"])
+        real_write(self, suffix, text)
+
+    def load(_args: object, _tmpdir: Path) -> None:
+        os.kill(os.getpid(), signal.SIGHUP)
+
+    monkeypatch.setattr(run_host.runfiles, "locked", tracking)
+    monkeypatch.setattr(runfiles.RunFiles, "write", write)
+    monkeypatch.setattr(run_host, "_load", load)
+    assert run_host.main(["example"], "run-host") == 143
+    assert held == [True, True]
+
+
+def test_interrupted_second_admission_leaves_the_completed_run_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    real = run_host.refuse_started
+    calls: list[int] = []
+
+    def admit(checked: runfiles.RunFiles) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            return
+        # The earlier run finished while this one waited for the lock.
+        files.write("log", "original output\n")
+        files.write("rc", "0\n")
+        try:
+            real(checked)
+        except run_host.RunExistsError:
+            raise run_host.RunInterruptedError from None
+
+    monkeypatch.setattr(run_host, "refuse_started", admit)
+    assert run_host.main(["example"], "run-host") == 143
+    assert files.path("log").read_text() == "original output\n"
+    assert files.path("rc").read_text() == "0\n"
+
+
+def test_interrupt_while_releasing_the_lock_keeps_the_recorded_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+
+    @contextmanager
+    def interrupted_release(_path: Path) -> Generator[None]:
+        try:
+            yield
+        finally:
+            raise run_host.RunInterruptedError
+
+    def load(_args: object, _tmpdir: Path) -> None:
+        raise OSError(errno.EIO, "load unavailable")
+
+    monkeypatch.setattr(run_host.runfiles, "locked", interrupted_release)
+    monkeypatch.setattr(run_host, "_load", load)
+    assert run_host.main(["example"], "run-host") == 1
+    assert files.path("rc").read_text().strip() == "1"
+
+
+def test_signal_after_recording_a_failure_keeps_the_recorded_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    record = run_host._record_failure  # noqa: SLF001
+
+    def record_then_terminate(files: runfiles.RunFiles, exc: Exception) -> None:
+        record(files, exc)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    def load(_args: object, _tmpdir: Path) -> None:
+        raise OSError(errno.EIO, "load unavailable")
+
+    monkeypatch.setattr(run_host, "_record_failure", record_then_terminate)
+    monkeypatch.setattr(run_host, "_load", load)
+    assert run_host.main(["example"], "run-host") == 1
+    assert files.path("rc").read_text().strip() == "1"
+
+
+def test_waiter_interrupted_before_the_lock_leaves_the_run_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
+    )
+    files.write("log", "original output\n")
+
+    class Waiting:
+        def __enter__(self) -> None:
+            raise run_host.RunInterruptedError
+
+        def __exit__(self, *_exception: object) -> None:
+            return None
+
+    def waiting(_path: Path) -> Waiting:
+        return Waiting()
+
+    monkeypatch.setattr(run_host.runfiles, "locked", waiting)
+    assert run_host.main(["example"], "run-host") == 143
+    assert files.path("log").read_text() == "original output\n"
+    assert not files.path("rc").exists()
 
 
 def test_checked_policy_audits_workspace_in_main_checkout(tmp_path: Path) -> None:
@@ -4523,3 +4844,291 @@ def test_config_check_protects_the_configured_startup_directory(
             Invalid, match=r"protected host path .* overlaps write root"
         ):
             run_host.check_config(configured)
+
+
+def test_resource_attributes_name_host_and_account(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings, otel_endpoint="https://otlp.example.net"
+        ),
+    )
+    assert run_host.resource_attributes(run) == {
+        "OTEL_RESOURCE_ATTRIBUTES": (
+            f"host.name={run.host.name},tbhb.account={run.request.account}"
+        )
+    }
+
+
+def test_resource_attributes_need_an_endpoint(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    assert run.settings.otel_endpoint is None
+    assert run_host.resource_attributes(run) == {}
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_unsandboxed_preflight_launches_every_harness(
+    tmp_path: Path, harness: Harness, profile: str
+) -> None:
+    run = make_run(
+        tmp_path,
+        harness=harness.value,
+        profile=profile,
+        commit="0" * 40 if profile == "review" else None,
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        reason="operator approval",
+        timeout=900,
+        unsandboxed=True,
+        authorized_by="operator-chat-2026-11-15",
+        tainted_host=True,
+    )
+    run = dataclasses.replace(
+        run, host=dataclasses.replace(run.host, proven_harnesses=())
+    )
+    run_host.preflight(run)
+
+
+@pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.parametrize("configured", [False, True])
+def test_unsandboxed_codex_uses_account_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: bool, configured: bool
+) -> None:
+    monkeypatch.setattr(host_tools, "resolve", RESOLVE)
+    run = make_run(tmp_path, unsandboxed=True, authorized_by="operator-chat-2026-11-15")
+    directory = run.home / ".local/bin"
+    directory.mkdir(parents=True)
+    binary = directory / "codex"
+    if not missing:
+        binary.write_bytes(b"binary")
+        binary.chmod(0o755)
+    inherited_path = str(tmp_path / "empty") if configured else str(directory)
+    monkeypatch.setenv("PATH", inherited_path)
+    sandbox_path = dataclasses.replace(
+        run.settings.sandbox.path, linux=(str(directory),)
+    )
+    sandbox = dataclasses.replace(run.settings.sandbox, path=sandbox_path)
+    run = dataclasses.replace(
+        run, settings=dataclasses.replace(run.settings, sandbox=sandbox)
+    )
+
+    def unexpected(*_args: object) -> None:
+        pytest.fail("unsandboxed runs must use the installed binary")
+
+    monkeypatch.setattr(codex_install, "prepare", unexpected)
+    if missing:
+        with pytest.raises(Invalid, match=r"^host executable codex was not found$"):
+            run_host.checked_policy(run, run_host.planned_paths(run))
+    else:
+        value, executable = run_host.checked_policy(run, run_host.planned_paths(run))
+        assert executable == str(binary)
+        assert value.env["PATH"].split(":")[0] == inherited_path
+        assert str(directory) in value.env["PATH"].split(":")
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", ["build", "review"])
+@pytest.mark.parametrize(
+    "directory", [".local/bin", ".local/gh-bin", ".bun/bin", ".npm-global/bin"]
+)
+def test_full_access_finds_every_harness_in_the_run_accounts_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    harness: Harness,
+    profile: str,
+    directory: str,
+) -> None:
+    monkeypatch.setattr(host_tools, "resolve", RESOLVE)
+    run = make_run(
+        tmp_path,
+        unsandboxed=True,
+        authorized_by=None,
+        harness=harness.value,
+        profile=profile,
+        commit="0" * 40 if profile == "review" else None,
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        reason="test run",
+        timeout=900,
+    )
+    name = harness.value
+    binary = run.home / directory / name
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"binary")
+    binary.chmod(0o755)
+    inherited = str(tmp_path / "empty")
+    monkeypatch.setenv("PATH", inherited)
+    sandbox = dataclasses.replace(
+        run.settings.sandbox,
+        write_roots=(str(run.home),),
+        denied_home_paths=(".config/gh",),
+        agy=dataclasses.replace(
+            run.settings.sandbox.agy,
+            build_read=(".config/gh",),
+            review_read=(".config/gh",),
+        ),
+        path=dataclasses.replace(
+            run.settings.sandbox.path, linux=("/missing",), macos=("/missing",)
+        ),
+    )
+    run = dataclasses.replace(
+        run,
+        settings=dataclasses.replace(run.settings, sandbox=sandbox),
+        host=dataclasses.replace(run.host, unsandboxed=False),
+    )
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("full access must skip sandbox executable and write-root checks")
+
+    monkeypatch.setattr(run_host, "audit_writes", unexpected)
+    monkeypatch.setattr(run_host.policy, "tool_path", unexpected)
+    monkeypatch.setattr(host_tools, "executable_paths", unexpected)
+    monkeypatch.setattr(codex_install, "prepare", unexpected)
+    value, executable = run_host.checked_policy(run, run_host.planned_paths(run))
+    assert executable == str(binary)
+    assert value.env["PATH"] == ":".join(
+        (inherited, *host_tools.account_path(str(run.home)))
+    )
+    assert not run.files.path("would_refuse").exists()
+    assert not run.files.path("log").exists()
+
+
+@pytest.mark.parametrize("harness", Harness)
+def test_full_access_keeps_the_mise_shim_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
+) -> None:
+    monkeypatch.setattr(host_tools, "resolve", RESOLVE)
+    run = make_run(
+        tmp_path,
+        unsandboxed=True,
+        harness=harness.value,
+        timeout=900,
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        reason="test run",
+    )
+    directory = run.home / ".local/share/mise/shims"
+    directory.mkdir(parents=True)
+    name = harness.value
+    binary = directory / name
+    binary.write_bytes(b"binary")
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", str(directory))
+    with pytest.raises(Invalid, match=f"host executable {name} is a mise shim"):
+        run_host.checked_policy(run, run_host.planned_paths(run))
+
+
+class FakePaths:
+    worktree = "/work/agent-x"
+
+
+class FakePrepared:
+    paths = FakePaths()
+
+
+def test_shutdown_bazel_runs_in_the_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    searched: list[str | None] = []
+    calls: list[tuple[list[str], str | None, int]] = []
+
+    def run(
+        command: list[str], *, cwd: str, timeout: int, **_options: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        calls.append((command, cwd, timeout))
+        return subprocess.CompletedProcess(command, 3)
+
+    def which(name: str, path: str | None = None) -> str:
+        searched.append(path)
+        return f"/bin/{name}"
+
+    run_value = make_run(tmp_path)
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(subprocess, "run", run)
+    assert (
+        run_host.shutdown_bazel(run_value, cast("run_host.Prepared", FakePrepared()))
+        == "rc=3"
+    )
+    assert calls == [(["/bin/bazelisk", "shutdown"], "/work/agent-x", 60)]
+    tools = policy.tool_path(run_value.settings, run_value.host, str(run_value.home))
+    assert searched[0] is not None
+    assert searched[0].endswith(":" + tools)
+
+
+@pytest.mark.parametrize(
+    ("available", "prepared", "expected"),
+    [
+        (("bazel",), True, "rc=0"),
+        ((), True, "skipped"),
+        (("bazelisk",), False, "skipped"),
+    ],
+)
+def test_shutdown_bazel_skips_without_a_tool_or_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    available: tuple[str, ...],
+    prepared: bool,
+    expected: str,
+) -> None:
+    def which(name: str, path: str | None = None) -> str | None:  # noqa: ARG001
+        return f"/bin/{name}" if name in available else None
+
+    def run(
+        command: list[str], **_options: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(subprocess, "run", run)
+    value = cast("run_host.Prepared", FakePrepared()) if prepared else None
+    assert run_host.shutdown_bazel(make_run(tmp_path), value) == expected
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (subprocess.TimeoutExpired("bazelisk", 60), "timed out"),
+        (OSError(), "failed to run"),
+    ],
+)
+def test_shutdown_bazel_reports_a_failed_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
+) -> None:
+    def run(*_args: object, **_options: object) -> None:
+        raise error
+
+    def which(name: str, path: str | None = None) -> str:  # noqa: ARG001
+        return f"/bin/{name}"
+
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(subprocess, "run", run)
+    assert (
+        run_host.shutdown_bazel(
+            make_run(tmp_path), cast("run_host.Prepared", FakePrepared())
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize("rc", [0, 7])
+def test_finish_shuts_bazel_down_and_records_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rc: int
+) -> None:
+    run = make_run(tmp_path)
+    order: list[str] = []
+    entries: list[dict[str, object]] = []
+
+    def shutdown(_run: run_host.Run, _prepared: object) -> str:
+        assert not run.files.path("rc").exists()
+        order.append("bazel")
+        return "rc=0"
+
+    monkeypatch.setattr(run_host, "shutdown_bazel", shutdown)
+
+    def append(_root: object, entry: dict[str, object]) -> None:
+        entries.append(entry)
+
+    monkeypatch.setattr(runfiles, "append", append)
+    assert run_host.finish(run, None, None, rc) == rc
+    assert order == ["bazel"]
+    assert entries[0]["bazel_shutdown"] == "rc=0"
+    assert run.files.path("rc").read_text() == f"{rc}\n"

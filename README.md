@@ -20,10 +20,12 @@ uv tool install git+https://github.com/tbhb-dev/tools
 
 ## Tools
 
+- `admin` makes policy-controlled GitHub administration calls with an append-only audit log. See [GitHub administration](docs/reference/admin.md).
+- `agy` records plain-answer and file-tool runs as OpenTelemetry; `record --dir DIR -- agy ARGS` writes local traces and delta metrics, and `export DIR` sends them to `OTEL_EXPORTER_OTLP_ENDPOINT`.
 - `analytics` applies PostgreSQL migrations and checks the installed catalog contract.
 - `secret` reads and manages 1Password items through the `tbhbdev.secrets` library.
 - `host` manages agent hosts from the operator's Mac.
-- `alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`. They may change or go away without notice.
+- `alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`. They may change or go away without notice. `tbhbdev alpha version-check` compares the installed build across hosts.
 
 ## Agent SSH interface
 
@@ -66,7 +68,7 @@ Supply a short-lived push token as `push_token`, or `null` to skip pushing. One 
 | 4 | Branch push failed. |
 | Other | The run-host exit status, including 1 for a refused run, 124 for a timeout, and 143 for an interrupted run. |
 
-The GitHub credential (`gh`) is optional. Without it, build runs don't receive a GitHub token. The `signing` setting also accepts an absolute path to an account-owned OpenSSH key file with no group or world access. Sandbox rules deny access to that path.
+The GitHub credential (`gh`) is optional. Without it, a build run requests its GitHub token from the pull-requests App when the config sets `pull_requests_app_client_id` and `pull_requests_app_pem`, and otherwise has no GitHub credential. The `signing` setting also accepts an absolute path to an account-owned OpenSSH key file with no group or world access. Sandbox rules deny access to that path.
 
 ## Documentation
 

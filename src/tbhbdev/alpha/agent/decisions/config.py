@@ -44,6 +44,7 @@ _SIGNING_REFERENCE = re.compile(
 )
 _REFERENCE_PARTS = 3
 _PROGRAMS = ("bash", "zsh")
+_MAX_PERCENT = 100
 
 
 def parse_duration(value: object) -> int | None:
@@ -222,10 +223,46 @@ def _public_repos(table: _Table) -> tuple[str, ...]:
     values = table.strings("public_repos")
     for value in values:
         try:
-            repo.parts(value)
+            parts = repo.parts(value)
         except Invalid:
             table.fail("public_repos", "must contain valid repository arguments")
+        else:
+            if parts[1].lower() != repo.DEFAULT_ORG:
+                table.fail(
+                    "public_repos", f"must contain only {repo.DEFAULT_ORG} repositories"
+                )
     return values
+
+
+_OTEL_SHAPE = "must be an https URL with no credentials, path, query or fragment"
+# The whole URL is matched, so no other character, such as a quote, a control
+# character or an `@`, can reach the config file, and no parser error can quote
+# the value.
+_OTEL_URL = re.compile(
+    r"https://(?P<host>[a-z0-9.-]+)(?::(?P<port>[1-9][0-9]{0,4}))?/?"
+)
+MAX_PORT = 65535
+
+
+def _otel_endpoint(root: _Table, network_domains: tuple[str, ...]) -> str | None:
+    """The base URL a harness exports telemetry to, which carries no credential.
+
+    The URL has no path, so a token can't ride in it, and its host must be one
+    the runs may already reach.
+    """
+    if "otel" not in root.values:
+        return None
+    table = root.table("otel")
+    table.only("endpoint")
+    endpoint = table.text("endpoint")
+    match = _OTEL_URL.fullmatch(endpoint)
+    if match is None:
+        table.fail("endpoint", _OTEL_SHAPE)
+    if match["port"] and int(match["port"]) > MAX_PORT:
+        table.fail("endpoint", _OTEL_SHAPE)
+    if match["host"] not in network_domains:
+        table.fail("endpoint", "host must be listed in [agent.sandbox] network_domains")
+    return endpoint
 
 
 def _sandbox(table: _Table) -> Sandbox:
@@ -300,6 +337,13 @@ def _reviews_app(table: _Table) -> tuple[str | None, str | None, str | None]:
     )
 
 
+def _pull_requests_app(table: _Table) -> tuple[str | None, str | None]:
+    keys = ("pull_requests_app_client_id", "pull_requests_app_pem")
+    if not table.values.keys() & set(keys):
+        return None, None
+    return table.reference(keys[0]), table.reference(keys[1])
+
+
 def _credentials(table: _Table) -> tuple[Credentials, ...]:
     if not table.values:
         table.fail("account", "is required")
@@ -312,18 +356,26 @@ def _credentials(table: _Table) -> tuple[Credentials, ...]:
             "reviews_app_id",
             "reviews_app_client_id",
             "reviews_app_pem",
+            "pull_requests_app_client_id",
+            "pull_requests_app_pem",
             "signing",
         )
         app_id, client_id, pem = _reviews_app(entry)
+        pull_requests_client_id, pull_requests_pem = _pull_requests_app(entry)
+        gh = entry.reference("gh") if "gh" in entry.values else None
+        if gh is not None and pull_requests_pem is not None:
+            entry.fail("gh", "must not be set with the pull_requests_app keys")
         accounts.append(
             Credentials(
                 account=account,
-                gh=entry.reference("gh") if "gh" in entry.values else None,
+                gh=gh,
                 docker=entry.reference("docker") if "docker" in entry.values else None,
                 reviews_app_id=app_id,
                 reviews_app_client_id=client_id,
                 reviews_app_pem=pem,
                 signing=entry.reference("signing"),
+                pull_requests_app_client_id=pull_requests_client_id,
+                pull_requests_app_pem=pull_requests_pem,
             )
         )
     return tuple(accounts)
@@ -379,13 +431,22 @@ def _hosts(root: _Table) -> tuple[Host, ...]:
 def _proven_harnesses(table: _Table) -> tuple[Harness, ...]:
     value = table.value("proven_harnesses")
     if not isinstance(value, list):
-        table.fail("proven_harnesses", "must list distinct codex or claude names")
+        table.fail("proven_harnesses", "must list distinct codex, claude or agy names")
     entries: list[object] = value
-    if any(name not in ("codex", "claude") for name in entries) or len(entries) != len(
-        set(entries)
-    ):
-        table.fail("proven_harnesses", "must list distinct codex or claude names")
+    if any(name not in ("codex", "claude", "agy") for name in entries) or len(
+        entries
+    ) != len(set(entries)):
+        table.fail("proven_harnesses", "must list distinct codex, claude or agy names")
     return tuple(Harness(str(name)) for name in entries)
+
+
+def _percent(table: _Table, key: str, default: int) -> int:
+    if key not in table.values:
+        return default
+    value = table.integer(key)
+    if value > _MAX_PERCENT:
+        table.fail(key, "must be a positive integer of at most 100")
+    return value
 
 
 def _host(table: _Table) -> Host:
@@ -398,6 +459,10 @@ def _host(table: _Table) -> Host:
         "accounts",
         "proven_harnesses",
         "tbhbdev",
+        "load_limit",
+        "min_memory_available_percent",
+        "max_swap_used_percent",
+        "limits_warn_only",
     )
     name = _check_name(table, "name", table.text("name"), HOST_NAME)
     os = table.choice("os", Os)
@@ -405,7 +470,7 @@ def _host(table: _Table) -> Host:
     if shell not in _PROGRAMS:
         table.fail("shell", f"must be one of {', '.join(_PROGRAMS)}")
     account = _check_name(table, "account", table.text("account"), NAME)
-    unsandboxed = table.flag("unsandboxed")
+    unsandboxed = table.flag("unsandboxed") if "unsandboxed" in table.values else True
     accounts = table.strings("accounts")
     if not all(NAME.fullmatch(a) for a in accounts):
         table.fail("accounts", f"must list names matching {NAME.pattern}")
@@ -425,23 +490,27 @@ def _host(table: _Table) -> Host:
         accounts,
         _proven_harnesses(table),
         program,
+        load_limit=table.integer("load_limit")
+        if "load_limit" in table.values
+        else None,
+        min_memory_available_percent=_percent(
+            table, "min_memory_available_percent", 20
+        ),
+        max_swap_used_percent=_percent(table, "max_swap_used_percent", 80),
+        limits_warn_only=table.flag("limits_warn_only")
+        if "limits_warn_only" in table.values
+        else False,
     )
 
 
 def _check_host_accounts(settings: Settings) -> None:
-    known = {c.account: c for c in settings.credentials}
+    known = {c.account for c in settings.credentials}
     for host in settings.hosts:
         for account in host.accounts:
             if account not in known:
                 message = (
                     f"[[agent.host]] accounts names {account}, "
                     f"which has no [agent.credentials.{account}]"
-                )
-                raise Invalid(message)
-            if host.unsandboxed and known[account].reviews_app_id is not None:
-                message = (
-                    f"[[agent.host]] unsandboxed host {host.name} "
-                    f"has reviews App credentials for {account}"
                 )
                 raise Invalid(message)
 
@@ -457,10 +526,12 @@ def parse(agent: dict[str, object]) -> Settings:
     root.only(
         "launch_wait_seconds",
         "agy_timeout",
+        "agy_build_timeout",
         "kill_grace_seconds",
         "max_run_minutes",
         "sockets_dir",
         "public_repos",
+        "otel",
         "sandbox",
         "codex",
         "credentials",
@@ -471,6 +542,7 @@ def parse(agent: dict[str, object]) -> Settings:
         "ssh_keepalive_count_max",
         "host_tag",  # Another command reads this key.
     )
+    sandbox = _sandbox(root.table("sandbox"))
     settings = Settings(
         launch_wait_seconds=root.integer("launch_wait_seconds"),
         agy_timeout_seconds=root.duration("agy_timeout"),
@@ -479,11 +551,14 @@ def parse(agent: dict[str, object]) -> Settings:
             root.integer("max_run_minutes") if "max_run_minutes" in agent else None
         ),
         sockets_dir=root.path("sockets_dir"),
-        sandbox=_sandbox(root.table("sandbox")),
+        sandbox=sandbox,
         codex=_codex(root.table("codex") if "codex" in agent else None),
         credentials=_credentials(root.table("credentials")),
         claude=_claude(root.table("claude")),
         hosts=_hosts(root),
+        agy_build_timeout_seconds=root.duration("agy_build_timeout")
+        if "agy_build_timeout" in agent
+        else 3600,
         ssh_connect_timeout=root.integer("ssh_connect_timeout")
         if "ssh_connect_timeout" in agent
         else 15,
@@ -494,6 +569,7 @@ def parse(agent: dict[str, object]) -> Settings:
         if "ssh_keepalive_count_max" in agent
         else 3,
         public_repos=_public_repos(root),
+        otel_endpoint=_otel_endpoint(root, sandbox.network_domains),
     )
     _check_host_accounts(settings)
     return settings

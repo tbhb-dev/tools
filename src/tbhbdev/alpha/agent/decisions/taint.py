@@ -6,10 +6,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from tbhbdev.alpha.agent.model import HOST_NAME, NAME, Invalid, Profile
+from tbhbdev.alpha.agent.model import HOST_NAME, NAME, Invalid
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+
+    from tbhbdev.alpha.agent.model import Profile
 
 _TEXT_LIMIT = 200
 
@@ -104,14 +106,11 @@ class Launch:
     label: str | None = None
 
 
-def check_launch(profile: Profile, *, tainted: State) -> Launch:
-    if profile is Profile.REVIEW and tainted.tainted:
-        message = (
-            f"review runs refused: {tainted.host} host={tainted.status}; "
-            "clear with: tbhbdev alpha agent clear-taint "
-            f"{tainted.host} --reason …"
-        )
-        return Launch(65, message)
+def check_launch(
+    profile: Profile,  # noqa: ARG001 -- both profiles use the same taint label
+    *,
+    tainted: State,
+) -> Launch:
     return Launch(label="untrusted-host" if tainted.tainted else None)
 
 

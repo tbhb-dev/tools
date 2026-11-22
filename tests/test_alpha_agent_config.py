@@ -29,13 +29,103 @@ PATHS = "must not contain a NUL or '..' part"
 NON_BLANK = "must be a non-blank string"
 STRINGS = "must be a non-empty list of non-blank strings"
 POSITIVE = "must be a positive integer"
+HTTPS = "must be an https URL with no credentials, path, query or fragment"
+OTEL_HOST = "otlp.example.net"
 DURATION = "must be bare seconds or a number ending in s, m or h, up to 7 days"
 
 
-@pytest.mark.parametrize("entries", [[], ["tbhb-dev/tools", "github.com/a/b"]])
+@pytest.mark.parametrize("entries", [[], ["tbhb-dev/tools", "github.com/TBHB-Dev/b"]])
 def test_public_repositories(entries: list[str]) -> None:
     assert config.parse(GOOD | {"public_repos": entries}).public_repos == tuple(entries)
     assert config.parse(GOOD).public_repos == ()
+
+
+def with_otel(table: Table) -> Table:
+    sandbox = GOOD["sandbox"]
+    assert isinstance(sandbox, dict)
+    return GOOD | {
+        "sandbox": sandbox | {"network_domains": [OTEL_HOST]},
+        "otel": table,
+    }
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://otlp.example.net:4318",
+        "https://otlp.example.net/",
+        "https://otlp.example.net:65535",
+        "https://otlp.example.net:1",
+    ],
+)
+def test_otel_endpoint(endpoint: str) -> None:
+    parsed = config.parse(with_otel({"endpoint": endpoint}))
+    assert parsed.otel_endpoint == endpoint
+    assert config.parse(GOOD).otel_endpoint is None
+
+
+@pytest.mark.parametrize(
+    ("table", "reason"),
+    [
+        ({"endpoint": "http://otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://user:pw@otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://user@otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://:pw@otlp.example.net"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/token"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/a b"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/a\x00b"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/a\x01b"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/a\x7fb"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/\u00e9"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:abc"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:99999"}, HTTPS),
+        ({"endpoint": 'https://otlp.example.net/a"b'}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/a\\b"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/?k=v"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net/#f"}, HTTPS),
+        ({"endpoint": "https://u:p@[::1"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:65536"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:0"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:00080"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:080"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net:123456"}, HTTPS),
+        ({"endpoint": "https://OTLP.example.net"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net\n"}, HTTPS),
+        ({"endpoint": "https://otlp.example.net//"}, HTTPS),
+        ({"endpoint": " https://otlp.example.net"}, HTTPS),
+        (
+            {"endpoint": "https://other.example.net"},
+            "host must be listed in [agent.sandbox] network_domains",
+        ),
+        ({"endpoint": 1}, NON_BLANK),
+        ({}, "is required"),
+    ],
+)
+def test_otel_endpoint_refuses_invalid_values(table: Table, reason: str) -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(with_otel(table))
+    assert str(caught.value) == f"[agent.otel] endpoint {reason}"
+
+
+def test_otel_endpoint_error_never_quotes_the_credential() -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(with_otel({"endpoint": "https://user:hunter2@[::1"}))
+    assert "hunter2" not in str(caught.value)
+
+
+def test_otel_endpoint_needs_a_network_domain() -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(GOOD | {"otel": {"endpoint": "https://otlp.example.net"}})
+    assert str(caught.value) == (
+        "[agent.otel] endpoint host must be listed in [agent.sandbox] network_domains"
+    )
+
+
+def test_otel_refuses_other_keys() -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(with_otel({"endpoint": "https://otlp.example.net", "x": 1}))
+    assert str(caught.value) == "[agent.otel] x not recognized"
 
 
 @pytest.mark.parametrize("entries", [None, "a/b", [1], [""], ["../b"]])
@@ -46,6 +136,15 @@ def test_public_repositories_refuse_invalid_entries(entries: object) -> None:
         "must contain valid repository arguments" if entries == ["../b"] else STRINGS
     )
     assert str(caught.value) == f"[agent] public_repos {reason}"
+
+
+@pytest.mark.parametrize("entry", ["a/b", "github.com/other-org/b", "tbhb-dev-x/b"])
+def test_public_repositories_refuse_other_owners(entry: str) -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(GOOD | {"public_repos": [entry]})
+    assert str(caught.value) == (
+        "[agent] public_repos must contain only tbhb-dev repositories"
+    )
 
 
 UNSAFE_REFERENCES = [
@@ -94,11 +193,12 @@ GOOD: Table = {
     "codex": {"web_search": {"build": "cached", "review": "disabled"}},
     "credentials": {
         "agent": {
-            "gh": "example-vault/example-gh/token",
             "docker": "example-vault/example-docker/config",
             "reviews_app_id": "example-vault/example-app/app_id",
             "reviews_app_client_id": "example-vault/example-app/client_id",
             "reviews_app_pem": "example-vault/example-app/private_key",
+            "pull_requests_app_client_id": "example-vault/example-pr/client_id",
+            "pull_requests_app_pem": "example-vault/example-pr/private_key",
             "signing": "example-vault/example-signing/private_key",
         }
     },
@@ -149,11 +249,13 @@ EXPECTED = model.Settings(
     credentials=(
         model.Credentials(
             account="agent",
-            gh="example-vault/example-gh/token",
+            gh=None,
             docker="example-vault/example-docker/config",
             reviews_app_id="example-vault/example-app/app_id",
             reviews_app_client_id="example-vault/example-app/client_id",
             reviews_app_pem="example-vault/example-app/private_key",
+            pull_requests_app_client_id="example-vault/example-pr/client_id",
+            pull_requests_app_pem="example-vault/example-pr/private_key",
             signing="example-vault/example-signing/private_key",
         ),
     ),
@@ -191,6 +293,19 @@ def edited(*path: str | int, value: object = MISSING) -> Table:
         del holder[path[-1]]
     else:
         holder[path[-1]] = value
+    return table
+
+
+GH_REFERENCE = "example-vault/example-gh/token"
+GOOD_ACCOUNT = cast("Table", cast("Table", GOOD["credentials"])["agent"])
+
+
+def gh_only() -> Table:
+    """GOOD with `gh` in place of the pull-requests App keys."""
+    table = edited("credentials", "agent", "gh", value=GH_REFERENCE)
+    account = cast("Table", cast("Table", table["credentials"])["agent"])
+    del account["pull_requests_app_client_id"]
+    del account["pull_requests_app_pem"]
     return table
 
 
@@ -320,9 +435,11 @@ def test_minimal_values_are_valid() -> None:
     table["kill_grace_seconds"] = 1
     table["max_run_minutes"] = 1
     table["agy_timeout"] = 1
+    table["agy_build_timeout"] = 1
     parsed = config.parse(table)
     assert (parsed.launch_wait_seconds, parsed.kill_grace_seconds) == (1, 1)
     assert (parsed.max_run_minutes, parsed.agy_timeout_seconds) == (1, 1)
+    assert parsed.agy_build_timeout_seconds == 1
 
 
 @pytest.mark.parametrize(
@@ -427,6 +544,8 @@ def _root_errors() -> list[Case]:
             _add(cases, (key,), bad, POSITIVE, root)
     for bad in (0, "0", "0s", "abc", "", "5d", True, 1.5, [5], None, 604801, "169h"):
         _add(cases, ("agy_timeout",), bad, DURATION, root)
+    for bad in (0, "0s", "abc", True, 604801):
+        _add(cases, ("agy_build_timeout",), bad, DURATION, root)
     for key in ("launch_wait_seconds", "agy_timeout", "kill_grace_seconds"):
         _add(cases, (key,), MISSING, "is required", root)
     _add(cases, ("sockets_dir",), MISSING, "is required", root)
@@ -497,7 +616,7 @@ def _credential_errors() -> list[Case]:
     cases: list[Case] = []
     account = "[agent.credentials.agent]"
     for key in REFERENCE_KEYS:
-        if key in ("gh", "docker"):
+        if key in ("gh", "docker") or key.startswith("pull_requests_app"):
             continue
         _add(cases, ("credentials", "agent", key), MISSING, "is required", account)
     for key in REFERENCE_KEYS:
@@ -548,7 +667,7 @@ def _claude_errors() -> list[Case]:
 def _host_errors() -> list[Case]:
     cases: list[Case] = []
     host = "[[agent.host]]"
-    for key in ("name", "os", "shell", "account", "unsandboxed", "accounts"):
+    for key in ("name", "os", "shell", "account", "accounts"):
         _add(cases, ("host", 0, key), MISSING, "is required", host)
     for bad in ("", " ", 5):
         _add(cases, ("host", 0, "name"), bad, NON_BLANK, host)
@@ -716,7 +835,9 @@ def test_credentials_is_not_a_host_key() -> None:
     assert refused(table) == "[[agent.host]] credentials not recognized"
 
 
-@pytest.mark.parametrize("names", [[], ["codex"], ["claude"], ["codex", "claude"]])
+@pytest.mark.parametrize(
+    "names", [[], ["codex"], ["claude"], ["agy"], ["codex", "claude", "agy"]]
+)
 def test_host_records_proven_harnesses(names: list[str]) -> None:
     table = edited("host", 0, "proven_harnesses", value=names)
     assert config.parse(table).hosts[0].proven_harnesses == tuple(
@@ -725,11 +846,11 @@ def test_host_records_proven_harnesses(names: list[str]) -> None:
 
 
 @pytest.mark.parametrize(
-    "value", [None, "codex", [1], ["agy"], ["Codex"], ["codex", "codex"]]
+    "value", [None, "codex", [1], ["unknown"], ["Codex"], ["codex", "codex"]]
 )
 def test_host_refuses_invalid_proven_harnesses(value: object) -> None:
     assert refused(edited("host", 0, "proven_harnesses", value=value)) == (
-        "[[agent.host]] proven_harnesses must list distinct codex or claude names"
+        "[[agent.host]] proven_harnesses must list distinct codex, claude or agy names"
     )
 
 
@@ -886,11 +1007,15 @@ def test_execution_options_name_the_invalid_path(
     assert str(caught.value) == f"[agent.sandbox] {key} {why}"
 
 
-def test_unsandboxed_host_refuses_reviews_app_delivery() -> None:
-    assert refused(edited("host", 0, "unsandboxed", value=True)) == (
-        "[[agent.host]] unsandboxed host example-linux "
-        "has reviews App credentials for agent"
+def test_unsandboxed_host_with_reviews_app_is_allowed() -> None:
+    parsed = config.parse(edited("host", 0, "unsandboxed", value=True))
+    assert parsed.hosts[0].unsandboxed is True
+    assert parsed.credentials[0].reviews_app_id == GOOD_ACCOUNT["reviews_app_id"]
+    assert (
+        parsed.credentials[0].reviews_app_client_id
+        == GOOD_ACCOUNT["reviews_app_client_id"]
     )
+    assert parsed.credentials[0].reviews_app_pem == GOOD_ACCOUNT["reviews_app_pem"]
 
 
 def test_unsandboxed_host_without_reviews_app_is_allowed() -> None:
@@ -976,8 +1101,8 @@ def test_claude_references_refuse_openssh_query(key: str) -> None:
 
 
 def test_github_credential_is_optional() -> None:
-    parsed = config.parse(edited("credentials", "agent", "gh"))
-    assert parsed.credentials[0].gh is None
+    assert config.parse(GOOD).credentials[0].gh is None
+    assert config.parse(gh_only()).credentials[0].gh == GH_REFERENCE
 
 
 @pytest.mark.parametrize("value", ["/example/key", "/key with spaces"])
@@ -1025,3 +1150,84 @@ def test_host_tbhbdev_path(program: str | None) -> None:
             config.parse(value)
         why = "must be an absolute path" if program == "relative" else PATHS
         assert str(caught.value) == f"[[agent.host]] tbhbdev {why}"
+
+
+def test_pull_requests_app_references_are_optional() -> None:
+    table = edited("credentials", "agent", "pull_requests_app_client_id")
+    account = cast("Table", cast("Table", table["credentials"])["agent"])
+    del account["pull_requests_app_pem"]
+    parsed = config.parse(table).credentials[0]
+    assert parsed.pull_requests_app_client_id is None
+    assert parsed.pull_requests_app_pem is None
+    assert config.parse(GOOD).credentials[0].pull_requests_app_pem == (
+        "example-vault/example-pr/private_key"
+    )
+
+
+@pytest.mark.parametrize(
+    ("present", "missing"),
+    [
+        ("pull_requests_app_pem", "pull_requests_app_client_id"),
+        ("pull_requests_app_client_id", "pull_requests_app_pem"),
+    ],
+)
+def test_partial_pull_requests_app_configuration_is_refused(
+    present: str, missing: str
+) -> None:
+    assert present in GOOD_ACCOUNT
+    table = edited("credentials", "agent", missing)
+    assert refused(table) == f"[agent.credentials.agent] {missing} is required"
+
+
+def test_gh_with_the_pull_requests_app_is_refused() -> None:
+    table = edited("credentials", "agent", "gh", value=GH_REFERENCE)
+    assert refused(table) == (
+        "[agent.credentials.agent] gh must not be set with the pull_requests_app keys"
+    )
+    assert config.parse(gh_only()).credentials[0].pull_requests_app_pem is None
+
+
+def test_host_unsandboxed_key_is_optional() -> None:
+    parsed = config.parse(edited("host", 0, "unsandboxed", value=MISSING))
+    assert parsed.hosts[0].unsandboxed is True
+
+
+def limits_host(**changes: object) -> model.Host:
+    table = {
+        "name": "example-linux",
+        "os": "linux",
+        "shell": "bash",
+        "account": "agent",
+        "accounts": ["agent"],
+        "proven_harnesses": ["codex"],
+        **changes,
+    }
+    return config._host(config._Table("[[agent.host]]", table))  # noqa: SLF001
+
+
+def test_host_limits_default_and_set() -> None:
+    host = limits_host()
+    assert (host.load_limit, host.min_memory_available_percent) == (None, 20)
+    assert (host.max_swap_used_percent, host.limits_warn_only) == (80, False)
+    host = limits_host(
+        load_limit=24,
+        min_memory_available_percent=30,
+        max_swap_used_percent=50,
+        limits_warn_only=True,
+    )
+    assert (host.load_limit, host.min_memory_available_percent) == (24, 30)
+    assert (host.max_swap_used_percent, host.limits_warn_only) == (50, True)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "why"),
+    [
+        ("load_limit", 0, "must be a positive integer"),
+        ("min_memory_available_percent", 101, "at most 100"),
+        ("max_swap_used_percent", 0, "must be a positive integer"),
+        ("limits_warn_only", "yes", "must be true or false"),
+    ],
+)
+def test_host_limits_refuse_bad_values(key: str, value: object, why: str) -> None:
+    with pytest.raises(Invalid, match=why):
+        limits_host(**{key: value})

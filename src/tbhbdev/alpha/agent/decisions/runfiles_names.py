@@ -16,6 +16,8 @@ RC_PENDING = ".rc.pending"
 RUN_LOCK = ".run.lock"
 FALLBACK = ".rc.fallback"
 OWNER = ".owner"
+AUDIT = ".audit.json"
+WOULD_REFUSE = ".would_refuse"
 INDEX = "index.jsonl"
 SUFFIXES = (
     REQUEST,
@@ -33,4 +35,6 @@ SUFFIXES = (
     FALLBACK,
     RC,
     OWNER,
+    AUDIT,
+    WOULD_REFUSE,
 )

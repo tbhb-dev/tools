@@ -56,11 +56,45 @@ if TYPE_CHECKING:
 type Json = dict[str, object]
 
 EXIT_FAILURE = 1
+RUN_ENV = "TBHBDEV_AGENT_RUN"  # Set by exec in every run's environment.
 EXIT_USAGE = 2
 EXIT_COOLDOWN = 75
 APP_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*[a-z0-9]")
 REPO_PATTERN = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 # Eleven digits reach the year 5138, which datetime still formats.
+PERMISSION_PATTERN = re.compile(r"[a-z][a-z_]*:(?:read|write)", re.ASCII)
+# GitHub's repository permission names, so a typo fails before any network call.
+PERMISSION_NAMES = frozenset(
+    {
+        "actions",
+        "administration",
+        "checks",
+        "codespaces",
+        "contents",
+        "dependabot_secrets",
+        "deployments",
+        "discussions",
+        "environments",
+        "issues",
+        "merge_queues",
+        "metadata",
+        "packages",
+        "pages",
+        "pull_requests",
+        "repository_advisories",
+        "repository_hooks",
+        "repository_projects",
+        "secret_scanning_alerts",
+        "secrets",
+        "security_events",
+        "single_file",
+        "statuses",
+        "vulnerability_alerts",
+        "workflows",
+    }
+)
+# A run this long of token characters in a failure message may be a credential.
+SECRET_LIKE = re.compile(r"[A-Za-z0-9_.~+/=-]{20,}")
 EPOCH_PATTERN = re.compile(r"[0-9]{1,11}", re.ASCII)
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_.~+/=-]+")
 PEM_PATTERN = re.compile(
@@ -90,6 +124,7 @@ NO_CHECK = False
 HEADER = {"alg": "RS256", "typ": "JWT"}
 MINT_FAILURE = "GitHub App token mint failed"
 USAGE = """usage: {prog} APP OWNER/REPO [--fresh] [--dry-run] [--all-repos] [--vault V]
+                                 [--permissions NAME:LEVEL,...]
        {prog} APP --cooldown-until EPOCH
        {prog} APP --cooldown-status
 """
@@ -135,6 +170,7 @@ class Args:
     vault: str
     cooldown_until: int | None
     cooldown_status: bool
+    permissions: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -177,6 +213,7 @@ def parse_args(argv: Sequence[str]) -> Args:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--all-repos", action="store_true")
     parser.add_argument("--vault", default=DEFAULT_VAULT)
+    parser.add_argument("--permissions", action="append")
     parser.add_argument("--cooldown-until")
     parser.add_argument("--cooldown-status", action="store_true")
     ns = parser.parse_args(argv)
@@ -193,7 +230,13 @@ def parse_args(argv: Sequence[str]) -> Args:
         message = "--cooldown-until and --cooldown-status are exclusive"
         raise UsageError(message)
     if until is not None or ns.cooldown_status:
-        if ns.repo is not None or ns.fresh or ns.dry_run or ns.all_repos:
+        if (
+            ns.repo is not None
+            or ns.fresh
+            or ns.dry_run
+            or ns.all_repos
+            or ns.permissions is not None
+        ):
             message = "a cooldown option takes only the app"
             raise UsageError(message)
     elif ns.repo is None:
@@ -205,6 +248,7 @@ def parse_args(argv: Sequence[str]) -> Args:
     if not valid_vault(ns.vault):
         message = f"vault {ns.vault!r} cannot be a directory name"
         raise UsageError(message)
+    permissions = parse_permissions(ns.permissions)
     return Args(
         ns.app,
         ns.repo or "",
@@ -214,7 +258,38 @@ def parse_args(argv: Sequence[str]) -> Args:
         ns.vault,
         until,
         ns.cooldown_status,
+        permissions,
     )
+
+
+def parse_permissions(values: list[str] | None) -> tuple[tuple[str, str], ...]:
+    """NAME:LEVEL pairs from the option's one comma list, sorted; empty for none.
+
+    Raises:
+        UsageError: The option repeats, an entry isn't NAME:read or NAME:write
+            with a known name, or a name repeats.
+    """
+    if values is None:
+        return ()
+    if len(values) > 1:
+        message = "--permissions can be given once"
+        raise UsageError(message)
+    text = values[0]
+    pairs: dict[str, str] = {}
+    for entry in text.split(","):
+        if (
+            PERMISSION_PATTERN.fullmatch(entry) is None
+            or entry.partition(":")[0] not in PERMISSION_NAMES
+            or entry.partition(":")[0] in pairs
+        ):
+            message = (
+                f"--permissions entry {entry!r} must be a known NAME:read "
+                "or NAME:write, once"
+            )
+            raise UsageError(message)
+        name, _, level = entry.partition(":")
+        pairs[name] = level
+    return tuple(sorted(pairs.items()))
 
 
 def valid_repo(repo: str) -> bool:
@@ -240,12 +315,14 @@ def split_repo(repo: str) -> tuple[str, str]:
 
 def out_dir(state: Path, args: Args) -> Path:
     owner, name = split_repo(args.repo)
+    # A narrowed token has its own directory: `+` can't appear in a repository name.
+    narrowed = "".join(f"+{n.replace('_', '-')}-{v}" for n, v in args.permissions)
     return (
         state
         / args.vault
         / args.app
         / owner
-        / (ALL_REPOS_DIR if args.all_repos else name)
+        / ((ALL_REPOS_DIR if args.all_repos else name) + narrowed)
     )
 
 
@@ -308,12 +385,19 @@ def signing_input(app_id: str, now: int) -> bytes:
 
 
 def lookup_paths(repo: str) -> list[str]:
+    if "/" not in repo:
+        return [f"/orgs/{repo}/installation"]
     owner, _ = split_repo(repo)
     return [f"/repos/{repo}/installation", f"/orgs/{owner}/installation"]
 
 
-def token_body(repo: str, *, all_repos: bool) -> Json:
-    return {} if all_repos else {"repositories": [split_repo(repo)[1]]}
+def token_body(
+    repo: str, *, all_repos: bool, permissions: tuple[tuple[str, str], ...] = ()
+) -> Json:
+    body: Json = {} if all_repos else {"repositories": [split_repo(repo)[1]]}
+    if permissions:
+        body["permissions"] = dict(permissions)
+    return body
 
 
 def json_object(response: httpx.Response) -> Json:
@@ -325,9 +409,11 @@ def json_object(response: httpx.Response) -> Json:
 
 
 def detail(payload: Json) -> str:
-    """GitHub's own `message` field, which is all a failure here quotes."""
+    """GitHub's own `message` field, minus anything that looks like a credential."""
     reason = payload.get("message")
-    return reason if isinstance(reason, str) and reason else "no message"
+    if not isinstance(reason, str) or not reason:
+        return "no message"
+    return SECRET_LIKE.sub("[redacted]", reason)
 
 
 def installation_id(response: httpx.Response) -> int | None:
@@ -571,7 +657,12 @@ def exchange_token(  # noqa: PLR0913  # Optional installation cache seams.
 def request_token(env: Env, args: Args, jwt: str) -> Minted:
     try:
         return exchange_token(
-            env, args.repo, jwt, token_body(args.repo, all_repos=args.all_repos)
+            env,
+            args.repo,
+            jwt,
+            token_body(
+                args.repo, all_repos=args.all_repos, permissions=args.permissions
+            ),
         )
     except InstallationMissingError:
         owner, _ = split_repo(args.repo)
@@ -590,6 +681,8 @@ def mint_token(  # noqa: PLR0913  # Explicit credentials and installation cache.
     installation_found: Callable[[int], None] | None = None,
 ) -> Minted:
     """Mint a token with explicit scope, keeping the key and token in memory.
+
+    REPOSITORY names OWNER/REPO, or just OWNER for organization permissions.
 
     Raises:
         GhAppError: Permissions, signing or the token exchange failed.
@@ -612,10 +705,9 @@ def mint_token(  # noqa: PLR0913  # Explicit credentials and installation cache.
     data = signing_input(app_id, env.now())
     signature = key.sign(data, padding.PKCS1v15(), hashes.SHA256())
     jwt = f"{data.decode()}.{b64url(signature)}"
-    body: Json = {
-        "repositories": [split_repo(repository)[1]],
-        "permissions": dict(permissions),
-    }
+    body: Json = {"permissions": dict(permissions)}
+    if "/" in repository:
+        body["repositories"] = [split_repo(repository)[1]]
     try:
         return exchange_token(
             env,
@@ -705,6 +797,11 @@ def main(argv: list[str], prog: str, *, env: Env | None = None) -> int:
     except UsageError as exc:
         sys.stderr.write(f"{prog}: {exc}\n{USAGE.format(prog=prog)}")
         return EXIT_USAGE
+    if os.environ.get(RUN_ENV):
+        sys.stderr.write(
+            f"{prog}: refused inside an agent run; a run never mints an App token\n"
+        )
+        return EXIT_FAILURE
     try:
         return dispatch(args, env or default_env())
     except GhAppError as exc:

@@ -30,9 +30,22 @@ def parser(prog: str) -> argparse.ArgumentParser:
     execute.add_argument("--repo", required=True)
     execute.add_argument("--ref")
     execute.add_argument(
+        "--fetch-ref",
+        action="append",
+        default=[],
+        metavar="REF",
+        help="fetch refs/pull/N/head or refs/heads/BRANCH during preparation "
+        "(repeat up to 8 times; available as origin/fetched/...; any profile)",
+    )
+    execute.add_argument(
         "--harness", choices=("codex", "claude", "agy"), default="codex"
     )
     execute.add_argument("--allow-non-gemini", action="store_true")
+    execute.add_argument(
+        "--ignore-limits",
+        action="store_true",
+        help="launch although the host's load, memory or swap exceeds its limits",
+    )
     accounts = execute.add_mutually_exclusive_group()
     accounts.add_argument("--account")
     accounts.add_argument("--ops", dest="account", action="store_const", const="ops")
@@ -41,7 +54,10 @@ def parser(prog: str) -> argparse.ArgumentParser:
     execute.add_argument("--profile", choices=("build", "review"), required=True)
     execute.add_argument("--reason")
     execute.add_argument("--claude-profile")
-    execute.add_argument("--unsandboxed")
+    execute.add_argument(
+        "--unsandboxed",
+        help="authorization: owner/repo#N or operator-chat-YYYY-MM-DD",
+    )
     execute.add_argument("--timeout", type=duration)
     execute.add_argument("--schema")
     execute.add_argument("--class", dest="class_")

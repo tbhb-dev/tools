@@ -10,6 +10,7 @@ import json
 import os
 import shlex
 import tarfile
+from pathlib import PurePosixPath
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -28,14 +29,17 @@ from tbhbdev import version
 from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import driver, model, render, taint_store, transport
 from tbhbdev.alpha.agent.decisions import remote as remote_commands
-from tbhbdev.alpha.agent.decisions import request, runfiles_names, taint
+from tbhbdev.alpha.agent.decisions import repo, request, runfiles_names, taint
 from tbhbdev.alpha.agent.model import Invalid, RunKind
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
+
 CONFIG = settings(reference=f"{MARKER}/{MARKER}/{MARKER}")
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
+PREPARE = driver.prepare
 
 
 @pytest.fixture
@@ -46,6 +50,21 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     )
     monkeypatch.setattr(agent.settings, "load", lambda: CONFIG)
 
+    # Keep coverage of management for recorded runs from before the new default.
+    def legacy_prepare(
+        config: model.Settings, args: agent.argparse.Namespace
+    ) -> driver.Run:
+        run = PREPARE(config, args)
+        run.request = dataclasses.replace(
+            run.request,
+            unsandboxed=args.unsandboxed is not None,
+            tainted_host=args.unsandboxed is not None
+            or taint.request_flag(taint_store.load(run.host.name)),
+        )
+        return run
+
+    monkeypatch.setattr(driver, "prepare", legacy_prepare)
+
     def no_sleep(_seconds: float) -> None:
         pass
 
@@ -54,6 +73,22 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
         driver, "time", SimpleNamespace(monotonic=lambda: next(ticks), sleep=no_sleep)
     )
     return result
+
+
+@pytest.fixture
+def no_clean(monkeypatch: pytest.MonkeyPatch) -> None:
+
+    def settled(_settings: model.Settings, _run: driver.Run, _result: int) -> None:
+        pass
+
+    monkeypatch.setattr(driver, "settle", settled)
+
+
+def kept() -> str:
+    tree = repo.clone_path(
+        PurePosixPath("."), driver.load(CONFIG, "sample").request.repo
+    )
+    return f"sample: worktree kept at example-linux:~/{tree}/.worktrees/agent-sample\n"
 
 
 def arguments(remote: Remote, *options: str) -> list[str]:
@@ -68,31 +103,60 @@ def command(verb: str, *options: str) -> int:
     return agent.main([verb, "sample", *options], "example agent")
 
 
-@pytest.mark.parametrize("verb", ["log", "diff", "clean"])
-def test_unsandboxed_refuses_inspection_before_ssh(
-    remote: Remote, capsys: pytest.CaptureFixture[str], verb: str
+def test_unsandboxed_clean_refuses_a_run_without_a_result(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
-    before = {tool: remote.records(tool) for tool in ("ssh", "git", "tmux")}
     capsys.readouterr()
-    assert command(verb) == 65
-    message = (
-        "unsandboxed run: pass --force to move it to trash"
-        if verb == "clean"
-        else "unsandboxed run: inspect agent/sample on GitHub"
+    assert command("clean") == 1
+    assert "clean refused" in capsys.readouterr().err
+    assert driver.metadata_path("sample").exists()
+
+
+@pytest.mark.parametrize(("verb", "profile"), [("log", "build"), ("diff", "review")])
+def test_unsandboxed_inspection_reads_the_host_output(
+    remote: Remote, capsys: pytest.CaptureFixture[str], verb: str, profile: str
+) -> None:
+    options = ["--ref", COMMIT] if profile == "review" else []
+    assert (
+        launch(
+            remote, "--ops", "--unsandboxed", "o/r#1", "--profile", profile, *options
+        )
+        == 0
     )
-    assert capsys.readouterr() == ("", f"{message}\n")
-    assert {tool: remote.records(tool) for tool in before} == before
+    remote.file(".out.final", "verdict text\n")
+    capsys.readouterr()
+    assert command(verb) == 0
+    assert "verdict text" in capsys.readouterr().out
 
 
-def test_unsandboxed_force_clean_only_moves_to_trash(
+@pytest.mark.parametrize("ops", [False, True])
+def test_unsandboxed_build_diff_inspects_commits(
+    remote: Remote, capsys: pytest.CaptureFixture[str], ops: bool
+) -> None:
+    options = ["--ops"] if ops else []
+    assert launch(remote, "--unsandboxed", "o/r#1", *options) == 0
+    remote.file(".out.final", "report without patches\n")
+    capsys.readouterr()
+    assert command("diff") == 0
+    assert capsys.readouterr() == ("diff output\n", "")
+    call = remote.records("ssh")[-1]["args"]
+    assert isinstance(call, list)
+    assert call[call.index("-l") + 1 : -1] == [
+        driver.load(CONFIG, "sample").host.account,
+        "example-linux",
+    ]
+
+
+def test_unsandboxed_clean_of_an_ended_run_only_moves_to_trash(
     remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
     remote.configure(session=False)
+    remote.file(".rc", "0")
     before = {tool: remote.records(tool) for tool in ("ssh", "git", "tmux")}
     capsys.readouterr()
-    assert command("clean", "--force") == 0
+    assert command("clean") == 0
     assert capsys.readouterr() == ("", "")
     assert remote.records("git") == before["git"]
     assert len(remote.records("tmux")) == len(before["tmux"]) + 2
@@ -151,6 +215,10 @@ def test_launch_stream_and_metadata(
             "one",
             "--role",
             "worker",
+            "--fetch-ref",
+            "refs/pull/391/head",
+            "--fetch-ref",
+            "refs/heads/fix-392",
         )
         == 0
     )
@@ -166,6 +234,7 @@ def test_launch_stream_and_metadata(
     assert parsed.account == "agent"
     assert parsed.timeout is None
     assert parsed.startup_deadline_seconds == 120
+    assert parsed.fetch_refs == ("refs/pull/391/head", "refs/heads/fix-392")
     assert (remote.state / "sample.prompt").read_text() == remote.prompt.read_text()
     assert (remote.state / "sample.schema.json").read_text() == schema.read_text()
     assert remote.state.stat().st_mode & 0o777 == 0o700
@@ -178,7 +247,10 @@ def test_launch_stream_and_metadata(
         "host": "example-linux",
         "started": record["started"],
         "owner": record["owner"],
+        "launcher": "coord-review-1",
+        "launcher_session": "session-1",
         "cleaning": False,
+        "ignore_limits": False,
     }
     assert len(record["owner"]) == 32
     assert (remote.state / "sample.owner").read_text() == record["owner"] + "\n"
@@ -187,7 +259,8 @@ def test_launch_stream_and_metadata(
     assert meta.parent.stat().st_mode & 0o777 == 0o700
     calls = remote.records("ssh")
     assert len(calls) == 5
-    archive = base64.b64decode(str(calls[2]["stdin"]))
+    owner_line, archive = base64.b64decode(str(calls[2]["stdin"])).split(b"\n", 1)
+    assert owner_line.decode() == record["owner"]
     with tarfile.open(fileobj=io.BytesIO(archive)) as stream:
         assert stream.getnames() == [
             "sample.request.json",
@@ -196,6 +269,9 @@ def test_launch_stream_and_metadata(
         ]
     for tool in ("ssh", "tmux"):
         assert MARKER not in json.dumps(remote.records(tool))
+    for tool in ("ssh", "tmux"):
+        argv = [record["args"] for record in remote.records(tool)]
+        assert record["owner"] not in json.dumps(argv)
     assert MARKER not in meta.read_text()
     tmux = remote.records("tmux")[0]["args"]
     assert tmux == shlex.split(
@@ -224,18 +300,6 @@ def test_launch_stream_and_metadata(
         ),
         (("--harness", "claude"), "reason is required"),
         (("--unsandboxed", "bad"), "request authorized_by must be"),
-        (
-            ("--unsandboxed", "o/r#1", "--host", "example-macos"),
-            "isn't enabled on this host",
-        ),
-        (
-            ("--unsandboxed", "o/r#1", "--profile", "review"),
-            "applies only to a build run",
-        ),
-        (
-            ("--unsandboxed", "o/r#1", "--harness", "claude", "--reason", "example"),
-            "applies only to a codex run",
-        ),
         (("--harness", "agy"), "agy requires a gemini-*"),
         (("--model", "bad model"), "model must match"),
         (("--effort", "bad effort"), "effort must match"),
@@ -281,11 +345,18 @@ def test_version_mismatch(remote: Remote, capsys: pytest.CaptureFixture[str]) ->
     assert len(remote.records("ssh")) == 2
 
 
-@pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT, "HEAD"])
+def test_review_without_ref_starts_nothing(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert launch(remote, "--profile", "review") == 1
+    assert "a review run needs --ref" in capsys.readouterr().err
+    assert remote.records("ssh") == []
+
+
+@pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT])
 def test_review_ref(remote: Remote, ref: str) -> None:
     remote.configure(refs=f"{COMMIT}\t{ref}\n")
-    options = ("--ref", ref) if ref != "HEAD" else ()
-    assert launch(remote, "--profile", "review", *options) == 0
+    assert launch(remote, "--profile", "review", "--ref", ref) == 0
     assert (
         json.loads((remote.state / "sample.request.json").read_text())["commit"]
         == COMMIT
@@ -325,12 +396,27 @@ def test_claude_case(remote: Remote, profile: str | None) -> None:
     )
 
 
+def test_agy_review_uses_the_review_timeout(remote: Remote) -> None:
+    remote.configure(refs=f"{COMMIT}\ttopic\n")
+    options = ("--harness", "agy", "--model", "gemini-example")
+    assert launch(remote, *options, "--profile", "review", "--ref", "topic") == 0
+    record = json.loads((remote.state / "sample.request.json").read_text())
+    assert record["timeout"] == 900
+
+
 @pytest.mark.parametrize(
     ("options", "timeout"),
     [
         (("--ops", "--unsandboxed", "o/r#1"), None),
-        (("--harness", "agy", "--model", "gemini-example"), 900),
+        (("--harness", "agy", "--model", "gemini-example"), 3600),
         (("--harness", "agy", "--allow-non-gemini", "--timeout", "1h"), 3600),
+        (
+            (
+                *("--harness", "agy", "--model", "gemini-example"),
+                *("--profile", "build", "--timeout", "5m"),
+            ),
+            300,
+        ),
     ],
 )
 def test_request_options(
@@ -375,7 +461,7 @@ def test_launch_deadline(
     remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # Leave time for the input calls, then cross the deadline during polling.
-    ticks = iter([0, 0, 0, 0, 0, 0, 120, 120, 120, 134, 134, 134])
+    ticks = iter([0, 0, 0, 0, 0, 0, 0, 120, 120, 120, 134, 134, 134])
     monkeypatch.setattr(
         driver,
         "time",
@@ -400,13 +486,15 @@ def test_wait_success(
     remote.file(".out", "stream answer\n")
     if final:
         remote.file(".out.final", "final answer\n")
+    expected = kept()
     assert command("wait") == 4
     assert capsys.readouterr() == (
         "sample: rc=4\n"
         + ("final answer\n" if final else "stream answer\n")
         + "\n"
         + render.INSPECTION_WARNING
-        + "\n",
+        + "\n"
+        + expected,
         "",
     )
 
@@ -429,9 +517,10 @@ def test_wait_unknown(remote: Remote, capsys: pytest.CaptureFixture[str]) -> Non
     assert launch(remote) == 0
     capsys.readouterr()
     remote.configure(session=False)
+    expected = kept()
     assert command("wait") == 1
     assert capsys.readouterr() == (
-        "sample: rc=unknown\n\n" + render.INSPECTION_WARNING + "\n",
+        "sample: rc=unknown\n\n" + render.INSPECTION_WARNING + "\n" + expected,
         "",
     )
 
@@ -461,7 +550,7 @@ def test_status(
     started = json.loads(driver.metadata_path("sample").read_text())["started"]
     assert output.out == (
         f"sample: phase=running rc={expected} host=example-linux "
-        f"account=agent started={started}\n"
+        f"account=agent started={started} launcher=coord-review-1\n"
     )
 
 
@@ -576,8 +665,11 @@ def test_stream_transport_failure_never_kills(
     assert not (remote.state / "sample.rc").exists()
 
 
+@pytest.mark.usefixtures("no_clean")
 def test_wait_retries_and_resets_failure_time(
-    remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     assert launch(remote) == 0
     capsys.readouterr()
@@ -685,6 +777,7 @@ def test_metadata_name_and_default_state(
     assert driver.directory() == remote.root / ".local/state/tbhbdev/agent-runs"
 
 
+@pytest.mark.usefixtures("no_clean")
 @pytest.mark.parametrize("poll", ["0.1", "2.5"])
 def test_wait_poll_and_transport_budget(
     remote: Remote,
@@ -817,9 +910,15 @@ def test_kill_grace_and_poll_bounds(
     scripts: list[str] = []
     timeouts: list[float] = []
 
-    def shell(settings: model.Settings, host: model.Host, script: str) -> str:
+    def shell(
+        settings: model.Settings,
+        host: model.Host,
+        script: str,
+        stdin: transport.Stdin | None = None,
+    ) -> str:
         assert settings == config
         assert host == run.host
+        assert stdin == transport.Stdin(run.owner)
         scripts.append(script)
         return ""
 
@@ -844,15 +943,8 @@ def test_kill_grace_and_poll_bounds(
     assert timeouts == [min(30, grace + 2), 1]
     assert sleeps == [0.5]
     assert scripts == [
-        remote_commands.session(
-            "sample",
-            "kill-session",
-            CONFIG.sockets_dir,
-            owner=driver.load(CONFIG, "sample").owner,
-        ),
-        remote_commands.fallback(
-            "sample", CONFIG.sockets_dir, owner=driver.load(CONFIG, "sample").owner
-        ),
+        remote_commands.session("sample", "kill-session", CONFIG.sockets_dir),
+        remote_commands.fallback("sample", CONFIG.sockets_dir),
     ]
 
 
@@ -962,16 +1054,25 @@ def test_exec_spends_one_startup_budget(
     steps: list[str] = []
 
     def shell(
-        settings: model.Settings, host: model.Host, script: str, *, timeout: float
+        settings: model.Settings,
+        host: model.Host,
+        script: str,
+        _stdin: transport.Stdin | None = None,
+        *,
+        timeout: float,
     ) -> str:
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
-        if script == remote_commands.host_marker(host.account):
+        if script == remote_commands.limits():
             assert timeout == 110
+            steps.append("limits")
+            return "0.5 4 1000 900 100 0"
+        if script == remote_commands.host_marker(host.account):
+            assert timeout == 100
             steps.append("marker")
             return ""
         assert script == remote_commands.installed(CONFIG.hosts[0])
-        assert timeout == 100
+        assert timeout == 90
         steps.append("preflight")
         return version.line() + "\n"
 
@@ -986,7 +1087,7 @@ def test_exec_spends_one_startup_budget(
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
         assert name == "sample"
-        assert timeout == 90
+        assert timeout == 80
         assert inputs.owner == driver.load(CONFIG, "sample").owner
         assert inputs.schema is None
         assert inputs.prompt.endswith("Carry out the example.\n")
@@ -997,18 +1098,17 @@ def test_exec_spends_one_startup_budget(
         settings: model.Settings,
         host: model.Host,
         argv: tuple[str, ...],
+        stdin: transport.Stdin | None,
         *,
         timeout: float,
     ) -> str:
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
+        assert stdin == transport.Stdin(driver.load(CONFIG, "sample").owner)
         assert argv == remote_commands.start(
-            "sample",
-            CONFIG.sockets_dir,
-            CONFIG.hosts[0],
-            owner=driver.load(CONFIG, "sample").owner,
+            "sample", CONFIG.sockets_dir, CONFIG.hosts[0]
         )
-        assert timeout == 80
+        assert timeout == 70
         steps.append("start")
         return ""
 
@@ -1022,7 +1122,7 @@ def test_exec_spends_one_startup_budget(
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
         assert name == ("sample", driver.load(CONFIG, "sample").owner)
-        assert timeout == 70
+        assert timeout == 60
         steps.append("poll")
         return transport.Reading("running", None, launched=True, session=True, text="")
 
@@ -1031,7 +1131,7 @@ def test_exec_spends_one_startup_budget(
     monkeypatch.setattr(transport, "call", call)
     monkeypatch.setattr(transport, "read", read)
     assert launch(remote) == 0
-    assert steps == ["marker", "preflight", "stream", "start", "poll"]
+    assert steps == ["limits", "marker", "preflight", "stream", "start", "poll"]
 
 
 @pytest.mark.parametrize(
@@ -1060,6 +1160,7 @@ def test_review_version_mismatch_precedes_clone_read(
     assert remote.records("git") == []
 
 
+@pytest.mark.usefixtures("no_clean")
 def test_successful_wait_resets_failure_for_a_short_window(
     remote: Remote, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1282,11 +1383,11 @@ def test_lost_clean_reply_cannot_clean_new_owner(
         config: model.Settings,
         host: model.Host,
         script: str,
+        stdin: transport.Stdin | None = None,
         *,
         timeout: float = 30,
-        data: bytes = b"",
     ) -> str:
-        result = original(config, host, script, timeout=timeout, data=data)
+        result = original(config, host, script, stdin, timeout=timeout)
         if 'trash="$d/trash/' in script:
             remote.file(".owner", "new-owner\n")
             remote.file(".rc", "0\n")
@@ -1351,11 +1452,11 @@ def test_lost_start_reply_keeps_unreachable_run_reachable(
         config: model.Settings,
         host: model.Host,
         command: tuple[str, ...],
+        stdin: transport.Stdin | None = None,
         *,
-        data: bytes = b"",
         timeout: float = 30,
     ) -> str:
-        reply = original(config, host, command, data=data, timeout=timeout)
+        reply = original(config, host, command, stdin, timeout=timeout)
         if "new-session" in command[2]:
             remote.configure(ssh=[{"rc": 255}])
             message = "lost start reply"
@@ -1409,15 +1510,15 @@ def test_clean_retry_after_rc_was_trashed(
         config: model.Settings,
         host: model.Host,
         script: str,
+        stdin: transport.Stdin | None = None,
         *,
         timeout: float = 30,
-        data: bytes = b"",
     ) -> str:
         if 'trash="$d/trash/' in script:
             (remote.state / "sample.rc").rename(remote.root / "saved-rc")
             message = "failed before owner move"
             raise transport.TransportError(message)
-        return original(config, host, script, timeout=timeout, data=data)
+        return original(config, host, script, stdin, timeout=timeout)
 
     monkeypatch.setattr(transport, "shell", fail)
     assert command("clean") == 1
@@ -1460,6 +1561,10 @@ def test_inspection_uses_recorded_target_and_mirror(
     assert command(verb) == 0
     assert capsys.readouterr() == (verb + " output\n", "")
     calls = [record["args"] for record in remote.records("git")]
+    if verb == "diff":
+        query = calls.pop(0)
+        assert isinstance(query, list)
+        assert "ls-remote" in query
     assert len(calls) == 2
     assert isinstance(calls[0], list)
     assert isinstance(calls[1], list)
@@ -1563,7 +1668,11 @@ def test_inspection_fetch_failure_stops_before_read(remote: Remote, verb: str) -
     assert launch(remote) == 0
     remote.configure(fetch_error=74)
     assert command(verb) == 1
-    assert len(remote.records("git")) == 1
+    calls = remote.records("git")
+    assert len(calls) == (2 if verb == "diff" else 1)
+    args = calls[-1]["args"]
+    assert isinstance(args, list)
+    assert "fetch" in args
 
 
 @pytest.mark.parametrize(
@@ -1610,23 +1719,19 @@ def test_unsandboxed_verbs_after_host_setting_disabled(
     if verb in {"kill", "clean"}:
         remote.configure(session=False)
         remote.file(".rc", "0")
-    before = remote.records("ssh")
-    assert command(verb, *(["--force"] if verb == "clean" else [])) == (
-        65 if verb in {"log", "diff"} else 0
-    )
+    if verb in {"log", "diff"}:
+        remote.file(".out.final", "verdict\n")
+    assert command(verb, *(["--force"] if verb == "clean" else [])) == 0
     output = capsys.readouterr()
     if verb == "status":
         assert "sandbox=none authorized_by=o/r#1" in output.out
-    if verb in {"log", "diff"}:
-        assert "unsandboxed run: inspect agent/sample on GitHub" in output.err
-        assert remote.records("ssh") == before
     if verb == "clean":
         assert not driver.metadata_path("sample").exists()
     if verb == "kill":
         assert any("kill-session" in str(call) for call in remote.records("tmux"))
 
 
-def test_unsandboxed_new_launch_after_host_setting_disabled(
+def test_unsandboxed_new_launch_ignores_host_setting(
     remote: Remote,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1638,9 +1743,9 @@ def test_unsandboxed_new_launch_after_host_setting_disabled(
         ),
     )
     monkeypatch.setattr(agent.settings, "load", lambda: disabled)
-    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 1
-    assert "isn't enabled on this host" in capsys.readouterr().err
-    assert remote.records("ssh") == []
+    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
+    assert capsys.readouterr().err == ""
+    assert remote.records("ssh")
 
 
 @pytest.mark.parametrize("failure", ["transfer", "deadline"])
@@ -1657,11 +1762,11 @@ def test_unsandboxed_unconfirmed_reports_sandbox(
             config: model.Settings,
             host: model.Host,
             command: tuple[str, ...],
+            stdin: transport.Stdin | None = None,
             *,
-            data: bytes = b"",
             timeout: float = 30,
         ) -> str:
-            reply = original(config, host, command, data=data, timeout=timeout)
+            reply = original(config, host, command, stdin, timeout=timeout)
             if "new-session" in command[2]:
                 message = "lost start reply"
                 raise transport.TransportError(message)
@@ -1684,3 +1789,103 @@ def test_unsandboxed_unconfirmed_reports_sandbox(
         f"sample: launch unconfirmed host=example-linux phase={phase}"
         " sandbox=none authorized_by=o/r#1 untrusted-host\n"
     )
+
+
+@pytest.mark.parametrize(
+    ("rc", "branch", "cleaned"),
+    [("0\n", True, True), ("0\n", False, False), ("4\n", True, False)],
+)
+def test_wait_cleans_a_successful_run_with_its_branch(
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    rc: str,
+    branch: bool,
+    cleaned: bool,
+) -> None:
+    assert launch(remote) == 0
+    capsys.readouterr()
+    remote.configure(session=False, branch=branch)
+    remote.file(".rc", rc)
+    expected = kept()
+    assert command("wait") == int(rc)
+    output = capsys.readouterr()
+    assert (expected in output.out) is not cleaned
+    assert driver.metadata_path("sample").exists() is not cleaned
+    assert ("branch agent/sample does not exist on origin" in output.err) is (
+        rc == "0\n" and not branch
+    )
+
+
+def test_wait_keeps_an_unsandboxed_success(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
+    capsys.readouterr()
+    remote.configure(session=False)
+    remote.file(".rc", "0\n")
+    expected = kept()
+    assert command("wait") == 0
+    assert expected in capsys.readouterr().out
+    assert driver.metadata_path("sample").exists()
+
+
+def test_wait_keeps_a_success_when_the_clean_loses_transport(
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert launch(remote) == 0
+    capsys.readouterr()
+    remote.configure(session=False)
+    remote.file(".rc", "0\n")
+    expected = kept()
+
+    def clean(_settings: model.Settings, _run: driver.Run, **_options: object) -> int:
+        message = "ssh lost"
+        raise transport.TransportError(message)
+
+    monkeypatch.setattr(driver, "clean", clean)
+    assert command("wait") == 0
+    output = capsys.readouterr()
+    assert expected in output.out
+    assert "ssh lost" in output.err
+    assert driver.metadata_path("sample").exists()
+
+
+def test_wait_keeps_a_success_when_the_clean_fails_unexpectedly(
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert launch(remote) == 0
+    capsys.readouterr()
+    remote.configure(session=False)
+    remote.file(".rc", "0\n")
+    expected = kept()
+
+    def clean(_settings: model.Settings, _run: driver.Run, **_options: object) -> int:
+        message = "disk gone"
+        raise OSError(message)
+
+    monkeypatch.setattr(driver, "clean", clean)
+    assert command("wait") == 0
+    output = capsys.readouterr()
+    assert expected in output.out
+    assert "cleanup state unknown: disk gone" in output.err
+
+
+def test_wait_never_forces_the_clean(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert launch(remote) == 0
+    remote.configure(session=False)
+    remote.file(".rc", "0\n")
+    forced: list[object] = []
+
+    def clean(_settings: model.Settings, _run: driver.Run, *, force: object) -> int:
+        forced.append(force)
+        return 0
+
+    monkeypatch.setattr(driver, "clean", clean)
+    assert command("wait") == 0
+    assert forced == [False]

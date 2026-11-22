@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shlex
-from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -14,6 +13,8 @@ if TYPE_CHECKING:
     from tbhbdev.alpha.agent.model import Host
 
 PREFIX = """PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+PATH="$HOME/.local/bin:$PATH"
 export PATH
 LC_ALL=C
 LANG=C
@@ -89,22 +90,24 @@ test "$(find "$s" -prune -type d -user "$(id -un)" -perm 0700)" = "$s" || exit 6
     )
 
 
-def owned(name: str, owner: str) -> str:
+def owned(name: str) -> str:
+    """Check the owner on stdin's first line against the run's owner file.
+
+    The owner never appears in the script, because ssh arguments reach audit
+    logs. ``transport`` writes the owner as the first line of stdin.
+    """
     path = f'"$d/{name}{files.OWNER}"'
     return (
         PREFIX
         + ROOT
+        + 'IFS= read -r given || exit 73\ntest -n "$given" || exit 73\n'
         + f"test ! -L {path} && test -f {path} && "
-        + f'test "$(cat {path})" = {shlex.quote(owner)} || exit 73\n'
+        + f'test "$(cat {path})" = "$given" || exit 73\n'
     )
 
 
-def session(name: str, command: str, sockets_dir: str, *, owner: str) -> str:
-    return (
-        owned(name, owner)
-        + socket_root(sockets_dir)
-        + f"tmux_state {command} ag-{name}\n"
-    )
+def session(name: str, command: str, sockets_dir: str) -> str:
+    return owned(name) + socket_root(sockets_dir) + f"tmux_state {command} ag-{name}\n"
 
 
 def program(host: Host) -> str:
@@ -133,6 +136,44 @@ def host_marker(account: str) -> str:
     return PREFIX + "perl -e " + shlex.quote(read) + " " + shlex.quote(str(marker))
 
 
+def limits() -> str:
+    """Print one line of host numbers: load, CPUs, then memory and swap in KiB.
+
+    The fields are the 1-minute load, the logical CPU count, MemTotal,
+    MemAvailable, swap total and swap used.
+    """
+    linux = (
+        "read l _ < /proc/loadavg || exit 1\n"
+        "c=$(nproc) || exit 1\n"
+        'awk -v l="$l" -v c="$c" \'/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} '
+        "/^SwapTotal:/{s=$2} /^SwapFree:/{f=$2} "
+        "END{if (t!~/^[0-9]+$/ || a!~/^[0-9]+$/ "
+        "|| s!~/^[0-9]+$/ || f!~/^[0-9]+$/) exit 1; "
+        "print l, c, t, a, s, s-f}' "
+        "/proc/meminfo\n"
+    )
+    macos = (
+        "l=$(sysctl -n vm.loadavg) || exit 1\n"
+        "c=$(sysctl -n hw.logicalcpu) || exit 1\n"
+        "m=$(sysctl -n hw.memsize) || exit 1\n"
+        "u=$(sysctl -n vm.swapusage) || exit 1\n"
+        "v=$(vm_stat) || exit 1\n"
+        'printf "%s\\n" "$v" | awk -v l="$l" -v c="$c" -v m="$m" -v u="$u" \''
+        "/page size of/{z=$8} "
+        "/^Pages (free|inactive|speculative|purgeable):/{p+=$NF; n++} "
+        'END{split(l,x," "); split(u,w,"[ =M]+"); '
+        'if (z=="" || n!=4 || x[2]=="" || w[1]!="total" || w[3]!="used" '
+        "|| w[2]!~/^[0-9.]+$/ || w[4]!~/^[0-9.]+$/) exit 1; "
+        'printf "%s %s %d %d %d %d\\n", x[2], c, m/1024, p*z/1024, '
+        "w[2]*1024, w[4]*1024}'\n"
+    )
+    return (
+        "# tbhbdev-limits\n"
+        + PREFIX
+        + f'if test "$(uname -s)" = Darwin; then\n{macos}else\n{linux}fi\n'
+    )
+
+
 def preflight(repository: str, ref: str, expected_version: str, host: Host) -> str:
     git_host, owner, project = repo.parts(repository)
     url = f"git@{git_host}:{owner}/{project}.git"
@@ -149,38 +190,42 @@ def preflight(repository: str, ref: str, expected_version: str, host: Host) -> s
     )
 
 
-def transfer(name: str, sockets_dir: str, *, owner: str) -> str:
+def transfer(name: str, sockets_dir: str) -> str:
     return (
         socket_root(sockets_dir)
         + f"""tmux_state has-session ag-{name}
 test "$present" -eq 0 || exit 73
 mkdir -p "$d" && chmod 700 "$d" || exit "$?"
-# The owner is the atomic name claim, before extracting any input.
+# The owner, stdin's first line, is the atomic name claim before the archive.
+IFS= read -r given || exit 73
+test -n "$given" || exit 73
 set -C
 for p in "$d/{name}."*; do
     if test -e "$p" || test -L "$p"; then exit 73; fi
 done
-( printf '%s\\n' {shlex.quote(owner)} > "$d/{name}{files.OWNER}" ) || exit 73
+( printf '%s\\n' "$given" > "$d/{name}{files.OWNER}" ) || exit 73
 tar -xf - -C "$d"
 """
     )
 
 
-def start(name: str, sockets_dir: str, host: Host, *, owner: str) -> tuple[str, ...]:
-    command = shlex.join(("alpha", "agent", "run-host", name, "--host", host.name))
+def start(name: str, sockets_dir: str, host: Host) -> tuple[str, ...]:
+    command = shlex.join(
+        ("alpha", "agent", "run-host", name, "--host", host.name, "--owned")
+    )
     return (
         "/bin/sh",
         "-c",
-        owned(name, owner)
+        owned(name)
         + socket_root(sockets_dir)
         + f'tmux -S "$s/agents" -f /dev/null new-session -d -s ag-{name} '
         + f"{program(host)} {command}",
     )
 
 
-def read(name: str, sockets_dir: str, *, owner: str, answer: bool = False) -> str:
+def read(name: str, sockets_dir: str, *, answer: bool = False) -> str:
     header = (
-        owned(name, owner)
+        owned(name)
         + socket_root(sockets_dir)
         + f"""tmux_state has-session ag-{name}
 field "$d/{name}{files.PHASE}" 756e6b6e6f776e
@@ -205,13 +250,13 @@ elif test -f {output}; then tail -c 65536 {output}; fi
     return header + f"safe_file {log}\nif test -f {log}; then head -c 65536 {log}; fi\n"
 
 
-def fallback(name: str, sockets_dir: str, *, owner: str) -> str:
+def fallback(name: str, sockets_dir: str) -> str:
     rc, pending, marker = (
         f'"$d/{name}{suffix}"'
         for suffix in (files.RC, files.RC_PENDING, files.FALLBACK)
     )
     return (
-        owned(name, owner)
+        owned(name)
         + socket_root(sockets_dir)
         + f"""tmux_state has-session ag-{name}
 test "$present" -eq 0 || exit 1
@@ -233,10 +278,10 @@ fi
     )
 
 
-def keep(name: str, *, owner: str) -> str:
+def keep(name: str) -> str:
     path = f'"$d/{name}{files.KEEP}"'
     return (
-        owned(name, owner)
+        owned(name)
         + HELPERS
         + f"""umask 077
 safe_file {path}
@@ -247,6 +292,19 @@ if test ! -f {path}; then ( : > {path} ); fi
 
 
 # The mirror lock serializes host fetches and reads of the fetched refs.
+# Files and directories git reads inside a run's .git for a format-patch. The
+# fallback refuses when any of them is a symlink.
+GIT_INTERNALS = (
+    "config",
+    "HEAD",
+    "objects",
+    "refs",
+    "packed-refs",
+    "info",
+    "shallow",
+    "commondir",
+)
+
 MIRROR_LOCK = (
     'open(my $lock, ">>", shift) or die "open lock: $!"; '
     'flock($lock, LOCK_EX) or die "lock: $!"; '
@@ -275,11 +333,11 @@ INSPECTION_OUTPUT = (
 )
 
 
-def mirror_command(repository: str, name: str, command: str, *, owner: str) -> str:
+def mirror_command(repository: str, name: str, command: str) -> str:
     git_host, organization, project = repo.parts(repository)
     git_host = git_host.lower()
     return (
-        owned(name, owner)
+        owned(name)
         + HELPERS
         + f'mirror="$state/tbhbdev/agent-mirrors/{git_host}/{organization}/'
         f"""{project}.git"
@@ -300,16 +358,15 @@ perl -MFcntl=:flock -e {shlex.quote(MIRROR_LOCK)} \
     )
 
 
-def origin_branch(repository: str, name: str, *, owner: str) -> str:
+def origin_branch(repository: str, name: str) -> str:
     return mirror_command(
         repository,
         name,
         f"{MIRROR_GIT} ls-remote --end-of-options origin refs/heads/agent/{name}",
-        owner=owner,
     )
 
 
-def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str:
+def inspect(repository: str, name: str, *, limit: int | None) -> str:
     branch = f"refs/heads/agent/{name}"
     base = "refs/tbhbdev/default"
     command = "diff" if limit is None else f"log -n {limit}"
@@ -318,22 +375,98 @@ def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str
         f"{MIRROR_GIT} -c diff.external= --no-optional-locks {command} "
         f"--no-ext-diff --no-textconv --no-color {comparison} --"
     )
+    fallback = ""
+    if limit is None:
+        tree = (
+            repo.clone_path(PurePosixPath("."), repository)
+            / ".worktrees"
+            / f"agent-{name}"
+        )
+        paths = " ".join(
+            '"$HOME"/' + shlex.quote(str(path))
+            for path in (*reversed(tree.parents[:-1]), tree, tree / ".git")
+        )
+        internals = " ".join(
+            '"$HOME"/' + shlex.quote(str(tree / ".git" / entry))
+            for entry in GIT_INTERNALS
+        )
+        run = '"$HOME"/' + shlex.quote(str(tree / ".git"))
+        # Git never reads the run's own config: format-patch runs in a fresh
+        # bare repository and borrows only the run's object store, and the
+        # two commits come from reading HEAD and the ref files as plain text.
+        patch = (
+            f"run={run}\n"
+            "resolve() {\n"
+            '    case "$1" in *[!A-Za-z0-9._/-]*|*..*|*//*) return 65 ;; esac\n'
+            '    if test -f "$run/$1" && test ! -L "$run/$1"; then\n'
+            '        sha=$(sed -n 1p "$run/$1")\n'
+            "    else\n"
+            "        sha=$(awk -v r=\"$1\" '$2 == r {print $1; exit}' "
+            '"$run/packed-refs" 2>/dev/null)\n'
+            "    fi\n"
+            '    case "$sha" in ""|*[!0-9a-f]*) return 65 ;; esac\n'
+            '    test "${#sha}" -eq 40 || return 65\n'
+            "    printf '%s\\n' \"$sha\"\n"
+            "}\n"
+            'links=$(find "$run/objects" "$run/refs" -type l -print -quit) '
+            "|| exit 65\n"
+            'test -z "$links" || exit 65\n'
+            'pack_index=$(find "$run/objects/pack" -name "multi-pack-index*" '
+            "-print -quit) || exit 65\n"
+            'test -z "$pack_index" || exit 65\n'
+            'test ! -e "$run/objects/info/alternates" || exit 65\n'
+            'head=$(sed -n 1p "$run/HEAD")\n'
+            'case "$head" in\n'
+            '    "ref: refs/heads/"*) tip=$(resolve "${head#ref: }") || exit 65 ;;\n'
+            "    *) tip=$head ;;\n"
+            "esac\n"
+            'case "$tip" in ""|*[!0-9a-f]*) exit 65 ;; esac\n'
+            'test "${#tip}" -eq 40 || exit 65\n'
+            'case "$1" in refs/remotes/origin/*) ;; *) exit 65 ;; esac\n'
+            'base=$(resolve "$1") || exit 65\n'
+            "scratch=$(mktemp -d) || exit 65\n"
+            "trap 'rm -rf \"$scratch\"' EXIT\n"
+            f"{GIT} GIT_CONFIG_GLOBAL=/dev/null {GIT_FLAGS} "
+            'init -q --bare --template= "$scratch" || exit 65\n'
+            f'{GIT} GIT_CONFIG_GLOBAL=/dev/null GIT_DIR="$scratch" '
+            f'GIT_OBJECT_DIRECTORY="$run/objects" {GIT_FLAGS} '
+            "-c protocol.allow=never -c diff.external= -c core.multiPackIndex=false "
+            "--no-optional-locks "
+            "format-patch --stdout --no-ext-diff --no-textconv --no-color "
+            "--no-signature --no-attach --no-add-header --no-notes "
+            '"$base..$tip" --\n'
+        )
+        fallback = (
+            f"pushed=$({MIRROR_GIT} ls-remote --end-of-options origin {branch}) "
+            '|| exit "$?"\n'
+            'if test -z "$pushed"; then\n'
+            f"    default=$({MIRROR_GIT} ls-remote --symref "
+            '--end-of-options origin HEAD) || exit "$?"\n'
+            "    base=$(printf '%s\\n' \"$default\" | "
+            'awk \'$1 == "ref:" && $2 ~ /^refs\\/heads\\// && $3 == "HEAD" '
+            '{sub(/^refs\\/heads\\//, "refs/remotes/origin/", $2); print $2}\')\n'
+            '    test -n "$base" || exit 65\n'
+            f"    for p in {paths}; do\n"
+            '        test ! -L "$p" && test -d "$p" || exit 65\n'
+            "    done\n"
+            f"    for p in {internals}; do\n"
+            '        test ! -L "$p" || exit 65\n'
+            "    done\n"
+            f"    perl -e {shlex.quote(INSPECTION_OUTPUT)} "
+            f'/bin/sh -c {shlex.quote(patch)} -- "$base"\n'
+            '    exit "$?"\n'
+            "fi\n"
+        )
     return mirror_command(
         repository,
         name,
-        f"{MIRROR_GIT} -c transfer.fsckObjects=true -c core.logAllRefUpdates=false "
+        fallback
+        + f"{MIRROR_GIT} -c transfer.fsckObjects=true -c core.logAllRefUpdates=false "
         "fetch --no-write-fetch-head --no-tags --no-prune --no-prune-tags "
         f"--end-of-options origin +HEAD:{base} +{branch}:{branch} "
         '|| exit "$?"\n'
         f"perl -e {shlex.quote(INSPECTION_OUTPUT)} /bin/sh -c {shlex.quote(read)}",
-        owner=owner,
     )
-
-
-@dataclass(frozen=True)
-class Cleanup:
-    owner: str
-    force: bool
 
 
 def clean(
@@ -342,7 +475,7 @@ def clean(
     stamp: str,
     sockets_dir: str,
     *,
-    decision: Cleanup,
+    force: bool,
 ) -> str:
     clone = repo.clone_path(PurePosixPath("."), repository)
     tree = f".worktrees/agent-{name}"
@@ -364,14 +497,14 @@ if test -d "$path"; then
 fi
 """
     command = (
-        owned(name, decision.owner)
+        owned(name)
         + FILE_HELPERS
         + socket_root(sockets_dir)
         + f"""tmux_state has-session ag-{name}
 test "$present" -eq 0 || exit 1
 """
     )
-    if not decision.force:
+    if not force:
         command += f"""fallback="$d/{name}{files.FALLBACK}"
 if test -e "$fallback" || test -L "$fallback"; then
     printf '%s\\n' 'clean refused: fallback rc requires --force' >&2

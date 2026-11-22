@@ -39,6 +39,7 @@ BUILD: Data = {
     "tainted_host": False,
     "authorized_by": None,
     "startup_deadline_seconds": 120,
+    "fetch_refs": [],
 }
 REVIEW: Data = {**BUILD, "profile": "review", "commit": COMMIT}
 CLAUDE: Data = {
@@ -153,9 +154,17 @@ def test_missing_fields_are_named() -> None:
     )
 
 
-@pytest.mark.parametrize("key", [k for k in BUILD if k != "v"])
+@pytest.mark.parametrize("key", [k for k in BUILD if k not in {"v", "fetch_refs"}])
 def test_each_field_is_required(key: str) -> None:
     assert refused(made(BUILD, **{key: MISSING})) == f"request is missing fields: {key}"
+
+
+def test_a_request_saved_before_fetch_refs_still_loads() -> None:
+    parsed = request.parse(
+        made(BUILD, fetch_refs=MISSING), host_allows_unsandboxed=False
+    )
+    assert parsed.fetch_refs == ()
+    assert request.to_dict(parsed)["fetch_refs"] == []
 
 
 def test_unknown_fields_are_named() -> None:
@@ -438,24 +447,33 @@ def test_unsandboxed_refuses_other_authorizations(authorization: str) -> None:
     )
 
 
-def test_unsandboxed_rule() -> None:
-    assert request.parse(UNSANDBOXED, host_allows_unsandboxed=True).unsandboxed
-    assert (
-        refused(UNSANDBOXED, host=False)
-        == "request unsandboxed isn't enabled on this host"
+@pytest.mark.parametrize("host", [False, True])
+@pytest.mark.parametrize("full", [False, True])
+@pytest.mark.parametrize("authorization", [None, "o/r#1"])
+def test_unsandboxed_needs_no_host_flag_or_authorization(
+    host: bool, full: bool, authorization: str | None
+) -> None:
+    parsed = request.parse(
+        made(BUILD, unsandboxed=full, authorized_by=authorization),
+        host_allows_unsandboxed=host,
     )
-    assert refused(made(UNSANDBOXED, authorized_by=None)) == (
-        "request unsandboxed requires authorized_by"
+    assert parsed.unsandboxed is full
+    assert parsed.authorized_by == authorization
+
+
+@pytest.mark.parametrize("base", [BUILD, CLAUDE, AGY], ids=["codex", "claude", "agy"])
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_unsandboxed_accepts_every_harness_and_profile(
+    base: Data, profile: str
+) -> None:
+    data = made(
+        base,
+        profile=profile,
+        commit=COMMIT if profile == "review" else None,
+        unsandboxed=True,
+        authorized_by="o/r#1",
     )
-    assert refused(made(BUILD, authorized_by="o/r#1")) == (
-        "request authorized_by requires unsandboxed"
-    )
-    claude = made(CLAUDE, unsandboxed=True, authorized_by="o/r#1")
-    assert refused(claude) == "request unsandboxed applies only to a codex run"
-    agy = made(AGY, unsandboxed=True, authorized_by="o/r#1")
-    assert refused(agy) == "request unsandboxed applies only to a codex run"
-    review = made(REVIEW, unsandboxed=True, authorized_by="o/r#1")
-    assert refused(review) == "request unsandboxed applies only to a build run"
+    assert request.parse(data, host_allows_unsandboxed=True).unsandboxed
 
 
 def test_the_host_flag_does_not_matter_without_unsandboxed() -> None:
@@ -471,8 +489,7 @@ def test_validate_checks_a_built_request() -> None:
             dataclasses.replace(built, model="a b"), host_allows_unsandboxed=False
         )
     unsandboxed = dataclasses.replace(built, unsandboxed=True)
-    with pytest.raises(Invalid, match="requires authorized_by"):
-        request.validate(unsandboxed, host_allows_unsandboxed=True)
+    request.validate(unsandboxed, host_allows_unsandboxed=False)
 
 
 def test_the_request_holds_no_credential_field() -> None:

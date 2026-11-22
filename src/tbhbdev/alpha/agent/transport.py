@@ -47,14 +47,29 @@ def terminal_text(text: str) -> str:
     )
 
 
+@dataclass(frozen=True)
+class Stdin:
+    """What a remote command reads: the run owner, then ``data``.
+
+    ssh arguments reach host audit logs, so the owner travels on stdin.
+    """
+
+    owner: str
+    data: bytes = b""
+
+    def encode(self) -> bytes:
+        return f"{self.owner}\n".encode() + self.data
+
+
 def call(
     settings: Settings,
     host: Host,
     command: tuple[str, ...],
+    stdin: Stdin | None = None,
     *,
-    data: bytes = b"",
     timeout: float = 30,
 ) -> str:
+    data = b"" if stdin is None else stdin.encode()
     args = argv.ssh(
         host,
         command,
@@ -99,11 +114,11 @@ def shell(
     settings: Settings,
     host: Host,
     script: str,
+    stdin: Stdin | None = None,
     *,
     timeout: float = 30,
-    data: bytes = b"",
 ) -> str:
-    return call(settings, host, ("/bin/sh", "-c", script), timeout=timeout, data=data)
+    return call(settings, host, ("/bin/sh", "-c", script), stdin, timeout=timeout)
 
 
 @dataclass(frozen=True)
@@ -136,8 +151,8 @@ def stream(
     shell(
         settings,
         host,
-        remote.transfer(name, settings.sockets_dir, owner=inputs.owner),
-        data=buffer.getvalue(),
+        remote.transfer(name, settings.sockets_dir),
+        Stdin(inputs.owner, buffer.getvalue()),
         timeout=timeout,
     )
 
@@ -154,7 +169,8 @@ def read(
     text = shell(
         settings,
         host,
-        remote.read(name, settings.sockets_dir, owner=owner, answer=answer),
+        remote.read(name, settings.sockets_dir, answer=answer),
+        Stdin(owner),
         timeout=timeout,
     )
     phase, rc, launched, session, tail = text.split("\n", 4)

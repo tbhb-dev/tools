@@ -39,6 +39,9 @@ with (root / (name + ".jsonl")).open("a") as log:
 if name == "ssh":
     if len((root / "ssh.jsonl").read_text().splitlines()) > 20:
         raise AssertionError("ssh call budget exceeded")
+    if "# tbhbdev-limits" in args[-1]:
+        print(control.get("limits", "0.5 4 1000 900 100 0"))
+        sys.exit(control.get("limits_rc", 0))
     plan = control.get("ssh", [])
     if plan:
         item = plan.pop(0)
@@ -83,7 +86,7 @@ elif name == "tmux":
     if verb == "new-session":
         assert args[8:] == [str(root / "home/.local/bin/tbhbdev"),
                             "alpha", "agent", "run-host", "sample",
-                            "--host", "example-linux"]
+                            "--host", "example-linux", "--owned"]
         (run / "sample.run.lock").write_text("")
         control["session"] = True
         launch = control.get("launch", {"launched": ""})
@@ -151,13 +154,15 @@ class Remote:
         values.update(changes)
         path.write_text(json.dumps(values))
 
-    def records(self, tool: str) -> list[dict[str, object]]:
+    def records(self, tool: str, *, limits: bool = False) -> list[dict[str, object]]:
+        """The calls to TOOL, without the limits reads unless LIMITS is true."""
         path = self.root / f"{tool}.jsonl"
-        return (
+        found = (
             [json.loads(line) for line in path.read_text().splitlines()]
             if path.exists()
             else []
         )
+        return [r for r in found if limits or "# tbhbdev-limits" not in str(r["args"])]
 
     def file(self, suffix: str, text: str) -> None:
         (self.state / ("sample" + suffix)).write_text(text)

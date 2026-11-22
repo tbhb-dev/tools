@@ -18,20 +18,12 @@ RECORD = taint.Taint(HOST, ACCOUNT, "sample", "operator-chat-2026-11-10", START)
 CLEARANCE = taint.Clearance(HOST, "Host rebuilt", LATER)
 
 
-def test_review_refused_and_build_labelled() -> None:
-    dirty = taint.state([RECORD], HOST)
-    assert dirty == taint.State(HOST, "tainted", RECORD)
-    assert taint.request_flag(dirty) is True
-    assert taint.check_launch(Profile.REVIEW, tainted=dirty) == (
-        taint.Launch(
-            65,
-            "review runs refused: example-linux host=tainted; "
-            "clear with: tbhbdev alpha agent clear-taint "
-            "example-linux --reason …",
-        )
-    )
-    assert taint.check_launch(Profile.BUILD, tainted=dirty) == taint.Launch(
-        label="untrusted-host"
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("status", ["unknown", "tainted", "clean"])
+def test_host_state_never_refuses_a_launch(profile: Profile, status: str) -> None:
+    state = taint.State(HOST, status)
+    assert taint.check_launch(profile, tainted=state) == taint.Launch(
+        label=None if status == "clean" else "untrusted-host"
     )
 
 
@@ -110,12 +102,7 @@ def test_failed_store_is_tainted() -> None:
     dirty = taint.State(HOST, "tainted", problem="wrong ownership")
     assert taint.request_flag(dirty) is True
     decision = taint.check_launch(Profile.REVIEW, tainted=dirty)
-    assert decision.status == 65
-    assert decision.label is None
-    assert decision.message == (
-        "review runs refused: example-linux host=tainted; "
-        "clear with: tbhbdev alpha agent clear-taint example-linux --reason …"
-    )
+    assert decision == taint.Launch(label="untrusted-host")
     assert taint.check_launch(Profile.BUILD, tainted=dirty).label == "untrusted-host"
 
 

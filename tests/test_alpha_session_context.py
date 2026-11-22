@@ -49,6 +49,8 @@ def test_it_names_the_host_its_role_the_others_and_the_time(
         "Other hosts: example-b, example-c. Reach them only over ssh; "
         '"this machine" and "local" mean example-a.\n'
         "Local time at session start: 2026-01-02 03:04 UTC.\n"
+        "Use `tbhbdev alpha` for GitHub writes: `tbhbdev alpha --help` lists "
+        "the commands.\n"
     )
 
 

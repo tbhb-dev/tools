@@ -10,6 +10,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import pull_request as pr
+from tbhbdev.alpha import review_policy
 
 SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -141,8 +142,11 @@ def draft(number: int, *, force: bool) -> Path:
     return path
 
 
-def check_text(text: str, number: int) -> list[pr.Problem]:
-    """Validate review metadata and its title-free body without reading GitHub."""
+def check_text(text: str, number: int, *, lint: bool = True) -> list[pr.Problem]:
+    """Validate review metadata and its title-free body without reading GitHub.
+
+    Run hosts lack the prose linters, so they pass ``lint=False``.
+    """
     try:
         data, body = pr.parse_frontmatter(text)
     except pr.FrontmatterError as exc:
@@ -173,7 +177,7 @@ def check_text(text: str, number: int) -> list[pr.Problem]:
     first_content = next(
         (index for index, line in enumerate(rendered, 1) if line.strip()), None
     )
-    if first_content is not None:
+    if lint and first_content is not None:
         problems += pr.lint(
             rendered,
             offset + 1,
@@ -195,13 +199,16 @@ def findings_problems(lines: list[pr.Line], first: int) -> list[pr.Problem]:
 
 
 def main(argv: list[str], prog: str) -> int:
-    """Run the review draft or check command."""
+    """Run the review draft, check or policy command."""
+    if argv[:1] == ["policy"]:
+        return review_policy.main(argv[1:], f"{prog} policy")
     parser = argparse.ArgumentParser(prog=prog, description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     create = sub.add_parser("draft")
     create.add_argument("number", type=int)
     create.add_argument("--force", action="store_true")
     sub.add_parser("check").add_argument("number", type=int)
+    sub.add_parser("policy", help="check a worktree's review policy files")
     args = parser.parse_args(argv)
     if args.number < 1:
         parser.error("PR number must be at least 1")

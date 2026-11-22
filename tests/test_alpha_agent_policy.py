@@ -342,50 +342,23 @@ def test_unsandboxed_selects_full_access_for_a_codex_build(os: Os) -> None:
         mode=model.CodexMode.FULL_ACCESS,
         read_roots=(),
         write_roots=(),
-        deny=denied(os, "/example/home/ops"),
+        deny=(),
         approval_policy="never",
         web_search=WebSearch.LIVE,
-        network_proxy=policy.network_proxy(settings()),
+        network_proxy=None,
     )
-    assert result.env == env_of(os, Harness.CODEX, "ops")
-    assert result.deny == denied(os, "/example/home/ops")
+    assert result.env == env_of(os, Harness.CODEX, "ops") | {
+        "PATH": ":".join(
+            host_tools.account_path(env_of(os, Harness.CODEX, "ops")["HOME"])
+        )
+    }
+    assert result.deny == ()
 
 
 def test_a_host_that_allows_it_still_sandboxes_unless_asked() -> None:
     result = made(Os.LINUX, Profile.BUILD, Harness.CODEX, "agent")
     assert isinstance(result.detail, model.CodexPolicy)
     assert result.detail.mode is model.CodexMode.PROFILE
-
-
-@pytest.mark.parametrize(
-    ("host", "harness", "profile", "account", "why"),
-    [
-        (LINUX, Harness.CLAUDE, Profile.BUILD, "agent", "applies only to a codex run"),
-        (LINUX, Harness.AGY, Profile.BUILD, "agent", "applies only to a codex run"),
-        (LINUX, Harness.CODEX, Profile.REVIEW, "agent", "applies only to a build run"),
-        (
-            dataclasses.replace(LINUX, unsandboxed=False),
-            Harness.CODEX,
-            Profile.BUILD,
-            "agent",
-            "isn't enabled on example-linux",
-        ),
-    ],
-)
-def test_unsandboxed_is_refused_outside_its_one_case(
-    host: model.Host, harness: Harness, profile: Profile, account: str, why: str
-) -> None:
-    with pytest.raises(Invalid) as caught:
-        policy.build(
-            settings(),
-            host,
-            harness=harness,
-            profile=profile,
-            account=account,
-            unsandboxed=True,
-            paths=paths(account),
-        )
-    assert str(caught.value) == f"policy unsandboxed {why}"
 
 
 @pytest.mark.parametrize("unsandboxed", [False, True])
@@ -411,12 +384,7 @@ def claude_file_tool_denies(
 ) -> list[str]:
     if profile is Profile.REVIEW:
         protected = [worktree, *protected]
-    return [
-        f"{tool}(/{path}{suffix})"
-        for path in protected
-        for suffix in ("", "/**")
-        for tool in ("Edit", "Write")
-    ]
+    return [f"Edit(/{path}{suffix})" for path in protected for suffix in ("", "/**")]
 
 
 def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]:
@@ -525,6 +493,17 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
 def test_claude_settings(os: Os, profile: Profile, account: str) -> None:
     result = made(os, profile, Harness.CLAUDE, account)
     assert result.detail == model.ClaudePolicy(claude_expected(os, profile, account))
+
+
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("os", Os)
+def test_claude_settings_emit_no_path_write_rules(os: Os, profile: Profile) -> None:
+    # Claude warns that `Write(path)` rules are not matched by file permission
+    # checks and ignores them; `Edit(path)` rules cover every file-writing tool.
+    result = made(os, profile, Harness.CLAUDE, "agent")
+    permissions = dig(claude_settings_of(result), "permissions")
+    rules = [*strings(dig(permissions, "allow")), *strings(dig(permissions, "deny"))]
+    assert not [rule for rule in rules if rule.startswith(("Write(", "NotebookEdit("))]
 
 
 def agy_expected(profile: Profile, account: str) -> tuple[str, ...]:
@@ -1154,21 +1133,54 @@ def test_dev_fd_cannot_reach_a_denied_path(
     )
 
 
-def test_unsandboxed_still_refuses_overlapping_write_roots() -> None:
-    sandbox = dataclasses.replace(SANDBOX, write_roots=(".example-denied",))
-    with pytest.raises(Invalid) as caught:
-        made(
-            Os.LINUX,
-            Profile.BUILD,
-            Harness.CODEX,
-            "agent",
-            unsandboxed=True,
-            config=settings(sandbox=sandbox),
-        )
-    assert str(caught.value) == (
-        "policy write path /example/home/agent/.example-denied "
-        "overlaps the denied path /example/home/agent/.example-denied"
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", Profile)
+@pytest.mark.parametrize("os", Os)
+def test_unsandboxed_skips_all_sandbox_checks(
+    harness: Harness, profile: Profile, os: Os, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sandbox = dataclasses.replace(
+        SANDBOX,
+        write_roots=(".example-denied",),
+        agy=model.AgySandbox(
+            (".example-denied",), (".example-denied",), (".example-denied",)
+        ),
     )
+    run_paths = dataclasses.replace(paths("agent"), signing_socket="/example/denied")
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("full access must skip sandbox policy checks")
+
+    for name in (
+        "protect_host",
+        "denied_paths",
+        "tool_path",
+        "_refuse_overlaps",
+        "_agy",
+    ):
+        monkeypatch.setattr(policy, name, unexpected)
+    value = policy.build(
+        settings(sandbox=sandbox),
+        dataclasses.replace(HOSTS[os], unsandboxed=False),
+        harness=harness,
+        profile=profile,
+        account="agent",
+        unsandboxed=True,
+        paths=run_paths,
+        protected=(run_paths.worktree,),
+        denied=("/example/denied",),
+    )
+    assert value.deny == ()
+    assert value.tool_path == ":".join(host_tools.account_path(run_paths.home))
+    assert value.env["PATH"] == value.tool_path
+    assert value.env["SSH_AUTH_SOCK"] == "/example/denied"
+    if isinstance(value.detail, model.ClaudePolicy):
+        assert value.detail.settings == {
+            "disableAllHooks": True,
+            "sandbox": {"enabled": False},
+        }
+    elif isinstance(value.detail, model.AgyPolicy):
+        assert value.detail.grants == ()
 
 
 @pytest.mark.parametrize("os", Os)
@@ -1423,22 +1435,15 @@ def test_codex_protects_git_configuration_inside_build_write_root(
 
 @pytest.mark.parametrize("profile", Profile)
 @pytest.mark.parametrize("reason", [None, "isolated test machine"])
-def test_agy_requires_named_opt_out(profile: Profile, reason: str | None) -> None:
+def test_agy_needs_no_named_opt_out(profile: Profile, reason: str | None) -> None:
     configured = settings(
         sandbox=dataclasses.replace(SANDBOX, agy_unsandboxed_opt_out=reason)
     )
-    if reason is None:
-        with pytest.raises(Invalid) as caught:
-            made(Os.LINUX, profile, Harness.AGY, "agent", config=configured)
-        assert str(caught.value) == (
-            "agy has no OS sandbox; configure agy_unsandboxed_opt_out "
-            "with a named reason"
-        )
-    else:
-        assert isinstance(
-            made(Os.LINUX, profile, Harness.AGY, "agent", config=configured).detail,
-            model.AgyPolicy,
-        )
+    assert configured.sandbox.agy_unsandboxed_opt_out == reason
+    assert isinstance(
+        made(Os.LINUX, profile, Harness.AGY, "agent", config=configured).detail,
+        model.AgyPolicy,
+    )
 
 
 @pytest.mark.parametrize("reason", [None, "explicit network exception"])
@@ -1599,39 +1604,37 @@ def test_git_entry_and_all_configuration_paths_are_protected() -> None:
 
 
 @pytest.mark.parametrize("reason", [None, "isolated test host"])
-def test_codex_full_access_requires_named_opt_out(reason: str | None) -> None:
-    configured = settings()
-    configured = dataclasses.replace(
-        configured,
-        sandbox=dataclasses.replace(
-            configured.sandbox, codex_unsandboxed_opt_out=reason
-        ),
+def test_codex_full_access_needs_no_named_opt_out(reason: str | None) -> None:
+    configured = settings(
+        sandbox=dataclasses.replace(SANDBOX, codex_unsandboxed_opt_out=reason)
     )
-    if reason is None:
-        with pytest.raises(Invalid) as caught:
-            made(
-                os=Os.LINUX,
-                profile=Profile.BUILD,
-                harness=Harness.CODEX,
-                account="agent",
-                unsandboxed=True,
-                config=configured,
-            )
-        assert str(caught.value) == (
-            "codex has no OS sandbox; configure codex_unsandboxed_opt_out "
-            "with a named reason"
-        )
-    else:
-        value = made(
-            os=Os.LINUX,
-            profile=Profile.BUILD,
-            harness=Harness.CODEX,
-            account="agent",
-            unsandboxed=True,
-            config=configured,
-        )
-        assert isinstance(value.detail, model.CodexPolicy)
+    assert configured.sandbox.codex_unsandboxed_opt_out == reason
+    value = made(
+        Os.LINUX,
+        Profile.BUILD,
+        Harness.CODEX,
+        "agent",
+        unsandboxed=True,
+        config=configured,
+    )
+    assert isinstance(value.detail, model.CodexPolicy)
+    assert value.detail.mode is model.CodexMode.FULL_ACCESS
+    assert value.detail.network_proxy is None
+
+
+@pytest.mark.parametrize("harness", Harness)
+@pytest.mark.parametrize("profile", Profile)
+def test_unsandboxed_policy_for_every_harness(
+    harness: Harness, profile: Profile
+) -> None:
+    value = made(Os.LINUX, profile, harness, "agent", unsandboxed=True)
+    if isinstance(value.detail, model.ClaudePolicy):
+        assert value.detail.settings["sandbox"] == {"enabled": False}
+    elif isinstance(value.detail, model.CodexPolicy):
         assert value.detail.mode is model.CodexMode.FULL_ACCESS
+        assert value.detail.network_proxy is None
+    else:
+        assert isinstance(value.detail, model.AgyPolicy)
 
 
 @pytest.mark.parametrize("harness", Harness)

@@ -75,6 +75,25 @@ NAME_RULES = (
 )
 
 
+# The private config's pointer to the committed config, and a committed
+# config's own [extend] table.
+EXTENDS_PATH = re.compile(r"^(\s*path\s*=\s*)(?:\"[^\"]*\"|'[^']*')", re.MULTILINE)
+EXTEND_TABLE = re.compile(r"^\s*\[extend\]", re.MULTILINE)
+
+
+def with_base(committed: str) -> str:
+    """The committed config with gitleaks' default rules as its base.
+
+    A repository that has dropped ``[extend] useDefault`` gets its base from
+    the Bazel wrapper, which a text scan can't run. Without a base, an
+    allowlist-only ``[[rules]]`` override fails to load. A config that has its
+    own ``[extend]`` table keeps it.
+    """
+    if EXTEND_TABLE.search(committed):
+        return committed
+    return committed + "\n[extend]\nuseDefault = true\n"
+
+
 def private_config() -> Path:
     """The host's private gitleaks config."""
     return Path.home() / GITLEAKS_FILE
@@ -188,12 +207,16 @@ def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) ->
         )
         raise SystemExit(message)
     reduced = without_name_rules(private) if visibility == PRIVATE else None
-    if reduced is None:
-        run_gitleaks(text, what, config, root=root, gitleaks=gitleaks)
-        return
     with tempfile.TemporaryDirectory() as directory:  # mode 0700
+        base = Path(directory) / "committed.toml"
         copy = Path(directory) / "private.toml"
-        copy.touch()
-        copy.chmod(0o600)  # touch's mode is cut by the umask, chmod's is not
-        copy.write_text(reduced)
+        for path in (base, copy):
+            path.touch()
+            path.chmod(0o600)  # touch's mode is cut by the umask, chmod's is not
+        base.write_text(with_base((root / GITLEAKS_EXTENDS).read_text()))
+        # The copies point at the committed copy by absolute path: the config
+        # path stays the root's, and gitleaks runs from there.
+        copy.write_text(
+            EXTENDS_PATH.sub(lambda m: f"{m.group(1)}'{base}'", reduced or private)
+        )
         run_gitleaks(text, what, copy, root=root, gitleaks=gitleaks)

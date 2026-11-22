@@ -54,6 +54,7 @@ HARD_RULES_BLOCK = """- After any denial, stop and report. No workaround by any 
 - Never unset or export the 1Password service-account token variable. No `env`, `printenv`, `set` or `export -p` dumps; no credential helpers; don't read SSH keys, the Codex home, GitHub CLI config, or any token file.
 - Never `rm`; move leftovers with `mv` into `$TMPDIR`. No ps, pgrep, top or sysctl; load checks use `uptime` only.
 - No "core" or "shell" as a module or pattern name. Never write a public IP address. Agents don't open GitHub issues; follow-ups go in a private drafts file.
+- Never bypass a guard or a hook. If a push is refused, push a new branch; never force-push.
 - Touch only your worktree and `$TMPDIR`."""  # noqa: E501 -- fixed rule lines
 REQUIRED_HEADINGS = (
     "## Step 1: worktree first (required)",

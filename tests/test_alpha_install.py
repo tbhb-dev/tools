@@ -79,6 +79,8 @@ for i, arg in enumerate(args):
     print("prek installed " + args[i + 1])
 """
 
+pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
+
 
 @dataclass
 class World:
@@ -244,6 +246,10 @@ def test_claude_hooks() -> None:
             },
             {
                 "matcher": "Bash",
+                "hooks": [{"type": "command", "command": marked("guard-gh-poll")}],
+            },
+            {
+                "matcher": "Write|Edit|MultiEdit|NotebookEdit",
                 "hooks": [{"type": "command", "command": marked("guard-gh-poll")}],
             },
             {
@@ -1925,6 +1931,16 @@ def test_install_git_hooks(world: World, capsys: pytest.CaptureFixture[str]) -> 
     assert stat.S_IMODE((world.hooks / "pre-push").stat().st_mode) == 0o755
 
 
+def test_pre_push_shebang_names_the_base_interpreter_not_the_venv(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "executable", "/work/tree/.venv/bin/python")
+    monkeypatch.setattr(sys, "base_prefix", "/base")
+    assert install.install_git_hooks(None, {}, dry_run=False) == 0
+    first = (world.hooks / "pre-push").read_text().splitlines()[0]
+    assert first == "#!/base/bin/python3"
+
+
 def test_install_git_hooks_from_a_worktree_uses_the_shared_hooks(
     world: World, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2173,6 +2189,7 @@ def test_main_without_options_runs_every_step(monkeypatch: pytest.MonkeyPatch) -
         "install_git_hooks",
         "install_gh_shim",
         "install_config",
+        "install_statusline",
         "install_codex_environment",
         "install_private_files",
     ):
@@ -2182,11 +2199,59 @@ def test_main_without_options_runs_every_step(monkeypatch: pytest.MonkeyPatch) -
         "install_git_hooks",
         "install_gh_shim",
         "install_config",
+        "install_statusline",
         "install_config",
         "install_codex_environment",
         "install_config",
         "install_private_files",
     ]
+
+
+def test_main_passes_a_dry_run_to_the_statusline_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    def step(_name: str, *_args: object, **_kwargs: object) -> int:
+        return 0
+
+    def statusline(_env: object, *, dry_run: object) -> int:
+        seen.append(dry_run)
+        return 0
+
+    for name in (
+        "install_git_hooks",
+        "install_gh_shim",
+        "install_config",
+        "install_codex_environment",
+        "install_private_files",
+    ):
+        monkeypatch.setattr(install, name, partial(step, name))
+    monkeypatch.setattr(install, "install_statusline", statusline)
+    assert install.main(["--dry-run"], "p") == 0
+    assert seen == [True]
+
+
+def test_main_fails_when_only_the_statusline_step_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def step(*_args: object, **_kwargs: object) -> int:
+        return 0
+
+    def statusline(_env: object, *, dry_run: object) -> int:
+        assert dry_run is False
+        return 1
+
+    for name in (
+        "install_git_hooks",
+        "install_gh_shim",
+        "install_config",
+        "install_codex_environment",
+        "install_private_files",
+    ):
+        monkeypatch.setattr(install, name, step)
+    monkeypatch.setattr(install, "install_statusline", statusline)
+    assert install.main([], "p") == 1
 
 
 def test_main_installs_the_git_hooks_and_every_harness(

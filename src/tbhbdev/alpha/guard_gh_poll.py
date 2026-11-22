@@ -9,19 +9,33 @@ relays webhook events into a session, so an agent never needs to poll GitHub.
 These rules apply in every repository, and deny:
 
     gh run watch, gh run list, gh pr checks --watch
+                                                 except the capped allowance
+                                                 below
     gh api|query --paginate                      any endpoint
     gh api|query repos/O/R/actions/runs          and the other list endpoints:
                                                  actions/workflows/W/runs,
                                                  actions/jobs, check-runs,
                                                  check-suites
     while|until|for loops whose condition or body runs gh, or runs both
-                                                 sleep and pgrep
+                                                 sleep and a self-matching
+                                                 pgrep -f
+
+The one exception is a granted allowance for a measurement pass: ``gh run list
+-R OWNER/REPO --limit 100 --json FIELDS``, in exactly that order, for each
+repository in a grant file under ``~/.local/state/tbhb``, one call for each
+repository, and not after the grant's expiry date. A count file beside it
+keeps the tally per repository. Only the operator writes either file: the guard
+denies a Claude Code Write or Edit to them, and any shell command that names
+them or moves their directory. The apply_patch and Antigravity edit tools
+aren't covered. That doesn't cover a script file or a computed path, so the
+allowance is a speed bump against accidents, not a barrier.
 
 The loop rule covers the self-matching wait, ``while pgrep -f fetch.py; do
 sleep 5; done``: pgrep -f matches its own shell's command line, so the loop
 never ends. Single-object reads pass: ``actions/runs/ID``,
 ``actions/runs/ID/jobs``, ``actions/jobs/ID``, ``check-runs/ID``,
-``actions/runs?head_sha=SHA`` for one full 40-hex SHA, ``pulls/N``,
+``actions/runs?head_sha=SHA`` for one full 40-hex SHA, a list endpoint with
+``per_page=1``, ``gh run list --limit 1``, ``pulls/N``,
 ``commits/SHA/check-runs`` and ``rate_limit``. A list endpoint with an
 explicit non-GET method (``-X POST``), or with fields and no method, which gh
 sends as a POST, is a write, not a read, and passes too. The deny reason tells the
@@ -56,6 +70,11 @@ other heredoc body, and a quoted argument to any other command, is data:
 pass. A loop that runs ``bash -c 'gh ...'``
 counts as running gh.
 
+It also runs ``guard_git_hooks.verdict``, which denies a command that skips
+or redirects git hooks (``git -c core.hooksPath``, writing the key,
+``--no-verify``). That check rides this hook because every harness already
+installs it.
+
 Allowing prints nothing. Like ``guard-gh-pr``, unreadable input or any crash
 allows the command and prints nothing, because a broken hook must never stop
 the agent's work. This is an accident guard, not a security boundary. It
@@ -68,14 +87,20 @@ name. ``tbhbdev alpha
 gh-shim`` budgets the gh calls a script makes, which no hook can see.
 """
 
+import fcntl
+import fnmatch
 import itertools
 import json
+import os
 import re
 import shlex
 from dataclasses import dataclass, field
-from typing import override
+from datetime import date, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, override
 from urllib.parse import parse_qs, urlsplit
 
+from tbhbdev.alpha import guard_git_hooks
 from tbhbdev.alpha.guard_gh_pr import (
     API_FIELD_FLAGS,
     API_VALUE_FLAGS,
@@ -94,12 +119,55 @@ from tbhbdev.alpha.guard_gh_pr import (
 )
 from tbhbdev.alpha.repo import read_hook_stdin
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+# Stands for `pgrep -f` with a pattern that matches its own shell, in a loop's programs.
+SELF_MATCHING_PGREP = "pgrep -f"
 POLL_REASON = (
     "Don't poll GitHub. Subscribe to the awrel event instead, for example "
     "check_run conclusion events for the repository through awrel, and act when "
     "it arrives. Bulk and polling GitHub reads are blocked; ask the operator "
     "for a capped exception."
 )
+# The capped allowance for one measurement pass. The operator writes the grant
+# file, JSON with `expires` (an ISO date) and `repos` (OWNER/REPO names); without
+# the file, or after `expires`, nothing is allowed. The names stay out of this
+# repository. The grant allows one call per listed repository, and the count
+# file records each repository once spent. Only the operator writes either file:
+# the guard denies an agent's Write or Edit to them and a shell command that
+# names them. It can't see a script file or a computed path, so this is a speed
+# bump against accidents, not a barrier.
+ALLOWANCE_GRANT = Path.home() / ".local/state/tbhb/gh-poll-allowance.json"
+ALLOWANCE_COUNT = Path.home() / ".local/state/tbhb/gh-poll-allowance.count"
+PROTECTED = (ALLOWANCE_GRANT.name, ALLOWANCE_COUNT.name)
+STATE_DIR = ALLOWANCE_GRANT.parent
+ALLOWANCE_LOCK = ALLOWANCE_COUNT.with_name(ALLOWANCE_COUNT.name + ".lock")
+STATE_FILES = tuple(
+    str(path).lower() for path in (ALLOWANCE_GRANT, ALLOWANCE_COUNT, ALLOWANCE_LOCK)
+)
+STATE_DIRS = tuple(str(path).lower() for path in (STATE_DIR, *STATE_DIR.parents))
+BRACE_LIMIT = 256
+SPELLING_LIMIT = 4096
+STATE_MOVERS = {"rm", "mv", "cp", "rsync", "ditto", "ln"}
+PROTECT_REASON = (
+    "The CI listing allowance's grant and count files are the operator's to "
+    "write. Ask the coordinator."
+)
+REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+DOTS = {".", ".."}
+REPEATERS = {"xargs", "parallel"}
+GH_RUN = re.compile(r"\bgh\b.*\brun\b", re.DOTALL)
+REDIRECT = re.compile(r"\d*(?:>>?|<|>&|&>)")
+REPEAT_REASON = (
+    "Don't run a CI listing through xargs or parallel; each repeat is a separate "
+    "call. Ask the coordinator."
+)
+ALLOWANCE_FIELDS = (
+    "databaseId,event,conclusion,createdAt,startedAt,updatedAt,"
+    "workflowName,attempt,headBranch"
+)
+ALLOWANCE_TAIL = ["--limit", "100", "--json", ALLOWANCE_FIELDS]
 # The token's variable, split because the repository's gitleaks config flags
 # the name written out in full.
 TOKEN = "OP_SERVICE_" + "ACCOUNT_TOKEN"
@@ -162,16 +230,27 @@ class BodyScanner(Scanner):
         self.pending = []
 
 
-def bulk_api(args: list[str]) -> bool:
-    """Whether ``gh api`` arguments page, or read a list endpoint."""
+def writes(args: list[str], flags: list[str]) -> bool:
+    """Whether ``gh api`` arguments send a write: a method other than GET or fields."""
+    methods = flag_values(args, {"-X", "--method"}, API_VALUE_FLAGS)
+    if methods and not methods[-1]:
+        methods = list[str]()  # pragma: no mutate  # None is falsy too
+    if methods:
+        return methods[-1].upper() not in {"GET", "HEAD"}
+    return bool(
+        flag_values(args, API_FIELD_FLAGS, API_VALUE_FLAGS) or "--input" in flags
+    )
+
+
+def bulk_api(args: list[str], *, repeated: bool = False) -> bool:
+    """Whether ``gh api`` arguments page, or read a list endpoint.
+
+    ``per_page=1`` allows a single read, never a repeated one.
+    """
     flags, endpoints = split_args(args, API_VALUE_FLAGS)
     if any(flag.partition("=")[0] == "--paginate" for flag in flags):
         return True
-    methods = flag_values(args, {"-X", "--method"}, API_VALUE_FLAGS)
-    if methods:
-        if methods[-1].upper() not in {"GET", "HEAD"}:
-            return False
-    elif flag_values(args, API_FIELD_FLAGS, API_VALUE_FLAGS) or "--input" in flags:
+    if writes(args, flags):
         return False
     for endpoint in endpoints:
         parsed = urlsplit(endpoint)
@@ -180,22 +259,120 @@ def bulk_api(args: list[str]) -> bool:
             continue
         heads = parse_qs(parsed.query).get("head_sha", [])
         one_sha = len(heads) == 1 and SHA.fullmatch(heads[0])
-        if not (RUNS_PATH.fullmatch(path) and one_sha):
+        one_page = not repeated and parse_qs(parsed.query).get("per_page") == ["1"]
+        if not (one_page or (RUNS_PATH.fullmatch(path) and one_sha)):
             return True
     return False
 
 
-def github_poll(args: list[str]) -> bool:
-    """Whether the words after ``gh``, past its global flags, poll GitHub."""
+def granted_repos(grant: object) -> set[str]:
+    """The lowercase repositories a grant lists; ValueError when it is malformed."""
+    entries = grant.get("repos") if isinstance(grant, dict) else None
+    repos: list[str] | None = entries if isinstance(entries, list) else None
+    if repos is None or not all(
+        isinstance(repo, str)
+        and REPO.fullmatch(repo)
+        and not DOTS & set(repo.split("/"))
+        for repo in repos
+    ):
+        message = "malformed grant"
+        raise ValueError(message)
+    return {repo.lower() for repo in repos}
+
+
+def allowed_call(args: list[str], repos: set[str]) -> bool:
+    """Whether the words are exactly the allowed listing for a granted repository."""
+    return (
+        len(args) == len(ALLOWANCE_TAIL) + 2
+        and args[0] == "-R"
+        and args[1].lower() in repos
+        and args[2:] == ALLOWANCE_TAIL
+    )
+
+
+def spend_allowance(args: list[str]) -> bool:
+    """Whether ``gh run list``'s words after ``list`` use the granted allowance.
+
+    The words must be exactly ``-R OWNER/REPO --limit 100 --json FIELDS`` for a
+    repository the grant file lists, whatever the repository name's case. A
+    match spends that repository's one call, recorded in the count file under
+    a file lock. A missing, expired or malformed grant, a repository already
+    spent, and an unreadable or unwritable count refuse it. The caller passes
+    only a call with no global flag before ``run``.
+    """
+    try:
+        grant = json.loads(ALLOWANCE_GRANT.read_text())
+        if not allowed_call(args, granted_repos(grant)) or (
+            datetime.now().astimezone().date() > date.fromisoformat(grant["expires"])
+        ):
+            return False
+        ALLOWANCE_COUNT.parent.mkdir(parents=True, exist_ok=True)
+        lock = ALLOWANCE_COUNT.with_name(ALLOWANCE_COUNT.name + ".lock")
+        with lock.open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            counts: object = (
+                json.loads(ALLOWANCE_COUNT.read_text())
+                if ALLOWANCE_COUNT.exists()
+                else {}
+            )
+            key = args[1].lower()
+            if not isinstance(counts, dict):
+                return False
+            spent: dict[str, object] = counts
+            if key in {k.lower() for k in spent}:
+                return False
+            spent[key] = 1
+            ALLOWANCE_COUNT.write_text(json.dumps(spent) + "\n")
+    except OSError, ValueError, KeyError, TypeError, RecursionError:
+        return False
+    return True
+
+
+def limits_to_one(words: list[str]) -> bool:
+    """Whether ``gh run list`` words ask for one run: ``--limit 1`` or ``-L 1``.
+
+    The last limit wins, as it does in gh, and ``-L1`` counts.
+    """
+    limit = None
+    for at, word in enumerate(words):
+        flag, equals, value = word.partition("=")
+        if flag in ("--limit", "-L"):
+            limit = value if equals else "".join(words[at + 1 : at + 2])
+        elif word.startswith("-L") and not word.startswith("--"):
+            limit = word[2:]
+    return limit == "1"
+
+
+def run_poll(rest: list[str], i: int, *, repeated: bool) -> bool:
+    """Whether ``gh run`` words poll; ``i`` counts the flags before ``run``."""
+    j = 1
+    while j < len(rest) and rest[j].startswith("-"):
+        j += 2 if rest[j] in VALUE_FLAGS else 1
+    verb = rest[j : j + 1]
+    if verb == ["watch"]:
+        return True
+    if verb in (["list"], ["ls"]):
+        tail = rest[j + 1 :]
+        if not repeated and limits_to_one(tail):
+            return False
+        return i > 0 or j > 1 or repeated or not spend_allowance(tail)
+    return False
+
+
+def github_poll(args: list[str], *, repeated: bool = False) -> bool:
+    """Whether the words after ``gh``, past its global flags, poll GitHub.
+
+    A repeated listing never spends the allowance.
+    """
     i = 0
     while i < len(args) and args[i].startswith("-"):
         i += 2 if args[i] in VALUE_FLAGS else 1
     rest = args[i:]
-    if rest[:2] in (["run", "watch"], ["run", "list"]):
-        return True
+    if rest[:1] == ["run"]:
+        return run_poll(rest, i, repeated=repeated)
     if rest[:2] == ["pr", "checks"]:
         return any(w.partition("=")[0] == "--watch" for w in rest[2:])
-    return rest[:1] in (["api"], ["query"]) and bulk_api(rest[1:])
+    return rest[:1] in (["api"], ["query"]) and bulk_api(rest[1:], repeated=repeated)
 
 
 def names_token(word: str) -> bool:
@@ -276,19 +453,31 @@ def clears_token(program: str, args: list[str]) -> bool:
 
 
 def unwrapped(words: list[str]) -> list[str] | None:
-    """The program's words after prefixes; None when they unset the token.
+    """The program's words after prefixes; None when they unset the token."""
+    return unwrap(words)[0]
+
+
+def unwrap(words: list[str]) -> tuple[list[str] | None, bool]:
+    """The program's words after prefixes, and whether a repeater was passed.
+
+    The words are None when the prefixes unset the token. A repeater is
+    xargs or parallel as a prefix, or inside env's ``-S`` string.
 
     Prefixes are guard_gh_pr's: ``NAME=value`` words, shell keywords and its
     wrappers with their options. env's options are parsed as env does.
     ``TOKEN=`` empties the token.
     """
     rest: list[str] | None = words
+    repeating = False
     while rest:
         word = rest[0]
         wrapper = program_of(rest)
+        repeating = repeating or wrapper in REPEATERS
         if word == f"{TOKEN}=":
-            return None
-        if word in KEYWORDS or ASSIGNMENT.match(word):
+            return None, repeating
+        if REDIRECT.match(word):
+            rest = rest[1 if REDIRECT.fullmatch(word) is None else 2 :]
+        elif word in KEYWORDS or ASSIGNMENT.match(word):
             rest = rest[1:]
         elif wrapper == "env":
             rest = env_rest(rest[1:])
@@ -298,7 +487,7 @@ def unwrapped(words: list[str]) -> list[str] | None:
                 rest = rest[1:]
         else:
             break
-    return rest
+    return rest, repeating
 
 
 def remote_command(args: list[str]) -> str | None:
@@ -337,9 +526,173 @@ def inner_script(words: list[str], body: str | None) -> str | None:
     return None
 
 
-def denial(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
-    """One simple command's deny reason, and the programs it runs."""
-    words = unwrapped(command)
+def flattened(words: list[str], depth: int = 4) -> list[str]:
+    """The words with each quoted or spaced word split as the shell would.
+
+    ``env -S 'xargs gh run'``, ``sh -c 'gh r""un'`` and ``x."count"`` come out
+    as the words they run or name. Splitting goes ``depth`` levels deep.
+    """
+    out: list[str] = []
+    for word in words:
+        parts = split_string(word)
+        if parts == [word] or depth == 0:
+            out.append(word)
+        else:
+            out.extend(flattened(parts, depth - 1))
+    return out
+
+
+def repeats(command: list[str]) -> bool:
+    """Whether xargs or parallel would run a ``gh run`` command more than once.
+
+    The listing words can arrive from stdin or ``-a``, so ``gh run`` alone counts.
+    The words are read after unquoting, including an option's value and env's
+    ``-S`` string.
+    """
+    words = flattened(command)
+    names = {word.rpartition("/")[2] for word in words}
+    return bool(REPEATERS & names) and bool(GH_RUN.search(" ".join(words)))
+
+
+def direction(first: int, last: int) -> int:
+    """The step of a brace range, which counts down when it ends below its start."""
+    return 1 if first <= last else -1  # pragma: no mutate (equal ends give one item)
+
+
+def brace_items(body: str) -> list[str]:
+    """The items of one brace body: a comma list, or a character or integer range."""
+    span = re.fullmatch(
+        r"(-?\d{1,9}|[A-Za-z])\.\.(-?\d{1,9}|[A-Za-z])(?:\.\.(-?\d{1,9}))?", body
+    )
+    if not span or span.group(1).isalpha() != span.group(2).isalpha():
+        return body.split(",")
+    letters = span.group(1).isalpha()  # pragma: no mutate  # ends match above
+    first, last = (ord(e) if letters else int(e) for e in span.group(1, 2))
+    sign = direction(first, last)
+    step = sign * (abs(int(span.group(3) or 1)) or 1)
+    items = range(first, last + sign, step)[:BRACE_LIMIT]
+    return [chr(n) if letters else str(n) for n in items]
+
+
+def braced(text: str) -> Iterator[str]:
+    """Every spelling of text after shell brace expansion, such as ``{count,json}``."""
+    match = re.search(r"\{([^{}]*)\}", text)
+    if not match:
+        yield text
+        return
+    for part in brace_items(match.group(1)):
+        yield from braced(text[: match.start()] + part + text[match.end() :])
+
+
+def names_state_dir(word: str) -> bool:
+    """Whether an absolute path word is, or globs to, the state directory or its files.
+
+    The word is expanded (``~``, ``$HOME``, braces) and normalized (``.``,
+    ``..``, ``//``) first. The volume ignores case, so the glob match is
+    lower-cased. A glob matches when it fits the state directory, one of its
+    parents or a protected file, such as ``/*/*/.local/state/tbhb``,
+    ``state/tbhb/*`` or ``gh-poll-*``.
+    """
+    home = word.replace("${HOME}", "~").replace("$HOME", "~")
+    targets = (*STATE_FILES, *STATE_DIRS)
+    limit = SPELLING_LIMIT + 1  # pragma: no mutate  # any larger count denies too
+    spellings = list(itertools.islice(braced(home), limit))  # pragma: no mutate
+    if len(spellings) > SPELLING_LIMIT:
+        return True  # too many to check, so deny
+    for spelling in spellings:
+        expanded = str(Path(spelling).expanduser())
+        pattern = re.sub(r"^/+", "/", os.path.normpath(expanded)).lower()
+        if pattern.startswith("/") and any(
+            fnmatch.fnmatchcase(target, pattern) for target in targets
+        ):
+            return True
+    return False
+
+
+def plain_home_or_above(word: str) -> bool:
+    """Whether a word with no glob is the home directory or a directory above it.
+
+    ``cd ~`` or ``$HOME`` beside ``xargs rm`` in one command text is not a path
+    fed to the mover, so ``pipes_state_dir`` skips these. ``~/.local`` and
+    ``~/.local/state`` still count, and so does any glob.
+    """
+    home = word.replace("${HOME}", "~").replace("$HOME", "~")
+    if any(char in home for char in "*?[{"):
+        return False
+    expanded = str(Path(home).expanduser())
+    path = re.sub(r"^/+", "/", os.path.normpath(expanded)).lower()
+    return path in STATE_DIRS[3:]
+
+
+def pipes_state_dir(text: str) -> bool:
+    """Whether xargs or parallel could feed a mover a path in the state directory.
+
+    The shell expands a glob before ``xargs`` sees it, as in
+    ``echo ~/.local/state/tbhb/* | xargs rm``, so the words are read across the
+    whole command text, not one simple command.
+    """
+    tokens = [token for token in re.split(r"[\s|;&()<>'\"]+", text) if token]
+    names = {token.rpartition("/")[2].lower() for token in tokens}
+    return (
+        bool(REPEATERS & names)
+        and bool(STATE_MOVERS & names)
+        and any(
+            names_state_dir(token) and not plain_home_or_above(token)
+            for token in tokens
+        )
+    )
+
+
+def attached(word: str) -> str:
+    """A path word without ``--target-directory=`` or ``-t``, such as ``-tPATH``."""
+    if word.startswith("--"):
+        return word.partition("=")[2] or word  # pragma: no mutate  # one = splits
+    return word.removeprefix("-t")
+
+
+def protected_words(command: list[str]) -> bool:
+    """Whether a command's unquoted words name a protected file.
+
+    ``rm``, ``mv``, ``cp`` and the like also count when they name the state
+    directory or a parent, because that removes or restores the files. A bare
+    ``/`` word doesn't: prose such as a ledger line has one, and it names no
+    state file.
+    """
+    words = flattened(command)
+    if any(name in word.lower() for word in words for name in PROTECTED):
+        return True
+    moves = any(word.rpartition("/")[2].lower() in STATE_MOVERS for word in words)
+    return moves and any(
+        word != "/" and names_state_dir(attached(word)) for word in words
+    )
+
+
+def repeated_scan(args: list[str]) -> tuple[str | None, set[str]]:
+    """Scan what a repeater may run: each suffix of its words, as repeated shell text.
+
+    The repeater's own options and the program they lead to aren't told
+    apart, so every suffix is read as a command; a suffix that isn't one
+    finds nothing.
+    """
+    programs: set[str] = set()
+    for i in range(len(args)):
+        message, seen = inspect(shlex.join(args[i:]), repeated=True)
+        if message:
+            return message, programs
+        programs |= seen
+    return None, programs
+
+
+def denial(
+    command: list[str], body: str | None, *, repeated: bool = False
+) -> tuple[str | None, set[str]]:
+    """One simple command's deny reason, and the programs it runs.
+
+    ``repeated`` is set when xargs or parallel runs the command more than once,
+    so a ``gh run list`` can't spend the one-call allowance.
+    """
+    words, passed = unwrap(command)
+    repeated = repeated or passed
     if words is None:
         return UNSET_REASON, set()
     if not words:
@@ -348,17 +701,55 @@ def denial(command: list[str], body: str | None) -> tuple[str | None, set[str]]:
     unset = program == "unset" and any(names_token(word) for word in words[1:])
     if unset or clears_token(program, words[1:]):
         return UNSET_REASON, set()
-    if program == "gh" and github_poll(words[1:]):
+    if program == "gh" and github_poll(words[1:], repeated=repeated):
         return POLL_REASON, set()
     script = inner_script(words, body)
-    if script is None:
-        return None, {program}
-    message, inner = inspect(script)
+    if program in REPEATERS:
+        message, inner = repeated_scan(words[1:])
+    elif script is None:
+        return None, {SELF_MATCHING_PGREP if self_matching(program, words) else program}
+    else:
+        message, inner = inspect(script, repeated=repeated)
     return message, {program, *inner}
 
 
-def inspect(text: str) -> tuple[str | None, set[str]]:
-    """The deny reason for a shell command, or None, and the programs it runs.
+def self_matching(program: str, words: list[str]) -> bool:
+    """Whether a command is ``pgrep -f`` with a pattern that matches its own shell.
+
+    A bracket in the pattern, as in ``pgrep -f '[f]etch.py'``, keeps the pattern
+    from matching its own command line, so that form is not self-matching.
+    """
+    if program != "pgrep":
+        return False
+    args = words[1:]
+    full = any(
+        word == "--full" or (word[:1] == "-" and word[1:2] != "-" and "f" in word)
+        for word in args
+    )
+    return full and not any("[" in word for word in args)
+
+
+def inspect(text: str, *, repeated: bool = False) -> tuple[str | None, set[str]]:
+    """The deny reason for a shell command, or None, and the programs it runs."""
+    if any(name in text.lower() for name in PROTECTED) or pipes_state_dir(text):
+        return PROTECT_REASON, set()
+    return scan_commands(text, repeated=repeated)
+
+
+def checked(
+    command: list[str], body: str | None, *, repeated: bool = False
+) -> tuple[str | None, set[str]]:
+    """One simple command's deny reason, refusing a repeated listing first."""
+    command = [command[0].removeprefix("$"), *command[1:]] if command else command
+    if protected_words(command):
+        return PROTECT_REASON, set()
+    if repeats(command):
+        return REPEAT_REASON, set()
+    return denial(command, body, repeated=repeated)
+
+
+def scan_commands(text: str, *, repeated: bool = False) -> tuple[str | None, set[str]]:
+    """Scan each command of a shell text for a denial.
 
     Each open loop collects the programs run from its keyword to its
     ``done``; an outer loop also collects its inner loops' programs.
@@ -369,24 +760,55 @@ def inspect(text: str) -> tuple[str | None, set[str]]:
     for index, command in enumerate(scanner.run()):
         if opens_loop(command):
             loops.append(set())
-        message, seen = denial(command, scanner.bodies.get(index))
+        message, seen = checked(command, scanner.bodies.get(index), repeated=repeated)
         if message:
             return message, programs
         programs |= seen
         for loop in loops:
             loop.update(seen)
-            if "gh" in loop or {"sleep", "pgrep"} <= loop:
+            if "gh" in loop or {"sleep", SELF_MATCHING_PGREP} <= loop:
                 return POLL_REASON, programs
         if seen == {"done"} and loops:
             loops.pop()
     return None, programs
 
 
+def edited_file(data: dict[str, object]) -> str:
+    """The path a Write, Edit or NotebookEdit call targets, or "" for another call."""
+    inputs = data.get("tool_input")
+    if not isinstance(inputs, dict):
+        return ""
+    path = inputs.get("file_path") or inputs.get("notebook_path")
+    return path if isinstance(path, str) else ""
+
+
+def protects(path: str) -> bool:
+    """Whether an edit target is a protected file, by name in any case or by link.
+
+    A name that starts with a protected name also counts, such as a lock or backup copy.
+    """
+    if not path:
+        return False
+    names = {Path(path).name.lower(), Path(path).resolve().name.lower()}
+    if any(name.startswith(PROTECTED) for name in names):
+        return True
+    for target in (ALLOWANCE_GRANT, ALLOWANCE_COUNT, ALLOWANCE_LOCK):
+        try:
+            if Path(path).samefile(target):
+                return True
+        except OSError:  # the target or the protected file doesn't exist
+            continue
+    return False
+
+
 def main() -> int:
     """Read the payload on stdin; print a deny decision for a blocked call."""
     try:
-        text, antigravity = command_of(read_hook_stdin())
-        message = inspect(text)[0]
+        data = read_hook_stdin()
+        text, antigravity = command_of(data)
+        message = inspect(text)[0] or guard_git_hooks.verdict(text)
+        if protects(edited_file(data)):
+            message = PROTECT_REASON
         if message:
             print(json.dumps(decision(message, antigravity=antigravity)))
     except Exception:  # noqa: BLE001  # fail open on any crash

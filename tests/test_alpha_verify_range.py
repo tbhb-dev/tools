@@ -521,3 +521,15 @@ def test_git_decodes_bytes_without_newline_translation(
         verify_range.git_output(".", "cat-file", "commit", "HEAD")
         == "name\rvalue\ufffd\n"
     )
+
+
+def test_a_commit_with_launch_and_started_at_passes(repo: Repository) -> None:
+    value = (
+        "LLM effort=high;harness=codex:0.164.0;launch=sha-256-64:0a1b2c3d4e5f6071;"
+        "model=openai:gpt-6.1-sol;session=sha-256-64:fb2bbc10b42a2d56;"
+        "started_at=2026-11-14T00:02:41Z;surface=exec"
+    )
+    tip = repo.commit(message=f"feat: example\n\nGenerated-by: {value}\n")
+    assert verify_range.main([repo.base, tip], PROG) == 0
+    bad = repo.commit(message=f"feat: x\n\nGenerated-by: {value.replace('T', 't')}\n")
+    assert verify_range.main([repo.base, bad], PROG) == 1

@@ -18,7 +18,7 @@ from tbhbdev.alpha import review
 
 HEAD = "a1" * 20
 NEXT = "B2" * 20
-FRONT = f"---\npr: 7\ncommit_id: '{HEAD}'\nevent: APPROVE\n---\n"
+FRONT = f"---\npr: 7\ncommit_id: '{HEAD}'\nevent: COMMENT\n---\n"
 BODY = (
     "## Verdict\n\nThe change passes.\n\n## Verification\n\n"
     "Read the diff and ran the tests. CI passed.\n"
@@ -70,7 +70,7 @@ def test_draft_prints_path_and_writes_skeleton(
     path = world.root / ".git" / "tbhb-alpha" / "review-7.md"
     assert capsys.readouterr() == (f"{path}\n", "")
     assert (
-        path.read_text() == FRONT.replace("event: APPROVE", "event:") + review.TEMPLATE
+        path.read_text() == FRONT.replace("event: COMMENT", "event:") + review.TEMPLATE
     )
     assert [call["argv"] for call in world.calls("gh")] == [
         ["pr", "view", "7", "--json", "headRefOid"]
@@ -192,10 +192,10 @@ def test_bad_yaml_stops_before_lint(text: str) -> None:
         (f"commit_id: '{HEAD}'", "commit_id: 123", 3, "string"),
         (f"commit_id: '{HEAD}'", "commit_id: 'abc'", 3, "does not match"),
         (f"commit_id: '{HEAD}'\n", "", 1, "required property"),
-        ("event: APPROVE", "event:", 4, "not one of"),
-        ("event: APPROVE", "event: approve", 4, "not one of"),
-        ("event: APPROVE\n", "", 1, "required property"),
-        ("event: APPROVE", "event: APPROVE\nextra: value", 1, "Additional properties"),
+        ("event: COMMENT", "event:", 4, "not one of"),
+        ("event: COMMENT", "event: approve", 4, "not one of"),
+        ("event: COMMENT\n", "", 1, "required property"),
+        ("event: COMMENT", "event: COMMENT\nextra: value", 1, "Additional properties"),
     ],
 )
 def test_schema_errors_point_to_the_key(
@@ -211,13 +211,13 @@ def test_non_mapping_frontmatter_fails(meta: str) -> None:
     assert "not of type 'object'" in structure(f"---\n{meta}\n---\n{BODY}")[0][1]
 
 
-@pytest.mark.parametrize("event", ["APPROVE", "COMMENT", "REQUEST_CHANGES"])
+@pytest.mark.parametrize("event", ["COMMENT", "REQUEST_CHANGES", "APPROVE"])
 def test_events_and_uppercase_hex_pass(event: str) -> None:
     body = BODY.replace(
         "## Verification",
         "## Findings\n\n- `src/file.py:3` must handle empty input.\n\n## Verification",
     )
-    assert structure((FRONT + body).replace("APPROVE", event).replace(HEAD, NEXT)) == []
+    assert structure((FRONT + body).replace("COMMENT", event).replace(HEAD, NEXT)) == []
 
 
 @pytest.mark.parametrize(
@@ -225,12 +225,12 @@ def test_events_and_uppercase_hex_pass(event: str) -> None:
 )
 def test_request_changes_needs_findings(body: str) -> None:
     assert (6, "REQUEST_CHANGES requires non-empty Findings") in structure(
-        FRONT.replace("APPROVE", "REQUEST_CHANGES") + body
+        FRONT.replace("COMMENT", "REQUEST_CHANGES") + body
     )
 
 
 def test_comments_do_not_count_as_findings() -> None:
-    text = FRONT.replace("APPROVE", "REQUEST_CHANGES") + BODY.replace(
+    text = FRONT.replace("COMMENT", "REQUEST_CHANGES") + BODY.replace(
         "## Verification", "## Findings\n\n<!-- TODO -->\n\n## Verification"
     )
     assert (6, "REQUEST_CHANGES requires non-empty Findings") in structure(text)
@@ -304,7 +304,7 @@ def test_check_prints_problems_and_never_reads_gh(
 ) -> None:
     path = review.draft_path(7)
     path.parent.mkdir()
-    path.write_text(FILLED.replace("event: APPROVE", "event:"))
+    path.write_text(FILLED.replace("event: COMMENT", "event:"))
     assert run_main("check", "7") == 1
     out, err = capsys.readouterr()
     assert out == ""
@@ -519,7 +519,7 @@ def test_empty_body_reports_required_sections(body: str) -> None:
 
 
 def test_schema_key_search_stays_in_the_frontmatter() -> None:
-    text = FILLED.replace("event: APPROVE", "'event': invalid") + "\nevent: body text\n"
+    text = FILLED.replace("event: COMMENT", "'event': invalid") + "\nevent: body text\n"
     assert structure(text) == [
         (
             1,
@@ -539,7 +539,7 @@ def test_h1_diagnostic_is_specific_to_reviews() -> None:
 
 
 def test_request_changes_keeps_other_problems() -> None:
-    text = FILLED.replace("APPROVE", "REQUEST_CHANGES").replace(HEAD, "abc")
+    text = FILLED.replace("COMMENT", "REQUEST_CHANGES").replace(HEAD, "abc")
     found = structure(text)
     assert any(line == 3 and "commit_id" in why for line, why in found)
     assert (6, "REQUEST_CHANGES requires non-empty Findings") in found
@@ -582,7 +582,7 @@ def test_refresh_fills_an_empty_commit_value(value: str) -> None:
     text = FILLED.replace(f" '{HEAD}'", value)
     changed = review.refresh(text, NEXT)
     data, body = pr.parse_frontmatter(changed)
-    assert data == {"pr": 7, "commit_id": NEXT, "event": "APPROVE"}
+    assert data == {"pr": 7, "commit_id": NEXT, "event": "COMMENT"}
     assert body == BODY
 
 

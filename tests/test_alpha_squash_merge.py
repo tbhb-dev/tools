@@ -55,7 +55,13 @@ here = os.path.dirname(os.path.abspath(__file__))
 spec = os.path.join(here, "gitleaks.spec")
 rc, out = json.load(open(spec)) if os.path.exists(spec) else (0, "[]")
 with open(os.path.join(here, "gitleaks.log"), "a") as log:
-    entry = {{"cwd": os.getcwd(), "stdin": sys.stdin.read(), "argv": sys.argv[1:]}}
+    config = open(sys.argv[sys.argv.index("--config") + 1]).read()
+    entry = {{
+        "cwd": os.getcwd(),
+        "stdin": sys.stdin.read(),
+        "argv": sys.argv[1:],
+        "config": config,
+    }}
     log.write(json.dumps(entry) + "\\n")
 sys.stdout.write(out)
 sys.exit(rc)
@@ -529,9 +535,7 @@ def test_merge_scans_the_final_message(tools: Tools, tmp_path: Path) -> None:
     (scanned,) = tools.scanned()
     assert scanned["cwd"] == str(tmp_path / "repo")
     assert scanned["stdin"] == f"{subject}\n\n{merge['stdin']}"
-    assert scanned["argv"][scanned["argv"].index("--config") + 1] == str(  # type: ignore[index]
-        tmp_path / ".config" / "gitleaks" / "private.toml"
-    )
+    assert scan_config(tools) == full_config()
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
@@ -920,16 +924,21 @@ def repo_reads(tools: Tools) -> list[dict[str, object]]:
     return [json.loads(line) for line in log.read_text().splitlines()]
 
 
+def without_path(config: str) -> str:
+    """A config with its ``path`` lines dropped: the scan points them at a copy."""
+    return re.sub(r"^\s*path\s*=.*$", "", config, flags=re.MULTILINE)
+
+
 def scan_config(tools: Tools) -> str:
-    """The config the one gitleaks call ran under."""
+    """The text of the config the one gitleaks call ran under, minus its paths."""
     (scanned,) = tools.scanned()
-    argv = cast("list[str]", scanned["argv"])
-    return argv[argv.index("--config") + 1]
+    return without_path(cast("str", scanned["config"]))
 
 
 def full_config() -> str:
-    """The private config, under the test's HOME."""
-    return str(Path.home() / ".config" / "gitleaks" / "private.toml")
+    """The private config under the test's HOME, minus its paths."""
+    path = Path.home() / ".config" / "gitleaks" / "private.toml"
+    return without_path(path.read_text())
 
 
 @pytest.mark.parametrize("argv", [("12",), ("12", "--dry-run")])

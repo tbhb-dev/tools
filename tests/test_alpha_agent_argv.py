@@ -1,4 +1,4 @@
-"""The argv builders are tables over literal values: no process, no file, no secret."""
+"""The argv builders use literal values and an isolated session-key path."""
 
 # ruff: noqa: S108 -- the paths are test data under /tmp that no test creates
 
@@ -10,7 +10,8 @@ import itertools
 import json
 import shlex
 import tomllib
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+from unittest.mock import patch
 
 import pytest
 from agent_example import (
@@ -28,6 +29,8 @@ from agent_example import (
 from tbhbdev.alpha.agent import model
 from tbhbdev.alpha.agent.decisions import argv, policy
 from tbhbdev.alpha.agent.model import Harness, Invalid, Os, Profile, RunKind
+
+pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +76,12 @@ CODEX_HANDOFF = (
     f'shell_environment_policy.set.CODEX_HOME="{TMP}/codex"',
     *HANDOFF,
 )
+UNSANDBOXED_PATH = (
+    f'shell_environment_policy.set.PATH="{HOME}/.local/bin:{HOME}/.local/gh-bin:'
+    f"{HOME}/.bun/bin:{HOME}/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin:"
+    '/usr/bin:/bin:/usr/sbin:/sbin"'
+)
+
 CODEX_TAIL = (
     "-c",
     "sandbox_workspace_write.network_access=true",
@@ -336,8 +345,18 @@ def test_unsandboxed_codex_is_full_access_with_no_profile(kind: RunKind) -> None
         "danger-full-access",
         "-c",
         f'projects={{"{WORKTREE}"={{trust_level="untrusted"}}}}',
-        *CODEX_TAIL,
-        *CODEX_HANDOFF,
+        *(
+            "features.network_proxy.enabled=false"
+            if arg.startswith("features.network_proxy=")
+            else arg
+            for arg in CODEX_TAIL
+        ),
+        *(
+            UNSANDBOXED_PATH
+            if arg.startswith("shell_environment_policy.set.PATH=")
+            else arg
+            for arg in CODEX_HANDOFF
+        ),
         *MODEL,
         "-" if kind is RunKind.EXEC else POINTER,
     )
@@ -548,12 +567,28 @@ def test_a_policy_for_another_harness_or_profile_is_refused(
     )
 
 
-def test_ssh() -> None:
-    result = argv.ssh(
-        LINUX,
-        ("example-tool", "run", "a b"),
-        connect_timeout=15,
-        keepalive=30,
+@pytest.mark.parametrize("hostname", ["example-local", "example-local.example.com"])
+@pytest.mark.parametrize("key_kind", ["missing", "file", "directory"])
+def test_ssh(isolated_home: Path, hostname: str, key_kind: str) -> None:
+    key = isolated_home / ".ssh" / "sessions" / "example-local_ed25519"
+    key.parent.mkdir(parents=True)
+    # Another machine's key must never be selected as a fallback.
+    (key.parent / "example-other_ed25519").touch()
+    if key_kind == "file":
+        key.touch()
+    elif key_kind == "directory":
+        key.mkdir()
+    with patch("socket.gethostname", return_value=hostname):
+        result = argv.ssh(
+            LINUX,
+            ("example-tool", "run", "a b"),
+            connect_timeout=15,
+            keepalive=30,
+        )
+    identity = (
+        ("-i", str(key), "-o", "IdentityAgent=none", "-o", "IdentitiesOnly=yes")
+        if key_kind == "file"
+        else ()
     )
     assert result == (
         "/usr/bin/ssh",
@@ -565,6 +600,7 @@ def test_ssh() -> None:
         "ServerAliveInterval=30",
         "-o",
         "ServerAliveCountMax=3",
+        *identity,
         "-l",
         "agent",
         "example-linux",
@@ -844,3 +880,26 @@ def test_codex_build_without_github_credential(kind: RunKind) -> None:
     )
     result = built(Harness.CODEX, kind, Profile.BUILD, config=config)
     assert f'shell_environment_policy.set.GH_CONFIG_DIR="{TMP}/gh"' in result
+
+
+@pytest.mark.parametrize("harness", [Harness.CLAUDE, Harness.AGY])
+@pytest.mark.parametrize("profile", Profile)
+def test_unsandboxed_argv_skips_harness_sandbox(
+    harness: Harness, profile: Profile
+) -> None:
+    run = request(harness, RunKind.EXEC, profile, unsandboxed=True)
+    value = policy_for(harness, profile, unsandboxed=True)
+    command = argv.harness(
+        run,
+        value,
+        worktree=WORKTREE,
+        brief_file=BRIEF_FILE,
+        agy_project=PROJECT,
+        agy_brief=BRIEF,
+    )
+    if harness is Harness.CLAUDE:
+        assert command[command.index("--permission-mode") + 1] == "bypassPermissions"
+    else:
+        assert command[0] == "agy"
+        assert "--dangerously-skip-permissions" in command
+        assert "--sandbox" not in command

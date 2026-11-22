@@ -192,6 +192,7 @@ def test_result(
         files.write("out.final", "answer")
         files.write("branch", "agent/example")
         files.write("head", "a" * 40)
+        files.write("pr", "github.com/tbhb-dev/tools#12")
     assert ssh_serve.main([], "ssh-serve") == 0
     assert json.loads(capsys.readouterr().out) == {
         **build_info.identities(),
@@ -203,6 +204,7 @@ def test_result(
         "log_tail": "".join(f"line {n}\n" for n in range(10, 210)),
         "branch": "agent/example" if finished else None,
         "head": "a" * 40 if finished else None,
+        "pr": "github.com/tbhb-dev/tools#12" if finished else None,
     }
 
 
@@ -253,8 +255,15 @@ def group_identity(pid: int) -> Group:
 def test_local_arguments(capsys: pytest.CaptureFixture[str]) -> None:
     assert ssh_serve.main(["extra"], "ssh-serve") == 2
     assert (
-        capsys.readouterr().err == "ssh-serve: refused: ssh-serve takes no arguments\n"
+        capsys.readouterr().err
+        == "ssh-serve: refused: expected run-host NAME, preflight NAME, "
+        "result NAME or kill NAME\n"
     )
+
+
+def test_plain_login_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SSH_ORIGINAL_COMMAND", raising=False)
+    assert ssh_serve.command(["result", "example"]) == ("result", "example")
 
 
 @pytest.mark.parametrize("owned", [False, True])
@@ -338,6 +347,7 @@ def test_result_before_first_phase(
         "log_tail": "",
         "branch": None,
         "head": None,
+        "pr": None,
     }
 
 

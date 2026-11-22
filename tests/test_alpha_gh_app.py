@@ -83,6 +83,7 @@ def ec_key(tmp_path_factory: pytest.TempPathFactory) -> Key:
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail at once on any request that no MockTransport answers."""
+    monkeypatch.delenv(gh_app.RUN_ENV, raising=False)
 
     def refuse(*_args: object, **_kwargs: object) -> httpx.Response:
         message = "a test reached the real network"
@@ -305,6 +306,59 @@ def test_state_root() -> None:
     assert gh_app.state_root({"XDG_STATE_HOME": ""}, home) == Path(
         "/home/u/.local/state/gh-app"
     )
+
+
+def test_permissions_parse_sort_and_split_the_cache_directory() -> None:
+    args = gh_app.parse_args(
+        ["bot", REPO, "--permissions", "pull_requests:write,contents:read"]
+    )
+    assert args.permissions == (("contents", "read"), ("pull_requests", "write"))
+    assert gh_app.parse_args(["bot", REPO]).permissions == ()
+    state = Path("/s")
+    assert gh_app.out_dir(state, replace(args, repo="o/r")) == Path(
+        "/s/tbhb-dev/bot/o/r+contents-read+pull-requests-write"
+    )
+    assert gh_app.token_body("o/r", all_repos=False, permissions=args.permissions) == {
+        "repositories": ["r"],
+        "permissions": {"contents": "read", "pull_requests": "write"},
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "contents",
+        "contents:admin",
+        "Contents:read",
+        "contents:read,contents:write",
+        "made_up_permission:read",
+    ],
+)
+def test_bad_permissions_are_refused(value: str) -> None:
+    with pytest.raises(gh_app.UsageError, match="--permissions entry"):
+        gh_app.parse_args(["bot", REPO, "--permissions", value])
+
+
+def test_a_repeated_permissions_option_is_refused() -> None:
+    with pytest.raises(gh_app.UsageError, match="given once"):
+        gh_app.parse_args(
+            ["bot", REPO, "--permissions", "contents:read", "--permissions", "bad"]
+        )
+
+
+def test_failure_details_hide_credential_like_text() -> None:
+    echoed = "ghs_" + "A1b2" * 10
+    assert gh_app.detail({"message": f"bad token {echoed} here"}) == (
+        "bad token [redacted] here"
+    )
+    assert gh_app.detail({"message": "Not Found"}) == "Not Found"
+    assert gh_app.detail({}) == "no message"
+
+
+def test_a_cooldown_option_refuses_permissions() -> None:
+    with pytest.raises(gh_app.UsageError, match="takes only the app"):
+        gh_app.parse_args(["bot", "--cooldown-status", "--permissions", "a:read"])
 
 
 def test_layout() -> None:
@@ -1065,6 +1119,27 @@ def test_all_repos_asks_for_every_repo_and_uses_its_own_dir(
     assert not out_path(tmp_path, "widget").exists()
 
 
+def test_permissions_narrow_the_token_request_and_use_their_own_dir(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, rsa: Key
+) -> None:
+    github = Github()
+    code, out, _ = run(
+        capsys,
+        env_for(tmp_path, app_store(rsa.pem), github),
+        "bot",
+        REPO,
+        "--permissions",
+        "contents:read",
+    )
+    assert code == 0
+    assert out == f"{out_path(tmp_path, 'widget+contents-read')}\n"
+    assert json.loads(github.requests[-1].content) == {
+        "repositories": ["widget"],
+        "permissions": {"contents": "read"},
+    }
+    assert not out_path(tmp_path, "widget").exists()
+
+
 @pytest.mark.parametrize(
     ("reply", "detail"),
     [
@@ -1715,3 +1790,16 @@ def test_mint_token_errors_never_disclose_tokens(
     assert capsys.readouterr() == ("", "")
     assert list(tmp_path.rglob("*")) == before
     assert all(TOKEN not in p.read_text() for p in tmp_path.rglob("*") if p.is_file())
+
+
+def test_a_run_never_mints(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    monkeypatch.setenv("TBHBDEV_AGENT_RUN", "1")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    assert gh_app.main(["bot", REPO], "gh-app") == 1
+    assert capsys.readouterr() == (
+        "",
+        "gh-app: refused inside an agent run; a run never mints an App token\n",
+    )
+    assert not (tmp_path / "gh-app").exists()

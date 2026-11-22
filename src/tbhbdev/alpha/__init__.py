@@ -29,6 +29,7 @@ from tbhbdev.alpha import (
     session_context,
     state_guard,
     verify_range,
+    version_check,
 )
 
 if TYPE_CHECKING:
@@ -51,6 +52,7 @@ __all__ = [
     "session_context",
     "state_guard",
     "verify_range",
+    "version_check",
 ]
 
 USAGE = """usage: {prog} <command> [args...]
@@ -60,7 +62,8 @@ Alpha commands are interim: they may change or go away without notice.
 commands:
   identity     agent identity: record <harness> | trailer MSGFILE [SOURCE]
                | consume | check MSGFILE | stamp-docs
-  guard-gh-pr  PreToolUse hook: block gh pr create|edit|merge and
+  guard-gh-pr  PreToolUse hook: block gh pr create|edit|merge|ready|close,
+               gh issue close, gh run rerun, gh api branch deletes and
                a session's approval of a pull request it opened
   guard-op     PreToolUse hook: require the configured 1Password account
   state-guard  Claude Code hook: block sign-off commits and unchecked open items
@@ -77,6 +80,7 @@ commands:
                | rerun N: rerun failed jobs for the current head
                | delete-branch N: delete a finished PR's head branch on origin
                | close N --reason TEXT: close a pull request (--comment is an alias)
+  pr-stats     OWNER/REPO [--limit N]: cycle time of merged and closed pull requests
   review       draft N [--force] | check N: the review draft
   issue        close N --reason completed|not-planned: close an issue
   gh-app       APP OWNER/REPO [--fresh] [--dry-run] [--all-repos]: mint a GitHub
@@ -86,6 +90,8 @@ commands:
                apply the standard repository settings
   merge        squash-merge an approved pull request
   verify-range BASE TIP [-C PATH]: check every agent commit in a range
+  version-check [--host NAME ...] [--expect SHA|latest] [--json]: compare the
+               installed build on each host
   loop         validate loop configuration (runner not yet available)
   agent        exec | wait | status | kill | clean | keep: headless runs
   pre-push-guard REMOTE URL: refuse rewritten history and private names
@@ -137,6 +143,12 @@ def pr(argv: list[str], prog: str) -> int:
     return pull_request.main(argv, prog=prog)
 
 
+def pr_stats_command(argv: list[str], prog: str) -> int:
+    from tbhbdev.alpha import pr_stats  # noqa: PLC0415 -- see the docstring
+
+    return pr_stats.main(argv, prog=prog)
+
+
 def review_command(argv: list[str], prog: str) -> int:
     from tbhbdev.alpha import review  # noqa: PLC0415 -- see the docstring
 
@@ -183,12 +195,14 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "gh-shim": gh_shim.main,
     "agent-env": gh_shim.agent_env,
     "pr": pr,
+    "pr-stats": pr_stats_command,
     "review": review_command,
     "issue": issue,
     "gh-app": gh_app_command,
     "repo": repo_command,
     "merge": merge,
     "verify-range": verify_range.main,
+    "version-check": version_check.main,
     "install": install_command,
     "pre-push-guard": pre_push_guard.main,
     "loop": loop.main,

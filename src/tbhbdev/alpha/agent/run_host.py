@@ -88,6 +88,7 @@ def planned_paths(run: Run) -> RunPaths:
 
 
 # These files can alter the next trusted shell or tool invocation.
+_BAZEL_SHUTDOWN_SECONDS = 60
 _STARTUP_FILES = (
     ".zshenv",
     ".zshrc",
@@ -241,8 +242,28 @@ def audit_writes(
         )
 
 
+def unsandboxed_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
+    value = policy.build(
+        run.settings,
+        run.host,
+        harness=run.request.harness,
+        profile=run.request.profile,
+        account=run.request.account,
+        unsandboxed=True,
+        paths=paths,
+    )
+    search_path = ":".join((os.environ.get("PATH", os.defpath), value.tool_path))
+    executable = host_tools.resolve(
+        run.request.harness.value, search_path, follow_symlinks=False
+    )
+    value = dataclasses.replace(value, env=value.env | {"PATH": search_path})
+    return value, executable
+
+
 def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
     """Check directories before even inspecting or invoking an executable."""
+    if run.request.unsandboxed:
+        return unsandboxed_policy(run, paths)
     directories = host_tools.search_path(run.settings, run.host.os)
     entries = run.settings.sandbox.path
     sandbox_directories = tuple(
@@ -434,18 +455,7 @@ def announce_access(run: Run) -> None:
 
 def preflight(run: Run) -> None:
     announce_access(run)
-    if run.request.harness is Harness.AGY:
-        message = "agy runs are refused: no OS sandbox"
-        raise Invalid(message)
-    if run.request.harness not in run.host.proven_harnesses:
-        message = (
-            f"{run.request.harness} has no recorded sandbox pass on {run.host.name}"
-        )
-        raise Invalid(message)
     _value, executable = checked_policy(run, planned_paths(run))
-    if run.request.profile is Profile.REVIEW and run.request.tainted_host:
-        message = "review runs are refused on a tainted host"
-        raise Invalid(message)
     if run.request.profile is Profile.REVIEW:
         references = next(
             c for c in run.settings.credentials if c.account == run.request.account
@@ -464,6 +474,7 @@ def preflight(run: Run) -> None:
     if (
         run.request.harness is Harness.CODEX
         and sandbox.codex_network_proxy_opt_out is None
+        and not run.request.unsandboxed
         and not host_tools.codex_proxy_supported(executable, run.tmpdir)
     ):
         message = (
@@ -472,14 +483,31 @@ def preflight(run: Run) -> None:
         )
         raise Invalid(message)
 
-    if run.request.harness is Harness.CLAUDE:
-        message = (
-            "claude runs are refused: separate tool paths for Claude (H3) "
-            "and the Claude credential decision remain open"
-        )
-        raise Invalid(message)
     if run.request.unsandboxed:
         mark_host(run)
+
+
+def otel_config(endpoint: str) -> str:
+    """A Codex config with an `[otel]` table that exports traces and metrics.
+
+    ENDPOINT is a base URL, and each signal gets its own OTLP/HTTP path. The
+    table leaves out the log exporter on purpose: Codex logs tool arguments and
+    an output preview, so `log_user_prompt = false`, which guards only the
+    prompt text, wouldn't keep a credential or a file out of the export.
+    The table has no headers, so it holds no secret.
+    """
+    base = endpoint.removesuffix("/")
+
+    def exporter(signal_path: str) -> str:
+        url = json.dumps(f"{base}/v1/{signal_path}")
+        return f'{{ otlp-http = {{ endpoint = {url}, protocol = "binary" }} }}'
+
+    return (
+        "[otel]\n"
+        f"trace_exporter = {exporter('traces')}\n"
+        f"metrics_exporter = {exporter('metrics')}\n"
+        "log_user_prompt = false\n"
+    )
 
 
 def prepare_workspace(run: Run) -> Prepared:
@@ -487,7 +515,10 @@ def prepare_workspace(run: Run) -> Prepared:
     paths = planned_paths(run)
     checked_policy(run, paths)
     workspace = worktree.create(
-        clone, run.files.name, run.request, run.settings.public_repos
+        clone,
+        run.files.name,
+        run.request,
+        lambda: credentials.fetch_token(run.request, run.settings),
     )
     with worktree.preparation_step("credential delivery"):
         delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
@@ -511,6 +542,12 @@ def prepare_workspace(run: Run) -> Prepared:
             runfiles.private_dir(Path(paths.codex_home))
             source = runfiles.private_dir(run.home / ".codex") / "auth.json"
             before = credentials.auth_copy(source, Path(paths.codex_home) / "auth.json")
+        if run.settings.otel_endpoint is not None:
+            with worktree.preparation_step("codex config"):
+                runfiles.atomic(
+                    Path(paths.codex_home) / "config.toml",
+                    otel_config(run.settings.otel_endpoint),
+                )
     return Prepared(paths, delivery, before)
 
 
@@ -649,12 +686,26 @@ def log_argv(run: Run, command: tuple[str, ...]) -> None:
             run.files.write("log", argv_log_line(command) + "\n")
 
 
+def resource_attributes(run: Run) -> dict[str, str]:
+    """OpenTelemetry resource attributes that name the host and the account.
+
+    A run without a configured endpoint gets none, so it stays as it was.
+    """
+    if run.settings.otel_endpoint is None:
+        return {}
+    return {
+        "OTEL_RESOURCE_ATTRIBUTES": (
+            f"host.name={run.host.name},tbhb.account={run.request.account}"
+        )
+    }
+
+
 def run_harness(
     run: Run, prepared: Prepared, stack: ExitStack, *, preflight_only: bool = False
 ) -> int:
     paths = prepared.paths
     value, executable = checked_policy(run, paths)
-    env = value.env | prepared.delivery.env
+    env = value.env | prepared.delivery.env | resource_attributes(run)
     command = checked_harness_command(run, prepared, value, executable)
     if preflight_only:
         log_hook_tools(run, paths)
@@ -739,6 +790,8 @@ def execute(
     run: Run, text: str, push_token: str | None = None, *, preflight_only: bool = False
 ) -> int:
     """Keep cleanup protected until the completion record is durable."""
+    if not run.request.unsandboxed:
+        os.environ["PATH"] = host_tools.search()
     with host_tools.configured(run.settings, run.host.os), ExitStack() as stack:
         return _execute(run, text, stack, push_token, preflight_only=preflight_only)
 
@@ -774,6 +827,8 @@ def _execute(
             agent = credentials.signing_agent(
                 prepared.delivery.signing, run.tmpdir, run.deadline
             )
+        if push_token is None and not preflight_only:
+            push_token = credentials.push_token(run.request, run.settings)
         rc = (
             run_harness(run, prepared, stack, preflight_only=True)
             if preflight_only
@@ -846,9 +901,39 @@ def audit_summary(run: Run, prepared: Prepared | None, rc: int) -> None:
     )
 
 
+def shutdown_bazel(run: Run, prepared: Prepared | None) -> str:
+    """Stop the Bazel server the run left behind, however the run ended."""
+    if prepared is None:
+        return "skipped"
+    # The harness ran with the configured tool path, so search it as well.
+    search = ":".join(
+        (
+            os.environ.get("PATH", os.defpath),
+            policy.tool_path(run.settings, run.host, str(run.home)),
+        )
+    )
+    tool = shutil.which("bazelisk", path=search) or shutil.which("bazel", path=search)
+    if tool is None:
+        return "skipped"
+    try:
+        done = subprocess.run(  # nosec B603
+            [tool, "shutdown"],
+            cwd=prepared.paths.worktree,
+            capture_output=True,
+            timeout=_BAZEL_SHUTDOWN_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return "timed out"
+    except OSError:
+        return "failed to run"
+    return f"rc={done.returncode}"
+
+
 def finish(
     run: Run, prepared: Prepared | None, agent: subprocess.Popen[str] | None, rc: int
 ) -> int:
+    bazel = "skipped"
     try:
         try:
             reason = finish_auth(run, prepared)
@@ -865,6 +950,7 @@ def finish(
         except OSError, Invalid:
             process_group.unknown(run.files)
         finally:
+            bazel = shutdown_bazel(run, prepared)
             try:
                 phase = "unknown" if run.files.uncertain else "ended"
                 run.files.write("phase", phase)
@@ -877,7 +963,8 @@ def finish(
     except OSError, ValueError:
         run.files.write("log", "audit summary write failed\n")
     try:
-        runfiles.append(run.files.root, index_entry(run, prepared, rc))
+        entry = index_entry(run, prepared, rc) | {"bazel_shutdown": bazel}
+        runfiles.append(run.files.root, entry)
     except OSError, ValueError:
         run.files.write("log", "completion index append failed\n")
     return rc
@@ -908,61 +995,96 @@ def main(
     push_token: str | None = None,
     claimed: bool = False,
 ) -> int:
-    os.environ["PATH"] = host_tools.search()
     parser = argparse.ArgumentParser(prog=prog)
     parser.add_argument("name", nargs="?")
     parser.add_argument("request", nargs="?")
     parser.add_argument("--host", default=socket.gethostname())
     parser.add_argument("--prompt")
     parser.add_argument("--preflight", action="store_true")
+    parser.add_argument("--owned", action="store_true")
     args = parser.parse_args(arguments)
     if args.name is None:
         print(f"{prog}: run name is required", file=sys.stderr)
         return 1
-    files = None
     completed = None
+    recorded = None
     previous = {s: signal.signal(s, interrupt) for s in process_group.INTERRUPTS}
     try:
         with process_group.defer_signals():
             files = _files(args.name)
             refuse_started(files)
-            ownership.claim(files, claimed=claimed)
-        with (
-            runfiles.locked(files.path("run.lock")),
-            tempfile.TemporaryDirectory() as tmpdir,
-        ):
+            ownership.claim(files, claimed=claimed, owned=args.owned)
+        # Anything that fails before this lock is held, including taking the
+        # lock, belongs to a waiter and writes nothing: the records are the
+        # run that holds the lock.
+        with runfiles.locked(files.path("run.lock")):
+            # Outside the try below: a refusal here, or an interrupt that
+            # replaces it, must leave the earlier run's records alone.
             refuse_started(files)
-            run, text = _load(args, Path(tmpdir).resolve())
-            run.files.write("log", build_info.line() + "\n")
-            completed = execute(run, text, push_token, preflight_only=args.preflight)
-    except (
-        Invalid,
-        userconfig.ConfigError,
-        OSError,
-        ValueError,
-        RunInterruptedError,
-    ) as exc:
+            try:
+                # Inside the try so a failure to create the temp directory
+                # leaves a record like any other refusal.
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    run, text = _load(args, Path(tmpdir).resolve())
+                    run.files.write("log", build_info.line() + "\n")
+                    completed = execute(
+                        run, text, push_token, preflight_only=args.preflight
+                    )
+            except _REFUSALS as exc:
+                if completed is None and not isinstance(exc, RunExistsError):
+                    # Ignored until `recorded` is set: a signal in between
+                    # would return a different status than the rc file holds.
+                    with process_group.ignore_signals():
+                        recorded = _recorded_rc(files)
+                        if recorded is None:
+                            _record_failure(files, exc)
+                            recorded = _failure_rc(exc)
+                raise
+    except _REFUSALS as exc:
         if completed is not None:
             return completed
-        rc = 143 if isinstance(exc, RunInterruptedError) else 1
-        with process_group.ignore_signals():
-            if files is not None and not isinstance(exc, RunExistsError):
-                try:
-                    reason = (
-                        "interrupted during load"
-                        if isinstance(exc, RunInterruptedError)
-                        else str(exc)
-                    )
-                    files.write("log", f"run refused: {reason}\n")
-                finally:
-                    files.write("rc", f"{rc}\n")
         print(f"{prog}: {exc}", file=sys.stderr)
-        return rc
+        # An interrupt while the lock is released replaces the exception but
+        # not the result already written to the rc file.
+        return recorded if recorded is not None else _failure_rc(exc)
     else:
         return completed
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)
+
+
+_REFUSALS = (
+    Invalid,
+    userconfig.ConfigError,
+    OSError,
+    ValueError,
+    RunInterruptedError,
+)
+
+
+def _failure_rc(exc: Exception) -> int:
+    return 143 if isinstance(exc, RunInterruptedError) else 1
+
+
+def _record_failure(files: runfiles.RunFiles, exc: Exception) -> None:
+    """Write the failed run's records while the caller holds the run lock."""
+    with process_group.ignore_signals():
+        try:
+            reason = (
+                "interrupted during load"
+                if isinstance(exc, RunInterruptedError)
+                else str(exc)
+            )
+            files.write("log", f"run refused: {reason}\n")
+        finally:
+            files.write("rc", f"{_failure_rc(exc)}\n")
+
+
+def _recorded_rc(files: runfiles.RunFiles) -> int | None:
+    """The status `execute` already wrote, when a signal hit before main saw it."""
+    path = files.path("rc")
+    return int(path.read_text()) if path.exists() else None
 
 
 def _files(name: str) -> runfiles.RunFiles:

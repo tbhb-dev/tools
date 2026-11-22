@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tbhbdev.alpha import private_names
-from tbhbdev.alpha.agent import host_tools, runfiles
+from tbhbdev.alpha.agent import host_tools, open_pr, runfiles
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.private_names import _configured
 
@@ -148,10 +148,14 @@ def run(
     if rc:
         run.files.write("log", f"push skipped: harness exited {rc}\n")
         return rc
+    made = True
     try:
         with publication(run.files.root, workspace, commit) as directory:
             scan(directory, before, commit, names, branch)
             status, error = send(directory, url(run.request.repo), branch, token)
+            if not status:
+                run.files.write("branch", branch)
+                made = opened(run, directory, commit, branch, token)
     except PushRefusedError as refusal:
         run.files.write("log", f"push refused: {refusal}\n")
         return 4
@@ -162,9 +166,20 @@ def run(
             token, "[redacted]"
         )
         run.files.write("log", f"push failed: {line}\n")
-    else:
-        run.files.write("branch", branch)
-    return 4 if status else rc
+    return 4 if status or not made else rc
+
+
+def opened(run: Run, git_dir: Path, commit: str, branch: str, token: str) -> bool:
+    """Open the run's pull request and record it; False when it was not opened."""
+    try:
+        number = open_pr.open_pull_request(
+            git_dir, commit, run.request.repo, branch, token
+        )
+    except (open_pr.OpenRefusedError, OSError) as refusal:
+        run.files.write("log", f"pull request not opened: {refusal}\n")
+        return False
+    run.files.write("pr", f"{run.request.repo}#{number}")
+    return True
 
 
 def read_names(source: Path) -> private_names.Names:

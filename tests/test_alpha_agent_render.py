@@ -23,11 +23,11 @@ def test_unsandboxed_reports_filter_authorization() -> None:
         "example",
         phase="running",
         rc="running",
-        target=("example-linux", "ops", reference),
+        target=("example-linux", "ops", reference, None),
         started="today",
     ) == (
         "example: phase=running rc=running host=example-linux account=ops started=today"
-        + suffix
+        " launcher=unknown" + suffix
     )
 
 
@@ -43,11 +43,11 @@ def test_status() -> None:
         "example",
         phase="finishing",
         rc="0",
-        target=("example-linux", "agent", None),
+        target=("example-linux", "agent", None, "coord-review-1"),
         started="2026-11-09T00:00:00+00:00",
     ) == (
         "example: phase=finishing rc=0 host=example-linux "
-        "account=agent started=2026-11-09T00:00:00+00:00"
+        "account=agent started=2026-11-09T00:00:00+00:00 launcher=coord-review-1"
     )
 
 

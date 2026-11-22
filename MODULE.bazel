@@ -8,7 +8,7 @@ module(name = "tbhb_dev_tools")
 bazel_dep(name = "tbhb_rules", version = "0.0.0", dev_dependency = True)
 git_override(
     module_name = "tbhb_rules",
-    commit = "fe9c1e56c33233cf7974de1cf38aa888fb5c7790",
+    commit = "60295689201c97560855aebec77af4ff8c836ae9",
     remote = "https://github.com/tbhb-dev/rules.git",
 )
 
@@ -18,7 +18,7 @@ git_override(
 bazel_dep(name = "tbhb_rules_python", version = "0.0.0", dev_dependency = True)
 git_override(
     module_name = "tbhb_rules_python",
-    commit = "fe9c1e56c33233cf7974de1cf38aa888fb5c7790",
+    commit = "60295689201c97560855aebec77af4ff8c836ae9",
     remote = "https://github.com/tbhb-dev/rules.git",
     strip_prefix = "python",
 )
@@ -90,8 +90,8 @@ http_file(
     name = "vale_google",
     dev_dependency = True,
     downloaded_file_path = "Google.zip",
-    sha256 = "4b67fca1f2a88595b2a578ab98bbf3017a23af677b04f93e862843f3ea1a9a0b",
-    url = "https://github.com/errata-ai/Google/releases/download/v0.7.1/Google.zip",
+    sha256 = "c1f61ae1c4cee3f2c2ffb2912fbbdff48a02c0e47e114dfd6435b15438171d97",
+    url = "https://github.com/errata-ai/Google/releases/download/v0.7.2/Google.zip",
 )
 
 http_file(

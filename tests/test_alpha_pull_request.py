@@ -24,7 +24,7 @@ from hypothesis import strategies as st
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import identity as agent_identity
-from tbhbdev.alpha import opened, private_names
+from tbhbdev.alpha import opened, private_names, size_gate
 from tbhbdev.alpha import pull_request as pr
 
 # mutmut runs the tests from a copy of the source tree, so everything resolves
@@ -69,6 +69,11 @@ record = {{
     "cwd": os.getcwd(),
     "stdin": sys.stdin.read(),
     "stdin_tty": sys.stdin.isatty(),
+    "config": (
+        open(sys.argv[sys.argv.index("--config") + 1]).read()
+        if "--config" in sys.argv
+        else None
+    ),
     "draft": open(draft).read() if os.path.exists(draft) else None,
     "links": {{n: os.readlink(n) for n in os.listdir(".") if os.path.islink(n)}},
 }}
@@ -167,6 +172,11 @@ def host_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     """A repository with the real schema and sections and stub configs."""
+    monkeypatch.setattr(
+        size_gate,
+        "size_counts",
+        Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None)),
+    )
     root = tmp_path / "repo"
     tools_dir = tmp_path / "bin"
     tools_dir.mkdir()
@@ -676,6 +686,12 @@ def test_frontmatter_invalid_yaml() -> None:
     )
 
 
+def test_frontmatter_refuses_a_repeated_key() -> None:
+    found = structure("---\nbase: main\nbase: dev\n---\n" + BASE)
+    assert [line for line, _ in found] == [1]
+    assert "duplicate key 'base'" in found[0][1]
+
+
 def test_frontmatter_must_be_a_mapping() -> None:
     found = structure("---\n- a\n---\n" + BASE)
     assert [line for line, _ in found] == [1]
@@ -695,6 +711,18 @@ def test_line_numbers_follow_the_frontmatter() -> None:
 
 def test_find_tool_prefers_path(world: World) -> None:
     assert pr.find_tool("vale") == str(world.bin / "vale")
+
+
+def test_find_tool_can_skip_the_bazel_shims(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shim = tmp_path / "repo" / ".bazel_env" / "bin"
+    shim.mkdir(parents=True)
+    (shim / "vale").write_text("")
+    (shim / "vale").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{world.bin}")
+    assert pr.find_tool("vale") == str(shim / "vale")
+    assert pr.find_tool("vale", unwrapped=True) == str(world.bin / "vale")
 
 
 def test_find_tool_falls_back_to_mise(world: World, tmp_path: Path) -> None:
@@ -1384,7 +1412,7 @@ def test_the_posting_session_dedupes_against_its_commit_trailer(
     assert lines == [OPENER, f"Generated-by: {trailer}"]
 
 
-@pytest.mark.parametrize("argv", [["create"], ["edit", "--pr", "7"]])
+@pytest.mark.parametrize("argv", [["create"], ["edit", str(pr.DRAFT), "--pr", "7"]])
 def test_an_unresolved_posting_model_fails_without_posting(
     world: World, agent: dict[str, str], argv: list[str]
 ) -> None:
@@ -1450,7 +1478,9 @@ def write_draft(world: World, text: str = BASE) -> Path:
 def test_check_prints_ok(world: World, capsys: pytest.CaptureFixture[str]) -> None:
     write_draft(world)
     assert run_main("check") == 0
-    assert capsys.readouterr().out == "OK: the draft conforms\n"
+    assert capsys.readouterr().out == (
+        "0 code lines, limit 400\n0 raw lines, limit 1500\nOK: the draft conforms\n"
+    )
 
 
 def test_check_prints_problems_with_paths(
@@ -1460,6 +1490,7 @@ def test_check_prints_problems_with_paths(
     assert run_main("check", str(path)) == 1
     assert capsys.readouterr().out == (
         f"{path}:5: HTML comment left in the description\n"
+        "0 code lines, limit 400\n0 raw lines, limit 1500\n"
     )
 
 
@@ -1472,6 +1503,7 @@ def test_check_defaults_to_the_draft_path(
     assert out == (
         ".github/PULL_REQUEST_DRAFT.md:1: "
         "cannot read the draft: No such file or directory\n"
+        "0 code lines, limit 400\n0 raw lines, limit 1500\n"
     )
 
 
@@ -1566,7 +1598,7 @@ def test_edit(world: World, capsys: pytest.CaptureFixture[str]) -> None:
     write_draft(
         world, "---\nlabels: [bug, docs]\ndraft: true\nbase: main\n---\n" + BASE
     )
-    assert run_main("edit", "--pr", "7") == 0
+    assert run_main("edit", str(pr.DRAFT), "--pr", "7") == 0
     _, call = world.calls("gh")
     assert call["argv"] == [
         "pr", "edit", "7", "--title", "fix: x", "--body-file", "-",
@@ -1583,7 +1615,7 @@ def test_edit_without_labels_and_with_agent(
     world: World, agent: dict[str, str]
 ) -> None:
     write_draft(world)
-    assert run_main("edit", "--pr", "7", env=agent) == 0
+    assert run_main("edit", str(pr.DRAFT), "--pr", "7", env=agent) == 0
     _, call = world.calls("gh")
     assert call["argv"] == ["pr", "edit", "7", "--title", "fix: x", "--body-file", "-"]
     assert str(call["stdin"]).endswith(f"v\n\nAssisted-by: {POSTING}\n")
@@ -1604,7 +1636,7 @@ def test_create_scans_the_final_title_and_body(
 
 def test_edit_scans_the_final_title_and_body(world: World) -> None:
     write_draft(world)
-    assert run_main("edit", "--pr", "7") == 0
+    assert run_main("edit", str(pr.DRAFT), "--pr", "7") == 0
     (call,) = world.calls("gitleaks")
     _, gh = world.calls("gh")
     assert call["stdin"] == f"fix: x\n\n{gh['stdin']}"
@@ -1614,7 +1646,7 @@ FINDING = '[{"RuleID": "some-rule", "StartLine": 9}]'
 
 
 @pytest.mark.parametrize(
-    "argv", [("create",), ("create", "--dry-run"), ("edit", "--pr", "7")]
+    "argv", [("create",), ("create", "--dry-run"), ("edit", str(pr.DRAFT), "--pr", "7")]
 )
 def test_a_finding_stops_before_gh(
     world: World, capsys: pytest.CaptureFixture[str], argv: tuple[str, ...]
@@ -1631,7 +1663,7 @@ def test_a_finding_stops_before_gh(
     assert "gh pr" not in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("argv", [("create",), ("edit", "--pr", "7")])
+@pytest.mark.parametrize("argv", [("create",), ("edit", str(pr.DRAFT), "--pr", "7")])
 def test_a_missing_gitleaks_stops_before_gh(
     world: World, argv: tuple[str, ...]
 ) -> None:
@@ -1819,16 +1851,21 @@ def test_the_base_visibility_counts_only_with_a_parsed_name(
     assert read["argv"] == ["repo", "view", "--json", "nameWithOwner,visibility"]
 
 
+def without_path(config: str) -> str:
+    """A config with its ``path`` lines dropped: the scan points them at a copy."""
+    return re.sub(r"^\s*path\s*=.*$", "", config, flags=re.MULTILINE)
+
+
 def scan_config(world: World) -> str:
-    """The config the one gitleaks call ran under."""
+    """The text of the config the one gitleaks call ran under, minus its paths."""
     (call,) = world.calls("gitleaks")
-    argv = cast("list[str]", call["argv"])
-    return argv[argv.index("--config") + 1]
+    return without_path(str(call["config"]))
 
 
 def full_config() -> str:
-    """The private config, under the test's HOME."""
-    return str(Path.home() / ".config" / "gitleaks" / "private.toml")
+    """The private config under the test's HOME, minus its paths."""
+    path = Path.home() / ".config" / "gitleaks" / "private.toml"
+    return without_path(path.read_text())
 
 
 VISIBILITIES = [
@@ -1884,7 +1921,7 @@ def test_edit_reads_the_prs_repository_once_and_picks_the_config(
 ) -> None:
     world.fake("gh", stdout="u\n", cases=edit_cases(pr_page(TARGET), stdout, rc))
     write_draft(world)
-    assert run_main("edit", "--pr", "7") == 0
+    assert run_main("edit", str(pr.DRAFT), "--pr", "7") == 0
     (read,) = world.calls("gh.repo")
     assert read["argv"] == ["repo", "view", TARGET, *VISIBILITY_READ]
     assert (scan_config(world) != full_config()) is reduced
@@ -1898,7 +1935,7 @@ def test_a_private_working_directory_posting_to_a_public_repo_gets_the_full_conf
     cases[f"repo view {other}"] = {"rc": 0, "stdout": "PUBLIC\n", "stderr": ""}
     world.fake("gh", stdout="u\n", cases=cases)
     write_draft(world)
-    assert run_main("edit", "--pr", "7") == 0
+    assert run_main("edit", str(pr.DRAFT), "--pr", "7") == 0
     (read,) = world.calls("gh.repo")
     assert read["argv"] == ["repo", "view", other, *VISIBILITY_READ]
     assert scan_config(world) == full_config()
@@ -1922,15 +1959,22 @@ def test_edit_with_an_unresolved_target_uses_the_full_config_and_reads_nothing(
 ) -> None:
     world.fake("gh", stdout="u\n", cases=edit_cases(url, "PRIVATE\n"))
     write_draft(world)
-    assert run_main("edit", "--pr", "7") == 0
+    assert run_main("edit", str(pr.DRAFT), "--pr", "7") == 0
     assert world.calls("gh.repo") == []
     assert scan_config(world) == full_config()
+
+
+def test_edit_requires_a_draft(world: World) -> None:
+    write_draft(world)
+    with pytest.raises(SystemExit) as info:
+        run_main("edit", "--pr", "7")
+    assert info.value.code == 2
 
 
 def test_edit_requires_a_pr_number(world: World) -> None:
     del world
     with pytest.raises(SystemExit) as info:
-        run_main("edit")
+        run_main("edit", str(pr.DRAFT))
     assert info.value.code == 2
 
 
@@ -1986,6 +2030,7 @@ def test_run_uses_the_given_directory(tmp_path: Path) -> None:
 
 def test_runs_as_tbhbdev_alpha_pr(world: World) -> None:
     write_draft(world)
+    write_fake(world.bin / "bazelisk", "raise SystemExit('missing target')")
     env = {**os.environ, "PYTHONPATH": pythonpath(SRC)}
     env.pop("MUTANT_UNDER_TEST", None)
     done = subprocess.run(
@@ -1996,7 +2041,10 @@ def test_runs_as_tbhbdev_alpha_pr(world: World) -> None:
         check=False,
         env=env,
     )
-    assert (done.returncode, done.stderr) == (0, "")
+    assert (done.returncode, done.stderr) == (
+        0,
+        "size count unavailable: missing target\n",
+    )
 
 
 # ------------------------------------------------------- mutation-killing pins
@@ -2104,7 +2152,7 @@ def test_a_bad_branch_trailer_and_posting_value_are_both_listed(
 
 @pytest.mark.parametrize("missing", [pr.SCHEMA, pr.SECTIONS])
 @pytest.mark.parametrize(
-    "argv", [["check"], ["create", "--dry-run"], ["edit", "--pr", "3"]]
+    "argv", [["check"], ["create", "--dry-run"], ["edit", str(pr.DRAFT), "--pr", "3"]]
 )
 def test_a_missing_baseline_file_names_it(
     world: World, missing: Path, argv: list[str]
@@ -2175,7 +2223,7 @@ def test_help_describes_the_script(capsys: pytest.CaptureFixture[str]) -> None:
 @pytest.mark.parametrize("command", ["edit"])
 def test_pr_number_must_be_an_integer(command: str) -> None:
     with pytest.raises(SystemExit) as info:
-        run_main(command, "--pr", "seven")
+        run_main(command, str(pr.DRAFT), "--pr", "seven")
     assert info.value.code == 2
 
 
@@ -2688,7 +2736,11 @@ def test_pr_commands_report_unresolved_attribution(
     agent_identity.record_command(ROOT, SUBAGENT, "background command", world.root)
     if site == "create-description":
         monkeypatch.setattr(pr, "opened_by", Mock(return_value=(None, None)))
-    argv = ("edit", "--pr", "1") if site == "edit-description" else ("create",)
+    argv = (
+        ("edit", str(pr.DRAFT), "--pr", "1")
+        if site == "edit-description"
+        else ("create",)
+    )
     assert run_main(*argv, env=agent) == 1
     assert capsys.readouterr() == (
         "",
@@ -2803,7 +2855,7 @@ def test_edit_copies_the_live_opened_by_line(
 ) -> None:
     world.fake("gh", cases={"pr view": live_body(body)})
     write_draft(world)
-    assert run_main("edit", "--pr", "7", env=agent) == 0
+    assert run_main("edit", str(pr.DRAFT), "--pr", "7", env=agent) == 0
     view, edit = world.calls("gh")
     assert view["argv"] == ["pr", "view", "7", "--json", "body,url"]
     assert cast("list[str]", edit["argv"])[:3] == ["pr", "edit", "7"]
@@ -2827,7 +2879,7 @@ def test_edit_stops_when_it_cant_read_the_live_body(
     write_draft(world)
     message = f"cannot read the body of PR 7 to keep its Opened-by: {why}"
     with pytest.raises(SystemExit, match=f"^{re.escape(message)}$"):
-        run_main("edit", "--pr", "7")
+        run_main("edit", str(pr.DRAFT), "--pr", "7")
     argvs = [cast("list[str]", call["argv"]) for call in world.calls("gh")]
     assert [argv[:2] for argv in argvs] == [["pr", "view"]]
 
@@ -3749,7 +3801,7 @@ def test_edit_stops_when_gh_fails_with_a_body(world: World) -> None:
     write_draft(world)
     message = 'cannot read the body of PR 7 to keep its Opened-by: {"body": ""}'
     with pytest.raises(SystemExit, match=f"^{re.escape(message)}$"):
-        run_main("edit", "--pr", "7")
+        run_main("edit", str(pr.DRAFT), "--pr", "7")
 
 
 def test_backfill_stops_when_gh_fails_with_a_list(world: World) -> None:
@@ -3780,6 +3832,12 @@ def test_help_uses_the_program_name(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         pr.main(["--help"], {}, prog="tbhbdev alpha pr")
     assert capsys.readouterr().out.startswith("usage: tbhbdev alpha pr ")
+
+
+def test_help_lists_close(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        pr.main(["--help"], {}, prog="tbhbdev alpha pr")
+    assert "close N --reason TEXT: close a pull request" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("make", ["file", "bytes"])
@@ -3895,7 +3953,7 @@ def test_create_refuses_an_open_pr(
         (
             "error: PR 17 (https://github.com/tbhb-dev/example/pull/17) "
             "is already open; "
-            "run `tbhbdev alpha pr edit --pr 17` to apply the draft\n"
+            "run `tbhbdev alpha pr edit DRAFT --pr 17` to apply the draft\n"
         ),
     )
     assert [call["argv"] for call in world.calls("gh")] == [
@@ -4017,7 +4075,7 @@ def test_create_rejects_already_exists(
         output.rstrip("\n")
         + "\n"
         + (
-            f"gh pr create failed; run `tbhbdev alpha pr edit --pr {number}` "
+            f"gh pr create failed; run `tbhbdev alpha pr edit DRAFT --pr {number}` "
             "to apply the draft\n"
         ),
     )

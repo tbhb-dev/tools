@@ -241,19 +241,19 @@ def sandbox_command(
     return command
 
 
-def report_agy_refusals(config: Settings, host: Host, paths: RunPaths) -> None:
+def report_agy_unproven(config: Settings, host: Host, paths: RunPaths) -> None:
     for profile in Profile:
-        with pytest.raises(Invalid, match="agy has no OS sandbox"):
-            policy.build(
-                config,
-                host,
-                harness=Harness.AGY,
-                profile=profile,
-                account="agent",
-                unsandboxed=False,
-                paths=paths,
-            )
-        report(f"agy {profile}: refused by policy")
+        value = policy.build(
+            config,
+            host,
+            harness=Harness.AGY,
+            profile=profile,
+            account="agent",
+            unsandboxed=False,
+            paths=paths,
+        )
+        assert value.harness is Harness.AGY
+        report(f"agy {profile}: unproven (no OS sandbox)")
 
 
 def report_unproven(harness: Harness) -> None:
@@ -532,14 +532,13 @@ def probe_auth_missing(result: subprocess.CompletedProcess[str]) -> bool:
 
 def probe_token_env(harness: Harness) -> dict[str, str]:
     variable = "TBHBDEV_LIVE_CLAUDE_TOKEN_FILE"
-    if harness is not Harness.CLAUDE or not (path := os.environ.get(variable)):
+    if harness is not Harness.CLAUDE:
         return {}
-    try:
-        token = Path(path).read_text().strip()
-    except OSError:
-        msg = f"cannot read {variable}: {path}"
-        raise ValueError(msg) from None
-    return {credentials.CLAUDE_TOKEN_ENV: token}
+    if os.environ.get(variable):
+        msg = f"{variable} is no longer read; set {credentials.CLAUDE_TOKEN_ENV}"
+        raise ValueError(msg)
+    token = os.environ.get(credentials.CLAUDE_TOKEN_ENV, "").strip()
+    return {credentials.CLAUDE_TOKEN_ENV: token} if token else {}
 
 
 def run_probe(
@@ -629,7 +628,7 @@ def run_probe(
 def test_build_sandboxes_refuse_user_sockets(tmp_path: Path, harness: Harness) -> None:
     run, paths = probe_run(tmp_path, harness)
     if harness is Harness.AGY:
-        report_agy_refusals(run.settings, run.host, paths)
+        report_agy_unproven(run.settings, run.host, paths)
         return
     if os.environ.get("CODEX_SANDBOX"):
         report_unproven(harness)
@@ -799,9 +798,9 @@ def test_refusals_require_an_observed_positive_control(tmp_path: Path) -> None:
         assert_observations(Harness.CODEX, {}, results, Proxy(1))
 
 
-def test_agy_live_request_reaches_the_policy_refusal(tmp_path: Path) -> None:
+def test_agy_live_request_reports_no_sandbox(tmp_path: Path) -> None:
     run, paths = probe_run(tmp_path, Harness.AGY)
-    report_agy_refusals(run.settings, run.host, paths)
+    report_agy_unproven(run.settings, run.host, paths)
 
 
 @live_only

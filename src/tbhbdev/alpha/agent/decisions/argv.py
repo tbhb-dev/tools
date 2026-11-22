@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 import shlex
 import shutil
+import socket
 import sys
+from pathlib import Path
 
 from tbhbdev.alpha.agent.decisions import policy as policy_module
 from tbhbdev.alpha.agent.model import (
@@ -60,9 +62,21 @@ def ssh(
     """The driver's call to HOST, which runs REMOTE in the host's shell.
 
     It never prompts, gives up connecting after CONNECT_TIMEOUT seconds and
-    probes the connection every KEEPALIVE seconds.
+    probes the connection every KEEPALIVE seconds. When present, the local
+    machine's session key is the only identity offered, without an SSH agent.
     """
     command = shlex.join((f"/bin/{host.shell}", "-c", shlex.join(remote)))
+    key = (
+        Path.home()
+        / ".ssh"
+        / "sessions"
+        / f"{socket.gethostname().split('.')[0]}_ed25519"
+    )
+    identity = (
+        ("-i", str(key), "-o", "IdentityAgent=none", "-o", "IdentitiesOnly=yes")
+        if key.is_file()
+        else ()
+    )
     return (
         executable("ssh"),
         "-o",
@@ -73,6 +87,7 @@ def ssh(
         f"ServerAliveInterval={keepalive}",
         "-o",
         f"ServerAliveCountMax={keepalive_count_max}",
+        *identity,
         "-l",
         host.account,
         host.name,
@@ -214,7 +229,13 @@ def _claude(
     request: RunRequest, policy: Policy, detail: ClaudePolicy, brief_file: str
 ) -> tuple[str, ...]:
     headless = request.kind is RunKind.EXEC
-    mode = "auto" if policy.profile is Profile.BUILD else "dontAsk"
+    mode = (
+        "bypassPermissions"
+        if request.unsandboxed
+        else "auto"
+        if policy.profile is Profile.BUILD
+        else "dontAsk"
+    )
     settings = json.dumps(detail.settings, separators=(",", ":"), sort_keys=True)
     argv = ["claude", *(["-p"] if headless else [])]
     argv += ["--model", request.model, "--effort", request.effort]
@@ -237,10 +258,19 @@ def _agy(  # noqa: PLR0913, PLR0917 -- one value per fact agy's argv depends on
         message = "argv agy run requires agy_project"
         raise Invalid(message)
     review = policy.profile is Profile.REVIEW
-    argv = ["agy" if review else "agy-agent", "--project", project]
+    argv = [
+        "agy" if review or request.unsandboxed else "agy-agent",
+        "--project",
+        project,
+    ]
     argv += ["--model", request.model]
+    if request.unsandboxed:
+        # Headless agy auto-denies any tool that needs a permission prompt.
+        argv.append("--dangerously-skip-permissions")
     if review:
-        argv += ["--mode", "plan", "--sandbox"]
+        argv += ["--mode", "plan"]
+        if not request.unsandboxed:
+            argv.append("--sandbox")
     if request.kind is RunKind.START:
         return (*argv, "--prompt-interactive", POINTER.format(path=brief_file))
     if brief is None:

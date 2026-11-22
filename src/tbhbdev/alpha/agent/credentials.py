@@ -26,6 +26,20 @@ if TYPE_CHECKING:
 
 # Split the spelling because the repository's leak scanner also flags the name.
 CLAUDE_TOKEN_ENV = "CLAUDE_CODE_" + "OAUTH_TOKEN"
+PULL_REQUESTS_PERMISSIONS = {"contents": "read"}
+# A build run pushes its own branch and opens its pull request; run-host holds this
+# token for the push and never puts it in the sandbox.
+PUSH_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
+# A review run returns its verdict as text, so its token can read and never write.
+# run-host posts the verdict after the run ends, so the posting token never reaches
+# the sandbox.
+REVIEW_POST_PERMISSIONS = {"pull_requests": "write"}
+REVIEW_PERMISSIONS = {
+    "contents": "read",
+    "pull_requests": "read",
+    "checks": "read",
+    "statuses": "read",
+}
 
 
 @dataclass(frozen=True)
@@ -57,50 +71,134 @@ def require_reviews_app(references: Credentials) -> None:
         raise Invalid(message)
 
 
-def installation_token(references: Credentials, repository: str) -> str:
-    """Reuse the app signer and request a token restricted to one repository."""
+def installation_token(
+    references: Credentials,
+    repository: str,
+    permissions: dict[str, str] = REVIEW_PERMISSIONS,
+) -> str:
+    """Mint the reviews App's token for one repository, read-only by default."""
+    if references.reviews_app_client_id is None or references.reviews_app_pem is None:
+        message = "reviews App credentials are not configured"
+        raise Invalid(message)
     host, owner, name = repo.parts(repository)
     if host != "github.com":
         message = "reviews app supports github.com repositories"
         raise Invalid(message)
-    if references.reviews_app_client_id is None or references.reviews_app_pem is None:
-        message = "reviews App credentials are not configured"
-        raise Invalid(message)
     client_id = read(references.reviews_app_client_id, label="reviews app")
     pem = read(references.reviews_app_pem, label="reviews app")
-    env = gh_app.default_env()
-    args = gh_app.Args(
-        app="reviews",
-        repo=f"{owner}/{name}",
-        fresh=True,
-        dry_run=False,
-        all_repos=False,
-        vault="",
-        cooldown_until=None,
-        cooldown_status=False,
-    )
-    jwt = gh_app.sign(env, client_id, gh_app.rebuild_pem(pem))
-    return gh_app.request_token(env, args, jwt).token
+    # Explicit permissions, so the token stays narrow whatever the App holds.
+    return gh_app.mint_token(
+        gh_app.default_env(),
+        app_id=client_id,
+        pem=pem,
+        repository=f"{owner}/{name}",
+        permissions=permissions,
+    ).token
+
+
+def pull_requests_token(
+    references: Credentials,
+    repository: str,
+    permissions: dict[str, str] = PULL_REQUESTS_PERMISSIONS,
+) -> str:
+    """Mint the pull-requests App token for one repository, read-only by default."""
+    if (
+        references.pull_requests_app_client_id is None
+        or references.pull_requests_app_pem is None
+    ):
+        message = "pull-requests App credentials are not configured"
+        raise Invalid(message)
+    host, owner, name = repo.parts(repository)
+    if host != "github.com":
+        message = "pull-requests app supports github.com repositories"
+        raise Invalid(message)
+    client_id = read(references.pull_requests_app_client_id, label="pull-requests app")
+    pem = read(references.pull_requests_app_pem, label="pull-requests app")
+    # Explicit permissions, so the token stays narrow whatever the App holds.
+    return gh_app.mint_token(
+        gh_app.default_env(),
+        app_id=client_id,
+        pem=pem,
+        repository=f"{owner}/{name}",
+        permissions=permissions,
+    ).token
+
+
+TOKEN_ERRORS = (
+    Invalid,
+    OSError,
+    ValueError,
+    KeyError,
+    TypeError,
+    httpx.HTTPError,
+    gh_app.GhAppError,
+)
+
+
+def github_token(request: RunRequest, references: Credentials) -> str | None:
+    if request.profile is Profile.REVIEW:
+        try:
+            return installation_token(references, request.repo)
+        except TOKEN_ERRORS:
+            message = "reviews App token unavailable; review refused"
+            raise Invalid(message) from None
+    if references.gh:
+        return read(references.gh, label="gh")
+    if (
+        references.pull_requests_app_client_id is None
+        and references.pull_requests_app_pem is None
+    ):
+        return None
+    try:
+        return pull_requests_token(references, request.repo)
+    except TOKEN_ERRORS:
+        message = "pull-requests App token unavailable; build refused"
+        raise Invalid(message) from None
+
+
+def push_token(request: RunRequest, settings: Settings) -> str | None:
+    """The run-scoped write token for a build's push, or None to skip the push."""
+    if request.profile is not Profile.BUILD:
+        return None
+    references = next(c for c in settings.credentials if c.account == request.account)
+    try:
+        return pull_requests_token(references, request.repo, PUSH_PERMISSIONS)
+    except TOKEN_ERRORS:
+        return None
+
+
+def review_post_token(request: RunRequest, settings: Settings) -> str | None:
+    """The run-scoped token that posts a review run's verdict, or None."""
+    if request.profile is not Profile.REVIEW:
+        return None
+    references = next(c for c in settings.credentials if c.account == request.account)
+    try:
+        return installation_token(references, request.repo, REVIEW_POST_PERMISSIONS)
+    except TOKEN_ERRORS:
+        return None
+
+
+def fetch_token(request: RunRequest, settings: Settings) -> str | None:
+    """The token for the mirror's https fetch of a private repository."""
+    references = next(c for c in settings.credentials if c.account == request.account)
+    if (
+        request.profile is Profile.BUILD
+        and references.reviews_app_client_id is not None
+        and references.reviews_app_pem is not None
+    ):
+        # A build fetches with the read-only reviews token, so its account needs
+        # no pull-requests App key. Pushes use the account's own ssh key.
+        try:
+            return installation_token(references, request.repo)
+        except TOKEN_ERRORS:
+            message = "reviews App token unavailable; build fetch refused"
+            raise Invalid(message) from None
+    return github_token(request, references)
 
 
 def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
     references = next(c for c in settings.credentials if c.account == request.account)
-    if request.profile is Profile.REVIEW:
-        try:
-            gh_token = installation_token(references, request.repo)
-        except (
-            Invalid,
-            OSError,
-            ValueError,
-            KeyError,
-            TypeError,
-            httpx.HTTPError,
-            gh_app.GhAppError,
-        ):
-            message = "reviews App token unavailable; review refused"
-            raise Invalid(message) from None
-    else:
-        gh_token = read(references.gh, label="gh") if references.gh else None
+    gh_token = github_token(request, references)
     gh = runfiles.private_dir(tmpdir / "gh")
     if gh_token is not None:
         host = repo.parts(request.repo)[0]
@@ -113,7 +211,7 @@ def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:
         read(references.docker, label="docker") if references.docker else '{"auths":{}}'
     )
     runfiles.atomic(docker / "config.json", docker_text)
-    env: dict[str, str] = {}
+    env: dict[str, str] = {gh_app.RUN_ENV: "1"}
     profile_name = None
     if request.harness is Harness.CLAUDE:
         profile = config.find_profile(
