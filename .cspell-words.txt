@@ -320,3 +320,7 @@ strikethrough
 timebox
 onexc
 execroot
+statvfs
+bavail
+frsize
+favail
