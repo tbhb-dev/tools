@@ -1181,3 +1181,44 @@ def test_gh_with_the_pull_requests_app_is_refused() -> None:
 def test_host_unsandboxed_key_is_optional() -> None:
     parsed = config.parse(edited("host", 0, "unsandboxed", value=MISSING))
     assert parsed.hosts[0].unsandboxed is True
+
+
+def limits_host(**changes: object) -> model.Host:
+    table = {
+        "name": "example-linux",
+        "os": "linux",
+        "shell": "bash",
+        "account": "agent",
+        "accounts": ["agent"],
+        "proven_harnesses": ["codex"],
+        **changes,
+    }
+    return config._host(config._Table("[[agent.host]]", table))  # noqa: SLF001
+
+
+def test_host_limits_default_and_set() -> None:
+    host = limits_host()
+    assert (host.load_limit, host.min_memory_available_percent) == (None, 20)
+    assert (host.max_swap_used_percent, host.limits_warn_only) == (80, False)
+    host = limits_host(
+        load_limit=24,
+        min_memory_available_percent=30,
+        max_swap_used_percent=50,
+        limits_warn_only=True,
+    )
+    assert (host.load_limit, host.min_memory_available_percent) == (24, 30)
+    assert (host.max_swap_used_percent, host.limits_warn_only) == (50, True)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "why"),
+    [
+        ("load_limit", 0, "must be a positive integer"),
+        ("min_memory_available_percent", 101, "at most 100"),
+        ("max_swap_used_percent", 0, "must be a positive integer"),
+        ("limits_warn_only", "yes", "must be true or false"),
+    ],
+)
+def test_host_limits_refuse_bad_values(key: str, value: object, why: str) -> None:
+    with pytest.raises(Invalid, match=why):
+        limits_host(**{key: value})
