@@ -1210,11 +1210,12 @@ def test_unpublished_diff_bounds_output_and_preserves_failure(
         "if '--symref' in sys.argv:\n"
         "    print('ref: refs/heads/main\\tHEAD'); sys.exit(0)\n"
         "if 'ls-remote' in sys.argv: sys.exit(0)\n"
+        "if 'init' in sys.argv: sys.exit(0)\n"
         "assert 'format-patch' in sys.argv\n"
         "assert 'diff.external=' in sys.argv\n"
         "assert '--no-ext-diff' in sys.argv and '--no-textconv' in sys.argv\n"
         "assert '--stdout' in sys.argv and '--no-optional-locks' in sys.argv\n"
-        "assert '--no-signature' in sys.argv and 'format.signatureFile=' in sys.argv\n"
+        "assert '--no-signature' in sys.argv\n"
         "assert 'protocol.allow=never' in sys.argv\n"
         "sys.stdout.write('x' * 200000)\n"
         f"sys.exit({74 if failure else 0})\n",
@@ -1274,6 +1275,70 @@ def test_unpublished_diff_ignores_signature_file_in_run_config(host: Path) -> No
     assert b"Subject: [PATCH" in result.stdout
     assert b"SECRET-SIGNATURE-LINE" not in result.stdout
     assert b"X-Leak" not in result.stdout
+
+
+def test_unpublished_diff_ignores_an_included_config_file(host: Path) -> None:
+    tree = unpublished_run(host)
+    include = host / "private.gitconfig"
+    include.write_text("[user]\n\temail = private-address@example.invalid\n")
+    git_in(tree, "config", "include.path", str(include))
+    git_in(tree, "config", "format.from", "true")
+    (tree / "example").write_text("local change\n")
+    git_in(tree, "add", "example")
+    commit_in(tree, "local change")
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
+        )
+    )
+    assert result.returncode == 0, result.stderr
+    assert b"Subject: [PATCH" in result.stdout
+    assert b"private-address@example.invalid" not in result.stdout
+
+
+@pytest.mark.parametrize("nested", ["objects/pack", "objects/ab", "refs/heads/dir"])
+def test_unpublished_diff_refuses_nested_symlinks(host: Path, nested: str) -> None:
+    tree = unpublished_run(host)
+    target = tree / ".git" / nested
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "link").symlink_to(host / "saved")
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
+        )
+    )
+    assert result.returncode == 65
+    assert result.stdout == b""
+
+
+def test_unpublished_diff_refuses_an_alternates_file(host: Path) -> None:
+    tree = unpublished_run(host)
+    (tree / ".git/objects/info").mkdir(parents=True, exist_ok=True)
+    (tree / ".git/objects/info/alternates").write_text(str(host / "origin.git") + "\n")
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
+        )
+    )
+    assert result.returncode == 65
+    assert result.stdout == b""
+
+
+def test_unpublished_diff_ignores_a_commondir_file(host: Path) -> None:
+    tree = unpublished_run(host)
+    other = host / "private-repo"
+    git_in(host, "init", "-q", str(other))
+    (tree / "example").write_text("local change\n")
+    git_in(tree, "add", "example")
+    commit_in(tree, "local change")
+    (tree / ".git/commondir").write_text(str(other) + "\n")
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
+        )
+    )
+    assert result.returncode == 0, result.stderr
+    assert b"Subject: [PATCH" in result.stdout
 
 
 @pytest.mark.parametrize("entry", remote.GIT_INTERNALS)

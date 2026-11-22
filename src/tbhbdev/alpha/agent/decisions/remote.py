@@ -350,14 +350,45 @@ def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str
             '"$HOME"/' + shlex.quote(str(tree / ".git" / entry))
             for entry in GIT_INTERNALS
         )
+        run = '"$HOME"/' + shlex.quote(str(tree / ".git"))
+        # Git never reads the run's own config: format-patch runs in a fresh
+        # bare repository and borrows only the run's object store, and the
+        # two commits come from reading HEAD and the ref files as plain text.
         patch = (
-            f"{GIT} GIT_CONFIG_GLOBAL=/dev/null {GIT_FLAGS} "
+            f"run={run}\n"
+            "resolve() {\n"
+            '    case "$1" in *[!A-Za-z0-9._/-]*|*..*|*//*) return 65 ;; esac\n'
+            '    if test -f "$run/$1" && test ! -L "$run/$1"; then\n'
+            '        sha=$(sed -n 1p "$run/$1")\n'
+            "    else\n"
+            "        sha=$(awk -v r=\"$1\" '$2 == r {print $1; exit}' "
+            '"$run/packed-refs" 2>/dev/null)\n'
+            "    fi\n"
+            '    case "$sha" in ""|*[!0-9a-f]*) return 65 ;; esac\n'
+            '    test "${#sha}" -eq 40 || return 65\n'
+            "    printf '%s\\n' \"$sha\"\n"
+            "}\n"
+            'test -z "$(find "$run/objects" "$run/refs" -type l -print -quit)" '
+            "|| exit 65\n"
+            'test ! -e "$run/objects/info/alternates" || exit 65\n'
+            'head=$(sed -n 1p "$run/HEAD")\n'
+            'case "$head" in\n'
+            '    "ref: refs/heads/"*) tip=$(resolve "${head#ref: }") || exit 65 ;;\n'
+            "    *) tip=$head ;;\n"
+            "esac\n"
+            'case "$tip" in ""|*[!0-9a-f]*) exit 65 ;; esac\n'
+            'test "${#tip}" -eq 40 || exit 65\n'
+            'case "$1" in refs/remotes/origin/*) ;; *) exit 65 ;; esac\n'
+            'base=$(resolve "$1") || exit 65\n'
+            "scratch=$(mktemp -d) || exit 65\n"
+            "trap 'rm -rf \"$scratch\"' EXIT\n"
+            f'{GIT} {GIT_FLAGS} init -q --bare --template= "$scratch" || exit 65\n'
+            f'{GIT} GIT_CONFIG_GLOBAL=/dev/null GIT_DIR="$scratch" '
+            f'GIT_OBJECT_DIRECTORY="$run/objects" {GIT_FLAGS} '
             "-c protocol.allow=never -c diff.external= --no-optional-locks "
-            f'--git-dir="$HOME"/{shlex.quote(str(tree / ".git"))} '
-            "-c format.signatureFile= -c format.signature= "
             "format-patch --stdout --no-ext-diff --no-textconv --no-color "
             "--no-signature --no-attach --no-add-header --no-notes "
-            '"$1..HEAD" --'
+            '"$base..$tip" --\n'
         )
         fallback = (
             f"pushed=$({MIRROR_GIT} ls-remote --end-of-options origin {branch}) "
