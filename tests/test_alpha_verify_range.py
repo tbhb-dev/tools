@@ -207,21 +207,57 @@ def test_failed_rules(
     )
 
 
-def test_merge_and_multiple_failures(
+def merge(repo: Repository, ours: str, theirs: str, *, signed: bool = True) -> str:
+    """A merge commit under a non-agent identity, as GitHub makes one."""
+    return repo.commit(
+        author="merger@example.com",
+        committer="merger@example.com",
+        signed=signed,
+        parents=[ours, theirs],
+        message="Merge pull request #1 from example/branch\n",
+    )
+
+
+def test_branch_updated_with_main_passes(
     repo: Repository, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    first = repo.commit(signed=False)
-    other = repo.commit(message=f"feat: branch\n\n{TRAILER}\n")
-    tip = repo.commit(parents=[first, other], author="other@example.com", signed=False)
-    assert verify_range.main([repo.base, tip], PROG) == 1
+    on_branch = repo.commit()
+    on_main = repo.commit(message="chore: main\n")
+    tip = merge(repo, on_branch, on_main)
+    # Main's commit is already on the base, so only the branch commit and the
+    # merge are in the range.
+    assert verify_range.main([on_main, tip], PROG) == 0
+    assert capsys.readouterr() == (
+        (
+            f"{on_branch[:7]} ok feat: example\n"
+            f"{tip[:7]} ok Merge pull request #1 from example/branch\n"
+            "verify-range: 2 commits, 0 failed\n"
+        ),
+        "",
+    )
+
+
+def test_pr_merge_checks_commits_it_brings_in(
+    repo: Repository, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bad = repo.commit(signed=False)
+    good = repo.commit(parents=[bad], message=f"feat: second\n\n{TRAILER}\n")
+    main = repo.commit(message="chore: main\n")
+    tip = merge(repo, main, good)
+    assert verify_range.main([main, tip], PROG) == 1
     out, err = capsys.readouterr()
     assert err == ""
-    assert out == (
-        f"{first[:7]} FAIL missing gpgsig header | feat: example\n"
-        f"{other[:7]} ok feat: branch\n"
-        f"{tip[:7]} FAIL author email is 'other@example.com'; expected {EMAIL}; "
-        "missing gpgsig header; expected one parent, found 2 | feat: example\n"
-        "verify-range: 3 commits, 2 failed\n"
+    assert f"{bad[:7]} FAIL missing gpgsig header | feat: example\n" in out
+    assert f"{good[:7]} ok feat: second\n" in out
+    assert f"{tip[:7]} ok Merge pull request" in out
+    assert out.endswith("verify-range: 3 commits, 1 failed\n")
+
+
+def test_unsigned_merge_fails(repo: Repository) -> None:
+    tip = merge(repo, repo.commit(), repo.commit(message="chore: main\n"), signed=False)
+    assert verify_range.inspect_commit(repo.git("cat-file", "commit", tip)) == (
+        ["missing gpgsig header"],
+        "Merge pull request #1 from example/branch",
     )
 
 
