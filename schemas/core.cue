@@ -35,6 +35,8 @@ package content
 	setextHeadings!: int & >=0
 	indentedCodeBlocks!:       int & >=0
 	fencedCodeBlocks!:         int & >=0
+	// Lines inside fenced and indented code blocks, so a section can cap code.
+	codeLines!:                int & >=0
 	htmlBlocks!:               int & >=0
 	linkReferenceDefinitions!: int & >=0
 	paragraphs!:               int & >=0
@@ -58,6 +60,7 @@ package content
 	setextHeadings:           0
 	indentedCodeBlocks:       0
 	fencedCodeBlocks:         0
+	codeLines:                0
 	htmlBlocks:               0
 	linkReferenceDefinitions: 0
 	paragraphs:               0
