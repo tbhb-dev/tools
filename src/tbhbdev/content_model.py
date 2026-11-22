@@ -328,6 +328,7 @@ def normalize(
     the caller's job.
     """
     titled = object != "issue-comment"
+    markdown = markdown.replace("\x00", "\ufffd")  # The parser does too.
     parser = (
         MarkdownIt("commonmark", {"inline_definitions": True})
         .enable(["table", "strikethrough"])

@@ -19,9 +19,9 @@ Supply a schema-supported object, a variant name, and JSON-compatible metadata. 
 
 Start the document with a nonempty level-one ATX (hash-prefixed) heading for the `title` block. Later level-two headings start sections. Section keys use visible heading text, lowercased, with runs of non-alphanumeric characters replaced by a hyphen. Duplicate keys receive suffixes starting at `-2`. Content before the first section becomes `preamble` when present. This block has kind `text` and omits optional heading and level fields. Missing titles and empty section headings raise `ValueError`.
 
-`blockOrder` preserves document order. Blocks include source, visible text, spans, metrics, content, and an empty inline index. Sections include their heading in source, visible text, and metrics. Their content arrays contain the following blocks. The title has an empty content array.
+`blockOrder` preserves document order. Blocks include source, visible text, spans, metrics, content, and an empty inline index. Sections include their heading in source. Their visible text and metrics exclude it. Their content arrays contain the following blocks. The title has an empty content array.
 
-Offsets count scalars from zero. Lines and columns start at one. Span ends are exclusive. Child source ranges include original line markers and indentation.
+Offsets count scalars from zero. Lines and columns start at one. Span ends are exclusive. Child source ranges include original line markers and indentation. Spans cover text, so blank lines between top-level blocks belong to no span. A NUL character in the input becomes U+FFFD, as in the parser.
 
 The parser enables tables and strikethrough in `markdown-it-py` and uses task lists from `mdit-py-plugins`. It emits paragraphs, headings, nested lists, fenced and indented code, tables, block quotes, thematic breaks, HTML blocks, and link reference definitions. Task items include `checked` and item metrics.
 

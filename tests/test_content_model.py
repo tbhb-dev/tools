@@ -269,6 +269,11 @@ def test_section_heading_is_not_text() -> None:
     assert _at(result, "metrics", "visible", "words") == 3
 
 
+def test_nul_in_table_cell_is_replaced() -> None:
+    result = _normalize("# T\n\n## Body\n\n| a\x00b |\n| - |\n")
+    assert "\ufffd" in str(_at(result, "blocks", "body", "source"))
+
+
 def test_issue_comment_has_no_title() -> None:
     result = normalize(
         "Fixed in abc.\n\n## Evidence\n\nrun log\n",
