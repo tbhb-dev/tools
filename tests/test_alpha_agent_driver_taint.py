@@ -12,7 +12,7 @@ from agent_driver_example import Remote, execution_arguments, setup
 from agent_example import settings
 
 from tbhbdev.alpha import agent
-from tbhbdev.alpha.agent import driver, taint_store
+from tbhbdev.alpha.agent import driver, taint_store, transport
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -122,8 +122,8 @@ def test_unsandboxed_append_precedes_preparation(
         config: agent.driver.Settings,
         host: agent.driver.Host,
         command: tuple[str, ...],
+        stdin: transport.Stdin | None = None,
         *,
-        data: bytes = b"",
         timeout: float = 30,
     ) -> str:
         if (
@@ -136,7 +136,7 @@ def test_unsandboxed_append_precedes_preparation(
             assert state.taint.account == "ops"
             assert state.taint.run == "sample"
             assert state.taint.authorized_by == "o/r#1"
-        return original(config, host, command, data=data, timeout=timeout)
+        return original(config, host, command, stdin, timeout=timeout)
 
     monkeypatch.setattr(driver.transport, "call", call)
     assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0

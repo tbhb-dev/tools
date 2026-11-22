@@ -61,7 +61,7 @@ def test_transport_bounds(
             "-o ServerAliveCountMax=3 -l agent example-linux"
         )
         assert args == (*expected_argv, "/bin/bash -c true")
-        assert data == b"example"
+        assert data == b"owner-1\nexample"
         return 0, b"example-output\xff"
 
     async def wait_for(
@@ -72,8 +72,9 @@ def test_transport_bounds(
 
     monkeypatch.setattr(transport.asyncio, "wait_for", wait_for)
     monkeypatch.setattr(transport, "execute", run)
+    stdin = transport.Stdin("owner-1", b"example")
     assert (
-        transport.call(settings(), LINUX, ("true",), data=b"example", timeout=timeout)
+        transport.call(settings(), LINUX, ("true",), stdin, timeout=timeout)
         == "example-output\ufffd"
     )
 
@@ -96,14 +97,14 @@ def test_shell_forwards_inputs(
         config: model.Settings,
         host: model.Host,
         command: tuple[str, ...],
+        stdin: transport.Stdin | None,
         *,
-        data: bytes,
         timeout: float,
     ) -> str:
         assert config == settings()
         assert host == LINUX
         assert command == ("/bin/sh", "-c", "example")
-        assert data == b"payload"
+        assert stdin == transport.Stdin("owner-1", b"payload")
         assert timeout == (7.5 if custom else 30)
         return "output"
 
@@ -111,7 +112,13 @@ def test_shell_forwards_inputs(
     monkeypatch.setattr(transport, "call", call)
     kwargs: dict[str, float] = {} if timeout is None else {"timeout": timeout}
     assert (
-        transport.shell(settings(), LINUX, "example", data=b"payload", **kwargs)
+        transport.shell(
+            settings(),
+            LINUX,
+            "example",
+            transport.Stdin("owner-1", b"payload"),
+            **kwargs,
+        )
         == "output"
     )
 
@@ -121,11 +128,11 @@ def test_shell_default_data(monkeypatch: pytest.MonkeyPatch) -> None:
         _config: model.Settings,
         _host: model.Host,
         _command: tuple[str, ...],
+        stdin: transport.Stdin | None,
         *,
-        data: bytes,
         timeout: float,
     ) -> str:
-        assert data == b""
+        assert stdin is None
         assert timeout == 30
         return ""
 
@@ -141,17 +148,17 @@ def test_stream_modes_and_budget(
         config: model.Settings,
         host: model.Host,
         script: str,
+        stdin: transport.Stdin | None,
         *,
-        data: bytes,
         timeout: float,
     ) -> str:
         assert config == settings()
         assert host == LINUX
-        assert script == remote.transfer(
-            "example", settings().sockets_dir, owner="example-owner"
-        )
+        assert script == remote.transfer("example", settings().sockets_dir)
         assert timeout == 4.5
-        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        assert stdin is not None
+        assert stdin.owner == "example-owner"
+        with tarfile.open(fileobj=io.BytesIO(stdin.data)) as archive:
             members = archive.getmembers()
             assert [m.name for m in members] == [
                 "example.request.json",
@@ -183,13 +190,17 @@ def test_read_budget(
     monkeypatch: pytest.MonkeyPatch, timeout: float | None, answer: bool
 ) -> None:
     def shell(
-        config: model.Settings, host: model.Host, script: str, *, timeout: float
+        config: model.Settings,
+        host: model.Host,
+        script: str,
+        stdin: transport.Stdin | None,
+        *,
+        timeout: float,
     ) -> str:
         assert config == settings()
         assert host == LINUX
-        assert script == remote.read(
-            "example", settings().sockets_dir, answer=answer, owner="example-owner"
-        )
+        assert script == remote.read("example", settings().sockets_dir, answer=answer)
+        assert stdin == transport.Stdin("example-owner")
         assert timeout == (7.5 if custom else 30)
         return "66696e6973686564\n30\n1\n0\nanswer\n"
 
@@ -334,11 +345,15 @@ def test_read_absent_rc_and_default_view(
     monkeypatch: pytest.MonkeyPatch, session: str
 ) -> None:
     def shell(
-        _config: model.Settings, _host: model.Host, script: str, *, timeout: float
+        _config: model.Settings,
+        _host: model.Host,
+        script: str,
+        stdin: transport.Stdin | None,
+        *,
+        timeout: float,
     ) -> str:
-        assert script == remote.read(
-            "sample", settings().sockets_dir, answer=False, owner="example-owner"
-        )
+        assert script == remote.read("sample", settings().sockets_dir, answer=False)
+        assert stdin == transport.Stdin("example-owner")
         assert timeout == 30
         return f"72756e6e696e67\n-\n0\n{session}\n"
 

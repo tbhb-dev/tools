@@ -17,8 +17,12 @@ class RunExistsError(Invalid):
 OWNER_MODE = 0o600
 
 
-def verify(files: RunFiles, expected: str) -> None:
-    """Refuse unless the owner file is the driver's own private regular file."""
+def verify(files: RunFiles, expected: str | None) -> None:
+    """Refuse unless the owner file is the driver's own private regular file.
+
+    ``expected=None`` checks the file's kind only. The launching script already
+    matched the owner on its stdin, which never reaches an argument list.
+    """
     try:
         # O_NONBLOCK keeps a FIFO planted at the path from blocking the open.
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -34,18 +38,25 @@ def verify(files: RunFiles, expected: str) -> None:
             and info.st_uid == os.getuid()
         )
         # Read one byte past the expected bytes so a longer file never matches.
-        wanted = f"{expected}\n".encode()
-        text = os.read(descriptor, len(wanted) + 1) if private else b""
+        wanted = None if expected is None else f"{expected}\n".encode()
+        text = os.read(descriptor, len(wanted) + 1) if private and wanted else b""
     finally:
         os.close(descriptor)
-    if not expected or not private or text != wanted:
+    if expected == "" or not private or (wanted is not None and text != wanted):
         message = f"run {files.name!r} has a different owner"
         raise RunExistsError(message)
 
 
 def claim(
-    files: RunFiles, *, claimed: bool = False, expected: str | None = None
+    files: RunFiles,
+    *,
+    claimed: bool = False,
+    expected: str | None = None,
+    owned: bool = False,
 ) -> None:
+    if owned:
+        verify(files, None)
+        return
     if expected is not None:
         verify(files, expected)
         return
