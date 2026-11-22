@@ -362,6 +362,7 @@ package content
 		"pr-review" |
 		"commit-comment" |
 		"release" |
+		"record" |
 		"project-item" |
 		"milestone" |
 		"discussion" |
