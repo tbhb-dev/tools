@@ -250,6 +250,7 @@ def test_launch_stream_and_metadata(
         "launcher": "coord-review-1",
         "launcher_session": "session-1",
         "cleaning": False,
+        "ignore_limits": False,
     }
     assert len(record["owner"]) == 32
     assert (remote.state / "sample.owner").read_text() == record["owner"] + "\n"
@@ -456,7 +457,7 @@ def test_launch_deadline(
     remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # Leave time for the input calls, then cross the deadline during polling.
-    ticks = iter([0, 0, 0, 0, 0, 0, 120, 120, 120, 134, 134, 134])
+    ticks = iter([0, 0, 0, 0, 0, 0, 0, 120, 120, 120, 134, 134, 134])
     monkeypatch.setattr(
         driver,
         "time",
@@ -1054,12 +1055,16 @@ def test_exec_spends_one_startup_budget(
     ) -> str:
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
-        if script == remote_commands.host_marker(host.account):
+        if script == remote_commands.limits():
             assert timeout == 110
+            steps.append("limits")
+            return "0.5 4 1000 900 100 0"
+        if script == remote_commands.host_marker(host.account):
+            assert timeout == 100
             steps.append("marker")
             return ""
         assert script == remote_commands.installed(CONFIG.hosts[0])
-        assert timeout == 100
+        assert timeout == 90
         steps.append("preflight")
         return version.line() + "\n"
 
@@ -1074,7 +1079,7 @@ def test_exec_spends_one_startup_budget(
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
         assert name == "sample"
-        assert timeout == 90
+        assert timeout == 80
         assert inputs.owner == driver.load(CONFIG, "sample").owner
         assert inputs.schema is None
         assert inputs.prompt.endswith("Carry out the example.\n")
@@ -1096,7 +1101,7 @@ def test_exec_spends_one_startup_budget(
             CONFIG.hosts[0],
             owner=driver.load(CONFIG, "sample").owner,
         )
-        assert timeout == 80
+        assert timeout == 70
         steps.append("start")
         return ""
 
@@ -1110,7 +1115,7 @@ def test_exec_spends_one_startup_budget(
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
         assert name == ("sample", driver.load(CONFIG, "sample").owner)
-        assert timeout == 70
+        assert timeout == 60
         steps.append("poll")
         return transport.Reading("running", None, launched=True, session=True, text="")
 
@@ -1119,7 +1124,7 @@ def test_exec_spends_one_startup_budget(
     monkeypatch.setattr(transport, "call", call)
     monkeypatch.setattr(transport, "read", read)
     assert launch(remote) == 0
-    assert steps == ["marker", "preflight", "stream", "start", "poll"]
+    assert steps == ["limits", "marker", "preflight", "stream", "start", "poll"]
 
 
 @pytest.mark.parametrize(
@@ -1762,7 +1767,7 @@ def test_unsandboxed_unconfirmed_reports_sandbox(
 
         monkeypatch.setattr(transport, "call", lost_reply)
     else:
-        ticks = iter([0, 0, 0, 0, 0, 120, 120, 120, 134, 134, 134])
+        ticks = iter([0, 0, 0, 0, 0, 0, 120, 120, 120, 134, 134, 134])
         monkeypatch.setattr(
             driver,
             "time",

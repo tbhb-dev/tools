@@ -126,7 +126,10 @@ def test_unsandboxed_append_precedes_preparation(
         data: bytes = b"",
         timeout: float = 30,
     ) -> str:
-        if "tbhbdev-agent-taint/ops.jsonl" not in command[2]:
+        if (
+            "tbhbdev-agent-taint/ops.jsonl" not in command[2]
+            and "# tbhbdev-limits" not in command[2]
+        ):
             state = taint_store.load("example-linux")
             assert state.status == "tainted"
             assert state.taint is not None
