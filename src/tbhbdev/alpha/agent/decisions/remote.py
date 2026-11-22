@@ -135,6 +135,36 @@ def host_marker(account: str) -> str:
     return PREFIX + "perl -e " + shlex.quote(read) + " " + shlex.quote(str(marker))
 
 
+def limits() -> str:
+    """Print one line of host numbers: load, CPUs, then memory and swap in KiB.
+
+    The fields are the 1-minute load, the logical CPU count, MemTotal,
+    MemAvailable, swap total and swap used.
+    """
+    linux = (
+        "read l _ < /proc/loadavg\n"
+        'awk -v l="$l" -v c="$(nproc)" \'/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} '
+        "/^SwapTotal:/{s=$2} /^SwapFree:/{f=$2} "
+        "END{print l, c, t, a, s, s-f}' /proc/meminfo\n"
+    )
+    macos = (
+        "l=$(sysctl -n vm.loadavg | awk '{print $2}')\n"
+        "c=$(sysctl -n hw.logicalcpu)\n"
+        "m=$(sysctl -n hw.memsize)\n"
+        "u=$(sysctl -n vm.swapusage)\n"
+        'vm_stat | awk -v l="$l" -v c="$c" -v m="$m" -v u="$u" \''
+        "/page size of/{z=$8} /^Pages (free|inactive|speculative|purgeable):/{p+=$NF} "
+        'END{split(u,w,"[ =M]+"); '
+        'printf "%s %s %d %d %d %d\\n", l, c, m/1024, p*z/1024, '
+        "w[2]*1024, w[4]*1024}'\n"
+    )
+    return (
+        "# tbhbdev-limits\n"
+        + PREFIX
+        + f'if test "$(uname -s)" = Darwin; then\n{macos}else\n{linux}fi\n'
+    )
+
+
 def preflight(repository: str, ref: str, expected_version: str, host: Host) -> str:
     git_host, owner, project = repo.parts(repository)
     url = f"git@{git_host}:{owner}/{project}.git"

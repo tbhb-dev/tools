@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, NoReturn
 from tbhbdev import version
 from tbhbdev.alpha.agent import render, runfiles, taint_store, transport
 from tbhbdev.alpha.agent.decisions import driver as rules
-from tbhbdev.alpha.agent.decisions import remote, repo, request, taint
+from tbhbdev.alpha.agent.decisions import limits, remote, repo, request, taint
 from tbhbdev.alpha.agent.decisions import runfiles_names as files
 from tbhbdev.alpha.agent.model import Harness, Invalid, Profile, RunKind, RunRequest
 
@@ -37,6 +37,7 @@ class Run:
         self.started = started
         self.owner = owner
         self.cleaning = False
+        self.ignore_limits = False
 
 
 def directory() -> Path:
@@ -58,6 +59,7 @@ def save(run: Run) -> None:
         "started": run.started,
         "owner": run.owner,
         "cleaning": run.cleaning,
+        "ignore_limits": run.ignore_limits,
     }
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as output:
@@ -76,12 +78,15 @@ def load(settings: Settings, name: str) -> Run:
         started = str(record.pop("started"))
         owner = str(record.pop("owner"))
         cleaning = record.pop("cleaning")
+        # Records from before the limits check have no such field.
+        ignore_limits = record.pop("ignore_limits", False)
         run = request.parse(record, host_allows_unsandboxed=True)
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         message = f"{path}: invalid run metadata"
         raise Invalid(message) from exc
     result = Run(name, host, run, started, owner)
     result.cleaning = bool(cleaning)
+    result.ignore_limits = bool(ignore_limits)
     return result
 
 
@@ -127,9 +132,35 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     run = rules.check(
         run, settings, host, ref=args.ref, exists=metadata_path(args.name).exists()
     )
-    return Run(
+    result = Run(
         args.name, host, run, datetime.now(UTC).isoformat(), secrets.token_hex(16)
     )
+    result.ignore_limits = args.ignore_limits
+    return result
+
+
+def check_limits(
+    settings: Settings, host: Host, *, ignore: bool, timeout: float = 30
+) -> None:
+    """Read HOST's load, memory and swap in one ssh call, then refuse or warn.
+
+    Launch calls this first. A later step may call it again.
+
+    Raises:
+        Invalid: A limit is exceeded or the read failed, and neither the host
+            nor IGNORE allows the launch to continue.
+    """
+    try:
+        found = limits.parse(
+            transport.shell(settings, host, remote.limits(), timeout=timeout)
+        )
+    except transport.TransportError as exc:
+        found = str(exc)
+    refuse, message = limits.decide(host, found, ignore=ignore)
+    if refuse:
+        raise Invalid(message)
+    if message:
+        print(message, file=sys.stderr)
 
 
 def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
@@ -190,6 +221,12 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
     if schema is not None:
         json.loads(schema)
     deadline = time.monotonic() + settings.launch_wait_seconds
+    check_limits(
+        settings,
+        run.host,
+        ignore=run.ignore_limits,
+        timeout=deadline - time.monotonic(),
+    )
     # Every exec run is unsandboxed: launch_trust records taint, never refuses.
     launch_trust(settings, run, deadline)
     ref = args.ref or "HEAD"

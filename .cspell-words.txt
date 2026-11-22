@@ -105,7 +105,9 @@ libexec
 libproc
 listy
 llmx
+loadavg
 lockfiles
+logicalcpu
 logname
 mcpjson
 mdfile
@@ -162,6 +164,7 @@ procargs
 proname
 pronamespace
 pubout
+purgeable
 pushd
 rdonly
 rdwr
@@ -200,6 +203,7 @@ strerror
 stubtool
 subagentstart
 surrogateescape
+swapusage
 syslimits
 tailnet
 tbhb

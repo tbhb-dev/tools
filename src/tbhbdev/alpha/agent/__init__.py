@@ -41,6 +41,11 @@ def parser(prog: str) -> argparse.ArgumentParser:
         "--harness", choices=("codex", "claude", "agy"), default="codex"
     )
     execute.add_argument("--allow-non-gemini", action="store_true")
+    execute.add_argument(
+        "--ignore-limits",
+        action="store_true",
+        help="launch although the host's load, memory or swap exceeds its limits",
+    )
     accounts = execute.add_mutually_exclusive_group()
     accounts.add_argument("--account")
     accounts.add_argument("--ops", dest="account", action="store_const", const="ops")
