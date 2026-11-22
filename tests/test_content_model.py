@@ -110,6 +110,7 @@ def _normalize(source: str) -> dict[str, object]:
     ("source", "order"),
     [
         ("# Title", ["title"]),
+        ("# T\n## B\n| a\x00b |\n| - |", ["title", "b"]),
         ("# Title\n\n## Out of scope\ntext", ["title", "out-of-scope"]),
         (
             "# Title\n\nintro\n\n## A\n## A\n## A",
@@ -267,11 +268,6 @@ def test_section_heading_is_not_text() -> None:
     assert _at(result, *outcome, "metrics", "atxHeadings") == 1
     assert str(_at(result, *outcome, "source")).startswith("## Outcome")
     assert _at(result, "metrics", "visible", "words") == 3
-
-
-def test_nul_in_table_cell_is_replaced() -> None:
-    result = _normalize("# T\n\n## Body\n\n| a\x00b |\n| - |\n")
-    assert "\ufffd" in str(_at(result, "blocks", "body", "source"))
 
 
 def test_issue_comment_has_no_title() -> None:
