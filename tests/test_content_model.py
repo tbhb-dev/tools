@@ -260,12 +260,12 @@ def test_escaped_table_cell() -> None:
 
 def test_section_heading_is_not_text() -> None:
     result = _normalize("# Title here\n\n## Outcome\n\nOne two three.\n")
-    section = _at(result, "blocks", "outcome")
-    assert section["metrics"]["visible"]["words"] == 3
-    assert section["metrics"]["visible"]["characters"] == len("One two three.")
-    assert section["metrics"]["source"]["characters"] == len("\nOne two three.\n")
-    assert section["metrics"]["atxHeadings"] == 1
-    assert section["source"].startswith("## Outcome")
+    outcome = ("blocks", "outcome")
+    assert _at(result, *outcome, "metrics", "visible", "words") == 3
+    assert _at(result, *outcome, "metrics", "visible", "characters") == 14
+    assert _at(result, *outcome, "metrics", "source", "characters") == 16
+    assert _at(result, *outcome, "metrics", "atxHeadings") == 1
+    assert str(_at(result, *outcome, "source")).startswith("## Outcome")
     assert _at(result, "metrics", "visible", "words") == 3
 
 
