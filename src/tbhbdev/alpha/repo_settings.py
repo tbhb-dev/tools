@@ -29,10 +29,14 @@ LOG_VERSION = 1
 
 TITLE = "squash_merge_commit_title"
 MESSAGE = "squash_merge_commit_message"
+MERGE_TITLE = "merge_commit_title"
+MERGE_MESSAGE = "merge_commit_message"
 # The values GitHub documents for each commit-message setting.
 ENUMS: dict[str, tuple[str, ...]] = {
     TITLE: ("PR_TITLE", "COMMIT_OR_PR_TITLE"),
     MESSAGE: ("PR_BODY", "COMMIT_MESSAGES", "BLANK"),
+    MERGE_TITLE: ("PR_TITLE", "MERGE_MESSAGE"),
+    MERGE_MESSAGE: ("PR_BODY", "PR_TITLE", "BLANK"),
 }
 # The allowlist, in the order the commands list a repository's keys. Each key
 # outside ENUMS takes true or false.
@@ -42,6 +46,8 @@ KEYS = (
     "allow_rebase_merge",
     TITLE,
     MESSAGE,
+    MERGE_TITLE,
+    MERGE_MESSAGE,
     "delete_branch_on_merge",
     "has_issues",
     "has_wiki",
@@ -51,7 +57,7 @@ KEYS = (
     "web_commit_signoff_required",
 )
 # GitHub refuses a message without its title.
-COMMIT_PAIR = (TITLE, MESSAGE)
+COMMIT_PAIRS = ((TITLE, MESSAGE), (MERGE_TITLE, MERGE_MESSAGE))
 
 TABLES = ("defaults", "repos")
 # An owner can't start with a dot. A repository name can, as in ``.github``, but
@@ -174,17 +180,19 @@ def patch_body(
 ) -> Settings:
     """The JSON for one update: the changed keys only.
 
-    GitHub requires the squash title with the squash message, so when either
-    changes, the body carries both: each from WANT, or from HAVE, the
-    repository's current values, when only one of them is wanted.
+    GitHub requires a commit title with its message, for the squash pair and
+    for the merge pair, so when either of a pair changes, the body carries
+    both: each from WANT, or from HAVE, the repository's current values, when
+    only one of them is wanted.
     """
     body: Settings = {key: after for key, (_, after) in changes.items()}
-    if body.keys() & set(COMMIT_PAIR):
-        for key in COMMIT_PAIR:
-            if key in want:
-                body[key] = want[key]
-            elif key in have:
-                body[key] = have[key]
+    for pair in COMMIT_PAIRS:
+        if body.keys() & set(pair):
+            for key in pair:
+                if key in want:
+                    body[key] = want[key]
+                elif key in have:
+                    body[key] = have[key]
     return body
 
 

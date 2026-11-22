@@ -167,9 +167,11 @@ RULESET_PLAIN_RULES = {
     "required_linear_history",
     "required_signatures",
 }
-# From .github/rulesets/main.json: one approval, squash only, the Actions app.
+# From .github/rulesets/main.json: one approval, merge or squash only (squash
+# stays allowed during the move to merge commits), the Actions app.
 RULESET_APPROVALS = 1
-RULESET_MERGE_METHODS = ["squash"]
+RULESET_MERGE_METHODS = frozenset({"merge", "squash"})
+RULESET_DEFAULT_METHODS = ["squash"]
 RULESET_CHECKS_APP = 15368
 OFF_DISMISSAL: dict[str, object] = {"enabled": False, "allowed_actors": []}
 RULESET_REVIEW_KEYS = {
@@ -192,6 +194,16 @@ def safe_dismissal(value: object) -> bool:
     )
 
 
+def safe_methods(methods: object) -> bool:
+    """A non-empty list of distinct merge methods from merge and squash."""
+    return (
+        isinstance(methods, list)
+        and bool(methods)
+        and len(set(methods)) == len(methods)
+        and set(methods) <= RULESET_MERGE_METHODS
+    )
+
+
 def safe_pull_request_rule(rule: dict[str, object]) -> bool:
     """A pull request rule with one approval, no code owner or team requirement."""
     parameters = rule.get("parameters")
@@ -199,12 +211,12 @@ def safe_pull_request_rule(rule: dict[str, object]) -> bool:
         return False
     options: dict[str, object] = parameters
     count = options.get("required_approving_review_count")
-    methods = options.get("allowed_merge_methods", RULESET_MERGE_METHODS)
+    methods = options.get("allowed_merge_methods", RULESET_DEFAULT_METHODS)
     return (
         isinstance(count, int)
         and not isinstance(count, bool)
         and 1 <= count <= RULESET_APPROVALS
-        and methods == RULESET_MERGE_METHODS
+        and safe_methods(methods)
         and set(options) <= RULESET_REVIEW_KEYS
         and options.get("require_code_owner_review", False) is False
         and options.get("required_reviewers", []) == []

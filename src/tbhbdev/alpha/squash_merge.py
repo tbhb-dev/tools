@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
-"""`tbhbdev alpha merge`: squash merge, ported from an earlier interim toolset.
+"""`tbhbdev alpha merge`: merge a PR, ported from an earlier interim toolset.
 
-GitHub's default squash message pastes the pull request body in as written,
-Markdown included. This script builds a plain-text commit message from the PR
-and merges with it.
+GitHub's default message pastes the pull request body in as written, Markdown
+included, and a default merge commit is titled "Merge pull request #N from
+branch". This script builds a plain-text commit message from the PR and passes
+it explicitly on the merge call, as the commit title and the commit message.
+
+The method comes from the repository's own settings, read live with ``gh repo
+view --json mergeCommitAllowed,squashMergeAllowed``: a merge commit when the
+repository allows it, else a squash merge, else the command stops. A failed or
+malformed read stops it too. The merge path also refuses a body that cleans to
+nothing or a subject in GitHub's default form. The file keeps its old name.
 
 Usage, from anywhere in a worktree:
 
@@ -41,7 +48,7 @@ any failing checks. It leaves the rules themselves to GitHub. The merge passes
 ``--match-head-commit`` so that a push after the preview cannot slip in.
 ``--dry-run`` previews the message and the command and merges nothing.
 
-Before the preview or the merge, the final squash message goes through gitleaks
+Before the preview or the merge, the final commit message goes through gitleaks
 under the host's private config (see ``tbhbdev.alpha.secret_scan``), and a
 finding, a missing config or a missing gitleaks stops the command. The message
 is built from the PR's current body, so this catches a body edited after
@@ -80,6 +87,8 @@ if TYPE_CHECKING:
 WIDTH = 72
 CODE_INDENT = "    "
 GH = "gh"
+METHOD_FIELDS = "mergeCommitAllowed,squashMergeAllowed"
+DEFAULT_MERGE_TITLES = ("Merge pull request", "Merge branch")
 GIT = "git"
 VIEW_FIELDS = (
     "title,body,headRefOid,baseRefName,state,isDraft,mergeable,"
@@ -446,7 +455,7 @@ def renovate_body(body: str) -> str:
 def build_message(
     title: str, number: int, body: str, *, agent: bool = False
 ) -> Message:
-    """The squash commit message for a PR.
+    """The commit message for a PR, for either merge method.
 
     Raises:
         SystemExit: The subject is not a Conventional Commit header within 72
@@ -455,7 +464,7 @@ def build_message(
     """
     subject = f"{title} (#{number})"
     if problems := pr.title_problems(subject, WIDTH):
-        stop(f"the squash subject {subject!r} fails: {'; '.join(problems)}")
+        stop(f"the commit subject {subject!r} fails: {'; '.join(problems)}")
     lines, _ = pr.scan(body.splitlines(), 1)  # pragma: no mutate -- numbers unused
     _, unclosed = pr.fence_flags(body.splitlines())
     if unclosed is not None:
@@ -545,10 +554,36 @@ def fetch(number: int) -> PullRequest:
     )
 
 
+def merge_method(target: str) -> str:
+    """``--merge`` or ``--squash``, by what the repository ``target`` allows.
+
+    Raises:
+        SystemExit: The read fails or is malformed, or neither is allowed.
+    """
+    if not pr.NAME_WITH_OWNER.fullmatch(target):
+        stop("not merging: can't tell which repository the PR is in")
+    done = pr.run([pr.find_tool(GH), "repo", "view", target, "--json", METHOD_FIELDS])
+    if done.returncode != 0:
+        stop(f"gh repo view failed: {' '.join(done.stderr.split())}")
+    try:
+        data = json.loads(done.stdout)
+        allowed = {name: data[name] for name in METHOD_FIELDS.split(",")}
+    except ValueError, KeyError, TypeError:
+        stop("gh repo view returned no usable merge settings")
+    if not all(isinstance(value, bool) for value in allowed.values()):
+        stop("gh repo view returned no usable merge settings")
+    if allowed["mergeCommitAllowed"]:
+        return "--merge"
+    if allowed["squashMergeAllowed"]:
+        return "--squash"
+    stop(f"not merging: {target} allows neither merge commits nor squash merges")
+
+
 def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     """The command line."""
     parser = argparse.ArgumentParser(
-        prog=prog, description="Squash-merge a PR with a clean message."
+        prog=prog,
+        description="Merge a PR (merge commit, else squash) with a clean message.",
     )
     parser.add_argument("number", type=int, metavar="PR")
     parser.add_argument("--dry-run", action="store_true", help="show it, merge nothing")
@@ -556,22 +591,30 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
-    """Preview or perform the squash merge."""
+    """Preview or perform the merge."""
     args = build_parser(prog).parse_args(argv)
     request = fetch(args.number)
     if reasons := refusals(request):
         stop(f"not merging PR #{args.number}: " + "; ".join(reasons))
+    method = merge_method(pr.target_of_pr(request.url))
     body = renovate_body(request.body) if request.renovate else request.body
     message = build_message(
         request.title, args.number, body, agent=request.agent and not request.renovate
     )
+    if method == "--merge" and (
+        not message.body or message.subject.startswith(DEFAULT_MERGE_TITLES)
+    ):
+        stop(
+            f"not merging PR #{args.number}: the merge commit would get "
+            "GitHub's default message, not the cleaned PR body"
+        )
     pr.scan_secrets(
         message.text(),
-        f"the squash message for PR #{args.number}",
+        f"the commit message for PR #{args.number}",
         pr.repo_visibility(pr.target_of_pr(request.url)),
     )
     argv_gh = [
-        GH, "pr", "merge", str(args.number), "--squash", "--subject", message.subject,
+        GH, "pr", "merge", str(args.number), method, "--subject", message.subject,
         "--body-file", "-", "--match-head-commit", request.head,
     ]  # fmt: skip
     if args.dry_run:

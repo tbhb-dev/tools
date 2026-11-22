@@ -1062,9 +1062,9 @@ def test_a_ruleset_may_hold_fewer_rules_and_no_conditions() -> None:
         ),
         with_rules(status_checks({"context": "conclusion", "integration_id": 15368.0})),
         with_rules(pull_request(10**9)),
-        with_rules(pull_request_methods(["merge"])),
+        with_rules(pull_request_methods(["merge", "rebase"])),
+        with_rules(pull_request_methods(["squash", "squash"])),
         with_rules(pull_request_methods(["rebase"])),
-        with_rules(pull_request_methods(["squash", "merge"])),
         with_rules(pull_request_methods([])),
         with_rules(pull_request_methods("squash")),
     ],
@@ -1090,3 +1090,12 @@ def test_the_create_rule_covers_only_a_repository_ruleset(
     method: str, path: str, code: str
 ) -> None:
     assert policy.check(method, path, live_ruleset()).code == code
+
+
+@pytest.mark.parametrize(
+    "methods", [["merge"], ["squash"], ["merge", "squash"], ["squash", "merge"]]
+)
+def test_a_ruleset_may_allow_merge_or_squash_or_both(methods: list[str]) -> None:
+    assert policy.check(
+        "POST", RULESET_PATH, with_rules(pull_request_methods(methods))
+    ).allowed

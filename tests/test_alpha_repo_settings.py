@@ -18,6 +18,8 @@ KINDS = {
     "allow_rebase_merge": "bool",
     "squash_merge_commit_title": "enum",
     "squash_merge_commit_message": "enum",
+    "merge_commit_title": "enum",
+    "merge_commit_message": "enum",
     "delete_branch_on_merge": "bool",
     "has_issues": "bool",
     "has_wiki": "bool",
@@ -48,6 +50,8 @@ def test_the_enum_values_are_the_ones_github_documents() -> None:
     assert rs.ENUMS == {
         "squash_merge_commit_title": ("PR_TITLE", "COMMIT_OR_PR_TITLE"),
         "squash_merge_commit_message": ("PR_BODY", "COMMIT_MESSAGES", "BLANK"),
+        "merge_commit_title": ("PR_TITLE", "MERGE_MESSAGE"),
+        "merge_commit_message": ("PR_BODY", "PR_TITLE", "BLANK"),
     }
 
 
@@ -332,6 +336,13 @@ PAIR_HAVE = {
             {"has_wiki": False},
             {"has_wiki": True},
             {"has_wiki": False},
+        ),
+        # The merge pair travels together too, and apart from the squash pair.
+        (
+            {"merge_commit_message": ("BLANK", "PR_BODY")},
+            {"merge_commit_message": "PR_BODY"},
+            {"merge_commit_title": "PR_TITLE", "merge_commit_message": "BLANK"},
+            {"merge_commit_title": "PR_TITLE", "merge_commit_message": "PR_BODY"},
         ),
         # Both wanted: both come from want.
         (

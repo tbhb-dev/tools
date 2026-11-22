@@ -3,7 +3,7 @@
 """Secret scan of agent-written text, ported from an earlier interim toolset.
 
 ``tbhbdev alpha pr`` scans a pull request's final title and body, and
-``tbhbdev alpha merge`` its squash message, before gh posts them. The scan
+``tbhbdev alpha merge`` its commit message, before gh posts them. The scan
 pipes the text through ``gitleaks stdin`` under the host's private config,
 ``private.toml`` in ``.config/gitleaks`` under the home directory, which
 extends the repository's .gitleaks.toml. That is the combination
