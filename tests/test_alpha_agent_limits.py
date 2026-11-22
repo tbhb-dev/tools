@@ -127,6 +127,52 @@ def test_a_failed_macos_read_ends_the_script_nonzero(key: str) -> None:
         assert (done.returncode, done.stdout) == (1, "")
 
 
+def run_script(script: str) -> tuple[int, str]:
+    done = subprocess.run(
+        ["/bin/sh", "-c", script], capture_output=True, text=True, check=False
+    )
+    return done.returncode, done.stdout
+
+
+@pytest.mark.parametrize(
+    "text", ["read l _ < /proc/loadavg", "c=$(nproc)", "v=$(vm_stat)"]
+)
+def test_every_other_read_ends_the_script_nonzero_too(text: str) -> None:
+    lines = [x for x in remote.limits().splitlines() if text in x]
+    assert len(lines) == 1
+    assert lines[0].endswith("|| exit 1")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc")
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("/proc/loadavg", "/nonexistent"),
+        ("$(nproc)", "$(false)"),
+        ("/proc/meminfo", "$TMPDIR/no-swap-fields"),
+    ],
+)
+def test_a_failed_or_partial_linux_read_ends_the_script_nonzero(
+    old: str, new: str, tmp_path: Path
+) -> None:
+    (tmp_path / "no-swap-fields").write_text("MemTotal: 10 kB\nMemAvailable: 5 kB\n")
+    script = remote.limits().replace(old, new.replace("$TMPDIR", str(tmp_path)))
+    assert run_script(script) == (1, "")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads sysctl and vm_stat")
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("$(vm_stat)", "$(echo 'Pages free: 5.'; false)"),
+        ("sysctl -n vm.swapusage", "echo 'total =  used = 5.00M  free = 1.00M'"),
+        ("sysctl -n vm.swapusage", "echo 'garbage'"),
+    ],
+)
+def test_a_partial_macos_read_ends_the_script_nonzero(old: str, new: str) -> None:
+    assert run_script(remote.limits().replace(old, new)) == (1, "")
+
+
 def good_host(**changes: object) -> dict[str, object]:
     return {
         "name": "example-linux",
