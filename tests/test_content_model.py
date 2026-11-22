@@ -209,8 +209,8 @@ def test_all_blocks_and_schema_fields() -> None:
         "| :- | :-: | -: |\n| d | e | f |\n\n- item\n\n| x |\n| - |\n"
     )
     result = _normalize(source)
-    order = cast("list[str]", result["blockOrder"])
-    assert "".join(str(_at(result, "blocks", k, "source")) for k in order) == source
+    blocks = cast("dict[str, dict[str, str]]", result["blocks"]).values()
+    assert "".join(b["source"] for b in blocks) == source
     assert (
         _at(result, "blocks", "body", "content", 0, "blocks", 1, "visible") == "second"
     )
@@ -226,9 +226,7 @@ def test_all_blocks_and_schema_fields() -> None:
     )
     assert _at(result, "blocks", "body", "content", 10, "rows") == []
     cue = Path("schemas/core.cue").read_text()
-    fields = set(re.findall(r"^\s*(\w+)[!?]?:", cue, re.MULTILINE))
-
-    _check_fields(result, fields)
+    _check_fields(result, set(re.findall(r"^\s*(\w+)[!?]?:", cue, re.MULTILINE)))
     assert json.loads(json.dumps(result)) == result
 
 
