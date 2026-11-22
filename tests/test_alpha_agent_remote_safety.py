@@ -1214,6 +1214,8 @@ def test_unpublished_diff_bounds_output_and_preserves_failure(
         "assert 'diff.external=' in sys.argv\n"
         "assert '--no-ext-diff' in sys.argv and '--no-textconv' in sys.argv\n"
         "assert '--stdout' in sys.argv and '--no-optional-locks' in sys.argv\n"
+        "assert '--no-signature' in sys.argv and 'format.signatureFile=' in sys.argv\n"
+        "assert 'protocol.allow=never' in sys.argv\n"
         "sys.stdout.write('x' * 200000)\n"
         f"sys.exit({74 if failure else 0})\n",
     )
@@ -1245,6 +1247,45 @@ def test_unpublished_diff_refuses_symlink_paths(host: Path, component: str) -> N
     )
     path.rename(host / "saved")
     path.symlink_to(host / "saved", target_is_directory=True)
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
+        )
+    )
+    assert result.returncode == 65
+    assert result.stdout == b""
+
+
+def test_unpublished_diff_ignores_signature_file_in_run_config(host: Path) -> None:
+    tree = unpublished_run(host)
+    secret = host / "secret.txt"
+    secret.write_text("SECRET-SIGNATURE-LINE\n")
+    git_in(tree, "config", "format.signatureFile", str(secret))
+    git_in(tree, "config", "format.headers", "X-Leak: header-value")
+    (tree / "example").write_text("local change\n")
+    git_in(tree, "add", "example")
+    commit_in(tree, "local change")
+    result = execute(
+        remote.inspect(
+            "example-org/example-repo", "sample", owner="example-owner", limit=None
+        )
+    )
+    assert result.returncode == 0, result.stderr
+    assert b"Subject: [PATCH" in result.stdout
+    assert b"SECRET-SIGNATURE-LINE" not in result.stdout
+    assert b"X-Leak" not in result.stdout
+
+
+@pytest.mark.parametrize("entry", remote.GIT_INTERNALS)
+def test_unpublished_diff_refuses_symlinked_git_internals(
+    host: Path, entry: str
+) -> None:
+    tree = unpublished_run(host)
+    path = tree / ".git" / entry
+    if not path.exists():
+        path.write_text("")
+    path.rename(host / "saved")
+    path.symlink_to(host / "saved")
     result = execute(
         remote.inspect(
             "example-org/example-repo", "sample", owner="example-owner", limit=None

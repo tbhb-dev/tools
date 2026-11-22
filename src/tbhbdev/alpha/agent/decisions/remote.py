@@ -251,6 +251,19 @@ if test ! -f {path}; then ( : > {path} ); fi
 
 
 # The mirror lock serializes host fetches and reads of the fetched refs.
+# Files and directories git reads inside a run's .git for a format-patch. The
+# fallback refuses when any of them is a symlink.
+GIT_INTERNALS = (
+    "config",
+    "HEAD",
+    "objects",
+    "refs",
+    "packed-refs",
+    "info",
+    "shallow",
+    "commondir",
+)
+
 MIRROR_LOCK = (
     'open(my $lock, ">>", shift) or die "open lock: $!"; '
     'flock($lock, LOCK_EX) or die "lock: $!"; '
@@ -333,11 +346,17 @@ def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str
             '"$HOME"/' + shlex.quote(str(path))
             for path in (*reversed(tree.parents[:-1]), tree, tree / ".git")
         )
+        internals = " ".join(
+            '"$HOME"/' + shlex.quote(str(tree / ".git" / entry))
+            for entry in GIT_INTERNALS
+        )
         patch = (
             f"{GIT} GIT_CONFIG_GLOBAL=/dev/null {GIT_FLAGS} "
             "-c protocol.allow=never -c diff.external= --no-optional-locks "
             f'--git-dir="$HOME"/{shlex.quote(str(tree / ".git"))} '
+            "-c format.signatureFile= -c format.signature= "
             "format-patch --stdout --no-ext-diff --no-textconv --no-color "
+            "--no-signature --no-attach --no-add-header --no-notes "
             '"$1..HEAD" --'
         )
         fallback = (
@@ -352,6 +371,9 @@ def inspect(repository: str, name: str, *, owner: str, limit: int | None) -> str
             '    test -n "$base" || exit 65\n'
             f"    for p in {paths}; do\n"
             '        test ! -L "$p" && test -d "$p" || exit 65\n'
+            "    done\n"
+            f"    for p in {internals}; do\n"
+            '        test ! -L "$p" || exit 65\n'
             "    done\n"
             f"    perl -e {shlex.quote(INSPECTION_OUTPUT)} "
             f'/bin/sh -c {shlex.quote(patch)} -- "$base"\n'
