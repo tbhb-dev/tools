@@ -28,3 +28,5 @@ style = "backtick"
 # GitHub pastes the template into the pull request body, which starts with
 # the comment telling the author how to fill it, not a heading.
 ".github/PULL_REQUEST_TEMPLATE.md" = ["MD041"]
+# Review bodies start at H2 and must retain the exact template bytes.
+"src/tbhbdev/alpha/review_data/PULL_REQUEST_REVIEW_TEMPLATE.md" = ["MD041"]

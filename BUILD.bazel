@@ -55,6 +55,22 @@ repo_files(
     ],
 )
 
+# The review template is package data, not an OKF document.
+repo_files(
+    name = "okf_repo_files",
+    exclude = [
+        "src/tbhbdev/alpha/review_data/PULL_REQUEST_REVIEW_TEMPLATE.md",
+        ".DS_Store",
+        "**/.DS_Store",
+        ".bazelrc.user",
+        ".coverage*",
+        ".env*",
+        ".github/PULL_REQUEST_DRAFT.md",
+        "coverage.*",
+        "mise.local.toml",
+    ],
+)
+
 # Generates preset.bazelrc, which .bazelrc imports. The content depends on the
 # Bazel version that runs the generator; the committed copy matches
 # .bazelversion, and `preset.update_test` fails when it is stale.
@@ -230,7 +246,7 @@ mutmut_test(
 # Validate the docs bundle and Markdown frontmatter against its schemas.
 okf_docs_test(
     name = "okf_docs_test",
-    srcs = [":repo_files"],
+    srcs = [":okf_repo_files"],
 )
 
 # Copyright and licensing information on every file (REUSE.toml, LICENSES/).
