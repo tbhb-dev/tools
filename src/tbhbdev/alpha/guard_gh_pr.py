@@ -6,7 +6,7 @@ A PreToolUse hook, ported from an earlier interim toolset. Outside a tbhb-dev
 repository only the approval rules below apply. Inside one, agents open, edit
 and merge pull requests through `tbhbdev alpha pr` and
 `tbhbdev alpha merge`, which add the machine-written trailers and
-the plain-text squash message. This hook blocks the direct `gh` call and names
+the plain-text commit message. This hook blocks the direct `gh` call and names
 the command to run instead:
 
     gh pr create  ->  tbhbdev alpha pr check, then tbhbdev alpha pr create
@@ -692,7 +692,7 @@ def hint(found: Match) -> str:
         return f"{blocked} Run `tbhbdev alpha pr ready {number}` instead."
     return (
         f"{blocked} Once the PR is approved, run `tbhbdev alpha merge {number}` "
-        "(add `--dry-run` to preview the squash message first)."
+        "(add `--dry-run` to preview the commit message first)."
     )
 
 

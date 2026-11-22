@@ -9,5 +9,5 @@
 prefix_rule(
     pattern = ["gh", "pr", ["create", "edit", "merge"]],
     decision = "forbidden",
-    justification = "Blocked: do not run gh pr create|edit|merge. Write .github/PULL_REQUEST_DRAFT.md, then `tbhbdev alpha pr check` and `tbhbdev alpha pr create`, or `tbhbdev alpha pr edit --pr N` to update; `tbhbdev alpha merge N` squash-merges an approved PR.",
+    justification = "Blocked: do not run gh pr create|edit|merge. Write .github/PULL_REQUEST_DRAFT.md, then `tbhbdev alpha pr check` and `tbhbdev alpha pr create`, or `tbhbdev alpha pr edit --pr N` to update; `tbhbdev alpha merge N` merges an approved PR.",
 )

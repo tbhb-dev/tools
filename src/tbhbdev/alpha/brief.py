@@ -79,7 +79,10 @@ FORBIDDEN = (
 )
 FORBIDDEN_REGEX = (
     ("git commit hook bypass", r"\bgit commit\b[^`;&|]*\s(?:-n\b|--no-ver[\w-]*)"),
-    ("git push force option", r"\bgit push\b[^`;&|]*\s(?:--force|-f)\b"),
+    (
+        "git push force option",
+        r"\bgit push\b[^`;&|]*\s(?:--force\b(?!-with-lease\b)|-f\b)",
+    ),
 )
 FIXED_BY_SECTION = {
     REQUIRED_HEADINGS[0]: (HOOK_RULE,),

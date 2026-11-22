@@ -325,3 +325,12 @@ bavail
 frsize
 favail
 fstatvfs
+refspec
+refspecs
+unfetched
+forc
+ofoo
+hardbreak
+mdit
+softbreak
+tasklists

@@ -9,7 +9,17 @@ their own (see plugins.py).
 import sys
 from collections.abc import Callable, Mapping, Sequence
 
-from tbhbdev import admin, agy, alpha, analytics, host, plugins, secret, version
+from tbhbdev import (
+    admin,
+    agy,
+    alpha,
+    analytics,
+    cue_runtime,
+    host,
+    plugins,
+    secret,
+    version,
+)
 
 Tool = Callable[[list[str], str], int]
 
@@ -19,6 +29,7 @@ TOOLS: dict[str, Tool] = {
     "agy": agy.main,
     "alpha": alpha.main,
     "analytics": analytics.main,
+    "cue": cue_runtime.main,
     "host": host.main,
     "secret": secret.main,
 }

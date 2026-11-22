@@ -88,13 +88,13 @@ commands:
                EPOCH | APP --cooldown-status
   repo         bootstrap [--dry-run] [--create --private|--public] ORG/REPO:
                apply the standard repository settings
-  merge        squash-merge an approved pull request
+  merge        merge an approved pull request
   verify-range BASE TIP [-C PATH]: check every agent commit in a range
   version-check [--host NAME ...] [--expect SHA|latest] [--json]: compare the
                installed build on each host
   loop         validate loop configuration (runner not yet available)
   agent        exec | wait | status | kill | clean | keep: headless runs
-  pre-push-guard REMOTE URL: refuse rewritten history and private names
+  pre-push-guard REMOTE URL: refuse protected/unfetched pushes and private names
   brief        new | check: peer-run briefs with required safeguards
   install      install the git hooks and the user-level harness hooks
 """
