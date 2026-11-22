@@ -148,14 +148,15 @@ def limits() -> str:
         "END{print l, c, t, a, s, s-f}' /proc/meminfo\n"
     )
     macos = (
-        "l=$(sysctl -n vm.loadavg | awk '{print $2}')\n"
-        "c=$(sysctl -n hw.logicalcpu)\n"
-        "m=$(sysctl -n hw.memsize)\n"
-        "u=$(sysctl -n vm.swapusage)\n"
+        "l=$(sysctl -n vm.loadavg) || exit 1\n"
+        "c=$(sysctl -n hw.logicalcpu) || exit 1\n"
+        "m=$(sysctl -n hw.memsize) || exit 1\n"
+        "u=$(sysctl -n vm.swapusage) || exit 1\n"
         'vm_stat | awk -v l="$l" -v c="$c" -v m="$m" -v u="$u" \''
         "/page size of/{z=$8} /^Pages (free|inactive|speculative|purgeable):/{p+=$NF} "
-        'END{split(u,w,"[ =M]+"); '
-        'printf "%s %s %d %d %d %d\\n", l, c, m/1024, p*z/1024, '
+        'END{split(l,x," "); split(u,w,"[ =M]+"); '
+        'if (x[2]=="" || w[2]=="" || w[4]=="") exit 1; '
+        'printf "%s %s %d %d %d %d\\n", x[2], c, m/1024, p*z/1024, '
         "w[2]*1024, w[4]*1024}'\n"
     )
     return (

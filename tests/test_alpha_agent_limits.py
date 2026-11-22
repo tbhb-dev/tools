@@ -6,6 +6,7 @@ import copy
 import dataclasses
 import json
 import subprocess
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -108,6 +109,22 @@ def test_script_prints_the_numbers_of_this_host() -> None:
         ["/bin/sh", "-c", script], capture_output=True, text=True, check=True
     )
     assert isinstance(limits.parse(done.stdout), limits.Reading)
+
+
+@pytest.mark.parametrize(
+    "key", ["vm.loadavg", "hw.logicalcpu", "hw.memsize", "vm.swapusage"]
+)
+def test_a_failed_macos_read_ends_the_script_nonzero(key: str) -> None:
+    script = remote.limits()
+    lines = [x for x in script.splitlines() if f"sysctl -n {key})" in x]
+    assert len(lines) == 1
+    assert lines[0].endswith("|| exit 1")
+    if sys.platform == "darwin":
+        broken = script.replace(f"sysctl -n {key}", "false")
+        done = subprocess.run(
+            ["/bin/sh", "-c", broken], capture_output=True, text=True, check=False
+        )
+        assert (done.returncode, done.stdout) == (1, "")
 
 
 def good_host(**changes: object) -> dict[str, object]:
