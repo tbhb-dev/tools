@@ -7,10 +7,11 @@ package content
 #IssueSection: #DraftBlock & {
 	kind: "section"
 	metrics: {
-		tables:                   0
-		htmlBlocks:               0
-		blockQuotes:              0
-		atxHeadings:              0
+		tables:      0
+		htmlBlocks:  0
+		blockQuotes: 0
+		// The section's own H2 line counts once, so a second heading is refused.
+		atxHeadings:              1
 		setextHeadings:           0
 		thematicBreaks:           0
 		linkReferenceDefinitions: 0
@@ -35,5 +36,7 @@ package content
 		paragraphs: <=1
 		lists:      0
 		codeLines:  0
+		...
 	}
+	...
 }
