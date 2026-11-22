@@ -5021,14 +5021,16 @@ def test_shutdown_bazel_skips_without_a_tool_or_workspace(
     prepared: bool,
     expected: str,
 ) -> None:
-    monkeypatch.setattr(
-        shutil,
-        "which",
-        lambda name, path=None: f"/bin/{name}" if name in available else None,  # noqa: ARG005
-    )
-    monkeypatch.setattr(
-        subprocess, "run", lambda command, **_o: subprocess.CompletedProcess(command, 0)
-    )
+    def which(name: str, path: str | None = None) -> str | None:  # noqa: ARG001
+        return f"/bin/{name}" if name in available else None
+
+    def run(
+        command: list[str], **_options: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(subprocess, "run", run)
     value = cast("run_host.Prepared", FakePrepared()) if prepared else None
     assert run_host.shutdown_bazel(make_run(tmp_path), value) == expected
 
@@ -5046,7 +5048,10 @@ def test_shutdown_bazel_reports_a_failed_shutdown(
     def run(*_args: object, **_options: object) -> None:
         raise error
 
-    monkeypatch.setattr(shutil, "which", lambda name, path=None: f"/bin/{name}")  # noqa: ARG005
+    def which(name: str, path: str | None = None) -> str:  # noqa: ARG001
+        return f"/bin/{name}"
+
+    monkeypatch.setattr(shutil, "which", which)
     monkeypatch.setattr(subprocess, "run", run)
     assert (
         run_host.shutdown_bazel(
@@ -5070,7 +5075,11 @@ def test_finish_shuts_bazel_down_and_records_it(
         return "rc=0"
 
     monkeypatch.setattr(run_host, "shutdown_bazel", shutdown)
-    monkeypatch.setattr(runfiles, "append", lambda _root, entry: entries.append(entry))
+
+    def append(_root: object, entry: dict[str, object]) -> None:
+        entries.append(entry)
+
+    monkeypatch.setattr(runfiles, "append", append)
     assert run_host.finish(run, None, None, rc) == rc
     assert order == ["bazel"]
     assert entries[0]["bazel_shutdown"] == "rc=0"
