@@ -10,6 +10,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import pull_request as pr
+from tbhbdev.alpha import review_policy
 
 SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -195,13 +196,16 @@ def findings_problems(lines: list[pr.Line], first: int) -> list[pr.Problem]:
 
 
 def main(argv: list[str], prog: str) -> int:
-    """Run the review draft or check command."""
+    """Run the review draft, check or policy command."""
+    if argv[:1] == ["policy"]:
+        return review_policy.main(argv[1:], f"{prog} policy")
     parser = argparse.ArgumentParser(prog=prog, description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     create = sub.add_parser("draft")
     create.add_argument("number", type=int)
     create.add_argument("--force", action="store_true")
     sub.add_parser("check").add_argument("number", type=int)
+    sub.add_parser("policy", help="check a worktree's review policy files")
     args = parser.parse_args(argv)
     if args.number < 1:
         parser.error("PR number must be at least 1")
