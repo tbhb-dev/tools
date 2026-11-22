@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
+from tbhbdev.alpha import private_names
 from tbhbdev.alpha.agent import open_pr
 
 if TYPE_CHECKING:
@@ -44,6 +45,21 @@ None.
 
 Ran it.
 """
+
+
+@pytest.fixture(autouse=True)
+def host_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the draft check a synthetic required host list, as a CI runner has none."""
+    home = tmp_path / "home"
+    path = home / ".local/state/tbhb/private-repos.txt"
+    path.parent.mkdir(parents=True)
+    path.write_text("example-host\n")
+    monkeypatch.setenv("HOME", str(home))
+
+    def public_origin(*_args: str) -> tuple[int, str]:
+        return 0, "https://example.test/public"
+
+    monkeypatch.setattr(private_names, "git", public_origin)
 
 
 def commit_draft(directory: Path, text: str | None) -> tuple[Path, str]:
