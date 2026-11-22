@@ -154,9 +154,17 @@ def test_missing_fields_are_named() -> None:
     )
 
 
-@pytest.mark.parametrize("key", [k for k in BUILD if k != "v"])
+@pytest.mark.parametrize("key", [k for k in BUILD if k not in {"v", "fetch_refs"}])
 def test_each_field_is_required(key: str) -> None:
     assert refused(made(BUILD, **{key: MISSING})) == f"request is missing fields: {key}"
+
+
+def test_a_request_saved_before_fetch_refs_still_loads() -> None:
+    parsed = request.parse(
+        made(BUILD, fetch_refs=MISSING), host_allows_unsandboxed=False
+    )
+    assert parsed.fetch_refs == ()
+    assert request.to_dict(parsed)["fetch_refs"] == []
 
 
 def test_unknown_fields_are_named() -> None:
