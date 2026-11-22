@@ -23,6 +23,7 @@ uv tool install git+https://github.com/tbhb-dev/tools
 - `admin` makes policy-controlled GitHub administration calls with an append-only audit log. See [GitHub administration](docs/reference/admin.md).
 - `agy` records plain-answer and file-tool runs as OpenTelemetry; `record --dir DIR -- agy ARGS` writes local traces and delta metrics, and `export DIR` sends them to `OTEL_EXPORTER_OTLP_ENDPOINT`.
 - `analytics` applies PostgreSQL migrations and checks the installed catalog contract.
+- `prose_check` is a library, not a command: `tbhbdev.prose_check.check_prose` runs vale, cspell and rumdl on text and raises `ProseRefused` on a finding or a failure. See [Prose check](docs/reference/prose-check.md).
 - `secret` reads and manages 1Password items through the `tbhbdev.secrets` library.
 - `host` manages agent hosts from the operator's Mac.
 - `alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`. They may change or go away without notice. `tbhbdev alpha version-check` compares the installed build across hosts.
@@ -76,6 +77,7 @@ The GitHub credential (`gh`) is optional. Without it, a build run requests its G
 - [Config](docs/reference/config.md)
 - [Analytics](docs/reference/analytics.md)
 - [Secrets](docs/reference/secrets.md)
+- [Prose check](docs/reference/prose-check.md)
 - [Agent hosts](docs/reference/agent-hosts.md)
 - [Plugins](docs/reference/plugins.md)
 - [Alpha commands](docs/reference/alpha/commands.md)
