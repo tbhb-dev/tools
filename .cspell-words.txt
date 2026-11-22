@@ -314,6 +314,10 @@ itimer
 setitimer
 sigalrm
 signum
+inlines
+setext
+strikethrough
+timebox
 refspec
 refspecs
 unfetched

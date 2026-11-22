@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
 
-"""Tests for tbhbdev alpha merge, the squash-merge command."""
+"""Tests for tbhbdev alpha merge."""
 
 import json
 import os
@@ -38,17 +38,23 @@ GH = """import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 spec = json.load(open(os.path.join(here, "gh.spec")))
 repo = sys.argv[1] == "repo"
+methods = repo and "mergeCommitAllowed,squashMergeAllowed" in sys.argv
 # A read with no repository argument names the working directory's repository.
-if repo:
+if methods:
+    kind = "methods"
+elif repo:
     kind = "cwd" if sys.argv[2].startswith("-") else "repo"
 else:
     kind = sys.argv[2] if sys.argv[1] == "pr" else "?"
 # The visibility read has its own log, so it never shifts the other gh calls.
-with open(os.path.join(here, "gh.repo.log" if repo else "gh.log"), "a") as log:
+logname = "gh.methods.log" if methods else "gh.repo.log" if repo else "gh.log"
+with open(os.path.join(here, logname), "a") as log:
     log.write(json.dumps({{"argv": sys.argv[1:], "stdin": sys.stdin.read()}}) + "\\n")
-sys.stdout.write(spec[kind + "_out"])
-sys.stderr.write(spec[kind + "_err"])
-sys.exit(spec[kind + "_rc"])
+# A ruleset can refuse the merge flag while the squash flag goes through.
+refused = kind == "merge" and "--merge" in sys.argv and "merge_refused" in spec
+sys.stdout.write("" if refused else spec[kind + "_out"])
+sys.stderr.write(spec["merge_refused"] if refused else spec[kind + "_err"])
+sys.exit(1 if refused else spec[kind + "_rc"])
 """
 GITLEAKS = """import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
@@ -91,6 +97,9 @@ class Tools:
             "repo_rc": 0,
             "repo_out": "PUBLIC\\n",
             "repo_err": "",
+            "methods_rc": 0,
+            "methods_out": '{"mergeCommitAllowed": true, "squashMergeAllowed": true}',
+            "methods_err": "",
             "cwd_rc": 0,
             "cwd_out": "PRIVATE\\n",
             "cwd_err": "",
@@ -506,7 +515,7 @@ def test_dry_run_prints_the_command_and_message_and_merges_nothing(
     out = capsys.readouterr().out
     assert code == 0
     assert out.startswith(
-        "gh pr merge 12 --squash --subject 'feat(cli): add the stamp subcommand (#12)' "
+        "gh pr merge 12 --merge --subject 'feat(cli): add the stamp subcommand (#12)' "
         "--body-file - --match-head-commit abc123\n\n"
         "feat(cli): add the stamp subcommand (#12)\n\nWhy\n"
     )
@@ -518,7 +527,7 @@ def test_merge_passes_subject_body_and_head(tools: Tools) -> None:
     view, merge = tools.calls()
     assert view["argv"] == ["pr", "view", "12", "--json", sm.VIEW_FIELDS]
     assert merge["argv"] == [
-        "pr", "merge", "12", "--squash",
+        "pr", "merge", "12", "--merge",
         "--subject", "feat(cli): add the stamp subcommand (#12)",
         "--body-file", "-", "--match-head-commit", "abc123",
     ]  # fmt: skip
@@ -549,7 +558,7 @@ def test_a_finding_in_the_current_body_stops_the_merge(
     argv = ["12", "--dry-run"] if dry_run else ["12"]
     code, _ = run_main(*argv)
     assert code == (
-        "refusing the squash message for PR #12: gitleaks finds a secret: "
+        "refusing the commit message for PR #12: gitleaks finds a secret: "
         "rule some-rule on line 3"
     )
     assert [call["argv"][1] for call in tools.calls()] == ["view"]  # type: ignore[index]
@@ -577,6 +586,7 @@ def test_merge_reports_gh_output_and_exit_code(
     tools.view()
     spec = json.loads((tools.bin / "gh.spec").read_text())
     tools.gh(**{**spec, "merge_rc": 4, "merge_out": "o\n", "merge_err": "e\n"})
+    amend(tools, methods_out=allowed(merge=False, squash=True))
     assert run_main("3")[0] == 4
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == ("o\n", "e\n")
@@ -584,6 +594,7 @@ def test_merge_reports_gh_output_and_exit_code(
 
 def test_a_body_without_sections_merges_with_the_subject_only(tools: Tools) -> None:
     tools.view(body="")
+    amend(tools, methods_out=allowed(merge=False, squash=True))
     assert run_main("3")[0] == 0
     assert tools.calls()[1]["stdin"] == ""
 
@@ -651,6 +662,7 @@ def test_missing_fields_default_to_empty_and_refuse(tools: Tools) -> None:
 
 def test_null_body_is_empty(tools: Tools) -> None:
     tools.view(body=None)
+    amend(tools, methods_out=allowed(merge=False, squash=True))
     assert run_main("3")[0] == 0
 
 
@@ -903,7 +915,7 @@ def test_every_subject_problem_is_listed() -> None:
     with pytest.raises(SystemExit) as info:
         sm.build_message(title, 5, "")
     assert str(info.value) == (
-        f"the squash subject '{title} (#5)' fails: title is 81 characters; "
+        f"the commit subject '{title} (#5)' fails: title is 81 characters; "
         "the limit is 72; title is not a Conventional Commit header (cog verify): "
         "not conventional"
     )
@@ -991,15 +1003,15 @@ def test_a_private_working_directory_merging_into_a_public_repo_gets_the_full_co
         {"url": "https://github.com/o/n/issues/12"},
     ],
 )
-def test_an_unresolved_target_uses_the_full_config_and_reads_nothing(
+def test_an_unresolved_target_refuses_before_any_read_or_scan(
     tools: Tools, fields: dict[str, object]
 ) -> None:
     data = json.loads(json.loads((tools.bin / "gh.spec").read_text())["view_out"])
     data.pop("url")
     tools.gh(view_out=json.dumps(data | fields), repo_out="PRIVATE\n")
-    assert run_main("12")[0] == 0
+    assert "can't tell which repository" in str(run_main("12")[0])
     assert repo_reads(tools) == []
-    assert scan_config(tools) == full_config()
+    assert tools.scanned() == []
 
 
 def test_the_view_reads_the_url() -> None:
@@ -1188,7 +1200,7 @@ def test_dry_run_preview_is_exact(
     tools.view(title="fix: x", body="## Why\n\nw\n")
     assert sm.main(["12", "--dry-run"]) == 0
     assert capsys.readouterr().out == (
-        "gh pr merge 12 --squash --subject 'fix: x (#12)' "
+        "gh pr merge 12 --merge --subject 'fix: x (#12)' "
         "--body-file - --match-head-commit abc123\n\n"
         "fix: x (#12)\n\nWhy\nw\n"
     )
@@ -1287,7 +1299,7 @@ def test_main_reads_process_arguments_and_keeps_the_program_name(
     assert info.value.code == 0
     out = capsys.readouterr().out
     assert out.startswith("usage: custom-merge [-h] [--dry-run] PR\n")
-    assert "Squash-merge a PR with a clean message." in out
+    assert "Merge a PR (merge commit, else squash) with a clean message." in out
 
 
 def test_main_reports_every_refusal_before_scanning_or_printing(
@@ -1328,5 +1340,118 @@ def test_main_passes_the_full_message_and_target_visibility_to_the_scan(
     args = ["37", "--dry-run"] if dry_run else ["37"]
     assert sm.main(args) == 0
     assert scans == [
-        ("fix: x (#37)\n\nWhy\nw\n", "the squash message for PR #37", "PRIVATE")
+        ("fix: x (#37)\n\nWhy\nw\n", "the commit message for PR #37", "PRIVATE")
     ]
+
+
+# ------------------------------------------------------- method selection
+
+
+def methods_calls(tools: Tools) -> list[dict[str, object]]:
+    log = tools.bin / "gh.methods.log"
+    return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def allowed(*, merge: object, squash: object) -> str:
+    return json.dumps({"mergeCommitAllowed": merge, "squashMergeAllowed": squash})
+
+
+def amend(tools: Tools, **spec: object) -> None:
+    """Change the fake gh's answers, keeping the rest."""
+    path = tools.bin / "gh.spec"
+    path.write_text(json.dumps(json.loads(path.read_text()) | spec))
+
+
+@pytest.mark.parametrize(
+    ("merge", "squash", "flag"),
+    [(True, True, "--merge"), (True, False, "--merge"), (False, True, "--squash")],
+)
+def test_the_method_follows_the_repository_settings(
+    tools: Tools, merge: bool, squash: bool, flag: str
+) -> None:
+    amend(tools, methods_out=allowed(merge=merge, squash=squash))
+    assert run_main("12")[0] == 0
+    (call,) = methods_calls(tools)
+    assert call["argv"] == [
+        "repo",
+        "view",
+        TARGET,
+        "--json",
+        "mergeCommitAllowed,squashMergeAllowed",
+    ]
+    assert tools.calls()[1]["argv"][3] == flag  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("spec", "reason"),
+    [
+        ({"methods_out": allowed(merge=False, squash=False)}, "allows neither"),
+        ({"methods_rc": 1, "methods_err": "boom"}, "gh repo view failed: boom"),
+        ({"methods_out": "not json"}, "no usable merge settings"),
+        ({"methods_out": "[1]"}, "no usable merge settings"),
+        ({"methods_out": '{"mergeCommitAllowed": true}'}, "no usable merge settings"),
+        (
+            {"methods_out": allowed(merge="yes", squash=True)},
+            "no usable merge settings",
+        ),
+    ],
+)
+def test_unknown_or_no_allowed_method_refuses(
+    tools: Tools, spec: dict[str, object], reason: str
+) -> None:
+    amend(tools, **spec)
+    code, _ = run_main("12")
+    assert reason in str(code)
+    assert [call["argv"][1] for call in tools.calls()] == ["view"]  # type: ignore[index]
+
+
+def test_a_refused_merge_commit_retries_with_squash_and_the_same_message(
+    tools: Tools, capsys: pytest.CaptureFixture[str]
+) -> None:
+    amend(tools, merge_refused="Merge commits are not allowed on this branch.\n")
+    assert run_main("12")[0] == 0
+    _, first, second = tools.calls()
+    assert first["argv"][3] == "--merge"  # type: ignore[index]
+    assert second["argv"][3] == "--squash"  # type: ignore[index]
+    assert second["argv"][:3] == first["argv"][:3]  # type: ignore[index]
+    assert second["argv"][4:] == first["argv"][4:]  # type: ignore[index]
+    assert second["stdin"] == first["stdin"]
+    captured = capsys.readouterr()
+    assert captured.out == "merged\n"
+    assert captured.err == (
+        "Merge commits are not allowed on this branch.\n"
+        "--merge failed; retrying with --squash\n"
+    )
+
+
+def test_a_refused_merge_commit_with_squash_off_does_not_retry(
+    tools: Tools,
+) -> None:
+    amend(
+        tools,
+        methods_out=allowed(merge=True, squash=False),
+        merge_refused="refused\n",
+    )
+    assert run_main("12")[0] == 1
+    assert [call["argv"][1] for call in tools.calls()] == ["view", "merge"]  # type: ignore[index]
+
+
+def test_an_empty_body_refuses_the_merge_method(tools: Tools) -> None:
+    tools.view(title="fix: x", body="")
+    code, _ = run_main("12")
+    assert "GitHub's default message" in str(code)
+    assert [call["argv"][1] for call in tools.calls()] == ["view"]  # type: ignore[index]
+
+
+def test_a_default_form_subject_refuses_the_merge_method(tools: Tools) -> None:
+    tools.view(title="Merge pull request #5 from x/y", body="## Why\n\nw\n")
+    code, _ = run_main("12")
+    assert "GitHub's default message" in str(code)
+    assert [call["argv"][1] for call in tools.calls()] == ["view"]  # type: ignore[index]
+
+
+def test_a_squash_fallback_allows_an_empty_body(tools: Tools) -> None:
+    tools.view(title="fix: x", body="")
+    amend(tools, methods_out=allowed(merge=False, squash=True))
+    assert run_main("12")[0] == 0
+    assert tools.calls()[1]["argv"][3] == "--squash"  # type: ignore[index]
