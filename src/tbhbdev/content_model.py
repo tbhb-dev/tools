@@ -189,7 +189,7 @@ class _Document:
         if kind == "list":
             result.update(
                 style="ordered" if node.type == "ordered_list" else "unordered",
-                tight=all(c.children[0].hidden for c in node.children),
+                tight=all(c.children[0].hidden for c in node.children if c.children),
             )
             if node.type == "ordered_list":
                 result["start"] = node.attrs.get("start", 1)
@@ -210,7 +210,7 @@ class _Document:
             result["htmlType"] = next(
                 i
                 for i, (pattern, _, _) in enumerate(HTML_SEQUENCES, 1)
-                if pattern.search(node.content.lstrip())
+                if pattern.search(node.content.lstrip().split("\n", 1)[0])
             )
         if kind == "link-reference-definition":
             meta = cast("dict[str, str]", node.meta)
