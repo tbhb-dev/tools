@@ -39,6 +39,7 @@ BUILD: Data = {
     "tainted_host": False,
     "authorized_by": None,
     "startup_deadline_seconds": 120,
+    "fetch_refs": [],
 }
 REVIEW: Data = {**BUILD, "profile": "review", "commit": COMMIT}
 CLAUDE: Data = {

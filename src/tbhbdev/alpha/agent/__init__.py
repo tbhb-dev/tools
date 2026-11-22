@@ -30,6 +30,14 @@ def parser(prog: str) -> argparse.ArgumentParser:
     execute.add_argument("--repo", required=True)
     execute.add_argument("--ref")
     execute.add_argument(
+        "--fetch-ref",
+        action="append",
+        default=[],
+        metavar="REF",
+        help="fetch refs/pull/N/head or refs/heads/BRANCH during preparation "
+        "(repeat up to 8 times; available as origin/fetched/...; any profile)",
+    )
+    execute.add_argument(
         "--harness", choices=("codex", "claude", "agy"), default="codex"
     )
     execute.add_argument("--allow-non-gemini", action="store_true")

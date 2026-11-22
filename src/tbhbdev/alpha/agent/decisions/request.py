@@ -30,6 +30,8 @@ _EFFORT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 _ISSUE = re.compile(rf"{repo.OWNER.pattern}/{repo.REPO.pattern}#[1-9][0-9]*")
 _CHAT = re.compile(r"operator-chat-([0-9]{4})-([0-9]{2})-([0-9]{2})")
 _REASON_LIMIT = 200
+_FETCH_REF = re.compile(r"refs/(?:pull/[0-9]+/head|heads/[A-Za-z0-9._/-]+)")
+_FETCH_REF_LIMIT = 8
 _FIELDS = frozenset(
     {
         "kind",
@@ -50,6 +52,7 @@ _FIELDS = frozenset(
         "tainted_host",
         "authorized_by",
         "startup_deadline_seconds",
+        "fetch_refs",
     }
 )
 
@@ -108,6 +111,20 @@ def _check_commit(request: RunRequest) -> None:
         _fail("commit", "applies only to a review run")
 
 
+def check_fetch_refs(refs: tuple[str, ...]) -> None:
+    if len(refs) > _FETCH_REF_LIMIT:
+        _fail("fetch_refs", f"allows at most {_FETCH_REF_LIMIT} refs")
+    for ref in refs:
+        if (
+            _FETCH_REF.fullmatch(ref) is None
+            or ".." in ref
+            or "//" in ref
+            or ref.endswith(("/", ".lock"))
+            or ref.startswith("refs/heads/-")
+        ):
+            _fail("fetch_refs", f"contains invalid ref {ref!r}")
+
+
 def validate(
     request: RunRequest,
     *,
@@ -121,6 +138,7 @@ def validate(
         Invalid: The message names the field.
     """
     repo.parts(request.repo)
+    check_fetch_refs(request.fetch_refs)
     _matches("commit", request.commit, _COMMIT)
     _matches("model", request.model, _MODEL)
     _matches("effort", request.effort, _EFFORT)
@@ -167,6 +185,7 @@ def to_dict(request: RunRequest) -> dict[str, object]:
         "tainted_host": request.tainted_host,
         "authorized_by": request.authorized_by,
         "startup_deadline_seconds": request.startup_deadline_seconds,
+        "fetch_refs": list(request.fetch_refs),
     }
 
 
@@ -205,6 +224,18 @@ def _choice[E: StrEnum](data: dict[str, object], key: str, kind: type[E]) -> E:
     if not isinstance(value, str) or value not in members:
         _fail(key, f"must be one of {', '.join(members)}")
     return members[value]
+
+
+def _fetch_refs(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        _fail("fetch_refs", "must be a list of strings")
+    entries: list[object] = value
+    refs: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            _fail("fetch_refs", "must be a list of strings")
+        refs.append(entry)
+    return tuple(refs)
 
 
 def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunRequest:
@@ -253,6 +284,7 @@ def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunReque
         tainted_host=_flag(data, "tainted_host"),
         authorized_by=_maybe_text(data, "authorized_by"),
         startup_deadline_seconds=_number(data, "startup_deadline_seconds"),
+        fetch_refs=_fetch_refs(data["fetch_refs"]),
     )
     validate(request, host_allows_unsandboxed=host_allows_unsandboxed)
     return request
