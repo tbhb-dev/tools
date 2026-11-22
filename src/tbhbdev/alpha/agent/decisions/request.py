@@ -56,6 +56,9 @@ _FIELDS = frozenset(
     }
 )
 
+# Requests saved before --fetch-ref lack this key and still load.
+_REQUIRED_FIELDS = _FIELDS - {"fetch_refs"}
+
 
 def _fail(field: str, why: str) -> NoReturn:
     message = f"request {field} {why}"
@@ -257,7 +260,7 @@ def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunReque
             f"{version!r} is not a supported request version; "
             f"this build reads {REQUEST_VERSION}",
         )
-    missing = _FIELDS - data.keys()
+    missing = _REQUIRED_FIELDS - data.keys()
     if missing:
         message = f"request is missing fields: {', '.join(sorted(missing))}"
         raise Invalid(message)
@@ -284,7 +287,7 @@ def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunReque
         tainted_host=_flag(data, "tainted_host"),
         authorized_by=_maybe_text(data, "authorized_by"),
         startup_deadline_seconds=_number(data, "startup_deadline_seconds"),
-        fetch_refs=_fetch_refs(data["fetch_refs"]),
+        fetch_refs=_fetch_refs(data.get("fetch_refs", [])),
     )
     validate(request, host_allows_unsandboxed=host_allows_unsandboxed)
     return request
