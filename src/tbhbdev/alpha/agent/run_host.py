@@ -960,6 +960,36 @@ def _server_alive(base: Path) -> bool:
     return True
 
 
+def _bazel_tool(run: Run) -> str | None:
+    # The harness ran with the configured tool path, so search it as well.
+    search = ":".join(
+        (
+            os.environ.get("PATH", os.defpath),
+            policy.tool_path(run.settings, run.host, str(run.home)),
+        )
+    )
+    return shutil.which("bazelisk", path=search) or shutil.which("bazel", path=search)
+
+
+def _shutdown_base(tool: str, base: Path, worktree: str) -> str:
+    try:
+        done = subprocess.run(  # nosec B603
+            [tool, f"--output_base={base}", "shutdown"],
+            cwd=worktree,
+            capture_output=True,
+            timeout=_BAZEL_SHUTDOWN_SECONDS,
+            check=False,
+        )
+        result = f"rc={done.returncode}"
+    except subprocess.TimeoutExpired:
+        result = "timed out"
+    except OSError:
+        result = "failed to run"
+    if result == "rc=0" and _server_alive(base):
+        result = "server alive"
+    return result
+
+
 def shutdown_bazel(
     run: Run, prepared: Prepared | None
 ) -> dict[Path, tuple[str, tuple[int, int]]]:
@@ -969,14 +999,7 @@ def shutdown_bazel(
     """
     if prepared is None:
         return {}
-    # The harness ran with the configured tool path, so search it as well.
-    search = ":".join(
-        (
-            os.environ.get("PATH", os.defpath),
-            policy.tool_path(run.settings, run.host, str(run.home)),
-        )
-    )
-    tool = shutil.which("bazelisk", path=search) or shutil.which("bazel", path=search)
+    tool = _bazel_tool(run)
     stopped: dict[Path, tuple[str, tuple[int, int]]] = {}
     for base in prepared.bases:
         status = _owned_base(run.home, base)
@@ -986,21 +1009,7 @@ def shutdown_bazel(
             continue
         if tool is None:
             continue
-        try:
-            done = subprocess.run(  # nosec B603
-                [tool, f"--output_base={base}", "shutdown"],
-                cwd=prepared.paths.worktree,
-                capture_output=True,
-                timeout=_BAZEL_SHUTDOWN_SECONDS,
-                check=False,
-            )
-            result = f"rc={done.returncode}"
-        except subprocess.TimeoutExpired:
-            result = "timed out"
-        except OSError:
-            result = "failed to run"
-        if result == "rc=0" and _server_alive(base):
-            result = "server alive"
+        result = _shutdown_base(tool, base, prepared.paths.worktree)
         stopped[base] = (result, (status.st_dev, status.st_ino))
     return stopped
 
@@ -1034,6 +1043,30 @@ def _space(path: Path) -> tuple[int, int]:
     return status.f_bavail * status.f_frsize, status.f_favail
 
 
+def _delete_base(run: Run, base: Path) -> tuple[int, int] | None:
+    """Delete a base, returning the (bytes, inodes) freed, or None on failure."""
+    try:
+        before = _space(base.parent)
+        _remove_base(base)
+        after = _space(base.parent)
+    except OSError:
+        run.files.write("log", "bazel cleanup failed\n")
+        return None
+    if os.path.lexists(base):
+        run.files.write("log", "bazel cleanup failed\n")
+        return None
+    return max(0, after[0] - before[0]), max(0, after[1] - before[1])
+
+
+def _unlink_bazel_links(worktree: Path, deleted: list[Path]) -> None:
+    for link in (*worktree.glob("bazel-*"), *worktree.glob(".bazel-*")):
+        if link.is_symlink() and any(
+            link.readlink().is_relative_to(base) for base in deleted
+        ):
+            with suppress(OSError):
+                link.unlink()
+
+
 def cleanup_bazel(
     run: Run,
     prepared: Prepared | None,
@@ -1060,28 +1093,16 @@ def cleanup_bazel(
         ):
             run.files.write("log", f"bazel cleanup: kept {base} ({result})\n")
             continue
-        try:
-            before = _space(base.parent)
-            _remove_base(base)
-            after = _space(base.parent)
-        except OSError:
-            run.files.write("log", "bazel cleanup failed\n")
+        space = _delete_base(run, base)
+        if space is None:
             continue
-        if os.path.lexists(base):
-            run.files.write("log", "bazel cleanup failed\n")
-            continue
-        freed["bytes"] += max(0, after[0] - before[0])
-        freed["inodes"] += max(0, after[1] - before[1])
+        freed["bytes"] += space[0]
+        freed["inodes"] += space[1]
         freed["bases"] += 1
         deleted.append(base)
     worktree = Path(prepared.paths.worktree)
     if deleted and not worktree.is_symlink():
-        for link in (*worktree.glob("bazel-*"), *worktree.glob(".bazel-*")):
-            if link.is_symlink() and any(
-                link.readlink().is_relative_to(base) for base in deleted
-            ):
-                with suppress(OSError):
-                    link.unlink()
+        _unlink_bazel_links(worktree, deleted)
     if freed["bases"]:
         run.files.write("log", f"bazel cleanup: freed {freed}\n")
     return freed
