@@ -209,6 +209,8 @@ def test_all_blocks_and_schema_fields() -> None:
         "| :- | :-: | -: |\n| d | e | f |\n\n- item\n\n| x |\n| - |\n"
     )
     result = _normalize(source)
+    order = cast("list[str]", result["blockOrder"])
+    assert "".join(str(_at(result, "blocks", k, "source")) for k in order) == source
     assert (
         _at(result, "blocks", "body", "content", 0, "blocks", 1, "visible") == "second"
     )

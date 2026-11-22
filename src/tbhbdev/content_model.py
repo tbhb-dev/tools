@@ -337,10 +337,11 @@ def normalize(
     nodes = SyntaxTreeNode(parser.parse(markdown)).children
     doc = _Document(markdown)
     blocks: dict[str, dict[str, builtins.object]] = {}
+    groups = _groups(nodes[1:] if titled else nodes)
+    starts = [doc.offsets[cast("tuple[int, int]", g[0].map)[0]] for g in groups]
     if titled:
         _validate_title(nodes)
-        title_end = cast("tuple[int, int]", nodes[0].map)[1]
-        title = doc.value(nodes[:1], 0, doc.offsets[title_end])
+        title = doc.value(nodes[:1], 0, starts[0] if starts else len(markdown))
         title.update(
             kind="heading",
             heading=_visible(nodes[0]).strip(),
@@ -349,8 +350,6 @@ def normalize(
             content=[],
         )
         blocks["title"] = title
-    groups = _groups(nodes[1:] if titled else nodes)
-    starts = [doc.offsets[cast("tuple[int, int]", g[0].map)[0]] for g in groups]
     ends = [*starts[1:], len(markdown)][: len(starts)]
     for group, start, end in zip(groups, starts, ends, strict=True):
         key, block = _group_block(doc, group, start, end)
