@@ -1031,6 +1031,24 @@ def test_the_repository_comes_from_the_hook_cwd_origin(tmp_path: Path) -> None:
     assert guard.origin_repo(https) == "tbhb-dev/tools"
 
 
+def test_the_repository_comes_from_the_push_url_of_a_mirror_clone(
+    tmp_path: Path,
+) -> None:
+    repo = origin_repo(tmp_path / "repo", str(tmp_path / "mirror.git"))
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "config",
+            "remote.origin.pushurl",
+            "https://github.com/tbhb-dev/tools.git",
+        ],
+        check=True,
+    )
+    assert guard.origin_repo(repo) == "tbhb-dev/tools"
+
+
 def test_without_an_origin_the_target_is_unknown(tmp_path: Path) -> None:
     (tmp_path / "plain").mkdir()
     assert guard.origin_repo(tmp_path / "plain") is None

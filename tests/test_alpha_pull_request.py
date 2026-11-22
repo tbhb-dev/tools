@@ -4135,3 +4135,17 @@ def test_create_normalizes_empty_error_streams(
     write_draft(world)
     assert run_main("create") == 1
     assert capsys.readouterr() == ("", expected)
+
+
+def test_origin_repository_reads_the_push_url(world: World) -> None:
+    world.git("remote", "set-url", "origin", str(world.root))
+    world.git("config", "remote.origin.pushurl", ORIGIN)
+    world.fake("gh", cases=branch_cases())
+    assert pr.origin_repository() == "tbhb-dev/example"
+    assert gh_argvs(world) == [["repo", "view", ORIGIN, "--json", "nameWithOwner,url"]]
+
+
+def test_origin_repository_without_a_push_url_reads_origin(world: World) -> None:
+    world.fake("gh", cases=branch_cases())
+    assert pr.origin_repository() == "tbhb-dev/example"
+    assert gh_argvs(world) == [["repo", "view", ORIGIN, "--json", "nameWithOwner,url"]]

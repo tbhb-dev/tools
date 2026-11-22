@@ -1118,7 +1118,7 @@ def origin_repository() -> str:
     Raises:
         SystemExit: origin or its GitHub repository can't be read.
     """
-    code, url = git("remote", "get-url", "origin")
+    code, url = git("remote", "get-url", "--push", "origin")
     if code or not url:
         message = "cannot read origin"
         raise SystemExit(message)

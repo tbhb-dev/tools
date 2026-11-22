@@ -56,6 +56,25 @@ def scratch_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(worktree.host_tools, "resolve", executable)
 
 
+def test_workspace_fetches_from_the_mirror_and_pushes_to_github(
+    tmp_path: Path,
+) -> None:
+    seed, clone = repository(tmp_path)
+    path = worktree.create(clone, "build-1", run_request())
+    mirror = worktree.mirror_path(tmp_path, run_request().repo)
+    assert git(path, "config", "remote.origin.url") == str(mirror)
+    assert git(path, "config", "remote.origin.pushurl") == (
+        "https://github.com/tbhb-dev/example-repo.git"
+    )
+    (seed / "tracked").write_text("later\n")
+    head = commit(seed, "later")
+    git(seed, "push", "origin", "main")
+    worktree.git(mirror, "fetch", "origin", "+refs/heads/main:refs/heads/main")
+    env = os.environ | {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/false"}
+    git(path, "fetch", "origin", env=env)
+    assert git(path, "rev-parse", "origin/main") == head
+
+
 def test_build_fetches_default_and_creates_one_branch(tmp_path: Path) -> None:
     seed, clone = repository(tmp_path)
     (seed / "tracked").write_text("new remote content\n")
@@ -318,10 +337,7 @@ def test_worktree_git_contract_under_one_stable_lock(
     assert (mirror / "agent-mirror.lock").is_file()
     assert (mirror.stat().st_mode & 0o777) == 0o700
     assert git(path, "rev-parse", "HEAD") == commit_id
-    assert (
-        git(path, "config", "remote.origin.url")
-        == "https://github.com/tbhb-dev/example-repo.git"
-    )
+    assert git(path, "config", "remote.origin.url") == str(mirror)
     assert (
         git(path, "config", "remote.origin.pushurl")
         == "https://github.com/tbhb-dev/example-repo.git"
@@ -882,14 +898,6 @@ def test_prelaunch_git_protocol(
                 *options,
                 str(mirror),
                 str(workspace),
-            ),
-        ),
-        (
-            workspace,
-            (
-                "config",
-                "remote.origin.url",
-                "https://github.com/tbhb-dev/example-repo.git",
             ),
         ),
         (

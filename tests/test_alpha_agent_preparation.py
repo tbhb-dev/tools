@@ -99,7 +99,7 @@ def test_public_mirror_uses_https_before_fetch(
         if not existing
         else (all(args[0] != "init" for _path, args in calls))
     )
-    assert (workspace, ("config", "remote.origin.url", URL)) in calls
+    assert all(args[:2] != ("config", "remote.origin.url") for _p, args in calls)
     assert (workspace, ("config", "remote.origin.pushurl", URL)) in calls
     assert any(args[0] == "fetch" for _path, args in calls)
 
