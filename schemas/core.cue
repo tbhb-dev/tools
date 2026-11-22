@@ -23,18 +23,18 @@ package content
 	source!:  #TextMetrics
 	visible!: #TextMetrics
 
-	lists!:          int & >=0
-	listItems!:      int & >=0
-	unorderedLists!: int & >=0
-	orderedLists!:   int & >=0
-	taskLists!:      int & >=0
-	taskItems!:      int & >=0
-	uncheckedItems!: int & >=0
-	thematicBreaks!: int & >=0
-	atxHeadings!:    int & >=0
-	setextHeadings!: int & >=0
-	indentedCodeBlocks!:       int & >=0
-	fencedCodeBlocks!:         int & >=0
+	lists!:              int & >=0
+	listItems!:          int & >=0
+	unorderedLists!:     int & >=0
+	orderedLists!:       int & >=0
+	taskLists!:          int & >=0
+	taskItems!:          int & >=0
+	uncheckedItems!:     int & >=0
+	thematicBreaks!:     int & >=0
+	atxHeadings!:        int & >=0
+	setextHeadings!:     int & >=0
+	indentedCodeBlocks!: int & >=0
+	fencedCodeBlocks!:   int & >=0
 	// Lines inside fenced and indented code blocks, so a section can cap code.
 	codeLines!:                int & >=0
 	htmlBlocks!:               int & >=0
@@ -43,8 +43,8 @@ package content
 	blankLines!:               int & >=0
 	tables!:                   int & >=0
 	blockQuotes!:              int & >=0
-	maxBlockDepth!:  int & >=0
-	maxListDepth!:   int & >=0
+	maxBlockDepth!:            int & >=0
+	maxListDepth!:             int & >=0
 }
 
 #NoGFMBlocks: {
@@ -113,59 +113,59 @@ package content
 }
 
 #BackslashEscape: #InlineValue & {
-	kind:      "backslash-escape"
+	kind:       "backslash-escape"
 	character!: string
 }
 
 #CharacterReference: #InlineValue & {
-	kind:      "character-reference"
+	kind:       "character-reference"
 	character!: string
 }
 
 #CodeSpan: #InlineValue & {
-	kind: "code-span"
+	kind:  "code-span"
 	code!: string
 }
 
 #Emphasis: #InlineValue & {
-	kind:     "emphasis"
+	kind: "emphasis"
 	children!: [...#Inline]
 }
 
 #StrongEmphasis: #InlineValue & {
-	kind:     "strong-emphasis"
+	kind: "strong-emphasis"
 	children!: [...#Inline]
 }
 
 #Strikethrough: #InlineValue & {
-	kind:     "strikethrough"
+	kind: "strikethrough"
 	children!: [...#Inline]
 }
 
 #Link: #InlineValue & {
-	kind:        "link"
-	style!:      "inline" | "full-reference" | "collapsed-reference" | "shortcut-reference"
+	kind:         "link"
+	style!:       "inline" | "full-reference" | "collapsed-reference" | "shortcut-reference"
 	destination!: string
-	title?:      string
-	children!:   [...#Inline]
+	title?:       string
+	children!: [...#Inline]
 }
 
 #Image: #InlineValue & {
-	kind:        "image"
-	style!:      "inline" | "full-reference" | "collapsed-reference" | "shortcut-reference"
+	kind:         "image"
+	style!:       "inline" | "full-reference" | "collapsed-reference" | "shortcut-reference"
 	destination!: string
-	title?:      string
-	children!:   [...#Inline]
+	title?:       string
+	children!: [...#Inline]
 }
 
 #Autolink: #InlineValue & {
-	kind:        "autolink"
-	style!:      "uri" | "email" | "extended-url" | "extended-www" | "extended-email"
+	kind:         "autolink"
+	style!:       "uri" | "email" | "extended-url" | "extended-www" | "extended-email"
 	destination!: string
 }
 
 #RawHTML: #InlineValue & {
-	kind:       "raw-html"
+	kind:        "raw-html"
 	disallowed!: bool
 }
 
@@ -192,12 +192,12 @@ package content
 	#SoftBreak
 
 #InlineOccurrence: {
-	kind!:        #InlineKind
-	source!:      string
-	visible!:     string
-	span!:        #SourceSpan
-	context!:     #InlineContext
-	ancestors!:   [...#InlineKind]
+	kind!:    #InlineKind
+	source!:  string
+	visible!: string
+	span!:    #SourceSpan
+	context!: #InlineContext
+	ancestors!: [...#InlineKind]
 	style?:       string
 	destination?: string
 	title?:       string
@@ -218,15 +218,15 @@ package content
 }
 
 #QualifiedRepositoryReference: #RepositoryReferenceBase & {
-	form:       "qualified"
-	owner!:     string & !=""
+	form:        "qualified"
+	owner!:      string & !=""
 	repository!: string & !=""
 }
 
 #RepositoryReference: #BareRepositoryReference | #QualifiedRepositoryReference
 
 #InlineIndex: {
-	elements!:             [...#InlineOccurrence]
+	elements!: [...#InlineOccurrence]
 	repositoryReferences!: [...#RepositoryReference]
 }
 
@@ -290,22 +290,22 @@ package content
 }
 
 #Table: #GFMTextValue & {
-	kind!:        "table"
-	alignments!:  [...("none" | "left" | "center" | "right")]
-	header!:      #TableRow
-	rows!:        [...#TableRow]
+	kind!: "table"
+	alignments!: [...("none" | "left" | "center" | "right")]
+	header!: #TableRow
+	rows!: [...#TableRow]
 	columnCount!: int & >=1
 }
 
 #BlockQuote: #GFMTextValue & {
-	kind!:   "block-quote"
+	kind!: "block-quote"
 	blocks!: [...#GFMBlock]
 }
 
 #ListItem: #GFMTextValue & {
 	kind!:    "list-item"
 	checked?: bool
-	blocks!:  [...#GFMBlock]
+	blocks!: [...#GFMBlock]
 }
 
 #TaskListItem: #ListItem & {
@@ -350,12 +350,12 @@ package content
 	level?:   int & >=1 & <=6
 	heading?: string & !=""
 	content?: [...#GFMBlock]
-	inline!:  #InlineIndex
+	inline!: #InlineIndex
 }
 
 #Draft: {
 	schemaVersion!: 1
-	object!: "commit" |
+	object!:        "commit" |
 		"pr" |
 		"issue" |
 		"issue-comment" |
@@ -365,8 +365,8 @@ package content
 		"project-item" |
 		"milestone" |
 		"discussion" |
-		"discussion-comment"
-	variant!:       string
+			"discussion-comment"
+	variant!: string
 
 	metadata!: {...}
 

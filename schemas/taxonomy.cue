@@ -16,3 +16,9 @@ package content
 // role:<name> names the agent role that owns the issue. The content module
 // checks the name against the role list kept outside this public file.
 #RoleLabel: =~"^role:[a-z0-9][a-z0-9-]*$"
+
+// Time limit for a Spike.
+#Timebox: "2h" | "1d" | "3d"
+
+// owner/repo#N. Whether the parent has the right issue type is a kernel check.
+#IssueRef: =~"^[a-z0-9][a-z0-9-]*/[a-z0-9._-]+#[1-9][0-9]*$"
