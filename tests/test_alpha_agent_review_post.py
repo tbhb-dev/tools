@@ -190,9 +190,6 @@ def test_a_missing_token_blocks_the_post(
     ("outcome", "message"),
     [
         (reply(403, {"message": "no"}), "status 403"),
-        (reply(201, {"id": "x"}), "no review id"),
-        (reply(201, []), "no review id"),
-        (httpx.Response(200, text="not json"), "request failed"),
         (httpx.ConnectError("x"), "ConnectError"),
     ],
 )
@@ -221,12 +218,24 @@ def test_any_2xx_post_is_a_success(
     assert written == {"review": "github.com/o/r#7 8"}
 
 
-def test_an_empty_2xx_post_counts_as_posted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        httpx.Response(204),
+        reply(201, {}),
+        reply(202, {}),
+        reply(200, []),
+        reply(201, {"id": "x"}),
+        httpx.Response(200, text="OK"),
+        httpx.Response(200, text="not json"),
+    ],
+)
+def test_a_2xx_post_without_an_integer_id_counts_as_posted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: httpx.Response
 ) -> None:
     run, prepared, written = make(tmp_path, draft())
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    Api(monkeypatch).created = httpx.Response(204)
+    Api(monkeypatch).created = outcome
     assert review_post.posted(run, prepared)
     assert written == {"review": "github.com/o/r#7 unknown"}
 

@@ -94,7 +94,7 @@ def api(
     """One GitHub API call; any 2xx is success.
 
     Raises:
-        PostRefusedError: GitHub refuses, can't be reached, or sends no JSON.
+        PostRefusedError: GitHub refuses or can't be reached.
     """
     try:
         response = httpx.request(
@@ -107,14 +107,17 @@ def api(
             json=payload,
             timeout=TIMEOUT,
         )
-        data = response.json() if response.is_success and response.content else None
-    except (httpx.HTTPError, ValueError) as exc:
+    except httpx.HTTPError as exc:
         message = f"the {method} request failed: {type(exc).__name__}"
         raise PostRefusedError(message) from exc
     if not response.is_success:
         message = f"GitHub refused the {method} with status {response.status_code}"
         raise PostRefusedError(message)
-    return data
+    try:
+        return response.json() if response.content else None
+    except ValueError:
+        # A 2xx whose body isn't JSON still means the request succeeded.
+        return None
 
 
 def pull_head(data: object) -> str | None:
@@ -142,10 +145,7 @@ def create(sub: Submission, token: str) -> int | None:
     }
     data = api("POST", f"{base}/reviews", token, payload)
     created = data.get("id") if isinstance(data, dict) else None
-    if data is not None and not isinstance(created, int):
-        message = "GitHub returned no review id"
-        raise PostRefusedError(message)
-    return created
+    return created if isinstance(created, int) else None
 
 
 def stamp(run: Run) -> str:
