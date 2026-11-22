@@ -175,3 +175,38 @@ def test_the_floor_requires_verdict_and_verification() -> None:
 
 def test_review_routes_policy_to_the_check(tmp_path: Path) -> None:
     assert review.main(["policy", "check", str(tmp_path)], "tbhbdev review") == 0
+
+
+def test_a_boolean_draft_schema_is_a_finding_not_a_crash(tmp_path: Path) -> None:
+    for text in ("true", "false"):
+        write(tmp_path, review_policy.DRAFT_SCHEMA, text)
+        assert rules(tmp_path) == ["draft-schema-open"]
+
+
+def test_a_required_floor_section_cannot_be_marked_optional(tmp_path: Path) -> None:
+    text = GOOD_TEMPLATE.replace(
+        "<!-- Required, at most 60 words. -->", "<!-- Optional. -->"
+    )
+    write(tmp_path, review_policy.TEMPLATE, text)
+    assert rules(tmp_path) == ["template-floor-section"]
+
+
+def test_a_floor_file_that_is_missing_exits_two(tmp_path: Path) -> None:
+    real = review_policy.files
+
+    def broken(package: str) -> object:
+        root = real(package)
+        return type(
+            "R",
+            (),
+            {
+                "joinpath": lambda _s, *parts: (
+                    (_ for _ in ()).throw(FileNotFoundError(parts[-1]))
+                    if parts[-1] == review_policy.CHECKLIST.name
+                    else root.joinpath(*parts)
+                )
+            },
+        )()
+
+    with patch.object(review_policy, "files", broken):
+        assert review_policy.main(["check", str(tmp_path)], "p") == 2

@@ -68,12 +68,14 @@ def sections(text: str) -> list[tuple[str, str | None]]:
 
 
 def floor_required() -> list[str]:
-    """The floor template's required sections, in order."""
+    """Load the floor's three files; return the template's required sections."""
     text = (
         files("tbhbdev.alpha")
         .joinpath("review_data", TEMPLATE.name)
         .read_text(encoding="utf-8")
     )
+    for name in (CHECKLIST.name, DRAFT_SCHEMA.name):
+        files("tbhbdev.alpha").joinpath("review_data", name).read_text(encoding="utf-8")
     return [name for name, kind in sections(text) if kind == "Required"]
 
 
@@ -97,11 +99,17 @@ def check_template(text: str, required: list[str]) -> list[Finding]:
     """A template keeps the floor's required sections, in order, and guides each."""
     path = str(TEMPLATE)
     found = sections(text)
+    lowered = [
+        Finding(path, "template-floor-section", f"required section {name} is Optional")
+        for name, kind in found
+        if name in required and kind == "Optional"
+    ]
     findings = [
         Finding(path, "template-guidance", f"section {name} has no guidance comment")
         for name, kind in found
         if kind is None
     ]
+    findings += lowered
     names = iter(name for name, _ in found)
     findings += [
         Finding(
@@ -123,7 +131,7 @@ def check_draft_schema(text: str) -> list[Finding]:
         Draft202012Validator.check_schema(schema)
     except (ValueError, SchemaError) as exc:
         return [Finding(path, "draft-schema-invalid", " ".join(str(exc).split())[:200])]
-    if schema.get("additionalProperties") is not False:
+    if not isinstance(schema, dict) or schema.get("additionalProperties") is not False:
         return [
             Finding(path, "draft-schema-open", "additionalProperties must be false")
         ]
