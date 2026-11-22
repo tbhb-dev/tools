@@ -350,9 +350,8 @@ def normalize(
         blocks["title"] = title
     groups = _groups(nodes[1:] if titled else nodes)
     starts = [doc.offsets[cast("tuple[int, int]", g[0].map)[0]] for g in groups]
-    for group, start, end in zip(
-        groups, starts, [*starts[1:], len(markdown)], strict=True
-    ):
+    ends = [*starts[1:], len(markdown)][: len(starts)]
+    for group, start, end in zip(groups, starts, ends, strict=True):
         key, block = _group_block(doc, group, start, end)
         candidate, suffix = key, 1
         while candidate in blocks:
