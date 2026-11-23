@@ -18,14 +18,22 @@ from typing import cast
 from unittest.mock import Mock, patch
 
 import pytest
-from fake_tool import link_git, pythonpath, write_fake, write_private_config
+from fake_tool import (
+    PRIVATE_CONFIG,
+    RULES_BEYOND_ONE,
+    link_git,
+    pythonpath,
+    write_fake,
+    write_private_config,
+)
 from hypothesis import given
 from hypothesis import strategies as st
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import identity as agent_identity
-from tbhbdev.alpha import opened, private_names, size_gate
+from tbhbdev.alpha import opened, size_gate
 from tbhbdev.alpha import pull_request as pr
+from tbhbdev.alpha.secret_scan import REPO_RULES, without_name_rules
 
 # mutmut runs the tests from a copy of the source tree, so everything resolves
 # against this file: the real repository root, or the mutants/ copy of it.
@@ -154,19 +162,11 @@ class World:
 
 @pytest.fixture(autouse=True)
 def host_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the required host list synthetic for every draft check."""
+    """Keep the home directory and git identity synthetic for every draft check."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    path = tmp_path / ".local/state/tbhb/private-repos.txt"
-    path.parent.mkdir(parents=True)
-    path.write_text("example-host\n")
     config = tmp_path / "gitconfig"
     config.write_text("[user]\nname = Example\nemail = example@example.test\n")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
-
-    def public_origin(*_args: str) -> tuple[int, str]:
-        return 0, "https://example.test/public"
-
-    monkeypatch.setattr(private_names, "git", public_origin)
 
 
 @pytest.fixture
@@ -198,7 +198,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     for name in pr.CONFIGS:
         (root / name).write_text("")
     (root / ".gitleaks.toml").write_text("")
-    write_private_config(tmp_path)
+    write_private_config(tmp_path, PRIVATE_CONFIG + RULES_BEYOND_ONE)
     # The script runs inside the repository whose branch it posts.
     monkeypatch.chdir(root)
     made = World(root, tools_dir)
@@ -1863,9 +1863,13 @@ def scan_config(world: World) -> str:
 
 
 def full_config() -> str:
-    """The private config under the test's HOME, minus its paths."""
+    """The private config under the test's HOME, minus its paths.
+
+    Every scan drops the repository rules, so this is the config a scan that
+    keeps the host rules runs under.
+    """
     path = Path.home() / ".config" / "gitleaks" / "private.toml"
-    return without_path(path.read_text())
+    return without_path(str(without_name_rules(path.read_text(), REPO_RULES)))
 
 
 VISIBILITIES = [

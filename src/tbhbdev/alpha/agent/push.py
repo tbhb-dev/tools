@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import re
-import stat
 import subprocess  # nosec B404
 import tempfile
 import threading
@@ -12,22 +11,13 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from tbhbdev.alpha import private_names
 from tbhbdev.alpha.agent import host_tools, open_pr, runfiles
 from tbhbdev.alpha.agent.decisions import repo
-from tbhbdev.alpha.private_names import _configured
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
     from tbhbdev.alpha.agent.run_host import Prepared, Run
-
-
-PRIVATE_NAMES = ".local/state/tbhb/private-repos.txt"
-
-
-class PushRefusedError(ValueError):
-    """The outgoing range could not pass the publication checks."""
 
 
 def url(repository: str) -> str:
@@ -128,12 +118,6 @@ def run(
 ) -> int:
     if token is None:
         return harness(run, prepared, stack)
-    try:
-        names = read_names(run.home / PRIVATE_NAMES)
-        names.private.extend(_configured(strict=True))
-    except (PushRefusedError, private_names.NameListError) as refusal:
-        run.files.write("log", f"push refused: {refusal}\n")
-        return 4
     workspace = Path(prepared.paths.worktree)
     branch = f"agent/{run.files.name}"
     before = head(workspace, branch)
@@ -151,14 +135,10 @@ def run(
     made = True
     try:
         with publication(run.files.root, workspace, commit) as directory:
-            scan(directory, before, commit, names, branch)
             status, error = send(directory, url(run.request.repo), branch, token)
             if not status:
                 run.files.write("branch", branch)
                 made = opened(run, directory, commit, branch, token)
-    except PushRefusedError as refusal:
-        run.files.write("log", f"push refused: {refusal}\n")
-        return 4
     except OSError, subprocess.SubprocessError:
         status, error = True, "git push unavailable"
     if status:
@@ -180,160 +160,6 @@ def opened(run: Run, git_dir: Path, commit: str, branch: str, token: str) -> boo
         return False
     run.files.write("pr", f"{run.request.repo}#{number}")
     return True
-
-
-def read_names(source: Path) -> private_names.Names:
-    try:
-        with os.fdopen(
-            os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb"
-        ) as incoming:
-            metadata = os.fstat(incoming.fileno())
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_uid != os.getuid()
-                or metadata.st_mode & 0o022
-            ):
-                message = (
-                    "private-name list must be owned, regular and protected from writes"
-                )
-                raise PushRefusedError(message)
-            data = incoming.read(1024 * 1024 + 1)
-            if len(data) > 1024 * 1024:
-                message = "private-name list exceeds 1 MiB"
-                raise PushRefusedError(message)
-        text = data.decode()
-    except OSError, UnicodeError:
-        text = ""
-    names = [
-        name
-        for line in text.splitlines()
-        if (name := line.strip()) and not name.startswith("#")
-    ]
-    if not names:
-        message = f"no private-name list at {source}"
-        raise PushRefusedError(message)
-    path_only = {
-        word.lower()
-        for line in text.splitlines()
-        if line.strip().startswith(private_names.PATH_HEADER)
-        for word in line.strip().removeprefix(private_names.PATH_HEADER).split()
-    }
-    if any(
-        re.fullmatch(r"[\w.-]+", name, re.ASCII) is None
-        for name in [*names, *path_only]
-    ):
-        message = "invalid private-name list"
-        raise PushRefusedError(message)
-    return private_names.Names(names, path_only, private_names.public_url_prefixes())
-
-
-def scan(
-    directory: Path,
-    before: str | None,
-    commit: str,
-    names: private_names.Names,
-    branch: str,
-) -> None:
-    if before is None:
-        message = "no base commit"
-        raise PushRefusedError(message)
-    env = dict.fromkeys(
-        (
-            "HOME",
-            "XDG_CACHE_HOME",
-            "XDG_CONFIG_HOME",
-            "XDG_DATA_HOME",
-            "XDG_STATE_HOME",
-        ),
-        str(directory),
-    )
-    env.update(
-        {
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_ASKPASS": "/bin/false",
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_TERMINAL_PROMPT": "0",
-            "PATH": host_tools.search(),
-        }
-    )
-    command = [
-        host_tools.resolve("git"),
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "core.quotePath=false",
-        "-C",
-        str(directory),
-    ]
-    try:
-        objects = subprocess.run(  # nosec B603
-            [*command, "rev-list", "--objects", f"{before}..{commit}"],
-            cwd=directory,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=True,
-        ).stdout
-        # Raw objects include merge results, binary blobs and both identities.
-        # List paths separately too: a renamed file can reuse an old blob or
-        # tree. Separate diffs against every merge parent include result paths.
-        result = subprocess.run(  # nosec B603
-            [*command, "cat-file", "--batch"],
-            cwd=directory,
-            env=env,
-            input=b"".join(
-                line.partition(b" ")[0] + b"\n" for line in objects.splitlines()
-            ),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=True,
-        )
-        paths = subprocess.run(  # nosec B603
-            [
-                *command,
-                "log",
-                "--format=",
-                "--name-only",
-                "-z",
-                "-m",
-                "--no-renames",
-                "--no-ext-diff",
-                "--no-text" + "conv",
-                f"{before}..{commit}",
-            ],
-            cwd=directory,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=True,
-        ).stdout
-    except OSError, subprocess.SubprocessError:
-        message = "git object scan unavailable"
-        raise PushRefusedError(message) from None
-    lines = [
-        f"refs/heads/{branch}",
-        *(
-            f"tree/{path.decode(errors='replace')}"
-            for path in paths.split(b"\0")
-            if path
-        ),
-        *result.stdout.decode(errors="replace").splitlines(),
-    ]
-    hits = private_names.private_name_problems(
-        lines,
-        names.private,
-        path_only=names.path_only,
-        prefixes=names.prefixes,
-    )
-    if hits:
-        message = f"{len(hits)} private-name hit(s)" + "".join(
-            f"\nline {n}: {message}" for n, message in hits
-        )
-        raise PushRefusedError(message)
 
 
 def head(workspace: Path, branch: str) -> str | None:

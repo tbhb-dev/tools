@@ -222,6 +222,21 @@ description = "A private repository name"
 regex = '''fake-sibling-repo'''
 
 [[rules]]
+id = "home-path-1"
+description = "An internal path"
+regex = '''/Users/fakeoperator'''
+
+[[rules]]
+id = "private-ipv4-1"
+description = "A private address"
+regex = '''\b10\.0\.0\.[0-9]+\b'''
+
+[[rules]]
+id = "account-name-1"
+description = "An account name"
+regex = '''fake-account-name'''
+
+[[rules]]
 id = "tailnet-ipv4-1"
 description = "A tailnet address"
 regex = '''\b100\.64\.[0-9]+\.[0-9]+\b'''
@@ -261,12 +276,14 @@ regex = '''fake-tool-dir'''
 DEFAULTS = "[extend]\nuseDefault = true\n"
 KEPT = [
     ("100.64.1.2", "tailnet-ipv4-1"),
+    ("10.0.0.7", "private-ipv4-1"),
+    ("fake-account-name", "account-name-1"),
     ("op://vault-one/item", "op-reference-1"),
     ("fake-vault", "op-vault-1"),
     ("fake-item-bad", "op-item-1"),
     (CANARY_HIT, "tbhb-private-canary"),
 ]
-SKIPPED = ["fakehost-abc", "fake-sibling-repo", "fake-tool-dir"]
+SKIPPED = ["fakehost-abc", "fake-tool-dir", "/Users/fakeoperator"]
 
 
 @pytest.fixture
@@ -290,6 +307,30 @@ def test_a_private_repo_keeps_every_other_rule(
     )
 
 
+@pytest.mark.parametrize("visibility", ["PRIVATE", "PUBLIC", "INTERNAL", "", "weird"])
+def test_a_private_repository_name_passes_under_every_visibility(
+    families: Path, visibility: str
+) -> None:
+    scan("fix: x\n\nIt names fake-sibling-repo.\n", families, visibility=visibility)
+
+
+@pytest.mark.parametrize(
+    ("text", "rule"),
+    [
+        ("fakehost-abc", "tailnet-host-1"),
+        ("10.0.0.7", "private-ipv4-1"),
+        ("/Users/fakeoperator", "home-path-1"),
+        ("fake-account-name", "account-name-1"),
+    ],
+)
+def test_a_public_text_naming_a_repository_still_fails_on_other_categories(
+    families: Path, text: str, rule: str
+) -> None:
+    assert refusal(
+        f"It names fake-sibling-repo and {text}.\n", families, visibility="PUBLIC"
+    ) == (f"refusing the text: gitleaks finds a secret: rule {rule} on line 1")
+
+
 def test_a_private_repo_keeps_a_kept_rules_allowlist(families: Path) -> None:
     scan("It names fake-item-ok.\n", families, visibility="PRIVATE")
 
@@ -299,8 +340,8 @@ def test_a_private_repo_keeps_a_kept_rules_allowlist(families: Path) -> None:
     ("text", "rule"),
     [
         ("fakehost-abc", "tailnet-host-1"),
-        ("fake-sibling-repo", "private-repo-12"),
         ("fake-tool-dir", "tool-dir-1"),
+        ("/Users/fakeoperator", "home-path-1"),
     ],
 )
 def test_any_other_visibility_scans_under_the_full_config(
@@ -347,8 +388,9 @@ def test_the_copy_is_private_holds_no_name_rule_and_is_gone_afterwards(
     assert not Path(path).exists()
     assert not Path(path).parent.exists()
     ids = [rule["id"] for rule in tomllib.loads(text)["rules"]]
-    assert ids == ["tbhb-private-canary", "tailnet-ipv4-1", "op-reference-1",
-                   "op-vault-1", "op-item-1"]  # fmt: skip
+    assert ids == ["tbhb-private-canary", "private-ipv4-1", "account-name-1",
+                   "tailnet-ipv4-1", "op-reference-1", "op-vault-1",
+                   "op-item-1"]  # fmt: skip
 
 
 def test_the_copy_is_gone_after_a_refusal(families: Path, tmp_path: Path) -> None:
@@ -368,14 +410,26 @@ def test_the_copy_is_gone_after_a_refusal(families: Path, tmp_path: Path) -> Non
     assert not Path(log.read_text()).exists()
 
 
+def test_the_repository_rules_alone_leave_the_name_rules() -> None:
+    copy = secret_scan.without_name_rules(FAMILIES, secret_scan.REPO_RULES)
+    assert copy is not None
+    ids = [rule["id"] for rule in tomllib.loads(copy)["rules"]]
+    assert "private-repo-12" not in ids
+    assert "tailnet-host-1" in ids
+    assert "home-path-1" in ids
+
+
 def test_the_copy_parses_back_to_the_private_config_minus_the_name_rules() -> None:
     expected = tomllib.loads(FAMILIES)
     expected["rules"] = [
         rule
         for rule in expected["rules"]
-        if rule["id"] not in {"tailnet-host-1", "private-repo-12", "tool-dir-1"}
+        if rule["id"]
+        not in {"tailnet-host-1", "private-repo-12", "home-path-1", "tool-dir-1"}
     ]
-    copy = secret_scan.without_name_rules(FAMILIES)
+    copy = secret_scan.without_name_rules(
+        FAMILIES, (*secret_scan.REPO_RULES, *secret_scan.NAME_RULES)
+    )
     assert copy is not None
     assert tomllib.loads(copy) == expected
     assert expected["rules"][-1]["allowlists"] == [
@@ -388,7 +442,6 @@ def test_the_copy_parses_back_to_the_private_config_minus_the_name_rules() -> No
 @pytest.mark.parametrize(
     ("rule_id", "skipped"),
     [
-        ("private-repo-1", True),
         ("tailnet-host-11", True),
         ("tailnet-stem-2", True),
         ("tailnet-name-1", True),
@@ -396,7 +449,8 @@ def test_the_copy_parses_back_to_the_private_config_minus_the_name_rules() -> No
         ("local-name-1", True),
         ("home-path-2", True),
         ("tool-dir-1", True),
-        ("private-repo", True),
+        ("private-repo", False),
+        ("private-repo-1", False),
         ("tailnet-ipv4-1", False),
         ("tailnet-ipv6-1", False),
         ("private-ipv4-3", False),
@@ -413,15 +467,15 @@ def test_the_copy_parses_back_to_the_private_config_minus_the_name_rules() -> No
 def test_the_name_rule_families_are_the_ids_without_their_number(
     rule_id: str, skipped: bool
 ) -> None:
-    assert secret_scan.is_name_rule({"id": rule_id}) is skipped
+    assert secret_scan.is_name_rule({"id": rule_id}, secret_scan.NAME_RULES) is skipped
 
 
 def test_a_rule_without_an_id_is_not_a_name_rule() -> None:
-    assert secret_scan.is_name_rule({}) is False
+    assert secret_scan.is_name_rule({}, secret_scan.NAME_RULES) is False
 
 
 def test_a_private_config_without_rules_gets_an_empty_rule_list() -> None:
-    copy = secret_scan.without_name_rules("title = 'x'\n")
+    copy = secret_scan.without_name_rules("title = 'x'\n", secret_scan.NAME_RULES)
     assert copy is not None
     assert tomllib.loads(copy) == {"title": "x", "rules": []}
 

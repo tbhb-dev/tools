@@ -9,8 +9,6 @@ import shutil
 import sys
 from typing import TYPE_CHECKING
 
-PRIVATE_REPO = "fixturerepo"
-
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -61,29 +59,22 @@ description = "Test canary"
 regex = '''test-canary-[0-9a-f]{16}'''
 """
 
+# One repository rule, which no scan keeps, and one host rule, which a scan of a
+# private repository drops.
+RULES_BEYOND_ONE = """
+[[rules]]
+id = "private-repo-1"
+regex = '''repo-x'''
+
+[[rules]]
+id = "tailnet-host-1"
+regex = '''host-x'''
+"""
+
 
 def write_private_config(home: Path, text: str = PRIVATE_CONFIG) -> Path:
     """Write the private gitleaks config under HOME and return its path."""
     path = home / ".config" / "gitleaks" / "private.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
-    return path
-
-
-def break_host_names(path: Path, kind: str) -> None:
-    """Make a synthetic host list missing, unreadable or empty."""
-    path.unlink()
-    if kind == "directory":
-        path.mkdir()
-    elif kind == "invalid":
-        path.write_bytes(b"\xff")
-    elif kind != "missing":
-        path.write_text("" if kind == "empty" else "\n# comment\n")
-
-
-def write_host_names(home: Path, *names: str) -> Path:
-    """Configure synthetic private names for guard and draft tests."""
-    path = home / ".local/state/tbhb/private-repos.txt"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("example-host\n" + "\n".join(names or (PRIVATE_REPO,)) + "\n")
     return path

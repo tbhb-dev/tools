@@ -13,13 +13,21 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from fake_tool import link_git, pythonpath, write_fake, write_private_config
+from fake_tool import (
+    PRIVATE_CONFIG,
+    RULES_BEYOND_ONE,
+    link_git,
+    pythonpath,
+    write_fake,
+    write_private_config,
+)
 from hypothesis import example, given
 from hypothesis import strategies as st
 
 from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha import pull_request as pr
 from tbhbdev.alpha import squash_merge as sm
+from tbhbdev.alpha.secret_scan import REPO_RULES, without_name_rules
 
 SRC = Path(sm.__file__).parents[2]
 
@@ -152,7 +160,7 @@ def tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Tools:
     repo.mkdir()
     (repo / ".gitleaks.toml").write_text("")
     monkeypatch.chdir(repo)
-    write_private_config(tmp_path)
+    write_private_config(tmp_path, PRIVATE_CONFIG + RULES_BEYOND_ONE)
     made = Tools(bin_dir)
     made.view()
     return made
@@ -948,9 +956,13 @@ def scan_config(tools: Tools) -> str:
 
 
 def full_config() -> str:
-    """The private config under the test's HOME, minus its paths."""
+    """The private config under the test's HOME, minus its paths.
+
+    Every scan drops the repository rules, so this is the config a scan that
+    keeps the host rules runs under.
+    """
     path = Path.home() / ".config" / "gitleaks" / "private.toml"
-    return without_path(path.read_text())
+    return without_path(str(without_name_rules(path.read_text(), REPO_RULES)))
 
 
 @pytest.mark.parametrize("argv", [("12",), ("12", "--dry-run")])
