@@ -1469,6 +1469,21 @@ def finished_as(run_id: object) -> str | None:
     return None
 
 
+def run_numbers(run_id: object) -> list[object]:
+    """The pull request numbers GitHub lists for the run."""
+    return cast(
+        "list[object]",
+        gh_json(
+            [
+                "api",
+                f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}",
+                "--jq",
+                "[.pull_requests[].number]",
+            ]
+        ),
+    )  # pragma: no mutate
+
+
 def cancel_and_rerun(run_id: str) -> int:
     """Cancel the run, wait until it completes as cancelled, then rerun it."""
     code = invoke_gh([GH, "run", "cancel", run_id], "")[0]
@@ -1534,6 +1549,7 @@ def rerun_stuck(number: int) -> int:
         for item in runs
         if item["headSha"] == head
         and item["status"] == "in_progress"
+        and number in run_numbers(item["databaseId"])
         and stuck_job(item["databaseId"])
     ]
     if not stuck:

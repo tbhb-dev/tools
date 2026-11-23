@@ -77,7 +77,8 @@ commands:
   agent-env    launch a harness with the gh shim first on PATH
   pr           check | create | edit | hook: the pull request draft
                | backfill-opened OWNER: the opened ledgers
-               | rerun N [--stuck]: rerun failed jobs for the current head
+               | rerun N [--stuck]: rerun failed jobs of the head; --stuck reruns
+               a run with a job in progress over an hour, in full
                | delete-branch N: delete a finished PR's head branch on origin
                | close N --reason TEXT: close a pull request (--comment is an alias)
   pr-stats     OWNER/REPO [--limit N]: cycle time of merged and closed pull requests
