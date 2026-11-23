@@ -198,7 +198,9 @@ def fake_git(tools: Tools) -> Callable[..., str]:
     """
     fetches: list[str] = []
 
-    def run(*argv: str) -> str:
+    def run(*argv: str, cwd: Path | None = None) -> str:  # noqa: ARG001
+        if argv[:2] == ("rev-parse", "--show-toplevel"):
+            return "/repo\n"
         if argv[0] == "fetch":
             fetches.append(argv[-1])
             return ""
@@ -207,7 +209,10 @@ def fake_git(tools: Tools) -> Callable[..., str]:
                 return str(tools.git.get("head", "abc123")) + "\n"
             tips = cast("list[str]", tools.git.get("tips", ["tip0"]))
             return (
-                tips[min(sum(f == "main" for f in fetches) - 1, len(tips) - 1)] + "\n"
+                tips[
+                    min(sum(f == "refs/heads/main" for f in fetches) - 1, len(tips) - 1)
+                ]
+                + "\n"
             )
         if argv[0] == "merge-base":
             return "base0\n"
@@ -1628,3 +1633,37 @@ def test_git_text_stops_when_git_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SystemExit) as info:
         GIT_TEXT("fetch", "origin")
     assert str(info.value) == "git fetch failed: boom here"
+
+
+def test_fetched_qualifies_a_branch_name_but_not_a_full_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, ...]] = []
+
+    def record(*argv: str, cwd: Path | None = None) -> str:  # noqa: ARG001
+        seen.append(argv)
+        return "abc\n"
+
+    monkeypatch.setattr(sm, "git_text", record)
+    assert sm.fetched("main") == "abc"
+    assert sm.fetched("refs/pull/3/head") == "abc"
+    assert [a[-1] for a in seen if a[0] == "fetch"] == [
+        "refs/heads/main",
+        "refs/pull/3/head",
+    ]
+
+
+def test_changed_paths_diffs_from_the_root_without_relative_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[str, ...], Path | None]] = []
+
+    def record(*argv: str, cwd: Path | None = None) -> str:
+        calls.append((argv, cwd))
+        return "/repo\n" if argv[0] == "rev-parse" else "M\0a.py\0"
+
+    monkeypatch.setattr(sm, "git_text", record)
+    assert sm.changed_paths("x", "y") == {"a.py"}
+    argv, cwd = calls[1]
+    assert "--no-relative" in argv
+    assert cwd == Path("/repo")

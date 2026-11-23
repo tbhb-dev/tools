@@ -76,6 +76,7 @@ import sys
 from dataclasses import dataclass
 from email.utils import parseaddr
 from itertools import takewhile
+from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, cast
 
 from tbhbdev.alpha import identity as agent_identity
@@ -556,21 +557,26 @@ def fetch(number: int) -> PullRequest:
     )
 
 
-def git_text(*argv: str) -> str:
-    """The stdout of one git read in the working directory.
+def git_text(*argv: str, cwd: Path | None = None) -> str:
+    """The stdout of one git read in ``cwd``, by default the working directory.
 
     Raises:
         SystemExit: git fails.
     """
-    done = pr.run([pr.find_tool(GIT), *argv])
+    done = pr.run([pr.find_tool(GIT), *argv], cwd=cwd)
     if done.returncode != 0:
         stop(f"git {argv[0]} failed: {' '.join(done.stderr.split())}")
     return done.stdout
 
 
 def fetched(ref: str) -> str:
-    """The commit that ``ref`` names on origin right now."""
-    git_text("fetch", "--quiet", "origin", ref)
+    """The commit that ``ref`` names on origin right now.
+
+    A branch name gets its full ``refs/heads/`` form, so a tag of the same name
+    can't shadow it.
+    """
+    qualified = ref if ref.startswith("refs/") else f"refs/heads/{ref}"
+    git_text("fetch", "--quiet", "origin", qualified)
     return git_text("rev-parse", "FETCH_HEAD").strip()
 
 
@@ -588,7 +594,10 @@ def changed_paths(old: str, new: str) -> set[str]:
     Raises:
         SystemExit: git fails or the listing is cut short.
     """
-    fields = git_text("diff", "--name-status", "-M", "-z", old, new).split("\0")
+    root = Path(git_text("rev-parse", "--show-toplevel").strip())
+    fields = git_text(
+        "diff", "--no-relative", "--name-status", "-M", "-z", old, new, cwd=root
+    ).split("\0")
     paths: set[str] = set()
     index = 0
     while index < len(fields) - 1:
