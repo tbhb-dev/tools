@@ -499,12 +499,32 @@ def settle(settings: Settings, run: Run, result: int) -> None:
 
 def status(settings: Settings, run: Run) -> int:
     state = taint_store.load(run.host.name)
-    reading = transport.read(
-        settings,
-        run.host,
-        (run.name, run.owner),
-        reason=True,
-    )
+    try:
+        reading = transport.read(
+            settings,
+            run.host,
+            (run.name, run.owner),
+            reason=True,
+        )
+    except transport.TransportError:
+        # The host can't answer, so the run may still be live. Print the
+        # local record and say the state is unknown instead of failing bare.
+        print(
+            render.status(
+                run.name,
+                phase="unknown",
+                rc="unknown",
+                target=(
+                    run.host.name,
+                    run.host.account,
+                    run.request.authorized_by,
+                    run.launched_by[0],
+                ),
+                started=run.started,
+            )
+            + " host unreachable, run state unknown"
+        )
+        return 1
     rc = rules.state(reading.rc, session=reading.session)
     if reading.rc and reading.text:
         rc += f" ({reading.text.rstrip()})"

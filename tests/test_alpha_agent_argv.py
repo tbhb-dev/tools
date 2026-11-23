@@ -61,6 +61,8 @@ HANDOFF = (
     "-c",
     f'shell_environment_policy.set.GH_CONFIG_DIR="{TMP}/gh"',
     "-c",
+    'shell_environment_policy.set.PYTEST_XDIST_AUTO_NUM_WORKERS="4"',
+    "-c",
     f'shell_environment_policy.set.TMPDIR="{TMP}"',
     "-c",
     f'shell_environment_policy.set.TMPPREFIX="{TMP}/zsh"',

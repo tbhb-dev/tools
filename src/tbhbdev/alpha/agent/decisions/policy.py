@@ -41,6 +41,8 @@ _DEV_FD = "/dev/fd"
 _REVIEW_DOMAINS = ("github.com", "api.github.com", "*.githubusercontent.com")
 # The handoff directories, under the run's private TMPDIR. run-host creates
 # each one, and the child gets its path in the variable of the same tool.
+# pytest-xdist reads this for `-n auto`, so a run's test fan-out stays bounded.
+XDIST_WORKERS = "4"
 GH_CONFIG_SUBDIR = "gh"
 DOCKER_CONFIG_SUBDIR = "docker"
 # macOS's `/tmp` is a link to `/private/tmp`, so a denied path under it needs both.
@@ -135,6 +137,7 @@ def environment(
         "TMPPREFIX": resolve(paths.tmpdir, "zsh"),
         "DOCKER_CONFIG": resolve(paths.tmpdir, DOCKER_CONFIG_SUBDIR),
         "GH_CONFIG_DIR": resolve(paths.tmpdir, GH_CONFIG_SUBDIR),
+        "PYTEST_XDIST_AUTO_NUM_WORKERS": XDIST_WORKERS,
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_COUNT": "7",
@@ -270,6 +273,7 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
                     "GH_CONFIG_DIR",
                     "DOCKER_CONFIG",
                     "GIT_NO_LAZY_FETCH",
+                    "PYTEST_XDIST_AUTO_NUM_WORKERS",
                     "SSH_AUTH_SOCK",
                 )
                 if k in env
