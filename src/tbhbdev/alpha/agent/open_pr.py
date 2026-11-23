@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess  # nosec B404
 from contextlib import ExitStack
@@ -170,6 +171,32 @@ def check_range(published: PublishedRange, write: Callable[[str, str], None]) ->
     return rules.stdout
 
 
+# Fixed phrases for scanner failures, so the log names the cause without
+# repeating the scanner's own text, which can carry gitleaks output.
+GITLEAKS_EXIT = re.compile(r"gitleaks failed \(exit (\d+)\)")
+SCAN_CAUSES = (
+    ("cannot be read", "the private gitleaks config cannot be read"),
+    ("is not the private gitleaks config", "the config is not the private one"),
+    ("does not exist", "the gitleaks extends file is missing"),
+    ("cannot run", "the gitleaks executable cannot run"),
+)
+
+
+def scan_cause(exc: Exception) -> str:
+    """Name why the draft scan refused, without the scanner's own text."""
+    if isinstance(exc, gitleaks_check.ScanRefused):
+        if exc.locations:
+            return exc.locations
+        text = str(exc)
+        if found := GITLEAKS_EXIT.search(text):
+            return f"gitleaks failed (exit {found[1]})"
+        for needle, cause in SCAN_CAUSES:
+            if needle in text:
+                return cause
+        return "the scanner refused for a reason the log doesn't name"
+    return f"{type(exc).__name__} while reading the draft"
+
+
 def scan_draft(text: str, git_dir: Path, rules: bytes) -> None:
     """Scan the draft with the host's private rules and the pre-run Git policy."""
     (git_dir / GITLEAKS_EXTENDS).write_bytes(rules)
@@ -182,12 +209,7 @@ def scan_draft(text: str, git_dir: Path, rules: bytes) -> None:
             visibility="",
         )
     except (gitleaks_check.ScanRefused, Invalid, UnicodeError) as exc:
-        cause = (
-            exc.locations
-            if isinstance(exc, gitleaks_check.ScanRefused) and exc.locations
-            else "check the draft and scanner configuration"
-        )
-        message = f"PR draft secret scan refused: {cause}"
+        message = f"PR draft secret scan refused: {scan_cause(exc)}"
         raise OpenRefusedError(message) from exc
 
 

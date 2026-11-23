@@ -12,6 +12,7 @@ import pytest
 
 from tbhbdev import gitleaks_check
 from tbhbdev.alpha.agent import host_tools, open_pr
+from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -411,23 +412,66 @@ def test_unavailable_scan_policy_refuses(
     assert scans == []
 
 
+UNNAMED = "the scanner refused for a reason the log doesn't name"
+FINDING = "rule fixture-rule on line 3"
+
+
 @pytest.mark.parametrize("committed", [False, True])
-@pytest.mark.parametrize("locations", [None, "rule fixture-rule on line 3"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        (
+            "private scanner detail",
+            None,
+            UNNAMED,
+        ),
+        (
+            "private scanner detail",
+            FINDING,
+            FINDING,
+        ),
+        (
+            "cannot scan x for secrets: gitleaks failed (exit 2): SECRET-TEXT",
+            None,
+            "gitleaks failed (exit 2)",
+        ),
+        (
+            "cannot scan x: the private gitleaks config /p cannot be read (n)",
+            None,
+            "the private gitleaks config cannot be read",
+        ),
+        (
+            "cannot scan x: /p is not the private gitleaks config.",
+            None,
+            "the config is not the private one",
+        ),
+        (
+            "cannot scan x for secrets: /p/.gitleaks.toml does not exist",
+            None,
+            "the gitleaks extends file is missing",
+        ),
+        (
+            "cannot scan x for secrets: the scanner g cannot run (nope)",
+            None,
+            "the gitleaks executable cannot run",
+        ),
+    ],
+)
 def test_a_scan_refusal_prevents_posting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    locations: str | None,
+    case: tuple[str, str | None, str],
     *,
     committed: bool,
 ) -> None:
+    detail, locations, reason = case
     published = commit_draft(tmp_path, DRAFT if committed else None)
     if not committed:
         write_draft(tmp_path, DRAFT)
 
     def refuse(text: str, *_args: object, **_kwargs: object) -> None:
         assert text == DRAFT
-        message = "private scanner detail"
-        raise gitleaks_check.ScanRefused(message, locations=locations)
+        raise gitleaks_check.ScanRefused(detail, locations=locations)
 
     def post(*_args: object, **_kwargs: object) -> httpx.Response:
         pytest.fail("unexpected API call")
@@ -436,5 +480,21 @@ def test_a_scan_refusal_prevents_posting(
     monkeypatch.setattr(httpx, "post", post)
     with pytest.raises(open_pr.OpenRefusedError) as captured:
         open_draft(published)
-    reason = locations or "check the draft and scanner configuration"
+    assert str(captured.value) == f"PR draft secret scan refused: {reason}"
+    assert "SECRET-TEXT" not in str(captured.value)
+
+
+@pytest.mark.parametrize("error", [UnicodeError("x"), Invalid("x")])
+def test_a_draft_read_failure_names_its_class(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    published = commit_draft(tmp_path, DRAFT)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(gitleaks_check, "scan_text", refuse)
+    with pytest.raises(open_pr.OpenRefusedError) as captured:
+        open_draft(published)
+    reason = f"{type(error).__name__} while reading the draft"
     assert str(captured.value) == f"PR draft secret scan refused: {reason}"
