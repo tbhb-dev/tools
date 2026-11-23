@@ -203,8 +203,33 @@ def scan_cause(exc: Exception) -> str:
     return f"{type(exc).__name__} while scanning the draft"
 
 
-def scan_draft(text: str, git_dir: Path, rules: bytes) -> None:
+def repository_visibility(repository: str, token: str) -> str:
+    """The visibility GitHub reports for REPOSITORY, or "" when it can't say.
+
+    The scan applies the name rules to any value but ``PRIVATE``, so an
+    unreadable or unexpected answer scans the draft as public text.
+    """
+    _, owner, name = repo.parts(repository)
+    try:
+        response = httpx.get(
+            f"https://api.github.com/repos/{owner}/{name}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+            },
+            timeout=TIMEOUT,
+        )
+        data = response.json() if response.status_code == httpx.codes.OK else None
+    except httpx.HTTPError, ValueError:
+        return ""
+    value = data.get("visibility") if isinstance(data, dict) else None
+    return value.upper() if isinstance(value, str) else ""
+
+
+def scan_draft(text: str, git_dir: Path, rules: bytes, visibility: str) -> None:
     """Scan the draft with the host's private rules and the pre-run Git policy.
+
+    VISIBILITY is that of the repository the PR opens in, as GitHub reports it.
 
     Raises:
         OpenRefusedError: The scan found a secret or could not run. It is
@@ -219,7 +244,7 @@ def scan_draft(text: str, git_dir: Path, rules: bytes) -> None:
             "PR draft",
             root=git_dir,
             gitleaks=host_tools.resolve("gitleaks"),
-            visibility="",
+            visibility=visibility,
         )
     except (gitleaks_check.ScanRefused, Invalid, UnicodeError) as exc:
         failure = exc
@@ -243,7 +268,7 @@ def open_pull_request(
     """
     rules = check_range(published, write)
     text = read_draft(published)
-    scan_draft(text, published.git_dir, rules)
+    scan_draft(text, published.git_dir, rules, repository_visibility(repository, token))
     draft = parse_draft(text.replace("\r\n", "\n").replace("\r", "\n"))
     _, owner, name = repo.parts(repository)
     try:

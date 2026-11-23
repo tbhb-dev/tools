@@ -126,11 +126,17 @@ def scans(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         assert root.name == ".git"
         assert (root / ".gitleaks.toml").read_text() == POLICY
         assert gitleaks == "fixture-scanner"
-        assert visibility == ""
+        assert visibility == "PRIVATE"
         seen.append(text)
+
+    def get(url: str, **options: object) -> httpx.Response:
+        assert url == "https://api.github.com/repos/tbhb-dev/tools"
+        assert "Bearer tok" in str(options["headers"])
+        return reply(200, {"visibility": "private"})
 
     monkeypatch.setattr(host_tools, "resolve", resolve)
     monkeypatch.setattr(gitleaks_check, "scan_text", scan)
+    monkeypatch.setattr(httpx, "get", get)
     return seen
 
 
@@ -497,3 +503,29 @@ def test_a_draft_read_failure_names_its_class(
         open_draft(published)
     reason = f"{type(error).__name__} while scanning the draft"
     assert str(captured.value) == f"PR draft secret scan refused: {reason}"
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        (reply(200, {"visibility": "public"}), "PUBLIC"),
+        (reply(200, {"visibility": "internal"}), "INTERNAL"),
+        (reply(200, {"visibility": 3}), ""),
+        (reply(200, ["private"]), ""),
+        (reply(404, {"visibility": "private"}), ""),
+        (httpx.ConnectError("down"), ""),
+        (ValueError("not json"), ""),
+    ],
+)
+def test_the_scan_visibility_comes_from_the_repository_read(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: httpx.Response | Exception,
+    expected: str,
+) -> None:
+    def get(*_args: object, **_options: object) -> httpx.Response:
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(httpx, "get", get)
+    assert open_pr.repository_visibility("tbhb-dev/tools", "tok") == expected
