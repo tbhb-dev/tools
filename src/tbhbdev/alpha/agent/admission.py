@@ -22,15 +22,15 @@ _DIRECTORY_MODE = 0o1777
 
 @contextmanager
 def _directory(root: Path) -> Generator[int]:
-    try:
+    with suppress(FileExistsError):
         root.mkdir(mode=_DIRECTORY_MODE)
-    except FileExistsError:
-        created = False
-    else:
-        created = True
     fd = os.open(root, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
     try:
-        if created:
+        info = os.fstat(fd)
+        # mkdir applies the umask, so another launch can see the new directory
+        # before its creator widens it, or after the creator died. Widen a
+        # directory this account owns instead of refusing.
+        if stat.S_IMODE(info.st_mode) != _DIRECTORY_MODE and info.st_uid == os.getuid():
             os.fchmod(fd, _DIRECTORY_MODE)
         if stat.S_IMODE(os.fstat(fd).st_mode) != _DIRECTORY_MODE:
             message = f"agent admission directory must have mode {_DIRECTORY_MODE:o}"
@@ -89,7 +89,7 @@ def reserve(root: Path, host: Host, profile: Profile) -> Generator[None]:
                     f"(max_concurrent_runs={limit})"
                 )
                 raise Invalid(message)
-            if profile is Profile.BUILD and len(builds) >= limit - 1:
+            if profile is Profile.BUILD and len(builds) >= max(limit - 1, 1):
                 message = (
                     f"{host.name}: remaining agent capacity is reserved for reviews"
                 )

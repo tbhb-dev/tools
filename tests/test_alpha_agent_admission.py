@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from contextlib import ExitStack
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -60,7 +62,29 @@ def test_zero_slots_disables_every_profile(tmp_path: Path, profile: Profile) -> 
         pytest.fail("disabled host admitted a run")
 
 
-def test_refuses_a_directory_with_the_wrong_mode(tmp_path: Path) -> None:
+def test_a_sole_slot_admits_a_build_then_refuses(tmp_path: Path) -> None:
+    host = replace(LINUX, max_concurrent_runs=1)
+    root = tmp_path / "admission"
+    with (
+        admission.reserve(root, host, Profile.BUILD),
+        pytest.raises(Invalid, match="max_concurrent_runs=1"),
+        admission.reserve(root, host, Profile.REVIEW),
+    ):
+        pytest.fail("a second run took the only slot")
+
+
+def test_widens_a_directory_this_account_owns(tmp_path: Path) -> None:
+    root = tmp_path / "admission"
+    root.mkdir(mode=0o755)
+    with admission.reserve(root, LINUX, Profile.REVIEW):
+        assert stat.S_IMODE(root.stat().st_mode) == 0o1777
+
+
+def test_refuses_a_directory_with_the_wrong_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = os.getuid() + 1
+    monkeypatch.setattr(admission.os, "getuid", lambda: other)
     with (
         pytest.raises(Invalid, match="directory must have mode 1777"),
         admission.reserve(tmp_path, LINUX, Profile.REVIEW),
