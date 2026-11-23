@@ -148,6 +148,7 @@ def test_pr_check(
     monkeypatch.setattr(pr, "read_checked", lint)
     counter = Mock(return_value=counts)
     monkeypatch.setattr(sg, "size_counts", counter)
+    monkeypatch.setattr(pr, "git", Mock(return_value=(0, "origin/main")))
     assert pr.command(
         argparse.Namespace(command="check", draft="draft.md"), {}
     ) == bool(problem)
