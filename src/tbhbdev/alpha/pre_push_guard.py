@@ -39,6 +39,7 @@ PROTECTED = frozenset({"refs/heads/main", "refs/heads/master"})
 AGENT_KEY = Path(".config/tbhbdev/agent-signing-key.pub")
 FINGERPRINT = re.compile(r"SHA256:\S+")
 RANGE_LIMIT = 1000
+URL_TIMEOUT = 30
 
 
 def agent_fingerprint() -> str:
@@ -81,6 +82,21 @@ def signature_fingerprint(raw: str) -> str:
     return found[0] if found else ""
 
 
+def resolved_url(url: str) -> str | None:
+    """What ``git ls-remote --get-url`` prints for ``url``, or None on a timeout."""
+    try:
+        done = subprocess.run(  # nosec B603 B607
+            ["git", *SAFE, "ls-remote", "--get-url", url],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=URL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    return None if done.returncode else done.stdout.strip("\n")
+
+
 def remote_tips(url: str) -> list[str] | None:
     """The tips at the push destination from ``git ls-remote``, or None on failure.
 
@@ -88,10 +104,16 @@ def remote_tips(url: str) -> list[str] | None:
     from the fetch URL is the one read. Git already applied its ``insteadOf``
     rules to ``url``, and ``ls-remote`` would apply them again. A URL that a
     rule still rewrites could read another repository, so it returns None.
+    The one exception is a URL that is also a configured remote's name: git
+    reads that word as the remote, so the guard retries it as ``./`` plus the
+    word, which is the path the push used. Every other URL goes to ``ls-remote``
+    as git gave it.
     """
-    code, rewritten = git(*SAFE, "ls-remote", "--get-url", url)
-    if code or rewritten != url:
-        return None
+    if resolved_url(url) != url:
+        remotes = git(*SAFE, "remote")[1].split()
+        url = f"./{url}" if url in remotes else ""
+        if not url or resolved_url(url) != url:
+            return None
     code, out = git(*SAFE, "ls-remote", url)
     if code:
         return None

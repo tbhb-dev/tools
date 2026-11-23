@@ -646,3 +646,54 @@ def test_a_push_url_that_git_would_rewrite_again_is_refused(
     monkeypatch.setattr(sys, "stdin", io.StringIO(row))
     assert alpha.main(["pre-push-guard", "origin", str(destination)], "p") == 1
     assert "cannot read the remote's tips" in capsys.readouterr().err
+
+
+def test_a_relative_url_that_names_another_remote_is_read_as_a_path(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publish = repo / "publish"
+    publish.mkdir()
+    git(publish, "init", "--bare", "-q")
+    git(repo, "config", "remote.origin.url", "publish")
+    git(repo, "remote", "add", "publish", "./publish")
+    tip = commit(repo, "human")
+    row = f"refs/heads/topic {tip} refs/heads/topic {ZERO}\n"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(row))
+    assert alpha.main(["pre-push-guard", "origin", "publish"], "p") == 0
+
+
+@pytest.mark.usefixtures("repo")
+def test_a_slow_get_url_check_refuses_the_push(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = subprocess.run
+    url = origin_url()
+
+    def hang(command: list[str], **kwargs: object) -> object:
+        if "--get-url" in command:
+            assert kwargs["timeout"] == pg.URL_TIMEOUT
+            raise subprocess.TimeoutExpired(command, 1)
+        return real(command, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(pg.subprocess, "run", hang)
+    assert pg.remote_tips(url) is None
+
+
+def test_an_alias_for_the_dot_prefixed_path_does_not_refuse_a_bare_path(
+    repo: Path,
+) -> None:
+    (repo / "a").mkdir()
+    git(repo / "a", "init", "--bare", "-q", "b")
+    git(repo, "config", "url./elsewhere/.insteadOf", "./a/b")
+    assert pg.remote_tips("a/b") == []
+
+
+def test_a_tilde_url_reaches_ls_remote_as_given(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    git(home, "init", "--bare", "-q", "bare.git")
+    monkeypatch.setenv("HOME", str(home))
+    assert pg.remote_tips("~/bare.git") == []
+    assert repo.exists()
