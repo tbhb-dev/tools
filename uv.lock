@@ -1348,10 +1348,19 @@ wheels = [
 [[package]]
 name = "tbhb-telemetry"
 version = "0"
-source = { git = "https://github.com/tbhb-dev/telemetry?subdirectory=python&rev=1f98f2c56b9529ad9296131bde40f3a41e004472#1f98f2c56b9529ad9296131bde40f3a41e004472" }
+source = { url = "https://github.com/tbhb-dev/telemetry/releases/download/sha-c44613c38c40/tbhb_telemetry-0-py3-none-any.whl" }
 dependencies = [
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
+]
+wheels = [
+    { url = "https://github.com/tbhb-dev/telemetry/releases/download/sha-c44613c38c40/tbhb_telemetry-0-py3-none-any.whl", hash = "sha256:ab9302c68f6c693117cca8190a5c4d265eac1fbf6c89179000eec6033a616173" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "opentelemetry-exporter-otlp-proto-http", specifier = "==1.45.2" },
+    { name = "opentelemetry-sdk", specifier = "==1.45.2" },
 ]
 
 [[package]]
@@ -1406,7 +1415,7 @@ requires-dist = [
     { name = "onepasswordconnectsdk", specifier = ">=2.1.1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "tbhb-telemetry", git = "https://github.com/tbhb-dev/telemetry?subdirectory=python&rev=1f98f2c56b9529ad9296131bde40f3a41e004472" },
+    { name = "tbhb-telemetry", url = "https://github.com/tbhb-dev/telemetry/releases/download/sha-c44613c38c40/tbhb_telemetry-0-py3-none-any.whl" },
     { name = "tomlkit", specifier = ">=0.15.2" },
 ]
 
