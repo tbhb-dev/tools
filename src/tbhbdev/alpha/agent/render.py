@@ -9,15 +9,10 @@ FINAL_ONLY = (
     "If this run should open a pull request, write .github/PULL_REQUEST_DRAFT.md "
     "in the worktree and keep it out of your commits."
 )
-BUILD_PUBLICATION = (
-    "Commit your changes locally, including .github/PULL_REQUEST_DRAFT.md. "
-    "The driver pushes the build branch and opens the pull request after success."
-)
 
 
 def brief(kind: RunKind, text: str, *, profile: Profile | None = None) -> str:
-    if profile is Profile.BUILD:
-        text = f"{BUILD_PUBLICATION}\n{text}"
+    del profile
     return f"{FINAL_ONLY}\n{text}" if kind is RunKind.EXEC else text
 
 
