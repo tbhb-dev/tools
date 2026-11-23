@@ -52,10 +52,16 @@ if methods:
     kind = "methods"
 elif repo:
     kind = "cwd" if sys.argv[2].startswith("-") else "repo"
+elif sys.argv[1] == "api":
+    kind = "rules" if sys.argv[2] != "graphql" else (
+        "preview" if "preview=true" in sys.argv else "queue"
+    )
 else:
     kind = sys.argv[2] if sys.argv[1] == "pr" else "?"
-# The visibility read has its own log, so it never shifts the other gh calls.
-logname = "gh.methods.log" if methods else "gh.repo.log" if repo else "gh.log"
+# The rules and repo reads have their own logs.
+logname = f"gh.{{kind}}.log" if kind in ("methods", "repo", "rules") else (
+    "gh.repo.log" if repo else "gh.log"
+)
 with open(os.path.join(here, logname), "a") as log:
     log.write(json.dumps({{"argv": sys.argv[1:], "stdin": sys.stdin.read()}}) + "\\n")
 # A ruleset can refuse the merge flag while the squash flag goes through.
@@ -108,6 +114,15 @@ class Tools:
             "methods_rc": 0,
             "methods_out": '{"mergeCommitAllowed": true, "squashMergeAllowed": true}',
             "methods_err": "",
+            "rules_rc": 0,
+            "rules_out": '[[{"type": "pull_request"}]]',
+            "rules_err": "",
+            "preview_rc": 0,
+            "preview_out": "",
+            "preview_err": "",
+            "queue_rc": 0,
+            "queue_out": "",
+            "queue_err": "",
             "cwd_rc": 0,
             "cwd_out": "PRIVATE\\n",
             "cwd_err": "",
@@ -119,6 +134,7 @@ class Tools:
             "title": "feat(cli): add the stamp subcommand",
             "body": FIXTURE.read_text().split("\n# ", 1)[1].split("\n", 1)[1],
             "headRefOid": "abc123",
+            "baseRefName": "main",
             "state": "OPEN",
             "isDraft": False,
             "mergeable": "MERGEABLE",
@@ -1121,6 +1137,7 @@ def test_fetch_records_the_pr_from_one_read(tools: Tools, agent: bool) -> None:
         title="fix: retain trailers",
         body="description",
         headRefOid="deadbeef",
+        baseRefName="release",
         state="CLOSED",
         isDraft=True,
         mergeable="CONFLICTING",
@@ -1133,6 +1150,7 @@ def test_fetch_records_the_pr_from_one_read(tools: Tools, agent: bool) -> None:
         title="fix: retain trailers",
         body="description",
         head="deadbeef",
+        base="release",
         state="CLOSED",
         draft=True,
         mergeable="CONFLICTING",
@@ -1467,3 +1485,216 @@ def test_a_squash_fallback_allows_an_empty_body(tools: Tools) -> None:
     amend(tools, methods_out=allowed(merge=False, squash=True))
     assert run_main("12")[0] == 0
     assert tools.calls()[1]["argv"][3] == "--squash"  # type: ignore[index]
+
+
+def queue_data(*, removal: dict[str, object] | None = None, **fields: object) -> str:
+    nodes = [] if removal is None else [removal]
+    request = {"timelineItems": {"nodes": nodes}, **fields}
+    return json.dumps({"data": {"repository": {"pullRequest": request}}})
+
+
+@pytest.fixture
+def queued_tools(tools: Tools) -> Tools:
+    tools.view(title="fix: tidy", body="A plain body.\n", baseRefName="release/One")
+    amend(
+        tools,
+        rules_out='[[{"type":"pull_request"}],'
+        '[{"type":"merge_queue","parameters":{"merge_method":"SQUASH"}}]]',
+        preview_out=queue_data(
+            headline="fix: tidy (#12)",
+            body="A plain body.\r\n",
+            removal={"id": "old", "reason": "An earlier removal"},
+        ),
+        queue_out=queue_data(state="OPEN", isInMergeQueue=True),
+    )
+    return tools
+
+
+def test_squash_queue_enqueues_with_the_matched_head_and_reads_once(
+    queued_tools: Tools, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_main("12")[0] == 0
+    assert capsys.readouterr().out == "PR #12 queued\n"
+    rules = json.loads((queued_tools.bin / "gh.rules.log").read_text())
+    assert rules["argv"] == [
+        "api",
+        "--paginate",
+        "--slurp",
+        f"repos/{TARGET}/rules/branches/release%2FOne",
+    ]
+    view, preview, merge, status = queued_tools.calls()
+    owner, repo = TARGET.split("/", 1)
+    assert view["argv"] == ["pr", "view", "12", "--json", sm.VIEW_FIELDS]
+    assert preview["argv"] == [
+        "api", "graphql", "-f", f"query={sm.QUEUE_QUERY}", "-f", f"owner={owner}",
+        "-f", f"repo={repo}", "-F", "number=12", "-F", "preview=true",
+    ]  # fmt: skip
+    assert merge == {
+        "argv": [
+            "pr",
+            "merge",
+            "12",
+            "--squash",
+            "--subject",
+            "fix: tidy (#12)",
+            "--body-file",
+            "-",
+            "--match-head-commit",
+            "abc123",
+        ],
+        "stdin": "A plain body.\n",
+    }
+    assert status["argv"] == [*cast("list[str]", preview["argv"])[:-1], "preview=false"]
+
+
+def test_queue_dry_run_previews_without_enqueuing(
+    queued_tools: Tools, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_main("12", "--dry-run")[0] == 0
+    assert capsys.readouterr().out == (
+        "gh pr merge 12 --squash --subject 'fix: tidy (#12)' "
+        "--body-file - --match-head-commit abc123\n\nfix: tidy (#12)\n\nA plain body.\n"
+    )
+    assert len(queued_tools.calls()) == 2
+
+
+@pytest.mark.parametrize(
+    ("state", "code", "output"),
+    [
+        (
+            queue_data(state="MERGED", mergeCommit={"oid": "def456"}),
+            0,
+            "PR #12 merged as def456\n",
+        ),
+        (
+            queue_data(state="OPEN", removal={"id": "new", "reason": "CI failed"}),
+            "PR #12 dequeued: CI failed",
+            "",
+        ),
+        (
+            queue_data(state="OPEN", removal={"id": "new", "reason": None}),
+            "PR #12 dequeued: GitHub supplied no reason",
+            "",
+        ),
+        (
+            queue_data(state="OPEN", removal={"id": "old", "reason": "Old"}),
+            "PR #12: GitHub reports no merge commit, queue entry, or new removal",
+            "",
+        ),
+        (
+            queue_data(state="MERGED", mergeCommit={"oid": ""}),
+            "PR #12: GitHub reports no merge commit, queue entry, or new removal",
+            "",
+        ),
+        ("{}", "gh returned no usable merge queue state", ""),
+        (
+            '{"data":{"repository":{"pullRequest":null}}}',
+            "gh returned no usable merge queue state",
+            "",
+        ),
+        (
+            '{"data":{"repository":{"pullRequest":{"state":"OPEN"}}}}',
+            "gh returned no usable merge queue timeline",
+            "",
+        ),
+    ],
+)
+def test_reports_the_queue_state_at_the_time_of_the_read(
+    queued_tools: Tools,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+    code: int | str,
+    output: str,
+) -> None:
+    amend(queued_tools, queue_out=state)
+    assert run_main("12")[0] == code
+    assert capsys.readouterr().out == output
+    assert len(queued_tools.calls()) == 4
+
+
+def test_a_queue_merge_refusal_preserves_the_gh_error(
+    queued_tools: Tools, capsys: pytest.CaptureFixture[str]
+) -> None:
+    amend(queued_tools, merge_rc=1, merge_out="", merge_err="head changed\n")
+    assert run_main("12")[0] == 1
+    assert capsys.readouterr().err == "head changed\n"
+    assert len(queued_tools.calls()) == 3
+
+
+@pytest.mark.parametrize(
+    ("spec", "error"),
+    [
+        (
+            {"rules_rc": 1, "rules_err": "forbidden"},
+            "gh branch rules lookup failed: forbidden",
+        ),
+        ({"rules_out": "not JSON"}, "no usable branch rules"),
+        ({"rules_out": "{}"}, "no usable branch rules"),
+        ({"rules_out": "[]"}, "no usable branch rules"),
+        ({"rules_out": "[{}]"}, "no usable branch rules"),
+        ({"rules_out": "[[{}]]"}, "no usable branch rules"),
+        (
+            {
+                "rules_out": '[[{"type":"merge_queue",'
+                '"parameters":{"merge_method":"MERGE"}}]]'
+            },
+            "merge queue must use squash",
+        ),
+    ],
+)
+def test_invalid_queue_rules_refuse(
+    tools: Tools, spec: dict[str, object], error: str
+) -> None:
+    amend(tools, **spec)
+    assert error in str(run_main("12")[0])
+    assert len(tools.calls()) == 1
+
+
+def test_no_base_branch_refuses(tools: Tools) -> None:
+    tools.view(baseRefName=None)
+    assert run_main("12")[0] == "not merging: gh pr view returned no base branch"
+    assert len(tools.calls()) == 1
+
+
+def test_queue_refuses_when_the_repository_disables_squash(queued_tools: Tools) -> None:
+    amend(queued_tools, methods_out=allowed(merge=True, squash=False))
+    assert (
+        run_main("12")[0]
+        == "not merging PR #12: the merge queue requires squash merges"
+    )
+    assert len(queued_tools.calls()) == 1
+
+
+@pytest.mark.parametrize(
+    ("spec", "error"),
+    [
+        (
+            {"preview_rc": 1, "preview_err": "forbidden"},
+            "gh merge queue lookup failed: forbidden",
+        ),
+        ({"preview_out": "not JSON"}, "no usable merge queue state"),
+        ({"preview_out": queue_data()}, "default squash message differs"),
+        (
+            {
+                "preview_out": queue_data(
+                    headline="fix: tidy (#12)", body="## Why\nA plain body."
+                )
+            },
+            "default squash message differs",
+        ),
+        (
+            {
+                "preview_out": queue_data(
+                    headline="fix: another title (#12)", body="A plain body."
+                )
+            },
+            "default squash message differs",
+        ),
+    ],
+)
+def test_queue_refuses_if_it_cannot_use_the_clean_message(
+    queued_tools: Tools, spec: dict[str, object], error: str
+) -> None:
+    amend(queued_tools, **spec)
+    assert error in str(run_main("12")[0])
+    assert len(queued_tools.calls()) == 2
