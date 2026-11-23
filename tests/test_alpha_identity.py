@@ -7402,6 +7402,16 @@ def test_a_running_subagent_refuses_a_commit_without_hook_records(
         assert ai.subagent_running("session-raw", env, now)
         with pytest.raises(ai.AttributionError, match="subagent of this session"):
             ai.committer_identity(env, [])
+    # A subagent the user stopped isn't running, though its transcript ends mid-turn.
+    write_transcript(done, finished("tool_use"))
+    meta = folder / "agent-a.meta.json"
+    meta.write_text(json.dumps({"stoppedByUser": True}))
+    assert not ai.subagent_running("session-raw", env, now)
+    assert ai.committer_identity(env, []) is not None
+    for text in ('{"stoppedByUser": false}', "[]", "not json"):
+        meta.write_text(text)
+        assert ai.subagent_running("session-raw", env, now)
+    meta.unlink()
     write_transcript(done, finished())
     # A dangling link is skipped; a transcript that can't be read counts as unfinished.
     (folder / "agent-e.jsonl").symlink_to(folder / "gone")
