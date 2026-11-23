@@ -336,3 +336,4 @@ softbreak
 tasklists
 unlaunched
 MemAvailable
+pids
