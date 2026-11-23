@@ -1,20 +1,10 @@
 ---
 description: Interim agent commands, installation, and harness hooks.
 generated:
-- role: generated
-  effort: high
-  harness: codex:0.164.0
-  model: openai:gpt-6.1-sol
-  session: sha-256-64:9fa208639bb640db
-  surface: exec
-  at: '2026-11-15T19:18:44Z'
-- role: generated
-  effort: high
-  harness: codex:0.164.0
-  model: openai:gpt-6.1-sol
-  session: sha-256-64:e641a1b7ee82fd67
-  surface: exec
-  at: '2026-11-15T19:08:28Z'
+  - role: generated
+    harness: codex
+    model: openai:gpt-6
+    at: "2026-11-23T03:01:39Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -88,7 +78,9 @@ The commit check runs without config. The command guard checks arguments for tra
 
 These user-level hooks run in every repository. Before acting, the identity, pull request, approval guard, and install hooks check that `origin` names a tbhb-dev repository on GitHub. Outside a repository, the identity record hook still writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Both `state-guard` and `session-context` run regardless of origin. At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, which puts the `gh` shim first on PATH for the session's commands and reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 
-The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, and each worktree has its own pull request draft, so sessions in two worktrees of one clone don't overwrite each other.
+The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, so sessions in two worktrees of one clone keep separate state.
+
+For a run that opens a pull request, write `.github/PULL_REQUEST_DRAFT.md` in its worktree and keep it out of commits. The driver reads the worktree draft first and uses the pushed commit's draft if the worktree draft is missing. The worktree draft must be an owned regular file of at most 64 KiB. The driver refuses symlinks and scans the draft with the host's secret rules and the pre-run commit's `.gitleaks.toml` before posting it. The driver warns when the pushed changes add the draft.
 
 ## Identity start time
 

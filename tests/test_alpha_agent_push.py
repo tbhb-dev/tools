@@ -159,6 +159,23 @@ def test_push_success(
         assert token == SYNTHETIC
         return original(directory, destination, branch, token)
 
+    workspace = Path(prepared.paths.worktree)
+    before = push.head(workspace, "agent/example")
+
+    def open_request(published: open_pr.PublishedRange, *details: object) -> int:
+        assert published.workspace == workspace
+        assert published.git_dir.parent == run.files.root
+        assert published.before == before
+        assert published.commit == push.head(workspace, "agent/example")
+        assert details == (
+            run.request.repo,
+            "agent/example",
+            SYNTHETIC,
+            run.files.write,
+        )
+        return 7
+
+    monkeypatch.setattr(open_pr, "open_pull_request", open_request)
     monkeypatch.setattr(push, "send", send)
     with ExitStack() as stack:
         assert push.run(run, prepared, stack, harness, SYNTHETIC) == 0
