@@ -97,6 +97,8 @@ def planned_paths(run: Run) -> RunPaths:
 
 # These files can alter the next trusted shell or tool invocation.
 _BAZEL_SHUTDOWN_SECONDS = 60
+_BAZEL_SHUTDOWN_RETRIES = 3
+_BAZEL_RETRY_SECONDS = 2
 _STARTUP_FILES = (
     ".zshenv",
     ".zshrc",
@@ -1027,7 +1029,7 @@ def _bazel_tool(run: Run) -> str | None:
     return shutil.which("bazelisk", path=search) or shutil.which("bazel", path=search)
 
 
-def _shutdown_base(tool: str, base: Path, worktree: str) -> str:
+def _shutdown_once(tool: str, base: Path, worktree: str) -> str:
     try:
         done = subprocess.run(  # nosec B603
             [tool, f"--output_base={base}", "shutdown"],
@@ -1043,6 +1045,18 @@ def _shutdown_base(tool: str, base: Path, worktree: str) -> str:
         result = "failed to run"
     if result == "rc=0" and _server_alive(base):
         result = "server alive"
+    return result
+
+
+def _shutdown_base(tool: str, base: Path, worktree: str) -> str:
+    # A server still starting can answer shutdown with rc 0 before it accepts
+    # commands, so a live server after a clean shutdown gets another attempt.
+    result = _shutdown_once(tool, base, worktree)
+    for _ in range(_BAZEL_SHUTDOWN_RETRIES):
+        if result != "server alive":
+            break
+        time.sleep(_BAZEL_RETRY_SECONDS)
+        result = _shutdown_once(tool, base, worktree)
     return result
 
 

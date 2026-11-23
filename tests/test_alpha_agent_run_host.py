@@ -5562,12 +5562,35 @@ def test_cleanup_keeps_a_base_whose_server_is_alive(
     base = make_base(prepared)
     (base / "server").mkdir()
     (base / "server/server.pid.txt").write_text(str(os.getpid()))
-    fake_bazel(monkeypatch)
+    calls: list[list[str]] = []
+    pauses: list[float] = []
+    fake_bazel(monkeypatch, calls=calls)
+    monkeypatch.setattr(time, "sleep", pauses.append)
     stopped = run_host.shutdown_bazel(run, prepared)
     assert stopped[base][0] == "server alive"
+    assert (len(calls), pauses) == (4, [2, 2, 2])
     assert run_host.cleanup_bazel(run, prepared, stopped)["bases"] == 0
     assert base.is_dir()
     assert "kept" in run.files.path("log").read_text()
+
+
+def test_shutdown_retries_a_server_that_was_still_starting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = bazel_run(tmp_path)
+    base = make_base(prepared)
+    (base / "server").mkdir()
+    pid_file = base / "server/server.pid.txt"
+    pid_file.write_text(str(os.getpid()))
+    calls: list[list[str]] = []
+    fake_bazel(monkeypatch, calls=calls)
+
+    def pause(_seconds: float) -> None:
+        pid_file.unlink()
+
+    monkeypatch.setattr(time, "sleep", pause)
+    stopped = run_host.shutdown_bazel(run, prepared)
+    assert (stopped[base][0], len(calls)) == ("rc=0", 2)
 
 
 @pytest.mark.parametrize("text", ["garbage", "-1", "999999999", "999999999999"])
