@@ -1683,14 +1683,31 @@ def test_the_default_branch_ignores_a_tag_of_the_same_name(
     assert pr.default_base() == "trunk"
 
 
-def test_an_unset_origin_head_names_the_schema_source(
-    world: World, capsys: pytest.CaptureFixture[str]
-) -> None:
+def unset_origin_head(world: World, url: str) -> None:
     world.git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
-    assert pr.default_base() == "main"
-    assert capsys.readouterr().err == (
-        "base: origin/HEAD is unset; using the schema's main\n"
-    )
+    world.git("remote", "set-url", "origin", url)
+
+
+def test_an_unset_origin_head_reads_the_remotes_own_default(
+    world: World, tmp_path: Path
+) -> None:
+    remote = tmp_path / "remote.git"
+    world.git("init", "-q", "--bare", "-b", "dev", str(remote))
+    world.git("push", "-q", str(remote), "HEAD:refs/heads/dev")
+    unset_origin_head(world, str(remote))
+    assert pr.default_base() == "dev"
+
+
+@pytest.mark.parametrize("kind", ["unreachable", "empty"])
+def test_an_unreadable_remote_default_refuses_without_a_guess(
+    world: World, tmp_path: Path, kind: str
+) -> None:
+    remote = tmp_path / "remote.git"
+    if kind == "empty":
+        world.git("init", "-q", "--bare", "-b", "dev", str(remote))
+    unset_origin_head(world, str(remote))
+    with pytest.raises(SystemExit, match="cannot find the default branch"):
+        pr.default_base()
 
 
 def test_create_within_the_limits_prints_no_counts(

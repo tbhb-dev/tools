@@ -914,17 +914,26 @@ def posting_value(env: Mapping[str, str]) -> str | None:
 
 
 def default_base() -> str:
-    """The repository's default branch from origin/HEAD, else the schema's.
+    """The repository's default branch: origin/HEAD, else the remote's own HEAD.
 
-    Names the source on stderr, so a fallback to the schema is visible.
+    Raises:
+        SystemExit: origin/HEAD is not a symbolic ref and the remote's HEAD is
+            unreadable. No guess stands in, so a draft never targets a wrong base.
     """
     code, out = git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
     name = out.removeprefix("refs/remotes/origin/")
     if code == 0 and name and name != out:
         return name
-    base = str(schema_default(load_schema(), "base"))
-    print(f"base: origin/HEAD is unset; using the schema's {base}", file=sys.stderr)
-    return base
+    code, out = git("ls-remote", "--symref", "origin", "HEAD")
+    found = re.search(r"^ref: refs/heads/(\S+)\s+HEAD$", out, re.MULTILINE)
+    if code != 0 or not found:
+        message = (
+            "cannot find the default branch: origin/HEAD is not a symbolic ref "
+            "and `git ls-remote --symref origin HEAD` failed; name the base in "
+            "the draft's frontmatter"
+        )
+        raise SystemExit(message)
+    return found[1]
 
 
 def base_of(meta: Mapping[str, object], default: str | None = None) -> str:
