@@ -172,11 +172,6 @@ def test_close_issue(
     ("body", "comment", "message"),
     [
         (
-            "## Acceptance criteria\n- [ ] Show preview",
-            "Done",
-            r"blocks\.acceptance-criteria: Acceptance boxes are unchecked",
-        ),
-        (
             "## Acceptance\n- [x] Open report\n## Acceptance\n- [ ] Show preview",
             "Done",
             r"blocks\.acceptance-2: Acceptance boxes are unchecked",

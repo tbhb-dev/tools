@@ -13,6 +13,10 @@ CI_HINT = "CI already checks this; state the observable outcome instead"
 TITLE = "Analysts can download reports"
 
 
+def issue(markdown: str, variant: str) -> content_vet.Json:
+    return normalize(markdown, object="issue", variant=variant, metadata={})
+
+
 @pytest.fixture(autouse=True)
 def pinned_cue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     if "TEST_TMPDIR" in os.environ:
@@ -50,13 +54,10 @@ class MissingCIRestatementError(AssertionError):
 
 
 def miss(criterion: str, reason: str) -> pytest.ParameterSet:
-    return pytest.param(
-        criterion,
-        True,
-        marks=pytest.mark.xfail(
-            strict=True, reason=reason, raises=MissingCIRestatementError
-        ),
+    mark = pytest.mark.xfail(
+        strict=True, reason=reason, raises=MissingCIRestatementError
     )
+    return pytest.param(criterion, True, marks=mark)
 
 
 @pytest.mark.parametrize(
@@ -90,15 +91,12 @@ def test_ci_restatement(criterion: str, refused: bool, variant_schema: Path) -> 
         (criterion, "Read the report"),
         ("Download the report", criterion),
     ):
-        draft = normalize(
-            f"# {TITLE}\n\n## Acceptance criteria\n- [ ] {acceptance}\n"
-            f"\n## Verification\n- {verification}\n",
-            object="issue",
-            variant="Feature",
-            metadata={},
+        markdown = (
+            f"# {TITLE}\n\n## Acceptance criteria\n- [ ] {acceptance}\n\n"
+            f"## Verification\n- {verification}\n"
         )
         result = content.check(
-            draft,
+            issue(markdown, "Feature"),
             SCHEMAS,
             variant_schema=variant_schema,
             definition="#Fixture",
@@ -137,20 +135,16 @@ def test_issue_checks(
     refusals: tuple[str, ...],
     warnings: tuple[str, ...],
 ) -> None:
-    draft = normalize(
+    draft = issue(
         f"# {title}\n\n## Acceptance criteria\nExplain the outcome.\n\n"
         "- [ ] The preview opens and the log updates\n- [x] Show the name and email\n",
-        object="issue",
-        variant=variant,
-        metadata={},
+        variant,
     )
     result = content.check(draft, SCHEMAS, parent_type=parent)
     assert tuple(item.code for item in result.refusals) == refusals
     assert tuple(item.code for item in result.warnings) == (*warnings, "joined-checks")
-    assert (
-        result.warnings[-1].path
-        == "blocks.acceptance-criteria.content.1.items.0.visible"
-    )
+    joined_check = result.warnings[-1]
+    assert joined_check.path == "blocks.acceptance-criteria.content.1.items.0.visible"
 
 
 @pytest.mark.parametrize(
@@ -170,7 +164,7 @@ def test_issue_checks(
     ],
 )
 def test_title_definitions(kind: str, title: str, refused: bool) -> None:
-    draft = normalize(f"# {title}\n", object="issue", variant="Fixture", metadata={})
+    draft = issue(f"# {title}\n", "Fixture")
     definition = f"{{blocks: {{title: #{kind}Title, ...}}, ...}}"
     result = content.check(draft, SCHEMAS, definition=definition)
     assert bool(result.refusals) == refused
@@ -179,15 +173,8 @@ def test_title_definitions(kind: str, title: str, refused: bool) -> None:
 
 def test_vet_reports_multiple_fields() -> None:
     result = content.check({"schemaVersion": 1}, SCHEMAS)
-    assert {item.path for item in result.refusals} == {
-        "blockOrder",
-        "blocks",
-        "inline",
-        "metadata",
-        "metrics",
-        "object",
-        "variant",
-    }
+    fields = "blockOrder blocks inline metadata metrics object variant"
+    assert {item.path for item in result.refusals} == set(fields.split())
     assert content.format_refusal(result.refusals[0]) == (
         "blockOrder: field is required but not present\n"
         "Revise the value to meet the schema constraint."
