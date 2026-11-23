@@ -802,7 +802,7 @@ def _execute(
     run: Run,
     text: str,
     stack: ExitStack,
-    push_token: str | None = None,
+    push_token: str | credentials.PushTokenFailure | None = None,
     *,
     preflight_only: bool,
 ) -> int:

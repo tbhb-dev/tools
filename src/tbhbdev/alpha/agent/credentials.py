@@ -50,6 +50,11 @@ class Delivery:
     claude_profile: str | None
 
 
+@dataclass(frozen=True)
+class PushTokenFailure:
+    reason: str
+
+
 def read(reference: str, *, label: str) -> str:
     try:
         value = secrets.read(reference)
@@ -156,15 +161,17 @@ def github_token(request: RunRequest, references: Credentials) -> str | None:
         raise Invalid(message) from None
 
 
-def push_token(request: RunRequest, settings: Settings) -> str | None:
-    """The run-scoped write token for a build's push, or None to skip the push."""
+def push_token(
+    request: RunRequest, settings: Settings
+) -> str | PushTokenFailure | None:
+    """Return a build's write token or the class name of the minting error."""
     if request.profile is not Profile.BUILD:
         return None
     references = next(c for c in settings.credentials if c.account == request.account)
     try:
         return pull_requests_token(references, request.repo, PUSH_PERMISSIONS)
-    except TOKEN_ERRORS:
-        return None
+    except TOKEN_ERRORS as exc:
+        return PushTokenFailure(type(exc).__name__)
 
 
 def review_post_token(request: RunRequest, settings: Settings) -> str | None:
