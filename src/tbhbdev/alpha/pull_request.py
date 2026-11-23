@@ -123,6 +123,7 @@ import shutil
 import subprocess  # nosec B404
 import sys
 import tempfile
+import time
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1411,7 +1412,10 @@ def head_of(number: int) -> str:
     return str(cast("dict[str, object]", data)["headRefOid"])  # pragma: no mutate
 
 
-STUCK_AFTER = dt.timedelta(minutes=30)
+STUCK_GRACE = dt.timedelta(minutes=10)
+UNSET_TIMEOUT = 60
+CANCEL_POLLS = 12
+CANCEL_PAUSE = 5.0
 
 
 def utcnow() -> dt.datetime:
@@ -1419,53 +1423,145 @@ def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.UTC)
 
 
-def stuck_job(run_id: object) -> bool:
-    """Whether a job of the run has been in progress past STUCK_AFTER.
+def pause(seconds: float) -> None:
+    """Sleep between polls of a cancelled run."""
+    time.sleep(seconds)
+
+
+def workflow_timeouts(workflow: object) -> dict[str, int]:
+    """Each job's ``timeout-minutes`` in the checkout's workflow named WORKFLOW.
+
+    Jobs are keyed by display name, which is the job key when it sets no name.
+    A job without a timeout, or a workflow file that isn't a mapping, adds
+    nothing.
+    """
+    found: dict[str, int] = {}
+    for path in sorted(Path(".github/workflows").glob("*.y*ml")):
+        data = yaml.safe_load(path.read_text())
+        if not isinstance(data, dict) or data.get("name") != workflow:
+            continue
+        jobs = cast("dict[str, object]", data.get("jobs") or {})  # pragma: no mutate
+        for key, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            spec = cast("dict[str, object]", job)  # pragma: no mutate
+            minutes = spec.get("timeout-minutes")
+            if isinstance(minutes, int):
+                found[str(spec.get("name", key))] = minutes
+    return found
+
+
+def run_view(run_id: object, field: str) -> dict[str, object]:
+    """A run's ``gh run view --json FIELD`` mapping.
 
     Raises:
         SystemExit: gh can't read the run.
     """
-    done = run([find_tool(GH), "run", "view", str(run_id), "--json", "jobs"])
+    done = run([find_tool(GH), "run", "view", str(run_id), "--json", field])
     data = gh_data(done)
     if not isinstance(data, dict):
         why = " ".join((done.stderr or done.stdout).split())
         message = f"cannot read run {run_id}: {why}"
         raise SystemExit(message)
-    jobs = cast("list[dict[str, str]]", data["jobs"])  # pragma: no mutate
+    return cast("dict[str, object]", data)  # pragma: no mutate
+
+
+def stuck_job(run_id: object, workflow: object) -> bool:
+    """Whether a job of the run has run 10 minutes past its own timeout.
+
+    The limit is the job's ``timeout-minutes`` plus 10, or 60 minutes plus 10
+    when the workflow sets none.
+
+    Raises:
+        SystemExit: gh can't read the run.
+    """
+    timeouts = workflow_timeouts(workflow)
+    jobs = cast(
+        "list[dict[str, str]]", run_view(run_id, "jobs")["jobs"]
+    )  # pragma: no mutate
     return any(
         job["status"] == "in_progress"
-        and utcnow() - dt.datetime.fromisoformat(job["startedAt"]) > STUCK_AFTER
+        and utcnow() - dt.datetime.fromisoformat(job["startedAt"])
+        > dt.timedelta(minutes=timeouts.get(job["name"], UNSET_TIMEOUT)) + STUCK_GRACE
         for job in jobs
     )
 
 
-def rerun_stuck(number: int) -> int:
-    """Cancel PR N's current-head run when a job is stuck, then rerun it.
+def cancelled(run_id: object) -> bool:
+    """Whether the run reaches ``completed`` within the bounded polls."""
+    for _ in range(CANCEL_POLLS):
+        if run_view(run_id, "status")["status"] == "completed":
+            return True
+        pause(CANCEL_PAUSE)
+    return False
 
-    The limit is a fixed 30 minutes, not each job's configured timeout.
+
+def rerun_stuck(number: int) -> int:
+    """Cancel PR N's stuck current-head run, wait for the cancel, then rerun it.
+
+    Only a ``pull_request`` run on the PR's head commit and head branch
+    counts. A fork's PR is refused, because its branch name can collide.
+
+    Raises:
+        SystemExit: gh can't read the pull request or its runs.
     """
+    done = run(
+        [
+            find_tool(GH),
+            "pr",
+            "view",
+            str(number),
+            "--json",
+            "headRefOid,headRefName,isCrossRepository",
+        ]
+    )
+    data = gh_data(done)
+    if not isinstance(data, dict):
+        why = " ".join((done.stderr or done.stdout).split())
+        message = f"cannot read PR {number}: {why}"
+        raise SystemExit(message)
+    meta = cast("dict[str, object]", data)  # pragma: no mutate
+    if meta["isCrossRepository"]:
+        print(f"PR {number} comes from a fork; rerun --stuck refuses", file=sys.stderr)
+        return 1
+    head = str(meta["headRefOid"])
     runs = gh_json(
         [
             "run",
             "list",
             "--commit",
-            head_of(number),
+            head,
+            "--event",
+            "pull_request",
+            "--branch",
+            str(meta["headRefName"]),
             "--limit",
-            "1",
+            "20",
             "--json",
-            "databaseId,status",
+            "databaseId,status,headSha,workflowName",
         ]
     )
-    if (
-        not runs
-        or runs[0]["status"] != "in_progress"
-        or not stuck_job(runs[0]["databaseId"])
-    ):
+    stuck = [
+        item
+        for item in runs
+        if item["headSha"] == head
+        and item["status"] == "in_progress"
+        and stuck_job(item["databaseId"], item["workflowName"])
+    ]
+    if not stuck:
         print(f"no stuck run for the current head of PR {number}", file=sys.stderr)
         return 1
-    run_id = str(runs[0]["databaseId"])
-    cancelled = invoke_gh([GH, "run", "cancel", run_id], "")[0]
-    return cancelled or invoke_gh([GH, "run", "rerun", run_id], "")[0]
+    if head_of(number) != head:
+        print(f"PR {number} moved to a new head; run again", file=sys.stderr)
+        return 1
+    run_id = str(stuck[0]["databaseId"])
+    code = invoke_gh([GH, "run", "cancel", run_id], "")[0]
+    if code:
+        return code
+    if not cancelled(run_id):
+        print(f"run {run_id} did not finish cancelling; no rerun", file=sys.stderr)
+        return 1
+    return invoke_gh([GH, "run", "rerun", run_id], "")[0]
 
 
 def rerun(number: int) -> int:

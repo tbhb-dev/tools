@@ -3082,54 +3082,123 @@ def test_rerun_reports_no_failed_run(
 
 
 NOW = dt.datetime(2026, 11, 23, 18, 0, tzinfo=dt.UTC)
+HEAD = "a" * 40
+WORKFLOW = """\
+name: ci
+jobs:
+  bazel:
+    name: bazel
+    timeout-minutes: 45
+  keyed:
+    timeout-minutes: 10
+  loose:
+    name: loose
+  odd: 3
+"""
 
 
-def stuck_world(
-    world: World,
-    monkeypatch: pytest.MonkeyPatch,
-    runs: list[dict[str, object]],
-    started: str,
-    status: str = "in_progress",
-) -> None:
-    monkeypatch.setattr(pr, "utcnow", Mock(return_value=NOW))
-    jobs = {"jobs": [{"status": status, "startedAt": started}]}
-    world.fake(
-        "gh",
-        cases={
-            "pr view": {
-                "rc": 0,
-                "stdout": json.dumps({"headRefOid": "a" * 40}),
-                "stderr": "",
+class Stuck:
+    """A stuck-run scenario: gh's pr view and run list, plus the run helpers."""
+
+    def __init__(self, world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.world = world
+        self.statuses = ["in_progress", "completed"]
+        self.jobs: list[dict[str, str]] = []
+        self.new_head = HEAD
+        self.invoked: list[list[str]] = []
+        self.pauses: list[float] = []
+        self.meta: dict[str, object] = {
+            "headRefOid": HEAD,
+            "headRefName": "topic",
+            "isCrossRepository": False,
+        }
+        self.runs: list[dict[str, object]] = []
+        monkeypatch.setattr(pr, "utcnow", Mock(return_value=NOW))
+        monkeypatch.setattr(pr, "run_view", self.view)
+        monkeypatch.setattr(pr, "head_of", self.head)
+        monkeypatch.setattr(pr, "invoke_gh", self.invoke)
+        monkeypatch.setattr(pr, "pause", self.pauses.append)
+        workflows = world.root / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        (workflows / "ci.yml").write_text(WORKFLOW)
+        (workflows / "other.yml").write_text("name: other\njobs: {}\n")
+        (workflows / "list.yml").write_text("- not a mapping\n")
+
+    def head(self, _number: int) -> str:
+        return self.new_head
+
+    def view(self, _run_id: object, field: str) -> dict[str, object]:
+        if field == "jobs":
+            return {"jobs": self.jobs}
+        return {"status": self.statuses.pop(0)}
+
+    def invoke(self, argv: list[str], _body: str) -> tuple[int, str]:
+        self.invoked.append(argv[1:])
+        return (1 if argv[1:3] == ["run", "cancel"] and self.cancel_fails else 0), ""
+
+    cancel_fails = False
+
+    def start(self) -> None:
+        self.world.fake(
+            "gh",
+            cases={
+                "pr view": {"rc": 0, "stdout": json.dumps(self.meta), "stderr": ""},
+                "run list": gh_list(self.runs),
             },
-            "run list": gh_list(runs),
-            "run view": {"rc": 0, "stdout": json.dumps(jobs), "stderr": ""},
-        },
-    )
+        )
 
 
-def test_rerun_stuck_cancels_and_reruns_an_old_in_progress_job(
+def old_job(
+    minutes: int, name: str = "bazel", status: str = "in_progress"
+) -> dict[str, str]:
+    started = NOW - dt.timedelta(minutes=minutes)
+    return {"name": name, "status": status, "startedAt": started.isoformat()}
+
+
+def a_run(run_id: int = 7, **fields: object) -> dict[str, object]:
+    run_fields: dict[str, object] = {
+        "databaseId": run_id,
+        "status": "in_progress",
+        "headSha": HEAD,
+        "workflowName": "ci",
+    }
+    return run_fields | fields
+
+
+def test_rerun_stuck_cancels_waits_and_reruns(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runs: list[dict[str, object]] = [{"databaseId": 7, "status": "in_progress"}]
-    stuck_world(world, monkeypatch, runs, "2026-11-23T17:00:00Z")
+    scene = Stuck(world, monkeypatch)
+    scene.runs = [a_run()]
+    scene.jobs = [old_job(56)]
+    scene.statuses = ["in_progress", "in_progress", "completed"]
+    scene.start()
     assert run_main("rerun", "45", "--stuck") == 0
-    argv = [call["argv"] for call in world.calls("gh")]
-    assert argv[-2:] == [["run", "cancel", "7"], ["run", "rerun", "7"]]
+    assert scene.invoked == [["run", "cancel", "7"], ["run", "rerun", "7"]]
+    assert scene.pauses == [pr.CANCEL_PAUSE, pr.CANCEL_PAUSE]
+    argvs = [cast("list[str]", c["argv"]) for c in world.calls("gh")]
+    list_call = next(argv for argv in argvs if argv[1] == "list")
+    assert list_call[2:8] == [
+        "--commit",
+        HEAD,
+        "--event",
+        "pull_request",
+        "--branch",
+        "topic",
+    ]
 
 
 @pytest.mark.parametrize(
-    ("runs", "job"),
+    ("runs", "jobs"),
     [
-        ([], ("2026-11-23T17:00:00Z", "in_progress")),
-        ([{"databaseId": 7, "status": "completed"}], ("2026-11-23T17:00:00Z", "x")),
-        (
-            [{"databaseId": 7, "status": "in_progress"}],
-            ("2026-11-23T17:45:00Z", "in_progress"),
-        ),
-        (
-            [{"databaseId": 7, "status": "in_progress"}],
-            ("2026-11-23T17:00:00Z", "queued"),
-        ),
+        ([], [old_job(300)]),
+        ([a_run(status="completed")], [old_job(300)]),
+        ([a_run(headSha="b" * 40)], [old_job(300)]),
+        ([a_run()], [old_job(55)]),
+        ([a_run()], [old_job(300, status="queued")]),
+        ([a_run()], [old_job(70, "loose")]),
+        ([a_run()], [old_job(19, "keyed")]),
+        ([a_run(workflowName="other")], [old_job(61, "bazel")]),
     ],
 )
 def test_rerun_stuck_leaves_a_run_that_is_not_stuck(
@@ -3137,66 +3206,125 @@ def test_rerun_stuck_leaves_a_run_that_is_not_stuck(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     runs: list[dict[str, object]],
-    job: tuple[str, str],
+    jobs: list[dict[str, str]],
 ) -> None:
-    stuck_world(world, monkeypatch, runs, *job)
+    scene = Stuck(world, monkeypatch)
+    scene.runs = runs
+    scene.jobs = jobs
+    scene.start()
     assert run_main("rerun", "45", "--stuck") == 1
     assert capsys.readouterr().err == "no stuck run for the current head of PR 45\n"
-    argv = [call["argv"] for call in world.calls("gh")]
-    assert ["run", "cancel", "7"] not in argv
-    assert ["run", "rerun", "7"] not in argv
+    assert scene.invoked == []
+
+
+def test_rerun_stuck_uses_the_jobs_own_timeout_plus_ten(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = Stuck(world, monkeypatch)
+    scene.runs = [a_run()]
+    scene.jobs = [old_job(56)]
+    scene.start()
+    assert run_main("rerun", "45", "--stuck") == 0
+    scene.jobs = [old_job(21, "keyed")]
+    scene.invoked.clear()
+    scene.statuses = ["completed"]
+    assert run_main("rerun", "45", "--stuck") == 0
+    scene.jobs = [old_job(71, "loose")]
+    scene.statuses = ["completed"]
+    assert run_main("rerun", "45", "--stuck") == 0
+
+
+def test_rerun_stuck_skips_a_young_run_to_reach_a_stuck_one(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = Stuck(world, monkeypatch)
+    scene.runs = [a_run(9), a_run(7)]
+    ages = {9: 5, 7: 90}
+
+    def view(run_id: object, field: str) -> dict[str, object]:
+        if field == "jobs":
+            return {"jobs": [old_job(ages[int(str(run_id))])]}
+        return {"status": "completed"}
+
+    monkeypatch.setattr(pr, "run_view", view)
+    scene.start()
+    assert run_main("rerun", "45", "--stuck") == 0
+    assert scene.invoked == [["run", "cancel", "7"], ["run", "rerun", "7"]]
+
+
+def test_rerun_stuck_refuses_a_fork(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    scene = Stuck(world, monkeypatch)
+    scene.meta["isCrossRepository"] = True
+    scene.start()
+    assert run_main("rerun", "45", "--stuck") == 1
+    assert "comes from a fork" in capsys.readouterr().err
+    assert len(world.calls("gh")) == 1
+
+
+def test_rerun_stuck_refuses_when_the_head_moved(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    scene = Stuck(world, monkeypatch)
+    scene.runs = [a_run()]
+    scene.jobs = [old_job(300)]
+    scene.new_head = "c" * 40
+    scene.start()
+    assert run_main("rerun", "45", "--stuck") == 1
+    assert "moved to a new head" in capsys.readouterr().err
+    assert scene.invoked == []
 
 
 def test_rerun_stuck_stops_when_the_cancel_fails(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runs: list[dict[str, object]] = [{"databaseId": 7, "status": "in_progress"}]
-    stuck_world(world, monkeypatch, runs, "2026-11-23T17:00:00Z")
-    world.fake(
-        "gh",
-        cases={
-            "pr view": {
-                "rc": 0,
-                "stdout": json.dumps({"headRefOid": "a" * 40}),
-                "stderr": "",
-            },
-            "run list": gh_list(runs),
-            "run view": {
-                "rc": 0,
-                "stdout": json.dumps(
-                    {
-                        "jobs": [
-                            {
-                                "status": "in_progress",
-                                "startedAt": "2026-11-23T17:00:00Z",
-                            }
-                        ]
-                    }
-                ),
-                "stderr": "",
-            },
-            "run cancel": {"rc": 1, "stdout": "", "stderr": "no"},
-        },
-    )
+    scene = Stuck(world, monkeypatch)
+    scene.runs = [a_run()]
+    scene.jobs = [old_job(300)]
+    scene.cancel_fails = True
+    scene.start()
     assert run_main("rerun", "45", "--stuck") == 1
-    assert [call["argv"] for call in world.calls("gh")][-1] == ["run", "cancel", "7"]
+    assert scene.invoked == [["run", "cancel", "7"]]
 
 
-def test_rerun_stuck_reports_an_unreadable_run(world: World) -> None:
-    world.fake(
-        "gh",
-        cases={
-            "pr view": {
-                "rc": 0,
-                "stdout": json.dumps({"headRefOid": "a" * 40}),
-                "stderr": "",
-            },
-            "run list": gh_list([{"databaseId": 7, "status": "in_progress"}]),
-            "run view": {"rc": 1, "stdout": "", "stderr": "gone"},
-        },
-    )
-    with pytest.raises(SystemExit, match="cannot read run 7: gone"):
+def test_rerun_stuck_refuses_when_the_cancel_never_completes(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    scene = Stuck(world, monkeypatch)
+    scene.runs = [a_run()]
+    scene.jobs = [old_job(300)]
+    scene.statuses = ["in_progress"] * pr.CANCEL_POLLS
+    scene.start()
+    assert run_main("rerun", "45", "--stuck") == 1
+    assert "did not finish cancelling" in capsys.readouterr().err
+    assert scene.invoked == [["run", "cancel", "7"]]
+    assert len(scene.pauses) == pr.CANCEL_POLLS
+
+
+def test_rerun_stuck_reports_an_unreadable_pull_request(world: World) -> None:
+    world.fake("gh", rc=1, stderr="gone")
+    with pytest.raises(SystemExit, match="cannot read PR 45: gone"):
         run_main("rerun", "45", "--stuck")
+
+
+def test_run_view_reports_an_unreadable_run(world: World) -> None:
+    world.fake("gh", rc=1, stderr="gone")
+    with pytest.raises(SystemExit, match="cannot read run 7: gone"):
+        pr.run_view(7, "jobs")
+
+
+def test_pause_sleeps(monkeypatch: pytest.MonkeyPatch) -> None:
+    slept = Mock()
+    monkeypatch.setattr(pr.time, "sleep", slept)
+    pr.pause(2.5)
+    slept.assert_called_once_with(2.5)
 
 
 def test_utcnow_is_timezone_aware() -> None:
