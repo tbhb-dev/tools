@@ -559,6 +559,30 @@ def test_status(
     )
 
 
+def test_status_reports_an_unreachable_host_with_the_local_record(
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert launch(remote) == 0
+    capsys.readouterr()
+
+    def unreachable(*_args: object, **_kwargs: object) -> transport.Reading:
+        message = "example-linux: transport failed"
+        raise transport.TransportError(message)
+
+    monkeypatch.setattr(transport, "read", unreachable)
+    assert command("status") == 1
+    output = capsys.readouterr()
+    started = json.loads(driver.metadata_path("sample").read_text())["started"]
+    assert output.err == ""
+    assert output.out == (
+        f"sample: phase=unknown rc=unknown host=example-linux "
+        f"account=agent started={started} launcher=coord-review-1"
+        " host unreachable, run state unknown\n"
+    )
+
+
 @pytest.mark.parametrize(
     ("rc", "reason"),
     [(4, "push failed: rejected"), (5, "pr not opened: no draft")],
