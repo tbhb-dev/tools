@@ -137,17 +137,16 @@ def environment(
         "GH_CONFIG_DIR": resolve(paths.tmpdir, GH_CONFIG_SUBDIR),
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_COUNT": "8",
+        "GIT_CONFIG_COUNT": "7",
     }
     overrides = (
         ("core.fsmonitor", "false"),
-        ("core.hooksPath", "/dev/null"),
+        ("safe.bareRepository", "explicit"),
         ("diff.ignoreSubmodules", "all"),
         ("status.submoduleSummary", "false"),
         ("protocol.ext.allow", "never"),
         ("protocol.file.allow", "never"),
         ("diff.external", ""),
-        ("safe.bareRepository", "explicit"),
     )
     for index, (key, value) in enumerate(overrides):
         env[f"GIT_CONFIG_KEY_{index}"] = key

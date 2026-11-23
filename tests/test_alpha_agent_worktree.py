@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Literal, TypedDict, Unpack
 
@@ -20,6 +21,7 @@ from agent_host_example import (
     unusual_git_metadata,
 )
 
+from tbhbdev.alpha import identity
 from tbhbdev.alpha.agent import worktree
 from tbhbdev.alpha.agent.model import Invalid
 
@@ -131,12 +133,13 @@ def test_missing_requested_ref_fails_preparation_with_its_name(
     tmp_path: Path, ref: str
 ) -> None:
     _, clone = repository(tmp_path)
-    request = run_request(fetch_refs=[ref])
+    request = run_request(fetch_refs=[ref, "refs/heads/main"])
     with pytest.raises(Invalid) as caught:
         worktree.create(clone, "missing", request)
     assert str(caught.value).startswith(
         "run preparation failed at mirror fetch "
-        "(https://github.com/tbhb-dev/example-repo.git); requested refs: " + ref
+        "(https://github.com/tbhb-dev/example-repo.git); requested refs: "
+        f"{ref}, refs/heads/main"
     )
     assert not (clone / ".worktrees" / "agent-missing").exists()
 
@@ -342,18 +345,7 @@ def test_worktree_git_contract_under_one_stable_lock(
         git(path, "config", "remote.origin.pushurl")
         == "https://github.com/tbhb-dev/example-repo.git"
     )
-    assert (
-        path / ".git" / "hooks" / "prepare-commit-msg"
-    ).read_text() == worktree.install.SHIM.format(
-        mark=worktree.install.SHIM_MARK,
-        verb="trailer",
-        hook="prepare-commit-msg",
-        origin=worktree.install.ORIGIN_GREP,
-    )
-    assert (
-        (path / ".git" / "hooks" / "pre-commit").read_text()
-        == '#!/bin/sh\nexec /example/prek hook-impl --hook-type pre-commit -- "$@"\n'
-    )
+    assert (path / ".git/hooks/prepare-commit-msg").is_file()
 
 
 def test_host_git_never_runs_hooks_or_monitor(tmp_path: Path) -> None:
@@ -653,7 +645,7 @@ def test_mirror_configuration_and_hooks_are_host_written(
     )
     for name in (
         "pre-commit",
-        "pre-push",
+        "pre-push.prek",
         "prepare-commit-msg",
         "commit-msg",
         "post-commit",
@@ -785,6 +777,7 @@ def test_hook_installation_is_repeatable_private_and_read_only(
     assert {p.name for p in hooks.iterdir()} == {
         "pre-commit",
         "pre-push",
+        "pre-push.prek",
         "prepare-commit-msg",
         "prepare-commit-msg.prek",
         "commit-msg",
@@ -794,21 +787,69 @@ def test_hook_installation_is_repeatable_private_and_read_only(
     }
     assert all(p.stat().st_mode & 0o777 == 0o555 for p in hooks.iterdir())
     for name, verb in worktree.install.IDENTITY_HOOKS:
-        assert (hooks / name).read_text() == worktree.install.SHIM.format(
+        assert (hooks / name).read_text() == worktree.RUN_IDENTITY_SHIM.format(
             mark=worktree.install.SHIM_MARK,
             verb=verb,
             hook=name,
-            origin=worktree.install.ORIGIN_GREP,
+            run_env=identity.RUN_HOOK_ENV,
         )
     for name in (
         "pre-commit",
         "pre-push",
         *(p[0] for p in worktree.install.IDENTITY_HOOKS),
     ):
-        destination = name if name in ("pre-commit", "pre-push") else f"{name}.prek"
-        assert (hooks / destination).read_text() == (
-            f'#!/bin/sh\nexec /example/prek hook-impl --hook-type {name} -- "$@"\n'
+        destination = name if name == "pre-commit" else f"{name}.prek"
+        assert (hooks / destination).read_text() == worktree.RUN_PREK_SHIM.format(
+            prek="/example/prek", stage=name
         )
+    assert (hooks / "pre-push").read_text() == worktree.install.PRE_PUSH_SHIM.format(
+        python=Path(sys.base_prefix, "bin", "python3"),
+        mark=worktree.install.SHIM_MARK,
+        pattern=worktree.TBHB_DEV_ORIGIN.pattern,
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("disabled", r"^effective core\.hooksPath does not select the run's hooks$"),
+        ("missing", "run hook prepare-commit-msg is missing"),
+        ("mode", "run hook prepare-commit-msg is missing or not executable"),
+    ],
+)
+def test_run_hook_verification_refuses_invalid_git_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, message: str
+) -> None:
+    _, clone = repository(tmp_path)
+    workspace = worktree.create(clone, "example", run_request())
+    hook = workspace / ".git/hooks/prepare-commit-msg"
+    env = dict(os.environ)
+    if failure == "disabled":
+        env.update(
+            GIT_CONFIG_COUNT="1",
+            GIT_CONFIG_KEY_0="core.hooksPath",
+            GIT_CONFIG_VALUE_0=os.devnull,
+        )
+    elif failure == "missing":
+        hook.parent.chmod(0o755)
+        hook.unlink()
+    else:
+        hook.chmod(0o444)
+    output = subprocess.check_output
+
+    def probe(command: list[str], **options: Unpack[GitOptions]) -> str:
+        assert options == {
+            "cwd": workspace,
+            "env": env,
+            "stderr": subprocess.PIPE,
+            "text": True,
+            "timeout": 30,
+        }
+        return output(command, **options)
+
+    monkeypatch.setattr(subprocess, "check_output", probe)
+    with pytest.raises(Invalid, match=message):
+        worktree.verify_run_hooks(workspace, env)
 
 
 @pytest.mark.parametrize("profile", ["build", "review"])
@@ -887,11 +928,7 @@ def test_prelaunch_git_protocol(
     )
     options = ("clone", "--no-local", "--no-hardlinks", "--no-checkout", "--template=")
     assert calls == [
-        *common,
-        (
-            mirror,
-            ("rev-parse", "--verify", "--end-of-options", reference + "^{commit}"),
-        ),
+        common[0],
         (
             mirror,
             (
@@ -909,6 +946,22 @@ def test_prelaunch_git_protocol(
             ),
         ),
         (workspace, ("config", "core.hooksPath", str(workspace / ".git" / "hooks"))),
+        *common[1:],
+        (
+            mirror,
+            ("rev-parse", "--verify", "--end-of-options", reference + "^{commit}"),
+        ),
+        (
+            workspace,
+            (
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--no-recurse-submodules",
+                str(mirror),
+                "+refs/heads/*:refs/remotes/origin/*",
+            ),
+        ),
         (workspace, checkout),
     ]
     assert workspace.is_dir()
@@ -1117,15 +1170,14 @@ def test_new_mirror_never_discovers_parent_config(
     assert (mirror / "HEAD").is_file()
 
 
-def test_checkout_precedes_hook_installation(
+def test_hook_installation_precedes_checkout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, clone = repository(tmp_path)
     install = worktree.install_hooks
 
     def checked(path: Path) -> None:
-        assert (path / "tracked").read_text() == "initial\n"
-        assert git(path, "branch", "--show-current") == "agent/ordered"
+        assert not (path / "tracked").exists()
         install(path)
 
     monkeypatch.setattr(worktree, "install_hooks", checked)
@@ -1975,12 +2027,15 @@ def test_private_fetch_retries_over_https_with_the_token(
     urls: list[str] = []
     tokens: list[str | None] = []
     original = worktree.configure_mirror
+    request = run_request()
 
     def configure(mirror: Path, url: str) -> None:
         urls.append(url)
         original(mirror, url)
 
-    def fetch(_mirror: Path, _request: object, token: str | None = None) -> str:
+    def fetch(mirror: Path, actual: object, token: str | None = None) -> str:
+        assert mirror == worktree.mirror_path(tmp_path, request.repo)
+        assert actual is request
         tokens.append(token)
         if token is None:
             raise subprocess.CalledProcessError(128, "git")
@@ -1992,7 +2047,7 @@ def test_private_fetch_retries_over_https_with_the_token(
         worktree.create(
             clone,
             "p3",
-            run_request(),
+            request,
             lambda: "example-token",
         )
     assert urls == ["https://github.com/tbhb-dev/example-repo.git"]

@@ -3854,7 +3854,8 @@ def test_main_dispatch(
         assert capsys.readouterr().err == ai.USAGE + "\n"
     assert (
         ai.USAGE == "usage: tbhbdev alpha identity record <harness> | "
-        "trailer <msgfile> [source] | consume | check <msgfile> | stamp-docs"
+        "trailer <msgfile> [source] | trailer --dry-run "
+        "| consume | check <msgfile> | stamp-docs"
     )
 
 
@@ -5274,8 +5275,51 @@ def test_main_runs_each_command_for_real(
     assert ai.main(["record", "antigravity"], {}) == 0
     assert ai.load_record(ai.sha256_64("s"))["harness"] == "antigravity"
     path = msg_file(tmp_path)
-    assert ai.main(["trailer", str(path)], CLAUDE_COMMIT_ENV) == 0
-    assert "Generated-by:" in path.read_text(encoding="utf-8")
+    env = CLAUDE_COMMIT_ENV | {
+        ai.RUN_HOOK_ENV: "1",
+        ai.RUN_MODEL_ENV: "claude-opus-5-5",
+    }
+    assert ai.main(["trailer", str(path)], env) == 0
+    assert "model=anthropic:claude-opus-5-5" in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.usefixtures("repo")
+def test_run_trailer_refuses_a_successful_noop(tmp_path: Path) -> None:
+    path = msg_file(tmp_path)
+    env = CLAUDE_COMMIT_ENV | {ai.RUN_HOOK_ENV: "1"}
+    with pytest.raises(
+        ai.AttributionError, match=r"^run commit requires a Generated-by trailer$"
+    ):
+        ai.trailer_command(str(path), "merge", env)
+    with pytest.raises(ai.AttributionError) as caught:
+        ai.trailer_command(str(path), None, {ai.RUN_HOOK_ENV: "1"})
+    assert str(caught.value) == ai.SESSION_ERROR
+
+
+def test_run_trailer_preserves_a_hook_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ai, "cmd_trailer", returning(3))
+    env = CLAUDE_COMMIT_ENV | {ai.RUN_HOOK_ENV: "1"}
+    assert ai.trailer_command(str(tmp_path / "absent"), "merge", env) == 3
+    assert ai.trailer_command("--dry-run", None, {ai.RUN_HOOK_ENV: "1"}) == 0
+
+
+def test_run_model_updates_root_but_keeps_a_child_identity() -> None:
+    root = make_ident(model=None)
+    child = make_ident(CHILD, "anthropic:other", ROOT)
+    committer = ai.Committer(ai.CLAUDE, child, root)
+    updated = ai.with_run_model(committer, "claude-opus-5-5")
+    assert updated.ident == child
+    assert updated.root_ident == dataclasses.replace(
+        root, model="anthropic:claude-opus-5-5"
+    )
+    assert ai.with_run_model(updated, "claude-sonnet-5-5") == updated
+    assert ai.with_run_model(committer, None) == committer
+    assert (
+        ai.with_run_model(ai.Committer(ai.CLAUDE, root, root), "claude-opus-5-5").ident
+        == updated.root_ident
+    )
 
 
 # ------------------------------------------------------- forked Codex threads

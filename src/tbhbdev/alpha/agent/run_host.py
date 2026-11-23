@@ -53,6 +53,7 @@ from tbhbdev.alpha.agent.model import (
     Settings,
 )
 from tbhbdev.alpha.agent.ownership import RunExistsError
+from tbhbdev.alpha.identity import RUN_MODEL_ENV
 
 
 @dataclass(frozen=True)
@@ -512,15 +513,28 @@ def otel_config(endpoint: str) -> str:
     )
 
 
+def hook_environment(value: Policy, *, unsandboxed: bool) -> dict[str, str]:
+    """Reflect the shell overrides each harness applies to its launch environment."""
+    if value.harness is Harness.CODEX:
+        shell = {
+            key: val for key, val in value.env.items() if not key.startswith("GIT_")
+        }
+        return shell | {"PATH": value.tool_path, "GIT_CONFIG_COUNT": "0"}
+    if value.harness is Harness.CLAUDE and not unsandboxed:
+        return value.env | {"PATH": value.tool_path}
+    return value.env
+
+
 def prepare_workspace(run: Run) -> Prepared:
     clone = Path(repo.clone_path(run.home, run.request.repo))
     paths = planned_paths(run)
-    checked_policy(run, paths)
+    value, _ = checked_policy(run, paths)
     workspace = worktree.create(
         clone,
         run.files.name,
         run.request,
         lambda: credentials.fetch_token(run.request, run.settings),
+        hook_env=hook_environment(value, unsandboxed=run.request.unsandboxed),
     )
     with worktree.preparation_step("credential delivery"):
         delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
@@ -707,7 +721,12 @@ def run_harness(
 ) -> int:
     paths = prepared.paths
     value, executable = checked_policy(run, paths)
-    env = value.env | prepared.delivery.env | resource_attributes(run)
+    env = (
+        value.env
+        | prepared.delivery.env
+        | resource_attributes(run)
+        | {RUN_MODEL_ENV: run.request.model}
+    )
     command = checked_harness_command(run, prepared, value, executable)
     if preflight_only:
         log_hook_tools(run, paths)
@@ -823,7 +842,9 @@ def _execute(
         prepared = prepared_result(result)
         runfiles.append(run.files.root, index_entry(run, prepared, None))
         run.files.write("phase", "workspace")
-        run.files.write("prompt", render.brief(run.request.kind, text))
+        run.files.write(
+            "prompt", render.brief(run.request.kind, text, profile=run.request.profile)
+        )
         run.files.write("phase", "brief")
         if prepared.delivery.signing is not None:
             agent = credentials.signing_agent(

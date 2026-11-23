@@ -112,6 +112,7 @@ def test_public_mirror_uses_https_before_fetch(
         ("fetch_commit", f"mirror fetch ({URL})"),
         ("clone_run", "clone"),
         ("install_hooks", "hook install"),
+        ("git", "checkout"),
         ("prepare_git", "git metadata"),
     ],
 )

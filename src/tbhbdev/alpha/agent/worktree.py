@@ -8,19 +8,23 @@ import errno
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess  # nosec B404
+import sys
 import unicodedata
 from contextlib import ExitStack, contextmanager
 from functools import partial
 from pathlib import Path
-lazy from collections.abc import Callable, Generator
+lazy from collections.abc import Callable, Generator, Mapping
 
 from tbhbdev.alpha import install
 from tbhbdev.alpha.agent import host_tools, runfiles
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.decisions.request import check_fetch_refs
 from tbhbdev.alpha.agent.model import Invalid, Profile, RunRequest
+from tbhbdev.alpha.identity import RUN_HOOK_ENV
+from tbhbdev.alpha.repo import TBHB_DEV_ORIGIN
 
 GIT_OVERRIDES = (
     "gc.auto=0",
@@ -65,6 +69,28 @@ SECRET_DETAIL = re.compile(
     r"|(?:token|password|secret)[=:]\s*)[^\s,'\"]+"
 )
 ABSOLUTE_PATH = re.compile(r"(?<![\w:/])/(?:[^\s/'\"]+/)*([^\s/'\"]+)")
+RUN_IDENTITY_SHIM = """#!/bin/sh
+{mark}
+export {run_env}=1
+if ! command -v tbhbdev >/dev/null 2>&1; then
+  echo "{hook}: tbhbdev is required on PATH for commit identity" >&2
+  exit 1
+fi
+tbhbdev alpha identity {verb} "$@" || exit $?
+exec "$(dirname "$0")/{hook}.prek" "$@"
+"""
+RUN_PREK_SHIM = """#!/bin/sh
+[ -f .pre-commit-config.yaml ] || [ -f prek.toml ] || exit 0
+hooks=$({prek} list --hook-stage {stage}) || exit $?
+[ -n "$hooks" ] || exit 0
+exec {prek} hook-impl --hook-type {stage} -- "$@"
+"""
+PREK_STAGES = ("pre-commit", "pre-push", *(name for name, _ in install.IDENTITY_HOOKS))
+REQUIRED_HOOKS = (
+    *PREK_STAGES,
+    *(f"{name}.prek" for name in PREK_STAGES if name != "pre-commit"),
+)
+HOOKS_PROBE_TIMEOUT = 30
 
 
 def git(clone: Path, *args: str, token: str | None = None) -> str:
@@ -219,15 +245,18 @@ def install_hooks(workspace: Path) -> None:
     hooks.chmod(hooks.stat().st_mode | stat.S_IWUSR)
     prek = shlex.quote(host_tools.resolve("prek"))
     scripts: dict[Path, str] = {}
-    for name in ("pre-commit", "pre-push", *(p[0] for p in install.IDENTITY_HOOKS)):
-        hook = hooks / (
-            f"{name}.prek" if name not in ("pre-commit", "pre-push") else name
-        )
-        scripts[hook] = f'#!/bin/sh\nexec {prek} hook-impl --hook-type {name} -- "$@"\n'
+    for name in PREK_STAGES:
+        hook = hooks / (name if name == "pre-commit" else f"{name}.prek")
+        scripts[hook] = RUN_PREK_SHIM.format(prek=prek, stage=name)
     for name, verb in install.IDENTITY_HOOKS:
-        scripts[hooks / name] = install.SHIM.format(
-            mark=install.SHIM_MARK, verb=verb, hook=name, origin=install.ORIGIN_GREP
+        scripts[hooks / name] = RUN_IDENTITY_SHIM.format(
+            mark=install.SHIM_MARK, verb=verb, hook=name, run_env=RUN_HOOK_ENV
         )
+    scripts[hooks / "pre-push"] = install.PRE_PUSH_SHIM.format(
+        python=Path(sys.base_prefix, "bin", "python3"),
+        mark=install.SHIM_MARK,
+        pattern=TBHB_DEV_ORIGIN.pattern,
+    )
     for hook, content in scripts.items():
         if hook.exists():
             hook.chmod(hook.stat().st_mode | stat.S_IWUSR)
@@ -235,6 +264,52 @@ def install_hooks(workspace: Path) -> None:
     for entry in (*hooks.rglob("*"), hooks):
         executable = entry.is_dir() or entry in scripts or entry.stat().st_mode & 0o111
         entry.chmod(0o555 if executable else 0o444)
+
+
+def verify_run_hooks(workspace: Path, env: Mapping[str, str]) -> None:
+    """Check Git's effective hooks directory and the CLI without making a commit."""
+    hooks = workspace / ".git" / "hooks"
+    probe = partial(
+        subprocess.check_output,
+        cwd=workspace,
+        env=env,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=HOOKS_PROBE_TIMEOUT,
+    )
+    actual = probe(
+        ["git", "rev-parse", "--path-format=absolute", "--git-path", "hooks"]
+    ).strip()
+    if Path(actual).resolve() != hooks.resolve():
+        message = "effective core.hooksPath does not select the run's hooks"
+        raise Invalid(message)
+    for name in REQUIRED_HOOKS:
+        hook = hooks / name
+        if not hook.is_file() or not os.access(hook, os.X_OK):
+            message = f"run hook {name} is missing or not executable"
+            raise Invalid(message)
+    try:
+        probe(["tbhbdev", "alpha", "identity", "trailer", "--dry-run"])
+    except subprocess.CalledProcessError:
+        message = (
+            "tbhbdev alpha identity trailer --dry-run failed in the run environment"
+        )
+        raise Invalid(message) from None
+
+
+def discard_unlaunched(workspace: Path) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        (workspace / ".git/hooks").chmod(stat.S_IRWXU)
+    with contextlib.suppress(FileNotFoundError):
+        shutil.rmtree(workspace)
+
+
+def prepare_hooks(workspace: Path, env: Mapping[str, str] | None) -> None:
+    with preparation_step("hook install"):
+        install_hooks(workspace)
+    if env is not None:
+        with preparation_step("hook verification"):
+            verify_run_hooks(workspace, env)
 
 
 def _own_common_directory(git_dir: Path) -> bool:
@@ -489,6 +564,8 @@ def create(
     name: str,
     request: RunRequest,
     token_source: Callable[[], str | None] | None = None,
+    *,
+    hook_env: Mapping[str, str] | None = None,
 ) -> Path:
     check_fetch_refs(request.fetch_refs)
     parts = repo.parts(request.repo)
@@ -510,11 +587,17 @@ def create(
         message = "host mirror paths must not be symbolic links"
         raise Invalid(message)
     with ExitStack() as stack:
+        discard = stack.enter_context(ExitStack())
         with preparation_step("mirror directory"):
             mirror = runfiles.private_dir(mirror)
             stack.enter_context(runfiles.locked(mirror / "agent-mirror.lock"))
         with preparation_step("mirror init"):
             configure_mirror(mirror, url)
+        with preparation_step("clone"):
+            worktree.parent.mkdir(exist_ok=True)
+            clone_run(mirror, worktree, url)
+        discard.callback(discard_unlaunched, worktree)
+        prepare_hooks(worktree, hook_env)
         fetch_step = f"mirror fetch ({url})"
         if request.fetch_refs:
             fetch_step += f"; requested refs: {', '.join(request.fetch_refs)}"
@@ -529,15 +612,17 @@ def create(
                 if token is None:
                     raise
                 commit = fetch_commit(mirror, request, token)
-        with preparation_step("clone"):
-            worktree.parent.mkdir(exist_ok=True)
-            clone_run(mirror, worktree, url)
+        with preparation_step("checkout"):
+            git(
+                worktree, "fetch", "--no-tags", "--no-write-fetch-head",
+                "--no-recurse-submodules", str(mirror),
+                "+refs/heads/*:refs/remotes/origin/*",
+            )  # fmt: skip
             if request.profile is Profile.BUILD:
                 git(worktree, "checkout", "-b", f"agent/{name}", commit, "--")
             else:
                 git(worktree, "checkout", "--detach", commit, "--")
-        with preparation_step("hook install"):
-            install_hooks(worktree)
         with preparation_step("git metadata"):
             prepare_git(worktree)
+        discard.pop_all()
     return worktree

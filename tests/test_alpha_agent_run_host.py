@@ -67,7 +67,7 @@ from tbhbdev.alpha.agent.model import (
 RESOLVE = host_tools.resolve
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator
+    from collections.abc import Callable, Generator, Mapping
     from typing import TextIO
 
     from tbhbdev.alpha.agent.model import Policy, RunRequest, Settings
@@ -347,6 +347,41 @@ def test_workspace_failure_names_its_step_and_safe_cause(
     assert "sensitive" not in str(caught.value)
 
 
+def with_identity_cli(run: run_host.Run, *, ready: bool) -> run_host.Run:
+    tools = run.home / ".local/bin"
+    tools.mkdir(parents=True)
+    cli = tools / "tbhbdev"
+    check = '[ "$*" = "alpha identity trailer --dry-run" ]' if ready else "exit 1"
+    cli.write_text(f"#!/bin/sh\n{check}\n")
+    cli.chmod(0o755)
+    return dataclasses.replace(
+        run,
+        settings=dataclasses.replace(
+            run.settings,
+            sandbox=dataclasses.replace(run.settings.sandbox, host_path=(str(tools),)),
+        ),
+    )
+
+
+def test_hook_probe_refuses_before_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = with_identity_cli(make_run(tmp_path), ready=False)
+
+    def forbidden(*_args: object) -> str:
+        pytest.fail("hook failure must precede fetch and credential delivery")
+
+    monkeypatch.setattr(run_host.worktree, "fetch_commit", forbidden)
+    monkeypatch.setattr(credentials, "deliver", forbidden)
+    with pytest.raises(Invalid) as caught:
+        run_host.prepare_workspace(run)
+    assert str(caught.value) == (
+        "run preparation failed at hook verification: "
+        "tbhbdev alpha identity trailer --dry-run failed in the run environment"
+    )
+    assert not Path(run_host.planned_paths(run).worktree).exists()
+
+
 @pytest.mark.parametrize("harness", Harness)
 def test_prepare_uses_one_worktree_and_private_destinations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
@@ -370,6 +405,12 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     run = dataclasses.replace(
         run, request=dataclasses.replace(run.request, commit=commit)
     )
+    run = with_identity_cli(run, ready=True)
+    value, _ = run_host.checked_policy(run, run_host.planned_paths(run))
+    expected_path = value.env["PATH"] if harness is Harness.AGY else value.tool_path
+    assert run_host.hook_environment(value, unsandboxed=False)["PATH"] == expected_path
+    if harness is Harness.CLAUDE:
+        assert run_host.hook_environment(value, unsandboxed=True) == value.env
     source = runfiles.private_dir(run.home / ".codex") / "auth.json"
     source.write_text("example-auth")
     (source.parent / "hooks.json").write_text('{"hooks":{"SessionStart":[]}}')
@@ -513,23 +554,43 @@ def test_build_preparation_has_the_run_socket(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = make_run(tmp_path)
+    probe = run_host.hook_environment
+
+    def hook_environment(value: Policy, *, unsandboxed: bool) -> dict[str, str]:
+        assert unsandboxed is run.request.unsandboxed
+        return probe(value, unsandboxed=unsandboxed)
+
+    def fetch_token(request: RunRequest, settings: Settings) -> str:
+        assert (request, settings) == (run.request, run.settings)
+        return "example-credential"
+
+    def bazel_bases(home: Path, workspace: str) -> tuple[Path, ...]:
+        assert (home, workspace) == (run.home, str(run.home / "worktree"))
+        return (run.home / "base",)
 
     def create(
         _clone: Path,
         _name: str,
         _value: run_host.RunRequest,
         token_source: Callable[[], str | None],
+        *,
+        hook_env: Mapping[str, str],
     ) -> Path:
+        assert hook_env["GIT_CONFIG_COUNT"] == "0"
+        assert {name for name in hook_env if name.startswith("GIT_")} == {
+            "GIT_CONFIG_COUNT"
+        }
         assert token_source() == "example-credential"
         return runfiles.private_dir(run.home / "worktree")
 
     monkeypatch.setattr(run_host.worktree, "create", create)
-    monkeypatch.setattr(
-        run_host.credentials, "fetch_token", constant("example-credential")
-    )
+    monkeypatch.setattr(run_host, "hook_environment", hook_environment)
+    monkeypatch.setattr(run_host, "bazel_bases", bazel_bases)
+    monkeypatch.setattr(credentials, "fetch_token", fetch_token)
     result = run_host.prepare_workspace(run)
     assert result.paths.signing_socket == str(run.tmpdir / "ssh.sock")
     assert result.delivery.signing == "example-signing"
+    assert result.bases == (run.home / "base",)
 
 
 class Child:
@@ -746,7 +807,7 @@ def test_finish_orders_cleanup_auth_agent_index_and_atomic_rc(
         assert not run.files.path("log").exists()
     if failure in (None, "auth"):
         assert run.files.path("prompt").read_text() == render.brief(
-            run.request.kind, "example"
+            run.request.kind, "example", profile=run.request.profile
         )
         entries = [
             json.loads(line)
@@ -1497,7 +1558,7 @@ def check_launch_contract(
         )
         | env
     )
-    assert kwargs["env"] == expected
+    assert kwargs["env"] == expected | {run_host.RUN_MODEL_ENV: run.request.model}
     assert all(
         marker not in repr(command)
         for marker in (
@@ -3892,6 +3953,7 @@ def test_system_temp_write_root_launches_with_state_codex_home(
     ) -> Child:
         assert spec.command == command
         assert spec.env["CODEX_HOME"] == paths.codex_home
+        assert spec.env[run_host.RUN_MODEL_ENV] == run.request.model
         started(child)
         return child
 

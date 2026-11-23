@@ -126,11 +126,11 @@ def env_of(os: Os, harness: Harness, account: str) -> dict[str, str]:
         "DOCKER_CONFIG": f"{tmp}/docker",
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_COUNT": "8",
+        "GIT_CONFIG_COUNT": "7",
         "GIT_CONFIG_KEY_0": "core.fsmonitor",
         "GIT_CONFIG_VALUE_0": "false",
-        "GIT_CONFIG_KEY_1": "core.hooksPath",
-        "GIT_CONFIG_VALUE_1": "/dev/null",
+        "GIT_CONFIG_KEY_1": "safe.bareRepository",
+        "GIT_CONFIG_VALUE_1": "explicit",
         "GIT_CONFIG_KEY_2": "diff.ignoreSubmodules",
         "GIT_CONFIG_VALUE_2": "all",
         "GIT_CONFIG_KEY_3": "status.submoduleSummary",
@@ -141,8 +141,6 @@ def env_of(os: Os, harness: Harness, account: str) -> dict[str, str]:
         "GIT_CONFIG_VALUE_5": "never",
         "GIT_CONFIG_KEY_6": "diff.external",
         "GIT_CONFIG_VALUE_6": "",
-        "GIT_CONFIG_KEY_7": "safe.bareRepository",
-        "GIT_CONFIG_VALUE_7": "explicit",
     }
     if harness is Harness.CODEX:
         env["CODEX_HOME"] = f"{tmp}/codex"
@@ -1571,13 +1569,12 @@ def test_harness_parent_neutralizes_all_repository_git_config(
 ) -> None:
     result = made(os_name, Profile.BUILD, harness, "agent")
     assert result.env["GIT_CONFIG_NOSYSTEM"] == "1"
-    assert result.env["GIT_CONFIG_COUNT"] == "8"
+    assert result.env["GIT_CONFIG_COUNT"] == "7"
     assert {
         result.env[f"GIT_CONFIG_KEY_{i}"]: result.env[f"GIT_CONFIG_VALUE_{i}"]
-        for i in range(8)
+        for i in range(7)
     } == {
         "core.fsmonitor": "false",
-        "core.hooksPath": "/dev/null",
         "diff.ignoreSubmodules": "all",
         "status.submoduleSummary": "false",
         "protocol.ext.allow": "never",
