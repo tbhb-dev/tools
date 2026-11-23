@@ -11,7 +11,7 @@ from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from tbhbdev.alpha.agent import host_tools, open_pr, runfiles, worktree
+from tbhbdev.alpha.agent import host_tools, open_pr, runfiles
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import Profile
 
@@ -219,11 +219,51 @@ def first_change(
         run.files.root, workspace, next(iter(candidates.values()))
     ) as directory:
         for name, tip in candidates.items():
-            if worktree.git(
-                directory, "rev-list", "--max-count=1", tip, "--not", *bases, "--"
-            ):
+            if outside_history(directory, tip, bases):
                 return name, tip
     return None
+
+
+def outside_history(directory: Path, tip: str, bases: tuple[str, ...]) -> bool:
+    """True when the tip has a commit that no starting tip reaches."""
+    env = dict.fromkeys(
+        (
+            "HOME",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+        ),
+        str(directory),
+    )
+    env.update(
+        GIT_CONFIG_GLOBAL="/dev/null",
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_TERMINAL_PROMPT="0",
+        PATH=host_tools.search(),
+    )
+    listed = subprocess.run(  # nosec B603
+        [
+            host_tools.resolve("git"),
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+            str(directory),
+            "rev-list",
+            "--max-count=1",
+            tip,
+            "--not",
+            *bases,
+            "--",
+        ],
+        cwd=directory,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return bool(listed.stdout.strip())
 
 
 def opened(run: Run, git_dir: Path, commit: str, branch: str, token: str) -> bool:
