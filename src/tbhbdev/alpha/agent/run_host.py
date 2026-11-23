@@ -1074,7 +1074,11 @@ def _shutdown_target(
 
 
 def shutdown_bazel(
-    run: Run, prepared: Prepared | None, *, group: int | None = None
+    run: Run,
+    prepared: Prepared | None,
+    *,
+    group: int | None = None,
+    servers: dict[Path, bazel_servers.Server] | None = None,
 ) -> BazelShutdown:
     """Stop the run's Bazel servers and mark recorded bases for deletion."""
     if prepared is None:
@@ -1083,8 +1087,9 @@ def shutdown_bazel(
     worktree = Path(prepared.paths.worktree)
     recorded = _recorded_bases(run, prepared)
     targets: dict[Path, bazel_servers.Server | None] = dict.fromkeys(recorded)
-    if group is not None:
-        targets.update(bazel_servers.find(worktree, group))
+    if servers is None and group is not None:
+        servers = bazel_servers.find(worktree, group)
+    targets.update(servers or {})
     stopped: BazelShutdown = {}
     for base, server in targets.items():
         if server is None and tool is None:
@@ -1101,13 +1106,19 @@ def shutdown_bazel(
 def _stop_harness(run: Run, prepared: Prepared, child: subprocess.Popen[str]) -> bool:
     with suppress(OSError):
         run.files.write("phase", "exited")
-    # Snapshot ancestry before stopping the harness group. Finish retries the
-    # recorded bases if an unexpected error prevents this pass from completing.
+    # Snapshot ancestry before the harness group stops, but shut the servers
+    # down after it: a shutdown issued while the harness is mid-build waits
+    # for that build. Finish retries the recorded bases if an unexpected error
+    # prevents the second pass from completing.
+    servers: dict[Path, bazel_servers.Server] = {}
     with suppress(Exception):
-        run.bazel_shutdown = shutdown_bazel(run, prepared, group=child.pid)
-    return process_group.stop_owned(
+        servers = bazel_servers.find(Path(prepared.paths.worktree), child.pid)
+    stopped = process_group.stop_owned(
         run.files, child.pid, run.settings.kill_grace_seconds, child.poll
     )
+    with suppress(Exception):
+        run.bazel_shutdown = shutdown_bazel(run, prepared, servers=servers)
+    return stopped
 
 
 def _remove_base(parent_fd: int, name: str) -> None:

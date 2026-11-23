@@ -685,9 +685,10 @@ def test_launch_uses_the_policy_and_marks_only_after_spawn(
     def stop(pid: int, grace: float, *_args: object) -> None:
         assert (pid, grace) == (23, 0)
         assert run.files.path("launched").exists()
+        # Bazel servers shut down only after the harness group has stopped.
         assert (run.files.path("phase").read_text(), run.bazel_shutdown) == (
             "exited",
-            {},
+            None,
         )
         events.append("stop")
 
@@ -5324,6 +5325,43 @@ def test_discovery_refuses_unconfirmed_server_metadata(
     assert not bazel_servers.matches_pid(link, 17)
     monkeypatch.setattr(os, "getuid", constant(uid + 1))
     assert not bazel_servers.matches_pid(base, 17)
+
+
+def test_stop_harness_shuts_servers_down_after_stopping_the_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = bazel_run(tmp_path)
+    worktree = Path(prepared.paths.worktree)
+    server = bazel_servers.Server(41, worktree, belongs=True)
+    base = tmp_path / "base"
+    events: list[str] = []
+
+    def find(found_worktree: Path, group: int) -> dict[Path, bazel_servers.Server]:
+        assert (found_worktree, group) == (worktree, 23)
+        events.append("find")
+        return {base: server}
+
+    def stop(*_args: object) -> bool:
+        events.append("stop")
+        return True
+
+    def shutdown(
+        _run: run_host.Run,
+        _prepared: run_host.Prepared,
+        *,
+        servers: dict[Path, bazel_servers.Server],
+    ) -> run_host.BazelShutdown:
+        assert servers == {base: server}
+        events.append("shutdown")
+        return {}
+
+    monkeypatch.setattr(bazel_servers, "find", find)
+    monkeypatch.setattr(process_group, "stop_owned", stop)
+    monkeypatch.setattr(run_host, "shutdown_bazel", shutdown)
+    child = cast("subprocess.Popen[str]", Child())
+    assert run_host._stop_harness(run, prepared, child) is True  # noqa: SLF001
+    assert events == ["find", "stop", "shutdown"]
+    assert run.bazel_shutdown == {}
 
 
 @pytest.mark.parametrize(
