@@ -85,8 +85,13 @@ def remote_tips(url: str) -> list[str] | None:
     """The tips at the push destination from ``git ls-remote``, or None on failure.
 
     ``url`` is the address git hands the hook, so a ``pushurl`` that differs
-    from the fetch URL is the one read.
+    from the fetch URL is the one read. Git already applied its ``insteadOf``
+    rules to ``url``, and ``ls-remote`` would apply them again. A URL that a
+    rule still rewrites could read another repository, so it returns None.
     """
+    code, rewritten = git(*SAFE, "ls-remote", "--get-url", url)
+    if code or rewritten != url:
+        return None
     code, out = git(*SAFE, "ls-remote", url)
     if code:
         return None

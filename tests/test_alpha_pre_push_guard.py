@@ -627,3 +627,22 @@ def test_tips_come_from_the_push_url_not_the_fetch_url(
     # The remote name `origin` resolves, so only the URL argument can refuse.
     monkeypatch.setattr(sys, "stdin", io.StringIO(row))
     assert alpha.main(["pre-push-guard", "origin", "/nowhere"], "p") == 1
+
+
+def test_a_push_url_that_git_would_rewrite_again_is_refused(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "destination.git"
+    elsewhere = tmp_path / "elsewhere.git"
+    for bare in (destination, elsewhere):
+        bare.mkdir()
+        git(bare, "init", "--bare", "-q")
+    git(repo, "config", f"url.{elsewhere}.insteadOf", str(destination))
+    tip = commit(repo, "human")
+    row = f"refs/heads/topic {tip} refs/heads/topic {ZERO}\n"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(row))
+    assert alpha.main(["pre-push-guard", "origin", str(destination)], "p") == 1
+    assert "cannot read the remote's tips" in capsys.readouterr().err
