@@ -45,7 +45,9 @@ def parse(text: str) -> Reading | str:
     return found
 
 
-def decide(host: Host, found: Reading | str, *, ignore: bool) -> tuple[bool, str]:
+def decide(
+    host: Host, found: Reading | str, memory_mib: int, *, ignore: bool
+) -> tuple[bool, str]:
     """Whether to refuse the launch, and the message to print, empty if none.
 
     FOUND is the reading, or the cause of a failed read. A warn-only host and
@@ -62,6 +64,11 @@ def decide(host: Host, found: Reading | str, *, ignore: bool) -> tuple[bool, str
         if memory < host.min_memory_available_percent:
             problems.append(
                 f"memory available {memory:.0f}% < {host.min_memory_available_percent}%"
+            )
+        if found.memory_available < memory_mib * 1024:
+            problems.append(
+                f"memory available {found.memory_available} KiB "
+                f"< reservation {memory_mib} MiB"
             )
         if 100 * found.swap_used > host.max_swap_used_percent * found.swap_total:
             swap = 100 * found.swap_used / found.swap_total

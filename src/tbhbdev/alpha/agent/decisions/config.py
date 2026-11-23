@@ -17,6 +17,8 @@ from typing import NoReturn
 
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import (
+    DEFAULT_MAX_CONCURRENT_RUNS,
+    DEFAULT_RUN_MEMORY_MIB,
     HOST_NAME,
     NAME,
     AgySandbox,
@@ -134,6 +136,12 @@ class _Table:
         value = self.value(key)
         if type(value) is not int or value <= 0:
             self.fail(key, "must be a positive integer")
+        return value
+
+    def nonnegative(self, key: str, default: int) -> int:
+        value = self.values.get(key, default)
+        if type(value) is not int or value < 0:
+            self.fail(key, "must be a non-negative integer")
         return value
 
     def duration(self, key: str) -> int:
@@ -463,6 +471,7 @@ def _host(table: _Table) -> Host:
         "min_memory_available_percent",
         "max_swap_used_percent",
         "limits_warn_only",
+        "max_concurrent_runs",
     )
     name = _check_name(table, "name", table.text("name"), HOST_NAME)
     os = table.choice("os", Os)
@@ -500,6 +509,9 @@ def _host(table: _Table) -> Host:
         limits_warn_only=table.flag("limits_warn_only")
         if "limits_warn_only" in table.values
         else False,
+        max_concurrent_runs=table.nonnegative(
+            "max_concurrent_runs", DEFAULT_MAX_CONCURRENT_RUNS
+        ),
     )
 
 
@@ -529,6 +541,8 @@ def parse(agent: dict[str, object]) -> Settings:
         "agy_build_timeout",
         "kill_grace_seconds",
         "max_run_minutes",
+        "run_memory_mib",
+        "review_memory_mib",
         "sockets_dir",
         "public_repos",
         "otel",
@@ -543,6 +557,11 @@ def parse(agent: dict[str, object]) -> Settings:
         "host_tag",  # Another command reads this key.
     )
     sandbox = _sandbox(root.table("sandbox"))
+    run_memory_mib = (
+        root.integer("run_memory_mib")
+        if "run_memory_mib" in agent
+        else DEFAULT_RUN_MEMORY_MIB
+    )
     settings = Settings(
         launch_wait_seconds=root.integer("launch_wait_seconds"),
         agy_timeout_seconds=root.duration("agy_timeout"),
@@ -570,6 +589,10 @@ def parse(agent: dict[str, object]) -> Settings:
         else 3,
         public_repos=_public_repos(root),
         otel_endpoint=_otel_endpoint(root, sandbox.network_domains),
+        run_memory_mib=run_memory_mib,
+        review_memory_mib=root.integer("review_memory_mib")
+        if "review_memory_mib" in agent
+        else run_memory_mib,
     )
     _check_host_accounts(settings)
     return settings

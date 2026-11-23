@@ -1209,14 +1209,17 @@ def test_host_limits_default_and_set() -> None:
     host = limits_host()
     assert (host.load_limit, host.min_memory_available_percent) == (None, 20)
     assert (host.max_swap_used_percent, host.limits_warn_only) == (80, False)
+    assert host.max_concurrent_runs == 3
     host = limits_host(
         load_limit=24,
         min_memory_available_percent=30,
         max_swap_used_percent=50,
         limits_warn_only=True,
+        max_concurrent_runs=0,
     )
     assert (host.load_limit, host.min_memory_available_percent) == (24, 30)
     assert (host.max_swap_used_percent, host.limits_warn_only) == (50, True)
+    assert host.max_concurrent_runs == 0
 
 
 @pytest.mark.parametrize(
@@ -1226,8 +1229,32 @@ def test_host_limits_default_and_set() -> None:
         ("min_memory_available_percent", 101, "at most 100"),
         ("max_swap_used_percent", 0, "must be a positive integer"),
         ("limits_warn_only", "yes", "must be true or false"),
+        ("max_concurrent_runs", -1, "must be a non-negative integer"),
+        ("max_concurrent_runs", False, "must be a non-negative integer"),
     ],
 )
 def test_host_limits_refuse_bad_values(key: str, value: object, why: str) -> None:
     with pytest.raises(Invalid, match=why):
         limits_host(**{key: value})
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        (dict[str, object](), (6144, 6144)),
+        ({"run_memory_mib": 3072}, (3072, 3072)),
+        ({"review_memory_mib": 1024}, (6144, 1024)),
+        ({"run_memory_mib": 3072, "review_memory_mib": 1024}, (3072, 1024)),
+    ],
+)
+def test_profile_memory_reservations(
+    overrides: Table, expected: tuple[int, int]
+) -> None:
+    settings = config.parse(GOOD | overrides)
+    assert (settings.run_memory_mib, settings.review_memory_mib) == expected
+
+
+@pytest.mark.parametrize("key", ["run_memory_mib", "review_memory_mib"])
+def test_profile_memory_reservations_must_be_positive(key: str) -> None:
+    with pytest.raises(Invalid, match=rf"{key} must be a positive integer"):
+        config.parse(GOOD | {key: 0})

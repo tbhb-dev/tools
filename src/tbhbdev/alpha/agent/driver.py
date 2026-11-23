@@ -173,7 +173,12 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
 
 
 def check_limits(
-    settings: Settings, host: Host, *, ignore: bool, timeout: float = 30
+    settings: Settings,
+    host: Host,
+    profile: Profile,
+    *,
+    ignore: bool,
+    timeout: float = 30,
 ) -> None:
     """Read HOST's load, memory and swap in one ssh call, then refuse or warn.
 
@@ -183,13 +188,21 @@ def check_limits(
         Invalid: A limit is exceeded or the read failed, and neither the host
             nor IGNORE allows the launch to continue.
     """
+    if host.max_concurrent_runs == 0:
+        message = f"{host.name}: max_concurrent_runs is 0"
+        raise Invalid(message)
     try:
         found = limits.parse(
             transport.shell(settings, host, remote.limits(), timeout=timeout)
         )
     except transport.TransportError as exc:
         found = str(exc)
-    refuse, message = limits.decide(host, found, ignore=ignore)
+    memory_mib = (
+        settings.review_memory_mib
+        if profile is Profile.REVIEW
+        else settings.run_memory_mib
+    )
+    refuse, message = limits.decide(host, found, memory_mib, ignore=ignore)
     if refuse:
         raise Invalid(message)
     if message:
@@ -267,6 +280,7 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
         check_limits(
             settings,
             run.host,
+            run.request.profile,
             ignore=run.ignore_limits,
             timeout=deadline - time.monotonic(),
         )
