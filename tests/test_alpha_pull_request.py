@@ -4,6 +4,7 @@
 
 """Tests for tbhbdev alpha pr, the pull request draft tooling."""
 
+import datetime as dt
 import io
 import json
 import os
@@ -3078,6 +3079,128 @@ def test_rerun_reports_no_failed_run(
     assert run_main("rerun", "45") == 1
     assert capsys.readouterr().err == "no failed run for the current head of PR 45\n"
     assert len(world.calls("gh")) == 2
+
+
+NOW = dt.datetime(2026, 11, 23, 18, 0, tzinfo=dt.UTC)
+
+
+def stuck_world(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    runs: list[dict[str, object]],
+    started: str,
+    status: str = "in_progress",
+) -> None:
+    monkeypatch.setattr(pr, "utcnow", Mock(return_value=NOW))
+    jobs = {"jobs": [{"status": status, "startedAt": started}]}
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {
+                "rc": 0,
+                "stdout": json.dumps({"headRefOid": "a" * 40}),
+                "stderr": "",
+            },
+            "run list": gh_list(runs),
+            "run view": {"rc": 0, "stdout": json.dumps(jobs), "stderr": ""},
+        },
+    )
+
+
+def test_rerun_stuck_cancels_and_reruns_an_old_in_progress_job(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs: list[dict[str, object]] = [{"databaseId": 7, "status": "in_progress"}]
+    stuck_world(world, monkeypatch, runs, "2026-11-23T17:00:00Z")
+    assert run_main("rerun", "45", "--stuck") == 0
+    argv = [call["argv"] for call in world.calls("gh")]
+    assert argv[-2:] == [["run", "cancel", "7"], ["run", "rerun", "7"]]
+
+
+@pytest.mark.parametrize(
+    ("runs", "job"),
+    [
+        ([], ("2026-11-23T17:00:00Z", "in_progress")),
+        ([{"databaseId": 7, "status": "completed"}], ("2026-11-23T17:00:00Z", "x")),
+        (
+            [{"databaseId": 7, "status": "in_progress"}],
+            ("2026-11-23T17:45:00Z", "in_progress"),
+        ),
+        (
+            [{"databaseId": 7, "status": "in_progress"}],
+            ("2026-11-23T17:00:00Z", "queued"),
+        ),
+    ],
+)
+def test_rerun_stuck_leaves_a_run_that_is_not_stuck(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    runs: list[dict[str, object]],
+    job: tuple[str, str],
+) -> None:
+    stuck_world(world, monkeypatch, runs, *job)
+    assert run_main("rerun", "45", "--stuck") == 1
+    assert capsys.readouterr().err == "no stuck run for the current head of PR 45\n"
+    argv = [call["argv"] for call in world.calls("gh")]
+    assert ["run", "cancel", "7"] not in argv
+    assert ["run", "rerun", "7"] not in argv
+
+
+def test_rerun_stuck_stops_when_the_cancel_fails(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs: list[dict[str, object]] = [{"databaseId": 7, "status": "in_progress"}]
+    stuck_world(world, monkeypatch, runs, "2026-11-23T17:00:00Z")
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {
+                "rc": 0,
+                "stdout": json.dumps({"headRefOid": "a" * 40}),
+                "stderr": "",
+            },
+            "run list": gh_list(runs),
+            "run view": {
+                "rc": 0,
+                "stdout": json.dumps(
+                    {
+                        "jobs": [
+                            {
+                                "status": "in_progress",
+                                "startedAt": "2026-11-23T17:00:00Z",
+                            }
+                        ]
+                    }
+                ),
+                "stderr": "",
+            },
+            "run cancel": {"rc": 1, "stdout": "", "stderr": "no"},
+        },
+    )
+    assert run_main("rerun", "45", "--stuck") == 1
+    assert [call["argv"] for call in world.calls("gh")][-1] == ["run", "cancel", "7"]
+
+
+def test_rerun_stuck_reports_an_unreadable_run(world: World) -> None:
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {
+                "rc": 0,
+                "stdout": json.dumps({"headRefOid": "a" * 40}),
+                "stderr": "",
+            },
+            "run list": gh_list([{"databaseId": 7, "status": "in_progress"}]),
+            "run view": {"rc": 1, "stdout": "", "stderr": "gone"},
+        },
+    )
+    with pytest.raises(SystemExit, match="cannot read run 7: gone"):
+        run_main("rerun", "45", "--stuck")
+
+
+def test_utcnow_is_timezone_aware() -> None:
+    assert pr.utcnow().tzinfo is dt.UTC
 
 
 def test_rerun_reports_a_missing_pull_request(
