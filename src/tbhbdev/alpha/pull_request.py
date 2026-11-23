@@ -886,7 +886,7 @@ def branch_trailers(base: str) -> list[tuple[str, str]]:
 
     The range is BASE..HEAD, which starts at the merge base. The PR targets the
     remote branch, so refs/remotes/origin/BASE is the base when it exists, else
-    refs/heads/BASE. Full refnames keep a tag named origin/BASE out. Git runs in the
+    refs/heads/BASE. Full ref names keep a tag named origin/BASE out. Git runs in the
     current directory, because the branch belongs to the repository the script
     is run from.
     """
