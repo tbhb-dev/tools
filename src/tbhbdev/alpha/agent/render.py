@@ -10,7 +10,7 @@ FINAL_ONLY = (
     "in the worktree and keep it out of your commits."
 )
 BUILD_PUBLICATION = (
-    "Commit your changes locally, including .github/PULL_REQUEST_DRAFT.md. "
+    "Commit your changes locally. "
     "The driver pushes the build branch and opens the pull request after success."
 )
 

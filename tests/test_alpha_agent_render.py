@@ -1,16 +1,25 @@
 """Report text is a pure function of literal facts."""
 
 from tbhbdev.alpha.agent import render
-from tbhbdev.alpha.agent.model import RunKind
+from tbhbdev.alpha.agent.model import Profile, RunKind
 
 
 def test_brief_and_launch() -> None:
-    assert render.brief(RunKind.EXEC, "example\n") == (
+    final_only = (
         "Report results only in your final answer. "
         "Never message Claude sessions, session sockets or other agents directly."
         "\nIf this run should open a pull request, write .github/PULL_REQUEST_DRAFT.md "
-        "in the worktree and keep it out of your commits.\nexample\n"
+        "in the worktree and keep it out of your commits.\n"
     )
+    assert render.brief(RunKind.EXEC, "example\n") == final_only + "example\n"
+    build = render.brief(RunKind.EXEC, "example\n", profile=Profile.BUILD)
+    assert build == (
+        final_only + "Commit your changes locally. "
+        "The driver pushes the build branch and opens the pull request after success."
+        "\nexample\n"
+    )
+    assert "including" not in build
+    assert render.brief(RunKind.START, "example", profile=Profile.REVIEW) == "example"
 
 
 def test_unsandboxed_reports_filter_authorization() -> None:
