@@ -1842,6 +1842,27 @@ def session_model(raw: str, env: Mapping[str, str]) -> str | None:
     return None
 
 
+def unfinished_turn(path: Path, now: float) -> bool:
+    """Claude: whether a recent transcript doesn't end on a finished assistant turn."""
+    try:
+        recent = now - path.stat().st_mtime < CMD_WINDOW
+    except OSError:
+        return False
+    if not recent:
+        return False
+    lines = read_tail(path, CLAUDE_TAIL)
+    if lines is None:
+        return True
+    for line in reversed(lines):
+        entry = parse_line(line) or {}
+        if entry.get("type") in {"assistant", "user"}:
+            message = as_dict(entry.get("message")) or {}
+            return (
+                entry["type"] != "assistant" or message.get("stop_reason") != "end_turn"
+            )
+    return False
+
+
 def subagent_running(raw: str, env: Mapping[str, str], now: float) -> bool:
     """Claude: whether a subagent of the session may be running right now.
 
@@ -1851,25 +1872,24 @@ def subagent_running(raw: str, env: Mapping[str, str], now: float) -> bool:
     """
     if not SESSION_RE.fullmatch(raw):
         return False
-    for path in claude_config(env).glob(f"projects/*/{raw}/subagents/agent-*.jsonl"):
-        try:
-            recent = now - path.stat().st_mtime < CMD_WINDOW
-        except OSError:
-            continue
-        lines = read_tail(path, CLAUDE_TAIL) if recent else []
-        if lines is None:
-            return True
-        for line in reversed(lines):
-            entry = parse_line(line) or {}
-            if entry.get("type") in {"assistant", "user"}:
-                message = as_dict(entry.get("message")) or {}
-                if (
-                    entry["type"] != "assistant"
-                    or message.get("stop_reason") != "end_turn"
-                ):
-                    return True
-                break
-    return False
+    pattern = f"projects/*/{raw}/subagents/agent-*.jsonl"
+    return any(unfinished_turn(path, now) for path in claude_config(env).glob(pattern))
+
+
+def hookless_model(raw: str, env: Mapping[str, str], *, sub: str | None) -> str | None:
+    """Claude: the main model from the transcript when no hook record names one.
+
+    A subagent's commit can't be told from the main agent's then: both carry
+    the session's ID. Refuse rather than stamp the main model on its work.
+    """
+    if not sub and subagent_running(raw, env, time.time()):
+        message = (
+            "A subagent of this session is running and no hook record says "
+            "which agent is committing. Commit from the main session after "
+            "the subagent finishes."
+        )
+        raise AttributionError(message)
+    return session_model(raw, env)
 
 
 def claude_committer(
@@ -1898,19 +1918,7 @@ def claude_committer(
             "Retry after the subagent's session record is restored."
         )
         raise AttributionError(message)
-    model = main_model(root_rec)
-    if not model:
-        # No hook record names the model, so a subagent's commit can't be told
-        # from the main agent's: both carry the session's ID. Refuse rather than
-        # stamp the main model on a subagent's work.
-        if not sub and subagent_running(raw, env, time.time()):
-            message = (
-                "A subagent of this session is running and no hook record says "
-                "which agent is committing. Commit from the main session after "
-                "the subagent finishes."
-            )
-            raise AttributionError(message)
-        model = session_model(raw, env)
+    model = main_model(root_rec) or hookless_model(raw, env, sub=sub)
     root_ident = make_ident(
         CLAUDE, root, Seen(ver, model, root_rec.get("effort"), surf)
     )
