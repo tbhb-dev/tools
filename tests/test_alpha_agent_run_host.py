@@ -1176,9 +1176,12 @@ def test_startup_deadline_stops_the_recorded_setup_group(
     def boot() -> str:
         return "example-boot"
 
+    def skip_verification(_workspace: Path, _env: Mapping[str, str]) -> None:
+        return None
+
     monkeypatch.setattr(process_group, "boot_id", boot)
     monkeypatch.setattr(run_host.worktree, "git", git)
-    monkeypatch.setattr(run_host.worktree, "verify_run_hooks", lambda *_: None)
+    monkeypatch.setattr(run_host.worktree, "verify_run_hooks", skip_verification)
     if phase == "secret":
         prepared = preparation(run)
         monkeypatch.setattr(
