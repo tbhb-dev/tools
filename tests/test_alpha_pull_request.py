@@ -1596,7 +1596,23 @@ def test_create_fails_closed_when_the_count_is_unavailable(
     write_draft(world)
     assert run_main("create") == 1
     assert world.calls("gh") == []
-    assert ":1: size count unavailable: gone" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert ":1: size count unavailable (@tbhb_rules//lint:pr_size_count): gone" in out
+
+
+@pytest.mark.parametrize("command", ["check", "create"])
+@pytest.mark.parametrize(
+    ("front", "base"), [("", "main"), ("---\nbase: dev\n---\n", "dev")]
+)
+def test_size_counts_against_the_drafts_base(
+    world: World, monkeypatch: pytest.MonkeyPatch, command: str, front: str, base: str
+) -> None:
+    counted = Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None))
+    monkeypatch.setattr(size_gate, "size_counts", counted)
+    monkeypatch.setattr(pr, "branch_trailers", Mock(return_value=[]))
+    write_draft(world, front + BASE)
+    run_main(command)
+    counted.assert_called_once_with(f"origin/{base}", "HEAD")
 
 
 def test_create_within_the_limits_prints_no_counts(
@@ -2090,7 +2106,7 @@ def test_runs_as_tbhbdev_alpha_pr(world: World) -> None:
     )
     assert (done.returncode, done.stderr) == (
         0,
-        "size count unavailable: missing target\n",
+        "size count unavailable (@tbhb_rules//lint:pr_size_count): missing target\n",
     )
 
 

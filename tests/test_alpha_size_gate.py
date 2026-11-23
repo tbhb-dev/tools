@@ -179,5 +179,8 @@ def test_pr_check_unavailable(
     )
     assert pr.command(argparse.Namespace(command="check", draft="draft.md"), {}) == 0
     captured = capsys.readouterr()
-    assert captured.err == "size count unavailable: missing target\n"
+    assert (
+        captured.err
+        == "size count unavailable (@tbhb_rules//lint:pr_size_count): missing target\n"
+    )
     assert captured.out == "OK: the draft conforms\n"

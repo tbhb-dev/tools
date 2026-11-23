@@ -1601,9 +1601,9 @@ def check_size(args: argparse.Namespace, checked: Checked) -> None:
     if args.command not in ("check", "create"):
         return
     try:
-        counts = size_gate.size_counts("origin/main", "HEAD")
+        counts = size_gate.size_counts(f"origin/{base_of(checked.meta)}", "HEAD")
     except size_gate.SizeCountError as exc:
-        why = f"size count unavailable: {exc}"
+        why = f"size count unavailable ({size_gate.COUNTER[2]}): {exc}"
         if args.command == "create":
             checked.problems.append((1, why))
             print(f"{args.draft}:1: {why}")
