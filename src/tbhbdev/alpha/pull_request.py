@@ -1484,6 +1484,19 @@ def run_numbers(run_id: object) -> list[object]:
     )  # pragma: no mutate
 
 
+def sole_pull_request(run_id: object, number: int) -> bool:
+    """Whether the run belongs to the pull request alone.
+
+    A run that lists other pull requests too is theirs as much as ours, so
+    cancelling it would hit them; the note names them.
+    """
+    numbers = run_numbers(run_id)
+    if number in numbers and numbers != [number]:
+        others = ", ".join(str(n) for n in numbers if n != number)
+        print(f"run {run_id} also belongs to PR {others}; skipping", file=sys.stderr)
+    return numbers == [number]
+
+
 def cancel_and_rerun(run_id: str) -> int:
     """Cancel the run, wait until it completes as cancelled, then rerun it."""
     code = invoke_gh([GH, "run", "cancel", run_id], "")[0]
@@ -1549,7 +1562,7 @@ def rerun_stuck(number: int) -> int:
         for item in runs
         if item["headSha"] == head
         and item["status"] == "in_progress"
-        and number in run_numbers(item["databaseId"])
+        and sole_pull_request(item["databaseId"], number)
         and stuck_job(item["databaseId"])
     ]
     if not stuck:
