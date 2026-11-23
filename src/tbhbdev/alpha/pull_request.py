@@ -885,18 +885,21 @@ def branch_trailers(base: str) -> list[tuple[str, str]]:
     """The LLM trailers of the commits on this branch, oldest first.
 
     The range is BASE..HEAD, which starts at the merge base. The PR targets the
-    remote branch, so origin/BASE is the base when it exists. Git runs in the
+    remote branch, so refs/remotes/origin/BASE is the base when it exists, else
+    refs/heads/BASE. Full refnames keep a tag named origin/BASE out. Git runs in the
     current directory, because the branch belongs to the repository the script
     is run from.
     """
-    remote = f"origin/{base}"
-    code, _ = agent_identity.git("rev-parse", remote)
-    span = f"{remote if code == 0 else base}..HEAD"
+    remote = f"refs/remotes/origin/{base}"
+    code, _ = agent_identity.git(
+        "rev-parse", "--verify", "--quiet", f"{remote}^{{commit}}"
+    )
+    span = f"{remote if code == 0 else f'refs/heads/{base}'}..HEAD"
     code, out = agent_identity.git(
         "log", "--reverse", "--format=%x1e%(trailers:only,unfold)", span
     )
     if code != 0:
-        message = f"cannot list the commits in {span}; is {base} fetched?"
+        message = f"cannot list the commits in {base}..HEAD; is {base} fetched?"
         raise SystemExit(message)
     found = (agent_identity.LINE.match(line) for line in out.splitlines())
     return [(match[1], match[2]) for match in found if match]

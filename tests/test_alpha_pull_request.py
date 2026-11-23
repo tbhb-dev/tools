@@ -1322,6 +1322,16 @@ def test_branch_trailers_prefer_the_remote_base(world: World) -> None:
     assert pr.branch_trailers("main") == [("Generated-by", GEN)]
 
 
+def test_branch_trailers_ignore_a_tag_named_like_the_remote_base(
+    world: World,
+) -> None:
+    world.git("update-ref", "refs/remotes/origin/main", "HEAD")
+    world.git("switch", "-q", "-c", "topic")
+    world.commit(f"mine\n\nGenerated-by: {GEN}")
+    world.git("tag", "origin/main")
+    assert pr.branch_trailers("main") == [("Generated-by", GEN)]
+
+
 def test_branch_trailers_need_a_known_base(world: World) -> None:
     del world
     with pytest.raises(
