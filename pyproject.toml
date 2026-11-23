@@ -17,7 +17,7 @@ dependencies = [
   "onepasswordconnectsdk>=2.1.1",
   "psycopg[binary]>=3.3.4",
   "pyyaml>=6.0.3",
-  "tbhb-telemetry @ https://github.com/tbhb-dev/telemetry/releases/download/sha-c44613c38c40/tbhb_telemetry-0-py3-none-any.whl",
+  "tbhb-telemetry @ https://github.com/tbhb-dev/telemetry/releases/download/sha-c25867db1d26/tbhb_telemetry-0-py3-none-any.whl",
   # tbhbdev alpha install edits Codex's config.toml in place, so the comments
   # and order of everything it doesn't own survive.
   "tomlkit>=0.15.2",
