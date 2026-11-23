@@ -910,12 +910,14 @@ def posting_value(env: Mapping[str, str]) -> str | None:
     return agent_identity.format_value(committer.ident.attrs())
 
 
-def default_base() -> str:
+def default_base(git_dir: Path | None = None) -> str:
     """The repository's default branch from origin/HEAD, else the schema's.
 
+    GIT_DIR names the repository to read, else the working directory's.
     Names the source on stderr, so a fallback to the schema is visible.
     """
-    code, out = git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    where = ["--git-dir", str(git_dir)] if git_dir else []
+    code, out = git(*where, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
     name = out.removeprefix("refs/remotes/origin/")
     if code == 0 and name and name != out:
         return name

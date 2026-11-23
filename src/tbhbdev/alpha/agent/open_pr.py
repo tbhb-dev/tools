@@ -49,7 +49,7 @@ class PublishedRange(NamedTuple):
     commit: str
 
 
-def parse_draft(text: str) -> Draft:
+def parse_draft(text: str, git_dir: Path | None = None) -> Draft:
     """Split a draft into its title, body and frontmatter fields.
 
     Only the frontmatter parser runs here. The schema, the section and prose
@@ -73,8 +73,15 @@ def parse_draft(text: str) -> Draft:
         message = "the draft frontmatter is invalid"
         raise OpenRefusedError(message)
     fields = cast("dict[str, object]", meta) if isinstance(meta, dict) else {}
-    # A missing base takes the schema default, as `alpha pr` does.
-    base = fields["base"] if "base" in fields else pull_request.base_of(fields)
+    # A missing base takes the repository's default branch, as `alpha pr` does.
+    # The schema fallback exits when the working directory has no baseline.
+    base = fields.get("base")
+    if "base" not in fields:
+        try:
+            base = pull_request.default_base(git_dir)
+        except SystemExit:
+            message = "the draft names no base and no default branch is readable"
+            raise OpenRefusedError(message) from None
     if not isinstance(base, str) or not base:
         message = "the draft frontmatter names an invalid base branch"
         raise OpenRefusedError(message)
@@ -288,7 +295,9 @@ def open_pull_request(
     scan_draft(
         text, published.git_dir, rules, repository_visibility(repository, token, write)
     )
-    draft = parse_draft(text.replace("\r\n", "\n").replace("\r", "\n"))
+    draft = parse_draft(
+        text.replace("\r\n", "\n").replace("\r", "\n"), published.git_dir
+    )
     _, owner, name = repo.parts(repository)
     try:
         response = httpx.post(

@@ -238,6 +238,47 @@ def test_a_draft_without_a_base_takes_the_schema_default(text: str) -> None:
     assert open_pr.parse_draft(text).base == "main"
 
 
+def test_a_draft_without_a_base_takes_the_repository_default_branch(
+    tmp_path: Path,
+) -> None:
+    published = commit_draft(tmp_path, "# t\n\nbody\n")
+    git_dir = published.git_dir
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(git_dir),
+            "update-ref",
+            "refs/remotes/origin/trunk",
+            "HEAD",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(git_dir),
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk",
+        ],
+        check=True,
+    )
+    assert open_pr.parse_draft("# t\n\nbody\n", git_dir).base == "trunk"
+
+
+def test_an_unreadable_default_branch_refuses_the_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def exits(_: Path | None = None) -> str:
+        raise SystemExit
+
+    monkeypatch.setattr(open_pr.pull_request, "default_base", exits)
+    with pytest.raises(open_pr.OpenRefusedError, match="no default branch"):
+        open_pr.parse_draft("# t\n\nbody\n")
+
+
 def test_the_frontmatter_sets_the_base_and_draft_flag(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
