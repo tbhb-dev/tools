@@ -59,6 +59,18 @@ description = "Test canary"
 regex = '''test-canary-[0-9a-f]{16}'''
 """
 
+# One repository rule, which no scan keeps, and one host rule, which a scan of a
+# private repository drops.
+RULES_BEYOND_ONE = """
+[[rules]]
+id = "private-repo-1"
+regex = '''repo-x'''
+
+[[rules]]
+id = "tailnet-host-1"
+regex = '''host-x'''
+"""
+
 
 def write_private_config(home: Path, text: str = PRIVATE_CONFIG) -> Path:
     """Write the private gitleaks config under HOME and return its path."""

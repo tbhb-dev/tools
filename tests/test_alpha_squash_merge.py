@@ -15,6 +15,7 @@ from typing import cast
 import pytest
 from fake_tool import (
     PRIVATE_CONFIG,
+    RULES_BEYOND_ONE,
     link_git,
     pythonpath,
     write_fake,
@@ -159,14 +160,7 @@ def tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Tools:
     repo.mkdir()
     (repo / ".gitleaks.toml").write_text("")
     monkeypatch.chdir(repo)
-    # One repository rule, which no scan keeps, and one host rule, which a scan
-    # of a private repository drops.
-    write_private_config(
-        tmp_path,
-        PRIVATE_CONFIG
-        + "\n[[rules]]\nid = \"private-repo-1\"\nregex = '''repo-x'''\n"
-        + "\n[[rules]]\nid = \"tailnet-host-1\"\nregex = '''host-x'''\n",
-    )
+    write_private_config(tmp_path, PRIVATE_CONFIG + RULES_BEYOND_ONE)
     made = Tools(bin_dir)
     made.view()
     return made

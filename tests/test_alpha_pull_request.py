@@ -20,6 +20,7 @@ from unittest.mock import Mock, patch
 import pytest
 from fake_tool import (
     PRIVATE_CONFIG,
+    RULES_BEYOND_ONE,
     link_git,
     pythonpath,
     write_fake,
@@ -197,14 +198,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     for name in pr.CONFIGS:
         (root / name).write_text("")
     (root / ".gitleaks.toml").write_text("")
-    # One repository rule, which no scan keeps, and one host rule, which a scan
-    # of a private repository drops.
-    write_private_config(
-        tmp_path,
-        PRIVATE_CONFIG
-        + "\n[[rules]]\nid = \"private-repo-1\"\nregex = '''repo-x'''\n"
-        + "\n[[rules]]\nid = \"tailnet-host-1\"\nregex = '''host-x'''\n",
-    )
+    write_private_config(tmp_path, PRIVATE_CONFIG + RULES_BEYOND_ONE)
     # The script runs inside the repository whose branch it posts.
     monkeypatch.chdir(root)
     made = World(root, tools_dir)
