@@ -935,7 +935,8 @@ def test_linux_control_refuses_malformed_bridge_frames(frame: bytes) -> None:
 
 @pytest.fixture
 def short_probe_home() -> Generator[Path]:
-    with tempfile.TemporaryDirectory(prefix="ag-") as directory:
+    # A Unix socket path holds about 100 bytes, less than a Bazel TMPDIR.
+    with tempfile.TemporaryDirectory(prefix="ag-", dir="/tmp") as directory:
         yield Path(directory)
 
 
