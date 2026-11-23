@@ -3083,18 +3083,6 @@ def test_rerun_reports_no_failed_run(
 
 NOW = dt.datetime(2026, 11, 23, 18, 0, tzinfo=dt.UTC)
 HEAD = "a" * 40
-WORKFLOW = """\
-name: ci
-jobs:
-  bazel:
-    name: bazel
-    timeout-minutes: 45
-  keyed:
-    timeout-minutes: 10
-  loose:
-    name: loose
-  odd: 3
-"""
 
 
 class Stuck:
@@ -3104,8 +3092,6 @@ class Stuck:
         self.world = world
         self.statuses = ["in_progress", "completed"]
         self.conclusion = "cancelled"
-        self.numbers: list[int] = [45]
-        self.same_workflows = True
         self.jobs: list[dict[str, str]] = []
         self.new_head = HEAD
         self.invoked: list[list[str]] = []
@@ -3121,11 +3107,6 @@ class Stuck:
         monkeypatch.setattr(pr, "head_of", self.head)
         monkeypatch.setattr(pr, "invoke_gh", self.invoke)
         monkeypatch.setattr(pr, "pause", self.pauses.append)
-        workflows = world.root / ".github" / "workflows"
-        workflows.mkdir(parents=True)
-        (workflows / "ci.yml").write_text(WORKFLOW)
-        (workflows / "other.yml").write_text("name: other\njobs: {}\n")
-        (workflows / "list.yml").write_text("- not a mapping\n")
 
     def head(self, _number: int) -> str:
         return self.new_head
@@ -3147,21 +3128,6 @@ class Stuck:
             cases={
                 "pr view": {"rc": 0, "stdout": json.dumps(self.meta), "stderr": ""},
                 "run list": gh_list(self.runs),
-                "api": {
-                    "rc": 0,
-                    "stdout": json.dumps(self.numbers),
-                    "stderr": "",
-                },
-            },
-        )
-        self.world.fake(
-            "git",
-            cases={
-                "diff --quiet": {
-                    "rc": 0 if self.same_workflows else 1,
-                    "stdout": "",
-                    "stderr": "",
-                }
             },
         )
 
@@ -3178,7 +3144,6 @@ def a_run(run_id: int = 7, **fields: object) -> dict[str, object]:
         "databaseId": run_id,
         "status": "in_progress",
         "headSha": HEAD,
-        "workflowName": "ci",
     }
     return run_fields | fields
 
@@ -3188,7 +3153,7 @@ def test_rerun_stuck_cancels_waits_and_reruns(
 ) -> None:
     scene = Stuck(world, monkeypatch)
     scene.runs = [a_run()]
-    scene.jobs = [old_job(56)]
+    scene.jobs = [old_job(61)]
     scene.statuses = ["in_progress", "in_progress", "completed"]
     scene.start()
     assert run_main("rerun", "45", "--stuck") == 0
@@ -3212,11 +3177,8 @@ def test_rerun_stuck_cancels_waits_and_reruns(
         ([], [old_job(300)]),
         ([a_run(status="completed")], [old_job(300)]),
         ([a_run(headSha="b" * 40)], [old_job(300)]),
-        ([a_run()], [old_job(55)]),
+        ([a_run()], [old_job(59)]),
         ([a_run()], [old_job(300, status="queued")]),
-        ([a_run()], [old_job(369, "loose")]),
-        ([a_run()], [old_job(19, "keyed")]),
-        ([a_run(workflowName="other")], [old_job(61, "bazel")]),
     ],
 )
 def test_rerun_stuck_leaves_a_run_that_is_not_stuck(
@@ -3229,52 +3191,6 @@ def test_rerun_stuck_leaves_a_run_that_is_not_stuck(
     scene = Stuck(world, monkeypatch)
     scene.runs = runs
     scene.jobs = jobs
-    scene.start()
-    assert run_main("rerun", "45", "--stuck") == 1
-    assert capsys.readouterr().err == "no stuck run for the current head of PR 45\n"
-    assert scene.invoked == []
-
-
-def test_rerun_stuck_uses_the_jobs_own_timeout_plus_ten(
-    world: World, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    scene = Stuck(world, monkeypatch)
-    scene.runs = [a_run()]
-    scene.jobs = [old_job(56)]
-    scene.start()
-    assert run_main("rerun", "45", "--stuck") == 0
-    scene.jobs = [old_job(21, "keyed")]
-    scene.invoked.clear()
-    scene.statuses = ["completed"]
-    assert run_main("rerun", "45", "--stuck") == 0
-    scene.jobs = [old_job(371, "loose")]
-    scene.statuses = ["completed"]
-    assert run_main("rerun", "45", "--stuck") == 0
-
-
-def test_rerun_stuck_uses_the_default_timeout_when_workflows_differ(
-    world: World, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    scene = Stuck(world, monkeypatch)
-    scene.same_workflows = False
-    scene.runs = [a_run()]
-    scene.jobs = [old_job(71)]
-    scene.start()
-    assert run_main("rerun", "45", "--stuck") == 1
-    scene.jobs = [old_job(371)]
-    scene.statuses = ["completed"]
-    assert run_main("rerun", "45", "--stuck") == 0
-
-
-def test_rerun_stuck_ignores_a_run_of_another_pull_request(
-    world: World,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    scene = Stuck(world, monkeypatch)
-    scene.numbers = [46]
-    scene.runs = [a_run()]
-    scene.jobs = [old_job(300)]
     scene.start()
     assert run_main("rerun", "45", "--stuck") == 1
     assert capsys.readouterr().err == "no stuck run for the current head of PR 45\n"
