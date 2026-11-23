@@ -385,6 +385,62 @@ def link_sub_issue(
     return None
 
 
+def unlink_sub_issue(
+    parent: IssueRef,
+    child: IssueRef,
+    *,
+    client: Client | None = None,
+    caller: str = "tbhbdev",
+    dry_run: bool = False,
+) -> Json | None:
+    """Remove a child from its parent issue."""
+    api = client if client is not None else GhClient()
+    issue = api.rest("GET", child.path)
+    payload = {"sub_issue_id": issue["id"]}
+    if dry_run:
+        return payload
+    api.rest("DELETE", f"{parent.path}/sub_issue", payload)
+    _audit(parent, "unlink_sub_issue", caller=caller)
+    return None
+
+
+def link_dependency(
+    blocked: IssueRef,
+    blocker: IssueRef,
+    *,
+    client: Client | None = None,
+    caller: str = "tbhbdev",
+    dry_run: bool = False,
+) -> Json | None:
+    """Add a blocker to an issue."""
+    api = client if client is not None else GhClient()
+    issue = api.rest("GET", blocker.path)
+    payload = {"issue_id": issue["id"]}
+    if dry_run:
+        return payload
+    api.rest("POST", f"{blocked.path}/dependencies/blocked_by", payload)
+    _audit(blocked, "link_dependency", caller=caller)
+    return None
+
+
+def unlink_dependency(
+    blocked: IssueRef,
+    blocker: IssueRef,
+    *,
+    client: Client | None = None,
+    caller: str = "tbhbdev",
+    dry_run: bool = False,
+) -> Json | None:
+    """Remove a blocker from an issue."""
+    api = client if client is not None else GhClient()
+    issue_id = api.rest("GET", blocker.path)["id"]
+    if dry_run:
+        return {"issue_id": issue_id}
+    api.rest("DELETE", f"{blocked.path}/dependencies/blocked_by/{issue_id}")
+    _audit(blocked, "unlink_dependency", caller=caller)
+    return None
+
+
 ADD_ITEM = """mutation($project: ID!, $content: ID!) {
   addProjectV2ItemById(input: {projectId: $project, contentId: $content}) {
     item { id }

@@ -1,12 +1,15 @@
 import json
 import subprocess
 from dataclasses import dataclass, field
+from typing import Protocol
 lazy from collections.abc import Callable
 lazy from pathlib import Path
 
 import pytest
 
 from tbhbdev import content as cw
+from tbhbdev.alpha import main as alpha_main
+from tbhbdev.alpha import pull_request as pr
 
 type Call = tuple[str, str, cw.Json | None]
 REF = cw.IssueRef("example", "demo", 7)
@@ -200,6 +203,192 @@ def test_link_sub_issue(tmp_path: Path) -> None:
         ("POST", f"{REF.path}/sub_issues", {"sub_issue_id": 123}),
     ]
     assert audit(tmp_path)[0]["scan"] == "not-needed"
+
+
+class RelationshipWrite(Protocol):
+    def __call__(
+        self,
+        first: cw.IssueRef,
+        second: cw.IssueRef,
+        /,
+        *,
+        client: cw.Client,
+        caller: str = "tbhbdev",
+        dry_run: bool = False,
+    ) -> cw.Json | None: ...
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (
+            cw.unlink_sub_issue,
+            "unlink_sub_issue",
+            "DELETE",
+            "/sub_issue",
+            "sub_issue_id",
+            True,
+        ),
+        (
+            cw.link_dependency,
+            "link_dependency",
+            "POST",
+            "/dependencies/blocked_by",
+            "issue_id",
+            True,
+        ),
+        (
+            cw.unlink_dependency,
+            "unlink_dependency",
+            "DELETE",
+            "/dependencies/blocked_by/123",
+            "issue_id",
+            False,
+        ),
+    ],
+)
+def test_relationship_write(
+    case: tuple[RelationshipWrite, str, str, str, str, bool],
+    tmp_path: Path,
+) -> None:
+    write, verb, method, suffix, id_field, has_body = case
+    client = RecordingClient()
+    other = cw.IssueRef("example", "other", 9)
+    payload: cw.Json = {id_field: 123}
+    assert write(REF, other, client=client, caller="import", dry_run=True) == payload
+    assert client.calls == [("GET", other.path, None)]
+    assert not (tmp_path / "audit.jsonl").exists()
+
+    assert write(REF, other, client=client) is None
+    assert client.calls[1:] == [
+        ("GET", other.path, None),
+        (method, f"{REF.path}{suffix}", payload if has_body else None),
+    ]
+    (entry,) = audit(tmp_path)
+    assert (entry["verb"], entry["caller"], entry["scan"]) == (
+        verb,
+        "tbhbdev",
+        "not-needed",
+    )
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    "case",
+    [
+        (
+            ["link-sub", "example/demo#7", "example/other#9"],
+            ("POST", "/sub_issues", {"sub_issue_id": 123}),
+            "example/other",
+            {"sub_issue_id": 123},
+            0,
+        ),
+        (
+            ["unlink-sub", "#7", "example/other#9"],
+            ("DELETE", "/sub_issue", {"sub_issue_id": 123}),
+            "example/other",
+            {"sub_issue_id": 123},
+            1,
+        ),
+        (
+            ["block", "example/demo#7", "--by", "#9"],
+            ("POST", "/dependencies/blocked_by", {"issue_id": 123}),
+            "example/demo",
+            {"issue_id": 123},
+            1,
+        ),
+        (
+            ["unblock", "example/demo#7", "--blocked-by", "example/other#9"],
+            ("DELETE", "/dependencies/blocked_by/123", None),
+            "example/other",
+            {"issue_id": 123},
+            0,
+        ),
+        (
+            ["unblock", "#9", "--blocking", "#7"],
+            ("DELETE", "/dependencies/blocked_by/123", None),
+            "example/demo",
+            {"issue_id": 123},
+            1,
+        ),
+    ],
+)
+def test_alpha_issue_relationship(
+    case: tuple[list[str], Call, str, cw.Json, int],
+    dry_run: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    argv, write, lookup_repo, preview, origin_calls = case
+    client = RecordingClient()
+    lookups: list[str] = []
+
+    def origin() -> str:
+        lookups.append("example/demo")
+        return "example/demo"
+
+    def client_factory() -> RecordingClient:
+        return client
+
+    monkeypatch.setattr(pr, "origin_repository", origin)
+    monkeypatch.setattr(cw, "GhClient", client_factory)
+    cmd = ["issue", *argv]
+    if dry_run:
+        cmd.append("--dry-run")
+    assert alpha_main(cmd, "tbhbdev alpha") == 0
+    assert len(lookups) == origin_calls
+    assert client.calls[0] == ("GET", f"/repos/{lookup_repo}/issues/9", None)
+    output = capsys.readouterr()
+    assert output.err == ""
+    if dry_run:
+        assert json.loads(output.out) == preview
+        assert client.calls[1:] == []
+        assert not (tmp_path / "audit.jsonl").exists()
+    else:
+        method, suffix, body = write
+        assert client.calls[1:] == [(method, f"{REF.path}{suffix}", body)]
+        assert output.out == ""
+        (entry,) = audit(tmp_path)
+        assert entry["caller"] == "tbhbdev alpha issue"
+
+
+def test_alpha_issue_relationship_reports_api_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    def fail(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert argv == ["gh", "api", "--method", "GET", "/repos/example/other/issues/9"]
+        raise subprocess.CalledProcessError(4, argv, stderr="issue missing\n")
+
+    monkeypatch.setattr(cw.subprocess, "run", fail)
+    args = ["issue", "block", "example/demo#7", "--by", "example/other#9"]
+    assert alpha_main(args, "tbhbdev alpha") == 4
+    assert capsys.readouterr() == ("", "issue missing\n")
+    assert not (tmp_path / "audit.jsonl").exists()
+
+
+@pytest.mark.parametrize("ref", ["7", "#0", "#-7", "#²", "bad#7", "example/..#7"])
+def test_alpha_issue_relationship_rejects_bad_refs(
+    ref: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        alpha_main(["issue", "link-sub", ref, "#9"], "tbhbdev alpha")
+    assert exc.value.code == 2
+    assert capsys.readouterr().err.endswith(": expected owner/repo#N or #N\n")
+
+
+@pytest.mark.parametrize("direction", [(), ("--by", "#9", "--blocking", "#8")])
+def test_alpha_issue_relationship_requires_one_direction(
+    direction: tuple[str, ...],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        alpha_main(["issue", "block", "#7", *direction], "tbhbdev alpha")
+    assert exc.value.code == 2
+    assert "--blocking" in capsys.readouterr().err
 
 
 WRITES: list[Callable[[cw.Client], object]] = [
