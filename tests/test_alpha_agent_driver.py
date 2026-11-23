@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import dataclasses
 import datetime as dt
+import fcntl
 import io
 import json
 import os
@@ -13,6 +15,7 @@ import tarfile
 from pathlib import PurePosixPath
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn
+from unittest.mock import Mock
 
 import pytest
 from agent_driver_example import (
@@ -33,6 +36,7 @@ from tbhbdev.alpha.agent.decisions import repo, request, runfiles_names, taint
 from tbhbdev.alpha.agent.model import Invalid, Profile, RunKind
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
     from pathlib import Path
 
 pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
@@ -431,12 +435,114 @@ def test_a_first_run_past_the_host_run_cap_no_longer_blocks(
     driver.refuse_live_duplicate(config, second)
 
 
-def test_a_first_run_with_no_time_limit_stays_live(remote: Remote) -> None:
+def started_ago(**delta: float) -> str:
+    return (dt.datetime.now(dt.UTC) - dt.timedelta(**delta)).isoformat()
+
+
+def test_a_first_run_with_no_time_limit_stays_live_under_the_ceiling(
+    remote: Remote,
+) -> None:
     second = recorded_review(remote)
-    age_first_run()
+    age_first_run(started=started_ago(hours=5))
     config = dataclasses.replace(CONFIG, max_run_minutes=None)
     with pytest.raises(Invalid, match="hasn't ended"):
         driver.refuse_live_duplicate(config, second)
+
+
+def test_a_first_run_with_no_time_limit_stops_blocking_past_the_ceiling(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = recorded_review(remote)
+    age_first_run(started=started_ago(hours=7))
+    config = dataclasses.replace(CONFIG, max_run_minutes=None)
+
+    def no_read(*_args: object, **_kwargs: object) -> NoReturn:
+        pytest.fail("past the ceiling, no read")
+
+    monkeypatch.setattr(transport, "read", no_read)
+    driver.refuse_live_duplicate(config, second)
+
+
+def test_the_run_cap_counts_minutes_not_seconds(remote: Remote) -> None:
+    second = recorded_review(remote)
+    age_first_run(started=started_ago(minutes=10))
+    config = dataclasses.replace(
+        CONFIG, max_run_minutes=60, launch_wait_seconds=0, kill_grace_seconds=0
+    )
+    with pytest.raises(Invalid, match="hasn't ended"):
+        driver.refuse_live_duplicate(config, second)
+
+
+def test_the_launch_wait_and_kill_grace_extend_the_limit(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = recorded_review(remote)
+    age_first_run(started=started_ago(seconds=100), timeout=60)
+    tight = dataclasses.replace(CONFIG, launch_wait_seconds=0, kill_grace_seconds=0)
+    monkeypatch.setattr(transport, "read", Mock(side_effect=transport.TransportError))
+    driver.refuse_live_duplicate(tight, second)
+    slow = dataclasses.replace(CONFIG, launch_wait_seconds=30, kill_grace_seconds=30)
+    with pytest.raises(Invalid, match="hasn't ended"):
+        driver.refuse_live_duplicate(slow, second)
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["Example-Org/Example-Repo", "github.com/example-org/example-repo.git"],
+)
+def test_the_repository_is_compared_in_its_canonical_form(
+    remote: Remote, spelling: str
+) -> None:
+    second = recorded_review(remote)
+    second.request = dataclasses.replace(second.request, repo=spelling)
+    with pytest.raises(Invalid, match="hasn't ended"):
+        driver.refuse_live_duplicate(CONFIG, second)
+
+
+def test_a_record_that_disappears_during_the_scan_is_skipped(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = recorded_review(remote)
+    monkeypatch.setattr(driver, "load", Mock(side_effect=FileNotFoundError))
+    driver.refuse_live_duplicate(CONFIG, second)
+
+
+def test_the_launch_lock_excludes_a_second_holder() -> None:
+    with driver.launch_lock():
+        descriptor = os.open(driver.directory() / "launch.lock", os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+
+
+def test_a_review_checks_and_saves_inside_the_launch_lock(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    real_lock = driver.launch_lock
+    real_save = driver.save
+
+    @contextlib.contextmanager
+    def lock() -> Generator[None]:
+        events.append("enter")
+        with real_lock():
+            yield
+        events.append("exit")
+
+    def refuse(*_args: object) -> None:
+        events.append("check")
+
+    def save(run: driver.Run) -> None:
+        events.append("save")
+        real_save(run)
+
+    monkeypatch.setattr(driver, "launch_lock", lock)
+    monkeypatch.setattr(driver, "refuse_live_duplicate", refuse)
+    monkeypatch.setattr(driver, "save", save)
+    assert launch(remote, "--profile", "review", "--ref", COMMIT) == 0
+    assert events == ["enter", "check", "save", "exit"]
 
 
 @pytest.mark.parametrize("change", ["commit", "profile"])
