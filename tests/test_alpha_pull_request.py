@@ -3320,6 +3320,11 @@ def test_run_view_reports_an_unreadable_run(world: World) -> None:
         pr.run_view(7, "jobs")
 
 
+def test_run_view_returns_the_mapping_gh_prints(world: World) -> None:
+    world.fake("gh", stdout='{"jobs": []}')
+    assert pr.run_view(7, "jobs") == {"jobs": []}
+
+
 def test_pause_sleeps(monkeypatch: pytest.MonkeyPatch) -> None:
     slept = Mock()
     monkeypatch.setattr(pr.time, "sleep", slept)
