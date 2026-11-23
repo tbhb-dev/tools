@@ -14,6 +14,8 @@ from typing import TypedDict
 
 # The run request's schema version. A reader refuses any other version.
 REQUEST_VERSION = 2
+DEFAULT_RUN_MEMORY_MIB = 6 * 1024
+DEFAULT_MAX_CONCURRENT_RUNS = 3
 
 # An identifier that reaches a file name, a tmux session name or an argv: run
 # names, accounts, profiles and the run's class, variant and role.
@@ -141,6 +143,7 @@ class Host:
     min_memory_available_percent: int = 20
     max_swap_used_percent: int = 80
     limits_warn_only: bool = False
+    max_concurrent_runs: int = DEFAULT_MAX_CONCURRENT_RUNS
 
 
 @dataclass(frozen=True)
@@ -163,6 +166,8 @@ class Settings:
     ssh_keepalive_count_max: int = 3
     public_repos: tuple[str, ...] = ()
     otel_endpoint: str | None = None
+    run_memory_mib: int = DEFAULT_RUN_MEMORY_MIB
+    review_memory_mib: int = DEFAULT_RUN_MEMORY_MIB
 
 
 @dataclass(frozen=True)

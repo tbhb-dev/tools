@@ -44,6 +44,7 @@ from test_alpha_agent_settings import EXAMPLE
 from tbhbdev import secrets
 from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import (
+    admission,
     codex_install,
     credentials,
     host_tools,
@@ -116,6 +117,7 @@ def fake_secrets(
     monkeypatch.setattr(
         run_host, "TAINT_DIRECTORY", tmp_path / "host-taint", raising=False
     )
+    monkeypatch.setattr(admission, "ROOT", tmp_path / "admission")
     monkeypatch.setattr(secrets, "read", read)
     monkeypatch.setattr(credentials, "installation_token", installation)
 
@@ -901,6 +903,20 @@ def test_hidden_dispatch_reads_request_and_restores_handlers(
     assert files.path("json").read_text() == "driver metadata"
 
 
+def test_run_host_refuses_when_host_has_zero_slots(config_file: Path) -> None:
+    config_file.write_text(
+        EXAMPLE.replace("[[agent.host]]", "[[agent.host]]\nmax_concurrent_runs = 0")
+    )
+    files = runfiles.RunFiles(
+        runfiles.state_home(Path.home()) / "tbhbdev" / "agent-runs", "example"
+    )
+    files.write("request.json", json.dumps(request.to_dict(run_request())))
+    files.write("prompt", "example")
+    assert run_host.main(["example", "--host", "example-linux"], "run-host") == 1
+    assert files.path("rc").read_text() == "1\n"
+    assert "max_concurrent_runs=0" in files.path("log").read_text()
+
+
 @pytest.mark.parametrize(
     "case", ["host", "list", "duplicate", "rc", "pgid", "account", "profile", "missing"]
 )
@@ -1240,6 +1256,7 @@ def recorded(self, suffix, text):
     if suffix == "phase" and text == "running":
         print("ready", flush=True)
 runfiles.RunFiles.write = recorded
+run_host.admission.ROOT = run.files.root / "admission"
 sys.exit(run_host.main(["example", "--host", "example-linux"], "example run-host"))
 '''
     supervisor = subprocess.Popen(

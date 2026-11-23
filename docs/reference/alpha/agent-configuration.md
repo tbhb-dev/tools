@@ -2,11 +2,9 @@
 description: Agent settings, run requests, and host preparation.
 generated:
   - role: generated
-    harness: codex:0.166.0
-    model: openai:gpt-6.2-sol
-    effort: high
-    surface: exec
-    at: "2026-11-23T03:17:35Z"
+    harness: codex:0.171.0
+    model: openai:gpt-6
+    at: "2026-11-23T04:48:48Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -22,6 +20,10 @@ type: Reference
 `agent exec` records the launching session's name and `CLAUDE_CODE_SESSION_ID` in the run record, and `agent status` prints `launcher=NAME`. The name is the tmux pane title of the launching process's pane, without its leading status glyph. A reviewer-role run, meaning `--role reviewer` or `--profile review`, starts only from a session on the review-launcher list, never from the session that owns the repository, and never when the name is missing. The built-in list names the `coord-review-N` sessions. `agent-review-launchers.json` in the state directory adds launchers and owners: `launchers` maps a session name to a list of `org/name` repositories, or to null for any repository, and `owners` maps a repository name to its owner session when that session isn't named for it. A malformed file refuses the launch. The list guards against honest mistakes by cooperating sessions; a session that forges its pane title isn't stopped.
 
 `agent exec` reads the run host once before it transfers anything. It refuses the launch and prints the numbers when the 1-minute load reaches the host's load limit, when available memory falls under a share of total memory, or when used swap passes a share of total swap. Each `[[agent.host]]` table sets its own values. `load_limit` defaults to the host's logical CPU count, `min_memory_available_percent` defaults to 20 and `max_swap_used_percent` defaults to 80. Set a lower `load_limit` on a host that also runs services. `limits_warn_only = true` prints the same numbers as a warning and lets the launch continue. A failed or unreadable read refuses with `cannot read host limits`. The caller must pass `--ignore-limits` to launch anyway, or the host sets `limits_warn_only = true`, which turns the refusal into a warning. The run record keeps an `--ignore-limits` choice. Older run records without the field load as `false`.
+
+`[agent]` sets the optional memory reservations as positive integers in MiB. `run_memory_mib` sets the build reservation and defaults to 6144 MiB (6 GiB). `review_memory_mib` defaults to the configured build reservation. The launch check also requires available memory to meet the reservation for the requested profile. Linux reads `MemAvailable`. On macOS, the check sums four counts from `vm_stat`, `Pages free`, `Pages inactive`, `Pages speculative`, and `Pages purgeable`, and multiplies the sum by the page size.
+
+Each `[[agent.host]]` can set `max_concurrent_runs` to a non-negative integer. It defaults to 3. Set it to 0 for a host that only runs CI, or to 1 for a host that only runs reviews. The host supervisor reserves a slot from preparation through cleanup. A limit of 3 allows up to 2 builds and leaves a slot for the `review` profile. Reviews can also use any available slots that builds can use. A launch with no eligible slot fails immediately. `--ignore-limits` and `limits_warn_only` apply to the load, memory, and swap checks. Use the same slot limit in every account's configuration on the host.
 
 `agent exec` exports one launch span named `tbhbdev alpha agent exec`. Its duration covers the launcher, and its launch attributes are `tbhb.agent.host`, `tbhb.agent.harness`, `tbhb.agent.model`, `tbhb.agent.profile`, `tbhb.agent.outcome` and `tbhb.run.id` (the run name). Outcome is `ok` for exit code zero, `refused` for a host-limit refusal and `failed` for another failure. The library accepts strings of at most 128 characters. These are the only launch attributes exported; the library also supplies command and service names, package version, exit code, error type and a drop counter. No prompt, prompt path, owner value, authorization, SSH output or other argument values are exported.
 
