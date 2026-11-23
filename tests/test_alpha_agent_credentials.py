@@ -1266,7 +1266,7 @@ def test_push_token_asks_for_write_on_the_one_repository(
     token = credentials.push_token(run_request(), pull_requests_settings())
     assert token == REVIEW_TOKEN
     assert [keywords["permissions"] for keywords in seen] == [
-        {"contents": "write", "pull_requests": "write"}
+        {"contents": "write", "pull_requests": "write", "workflows": "write"}
     ]
     assert [keywords["repository"] for keywords in seen] == ["tbhb-dev/example-repo"]
 
