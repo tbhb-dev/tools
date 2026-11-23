@@ -1284,7 +1284,10 @@ def main(
         # Anything that fails before this lock is held, including taking the
         # lock, belongs to a waiter and writes nothing: the records are the
         # run that holds the lock.
-        with runfiles.locked(files.path("run.lock")):
+        with (
+            runfiles.locked(files.path("run.lock")),
+            ownership.reservation(files, owned=args.owned),
+        ):
             # Outside the try below: a refusal here, or an interrupt that
             # replaces it, must leave the earlier run's records alone.
             refuse_started(files)

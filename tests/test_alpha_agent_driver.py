@@ -353,9 +353,10 @@ def test_review_without_ref_starts_nothing(
     assert remote.records("ssh") == []
 
 
-@pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT])
+@pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT, ""])
 def test_review_ref(remote: Remote, ref: str) -> None:
-    remote.configure(refs=f"{COMMIT}\t{ref}\n")
+    selected = ref or "HEAD"
+    remote.configure(refs=f"{COMMIT}\t{selected}\n")
     assert launch(remote, "--profile", "review", "--ref", ref) == 0
     assert (
         json.loads((remote.state / "sample.request.json").read_text())["commit"]
@@ -376,8 +377,8 @@ def test_review_ref(remote: Remote, ref: str) -> None:
                     "--exit-code",
                     "--",
                     "git@github.com:example-org/example-repo.git",
-                    ref,
-                    ref + "^{}",
+                    selected,
+                    selected + "^{}",
                 ],
                 "stdin": "",
             }

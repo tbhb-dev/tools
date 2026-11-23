@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from fake_tool import write_fake
 
 from tbhbdev import version
-from tbhbdev.alpha.agent.decisions import argv
+from tbhbdev.alpha.agent.decisions import argv, remote
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,7 +40,7 @@ if name == "ssh":
     if len((root / "ssh.jsonl").read_text().splitlines()) > 20:
         raise AssertionError("ssh call budget exceeded")
     if "# tbhbdev-limits" in args[-1]:
-        print(control.get("limits", "0.5 4 1000 900 100 0"))
+        print(control.get("limits", "0.5 4 33554432 25165824 100 0"))
         sys.exit(control.get("limits_rc", 0))
     plan = control.get("ssh", [])
     if plan:
@@ -59,10 +59,19 @@ if name == "ssh":
     assert command[:2] in (["/bin/bash", "-c"], ["/bin/zsh", "-c"])
     env = {"PATH": os.environ["PATH"], "EXAMPLE_REMOTE": str(root),
            "HOME": str(root / "home"), "XDG_STATE_HOME": str(root / "state")}
-    script = command[2].replace(
+    script = shlex.split(command[2])[2].replace(
         "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=" + os.environ["PATH"])
     script = script.replace("/var/tmp/tbhbdev-agent-taint", str(root / "markers"))
+    script = script.replace(
+        "/var/tmp/tbhbdev-agent-admission", str(root / "admission"))
     script = script.replace("/tmp/example-sockets", str(root / "sockets"))
+    reading = control.get("capacity", "0.5 4 33554432 25165824 100 0")
+    measured = (
+        "exit 1\\n" if control.get("capacity_read_fails")
+        else "printf '%s\\n' " + shlex.quote(reading) + "\\n"
+    )
+    script = script.replace(
+        shlex.quote(LIMIT_NUMBERS)[1:-1], shlex.quote(measured)[1:-1])
     result = subprocess.run(["/bin/sh", "-c", script], input=data, env=env)
     sys.exit(result.returncode)
 if name == "tbhbdev":
@@ -191,7 +200,8 @@ def setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     for name in ("ssh", "tmux", "git", "tbhbdev"):
         write_standalone_fake(
             tools / name,
-            BODY.replace(
+            f"LIMIT_NUMBERS = {remote.limit_numbers()!r}\n"
+            + BODY.replace(
                 'root = Path(os.environ["EXAMPLE_REMOTE"])',
                 f"root = Path({str(root)!r})",
             ),

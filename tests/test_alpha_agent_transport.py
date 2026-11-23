@@ -79,14 +79,40 @@ def test_transport_bounds(
     )
 
 
-def test_remote_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("code", "output", "error", "message"),
+    [
+        (
+            255,
+            b"private remote output",
+            transport.TransportError,
+            "example-linux: remote command failed (255)",
+        ),
+        (
+            remote.ADMISSION_REFUSAL,
+            b" live runs 3, free memory 0 KiB: capacity\x00\xff\n",
+            transport.AdmissionError,
+            (
+                "example-linux: live runs 3, free memory 0 KiB: capacity\ufffd; "
+                "pass --ignore-limits to launch anyway"
+            ),
+        ),
+    ],
+)
+def test_remote_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    code: int,
+    output: bytes,
+    error: type[Exception],
+    message: str,
+) -> None:
     async def fail(_args: tuple[str, ...], _data: bytes) -> tuple[int, bytes]:
-        return 255, b"private remote output"
+        return code, output
 
     monkeypatch.setattr(transport, "execute", fail)
-    with pytest.raises(transport.TransportError) as caught:
+    with pytest.raises(error) as caught:
         transport.call(settings(), LINUX, ("true",))
-    assert str(caught.value) == "example-linux: remote command failed (255)"
+    assert str(caught.value) == message
 
 
 @pytest.mark.parametrize("timeout", [None, 7.5])
@@ -141,8 +167,9 @@ def test_shell_default_data(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("schema", [None, '{"type":"object"}'])
+@pytest.mark.parametrize("ignore", [False, True])
 def test_stream_modes_and_budget(
-    monkeypatch: pytest.MonkeyPatch, schema: str | None
+    monkeypatch: pytest.MonkeyPatch, schema: str | None, *, ignore: bool
 ) -> None:
     def shell(
         config: model.Settings,
@@ -154,7 +181,9 @@ def test_stream_modes_and_budget(
     ) -> str:
         assert config == settings()
         assert host == LINUX
-        assert script == remote.transfer("example", settings().sockets_dir)
+        assert script == remote.transfer(
+            "example", settings().sockets_dir, admission=None if ignore else LINUX
+        )
         assert timeout == 4.5
         assert stdin is not None
         assert stdin.owner == "example-owner"
@@ -179,7 +208,9 @@ def test_stream_modes_and_budget(
         settings(),
         LINUX,
         "example",
-        inputs=transport.Inputs("request", "brief é", schema, "example-owner"),
+        inputs=transport.Inputs(
+            "request", "brief é", schema, "example-owner", ignore_limits=ignore
+        ),
         timeout=4.5,
     )
 

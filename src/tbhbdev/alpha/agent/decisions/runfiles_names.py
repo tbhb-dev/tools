@@ -1,6 +1,8 @@
 """The coordinator's file contract with run-host, relative to the run directory."""
 
 DIRECTORY = "tbhbdev/agent-runs"
+# The host scripts verify the sticky directory before sharing it across accounts.
+ADMISSION_DIR = "/var/tmp/tbhbdev-agent-admission"  # noqa: S108  # nosec B108
 REQUEST = ".request.json"
 PROMPT = ".prompt"
 SCHEMA = ".schema.json"

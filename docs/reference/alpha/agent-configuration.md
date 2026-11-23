@@ -2,11 +2,11 @@
 description: Agent settings, run requests, and host preparation.
 generated:
   - role: generated
-    harness: codex:0.166.0
-    model: openai:gpt-6.1-sol
+    harness: codex:0.171.0
+    model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    at: "2026-11-22T00:47:49Z"
+    at: "2026-11-23T02:56:58Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -21,7 +21,11 @@ type: Reference
 
 `agent exec` records the launching session's name and `CLAUDE_CODE_SESSION_ID` in the run record, and `agent status` prints `launcher=NAME`. The name is the tmux pane title of the launching process's pane, without its leading status glyph. A reviewer-role run, meaning `--role reviewer` or `--profile review`, starts only from a session on the review-launcher list, never from the session that owns the repository, and never when the name is missing. The built-in list names the `coord-review-N` sessions. `agent-review-launchers.json` in the state directory adds launchers and owners: `launchers` maps a session name to a list of `org/name` repositories, or to null for any repository, and `owners` maps a repository name to its owner session when that session isn't named for it. A malformed file refuses the launch. The list guards against honest mistakes by cooperating sessions; a session that forges its pane title isn't stopped.
 
-`agent exec` reads the run host once before it transfers anything. It refuses the launch and prints the numbers when the 1-minute load reaches the host's load limit, when available memory falls under a share of total memory, or when used swap passes a share of total swap. Each `[[agent.host]]` table sets its own values. `load_limit` defaults to the host's logical CPU count, `min_memory_available_percent` defaults to 20 and `max_swap_used_percent` defaults to 80. Set a lower `load_limit` on a host that also runs services. `limits_warn_only = true` prints the same numbers as a warning and lets the launch continue. A failed or unreadable read refuses with `cannot read host limits`. The caller must pass `--ignore-limits` to launch anyway, or the host sets `limits_warn_only = true`, which turns the refusal into a warning. The run record keeps an `--ignore-limits` choice. Older run records without the field load as `false`.
+`agent exec` checks 1-minute load, available memory as a share of total memory, and used swap before it transfers inputs. Each `[[agent.host]]` table sets its own values. `load_limit` defaults to the host's logical CPU count, `min_memory_available_percent` defaults to 20, and `max_swap_used_percent` defaults to 80. `limits_warn_only = true` turns failures of this initial check into warnings.
+
+When the host claims the run name, it also reserves capacity under a host-wide lock. The number of existing reservations must be below `max_concurrent_runs` (default 3). Current available memory must cover `run_memory_mib` (default 6144) for each existing reservation and for the new run. Both settings accept positive integers. A refusal reports the run count, available memory, and the limit. The supervisor releases the reservation after recording completion. Use `agent clean --force` to release an abandoned reservation after the session ends. Existing launches from the same account count until they complete. Runs from earlier releases under other accounts become visible once they launch with host-wide reservations.
+
+`--ignore-limits` lets a launch bypass enforcement of both checks. The launch still reserves capacity and counts toward later admissions. The run record keeps the override.
 
 Use the hidden host command as `tbhbdev alpha agent run-host NAME [REQUEST] --host HOST [--prompt FILE] [--preflight] [--owned]`. The driver's tmux start passes `--owned`. With the flag, run-host checks that `<name>.owner`, which the driver wrote, is a private regular file, and doesn't create it. The run ID itself never appears in a command line: the driver sends it as the first line of stdin to each remote script, which compares it with the file. Without the flag, run-host creates the owner file and refuses a name that already has one. Supply a versioned JSON request through `REQUEST`, stdin with `REQUEST` set to `-`, or `<name>.request.json` by leaving out the path. A prompt path defaults to the run's recorded prompt. Config must list the host. During setup, run-host fetches a bare mirror over HTTPS under `$XDG_STATE_HOME/tbhbdev/agent-mirrors/github.com/<owner>/<repo>.git` and creates a separate clone at `<account clone>/.worktrees/agent-<name>`. It reads credentials through the secrets library. It then starts the harness with the policy's explicit environment and records its exit. Run files and the index live under `tbhbdev/agent-runs` in the state directory. SIGHUP, SIGTERM, and SIGINT stop the harness group and refresh Codex auth before run-host writes `<name>.rc`. After the harness stops, whether the run succeeded or failed, run-host runs `bazelisk shutdown` (or `bazel shutdown`) in the run worktree so the run leaves no Bazel server behind. It waits up to 60 seconds and records `rc=N`, `timed out`, `failed to run` or `skipped` as `bazel_shutdown` in the completion index entry.
 
@@ -100,6 +104,8 @@ account = "agent"
 # unsandboxed = true # Legacy flag; neither value gates a run.
 accounts = ["agent"]
 proven_harnesses = ["codex"]
+# max_concurrent_runs = 3
+# run_memory_mib = 6144
 ```
 
 Run-host finds harness executables through the account’s PATH, then `$HOME/.local/bin`, `$HOME/.local/gh-bin`, `$HOME/.bun/bin`, `$HOME/.npm-global/bin`, `/usr/local/bin`, `/opt/homebrew/bin` and the system directories. It uses the run account’s home for these paths. It ignores `sandbox.path` for executable lookup and grants no sandbox read or write paths.

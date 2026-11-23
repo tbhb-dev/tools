@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import json
+import os
+import shlex
 import subprocess
 import sys
 from typing import TYPE_CHECKING
 
 import pytest
-from agent_driver_example import Remote, setup
+from agent_driver_example import Remote, setup, write_standalone_fake
 from agent_example import LINUX, MARKER, settings
 
 from tbhbdev.alpha import agent
-from tbhbdev.alpha.agent import driver, taint_store
+from tbhbdev.alpha.agent import driver, ownership, runfiles, taint_store
 from tbhbdev.alpha.agent.decisions import limits, remote, taint
 from tbhbdev.alpha.agent.model import Invalid
 
@@ -135,6 +138,41 @@ def run_script(script: str) -> tuple[int, str]:
 
 
 @pytest.mark.parametrize(
+    ("swap", "expected"),
+    [
+        (
+            "total = 100.00M used = 10.00M free = 90.00M",
+            (0, "1.25 8 32768 40 102400 10240\n"),
+        ),
+        ("total = invalid used = 10.00M free = 90.00M", (1, "")),
+    ],
+)
+def test_macos_numbers_with_fake_host_tools(
+    tmp_path: Path, swap: str, expected: tuple[int, str]
+) -> None:
+    write_standalone_fake(tmp_path / "uname", "print('Darwin')")
+    readings = {
+        "vm.loadavg": "{ 1.25 2.0 3.0 }",
+        "hw.logicalcpu": "8",
+        "hw.memsize": "33554432",
+        "vm.swapusage": swap,
+    }
+    write_standalone_fake(
+        tmp_path / "sysctl", f"import sys\nprint({readings!r}[sys.argv[2]])"
+    )
+    pages = (
+        "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
+        "Pages free: 1.\nPages inactive: 2.\n"
+        "Pages speculative: 3.\nPages purgeable: 4.\n"
+    )
+    write_standalone_fake(tmp_path / "vm_stat", f"print({pages!r}, end='')")
+    script = (
+        f"PATH={shlex.quote(str(tmp_path))}:/usr/bin:/bin\n" + remote.limit_numbers()
+    )
+    assert run_script(script) == expected
+
+
+@pytest.mark.parametrize(
     "text", ["read l _ < /proc/loadavg", "c=$(nproc)", "v=$(vm_stat)"]
 )
 def test_every_other_read_ends_the_script_nonzero_too(text: str) -> None:
@@ -244,11 +282,66 @@ def test_a_busy_host_refuses_before_any_transfer(
 def test_ignore_limits_launches_warns_and_is_recorded(
     host: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    host.configure(limits="9 4 1000 900 100 0")
+    host.configure(limits="9 4 1000 900 100 0", capacity="1 4 1000 0 100 0")
     assert launch(host, "--ignore-limits") == 0
     assert "warning: example-linux: load 9 >= limit 4" in capsys.readouterr().err
     assert json.loads(driver.metadata_path("sample").read_text())["ignore_limits"]
     assert driver.load(CONFIG, "sample").ignore_limits
+    assert len(list((host.root / "admission").glob("claim.*"))) == 1
+
+
+def test_capacity_refusal_leaves_no_claim_and_allows_retry(
+    host: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (host.state / "earlier.owner").write_text("earlier-owner\n")
+    host.configure(capacity="1 4 33554432 12582911 100 0")
+    assert launch(host) == 1
+    assert (
+        "example-linux: live runs 1, free memory 12582911 KiB: insufficient "
+        "memory for a 6144 MiB reservation; pass --ignore-limits to launch anyway"
+        in capsys.readouterr().err
+    )
+    assert not driver.metadata_path("sample").exists()
+    assert not (host.state / "sample.owner").exists()
+    assert not (host.state / "sample.request.json").exists()
+    assert not any("new-session" in str(r["args"]) for r in host.records("tmux"))
+
+    (host.state / "earlier.rc").write_text("0\n")
+    host.configure(capacity="1 4 33554432 6291456 100 0")
+    assert launch(host) == 0
+
+
+def test_capacity_refuses_a_failed_fresh_read(
+    host: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    host.configure(capacity_read_fails=True)
+    assert launch(host) == 1
+    assert "live runs 0, free memory unknown: cannot read host limits" in (
+        capsys.readouterr().err
+    )
+    assert not driver.metadata_path("sample").exists()
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_supervisor_releases_only_its_completed_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, completed: bool
+) -> None:
+    shared = tmp_path / "admission"
+    shared.mkdir()
+    monkeypatch.setattr(ownership, "ADMISSION_DIR", str(shared))
+    files = runfiles.RunFiles(tmp_path / "state", "sample")
+    files.write("owner", "example-owner\n")
+    digest = hashlib.sha256(b"example-owner\n").hexdigest()
+    claim = shared / f"claim.{os.getuid()}.sample.{digest}"
+    claim.touch()
+    unrelated = claim.with_name(claim.name + "-other")
+    unrelated.touch()
+    with ownership.reservation(files, owned=True):
+        assert claim.is_file()
+        if completed:
+            files.write("rc", "0\n")
+    assert claim.is_file() is not completed
+    assert unrelated.is_file()
 
 
 def test_a_failed_read_refuses(

@@ -1,12 +1,18 @@
 """Exclusive host-side claims for run names."""
 
+import hashlib
 import os
 import stat
+from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING
 
+from tbhbdev.alpha.agent import runfiles
+from tbhbdev.alpha.agent.decisions.runfiles_names import ADMISSION_DIR
 from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from tbhbdev.alpha.agent.runfiles import RunFiles
 
 
@@ -73,3 +79,24 @@ def claim(
         output.write("host\n")
         output.flush()
         os.fsync(output.fileno())
+
+
+@contextmanager
+def reservation(files: RunFiles, *, owned: bool) -> Generator[None]:
+    """Release the exact driver's reservation when the supervisor records its exit."""
+    if not owned:
+        yield
+        return
+    owner = runfiles.read_owned(files.path("owner"), 128, "run owner")
+    digest = hashlib.sha256(owner.encode()).hexdigest()
+    name = f"claim.{os.getuid()}.{files.name}.{digest}"
+    try:
+        yield
+    finally:
+        if files.path("rc").is_file():
+            with suppress(OSError):
+                directory = os.open(ADMISSION_DIR, os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.unlink(name, dir_fd=directory)
+                finally:
+                    os.close(directory)
