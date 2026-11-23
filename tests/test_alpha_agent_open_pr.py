@@ -413,7 +413,8 @@ def test_unavailable_scan_policy_refuses(
 
 
 UNNAMED = "the scanner refused for a reason the log doesn't name"
-FINDING = "rule fixture-rule on line 3"
+FINDING = "rule fixture-rule on line 3; rule other-rule on line 9"
+FINDING_LOG = "gitleaks finds a secret on lines: 3, 9"
 
 
 @pytest.mark.parametrize("committed", [False, True])
@@ -428,12 +429,17 @@ FINDING = "rule fixture-rule on line 3"
         (
             "private scanner detail",
             FINDING,
-            FINDING,
+            FINDING_LOG,
         ),
         (
             "cannot scan x for secrets: gitleaks failed (exit 2): SECRET-TEXT",
             None,
             "gitleaks failed (exit 2)",
+        ),
+        (
+            "cannot scan x for secrets: gitleaks failed (exit -9): SECRET-TEXT",
+            None,
+            "gitleaks failed (exit -9)",
         ),
         (
             "cannot scan x: the private gitleaks config /p cannot be read (n)",
@@ -482,6 +488,9 @@ def test_a_scan_refusal_prevents_posting(
         open_draft(published)
     assert str(captured.value) == f"PR draft secret scan refused: {reason}"
     assert "SECRET-TEXT" not in str(captured.value)
+    assert "fixture-rule" not in str(captured.value)
+    assert captured.value.__cause__ is None
+    assert captured.value.__suppress_context__
 
 
 @pytest.mark.parametrize("error", [UnicodeError("x"), Invalid("x")])
@@ -496,5 +505,5 @@ def test_a_draft_read_failure_names_its_class(
     monkeypatch.setattr(gitleaks_check, "scan_text", refuse)
     with pytest.raises(open_pr.OpenRefusedError) as captured:
         open_draft(published)
-    reason = f"{type(error).__name__} while reading the draft"
+    reason = f"{type(error).__name__} while scanning the draft"
     assert str(captured.value) == f"PR draft secret scan refused: {reason}"
