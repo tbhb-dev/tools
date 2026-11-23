@@ -1698,6 +1698,28 @@ def test_an_unset_origin_head_reads_the_remotes_own_default(
     assert pr.default_base() == "dev"
 
 
+def test_create_reads_the_default_branch_once(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answers = iter(["trunk", "dev", "other"])
+    read = Mock(side_effect=lambda: next(answers))
+    monkeypatch.setattr(pr, "default_base", read)
+    counted = Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None))
+    monkeypatch.setattr(size_gate, "size_counts", counted)
+    trailers = Mock(return_value=[])
+    monkeypatch.setattr(pr, "branch_trailers", trailers)
+    world.git("update-ref", "refs/remotes/origin/trunk", "HEAD")
+    write_draft(world)
+    assert run_main("create") == 0
+    assert read.call_count == 1
+    assert counted.call_args.args[0] == "refs/remotes/origin/trunk"
+    trailers.assert_called_once_with("trunk")
+    _, call = world.calls("gh")
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    assert argv[-2:] == ["--base", "trunk"]
+
+
 @pytest.mark.parametrize("kind", ["unreachable", "empty"])
 def test_an_unreadable_remote_default_refuses_without_a_guess(
     world: World, tmp_path: Path, kind: str
