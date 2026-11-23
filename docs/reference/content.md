@@ -2,9 +2,11 @@
 description: Shared GitHub issue and project writes for plugins.
 generated:
   - role: generated
-    harness: codex
-    model: openai:gpt-6
-    at: "2026-11-22T19:21:50Z"
+    harness: codex:0.166.0
+    model: openai:gpt-6.2-sol
+    effort: high
+    surface: exec
+    at: "2026-11-23T02:49:55Z"
 status: stable
 tags: [plugins]
 title: Content writes
@@ -13,7 +15,7 @@ type: Reference
 
 # Content writes
 
-`tbhbdev.content` is the shared library for GitHub content writes by the `pm` and `sm` plugins. Import it directly; it has no CLI command or templates.
+`tbhbdev.content` provides content checks and GitHub writes for the `pm` and `sm` plugins. Import the library directly.
 
 - `render(template_path, data)` replaces `{{key}}` placeholders with mapping values. A missing key raises `KeyError`.
 - `create_issue(repo, title, body, *, issue_type, labels=(), fields=None, project=None, client=None)` creates an issue with its type and labels. `repo` is `owner/repo`. When given a project, it adds the issue and sets the fields after creation.
@@ -33,6 +35,18 @@ With `dry_run=True`, text is scanned, no REST or GraphQL write is sent, and no a
 - Closing with a comment returns `{"comment": {"body": "..."}, "issue": {"state": "closed", "state_reason": "..."}}`.
 - Adding to a project returns `add_item` with a GraphQL `query` and `variables`, plus `set_fields`, a list of GraphQL payloads. Field updates use `<created-project-item-id>` for the ID returned by the addition.
 - Creating with a project returns `issue` with the REST payload and `project` with the project preview above. The addition uses `<created-issue-node-id>` for the ID returned by issue creation. Without a project, creation returns the REST payload directly.
+
+## Decision records
+
+```python
+check_decision_record(markdown: str) -> list[str]
+```
+
+Pass the Markdown body starting with a hash-prefixed H1 title. The caller removes frontmatter. An empty list means the body passes. Each string in a nonempty list describes a refusal.
+
+The title needs at least four visible words and cannot end in a colon or question mark. The H2 sections are Context, Decision, Options considered (optional), and Consequences, in that order. These are the only headings after the title. The word caps for Context, Decision, and Consequences are 150, 120, and 150 respectively. Options considered can hold up to five flat bullets of at most 25 words each. The 450-word body cap uses visible text and excludes the title and section headings. [Content model](content-model.md)
+
+Write each paragraph on one source line, including paragraphs within bullets. A sentence cannot start a line as a quotation. Tables, code blocks, and block quotes are forbidden.
 
 ## Secret scan
 
