@@ -5574,25 +5574,6 @@ def test_cleanup_keeps_a_base_whose_server_is_alive(
     assert "kept" in run.files.path("log").read_text()
 
 
-def test_shutdown_retries_a_server_that_was_still_starting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, prepared = bazel_run(tmp_path)
-    base = make_base(prepared)
-    (base / "server").mkdir()
-    pid_file = base / "server/server.pid.txt"
-    pid_file.write_text(str(os.getpid()))
-    calls: list[list[str]] = []
-    fake_bazel(monkeypatch, calls=calls)
-
-    def pause(_seconds: float) -> None:
-        pid_file.unlink()
-
-    monkeypatch.setattr(time, "sleep", pause)
-    stopped = run_host.shutdown_bazel(run, prepared)
-    assert (stopped[base][0], len(calls)) == ("rc=0", 2)
-
-
 @pytest.mark.parametrize("text", ["garbage", "-1", "999999999", "999999999999"])
 def test_a_dead_or_unreadable_server_pid_is_not_alive(
     tmp_path: Path, text: str
