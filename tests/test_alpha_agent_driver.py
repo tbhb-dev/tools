@@ -33,7 +33,7 @@ from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import driver, model, render, taint_store, transport
 from tbhbdev.alpha.agent.decisions import remote as remote_commands
 from tbhbdev.alpha.agent.decisions import repo, request, runfiles_names, taint
-from tbhbdev.alpha.agent.model import Invalid, Profile, RunKind
+from tbhbdev.alpha.agent.model import Invalid, Profile, RunKind, RunRequest
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -551,13 +551,14 @@ def test_another_commit_profile_or_pair_member_does_not_count_as_a_duplicate(
 ) -> None:
     second = recorded_review(remote)
     (driver.directory() / "broken.json").write_text("{")
-    second.request = (
-        dataclasses.replace(second.request, commit=OTHER_COMMIT)
-        if change == "commit"
-        else dataclasses.replace(second.request, profile=Profile.BUILD)
-        if change == "profile"
-        else dataclasses.replace(second.request, **{change: "b"})
-    )
+    changes: dict[str, RunRequest] = {
+        "commit": dataclasses.replace(second.request, commit=OTHER_COMMIT),
+        "profile": dataclasses.replace(second.request, profile=Profile.BUILD),
+        "variant": dataclasses.replace(second.request, variant="b"),
+        "role": dataclasses.replace(second.request, role="b"),
+        "class_": dataclasses.replace(second.request, class_="b"),
+    }
+    second.request = changes[change]
     driver.refuse_live_duplicate(CONFIG, second)
 
 
