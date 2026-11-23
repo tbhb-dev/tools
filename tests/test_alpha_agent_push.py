@@ -21,7 +21,6 @@ from tbhbdev.alpha.agent import (
     push,
     run_host,
     runfiles,
-    worktree,
 )
 
 if TYPE_CHECKING:
@@ -151,7 +150,7 @@ def test_push_success(
 ) -> None:
     run, prepared, target = local_run
     original = push.send
-    history = worktree.git
+    history = push.outside_history
     workspace = Path(prepared.paths.worktree)
     base = git(workspace, "rev-parse", "HEAD")
 
@@ -183,17 +182,11 @@ def test_push_success(
     monkeypatch.setattr(open_pr, "open_pull_request", open_request)
     monkeypatch.setattr(push, "send", send)
 
-    def reachable(directory: Path, *args: str) -> str:
+    def reachable(directory: Path, tip: str, bases: tuple[str, ...]) -> bool:
         assert directory.parent == run.files.root
-        assert args == (
-            "rev-list",
-            "--max-count=1",
-            git(workspace, "rev-parse", "HEAD"),
-            "--not",
-            base,
-            "--",
-        )
-        return history(directory, *args)
+        assert tip == git(workspace, "rev-parse", "HEAD")
+        assert bases == (base,)
+        return history(directory, tip, bases)
 
     def open_pull_request(published: open_pr.PublishedRange, *details: object) -> int:
         assert published.git_dir.parent == run.files.root
@@ -206,7 +199,7 @@ def test_push_success(
         )
         return 7
 
-    monkeypatch.setattr(worktree, "git", reachable)
+    monkeypatch.setattr(push, "outside_history", reachable)
     monkeypatch.setattr(open_pr, "open_pull_request", open_pull_request)
     with ExitStack() as stack:
         assert push.run(run, prepared, stack, harness, SYNTHETIC) == 0
