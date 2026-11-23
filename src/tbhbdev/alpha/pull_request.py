@@ -1592,26 +1592,42 @@ def opened_by(env: Mapping[str, str]) -> tuple[str | None, str | None]:
     return ident.root, f"{OPENED_KEY}: {value}"
 
 
+def check_size(args: argparse.Namespace, checked: Checked) -> None:
+    """Count the branch's added lines and flag a count over either limit.
+
+    ``pr check`` only warns when the count is unavailable. ``pr create`` fails
+    closed, so no oversized pull request opens on a missing counter.
+    """
+    if args.command not in ("check", "create"):
+        return
+    try:
+        counts = size_gate.size_counts("origin/main", "HEAD")
+    except size_gate.SizeCountError as exc:
+        why = f"size count unavailable: {exc}"
+        if args.command == "create":
+            checked.problems.append((1, why))
+            print(f"{args.draft}:1: {why}")
+        else:
+            print(why, file=sys.stderr)
+        return
+    if args.command == "check":
+        print(f"{counts.code_lines} code lines, limit {counts.code_limit}")
+        print(f"{counts.raw_lines} raw lines, limit {counts.raw_limit}")
+    if counts.failed is not None:
+        count, limit = (
+            (counts.code_lines, counts.code_limit)
+            if counts.failed == "code"
+            else (counts.raw_lines, counts.raw_limit)
+        )
+        why = f"{count} lines, limit {limit}: split into stacked PRs"
+        checked.problems.append((1, why))
+        print(f"{args.draft}:1: {why}")
+
+
 def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     """Run the chosen subcommand."""
     checked = read_checked(args.draft)
-    if args.command == "check":
-        try:
-            counts = size_gate.size_counts("origin/main", "HEAD")
-        except size_gate.SizeCountError as exc:
-            print(f"size count unavailable: {exc}", file=sys.stderr)
-        else:
-            print(f"{counts.code_lines} code lines, limit {counts.code_limit}")
-            print(f"{counts.raw_lines} raw lines, limit {counts.raw_limit}")
-            if counts.failed is not None:
-                count, limit = (
-                    (counts.code_lines, counts.code_limit)
-                    if counts.failed == "code"
-                    else (counts.raw_lines, counts.raw_limit)
-                )
-                why = f"{count} lines, limit {limit}: split into stacked PRs"
-                checked.problems.append((1, why))
-                print(f"{args.draft}:1: {why}")
+    check_size(args, checked)
     if checked.problems:
         return 1
     if args.command == "check":

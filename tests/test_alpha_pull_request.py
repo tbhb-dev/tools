@@ -1564,6 +1564,49 @@ def test_create_passes_gh_errors_through(
     assert world.git("status", "--porcelain", "--ignored").count("push") == 0
 
 
+@pytest.mark.parametrize(
+    ("counts", "line"),
+    [
+        (size_gate.SizeCounts(401, 400, 900, 1500, "code"), "401 lines, limit 400"),
+        (size_gate.SizeCounts(100, 400, 1501, 1500, "raw"), "1501 lines, limit 1500"),
+    ],
+)
+def test_create_refuses_an_oversized_branch(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    counts: size_gate.SizeCounts,
+    line: str,
+) -> None:
+    monkeypatch.setattr(size_gate, "size_counts", Mock(return_value=counts))
+    write_draft(world)
+    assert run_main("create") == 1
+    assert world.calls("gh") == []
+    assert f":1: {line}: split into stacked PRs" in capsys.readouterr().out
+
+
+def test_create_fails_closed_when_the_count_is_unavailable(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        size_gate, "size_counts", Mock(side_effect=size_gate.SizeCountError("gone"))
+    )
+    write_draft(world)
+    assert run_main("create") == 1
+    assert world.calls("gh") == []
+    assert ":1: size count unavailable: gone" in capsys.readouterr().out
+
+
+def test_create_within_the_limits_prints_no_counts(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_draft(world)
+    assert run_main("create") == 0
+    assert "code lines" not in capsys.readouterr().out
+
+
 def test_create_stops_on_problems(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:

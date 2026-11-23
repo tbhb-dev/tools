@@ -166,6 +166,10 @@ def test_pr_check(
         assert captured.out.endswith("OK: the draft conforms\n")
 
 
+def test_counter_targets_the_rules_repository() -> None:
+    assert sg.COUNTER[2] == "@tbhb_rules//lint:pr_size_count"
+
+
 def test_pr_check_unavailable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
