@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from tbhbdev.alpha.agent.model import Host
 
-ROOT = Path("/var/tmp/tbhbdev-agent-admission")  # noqa: S108 -- checked sticky directory
+ROOT = Path("/var/tmp/tbhbdev-agent-admission")  # noqa: S108  # nosec B108 -- shared host-wide directory by design; an owner check is a follow-up
 _DIRECTORY_MODE = 0o1777
 
 
