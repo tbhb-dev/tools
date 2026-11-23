@@ -25,6 +25,7 @@ from pathlib import Path
 from tbhbdev import userconfig
 from tbhbdev.alpha.agent import (
     admission,
+    bazel_servers,
     build_info,
     codex_install,
     credentials,
@@ -56,8 +57,10 @@ from tbhbdev.alpha.agent.model import (
 from tbhbdev.alpha.agent.ownership import RunExistsError
 from tbhbdev.alpha.identity import RUN_MODEL_ENV
 
+type BazelShutdown = dict[Path, tuple[str, tuple[int, int] | None]]
 
-@dataclass(frozen=True)
+
+@dataclass
 class Run:
     files: runfiles.RunFiles
     request: RunRequest
@@ -67,6 +70,7 @@ class Run:
     tmpdir: Path
     started: float
     deadline: float
+    bazel_shutdown: BazelShutdown | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,8 @@ def planned_paths(run: Run) -> RunPaths:
 
 # These files can alter the next trusted shell or tool invocation.
 _BAZEL_SHUTDOWN_SECONDS = 60
+_BAZEL_SHUTDOWN_RETRIES = 3
+_BAZEL_RETRY_SECONDS = 2
 _STARTUP_FILES = (
     ".zshenv",
     ".zshrc",
@@ -541,7 +547,7 @@ def prepare_workspace(run: Run) -> Prepared:
         delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
     paths = RunPaths(
         home=str(run.home),
-        worktree=str(workspace),
+        worktree=str(workspace.resolve()),
         tmpdir=str(run.tmpdir),
         codex_home=paths.codex_home,
         audit_dir=policy.resolve(str(run.home), run.settings.sandbox.audit_dir),
@@ -772,11 +778,7 @@ def run_harness(
     finally:
         stack.enter_context(process_group.ignore_signals())
         if child is not None:
-            with suppress(OSError):
-                run.files.write("phase", "exited")
-            stopped = process_group.stop_owned(
-                run.files, child.pid, run.settings.kill_grace_seconds, child.poll
-            )
+            stopped = _stop_harness(run, prepared, child)
             if stopped:
                 with suppress(OSError, subprocess.SubprocessError):
                     child.wait()
@@ -942,7 +944,7 @@ def bazel_bases(home: Path, worktree: str) -> tuple[Path, ...]:
     """Pin the output bases Bazel keys by the md5 of the workspace path.
 
     Prepare time computes them once, so a worktree swapped later cannot name
-    another workspace's base. Custom --output_base locations are out of scope.
+    another workspace's base. Only these default bases qualify for deletion.
     """
     names = {
         hashlib.md5(path.encode(), usedforsecurity=False).hexdigest()
@@ -1004,11 +1006,13 @@ def _owned_base(home: Path, base: Path) -> os.stat_result | None:
 def _server_alive(base: Path) -> bool:
     try:
         pid = int((base / "server/server.pid.txt").read_text())
+        if pid <= 0:
+            return False
         os.kill(pid, 0)
     except PermissionError:
         # A live process of another uid, or an unreadable pid file: keep the base.
         return True
-    except OSError, ValueError:
+    except OSError, ValueError, OverflowError:
         # No readable pid file, or no such process, means no server we can see.
         return False
     return True
@@ -1025,7 +1029,7 @@ def _bazel_tool(run: Run) -> str | None:
     return shutil.which("bazelisk", path=search) or shutil.which("bazel", path=search)
 
 
-def _shutdown_base(tool: str, base: Path, worktree: str) -> str:
+def _shutdown_once(tool: str, base: Path, worktree: str) -> str:
     try:
         done = subprocess.run(  # nosec B603
             [tool, f"--output_base={base}", "shutdown"],
@@ -1044,27 +1048,90 @@ def _shutdown_base(tool: str, base: Path, worktree: str) -> str:
     return result
 
 
-def shutdown_bazel(
-    run: Run, prepared: Prepared | None
-) -> dict[Path, tuple[str, tuple[int, int]]]:
-    """Stop the Bazel server of each recorded base, which must be the agent's own.
+def _shutdown_base(tool: str, base: Path, worktree: str) -> str:
+    # A server still starting can answer shutdown with rc 0 before it accepts
+    # commands, so a live server after a clean shutdown gets another attempt.
+    result = _shutdown_once(tool, base, worktree)
+    for _ in range(_BAZEL_SHUTDOWN_RETRIES):
+        if result != "server alive":
+            break
+        time.sleep(_BAZEL_RETRY_SECONDS)
+        result = _shutdown_once(tool, base, worktree)
+    return result
 
-    Maps each base to its shutdown status and its (st_dev, st_ino) at that time.
-    """
-    if prepared is None:
-        return {}
-    tool = _bazel_tool(run)
-    stopped: dict[Path, tuple[str, tuple[int, int]]] = {}
+
+def _recorded_bases(
+    run: Run, prepared: Prepared
+) -> dict[Path, tuple[Path, tuple[int, int]]]:
+    recorded: dict[Path, tuple[Path, tuple[int, int]]] = {}
     for base in prepared.bases:
         status = _owned_base(run.home, base)
         if status is None:
             if os.path.lexists(base):
                 run.files.write("log", f"bazel cleanup: refused {base}\n")
             continue
-        if tool is None:
+        recorded[Path(os.path.realpath(base))] = (base, (status.st_dev, status.st_ino))
+    return recorded
+
+
+def _shutdown_target(
+    tool: str | None, base: Path, worktree: Path, server: bazel_servers.Server | None
+) -> str:
+    if tool is None:
+        return "tool unavailable"
+    if server is not None:
+        if not bazel_servers.matches_pid(base, server.pid):
+            return "server changed"
+        if server.workspace.is_dir():
+            worktree = server.workspace
+    return _shutdown_base(tool, base, str(worktree))
+
+
+def shutdown_bazel(
+    run: Run,
+    prepared: Prepared | None,
+    *,
+    group: int | None = None,
+    servers: dict[Path, bazel_servers.Server] | None = None,
+) -> BazelShutdown:
+    """Stop the run's Bazel servers and mark recorded bases for deletion."""
+    if prepared is None:
+        return {}
+    tool = _bazel_tool(run)
+    worktree = Path(prepared.paths.worktree)
+    recorded = _recorded_bases(run, prepared)
+    targets: dict[Path, bazel_servers.Server | None] = dict.fromkeys(recorded)
+    if servers is None and group is not None:
+        servers = bazel_servers.find(worktree, group)
+    targets.update(servers or {})
+    stopped: BazelShutdown = {}
+    for base, server in targets.items():
+        if server is None and tool is None:
             continue
-        result = _shutdown_base(tool, base, prepared.paths.worktree)
-        stopped[base] = (result, (status.st_dev, status.st_ino))
+        if server is not None and not server.belongs:
+            continue
+        path, identity = recorded.get(base, (base, None))
+        result = _shutdown_target(tool, path, worktree, server)
+        run.files.write("log", f"bazel shutdown: {str(path)!r} ({result})\n")
+        stopped[path] = (result, identity)
+    return stopped
+
+
+def _stop_harness(run: Run, prepared: Prepared, child: subprocess.Popen[str]) -> bool:
+    with suppress(OSError):
+        run.files.write("phase", "exited")
+    # Snapshot ancestry before the harness group stops, but shut the servers
+    # down after it: a shutdown issued while the harness is mid-build waits
+    # for that build. Finish retries the recorded bases if an unexpected error
+    # prevents the second pass from completing.
+    servers: dict[Path, bazel_servers.Server] = {}
+    with suppress(Exception):
+        servers = bazel_servers.find(Path(prepared.paths.worktree), child.pid)
+    stopped = process_group.stop_owned(
+        run.files, child.pid, run.settings.kill_grace_seconds, child.poll
+    )
+    with suppress(Exception):
+        run.bazel_shutdown = shutdown_bazel(run, prepared, servers=servers)
     return stopped
 
 
@@ -1159,7 +1226,7 @@ def _clean_base(
 def cleanup_bazel(
     run: Run,
     prepared: Prepared | None,
-    stopped: dict[Path, tuple[str, tuple[int, int]]],
+    stopped: BazelShutdown,
 ) -> dict[str, int]:
     """Delete the recorded output bases whose server is gone, and the links into them.
 
@@ -1175,6 +1242,8 @@ def cleanup_bazel(
         return freed
     deleted: list[Path] = []
     for base, (result, identity) in stopped.items():
+        if identity is None:
+            continue
         space = _clean_base(run, base, result, identity)
         if space is None:
             continue
@@ -1212,7 +1281,9 @@ def finish(
             process_group.unknown(run.files)
         finally:
             try:
-                stopped = shutdown_bazel(run, prepared)
+                stopped = run.bazel_shutdown
+                if stopped is None:
+                    stopped = shutdown_bazel(run, prepared)
                 bazel = ",".join(sorted({result for result, _ in stopped.values()}))
                 cleanup = cleanup_bazel(run, prepared, stopped)
             except Exception:  # noqa: BLE001
