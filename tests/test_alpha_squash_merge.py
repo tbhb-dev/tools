@@ -46,16 +46,21 @@ GH = """import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 spec = json.load(open(os.path.join(here, "gh.spec")))
 repo = sys.argv[1] == "repo"
+api = sys.argv[1] == "api"
 methods = repo and "mergeCommitAllowed,squashMergeAllowed" in sys.argv
 # A read with no repository argument names the working directory's repository.
-if methods:
+if api:
+    kind = "api_base" if ".merge_base_commit" in sys.argv[-1] else "api_files"
+elif methods:
     kind = "methods"
 elif repo:
     kind = "cwd" if sys.argv[2].startswith("-") else "repo"
 else:
     kind = sys.argv[2] if sys.argv[1] == "pr" else "?"
-# The visibility read has its own log, so it never shifts the other gh calls.
+# The visibility and comparison reads have their own logs, so they never shift
+# the other gh calls.
 logname = "gh.methods.log" if methods else "gh.repo.log" if repo else "gh.log"
+logname = "gh.api.log" if api else logname
 with open(os.path.join(here, logname), "a") as log:
     log.write(json.dumps({{"argv": sys.argv[1:], "stdin": sys.stdin.read()}}) + "\\n")
 # A ruleset can refuse the merge flag while the squash flag goes through.
@@ -111,6 +116,12 @@ class Tools:
             "cwd_rc": 0,
             "cwd_out": "PRIVATE\\n",
             "cwd_err": "",
+            "api_base_rc": 0,
+            "api_base_out": "base0\n",
+            "api_base_err": "",
+            "api_files_rc": 0,
+            "api_files_out": "",
+            "api_files_err": "",
         }
         (self.bin / "gh.spec").write_text(json.dumps(full | spec))
 
@@ -119,6 +130,8 @@ class Tools:
             "title": "feat(cli): add the stamp subcommand",
             "body": FIXTURE.read_text().split("\n# ", 1)[1].split("\n", 1)[1],
             "headRefOid": "abc123",
+            "baseRefName": "main",
+            "files": [{"path": "src/tbhbdev/x.py"}, {"path": "README.md"}],
             "state": "OPEN",
             "isDraft": False,
             "mergeable": "MERGEABLE",
@@ -1141,6 +1154,8 @@ def test_fetch_records_the_pr_from_one_read(tools: Tools, agent: bool) -> None:
         renovate=True,
         url=f"https://github.com/{TARGET}/pull/12",
         agent=agent,
+        base="main",
+        files=("src/tbhbdev/x.py", "README.md"),
     )
     (view,) = tools.calls()
     assert view == {
@@ -1467,3 +1482,87 @@ def test_a_squash_fallback_allows_an_empty_body(tools: Tools) -> None:
     amend(tools, methods_out=allowed(merge=False, squash=True))
     assert run_main("12")[0] == 0
     assert tools.calls()[1]["argv"][3] == "--squash"  # type: ignore[index]
+
+
+def api_reads(tools: Tools) -> list[list[str]]:
+    log = tools.bin / "gh.api.log"
+    return [json.loads(line)["argv"] for line in log.read_text().splitlines()]
+
+
+def test_main_reads_the_merge_base_then_what_the_base_gained(tools: Tools) -> None:
+    assert sm.main(["37", "--dry-run"]) == 0
+    assert api_reads(tools) == [
+        [
+            "api",
+            f"repos/{TARGET}/compare/main...abc123",
+            "--jq",
+            ".merge_base_commit.sha",
+        ],
+        ["api", f"repos/{TARGET}/compare/base0...main", "--jq", ".files[].filename"],
+    ]
+
+
+def test_main_refuses_when_the_base_gained_commits_in_a_changed_directory(
+    tools: Tools,
+) -> None:
+    amend(tools, api_files_out="src/tbhbdev/y.py\nsrc/tbhbdev/z.py\ndocs/a.md\n")
+    with pytest.raises(SystemExit) as info:
+        sm.main(["37", "--dry-run"])
+    assert str(info.value) == (
+        "not merging PR #37: main gained commits in src/tbhbdev since CI ran; "
+        "rerun CI against current main"
+    )
+    assert tools.scanned() == []
+
+
+def test_main_refuses_on_a_top_level_clash(tools: Tools) -> None:
+    amend(tools, api_files_out="pyproject.toml\n")
+    with pytest.raises(SystemExit) as info:
+        sm.main(["37", "--dry-run"])
+    assert "main gained commits in . since CI ran" in str(info.value)
+
+
+def test_main_warns_and_merges_when_the_base_moved_elsewhere(
+    tools: Tools, capsys: pytest.CaptureFixture[str]
+) -> None:
+    amend(tools, api_files_out="docs/a.md\n")
+    assert sm.main(["37", "--dry-run"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == (
+        "warning: main advanced since CI ran, in other directories\n"
+    )
+    assert captured.out.startswith("gh pr merge 37")
+
+
+@pytest.mark.usefixtures("tools")
+def test_main_says_nothing_when_the_base_has_not_moved(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert sm.main(["37", "--dry-run"]) == 0
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("which", ["api_base", "api_files"])
+def test_main_stops_when_a_comparison_read_fails(tools: Tools, which: str) -> None:
+    amend(tools, **{f"{which}_rc": 1, f"{which}_err": "boom\n  here"})
+    with pytest.raises(SystemExit) as info:
+        sm.main(["37", "--dry-run"])
+    assert str(info.value) == "gh api failed: boom here"
+
+
+@pytest.mark.usefixtures("tools")
+def test_fetch_records_the_base_and_the_changed_files() -> None:
+    request = sm.fetch(12)
+    assert request.base == "main"
+    assert request.files == ("src/tbhbdev/x.py", "README.md")
+
+
+def test_fetch_skips_a_file_entry_without_a_path_object(tools: Tools) -> None:
+    tools.view(files=["odd", {"path": "a.py"}])
+    assert sm.fetch(12).files == ("a.py",)
+
+
+def test_fetch_without_files_or_base_reports_none(tools: Tools) -> None:
+    tools.view(files=None, baseRefName=None)
+    request = sm.fetch(12)
+    assert request.files == ()

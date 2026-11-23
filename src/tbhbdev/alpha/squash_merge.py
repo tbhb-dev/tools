@@ -92,7 +92,7 @@ DEFAULT_MERGE_TITLES = ("Merge pull request", "Merge branch")
 GIT = "git"
 VIEW_FIELDS = (
     "title,body,headRefOid,baseRefName,state,isDraft,mergeable,"
-    "mergeStateStatus,statusCheckRollup,author,url,commits"
+    "mergeStateStatus,statusCheckRollup,author,url,commits,files"
 )
 # gh's merge states that mean "not now", with the reason GitHub already computed.
 REFUSED_STATES = frozenset({"BLOCKED", "BEHIND", "DIRTY", "DRAFT", "UNKNOWN"})
@@ -129,6 +129,8 @@ class PullRequest:
     renovate: bool = False
     url: object = None
     agent: bool = False
+    base: str = ""
+    files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -551,7 +553,52 @@ def fetch(number: int) -> PullRequest:
         merge_state=str(data.get("mergeStateStatus", "")),
         failing=failing_checks(data.get("statusCheckRollup")),
         url=data.get("url"),
+        base=str(data.get("baseRefName", "")),
+        files=tuple(
+            str(fields["path"])
+            for entry in cast("list[object]", data.get("files") or [])
+            if (fields := agent_identity.as_dict(entry))
+        ),
     )
+
+
+def gh_text(*argv: str) -> str:
+    """The stdout of one gh read.
+
+    Raises:
+        SystemExit: gh fails.
+    """
+    done = pr.run([pr.find_tool(GH), *argv])
+    if done.returncode != 0:
+        stop(f"gh {argv[0]} failed: {' '.join(done.stderr.split())}")
+    return done.stdout
+
+
+def directory(path: str) -> str:
+    """The directory of a repository path, "." for a top-level file."""
+    return path.rpartition("/")[0] or "."
+
+
+def advanced_directories(request: PullRequest, target: str) -> tuple[bool, list[str]]:
+    """Whether the base moved past the PR's merge-base, and where it clashes.
+
+    The second value lists the directories that both the base's new commits
+    and the PR change. A directory is a package, and two green PRs that change
+    different files of one package can still break the base together.
+
+    Raises:
+        SystemExit: gh cannot read the comparison.
+    """
+    head = f"repos/{target}/compare/{request.base}...{request.head}"
+    merge_base = gh_text("api", head, "--jq", ".merge_base_commit.sha").strip()
+    moved = gh_text(
+        "api",
+        f"repos/{target}/compare/{merge_base}...{request.base}",
+        "--jq",
+        ".files[].filename",
+    ).split()
+    mine = {directory(path) for path in request.files}
+    return bool(moved), sorted({directory(path) for path in moved} & mine)
 
 
 def merge_methods(target: str) -> list[str]:
@@ -605,6 +652,19 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
     request = fetch(args.number)
     if reasons := refusals(request):
         stop(f"not merging PR #{args.number}: " + "; ".join(reasons))
+    advanced, clashes = advanced_directories(request, pr.target_of_pr(request.url))
+    if clashes:
+        stop(
+            f"not merging PR #{args.number}: {request.base} gained commits in "
+            + ", ".join(clashes)
+            + " since CI ran; rerun CI against current "
+            + request.base
+        )
+    if advanced:
+        print(
+            f"warning: {request.base} advanced since CI ran, in other directories",
+            file=sys.stderr,
+        )
     methods = merge_methods(pr.target_of_pr(request.url))
     body = renovate_body(request.body) if request.renovate else request.body
     message = build_message(
