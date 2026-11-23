@@ -190,6 +190,7 @@ AGY_PATH_KEYS = (
 )
 
 CMD_WINDOW = 2 * 3600
+SESSION_RE = re.compile(r"[0-9A-Za-z_-]+")
 ANCESTRY_LIMIT = 16
 CLAUDE_TAIL = 256 * 1024
 CODEX_TAIL = 1024 * 1024
@@ -1823,17 +1824,52 @@ def cmd_record(harness: str, env: Mapping[str, str]) -> int:
 # ------------------------------------------------------------- committer identity
 
 
+def claude_config(env: Mapping[str, str]) -> Path:
+    return Path(env.get("CLAUDE_CONFIG_DIR") or Path(env.get("HOME", "")) / ".claude")
+
+
 def session_model(raw: str, env: Mapping[str, str]) -> str | None:
     """Claude: the model in the session's own transcript under its config dir.
 
     A run that disables hooks writes no session record, so the record has no
     transcript path. Claude names each transcript after its session ID.
     """
-    config = env.get("CLAUDE_CONFIG_DIR") or str(Path(env.get("HOME", "")) / ".claude")
-    for transcript in sorted(Path(config).glob(f"projects/*/{raw}.jsonl")):
+    if not SESSION_RE.fullmatch(raw):
+        return None
+    for transcript in sorted(claude_config(env).glob(f"projects/*/{raw}.jsonl")):
         if model := transcript_model(str(transcript)):
             return model
     return None
+
+
+def subagent_running(raw: str, env: Mapping[str, str], now: float) -> bool:
+    """Claude: whether a subagent of the session may be running right now.
+
+    A subagent's transcript sits under the session's directory. It is
+    unfinished until its last turn is an assistant reply that ended the turn.
+    A transcript that can't be read counts as unfinished.
+    """
+    if not SESSION_RE.fullmatch(raw):
+        return False
+    for path in claude_config(env).glob(f"projects/*/{raw}/subagents/agent-*.jsonl"):
+        try:
+            recent = now - path.stat().st_mtime < CMD_WINDOW
+        except OSError:
+            continue
+        lines = read_tail(path, CLAUDE_TAIL) if recent else []
+        if lines is None:
+            return True
+        for line in reversed(lines):
+            entry = parse_line(line) or {}
+            if entry.get("type") in {"assistant", "user"}:
+                message = as_dict(entry.get("message")) or {}
+                if (
+                    entry["type"] != "assistant"
+                    or message.get("stop_reason") != "end_turn"
+                ):
+                    return True
+                break
+    return False
 
 
 def claude_committer(
@@ -1862,7 +1898,19 @@ def claude_committer(
             "Retry after the subagent's session record is restored."
         )
         raise AttributionError(message)
-    model = main_model(root_rec) or session_model(raw, env)
+    model = main_model(root_rec)
+    if not model:
+        # No hook record names the model, so a subagent's commit can't be told
+        # from the main agent's: both carry the session's ID. Refuse rather than
+        # stamp the main model on a subagent's work.
+        if not sub and subagent_running(raw, env, time.time()):
+            message = (
+                "A subagent of this session is running and no hook record says "
+                "which agent is committing. Commit from the main session after "
+                "the subagent finishes."
+            )
+            raise AttributionError(message)
+        model = session_model(raw, env)
     root_ident = make_ident(
         CLAUDE, root, Seen(ver, model, root_rec.get("effort"), surf)
     )

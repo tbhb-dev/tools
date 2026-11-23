@@ -7371,6 +7371,50 @@ def test_claude_committer_reads_the_model_from_the_session_transcript(
     assert ai.session_model("session-missing", {"HOME": str(tmp_path)}) is None
 
 
+def finished(stop: str | None = "end_turn") -> Json:
+    return {"type": "assistant", "message": {"model": HAIKU, "stop_reason": stop}}
+
+
+@pytest.mark.usefixtures("repo")
+def test_a_running_subagent_refuses_a_commit_without_hook_records(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config"
+    project = config / "projects" / "example-project"
+    write_transcript(project / "session-raw.jsonl", reply(SONNET))
+    env = {**CLAUDE_COMMIT_ENV, "CLAUDE_CONFIG_DIR": str(config)}
+    folder = project / "session-raw" / "subagents"
+    now = time.time()
+    # No subagent, then only finished ones: the main model is right.
+    assert not ai.subagent_running("session-raw", env, now)
+    done = write_transcript(folder / "agent-a.jsonl", {"type": "user"}, finished())
+    write_transcript(folder / "agent-b.jsonl", {"type": "api-request"})
+    assert not ai.subagent_running("session-raw", env, now)
+    assert ai.committer_identity(env, []) is not None
+    # An old unfinished transcript is abandoned work, not a running agent.
+    stale = write_transcript(folder / "agent-c.jsonl", {"type": "user"})
+    os.utime(stale, (now - ai.CMD_WINDOW - 1,) * 2)
+    assert not ai.subagent_running("session-raw", env, now)
+    # A recent transcript that doesn't end its turn means a subagent is working.
+    unfinished: tuple[Json, ...] = (finished("tool_use"), {"type": "user"})
+    for last in unfinished:
+        write_transcript(done, last)
+        assert ai.subagent_running("session-raw", env, now)
+        with pytest.raises(ai.AttributionError, match="subagent of this session"):
+            ai.committer_identity(env, [])
+    write_transcript(done, finished())
+    # A dangling link is skipped; a transcript that can't be read counts as unfinished.
+    (folder / "agent-e.jsonl").symlink_to(folder / "gone")
+    assert not ai.subagent_running("session-raw", env, now)
+    unreadable = folder / "agent-d.jsonl"
+    unreadable.mkdir()
+    assert ai.subagent_running("session-raw", env, now)
+    unreadable.rmdir()
+    # An ID with glob characters or separators matches nothing.
+    assert not ai.subagent_running("*", env, now)
+    assert ai.session_model("../session-raw", env) is None
+
+
 def test_delegating_root_takes_the_main_model_at_commit_time(repo: Path) -> None:
     transcript = write_transcript(repo / "t.jsonl", reply(OPUS))
     ai.write_record(
