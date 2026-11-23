@@ -5,13 +5,13 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import shlex
 import subprocess
-import sys
 from typing import TYPE_CHECKING
 
 import pytest
 from agent_driver_example import Remote, setup
-from agent_example import LINUX, MARKER, settings
+from agent_example import LINUX, MACOS, MARKER, settings
 
 from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import driver, taint_store
@@ -20,6 +20,8 @@ from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from tbhbdev.alpha.agent.model import Settings
 
 pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
 
@@ -102,31 +104,6 @@ def test_decide_warns_when_ignored_or_warn_only(found: limits.Reading | str) -> 
         assert message.startswith("warning: example-linux: ")
 
 
-def test_script_prints_the_numbers_of_this_host() -> None:
-    script = remote.limits()
-    assert script.startswith("# tbhbdev-limits\n")
-    done = subprocess.run(
-        ["/bin/sh", "-c", script], capture_output=True, text=True, check=True
-    )
-    assert isinstance(limits.parse(done.stdout), limits.Reading)
-
-
-@pytest.mark.parametrize(
-    "key", ["vm.loadavg", "hw.logicalcpu", "hw.memsize", "vm.swapusage"]
-)
-def test_a_failed_macos_read_ends_the_script_nonzero(key: str) -> None:
-    script = remote.limits()
-    lines = [x for x in script.splitlines() if f"sysctl -n {key})" in x]
-    assert len(lines) == 1
-    assert lines[0].endswith("|| exit 1")
-    if sys.platform == "darwin":
-        broken = script.replace(f"sysctl -n {key}", "false")
-        done = subprocess.run(
-            ["/bin/sh", "-c", broken], capture_output=True, text=True, check=False
-        )
-        assert (done.returncode, done.stdout) == (1, "")
-
-
 def run_script(script: str) -> tuple[int, str]:
     done = subprocess.run(
         ["/bin/sh", "-c", script], capture_output=True, text=True, check=False
@@ -134,16 +111,108 @@ def run_script(script: str) -> tuple[int, str]:
     return done.returncode, done.stdout
 
 
+VM_STATS = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                        262144.
+Pages inactive:                   1048576.
+Pages speculative:                 589824.
+Pages purgeable:                   524288.
+"""
+
+
+def macos_script(
+    stats: str = VM_STATS,
+    *,
+    failed: str = "",
+    load: str = "{ 0.5 0.8 0.9 }",
+    memory: str = "68719476736",
+) -> str:
+    return f"""uname() {{ printf '%s\\n' Darwin; }}
+sysctl() {{
+    test "$2" != {shlex.quote(failed)} || return 1
+    case "$2" in
+        vm.loadavg) printf '%s\\n' {shlex.quote(load)} ;;
+        hw.logicalcpu) printf '%s\\n' 4 ;;
+        hw.memsize) printf '%s\\n' {shlex.quote(memory)} ;;
+        vm.swapusage) printf '%s\\n' 'total = 100.00M  used = 87.00M  free = 13.00M' ;;
+        *) return 1 ;;
+    esac
+}}
+vm_stat() {{
+    printf '%s\\n' {shlex.quote(stats)}
+    test {shlex.quote(failed)} != vm_stat
+}}
+""" + remote.limits()
+
+
+@pytest.mark.parametrize("failed", ["", "vm.swapusage"])
+def test_macos_launches_with_available_memory_despite_swap(failed: str) -> None:
+    code, out = run_script(macos_script(failed=failed))
+    assert code == 0
+    reading = limits.parse(out)
+    assert reading == limits.Reading(0.5, 4, 64 * 1024**2, 29 * 1024**2, 0, 0)
+    assert limits.decide(MACOS, reading, ignore=False) == (False, "")
+
+
+def test_macos_uses_the_reported_page_size_and_refuses_low_memory() -> None:
+    code, out = run_script(macos_script(VM_STATS.replace("16384", "4096")))
+    assert code == 0
+    reading = limits.parse(out)
+    assert reading == limits.Reading(0.5, 4, 64 * 1024**2, 29 * 256 * 1024, 0, 0)
+    assert limits.decide(MACOS, reading, ignore=False) == (
+        True,
+        (
+            f"{MACOS.name}: memory available 11% < 20%; "
+            "pass --ignore-limits to launch anyway"
+        ),
+    )
+
+
 @pytest.mark.parametrize(
-    "text", ["read l _ < /proc/loadavg", "c=$(nproc)", "v=$(vm_stat)"]
+    "probe", ["vm.loadavg", "hw.logicalcpu", "hw.memsize", "vm_stat"]
 )
-def test_every_other_read_ends_the_script_nonzero_too(text: str) -> None:
-    lines = [x for x in remote.limits().splitlines() if text in x]
-    assert len(lines) == 1
-    assert lines[0].endswith("|| exit 1")
+def test_a_failed_macos_read_ends_the_script_nonzero(probe: str) -> None:
+    assert run_script(macos_script(failed=probe)) == (1, "")
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc")
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("page size of", "page size unknown"),
+        ("16384", "0"),
+        ("16384", "bad"),
+        ("Pages free:", "Pages used:"),
+        ("Pages inactive:", "Pages free:"),
+        ("Pages speculative:", "Pages free:"),
+        ("262144.", "bad"),
+        ("589824.", "-1."),
+    ],
+)
+def test_a_malformed_macos_memory_read_ends_the_script_nonzero(
+    old: str, new: str
+) -> None:
+    assert run_script(macos_script(VM_STATS.replace(old, new))) == (1, "")
+
+
+def test_a_malformed_macos_sysctl_read_ends_the_script_nonzero() -> None:
+    assert run_script(macos_script(load="")) == (1, "")
+    assert run_script(macos_script(memory="68719476736 bytes")) == (1, "")
+
+
+def linux_script(tmp_path: Path, *, old: str = "", new: str = "") -> str:
+    loadavg = tmp_path / "loadavg"
+    loadavg.write_text("0.5 0.8 0.9 1/1 1\n")
+    script = remote.limits()
+    assert script.startswith("# tbhbdev-limits\n")
+    if old:
+        script = script.replace(old, new)
+    return (
+        "uname() { printf '%s\\n' Linux; }\nnproc() { printf '%s\\n' 4; }\n"
+        + script.replace("/proc/loadavg", shlex.quote(str(loadavg))).replace(
+            "/proc/meminfo", shlex.quote(str(tmp_path / "meminfo"))
+        )
+    )
+
+
 @pytest.mark.parametrize(
     ("old", "new"),
     [
@@ -151,8 +220,10 @@ def test_every_other_read_ends_the_script_nonzero_too(text: str) -> None:
         ("$(nproc)", "$(false)"),
     ],
 )
-def test_a_failed_linux_read_ends_the_script_nonzero(old: str, new: str) -> None:
-    script = remote.limits().replace(old, new)
+def test_a_failed_linux_read_ends_the_script_nonzero(
+    old: str, new: str, tmp_path: Path
+) -> None:
+    script = linux_script(tmp_path, old=old, new=new)
     assert run_script(script) == (1, "")
 
 
@@ -164,7 +235,6 @@ MEMINFO = {
 }
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc")
 @pytest.mark.parametrize("field", list(MEMINFO))
 @pytest.mark.parametrize("damage", ["missing", "empty", "word"])
 def test_each_linux_memory_field_must_be_a_number(
@@ -179,36 +249,31 @@ def test_each_linux_memory_field_must_be_a_number(
     (tmp_path / "meminfo").write_text(
         "".join(f"{line}\n" for line in lines.values() if line)
     )
-    script = remote.limits().replace("/proc/meminfo", str(tmp_path / "meminfo"))
-    assert run_script(script) == (1, "")
+    assert run_script(linux_script(tmp_path)) == (1, "")
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc")
 def test_a_swapless_linux_host_with_zero_fields_is_readable(tmp_path: Path) -> None:
     (tmp_path / "meminfo").write_text(
         "".join(f"{name}: {value}\n" for name, value in MEMINFO.items())
     )
-    script = remote.limits().replace("/proc/meminfo", str(tmp_path / "meminfo"))
-    code, out = run_script(script)
+    code, out = run_script(linux_script(tmp_path))
     assert code == 0
-    assert isinstance(limits.parse(out), limits.Reading)
+    assert limits.parse(out) == limits.Reading(0.5, 4, 10, 5, 0, 0)
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="reads sysctl and vm_stat")
-@pytest.mark.parametrize(
-    ("old", "new"),
-    [
-        ("$(vm_stat)", "$(echo 'Pages free: 5.'; false)"),
-        (
-            "$(vm_stat)",
-            "$(echo 'Mach Virtual Memory Statistics: (page size of 16384 bytes)')",
-        ),
-        ("sysctl -n vm.swapusage", "echo 'total =  used = 5.00M  free = 1.00M'"),
-        ("sysctl -n vm.swapusage", "echo 'garbage'"),
-    ],
-)
-def test_a_partial_macos_read_ends_the_script_nonzero(old: str, new: str) -> None:
-    assert run_script(remote.limits().replace(old, new)) == (1, "")
+def test_linux_refuses_high_swap_with_available_memory(tmp_path: Path) -> None:
+    fields = MEMINFO | {"SwapTotal": "100 kB", "SwapFree": "13 kB"}
+    (tmp_path / "meminfo").write_text(
+        "".join(f"{name}: {value}\n" for name, value in fields.items())
+    )
+    code, out = run_script(linux_script(tmp_path))
+    assert code == 0
+    reading = limits.parse(out)
+    assert reading == limits.Reading(0.5, 4, 10, 5, 100, 87)
+    assert limits.decide(LINUX, reading, ignore=False) == (
+        True,
+        f"{LINUX.name}: swap used 87% > 80%; pass --ignore-limits to launch anyway",
+    )
 
 
 @pytest.fixture
@@ -217,7 +282,11 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     taint_store.record_clearance(
         taint.Clearance("example-linux", "Test host rebuilt", "2026-11-10T00:00:00Z")
     )
-    monkeypatch.setattr(agent.settings, "load", lambda: CONFIG)
+
+    def load_settings() -> Settings:
+        return CONFIG
+
+    monkeypatch.setattr(agent.settings, "load", load_settings)
     return result
 
 

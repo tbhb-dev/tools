@@ -139,8 +139,9 @@ def host_marker(account: str) -> str:
 def limits() -> str:
     """Print one line of host numbers: load, CPUs, then memory and swap in KiB.
 
-    The fields are the 1-minute load, the logical CPU count, MemTotal,
-    MemAvailable, swap total and swap used.
+    The fields are the 1-minute load, the logical CPU count, total memory,
+    available memory, swap total and swap used. macOS supplies zero for both
+    swap fields so the launch check uses load and available memory alone.
     """
     linux = (
         "read l _ < /proc/loadavg || exit 1\n"
@@ -152,21 +153,24 @@ def limits() -> str:
         "print l, c, t, a, s, s-f}' "
         "/proc/meminfo\n"
     )
-    macos = (
-        "l=$(sysctl -n vm.loadavg) || exit 1\n"
-        "c=$(sysctl -n hw.logicalcpu) || exit 1\n"
-        "m=$(sysctl -n hw.memsize) || exit 1\n"
-        "u=$(sysctl -n vm.swapusage) || exit 1\n"
-        "v=$(vm_stat) || exit 1\n"
-        'printf "%s\\n" "$v" | awk -v l="$l" -v c="$c" -v m="$m" -v u="$u" \''
-        "/page size of/{z=$8} "
-        "/^Pages (free|inactive|speculative|purgeable):/{p+=$NF; n++} "
-        'END{split(l,x," "); split(u,w,"[ =M]+"); '
-        'if (z=="" || n!=4 || x[2]=="" || w[1]!="total" || w[3]!="used" '
-        "|| w[2]!~/^[0-9.]+$/ || w[4]!~/^[0-9.]+$/) exit 1; "
-        'printf "%s %s %d %d %d %d\\n", x[2], c, m/1024, p*z/1024, '
-        "w[2]*1024, w[4]*1024}'\n"
-    )
+    macos = r"""l=$(sysctl -n vm.loadavg) || exit 1
+c=$(sysctl -n hw.logicalcpu) || exit 1
+m=$(sysctl -n hw.memsize) || exit 1
+v=$(vm_stat) || exit 1
+printf '%s\n' "$v" | awk -v l="$l" -v c="$c" -v m="$m" '
+/page size of/ { size = $8 }
+/^Pages (free|inactive|speculative):/ {
+    if ($NF !~ /^[0-9]+[.]?$/ || seen[$2]++) invalid = 1
+    pages += $NF
+    count++
+}
+END {
+    split(l, load, " ")
+    if (invalid || count != 3 || size !~ /^[0-9]+$/ || size == 0 ||
+        m !~ /^[0-9]+$/ || load[2] == "") exit 1
+    printf "%s %s %.0f %.0f 0 0\n", load[2], c, int(m/1024), int(pages*size/1024)
+}'
+"""
     return (
         "# tbhbdev-limits\n"
         + PREFIX

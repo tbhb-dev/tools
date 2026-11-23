@@ -2,11 +2,11 @@
 description: Agent settings, run requests, and host preparation.
 generated:
   - role: generated
-    harness: codex:0.166.0
+    harness: codex:0.171.0
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    at: "2026-11-23T03:17:35Z"
+    at: "2026-11-23T04:35:51Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -21,7 +21,11 @@ type: Reference
 
 `agent exec` records the launching session's name and `CLAUDE_CODE_SESSION_ID` in the run record, and `agent status` prints `launcher=NAME`. The name is the tmux pane title of the launching process's pane, without its leading status glyph. A reviewer-role run, meaning `--role reviewer` or `--profile review`, starts only from a session on the review-launcher list, never from the session that owns the repository, and never when the name is missing. The built-in list names the `coord-review-N` sessions. `agent-review-launchers.json` in the state directory adds launchers and owners: `launchers` maps a session name to a list of `org/name` repositories, or to null for any repository, and `owners` maps a repository name to its owner session when that session isn't named for it. A malformed file refuses the launch. The list guards against honest mistakes by cooperating sessions; a session that forges its pane title isn't stopped.
 
-`agent exec` reads the run host once before it transfers anything. It refuses the launch and prints the numbers when the 1-minute load reaches the host's load limit, when available memory falls under a share of total memory, or when used swap passes a share of total swap. Each `[[agent.host]]` table sets its own values. `load_limit` defaults to the host's logical CPU count, `min_memory_available_percent` defaults to 20 and `max_swap_used_percent` defaults to 80. Set a lower `load_limit` on a host that also runs services. `limits_warn_only = true` prints the same numbers as a warning and lets the launch continue. A failed or unreadable read refuses with `cannot read host limits`. The caller must pass `--ignore-limits` to launch anyway, or the host sets `limits_warn_only = true`, which turns the refusal into a warning. The run record keeps an `--ignore-limits` choice. Older run records without the field load as `false`.
+`agent exec` reads the run host once before it transfers anything. It refuses the launch and prints the numbers when the 1-minute load reaches the host's load limit or when available memory falls below a share of total memory. Each `[[agent.host]]` table sets its own values. `load_limit` defaults to the host's logical CPU count, and `min_memory_available_percent` defaults to 20. Set a lower `load_limit` on a host that also runs services.
+
+On macOS, the launch check adds the free, inactive, and speculative page counts from `vm_stat` and multiplies the sum by the reported page size. It uses those bytes to estimate how much physical memory is available now, since macOS can keep swap in use after memory pressure subsides. On Linux, the check reads `MemAvailable` and also refuses when used swap exceeds `max_swap_used_percent` of total swap. That setting defaults to 80 and applies only to Linux.
+
+`limits_warn_only = true` prints the same numbers as a warning and lets the launch continue. A failed or unreadable read refuses with `cannot read host limits`. The caller must pass `--ignore-limits` to launch anyway unless the host sets `limits_warn_only = true`. The run record keeps an `--ignore-limits` choice. Older run records without the field load as `false`.
 
 `agent exec` exports one launch span named `tbhbdev alpha agent exec`. Its duration covers the launcher, and its launch attributes are `tbhb.agent.host`, `tbhb.agent.harness`, `tbhb.agent.model`, `tbhb.agent.profile`, `tbhb.agent.outcome` and `tbhb.run.id` (the run name). Outcome is `ok` for exit code zero, `refused` for a host-limit refusal and `failed` for another failure. The library accepts strings of at most 128 characters. These are the only launch attributes exported; the library also supplies command and service names, package version, exit code, error type and a drop counter. No prompt, prompt path, owner value, authorization, SSH output or other argument values are exported.
 
