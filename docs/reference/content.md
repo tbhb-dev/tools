@@ -2,9 +2,12 @@
 description: Shared GitHub content validation and writes for plugins.
 generated:
   - role: generated
-    harness: codex
-    model: openai:gpt-6
-    at: "2026-11-23T04:03:09Z"
+    harness: codex:0.171.0
+    model: openai:gpt-6.2-sol
+    effort: medium
+    surface: exec
+    session: sha-256-64:7e4e81139716a7b7
+    at: "2026-11-23T04:19:24Z"
 status: stable
 tags: [plugins]
 title: Content writes
