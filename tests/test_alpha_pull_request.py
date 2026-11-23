@@ -285,7 +285,10 @@ def test_schema_is_valid_and_closed() -> None:
     schema = pr.load_schema()
     Draft202012Validator.check_schema(schema)
     assert schema["additionalProperties"] is False
-    assert pr.schema_default(schema, "base") == "main"
+    assert (
+        "default"
+        not in cast("dict[str, dict[str, object]]", schema["properties"])["base"]
+    )
     assert pr.schema_default(schema, "draft") is False
     properties = cast("dict[str, dict[str, str]]", schema["properties"])
     assert all(prop.get("description") for prop in properties.values())
