@@ -376,6 +376,7 @@ def test_private_repository_names_pass_everywhere(
     assert guard(monkeypatch, head) == 0
 
 
+@pytest.mark.usefixtures("repo")
 def test_bad_input_is_refused(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
