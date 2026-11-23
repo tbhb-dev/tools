@@ -1662,6 +1662,10 @@ def check_size(args: argparse.Namespace, checked: Checked) -> None:
 def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     """Run the chosen subcommand."""
     checked = read_checked(args.draft)
+    if args.command in ("check", "create"):
+        # One read of the default branch feeds the size count, the trailers, and
+        # `gh --base`, so a remote change mid-run can't split them.
+        checked.meta.setdefault("base", base_of(checked.meta))
     check_size(args, checked)
     if checked.problems:
         return 1
