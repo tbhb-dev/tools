@@ -250,15 +250,17 @@ def test_token_rules(
     assert all(SYNTHETIC not in value for value in values)
 
 
+@pytest.mark.parametrize("reason", [None, "GhAppError", "TimeoutError"])
 def test_missing_push_token(
-    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    local_run: tuple[run_host.Run, run_host.Prepared, Path], reason: str | None
 ) -> None:
     run, prepared, target = local_run
+    token = credentials.PushTokenFailure(reason) if reason is not None else None
     with ExitStack() as stack:
-        assert push.run(run, prepared, stack, harness, None) == 4
+        assert push.run(run, prepared, stack, harness, token) == 4
     sha = git(Path(prepared.paths.worktree), "rev-parse", "HEAD")
     assert run.files.path("log").read_text() == (
-        f"push skipped: no push token (unavailable) for commit {sha}\n"
+        f"push skipped: no push token ({reason or 'unavailable'}) for commit {sha}\n"
     )
     assert git(target, "for-each-ref") == ""
     assert run.files.path("head").read_text() == sha
@@ -832,12 +834,14 @@ def test_feed_sends_one_line_and_closes() -> None:
 
 
 @pytest.mark.parametrize(
-    "failure", [open_pr.OpenRefusedError("no draft"), OSError("x")]
+    ("failure", "reason"),
+    [(open_pr.OpenRefusedError("no draft"), "no draft"), (OSError("x"), "OSError")],
 )
 def test_unopened_pull_request_fails_the_run_but_keeps_the_branch(
     local_run: tuple[run_host.Run, run_host.Prepared, Path],
     monkeypatch: pytest.MonkeyPatch,
     failure: Exception,
+    reason: str,
 ) -> None:
     run, prepared, target = local_run
 
@@ -846,8 +850,8 @@ def test_unopened_pull_request_fails_the_run_but_keeps_the_branch(
 
     monkeypatch.setattr(open_pr, "open_pull_request", refuse)
     with ExitStack() as stack:
-        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 5
     assert run.files.path("branch").read_text() == "agent/example"
     assert git(target, "rev-parse", "refs/heads/agent/example")
     assert not run.files.path("pr").exists()
-    assert run.files.path("log").read_text() == f"pull request not opened: {failure}\n"
+    assert run.files.path("log").read_text() == f"pr not opened: {reason}\n"

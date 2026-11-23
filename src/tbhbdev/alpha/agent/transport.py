@@ -157,19 +157,20 @@ def stream(
     )
 
 
-def read(
+def read(  # noqa: PLR0913 -- keep the log, answer, and reason views explicit
     settings: Settings,
     host: Host,
     target: tuple[str, str],
     *,
     answer: bool = False,
+    reason: bool = False,
     timeout: float = 30,
 ) -> Reading:
     name, owner = target
     text = shell(
         settings,
         host,
-        remote.read(name, settings.sockets_dir, answer=answer),
+        remote.read(name, settings.sockets_dir, answer=answer, reason=reason),
         Stdin(owner),
         timeout=timeout,
     )

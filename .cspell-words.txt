@@ -334,6 +334,7 @@ hardbreak
 mdit
 softbreak
 tasklists
+objectname
 unlaunched
 MemAvailable
 pids

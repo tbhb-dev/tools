@@ -62,6 +62,25 @@ def test_a_missing_private_config_fails_closed(
     assert "cannot be read" in str(caught.value)
 
 
+def test_findings_keep_only_the_rule_and_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def scan(_text: str, what: str, **_options: object) -> None:
+        raise secret_scan.FindingRefusal(what, [(2, "fixture-rule")])
+
+    monkeypatch.setattr(secret_scan, "scan", scan)
+    with pytest.raises(gitleaks_check.ScanRefused) as caught:
+        gitleaks_check.scan_text(
+            "matched text",
+            "the body",
+            root=tmp_path,
+            gitleaks="gl",
+            visibility="PUBLIC",
+        )
+    assert caught.value.locations == "rule fixture-rule on line 2"
+    assert "matched text" not in str(caught.value)
+
+
 def test_scan_refused_is_a_runtime_error() -> None:
     assert issubclass(gitleaks_check.ScanRefused, RuntimeError)
 

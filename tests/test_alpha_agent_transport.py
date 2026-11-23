@@ -8,7 +8,7 @@ import io
 import os
 import shlex
 import tarfile
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 import pytest
 from agent_driver_example import write_standalone_fake
@@ -22,6 +22,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
+
+
+class ReadTimeout(TypedDict, total=False, closed=True):
+    timeout: float
 
 
 @pytest.fixture(autouse=True)
@@ -206,7 +210,7 @@ def test_read_budget(
 
     custom = timeout is not None
     monkeypatch.setattr(transport, "shell", shell)
-    kwargs: dict[str, float] = {} if timeout is None else {"timeout": timeout}
+    kwargs: ReadTimeout = {} if timeout is None else {"timeout": timeout}
     assert transport.read(
         settings(),
         LINUX,

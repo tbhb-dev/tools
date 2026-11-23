@@ -215,7 +215,7 @@ def harness_without_push(
     prepared: run_host.Prepared,
     stack: ExitStack,
     harness: Callable[[run_host.Run, run_host.Prepared, ExitStack], int],
-    _token: str | None,
+    _token: str | credentials.PushTokenFailure | None,
 ) -> int:
     return harness(run, prepared, stack)
 
@@ -4379,9 +4379,19 @@ def test_push_failure_reaches_durable_completion(
     assert runfiles.latest(run.files.root)["example"]["rc"] == 4
 
 
-@pytest.mark.parametrize("given", [None, "given-value"])
+@pytest.mark.parametrize(
+    ("given", "result"),
+    [
+        (None, "minted-value"),
+        ("given-value", None),
+        (None, credentials.PushTokenFailure("GhAppError")),
+    ],
+)
 def test_execute_mints_a_push_token_only_when_none_was_given(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, given: str | None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    given: str | None,
+    result: str | credentials.PushTokenFailure | None,
 ) -> None:
     run = make_run(tmp_path)
     prepared = dataclasses.replace(preparation(run), auth_before="example-before")
@@ -4389,18 +4399,20 @@ def test_execute_mints_a_push_token_only_when_none_was_given(
     runtime.patch(monkeypatch)
     minted: list[object] = []
 
-    def mint(request: object, _settings: object) -> str:
+    def mint(
+        request: object, _settings: object
+    ) -> str | credentials.PushTokenFailure | None:
         minted.append(request)
-        return "minted-value"
+        return result
 
-    tokens: list[str | None] = []
+    tokens: list[str | credentials.PushTokenFailure | None] = []
 
     def publish(
         _run: run_host.Run,
         _ready: run_host.Prepared,
         _stack: ExitStack,
         _harness: object,
-        token: str | None,
+        token: str | credentials.PushTokenFailure | None,
     ) -> int:
         tokens.append(token)
         return 0
@@ -4408,7 +4420,7 @@ def test_execute_mints_a_push_token_only_when_none_was_given(
     monkeypatch.setattr(run_host.credentials, "push_token", mint)
     monkeypatch.setattr(run_host.push, "run", publish)
     assert run_host.execute(run, "example", given) == 0
-    assert tokens == [given or "minted-value"]
+    assert tokens == [given or result]
     assert len(minted) == (0 if given else 1)
 
 

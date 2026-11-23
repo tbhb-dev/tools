@@ -19,6 +19,10 @@ if TYPE_CHECKING:
 class ScanRefused(RuntimeError):  # noqa: N818 - the public name callers import
     """The text was not cleared: a finding, a scanner failure or a missing config."""
 
+    def __init__(self, message: str, *, locations: str | None = None) -> None:
+        super().__init__(message)
+        self.locations = locations
+
 
 def scan_text(
     text: str, what: str, *, root: Path, gitleaks: str, visibility: str
@@ -42,6 +46,8 @@ def scan_text(
         secret_scan.scan(
             text, what, root=root, gitleaks=gitleaks, visibility=visibility
         )
+    except secret_scan.FindingRefusal as exc:
+        raise ScanRefused(str(exc.code), locations=exc.locations) from None
     except SystemExit as exc:
         raise ScanRefused(str(exc.code)) from None
     except OSError as exc:

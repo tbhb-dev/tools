@@ -18,6 +18,7 @@ from tbhbdev.alpha.agent.model import Profile
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
+    from tbhbdev.alpha.agent.credentials import PushTokenFailure
     from tbhbdev.alpha.agent.run_host import Prepared, Run
 
 # A remote rejection is on a later stderr line than the URL, so keep all of it.
@@ -119,7 +120,7 @@ def run(
     prepared: Prepared,
     stack: ExitStack,
     harness: Callable[[Run, Prepared, ExitStack], int],
-    token: str | None,
+    token: str | PushTokenFailure | None,
 ) -> int:
     if run.request.profile is not Profile.BUILD:
         return harness(run, prepared, stack)
@@ -142,7 +143,7 @@ def run(
         after = local_refs(workspace)
         commit = after.pop(reference, None)
         if commit is not None:
-            if token is not None and head(workspace, branch) is None:
+            if isinstance(token, str) and head(workspace, branch) is None:
                 after[reference] = commit
             else:
                 after = {reference: commit, **after}
@@ -161,7 +162,7 @@ def publish(
     run: Run,
     workspace: Path,
     change: tuple[str, str],
-    token: str | None,
+    token: str | PushTokenFailure | None,
     base: str | None,
 ) -> int:
     name, commit = change
@@ -169,9 +170,10 @@ def publish(
     on_branch = name == f"refs/heads/{branch}"
     if on_branch:
         run.files.write("head", commit)
-    if token is None:
+    if not isinstance(token, str):
+        reason = token.reason if token is not None else "unavailable"
         run.files.write(
-            "log", f"push skipped: no push token (unavailable) for commit {commit}\n"
+            "log", f"push skipped: no push token ({reason}) for commit {commit}\n"
         )
         return 4
     try:
@@ -188,7 +190,7 @@ def publish(
             if not status:
                 run.files.write("branch", branch)
                 published = open_pr.PublishedRange(workspace, directory, base, commit)
-                return 0 if opened(run, published, branch, token) else 4
+                return 0 if opened(run, published, branch, token) else 5
     except OSError, subprocess.SubprocessError:
         error = "git push unavailable"
     text = " ".join(error.replace(token, "[redacted]").split()) or "git push failed"
@@ -290,7 +292,12 @@ def opened(
             published, run.request.repo, branch, token, run.files.write
         )
     except (open_pr.OpenRefusedError, OSError) as refusal:
-        run.files.write("log", f"pull request not opened: {refusal}\n")
+        reason = (
+            str(refusal)
+            if isinstance(refusal, open_pr.OpenRefusedError)
+            else type(refusal).__name__
+        )
+        run.files.write("log", f"pr not opened: {' '.join(reason.split())}\n")
         return False
     run.files.write("pr", f"{run.request.repo}#{number}")
     return True
