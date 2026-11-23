@@ -40,6 +40,7 @@ BUILD: Data = {
     "authorized_by": None,
     "startup_deadline_seconds": 120,
     "fetch_refs": [],
+    "max_concurrent_runs": None,
 }
 REVIEW: Data = {**BUILD, "profile": "review", "commit": COMMIT}
 CLAUDE: Data = {
@@ -154,7 +155,9 @@ def test_missing_fields_are_named() -> None:
     )
 
 
-@pytest.mark.parametrize("key", [k for k in BUILD if k not in {"v", "fetch_refs"}])
+@pytest.mark.parametrize(
+    "key", [k for k in BUILD if k not in {"v", "fetch_refs", "max_concurrent_runs"}]
+)
 def test_each_field_is_required(key: str) -> None:
     assert refused(made(BUILD, **{key: MISSING})) == f"request is missing fields: {key}"
 
@@ -542,4 +545,10 @@ def test_request_v2_taint_contract() -> None:
 def test_tainted_host_must_be_a_boolean(bad: object) -> None:
     assert refused(made(BUILD, tainted_host=bad)) == (
         "request tainted_host must be true or false"
+    )
+
+
+def test_a_negative_launcher_cap_is_refused() -> None:
+    assert refused(made(BUILD, max_concurrent_runs=-1)) == (
+        "request max_concurrent_runs must not be negative"
     )

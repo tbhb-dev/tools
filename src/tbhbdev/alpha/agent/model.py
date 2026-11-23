@@ -275,3 +275,4 @@ class RunRequest:
     startup_deadline_seconds: int
     tainted_host: bool
     fetch_refs: tuple[str, ...] = ()
+    max_concurrent_runs: int | None = None

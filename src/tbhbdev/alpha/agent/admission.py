@@ -75,14 +75,26 @@ def _active(directory: int, profile: Profile) -> set[str]:
 
 
 @contextmanager
-def reserve(root: Path, host: Host, profile: Profile) -> Generator[None]:
-    """Check both slot counts and claim capacity under one shared lock."""
+def reserve(
+    root: Path, host: Host, profile: Profile, limit: int | None
+) -> Generator[None]:
+    """Check both slot counts and claim capacity under one shared lock.
+
+    LIMIT is the launcher's ``max_concurrent_runs`` for the host. The run
+    host's own account config can lack the host, so its default must never
+    decide the cap.
+
+    Raises:
+        Invalid: LIMIT is None, or no slot is free.
+    """
+    if limit is None:
+        message = f"{host.name}: the request carries no max_concurrent_runs"
+        raise Invalid(message)
     with ExitStack() as slot, _directory(root) as directory:
         with _slot(directory, "admission.lock", create=True) as guard:
             fcntl.flock(guard, fcntl.LOCK_EX)
             builds = _active(directory, Profile.BUILD)
             reviews = _active(directory, Profile.REVIEW)
-            limit = host.max_concurrent_runs
             if len(builds) + len(reviews) >= limit:
                 message = (
                     f"{host.name}: no agent slot available "
