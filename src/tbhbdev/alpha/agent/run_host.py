@@ -512,6 +512,40 @@ def otel_config(endpoint: str) -> str:
     )
 
 
+def trust_mise_config(run: Run, workspace: Path) -> None:
+    with worktree.preparation_step("mise trust"):
+        config = workspace / "mise.toml"
+        try:
+            mode = config.lstat().st_mode
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(mode):
+            message = "worktree mise.toml must be a regular file"
+            raise Invalid(message)
+        search = ":".join(
+            (host_tools.search(), *host_tools.account_path(str(run.home)))
+        )
+        mise = host_tools.resolve("mise", search)
+        run.files.write("log", "trusting worktree mise.toml\n")
+        # All setups on this run host share this lock in the run state directory.
+        with runfiles.locked(run.files.root / "mise-trust.lock"):
+            result = subprocess.run(  # nosec B603
+                [mise, "trust", str(config)],
+                cwd="/",
+                env={"HOME": str(run.home), "PATH": search, "TMPDIR": str(run.tmpdir)},
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                check=False,
+            )
+        if result.returncode:
+            message = (
+                result.stderr.strip() or f"mise exited with status {result.returncode}"
+            )
+            raise Invalid(message)
+
+
 def prepare_workspace(run: Run) -> Prepared:
     clone = Path(repo.clone_path(run.home, run.request.repo))
     paths = planned_paths(run)
@@ -522,6 +556,7 @@ def prepare_workspace(run: Run) -> Prepared:
         run.request,
         lambda: credentials.fetch_token(run.request, run.settings),
     )
+    trust_mise_config(run, workspace)
     with worktree.preparation_step("credential delivery"):
         delivery = credentials.deliver(run.request, run.settings, run.tmpdir)
     paths = RunPaths(
@@ -838,6 +873,7 @@ def _execute(
         )
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
+        run.files.write("log", "run setup or launch timed out\n")
     except RunInterruptedError, EOFError:
         rc = 143
     except Invalid as exc:

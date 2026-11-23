@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import fcntl
 import getpass
 import grp
 import hashlib
@@ -19,9 +20,11 @@ import sys
 import tempfile
 import time
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from functools import partial
 from pathlib import Path
+from threading import Event
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -37,6 +40,7 @@ from agent_host_example import (
     trusted_host_stat,
     unusual_git_metadata,
 )
+from fake_tool import write_fake
 from test_alpha_agent_codex_install import release
 from test_alpha_agent_credentials import VALUES
 from test_alpha_agent_settings import EXAMPLE
@@ -345,6 +349,138 @@ def test_workspace_failure_names_its_step_and_safe_cause(
         run_host.prepare_workspace(run)
     assert str(caught.value) == f"run preparation failed at {step}: {cause}"
     assert "sensitive" not in str(caught.value)
+
+
+@pytest.fixture
+def mise_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[run_host.Run, Path]:
+    run = make_run(tmp_path, harness=Harness.AGY.value, timeout=30)
+    root = tmp_path / "workspaces"
+    root.mkdir()
+
+    def create(_clone: Path, name: str, *_args: object) -> Path:
+        workspace = root / name
+        workspace.mkdir()
+        (workspace / "mise.toml").write_text("[env]\nEXAMPLE = 'example'\n")
+        return workspace
+
+    monkeypatch.setattr(run_host.worktree, "create", create)
+    monkeypatch.setattr(run_host, "checked_policy", constant(None))
+    monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
+    return run, root
+
+
+@pytest.mark.parametrize(
+    ("status", "stderr", "reason"),
+    [
+        (0, "", ""),
+        (17, "trust write failed", "trust write failed"),
+        (17, "", "mise exited with status"),
+    ],
+)
+def test_mise_trust_controls_launch(
+    mise_setup: tuple[run_host.Run, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    stderr: str,
+    reason: str,
+) -> None:
+    run, root = mise_setup
+    config = root / run.files.name / "mise.toml"
+    record = run.tmpdir / "mise-argv"
+    binary = run.tmpdir / "mise"
+    write_fake(
+        binary,
+        f"""\
+import sys
+from pathlib import Path
+
+Path({str(record)!r}).write_text("\\n".join(sys.argv[1:]))
+sys.stderr.write({stderr!r})
+raise SystemExit({status})
+""",
+    )
+
+    def launch(*_args: object) -> int:
+        assert record.read_text() == f"trust\n{config}"
+        run.files.write("launched", "\n")
+        return 0
+
+    def prepare(operation: Callable[[], object], *_args: object) -> object:
+        return operation()
+
+    monkeypatch.setattr(host_tools, "search", constant(str(binary.parent)))
+    monkeypatch.setattr(run_host, "preflight", constant(None))
+    monkeypatch.setattr(process_group, "prepare", prepare)
+    monkeypatch.setattr(run_host, "run_harness", launch)
+    monkeypatch.setattr(credentials, "push_token", constant(None))
+    expected_rc = int(status != 0)
+    assert run_host.execute(run, "example") == expected_rc
+    assert record.read_text() == f"trust\n{config}"
+    assert run.files.path("launched").exists() == (status == 0)
+    assert run.files.path("rc").read_text() == f"{expected_rc}\n"
+    log = run.files.path("log").read_text()
+    start = "trusting worktree mise.toml\n"
+    if reason:
+        assert log.startswith(f"{start}run preparation failed at mise trust: {reason}")
+    else:
+        assert log == start
+
+
+def test_mise_trust_refuses_a_symlink(tmp_path: Path) -> None:
+    run = make_run(tmp_path)
+    workspace = runfiles.private_dir(tmp_path / "workspace")
+    (workspace / "mise.toml").symlink_to(tmp_path / "other.toml")
+    with pytest.raises(Invalid, match=r"mise\.toml must be a regular file"):
+        run_host.trust_mise_config(run, workspace)
+
+
+def test_concurrent_setups_serialize_mise_trust(
+    mise_setup: tuple[run_host.Run, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, root = mise_setup
+    second = dataclasses.replace(
+        first,
+        files=runfiles.RunFiles(first.files.root, "second"),
+        tmpdir=runfiles.private_dir(first.tmpdir.parent / "second-tmp"),
+    )
+    trusting = Event()
+    contended = Event()
+    actual_flock = fcntl.flock
+
+    def flock(lock: TextIO, operation: int) -> None:
+        if trusting.is_set():
+            with pytest.raises(BlockingIOError):
+                actual_flock(lock, operation | fcntl.LOCK_NB)
+            contended.set()
+        actual_flock(lock, operation)
+
+    def trust(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if Path(command[-1]) == root / first.files.name / "mise.toml":
+            trusting.set()
+            assert contended.wait(5)
+        else:
+            assert Path(command[-1]) == root / second.files.name / "mise.toml"
+            assert contended.is_set()
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(fcntl, "flock", flock)
+    monkeypatch.setattr(host_tools, "resolve", constant("mise"))
+    monkeypatch.setattr(subprocess, "run", trust)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_setup = executor.submit(run_host.prepare_workspace, first)
+        assert trusting.wait(5)
+        second_setup = executor.submit(run_host.prepare_workspace, second)
+        assert first_setup.result(timeout=5).paths.worktree == str(
+            root / first.files.name
+        )
+        assert second_setup.result(timeout=5).paths.worktree == str(
+            root / second.files.name
+        )
+    assert (first.files.root / "mise-trust.lock").is_file()
 
 
 @pytest.mark.parametrize("harness", Harness)
@@ -735,6 +871,7 @@ def test_finish_orders_cleanup_auth_agent_index_and_atomic_rc(
         else ["check", "ended"]
     )
     messages = {
+        "timeout": "run setup or launch timed out\n",
         "invalid": "safe preparation error\n",
         "os": "run failed; check the clone and credential references\n",
         "auth": "codex auth write-back failed\n",
