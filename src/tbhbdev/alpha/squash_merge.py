@@ -92,7 +92,7 @@ DEFAULT_MERGE_TITLES = ("Merge pull request", "Merge branch")
 GIT = "git"
 VIEW_FIELDS = (
     "title,body,headRefOid,baseRefName,state,isDraft,mergeable,"
-    "mergeStateStatus,statusCheckRollup,author,url,commits,files"
+    "mergeStateStatus,statusCheckRollup,author,url,commits"
 )
 # gh's merge states that mean "not now", with the reason GitHub already computed.
 REFUSED_STATES = frozenset({"BLOCKED", "BEHIND", "DIRTY", "DRAFT", "UNKNOWN"})
@@ -130,7 +130,6 @@ class PullRequest:
     url: object = None
     agent: bool = False
     base: str = ""
-    files: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -554,24 +553,25 @@ def fetch(number: int) -> PullRequest:
         failing=failing_checks(data.get("statusCheckRollup")),
         url=data.get("url"),
         base=str(data.get("baseRefName", "")),
-        files=tuple(
-            str(fields["path"])
-            for entry in cast("list[object]", data.get("files") or [])
-            if (fields := agent_identity.as_dict(entry))
-        ),
     )
 
 
-def gh_text(*argv: str) -> str:
-    """The stdout of one gh read.
+def git_text(*argv: str) -> str:
+    """The stdout of one git read in the working directory.
 
     Raises:
-        SystemExit: gh fails.
+        SystemExit: git fails.
     """
-    done = pr.run([pr.find_tool(GH), *argv])
+    done = pr.run([pr.find_tool(GIT), *argv])
     if done.returncode != 0:
-        stop(f"gh {argv[0]} failed: {' '.join(done.stderr.split())}")
+        stop(f"git {argv[0]} failed: {' '.join(done.stderr.split())}")
     return done.stdout
+
+
+def fetched(ref: str) -> str:
+    """The commit that ``ref`` names on origin right now."""
+    git_text("fetch", "--quiet", "origin", ref)
+    return git_text("rev-parse", "FETCH_HEAD").strip()
 
 
 def directory(path: str) -> str:
@@ -579,26 +579,54 @@ def directory(path: str) -> str:
     return path.rpartition("/")[0] or "."
 
 
-def advanced_directories(request: PullRequest, target: str) -> tuple[bool, list[str]]:
-    """Whether the base moved past the PR's merge-base, and where it clashes.
+def changed_paths(old: str, new: str) -> set[str]:
+    """Every path that differs between two commits, rename sources included.
 
-    The second value lists the directories that both the base's new commits
-    and the PR change. A directory is a package, and two green PRs that change
-    different files of one package can still break the base together.
+    The listing is NUL separated, so a path with a space or a newline can't
+    split. A rename or copy entry holds a status and two paths.
 
     Raises:
-        SystemExit: gh cannot read the comparison.
+        SystemExit: git fails or the listing is cut short.
     """
-    head = f"repos/{target}/compare/{request.base}...{request.head}"
-    merge_base = gh_text("api", head, "--jq", ".merge_base_commit.sha").strip()
-    moved = gh_text(
-        "api",
-        f"repos/{target}/compare/{merge_base}...{request.base}",
-        "--jq",
-        ".files[].filename",
-    ).split()
-    mine = {directory(path) for path in request.files}
-    return bool(moved), sorted({directory(path) for path in moved} & mine)
+    fields = git_text("diff", "--name-status", "-M", "-z", old, new).split("\0")
+    paths: set[str] = set()
+    index = 0
+    while index < len(fields) - 1:
+        count = 3 if fields[index][:1] in "RC" else 2
+        found = fields[index + 1 : index + count]
+        if len(found) < count - 1 or not all(found):
+            stop("git diff returned a malformed file list")
+        paths.update(found)
+        index += count
+    return paths
+
+
+def advanced_directories(
+    request: PullRequest, number: int
+) -> tuple[str, bool, list[str]]:
+    """The base tip, whether it moved past the merge base, and where it clashes.
+
+    Both file lists come from local git over the fetched base, the merge base
+    and the PR head, so no API file cap applies. The third value lists the
+    directories that both the base's new commits and the PR change. A
+    directory is a package, and two green PRs that change different files of
+    one package can still break the base together.
+
+    Raises:
+        SystemExit: A fetch or diff fails, the PR head isn't the fetched head,
+            or the PR lists no changed file.
+    """
+    tip = fetched(request.base)
+    head = fetched(f"refs/pull/{number}/head")
+    if head != request.head:
+        stop(f"the fetched head {head[:12]} isn't PR #{number}'s head")
+    merge_base = git_text("merge-base", tip, head).strip()
+    mine = changed_paths(merge_base, head)
+    if not mine:
+        stop(f"PR #{number} lists no changed file")
+    moved = changed_paths(merge_base, tip)
+    clashes = {directory(path) for path in moved} & {directory(p) for p in mine}
+    return tip, bool(moved), sorted(clashes)
 
 
 def merge_methods(target: str) -> list[str]:
@@ -652,7 +680,7 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
     request = fetch(args.number)
     if reasons := refusals(request):
         stop(f"not merging PR #{args.number}: " + "; ".join(reasons))
-    advanced, clashes = advanced_directories(request, pr.target_of_pr(request.url))
+    tip, advanced, clashes = advanced_directories(request, args.number)
     if clashes:
         stop(
             f"not merging PR #{args.number}: {request.base} gained commits in "
@@ -682,6 +710,10 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
         f"the commit message for PR #{args.number}",
         pr.repo_visibility(pr.target_of_pr(request.url)),
     )
+    # The last look at the base. A push after this fetch still reaches the
+    # merge call, so GitHub's own checks and the head match decide that case.
+    if fetched(request.base) != tip:
+        stop(f"not merging PR #{args.number}: {request.base} moved during the check")
     argv_gh = [
         GH, "pr", "merge", str(args.number), methods[0], "--subject", message.subject,
         "--body-file", "-", "--match-head-commit", request.head,

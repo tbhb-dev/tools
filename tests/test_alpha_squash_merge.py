@@ -8,9 +8,9 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from fake_tool import (
@@ -29,6 +29,10 @@ from tbhbdev.alpha import pull_request as pr
 from tbhbdev.alpha import squash_merge as sm
 from tbhbdev.alpha.secret_scan import REPO_RULES, without_name_rules
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+GIT_TEXT = sm.git_text
 SRC = Path(sm.__file__).parents[2]
 
 FIXTURE = (
@@ -46,21 +50,16 @@ GH = """import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 spec = json.load(open(os.path.join(here, "gh.spec")))
 repo = sys.argv[1] == "repo"
-api = sys.argv[1] == "api"
 methods = repo and "mergeCommitAllowed,squashMergeAllowed" in sys.argv
 # A read with no repository argument names the working directory's repository.
-if api:
-    kind = "api_base" if ".merge_base_commit" in sys.argv[-1] else "api_files"
-elif methods:
+if methods:
     kind = "methods"
 elif repo:
     kind = "cwd" if sys.argv[2].startswith("-") else "repo"
 else:
     kind = sys.argv[2] if sys.argv[1] == "pr" else "?"
-# The visibility and comparison reads have their own logs, so they never shift
-# the other gh calls.
+# The visibility read has its own log, so it never shifts the other gh calls.
 logname = "gh.methods.log" if methods else "gh.repo.log" if repo else "gh.log"
-logname = "gh.api.log" if api else logname
 with open(os.path.join(here, logname), "a") as log:
     log.write(json.dumps({{"argv": sys.argv[1:], "stdin": sys.stdin.read()}}) + "\\n")
 # A ruleset can refuse the merge flag while the squash flag goes through.
@@ -85,6 +84,21 @@ with open(os.path.join(here, "gitleaks.log"), "a") as log:
 sys.stdout.write(out)
 sys.exit(rc)
 """
+GIT_STUB = """import os, sys
+sub = sys.argv[1]
+state = os.path.join(os.path.dirname(os.path.abspath(__file__)), "git.state")
+if sub == "fetch":
+    open(state, "w").write(sys.argv[-1])
+elif "--show-toplevel" in sys.argv:
+    sys.stdout.write(os.getcwd() + "\\n")
+elif sub == "rev-parse":
+    pulled = open(state).read().startswith("refs/pull/")
+    sys.stdout.write("abc123\\n" if pulled else "tip0\\n")
+elif sub == "merge-base":
+    sys.stdout.write("base0\\n")
+elif sub == "diff" and sys.argv[-1] == "abc123":
+    sys.stdout.write("M\\0README.md\\0")
+"""
 COG = """import sys
 text = sys.stdin.read()
 if "BAD" in text:
@@ -98,6 +112,7 @@ class Tools:
     """Fake gh and cog on an isolated PATH."""
 
     bin: Path
+    git: dict[str, object] = field(default_factory=dict)
 
     def gh(self, **spec: object) -> None:
         full: dict[str, object] = {
@@ -116,12 +131,6 @@ class Tools:
             "cwd_rc": 0,
             "cwd_out": "PRIVATE\\n",
             "cwd_err": "",
-            "api_base_rc": 0,
-            "api_base_out": "base0\n",
-            "api_base_err": "",
-            "api_files_rc": 0,
-            "api_files_out": "",
-            "api_files_err": "",
         }
         (self.bin / "gh.spec").write_text(json.dumps(full | spec))
 
@@ -176,7 +185,37 @@ def tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Tools:
     write_private_config(tmp_path, PRIVATE_CONFIG + RULES_BEYOND_ONE)
     made = Tools(bin_dir)
     made.view()
+    monkeypatch.setattr(sm, "git_text", fake_git(made))
     return made
+
+
+def fake_git(tools: Tools) -> Callable[..., str]:
+    """A git that answers the comparison reads from ``tools.git``.
+
+    The keys are ``tips`` (the base tip on each fetch, the last one repeating),
+    ``head`` (the fetched PR head), and ``mine`` and ``moved`` (the
+    NUL-separated name-status lists of the PR and the base).
+    """
+    fetches: list[str] = []
+
+    def run(*argv: str) -> str:
+        if argv[0] == "fetch":
+            fetches.append(argv[-1])
+            return ""
+        if argv[0] == "rev-parse":
+            if fetches[-1].startswith("refs/pull/"):
+                return str(tools.git.get("head", "abc123")) + "\n"
+            tips = cast("list[str]", tools.git.get("tips", ["tip0"]))
+            return (
+                tips[min(sum(f == "main" for f in fetches) - 1, len(tips) - 1)] + "\n"
+            )
+        if argv[0] == "merge-base":
+            return "base0\n"
+        key = "mine" if argv[-1] == "abc123" else "moved"
+        default = "M\0src/tbhbdev/x.py\0" if key == "mine" else ""
+        return str(tools.git.get(key, default))
+
+    return run
 
 
 def message_of(body: str, title: str = "fix: x", number: int = 7) -> str:
@@ -841,8 +880,10 @@ def test_the_script_never_adds_human_trailers(tools: Tools) -> None:
     assert not re.search(r"Signed-off-by|Co-authored-by", stdin, re.IGNORECASE)
 
 
-@pytest.mark.usefixtures("tools")
-def test_runs_as_tbhbdev_alpha_merge(tmp_path: Path) -> None:
+def test_runs_as_tbhbdev_alpha_merge(tmp_path: Path, tools: Tools) -> None:
+    # A git that sees the base unmoved: every fetch and rev-parse answers the
+    # PR's head, so the base tip, the head and the merge base all agree.
+    write_fake(tools.bin / "git", GIT_STUB)
     env = {**os.environ, "PYTHONPATH": pythonpath(SRC)}
     env.pop("MUTANT_UNDER_TEST", None)
     done = subprocess.run(
@@ -1155,7 +1196,6 @@ def test_fetch_records_the_pr_from_one_read(tools: Tools, agent: bool) -> None:
         url=f"https://github.com/{TARGET}/pull/12",
         agent=agent,
         base="main",
-        files=("src/tbhbdev/x.py", "README.md"),
     )
     (view,) = tools.calls()
     assert view == {
@@ -1484,28 +1524,15 @@ def test_a_squash_fallback_allows_an_empty_body(tools: Tools) -> None:
     assert tools.calls()[1]["argv"][3] == "--squash"  # type: ignore[index]
 
 
-def api_reads(tools: Tools) -> list[list[str]]:
-    log = tools.bin / "gh.api.log"
-    return [json.loads(line)["argv"] for line in log.read_text().splitlines()]
-
-
-def test_main_reads_the_merge_base_then_what_the_base_gained(tools: Tools) -> None:
+@pytest.mark.usefixtures("tools")
+def test_main_compares_the_fetched_base_and_head() -> None:
     assert sm.main(["37", "--dry-run"]) == 0
-    assert api_reads(tools) == [
-        [
-            "api",
-            f"repos/{TARGET}/compare/main...abc123",
-            "--jq",
-            ".merge_base_commit.sha",
-        ],
-        ["api", f"repos/{TARGET}/compare/base0...main", "--jq", ".files[].filename"],
-    ]
 
 
 def test_main_refuses_when_the_base_gained_commits_in_a_changed_directory(
     tools: Tools,
 ) -> None:
-    amend(tools, api_files_out="src/tbhbdev/y.py\nsrc/tbhbdev/z.py\ndocs/a.md\n")
+    tools.git["moved"] = "M\0src/tbhbdev/y.py\0M\0docs/a.md\0"
     with pytest.raises(SystemExit) as info:
         sm.main(["37", "--dry-run"])
     assert str(info.value) == (
@@ -1515,8 +1542,17 @@ def test_main_refuses_when_the_base_gained_commits_in_a_changed_directory(
     assert tools.scanned() == []
 
 
+def test_main_counts_a_rename_source_as_changed(tools: Tools) -> None:
+    tools.git["mine"] = "R100\0old/a.py\0new/a.py\0"
+    tools.git["moved"] = "M\0old/b.py\0"
+    with pytest.raises(SystemExit) as info:
+        sm.main(["37", "--dry-run"])
+    assert "gained commits in old since CI ran" in str(info.value)
+
+
 def test_main_refuses_on_a_top_level_clash(tools: Tools) -> None:
-    amend(tools, api_files_out="pyproject.toml\n")
+    tools.git["moved"] = "M\0pyproject.toml\0"
+    tools.git["mine"] = "M\0README.md\0"
     with pytest.raises(SystemExit) as info:
         sm.main(["37", "--dry-run"])
     assert "main gained commits in . since CI ran" in str(info.value)
@@ -1525,7 +1561,7 @@ def test_main_refuses_on_a_top_level_clash(tools: Tools) -> None:
 def test_main_warns_and_merges_when_the_base_moved_elsewhere(
     tools: Tools, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    amend(tools, api_files_out="docs/a.md\n")
+    tools.git["moved"] = "M\0docs/a.md\0"
     assert sm.main(["37", "--dry-run"]) == 0
     captured = capsys.readouterr()
     assert captured.err == (
@@ -1542,27 +1578,53 @@ def test_main_says_nothing_when_the_base_has_not_moved(
     assert capsys.readouterr().err == ""
 
 
-@pytest.mark.parametrize("which", ["api_base", "api_files"])
-def test_main_stops_when_a_comparison_read_fails(tools: Tools, which: str) -> None:
-    amend(tools, **{f"{which}_rc": 1, f"{which}_err": "boom\n  here"})
+def test_main_refuses_when_the_base_moves_during_the_check(tools: Tools) -> None:
+    tools.git["tips"] = ["tip0", "tip1"]
     with pytest.raises(SystemExit) as info:
         sm.main(["37", "--dry-run"])
-    assert str(info.value) == "gh api failed: boom here"
+    assert str(info.value) == "not merging PR #37: main moved during the check"
 
 
-@pytest.mark.usefixtures("tools")
-def test_fetch_records_the_base_and_the_changed_files() -> None:
-    request = sm.fetch(12)
-    assert request.base == "main"
-    assert request.files == ("src/tbhbdev/x.py", "README.md")
+def test_main_refuses_when_the_fetched_head_differs(tools: Tools) -> None:
+    tools.git["head"] = "other"
+    with pytest.raises(SystemExit) as info:
+        sm.main(["37", "--dry-run"])
+    assert "isn't PR #37's head" in str(info.value)
 
 
-def test_fetch_skips_a_file_entry_without_a_path_object(tools: Tools) -> None:
-    tools.view(files=["odd", {"path": "a.py"}])
-    assert sm.fetch(12).files == ("a.py",)
+@pytest.mark.parametrize("listing", ["", "M\0"])
+def test_main_refuses_an_empty_or_cut_file_list(tools: Tools, listing: str) -> None:
+    tools.git["mine"] = listing
+    with pytest.raises(SystemExit) as info:
+        sm.main(["37", "--dry-run"])
+    assert "lists no changed file" in str(info.value) or "malformed" in str(info.value)
 
 
-def test_fetch_without_files_or_base_reports_none(tools: Tools) -> None:
-    tools.view(files=None, baseRefName=None)
-    request = sm.fetch(12)
-    assert request.files == ()
+def test_changed_paths_reads_names_with_spaces_and_copies(tools: Tools) -> None:
+    tools.git["mine"] = "C75\0a b.py\0c\nd.py\0D\0e.py\0"
+    assert sm.changed_paths("x", "abc123") == {"a b.py", "c\nd.py", "e.py"}
+
+
+@pytest.mark.parametrize("empty", ["M\0\0", "R90\0a\0\0"])
+def test_changed_paths_refuses_an_empty_path(tools: Tools, empty: str) -> None:
+    tools.git["mine"] = empty
+    with pytest.raises(SystemExit, match="malformed"):
+        sm.changed_paths("x", "abc123")
+
+
+def test_git_text_returns_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 0, "out\n", "")
+
+    monkeypatch.setattr(pr, "run", fake_run)
+    assert GIT_TEXT("rev-parse", "HEAD") == "out\n"
+
+
+def test_git_text_stops_when_git_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 1, "", "boom\n  here")
+
+    monkeypatch.setattr(pr, "run", fake_run)
+    with pytest.raises(SystemExit) as info:
+        GIT_TEXT("fetch", "origin")
+    assert str(info.value) == "git fetch failed: boom here"
