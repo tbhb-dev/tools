@@ -189,7 +189,7 @@ def scan_cause(exc: Exception) -> str:
     if isinstance(exc, gitleaks_check.ScanRefused):
         if exc.locations:
             # Rule IDs can be private values, so only the line numbers pass.
-            lines = ", ".join(FINDING_LINE.findall(exc.locations))
+            lines: str = ", ".join(FINDING_LINE.findall(exc.locations))
             return f"gitleaks finds a secret on lines: {lines}"
         text = str(exc)
         if found := GITLEAKS_EXIT.search(text):
