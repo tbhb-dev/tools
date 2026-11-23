@@ -148,7 +148,9 @@ def environment(
         ("diff.ignoreSubmodules", "all"),
         ("status.submoduleSummary", "false"),
         ("protocol.ext.allow", "never"),
-        ("protocol.file.allow", "never"),
+        # `user` lets the run's own `git fetch` read its mirror but refuses the
+        # file transport for a submodule or any other git-started fetch.
+        ("protocol.file.allow", "user"),
         ("diff.external", ""),
     )
     for index, (key, value) in enumerate(overrides):
