@@ -3,18 +3,11 @@ description: Interim agent commands, installation, and harness hooks.
 generated:
 - role: generated
   effort: high
-  harness: codex:0.164.0
-  model: openai:gpt-6.1-sol
-  session: sha-256-64:9fa208639bb640db
+  harness: codex:0.171.0
+  model: openai:gpt-6.2-sol
+  session: sha-256-64:32c474f70552a398
   surface: exec
-  at: '2026-11-15T19:18:44Z'
-- role: generated
-  effort: high
-  harness: codex:0.164.0
-  model: openai:gpt-6.1-sol
-  session: sha-256-64:e641a1b7ee82fd67
-  surface: exec
-  at: '2026-11-15T19:08:28Z'
+  at: '2026-11-23T03:09:57Z'
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -40,6 +33,8 @@ type: Reference
 - `guard-gh-config-dir` is a PreToolUse hook that blocks `gh` commands when `GH_CONFIG_DIR` is unset or empty in the hook's environment. It scans the command string without running `gh` and accepts any nonempty value.
 - `agent-env` runs Codex or Antigravity with the `gh` shim first on PATH.
 - `pr check [DRAFT]` checks a draft, and `pr create [DRAFT]` opens a pull request from it. Both default to `.github/PULL_REQUEST_DRAFT.md`. `pr edit DRAFT --pr N` updates pull request N and requires the draft path. `pr ready N [N...]` marks each one ready for review, only when the pull request's GitHub author is the account the agent's own `gh` runs as. `pr rerun N` reruns only the failed jobs of the latest run for pull request N's current head commit. It reports an error when that run hasn't failed or no run exists. `pr close N --reason TEXT` (or `--comment TEXT`) closes it after the agent-session, open-state and opened-ledger checks, in origin's repository. `pr delete-branch N` deletes only the head branch of a closed or merged pull request in origin's GitHub repository. It refuses fork heads, `main`, protected branches, and unreadable metadata.
+- `issue link-sub PARENT CHILD` adds a sub-issue, and `issue unlink-sub PARENT CHILD` removes it. GitHub requires the same repository owner for the parent and child when adding a sub-issue.
+- `issue block BLOCKED --by BLOCKER` adds a dependency, and `issue unblock BLOCKED --by BLOCKER` removes it. Use `--blocked-by` as an alias for `--by`, or use `BLOCKER --blocking BLOCKED` to give the blocker first.
 - `review` drafts and checks a pull request review.
 - `review policy check [PATH] [--json]` checks the review files of the worktree at PATH, which defaults to the current directory. It reads the files as data and applies none of them. A missing file passes, because the floor and its defaults apply. It checks `.github/pull_request_review.toml` against a closed schema (`config-toml`, `config-schema`). It checks that the template keeps the floor's required sections in order and gives each section a guidance comment (`template-floor-section`, `template-guidance`). It checks that the draft schema is valid JSON Schema 2020-12 and sets `additionalProperties` to false (`draft-schema-invalid`, `draft-schema-open`). It checks that checklist item ids are unique and outside `R1` to `R99`, and that escalation ids are unique and don't start with `FE` (`checklist-frontmatter`, `checklist-item-id`, `checklist-escalate-id`). An unreadable file is `unreadable`. The checklist's other frontmatter keys aren't validated yet. Output is one `PATH: RULE: MESSAGE` line per finding, or with `--json` an object `{"ok": bool, "findings": [{"path", "id", "message"}]}`. Exit 0 means no findings, 1 means findings, and 2 means PATH isn't a directory or the floor fails to load. With `--json`, exit 2 still prints one object, `{"ok": false, "error": KIND, "message": TEXT}`, where KIND is `not-a-directory` or `floor-load`.
 - `agent/review_post.py` holds the host-side step that posts a review run's verdict. Run-host doesn't call it yet, so no run posts a review (a later change wires it in with a duplicate check). The step reads the run's one `.git/tbhb-alpha/review-N.md` draft, checks it again with the `review check` rules minus the prose linters (a run host lacks them), and requires `commit_id` to equal the commit the run reviewed. It holds the draft to the floor's schema and sections only, and never reads the repository's policy or schema from the writable worktree. A draft with a repeated frontmatter key is refused. Before posting it checks that the pull request's head is still the judged commit. Only `COMMENT` posts; `APPROVE` and `REQUEST_CHANGES` are refused, so a post never changes the pull request's review state. Any 2xx answer counts as posted. The review body ends with the run name, harness, model and judged head.
@@ -51,6 +46,8 @@ type: Reference
 - `agent precheck CLONE --reference REF [--host HOST]` compares a clone's hooks with a local reference and checks its Git config for risky keys. Paths may be absolute or relative to the home directory. Collection uses one SSH call with `--host` and reads locally otherwise. It never runs Git. Exit codes are 0 for a match, 1 for mismatches, and 2 for usage or collection errors. The Python API `precheck(clone_data, reference)` returns the result for callers.
 - `agent` coordinates runs with `exec`, `wait`, `status`, `log`, `diff`, `kill`, `clean` and `keep`. `clear-taint HOST --reason TEXT` records local host clearance. `signing-parity` checks that each configured host's signing key is a signing key of tbhb-agent. It runs the hidden host command `signing-fingerprint ACCOUNT`, which prints only the SHA256 fingerprint of the key a run would sign with, over the ordinary ssh shell. It then reads tbhb-agent's public signing key list from GitHub and exits 1 when any host's fingerprint is missing or the host is unreachable. A host without the command counts as unreachable until `tbhbdev` syncs there. The package also includes the run request's schema and the repo argument rules.
 - `install` installs the git hooks and the user-level harness hooks. `--hooks-only` installs only this clone's git hooks without writing user-level config.
+
+The four issue relationship commands accept `owner/repo#N` or a quoted `'#N'` for the current repository's `origin`. Both references can name different repositories. `--dry-run` looks up the related issue's numeric ID and prints it as JSON without writing the relationship or an audit entry.
 
 `tbhbdev alpha pr check` runs the rules size counter after linting the draft, comparing `origin/main` with `HEAD`. It prints the added code and raw line counts with their limits: 400 code lines and 1,500 raw lines. If either count exceeds its limit, the check fails with a message to split the change into stacked pull requests. When both counts exceed their limits, the problem reports the code count. If the counter is unavailable or returns an error or invalid JSON, the command prints `size count unavailable: <reason>` as a warning and continues with the draft result.
 

@@ -1,6 +1,7 @@
 import json
 import subprocess
 from dataclasses import dataclass, field
+from typing import Protocol
 lazy from collections.abc import Callable
 lazy from pathlib import Path
 
@@ -173,7 +174,73 @@ def test_link_sub_issue(tmp_path: Path) -> None:
         ("GET", child.path, None),
         ("POST", f"{REF.path}/sub_issues", {"sub_issue_id": 123}),
     ]
-    assert audit(tmp_path)[0]["scan"] == "not-needed"
+    entry = audit(tmp_path)[0]
+    assert (entry["verb"], entry["scan"]) == ("link_sub_issue", "not-needed")
+    assert entry["caller"] == "tbhbdev"
+
+
+class RelationshipWrite(Protocol):
+    def __call__(
+        self,
+        source: cw.IssueRef,
+        target: cw.IssueRef,
+        /,
+        *,
+        client: cw.Client,
+        caller: str,
+        dry_run: bool,
+    ) -> cw.Json | None: ...
+
+
+@pytest.mark.parametrize(
+    ("write", "verb", "method", "suffix", "key"),
+    [
+        (
+            cw.link_dependency,
+            "link_dependency",
+            "POST",
+            "dependencies/blocked_by",
+            "issue_id",
+        ),
+        (
+            cw.unlink_dependency,
+            "unlink_dependency",
+            "DELETE",
+            "dependencies/blocked_by/123",
+            "issue_id",
+        ),
+        (
+            cw.unlink_sub_issue,
+            "unlink_sub_issue",
+            "DELETE",
+            "sub_issue",
+            "sub_issue_id",
+        ),
+    ],
+)
+def test_issue_relationships(  # noqa: PLR0913 -- Parameterized REST contract.
+    write: RelationshipWrite,
+    verb: str,
+    method: str,
+    suffix: str,
+    key: str,
+    *,
+    tmp_path: Path,
+) -> None:
+    client = RecordingClient()
+    other = cw.IssueRef("example", "other", 9)
+    lookup: Call = ("GET", other.path, None)
+    payload: cw.Json = {key: 123}
+    assert write(REF, other, client=client, caller="tracker", dry_run=True) == payload
+    assert client.calls == [lookup]
+    assert not (tmp_path / "audit.jsonl").exists()
+
+    assert write(REF, other, client=client, caller="tracker", dry_run=False) is None
+    body = None if verb == "unlink_dependency" else payload
+    assert client.calls == [lookup, lookup, (method, f"{REF.path}/{suffix}", body)]
+    assert [(e["verb"], e["caller"], e["scan"]) for e in audit(tmp_path)] == [
+        (verb, "tracker", "not-needed")
+    ]
 
 
 WRITES: list[Callable[[cw.Client], object]] = [
@@ -240,6 +307,14 @@ def test_default_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
         "query": cw.ADD_ITEM,
         "variables": {"project": "PROJECT", "content": "ISSUE"},
     }
+    cw.unlink_sub_issue(REF, REF)
+    cw.link_dependency(REF, REF)
+    cw.unlink_dependency(REF, REF)
+    assert [(entry["verb"], entry["caller"]) for entry in audit(tmp_path)[-3:]] == [
+        ("unlink_sub_issue", "tbhbdev"),
+        ("link_dependency", "tbhbdev"),
+        ("unlink_dependency", "tbhbdev"),
+    ]
     monkeypatch.delenv("TBHBDEV_AUDIT_LOG")
     monkeypatch.setenv("HOME", str(tmp_path))
     cw.add_comment(REF, "Default audit")

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tbhbdev import alpha, content
 from tbhbdev.alpha import close, opened
 from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha import pull_request as pr
@@ -104,6 +105,10 @@ def test_close_pr_it_opened_comments_the_reason_and_the_trailer(
 ) -> None:
     opened.record_opened(root(), ["tbhb-dev/tools#7"])
     assert close.main(["pr", "close", "7", "--reason", "superseded"], env=ENV) == 0
+    assert gh.calls[0][3:5] == [
+        "--repo",
+        URL.removeprefix("https://").removesuffix("/pull/7"),
+    ]
     assert gh.calls[-1] == [
         "pr",
         "close",
@@ -357,10 +362,11 @@ def test_the_parser_describes_itself_and_names_its_prog(
 ) -> None:
     parser = close.build_parser("p")
     assert parser.prog == "p"
-    assert parser.description == "Close a PR or issue."
+    description = "Close a PR or issue, or edit issue relationships."
+    assert parser.description == description
     with pytest.raises(SystemExit):
         parser.parse_args(["--help"])
-    assert "Close a PR or issue." in capsys.readouterr().out
+    assert description in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("kind", ["pr", "issue"])
@@ -409,6 +415,175 @@ def test_main_names_the_prog_in_usage(capsys: pytest.CaptureFixture[str]) -> Non
     with pytest.raises(SystemExit):
         close.main(["--help"], prog="prog", env=ENV)
     assert capsys.readouterr().out.startswith("usage: prog ")
+
+
+ADD_DEPENDENCY = ("POST", "dependencies/blocked_by", "issue_id")
+REMOVE_DEPENDENCY = ("DELETE", "dependencies/blocked_by/123", "issue_id")
+
+
+@pytest.mark.parametrize(
+    ("words", "lookup_repo", "write_request"),
+    [
+        (
+            ["link-sub", "#7", "example/other#9"],
+            "other",
+            ("POST", "sub_issues", "sub_issue_id"),
+        ),
+        (
+            ["unlink-sub", "example/demo#7", "#9"],
+            "demo",
+            ("DELETE", "sub_issue", "sub_issue_id"),
+        ),
+        (
+            ["block", "example/demo#7", "--by", "example/other#9"],
+            "other",
+            ADD_DEPENDENCY,
+        ),
+        (["block", "#7", "--blocked-by", "#9"], "demo", ADD_DEPENDENCY),
+        (["block", "example/other#9", "--blocking", "#7"], "other", ADD_DEPENDENCY),
+        (
+            ["unblock", "example/demo#7", "--by", "example/other#9"],
+            "other",
+            REMOVE_DEPENDENCY,
+        ),
+        (
+            ["unblock", "example/other#9", "--blocking", "example/demo#7"],
+            "other",
+            REMOVE_DEPENDENCY,
+        ),
+    ],
+)
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_issue_relationship_command(  # noqa: PLR0913 -- Parameterized CLI contract.
+    words: list[str],
+    lookup_repo: str,
+    write_request: tuple[str, str, str],
+    *,
+    dry_run: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str, content.Json | None]] = []
+    origins: list[str] = []
+
+    def rest(
+        _self: content.GhClient,
+        method: str,
+        path: str,
+        payload: content.Json | None = None,
+    ) -> content.Json:
+        calls.append((method, path, payload))
+        return {"id": 123, "number": 9}
+
+    def origin_repository() -> str:
+        origins.append("example/demo")
+        return "example/demo"
+
+    audit = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("TBHBDEV_AUDIT_LOG", str(audit))
+    monkeypatch.setattr(content.GhClient, "rest", rest)
+    monkeypatch.setattr(pr, "origin_repository", origin_repository)
+    argv = ["issue", *words, "--dry-run"] if dry_run else ["issue", *words]
+    assert alpha.main(argv, "tbhbdev alpha") == 0
+    assert len(origins) == int(any(word.startswith("#") for word in words))
+    lookup = ("GET", f"/repos/example/{lookup_repo}/issues/9", None)
+    method, suffix, key = write_request
+    preview = {key: 123}
+    if dry_run:
+        assert calls == [lookup]
+        assert capsys.readouterr() == (json.dumps(preview) + "\n", "")
+        assert not audit.exists()
+    else:
+        body = None if write_request == REMOVE_DEPENDENCY else preview
+        assert calls == [
+            lookup,
+            (method, f"/repos/example/demo/issues/7/{suffix}", body),
+        ]
+        assert capsys.readouterr() == ("", "")
+        assert json.loads(audit.read_text())["caller"] == "tbhbdev alpha issue"
+
+
+@pytest.mark.parametrize(
+    ("words", "message"),
+    [
+        (
+            ["link-sub", "7", "#9"],
+            "expected owner/repo#N or #N with a positive issue number",
+        ),
+        (
+            ["link-sub", "#7", "#0"],
+            "expected owner/repo#N or #N with a positive issue number",
+        ),
+        (
+            ["unlink-sub", "invalid#7", "#9"],
+            "expected owner/repo#N or #N with a positive issue number",
+        ),
+        (
+            ["block", "#7"],
+            "one of the arguments --by/--blocked-by --blocking is required",
+        ),
+        (
+            ["unblock", "#7", "--by", "#9", "--blocking", "#8"],
+            "not allowed with argument --by/--blocked-by",
+        ),
+    ],
+)
+def test_issue_relationship_usage_error(
+    words: list[str], message: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        close.main(["issue", *words])
+    assert exc.value.code == 2
+    assert capsys.readouterr().err.endswith(f"{message}\n")
+
+
+@pytest.mark.parametrize(
+    ("verb", "labels"),
+    [
+        ("link-sub", ("PARENT CHILD",)),
+        ("unlink-sub", ("PARENT CHILD",)),
+        ("block", ("\n  ISSUE\n", "--by, --blocked-by BLOCKER", "--blocking BLOCKED")),
+        (
+            "unblock",
+            ("\n  ISSUE\n", "--by, --blocked-by BLOCKER", "--blocking BLOCKED"),
+        ),
+    ],
+)
+def test_issue_relationship_help(
+    verb: str, labels: tuple[str, ...], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        alpha.main(["issue", verb, "--help"], "tbhbdev alpha")
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    assert output.startswith(f"usage: tbhbdev alpha issue {verb} ")
+    assert "[--dry-run]" in output
+    assert all(label in output for label in labels)
+
+
+def test_issue_relationship_api_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    def rest(
+        _self: content.GhClient,
+        method: str,
+        _path: str,
+        _payload: content.Json | None = None,
+    ) -> content.Json:
+        if method == "GET":
+            return {"id": 123}
+        raise subprocess.CalledProcessError(4, "gh", stderr="write failed\n")
+
+    audit = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("TBHBDEV_AUDIT_LOG", str(audit))
+    monkeypatch.setattr(content.GhClient, "rest", rest)
+    assert (
+        alpha.main(["issue", "block", "example/demo#7", "--by", "example/other#9"], "p")
+        == 4
+    )
+    assert capsys.readouterr() == ("", "write failed\n")
+    assert not audit.exists()
 
 
 def test_main_reads_the_process_environment_by_default(

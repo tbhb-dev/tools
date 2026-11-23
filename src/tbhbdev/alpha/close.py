@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
-"""``tbhbdev alpha pr close`` and ``tbhbdev alpha issue close``.
+"""``tbhbdev alpha pr close`` and ``tbhbdev alpha issue`` writes.
 
 Both close through the agent's own ``gh``, as the agent's GitHub account, and
 leave a final comment that holds the reason and the posting agent's
@@ -19,21 +19,30 @@ close an issue with a reason.
 """
 
 import argparse
+import json
 import os
+import re
 import shlex
+import subprocess  # nosec B404
 import sys
 import urllib.parse
 from typing import TYPE_CHECKING
 
+from tbhbdev import content
 from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha import opened
 from tbhbdev.alpha import pull_request as pr
 
 if TYPE_CHECKING:
-    import subprocess  # nosec B404
     from collections.abc import Mapping, Sequence
 
 REASONS = {"completed": "completed", "not-planned": "not planned"}
+RELATIONSHIP_WRITES = {
+    "link-sub": content.link_sub_issue,
+    "unlink-sub": content.unlink_sub_issue,
+    "block": content.link_dependency,
+    "unblock": content.unlink_dependency,
+}
 
 
 def gh(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -227,9 +236,51 @@ def non_blank(text: str) -> str:
     return text
 
 
+def _issue_ref(text: str) -> tuple[str, int]:
+    # Both partition directions reject an extra # in one of the two fields.
+    repo, separator, number = text.partition("#")  # pragma: no mutate
+    if (
+        not separator
+        or not re.fullmatch(r"[1-9][0-9]*", number)
+        or (repo and not pr.NAME_WITH_OWNER.fullmatch(repo))
+    ):
+        message = "expected owner/repo#N or #N with a positive issue number"
+        raise argparse.ArgumentTypeError(message)
+    return repo, int(number)
+
+
+def _write_relationship(args: argparse.Namespace) -> int:
+    source, target = args.source, args.target
+    if args.blocking is not None:
+        source, target = args.blocking, source
+    source_repo, source_number = source
+    target_repo, target_number = target
+    if not source_repo or not target_repo:
+        current_repo = pr.origin_repository()
+        source_repo = source_repo or current_repo
+        target_repo = target_repo or current_repo
+    source_owner, source_name = source_repo.split("/")
+    target_owner, target_name = target_repo.split("/")
+    ref = content.IssueRef(source_owner, source_name, source_number)
+    related = content.IssueRef(target_owner, target_name, target_number)
+    write = RELATIONSHIP_WRITES[args.verb]
+    try:
+        preview = write(
+            ref, related, caller="tbhbdev alpha issue", dry_run=args.dry_run
+        )
+    except subprocess.CalledProcessError as exc:
+        print(exc.stderr, end="", file=sys.stderr)
+        return exc.returncode
+    if preview is not None:
+        print(json.dumps(preview))
+    return 0
+
+
 def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     """The command line."""
-    parser = argparse.ArgumentParser(prog=prog, description="Close a PR or issue.")
+    parser = argparse.ArgumentParser(
+        prog=prog, description="Close a PR or issue, or edit issue relationships."
+    )
     sub = parser.add_subparsers(dest="kind", required=True)
     for kind in ("pr", "issue"):
         one = sub.add_parser(kind).add_subparsers(dest="verb", required=True)
@@ -237,13 +288,30 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         closing.add_argument("number", type=int)
         closing.add_argument("--dry-run", action="store_true")
         if kind == "pr":
-            closing.add_argument(
-                "--reason", "--comment", dest="reason", required=True, type=non_blank
-            )
+            closing.add_argument("--reason", "--comment", required=True, type=non_blank)
             closing.add_argument("--delete-branch", action="store_true")
         else:
             closing.add_argument("--reason", required=True, choices=sorted(REASONS))
             closing.add_argument("--comment", type=non_blank)
+            for verb in ("link-sub", "unlink-sub"):
+                relationship = one.add_parser(verb)
+                relationship.add_argument("source", metavar="PARENT", type=_issue_ref)
+                relationship.add_argument("target", metavar="CHILD", type=_issue_ref)
+                relationship.add_argument("--dry-run", action="store_true")
+                relationship.set_defaults(blocking=None)
+            for verb in ("block", "unblock"):
+                relationship = one.add_parser(verb)
+                relationship.add_argument("source", metavar="ISSUE", type=_issue_ref)
+                direction = relationship.add_mutually_exclusive_group(required=True)
+                direction.add_argument(
+                    "--by",
+                    "--blocked-by",
+                    dest="target",
+                    metavar="BLOCKER",
+                    type=_issue_ref,
+                )
+                direction.add_argument("--blocking", metavar="BLOCKED", type=_issue_ref)
+                relationship.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -252,8 +320,10 @@ def main(
     prog: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> int:
-    """Close the pull request or issue the arguments name."""
+    """Close a pull request or issue, or edit an issue relationship."""
     args = build_parser(prog).parse_args(argv)
+    if args.verb != "close":
+        return _write_relationship(args)
     env = os.environ if env is None else env
     line = trailer(env)
     repo = pr.origin_repository()

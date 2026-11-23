@@ -83,6 +83,9 @@ commands:
   pr-stats     OWNER/REPO [--limit N]: cycle time of merged and closed pull requests
   review       draft N [--force] | check N: the review draft
   issue        close N --reason completed|not-planned: close an issue
+               | link-sub PARENT CHILD | unlink-sub PARENT CHILD [--dry-run]
+               | block BLOCKED --by BLOCKER | unblock BLOCKED --by BLOCKER [--dry-run]
+               Use --blocked-by as an alias for --by, or BLOCKER --blocking BLOCKED.
   gh-app       APP OWNER/REPO [--fresh] [--dry-run] [--all-repos]: mint a GitHub
                App installation token through Connect | APP --cooldown-until
                EPOCH | APP --cooldown-status
@@ -158,7 +161,7 @@ def review_command(argv: list[str], prog: str) -> int:
 def issue(argv: list[str], prog: str) -> int:
     from tbhbdev.alpha import close  # noqa: PLC0415 -- see the docstring
 
-    return close.main(["issue", *argv], prog=prog)
+    return close.main(["issue", *argv], prog=prog.removesuffix(" issue"))
 
 
 def gh_app_command(argv: list[str], prog: str) -> int:

@@ -99,7 +99,7 @@ def test_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
         ("close", (["pr", "close", "3", "--reason", "r"], "p pr")),
         ("close", (["pr", "close", "3", "--reason=r"], "p pr")),
         ("close", (["pr", "close", "3", "--comment", "c"], "p pr")),
-        ("close", (["issue", "close", "3"], "p issue")),
+        ("close", (["issue", "close", "3"], "p")),
     ]
 
 
