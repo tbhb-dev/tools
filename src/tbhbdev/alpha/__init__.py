@@ -22,6 +22,7 @@ from tbhbdev.alpha import (
     guard_gh_pr,
     guard_op,
     guard_scripts,
+    guard_ssh_agent,
     identity,
     install,
     loop,
@@ -44,6 +45,7 @@ __all__ = [
     "guard_gh_pr",
     "guard_op",
     "guard_scripts",
+    "guard_ssh_agent",
     "identity",
     "install",
     "loop",
@@ -66,6 +68,7 @@ commands:
                gh issue close, gh run rerun, gh api branch deletes and
                a session's approval of a pull request it opened
   guard-op     PreToolUse hook: require the configured 1Password account
+  guard-ssh-agent PreToolUse hook: keep ssh calls off the SSH agent and the ssh dir
   state-guard  Claude Code hook: block sign-off commits and unchecked open items
   session-context
                SessionStart hook: name the host, the other hosts and the time
@@ -127,6 +130,10 @@ def session_context_command(_argv: list[str], _prog: str) -> int:
 
 def poll_command(_argv: list[str], _prog: str) -> int:
     return guard_gh_poll.main()
+
+
+def ssh_agent_command(_argv: list[str], _prog: str) -> int:
+    return guard_ssh_agent.main()
 
 
 def gh_config_dir_command(_argv: list[str], _prog: str) -> int:
@@ -196,6 +203,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "session-context": session_context_command,
     "guard-gh-poll": poll_command,
     "guard-gh-config-dir": gh_config_dir_command,
+    "guard-ssh-agent": ssh_agent_command,
     "guard-scripts": scripts_command,
     "gh-shim": gh_shim.main,
     "agent-env": gh_shim.agent_env,
