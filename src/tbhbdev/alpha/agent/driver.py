@@ -172,12 +172,25 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     return result
 
 
+def past_time_limit(settings: Settings, run: Run) -> bool:
+    """Whether RUN started longer ago than the longest it may run."""
+    limits = [run.request.timeout]
+    if settings.max_run_minutes is not None:
+        limits.append(settings.max_run_minutes * 60)
+    seconds = min((n for n in limits if n is not None), default=None)
+    if seconds is None:
+        return False
+    age = datetime.now(UTC) - datetime.fromisoformat(run.started)
+    return age.total_seconds() > seconds
+
+
 def refuse_live_duplicate(settings: Settings, run: Run) -> None:
     """Refuse a review of a commit that another run of the profile is reviewing.
 
     A recorded run counts as live until the host reports its exit status, so
-    an unreachable host or a run with no status also refuses. Clear one with
-    `agent kill` or `agent clean`.
+    an unreachable host or a run with no status also refuses. A run older than
+    its time limit no longer counts, because the host stops it by then. A
+    record with no time limit stays live until `agent kill` or `agent clean`.
 
     Raises:
         Invalid: A recorded run has the same repo, commit and profile and no
@@ -193,7 +206,7 @@ def refuse_live_duplicate(settings: Settings, run: Run) -> None:
             and other.request.commit == run.request.commit
             and other.request.profile is run.request.profile
         )
-        if not same:
+        if not same or past_time_limit(settings, other):
             continue
         try:
             ended = (

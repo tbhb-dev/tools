@@ -395,6 +395,34 @@ def test_an_unreachable_host_still_counts_the_first_run_as_live(
         driver.refuse_live_duplicate(CONFIG, second)
 
 
+def age_first_run(**request: object) -> None:
+    """Rewrite the recorded `sample` run as started in 2020."""
+    path = driver.metadata_path("sample")
+    record = json.loads(path.read_text())
+    record["started"] = "2020-01-01T00:00:00+00:00"
+    record.update(request)
+    path.write_text(json.dumps(record))
+
+
+def test_a_first_run_past_its_time_limit_no_longer_blocks(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = recorded_review(remote)
+    age_first_run(timeout=60)
+    monkeypatch.setattr(
+        transport, "read", lambda *_a, **_k: pytest.fail("past the limit, no read")
+    )
+    driver.refuse_live_duplicate(CONFIG, second)
+
+
+def test_a_first_run_with_no_time_limit_stays_live(remote: Remote) -> None:
+    second = recorded_review(remote)
+    age_first_run()
+    config = dataclasses.replace(CONFIG, max_run_minutes=None)
+    with pytest.raises(Invalid, match="hasn't ended"):
+        driver.refuse_live_duplicate(config, second)
+
+
 @pytest.mark.parametrize("change", ["commit", "profile"])
 def test_another_commit_or_profile_does_not_count_as_a_duplicate(
     remote: Remote, change: str
