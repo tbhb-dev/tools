@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import secrets
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -29,6 +31,7 @@ from tbhbdev.alpha.agent.model import Harness, Invalid, Profile, RunKind, RunReq
 
 if TYPE_CHECKING:
     import argparse
+    from collections.abc import Generator
 
     from tbhbdev.alpha.agent.model import Host, Settings
 
@@ -173,6 +176,91 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     return result
 
 
+# A recorded run with no known time limit counts as live this long.
+UNKNOWN_LIMIT_SECONDS = 6 * 60 * 60
+
+
+def past_time_limit(settings: Settings, run: Run) -> bool:
+    """Whether RUN, recorded at launch, can no longer be running.
+
+    The limit is the shortest of the request's timeout and the host run cap, or
+    six hours when neither is known. The launch wait and the kill grace add to
+    it, because the clock starts at preparation and the run starts later.
+    """
+    limits = [run.request.timeout]
+    if settings.max_run_minutes is not None:
+        limits.append(settings.max_run_minutes * 60)
+    seconds = min((n for n in limits if n is not None), default=UNKNOWN_LIMIT_SECONDS)
+    seconds += settings.launch_wait_seconds + settings.kill_grace_seconds
+    age = datetime.now(UTC) - datetime.fromisoformat(run.started)
+    return age.total_seconds() > seconds
+
+
+def canonical_repo(repo: str) -> str:
+    """Lowercase owner/name, without a github.com prefix or a .git suffix."""
+    name = repo.strip().lower()
+    for prefix in ("https://github.com/", "github.com/"):
+        name = name.removeprefix(prefix)
+    return name.removesuffix(".git")
+
+
+@contextmanager
+def launch_lock() -> Generator[None]:
+    """Hold the coordinator-side lock that orders duplicate checks and saves."""
+    folder = directory()
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    folder.chmod(0o700)
+    descriptor = os.open(
+        folder / "launch.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def refuse_live_duplicate(settings: Settings, run: Run) -> None:
+    """Refuse a review of a commit that another run of the profile is reviewing.
+
+    A recorded run counts as live until the host reports its exit status, so
+    an unreachable host or a run with no status also refuses. A run older than
+    its time limit no longer counts, because the host stops it by then. A
+    record with no time limit stays live for six hours. The caller holds
+    ``launch_lock`` so two launches cannot both pass this check.
+
+    Raises:
+        Invalid: A recorded run has the same repo, commit and profile and no
+            exit status yet.
+    """
+    for path in sorted(directory().glob("*.json")):
+        try:
+            other = load(settings, path.stem)
+        except Invalid, ValueError, FileNotFoundError:
+            continue
+        same = (
+            canonical_repo(other.request.repo) == canonical_repo(run.request.repo)
+            and other.request.commit == run.request.commit
+            and other.request.profile is run.request.profile
+        )
+        if not same or past_time_limit(settings, other):
+            continue
+        try:
+            ended = (
+                transport.read(settings, other.host, (other.name, other.owner)).rc
+                is not None
+            )
+        except transport.TransportError:
+            ended = False
+        if not ended:
+            message = (
+                f"{run.name}: run {other.name} already reviews "
+                f"{run.request.repo}@{run.request.commit} with the "
+                f"{run.request.profile.value} profile and hasn't ended"
+            )
+            raise Invalid(message)
+
+
 def check_limits(
     settings: Settings,
     host: Host,
@@ -306,7 +394,10 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
     rules.same_version(version.line(), host_version)
     if run.request.profile is Profile.REVIEW:
         run.request = replace(run.request, commit=rules.resolve_ref(ref, refs))
-    save(run)
+    with launch_lock():
+        if run.request.profile is Profile.REVIEW:
+            refuse_live_duplicate(settings, run)
+        save(run)
     try:
         transport.stream(
             settings,

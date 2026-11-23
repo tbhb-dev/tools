@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import dataclasses
 import datetime as dt
+import fcntl
 import io
 import json
 import os
@@ -12,7 +14,8 @@ import shlex
 import tarfile
 from pathlib import PurePosixPath
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
+from unittest.mock import Mock
 
 import pytest
 from agent_driver_example import (
@@ -30,9 +33,10 @@ from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import driver, model, render, taint_store, transport
 from tbhbdev.alpha.agent.decisions import remote as remote_commands
 from tbhbdev.alpha.agent.decisions import repo, request, runfiles_names, taint
-from tbhbdev.alpha.agent.model import Invalid, RunKind
+from tbhbdev.alpha.agent.model import Invalid, Profile, RunKind
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
     from pathlib import Path
 
 pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
@@ -351,6 +355,208 @@ def test_review_without_ref_starts_nothing(
     assert launch(remote, "--profile", "review") == 1
     assert "a review run needs --ref" in capsys.readouterr().err
     assert remote.records("ssh") == []
+
+
+OTHER_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
+
+
+def recorded_review(remote: Remote) -> driver.Run:
+    """Launch `sample`, then return a copy named `second` to check against it."""
+    assert launch(remote, "--profile", "review", "--ref", COMMIT) == 0
+    second = driver.load(CONFIG, "sample")
+    second.name = "second"
+    return second
+
+
+def test_a_second_live_review_of_the_same_commit_is_refused(remote: Remote) -> None:
+    second = recorded_review(remote)
+    with pytest.raises(Invalid) as info:
+        driver.refuse_live_duplicate(CONFIG, second)
+    assert str(info.value) == (
+        f"second: run sample already reviews example-org/example-repo@{COMMIT} "
+        "with the review profile and hasn't ended"
+    )
+
+
+def test_a_review_may_start_when_the_first_has_ended(remote: Remote) -> None:
+    second = recorded_review(remote)
+    remote.file(".phase", "finished\n")
+    remote.file(".rc", "0\n")
+    driver.refuse_live_duplicate(CONFIG, second)
+
+
+def test_an_unreachable_host_still_counts_the_first_run_as_live(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = recorded_review(remote)
+
+    def unreachable(*_args: object, **_kwargs: object) -> transport.Reading:
+        message = "example-linux: transport failed"
+        raise transport.TransportError(message)
+
+    monkeypatch.setattr(transport, "read", unreachable)
+    with pytest.raises(Invalid, match="hasn't ended"):
+        driver.refuse_live_duplicate(CONFIG, second)
+
+
+def age_first_run(**request: object) -> None:
+    """Rewrite the recorded `sample` run as started in 2020."""
+    path = driver.metadata_path("sample")
+    record = json.loads(path.read_text())
+    record["started"] = "2020-01-01T00:00:00+00:00"
+    record.update(request)
+    path.write_text(json.dumps(record))
+
+
+def test_a_first_run_past_its_time_limit_no_longer_blocks(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = recorded_review(remote)
+    age_first_run(timeout=60)
+
+    def no_read(*_args: object, **_kwargs: object) -> NoReturn:
+        pytest.fail("past the limit, no read")
+
+    monkeypatch.setattr(transport, "read", no_read)
+    driver.refuse_live_duplicate(CONFIG, second)
+
+
+def test_a_first_run_past_the_host_run_cap_no_longer_blocks(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = recorded_review(remote)
+    age_first_run()
+    config = dataclasses.replace(CONFIG, max_run_minutes=1)
+
+    def no_read(*_args: object, **_kwargs: object) -> NoReturn:
+        pytest.fail("past the cap, no read")
+
+    monkeypatch.setattr(transport, "read", no_read)
+    driver.refuse_live_duplicate(config, second)
+
+
+def started_ago(**delta: float) -> str:
+    return (dt.datetime.now(dt.UTC) - dt.timedelta(**delta)).isoformat()
+
+
+def test_a_first_run_with_no_time_limit_stays_live_under_the_ceiling(
+    remote: Remote,
+) -> None:
+    second = recorded_review(remote)
+    age_first_run(started=started_ago(hours=5))
+    config = dataclasses.replace(CONFIG, max_run_minutes=None)
+    with pytest.raises(Invalid, match="hasn't ended"):
+        driver.refuse_live_duplicate(config, second)
+
+
+def test_a_first_run_with_no_time_limit_stops_blocking_past_the_ceiling(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = recorded_review(remote)
+    age_first_run(started=started_ago(hours=7))
+    config = dataclasses.replace(CONFIG, max_run_minutes=None)
+
+    def no_read(*_args: object, **_kwargs: object) -> NoReturn:
+        pytest.fail("past the ceiling, no read")
+
+    monkeypatch.setattr(transport, "read", no_read)
+    driver.refuse_live_duplicate(config, second)
+
+
+def test_the_run_cap_counts_minutes_not_seconds(remote: Remote) -> None:
+    second = recorded_review(remote)
+    age_first_run(started=started_ago(minutes=10))
+    config = dataclasses.replace(
+        CONFIG, max_run_minutes=60, launch_wait_seconds=0, kill_grace_seconds=0
+    )
+    with pytest.raises(Invalid, match="hasn't ended"):
+        driver.refuse_live_duplicate(config, second)
+
+
+def test_the_launch_wait_and_kill_grace_extend_the_limit(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = recorded_review(remote)
+    age_first_run(started=started_ago(seconds=100), timeout=60)
+    tight = dataclasses.replace(CONFIG, launch_wait_seconds=0, kill_grace_seconds=0)
+    monkeypatch.setattr(transport, "read", Mock(side_effect=transport.TransportError))
+    driver.refuse_live_duplicate(tight, second)
+    slow = dataclasses.replace(CONFIG, launch_wait_seconds=30, kill_grace_seconds=30)
+    with pytest.raises(Invalid, match="hasn't ended"):
+        driver.refuse_live_duplicate(slow, second)
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["Example-Org/Example-Repo", "github.com/example-org/example-repo.git"],
+)
+def test_the_repository_is_compared_in_its_canonical_form(
+    remote: Remote, spelling: str
+) -> None:
+    second = recorded_review(remote)
+    second.request = dataclasses.replace(second.request, repo=spelling)
+    with pytest.raises(Invalid, match="hasn't ended"):
+        driver.refuse_live_duplicate(CONFIG, second)
+
+
+def test_a_record_that_disappears_during_the_scan_is_skipped(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = recorded_review(remote)
+    monkeypatch.setattr(driver, "load", Mock(side_effect=FileNotFoundError))
+    driver.refuse_live_duplicate(CONFIG, second)
+
+
+def test_the_launch_lock_excludes_a_second_holder() -> None:
+    with driver.launch_lock():
+        descriptor = os.open(driver.directory() / "launch.lock", os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+
+
+def test_a_review_checks_and_saves_inside_the_launch_lock(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    real_lock = driver.launch_lock
+    real_save = driver.save
+
+    @contextlib.contextmanager
+    def lock() -> Generator[None]:
+        events.append("enter")
+        with real_lock():
+            yield
+        events.append("exit")
+
+    def refuse(*_args: object) -> None:
+        events.append("check")
+
+    def save(run: driver.Run) -> None:
+        events.append("save")
+        real_save(run)
+
+    monkeypatch.setattr(driver, "launch_lock", lock)
+    monkeypatch.setattr(driver, "refuse_live_duplicate", refuse)
+    monkeypatch.setattr(driver, "save", save)
+    assert launch(remote, "--profile", "review", "--ref", COMMIT) == 0
+    assert events == ["enter", "check", "save", "exit"]
+
+
+@pytest.mark.parametrize("change", ["commit", "profile"])
+def test_another_commit_or_profile_does_not_count_as_a_duplicate(
+    remote: Remote, change: str
+) -> None:
+    second = recorded_review(remote)
+    (driver.directory() / "broken.json").write_text("{")
+    second.request = (
+        dataclasses.replace(second.request, commit=OTHER_COMMIT)
+        if change == "commit"
+        else dataclasses.replace(second.request, profile=Profile.BUILD)
+    )
+    driver.refuse_live_duplicate(CONFIG, second)
 
 
 @pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT])
