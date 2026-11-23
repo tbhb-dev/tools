@@ -318,6 +318,13 @@ inlines
 setext
 strikethrough
 timebox
+onexc
+execroot
+statvfs
+bavail
+frsize
+favail
+fstatvfs
 refspec
 refspecs
 unfetched
