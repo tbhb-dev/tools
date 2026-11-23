@@ -15,6 +15,7 @@ okf_version: "0.2"
 * [Prose check](reference/prose-check.md) - The vale, cspell and rumdl check of prose before it is posted.
 * [Agent hosts](reference/agent-hosts.md) - Agent host setup, upgrades, access, and configuration.
 * [Content writes](reference/content.md) - Shared GitHub issue and project writes for plugins.
+* [Content model](reference/content-model.md) - Markdown normalization, source spans, and content metrics.
 * [Plugins](reference/plugins.md) - Commands and configuration from installed packages.
 * [Alpha commands](reference/alpha/commands.md) - Interim agent commands, installation, and harness hooks.
 * [Loop configuration](reference/alpha/loop-configuration.md) - Loop settings, shadow rules, and store behavior.

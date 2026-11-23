@@ -14,6 +14,13 @@ command makes git skip or swap them:
     export GIT_CONFIG_PARAMETERS=...     ``export`` and ``declare`` naming the key
     git ... --no-verify                  also ``--no-ve`` and ``commit -n``
 
+It also gates ``git push`` rewrites. ``--force-with-lease`` (with or without
+``=REF:SHA``) to a branch that isn't main or master passes. A plain
+``--force``, ``-f`` (alone or inside a cluster such as ``-fu``), ``--mirror``,
+a ``+REF`` refspec, ``--force-if-includes`` without a lease and any push to
+main or master are denied. The pre-push hook cannot see which flag was used,
+so this is where the lease semantic is enforced.
+
 This is an accident guard: a script file, a variable that
 holds the key and ``bash -c`` forms outside the scanner's list are out of
 scope.
@@ -72,6 +79,94 @@ REASON = (
     "write core.hooksPath or pass `--no-verify`. If a push is refused, push the "
     "work to a new branch and open a pull request."
 )
+
+
+PUSH_REASON = (
+    "Blocked: never force-push. Only `--force-with-lease` to a branch other "
+    "than main or master is allowed; no `--force`, `-f`, `--mirror`, `+REF` "
+    "refspec or push to main or master. Push a new branch and open a pull request."
+)
+PROTECTED_BRANCHES = {"main", "master"}
+# Push options whose next word is a value, so it is not a refspec.
+PUSH_VALUE_OPTIONS = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
+LEASE = "--force-with-lease"
+INCLUDES = "--force-if-includes"
+# Shortest abbreviation of --force or --mirror worth refusing: ``--mi`` is only
+# --mirror, and ``--fo`` fails in git as ambiguous, so refusing it costs nothing.
+MIN_ABBREVIATION = 4
+
+
+def long_push_flag(word: str) -> str:
+    """Classify a ``--`` push option as ``lease``, ``includes``, ``force`` or ``""``."""
+    name = word.partition("=")[0]
+    if name == LEASE:
+        return "lease"
+    if name == INCLUDES:
+        return "includes"
+    # Any other --force-* word is an abbreviation or unknown: fail closed.
+    for full in ("--force", "--mirror"):
+        if len(name) >= MIN_ABBREVIATION and full.startswith(name):
+            return "force"
+    return "force" if name.startswith("--force-") else ""
+
+
+def short_push_flag(word: str) -> str:
+    """Classify a ``-x`` push option cluster as ``force`` or ``""``."""
+    for letter in word[1:]:
+        if letter == "f":
+            return "force"
+        if letter == "o":
+            break
+    return ""
+
+
+def push_flag(word: str) -> str:
+    """Classify a push option as ``lease``, ``includes``, ``force`` or ``""``."""
+    if word.startswith("--"):
+        return long_push_flag(word)
+    return short_push_flag(word)
+
+
+def split_push_args(rest: list[str]) -> tuple[set[str], list[str]]:
+    """The classified push options and the positional targets after them."""
+    flags: set[str] = set()
+    targets: list[str] = []
+    options = True
+    skip = False
+    for word in rest:
+        if skip:
+            skip = False
+        elif options and word == "--":
+            options = False
+        elif options and word.startswith("-"):
+            flags.add(push_flag(word))
+            skip = word in PUSH_VALUE_OPTIONS
+        else:
+            targets.append(word)
+    return flags, targets
+
+
+def targets_protected(targets: list[str]) -> bool:
+    """Whether a push target is a ``+REF`` refspec or names a protected branch."""
+    if any(target.startswith("+") for target in targets):
+        return True
+    for target in targets[1:]:
+        destination = target.rpartition(":")[2].removeprefix("refs/heads/")
+        if destination in PROTECTED_BRANCHES:
+            return True
+    return False
+
+
+def push_reason(name: str, rest: list[str]) -> str | None:
+    """The deny reason for a push that rewrites or targets protected history."""
+    if name != "push":
+        return None
+    flags, targets = split_push_args(rest)
+    if "force" in flags or ("includes" in flags and "lease" not in flags):
+        return PUSH_REASON
+    if targets_protected(targets):
+        return PUSH_REASON
+    return None
 
 
 def names_key(words: Iterable[str]) -> bool:
@@ -188,4 +283,8 @@ def verdict(text: str) -> str | None:
     for prefix, words in simple_commands(text):
         if assigns_env(prefix) or bypasses(words):
             return REASON
+        if program_of(words) == "git":
+            at, name = subcommand(words)
+            if why := push_reason(name, words[at + 1 :]):
+                return why
     return None

@@ -2,8 +2,8 @@
 
 Run in a clone of a tbhb-dev repository, it installs that clone's git hooks
 into `$(git rev-parse --git-common-dir)/hooks`, which every worktree of the
-clone shares. The pre-push guard refuses rewritten history and protected-branch
-pushes before prek, replaying identical arguments and stdin bytes to both.
+clone shares. The pre-push guard refuses protected-branch pushes and unfetched
+rewrites before prek, replaying identical arguments and stdin bytes to both.
 Nonempty SKIP or PREK_SKIP refuses a push. Without tbhbdev on PATH, it refuses
 pushes targeting a tbhb-dev repository, using the hook URL argument or the named
 remote's URL. prek also runs pre-commit. The agent identity hooks
