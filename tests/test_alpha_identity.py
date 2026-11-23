@@ -7393,6 +7393,28 @@ def test_claude_committer_takes_the_main_model_at_commit_time(repo: Path) -> Non
     assert got.ident.model == got.root_ident.model == "anthropic:" + SONNET
 
 
+@pytest.mark.usefixtures("repo")
+def test_claude_committer_reads_the_model_from_the_session_transcript(
+    tmp_path: Path,
+) -> None:
+    # A run disables hooks, so no session record names the transcript.
+    config = tmp_path / "config"
+    project = config / "projects" / "example-project"
+    project.mkdir(parents=True)
+    write_transcript(project / "session-raw.jsonl", reply(SONNET))
+    write_transcript(config / "projects" / "session-raw.jsonl", reply(OPUS))
+    env = {**CLAUDE_COMMIT_ENV, "CLAUDE_CONFIG_DIR": str(config)}
+    got = ai.committer_identity(env, [])
+    assert got is not None
+    assert got.ident.model == got.root_ident.model == "anthropic:" + SONNET
+    home = {**CLAUDE_COMMIT_ENV, "HOME": str(tmp_path / "config" / "..")}
+    assert ai.session_model("session-raw", home) is None
+    empty = project / "session-empty.jsonl"
+    write_transcript(empty, {"type": "user"})
+    assert ai.session_model("session-empty", env) is None
+    assert ai.session_model("session-missing", {"HOME": str(tmp_path)}) is None
+
+
 def test_delegating_root_takes_the_main_model_at_commit_time(repo: Path) -> None:
     transcript = write_transcript(repo / "t.jsonl", reply(OPUS))
     ai.write_record(
