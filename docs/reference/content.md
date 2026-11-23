@@ -1,10 +1,10 @@
 ---
-description: Shared GitHub issue and project writes for plugins.
+description: Shared GitHub content validation and writes for plugins.
 generated:
   - role: generated
     harness: codex
-    model: openai:gpt-6
-    at: "2026-11-22T19:21:50Z"
+    model: openai:gpt-6.2-sol
+    at: "2026-11-23T02:43:02Z"
 status: stable
 tags: [plugins]
 title: Content writes
@@ -13,7 +13,7 @@ type: Reference
 
 # Content writes
 
-`tbhbdev.content` is the shared library for GitHub content writes by the `pm` and `sm` plugins. Import it directly; it has no CLI command or templates.
+`tbhbdev.content` is the shared library for GitHub content validation and for writes by the `pm` and `sm` plugins. Import it directly.
 
 - `render(template_path, data)` replaces `{{key}}` placeholders with mapping values. A missing key raises `KeyError`.
 - `create_issue(repo, title, body, *, issue_type, labels=(), fields=None, project=None, client=None)` creates an issue with its type and labels. `repo` is `owner/repo`. When given a project, it adds the issue and sets the fields after creation.
@@ -23,6 +23,32 @@ type: Reference
 - `add_to_project(ref, project, fields=None, *, client=None)` adds an issue to a Projects v2 project. `project` is the project node ID. `fields` maps field node IDs to GraphQL field values, such as `{"FIELD_ID": {"singleSelectOptionId": "OPTION_ID"}}`.
 
 `IssueRef(owner, repo, number)` is a frozen dataclass. Every write accepts an injected `Client` with `rest(method, path, payload=None)` and `graphql(query, variables)` methods returning dictionaries. The default `GhClient` runs `gh api` with JSON input and inherits gh's environment credentials. API errors propagate to the caller. Earlier successful writes remain applied if a later step fails.
+
+## Review validation
+
+`tbhbdev.content.check_review(markdown: str) -> list[str]` takes the Markdown body of a pull request review. An empty list means it passed. On refusal, the list contains a diagnostic. The function normalizes the body as object `pr-review`, variant `review`, and checks it against `#Review` with the binary from `tbhbdev cue install`. The caller verifies the commit hash against the pull request head before posting.
+
+Start with one paragraph of five consecutive header lines. Use one token each for the run name, provider, and model. `Head` takes a 40-digit hexadecimal commit hash and `Tier` takes `1`, `2`, or `3`. Follow the header with `Verdict` and `Findings` sections in that order.
+
+```markdown
+Run: review-build
+Provider: openai
+Model: gpt-6
+Head: 0123456789abcdef0123456789abcdef01234567
+Tier: 1
+
+## Verdict
+
+HOLD
+
+## Findings
+
+- BLOCK `src/app.py:4` Return the saved value when the cache is warm.
+```
+
+Each finding is one bullet with a class (`BLOCK`, `TECH-DEBT`, or `SECURITY-DEBT`), a whitespace-free `file:line` reference with a positive line number, and one or two sentences. Use a period, question mark, or exclamation point at the end of each sentence. The checker treats whitespace after that punctuation as a sentence boundary and applies the shared CI restatement check to each sentence. Limits are 40 visible prose words per finding, 8 findings, and 160 visible prose words across all findings. The checker counts prose after the class and reference.
+
+Use `HOLD` with at least one `BLOCK` finding. With `GO`, use debt findings or leave `Findings` empty.
 
 ## Caller and dry run
 
