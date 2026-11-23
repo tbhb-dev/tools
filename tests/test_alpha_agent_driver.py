@@ -30,7 +30,7 @@ from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import driver, model, render, taint_store, transport
 from tbhbdev.alpha.agent.decisions import remote as remote_commands
 from tbhbdev.alpha.agent.decisions import repo, request, runfiles_names, taint
-from tbhbdev.alpha.agent.model import Invalid, RunKind
+from tbhbdev.alpha.agent.model import Invalid, Profile, RunKind
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -351,6 +351,62 @@ def test_review_without_ref_starts_nothing(
     assert launch(remote, "--profile", "review") == 1
     assert "a review run needs --ref" in capsys.readouterr().err
     assert remote.records("ssh") == []
+
+
+OTHER_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
+
+
+def recorded_review(remote: Remote) -> driver.Run:
+    """Launch `sample`, then return a copy named `second` to check against it."""
+    assert launch(remote, "--profile", "review", "--ref", COMMIT) == 0
+    second = driver.load(CONFIG, "sample")
+    second.name = "second"
+    return second
+
+
+def test_a_second_live_review_of_the_same_commit_is_refused(remote: Remote) -> None:
+    second = recorded_review(remote)
+    with pytest.raises(Invalid) as info:
+        driver.refuse_live_duplicate(CONFIG, second)
+    assert str(info.value) == (
+        f"second: run sample already reviews example-org/example-repo@{COMMIT} "
+        "with the review profile and hasn't ended"
+    )
+
+
+def test_a_review_may_start_when_the_first_has_ended(remote: Remote) -> None:
+    second = recorded_review(remote)
+    remote.file(".phase", "finished\n")
+    remote.file(".rc", "0\n")
+    driver.refuse_live_duplicate(CONFIG, second)
+
+
+def test_an_unreachable_host_still_counts_the_first_run_as_live(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = recorded_review(remote)
+
+    def unreachable(*_args: object, **_kwargs: object) -> transport.Reading:
+        message = "example-linux: transport failed"
+        raise transport.TransportError(message)
+
+    monkeypatch.setattr(transport, "read", unreachable)
+    with pytest.raises(Invalid, match="hasn't ended"):
+        driver.refuse_live_duplicate(CONFIG, second)
+
+
+@pytest.mark.parametrize("change", ["commit", "profile"])
+def test_another_commit_or_profile_does_not_count_as_a_duplicate(
+    remote: Remote, change: str
+) -> None:
+    second = recorded_review(remote)
+    (driver.directory() / "broken.json").write_text("{")
+    second.request = (
+        dataclasses.replace(second.request, commit=OTHER_COMMIT)
+        if change == "commit"
+        else dataclasses.replace(second.request, profile=Profile.BUILD)
+    )
+    driver.refuse_live_duplicate(CONFIG, second)
 
 
 @pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT])

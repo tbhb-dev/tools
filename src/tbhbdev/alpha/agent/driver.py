@@ -172,6 +172,45 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     return result
 
 
+def refuse_live_duplicate(settings: Settings, run: Run) -> None:
+    """Refuse a review of a commit that another run of the profile is reviewing.
+
+    A recorded run counts as live until the host reports its exit status, so
+    an unreachable host or a run with no status also refuses. Clear one with
+    `agent kill` or `agent clean`.
+
+    Raises:
+        Invalid: A recorded run has the same repo, commit and profile and no
+            exit status yet.
+    """
+    for path in sorted(directory().glob("*.json")):
+        try:
+            other = load(settings, path.stem)
+        except Invalid, ValueError:
+            continue
+        same = (
+            other.request.repo == run.request.repo
+            and other.request.commit == run.request.commit
+            and other.request.profile is run.request.profile
+        )
+        if not same:
+            continue
+        try:
+            ended = (
+                transport.read(settings, other.host, (other.name, other.owner)).rc
+                is not None
+            )
+        except transport.TransportError:
+            ended = False
+        if not ended:
+            message = (
+                f"{run.name}: run {other.name} already reviews "
+                f"{run.request.repo}@{run.request.commit} with the "
+                f"{run.request.profile.value} profile and hasn't ended"
+            )
+            raise Invalid(message)
+
+
 def check_limits(
     settings: Settings,
     host: Host,
@@ -305,6 +344,7 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
     rules.same_version(version.line(), host_version)
     if run.request.profile is Profile.REVIEW:
         run.request = replace(run.request, commit=rules.resolve_ref(ref, refs))
+        refuse_live_duplicate(settings, run)
     save(run)
     try:
         transport.stream(
