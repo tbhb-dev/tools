@@ -15,7 +15,7 @@ Before choosing a model for a subagent or peer run, read models/README.md in tbh
 ## Commits and pull requests
 
 - Branch first. Every change lands through a pull request.
-- Use Conventional Commits and a plain `git commit`, without `Signed-off-by` or `Co-authored-by`, and fill every section of `.github/PULL_REQUEST_TEMPLATE.md`.
+- Use Conventional Commits and a plain `git commit`, without `Signed-off-by` or `Co-authored-by`, and draft the pull request in `.github/PULL_REQUEST_DRAFT.md` using `.github/PULL_REQUEST_TEMPLATE.md`. Keep the draft out of commits.
 
 ## Adding a tool
 

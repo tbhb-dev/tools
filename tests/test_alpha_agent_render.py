@@ -8,7 +8,8 @@ def test_brief_and_launch() -> None:
     assert render.brief(RunKind.EXEC, "example\n") == (
         "Report results only in your final answer. "
         "Never message Claude sessions, session sockets or other agents directly."
-        "\nexample\n"
+        "\nIf this run should open a pull request, write .github/PULL_REQUEST_DRAFT.md "
+        "in the worktree and keep it out of your commits.\nexample\n"
     )
 
 

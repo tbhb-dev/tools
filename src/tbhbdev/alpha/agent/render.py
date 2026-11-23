@@ -5,7 +5,9 @@ from tbhbdev.alpha.agent.model import RunKind
 
 FINAL_ONLY = (
     "Report results only in your final answer. "
-    "Never message Claude sessions, session sockets or other agents directly."
+    "Never message Claude sessions, session sockets or other agents directly.\n"
+    "If this run should open a pull request, write .github/PULL_REQUEST_DRAFT.md "
+    "in the worktree and keep it out of your commits."
 )
 
 

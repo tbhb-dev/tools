@@ -154,6 +154,8 @@ def test_brief(kind: RunKind) -> None:
     prefix = (
         "Report results only in your final answer. "
         "Never message Claude sessions, session sockets or other agents directly.\n"
+        "If this run should open a pull request, write .github/PULL_REQUEST_DRAFT.md "
+        "in the worktree and keep it out of your commits.\n"
     )
     assert (
         render.brief(kind, "brief text")
