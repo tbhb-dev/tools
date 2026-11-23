@@ -235,12 +235,16 @@ class GhClient:
 
 
 def _visibility(api: Client, repo: str) -> str:
-    """Read the repository's visibility as GitHub reports it, in upper case.
+    """Return ``PRIVATE`` only for an exact ``private`` answer about this repository.
 
-    Only ``PRIVATE`` lets the scan skip the name rules, so a missing value
-    counts as public.
+    Only ``PRIVATE`` lets the scan skip the name rules. The match is exact so a
+    lookalike spelling can't qualify, and the answer must name the requested
+    repository exactly, with no case folding. Anything else counts as public
+    and returns "".
     """
-    return str(api.rest("GET", f"/repos/{repo}").get("visibility", "")).upper()
+    answer = api.rest("GET", f"/repos/{repo}")
+    named = answer.get("full_name") == repo
+    return "PRIVATE" if named and answer.get("visibility") == "private" else ""
 
 
 def _scan(text: str, what: str, visibility: str = "") -> None:

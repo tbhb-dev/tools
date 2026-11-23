@@ -22,12 +22,13 @@ class RecordingClient:
     calls: list[Call] = field(default_factory=list)
     body: str | None = None
     visibility: str = "private"
+    full_name: str = "Example/Demo"
     reads: list[str] = field(default_factory=list)
 
     def rest(self, method: str, path: str, payload: cw.Json | None = None) -> cw.Json:
         if (method, path) == ("GET", "/repos/example/demo"):
             self.reads.append(path)
-            return {"visibility": self.visibility}
+            return {"visibility": self.visibility, "full_name": self.full_name}
         self.calls.append((method, path, payload))
         return {"number": 7, "id": 123, "node_id": "ISSUE", "body": self.body}
 
@@ -627,11 +628,24 @@ def test_dry_run_refused(
 
 
 @pytest.mark.parametrize(
-    ("reported", "passed"),
-    [("private", "PRIVATE"), ("public", "PUBLIC"), ("internal", "INTERNAL"), ("", "")],
+    ("reported", "full_name", "passed"),
+    [
+        ("private", "example/demo", "PRIVATE"),
+        ("private", "Example/Demo", ""),
+        ("private", "example/dem\u0131", ""),
+        ("private", "example/other", ""),
+        ("private", "", ""),
+        ("PRIVATE", "example/demo", ""),
+        ("private".replace("i", "\u0131"), "example/demo", ""),
+        ("public", "example/demo", ""),
+        ("internal", "example/demo", ""),
+        ("", "example/demo", ""),
+    ],
 )
-def test_writes_scan_with_the_repository_visibility(reported: str, passed: str) -> None:
-    client = RecordingClient(visibility=reported)
+def test_writes_scan_with_the_repository_visibility(
+    reported: str, full_name: str, passed: str
+) -> None:
+    client = RecordingClient(visibility=reported, full_name=full_name)
     cw.create_issue("example/demo", "Title", "Body", issue_type="Task", client=client)
     cw.add_comment(REF, "Comment", client=client)
     assert client.reads == ["/repos/example/demo"] * 2
