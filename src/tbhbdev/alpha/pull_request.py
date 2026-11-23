@@ -913,21 +913,18 @@ def posting_value(env: Mapping[str, str]) -> str | None:
     return agent_identity.format_value(committer.ident.attrs())
 
 
-def default_base(git_dir: Path | None = None) -> str:
+def default_base() -> str:
     """The repository's default branch: origin/HEAD, else the remote's own HEAD.
-
-    GIT_DIR names the repository to read, else the working directory's.
 
     Raises:
         SystemExit: origin/HEAD is not a symbolic ref and the remote's HEAD is
             unreadable. No guess stands in, so a draft never targets a wrong base.
     """
-    where = ["--git-dir", str(git_dir)] if git_dir else []
-    code, out = git(*where, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    code, out = git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
     name = out.removeprefix("refs/remotes/origin/")
     if code == 0 and name and name != out:
         return name
-    code, out = git(*where, "ls-remote", "--symref", "origin", "HEAD")
+    code, out = git("ls-remote", "--symref", "origin", "HEAD")
     found = re.search(r"^ref: refs/heads/(\S+)\s+HEAD$", out, re.MULTILINE)
     if code != 0 or not found:
         message = (

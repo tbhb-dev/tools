@@ -49,7 +49,7 @@ class PublishedRange(NamedTuple):
     commit: str
 
 
-def parse_draft(text: str, git_dir: Path | None = None) -> Draft:
+def parse_draft(text: str, default_branch: Callable[[], str]) -> Draft:
     """Split a draft into its title, body and frontmatter fields.
 
     Only the frontmatter parser runs here. The schema, the section and prose
@@ -74,14 +74,7 @@ def parse_draft(text: str, git_dir: Path | None = None) -> Draft:
         raise OpenRefusedError(message)
     fields = cast("dict[str, object]", meta) if isinstance(meta, dict) else {}
     # A missing base takes the repository's default branch, as `alpha pr` does.
-    # An unreadable default branch exits, and the opener refuses the draft.
-    base = fields.get("base")
-    if "base" not in fields:
-        try:
-            base = pull_request.default_base(git_dir)
-        except SystemExit:
-            message = "the draft names no base and no default branch is readable"
-            raise OpenRefusedError(message) from None
+    base = default_branch() if "base" not in fields else fields["base"]
     if not isinstance(base, str) or not base:
         message = "the draft frontmatter names an invalid base branch"
         raise OpenRefusedError(message)
@@ -277,6 +270,33 @@ def scan_draft(text: str, git_dir: Path, rules: bytes, visibility: str) -> None:
         raise OpenRefusedError(message)
 
 
+def repository_default_branch(repository: str, token: str) -> str:
+    """The default branch GitHub reports for REPOSITORY.
+
+    Raises:
+        OpenRefusedError: GitHub is unreachable or gives no usable branch for
+            the named repository. No guess stands in for the answer.
+    """
+    _, owner, name = repo.parts(repository)
+    try:
+        response = httpx.get(
+            f"https://api.github.com/repos/{owner}/{name}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+            },
+            timeout=TIMEOUT,
+        )
+        data = response.json() if response.status_code == httpx.codes.OK else None
+    except httpx.HTTPError, ValueError:
+        data = None
+    branch = data.get("default_branch") if isinstance(data, dict) else None
+    if not isinstance(branch, str) or not branch:
+        message = "the draft names no base and the default branch is unreadable"
+        raise OpenRefusedError(message)
+    return branch
+
+
 def open_pull_request(
     published: PublishedRange,
     repository: str,
@@ -296,7 +316,8 @@ def open_pull_request(
         text, published.git_dir, rules, repository_visibility(repository, token, write)
     )
     draft = parse_draft(
-        text.replace("\r\n", "\n").replace("\r", "\n"), published.git_dir
+        text.replace("\r\n", "\n").replace("\r", "\n"),
+        lambda: repository_default_branch(repository, token),
     )
     _, owner, name = repo.parts(repository)
     try:
