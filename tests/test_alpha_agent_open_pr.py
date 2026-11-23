@@ -12,6 +12,7 @@ import pytest
 
 from tbhbdev import gitleaks_check
 from tbhbdev.alpha.agent import host_tools, open_pr
+from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -220,8 +221,9 @@ def test_a_missing_draft_is_refused(tmp_path: Path) -> None:
 )
 def test_a_malformed_draft_is_refused(tmp_path: Path, text: str, message: str) -> None:
     published = commit_draft(tmp_path, text)
-    with pytest.raises(open_pr.OpenRefusedError, match=message):
+    with pytest.raises(open_pr.OpenRefusedError, match=message) as captured:
         open_draft(published)
+    assert captured.value.__context__ is None
 
 
 def test_the_frontmatter_sets_the_base_and_draft_flag(
@@ -411,12 +413,34 @@ def test_unavailable_scan_policy_refuses(
     assert scans == []
 
 
+UNNAMED = "the scanner refused for a reason the log doesn't name"
+SCANNER_MISSING = "the gitleaks executable cannot run"
+
+
 @pytest.mark.parametrize("committed", [False, True])
-@pytest.mark.parametrize("locations", [None, "rule fixture-rule on line 3"])
+@pytest.mark.parametrize(
+    ("fields", "reason"),
+    [
+        ({"kind": "exit"}, UNNAMED),
+        ({"kind": "other"}, UNNAMED),
+        (
+            {"kind": "finding", "lines": (3, 9), "locations": "rule on line 123"},
+            "gitleaks finds a secret on lines: 3, 9",
+        ),
+        ({"kind": "exit", "status": 2}, "gitleaks failed (exit 2)"),
+        ({"kind": "signal", "status": -9}, "gitleaks was stopped by a signal"),
+        (
+            {"kind": "config"},
+            "the private gitleaks config or the extends file is unusable",
+        ),
+        ({"kind": "scanner_missing"}, SCANNER_MISSING),
+    ],
+)
 def test_a_scan_refusal_prevents_posting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    locations: str | None,
+    fields: dict[str, object],
+    reason: str,
     *,
     committed: bool,
 ) -> None:
@@ -426,8 +450,8 @@ def test_a_scan_refusal_prevents_posting(
 
     def refuse(text: str, *_args: object, **_kwargs: object) -> None:
         assert text == DRAFT
-        message = "private scanner detail"
-        raise gitleaks_check.ScanRefused(message, locations=locations)
+        message = "SECRET-TEXT fixture-rule"
+        raise gitleaks_check.ScanRefused(message, **fields)  # pyrefly: ignore[bad-argument-type]
 
     def post(*_args: object, **_kwargs: object) -> httpx.Response:
         pytest.fail("unexpected API call")
@@ -436,5 +460,40 @@ def test_a_scan_refusal_prevents_posting(
     monkeypatch.setattr(httpx, "post", post)
     with pytest.raises(open_pr.OpenRefusedError) as captured:
         open_draft(published)
-    reason = locations or "check the draft and scanner configuration"
+    assert str(captured.value) == f"PR draft secret scan refused: {reason}"
+    assert "SECRET-TEXT" not in str(captured.value)
+    assert "123" not in str(captured.value)
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+
+
+def test_a_missing_scanner_executable_is_labeled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    published = commit_draft(tmp_path, DRAFT)
+
+    def missing(*_args: object, **_kwargs: object) -> None:
+        message = "host executable gitleaks was not found"
+        raise Invalid(message)
+
+    monkeypatch.setattr(gitleaks_check, "scan_text", missing)
+    with pytest.raises(open_pr.OpenRefusedError) as captured:
+        open_draft(published)
+    assert str(captured.value) == f"PR draft secret scan refused: {SCANNER_MISSING}"
+    assert captured.value.__context__ is None
+
+
+@pytest.mark.parametrize("error", [UnicodeError("x")])
+def test_a_draft_read_failure_names_its_class(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    published = commit_draft(tmp_path, DRAFT)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(gitleaks_check, "scan_text", refuse)
+    with pytest.raises(open_pr.OpenRefusedError) as captured:
+        open_draft(published)
+    reason = f"{type(error).__name__} while scanning the draft"
     assert str(captured.value) == f"PR draft secret scan refused: {reason}"

@@ -17,11 +17,28 @@ if TYPE_CHECKING:
 
 
 class ScanRefused(RuntimeError):  # noqa: N818 - the public name callers import
-    """The text was not cleared: a finding, a scanner failure or a missing config."""
+    """The text was not cleared: a finding, a scanner failure or a missing config.
 
-    def __init__(self, message: str, *, locations: str | None = None) -> None:
+    ``kind`` is ``finding``, ``config``, ``scanner_missing``, ``signal`` or
+    ``exit``. ``lines`` holds a finding's line numbers, and ``status`` the exit
+    status of a failed scanner. Callers choose their wording from these fields
+    and need not parse the message.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = "exit",
+        locations: str | None = None,
+        lines: tuple[int, ...] = (),
+        status: int | None = None,
+    ) -> None:
         super().__init__(message)
+        self.kind = kind
         self.locations = locations
+        self.lines = lines
+        self.status = status
 
 
 def scan_text(
@@ -41,18 +58,27 @@ def scan_text(
         ScanRefused: The scan found a secret or couldn't run, a missing or
             non-executable scanner included. The message names rule IDs and line
             numbers, or the executable and the OS reason, never matched text.
+            It is raised after the handler ends, so it carries no chained
+            exception and no scanner text beyond its own fields.
     """
+    refusal: ScanRefused | None = None
     try:
         secret_scan.scan(
             text, what, root=root, gitleaks=gitleaks, visibility=visibility
         )
     except secret_scan.FindingRefusal as exc:
-        raise ScanRefused(str(exc.code), locations=exc.locations) from None
+        refusal = ScanRefused(
+            str(exc.code), kind="finding", locations=exc.locations, lines=exc.lines
+        )
+    except secret_scan.ScanBlocked as exc:
+        refusal = ScanRefused(str(exc.code), kind=exc.kind, status=exc.status)
     except SystemExit as exc:
-        raise ScanRefused(str(exc.code)) from None
+        refusal = ScanRefused(str(exc.code))
     except OSError as exc:
         message = (
             f"cannot scan {what} for secrets: the scanner {gitleaks} "
             f"cannot run ({exc.strerror})"
         )
-        raise ScanRefused(message) from None
+        refusal = ScanRefused(message, kind="scanner_missing")
+    if refusal is not None:
+        raise refusal

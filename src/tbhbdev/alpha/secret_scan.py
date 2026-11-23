@@ -86,10 +86,27 @@ EXTENDS_PATH = re.compile(r"^(\s*path\s*=\s*)(?:\"[^\"]*\"|'[^']*')", re.MULTILI
 EXTEND_TABLE = re.compile(r"^\s*\[extend\]", re.MULTILINE)
 
 
+class ScanBlocked(SystemExit):
+    """A scan that could not clear the text, with a machine-readable kind.
+
+    ``kind`` is ``config`` for a missing or wrong config, ``signal`` when
+    gitleaks died on a signal, and ``exit`` for any other failure.
+    ``status`` is gitleaks' exit status, or None when it didn't run to one.
+    """
+
+    def __init__(self, message: str, kind: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.status = status
+
+
 class FindingRefusal(SystemExit):
     """A scan refusal with only the rule IDs and line numbers."""
 
+    kind = "finding"
+
     def __init__(self, what: str, found: list[tuple[int, str]]) -> None:
+        self.lines = tuple(line for line, _ in found)
         self.locations = "; ".join(
             f"rule {rule} on line {line}" for line, rule in found
         )
@@ -179,7 +196,8 @@ def run_gitleaks(
             f"cannot scan {what} for secrets: gitleaks failed "
             f"(exit {done.returncode}): {output}"
         )
-        raise SystemExit(message)
+        kind = "signal" if done.returncode < 0 else "exit"
+        raise ScanBlocked(message, kind, done.returncode)
 
 
 def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) -> None:
@@ -196,7 +214,8 @@ def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) ->
             empty value, scans under the full private config.
 
     Raises:
-        SystemExit: The private config or .gitleaks.toml is missing or wrong,
+        SystemExit: (a ScanBlocked or FindingRefusal) The private config or
+            .gitleaks.toml is missing or wrong,
             or gitleaks reports a finding or fails.
     """
     config = private_config()
@@ -207,18 +226,18 @@ def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) ->
             f"cannot scan {what} for secrets: the private gitleaks config "
             f"{config} cannot be read ({exc.strerror}). {FETCH}"
         )
-        raise SystemExit(message) from None
+        raise ScanBlocked(message, "config") from None
     if not CANARY.search(private):
         message = (
             f"cannot scan {what} for secrets: {config} has no rule with the id "
             f"{GITLEAKS_CANARY}, so it is not the private gitleaks config. {FETCH}"
         )
-        raise SystemExit(message)
+        raise ScanBlocked(message, "config")
     if not (root / GITLEAKS_EXTENDS).is_file():
         message = (
             f"cannot scan {what} for secrets: {root / GITLEAKS_EXTENDS} does not exist"
         )
-        raise SystemExit(message)
+        raise ScanBlocked(message, "config")
     dropped = (*REPO_RULES, *NAME_RULES) if visibility == PRIVATE else REPO_RULES
     reduced = without_name_rules(private, dropped)
     with tempfile.TemporaryDirectory() as directory:  # mode 0700

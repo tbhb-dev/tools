@@ -191,6 +191,8 @@ def publish(
                 run.files.write("branch", branch)
                 published = open_pr.PublishedRange(workspace, directory, base, commit)
                 return 0 if opened(run, published, branch, token) else 5
+    except subprocess.TimeoutExpired:
+        error = "git timed out"
     except OSError, subprocess.SubprocessError:
         error = "git push unavailable"
     text = " ".join(error.replace(token, "[redacted]").split()) or "git push failed"
