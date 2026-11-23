@@ -202,6 +202,21 @@ def preparation(run: run_host.Run) -> run_host.Prepared:
     )
 
 
+def harness_without_push(
+    run: run_host.Run,
+    prepared: run_host.Prepared,
+    stack: ExitStack,
+    harness: Callable[[run_host.Run, run_host.Prepared, ExitStack], int],
+    _token: str | None,
+) -> int:
+    return harness(run, prepared, stack)
+
+
+@pytest.fixture(autouse=True)
+def stub_push(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run_host.push, "run", harness_without_push)
+
+
 @pytest.mark.parametrize("hook_tools", ["missing", "directory", "file"])
 @pytest.mark.parametrize("kind", RunKind)
 def test_preflight_prepares_and_stops_signing_without_launch(
@@ -1260,6 +1275,7 @@ run_host.codex_install.prepare = lambda executable, home: (executable, ())
 
 sys.path.insert(0, str(Path(sys.argv[1]).parent))
 helpers = runpy.run_path(sys.argv[1])
+run_host.push.run = helpers["harness_without_push"]
 run = helpers["make_run"](Path(sys.argv[2]))
 run = dataclasses.replace(
     run, settings=dataclasses.replace(run.settings, kill_grace_seconds=0.2)
