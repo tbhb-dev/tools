@@ -18,6 +18,7 @@ from test_alpha_agent_git_parent import execute_native_git_probe, real_clone
 from test_alpha_agent_sandbox_live import live_only, report
 
 from tbhbdev.alpha import identity, install
+from tbhbdev.alpha.agent import worktree
 from tbhbdev.alpha.agent.decisions.policy import GIT_CONFIG_PATHS
 from tbhbdev.alpha.agent.model import Harness, Profile
 
@@ -221,8 +222,10 @@ def test_live_codex_commit_and_git_children(
     children = GIT_CONFIG_PATHS[1:]
     before = {child: evidence.child_snapshot(workspace / child) for child in children}
     for name, verb in install.IDENTITY_HOOKS:
-        assert (workspace / ".git/hooks" / name).read_text() == install.SHIM.format(
-            mark=install.SHIM_MARK, verb=verb, hook=name, origin=install.ORIGIN_GREP
+        assert (
+            workspace / ".git/hooks" / name
+        ).read_text() == worktree.RUN_IDENTITY_SHIM.format(
+            mark=install.SHIM_MARK, verb=verb, hook=name, run_env=identity.RUN_HOOK_ENV
         )
     command = shlex.join(
         (

@@ -1,7 +1,7 @@
 """The brief a harness receives, from literal text and run kind."""
 
 from tbhbdev.alpha.agent import transport
-from tbhbdev.alpha.agent.model import RunKind
+from tbhbdev.alpha.agent.model import Profile, RunKind
 
 FINAL_ONLY = (
     "Report results only in your final answer. "
@@ -9,9 +9,15 @@ FINAL_ONLY = (
     "If this run should open a pull request, write .github/PULL_REQUEST_DRAFT.md "
     "in the worktree and keep it out of your commits."
 )
+BUILD_PUBLICATION = (
+    "Commit your changes locally. "
+    "The driver pushes the build branch and opens the pull request after success."
+)
 
 
-def brief(kind: RunKind, text: str) -> str:
+def brief(kind: RunKind, text: str, *, profile: Profile | None = None) -> str:
+    if profile is Profile.BUILD:
+        text = f"{BUILD_PUBLICATION}\n{text}"
     return f"{FINAL_ONLY}\n{text}" if kind is RunKind.EXEC else text
 
 

@@ -334,4 +334,5 @@ hardbreak
 mdit
 softbreak
 tasklists
+unlaunched
 MemAvailable

@@ -1252,8 +1252,9 @@ def test_fetch_token_without_reviews_refs_reads_the_account_credentials() -> Non
     )
 
 
-def test_push_token_asks_for_write_on_the_one_repository(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("profile", Profile)
+def test_harness_and_driver_mint_distinct_scopes(
+    monkeypatch: pytest.MonkeyPatch, profile: Profile
 ) -> None:
     monkeypatch.setitem(VALUES, "example/app/pem", "example-pem")
     seen: list[dict[str, object]] = []
@@ -1263,12 +1264,32 @@ def test_push_token_asks_for_write_on_the_one_repository(
         return gh_app.Minted(REVIEW_TOKEN, 2000)
 
     monkeypatch.setattr(gh_app, "mint_token", mint)
-    token = credentials.push_token(run_request(), pull_requests_settings())
-    assert token == REVIEW_TOKEN
-    assert [keywords["permissions"] for keywords in seen] == [
-        {"contents": "write", "pull_requests": "write", "workflows": "write"}
-    ]
-    assert [keywords["repository"] for keywords in seen] == ["tbhb-dev/example-repo"]
+    settings = pull_requests_settings()
+    request = run_request(
+        profile=profile.value, commit="0" * 40 if profile is Profile.REVIEW else None
+    )
+    assert credentials.github_token(request, settings.credentials[0]) == REVIEW_TOKEN
+    scopes = [keywords["permissions"] for keywords in seen]
+    if profile is Profile.BUILD:
+        assert scopes == [{"contents": "read"}]
+        assert credentials.push_token(request, settings) == REVIEW_TOKEN
+        assert seen[-1]["permissions"] == {
+            "contents": "write",
+            "pull_requests": "write",
+            "workflows": "write",
+        }
+    else:
+        assert scopes == [
+            {
+                "contents": "read",
+                "pull_requests": "read",
+                "checks": "read",
+                "statuses": "read",
+            }
+        ]
+        assert credentials.push_token(request, settings) is None
+        assert len(seen) == 1
+    assert all(keywords["repository"] == request.repo for keywords in seen)
 
 
 def test_push_token_is_none_for_a_review_without_minting(

@@ -12,6 +12,7 @@ those records into trailers and validate them:
                                        user record in another owner's repo;
                                        outside any repo, user records only)
     trailer <msgfile> [source]         prepare-commit-msg: stamp the trailers
+    trailer --dry-run                 verify command availability without Git writes
     consume                            post-commit: consume the credited receipts
     check <msgfile>                    commit-msg: validate the trailers, and
                                        an agent commit's author and committer;
@@ -124,6 +125,8 @@ STORE = "tbhb-alpha"
 PROG = "tbhbdev alpha identity"
 KEY_GEN = "Generated-by"
 KEY_ASSIST = "Assisted-by"
+RUN_HOOK_ENV = "TBHBDEV_REQUIRE_IDENTITY"
+RUN_MODEL_ENV = "TBHBDEV_IDENTITY_MODEL"
 
 CLAUDE = "claude"
 CODEX = "codex"
@@ -2403,6 +2406,19 @@ def amend_only(path: Path, text: str, kept: list[Trailer]) -> None:
         add_trailers(path, [], [], kept)
 
 
+def with_run_model(committer: Committer, configured_model: str | None) -> Committer:
+    """Use the launcher's model when the root harness has no model record."""
+    root = committer.root_ident
+    if root.model or not (model := provider_model(committer.key, configured_model)):
+        return committer
+    updated = replace(root, model=model)
+    return replace(
+        committer,
+        root_ident=updated,
+        ident=committer.ident if committer.ident.subagent else updated,
+    )
+
+
 def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int:
     """prepare-commit-msg: stamp ``Generated-by`` and ``Assisted-by``.
 
@@ -2441,6 +2457,7 @@ def cmd_trailer(msgfile: str, source: str | None, env: Mapping[str, str]) -> int
     if not committer:
         amend_only(path, text, kept)
         return 0
+    committer = with_run_model(committer, env.get(RUN_MODEL_ENV))
     picked = None if replaying else picked_commit(head, text, repo.top)
     problem = picked and pick_refusal(picked, text, repo.top)
     if problem:
@@ -3051,8 +3068,28 @@ def cmd_check(msgfile: str, env: Mapping[str, str]) -> int:
     return 1 if errs else 0
 
 
+def trailer_command(msgfile: str, source: str | None, env: Mapping[str, str]) -> int:
+    if msgfile == "--dry-run":
+        return 0
+    required = env.get(RUN_HOOK_ENV) == "1"
+    if required and detect(env) is None:
+        raise AttributionError(SESSION_ERROR)
+    status = cmd_trailer(msgfile, source, env)
+    if (
+        required
+        and status == 0
+        and not any(
+            key == KEY_GEN for key, _ in llm_trailers(Path(msgfile).read_text())
+        )
+    ):
+        message = "run commit requires a Generated-by trailer"
+        raise AttributionError(message)
+    return status
+
+
 USAGE = (
     "usage: tbhbdev alpha identity record <harness> | trailer <msgfile> [source]"
+    " | trailer --dry-run"
     " | consume | check <msgfile> | stamp-docs"
 )
 
@@ -3063,7 +3100,9 @@ def main(argv: list[str], env: Mapping[str, str]) -> int:
         case ["record", harness, *_]:
             return cmd_record(harness, env)
         case ["trailer", msgfile, *rest]:
-            return cmd_trailer(msgfile, rest[0] if rest else env.get(SOURCE_ENV), env)
+            return trailer_command(
+                msgfile, rest[0] if rest else env.get(SOURCE_ENV), env
+            )
         case ["consume", *_]:
             return cmd_consume()
         case ["stamp-docs", *_]:
