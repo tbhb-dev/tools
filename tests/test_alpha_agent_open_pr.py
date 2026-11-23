@@ -126,11 +126,17 @@ def scans(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         assert root.name == ".git"
         assert (root / ".gitleaks.toml").read_text() == POLICY
         assert gitleaks == "fixture-scanner"
-        assert visibility == ""
+        assert visibility == "PRIVATE"
         seen.append(text)
+
+    def get(url: str, **options: object) -> httpx.Response:
+        assert url == "https://api.github.com/repos/tbhb-dev/tools"
+        assert "Bearer tok" in str(options["headers"])
+        return reply(200, {"full_name": "TBHB-dev/Tools", "visibility": "private"})
 
     monkeypatch.setattr(host_tools, "resolve", resolve)
     monkeypatch.setattr(gitleaks_check, "scan_text", scan)
+    monkeypatch.setattr(httpx, "get", get)
     return seen
 
 
@@ -497,3 +503,51 @@ def test_a_draft_read_failure_names_its_class(
         open_draft(published)
     reason = f"{type(error).__name__} while scanning the draft"
     assert str(captured.value) == f"PR draft secret scan refused: {reason}"
+
+
+NAMED = "tbhb-dev/tools"
+UNREADABLE = "visibility lookup failed: unreachable or unreadable\n"
+NO_ANSWER = "visibility lookup failed: no usable answer\n"
+OTHER = "visibility lookup failed: answer names another repository\n"
+
+
+def answer_for(visibility: object, name: object = "TBHB-dev/Tools") -> httpx.Response:
+    return reply(200, {"full_name": name, "visibility": visibility})
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected", "logged"),
+    [
+        (answer_for("private"), "PRIVATE", ""),
+        (answer_for("public"), "PUBLIC", ""),
+        (answer_for("internal"), "INTERNAL", ""),
+        (answer_for("Private"), "", ""),
+        (answer_for("PRIVATE"), "", ""),
+        (answer_for(3), "", ""),
+        (answer_for("private", "tbhb-dev/other"), "", OTHER),
+        (answer_for("private", None), "", OTHER),
+        (reply(200, {"visibility": "private"}), "", OTHER),
+        (reply(200, ["private"]), "", NO_ANSWER),
+        (reply(404, {"visibility": "private"}), "", NO_ANSWER),
+        (httpx.ConnectError("down"), "", UNREADABLE),
+        (ValueError("not json"), "", UNREADABLE),
+    ],
+)
+def test_the_scan_visibility_comes_from_the_repository_read(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: httpx.Response | Exception,
+    expected: str,
+    logged: str,
+) -> None:
+    def get(*_args: object, **_options: object) -> httpx.Response:
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    lines: list[tuple[str, str]] = []
+    monkeypatch.setattr(httpx, "get", get)
+    result = open_pr.repository_visibility(
+        NAMED, "tok", lambda suffix, text: lines.append((suffix, text))
+    )
+    assert result == expected
+    assert lines == ([("log", logged)] if logged else [])
