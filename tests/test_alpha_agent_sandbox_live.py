@@ -706,15 +706,13 @@ def test_local_sandbox_commands_use_the_build_policy(
         )
 
 
-def test_socket_listener_records_connections() -> None:
-    # A short disposable directory avoids macOS's Unix socket path limit.
-    with tempfile.TemporaryDirectory(prefix="ag-") as directory:
-        path = str(Path(directory) / "s")
-        with listen(path) as listener, socket.socket(socket.AF_UNIX) as client:
-            assert not listener.connections
-            client.connect(path)
-            assert b"200 OK" in client.recv(4096)
-        assert listener.connections == [True]
+def test_socket_listener_records_connections(short_probe_home: Path) -> None:
+    path = str(short_probe_home / "s")
+    with listen(path) as listener, socket.socket(socket.AF_UNIX) as client:
+        assert not listener.connections
+        client.connect(path)
+        assert b"200 OK" in client.recv(4096)
+    assert listener.connections == [True]
 
 
 def test_script_records_real_exit_statuses(
@@ -935,7 +933,8 @@ def test_linux_control_refuses_malformed_bridge_frames(frame: bytes) -> None:
 
 @pytest.fixture
 def short_probe_home() -> Generator[Path]:
-    with tempfile.TemporaryDirectory(prefix="ag-") as directory:
+    # A Unix socket path holds about 100 bytes, less than a Bazel TMPDIR.
+    with tempfile.TemporaryDirectory(prefix="ag-", dir="/tmp") as directory:
         yield Path(directory)
 
 
