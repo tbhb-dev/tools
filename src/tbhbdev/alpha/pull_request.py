@@ -885,18 +885,21 @@ def branch_trailers(base: str) -> list[tuple[str, str]]:
     """The LLM trailers of the commits on this branch, oldest first.
 
     The range is BASE..HEAD, which starts at the merge base. The PR targets the
-    remote branch, so origin/BASE is the base when it exists. Git runs in the
+    remote branch, so refs/remotes/origin/BASE is the base when it exists, else
+    refs/heads/BASE. Full ref names keep a tag named origin/BASE out. Git runs in the
     current directory, because the branch belongs to the repository the script
     is run from.
     """
-    remote = f"origin/{base}"
-    code, _ = agent_identity.git("rev-parse", remote)
-    span = f"{remote if code == 0 else base}..HEAD"
+    remote = f"refs/remotes/origin/{base}"
+    code, _ = agent_identity.git(
+        "rev-parse", "--verify", "--quiet", f"{remote}^{{commit}}"
+    )
+    span = f"{remote if code == 0 else f'refs/heads/{base}'}..HEAD"
     code, out = agent_identity.git(
         "log", "--reverse", "--format=%x1e%(trailers:only,unfold)", span
     )
     if code != 0:
-        message = f"cannot list the commits in {span}; is {base} fetched?"
+        message = f"cannot list the commits in {base}..HEAD; is {base} fetched?"
         raise SystemExit(message)
     found = (agent_identity.LINE.match(line) for line in out.splitlines())
     return [(match[1], match[2]) for match in found if match]
@@ -911,19 +914,29 @@ def posting_value(env: Mapping[str, str]) -> str | None:
 
 
 def default_base(git_dir: Path | None = None) -> str:
-    """The repository's default branch from origin/HEAD, else the schema's.
+    """The repository's default branch: origin/HEAD, else the remote's own HEAD.
 
     GIT_DIR names the repository to read, else the working directory's.
-    Names the source on stderr, so a fallback to the schema is visible.
+
+    Raises:
+        SystemExit: origin/HEAD is not a symbolic ref and the remote's HEAD is
+            unreadable. No guess stands in, so a draft never targets a wrong base.
     """
     where = ["--git-dir", str(git_dir)] if git_dir else []
     code, out = git(*where, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
     name = out.removeprefix("refs/remotes/origin/")
     if code == 0 and name and name != out:
         return name
-    base = str(schema_default(load_schema(), "base"))
-    print(f"base: origin/HEAD is unset; using the schema's {base}", file=sys.stderr)
-    return base
+    code, out = git(*where, "ls-remote", "--symref", "origin", "HEAD")
+    found = re.search(r"^ref: refs/heads/(\S+)\s+HEAD$", out, re.MULTILINE)
+    if code != 0 or not found:
+        message = (
+            "cannot find the default branch: origin/HEAD is not a symbolic ref "
+            "and `git ls-remote --symref origin HEAD` failed; name the base in "
+            "the draft's frontmatter"
+        )
+        raise SystemExit(message)
+    return found[1]
 
 
 def base_of(meta: Mapping[str, object], default: str | None = None) -> str:

@@ -74,7 +74,7 @@ def parse_draft(text: str, git_dir: Path | None = None) -> Draft:
         raise OpenRefusedError(message)
     fields = cast("dict[str, object]", meta) if isinstance(meta, dict) else {}
     # A missing base takes the repository's default branch, as `alpha pr` does.
-    # The schema fallback exits when the working directory has no baseline.
+    # An unreadable default branch exits, and the opener refuses the draft.
     base = fields.get("base")
     if "base" not in fields:
         try:

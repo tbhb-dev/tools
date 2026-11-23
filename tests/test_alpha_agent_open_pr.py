@@ -234,7 +234,10 @@ def test_a_malformed_draft_is_refused(tmp_path: Path, text: str, message: str) -
 @pytest.mark.parametrize(
     "text", ["# t\n\nbody\n", "---\ndraft: false\n---\n\n# t\n\nbody\n"]
 )
-def test_a_draft_without_a_base_takes_the_schema_default(text: str) -> None:
+def test_a_draft_without_a_base_takes_the_working_directory_default(
+    text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(open_pr.pull_request, "default_base", lambda _=None: "main")
     assert open_pr.parse_draft(text).base == "main"
 
 
@@ -266,6 +269,34 @@ def test_a_draft_without_a_base_takes_the_repository_default_branch(
         check=True,
     )
     assert open_pr.parse_draft("# t\n\nbody\n", git_dir).base == "trunk"
+
+
+def test_a_publication_git_dir_without_origin_head_reads_the_remote(
+    tmp_path: Path,
+) -> None:
+    remote = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "dev", str(remote)], check=True
+    )
+    published = commit_draft(tmp_path, "# t\n\nbody\n")
+    git_dir = str(published.git_dir)
+    subprocess.run(
+        ["git", "--git-dir", git_dir, "push", "-q", str(remote), "HEAD:refs/heads/dev"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "--git-dir", git_dir, "remote", "add", "origin", str(remote)],
+        check=True,
+    )
+    assert open_pr.parse_draft("# t\n\nbody\n", published.git_dir).base == "dev"
+
+
+def test_a_publication_git_dir_without_a_remote_refuses_the_draft(
+    tmp_path: Path,
+) -> None:
+    published = commit_draft(tmp_path, "# t\n\nbody\n")
+    with pytest.raises(open_pr.OpenRefusedError, match="no default branch"):
+        open_pr.parse_draft("# t\n\nbody\n", published.git_dir)
 
 
 def test_an_unreadable_default_branch_refuses_the_draft(
