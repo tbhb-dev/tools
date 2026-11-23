@@ -81,9 +81,13 @@ def signature_fingerprint(raw: str) -> str:
     return found[0] if found else ""
 
 
-def remote_tips(remote: str) -> list[str] | None:
-    """The remote's current ref tips from ``git ls-remote``, or None on failure."""
-    code, out = git(*SAFE, "ls-remote", remote)
+def remote_tips(url: str) -> list[str] | None:
+    """The tips at the push destination from ``git ls-remote``, or None on failure.
+
+    ``url`` is the address git hands the hook, so a ``pushurl`` that differs
+    from the fetch URL is the one read.
+    """
+    code, out = git(*SAFE, "ls-remote", url)
     if code:
         return None
     return [line.split()[0] for line in out.splitlines() if line.split()]
@@ -189,12 +193,12 @@ def ref_problems(
     return problems
 
 
-def push_problems(remote: str, lines: Sequence[str]) -> list[str]:
+def push_problems(remote: str, url: str, lines: Sequence[str]) -> list[str]:
     rows: list[tuple[str, str, str]] = []
     for line in lines:
         _, local, ref, old = line.split()  # ValueError: main() refuses the push
         rows.append((local, ref, old))
-    tips = remote_tips(remote) if any(local.strip("0") for local, _, _ in rows) else []
+    tips = remote_tips(url) if any(local.strip("0") for local, _, _ in rows) else []
     if tips is None:
         return ["pre-push-guard: cannot read the remote's tips; push refused"]
     return [problem for row in rows for problem in ref_problems(remote, row, tips)]
@@ -210,7 +214,7 @@ def main(argv: list[str], prog: str) -> int:
             return 1
     remote = argv[0]
     try:
-        problems = push_problems(remote, sys.stdin.read().splitlines())
+        problems = push_problems(remote, argv[1], sys.stdin.read().splitlines())
     except ValueError:
         problems = ["pre-push-guard: cannot inspect push; push refused"]
     for problem in problems:

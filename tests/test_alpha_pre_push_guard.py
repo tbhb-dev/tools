@@ -16,7 +16,6 @@ from tbhbdev.alpha import install
 from tbhbdev.alpha import pre_push_guard as pg
 
 ZERO = "0" * 40
-PUBLIC = "https://github.com/example/public.git"
 PRIVATE = "fixturerepo"
 
 
@@ -72,15 +71,17 @@ def commit(repo: Path, message: str = "next", **files: str) -> str:
     return git(repo, "rev-parse", "HEAD")
 
 
-def guard(
-    monkeypatch: pytest.MonkeyPatch, local: str, remote: str = ZERO, url: str = PUBLIC
-) -> int:
+def origin_url() -> str:
+    return git(Path.cwd(), "config", "remote.origin.url")
+
+
+def guard(monkeypatch: pytest.MonkeyPatch, local: str, remote: str = ZERO) -> int:
     monkeypatch.setattr(
         sys,
         "stdin",
         io.StringIO(f"refs/heads/topic {local} refs/heads/topic {remote}\n"),
     )
-    return alpha.main(["pre-push-guard", "origin", url], "tbhbdev alpha")
+    return alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha")
 
 
 @pytest.mark.parametrize("kind", ["diverged", "forward", "new", "delete", "missing"])
@@ -140,7 +141,7 @@ def test_rewrite_outside_branches_is_refused(
     head = commit(repo)
     git(repo, "update-ref", "refs/remotes/origin/topic", head)
     monkeypatch.setattr(sys, "stdin", io.StringIO(f"HEAD {base} {ref} {head}\n"))
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha") == 1
     assert "non-fast-forward push refused" in capsys.readouterr().err
 
 
@@ -279,7 +280,7 @@ def test_protected_branch_refused(
         "delete": (ZERO, base),
     }[kind]
     monkeypatch.setattr(sys, "stdin", io.StringIO(f"HEAD {local} {ref} {remote}\n"))
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha") == 1
     out, err = capsys.readouterr()
     assert out == ""
     assert err == (
@@ -303,7 +304,7 @@ def test_protected_branch_refused_beside_other_refs(
             f"refs/heads/topic {head} refs/heads/main {base}\n"
         ),
     )
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha") == 1
     assert capsys.readouterr().err.startswith("refs/heads/main: push to a protected")
 
 
@@ -322,7 +323,7 @@ def test_protected_branch_does_not_hide_later_refs(
             f"refs/heads/topic {base} refs/heads/topic {head}\n"
         ),
     )
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha") == 1
     err = capsys.readouterr().err
     assert "refs/heads/main: push to a protected" in err
     assert "refs/heads/topic: non-fast-forward push refused" in err
@@ -342,7 +343,7 @@ def test_similar_names_are_not_protected(
 ) -> None:
     head = commit(repo)
     monkeypatch.setattr(sys, "stdin", io.StringIO(f"HEAD {head} {ref} {ZERO}\n"))
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 0
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha") == 0
 
 
 @pytest.mark.parametrize("default", ["upstream", "simple", "current"])
@@ -362,32 +363,24 @@ def test_tracking_main_is_refused_for_any_push_default(
         "stdin",
         io.StringIO(f"refs/heads/topic {head} refs/heads/main {base}\n"),
     )
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha") == 1
     assert "refs/heads/main: push to a protected" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
-        f"https://github.com/example/{PRIVATE}.git",
-        f"https://example.test/{PRIVATE}",
-        "",
-    ],
-)
 def test_private_repository_names_pass_everywhere(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, url: str
+    repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A repository name in the message, a path and a line is public text now.
     # The list file that once held the names isn't read.
     head = commit(repo, PRIVATE, **{PRIVATE: f"{PRIVATE}\n"})
-    assert guard(monkeypatch, head, url=url) == 0
+    assert guard(monkeypatch, head) == 0
 
 
 def test_bad_input_is_refused(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO("broken\n"))
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "p") == 1
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "p") == 1
     assert capsys.readouterr() == (
         "",
         "pre-push-guard: cannot inspect push; push refused\n",
@@ -400,9 +393,9 @@ def test_duplicate_and_empty_input(
     head = commit(repo)
     row = f"refs/heads/topic {head} refs/heads/topic {ZERO}\n"
     monkeypatch.setattr(sys, "stdin", io.StringIO(row + row))
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "p") == 0
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "p") == 0
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "p") == 0
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "p") == 0
     assert capsys.readouterr() == ("", "")
 
 
@@ -550,7 +543,7 @@ def test_an_unreadable_remote_refuses_closed(
     head = git(Path.cwd(), "rev-parse", "HEAD")
     row = f"refs/heads/topic {head} refs/heads/topic {ZERO}\n"
     monkeypatch.setattr(sys, "stdin", io.StringIO(row))
-    assert alpha.main(["pre-push-guard", "nowhere", PUBLIC], "p") == 1
+    assert alpha.main(["pre-push-guard", "origin", "/nowhere"], "p") == 1
     assert capsys.readouterr().err == (
         "pre-push-guard: cannot read the remote's tips; push refused\n"
     )
@@ -614,3 +607,22 @@ def test_signing_refuses_when_an_agent_socket_is_set(
     monkeypatch.setenv("SSH_AUTH_SOCK", "/nonexistent")
     with pytest.raises(AssertionError, match="never reach an agent"):
         agent_commit(repo, None)
+
+
+def test_tips_come_from_the_push_url_not_the_fetch_url(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    held = commit(repo, "held")
+    git(repo, "push", "-q", "origin", f"{held}:refs/heads/other")
+    git(repo, "update-ref", "-d", "refs/remotes/origin/other")
+    destination = tmp_path / "destination.git"
+    destination.mkdir()
+    git(destination, "init", "--bare", "-q")
+    git(repo, "config", "remote.origin.pushurl", str(destination))
+    tip = commit(repo, "human")
+    row = f"refs/heads/topic {tip} refs/heads/topic {ZERO}\n"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(row))
+    assert alpha.main(["pre-push-guard", "origin", str(destination)], "p") == 0
+    # The remote name `origin` resolves, so only the URL argument can refuse.
+    monkeypatch.setattr(sys, "stdin", io.StringIO(row))
+    assert alpha.main(["pre-push-guard", "origin", "/nowhere"], "p") == 1
