@@ -81,19 +81,31 @@ def signature_fingerprint(raw: str) -> str:
     return found[0] if found else ""
 
 
-def agent_commit_problems(remote: str, ref: str, local: str) -> list[str]:
-    """Name each agent commit the push adds that the agent key didn't sign."""
+def agent_commit_problems(remote: str, ref: str, local: str, old: str) -> list[str]:
+    """Name each agent commit the push adds that the agent key didn't sign.
+
+    The range excludes what the remote's tracking refs hold and the remote tip git
+    reports in ``old`` when this clone has that object. A failed listing or a range
+    over RANGE_LIMIT refuses the push.
+    """
+    known = bool(old.strip("0")) and git(*SAFE, "cat-file", "-e", old)[0] == 0
     code, out = git(
         *SAFE,
         "rev-list",
-        f"--max-count={RANGE_LIMIT}",
+        f"--max-count={RANGE_LIMIT + 1}",
         local,
         "--not",
         f"--remotes={remote}",
+        *([old] if known else []),
     )
+    if code:
+        return [f"{ref}: cannot list the commits to push; push refused"]
+    shas = out.split()
+    if len(shas) > RANGE_LIMIT:
+        return [f"{ref}: the push adds over {RANGE_LIMIT} commits; push refused"]
     problems: list[str] = []
     expected = ""
-    for sha in out.split() if code == 0 else []:
+    for sha in shas:
         _, text = git(*SAFE, "cat-file", "commit", sha)
         raw = text + "\n"  # git() strips the newline that ends a commit object
         idents = [
@@ -140,7 +152,7 @@ def push_problems(remote: str, lines: Sequence[str]) -> list[str]:
             continue
         if not local.strip("0"):
             continue
-        problems.extend(agent_commit_problems(remote, ref, local))
+        problems.extend(agent_commit_problems(remote, ref, local, old))
         if old.strip("0") and git(*SAFE, "merge-base", "--is-ancestor", old, local)[0]:
             if fetched_tip(remote, ref) == old:
                 print(

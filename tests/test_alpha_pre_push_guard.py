@@ -520,6 +520,42 @@ def test_a_non_tip_agent_commit_is_refused(
     assert push_agent(monkeypatch, tip) == 1
 
 
+@pytest.mark.usefixtures("agent_key")
+def test_commits_below_the_remote_tip_are_not_checked(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    already_there = agent_commit(repo, None)
+    tip = commit(repo, "human")
+    assert push_agent(monkeypatch, tip) == 1
+    assert guard(monkeypatch, tip, already_there) == 0
+
+
+@pytest.mark.usefixtures("agent_key")
+def test_a_range_over_the_limit_is_refused(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    commit(repo, "one")
+    tip = commit(repo, "two")
+    monkeypatch.setattr(pg, "RANGE_LIMIT", 1)
+    assert push_agent(monkeypatch, tip) == 1
+    assert capsys.readouterr().err == (
+        "refs/heads/topic: the push adds over 1 commits; push refused\n"
+    )
+
+
+@pytest.mark.usefixtures("repo")
+def test_a_range_that_cannot_be_listed_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert push_agent(monkeypatch, "f" * 40) == 1
+    assert capsys.readouterr().err == (
+        "refs/heads/topic: cannot list the commits to push; push refused\n"
+    )
+
+
 def test_an_unreadable_agent_key_refuses_closed(
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
