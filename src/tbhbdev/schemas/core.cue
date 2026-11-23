@@ -1,0 +1,1 @@
+../../../schemas/core.cue

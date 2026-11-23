@@ -322,12 +322,12 @@ def normalize(
     """Return a core.cue Draft.
 
     Input starts with a nonempty level-one ATX title, except for the
-    `issue-comment` object, which has no title and keeps leading text as a
+    `issue-comment` and `pr-review` objects, which keep leading text as a
     `preamble` block. Section and draft word, character and paragraph metrics
     exclude headings. Metadata must already contain JSON values. Frontmatter is
     the caller's job.
     """
-    titled = object != "issue-comment"
+    titled = object not in {"issue-comment", "pr-review"}
     markdown = markdown.replace("\x00", "\ufffd")  # The parser does too.
     parser = (
         MarkdownIt("commonmark", {"inline_definitions": True})

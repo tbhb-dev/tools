@@ -207,9 +207,10 @@ pytest_test(
         "auto",
     ],
     coverage = ["src/tbhbdev"],
-    # The alpha pr and merge tests run cog, and the private gitleaks config's
-    # tests run the pinned gitleaks.
+    # Review validation uses CUE. The alpha pr and merge tests run cog,
+    # and the private gitleaks config's tests run the pinned gitleaks.
     path_tools = [
+        "@cue_test_tool//:cue",
         "@tbhb_rules_cog//:cog",
         "@tbhb_rules_gitleaks//:gitleaks",
     ],

@@ -3,8 +3,8 @@ description: Markdown normalization into the content schema.
 generated:
   - role: generated
     harness: codex
-    model: openai:gpt-6
-    at: "2026-11-22T20:24:20Z"
+    model: openai:gpt-6.2-sol
+    at: "2026-11-23T02:43:02Z"
 status: stable
 tags: [plugins]
 title: Content model
@@ -17,7 +17,7 @@ type: Reference
 
 Supply a schema-supported object, a variant name, and JSON-compatible metadata. Metadata passes through unchanged. The caller parses frontmatter.
 
-Start the document with a nonempty level-one ATX (hash-prefixed) heading for the `title` block. Later level-two headings start sections. Section keys use visible heading text, lowercased, with runs of non-alphanumeric characters replaced by a hyphen. Duplicate keys receive suffixes starting at `-2`. Content before the first section becomes `preamble` when present. This block has kind `text` and omits optional heading and level fields. Missing titles and empty section headings raise `ValueError`.
+Start the document with a nonempty level-one ATX (hash-prefixed) heading for the `title` block. Issue comments and pull request reviews are title-free. Level-two headings start sections. Section keys use visible heading text, lowercased, with runs of non-alphanumeric characters replaced by a hyphen. Duplicate keys receive suffixes starting at `-2`. Content before the first section becomes `preamble` when present. This block has kind `text` and omits optional heading and level fields. Missing required titles and empty section headings raise `ValueError`.
 
 `blockOrder` preserves document order. Blocks include source, visible text, spans, metrics, content, and an empty inline index. Sections include their heading in source. Their visible text and metrics exclude it. Their content arrays contain the following blocks. The title has an empty content array.
 
