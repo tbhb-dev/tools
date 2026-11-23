@@ -6,12 +6,15 @@ import os
 import select
 import subprocess
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from agent_host_example import constant, host_settings, run_request
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from tbhbdev.alpha.agent import (
     credentials,
@@ -77,6 +80,17 @@ def local_run(
     git(workspace, "config", "user.email", "example@example.com")
     git(workspace, "config", "commit.gpgsign", "false")
     commit(workspace, "initial")
+    signing = ed25519.Ed25519PrivateKey.generate().private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.OpenSSH,
+        serialization.NoEncryption(),
+    )
+    key = tmp_path / "signing"
+    key.touch(mode=0o600)
+    key.write_bytes(signing)
+    git(workspace, "config", "user.signingKey", str(key))
+    git(workspace, "config", "gpg.format", "ssh")
+    git(workspace, "config", "commit.gpgsign", "true")
     paths = run_host.RunPaths(
         str(tmp_path),
         str(workspace),
@@ -97,7 +111,9 @@ def local_run(
     )
     prepared = run_host.Prepared(
         paths,
-        credentials.Delivery({}, None, gh_fallback=False, claude_profile=None),
+        credentials.Delivery(
+            {}, signing.decode(), gh_fallback=False, claude_profile=None
+        ),
         None,
     )
 
@@ -183,6 +199,101 @@ def test_push_success(
     assert run.files.path("head").read_text() == head
     assert run.files.path("branch").read_text() == "agent/example"
     assert run.files.path("pr").read_text() == f"{run.request.repo}#7"
+
+
+@pytest.mark.parametrize("status", ["N", "B"])
+def test_refuses_the_first_commit_without_a_good_signature(
+    status: str, local_run: tuple[run_host.Run, run_host.Prepared, Path]
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+    rejected: list[str] = []
+
+    def change(actual: run_host.Run, paths: run_host.Prepared, stack: ExitStack) -> int:
+        if status == "N":
+            git(
+                workspace, "commit", "--no-gpg-sign", "--allow-empty", "-qm", "unsigned"
+            )
+        else:
+            commit(workspace, "signed message")
+            original = git(workspace, "cat-file", "commit", "HEAD").encode()
+            changed = original.replace(b"signed message", b"changed message") + b"\n"
+            bad = git(
+                workspace, "hash-object", "-t", "commit", "-w", "--stdin", data=changed
+            )
+            git(workspace, "update-ref", "HEAD", bad)
+        rejected.append(git(workspace, "rev-parse", "HEAD"))
+        git(workspace, "commit", "--no-gpg-sign", "--allow-empty", "-qm", "later")
+        return harness(actual, paths, stack)
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, change, SYNTHETIC) == 4
+    assert run.files.path("log").read_text() == (
+        f"push refused: commit {rejected[0]} has signature status {status} (%G?)\n"
+    )
+    assert run.files.path("head").read_text() == git(workspace, "rev-parse", "HEAD")
+    assert git(target, "for-each-ref") == ""
+    assert not run.files.path("branch").exists()
+    assert not run.files.path("pr").exists()
+
+
+def test_checks_the_whole_history_without_a_pre_run_head(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+    initial = git(workspace, "rev-parse", "HEAD")
+    git(workspace, "checkout", "-b", "other")
+
+    def change(actual: run_host.Run, paths: run_host.Prepared, stack: ExitStack) -> int:
+        git(workspace, "checkout", "agent/example")
+        return harness(actual, paths, stack)
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, change, SYNTHETIC) == 4
+    assert run.files.path("log").read_text() == (
+        f"push refused: commit {initial} has signature status N (%G?)\n"
+    )
+    assert git(target, "for-each-ref") == ""
+
+
+def test_refuses_a_signature_without_a_trusted_key(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    run, prepared, target = local_run
+    prepared = replace(prepared, delivery=replace(prepared.delivery, signing=None))
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
+    commit_sha = run.files.path("head").read_text()
+    assert run.files.path("log").read_text() == (
+        f"push refused: commit {commit_sha} has signature status U (%G?)\n"
+    )
+    assert git(target, "for-each-ref") == ""
+
+
+@pytest.mark.parametrize("failure", ["missing commit", "invalid signing key"])
+def test_signature_verification_failure_refuses_push(
+    failure: str, local_run: tuple[run_host.Run, run_host.Prepared, Path]
+) -> None:
+    run, prepared, target = local_run
+
+    def change(actual: run_host.Run, paths: run_host.Prepared, stack: ExitStack) -> int:
+        if failure == "missing commit":
+            ref = (
+                Path(paths.paths.worktree) / ".git" / "refs" / "heads" / "agent/example"
+            )
+            ref.write_text("f" * 40 + "\n")
+            return 0
+        return harness(actual, paths, stack)
+
+    if failure == "invalid signing key":
+        prepared = replace(prepared, delivery=replace(prepared.delivery, signing=""))
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, change, SYNTHETIC) == 4
+    assert run.files.path("log").read_text() == (
+        "push refused: cannot verify commit signatures\n"
+    )
+    assert git(target, "for-each-ref") == ""
 
 
 def test_a_private_repository_name_does_not_block_the_push(

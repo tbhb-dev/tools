@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from tbhbdev.alpha.agent import host_tools, open_pr, runfiles
 from tbhbdev.alpha.agent.decisions import repo
+from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -138,6 +139,10 @@ def run(
     made = True
     try:
         with publication(run.files.root, workspace, commit) as directory:
+            refusal = signature_refusal(directory, before, prepared.delivery.signing)
+            if refusal is not None:
+                run.files.write("log", f"push refused: {refusal}\n")
+                return 4
             status, error = send(directory, url(run.request.repo), branch, token)
             if not status:
                 run.files.write("branch", branch)
@@ -153,6 +158,49 @@ def run(
         text = error.strip().replace(token, "[redacted]") or "git push failed"
         run.files.write("log", f"push failed: {text[:PUSH_ERROR_LIMIT]}\n")
     return 4 if status or not made else rc
+
+
+def signature_refusal(
+    directory: Path, before: str | None, signing: str | None
+) -> str | None:
+    """Verify all new commits using SSH trust derived from the run's signing key."""
+    unavailable = "cannot verify commit signatures"
+    signers = directory / "allowed_signers"
+    try:
+        # The run clone cannot set its own trust policy. Keep only the public key
+        # fields in the allowed-signers file, without the private key or comment.
+        allowed = b""
+        if signing is not None:
+            public = subprocess.check_output(  # nosec B603
+                [host_tools.resolve("ssh-keygen"), "-y", "-P", "", "-f", "/dev/stdin"],
+                cwd=directory,
+                env={"PATH": host_tools.search()},
+                input=signing.encode(),
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+            allowed = b"agent " + b" ".join(public.split()[:2]) + b"\n"
+        signers.write_bytes(allowed)
+        result = open_pr.publication_git(
+            directory,
+            "-c",
+            f"gpg.ssh.allowedSignersFile={signers}",
+            "log",
+            "--topo-order",
+            "--reverse",
+            "--format=%H %G?",
+            f"{before}..HEAD" if before is not None else "HEAD",
+            "--",
+        )
+    except Invalid, OSError, subprocess.SubprocessError:
+        return unavailable
+    if result.returncode:
+        return unavailable
+    for line in result.stdout.decode().splitlines():
+        commit, _, status = line.partition(" ")
+        if status != "G":
+            return f"commit {commit} has signature status {status} (%G?)"
+    return None
 
 
 def opened(
