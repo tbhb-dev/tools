@@ -174,6 +174,7 @@ def test_counter_targets_the_rules_repository() -> None:
 def test_pr_check_unavailable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    monkeypatch.setattr(pr, "git", Mock(return_value=(0, "origin/main")))
     monkeypatch.setattr(pr, "read_checked", Mock(return_value=pr.Checked([])))
     monkeypatch.setattr(
         sg, "size_counts", Mock(side_effect=sg.SizeCountError("missing target"))
