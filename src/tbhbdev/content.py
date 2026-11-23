@@ -1,4 +1,4 @@
-"""Shared GitHub content writes for plugins; no templates or CLI of its own."""
+"""Shared GitHub content validation and writes for plugins."""
 
 import json
 import os
@@ -6,16 +6,56 @@ import re
 import subprocess  # nosec B404
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
+from tbhbdev import cue_runtime
 from tbhbdev.alpha import secret_scan
 from tbhbdev.alpha.pull_request import find_tool, root
+from tbhbdev.content_model import normalize
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 type Json = dict[str, object]
+
+
+def check_review(markdown: str) -> list[str]:
+    """Return review validation refusals, or an empty list on success."""
+    try:
+        draft = normalize(markdown, object="pr-review", variant="review", metadata={})
+    except ValueError as exc:
+        return [str(exc)]
+    try:
+        cue = cue_runtime.resolve()
+        with as_file(files("tbhbdev").joinpath("schemas")) as schemas:
+            # Fixed schema names and pinned executable. Draft JSON goes on stdin.
+            done = subprocess.run(  # nosec B603
+                [
+                    str(cue),
+                    "vet",
+                    "-c",
+                    "-d",
+                    "#Review",
+                    "core.cue",
+                    "issue.cue",
+                    "review.cue",
+                    "json:",
+                    "-",
+                ],
+                cwd=schemas,
+                input=json.dumps(draft),
+                capture_output=True,
+                encoding="utf-8",
+                check=False,
+                timeout=10,
+            )
+    except (cue_runtime.CueError, OSError, subprocess.TimeoutExpired) as exc:
+        return [f"Review validation could not run: {exc}"]
+    if done.returncode:
+        return [done.stderr.strip() or "Review validation failed"]
+    return []
 
 
 @dataclass(frozen=True)

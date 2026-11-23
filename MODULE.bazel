@@ -60,6 +60,13 @@ bazel_dep(name = "bazel_env.bzl", version = "0.10.0", dev_dependency = True)
 # current and its digests drift.
 http_file = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
 
+cue_test_tool = use_repo_rule("//:tests/cue_test_tool.bzl", "cue_test_tool")
+
+cue_test_tool(
+    name = "cue_test_tool",
+    dev_dependency = True,
+)
+
 _SCHEMASTORE = "https://raw.githubusercontent.com/SchemaStore/schemastore/f0e072bb85076fcae82bebf058cf86520d4ea450/src/schemas/json/"
 
 http_file(
