@@ -48,6 +48,7 @@ def test_a_refusal_becomes_scan_refused_with_the_same_message(
         )
     assert str(caught.value) == "cannot scan the body: finding rule-1 at line 2"
     assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 def test_a_missing_private_config_fails_closed(
@@ -60,6 +61,8 @@ def test_a_missing_private_config_fails_closed(
         )
     assert "the private gitleaks config" in str(caught.value)
     assert "cannot be read" in str(caught.value)
+    assert caught.value.kind == "config"
+    assert caught.value.__context__ is None
 
 
 def test_findings_keep_only_the_rule_and_line(
@@ -78,6 +81,8 @@ def test_findings_keep_only_the_rule_and_line(
             visibility="PUBLIC",
         )
     assert caught.value.locations == "rule fixture-rule on line 2"
+    assert (caught.value.kind, caught.value.lines) == ("finding", (2,))
+    assert caught.value.__context__ is None
     assert "matched text" not in str(caught.value)
 
 
@@ -108,5 +113,26 @@ def test_a_scanner_that_cannot_run_is_refused_without_the_text(
     assert message.startswith("cannot scan the body for secrets: the scanner ")
     assert str(scanner) in message
     assert "cannot run (" in message
+    assert caught.value.kind == "scanner_missing"
+    assert caught.value.__context__ is None
     assert "the-scanned-text" not in message
     assert caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize(
+    ("code", "kind"), [(2, "exit"), (-9, "signal")], ids=["exit", "signal"]
+)
+def test_a_failed_scanner_reports_its_kind_and_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, code: int, kind: str
+) -> None:
+    def scan(*_args: object, **_kwargs: object) -> None:
+        message = "gitleaks failed"
+        raise secret_scan.ScanBlocked(message, kind, code)
+
+    monkeypatch.setattr(secret_scan, "scan", scan)
+    with pytest.raises(gitleaks_check.ScanRefused) as caught:
+        gitleaks_check.scan_text(
+            "x", "the body", root=tmp_path, gitleaks="gl", visibility="PUBLIC"
+        )
+    assert (caught.value.kind, caught.value.status) == (kind, code)
+    assert caught.value.__context__ is None

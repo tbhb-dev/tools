@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import stat
 import subprocess  # nosec B404
 from contextlib import ExitStack
@@ -61,12 +60,18 @@ def parse_draft(text: str) -> Draft:
         OpenRefusedError: The frontmatter is invalid or names no base, or the
             body doesn't start with an H1 title.
     """
+    meta: object = None
+    body = ""
+    invalid = False
     try:
         meta, body = pull_request.parse_frontmatter(text)
     except pull_request.FrontmatterError:
-        # The parser's text can quote draft lines, so the log gets only the fact.
+        # The parser's text can quote draft lines, so the log gets only the
+        # fact, and the error is raised outside the handler to drop its context.
+        invalid = True
+    if invalid:
         message = "the draft frontmatter is invalid"
-        raise OpenRefusedError(message) from None
+        raise OpenRefusedError(message)
     fields = cast("dict[str, object]", meta) if isinstance(meta, dict) else {}
     base = fields.get("base")
     if not isinstance(base, str) or not base:
@@ -172,38 +177,42 @@ def check_range(published: PublishedRange, write: Callable[[str, str], None]) ->
     return rules.stdout
 
 
-# Fixed phrases for scanner failures, so the log names the cause without
-# repeating the scanner's own text, which can carry gitleaks output.
-GITLEAKS_EXIT = re.compile(r"gitleaks failed \(exit (-?\d+)\)")
-FINDING_LINE = re.compile(r"on line (\d+)")
-SCAN_CAUSES = (
-    ("cannot be read", "the private gitleaks config cannot be read"),
-    ("is not the private gitleaks config", "the config is not the private one"),
-    ("does not exist", "the gitleaks extends file is missing"),
-    ("cannot run", "the gitleaks executable cannot run"),
-)
+# Fixed phrases for scanner failures, chosen by the refusal's kind, so the log
+# names the cause without repeating the scanner's own text.
+SCAN_CAUSES = {
+    "config": "the private gitleaks config or the extends file is unusable",
+    "scanner_missing": "the gitleaks executable cannot run",
+    "signal": "gitleaks was stopped by a signal",
+}
 
 
 def scan_cause(exc: Exception) -> str:
-    """Name why the draft scan refused, without the scanner's own text."""
+    """Name why the draft scan refused, from fixed phrases and integers only."""
     if isinstance(exc, gitleaks_check.ScanRefused):
-        if exc.locations:
-            # Rule IDs can be private values, so only the line numbers pass.
-            lines: str = ", ".join(FINDING_LINE.findall(exc.locations))
+        if exc.kind == "finding":
+            lines = ", ".join(str(line) for line in exc.lines)
             return f"gitleaks finds a secret on lines: {lines}"
-        text = str(exc)
-        if found := GITLEAKS_EXIT.search(text):
-            return f"gitleaks failed (exit {found[1]})"
-        for needle, cause in SCAN_CAUSES:
-            if needle in text:
-                return cause
-        return "the scanner refused for a reason the log doesn't name"
+        if exc.kind == "exit" and exc.status is not None:
+            return f"gitleaks failed (exit {exc.status})"
+        return SCAN_CAUSES.get(
+            exc.kind, "the scanner refused for a reason the log doesn't name"
+        )
+    if isinstance(exc, Invalid):
+        # host_tools.resolve raises Invalid only when gitleaks is missing or a shim.
+        return SCAN_CAUSES["scanner_missing"]
     return f"{type(exc).__name__} while scanning the draft"
 
 
 def scan_draft(text: str, git_dir: Path, rules: bytes) -> None:
-    """Scan the draft with the host's private rules and the pre-run Git policy."""
+    """Scan the draft with the host's private rules and the pre-run Git policy.
+
+    Raises:
+        OpenRefusedError: The scan found a secret or could not run. It is
+            raised outside the handler, so its ``__context__`` is None and
+            the scanner's text and rule IDs never reach a traceback.
+    """
     (git_dir / GITLEAKS_EXTENDS).write_bytes(rules)
+    failure: Exception | None = None
     try:
         gitleaks_check.scan_text(
             text,
@@ -213,8 +222,10 @@ def scan_draft(text: str, git_dir: Path, rules: bytes) -> None:
             visibility="",
         )
     except (gitleaks_check.ScanRefused, Invalid, UnicodeError) as exc:
-        message = f"PR draft secret scan refused: {scan_cause(exc)}"
-        raise OpenRefusedError(message) from None
+        failure = exc
+    if failure is not None:
+        message = f"PR draft secret scan refused: {scan_cause(failure)}"
+        raise OpenRefusedError(message)
 
 
 def open_pull_request(

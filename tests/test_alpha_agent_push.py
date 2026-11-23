@@ -706,6 +706,22 @@ def test_push_start_failure_is_recorded(
     assert run.files.path("log").read_text() == "push failed: git push unavailable\n"
 
 
+def test_push_timeout_is_labeled_as_a_timeout(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, _target = local_run
+
+    def stall(*_args: object) -> None:
+        command = "git"
+        raise subprocess.TimeoutExpired(command, 1)
+
+    monkeypatch.setattr(push, "send", stall)
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
+    assert run.files.path("log").read_text() == "push failed: git timed out\n"
+
+
 def test_send_limits_child_capabilities(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
