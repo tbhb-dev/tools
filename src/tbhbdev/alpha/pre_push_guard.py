@@ -81,26 +81,49 @@ def signature_fingerprint(raw: str) -> str:
     return found[0] if found else ""
 
 
-def agent_commit_problems(remote: str, ref: str, local: str, old: str) -> list[str]:
+def remote_tips(remote: str) -> list[str] | None:
+    """The remote's current ref tips from ``git ls-remote``, or None on failure."""
+    code, out = git(*SAFE, "ls-remote", remote)
+    if code:
+        return None
+    return [line.split()[0] for line in out.splitlines() if line.split()]
+
+
+def known_objects(shas: list[str]) -> list[str]:
+    """The shas this clone holds, from one ``cat-file --batch-check`` call."""
+    done = subprocess.run(  # nosec B603 B607
+        ["git", *SAFE, "cat-file", "--batch-check"],
+        input="".join(f"{sha}\n" for sha in shas),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return [
+        line.split()[0] for line in done.stdout.splitlines() if " missing" not in line
+    ]
+
+
+def pushed_commits(local: str, exclude: list[str]) -> tuple[int, list[str]]:
+    """The commits reachable from ``local`` but not from ``exclude``, capped."""
+    done = subprocess.run(  # nosec B603 B607
+        ["git", *SAFE, "rev-list", f"--max-count={RANGE_LIMIT + 1}", "--stdin"],
+        input="\n".join([local, "--not", *exclude]) + "\n",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return done.returncode, done.stdout.split()
+
+
+def agent_commit_problems(ref: str, local: str, exclude: list[str]) -> list[str]:
     """Name each agent commit the push adds that the agent key didn't sign.
 
-    The range excludes what the remote's tracking refs hold and the remote tip git
-    reports in ``old`` when this clone has that object. A failed listing or a range
-    over RANGE_LIMIT refuses the push.
+    ``exclude`` holds the remote's current tips and the old shas git reports. A
+    failed listing or a range over RANGE_LIMIT refuses the push.
     """
-    known = bool(old.strip("0")) and git(*SAFE, "cat-file", "-e", old)[0] == 0
-    code, out = git(
-        *SAFE,
-        "rev-list",
-        f"--max-count={RANGE_LIMIT + 1}",
-        local,
-        "--not",
-        f"--remotes={remote}",
-        *([old] if known else []),
-    )
+    code, shas = pushed_commits(local, exclude)
     if code:
         return [f"{ref}: cannot list the commits to push; push refused"]
-    shas = out.split()
     if len(shas) > RANGE_LIMIT:
         return [f"{ref}: the push adds over {RANGE_LIMIT} commits; push refused"]
     problems: list[str] = []
@@ -141,9 +164,15 @@ def fetched_tip(remote: str, ref: str) -> str:
 
 
 def push_problems(remote: str, lines: Sequence[str]) -> list[str]:
-    problems: list[str] = []
+    rows: list[tuple[str, str, str]] = []
     for line in lines:
-        _, local, ref, old = line.split()
+        _, local, ref, old = line.split()  # ValueError: main() refuses the push
+        rows.append((local, ref, old))
+    tips = remote_tips(remote) if any(local.strip("0") for local, _, _ in rows) else []
+    if tips is None:
+        return ["pre-push-guard: cannot read the remote's tips; push refused"]
+    problems: list[str] = []
+    for local, ref, old in rows:
         if ref in PROTECTED:
             problems.append(
                 f"{ref}: push to a protected branch refused; "
@@ -152,7 +181,8 @@ def push_problems(remote: str, lines: Sequence[str]) -> list[str]:
             continue
         if not local.strip("0"):
             continue
-        problems.extend(agent_commit_problems(remote, ref, local, old))
+        exclude = known_objects([*tips, *([old] if old.strip("0") else [])])
+        problems.extend(agent_commit_problems(ref, local, exclude))
         if old.strip("0") and git(*SAFE, "merge-base", "--is-ancestor", old, local)[0]:
             if fetched_tip(remote, ref) == old:
                 print(

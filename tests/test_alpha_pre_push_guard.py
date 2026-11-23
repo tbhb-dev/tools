@@ -437,6 +437,8 @@ def agent_commit(repo: Path, key: Path | None) -> str:
     assert "SSH_AUTH_SOCK" not in os.environ, "signing must never reach an agent"
     env = {
         **os.environ,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_AUTHOR_NAME": AGENT,
         "GIT_AUTHOR_EMAIL": AGENT_MAIL,
         "GIT_COMMITTER_NAME": AGENT,
@@ -528,6 +530,30 @@ def test_commits_below_the_remote_tip_are_not_checked(
     tip = commit(repo, "human")
     assert push_agent(monkeypatch, tip) == 1
     assert guard(monkeypatch, tip, already_there) == 0
+
+
+@pytest.mark.usefixtures("agent_key")
+def test_commits_the_remote_already_holds_are_not_checked(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held = agent_commit(repo, None)
+    git(repo, "push", "-q", "origin", f"{held}:refs/heads/other")
+    git(repo, "update-ref", "-d", "refs/remotes/origin/other")
+    tip = commit(repo, "human")
+    assert guard(monkeypatch, tip) == 0
+
+
+@pytest.mark.usefixtures("repo")
+def test_an_unreadable_remote_refuses_closed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    head = git(Path.cwd(), "rev-parse", "HEAD")
+    row = f"refs/heads/topic {head} refs/heads/topic {ZERO}\n"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(row))
+    assert alpha.main(["pre-push-guard", "nowhere", PUBLIC], "p") == 1
+    assert capsys.readouterr().err == (
+        "pre-push-guard: cannot read the remote's tips; push refused\n"
+    )
 
 
 @pytest.mark.usefixtures("agent_key")
