@@ -630,8 +630,9 @@ def test_dry_run_refused(
 @pytest.mark.parametrize(
     ("reported", "full_name", "passed"),
     [
-        ("private", "Example/Demo", "PRIVATE"),
         ("private", "example/demo", "PRIVATE"),
+        ("private", "Example/Demo", ""),
+        ("private", "example/dem\u0131", ""),
         ("private", "example/other", ""),
         ("private", "", ""),
         ("PRIVATE", "example/demo", ""),

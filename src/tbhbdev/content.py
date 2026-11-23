@@ -239,10 +239,11 @@ def _visibility(api: Client, repo: str) -> str:
 
     Only ``PRIVATE`` lets the scan skip the name rules. The match is exact so a
     lookalike spelling can't qualify, and the answer must name the requested
-    repository, ignoring case. Anything else counts as public and returns "".
+    repository exactly, with no case folding. Anything else counts as public
+    and returns "".
     """
     answer = api.rest("GET", f"/repos/{repo}")
-    named = str(answer.get("full_name", "")).lower() == repo.lower()
+    named = answer.get("full_name") == repo
     return "PRIVATE" if named and answer.get("visibility") == "private" else ""
 
 
