@@ -53,11 +53,12 @@ _FIELDS = frozenset(
         "authorized_by",
         "startup_deadline_seconds",
         "fetch_refs",
+        "max_concurrent_runs",
     }
 )
 
 # Requests saved before --fetch-ref lack this key and still load.
-_REQUIRED_FIELDS = _FIELDS - {"fetch_refs"}
+_REQUIRED_FIELDS = _FIELDS - {"fetch_refs", "max_concurrent_runs"}
 
 
 def _fail(field: str, why: str) -> NoReturn:
@@ -159,6 +160,8 @@ def validate(
         )
     if request.timeout is not None and request.timeout <= 0:
         _fail("timeout", "must be a positive number of seconds")
+    if request.max_concurrent_runs is not None and request.max_concurrent_runs < 0:
+        _fail("max_concurrent_runs", "must not be negative")
     if request.startup_deadline_seconds <= 0:
         _fail("startup_deadline_seconds", "must be a positive number of seconds")
     _check_commit(request)
@@ -189,6 +192,7 @@ def to_dict(request: RunRequest) -> dict[str, object]:
         "authorized_by": request.authorized_by,
         "startup_deadline_seconds": request.startup_deadline_seconds,
         "fetch_refs": list(request.fetch_refs),
+        "max_concurrent_runs": request.max_concurrent_runs,
     }
 
 
@@ -211,7 +215,7 @@ def _number(data: dict[str, object], key: str) -> int:
 
 
 def _maybe_number(data: dict[str, object], key: str) -> int | None:
-    return None if data[key] is None else _number(data, key)
+    return None if data.get(key) is None else _number(data, key)
 
 
 def _flag(data: dict[str, object], key: str) -> bool:
@@ -288,6 +292,7 @@ def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunReque
         authorized_by=_maybe_text(data, "authorized_by"),
         startup_deadline_seconds=_number(data, "startup_deadline_seconds"),
         fetch_refs=_fetch_refs(data.get("fetch_refs", [])),
+        max_concurrent_runs=_maybe_number(data, "max_concurrent_runs"),
     )
     validate(request, host_allows_unsandboxed=host_allows_unsandboxed)
     return request

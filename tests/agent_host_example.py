@@ -114,7 +114,7 @@ def unusual_git_metadata(tmp_path: Path, entry: str, kind: str) -> Path:
 
 def run_request(**changes: object) -> model.RunRequest:
     return request.parse(
-        BUILD | {"repo": "tbhb-dev/example-repo"} | changes,
+        BUILD | {"repo": "tbhb-dev/example-repo", "max_concurrent_runs": 3} | changes,
         host_allows_unsandboxed=True,
     )
 

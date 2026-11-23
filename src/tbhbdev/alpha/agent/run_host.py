@@ -819,7 +819,12 @@ def execute(
     with host_tools.configured(run.settings, run.host.os), ExitStack() as stack:
         if not preflight_only:
             stack.enter_context(
-                admission.reserve(admission.ROOT, run.host, run.request.profile)
+                admission.reserve(
+                    admission.ROOT,
+                    run.host,
+                    run.request.profile,
+                    run.request.max_concurrent_runs,
+                )
             )
         return _execute(run, text, stack, push_token, preflight_only=preflight_only)
 

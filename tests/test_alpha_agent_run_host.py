@@ -992,13 +992,14 @@ def test_hidden_dispatch_reads_request_and_restores_handlers(
 
 
 def test_run_host_refuses_when_host_has_zero_slots(config_file: Path) -> None:
-    config_file.write_text(
-        EXAMPLE.replace("[[agent.host]]", "[[agent.host]]\nmax_concurrent_runs = 0")
-    )
+    config_file.write_text(EXAMPLE)
     files = runfiles.RunFiles(
         runfiles.state_home(Path.home()) / "tbhbdev" / "agent-runs", "example"
     )
-    files.write("request.json", json.dumps(request.to_dict(run_request())))
+    files.write(
+        "request.json",
+        json.dumps(request.to_dict(run_request(max_concurrent_runs=0))),
+    )
     files.write("prompt", "example")
     assert run_host.main(["example", "--host", "example-linux"], "run-host") == 1
     assert files.path("rc").read_text() == "1\n"
