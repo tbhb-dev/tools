@@ -148,11 +148,12 @@ def test_pr_check(
     monkeypatch.setattr(pr, "read_checked", lint)
     counter = Mock(return_value=counts)
     monkeypatch.setattr(sg, "size_counts", counter)
+    monkeypatch.setattr(pr, "git", Mock(return_value=(0, "refs/remotes/origin/main")))
     assert pr.command(
         argparse.Namespace(command="check", draft="draft.md"), {}
     ) == bool(problem)
     lint.assert_called_once_with("draft.md")
-    counter.assert_called_once_with("origin/main", "HEAD")
+    counter.assert_called_once_with("refs/remotes/origin/main", "HEAD")
     captured = capsys.readouterr()
     assert captured.err == ""
     assert captured.out.startswith(
@@ -166,14 +167,22 @@ def test_pr_check(
         assert captured.out.endswith("OK: the draft conforms\n")
 
 
+def test_counter_targets_the_rules_repository() -> None:
+    assert sg.COUNTER[2] == "@tbhb_rules//lint:pr_size_count"
+
+
 def test_pr_check_unavailable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    monkeypatch.setattr(pr, "git", Mock(return_value=(0, "refs/remotes/origin/main")))
     monkeypatch.setattr(pr, "read_checked", Mock(return_value=pr.Checked([])))
     monkeypatch.setattr(
         sg, "size_counts", Mock(side_effect=sg.SizeCountError("missing target"))
     )
     assert pr.command(argparse.Namespace(command="check", draft="draft.md"), {}) == 0
     captured = capsys.readouterr()
-    assert captured.err == "size count unavailable: missing target\n"
+    assert (
+        captured.err
+        == "size count unavailable (@tbhb_rules//lint:pr_size_count): missing target\n"
+    )
     assert captured.out == "OK: the draft conforms\n"

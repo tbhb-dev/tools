@@ -910,9 +910,25 @@ def posting_value(env: Mapping[str, str]) -> str | None:
     return agent_identity.format_value(committer.ident.attrs())
 
 
-def base_of(meta: Mapping[str, object]) -> str:
-    """The PR's base branch: the frontmatter's, or the schema's default."""
-    return str(meta.get("base", schema_default(load_schema(), "base")))
+def default_base() -> str:
+    """The repository's default branch from origin/HEAD, else the schema's.
+
+    Names the source on stderr, so a fallback to the schema is visible.
+    """
+    code, out = git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    name = out.removeprefix("refs/remotes/origin/")
+    if code == 0 and name and name != out:
+        return name
+    base = str(schema_default(load_schema(), "base"))
+    print(f"base: origin/HEAD is unset; using the schema's {base}", file=sys.stderr)
+    return base
+
+
+def base_of(meta: Mapping[str, object], default: str | None = None) -> str:
+    """The PR's base branch: the frontmatter's, else DEFAULT or the repository's."""
+    if "base" in meta:
+        return str(meta["base"])
+    return default if default is not None else default_base()
 
 
 def gh_data(done: subprocess.CompletedProcess[str]) -> object:
@@ -1592,26 +1608,49 @@ def opened_by(env: Mapping[str, str]) -> tuple[str | None, str | None]:
     return ident.root, f"{OPENED_KEY}: {value}"
 
 
+def check_size(args: argparse.Namespace, checked: Checked) -> None:
+    """Count the branch's added lines and flag a count over either limit.
+
+    ``pr check`` only warns when the count is unavailable. ``pr create`` fails
+    closed, so no oversized pull request opens on a missing counter.
+    """
+    if args.command not in ("check", "create"):
+        return
+    base = f"refs/remotes/origin/{base_of(checked.meta)}"
+    code, _ = git("rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
+    if code != 0:
+        why = f"base branch {base} not found (is it fetched?)"
+        checked.problems.append((1, why))
+        print(f"{args.draft}:1: {why}")
+        return
+    try:
+        counts = size_gate.size_counts(base, "HEAD")
+    except size_gate.SizeCountError as exc:
+        why = f"size count unavailable ({size_gate.COUNTER[2]}): {exc}"
+        if args.command == "create":
+            checked.problems.append((1, why))
+            print(f"{args.draft}:1: {why}")
+        else:
+            print(why, file=sys.stderr)
+        return
+    if args.command == "check":
+        print(f"{counts.code_lines} code lines, limit {counts.code_limit}")
+        print(f"{counts.raw_lines} raw lines, limit {counts.raw_limit}")
+    if counts.failed is not None:
+        count, limit = (
+            (counts.code_lines, counts.code_limit)
+            if counts.failed == "code"
+            else (counts.raw_lines, counts.raw_limit)
+        )
+        why = f"{count} lines, limit {limit}: split into stacked PRs"
+        checked.problems.append((1, why))
+        print(f"{args.draft}:1: {why}")
+
+
 def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     """Run the chosen subcommand."""
     checked = read_checked(args.draft)
-    if args.command == "check":
-        try:
-            counts = size_gate.size_counts("origin/main", "HEAD")
-        except size_gate.SizeCountError as exc:
-            print(f"size count unavailable: {exc}", file=sys.stderr)
-        else:
-            print(f"{counts.code_lines} code lines, limit {counts.code_limit}")
-            print(f"{counts.raw_lines} raw lines, limit {counts.raw_limit}")
-            if counts.failed is not None:
-                count, limit = (
-                    (counts.code_lines, counts.code_limit)
-                    if counts.failed == "code"
-                    else (counts.raw_lines, counts.raw_limit)
-                )
-                why = f"{count} lines, limit {limit}: split into stacked PRs"
-                checked.problems.append((1, why))
-                print(f"{args.draft}:1: {why}")
+    check_size(args, checked)
     if checked.problems:
         return 1
     if args.command == "check":
