@@ -911,12 +911,17 @@ def posting_value(env: Mapping[str, str]) -> str | None:
 
 
 def default_base() -> str:
-    """The repository's default branch from origin/HEAD, else the schema's."""
-    code, out = git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
-    name = out.removeprefix("origin/")
-    if code == 0 and name:
+    """The repository's default branch from origin/HEAD, else the schema's.
+
+    Names the source on stderr, so a fallback to the schema is visible.
+    """
+    code, out = git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    name = out.removeprefix("refs/remotes/origin/")
+    if code == 0 and name and name != out:
         return name
-    return str(schema_default(load_schema(), "base"))
+    base = str(schema_default(load_schema(), "base"))
+    print(f"base: origin/HEAD is unset; using the schema's {base}", file=sys.stderr)
+    return base
 
 
 def base_of(meta: Mapping[str, object], default: str | None = None) -> str:

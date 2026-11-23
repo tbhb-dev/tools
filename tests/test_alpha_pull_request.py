@@ -207,6 +207,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     made.git("remote", "add", "origin", ORIGIN)
     made.commit("init")
     made.git("update-ref", "refs/remotes/origin/main", "HEAD")
+    made.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
     made.fake("cog")
     made.fake("vale", stdout="{}")
     made.fake("cspell")
@@ -1658,6 +1659,28 @@ def test_a_draft_without_a_base_takes_the_default_branch(
     write_draft(world, BASE)
     run_main("check")
     counted.assert_called_once_with("refs/remotes/origin/trunk", "HEAD")
+
+
+def test_the_default_branch_ignores_a_tag_of_the_same_name(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counted = Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None))
+    monkeypatch.setattr(size_gate, "size_counts", counted)
+    monkeypatch.setattr(pr, "branch_trailers", Mock(return_value=[]))
+    world.git("update-ref", "refs/remotes/origin/trunk", "HEAD")
+    world.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+    world.git("tag", "origin/trunk")
+    assert pr.default_base() == "trunk"
+
+
+def test_an_unset_origin_head_names_the_schema_source(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+    assert pr.default_base() == "main"
+    assert capsys.readouterr().err == (
+        "base: origin/HEAD is unset; using the schema's main\n"
+    )
 
 
 def test_create_within_the_limits_prints_no_counts(
