@@ -6,18 +6,21 @@ import os
 import select
 import subprocess
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from agent_host_example import constant, host_settings, run_request
+from test_alpha_agent_credentials import pull_requests_settings
 
-from tbhbdev.alpha import private_names
+from tbhbdev.alpha import gh_app, private_names
 from tbhbdev.alpha.agent import (
     credentials,
     host_tools,
     open_pr,
+    process_group,
     push,
     run_host,
     runfiles,
@@ -56,6 +59,7 @@ def push_account(
         if source.name.lower() in ("head", "packed-refs"):
             assert source.name in ("HEAD", "packed-refs")
         expected = {
+            "auth.json": (1024 * 1024, "codex auth"),
             "private-repos.txt": (1024 * 1024, "private-name list"),
             "HEAD": (1024, "run HEAD"),
             "packed-refs": (1024 * 1024, "packed refs"),
@@ -155,7 +159,13 @@ def test_push_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run, prepared, target = local_run
+    run = replace(run, settings=pull_requests_settings())
     original = push.send
+
+    def mint(_env: gh_app.Env, **kwargs: object) -> gh_app.Minted:
+        assert kwargs["permissions"] == credentials.PUSH_PERMISSIONS
+        assert kwargs["repository"] == run.request.repo
+        return gh_app.Minted(SYNTHETIC, 2000)
 
     def send(
         directory: Path, destination: str, branch: str, token: str
@@ -166,13 +176,29 @@ def test_push_success(
         assert token == SYNTHETIC
         return original(directory, destination, branch, token)
 
+    def open_pull_request(
+        directory: Path, commit: str, repository: str, branch: str, token: str
+    ) -> int:
+        assert directory.parent == run.files.root
+        assert commit == run.files.path("head").read_text()
+        assert repository == run.request.repo
+        assert branch == "agent/example"
+        assert token == SYNTHETIC
+        return 7
+
     monkeypatch.setattr(push, "send", send)
-    with ExitStack() as stack:
-        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 0
+    monkeypatch.setattr(open_pr, "open_pull_request", open_pull_request)
+    monkeypatch.setattr(credentials, "read", constant("example-value"))
+    monkeypatch.setattr(gh_app, "mint_token", mint)
+    monkeypatch.setattr(run_host, "preflight", constant(None))
+    monkeypatch.setattr(process_group, "prepare", constant(prepared))
+    monkeypatch.setattr(run_host, "run_harness", harness)
+    assert run_host.execute(run, "example") == 0
     head = git(target, "rev-parse", "refs/heads/agent/example")
     assert run.files.path("head").read_text() == head
     assert run.files.path("branch").read_text() == "agent/example"
     assert run.files.path("pr").read_text() == f"{run.request.repo}#7"
+    assert runfiles.latest(run.files.root)["example"]["rc"] == 0
 
 
 @pytest.mark.parametrize(
@@ -215,11 +241,39 @@ def test_token_rules(
     assert all(SYNTHETIC not in value for value in values)
 
 
-def test_skip(local_run: tuple[run_host.Run, run_host.Prepared, Path]) -> None:
-    run, prepared, target = local_run
-    with ExitStack() as stack:
-        assert push.run(run, prepared, stack, harness, None) == 0
-    assert git(target, "for-each-ref") == ""
+@pytest.mark.parametrize(
+    ("configured", "reason"),
+    [(False, "no App configured"), (True, "App token unavailable")],
+)
+def test_unavailable_push_token_prevents_git_and_records_failure(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    configured: bool,
+    reason: str,
+) -> None:
+    run, _prepared, _target = local_run
+    if configured:
+        run = replace(run, settings=pull_requests_settings())
+
+    def unexpected(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("a build without an App token must stop before preparing")
+
+    def mint(_env: gh_app.Env, **_kwargs: object) -> gh_app.Minted:
+        assert configured
+        message = "permissions refused"
+        raise gh_app.GhAppError(message)
+
+    monkeypatch.setattr(credentials, "read", constant("example-value"))
+    monkeypatch.setattr(gh_app, "mint_token", mint)
+    monkeypatch.setattr(run_host, "preflight", unexpected)
+    monkeypatch.setattr(process_group, "prepare", unexpected)
+    monkeypatch.setattr(run_host, "run_harness", unexpected)
+    monkeypatch.setattr(subprocess, "Popen", unexpected)
+    assert run_host.execute(run, "example") == 1
+    assert run.files.path("rc").read_text() == "1\n"
+    assert run.files.path("log").read_text() == f"push skipped: {reason} (rc=1)\n"
+    assert runfiles.latest(run.files.root)["example"]["rc"] == 1
     assert not run.files.path("branch").exists()
 
 

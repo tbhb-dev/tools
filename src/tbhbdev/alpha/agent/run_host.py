@@ -798,6 +798,14 @@ def execute(
         return _execute(run, text, stack, push_token, preflight_only=preflight_only)
 
 
+def resolve_push_token(run: Run) -> str | None:
+    token = credentials.push_token(run.request, run.settings)
+    if token is None and run.request.profile is Profile.BUILD:
+        message = "no App configured"
+        raise credentials.PushTokenError(message)
+    return token
+
+
 def _execute(
     run: Run,
     text: str,
@@ -813,6 +821,8 @@ def _execute(
         if not run.files.path("request.json").exists():
             run.files.receive(run.request)
         run.files.write("phase", "check")
+        if push_token is None and not preflight_only:
+            push_token = resolve_push_token(run)
         preflight(run)
         result = process_group.prepare(
             lambda: prepare_workspace(run),
@@ -829,17 +839,18 @@ def _execute(
             agent = credentials.signing_agent(
                 prepared.delivery.signing, run.tmpdir, run.deadline
             )
-        if push_token is None and not preflight_only:
-            push_token = credentials.push_token(run.request, run.settings)
-        rc = (
-            run_harness(run, prepared, stack, preflight_only=True)
-            if preflight_only
-            else push.run(run, prepared, stack, run_harness, push_token)
-        )
+        if preflight_only:
+            rc = run_harness(run, prepared, stack, preflight_only=True)
+        elif push_token is None:
+            rc = run_harness(run, prepared, stack)
+        else:
+            rc = push.run(run, prepared, stack, run_harness, push_token)
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
     except RunInterruptedError, EOFError:
         rc = 143
+    except credentials.PushTokenError as exc:
+        run.files.write("log", f"push skipped: {exc} (rc={rc})\n")
     except Invalid as exc:
         run.files.write("log", f"{exc}\n")
     except OSError, ValueError, subprocess.SubprocessError:

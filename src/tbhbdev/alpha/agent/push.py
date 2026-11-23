@@ -124,10 +124,8 @@ def run(
     prepared: Prepared,
     stack: ExitStack,
     harness: Callable[[Run, Prepared, ExitStack], int],
-    token: str | None,
+    token: str,
 ) -> int:
-    if token is None:
-        return harness(run, prepared, stack)
     try:
         names = read_names(run.home / PRIVATE_NAMES)
         names.private.extend(_configured(strict=True))

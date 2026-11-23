@@ -118,6 +118,8 @@ def fake_secrets(
     )
     monkeypatch.setattr(secrets, "read", read)
     monkeypatch.setattr(credentials, "installation_token", installation)
+    monkeypatch.setattr(credentials, "push_token", constant("example-push-value"))
+    monkeypatch.setattr(run_host.push, "run", run_without_publication)
 
     real_resolve = host_tools.resolve
 
@@ -166,6 +168,16 @@ def portable_run_protocol(
         original_copy(source, destination)
 
     monkeypatch.setattr(runfiles, "copy_final", copy)
+
+
+def run_without_publication(
+    run: run_host.Run,
+    prepared: run_host.Prepared,
+    stack: ExitStack,
+    harness: Callable[[run_host.Run, run_host.Prepared, ExitStack], int],
+    _token: str,
+) -> int:
+    return harness(run, prepared, stack)
 
 
 def make_run(tmp_path: Path, **changes: object) -> run_host.Run:
@@ -1179,6 +1191,8 @@ run_host.codex_install.prepare = lambda executable, home: (executable, ())
 
 sys.path.insert(0, str(Path(sys.argv[1]).parent))
 helpers = runpy.run_path(sys.argv[1])
+run_host.credentials.push_token = helpers["constant"]("example-push-value")
+run_host.push.run = helpers["run_without_publication"]
 run = helpers["make_run"](Path(sys.argv[2]))
 run = dataclasses.replace(
     run, settings=dataclasses.replace(run.settings, kill_grace_seconds=0.2)
@@ -4315,6 +4329,23 @@ def test_preflight_mints_no_push_token(
     monkeypatch.setattr(run_host.credentials, "push_token", refuse)
     monkeypatch.setattr(run_host, "run_harness", constant(0))
     assert run_host.execute(run, "example", preflight_only=True) == 0
+
+
+def test_review_run_does_not_publish_a_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path, profile="review", commit="0" * 40)
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
+    runtime = HostRuntime(run, prepared, None)
+    runtime.patch(monkeypatch)
+
+    def refuse(*_args: object) -> int:
+        pytest.fail("a review must not publish a branch")
+
+    monkeypatch.setattr(credentials, "push_token", constant(None))
+    monkeypatch.setattr(run_host.push, "run", refuse)
+    assert run_host.execute(run, "example") == 7
+    assert runtime.events == ["group-stopped", "auth"]
 
 
 @pytest.mark.parametrize("claimed", [False, True])

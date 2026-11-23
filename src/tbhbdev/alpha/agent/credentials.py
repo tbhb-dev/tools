@@ -135,6 +135,10 @@ TOKEN_ERRORS = (
 )
 
 
+class PushTokenError(Invalid):
+    """The build cannot obtain its write token."""
+
+
 def github_token(request: RunRequest, references: Credentials) -> str | None:
     if request.profile is Profile.REVIEW:
         try:
@@ -157,14 +161,20 @@ def github_token(request: RunRequest, references: Credentials) -> str | None:
 
 
 def push_token(request: RunRequest, settings: Settings) -> str | None:
-    """The run-scoped write token for a build's push, or None to skip the push."""
+    """Mint a build's write token when the account configures an App."""
     if request.profile is not Profile.BUILD:
         return None
     references = next(c for c in settings.credentials if c.account == request.account)
+    if (
+        references.pull_requests_app_client_id is None
+        or references.pull_requests_app_pem is None
+    ):
+        return None
     try:
         return pull_requests_token(references, request.repo, PUSH_PERMISSIONS)
     except TOKEN_ERRORS:
-        return None
+        message = "App token unavailable"
+        raise PushTokenError(message) from None
 
 
 def review_post_token(request: RunRequest, settings: Settings) -> str | None:
@@ -186,8 +196,7 @@ def fetch_token(request: RunRequest, settings: Settings) -> str | None:
         and references.reviews_app_client_id is not None
         and references.reviews_app_pem is not None
     ):
-        # A build fetches with the read-only reviews token, so its account needs
-        # no pull-requests App key. Pushes use the account's own ssh key.
+        # A build can fetch with the read-only reviews App token.
         try:
             return installation_token(references, request.repo)
         except TOKEN_ERRORS:
