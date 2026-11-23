@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from shutil import which
@@ -23,7 +25,7 @@ from agent_example import LINUX, settings, trusted_executables
 
 from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import driver, transport
-from tbhbdev.alpha.agent.decisions import policy, remote
+from tbhbdev.alpha.agent.decisions import policy, remote, runfiles_names
 
 
 @pytest.fixture(autouse=True)
@@ -54,12 +56,17 @@ def execute(
         'PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"', 'PATH="$PATH"'
     )
     script = script.replace(settings().sockets_dir, os.environ["HOME"] + "/sockets")
+    script = scratch_admission(script, Path(os.environ["HOME"]))
     return subprocess.run(
         ["/bin/sh", "-c", script],
         input=f"{owner}\n".encode(),
         capture_output=True,
         check=False,
     )
+
+
+def scratch_admission(script: str, host: Path) -> str:
+    return script.replace(runfiles_names.ADMISSION_DIR, str(host / "admission"))
 
 
 def inspect_output(
@@ -239,7 +246,6 @@ def test_scripts_have_fixed_path_socket_and_git_environment() -> None:
         assert "tmux -L" not in script
         assert f"s={config.sockets_dir}\n" in script
     assert " git " not in scripts[-1]
-    assert "perl" not in scripts[-1]
     assert remote.installed(LINUX).endswith('"$HOME/.local/bin/tbhbdev" --version')
     assert "-lc" not in remote.start("sample", config.sockets_dir, LINUX)[2]
     for script in [
@@ -306,7 +312,11 @@ def test_claim_refusal_is_distinct_even_for_redirection_failure(host: Path) -> N
     claim = host / "existing"
     claim.write_text("preserve")
     script = remote.transfer("sample", settings().sockets_dir)
-    line = next(line for line in script.splitlines() if '> "$d/sample.owner"' in line)
+    lock = script.split("export a d s\n", 1)[1].replace("\\\n", " ")
+    claim_script = shlex.split(lock)[9]
+    line = next(
+        line for line in claim_script.splitlines() if '> "$d/sample.owner"' in line
+    )
     line = line.replace('"$d/sample.owner"', shlex.quote(str(claim)))
     result = execute("set -C\n" + line)
     assert result.returncode == 73
@@ -464,9 +474,9 @@ def test_concurrent_claims_have_one_winner(host: Path) -> None:
     (host / "sockets").mkdir(mode=0o700)
     scripts = [remote.transfer("sample", settings().sockets_dir)] * 2
     scripts = [
-        s.replace(
-            "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=" + os.environ["PATH"]
-        ).replace(settings().sockets_dir, str(host / "sockets"))
+        scratch_admission(s, host)
+        .replace("PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PATH=" + os.environ["PATH"])
+        .replace(settings().sockets_dir, str(host / "sockets"))
         for s in scripts
     ]
     processes = [
@@ -485,6 +495,36 @@ def test_concurrent_claims_have_one_winner(host: Path) -> None:
         "first\n",
         "second\n",
     }
+
+
+@pytest.mark.parametrize("share_state", [False, True])
+def test_concurrent_claims_reserve_host_capacity(
+    host: Path, *, share_state: bool
+) -> None:
+    no_session(host)
+    write_standalone_fake(host / "bin/tar", "")
+    (host / "sockets").mkdir(mode=0o700)
+    configured = replace(LINUX, max_concurrent_runs=1)
+    numbers = "sleep 0.2\nprintf '%s\\n' '0 4 33554432 25165824 0 0'\n"
+
+    def claim(name: str) -> subprocess.CompletedProcess[bytes]:
+        state = host / ("shared" if share_state else name)
+        script = remote.transfer(name, settings().sockets_dir, admission=configured)
+        script = script.replace(
+            shlex.quote(remote.limit_numbers())[1:-1], shlex.quote(numbers)[1:-1]
+        )
+        return execute(f"export XDG_STATE_HOME={shlex.quote(str(state))}\n" + script)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(claim, ("first", "second")))
+    allowed, refused = sorted(results, key=lambda result: result.returncode)
+    assert allowed.returncode == 0
+    assert refused.returncode == remote.ADMISSION_REFUSAL
+    assert refused.stdout == (
+        b"live runs 1, free memory 25165824 KiB: concurrent run limit 1 reached\n"
+    )
+    assert len(list(host.glob("*/tbhbdev/agent-runs/*.owner"))) == 2
+    assert len(list((host / "admission").glob("claim.*"))) == 1
 
 
 def test_real_ssh_shell_quoting(host: Path) -> None:
@@ -631,9 +671,17 @@ def test_clean_checks_flags_fallback_and_missing_clone(host: Path) -> None:
     no_session(host)
     state = host / "state/tbhbdev/agent-runs"
     (state / "sample.rc.fallback").write_text("")
+    shared = host / "admission"
+    shared.mkdir()
+    shared.chmod(0o1777)
+    digest = hashlib.sha256(b"example-owner\n").hexdigest()
+    claim = shared / f"claim.{os.getuid()}.sample.{digest}"
+    claim.touch()
     assert execute(cleanup()).returncode == 65
+    assert claim.is_file()
     assert execute(cleanup(force=True)).returncode == 0
     assert (state / "trash/stamp-sample/sample.rc.fallback").is_file()
+    assert not claim.exists()
 
 
 def test_origin_branch_without_mirror(host: Path) -> None:

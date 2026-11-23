@@ -12,6 +12,28 @@ from tbhbdev.alpha.agent.decisions import runfiles_names as files
 if TYPE_CHECKING:
     from tbhbdev.alpha.agent.model import Host
 
+ADMISSION_REFUSAL = 76
+CLAIM_LOCK = (
+    "sysopen(my $lock, shift, O_RDONLY | O_NOFOLLOW | O_DIRECTORY) "
+    'or die "open lock: $!"; '
+    'flock($lock, LOCK_EX) or die "lock: $!"; '
+    'fcntl($lock, F_SETFD, 0) or die "retain lock: $!"; '
+    'exec("/bin/sh", "-c", shift) or die "run claim: $!";'
+)
+ADMISSION_ROOT = f"a={files.ADMISSION_DIR}\n"
+CHECK_ADMISSION_ROOT = """test ! -L "$a" || exit 65
+if test -e "$a"; then
+    test "$(find "$a" -prune -type d -perm 1777)" = "$a" || exit 65
+fi
+"""
+RESERVATION = r"""reservation() {
+    uid=$(id -u) || exit 65
+    hash=$(printf '%s\n' "$given" | perl -MDigest::SHA=sha256_hex \
+        -e 'print sha256_hex(<STDIN>)') || exit 65
+    reservation="$a/claim.$uid.$1.$hash"
+}
+"""
+
 PREFIX = """PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 PATH="$HOME/.local/bin:$PATH"
@@ -142,6 +164,10 @@ def limits() -> str:
     The fields are the 1-minute load, the logical CPU count, MemTotal,
     MemAvailable, swap total and swap used.
     """
+    return "# tbhbdev-limits\n" + PREFIX + limit_numbers()
+
+
+def limit_numbers() -> str:
     linux = (
         "read l _ < /proc/loadavg || exit 1\n"
         "c=$(nproc) || exit 1\n"
@@ -167,11 +193,7 @@ def limits() -> str:
         'printf "%s %s %d %d %d %d\\n", x[2], c, m/1024, p*z/1024, '
         "w[2]*1024, w[4]*1024}'\n"
     )
-    return (
-        "# tbhbdev-limits\n"
-        + PREFIX
-        + f'if test "$(uname -s)" = Darwin; then\n{macos}else\n{linux}fi\n'
-    )
+    return f'if test "$(uname -s)" = Darwin; then\n{macos}else\n{linux}fi\n'
 
 
 def preflight(repository: str, ref: str, expected_version: str, host: Host) -> str:
@@ -190,20 +212,76 @@ def preflight(repository: str, ref: str, expected_version: str, host: Host) -> s
     )
 
 
-def transfer(name: str, sockets_dir: str) -> str:
-    return (
-        socket_root(sockets_dir)
+def capacity(host: Host) -> str:
+    """Check current memory against the host-wide claims under the lock."""
+    return f"""# tbhbdev-capacity
+live=0
+for claim in "$a/"claim.*; do
+    safe_file "$claim"
+    if test -f "$claim"; then live=$((live + 1)); fi
+done
+uid=$(id -u) || exit 65
+# Count unfinished records from before host-wide reservations existed.
+for owner in "$d/"*{files.OWNER}; do
+    safe_file "$owner"
+    test -f "$owner" || continue
+    rc="${{owner%{files.OWNER}}}{files.RC}"
+    safe_file "$rc"
+    test ! -f "$rc" || continue
+    base=${{owner##*/}}
+    set -- "$a/claim.$uid.${{base%{files.OWNER}}}."*
+    if test ! -f "$1"; then live=$((live + 1)); fi
+done
+numbers=$(
+{limit_numbers()}) || {{
+    printf 'live runs %s, free memory unknown: cannot read host limits\\n' "$live"
+    exit {ADMISSION_REFUSAL}
+}}
+set -- $numbers
+awk -v live="$live" -v free="$4" -v max={host.max_concurrent_runs} \\
+    -v memory={host.run_memory_mib} '
+BEGIN {{
+    if (live >= max) reason = "concurrent run limit " max " reached"
+    else if (free < (live + 1) * memory * 1024)
+        reason = "insufficient memory for a " memory " MiB reservation"
+    else exit 0
+    printf "live runs %d, free memory %.0f KiB: %s\\n", live, free, reason
+    exit {ADMISSION_REFUSAL}
+}}' || exit "$?"
+"""
+
+
+def transfer(name: str, sockets_dir: str, *, admission: Host | None = None) -> str:
+    claim = (
+        HELPERS
+        + RESERVATION
         + f"""tmux_state has-session ag-{name}
 test "$present" -eq 0 || exit 73
-mkdir -p "$d" && chmod 700 "$d" || exit "$?"
 # The owner, stdin's first line, is the atomic name claim before the archive.
 IFS= read -r given || exit 73
-test -n "$given" || exit 73
 set -C
 for p in "$d/{name}."*; do
     if test -e "$p" || test -L "$p"; then exit 73; fi
 done
+"""
+    )
+    if admission is not None:
+        claim += capacity(admission)
+    claim += f"""reservation {name}
 ( printf '%s\\n' "$given" > "$d/{name}{files.OWNER}" ) || exit 73
+( : > "$reservation" ) || exit 65
+"""
+    return (
+        socket_root(sockets_dir)
+        + ADMISSION_ROOT
+        + 'if test ! -e "$a"; then mkdir -m 1777 "$a" 2>/dev/null || :; fi\n'
+        + CHECK_ADMISSION_ROOT
+        + f"""mkdir -p "$d" && chmod 700 "$d" || exit "$?"
+IFS= read -r given || exit 73
+test -n "$given" || exit 73
+export a d s
+printf '%s\\n' "$given" | perl -MFcntl=:DEFAULT,:flock -e {shlex.quote(CLAIM_LOCK)} \\
+    "$a" {shlex.quote(claim)} || exit "$?"
 tar -xf - -C "$d"
 """
     )
@@ -500,6 +578,9 @@ fi
         owned(name)
         + FILE_HELPERS
         + socket_root(sockets_dir)
+        + ADMISSION_ROOT
+        + CHECK_ADMISSION_ROOT
+        + RESERVATION
         + f"""tmux_state has-session ag-{name}
 test "$present" -eq 0 || exit 1
 """
@@ -517,6 +598,7 @@ test ! -L "$d/trash" && test ! -L "$trash" || exit 65
 mkdir -p "$trash" || exit "$?"
 """
         + move
+        + f'reservation {name}\nrm -f "$reservation" || exit "$?"\n'
     )
     for suffix in files.SUFFIXES:
         path = f'"$d/{name}{suffix}"'

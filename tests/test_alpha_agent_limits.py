@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import json
+import os
 import subprocess
 import sys
 from typing import TYPE_CHECKING
@@ -14,7 +16,7 @@ from agent_driver_example import Remote, setup
 from agent_example import LINUX, MARKER, settings
 
 from tbhbdev.alpha import agent
-from tbhbdev.alpha.agent import driver, taint_store
+from tbhbdev.alpha.agent import driver, ownership, runfiles, taint_store
 from tbhbdev.alpha.agent.decisions import limits, remote, taint
 from tbhbdev.alpha.agent.model import Invalid
 
@@ -244,11 +246,66 @@ def test_a_busy_host_refuses_before_any_transfer(
 def test_ignore_limits_launches_warns_and_is_recorded(
     host: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    host.configure(limits="9 4 1000 900 100 0")
+    host.configure(limits="9 4 1000 900 100 0", capacity="1 4 1000 0 100 0")
     assert launch(host, "--ignore-limits") == 0
     assert "warning: example-linux: load 9 >= limit 4" in capsys.readouterr().err
     assert json.loads(driver.metadata_path("sample").read_text())["ignore_limits"]
     assert driver.load(CONFIG, "sample").ignore_limits
+    assert len(list((host.root / "admission").glob("claim.*"))) == 1
+
+
+def test_capacity_refusal_leaves_no_claim_and_allows_retry(
+    host: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (host.state / "earlier.owner").write_text("earlier-owner\n")
+    host.configure(capacity="1 4 33554432 12582911 100 0")
+    assert launch(host) == 1
+    assert (
+        "example-linux: live runs 1, free memory 12582911 KiB: insufficient "
+        "memory for a 6144 MiB reservation; pass --ignore-limits to launch anyway"
+        in capsys.readouterr().err
+    )
+    assert not driver.metadata_path("sample").exists()
+    assert not (host.state / "sample.owner").exists()
+    assert not (host.state / "sample.request.json").exists()
+    assert not any("new-session" in str(r["args"]) for r in host.records("tmux"))
+
+    (host.state / "earlier.rc").write_text("0\n")
+    host.configure(capacity="1 4 33554432 6291456 100 0")
+    assert launch(host) == 0
+
+
+def test_capacity_refuses_a_failed_fresh_read(
+    host: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    host.configure(capacity_read_fails=True)
+    assert launch(host) == 1
+    assert "live runs 0, free memory unknown: cannot read host limits" in (
+        capsys.readouterr().err
+    )
+    assert not driver.metadata_path("sample").exists()
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_supervisor_releases_only_its_completed_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, completed: bool
+) -> None:
+    shared = tmp_path / "admission"
+    shared.mkdir()
+    monkeypatch.setattr(ownership, "ADMISSION_DIR", str(shared))
+    files = runfiles.RunFiles(tmp_path / "state", "sample")
+    files.write("owner", "example-owner\n")
+    digest = hashlib.sha256(b"example-owner\n").hexdigest()
+    claim = shared / f"claim.{os.getuid()}.sample.{digest}"
+    claim.touch()
+    unrelated = claim.with_name(claim.name + "-other")
+    unrelated.touch()
+    with ownership.reservation(files, owned=True):
+        assert claim.is_file()
+        if completed:
+            files.write("rc", "0\n")
+    assert claim.is_file() is not completed
+    assert unrelated.is_file()
 
 
 def test_a_failed_read_refuses(

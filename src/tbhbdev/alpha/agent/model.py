@@ -141,6 +141,8 @@ class Host:
     min_memory_available_percent: int = 20
     max_swap_used_percent: int = 80
     limits_warn_only: bool = False
+    max_concurrent_runs: int = 3
+    run_memory_mib: int = 6144
 
 
 @dataclass(frozen=True)

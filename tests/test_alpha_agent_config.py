@@ -1209,14 +1209,18 @@ def test_host_limits_default_and_set() -> None:
     host = limits_host()
     assert (host.load_limit, host.min_memory_available_percent) == (None, 20)
     assert (host.max_swap_used_percent, host.limits_warn_only) == (80, False)
+    assert (host.max_concurrent_runs, host.run_memory_mib) == (3, 6144)
     host = limits_host(
         load_limit=24,
         min_memory_available_percent=30,
         max_swap_used_percent=50,
         limits_warn_only=True,
+        max_concurrent_runs=2,
+        run_memory_mib=4096,
     )
     assert (host.load_limit, host.min_memory_available_percent) == (24, 30)
     assert (host.max_swap_used_percent, host.limits_warn_only) == (50, True)
+    assert (host.max_concurrent_runs, host.run_memory_mib) == (2, 4096)
 
 
 @pytest.mark.parametrize(
@@ -1226,6 +1230,8 @@ def test_host_limits_default_and_set() -> None:
         ("min_memory_available_percent", 101, "at most 100"),
         ("max_swap_used_percent", 0, "must be a positive integer"),
         ("limits_warn_only", "yes", "must be true or false"),
+        ("max_concurrent_runs", 0, "must be a positive integer"),
+        ("run_memory_mib", True, "must be a positive integer"),
     ],
 )
 def test_host_limits_refuse_bad_values(key: str, value: object, why: str) -> None:

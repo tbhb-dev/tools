@@ -463,6 +463,8 @@ def _host(table: _Table) -> Host:
         "min_memory_available_percent",
         "max_swap_used_percent",
         "limits_warn_only",
+        "max_concurrent_runs",
+        "run_memory_mib",
     )
     name = _check_name(table, "name", table.text("name"), HOST_NAME)
     os = table.choice("os", Os)
@@ -500,7 +502,13 @@ def _host(table: _Table) -> Host:
         limits_warn_only=table.flag("limits_warn_only")
         if "limits_warn_only" in table.values
         else False,
+        max_concurrent_runs=_positive(table, "max_concurrent_runs", 3),
+        run_memory_mib=_positive(table, "run_memory_mib", 6144),
     )
+
+
+def _positive(table: _Table, key: str, default: int) -> int:
+    return table.integer(key) if key in table.values else default
 
 
 def _check_host_accounts(settings: Settings) -> None:

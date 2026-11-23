@@ -39,6 +39,10 @@ class TransportError(OSError):
     """A failed or timed-out ssh call, whose output contains no input bytes."""
 
 
+class AdmissionError(Invalid):
+    """The host could not reserve capacity for a new run."""
+
+
 def terminal_text(text: str) -> str:
     return "".join(
         c
@@ -87,6 +91,10 @@ def call(
     if code == COLLISION:
         message = f"{host.name}: run name collision"
         raise CollisionError(message)
+    if code == remote.ADMISSION_REFUSAL:
+        detail = terminal_text(output.decode(errors="replace")).strip()
+        message = f"{host.name}: {detail}; pass --ignore-limits to launch anyway"
+        raise AdmissionError(message)
     if code:
         message = f"{host.name}: remote command failed ({code})"
         raise TransportError(message)
@@ -127,6 +135,7 @@ class Inputs:
     prompt: str
     schema: str | None
     owner: str
+    ignore_limits: bool = False
 
 
 def stream(
@@ -151,7 +160,9 @@ def stream(
     shell(
         settings,
         host,
-        remote.transfer(name, settings.sockets_dir),
+        remote.transfer(
+            name, settings.sockets_dir, admission=None if inputs.ignore_limits else host
+        ),
         Stdin(inputs.owner, buffer.getvalue()),
         timeout=timeout,
     )

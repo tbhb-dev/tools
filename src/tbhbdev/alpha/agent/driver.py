@@ -285,7 +285,11 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
             run.host,
             run.name,
             inputs=transport.Inputs(
-                json.dumps(request.to_dict(run.request)), prompt, schema, run.owner
+                json.dumps(request.to_dict(run.request)),
+                prompt,
+                schema,
+                run.owner,
+                ignore_limits=run.ignore_limits,
             ),
             timeout=deadline - time.monotonic(),
         )
@@ -296,7 +300,7 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
             transport.Stdin(run.owner),
             timeout=deadline - time.monotonic(),
         )
-    except transport.CollisionError:
+    except transport.CollisionError, transport.AdmissionError:
         archive_metadata(run.name, run.started)
         raise
     except transport.TransportError:

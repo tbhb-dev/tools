@@ -141,8 +141,9 @@ def test_shell_default_data(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("schema", [None, '{"type":"object"}'])
+@pytest.mark.parametrize("ignore", [False, True])
 def test_stream_modes_and_budget(
-    monkeypatch: pytest.MonkeyPatch, schema: str | None
+    monkeypatch: pytest.MonkeyPatch, schema: str | None, *, ignore: bool
 ) -> None:
     def shell(
         config: model.Settings,
@@ -154,7 +155,9 @@ def test_stream_modes_and_budget(
     ) -> str:
         assert config == settings()
         assert host == LINUX
-        assert script == remote.transfer("example", settings().sockets_dir)
+        assert script == remote.transfer(
+            "example", settings().sockets_dir, admission=None if ignore else LINUX
+        )
         assert timeout == 4.5
         assert stdin is not None
         assert stdin.owner == "example-owner"
@@ -179,7 +182,9 @@ def test_stream_modes_and_budget(
         settings(),
         LINUX,
         "example",
-        inputs=transport.Inputs("request", "brief é", schema, "example-owner"),
+        inputs=transport.Inputs(
+            "request", "brief é", schema, "example-owner", ignore_limits=ignore
+        ),
         timeout=4.5,
     )
 
