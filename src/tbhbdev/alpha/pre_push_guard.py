@@ -163,6 +163,32 @@ def fetched_tip(remote: str, ref: str) -> str:
     return "" if code else out
 
 
+def ref_problems(
+    remote: str, row: tuple[str, str, str], tips: Sequence[str]
+) -> list[str]:
+    """The refusals for one pushed ref: LOCAL, REF, and the remote's OLD value."""
+    local, ref, old = row
+    if ref in PROTECTED:
+        message = (
+            "push to a protected branch refused; "
+            "push a new branch and open a pull request"
+        )
+        return [f"{ref}: {message}"]
+    if not local.strip("0"):
+        return []
+    exclude = known_objects([*tips, *([old] if old.strip("0") else [])])
+    problems = agent_commit_problems(ref, local, exclude)
+    if old.strip("0") and git(*SAFE, "merge-base", "--is-ancestor", old, local)[0]:
+        if fetched_tip(remote, ref) == old:
+            print(f"pre-push-guard: {ref} rewritten {old} -> {local}", file=sys.stderr)
+        else:
+            problems.append(
+                f"{ref}: non-fast-forward push refused; the remote tip is not "
+                "the fetched one, so fetch and push with --force-with-lease"
+            )
+    return problems
+
+
 def push_problems(remote: str, lines: Sequence[str]) -> list[str]:
     rows: list[tuple[str, str, str]] = []
     for line in lines:
@@ -171,30 +197,7 @@ def push_problems(remote: str, lines: Sequence[str]) -> list[str]:
     tips = remote_tips(remote) if any(local.strip("0") for local, _, _ in rows) else []
     if tips is None:
         return ["pre-push-guard: cannot read the remote's tips; push refused"]
-    problems: list[str] = []
-    for local, ref, old in rows:
-        if ref in PROTECTED:
-            problems.append(
-                f"{ref}: push to a protected branch refused; "
-                "push a new branch and open a pull request"
-            )
-            continue
-        if not local.strip("0"):
-            continue
-        exclude = known_objects([*tips, *([old] if old.strip("0") else [])])
-        problems.extend(agent_commit_problems(ref, local, exclude))
-        if old.strip("0") and git(*SAFE, "merge-base", "--is-ancestor", old, local)[0]:
-            if fetched_tip(remote, ref) == old:
-                print(
-                    f"pre-push-guard: {ref} rewritten {old} -> {local}",
-                    file=sys.stderr,
-                )
-            else:
-                problems.append(
-                    f"{ref}: non-fast-forward push refused; the remote tip is not "
-                    "the fetched one, so fetch and push with --force-with-lease"
-                )
-    return problems
+    return [problem for row in rows for problem in ref_problems(remote, row, tips)]
 
 
 def main(argv: list[str], prog: str) -> int:
