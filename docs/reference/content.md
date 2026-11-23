@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
-    at: "2026-11-23T02:27:39Z"
+    at: "2026-11-23T02:50:05Z"
 status: stable
 tags: [plugins]
 title: Content writes
@@ -18,7 +18,7 @@ type: Reference
 - `render(template_path, data)` replaces `{{key}}` placeholders with mapping values. A missing key raises `KeyError`.
 - `create_issue(repo, title, body, *, issue_type, labels=(), fields=None, project=None, client=None)` creates an issue with its type and labels. `repo` is `owner/repo`. When given a project, it adds the issue and sets the fields after creation.
 - `add_comment(ref, text, *, client=None)` posts a comment.
-- `close_issue(ref, reason, *, comment=None, client=None)` accepts `completed`, `not-planned`, or `duplicate`. It reads the issue body first and raises `Refused` for unchecked acceptance boxes. A refused checklist or comment leaves the issue open.
+- `close_issue(ref, reason, *, comment=None, client=None)` accepts `completed`, `not-planned`, or `duplicate`. Only for `completed`, it reads the issue body and raises `Refused` for unchecked acceptance boxes. A refused checklist or comment leaves the issue open.
 - `link_sub_issue(parent, child, *, client=None)` reads the child's database ID and links it to the parent, including across repositories in the organization.
 - `add_to_project(ref, project, fields=None, *, client=None)` adds an issue to a Projects v2 project. `project` is the project node ID. `fields` maps field node IDs to GraphQL field values, such as `{"FIELD_ID": {"singleSelectOptionId": "OPTION_ID"}}`.
 
@@ -28,7 +28,7 @@ type: Reference
 
 Every write accepts the keyword arguments `caller="tbhbdev"` and `dry_run=False`. The caller identifies the plugin in each audit entry, including nested comments and project writes. Existing calls keep their return values: `create_issue` returns an `IssueRef`, and other writes return `None`.
 
-With `dry_run=True`, text is scanned, no REST or GraphQL write is sent, and no audit line is written. The return value is a dictionary containing the payload that would be sent. `close_issue` reads the issue body to check its acceptance boxes. `link_sub_issue` and `add_to_project` read the existing issue's ID. Multi-write previews use these keys:
+With `dry_run=True`, text is scanned, no REST or GraphQL write is sent, and no audit line is written. The return value is a dictionary containing the payload that would be sent. For `completed` only, `close_issue` reads the issue body to check its acceptance boxes. `link_sub_issue` and `add_to_project` read the existing issue's ID. Multi-write previews use these keys:
 
 - Closing with a comment returns `{"comment": {"body": "..."}, "issue": {"state": "closed", "state_reason": "..."}}`.
 - Adding to a project returns `add_item` with a GraphQL `query` and `variables`, plus `set_fields`, a list of GraphQL payloads. Field updates use `<created-project-item-id>` for the ID returned by the addition.

@@ -154,9 +154,10 @@ def test_add_comment(scans: list[tuple[str, str]], tmp_path: Path) -> None:
 def test_close_issue(
     reason: str, wire: str, comment: str | None, tmp_path: Path
 ) -> None:
-    client = RecordingClient(body="## Acceptance criteria\n- [x] Show the preview")
+    box = "x" if reason == "completed" else " "
+    client = RecordingClient(body=f"## Acceptance criteria\n- [{box}] Show preview")
     cw.close_issue(REF, reason, comment=comment, client=client)
-    expected: list[Call] = [("GET", REF.path, None)]
+    expected: list[Call] = [("GET", REF.path, None)] if reason == "completed" else []
     if comment is not None:
         expected.append(("POST", f"{REF.path}/comments", {"body": comment}))
     assert client.calls == [
@@ -170,6 +171,11 @@ def test_close_issue(
 @pytest.mark.parametrize(
     ("body", "comment", "message"),
     [
+        (
+            "## Acceptance criteria\n- [ ] Show preview",
+            "Done",
+            r"blocks\.acceptance-criteria: Acceptance boxes are unchecked",
+        ),
         (
             "## Acceptance\n- [x] Open report\n## Acceptance\n- [ ] Show preview",
             "Done",

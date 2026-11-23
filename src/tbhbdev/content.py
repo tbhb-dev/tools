@@ -185,11 +185,12 @@ def close_issue(  # noqa: PLR0913 -- Public plugin interface.
         "duplicate": "duplicate",
     }[reason]
     api = client if client is not None else GhClient()
-    body = api.rest("GET", ref.path).get("body") or ""
-    draft = normalize(f"# Issue\n\n{body}", object="issue", variant="", metadata={})
-    if refusals := check_close(draft):
-        message = "\n".join(format_refusal(refusal) for refusal in refusals)
-        raise Refused(message)
+    if reason == "completed":
+        body = api.rest("GET", ref.path).get("body") or ""
+        draft = normalize(f"# Issue\n\n{body}", object="issue", variant="", metadata={})
+        if refusals := check_close(draft):
+            message = "\n".join(format_refusal(refusal) for refusal in refusals)
+            raise Refused(message)
     payload: Json = {"state": "closed", "state_reason": state_reason}
     if comment is not None:
         preview = add_comment(ref, comment, client=api, caller=caller, dry_run=dry_run)
