@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6
-    at: "2026-11-23T03:01:39Z"
+    at: "2026-11-23T12:35:28Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -51,6 +51,10 @@ type: Reference
 `tbhbdev alpha verify-range BASE TIP [-C PATH]` checks each commit in `BASE..TIP`, oldest first. A commit passes when the agent is its author and committer, it has a signature header and valid attribution trailers, and it has exactly one parent. A merge commit passes without those checks, and the commits it brings in are checked like any other. A root commit fails. Sign-off trailers, co-author trailers and GitHub's no-reply addresses fail it. Exit codes are 0 when every commit passes, 1 when any fails and 2 for usage or Git errors.
 
 `tbhbdev alpha brief new RUN --repo OWNER/REPO` writes a peer-run brief skeleton to stdout, or to a file with `-o FILE`. Fill its placeholders, then run `tbhbdev alpha brief check FILE...` to check the completed brief. Use `--branch` and `--base` to override the worktree defaults. `--push --scan-command CMD` includes the required outgoing scan command supplied by the operator. The command must be non-empty and contain no newline or backtick. The check normalizes Unicode, whitespace and case before searching for forbidden instructions and removing fixed sentences in their generated sections. It matches phrases by spelling and section placement. Authors can add lines in Hard rules. Use it to catch omissions and common mistakes. Review the brief's intent separately.
+
+`tbhbdev alpha issue link-sub PARENT CHILD` adds a sub-issue, and `unlink-sub PARENT CHILD` removes it. `block BLOCKED --by BLOCKER` adds a dependency, and `unblock BLOCKED --by BLOCKER` removes it. Use `--blocked-by` as an alias for `--by`, or pass `BLOCKER --blocking BLOCKED` to specify the blocker first.
+
+Use `owner/repo#N` for a qualified issue reference or `'#N'` for an issue in the current repository's origin. GitHub requires the same repository owner for the parent and child when adding a sub-issue. With `--dry-run`, the command looks up the related issue and prints its numeric ID as JSON. This mode skips the write and audit entry.
 
 Run `tbhbdev alpha install` once on each host, from a clone of a tbhb-dev repository. It does seven things:
 

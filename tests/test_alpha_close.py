@@ -104,6 +104,7 @@ def test_close_pr_it_opened_comments_the_reason_and_the_trailer(
 ) -> None:
     opened.record_opened(root(), ["tbhb-dev/tools#7"])
     assert close.main(["pr", "close", "7", "--reason", "superseded"], env=ENV) == 0
+    assert gh.calls[0][3:5] == gh.calls[-1][3:5]
     assert gh.calls[-1] == [
         "pr",
         "close",
@@ -357,10 +358,10 @@ def test_the_parser_describes_itself_and_names_its_prog(
 ) -> None:
     parser = close.build_parser("p")
     assert parser.prog == "p"
-    assert parser.description == "Close a PR or issue."
+    assert parser.description == "Close a PR or manage issues."
     with pytest.raises(SystemExit):
         parser.parse_args(["--help"])
-    assert "Close a PR or issue." in capsys.readouterr().out
+    assert "Close a PR or manage issues." in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("kind", ["pr", "issue"])
@@ -409,6 +410,27 @@ def test_main_names_the_prog_in_usage(capsys: pytest.CaptureFixture[str]) -> Non
     with pytest.raises(SystemExit):
         close.main(["--help"], prog="prog", env=ENV)
     assert capsys.readouterr().out.startswith("usage: prog ")
+
+
+@pytest.mark.parametrize(
+    ("verb", "arguments"),
+    [
+        ("link-sub", ("PARENT CHILD",)),
+        (
+            "block",
+            ("--by BLOCKER", "--blocked-by BLOCKER", "--blocking BLOCKED", " ISSUE\n"),
+        ),
+    ],
+)
+def test_issue_relationship_usage(
+    verb: str, arguments: tuple[str, ...], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        close.main(["issue", verb, "--help"], prog="prog")
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    for argument in arguments:
+        assert argument in output
 
 
 def test_main_reads_the_process_environment_by_default(

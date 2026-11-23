@@ -83,6 +83,11 @@ commands:
   pr-stats     OWNER/REPO [--limit N]: cycle time of merged and closed pull requests
   review       draft N [--force] | check N: the review draft
   issue        close N --reason completed|not-planned: close an issue
+               | link-sub PARENT CHILD | unlink-sub PARENT CHILD
+               | block BLOCKED --by BLOCKER | unblock BLOCKED --by BLOCKER
+               Relationship commands accept --dry-run and owner/repo#N or #N.
+               For dependencies, --blocked-by aliases --by, and
+               --blocking takes BLOCKED with BLOCKER as the positional issue.
   gh-app       APP OWNER/REPO [--fresh] [--dry-run] [--all-repos]: mint a GitHub
                App installation token through Connect | APP --cooldown-until
                EPOCH | APP --cooldown-status
