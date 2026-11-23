@@ -1823,6 +1823,19 @@ def cmd_record(harness: str, env: Mapping[str, str]) -> int:
 # ------------------------------------------------------------- committer identity
 
 
+def session_model(raw: str, env: Mapping[str, str]) -> str | None:
+    """Claude: the model in the session's own transcript under its config dir.
+
+    A run that disables hooks writes no session record, so the record has no
+    transcript path. Claude names each transcript after its session ID.
+    """
+    config = env.get("CLAUDE_CONFIG_DIR") or str(Path(env.get("HOME", "")) / ".claude")
+    for transcript in sorted(Path(config).glob(f"projects/*/{raw}.jsonl")):
+        if model := transcript_model(str(transcript)):
+            return model
+    return None
+
+
 def claude_committer(
     raw: str, env: Mapping[str, str], command_lines: list[str] | None
 ) -> Committer:
@@ -1849,7 +1862,7 @@ def claude_committer(
             "Retry after the subagent's session record is restored."
         )
         raise AttributionError(message)
-    model = main_model(root_rec)
+    model = main_model(root_rec) or session_model(raw, env)
     root_ident = make_ident(
         CLAUDE, root, Seen(ver, model, root_rec.get("effort"), surf)
     )
