@@ -26,3 +26,7 @@ okf_version: "0.2"
 * [Review drafts](reference/alpha/review-drafts.md) - Drafting and checking pull request reviews.
 * [Repository settings](reference/alpha/repository-settings.md) - Standard repository settings and bootstrap behavior.
 * [GitHub polling](reference/alpha/github-polling.md) - GitHub event delivery, polling guards, and request budgets.
+
+## Design drafts
+
+* [Pull request verification in CUE](pr-verification-cue-design.md) - CUE definitions for pull request drafts, review templates, review drafts, and verdicts, with the parse step, runtime, and migration.
