@@ -17,7 +17,7 @@ dependencies = [
   "onepasswordconnectsdk>=2.1.1",
   "psycopg[binary]>=3.3.4",
   "pyyaml>=6.0.3",
-  "tbhb-telemetry",
+  "tbhb-telemetry @ https://github.com/tbhb-dev/telemetry/releases/download/sha-c44613c38c40/tbhb_telemetry-0-py3-none-any.whl",
   # tbhbdev alpha install edits Codex's config.toml in place, so the comments
   # and order of everything it doesn't own survive.
   "tomlkit>=0.15.2",
@@ -62,9 +62,6 @@ required-version = ">=0.13.0,<0.14"
 # Lock refreshes skip releases younger than 5 days, the same cooldown
 # Renovate applies to version bumps.
 exclude-newer = "5 days"
-
-[tool.uv.sources]
-tbhb-telemetry = { git = "https://github.com/tbhb-dev/telemetry", rev = "1f98f2c56b9529ad9296131bde40f3a41e004472", subdirectory = "python" }
 
 [tool.complexipy]
 paths = ["src"]

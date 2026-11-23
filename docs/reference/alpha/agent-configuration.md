@@ -2,11 +2,11 @@
 description: Agent settings, run requests, and host preparation.
 generated:
   - role: generated
-    harness: codex:0.171.0
-    model: openai:gpt-6.1-sol
+    harness: codex:0.166.0
+    model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    at: "2026-11-23T01:00:46Z"
+    at: "2026-11-23T03:17:35Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -24,6 +24,8 @@ type: Reference
 `agent exec` reads the run host once before it transfers anything. It refuses the launch and prints the numbers when the 1-minute load reaches the host's load limit, when available memory falls under a share of total memory, or when used swap passes a share of total swap. Each `[[agent.host]]` table sets its own values. `load_limit` defaults to the host's logical CPU count, `min_memory_available_percent` defaults to 20 and `max_swap_used_percent` defaults to 80. Set a lower `load_limit` on a host that also runs services. `limits_warn_only = true` prints the same numbers as a warning and lets the launch continue. A failed or unreadable read refuses with `cannot read host limits`. The caller must pass `--ignore-limits` to launch anyway, or the host sets `limits_warn_only = true`, which turns the refusal into a warning. The run record keeps an `--ignore-limits` choice. Older run records without the field load as `false`.
 
 `agent exec` exports one launch span named `tbhbdev alpha agent exec`. Its duration covers the launcher, and its launch attributes are `tbhb.agent.host`, `tbhb.agent.harness`, `tbhb.agent.model`, `tbhb.agent.profile`, `tbhb.agent.outcome` and `tbhb.run.id` (the run name). Outcome is `ok` for exit code zero, `refused` for a host-limit refusal and `failed` for another failure. The library accepts strings of at most 128 characters. These are the only launch attributes exported; the library also supplies command and service names, package version, exit code, error type and a drop counter. No prompt, prompt path, owner value, authorization, SSH output or other argument values are exported.
+
+The package depends on `tbhb-telemetry` through a pinned GitHub release wheel URL. The lockfile records the wheel's SHA-256 digest.
 
 `OTEL_EXPORTER_OTLP_ENDPOINT` selects the launch collector; its default is loopback port 4318. `TBHB_TELEMETRY_ALLOW_HOSTS` accepts a comma-separated list of exact collector host names to permit destinations beyond loopback. These environment variables are independent of `[agent.otel]`, which configures the harness. Export failure is silent, with one send attempt bounded to 250 milliseconds, and leaves the launch's output and exit status intact. Drop records live under `$XDG_STATE_HOME/tbhb/telemetry`, or `~/.local/state/tbhb/telemetry`. Set `OTEL_SDK_DISABLED=true` to disable launch telemetry. Other commands do not load the library.
 
