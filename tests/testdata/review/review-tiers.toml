@@ -1,0 +1,12 @@
+[tier.2]
+paths = [".github/workflows/**", ".github/review-tiers*.toml", ".github/CODEOWNERS",
+  ".claude/**", ".codex/**", ".mcp.json", "**/harness/**",
+  "**/rulesets/**", "**/permissions/**", "**/credentials.py",
+  "**/deploy/**", "**/deployments/**",
+  "**/review.py", "**/review/**", "**/review_*.py", "**/*merge*.py"]
+patterns = ['\brmtree\b',
+  '\brm\b(?=.*\s(?:--recursive\b|-[A-Za-z]*[rR]))(?=.*\s(?:--force\b|-[A-Za-z]*f))',
+  '\bgit\s+branch\s+-D\b',
+  '\bgit\s+push\b.*(?:\s--force(?:-with-lease)?(?:\s|=|$)|\s-f\b|\s\+\S+)',
+  '(?i)\b(?:credentials?|tokens?|permissions?)\b',
+]

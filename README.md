@@ -26,6 +26,7 @@ uv tool install git+https://github.com/tbhb-dev/tools
 - `gitleaks_check` is a library, not a command: `tbhbdev.gitleaks_check.scan_text` scans text with gitleaks and raises `ScanRefused` on a finding or a failure. See [Gitleaks check](docs/reference/gitleaks-check.md).
 - `prose_check` is a library, not a command: `tbhbdev.prose_check.check_prose` runs vale, cspell and rumdl on text and raises `ProseRefused` on a finding or a failure. See [Prose check](docs/reference/prose-check.md).
 - `secret` reads and manages 1Password items through the `tbhbdev.secrets` library.
+- `review tier` classifies a pull request diff and posts a commit status. See [Review tier status](docs/reference/alpha/review-drafts.md#review-tier-status).
 - `host` manages agent hosts from the operator's Mac.
 - `alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`. They may change or go away without notice. `tbhbdev alpha version-check` compares the installed build across hosts.
 

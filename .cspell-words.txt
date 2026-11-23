@@ -334,3 +334,4 @@ hardbreak
 mdit
 softbreak
 tasklists
+adoc
