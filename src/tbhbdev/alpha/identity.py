@@ -1866,17 +1866,30 @@ def unfinished_turn(path: Path, now: float) -> bool:
     return False
 
 
+def stopped_by_user(path: Path) -> bool:
+    """Claude: whether the subagent's metadata records that the user stopped it."""
+    try:
+        meta = json.loads(path.with_suffix(".meta.json").read_text())
+    except OSError, ValueError:
+        return False
+    return isinstance(meta, dict) and meta.get("stoppedByUser") is True
+
+
 def subagent_running(raw: str, env: Mapping[str, str], now: float) -> bool:
     """Claude: whether a subagent of the session may be running right now.
 
     A subagent's transcript sits under the session's directory. It is
     unfinished until its last turn is an assistant reply that ended the turn.
-    A transcript that can't be read counts as unfinished.
+    A transcript that can't be read counts as unfinished. A subagent whose
+    metadata says the user stopped it isn't running, whatever its transcript ends on.
     """
     if not SESSION_RE.fullmatch(raw):
         return False
     pattern = f"projects/*/{raw}/subagents/agent-*.jsonl"
-    return any(unfinished_turn(path, now) for path in claude_config(env).glob(pattern))
+    return any(
+        unfinished_turn(path, now) and not stopped_by_user(path)
+        for path in claude_config(env).glob(pattern)
+    )
 
 
 def hookless_model(raw: str, env: Mapping[str, str], *, sub: str | None) -> str | None:
