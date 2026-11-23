@@ -3487,6 +3487,12 @@ def test_ready_marks_the_pull_request_ready(world: World) -> None:
     assert [c["stdin"] for c in world.calls("gh")] == ["", "", ""]
 
 
+def test_ready_accepts_a_pull_request_the_driver_opened(world: World) -> None:
+    world.fake("gh", cases=ready_cases(author="app/tbhb-dev-agent-pull-requests"))
+    assert run_main("ready", "45") == 0
+    assert gh_argvs(world)[-1] == ["pr", "ready", "45", "--repo", READY_REPO]
+
+
 def test_refusal_reason_decodes_invalid_bytes_and_joins_streams() -> None:
     assert pr.refusal_reason(b"bad \xff byte\n", b"and\r\nmore") == (
         "bad \ufffd byte and more"

@@ -60,6 +60,18 @@ With `dry_run=True`, text is scanned, no REST or GraphQL write is sent, and no a
 - Adding to a project returns `add_item` with a GraphQL `query` and `variables`, plus `set_fields`, a list of GraphQL payloads. Field updates use `<created-project-item-id>` for the ID returned by the addition.
 - Creating with a project returns `issue` with the REST payload and `project` with the project preview above. The addition uses `<created-issue-node-id>` for the ID returned by issue creation. Without a project, creation returns the REST payload directly.
 
+## Decision records
+
+```python
+check_decision_record(markdown: str) -> list[str]
+```
+
+Pass the Markdown body starting with a hash-prefixed H1 title. The caller removes frontmatter. An empty list means the body passes. Each string in a nonempty list describes a refusal.
+
+The title needs at least four visible words and cannot end in a colon or question mark. The H2 sections are Context, Decision, Options considered (optional), and Consequences, in that order. These are the only headings after the title. The word caps for Context, Decision, and Consequences are 150, 120, and 150 respectively. Options considered can hold up to five flat bullets of at most 25 words each. The 450-word body cap uses visible text and excludes the title and section headings. [Content model](content-model.md)
+
+Write each paragraph on one source line, including paragraphs within bullets. A sentence cannot start a line as a quotation. Tables, code blocks, and block quotes are forbidden.
+
 ## Secret scan
 
 `scan_text(text, what)` runs the same scan without rendering, sending, or auditing anything. Plugins can use it before committing a record.

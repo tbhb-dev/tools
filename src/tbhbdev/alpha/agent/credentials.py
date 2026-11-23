@@ -28,8 +28,13 @@ if TYPE_CHECKING:
 CLAUDE_TOKEN_ENV = "CLAUDE_CODE_" + "OAUTH_TOKEN"
 PULL_REQUESTS_PERMISSIONS = {"contents": "read"}
 # A build run pushes its own branch and opens its pull request; run-host holds this
-# token for the push and never puts it in the sandbox.
-PUSH_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
+# token for the push and never puts it in the sandbox. A change under
+# .github/workflows needs workflows: write, which only this token carries.
+PUSH_PERMISSIONS = {
+    "contents": "write",
+    "pull_requests": "write",
+    "workflows": "write",
+}
 # A review run returns its verdict as text, so its token can read and never write.
 # run-host posts the verdict after the run ends, so the posting token never reaches
 # the sandbox.
