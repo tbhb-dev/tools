@@ -1209,14 +1209,30 @@ def test_host_limits_default_and_set() -> None:
     host = limits_host()
     assert (host.load_limit, host.min_memory_available_percent) == (None, 20)
     assert (host.max_swap_used_percent, host.limits_warn_only) == (80, False)
+    assert (
+        host.min_disk_free_percent,
+        host.min_inode_free_percent,
+        host.max_runs_per_host,
+        host.models,
+    ) == (10, 10, 2, ())
     host = limits_host(
         load_limit=24,
         min_memory_available_percent=30,
         max_swap_used_percent=50,
         limits_warn_only=True,
+        min_disk_free_percent=15,
+        min_inode_free_percent=25,
+        max_runs_per_host=1,
+        models=["example-model"],
     )
     assert (host.load_limit, host.min_memory_available_percent) == (24, 30)
     assert (host.max_swap_used_percent, host.limits_warn_only) == (50, True)
+    assert (
+        host.min_disk_free_percent,
+        host.min_inode_free_percent,
+        host.max_runs_per_host,
+        host.models,
+    ) == (15, 25, 1, ("example-model",))
 
 
 @pytest.mark.parametrize(
@@ -1226,6 +1242,10 @@ def test_host_limits_default_and_set() -> None:
         ("min_memory_available_percent", 101, "at most 100"),
         ("max_swap_used_percent", 0, "must be a positive integer"),
         ("limits_warn_only", "yes", "must be true or false"),
+        ("min_disk_free_percent", 101, "at most 100"),
+        ("min_inode_free_percent", -1, "must be a positive integer"),
+        ("max_runs_per_host", 0, "must be a positive integer"),
+        ("models", False, "must be a non-empty list"),
     ],
 )
 def test_host_limits_refuse_bad_values(key: str, value: object, why: str) -> None:

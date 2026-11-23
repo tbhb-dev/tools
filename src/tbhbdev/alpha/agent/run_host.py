@@ -700,15 +700,26 @@ def resource_attributes(run: Run) -> dict[str, str]:
     }
 
 
+def bazel_env(run: Run) -> dict[str, str]:
+    if run.request.bazel is None:
+        return {}
+    jobs, memory = run.request.bazel
+    rc = run.tmpdir / "bazelrc"
+    options = f"--jobs={jobs} --local_resources=memory={memory}"
+    runfiles.atomic(rc, f"build {options}\n")
+    run.files.write("log", f"Bazel: {options}\n")
+    return {"BAZELRC": str(rc)}
+
+
 def run_harness(
     run: Run, prepared: Prepared, stack: ExitStack, *, preflight_only: bool = False
 ) -> int:
-    paths = prepared.paths
-    value, executable = checked_policy(run, paths)
+    value, executable = checked_policy(run, prepared.paths)
+    value = dataclasses.replace(value, env=value.env | bazel_env(run))
     env = value.env | prepared.delivery.env | resource_attributes(run)
     command = checked_harness_command(run, prepared, value, executable)
     if preflight_only:
-        log_hook_tools(run, paths)
+        log_hook_tools(run, prepared.paths)
         run.files.write("log", f"preflight ok: {executable}\n")
         return 0
     log_argv(run, command)
@@ -734,7 +745,9 @@ def run_harness(
     try:
         with process_group.defer_signals():
             child = process_group.launch_owned(
-                process_group.Launch(command, env, paths.worktree, streams, terminal),
+                process_group.Launch(
+                    command, env, prepared.paths.worktree, streams, terminal
+                ),
                 started=started,
             )
         if run.files.path("request.json").exists():

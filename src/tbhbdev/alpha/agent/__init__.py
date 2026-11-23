@@ -27,7 +27,7 @@ def parser(prog: str) -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog=prog)
     verbs = command.add_subparsers(dest="verb", required=True)
     execute = verbs.add_parser("exec", help="launch a headless run")
-    execute.add_argument("--host", required=True)
+    execute.add_argument("--host", required=True, help="configured host name or auto")
     execute.add_argument("--repo", required=True)
     execute.add_argument("--ref")
     execute.add_argument(
@@ -45,7 +45,7 @@ def parser(prog: str) -> argparse.ArgumentParser:
     execute.add_argument(
         "--ignore-limits",
         action="store_true",
-        help="launch although the host's load, memory or swap exceeds its limits",
+        help="override resource limits for a named host",
     )
     accounts = execute.add_mutually_exclusive_group()
     accounts.add_argument("--account")

@@ -136,12 +136,28 @@ def host_marker(account: str) -> str:
     return PREFIX + "perl -e " + shlex.quote(read) + " " + shlex.quote(str(marker))
 
 
-def limits() -> str:
-    """Print one line of host numbers: load, CPUs, then memory and swap in KiB.
+def placement_probe(repository: str) -> str:
+    git_host, owner, project = repo.parts(repository)
+    path = f"tbhbdev/agent-mirrors/{git_host.lower()}/{owner}/{project}.git"
+    return f"""mirror="$state/{path}"
+if ! test -f "$mirror/HEAD" || ! test -d "$mirror/objects" ||
+   ! test -d "$mirror/refs"; then
+    printf '%s\\n' 'repository mirror missing'
+    exit 0
+fi
+set -- "$@" "$mirror"
+processes=$(ps -A -ww -o pid= -o ppid= -o comm= -o args=) || exit 1
+running=$(printf '%s\\n' "$processes" | awk '
+    $3 ~ /(^|\\/)(python[0-9.]*|tbhbdev)$/ && / alpha agent run-host / {{
+        parent[$1]=$2
+    }}
+    END {{for (pid in parent) if (!(parent[pid] in parent)) n++; print n+0}}
+') || exit 1
+"""
 
-    The fields are the 1-minute load, the logical CPU count, MemTotal,
-    MemAvailable, swap total and swap used.
-    """
+
+def limits(repository: str | None = None) -> str:
+    """Read host resources and, for auto placement, mirror and run count."""
     linux = (
         "read l _ < /proc/loadavg || exit 1\n"
         "c=$(nproc) || exit 1\n"
@@ -170,7 +186,34 @@ def limits() -> str:
     return (
         "# tbhbdev-limits\n"
         + PREFIX
-        + f'if test "$(uname -s)" = Darwin; then\n{macos}else\n{linux}fi\n'
+        + ROOT
+        + """state_fs=$d
+while test ! -d "$state_fs"; do state_fs=$(dirname "$state_fs"); done
+set -- "$HOME" "$state_fs" "${TMPDIR:-/tmp}"
+running=0
+"""
+        + (placement_probe(repository) if repository is not None else "")
+        + f"""if test "$(uname -s)" = Darwin; then
+    inode_col=8
+    resources=$(
+{macos}    ) || exit 1
+else
+    inode_col=5
+    resources=$(
+{linux}    ) || exit 1
+fi
+minimum_free() {{
+    report=$(df "$@") || return 1
+    printf '%s\\n' "$report" | awk -v col="$col" '
+        BEGIN {{min=100}}
+        NR > 1 {{if ($col !~ /^[0-9]+%$/) exit 1; p=100-$col; if (p<min) min=p}}
+        END {{if (NR<2) exit 1; print (min<0 ? 0 : min)}}
+    '
+}}
+disk=$(col=5 minimum_free -Pk "$@") || exit 1
+inode=$(col=$inode_col minimum_free -Pi "$@") || exit 1
+printf '%s %s %s %s\\n' "$resources" "$disk" "$inode" "$running"
+"""
     )
 
 

@@ -7,14 +7,16 @@ import os
 import secrets
 import sys
 import time
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, NoReturn, cast
 
 from tbhbdev import version
 from tbhbdev.alpha.agent import (
     launcher,
+    placement,
     render,
     runfiles,
     signing_parity,
@@ -52,6 +54,7 @@ class Run:
         self.launched_by: tuple[str | None, str | None] = (None, None)
         self.cleaning = False
         self.ignore_limits = False
+        self.placement: dict[str, str] = {}
 
 
 def directory() -> Path:
@@ -76,6 +79,7 @@ def save(run: Run) -> None:
         "launcher_session": run.launched_by[1],
         "cleaning": run.cleaning,
         "ignore_limits": run.ignore_limits,
+        **({"placement": run.placement} if run.placement else {}),
     }
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as output:
@@ -104,6 +108,7 @@ def load(settings: Settings, name: str) -> Run:
         )
         # Records from before the limits check have no such field.
         ignore_limits = record.pop("ignore_limits", False)
+        reasons = cast("dict[str, str]", record.pop("placement", {}))
         run = request.parse(record, host_allows_unsandboxed=True)
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         message = f"{path}: invalid run metadata"
@@ -112,6 +117,7 @@ def load(settings: Settings, name: str) -> Run:
     result.launched_by = launched_by
     result.cleaning = bool(cleaning)
     result.ignore_limits = bool(ignore_limits)
+    result.placement = reasons
     return result
 
 
@@ -125,7 +131,12 @@ def agy_timeout(settings: Settings, harness: Harness, profile: Profile) -> int |
 
 def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     rules.check_name(args.name)
-    host = rules.select_host(settings, args.host, args.account)
+    automatic: bool = args.host == "auto"
+    host = (
+        settings.hosts[0]
+        if automatic
+        else rules.select_host(settings, args.host, args.account)
+    )
     harness = Harness(args.harness)
     profile = Profile(args.profile)
     launched_by = launcher.session()
@@ -168,14 +179,14 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         secrets.token_hex(16),
     )
     result.launched_by = launched_by
-    result.ignore_limits = args.ignore_limits
+    result.ignore_limits = args.ignore_limits and not automatic
     return result
 
 
 def check_limits(
     settings: Settings, host: Host, *, ignore: bool, timeout: float = 30
-) -> None:
-    """Read HOST's load, memory and swap in one ssh call, then refuse or warn.
+) -> limits.Reading | None:
+    """Read HOST's resources in one ssh call, then refuse or warn.
 
     Launch calls this first. A later step may call it again.
 
@@ -183,17 +194,13 @@ def check_limits(
         Invalid: A limit is exceeded or the read failed, and neither the host
             nor IGNORE allows the launch to continue.
     """
-    try:
-        found = limits.parse(
-            transport.shell(settings, host, remote.limits(), timeout=timeout)
-        )
-    except transport.TransportError as exc:
-        found = str(exc)
+    found = placement.probe(settings, host, None, timeout)
     refuse, message = limits.decide(host, found, ignore=ignore)
     if refuse:
         raise Invalid(message)
     if message:
         print(message, file=sys.stderr)
+    return found if isinstance(found, limits.Reading) else None
 
 
 def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
@@ -248,18 +255,38 @@ def clear_taint(host: str, reason: str) -> int:
 
 
 def execute(settings: Settings, args: argparse.Namespace) -> int:
+    with ExitStack() as stack:
+        if args.host == "auto":
+            lock = runfiles.private_dir(directory()) / "placement.lock"
+            try:
+                stack.enter_context(runfiles.locked(lock, blocking=False))
+            except BlockingIOError as exc:
+                message = "another automatic placement is in progress"
+                raise Invalid(message) from exc
+        return _execute(settings, args)
+
+
+def _execute(settings: Settings, args: argparse.Namespace) -> int:
     run = prepare(settings, args)
     prompt = Path(args.prompt_file).read_text()
     schema = None if args.schema is None else Path(args.schema).read_text()
     if schema is not None:
         json.loads(schema)
     deadline = time.monotonic() + settings.launch_wait_seconds
-    check_limits(
-        settings,
-        run.host,
-        ignore=run.ignore_limits,
-        timeout=deadline - time.monotonic(),
-    )
+    if args.host == "auto":
+        run.host, found, run.placement = placement.select(
+            settings, run.request, args.account, deadline
+        )
+        run.request = replace(run.request, account=run.host.account)
+    else:
+        found = check_limits(
+            settings,
+            run.host,
+            ignore=run.ignore_limits,
+            timeout=deadline - time.monotonic(),
+        )
+    if found is not None:
+        run.request = replace(run.request, bazel=limits.bazel_caps(run.host, found))
     # Every exec run is unsandboxed: launch_trust records taint, never refuses.
     launch_trust(settings, run, deadline)
     ref = args.ref or "HEAD"

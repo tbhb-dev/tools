@@ -53,11 +53,12 @@ _FIELDS = frozenset(
         "authorized_by",
         "startup_deadline_seconds",
         "fetch_refs",
+        "bazel",
     }
 )
 
 # Requests saved before --fetch-ref lack this key and still load.
-_REQUIRED_FIELDS = _FIELDS - {"fetch_refs"}
+_REQUIRED_FIELDS = _FIELDS - {"fetch_refs", "bazel"}
 
 
 def _fail(field: str, why: str) -> NoReturn:
@@ -189,6 +190,7 @@ def to_dict(request: RunRequest) -> dict[str, object]:
         "authorized_by": request.authorized_by,
         "startup_deadline_seconds": request.startup_deadline_seconds,
         "fetch_refs": list(request.fetch_refs),
+        **({"bazel": list(request.bazel)} if request.bazel is not None else {}),
     }
 
 
@@ -241,6 +243,18 @@ def _fetch_refs(value: object) -> tuple[str, ...]:
     return tuple(refs)
 
 
+def _bazel(value: object) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    match value:
+        case [int(jobs), int(memory)] if (
+            type(jobs) is int and type(memory) is int and min(jobs, memory) > 0
+        ):
+            return jobs, memory
+        case _:
+            _fail("bazel", "must contain positive integer jobs and memory limits")
+
+
 def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunRequest:
     """The request DATA holds, the JSON object that `to_dict` writes.
 
@@ -288,6 +302,7 @@ def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunReque
         authorized_by=_maybe_text(data, "authorized_by"),
         startup_deadline_seconds=_number(data, "startup_deadline_seconds"),
         fetch_refs=_fetch_refs(data.get("fetch_refs", [])),
+        bazel=_bazel(data.get("bazel")),
     )
     validate(request, host_allows_unsandboxed=host_allows_unsandboxed)
     return request

@@ -463,6 +463,10 @@ def _host(table: _Table) -> Host:
         "min_memory_available_percent",
         "max_swap_used_percent",
         "limits_warn_only",
+        "min_disk_free_percent",
+        "min_inode_free_percent",
+        "max_runs_per_host",
+        "models",
     )
     name = _check_name(table, "name", table.text("name"), HOST_NAME)
     os = table.choice("os", Os)
@@ -500,6 +504,12 @@ def _host(table: _Table) -> Host:
         limits_warn_only=table.flag("limits_warn_only")
         if "limits_warn_only" in table.values
         else False,
+        min_disk_free_percent=_percent(table, "min_disk_free_percent", 10),
+        min_inode_free_percent=_percent(table, "min_inode_free_percent", 10),
+        max_runs_per_host=table.integer("max_runs_per_host")
+        if "max_runs_per_host" in table.values
+        else 2,
+        models=table.strings("models") if "models" in table.values else (),
     )
 
 

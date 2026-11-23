@@ -1066,7 +1066,7 @@ def test_exec_spends_one_startup_budget(
         if script == remote_commands.limits():
             assert timeout == 110
             steps.append("limits")
-            return "0.5 4 1000 900 100 0"
+            return "0.5 4 8388608 7340032 100 0 90 90 0"
         if script == remote_commands.host_marker(host.account):
             assert timeout == 100
             steps.append("marker")

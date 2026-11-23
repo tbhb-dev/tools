@@ -83,11 +83,11 @@ def copy_final(source: Path, destination: Path) -> None:
 
 
 @contextmanager
-def locked(path: Path) -> Generator[None]:
+def locked(path: Path, *, blocking: bool = True) -> Generator[None]:
     """Lock a stable sibling file, never a file that gets replaced."""
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     with os.fdopen(fd, "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        fcntl.flock(lock, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
 
 

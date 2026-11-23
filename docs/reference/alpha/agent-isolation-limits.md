@@ -81,4 +81,4 @@ The driver’s mirror receives agent-pushed objects.
 
 Before pushing, a run reads the private-name list at `.local/state/tbhb/private-repos.txt` in the agent home. The file must belong to the agent account, and its mode must clear the group and other write bits. On a host whose file-creation mask is 002, which is the Ubuntu default, create the file with mode 0644 or tighter, or the push refuses.
 
-One successful, real `agent exec` run on a host proves that harness. `proven_harnesses` records this fact without refusing unproven harnesses. An empty list never refuses a run. Remove the recorded fact when upgrading that harness. Codex uses the existing account executable on PATH and requires no standalone release layout.
+One successful, real `agent exec` run on a host proves that harness. `proven_harnesses` records this fact. An empty list never refuses a run with a named host. Auto placement requires a proven harness. Remove the recorded fact when upgrading that harness. Codex uses the existing account executable on PATH and requires no standalone release layout.

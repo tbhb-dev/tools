@@ -7,16 +7,19 @@ import dataclasses
 import json
 import subprocess
 import sys
+import time
+from random import Random
 from typing import TYPE_CHECKING
 
 import pytest
 from agent_driver_example import Remote, setup
 from agent_example import LINUX, MARKER, settings
+from test_alpha_agent_run_host import make_run
 
 from tbhbdev.alpha import agent
-from tbhbdev.alpha.agent import driver, taint_store
+from tbhbdev.alpha.agent import driver, placement, run_host, runfiles, taint_store
 from tbhbdev.alpha.agent.decisions import limits, remote, taint
-from tbhbdev.alpha.agent.model import Invalid
+from tbhbdev.alpha.agent.model import Host, Invalid, RunRequest, Settings
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,12 +27,12 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
 
 CONFIG = settings(reference=f"{MARKER}/{MARKER}/{MARKER}")
-FINE = limits.Reading(1.0, 8, 1000, 500, 100, 10)
+FINE = limits.Reading(1.0, 8, 1000, 500, 100, 10, 90, 90, 0)
 
 
-def test_parse_reads_six_numbers() -> None:
-    assert limits.parse("0.5 4 1000 900 100 0\n") == limits.Reading(
-        0.5, 4, 1000, 900, 100, 0
+def test_parse_reads_host_numbers() -> None:
+    assert limits.parse("0.5 4 8388608 7340032 100 0 90 90 0\n") == limits.Reading(
+        0.5, 4, 8388608, 7340032, 100, 0, 90, 90, 0
     )
 
 
@@ -38,15 +41,19 @@ def test_parse_reads_six_numbers() -> None:
     [
         "",
         "1 2 3",
-        "x 4 1000 900 100 0",
-        "1 4 1000 900 100 0 7",
-        "nan 4 1000 900 100 0",
-        "-1 4 1000 900 100 0",
-        "1 0 1000 900 100 0",
-        "1 4 0 0 100 0",
-        "1 4 1000 -1 100 0",
-        "1 4 1000 900 -1 0",
-        "1 4 1000 900 100 -1",
+        "x 4 1000 900 100 0 90 90 0",
+        "1 4 1000 900 100 0 7 90 90 0",
+        "nan 4 1000 900 100 0 90 90 0",
+        "-1 4 1000 900 100 0 90 90 0",
+        "1 0 1000 900 100 0 90 90 0",
+        "1 4 0 0 100 0 90 90 0",
+        "1 4 1000 -1 100 0 90 90 0",
+        "1 4 1000 900 -1 0 90 90 0",
+        "1 4 1000 900 100 -1 90 90 0",
+        "1 4 1000 900 0 1 90 90 0",
+        "1 4 1000 900 0 0 101 90 0",
+        "1 4 1000 900 0 0 90 -1 0",
+        "1 4 1000 900 0 0 90 90 -1",
     ],
 )
 def test_parse_refuses_anything_else(text: str) -> None:
@@ -58,7 +65,7 @@ def test_decide_passes_a_quiet_host() -> None:
 
 
 def test_decide_names_every_number_over_a_limit() -> None:
-    busy = limits.Reading(8.0, 8, 1000, 100, 100, 90)
+    busy = limits.Reading(8.0, 8, 1000, 100, 100, 90, 90, 90, 0)
     refuse, message = limits.decide(LINUX, busy, ignore=False)
     assert refuse
     assert message == (
@@ -71,14 +78,14 @@ def test_decide_uses_the_configured_limits() -> None:
     host = dataclasses.replace(
         LINUX, load_limit=24, min_memory_available_percent=10, max_swap_used_percent=95
     )
-    reading = limits.Reading(23.9, 32, 1000, 100, 100, 90)
+    reading = limits.Reading(23.9, 32, 1000, 100, 100, 90, 90, 90, 0)
     assert limits.decide(host, reading, ignore=False) == (False, "")
     low = dataclasses.replace(host, load_limit=2)
     assert limits.decide(low, reading, ignore=False)[0]
 
 
 def test_decide_allows_swap_of_zero() -> None:
-    reading = limits.Reading(1.0, 8, 1000, 500, 0, 0)
+    reading = limits.Reading(1.0, 8, 1000, 500, 0, 0, 90, 90, 0)
     assert limits.decide(LINUX, reading, ignore=False) == (False, "")
 
 
@@ -91,7 +98,7 @@ def test_decide_refuses_a_failed_read() -> None:
     )
 
 
-@pytest.mark.parametrize("found", ["cause", limits.Reading(9, 8, 1000, 500, 0, 0)])
+@pytest.mark.parametrize("found", ["cause", dataclasses.replace(FINE, load=9)])
 def test_decide_warns_when_ignored_or_warn_only(found: limits.Reading | str) -> None:
     warn_only = dataclasses.replace(LINUX, limits_warn_only=True)
     for refuse, message in (
@@ -217,7 +224,11 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     taint_store.record_clearance(
         taint.Clearance("example-linux", "Test host rebuilt", "2026-11-10T00:00:00Z")
     )
-    monkeypatch.setattr(agent.settings, "load", lambda: CONFIG)
+
+    def configured() -> Settings:
+        return CONFIG
+
+    monkeypatch.setattr(agent.settings, "load", configured)
     return result
 
 
@@ -233,7 +244,7 @@ def launch(host: Remote, *options: str) -> int:
 def test_a_busy_host_refuses_before_any_transfer(
     host: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    host.configure(limits="9 4 1000 900 100 0")
+    host.configure(limits="9 4 1000 900 100 0 90 90 0")
     assert launch(host) == 1
     assert "load 9 >= limit 4" in capsys.readouterr().err
     assert len(host.records("ssh", limits=True)) == 1
@@ -244,7 +255,7 @@ def test_a_busy_host_refuses_before_any_transfer(
 def test_ignore_limits_launches_warns_and_is_recorded(
     host: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    host.configure(limits="9 4 1000 900 100 0")
+    host.configure(limits="9 4 1000 900 100 0 90 90 0")
     assert launch(host, "--ignore-limits") == 0
     assert "warning: example-linux: load 9 >= limit 4" in capsys.readouterr().err
     assert json.loads(driver.metadata_path("sample").read_text())["ignore_limits"]
@@ -272,8 +283,125 @@ def test_a_quiet_host_launches_without_a_warning(
     assert not json.loads(driver.metadata_path("sample").read_text())["ignore_limits"]
 
 
+@pytest.mark.parametrize(("cpus", "jobs"), [(1, 1), (17, 5)])
+def test_bazel_share(tmp_path: Path, cpus: int, jobs: int) -> None:
+    found = dataclasses.replace(FINE, cpus=cpus, memory_total=12289 * 1024)
+    caps = limits.bazel_caps(dataclasses.replace(LINUX, max_runs_per_host=3), found)
+    assert caps == (jobs, 4096)
+    value = make_run(tmp_path)
+    run = dataclasses.replace(
+        value, request=dataclasses.replace(value.request, bazel=caps)
+    )
+    run.tmpdir.mkdir(exist_ok=True)
+    assert run_host.bazel_env(run) == {"BAZELRC": str(run.tmpdir / "bazelrc")}
+    options = f"--jobs={jobs} --local_resources=memory=4096"
+    assert (run.tmpdir / "bazelrc").read_text() == f"build {options}\n"
+    assert options in run.files.path("log").read_text()
+
+
+def test_auto_records_choice_and_reasons(
+    host: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def read(
+        _cfg: Settings, target: Host, repository: str | None, timeout: float
+    ) -> limits.Reading:
+        assert repository == "example-org/example-repo"
+        assert timeout > 0
+        return (
+            dataclasses.replace(FINE, disk_free=5, inode_free=3)
+            if target != LINUX
+            else FINE
+        )
+
+    monkeypatch.setattr(placement, "probe", read)
+    assert launch(host, "--host", "auto") == 0
+    run = driver.load(CONFIG, "sample")
+    assert run.host == LINUX
+    assert run.placement == {
+        CONFIG.hosts[0].name: "eligible, headroom 30, running 0",
+        CONFIG.hosts[1].name: "disk free 5% < 10%; inodes free 3% < 10%",
+    }
+    assert run.request.bazel == (4, 1)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (dataclasses.replace(LINUX, proven_harnesses=()), "harness"),
+        (dataclasses.replace(LINUX, models=("other",)), "model"),
+        (dataclasses.replace(LINUX, accounts=LINUX.accounts[1:]), "account"),
+        (LINUX, "mirror"),
+        (dataclasses.replace(LINUX, limits_warn_only=True), "cap 2"),
+    ],
+)
+def test_auto_refuses_each_ineligible_host(
+    host: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    case: tuple[Host, str],
+) -> None:
+    target, detail = case
+
+    def read(
+        _cfg: Settings, _host: Host, _repository: str | None, _timeout: float
+    ) -> limits.Reading:
+        return dataclasses.replace(FINE, running=2)
+
+    def configured() -> Settings:
+        return dataclasses.replace(CONFIG, hosts=(target,))
+
+    if detail == "mirror":
+        host.configure(limits="repository mirror missing")
+    else:
+        monkeypatch.setattr(placement, "probe", read)
+    monkeypatch.setattr(agent.settings, "load", configured)
+    assert (
+        launch(host, "--host", "auto", "--account", LINUX.account, "--ignore-limits")
+        == 1
+    )
+    error = capsys.readouterr().err
+    assert f"no host has headroom\n{LINUX.name}: " in error
+    assert detail in error.splitlines()[-1]
+    assert not driver.metadata_path("sample").exists()
+
+
+@pytest.mark.parametrize("prefer_one", [False, True])
+def test_placement_ranks_by_headroom_and_spreads_ties(
+    host: Remote, monkeypatch: pytest.MonkeyPatch, prefer_one: bool
+) -> None:
+    def read(
+        _cfg: Settings, target: Host, _repository: str | None, _timeout: float
+    ) -> limits.Reading:
+        if prefer_one and target != LINUX:
+            return dataclasses.replace(FINE, memory_available=300)
+        return FINE
+
+    monkeypatch.setattr(placement, "probe", read)
+    assert launch(host) == 0
+    run: RunRequest = driver.load(CONFIG, "sample").request
+    chosen = {
+        placement.select(
+            CONFIG,
+            run,
+            None,
+            time.monotonic() + 10,
+            rng=Random(seed),  # noqa: S311 -- deterministic placement
+        )[0].name
+        for seed in range(8)
+    }
+    assert chosen == ({LINUX.name} if prefer_one else {h.name for h in CONFIG.hosts})
+
+
+def test_concurrent_auto_fails_without_waiting(
+    host: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with runfiles.locked(runfiles.private_dir(driver.directory()) / "placement.lock"):
+        assert launch(host, "--host", "auto") == 1
+    assert "another automatic placement is in progress" in capsys.readouterr().err
+
+
 def test_check_limits_runs_without_a_launch(host: Remote) -> None:
-    host.configure(limits="9 4 1000 900 100 0")
+    host.configure(limits="9 4 1000 900 100 0 90 90 0")
     config_host = CONFIG.hosts[0]
     with pytest.raises(Invalid, match="load 9"):
         driver.check_limits(CONFIG, config_host, ignore=False)
@@ -287,3 +415,9 @@ def test_load_accepts_a_record_from_before_the_field(host: Remote) -> None:
     del record["ignore_limits"]
     path.write_text(json.dumps(copy.deepcopy(record)) + "\n")
     assert driver.load(CONFIG, "sample").ignore_limits is False
+
+
+def test_warn_only_keeps_launching_when_the_probe_fails(host: Remote) -> None:
+    host.configure(limits_rc=1)
+    assert launch(host, "--ignore-limits") == 0
+    assert driver.load(CONFIG, "sample").request.bazel is None

@@ -122,6 +122,13 @@ def test_parse_builds_every_field() -> None:
 def test_to_dict_holds_the_version_and_every_field() -> None:
     parsed = request.parse(BUILD, host_allows_unsandboxed=False)
     assert request.to_dict(parsed) == BUILD
+
+
+@pytest.mark.parametrize("caps", [[False, 4], [2, True], [2, 0], [2], "2,4"])
+def test_request_refuses_invalid_bazel_caps(caps: object) -> None:
+    assert refused(made(BUILD, bazel=caps)) == (
+        "request bazel must contain positive integer jobs and memory limits"
+    )
     assert model.REQUEST_VERSION == 2
 
 

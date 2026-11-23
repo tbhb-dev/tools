@@ -141,6 +141,10 @@ class Host:
     min_memory_available_percent: int = 20
     max_swap_used_percent: int = 80
     limits_warn_only: bool = False
+    min_disk_free_percent: int = 10
+    min_inode_free_percent: int = 10
+    max_runs_per_host: int = 2
+    models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -270,3 +274,4 @@ class RunRequest:
     startup_deadline_seconds: int
     tainted_host: bool
     fetch_refs: tuple[str, ...] = ()
+    bazel: tuple[int, int] | None = None

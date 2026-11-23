@@ -645,18 +645,17 @@ def test_no_argv_holds_a_secret_reference_or_a_token() -> None:
         assert not any(MARKER in element for element in command)
 
 
-def test_codex_overrides_the_signing_socket_setting() -> None:
+@pytest.mark.parametrize("key", ["SSH_AUTH_SOCK", "BAZELRC"])
+def test_codex_overrides_shell_environment_setting(key: str) -> None:
     original = policy_for(Harness.CODEX, Profile.BUILD)
-    pol = dataclasses.replace(
-        original, env=original.env | {"SSH_AUTH_SOCK": "/example/private/ssh.sock"}
-    )
+    pol = dataclasses.replace(original, env=original.env | {key: f"{WORKTREE}/example"})
     result = argv.harness(
         request(Harness.CODEX, RunKind.EXEC, Profile.BUILD),
         pol,
         worktree=WORKTREE,
         brief_file=BRIEF_FILE,
     )
-    flag = 'shell_environment_policy.set.SSH_AUTH_SOCK="/example/private/ssh.sock"'
+    flag = f'shell_environment_policy.set.{key}="{WORKTREE}/example"'
     assert result[result.index(flag) - 1] == "-c"
     assert result.count(flag) == 1
 

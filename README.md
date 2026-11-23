@@ -27,7 +27,7 @@ uv tool install git+https://github.com/tbhb-dev/tools
 - `prose_check` is a library, not a command: `tbhbdev.prose_check.check_prose` runs vale, cspell and rumdl on text and raises `ProseRefused` on a finding or a failure. See [Prose check](docs/reference/prose-check.md).
 - `secret` reads and manages 1Password items through the `tbhbdev.secrets` library.
 - `host` manages agent hosts from the operator's Mac.
-- `alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`. They may change or go away without notice. `tbhbdev alpha version-check` compares the installed build across hosts.
+- `alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`. They may change or go away without notice. `tbhbdev alpha version-check` compares the installed build across hosts. `tbhbdev alpha agent exec --host auto` selects a host with room for the run.
 
 The shared `tbhbdev.content` library provides scanned, audited GitHub issue and project writes for plugins. See [Content writes](docs/reference/content.md).
 
