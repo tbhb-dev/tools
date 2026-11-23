@@ -12,7 +12,7 @@ import shlex
 import tarfile
 from pathlib import PurePosixPath
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 from agent_driver_example import (
@@ -409,9 +409,11 @@ def test_a_first_run_past_its_time_limit_no_longer_blocks(
 ) -> None:
     second = recorded_review(remote)
     age_first_run(timeout=60)
-    monkeypatch.setattr(
-        transport, "read", lambda *_a, **_k: pytest.fail("past the limit, no read")
-    )
+
+    def no_read(*_args: object, **_kwargs: object) -> NoReturn:
+        pytest.fail("past the limit, no read")
+
+    monkeypatch.setattr(transport, "read", no_read)
     driver.refuse_live_duplicate(CONFIG, second)
 
 
