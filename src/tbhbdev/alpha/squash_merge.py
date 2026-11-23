@@ -13,6 +13,10 @@ repository allows it, else a squash merge, else the command stops. A failed or
 malformed read stops it too. The merge path also refuses a body that cleans to
 nothing or a subject in GitHub's default form. The file keeps its old name.
 
+A branch that requires a squash merge queue uses GitHub's default squash
+message. The command compares that default with the cleaned message before
+it enqueues and reads the queue status once after a successful gh call.
+
 Usage, from anywhere in a worktree:
 
     tbhbdev alpha merge PR [--dry-run]
@@ -77,6 +81,7 @@ from dataclasses import dataclass
 from email.utils import parseaddr
 from itertools import takewhile
 from typing import TYPE_CHECKING, NoReturn, cast
+from urllib.parse import quote
 
 from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha import pull_request as pr
@@ -94,6 +99,22 @@ VIEW_FIELDS = (
     "title,body,headRefOid,baseRefName,state,isDraft,mergeable,"
     "mergeStateStatus,statusCheckRollup,author,url,commits"
 )
+QUEUE_QUERY = """\
+query($owner: String!, $repo: String!, $number: Int!, $preview: Boolean!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      headline: viewerMergeHeadlineText(mergeType: SQUASH) @include(if: $preview)
+      body: viewerMergeBodyText(mergeType: SQUASH) @include(if: $preview)
+      state
+      isInMergeQueue
+      mergeCommit { oid }
+      timelineItems(last: 1, itemTypes: [REMOVED_FROM_MERGE_QUEUE_EVENT]) {
+        nodes { ... on RemovedFromMergeQueueEvent { id reason } }
+      }
+    }
+  }
+}
+"""
 # gh's merge states that mean "not now", with the reason GitHub already computed.
 REFUSED_STATES = frozenset({"BLOCKED", "BEHIND", "DIRTY", "DRAFT", "UNKNOWN"})
 FAILED_CONCLUSIONS = frozenset(
@@ -129,6 +150,7 @@ class PullRequest:
     renovate: bool = False
     url: object = None
     agent: bool = False
+    base: str = ""
 
 
 @dataclass(frozen=True)
@@ -534,6 +556,7 @@ def fetch(number: int) -> PullRequest:
         stop(f"gh pr view returned something that is not JSON: {exc}")
     who = agent_identity.as_dict(data.get("author")) or {}
     commits = data.get("commits", [])
+    base = data.get("baseRefName")
     _, email = parseaddr(agent_identity.AGENT_IDENT)
     return PullRequest(
         agent=any(
@@ -545,6 +568,7 @@ def fetch(number: int) -> PullRequest:
         title=str(data.get("title", "")),
         body=str(data.get("body") or ""),
         head=str(data.get("headRefOid", "")),
+        base=base if isinstance(base, str) else "",
         state=str(data.get("state", "")),
         draft=data.get("isDraft") is True,
         mergeable=str(data.get("mergeable", "")),
@@ -588,6 +612,109 @@ def merge_methods(target: str) -> list[str]:
     stop(f"not merging: {target} allows neither merge commits nor squash merges")
 
 
+def branch_rules(target: str, base: str) -> list[object]:
+    """Read every page of active rules for the base branch."""
+    if not base:
+        stop("not merging: gh pr view returned no base branch")
+    endpoint = f"repos/{target}/rules/branches/{quote(base, safe='')}"
+    done = pr.run([pr.find_tool(GH), "api", "--paginate", "--slurp", endpoint])
+    if done.returncode != 0:
+        stop(f"gh branch rules lookup failed: {' '.join(done.stderr.split())}")
+    try:
+        pages: object = json.loads(done.stdout)
+    except ValueError:
+        stop("gh returned no usable branch rules")
+    if not isinstance(pages, list) or not pages:
+        stop("gh returned no usable branch rules")
+    rules: list[object] = []
+    for page in cast("list[object]", pages):
+        if not isinstance(page, list):
+            stop("gh returned no usable branch rules")
+        rules.extend(cast("list[object]", page))
+    return rules
+
+
+def requires_queue(target: str, base: str) -> bool:
+    """Check whether the active branch rules require a squash queue."""
+    required = False
+    for entry in branch_rules(target, base):
+        rule = agent_identity.as_dict(entry)
+        if rule is None or not isinstance(rule.get("type"), str):
+            stop("gh returned no usable branch rules")
+        if rule["type"] == "merge_queue":
+            parameters = agent_identity.as_dict(rule.get("parameters")) or {}
+            if parameters.get("merge_method") not in ("SQUASH", "squash"):
+                stop("not merging: the branch merge queue must use squash")
+            required = True
+    return required
+
+
+def queue_state(target: str, number: int, *, preview: bool) -> dict[str, object]:
+    """Read the PR's queue status and optionally its default squash message."""
+    owner, repo = target.split("/", 1)
+    done = pr.run([
+        pr.find_tool(GH), "api", "graphql", "-f", f"query={QUEUE_QUERY}",
+        "-f", f"owner={owner}", "-f", f"repo={repo}", "-F", f"number={number}",
+        "-F", f"preview={str(preview).lower()}",
+    ])  # fmt: skip
+    if done.returncode != 0:
+        stop(f"gh merge queue lookup failed: {' '.join(done.stderr.split())}")
+    try:
+        data = json.loads(done.stdout)["data"]["repository"]["pullRequest"]
+    except ValueError, KeyError, TypeError:
+        stop("gh returned no usable merge queue state")
+    state = agent_identity.as_dict(data)
+    if state is None:
+        stop("gh returned no usable merge queue state")
+    return state
+
+
+def queue_removal(state: dict[str, object]) -> tuple[str, str | None]:
+    """Return the latest removal event's ID and reason."""
+    timeline = agent_identity.as_dict(state.get("timelineItems")) or {}
+    match cast("list[dict[str, object]]", timeline.get("nodes")):
+        case [{"id": str() as event, "reason": (str() | None) as reason}]:
+            return event, reason
+        case []:
+            return "", None
+        case _:
+            stop("gh returned no usable merge queue timeline")
+
+
+def queue_preview(target: str, number: int, message: Message) -> str:
+    """Refuse a default squash message that differs and record the last removal."""
+    state = queue_state(target, number, preview=True)
+    body = state.get("body")
+    if (
+        isinstance(body, str)
+        and state.get("headline") == message.subject
+        and body.replace("\r\n", "\n").rstrip("\n") == message.body.rstrip("\n")
+    ):
+        return queue_removal(state)[0]
+    stop(
+        f"not merging PR #{number}: GitHub's default squash message differs "
+        "from the cleaned message"
+    )
+
+
+def report_queue(target: str, number: int, previous_removal: str) -> int:
+    """Report the result of one post-merge state read."""
+    state = queue_state(target, number, preview=False)
+    if state.get("state") == "MERGED":
+        commit = agent_identity.as_dict(state.get("mergeCommit")) or {}
+        sha = commit.get("oid")
+        if isinstance(sha, str) and sha:
+            print(f"PR #{number} merged as {sha}")
+            return 0
+    if state.get("state") == "OPEN" and state.get("isInMergeQueue") is True:
+        print(f"PR #{number} queued")
+        return 0
+    event, reason = queue_removal(state)
+    if event and event != previous_removal:
+        stop(f"PR #{number} dequeued: {reason or 'GitHub supplied no reason'}")
+    stop(f"PR #{number}: GitHub reports no merge commit, queue entry, or new removal")
+
+
 def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     """The command line."""
     parser = argparse.ArgumentParser(
@@ -605,7 +732,15 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
     request = fetch(args.number)
     if reasons := refusals(request):
         stop(f"not merging PR #{args.number}: " + "; ".join(reasons))
-    methods = merge_methods(pr.target_of_pr(request.url))
+    target = pr.target_of_pr(request.url)
+    methods = merge_methods(target)
+    queued = requires_queue(target, request.base)
+    if queued:
+        if "--squash" not in methods:
+            stop(
+                f"not merging PR #{args.number}: the merge queue requires squash merges"
+            )
+        methods = ["--squash"]
     body = renovate_body(request.body) if request.renovate else request.body
     message = build_message(
         request.title, args.number, body, agent=request.agent and not request.renovate
@@ -617,10 +752,11 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
             f"not merging PR #{args.number}: the merge commit would get "
             "GitHub's default message, not the cleaned PR body"
         )
+    previous_removal = queue_preview(target, args.number, message) if queued else ""
     pr.scan_secrets(
         message.text(),
         f"the commit message for PR #{args.number}",
-        pr.repo_visibility(pr.target_of_pr(request.url)),
+        pr.repo_visibility(target),
     )
     argv_gh = [
         GH, "pr", "merge", str(args.number), methods[0], "--subject", message.subject,
@@ -638,6 +774,9 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
         print(f"{methods[0]} failed; retrying with {methods[1]}", file=sys.stderr)
         argv_gh[argv_gh.index(methods[0])] = methods[1]
         done = pr.run(argv_gh, stdin=message.body)
+    if queued and done.returncode == 0:
+        print(done.stderr, end="", file=sys.stderr)
+        return report_queue(target, args.number, previous_removal)
     print(done.stdout, end="")
     print(done.stderr, end="", file=sys.stderr)
     return done.returncode

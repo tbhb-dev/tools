@@ -10,6 +10,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -23,7 +25,7 @@ env:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   # Bazel 9.x only, the version .bazelversion pins. This repository is
@@ -56,7 +58,7 @@ jobs:
         uses: tbhb-dev/rules/.github/actions/setup-bazel-ci@60295689201c97560855aebec77af4ff8c836ae9  # main
         with:
           disk-cache: ${{ github.event_name == 'push' && 'false' || format('{0}-ubuntu-26.04', github.workflow) }}
-          cache-save: ${{ github.event_name != 'pull_request' }}
+          cache-save: ${{ github.event_name == 'push' }}
 
       # The bazel-r2-cache remote cache, through its shared action. A fork's
       # pull request gets no secrets and builds without the cache.
@@ -64,7 +66,7 @@ jobs:
         uses: tbhb-dev/bazel-r2-cache/.github/actions/remote-cache@ced4cd189a557a2b622a7f0906c55a761a037ba2  # main
         with:
           token: ${{ github.event_name == 'push' && secrets.BAZEL_CACHE_TOKEN || secrets.BAZEL_CACHE_PR_TOKEN }}
-          pull-request: ${{ github.event.pull_request.number }}
+          pull-request: ${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}
 
       # //... covers the @tbhb_rules lint, format, shell and docs tests over
       # the whole tree, the buildifier_test, and the preset.update_test that
