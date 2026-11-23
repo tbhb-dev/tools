@@ -17,6 +17,9 @@ package content
 // checks the name against the role list kept outside this public file.
 #RoleLabel: =~"^role:[a-z0-9][a-z0-9-]*$"
 
+// Where a draft came from. A variant that sets it to Import is a tracker import.
+#Source: "Import"
+
 // Time limit for a Spike.
 #Timebox: "2h" | "1d" | "3d"
 
