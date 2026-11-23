@@ -223,8 +223,9 @@ def launch_lock() -> Generator[None]:
 def refuse_live_duplicate(settings: Settings, run: Run) -> None:
     """Refuse a review of a commit that another run of the profile is reviewing.
 
-    Runs that declare a different variant, role or class are a planned pair
-    (two reviewers of one head) and don't count as duplicates.
+    Two runs on one repository, commit and profile coexist only when both
+    declare a variant and the variants differ (a planned pair of reviewers of
+    one head). A run with no variant conflicts with every live run on that key.
 
     A recorded run counts as live until the host reports its exit status, so
     an unreachable host or a run with no status also refuses. A run older than
@@ -233,8 +234,9 @@ def refuse_live_duplicate(settings: Settings, run: Run) -> None:
     ``launch_lock`` so two launches cannot both pass this check.
 
     Raises:
-        Invalid: A recorded run has the same repo, commit, profile, variant,
-            role and class and no exit status yet.
+        Invalid: A recorded run has the same repo, commit and profile, no exit
+            status yet, and either run declares no variant or both declare the
+            same one.
     """
     for path in sorted(directory().glob("*.json")):
         try:
@@ -245,9 +247,11 @@ def refuse_live_duplicate(settings: Settings, run: Run) -> None:
             canonical_repo(other.request.repo) == canonical_repo(run.request.repo)
             and other.request.commit == run.request.commit
             and other.request.profile is run.request.profile
-            and other.request.variant == run.request.variant
-            and other.request.role == run.request.role
-            and other.request.class_ == run.request.class_
+            and (
+                other.request.variant is None
+                or run.request.variant is None
+                or other.request.variant == run.request.variant
+            )
         )
         if not same or past_time_limit(settings, other):
             continue

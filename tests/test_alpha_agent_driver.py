@@ -360,9 +360,9 @@ def test_review_without_ref_starts_nothing(
 OTHER_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
 
 
-def recorded_review(remote: Remote) -> driver.Run:
+def recorded_review(remote: Remote, *extra: str) -> driver.Run:
     """Launch `sample`, then return a copy named `second` to check against it."""
-    assert launch(remote, "--profile", "review", "--ref", COMMIT) == 0
+    assert launch(remote, "--profile", "review", "--ref", COMMIT, *extra) == 0
     second = driver.load(CONFIG, "sample")
     second.name = "second"
     return second
@@ -545,8 +545,8 @@ def test_a_review_checks_and_saves_inside_the_launch_lock(
     assert events == ["enter", "check", "save", "exit"]
 
 
-@pytest.mark.parametrize("change", ["commit", "profile", "variant", "role", "class_"])
-def test_another_commit_profile_or_pair_member_does_not_count_as_a_duplicate(
+@pytest.mark.parametrize("change", ["commit", "profile"])
+def test_another_commit_or_profile_does_not_count_as_a_duplicate(
     remote: Remote, change: str
 ) -> None:
     second = recorded_review(remote)
@@ -554,12 +554,47 @@ def test_another_commit_profile_or_pair_member_does_not_count_as_a_duplicate(
     changes: dict[str, RunRequest] = {
         "commit": dataclasses.replace(second.request, commit=OTHER_COMMIT),
         "profile": dataclasses.replace(second.request, profile=Profile.BUILD),
-        "variant": dataclasses.replace(second.request, variant="b"),
-        "role": dataclasses.replace(second.request, role="b"),
-        "class_": dataclasses.replace(second.request, class_="b"),
     }
     second.request = changes[change]
     driver.refuse_live_duplicate(CONFIG, second)
+
+
+def test_two_declared_variants_may_review_one_commit(remote: Remote) -> None:
+    second = recorded_review(remote, "--variant", "a")
+    second.request = dataclasses.replace(second.request, variant="b")
+    driver.refuse_live_duplicate(CONFIG, second)
+
+
+@pytest.mark.parametrize(
+    ("first", "later"),
+    [
+        (None, "b"),
+        ("a", None),
+        ("a", "a"),
+        (None, None),
+    ],
+)
+def test_a_run_without_a_variant_or_with_the_same_one_is_a_duplicate(
+    remote: Remote, first: str | None, later: str | None
+) -> None:
+    second = recorded_review(remote, *(("--variant", first) if first else ()))
+    second.request = dataclasses.replace(second.request, variant=later)
+    with pytest.raises(Invalid, match="hasn't ended"):
+        driver.refuse_live_duplicate(CONFIG, second)
+
+
+@pytest.mark.parametrize("field", ["role", "class_"])
+def test_a_different_role_or_class_alone_is_still_a_duplicate(
+    remote: Remote, field: str
+) -> None:
+    second = recorded_review(remote)
+    changes: dict[str, RunRequest] = {
+        "role": dataclasses.replace(second.request, role="b"),
+        "class_": dataclasses.replace(second.request, class_="b"),
+    }
+    second.request = changes[field]
+    with pytest.raises(Invalid, match="hasn't ended"):
+        driver.refuse_live_duplicate(CONFIG, second)
 
 
 @pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT])
