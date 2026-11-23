@@ -1276,6 +1276,7 @@ def test_harness_and_driver_mint_distinct_scopes(
         assert seen[-1]["permissions"] == {
             "contents": "write",
             "pull_requests": "write",
+            "workflows": "write",
         }
     else:
         assert scopes == [
