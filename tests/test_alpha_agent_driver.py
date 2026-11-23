@@ -20,6 +20,7 @@ from agent_driver_example import (
     execution_arguments,
     git_in,
     mirror_in,
+    record_build,
     setup,
     write_standalone_fake,
 )
@@ -27,7 +28,7 @@ from agent_example import MARKER, settings
 
 from tbhbdev import version
 from tbhbdev.alpha import agent
-from tbhbdev.alpha.agent import driver, model, render, taint_store, transport
+from tbhbdev.alpha.agent import driver, launcher, model, render, taint_store, transport
 from tbhbdev.alpha.agent.decisions import remote as remote_commands
 from tbhbdev.alpha.agent.decisions import repo, request, runfiles_names, taint
 from tbhbdev.alpha.agent.model import Invalid, RunKind
@@ -117,7 +118,14 @@ def test_unsandboxed_clean_refuses_a_run_without_a_result(
 def test_unsandboxed_inspection_reads_the_host_output(
     remote: Remote, capsys: pytest.CaptureFixture[str], verb: str, profile: str
 ) -> None:
-    options = ["--ref", COMMIT] if profile == "review" else []
+    options: tuple[str, ...] = ()
+    if profile == "review":
+        build = record_build(
+            remote.prompt, CONFIG, "--harness", "claude", "--reason", "build"
+        )
+        ref = f"refs/heads/agent/{build.name}"
+        remote.configure(refs=f"{COMMIT}\t{ref}\n")
+        options = ("--ref", ref)
     assert (
         launch(
             remote, "--ops", "--unsandboxed", "o/r#1", "--profile", profile, *options
@@ -353,10 +361,31 @@ def test_review_without_ref_starts_nothing(
     assert remote.records("ssh") == []
 
 
-@pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT])
-def test_review_ref(remote: Remote, ref: str) -> None:
+@pytest.mark.parametrize("ref", ["refs/heads/agent/build-example", "refs/pull/2/head"])
+def test_review_ref(remote: Remote, monkeypatch: pytest.MonkeyPatch, ref: str) -> None:
+    record_build(remote.prompt, CONFIG)
+
+    def pull_branch(repository: str, number: str) -> str:
+        assert repository == "example-org/example-repo"
+        assert number == "2"
+        return "agent/build-example"
+
+    monkeypatch.setattr(launcher, "pull_branch", pull_branch)
     remote.configure(refs=f"{COMMIT}\t{ref}\n")
-    assert launch(remote, "--profile", "review", "--ref", ref) == 0
+    assert (
+        launch(
+            remote,
+            "--profile",
+            "review",
+            "--ref",
+            ref,
+            "--harness",
+            "claude",
+            "--reason",
+            "review",
+        )
+        == 0
+    )
     assert (
         json.loads((remote.state / "sample.request.json").read_text())["commit"]
         == COMMIT
@@ -365,23 +394,20 @@ def test_review_ref(remote: Remote, ref: str) -> None:
     assert "tbhbdev-agent-taint/agent.jsonl" in str(calls[0]["args"])
     assert "--version" in str(calls[1]["args"])
     git = remote.records("git")
-    if ref == COMMIT:
-        assert git == []
-    else:
-        assert git == [
-            {
-                "args": [
-                    *shlex.split(remote_commands.GIT_FLAGS)[1:],
-                    "ls-remote",
-                    "--exit-code",
-                    "--",
-                    "git@github.com:example-org/example-repo.git",
-                    ref,
-                    ref + "^{}",
-                ],
-                "stdin": "",
-            }
-        ]
+    assert git == [
+        {
+            "args": [
+                *shlex.split(remote_commands.GIT_FLAGS)[1:],
+                "ls-remote",
+                "--exit-code",
+                "--",
+                "git@github.com:example-org/example-repo.git",
+                ref,
+                ref + "^{}",
+            ],
+            "stdin": "",
+        }
+    ]
 
 
 @pytest.mark.parametrize("profile", [None, "Primary", "PRIMARY"])
@@ -396,12 +422,16 @@ def test_claude_case(remote: Remote, profile: str | None) -> None:
     )
 
 
-def test_agy_review_uses_the_review_timeout(remote: Remote) -> None:
-    remote.configure(refs=f"{COMMIT}\ttopic\n")
+def test_agy_cannot_review_a_codex_build(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    build = record_build(remote.prompt, CONFIG)
     options = ("--harness", "agy", "--model", "gemini-example")
-    assert launch(remote, *options, "--profile", "review", "--ref", "topic") == 0
-    record = json.loads((remote.state / "sample.request.json").read_text())
-    assert record["timeout"] == 900
+    assert (
+        launch(remote, *options, "--profile", "review", "--ref", f"agent/{build.name}")
+        == 1
+    )
+    assert "a codex build requires a claude review run" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -1152,8 +1182,11 @@ def test_explicit_codex_harness(remote: Remote) -> None:
 def test_review_version_mismatch_precedes_clone_read(
     remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    build = record_build(
+        remote.prompt, CONFIG, "--harness", "claude", "--reason", "build"
+    )
     remote.configure(version="tbhbdev example-other")
-    assert launch(remote, "--profile", "review", "--ref", "topic") == 1
+    assert launch(remote, "--profile", "review", "--ref", f"agent/{build.name}") == 1
     message = capsys.readouterr().err
     assert version.line() in message
     assert "tbhbdev example-other" in message

@@ -123,14 +123,43 @@ def agy_timeout(settings: Settings, harness: Harness, profile: Profile) -> int |
     return settings.agy_timeout_seconds
 
 
+def check_review(settings: Settings, review: Run, ref: str) -> None:
+    if review.request.profile is not Profile.REVIEW:
+        message = "a reviewer-role run requires --profile review"
+        raise Invalid(message)
+    if review.launched_by[0] is None:
+        message = "a review run needs the launching session's name from its tmux pane"
+        raise Invalid(message)
+    if metadata_path(review.name).exists() or any(
+        directory().glob(f"trash/*/{review.name}.json")
+    ):
+        message = "a review run needs a fresh run name"
+        raise Invalid(message)
+    repository = review.request.repo
+    build_name = launcher.review_build_name(repository, ref)
+    try:
+        build = load(settings, build_name)
+    except FileNotFoundError as exc:
+        raise Invalid(launch_rules.NO_BUILD) from exc
+    if build.request.profile is not Profile.BUILD or (
+        "/".join(repo.parts(build.request.repo)).casefold()
+        != "/".join(repo.parts(repository)).casefold()
+    ):
+        raise Invalid(launch_rules.NO_BUILD)
+    launch_rules.check(
+        review.launched_by,
+        build.launched_by,
+        build.request.harness,
+        review.request.harness,
+    )
+
+
 def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     rules.check_name(args.name)
     host = rules.select_host(settings, args.host, args.account)
     harness = Harness(args.harness)
     profile = Profile(args.profile)
-    launched_by = launcher.session()
-    if launch_rules.is_reviewer(args.role, profile):
-        launch_rules.check(launched_by[0], args.repo, *launcher.load_table())
+    reviewer = launch_rules.is_reviewer(args.role, profile)
     rules.check_model(harness, args.model, allow_non_gemini=args.allow_non_gemini)
     # A review's final commit is read remotely after all local checks pass.
     commit = "0" * 40 if profile is Profile.REVIEW else None
@@ -158,7 +187,11 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         fetch_refs=tuple(args.fetch_ref),
     )
     run = rules.check(
-        run, settings, host, ref=args.ref, exists=metadata_path(args.name).exists()
+        run,
+        settings,
+        host,
+        ref=args.ref,
+        exists=not reviewer and metadata_path(args.name).exists(),
     )
     result = Run(
         args.name,
@@ -167,7 +200,9 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         datetime.now(UTC).isoformat(),
         secrets.token_hex(16),
     )
-    result.launched_by = launched_by
+    result.launched_by = launcher.session()
+    if reviewer:
+        check_review(settings, result, args.ref or "")
     result.ignore_limits = args.ignore_limits
     return result
 
@@ -262,13 +297,10 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
     )
     # Every exec run is unsandboxed: launch_trust records taint, never refuses.
     launch_trust(settings, run, deadline)
-    ref = args.ref or "HEAD"
-    resolve = (
-        run.request.profile is Profile.REVIEW and rules.COMMIT.fullmatch(ref) is None
-    )
+    ref = launch_rules.full_ref(args.ref) if args.ref is not None else "HEAD"
     script = (
         remote.preflight(run.request.repo, ref, version.line(), run.host)
-        if resolve
+        if run.request.profile is Profile.REVIEW
         else remote.installed(run.host)
     )
     preflight = transport.shell(

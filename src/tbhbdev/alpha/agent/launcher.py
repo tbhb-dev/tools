@@ -1,18 +1,20 @@
-"""Reading the launching session's name and id from the harness."""
+"""Read the launching session and resolve a pull request to its build branch."""
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess  # nosec B404
-from pathlib import Path
 from typing import cast
 
-from tbhbdev.alpha.agent import runfiles
+import httpx
+
 from tbhbdev.alpha.agent.decisions import launcher as rules
+from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import Invalid
+from tbhbdev.alpha.gh_app import API
 
 TMUX_TIMEOUT_SECONDS = 5
+PULL_TIMEOUT_SECONDS = 10
 
 
 def session() -> tuple[str | None, str | None]:
@@ -34,55 +36,34 @@ def session() -> tuple[str | None, str | None]:
     return rules.session_name(result.stdout), session_id
 
 
-def table_path() -> Path:
-    return runfiles.state_home(Path.home()) / "tbhbdev/agent-review-launchers.json"
-
-
-Table = tuple[dict[str, frozenset[str] | None], dict[str, str]]
-
-
-def _parse(table: object) -> Table | None:
-    """The launchers and owners of a decoded table, or None when it is malformed.
-
-    Values are never coerced: a string where a list belongs, or a null owner,
-    is malformed.
-    """
-    if not isinstance(table, dict):
-        return None
-    parts = cast("dict[str, object]", table)
-    listed = parts.get("launchers", {})
-    owned = parts.get("owners", {})
-    if not isinstance(listed, dict) or not isinstance(owned, dict):
-        return None
-    launchers = dict(rules.REVIEW_LAUNCHERS)
-    for name, repos in cast("dict[str, object]", listed).items():
-        if repos is None:
-            launchers[name] = None
-        elif isinstance(repos, list) and all(
-            isinstance(repo, str) for repo in cast("list[object]", repos)
-        ):
-            launchers[name] = frozenset(cast("list[str]", repos))
-        else:
-            return None
-    owners = cast("dict[str, object]", owned)
-    if not all(isinstance(owner, str) for owner in owners.values()):
-        return None
-    return launchers, cast("dict[str, str]", owners)
-
-
-def load_table() -> Table:
-    """The built-in launchers plus the user's table, and the owner exceptions.
-
-    The table is a JSON object with optional ``launchers`` (session name to a
-    list of ``org/name`` repositories, or null for any) and ``owners``
-    (repository name to its owner session). A missing, unreadable or malformed
-    file refuses the launch, naming the path.
-    """
-    message = f"{table_path()}: invalid review-launcher table"
-    try:
-        parsed = _parse(json.loads(table_path().read_text()))
-    except (ValueError, OSError) as exc:
-        raise Invalid(message) from exc
-    if parsed is None:
+def pull_branch(repository: str, number: str) -> str:
+    """Read the head branch of a single pull request in the same repository."""
+    host, owner, name = repo.parts(repository)
+    slug = f"{owner}/{name}"
+    if host.casefold() != repo.DEFAULT_GIT_HOST:
+        message = "pull request head lookup requires the default git host"
         raise Invalid(message)
-    return parsed
+    try:
+        response = httpx.get(
+            f"{API}/repos/{slug}/pulls/{number}", timeout=PULL_TIMEOUT_SECONDS
+        )
+        response.raise_for_status()
+        head = cast("dict[str, object]", response.json()["head"])
+        branch = head["ref"]
+        source = cast("dict[str, object]", head["repo"])["full_name"]
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        message = f"cannot read the head branch of {slug}#{number}"
+        raise Invalid(message) from exc
+    if not isinstance(source, str) or source.casefold() != slug.casefold():
+        message = f"{slug}#{number} must have its head in the same repository"
+        raise Invalid(message)
+    if not isinstance(branch, str):
+        message = f"cannot read the head branch of {slug}#{number}"
+        raise Invalid(message)
+    return branch
+
+
+def review_build_name(repository: str, ref: str) -> str:
+    if pull := rules.PULL_HEAD.fullmatch(ref):
+        ref = f"refs/heads/{pull_branch(repository, pull[1])}"
+    return rules.build_name(ref)

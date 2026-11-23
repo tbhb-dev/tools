@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
-from agent_driver_example import Remote, execution_arguments, setup
+from agent_driver_example import Remote, execution_arguments, record_build, setup
 from agent_example import settings
 
 from tbhbdev.alpha import agent
@@ -35,9 +35,25 @@ def clear(host: str = "example-linux", reason: str = "Host rebuilt") -> int:
     return agent.main(["clear-taint", host, "--reason", reason], "example agent")
 
 
+def review_options(remote: Remote, harness: str = "codex") -> tuple[str, ...]:
+    options = ("--harness", "claude", "--reason", "build") if harness == "codex" else ()
+    build = record_build(remote.prompt, settings(), *options)
+    ref = f"refs/heads/agent/{build.name}"
+    remote.configure(refs=f"{'a' * 40}\t{ref}\n")
+    return "--profile", "review", "--ref", ref
+
+
 @pytest.mark.parametrize("state", ["unknown", "tainted", "clean", "broken"])
-@pytest.mark.parametrize("profile", ["build", "review"])
-@pytest.mark.parametrize("harness", ["codex", "claude", "agy"])
+@pytest.mark.parametrize(
+    ("profile", "harness"),
+    [
+        ("build", "codex"),
+        ("build", "claude"),
+        ("build", "agy"),
+        ("review", "codex"),
+        ("review", "claude"),
+    ],
+)
 @pytest.mark.parametrize("authorization", [None, "o/r#1"])
 def test_default_launch_ignores_host_taint_and_records_full_access(  # noqa: PLR0913, PLR0917 -- launch matrix
     remote: Remote,
@@ -61,9 +77,9 @@ def test_default_launch_ignores_host_taint_and_records_full_access(  # noqa: PLR
         path.parent.parent.chmod(0o700)
         path.write_text("broken\n")
         path.chmod(0o600)
-    options = ["--profile", profile, "--harness", harness]
+    options = ["--harness", harness]
     if profile == "review":
-        options += ["--ref", "a" * 40]
+        options.extend(review_options(remote, harness))
     if harness == "claude":
         options += ["--reason", "test run"]
     if harness == "agy":
@@ -102,8 +118,7 @@ def test_unknown_build_label_and_required_request(
 
 def test_clear_host_and_launch_review(remote: Remote) -> None:
     assert clear() == 0
-    remote.configure(refs="a" * 40 + "\tHEAD\n")
-    assert launch(remote, "--profile", "review", "--ref", "HEAD") == 0
+    assert launch(remote, *review_options(remote)) == 0
     assert taint_store.load("example-linux").status == "tainted"
     calls = remote.records("ssh")
     assert "--version" in str(calls[0])
@@ -228,7 +243,7 @@ def test_clearance_prints_state_and_repairs_partial_line(
     assert taint_store.load("example-linux").status == "clean"
     assert list(path.parent.glob("example-linux.jsonl.broken-*"))
     assert json.loads(path.read_text())["reason"] == "Host rebuilt again"
-    assert launch(remote, "--profile", "review", "--ref", "a" * 40) == 0
+    assert launch(remote, *review_options(remote)) == 0
 
 
 def test_clearance_between_prepare_and_append_does_not_hide_taint(
@@ -301,10 +316,7 @@ def test_empty_marker_for_run_account_allows_review(
     (remote.root / "markers" / f"{account}.jsonl").write_text("")
     other = "ops" if account == "agent" else "agent"
     (remote.root / "markers" / f"{other}.jsonl").write_text("marked\n")
-    assert (
-        launch(remote, "--account", account, "--profile", "review", "--ref", "a" * 40)
-        == 0
-    )
+    assert launch(remote, "--account", account, *review_options(remote)) == 0
     assert len(remote.records("ssh")) == 4
     assert taint_store.load("example-linux").status == "tainted"
 
@@ -329,12 +341,7 @@ def test_prepare_alone_fails_closed(
 
 
 def test_unsandboxed_review_launches_on_unknown_host(remote: Remote) -> None:
-    assert (
-        launch(
-            remote, "--profile", "review", "--ref", "a" * 40, "--unsandboxed", "o/r#1"
-        )
-        == 0
-    )
+    assert launch(remote, *review_options(remote), "--unsandboxed", "o/r#1") == 0
     wire = json.loads((remote.state / "sample.request.json").read_text())
     assert wire["unsandboxed"] is True
     assert wire["tainted_host"] is True

@@ -7,7 +7,7 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
-from agent_driver_example import execution_arguments
+from agent_driver_example import execution_arguments, record_build
 from agent_example import settings
 from agent_host_example import run_request
 from test_alpha_agent_request import BUILD
@@ -99,7 +99,10 @@ def test_eight_refs_round_trip_for_any_profile(
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     options = [part for ref in GOOD_REFS for part in ("--fetch-ref", ref)]
     if profile == "review":
-        options += ["--ref", "a" * 40]
+        build = record_build(
+            "brief.md", settings(), "--harness", "claude", "--reason", "build"
+        )
+        options += ["--ref", f"agent/{build.name}"]
     args = agent.parser("agent").parse_args(
         execution_arguments("brief.md", "--profile", profile, *options)
     )

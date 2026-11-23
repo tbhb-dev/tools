@@ -13,12 +13,16 @@ from typing import TYPE_CHECKING
 from fake_tool import write_fake
 
 from tbhbdev import version
+from tbhbdev.alpha import agent
+from tbhbdev.alpha.agent import driver
 from tbhbdev.alpha.agent.decisions import argv
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     import pytest
+
+    from tbhbdev.alpha.agent.model import Settings
 
 BODY = """\
 import base64
@@ -288,3 +292,12 @@ def execution_arguments(prompt: Path | str, *options: str) -> list[str]:
         "sample",
         str(prompt),
     ]
+
+
+def record_build(prompt: Path | str, settings: Settings, *options: str) -> driver.Run:
+    arguments = execution_arguments(prompt, *options)
+    arguments[-2] = "build-example"
+    args = agent.parser("example agent").parse_args(arguments)
+    build = driver.prepare(settings, args)
+    driver.save(build)
+    return build

@@ -49,7 +49,7 @@ def check(
         message = "--ref applies only to a review run"
         raise Invalid(message)
     if ref is None and run.profile is Profile.REVIEW:
-        message = "a review run needs --ref with the full commit hash to review"
+        message = "a review run needs --ref with an agent build branch or PR head ref"
         raise Invalid(message)
     if run.harness is Harness.CLAUDE:
         name = (

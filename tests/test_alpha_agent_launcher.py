@@ -1,25 +1,25 @@
-"""Only a session on the review-launcher list starts a reviewer-role run."""
+"""The recorded build decides who can commission a fresh review."""
 
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
+import httpx
 import pytest
-from agent_driver_example import Remote, execution_arguments, setup
+from agent_driver_example import Remote, execution_arguments, record_build, setup
 from agent_example import settings
 
 from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import driver, launcher
 from tbhbdev.alpha.agent.decisions import launcher as rules
-from tbhbdev.alpha.agent.model import Invalid, Profile
+from tbhbdev.alpha.agent.model import Harness, Invalid, Profile
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 # The conftest replaces `launcher.session`; these tests read the real one.
 REAL_SESSION = launcher.session
-REAL_LOAD_TABLE = launcher.load_table
 
 pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
 
@@ -60,141 +60,198 @@ def test_a_review_profile_run_is_reviewer_role_too(
     assert rules.is_reviewer(role, profile) is expected
 
 
-LAUNCHERS = {**rules.REVIEW_LAUNCHERS, "helper": frozenset({"org/one"})}
-OWNERS = {"two-hidden": "alpha"}
+@pytest.fixture
+def commissioner(monkeypatch: pytest.MonkeyPatch) -> None:
+    def session() -> tuple[str, str]:
+        return "example-repo", "commissioner-id"
+
+    monkeypatch.setattr(launcher, "session", session)
 
 
-@pytest.mark.parametrize(
-    ("launcher_name", "repo", "fragment"),
-    [
-        (None, "o/rules", "TMUX_PANE or its title is missing"),
-        ("tools", "o/rules", "may not launch a reviewer-role run"),
-        ("helper", "o/rules", "only for org/one"),
-        ("coord-review-1", "o/rules", None),
-        ("helper", "org/one", None),
-        ("alpha", "o/two-hidden", "owns o/two-hidden"),
-        ("coord-review-1", "o/two-hidden", None),
-    ],
-)
-def test_the_launcher_list_gates_reviewer_runs(
-    launcher_name: str | None, repo: str, fragment: str | None
+@pytest.mark.usefixtures("commissioner")
+def test_commissioner_launches_a_fresh_review_for_the_build_branch(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    launchers = {**LAUNCHERS, "alpha": None}
-    if fragment is None:
-        rules.check(launcher_name, repo, launchers, OWNERS)
-        return
-    with pytest.raises(Invalid, match=fragment) as caught:
-        rules.check(launcher_name, repo, launchers, OWNERS)
-    assert "ask coord" in str(caught.value)
-
-
-def test_the_built_in_launchers_apply_without_a_table() -> None:
-    rules.check("coord-review-2", "o/rules")
-    with pytest.raises(Invalid, match="may not launch"):
-        rules.check("tools", "o/rules")
-
-
-@pytest.mark.parametrize(
-    ("repo", "owner"), [("o/rules", "rules"), ("o/two-hidden", "alpha")]
-)
-def test_repository_owner_sessions(repo: str, owner: str) -> None:
-    assert rules.owner(repo, OWNERS) == owner
-
-
-@pytest.mark.parametrize(
-    ("launcher_name", "repo", "listed"),
-    [
-        ("tools", "o/Tools", None),
-        ("example-repo", "o/Example-Repo", None),
-        ("alpha", "o/Two-Hidden", None),
-        ("Alpha", "o/two-hidden", None),
-        ("helper", "O/Other", frozenset({"o/other"})),
-    ],
-)
-def test_names_match_without_regard_to_case(
-    launcher_name: str, repo: str, listed: frozenset[str] | None
-) -> None:
-    launchers = {launcher_name: listed}
-    refused = launcher_name.casefold() != "helper"
-    if refused:
-        with pytest.raises(Invalid, match="owns"):
-            rules.check(launcher_name, repo, launchers, {"Two-Hidden": "alpha"})
-    else:
-        rules.check(launcher_name, repo, launchers, OWNERS)
-
-
-def test_a_listed_repository_matches_in_any_case_and_others_are_refused() -> None:
-    launchers: dict[str, frozenset[str] | None] = {"helper": frozenset({"o/Other"})}
-    rules.check("helper", "O/other", launchers, OWNERS)
-    with pytest.raises(Invalid, match="only for"):
-        rules.check("helper", "o/else", launchers, OWNERS)
-
-
-def test_a_missing_table_is_refused_with_its_path() -> None:
-    with pytest.raises(Invalid, match=r"agent-review-launchers\.json: invalid"):
-        REAL_LOAD_TABLE()
-
-
-def test_the_table_adds_launchers_and_owners() -> None:
-    path = launcher.table_path()
-    path.parent.mkdir(parents=True)
-    path.write_text(
-        '{"launchers": {"helper": ["org/one"], "any": null},'
-        ' "owners": {"two-hidden": "alpha"}}'
+    build = record_build(
+        remote.prompt, settings(), "--harness", "claude", "--reason", "build"
     )
-    launchers, owners = REAL_LOAD_TABLE()
-    assert launchers["helper"] == frozenset({"org/one"})
-    assert launchers["any"] is None
-    assert launchers["coord-review-1"] is None
-    assert owners == {"two-hidden": "alpha"}
+    commit = "a" * 40
+    ref = f"refs/heads/agent/{build.name}"
+    remote.configure(refs=f"{commit}\t{ref}\n")
+    arguments = execution_arguments(
+        remote.prompt, "--profile", "review", "--ref", f"agent/{build.name}"
+    )
+    assert agent.main(arguments, "example agent") == 0
+    review = driver.load(settings(), "sample")
+    assert review.name != build.name
+    assert review.request.profile is Profile.REVIEW
+    assert review.request.harness is Harness.CODEX
+    assert review.request.commit == commit
+    assert review.launched_by == build.launched_by
+    arguments[-3] = f"agent/{review.name}"
+    arguments[-2] = "another-review"
+    assert agent.main(arguments, "example agent") == 1
+    assert rules.NO_BUILD in capsys.readouterr().err
+
+
+class RefusedReview(NamedTuple):
+    message: str
+    build_options: tuple[str, ...] = ()
+    review_options: tuple[str, ...] = ()
+    session: tuple[str | None, str | None] | None = None
+    ref: str | None = "agent/build-example"
+    name: str = "sample"
 
 
 @pytest.mark.parametrize(
-    "text",
+    "case",
     [
-        "not json",
-        "[1]",
-        '{"launchers": [1]}',
-        '{"owners": [1]}',
-        '{"launchers": {"helper": "org/repo"}}',
-        '{"launchers": {"helper": [1]}}',
-        '{"owners": {"example-repo": null}}',
-        '{"owners": {"example-repo": 3}}',
+        RefusedReview("requires a claude"),
+        RefusedReview(rules.NO_BUILD, ref="agent/missing"),
+        RefusedReview(rules.NO_BUILD, ref="agent/nested/branch"),
+        RefusedReview(rules.NO_BUILD, ref="main"),
+        RefusedReview(rules.NO_BUILD, build_options=("--repo", "org/other")),
+        RefusedReview(
+            "only the session that commissioned",
+            session=("another-session", "commissioner-id"),
+        ),
+        RefusedReview(
+            "only the session that commissioned", session=("example-repo", "another-id")
+        ),
+        RefusedReview("launching session's name", session=(None, None)),
+        RefusedReview("needs a fresh run name", name="build-example"),
+        RefusedReview(
+            "supports Codex and Claude builds",
+            build_options=("--harness", "agy", "--model", "gemini-example"),
+        ),
+        RefusedReview(
+            "requires --profile review",
+            review_options=("--profile", "build", "--role", "reviewer"),
+            ref=None,
+        ),
     ],
 )
-def test_a_malformed_table_is_refused(text: str) -> None:
-    path = launcher.table_path()
-    path.parent.mkdir(parents=True)
-    path.write_text(text)
-    with pytest.raises(Invalid, match="invalid review-launcher table"):
-        REAL_LOAD_TABLE()
-
-
-def test_a_reviewer_launch_from_an_unlisted_session_is_refused(
-    remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.usefixtures("commissioner")
+def test_invalid_review_stops_before_host_contact(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    case: RefusedReview,
 ) -> None:
-    monkeypatch.setattr(launcher, "session", lambda: ("tools", "s"))
-    arguments = execution_arguments(remote.prompt, "--role", "reviewer")
-    assert agent.main(arguments, "example agent") != 0
-    assert "ask coord" in capsys.readouterr().err
-    assert not driver.metadata_path("sample").exists()
+    record_build(remote.prompt, settings(), *case.build_options)
+    if case.session is not None:
+        identity = case.session
+
+        def caller() -> tuple[str | None, str | None]:
+            return identity
+
+        monkeypatch.setattr(launcher, "session", caller)
+    arguments = execution_arguments(
+        remote.prompt, "--profile", "review", *case.review_options
+    )
+    if case.ref is not None:
+        arguments[-2:-2] = ["--ref", case.ref]
+    arguments[-2] = case.name
+    assert agent.main(arguments, "example agent") == 1
+    assert case.message in capsys.readouterr().err
+    assert remote.records("ssh", limits=True) == []
 
 
-def test_a_review_profile_launch_without_a_session_name_is_refused(
-    remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_a_previously_used_review_name_is_refused(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(launcher, "session", lambda: (None, "s"))
-    arguments = execution_arguments(remote.prompt)
-    arguments[arguments.index("build")] = "review"
-    arguments[-2:-2] = ["--ref", "a" * 40]
-    assert agent.main(arguments, "example agent") != 0
-    assert "launching session's name" in capsys.readouterr().err
+    build = record_build(remote.prompt, settings())
+    driver.archive_metadata(build.name, "example-stamp")
+    arguments = execution_arguments(
+        remote.prompt, "--profile", "review", "--ref", f"agent/{build.name}"
+    )
+    arguments[-2] = build.name
+    assert agent.main(arguments, "example agent") == 1
+    assert "needs a fresh run name" in capsys.readouterr().err
+    assert remote.records("ssh", limits=True) == []
+
+
+def test_no_recorded_build_stops_review(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    arguments = execution_arguments(
+        remote.prompt, "--profile", "review", "--ref", "agent/build-example"
+    )
+    assert agent.main(arguments, "example agent") == 1
+    assert rules.NO_BUILD in capsys.readouterr().err
+    assert remote.records("ssh", limits=True) == []
+
+
+@pytest.mark.parametrize(
+    ("repository", "status", "head", "expected"),
+    [
+        (
+            "org/repo",
+            200,
+            {"ref": "agent/build-example", "repo": {"full_name": "ORG/Repo"}},
+            "build-example",
+        ),
+        (
+            "org/repo",
+            200,
+            {
+                "ref": "refs/heads/agent/build-example",
+                "repo": {"full_name": "ORG/Repo"},
+            },
+            rules.NO_BUILD,
+        ),
+        (
+            "org/repo",
+            200,
+            {"ref": "agent/build-example", "repo": {"full_name": "fork/repo"}},
+            "must have its head in the same repository",
+        ),
+        (
+            "org/repo",
+            200,
+            {"ref": "agent/build-example", "repo": {"full_name": None}},
+            "must have its head in the same repository",
+        ),
+        (
+            "org/repo",
+            200,
+            {"ref": None, "repo": {"full_name": "org/repo"}},
+            "cannot read the head branch",
+        ),
+        ("org/repo", 200, {}, "cannot read the head branch"),
+        ("org/repo", 404, {}, "cannot read the head branch"),
+        ("example/org/repo", 200, {}, "requires the default git host"),
+    ],
+)
+def test_read_only_pull_head_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: str,
+    status: int,
+    head: dict[str, object],
+    expected: str,
+) -> None:
+    def get(url: str, *, timeout: float) -> httpx.Response:
+        assert url == f"{launcher.API}/repos/org/repo/pulls/3"
+        assert timeout > 0
+        return httpx.Response(
+            status, json={"head": head}, request=httpx.Request("GET", url)
+        )
+
+    monkeypatch.setattr(launcher.httpx, "get", get)
+    if expected == "build-example":
+        assert launcher.review_build_name(repository, "refs/pull/3/head") == expected
+    else:
+        with pytest.raises(Invalid, match=expected):
+            launcher.review_build_name(repository, "refs/pull/3/head")
 
 
 def test_a_build_launch_without_a_session_name_records_unknown(
     remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(launcher, "session", lambda: (None, None))
+    def session() -> tuple[None, None]:
+        return None, None
+
+    monkeypatch.setattr(launcher, "session", session)
     assert agent.main(execution_arguments(remote.prompt), "example agent") == 0
     assert agent.main(["status", "sample"], "example agent") == 0
     assert "launcher=unknown" in capsys.readouterr().out
