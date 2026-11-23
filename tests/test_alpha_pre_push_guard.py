@@ -410,3 +410,132 @@ def test_a_malformed_old_object_is_a_rewrite(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert guard(monkeypatch, commit(repo), "X" * 40) == 1
+
+
+AGENT = "tbhb.dev Agent"
+AGENT_MAIL = "agent@tonyburns.net"
+
+
+def make_key(folder: Path, name: str) -> Path:
+    path = folder / name
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(path)],
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
+def agent_commit(repo: Path, key: Path | None) -> str:
+    """Commit as the agent, signed by KEY or unsigned when it is None."""
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": AGENT,
+        "GIT_AUTHOR_EMAIL": AGENT_MAIL,
+        "GIT_COMMITTER_NAME": AGENT,
+        "GIT_COMMITTER_EMAIL": AGENT_MAIL,
+    }
+    signing = (
+        ["-c", "gpg.format=ssh", "-c", f"user.signingkey={key}.pub"] if key else []
+    )
+    flag = ["-S"] if key else ["--no-gpg-sign"]
+    subprocess.run(
+        ["git", *signing, "commit", *flag, "--allow-empty", "-qm", "agent"],
+        cwd=repo,
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    return git(repo, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def agent_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The agent key, with its public half at the path the hook reads."""
+    key = make_key(tmp_path, "agent")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    target = tmp_path / "home" / pg.AGENT_KEY
+    target.parent.mkdir(parents=True)
+    target.write_text(key.with_suffix(".pub").read_text())
+    return key
+
+
+def push_agent(monkeypatch: pytest.MonkeyPatch, local: str) -> int:
+    return guard(monkeypatch, local)
+
+
+def test_an_agent_commit_signed_with_the_agent_key_passes(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, agent_key: Path
+) -> None:
+    head = agent_commit(repo, agent_key)
+    assert push_agent(monkeypatch, head) == 0
+
+
+@pytest.mark.usefixtures("agent_key")
+@pytest.mark.parametrize("signed_by", ["other", "nobody"])
+def test_an_agent_commit_without_the_agent_key_is_refused(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    signed_by: str,
+) -> None:
+    other = make_key(tmp_path, "personal") if signed_by == "other" else None
+    head = agent_commit(repo, other)
+    assert push_agent(monkeypatch, head) == 1
+    assert capsys.readouterr().err == (
+        f"refs/heads/topic: agent commit {head} is not signed with the agent key; "
+        "push refused\n"
+    )
+
+
+def test_a_bad_signature_is_refused(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, agent_key: Path
+) -> None:
+    head = agent_commit(repo, agent_key)
+    raw = git(repo, "cat-file", "commit", head)
+    forged = raw.replace("\n\nagent", "\n\ntampered", 1)
+    new = subprocess.run(
+        ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+        cwd=repo,
+        input=forged + "\n",
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert push_agent(monkeypatch, new) == 1
+
+
+@pytest.mark.usefixtures("agent_key")
+def test_a_non_tip_agent_commit_is_refused(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_commit(repo, None)
+    tip = commit(repo, "human")
+    assert push_agent(monkeypatch, tip) == 1
+
+
+def test_an_unreadable_agent_key_refuses_closed(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    head = agent_commit(repo, make_key(tmp_path, "agent"))
+    monkeypatch.setenv("HOME", str(tmp_path / "empty"))
+    assert push_agent(monkeypatch, head) == 1
+    assert capsys.readouterr().err == (
+        "refs/heads/topic: agent signing key unreadable; push refused\n"
+    )
+
+
+def test_a_signature_header_without_a_signature_is_empty() -> None:
+    assert pg.signature_fingerprint("tree x\n\nmessage") == ""
+
+
+def test_a_garbled_signature_has_no_fingerprint() -> None:
+    raw = (
+        "tree x\ngpgsig -----BEGIN SSH SIGNATURE-----\n junk\n"
+        " -----END SSH SIGNATURE-----\n\nmsg"
+    )
+    assert pg.signature_fingerprint(raw) == ""

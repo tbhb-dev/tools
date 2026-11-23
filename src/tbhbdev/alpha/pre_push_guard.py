@@ -11,9 +11,14 @@ logs ``old -> new`` on stderr for every rewrite it allows.
 from __future__ import annotations
 
 import os
+import re
+import subprocess  # nosec B404
 import sys
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from tbhbdev.alpha.identity import AGENT_EMAIL
 from tbhbdev.alpha.repo import git
 
 if TYPE_CHECKING:
@@ -31,6 +36,82 @@ SAFE = (
 )
 HOOK_ARGUMENTS = 2
 PROTECTED = frozenset({"refs/heads/main", "refs/heads/master"})
+AGENT_KEY = Path(".config/tbhbdev/agent-signing-key.pub")
+FINGERPRINT = re.compile(r"SHA256:\S+")
+RANGE_LIMIT = 1000
+
+
+def agent_fingerprint() -> str:
+    """The fingerprint of the agent's public signing key, or empty if unreadable."""
+    done = subprocess.run(  # nosec B603 B607
+        ["ssh-keygen", "-l", "-f", str(Path.home() / AGENT_KEY)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    found = FINGERPRINT.search(done.stdout)
+    return found[0] if done.returncode == 0 and found else ""
+
+
+def signature_fingerprint(raw: str) -> str:
+    """The fingerprint of a commit's SSH signature, or empty if it has none."""
+    head, _, _ = raw.partition("\n\n")
+    lines = head.split("\n")
+    start = next((i for i, line in enumerate(lines) if line.startswith("gpgsig ")), -1)
+    if start < 0:
+        return ""
+    end = start + 1
+    while end < len(lines) and lines[end].startswith(" "):
+        end += 1
+    signature = "\n".join(
+        [lines[start].removeprefix("gpgsig "), *(x[1:] for x in lines[start + 1 : end])]
+    )
+    rest = "\n".join(lines[:start] + lines[end:]) + raw[len(head) :]
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "signature"
+        path.write_text(signature + "\n")
+        done = subprocess.run(  # nosec B603 B607
+            ["ssh-keygen", "-Y", "check-novalidate", "-n", "git", "-s", str(path)],
+            input=rest,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    found = FINGERPRINT.search(done.stdout + done.stderr)
+    return found[0] if found else ""
+
+
+def agent_commit_problems(remote: str, ref: str, local: str) -> list[str]:
+    """Name each agent commit the push adds that the agent key didn't sign."""
+    code, out = git(
+        *SAFE,
+        "rev-list",
+        f"--max-count={RANGE_LIMIT}",
+        local,
+        "--not",
+        f"--remotes={remote}",
+    )
+    problems: list[str] = []
+    expected = ""
+    for sha in out.split() if code == 0 else []:
+        _, text = git(*SAFE, "cat-file", "commit", sha)
+        raw = text + "\n"  # git() strips the newline that ends a commit object
+        idents = [
+            x
+            for x in raw.partition("\n\n")[0].split("\n")
+            if x.startswith(("author ", "committer "))
+        ]
+        if not any(f"<{AGENT_EMAIL}>" in x for x in idents):
+            continue
+        expected = expected or agent_fingerprint()
+        if not expected:
+            return [f"{ref}: agent signing key unreadable; push refused"]
+        if signature_fingerprint(raw) != expected:
+            problems.append(
+                f"{ref}: agent commit {sha} is not signed with the agent key; "
+                "push refused"
+            )
+    return problems
 
 
 def fetched_tip(remote: str, ref: str) -> str:
@@ -59,6 +140,7 @@ def push_problems(remote: str, lines: Sequence[str]) -> list[str]:
             continue
         if not local.strip("0"):
             continue
+        problems.extend(agent_commit_problems(remote, ref, local))
         if old.strip("0") and git(*SAFE, "merge-base", "--is-ancestor", old, local)[0]:
             if fetched_tip(remote, ref) == old:
                 print(
