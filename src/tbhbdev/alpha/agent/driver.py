@@ -223,6 +223,9 @@ def launch_lock() -> Generator[None]:
 def refuse_live_duplicate(settings: Settings, run: Run) -> None:
     """Refuse a review of a commit that another run of the profile is reviewing.
 
+    Runs that declare a different variant, role or class are a planned pair
+    (two reviewers of one head) and don't count as duplicates.
+
     A recorded run counts as live until the host reports its exit status, so
     an unreachable host or a run with no status also refuses. A run older than
     its time limit no longer counts, because the host stops it by then. A
@@ -230,8 +233,8 @@ def refuse_live_duplicate(settings: Settings, run: Run) -> None:
     ``launch_lock`` so two launches cannot both pass this check.
 
     Raises:
-        Invalid: A recorded run has the same repo, commit and profile and no
-            exit status yet.
+        Invalid: A recorded run has the same repo, commit, profile, variant,
+            role and class and no exit status yet.
     """
     for path in sorted(directory().glob("*.json")):
         try:
@@ -242,6 +245,9 @@ def refuse_live_duplicate(settings: Settings, run: Run) -> None:
             canonical_repo(other.request.repo) == canonical_repo(run.request.repo)
             and other.request.commit == run.request.commit
             and other.request.profile is run.request.profile
+            and other.request.variant == run.request.variant
+            and other.request.role == run.request.role
+            and other.request.class_ == run.request.class_
         )
         if not same or past_time_limit(settings, other):
             continue

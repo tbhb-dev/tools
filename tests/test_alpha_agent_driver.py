@@ -545,8 +545,8 @@ def test_a_review_checks_and_saves_inside_the_launch_lock(
     assert events == ["enter", "check", "save", "exit"]
 
 
-@pytest.mark.parametrize("change", ["commit", "profile"])
-def test_another_commit_or_profile_does_not_count_as_a_duplicate(
+@pytest.mark.parametrize("change", ["commit", "profile", "variant", "role", "class_"])
+def test_another_commit_profile_or_pair_member_does_not_count_as_a_duplicate(
     remote: Remote, change: str
 ) -> None:
     second = recorded_review(remote)
@@ -555,6 +555,8 @@ def test_another_commit_or_profile_does_not_count_as_a_duplicate(
         dataclasses.replace(second.request, commit=OTHER_COMMIT)
         if change == "commit"
         else dataclasses.replace(second.request, profile=Profile.BUILD)
+        if change == "profile"
+        else dataclasses.replace(second.request, **{change: "b"})
     )
     driver.refuse_live_duplicate(CONFIG, second)
 
