@@ -35,7 +35,8 @@ _SEARCH: ContextVar[str] = ContextVar(
 def search_path(settings: Settings, os: Os) -> tuple[str, ...]:
     entries = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
     if os is Os.MACOS:
-        entries.extend(("/opt/homebrew/bin", "/usr/local/bin"))
+        entries.append("/opt/homebrew/bin")
+    entries.append("/usr/local/bin")
     return (*entries, *settings.sandbox.host_path)
 
 

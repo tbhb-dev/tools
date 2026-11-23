@@ -64,7 +64,8 @@ def test_host_path_is_fixed_and_scoped(
     monkeypatch.setenv("PATH", "/untrusted")
     entries = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
     if os is Os.MACOS:
-        entries += ("/opt/homebrew/bin", "/usr/local/bin")
+        entries += ("/opt/homebrew/bin",)
+    entries += ("/usr/local/bin",)
     assert host_tools.search_path(configured, os) == (*entries, "/example/bin")
     executable = script(tmp_path / "git", "binary")
 
