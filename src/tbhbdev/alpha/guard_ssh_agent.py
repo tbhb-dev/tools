@@ -161,14 +161,20 @@ def path_reason(data: Json) -> str | None:
     return None
 
 
+def denial() -> str | None:
+    """The deny decision as JSON for the payload on stdin, or None to allow."""
+    data = read_hook_stdin()
+    text, antigravity = command_of(data)
+    reason = verdict(text) or path_reason(data)
+    return json.dumps(decision(reason, antigravity=antigravity)) if reason else None
+
+
 def main() -> int:
     """Read the payload on stdin; print a deny decision for a blocked call."""
     try:
-        data = read_hook_stdin()
-        text, antigravity = command_of(data)
-        reason = verdict(text) or path_reason(data)
-        if reason:
-            print(json.dumps(decision(reason, antigravity=antigravity)))
+        blocked = denial()
     except Exception:  # noqa: BLE001  # fail open on any crash
         return 0
+    if blocked:
+        print(blocked)
     return 0
