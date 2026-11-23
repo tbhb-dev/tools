@@ -417,6 +417,20 @@ def test_a_first_run_past_its_time_limit_no_longer_blocks(
     driver.refuse_live_duplicate(CONFIG, second)
 
 
+def test_a_first_run_past_the_host_run_cap_no_longer_blocks(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    second = recorded_review(remote)
+    age_first_run()
+    config = dataclasses.replace(CONFIG, max_run_minutes=1)
+
+    def no_read(*_args: object, **_kwargs: object) -> NoReturn:
+        pytest.fail("past the cap, no read")
+
+    monkeypatch.setattr(transport, "read", no_read)
+    driver.refuse_live_duplicate(config, second)
+
+
 def test_a_first_run_with_no_time_limit_stays_live(remote: Remote) -> None:
     second = recorded_review(remote)
     age_first_run()
