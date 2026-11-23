@@ -1,7 +1,6 @@
 """Captured-style streams, redaction, OTLP shape and command contracts."""
 
 import json
-import sys
 from pathlib import Path
 from typing import cast
 
@@ -17,12 +16,15 @@ MARKER = "marker-secret-must-stay-local"
 @pytest.fixture
 def fake(tmp_path: Path) -> Path:
     script = tmp_path / "agy"
+    # A short /bin/sh shebang: a long interpreter path fails with ENOEXEC.
     script.write_text(
-        f"#!{sys.executable}\nfrom pathlib import Path\nimport sys\n"
-        "p=Path(__file__).parent\n"
-        "name='version' if '--version' in sys.argv else 'stream'\n"
-        "print((p/name).read_text())\n"
-        "sys.exit(int((p/'rc').read_text()))\n"
+        "#!/bin/sh\n"
+        'd=$(dirname "$0")\n'
+        "n=stream\n"
+        'for a in "$@"; do [ "$a" = --version ] && n=version; done\n'
+        'cat "$d/$n"\n'
+        "echo\n"
+        'exit "$(cat "$d/rc")"\n'
     )
     script.chmod(0o700)
     (tmp_path / "version").write_text("1.5.8")
