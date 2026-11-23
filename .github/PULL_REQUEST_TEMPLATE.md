@@ -6,9 +6,9 @@ renders a newline as a line break, so a hard-wrapped paragraph shows ragged
 short lines. The merge wraps the commit message. Word limits count
 prose only: code blocks and links are free.
 
-Agents don't use this form. They draft .github/PULL_REQUEST_DRAFT.md, which is
-gitignored. Its frontmatter carries the metadata and its H1 is the title, and
-the PR script lints the draft and opens the PR from it. The script also
+Agents write .github/PULL_REQUEST_DRAFT.md in their worktree, where Git ignores
+it. Keep the draft out of commits. Its frontmatter holds the metadata, and
+its H1 supplies the title. The PR script lints the draft and opens the PR. The script also
 appends the Generated-by and Assisted-by trailers as the body's last paragraph,
 from the branch's commits and the posting agent's identity. Never write them.
 -->

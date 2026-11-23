@@ -1,23 +1,29 @@
-"""Open the pull request for a run's pushed branch, host-side, with the run's token.
-
-The pushed commit already passed the push scan, and the draft is part of it.
-"""
+"""Open a run's pull request after scanning its worktree or committed draft."""
 
 from __future__ import annotations
 
+import os
+import stat
 import subprocess  # nosec B404
+from contextlib import ExitStack
 from typing import TYPE_CHECKING, NamedTuple, cast
 
 import httpx
 
+from tbhbdev import gitleaks_check
 from tbhbdev.alpha import pull_request
 from tbhbdev.alpha.agent import host_tools
 from tbhbdev.alpha.agent.decisions import repo
+from tbhbdev.alpha.agent.model import Invalid
+from tbhbdev.host import GITLEAKS_EXTENDS
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
-DRAFT = ".github/PULL_REQUEST_DRAFT.md"
+DRAFT_NAME = "PULL_REQUEST_DRAFT.md"
+DRAFT = f".github/{DRAFT_NAME}"
+DRAFT_LIMIT = 64 * 1024
 TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 
 
@@ -34,13 +40,21 @@ class Draft(NamedTuple):
     draft: bool
 
 
+class PublishedRange(NamedTuple):
+    """The run worktree and its pushed range in the host's Git metadata."""
+
+    workspace: Path
+    git_dir: Path
+    before: str | None
+    commit: str
+
+
 def parse_draft(text: str) -> Draft:
     """Split a draft into its title, body and frontmatter fields.
 
     Only the frontmatter parser runs here. The schema, the section and prose
     checks and the Conventional Commit check read the repository or need tools
-    that run hosts lack, so the run's own ``pr check`` and the push scan stand
-    for them.
+    that run hosts lack. The run checks those rules with ``pr check``.
 
     Raises:
         OpenRefusedError: The frontmatter is invalid or names no base, or the
@@ -64,20 +78,43 @@ def parse_draft(text: str) -> Draft:
     return Draft(title, rest.strip("\n") + "\n", base, fields.get("draft") is True)
 
 
-def read_draft(git_dir: Path, commit: str) -> Draft:
-    """The draft as the pushed commit holds it.
+def read_worktree_draft(workspace: Path) -> bytes | None:
+    """Read an owned draft through pinned, non-symlink directories."""
+    try:
+        with ExitStack() as stack:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            root = os.open(workspace, flags)
+            stack.callback(os.close, root)
+            try:
+                directory = os.open(".github", flags, dir_fd=root)
+                stack.callback(os.close, directory)
+                fd = os.open(
+                    DRAFT_NAME,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=directory,
+                )
+            except FileNotFoundError:
+                return None
+            with os.fdopen(fd, "rb") as incoming:
+                metadata = os.fstat(incoming.fileno())
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                    message = "the worktree PR draft must be an owned regular file"
+                    raise OpenRefusedError(message)
+                data = incoming.read(DRAFT_LIMIT + 1)
+                if len(data) > DRAFT_LIMIT:
+                    message = "the worktree PR draft exceeds 64 KiB"
+                    raise OpenRefusedError(message)
+                return data
+    except OSError as exc:
+        message = "cannot read the worktree PR draft safely"
+        raise OpenRefusedError(message) from exc
 
-    ``git_dir`` is the host-owned publication repository, never the run clone,
-    so git loads no configuration the sandbox wrote.
-    """
-    done = subprocess.run(  # nosec B603
-        [
-            host_tools.resolve("git"),
-            "--git-dir",
-            str(git_dir),
-            "show",
-            f"{commit}:{DRAFT}",
-        ],
+
+def publication_git(git_dir: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    """Read Git objects using the host's protected publication repository."""
+    return subprocess.run(  # nosec B603
+        [host_tools.resolve("git"), "--git-dir", str(git_dir), *args],
+        cwd=git_dir,
         env={
             "HOME": str(git_dir),
             "PATH": host_tools.search(),
@@ -85,17 +122,78 @@ def read_draft(git_dir: Path, commit: str) -> Draft:
             "GIT_CONFIG_GLOBAL": "/dev/null",
         },
         capture_output=True,
-        text=True,
-        check=False,
+        check=False,  # pragma: no mutate -- Explicit subprocess default.
     )
-    if done.returncode:
-        message = f"the pushed commit has no {DRAFT}"
+
+
+def read_draft(published: PublishedRange) -> str:
+    """Prefer the worktree draft and fall back when its path is absent."""
+    data = read_worktree_draft(published.workspace)
+    if data is None:
+        done = publication_git(
+            published.git_dir, "cat-file", "blob", f"{published.commit}:{DRAFT}"
+        )
+        if done.returncode:
+            message = f"the worktree and pushed commit have no {DRAFT}"
+            raise OpenRefusedError(message)
+        data = done.stdout
+    try:
+        return data.decode()
+    except UnicodeError as exc:
+        message = "the PR draft must use UTF-8"
+        raise OpenRefusedError(message) from exc
+
+
+def check_range(published: PublishedRange, write: Callable[[str, str], None]) -> bytes:
+    """Warn about draft additions and load the pre-run secret scan rules."""
+    before = published.before
+    if before is None:
+        message = "cannot check the PR draft without a pre-run commit"
         raise OpenRefusedError(message)
-    return parse_draft(done.stdout)
+    flags = "--no-ext-diff --no-textconv --no-renames --diff-filter=A --name-only"
+    changed = publication_git(
+        published.git_dir, "diff", *flags.split(), before, published.commit, "--", DRAFT
+    )
+    if changed.returncode:
+        message = "cannot check whether the pushed range adds the PR draft"
+        raise OpenRefusedError(message)
+    if DRAFT.encode() in changed.stdout.splitlines():
+        write("log", "draft committed: it will merge into main; remove it\n")
+    rules = publication_git(
+        published.git_dir, "cat-file", "blob", f"{before}:{GITLEAKS_EXTENDS}"
+    )
+    if rules.returncode:
+        message = (
+            f"cannot scan the PR draft without {GITLEAKS_EXTENDS} in the pre-run commit"
+        )
+        raise OpenRefusedError(message)
+    return rules.stdout
+
+
+def scan_draft(text: str, git_dir: Path, rules: bytes) -> None:
+    """Scan the draft with the host's private rules and the pre-run Git policy."""
+    (git_dir / GITLEAKS_EXTENDS).write_bytes(rules)
+    try:
+        gitleaks_check.scan_text(
+            text,
+            "PR draft",
+            root=git_dir,
+            gitleaks=host_tools.resolve("gitleaks"),
+            visibility="",
+        )
+    except (gitleaks_check.ScanRefused, Invalid, UnicodeError) as exc:
+        message = (
+            "PR draft secret scan refused; check the draft and scanner configuration"
+        )
+        raise OpenRefusedError(message) from exc
 
 
 def open_pull_request(
-    git_dir: Path, commit: str, repository: str, branch: str, token: str
+    published: PublishedRange,
+    repository: str,
+    branch: str,
+    token: str,
+    write: Callable[[str, str], None],
 ) -> int:
     """Create the PR and return its number.
 
@@ -103,7 +201,10 @@ def open_pull_request(
         OpenRefusedError: The draft is missing or malformed, or GitHub
             refuses or cannot be reached.
     """
-    draft = read_draft(git_dir, commit)
+    rules = check_range(published, write)
+    text = read_draft(published)
+    scan_draft(text, published.git_dir, rules)
+    draft = parse_draft(text.replace("\r\n", "\n").replace("\r", "\n"))
     _, owner, name = repo.parts(repository)
     try:
         response = httpx.post(
@@ -121,7 +222,9 @@ def open_pull_request(
             },
             timeout=TIMEOUT,
         )
-        number = cast("dict[str, int]", response.json()).get("number")
+        result = response.json()
+        fields = cast("dict[str, int]", result)  # pragma: no mutate -- Cast only.
+        number = fields.get("number")
     except (httpx.HTTPError, ValueError) as exc:
         message = f"the PR request failed: {type(exc).__name__}"
         raise OpenRefusedError(message) from exc
