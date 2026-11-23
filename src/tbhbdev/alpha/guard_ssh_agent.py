@@ -79,30 +79,37 @@ def names_ssh_dir(word: str) -> bool:
     return False
 
 
+def command_reason(prefix: list[str], words: list[str]) -> str | None:
+    """The deny reason for one simple command, or None to allow it."""
+    if any(SOCK.match(w) for w in [*prefix, *words]):
+        return REASON_SOCK
+    if any(names_ssh_dir(w) for w in [*prefix, *words]):
+        return REASON_DIR
+    program = program_of(words)
+    if program == "ssh-add":
+        return REASON_ADD
+    over_ssh = program in SSH_PROGRAMS or (program == "rsync" and rsync_uses_ssh(words))
+    if over_ssh and not avoids_agent(words):
+        return REASON_AGENT
+    return None
+
+
 def verdict(text: str) -> str | None:
     """The deny reason for a command, or None to allow it."""
     for prefix, words in simple_commands(text):
-        if any(SOCK.match(w) for w in [*prefix, *words]):
-            return REASON_SOCK
-        if any(names_ssh_dir(w) for w in [*prefix, *words]):
-            return REASON_DIR
-        program = program_of(words)
-        if program == "ssh-add":
-            return REASON_ADD
-        if program in SSH_PROGRAMS and not avoids_agent(words):
-            return REASON_AGENT
-        if program == "rsync" and rsync_uses_ssh(words) and not avoids_agent(words):
-            return REASON_AGENT
+        reason = command_reason(prefix, words)
+        if reason:
+            return reason
     return None
 
 
 def main() -> int:
     """Read the payload on stdin; print a deny decision for a blocked call."""
     try:
-        text, antigravity = command_of(read_hook_stdin())
-        reason = verdict(text)
+        payload = command_of(read_hook_stdin())
+        reason = verdict(payload[0])
         if reason:
-            print(json.dumps(decision(reason, antigravity=antigravity)))
+            print(json.dumps(decision(reason, antigravity=payload[1])))
     except Exception:  # noqa: BLE001  # fail open on any crash
         return 0
     return 0
