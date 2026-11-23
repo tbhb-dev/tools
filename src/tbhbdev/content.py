@@ -234,14 +234,23 @@ class GhClient:
         return response
 
 
-def _scan(text: str, what: str) -> None:
+def _visibility(api: Client, repo: str) -> str:
+    """Read the repository's visibility as GitHub reports it, in upper case.
+
+    Only ``PRIVATE`` lets the scan skip the name rules, so a missing value
+    counts as public.
+    """
+    return str(api.rest("GET", f"/repos/{repo}").get("visibility", "")).upper()
+
+
+def _scan(text: str, what: str, visibility: str = "") -> None:
     try:
         secret_scan.scan(
             text,
             what,
             root=root(),
             gitleaks=find_tool("gitleaks", unwrapped=True),
-            visibility="",
+            visibility=visibility,
         )
     except SystemExit as exc:
         raise Refused(str(exc)) from None
@@ -269,9 +278,9 @@ def _audit(
         stream.write(json.dumps(entry) + "\n")
 
 
-def scan_text(text: str, what: str) -> None:
+def scan_text(text: str, what: str, visibility: str = "") -> None:
     """Scan a record before the caller commits it."""
-    _scan(text, what)
+    _scan(text, what, visibility)
 
 
 def render(template_path: Path, data: Mapping[str, str]) -> str:
@@ -291,9 +300,10 @@ def create_issue(  # noqa: PLR0913 -- Public plugin interface.
     caller: str = "tbhbdev",
     dry_run: bool = False,
 ) -> IssueRef | Json:
-    _scan(title, "issue title")
-    _scan(body, "issue body")
     api = client if client is not None else GhClient()
+    visibility = _visibility(api, repo)
+    _scan(title, "issue title", visibility)
+    _scan(body, "issue body", visibility)
     owner, name = repo.split("/")
     payload: Json = {
         "title": title,
@@ -324,8 +334,8 @@ def add_comment(
     caller: str = "tbhbdev",
     dry_run: bool = False,
 ) -> Json | None:
-    _scan(text, "issue comment")
     api = client if client is not None else GhClient()
+    _scan(text, "issue comment", _visibility(api, f"{ref.owner}/{ref.repo}"))
     payload: Json = {"body": text}
     if dry_run:
         return payload
