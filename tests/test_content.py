@@ -10,6 +10,7 @@ from tbhbdev import content as cw
 
 type Call = tuple[str, str, cw.Json | None]
 REF = cw.IssueRef("example", "demo", 7)
+VISIBILITIES: list[str] = []
 ITEM: cw.Json = {"data": {"addProjectV2ItemById": {"item": {"id": "ITEM"}}}}
 
 
@@ -17,8 +18,13 @@ ITEM: cw.Json = {"data": {"addProjectV2ItemById": {"item": {"id": "ITEM"}}}}
 class RecordingClient:
     calls: list[Call] = field(default_factory=list)
     body: str | None = None
+    visibility: str = "private"
+    reads: list[str] = field(default_factory=list)
 
     def rest(self, method: str, path: str, payload: cw.Json | None = None) -> cw.Json:
+        if (method, path) == ("GET", "/repos/example/demo"):
+            self.reads.append(path)
+            return {"visibility": self.visibility}
         self.calls.append((method, path, payload))
         return {"number": 7, "id": 123, "node_id": "ISSUE", "body": self.body}
 
@@ -30,11 +36,13 @@ class RecordingClient:
 @pytest.fixture(autouse=True)
 def scans(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[tuple[str, str]]:
     seen: list[tuple[str, str]] = []
+    VISIBILITIES.clear()
 
     def scan(
         text: str, what: str, *, root: Path, gitleaks: str, visibility: str
     ) -> None:
-        assert (root, gitleaks, visibility) == (tmp_path, "gitleaks", "")
+        assert (root, gitleaks) == (tmp_path, "gitleaks")
+        VISIBILITIES.append(visibility)
         seen.append((text, what))
         if text == "refuse":
             message = "rule test-rule on line 1"
@@ -256,11 +264,12 @@ def test_default_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     cw.close_issue(REF, "completed")
     cw.link_sub_issue(REF, REF)
     cw.add_to_project(REF, "PROJECT")
-    assert calls[0] == (
+    assert calls[0] == (["gh", "api", "--method", "GET", "/repos/example/demo"], None)
+    assert calls[1] == (
         ["gh", "api", "--method", "POST", "/repos/example/demo/issues", "--input", "-"],
         {"title": "Title", "body": "Body", "type": "Task", "labels": []},
     )
-    assert calls[2] == (["gh", "api", "--method", "GET", REF.path], None)
+    assert (["gh", "api", "--method", "GET", REF.path], None) in calls
     assert calls[-1][1] == {
         "query": cw.ADD_ITEM,
         "variables": {"project": "PROJECT", "content": "ISSUE"},
@@ -426,3 +435,15 @@ def test_dry_run_refused(
         write(client, dry_run)
     assert client.calls == []
     assert not (tmp_path / "audit.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    ("reported", "passed"),
+    [("private", "PRIVATE"), ("public", "PUBLIC"), ("internal", "INTERNAL"), ("", "")],
+)
+def test_writes_scan_with_the_repository_visibility(reported: str, passed: str) -> None:
+    client = RecordingClient(visibility=reported)
+    cw.create_issue("example/demo", "Title", "Body", issue_type="Task", client=client)
+    cw.add_comment(REF, "Comment", client=client)
+    assert client.reads == ["/repos/example/demo"] * 2
+    assert [passed] * 3 == VISIBILITIES
