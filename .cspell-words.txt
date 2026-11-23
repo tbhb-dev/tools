@@ -335,3 +335,4 @@ mdit
 softbreak
 tasklists
 unlaunched
+MemAvailable

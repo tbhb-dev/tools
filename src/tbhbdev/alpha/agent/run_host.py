@@ -24,6 +24,7 @@ from pathlib import Path
 
 from tbhbdev import userconfig
 from tbhbdev.alpha.agent import (
+    admission,
     build_info,
     codex_install,
     credentials,
@@ -814,6 +815,10 @@ def execute(
     if not run.request.unsandboxed:
         os.environ["PATH"] = host_tools.search()
     with host_tools.configured(run.settings, run.host.os), ExitStack() as stack:
+        if not preflight_only:
+            stack.enter_context(
+                admission.reserve(admission.ROOT, run.host, run.request.profile)
+            )
         return _execute(run, text, stack, push_token, preflight_only=preflight_only)
 
 
