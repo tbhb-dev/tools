@@ -2,9 +2,12 @@
 description: Agent isolation constraints, coordination, and cleanup.
 generated:
   - role: generated
-    harness: codex:0.166.0
-    model: openai:gpt-6
-    at: "2026-11-22T00:35:22Z"
+    harness: codex:0.171.0
+    model: openai:gpt-6.2-sol
+    effort: high
+    surface: exec
+    session: sha-256-64:ec35558d6fb1a9a1
+    at: "2026-11-23T08:19:38Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -54,6 +57,16 @@ The coordinator stores metadata under `$XDG_STATE_HOME/tbhbdev/agent-runs/` on t
 The tmux socket is `-S <sockets_dir>/agents`. The driver creates the configured directory with mode 0700 and refuses a symlink, another owner, or any other mode. Sandbox policies deny reads there. Whether each sandbox blocks a Unix socket connection needs the shadow test.
 
 `wait` prefers the final answer and returns the run's exit status. Its poll interval defaults to 30 seconds (`TBHB_AGENT_WAIT_POLL`). Consecutive connection failures stop after 240 seconds (`TBHB_AGENT_WAIT_UNREACHABLE`) with exit status 75. Exit codes 1 and 75 overlap with harness exit codes. Read the first result line to distinguish an unknown or unreachable run from a harness result. Agent text follows that line.
+
+After a successful build harness run, run-host compares commits reachable from all Git refs and detached `HEAD` with the starting history. It uses these exit statuses for publication.
+
+| Exit status | Result |
+| --- | --- |
+| 0 | The run contains no new commits, or run-host pushes the branch and opens the pull request. |
+| 4 | Run-host skips the push or Git fails to push. The log starts the reason line with `push skipped:` or `push failed:`. |
+| 5 | Run-host pushes the branch and can't open the pull request. The log starts the reason line with `pr not opened:`. |
+
+If the harness fails, run-host keeps its exit status. `tbhbdev alpha agent status NAME` shows the last publication reason next to the return code when the run ends with a nonzero status and the log contains a reason.
 
 Each claim writes a random run ID to the local metadata and the remote `<name>.owner` file before extracting inputs. Every remote command reads the ID from the first line of its stdin and compares it with `<name>.owner`, so the ID never appears in an ssh argument list or a host audit log. The tmux start passes run-host `--owned`, and run-host checks `<name>.owner` first. The file must be a regular file, never a symlink. Its mode must be 0600 and its owner the running user. Its content must be the ID followed by a newline. An empty ID, a missing file, a directory, a named pipe or any other content refuses the start with exit status 1 and leaves the earlier run's files untouched. Run-host writes its log and return code for a failed start only while it holds `<name>.run.lock`. A refusal before that point leaves every record unchanged. Later commands check that ID before they act. A mismatch or missing owner archives local metadata and reports `not owner`. After a transfer error, the driver retains metadata only when a remote owner check succeeds. The driver sends the raw brief and starts run-host with the configured `--host`. Every tmux call uses `-f /dev/null`, and session creation passes an absolute executable with separate arguments.
 

@@ -502,12 +502,16 @@ def status(settings: Settings, run: Run) -> int:
         settings,
         run.host,
         (run.name, run.owner),
+        reason=True,
     )
+    rc = rules.state(reading.rc, session=reading.session)
+    if reading.rc and reading.text:
+        rc += f" ({reading.text.rstrip()})"
     print(
         render.status(
             run.name,
             phase=reading.phase,
-            rc=rules.state(reading.rc, session=reading.session),
+            rc=rc,
             target=(
                 run.host.name,
                 run.host.account,

@@ -86,6 +86,16 @@ EXTENDS_PATH = re.compile(r"^(\s*path\s*=\s*)(?:\"[^\"]*\"|'[^']*')", re.MULTILI
 EXTEND_TABLE = re.compile(r"^\s*\[extend\]", re.MULTILINE)
 
 
+class FindingRefusal(SystemExit):
+    """A scan refusal with only the rule IDs and line numbers."""
+
+    def __init__(self, what: str, found: list[tuple[int, str]]) -> None:
+        self.locations = "; ".join(
+            f"rule {rule} on line {line}" for line, rule in found
+        )
+        super().__init__(f"refusing {what}: gitleaks finds a secret: {self.locations}")
+
+
 def with_base(committed: str) -> str:
     """The committed config with gitleaks' default rules as its base.
 
@@ -162,9 +172,7 @@ def run_gitleaks(
     )
     found = findings(done.stdout)
     if found:
-        where = "; ".join(f"rule {rule} on line {line}" for line, rule in found)
-        message = f"refusing {what}: gitleaks finds a secret: {where}"
-        raise SystemExit(message)
+        raise FindingRefusal(what, found)
     if done.returncode != 0 or found is None:
         output = " ".join(done.stderr.split())
         message = (

@@ -1303,7 +1303,7 @@ def test_push_token_is_none_for_a_review_without_minting(
     assert credentials.push_token(request, pull_requests_settings()) is None
 
 
-def test_push_token_is_none_when_the_app_refuses_the_permissions(
+def test_push_token_reports_when_the_app_refuses_the_permissions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(VALUES, "example/app/pem", "example-pem")
@@ -1313,4 +1313,6 @@ def test_push_token_is_none_when_the_app_refuses_the_permissions(
         raise gh_app.GhAppError(message)
 
     monkeypatch.setattr(gh_app, "mint_token", refuse)
-    assert credentials.push_token(run_request(), pull_requests_settings()) is None
+    assert credentials.push_token(
+        run_request(), pull_requests_settings()
+    ) == credentials.PushTokenFailure("GhAppError")

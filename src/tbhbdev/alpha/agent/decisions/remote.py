@@ -223,7 +223,9 @@ def start(name: str, sockets_dir: str, host: Host) -> tuple[str, ...]:
     )
 
 
-def read(name: str, sockets_dir: str, *, answer: bool = False) -> str:
+def read(
+    name: str, sockets_dir: str, *, answer: bool = False, reason: bool = False
+) -> str:
     header = (
         owned(name)
         + socket_root(sockets_dir)
@@ -245,6 +247,16 @@ printf '%s\\n' "$present"
 safe_file {output}
 if test -f {final}; then tail -c 65536 {final}
 elif test -f {output}; then tail -c 65536 {output}; fi
+"""
+        )
+    if reason:
+        return (
+            header
+            + f"""safe_file {log}
+if test -f {log}; then
+    awk '/^(push skipped:|push failed:|pr not opened:)/ {{ last = $0 }}
+         END {{ if (last != "") print substr(last, 1, 4096) }}' {log}
+fi
 """
         )
     return header + f"safe_file {log}\nif test -f {log}; then head -c 65536 {log}; fi\n"

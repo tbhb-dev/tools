@@ -527,7 +527,12 @@ def test_wait_unknown(remote: Remote, capsys: pytest.CaptureFixture[str]) -> Non
 
 @pytest.mark.parametrize(
     ("session", "rc", "expected"),
-    [(True, None, "running"), (False, "0\n", "0"), (False, None, "unknown")],
+    [
+        (True, None, "running"),
+        (False, "0\n", "0"),
+        (False, "7\n", "7"),
+        (False, None, "unknown"),
+    ],
 )
 def test_status(
     remote: Remote,
@@ -552,6 +557,28 @@ def test_status(
         f"sample: phase=running rc={expected} host=example-linux "
         f"account=agent started={started} launcher=coord-review-1\n"
     )
+
+
+@pytest.mark.parametrize(
+    ("rc", "reason"),
+    [(4, "push failed: rejected"), (5, "pr not opened: no draft")],
+)
+def test_status_shows_the_last_publication_reason(
+    remote: Remote, capsys: pytest.CaptureFixture[str], rc: int, reason: str
+) -> None:
+    assert launch(remote) == 0
+    capsys.readouterr()
+    remote.file(".phase", "finished\n")
+    remote.file(".rc", f"{rc}\n")
+    remote.file(
+        ".log",
+        "ordinary log text\n" * 4200 + f"push skipped: earlier\n{reason}\ncleanup\n",
+    )
+    assert command("status") == 0
+    output = capsys.readouterr().out
+    assert output.startswith(f"sample: phase=finished rc={rc} ({reason}) ")
+    assert "earlier" not in output
+    assert "cleanup" not in output
 
 
 def test_kill_host_rc(remote: Remote) -> None:
