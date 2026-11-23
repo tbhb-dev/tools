@@ -16,10 +16,11 @@ ITEM: cw.Json = {"data": {"addProjectV2ItemById": {"item": {"id": "ITEM"}}}}
 @dataclass
 class RecordingClient:
     calls: list[Call] = field(default_factory=list)
+    body: str | None = None
 
     def rest(self, method: str, path: str, payload: cw.Json | None = None) -> cw.Json:
         self.calls.append((method, path, payload))
-        return {"number": 7, "id": 123, "node_id": "ISSUE"}
+        return {"number": 7, "id": 123, "node_id": "ISSUE", "body": self.body}
 
     def graphql(self, query: str, variables: cw.Json) -> cw.Json:
         self.calls.append(("graphql", query, variables))
@@ -153,9 +154,9 @@ def test_add_comment(scans: list[tuple[str, str]], tmp_path: Path) -> None:
 def test_close_issue(
     reason: str, wire: str, comment: str | None, tmp_path: Path
 ) -> None:
-    client = RecordingClient()
+    client = RecordingClient(body="## Acceptance criteria\n- [x] Show the preview")
     cw.close_issue(REF, reason, comment=comment, client=client)
-    expected: list[Call] = []
+    expected: list[Call] = [("GET", REF.path, None)]
     if comment is not None:
         expected.append(("POST", f"{REF.path}/comments", {"body": comment}))
     assert client.calls == [
@@ -163,6 +164,30 @@ def test_close_issue(
         ("PATCH", REF.path, {"state": "closed", "state_reason": wire}),
     ]
     assert audit(tmp_path)[-1]["verb"] == "close_issue"
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    ("body", "comment", "message"),
+    [
+        (
+            "## Acceptance\n- [x] Open report\n## Acceptance\n- [ ] Show preview",
+            "Done",
+            r"blocks\.acceptance-2: Acceptance boxes are unchecked",
+        ),
+        ("## Verification\n- [ ] Show preview", "refuse", "rule test-rule on line 1"),
+    ],
+)
+def test_close_refused(
+    body: str, comment: str, message: str, dry_run: bool, tmp_path: Path
+) -> None:
+    client = RecordingClient(body=body)
+    with pytest.raises(cw.Refused, match=message):
+        cw.close_issue(
+            REF, "completed", comment=comment, client=client, dry_run=dry_run
+        )
+    assert client.calls == [("GET", REF.path, None)]
+    assert not (tmp_path / "audit.jsonl").exists()
 
 
 def test_link_sub_issue(tmp_path: Path) -> None:
@@ -184,7 +209,6 @@ WRITES: list[Callable[[cw.Client], object]] = [
         "example/demo", "title", "refuse", issue_type="Task", client=c
     ),
     lambda c: cw.add_comment(REF, "refuse", client=c),
-    lambda c: cw.close_issue(REF, "completed", comment="refuse", client=c),
 ]
 
 
@@ -235,7 +259,7 @@ def test_default_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
         ["gh", "api", "--method", "POST", "/repos/example/demo/issues", "--input", "-"],
         {"title": "Title", "body": "Body", "type": "Task", "labels": []},
     )
-    assert calls[3] == (["gh", "api", "--method", "GET", REF.path], None)
+    assert calls[2] == (["gh", "api", "--method", "GET", REF.path], None)
     assert calls[-1][1] == {
         "query": cw.ADD_ITEM,
         "variables": {"project": "PROJECT", "content": "ISSUE"},
@@ -323,7 +347,7 @@ def test_dry_run_text(comment: str | None, tmp_path: Path) -> None:
         )
         == expected
     )
-    assert client.calls == []
+    assert client.calls == [("GET", REF.path, None)]
     assert not (tmp_path / "audit.jsonl").exists()
 
 
@@ -386,9 +410,6 @@ DRY_WRITES: list[Callable[[cw.Client, bool], object]] = [
         "example/demo", "Title", "refuse", issue_type="Task", client=c, dry_run=dry
     ),
     lambda c, dry: cw.add_comment(REF, "refuse", client=c, dry_run=dry),
-    lambda c, dry: cw.close_issue(
-        REF, "completed", comment="refuse", client=c, dry_run=dry
-    ),
 ]
 
 

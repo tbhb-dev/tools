@@ -208,8 +208,9 @@ pytest_test(
     ],
     coverage = ["src/tbhbdev"],
     # The alpha pr and merge tests run cog, and the private gitleaks config's
-    # tests run the pinned gitleaks.
+    # tests run the pinned gitleaks. Content tests run the pinned CUE release.
     path_tools = [
+        "@cue_test_binary//:cue",
         "@tbhb_rules_cog//:cog",
         "@tbhb_rules_gitleaks//:gitleaks",
     ],

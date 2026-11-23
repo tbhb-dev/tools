@@ -28,6 +28,14 @@ git_override(
 python = use_extension("@tbhb_rules_python//:extensions.bzl", "python", dev_dependency = True)
 python.project()
 
+# The CUE integration tests use the runtime's release pin.
+cue_test_tool = use_repo_rule("//:cue_test_tool.bzl", "cue_test_tool")
+
+cue_test_tool(
+    name = "cue_test_binary",
+    pin = "//:src/tbhbdev/cue-pin.json",
+)
+
 # The tool binaries @tbhb_rules pins, so the bazel_env shims and CI name
 # the same repositories and each tool keeps one pin.
 tools = use_extension("@tbhb_rules//pins:extensions.bzl", "tools")

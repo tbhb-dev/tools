@@ -9,13 +9,22 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
+from tbhbdev import content_vet
 from tbhbdev.alpha import secret_scan
 from tbhbdev.alpha.pull_request import find_tool, root
+from tbhbdev.content_model import normalize
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 type Json = dict[str, object]
+
+CheckResult = content_vet.CheckResult
+Finding = content_vet.Finding
+check = content_vet.check
+check_close = content_vet.check_close
+format_refusal = content_vet.format_refusal
+guide = content_vet.guide
 
 
 @dataclass(frozen=True)
@@ -30,7 +39,7 @@ class IssueRef:
 
 
 class Refused(RuntimeError):  # noqa: N818 -- Required public name.
-    """A scan refusal, with the scanner's redacted diagnostic."""
+    """A content refusal with a diagnostic."""
 
 
 class Client(Protocol):
@@ -176,6 +185,11 @@ def close_issue(  # noqa: PLR0913 -- Public plugin interface.
         "duplicate": "duplicate",
     }[reason]
     api = client if client is not None else GhClient()
+    body = api.rest("GET", ref.path).get("body") or ""
+    draft = normalize(f"# Issue\n\n{body}", object="issue", variant="", metadata={})
+    if refusals := check_close(draft):
+        message = "\n".join(format_refusal(refusal) for refusal in refusals)
+        raise Refused(message)
     payload: Json = {"state": "closed", "state_reason": state_reason}
     if comment is not None:
         preview = add_comment(ref, comment, client=api, caller=caller, dry_run=dry_run)
