@@ -152,7 +152,7 @@ def test_pr_check(
         argparse.Namespace(command="check", draft="draft.md"), {}
     ) == bool(problem)
     lint.assert_called_once_with("draft.md")
-    counter.assert_called_once_with("origin/main", "HEAD")
+    counter.assert_called_once_with("refs/remotes/origin/main", "HEAD")
     captured = capsys.readouterr()
     assert captured.err == ""
     assert captured.out.startswith(

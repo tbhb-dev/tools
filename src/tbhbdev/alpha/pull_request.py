@@ -910,9 +910,20 @@ def posting_value(env: Mapping[str, str]) -> str | None:
     return agent_identity.format_value(committer.ident.attrs())
 
 
-def base_of(meta: Mapping[str, object]) -> str:
-    """The PR's base branch: the frontmatter's, or the schema's default."""
-    return str(meta.get("base", schema_default(load_schema(), "base")))
+def default_base() -> str:
+    """The repository's default branch from origin/HEAD, else the schema's."""
+    code, out = git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    name = out.removeprefix("origin/")
+    if code == 0 and name:
+        return name
+    return str(schema_default(load_schema(), "base"))
+
+
+def base_of(meta: Mapping[str, object], default: str | None = None) -> str:
+    """The PR's base branch: the frontmatter's, else DEFAULT or the repository's."""
+    if "base" in meta:
+        return str(meta["base"])
+    return default if default is not None else default_base()
 
 
 def gh_data(done: subprocess.CompletedProcess[str]) -> object:
@@ -1600,8 +1611,15 @@ def check_size(args: argparse.Namespace, checked: Checked) -> None:
     """
     if args.command not in ("check", "create"):
         return
+    base = f"refs/remotes/origin/{base_of(checked.meta)}"
+    code, _ = git("rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
+    if code != 0:
+        why = f"base branch {base} not found (is it fetched?)"
+        checked.problems.append((1, why))
+        print(f"{args.draft}:1: {why}")
+        return
     try:
-        counts = size_gate.size_counts(f"origin/{base_of(checked.meta)}", "HEAD")
+        counts = size_gate.size_counts(base, "HEAD")
     except size_gate.SizeCountError as exc:
         why = f"size count unavailable ({size_gate.COUNTER[2]}): {exc}"
         if args.command == "create":

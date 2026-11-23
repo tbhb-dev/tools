@@ -206,6 +206,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     made.git("config", "commit.gpgsign", "false")
     made.git("remote", "add", "origin", ORIGIN)
     made.commit("init")
+    made.git("update-ref", "refs/remotes/origin/main", "HEAD")
     made.fake("cog")
     made.fake("vale", stdout="{}")
     made.fake("cspell")
@@ -1515,6 +1516,7 @@ def test_create_runs_gh_with_the_frontmatter(
         "reviewers: [tbhb, org/team]\nassignees: ['@me']\nmilestone: v1\n---\n"
     )
     world.git("branch", "dev")
+    world.git("update-ref", "refs/remotes/origin/dev", "HEAD")
     write_draft(world, meta + BASE)
     assert run_main("create") == 0
     _, call = world.calls("gh")
@@ -1610,9 +1612,52 @@ def test_size_counts_against_the_drafts_base(
     counted = Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None))
     monkeypatch.setattr(size_gate, "size_counts", counted)
     monkeypatch.setattr(pr, "branch_trailers", Mock(return_value=[]))
+    world.git("update-ref", f"refs/remotes/origin/{base}", "HEAD")
     write_draft(world, front + BASE)
     run_main(command)
-    counted.assert_called_once_with(f"origin/{base}", "HEAD")
+    counted.assert_called_once_with(f"refs/remotes/origin/{base}", "HEAD")
+
+
+@pytest.mark.parametrize("command", ["check", "create"])
+def test_a_missing_base_fails_the_size_check(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    counted = Mock()
+    monkeypatch.setattr(size_gate, "size_counts", counted)
+    write_draft(world, "---\nbase: nope\n---\n" + BASE)
+    assert run_main(command) == 1
+    counted.assert_not_called()
+    assert (
+        ":1: base branch refs/remotes/origin/nope not found (is it fetched?)"
+        in capsys.readouterr().out
+    )
+
+
+def test_a_tag_does_not_stand_in_for_the_base(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counted = Mock()
+    monkeypatch.setattr(size_gate, "size_counts", counted)
+    world.git("tag", "origin/dev")
+    write_draft(world, "---\nbase: dev\n---\n" + BASE)
+    assert run_main("check") == 1
+    counted.assert_not_called()
+
+
+def test_a_draft_without_a_base_takes_the_default_branch(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counted = Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None))
+    monkeypatch.setattr(size_gate, "size_counts", counted)
+    monkeypatch.setattr(pr, "branch_trailers", Mock(return_value=[]))
+    world.git("update-ref", "refs/remotes/origin/trunk", "HEAD")
+    world.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+    write_draft(world, BASE)
+    run_main("check")
+    counted.assert_called_once_with("refs/remotes/origin/trunk", "HEAD")
 
 
 def test_create_within_the_limits_prints_no_counts(
