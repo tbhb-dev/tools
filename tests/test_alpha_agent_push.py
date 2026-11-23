@@ -317,7 +317,9 @@ def test_do_not_push_other_branches(
     assert git(target, "for-each-ref") == ""
 
 
-@pytest.mark.parametrize("error", ["", "fatal: " + SYNTHETIC + "\nsecond line"])
+@pytest.mark.parametrize(
+    "error", ["", "fatal: " + SYNTHETIC + "\n ! [remote rejected] x"]
+)
 def test_failure_redacted(
     error: str,
     local_run: tuple[run_host.Run, run_host.Prepared, Path],
@@ -328,10 +330,21 @@ def test_failure_redacted(
     with ExitStack() as stack:
         assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
     assert run.files.path("log").read_text() == (
-        "push failed: fatal: [redacted]\n"
+        "push failed: fatal: [redacted]\n ! [remote rejected] x\n"
         if error
         else "push failed: git push failed\n"
     )
+
+
+def test_failure_log_is_capped(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, _target = local_run
+    monkeypatch.setattr(push, "send", constant((1, "x" * 9000)))
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
+    assert run.files.path("log").read_text() == "push failed: " + "x" * 4000 + "\n"
 
 
 def test_spawn_failure_closes_pipe(

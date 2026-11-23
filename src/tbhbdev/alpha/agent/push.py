@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 
     from tbhbdev.alpha.agent.run_host import Prepared, Run
 
+# A remote rejection is on a later stderr line than the URL, so keep all of it.
+PUSH_ERROR_LIMIT = 4000
+
 
 def url(repository: str) -> str:
     host, owner, name = repo.parts(repository)
@@ -142,10 +145,8 @@ def run(
     except OSError, subprocess.SubprocessError:
         status, error = True, "git push unavailable"
     if status:
-        line = next(iter(error.splitlines()), "git push failed").replace(
-            token, "[redacted]"
-        )
-        run.files.write("log", f"push failed: {line}\n")
+        text = error.strip().replace(token, "[redacted]") or "git push failed"
+        run.files.write("log", f"push failed: {text[:PUSH_ERROR_LIMIT]}\n")
     return 4 if status or not made else rc
 
 
