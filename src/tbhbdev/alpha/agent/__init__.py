@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from tbhbdev import userconfig
+from tbhbdev import telemetry, userconfig
 from tbhbdev.alpha.agent import driver, precheck, settings
 from tbhbdev.alpha.agent import run_host as run_host
 from tbhbdev.alpha.agent import signing_parity as signing_parity
@@ -95,6 +95,12 @@ def main(argv: list[str], prog: str) -> int:
         args = parser(prog).parse_args(argv) if argv else None
     except SystemExit as exc:
         return int(exc.code or 0)
+    if args is not None and args.verb == "exec":
+        return telemetry.command(lambda: dispatch(args, prog))
+    return dispatch(args, prog)
+
+
+def dispatch(args: argparse.Namespace | None, prog: str) -> int:
     try:
         loaded = settings.load()
         if args is None:
