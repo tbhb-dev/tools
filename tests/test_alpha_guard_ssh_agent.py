@@ -13,45 +13,17 @@ from tbhbdev import alpha
 from tbhbdev.alpha import guard_ssh_agent as guard
 
 S = ".ssh"
-SAFE = "-i /k -o IdentityAgent=none"
 
 
 @pytest.mark.parametrize(
     ("command", "reason"),
     [
-        ("ssh host true", guard.REASON_AGENT),
-        ("scp a host:b", guard.REASON_AGENT),
-        ("sftp host", guard.REASON_AGENT),
-        ("ssh -i /k host", guard.REASON_AGENT),
-        ("ssh -o IdentityAgent=none host", guard.REASON_AGENT),
-        ("ssh -i /k -o IdentitiesOnly=yes host", guard.REASON_AGENT),
-        (
-            "ssh -o IdentityAgent=/sock -i /k -o IdentityAgent=none host",
-            guard.REASON_AGENT,
-        ),
-        ("ssh -vi /k host", guard.REASON_AGENT),
-        ("ssh host -o IdentityAgent=none -i /k", guard.REASON_AGENT),
-        ("ssh -- host", guard.REASON_AGENT),
-        ("ssh -v host", guard.REASON_AGENT),
-        ("rsync host:b -e", guard.REASON_AGENT),
-        ("ssh -", guard.REASON_AGENT),
-        ("bash -c 'ssh host'", guard.REASON_AGENT),
-        ("env -u LANG ssh host", guard.REASON_AGENT),
-        ("sudo -u deploy ssh host", guard.REASON_AGENT),
-        ("env -- ssh host", guard.REASON_AGENT),
-        ("FOO=1 /usr/bin/ssh host", guard.REASON_AGENT),
-        ("true && ssh host", guard.REASON_AGENT),
-        ("x=$(ssh host uptime)", guard.REASON_AGENT),
-        ('echo "$(ssh host uptime)"', guard.REASON_AGENT),
-        ("echo `ssh host`", guard.REASON_AGENT),
-        ("cat <<EOF\n$(ssh host uptime)\nEOF", guard.REASON_AGENT),
-        ("rsync -a a host:b", guard.REASON_AGENT),
-        ("rsync -e ssh -a a host:b", guard.REASON_AGENT),
-        ("rsync -avze 'ssh -i /k' a host:b", guard.REASON_AGENT),
-        ("rsync --rsh='ssh -i /k' a host:b", guard.REASON_AGENT),
-        ("rsync --rsh 'ssh -i /k' a host:b", guard.REASON_AGENT),
-        ("rsync -essh a host:b", guard.REASON_AGENT),
         ("ssh-add -l", guard.REASON_ADD),
+        ("/usr/bin/ssh-add", guard.REASON_ADD),
+        ("true && ssh-add", guard.REASON_ADD),
+        ("sudo -u deploy ssh-add", guard.REASON_ADD),
+        ("env -- FOO=1 ssh-add", guard.REASON_ADD),
+        ("FOO=1 command ssh-add", guard.REASON_ADD),
         (f"cat ~/{S}/config", guard.REASON_DIR),
         (f"wc -c <~/{S}/config", guard.REASON_DIR),
         (f"ls $HOME/{S}", guard.REASON_DIR),
@@ -67,40 +39,21 @@ def test_denied(command: str, reason: str) -> None:
 @pytest.mark.parametrize(
     "command",
     [
-        f"ssh {SAFE} host true",
-        f"ssh {SAFE} host 'ssh other'",
-        "ssh -oIdentityAgent=none -i/k host",
-        "ssh -o 'IdentityAgent none' -i /k host",
-        "ssh -o 'IdentityAgent=\"none\"' -i /k host",
-        'ssh -i "$(key_path)" -o IdentityAgent=none host',
-        f"scp {SAFE} a host:b",
-        f"sftp {SAFE} host",
-        f"rsync -a -e 'ssh {SAFE}' a host:b",
-        f"rsync -a --rsh='ssh {SAFE}' a host:b",
-        f"RSYNC_RSH='ssh {SAFE}' rsync -a a host:b",
-        "rsync -a -e 'ssh -i /k' a b",
-        "rsync -a -e 'rsh' a host:b",
-        "rsync -e '' a host:b",
-        "rsync -a a b",
-        "rsync -a ./a:b c",
-        "rsync -a rsync://host/mod/x b",
-        "rsync -a host::mod b",
+        "ssh host true",
+        "scp a host:b",
+        "rsync -a a host:b",
+        "ssh -V",
         f"ls ~/{S}/sessions",
         f"ls ~/{S}/sessions/x",
         f"ls ~/{S}x",
         f"ls ~/{S}-other",
         f"echo ~/{S}/config",
         f"printf '%s' ~/{S}/config",
-        f"scp {SAFE} host:~/{S}/config .",
-        "git commit -m 'SSH_AUTH_SOCK=/tmp/session.sock'",
+        f"git commit -m 'read config=~/{S}/config'",
         "SSH_AUTH_SOCK=/s git status",
-        "export SSH_AUTH_SOCK=/s",
-        "command -v ssh",
-        "command -V ssh",
         "nohup git status",
-        "env -u SSH_AUTH_SOCK git status",
-        "echo ssh",
-        "bash -c",
+        "env FOO=1",
+        "echo ssh-add",
         "git status",
         "echo 'unbalanced",
         "",
@@ -108,10 +61,6 @@ def test_denied(command: str, reason: str) -> None:
 )
 def test_allowed(command: str) -> None:
     assert guard.verdict(command) is None
-
-
-def test_command_run_through_a_wrapper_is_still_checked() -> None:
-    assert guard.verdict("command ssh host") == guard.REASON_AGENT
 
 
 def test_the_literal_home_path_is_denied() -> None:
@@ -146,6 +95,34 @@ def test_hook_contract(
         assert out == {"decision": "deny", "reason": guard.REASON_ADD}
     else:
         assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize(
+    ("tool_input", "denied"),
+    [
+        ({"file_path": f"{Path.home()}/{S}/id_x"}, True),
+        ({"path": f"~/{S}/config"}, True),
+        ({"file_path": f"{Path.home()}/{S}/sessions/k"}, False),
+        ({"file_path": "/etc/hosts"}, False),
+        ({"file_path": 3}, False),
+    ],
+)
+def test_a_tool_path_is_checked(
+    *,
+    tool_input: dict[str, object],
+    denied: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps({"tool_input": tool_input}))
+    )
+    assert guard.main() == 0
+    assert bool(capsys.readouterr().out) is denied
+
+
+def test_a_payload_without_tool_input_is_allowed() -> None:
+    assert guard.path_reason({"tool_input": "x"}) is None
 
 
 def test_allow_prints_nothing(

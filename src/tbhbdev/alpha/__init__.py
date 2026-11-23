@@ -68,7 +68,7 @@ commands:
                gh issue close, gh run rerun, gh api branch deletes and
                a session's approval of a pull request it opened
   guard-op     PreToolUse hook: require the configured 1Password account
-  guard-ssh-agent PreToolUse hook: keep ssh calls off the SSH agent and the ssh dir
+  guard-ssh-agent PreToolUse hook: block ssh-add and reads of the ssh dir
   state-guard  Claude Code hook: block sign-off commits and unchecked open items
   session-context
                SessionStart hook: name the host, the other hosts and the time
