@@ -57,7 +57,7 @@ def parse_draft(text: str) -> Draft:
     that run hosts lack. The run checks those rules with ``pr check``.
 
     Raises:
-        OpenRefusedError: The frontmatter is invalid or names no base, or the
+        OpenRefusedError: The frontmatter is invalid or names a bad base, or the
             body doesn't start with an H1 title.
     """
     meta: object = None
@@ -73,9 +73,10 @@ def parse_draft(text: str) -> Draft:
         message = "the draft frontmatter is invalid"
         raise OpenRefusedError(message)
     fields = cast("dict[str, object]", meta) if isinstance(meta, dict) else {}
-    base = fields.get("base")
+    # A missing base takes the schema default, as `alpha pr` does.
+    base = fields["base"] if "base" in fields else pull_request.base_of(fields)
     if not isinstance(base, str) or not base:
-        message = "the draft frontmatter names no base branch"
+        message = "the draft frontmatter names an invalid base branch"
         raise OpenRefusedError(message)
     heading, _, rest = body.lstrip().partition("\n")
     title = heading.removeprefix("# ").strip()

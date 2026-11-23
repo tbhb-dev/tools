@@ -216,11 +216,10 @@ def test_a_missing_draft_is_refused(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("text", "message"),
     [
-        ("# no front matter\n", "names no base branch"),
         ("---\nbase: [\n---\n\n# t\n", "frontmatter is invalid"),
         ("---\n# t\n", "frontmatter is invalid"),
-        ("---\ndraft: false\n---\n\n# t\n", "names no base branch"),
-        ("---\nbase: 3\n---\n\n# t\n", "names no base branch"),
+        ("---\nbase: 3\n---\n\n# t\n", "invalid base branch"),
+        ("---\nbase: ''\n---\n\n# t\n", "invalid base branch"),
         ("---\nbase: main\n---\n\nplain text\n", "no H1 title"),
         ("---\nbase: main\n---\n\n# \n", "no H1 title"),
     ],
@@ -230,6 +229,13 @@ def test_a_malformed_draft_is_refused(tmp_path: Path, text: str, message: str) -
     with pytest.raises(open_pr.OpenRefusedError, match=message) as captured:
         open_draft(published)
     assert captured.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "text", ["# t\n\nbody\n", "---\ndraft: false\n---\n\n# t\n\nbody\n"]
+)
+def test_a_draft_without_a_base_takes_the_schema_default(text: str) -> None:
+    assert open_pr.parse_draft(text).base == "main"
 
 
 def test_the_frontmatter_sets_the_base_and_draft_flag(
