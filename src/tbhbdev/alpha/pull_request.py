@@ -1205,8 +1205,14 @@ def run_bytes(argv: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
     )
 
 
+DRIVER_APP_AUTHOR = "app/tbhb-dev-agent-pull-requests"
+
+
 def require_own_author(number: int, repo: str) -> None:
-    """Refuse unless PR N's GitHub author is the account this ``gh`` runs as.
+    """Refuse unless PR N's author is this ``gh`` account or the driver's App.
+
+    The driver opens a run's pull request as the pull-requests App, so no agent
+    account authors it. Any other author, a human's included, is refused.
 
     Both reads name github.com and ``repo``, the repository ``gh pr ready``
     acts on, so no ``GH_HOST`` or ``GH_REPO`` setting can split them. The two
@@ -1236,7 +1242,10 @@ def require_own_author(number: int, repo: str) -> None:
         author.returncode
         or me.returncode
         or not author.stdout.strip()
-        or me.stdout != author.stdout
+        or (
+            me.stdout != author.stdout
+            and author.stdout.strip() != DRIVER_APP_AUTHOR.encode()
+        )
     ):
         why = refusal_reason(author.stderr, me.stderr)
         message = (
