@@ -416,6 +416,12 @@ AGENT = "tbhb.dev Agent"
 AGENT_MAIL = "agent@tonyburns.net"
 
 
+@pytest.fixture(autouse=True)
+def no_ssh_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every test away from the user's SSH agent."""
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+
+
 def make_key(folder: Path, name: str) -> Path:
     path = folder / name
     subprocess.run(
@@ -428,6 +434,7 @@ def make_key(folder: Path, name: str) -> Path:
 
 def agent_commit(repo: Path, key: Path | None) -> str:
     """Commit as the agent, signed by KEY or unsigned when it is None."""
+    assert "SSH_AUTH_SOCK" not in os.environ, "signing must never reach an agent"
     env = {
         **os.environ,
         "GIT_AUTHOR_NAME": AGENT,
@@ -435,9 +442,7 @@ def agent_commit(repo: Path, key: Path | None) -> str:
         "GIT_COMMITTER_NAME": AGENT,
         "GIT_COMMITTER_EMAIL": AGENT_MAIL,
     }
-    signing = (
-        ["-c", "gpg.format=ssh", "-c", f"user.signingkey={key}.pub"] if key else []
-    )
+    signing = ["-c", "gpg.format=ssh", "-c", f"user.signingkey={key}"] if key else []
     flag = ["-S"] if key else ["--no-gpg-sign"]
     subprocess.run(
         ["git", *signing, "commit", *flag, "--allow-empty", "-qm", "agent"],
@@ -539,3 +544,11 @@ def test_a_garbled_signature_has_no_fingerprint() -> None:
         " -----END SSH SIGNATURE-----\n\nmsg"
     )
     assert pg.signature_fingerprint(raw) == ""
+
+
+def test_signing_refuses_when_an_agent_socket_is_set(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/nonexistent")
+    with pytest.raises(AssertionError, match="never reach an agent"):
+        agent_commit(repo, None)
