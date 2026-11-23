@@ -7,16 +7,18 @@ import re
 import subprocess  # nosec B404
 import tempfile
 import threading
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from tbhbdev.alpha.agent import host_tools, open_pr, runfiles
+from tbhbdev.alpha.agent import host_tools, open_pr, runfiles, worktree
 from tbhbdev.alpha.agent.decisions import repo
+from tbhbdev.alpha.agent.model import Profile
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
+    from tbhbdev.alpha.agent.credentials import PushTokenFailure
     from tbhbdev.alpha.agent.run_host import Prepared, Run
 
 # A remote rejection is on a later stderr line than the URL, so keep all of it.
@@ -117,42 +119,114 @@ def run(
     prepared: Prepared,
     stack: ExitStack,
     harness: Callable[[Run, Prepared, ExitStack], int],
-    token: str | None,
+    token: str | PushTokenFailure | None,
 ) -> int:
-    if token is None:
+    if run.request.profile is not Profile.BUILD:
         return harness(run, prepared, stack)
     workspace = Path(prepared.paths.worktree)
     branch = f"agent/{run.files.name}"
-    before = head(workspace, branch)
+    before = local_heads(workspace)
     rc = harness(run, prepared, stack)
-    if (
-        run.files.uncertain
-        or (commit := head(workspace, branch)) is None
-        or commit == before
-    ):
+    if run.files.uncertain:
         return rc
-    run.files.write("head", commit)
     if rc:
-        run.files.write("log", f"push skipped: harness exited {rc}\n")
+        with suppress(OSError, ValueError):
+            commit = head(workspace, branch)
+            if commit is not None and commit != before.get(branch):
+                run.files.write("head", commit)
+                run.files.write("log", f"push skipped: harness exited {rc}\n")
         return rc
-    made = True
+    after = local_heads(workspace)
+    commit = after.pop(branch, None)
+    if isinstance(token, str):
+        commit = head(workspace, branch)
+    if commit is not None:
+        after = {branch: commit, **after}
+    change = first_change(run, workspace, before, after)
+    if change is None:
+        return 0
+    return publish(run, workspace, change, token, before.get(branch))
+
+
+def publish(
+    run: Run,
+    workspace: Path,
+    change: tuple[str, str],
+    token: str | PushTokenFailure | None,
+    base: str | None,
+) -> int:
+    name, commit = change
+    branch = f"agent/{run.files.name}"
+    wrong_branch = name != branch
+    if wrong_branch:
+        run.files.write(
+            "log", f"push skipped: commits are on {name}, expected {branch}\n"
+        )
+    else:
+        run.files.write("head", commit)
+    if not isinstance(token, str):
+        reason = token.reason if token is not None else "unavailable"
+        run.files.write("log", f"push skipped: no push token ({reason})\n")
+        return 4
+    if wrong_branch:
+        return 4
     try:
         with publication(run.files.root, workspace, commit) as directory:
             status, error = send(directory, url(run.request.repo), branch, token)
             if not status:
                 run.files.write("branch", branch)
-                made = opened(
-                    run,
-                    open_pr.PublishedRange(workspace, directory, before, commit),
-                    branch,
-                    token,
-                )
+                published = open_pr.PublishedRange(workspace, directory, base, commit)
+                return 0 if opened(run, published, branch, token) else 4
     except OSError, subprocess.SubprocessError:
-        status, error = True, "git push unavailable"
-    if status:
-        text = error.strip().replace(token, "[redacted]") or "git push failed"
-        run.files.write("log", f"push failed: {text[:PUSH_ERROR_LIMIT]}\n")
-    return 4 if status or not made else rc
+        error = "git push unavailable"
+    text = error.strip().replace(token, "[redacted]") or "git push failed"
+    run.files.write("log", f"push failed: {text[:PUSH_ERROR_LIMIT]}\n")
+    return 4
+
+
+def local_heads(workspace: Path) -> dict[str, str]:
+    """Read local branch tips and detached HEAD without loading clone config."""
+    directory = workspace / ".git"
+    heads: dict[str, str] = {}
+    with suppress(FileNotFoundError):
+        packed = runfiles.read_owned(
+            directory / "packed-refs", 1024 * 1024, "packed refs"
+        )
+        heads.update(
+            (name, commit)
+            for commit, name in re.findall(
+                r"^([0-9a-f]{40}) refs/heads/(\S+)$", packed, re.MULTILINE
+            )
+        )
+    base = directory / "refs" / "heads"
+    for path in base.rglob("*"):
+        if not path.is_dir() and path.suffix != ".lock":
+            value = runfiles.read_owned(path, 1024, "run ref").strip()
+            if re.fullmatch(r"[0-9a-f]{40}", value):
+                heads[path.relative_to(base).as_posix()] = value
+    current = runfiles.read_owned(directory / "HEAD", 1024, "run HEAD").strip()
+    if re.fullmatch(r"[0-9a-f]{40}", current):
+        heads["detached HEAD"] = current
+    return heads
+
+
+def first_change(
+    run: Run, workspace: Path, before: dict[str, str], after: dict[str, str]
+) -> tuple[str, str] | None:
+    """Find the first tip with commits outside the starting local history."""
+    bases = tuple(dict.fromkeys(before.values()))
+    candidates = {name: tip for name, tip in after.items() if tip not in bases}
+    if not candidates:
+        return None
+    with publication(
+        run.files.root, workspace, next(iter(candidates.values()))
+    ) as directory:
+        for name, tip in candidates.items():
+            if worktree.git(
+                directory, "rev-list", "--max-count=1", tip, "--not", *bases, "--"
+            ):
+                return name, tip
+    return None
 
 
 def opened(
