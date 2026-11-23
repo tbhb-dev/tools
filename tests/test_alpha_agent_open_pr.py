@@ -1,16 +1,20 @@
-"""Open a run's pull request from the draft in its pushed commit."""
+"""Open a run's pull request from either draft source."""
 
 from __future__ import annotations
 
+import os
 import subprocess
-from typing import TYPE_CHECKING
+from io import BufferedReader, FileIO
+from typing import TYPE_CHECKING, override
 
 import httpx
 import pytest
 
-from tbhbdev.alpha.agent import open_pr
+from tbhbdev import gitleaks_check
+from tbhbdev.alpha.agent import host_tools, open_pr
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 DRAFT = """---
@@ -46,30 +50,87 @@ Ran it.
 """
 
 
-def commit_draft(directory: Path, text: str | None) -> tuple[Path, str]:
+POLICY = "[extend]\nuseDefault = true\n"
+WARNING = ("log", "draft committed: it will merge into main; remove it\n")
+
+
+def write_draft(directory: Path, text: str) -> Path:
+    path = directory / open_pr.DRAFT
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def commit_draft(
+    directory: Path,
+    text: str | None,
+    *,
+    initial: bool = False,
+    policy: bool = True,
+) -> open_pr.PublishedRange:
     def git(*args: str) -> str:
         return subprocess.check_output(
-            ["git", "-c", "core.hooksPath=/dev/null", *args],
+            ["git", *args],
             cwd=directory,
             text=True,
         ).strip()
 
-    git("init", "-q")
-    if text is not None:
-        (directory / ".github").mkdir()
-        (directory / ".github/PULL_REQUEST_DRAFT.md").write_text(text)
+    def commit() -> str:
         git("add", ".")
-    git(
-        "-c",
-        "user.name=t",
-        "-c",
-        "user.email=t@example.com",
-        "commit",
-        "--allow-empty",
-        "-qm",
-        "x",
+        git("commit", "--allow-empty", "-qm", "x")
+        return git("rev-parse", "HEAD")
+
+    git("init", "-q")
+    git("config", "user.name", "t")
+    git("config", "user.email", "t@invalid")
+    git("config", "commit.gpgsign", "false")
+    if policy:
+        (directory / ".gitleaks.toml").write_text(POLICY)
+    if initial:
+        write_draft(directory, DRAFT)
+    before = commit()
+    if text is not None:
+        write_draft(directory, text)
+        (directory / ".gitleaks.toml").write_text("untrusted")
+    head = commit()
+    (directory / open_pr.DRAFT).unlink(missing_ok=True)
+    return open_pr.PublishedRange(directory, directory / ".git", before, head)
+
+
+def accept_warning(suffix: str, text: str) -> None:
+    assert (suffix, text) == WARNING
+
+
+def open_draft(
+    published: open_pr.PublishedRange,
+    write: Callable[[str, str], None] = accept_warning,
+) -> int:
+    return open_pr.open_pull_request(
+        published, "tbhb-dev/tools", "agent/r1", "tok", write
     )
-    return directory / ".git", git("rev-parse", "HEAD")
+
+
+@pytest.fixture(autouse=True)
+def scans(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    original = host_tools.resolve
+    seen: list[str] = []
+
+    def resolve(name: str) -> str:
+        return "fixture-scanner" if name == "gitleaks" else original(name)
+
+    def scan(
+        text: str, what: str, *, root: Path, gitleaks: str, visibility: str
+    ) -> None:
+        assert what == "PR draft"
+        assert root.name == ".git"
+        assert (root / ".gitleaks.toml").read_text() == POLICY
+        assert gitleaks == "fixture-scanner"
+        assert visibility == ""
+        seen.append(text)
+
+    monkeypatch.setattr(host_tools, "resolve", resolve)
+    monkeypatch.setattr(gitleaks_check, "scan_text", scan)
+    return seen
 
 
 def reply(status: int, data: object) -> httpx.Response:
@@ -77,9 +138,9 @@ def reply(status: int, data: object) -> httpx.Response:
 
 
 def test_opens_the_pr_from_the_pushed_draft(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scans: list[str]
 ) -> None:
-    git_dir, commit = commit_draft(tmp_path, DRAFT)
+    published = commit_draft(tmp_path, DRAFT)
     seen: dict[str, object] = {}
 
     def post(url: str, **options: object) -> httpx.Response:
@@ -88,10 +149,15 @@ def test_opens_the_pr_from_the_pushed_draft(
         return reply(201, {"number": 12})
 
     monkeypatch.setattr(httpx, "post", post)
-    number = open_pr.open_pull_request(
-        git_dir, commit, "github.com/tbhb-dev/tools", "agent/r1", "tok"
-    )
+    warnings: list[tuple[str, str]] = []
+
+    def warn(suffix: str, text: str) -> None:
+        warnings.append((suffix, text))
+
+    number = open_draft(published, warn)
     assert number == 12
+    assert warnings == [WARNING]
+    assert scans == [DRAFT]
     assert seen["url"] == "https://api.github.com/repos/tbhb-dev/tools/pulls"
     payload = seen["json"]
     assert isinstance(payload, dict)
@@ -103,14 +169,41 @@ def test_opens_the_pr_from_the_pushed_draft(
     headers = seen["headers"]
     assert isinstance(headers, dict)
     assert headers["Authorization"] == "Bearer tok"
+    assert headers["Accept"] == "application/vnd.github+json"
+    assert seen["timeout"] is open_pr.TIMEOUT
+
+
+def test_publication_git_isolated_from_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    published = commit_draft(tmp_path, DRAFT)
+    flags = "--no-ext-diff --no-textconv --no-renames --diff-filter=A --name-only"
+    output = iter([open_pr.DRAFT.encode(), POLICY.encode()])
+    expected = {
+        "HOME": str(published.git_dir),
+        "PATH": host_tools.search(),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+    }
+
+    def git(args: list[str], **options: object) -> subprocess.CompletedProcess[bytes]:
+        if args[3] == "diff":
+            assert args[4:-4] == flags.split()
+            assert args[-1] == open_pr.DRAFT
+        assert options["cwd"] == published.git_dir
+        assert options["env"] == expected
+        return subprocess.CompletedProcess(args, 0, next(output))
+
+    monkeypatch.setattr(subprocess, "run", git)
+    assert open_pr.check_range(published, accept_warning) == POLICY.encode()
 
 
 def test_a_missing_draft_is_refused(tmp_path: Path) -> None:
-    git_dir, commit = commit_draft(tmp_path, None)
+    published = commit_draft(tmp_path, None)
     with pytest.raises(
         open_pr.OpenRefusedError, match=r"no \.github/PULL_REQUEST_DRAFT"
     ):
-        open_pr.open_pull_request(git_dir, commit, "github.com/o/r", "agent/r", "t")
+        open_draft(published)
 
 
 @pytest.mark.parametrize(
@@ -126,16 +219,16 @@ def test_a_missing_draft_is_refused(tmp_path: Path) -> None:
     ],
 )
 def test_a_malformed_draft_is_refused(tmp_path: Path, text: str, message: str) -> None:
-    git_dir, commit = commit_draft(tmp_path, text)
+    published = commit_draft(tmp_path, text)
     with pytest.raises(open_pr.OpenRefusedError, match=message):
-        open_pr.open_pull_request(git_dir, commit, "github.com/o/r", "agent/r", "t")
+        open_draft(published)
 
 
 def test_the_frontmatter_sets_the_base_and_draft_flag(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    text = "---\nbase: release\ndraft: true\n---\n\n# fix(x): y\n\n## Why\n\nZ.\n"
-    git_dir, commit = commit_draft(tmp_path, text)
+    text = "---\nbase: release\ndraft: true\n---\n\n# fix(x): y\n\n  ## Why\n\nZ.X\n"
+    published = commit_draft(tmp_path, text)
     seen: dict[str, object] = {}
 
     def post(_url: str, **options: object) -> httpx.Response:
@@ -143,11 +236,11 @@ def test_the_frontmatter_sets_the_base_and_draft_flag(
         return reply(201, {"number": 3})
 
     monkeypatch.setattr(httpx, "post", post)
-    open_pr.open_pull_request(git_dir, commit, "github.com/o/r", "agent/r", "t")
+    open_draft(published)
     assert seen["json"] == {
         "title": "fix(x): y",
-        "body": "## Why\n\nZ.\n",
-        "head": "agent/r",
+        "body": "  ## Why\n\nZ.X\n",
+        "head": "agent/r1",
         "base": "release",
         "draft": True,
     }
@@ -166,25 +259,176 @@ def test_a_refusing_api_is_reported_without_its_text(
     response: httpx.Response,
     message: str,
 ) -> None:
-    git_dir, commit = commit_draft(tmp_path, DRAFT)
+    published = commit_draft(tmp_path, DRAFT)
 
     def post(*_args: object, **_options: object) -> httpx.Response:
         return response
 
     monkeypatch.setattr(httpx, "post", post)
     with pytest.raises(open_pr.OpenRefusedError, match=message):
-        open_pr.open_pull_request(git_dir, commit, "github.com/o/r", "agent/r", "t")
+        open_draft(published)
 
 
 @pytest.mark.parametrize("failure", [httpx.ConnectError("down"), ValueError("x")])
 def test_a_transport_failure_is_reported_by_type(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
 ) -> None:
-    git_dir, commit = commit_draft(tmp_path, DRAFT)
+    published = commit_draft(tmp_path, DRAFT)
 
     def post(*_args: object, **_options: object) -> httpx.Response:
         raise failure
 
     monkeypatch.setattr(httpx, "post", post)
     with pytest.raises(open_pr.OpenRefusedError, match=type(failure).__name__):
-        open_pr.open_pull_request(git_dir, commit, "github.com/o/r", "agent/r", "t")
+        open_draft(published)
+
+
+@pytest.mark.parametrize(
+    ("ending", "tracked"), [("\n", False), ("\r\n", True), ("\r", True)]
+)
+def test_worktree_draft_takes_priority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scans: list[str],
+    ending: str,
+    *,
+    tracked: bool,
+) -> None:
+    published = commit_draft(
+        tmp_path, "bad committed draft" if tracked else None, initial=tracked
+    )
+    (published.git_dir / "info" / "exclude").write_text(open_pr.DRAFT + "\n")
+    worktree_text = DRAFT.replace("# feat", "# fix").replace("\n", ending)
+    write_draft(tmp_path, worktree_text)
+
+    def no_warning(suffix: str, text: str) -> None:
+        pytest.fail(f"unexpected {suffix}: {text}")
+
+    def post(_url: str, **options: object) -> httpx.Response:
+        assert scans == [worktree_text]
+        payload = options["json"]
+        assert isinstance(payload, dict)
+        assert payload["title"] == "fix(example): add a thing"
+        assert payload["body"] == open_pr.parse_draft(DRAFT).body
+        return reply(201, {"number": 12})
+
+    monkeypatch.setattr(httpx, "post", post)
+    assert open_draft(published, no_warning) == 12
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["file-link", "folder-link", "root-link", "fifo", "uid", "size", "encoding"],
+)
+def test_unsafe_worktree_draft_refuses_without_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str, scans: list[str]
+) -> None:
+    workspace = tmp_path / "run"
+    workspace.mkdir()
+    published = commit_draft(workspace, DRAFT)
+    path = workspace / open_pr.DRAFT
+    outside = write_draft(tmp_path, DRAFT)
+    message = "cannot read the worktree PR draft safely"
+
+    match kind:
+        case "file-link":
+            path.symlink_to(outside)
+        case "folder-link":
+            path.parent.rmdir()
+            path.parent.symlink_to(outside.parent, target_is_directory=True)
+        case "root-link":
+            link = tmp_path / "link"
+            link.symlink_to(workspace, target_is_directory=True)
+            published = published._replace(workspace=link)
+        case "fifo":
+            os.mkfifo(path)
+            message = "the worktree PR draft must be an owned regular file"
+        case "uid":
+            path.write_text(DRAFT)
+
+            def uid() -> int:
+                return path.stat().st_uid + 1
+
+            monkeypatch.setattr(os, "getuid", uid)
+            message = "the worktree PR draft must be an owned regular file"
+        case "size":
+            path.write_bytes(b"x" * (64 * 1024 + 1))
+            message = "the worktree PR draft exceeds 64 KiB"
+        case _:
+            path.write_bytes(b"\xff")
+            message = "the PR draft must use UTF-8"
+
+    with pytest.raises(open_pr.OpenRefusedError, match=rf"^{message}$"):
+        open_draft(published)
+    assert scans == []
+
+
+def test_worktree_draft_size_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = DRAFT.ljust(64 * 1024)
+    write_draft(tmp_path, text)
+    original = os.open
+
+    def open_at(path: str | Path, flags: int, *, dir_fd: int | None = None) -> int:
+        required = os.O_NONBLOCK if path == open_pr.DRAFT_NAME else os.O_DIRECTORY
+        assert flags == os.O_RDONLY | os.O_NOFOLLOW | required
+        return original(path, flags, dir_fd=dir_fd)
+
+    class DraftReader(BufferedReader):
+        @override
+        def read(self, size: int | None = -1, /) -> bytes:
+            assert size == 64 * 1024 + 1
+            return super().read(size)
+
+    def fdopen(fd: int, mode: str) -> BufferedReader:
+        return DraftReader(FileIO(fd, mode))
+
+    monkeypatch.setattr(os, "open", open_at)
+    monkeypatch.setattr(os, "fdopen", fdopen)
+    assert open_pr.read_worktree_draft(tmp_path) == text.encode()
+
+
+@pytest.mark.parametrize("reason", ["no-base", "bad-range", "no-policy"])
+def test_unavailable_scan_policy_refuses(
+    tmp_path: Path, reason: str, scans: list[str]
+) -> None:
+    published = commit_draft(tmp_path, None, policy=False)
+    write_draft(tmp_path, DRAFT)
+    if reason == "no-base":
+        published = published._replace(before=None)
+        message = r"^cannot check the PR draft without a pre-run commit$"
+    elif reason == "bad-range":
+        published = published._replace(before="0" * 40)
+        message = r"^cannot check whether the pushed range adds the PR draft$"
+    else:
+        message = "cannot scan the PR draft without"
+    with pytest.raises(open_pr.OpenRefusedError, match=message):
+        open_draft(published)
+    assert scans == []
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_a_scan_refusal_prevents_posting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, committed: bool
+) -> None:
+    published = commit_draft(tmp_path, DRAFT if committed else None)
+    if not committed:
+        write_draft(tmp_path, DRAFT)
+
+    def refuse(text: str, *_args: object, **_kwargs: object) -> None:
+        assert text == DRAFT
+        message = "private scanner detail"
+        raise gitleaks_check.ScanRefused(message)
+
+    def post(*_args: object, **_kwargs: object) -> httpx.Response:
+        pytest.fail("unexpected API call")
+
+    monkeypatch.setattr(gitleaks_check, "scan_text", refuse)
+    monkeypatch.setattr(httpx, "post", post)
+    with pytest.raises(
+        open_pr.OpenRefusedError,
+        match=r"^PR draft secret scan refused; check the draft and "
+        r"scanner configuration$",
+    ):
+        open_draft(published)

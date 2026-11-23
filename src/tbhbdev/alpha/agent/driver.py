@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NoReturn
 
-from tbhbdev import version
+from tbhbdev import telemetry, version
 from tbhbdev.alpha.agent import (
     launcher,
     render,
@@ -249,17 +249,30 @@ def clear_taint(host: str, reason: str) -> int:
 
 def execute(settings: Settings, args: argparse.Namespace) -> int:
     run = prepare(settings, args)
+    telemetry.attributes(
+        **{
+            "tbhb.agent.host": run.host.name,
+            "tbhb.agent.harness": run.request.harness.value,
+            "tbhb.agent.model": run.request.model,
+            "tbhb.agent.profile": run.request.profile.value,
+            "tbhb.run.id": run.name,
+        }
+    )
     prompt = Path(args.prompt_file).read_text()
     schema = None if args.schema is None else Path(args.schema).read_text()
     if schema is not None:
         json.loads(schema)
     deadline = time.monotonic() + settings.launch_wait_seconds
-    check_limits(
-        settings,
-        run.host,
-        ignore=run.ignore_limits,
-        timeout=deadline - time.monotonic(),
-    )
+    try:
+        check_limits(
+            settings,
+            run.host,
+            ignore=run.ignore_limits,
+            timeout=deadline - time.monotonic(),
+        )
+    except Invalid:
+        telemetry.attributes(**{"tbhb.agent.outcome": "refused"})
+        raise
     # Every exec run is unsandboxed: launch_trust records taint, never refuses.
     launch_trust(settings, run, deadline)
     ref = args.ref or "HEAD"
@@ -615,7 +628,11 @@ def dispatch(settings: Settings, args: argparse.Namespace) -> int:
     if args.verb == "signing-parity":
         return signing_parity.main(settings)
     if args.verb == "exec":
-        return execute(settings, args)
+        result = execute(settings, args)
+        telemetry.attributes(
+            **{"tbhb.agent.outcome": "ok" if result == 0 else "failed"}
+        )
+        return result
     run = load(settings, args.name)
     verbs = {"wait": wait, "status": status, "kill": kill, "keep": keep}
     try:

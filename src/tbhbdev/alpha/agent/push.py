@@ -138,7 +138,12 @@ def run(
             status, error = send(directory, url(run.request.repo), branch, token)
             if not status:
                 run.files.write("branch", branch)
-                made = opened(run, directory, commit, branch, token)
+                made = opened(
+                    run,
+                    open_pr.PublishedRange(workspace, directory, before, commit),
+                    branch,
+                    token,
+                )
     except OSError, subprocess.SubprocessError:
         status, error = True, "git push unavailable"
     if status:
@@ -149,11 +154,13 @@ def run(
     return 4 if status or not made else rc
 
 
-def opened(run: Run, git_dir: Path, commit: str, branch: str, token: str) -> bool:
+def opened(
+    run: Run, published: open_pr.PublishedRange, branch: str, token: str
+) -> bool:
     """Open the run's pull request and record it; False when it was not opened."""
     try:
         number = open_pr.open_pull_request(
-            git_dir, commit, run.request.repo, branch, token
+            published, run.request.repo, branch, token, run.files.write
         )
     except (open_pr.OpenRefusedError, OSError) as refusal:
         run.files.write("log", f"pull request not opened: {refusal}\n")
