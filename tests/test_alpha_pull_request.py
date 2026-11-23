@@ -3103,6 +3103,9 @@ class Stuck:
     def __init__(self, world: World, monkeypatch: pytest.MonkeyPatch) -> None:
         self.world = world
         self.statuses = ["in_progress", "completed"]
+        self.conclusion = "cancelled"
+        self.numbers: list[int] = [45]
+        self.same_workflows = True
         self.jobs: list[dict[str, str]] = []
         self.new_head = HEAD
         self.invoked: list[list[str]] = []
@@ -3130,7 +3133,7 @@ class Stuck:
     def view(self, _run_id: object, field: str) -> dict[str, object]:
         if field == "jobs":
             return {"jobs": self.jobs}
-        return {"status": self.statuses.pop(0)}
+        return {"status": self.statuses.pop(0), "conclusion": self.conclusion}
 
     def invoke(self, argv: list[str], _body: str) -> tuple[int, str]:
         self.invoked.append(argv[1:])
@@ -3144,6 +3147,21 @@ class Stuck:
             cases={
                 "pr view": {"rc": 0, "stdout": json.dumps(self.meta), "stderr": ""},
                 "run list": gh_list(self.runs),
+                "api": {
+                    "rc": 0,
+                    "stdout": json.dumps(self.numbers),
+                    "stderr": "",
+                },
+            },
+        )
+        self.world.fake(
+            "git",
+            cases={
+                "diff --quiet": {
+                    "rc": 0 if self.same_workflows else 1,
+                    "stdout": "",
+                    "stderr": "",
+                }
             },
         )
 
@@ -3196,7 +3214,7 @@ def test_rerun_stuck_cancels_waits_and_reruns(
         ([a_run(headSha="b" * 40)], [old_job(300)]),
         ([a_run()], [old_job(55)]),
         ([a_run()], [old_job(300, status="queued")]),
-        ([a_run()], [old_job(70, "loose")]),
+        ([a_run()], [old_job(369, "loose")]),
         ([a_run()], [old_job(19, "keyed")]),
         ([a_run(workflowName="other")], [old_job(61, "bazel")]),
     ],
@@ -3229,9 +3247,53 @@ def test_rerun_stuck_uses_the_jobs_own_timeout_plus_ten(
     scene.invoked.clear()
     scene.statuses = ["completed"]
     assert run_main("rerun", "45", "--stuck") == 0
-    scene.jobs = [old_job(71, "loose")]
+    scene.jobs = [old_job(371, "loose")]
     scene.statuses = ["completed"]
     assert run_main("rerun", "45", "--stuck") == 0
+
+
+def test_rerun_stuck_uses_the_default_timeout_when_workflows_differ(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = Stuck(world, monkeypatch)
+    scene.same_workflows = False
+    scene.runs = [a_run()]
+    scene.jobs = [old_job(71)]
+    scene.start()
+    assert run_main("rerun", "45", "--stuck") == 1
+    scene.jobs = [old_job(371)]
+    scene.statuses = ["completed"]
+    assert run_main("rerun", "45", "--stuck") == 0
+
+
+def test_rerun_stuck_ignores_a_run_of_another_pull_request(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    scene = Stuck(world, monkeypatch)
+    scene.numbers = [46]
+    scene.runs = [a_run()]
+    scene.jobs = [old_job(300)]
+    scene.start()
+    assert run_main("rerun", "45", "--stuck") == 1
+    assert capsys.readouterr().err == "no stuck run for the current head of PR 45\n"
+    assert scene.invoked == []
+
+
+def test_rerun_stuck_does_not_rerun_a_run_that_completed_normally(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    scene = Stuck(world, monkeypatch)
+    scene.runs = [a_run()]
+    scene.jobs = [old_job(300)]
+    scene.conclusion = "success"
+    scene.start()
+    assert run_main("rerun", "45", "--stuck") == 1
+    assert "completed as success; no rerun" in capsys.readouterr().err
+    assert scene.invoked == [["run", "cancel", "7"]]
 
 
 def test_rerun_stuck_skips_a_young_run_to_reach_a_stuck_one(
@@ -3244,7 +3306,7 @@ def test_rerun_stuck_skips_a_young_run_to_reach_a_stuck_one(
     def view(run_id: object, field: str) -> dict[str, object]:
         if field == "jobs":
             return {"jobs": [old_job(ages[int(str(run_id))])]}
-        return {"status": "completed"}
+        return {"status": "completed", "conclusion": "cancelled"}
 
     monkeypatch.setattr(pr, "run_view", view)
     scene.start()

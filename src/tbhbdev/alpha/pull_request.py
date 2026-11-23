@@ -89,9 +89,12 @@ stops at the first failure and doesn't read a draft.
 current head commit with ``gh run rerun --failed``. It reports an error when
 that run hasn't failed or no run exists. It doesn't read a draft.
 
-``rerun N --stuck`` cancels the latest current-head run when one of its jobs has
-been in progress for over 30 minutes, then reruns it in full. It reports an
-error when the run isn't in progress or no job is that old.
+``rerun N --stuck`` cancels a ``pull_request`` run of pull request N's current
+head when one of its jobs has been in progress for 10 minutes past its
+timeout, then reruns it in full once the run completes as cancelled. A job's
+timeout is its ``timeout-minutes`` when the checkout's workflows match the
+head commit, and GitHub's 360-minute default otherwise. It reports an error
+when no such run is in progress or no job is that old.
 
 ``delete-branch N`` deletes only the head branch of a closed or merged pull
 request in origin's repository. Fork heads, main, protected branches and
@@ -1413,7 +1416,7 @@ def head_of(number: int) -> str:
 
 
 STUCK_GRACE = dt.timedelta(minutes=10)
-UNSET_TIMEOUT = 60
+UNSET_TIMEOUT = 360
 CANCEL_POLLS = 12
 CANCEL_PAUSE = 5.0
 
@@ -1428,14 +1431,20 @@ def pause(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def workflow_timeouts(workflow: object) -> dict[str, int]:
-    """Each job's ``timeout-minutes`` in the checkout's workflow named WORKFLOW.
+def workflow_timeouts(workflow: object, head: str) -> dict[str, int]:
+    """Each job's ``timeout-minutes`` in the workflow named WORKFLOW at HEAD.
+
+    The checkout's files count only when they match commit HEAD. Otherwise the
+    run may have used other workflows, and no job has a timeout here.
 
     Jobs are keyed by display name, which is the job key when it sets no name.
     A job without a timeout, or a workflow file that isn't a mapping, adds
     nothing.
     """
     found: dict[str, int] = {}
+    same = run(["git", "diff", "--quiet", head, "--", ".github/workflows"])
+    if same.returncode != 0:
+        return found
     for path in sorted(Path(".github/workflows").glob("*.y*ml")):
         data = yaml.safe_load(path.read_text())
         if not isinstance(data, dict) or data.get("name") != workflow:
@@ -1466,16 +1475,16 @@ def run_view(run_id: object, field: str) -> dict[str, object]:
     return cast("dict[str, object]", data)  # pragma: no mutate
 
 
-def stuck_job(run_id: object, workflow: object) -> bool:
+def stuck_job(run_id: object, workflow: object, head: str) -> bool:
     """Whether a job of the run has run 10 minutes past its own timeout.
 
-    The limit is the job's ``timeout-minutes`` plus 10, or 60 minutes plus 10
-    when the workflow sets none.
+    The limit is the job's ``timeout-minutes`` plus 10, or GitHub's default of
+    360 minutes plus 10 when the job's timeout isn't known.
 
     Raises:
         SystemExit: gh can't read the run.
     """
-    timeouts = workflow_timeouts(workflow)
+    timeouts = workflow_timeouts(workflow, head)
     jobs = cast(
         "list[dict[str, str]]", run_view(run_id, "jobs")["jobs"]
     )  # pragma: no mutate
@@ -1487,13 +1496,44 @@ def stuck_job(run_id: object, workflow: object) -> bool:
     )
 
 
-def cancelled(run_id: object) -> bool:
-    """Whether the run reaches ``completed`` within the bounded polls."""
+def finished_as(run_id: object) -> str | None:
+    """The run's conclusion once it completes within the bounded polls, else None."""
     for _ in range(CANCEL_POLLS):
-        if run_view(run_id, "status")["status"] == "completed":
-            return True
+        view = run_view(run_id, "status,conclusion")
+        if view["status"] == "completed":
+            return str(view["conclusion"])
         pause(CANCEL_PAUSE)
-    return False
+    return None
+
+
+def run_numbers(run_id: object) -> list[object]:
+    """The pull request numbers GitHub lists for the run."""
+    return cast(
+        "list[object]",
+        gh_json(
+            [
+                "api",
+                f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}",
+                "--jq",
+                "[.pull_requests[].number]",
+            ]
+        ),
+    )  # pragma: no mutate
+
+
+def cancel_and_rerun(run_id: str) -> int:
+    """Cancel the run, wait until it completes as cancelled, then rerun it."""
+    code = invoke_gh([GH, "run", "cancel", run_id], "")[0]
+    if code:
+        return code
+    outcome = finished_as(run_id)
+    if outcome is None:
+        print(f"run {run_id} did not finish cancelling; no rerun", file=sys.stderr)
+        return 1
+    if outcome != "cancelled":
+        print(f"run {run_id} completed as {outcome}; no rerun", file=sys.stderr)
+        return 1
+    return invoke_gh([GH, "run", "rerun", run_id], "")[0]
 
 
 def rerun_stuck(number: int) -> int:
@@ -1546,7 +1586,8 @@ def rerun_stuck(number: int) -> int:
         for item in runs
         if item["headSha"] == head
         and item["status"] == "in_progress"
-        and stuck_job(item["databaseId"], item["workflowName"])
+        and number in run_numbers(item["databaseId"])
+        and stuck_job(item["databaseId"], item["workflowName"], head)
     ]
     if not stuck:
         print(f"no stuck run for the current head of PR {number}", file=sys.stderr)
@@ -1554,14 +1595,7 @@ def rerun_stuck(number: int) -> int:
     if head_of(number) != head:
         print(f"PR {number} moved to a new head; run again", file=sys.stderr)
         return 1
-    run_id = str(stuck[0]["databaseId"])
-    code = invoke_gh([GH, "run", "cancel", run_id], "")[0]
-    if code:
-        return code
-    if not cancelled(run_id):
-        print(f"run {run_id} did not finish cancelling; no rerun", file=sys.stderr)
-        return 1
-    return invoke_gh([GH, "run", "rerun", run_id], "")[0]
+    return cancel_and_rerun(str(stuck[0]["databaseId"]))
 
 
 def rerun(number: int) -> int:
