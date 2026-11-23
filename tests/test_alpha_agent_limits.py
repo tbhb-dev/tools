@@ -7,12 +7,13 @@ import dataclasses
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 from typing import TYPE_CHECKING
 
 import pytest
-from agent_driver_example import Remote, setup
+from agent_driver_example import Remote, setup, write_standalone_fake
 from agent_example import LINUX, MARKER, settings
 
 from tbhbdev.alpha import agent
@@ -134,6 +135,41 @@ def run_script(script: str) -> tuple[int, str]:
         ["/bin/sh", "-c", script], capture_output=True, text=True, check=False
     )
     return done.returncode, done.stdout
+
+
+@pytest.mark.parametrize(
+    ("swap", "expected"),
+    [
+        (
+            "total = 100.00M used = 10.00M free = 90.00M",
+            (0, "1.25 8 32768 40 102400 10240\n"),
+        ),
+        ("total = invalid used = 10.00M free = 90.00M", (1, "")),
+    ],
+)
+def test_macos_numbers_with_fake_host_tools(
+    tmp_path: Path, swap: str, expected: tuple[int, str]
+) -> None:
+    write_standalone_fake(tmp_path / "uname", "print('Darwin')")
+    readings = {
+        "vm.loadavg": "{ 1.25 2.0 3.0 }",
+        "hw.logicalcpu": "8",
+        "hw.memsize": "33554432",
+        "vm.swapusage": swap,
+    }
+    write_standalone_fake(
+        tmp_path / "sysctl", f"import sys\nprint({readings!r}[sys.argv[2]])"
+    )
+    pages = (
+        "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
+        "Pages free: 1.\nPages inactive: 2.\n"
+        "Pages speculative: 3.\nPages purgeable: 4.\n"
+    )
+    write_standalone_fake(tmp_path / "vm_stat", f"print({pages!r}, end='')")
+    script = (
+        f"PATH={shlex.quote(str(tmp_path))}:/usr/bin:/bin\n" + remote.limit_numbers()
+    )
+    assert run_script(script) == expected
 
 
 @pytest.mark.parametrize(

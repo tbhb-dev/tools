@@ -47,6 +47,7 @@ from tbhbdev.alpha.agent import (
     codex_install,
     credentials,
     host_tools,
+    ownership,
     process_group,
     render,
     run_host,
@@ -4344,6 +4345,7 @@ def test_main_claims_owner_before_loading(
 
 @pytest.mark.parametrize("present", [True, False])
 def test_main_with_owned_flag_requires_the_drivers_file(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     *,
@@ -4352,8 +4354,14 @@ def test_main_with_owned_flag_requires_the_drivers_file(
     files = runfiles.RunFiles(
         runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
     )
+    shared = tmp_path / "admission"
+    shared.mkdir()
+    monkeypatch.setattr(ownership, "ADMISSION_DIR", str(shared))
+    digest = hashlib.sha256(b"run-id\n").hexdigest()
+    claim = shared / f"claim.{os.getuid()}.example.{digest}"
     if present:
         files.write("owner", "run-id\n")
+        claim.touch()
     calls: list[bool] = []
 
     def load(_args: object, _temporary: Path) -> tuple[run_host.Run, str]:
@@ -4366,6 +4374,8 @@ def test_main_with_owned_flag_requires_the_drivers_file(
     assert run_host.main(arguments, "run-host") == 1
     if present:
         assert files.path("owner").read_text() == "run-id\n"
+        assert files.path("rc").read_text() == "1\n"
+        assert not claim.exists()
         assert calls == [True]
     else:
         assert calls == []
