@@ -249,8 +249,10 @@ def test_the_frontmatter_sets_the_base_and_draft_flag(
 @pytest.mark.parametrize(
     ("response", "message"),
     [
-        (reply(422, {"message": "bad"}), "status 422"),
+        (httpx.Response(422, text="private response detail"), "status 422"),
+        (reply(401, {"message": "private response detail"}), "token with status 401"),
         (reply(201, {"id": 1}), "status 201"),
+        (reply(201, []), "status 201"),
     ],
 )
 def test_a_refusing_api_is_reported_without_its_text(
@@ -265,8 +267,9 @@ def test_a_refusing_api_is_reported_without_its_text(
         return response
 
     monkeypatch.setattr(httpx, "post", post)
-    with pytest.raises(open_pr.OpenRefusedError, match=message):
+    with pytest.raises(open_pr.OpenRefusedError, match=message) as captured:
         open_draft(published)
+    assert "private response detail" not in str(captured.value)
 
 
 @pytest.mark.parametrize("failure", [httpx.ConnectError("down"), ValueError("x")])
@@ -409,8 +412,13 @@ def test_unavailable_scan_policy_refuses(
 
 
 @pytest.mark.parametrize("committed", [False, True])
+@pytest.mark.parametrize("locations", [None, "rule fixture-rule on line 3"])
 def test_a_scan_refusal_prevents_posting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, committed: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    locations: str | None,
+    *,
+    committed: bool,
 ) -> None:
     published = commit_draft(tmp_path, DRAFT if committed else None)
     if not committed:
@@ -419,16 +427,14 @@ def test_a_scan_refusal_prevents_posting(
     def refuse(text: str, *_args: object, **_kwargs: object) -> None:
         assert text == DRAFT
         message = "private scanner detail"
-        raise gitleaks_check.ScanRefused(message)
+        raise gitleaks_check.ScanRefused(message, locations=locations)
 
     def post(*_args: object, **_kwargs: object) -> httpx.Response:
         pytest.fail("unexpected API call")
 
     monkeypatch.setattr(gitleaks_check, "scan_text", refuse)
     monkeypatch.setattr(httpx, "post", post)
-    with pytest.raises(
-        open_pr.OpenRefusedError,
-        match=r"^PR draft secret scan refused; check the draft and "
-        r"scanner configuration$",
-    ):
+    with pytest.raises(open_pr.OpenRefusedError) as captured:
         open_draft(published)
+    reason = locations or "check the draft and scanner configuration"
+    assert str(captured.value) == f"PR draft secret scan refused: {reason}"

@@ -182,9 +182,12 @@ def scan_draft(text: str, git_dir: Path, rules: bytes) -> None:
             visibility="",
         )
     except (gitleaks_check.ScanRefused, Invalid, UnicodeError) as exc:
-        message = (
-            "PR draft secret scan refused; check the draft and scanner configuration"
+        cause = (
+            exc.locations
+            if isinstance(exc, gitleaks_check.ScanRefused) and exc.locations
+            else "check the draft and scanner configuration"
         )
+        message = f"PR draft secret scan refused: {cause}"
         raise OpenRefusedError(message) from exc
 
 
@@ -222,13 +225,17 @@ def open_pull_request(
             },
             timeout=TIMEOUT,
         )
-        result = response.json()
-        fields = cast("dict[str, int]", result)  # pragma: no mutate -- Cast only.
-        number = fields.get("number")
+        result = (
+            response.json() if response.status_code == httpx.codes.CREATED else None
+        )
     except (httpx.HTTPError, ValueError) as exc:
         message = f"the PR request failed: {type(exc).__name__}"
         raise OpenRefusedError(message) from exc
-    if response.status_code != httpx.codes.CREATED or not isinstance(number, int):
-        message = f"GitHub refused the PR with status {response.status_code}"
+    fields = cast("dict[str, int]", result)  # pragma: no mutate -- Cast only.
+    if isinstance(result, dict) and isinstance(number := fields.get("number"), int):
+        return number
+    if response.status_code == httpx.codes.UNAUTHORIZED:
+        message = f"GitHub rejected the PR token with status {response.status_code}"
         raise OpenRefusedError(message)
-    return number
+    message = f"GitHub refused the PR with status {response.status_code}"
+    raise OpenRefusedError(message)

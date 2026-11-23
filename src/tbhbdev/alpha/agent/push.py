@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 # A remote rejection is on a later stderr line than the URL, so keep all of it.
 PUSH_ERROR_LIMIT = 4000
+HISTORY_TIMEOUT = 30
 
 
 def url(repository: str) -> str:
@@ -125,27 +126,36 @@ def run(
         return harness(run, prepared, stack)
     workspace = Path(prepared.paths.worktree)
     branch = f"agent/{run.files.name}"
-    before = local_heads(workspace)
+    reference = f"refs/heads/{branch}"
+    before = starting_refs(run.files.root, workspace)
+    base = before.get(reference)
     rc = harness(run, prepared, stack)
     if run.files.uncertain:
         return rc
     if rc:
         with suppress(OSError, ValueError):
             commit = head(workspace, branch)
-            if commit is not None and commit != before.get(branch):
+            if commit is not None and commit != base:
                 run.files.write("head", commit)
                 run.files.write("log", f"push skipped: harness exited {rc}\n")
         return rc
-    after = local_heads(workspace)
-    commit = after.pop(branch, None)
-    if isinstance(token, str):
-        commit = head(workspace, branch)
-    if commit is not None:
-        after = {branch: commit, **after}
-    change = first_change(run, workspace, before, after)
+    try:
+        after = local_refs(workspace)
+        commit = after.pop(reference, None)
+        if commit is not None:
+            if isinstance(token, str) and head(workspace, branch) is None:
+                after[reference] = commit
+            else:
+                after = {reference: commit, **after}
+        change = first_change(run, workspace, before, after)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        run.files.write(
+            "log", f"push skipped: cannot check new commits ({type(exc).__name__})\n"
+        )
+        return 4
     if change is None:
         return 0
-    return publish(run, workspace, change, token, before.get(branch))
+    return publish(run, workspace, change, token, base)
 
 
 def publish(
@@ -157,63 +167,87 @@ def publish(
 ) -> int:
     name, commit = change
     branch = f"agent/{run.files.name}"
-    wrong_branch = name != branch
-    if wrong_branch:
-        run.files.write(
-            "log", f"push skipped: commits are on {name}, expected {branch}\n"
-        )
-    else:
+    on_branch = name == f"refs/heads/{branch}"
+    if on_branch:
         run.files.write("head", commit)
     if not isinstance(token, str):
         reason = token.reason if token is not None else "unavailable"
-        run.files.write("log", f"push skipped: no push token ({reason})\n")
-        return 4
-    if wrong_branch:
+        run.files.write(
+            "log", f"push skipped: no push token ({reason}) for commit {commit}\n"
+        )
         return 4
     try:
+        if not on_branch or head(workspace, branch) != commit:
+            source = name.removeprefix("refs/heads/")
+            run.files.write(
+                "log",
+                f"push skipped: commit {commit} on {source} needs "
+                f"{branch} checked out\n",
+            )
+            return 4
         with publication(run.files.root, workspace, commit) as directory:
             status, error = send(directory, url(run.request.repo), branch, token)
             if not status:
                 run.files.write("branch", branch)
                 published = open_pr.PublishedRange(workspace, directory, base, commit)
-                return 0 if opened(run, published, branch, token) else 4
+                return 0 if opened(run, published, branch, token) else 5
     except OSError, subprocess.SubprocessError:
         error = "git push unavailable"
-    text = error.strip().replace(token, "[redacted]") or "git push failed"
+    text = " ".join(error.replace(token, "[redacted]").split()) or "git push failed"
     run.files.write("log", f"push failed: {text[:PUSH_ERROR_LIMIT]}\n")
     return 4
 
 
-def local_heads(workspace: Path) -> dict[str, str]:
-    """Read local branch tips and detached HEAD without loading clone config."""
+def starting_refs(root: Path, workspace: Path) -> dict[str, str]:
+    """List the starting refs in a repository that owns its Git metadata."""
+    refs = local_refs(workspace)
+    detached = refs.pop("detached HEAD", None)
+    seed = next(iter(refs.values()), "0" * 40)
+    with publication(root, workspace, seed) as directory:
+        (directory / "packed-refs").write_text(
+            "".join(f"{commit} {name}\n" for name, commit in refs.items())
+        )
+        listing = history_git(
+            directory, "for-each-ref", "--format=%(refname) %(objectname)"
+        )
+    refs = dict(line.split(" ", 1) for line in listing.splitlines())
+    if detached is not None:
+        refs["detached HEAD"] = detached
+    return refs
+
+
+def detached_ref(directory: Path) -> dict[str, str]:
+    current = runfiles.read_owned(directory / "HEAD", 1024, "run HEAD").strip()
+    return {"detached HEAD": current} if re.fullmatch(r"[0-9a-f]{40}", current) else {}
+
+
+def local_refs(workspace: Path) -> dict[str, str]:
+    """Read loose and packed refs without loading the run's Git config."""
     directory = workspace / ".git"
-    heads: dict[str, str] = {}
+    refs: dict[str, str] = {}
     with suppress(FileNotFoundError):
         packed = runfiles.read_owned(
             directory / "packed-refs", 1024 * 1024, "packed refs"
         )
-        heads.update(
+        refs.update(
             (name, commit)
             for commit, name in re.findall(
-                r"^([0-9a-f]{40}) refs/heads/(\S+)$", packed, re.MULTILINE
+                r"^([0-9a-f]{40}) (refs/\S+)$", packed, re.MULTILINE
             )
         )
-    base = directory / "refs" / "heads"
+    base = directory / "refs"
     for path in base.rglob("*"):
         if not path.is_dir() and path.suffix != ".lock":
             value = runfiles.read_owned(path, 1024, "run ref").strip()
             if re.fullmatch(r"[0-9a-f]{40}", value):
-                heads[path.relative_to(base).as_posix()] = value
-    current = runfiles.read_owned(directory / "HEAD", 1024, "run HEAD").strip()
-    if re.fullmatch(r"[0-9a-f]{40}", current):
-        heads["detached HEAD"] = current
-    return heads
+                refs[path.relative_to(directory).as_posix()] = value
+    return refs | detached_ref(directory)
 
 
 def first_change(
     run: Run, workspace: Path, before: dict[str, str], after: dict[str, str]
 ) -> tuple[str, str] | None:
-    """Find the first tip with commits outside the starting local history."""
+    """Find a commit that no starting ref reaches."""
     bases = tuple(dict.fromkeys(before.values()))
     candidates = {name: tip for name, tip in after.items() if tip not in bases}
     if not candidates:
@@ -222,13 +256,20 @@ def first_change(
         run.files.root, workspace, next(iter(candidates.values()))
     ) as directory:
         for name, tip in candidates.items():
-            if outside_history(directory, tip, bases):
-                return name, tip
+            if commit := outside_history(directory, tip, bases):
+                return name, commit
     return None
 
 
-def outside_history(directory: Path, tip: str, bases: tuple[str, ...]) -> bool:
-    """True when the tip has a commit that no starting tip reaches."""
+def outside_history(directory: Path, tip: str, bases: tuple[str, ...]) -> str:
+    """Return a new commit SHA, peeling tags and ignoring non-commit objects."""
+    revisions = "\n".join((tip, *(f"^{base}" for base in bases))) + "\n"
+    return history_git(
+        directory, "rev-list", "--max-count=1", "--stdin", "--", data=revisions
+    )
+
+
+def history_git(directory: Path, *args: str, data: str = "") -> str:
     env = dict.fromkeys(
         (
             "HOME",
@@ -252,21 +293,17 @@ def outside_history(directory: Path, tip: str, bases: tuple[str, ...]) -> bool:
             "core.hooksPath=/dev/null",
             "-C",
             str(directory),
-            "rev-list",
-            "--max-count=1",
-            tip,
-            "--not",
-            *bases,
-            "--",
+            *args,
         ],
         cwd=directory,
         env=env,
-        stdin=subprocess.DEVNULL,
+        input=data,
         capture_output=True,
         text=True,
         check=True,
+        timeout=HISTORY_TIMEOUT,
     )
-    return bool(listed.stdout.strip())
+    return listed.stdout.strip()
 
 
 def opened(
@@ -278,7 +315,12 @@ def opened(
             published, run.request.repo, branch, token, run.files.write
         )
     except (open_pr.OpenRefusedError, OSError) as refusal:
-        run.files.write("log", f"pull request not opened: {refusal}\n")
+        reason = (
+            str(refusal)
+            if isinstance(refusal, open_pr.OpenRefusedError)
+            else type(refusal).__name__
+        )
+        run.files.write("log", f"pr not opened: {' '.join(reason.split())}\n")
         return False
     run.files.write("pr", f"{run.request.repo}#{number}")
     return True
