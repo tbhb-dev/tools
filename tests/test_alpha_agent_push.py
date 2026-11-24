@@ -404,14 +404,16 @@ def test_fetch_does_not_publish_upstream_history(
     upstream = run.home / "upstream.git"
     git(workspace, "init", "--bare", str(upstream))
     git(workspace, "remote", "add", "origin", str(upstream))
-    git(workspace, "push", "origin", "HEAD:refs/heads/main")
+    git(workspace, "push", "origin", "HEAD:refs/heads/fetched/heads/main")
     git(workspace, "switch", "-c", "upstream/work")
     commit(workspace, "upstream ancestor")
     ancestor = git(workspace, "rev-parse", "HEAD")
     commit(workspace, "upstream tip")
-    git(workspace, "push", str(upstream), "HEAD:refs/heads/main")
+    git(workspace, "push", str(upstream), "HEAD:refs/heads/fetched/heads/main")
     git(workspace, "switch", "agent/example")
     git(workspace, "branch", "-D", "upstream/work")
+    if work != "fetch only":
+        git(workspace, "fetch", "origin")
 
     def fetch(*_args: object) -> int:
         git(workspace, "fetch", "origin")
@@ -432,6 +434,30 @@ def test_fetch_does_not_publish_upstream_history(
         assert git(target, "for-each-ref") == ""
         assert not run.files.path("head").exists()
     assert not run.files.path("log").exists()
+
+
+@pytest.mark.parametrize(
+    "tracking", ["origin/agent/example", "origin/fetched/heads/main"]
+)
+def test_sandbox_remote_ref_cannot_hide_a_run_commit(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path], tracking: str
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+    reference = f"refs/remotes/{tracking}"
+    git(workspace, "update-ref", "refs/remotes/origin/fetched/heads/main", "HEAD")
+
+    def work(*_args: object) -> int:
+        commit(workspace, "agent change")
+        git(workspace, "update-ref", reference, "HEAD")
+        return 0
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, work, SYNTHETIC) == 0
+    assert git(target, "for-each-ref", "--format=%(objectname)") == git(
+        workspace, "rev-parse", "HEAD"
+    )
+    assert run.files.path("pr").read_text() == f"{run.request.repo}#7"
 
 
 @pytest.mark.parametrize(
@@ -492,14 +518,44 @@ def test_only_descendants_of_start_are_published(
         return 0
 
     with ExitStack() as stack:
-        assert push.run(run, prepared, stack, work, SYNTHETIC) == 0
+        assert push.run(run, prepared, stack, work, SYNTHETIC) == (0 if descends else 4)
+    sha = git(workspace, "rev-parse", "HEAD")
     if descends:
-        assert git(target, "rev-parse", "refs/heads/agent/example") == git(
-            workspace, "rev-parse", "HEAD"
-        )
+        assert git(target, "rev-parse", "refs/heads/agent/example") == sha
     else:
         assert git(target, "for-each-ref") == ""
         assert not run.files.path("head").exists()
+        assert run.files.path("log").read_text() == (
+            f"push skipped: 1 new tip(s) outside run start ancestry: {sha[:12]}\n"
+        )
+
+
+def test_unrelated_tips_refuse_publication_even_with_a_run_commit(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+    common = git(workspace, "rev-parse", "HEAD")
+    commit(workspace, "run start")
+
+    def work(*_args: object) -> int:
+        for name in ("first", "second"):
+            git(workspace, "switch", "-c", f"topic/{name}", common)
+            commit(workspace, name)
+        git(workspace, "branch", "topic/alias", "topic/first")
+        git(workspace, "switch", "agent/example")
+        commit(workspace, "publishable work")
+        return 0
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, work, SYNTHETIC) == 4
+    assert git(target, "for-each-ref") == ""
+    first = git(workspace, "rev-parse", "topic/first")
+    second = git(workspace, "rev-parse", "topic/second")
+    short = " ".join(sorted((first[:12], second[:12])))
+    assert run.files.path("log").read_text() == (
+        f"push skipped: 2 new tip(s) outside run start ancestry: {short}\n"
+    )
 
 
 def test_unborn_start_does_not_publish(
@@ -582,7 +638,10 @@ def test_ref_snapshot_reads_packed_branches_and_ignores_locks(
     sha = git(workspace, "rev-parse", "HEAD")
     git(workspace, "pack-refs", "--all")
     (workspace / ".git" / "refs" / "heads" / "pending.lock").write_text(sha)
-    assert push.local_refs(workspace) == {"refs/heads/agent/example": sha, "HEAD": sha}
+    assert push.local_refs(workspace) == (
+        {"refs/heads/agent/example": sha, "HEAD": sha},
+        "ref: refs/heads/agent/example",
+    )
 
 
 def test_history_lookup_uses_protected_metadata_and_has_a_deadline(
@@ -683,6 +742,61 @@ def test_commits_on_two_branches(
     assert run.files.path("log").read_text() == (
         f"push skipped: commits {run_commit} {other} on agent/example, topic/work "
         "need one branch, agent/example\n"
+    )
+
+
+@pytest.mark.parametrize("new_on_run_branch", [True, False])
+def test_prefer_checked_out_run_branch_over_leftover_branch(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path], new_on_run_branch: bool
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+
+    def work(*_args: object) -> int:
+        git(workspace, "switch", "-c", "topic/leftover")
+        commit(workspace, "leftover change")
+        git(workspace, "switch", "agent/example")
+        if new_on_run_branch:
+            commit(workspace, "run change")
+        return 0
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, work, SYNTHETIC) == (
+            0 if new_on_run_branch else 4
+        )
+    if new_on_run_branch:
+        assert git(target, "rev-parse", "refs/heads/agent/example") == git(
+            workspace, "rev-parse", "HEAD"
+        )
+        assert run.files.path("pr").read_text() == f"{run.request.repo}#7"
+    else:
+        assert git(target, "for-each-ref") == ""
+        assert run.files.path("log").read_text() == (
+            "push skipped: checked-out run branch has no new commits\n"
+        )
+
+
+def test_ambiguous_ref_names_are_safe_to_log(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+
+    def work(*_args: object) -> int:
+        start = git(workspace, "rev-parse", "HEAD")
+        commit(workspace, "run change")
+        git(workspace, "switch", "--detach", start)
+        commit(workspace, "other change")
+        sha = git(workspace, "rev-parse", "HEAD")
+        git(workspace, "switch", "--detach", start)
+        (workspace / ".git" / "refs" / "heads" / ("other" + "\x1b\n")).write_text(sha)
+        return 0
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, work, SYNTHETIC) == 4
+    assert git(target, "for-each-ref") == ""
+    assert " on agent/example, other need one branch, agent/example\n" in (
+        run.files.path("log").read_text()
     )
 
 

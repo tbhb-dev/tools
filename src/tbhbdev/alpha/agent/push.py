@@ -26,6 +26,10 @@ PUSH_ERROR_LIMIT = 4000
 HISTORY_TIMEOUT = 30
 
 
+class PublicationRefusedError(ValueError):
+    """The run has new history that cannot be published safely."""
+
+
 def url(repository: str) -> str:
     host, owner, name = repo.parts(repository)
     if host != "github.com":
@@ -127,7 +131,7 @@ def run(
     workspace = Path(prepared.paths.worktree)
     branch = f"agent/{run.files.name}"
     reference = f"refs/heads/{branch}"
-    before = local_refs(workspace)
+    before, _ = local_refs(workspace)
     base = before.get(reference)
     rc = harness(run, prepared, stack)
     if run.files.uncertain:
@@ -140,15 +144,17 @@ def run(
                 run.files.write("log", f"push skipped: harness exited {rc}\n")
         return rc
     try:
-        found = new_commits(run, workspace, before, local_refs(workspace))
+        after, checkout = local_refs(workspace)
+        found = new_commits(run, workspace, before, after, checkout)
+    except PublicationRefusedError as exc:
+        run.files.write("log", f"push skipped: {exc}\n")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         run.files.write(
             "log", f"push skipped: cannot check new commits ({type(exc).__name__})\n"
         )
-        return 4
-    if not found:
-        return 0
-    return publish(run, workspace, found, token, base)
+    else:
+        return publish(run, workspace, found, token, base) if found else 0
+    return 4
 
 
 def publish(
@@ -162,6 +168,7 @@ def publish(
     commits = dict.fromkeys(commit for _, commit in found)
     if len(commits) > 1:
         sources = ", ".join(name.removeprefix("refs/heads/") for name, _ in found)
+        sources = "".join(filter(str.isprintable, sources))
         run.files.write(
             "log",
             f"push skipped: commits {' '.join(commits)} on {sources} "
@@ -192,7 +199,7 @@ def publish(
     return 4
 
 
-def local_refs(workspace: Path) -> dict[str, str]:
+def local_refs(workspace: Path) -> tuple[dict[str, str], str]:
     """Read loose and packed refs without loading the run's Git config."""
     directory = workspace / ".git"
     refs: dict[str, str] = {}
@@ -217,19 +224,22 @@ def local_refs(workspace: Path) -> dict[str, str]:
         refs["detached HEAD"] = current
     elif tip := refs.get(current.removeprefix("ref: ")):
         refs["HEAD"] = tip
-    return refs
+    return refs, current
 
 
 def new_commits(
-    run: Run, workspace: Path, before: dict[str, str], after: dict[str, str]
+    run: Run,
+    workspace: Path,
+    before: dict[str, str],
+    after: dict[str, str],
+    checkout: str,
 ) -> list[tuple[str, str]]:
     """Find independent local branch or detached HEAD tips with new run history."""
+    reference = f"refs/heads/agent/{run.files.name}"
     # Use the starting tip of the run's branch, falling back to the starting HEAD.
-    start = before.get(f"refs/heads/agent/{run.files.name}") or before.get(
-        "HEAD", before.get("detached HEAD")
-    )
-    upstream = (tip for name, tip in after.items() if name.startswith("refs/remotes/"))
-    bases = tuple(dict.fromkeys((*before.values(), *upstream)))
+    start = before.get(reference) or before.get("HEAD", before.get("detached HEAD"))
+    # Preparation fetches into the clone before the harness can change its refs.
+    bases = tuple(dict.fromkeys(before.values()))
     candidates = {
         name: tip
         for name, tip in after.items()
@@ -241,36 +251,50 @@ def new_commits(
     with publication(
         run.files.root, workspace, next(iter(candidates.values()))
     ) as directory:
-        found = [
-            (name, commit)
-            for name, tip in sorted(candidates.items())
-            if (commit := outside_history(directory, tip, bases, start))
-        ]
+        found: dict[str, str] = {}
+        dropped: set[str] = set()
+        for name, tip in sorted(candidates.items()):
+            if outside_history(directory, tip, bases, start):
+                found[name] = tip
+            elif outside_history(directory, tip, bases):
+                dropped.add(tip)
+        if dropped:
+            short = " ".join(tip[:12] for tip in sorted(dropped))
+            message = f"{len(dropped)} new tip(s) outside run start ancestry: {short}"
+            raise PublicationRefusedError(message)
+        if found and checkout == f"ref: {reference}":
+            if reference in found:
+                return [(reference, found[reference])]
+            message = "checked-out run branch has no new commits"
+            raise PublicationRefusedError(message)
         if len(found) <= 1:
-            return found
+            return list(found.items())
         independent = set(
             history_git(
-                directory, "merge-base", "--independent", *(tip for _, tip in found)
+                directory, "merge-base", "--independent", *found.values()
             ).split()
         )
-        return [(name, tip) for name, tip in found if tip in independent]
+        return [(name, tip) for name, tip in found.items() if tip in independent]
 
 
 def outside_history(
-    directory: Path, tip: str, bases: tuple[str, ...], start: str
-) -> str:
-    """Return the tip if it descends from the start and is outside known history."""
+    directory: Path, tip: str, bases: tuple[str, ...], start: str | None = None
+) -> bool:
+    """Check for new history, optionally restricted to descendants of the start."""
     revisions = "\n".join((tip, *(f"^{base}" for base in bases))) + "\n"
-    return history_git(
-        directory,
-        "rev-list",
-        # Excluding the start also excludes its ancestors.
-        f"--ancestry-path={start}",
-        "--max-count=1",
-        "--stdin",
-        "--",
-        revisions=revisions,
-    ).strip()
+    # Excluding the start also excludes its ancestors.
+    ancestry = (f"--ancestry-path={start}",) if start else ()
+    return bool(
+        history_git(
+            directory,
+            "rev-list",
+            *ancestry,
+            "--max-count=1",
+            "--stdin",
+            "--",
+            revisions=revisions,
+        ).strip()
+    )
 
 
 def history_git(directory: Path, *args: str, revisions: str | None = None) -> str:

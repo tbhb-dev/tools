@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:ec35558d6fb1a9a1
-    at: "2026-11-23T08:19:38Z"
+    session: sha-256-64:32929a3bd147a3a4
+    at: "2026-11-24T22:26:57Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -58,12 +58,12 @@ The tmux socket is `-S <sockets_dir>/agents`. The driver creates the configured 
 
 `wait` prefers the final answer and returns the run's exit status. Its poll interval defaults to 30 seconds (`TBHB_AGENT_WAIT_POLL`). Consecutive connection failures stop after 240 seconds (`TBHB_AGENT_WAIT_UNREACHABLE`) with exit status 75. Exit codes 1 and 75 overlap with harness exit codes. Read the first result line to distinguish an unknown or unreachable run from a harness result. Agent text follows that line.
 
-After a successful build harness run, run-host compares commits reachable from all Git refs and detached `HEAD` with the starting history. It uses these exit statuses for publication.
+After a successful build harness run, run-host compares local branch tips and detached `HEAD` with the history it recorded before launch, including refs fetched by run-host during preparation. Remote-tracking refs added or changed during the harness run do not change that history. Run-host publishes the checked-out run branch when it contains new commits. If the run branch is checked out and new commits exist only elsewhere, run-host refuses publication. When the run branch is not checked out, run-host can publish a single independent new tip from another branch or detached `HEAD` to the run branch on origin.
 
 | Exit status | Result |
 | --- | --- |
 | 0 | The run contains no new commits, or run-host pushes the branch and opens the pull request. |
-| 4 | Run-host skips the push or Git fails to push. The log starts the reason line with `push skipped:` or `push failed:`. |
+| 4 | Run-host refuses publication or Git fails to push. New tips outside the starting commit's ancestry cause a refusal, and the log lists their count and short commit IDs. The reason line starts with `push skipped:` or `push failed:`. |
 | 5 | Run-host pushes the branch and can't open the pull request. The log starts the reason line with `pr not opened:`. |
 
 If the harness fails, run-host keeps its exit status. `tbhbdev alpha agent status NAME` shows the last publication reason next to the return code when the run ends with a nonzero status and the log contains a reason.
