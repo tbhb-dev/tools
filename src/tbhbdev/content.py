@@ -157,10 +157,16 @@ def check_decision_record(markdown: str) -> list[str]:
     return refusals
 
 
-def check_review(markdown: str) -> list[str]:
+def check_review(markdown: str, *, metadata: Json | None = None) -> list[str]:
     """Return review validation refusals, or an empty list on success."""
+    definition = "#Review"
+    if metadata is None:
+        definition = "#ReviewBody"
+        metadata = {}
     try:
-        draft = normalize(markdown, object="pr-review", variant="review", metadata={})
+        draft = normalize(
+            markdown, object="pr-review", variant="review", metadata=metadata
+        )
     except ValueError as exc:
         return [str(exc)]
     try:
@@ -173,7 +179,7 @@ def check_review(markdown: str) -> list[str]:
                     "vet",
                     "-c",
                     "-d",
-                    "#Review",
+                    definition,
                     "core.cue",
                     "issue.cue",
                     "review.cue",
