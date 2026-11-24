@@ -224,7 +224,13 @@ def test_start_ref_push_fast_forwards_the_existing_branch_without_a_pr(
             assert args[-3:] == (target.as_uri(), "HEAD", START_REF)
             operations.append("ls-remote")
         else:
-            assert args == ("push", "--", target.as_uri(), f"HEAD:{START_REF}")
+            assert args == (
+                "push",
+                f"--force-with-lease={START_REF}:{base}",
+                "--",
+                target.as_uri(),
+                f"HEAD:{START_REF}",
+            )
             operations.append("push")
         return original(directory, token, *args, capture_output=capture_output)
 
@@ -249,6 +255,35 @@ def test_start_ref_push_fast_forwards_the_existing_branch_without_a_pr(
         DEFAULT_REF,
     }
     assert not run.files.path("pr").exists()
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+def test_start_ref_lease_refuses_remote_changes_after_the_check(
+    fix_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    deleted: bool,
+) -> None:
+    run, prepared, target = fix_run
+    original = push.git_with_token
+
+    def change_before_push(
+        directory: Path, token: str, *args: str, capture_output: bool = False
+    ) -> tuple[int, str, str]:
+        if args[0] == "push":
+            if deleted:
+                git(target, "update-ref", "-d", START_REF)
+            else:
+                git(target, "update-ref", START_REF, DEFAULT_REF)
+        return original(directory, token, *args, capture_output=capture_output)
+
+    monkeypatch.setattr(push, "git_with_token", change_before_push)
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 4
+    assert "stale info" in run.files.path("log").read_text()
+    assert not run.files.path("branch").exists()
+    assert git(target, "for-each-ref", "--format=%(objectname)", START_REF) == (
+        "" if deleted else git(target, "rev-parse", DEFAULT_REF)
+    )
 
 
 def test_start_ref_uses_the_run_branch_when_another_branch_shares_its_tip(

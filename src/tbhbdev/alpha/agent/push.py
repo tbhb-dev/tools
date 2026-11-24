@@ -53,9 +53,11 @@ def feed(fd: int, token: str) -> None:
         pass
 
 
-def send(workspace: Path, target: str, branch: str, token: str) -> tuple[int, str]:
+def send(
+    workspace: Path, target: str, branch: str, token: str, *options: str
+) -> tuple[int, str]:
     status, _, error = git_with_token(
-        workspace, token, "push", "--", target, f"HEAD:refs/heads/{branch}"
+        workspace, token, "push", *options, "--", target, f"HEAD:refs/heads/{branch}"
     )
     return status, error
 
@@ -281,7 +283,9 @@ def push_start_branch(
                 )
                 return 4
             check_not_moved(directory, target, ref, base, token)
-            status, error = send(directory, target, branch, token)
+            status, error = send(
+                directory, target, branch, token, f"--force-with-lease={ref}:{base}"
+            )
         if not status:
             run.files.write("branch", branch)
             run.files.write("log", f"pushed {ref} at {commit}\n")
