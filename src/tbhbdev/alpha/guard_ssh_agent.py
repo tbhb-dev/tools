@@ -8,25 +8,23 @@ read reliably. The hook denies:
 
 - `ssh-add` as the command word of a simple command, which is the first word
   after an operator or the start of the text, past assignments, wrappers such
-  as `env` and `sudo`, and keywords such as `then`;
-- a plain word of a shell command, or the `file_path` or `path` of another
-  tool such as Read, that resolves, against the payload's working directory
-  and with symlinks and `..` resolved, into the operator's ssh directory
-  except its `sessions` subdirectory. This covers ssh, scp, sftp and rsync
-  arguments too.
+  as `env` and keywords such as `then`;
+- the `file_path` or `path` of another tool such as Read that resolves, with
+  symlinks and `..` resolved against the payload's working directory, into the
+  operator's ssh directory except its `sessions` subdirectory.
 
-A word is plain when it has no quote or escape. `~` and `$HOME` expand in a
-plain word, and a name that starts with `--option=` or `NAME=` is read after
-the `=`. The hook never looks inside heredoc bodies, comments, quoted text,
-redirection operands, here-strings or `case` patterns. Like the other guards,
+The hook never looks inside comments or quoted text. A command with a
+redirection operator, a heredoc or here-string, a `case`, a group or
+parenthesis, a command substitution, a backtick, or `sudo` or `doas` as a
+command word is not parsed and is allowed whole. Like the other guards,
 allowing prints nothing and unreadable input or a crash, including a closed
 output pipe, fails open.
 
-Known gaps, all false allows: a path with any quote or escape, a redirection
-operand, a bare new filename in the ssh directory, a program name held in a
-variable, runners such as `timeout` and `xargs`, commands inside `$(...)`,
-backticks, and `bash -c`, a heredoc that starts inside such a command, and
-the Antigravity file tools and `workspacePaths`.
+Known gaps, all false allows: every unparsed form above, any shell word that
+names the ssh directory, a program name held in a variable, runners such as
+`timeout`, `xargs`, `env -S` and `bash -c`, `builtin command ssh-add`, a path
+that differs from the ssh directory only in case on a case-insensitive volume,
+and the Antigravity file tools and `workspacePaths`.
 """
 
 import json
@@ -34,7 +32,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 
 from tbhbdev.alpha.guard_gh_pr import command_of, decision
 from tbhbdev.alpha.repo import read_hook_stdin
@@ -48,15 +46,14 @@ REASON_DIR = (
     "outside its sessions subdirectory."
 )
 SSH_DIR = ".ssh"
-OPERATORS = ";&|()<>"
+OPERATORS = ";&|"
+# Constructs the lexer does not handle: the whole command is allowed.
+UNPARSED = re.compile(r"[()`<>]|\bcase\b")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
-PREFIX = re.compile(r"(?:--?[A-Za-z][\w-]*|[A-Za-z_]\w*)=")
 KEYWORDS = {"if", "then", "do", "else", "elif", "while", "until", "!", "{"}
 # Wrapper programs and the options of each that take a value.
 WRAPPERS = {
     "env": {"-u", "-C", "-S", "--unset", "--chdir", "--split-string"},
-    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U", "--user"}
-    | {"--group", "--host", "--prompt", "--chdir"},
     "command": set(),
     "exec": {"-a"},
     "nohup": set(),
@@ -64,15 +61,8 @@ WRAPPERS = {
     "nice": {"-n"},
 }
 LOOKUP = re.compile(r"-[A-Za-z]*[vV][A-Za-z]*")
-PRINTERS = {"echo", "printf"}
+ELEVATORS = {"sudo", "doas"}
 PATH_FIELDS = ("file_path", "path")
-
-
-class Word(NamedTuple):
-    """A shell word, plain when it has no quote or escape."""
-
-    text: str
-    plain: bool
 
 
 def quoted(text: str, index: int, mark: str) -> tuple[str, int]:
@@ -103,32 +93,22 @@ class Lexer:
     def __init__(self, text: str) -> None:
         self.text = text
         self.index = 0
-        self.found: list[list[Word]] = [[]]
+        self.found: list[list[str]] = [[]]
         self.buf: list[str] = []
-        self.quoted = False  # the word has a quote or escape
         self.started = False
-        self.depth = 0  # open parentheses
-        self.drop = False  # the next word is a redirection operand
-        self.heredoc = False  # the next word ends a heredoc body
-        self.ends: list[str] = []  # terminators of the bodies after this line
 
     def flush(self) -> None:
         """End the word being built."""
         if self.started:
-            word = "".join(self.buf)
-            if self.heredoc:
-                self.ends.append(word.removeprefix("-"))
-            elif not self.drop:
-                self.found[-1].append(Word(word, not self.quoted))
-            self.drop = self.heredoc = False
+            self.found[-1].append("".join(self.buf))
         self.buf.clear()
-        self.quoted = self.started = False
+        self.started = False
 
     def quote(self, mark: str) -> None:
         """Read the quoted part at the index."""
         part, self.index = quoted(self.text, self.index, mark)
         self.buf.append(part)
-        self.quoted = self.started = True
+        self.started = True
 
     def escape(self) -> None:
         """Read a backslash and the character it escapes."""
@@ -136,41 +116,13 @@ class Lexer:
         self.index += 2
         if following != "\n":
             self.buf.append(following)
-            self.quoted = self.started = True
-
-    def skip_bodies(self) -> None:
-        """Skip the heredoc bodies that start on the line just ended."""
-        for end in self.ends:
-            while self.index < len(self.text):
-                stop = self.text.find("\n", self.index) % (len(self.text) + 1)
-                line = self.text[self.index : stop]
-                self.index = min(stop + 1, len(self.text))
-                if line.strip() == end:
-                    break
-        self.ends.clear()
+            self.started = True
 
     def operator(self) -> None:
         """Read the operator at the index, which starts the next segment."""
         self.flush()
-        end = self.index + 1
-        newline = self.text[self.index] == "\n"
-        if not newline:
-            while end < len(self.text) and self.text[end] in OPERATORS:
-                end += 1
-        run = self.text[self.index : end]
-        for char in run:
-            if char == ")" and not self.depth:
-                self.found[-1].clear()  # a `case` pattern, not a command
-            self.depth += (char == "(") - (char == ")" and self.depth > 0)
-        self.index = end
-        if set(run) <= set("<>"):
-            # A redirection's operand is neither a command nor a path.
-            self.drop = True
-            self.heredoc = run == "<<"
-        else:
-            self.found.append([])
-        if newline:
-            self.skip_bodies()
+        self.index += 1
+        self.found.append([])
 
     def step(self) -> None:
         """Read one character or construct at the index."""
@@ -192,12 +144,14 @@ class Lexer:
             self.index += 1
 
 
-def segments(text: str) -> list[list[Word]]:
+def segments(text: str) -> list[list[str]]:
     """The simple commands of TEXT, split at the shell operators outside quotes.
 
     Raises:
         ValueError: TEXT has an unbalanced quote.
     """
+    if UNPARSED.search(text):
+        return []
     lexer = Lexer(text)
     while lexer.index < len(text):
         lexer.step()
@@ -229,7 +183,7 @@ def strip_wrappers(words: list[str]) -> list[str]:
         elif name in WRAPPERS:
             end = skip_options(words, index + 1, WRAPPERS[name])
             if name == "command" and any(
-                LOOKUP.fullmatch(word) for word in words[index + 1 : end]
+                LOOKUP.fullmatch(w) for w in words[index + 1 : end]
             ):
                 return []
             index = end
@@ -255,14 +209,10 @@ def under_ssh(path: str, home: str) -> bool:
     return path == ssh or path.startswith(ssh + "/")
 
 
-def names_ssh_dir(word: Word, cwd: str) -> bool:
-    """Whether a plain word names the ssh directory or a path below it."""
+def names_ssh_dir(text: str, cwd: str) -> bool:
+    """Whether a path names the ssh directory or a path below it."""
     home = str(Path.home())
-    text = word.text
-    found = PREFIX.match(text)
-    if found:
-        text = text[found.end() :]
-    if not word.plain or not text or text.startswith("-"):
+    if not text or text.startswith("-"):
         return False
     text = expand(text, home)
     if not Path(text).is_absolute():
@@ -279,32 +229,22 @@ def names_ssh_dir(word: Word, cwd: str) -> bool:
     return under_ssh(os.path.realpath(text), home)
 
 
-def segment_reason(words: list[Word], cwd: str) -> str | None:
-    """The deny reason for one simple command, or None to allow it."""
-    args = strip_wrappers([word.text for word in words])
-    program = Path(args[0]).name if args else ""
-    if program == "ssh-add":
-        return REASON_ADD
-    if program not in PRINTERS and any(names_ssh_dir(w, cwd) for w in words):
-        return REASON_DIR
-    return None
-
-
-def verdict(text: str, cwd: str | None = None) -> str | None:
+def verdict(text: str) -> str | None:
     """The deny reason for a shell command, or None to allow it.
 
-    CWD is the working directory, which defaults to the process's. An unbalanced
-    quote makes the text unreadable, which allows it.
+    An unbalanced quote makes the text unreadable, which allows it. So does
+    `sudo` or `doas` as a command word, whose arguments the hook can't read.
     """
     try:
         parsed = segments(text)
     except ValueError:
         return None
-    for words in parsed:
-        reason = segment_reason(words, cwd or str(Path.cwd()))
-        if reason:
-            return reason
-    return None
+    programs = [
+        Path(args[0]).name for words in parsed if (args := strip_wrappers(words))
+    ]
+    if ELEVATORS.intersection(programs):
+        return None
+    return REASON_ADD if "ssh-add" in programs else None
 
 
 def path_reason(data: Json, cwd: str | None = None) -> str | None:
@@ -314,9 +254,7 @@ def path_reason(data: Json, cwd: str | None = None) -> str | None:
         return None
     for field in PATH_FIELDS:
         value = inputs.get(field)
-        if isinstance(value, str) and names_ssh_dir(
-            Word(value, plain=True), cwd or str(Path.cwd())
-        ):
+        if isinstance(value, str) and names_ssh_dir(value, cwd or str(Path.cwd())):
             return REASON_DIR
     return None
 
@@ -327,7 +265,7 @@ def denial() -> str | None:
     text, antigravity = command_of(data)
     cwd = data.get("cwd")
     cwd = cwd if isinstance(cwd, str) else None
-    reason = verdict(text, cwd) or path_reason(data, cwd)
+    reason = verdict(text) or path_reason(data, cwd)
     return json.dumps(decision(reason, antigravity=antigravity)) if reason else None
 
 

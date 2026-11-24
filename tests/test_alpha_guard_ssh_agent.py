@@ -22,31 +22,18 @@ S = ".ssh"
         ("ssh-add -l", guard.REASON_ADD),
         ("/usr/bin/ssh-add", guard.REASON_ADD),
         ("true && ssh-add", guard.REASON_ADD),
-        ("sudo -u deploy ssh-add", guard.REASON_ADD),
+        ("\\ssh-add", guard.REASON_ADD),
+        ("true |& ssh-add", guard.REASON_ADD),
+        ("echo ok & ssh-add", guard.REASON_ADD),
+        ("echo a\nssh-add", guard.REASON_ADD),
         ("env -- FOO=1 ssh-add", guard.REASON_ADD),
         ("FOO=1 command ssh-add", guard.REASON_ADD),
-        (f"cat ~/{S}/config", guard.REASON_DIR),
-        ("< notes ssh-add", guard.REASON_ADD),
-        ("(ssh-add)", guard.REASON_ADD),
-        ("ssh-add <<EOF\nunterminated", guard.REASON_ADD),
-        ("ls # <<EOF\nssh-add", guard.REASON_ADD),
-        ("cat <<A <<B\nx\nA\ny\nB\nssh-add", guard.REASON_ADD),
-        (f"ls $HOME/{S}", guard.REASON_DIR),
-        (f"x=~/{S}/id cat", guard.REASON_DIR),
-        (f"sudo cat ~/{S}/id", guard.REASON_DIR),
         ("env --unset FOO ssh-add -l", guard.REASON_ADD),
         ("if true; then ssh-add; fi", guard.REASON_ADD),
-        ("cat <<EOF\nx\nEOF\nssh-add", guard.REASON_ADD),
-        (f"cat ./{S}/config", guard.REASON_DIR),
-        (f"cat ~/{S}/sessions/../id_x", guard.REASON_DIR),
-        (f"cat ~/{S}/sessions-x/y", guard.REASON_DIR),
-        (f"cat --file=~/{S}/config", guard.REASON_DIR),
-        (f"ssh -i ~/{S}/id_x host", guard.REASON_DIR),
-        (f"cat a\\\n ~/{S}/config", guard.REASON_DIR),
     ],
 )
 def test_denied(command: str, reason: str) -> None:
-    assert guard.verdict(command, str(Path.home())) == reason
+    assert guard.verdict(command) == reason
 
 
 @pytest.mark.parametrize(
@@ -54,6 +41,8 @@ def test_denied(command: str, reason: str) -> None:
     [
         f"ls ~/{S}/sessions",
         f"ls ~/{S}x",
+        f"git commit -m {Path.home()}/{S}",
+        f"cat ./{S}/config",
         f"echo ~/{S}/config",
         f"git commit -m 'read config=~/{S}/config'",
         "SSH_AUTH_SOCK=/s git status",
@@ -76,6 +65,34 @@ def test_denied(command: str, reason: str) -> None:
         "cat <<< 'ssh-add'",
         "case $x in\n ssh-add) true;;\nesac",
         "command -pv ssh-add",
+        "sudo -l ssh-add",
+        f"git commit -m `echo ~/{S}/x`",
+        "(ssh-add)",
+        "ssh-add <<EOF\nunterminated",
+        "ls # <<EOF\nssh-add",
+        "cat <<EOF\nx\nEOF\nssh-add",
+        "cat <<EOF\n  EOF\nssh-add -l\nEOF",
+        "cat <<'-EOF'\n-EOF\nssh-add -l",
+        'git commit -m "$(printf \'%s\' "docs; ssh-add -l; finished")"',
+        "echo foo &> ./ssh-add",
+        "(case $x in ssh-add) true;; esac)",
+        f"git commit -m ~/{S}/config",
+        f"grep -F ~/{S}/config x",
+        f"cat ~/{S}/config",
+        "echo foo &> out ssh-add",
+        "echo &>>log ssh-add",
+        "printf %s >|file ssh-add",
+        "ssh-add 2>&1",
+        "< notes ssh-add",
+        "sudo ssh-add",
+        "sudo -nl ssh-add",
+        "sudo -ll ssh-add",
+        "sudo -lUx ssh-add",
+        "sudo -e ./ssh-add",
+        "doas ssh-add",
+        "env FOO=1 sudo ssh-add",
+        "ssh-add; echo (x)",
+        "ssh-add; case x in",
     ],
 )
 def test_allowed(command: str) -> None:
@@ -84,9 +101,7 @@ def test_allowed(command: str) -> None:
 
 def test_quoting_and_continuations() -> None:
     assert guard.verdict('echo "a \\"b\\" \\$x"') is None
-    assert guard.verdict(f"cat \\~/{S}/config") is None
     assert guard.verdict("ls \\\n -l") is None
-    assert guard.verdict("ls 2>&1") is None
 
 
 def test_a_bare_name_counts_when_the_file_is_in_the_ssh_directory(
@@ -96,16 +111,16 @@ def test_a_bare_name_counts_when_the_file_is_in_the_ssh_directory(
     ssh = tmp_path / S
     ssh.mkdir()
     (ssh / "id_x").write_text("k")
-    assert guard.verdict("cat id_x", str(ssh)) == guard.REASON_DIR
-    assert guard.verdict("git log main", str(ssh)) is None
-    assert guard.verdict("git status -s", str(ssh)) is None
+    assert guard.path_reason({"tool_input": {"path": "id_x"}}, str(ssh)) is not None
+    assert guard.path_reason({"tool_input": {"path": "main"}}, str(ssh)) is None
+    assert guard.path_reason({"tool_input": {"path": "-s"}}, str(ssh)) is None
 
 
 def test_the_payload_cwd_resolves_relative_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    payload = {"cwd": str(tmp_path), "tool_input": {"command": f"cat {S}/config"}}
+    payload = {"cwd": str(tmp_path), "tool_input": {"file_path": f"{S}/config"}}
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
     assert guard.main() == 0
     assert "deny" in capsys.readouterr().out
