@@ -26,7 +26,13 @@ def duration(text: str) -> int:
 def parser(prog: str) -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog=prog)
     verbs = command.add_subparsers(dest="verb", required=True)
-    execute = verbs.add_parser("exec", help="launch a headless run")
+    execute = verbs.add_parser(
+        "exec",
+        help="launch a headless run",
+        description="For a fix round on an existing pull request, run "
+        "agent clean NAME and reuse the pull request's run name, or pass both "
+        "--start-ref and --fetch-ref for its branch.",
+    )
     execute.add_argument("--host", required=True)
     execute.add_argument("--repo", required=True)
     execute.add_argument("--ref")

@@ -15,6 +15,11 @@ BUILD_PUBLICATION = (
 START_REF_PUBLICATION = (
     "The driver pushes to the existing pull request branch after success."
 )
+FIX_ROUND = (
+    "For a fix round on an existing pull request, run `agent clean NAME` and reuse "
+    "the pull request's run name, or pass both `--start-ref` and `--fetch-ref` "
+    "for its branch."
+)
 
 
 def brief(
@@ -26,7 +31,7 @@ def brief(
 ) -> str:
     if profile is Profile.BUILD:
         publication = BUILD_PUBLICATION if start_ref is None else START_REF_PUBLICATION
-        text = f"Commit your changes locally. {publication}\n{text}"
+        text = f"Commit your changes locally. {publication}\n{FIX_ROUND}\n{text}"
     return f"{FINAL_ONLY}\n{text}" if kind is RunKind.EXEC else text
 
 

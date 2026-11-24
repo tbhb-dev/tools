@@ -148,6 +148,11 @@ def test_exec_help_describes_fetch_refs(capsys: pytest.CaptureFixture[str]) -> N
     assert "--start-ref REF" in help_text
     assert "also listed with --fetch-ref" in help_text
     assert "build profile only" in help_text
+    assert (
+        "For a fix round on an existing pull request, run agent clean NAME and reuse "
+        "the pull request's run name, or pass both --start-ref and --fetch-ref "
+        "for its branch." in help_text
+    )
 
 
 @pytest.mark.parametrize(

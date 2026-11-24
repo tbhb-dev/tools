@@ -3,8 +3,8 @@ description: Interim agent commands, installation, and harness hooks.
 generated:
   - role: generated
     harness: codex
-    model: openai:gpt-6
-    at: "2026-11-24T17:15:58Z"
+    model: openai:gpt-6.2-sol
+    at: "2026-11-24T20:18:46Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -86,9 +86,9 @@ The alpha commands write each worktree's state under `$(git rev-parse --git-dir)
 
 `tbhbdev alpha agent exec --fetch-ref REF` makes `refs/heads/<branch>` available as `origin/fetched/heads/<branch>` and `refs/pull/N/head` as `origin/fetched/pull/N/head`. Repeat `--fetch-ref` up to eight times with either profile.
 
-For a build that updates an existing pull request, pass both `--fetch-ref refs/heads/<branch>` and `--start-ref refs/heads/<branch>`. The run starts at the fetched commit and pushes a fast-forward to that branch without opening a pull request. The command refuses the repository's default branch. If the remote tip changes before the push check, the run fails and keeps its worktree.
+For a fix round on an existing pull request, run `tbhbdev alpha agent clean NAME` and reuse the pull request's run name, or pass both `--start-ref refs/heads/<branch>` and `--fetch-ref refs/heads/<branch>` for its branch. With both flags, the run starts at the fetched commit and pushes a fast-forward to the existing pull request branch. The command refuses the repository's default branch. If the remote tip no longer matches the fetched commit at push time, the run fails and keeps its worktree.
 
-For a run that opens a pull request, write `.github/PULL_REQUEST_DRAFT.md` in its worktree and keep it out of commits. The driver reads the worktree draft first and uses the pushed commit's draft if the worktree draft is missing. The worktree draft must be an owned regular file of at most 64 KiB. The driver refuses symlinks and scans the draft with the host's secret rules and the pre-run commit's `.gitleaks.toml` before posting it. The driver warns when the pushed changes add the draft.
+For a run that opens a pull request, write `.github/PULL_REQUEST_DRAFT.md` in its worktree and keep it out of commits. The driver reads the worktree draft first and uses the pushed commit's draft if the worktree draft is missing. The worktree draft must be an owned regular file of at most 64 KiB. The driver refuses symlinks and scans the draft with the host's secret rules and the pre-run commit's `.gitleaks.toml` before posting it. The driver warns when the pushed changes add the draft. If GitHub responds with HTTP 422 when the driver tries to open a pull request, the driver records the open pull request if the pushed branch has one.
 
 ## Identity start time
 

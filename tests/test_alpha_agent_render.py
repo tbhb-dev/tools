@@ -16,7 +16,9 @@ def test_brief_and_launch() -> None:
     assert build == (
         final_only + "Commit your changes locally. "
         "The driver pushes the build branch and opens the pull request after success."
-        "\nexample\n"
+        "\nFor a fix round on an existing pull request, run `agent clean NAME` "
+        "and reuse the pull request's run name, or pass both `--start-ref` and "
+        "`--fetch-ref` for its branch.\nexample\n"
     )
     assert "including" not in build
     assert render.brief(RunKind.START, "example", profile=Profile.REVIEW) == "example"
