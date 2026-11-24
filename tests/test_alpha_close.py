@@ -433,6 +433,19 @@ def test_issue_relationship_usage(
         assert argument in output
 
 
+def test_issue_relationship_reports_refusal(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    message = "Cannot link example/child#9 under example/parent#7: visibility refused"
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise close.content.Refused(message)
+
+    monkeypatch.setitem(close.RELATIONSHIP_WRITES, "link-sub", refuse)
+    assert close.main(["issue", "link-sub", "example/parent#7", "example/child#9"]) == 1
+    assert capsys.readouterr() == ("", f"{message}\n")
+
+
 def test_main_reads_the_process_environment_by_default(
     gh: Gh, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

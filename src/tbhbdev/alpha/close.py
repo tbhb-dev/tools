@@ -271,6 +271,9 @@ def write_relationship(args: argparse.Namespace) -> int:
     except subprocess.CalledProcessError as exc:
         print(exc.stderr, end="", file=sys.stderr)
         return exc.returncode
+    except content.Refused as exc:
+        print(exc, file=sys.stderr)
+        return 1
     if result is not None:
         print(json.dumps(result))
     return 0
