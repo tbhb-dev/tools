@@ -176,6 +176,7 @@ readextattr
 readsecurity
 redirections
 regclass
+refmap
 regenerable
 relkind
 relname

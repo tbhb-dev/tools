@@ -7,7 +7,7 @@ from typing import cast
 
 from tbhbdev.alpha.repo_bootstrap import gh_api
 
-COUNTER = ("bazelisk", "run", "//lint:pr_size_count", "--")
+COUNTER = ("bazelisk", "run", "@tbhb_rules//lint:pr_size_count", "--")
 COUNT_KEYS = ("code_lines", "code_limit", "raw_lines", "raw_limit")
 
 
