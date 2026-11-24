@@ -146,41 +146,54 @@ def run(
                 run.files.write("head", commit)
                 run.files.write("log", f"push skipped: harness exited {rc}\n")
         return rc
+    return publish_changes(run, workspace, before, token, start)
+
+
+def publish_changes(
+    run: Run,
+    workspace: Path,
+    before: dict[str, str],
+    token: str | PushTokenFailure | None,
+    start: tuple[str, str] | None,
+) -> int:
+    reference = f"refs/heads/agent/{run.files.name}"
     try:
         after = local_refs(workspace)
-        commit = after.pop(reference, None)
-        if commit is not None:
-            if isinstance(token, str) and head(workspace, branch) is None:
-                after[reference] = commit
-            else:
-                after = {reference: commit, **after}
-        change = first_change(run, workspace, before, after)
+        if start is not None:
+            change = first_change(run, workspace, before, after, token)
+            return (
+                0
+                if change is None
+                else push_start_branch(run, workspace, change, token, start)
+            )
+        found = new_commits(run, workspace, before, after)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         run.files.write(
             "log", f"push skipped: cannot check new commits ({type(exc).__name__})\n"
         )
         return 4
-    if change is None:
-        return 0
-    return (
-        push_start_branch(run, workspace, change, token, start)
-        if start is not None
-        else publish(run, workspace, change, token, base)
-    )
+    return publish(run, workspace, found, token, before.get(reference)) if found else 0
 
 
 def publish(
     run: Run,
     workspace: Path,
-    change: tuple[str, str],
+    found: list[tuple[str, str]],
     token: str | PushTokenFailure | None,
     base: str | None,
 ) -> int:
-    name, commit = change
     branch = f"agent/{run.files.name}"
-    on_branch = name == f"refs/heads/{branch}"
-    if on_branch:
-        run.files.write("head", commit)
+    commits = dict.fromkeys(commit for _, commit in found)
+    if len(commits) > 1:
+        sources = ", ".join(name.removeprefix("refs/heads/") for name, _ in found)
+        run.files.write(
+            "log",
+            f"push skipped: commits {' '.join(commits)} on {sources} "
+            f"need one branch, {branch}\n",
+        )
+        return 4
+    commit = found[0][1]
+    run.files.write("head", commit)
     if not isinstance(token, str):
         reason = token.reason if token is not None else "unavailable"
         run.files.write(
@@ -188,14 +201,6 @@ def publish(
         )
         return 4
     try:
-        if not on_branch or head(workspace, branch) != commit:
-            source = name.removeprefix("refs/heads/")
-            run.files.write(
-                "log",
-                f"push skipped: commit {commit} on {source} needs "
-                f"{branch} checked out\n",
-            )
-            return 4
         with publication(run.files.root, workspace, commit) as directory:
             status, error = send(directory, url(run.request.repo), branch, token)
             if not status:
@@ -274,7 +279,7 @@ def push_start_branch(
         target = url(run.request.repo)
         branch = ref.removeprefix("refs/heads/")
         with publication(run.files.root, workspace, commit) as directory:
-            if outside_history(directory, base, (commit,)):
+            if outside_history(directory, commit, (base,), base) != commit:
                 run.files.write(
                     "log",
                     f"push failed: commit {commit} does not fast-forward "
@@ -323,29 +328,106 @@ def local_refs(workspace: Path) -> dict[str, str]:
     current = runfiles.read_owned(directory / "HEAD", 1024, "run HEAD").strip()
     if re.fullmatch(r"[0-9a-f]{40}", current):
         refs["detached HEAD"] = current
+    elif tip := refs.get(current.removeprefix("ref: ")):
+        refs["HEAD"] = tip
     return refs
 
 
 def first_change(
-    run: Run, workspace: Path, before: dict[str, str], after: dict[str, str]
+    run: Run,
+    workspace: Path,
+    before: dict[str, str],
+    after: dict[str, str],
+    token: str | PushTokenFailure | None,
 ) -> tuple[str, str] | None:
-    """Find a commit that no starting ref reaches."""
+    branch = f"agent/{run.files.name}"
+    reference = f"refs/heads/{branch}"
+    commit = after.pop(reference, None)
+    if commit is not None:
+        if isinstance(token, str) and head(workspace, branch) is None:
+            after[reference] = commit
+        else:
+            after = {reference: commit, **after}
     bases = tuple(dict.fromkeys(before.values()))
-    candidates = {name: tip for name, tip in after.items() if tip not in bases}
+    candidates = {
+        name: tip for name, tip in after.items() if name != "HEAD" and tip not in bases
+    }
     if not candidates:
         return None
+    excludes = tuple(f"^{base}" for base in bases)
     with publication(
         run.files.root, workspace, next(iter(candidates.values()))
     ) as directory:
         for name, tip in candidates.items():
-            if commit := outside_history(directory, tip, bases):
+            revisions = "\n".join((tip, *excludes)) + "\n"
+            commit = history_git(
+                directory,
+                "rev-list",
+                "--max-count=1",
+                "--stdin",
+                "--",
+                revisions=revisions,
+            ).strip()
+            if commit:
                 return name, commit
     return None
 
 
-def outside_history(directory: Path, tip: str, bases: tuple[str, ...]) -> str:
-    """Return a new commit SHA, peeling tags and ignoring non-commit objects."""
+def new_commits(
+    run: Run, workspace: Path, before: dict[str, str], after: dict[str, str]
+) -> list[tuple[str, str]]:
+    """Find independent local branch or detached HEAD tips with new run history."""
+    # Use the starting tip of the run's branch, falling back to the starting HEAD.
+    start = before.get(f"refs/heads/agent/{run.files.name}") or before.get(
+        "HEAD", before.get("detached HEAD")
+    )
+    upstream = (tip for name, tip in after.items() if name.startswith("refs/remotes/"))
+    bases = tuple(dict.fromkeys((*before.values(), *upstream)))
+    candidates = {
+        name: tip
+        for name, tip in after.items()
+        if (name.startswith("refs/heads/") or name == "detached HEAD")
+        and tip not in bases
+    }
+    if not start or not candidates:
+        return []
+    with publication(
+        run.files.root, workspace, next(iter(candidates.values()))
+    ) as directory:
+        found = [
+            (name, commit)
+            for name, tip in sorted(candidates.items())
+            if (commit := outside_history(directory, tip, bases, start))
+        ]
+        if len(found) <= 1:
+            return found
+        independent = set(
+            history_git(
+                directory, "merge-base", "--independent", *(tip for _, tip in found)
+            ).split()
+        )
+        return [(name, tip) for name, tip in found if tip in independent]
+
+
+def outside_history(
+    directory: Path, tip: str, bases: tuple[str, ...], start: str
+) -> str:
+    """Return the tip if it descends from the start and is outside known history."""
     revisions = "\n".join((tip, *(f"^{base}" for base in bases))) + "\n"
+    return history_git(
+        directory,
+        "rev-list",
+        # Excluding the start also excludes its ancestors.
+        f"--ancestry-path={start}",
+        "--max-count=1",
+        "--stdin",
+        "--",
+        revisions=revisions,
+    ).strip()
+
+
+def history_git(directory: Path, *args: str, revisions: str | None = None) -> str:
+    """Run a Git history query with the protected publication metadata."""
     env = dict.fromkeys(
         (
             "HOME",
@@ -362,17 +444,14 @@ def outside_history(directory: Path, tip: str, bases: tuple[str, ...]) -> str:
         GIT_TERMINAL_PROMPT="0",
         PATH=host_tools.search(),
     )
-    listed = subprocess.run(  # nosec B603
+    return subprocess.run(  # nosec B603
         [
             host_tools.resolve("git"),
             "-c",
             "core.hooksPath=/dev/null",
             "-C",
             str(directory),
-            "rev-list",
-            "--max-count=1",
-            "--stdin",
-            "--",
+            *args,
         ],
         cwd=directory,
         env=env,
@@ -381,8 +460,7 @@ def outside_history(directory: Path, tip: str, bases: tuple[str, ...]) -> str:
         text=True,
         check=True,
         timeout=HISTORY_TIMEOUT,
-    )
-    return listed.stdout.strip()
+    ).stdout
 
 
 def opened(
