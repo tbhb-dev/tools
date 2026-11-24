@@ -113,14 +113,8 @@ def test_settings_precedence(  # noqa: PLR0913, PLR0917 -- precedence matrix and
     user = {ENDPOINT: f"{URL}/user", ALLOW_HOSTS: f"{COLLECTOR},review-host"}
     managed_file.write_text(json.dumps({"env": managed}), encoding="utf-8")
     user_file.write_text(json.dumps({"env": user}), encoding="utf-8")
-    opened: list[str] = []
-    original_open = os.open
-
-    def track_open(path: str, flags: int) -> int:
-        opened.append(path)
-        return original_open(path, flags)
-
-    monkeypatch.setattr(os, "open", track_open)
+    open_file = Mock(wraps=os.open)
+    monkeypatch.setattr(os, "open", open_file)
 
     assert telemetry.command(lambda: 7) == 7
 
@@ -129,7 +123,7 @@ def test_settings_precedence(  # noqa: PLR0913, PLR0917 -- precedence matrix and
         expected_files.append(str(managed_file))
     if "user" in expected:
         expected_files.append(str(user_file))
-    assert opened == expected_files
+    assert [call.args[0] for call in open_file.call_args_list] == expected_files
     values = {"environment": process, "managed": managed, "user": user}
     assert local_export == {
         key: values[source][key]
@@ -150,12 +144,8 @@ def test_only_allowlisted_keys_apply_from_default_user_settings(
     monkeypatch.delenv(decoy, raising=False)
     user = isolated_home / ".claude" / "settings.json"
     user.parent.mkdir()
-    user.write_text(
-        json.dumps(
-            {"env": {ENDPOINT: URL, decoy: marker, "OTEL_SDK_DISABLED": "true"}}
-        ),
-        encoding="utf-8",
-    )
+    env = {ENDPOINT: URL, decoy: marker, "OTEL_SDK_DISABLED": "true"}
+    user.write_text(json.dumps({"env": env}), encoding="utf-8")
     reported = threading.Lock()
 
     def acquire(*, blocking: bool) -> bool:
@@ -168,11 +158,7 @@ def test_only_allowlisted_keys_apply_from_default_user_settings(
     assert local_export == {ENDPOINT: URL, ALLOW_HOSTS: None}
     assert decoy not in os.environ
     assert "OTEL_SDK_DISABLED" not in os.environ
-    out, err = capsys.readouterr()
-    assert out == ""
-    assert err == diagnostic("user", "none")
-    assert decoy not in err
-    assert marker not in err
+    assert capsys.readouterr() == ("", diagnostic("user", "none"))
     assert telemetry.command(lambda: 0) == 0
     assert capsys.readouterr() == ("", "")
 
@@ -210,14 +196,9 @@ def test_unreadable_or_invalid_settings_fall_back(  # noqa: PLR0913 -- settings 
     if not user_available:
         monkeypatch.setattr(os, "open", open_file)
     assert telemetry.command(lambda: 7) == 7
-    assert local_export == {
-        ENDPOINT: URL if user_available else None,
-        ALLOW_HOSTS: None,
-    }
-    assert capsys.readouterr() == (
-        "",
-        diagnostic("user" if user_available else "none", "none"),
-    )
+    source, endpoint = ("user", URL) if user_available else ("none", None)
+    assert local_export == {ENDPOINT: endpoint, ALLOW_HOSTS: None}
+    assert capsys.readouterr() == ("", diagnostic(source, "none"))
 
 
 def test_unavailable_home_and_nonregular_settings_fall_back(
