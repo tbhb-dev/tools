@@ -13,9 +13,10 @@ repository allows it, else a squash merge, else the command stops. A failed or
 malformed read stops it too. The merge path also refuses a body that cleans to
 nothing or a subject in GitHub's default form. The file keeps its old name.
 
-A branch that requires a squash merge queue uses GitHub's default squash
-message. The command compares that default with the cleaned message before
-it enqueues and reads the queue status once after a successful gh call.
+A branch that requires a merge queue uses the queue's configured method. For
+a squash queue, the command compares GitHub's default squash message with the
+cleaned message before it enqueues. The command reads the queue status once
+after a successful gh call.
 
 Usage, from anywhere in a worktree:
 
@@ -634,19 +635,19 @@ def branch_rules(target: str, base: str) -> list[object]:
     return rules
 
 
-def requires_queue(target: str, base: str) -> bool:
-    """Check whether the active branch rules require a squash queue."""
-    required = False
+def requires_queue(target: str, base: str) -> str | None:
+    """Return the active branch merge queue's method, if it has a queue."""
+    method = None
     for entry in branch_rules(target, base):
         rule = agent_identity.as_dict(entry)
         if rule is None or not isinstance(rule.get("type"), str):
             stop("gh returned no usable branch rules")
         if rule["type"] == "merge_queue":
             parameters = agent_identity.as_dict(rule.get("parameters")) or {}
-            if parameters.get("merge_method") not in ("SQUASH", "squash"):
-                stop("not merging: the branch merge queue must use squash")
-            required = True
-    return required
+            method = str(parameters.get("merge_method")).upper()
+            if method not in ("SQUASH", "MERGE"):
+                stop(f"not merging: unsupported branch merge queue method {method}")
+    return method
 
 
 def queue_state(target: str, number: int, *, preview: bool) -> dict[str, object]:
@@ -734,13 +735,13 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
         stop(f"not merging PR #{args.number}: " + "; ".join(reasons))
     target = pr.target_of_pr(request.url)
     methods = merge_methods(target)
-    queued = requires_queue(target, request.base)
-    if queued:
-        if "--squash" not in methods:
-            stop(
-                f"not merging PR #{args.number}: the merge queue requires squash merges"
-            )
-        methods = ["--squash"]
+    queue_method = requires_queue(target, request.base)
+    if queue_method is not None:
+        queue_flag = f"--{queue_method.lower()}"
+        if queue_flag not in methods:
+            required = "squash merges" if queue_method == "SQUASH" else "merge commits"
+            stop(f"not merging PR #{args.number}: the merge queue requires {required}")
+        methods = [queue_flag]
     body = renovate_body(request.body) if request.renovate else request.body
     message = build_message(
         request.title, args.number, body, agent=request.agent and not request.renovate
@@ -752,7 +753,13 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
             f"not merging PR #{args.number}: the merge commit would get "
             "GitHub's default message, not the cleaned PR body"
         )
-    previous_removal = queue_preview(target, args.number, message) if queued else ""
+    previous_removal = ""
+    if queue_method == "SQUASH":
+        previous_removal = queue_preview(target, args.number, message)
+    elif queue_method == "MERGE":
+        previous_removal = queue_removal(
+            queue_state(target, args.number, preview=False)
+        )[0]
     pr.scan_secrets(
         message.text(),
         f"the commit message for PR #{args.number}",
@@ -774,7 +781,7 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
         print(f"{methods[0]} failed; retrying with {methods[1]}", file=sys.stderr)
         argv_gh[argv_gh.index(methods[0])] = methods[1]
         done = pr.run(argv_gh, stdin=message.body)
-    if queued and done.returncode == 0:
+    if queue_method is not None and done.returncode == 0:
         print(done.stderr, end="", file=sys.stderr)
         return report_queue(target, args.number, previous_removal)
     print(done.stdout, end="")
