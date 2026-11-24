@@ -480,9 +480,7 @@ def test_sandbox_remote_ref_cannot_hide_a_run_commit(
         git(workspace, "update-ref", f"refs/remotes/{tracking}", "HEAD")
 
     assert push_after(local_run, work) == 0
-    assert git(target, "for-each-ref", "--format=%(objectname)") == git(
-        workspace, "rev-parse", "HEAD"
-    )
+    assert_pushed(target, git(workspace, "rev-parse", "HEAD"))
     assert run.files.path("pr").read_text() == f"{run.request.repo}#7"
 
 
@@ -544,7 +542,11 @@ def test_eligible_tips_orders_refs_and_ignores_existing_history(
     start, existing, first, last = (digit * 40 for digit in "1234")
     bases = (start,)
     first_ref, last_ref = "refs/heads/a-first", "refs/heads/z-last"
-    candidates = {last_ref: last, "refs/heads/m-existing": existing, first_ref: first}
+    candidates: dict[str, str] = {
+        last_ref: last,
+        "refs/heads/m-existing": existing,
+        first_ref: first,
+    }
     history = Mock(side_effect=[True, False, False, True])
     monkeypatch.setattr(push, "outside_history", history)
 
@@ -759,9 +761,8 @@ def test_prefer_checked_out_run_branch_over_leftover_branch(
     if new_on_run_branch:
         assert_run_file(run, "pr", f"{run.request.repo}#7")
     else:
-        assert_run_file(
-            run, "log", "push skipped: checked-out run branch has no new commits\n"
-        )
+        expected = "push skipped: checked-out run branch has no new commits\n"
+        assert_run_file(run, "log", expected)
 
 
 @pytest.mark.parametrize(
