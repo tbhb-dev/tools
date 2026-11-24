@@ -71,7 +71,7 @@ def _resolve_environment() -> None:
         warning = (
             ""
             if len(sources) == len(_KEYS)
-            else "; warning: the exporter will drop the launch trace"
+            else "; warning: the exporter may drop the launch trace"
         )
         print(f"telemetry: {details}{warning}", file=sys.stderr)
 

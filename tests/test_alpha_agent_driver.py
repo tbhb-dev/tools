@@ -204,8 +204,9 @@ def test_unsandboxed_run_is_visible(
 
 
 def test_launch_stream_and_metadata(
-    remote: Remote, capsys: pytest.CaptureFixture[str]
+    remote: Remote, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
     schema = remote.root / "schema.json"
     schema.write_text('{"type":"object"}')
     assert (

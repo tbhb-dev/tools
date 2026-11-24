@@ -31,7 +31,7 @@ ENDPOINT = "OTEL_EXPORTER_OTLP_ENDPOINT"
 ALLOW_HOSTS = "TBHB_TELEMETRY_ALLOW_HOSTS"
 COLLECTOR = "collector.example.test"
 URL = f"http://{COLLECTOR}:4318"
-DROP_WARNING = "; warning: the exporter will drop the launch trace"
+DROP_WARNING = "; warning: the exporter may drop the launch trace"
 
 
 @pytest.fixture(autouse=True)
