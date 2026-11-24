@@ -1144,6 +1144,24 @@ def origin_repository() -> str:
     return name
 
 
+def target_is_origin() -> bool:
+    """Whether ``gh pr create`` posts to origin's repository.
+
+    gh's default repository (``gh repo set-default``, or a parent fork) may
+    differ from origin, and ``GH_REPO`` overrides both. Any failed read counts
+    as "no", so the size count is skipped instead of run against the wrong base.
+    """
+    if os.environ.get("GH_REPO"):
+        return False  # gh pr create posts to GH_REPO, not to its default repository
+    data = gh_data(run([find_tool(GH), "repo", "view", "--json", "nameWithOwner"]))
+    target = data.get("nameWithOwner") if isinstance(data, dict) else None
+    try:
+        origin = origin_repository()
+    except SystemExit:
+        return False
+    return isinstance(target, str) and target.casefold() == origin.casefold()
+
+
 def closed_pr_head(number: int, repo: str) -> str:
     """Read the head of a finished PR whose branch belongs to origin.
 
@@ -1771,25 +1789,41 @@ def opened_by(env: Mapping[str, str]) -> tuple[str | None, str | None]:
 def check_size(args: argparse.Namespace, checked: Checked) -> None:
     """Count the branch's added lines against the draft's base and flag an excess.
 
-    ``pr check`` only warns when the count is unavailable. ``pr create`` fails
-    closed, so no oversized pull request opens on a missing base or counter.
+    The base tracking ref is refreshed once, without tags, except in a dry run,
+    which writes no refs. A failed refresh or a count that stays unavailable
+    only warns, for ``pr create`` too, so a broken counter never blocks a valid
+    PR. A dry run reports an excess as a warning and still previews.
     """
-    base = f"refs/remotes/origin/{base_of(checked.meta)}"
-    code, _ = git("rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
-    if code != 0:
-        why = f"base branch {base} not found (is it fetched?)"
-        checked.problems.append((1, why))
-        print(f"{args.draft}:1: {why}")
+    branch = base_of(checked.meta)
+    dry_run = getattr(args, "dry_run", False)
+    base = f"refs/remotes/origin/{branch}"
+    verify = ("rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
+    if args.command == "create" and not target_is_origin():
+        # gh may open the PR against a repository whose base origin doesn't track.
+        message = "size count unavailable: gh may target a repository other than origin"
+        print(message, file=sys.stderr)
+        return
+    if not dry_run:
+        fetch = (
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--refmap=",
+            "origin",
+            f"+refs/heads/{branch}:{base}",
+        )
+        if git(*fetch)[0] != 0:
+            # A stale tracking ref would count the wrong range, so stop here.
+            print(f"size count unavailable: cannot fetch {branch}", file=sys.stderr)
+            return
+    if git(*verify)[0] != 0:
+        print(f"size count unavailable: base branch {base} not found", file=sys.stderr)
         return
     try:
         counts = size_gate.size_counts(base, "HEAD")
     except size_gate.SizeCountError as exc:
-        why = f"size count unavailable: {exc}"
-        if args.command == "create":
-            checked.problems.append((1, why))
-            print(f"{args.draft}:1: {why}")
-        else:
-            print(why, file=sys.stderr)
+        print(f"size count unavailable: {exc}", file=sys.stderr)
         return
     if args.command == "check":
         print(f"{counts.code_lines} code lines, limit {counts.code_limit}")
@@ -1801,6 +1835,9 @@ def check_size(args: argparse.Namespace, checked: Checked) -> None:
             else (counts.raw_lines, counts.raw_limit)
         )
         why = f"{count} lines, limit {limit}: split into stacked PRs"
+        if dry_run:
+            print(f"warning: {args.draft}:1: {why}", file=sys.stderr)
+            return
         checked.problems.append((1, why))
         print(f"{args.draft}:1: {why}")
 

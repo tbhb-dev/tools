@@ -178,6 +178,17 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
         "size_counts",
         Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None)),
     )
+    # The repository's origin is a URL nothing serves, so the size check's fetch
+    # of the base branch is a no-op here and the tracking refs set below stay.
+    real_git = pr.git
+
+    def offline_git(*argv: str, cwd: Path | None = None) -> tuple[int, str]:
+        if argv[:1] == ("fetch",):
+            return 0, ""
+        return real_git(*argv, cwd=cwd)
+
+    monkeypatch.setattr(pr, "git", offline_git)
+    monkeypatch.setattr(pr, "target_is_origin", Mock(return_value=True))
     root = tmp_path / "repo"
     tools_dir = tmp_path / "bin"
     tools_dir.mkdir()
@@ -2037,7 +2048,17 @@ def test_run_uses_the_given_directory(tmp_path: Path) -> None:
 def test_runs_as_tbhbdev_alpha_pr(world: World) -> None:
     write_draft(world)
     write_fake(world.bin / "bazelisk", "raise SystemExit('missing target')")
-    env = {**os.environ, "PYTHONPATH": pythonpath(SRC)}
+    bare = world.root.parent / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    world.git("push", "-q", str(bare), "HEAD:refs/heads/main")
+    env = {
+        **os.environ,
+        "PYTHONPATH": pythonpath(SRC),
+        # The fetch of the base branch reaches this local repository.
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": f"url.{bare}.insteadOf",
+        "GIT_CONFIG_VALUE_0": ORIGIN,
+    }
     env.pop("MUTANT_UNDER_TEST", None)
     done = subprocess.run(
         [sys.executable, "-m", "tbhbdev", "alpha", "pr", "check"],
