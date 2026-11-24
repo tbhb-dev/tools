@@ -558,6 +558,36 @@ def test_unrelated_tips_refuse_publication_even_with_a_run_commit(
     )
 
 
+def test_eligible_tips_orders_refs_and_ignores_existing_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start = "1" * 40
+    first = "3" * 40
+    existing = "2" * 40
+    last = "4" * 40
+    bases = (start,)
+    candidates = {
+        "refs/heads/z-last": last,
+        "refs/heads/m-existing": existing,
+        "refs/heads/a-first": first,
+    }
+    history = Mock(side_effect=[True, False, False, True])
+    monkeypatch.setattr(push, "outside_history", history)
+
+    found = push.eligible_tips(tmp_path, candidates, bases, start)
+
+    assert list(found.items()) == [
+        ("refs/heads/a-first", first),
+        ("refs/heads/z-last", last),
+    ]
+    assert [query.args for query in history.call_args_list] == [
+        (tmp_path, first, bases, start),
+        (tmp_path, existing, bases, start),
+        (tmp_path, existing, bases),
+        (tmp_path, last, bases, start),
+    ]
+
+
 def test_unborn_start_does_not_publish(
     local_run: tuple[run_host.Run, run_host.Prepared, Path],
 ) -> None:
