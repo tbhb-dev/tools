@@ -563,16 +563,54 @@ def test_starting_fetched_history(
     assert not run.files.path("log").exists()
 
 
-def test_history_lookup_has_a_deadline(
+def test_ref_snapshot_reads_packed_branches_and_ignores_locks(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    _run, prepared, _target = local_run
+    workspace = Path(prepared.paths.worktree)
+    sha = git(workspace, "rev-parse", "HEAD")
+    git(workspace, "pack-refs", "--all")
+    (workspace / ".git" / "refs" / "heads" / "pending.lock").write_text(sha)
+    assert push.local_refs(workspace) == {"refs/heads/agent/example": sha, "HEAD": sha}
+
+
+def test_history_lookup_uses_protected_metadata_and_has_a_deadline(
     local_run: tuple[run_host.Run, run_host.Prepared, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     run, prepared, _target = local_run
+    workspace = Path(prepared.paths.worktree)
+    base = git(workspace, "rev-parse", "HEAD")
 
     def exceeded(
         command: list[str], **options: object
     ) -> subprocess.CompletedProcess[str]:
-        assert "rev-list" in command
+        directory = cast("Path", options["cwd"])
+        assert directory.parent == run.files.root
+        assert command == [
+            host_tools.resolve("git"),
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+            str(directory),
+            "rev-list",
+            f"--ancestry-path={base}",
+            "--max-count=1",
+            "--stdin",
+            "--",
+        ]
+        assert options["env"] == {
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "HOME": str(directory),
+            "PATH": host_tools.search(),
+            "XDG_CACHE_HOME": str(directory),
+            "XDG_CONFIG_HOME": str(directory),
+            "XDG_DATA_HOME": str(directory),
+            "XDG_STATE_HOME": str(directory),
+        }
+        assert options["check"] is True
         assert options["timeout"] == 30
         raise subprocess.TimeoutExpired(command, 30)
 
