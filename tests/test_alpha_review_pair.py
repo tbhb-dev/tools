@@ -343,7 +343,7 @@ def test_an_unreadable_pr_after_the_runs_voids_the_verdicts(
             (spec, "")
             for spec in [
                 "not json",
-                [],
+                list[object](),
                 {"runs": [run_spec("a")]},
                 {"runs": [run_spec(str(n)) for n in range(4)]},
                 {"runs": [run_spec("a"), run_spec("a", harness="agy")]},
