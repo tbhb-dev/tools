@@ -16,7 +16,6 @@ from tbhbdev.alpha import install
 from tbhbdev.alpha import pre_push_guard as pg
 
 ZERO = "0" * 40
-PUBLIC = "https://github.com/example/public.git"
 PRIVATE = "fixturerepo"
 
 
@@ -72,15 +71,17 @@ def commit(repo: Path, message: str = "next", **files: str) -> str:
     return git(repo, "rev-parse", "HEAD")
 
 
-def guard(
-    monkeypatch: pytest.MonkeyPatch, local: str, remote: str = ZERO, url: str = PUBLIC
-) -> int:
+def origin_url() -> str:
+    return git(Path.cwd(), "config", "remote.origin.url")
+
+
+def guard(monkeypatch: pytest.MonkeyPatch, local: str, remote: str = ZERO) -> int:
     monkeypatch.setattr(
         sys,
         "stdin",
         io.StringIO(f"refs/heads/topic {local} refs/heads/topic {remote}\n"),
     )
-    return alpha.main(["pre-push-guard", "origin", url], "tbhbdev alpha")
+    return alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha")
 
 
 @pytest.mark.parametrize("kind", ["diverged", "forward", "new", "delete", "missing"])
@@ -140,7 +141,7 @@ def test_rewrite_outside_branches_is_refused(
     head = commit(repo)
     git(repo, "update-ref", "refs/remotes/origin/topic", head)
     monkeypatch.setattr(sys, "stdin", io.StringIO(f"HEAD {base} {ref} {head}\n"))
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha") == 1
     assert "non-fast-forward push refused" in capsys.readouterr().err
 
 
@@ -279,7 +280,7 @@ def test_protected_branch_refused(
         "delete": (ZERO, base),
     }[kind]
     monkeypatch.setattr(sys, "stdin", io.StringIO(f"HEAD {local} {ref} {remote}\n"))
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha") == 1
     out, err = capsys.readouterr()
     assert out == ""
     assert err == (
@@ -303,7 +304,7 @@ def test_protected_branch_refused_beside_other_refs(
             f"refs/heads/topic {head} refs/heads/main {base}\n"
         ),
     )
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha") == 1
     assert capsys.readouterr().err.startswith("refs/heads/main: push to a protected")
 
 
@@ -322,7 +323,7 @@ def test_protected_branch_does_not_hide_later_refs(
             f"refs/heads/topic {base} refs/heads/topic {head}\n"
         ),
     )
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha") == 1
     err = capsys.readouterr().err
     assert "refs/heads/main: push to a protected" in err
     assert "refs/heads/topic: non-fast-forward push refused" in err
@@ -342,7 +343,7 @@ def test_similar_names_are_not_protected(
 ) -> None:
     head = commit(repo)
     monkeypatch.setattr(sys, "stdin", io.StringIO(f"HEAD {head} {ref} {ZERO}\n"))
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 0
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha") == 0
 
 
 @pytest.mark.parametrize("default", ["upstream", "simple", "current"])
@@ -362,32 +363,25 @@ def test_tracking_main_is_refused_for_any_push_default(
         "stdin",
         io.StringIO(f"refs/heads/topic {head} refs/heads/main {base}\n"),
     )
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "tbhbdev alpha") == 1
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha") == 1
     assert "refs/heads/main: push to a protected" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
-        f"https://github.com/example/{PRIVATE}.git",
-        f"https://example.test/{PRIVATE}",
-        "",
-    ],
-)
 def test_private_repository_names_pass_everywhere(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, url: str
+    repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A repository name in the message, a path and a line is public text now.
     # The list file that once held the names isn't read.
     head = commit(repo, PRIVATE, **{PRIVATE: f"{PRIVATE}\n"})
-    assert guard(monkeypatch, head, url=url) == 0
+    assert guard(monkeypatch, head) == 0
 
 
+@pytest.mark.usefixtures("repo")
 def test_bad_input_is_refused(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(sys, "stdin", io.StringIO("broken\n"))
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "p") == 1
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "p") == 1
     assert capsys.readouterr() == (
         "",
         "pre-push-guard: cannot inspect push; push refused\n",
@@ -400,9 +394,9 @@ def test_duplicate_and_empty_input(
     head = commit(repo)
     row = f"refs/heads/topic {head} refs/heads/topic {ZERO}\n"
     monkeypatch.setattr(sys, "stdin", io.StringIO(row + row))
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "p") == 0
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "p") == 0
     monkeypatch.setattr(sys, "stdin", io.StringIO(""))
-    assert alpha.main(["pre-push-guard", "origin", PUBLIC], "p") == 0
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "p") == 0
     assert capsys.readouterr() == ("", "")
 
 
@@ -410,3 +404,254 @@ def test_a_malformed_old_object_is_a_rewrite(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert guard(monkeypatch, commit(repo), "X" * 40) == 1
+
+
+AGENT = "tbhb.dev Agent"
+AGENT_MAIL = "agent@tonyburns.net"
+
+
+@pytest.fixture(autouse=True)
+def no_ssh_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every test away from the user's SSH agent."""
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+
+
+def make_key(folder: Path, name: str) -> Path:
+    path = folder / name
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(path)],
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
+def agent_commit(repo: Path, key: Path | None, message: bytes = b"agent") -> str:
+    """Commit as the agent, signed by KEY or unsigned when it is None."""
+    assert "SSH_AUTH_SOCK" not in os.environ, "signing must never reach an agent"
+    env = {
+        **os.environ,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_AUTHOR_NAME": AGENT,
+        "GIT_AUTHOR_EMAIL": AGENT_MAIL,
+        "GIT_COMMITTER_NAME": AGENT,
+        "GIT_COMMITTER_EMAIL": AGENT_MAIL,
+    }
+    signing = ["-c", "gpg.format=ssh", "-c", f"user.signingkey={key}"] if key else []
+    # A non-UTF-8 message stays byte for byte, so Git never recodes it.
+    signing += ["-c", "i18n.commitEncoding=ISO-8859-1"]
+    flag = ["-S"] if key else ["--no-gpg-sign"]
+    subprocess.run(
+        [
+            "git",
+            *signing,
+            "commit",
+            *flag,
+            "--allow-empty",
+            "--cleanup=verbatim",
+            "-qF",
+            "-",
+        ],
+        input=message,
+        cwd=repo,
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    return git(repo, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def agent_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The agent key, with its public half at the path the hook reads."""
+    key = make_key(tmp_path, "agent")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    target = tmp_path / "home" / pg.AGENT_KEY
+    target.parent.mkdir(parents=True)
+    target.write_text(key.with_suffix(".pub").read_text())
+    return key
+
+
+def push_agent(monkeypatch: pytest.MonkeyPatch, local: str) -> int:
+    return guard(monkeypatch, local)
+
+
+def test_an_agent_commit_signed_with_the_agent_key_passes(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, agent_key: Path
+) -> None:
+    head = agent_commit(repo, agent_key)
+    assert push_agent(monkeypatch, head) == 0
+
+
+@pytest.mark.usefixtures("agent_key")
+@pytest.mark.parametrize("signed_by", ["other", "nobody"])
+def test_an_agent_commit_without_the_agent_key_is_refused(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    signed_by: str,
+) -> None:
+    other = make_key(tmp_path, "personal") if signed_by == "other" else None
+    head = agent_commit(repo, other)
+    assert push_agent(monkeypatch, head) == 1
+    assert capsys.readouterr().err == (
+        f"refs/heads/topic: agent commit {head} is not signed with the agent key; "
+        "push refused\n"
+    )
+
+
+def test_a_bad_signature_is_refused(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, agent_key: Path
+) -> None:
+    head = agent_commit(repo, agent_key)
+    raw = git(repo, "cat-file", "commit", head)
+    forged = raw.replace("\n\nagent", "\n\ntampered", 1)
+    new = subprocess.run(
+        ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+        cwd=repo,
+        input=forged + "\n",
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert push_agent(monkeypatch, new) == 1
+
+
+@pytest.mark.usefixtures("agent_key")
+def test_a_non_tip_agent_commit_is_refused(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_commit(repo, None)
+    tip = commit(repo, "human")
+    assert push_agent(monkeypatch, tip) == 1
+
+
+@pytest.mark.usefixtures("agent_key")
+def test_commits_below_the_remote_tip_are_not_checked(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    already_there = agent_commit(repo, None)
+    tip = commit(repo, "human")
+    assert push_agent(monkeypatch, tip) == 1
+    assert guard(monkeypatch, tip, already_there) == 0
+
+
+@pytest.mark.usefixtures("agent_key")
+def test_a_new_branch_skips_commits_under_other_remote_refs(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held = agent_commit(repo, None)
+    git(repo, "push", "-q", "origin", f"{held}:refs/heads/other")
+    tip = commit(repo, "human")
+    assert guard(monkeypatch, tip) == 0
+
+
+@pytest.mark.usefixtures("agent_key")
+def test_an_existing_branch_skips_commits_under_other_remote_refs(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = git(repo, "rev-parse", "HEAD")
+    held = agent_commit(repo, None)
+    git(repo, "push", "-q", "origin", f"{held}:refs/heads/main-copy")
+    tip = commit(repo, "human")
+    assert guard(monkeypatch, tip, old) == 0
+
+
+@pytest.mark.usefixtures("agent_key")
+def test_an_existing_branch_skips_commits_under_remote_tags(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = git(repo, "rev-parse", "HEAD")
+    held = agent_commit(repo, None)
+    git(repo, "tag", "v1", held)
+    tip = commit(repo, "human")
+    assert guard(monkeypatch, tip, old) == 0
+
+
+@pytest.mark.parametrize("message", [b"agent\r\nbody\r\n", b"caf\xe9"])
+def test_a_signed_message_with_crlf_or_latin1_bytes_passes(
+    message: bytes, repo: Path, monkeypatch: pytest.MonkeyPatch, agent_key: Path
+) -> None:
+    tip = agent_commit(repo, agent_key, message)
+    assert push_agent(monkeypatch, tip) == 0
+
+
+def test_a_sha256_repository_signature_is_read(tmp_path: Path, agent_key: Path) -> None:
+    other = tmp_path / "sha256"
+    other.mkdir()
+    git(other, "init", "-q", "--object-format=sha256")
+    tip = agent_commit(other, agent_key)
+    raw = subprocess.run(
+        ["git", "cat-file", "commit", tip], cwd=other, capture_output=True, check=True
+    ).stdout
+    assert b"\ngpgsig-sha256 " in raw
+    assert pg.signature_fingerprint(raw) == pg.agent_fingerprint()
+
+
+def test_a_signed_message_with_trailing_blank_lines_passes(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, agent_key: Path
+) -> None:
+    tip = agent_commit(repo, agent_key, b"agent\n\n\n")
+    assert push_agent(monkeypatch, tip) == 0
+
+
+@pytest.mark.usefixtures("agent_key")
+def test_a_range_over_the_limit_is_refused(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    commit(repo, "one")
+    tip = commit(repo, "two")
+    monkeypatch.setattr(pg, "RANGE_LIMIT", 1)
+    assert push_agent(monkeypatch, tip) == 1
+    assert capsys.readouterr().err == (
+        "refs/heads/topic: the push adds over 1 commits; push refused\n"
+    )
+
+
+@pytest.mark.usefixtures("repo")
+def test_a_range_that_cannot_be_listed_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert push_agent(monkeypatch, "f" * 40) == 1
+    assert capsys.readouterr().err == (
+        "refs/heads/topic: cannot list the commits to push; push refused\n"
+    )
+
+
+def test_an_unreadable_agent_key_refuses_closed(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    head = agent_commit(repo, make_key(tmp_path, "agent"))
+    monkeypatch.setenv("HOME", str(tmp_path / "empty"))
+    assert push_agent(monkeypatch, head) == 1
+    assert capsys.readouterr().err == (
+        "refs/heads/topic: agent signing key unreadable; push refused\n"
+    )
+
+
+def test_a_signature_header_without_a_signature_is_empty() -> None:
+    assert pg.signature_fingerprint(b"tree x\n\nmessage") == ""
+
+
+def test_a_garbled_signature_has_no_fingerprint() -> None:
+    raw = (
+        b"tree x\ngpgsig -----BEGIN SSH SIGNATURE-----\n junk\n"
+        b" -----END SSH SIGNATURE-----\n\nmsg"
+    )
+    assert pg.signature_fingerprint(raw) == ""
+
+
+def test_signing_refuses_when_an_agent_socket_is_set(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/nonexistent")
+    with pytest.raises(AssertionError, match="never reach an agent"):
+        agent_commit(repo, None)
