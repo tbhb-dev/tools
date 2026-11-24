@@ -4380,6 +4380,21 @@ def test_push_failure_reaches_durable_completion(
     assert runfiles.latest(run.files.root)["example"]["rc"] == 4
 
 
+def test_start_ref_brief_describes_the_existing_pull_request_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ref = "refs/heads/agent/existing"
+    run = make_run(tmp_path, start_ref=ref, fetch_refs=[ref])
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
+    runtime = HostRuntime(run, prepared, None)
+    runtime.patch(monkeypatch)
+
+    assert run_host.execute(run, "example", "synthetic-push-value") == 7
+    prompt = run.files.path("prompt").read_text()
+    assert "The driver pushes to the existing pull request branch" in prompt
+    assert "opens the pull request" not in prompt
+
+
 @pytest.mark.parametrize(
     ("given", "result"),
     [

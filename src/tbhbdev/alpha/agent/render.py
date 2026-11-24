@@ -10,14 +10,23 @@ FINAL_ONLY = (
     "in the worktree and keep it out of your commits."
 )
 BUILD_PUBLICATION = (
-    "Commit your changes locally. "
     "The driver pushes the build branch and opens the pull request after success."
+)
+START_REF_PUBLICATION = (
+    "The driver pushes to the existing pull request branch after success."
 )
 
 
-def brief(kind: RunKind, text: str, *, profile: Profile | None = None) -> str:
+def brief(
+    kind: RunKind,
+    text: str,
+    *,
+    profile: Profile | None = None,
+    start_ref: str | None = None,
+) -> str:
     if profile is Profile.BUILD:
-        text = f"{BUILD_PUBLICATION}\n{text}"
+        publication = BUILD_PUBLICATION if start_ref is None else START_REF_PUBLICATION
+        text = f"Commit your changes locally. {publication}\n{text}"
     return f"{FINAL_ONLY}\n{text}" if kind is RunKind.EXEC else text
 
 

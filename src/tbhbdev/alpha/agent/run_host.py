@@ -855,7 +855,13 @@ def _execute(
         runfiles.append(run.files.root, index_entry(run, prepared, None))
         run.files.write("phase", "workspace")
         run.files.write(
-            "prompt", render.brief(run.request.kind, text, profile=run.request.profile)
+            "prompt",
+            render.brief(
+                run.request.kind,
+                text,
+                profile=run.request.profile,
+                start_ref=run.request.start_ref,
+            ),
         )
         run.files.write("phase", "brief")
         if prepared.delivery.signing is not None:
