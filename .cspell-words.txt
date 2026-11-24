@@ -317,7 +317,6 @@ signum
 inlines
 setext
 strikethrough
-timebox
 onexc
 execroot
 statvfs

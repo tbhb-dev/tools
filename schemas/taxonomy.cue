@@ -20,8 +20,5 @@ package content
 // Where a draft came from. A variant that sets it to Import is a tracker import.
 #Source: "Import"
 
-// Time limit for a Spike.
-#Timebox: "2h" | "1d" | "3d"
-
 // owner/repo#N. Whether the parent has the right issue type is a kernel check.
 #IssueRef: =~"^[a-z0-9][a-z0-9-]*/[a-z0-9._-]+#[1-9][0-9]*$"
