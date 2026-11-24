@@ -131,7 +131,7 @@ def agy_timeout(settings: Settings, harness: Harness, profile: Profile) -> int |
 def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     rules.check_name(args.name)
     profile = Profile(args.profile)
-    auto = args.host == "auto"
+    auto: bool = args.host == "auto"
     if auto:
         if profile is not Profile.BUILD:
             message = "--host auto requires --profile build"

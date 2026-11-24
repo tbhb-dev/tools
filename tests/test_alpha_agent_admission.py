@@ -26,6 +26,7 @@ def test_slot_counts_refuse_symlink_to_admission_directory(tmp_path: Path) -> No
     alias.symlink_to(root, target_is_directory=True)
 
     assert admission.counts(root) == (0, 0)
+    # cspell:ignore ELOOP ENOTDIR
     with pytest.raises(
         OSError, check=lambda error: error.errno in {errno.ELOOP, errno.ENOTDIR}
     ):

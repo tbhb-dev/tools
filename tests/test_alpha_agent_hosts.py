@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import Mock
 
 import pytest
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
     from tbhbdev.alpha.agent.model import Host
 
-pytestmark = pytest.mark.usefixtures("isolated_home")
+pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
 PROG = "agent"
 FREE = "0 0"
 HEALTHY = "0 8 16777216 16777216 0 0"
@@ -166,15 +166,8 @@ def test_auto_refuses_incompatible_flags(
 
 
 def table(index: int, **keys: object) -> dict[str, object]:
-    return {
-        "name": f"review-host-{index}",
-        "os": "linux",
-        "shell": "bash",
-        "account": "agent",
-        "accounts": ["agent"],
-        "proven_harnesses": ["codex"],
-        **keys,
-    }
+    example = cast("list[dict[str, object]]", GOOD["host"])[0]
+    return {**example, "name": f"review-host-{index}", **keys}
 
 
 def write_config(*hosts: dict[str, object]) -> Path:
