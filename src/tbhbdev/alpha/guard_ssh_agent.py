@@ -3,28 +3,28 @@
 """`tbhbdev alpha guard-ssh-agent`: keep agent commands off the SSH agent.
 
 This PreToolUse hook shares guard-gh-pr's payload contracts but reads the
-command with its own small shell lexer. It decides only what the lexer can
-read reliably. The hook denies:
+command with its own small shell lexer. It denies only two shapes:
 
-- `ssh-add` as the command word of a simple command, which is the first word
-  after an operator or the start of the text, past assignments, wrappers such
-  as `env` and keywords such as `then`;
+- `ssh-add` as the first word of a simple command, after plain `NAME=value`
+  assignments and the wrappers `command`, `exec`, `nohup`, `time` and `env`
+  used without options;
 - the `file_path` or `path` of another tool such as Read that resolves, with
   symlinks and `..` resolved against the payload's working directory, into the
   operator's ssh directory except its `sessions` subdirectory.
 
-The hook never looks inside comments or quoted text. A command with a
-redirection operator, a heredoc or here-string, a `case`, a group or
-parenthesis, a command substitution, a backtick, or `sudo` or `doas` as a
-command word is not parsed and is allowed whole. Like the other guards,
-allowing prints nothing and unreadable input or a crash, including a closed
-output pipe, fails open.
+Every other shape is allowed, including a command with a redirection, heredoc,
+`case`, group, parenthesis, `[[`, a `${` expansion, command substitution or
+backtick, a wrapper with an option, a function and anything else the lexer
+does not read. Like the
+other guards, allowing prints nothing and unreadable input or a crash,
+including a closed output pipe, fails open.
 
-Known gaps, all false allows: every unparsed form above, any shell word that
-names the ssh directory, a program name held in a variable, runners such as
-`timeout`, `xargs`, `env -S` and `bash -c`, `builtin command ssh-add`, a path
-that differs from the ssh directory only in case on a case-insensitive volume,
-and the Antigravity file tools and `workspacePaths`.
+Known gaps, all false allows: every wrapped or unparsed form above, `sudo` or
+`doas`, a program name held in a variable, runners such as `timeout`, `xargs`
+and `bash -c`, a keyword such as `then` before `ssh-add`, any shell word that
+names the ssh directory, a path that differs from the ssh directory only in
+case on a case-insensitive volume, and the Antigravity file tools and
+`workspacePaths`.
 """
 
 import json
@@ -48,20 +48,17 @@ REASON_DIR = (
 SSH_DIR = ".ssh"
 OPERATORS = ";&|"
 # Constructs the lexer does not handle: the whole command is allowed.
-UNPARSED = re.compile(r"[()`<>]|\bcase\b")
+UNPARSED = re.compile(r"[()`<>]|\$\{|\$'|\[\[|\bcase\b")
 ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
-KEYWORDS = {"if", "then", "do", "else", "elif", "while", "until", "!", "{"}
-# Wrapper programs and the options of each that take a value.
-WRAPPERS = {
-    "env": {"-u", "-C", "-S", "--unset", "--chdir", "--split-string"},
-    "command": set(),
-    "exec": {"-a"},
-    "nohup": set(),
-    "time": set(),
-    "nice": {"-n"},
+WRAPPERS = {"command", "exec", "nohup", "time", "env"}
+SYSTEM_DIRS = {
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
 }
-LOOKUP = re.compile(r"-[A-Za-z]*[vV][A-Za-z]*")
-ELEVATORS = {"sudo", "doas"}
 PATH_FIELDS = ("file_path", "path")
 
 
@@ -159,37 +156,28 @@ def segments(text: str) -> list[list[str]]:
     return [words for words in lexer.found if words]
 
 
-def skip_options(words: list[str], index: int, takes: set[str]) -> int:
-    """The index after the options at INDEX, where TAKES lists those with a value."""
-    while index < len(words) and words[index].startswith("-"):
-        done = words[index] == "--"
-        index += 2 if words[index] in takes else 1
-        if done:
-            break
-    return index
+def command_word(words: list[str]) -> str:
+    """The first word after leading assignments and option-less wrappers.
 
-
-def strip_wrappers(words: list[str]) -> list[str]:
-    """The command without its leading assignments, keywords and wrappers.
-
-    `command -v` and `command -V` only look a name up, so they return nothing.
+    A wrapper is a bare name or a path in a system directory, never a relative
+    path such as `./time` or a project script such as `/home/u/tools/env`. Any
+    option after a wrapper means the command is not read.
     """
-    index = 0
-    while index < len(words):
-        word = words[index]
+    wrapper = ""
+    for word in words:
+        if wrapper and word.startswith("-"):
+            return ""  # a wrapper with an option is not one we read
         name = Path(word).name
-        if ASSIGNMENT.match(word) or word in KEYWORDS:
-            index += 1
-        elif name in WRAPPERS:
-            end = skip_options(words, index + 1, WRAPPERS[name])
-            if name == "command" and any(
-                LOOKUP.fullmatch(w) for w in words[index + 1 : end]
-            ):
-                return []
-            index = end
-        else:
-            break
-    return words[index:]
+        if not (
+            ASSIGNMENT.match(word)
+            or (
+                name in WRAPPERS
+                and ("/" not in word or str(Path(word).parent) in SYSTEM_DIRS)
+            )
+        ):
+            return name
+        wrapper = name
+    return ""
 
 
 def expand(text: str, home: str) -> str:
@@ -200,13 +188,27 @@ def expand(text: str, home: str) -> str:
     return text
 
 
+def in_sessions(path: str, ssh: str, sessions: str) -> bool:
+    """Whether PATH, already below SSH, is in the sessions directory.
+
+    The first component is compared by file identity too, so `SESSIONS` names
+    the same directory on a case-insensitive volume.
+    """
+    if path == sessions or path.startswith(sessions + "/"):
+        return True
+    first = path[len(ssh) + 1 :].split("/", 1)[0]
+    try:
+        return Path(f"{ssh}/{first}").samefile(sessions)
+    except OSError:
+        return False
+
+
 def under_ssh(path: str, home: str) -> bool:
     """Whether PATH is the ssh directory or below it, outside sessions."""
     ssh = os.path.realpath(f"{home}/{SSH_DIR}")
-    sessions = f"{ssh}/sessions"
-    if path == sessions or path.startswith(sessions + "/"):
+    if path != ssh and not path.startswith(ssh + "/"):
         return False
-    return path == ssh or path.startswith(ssh + "/")
+    return not in_sessions(path, ssh, os.path.realpath(f"{ssh}/sessions"))
 
 
 def names_ssh_dir(text: str, cwd: str) -> bool:
@@ -232,19 +234,13 @@ def names_ssh_dir(text: str, cwd: str) -> bool:
 def verdict(text: str) -> str | None:
     """The deny reason for a shell command, or None to allow it.
 
-    An unbalanced quote makes the text unreadable, which allows it. So does
-    `sudo` or `doas` as a command word, whose arguments the hook can't read.
+    An unbalanced quote makes the text unreadable, which allows it.
     """
     try:
         parsed = segments(text)
     except ValueError:
         return None
-    programs = [
-        Path(args[0]).name for words in parsed if (args := strip_wrappers(words))
-    ]
-    if ELEVATORS.intersection(programs):
-        return None
-    return REASON_ADD if "ssh-add" in programs else None
+    return REASON_ADD if any(command_word(w) == "ssh-add" for w in parsed) else None
 
 
 def path_reason(data: Json, cwd: str | None = None) -> str | None:

@@ -26,10 +26,13 @@ S = ".ssh"
         ("true |& ssh-add", guard.REASON_ADD),
         ("echo ok & ssh-add", guard.REASON_ADD),
         ("echo a\nssh-add", guard.REASON_ADD),
-        ("env -- FOO=1 ssh-add", guard.REASON_ADD),
+        ("env FOO=1 ssh-add", guard.REASON_ADD),
+        ("/usr/bin/env ssh-add -l", guard.REASON_ADD),
+        ("nohup ssh-add", guard.REASON_ADD),
+        ("exec ssh-add", guard.REASON_ADD),
+        ("time ssh-add", guard.REASON_ADD),
+        ("ssh-add; sudo -nl", guard.REASON_ADD),
         ("FOO=1 command ssh-add", guard.REASON_ADD),
-        ("env --unset FOO ssh-add -l", guard.REASON_ADD),
-        ("if true; then ssh-add; fi", guard.REASON_ADD),
     ],
 )
 def test_denied(command: str, reason: str) -> None:
@@ -91,6 +94,22 @@ def test_denied(command: str, reason: str) -> None:
         "sudo -e ./ssh-add",
         "doas ssh-add",
         "env FOO=1 sudo ssh-add",
+        "env -- FOO=1 ssh-add",
+        "env --unset FOO ssh-add -l",
+        "env -S 'printf %s' ssh-add",
+        "env --chdir=./ssh-add pwd",
+        "./time ssh-add",
+        "tools/env ssh-add",
+        "/home/u/project/env ssh-add",
+        "printf '%s\\n' $'it\\'s text; ssh-add -l; # end'",
+        "/usr/bin/time -o./ssh-add /usr/bin/true",
+        "env -C./ssh-add pwd",
+        "env --split-string='printf %s ./ssh-add'",
+        "command -- ssh-add",
+        "printf '%s\\n' ${STATUS:-ready;ssh-add;done}",
+        "if true; then ssh-add; fi",
+        "[[ -z $t || ssh-add == $t ]] && echo matched",
+        "[[ $t =~ git|ssh-add ]]",
         "ssh-add; echo (x)",
         "ssh-add; case x in",
     ],
@@ -185,6 +204,33 @@ def test_a_tool_path_is_checked(
     )
     assert guard.main() == 0
     assert bool(capsys.readouterr().out) is denied
+
+
+def test_sessions_matches_by_file_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A case-insensitive volume names sessions as SESSIONS: samefile says so."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / S / "sessions").mkdir(parents=True)
+
+    def same(_self: Path, _other: object) -> bool:
+        return True
+
+    monkeypatch.setattr(guard.Path, "samefile", same)
+    payload: dict[str, object] = {"tool_input": {"file_path": f"~/{S}/SESSIONS/record"}}
+    assert guard.path_reason(payload) is None
+
+
+def test_a_symlinked_sessions_directory_is_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ssh = tmp_path / S
+    (ssh / "store").mkdir(parents=True)
+    (ssh / "sessions").symlink_to("store")
+    (ssh / "store" / "record").write_text("")
+    payload: dict[str, object] = {"tool_input": {"file_path": f"~/{S}/sessions/record"}}
+    assert guard.path_reason(payload) is None
 
 
 def test_a_payload_without_tool_input_is_allowed() -> None:
