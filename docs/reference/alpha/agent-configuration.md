@@ -3,6 +3,12 @@ description: Agent settings, run requests, and host preparation.
 generated:
   - role: generated
     harness: codex:0.171.0
+    model: openai:gpt-6.2-sol
+    effort: high
+    surface: exec
+    at: "2026-11-24T20:38:25Z"
+  - role: generated
+    harness: codex:0.171.0
     model: openai:gpt-6
     at: "2026-11-24T20:44:25Z"
 status: stable
@@ -16,6 +22,8 @@ type: Reference
 `tbhbdev alpha agent` reads the optional `[agent]` table from the user config. Calling this command requires the table and every key shown below except `public_repos`, `[agent.otel]`, `max_run_minutes`, `docker`, `expires`, `pull_requests_app_client_id`, `pull_requests_app_pem`, the host’s `unsandboxed` flag and `tbhbdev` path, and the `[agent.codex]` table. Unreadable config fails with its path. Missing or invalid settings fail with the path, the full table name and the key, as `[agent.sandbox] audit_dir is required`. Unknown keys fail the same way at any level. `exec` validates a headless run before it contacts the host. It checks the remote version, then claims the name before it streams the inputs. A tmux session runs the host supervisor. Install that supervisor separately. `wait`, `status`, `kill`, `clean`, `keep`, `log` and `diff` use the recorded target. The parser allows and ignores `host_tag` in `[agent]` because another command reads it.
 
 `agent exec --fetch-ref REF` fetches a named ref during host preparation for either profile. Repeat the option up to eight times. Accepted refs are `refs/pull/<digits>/head` and `refs/heads/<branch>`. Branch names use only ASCII letters, digits, `.`, `_`, `/` and `-`; they cannot contain `..` or `//`, start or end with `/`, end with `.lock`, or start with `-`. The controller and host both validate these restrictions. For example, `--fetch-ref refs/pull/391/head --fetch-ref refs/heads/fix-392` makes `origin/fetched/pull/391/head` and `origin/fetched/heads/fix-392` available in the run clone. The host fetches these refs with the default branch in one Git fetch, using the existing authentication fallback. A missing requested ref fails preparation, and the error names the requested refs. The checkout stays on its usual build branch or review commit. No GitHub credential reaches the run through this option.
+
+`agent exec --expect-commit` requires a new commit from a build run. If the run would otherwise succeed and the host records no new commit, it returns exit status 6 and logs `no new commit: the brief expected one (--expect-commit)`. The launcher refuses this flag for the review profile.
 
 `agent exec` records the launching session's name and `CLAUDE_CODE_SESSION_ID` in the run record, and `agent status` prints `launcher=NAME`. The name is the tmux pane title of the launching process's pane, without its leading status glyph. Any named session may launch a reviewer-role run, meaning `--role reviewer` or `--profile review`, including for its own repository. A missing `TMUX_PANE` or pane title refuses the launch; set the launching session's tmux pane title to its name. Review tier rules are enforced by briefs.
 

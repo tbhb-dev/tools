@@ -104,6 +104,17 @@ def launch(remote: Remote, *options: str) -> int:
     return agent.main(arguments(remote, *options), "example agent")
 
 
+def test_exec_help_describes_expected_commits(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert agent.main(["exec", "--help"], "example agent") == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert (
+        "--expect-commit return status 6 if a successful build produced no new commit"
+        in help_text
+    )
+
+
 def command(verb: str, *options: str) -> int:
     return agent.main([verb, "sample", *options], "example agent")
 
@@ -220,6 +231,7 @@ def test_launch_stream_and_metadata(
             "one",
             "--role",
             "worker",
+            "--expect-commit",
             "--fetch-ref",
             "refs/pull/391/head",
             "--fetch-ref",
@@ -240,6 +252,7 @@ def test_launch_stream_and_metadata(
     assert parsed.timeout is None
     assert parsed.startup_deadline_seconds == 120
     assert parsed.fetch_refs == ("refs/pull/391/head", "refs/heads/fix-392")
+    assert parsed.expect_commit is True
     assert (remote.state / "sample.prompt").read_text() == remote.prompt.read_text()
     assert (remote.state / "sample.schema.json").read_text() == schema.read_text()
     assert remote.state.stat().st_mode & 0o777 == 0o700
@@ -598,6 +611,18 @@ def test_a_different_role_or_class_alone_is_still_a_duplicate(
         driver.refuse_live_duplicate(CONFIG, second)
 
 
+def test_exec_refuses_expect_commit_on_a_review(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        launch(remote, "--profile", "review", "--ref", COMMIT, "--expect-commit") == 1
+    )
+    assert (
+        "request expect_commit applies only to a build run" in capsys.readouterr().err
+    )
+    assert remote.records("ssh") == []
+
+
 @pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT])
 def test_review_ref(remote: Remote, ref: str) -> None:
     remote.configure(refs=f"{COMMIT}\t{ref}\n")
@@ -830,7 +855,11 @@ def test_status_reports_an_unreachable_host_with_the_local_record(
 
 @pytest.mark.parametrize(
     ("rc", "reason"),
-    [(4, "push failed: rejected"), (5, "pr not opened: no draft")],
+    [
+        (4, "push failed: rejected"),
+        (5, "pr not opened: no draft"),
+        (6, "no new commit: the brief expected one (--expect-commit)"),
+    ],
 )
 def test_status_shows_the_last_publication_reason(
     remote: Remote, capsys: pytest.CaptureFixture[str], rc: int, reason: str
