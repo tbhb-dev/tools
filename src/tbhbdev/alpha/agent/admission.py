@@ -9,6 +9,7 @@ from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from tbhbdev.alpha.agent.decisions.hosts import slot_refusal
 from tbhbdev.alpha.agent.model import Invalid, Profile
 
 if TYPE_CHECKING:
@@ -74,6 +75,19 @@ def _active(directory: int, profile: Profile) -> set[str]:
     return active
 
 
+def counts(root: Path) -> tuple[int, int]:
+    """Read active slots without creating admission files."""
+    with ExitStack() as stack:
+        try:
+            fd = os.open(root, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+            stack.callback(os.close, fd)
+            guard = stack.enter_context(_slot(fd, "admission.lock"))
+        except FileNotFoundError:
+            return 0, 0
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        return len(_active(fd, Profile.BUILD)), len(_active(fd, Profile.REVIEW))
+
+
 @contextmanager
 def reserve(
     root: Path, host: Host, profile: Profile, limit: int | None
@@ -95,16 +109,9 @@ def reserve(
             fcntl.flock(guard, fcntl.LOCK_EX)
             builds = _active(directory, Profile.BUILD)
             reviews = _active(directory, Profile.REVIEW)
-            if len(builds) + len(reviews) >= limit:
-                message = (
-                    f"{host.name}: no agent slot available "
-                    f"(max_concurrent_runs={limit})"
-                )
-                raise Invalid(message)
-            if profile is Profile.BUILD and len(builds) >= max(limit - 1, 1):
-                message = (
-                    f"{host.name}: remaining agent capacity is reserved for reviews"
-                )
+            reason = slot_refusal(profile, limit, len(builds), len(reviews))
+            if reason is not None:
+                message = f"{host.name}: {reason}"
                 raise Invalid(message)
             active = builds if profile is Profile.BUILD else reviews
             names = (f"{profile}-{i}" for i in range(len(active) + 1))
