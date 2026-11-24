@@ -670,10 +670,15 @@ def test_visibility_lookup_failure_is_logged_when_opening(
 ) -> None:
     published = commit_draft(tmp_path, None)
     write_draft(tmp_path, DRAFT)
-    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: reply(404, {}))
-    monkeypatch.setattr(
-        httpx, "post", lambda *_args, **_kwargs: reply(201, {"number": 12})
-    )
+
+    def get(*_args: object, **_kwargs: object) -> httpx.Response:
+        return reply(404, {})
+
+    def post(*_args: object, **_kwargs: object) -> httpx.Response:
+        return reply(201, {"number": 12})
+
+    monkeypatch.setattr(httpx, "get", get)
+    monkeypatch.setattr(httpx, "post", post)
 
     def scan(_text: str, _what: str, **options: object) -> None:
         assert options["visibility"] == ""
