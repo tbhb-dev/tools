@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NoReturn
 
 from tbhbdev import telemetry, version
+from tbhbdev.alpha import brief
 from tbhbdev.alpha.agent import (
     launcher,
     render,
@@ -360,6 +361,14 @@ def clear_taint(host: str, reason: str) -> int:
 
 
 def execute(settings: Settings, args: argparse.Namespace) -> int:
+    prompt = Path(args.prompt_file).read_text()
+    problems = brief.check_hooks(prompt)
+    if problems:
+        telemetry.attributes(**{"tbhb.agent.outcome": "refused"})
+        message = "\n".join(f"{args.prompt_file}: {problem}" for problem in problems)
+        raise Invalid(message)
+    for warning in brief.branch_warnings(prompt, run=args.name):
+        print(f"warning: {args.prompt_file}: {warning}", file=sys.stderr)
     run = prepare(settings, args)
     telemetry.attributes(
         **{
@@ -370,7 +379,6 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
             "tbhb.run.id": run.name,
         }
     )
-    prompt = Path(args.prompt_file).read_text()
     schema = None if args.schema is None else Path(args.schema).read_text()
     if schema is not None:
         json.loads(schema)

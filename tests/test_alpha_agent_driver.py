@@ -19,6 +19,7 @@ from unittest.mock import Mock
 
 import pytest
 from agent_driver_example import (
+    BODY,
     Remote,
     execution_arguments,
     git_in,
@@ -1043,6 +1044,50 @@ def test_schema_and_prompt_refused_locally(remote: Remote) -> None:
     remote.prompt.rename(remote.prompt.with_suffix(".saved"))
     assert launch(remote) == 1
     assert remote.records("ssh") == []
+
+
+def test_prompt_hook_conflicts_refuse_launch_before_ssh(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    remote.prompt.write_text("Run `prek install`. Run `git push origin main`.\n")
+    args = arguments(remote, "--ignore-limits")
+    args[-2] = "sample-run"
+    assert agent.main(args, "example agent") == 1
+    assert capsys.readouterr() == (
+        "",
+        (
+            f"example agent: {remote.prompt}: "
+            "hook conflict: push to main or master is forbidden\n"
+            f"{remote.prompt}: hook conflict: hook install is forbidden\n"
+        ),
+    )
+    assert remote.records("ssh", limits=True) == []
+    assert remote.records("tmux") == []
+    assert not driver.metadata_path("sample-run").exists()
+
+
+def test_prompt_without_hook_conflicts_launches(remote: Remote) -> None:
+    remote.prompt.write_text(
+        'Never run `prek install`. Use `git commit -m "feat: x"`.\n'
+    )
+    assert launch(remote) == 0
+    assert driver.metadata_path("sample").is_file()
+    assert (remote.state / "sample.prompt").read_text() == remote.prompt.read_text()
+
+
+def test_prompt_with_foreign_branch_warns_and_launches(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_standalone_fake(remote.bin / "tmux", BODY.replace("sample", "sample-run"))
+    remote.prompt.write_text("Create branch `agent/other`.\n")
+    args = arguments(remote)
+    args[-2] = "sample-run"
+    assert agent.main(args, "example agent") == 0
+    assert capsys.readouterr().err == (
+        f"warning: {remote.prompt}: use the launcher branch agent/sample-run "
+        "instead of agent/other\n"
+    )
+    assert driver.metadata_path("sample-run").is_file()
 
 
 def test_metadata_round_trip_and_exclusive_create(remote: Remote) -> None:
