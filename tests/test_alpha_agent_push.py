@@ -566,7 +566,7 @@ def test_eligible_tips_orders_refs_and_ignores_existing_history(
     existing = "2" * 40
     last = "4" * 40
     bases = (start,)
-    candidates = {
+    candidates: dict[str, str] = {
         "refs/heads/z-last": last,
         "refs/heads/m-existing": existing,
         "refs/heads/a-first": first,
