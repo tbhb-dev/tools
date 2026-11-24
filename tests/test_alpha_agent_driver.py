@@ -1567,6 +1567,18 @@ def test_load_hardens_existing_metadata_directory(remote: Remote) -> None:
     assert path.parent.stat().st_mode & 0o777 == 0o700
 
 
+def test_load_accepts_legacy_tainted_host(remote: Remote) -> None:
+    args = agent.parser("example agent").parse_args(arguments(remote))
+    run = driver.prepare(CONFIG, args)
+    driver.save(run)
+    path = driver.metadata_path(run.name)
+    record = json.loads(path.read_text())
+    record["tainted_host"] = True
+    path.write_text(json.dumps(record))
+
+    assert driver.load(CONFIG, run.name).request == run.request
+
+
 def test_metadata_directory_is_private_before_chmod(
     remote: Remote, monkeypatch: pytest.MonkeyPatch
 ) -> None:

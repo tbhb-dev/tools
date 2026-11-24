@@ -106,6 +106,7 @@ def load(settings: Settings, name: str) -> Run:
         )
         # Records from before the limits check have no such field.
         ignore_limits = record.pop("ignore_limits", False)
+        record.pop("tainted_host", None)
         run = request.parse(record, host_allows_unsandboxed=True)
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         message = f"{path}: invalid run metadata"
