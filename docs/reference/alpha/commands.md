@@ -3,8 +3,7 @@ description: Interim agent commands, installation, and harness hooks.
 generated:
   - role: generated
     harness: codex
-    model: openai:gpt-6
-    at: "2026-11-24T17:35:44Z"
+    at: "2026-11-24T18:11:44Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -89,11 +88,11 @@ For a run that opens a pull request, write `.github/PULL_REQUEST_DRAFT.md` in it
 
 ## Gate
 
-`tbhbdev alpha gate run NAME WORKTREE HOST [REPO]` bundles the worktree's `HEAD` relative to `origin/main` and runs `bazelisk test --config=ci //...` in a detached worktree on the host. `REPO` defaults to `tools`. Exit codes follow the remote test status, with a nonzero status if an earlier step fails and 2 for a usage error.
+`tbhbdev alpha gate run NAME WORKTREE HOST [REPO]` bundles the worktree's `HEAD` relative to `origin/main` and runs `bazelisk test --config=ci //...` in a detached worktree on the host. An omitted or empty `REPO` selects `tools`. The command prints the first five log lines containing `tests pass`, `FAILED` or `Build did NOT`, with ANSI escape sequences removed. Exit codes follow the remote test status, with a nonzero status if an earlier step fails and 2 for a usage error.
 
-Under `~/.local/state/tbhb/gate/NAME-HOST/`, `pid` holds the local process ID and `heartbeat` holds a timestamp in Coordinated Universal Time (UTC). The command updates `heartbeat` at least every 30 seconds. On completion, `exit` holds the final status, and `reason` names the failed step if the remote test didn't return a status. When the run finishes, the command publishes `~/.local/state/tbhb/tools-NAME-HOST.log` and then writes the commit hash to `<log>.sha` if the remote test returned a status.
+Both commands accept `HOST` as `host` or `user@host`. The state directory is `~/.local/state/tbhb/gate/NAME-HOST/` and the log is `~/.local/state/tbhb/tools-NAME-HOST.log`. With `user@host`, both paths use `NAME+USER+HOST` in place of `NAME-HOST`. In the state directory, `pid` holds the local process ID, `heartbeat` holds a UTC timestamp, `exit` holds the final status, and `reason` names any failed setup step. The command publishes the log and then writes the commit hash to `<log>.sha` if the remote test returned a status. Bundle creation and copy failures preserve the previous log and `.sha`. Waiters check the current run's status.
 
-`tbhbdev alpha gate wait NAME HOST --sha SHA [--timeout SECONDS]` checks for a matching result every 15 seconds and prints up to 40 summary lines. Without a result, a missing `pid`, a dead process, or a missing or stale heartbeat fails the wait. A heartbeat goes stale when its timestamp is more than 90 seconds old. The command returns 0 for a pass, 1 for a failure, 2 for a usage error, and 3 if the gate still runs at the timeout. By default, the wait times out after 14,400 seconds.
+`tbhbdev alpha gate wait NAME HOST --sha SHA [--timeout SECONDS]` checks for a matching result every 15 seconds and prints up to 40 summary lines. It checks again for a result if the process has exited. A missing `pid`, a dead process without a result, or a stale heartbeat fails the wait. A live process has five seconds after publishing `pid` to provide its first heartbeat. A heartbeat goes stale when its timestamp is more than 90 seconds old. The command returns 0 for a pass, 1 for a failure, 2 for a usage error, and 3 if the gate still runs at the timeout. By default, the wait times out after 14,400 seconds.
 
 ## Identity start time
 

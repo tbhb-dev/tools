@@ -9,6 +9,7 @@ import tempfile
 from collections import deque
 from contextlib import suppress
 from datetime import UTC, datetime
+from itertools import islice
 from pathlib import Path
 from shlex import quote
 from time import monotonic, sleep, time
@@ -19,7 +20,9 @@ from tbhbdev.alpha.agent.runfiles import atomic, private_dir
 if TYPE_CHECKING:
     from typing import IO
 
-COMPONENT = re.compile(r"(?!\.{1,2}$)[A-Za-z0-9._][A-Za-z0-9._-]*")
+COMPONENT_CHARS = r"[A-Za-z0-9._][A-Za-z0-9._-]*"
+COMPONENT = re.compile(rf"(?!\.{{1,2}}$){COMPONENT_CHARS}")
+HOST = re.compile(rf"(?:(?!\.{{1,2}}@){COMPONENT_CHARS}@)?{COMPONENT.pattern}")
 ANSI = re.compile(
     rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[ -/]*[0-~])"
 )
@@ -27,7 +30,9 @@ SUMMARY = re.compile(
     rb"FAILED|TIMEOUT|NO STATUS|Build did NOT|Build completed|FLAKY|PASSED|"
     rb"tests pass|^Executed"
 )
+RUN_SUMMARY = re.compile(rb"tests pass|FAILED|Build did NOT")
 HEARTBEAT_INTERVAL = 10
+STARTUP_GRACE = 5
 STALE_LIMIT = 90
 POLL_INTERVAL = 15
 
@@ -55,32 +60,62 @@ def run_step(
             heartbeat(directory)
 
 
-def run(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> int:
+def print_run_summary(log: Path) -> None:
+    with log.open("rb") as source:
+        lines = (ANSI.sub(b"", raw) for raw in source)
+        summary = b"".join(
+            islice((line for line in lines if RUN_SUMMARY.search(line)), 5)
+        )
+    if summary:
+        sys.stdout.buffer.write(summary.removesuffix(b"\n") + b"\n")
+
+
+def begin_run(directory: Path) -> Path:
     private_dir(directory)
-    old_state = (directory / name for name in ("pid", "heartbeat", "exit", "reason"))
-    for old in (result, log, *old_state):
-        old.unlink(missing_ok=True)
+    superseded = directory / "superseded"
+    # Keep the previous files through preparation without serving them to waiters.
+    superseded.touch()
+    for name in ("pid", "heartbeat", "exit", "reason"):
+        (directory / name).unlink(missing_ok=True)
     atomic(directory / "pid", f"{os.getpid()}\n")
     heartbeat(directory)
+    return superseded
 
-    git = ["git", "-C", args.worktree]
-    bundle_name = f"{args.name}.bundle"
-    bundle = log.parent / "gate-bundles" / bundle_name
+
+def remote_commands(
+    args: argparse.Namespace, bundle_name: str, sha: str
+) -> tuple[str, str]:
     repo = f"~/Code/github.com/tbhb-dev/{quote(args.repo)}"
     remote_bundle = f"~/{quote(bundle_name)}"
     ref = quote(f"refs/gate/{args.name}")
     worktree = quote(f".worktrees/{args.name}")
-    env = {**os.environ, "SSH_AUTH_SOCK": ""}
-    ssh = ["ssh", "-o", "IdentityAgent=none", args.host]
-    destination = f"{args.host}:{bundle_name}"
-    scp = ["scp", "-q", "-o", "IdentityAgent=none", str(bundle), destination]
+    test = (
+        f"cd {repo} && git fetch -q origin && "
+        f"git fetch -q {remote_bundle} HEAD:{ref} && "
+        f'test "$(git rev-parse {ref})" = {quote(sha)} && '
+        f"git worktree add -q --detach {worktree} {ref} && "
+        f"cd {worktree} && bash -lc 'bazelisk test --config=ci //...'"
+    )
     cleanup = (
         f"cd {repo} && {{ git worktree remove --force {worktree}; "
         f"git update-ref -d {ref}; }}; rm -f {remote_bundle}"
     )
+    return test, cleanup
+
+
+def run(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> int:
+    superseded = begin_run(directory)
+    git = ["git", "-C", args.worktree]
+    bundle_name = f"{args.name}.bundle"
+    bundle = log.parent / "gate-bundles" / bundle_name
+    env = {**os.environ, "SSH_AUTH_SOCK": ""}
+    ssh = ["ssh", "-o", "IdentityAgent=none", args.host]
+    destination = f"{args.host}:{bundle_name}"
+    scp = ["scp", "-q", "-o", "IdentityAgent=none", str(bundle), destination]
 
     step = "read HEAD"
     sha = ""
+    prepared = False
     with tempfile.NamedTemporaryFile(dir=directory, delete=False) as output:
         try:
             sha = subprocess.check_output(  # nosec B603
@@ -90,17 +125,14 @@ def run(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> i
             private_dir(bundle.parent)
             create = [*git, "bundle", "create", str(bundle), "origin/main..HEAD"]
             run_step(create, directory, output).check_returncode()
+            remote, cleanup = remote_commands(args, bundle_name, sha)
             try:
                 step = "scp bundle"
                 run_step(scp, directory, output, env=env).check_returncode()
+                result.unlink(missing_ok=True)
+                superseded.unlink()
+                prepared = True
                 step = "ssh test"
-                remote = (
-                    f"cd {repo} && git fetch origin && "
-                    f"git fetch {remote_bundle} HEAD:{ref} && "
-                    f'test "$(git rev-parse {ref})" = {quote(sha)} && '
-                    f"git worktree add --detach {worktree} {ref} && cd {worktree} && "
-                    "bash -lc 'bazelisk test --config=ci //...'"
-                )
                 status = run_step([*ssh, remote], directory, output, env=env).returncode
             finally:
                 with suppress(OSError):
@@ -112,12 +144,17 @@ def run(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> i
         else:
             step = ""
 
-    Path(output.name).replace(log)
+    if prepared:
+        Path(output.name).replace(log)
+    else:
+        Path(output.name).unlink()
     if step:
         atomic(directory / "reason", f"{step} failed\n")
     atomic(directory / "exit", f"{status}\n")
     if not step:
         atomic(result, f"{sha}\n")
+    if prepared:
+        print_run_summary(log)
     return status
 
 
@@ -128,6 +165,8 @@ def read_state(path: Path) -> str | None:
 
 
 def result_status(directory: Path, log: Path, result: Path, sha: str) -> int | None:
+    if (directory / "superseded").exists():
+        return None
     actual = read_state(result)
     if actual is None:
         return None
@@ -149,9 +188,10 @@ def result_status(directory: Path, log: Path, result: Path, sha: str) -> int | N
 
 def running_failure(directory: Path) -> str | None:
     no_pid = "no pid file (the gate never started or was removed)"
+    pid_file = directory / "pid"
     pid = 0
     with suppress(ValueError):
-        pid = int(read_state(directory / "pid") or "0")
+        pid = int(read_state(pid_file) or "0")
     if pid <= 0:
         return no_pid
     try:
@@ -171,6 +211,9 @@ def running_failure(directory: Path) -> str | None:
         stamp = datetime.fromisoformat(read_state(directory / "heartbeat") or "")
         age = (datetime.fromtimestamp(time(), UTC) - stamp).total_seconds()
     except TypeError, ValueError:
+        with suppress(OSError):
+            if time() - pid_file.stat().st_mtime < STARTUP_GRACE:
+                return None
         return "heartbeat stale (missing)"
     stale = f"heartbeat stale (age {age:.0f}s, limit {STALE_LIMIT} s)"
     return stale if age > STALE_LIMIT else None
@@ -182,6 +225,8 @@ def wait(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> 
         if (status := result_status(directory, log, result, args.sha)) is not None:
             return status
         if failure := running_failure(directory):
+            if (status := result_status(directory, log, result, args.sha)) is not None:
+                return status
             print(f"FAILED: {failure}")
             return 1
         remaining = deadline - monotonic()
@@ -198,7 +243,7 @@ def main(argv: list[str], prog: str) -> int:
     run_parser.add_argument("name", metavar="NAME")
     run_parser.add_argument("worktree", metavar="WORKTREE")
     run_parser.add_argument("host", metavar="HOST")
-    run_parser.add_argument("repo", metavar="REPO", nargs="?", default="tools")
+    run_parser.add_argument("repo", metavar="REPO", nargs="?")
     wait_parser = commands.add_parser(
         "wait", help="wait for a result", allow_abbrev=False
     )
@@ -208,16 +253,23 @@ def main(argv: list[str], prog: str) -> int:
     wait_parser.add_argument("--timeout", metavar="SECONDS", type=int, default=14400)
     try:
         args = parser.parse_args(argv)
-        for field in ("name", "host", "repo"):
-            if not COMPONENT.fullmatch(getattr(args, field, "tools")):
-                parser.error(f"invalid {field.upper()}")
-        if args.command == "wait" and args.timeout < 0:
+        if not COMPONENT.fullmatch(args.name):
+            parser.error("invalid NAME")
+        if not HOST.fullmatch(args.host):
+            parser.error("invalid HOST")
+        if args.command == "run":
+            args.repo = args.repo or "tools"
+            if not COMPONENT.fullmatch(args.repo):
+                parser.error("invalid REPO")
+        elif args.timeout < 0:
             parser.error("--timeout must be nonnegative")
     except SystemExit as exc:
         return int(exc.code or 0)
 
     state = Path.home() / ".local" / "state" / "tbhb"
     key = f"{args.name}-{args.host}"
+    if "@" in args.host:
+        key = f"{args.name}+{args.host.replace('@', '+')}"
     log = state / f"tools-{key}.log"
     action = run if args.command == "run" else wait
     return action(args, state / "gate" / key, log, log.with_suffix(".log.sha"))
