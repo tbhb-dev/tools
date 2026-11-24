@@ -35,8 +35,16 @@ def parser(prog: str) -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="REF",
-        help="fetch refs/pull/N/head or refs/heads/BRANCH during preparation "
-        "(repeat up to 8 times; available as origin/fetched/...; any profile)",
+        help="fetch refs/heads/<branch> as origin/fetched/heads/<branch> or "
+        "refs/pull/N/head as origin/fetched/pull/N/head (repeat up to 8 times; "
+        "any profile)",
+    )
+    execute.add_argument(
+        "--start-ref",
+        metavar="REF",
+        help="start at a refs/heads/<branch> also listed with --fetch-ref "
+        "and fast-forward that branch without opening a pull request "
+        "(build profile only; excludes the default branch)",
     )
     execute.add_argument(
         "--harness", choices=("codex", "claude", "agy"), default="codex"
