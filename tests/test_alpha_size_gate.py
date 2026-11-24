@@ -148,11 +148,13 @@ def test_pr_check(
     monkeypatch.setattr(pr, "read_checked", lint)
     counter = Mock(return_value=counts)
     monkeypatch.setattr(sg, "size_counts", counter)
+    monkeypatch.setattr(pr, "git", Mock(return_value=(0, "")))
+    monkeypatch.setattr(pr, "base_of", Mock(return_value="main"))
     assert pr.command(
         argparse.Namespace(command="check", draft="draft.md"), {}
     ) == bool(problem)
     lint.assert_called_once_with("draft.md")
-    counter.assert_called_once_with("origin/main", "HEAD")
+    counter.assert_called_once_with("refs/remotes/origin/main", "HEAD")
     captured = capsys.readouterr()
     assert captured.err == ""
     assert captured.out.startswith(
@@ -169,6 +171,8 @@ def test_pr_check(
 def test_pr_check_unavailable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    monkeypatch.setattr(pr, "git", Mock(return_value=(0, "")))
+    monkeypatch.setattr(pr, "base_of", Mock(return_value="main"))
     monkeypatch.setattr(pr, "read_checked", Mock(return_value=pr.Checked([])))
     monkeypatch.setattr(
         sg, "size_counts", Mock(side_effect=sg.SizeCountError("missing target"))
@@ -177,3 +181,29 @@ def test_pr_check_unavailable(
     captured = capsys.readouterr()
     assert captured.err == "size count unavailable: missing target\n"
     assert captured.out == "OK: the draft conforms\n"
+
+
+@pytest.mark.parametrize("failure", ["count", "over", "base"])
+def test_pr_create_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    counts = sg.SizeCounts(401, 400, 500, 1500, "code")
+    counter = Mock(return_value=counts)
+    if failure == "count":
+        counter = Mock(side_effect=sg.SizeCountError("missing target"))
+    monkeypatch.setattr(sg, "size_counts", counter)
+    monkeypatch.setattr(pr, "git", Mock(return_value=(int(failure == "base"), "")))
+    monkeypatch.setattr(pr, "base_of", Mock(return_value="main"))
+    monkeypatch.setattr(pr, "read_checked", Mock(return_value=pr.Checked([])))
+    post = Mock()
+    monkeypatch.setattr(pr, "create_pr", post)
+    assert pr.command(argparse.Namespace(command="create", draft="d.md"), {}) == 1
+    post.assert_not_called()
+    expected = {
+        "count": "size count unavailable: missing target",
+        "over": "401 lines, limit 400: split into stacked PRs",
+        "base": "base branch refs/remotes/origin/main not found (is it fetched?)",
+    }[failure]
+    assert capsys.readouterr().out == f"d.md:1: {expected}\n"

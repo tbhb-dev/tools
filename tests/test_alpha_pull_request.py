@@ -207,6 +207,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     made.git("config", "commit.gpgsign", "false")
     made.git("remote", "add", "origin", ORIGIN)
     made.commit("init")
+    made.git("update-ref", "refs/remotes/origin/main", "HEAD")
     made.fake("cog")
     made.fake("vale", stdout="{}")
     made.fake("cspell")
@@ -1515,7 +1516,7 @@ def test_create_runs_gh_with_the_frontmatter(
         "---\nbase: dev\ndraft: true\nlabels: [bug, good first issue]\n"
         "reviewers: [tbhb, org/team]\nassignees: ['@me']\nmilestone: v1\n---\n"
     )
-    world.git("branch", "dev")
+    world.git("update-ref", "refs/remotes/origin/dev", "HEAD")
     write_draft(world, meta + BASE)
     assert run_main("create") == 0
     _, call = world.calls("gh")
