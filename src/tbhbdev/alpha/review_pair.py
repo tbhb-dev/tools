@@ -27,7 +27,7 @@ REVIEW_VERDICT = re.compile(
     r"^##[ \t]+Verdict[ \t]*\r?\n\s*(GO|HOLD)[ \t]*\r?$", re.MULTILINE
 )
 REVIEW_FINDING = re.compile(
-    r"^[ \t]*[-*+][ \t]+(BLOCK|TECH-DEBT|SECURITY-DEBT)[ \t]+", re.MULTILINE
+    r"^[ \t]*(?:[-*+][ \t]+)?(BLOCK|TECH-DEBT|SECURITY-DEBT)[ \t]+", re.MULTILINE
 )
 RC = re.compile(r"^\S+: rc=(\S+)")
 # Spec key -> `agent exec` flag. Every run is a review-profile run.

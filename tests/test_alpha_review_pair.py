@@ -141,6 +141,48 @@ def test_review_format_prints_verdict_and_finding_counts(
     assert "  verdict: GO\n" in out
 
 
+@pytest.mark.parametrize("verdict", ["GO", "HOLD"])
+@pytest.mark.parametrize("bullet", ["", "- ", "* ", "+ "])
+@pytest.mark.parametrize("indent", ["", " \t"])
+@pytest.mark.parametrize(
+    ("finding", "counts"),
+    [
+        (
+            "BLOCK src/tbhbdev/alpha/review_pair.py:29 the parser requires a Markdown bullet",  # noqa: E501 -- verbatim reviewer line
+            "BLOCK=1 TECH-DEBT=0 SECURITY-DEBT=0",
+        ),
+        (
+            "TECH-DEBT telemetry.py:76 a full stderr pipe blocked",
+            "BLOCK=0 TECH-DEBT=1 SECURITY-DEBT=0",
+        ),
+        (
+            "SECURITY-DEBT ops/claude/settings.json:42 the same OTLP endpoint also serves",  # noqa: E501 -- verbatim reviewer line
+            "BLOCK=0 TECH-DEBT=0 SECURITY-DEBT=1",
+        ),
+    ],
+)
+def test_review_class_lines_are_counted(
+    verdict: str, bullet: str, indent: str, finding: str, counts: str
+) -> None:
+    answer = f"## Verdict\n{verdict}\n\n## Findings\n{indent}{bullet}{finding}\n"
+    assert review_pair.summarize(answer) == (verdict, f"P1=0 P2=0 P3=0 {counts}")
+
+
+@pytest.mark.parametrize("tag", ["BLOCK", "TECH-DEBT", "SECURITY-DEBT"])
+@pytest.mark.parametrize("bullet", ["", "- ", "* ", "+ "])
+@pytest.mark.parametrize(
+    "line", ["Mention {tag} in a sentence.", "{tag}: path:1 finding", "{tag}"]
+)
+def test_review_class_mentions_and_missing_whitespace_are_not_counted(
+    tag: str, bullet: str, line: str
+) -> None:
+    answer = f"## Verdict\nGO\n\n{bullet}{line.format(tag=tag)}\n"
+    assert review_pair.summarize(answer) == (
+        "GO",
+        "P1=0 P2=0 P3=0 BLOCK=0 TECH-DEBT=0 SECURITY-DEBT=0",
+    )
+
+
 def test_generated_launches_satisfy_the_real_exec_parser(tmp_path: Path) -> None:
     run = run_spec(
         "a",
