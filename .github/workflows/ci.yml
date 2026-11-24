@@ -101,13 +101,38 @@ jobs:
       pip-audit-target: //:pip_audit
       module-dirs: .
 
+  # The PR draft stays in the worktree. These checks live here because the
+  # shared rules gates and reusable repo workflow cannot be changed here.
+  pr-draft:
+    name: pr-draft
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Refuse a committed PR draft
+        if: github.event_name == 'pull_request'
+        run: |
+          changed=$(git diff --name-only origin/main...HEAD)
+          if grep -Fxq '.github/PULL_REQUEST_DRAFT.md' <<<"$changed"; then
+            echo 'PR diff contains .github/PULL_REQUEST_DRAFT.md; remove it from the commits'
+            exit 1
+          fi
+
   # One stable required check for branch protection. `if: always()` runs it
   # even when a needed job failed; the shared action passes only when every
   # needed job's result is exactly "success".
   conclusion:
     name: conclusion
     if: always()
-    needs: [bazel, repo]
+    needs: [bazel, repo, pr-draft]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
