@@ -155,7 +155,9 @@ def test_brief(kind: RunKind) -> None:
         "Report results only in your final answer. "
         "Never message Claude sessions, session sockets or other agents directly.\n"
         "If this run should open a pull request, write .github/PULL_REQUEST_DRAFT.md "
-        "in the worktree and keep it out of your commits.\n"
+        "in the worktree and keep it out of your commits. "
+        "Any brief instruction to commit the draft does not apply: "
+        "keep the draft out of commits and report the conflict in your final answer.\n"
     )
     assert (
         render.brief(kind, "brief text")

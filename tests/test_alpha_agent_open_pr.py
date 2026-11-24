@@ -194,8 +194,13 @@ def test_publication_git_isolated_from_run(
 
     def git(args: list[str], **options: object) -> subprocess.CompletedProcess[bytes]:
         if args[3] == "diff":
-            assert args[4:-4] == flags.split()
-            assert args[-1] == open_pr.DRAFT
+            assert args[4:] == [
+                *flags.split(),
+                published.before,
+                published.commit,
+                "--",
+                open_pr.DRAFT,
+            ]
         assert options["cwd"] == published.git_dir
         assert options["env"] == expected
         return subprocess.CompletedProcess(args, 0, next(output))

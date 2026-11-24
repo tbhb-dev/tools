@@ -187,6 +187,7 @@ def publish(
             return 4
         with publication(run.files.root, workspace, commit) as directory:
             published = open_pr.PublishedRange(workspace, directory, base, commit)
+            # Without a pre-run commit, keep the existing PR refusal after push.
             if base is not None:
                 open_pr.check_range(published)
             status, error = send(directory, url(run.request.repo), branch, token)

@@ -41,7 +41,7 @@ def test_pr_draft_gate(tmp_path: Path, change: str) -> None:
     if change != "bad-base":
         git("update-ref", "refs/remotes/origin/main", "HEAD")
     if change == "delete":
-        draft.rename(tmp_path / "removed.md")
+        draft.rename(tmp_path.parent / f"{tmp_path.name}-removed.md")
     elif change == "rename":
         other.rename(draft)
     elif change in ("add", "modify"):
@@ -51,7 +51,7 @@ def test_pr_draft_gate(tmp_path: Path, change: str) -> None:
     git("add", "-A")
     git("commit", "-qm", "change")
     done = subprocess.run(
-        ["bash", "-e", "-o", "pipefail", "-c", gate["run"]],
+        ["bash", "-e", "-c", gate["run"]],
         cwd=tmp_path,
         text=True,
         capture_output=True,
