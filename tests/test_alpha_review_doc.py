@@ -39,7 +39,7 @@ Read the cache.
 """
 MARKER = f"<!-- tbhb-review v1 repo={REPO} pr=384 head={HEAD} run=review-build -->"
 KEY = Marker(REPO, 384, HEAD, "review-build")
-EXISTING = Existing(942, "reviews[bot]", "COMMENTED", f"{BODY}\n{MARKER}\n")
+EXISTING = Existing(942, "reviews[bot]", KEY, "COMMENTED", f"{BODY}\n{MARKER}\n")
 METADATA = {
     "schema": 2,
     "repo": REPO,
@@ -79,13 +79,16 @@ def test_render_empty_findings_and_alternate_run() -> None:
     ("old", "new", "problem"),
     [
         (PREAMBLE, "", r"^expected schema 2 frontmatter with repo and integer pr$"),
-        ("384\n---", "384", "unterminated frontmatter"),
-        ("pr: 384", "pr: [", "invalid YAML"),
-        ("pr: 384", "pr: 384\npr: 383", "duplicate key"),
+        ("384\n---", "384", "invalid review frontmatter"),
+        ("pr: 384", "pr: [", "invalid review frontmatter"),
+        ("pr: 384", "pr: 384\npr: 383", "invalid review frontmatter"),
+        ("pr: 384", 'pr: !!int ""', "invalid review frontmatter"),
+        ("pr: 384", "pr: !!bool maybe", "invalid review frontmatter"),
+        ("pr: 384", f"pr: !!float {'1:' * 200}1", "invalid review frontmatter"),
         ("schema: 2", "schema: 1", "expected schema 2"),
         ("pr: 384", "pr: true", "integer pr"),
-        ("pr: 384", "pr: 384\nextra: value", "field: extra"),
-        ("pr: 384", "pr: 384\ntier: 1", "field: tier"),
+        ("pr: 384", "pr: 384\nextra: value", "mismatched review frontmatter field"),
+        ("pr: 384", "pr: 384\ntier: 1", "mismatched review frontmatter field"),
         (
             "Verdict\n",
             "Findings\n",
@@ -95,13 +98,45 @@ def test_render_empty_findings_and_alternate_run() -> None:
         ("Run:", " Run:", "seven run header lines"),
         ("Run:", "XRun:", "seven run header lines"),
         ("NO-GO", "HOLD", r"^expected a GO or NO-GO verdict$"),
-        ("- BLOCK", "- NOTE", "invalid finding: '- NOTE"),
+        ("- BLOCK", "- NOTE", "invalid finding"),
         ("app.py:4", "app.py:0", "invalid finding"),
     ],
 )
 def test_parse_refuses_malformed_drafts(old: str, new: str, problem: str) -> None:
     with pytest.raises(review.ReviewError, match=problem):
         review.parse((PREAMBLE + BODY).replace(old, new, 1))
+
+
+def test_parse_refuses_deeply_nested_yaml() -> None:
+    nested = "[" * 2000 + "0" + "]" * 2000
+    draft = (PREAMBLE + BODY).replace("pr: 384", f"pr: {nested}", 1)
+    with pytest.raises(review.ReviewError, match=r"^invalid review frontmatter$"):
+        review.parse(draft)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "problem"),
+    [
+        ("pr: 384", "private: [", "invalid review frontmatter"),
+        (
+            "pr: 384",
+            "pr: 384\nprivate: draft",
+            "unexpected or mismatched review frontmatter field",
+        ),
+        ("- BLOCK", "- private", "invalid finding"),
+    ],
+)
+def test_parse_errors_omit_draft_text(old: str, new: str, problem: str) -> None:
+    with pytest.raises(review.ReviewError) as refused:
+        review.parse((PREAMBLE + BODY).replace(old, new, 1))
+    assert str(refused.value) == problem
+    assert refused.value.__suppress_context__ or refused.value.__context__ is None
+
+
+def test_parse_refuses_oversized_finding_line() -> None:
+    draft = (PREAMBLE + BODY).replace("app.py:4", f"app.py:{'9' * 5000}", 1)
+    with pytest.raises(review.ReviewError, match=r"^invalid finding line number$"):
+        review.parse(draft)
 
 
 @pytest.mark.parametrize("spacer", ["", "  "])
@@ -115,13 +150,21 @@ def test_round_trip_preserves_summary_and_verification(spacer: str) -> None:
 
 
 def test_marker_uses_last_matching_line() -> None:
-    assert review.marker(DOC) == MARKER
+    assert review.marker(DOC) == KEY
+    assert review.marker(replace(DOC, run=replace(RUN, variant="b"))) == KEY
+    assert KEY.head_sha == HEAD
     assert review.parse_marker(review.render(DOC)) == KEY
     wrong = MARKER.replace("pr=384", "pr=12")
     older = MARKER.replace("run=review-build", "run=other")
     invalid = MARKER.replace(HEAD, HEAD.upper())
     assert review.parse_marker(f"{wrong}\n{MARKER}\n{invalid}") == KEY
     assert review.parse_marker(f"{wrong}\n{older}\n{MARKER}") == KEY
+
+
+def test_parse_marker_accepts_crlf_and_maximum_pr_length() -> None:
+    number = 999_999_999_999
+    marker = MARKER.replace("pr=384", f"pr={number}")
+    assert review.parse_marker(f"{MARKER}\r\n{marker}\r\n") == replace(KEY, pr=number)
 
 
 @pytest.mark.parametrize(
@@ -132,6 +175,13 @@ def test_marker_uses_last_matching_line() -> None:
         f" {MARKER}",
         f"{MARKER} ",
         MARKER.replace(HEAD, HEAD.upper()),
+        MARKER.replace("pr=384", f"pr={'9' * 5000}"),
+        MARKER.replace("pr=384", "pr=1000000000000"),
+        MARKER.replace("pr=384", "pr=\u066384"),
+        MARKER.replace("pr=384", "pr=00384"),
+        MARKER.replace("pr=384", "pr=0"),
+        MARKER.replace("review-build", "review\xa0build"),
+        MARKER.replace(REPO, "tbhb-dev/\xa0tools"),
     ],
 )
 def test_parse_marker_refuses_spoofs(body: str) -> None:
@@ -188,10 +238,34 @@ def test_validate_reports_unexpected_failure(monkeypatch: pytest.MonkeyPatch) ->
     ]
 
 
-def test_validate_schema_and_caps(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture
+def use_bazel_cue(monkeypatch: pytest.MonkeyPatch) -> None:
     # Bazel puts the pinned CUE executable on PATH inside its test sandbox.
     if executable := shutil.which("cue"):
         monkeypatch.setattr(cue_runtime, "resolve", lambda: Path(executable))
+
+
+@pytest.mark.usefixtures("use_bazel_cue")
+def test_validate_uses_visible_finding_summary() -> None:
+    summary = (
+        "Call  `find_existing` via [the lookup](https://example.org)\u2003*first*."
+    )
+    doc = replace(DOC, findings=(replace(BLOCK, summary=summary),))
+    metadata = METADATA | {
+        "findings": [
+            {"class": "BLOCK", "path": "src/app.py", "line": 4, "summary": summary}
+        ]
+    }
+    body = review.render(doc).removesuffix(f"\n{MARKER}\n")
+    draft = f"---\n{json.dumps(metadata)}\n---\n{body}"
+    parsed = review.parse(draft)
+    assert parsed == doc
+    assert content.check_review(body) == []
+    assert review.validate(parsed) == []
+
+
+@pytest.mark.usefixtures("use_bazel_cue")
+def test_validate_schema_and_caps() -> None:
     doc = replace(DOC, verdict="GO")
     long = replace(DEBT, summary="word " * 39 + "word.")
     assert review.validate(DOC) == []
@@ -215,10 +289,10 @@ def test_validate_schema_and_caps(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_api_stubs_raise() -> None:
     api = cast("review.Api", object())
     with pytest.raises(NotImplementedError, match=r"^review lookup pending$"):
-        review.find_existing(api, KEY, author=EXISTING.author)
+        review.find_existing(api, REPO, DOC.pr, HEAD, KEY.run, EXISTING.author)
     with pytest.raises(NotImplementedError, match=r"^review posting pending$"):
         review.post(api, DOC, author=EXISTING.author)
     with pytest.raises(NotImplementedError, match=r"^review dismissal pending$"):
-        review.dismiss(api, REPO, DOC.pr, EXISTING, "stale head")
+        review.dismiss(api, REPO, DOC.pr, review_id=EXISTING.id, reason="stale head")
     with pytest.raises(NotImplementedError, match=r"^review replies pending$"):
-        review.reply(api, REPO, DOC.pr, EXISTING.id, HEAD, "Retested.")
+        review.reply(api, REPO, DOC.pr, review_id=EXISTING.id, text="Retested.")
