@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:ec35558d6fb1a9a1
-    at: "2026-11-23T08:19:38Z"
+    session: sha-256-64:3bcef7c31b99ccc0
+    at: "2026-11-24T20:38:33Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -62,7 +62,7 @@ After a successful build harness run, run-host compares commits reachable from a
 
 | Exit status | Result |
 | --- | --- |
-| 0 | The run contains no new commits, or run-host pushes the branch and opens the pull request. |
+| 0 | The run leaves the branch head unchanged, or run-host pushes the branch and opens the pull request. |
 | 4 | Run-host skips the push or Git fails to push. The log starts the reason line with `push skipped:` or `push failed:`. |
 | 5 | Run-host pushes the branch and can't open the pull request. The log starts the reason line with `pr not opened:`. |
 

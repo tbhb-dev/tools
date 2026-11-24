@@ -137,6 +137,20 @@ def test_launch(rc: int | None, launched: bool, expired: bool, result: str) -> N
 
 
 @pytest.mark.parametrize(
+    ("phase", "now", "action"),
+    [
+        ("workspace", 120, "deadline"),
+        ("shims", 120, "poll"),
+        ("shims", 719, "poll"),
+        ("shims", 720, "deadline"),
+    ],
+)
+def test_shim_launch_deadline(phase: str, now: float, action: str) -> None:
+    deadline = driver.launch_deadline(phase, 120, 600)
+    assert driver.launch(None, launched=False, expired=now >= deadline) == action
+
+
+@pytest.mark.parametrize(
     ("rc", "session", "result"),
     [
         (0, True, "0"),

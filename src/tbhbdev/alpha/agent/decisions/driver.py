@@ -93,6 +93,10 @@ def launch(rc: int | None, *, launched: bool, expired: bool) -> str:
     return "deadline" if expired else "poll"
 
 
+def launch_deadline(phase: str, deadline: float, shim_seconds: int) -> float:
+    return deadline + shim_seconds if phase == "shims" else deadline
+
+
 def state(rc: int | None, *, session: bool) -> str:
     if rc is not None:
         return str(rc)

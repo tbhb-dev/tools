@@ -36,6 +36,7 @@ from tbhbdev.alpha.agent import (
     render,
     runfiles,
     settings,
+    shims,
     worktree,
 )
 from tbhbdev.alpha.agent.decisions import argv, config, policy, repo, request, run_state
@@ -854,10 +855,17 @@ def _execute(
         prepared = prepared_result(result)
         runfiles.append(run.files.root, index_entry(run, prepared, None))
         run.files.write("phase", "workspace")
+        workspace = Path(prepared.paths.worktree)
+        needs_shims = not preflight_only and shims.needed(
+            workspace, run.request.profile
+        )
+        if needs_shims:
+            build_shims(run, workspace)
         run.files.write(
             "prompt", render.brief(run.request.kind, text, profile=run.request.profile)
         )
-        run.files.write("phase", "brief")
+        if not needs_shims:
+            run.files.write("phase", "brief")
         if prepared.delivery.signing is not None:
             agent = credentials.signing_agent(
                 prepared.delivery.signing, run.tmpdir, run.deadline
@@ -1032,6 +1040,20 @@ def _bazel_tool(run: Run) -> str | None:
         )
     )
     return shutil.which("bazelisk", path=search) or shutil.which("bazel", path=search)
+
+
+def build_shims(run: Run, workspace: Path) -> None:
+    if not run.host.build_shims:
+        message = (
+            "hook shims: the hooks need Bazel shims and this host has "
+            "build_shims = false; run on another host"
+        )
+        raise Invalid(message)
+    # Keep this phase until launch so polling uses the extra time through startup.
+    run.files.write("phase", "shims")
+    started = time.monotonic()
+    shims.build(workspace, _bazel_tool(run))
+    run.deadline += time.monotonic() - started
 
 
 def _shutdown_once(tool: str, base: Path, worktree: str) -> str:
