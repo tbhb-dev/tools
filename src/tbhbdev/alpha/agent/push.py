@@ -215,16 +215,28 @@ def local_refs(workspace: Path) -> dict[str, str]:
     current = runfiles.read_owned(directory / "HEAD", 1024, "run HEAD").strip()
     if re.fullmatch(r"[0-9a-f]{40}", current):
         refs["detached HEAD"] = current
+    elif tip := refs.get(current.removeprefix("ref: ")):
+        refs["HEAD"] = tip
     return refs
 
 
 def new_commits(
     run: Run, workspace: Path, before: dict[str, str], after: dict[str, str]
 ) -> list[tuple[str, str]]:
-    """Find every ref whose tip reaches a commit that no starting ref reaches."""
-    bases = tuple(dict.fromkeys(before.values()))
-    candidates = {name: tip for name, tip in after.items() if tip not in bases}
-    if not candidates:
+    """Find local branch or detached HEAD tips with new run history."""
+    # Use the starting tip of the run's branch, falling back to the starting HEAD.
+    start = before.get(f"refs/heads/agent/{run.files.name}") or before.get(
+        "HEAD", before.get("detached HEAD")
+    )
+    upstream = (tip for name, tip in after.items() if name.startswith("refs/remotes/"))
+    bases = tuple(dict.fromkeys((*before.values(), *upstream)))
+    candidates = {
+        name: tip
+        for name, tip in after.items()
+        if (name.startswith("refs/heads/") or name == "detached HEAD")
+        and tip not in bases
+    }
+    if not start or not candidates:
         return []
     with publication(
         run.files.root, workspace, next(iter(candidates.values()))
@@ -232,12 +244,14 @@ def new_commits(
         return [
             (name, commit)
             for name, tip in sorted(candidates.items())
-            if (commit := outside_history(directory, tip, bases))
+            if (commit := outside_history(directory, tip, bases, start))
         ]
 
 
-def outside_history(directory: Path, tip: str, bases: tuple[str, ...]) -> str:
-    """Return a new commit SHA, peeling tags and ignoring non-commit objects."""
+def outside_history(
+    directory: Path, tip: str, bases: tuple[str, ...], start: str
+) -> str:
+    """Return the tip if it descends from the start and is outside known history."""
     revisions = "\n".join((tip, *(f"^{base}" for base in bases))) + "\n"
     env = dict.fromkeys(
         (
@@ -263,6 +277,8 @@ def outside_history(directory: Path, tip: str, bases: tuple[str, ...]) -> str:
             "-C",
             str(directory),
             "rev-list",
+            # Excluding the start also excludes its ancestors.
+            f"--ancestry-path={start}",
             "--max-count=1",
             "--stdin",
             "--",

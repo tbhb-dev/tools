@@ -357,18 +357,10 @@ def test_do_not_push_uncertain_run(
 
 
 @pytest.mark.parametrize(
-    ("source", "token"),
-    [
-        ("topic/work", SYNTHETIC),
-        ("detached HEAD", SYNTHETIC),
-        ("refs/tags/work", SYNTHETIC),
-        ("refs/notes/work", None),
-    ],
+    "source", ["topic/work", "detached HEAD", "refs/tags/work", "refs/notes/work"]
 )
 def test_commits_off_the_run_branch(
-    local_run: tuple[run_host.Run, run_host.Prepared, Path],
-    source: str,
-    token: str | None,
+    local_run: tuple[run_host.Run, run_host.Prepared, Path], source: str
 ) -> None:
     run, prepared, target = local_run
     workspace = Path(prepared.paths.worktree)
@@ -391,18 +383,125 @@ def test_commits_off_the_run_branch(
         return 0
 
     with ExitStack() as stack:
-        assert push.run(run, prepared, stack, elsewhere, token) == (0 if token else 4)
-    (sha,) = made
-    if token is None:
+        assert push.run(run, prepared, stack, elsewhere, SYNTHETIC) == 0
+    if source.startswith("refs/"):
         assert git(target, "for-each-ref") == ""
+        assert not run.files.path("head").exists()
         assert not run.files.path("branch").exists()
-        assert run.files.path("log").read_text() == (
-            f"push skipped: no push token (unavailable) for commit {sha}\n"
+        assert not run.files.path("log").exists()
+    else:
+        (sha,) = made
+        assert git(target, "rev-parse", "refs/heads/agent/example") == sha
+        assert run.files.path("branch").read_text() == "agent/example"
+        assert run.files.path("head").read_text() == sha
+
+
+@pytest.mark.parametrize("work", ["fetch only", "checkout fetched ancestor", "commit"])
+def test_fetch_does_not_publish_upstream_history(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path], work: str
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+    upstream = run.home / "upstream.git"
+    git(workspace, "init", "--bare", str(upstream))
+    git(workspace, "remote", "add", "origin", str(upstream))
+    git(workspace, "switch", "-c", "upstream/work")
+    commit(workspace, "upstream ancestor")
+    ancestor = git(workspace, "rev-parse", "HEAD")
+    commit(workspace, "upstream tip")
+    git(workspace, "push", str(upstream), "HEAD:refs/heads/main")
+    git(workspace, "switch", "agent/example")
+    git(workspace, "branch", "-D", "upstream/work")
+
+    def fetch(*_args: object) -> int:
+        git(workspace, "fetch", "origin")
+        if work == "checkout fetched ancestor":
+            git(workspace, "switch", "-c", "topic/fetched", ancestor)
+            git(workspace, "pack-refs", "--all")
+        elif work == "commit":
+            commit(workspace, "new run commit")
+        return 0
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, fetch, SYNTHETIC) == 0
+    if work == "commit":
+        sha = git(workspace, "rev-parse", "HEAD")
+        assert git(target, "rev-parse", "refs/heads/agent/example") == sha
+        assert run.files.path("head").read_text() == sha
+    else:
+        assert git(target, "for-each-ref") == ""
+        assert not run.files.path("head").exists()
+    assert not run.files.path("log").exists()
+
+
+@pytest.mark.parametrize("ref", ["stash", "notes"])
+def test_git_metadata_does_not_publish(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path], ref: str
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+
+    def write_metadata(*_args: object) -> int:
+        if ref == "stash":
+            (workspace / "untracked.txt").write_text("untracked work\n")
+            git(workspace, "stash", "push", "-u")
+        else:
+            git(workspace, "notes", "add", "-m", "run note")
+        return 0
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, write_metadata, SYNTHETIC) == 0
+    assert git(target, "for-each-ref") == ""
+    assert not run.files.path("head").exists()
+    assert not run.files.path("log").exists()
+
+
+@pytest.mark.parametrize("start", ["run branch", "attached HEAD", "detached HEAD"])
+@pytest.mark.parametrize("descends", [False, True])
+def test_only_descendants_of_start_are_published(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path], start: str, descends: bool
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+    common = git(workspace, "rev-parse", "HEAD")
+    commit(workspace, "run start")
+    start_sha = git(workspace, "rev-parse", "HEAD")
+    if start == "run branch":
+        git(workspace, "switch", "-c", "topic/checkout", common)
+        commit(workspace, "checkout tip")
+    elif start == "attached HEAD":
+        git(workspace, "branch", "-m", "topic/start")
+    else:
+        git(workspace, "switch", "--detach", start_sha)
+        git(workspace, "branch", "-D", "agent/example")
+
+    def work(*_args: object) -> int:
+        git(workspace, "switch", "-c", "topic/work", start_sha if descends else common)
+        commit(workspace, "run work")
+        return 0
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, work, SYNTHETIC) == 0
+    if descends:
+        assert git(target, "rev-parse", "refs/heads/agent/example") == git(
+            workspace, "rev-parse", "HEAD"
         )
-        return
-    assert git(target, "rev-parse", "refs/heads/agent/example") == sha
-    assert run.files.path("branch").read_text() == "agent/example"
-    assert run.files.path("head").read_text() == sha
+    else:
+        assert git(target, "for-each-ref") == ""
+        assert not run.files.path("head").exists()
+
+
+def test_unborn_start_does_not_publish(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+    git(workspace, "switch", "--orphan", "topic/work")
+    git(workspace, "branch", "-D", "agent/example")
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 0
+    assert git(target, "for-each-ref") == ""
+    assert not run.files.path("head").exists()
 
 
 def test_existing_history_does_not_count_as_new_commits(
@@ -442,16 +541,20 @@ def test_starting_fetched_history(
     base = git(workspace, "rev-parse", "HEAD")
     commit(workspace, "fetched history")
     fetched = git(workspace, "rev-parse", "HEAD")
+    if reference is not None:
+        commit(workspace, "starting ref tip")
     if reference == "refs/tags/topic":
         git(workspace, "tag", "-a", "topic", "-m", "existing tag")
     elif reference is not None:
-        git(workspace, "update-ref", reference, fetched)
+        git(workspace, "update-ref", reference, "HEAD")
     git(workspace, "reset", "--hard", base)
     git(workspace, "pack-refs", "--all")
     if reference is None:
         git(workspace, "switch", "--detach", fetched)
 
     def checkout(*_args: object) -> int:
+        if reference is not None:
+            git(workspace, "update-ref", "-d", reference)
         git(workspace, "switch", "--detach", fetched)
         return 0
 
