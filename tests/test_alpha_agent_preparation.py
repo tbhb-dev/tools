@@ -13,7 +13,6 @@ from agent_host_example import constant, preparation_failure, run_request
 from tbhbdev.alpha.agent import process_group, runfiles, worktree
 from tbhbdev.alpha.agent.model import Invalid
 
-PUBLIC = ("github.com/tbhb-dev/example-repo",)
 URL = "https://github.com/tbhb-dev/example-repo.git"
 
 
