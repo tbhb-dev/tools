@@ -100,7 +100,10 @@ def test_each_run_prints_one_block(
     assert review.main(["pair", str(pair(tmp_path))], "p") == 0
     out = capsys.readouterr().out
     assert "a\n  head: " + HEAD + "\n  state: rc=0\n  verdict: VERDICT: GO\n" in out
-    assert "  findings: P1=0 P2=2 P3=1\n  log: tbhbdev alpha agent log a\n" in out
+    assert (
+        "  findings: P1=0 P2=2 P3=1 BLOCK=0 TECH-DEBT=0 SECURITY-DEBT=0\n"
+        "  log: tbhbdev alpha agent log a\n" in out
+    )
     assert "  verdict: RECOMMEND HOLD** P1 (1) z\n  findings: P1=1" in out
     first = next(argv for argv in seen if argv[-1] == "/p/a.md")
     assert first[len(review_pair.LAUNCHER) :] == [
@@ -110,7 +113,35 @@ def test_each_run_prints_one_block(
     ]  # fmt: skip
 
 
-def test_generated_launches_satisfy_the_real_exec_parser() -> None:
+def test_review_format_prints_verdict_and_finding_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    hold = (
+        "a: rc=0\n## Verdict\n\nHOLD\n\n## Findings\n\n"
+        "- BLOCK `src/app.py:4` Return the saved value.\n"
+        "- BLOCK `src/app.py:8` Handle the missing record.\n"
+        "- TECH-DEBT `src/app.py:12` Consolidate the lookup.\n"
+        "- SECURITY-DEBT `src/app.py:16` Narrow the permission.\n"
+    )
+    fake(
+        monkeypatch,
+        {
+            "exec a": done(0),
+            "wait a": done(0, hold),
+            "exec b": done(0),
+            "wait b": done(0, "b: rc=0\n## Verdict\nGO\n\n## Findings\n"),
+        },
+    )
+    assert review.main(["pair", str(pair(tmp_path))], "p") == 0
+    out = capsys.readouterr().out
+    assert (
+        "  verdict: HOLD\n"
+        "  findings: P1=0 P2=0 P3=0 BLOCK=2 TECH-DEBT=1 SECURITY-DEBT=1\n" in out
+    )
+    assert "  verdict: GO\n" in out
+
+
+def test_generated_launches_satisfy_the_real_exec_parser(tmp_path: Path) -> None:
     run = run_spec(
         "a",
         harness="claude",
@@ -119,7 +150,10 @@ def test_generated_launches_satisfy_the_real_exec_parser() -> None:
         account="x",
         fetch_refs=["r1", "r2"],
     )
-    argv = review_pair.exec_argv(run)[len(review_pair.LAUNCHER) :]
+    path = write(tmp_path, {"runs": [run, run_spec("b", harness="codex")]})
+    argv = review_pair.exec_argv(review_pair.load_spec(path)[0])[
+        len(review_pair.LAUNCHER) :
+    ]
     parsed = agent.parser("agent").parse_args(argv)
     assert parsed.ref == HEAD
     assert parsed.profile == "review"
@@ -164,6 +198,24 @@ def test_a_lost_start_acknowledgement_still_waits(
     assert review.main(["pair", str(pair(tmp_path))], "p") == 0
     assert [*review_pair.LAUNCHER, "wait", "a"] in seen
     assert "a\n  head: " + HEAD + "\n  state: rc=0" in capsys.readouterr().out
+
+
+def test_a_run_that_finishes_before_launch_acknowledgement_keeps_its_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake(
+        monkeypatch,
+        {
+            "exec a": done(7, "a: rc=7 sandbox=unsandboxed\nlog output\n"),
+            "wait a": done(7, "a: rc=7\n## Verdict\nHOLD\n"),
+            "exec b": done(0),
+            "wait b": done(0, "b: rc=0\nVERDICT: GO\n"),
+        },
+    )
+    assert review.main(["pair", str(pair(tmp_path))], "p") == 1
+    assert "a\n  head: " + HEAD + "\n  state: rc=7\n  verdict: HOLD\n" in (
+        capsys.readouterr().out
+    )
 
 
 def test_a_worker_error_keeps_the_sibling_block(
@@ -303,6 +355,10 @@ def test_an_unreadable_pr_after_the_runs_voids_the_verdicts(
         {"runs": [run_spec("a"), run_spec("b", pr="358")]},
         {"runs": [run_spec("a"), run_spec("b", pr=True)]},
         {"runs": [run_spec("a"), run_spec("b", pr=0)]},
+        pytest.param(
+            {"runs": [run_spec("a"), run_spec("b", harness="cluade")]},
+            id="unknown-harness",
+        ),
         {"runs": [run_spec("a"), run_spec("b", harness="claude")]},
         {"runs": [run_spec("a"), run_spec("b", harness="claude", reason="r")]},
         {"runs": [run_spec("a"), run_spec("b", harness="agy", repo="x/y")]},
@@ -322,7 +378,10 @@ def test_a_bad_spec_is_refused_before_any_launch(
     path.write_text(spec if isinstance(spec, str) else json.dumps(spec))
     monkeypatch.setattr(review_pair, "run_command", pytest.fail)
     assert review_pair.main([str(path)], "p") == 2
-    assert capsys.readouterr().err.startswith("p: ")
+    error = capsys.readouterr().err
+    assert error.startswith("p: ")
+    if "cluade" in json.dumps(spec):
+        assert error == "p: run 'b': harness must be codex, claude or agy\n"
 
 
 def test_a_missing_spec_file_is_refused(

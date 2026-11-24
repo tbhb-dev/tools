@@ -23,6 +23,12 @@ MAX_RUNS = 3
 HEAD = re.compile(r"[0-9a-fA-F]{40}")
 VERDICT = re.compile(r"^[\s>*_#-]*((?:VERDICT|RECOMMEND)\b.*)$", re.MULTILINE)
 FINDING = re.compile(r"^[\s>*_-]*(P[123])\b", re.MULTILINE)
+REVIEW_VERDICT = re.compile(
+    r"^##[ \t]+Verdict[ \t]*\r?\n\s*(GO|HOLD)[ \t]*\r?$", re.MULTILINE
+)
+REVIEW_FINDING = re.compile(
+    r"^[ \t]*[-*+][ \t]+(BLOCK|TECH-DEBT|SECURITY-DEBT)[ \t]+", re.MULTILINE
+)
 RC = re.compile(r"^\S+: rc=(\S+)")
 # Spec key -> `agent exec` flag. Every run is a review-profile run.
 REQUIRED = ("name", "prompt_file", "host", "repo", "model", "effort", "head", "pr")
@@ -115,14 +121,16 @@ def check_run(item: object) -> dict[str, object]:
 
 
 def check_launch_keys(run: dict[str, object]) -> None:
-    """Refuse a bad pull request number or a claude run without its launch keys."""
+    """Validate the pull request number and harness launch options."""
     number = run["pr"]
     if not isinstance(number, int) or isinstance(number, bool) or number < 1:
         message = f"run {run['name']!r}: pr is a positive integer"
         raise SpecError(message)
-    if run.get("harness") == "claude" and not (
-        run.get("reason") and run.get("claude_profile")
-    ):
+    harness = run.get("harness", "codex")
+    if harness not in ("codex", "claude", "agy"):
+        message = f"run {run['name']!r}: harness must be codex, claude or agy"
+        raise SpecError(message)
+    if harness == "claude" and not (run.get("reason") and run.get("claude_profile")):
         message = f"run {run['name']!r}: a claude run needs reason and claude_profile"
         raise SpecError(message)
 
@@ -184,11 +192,14 @@ def preflight(run: dict[str, object]) -> None:
 
 
 def summarize(answer: str) -> tuple[str, str]:
-    """The verdict line and the P1/P2/P3 counts of a run's answer."""
-    found = VERDICT.search(answer)
+    """The verdict and finding counts of a run's answer."""
+    found = REVIEW_VERDICT.search(answer) or VERDICT.search(answer)
     verdict = found[1].strip() if found else "unparsed"
-    tags = FINDING.findall(answer)
-    counts = " ".join(f"{tag}={tags.count(tag)}" for tag in ("P1", "P2", "P3"))
+    tags = FINDING.findall(answer) + REVIEW_FINDING.findall(answer)
+    counts = " ".join(
+        f"{tag}={tags.count(tag)}"
+        for tag in ("P1", "P2", "P3", "BLOCK", "TECH-DEBT", "SECURITY-DEBT")
+    )
     return verdict, counts
 
 
@@ -196,7 +207,11 @@ def run_one(run: dict[str, object]) -> tuple[Result, bool]:
     """Launch one run, wait for it, and say whether it ended with rc=0."""
     name, head = str(run["name"]), str(run["head"])
     launched = run_command(exec_argv(run))
-    if launched.returncode not in (0, int(LAUNCH_UNKNOWN)):
+    # A run can finish before exec acknowledges the launch. Wait reads its answer.
+    if launched.returncode not in (
+        0,
+        int(LAUNCH_UNKNOWN),
+    ) and not launched.stdout.startswith(f"{name}: rc="):
         state = f"not launched (exit {launched.returncode})"
         return Result(name, head, state, "none", "none"), False
     waited = run_command([*LAUNCHER, "wait", name])
