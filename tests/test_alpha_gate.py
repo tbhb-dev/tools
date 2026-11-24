@@ -7,6 +7,7 @@ import os
 import subprocess
 from contextlib import nullcontext
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
@@ -140,6 +141,7 @@ def test_early_failure(
     state, log, result = files
     log.write_bytes(b"previous FAILED\n")
     result.write_text(f"{SHA}\n")
+    (state / "exit").write_text("0\n")
     monkeypatch.setattr(gate.subprocess, "check_output", Mock(return_value=SHA))
     process = nullcontext(Mock(wait=Mock(return_value=0)))
     failure = nullcontext(Mock(wait=Mock(return_value=8))) if status == 8 else OSError()
@@ -289,7 +291,7 @@ def test_wait_heartbeat_startup_grace(
 ) -> None:
     state, _, _ = files
     pid = state / "pid"
-    pid.write_bytes(PID)
+    pid.write_bytes(b"1")
     os.utime(pid, (100, 100))
     if beat is not None:
         (state / "heartbeat").write_bytes(beat)
@@ -342,19 +344,22 @@ def test_timeout(
 
 @pytest.mark.usefixtures("files")
 @pytest.mark.parametrize(
-    "argv",
+    ("argv", "message"),
     [
-        ["run"],
-        [*WAIT, "--bad"],
-        [*WAIT, "--timeout", "-1"],
-        ["run", "a/b", "checkout", HOST],
-        [*RUN, ".."],
-        [*RUN[:-1], ""],
+        ([], "the following arguments are required: command"),
+        (["run"], "the following arguments are required: NAME, WORKTREE, HOST"),
+        (["run", "--hel", *RUN[1:]], "unrecognized arguments: --hel"),
+        (WAIT[:3], "the following arguments are required: --sha"),
+        ([*WAIT, "--time", "1"], "unrecognized arguments: --time 1"),
+        ([*WAIT, "--timeout", "-1"], "--timeout must be nonnegative"),
+        (["run", "a/b", "checkout", HOST], "invalid NAME"),
+        ([*RUN, ".."], "invalid REPO"),
+        ([*RUN[:-1], ""], "invalid HOST"),
     ],
 )
-def test_usage(argv: list[str], capsys: Capture) -> None:
+def test_usage(argv: list[str], message: str, capsys: Capture) -> None:
     assert gate.main(argv, PROG) == 2
-    assert f"usage: {PROG}" in capsys.readouterr().err
+    assert capsys.readouterr().err.endswith(f"error: {message}\n")
 
 
 @pytest.mark.usefixtures("files")
@@ -386,7 +391,8 @@ def test_invalid_host(host: str, capsys: Capture) -> None:
 @pytest.mark.parametrize(
     ("host", "key"),
     [
-        ("agent@review-host", "gate+agent+review-host"),
+        ("agent@review-host", f"ssh.{sha256(b'gate/agent@review-host').hexdigest()}"),
+        ("Agent@review-host", f"ssh.{sha256(b'gate/Agent@review-host').hexdigest()}"),
         ("agent-at-review-host", "gate-agent-at-review-host"),
     ],
 )
@@ -408,7 +414,26 @@ def test_host_paths(
     assert wait.call_args.args[0].timeout == 14400
 
 
-@pytest.mark.parametrize("argv", [["-h"], ["run", "-h"], ["wait", "-h"]])
-def test_help(argv: list[str], capsys: Capture) -> None:
+@pytest.mark.parametrize(
+    ("argv", "usage", "text"),
+    [
+        (
+            ["-h"],
+            "[-h] {run,wait} ...",
+            (
+                "Run a Bazel gate on a host and wait for a specific commit's result.",
+                "run tests",
+                "wait for a result",
+            ),
+        ),
+        (["run", "-h"], "run [-h] NAME WORKTREE HOST [REPO]", ()),
+        (["wait", "-h"], "wait [-h] --sha SHA [--timeout SECONDS] NAME HOST", ()),
+    ],
+)
+def test_help(
+    argv: list[str], usage: str, text: tuple[str, ...], capsys: Capture
+) -> None:
     assert alpha.main(["gate", *argv], "tbhbdev alpha") == 0
-    assert f"usage: {PROG}" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert output.startswith(f"usage: {PROG} {usage}\n")
+    assert all(line in output for line in text)

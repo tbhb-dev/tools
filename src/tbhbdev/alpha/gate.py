@@ -9,6 +9,7 @@ import tempfile
 from collections import deque
 from contextlib import suppress
 from datetime import UTC, datetime
+from hashlib import sha256
 from itertools import islice
 from pathlib import Path
 from shlex import quote
@@ -191,7 +192,7 @@ def running_failure(directory: Path) -> str | None:
     pid_file = directory / "pid"
     pid = 0
     with suppress(ValueError):
-        pid = int(read_state(pid_file) or "0")
+        pid = int(read_state(pid_file) or 0)
     if pid <= 0:
         return no_pid
     try:
@@ -269,7 +270,8 @@ def main(argv: list[str], prog: str) -> int:
     state = Path.home() / ".local" / "state" / "tbhb"
     key = f"{args.name}-{args.host}"
     if "@" in args.host:
-        key = f"{args.name}+{args.host.replace('@', '+')}"
+        destination = f"{args.name}/{args.host}".encode()
+        key = f"ssh.{sha256(destination).hexdigest()}"
     log = state / f"tools-{key}.log"
     action = run if args.command == "run" else wait
     return action(args, state / "gate" / key, log, log.with_suffix(".log.sha"))
