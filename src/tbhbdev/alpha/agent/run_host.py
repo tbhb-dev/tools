@@ -872,11 +872,11 @@ def _execute(
             )
         if push_token is None and not preflight_only:
             push_token = credentials.push_token(run.request, run.settings)
-        rc = (
-            run_harness(run, prepared, stack, preflight_only=True)
-            if preflight_only
-            else push.run(run, prepared, stack, run_harness, push_token)
-        )
+        if preflight_only:
+            rc = run_harness(run, prepared, stack, preflight_only=True)
+        else:
+            rc = push.run(run, prepared, stack, run_harness, push_token)
+            rc = require_commit(run, rc)
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
     except RunInterruptedError, EOFError:
@@ -890,6 +890,15 @@ def _execute(
     finally:
         stack.enter_context(process_group.ignore_signals())
         rc = finish(run, prepared, agent, rc)
+    return rc
+
+
+def require_commit(run: Run, rc: int) -> int:
+    if rc == 0 and run.request.expect_commit and not run.files.path("head").exists():
+        run.files.write(
+            "log", "no new commit: the brief expected one (--expect-commit)\n"
+        )
+        return 6
     return rc
 
 

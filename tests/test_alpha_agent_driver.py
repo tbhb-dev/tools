@@ -219,6 +219,7 @@ def test_launch_stream_and_metadata(
             "one",
             "--role",
             "worker",
+            "--expect-commit",
             "--fetch-ref",
             "refs/pull/391/head",
             "--fetch-ref",
@@ -239,6 +240,7 @@ def test_launch_stream_and_metadata(
     assert parsed.timeout is None
     assert parsed.startup_deadline_seconds == 120
     assert parsed.fetch_refs == ("refs/pull/391/head", "refs/heads/fix-392")
+    assert parsed.expect_commit is True
     assert (remote.state / "sample.prompt").read_text() == remote.prompt.read_text()
     assert (remote.state / "sample.schema.json").read_text() == schema.read_text()
     assert remote.state.stat().st_mode & 0o777 == 0o700
@@ -595,6 +597,18 @@ def test_a_different_role_or_class_alone_is_still_a_duplicate(
     second.request = changes[field]
     with pytest.raises(Invalid, match="hasn't ended"):
         driver.refuse_live_duplicate(CONFIG, second)
+
+
+def test_exec_refuses_expect_commit_on_a_review(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        launch(remote, "--profile", "review", "--ref", COMMIT, "--expect-commit") == 1
+    )
+    assert (
+        "request expect_commit applies only to a build run" in capsys.readouterr().err
+    )
+    assert remote.records("ssh") == []
 
 
 @pytest.mark.parametrize("ref", ["topic", "refs/pull/2/head", COMMIT])
