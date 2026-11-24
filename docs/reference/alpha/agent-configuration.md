@@ -7,6 +7,10 @@ generated:
     effort: high
     surface: exec
     at: "2026-11-24T20:38:25Z"
+  - role: generated
+    harness: codex:0.171.0
+    model: openai:gpt-6
+    at: "2026-11-24T20:44:25Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -33,7 +37,7 @@ Each `[[agent.host]]` can set `max_concurrent_runs` to a non-negative integer. I
 
 The package depends on `tbhb-telemetry` through a pinned GitHub release wheel URL. The lockfile records the wheel's SHA-256 digest.
 
-`OTEL_EXPORTER_OTLP_ENDPOINT` selects the launch collector; its default is loopback port 4318. `TBHB_TELEMETRY_ALLOW_HOSTS` accepts a comma-separated list of exact collector host names to permit destinations beyond loopback. These environment variables are independent of `[agent.otel]`, which configures the harness. Export failure is silent, with one send attempt bounded to 250 milliseconds, and leaves the launch's output and exit status intact. Drop records live under `$XDG_STATE_HOME/tbhb/telemetry`, or `~/.local/state/tbhb/telemetry`. Set `OTEL_SDK_DISABLED=true` to disable launch telemetry. Other commands do not load the library.
+`OTEL_EXPORTER_OTLP_ENDPOINT` selects the launch collector; its default is loopback port 4318. `TBHB_TELEMETRY_ENDPOINT` supplies the endpoint when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset or empty, for launchers that can't pass `OTEL_*` variables. `TBHB_TELEMETRY_ALLOW_HOSTS` accepts a comma-separated list of exact collector host names to permit destinations beyond loopback. These environment variables are independent of `[agent.otel]`, which configures the harness. Export failure is silent, with one send attempt bounded to 250 milliseconds, and leaves the launch's output and exit status intact. Drop records live under `$XDG_STATE_HOME/tbhb/telemetry`, or `~/.local/state/tbhb/telemetry`. Set `OTEL_SDK_DISABLED=true` to disable launch telemetry. Other commands do not load the library.
 
 Use the hidden host command as `tbhbdev alpha agent run-host NAME [REQUEST] --host HOST [--prompt FILE] [--preflight] [--owned]`. The driver's tmux start passes `--owned`. With the flag, run-host checks that `<name>.owner`, which the driver wrote, is a private regular file, and doesn't create it. The run ID itself never appears in a command line: the driver sends it as the first line of stdin to each remote script, which compares it with the file. Without the flag, run-host creates the owner file and refuses a name that already has one. Supply a versioned JSON request through `REQUEST`, stdin with `REQUEST` set to `-`, or `<name>.request.json` by leaving out the path. A prompt path defaults to the run's recorded prompt. Config must list the host. During setup, run-host fetches a bare mirror over HTTPS under `$XDG_STATE_HOME/tbhbdev/agent-mirrors/github.com/<owner>/<repo>.git` and creates a separate clone at `<account clone>/.worktrees/agent-<name>`. It reads credentials through the secrets library. It then starts the harness with the policy's explicit environment and records its exit. Run files and the index live under `tbhbdev/agent-runs` in the state directory. SIGHUP, SIGTERM, and SIGINT stop the harness group and refresh Codex auth before run-host writes `<name>.rc`.
 

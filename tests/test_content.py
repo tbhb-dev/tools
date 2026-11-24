@@ -13,6 +13,7 @@ from tbhbdev.alpha import pull_request as pr
 
 type Call = tuple[str, str, cw.Json | None]
 REF = cw.IssueRef("example", "demo", 7)
+CHILD = cw.IssueRef("example", "other", 9)
 VISIBILITIES: list[str] = []
 ITEM: cw.Json = {"data": {"addProjectV2ItemById": {"item": {"id": "ITEM"}}}}
 
@@ -24,13 +25,24 @@ class RecordingClient:
     visibility: str = "private"
     full_name: str = "Example/Demo"
     reads: list[str] = field(default_factory=list)
+    other_visibility: str = "public"
+    issues: dict[str, cw.Json] = field(default_factory=dict)
 
     def rest(self, method: str, path: str, payload: cw.Json | None = None) -> cw.Json:
         if (method, path) == ("GET", "/repos/example/demo"):
             self.reads.append(path)
             return {"visibility": self.visibility, "full_name": self.full_name}
+        if (method, path) == ("GET", "/repos/example/other"):
+            self.reads.append(path)
+            return {"visibility": self.other_visibility, "full_name": "example/other"}
         self.calls.append((method, path, payload))
-        return {"number": 7, "id": 123, "node_id": "ISSUE", "body": self.body}
+        return {
+            "number": 7,
+            "id": 123,
+            "node_id": "ISSUE",
+            "body": self.body,
+            **self.issues.get(path, {}),
+        }
 
     def graphql(self, query: str, variables: cw.Json) -> cw.Json:
         self.calls.append(("graphql", query, variables))
@@ -203,15 +215,111 @@ def test_close_refused(
     assert not (tmp_path / "audit.jsonl").exists()
 
 
-def test_link_sub_issue(tmp_path: Path) -> None:
-    client = RecordingClient()
-    child = cw.IssueRef("example", "other", 9)
-    cw.link_sub_issue(REF, child, client=client)
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("public", "private", "Initiative", "Epic"),
+        ("private", "private", "Epic", "Feature"),
+        ("private", "public", "Feature", "Task"),
+        ("private", "public", "Feature", "Defect"),
+        ("private", "public", "Feature", "Chore"),
+        ("private", "public", "Feature", "Spike"),
+        ("private", "public", "Feature", "Research"),
+    ],
+)
+def test_link_sub_issue(
+    case: tuple[str, str, str, str],
+    tmp_path: Path,
+    scans: list[tuple[str, str]],
+) -> None:
+    parent_vis, child_vis, parent_type, child_type = case
+    client = RecordingClient(
+        visibility=parent_vis,
+        full_name="example/demo",
+        other_visibility=child_vis,
+        issues={
+            REF.path: {"id": 456, "type": {"name": parent_type}},
+            CHILD.path: {"type": {"name": child_type}},
+        },
+    )
+    assert cw.link_sub_issue(REF, CHILD, client=client) is None
     assert client.calls == [
-        ("GET", child.path, None),
+        ("GET", CHILD.path, None),
+        ("GET", REF.path, None),
         ("POST", f"{REF.path}/sub_issues", {"sub_issue_id": 123}),
     ]
-    assert audit(tmp_path)[0]["scan"] == "not-needed"
+    assert client.reads == ["/repos/example/demo", "/repos/example/other"]
+    (entry,) = audit(tmp_path)
+    assert (entry["verb"], entry["scan"]) == ("link_sub_issue", "not-needed")
+    assert entry["caller"] == "tbhbdev"
+    assert scans == []
+
+
+def test_link_sub_issue_reuses_same_repo_visibility(tmp_path: Path) -> None:
+    child = cw.IssueRef("example", "demo", 9)
+    client = RecordingClient(
+        full_name="example/demo", issues={child.path: {"type": {"name": "Epic"}}}
+    )
+    assert cw.link_sub_issue(REF, child, client=client, dry_run=True) == {
+        "sub_issue_id": 123
+    }
+    assert client.calls == [("GET", child.path, None), ("GET", REF.path, None)]
+    assert client.reads == ["/repos/example/demo"]
+    assert not (tmp_path / "audit.jsonl").exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(
+    ("parent", "child", "reason"),
+    [
+        (
+            {"type": {"name": "Feature"}},
+            {"type": {"name": child_type}},
+            f"a private parent cannot have a public {child_type} child",
+        )
+        for child_type in ("Initiative", "Epic", "Feature")
+    ]
+    + [
+        (
+            {"type": {"name": "Feature"}},
+            child,
+            "a public child of a private parent must have a recognized issue type",
+        )
+        for child in (
+            {"title": "Child"},
+            {"type": {"name": "Other"}},
+            {"type": None, "title": "Child"},
+        )
+    ]
+    + [
+        (
+            parent,
+            {"type": {"name": "Task"}},
+            "only a private Feature can have a public leaf child",
+        )
+        for parent in (
+            {"type": {"name": "Epic"}},
+            {"title": "Parent"},
+            {"type": "Feature"},
+            {"type": {"id": 456}},
+            {"type": {"name": ["Feature"]}},
+        )
+    ],
+)
+def test_link_sub_issue_refuses_visibility(
+    parent: cw.Json, child: cw.Json, reason: str, dry_run: bool, tmp_path: Path
+) -> None:
+    client = RecordingClient(
+        full_name="example/demo", issues={REF.path: parent, CHILD.path: child}
+    )
+    with pytest.raises(cw.Refused) as exc:
+        cw.link_sub_issue(REF, CHILD, client=client, dry_run=dry_run)
+    assert str(exc.value) == (
+        f"Cannot link example/other#9 under example/demo#7: {reason}"
+    )
+    assert client.calls == [("GET", CHILD.path, None), ("GET", REF.path, None)]
+    assert client.reads == ["/repos/example/demo", "/repos/example/other"]
+    assert not (tmp_path / "audit.jsonl").exists()
 
 
 class RelationshipWrite(Protocol):
@@ -347,16 +455,21 @@ def test_alpha_issue_relationship(
         cmd.append("--dry-run")
     assert alpha_main(cmd, "tbhbdev alpha") == 0
     assert len(lookups) == origin_calls
-    assert client.calls[0] == ("GET", f"/repos/{lookup_repo}/issues/9", None)
+    reads: list[Call] = [("GET", f"/repos/{lookup_repo}/issues/9", None)]
+    if argv[0] == "link-sub":
+        reads.append(("GET", REF.path, None))
+        assert client.reads == ["/repos/example/demo", "/repos/example/other"]
+    else:
+        assert client.reads == []
     output = capsys.readouterr()
     assert output.err == ""
     if dry_run:
         assert json.loads(output.out) == preview
-        assert client.calls[1:] == []
+        assert client.calls == reads
         assert not (tmp_path / "audit.jsonl").exists()
     else:
         method, suffix, body = write
-        assert client.calls[1:] == [(method, f"{REF.path}{suffix}", body)]
+        assert client.calls == [*reads, (method, f"{REF.path}{suffix}", body)]
         assert output.out == ""
         (entry,) = audit(tmp_path)
         assert entry["caller"] == "tbhbdev alpha issue"
@@ -601,7 +714,7 @@ def test_dry_run_ids(fields: dict[str, cw.Json] | None, tmp_path: Path) -> None:
     assert cw.link_sub_issue(REF, REF, client=client, dry_run=True) == {
         "sub_issue_id": 123
     }
-    assert client.calls == [("GET", REF.path, None)] * 2
+    assert client.calls == [("GET", REF.path, None)] * 3
     assert not (tmp_path / "audit.jsonl").exists()
 
 
