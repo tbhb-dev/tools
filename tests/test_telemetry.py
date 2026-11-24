@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -24,7 +25,187 @@ if TYPE_CHECKING:
 
     from opentelemetry.sdk.trace import ReadableSpan
 
-pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
+ENDPOINT = "OTEL_EXPORTER_OTLP_ENDPOINT"
+ALLOW_HOSTS = "TBHB_TELEMETRY_ALLOW_HOSTS"
+COLLECTOR = "collector.example.test"
+URL = f"http://{COLLECTOR}:4318"
+DROP_WARNING = "; warning: the exporter will drop the launch trace"
+
+
+@pytest.fixture(autouse=True)
+def telemetry_files(
+    tmp_path: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    managed = tmp_path / "managed-settings.json"
+    user = isolated_home / "claude-config" / "settings.json"
+    user.parent.mkdir()
+    monkeypatch.setattr(telemetry, "_MANAGED_SETTINGS", {sys.platform: managed})
+    monkeypatch.setattr(telemetry, "_REPORTED", threading.Lock())
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(user.parent))
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+    for key in (ENDPOINT, ALLOW_HOSTS):
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
+    return managed, user
+
+
+def diagnostic(endpoint: str, hosts: str) -> str:
+    warning = DROP_WARNING if "none" in (endpoint, hosts) else ""
+    return (
+        f"telemetry: {ENDPOINT} from {endpoint}; {ALLOW_HOSTS} from {hosts}{warning}\n"
+    )
+
+
+@pytest.fixture
+def local_export(monkeypatch: pytest.MonkeyPatch) -> dict[str, str | None]:
+    received: dict[str, str | None] = {}
+
+    def command(_name: str, *, version: str, main: Callable[[], int]) -> int:
+        assert version == "0"
+        received.update((key, os.environ.get(key)) for key in (ENDPOINT, ALLOW_HOSTS))
+        return main()
+
+    monkeypatch.setattr(tbhb_telemetry, "command", command)
+    return received
+
+
+@pytest.mark.parametrize(
+    ("process", "managed", "expected"),
+    [
+        (
+            {ENDPOINT: URL, ALLOW_HOSTS: COLLECTOR},
+            {ENDPOINT: "managed"},
+            ("environment", "environment"),
+        ),
+        ({}, {ENDPOINT: URL, ALLOW_HOSTS: COLLECTOR}, ("managed", "managed")),
+        (
+            {ENDPOINT: URL},
+            {ENDPOINT: "managed", ALLOW_HOSTS: COLLECTOR},
+            ("environment", "managed"),
+        ),
+        ({ALLOW_HOSTS: ""}, {ENDPOINT: URL}, ("managed", "user")),
+        ({}, {}, ("user", "user")),
+        ({}, {ENDPOINT: 42, ALLOW_HOSTS: ""}, ("user", "user")),
+        ({}, {ENDPOINT: "\0", ALLOW_HOSTS: "\ud800"}, ("user", "user")),
+    ],
+)
+def test_settings_precedence(  # noqa: PLR0913, PLR0917 -- precedence matrix and fixtures
+    telemetry_files: tuple[Path, Path],
+    local_export: dict[str, str | None],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    process: dict[str, str],
+    managed: dict[str, object],
+    expected: tuple[str, str],
+) -> None:
+    managed_file, user_file = telemetry_files
+    for key, value in process.items():
+        monkeypatch.setenv(key, value)
+    user = {ENDPOINT: f"{URL}/user", ALLOW_HOSTS: f"{COLLECTOR},review-host"}
+    managed_file.write_text(json.dumps({"env": managed}), encoding="utf-8")
+    user_file.write_text(json.dumps({"env": user}), encoding="utf-8")
+
+    assert telemetry.command(lambda: 7) == 7
+
+    values = {"environment": process, "managed": managed, "user": user}
+    assert local_export == {
+        key: values[source][key]
+        for key, source in zip((ENDPOINT, ALLOW_HOSTS), expected, strict=True)
+    }
+    assert capsys.readouterr() == ("", diagnostic(*expected))
+
+
+def test_only_allowlisted_keys_apply_from_default_user_settings(
+    isolated_home: Path,
+    local_export: dict[str, str | None],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    monkeypatch.setattr(telemetry, "_MANAGED_SETTINGS", {})
+    decoy, marker = "DECOY_SECRET", "fictional-decoy-value"
+    monkeypatch.delenv(decoy, raising=False)
+    user = isolated_home / ".claude" / "settings.json"
+    user.parent.mkdir()
+    user.write_text(
+        json.dumps(
+            {"env": {ENDPOINT: URL, decoy: marker, "OTEL_SDK_DISABLED": "true"}}
+        ),
+        encoding="utf-8",
+    )
+
+    assert telemetry.command(lambda: 0) == 0
+    assert local_export == {ENDPOINT: URL, ALLOW_HOSTS: None}
+    assert decoy not in os.environ
+    assert "OTEL_SDK_DISABLED" not in os.environ
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err == diagnostic("user", "none")
+    assert decoy not in err
+    assert marker not in err
+    assert telemetry.command(lambda: 0) == 0
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("invalid", ["{", "[]", '{"env": []}', '{"env": {}}'])
+@pytest.mark.parametrize("user_available", [False, True])
+def test_unreadable_or_invalid_settings_fall_back(  # noqa: PLR0913 -- settings matrix and fixtures
+    telemetry_files: tuple[Path, Path],
+    local_export: dict[str, str | None],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    invalid: str,
+    *,
+    user_available: bool,
+) -> None:
+    managed, user = telemetry_files
+    managed.write_text(invalid, encoding="utf-8")
+    user.write_text(json.dumps({"env": {ENDPOINT: URL}}), encoding="utf-8")
+    original_open = os.open
+
+    def open_file(path: str, flags: int) -> int:
+        if path == str(user):
+            raise PermissionError
+        return original_open(path, flags)
+
+    if not user_available:
+        monkeypatch.setattr(os, "open", open_file)
+    assert telemetry.command(lambda: 7) == 7
+    assert local_export == {
+        ENDPOINT: URL if user_available else None,
+        ALLOW_HOSTS: None,
+    }
+    assert capsys.readouterr() == (
+        "",
+        diagnostic("user" if user_available else "none", "none"),
+    )
+
+
+def test_unavailable_home_and_nonregular_settings_fall_back(
+    telemetry_files: tuple[Path, Path],
+    local_export: dict[str, str | None],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    managed, _user = telemetry_files
+    os.mkfifo(managed)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    monkeypatch.setattr(type(managed), "home", broken)
+    assert telemetry.command(lambda: 7) == 7
+    assert local_export == {ENDPOINT: None, ALLOW_HOSTS: None}
+    assert capsys.readouterr() == ("", diagnostic("none", "none"))
+
+
+def test_disabled_skips_lookup_and_reporting(
+    local_export: dict[str, str | None],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    monkeypatch.setattr(telemetry, "_apply_settings", pytest.fail)
+    assert telemetry.command(lambda: 0) == 0
+    assert local_export == {ENDPOINT: None, ALLOW_HOSTS: None}
+    assert capsys.readouterr() == ("", "")
 
 
 def flow(root: Path, monkeypatch: pytest.MonkeyPatch, outcome: str) -> list[str]:
@@ -85,7 +266,7 @@ def test_export_failure_preserves_launch(
         else:
             listener.close()
         if fault == "endpoint":
-            endpoint = "http://collector.example:4318"
+            endpoint = URL
         elif fault == "import":
             monkeypatch.setitem(sys.modules, "tbhb_telemetry", None)
         elif fault == "attributes":
@@ -95,7 +276,11 @@ def test_export_failure_preserves_launch(
         try:
             assert agent.main(args, "example agent") == baseline_rc
             elapsed = time.monotonic() - start
-            assert capsys.readouterr() == baseline_output
+            assert capsys.readouterr() == (
+                baseline_output.out,
+                ("" if fault == "disabled" else diagnostic("environment", "none"))
+                + baseline_output.err,
+            )
             # 250 ms export wait plus 750 ms for SDK imports, drop I/O and jitter on a
             # loaded Mac. A stalled export would hold the launch for the full 3 s.
             assert elapsed < baseline_time + 1.0
@@ -119,9 +304,31 @@ def test_export_failure_preserves_launch(
         assert records[-1]["reason"] in expected
 
 
+@pytest.mark.parametrize("outcome", [0, 7])
+def test_resolver_failure_preserves_launch(
+    tmp_path: Path,
+    local_export: dict[str, str | None],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    outcome: int,
+) -> None:
+    def launch(*_args: object) -> int:
+        print("launch")  # noqa: T201 -- exercise the CLI's standard output
+        return outcome
+
+    monkeypatch.setattr(telemetry, "_resolve_environment", broken)
+    monkeypatch.setattr(agent, "dispatch", launch)
+    assert (
+        agent.main(execution_arguments(tmp_path / "prompt"), "example agent") == outcome
+    )
+    assert capsys.readouterr() == ("launch\n", "")
+    assert local_export == {ENDPOINT: None, ALLOW_HOSTS: None}
+
+
 @pytest.mark.parametrize("outcome", ["ok", "failed", "refused", "exception"])
 def test_launch_span_contains_only_allowed_data(
     tmp_path: Path,
+    telemetry_files: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     outcome: str,
@@ -129,17 +336,21 @@ def test_launch_span_contains_only_allowed_data(
     args = flow(tmp_path / "run", monkeypatch, outcome)
     spans: list[ReadableSpan] = []
 
-    def export(batch: list[ReadableSpan], _endpoint: str) -> None:
+    def export(batch: list[ReadableSpan], endpoint: str) -> None:
+        assert endpoint == URL
         spans.extend(batch)
 
     monkeypatch.setenv("OTEL_SDK_DISABLED", "false")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+    _managed, user = telemetry_files
+    user.write_text(
+        json.dumps({"env": {ENDPOINT: URL, ALLOW_HOSTS: COLLECTOR}}), encoding="utf-8"
+    )
     monkeypatch.setattr(tbhb_telemetry, "_export", export)
     assert (
         agent.main(args, "example agent")
         == {"ok": 0, "failed": 7, "refused": 1, "exception": 1}[outcome]
     )
-    capsys.readouterr()
+    assert capsys.readouterr().err.startswith(diagnostic("user", "user"))
     assert len(spans) == 1
     span = spans[0]
     assert span.name == "tbhbdev alpha agent exec"
