@@ -15,15 +15,17 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple, cast
 
+from tbhbdev.alpha import pull_request as pr
+
 LAUNCHER = [sys.executable, "-I", "-m", "tbhbdev", "alpha", "agent"]
 MIN_RUNS = 2
-MAX_RUNS = 4
+MAX_RUNS = 3
 HEAD = re.compile(r"[0-9a-fA-F]{40}")
 VERDICT = re.compile(r"^[\s>*_#-]*((?:VERDICT|RECOMMEND)\b.*)$", re.MULTILINE)
 FINDING = re.compile(r"^[\s>*_-]*(P[123])\b", re.MULTILINE)
 RC = re.compile(r"^\S+: rc=(\S+)")
 # Spec key -> `agent exec` flag. Every run is a review-profile run.
-REQUIRED = ("name", "prompt_file", "host", "repo", "model", "effort", "head")
+REQUIRED = ("name", "prompt_file", "host", "repo", "model", "effort", "head", "pr")
 FLAGS = {
     "host": "--host",
     "repo": "--repo",
@@ -32,8 +34,10 @@ FLAGS = {
     "harness": "--harness",
     "account": "--account",
     "claude_profile": "--claude-profile",
+    "reason": "--reason",
 }
-OPTIONAL = ("harness", "account", "claude_profile", "fetch_refs")
+OPTIONAL = ("harness", "account", "claude_profile", "reason", "fetch_refs")
+LAUNCH_UNKNOWN = "75"  # the launcher kept the run record: the run may be live
 
 
 class SpecError(ValueError):
@@ -51,7 +55,7 @@ class Result(NamedTuple):
 
 
 def load_spec(path: Path) -> list[dict[str, object]]:
-    """Read and validate the spec: 2 to 4 runs with a closed set of keys."""
+    """Read and validate the spec: 2 or 3 runs of one head by different harnesses."""
     try:
         data: object = json.loads(path.read_text())
     except (OSError, UnicodeError, ValueError) as exc:
@@ -71,6 +75,14 @@ def load_spec(path: Path) -> list[dict[str, object]]:
     if len(set(names)) != len(names):
         message = "run names must differ"
         raise SpecError(message)
+    for key in ("repo", "head", "pr"):
+        if len({str(run[key]).lower() for run in checked}) != 1:
+            message = f"every run reviews the same {key}"
+            raise SpecError(message)
+    harnesses = [str(run.get("harness", "codex")) for run in checked]
+    if len(set(harnesses)) != len(harnesses):
+        message = "each run needs its own harness, so providers stay independent"
+        raise SpecError(message)
     return checked
 
 
@@ -86,9 +98,18 @@ def check_run(item: object) -> dict[str, object]:
         message = f"run keys: unknown {unknown}, missing {missing}"
         raise SpecError(message)
     for key, value in run.items():
-        if key != "fetch_refs" and not (isinstance(value, str) and value):
+        if key not in ("fetch_refs", "pr") and not (isinstance(value, str) and value):
             message = f"run {run['name']!r}: {key} is a non-empty string"
             raise SpecError(message)
+    number = run["pr"]
+    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        message = f"run {run['name']!r}: pr is a positive integer"
+        raise SpecError(message)
+    if run.get("harness") == "claude" and not (
+        run.get("reason") and run.get("claude_profile")
+    ):
+        message = f"run {run['name']!r}: a claude run needs reason and claude_profile"
+        raise SpecError(message)
     refs = run.get("fetch_refs", [])
     if not isinstance(refs, list) or not all(
         isinstance(ref, str) for ref in cast("list[object]", refs)
@@ -103,7 +124,7 @@ def check_run(item: object) -> dict[str, object]:
 
 def exec_argv(run: dict[str, object]) -> list[str]:
     """The `agent exec` command line for one run."""
-    argv = [*LAUNCHER, "exec", "--profile", "review"]
+    argv = [*LAUNCHER, "exec", "--profile", "review", "--ref", str(run["head"])]
     for key, flag in FLAGS.items():
         if key in run:
             argv += [flag, str(run[key])]
@@ -119,10 +140,42 @@ def run_command(argv: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def tail(text: str) -> str:
-    """The last line of a command's output, for a one-line state."""
-    lines = [line for line in text.strip().splitlines() if line.strip()]
-    return lines[-1] if lines else "no output"
+def pull_request_state(repo: str, number: int) -> tuple[str, bool, str]:
+    """Read the PR's head, draft flag and state in one call; refuse an unreadable PR."""
+    done = pr.run(
+        [
+            pr.find_tool(pr.GH),
+            "pr",
+            "view",
+            str(number),
+            "-R",
+            repo,
+            "--json",
+            "headRefOid,isDraft,state",
+        ]
+    )
+    data = pr.gh_data(done)
+    if not isinstance(data, dict):
+        message = f"cannot read pull request {number}"
+        raise SpecError(message)
+    info = cast("dict[str, object]", data)
+    return (
+        str(info.get("headRefOid")),
+        info.get("isDraft") is not False,
+        str(info.get("state")),
+    )
+
+
+def preflight(run: dict[str, object]) -> None:
+    """Refuse a draft, a closed PR, or a head that differs from the spec."""
+    number = cast("int", run["pr"])
+    head, draft, state = pull_request_state(str(run["repo"]), number)
+    if draft or state != "OPEN" or head.lower() != str(run["head"]).lower():
+        message = (
+            f"pull request {number} must be open, ready, and at the spec head "
+            f"(now {head}, state {state}, draft {draft})"
+        )
+        raise SpecError(message)
 
 
 def summarize(answer: str) -> tuple[str, str]:
@@ -138,15 +191,24 @@ def run_one(run: dict[str, object]) -> tuple[Result, bool]:
     """Launch one run, wait for it, and say whether it ended with rc=0."""
     name, head = str(run["name"]), str(run["head"])
     launched = run_command(exec_argv(run))
-    if launched.returncode != 0:
-        state = f"not launched ({tail(launched.stdout + launched.stderr)})"
+    if launched.returncode not in (0, int(LAUNCH_UNKNOWN)):
+        state = f"not launched (exit {launched.returncode})"
         return Result(name, head, state, "none", "none"), False
     waited = run_command([*LAUNCHER, "wait", name])
     first, _, answer = waited.stdout.partition("\n")
     code = RC.match(first)
-    rc = code[1] if code else f"unknown ({tail(waited.stdout + waited.stderr)})"
+    rc = code[1] if code else f"unknown (wait exit {waited.returncode})"
     verdict, counts = summarize(answer)
     return Result(name, head, f"rc={rc}", verdict, counts), rc == "0"
+
+
+def guarded(run: dict[str, object]) -> tuple[Result, bool]:
+    """Run one review; an unexpected error becomes that run's own block."""
+    try:
+        return run_one(run)
+    except Exception as exc:  # noqa: BLE001 -- one run's failure must not hide the others
+        state = f"error ({type(exc).__name__})"
+        return Result(str(run["name"]), str(run["head"]), state, "none", "none"), False
 
 
 def render(result: Result) -> str:
@@ -168,10 +230,19 @@ def main(argv: list[str], prog: str) -> int:
     args = parser.parse_args(argv)
     try:
         runs = load_spec(args.spec)
+        preflight(runs[0])
     except SpecError as exc:
         print(f"{prog}: {exc}", file=sys.stderr)
         return 2
     with ThreadPoolExecutor(max_workers=len(runs)) as pool:
-        outcomes = list(pool.map(run_one, runs))
+        outcomes = list(pool.map(guarded, runs))
     print("\n".join(render(result) for result, _ in outcomes), end="")
-    return 0 if all(ended for _, ended in outcomes) else 1
+    ended = all(ok for _, ok in outcomes)
+    try:
+        now, _, _ = pull_request_state(str(runs[0]["repo"]), cast("int", runs[0]["pr"]))
+    except SpecError:
+        now = "unreadable"
+    if now.lower() != str(runs[0]["head"]).lower():
+        print(f"head moved to {now}: every verdict above is void", file=sys.stderr)
+        return 1
+    return 0 if ended else 1
