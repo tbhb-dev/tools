@@ -299,6 +299,25 @@ def repository_default_branch(repository: str, token: str) -> str:
     return branch
 
 
+def existing_pull_request(url: str, head: str, headers: dict[str, str]) -> int | None:
+    """Find an open pull request for the exact pushed head."""
+    try:
+        response = httpx.get(
+            url,
+            headers=headers,
+            params={"state": "open", "head": head},
+            timeout=TIMEOUT,
+        )
+        data = response.json() if response.status_code == httpx.codes.OK else None
+    except httpx.HTTPError, ValueError:
+        return None
+    match data:
+        case [{"number": int(number)}, *_]:
+            return number
+        case _:
+            return None
+
+
 def open_pull_request(
     published: PublishedRange,
     repository: str,
@@ -306,7 +325,7 @@ def open_pull_request(
     token: str,
     write: Callable[[str, str], None],
 ) -> int:
-    """Create the PR and return its number.
+    """Create the PR or find the open PR for the pushed branch, and return its number.
 
     Raises:
         OpenRefusedError: The draft is missing or malformed, or GitHub
@@ -322,13 +341,15 @@ def open_pull_request(
         lambda: repository_default_branch(repository, token),
     )
     _, owner, name = repo.parts(repository)
+    url = f"https://api.github.com/repos/{owner}/{name}/pulls"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
     try:
         response = httpx.post(
-            f"https://api.github.com/repos/{owner}/{name}/pulls",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-            },
+            url,
+            headers=headers,
             json={
                 "title": draft.title,
                 "body": draft.body,
@@ -347,6 +368,11 @@ def open_pull_request(
     fields = cast("dict[str, int]", result)  # pragma: no mutate -- Cast only.
     if isinstance(result, dict) and isinstance(number := fields.get("number"), int):
         return number
+    if response.status_code == httpx.codes.UNPROCESSABLE_ENTITY:
+        number = existing_pull_request(url, f"{owner}:{branch}", headers)
+        if number is not None:
+            write("log", f"push updated existing pull request #{number}\n")
+            return number
     if response.status_code == httpx.codes.UNAUTHORIZED:
         message = f"GitHub rejected the PR token with status {response.status_code}"
         raise OpenRefusedError(message)

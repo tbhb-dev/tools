@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import Mock
 
+import httpx
 import pytest
 from agent_host_example import constant, host_settings, run_request
 
@@ -40,8 +41,10 @@ def umask_022() -> Generator[None]:
 
 
 @pytest.fixture(autouse=True)
-def pull_request_opens(monkeypatch: pytest.MonkeyPatch) -> None:
+def pull_request_opens(monkeypatch: pytest.MonkeyPatch) -> Callable[..., int]:
+    original = open_pr.open_pull_request
     monkeypatch.setattr(open_pr, "open_pull_request", constant(7))
+    return original
 
 
 @pytest.fixture(autouse=True)
@@ -1338,3 +1341,72 @@ def test_unopened_pull_request_fails_the_run_but_keeps_the_branch(
     assert git(target, "rev-parse", "refs/heads/agent/example")
     assert not run.files.path("pr").exists()
     assert run.files.path("log").read_text() == f"pr not opened: {reason}\n"
+
+
+@pytest.mark.parametrize(
+    ("lookup", "number"),
+    [
+        (httpx.Response(200, json=[{"number": 23}]), 23),
+        (httpx.Response(200, json=[]), None),
+        (httpx.Response(200, json=[{"number": "23"}]), None),
+        (httpx.Response(403), None),
+        (httpx.Response(200, text="unreadable"), None),
+        (httpx.ConnectError("unreachable"), None),
+    ],
+)
+def test_pr_creation_conflict_succeeds_only_with_an_open_pr_for_the_branch(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    pull_request_opens: Callable[..., int],
+    lookup: httpx.Response | httpx.ConnectError,
+    number: int | None,
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+    (workspace / ".gitleaks.toml").write_text("[extend]\nuseDefault = true\n")
+    git(workspace, "add", ".gitleaks.toml")
+    commit(workspace, "add scan policy")
+    (workspace / ".github").mkdir()
+    (workspace / open_pr.DRAFT).write_text("---\nbase: main\n---\n\n# fix: test\n")
+    url = "https://api.github.com/repos/tbhb-dev/example-repo/pulls"
+    headers = {
+        "Authorization": f"Bearer {SYNTHETIC}",
+        "Accept": "application/vnd.github+json",
+    }
+
+    def post(endpoint: str, **options: object) -> httpx.Response:
+        assert endpoint == url
+        assert options["headers"] == headers
+        return httpx.Response(422, text="private response detail")
+
+    def get(endpoint: str, **options: object) -> httpx.Response:
+        assert endpoint == url
+        assert options == {
+            "headers": headers,
+            "params": {"state": "open", "head": "tbhb-dev:agent/example"},
+            "timeout": open_pr.TIMEOUT,
+        }
+        if isinstance(lookup, httpx.ConnectError):
+            raise lookup
+        return lookup
+
+    monkeypatch.setattr(open_pr, "open_pull_request", pull_request_opens)
+    monkeypatch.setattr(open_pr, "repository_visibility", constant("PRIVATE"))
+    monkeypatch.setattr(open_pr, "scan_draft", Mock())
+    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(httpx, "get", get)
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == (
+            5 if number is None else 0
+        )
+    assert run.files.path("branch").read_text() == "agent/example"
+    assert git(target, "rev-parse", "refs/heads/agent/example") == git(
+        workspace, "rev-parse", "HEAD"
+    )
+    log = run.files.path("log").read_text()
+    if number is None:
+        assert not run.files.path("pr").exists()
+        assert log == "pr not opened: GitHub refused the PR with status 422\n"
+    else:
+        assert run.files.path("pr").read_text() == f"{run.request.repo}#{number}"
+        assert log == f"push updated existing pull request #{number}\n"

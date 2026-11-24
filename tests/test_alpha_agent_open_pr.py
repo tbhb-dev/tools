@@ -348,7 +348,6 @@ def test_the_frontmatter_sets_the_base_and_draft_flag(
 @pytest.mark.parametrize(
     ("response", "message"),
     [
-        (httpx.Response(422, text="private response detail"), "status 422"),
         (reply(401, {"message": "private response detail"}), "token with status 401"),
         (reply(201, {"id": 1}), "status 201"),
         (reply(201, []), "status 201"),

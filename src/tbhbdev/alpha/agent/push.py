@@ -424,7 +424,7 @@ def history_git(directory: Path, *args: str, revisions: str | None = None) -> st
 def opened(
     run: Run, published: open_pr.PublishedRange, branch: str, token: str
 ) -> bool:
-    """Open the run's pull request and record it; False when it was not opened."""
+    """Record the pull request that the push created or updated."""
     try:
         number = open_pr.open_pull_request(
             published, run.request.repo, branch, token, run.files.write
