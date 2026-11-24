@@ -101,15 +101,7 @@ def check_run(item: object) -> dict[str, object]:
         if key not in ("fetch_refs", "pr") and not (isinstance(value, str) and value):
             message = f"run {run['name']!r}: {key} is a non-empty string"
             raise SpecError(message)
-    number = run["pr"]
-    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
-        message = f"run {run['name']!r}: pr is a positive integer"
-        raise SpecError(message)
-    if run.get("harness") == "claude" and not (
-        run.get("reason") and run.get("claude_profile")
-    ):
-        message = f"run {run['name']!r}: a claude run needs reason and claude_profile"
-        raise SpecError(message)
+    check_launch_keys(run)
     refs = run.get("fetch_refs", [])
     if not isinstance(refs, list) or not all(
         isinstance(ref, str) for ref in cast("list[object]", refs)
@@ -120,6 +112,19 @@ def check_run(item: object) -> dict[str, object]:
         message = f"run {run['name']!r}: head is a 40-digit commit sha"
         raise SpecError(message)
     return run
+
+
+def check_launch_keys(run: dict[str, object]) -> None:
+    """Refuse a bad pull request number or a claude run without its launch keys."""
+    number = run["pr"]
+    if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+        message = f"run {run['name']!r}: pr is a positive integer"
+        raise SpecError(message)
+    if run.get("harness") == "claude" and not (
+        run.get("reason") and run.get("claude_profile")
+    ):
+        message = f"run {run['name']!r}: a claude run needs reason and claude_profile"
+        raise SpecError(message)
 
 
 def exec_argv(run: dict[str, object]) -> list[str]:

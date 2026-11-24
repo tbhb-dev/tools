@@ -44,10 +44,18 @@ def done(code: int, out: str = "", err: str = "") -> subprocess.CompletedProcess
     return subprocess.CompletedProcess([], code, out, err)
 
 
+def tool_name(name: str) -> str:
+    return name
+
+
+def fail_read(_argv: list[str]) -> subprocess.CompletedProcess[str]:
+    return done(1, "", "no")
+
+
 @pytest.fixture(autouse=True)
 def pull_request(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool, str]]:
     """The PR reads return these answers in order, then repeat the last."""
-    answers = [(HEAD, False, "OPEN")]
+    answers: list[tuple[str, bool, str]] = [(HEAD, False, "OPEN")]
 
     def read(_repo: str, _number: int) -> tuple[str, bool, str]:
         return answers.pop(0) if len(answers) > 1 else answers[0]
@@ -340,7 +348,7 @@ def test_pull_request_state_reads_one_gh_view(
         return done(0, json.dumps(info))
 
     monkeypatch.setattr(review_pair.pr, "run", run)
-    monkeypatch.setattr(review_pair.pr, "find_tool", lambda name: name)
+    monkeypatch.setattr(review_pair.pr, "find_tool", tool_name)
     assert READ("tbhb-dev/tools", 358) == (HEAD, False, "OPEN")
     assert seen[0][1:7] == ["pr", "view", "358", "-R", "tbhb-dev/tools", "--json"]
 
@@ -348,7 +356,7 @@ def test_pull_request_state_reads_one_gh_view(
 def test_an_unreadable_pull_request_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(review_pair.pr, "run", lambda _argv: done(1, "", "no"))
-    monkeypatch.setattr(review_pair.pr, "find_tool", lambda name: name)
+    monkeypatch.setattr(review_pair.pr, "run", fail_read)
+    monkeypatch.setattr(review_pair.pr, "find_tool", tool_name)
     with pytest.raises(review_pair.SpecError, match="cannot read pull request 358"):
         READ("tbhb-dev/tools", 358)
