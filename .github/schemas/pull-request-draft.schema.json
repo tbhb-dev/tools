@@ -7,9 +7,8 @@
   "additionalProperties": false,
   "properties": {
     "base": {
-      "description": "The branch the pull request targets, and the branch the script diffs against to collect the commits' LLM trailers.",
+      "description": "The branch the pull request targets, and the branch the script diffs against to collect the commits' LLM trailers. When omitted, it is the repository's default branch.",
       "type": "string",
-      "default": "main",
       "maxLength": 255,
       "pattern": "^[A-Za-z0-9_][A-Za-z0-9._/-]*$"
     },

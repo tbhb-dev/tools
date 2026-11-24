@@ -216,11 +216,10 @@ def test_a_missing_draft_is_refused(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("text", "message"),
     [
-        ("# no front matter\n", "names no base branch"),
         ("---\nbase: [\n---\n\n# t\n", "frontmatter is invalid"),
         ("---\n# t\n", "frontmatter is invalid"),
-        ("---\ndraft: false\n---\n\n# t\n", "names no base branch"),
-        ("---\nbase: 3\n---\n\n# t\n", "names no base branch"),
+        ("---\nbase: 3\n---\n\n# t\n", "invalid base branch"),
+        ("---\nbase: ''\n---\n\n# t\n", "invalid base branch"),
         ("---\nbase: main\n---\n\nplain text\n", "no H1 title"),
         ("---\nbase: main\n---\n\n# \n", "no H1 title"),
     ],
@@ -230,6 +229,96 @@ def test_a_malformed_draft_is_refused(tmp_path: Path, text: str, message: str) -
     with pytest.raises(open_pr.OpenRefusedError, match=message) as captured:
         open_draft(published)
     assert captured.value.__context__ is None
+
+
+def never_asked() -> str:
+    raise AssertionError
+
+
+@pytest.mark.parametrize(
+    "text", ["# t\n\nbody\n", "---\ndraft: false\n---\n\n# t\n\nbody\n"]
+)
+def test_a_draft_without_a_base_takes_the_repository_default_branch(
+    text: str,
+) -> None:
+    assert open_pr.parse_draft(text, lambda: "trunk").base == "trunk"
+
+
+def test_a_draft_with_a_base_never_asks_for_the_default_branch() -> None:
+    assert (
+        open_pr.parse_draft("---\nbase: dev\n---\n\n# t\n", never_asked).base == "dev"
+    )
+
+
+def api_reply(status: int, data: object) -> httpx.Response:
+    return httpx.Response(status, json=data, request=httpx.Request("GET", "https://x"))
+
+
+def test_the_default_branch_comes_from_one_api_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    def get(url: str, **options: object) -> httpx.Response:
+        seen["url"] = url
+        seen["headers"] = options["headers"]
+        return api_reply(200, {"default_branch": "trunk"})
+
+    monkeypatch.setattr(httpx, "get", get)
+    assert open_pr.repository_default_branch("tbhb-dev/tools", "tok") == "trunk"
+    assert seen["url"] == "https://api.github.com/repos/tbhb-dev/tools"
+    assert isinstance(seen["headers"], dict)
+    assert seen["headers"]["Authorization"] == "Bearer tok"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        api_reply(404, {}),
+        api_reply(200, ["main"]),
+        api_reply(200, {}),
+        api_reply(200, {"default_branch": ""}),
+        api_reply(200, {"default_branch": 3}),
+        httpx.ConnectError("down"),
+        ValueError("not json"),
+    ],
+)
+def test_an_unreadable_default_branch_refuses(
+    monkeypatch: pytest.MonkeyPatch, answer: httpx.Response | Exception
+) -> None:
+    def get(_url: str, **_options: object) -> httpx.Response:
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(httpx, "get", get)
+    with pytest.raises(open_pr.OpenRefusedError, match="default branch is unreadable"):
+        open_pr.repository_default_branch("tbhb-dev/tools", "tok")
+
+
+def test_a_draft_without_a_base_opens_against_the_api_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    published = commit_draft(tmp_path, "# t\n\nbody\n")
+    seen: dict[str, object] = {}
+
+    def get(_url: str, **_options: object) -> httpx.Response:
+        data = {
+            "default_branch": "trunk",
+            "full_name": "tbhb-dev/tools",
+            "visibility": "private",
+        }
+        return api_reply(200, data)
+
+    def post(_url: str, **options: object) -> httpx.Response:
+        seen.update(options)
+        return reply(201, {"number": 4})
+
+    monkeypatch.setattr(httpx, "get", get)
+    monkeypatch.setattr(httpx, "post", post)
+    assert open_draft(published) == 4
+    assert isinstance(seen["json"], dict)
+    assert seen["json"]["base"] == "trunk"
 
 
 def test_the_frontmatter_sets_the_base_and_draft_flag(
@@ -320,7 +409,7 @@ def test_worktree_draft_takes_priority(
         payload = options["json"]
         assert isinstance(payload, dict)
         assert payload["title"] == "fix(example): add a thing"
-        assert payload["body"] == open_pr.parse_draft(DRAFT).body
+        assert payload["body"] == open_pr.parse_draft(DRAFT, never_asked).body
         return reply(201, {"number": 12})
 
     monkeypatch.setattr(httpx, "post", post)
