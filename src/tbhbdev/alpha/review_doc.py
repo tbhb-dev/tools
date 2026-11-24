@@ -254,7 +254,7 @@ def find_existing(api: Api, key: Marker, *, author: str) -> Existing | None:
     Raises:
         NotImplementedError: A follow-up change implements review lookup.
     """
-    raise NotImplementedError("review lookup is not implemented")  # noqa: EM101
+    raise NotImplementedError("review lookup pending")  # noqa: EM101
 
 
 def post(
@@ -269,7 +269,7 @@ def post(
     Raises:
         NotImplementedError: A follow-up change implements posting.
     """
-    raise NotImplementedError("review posting is not implemented")  # noqa: EM101
+    raise NotImplementedError("review posting pending")  # noqa: EM101
 
 
 def dismiss(api: Api, repo: str, pr: int, existing: Existing, reason: str) -> None:
@@ -280,7 +280,7 @@ def dismiss(api: Api, repo: str, pr: int, existing: Existing, reason: str) -> No
     Raises:
         NotImplementedError: A follow-up change implements superseding reviews.
     """
-    raise NotImplementedError("review dismissal is not implemented")  # noqa: EM101
+    raise NotImplementedError("review dismissal pending")  # noqa: EM101
 
 
 def reply(  # noqa: PLR0913, PLR0917
@@ -299,4 +299,4 @@ def reply(  # noqa: PLR0913, PLR0917
     Raises:
         NotImplementedError: A follow-up change implements review replies.
     """
-    raise NotImplementedError("review replies are not implemented")  # noqa: EM101
+    raise NotImplementedError("review replies pending")  # noqa: EM101
