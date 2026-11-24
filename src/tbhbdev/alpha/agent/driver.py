@@ -20,12 +20,11 @@ from tbhbdev.alpha.agent import (
     render,
     runfiles,
     signing_parity,
-    taint_store,
     transport,
 )
 from tbhbdev.alpha.agent.decisions import driver as rules
 from tbhbdev.alpha.agent.decisions import launcher as launch_rules
-from tbhbdev.alpha.agent.decisions import limits, remote, repo, request, taint
+from tbhbdev.alpha.agent.decisions import limits, remote, repo, request
 from tbhbdev.alpha.agent.decisions import runfiles_names as files
 from tbhbdev.alpha.agent.model import Harness, Invalid, Profile, RunKind, RunRequest
 
@@ -155,7 +154,6 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         variant=args.variant,
         role=args.role,
         unsandboxed=True,
-        tainted_host=True,
         authorized_by=args.unsandboxed,
         startup_deadline_seconds=settings.launch_wait_seconds,
         fetch_refs=tuple(args.fetch_ref),
@@ -308,57 +306,6 @@ def check_limits(
         print(message, file=sys.stderr)
 
 
-def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
-    """Consult coordinator evidence before contacting the run host."""
-    state = taint_store.load(run.host.name)
-    if state.status == "clean" and not run.request.unsandboxed:
-        try:
-            marker = transport.shell(
-                settings,
-                run.host,
-                remote.host_marker(run.request.account),
-                timeout=deadline - time.monotonic(),
-            )
-        except transport.TransportError:
-            decision = taint.unreadable_marker(run.host.name)
-            print(decision.message, file=sys.stderr)
-            return decision.status
-        else:
-            if marker:
-                record = taint.Taint(
-                    run.host.name,
-                    run.host.account,
-                    "host-marker",
-                    "host-marker",
-                    datetime.now(UTC).isoformat(),
-                )
-                taint_store.record_taint(record)
-                state = taint.State(run.host.name, "tainted")
-    if run.request.unsandboxed:
-        taint_store.record_taint(
-            taint.Taint(
-                run.host.name,
-                run.host.account,
-                run.name,
-                run.request.authorized_by or "agent-exec-default",
-                run.started,
-            )
-        )
-    run.request = replace(
-        run.request,
-        tainted_host=run.request.unsandboxed or taint.request_flag(state),
-    )
-    return 0
-
-
-def clear_taint(host: str, reason: str) -> int:
-    taint_store.record_clearance(
-        taint.Clearance(host, reason, datetime.now(UTC).isoformat())
-    )
-    print(f"{host}: host={taint_store.load(host).status}")
-    return 0
-
-
 def execute(settings: Settings, args: argparse.Namespace) -> int:
     run = prepare(settings, args)
     telemetry.attributes(
@@ -386,8 +333,6 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
     except Invalid:
         telemetry.attributes(**{"tbhb.agent.outcome": "refused"})
         raise
-    # Every exec run is unsandboxed: launch_trust records taint, never refuses.
-    launch_trust(settings, run, deadline)
     ref = args.ref or "HEAD"
     resolve = (
         run.request.profile is Profile.REVIEW and rules.COMMIT.fullmatch(ref) is None
@@ -433,7 +378,6 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
         print(
             f"{run.name}: launch unconfirmed host={run.host.name} phase=unreachable"
             + render.sandbox(run.request.authorized_by)
-            + render.trust(tainted_host=run.request.tainted_host)
         )
         return 75
     try:
@@ -485,7 +429,7 @@ def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
             print(
                 f"{run.name}: rc={reading.rc}"
                 f"{render.sandbox(run.request.authorized_by)}"
-                f"{render.trust(tainted_host=run.request.tainted_host)}\n{reading.text}",
+                f"\n{reading.text}",
                 end="",
             )
             return reading.rc or 0
@@ -496,7 +440,6 @@ def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
                     run.host.name,
                     run.host.account,
                     authorized_by=run.request.authorized_by,
-                    tainted_host=run.request.tainted_host,
                 )
             )
             return 0
@@ -509,7 +452,6 @@ def unconfirmed(settings: Settings, run: Run, phase: str) -> int:
     print(
         f"{run.name}: launch unconfirmed host={run.host.name} phase={phase}"
         + render.sandbox(run.request.authorized_by)
-        + render.trust(tainted_host=run.request.tainted_host)
     )
     try:
         kill(settings, run)
@@ -599,7 +541,6 @@ def settle(settings: Settings, run: Run, result: int) -> None:
 
 
 def status(settings: Settings, run: Run) -> int:
-    state = taint_store.load(run.host.name)
     try:
         reading = transport.read(
             settings,
@@ -642,7 +583,6 @@ def status(settings: Settings, run: Run) -> int:
             ),
             started=run.started,
         )
-        + (f" host={state.status}" if state.tainted else "")
     )
     return 0
 
@@ -763,8 +703,6 @@ def keep(settings: Settings, run: Run) -> int:
 
 
 def dispatch(settings: Settings, args: argparse.Namespace) -> int:
-    if args.verb == "clear-taint":
-        return clear_taint(args.host, args.reason)
     if args.verb == "signing-parity":
         return signing_parity.main(settings)
     if args.verb == "exec":

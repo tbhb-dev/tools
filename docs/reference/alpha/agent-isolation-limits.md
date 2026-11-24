@@ -2,12 +2,9 @@
 description: Agent isolation constraints, coordination, and cleanup.
 generated:
   - role: generated
-    harness: codex:0.171.0
-    model: openai:gpt-6.2-sol
-    effort: high
-    surface: exec
-    session: sha-256-64:ec35558d6fb1a9a1
-    at: "2026-11-23T08:19:38Z"
+    harness: codex
+    model: openai:gpt-6
+    at: "2026-11-24T19:23:45Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -20,7 +17,7 @@ Run-host runs git in a run clone only during `clone_run` and `create`, before la
 
 Run-host checks out a new build branch from a commit and leaves upstream tracking unset before launch. The legacy sandbox probes keep `.git/config` read-only. In those probes, use `git switch --no-track -c x origin/main` and push with an explicit destination branch, such as `git push origin HEAD:refs/heads/x`.
 
-Every `agent exec` run has the account’s full access. It can read the account’s 1Password Connect token and every secret the account can read, and write anything the account can write. Codex, Claude and agy use this behavior for both build and review profiles. The agent account supplies the boundary. The host marker at `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` supplies audit information, and the marked account can delete it. A child can leave the process group and keep running after the run ends.
+Every `agent exec` run has the account’s full access. It can read the account’s 1Password Connect token and every secret the account can read, and write anything the account can write. Codex, Claude and agy use this behavior for both build and review profiles. The agent account supplies the boundary. A child can leave the process group and keep running after the run ends.
 Runs skip sandbox policy checks, executable trust checks and write-root audits. They still refuse mise shims.
 
 - A run can read other runs' temp directories.
@@ -33,10 +30,9 @@ The coordinator traced every git process that the Codex parent starts, with ever
 
 The legacy sandbox probes also exercise Git pointer files and terminal isolation. They test the policy builders separately from `agent exec`, which launches every harness without a sandbox.
 
-Launch a run with a local prompt file. The optional clearance command updates local audit information:
+Launch a run with a local prompt file:
 
 ```sh
-tbhbdev alpha agent clear-taint example-linux --reason "Host rebuilt"
 tbhbdev alpha agent exec --host example-linux --repo example-org/example-repo --model example-model --effort high --profile build example brief.md
 tbhbdev alpha agent status example
 tbhbdev alpha agent wait example
@@ -45,12 +41,6 @@ tbhbdev alpha agent wait example
 Reviews accept `--ref` and resolve it before launch. `--schema` streams a JSON schema beside the prompt. Claude requires `--reason` and accepts `--claude-profile`. Use a `gemini-*` model for agy, or pass `--allow-non-gemini`. `--ops` selects the host's configured `ops` account.
 
 The optional `[[agent.host]] tbhbdev` key names an absolute executable path on that host. Its default is `$HOME/.local/bin/tbhbdev`, using the remote account’s home. Local `ssh` and `tmux` resolve against a fixed system PATH. Remote launch and transfer scripts add the account’s `$HOME/.local/bin` and the standard package directories on macOS, and skip login shell startup.
-
-Each coordinator writes a per-host taint record to `$XDG_STATE_HOME/tbhbdev/agent-runs/taint/<host>.jsonl`. A mark from any account taints the entire host. The account remains in the record as information. Missing or empty records mean `unknown`. Host taint never refuses a build or review. Runs report `untrusted-host`, and `status` shows the recorded host state.
-
-Before every launch, the coordinator appends a durable record using local run values. When `--unsandboxed VALUE` supplies a valid authorization reference, the request and taint record retain it. Without a value, the request records null and the taint audit uses `agent-exec-default`. Failure to append still refuses the launch. The last appended record decides the audit state, regardless of its timestamp. Only `clear-taint HOST --reason TEXT` clears local taint and prints the new state. If the last line is incomplete, clearance moves the incomplete file aside in the same directory and starts a new file.
-
-Run-host appends a mark to `/var/tmp/tbhbdev-agent-taint/<account>.jsonl` before preparation. New launches skip the remote marker read and record their own taint. Clearance changes only this coordinator’s audit record and grants no launch permission.
 
 The coordinator stores metadata under `$XDG_STATE_HOME/tbhbdev/agent-runs/` on the coordinator. The remote directory uses the same location under the run account, with `.local/state` under home as the default state directory. The transfer claims `<name>.owner` with `set -C` before extracting inputs. It refuses an existing session or any `<name>.*` file with exit status 73. A collision never kills the existing session.
 
@@ -85,10 +75,6 @@ Cleanup refuses an open session. Every new run requires `clean --force`, which m
 Ref resolution runs outside the clone against the SSH URL from the repository argument. Remote Git uses an empty environment and explicit overrides for hooks, file monitoring, SSH, credentials, prompts, external protocols, paging, submodules, and automatic maintenance. It disables lazy fetching. Remote scripts use the C locale. Run file reads refuse symlinks, bound byte counts, check status fields, replace invalid UTF-8, and remove terminal control characters. Polls wait at least half a second between connections.
 
 ## Risk
-
-Each coordinator writes a separate taint record. A marked account can delete its host marker.
-
-Hosts with no record can launch both builds and reviews.
 
 The driver’s mirror receives agent-pushed objects.
 

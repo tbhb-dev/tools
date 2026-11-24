@@ -77,7 +77,7 @@ def inspect_output(
     monkeypatch.setattr(transport, "execute", run)
     args = agent.parser("example").parse_args(execution_arguments("example.md"))
     run = driver.prepare(settings(), args)
-    run.request = replace(run.request, unsandboxed=unsandboxed, tainted_host=False)
+    run.request = replace(run.request, unsandboxed=unsandboxed)
     run.owner = "example-owner"
     assert driver.inspect(settings(), run, limit=limit) == 0
     return capsys.readouterr().out
@@ -1300,26 +1300,6 @@ def test_diff_refuses_failed_branch_query(host: Path) -> None:
     result = fallback_diff()
     assert result.returncode == 74
     assert result.stdout == b""
-
-
-@pytest.mark.parametrize("account", ["agent", "ops"])
-def test_host_marker_uses_portable_perl_arguments(host: Path, account: str) -> None:
-    call_log = host / "perl-call.json"
-    write_standalone_fake(
-        host / "bin/perl",
-        "import json, os, sys\nfrom pathlib import Path\n"
-        f"Path({str(call_log)!r}).write_text(json.dumps(sys.argv))\n"
-        "sys.argv[3] = " + repr(str(host / "missing-marker")) + "\n"
-        "os.execv('/usr/bin/perl', ['perl', *sys.argv[1:]])\n",
-    )
-    result = execute(remote.host_marker(account))
-    assert result.returncode == 0, result.stderr
-    assert result.stdout == b""
-    invoked: list[str] = json.loads(call_log.read_text())
-    assert invoked[1] == "-e"
-    assert invoked[3] == str(
-        Path("/var") / "tmp" / "tbhbdev-agent-taint" / f"{account}.jsonl"
-    )
 
 
 @pytest.mark.parametrize("limit", [None, 10])

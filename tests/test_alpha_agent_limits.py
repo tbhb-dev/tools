@@ -14,8 +14,8 @@ from agent_driver_example import Remote, setup
 from agent_example import LINUX, MARKER, settings
 
 from tbhbdev.alpha import agent
-from tbhbdev.alpha.agent import driver, taint_store
-from tbhbdev.alpha.agent.decisions import limits, remote, taint
+from tbhbdev.alpha.agent import driver
+from tbhbdev.alpha.agent.decisions import limits, remote
 from tbhbdev.alpha.agent.model import Invalid, Profile, Settings
 
 if TYPE_CHECKING:
@@ -238,9 +238,6 @@ def test_a_partial_macos_read_ends_the_script_nonzero(old: str, new: str) -> Non
 @pytest.fixture
 def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     result = setup(tmp_path, monkeypatch)
-    taint_store.record_clearance(
-        taint.Clearance("example-linux", "Test host rebuilt", "2026-11-10T00:00:00Z")
-    )
 
     def load() -> Settings:
         return CONFIG

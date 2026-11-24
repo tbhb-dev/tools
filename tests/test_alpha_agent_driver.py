@@ -30,9 +30,9 @@ from agent_example import MARKER, settings
 
 from tbhbdev import version
 from tbhbdev.alpha import agent
-from tbhbdev.alpha.agent import driver, model, render, taint_store, transport
+from tbhbdev.alpha.agent import driver, model, render, transport
 from tbhbdev.alpha.agent.decisions import remote as remote_commands
-from tbhbdev.alpha.agent.decisions import repo, request, runfiles_names, taint
+from tbhbdev.alpha.agent.decisions import repo, request, runfiles_names
 from tbhbdev.alpha.agent.model import Invalid, Profile, RunKind, RunRequest
 
 if TYPE_CHECKING:
@@ -49,9 +49,6 @@ PREPARE = driver.prepare
 @pytest.fixture
 def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     result = setup(tmp_path, monkeypatch)
-    taint_store.record_clearance(
-        taint.Clearance("example-linux", "Test host rebuilt", "2026-11-10T00:00:00Z")
-    )
     monkeypatch.setattr(agent.settings, "load", lambda: CONFIG)
 
     # Keep coverage of management for recorded runs from before the new default.
@@ -62,8 +59,6 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
         run.request = dataclasses.replace(
             run.request,
             unsandboxed=args.unsandboxed is not None,
-            tainted_host=args.unsandboxed is not None
-            or taint.request_flag(taint_store.load(run.host.name)),
         )
         return run
 
@@ -262,8 +257,8 @@ def test_launch_stream_and_metadata(
     assert meta.stat().st_mode & 0o777 == 0o600
     assert meta.parent.stat().st_mode & 0o777 == 0o700
     calls = remote.records("ssh")
-    assert len(calls) == 5
-    owner_line, archive = base64.b64decode(str(calls[2]["stdin"])).split(b"\n", 1)
+    assert len(calls) == 4
+    owner_line, archive = base64.b64decode(str(calls[1]["stdin"])).split(b"\n", 1)
     assert owner_line.decode() == record["owner"]
     with tarfile.open(fileobj=io.BytesIO(archive)) as stream:
         assert stream.getnames() == [
@@ -346,7 +341,7 @@ def test_version_mismatch(remote: Remote, capsys: pytest.CaptureFixture[str]) ->
     assert "version mismatch" in message
     assert version.line() in message
     assert "tbhbdev example-other" in message
-    assert len(remote.records("ssh")) == 2
+    assert len(remote.records("ssh")) == 1
 
 
 def test_review_without_ref_starts_nothing(
@@ -606,8 +601,7 @@ def test_review_ref(remote: Remote, ref: str) -> None:
         == COMMIT
     )
     calls = remote.records("ssh")
-    assert "tbhbdev-agent-taint/agent.jsonl" in str(calls[0]["args"])
-    assert "--version" in str(calls[1]["args"])
+    assert "--version" in str(calls[0]["args"])
     git = remote.records("git")
     if ref == COMMIT:
         assert git == []
@@ -705,7 +699,7 @@ def test_launch_deadline(
     remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # Leave time for the input calls, then cross the deadline during polling.
-    ticks = iter([0, 0, 0, 0, 0, 0, 0, 120, 120, 120, 134, 134, 134])
+    ticks = iter([0, 0, 0, 0, 0, 0, 120, 120, 120, 134, 134, 134])
     monkeypatch.setattr(
         driver,
         "time",
@@ -945,15 +939,15 @@ def test_wait_start_refused(remote: Remote, capsys: pytest.CaptureFixture[str]) 
 
 
 def test_launch_polls_then_acknowledges(remote: Remote) -> None:
-    remote.configure(ssh=[None, None, None, None, {"out": "preparing\n\n0\n1\n"}, None])
+    remote.configure(ssh=[None, None, None, {"out": "preparing\n\n0\n1\n"}, None])
     assert launch(remote) == 0
-    assert len(remote.records("ssh")) == 6
+    assert len(remote.records("ssh")) == 5
 
 
 def test_stream_transport_failure_never_kills(
     remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    remote.configure(ssh=[None, None, {"rc": 255}], kill_rc="1\n")
+    remote.configure(ssh=[None, {"rc": 255}], kill_rc="1\n")
     assert launch(remote) == 1
     assert "not owner" in capsys.readouterr().err
     assert not driver.metadata_path("sample").exists()
@@ -1362,12 +1356,8 @@ def test_exec_spends_one_startup_budget(
             assert timeout == 110
             steps.append("limits")
             return "0.5 4 12582912 6291456 100 0"
-        if script == remote_commands.host_marker(host.account):
-            assert timeout == 100
-            steps.append("marker")
-            return ""
         assert script == remote_commands.installed(CONFIG.hosts[0])
-        assert timeout == 90
+        assert timeout == 100
         steps.append("preflight")
         return version.line() + "\n"
 
@@ -1382,7 +1372,7 @@ def test_exec_spends_one_startup_budget(
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
         assert name == "sample"
-        assert timeout == 80
+        assert timeout == 90
         assert inputs.owner == driver.load(CONFIG, "sample").owner
         assert inputs.schema is None
         assert inputs.prompt.endswith("Carry out the example.\n")
@@ -1403,7 +1393,7 @@ def test_exec_spends_one_startup_budget(
         assert argv == remote_commands.start(
             "sample", CONFIG.sockets_dir, CONFIG.hosts[0]
         )
-        assert timeout == 70
+        assert timeout == 80
         steps.append("start")
         return ""
 
@@ -1417,7 +1407,7 @@ def test_exec_spends_one_startup_budget(
         assert settings == CONFIG
         assert host == CONFIG.hosts[0]
         assert name == ("sample", driver.load(CONFIG, "sample").owner)
-        assert timeout == 60
+        assert timeout == 70
         steps.append("poll")
         return transport.Reading("running", None, launched=True, session=True, text="")
 
@@ -1426,7 +1416,7 @@ def test_exec_spends_one_startup_budget(
     monkeypatch.setattr(transport, "call", call)
     monkeypatch.setattr(transport, "read", read)
     assert launch(remote) == 0
-    assert steps == ["limits", "marker", "preflight", "stream", "start", "poll"]
+    assert steps == ["limits", "preflight", "stream", "start", "poll"]
 
 
 @pytest.mark.parametrize(
@@ -1551,7 +1541,7 @@ def test_existing_metadata_directory_permissions(remote: Remote) -> None:
 def test_poll_transport_failure_only_kills_created_session(
     remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    remote.configure(ssh=[None, None, None, None, {"rc": 255}], kill_rc="1\n")
+    remote.configure(ssh=[None, None, None, {"rc": 255}], kill_rc="1\n")
     assert launch(remote) == 1
     assert capsys.readouterr().out == (
         "sample: launch unconfirmed host=example-linux phase=unreachable\n"
@@ -1583,7 +1573,6 @@ def test_metadata_directory_is_private_before_chmod(
     args = agent.parser("example agent").parse_args(arguments(remote))
     run = driver.prepare(CONFIG, args)
     directory = driver.metadata_path("sample").parent
-    directory.rename(directory.with_name("previous-agent-runs"))
     original = type(directory).chmod
 
     def chmod(path: Path, mode: int) -> None:
@@ -1870,7 +1859,7 @@ def test_inspection_uses_recorded_target_and_mirror(
         assert calls[1][calls[1].index("-n") + 1] == "10"
     else:
         assert "-n" not in calls[1]
-    assert len(remote.records("ssh")) == 6
+    assert len(remote.records("ssh")) == 5
 
     mirror_path = (
         remote.root
@@ -2082,7 +2071,7 @@ def test_unsandboxed_unconfirmed_reports_sandbox(
     phase = "unreachable" if failure == "transfer" else "preparing"
     assert capsys.readouterr().out == (
         f"sample: launch unconfirmed host=example-linux phase={phase}"
-        " sandbox=none authorized_by=o/r#1 untrusted-host\n"
+        " sandbox=none authorized_by=o/r#1\n"
     )
 
 

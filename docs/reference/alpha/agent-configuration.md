@@ -2,11 +2,9 @@
 description: Agent settings, run requests, and host preparation.
 generated:
   - role: generated
-    harness: codex:0.171.0
-    model: openai:gpt-6.1-sol
-    effort: high
-    surface: exec
-    at: "2026-11-24T19:13:18Z"
+    harness: codex
+    model: openai:gpt-6
+    at: "2026-11-24T19:23:45Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -122,7 +120,7 @@ Host tools use a fixed search path with optional absolute directories from `host
 
 Codex uses the account’s existing executable. Runs skip standalone release validation and copying. A missing executable still fails with `host executable codex was not found`. Codex uses full access with its network proxy off. An agy review omits `--sandbox`.
 
-Run-host announces full access and appends a durable host taint marker before preparation. Taint records supply audit information and never refuse a build or review because a host is unknown or tainted. Reviews still require reviews App references and refuse token request failures. A review token holds read permissions only (contents, pull requests, checks and statuses). Reviews App credentials can remain configured on any run host.
+Run-host announces full access before preparation. Reviews still require reviews App references and refuse token request failures. A review token holds read permissions only (contents, pull requests, checks and statuses). Reviews App credentials can remain configured on any run host.
 
 Run-host builds the harness command and adds the brief header. The driver sends the raw brief, an optional `<name>.schema.json`, and `--host` with a configured host name. Codex receives the schema path. Claude receives its contents. An unset, empty or relative `XDG_STATE_HOME` uses the home directory default. Finished runs keep their completion and log files when a rerun fails.
 
@@ -149,6 +147,6 @@ The settings have these constraints:
 - `default_profile` names one of the profiles, matching without regard to case, so `Primary` selects `primary`. Profile names that differ only in case fail validation. Display uses the name as written.
 - `[[agent.host]]` lists at least one host. Its `name` is lower-case, dot-separated labels, `os` is `linux` or `macos`, `shell` is `bash` or `zsh`, `account` must be one of `accounts`, and host names are unique. Every name in `accounts` needs an `[agent.credentials.<name>]` table. `proven_harnesses` records `codex`, `claude` and `agy` names. Add a harness after one successful, real `agent exec` run on that host. An empty list never refuses a run. Remove the recorded fact when upgrading that harness.
 
-The run request is a versioned JSON object. Version 2 lists every run field, including the required boolean `tainted_host`, and no credential. Readers refuse version 1 and requests missing `tainted_host`. A reader refuses unknown versions, unknown or missing fields. An optional authorization must have the form `owner/repo#N` or `operator-chat-YYYY-MM-DD`. The repo argument takes the form `org/repo` or `<git host>/<org>/<repo>`, with `github.com` as the default git host, and resolves to `Code/<git host>/<org>/<repo>` under the home directory. A repo name can't be `.` or `..` or end in `.git`.
+The run request is a versioned JSON object. Version 2 lists every run field and no credential. Readers refuse version 1. A reader refuses unknown versions, unknown or missing fields. An optional authorization must have the form `owner/repo#N` or `operator-chat-YYYY-MM-DD`. The repo argument takes the form `org/repo` or `<git host>/<org>/<repo>`, with `github.com` as the default git host, and resolves to `Code/<git host>/<org>/<repo>` under the home directory. A repo name can't be `.` or `..` or end in `.git`.
 
-Every `agent exec` request sets `unsandboxed` and `tainted_host` to true. Omit `--unsandboxed` for the default behavior. Existing callers may still pass `agent exec --unsandboxed operator-chat-YYYY-MM-DD` or `--unsandboxed owner/repo#N` to record `authorized_by`. The host’s legacy `unsandboxed` key is optional, and neither value refuses a run. Run-host reads the account’s config before parsing the request.
+Every `agent exec` request sets `unsandboxed` to true. Omit `--unsandboxed` for the default behavior. Existing callers may still pass `agent exec --unsandboxed operator-chat-YYYY-MM-DD` or `--unsandboxed owner/repo#N` to record `authorized_by`. The host’s legacy `unsandboxed` key is optional, and neither value refuses a run. Run-host reads the account’s config before parsing the request.

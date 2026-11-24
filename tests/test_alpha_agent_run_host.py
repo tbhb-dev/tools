@@ -57,8 +57,6 @@ from tbhbdev.alpha.agent import (
 from tbhbdev.alpha.agent.decisions import policy, request
 from tbhbdev.alpha.agent.decisions.run_state import Group
 from tbhbdev.alpha.agent.model import (
-    AgyPolicy,
-    ClaudePolicy,
     CodexPolicy,
     Harness,
     Invalid,
@@ -122,9 +120,6 @@ def fake_secrets(
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
     isolate_host_git(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        run_host, "TAINT_DIRECTORY", tmp_path / "host-taint", raising=False
-    )
     monkeypatch.setattr(admission, "ROOT", tmp_path / "admission")
     monkeypatch.setattr(secrets, "read", read)
     monkeypatch.setattr(credentials, "installation_token", installation)
@@ -2528,94 +2523,6 @@ def test_checked_policy_supplies_all_protected_paths(
     assert executable == str(tmp_path / "host-bin" / "true")
 
 
-def assert_claude_marker_write_denies(
-    detail: ClaudePolicy, markers: tuple[str, ...]
-) -> None:
-    sandbox = cast("dict[str, object]", detail.settings["sandbox"])
-    filesystem = cast("dict[str, list[str]]", sandbox["filesystem"])
-    permissions = cast("dict[str, list[str]]", detail.settings["permissions"])
-    for path in markers:
-        assert path in filesystem["denyWrite"]
-        assert f"Edit(/{path})" in permissions["deny"]
-        assert f"Edit(/{path}/**)" in permissions["deny"]
-
-
-@pytest.mark.parametrize("os_name", Os)
-@pytest.mark.parametrize("harness", Harness)
-@pytest.mark.parametrize("profile", ["build", "review"])
-def test_host_marker_directory_is_write_denied(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    os_name: Os,
-    harness: Harness,
-    profile: str,
-) -> None:
-    run = make_run(
-        tmp_path,
-        harness=harness.value,
-        profile=profile,
-        timeout=900,
-        commit="0" * 40 if profile == "review" else None,
-        reason="test",
-        claude_profile="primary" if harness is Harness.CLAUDE else None,
-    )
-    run = dataclasses.replace(run, host=dataclasses.replace(run.host, os=os_name))
-    resolved = tmp_path / "private" / "var"
-    resolved.mkdir(parents=True)
-    alias = tmp_path / "var"
-    alias.symlink_to(resolved, target_is_directory=True)
-    marker = alias / "tmp" / "tbhbdev-agent-taint"
-    monkeypatch.setattr(run_host, "TAINT_DIRECTORY", marker)
-    markers = (str(marker), str(resolved / "tmp" / "tbhbdev-agent-taint"))
-    protected = run_host.protected_home(run)
-    assert all(path in protected for path in markers)
-    value, _executable = run_host.checked_policy(run, preparation(run).paths)
-    match value.detail:
-        case ClaudePolicy() as detail:
-            assert_claude_marker_write_denies(detail, markers)
-        case CodexPolicy() as detail:
-            assert detail.read_roots[0] == ":root"
-            assert all(
-                not Path(path).is_relative_to(root)
-                for path in markers
-                for root in detail.write_roots
-            )
-        case AgyPolicy(grants):
-            assert all(
-                not Path(path).is_relative_to(grant.removeprefix("write_file(")[:-1])
-                for path in markers
-                for grant in grants
-                if grant.startswith("write_file(")
-            )
-
-
-@pytest.mark.parametrize(
-    "write_root",
-    [Path("/var") / "tmp", Path("/var") / "tmp" / "tbhbdev-agent-taint"],
-)
-def test_host_marker_write_roots_are_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_root: Path
-) -> None:
-    run = make_run(tmp_path)
-    marker = Path("/var") / "tmp" / "tbhbdev-agent-taint"
-    monkeypatch.setattr(run_host, "TAINT_DIRECTORY", marker)
-    run = dataclasses.replace(
-        run,
-        settings=dataclasses.replace(
-            run.settings,
-            sandbox=dataclasses.replace(
-                run.settings.sandbox, write_roots=(str(write_root),)
-            ),
-        ),
-    )
-    with pytest.raises(Invalid) as caught:
-        run_host.checked_policy(run, preparation(run).paths)
-    assert str(caught.value) == (
-        f"protected host path {marker.resolve()} overlaps write root "
-        f"{Path(write_root).resolve()}; narrow that write root"
-    )
-
-
 def test_main_defaults_to_the_current_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3037,7 +2944,6 @@ def test_protected_home_lists_startup_files_and_socket_ancestors(
         str(mirror.parent.parent),
         str(mirror.parent.parent.parent),
         str(run_host.userconfig.path()),
-        str(run_host.TAINT_DIRECTORY),
     )
 
 
@@ -3471,20 +3377,6 @@ def test_checked_policy_codex_table_has_unique_keys(
         assert table[prepared.paths.worktree] == "write"
 
 
-@pytest.mark.parametrize("profile", ["build", "review"])
-@pytest.mark.parametrize("tainted", [False, True])
-def test_preflight_allows_review_on_tainted_host(
-    tmp_path: Path, profile: str, tainted: bool
-) -> None:
-    run = make_run(
-        tmp_path,
-        profile=profile,
-        commit="0" * 40 if profile == "review" else None,
-        tainted_host=tainted,
-    )
-    run_host.preflight(run)
-
-
 @pytest.mark.parametrize(
     "missing", ["reviews_app_id", "reviews_app_client_id", "reviews_app_pem"]
 )
@@ -3539,203 +3431,23 @@ def test_preflight_accepts_harness_without_recorded_pass(
 
 
 @pytest.mark.parametrize("unsandboxed", [False, True])
-@pytest.mark.parametrize("tainted", [False, True])
-def test_preflight_announces_access_and_build_trust(
+def test_preflight_announces_access(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     unsandboxed: bool,
-    tainted: bool,
 ) -> None:
     run = make_run(
         tmp_path,
         unsandboxed=unsandboxed,
         authorized_by="tbhb-dev/example-repo#1" if unsandboxed else None,
-        tainted_host=tainted,
     )
     run_host.preflight(run)
-    lines = ["untrusted-host"] if tainted else []
+    lines = []
     if unsandboxed:
         lines.append("unsandboxed full access authorized_by=tbhb-dev/example-repo#1")
     expected = "".join(f"{line}\n" for line in lines)
     assert capsys.readouterr().err == expected
     assert (run.files.path("log").read_text() if lines else "") == expected
-
-
-@pytest.mark.parametrize("state", [None, "", "configured"])
-def test_preflight_appends_durable_host_marker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str | None
-) -> None:
-    run = make_run(tmp_path, unsandboxed=True, authorized_by="operator-chat-2026-11-10")
-    if state is None:
-        monkeypatch.delenv("XDG_STATE_HOME")
-    else:
-        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / state) if state else "")
-    marker = run_host.TAINT_DIRECTORY / "agent.jsonl"
-    marker.parent.mkdir(mode=0o1777)
-    marker.parent.chmod(0o1777)
-    marker.write_text('{"previous":true}\n')
-    synced: list[int] = []
-    original_sync = os.fsync
-    original_open = os.open
-
-    def opened(
-        path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
-    ) -> int:
-        if path == marker.parent:
-            assert flags == os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-            assert dir_fd is None
-        else:
-            assert path == marker.name
-            assert flags == (
-                os.O_CREAT | os.O_APPEND | os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-            )
-            assert mode == 0o644
-            assert dir_fd is not None
-        return original_open(path, flags, mode, dir_fd=dir_fd)
-
-    def sync(fd: int) -> None:
-        synced.append(fd)
-        original_sync(fd)
-
-    monkeypatch.setattr(os, "fsync", sync)
-    monkeypatch.setattr(time, "time", lambda: 1234)
-    run_host.preflight(run)
-    lines = marker.read_text().splitlines()
-    assert json.loads(lines[0]) == {"previous": True}
-    assert json.loads(lines[1]) == {
-        "v": 1,
-        "run": "example",
-        "account": "agent",
-        "authorized_by": "operator-chat-2026-11-10",
-        "at": 1234,
-    }
-    assert len(lines) == 2
-    assert synced
-    monkeypatch.setattr(os, "open", opened)
-    run_host.mark_host(run)
-    assert len(synced) == 3
-
-
-def test_marker_failure_refuses_launch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run = make_run(tmp_path, unsandboxed=True, authorized_by="tbhb-dev/example-repo#1")
-
-    original = os.fsync
-
-    def sync(fd: int) -> None:
-        marker = run_host.TAINT_DIRECTORY / "agent.jsonl"
-        if marker.exists() and os.fstat(fd).st_ino == marker.stat().st_ino:
-            raise OSError
-        original(fd)
-
-    def unexpected(*_args: object) -> None:
-        pytest.fail("a failed host marker must refuse workspace preparation")
-
-    monkeypatch.setattr(os, "fsync", sync)
-    monkeypatch.setattr(process_group, "prepare", unexpected)
-    assert run_host.execute(run, "probe") == 1
-    assert not run.files.path("launched").exists()
-
-
-@pytest.mark.parametrize(
-    "plant",
-    [
-        "fifo",
-        "non-sticky",
-        "directory-owner",
-        "symlink",
-        "hard-link",
-        "file-owner",
-        "directory-file",
-    ],
-)
-def test_host_marker_refuses_unsafe_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, plant: str
-) -> None:
-    run = make_run(tmp_path, unsandboxed=True, authorized_by="operator-chat-2026-11-10")
-    directory = run_host.TAINT_DIRECTORY
-    directory.mkdir()
-    directory.chmod(0o1777)
-    marker = directory / "agent.jsonl"
-    if plant == "fifo":
-        os.mkfifo(marker)
-    elif plant == "non-sticky":
-        directory.chmod(0o777)
-    elif plant == "symlink":
-        target = directory.with_name("real-directory")
-        directory.rename(target)
-        directory.symlink_to(target, target_is_directory=True)
-    elif plant == "hard-link":
-        source = tmp_path / "source"
-        source.write_text("unchanged")
-        marker.hardlink_to(source)
-    elif plant == "directory-file":
-        marker.mkdir()
-    original = os.fstat
-    original_open = os.open
-
-    def opened(
-        path: Path | str, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
-    ) -> int:
-        if path == marker.name:
-            assert flags & os.O_NONBLOCK
-        return original_open(path, flags, mode, dir_fd=dir_fd)
-
-    def inspected(fd: int) -> os.stat_result:
-        info = original(fd)
-        if (plant == "directory-owner" and stat.S_ISDIR(info.st_mode)) or (
-            plant == "file-owner" and stat.S_ISREG(info.st_mode)
-        ):
-            fields = list(info)
-            fields[4] = os.getuid() + 1
-            return os.stat_result(fields)
-        return info
-
-    monkeypatch.setattr(os, "fstat", inspected)
-    monkeypatch.setattr(os, "open", opened)
-    with pytest.raises((Invalid, OSError)) as caught:
-        run_host.mark_host(run)
-    if plant in ("non-sticky", "directory-owner"):
-        assert str(caught.value) == (
-            "host marker directory must be sticky and owned by root or this account"
-        )
-    elif plant in ("hard-link", "file-owner"):
-        assert str(caught.value) == (
-            "host marker must be a regular file owned by this account with one link"
-        )
-    if plant == "hard-link":
-        assert (tmp_path / "source").read_text() == "unchanged"
-
-
-def test_host_marker_directory_creation_ignores_umask(tmp_path: Path) -> None:
-    run = make_run(tmp_path, unsandboxed=True, authorized_by="operator-chat-2026-11-10")
-    previous = os.umask(0o077)
-    try:
-        run_host.mark_host(run)
-    finally:
-        os.umask(previous)
-    assert stat.S_IMODE(run_host.TAINT_DIRECTORY.stat().st_mode) == 0o1777
-    assert json.loads((run_host.TAINT_DIRECTORY / "agent.jsonl").read_text())["v"] == 1
-
-
-def test_host_marker_accepts_root_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run = make_run(tmp_path)
-    original = os.fstat
-
-    def inspected(fd: int) -> os.stat_result:
-        info = original(fd)
-        if stat.S_ISDIR(info.st_mode):
-            fields = list(info)
-            fields[4] = 0
-            return os.stat_result(fields)
-        return info
-
-    monkeypatch.setattr(os, "fstat", inspected)
-    run_host.mark_host(run)
-    assert (run_host.TAINT_DIRECTORY / "agent.jsonl").is_file()
 
 
 @pytest.mark.parametrize("profile", ["build", "review"])
@@ -5007,7 +4719,6 @@ def test_unsandboxed_preflight_launches_every_harness(
         timeout=900,
         unsandboxed=True,
         authorized_by="operator-chat-2026-11-15",
-        tainted_host=True,
     )
     run = dataclasses.replace(
         run, host=dataclasses.replace(run.host, proven_harnesses=())

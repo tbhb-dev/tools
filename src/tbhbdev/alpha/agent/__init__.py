@@ -76,9 +76,6 @@ def parser(prog: str) -> argparse.ArgumentParser:
     verbs.add_parser(
         "signing-parity", help="check each host's signing key is registered"
     )
-    clear = verbs.add_parser("clear-taint", help="clear local host taint with a reason")
-    clear.add_argument("host")
-    clear.add_argument("--reason", required=True)
     return command
 
 
