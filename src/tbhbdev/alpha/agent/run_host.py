@@ -841,6 +841,7 @@ def _execute(
     rc = 1
     agent = None
     try:
+        run.files.path("head").unlink(missing_ok=True)
         if not run.files.path("request.json").exists():
             run.files.receive(run.request)
         run.files.write("phase", "check")

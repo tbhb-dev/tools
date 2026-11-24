@@ -854,7 +854,11 @@ def test_status_reports_an_unreachable_host_with_the_local_record(
 
 @pytest.mark.parametrize(
     ("rc", "reason"),
-    [(4, "push failed: rejected"), (5, "pr not opened: no draft")],
+    [
+        (4, "push failed: rejected"),
+        (5, "pr not opened: no draft"),
+        (6, "no new commit: the brief expected one (--expect-commit)"),
+    ],
 )
 def test_status_shows_the_last_publication_reason(
     remote: Remote, capsys: pytest.CaptureFixture[str], rc: int, reason: str

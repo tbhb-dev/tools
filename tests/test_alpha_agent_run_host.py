@@ -28,6 +28,7 @@ import pytest
 from agent_host_example import (
     build_provenance,
     constant,
+    git,
     host_settings,
     isolate_host_git,
     local_mirror_fetches,
@@ -67,6 +68,7 @@ from tbhbdev.alpha.agent.model import (
 )
 
 RESOLVE = host_tools.resolve
+PUSH_RUN = run_host.push.run
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping
@@ -4415,6 +4417,31 @@ def test_execute_requires_a_commit_when_requested(
     assert (log.exists() and message in log.read_text().splitlines(keepends=True)) is (
         expected == 6
     )
+
+
+def test_execute_rejects_a_stale_head_when_requiring_a_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path, expect_commit=True)
+    _, clone = repository(tmp_path / "repo")
+    git(clone, "switch", "-c", "agent/example")
+    prepared = preparation(run)
+    prepared = dataclasses.replace(
+        prepared,
+        paths=dataclasses.replace(prepared.paths, worktree=str(clone)),
+        auth_before="example-before",
+    )
+    HostRuntime(run, prepared, None).patch(monkeypatch)
+    monkeypatch.setattr(run_host, "run_harness", constant(0))
+    monkeypatch.setattr(run_host.push, "run", PUSH_RUN)
+    run.files.write("head", "a" * 40)
+
+    assert run_host.execute(run, "example", "unused") == 6
+    assert run.files.path("rc").read_text() == "6\n"
+    assert "no new commit: the brief expected one (--expect-commit)" in (
+        run.files.path("log").read_text().splitlines()
+    )
+    assert not run.files.path("head").exists()
 
 
 @pytest.mark.parametrize(
