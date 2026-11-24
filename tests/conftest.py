@@ -125,6 +125,12 @@ def launching_session(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def disable_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep agent launch tests independent of the host's telemetry settings."""
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+
+
+@pytest.fixture(autouse=True)
 def guard_account_codex_writes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Callable[[FilePath], None]:

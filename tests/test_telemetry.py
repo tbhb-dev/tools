@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import socket
@@ -9,8 +10,10 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 import tbhb_telemetry
@@ -22,8 +25,7 @@ from tbhbdev.alpha import agent
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
-    from typing import TextIO
+    from typing import BinaryIO
 
     from opentelemetry.sdk.trace import ReadableSpan
 
@@ -32,6 +34,11 @@ ALLOW_HOSTS = "TBHB_TELEMETRY_ALLOW_HOSTS"
 COLLECTOR = "collector.example.test"
 URL = f"http://{COLLECTOR}:4318"
 DROP_WARNING = "; warning: the exporter may drop the launch trace"
+
+
+@pytest.fixture
+def disable_telemetry() -> None:
+    """Override the suite's telemetry opt-out for these tests."""
 
 
 @pytest.fixture(autouse=True)
@@ -152,7 +159,7 @@ def test_only_allowlisted_keys_apply_from_default_user_settings(
     reported = threading.Lock()
 
     def acquire(*, blocking: bool) -> bool:
-        assert not blocking
+        assert blocking is False
         return reported.acquire(blocking=False)
 
     monkeypatch.setattr(telemetry, "_REPORTED", SimpleNamespace(acquire=acquire))
@@ -170,7 +177,16 @@ def test_only_allowlisted_keys_apply_from_default_user_settings(
     assert capsys.readouterr() == ("", "")
 
 
-@pytest.mark.parametrize("invalid", ["{", "[]", '{"env": []}', '{"env": {}}'])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "{",
+        "[]",
+        '{"env": []}',
+        '{"env": {}}',
+        pytest.param("[" * 10_000 + "0" + "]" * 10_000, id="deeply-nested"),
+    ],
+)
 @pytest.mark.parametrize("user_available", [False, True])
 def test_unreadable_or_invalid_settings_fall_back(  # noqa: PLR0913 -- settings matrix and fixtures
     telemetry_files: tuple[Path, Path],
@@ -220,17 +236,19 @@ def test_unavailable_home_and_nonregular_settings_fall_back(
 
     def open_settings(
         path: Path,
+        mode: str,
         *,
-        encoding: str | None = None,
+        buffering: int,
         opener: Callable[[str, int], int] | None = None,
-    ) -> TextIO:
-        assert encoding is not None
+    ) -> BinaryIO:
+        assert mode == "rb"
+        assert buffering == 0
         assert opener is not None
-        return open(path, encoding=encoding, opener=opener)
+        return open(path, mode, buffering=buffering, opener=opener)
 
     monkeypatch.setattr(os, "open", open_fifo)
     monkeypatch.setattr(telemetry, "open", open_settings, raising=False)
-    monkeypatch.setattr(json, "load", pytest.fail)
+    monkeypatch.setattr(json, "loads", pytest.fail)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR")
     monkeypatch.setattr("pathlib.Path.home", broken)
     assert telemetry.command(lambda: 7) == 7
@@ -238,12 +256,110 @@ def test_unavailable_home_and_nonregular_settings_fall_back(
     assert capsys.readouterr() == ("", diagnostic("none", "none"))
 
 
+@pytest.mark.parametrize(
+    ("size", "source"), [(65_536, "managed"), (65_537, "user"), (131_072, "user")]
+)
+def test_settings_read_is_bounded(
+    telemetry_files: tuple[Path, Path],
+    local_export: dict[str, str | None],
+    capsys: pytest.CaptureFixture[str],
+    size: int,
+    source: str,
+) -> None:
+    managed, user = telemetry_files
+    settings_json = json.dumps(
+        {"env": {ENDPOINT: URL}, "label": "é"}, ensure_ascii=False
+    )
+    managed.write_bytes(settings_json.encode().ljust(size))
+    user.write_text(json.dumps({"env": {ENDPOINT: "fallback"}}), encoding="utf-8")
+
+    assert telemetry.command(lambda: 7) == 7
+    assert local_export == {
+        ENDPOINT: URL if source == "managed" else "fallback",
+        ALLOW_HOSTS: None,
+    }
+    assert capsys.readouterr() == ("", diagnostic(source, "none"))
+
+
+@pytest.mark.parametrize("operation", ["write", "flush"])
+@pytest.mark.parametrize("error", [OSError, ValueError])
+def test_diagnostic_ignores_stream_errors(
+    monkeypatch: pytest.MonkeyPatch, operation: str, error: type[Exception]
+) -> None:
+    stderr = io.StringIO()
+    fail = Mock(side_effect=error)
+    monkeypatch.setattr(stderr, operation, fail)
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stderr", stderr)
+        telemetry._resolve_environment()  # noqa: SLF001 -- bypass the outer safeguard
+    assert fail.call_count == 1
+
+
+def test_diagnostic_writes_to_original_stderr(
+    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stderr", sys.__stderr__)
+        telemetry._resolve_environment()  # noqa: SLF001 -- exercise the diagnostic
+    assert capfd.readouterr() == ("", diagnostic("none", "none"))
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_diagnostic_skips_unavailable_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    local_export: dict[str, str | None],
+    *,
+    closed: bool,
+) -> None:
+    stderr = io.StringIO() if closed else None
+    if stderr is not None:
+        stderr.close()
+    with monkeypatch.context() as patch:
+        patch.setattr(sys, "stderr", stderr)
+        assert telemetry.command(lambda: 7) == 7
+    assert capsys.readouterr() == ("", "")
+    assert telemetry.command(lambda: 7) == 7
+    assert capsys.readouterr() == ("", diagnostic("none", "none"))
+    assert local_export == {ENDPOINT: None, ALLOW_HOSTS: None}
+
+
+@pytest.mark.parametrize("target", ["pipe", "full", "closed"])
+def test_diagnostic_preserves_process_exit_and_stdout(target: str) -> None:
+    device = Path("/dev/full")
+    if target == "full" and not device.is_char_device():
+        pytest.skip("/dev/full is unavailable")
+    script = (
+        "import os, sys; from tbhbdev import telemetry; "
+        "telemetry._MANAGED_SETTINGS.clear(); "
+        "sys.modules['tbhb_telemetry'] = None; "
+        + ("os.close(2); " if target == "closed" else "")
+        + "raise SystemExit(telemetry.command(lambda: print('launch') or 7))"
+    )
+    with (device if target == "full" else Path(os.devnull)).open("wb") as sink:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=sink if target == "full" else subprocess.PIPE,
+            check=False,
+            timeout=10,
+        )
+    assert result.returncode == 7
+    assert result.stdout == b"launch\n"
+    if target != "full":
+        assert result.stderr == (
+            diagnostic("none", "none").encode() if target == "pipe" else b""
+        )
+
+
+@pytest.mark.parametrize("disabled", ["true", "TRUE"])
 def test_disabled_skips_lookup_and_reporting(
     local_export: dict[str, str | None],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    disabled: str,
 ) -> None:
-    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    monkeypatch.setenv("OTEL_SDK_DISABLED", disabled)
     monkeypatch.setattr(telemetry, "_apply_settings", pytest.fail)
     assert telemetry.command(lambda: 0) == 0
     assert local_export == {ENDPOINT: None, ALLOW_HOSTS: None}

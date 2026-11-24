@@ -20,6 +20,7 @@ _MANAGED_SETTINGS = {
     "darwin": Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
     "linux": Path("/etc/claude-code/managed-settings.json"),
 }
+_SETTINGS_READ_LIMIT = 64 * 1024 + 1  # The extra byte detects oversize files.
 _REPORTED = Lock()
 
 
@@ -28,12 +29,16 @@ def _apply_settings(path: Path, source: str, sources: dict[str, str]) -> None:
         # Avoid waiting on a FIFO in place of a settings file.
         with open(
             path,
-            encoding="utf-8",
+            "rb",
+            buffering=0,
             opener=lambda name, flags: os.open(name, flags | os.O_NONBLOCK),
         ) as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 return
-            settings: object = json.load(stream)
+            data = stream.read(_SETTINGS_READ_LIMIT)
+            if len(data) == _SETTINGS_READ_LIMIT:
+                return
+            settings: object = json.loads(data.decode())
     except OSError, ValueError, RecursionError:
         return
     if not isinstance(settings, dict) or not isinstance(
@@ -52,7 +57,8 @@ def _apply_settings(path: Path, source: str, sources: dict[str, str]) -> None:
 
 
 def _resolve_environment() -> None:
-    if os.environ.get("OTEL_SDK_DISABLED", "").lower() == "true":
+    disabled = os.environ.get("OTEL_SDK_DISABLED")
+    if disabled is not None and disabled.lower() == "true":
         return
     sources = {key: "environment" for key in _KEYS if os.environ.get(key)}
     managed = _MANAGED_SETTINGS.get(sys.platform)
@@ -65,6 +71,13 @@ def _resolve_environment() -> None:
             )
             _apply_settings(config_dir / "settings.json", "user", sources)
 
+    _report(sources)
+
+
+def _report(sources: dict[str, str]) -> None:
+    stderr = sys.stderr
+    if stderr is None or stderr.closed:
+        return
     # Claim the only report for this process without waiting or retrying the write.
     if _REPORTED.acquire(blocking=False):
         details = "; ".join(f"{key} from {sources.get(key, 'none')}" for key in _KEYS)
@@ -73,7 +86,14 @@ def _resolve_environment() -> None:
             if len(sources) == len(_KEYS)
             else "; warning: the exporter may drop the launch trace"
         )
-        print(f"telemetry: {details}{warning}", file=sys.stderr)
+        line = f"telemetry: {details}{warning}\n"
+        with suppress(OSError, ValueError):
+            if sys.__stderr__ is stderr:
+                # A failed buffered write can be retried during interpreter shutdown.
+                os.write(stderr.fileno(), line.encode())
+            else:
+                stderr.write(line)
+                stderr.flush()
 
 
 def attributes(**values: str) -> None:
