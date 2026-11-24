@@ -144,6 +144,7 @@ class Host:
     max_swap_used_percent: int = 80
     limits_warn_only: bool = False
     max_concurrent_runs: int = DEFAULT_MAX_CONCURRENT_RUNS
+    build_shims: bool = True
 
 
 @dataclass(frozen=True)
