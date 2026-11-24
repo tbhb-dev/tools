@@ -3245,17 +3245,16 @@ def test_main_keeps_account_path_until_request_loaded(
     assert run_host.main(["example"], "example") == 1
 
 
+@pytest.mark.parametrize("error", [OSError, RecursionError])
 def test_late_temporary_cleanup_keeps_finished_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
 ) -> None:
     run = make_run(tmp_path)
-    original = tempfile.TemporaryDirectory
+    cleanup = tempfile.TemporaryDirectory.cleanup
 
-    @contextmanager
-    def directory() -> Generator[str]:
-        with original() as value:
-            yield value
-        raise OSError
+    def fail_cleanup(directory: tempfile.TemporaryDirectory[str]) -> None:
+        cleanup(directory)
+        raise error
 
     def execute(
         _run: run_host.Run,
@@ -3271,7 +3270,7 @@ def test_late_temporary_cleanup_keeps_finished_records(
         run.files.write("rc", "7\n")
         return 7
 
-    monkeypatch.setattr(tempfile, "TemporaryDirectory", directory)
+    monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", fail_cleanup)
     monkeypatch.setattr(run_host, "_files", constant(run.files))
     monkeypatch.setattr(run_host, "_load", constant((run, "task")))
     monkeypatch.setattr(run_host, "execute", execute)
@@ -3311,6 +3310,9 @@ def test_exec_removes_its_pytest_tree_after_each_outcome(
         run_dirs.append(directory)
         return run, "example task"
 
+    def prepare(*_args: object) -> run_host.Prepared:
+        return preparation(run)
+
     def launch(spec: process_group.Launch, **kwargs: object) -> Child:
         assert (
             spec.env["TMPDIR"] == spec.env["PYTEST_DEBUG_TEMPROOT"] == str(run.tmpdir)
@@ -3347,7 +3349,7 @@ def test_exec_removes_its_pytest_tree_after_each_outcome(
     monkeypatch.setattr(run_host, "_load", load)
     monkeypatch.setattr(run_host, "preflight", constant(None))
     monkeypatch.setattr(credentials, "push_token", constant(None))
-    monkeypatch.setattr(process_group, "prepare", lambda *_args: preparation(run))
+    monkeypatch.setattr(process_group, "prepare", prepare)
     monkeypatch.setattr(process_group, "launch_owned", launch)
     monkeypatch.setattr(process_group, "record", constant(None))
     monkeypatch.setattr(process_group, "stop_owned", constant(value=True))

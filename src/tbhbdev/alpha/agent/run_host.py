@@ -1372,12 +1372,17 @@ def main(
             try:
                 # Inside the try so a failure to create the temp directory
                 # leaves a record like any other refusal.
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    run, text = _load(args, Path(tmpdir).resolve())
+                temporary = tempfile.TemporaryDirectory()
+                try:
+                    run, text = _load(args, Path(temporary.name).resolve())
                     run.files.write("log", build_info.line() + "\n")
                     completed = execute(
                         run, text, push_token, preflight_only=args.preflight
                     )
+                finally:
+                    # The run's result takes precedence over temporary cleanup.
+                    with suppress(Exception):
+                        temporary.cleanup()
             except _REFUSALS as exc:
                 if completed is None and not isinstance(exc, RunExistsError):
                     # Ignored until `recorded` is set: a signal in between
