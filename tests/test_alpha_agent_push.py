@@ -587,13 +587,13 @@ def test_history_lookup_uses_protected_metadata_and_has_a_deadline(
     ) -> subprocess.CompletedProcess[str]:
         directory = cast("Path", options["cwd"])
         assert directory.parent == run.files.root
-        assert command == [
+        assert command[:3] == [
             host_tools.resolve("git"),
             "-c",
             "core.hooksPath=/dev/null",
-            "-C",
-            str(directory),
-            "rev-list",
+        ]
+        assert command[3:6] == ["-C", str(directory), "rev-list"]
+        assert command[6:] == [
             f"--ancestry-path={base}",
             "--max-count=1",
             "--stdin",
