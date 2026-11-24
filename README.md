@@ -21,6 +21,7 @@ uv tool install git+https://github.com/tbhb-dev/tools
 ## Tools
 
 - `admin` makes policy-controlled GitHub administration calls with an append-only audit log. See [GitHub administration](docs/reference/admin.md).
+- `adr new --from-decision N` drafts an architecture decision record from a GitHub Decision issue. See [Decision record commands](docs/reference/adr.md).
 - `agy` records plain-answer and file-tool runs as OpenTelemetry; `record --dir DIR -- agy ARGS` writes local traces and delta metrics, and `export DIR` sends them to `OTEL_EXPORTER_OTLP_ENDPOINT`.
 - `analytics` applies PostgreSQL migrations and checks the installed catalog contract.
 - `gitleaks_check` is a library, not a command: `tbhbdev.gitleaks_check.scan_text` scans text with gitleaks and raises `ScanRefused` on a finding or a failure. See [Gitleaks check](docs/reference/gitleaks-check.md).

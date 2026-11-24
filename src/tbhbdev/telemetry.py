@@ -104,9 +104,9 @@ def attributes(**values: str) -> None:
 
 
 def command(main: Callable[[], int]) -> int:
-    result = 0
+    result = 0  # pragma: no mutate -- read only after main assigns it
     error: BaseException | None = None
-    started = False
+    started = False  # pragma: no mutate -- None takes the same fallback path
 
     def launch() -> int:
         nonlocal result, error, started
@@ -119,11 +119,18 @@ def command(main: Callable[[], int]) -> int:
             raise
         return result
 
-    with suppress(Exception):
-        _resolve_environment()
-
     # A telemetry failure before main falls back; one after main keeps its result.
     with suppress(Exception):
+        endpoint = os.environ.get("TBHB_TELEMETRY_ENDPOINT", "")
+        if (
+            not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+            and endpoint.strip()
+        ):
+            os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint
+
+        with suppress(Exception):
+            _resolve_environment()
+
         import tbhb_telemetry  # noqa: PLC0415 -- other commands must not import it
 
         def resolved() -> int:
@@ -133,7 +140,8 @@ def command(main: Callable[[], int]) -> int:
                 tbhb_telemetry.materialize()
             return launch()
 
-        tbhb_telemetry.command("tbhbdev", version=version("tbhbdev"), main=resolved)
+        name = "tbhbdev"
+        tbhb_telemetry.command(name, version=version(name), main=resolved)
     if error is not None:
         raise error
     return result if started else launch()
