@@ -7,7 +7,7 @@
   "additionalProperties": false,
   "properties": {
     "base": {
-      "description": "The branch the pull request targets, and the branch the script diffs against to collect the commits' LLM trailers.",
+      "description": "The branch the pull request targets, and the branch the script diffs against to collect the commits' LLM trailers. When omitted, it is the repository's default branch. The default below is only for tbhbdev installs older than that change; current code ignores it.",
       "type": "string",
       "default": "main",
       "maxLength": 255,

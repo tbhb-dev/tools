@@ -892,18 +892,21 @@ def branch_trailers(base: str) -> list[tuple[str, str]]:
     """The LLM trailers of the commits on this branch, oldest first.
 
     The range is BASE..HEAD, which starts at the merge base. The PR targets the
-    remote branch, so origin/BASE is the base when it exists. Git runs in the
-    current directory, because the branch belongs to the repository the script
-    is run from.
+    remote branch, so refs/remotes/origin/BASE is the base when it exists, else
+    refs/heads/BASE. Full ref names keep a tag named origin/BASE out. Git runs in
+    the current directory, because the branch belongs to the repository the
+    script is run from.
     """
-    remote = f"origin/{base}"
-    code, _ = agent_identity.git("rev-parse", remote)
-    span = f"{remote if code == 0 else base}..HEAD"
+    remote = f"refs/remotes/origin/{base}"
+    code, _ = agent_identity.git(
+        "rev-parse", "--verify", "--quiet", f"{remote}^{{commit}}"
+    )
+    span = f"{remote if code == 0 else f'refs/heads/{base}'}..HEAD"
     code, out = agent_identity.git(
         "log", "--reverse", "--format=%x1e%(trailers:only,unfold)", span
     )
     if code != 0:
-        message = f"cannot list the commits in {span}; is {base} fetched?"
+        message = f"cannot list the commits in {base}..HEAD; is {base} fetched?"
         raise SystemExit(message)
     found = (agent_identity.LINE.match(line) for line in out.splitlines())
     return [(match[1], match[2]) for match in found if match]
@@ -917,9 +920,41 @@ def posting_value(env: Mapping[str, str]) -> str | None:
     return agent_identity.format_value(committer.ident.attrs())
 
 
-def base_of(meta: Mapping[str, object]) -> str:
-    """The PR's base branch: the frontmatter's, or the schema's default."""
-    return str(meta.get("base", schema_default(load_schema(), "base")))
+def default_base() -> str:
+    """The repository's default branch: the remote's own HEAD, else origin/HEAD.
+
+    The remote answers first because origin/HEAD goes stale when the default
+    branch moves and a plain fetch leaves it, and a fresh mirror may have none.
+
+    Raises:
+        SystemExit: ``GH_REPO`` names a repository that origin does not describe,
+            or neither read answers. No guess stands in, so a draft never
+            targets a wrong base.
+    """
+    hint = "; name the base in the draft's frontmatter"
+    if os.environ.get("GH_REPO"):
+        message = f"cannot find the default branch of GH_REPO{hint}"
+        raise SystemExit(message)
+    code, out = git("ls-remote", "--symref", "origin", "HEAD")
+    found = re.search(r"^ref: refs/heads/(\S+)\s+HEAD$", out, re.MULTILINE)
+    if code == 0 and found:
+        return found[1]
+    code, out = git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    name = out.removeprefix("refs/remotes/origin/")
+    if code == 0 and name and name != out:
+        return name
+    message = (
+        "cannot find the default branch: `git ls-remote --symref origin HEAD` "
+        f"failed and origin/HEAD is not a symbolic ref{hint}"
+    )
+    raise SystemExit(message)
+
+
+def base_of(meta: Mapping[str, object], default: str | None = None) -> str:
+    """The PR's base branch: the frontmatter's, else DEFAULT or the repository's."""
+    if "base" in meta:
+        return str(meta["base"])
+    return default if default is not None else default_base()
 
 
 def gh_data(done: subprocess.CompletedProcess[str]) -> object:
@@ -1846,6 +1881,9 @@ def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     """Run the chosen subcommand."""
     checked = read_checked(args.draft)
     if args.command in ("check", "create"):
+        # One read of the default branch feeds the size count, the trailers, and
+        # `gh --base`, so a remote change mid-run can't split them.
+        checked.meta.setdefault("base", base_of(checked.meta))
         check_size(args, checked)
     if checked.problems:
         return 1

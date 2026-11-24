@@ -219,6 +219,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     made.git("remote", "add", "origin", ORIGIN)
     made.commit("init")
     made.git("update-ref", "refs/remotes/origin/main", "HEAD")
+    made.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
     made.fake("cog")
     made.fake("vale", stdout="{}")
     made.fake("cspell")
@@ -296,7 +297,6 @@ def test_schema_is_valid_and_closed() -> None:
     schema = pr.load_schema()
     Draft202012Validator.check_schema(schema)
     assert schema["additionalProperties"] is False
-    assert pr.schema_default(schema, "base") == "main"
     assert pr.schema_default(schema, "draft") is False
     properties = cast("dict[str, dict[str, str]]", schema["properties"])
     assert all(prop.get("description") for prop in properties.values())
@@ -1333,6 +1333,16 @@ def test_branch_trailers_prefer_the_remote_base(world: World) -> None:
     assert pr.branch_trailers("main") == [("Generated-by", GEN)]
 
 
+def test_branch_trailers_ignore_a_tag_named_like_the_remote_base(
+    world: World,
+) -> None:
+    world.git("update-ref", "refs/remotes/origin/main", "HEAD")
+    world.git("switch", "-q", "-c", "topic")
+    world.commit(f"mine\n\nGenerated-by: {GEN}")
+    world.git("tag", "origin/main")
+    assert pr.branch_trailers("main") == [("Generated-by", GEN)]
+
+
 def test_branch_trailers_need_a_known_base(world: World) -> None:
     del world
     with pytest.raises(
@@ -1575,6 +1585,120 @@ def test_create_passes_gh_errors_through(
     assert captured.out == ""
     assert len(world.calls("gh")) == 2
     assert world.git("status", "--porcelain", "--ignored").count("push") == 0
+
+
+def remote_default(world: World, tmp_path: Path, branch: str) -> None:
+    remote = tmp_path / "remote.git"
+    world.git("init", "-q", "--bare", "-b", branch, str(remote))
+    world.git("push", "-q", str(remote), f"HEAD:refs/heads/{branch}")
+    world.git("remote", "set-url", "origin", str(remote))
+
+
+def test_a_draft_without_a_base_takes_the_default_branch(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counted = Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None))
+    monkeypatch.setattr(size_gate, "size_counts", counted)
+    monkeypatch.setattr(pr, "branch_trailers", Mock(return_value=[]))
+    world.git("update-ref", "refs/remotes/origin/trunk", "HEAD")
+    world.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+    remote_default(world, tmp_path, "trunk")
+    write_draft(world, BASE)
+    run_main("check")
+    counted.assert_called_once_with("refs/remotes/origin/trunk", "HEAD")
+
+
+def test_the_default_branch_ignores_a_tag_of_the_same_name(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counted = Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None))
+    monkeypatch.setattr(size_gate, "size_counts", counted)
+    monkeypatch.setattr(pr, "branch_trailers", Mock(return_value=[]))
+    world.git("update-ref", "refs/remotes/origin/trunk", "HEAD")
+    world.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+    world.git("tag", "origin/trunk")
+    remote_default(world, tmp_path, "trunk")
+    assert pr.default_base() == "trunk"
+
+
+def test_an_older_reader_still_loads_the_schema_default() -> None:
+    """Installs that predate the default-branch change read `base`'s default."""
+    assert pr.schema_default(pr.load_schema(), "base") == "main"
+
+
+def test_the_remote_default_beats_a_stale_origin_head(
+    world: World, tmp_path: Path
+) -> None:
+    world.git("update-ref", "refs/remotes/origin/trunk", "HEAD")
+    world.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+    remote_default(world, tmp_path, "main")
+    assert pr.default_base() == "main"
+
+
+def test_an_unreachable_remote_falls_back_to_origin_head(
+    world: World, tmp_path: Path
+) -> None:
+    world.git("update-ref", "refs/remotes/origin/trunk", "HEAD")
+    world.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+    world.git("remote", "set-url", "origin", str(tmp_path / "missing.git"))
+    assert pr.default_base() == "trunk"
+
+
+def test_gh_repo_refuses_a_guessed_default_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GH_REPO", "other/repo")
+    with pytest.raises(SystemExit, match="default branch of GH_REPO"):
+        pr.default_base()
+
+
+def unset_origin_head(world: World, url: str) -> None:
+    world.git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+    world.git("remote", "set-url", "origin", url)
+
+
+def test_an_unset_origin_head_reads_the_remotes_own_default(
+    world: World, tmp_path: Path
+) -> None:
+    remote = tmp_path / "remote.git"
+    world.git("init", "-q", "--bare", "-b", "dev", str(remote))
+    world.git("push", "-q", str(remote), "HEAD:refs/heads/dev")
+    unset_origin_head(world, str(remote))
+    assert pr.default_base() == "dev"
+
+
+def test_create_reads_the_default_branch_once(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answers = iter(["trunk", "dev", "other"])
+    read = Mock(side_effect=lambda: next(answers))
+    monkeypatch.setattr(pr, "default_base", read)
+    counted = Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None))
+    monkeypatch.setattr(size_gate, "size_counts", counted)
+    trailers = Mock(return_value=[])
+    monkeypatch.setattr(pr, "branch_trailers", trailers)
+    world.git("update-ref", "refs/remotes/origin/trunk", "HEAD")
+    write_draft(world)
+    assert run_main("create") == 0
+    assert read.call_count == 1
+    assert counted.call_args.args[0] == "refs/remotes/origin/trunk"
+    trailers.assert_called_once_with("trunk")
+    _, call = world.calls("gh")
+    argv = call["argv"]
+    assert isinstance(argv, list)
+    assert argv[-2:] == ["--base", "trunk"]
+
+
+@pytest.mark.parametrize("kind", ["unreachable", "empty"])
+def test_an_unreadable_remote_default_refuses_without_a_guess(
+    world: World, tmp_path: Path, kind: str
+) -> None:
+    remote = tmp_path / "remote.git"
+    if kind == "empty":
+        world.git("init", "-q", "--bare", "-b", "dev", str(remote))
+    unset_origin_head(world, str(remote))
+    with pytest.raises(SystemExit, match="cannot find the default branch"):
+        pr.default_base()
 
 
 def test_create_stops_on_problems(

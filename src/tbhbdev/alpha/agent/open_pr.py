@@ -49,7 +49,7 @@ class PublishedRange(NamedTuple):
     commit: str
 
 
-def parse_draft(text: str) -> Draft:
+def parse_draft(text: str, default_branch: Callable[[], str]) -> Draft:
     """Split a draft into its title, body and frontmatter fields.
 
     Only the frontmatter parser runs here. The schema, the section and prose
@@ -57,7 +57,7 @@ def parse_draft(text: str) -> Draft:
     that run hosts lack. The run checks those rules with ``pr check``.
 
     Raises:
-        OpenRefusedError: The frontmatter is invalid or names no base, or the
+        OpenRefusedError: The frontmatter is invalid or names a bad base, or the
             body doesn't start with an H1 title.
     """
     meta: object = None
@@ -69,13 +69,16 @@ def parse_draft(text: str) -> Draft:
         # The parser's text can quote draft lines, so the log gets only the
         # fact, and the error is raised outside the handler to drop its context.
         invalid = True
-    if invalid:
+    # A list or scalar is not a mapping: the host posts the base unchecked, so a
+    # draft the CLI schema rejects must not take the default branch.
+    if invalid or (meta is not None and not isinstance(meta, dict)):
         message = "the draft frontmatter is invalid"
         raise OpenRefusedError(message)
-    fields = cast("dict[str, object]", meta) if isinstance(meta, dict) else {}
-    base = fields.get("base")
+    fields = cast("dict[str, object]", meta) if meta is not None else {}
+    # A missing base takes the repository's default branch, as `alpha pr` does.
+    base = default_branch() if "base" not in fields else fields["base"]
     if not isinstance(base, str) or not base:
-        message = "the draft frontmatter names no base branch"
+        message = "the draft frontmatter names an invalid base branch"
         raise OpenRefusedError(message)
     heading, _, rest = body.lstrip().partition("\n")
     title = heading.removeprefix("# ").strip()
@@ -269,6 +272,33 @@ def scan_draft(text: str, git_dir: Path, rules: bytes, visibility: str) -> None:
         raise OpenRefusedError(message)
 
 
+def repository_default_branch(repository: str, token: str) -> str:
+    """The default branch GitHub reports for REPOSITORY.
+
+    Raises:
+        OpenRefusedError: GitHub is unreachable or gives no usable branch for
+            the named repository. No guess stands in for the answer.
+    """
+    _, owner, name = repo.parts(repository)
+    try:
+        response = httpx.get(
+            f"https://api.github.com/repos/{owner}/{name}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+            },
+            timeout=TIMEOUT,
+        )
+        data = response.json() if response.status_code == httpx.codes.OK else None
+    except httpx.HTTPError, ValueError:
+        data = None
+    branch = data.get("default_branch") if isinstance(data, dict) else None
+    if not isinstance(branch, str) or not branch:
+        message = "the draft names no base and the default branch is unreadable"
+        raise OpenRefusedError(message)
+    return branch
+
+
 def open_pull_request(
     published: PublishedRange,
     repository: str,
@@ -287,7 +317,10 @@ def open_pull_request(
     scan_draft(
         text, published.git_dir, rules, repository_visibility(repository, token, write)
     )
-    draft = parse_draft(text.replace("\r\n", "\n").replace("\r", "\n"))
+    draft = parse_draft(
+        text.replace("\r\n", "\n").replace("\r", "\n"),
+        lambda: repository_default_branch(repository, token),
+    )
     _, owner, name = repo.parts(repository)
     try:
         response = httpx.post(
