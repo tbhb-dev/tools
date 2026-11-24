@@ -151,14 +151,7 @@ def test_auth(
 
 @pytest.mark.parametrize("kind", RunKind)
 def test_brief(kind: RunKind) -> None:
-    prefix = (
-        "Report results only in your final answer. "
-        "Never message Claude sessions, session sockets or other agents directly.\n"
-        "If this run should open a pull request, write .github/PULL_REQUEST_DRAFT.md "
-        "in the worktree and keep it out of your commits. "
-        "Any brief instruction to commit the draft does not apply: "
-        "keep the draft out of commits and report the conflict in your final answer.\n"
-    )
+    prefix = render.FINAL_ONLY + "\n"
     assert (
         render.brief(kind, "brief text")
         == (prefix if kind is RunKind.EXEC else "") + "brief text"
