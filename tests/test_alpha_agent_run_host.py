@@ -4683,12 +4683,11 @@ def test_interrupted_second_admission_leaves_the_completed_run_alone(
     assert files.path("rc").read_text() == "0\n"
 
 
+@pytest.mark.parametrize("expected", [1, 7])
 def test_interrupt_while_releasing_the_lock_keeps_the_recorded_result(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, expected: int
 ) -> None:
-    files = runfiles.RunFiles(
-        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
-    )
+    run = make_run(tmp_path)
 
     @contextmanager
     def interrupted_release(_path: Path) -> Generator[None]:
@@ -4697,13 +4696,21 @@ def test_interrupt_while_releasing_the_lock_keeps_the_recorded_result(
         finally:
             raise run_host.RunInterruptedError
 
-    def load(_args: object, _tmpdir: Path) -> None:
-        raise OSError(errno.EIO, "load unavailable")
+    def load(_args: object, _tmpdir: Path) -> tuple[run_host.Run, str]:
+        if expected == 1:
+            raise OSError(errno.EIO, "load unavailable")
+        return run, "example task"
 
+    def execute(*_args: object, **_kwargs: object) -> int:
+        run.files.write("rc", "7\n")
+        return 7
+
+    monkeypatch.setattr(run_host, "_files", constant(run.files))
     monkeypatch.setattr(run_host.runfiles, "locked", interrupted_release)
     monkeypatch.setattr(run_host, "_load", load)
-    assert run_host.main(["example"], "run-host") == 1
-    assert files.path("rc").read_text().strip() == "1"
+    monkeypatch.setattr(run_host, "execute", execute)
+    assert run_host.main(["example"], "run-host") == expected
+    assert run.files.path("rc").read_text() == f"{expected}\n"
 
 
 def test_signal_after_recording_a_failure_keeps_the_recorded_result(
