@@ -15,8 +15,11 @@ nothing or a subject in GitHub's default form. The file keeps its old name.
 
 A branch that requires a merge queue uses the queue's configured method. For
 a squash queue, the command compares GitHub's default squash message with the
-cleaned message before it enqueues. The command reads the queue status once
-after a successful gh call.
+cleaned message before it enqueues. A MERGE-method queue keeps the subject and
+body passed to ``gh pr merge``, as tools#370 showed in merge commit 5800789a.
+That queue needs no default-message preview, and the merge guard still refuses
+a default-looking message. The command reads the queue status once after a
+successful gh call.
 
 Usage, from anywhere in a worktree:
 
@@ -644,7 +647,7 @@ def requires_queue(target: str, base: str) -> str | None:
             stop("gh returned no usable branch rules")
         if rule["type"] == "merge_queue":
             parameters = agent_identity.as_dict(rule.get("parameters")) or {}
-            method = str(parameters.get("merge_method")).upper()
+            method = str(parameters.get("merge_method", "(missing)")).upper()
             if method not in ("SQUASH", "MERGE"):
                 stop(f"not merging: unsupported branch merge queue method {method}")
     return method
@@ -762,6 +765,7 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
     if queue_method == "SQUASH":
         previous_removal = queue_preview(target, args.number, message)
     elif queue_method == "MERGE":
+        # The queue keeps the passed subject and body (tools#370, 5800789a).
         previous_removal = queue_removal(
             queue_state(target, args.number, preview=False)
         )[0]

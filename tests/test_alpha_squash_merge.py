@@ -1577,7 +1577,7 @@ def test_lowercase_squash_queue_reads_the_preview(queued_tools: Tools) -> None:
 
 
 @pytest.mark.parametrize("method", ["MERGE", "merge"])
-def test_merge_queue_dry_run_prints_the_merge_command_without_a_squash_preview(
+def test_merge_queue_dry_run_prints_the_cleaned_message(
     tools: Tools, capsys: pytest.CaptureFixture[str], method: str
 ) -> None:
     tools.view(title="fix: tidy", body="A plain body.\n")
@@ -1588,6 +1588,7 @@ def test_merge_queue_dry_run_prints_the_merge_command_without_a_squash_preview(
         queue_out=queue_data(),
     )
     assert run_main("12", "--dry-run")[0] == 0
+    # A MERGE queue keeps the subject and body passed to gh pr merge.
     assert capsys.readouterr().out == (
         "gh pr merge 12 --merge --subject 'fix: tidy (#12)' "
         "--body-file - --match-head-commit abc123\n\nfix: tidy (#12)\n\nA plain body.\n"
@@ -1754,7 +1755,7 @@ def test_a_queue_merge_refusal_preserves_the_gh_error(
         ),
         (
             {"rules_out": '[[{"type":"merge_queue"}]]'},
-            "not merging: unsupported branch merge queue method NONE",
+            "not merging: unsupported branch merge queue method (MISSING)",
         ),
     ],
 )
