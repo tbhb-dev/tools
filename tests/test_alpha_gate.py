@@ -27,6 +27,7 @@ PROG = "tbhbdev alpha gate"
 RUN = ["run", "gate", "checkout path", HOST]
 WAIT = ["wait", "gate", HOST, "--sha", SHA]
 SSH = ["ssh", "-o", "IdentityAgent=none", HOST]
+START = b"\nGATE-BAZEL-START\n"
 Files = tuple[Path, Path, Path]
 Capture = pytest.CaptureFixture[str]
 
@@ -54,7 +55,7 @@ def check_publication(files: Files, status: int) -> Callable[[Path, str], None]:
         if path == state / "pid":
             assert not any((state / name).exists() for name in ("pid", "heartbeat"))
         if path == result:
-            assert log.read_bytes() == b"PASSED remote test\n"
+            assert log.read_bytes() == START + b"PASSED remote test\n"
             assert (state / "exit").read_text() == f"{status}\n"
         atomic(path, value)
 
@@ -89,7 +90,9 @@ def test_run(
         "git fetch -q ~/gate.bundle HEAD:refs/gate/gate && "
         f'test "$(git rev-parse refs/gate/gate)" = {SHA} && '
         "git worktree add -q --detach .worktrees/gate refs/gate/gate && "
-        "cd .worktrees/gate && bash -lc 'bazelisk test --config=ci //...'"
+        "cd .worktrees/gate && bash -lc '"
+        'printf "\\nGATE-BAZEL-START\\n" && exec bazelisk test --config=ci //...'
+        "'"
     )
     cleanup = (
         f"cd {remote_repo} && {{ git worktree remove --force .worktrees/gate; "
@@ -134,7 +137,7 @@ def test_run(
             [*git, "rev-parse", "HEAD"], stderr=stdout, timeout=10, text=True
         )
         if argv[-1] == remote:
-            stdout.write(b"PASSED remote test\n")
+            os.write(stdout.fileno(), START + b"PASSED remote test\n")
             return nullcontext(Mock(wait=wait))
         assert result.read_text() == "old\n"
         assert gate.result_status(state, log, result, "old") is None
@@ -145,6 +148,7 @@ def test_run(
     assert list(commands) == []
     assert result.read_text() == f"{SHA}\n"
     assert not (state / "superseded").exists()
+    assert gate.main(WAIT, PROG) == int(status != 0)
 
 
 @pytest.mark.parametrize(
@@ -155,6 +159,8 @@ def test_run(
         ("scp bundle", 8),
         ("scp bundle", 1),
         ("ssh test", 1),
+        ("ssh test", 7),
+        ("ssh test", 255),
     ],
 )
 def test_run_failure(
@@ -173,7 +179,9 @@ def test_run_failure(
         gate.subprocess, "check_output", Mock(return_value=SHA, side_effect=head_error)
     )
     process = nullcontext(Mock(wait=Mock(return_value=0)))
-    failure = nullcontext(Mock(wait=Mock(return_value=8))) if status == 8 else OSError()
+    failure = (
+        OSError() if status == 1 else nullcontext(Mock(wait=Mock(return_value=status)))
+    )
     steps, expected = {
         "read HEAD": ((), ()),
         "create bundle": ((failure,), ("git",)),
@@ -208,38 +216,47 @@ def test_run_failure(
 
 
 @pytest.mark.parametrize(
-    ("remote_output", "summary"),
+    "case",
     [
-        (b"PASSED\n", b""),
-        (b"\x1b[31mBuild did NOT\x1b[0m", b"Build did NOT\n"),
+        (START + b"PASSED\n", 0, 0, b""),
+        (START + b"\x1b[31mBuild did NOT\x1b[0m", 0, 0, b"Build did NOT\n"),
         (
-            (
+            START
+            + (
                 b"PASSED\n\x1b[31mtests pass\x1b[0m\nFAILED\nBuild did NOT\n"
                 b"FAILED\ntests pass\nFAILED\n"
             ),
+            0,
+            0,
             b"tests pass\nFAILED\nBuild did NOT\nFAILED\ntests pass\n",
         ),
+        (b"FAILED: GATE-BAZEL-START\n", 0, 1, b""),
+        (START + b"FAILED\n", 255, 255, b""),
     ],
 )
 def test_run_summary(
     files: Files,
     monkeypatch: pytest.MonkeyPatch,
     capfdbinary: pytest.CaptureFixture[bytes],
-    remote_output: bytes,
-    summary: bytes,
+    case: tuple[bytes, int, int, bytes],
 ) -> None:
+    remote_output, remote_status, status, summary = case
     monkeypatch.setattr(gate.subprocess, "check_output", Mock(return_value=SHA))
 
     def run_step(
         command: list[str], _directory: Path, output: BinaryIO, **_kwargs: object
     ) -> subprocess.CompletedProcess[bytes]:
+        if command[0] == "git":
+            output.write(START)
         if "bazelisk test" in command[-1]:
             output.write(remote_output)
+            return subprocess.CompletedProcess(command, remote_status)
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(gate, "run_step", run_step)
-    assert gate.main(RUN, PROG) == 0
-    assert files[1].read_bytes() == remote_output
+    assert gate.main(RUN, PROG) == status
+    assert files[1].read_bytes() == START + remote_output
+    assert files[2].exists() is (status == 0)
     assert capfdbinary.readouterr().out == summary
 
 

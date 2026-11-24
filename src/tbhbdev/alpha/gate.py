@@ -32,6 +32,9 @@ SUMMARY = re.compile(
     rb"tests pass|^Executed"
 )
 RUN_SUMMARY = re.compile(rb"tests pass|FAILED|Build did NOT")
+BAZEL_START = "GATE-BAZEL-START"
+BAZEL_START_LINE = f"{BAZEL_START}\n".encode()
+SSH_ERROR = 255
 PID_FILE = "pid"
 HEARTBEAT_FILE = "heartbeat"
 EXIT_FILE = "exit"
@@ -95,12 +98,13 @@ def remote_commands(
     remote_bundle = f"~/{quote(bundle_name)}"
     ref = quote(f"refs/gate/{args.name}")
     worktree = quote(f".worktrees/{args.name}")
+    bazel = f'printf "\\n{BAZEL_START}\\n" && exec bazelisk test --config=ci //...'
     test = (
         f"cd {repo} && git fetch -q origin && "
         f"git fetch -q {remote_bundle} HEAD:{ref} && "
         f'test "$(git rev-parse {ref})" = {quote(sha)} && '
         f"git worktree add -q --detach {worktree} {ref} && "
-        f"cd {worktree} && bash -lc 'bazelisk test --config=ci //...'"
+        f"cd {worktree} && bash -lc {quote(bazel)}"
     )
     cleanup = (
         f"cd {repo} && {{ git worktree remove --force {worktree}; "
@@ -142,7 +146,12 @@ def run(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> i
                 superseded.unlink()
                 published_log = log
                 step = "ssh test"
+                offset = output.tell()
                 status = run_step([*ssh, remote], directory, output, env=env).returncode
+                output.seek(offset)
+                published_sha = (
+                    sha if status != SSH_ERROR and BAZEL_START_LINE in output else None
+                )
             finally:
                 with suppress(OSError):
                     run_step([*ssh, cleanup], directory, subprocess.DEVNULL, env=env)
@@ -150,8 +159,6 @@ def run(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> i
             status = exc.returncode
         except OSError, subprocess.TimeoutExpired:
             status = 1
-        else:
-            published_sha = sha
 
     if published_log is None:
         Path(output.name).unlink()
@@ -159,11 +166,11 @@ def run(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> i
         Path(output.name).replace(published_log)
     if published_sha is None:
         atomic(directory / REASON_FILE, f"{step} failed\n")
+        status = status or 1
     atomic(directory / EXIT_FILE, f"{status}\n")
     if published_sha is not None:
         atomic(result, f"{published_sha}\n")
-    if published_log is not None:
-        print_run_summary(published_log)
+        print_run_summary(log)
     return status
 
 
