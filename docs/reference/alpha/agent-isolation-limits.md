@@ -63,7 +63,7 @@ After a successful build harness run, run-host compares commits reachable from a
 | Exit status | Result |
 | --- | --- |
 | 0 | The run contains no new commits, or run-host pushes the branch and opens the pull request. |
-| 4 | Run-host skips the push or Git fails to push. The log starts the reason line with `push skipped:` or `push failed:`. |
+| 4 | Run-host skips or refuses the push, or Git fails to push. The log starts the reason line with `push skipped:`, `push refused:`, or `push failed:`. |
 | 5 | Run-host pushes the branch and can't open the pull request. The log starts the reason line with `pr not opened:`. |
 
 If the harness fails, run-host keeps its exit status. `tbhbdev alpha agent status NAME` shows the last publication reason next to the return code when the run ends with a nonzero status and the log contains a reason.

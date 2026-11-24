@@ -84,7 +84,7 @@ These user-level hooks run in every repository. Before acting, the identity, pul
 
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, so sessions in two worktrees of one clone keep separate state.
 
-For a run that opens a pull request, write `.github/PULL_REQUEST_DRAFT.md` in its worktree and keep it out of commits. The driver reads the worktree draft first and uses the pushed commit's draft if the worktree draft is missing. The worktree draft must be an owned regular file of at most 64 KiB. The driver refuses symlinks and scans the draft with the host's secret rules and the pre-run commit's `.gitleaks.toml` before posting it. The driver refuses to push when the run’s commits add the draft, and CI fails a pull request whose diff contains the draft.
+For a run that opens a pull request, write `.github/PULL_REQUEST_DRAFT.md` in its worktree and keep it out of commits. The driver reads the worktree draft first and uses the pushed commit's draft if the worktree draft is missing. The worktree draft must be an owned regular file of at most 64 KiB. The driver refuses symlinks and scans the draft with the host's secret rules and the pre-run commit's `.gitleaks.toml` before posting it. The driver refuses to push when the run's commits add the draft, and CI fails a pull request whose diff contains the draft.
 
 ## Identity start time
 
