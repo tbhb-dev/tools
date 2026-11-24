@@ -77,8 +77,9 @@ thing that sets it there. config.toml is edited with tomlkit, which keeps every
 other key, comment and the layout, and gets the same backup and up-to-date
 rules. And it writes the gh shim (see gh_shim): an executable `gh` in
 `$XDG_DATA_HOME/tbhbdev/agent-bin`, left alone when it is already current,
-and an `ssh` beside it that runs /usr/bin/ssh with `-o IdentityAgent=none`
-(scp and sftp run ssh from PATH, so they get it too).
+and an `ssh` beside it that runs the next ssh on PATH with
+`-o IdentityAgent=none` (scp and sftp call /usr/bin/ssh directly on macOS and
+Ubuntu and skip it).
 None of this prompts, runs op or needs the 1Password app, so configuration
 management can run it unattended, and a rerun changes nothing. It never
 writes PATH into a harness config: Claude's SessionStart hook puts the shim
@@ -184,21 +185,24 @@ AGENT_ENVIRONMENT = {"SSH_AUTH_SOCK": ""}
 POLICY = "shell_environment_policy"
 GH_SHIM_MODE = 0o755
 SSH_SHIM_MARK = "# tbhbdev alpha install: ssh shim"
-# A command-line -o beats the IdentityAgent in the operator's ssh config, and
-# the first -o for an option wins. The shim adds IdentityAgent (the caller's
-# SSH_AUTH_SOCK unless it is empty or names the 1Password agent) and BatchMode,
-# each only when the caller gave none. It runs the next ssh on PATH, so a host
-# with its ssh elsewhere keeps working.
+# A command-line -o beats the IdentityAgent in the operator's ssh config. The
+# shim puts one first (the first -o for an option wins): the caller's
+# SSH_AUTH_SOCK unless it is empty or names the 1Password agent, else none. A
+# caller who wants another agent sets SSH_AUTH_SOCK. BatchMode stays the
+# caller's and the ssh config's. The shim runs the next ssh on PATH that is not
+# the shim itself (same file, so a symlink or hard link can't loop it), so a
+# host with its ssh elsewhere keeps working.
 SSH_SHIM_TEXT = f"""#!/bin/sh
 {SSH_SHIM_MARK}
 case $0 in */*) here=${{0%/*}} ;; *) here=. ;; esac
-here=$(cd "$here" && pwd -P)
+here=$(CDPATH= cd "$here" && pwd -P)
 real=
 oldifs=$IFS
 IFS=:
 for dir in $PATH; do
   [ -n "$dir" ] || continue
-  [ "$(cd "$dir" 2>/dev/null && pwd -P)" = "$here" ] && continue
+  [ "$(CDPATH= cd "$dir" 2>/dev/null && pwd -P)" = "$here" ] && continue
+  [ "$dir/ssh" -ef "$here/${{0##*/}}" ] && continue
   if [ -x "$dir/ssh" ] && [ ! -d "$dir/ssh" ]; then
     real=$dir/ssh
     break
@@ -209,21 +213,12 @@ if [ -z "$real" ]; then
   echo "ssh: no ssh on PATH besides the tbhbdev shim" >&2
   exit 127
 fi
-agent=1
-batch=1
-for arg in "$@"; do
-  case $arg in
-    *[Ii][Dd][Ee][Nn][Tt][Ii][Tt][Yy][Aa][Gg][Ee][Nn][Tt]*) agent=0 ;;
-    *[Bb][Aa][Tt][Cc][Hh][Mm][Oo][Dd][Ee]*) batch=0 ;;
-  esac
-done
 sock=none
 case ${{SSH_AUTH_SOCK:-}} in
   ''|*[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]*) ;;
   *) sock=$SSH_AUTH_SOCK ;;
 esac
-[ "$batch" = 1 ] && set -- -o BatchMode=yes "$@"
-[ "$agent" = 1 ] && set -- -o "IdentityAgent=$sock" "$@"
+set -- -o "IdentityAgent=\\"$sock\\"" "$@"
 exec "$real" "$@"
 """
 AGY_PR_TIMEOUT = 120
@@ -1045,7 +1040,7 @@ def install_shim(
     path = bin_dir() / name
     label = f"{name}-shim"
     try:
-        current = path.read_text() if path.is_file() else None
+        current = path.read_text(errors="replace") if path.is_file() else None
         if mark and current is not None and mark not in current:
             print(f"{PROG}: {label}: {path} is not ours; left alone", file=sys.stderr)
             return 1
@@ -1076,7 +1071,7 @@ def install_gh_shim(*, dry_run: bool) -> int:
 def install_ssh_shim(*, dry_run: bool) -> int:
     """Write the ssh shim: ssh with no 1Password agent, for agent sessions.
 
-    scp and sftp run ``ssh`` from PATH, so they get it too.
+    scp and sftp call /usr/bin/ssh directly on macOS and Ubuntu, so they skip it.
     """
     return install_shim("ssh", SSH_SHIM_TEXT, dry_run=dry_run, mark=SSH_SHIM_MARK)
 

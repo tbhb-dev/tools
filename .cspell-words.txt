@@ -293,6 +293,7 @@ TIOCSCTTY
 asname
 basetemp
 noproxy
+CDPATH
 CDXPXY
 ENXIO
 ttyname

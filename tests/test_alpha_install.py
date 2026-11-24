@@ -2797,24 +2797,34 @@ def shim_ssh_options(
 @pytest.mark.parametrize(
     ("args", "env", "expected"),
     [
-        ([], {}, {"identityagent": "none", "batchmode": "yes"}),
-        ([], {"SSH_AUTH_SOCK": ""}, {"identityagent": "none", "batchmode": "yes"}),
+        ([], {}, {"identityagent": "none", "batchmode": "no"}),
+        ([], {"SSH_AUTH_SOCK": ""}, {"identityagent": "none", "batchmode": "no"}),
         (
             [],
             {"SSH_AUTH_SOCK": "/x/1Password/t/agent.sock"},
-            {"identityagent": "none", "batchmode": "yes"},
+            {"identityagent": "none", "batchmode": "no"},
         ),
         (
             [],
             {"SSH_AUTH_SOCK": "/x/other.sock"},
-            {"identityagent": "/x/other.sock", "batchmode": "yes"},
+            {"identityagent": "/x/other.sock", "batchmode": "no"},
+        ),
+        (
+            [],
+            {"SSH_AUTH_SOCK": "/x/with space/agent.sock"},
+            {"identityagent": "/x/with space/agent.sock", "batchmode": "no"},
         ),
         (
             ["-o", "IdentityAgent=/y/mine.sock"],
             {},
-            {"identityagent": "/y/mine.sock", "batchmode": "yes"},
+            {"identityagent": "none", "batchmode": "no"},
         ),
-        (["-o", "BatchMode=no"], {}, {"identityagent": "none", "batchmode": "no"}),
+        (["-o", "BatchMode=yes"], {}, {"identityagent": "none", "batchmode": "yes"}),
+        (
+            ["-voIdentityAgent=/z/a.sock"],
+            {},
+            {"identityagent": "none", "batchmode": "no"},
+        ),
     ],
 )
 def test_the_ssh_shim_options(
@@ -2824,7 +2834,7 @@ def test_the_ssh_shim_options(
     env: dict[str, str],
     expected: dict[str, str],
 ) -> None:
-    """No agent and no prompt by default; the caller's explicit choice stands."""
+    """The shim sets the agent from SSH_AUTH_SOCK; BatchMode stays the caller's."""
     del world
     assert install.install_ssh_shim(dry_run=False) == 0
     options = shim_ssh_options(tmp_path, args, env)
@@ -2846,6 +2856,32 @@ def test_the_ssh_shim_without_another_ssh_exits_127(
     )
     assert done.returncode == 127
     assert "no ssh on PATH" in done.stderr
+
+
+def test_the_ssh_shim_skips_a_symlink_to_itself(world: World, tmp_path: Path) -> None:
+    """A second PATH entry that links to the shim must not make it loop."""
+    del world
+    assert install.install_ssh_shim(dry_run=False) == 0
+    link_dir = tmp_path / "link"
+    real_dir = tmp_path / "real"
+    link_dir.mkdir()
+    real_dir.mkdir()
+    (link_dir / "ssh").symlink_to(gh_shim.bin_dir() / "ssh")
+    real = real_dir / "ssh"
+    real.write_text("#!/bin/sh\necho real\n")
+    real.chmod(0o755)
+    done = subprocess.run(
+        ["/bin/sh", str(gh_shim.bin_dir() / "ssh")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            "PATH": f"{gh_shim.bin_dir()}:{link_dir}:{real_dir}",
+            "HOME": str(tmp_path),
+        },
+        timeout=10,  # a shim that re-executes itself never returns
+    )
+    assert (done.returncode, done.stdout) == (0, "real\n")
 
 
 def test_install_ssh_shim_leaves_a_foreign_ssh(
