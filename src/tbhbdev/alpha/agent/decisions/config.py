@@ -242,12 +242,13 @@ def _public_repos(table: _Table) -> tuple[str, ...]:
     return values
 
 
-_OTEL_SHAPE = "must be an https URL with no credentials, path, query or fragment"
-# The whole URL is matched, so no other character, such as a quote, a control
-# character or an `@`, can reach the config file, and no parser error can quote
-# the value.
+_OTEL_SHAPE = (
+    "must be an http or https URL with no credentials, path, query or fragment"
+)
+# Match the whole http or https URL so quotes, control characters and `@`
+# can't reach the config file. Parser errors don't quote the value.
 _OTEL_URL = re.compile(
-    r"https://(?P<host>[a-z0-9.-]+)(?::(?P<port>[1-9][0-9]{0,4}))?/?"
+    r"https?://(?P<host>[a-z0-9.-]+)(?::(?P<port>[1-9][0-9]{0,4}))?/?"
 )
 MAX_PORT = 65535
 

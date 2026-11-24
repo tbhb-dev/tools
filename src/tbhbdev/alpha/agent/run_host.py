@@ -719,6 +719,7 @@ def resource_attributes(run: Run) -> dict[str, str]:
     return {
         "OTEL_RESOURCE_ATTRIBUTES": (
             f"host.name={run.host.name},tbhb.account={run.request.account}"
+            f",tbhb.run.id={run.files.name}"
         )
     }
 

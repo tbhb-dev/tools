@@ -482,7 +482,10 @@ def test_prepare_uses_one_worktree_and_private_destinations(
 
 
 def otel_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    harness: Harness,
+    endpoint: str = "https://otlp.example.net:4318",
 ) -> run_host.Run:
     run = make_run(
         tmp_path,
@@ -490,9 +493,7 @@ def otel_run(
         claude_profile="primary" if harness is Harness.CLAUDE else None,
         reason="example" if harness is Harness.CLAUDE else None,
     )
-    settings = dataclasses.replace(
-        run.settings, otel_endpoint="https://otlp.example.net:4318"
-    )
+    settings = dataclasses.replace(run.settings, otel_endpoint=endpoint)
     run = dataclasses.replace(run, settings=settings)
     runfiles.private_dir(run.home / ".codex")
     monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
@@ -501,10 +502,12 @@ def otel_run(
     return run
 
 
+@pytest.mark.parametrize("scheme", ["http", "https"])
 def test_codex_run_config_holds_the_otel_table(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scheme: str
 ) -> None:
-    run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
+    endpoint = f"{scheme}://otlp.example.net:4318"
+    run = otel_run(tmp_path, monkeypatch, Harness.CODEX, endpoint)
     result = run_host.prepare_workspace(run)
     config_path = Path(result.paths.codex_home) / "config.toml"
     # The macOS filesystem ignores case, so name the file as written.
@@ -513,13 +516,13 @@ def test_codex_run_config_holds_the_otel_table(
         "otel": {
             "trace_exporter": {
                 "otlp-http": {
-                    "endpoint": "https://otlp.example.net:4318/v1/traces",
+                    "endpoint": f"{endpoint}/v1/traces",
                     "protocol": "binary",
                 }
             },
             "metrics_exporter": {
                 "otlp-http": {
-                    "endpoint": "https://otlp.example.net:4318/v1/metrics",
+                    "endpoint": f"{endpoint}/v1/metrics",
                     "protocol": "binary",
                 }
             },
@@ -530,17 +533,15 @@ def test_codex_run_config_holds_the_otel_table(
     assert config_path.stat().st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize(
-    "endpoint", ["https://otlp.example.net/", "https://otlp.example.net"]
-)
-def test_otel_config_derives_signal_paths_from_the_base(endpoint: str) -> None:
-    table = tomllib.loads(run_host.otel_config(endpoint))["otel"]
-    assert table["trace_exporter"]["otlp-http"]["endpoint"] == (
-        "https://otlp.example.net/v1/traces"
-    )
-    assert table["metrics_exporter"]["otlp-http"]["endpoint"] == (
-        "https://otlp.example.net/v1/metrics"
-    )
+@pytest.mark.parametrize("scheme", ["http", "https"])
+@pytest.mark.parametrize("suffix", ["", "/"])
+def test_otel_config_derives_signal_paths_from_the_base(
+    scheme: str, suffix: str
+) -> None:
+    base = f"{scheme}://otlp.example.net"
+    table = tomllib.loads(run_host.otel_config(base + suffix))["otel"]
+    assert table["trace_exporter"]["otlp-http"]["endpoint"] == (f"{base}/v1/traces")
+    assert table["metrics_exporter"]["otlp-http"]["endpoint"] == (f"{base}/v1/metrics")
 
 
 def test_codex_run_without_an_endpoint_writes_no_config(
@@ -4971,17 +4972,21 @@ def test_config_check_protects_the_configured_startup_directory(
             run_host.check_config(configured)
 
 
-def test_resource_attributes_name_host_and_account(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_resource_attributes_name_host_account_and_run(
+    tmp_path: Path, scheme: str
+) -> None:
     run = make_run(tmp_path)
     run = dataclasses.replace(
         run,
         settings=dataclasses.replace(
-            run.settings, otel_endpoint="https://otlp.example.net"
+            run.settings, otel_endpoint=f"{scheme}://otlp.example.net"
         ),
     )
     assert run_host.resource_attributes(run) == {
         "OTEL_RESOURCE_ATTRIBUTES": (
             f"host.name={run.host.name},tbhb.account={run.request.account}"
+            ",tbhb.run.id=example"
         )
     }
 
