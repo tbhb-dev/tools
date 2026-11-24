@@ -13,7 +13,7 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr create [DRAFT] [--dry-run]
     tbhbdev alpha pr edit DRAFT --pr N
     tbhbdev alpha pr ready N [N...]
-    tbhbdev alpha pr rerun N
+    tbhbdev alpha pr rerun N [--stuck]
     tbhbdev alpha pr delete-branch N
     tbhbdev alpha pr checks N
     tbhbdev alpha pr hook claude|codex|antigravity
@@ -89,6 +89,11 @@ stops at the first failure and doesn't read a draft.
 current head commit with ``gh run rerun --failed``. It reports an error when
 that run hasn't failed or no run exists. It doesn't read a draft.
 
+``rerun N --stuck`` cancels a ``pull_request`` run of pull request N's current
+head when one of its jobs has been in progress for over an hour, then reruns
+it in full once the run completes as cancelled. It reports an error when no
+such run is in progress or no job is that old.
+
 ``delete-branch N`` deletes only the head branch of a closed or merged pull
 request in origin's repository. Fork heads, main, protected branches and
 unreadable metadata are refused. It doesn't read a draft.
@@ -110,6 +115,7 @@ reaches gh's ``--limit``, since the rest may be missing.
 """
 
 import argparse
+import datetime as dt
 import json
 import os
 import re
@@ -118,6 +124,7 @@ import shutil
 import subprocess  # nosec B404
 import sys
 import tempfile
+import time
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1391,11 +1398,11 @@ def gh_json(argv: Sequence[str]) -> list[dict[str, object]]:
     return cast("list[dict[str, object]]", data)  # pragma: no mutate
 
 
-def rerun(number: int) -> int:
-    """Rerun the failed jobs of PR N's latest current-head run.
+def head_of(number: int) -> str:
+    """PR N's head commit.
 
     Raises:
-        SystemExit: gh can't read the pull request or its runs.
+        SystemExit: gh can't read the pull request.
     """
     done = run([find_tool(GH), "pr", "view", str(number), "--json", "headRefOid"])
     data = gh_data(done)
@@ -1403,13 +1410,182 @@ def rerun(number: int) -> int:
         why = " ".join((done.stderr or done.stdout).split())
         message = f"cannot read the head of PR {number}: {why}"
         raise SystemExit(message)
-    data = cast("dict[str, object]", data)  # pragma: no mutate
+    return str(cast("dict[str, object]", data)["headRefOid"])  # pragma: no mutate
+
+
+STUCK_AFTER = dt.timedelta(minutes=60)
+CANCEL_POLLS = 12
+CANCEL_PAUSE = 5.0
+
+
+def utcnow() -> dt.datetime:
+    """The current time in UTC."""
+    return dt.datetime.now(dt.UTC)
+
+
+def pause(seconds: float) -> None:
+    """Sleep between polls of a cancelled run."""
+    time.sleep(seconds)
+
+
+def run_view(run_id: object, field: str) -> dict[str, object]:
+    """A run's ``gh run view --json FIELD`` mapping.
+
+    Raises:
+        SystemExit: gh can't read the run.
+    """
+    done = run([find_tool(GH), "run", "view", str(run_id), "--json", field])
+    data = gh_data(done)
+    if not isinstance(data, dict):
+        why = " ".join((done.stderr or done.stdout).split())
+        message = f"cannot read run {run_id}: {why}"
+        raise SystemExit(message)
+    return cast("dict[str, object]", data)  # pragma: no mutate
+
+
+def stuck_job(run_id: object) -> bool:
+    """Whether a job of the run has been in progress longer than ``STUCK_AFTER``.
+
+    Raises:
+        SystemExit: gh can't read the run.
+    """
+    jobs = cast(
+        "list[dict[str, str]]", run_view(run_id, "jobs")["jobs"]
+    )  # pragma: no mutate
+    return any(
+        job["status"] == "in_progress"
+        and utcnow() - dt.datetime.fromisoformat(job["startedAt"]) > STUCK_AFTER
+        for job in jobs
+    )
+
+
+def finished_as(run_id: object) -> str | None:
+    """The run's conclusion once it completes within the bounded polls, else None."""
+    for _ in range(CANCEL_POLLS):
+        view = run_view(run_id, "status,conclusion")
+        if view["status"] == "completed":
+            return str(view["conclusion"])
+        pause(CANCEL_PAUSE)
+    return None
+
+
+def run_numbers(run_id: object) -> list[object]:
+    """The pull request numbers GitHub lists for the run."""
+    return cast(
+        "list[object]",
+        gh_json(
+            [
+                "api",
+                f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}",
+                "--jq",
+                "[.pull_requests[].number]",
+            ]
+        ),
+    )  # pragma: no mutate
+
+
+def sole_pull_request(run_id: object, number: int) -> bool:
+    """Whether the run belongs to the pull request alone.
+
+    A run that lists other pull requests too is theirs as much as ours, so
+    cancelling it would hit them; the note names them.
+    """
+    numbers = run_numbers(run_id)
+    if number in numbers and numbers != [number]:
+        others = ", ".join(str(n) for n in numbers if n != number)
+        print(f"run {run_id} also belongs to PR {others}; skipping", file=sys.stderr)
+    return numbers == [number]
+
+
+def cancel_and_rerun(run_id: str) -> int:
+    """Cancel the run, wait until it completes as cancelled, then rerun it."""
+    code = invoke_gh([GH, "run", "cancel", run_id], "")[0]
+    if code:
+        return code
+    outcome = finished_as(run_id)
+    if outcome is None:
+        print(f"run {run_id} did not finish cancelling; no rerun", file=sys.stderr)
+        return 1
+    if outcome != "cancelled":
+        print(f"run {run_id} completed as {outcome}; no rerun", file=sys.stderr)
+        return 1
+    return invoke_gh([GH, "run", "rerun", run_id], "")[0]
+
+
+def rerun_stuck(number: int) -> int:
+    """Cancel PR N's stuck current-head run, wait for the cancel, then rerun it.
+
+    Only a ``pull_request`` run on the PR's head commit and head branch
+    counts. A fork's PR is refused, because its branch name can collide.
+
+    Raises:
+        SystemExit: gh can't read the pull request or its runs.
+    """
+    done = run(
+        [
+            find_tool(GH),
+            "pr",
+            "view",
+            str(number),
+            "--json",
+            "headRefOid,headRefName,isCrossRepository",
+        ]
+    )
+    data = gh_data(done)
+    if not isinstance(data, dict):
+        why = " ".join((done.stderr or done.stdout).split())
+        message = f"cannot read PR {number}: {why}"
+        raise SystemExit(message)
+    meta = cast("dict[str, object]", data)  # pragma: no mutate
+    if meta["isCrossRepository"]:
+        print(f"PR {number} comes from a fork; rerun --stuck refuses", file=sys.stderr)
+        return 1
+    head = str(meta["headRefOid"])
     runs = gh_json(
         [
             "run",
             "list",
             "--commit",
-            str(data["headRefOid"]),
+            head,
+            "--event",
+            "pull_request",
+            "--branch",
+            str(meta["headRefName"]),
+            "--limit",
+            "20",
+            "--json",
+            "databaseId,status,headSha",
+        ]
+    )
+    stuck = [
+        item
+        for item in runs
+        if item["headSha"] == head
+        and item["status"] == "in_progress"
+        and sole_pull_request(item["databaseId"], number)
+        and stuck_job(item["databaseId"])
+    ]
+    if not stuck:
+        print(f"no stuck run for the current head of PR {number}", file=sys.stderr)
+        return 1
+    if head_of(number) != head:
+        print(f"PR {number} moved to a new head; run again", file=sys.stderr)
+        return 1
+    return cancel_and_rerun(str(stuck[0]["databaseId"]))
+
+
+def rerun(number: int) -> int:
+    """Rerun the failed jobs of PR N's latest current-head run.
+
+    Raises:
+        SystemExit: gh can't read the pull request or its runs.
+    """
+    runs = gh_json(
+        [
+            "run",
+            "list",
+            "--commit",
+            head_of(number),
             "--limit",
             "1",
             "--json",
@@ -1696,7 +1872,9 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub.add_parser("hook").add_argument("harness", choices=[CLAUDE, CODEX, ANTIGRAVITY])
     sub.add_parser("backfill-opened").add_argument("owner")
     sub.add_parser("ready").add_argument("pr", type=int, nargs="+")
-    sub.add_parser("rerun").add_argument("pr", type=int)
+    again = sub.add_parser("rerun")
+    again.add_argument("pr", type=int)
+    again.add_argument("--stuck", action="store_true")
     sub.add_parser("delete-branch").add_argument("pr", type=int)
     sub.add_parser("checks").add_argument("pr", type=int)
     # `tbhbdev alpha pr close` runs in close.py before this parser sees it, so
@@ -1727,7 +1905,8 @@ def main(
         return hook(args.harness)
     if args.command == "backfill-opened":
         return backfill(args.owner)
-    by_pr = {"rerun": rerun, "delete-branch": delete_pr_branch, "checks": checks}
+    again = rerun_stuck if getattr(args, "stuck", False) else rerun
+    by_pr = {"rerun": again, "delete-branch": delete_pr_branch, "checks": checks}
     if args.command in by_pr:
         return by_pr[args.command](args.pr)
     if args.command == "ready":
