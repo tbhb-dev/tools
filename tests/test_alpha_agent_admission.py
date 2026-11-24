@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from contextlib import ExitStack
@@ -16,6 +17,19 @@ from tbhbdev.alpha.agent.model import Invalid, Profile
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def test_slot_counts_refuse_symlink_to_admission_directory(tmp_path: Path) -> None:
+    root = tmp_path / "admission"
+    root.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(root, target_is_directory=True)
+
+    assert admission.counts(root) == (0, 0)
+    with pytest.raises(
+        OSError, check=lambda error: error.errno in {errno.ELOOP, errno.ENOTDIR}
+    ):
+        admission.counts(alias)
 
 
 def test_builds_leave_one_slot_for_reviews(tmp_path: Path) -> None:
