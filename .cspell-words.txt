@@ -35,6 +35,7 @@ claudecode
 cmerged
 commondir
 complexipy
+confcutdir
 conftest
 cpus
 creat
@@ -50,6 +51,7 @@ doas
 docstrings
 dotrepo
 drwx
+dumpable
 dunder
 elts
 ENOENT
@@ -65,6 +67,7 @@ fakehost
 fakeop
 fakeoperator
 fchmod
+fdtype
 fixturerepo
 flatmap
 frontmatter
@@ -101,9 +104,11 @@ keygen
 keyrings
 killall
 kworker
+launchgate
 libc
 libexec
 libproc
+listpids
 listy
 llmx
 loadavg
@@ -151,9 +156,13 @@ PGHOST
 PGPORT
 pgrep
 PGUSER
+pidfdinfo
+pidfdvnodeinfo
 pidinfo
+pidlistfds
 pidpath
 pidtbsdinfo
+pidvnodepathinfo
 pkey
 pkeyopt
 popd
@@ -213,6 +222,7 @@ syslimits
 tailnet
 tbhb
 tbhbdev
+temproot
 testdata
 testpaths
 textconv
@@ -227,6 +237,7 @@ tricolon
 tskey
 tzset
 ufffd
+uids
 unalias
 uncheckpointed
 unconfigured
@@ -244,6 +255,7 @@ uploadpack
 usefixtures
 userconfig
 usermod
+vnode
 waitpid
 wnohang
 worktrees

@@ -53,6 +53,7 @@ from tbhbdev.alpha.agent import (
     render,
     run_host,
     runfiles,
+    temp_cleanup,
 )
 from tbhbdev.alpha.agent.decisions import policy, request
 from tbhbdev.alpha.agent.decisions.run_state import Group
@@ -80,6 +81,11 @@ def empty_bazel_listing(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], str]
     original = bazel_servers.listing
     monkeypatch.setattr(bazel_servers, "listing", constant(""))
     return original
+
+
+@pytest.fixture(autouse=True)
+def skip_system_temp_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(temp_cleanup, "sweep", constant(None))
 
 
 @pytest.fixture(autouse=True, params=["regular", "symlinked"])
@@ -3282,6 +3288,102 @@ def test_late_temporary_cleanup_keeps_finished_records(
         run.files.path("log").read_text()
         == run_host.build_info.line() + "\nharness log\n"
     )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "rc"), [("success", 0), ("failure", 1), ("timeout", 124), ("exit", 7)]
+)
+def test_exec_removes_its_pytest_tree_after_each_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, rc: int
+) -> None:
+    run = make_run(tmp_path, timeout=1)
+    run_dirs: list[Path] = []
+    sweeps: list[bool] = []
+    test = tmp_path / "test_probe.py"
+    test.write_text(
+        "from pathlib import Path\n"
+        "from os import environ\n"
+        "def test_temp(tmp_path):\n"
+        "    assert tmp_path.is_relative_to(Path(environ['TMPDIR']))\n"
+        "    tmp_path.joinpath('test-file').write_text('example')\n"
+    )
+
+    def load(_args: object, directory: Path) -> tuple[run_host.Run, str]:
+        run.tmpdir = runfiles.private_dir(directory / "tools")
+        run_dirs.append(directory)
+        return run, "example task"
+
+    def launch(spec: process_group.Launch, **kwargs: object) -> Child:
+        assert (
+            spec.env["TMPDIR"] == spec.env["PYTEST_DEBUG_TEMPROOT"] == str(run.tmpdir)
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "--confcutdir",
+                str(tmp_path),
+                str(test),
+            ],
+            env={
+                **os.environ,
+                "TMPDIR": spec.env["TMPDIR"],
+                "PYTEST_DEBUG_TEMPROOT": spec.env["PYTEST_DEBUG_TEMPROOT"],
+                "PYTEST_ADDOPTS": "",
+                "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+            },
+            check=True,
+            capture_output=True,
+        )
+        assert next(run.tmpdir.glob("pytest-of-*/pytest-*/test_temp0/test-file"))
+        if outcome == "failure":
+            raise OSError
+        child = Child(code=rc, timeout=outcome == "timeout")
+        cast("Callable[[Child], None]", kwargs["started"])(child)
+        return child
+
+    monkeypatch.setattr(run_host, "_files", constant(run.files))
+    monkeypatch.setattr(run_host, "_load", load)
+    monkeypatch.setattr(run_host, "preflight", constant(None))
+    monkeypatch.setattr(credentials, "push_token", constant(None))
+    monkeypatch.setattr(process_group, "prepare", lambda *_args: preparation(run))
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "record", constant(None))
+    monkeypatch.setattr(process_group, "stop_owned", constant(value=True))
+    monkeypatch.setattr(
+        temp_cleanup, "sweep", lambda: sweeps.append(run.tmpdir.is_dir())
+    )
+
+    assert run_host.main(["example"], "run-host") == rc
+    assert run.files.path("rc").read_text() == f"{rc}\n"
+    assert sweeps == [True]
+    assert len(run_dirs) == 1
+    assert not run_dirs[0].exists()
+
+
+@pytest.mark.parametrize("log_available", [False, True])
+def test_temp_sweep_error_keeps_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, log_available: bool
+) -> None:
+    run = make_run(tmp_path)
+    write = run.files.write
+
+    def fail() -> None:
+        raise OSError
+
+    def record(suffix: str, text: str) -> None:
+        if suffix == "log" and not log_available:
+            raise OSError
+        write(suffix, text)
+
+    monkeypatch.setattr(temp_cleanup, "sweep", fail)
+    monkeypatch.setattr(run.files, "write", record)
+    assert run_host.finish(run, None, None, 7) == 7
+    assert run.files.path("rc").read_text() == "7\n"
+    if log_available:
+        assert run.files.path("log").read_text() == "temporary file sweep failed\n"
 
 
 def test_signer_stop_denial_keeps_harness_rc(
