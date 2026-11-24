@@ -3,10 +3,10 @@ description: Agent settings, run requests, and host preparation.
 generated:
   - role: generated
     harness: codex:0.171.0
-    model: openai:gpt-6.2-sol
+    model: openai:gpt-6.1-sol
     effort: high
     surface: exec
-    at: "2026-11-23T05:54:50Z"
+    at: "2026-11-24T19:13:18Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -19,7 +19,7 @@ type: Reference
 
 `agent exec --fetch-ref REF` fetches a named ref during host preparation for either profile. Repeat the option up to eight times. Accepted refs are `refs/pull/<digits>/head` and `refs/heads/<branch>`. Branch names use only ASCII letters, digits, `.`, `_`, `/` and `-`; they cannot contain `..` or `//`, start or end with `/`, end with `.lock`, or start with `-`. The controller and host both validate these restrictions. For example, `--fetch-ref refs/pull/391/head --fetch-ref refs/heads/fix-392` makes `origin/fetched/pull/391/head` and `origin/fetched/heads/fix-392` available in the run clone. The host fetches these refs with the default branch in one Git fetch, using the existing authentication fallback. A missing requested ref fails preparation, and the error names the requested refs. The checkout stays on its usual build branch or review commit. No GitHub credential reaches the run through this option.
 
-`agent exec` records the launching session's name and `CLAUDE_CODE_SESSION_ID` in the run record, and `agent status` prints `launcher=NAME`. The name is the tmux pane title of the launching process's pane, without its leading status glyph. A reviewer-role run, meaning `--role reviewer` or `--profile review`, starts only from a session on the review-launcher list, never from the session that owns the repository, and never when the name is missing. The built-in list names the `coord-review-N` sessions. `agent-review-launchers.json` in the state directory adds launchers and owners: `launchers` maps a session name to a list of `org/name` repositories, or to null for any repository, and `owners` maps a repository name to its owner session when that session isn't named for it. A malformed file refuses the launch. The list guards against honest mistakes by cooperating sessions; a session that forges its pane title isn't stopped.
+`agent exec` records the launching session's name and `CLAUDE_CODE_SESSION_ID` in the run record, and `agent status` prints `launcher=NAME`. The name is the tmux pane title of the launching process's pane, without its leading status glyph. Any named session may launch a reviewer-role run, meaning `--role reviewer` or `--profile review`, including for its own repository. A missing `TMUX_PANE` or pane title refuses the launch; set the launching session's tmux pane title to its name. Review tier rules are enforced by briefs.
 
 `agent exec` reads the run host once before it transfers anything. It refuses the launch and prints the numbers when the 1-minute load reaches the host's load limit, when available memory falls under a share of total memory, or when used swap passes a share of total swap. Each `[[agent.host]]` table sets its own values. `load_limit` defaults to the host's logical CPU count, `min_memory_available_percent` defaults to 20 and `max_swap_used_percent` defaults to 80. Set a lower `load_limit` on a host that also runs services. `limits_warn_only = true` prints the same numbers as a warning and lets the launch continue. A failed or unreadable read refuses with `cannot read host limits`. The caller must pass `--ignore-limits` to launch anyway, or the host sets `limits_warn_only = true`, which turns the refusal into a warning. The run record keeps an `--ignore-limits` choice. Older run records without the field load as `false`.
 
