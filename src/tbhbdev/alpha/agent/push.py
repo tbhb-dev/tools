@@ -231,7 +231,7 @@ def new_commits(
     ) as directory:
         return [
             (name, commit)
-            for name, tip in candidates.items()
+            for name, tip in sorted(candidates.items())
             if (commit := outside_history(directory, tip, bases))
         ]
 
