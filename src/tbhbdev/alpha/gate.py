@@ -32,6 +32,11 @@ SUMMARY = re.compile(
     rb"tests pass|^Executed"
 )
 RUN_SUMMARY = re.compile(rb"tests pass|FAILED|Build did NOT")
+PID_FILE = "pid"
+HEARTBEAT_FILE = "heartbeat"
+EXIT_FILE = "exit"
+REASON_FILE = "reason"
+SUPERSEDED_FILE = "superseded"
 HEARTBEAT_INTERVAL = 10
 STARTUP_GRACE = 5
 STALE_LIMIT = 90
@@ -40,7 +45,7 @@ POLL_INTERVAL = 15
 
 def heartbeat(directory: Path) -> None:
     stamp = datetime.fromtimestamp(time(), UTC).isoformat()
-    atomic(directory / "heartbeat", f"{stamp}\n")
+    atomic(directory / HEARTBEAT_FILE, f"{stamp}\n")
 
 
 def run_step(
@@ -73,12 +78,12 @@ def print_run_summary(log: Path) -> None:
 
 def begin_run(directory: Path) -> Path:
     private_dir(directory)
-    superseded = directory / "superseded"
+    superseded = directory / SUPERSEDED_FILE
     # Keep the previous files through preparation without serving them to waiters.
     superseded.touch()
-    for name in ("pid", "heartbeat", "exit", "reason"):
+    for name in (PID_FILE, HEARTBEAT_FILE, EXIT_FILE, REASON_FILE):
         (directory / name).unlink(missing_ok=True)
-    atomic(directory / "pid", f"{os.getpid()}\n")
+    atomic(directory / PID_FILE, f"{os.getpid()}\n")
     heartbeat(directory)
     return superseded
 
@@ -115,9 +120,12 @@ def run(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> i
     scp = ["scp", "-q", "-o", "IdentityAgent=none", str(bundle), destination]
 
     step = "read HEAD"
-    sha = ""
-    prepared = False
-    with tempfile.NamedTemporaryFile(dir=directory, delete=False) as output:
+    published_sha = None
+    published_log = None
+    with tempfile.NamedTemporaryFile(
+        dir=directory,
+        delete=False,  # pragma: no mutate - None also disables deletion.
+    ) as output:
         try:
             sha = subprocess.check_output(  # nosec B603
                 [*git, "rev-parse", "HEAD"], stderr=output, timeout=10, text=True
@@ -132,7 +140,7 @@ def run(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> i
                 run_step(scp, directory, output, env=env).check_returncode()
                 result.unlink(missing_ok=True)
                 superseded.unlink()
-                prepared = True
+                published_log = log
                 step = "ssh test"
                 status = run_step([*ssh, remote], directory, output, env=env).returncode
             finally:
@@ -143,19 +151,19 @@ def run(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> i
         except OSError, subprocess.TimeoutExpired:
             status = 1
         else:
-            step = ""
+            published_sha = sha
 
-    if prepared:
-        Path(output.name).replace(log)
-    else:
+    if published_log is None:
         Path(output.name).unlink()
-    if step:
-        atomic(directory / "reason", f"{step} failed\n")
-    atomic(directory / "exit", f"{status}\n")
-    if not step:
-        atomic(result, f"{sha}\n")
-    if prepared:
-        print_run_summary(log)
+    else:
+        Path(output.name).replace(published_log)
+    if published_sha is None:
+        atomic(directory / REASON_FILE, f"{step} failed\n")
+    atomic(directory / EXIT_FILE, f"{status}\n")
+    if published_sha is not None:
+        atomic(result, f"{published_sha}\n")
+    if published_log is not None:
+        print_run_summary(published_log)
     return status
 
 
@@ -166,7 +174,7 @@ def read_state(path: Path) -> str | None:
 
 
 def result_status(directory: Path, log: Path, result: Path, sha: str) -> int | None:
-    if (directory / "superseded").exists():
+    if (directory / SUPERSEDED_FILE).exists():
         return None
     actual = read_state(result)
     if actual is None:
@@ -182,14 +190,14 @@ def result_status(directory: Path, log: Path, result: Path, sha: str) -> int | N
                 lines.append(line)
     if lines:
         sys.stdout.buffer.write(b"".join(lines).removesuffix(b"\n") + b"\n")
-    status = read_state(directory / "exit")
+    status = read_state(directory / EXIT_FILE)
     print(f"exit status: {status if status is not None else 'unknown'}")
     return 0 if status == "0" else 1
 
 
 def running_failure(directory: Path) -> str | None:
     no_pid = "no pid file (the gate never started or was removed)"
-    pid_file = directory / "pid"
+    pid_file = directory / PID_FILE
     pid = 0
     with suppress(ValueError):
         pid = int(read_state(pid_file) or 0)
@@ -201,23 +209,23 @@ def running_failure(directory: Path) -> str | None:
         return no_pid
     except ProcessLookupError:
         message = f"pid {pid} is dead and no result was written"
-        for name in ("exit", "reason"):
+        for name in (EXIT_FILE, REASON_FILE):
             if detail := read_state(directory / name):
                 message += f"; {name}: {detail}"
         return message
     except PermissionError:
         pass
 
-    try:
-        stamp = datetime.fromisoformat(read_state(directory / "heartbeat") or "")
-        age = (datetime.fromtimestamp(time(), UTC) - stamp).total_seconds()
-    except TypeError, ValueError:
-        with suppress(OSError):
-            if time() - pid_file.stat().st_mtime < STARTUP_GRACE:
-                return None
-        return "heartbeat stale (missing)"
-    stale = f"heartbeat stale (age {age:.0f}s, limit {STALE_LIMIT} s)"
-    return stale if age > STALE_LIMIT else None
+    if (beat := read_state(directory / HEARTBEAT_FILE)) is not None:
+        with suppress(TypeError, ValueError):
+            stamp = datetime.fromisoformat(beat)
+            age = (datetime.fromtimestamp(time(), UTC) - stamp).total_seconds()
+            stale = f"heartbeat stale (age {age:.0f}s, limit {STALE_LIMIT} s)"
+            return stale if age > STALE_LIMIT else None
+    with suppress(OSError):
+        if time() - pid_file.stat().st_mtime < STARTUP_GRACE:
+            return None
+    return "heartbeat stale (missing)"
 
 
 def wait(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> int:
@@ -240,17 +248,23 @@ def wait(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> 
 def main(argv: list[str], prog: str) -> int:
     parser = argparse.ArgumentParser(prog=prog, description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    run_parser = commands.add_parser("run", help="run tests", allow_abbrev=False)
+    run_parser = commands.add_parser(
+        "run",
+        help="run tests",
+        allow_abbrev=False,  # pragma: no mutate - None also disables abbreviations.
+    )
     run_parser.add_argument("name", metavar="NAME")
     run_parser.add_argument("worktree", metavar="WORKTREE")
     run_parser.add_argument("host", metavar="HOST")
     run_parser.add_argument("repo", metavar="REPO", nargs="?")
     wait_parser = commands.add_parser(
-        "wait", help="wait for a result", allow_abbrev=False
+        "wait",
+        help="wait for a result",
+        allow_abbrev=False,  # pragma: no mutate - None also disables abbreviations.
     )
     wait_parser.add_argument("name", metavar="NAME")
     wait_parser.add_argument("host", metavar="HOST")
-    wait_parser.add_argument("--sha", metavar="SHA", required=True)
+    wait_parser.add_argument("--sha", required=True)
     wait_parser.add_argument("--timeout", metavar="SECONDS", type=int, default=14400)
     try:
         args = parser.parse_args(argv)

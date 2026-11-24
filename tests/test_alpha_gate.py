@@ -18,6 +18,7 @@ from tbhbdev import alpha
 from tbhbdev.alpha import gate
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from typing import BinaryIO
 
 HOST = "review-host"
@@ -45,6 +46,21 @@ def stamp(seconds: float) -> str:
     return datetime.fromtimestamp(seconds, UTC).isoformat()
 
 
+def check_publication(files: Files, status: int) -> Callable[[Path, str], None]:
+    state, log, result = files
+    atomic = gate.atomic
+
+    def publish(path: Path, value: str) -> None:
+        if path == state / "pid":
+            assert not any((state / name).exists() for name in ("pid", "heartbeat"))
+        if path == result:
+            assert log.read_bytes() == b"PASSED remote test\n"
+            assert (state / "exit").read_text() == f"{status}\n"
+        atomic(path, value)
+
+    return publish
+
+
 @pytest.mark.parametrize(("status", "repo"), [(0, []), (7, [""])])
 def test_run(
     files: Files,
@@ -62,17 +78,10 @@ def test_run(
     monkeypatch.setenv("SSH_AUTH_SOCK", "old socket")
     now = 0
     monkeypatch.setattr(gate, "time", lambda: now)
-    monkeypatch.setattr(gate.subprocess, "check_output", Mock(return_value=SHA + "\n"))
-    atomic = gate.atomic
-
-    def publish(path: Path, value: str) -> None:
-        if path == result:
-            assert log.read_bytes() == b"PASSED remote test\n"
-            assert (state / "exit").read_text() == f"{status}\n"
-        atomic(path, value)
-
-    monkeypatch.setattr(gate, "atomic", publish)
     git = ["git", "-C", "checkout path"]
+    read_head = Mock(return_value=SHA + "\n")
+    monkeypatch.setattr(gate.subprocess, "check_output", read_head)
+    monkeypatch.setattr(gate, "atomic", check_publication(files, status))
     bundle = str(log.parent / "gate-bundles/gate.bundle")
     remote_repo = "~/Code/github.com/tbhb-dev/tools"
     remote = (
@@ -102,7 +111,11 @@ def test_run(
         raise subprocess.TimeoutExpired(SSH, timeout)
 
     def start(
-        argv: list[str], *, stdout: BinaryIO, stderr: int, env: dict[str, str] | None
+        argv: list[str],
+        *,
+        stdout: BinaryIO | int,
+        stderr: int,
+        env: dict[str, str] | None,
     ) -> nullcontext[Mock]:
         assert argv == next(commands)
         assert (state / "pid").read_text() == f"{os.getpid()}\n"
@@ -112,14 +125,20 @@ def test_run(
         if argv[0] in {"scp", "ssh"}:
             assert env is not None
             assert (env["SSH_AUTH_SOCK"], env["HOME"]) == ("", os.environ["HOME"])
+        if argv[-1] == cleanup:
+            assert stdout == subprocess.DEVNULL
+            return nullcontext(Mock(wait=Mock(return_value=9)))
+        assert not isinstance(stdout, int)
+        assert Path(stdout.name).parent == state
+        read_head.assert_called_once_with(
+            [*git, "rev-parse", "HEAD"], stderr=stdout, timeout=10, text=True
+        )
         if argv[-1] == remote:
             stdout.write(b"PASSED remote test\n")
             return nullcontext(Mock(wait=wait))
-        if argv in (bundle_create, scp):
-            assert result.read_text() == "old\n"
-            assert gate.result_status(state, log, result, "old") is None
-        rc = 9 if argv[-1] == cleanup else 0
-        return nullcontext(Mock(wait=Mock(return_value=rc)))
+        assert result.read_text() == "old\n"
+        assert gate.result_status(state, log, result, "old") is None
+        return nullcontext(Mock(wait=Mock(return_value=0)))
 
     monkeypatch.setattr(gate.subprocess, "Popen", start)
     assert gate.main([*RUN, *repo], PROG) == status
@@ -129,9 +148,16 @@ def test_run(
 
 
 @pytest.mark.parametrize(
-    ("step", "status"), [("create bundle", 8), ("scp bundle", 8), ("scp bundle", 1)]
+    ("step", "status"),
+    [
+        ("read HEAD", 1),
+        ("create bundle", 8),
+        ("scp bundle", 8),
+        ("scp bundle", 1),
+        ("ssh test", 1),
+    ],
 )
-def test_early_failure(
+def test_run_failure(
     files: Files,
     monkeypatch: pytest.MonkeyPatch,
     capsys: Capture,
@@ -142,26 +168,36 @@ def test_early_failure(
     log.write_bytes(b"previous FAILED\n")
     result.write_text(f"{SHA}\n")
     (state / "exit").write_text("0\n")
-    monkeypatch.setattr(gate.subprocess, "check_output", Mock(return_value=SHA))
+    head_error = subprocess.TimeoutExpired("git", 10) if step == "read HEAD" else None
+    monkeypatch.setattr(
+        gate.subprocess, "check_output", Mock(return_value=SHA, side_effect=head_error)
+    )
     process = nullcontext(Mock(wait=Mock(return_value=0)))
     failure = nullcontext(Mock(wait=Mock(return_value=8))) if status == 8 else OSError()
-    steps = [failure] if step == "create bundle" else [process, failure, process]
-    expected = ["git"] if step == "create bundle" else ["git", "scp", "ssh"]
+    steps, expected = {
+        "read HEAD": ((), ()),
+        "create bundle": ((failure,), ("git",)),
+        "scp bundle": ((process, failure, process), ("git", "scp", "ssh")),
+        "ssh test": (
+            (process, process, failure, OSError()),
+            ("git", "scp", "ssh", "ssh"),
+        ),
+    }[step]
     popen = Mock(side_effect=steps)
     monkeypatch.setattr(gate.subprocess, "Popen", popen)
     assert gate.main(RUN, PROG) == status
-    assert [call.args[0][0] for call in popen.call_args_list] == expected
+    assert tuple(call.args[0][0] for call in popen.call_args_list) == expected
     assert (state / "exit").read_text() == f"{status}\n"
     assert (state / "reason").read_text() == f"{step} failed\n"
-    assert sorted(path.name for path in state.iterdir()) == [
-        "exit",
-        "heartbeat",
-        "pid",
-        "reason",
-        "superseded",
-    ]
-    assert log.read_bytes() == b"previous FAILED\n"
-    assert result.read_text() == f"{SHA}\n"
+    state_names = {"exit", "heartbeat", "pid", "reason"}
+    if step == "ssh test":
+        assert not result.exists()
+        assert log.read_bytes() == b""
+    else:
+        state_names.add("superseded")
+        assert log.read_bytes() == b"previous FAILED\n"
+        assert result.read_text() == f"{SHA}\n"
+    assert {path.name for path in state.iterdir()} == state_names
     assert capsys.readouterr().out == ""
     monkeypatch.setattr(gate.os, "kill", Mock(side_effect=ProcessLookupError))
     assert gate.main(WAIT, PROG) == 1
@@ -222,7 +258,10 @@ def test_wait_summary(
     if status is not None:
         (state / "exit").write_text(status)
         prefix = b"old FAILED\n" * 40 + recent + b"ignore Executed\n"
-        log.write_bytes(prefix + b"\x1b]0;x\x07\x1b[31m" + lines + b"\x1b[0m\x1bc")
+        ending = b"\n" if status == "7" else b""
+        log.write_bytes(
+            prefix + b"\x1b]0;x\x07\x1b[31m" + lines + b"\x1b[0m\x1bc" + ending
+        )
         expected = recent + lines + b"\n" + expected
     assert gate.main(WAIT, PROG) == int(status != "0")
     assert capfdbinary.readouterr().out == expected
@@ -336,10 +375,15 @@ def test_timeout(
     monkeypatch.setattr(gate.os, "kill", Mock(side_effect=PermissionError))
     monkeypatch.setattr(gate, "time", lambda: 90)
     monkeypatch.setattr(gate, "monotonic", lambda: sum(sleeps))
-    monkeypatch.setattr(gate, "sleep", sleeps.append)
-    assert gate.main([*WAIT, "--timeout", "32"], PROG) == 3
-    assert sleeps == [15, 15, 2]
-    assert capsys.readouterr().out == "FAILED: timeout after 32 s, gate still running\n"
+
+    def pause(seconds: float) -> None:
+        assert seconds > 0
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(gate, "sleep", pause)
+    assert gate.main([*WAIT, "--timeout", "31"], PROG) == 3
+    assert sleeps == [15, 15, 1]
+    assert capsys.readouterr().out == "FAILED: timeout after 31 s, gate still running\n"
 
 
 @pytest.mark.usefixtures("files")
@@ -422,8 +466,8 @@ def test_host_paths(
             "[-h] {run,wait} ...",
             (
                 "Run a Bazel gate on a host and wait for a specific commit's result.",
-                "run tests",
-                "wait for a result",
+                "    run       run tests",
+                "    wait      wait for a result",
             ),
         ),
         (["run", "-h"], "run [-h] NAME WORKTREE HOST [REPO]", ()),
@@ -436,4 +480,4 @@ def test_help(
     assert alpha.main(["gate", *argv], "tbhbdev alpha") == 0
     output = capsys.readouterr().out
     assert output.startswith(f"usage: {PROG} {usage}\n")
-    assert all(line in output for line in text)
+    assert all(line in output.splitlines() for line in text)
