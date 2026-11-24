@@ -276,3 +276,4 @@ class RunRequest:
     tainted_host: bool
     fetch_refs: tuple[str, ...] = ()
     max_concurrent_runs: int | None = None
+    expect_commit: bool = False
