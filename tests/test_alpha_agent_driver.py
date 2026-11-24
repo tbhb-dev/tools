@@ -1047,12 +1047,24 @@ def test_schema_and_prompt_refused_locally(remote: Remote) -> None:
 
 
 def test_prompt_hook_conflicts_refuse_launch_before_ssh(
-    remote: Remote, capsys: pytest.CaptureFixture[str]
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    attributes: dict[str, str] = {}
+    monkeypatch.setattr(driver.telemetry, "attributes", attributes.update)
     remote.prompt.write_text("Run `prek install`. Run `git push origin main`.\n")
     args = arguments(remote, "--ignore-limits")
     args[-2] = "sample-run"
     assert agent.main(args, "example agent") == 1
+    assert attributes == {
+        "tbhb.agent.host": "example-linux",
+        "tbhb.agent.harness": "codex",
+        "tbhb.agent.model": "example-model",
+        "tbhb.agent.profile": "build",
+        "tbhb.run.id": "sample-run",
+        "tbhb.agent.outcome": "refused",
+    }
     assert capsys.readouterr() == (
         "",
         (

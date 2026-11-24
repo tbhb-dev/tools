@@ -360,7 +360,8 @@ def clear_taint(host: str, reason: str) -> int:
     return 0
 
 
-def execute(settings: Settings, args: argparse.Namespace) -> int:
+def checked_prompt(args: argparse.Namespace) -> str:
+    """Read the brief, refuse hook conflicts and report branch warnings locally."""
     prompt = Path(args.prompt_file).read_text()
     problems = brief.check_hooks(prompt)
     if problems:
@@ -369,6 +370,10 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
         raise Invalid(message)
     for warning in brief.branch_warnings(prompt, run=args.name):
         print(f"warning: {args.prompt_file}: {warning}", file=sys.stderr)
+    return prompt
+
+
+def execute(settings: Settings, args: argparse.Namespace) -> int:
     run = prepare(settings, args)
     telemetry.attributes(
         **{
@@ -379,6 +384,7 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
             "tbhb.run.id": run.name,
         }
     )
+    prompt = checked_prompt(args)
     schema = None if args.schema is None else Path(args.schema).read_text()
     if schema is not None:
         json.loads(schema)
