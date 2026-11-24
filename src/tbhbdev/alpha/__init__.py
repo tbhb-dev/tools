@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from tbhbdev.alpha import (
     agent,
     brief,
+    gate,
     gh_shim,
     guard_gh_config_dir,
     guard_gh_poll,
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
 __all__ = [
     "agent",
     "brief",
+    "gate",
     "gh_shim",
     "guard_gh_config_dir",
     "guard_gh_poll",
@@ -104,6 +106,8 @@ commands:
                installed build on each host
   loop         validate loop configuration (runner not yet available)
   agent        exec | wait | status | kill | clean | keep: headless runs
+  gate         run NAME WORKTREE HOST [REPO]
+               | wait NAME HOST --sha SHA [--timeout SECONDS]
   pre-push-guard REMOTE URL: refuse protected-branch and unfetched-rewrite pushes
   brief        new | check: peer-run briefs with required safeguards
   install      install the git hooks and the user-level harness hooks
@@ -223,6 +227,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "loop": loop.main,
     "agent": agent.main,
     "brief": brief.main,
+    "gate": gate.main,
 }
 
 

@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6
-    at: "2026-11-23T12:35:28Z"
+    at: "2026-11-24T17:35:44Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -40,6 +40,7 @@ type: Reference
 - `loop` validates its user configuration and refuses live intake until adapters connect the runner to its sources. Its shadow runner accepts typed event and reconcile interfaces for simulation. The package includes pure state derivation and rules that produce typed shadow intents with action keys and spawn budgets. A SQLite store records receipts, action keys, runs, and escalation markers.
 - `agent precheck CLONE --reference REF [--host HOST]` compares a clone's hooks with a local reference and checks its Git config for risky keys. Paths may be absolute or relative to the home directory. Collection uses one SSH call with `--host` and reads locally otherwise. It never runs Git. Exit codes are 0 for a match, 1 for mismatches, and 2 for usage or collection errors. The Python API `precheck(clone_data, reference)` returns the result for callers.
 - `agent` coordinates runs with `exec`, `wait`, `status`, `log`, `diff`, `kill`, `clean` and `keep`. `clear-taint HOST --reason TEXT` records local host clearance. `signing-parity` checks that each configured host's signing key is a signing key of tbhb-agent. It runs the hidden host command `signing-fingerprint ACCOUNT`, which prints only the SHA256 fingerprint of the key a run would sign with, over the ordinary ssh shell. It then reads tbhb-agent's public signing key list from GitHub and exits 1 when any host's fingerprint is missing or the host is unreachable. A host without the command counts as unreachable until `tbhbdev` syncs there. The package also includes the run request's schema and the repo argument rules.
+- `gate` runs the Bazel tests for a worktree's commit on a host and waits for the result.
 - `install` installs the git hooks and the user-level harness hooks. `--hooks-only` installs only this clone's git hooks without writing user-level config.
 
 `tbhbdev alpha pr check` and `pr create` run the rules size counter after linting the draft, comparing the draft's base branch on `origin` with `HEAD`. A missing remote-tracking ref is fetched once. It prints the added code and raw line counts with their limits: 400 code lines and 1,500 raw lines. If either count exceeds its limit, the check fails with a message to split the change into stacked pull requests. When both counts exceed their limits, the problem reports the code count. If the counter is unavailable or returns an error or invalid JSON, the command prints `size count unavailable: <reason>` as a warning and continues, and `pr create` still opens the pull request.
@@ -85,6 +86,14 @@ These user-level hooks run in every repository. Before acting, the identity, pul
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, so sessions in two worktrees of one clone keep separate state.
 
 For a run that opens a pull request, write `.github/PULL_REQUEST_DRAFT.md` in its worktree and keep it out of commits. The driver reads the worktree draft first and uses the pushed commit's draft if the worktree draft is missing. The worktree draft must be an owned regular file of at most 64 KiB. The driver refuses symlinks and scans the draft with the host's secret rules and the pre-run commit's `.gitleaks.toml` before posting it. The driver warns when the pushed changes add the draft.
+
+## Gate
+
+`tbhbdev alpha gate run NAME WORKTREE HOST [REPO]` bundles the worktree's `HEAD` relative to `origin/main` and runs `bazelisk test --config=ci //...` in a detached worktree on the host. `REPO` defaults to `tools`. Exit codes follow the remote test status, with a nonzero status if an earlier step fails and 2 for a usage error.
+
+Under `~/.local/state/tbhb/gate/NAME-HOST/`, `pid` holds the local process ID and `heartbeat` holds a timestamp in Coordinated Universal Time (UTC). The command updates `heartbeat` at least every 30 seconds. On completion, `exit` holds the final status, and `reason` names the failed step if the remote test didn't return a status. When the run finishes, the command publishes `~/.local/state/tbhb/tools-NAME-HOST.log` and then writes the commit hash to `<log>.sha` if the remote test returned a status.
+
+`tbhbdev alpha gate wait NAME HOST --sha SHA [--timeout SECONDS]` checks for a matching result every 15 seconds and prints up to 40 summary lines. Without a result, a missing `pid`, a dead process, or a missing or stale heartbeat fails the wait. A heartbeat goes stale when its timestamp is more than 90 seconds old. The command returns 0 for a pass, 1 for a failure, 2 for a usage error, and 3 if the gate still runs at the timeout. By default, the wait times out after 14,400 seconds.
 
 ## Identity start time
 
