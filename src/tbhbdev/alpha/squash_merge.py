@@ -650,6 +650,15 @@ def requires_queue(target: str, base: str) -> str | None:
     return method
 
 
+def queue_flag(method: str, allowed: Sequence[str], number: int) -> str:
+    """Return the queue's merge flag or refuse a disabled method."""
+    flag = f"--{method.lower()}"
+    if flag not in allowed:
+        required = "squash merges" if method == "SQUASH" else "merge commits"
+        stop(f"not merging PR #{number}: the merge queue requires {required}")
+    return flag
+
+
 def queue_state(target: str, number: int, *, preview: bool) -> dict[str, object]:
     """Read the PR's queue status and optionally its default squash message."""
     owner, repo = target.split("/", 1)
@@ -737,11 +746,7 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
     methods = merge_methods(target)
     queue_method = requires_queue(target, request.base)
     if queue_method is not None:
-        queue_flag = f"--{queue_method.lower()}"
-        if queue_flag not in methods:
-            required = "squash merges" if queue_method == "SQUASH" else "merge commits"
-            stop(f"not merging PR #{args.number}: the merge queue requires {required}")
-        methods = [queue_flag]
+        methods = [queue_flag(queue_method, methods, args.number)]
     body = renovate_body(request.body) if request.renovate else request.body
     message = build_message(
         request.title, args.number, body, agent=request.agent and not request.renovate

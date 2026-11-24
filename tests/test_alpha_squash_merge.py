@@ -62,12 +62,12 @@ else:
 logname = f"gh.{{kind}}.log" if kind in ("methods", "repo", "rules") else (
     "gh.repo.log" if repo else "gh.log"
 )
-logpath = os.path.join(here, logname)
+log_path = os.path.join(here, logname)
 if kind == "queue" and "queue_before_out" in spec:
-    with open(logpath) as log:
+    with open(log_path) as log:
         if not any(json.loads(line)["argv"][:2] == ["pr", "merge"] for line in log):
             spec["queue_out"] = spec["queue_before_out"]
-with open(logpath, "a") as log:
+with open(log_path, "a") as log:
     log.write(json.dumps({{"argv": sys.argv[1:], "stdin": sys.stdin.read()}}) + "\\n")
 # A ruleset can refuse the merge flag while the squash flag goes through.
 refused = kind == "merge" and "--merge" in sys.argv and "merge_refused" in spec
@@ -1736,14 +1736,19 @@ def test_a_queue_merge_refusal_preserves_the_gh_error(
             {"rules_rc": 1, "rules_err": "forbidden"},
             "gh branch rules lookup failed: forbidden",
         ),
-        ({"rules_out": "not JSON"}, "no usable branch rules"),
-        ({"rules_out": "{}"}, "no usable branch rules"),
-        ({"rules_out": "[]"}, "no usable branch rules"),
-        ({"rules_out": "[{}]"}, "no usable branch rules"),
-        ({"rules_out": "[[{}]]"}, "no usable branch rules"),
+        ({"rules_out": "not JSON"}, "gh returned no usable branch rules"),
+        ({"rules_out": "{}"}, "gh returned no usable branch rules"),
+        ({"rules_out": "[]"}, "gh returned no usable branch rules"),
+        ({"rules_out": "[{}]"}, "gh returned no usable branch rules"),
+        ({"rules_out": "[[{}]]"}, "gh returned no usable branch rules"),
+        ({"rules_out": "[[null]]"}, "gh returned no usable branch rules"),
         (
             {"rules_out": queue_rules("rebase")},
-            "unsupported branch merge queue method REBASE",
+            "not merging: unsupported branch merge queue method REBASE",
+        ),
+        (
+            {"rules_out": '[[{"type":"merge_queue"}]]'},
+            "not merging: unsupported branch merge queue method NONE",
         ),
     ],
 )
@@ -1751,7 +1756,7 @@ def test_invalid_queue_rules_refuse(
     tools: Tools, spec: dict[str, object], error: str
 ) -> None:
     amend(tools, **spec)
-    assert error in str(run_main("12")[0])
+    assert run_main("12")[0] == error
     assert len(tools.calls()) == 1
 
 
