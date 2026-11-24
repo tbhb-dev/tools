@@ -251,6 +251,69 @@ def test_start_ref_push_fast_forwards_the_existing_branch_without_a_pr(
     assert not run.files.path("pr").exists()
 
 
+def test_start_ref_uses_the_run_branch_when_another_branch_shares_its_tip(
+    fix_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    run, prepared, target = fix_run
+    work = Path(prepared.paths.worktree)
+
+    def duplicate_tip(
+        run: run_host.Run, ready: run_host.Prepared, stack: ExitStack
+    ) -> int:
+        status = harness(run, ready, stack)
+        git(work, "branch", "aaa")
+        return status
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, duplicate_tip, SYNTHETIC) == 0
+    assert git(target, "rev-parse", START_REF) == git(work, "rev-parse", "aaa")
+
+
+def test_start_ref_pushes_a_commit_also_reachable_from_another_fetch_ref(
+    fix_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    run, prepared, target = fix_run
+    work = Path(prepared.paths.worktree)
+    other = "refs/heads/other"
+    run.request = replace(run.request, fetch_refs=(START_REF, other))
+    commit(work, "fix")
+    fix = git(work, "rev-parse", "HEAD")
+    commit(work, "follow-up")
+    git(work, "push", target.as_uri(), f"HEAD:{other}")
+    git(
+        work,
+        "fetch",
+        target.as_uri(),
+        f"{other}:refs/remotes/origin/fetched/heads/other",
+    )
+    git(work, "reset", "--hard", f"{fix}^")
+
+    def advance(*_args: object) -> int:
+        git(work, "merge", "--ff-only", fix)
+        return 0
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, advance, SYNTHETIC) == 0
+    assert git(target, "rev-parse", START_REF) == fix
+
+
+def test_start_ref_skips_push_when_the_run_branch_is_unchanged(
+    fix_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, target = fix_run
+    base = git(target, "rev-parse", START_REF)
+
+    def unexpected_remote(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
+        pytest.fail("unchanged start ref contacted the remote")
+
+    monkeypatch.setattr(push, "git_with_token", unexpected_remote)
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, constant(0), None) == 0
+    assert not run.files.path("head").exists()
+    assert git(target, "rev-parse", START_REF) == base
+
+
 @pytest.mark.parametrize("remote_change", ["rewound", "deleted", "default", "missing"])
 def test_changed_remote_ref_leaves_the_worktree_and_pushes_nothing(
     fix_run: tuple[run_host.Run, run_host.Prepared, Path],

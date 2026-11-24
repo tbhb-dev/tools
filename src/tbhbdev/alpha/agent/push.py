@@ -146,7 +146,9 @@ def run(
                 run.files.write("head", commit)
                 run.files.write("log", f"push skipped: harness exited {rc}\n")
         return rc
-    return publish_changes(run, workspace, before, token, start)
+    if start is not None:
+        return push_start_branch(run, workspace, token, start)
+    return publish_changes(run, workspace, before, token)
 
 
 def publish_changes(
@@ -154,18 +156,10 @@ def publish_changes(
     workspace: Path,
     before: dict[str, str],
     token: str | PushTokenFailure | None,
-    start: tuple[str, str] | None,
 ) -> int:
     reference = f"refs/heads/agent/{run.files.name}"
     try:
         after = local_refs(workspace)
-        if start is not None:
-            change = first_change(run, workspace, before, after, token)
-            return (
-                0
-                if change is None
-                else push_start_branch(run, workspace, change, token, start)
-            )
         found = new_commits(run, workspace, before, after)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         run.files.write(
@@ -255,25 +249,25 @@ def check_not_moved(
 def push_start_branch(
     run: Run,
     workspace: Path,
-    change: tuple[str, str],
     token: str | PushTokenFailure | None,
     start: tuple[str, str],
 ) -> int:
     ref, base = start
-    name, commit = change
     run_branch = f"agent/{run.files.name}"
-    if name == f"refs/heads/{run_branch}":
-        run.files.write("head", commit)
-    if not isinstance(token, str):
-        reason = token.reason if token is not None else "unavailable"
-        run.files.write(
-            "log", f"push failed: no push token ({reason}) for commit {commit}\n"
-        )
-        return 4
     try:
-        if name != f"refs/heads/{run_branch}" or head(workspace, run_branch) != commit:
+        commit = head(workspace, run_branch)
+        if commit is None:
             run.files.write(
-                "log", f"push failed: commit {commit} needs {run_branch} checked out\n"
+                "log", f"push failed: updating {ref} needs {run_branch} checked out\n"
+            )
+            return 4
+        if commit == base:
+            return 0
+        run.files.write("head", commit)
+        if not isinstance(token, str):
+            reason = token.reason if token is not None else "unavailable"
+            run.files.write(
+                "log", f"push failed: no push token ({reason}) for commit {commit}\n"
             )
             return 4
         target = url(run.request.repo)
@@ -331,46 +325,6 @@ def local_refs(workspace: Path) -> dict[str, str]:
     elif tip := refs.get(current.removeprefix("ref: ")):
         refs["HEAD"] = tip
     return refs
-
-
-def first_change(
-    run: Run,
-    workspace: Path,
-    before: dict[str, str],
-    after: dict[str, str],
-    token: str | PushTokenFailure | None,
-) -> tuple[str, str] | None:
-    branch = f"agent/{run.files.name}"
-    reference = f"refs/heads/{branch}"
-    commit = after.pop(reference, None)
-    if commit is not None:
-        if isinstance(token, str) and head(workspace, branch) is None:
-            after[reference] = commit
-        else:
-            after = {reference: commit, **after}
-    bases = tuple(dict.fromkeys(before.values()))
-    candidates = {
-        name: tip for name, tip in after.items() if name != "HEAD" and tip not in bases
-    }
-    if not candidates:
-        return None
-    excludes = tuple(f"^{base}" for base in bases)
-    with publication(
-        run.files.root, workspace, next(iter(candidates.values()))
-    ) as directory:
-        for name, tip in candidates.items():
-            revisions = "\n".join((tip, *excludes)) + "\n"
-            commit = history_git(
-                directory,
-                "rev-list",
-                "--max-count=1",
-                "--stdin",
-                "--",
-                revisions=revisions,
-            ).strip()
-            if commit:
-                return name, commit
-    return None
 
 
 def new_commits(
