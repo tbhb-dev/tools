@@ -309,7 +309,9 @@ def test_a_draft_without_a_base_opens_against_the_api_default(
     published = commit_draft(tmp_path, "# t\n\nbody\n")
     seen: dict[str, object] = {}
 
-    def get(_url: str, **_options: object) -> httpx.Response:
+    def get(_url: str, **options: object) -> httpx.Response:
+        assert isinstance(options["headers"], dict)
+        assert options["headers"]["Authorization"] == "Bearer tok"
         data = {
             "default_branch": "trunk",
             "full_name": "tbhb-dev/tools",
@@ -661,3 +663,26 @@ def test_run_range_refuses_a_new_draft(tmp_path: Path) -> None:
 def test_run_range_allows_a_preexisting_draft(tmp_path: Path) -> None:
     published = commit_draft(tmp_path, "changed", initial=True)
     open_pr.check_range(published)
+
+
+def test_visibility_lookup_failure_is_logged_when_opening(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    published = commit_draft(tmp_path, None)
+    write_draft(tmp_path, DRAFT)
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: reply(404, {}))
+    monkeypatch.setattr(
+        httpx, "post", lambda *_args, **_kwargs: reply(201, {"number": 12})
+    )
+
+    def scan(_text: str, _what: str, **options: object) -> None:
+        assert options["visibility"] == ""
+
+    monkeypatch.setattr(gitleaks_check, "scan_text", scan)
+    logs: list[tuple[str, str]] = []
+
+    def write(suffix: str, text: str) -> None:
+        logs.append((suffix, text))
+
+    assert open_draft(published, write) == 12
+    assert logs == [("log", "visibility lookup failed: no usable answer\n")]
