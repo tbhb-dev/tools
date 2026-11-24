@@ -166,7 +166,7 @@ def run(args: argparse.Namespace, directory: Path, log: Path, result: Path) -> i
         Path(output.name).replace(published_log)
     if published_sha is None:
         atomic(directory / REASON_FILE, f"{step} failed\n")
-        status = status or 1
+        status = 1 if status == 0 else status
     atomic(directory / EXIT_FILE, f"{status}\n")
     if published_sha is not None:
         atomic(result, f"{published_sha}\n")

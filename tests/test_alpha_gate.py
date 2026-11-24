@@ -223,7 +223,8 @@ def test_run_failure(
         (
             START
             + (
-                b"PASSED\n\x1b[31mtests pass\x1b[0m\nFAILED\nBuild did NOT\n"
+                b"PASSED\n\x1b[31m"
+                b"tests pass\x1b[0m\nFAILED\nBuild did NOT\n"
                 b"FAILED\ntests pass\nFAILED\n"
             ),
             0,
