@@ -171,7 +171,7 @@ def check_review(markdown: str, *, metadata: Json | None = None) -> list[str]:
         return [str(exc)]
     try:
         cue = cue_runtime.resolve()
-        with as_file(files("tbhbdev").joinpath("schemas")) as schemas:
+        with as_file(files().joinpath("schemas")) as schemas:
             # Fixed schema names and pinned executable. Draft JSON goes on stdin.
             done = subprocess.run(  # nosec B603
                 [
