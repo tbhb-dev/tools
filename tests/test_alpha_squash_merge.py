@@ -1612,7 +1612,10 @@ def test_merge_queue_refuses_when_the_repository_disables_merge(tools: Tools) ->
 def test_merge_queue_refuses_a_default_message(tools: Tools) -> None:
     tools.view(title="fix: tidy", body="")
     amend(tools, rules_out=queue_rules("MERGE"))
-    assert "GitHub's default message" in str(run_main("12")[0])
+    assert run_main("12")[0] == (
+        "not merging PR #12: the merge commit would get "
+        "GitHub's default message, not the cleaned PR body"
+    )
     assert len(tools.calls()) == 1
 
 
@@ -1650,9 +1653,12 @@ def test_merge_queue_reports_the_result_using_the_previous_removal(
         rules_out=queue_rules("MERGE"),
         queue_before_out=queue_data(removal={"id": "old", "reason": "Old"}),
         queue_out=state,
+        merge_err="GitHub accepted the request.\n",
     )
     assert run_main("12")[0] == code
-    assert capsys.readouterr().out == output
+    captured = capsys.readouterr()
+    assert captured.out == output
+    assert captured.err == "GitHub accepted the request.\n"
     _, before, merge, after = tools.calls()
     assert cast("list[str]", before["argv"])[-1] == "preview=false"
     assert cast("list[str]", merge["argv"])[:4] == ["pr", "merge", "12", "--merge"]

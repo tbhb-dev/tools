@@ -758,7 +758,7 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
             f"not merging PR #{args.number}: the merge commit would get "
             "GitHub's default message, not the cleaned PR body"
         )
-    previous_removal = ""
+    previous_removal = None
     if queue_method == "SQUASH":
         previous_removal = queue_preview(target, args.number, message)
     elif queue_method == "MERGE":
@@ -786,7 +786,7 @@ def main(argv: Sequence[str] | None = None, prog: str | None = None) -> int:
         print(f"{methods[0]} failed; retrying with {methods[1]}", file=sys.stderr)
         argv_gh[argv_gh.index(methods[0])] = methods[1]
         done = pr.run(argv_gh, stdin=message.body)
-    if queue_method is not None and done.returncode == 0:
+    if previous_removal is not None and done.returncode == 0:
         print(done.stderr, end="", file=sys.stderr)
         return report_queue(target, args.number, previous_removal)
     print(done.stdout, end="")
