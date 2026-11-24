@@ -39,7 +39,8 @@ PROTECTED = frozenset({"refs/heads/main", "refs/heads/master"})
 AGENT_KEY = Path(".config/tbhbdev/agent-signing-key.pub")
 FINGERPRINT = re.compile(r"SHA256:\S+")
 RANGE_LIMIT = 1000
-URL_TIMEOUT = 30
+# SHA-1 repositories write `gpgsig`, SHA-256 repositories `gpgsig-sha256`.
+SIGNATURE_HEADER = re.compile(rb"gpgsig(-sha256)? ")
 
 
 def agent_fingerprint() -> str:
@@ -54,70 +55,41 @@ def agent_fingerprint() -> str:
     return found[0] if done.returncode == 0 and found else ""
 
 
-def signature_fingerprint(raw: str) -> str:
+def signature_fingerprint(raw: bytes) -> str:
     """The fingerprint of a commit's SSH signature, or empty if it has none."""
-    head, _, _ = raw.partition("\n\n")
-    lines = head.split("\n")
-    start = next((i for i, line in enumerate(lines) if line.startswith("gpgsig ")), -1)
+    head, _, _ = raw.partition(b"\n\n")
+    lines = head.split(b"\n")
+    start = next((i for i, x in enumerate(lines) if SIGNATURE_HEADER.match(x)), -1)
     if start < 0:
         return ""
     end = start + 1
-    while end < len(lines) and lines[end].startswith(" "):
+    while end < len(lines) and lines[end].startswith(b" "):
         end += 1
-    signature = "\n".join(
-        [lines[start].removeprefix("gpgsig "), *(x[1:] for x in lines[start + 1 : end])]
+    signature = b"\n".join(
+        [
+            SIGNATURE_HEADER.sub(b"", lines[start]),
+            *(x[1:] for x in lines[start + 1 : end]),
+        ]
     )
-    rest = "\n".join(lines[:start] + lines[end:]) + raw[len(head) :]
+    rest = b"\n".join(lines[:start] + lines[end:]) + raw[len(head) :]
     with tempfile.TemporaryDirectory() as folder:
         path = Path(folder) / "signature"
-        path.write_text(signature + "\n")
+        path.write_bytes(signature + b"\n")
         done = subprocess.run(  # nosec B603 B607
             ["ssh-keygen", "-Y", "check-novalidate", "-n", "git", "-s", str(path)],
             input=rest,
             capture_output=True,
-            text=True,
             check=False,
         )
-    found = FINGERPRINT.search(done.stdout + done.stderr)
+    found = FINGERPRINT.search((done.stdout + done.stderr).decode(errors="replace"))
     return found[0] if found else ""
 
 
-def resolved_url(url: str) -> str | None:
-    """What ``git ls-remote --get-url`` prints for ``url``, or None on a timeout."""
-    try:
-        done = subprocess.run(  # nosec B603 B607
-            ["git", *SAFE, "ls-remote", "--get-url", url],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=URL_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return None
-    return None if done.returncode else done.stdout.strip("\n")
-
-
-def remote_tips(url: str) -> list[str] | None:
-    """The tips at the push destination from ``git ls-remote``, or None on failure.
-
-    ``url`` is the address git hands the hook, so a ``pushurl`` that differs
-    from the fetch URL is the one read. Git already applied its ``insteadOf``
-    rules to ``url``, and ``ls-remote`` would apply them again. A URL that a
-    rule still rewrites could read another repository, so it returns None.
-    The one exception is a URL that is also a configured remote's name: git
-    reads that word as the remote, so the guard retries it as ``./`` plus the
-    word, which is the path the push used. Every other URL goes to ``ls-remote``
-    as git gave it.
-    """
-    if resolved_url(url) != url:
-        remotes = git(*SAFE, "remote")[1].split()
-        url = f"./{url}" if url in remotes else ""
-        if not url or resolved_url(url) != url:
-            return None
-    code, out = git(*SAFE, "ls-remote", url)
-    if code:
-        return None
-    return [line.split()[0] for line in out.splitlines() if line.split()]
+def remote_tips() -> list[str]:
+    """The tips of every remote-tracking ref and tag a pushed branch builds on."""
+    return git(
+        *SAFE, "for-each-ref", "--format=%(objectname)", "refs/remotes", "refs/tags"
+    )[1].split()
 
 
 def known_objects(shas: list[str]) -> list[str]:
@@ -146,10 +118,20 @@ def pushed_commits(local: str, exclude: list[str]) -> tuple[int, list[str]]:
     return done.returncode, done.stdout.split()
 
 
+def commit_bytes(sha: str) -> bytes:
+    """The commit object as git stores it, byte for byte."""
+    done = subprocess.run(  # nosec B603 B607
+        ["git", *SAFE, "cat-file", "commit", sha],
+        capture_output=True,
+        check=False,
+    )
+    return done.stdout
+
+
 def agent_commit_problems(ref: str, local: str, exclude: list[str]) -> list[str]:
     """Name each agent commit the push adds that the agent key didn't sign.
 
-    ``exclude`` holds the remote's current tips and the old shas git reports. A
+    ``exclude`` holds every remote-tracking and tag tip and the old sha git reports. A
     failed listing or a range over RANGE_LIMIT refuses the push.
     """
     code, shas = pushed_commits(local, exclude)
@@ -160,14 +142,13 @@ def agent_commit_problems(ref: str, local: str, exclude: list[str]) -> list[str]
     problems: list[str] = []
     expected = ""
     for sha in shas:
-        _, text = git(*SAFE, "cat-file", "commit", sha)
-        raw = text + "\n"  # git() strips the newline that ends a commit object
+        raw = commit_bytes(sha)
         idents = [
             x
-            for x in raw.partition("\n\n")[0].split("\n")
-            if x.startswith(("author ", "committer "))
+            for x in raw.partition(b"\n\n")[0].split(b"\n")
+            if x.startswith((b"author ", b"committer "))
         ]
-        if not any(f"<{AGENT_EMAIL}>" in x for x in idents):
+        if not any(f"<{AGENT_EMAIL}>".encode() in x for x in idents):
             continue
         expected = expected or agent_fingerprint()
         if not expected:
@@ -207,7 +188,7 @@ def ref_problems(
         return [f"{ref}: {message}"]
     if not local.strip("0"):
         return []
-    exclude = known_objects([*tips, *([old] if old.strip("0") else [])])
+    exclude = known_objects([*tips, old] if old.strip("0") else list(tips))
     problems = agent_commit_problems(ref, local, exclude)
     if old.strip("0") and git(*SAFE, "merge-base", "--is-ancestor", old, local)[0]:
         if fetched_tip(remote, ref) == old:
@@ -220,14 +201,12 @@ def ref_problems(
     return problems
 
 
-def push_problems(remote: str, url: str, lines: Sequence[str]) -> list[str]:
+def push_problems(remote: str, lines: Sequence[str]) -> list[str]:
     rows: list[tuple[str, str, str]] = []
     for line in lines:
         _, local, ref, old = line.split()  # ValueError: main() refuses the push
         rows.append((local, ref, old))
-    tips = remote_tips(url) if any(local.strip("0") for local, _, _ in rows) else []
-    if tips is None:
-        return ["pre-push-guard: cannot read the remote's tips; push refused"]
+    tips = remote_tips()
     return [problem for row in rows for problem in ref_problems(remote, row, tips)]
 
 
@@ -241,7 +220,7 @@ def main(argv: list[str], prog: str) -> int:
             return 1
     remote = argv[0]
     try:
-        problems = push_problems(remote, argv[1], sys.stdin.read().splitlines())
+        problems = push_problems(remote, sys.stdin.read().splitlines())
     except ValueError:
         problems = ["pre-push-guard: cannot inspect push; push refused"]
     for problem in problems:

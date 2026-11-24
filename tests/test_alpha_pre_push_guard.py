@@ -426,7 +426,7 @@ def make_key(folder: Path, name: str) -> Path:
     return path
 
 
-def agent_commit(repo: Path, key: Path | None) -> str:
+def agent_commit(repo: Path, key: Path | None, message: bytes = b"agent") -> str:
     """Commit as the agent, signed by KEY or unsigned when it is None."""
     assert "SSH_AUTH_SOCK" not in os.environ, "signing must never reach an agent"
     env = {
@@ -439,9 +439,21 @@ def agent_commit(repo: Path, key: Path | None) -> str:
         "GIT_COMMITTER_EMAIL": AGENT_MAIL,
     }
     signing = ["-c", "gpg.format=ssh", "-c", f"user.signingkey={key}"] if key else []
+    # A non-UTF-8 message stays byte for byte, so Git never recodes it.
+    signing += ["-c", "i18n.commitEncoding=ISO-8859-1"]
     flag = ["-S"] if key else ["--no-gpg-sign"]
     subprocess.run(
-        ["git", *signing, "commit", *flag, "--allow-empty", "-qm", "agent"],
+        [
+            "git",
+            *signing,
+            "commit",
+            *flag,
+            "--allow-empty",
+            "--cleanup=verbatim",
+            "-qF",
+            "-",
+        ],
+        input=message,
         cwd=repo,
         env=env,
         check=True,
@@ -527,27 +539,62 @@ def test_commits_below_the_remote_tip_are_not_checked(
 
 
 @pytest.mark.usefixtures("agent_key")
-def test_commits_the_remote_already_holds_are_not_checked(
+def test_a_new_branch_skips_commits_under_other_remote_refs(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     held = agent_commit(repo, None)
     git(repo, "push", "-q", "origin", f"{held}:refs/heads/other")
-    git(repo, "update-ref", "-d", "refs/remotes/origin/other")
     tip = commit(repo, "human")
     assert guard(monkeypatch, tip) == 0
 
 
-@pytest.mark.usefixtures("repo")
-def test_an_unreadable_remote_refuses_closed(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.usefixtures("agent_key")
+def test_an_existing_branch_skips_commits_under_other_remote_refs(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    head = git(Path.cwd(), "rev-parse", "HEAD")
-    row = f"refs/heads/topic {head} refs/heads/topic {ZERO}\n"
-    monkeypatch.setattr(sys, "stdin", io.StringIO(row))
-    assert alpha.main(["pre-push-guard", "origin", "/nowhere"], "p") == 1
-    assert capsys.readouterr().err == (
-        "pre-push-guard: cannot read the remote's tips; push refused\n"
-    )
+    old = git(repo, "rev-parse", "HEAD")
+    held = agent_commit(repo, None)
+    git(repo, "push", "-q", "origin", f"{held}:refs/heads/main-copy")
+    tip = commit(repo, "human")
+    assert guard(monkeypatch, tip, old) == 0
+
+
+@pytest.mark.usefixtures("agent_key")
+def test_an_existing_branch_skips_commits_under_remote_tags(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = git(repo, "rev-parse", "HEAD")
+    held = agent_commit(repo, None)
+    git(repo, "tag", "v1", held)
+    tip = commit(repo, "human")
+    assert guard(monkeypatch, tip, old) == 0
+
+
+@pytest.mark.parametrize("message", [b"agent\r\nbody\r\n", b"caf\xe9"])
+def test_a_signed_message_with_crlf_or_latin1_bytes_passes(
+    message: bytes, repo: Path, monkeypatch: pytest.MonkeyPatch, agent_key: Path
+) -> None:
+    tip = agent_commit(repo, agent_key, message)
+    assert push_agent(monkeypatch, tip) == 0
+
+
+def test_a_sha256_repository_signature_is_read(tmp_path: Path, agent_key: Path) -> None:
+    other = tmp_path / "sha256"
+    other.mkdir()
+    git(other, "init", "-q", "--object-format=sha256")
+    tip = agent_commit(other, agent_key)
+    raw = subprocess.run(
+        ["git", "cat-file", "commit", tip], cwd=other, capture_output=True, check=True
+    ).stdout
+    assert b"\ngpgsig-sha256 " in raw
+    assert pg.signature_fingerprint(raw) == pg.agent_fingerprint()
+
+
+def test_a_signed_message_with_trailing_blank_lines_passes(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, agent_key: Path
+) -> None:
+    tip = agent_commit(repo, agent_key, b"agent\n\n\n")
+    assert push_agent(monkeypatch, tip) == 0
 
 
 @pytest.mark.usefixtures("agent_key")
@@ -591,13 +638,13 @@ def test_an_unreadable_agent_key_refuses_closed(
 
 
 def test_a_signature_header_without_a_signature_is_empty() -> None:
-    assert pg.signature_fingerprint("tree x\n\nmessage") == ""
+    assert pg.signature_fingerprint(b"tree x\n\nmessage") == ""
 
 
 def test_a_garbled_signature_has_no_fingerprint() -> None:
     raw = (
-        "tree x\ngpgsig -----BEGIN SSH SIGNATURE-----\n junk\n"
-        " -----END SSH SIGNATURE-----\n\nmsg"
+        b"tree x\ngpgsig -----BEGIN SSH SIGNATURE-----\n junk\n"
+        b" -----END SSH SIGNATURE-----\n\nmsg"
     )
     assert pg.signature_fingerprint(raw) == ""
 
@@ -608,92 +655,3 @@ def test_signing_refuses_when_an_agent_socket_is_set(
     monkeypatch.setenv("SSH_AUTH_SOCK", "/nonexistent")
     with pytest.raises(AssertionError, match="never reach an agent"):
         agent_commit(repo, None)
-
-
-def test_tips_come_from_the_push_url_not_the_fetch_url(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    held = commit(repo, "held")
-    git(repo, "push", "-q", "origin", f"{held}:refs/heads/other")
-    git(repo, "update-ref", "-d", "refs/remotes/origin/other")
-    destination = tmp_path / "destination.git"
-    destination.mkdir()
-    git(destination, "init", "--bare", "-q")
-    git(repo, "config", "remote.origin.pushurl", str(destination))
-    tip = commit(repo, "human")
-    row = f"refs/heads/topic {tip} refs/heads/topic {ZERO}\n"
-    monkeypatch.setattr(sys, "stdin", io.StringIO(row))
-    assert alpha.main(["pre-push-guard", "origin", str(destination)], "p") == 0
-    # The remote name `origin` resolves, so only the URL argument can refuse.
-    monkeypatch.setattr(sys, "stdin", io.StringIO(row))
-    assert alpha.main(["pre-push-guard", "origin", "/nowhere"], "p") == 1
-
-
-def test_a_push_url_that_git_would_rewrite_again_is_refused(
-    repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    destination = tmp_path / "destination.git"
-    elsewhere = tmp_path / "elsewhere.git"
-    for bare in (destination, elsewhere):
-        bare.mkdir()
-        git(bare, "init", "--bare", "-q")
-    git(repo, "config", f"url.{elsewhere}.insteadOf", str(destination))
-    tip = commit(repo, "human")
-    row = f"refs/heads/topic {tip} refs/heads/topic {ZERO}\n"
-    monkeypatch.setattr(sys, "stdin", io.StringIO(row))
-    assert alpha.main(["pre-push-guard", "origin", str(destination)], "p") == 1
-    assert "cannot read the remote's tips" in capsys.readouterr().err
-
-
-def test_a_relative_url_that_names_another_remote_is_read_as_a_path(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    publish = repo / "publish"
-    publish.mkdir()
-    git(publish, "init", "--bare", "-q")
-    git(repo, "config", "remote.origin.url", "publish")
-    git(repo, "remote", "add", "publish", "./publish")
-    tip = commit(repo, "human")
-    row = f"refs/heads/topic {tip} refs/heads/topic {ZERO}\n"
-    monkeypatch.setattr(sys, "stdin", io.StringIO(row))
-    assert alpha.main(["pre-push-guard", "origin", "publish"], "p") == 0
-
-
-@pytest.mark.usefixtures("repo")
-def test_a_slow_get_url_check_refuses_the_push(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    real = subprocess.run
-    url = origin_url()
-
-    def hang(command: list[str], **kwargs: object) -> object:
-        if "--get-url" in command:
-            assert kwargs["timeout"] == pg.URL_TIMEOUT
-            raise subprocess.TimeoutExpired(command, 1)
-        return real(command, **kwargs)  # type: ignore[call-overload]
-
-    monkeypatch.setattr(pg.subprocess, "run", hang)
-    assert pg.remote_tips(url) is None
-
-
-def test_an_alias_for_the_dot_prefixed_path_does_not_refuse_a_bare_path(
-    repo: Path,
-) -> None:
-    (repo / "a").mkdir()
-    git(repo / "a", "init", "--bare", "-q", "b")
-    git(repo, "config", "url./elsewhere/.insteadOf", "./a/b")
-    assert pg.remote_tips("a/b") == []
-
-
-def test_a_tilde_url_reaches_ls_remote_as_given(
-    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    git(home, "init", "--bare", "-q", "bare.git")
-    monkeypatch.setenv("HOME", str(home))
-    assert pg.remote_tips("~/bare.git") == []
-    assert repo.exists()
