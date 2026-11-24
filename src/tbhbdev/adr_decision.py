@@ -2,7 +2,7 @@
 
 import re
 from dataclasses import dataclass
-from typing import Self
+from typing import Self, cast
 
 from tbhbdev.content import Json, Refused
 
@@ -47,7 +47,7 @@ class Decision:
         labels = issue.get("labels")
         if not isinstance(labels, list) or not any(
             isinstance(label, dict) and label.get("name") == ADR_LABEL
-            for label in labels
+            for label in cast("list[object]", labels)  # pragma: no mutate -- Type only.
         ):
             message = f"Decision issue lacks the {ADR_LABEL} label"
             raise Refused(message)
@@ -55,15 +55,15 @@ class Decision:
             message = "Decision issue is closed"
             raise Refused(message)
         body = _required(issue, "body").replace("\r\n", "\n")
-        link = issue.get(ADR_LINK_KEY)
-        if (
-            isinstance(link, str) and re.fullmatch(_PULL_URL, link)
-        ) or _LINK_LINE.search(body):
-            message = "Decision issue already has an ADR pull request link"
+        if _LINK_LINE.search(f"{ADR_LINK_KEY}: {issue.get(ADR_LINK_KEY)}\n{body}"):
+            message = "Decision issue already links to a record pull request"
             raise Refused(message)
         parts = _HEADING.split(body)
         sections: Json = dict(zip(parts[1::2], parts[2::2], strict=True))
-        options = dict(_OPTION.findall(_required(sections, OPTIONS)))
+        options = {
+            option[1]: option[2]
+            for option in _OPTION.finditer(_required(sections, OPTIONS))
+        }
         selected = _required(sections, RECOMMENDATION).strip()
         if selected not in options:
             message = f"{RECOMMENDATION} must name a numbered option"
