@@ -223,7 +223,7 @@ def local_refs(workspace: Path) -> dict[str, str]:
 def new_commits(
     run: Run, workspace: Path, before: dict[str, str], after: dict[str, str]
 ) -> list[tuple[str, str]]:
-    """Find local branch or detached HEAD tips with new run history."""
+    """Find independent local branch or detached HEAD tips with new run history."""
     # Use the starting tip of the run's branch, falling back to the starting HEAD.
     start = before.get(f"refs/heads/agent/{run.files.name}") or before.get(
         "HEAD", before.get("detached HEAD")
@@ -241,11 +241,19 @@ def new_commits(
     with publication(
         run.files.root, workspace, next(iter(candidates.values()))
     ) as directory:
-        return [
+        found = [
             (name, commit)
             for name, tip in sorted(candidates.items())
             if (commit := outside_history(directory, tip, bases, start))
         ]
+        if len(found) <= 1:
+            return found
+        independent = set(
+            history_git(
+                directory, "merge-base", "--independent", *(tip for _, tip in found)
+            ).split()
+        )
+        return [(name, tip) for name, tip in found if tip in independent]
 
 
 def outside_history(
@@ -253,6 +261,20 @@ def outside_history(
 ) -> str:
     """Return the tip if it descends from the start and is outside known history."""
     revisions = "\n".join((tip, *(f"^{base}" for base in bases))) + "\n"
+    return history_git(
+        directory,
+        "rev-list",
+        # Excluding the start also excludes its ancestors.
+        f"--ancestry-path={start}",
+        "--max-count=1",
+        "--stdin",
+        "--",
+        revisions=revisions,
+    ).strip()
+
+
+def history_git(directory: Path, *args: str, revisions: str | None = None) -> str:
+    """Run a Git history query with the protected publication metadata."""
     env = dict.fromkeys(
         (
             "HOME",
@@ -269,19 +291,14 @@ def outside_history(
         GIT_TERMINAL_PROMPT="0",
         PATH=host_tools.search(),
     )
-    listed = subprocess.run(  # nosec B603
+    return subprocess.run(  # nosec B603
         [
             host_tools.resolve("git"),
             "-c",
             "core.hooksPath=/dev/null",
             "-C",
             str(directory),
-            "rev-list",
-            # Excluding the start also excludes its ancestors.
-            f"--ancestry-path={start}",
-            "--max-count=1",
-            "--stdin",
-            "--",
+            *args,
         ],
         cwd=directory,
         env=env,
@@ -290,8 +307,7 @@ def outside_history(
         text=True,
         check=True,
         timeout=HISTORY_TIMEOUT,
-    )
-    return listed.stdout.strip()
+    ).stdout
 
 
 def opened(

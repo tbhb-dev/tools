@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import Mock
 
 import pytest
 from agent_host_example import constant, host_settings, run_request
@@ -364,7 +365,6 @@ def test_commits_off_the_run_branch(
 ) -> None:
     run, prepared, target = local_run
     workspace = Path(prepared.paths.worktree)
-    made: list[str] = []
 
     def elsewhere(*_args: object) -> int:
         if source == "topic/work":
@@ -372,7 +372,6 @@ def test_commits_off_the_run_branch(
         else:
             git(workspace, "switch", "--detach", "HEAD")
         commit(workspace, "off branch")
-        made.append(git(workspace, "rev-parse", "HEAD"))
         if source.startswith("refs/"):
             if source == "refs/tags/work":
                 git(workspace, "tag", "-a", "work", "-m", "keep tagged work")
@@ -390,7 +389,7 @@ def test_commits_off_the_run_branch(
         assert not run.files.path("branch").exists()
         assert not run.files.path("log").exists()
     else:
-        (sha,) = made
+        sha = git(workspace, "rev-parse", "HEAD")
         assert git(target, "rev-parse", "refs/heads/agent/example") == sha
         assert run.files.path("branch").read_text() == "agent/example"
         assert run.files.path("head").read_text() == sha
@@ -405,6 +404,7 @@ def test_fetch_does_not_publish_upstream_history(
     upstream = run.home / "upstream.git"
     git(workspace, "init", "--bare", str(upstream))
     git(workspace, "remote", "add", "origin", str(upstream))
+    git(workspace, "push", "origin", "HEAD:refs/heads/main")
     git(workspace, "switch", "-c", "upstream/work")
     commit(workspace, "upstream ancestor")
     ancestor = git(workspace, "rev-parse", "HEAD")
@@ -434,9 +434,12 @@ def test_fetch_does_not_publish_upstream_history(
     assert not run.files.path("log").exists()
 
 
-@pytest.mark.parametrize("ref", ["stash", "notes"])
+@pytest.mark.parametrize(
+    ("ref", "with_commit"),
+    [("stash", False), ("notes", False), ("stash", True), ("tag", True)],
+)
 def test_git_metadata_does_not_publish(
-    local_run: tuple[run_host.Run, run_host.Prepared, Path], ref: str
+    local_run: tuple[run_host.Run, run_host.Prepared, Path], ref: str, with_commit: bool
 ) -> None:
     run, prepared, target = local_run
     workspace = Path(prepared.paths.worktree)
@@ -445,14 +448,22 @@ def test_git_metadata_does_not_publish(
         if ref == "stash":
             (workspace / "untracked.txt").write_text("untracked work\n")
             git(workspace, "stash", "push", "-u")
-        else:
+        elif ref == "notes":
             git(workspace, "notes", "add", "-m", "run note")
+        else:
+            git(workspace, "switch", "--detach", "HEAD")
+            commit(workspace, "tagged commit")
+            git(workspace, "tag", "work")
+            git(workspace, "switch", "agent/example")
+        if with_commit:
+            commit(workspace, "new run commit")
         return 0
 
     with ExitStack() as stack:
         assert push.run(run, prepared, stack, write_metadata, SYNTHETIC) == 0
-    assert git(target, "for-each-ref") == ""
-    assert not run.files.path("head").exists()
+    sha = git(workspace, "rev-parse", "HEAD")
+    expected = f"{sha} refs/heads/agent/example" if with_commit else ""
+    assert git(target, "for-each-ref", "--format=%(objectname) %(refname)") == expected
     assert not run.files.path("log").exists()
 
 
@@ -628,46 +639,51 @@ def test_history_lookup_uses_protected_metadata_and_has_a_deadline(
     )
 
 
-def test_commits_on_two_branches_are_not_pushed(
+@pytest.mark.parametrize("history", ["single", "chain", "diverged"])
+def test_commits_on_two_branches(
     local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    history: str,
 ) -> None:
     run, prepared, target = local_run
     workspace = Path(prepared.paths.worktree)
+    commands = Mock(wraps=subprocess.run)
 
     def elsewhere(*_args: object) -> int:
-        git(workspace, "branch", "topic/work")
+        start = git(workspace, "rev-parse", "HEAD")
         commit(workspace, "run branch commit")
-        git(workspace, "switch", "topic/work")
-        commit(workspace, "other branch commit")
+        git(
+            workspace,
+            "switch",
+            "-c",
+            "topic/work",
+            "HEAD" if history == "chain" else start,
+        )
+        if history != "single":
+            commit(workspace, "other branch commit")
+        monkeypatch.setattr(subprocess, "run", commands)
         return 0
 
     with ExitStack() as stack:
-        assert push.run(run, prepared, stack, elsewhere, SYNTHETIC) == 4
-    assert git(target, "for-each-ref") == ""
+        assert push.run(run, prepared, stack, elsewhere, SYNTHETIC) == (
+            4 if history == "diverged" else 0
+        )
+    last_query = commands.call_args.args[0][5:]
     run_commit = git(workspace, "rev-parse", "agent/example")
     other = git(workspace, "rev-parse", "topic/work")
+    if history != "diverged":
+        assert git(target, "rev-parse", "refs/heads/agent/example") == (
+            other if history == "chain" else run_commit
+        )
+        if history == "single":
+            assert last_query[0] == "rev-list"
+        return
+    assert git(target, "for-each-ref") == ""
+    assert last_query == ["merge-base", "--independent", run_commit, other]
     assert run.files.path("log").read_text() == (
         f"push skipped: commits {run_commit} {other} on agent/example, topic/work "
         "need one branch, agent/example\n"
     )
-
-
-def test_run_branch_commit_off_checkout_is_pushed(
-    local_run: tuple[run_host.Run, run_host.Prepared, Path],
-) -> None:
-    run, prepared, target = local_run
-    workspace = Path(prepared.paths.worktree)
-
-    def elsewhere(*_args: object) -> int:
-        git(workspace, "branch", "topic/work")
-        commit(workspace, "run branch commit")
-        git(workspace, "switch", "topic/work")
-        return 0
-
-    with ExitStack() as stack:
-        assert push.run(run, prepared, stack, elsewhere, SYNTHETIC) == 0
-    sha = git(workspace, "rev-parse", "agent/example")
-    assert git(target, "rev-parse", "refs/heads/agent/example") == sha
 
 
 @pytest.mark.parametrize(
@@ -953,40 +969,29 @@ def test_send_limits_child_capabilities(
 
 
 @pytest.mark.parametrize("token", [SYNTHETIC, None])
+@pytest.mark.parametrize("on_run_branch", [True, False])
 def test_push_preserves_harness_failure(
-    local_run: tuple[run_host.Run, run_host.Prepared, Path], token: str | None
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    token: str | None,
+    on_run_branch: bool,
 ) -> None:
     run, prepared, target = local_run
 
     def failed_harness(
         actual: run_host.Run, paths: run_host.Prepared, stack: ExitStack
     ) -> int:
+        if not on_run_branch:
+            git(Path(paths.paths.worktree), "switch", "-c", "topic/work")
         harness(actual, paths, stack)
         return 7
 
     with ExitStack() as stack:
         assert push.run(run, prepared, stack, failed_harness, token) == 7
     assert git(target, "for-each-ref") == ""
-    assert run.files.path("head").exists()
-    assert run.files.path("log").read_text() == "push skipped: harness exited 7\n"
+    assert run.files.path("head").exists() is on_run_branch
     assert not run.files.path("branch").exists()
-
-
-def test_failed_harness_off_the_run_branch_records_no_head(
-    local_run: tuple[run_host.Run, run_host.Prepared, Path],
-) -> None:
-    run, prepared, target = local_run
-    workspace = Path(prepared.paths.worktree)
-
-    def failed_elsewhere(*_args: object) -> int:
-        git(workspace, "switch", "-c", "topic/work")
-        commit(workspace, "off branch")
-        return 7
-
-    with ExitStack() as stack:
-        assert push.run(run, prepared, stack, failed_elsewhere, SYNTHETIC) == 7
-    assert git(target, "for-each-ref") == ""
-    assert not run.files.path("head").exists()
+    if on_run_branch:
+        assert run.files.path("log").read_text() == "push skipped: harness exited 7\n"
 
 
 @pytest.mark.parametrize("missing", [False, True])
