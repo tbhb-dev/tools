@@ -57,10 +57,10 @@ def test_build_requires_cog_and_sanitizes_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rc: int
 ) -> None:
     result = subprocess.CompletedProcess(
-        [], rc, b"ignored", b"failed in /private/path\nsecond line"
+        [], rc, b"ignored", b"failed \xff in /private/path\nsecond line"
     )
     monkeypatch.setattr(shims.subprocess, "run", Mock(return_value=result))
-    expected = f"hook shims: bazel run //:bazel_env failed (rc={rc}): failed"
+    expected = f"hook shims: bazel run //:bazel_env failed (rc={rc}): failed \ufffd"
     with pytest.raises(Invalid, match=re.escape(expected)) as caught:
         shims.build(tmp_path, "/tools/bazel")
     assert "/private/path" not in str(caught.value)

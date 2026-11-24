@@ -103,6 +103,17 @@ def launch(remote: Remote, *options: str) -> int:
     return agent.main(arguments(remote, *options), "example agent")
 
 
+def test_exec_help_describes_expected_commits(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert agent.main(["exec", "--help"], "example agent") == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert (
+        "--expect-commit return status 6 if a successful build produced no new commit"
+        in help_text
+    )
+
+
 def command(verb: str, *options: str) -> int:
     return agent.main([verb, "sample", *options], "example agent")
 
