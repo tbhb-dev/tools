@@ -14,6 +14,7 @@ atttypmod
 autolaunch
 autouse
 awrel
+batchmode
 bazelisk
 bazelrc
 bazelversion
@@ -138,6 +139,7 @@ NOSYSTEM
 nspname
 O_CLOEXEC
 O_NONBLOCK
+oldifs
 onepassword
 onepasswordconnectsdk
 opam
@@ -344,3 +346,4 @@ dequeued
 enqueue
 enqueues
 enqueuing
+identityagent
