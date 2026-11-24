@@ -1,16 +1,18 @@
 """Draft architecture decision records from GitHub issues."""
 
-import argparse
+# cspell:words adrs
+
 import fcntl
 import json
 import os
 import re
 import sys
 import unicodedata
+from argparse import ArgumentParser, ArgumentTypeError, Namespace
 from datetime import date
 from functools import partial
 from pathlib import Path
-from subprocess import CalledProcessError
+from subprocess import CalledProcessError  # nosec B404 -- Only the client error type.
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
@@ -32,7 +34,7 @@ def _positive(value: str) -> int:
     number = int(value)
     if number <= 0:
         message = "expected a positive number"
-        raise argparse.ArgumentTypeError(message)
+        raise ArgumentTypeError(message)
     return number
 
 
@@ -61,7 +63,7 @@ def _deprecated(text: str, number: int) -> str:
 def _replace(path: Path, text: str) -> None:
     with TemporaryDirectory(dir=path.parent) as directory:
         temporary = Path(directory) / path.name
-        temporary.write_text(text, encoding="utf-8", newline="")
+        temporary.write_bytes(text.encode())
         temporary.chmod(path.stat().st_mode & 0o777)
         temporary.replace(path)
 
@@ -75,7 +77,7 @@ def _write(
         message = "issue title needs an ASCII letter or digit for the filename"
         raise Refused(message)
     directory.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    descriptor = os.open(directory, os.O_DIRECTORY)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         return _write_next(directory, slug, supersedes, decision, today)
@@ -104,7 +106,7 @@ def _write_next(
             )
             raise Refused(message)
         replaced = matches[0]
-        original = replaced.read_text(encoding="utf-8", newline="")
+        original = replaced.read_bytes().decode()
         update = replaced, _deprecated(original, number)
         context += f"\n\nThis record supersedes [{supersedes:04d}]({replaced.name})."
     title = f"{number:04d}. {decision.title}"
@@ -119,9 +121,9 @@ def _write_next(
         "---\n\n"
     )
     path = directory / f"{number:04d}-{slug}.md"
-    with path.open("x", encoding="utf-8") as stream:
+    with path.open("xb") as stream:
         try:
-            stream.write(frontmatter + body)
+            stream.write((frontmatter + body).encode())
             stream.close()
             if update is not None:
                 _replace(*update)
@@ -131,9 +133,7 @@ def _write_next(
     return path, body
 
 
-def _new(
-    args: argparse.Namespace, client: Client | None, clock: Callable[[], date]
-) -> int:
+def _new(args: Namespace, client: Client | None, clock: Callable[[], date]) -> int:
     api = GhClient() if client is None else client
     try:
         repo = args.repo or origin_repository()
@@ -164,7 +164,7 @@ def main(
     client: Client | None = None,
     clock: Callable[[], date] = date.today,
 ) -> int:
-    parser = argparse.ArgumentParser(prog=prog)
+    parser = ArgumentParser(prog=prog)
     new = parser.add_subparsers(required=True).add_parser("new")
     new.add_argument("--from-decision", type=_positive, required=True, metavar="N")
     new.add_argument("--repo", type=repo_name, metavar="OWNER/REPO")

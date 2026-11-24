@@ -2,8 +2,9 @@
 description: Draft architecture decision records from GitHub Decision issues.
 generated:
   - role: generated
-    harness: codex
-    at: "2026-11-24T19:53:00Z"
+    harness: codex:0.171.0
+    model: openai:gpt-6.2-sol
+    at: "2026-11-24T19:58:00Z"
 status: stable
 tags: [decisions, records]
 title: Decision record commands
@@ -11,6 +12,8 @@ type: Reference
 ---
 
 # Decision record commands
+
+<!-- cspell:words adrs -->
 
 `tbhbdev adr new --from-decision N` reads issue `N` from the current clone's GitHub origin. Use `--repo OWNER/REPO` to read from another repository. The issue must be an open Decision that proposes an architecture decision record and has no link to the record's pull request.
 

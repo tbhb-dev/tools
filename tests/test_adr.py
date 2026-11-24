@@ -1,5 +1,7 @@
 """Exercise record drafting with a fake GitHub client."""
 
+# cspell:words adrs
+
 from datetime import date
 from pathlib import Path
 from subprocess import CalledProcessError
@@ -13,7 +15,7 @@ from tbhbdev.alpha.pull_request import parse_frontmatter
 from tbhbdev.content import Json, Refused
 
 PROG = "tbhbdev adr"
-NEW = ["new", "--from-decision", "42"]
+NEW = ["new", "--from-decision", "1"]
 PULL = "https://github.com/example/records/pull/17"
 QUESTION = "Where should we store notes?"
 OPTION = "Shared folder - easy to search"
@@ -42,7 +44,7 @@ class Drafts:
         }
 
     def rest(self, method: str, path: str, payload: Json | None = None) -> Json:
-        assert (method, path, payload) == ("GET", f"/repos/{self.repo}/issues/42", None)
+        assert (method, path, payload) == ("GET", f"/repos/{self.repo}/issues/1", None)
         return self.issue
 
     def graphql(self, query: str, variables: Json) -> Json:
@@ -69,11 +71,12 @@ def drafts(
     return Drafts(root, capsys)
 
 
-@pytest.mark.parametrize(("old", "number"), [((), 1), ((2, 10), 11)])
+@pytest.mark.parametrize(("old", "number"), [((), 1), ((2, 9998), 9999)])
 def test_scaffold(drafts: Drafts, old: tuple[int, ...], number: int) -> None:
     for prefix in old:
         (drafts.root / f"{prefix:04d}-prior.md").touch()
-    (drafts.root / "9999-ignored.txt").touch()
+    if not old:
+        drafts.root = drafts.root / "nested" / "records"
     assert drafts.run() == 0
     path = drafts.root / f"{number:04d}-{SLUG}.md"
     assert drafts.capture.readouterr() == (f"{path}\n", "")
@@ -98,7 +101,7 @@ def test_scaffold(drafts: Drafts, old: tuple[int, ...], number: int) -> None:
     [
         ("type", None, "issue is not a Decision"),
         ("type", {"name": "Task"}, "issue is not a Decision"),
-        ("labels", [], "Decision issue lacks the adr label"),
+        ("labels", [{"name": "other"}], "Decision issue lacks the adr label"),
         ("labels", None, "Decision issue lacks the adr label"),
         ("state", "closed", "Decision issue is closed"),
         ("adrLink", PULL, "Decision issue already links to a record pull request"),
@@ -132,7 +135,8 @@ def test_supersedes(drafts: Drafts, prior: str) -> None:
     old.chmod(0o640)
     assert drafts.run("--supersedes", "0007") == 0
     new = drafts.root / f"0008-{SLUG}.md"
-    assert "This record supersedes [0007](0007-prior.md)." in new.read_text()
+    context = f"{QUESTION}\n\nThis record supersedes [0007](0007-prior.md)."
+    assert context in new.read_text()
     expected = PRIOR.replace("'stable'", "deprecated") + "superseded_by: 8\r\n" + END
     assert old.read_bytes() == expected.encode()
     assert old.stat().st_mode & 0o777 == 0o640
