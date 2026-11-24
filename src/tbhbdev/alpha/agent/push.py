@@ -140,36 +140,36 @@ def run(
                 run.files.write("log", f"push skipped: harness exited {rc}\n")
         return rc
     try:
-        after = local_refs(workspace)
-        commit = after.pop(reference, None)
-        if commit is not None:
-            if isinstance(token, str) and head(workspace, branch) is None:
-                after[reference] = commit
-            else:
-                after = {reference: commit, **after}
-        change = first_change(run, workspace, before, after)
+        found = new_commits(run, workspace, before, local_refs(workspace))
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         run.files.write(
             "log", f"push skipped: cannot check new commits ({type(exc).__name__})\n"
         )
         return 4
-    if change is None:
+    if not found:
         return 0
-    return publish(run, workspace, change, token, base)
+    return publish(run, workspace, found, token, base)
 
 
 def publish(
     run: Run,
     workspace: Path,
-    change: tuple[str, str],
+    found: list[tuple[str, str]],
     token: str | PushTokenFailure | None,
     base: str | None,
 ) -> int:
-    name, commit = change
     branch = f"agent/{run.files.name}"
-    on_branch = name == f"refs/heads/{branch}"
-    if on_branch:
-        run.files.write("head", commit)
+    commits = dict.fromkeys(commit for _, commit in found)
+    if len(commits) > 1:
+        sources = ", ".join(name.removeprefix("refs/heads/") for name, _ in found)
+        run.files.write(
+            "log",
+            f"push skipped: commits {' '.join(commits)} on {sources} "
+            f"need one branch, {branch}\n",
+        )
+        return 4
+    commit = found[0][1]
+    run.files.write("head", commit)
     if not isinstance(token, str):
         reason = token.reason if token is not None else "unavailable"
         run.files.write(
@@ -177,14 +177,6 @@ def publish(
         )
         return 4
     try:
-        if not on_branch or head(workspace, branch) != commit:
-            source = name.removeprefix("refs/heads/")
-            run.files.write(
-                "log",
-                f"push skipped: commit {commit} on {source} needs "
-                f"{branch} checked out\n",
-            )
-            return 4
         with publication(run.files.root, workspace, commit) as directory:
             status, error = send(directory, url(run.request.repo), branch, token)
             if not status:
@@ -226,21 +218,22 @@ def local_refs(workspace: Path) -> dict[str, str]:
     return refs
 
 
-def first_change(
+def new_commits(
     run: Run, workspace: Path, before: dict[str, str], after: dict[str, str]
-) -> tuple[str, str] | None:
-    """Find a commit that no starting ref reaches."""
+) -> list[tuple[str, str]]:
+    """Find every ref whose tip reaches a commit that no starting ref reaches."""
     bases = tuple(dict.fromkeys(before.values()))
     candidates = {name: tip for name, tip in after.items() if tip not in bases}
     if not candidates:
-        return None
+        return []
     with publication(
         run.files.root, workspace, next(iter(candidates.values()))
     ) as directory:
-        for name, tip in candidates.items():
-            if commit := outside_history(directory, tip, bases):
-                return name, commit
-    return None
+        return [
+            (name, commit)
+            for name, tip in candidates.items()
+            if (commit := outside_history(directory, tip, bases))
+        ]
 
 
 def outside_history(directory: Path, tip: str, bases: tuple[str, ...]) -> str:
