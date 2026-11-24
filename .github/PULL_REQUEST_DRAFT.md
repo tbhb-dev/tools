@@ -10,7 +10,7 @@ A build run can make a commit on one branch and continue on another. Publication
 
 ## Behavior change
 
-Publication considers local branch tips and detached HEAD. A candidate must descend from the run's start commit and be absent from upstream and pre-run history. The driver drops any candidate already reachable from another candidate. It publishes the remaining tip to the run branch, or exits with code 4 if multiple distinct tips remain. Tags, notes, and stashes are excluded from publication.
+The driver considers only local branch tips and detached `HEAD`. Candidates must descend from the start commit and fall outside upstream and pre-run history. The driver drops any tip with a descendant among the candidates. When one distinct tip remains, it pushes that tip to the run branch. If two or more remain, it exits with code 4. It skips tags, notes, and stashes.
 
 ## Risk
 
