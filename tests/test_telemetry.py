@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -22,6 +23,7 @@ from tbhbdev.alpha import agent
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+    from typing import TextIO
 
     from opentelemetry.sdk.trace import ReadableSpan
 
@@ -104,9 +106,23 @@ def test_settings_precedence(  # noqa: PLR0913, PLR0917 -- precedence matrix and
     user = {ENDPOINT: f"{URL}/user", ALLOW_HOSTS: f"{COLLECTOR},review-host"}
     managed_file.write_text(json.dumps({"env": managed}), encoding="utf-8")
     user_file.write_text(json.dumps({"env": user}), encoding="utf-8")
+    opened: list[str] = []
+    original_open = os.open
+
+    def track_open(path: str, flags: int) -> int:
+        opened.append(path)
+        return original_open(path, flags)
+
+    monkeypatch.setattr(os, "open", track_open)
 
     assert telemetry.command(lambda: 7) == 7
 
+    expected_files = []
+    if expected != ("environment", "environment"):
+        expected_files.append(str(managed_file))
+    if "user" in expected:
+        expected_files.append(str(user_file))
+    assert opened == expected_files
     values = {"environment": process, "managed": managed, "user": user}
     assert local_export == {
         key: values[source][key]
@@ -133,6 +149,13 @@ def test_only_allowlisted_keys_apply_from_default_user_settings(
         ),
         encoding="utf-8",
     )
+    reported = threading.Lock()
+
+    def acquire(*, blocking: bool) -> bool:
+        assert not blocking
+        return reported.acquire(blocking=False)
+
+    monkeypatch.setattr(telemetry, "_REPORTED", SimpleNamespace(acquire=acquire))
 
     assert telemetry.command(lambda: 0) == 0
     assert local_export == {ENDPOINT: URL, ALLOW_HOSTS: None}
@@ -189,8 +212,27 @@ def test_unavailable_home_and_nonregular_settings_fall_back(
 ) -> None:
     managed, _user = telemetry_files
     os.mkfifo(managed)
+    original_open = os.open
+
+    def open_fifo(path: str, flags: int) -> int:
+        assert flags & os.O_NONBLOCK
+        return original_open(path, flags)
+
+    def open_settings(
+        path: Path,
+        *,
+        encoding: str | None = None,
+        opener: Callable[[str, int], int] | None = None,
+    ) -> TextIO:
+        assert encoding is not None
+        assert opener is not None
+        return open(path, encoding=encoding, opener=opener)
+
+    monkeypatch.setattr(os, "open", open_fifo)
+    monkeypatch.setattr(telemetry, "open", open_settings, raising=False)
+    monkeypatch.setattr(json, "load", pytest.fail)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR")
-    monkeypatch.setattr(type(managed), "home", broken)
+    monkeypatch.setattr("pathlib.Path.home", broken)
     assert telemetry.command(lambda: 7) == 7
     assert local_export == {ENDPOINT: None, ALLOW_HOSTS: None}
     assert capsys.readouterr() == ("", diagnostic("none", "none"))
