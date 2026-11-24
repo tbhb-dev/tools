@@ -1,3 +1,4 @@
+import json
 import shutil
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
@@ -54,6 +55,41 @@ MARKER = (
 )
 KEY = Marker("tbhb-dev/tools", 384, HEAD, "review-build")
 EXISTING = Existing(942, "reviews[bot]", "COMMENTED", f"{BODY}\n{MARKER}\n")
+METADATA = {
+    "schema": 2,
+    "repo": "tbhb-dev/tools",
+    "pr": 384,
+    "head_sha": HEAD,
+    "tier": 2,
+    "verdict": "NO-GO",
+    "run": {
+        "name": "review-build",
+        "provider": "openai",
+        "model": "gpt-6",
+        "variant": "a",
+        "host": "reviewer.example.org",
+    },
+    "findings": [
+        {
+            "class": "BLOCK",
+            "path": "src/app.py",
+            "line": 4,
+            "summary": "Return the saved value.",
+        },
+        {
+            "class": "TECH-DEBT",
+            "path": "tests/test_app.py",
+            "line": 8,
+            "summary": "Rename the fixture.",
+        },
+        {
+            "class": "SECURITY-DEBT",
+            "path": "src/app.py",
+            "line": 12,
+            "summary": "Narrow the file permissions.",
+        },
+    ],
+}
 
 
 @pytest.fixture
@@ -93,67 +129,25 @@ def test_render_empty_findings_and_alternate_run() -> None:
         run=replace(RUN, variant="b"),
         verification="Read the cache.\n\n",
     )
-    body = """Run: review-build
-Provider: openai
-Model: gpt-6
-Variant: b
-Host: reviewer.example.org
-Head: 0123456789abcdef0123456789abcdef01234567
-Tier: 0
-
-## Verdict
-
-GO
-
-## Findings
-
-## Verification
-
-Read the cache.
-"""
-    assert review_doc.render(doc) == f"{body}\n{MARKER}\n"
+    rendered = review_doc.render(doc)
+    assert rendered.endswith(
+        f"\n## Findings\n\n## Verification\n\nRead the cache.\n\n{MARKER}\n"
+    )
+    body = rendered.removesuffix(f"\n{MARKER}\n")
     assert review_doc.parse(FRONTMATTER + body) == replace(
         doc, verification="Read the cache."
     )
 
 
 def test_parse_matching_frontmatter() -> None:
-    frontmatter = f"""---
-schema: 2
-repo: tbhb-dev/tools
-pr: 384
-head_sha: '{HEAD}'
-tier: 2
-verdict: NO-GO
-run:
-  name: review-build
-  provider: openai
-  model: gpt-6
-  variant: a
-  host: reviewer.example.org
-findings:
-  - class: BLOCK
-    path: src/app.py
-    line: 4
-    summary: Return the saved value.
-  - class: TECH-DEBT
-    path: tests/test_app.py
-    line: 8
-    summary: Rename the fixture.
-  - class: SECURITY-DEBT
-    path: src/app.py
-    line: 12
-    summary: Narrow the file permissions.
----
-
-"""
+    frontmatter = f"---\n{json.dumps(METADATA)}\n---\n\n"
     assert review_doc.parse((frontmatter + BODY).replace("\n", "\r\n")) == DOC
 
 
 @pytest.mark.parametrize(
     ("draft", "problem"),
     [
-        (BODY, "expected schema 2 frontmatter"),
+        (BODY, "^expected schema 2 frontmatter with repo and integer pr$"),
         ("---\nschema: 2\n" + BODY, "unterminated frontmatter"),
         (FRONTMATTER.replace("pr: 384", "pr: [") + BODY, "invalid YAML"),
         (
@@ -169,10 +163,18 @@ findings:
         (FRONTMATTER.replace("pr: 384", "pr: 384\ntier: 1") + BODY, "field: tier"),
         (
             FRONTMATTER + BODY.replace("## Verdict", "## Verification", 1),
-            "sections in order",
+            "^expected Verdict, Findings, and Verification sections in order$",
         ),
-        (FRONTMATTER + BODY.replace("Tier: 2", "Tier: 3"), "seven run header lines"),
-        (FRONTMATTER + BODY.replace("\nNO-GO\n", "\nHOLD\n"), "GO or NO-GO verdict"),
+        (
+            FRONTMATTER + BODY.replace("Tier: 2", "Tier: 3"),
+            "^expected the seven run header lines$",
+        ),
+        (FRONTMATTER + " " + BODY, "seven run header lines"),
+        (FRONTMATTER + "X" + BODY, "seven run header lines"),
+        (
+            FRONTMATTER + BODY.replace("\nNO-GO\n", "\nHOLD\n"),
+            "^expected a GO or NO-GO verdict$",
+        ),
         (FRONTMATTER + BODY.replace("- BLOCK", "- NOTE"), "invalid finding: '- NOTE"),
         (FRONTMATTER + BODY.replace("app.py:4", "app.py:0"), "invalid finding"),
     ],
@@ -180,6 +182,23 @@ findings:
 def test_parse_refuses_malformed_drafts(draft: str, problem: str) -> None:
     with pytest.raises(review_doc.ReviewError, match=problem):
         review_doc.parse(draft)
+
+
+@pytest.mark.parametrize(
+    ("summary", "verification"),
+    [("Handle X", "Xcode uses API X"), ("Handle X  ", "Read the output.  ")],
+)
+def test_round_trip_preserves_verification_and_summary(
+    summary: str, verification: str
+) -> None:
+    # The parser preserves the source text for the schema validator.
+    doc = replace(
+        DOC, findings=(replace(BLOCK, summary=summary),), verification=verification
+    )
+    rendered = review_doc.render(doc)
+    assert rendered.endswith(f"\n{verification}\n\n{MARKER}\n")
+    body = rendered.removesuffix(f"\n{MARKER}\n")
+    assert review_doc.parse(FRONTMATTER + body) == doc
 
 
 def test_marker_round_trip() -> None:
@@ -233,41 +252,7 @@ def test_validate_passes_exact_body_and_metadata(
 ) -> None:
     def check_review(markdown: str, *, metadata: content.Json) -> list[str]:
         assert markdown == BODY
-        assert metadata == {
-            "schema": 2,
-            "repo": "tbhb-dev/tools",
-            "pr": 384,
-            "head_sha": HEAD,
-            "tier": 2,
-            "verdict": "NO-GO",
-            "run": {
-                "name": "review-build",
-                "provider": "openai",
-                "model": "gpt-6",
-                "variant": "a",
-                "host": "reviewer.example.org",
-            },
-            "findings": [
-                {
-                    "class": "BLOCK",
-                    "path": "src/app.py",
-                    "line": 4,
-                    "summary": "Return the saved value.",
-                },
-                {
-                    "class": "TECH-DEBT",
-                    "path": "tests/test_app.py",
-                    "line": 8,
-                    "summary": "Rename the fixture.",
-                },
-                {
-                    "class": "SECURITY-DEBT",
-                    "path": "src/app.py",
-                    "line": 12,
-                    "summary": "Narrow the file permissions.",
-                },
-            ],
-        }
+        assert metadata == METADATA
         return ["CUE refusal"]
 
     monkeypatch.setattr(content, "check_review", check_review)
@@ -351,13 +336,19 @@ def test_validate_returns_cue_refusals(doc: ReviewDoc, problem: str) -> None:
 
 def test_api_stubs_raise() -> None:
     api = cast("review_doc.Api", object())
-    with pytest.raises(NotImplementedError, match="review lookup is not implemented"):
+    with pytest.raises(
+        NotImplementedError, match=r"^review lookup is not implemented$"
+    ):
         review_doc.find_existing(api, KEY, author=EXISTING.author)
-    with pytest.raises(NotImplementedError, match="review posting is not implemented"):
+    with pytest.raises(
+        NotImplementedError, match=r"^review posting is not implemented$"
+    ):
         review_doc.post(api, DOC, author=EXISTING.author)
     with pytest.raises(
-        NotImplementedError, match="review dismissal is not implemented"
+        NotImplementedError, match=r"^review dismissal is not implemented$"
     ):
         review_doc.dismiss(api, DOC.repo, DOC.pr, EXISTING, "stale head")
-    with pytest.raises(NotImplementedError, match="review replies are not implemented"):
+    with pytest.raises(
+        NotImplementedError, match=r"^review replies are not implemented$"
+    ):
         review_doc.reply(api, DOC.repo, DOC.pr, EXISTING.id, HEAD, "Retested.")

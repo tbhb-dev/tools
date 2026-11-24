@@ -112,7 +112,8 @@ def _parse_finding(line: str) -> Finding:
         message = f"invalid finding: {line!r}"
         raise ReviewError(message)
     class_, path, number, summary = match.groups()
-    return Finding(cast("FindingClass", class_), path, int(number), summary)
+    kind = cast("FindingClass", class_)  # pragma: no mutate -- runtime no-op
+    return Finding(kind, path, int(number), summary)
 
 
 def _parse_body(body: str, repo: str, pr: int) -> ReviewDoc:
@@ -130,13 +131,16 @@ def _parse_body(body: str, repo: str, pr: int) -> ReviewDoc:
     if verdict not in ("GO", "NO-GO"):
         message = "expected a GO or NO-GO verdict"
         raise ReviewError(message)
+    tier_number = int(tier)
+    parsed_tier = cast("Tier", tier_number)  # pragma: no mutate -- runtime no-op
+    run_variant = cast("Variant", variant)  # pragma: no mutate -- runtime no-op
     return ReviewDoc(
         repo,
         pr,
         head,
-        cast("Tier", int(tier)),
-        cast("Verdict", verdict),
-        Run(name, provider, model, cast("Variant", variant), host),
+        parsed_tier,
+        verdict,
+        Run(name, provider, model, run_variant, host),
         tuple(_parse_finding(line) for line in findings.strip("\n").splitlines()),
         verification.strip("\n"),
     )
@@ -153,7 +157,9 @@ def parse(text: str) -> ReviewDoc:
     except ValueError as exc:
         raise ReviewError(str(exc)) from exc
 
-    match fields if isinstance(fields, dict) else {}:
+    # The mapping pattern checks the YAML value at runtime.
+    mapping = cast("dict[str, object] | None", fields)  # pragma: no mutate -- no-op
+    match mapping:
         case {"schema": int(2), "repo": str(repo), "pr": int(pr), **supplied} if (
             type(pr) is int
         ):
@@ -165,8 +171,7 @@ def parse(text: str) -> ReviewDoc:
             message = "expected schema 2 frontmatter with repo and integer pr"
             raise ReviewError(message)
     expected = _metadata(doc)
-    supplied_fields = cast("dict[str, object]", supplied)
-    for name, value in supplied_fields.items():
+    for name, value in supplied.items():
         if name not in expected or expected[name] != value:
             message = f"unexpected or mismatched review frontmatter field: {name}"
             raise ReviewError(message)
@@ -279,7 +284,12 @@ def dismiss(api: Api, repo: str, pr: int, existing: Existing, reason: str) -> No
 
 
 def reply(  # noqa: PLR0913, PLR0917
-    api: Api, repo: str, pr: int, review_id: int, head_sha: str, text: str
+    api: Api,
+    repo: str,
+    pr: int,
+    review_id: int,  # noqa: V107 -- Reserved for the reply implementation.
+    head_sha: str,
+    text: str,
 ) -> int:
     """Post a PR issue comment and return its ID.
 
