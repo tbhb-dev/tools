@@ -4400,7 +4400,7 @@ def test_execute_requires_a_commit_when_requested(
     expected: int,
 ) -> None:
     run = make_run(tmp_path, expect_commit=expect_commit)
-    prepared = preparation(run)
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
     HostRuntime(run, prepared, None).patch(monkeypatch)
 
     def publish(*_args: object) -> int:
@@ -4431,7 +4431,7 @@ def test_run_builds_required_shims_before_harness(
 ) -> None:
     run = make_run(tmp_path)
     run.host = dataclasses.replace(run.host, build_shims=enabled)
-    prepared = preparation(run)
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
     workspace = Path(prepared.paths.worktree)
     if hook_reference:
         (workspace / "prek.toml").write_text(".bazel_env/bin/cog")
@@ -4459,7 +4459,7 @@ def test_run_builds_required_shims_before_harness(
     assert run_host.execute(run, "example", "unused") == expected
     assert run.files.path("rc").read_text() == f"{expected}\n"
     if enabled:
-        assert runtime.events == ["group-stopped"]
+        assert runtime.events == ["group-stopped", "auth"]
         assert run.deadline == deadline + 30
         assert tool.call_count == 2  # Shim build and Bazel shutdown.
         call.assert_called_once()
