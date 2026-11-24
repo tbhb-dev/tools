@@ -303,7 +303,13 @@ def post(
     raise NotImplementedError("review posting pending")  # noqa: EM101
 
 
-def dismiss(api: Api, repo: str, pr: int, review_id: int, reason: str) -> None:
+def dismiss(
+    api: Api,
+    repo: str,
+    pr: int,
+    review_id: int,  # noqa: V107 -- Stream 3 will use this review ID.
+    reason: str,
+) -> None:
     """Edit a COMMENT review to prefix its body with `SUPERSEDED: <reason>`.
 
     Require a plain-text reason of at most 200 characters with no markers.
