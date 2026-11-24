@@ -583,6 +583,27 @@ def test_a_run_without_a_variant_or_with_the_same_one_is_a_duplicate(
         driver.refuse_live_duplicate(CONFIG, second)
 
 
+@pytest.mark.parametrize("change", ["launcher", "harness", "model"])
+def test_a_run_by_another_launcher_harness_or_model_is_not_a_duplicate(
+    remote: Remote, change: str
+) -> None:
+    second = recorded_review(remote)
+    other = (
+        model.Harness.CLAUDE
+        if second.request.harness is not model.Harness.CLAUDE
+        else model.Harness.CODEX
+    )
+    if change == "launcher":
+        second.launched_by = ("another-launcher", second.launched_by[1])
+    else:
+        changes: dict[str, RunRequest] = {
+            "harness": dataclasses.replace(second.request, harness=other),
+            "model": dataclasses.replace(second.request, model="another-model"),
+        }
+        second.request = changes[change]
+    driver.refuse_live_duplicate(CONFIG, second)
+
+
 @pytest.mark.parametrize("field", ["role", "class_"])
 def test_a_different_role_or_class_alone_is_still_a_duplicate(
     remote: Remote, field: str

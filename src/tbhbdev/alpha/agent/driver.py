@@ -221,11 +221,13 @@ def launch_lock() -> Generator[None]:
 
 
 def refuse_live_duplicate(settings: Settings, run: Run) -> None:
-    """Refuse a review of a commit that another run of the profile is reviewing.
+    """Refuse a repeat of a run that another launch of the profile has live.
 
-    Two runs on one repository, commit and profile coexist only when both
-    declare a variant and the variants differ (a planned pair of reviewers of
-    one head). A run with no variant conflicts with every live run on that key.
+    Two runs on one repository, commit and profile coexist when their launcher,
+    harness or model differ, so a planned pair of reviewers can hold one head.
+    They also coexist when both declare a variant and the variants differ. A
+    run with the same launcher, harness and model conflicts with every live run
+    on that key unless both variants are declared and differ.
 
     A recorded run counts as live until the host reports its exit status, so
     an unreachable host or a run with no status also refuses. A run older than
@@ -247,6 +249,9 @@ def refuse_live_duplicate(settings: Settings, run: Run) -> None:
             canonical_repo(other.request.repo) == canonical_repo(run.request.repo)
             and other.request.commit == run.request.commit
             and other.request.profile is run.request.profile
+            and other.launched_by[0] == run.launched_by[0]
+            and other.request.harness is run.request.harness
+            and other.request.model == run.request.model
             and (
                 other.request.variant is None
                 or run.request.variant is None
