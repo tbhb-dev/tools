@@ -3,9 +3,10 @@ description: Agent settings, run requests, and host preparation.
 generated:
   - role: generated
     harness: codex:0.171.0
-    model: openai:gpt-6
+    model: openai:gpt-6.2-sol
+    effort: high
     surface: exec
-    at: "2026-11-24T17:07:09Z"
+    at: "2026-11-24T17:09:42Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
