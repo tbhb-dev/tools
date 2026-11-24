@@ -144,13 +144,14 @@ def test_review_format_prints_verdict_and_finding_counts(
 def test_generated_launches_satisfy_the_real_exec_parser(tmp_path: Path) -> None:
     run = run_spec(
         "a",
+        pr=1,
         harness="claude",
         reason="review",
         claude_profile="y",
         account="x",
         fetch_refs=["r1", "r2"],
     )
-    path = write(tmp_path, {"runs": [run, run_spec("b", harness="codex")]})
+    path = write(tmp_path, {"runs": [run, run_spec("b", pr=1, harness="codex")]})
     argv = review_pair.exec_argv(review_pair.load_spec(path)[0])[
         len(review_pair.LAUNCHER) :
     ]
@@ -178,7 +179,10 @@ def test_a_run_that_fails_to_launch_does_not_stop_the_others(
     )
     assert review.main(["pair", str(pair(tmp_path))], "p") == 1
     out = capsys.readouterr().out
-    assert "state: not launched (exit 1)" in out
+    assert (
+        f"a\n  head: {HEAD}\n  state: not launched (exit 1)\n"
+        "  verdict: none\n  findings: none\n" in out
+    )
     assert "/home/" not in out
     assert "b\n  head: " + HEAD + "\n  state: rc=0" in out
 
@@ -333,39 +337,55 @@ def test_an_unreadable_pr_after_the_runs_voids_the_verdicts(
 
 
 @pytest.mark.parametrize(
-    "spec",
+    ("spec", "message"),
     [
-        "not json",
-        [],
-        {"runs": [run_spec("a")]},
-        {"runs": [run_spec(str(n)) for n in range(4)]},
-        {"runs": [run_spec("a"), run_spec("a", harness="agy")]},
-        {"runs": [run_spec("a"), "x"]},
-        {"runs": [run_spec("a"), run_spec("b", extra=1)]},
-        {
-            "runs": [
-                run_spec("a"),
-                {k: v for k, v in run_spec("b").items() if k != "host"},
+        *(
+            (spec, "")
+            for spec in [
+                "not json",
+                [],
+                {"runs": [run_spec("a")]},
+                {"runs": [run_spec(str(n)) for n in range(4)]},
+                {"runs": [run_spec("a"), run_spec("a", harness="agy")]},
+                {"runs": [run_spec("a"), "x"]},
+                {"runs": [run_spec("a"), run_spec("b", extra=1)]},
+                {
+                    "runs": [
+                        run_spec("a"),
+                        {k: v for k, v in run_spec("b").items() if k != "host"},
+                    ]
+                },
+                {"runs": [run_spec("a"), run_spec("b", host="")]},
+                {"runs": [run_spec("a"), run_spec("b", fetch_refs="r")]},
+                {"runs": [run_spec("a"), run_spec("b", fetch_refs=[1])]},
+                {"runs": [run_spec("a"), run_spec("b", head="abc")]},
+                {"runs": [run_spec("a"), run_spec("b", harness="agy", repo="x/y")]},
+                {"runs": [run_spec("a"), run_spec("b", harness="agy", head="c" * 40)]},
+                {"runs": [run_spec("a"), run_spec("b", harness="agy", pr=359)]},
+                {"runs": [run_spec("a"), run_spec("b")]},
+                {"runs": [run_spec("a"), run_spec("b", harness="agy")], "other": 1},
             ]
-        },
-        {"runs": [run_spec("a"), run_spec("b", host="")]},
-        {"runs": [run_spec("a"), run_spec("b", fetch_refs="r")]},
-        {"runs": [run_spec("a"), run_spec("b", fetch_refs=[1])]},
-        {"runs": [run_spec("a"), run_spec("b", head="abc")]},
-        {"runs": [run_spec("a"), run_spec("b", pr="358")]},
-        {"runs": [run_spec("a"), run_spec("b", pr=True)]},
-        {"runs": [run_spec("a"), run_spec("b", pr=0)]},
+        ),
+        *(
+            (
+                {"runs": [run_spec("a"), run_spec("b", pr=pr)]},
+                "run 'b': pr is a positive integer",
+            )
+            for pr in ("358", True, 0)
+        ),
         pytest.param(
-            {"runs": [run_spec("a"), run_spec("b", harness="cluade")]},
+            {"runs": [run_spec("a"), run_spec("b", harness="code")]},
+            "run 'b': harness must be codex, claude or agy",
             id="unknown-harness",
         ),
-        {"runs": [run_spec("a"), run_spec("b", harness="claude")]},
-        {"runs": [run_spec("a"), run_spec("b", harness="claude", reason="r")]},
-        {"runs": [run_spec("a"), run_spec("b", harness="agy", repo="x/y")]},
-        {"runs": [run_spec("a"), run_spec("b", harness="agy", head="c" * 40)]},
-        {"runs": [run_spec("a"), run_spec("b", harness="agy", pr=359)]},
-        {"runs": [run_spec("a"), run_spec("b")]},
-        {"runs": [run_spec("a"), run_spec("b", harness="agy")], "other": 1},
+        (
+            {"runs": [run_spec("a"), run_spec("b", harness="claude")]},
+            "run 'b': a claude run needs reason and claude_profile",
+        ),
+        (
+            {"runs": [run_spec("a"), run_spec("b", harness="claude", reason="r")]},
+            "run 'b': a claude run needs reason and claude_profile",
+        ),
     ],
 )
 def test_a_bad_spec_is_refused_before_any_launch(
@@ -373,15 +393,13 @@ def test_a_bad_spec_is_refused_before_any_launch(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     spec: object,
+    message: str,
 ) -> None:
     path = tmp_path / "spec.json"
     path.write_text(spec if isinstance(spec, str) else json.dumps(spec))
     monkeypatch.setattr(review_pair, "run_command", pytest.fail)
     assert review_pair.main([str(path)], "p") == 2
-    error = capsys.readouterr().err
-    assert error.startswith("p: ")
-    if "cluade" in json.dumps(spec):
-        assert error == "p: run 'b': harness must be codex, claude or agy\n"
+    assert capsys.readouterr().err.startswith(f"p: {message}")
 
 
 def test_a_missing_spec_file_is_refused(
