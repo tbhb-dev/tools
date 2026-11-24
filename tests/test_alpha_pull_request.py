@@ -1591,21 +1591,29 @@ def test_create_passes_gh_errors_through(
     assert world.git("status", "--porcelain", "--ignored").count("push") == 0
 
 
+def remote_default(world: World, tmp_path: Path, branch: str) -> None:
+    remote = tmp_path / "remote.git"
+    world.git("init", "-q", "--bare", "-b", branch, str(remote))
+    world.git("push", "-q", str(remote), f"HEAD:refs/heads/{branch}")
+    world.git("remote", "set-url", "origin", str(remote))
+
+
 def test_a_draft_without_a_base_takes_the_default_branch(
-    world: World, monkeypatch: pytest.MonkeyPatch
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     counted = Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None))
     monkeypatch.setattr(size_gate, "size_counts", counted)
     monkeypatch.setattr(pr, "branch_trailers", Mock(return_value=[]))
     world.git("update-ref", "refs/remotes/origin/trunk", "HEAD")
     world.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+    remote_default(world, tmp_path, "trunk")
     write_draft(world, BASE)
     run_main("check")
     counted.assert_called_once_with("refs/remotes/origin/trunk", "HEAD")
 
 
 def test_the_default_branch_ignores_a_tag_of_the_same_name(
-    world: World, monkeypatch: pytest.MonkeyPatch
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     counted = Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None))
     monkeypatch.setattr(size_gate, "size_counts", counted)
@@ -1613,7 +1621,34 @@ def test_the_default_branch_ignores_a_tag_of_the_same_name(
     world.git("update-ref", "refs/remotes/origin/trunk", "HEAD")
     world.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
     world.git("tag", "origin/trunk")
+    remote_default(world, tmp_path, "trunk")
     assert pr.default_base() == "trunk"
+
+
+def test_the_remote_default_beats_a_stale_origin_head(
+    world: World, tmp_path: Path
+) -> None:
+    world.git("update-ref", "refs/remotes/origin/trunk", "HEAD")
+    world.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+    remote_default(world, tmp_path, "main")
+    assert pr.default_base() == "main"
+
+
+def test_an_unreachable_remote_falls_back_to_origin_head(
+    world: World, tmp_path: Path
+) -> None:
+    world.git("update-ref", "refs/remotes/origin/trunk", "HEAD")
+    world.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+    world.git("remote", "set-url", "origin", str(tmp_path / "missing.git"))
+    assert pr.default_base() == "trunk"
+
+
+def test_gh_repo_refuses_a_guessed_default_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GH_REPO", "other/repo")
+    with pytest.raises(SystemExit, match="default branch of GH_REPO"):
+        pr.default_base()
 
 
 def unset_origin_head(world: World, url: str) -> None:

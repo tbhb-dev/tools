@@ -921,26 +921,33 @@ def posting_value(env: Mapping[str, str]) -> str | None:
 
 
 def default_base() -> str:
-    """The repository's default branch: origin/HEAD, else the remote's own HEAD.
+    """The repository's default branch: the remote's own HEAD, else origin/HEAD.
+
+    The remote answers first because origin/HEAD goes stale when the default
+    branch moves and a plain fetch leaves it, and a fresh mirror may have none.
 
     Raises:
-        SystemExit: origin/HEAD is not a symbolic ref and the remote's HEAD is
-            unreadable. No guess stands in, so a draft never targets a wrong base.
+        SystemExit: ``GH_REPO`` names a repository that origin does not describe,
+            or neither read answers. No guess stands in, so a draft never
+            targets a wrong base.
     """
+    hint = "; name the base in the draft's frontmatter"
+    if os.environ.get("GH_REPO"):
+        message = f"cannot find the default branch of GH_REPO{hint}"
+        raise SystemExit(message)
+    code, out = git("ls-remote", "--symref", "origin", "HEAD")
+    found = re.search(r"^ref: refs/heads/(\S+)\s+HEAD$", out, re.MULTILINE)
+    if code == 0 and found:
+        return found[1]
     code, out = git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
     name = out.removeprefix("refs/remotes/origin/")
     if code == 0 and name and name != out:
         return name
-    code, out = git("ls-remote", "--symref", "origin", "HEAD")
-    found = re.search(r"^ref: refs/heads/(\S+)\s+HEAD$", out, re.MULTILINE)
-    if code != 0 or not found:
-        message = (
-            "cannot find the default branch: origin/HEAD is not a symbolic ref "
-            "and `git ls-remote --symref origin HEAD` failed; name the base in "
-            "the draft's frontmatter"
-        )
-        raise SystemExit(message)
-    return found[1]
+    message = (
+        "cannot find the default branch: `git ls-remote --symref origin HEAD` "
+        f"failed and origin/HEAD is not a symbolic ref{hint}"
+    )
+    raise SystemExit(message)
 
 
 def base_of(meta: Mapping[str, object], default: str | None = None) -> str:
