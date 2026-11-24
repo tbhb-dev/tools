@@ -2,9 +2,9 @@
 package content
 
 import (
+	"encoding/json"
 	"list"
 	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -108,7 +108,7 @@ import (
 	_matchingMetadata: metadata & {
 		verdict:  Body.blocks.verdict.content[0].visible
 		head_sha: header[6]
-		tier:     strconv.Atoi(header[7])
+		tier:     json.Unmarshal(header[7])
 		run: {
 			name:     header[1]
 			provider: header[2]
@@ -119,7 +119,7 @@ import (
 		findings: [for item in Body._findings {
 			class:   item._class
 			path:    item._parts[2]
-			line:    strconv.Atoi(item._parts[3])
+			line:    json.Unmarshal(item._parts[3])
 			summary: item._prose
 		}]
 	}

@@ -258,7 +258,10 @@ def test_check_review_reports_missing_cue(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_check_review_reports_silent_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    def quiet(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def quiet(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["check"] is False
+        assert kwargs["timeout"] == 10
         return subprocess.CompletedProcess(["cue"], 1, stderr="\n")
 
     monkeypatch.setattr(cue_runtime, "resolve", lambda: Path("cue"))

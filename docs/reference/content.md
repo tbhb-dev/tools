@@ -3,7 +3,8 @@ description: Shared GitHub content validation and writes for plugins.
 generated:
   - role: generated
     harness: codex
-    at: "2026-11-24T22:01:32Z"
+    model: openai:gpt-6.2-sol
+    at: "2026-11-24T22:03:20Z"
 status: stable
 tags: [plugins]
 title: Content writes
@@ -55,7 +56,7 @@ Each finding is one bullet with a class (`BLOCK`, `TECH-DEBT`, or `SECURITY-DEBT
 
 Use `NO-GO` with at least one `BLOCK` finding. With `GO`, use debt findings or leave `Findings` empty. In `Verification`, describe what you read or ran in one or more paragraphs totaling at most 100 visible words.
 
-Metadata requires `schema: 2`, a repository in `OWNER/NAME` form, a positive `pr` number, `head_sha`, `tier`, `verdict`, a `run` object with `name`, `provider`, `model`, `variant`, and `host`, and a `findings` list of objects with `class`, `path`, `line`, and `summary`. The objects reject unknown fields. The verdict, head, tier, and run fields must match the body. Findings must also match in order, with each summary equal to the visible prose of its bullet with whitespace collapsed to single spaces.
+Metadata requires `schema: 2`, a `repo` in `OWNER/NAME` form, a positive `pr` number, `head_sha`, `tier`, `verdict`, a `run` object with `name`, `provider`, `model`, `variant`, and `host`, and a `findings` list of objects with `class`, `path`, `line`, and `summary`. The objects reject unknown fields. The verdict, head, tier, and run fields must match the body. Findings must also match in order, with each summary equal to the visible prose of its bullet with whitespace collapsed to single spaces.
 
 The seven-line header and `Verification` section are required. The tier range changed to `0`–`2`, and `HOLD` was renamed to `NO-GO`. The 160-word whole-review cap became a per-summary cap on metadata. The body keeps its 40-word limit on each finding, which also limits the matching summary.
 
