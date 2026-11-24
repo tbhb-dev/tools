@@ -172,6 +172,7 @@ def table(index: int, **keys: object) -> dict[str, object]:
         "shell": "bash",
         "account": "agent",
         "accounts": ["agent"],
+        "proven_harnesses": ["codex"],
         **keys,
     }
 
