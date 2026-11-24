@@ -76,7 +76,10 @@ the operator's own account no harness environment, so this command is the only
 thing that sets it there. config.toml is edited with tomlkit, which keeps every
 other key, comment and the layout, and gets the same backup and up-to-date
 rules. And it writes the gh shim (see gh_shim): an executable `gh` in
-`$XDG_DATA_HOME/tbhbdev/agent-bin`, left alone when it is already current.
+`$XDG_DATA_HOME/tbhbdev/agent-bin`, left alone when it is already current,
+and an `ssh` beside it that runs the next ssh on PATH with
+`-o IdentityAgent=none` (scp and sftp call /usr/bin/ssh directly on macOS and
+Ubuntu and skip it).
 None of this prompts, runs op or needs the 1Password app, so configuration
 management can run it unattended, and a rerun changes nothing. It never
 writes PATH into a harness config: Claude's SessionStart hook puts the shim
@@ -181,6 +184,43 @@ AGY_TIMEOUT = 30
 AGENT_ENVIRONMENT = {"SSH_AUTH_SOCK": ""}
 POLICY = "shell_environment_policy"
 GH_SHIM_MODE = 0o755
+SSH_SHIM_MARK = "# tbhbdev alpha install: ssh shim"
+# A command-line -o beats the IdentityAgent in the operator's ssh config. The
+# shim puts one first (the first -o for an option wins): the caller's
+# SSH_AUTH_SOCK unless it is empty or names the 1Password agent, else none. A
+# caller who wants another agent sets SSH_AUTH_SOCK. BatchMode stays the
+# caller's and the ssh config's. The shim runs the next ssh on PATH that is not
+# the shim itself (same file, so a symlink or hard link can't loop it), so a
+# host with its ssh elsewhere keeps working.
+SSH_SHIM_TEXT = f"""#!/bin/sh
+{SSH_SHIM_MARK}
+case $0 in */*) here=${{0%/*}} ;; *) here=. ;; esac
+here=$(CDPATH= cd "$here" && pwd -P)
+real=
+oldifs=$IFS
+IFS=:
+for dir in $PATH; do
+  [ -n "$dir" ] || continue
+  [ "$(CDPATH= cd "$dir" 2>/dev/null && pwd -P)" = "$here" ] && continue
+  [ "$dir/ssh" -ef "$here/${{0##*/}}" ] && continue
+  if [ -x "$dir/ssh" ] && [ ! -d "$dir/ssh" ]; then
+    real=$dir/ssh
+    break
+  fi
+done
+IFS=$oldifs
+if [ -z "$real" ]; then
+  echo "ssh: no ssh on PATH besides the tbhbdev shim" >&2
+  exit 127
+fi
+sock=none
+case ${{SSH_AUTH_SOCK:-}} in
+  ''|*[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]*) ;;
+  *) sock=$SSH_AUTH_SOCK ;;
+esac
+set -- -o "IdentityAgent=\\"$sock\\"" "$@"
+exec "$real" "$@"
+"""
 AGY_PR_TIMEOUT = 120
 HARNESS_TIMEOUT = 10
 # Codex's documented default hook timeout, written out so the trusted hash covers
@@ -990,29 +1030,50 @@ def install_private_files(*, dry_run: bool) -> int:
 # ---------------------------------------------------------- gh environment
 
 
-def install_gh_shim(*, dry_run: bool) -> int:
-    """Write the gh shim (see gh_shim) unless it is already in place."""
-    path = bin_dir() / "gh"
-    text = wrapper_text()
+def install_shim(
+    name: str, text: str, *, dry_run: bool, mark: str | None = None
+) -> int:
+    """Write the agent-bin executable NAME with TEXT unless it is in place.
+
+    With MARK, an existing file that lacks it is the user's own, so it stays.
+    """
+    path = bin_dir() / name
+    label = f"{name}-shim"
     try:
-        current = path.read_text() if path.is_file() else None
+        current = path.read_text(errors="replace") if path.is_file() else None
+        if mark and current is not None and mark not in current:
+            print(f"{PROG}: {label}: {path} is not ours; left alone", file=sys.stderr)
+            return 1
         mode = stat.S_IMODE(path.stat().st_mode) if current is not None else None
         if current == text and mode == GH_SHIM_MODE:
-            print(f"gh-shim: {path} is up to date")
+            print(f"{label}: {path} is up to date")
             return 0
         if dry_run:
-            print(f"gh-shim: would write {path}")
+            print(f"{label}: would write {path}")
             return 0
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".gh.{os.getpid()}.tmp")
+        tmp = path.with_name(f".{name}.{os.getpid()}.tmp")
         tmp.write_text(text)
         tmp.chmod(GH_SHIM_MODE)
         tmp.replace(path)
     except OSError as exc:
-        print(f"{PROG}: gh-shim: cannot write {path}: {exc}", file=sys.stderr)
+        print(f"{PROG}: {label}: cannot write {path}: {exc}", file=sys.stderr)
         return 1
-    print(f"gh-shim: wrote {path}")
+    print(f"{label}: wrote {path}")
     return 0
+
+
+def install_gh_shim(*, dry_run: bool) -> int:
+    """Write the gh shim (see gh_shim) unless it is already in place."""
+    return install_shim("gh", wrapper_text(), dry_run=dry_run)
+
+
+def install_ssh_shim(*, dry_run: bool) -> int:
+    """Write the ssh shim: ssh with no 1Password agent, for agent sessions.
+
+    scp and sftp call /usr/bin/ssh directly on macOS and Ubuntu, so they skip it.
+    """
+    return install_shim("ssh", SSH_SHIM_TEXT, dry_run=dry_run, mark=SSH_SHIM_MARK)
 
 
 def with_environment(old: str | None) -> str:
@@ -1447,6 +1508,7 @@ def main(argv: list[str], prog: str) -> int:
         return session_start(env, dry_run=args.dry_run)
     status = install_git_hooks(None, env, dry_run=args.dry_run)
     status |= install_gh_shim(dry_run=args.dry_run)
+    status |= install_ssh_shim(dry_run=args.dry_run)
     for harness in [args.harness] if args.harness else HARNESSES:
         result = install_config(harness, env, dry_run=args.dry_run)
         status |= result

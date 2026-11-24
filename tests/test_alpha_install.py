@@ -2196,6 +2196,7 @@ def test_main_without_options_runs_every_step(monkeypatch: pytest.MonkeyPatch) -
     for name in (
         "install_git_hooks",
         "install_gh_shim",
+        "install_ssh_shim",
         "install_config",
         "install_statusline",
         "install_codex_environment",
@@ -2206,6 +2207,7 @@ def test_main_without_options_runs_every_step(monkeypatch: pytest.MonkeyPatch) -
     assert calls == [
         "install_git_hooks",
         "install_gh_shim",
+        "install_ssh_shim",
         "install_config",
         "install_statusline",
         "install_config",
@@ -2750,6 +2752,148 @@ def test_install_gh_shim_reports_a_failure(
             f"Not a directory: {str(path.parent)!r}\n"
         ),
     )
+
+
+def test_install_ssh_shim_writes_then_is_up_to_date(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    del world
+    path = gh_shim.bin_dir() / "ssh"
+    assert install.install_ssh_shim(dry_run=False) == 0
+    assert capsys.readouterr().out == f"ssh-shim: wrote {path}\n"
+    assert path.read_text() == install.SSH_SHIM_TEXT
+    assert path.stat().st_mode & 0o7777 == 0o755
+    assert install.install_ssh_shim(dry_run=True) == 0
+    assert capsys.readouterr().out == f"ssh-shim: {path} is up to date\n"
+    path.write_text(f"{install.SSH_SHIM_MARK}\nold\n")
+    assert install.install_ssh_shim(dry_run=True) == 0
+    assert capsys.readouterr().out == f"ssh-shim: would write {path}\n"
+
+
+def test_main_installs_the_ssh_shim_beside_gh(world: World) -> None:
+    assert install.main(["--harness", "claude"], "p") == 0
+    assert sorted(p.name for p in gh_shim.bin_dir().iterdir()) == ["gh", "ssh"]
+    del world
+
+
+def shim_ssh_options(
+    tmp_path: Path, args: list[str], env: dict[str, str]
+) -> dict[str, str]:
+    """The `ssh -G` options in force through the installed shim, by name."""
+    config = tmp_path / "ssh_config"
+    config.write_text(f"Host *\n  IdentityAgent {tmp_path}/agent.sock\n")
+    done = subprocess.run(
+        [str(gh_shim.bin_dir() / "ssh"), *args, "-F", str(config), "-G", "h.invalid"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": "/usr/bin:/bin", **env},
+    )
+    options = (line.split(" ", 1) for line in done.stdout.splitlines())
+    return {k: v for k, v in options if k in {"identityagent", "batchmode"}}
+
+
+@pytest.mark.skipif(not Path("/usr/bin/ssh").exists(), reason="needs /usr/bin/ssh")
+@pytest.mark.parametrize(
+    ("args", "env", "expected"),
+    [
+        ([], {}, {"identityagent": "none", "batchmode": "no"}),
+        ([], {"SSH_AUTH_SOCK": ""}, {"identityagent": "none", "batchmode": "no"}),
+        (
+            [],
+            {"SSH_AUTH_SOCK": "/x/1Password/t/agent.sock"},
+            {"identityagent": "none", "batchmode": "no"},
+        ),
+        (
+            [],
+            {"SSH_AUTH_SOCK": "/x/other.sock"},
+            {"identityagent": "/x/other.sock", "batchmode": "no"},
+        ),
+        (
+            [],
+            {"SSH_AUTH_SOCK": "/x/with space/agent.sock"},
+            {"identityagent": "/x/with space/agent.sock", "batchmode": "no"},
+        ),
+        (
+            ["-o", "IdentityAgent=/y/mine.sock"],
+            {},
+            {"identityagent": "none", "batchmode": "no"},
+        ),
+        (["-o", "BatchMode=yes"], {}, {"identityagent": "none", "batchmode": "yes"}),
+        (
+            ["-voIdentityAgent=/z/a.sock"],
+            {},
+            {"identityagent": "none", "batchmode": "no"},
+        ),
+    ],
+)
+def test_the_ssh_shim_options(
+    world: World,
+    tmp_path: Path,
+    args: list[str],
+    env: dict[str, str],
+    expected: dict[str, str],
+) -> None:
+    """The shim sets the agent from SSH_AUTH_SOCK; BatchMode stays the caller's."""
+    del world
+    assert install.install_ssh_shim(dry_run=False) == 0
+    options = shim_ssh_options(tmp_path, args, env)
+    assert options == expected
+
+
+def test_the_ssh_shim_without_another_ssh_exits_127(
+    world: World, tmp_path: Path
+) -> None:
+    del world
+    assert install.install_ssh_shim(dry_run=False) == 0
+    done = subprocess.run(
+        ["/bin/sh", str(gh_shim.bin_dir() / "ssh")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PATH": str(gh_shim.bin_dir()), "HOME": str(tmp_path)},
+        timeout=10,  # a shim that re-executes itself never returns
+    )
+    assert done.returncode == 127
+    assert "no ssh on PATH" in done.stderr
+
+
+def test_the_ssh_shim_skips_a_symlink_to_itself(world: World, tmp_path: Path) -> None:
+    """A second PATH entry that links to the shim must not make it loop."""
+    del world
+    assert install.install_ssh_shim(dry_run=False) == 0
+    link_dir = tmp_path / "link"
+    real_dir = tmp_path / "real"
+    link_dir.mkdir()
+    real_dir.mkdir()
+    (link_dir / "ssh").symlink_to(gh_shim.bin_dir() / "ssh")
+    real = real_dir / "ssh"
+    real.write_text("#!/bin/sh\necho real\n")
+    real.chmod(0o755)
+    done = subprocess.run(
+        ["/bin/sh", str(gh_shim.bin_dir() / "ssh")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            "PATH": f"{gh_shim.bin_dir()}:{link_dir}:{real_dir}",
+            "HOME": str(tmp_path),
+        },
+        timeout=10,  # a shim that re-executes itself never returns
+    )
+    assert (done.returncode, done.stdout) == (0, "real\n")
+
+
+def test_install_ssh_shim_leaves_a_foreign_ssh(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    del world
+    path = gh_shim.bin_dir() / "ssh"
+    path.parent.mkdir(parents=True)
+    path.write_text("#!/bin/sh\necho mine\n")
+    assert install.install_ssh_shim(dry_run=False) == 1
+    assert "is not ours; left alone" in capsys.readouterr().err
+    assert path.read_text() == "#!/bin/sh\necho mine\n"
 
 
 @pytest.mark.parametrize(
