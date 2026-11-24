@@ -297,10 +297,6 @@ def test_schema_is_valid_and_closed() -> None:
     schema = pr.load_schema()
     Draft202012Validator.check_schema(schema)
     assert schema["additionalProperties"] is False
-    assert (
-        "default"
-        not in cast("dict[str, dict[str, object]]", schema["properties"])["base"]
-    )
     assert pr.schema_default(schema, "draft") is False
     properties = cast("dict[str, dict[str, str]]", schema["properties"])
     assert all(prop.get("description") for prop in properties.values())
@@ -1623,6 +1619,11 @@ def test_the_default_branch_ignores_a_tag_of_the_same_name(
     world.git("tag", "origin/trunk")
     remote_default(world, tmp_path, "trunk")
     assert pr.default_base() == "trunk"
+
+
+def test_an_older_reader_still_loads_the_schema_default() -> None:
+    """Installs that predate the default-branch change read `base`'s default."""
+    assert pr.schema_default(pr.load_schema(), "base") == "main"
 
 
 def test_the_remote_default_beats_a_stale_origin_head(
