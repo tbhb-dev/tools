@@ -473,6 +473,7 @@ def _host(table: _Table) -> Host:
         "limits_warn_only",
         "build_shims",
         "max_concurrent_runs",
+        "auto_build",
     )
     name = _check_name(table, "name", table.text("name"), HOST_NAME)
     os = table.choice("os", Os)
@@ -516,6 +517,7 @@ def _host(table: _Table) -> Host:
         max_concurrent_runs=table.nonnegative(
             "max_concurrent_runs", DEFAULT_MAX_CONCURRENT_RUNS
         ),
+        auto_build=table.flag("auto_build") if "auto_build" in table.values else False,
     )
 
 

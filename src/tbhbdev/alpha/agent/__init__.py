@@ -27,7 +27,9 @@ def parser(prog: str) -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog=prog)
     verbs = command.add_subparsers(dest="verb", required=True)
     execute = verbs.add_parser("exec", help="launch a headless run")
-    execute.add_argument("--host", required=True)
+    execute.add_argument(
+        "--host", required=True, help="configured host or auto for builds"
+    )
     execute.add_argument("--repo", required=True)
     execute.add_argument("--ref")
     execute.add_argument(
@@ -88,6 +90,8 @@ def parser(prog: str) -> argparse.ArgumentParser:
 
 
 def main(argv: list[str], prog: str) -> int:
+    if argv == ["slot-counts"]:
+        return driver.print_slot_counts(prog)
     host_commands = {
         "run-host": run_host.main,
         "ssh-serve": ssh_serve.main,

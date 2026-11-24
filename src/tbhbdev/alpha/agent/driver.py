@@ -14,8 +14,9 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NoReturn
 
-from tbhbdev import telemetry, version
+from tbhbdev import telemetry, userconfig, version
 from tbhbdev.alpha.agent import (
+    admission,
     launcher,
     render,
     runfiles,
@@ -25,8 +26,8 @@ from tbhbdev.alpha.agent import (
     transport,
 )
 from tbhbdev.alpha.agent.decisions import driver as rules
+from tbhbdev.alpha.agent.decisions import hosts, limits, remote, repo, request, taint
 from tbhbdev.alpha.agent.decisions import launcher as launch_rules
-from tbhbdev.alpha.agent.decisions import limits, remote, repo, request, taint
 from tbhbdev.alpha.agent.decisions import runfiles_names as files
 from tbhbdev.alpha.agent.model import Harness, Invalid, Profile, RunKind, RunRequest
 
@@ -129,13 +130,25 @@ def agy_timeout(settings: Settings, harness: Harness, profile: Profile) -> int |
 
 def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     rules.check_name(args.name)
-    host = rules.select_host(settings, args.host, args.account)
-    harness = Harness(args.harness)
     profile = Profile(args.profile)
+    auto = args.host == "auto"
+    if auto:
+        if profile is not Profile.BUILD:
+            message = "--host auto requires --profile build"
+            raise Invalid(message)
+        if args.ignore_limits:
+            message = "--host auto cannot be combined with --ignore-limits"
+            raise Invalid(message)
+    harness = Harness(args.harness)
     launched_by = launcher.session()
     if launch_rules.is_reviewer(args.role, profile):
         launch_rules.check(launched_by[0], args.repo, *launcher.load_table())
     rules.check_model(harness, args.model, allow_non_gemini=args.allow_non_gemini)
+    host = (
+        select_build_host(settings, args.account)
+        if auto
+        else rules.select_host(settings, args.host, args.account)
+    )
     # A review's final commit is read remotely after all local checks pass.
     commit = "0" * 40 if profile is Profile.REVIEW else None
     run = RunRequest(
@@ -310,6 +323,57 @@ def check_limits(
         print(message, file=sys.stderr)
 
 
+def print_slot_counts(prog: str) -> int:
+    try:
+        builds, reviews = admission.counts(admission.ROOT)
+    except (OSError, Invalid) as exc:
+        print(f"{prog}: {exc}", file=sys.stderr)
+        return 1
+    print(builds, reviews)
+    return 0
+
+
+def probe_build_host(settings: Settings, host: Host) -> str | None:
+    try:
+        builds, reviews = hosts.parse_counts(
+            transport.shell(settings, host, remote.slot_counts(host))
+        )
+    except (Invalid, transport.TransportError) as exc:
+        return f"cannot read slot counts: {exc}"
+    reason = hosts.slot_refusal(
+        Profile.BUILD, host.max_concurrent_runs, builds, reviews
+    )
+    if reason is not None:
+        return reason
+    try:
+        check_limits(settings, host, Profile.BUILD, ignore=False)
+    except Invalid as exc:
+        return str(exc)
+    return None
+
+
+def select_build_host(settings: Settings, account: str | None) -> Host:
+    print(f"host auto: read {userconfig.path()}")
+    chosen = None
+    for host in settings.hosts:
+        if chosen is not None:
+            print(f"{host.name}: not probed")
+            continue
+        reason = hosts.candidate_refusal(host, account)
+        if reason is None:
+            target = host if account is None else replace(host, account=account)
+            reason = probe_build_host(settings, target)
+            if reason is None:
+                chosen = target
+                print(f"{host.name}: picked")
+                continue
+        print(f"{host.name}: skipped ({' '.join(reason.splitlines())})")
+    if chosen is None:
+        message = "no build host available"
+        raise Invalid(message)
+    return chosen
+
+
 def launch_trust(settings: Settings, run: Run, deadline: float) -> int:
     """Consult coordinator evidence before contacting the run host."""
     state = taint_store.load(run.host.name)
@@ -377,17 +441,18 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
     if schema is not None:
         json.loads(schema)
     deadline = time.monotonic() + settings.launch_wait_seconds
-    try:
-        check_limits(
-            settings,
-            run.host,
-            run.request.profile,
-            ignore=run.ignore_limits,
-            timeout=deadline - time.monotonic(),
-        )
-    except Invalid:
-        telemetry.attributes(**{"tbhb.agent.outcome": "refused"})
-        raise
+    if args.host != "auto":
+        try:
+            check_limits(
+                settings,
+                run.host,
+                run.request.profile,
+                ignore=run.ignore_limits,
+                timeout=deadline - time.monotonic(),
+            )
+        except Invalid:
+            telemetry.attributes(**{"tbhb.agent.outcome": "refused"})
+            raise
     # Every exec run is unsandboxed: launch_trust records taint, never refuses.
     launch_trust(settings, run, deadline)
     ref = args.ref or "HEAD"

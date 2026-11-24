@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6
-    at: "2026-11-23T12:35:28Z"
+    at: "2026-11-24T17:22:23Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -85,6 +85,10 @@ These user-level hooks run in every repository. Before acting, the identity, pul
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, so sessions in two worktrees of one clone keep separate state.
 
 For a run that opens a pull request, write `.github/PULL_REQUEST_DRAFT.md` in its worktree and keep it out of commits. The driver reads the worktree draft first and uses the pushed commit's draft if the worktree draft is missing. The worktree draft must be an owned regular file of at most 64 KiB. The driver refuses symlinks and scans the draft with the host's secret rules and the pre-run commit's `.gitleaks.toml` before posting it. The driver warns when the pushed changes add the draft.
+
+## Build hosts
+
+`agent exec --host auto` tries configured hosts with `auto_build = true` in config order. It skips hosts with a zero slot limit, no available build slot, or a limits check that refuses the launch. The launcher prints the config path, the reason for each skip, and its choice. It exits with status 1 when no host qualifies. Use an explicit host for review runs or when passing `--ignore-limits`.
 
 ## Identity start time
 

@@ -174,6 +174,10 @@ def limits() -> str:
     )
 
 
+def slot_counts(host: Host) -> str:
+    return PREFIX + f"{program(host)} alpha agent slot-counts"
+
+
 def preflight(repository: str, ref: str, expected_version: str, host: Host) -> str:
     git_host, owner, project = repo.parts(repository)
     url = f"git@{git_host}:{owner}/{project}.git"
