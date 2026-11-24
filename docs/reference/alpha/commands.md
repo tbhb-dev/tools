@@ -5,6 +5,10 @@ generated:
     harness: codex
     model: openai:gpt-6.1-sol
     at: "2026-11-24T18:47:56Z"
+  - role: generated
+    harness: codex
+    model: openai:gpt-6
+    at: "2026-11-24T18:05:55Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -52,7 +56,7 @@ type: Reference
 
 `tbhbdev alpha brief new RUN --repo OWNER/REPO` writes a peer-run brief skeleton to stdout, or to a file with `-o FILE`. Fill its placeholders, then run `tbhbdev alpha brief check FILE...` to check the completed brief. Use `--branch` and `--base` to override the worktree defaults. `--push --scan-command CMD` includes the required outgoing scan command supplied by the operator. The command must be non-empty and contain no newline or backtick. The check normalizes Unicode, whitespace and case before searching for forbidden instructions and removing fixed sentences in their generated sections. It matches phrases by spelling and section placement. Authors can add lines in Hard rules. Use it to catch omissions and common mistakes. Review the brief's intent separately.
 
-`tbhbdev alpha issue link-sub PARENT CHILD` adds a sub-issue, and `unlink-sub PARENT CHILD` removes it. `block BLOCKED --by BLOCKER` adds a dependency, and `unblock BLOCKED --by BLOCKER` removes it. Use `--blocked-by` as an alias for `--by`, or pass `BLOCKER --blocking BLOCKED` to specify the blocker first.
+`tbhbdev alpha issue link-sub PARENT CHILD` adds a sub-issue, and `unlink-sub PARENT CHILD` removes it. A private issue can have a public sub-issue only when the parent is a Feature and the child is a Task, Defect, Chore, Spike, or Research issue. `block BLOCKED --by BLOCKER` adds a dependency, and `unblock BLOCKED --by BLOCKER` removes it. Use `--blocked-by` as an alias for `--by`, or pass `BLOCKER --blocking BLOCKED` to specify the blocker first.
 
 Use `owner/repo#N` for a qualified issue reference or `'#N'` for an issue in the current repository's origin. GitHub requires the same repository owner for the parent and child when adding a sub-issue. With `--dry-run`, the command looks up the related issue and prints its numeric ID as JSON. This mode skips the write and audit entry.
 

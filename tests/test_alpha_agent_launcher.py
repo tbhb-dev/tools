@@ -1,4 +1,4 @@
-"""Only a session on the review-launcher list starts a reviewer-role run."""
+"""Any named session may start a reviewer-role run."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 
 # The conftest replaces `launcher.session`; these tests read the real one.
 REAL_SESSION = launcher.session
-REAL_LOAD_TABLE = launcher.load_table
 
 pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
 
@@ -35,7 +34,7 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     ("title", "name"),
     [
         ("✳ tools", "tools"),
-        ("coord-review-1", "coord-review-1"),
+        ("tools", "tools"),
         ("  ⠂ helper-session  ", "helper-session"),
         ("✳", None),
         ("", None),
@@ -60,135 +59,58 @@ def test_a_review_profile_run_is_reviewer_role_too(
     assert rules.is_reviewer(role, profile) is expected
 
 
-LAUNCHERS = {**rules.REVIEW_LAUNCHERS, "helper": frozenset({"org/one"})}
-OWNERS = {"two-hidden": "alpha"}
+@pytest.mark.parametrize("launcher_name", ["tools", "helper", "alpha"])
+def test_any_named_session_may_launch_reviews(launcher_name: str) -> None:
+    rules.check(launcher_name)
 
 
-@pytest.mark.parametrize(
-    ("launcher_name", "repo", "fragment"),
-    [
-        (None, "o/rules", "TMUX_PANE or its title is missing"),
-        ("tools", "o/rules", "may not launch a reviewer-role run"),
-        ("helper", "o/rules", "only for org/one"),
-        ("coord-review-1", "o/rules", None),
-        ("helper", "org/one", None),
-        ("alpha", "o/two-hidden", "owns o/two-hidden"),
-        ("coord-review-1", "o/two-hidden", None),
-    ],
-)
-def test_the_launcher_list_gates_reviewer_runs(
-    launcher_name: str | None, repo: str, fragment: str | None
-) -> None:
-    launchers = {**LAUNCHERS, "alpha": None}
-    if fragment is None:
-        rules.check(launcher_name, repo, launchers, OWNERS)
-        return
-    with pytest.raises(Invalid, match=fragment) as caught:
-        rules.check(launcher_name, repo, launchers, OWNERS)
-    assert "ask coord" in str(caught.value)
-
-
-def test_the_built_in_launchers_apply_without_a_table() -> None:
-    rules.check("coord-review-2", "o/rules")
-    with pytest.raises(Invalid, match="may not launch"):
-        rules.check("tools", "o/rules")
-
-
-@pytest.mark.parametrize(
-    ("repo", "owner"), [("o/rules", "rules"), ("o/two-hidden", "alpha")]
-)
-def test_repository_owner_sessions(repo: str, owner: str) -> None:
-    assert rules.owner(repo, OWNERS) == owner
-
-
-@pytest.mark.parametrize(
-    ("launcher_name", "repo", "listed"),
-    [
-        ("tools", "o/Tools", None),
-        ("example-repo", "o/Example-Repo", None),
-        ("alpha", "o/Two-Hidden", None),
-        ("Alpha", "o/two-hidden", None),
-        ("helper", "O/Other", frozenset({"o/other"})),
-    ],
-)
-def test_names_match_without_regard_to_case(
-    launcher_name: str, repo: str, listed: frozenset[str] | None
-) -> None:
-    launchers = {launcher_name: listed}
-    refused = launcher_name.casefold() != "helper"
-    if refused:
-        with pytest.raises(Invalid, match="owns"):
-            rules.check(launcher_name, repo, launchers, {"Two-Hidden": "alpha"})
-    else:
-        rules.check(launcher_name, repo, launchers, OWNERS)
-
-
-def test_a_listed_repository_matches_in_any_case_and_others_are_refused() -> None:
-    launchers: dict[str, frozenset[str] | None] = {"helper": frozenset({"o/Other"})}
-    rules.check("helper", "O/other", launchers, OWNERS)
-    with pytest.raises(Invalid, match="only for"):
-        rules.check("helper", "o/else", launchers, OWNERS)
-
-
-def test_a_missing_table_is_refused_with_its_path() -> None:
-    with pytest.raises(Invalid, match=r"agent-review-launchers\.json: invalid"):
-        REAL_LOAD_TABLE()
-
-
-def test_the_table_adds_launchers_and_owners() -> None:
-    path = launcher.table_path()
-    path.parent.mkdir(parents=True)
-    path.write_text(
-        '{"launchers": {"helper": ["org/one"], "any": null},'
-        ' "owners": {"two-hidden": "alpha"}}'
+def test_a_reviewer_run_without_a_session_name_is_refused() -> None:
+    with pytest.raises(Invalid) as caught:
+        rules.check(None)
+    assert str(caught.value) == (
+        "a reviewer-role run needs the launching session's name, from the "
+        "tmux pane title; TMUX_PANE or its title is missing, so "
+        "name the launching session via the tmux pane title"
     )
-    launchers, owners = REAL_LOAD_TABLE()
-    assert launchers["helper"] == frozenset({"org/one"})
-    assert launchers["any"] is None
-    assert launchers["coord-review-1"] is None
-    assert owners == {"two-hidden": "alpha"}
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "not json",
-        "[1]",
-        '{"launchers": [1]}',
-        '{"owners": [1]}',
-        '{"launchers": {"helper": "org/repo"}}',
-        '{"launchers": {"helper": [1]}}',
-        '{"owners": {"example-repo": null}}',
-        '{"owners": {"example-repo": 3}}',
-    ],
-)
-def test_a_malformed_table_is_refused(text: str) -> None:
-    path = launcher.table_path()
-    path.parent.mkdir(parents=True)
-    path.write_text(text)
-    with pytest.raises(Invalid, match="invalid review-launcher table"):
-        REAL_LOAD_TABLE()
-
-
-def test_a_reviewer_launch_from_an_unlisted_session_is_refused(
-    remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("session", ["tools", "example-repo", "helper"])
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_a_named_session_can_launch_reviews_for_any_repo(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch, session: str, profile: str
 ) -> None:
-    monkeypatch.setattr(launcher, "session", lambda: ("tools", "s"))
-    arguments = execution_arguments(remote.prompt, "--role", "reviewer")
-    assert agent.main(arguments, "example agent") != 0
-    assert "ask coord" in capsys.readouterr().err
-    assert not driver.metadata_path("sample").exists()
+    monkeypatch.setattr(launcher, "session", lambda: (session, "s"))
+    arguments = execution_arguments(
+        remote.prompt, *(("--role", "reviewer") if profile == "build" else ())
+    )
+    arguments[arguments.index("build")] = profile
+    if profile == "review":
+        arguments[-2:-2] = ["--ref", "a" * 40]
+    assert agent.main(arguments, "example agent") == 0
+    run = driver.load(settings(), "sample")
+    assert run.launched_by == (session, "s")
+    assert run.request.max_concurrent_runs == 3
 
 
-def test_a_review_profile_launch_without_a_session_name_is_refused(
-    remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("profile", ["build", "review"])
+def test_a_reviewer_launch_without_a_session_name_is_refused(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    profile: str,
 ) -> None:
     monkeypatch.setattr(launcher, "session", lambda: (None, "s"))
-    arguments = execution_arguments(remote.prompt)
-    arguments[arguments.index("build")] = "review"
-    arguments[-2:-2] = ["--ref", "a" * 40]
+    arguments = execution_arguments(
+        remote.prompt, *(("--role", "reviewer") if profile == "build" else ())
+    )
+    arguments[arguments.index("build")] = profile
+    if profile == "review":
+        arguments[-2:-2] = ["--ref", "a" * 40]
     assert agent.main(arguments, "example agent") != 0
-    assert "launching session's name" in capsys.readouterr().err
+    assert (
+        "name the launching session via the tmux pane title" in capsys.readouterr().err
+    )
+    assert not driver.metadata_path("sample").exists()
 
 
 def test_a_build_launch_without_a_session_name_records_unknown(
@@ -206,7 +128,7 @@ def test_a_record_saved_before_the_launcher_field_loads(remote: Remote) -> None:
     path = driver.metadata_path("sample")
     record = path.read_text()
     path.write_text(
-        record.replace('"launcher": "coord-review-1", ', "").replace(
+        record.replace('"launcher": "tools", ', "").replace(
             '"launcher_session": "session-1", ', ""
         )
     )
@@ -233,16 +155,17 @@ def reading(
 def test_the_session_reads_the_pane_title_and_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert reading(monkeypatch, title="✳ coord-review-2", session_id="abc") == (
-        "coord-review-2",
+    assert reading(monkeypatch, title="✳ helper", session_id="abc") == (
+        "helper",
         "abc",
     )
 
 
-def test_the_session_has_no_name_without_a_pane(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("title", [None, "", "✳", "  "])
+def test_the_session_has_no_name_without_a_pane_or_title(
+    monkeypatch: pytest.MonkeyPatch, title: str | None
 ) -> None:
-    assert reading(monkeypatch, title=None, session_id=None) == (None, None)
+    assert reading(monkeypatch, title=title, session_id=None) == (None, None)
 
 
 @pytest.mark.parametrize(

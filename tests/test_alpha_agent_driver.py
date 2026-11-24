@@ -251,7 +251,7 @@ def test_launch_stream_and_metadata(
         "host": "example-linux",
         "started": record["started"],
         "owner": record["owner"],
-        "launcher": "coord-review-1",
+        "launcher": "tools",
         "launcher_session": "session-1",
         "cleaning": False,
         "ignore_limits": False,
@@ -799,7 +799,7 @@ def test_status(
     started = json.loads(driver.metadata_path("sample").read_text())["started"]
     assert output.out == (
         f"sample: phase=running rc={expected} host=example-linux "
-        f"account=agent started={started} launcher=coord-review-1\n"
+        f"account=agent started={started} launcher=tools\n"
     )
 
 
@@ -822,7 +822,7 @@ def test_status_reports_an_unreachable_host_with_the_local_record(
     assert output.err == ""
     assert output.out == (
         f"sample: phase=unknown rc=unknown host=example-linux "
-        f"account=agent started={started} launcher=coord-review-1"
+        f"account=agent started={started} launcher=tools"
         " host unreachable, run state unknown\n"
     )
 
