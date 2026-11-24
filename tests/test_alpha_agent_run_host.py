@@ -2352,6 +2352,21 @@ def test_execute_scopes_the_mac_host_path(
     assert host_tools.search() == before
 
 
+def test_execute_preserves_path_for_unsandboxed_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path, unsandboxed=True, authorized_by="tbhb-dev/example-repo#1")
+    account_path = str(tmp_path / "account-bin")
+    monkeypatch.setenv("PATH", account_path)
+
+    def execute(*_args: object, **_kwargs: object) -> int:
+        assert os.environ["PATH"] == account_path
+        return 7
+
+    monkeypatch.setattr(run_host, "_execute", execute)
+    assert run_host.execute(run, "task") == 7
+
+
 @pytest.mark.parametrize("os", Os)
 @pytest.mark.parametrize("harness", Harness)
 @pytest.mark.parametrize("profile", ["build", "review"])
