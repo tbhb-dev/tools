@@ -2,9 +2,12 @@
 description: Agent isolation constraints, coordination, and cleanup.
 generated:
   - role: generated
-    harness: codex
-    model: openai:gpt-6
-    at: "2026-11-24T22:54:03Z"
+    harness: codex:0.171.0
+    model: openai:gpt-6.2-sol
+    effort: high
+    surface: exec
+    session: sha-256-64:6f2e01be74c7daae
+    at: "2026-11-24T23:44:57Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -41,9 +44,7 @@ tbhbdev alpha agent wait example
 
 Reviews accept `--ref` and resolve it before launch. `--schema` streams a JSON schema beside the prompt. Claude requires `--reason` and accepts `--claude-profile`. Use a `gemini-*` model for agy, or pass `--allow-non-gemini`. `--ops` selects the host's configured `ops` account.
 
-Each run gets a private `TMPDIR`. Pytest uses it for its default base directory. Run-host removes the tree at exit, including after a failure or timeout.
-
-When an `exec` run ends, run-host also checks `/tmp` for `pytest-of-*`, `rbz.*`, and `launchgate-bazel.*` entries. The sweep requires private entries that belong to the run account and last changed more than 24 hours ago. It keeps a tree if the account has an open file or a working directory in it. The sweep skips top-level symlinks and never follows links inside a tree.
+Each run gets a private `TMPDIR`. Run-host sets `PYTEST_DEBUG_TEMPROOT` to the same directory for pytest's default base directory. At exit, run-host removes the run's temporary tree without following symlinks. If removal fails, the run keeps its exit status.
 
 The optional `[[agent.host]] tbhbdev` key names an absolute executable path on that host. Its default is `$HOME/.local/bin/tbhbdev`, using the remote account’s home. Local `ssh` and `tmux` resolve against a fixed system PATH. Remote launch and transfer scripts add the account’s `$HOME/.local/bin` and the standard package directories on macOS, and skip login shell startup.
 

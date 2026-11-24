@@ -36,7 +36,6 @@ from tbhbdev.alpha.agent import (
     render,
     runfiles,
     settings,
-    temp_cleanup,
     worktree,
 )
 from tbhbdev.alpha.agent.decisions import argv, config, policy, repo, request, run_state
@@ -1265,15 +1264,6 @@ def cleanup_bazel(
     return freed
 
 
-def sweep_temp(run: Run) -> None:
-    if run.request.kind is RunKind.EXEC:
-        try:
-            temp_cleanup.sweep()
-        except Exception:  # noqa: BLE001 -- keep the harness result on cleanup failure
-            with suppress(OSError):
-                run.files.write("log", "temporary file sweep failed\n")
-
-
 def finish(
     run: Run, prepared: Prepared | None, agent: subprocess.Popen[str] | None, rc: int
 ) -> int:
@@ -1305,7 +1295,6 @@ def finish(
                 # Nothing from the Bazel cleanup may block the rc and completion record.
                 with suppress(Exception):
                     run.files.write("log", "bazel cleanup failed\n")
-            sweep_temp(run)
             bazel = bazel or "skipped"
             try:
                 phase = "unknown" if run.files.uncertain else "ended"
