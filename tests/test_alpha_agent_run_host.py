@@ -4415,7 +4415,9 @@ def test_execute_requires_a_commit_when_requested(
     assert runfiles.latest(run.files.root)["example"]["rc"] == expected
     log = run.files.path("log")
     message = "no new commit: the brief expected one (--expect-commit)\n"
-    assert (log.exists() and message in log.read_text()) is (expected == 6)
+    assert (log.exists() and message in log.read_text().splitlines(keepends=True)) is (
+        expected == 6
+    )
 
 
 @pytest.mark.parametrize(

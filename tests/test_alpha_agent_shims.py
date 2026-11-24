@@ -85,6 +85,6 @@ def test_build_refuses_subprocess_failures(
 def test_build_requires_bazel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake = Mock()
     monkeypatch.setattr(shims.subprocess, "run", fake)
-    with pytest.raises(Invalid, match="bazelisk or bazel is required"):
+    with pytest.raises(Invalid, match=r"^hook shims: bazelisk or bazel is required$"):
         shims.build(tmp_path, None)
     fake.assert_not_called()
