@@ -217,6 +217,8 @@ def test_a_missing_draft_is_refused(tmp_path: Path) -> None:
     ("text", "message"),
     [
         ("---\nbase: [\n---\n\n# t\n", "frontmatter is invalid"),
+        ("---\n- base: release/1.x\n---\n\n# t\n", "frontmatter is invalid"),
+        ("---\nrelease\n---\n\n# t\n", "frontmatter is invalid"),
         ("---\n# t\n", "frontmatter is invalid"),
         ("---\nbase: 3\n---\n\n# t\n", "invalid base branch"),
         ("---\nbase: ''\n---\n\n# t\n", "invalid base branch"),

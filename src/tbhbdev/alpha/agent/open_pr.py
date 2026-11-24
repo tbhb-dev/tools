@@ -69,10 +69,12 @@ def parse_draft(text: str, default_branch: Callable[[], str]) -> Draft:
         # The parser's text can quote draft lines, so the log gets only the
         # fact, and the error is raised outside the handler to drop its context.
         invalid = True
-    if invalid:
+    # A list or scalar is not a mapping: the host posts the base unchecked, so a
+    # draft the CLI schema rejects must not take the default branch.
+    if invalid or (meta is not None and not isinstance(meta, dict)):
         message = "the draft frontmatter is invalid"
         raise OpenRefusedError(message)
-    fields = cast("dict[str, object]", meta) if isinstance(meta, dict) else {}
+    fields = cast("dict[str, object]", meta) if meta is not None else {}
     # A missing base takes the repository's default branch, as `alpha pr` does.
     base = default_branch() if "base" not in fields else fields["base"]
     if not isinstance(base, str) or not base:
