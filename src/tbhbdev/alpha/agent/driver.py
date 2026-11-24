@@ -133,7 +133,7 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     profile = Profile(args.profile)
     launched_by = launcher.session()
     if launch_rules.is_reviewer(args.role, profile):
-        launch_rules.check(launched_by[0], args.repo, *launcher.load_table())
+        launch_rules.check(launched_by[0])
     rules.check_model(harness, args.model, allow_non_gemini=args.allow_non_gemini)
     # A review's final commit is read remotely after all local checks pass.
     commit = "0" * 40 if profile is Profile.REVIEW else None

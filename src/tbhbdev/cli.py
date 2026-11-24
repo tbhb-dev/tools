@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 from tbhbdev import (
     admin,
+    adr,
     agy,
     alpha,
     analytics,
@@ -27,6 +28,7 @@ Tool = Callable[[list[str], str], int]
 # The built-in tools. main adds the plugins' tools when it runs.
 TOOLS: dict[str, Tool] = {
     "admin": admin.main,
+    "adr": adr.main,
     "agy": agy.main,
     "alpha": alpha.main,
     "analytics": analytics.main,

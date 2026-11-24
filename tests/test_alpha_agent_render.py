@@ -53,11 +53,11 @@ def test_status() -> None:
         "example",
         phase="finishing",
         rc="0",
-        target=("example-linux", "agent", None, "coord-review-1"),
+        target=("example-linux", "agent", None, "tools"),
         started="2026-11-09T00:00:00+00:00",
     ) == (
         "example: phase=finishing rc=0 host=example-linux "
-        "account=agent started=2026-11-09T00:00:00+00:00 launcher=coord-review-1"
+        "account=agent started=2026-11-09T00:00:00+00:00 launcher=tools"
     )
 
 

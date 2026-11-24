@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -44,6 +45,55 @@ def flow(root: Path, monkeypatch: pytest.MonkeyPatch, outcome: str) -> list[str]
 def broken(*_args: object, **_kwargs: object) -> None:
     message = "telemetry broken"
     raise RuntimeError(message)
+
+
+@pytest.mark.parametrize(
+    ("otel_endpoint", "tbhb_endpoint", "expected_endpoint"),
+    [
+        (None, " https://collector.example\t", " https://collector.example\t"),
+        ("https://collector.example/otel", None, "https://collector.example/otel"),
+        (
+            " https://collector.example/otel ",
+            "https://collector.example",
+            " https://collector.example/otel ",
+        ),
+        ("", "https://collector.example", "https://collector.example"),
+        (" \t", "https://collector.example", "https://collector.example"),
+        (None, None, None),
+        (None, "", None),
+        (None, " \t", None),
+        ("", "", ""),
+        (" \t", " \t", " \t"),
+    ],
+)
+def test_endpoint_default(
+    monkeypatch: pytest.MonkeyPatch,
+    otel_endpoint: str | None,
+    tbhb_endpoint: str | None,
+    expected_endpoint: str | None,
+) -> None:
+    otel_name = "OTEL_EXPORTER_OTLP_ENDPOINT"
+    tbhb_name = "TBHB_TELEMETRY_ENDPOINT"
+    monkeypatch.setenv(otel_name, otel_endpoint or "")
+    if otel_endpoint is None:
+        monkeypatch.delenv(otel_name)
+    if tbhb_endpoint is None:
+        monkeypatch.delenv(tbhb_name, raising=False)
+    else:
+        monkeypatch.setenv(tbhb_name, tbhb_endpoint)
+    expected_environment = dict(os.environ)
+    if expected_endpoint is not None:
+        expected_environment[otel_name] = expected_endpoint
+    captured_environment: dict[str, str] = {}
+
+    def command(_name: str, *, main: Callable[[], int], **_kwargs: str) -> int:
+        captured_environment.update(os.environ)
+        return main()
+
+    monkeypatch.setattr(tbhb_telemetry, "command", command)
+    assert telemetry.command(lambda: 7) == 7
+    assert captured_environment == expected_environment
+    assert dict(os.environ) == expected_environment
 
 
 @pytest.mark.parametrize("outcome", ["ok", "failed", "refused"])
@@ -178,9 +228,16 @@ def test_launch_span_contains_only_allowed_data(
 def test_broken_setup_does_not_change_result(
     monkeypatch: pytest.MonkeyPatch, method: str
 ) -> None:
-    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")
+    results: list[int] = []
+
+    def command(_name: str, *, main: Callable[[], int], **_kwargs: str) -> None:
+        results.append(main())
+
+    monkeypatch.delenv("TBHB_TELEMETRY_ENDPOINT", raising=False)
+    monkeypatch.setattr(tbhb_telemetry, "command", command)
     monkeypatch.setattr(tbhb_telemetry, method, broken)
     assert telemetry.command(lambda: 7) == 7
+    assert results == [7]
 
 
 @pytest.mark.parametrize("after", [False, True])

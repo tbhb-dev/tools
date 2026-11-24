@@ -62,7 +62,12 @@ else:
 logname = f"gh.{{kind}}.log" if kind in ("methods", "repo", "rules") else (
     "gh.repo.log" if repo else "gh.log"
 )
-with open(os.path.join(here, logname), "a") as log:
+log_path = os.path.join(here, logname)
+if kind == "queue" and "queue_before_out" in spec:
+    with open(log_path) as log:
+        if not any(json.loads(line)["argv"][:2] == ["pr", "merge"] for line in log):
+            spec["queue_out"] = spec["queue_before_out"]
+with open(log_path, "a") as log:
     log.write(json.dumps({{"argv": sys.argv[1:], "stdin": sys.stdin.read()}}) + "\\n")
 # A ruleset can refuse the merge flag while the squash flag goes through.
 refused = kind == "merge" and "--merge" in sys.argv and "merge_refused" in spec
@@ -1493,6 +1498,12 @@ def queue_data(*, removal: dict[str, object] | None = None, **fields: object) ->
     return json.dumps({"data": {"repository": {"pullRequest": request}}})
 
 
+def queue_rules(method: str) -> str:
+    return json.dumps(
+        [[{"type": "merge_queue", "parameters": {"merge_method": method}}]]
+    )
+
+
 @pytest.fixture
 def queued_tools(tools: Tools) -> Tools:
     tools.view(title="fix: tidy", body="A plain body.\n", baseRefName="release/One")
@@ -1556,6 +1567,110 @@ def test_queue_dry_run_previews_without_enqueuing(
         "--body-file - --match-head-commit abc123\n\nfix: tidy (#12)\n\nA plain body.\n"
     )
     assert len(queued_tools.calls()) == 2
+
+
+def test_lowercase_squash_queue_reads_the_preview(queued_tools: Tools) -> None:
+    amend(queued_tools, rules_out=queue_rules("squash"))
+    assert run_main("12", "--dry-run")[0] == 0
+    _, preview = queued_tools.calls()
+    assert cast("list[str]", preview["argv"])[-1] == "preview=true"
+
+
+@pytest.mark.parametrize("method", ["MERGE", "merge"])
+def test_merge_queue_dry_run_prints_the_cleaned_message(
+    tools: Tools, capsys: pytest.CaptureFixture[str], method: str
+) -> None:
+    tools.view(title="fix: tidy", body="A plain body.\n")
+    amend(
+        tools,
+        rules_out=queue_rules(method),
+        methods_out=allowed(merge=True, squash=False),
+        queue_out=queue_data(),
+    )
+    assert run_main("12", "--dry-run")[0] == 0
+    # A MERGE queue keeps the subject and body passed to gh pr merge.
+    assert capsys.readouterr().out == (
+        "gh pr merge 12 --merge --subject 'fix: tidy (#12)' "
+        "--body-file - --match-head-commit abc123\n\nfix: tidy (#12)\n\nA plain body.\n"
+    )
+    _, before = tools.calls()
+    assert cast("list[str]", before["argv"])[-1] == "preview=false"
+
+
+def test_merge_queue_refuses_when_the_repository_disables_merge(tools: Tools) -> None:
+    amend(
+        tools,
+        rules_out=queue_rules("MERGE"),
+        methods_out=allowed(merge=False, squash=True),
+    )
+    assert (
+        run_main("12")[0]
+        == "not merging PR #12: the merge queue requires merge commits"
+    )
+    assert [call["argv"][:2] for call in tools.calls()] == [["pr", "view"]]  # type: ignore[index]
+
+
+def test_merge_queue_refuses_a_default_message(tools: Tools) -> None:
+    tools.view(title="fix: tidy", body="")
+    amend(tools, rules_out=queue_rules("MERGE"))
+    assert run_main("12")[0] == (
+        "not merging PR #12: the merge commit would get "
+        "GitHub's default message, not the cleaned PR body"
+    )
+    assert len(tools.calls()) == 1
+
+
+@pytest.mark.parametrize(
+    ("state", "code", "output"),
+    [
+        (queue_data(state="OPEN", isInMergeQueue=True), 0, "PR #12 queued\n"),
+        (
+            queue_data(state="MERGED", mergeCommit={"oid": "def456"}),
+            0,
+            "PR #12 merged as def456\n",
+        ),
+        (
+            queue_data(state="OPEN", removal={"id": "new", "reason": "CI failed"}),
+            "PR #12 dequeued: CI failed",
+            "",
+        ),
+        (
+            queue_data(state="OPEN", removal={"id": "old", "reason": "Old"}),
+            "PR #12: GitHub reports no merge commit, queue entry, or new removal",
+            "",
+        ),
+    ],
+)
+def test_merge_queue_reports_the_result_using_the_previous_removal(
+    tools: Tools,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+    code: int | str,
+    output: str,
+) -> None:
+    tools.view(title="fix: tidy", body="A plain body.\n")
+    amend(
+        tools,
+        rules_out=queue_rules("MERGE"),
+        queue_before_out=queue_data(removal={"id": "old", "reason": "Old"}),
+        queue_out=state,
+        merge_err="GitHub accepted the request.\n",
+    )
+    assert run_main("12")[0] == code
+    captured = capsys.readouterr()
+    assert captured.out == output
+    assert captured.err == "GitHub accepted the request.\n"
+    _, before, merge, after = tools.calls()
+    assert cast("list[str]", before["argv"])[-1] == "preview=false"
+    assert cast("list[str]", merge["argv"])[:4] == ["pr", "merge", "12", "--merge"]
+    assert before == after
+
+
+def test_a_refused_merge_queue_does_not_retry_with_squash(tools: Tools) -> None:
+    amend(tools, rules_out=queue_rules("MERGE"), queue_out=queue_data(), merge_rc=1)
+    assert run_main("12")[0] == 1
+    _, _, merge = tools.calls()
+    assert cast("list[str]", merge["argv"])[:4] == ["pr", "merge", "12", "--merge"]
 
 
 @pytest.mark.parametrize(
@@ -1628,17 +1743,19 @@ def test_a_queue_merge_refusal_preserves_the_gh_error(
             {"rules_rc": 1, "rules_err": "forbidden"},
             "gh branch rules lookup failed: forbidden",
         ),
-        ({"rules_out": "not JSON"}, "no usable branch rules"),
-        ({"rules_out": "{}"}, "no usable branch rules"),
-        ({"rules_out": "[]"}, "no usable branch rules"),
-        ({"rules_out": "[{}]"}, "no usable branch rules"),
-        ({"rules_out": "[[{}]]"}, "no usable branch rules"),
+        ({"rules_out": "not JSON"}, "gh returned no usable branch rules"),
+        ({"rules_out": "{}"}, "gh returned no usable branch rules"),
+        ({"rules_out": "[]"}, "gh returned no usable branch rules"),
+        ({"rules_out": "[{}]"}, "gh returned no usable branch rules"),
+        ({"rules_out": "[[{}]]"}, "gh returned no usable branch rules"),
+        ({"rules_out": "[[null]]"}, "gh returned no usable branch rules"),
         (
-            {
-                "rules_out": '[[{"type":"merge_queue",'
-                '"parameters":{"merge_method":"MERGE"}}]]'
-            },
-            "merge queue must use squash",
+            {"rules_out": queue_rules("rebase")},
+            "not merging: unsupported branch merge queue method REBASE",
+        ),
+        (
+            {"rules_out": '[[{"type":"merge_queue"}]]'},
+            "not merging: unsupported branch merge queue method (MISSING)",
         ),
     ],
 )
@@ -1646,7 +1763,7 @@ def test_invalid_queue_rules_refuse(
     tools: Tools, spec: dict[str, object], error: str
 ) -> None:
     amend(tools, **spec)
-    assert error in str(run_main("12")[0])
+    assert run_main("12")[0] == error
     assert len(tools.calls()) == 1
 
 
