@@ -21,7 +21,7 @@ Pick `REQUEST_CHANGES` or `COMMENT` in the draft's `event` field. A draft can't 
 
 ## Post a review document
 
-Create `review-N.doc.md` in the same directory as `review-N.md`. Start with YAML frontmatter containing `schema: 2`, `repo: OWNER/REPO`, and `pr: N`. Follow it with the seven lines `Run: NAME`, `Provider: PROVIDER`, `Model: MODEL`, `Variant: a` or `Variant: b`, `Host: HOSTNAME`, `Head: SHA`, and `Tier: 0`, `Tier: 1`, or `Tier: 2`. Use the full lowercase commit SHA and a fully qualified hostname.
+Create `review-N.doc.md` in the same directory as `review-N.md`. Start with YAML frontmatter containing `schema: 2`, `repo: OWNER/REPO`, and `pr: N`. Follow it with the seven lines `Run: NAME`, `Provider: PROVIDER`, `Model: MODEL`, `Variant: a` or `Variant: b`, `Host: HOSTNAME`, `Head: SHA`, and `Tier: 0`, `Tier: 1`, or `Tier: 2`. Use the full lowercase commit hash and a fully qualified hostname.
 
 After the header, add `## Verdict`, `## Findings`, and `## Verification` in that order. Write `GO` or `NO-GO` in Verdict and describe what you checked in Verification. Each finding starts with `- BLOCK`, `- TECH-DEBT`, or `- SECURITY-DEBT`. Follow the class with `path:line` in backticks and a summary. `NO-GO` requires a `BLOCK` finding, and `GO` disallows one.
 
@@ -29,6 +29,6 @@ After the header, add `## Verdict`, `## Findings`, and `## Verification` in that
 
 ## Supersede or reply to a review
 
-`tbhbdev alpha review dismiss N REVIEW_ID --reason TEXT` prefixes the marked comment review's body with `SUPERSEDED:` and the reason. The reason is one line of up to 200 characters and must omit review and reply markers. A review already superseded or dismissed succeeds without another edit. The edit is UNVERIFIED against GitHub's API.
+`tbhbdev alpha review dismiss N REVIEW_ID --reason TEXT` prefixes the marked comment review's body with `SUPERSEDED:` and the reason. Write the reason on one line in up to 200 characters and omit review and reply markers. A review already superseded or dismissed succeeds without another edit. GitHub API behavior for this edit is UNVERIFIED.
 
-`tbhbdev alpha review reply N REVIEW_ID --text TEXT` writes a comment on the pull request with the review ID and the first eight characters of the reviewed commit SHA. Omit review and reply markers from the text. The command appends its own marker and prints the new comment ID.
+`tbhbdev alpha review reply N REVIEW_ID --text TEXT` writes a comment on the pull request with the review ID and the first eight characters of the reviewed commit hash. Omit review and reply markers from the text. On success, the command appends its own marker and prints the new comment ID.
