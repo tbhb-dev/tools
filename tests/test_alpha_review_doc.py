@@ -1,8 +1,12 @@
 import json
+import shutil
 from dataclasses import asdict, replace
+from pathlib import Path
+from typing import cast
 
 import pytest
 
+from tbhbdev import content, cue_runtime
 from tbhbdev.alpha import review_doc as review
 from tbhbdev.alpha.review_doc import Existing, Finding, Marker, ReviewDoc, Run
 from tbhbdev.alpha.review_doc import _metadata as review_metadata
@@ -203,3 +207,103 @@ def test_is_dismissed() -> None:
     assert not review.is_dismissed(
         replace(EXISTING, state="dismissed", body="Older SUPERSEDED: text")
     )
+
+
+def test_validate_passes_exact_body_and_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def check_review(markdown: str, *, metadata: content.Json) -> list[str]:
+        assert (markdown, metadata) == (BODY, METADATA)
+        return ["CUE refusal"]
+
+    monkeypatch.setattr(content, "check_review", check_review)
+    assert review.validate(DOC) == ["CUE refusal"]
+
+
+def test_validate_cross_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    def accept(*_args: object, **_kwargs: object) -> list[str]:
+        return []
+
+    monkeypatch.setattr(content, "check_review", accept)
+    assert review.validate(DOC) == []
+    assert review.validate(replace(DOC, verdict="GO", findings=(DEBT,))) == []
+    for head in (HEAD.upper(), HEAD + "\n"):
+        assert review.validate(replace(DOC, head_sha=head)) == [
+            "head_sha must be 40 lowercase hexadecimal characters"
+        ]
+    assert review.validate(replace(DOC, verdict="GO")) == ["GO forbids BLOCK findings"]
+    assert review.validate(replace(DOC, findings=(DEBT,))) == [
+        "NO-GO requires at least one BLOCK finding"
+    ]
+
+
+def test_validate_reports_unexpected_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*_args: object, **_kwargs: object) -> list[str]:
+        message = "test validator failed"
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(content, "check_review", fail)
+    assert review.validate(replace(DOC, verdict="GO")) == [
+        "GO forbids BLOCK findings",
+        "Review validation could not run: test validator failed",
+    ]
+
+
+@pytest.fixture
+def use_bazel_cue(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Bazel puts the pinned CUE executable on PATH inside its test sandbox.
+    if executable := shutil.which("cue"):
+        monkeypatch.setattr(cue_runtime, "resolve", lambda: Path(executable))
+
+
+@pytest.mark.usefixtures("use_bazel_cue")
+def test_validate_uses_visible_finding_summary() -> None:
+    summary = (
+        "Call  `find_existing` via [the lookup](https://example.org)\u2003*first*."
+    )
+    doc = replace(DOC, findings=(replace(BLOCK, summary=summary),))
+    metadata = METADATA | {
+        "findings": [
+            {"class": "BLOCK", "path": "src/app.py", "line": 4, "summary": summary}
+        ]
+    }
+    body = review.render(doc).removesuffix(f"\n{MARKER}\n")
+    draft = f"---\n{json.dumps(metadata)}\n---\n{body}"
+    parsed = review.parse(draft)
+    assert parsed == doc
+    assert content.check_review(body) == []
+    assert review.validate(parsed) == []
+
+
+@pytest.mark.usefixtures("use_bazel_cue")
+def test_validate_schema_and_caps() -> None:
+    doc = replace(DOC, verdict="GO")
+    long = replace(DEBT, summary="word " * 39 + "word.")
+    assert review.validate(DOC) == []
+    assert review.validate(replace(doc, findings=(long,) * 8)) == []
+    for invalid, problem in (
+        (replace(DOC, repo="tools"), "metadata.repo"),
+        (replace(DOC, findings=(BLOCK,) * 9), "findings"),
+        (
+            replace(doc, findings=(replace(DEBT, summary="word " * 40 + "word."),)),
+            "_words",
+        ),
+        (
+            replace(doc, findings=(replace(DEBT, summary="word " * 160 + "word."),)),
+            "metadata.findings.0._words",
+        ),
+        (replace(DOC, verification=""), "verification"),
+    ):
+        assert any(problem in error for error in review.validate(invalid))
+
+
+def test_api_stubs_raise() -> None:
+    api = cast("review.Api", object())
+    with pytest.raises(NotImplementedError, match=r"^review lookup pending$"):
+        review.find_existing(api, REPO, DOC.pr, HEAD, KEY.run, EXISTING.author)
+    with pytest.raises(NotImplementedError, match=r"^review posting pending$"):
+        review.post(api, DOC, author=EXISTING.author)
+    with pytest.raises(NotImplementedError, match=r"^review dismissal pending$"):
+        review.dismiss(api, REPO, DOC.pr, review_id=EXISTING.id, reason="stale head")
+    with pytest.raises(NotImplementedError, match=r"^review replies pending$"):
+        review.reply(api, REPO, DOC.pr, review_id=EXISTING.id, text="Retested.")

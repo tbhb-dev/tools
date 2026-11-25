@@ -4,21 +4,28 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
 
+from tbhbdev import content
 from tbhbdev.alpha.pull_request import parse_frontmatter
+from tbhbdev.content_model import normalize
 
 type Tier = Literal[0, 1, 2]
 type Verdict = Literal["GO", "NO-GO"]
 type FindingClass = Literal["BLOCK", "TECH-DEBT", "SECURITY-DEBT"]
 type Variant = Literal["a", "b"]
 
+_HEAD = re.compile(r"[0-9a-f]{40}")
 _HEADER = re.compile(
     r"Run: (\S+)\nProvider: (\S+)\nModel: (\S+)\nVariant: ([ab])\n"
     r"Host: (\S+)\nHead: (\S+)\nTier: ([012])\n\n"
 )
 _FINDING = re.compile(
     r"- (BLOCK|TECH-DEBT|SECURITY-DEBT) `([^\s:`]+):([1-9][0-9]*)` (.+)"
+)
+# CUE's strings.Fields splits on the Unicode White_Space property.
+_CUE_FIELDS = re.compile(
+    r"[^\t-\r \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+"
 )
 _MARKER = re.compile(
     r"^<!-- tbhb-review v1 repo=(?u:(\S+)) pr=([1-9][0-9]{0,11}) "
@@ -79,7 +86,28 @@ class Existing:
     body: str
 
 
-def _metadata(doc: ReviewDoc) -> dict[str, object]:
+class Api(Protocol):
+    def request(
+        self, method: str, path: str, payload: dict[str, object] | None = None
+    ) -> object: ...
+
+
+def _visible_summary(summary: str) -> str:
+    # The prefix keeps the summary in the same inline context as a finding.
+    draft = normalize(
+        f"Finding: {summary}",
+        object="pr-review",
+        # The variant and metadata have no effect on the normalized body.
+        variant="review",  # pragma: no mutate
+        metadata={},  # pragma: no mutate
+    )
+    blocks = cast("dict[str, content.Json]", draft["blocks"])  # pragma: no mutate
+    visible = cast("str", blocks["preamble"]["visible"])  # pragma: no mutate
+    fields: list[str] = _CUE_FIELDS.findall(visible.removeprefix("Finding:"))
+    return " ".join(fields)
+
+
+def _metadata(doc: ReviewDoc, *, visible: bool = False) -> content.Json:
     return {
         "schema": 2,
         "repo": doc.repo,
@@ -93,7 +121,7 @@ def _metadata(doc: ReviewDoc) -> dict[str, object]:
                 "class": item.class_,
                 "path": item.path,
                 "line": item.line,
-                "summary": item.summary,
+                "summary": _visible_summary(item.summary) if visible else item.summary,
             }
             for item in doc.findings
         ],
@@ -196,6 +224,25 @@ def _body(doc: ReviewDoc) -> str:
     )
 
 
+def validate(doc: ReviewDoc) -> list[str]:
+    """Return refusals from the document cross-checks and the content schema."""
+    errors: list[str] = []
+    try:
+        if _HEAD.fullmatch(doc.head_sha) is None:
+            errors.append("head_sha must be 40 lowercase hexadecimal characters")
+        has_block = any(item.class_ == "BLOCK" for item in doc.findings)
+        if doc.verdict == "GO" and has_block:
+            errors.append("GO forbids BLOCK findings")
+        if doc.verdict == "NO-GO" and not has_block:
+            errors.append("NO-GO requires at least one BLOCK finding")
+        errors.extend(
+            content.check_review(_body(doc), metadata=_metadata(doc, visible=True))
+        )
+    except Exception as exc:  # noqa: BLE001 -- Validation returns diagnostics.
+        errors.append(f"Review validation could not run: {exc}")
+    return errors
+
+
 def render(doc: ReviewDoc) -> str:
     """Render the body to post, with the review marker on its last line."""
     key = marker(doc)
@@ -222,3 +269,71 @@ def parse_marker(body: str) -> Marker | None:
 def is_dismissed(existing: Existing) -> bool:
     """Check whether GitHub dismissed the review or the App superseded it."""
     return existing.state == "DISMISSED" or existing.body.startswith("SUPERSEDED:")
+
+
+# agent/review_post.py's posted() uses credentials.review_post_token for the App.
+# The caller supplies the corresponding author's login for review lookups.
+def find_existing(  # noqa: PLR0913, PLR0917
+    api: Api, repo: str, pr: int, head_sha: str, run: str, author: str
+) -> int | None:
+    """Page through GET /repos/{repo}/pulls/{pr}/reviews?per_page=100.
+
+    Return the ID of the newest review with the App author's login and matching
+    marker whose is_dismissed check is false, or None if none match.
+
+    Raises:
+        NotImplementedError: A follow-up change implements review lookup.
+    """
+    raise NotImplementedError("review lookup pending")  # noqa: EM101
+
+
+def post(
+    api: Api, doc: ReviewDoc, *, author: str
+) -> tuple[Literal["posted", "exists"], int | None]:
+    """Validate the document and refuse a moved pull request head.
+
+    Return ("exists", id) if the App already posted a matching review. Otherwise
+    POST a review with commit_id set to doc.head_sha, body set to render(doc),
+    and event set to COMMENT. Return ("posted", id), with None for an absent ID.
+    Accept the race between concurrent posts without a lock.
+
+    Raises:
+        NotImplementedError: A follow-up change implements posting.
+    """
+    raise NotImplementedError("review posting pending")  # noqa: EM101
+
+
+def dismiss(
+    api: Api,
+    repo: str,
+    pr: int,
+    review_id: int,  # noqa: V107 -- Stream 3 will use this review ID.
+    reason: str,
+) -> None:
+    """Edit a COMMENT review to prefix its body with `SUPERSEDED: <reason>`.
+
+    Require a plain-text reason of at most 200 characters with no markers.
+    Preserve the original marker. This behavior is unverified against GitHub.
+
+    Raises:
+        NotImplementedError: A follow-up change implements superseding reviews.
+    """
+    raise NotImplementedError("review dismissal pending")  # noqa: EM101
+
+
+def reply(
+    api: Api,
+    repo: str,
+    pr: int,
+    review_id: int,  # noqa: V107 -- Reserved for the reply implementation.
+    text: str,
+) -> int:
+    """Post a PR issue comment and return its ID.
+
+    Use the review's head to format `Re review <id> (head <sha8>): <text>`
+    followed by a separate `<!-- tbhb-reply v1 review=<id> -->` marker line.
+
+    Raises:
+        NotImplementedError: A follow-up change implements review replies.
+    """
+    raise NotImplementedError("review replies pending")  # noqa: EM101
