@@ -21,7 +21,7 @@ lazy from collections.abc import Callable, Generator, Mapping
 from tbhbdev.alpha import install
 from tbhbdev.alpha.agent import host_tools, runfiles
 from tbhbdev.alpha.agent.decisions import repo
-from tbhbdev.alpha.agent.decisions.request import check_fetch_refs
+from tbhbdev.alpha.agent.decisions.request import check_fetch_refs, check_start_ref
 from tbhbdev.alpha.agent.model import Invalid, Profile, RunRequest
 from tbhbdev.alpha.identity import RUN_HOOK_ENV
 from tbhbdev.alpha.repo import TBHB_DEV_ORIGIN
@@ -208,7 +208,24 @@ def default_branch(mirror: Path, token: str | None = None) -> str:
     raise Invalid(message)
 
 
+def fetched_ref(ref: str) -> str:
+    return f"refs/heads/fetched/{ref.removeprefix('refs/')}"
+
+
+def start_reference(mirror: Path, ref: str, default: str) -> str:
+    try:
+        git(mirror, "check-ref-format", ref)
+    except subprocess.CalledProcessError:
+        message = f"--start-ref is not a valid Git ref: {ref!r}"
+        raise Invalid(message) from None
+    if ref == default:
+        message = f"--start-ref cannot name the default branch: {ref}"
+        raise Invalid(message)
+    return fetched_ref(ref)
+
+
 def fetch_commit(mirror: Path, request: RunRequest, token: str | None = None) -> str:
+    check_start_ref(request)
     check_fetch_refs(request.fetch_refs)
     options = (
         "--no-recurse-submodules",
@@ -217,11 +234,11 @@ def fetch_commit(mirror: Path, request: RunRequest, token: str | None = None) ->
         "--upload-pack=git-upload-pack",
     )
     branch = default_branch(mirror, token)
+    reference = branch if request.profile is Profile.BUILD else request.commit
+    if request.start_ref is not None:
+        reference = start_reference(mirror, request.start_ref, branch)
     references = [f"+{branch}:{branch}"]
-    references.extend(
-        f"+{ref}:refs/heads/fetched/{ref.removeprefix('refs/')}"
-        for ref in request.fetch_refs
-    )
+    references.extend(f"+{ref}:{fetched_ref(ref)}" for ref in request.fetch_refs)
     if request.commit is not None:
         references.append(f"+{request.commit}:refs/heads/tbhbdev-review")
     fetch = ("fetch", *options, "--no-prune", "origin", *references)
@@ -229,7 +246,6 @@ def fetch_commit(mirror: Path, request: RunRequest, token: str | None = None) ->
         git(mirror, *fetch)
     else:
         git(mirror, *fetch, token=token)
-    reference = branch if request.profile is Profile.BUILD else request.commit
     commit = git(
         mirror, "rev-parse", "--verify", "--end-of-options", f"{reference}^{{commit}}"
     )

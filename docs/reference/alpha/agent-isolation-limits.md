@@ -2,9 +2,12 @@
 description: Agent isolation constraints, coordination, and cleanup.
 generated:
   - role: generated
-    harness: codex
-    model: openai:gpt-6
-    at: "2026-11-24T19:23:45Z"
+    harness: codex:0.171.0
+    model: openai:gpt-6.2-sol
+    effort: high
+    surface: exec
+    session: sha-256-64:e4b1d0f412eff203
+    at: "2026-11-24T21:54:14Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -40,6 +43,8 @@ tbhbdev alpha agent wait example
 
 Reviews accept `--ref` and resolve it before launch. `--schema` streams a JSON schema beside the prompt. Claude requires `--reason` and accepts `--claude-profile`. Use a `gemini-*` model for agy, or pass `--allow-non-gemini`. `--ops` selects the host's configured `ops` account.
 
+Each run gets a private `TMPDIR`. Run-host sets `PYTEST_DEBUG_TEMPROOT` to the same directory for pytest's default base directory. At exit, run-host removes the run's temporary tree without following symlinks. If removal fails, the run keeps its exit status.
+
 The optional `[[agent.host]] tbhbdev` key names an absolute executable path on that host. Its default is `$HOME/.local/bin/tbhbdev`, using the remote account’s home. Local `ssh` and `tmux` resolve against a fixed system PATH. Remote launch and transfer scripts add the account’s `$HOME/.local/bin` and the standard package directories on macOS, and skip login shell startup.
 
 The coordinator stores metadata under `$XDG_STATE_HOME/tbhbdev/agent-runs/` on the coordinator. The remote directory uses the same location under the run account, with `.local/state` under home as the default state directory. The transfer claims `<name>.owner` with `set -C` before extracting inputs. It refuses an existing session or any `<name>.*` file with exit status 73. A collision never kills the existing session.
@@ -52,9 +57,10 @@ After a successful build harness run, run-host compares commits reachable from a
 
 | Exit status | Result |
 | --- | --- |
-| 0 | The run contains no new commits, or run-host pushes the branch and opens the pull request. |
-| 4 | Run-host skips the push or Git fails to push. The log starts the reason line with `push skipped:` or `push failed:`. |
+| 0 | The run contains no new commits and did not require one, or run-host pushes the branch and opens the pull request. |
+| 4 | Run-host skips or refuses the push, or Git fails to push. The log starts the reason line with `push skipped:`, `push refused:`, or `push failed:`. |
 | 5 | Run-host pushes the branch and can't open the pull request. The log starts the reason line with `pr not opened:`. |
+| 6 | `--expect-commit` required a new commit, and the run produced none. The log starts the reason line with `no new commit:`. |
 
 If the harness fails, run-host keeps its exit status. `tbhbdev alpha agent status NAME` shows the last publication reason next to the return code when the run ends with a nonzero status and the log contains a reason.
 

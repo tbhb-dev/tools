@@ -35,8 +35,16 @@ def parser(prog: str) -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="REF",
-        help="fetch refs/pull/N/head or refs/heads/BRANCH during preparation "
-        "(repeat up to 8 times; available as origin/fetched/...; any profile)",
+        help="fetch refs/heads/<branch> as origin/fetched/heads/<branch> or "
+        "refs/pull/N/head as origin/fetched/pull/N/head (repeat up to 8 times; "
+        "any profile)",
+    )
+    execute.add_argument(
+        "--start-ref",
+        metavar="REF",
+        help="start at a refs/heads/<branch> also listed with --fetch-ref "
+        "and fast-forward that branch without opening a pull request "
+        "(build profile only; excludes the default branch)",
     )
     execute.add_argument(
         "--harness", choices=("codex", "claude", "agy"), default="codex"
@@ -46,6 +54,11 @@ def parser(prog: str) -> argparse.ArgumentParser:
         "--ignore-limits",
         action="store_true",
         help="launch although the host's load, memory or swap exceeds its limits",
+    )
+    execute.add_argument(
+        "--expect-commit",
+        action="store_true",
+        help="return status 6 if a successful build produced no new commit",
     )
     accounts = execute.add_mutually_exclusive_group()
     accounts.add_argument("--account")

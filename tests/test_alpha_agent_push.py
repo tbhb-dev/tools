@@ -22,6 +22,7 @@ from tbhbdev.alpha.agent import (
     run_host,
     runfiles,
 )
+from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -184,6 +185,199 @@ def test_push_success(
     assert run.files.path("head").read_text() == head
     assert run.files.path("branch").read_text() == "agent/example"
     assert run.files.path("pr").read_text() == f"{run.request.repo}#7"
+
+
+START_REF = "refs/heads/fix/topic"
+DEFAULT_REF = "refs/heads/trunk"
+
+
+@pytest.fixture
+def fix_run(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> tuple[run_host.Run, run_host.Prepared, Path]:
+    run, prepared, target = local_run
+    work = Path(prepared.paths.worktree)
+    git(work, "push", target.as_uri(), f"HEAD:{DEFAULT_REF}")
+    git(target, "symbolic-ref", "HEAD", DEFAULT_REF)
+    commit(work, "PR head")
+    git(work, "push", target.as_uri(), f"HEAD:{START_REF}")
+    run.request = replace(run.request, start_ref=START_REF, fetch_refs=(START_REF,))
+    return run, prepared, target
+
+
+def test_start_ref_push_fast_forwards_the_existing_branch_without_a_pr(
+    fix_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, target = fix_run
+    base = git(target, "rev-parse", START_REF)
+    original = push.git_with_token
+    operations: list[str] = []
+
+    def command(
+        directory: Path, token: str, *args: str, capture_output: bool = False
+    ) -> tuple[int, str, str]:
+        assert directory.parent == run.files.root
+        assert token == SYNTHETIC
+        if "ls-remote" in args:
+            assert args[-3:] == (target.as_uri(), "HEAD", START_REF)
+            operations.append("ls-remote")
+        else:
+            assert args == ("push", "--", target.as_uri(), f"HEAD:{START_REF}")
+            operations.append("push")
+        return original(directory, token, *args, capture_output=capture_output)
+
+    def unexpected_pr(*_args: object) -> int:
+        pytest.fail("start-ref push tried to open a pull request")
+
+    monkeypatch.setattr(push, "git_with_token", command)
+    monkeypatch.setattr(open_pr, "open_pull_request", unexpected_pr)
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, SYNTHETIC) == 0
+
+    assert operations == ["ls-remote", "push"]
+    tip = git(target, "rev-parse", START_REF)
+    assert git(target, "rev-parse", f"{START_REF}^") == base
+    assert run.files.path("head").read_text() == tip
+    assert run.files.path("branch").read_text() == "fix/topic"
+    assert run.files.path("log").read_text() == (
+        f"start ref: {START_REF} at {base}\npushed {START_REF} at {tip}\n"
+    )
+    assert set(git(target, "for-each-ref", "--format=%(refname)").splitlines()) == {
+        START_REF,
+        DEFAULT_REF,
+    }
+    assert not run.files.path("pr").exists()
+
+
+@pytest.mark.parametrize("remote_change", ["rewound", "deleted", "default", "missing"])
+def test_changed_remote_ref_leaves_the_worktree_and_pushes_nothing(
+    fix_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    remote_change: str,
+) -> None:
+    run, prepared, target = fix_run
+    base = git(target, "rev-parse", START_REF)
+
+    def change_remote(
+        run: run_host.Run, ready: run_host.Prepared, stack: ExitStack
+    ) -> int:
+        status = harness(run, ready, stack)
+        if remote_change == "rewound":
+            git(target, "update-ref", START_REF, DEFAULT_REF)
+        elif remote_change == "deleted":
+            git(target, "update-ref", "-d", START_REF)
+        elif remote_change == "default":
+            git(target, "symbolic-ref", "HEAD", START_REF)
+        else:
+            git(target, "symbolic-ref", "HEAD", "refs/heads/missing")
+        return status
+
+    def unexpected_push(*_args: object) -> tuple[int, str]:
+        pytest.fail("push ran after the remote changed")
+
+    monkeypatch.setattr(push, "send", unexpected_push)
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, change_remote, SYNTHETIC) == 4
+
+    reason = (
+        f"remote branch {START_REF} moved from {base} or no longer exists"
+        if remote_change in ("rewound", "deleted")
+        else f"cannot verify {START_REF} is a non-default branch"
+    )
+    assert f"push failed: {reason}\n" in run.files.path("log").read_text()
+    assert Path(prepared.paths.worktree).is_dir()
+    assert run.files.path("head").read_text() != base
+    assert not run.files.path("branch").exists()
+    assert not run.files.path("pr").exists()
+
+
+def test_start_ref_requires_the_fetched_starting_commit(
+    fix_run: tuple[run_host.Run, run_host.Prepared, Path],
+) -> None:
+    run, prepared, _target = fix_run
+    git(Path(prepared.paths.worktree), "update-ref", "-d", "refs/heads/agent/example")
+    with (
+        ExitStack() as stack,
+        pytest.raises(Invalid, match="missing fetched starting commit"),
+    ):
+        push.run(run, prepared, stack, harness, SYNTHETIC)
+    assert not run.files.path("out.final").exists()
+
+
+@pytest.mark.parametrize("branch_state", ["off-branch", "detached", "diverged"])
+def test_start_ref_requires_a_fast_forward_on_the_run_branch(
+    fix_run: tuple[run_host.Run, run_host.Prepared, Path], branch_state: str
+) -> None:
+    run, prepared, target = fix_run
+    work = Path(prepared.paths.worktree)
+    base = git(target, "rev-parse", START_REF)
+
+    def change_branch(
+        run: run_host.Run, ready: run_host.Prepared, stack: ExitStack
+    ) -> int:
+        if branch_state == "off-branch":
+            git(work, "checkout", "-b", "other")
+        if branch_state == "diverged":
+            git(work, "reset", "--hard", f"{base}^")
+        status = harness(run, ready, stack)
+        if branch_state == "detached":
+            git(work, "checkout", "--detach", base)
+        return status
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, change_branch, SYNTHETIC) == 4
+
+    expected = {
+        "off-branch": "needs agent/example checked out",
+        "detached": "needs agent/example checked out",
+        "diverged": f"does not fast-forward {START_REF} from {base}",
+    }
+    assert expected[branch_state] in run.files.path("log").read_text()
+    assert git(target, "rev-parse", START_REF) == base
+
+
+@pytest.mark.parametrize(
+    ("outcome", "reason"),
+    [
+        (None, "no push token (unavailable)"),
+        (credentials.PushTokenFailure("denied"), "no push token (denied)"),
+        ((1, "", ""), f"cannot read remote tip of {START_REF}"),
+        ((1, SYNTHETIC), "[redacted]"),
+        ((1, ""), "git push failed"),
+        (subprocess.TimeoutExpired("git", 1), "git timed out"),
+        (OSError(), "git push unavailable"),
+    ],
+)
+def test_start_ref_reports_push_failures(
+    fix_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: tuple[int, str]
+    | tuple[int, str, str]
+    | Exception
+    | credentials.PushTokenFailure
+    | None,
+    reason: str,
+) -> None:
+    run, prepared, _target = fix_run
+    token: str | credentials.PushTokenFailure | None = SYNTHETIC
+    if outcome is None or isinstance(outcome, credentials.PushTokenFailure):
+        token = outcome
+    elif isinstance(outcome, tuple):
+        monkeypatch.setattr(
+            push, "send" if len(outcome) == 2 else "git_with_token", constant(outcome)
+        )
+    else:
+
+        def fail(*_args: object) -> tuple[int, str]:
+            raise outcome
+
+        monkeypatch.setattr(push, "send", fail)
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, harness, token) == 4
+    assert f"push failed: {reason}" in run.files.path("log").read_text()
+    assert not run.files.path("branch").exists()
 
 
 def test_a_private_repository_name_does_not_block_the_push(
@@ -871,3 +1065,61 @@ def test_unopened_pull_request_fails_the_run_but_keeps_the_branch(
     assert git(target, "rev-parse", "refs/heads/agent/example")
     assert not run.files.path("pr").exists()
     assert run.files.path("log").read_text() == f"pr not opened: {reason}\n"
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_draft_addition_is_refused_before_push(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path], *, committed: bool
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+
+    def draft_harness(*_args: object) -> int:
+        draft = workspace / open_pr.DRAFT
+        draft.parent.mkdir()
+        draft.write_text("worktree draft")
+        if committed:
+            git(workspace, "add", open_pr.DRAFT)
+        commit(workspace, "agent change")
+        return 0
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, draft_harness, SYNTHETIC) == (
+            4 if committed else 0
+        )
+    assert (workspace / open_pr.DRAFT).read_text() == "worktree draft"
+    if committed:
+        assert git(target, "for-each-ref") == ""
+        assert not run.files.path("branch").exists()
+        assert not run.files.path("pr").exists()
+        assert run.files.path("log").read_text() == (
+            "push refused: the run's commits add .github/PULL_REQUEST_DRAFT.md; "
+            "remove it from the commits\n"
+        )
+    else:
+        assert git(target, "rev-parse", "refs/heads/agent/example")
+        assert run.files.path("pr").read_text() == f"{run.request.repo}#7"
+
+
+def test_missing_pre_run_commit_keeps_pr_refusal_after_push(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+
+    def open_without_base(published: open_pr.PublishedRange, *_args: object) -> int:
+        assert published.before is None
+        open_pr.scan_rules(published)
+        raise AssertionError
+
+    monkeypatch.setattr(open_pr, "open_pull_request", open_without_base)
+    sha = git(workspace, "rev-parse", "HEAD")
+    assert (
+        push.publish(run, workspace, ("refs/heads/agent/example", sha), SYNTHETIC, None)
+        == 5
+    )
+    assert git(target, "rev-parse", "refs/heads/agent/example") == sha
+    assert run.files.path("log").read_text() == (
+        "pr not opened: cannot check the PR draft without a pre-run commit\n"
+    )

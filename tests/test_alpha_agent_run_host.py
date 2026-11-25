@@ -22,12 +22,15 @@ import tomllib
 from contextlib import ExitStack, contextmanager
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import Mock
 
 import pytest
 from agent_host_example import (
     build_provenance,
     constant,
+    git,
     host_settings,
     isolate_host_git,
     local_mirror_fetches,
@@ -53,6 +56,7 @@ from tbhbdev.alpha.agent import (
     render,
     run_host,
     runfiles,
+    shims,
 )
 from tbhbdev.alpha.agent.decisions import policy, request
 from tbhbdev.alpha.agent.decisions.run_state import Group
@@ -65,6 +69,7 @@ from tbhbdev.alpha.agent.model import (
 )
 
 RESOLVE = host_tools.resolve
+PUSH_RUN = run_host.push.run
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping
@@ -477,7 +482,10 @@ def test_prepare_uses_one_worktree_and_private_destinations(
 
 
 def otel_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    harness: Harness,
+    endpoint: str = "https://otlp.example.net:4318",
 ) -> run_host.Run:
     run = make_run(
         tmp_path,
@@ -485,9 +493,7 @@ def otel_run(
         claude_profile="primary" if harness is Harness.CLAUDE else None,
         reason="example" if harness is Harness.CLAUDE else None,
     )
-    settings = dataclasses.replace(
-        run.settings, otel_endpoint="https://otlp.example.net:4318"
-    )
+    settings = dataclasses.replace(run.settings, otel_endpoint=endpoint)
     run = dataclasses.replace(run, settings=settings)
     runfiles.private_dir(run.home / ".codex")
     monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
@@ -496,10 +502,12 @@ def otel_run(
     return run
 
 
+@pytest.mark.parametrize("scheme", ["http", "https"])
 def test_codex_run_config_holds_the_otel_table(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scheme: str
 ) -> None:
-    run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
+    endpoint = f"{scheme}://otlp.example.net:4318"
+    run = otel_run(tmp_path, monkeypatch, Harness.CODEX, endpoint)
     result = run_host.prepare_workspace(run)
     config_path = Path(result.paths.codex_home) / "config.toml"
     # The macOS filesystem ignores case, so name the file as written.
@@ -508,13 +516,13 @@ def test_codex_run_config_holds_the_otel_table(
         "otel": {
             "trace_exporter": {
                 "otlp-http": {
-                    "endpoint": "https://otlp.example.net:4318/v1/traces",
+                    "endpoint": f"{endpoint}/v1/traces",
                     "protocol": "binary",
                 }
             },
             "metrics_exporter": {
                 "otlp-http": {
-                    "endpoint": "https://otlp.example.net:4318/v1/metrics",
+                    "endpoint": f"{endpoint}/v1/metrics",
                     "protocol": "binary",
                 }
             },
@@ -525,17 +533,15 @@ def test_codex_run_config_holds_the_otel_table(
     assert config_path.stat().st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize(
-    "endpoint", ["https://otlp.example.net/", "https://otlp.example.net"]
-)
-def test_otel_config_derives_signal_paths_from_the_base(endpoint: str) -> None:
-    table = tomllib.loads(run_host.otel_config(endpoint))["otel"]
-    assert table["trace_exporter"]["otlp-http"]["endpoint"] == (
-        "https://otlp.example.net/v1/traces"
-    )
-    assert table["metrics_exporter"]["otlp-http"]["endpoint"] == (
-        "https://otlp.example.net/v1/metrics"
-    )
+@pytest.mark.parametrize("scheme", ["http", "https"])
+@pytest.mark.parametrize("suffix", ["", "/"])
+def test_otel_config_derives_signal_paths_from_the_base(
+    scheme: str, suffix: str
+) -> None:
+    base = f"{scheme}://otlp.example.net"
+    table = tomllib.loads(run_host.otel_config(base + suffix))["otel"]
+    assert table["trace_exporter"]["otlp-http"]["endpoint"] == (f"{base}/v1/traces")
+    assert table["metrics_exporter"]["otlp-http"]["endpoint"] == (f"{base}/v1/metrics")
 
 
 def test_codex_run_without_an_endpoint_writes_no_config(
@@ -3166,17 +3172,16 @@ def test_main_keeps_account_path_until_request_loaded(
     assert run_host.main(["example"], "example") == 1
 
 
+@pytest.mark.parametrize("error", [OSError, RecursionError])
 def test_late_temporary_cleanup_keeps_finished_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
 ) -> None:
     run = make_run(tmp_path)
-    original = tempfile.TemporaryDirectory
+    cleanup = tempfile.TemporaryDirectory.cleanup
 
-    @contextmanager
-    def directory() -> Generator[str]:
-        with original() as value:
-            yield value
-        raise OSError
+    def fail_cleanup(directory: tempfile.TemporaryDirectory[str]) -> None:
+        cleanup(directory)
+        raise error
 
     def execute(
         _run: run_host.Run,
@@ -3192,7 +3197,7 @@ def test_late_temporary_cleanup_keeps_finished_records(
         run.files.write("rc", "7\n")
         return 7
 
-    monkeypatch.setattr(tempfile, "TemporaryDirectory", directory)
+    monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", fail_cleanup)
     monkeypatch.setattr(run_host, "_files", constant(run.files))
     monkeypatch.setattr(run_host, "_load", constant((run, "task")))
     monkeypatch.setattr(run_host, "execute", execute)
@@ -3203,6 +3208,83 @@ def test_late_temporary_cleanup_keeps_finished_records(
         run.files.path("log").read_text()
         == run_host.build_info.line() + "\nharness log\n"
     )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "rc"), [("success", 0), ("failure", 1), ("timeout", 124), ("exit", 7)]
+)
+def test_exec_removes_its_pytest_tree_after_each_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, rc: int
+) -> None:
+    run = make_run(tmp_path, timeout=1)
+    other_tree = tmp_path / "pytest-of-another-run"
+    other_tree.mkdir()
+    other_file = other_tree / "test-file"
+    other_file.write_text("keep")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    run_dirs: list[Path] = []
+    test = tmp_path / "test_probe.py"
+    test.write_text(
+        "from pathlib import Path\n"
+        "from os import environ\n"
+        "def test_temp(tmp_path):\n"
+        "    assert tmp_path.is_relative_to(Path(environ['TMPDIR']))\n"
+        "    tmp_path.joinpath('test-file').write_text('example')\n"
+    )
+
+    def load(_args: object, directory: Path) -> tuple[run_host.Run, str]:
+        run.tmpdir = runfiles.private_dir(directory / "tools")
+        run_dirs.append(directory)
+        return run, "example task"
+
+    def prepare(*_args: object) -> run_host.Prepared:
+        return preparation(run)
+
+    def launch(spec: process_group.Launch, **kwargs: object) -> Child:
+        assert (
+            spec.env["TMPDIR"] == spec.env["PYTEST_DEBUG_TEMPROOT"] == str(run.tmpdir)
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "--confcutdir",
+                str(tmp_path),
+                str(test),
+            ],
+            env={
+                **os.environ,
+                "TMPDIR": spec.env["TMPDIR"],
+                "PYTEST_DEBUG_TEMPROOT": spec.env["PYTEST_DEBUG_TEMPROOT"],
+                "PYTEST_ADDOPTS": "",
+                "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+            },
+            check=True,
+            capture_output=True,
+        )
+        assert next(run.tmpdir.glob("pytest-of-*/pytest-*/test_temp0/test-file"))
+        (run.tmpdir / "outside").symlink_to(other_tree, target_is_directory=True)
+        if outcome == "failure":
+            raise OSError
+        child = Child(code=rc, timeout=outcome == "timeout")
+        cast("Callable[[Child], None]", kwargs["started"])(child)
+        return child
+
+    monkeypatch.setattr(run_host, "_files", constant(run.files))
+    monkeypatch.setattr(run_host, "_load", load)
+    monkeypatch.setattr(run_host, "preflight", constant(None))
+    monkeypatch.setattr(credentials, "push_token", constant(None))
+    monkeypatch.setattr(process_group, "prepare", prepare)
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "record", constant(None))
+    monkeypatch.setattr(process_group, "stop_owned", constant(value=True))
+    assert run_host.main(["example"], "run-host") == rc
+    assert run.files.path("rc").read_text() == f"{rc}\n"
+    assert len(run_dirs) == 1
+    assert not run_dirs[0].exists()
+    assert other_file.read_text() == "keep"
 
 
 def test_signer_stop_denial_keeps_harness_rc(
@@ -4108,6 +4190,132 @@ def test_push_failure_reaches_durable_completion(
 
 
 @pytest.mark.parametrize(
+    ("hook_reference", "enabled", "expected"),
+    [(True, True, 7), (True, False, 1), (False, False, 7)],
+)
+def test_run_builds_required_shims_before_harness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hook_reference: bool,
+    enabled: bool,
+    expected: int,
+) -> None:
+    run = make_run(tmp_path)
+    run.host = dataclasses.replace(run.host, build_shims=enabled)
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
+    workspace = Path(prepared.paths.worktree)
+    if hook_reference:
+        (workspace / "prek.toml").write_text(".bazel_env/bin/cog")
+    runtime = HostRuntime(run, prepared, None)
+    runtime.patch(monkeypatch)
+    monkeypatch.setattr(run_host, "preflight", Mock())
+    tool = Mock(return_value="/tools/bazelisk")
+    monkeypatch.setattr(run_host, "_bazel_tool", tool)
+    deadline = run.deadline
+    ticks = iter([100, 130])
+    monkeypatch.setattr(
+        run_host, "time", SimpleNamespace(monotonic=lambda: next(ticks), time=time.time)
+    )
+
+    def build(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        assert runtime.phases == ["check", "workspace", "shims"]
+        assert runtime.events == []
+        cog = workspace / ".bazel_env/bin/cog"
+        cog.parent.mkdir(parents=True)
+        cog.touch()
+        return subprocess.CompletedProcess([], 1, b"", b"")
+
+    call = Mock(side_effect=build)
+    monkeypatch.setattr(shims.subprocess, "run", call)
+    assert run_host.execute(run, "example", "unused") == expected
+    assert run.files.path("rc").read_text() == f"{expected}\n"
+    if enabled:
+        assert runtime.events == ["group-stopped", "auth"]
+        assert runtime.phases == ["check", "workspace", "shims", "ended"]
+        assert run.deadline == deadline + 30
+        assert tool.call_count == 2  # Shim build and Bazel shutdown.
+        assert tool.call_args_list[0].args == (run,)
+        call.assert_called_once()
+    else:
+        assert run.deadline == deadline
+        tool.assert_called_once_with(run)  # Cleanup still looks for Bazel.
+        call.assert_not_called()
+        if hook_reference:
+            assert runtime.events == ["auth"]
+            assert runtime.phases == ["check", "workspace", "ended"]
+            assert (
+                "hook shims: the hooks need Bazel shims and this host has "
+                "build_shims = false; run on another host\n"
+                in run.files.path("log").read_text()
+            )
+        else:
+            assert runtime.events == ["group-stopped", "auth"]
+            assert runtime.phases == ["check", "workspace", "brief", "ended"]
+
+
+@pytest.mark.parametrize(
+    ("expect_commit", "push_result", "expected"),
+    [
+        (True, (0, None), 6),
+        (True, (0, "a" * 40), 0),
+        (True, (4, None), 4),
+        (False, (0, None), 0),
+    ],
+)
+def test_execute_requires_a_commit_when_requested(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    expect_commit: bool,
+    push_result: tuple[int, str | None],
+    expected: int,
+) -> None:
+    run = make_run(tmp_path, expect_commit=expect_commit)
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
+    HostRuntime(run, prepared, None).patch(monkeypatch)
+
+    def publish(*_args: object) -> int:
+        push_status, recorded_head = push_result
+        if recorded_head is not None:
+            run.files.write("head", recorded_head)
+        return push_status
+
+    monkeypatch.setattr(run_host.push, "run", publish)
+    assert run_host.execute(run, "example", "unused") == expected
+    assert run.files.path("rc").read_text() == f"{expected}\n"
+    assert runfiles.latest(run.files.root)["example"]["rc"] == expected
+    log = run.files.path("log")
+    message = "no new commit: the brief expected one (--expect-commit)\n"
+    assert (log.exists() and message in log.read_text().splitlines(keepends=True)) is (
+        expected == 6
+    )
+
+
+def test_execute_rejects_a_stale_head_when_requiring_a_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path, expect_commit=True)
+    _, clone = repository(tmp_path / "repo")
+    git(clone, "switch", "-c", "agent/example")
+    prepared = preparation(run)
+    prepared = dataclasses.replace(
+        prepared,
+        paths=dataclasses.replace(prepared.paths, worktree=str(clone)),
+        auth_before="example-before",
+    )
+    HostRuntime(run, prepared, None).patch(monkeypatch)
+    monkeypatch.setattr(run_host, "run_harness", constant(0))
+    monkeypatch.setattr(run_host.push, "run", PUSH_RUN)
+    run.files.write("head", "a" * 40)
+
+    assert run_host.execute(run, "example", "unused") == 6
+    assert run.files.path("rc").read_text() == "6\n"
+    assert "no new commit: the brief expected one (--expect-commit)" in (
+        run.files.path("log").read_text().splitlines()
+    )
+    assert not run.files.path("head").exists()
+
+
+@pytest.mark.parametrize(
     ("given", "result"),
     [
         (None, "minted-value"),
@@ -4155,17 +4363,34 @@ def test_execute_mints_a_push_token_only_when_none_was_given(
 def test_preflight_mints_no_push_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run = make_run(tmp_path)
+    run = make_run(tmp_path, expect_commit=True)
     prepared = dataclasses.replace(preparation(run), auth_before="example-before")
     runtime = HostRuntime(run, prepared, None)
     runtime.patch(monkeypatch)
+    (Path(prepared.paths.worktree) / "prek.toml").write_text(".bazel_env/bin/cog")
 
     def refuse(_request: object, _settings: object) -> str:
         raise AssertionError
 
+    def probe(
+        actual: run_host.Run,
+        ready: run_host.Prepared,
+        stack: ExitStack,
+        *,
+        preflight_only: bool,
+    ) -> int:
+        assert actual is run
+        assert ready is prepared
+        assert isinstance(stack, ExitStack)
+        assert preflight_only is True
+        return 0
+
+    build = Mock()
+    monkeypatch.setattr(run_host, "build_shims", build)
     monkeypatch.setattr(run_host.credentials, "push_token", refuse)
-    monkeypatch.setattr(run_host, "run_harness", constant(0))
+    monkeypatch.setattr(run_host, "run_harness", probe)
     assert run_host.execute(run, "example", preflight_only=True) == 0
+    build.assert_not_called()
 
 
 @pytest.mark.parametrize("claimed", [False, True])
@@ -4334,12 +4559,11 @@ def test_interrupted_second_admission_leaves_the_completed_run_alone(
     assert files.path("rc").read_text() == "0\n"
 
 
+@pytest.mark.parametrize("expected", [1, 7])
 def test_interrupt_while_releasing_the_lock_keeps_the_recorded_result(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, expected: int
 ) -> None:
-    files = runfiles.RunFiles(
-        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
-    )
+    run = make_run(tmp_path)
 
     @contextmanager
     def interrupted_release(_path: Path) -> Generator[None]:
@@ -4348,13 +4572,21 @@ def test_interrupt_while_releasing_the_lock_keeps_the_recorded_result(
         finally:
             raise run_host.RunInterruptedError
 
-    def load(_args: object, _tmpdir: Path) -> None:
-        raise OSError(errno.EIO, "load unavailable")
+    def load(_args: object, _tmpdir: Path) -> tuple[run_host.Run, str]:
+        if expected == 1:
+            raise OSError(errno.EIO, "load unavailable")
+        return run, "example task"
 
+    def execute(*_args: object, **_kwargs: object) -> int:
+        run.files.write("rc", "7\n")
+        return 7
+
+    monkeypatch.setattr(run_host, "_files", constant(run.files))
     monkeypatch.setattr(run_host.runfiles, "locked", interrupted_release)
     monkeypatch.setattr(run_host, "_load", load)
-    assert run_host.main(["example"], "run-host") == 1
-    assert files.path("rc").read_text().strip() == "1"
+    monkeypatch.setattr(run_host, "execute", execute)
+    assert run_host.main(["example"], "run-host") == expected
+    assert run.files.path("rc").read_text() == f"{expected}\n"
 
 
 def test_signal_after_recording_a_failure_keeps_the_recorded_result(
@@ -4698,17 +4930,21 @@ def test_config_check_protects_the_configured_startup_directory(
             run_host.check_config(configured)
 
 
-def test_resource_attributes_name_host_and_account(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_resource_attributes_name_host_account_and_run(
+    tmp_path: Path, scheme: str
+) -> None:
     run = make_run(tmp_path)
     run = dataclasses.replace(
         run,
         settings=dataclasses.replace(
-            run.settings, otel_endpoint="https://otlp.example.net"
+            run.settings, otel_endpoint=f"{scheme}://otlp.example.net"
         ),
     )
     assert run_host.resource_attributes(run) == {
         "OTEL_RESOURCE_ATTRIBUTES": (
             f"host.name={run.host.name},tbhb.account={run.request.account}"
+            ",tbhb.run.id=example"
         )
     }
 

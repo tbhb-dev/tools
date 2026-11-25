@@ -240,7 +240,9 @@ elif test -f {output}; then tail -c 65536 {output}; fi
             header
             + f"""safe_file {log}
 if test -f {log}; then
-    awk '/^(push skipped:|push failed:|pr not opened:)/ {{ last = $0 }}
+    awk '/^(push skipped:|push refused:|push failed:|pr not opened:|no new commit:)/ {{
+             last = $0
+         }}
          END {{ if (last != "") print substr(last, 1, 4096) }}' {log}
 fi
 """

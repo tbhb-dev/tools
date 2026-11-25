@@ -242,12 +242,13 @@ def _public_repos(table: _Table) -> tuple[str, ...]:
     return values
 
 
-_OTEL_SHAPE = "must be an https URL with no credentials, path, query or fragment"
-# The whole URL is matched, so no other character, such as a quote, a control
-# character or an `@`, can reach the config file, and no parser error can quote
-# the value.
+_OTEL_SHAPE = (
+    "must be an http or https URL with no credentials, path, query or fragment"
+)
+# Match the whole http or https URL so quotes, control characters and `@`
+# can't reach the config file. Parser errors don't quote the value.
 _OTEL_URL = re.compile(
-    r"https://(?P<host>[a-z0-9.-]+)(?::(?P<port>[1-9][0-9]{0,4}))?/?"
+    r"https?://(?P<host>[a-z0-9.-]+)(?::(?P<port>[1-9][0-9]{0,4}))?/?"
 )
 MAX_PORT = 65535
 
@@ -471,6 +472,7 @@ def _host(table: _Table) -> Host:
         "min_memory_available_percent",
         "max_swap_used_percent",
         "limits_warn_only",
+        "build_shims",
         "max_concurrent_runs",
     )
     name = _check_name(table, "name", table.text("name"), HOST_NAME)
@@ -509,6 +511,9 @@ def _host(table: _Table) -> Host:
         limits_warn_only=table.flag("limits_warn_only")
         if "limits_warn_only" in table.values
         else False,
+        build_shims=table.flag("build_shims")
+        if "build_shims" in table.values
+        else True,
         max_concurrent_runs=table.nonnegative(
             "max_concurrent_runs", DEFAULT_MAX_CONCURRENT_RUNS
         ),

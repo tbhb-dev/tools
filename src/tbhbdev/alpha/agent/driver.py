@@ -15,10 +15,12 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NoReturn
 
 from tbhbdev import telemetry, version
+from tbhbdev.alpha import brief
 from tbhbdev.alpha.agent import (
     launcher,
     render,
     runfiles,
+    shims,
     signing_parity,
     transport,
 )
@@ -158,8 +160,11 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         authorized_by=args.unsandboxed,
         startup_deadline_seconds=settings.launch_wait_seconds,
         fetch_refs=tuple(args.fetch_ref),
+        start_ref=args.start_ref,
         max_concurrent_runs=host.max_concurrent_runs,
+        expect_commit=args.expect_commit,
     )
+    request.check_start_ref(run)
     run = rules.check(
         run, settings, host, ref=args.ref, exists=metadata_path(args.name).exists()
     )
@@ -307,6 +312,19 @@ def check_limits(
         print(message, file=sys.stderr)
 
 
+def checked_prompt(args: argparse.Namespace) -> str:
+    """Read the brief, refuse hook conflicts and report branch warnings locally."""
+    prompt = Path(args.prompt_file).read_text()
+    problems = brief.check_hooks(prompt)
+    if problems:
+        telemetry.attributes(**{"tbhb.agent.outcome": "refused"})
+        message = "\n".join(f"{args.prompt_file}: {problem}" for problem in problems)
+        raise Invalid(message)
+    for warning in brief.branch_warnings(prompt, run=args.name):
+        print(f"warning: {args.prompt_file}: {warning}", file=sys.stderr)
+    return prompt
+
+
 def execute(settings: Settings, args: argparse.Namespace) -> int:
     run = prepare(settings, args)
     telemetry.attributes(
@@ -318,7 +336,7 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
             "tbhb.run.id": run.name,
         }
     )
-    prompt = Path(args.prompt_file).read_text()
+    prompt = checked_prompt(args)
     schema = None if args.schema is None else Path(args.schema).read_text()
     if schema is not None:
         json.loads(schema)
@@ -409,15 +427,21 @@ def recover_transfer(settings: Settings, run: Run) -> None:
 
 
 def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
+    poll_deadline = deadline
     while True:
         reading = transport.read(
             settings,
             run.host,
             (run.name, run.owner),
-            timeout=deadline - time.monotonic(),
+            timeout=poll_deadline - time.monotonic(),
+        )
+        poll_deadline = rules.launch_deadline(
+            reading.phase, deadline, shims.SHIM_SECONDS
         )
         action = rules.launch(
-            reading.rc, launched=reading.launched, expired=time.monotonic() >= deadline
+            reading.rc,
+            launched=reading.launched,
+            expired=time.monotonic() >= poll_deadline,
         )
         if action == "finished":
             # The host may still be closing its pane after committing the rc.

@@ -144,6 +144,7 @@ class Host:
     max_swap_used_percent: int = 80
     limits_warn_only: bool = False
     max_concurrent_runs: int = DEFAULT_MAX_CONCURRENT_RUNS
+    build_shims: bool = True
 
 
 @dataclass(frozen=True)
@@ -274,4 +275,6 @@ class RunRequest:
     authorized_by: str | None
     startup_deadline_seconds: int
     fetch_refs: tuple[str, ...] = ()
+    start_ref: str | None = None
     max_concurrent_runs: int | None = None
+    expect_commit: bool = False

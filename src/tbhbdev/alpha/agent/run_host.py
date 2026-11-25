@@ -36,6 +36,7 @@ from tbhbdev.alpha.agent import (
     render,
     runfiles,
     settings,
+    shims,
     worktree,
 )
 from tbhbdev.alpha.agent.decisions import argv, config, policy, repo, request, run_state
@@ -652,6 +653,7 @@ def resource_attributes(run: Run) -> dict[str, str]:
     return {
         "OTEL_RESOURCE_ATTRIBUTES": (
             f"host.name={run.host.name},tbhb.account={run.request.account}"
+            f",tbhb.run.id={run.files.name}"
         )
     }
 
@@ -774,6 +776,7 @@ def _execute(
     rc = 1
     agent = None
     try:
+        run.files.path("head").unlink(missing_ok=True)
         if not run.files.path("request.json").exists():
             run.files.receive(run.request)
         run.files.write("phase", "check")
@@ -787,21 +790,28 @@ def _execute(
         prepared = prepared_result(result)
         runfiles.append(run.files.root, index_entry(run, prepared, None))
         run.files.write("phase", "workspace")
+        workspace = Path(prepared.paths.worktree)
+        needs_shims = not preflight_only and shims.needed(
+            workspace, run.request.profile
+        )
+        if needs_shims:
+            build_shims(run, workspace)
         run.files.write(
             "prompt", render.brief(run.request.kind, text, profile=run.request.profile)
         )
-        run.files.write("phase", "brief")
+        if not needs_shims:
+            run.files.write("phase", "brief")
         if prepared.delivery.signing is not None:
             agent = credentials.signing_agent(
                 prepared.delivery.signing, run.tmpdir, run.deadline
             )
         if push_token is None and not preflight_only:
             push_token = credentials.push_token(run.request, run.settings)
-        rc = (
-            run_harness(run, prepared, stack, preflight_only=True)
-            if preflight_only
-            else push.run(run, prepared, stack, run_harness, push_token)
-        )
+        if preflight_only:
+            rc = run_harness(run, prepared, stack, preflight_only=True)
+        else:
+            rc = push.run(run, prepared, stack, run_harness, push_token)
+            rc = require_commit(run, rc)
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
     except RunInterruptedError, EOFError:
@@ -815,6 +825,15 @@ def _execute(
     finally:
         stack.enter_context(process_group.ignore_signals())
         rc = finish(run, prepared, agent, rc)
+    return rc
+
+
+def require_commit(run: Run, rc: int) -> int:
+    if rc == 0 and run.request.expect_commit and not run.files.path("head").exists():
+        run.files.write(
+            "log", "no new commit: the brief expected one (--expect-commit)\n"
+        )
+        return 6
     return rc
 
 
@@ -965,6 +984,20 @@ def _bazel_tool(run: Run) -> str | None:
         )
     )
     return shutil.which("bazelisk", path=search) or shutil.which("bazel", path=search)
+
+
+def build_shims(run: Run, workspace: Path) -> None:
+    if not run.host.build_shims:
+        message = (
+            "hook shims: the hooks need Bazel shims and this host has "
+            "build_shims = false; run on another host"
+        )
+        raise Invalid(message)
+    # Keep this phase until launch so polling uses the extra time through startup.
+    run.files.write("phase", "shims")
+    started = time.monotonic()
+    shims.build(workspace, _bazel_tool(run))
+    run.deadline += time.monotonic() - started
 
 
 def _shutdown_once(tool: str, base: Path, worktree: str) -> str:
@@ -1305,12 +1338,17 @@ def main(
             try:
                 # Inside the try so a failure to create the temp directory
                 # leaves a record like any other refusal.
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    run, text = _load(args, Path(tmpdir).resolve())
+                temporary = tempfile.TemporaryDirectory()
+                try:
+                    run, text = _load(args, Path(temporary.name).resolve())
                     run.files.write("log", build_info.line() + "\n")
                     completed = execute(
                         run, text, push_token, preflight_only=args.preflight
                     )
+                finally:
+                    # The run's result takes precedence over temporary cleanup.
+                    with suppress(Exception):
+                        temporary.cleanup()
             except _REFUSALS as exc:
                 if completed is None and not isinstance(exc, RunExistsError):
                     # Ignored until `recorded` is set: a signal in between
