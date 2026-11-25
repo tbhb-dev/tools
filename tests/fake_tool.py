@@ -6,8 +6,11 @@
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 from typing import TYPE_CHECKING
+
+import pytest
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,6 +42,7 @@ def write_fake(script: Path, body: str) -> None:
 # readlink and dirname and checks the kernel with uname, so a PATH that
 # holds git must hold these too.
 GIT_TOOLS = ("git", "readlink", "dirname", "uname")
+PR_ORIGIN = "git@github.com:tbhb-dev/example.git"
 
 
 def link_git(directory: Path) -> None:
@@ -46,6 +50,40 @@ def link_git(directory: Path) -> None:
     directory.mkdir()
     for name in GIT_TOOLS:
         (directory / name).symlink_to(shutil.which(name) or name)
+
+
+@pytest.fixture(scope="session")
+def pr_git_baseline(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Seed Git metadata once for pull request and review tests to copy."""
+    home = tmp_path_factory.mktemp("pr-git-baseline")
+    root = home / "repo"
+    root.mkdir()
+    git_dir = home / "bin"
+    link_git(git_dir)
+    env = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    env.update(
+        HOME=str(home),
+        XDG_CONFIG_HOME=str(home / "xdg"),
+        PATH=str(git_dir),
+        GIT_AUTHOR_NAME="T",
+        GIT_AUTHOR_EMAIL="t@example.com",
+        GIT_COMMITTER_NAME="T",
+        GIT_COMMITTER_EMAIL="t@example.com",
+    )
+    for argv in (
+        ("init", "-q", "-b", "main", "--template="),
+        ("config", "commit.gpgsign", "false"),
+        ("remote", "add", "origin", PR_ORIGIN),
+        ("commit", "--allow-empty", "-q", "-m", "init"),
+        ("update-ref", "refs/remotes/origin/main", "HEAD"),
+        ("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"),
+    ):
+        subprocess.run(
+            ["git", *argv], cwd=root, env=env, capture_output=True, check=True
+        )
+    return root / ".git"
 
 
 # A stand-in for the host's private gitleaks config: it extends the committed
