@@ -335,8 +335,9 @@ def test_check_reports_unreadable_drafts(
     "argv",
     [
         [],
-        ["post", "7"],
+        ["post", "7", "--event", "APPROVE"],
         ["dismiss", "7"],
+        ["dismiss", "7", "0", "--reason", "stale"],
         ["draft"],
         ["check", "0"],
         ["draft", "-1"],
