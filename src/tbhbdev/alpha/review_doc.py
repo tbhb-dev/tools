@@ -14,6 +14,8 @@ type Tier = Literal[0, 1, 2]
 type Verdict = Literal["GO", "NO-GO"]
 type FindingClass = Literal["BLOCK", "TECH-DEBT", "SECURITY-DEBT"]
 type Variant = Literal["a", "b"]
+type _ReviewRow = dict[str, dict[str, object] | str | int] | None
+type _Pull = dict[str, dict[str, object]] | None
 
 _HEAD = re.compile(r"[0-9a-f]{40}")
 _HEADER = re.compile(
@@ -32,10 +34,13 @@ _MARKER = re.compile(
     r"head=([0-9a-f]{40}) run=(?u:(\S+)) -->$",
     re.ASCII | re.MULTILINE,
 )
+_PAGE_SIZE = 100
+_MARKER_SYNTAX = re.compile(r"<!--\s*tbhb-(?:review|reply)\b", re.IGNORECASE)
+_REASON_LIMIT = 200
 
 
 class ReviewError(ValueError):
-    """The review draft cannot be parsed."""
+    """A review document or operation was refused."""
 
 
 @dataclass(frozen=True)
@@ -268,23 +273,57 @@ def parse_marker(body: str) -> Marker | None:
 
 def is_dismissed(existing: Existing) -> bool:
     """Check whether GitHub dismissed the review or the App superseded it."""
-    return existing.state == "DISMISSED" or existing.body.startswith("SUPERSEDED:")
+    return _dismissed(existing.state, existing.body)
 
 
-# agent/review_post.py's posted() uses credentials.review_post_token for the App.
-# The caller supplies the corresponding author's login for review lookups.
+def _dismissed(state: str, body: str) -> bool:
+    return state == "DISMISSED" or body.startswith("SUPERSEDED:")
+
+
+def _active_id(entry: object, expected: Marker, author: str) -> int | None:
+    # The mapping pattern checks the API response at runtime.
+    match cast("_ReviewRow", entry):  # pragma: no mutate -- cast is a runtime no-op
+        case {
+            "id": int(review_id),
+            "user": {"login": str(login)},
+            "body": str(body),
+            "state": str(state),
+        } if (key := parse_marker(body)) is not None:
+            existing = Existing(review_id, login, key, state, body)
+            same_marker = existing.marker == expected
+            same_author = existing.author.casefold() == author.casefold()
+            if same_marker and same_author and not is_dismissed(existing):
+                return existing.id
+        case _:  # pragma: no mutate -- falls through to the same return
+            pass
+    return None
+
+
 def find_existing(  # noqa: PLR0913, PLR0917
     api: Api, repo: str, pr: int, head_sha: str, run: str, author: str
 ) -> int | None:
     """Page through GET /repos/{repo}/pulls/{pr}/reviews?per_page=100.
 
-    Return the ID of the newest review with the App author's login and matching
+    Return the ID of the newest review with the author's login and matching
     marker whose is_dismissed check is false, or None if none match.
-
-    Raises:
-        NotImplementedError: A follow-up change implements review lookup.
     """
-    raise NotImplementedError("review lookup pending")  # noqa: EM101
+    expected = Marker(repo, pr, head_sha, run)
+    newest = None
+    page = 1
+    while True:
+        path = f"repos/{repo}/pulls/{pr}/reviews?per_page={_PAGE_SIZE}&page={page}"
+        reviews = api.request("GET", path)
+        if not isinstance(reviews, list):
+            message = "expected a list of reviews"
+            raise ReviewError(message)
+        # GitHub returns reviews in chronological order.
+        entries = cast("list[object]", reviews)  # pragma: no mutate -- runtime no-op
+        for entry in entries:
+            if (matched := _active_id(entry, expected, author)) is not None:
+                newest = matched
+        if len(reviews) < _PAGE_SIZE:
+            return newest
+        page += 1
 
 
 def post(
@@ -292,40 +331,74 @@ def post(
 ) -> tuple[Literal["posted", "exists"], int | None]:
     """Validate the document and refuse a moved pull request head.
 
-    Return ("exists", id) if the App already posted a matching review. Otherwise
+    Return ("exists", id) if the author already posted a matching review. Otherwise
     POST a review with commit_id set to doc.head_sha, body set to render(doc),
     and event set to COMMENT. Return ("posted", id), with None for an absent ID.
     Accept the race between concurrent posts without a lock.
 
-    Raises:
-        NotImplementedError: A follow-up change implements posting.
     """
-    raise NotImplementedError("review posting pending")  # noqa: EM101
+    if problems := validate(doc):
+        raise ReviewError("\n".join(problems))
+    path = f"repos/{doc.repo}/pulls/{doc.pr}"
+    live = api.request("GET", path)
+    match cast("_Pull", live):  # pragma: no mutate -- runtime no-op
+        case {"head": {"sha": head}} if head == doc.head_sha:
+            pass
+        case _:
+            message = "pull request head has moved"
+            raise ReviewError(message)
+    existing = find_existing(api, doc.repo, doc.pr, doc.head_sha, doc.run.name, author)
+    if existing is not None:
+        return "exists", existing
+    result = api.request(
+        "POST",
+        f"{path}/reviews",
+        {"commit_id": doc.head_sha, "body": render(doc), "event": "COMMENT"},
+    )
+    match cast("dict[str, object] | None", result):  # pragma: no mutate -- cast
+        case {"id": int(review_id)}:
+            return "posted", review_id
+        case _:
+            return "posted", None
 
 
 def dismiss(
     api: Api,
     repo: str,
     pr: int,
-    review_id: int,  # noqa: V107 -- Stream 3 will use this review ID.
+    review_id: int,
     reason: str,
 ) -> None:
     """Edit a COMMENT review to prefix its body with `SUPERSEDED: <reason>`.
 
     Require a plain-text reason of at most 200 characters with no markers.
-    Preserve the original marker. This behavior is unverified against GitHub.
-
-    Raises:
-        NotImplementedError: A follow-up change implements superseding reviews.
+    Preserve the original marker.
     """
-    raise NotImplementedError("review dismissal pending")  # noqa: EM101
+    one_line = reason.splitlines() == [reason]
+    if not one_line or len(reason) > _REASON_LIMIT or _MARKER_SYNTAX.search(reason):
+        message = "reason must be one line of at most 200 characters without markers"
+        raise ReviewError(message)
+    path = f"repos/{repo}/pulls/{pr}/reviews/{review_id}"
+    response = api.request("GET", path)
+    match cast("dict[str, object] | None", response):  # pragma: no mutate -- cast
+        case {"body": str(body), "state": ("COMMENTED" | "DISMISSED") as state}:
+            key = parse_marker(body)
+            if key is not None and (key.repo, key.pr) == (repo, pr):
+                if not _dismissed(state, body):
+                    body = f"SUPERSEDED: {reason}\n{body}"
+                    api.request("PUT", path, {"body": body})
+                return
+        case _:  # pragma: no mutate -- falls through to the same refusal
+            pass
+    message = "expected a COMMENT review marked for this pull request"
+    raise ReviewError(message)
 
 
 def reply(
     api: Api,
     repo: str,
     pr: int,
-    review_id: int,  # noqa: V107 -- Reserved for the reply implementation.
+    review_id: int,
     text: str,
 ) -> int:
     """Post a PR issue comment and return its ID.
@@ -333,7 +406,22 @@ def reply(
     Use the review's head to format `Re review <id> (head <sha8>): <text>`
     followed by a separate `<!-- tbhb-reply v1 review=<id> -->` marker line.
 
-    Raises:
-        NotImplementedError: A follow-up change implements review replies.
     """
-    raise NotImplementedError("review replies pending")  # noqa: EM101
+    if _MARKER_SYNTAX.search(text):
+        message = "reply text must not contain markers"
+        raise ReviewError(message)
+    review = api.request("GET", f"repos/{repo}/pulls/{pr}/reviews/{review_id}")
+    match cast("dict[str, object] | None", review):  # pragma: no mutate -- cast
+        case {"commit_id": str(head)} if _HEAD.fullmatch(head):
+            body = f"Re review {review_id} (head {head[:8]}): {text}\n"
+        case _:
+            message = "review lacks a 40-hex commit ID"
+            raise ReviewError(message)
+    body += f"<!-- tbhb-reply v1 review={review_id} -->"
+    response = api.request("POST", f"repos/{repo}/issues/{pr}/comments", {"body": body})
+    match cast("dict[str, object] | None", response):  # pragma: no mutate -- cast
+        case {"id": int(comment_id)}:
+            return comment_id
+        case _:
+            message = "missing reply comment ID"
+            raise ReviewError(message)
