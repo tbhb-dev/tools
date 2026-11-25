@@ -34,7 +34,9 @@ def _load(name: str) -> str:
         return (
             files("tbhbdev.alpha")
             .joinpath("review_prompt_data", name)
-            .read_text(encoding="utf-8")
+            .read_text(
+                encoding="utf-8",  # pragma: no mutate -- Codec names ignore case.
+            )
         )
     except FileNotFoundError as exc:
         message = f"Missing review prompt resource: {name}"
