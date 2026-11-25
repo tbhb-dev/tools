@@ -36,7 +36,6 @@ BUILD: Data = {
     "variant": None,
     "role": None,
     "unsandboxed": False,
-    "tainted_host": False,
     "authorized_by": None,
     "startup_deadline_seconds": 120,
     "fetch_refs": [],
@@ -117,7 +116,6 @@ def test_parse_builds_every_field() -> None:
         unsandboxed=False,
         authorized_by=None,
         startup_deadline_seconds=120,
-        tainted_host=False,
     )
 
 
@@ -521,49 +519,10 @@ def test_the_request_holds_no_credential_field() -> None:
     ) == (set(BUILD))
 
 
-@pytest.mark.parametrize("tainted", [False, True])
-def test_request_reads_driver_host_taint(tainted: bool) -> None:
-    parsed = request.parse(
-        BUILD | {"tainted_host": tainted}, host_allows_unsandboxed=True
-    )
-    assert parsed.tainted_host is tainted
-    assert request.to_dict(parsed)["tainted_host"] is tainted
-
-
-def test_request_host_taint_is_required() -> None:
-    assert refused(made(BUILD, tainted_host=MISSING)) == (
-        "request is missing fields: tainted_host"
-    )
-
-
-def test_run_request_has_no_host_taint_default() -> None:
-    fields = {field.name: field for field in dataclasses.fields(model.RunRequest)}
-    assert fields["tainted_host"].default is dataclasses.MISSING
-
-
-@pytest.mark.parametrize("bad", [None, 0, 1, "false"])
-def test_request_host_taint_requires_boolean(bad: object) -> None:
-    assert (
-        refused(BUILD | {"tainted_host": bad})
-        == "request tainted_host must be true or false"
-    )
-
-
-def test_request_v2_taint_contract() -> None:
-    data = {**BUILD, "v": 2, "tainted_host": True}
-    parsed = request.parse(data, host_allows_unsandboxed=False)
-    assert request.to_dict(parsed) == data
-    assert parsed.tainted_host is True
-    assert refused({**data, "v": 1}).startswith("request v 1 is not a supported")
-    del data["tainted_host"]
-    assert refused(data) == "request is missing fields: tainted_host"
-
-
-@pytest.mark.parametrize("bad", ["yes", 1, 0, None, "true"])
-def test_tainted_host_must_be_a_boolean(bad: object) -> None:
-    assert refused(made(BUILD, tainted_host=bad)) == (
-        "request tainted_host must be true or false"
-    )
+def test_request_v2_contract() -> None:
+    parsed = request.parse(BUILD, host_allows_unsandboxed=False)
+    assert request.to_dict(parsed) == BUILD
+    assert refused({**BUILD, "v": 1}).startswith("request v 1 is not a supported")
 
 
 def test_a_negative_launcher_cap_is_refused() -> None:

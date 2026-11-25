@@ -1065,3 +1065,61 @@ def test_unopened_pull_request_fails_the_run_but_keeps_the_branch(
     assert git(target, "rev-parse", "refs/heads/agent/example")
     assert not run.files.path("pr").exists()
     assert run.files.path("log").read_text() == f"pr not opened: {reason}\n"
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_draft_addition_is_refused_before_push(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path], *, committed: bool
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+
+    def draft_harness(*_args: object) -> int:
+        draft = workspace / open_pr.DRAFT
+        draft.parent.mkdir()
+        draft.write_text("worktree draft")
+        if committed:
+            git(workspace, "add", open_pr.DRAFT)
+        commit(workspace, "agent change")
+        return 0
+
+    with ExitStack() as stack:
+        assert push.run(run, prepared, stack, draft_harness, SYNTHETIC) == (
+            4 if committed else 0
+        )
+    assert (workspace / open_pr.DRAFT).read_text() == "worktree draft"
+    if committed:
+        assert git(target, "for-each-ref") == ""
+        assert not run.files.path("branch").exists()
+        assert not run.files.path("pr").exists()
+        assert run.files.path("log").read_text() == (
+            "push refused: the run's commits add .github/PULL_REQUEST_DRAFT.md; "
+            "remove it from the commits\n"
+        )
+    else:
+        assert git(target, "rev-parse", "refs/heads/agent/example")
+        assert run.files.path("pr").read_text() == f"{run.request.repo}#7"
+
+
+def test_missing_pre_run_commit_keeps_pr_refusal_after_push(
+    local_run: tuple[run_host.Run, run_host.Prepared, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run, prepared, target = local_run
+    workspace = Path(prepared.paths.worktree)
+
+    def open_without_base(published: open_pr.PublishedRange, *_args: object) -> int:
+        assert published.before is None
+        open_pr.scan_rules(published)
+        raise AssertionError
+
+    monkeypatch.setattr(open_pr, "open_pull_request", open_without_base)
+    sha = git(workspace, "rev-parse", "HEAD")
+    assert (
+        push.publish(run, workspace, ("refs/heads/agent/example", sha), SYNTHETIC, None)
+        == 5
+    )
+    assert git(target, "rev-parse", "refs/heads/agent/example") == sha
+    assert run.files.path("log").read_text() == (
+        "pr not opened: cannot check the PR draft without a pre-run commit\n"
+    )

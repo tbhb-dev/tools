@@ -52,7 +52,6 @@ Ran it.
 
 
 POLICY = "[extend]\nuseDefault = true\n"
-WARNING = ("log", "draft committed: it will merge into main; remove it\n")
 
 
 def write_draft(directory: Path, text: str) -> Path:
@@ -98,13 +97,13 @@ def commit_draft(
     return open_pr.PublishedRange(directory, directory / ".git", before, head)
 
 
-def accept_warning(suffix: str, text: str) -> None:
-    assert (suffix, text) == WARNING
+def no_log(suffix: str, text: str) -> None:
+    pytest.fail(f"unexpected {suffix}: {text}")
 
 
 def open_draft(
     published: open_pr.PublishedRange,
-    write: Callable[[str, str], None] = accept_warning,
+    write: Callable[[str, str], None] = no_log,
 ) -> int:
     return open_pr.open_pull_request(
         published, "tbhb-dev/tools", "agent/r1", "tok", write
@@ -163,7 +162,7 @@ def test_opens_the_pr_from_the_pushed_draft(
 
     number = open_draft(published, warn)
     assert number == 12
-    assert warnings == [WARNING]
+    assert warnings == []
     assert scans == [DRAFT]
     assert seen["url"] == "https://api.github.com/repos/tbhb-dev/tools/pulls"
     payload = seen["json"]
@@ -185,7 +184,7 @@ def test_publication_git_isolated_from_run(
 ) -> None:
     published = commit_draft(tmp_path, DRAFT)
     flags = "--no-ext-diff --no-textconv --no-renames --diff-filter=A --name-only"
-    output = iter([open_pr.DRAFT.encode(), POLICY.encode()])
+    output = iter([b"", POLICY.encode()])
     expected = {
         "HOME": str(published.git_dir),
         "PATH": host_tools.search(),
@@ -195,14 +194,20 @@ def test_publication_git_isolated_from_run(
 
     def git(args: list[str], **options: object) -> subprocess.CompletedProcess[bytes]:
         if args[3] == "diff":
-            assert args[4:-4] == flags.split()
-            assert args[-1] == open_pr.DRAFT
+            assert args[4:] == [
+                *flags.split(),
+                published.before,
+                published.commit,
+                "--",
+                open_pr.DRAFT,
+            ]
         assert options["cwd"] == published.git_dir
         assert options["env"] == expected
         return subprocess.CompletedProcess(args, 0, next(output))
 
     monkeypatch.setattr(subprocess, "run", git)
-    assert open_pr.check_range(published, accept_warning) == POLICY.encode()
+    open_pr.check_range(published)
+    assert open_pr.scan_rules(published) == POLICY.encode()
 
 
 def test_a_missing_draft_is_refused(tmp_path: Path) -> None:
@@ -304,7 +309,9 @@ def test_a_draft_without_a_base_opens_against_the_api_default(
     published = commit_draft(tmp_path, "# t\n\nbody\n")
     seen: dict[str, object] = {}
 
-    def get(_url: str, **_options: object) -> httpx.Response:
+    def get(_url: str, **options: object) -> httpx.Response:
+        assert isinstance(options["headers"], dict)
+        assert options["headers"]["Authorization"] == "Bearer tok"
         data = {
             "default_branch": "trunk",
             "full_name": "tbhb-dev/tools",
@@ -502,11 +509,12 @@ def test_unavailable_scan_policy_refuses(
         message = r"^cannot check the PR draft without a pre-run commit$"
     elif reason == "bad-range":
         published = published._replace(before="0" * 40)
-        message = r"^cannot check whether the pushed range adds the PR draft$"
+        message = r"^cannot check whether the run range adds the PR draft$"
     else:
         message = "cannot scan the PR draft without"
+    check = open_pr.check_range if reason in ("no-base", "bad-range") else open_draft
     with pytest.raises(open_pr.OpenRefusedError, match=message):
-        open_draft(published)
+        check(published)
     assert scans == []
 
 
@@ -642,3 +650,44 @@ def test_the_scan_visibility_comes_from_the_repository_read(
     )
     assert result == expected
     assert lines == ([("log", logged)] if logged else [])
+
+
+def test_run_range_refuses_a_new_draft(tmp_path: Path) -> None:
+    published = commit_draft(tmp_path, DRAFT)
+    with pytest.raises(
+        open_pr.OpenRefusedError, match=r"commits add .*PULL_REQUEST_DRAFT"
+    ):
+        open_pr.check_range(published)
+
+
+def test_run_range_allows_a_preexisting_draft(tmp_path: Path) -> None:
+    published = commit_draft(tmp_path, "changed", initial=True)
+    open_pr.check_range(published)
+
+
+def test_visibility_lookup_failure_is_logged_when_opening(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    published = commit_draft(tmp_path, None)
+    write_draft(tmp_path, DRAFT)
+
+    def get(*_args: object, **_kwargs: object) -> httpx.Response:
+        return reply(404, {})
+
+    def post(*_args: object, **_kwargs: object) -> httpx.Response:
+        return reply(201, {"number": 12})
+
+    monkeypatch.setattr(httpx, "get", get)
+    monkeypatch.setattr(httpx, "post", post)
+
+    def scan(_text: str, _what: str, **options: object) -> None:
+        assert options["visibility"] == ""
+
+    monkeypatch.setattr(gitleaks_check, "scan_text", scan)
+    logs: list[tuple[str, str]] = []
+
+    def write(suffix: str, text: str) -> None:
+        logs.append((suffix, text))
+
+    assert open_draft(published, write) == 12
+    assert logs == [("log", "visibility lookup failed: no usable answer\n")]
