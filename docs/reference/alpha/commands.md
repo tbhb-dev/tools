@@ -2,10 +2,9 @@
 description: Interim agent commands, installation, and harness hooks.
 generated:
   - role: generated
-    harness: codex:0.166.0
+    harness: codex:0.171.0
     model: openai:gpt-6.2-sol
-    effort: medium
-    at: "2026-11-25T21:17:18Z"
+    at: "2026-11-25T23:56:19Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -45,6 +44,8 @@ type: Reference
 - `install` installs the git hooks and the user-level harness hooks. `--hooks-only` installs only this clone's git hooks without writing user-level config.
 
 The pre-push guard requires each newly pushed commit with an agent author or committer to have a valid SSH signature from the local agent key or a signing key registered to `tbhb-agent` on GitHub. The guard accepts local signatures offline. When it needs the registered keys, it makes one request per push with a five-second timeout. If the request fails, the guard accepts the local key alone and explains the fallback when it refuses a commit.
+
+A branch update that adds a commit with an agent author or committer must target a remote branch under `agent/` or `renovate/`. The guard names the refused ref and tells the agent to push to an `agent/<name>` branch. Agents can delete branches under `agent/`.
 
 `tbhbdev alpha pr rebase N [N...]` asks Renovate to rebase open pull requests in the repository named by `origin`. It ticks the rebase checkbox only for pull requests from the Renovate bot and preserves the rest of each body. It skips checked boxes and stops at the first failure.
 
