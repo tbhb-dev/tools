@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, NamedTuple, cast
 import httpx
 
 from tbhbdev import gitleaks_check
-from tbhbdev.alpha import pull_request
+from tbhbdev.alpha import pull_request, secret_scan
 from tbhbdev.alpha.agent import host_tools
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import Invalid
@@ -172,8 +172,20 @@ def check_range(published: PublishedRange) -> None:
         raise OpenRefusedError(message)
 
 
-def scan_rules(published: PublishedRange) -> bytes:
-    """Load secret scan rules from the pre-run commit."""
+NO_BASE_RULES = secret_scan.NO_COMMITTED_CONFIG
+HEAD_RULES = (
+    "no .gitleaks.toml at the base; scanned with the private config and the "
+    "run's .gitleaks.toml"
+)
+
+
+def scan_rules(published: PublishedRange, write: Callable[[str, str], None]) -> bytes:
+    """Load secret scan rules from the pre-run commit.
+
+    A pre-run commit without the file falls back to the run's head commit file,
+    or to none, which scans with the private config and gitleaks' defaults. The
+    fallback is logged. A missing commit or an unreadable file still refuses.
+    """
     before = published.before
     if before is None:
         message = "cannot check the PR draft without a pre-run commit"
@@ -181,12 +193,19 @@ def scan_rules(published: PublishedRange) -> bytes:
     rules = publication_git(
         published.git_dir, "cat-file", "blob", f"{before}:{GITLEAKS_EXTENDS}"
     )
-    if rules.returncode:
-        message = (
-            f"cannot scan the PR draft without {GITLEAKS_EXTENDS} in the pre-run commit"
-        )
+    if not rules.returncode:
+        return rules.stdout
+    listed = publication_git(
+        published.git_dir, "ls-tree", "--name-only", before, "--", GITLEAKS_EXTENDS
+    )
+    if listed.returncode or listed.stdout.strip():
+        message = f"cannot load {GITLEAKS_EXTENDS} from the pre-run commit"
         raise OpenRefusedError(message)
-    return rules.stdout
+    head = publication_git(
+        published.git_dir, "cat-file", "blob", f"{published.commit}:{GITLEAKS_EXTENDS}"
+    )
+    write("log", f"{NO_BASE_RULES if head.returncode else HEAD_RULES}\n")
+    return b"" if head.returncode else head.stdout
 
 
 # Fixed phrases for scanner failures, chosen by the refusal's kind, so the log
@@ -321,7 +340,7 @@ def open_pull_request(
         OpenRefusedError: The draft is missing or malformed, or GitHub
             refuses or cannot be reached.
     """
-    rules = scan_rules(published)
+    rules = scan_rules(published, write)
     text = read_draft(published)
     scan_draft(
         text, published.git_dir, rules, repository_visibility(repository, token, write)

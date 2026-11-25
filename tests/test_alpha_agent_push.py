@@ -1366,7 +1366,7 @@ def test_missing_pre_run_commit_keeps_pr_refusal_after_push(
 
     def open_without_base(published: open_pr.PublishedRange, *_args: object) -> int:
         assert published.before is None
-        open_pr.scan_rules(published)
+        open_pr.scan_rules(published, lambda *_: None)
         raise AssertionError
 
     monkeypatch.setattr(open_pr, "open_pull_request", open_without_base)

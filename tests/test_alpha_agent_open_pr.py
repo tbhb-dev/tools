@@ -207,7 +207,7 @@ def test_publication_git_isolated_from_run(
 
     monkeypatch.setattr(subprocess, "run", git)
     open_pr.check_range(published)
-    assert open_pr.scan_rules(published) == POLICY.encode()
+    assert open_pr.scan_rules(published, no_log) == POLICY.encode()
 
 
 def test_a_missing_draft_is_refused(tmp_path: Path) -> None:
@@ -498,11 +498,11 @@ def test_worktree_draft_size_boundary(
     assert open_pr.read_worktree_draft(tmp_path) == text.encode()
 
 
-@pytest.mark.parametrize("reason", ["no-base", "bad-range", "no-policy"])
+@pytest.mark.parametrize("reason", ["no-base", "bad-range", "bad-commit", "not-a-file"])
 def test_unavailable_scan_policy_refuses(
     tmp_path: Path, reason: str, scans: list[str]
 ) -> None:
-    published = commit_draft(tmp_path, None, policy=False)
+    published = commit_draft(tmp_path, None, policy=reason != "not-a-file")
     write_draft(tmp_path, DRAFT)
     if reason == "no-base":
         published = published._replace(before=None)
@@ -510,12 +510,98 @@ def test_unavailable_scan_policy_refuses(
     elif reason == "bad-range":
         published = published._replace(before="0" * 40)
         message = r"^cannot check whether the run range adds the PR draft$"
+    elif reason == "bad-commit":
+        published = published._replace(before="0" * 40)
+        message = r"^cannot load \.gitleaks\.toml from the pre-run commit$"
     else:
-        message = "cannot scan the PR draft without"
+        # The base commit holds a directory where the config belongs.
+        (tmp_path / ".gitleaks.toml").mkdir()
+        (tmp_path / ".gitleaks.toml" / "x").write_text("x")
+        subprocess.check_call(["git", "add", "."], cwd=tmp_path)
+        subprocess.check_call(["git", "commit", "-qm", "dir"], cwd=tmp_path)
+        before = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=tmp_path, text=True
+        ).strip()
+        published = published._replace(before=before)
+        message = r"^cannot load \.gitleaks\.toml from the pre-run commit$"
     check = open_pr.check_range if reason in ("no-base", "bad-range") else open_draft
     with pytest.raises(open_pr.OpenRefusedError, match=message):
         check(published)
     assert scans == []
+
+
+def test_rules_come_from_the_base_and_a_head_file_never_overrides_them(
+    tmp_path: Path,
+) -> None:
+    published = commit_draft(tmp_path, DRAFT)
+    assert open_pr.scan_rules(published, no_log) == POLICY.encode()
+
+
+def test_rules_need_a_pre_run_commit(tmp_path: Path) -> None:
+    published = commit_draft(tmp_path, None)._replace(before=None)
+    with pytest.raises(open_pr.OpenRefusedError, match="without a pre-run commit"):
+        open_pr.scan_rules(published, no_log)
+
+
+def test_a_base_without_rules_falls_back_to_the_defaults(tmp_path: Path) -> None:
+    published = commit_draft(tmp_path, None, policy=False)
+    logged: list[tuple[str, str]] = []
+    rules = open_pr.scan_rules(
+        published, lambda suffix, text: logged.append((suffix, text))
+    )
+    assert rules == b""
+    assert logged == [("log", f"{open_pr.NO_BASE_RULES}\n")]
+    assert open_pr.NO_BASE_RULES == (
+        "no .gitleaks.toml at the base; scanned with the private config and "
+        "gitleaks defaults"
+    )
+
+
+def test_a_base_without_rules_uses_the_file_the_run_adds(tmp_path: Path) -> None:
+    published = commit_draft(tmp_path, DRAFT, policy=False)
+    logged: list[tuple[str, str]] = []
+    rules = open_pr.scan_rules(
+        published, lambda suffix, text: logged.append((suffix, text))
+    )
+    assert rules == b"untrusted"
+    assert logged == [("log", f"{open_pr.HEAD_RULES}\n")]
+
+
+@pytest.mark.parametrize(("adds", "expected"), [(False, b""), (True, b"untrusted")])
+def test_opening_without_base_rules_scans_and_says_so(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adds: bool,
+    expected: bytes,
+) -> None:
+    published = commit_draft(tmp_path, DRAFT if adds else None, policy=False)
+    write_draft(tmp_path, DRAFT)
+    seen: list[bytes] = []
+
+    def scan(
+        text: str, what: str, *, root: Path, gitleaks: str, visibility: str
+    ) -> None:
+        assert text == DRAFT
+        assert (what, gitleaks, visibility) == (
+            "PR draft",
+            "fixture-scanner",
+            "PRIVATE",
+        )
+        seen.append((root / ".gitleaks.toml").read_bytes())
+
+    def post(url: str, **options: object) -> httpx.Response:
+        assert url.endswith("/pulls"), options
+        return reply(201, {"number": 3})
+
+    monkeypatch.setattr(gitleaks_check, "scan_text", scan)
+    monkeypatch.setattr(httpx, "post", post)
+    logged: list[tuple[str, str]] = []
+    assert (
+        open_draft(published, lambda suffix, text: logged.append((suffix, text))) == 3
+    )
+    assert seen == [expected]
+    line = open_pr.HEAD_RULES if adds else open_pr.NO_BASE_RULES
+    assert logged == [("log", f"{line}\n")]
 
 
 UNNAMED = "the scanner refused for a reason the log doesn't name"

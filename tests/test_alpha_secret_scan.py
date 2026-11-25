@@ -114,8 +114,22 @@ def test_a_private_config_without_the_canary_is_refused(root: Path) -> None:
     )
 
 
-def test_a_missing_committed_config_is_refused(root: Path) -> None:
+def test_a_missing_committed_config_falls_back_to_the_defaults(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     (root / ".gitleaks.toml").unlink()
+    scan("fix: clean\n", root)
+    assert capsys.readouterr().err == f"{secret_scan.NO_COMMITTED_CONFIG}\n"
+    assert refusal(f"x {CANARY_HIT}\n", root) == (
+        "refusing the text: gitleaks finds a secret: rule tbhb-private-canary on line 1"
+    )
+    token = "ghp_" + "aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5"
+    assert "rule github-pat on line 1" in refusal(f"{token}\n", root)
+
+
+def test_a_committed_config_that_is_not_a_file_is_refused(root: Path) -> None:
+    (root / ".gitleaks.toml").unlink()
+    (root / ".gitleaks.toml").mkdir()
     assert refusal("clean\n", root) == (
         f"cannot scan the text for secrets: {root / '.gitleaks.toml'} does not exist"
     )
