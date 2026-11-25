@@ -1,0 +1,5 @@
+### Correctness
+- C1 Does the change satisfy the stated behavior at its normal entry points?
+- C2 Do boundary values, empty inputs, and existing data behave as expected?
+- C3 Can failures, retries, or concurrent calls leave inconsistent state?
+- C4 Do existing callers retain the interface and behavior they rely on?

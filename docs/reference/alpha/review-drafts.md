@@ -1,13 +1,13 @@
 ---
 description: Drafting, checking, posting, and responding to pull request reviews.
 generated:
-  - role: generated
-    harness: codex:0.166.0
+  - role: assisted
+    harness: codex:0.171.0
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:6d375ace6e6ad111
-    at: "2026-11-25T07:34:33Z"
+    session: sha-256-64:fd1b5f66325083c3
+    at: "2026-11-25T09:20:33Z"
 status: stable
 tags: [alpha]
 title: Review drafts
@@ -35,3 +35,11 @@ Leave a blank line after the header. Add `## Verdict`, `## Findings`, and `## Ve
 `tbhbdev alpha review dismiss N REVIEW_ID --reason TEXT` prefixes the marked comment review's body with `SUPERSEDED:` and the reason. Write the reason on one line in up to 200 characters and omit review and reply markers. A review already superseded or dismissed succeeds without another edit.
 
 `tbhbdev alpha review reply N REVIEW_ID --text TEXT` writes a comment on the pull request with the review ID and the first eight characters of the reviewed commit hash. Omit review and reply markers from the text. On success, the command appends its own marker and prints the new comment ID.
+
+## Review prompts and checklists
+
+The schema 2 prompt renderer uses four templates. Tier 1 uses `tier-1.txt` for the standard review. Tier 2 uses `tier-2-a.txt` to start with the implementation and `tier-2-b.txt` to start with the tests and claimed behavior. Both tier 2 variants read the whole change, require the security lens, and apply the floor's FE escalation rules.
+
+For a re-review, `delta.txt` supplies the previously reviewed head as Base-reviewed. The reviewer judges changes between that head and the new head, records what changed, and keeps unresolved findings by reference. The renderer can also return the schema 2 draft skeleton on its own.
+
+Every prompt includes the correctness (C), security (S), tests and coverage (T), docs (D), and scope (P) checklists. Each question has a stable numbered ID such as C1 or S1. The review floor retains its R and FE IDs.

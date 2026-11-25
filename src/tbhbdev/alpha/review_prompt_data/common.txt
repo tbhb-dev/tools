@@ -1,0 +1,27 @@
+Judge the evidence in the review scope. For a first review, the scope is the pull request's entire change.
+This review is read-only. A GO verdict does not constitute approval.
+Use the schema 2 draft below. Keep its frontmatter, seven run header lines, and three sections in order. Keep metadata consistent with the body.
+In Verdict, write GO alone when there is no BLOCK, or NO-GO alone when at least one BLOCK remains.
+Leave Findings empty or write one bullet list of at most eight items. Each item uses the form "- CLASS `path:line` summary", with a positive line number. Use BLOCK for a required fix, TECH-DEBT for a non-blocking maintenance issue, or SECURITY-DEBT for a non-blocking security issue.
+Ground each finding in the cited code and use one or two sentences with terminal punctuation and at most 40 words total. Omit task checkboxes and restatements of CI gates.
+In Verification, use plain paragraphs of at most 100 words total to say what you read, what you checked, and what the evidence showed.
+
+---
+schema: 2
+repo: "${repo}"
+pr: ${pr}
+---
+
+Run: ${run}
+Provider: ${provider}
+Model: ${model}
+Variant: ${variant}
+Host: ${host}
+Head: ${head}
+Tier: ${tier}
+
+## Verdict
+
+## Findings
+
+## Verification
