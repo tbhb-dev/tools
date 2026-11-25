@@ -138,7 +138,6 @@ def check_config(configured: Settings) -> None:
     protected = (
         *protected_home_paths(home, configured.sockets_dir),
         userconfig.path(),
-        TAINT_DIRECTORY,
     )
     if os.environ.get("ZDOTDIR"):
         protected = (*protected, home / os.environ["ZDOTDIR"])
@@ -165,7 +164,6 @@ def protected_home(run: Run) -> tuple[str, ...]:
         mirror.parent.parent,
         mirror.parent.parent.parent,
         userconfig.path(),
-        TAINT_DIRECTORY,
     )
     if os.environ.get("ZDOTDIR"):
         paths = (*paths, run.home / os.environ["ZDOTDIR"])
@@ -391,70 +389,8 @@ def checked_policy(run: Run, paths: RunPaths) -> tuple[Policy, str]:
     return value, executable
 
 
-TAINT_DIRECTORY = Path("/var") / "tmp" / "tbhbdev-agent-taint"
-
-
-def mark_host(run: Run) -> None:
-    with ExitStack() as stack:
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        try:
-            TAINT_DIRECTORY.mkdir(mode=0o1777)
-        except FileExistsError:
-            directory = os.open(TAINT_DIRECTORY, flags)
-            stack.callback(os.close, directory)
-        else:
-            directory = os.open(TAINT_DIRECTORY, flags)
-            stack.callback(os.close, directory)
-            os.fchmod(directory, stat.S_ISVTX | 0o777)
-        info = os.fstat(directory)
-        if (
-            not stat.S_ISDIR(info.st_mode)
-            or not info.st_mode & stat.S_ISVTX
-            or info.st_uid not in (0, os.getuid())
-        ):
-            message = (
-                "host marker directory must be sticky and owned by root or this account"
-            )
-            raise Invalid(message)
-        marker = os.open(
-            f"{run.request.account}.jsonl",
-            os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-            0o644,
-            dir_fd=directory,
-        )
-        stream = stack.enter_context(os.fdopen(marker, "ab"))
-        info = os.fstat(stream.fileno())
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_uid != os.getuid()
-            or info.st_nlink != 1
-        ):
-            message = (
-                "host marker must be a regular file owned by this account with one link"
-            )
-            raise Invalid(message)
-        stream.write(
-            (
-                json.dumps(
-                    {
-                        "v": 1,
-                        "run": run.files.name,
-                        "account": run.request.account,
-                        "authorized_by": run.request.authorized_by,
-                        "at": time.time(),
-                    }
-                )
-                + "\n"
-            ).encode()
-        )
-        stream.flush()
-        os.fsync(stream.fileno())
-
-
 def announce_access(run: Run) -> None:
     notices = []
-    if run.request.profile is Profile.BUILD and run.request.tainted_host:
-        notices.append("untrusted-host")
     if run.request.unsandboxed:
         notices.append(
             f"unsandboxed full access authorized_by={run.request.authorized_by}"
@@ -493,9 +429,6 @@ def preflight(run: Run) -> None:
             "upgrade or configure codex_network_proxy_opt_out"
         )
         raise Invalid(message)
-
-    if run.request.unsandboxed:
-        mark_host(run)
 
 
 def otel_config(endpoint: str) -> str:

@@ -175,7 +175,6 @@ def request(
         unsandboxed=unsandboxed,
         authorized_by="example-org/example-repo#1" if unsandboxed else None,
         startup_deadline_seconds=120,
-        tainted_host=False,
     )
 
 

@@ -63,15 +63,6 @@ def test_status() -> None:
     )
 
 
-def test_launch_on_untrusted_host() -> None:
-    assert render.trust(tainted_host=False) == ""
-    assert render.trust(tainted_host=True) == " untrusted-host"
-    assert (
-        render.launched("example", "example-linux", "agent", tainted_host=True)
-        == "example: launched host=example-linux account=agent untrusted-host"
-    )
-
-
 def test_build_brief_overrides_an_instruction_to_commit_the_draft() -> None:
     text = render.brief(
         RunKind.EXEC, "Commit .github/PULL_REQUEST_DRAFT.md.", profile=Profile.BUILD
