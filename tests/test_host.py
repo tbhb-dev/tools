@@ -272,6 +272,52 @@ def name_for(host: str, *vaults: str, when: datetime = T0) -> str:
     return host_tool.token_name(host, when, {"vault-all", f"vault-{host}", *vaults})
 
 
+def token_row(host: str, *vaults: str, number: int = 1, when: datetime = T0) -> Json:
+    return {
+        "id": f"tok-{number}",
+        "name": name_for(host, *vaults, when=when),
+        "state": "ACTIVE",
+        "token": f"fake-connect-token-{number}",
+        "vaults": sorted({"vault-all", f"vault-{host}", *vaults}),
+        "expires_in": "90d",
+    }
+
+
+def seed_token_server(world: World, *tokens: Json) -> str:
+    """Seed the op stub and the Connect API with existing token rows."""
+    server = "srv-1"
+    vaults = sorted({v for row in tokens for v in cast("list[str]", row["vaults"])})
+    world.stubs.set(
+        op={
+            "servers": [{"id": server, "name": "example-connect"}],
+            "vaults": [{"id": f"vlt-{n}", "name": v} for n, v in enumerate(vaults, 1)],
+            "grants": vaults,
+            "tokens": [{**row, "integrationId": server} for row in tokens],
+        }
+    )
+    live = {
+        str(row["token"]): row["vaults"] for row in tokens if row["state"] == "ACTIVE"
+    }
+    (world.stubs.dir / "connect-tokens.json").write_text(json.dumps(live))
+    return server
+
+
+def seed_keychain(
+    world: World, host: str, token: Json | None, *, recorded: str | None
+) -> None:
+    keychain = world.stubs.home(HOME_KEY[host]) / "Library" / "Keychains"
+    keychain.mkdir(parents=True)
+    key = f"{secrets.SERVICE}/{secrets.ACCOUNT}"
+    items = {key: token["token"]} if token is not None else {}
+    (keychain / f"{secrets.KEYCHAIN}-db").write_text(
+        json.dumps({"password": "", "locked": False, "settings": [], "items": items})
+    )
+    if recorded is not None:
+        path = token_name_file(world, host)
+        path.parent.mkdir(parents=True)
+        path.write_text(f"{recorded}\n")
+
+
 def test_the_command_is_registered() -> None:
     assert cli.TOOLS["host"] is host_tool.main
     assert "agent" not in cli.TOOLS
@@ -510,12 +556,19 @@ def test_op_names_the_configured_account(
 def test_a_token_prefix_from_the_config_names_the_tokens(
     world: World, config_file: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
-    first = world.token_of("host-a")
+    host = host_tool.Host("host-a", "macOS", local=False)
+    first = token_row(host.name)
+    server = seed_token_server(world, first)
+    seed_keychain(world, host.name, first, recorded=str(first["name"]))
     text = config_file.read_text().replace('"example-host"', '"other-host"')
     config_file.write_text(text)
-    assert run(world, capfd, "revoke", "--host", "host-a", "ops") == 0
-    assert "host-a: no token; creating a new token" in world.out
+
+    account = host_tool.Account.load(server)
+    plans = host_tool._plans(account, [host], lambda held: held - {"ops"})  # noqa: SLF001
+    assert account.foreign == 1
+    host_tool.refresh(account, host, plans[host], ENDPOINTS)
+
+    assert "host-a: no token; creating a new token" in capfd.readouterr().out
     names = [str(t["name"]) for t in world.tokens()]
     assert names == [first["name"], name_for("host-a")]
     assert names[1].startswith("other-host:host-a:")
@@ -596,30 +649,48 @@ def test_bootstrap_again_has_nothing_to_do(
 def test_bootstrap_keeps_vaults_a_host_already_has(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--host", "host-a", "ops") == 0
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
-    assert "is current" in world.out
-    assert world.token_of("host-a")["name"] == name_for("host-a", "ops")
+    host = host_tool.Host("host-a", "macOS", local=False)
+    old = token_row(host.name, "ops")
+    server = seed_token_server(world, old)
+    seed_keychain(world, host.name, old, recorded=str(old["name"]))
+
+    account = host_tool.Account.load(server)
+    plans = host_tool._plans(account, [host], lambda held: held)  # noqa: SLF001
+    assert plans == {host: {"vault-all", "vault-host-a", "ops"}}
+    host_tool.refresh(account, host, plans[host], ENDPOINTS)
+
+    assert capfd.readouterr().out == f"host-a: the token {old['name']} is current\n"
+    assert world.token_of(host.name)["id"] == old["id"]
+    assert world.op_calls() == ["connect token list"]
 
 
 def test_wrong_vaults_get_a_new_token_and_the_old_one_goes(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
-    old = world.token_of("host-a")
+    host = host_tool.Host("host-a", "macOS", local=False)
+    old = token_row(host.name)
+    server = seed_token_server(world, old)
+    seed_keychain(world, host.name, old, recorded=str(old["name"]))
+    copy_of(world, host.name).write_text(agent_copy_text())
+
+    account = host_tool.Account.load(server)
+    vaults = host_tool.base_vaults(host) | {"ops"}
+    why = f"the token {old['name']} has other vaults"
+    assert (
+        host_tool.problem(
+            account.current(host), vaults, account.when, held=str(old["name"])
+        )
+        == why
+    )
+
+    # Check that bootstrap grants the vault and confirms the config before rotation.
     assert run(world, capfd, "bootstrap", "--host", "host-a", "ops") == 0
     assert world.out.startswith(
         "created the vault ops\ngranted the Connect server the vault ops\n"
     )
-    assert (
-        f"host-a: the token {old['name']} has other vaults; creating a new token"
-        in world.out.splitlines()
-    )
-    assert "host-a: config.toml ok" in world.out.splitlines()
-    assert world.out.splitlines().index(
-        "host-a: config.toml ok"
-    ) < world.out.splitlines().index(
-        f"host-a: the token {old['name']} has other vaults; creating a new token"
+    lines = world.out.splitlines()
+    assert lines.index("host-a: config.toml ok") < lines.index(
+        f"host-a: {why}; creating a new token"
     )
     new = world.token_of("host-a")
     assert new["name"] == name_for("host-a", "ops")
@@ -632,16 +703,20 @@ def test_wrong_vaults_get_a_new_token_and_the_old_one_goes(
 def test_a_token_near_expiry_is_renewed(
     world: World,
     capfd: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
     days: int,
     renewed: bool,
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--host", "host-c") == 0
-    old = world.token_of("host-c")
+    host = host_tool.Host("host-c", "macOS", local=False)
+    old = token_row(host.name)
+    server = seed_token_server(world, old)
+    seed_keychain(world, host.name, old, recorded=str(old["name"]))
     later = T0 + timedelta(days=days)
-    monkeypatch.setattr(host_tool, "now", lambda: later)
-    assert run(world, capfd, "bootstrap", "--host", "host-c") == 0
-    new = world.token_of("host-c")
+
+    account = dataclasses.replace(host_tool.Account.load(server), when=later)
+    host_tool.refresh(account, host, host_tool.base_vaults(host), ENDPOINTS)
+
+    world.out, world.err = capfd.readouterr()
+    new = world.token_of(host.name)
     assert (new["id"] != old["id"]) is renewed
     if renewed:
         expiry = f"{T0 + host_tool.LIFETIME:%Y-%m-%d}"
@@ -654,45 +729,51 @@ def test_a_token_near_expiry_is_renewed(
 def test_a_missing_token_is_created(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--host", "host-b") == 0
-    state = world.stubs.state()
-    for token in cast("list[Json]", cast("Json", state["op"])["tokens"]):
-        token["state"] = "REVOKED"
-    world.stubs.set(**state)
-    assert run(world, capfd, "bootstrap", "--host", "host-b") == 0
-    assert "host-b: no token; creating a new token" in world.out
-    assert world.installed("host-b") == world.token_of("host-b")["token"]
+    host = host_tool.Host("host-b", "macOS", local=True)
+    old = {**token_row(host.name), "state": "REVOKED"}
+    server = seed_token_server(world, old)
+    seed_keychain(world, host.name, old, recorded=str(old["name"]))
+
+    account = host_tool.Account.load(server)
+    host_tool.refresh(account, host, host_tool.base_vaults(host), ENDPOINTS)
+
+    assert "host-b: no token; creating a new token" in capfd.readouterr().out
+    assert world.installed(host.name) == world.token_of(host.name)["token"]
 
 
 def test_a_missing_keychain_entry_gets_a_new_token(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
-    old = world.token_of("host-a")
-    path = world.stubs.home("host-a") / "Library" / "Keychains"
-    path = path / f"{secrets.KEYCHAIN}-db"
-    data = json.loads(path.read_text())
-    data["items"] = {}
-    path.write_text(json.dumps(data))
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
-    assert "host-a: the keychain has no token; creating a new token" in world.out
-    assert world.token_of("host-a")["id"] != old["id"]
-    assert world.installed("host-a") == world.token_of("host-a")["token"]
+    host = host_tool.Host("host-a", "macOS", local=False)
+    old = token_row(host.name)
+    server = seed_token_server(world, old)
+    seed_keychain(world, host.name, None, recorded=str(old["name"]))
+
+    account = host_tool.Account.load(server)
+    host_tool.refresh(account, host, host_tool.base_vaults(host), ENDPOINTS)
+
+    assert "host-a: the keychain has no token; creating a new token" in (
+        capfd.readouterr().out
+    )
+    assert world.token_of(host.name)["id"] != old["id"]
+    assert world.installed(host.name) == world.token_of(host.name)["token"]
 
 
 def test_stray_tokens_beside_a_current_one_are_deleted(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
-    state = world.stubs.state()
-    tokens = cast("list[Json]", cast("Json", state["op"])["tokens"])
-    older = name_for("host-a", when=T0 - timedelta(days=1))
-    stray = {**tokens[0], "id": "tok-stray", "name": older, "token": "fake-stray"}
-    tokens.append(stray)
-    world.stubs.set(**state)
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
-    assert f"deleted the token {older}" in world.out
-    assert [t["id"] for t in world.tokens("REVOKED")] == ["tok-stray"]
+    host = host_tool.Host("host-a", "macOS", local=False)
+    current = token_row(host.name)
+    stray = token_row(host.name, number=2, when=T0 - timedelta(days=1))
+    server = seed_token_server(world, current, stray)
+    seed_keychain(world, host.name, current, recorded=str(current["name"]))
+
+    account = host_tool.Account.load(server)
+    host_tool.refresh(account, host, host_tool.base_vaults(host), ENDPOINTS)
+
+    assert f"deleted the token {stray['name']}" in capfd.readouterr().out
+    assert [t["id"] for t in world.tokens("REVOKED")] == [stray["id"]]
+    assert world.token_of(host.name)["id"] == current["id"]
 
 
 @pytest.mark.parametrize(
@@ -2613,21 +2694,21 @@ def token_name_file(world: World, host: str) -> Path:
 def test_a_keychain_with_another_token_gets_a_new_one(
     world: World, capfd: pytest.CaptureFixture[str], recorded: str | None, why: str
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
-    name = name_for("host-a")
-    path = token_name_file(world, "host-a")
-    assert path.read_text() == f"{name}\n"
-    if recorded is None:
-        path.unlink()
-    else:
-        path.write_text(f"{recorded}\n")
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
+    host = host_tool.Host("host-a", "macOS", local=False)
+    old = token_row(host.name)
+    server = seed_token_server(world, old)
+    seed_keychain(world, host.name, old, recorded=recorded)
+
+    account = host_tool.Account.load(server)
+    host_tool.refresh(account, host, host_tool.base_vaults(host), ENDPOINTS)
+
+    name = old["name"]
     assert (
         f"host-a: the keychain holds {why}, not {name}; creating a new token"
-        in world.out
+        in capfd.readouterr().out
     )
-    assert path.read_text() == f"{name}\n"
-    assert world.installed("host-a") == world.token_of("host-a")["token"]
+    assert token_name_file(world, host.name).read_text() == f"{name}\n"
+    assert world.installed(host.name) == world.token_of(host.name)["token"]
 
 
 # upgrade.
