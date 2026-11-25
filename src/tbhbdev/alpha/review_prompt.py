@@ -84,7 +84,11 @@ def render(
     variant: Variant,
     fields: Mapping[str, str | int],
 ) -> str:
-    """Render reviewer instructions, the five lenses, and the draft skeleton."""
+    """Render reviewer instructions, the five lenses, and the draft skeleton.
+
+    Pass run, provider, model, host, head, repo, and pr in fields. Delta
+    reviews also require base_reviewed. The arguments supply tier and variant.
+    """
     values = _values(tier, variant, fields, delta=delta)
     instructions, draft = _common()
     depth = _load(_PROMPTS[tier, variant])

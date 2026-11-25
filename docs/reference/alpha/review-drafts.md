@@ -2,9 +2,12 @@
 description: Drafting and checking pull request reviews.
 generated:
   - role: generated
-    harness: codex
-    model: openai:gpt-6
-    at: "2026-11-25T02:25:13Z"
+    harness: codex:0.166.0
+    model: openai:gpt-6.2-sol
+    effort: high
+    surface: exec
+    session: sha-256-64:7f311c0838c707c2
+    at: "2026-11-25T02:28:08Z"
 status: stable
 tags: [alpha]
 title: Review drafts
