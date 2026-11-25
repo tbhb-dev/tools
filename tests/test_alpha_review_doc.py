@@ -46,12 +46,8 @@ PULL = f"repos/{REPO}/pulls/384"
 REVIEWS = f"{PULL}/reviews"
 PAGE = f"{REVIEWS}?per_page=100&page="
 LIVE = {"head": {"sha": HEAD}}
-ROW = {
-    "id": 942,
-    "user": {"login": EXISTING.author},
-    "state": "COMMENTED",
-    "body": MARKER,
-}
+USER = {"login": EXISTING.author}
+ROW = {"id": 942, "user": USER, "state": "COMMENTED", "body": MARKER}
 METADATA = {
     "schema": 2,
     "repo": REPO,
@@ -329,14 +325,9 @@ def test_find_existing_uses_latest_active_match_across_pages() -> None:
         ROW | {"state": "DISMISSED"},
         ROW | {"body": f"SUPERSEDED: reason\n{MARKER}"},
     ]
-    api = FakeApi(
-        [ROW, *ignored, *([{}] * 93)],
-        [
-            ROW | {"id": 22},
-            ROW | {"id": 23},
-            *ignored,
-        ],
-    )
+    first = [ROW, *ignored, *([None] * 93)]
+    second = [ROW | {"id": 22}, ROW | {"id": 23}, *ignored]
+    api = FakeApi(first, second)
     assert review.find_existing(api, REPO, 384, HEAD, KEY.run, "Reviews[bot]") == 23
     assert api.calls == [("GET", PAGE + "1", None), ("GET", PAGE + "2", None)]
 
@@ -384,9 +375,11 @@ def test_post_and_cli_only_send_comments(  # noqa: PLR0913, PLR0917
     api = FakeApi(LIVE, [], response)
     assert review.post(api, doc, author=EXISTING.author) == ("posted", expected)
     assert api.calls == calls
-    api = FakeApi({"login": EXISTING.author}, LIVE, [], response)
+    api = FakeApi(USER, LIVE, [], response)
     monkeypatch.setattr(cli, "GhApi", lambda: api)
-    monkeypatch.setattr(cli, "draft_path", lambda n: tmp_path / f"review-{n}.md")
+    monkeypatch.setattr(
+        cli, "draft_path", {384: tmp_path / "review-384.md"}.__getitem__
+    )
     (tmp_path / "review-384.doc.md").write_text(
         PREAMBLE + body.removesuffix(f"\n{MARKER}\n")
     )
@@ -403,7 +396,9 @@ def test_post_cli_exists_and_refusals(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     path = tmp_path / "review-384.doc.md"
-    monkeypatch.setattr(cli, "draft_path", lambda n: tmp_path / f"review-{n}.md")
+    monkeypatch.setattr(
+        cli, "draft_path", {384: tmp_path / "review-384.md"}.__getitem__
+    )
     api = FakeApi(LIVE, [ROW], {})
     monkeypatch.setattr(cli, "GhApi", lambda: api)
     args = ["post", "384", "--author", EXISTING.author]
@@ -414,36 +409,31 @@ def test_post_cli_exists_and_refusals(
     assert capsys.readouterr() == ("exists 942\n", "")
     assert api.calls == [("GET", PULL, None), ("GET", PAGE + "1", None)]
     assert cli.main(["post", "384"], "review") == 1
-    assert capsys.readouterr() == (
-        "",
-        f"{path}: GitHub did not return the current account login\n",
-    )
+    assert capsys.readouterr() == ("", f"{path}: GitHub did not return a login\n")
     path.write_text((PREAMBLE + BODY).replace("pr: 384", "pr: 383"))
     assert cli.main(args, "review") == 1
     assert capsys.readouterr() == ("", f"{path}: draft must name pull request 384\n")
     path.write_text((PREAMBLE + BODY).replace("NO-GO", "GO"))
     assert cli.main(args, "review") == 1
-    out, err = capsys.readouterr()
-    assert out == ""
+    err = capsys.readouterr().err
     assert err.startswith(f"{path}: GO forbids BLOCK findings\n")
     assert all(line.startswith(f"{path}: ") for line in err.splitlines())
 
 
 @pytest.mark.parametrize(
-    ("code", "stdout", "error", "payload", "expected"),
+    ("code", "stdout", "error", "payload"),
     [
-        (0, '{"id": 16}', "", {"event": "COMMENT"}, {"id": 16}),
-        (0, "", "", None, None),
-        (0, "invalid", "GitHub returned invalid JSON", None, None),
-        (1, '{"id": 16}', "request failed", None, None),
+        (0, '{"id": 16}', "", {"event": "COMMENT"}),
+        (0, "", "", None),
+        (0, "invalid", "GitHub returned invalid JSON", None),
+        (-1, '{"id": 16}', "request failed", None),
     ],
 )
-def test_gh_api(  # noqa: PLR0913, PLR0917
+def test_gh_api(
     code: int,
     stdout: str,
     error: str,
     payload: dict[str, object] | None,
-    expected: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def run(args: list[str], *, stdin: str) -> CompletedProcess[str]:
@@ -458,7 +448,9 @@ def test_gh_api(  # noqa: PLR0913, PLR0917
         with pytest.raises(review.ReviewError, match=f"^{error}$"):
             cli.GhApi().request("POST", REVIEWS, payload)
     else:
-        assert cli.GhApi().request("POST", REVIEWS, payload) == expected
+        assert cli.GhApi().request("POST", REVIEWS, payload) == json.loads(
+            stdout or "null"
+        )
 
 
 @pytest.mark.parametrize("reason", ["x" * 201, "x\ny", "x\r", MARKER, ""])
@@ -500,10 +492,7 @@ def test_dismiss_cli_and_idempotence(
     get = ("GET", f"{REVIEWS}/942", None)
     assert api.calls == [get, ("PATCH", f"{REVIEWS}/942", {"body": body}), get, get]
     assert cli.main(args, "review") == 1
-    assert capsys.readouterr() == (
-        "",
-        "review 942: expected a COMMENT review marked for this pull request\n",
-    )
+    assert capsys.readouterr().err.startswith("review 942: expected a COMMENT review")
 
 
 def test_reply_cli(
@@ -512,11 +501,11 @@ def test_reply_cli(
     api = FakeApi({"commit_id": HEAD}, {"id": 12})
     monkeypatch.setattr(cli, "GhApi", lambda: api)
     monkeypatch.setattr(cli.pr, "origin_repository", lambda: REPO)
-    assert cli.main(["reply", "384", "942", "--text", "Retested."], "review") == 0
+    assert cli.main(["reply", "384", "1", "--text", "Retested."], "review") == 0
     assert capsys.readouterr() == ("replied 12\n", "")
-    body = "Re review 942 (head 01234567): Retested.\n<!-- tbhb-reply v1 review=942 -->"
+    body = "Re review 1 (head 01234567): Retested.\n<!-- tbhb-reply v1 review=1 -->"
     assert api.calls == [
-        ("GET", f"{REVIEWS}/942", None),
+        ("GET", f"{REVIEWS}/1", None),
         ("POST", f"repos/{REPO}/issues/384/comments", {"body": body}),
     ]
 

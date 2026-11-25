@@ -220,20 +220,17 @@ class GhApi:
             raise review_doc.ReviewError(message) from exc
 
 
-def doc_path(number: int) -> Path:
-    return draft_path(number).with_suffix(".doc.md")
-
-
 def api_author(api: review_doc.Api) -> str:
-    match api.request("GET", "user"):
+    match cast("review_doc.ApiObject", api.request("GET", "user")):
         case {"login": str(login)} if login:
             return login
-    message = "GitHub did not return the current account login"
-    raise review_doc.ReviewError(message)
+        case _:
+            message = "GitHub did not return a login"
+            raise review_doc.ReviewError(message)
 
 
 def post_draft(number: int, author: str | None) -> int:
-    path = doc_path(number)
+    path = draft_path(number).with_suffix(".doc.md")
     try:
         doc = review_doc.parse(path.read_text())
         if doc.pr != number:

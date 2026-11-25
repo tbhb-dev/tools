@@ -3,7 +3,7 @@ description: Drafting, checking, posting, and responding to pull request reviews
 generated:
   - role: generated
     harness: codex
-    model: openai:gpt-6
+    model: openai:gpt-6.2-sol
     at: "2026-11-25T02:25:56Z"
 status: stable
 tags: [alpha]
@@ -23,7 +23,7 @@ Pick `REQUEST_CHANGES` or `COMMENT` in the draft's `event` field. A draft can't 
 
 Create `review-N.doc.md` in the same directory as `review-N.md`. Start with YAML frontmatter containing `schema: 2`, `repo: OWNER/REPO`, and `pr: N`. Follow it with the seven lines `Run: NAME`, `Provider: PROVIDER`, `Model: MODEL`, `Variant: a` or `Variant: b`, `Host: HOSTNAME`, `Head: SHA`, and `Tier: 0`, `Tier: 1`, or `Tier: 2`. Use the full lowercase commit SHA and a fully qualified hostname.
 
-After the header, add `## Verdict`, `## Findings`, and `## Verification` in that order. Write `GO` or `NO-GO` in Verdict and describe what you checked in Verification. Each finding starts with `- BLOCK`, `- TECH-DEBT`, or `- SECURITY-DEBT`, followed by a backticked `path:line` and a summary. `NO-GO` requires a `BLOCK` finding, and `GO` disallows one.
+After the header, add `## Verdict`, `## Findings`, and `## Verification` in that order. Write `GO` or `NO-GO` in Verdict and describe what you checked in Verification. Each finding starts with `- BLOCK`, `- TECH-DEBT`, or `- SECURITY-DEBT`. Follow the class with `path:line` in backticks and a summary. `NO-GO` requires a `BLOCK` finding, and `GO` disallows one.
 
 `tbhbdev alpha review post N [--author LOGIN]` validates the document and checks the pull request head against the draft. It submits a `COMMENT` review using the agent's own GitHub account. It looks for an active review with the same run, head, and pull request by that account, or by `LOGIN` if supplied. It prints `posted` or `exists` and the review ID when available. Both statuses exit 0. It reports refusals as `path: problem` on stderr and exits 1. Usage errors exit 2.
 

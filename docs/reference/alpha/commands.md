@@ -3,7 +3,7 @@ description: Interim agent commands, installation, and harness hooks.
 generated:
   - role: generated
     harness: codex
-    model: openai:gpt-6
+    model: openai:gpt-6.2-sol
     at: "2026-11-25T02:25:56Z"
 status: stable
 tags: [alpha]

@@ -14,6 +14,7 @@ type Tier = Literal[0, 1, 2]
 type Verdict = Literal["GO", "NO-GO"]
 type FindingClass = Literal["BLOCK", "TECH-DEBT", "SECURITY-DEBT"]
 type Variant = Literal["a", "b"]
+type ApiObject = dict[str, object] | None
 
 _HEAD = re.compile(r"[0-9a-f]{40}")
 _HEADER = re.compile(
@@ -274,6 +275,24 @@ def is_dismissed(existing: Existing) -> bool:
     return existing.state == "DISMISSED" or existing.body.startswith("SUPERSEDED:")
 
 
+def _active_id(entry: object, expected: Marker, author: str) -> int | None:
+    # The mapping pattern checks the API response at runtime.
+    row = cast(
+        "dict[str, dict[str, object] | str | int] | None", entry
+    )  # pragma: no mutate -- runtime no-op
+    match row:
+        case {
+            "id": int(review_id),
+            "user": {"login": str(login)},
+            "body": str(body),
+            "state": str(state),
+        } if parse_marker(body) == expected and login.casefold() == author.casefold():
+            existing = Existing(review_id, login, expected, state, body)
+            return None if is_dismissed(existing) else review_id
+        case _:
+            return None
+
+
 def find_existing(  # noqa: PLR0913, PLR0917
     api: Api, repo: str, pr: int, head_sha: str, run: str, author: str
 ) -> int | None:
@@ -292,19 +311,11 @@ def find_existing(  # noqa: PLR0913, PLR0917
             message = "expected a list of pull request reviews"
             raise ReviewError(message)
         # GitHub returns reviews in chronological order.
-        for entry in reviews:
-            match entry:
-                case {
-                    "id": int(review_id),
-                    "user": {"login": str(login)},
-                    "body": str(body),
-                    "state": str(state),
-                }:
-                    key = parse_marker(body)
-                    if key == expected and login.casefold() == author.casefold():
-                        existing = Existing(review_id, login, key, state, body)
-                        if not is_dismissed(existing):
-                            newest = review_id
+        for entry in cast(
+            "list[object]", reviews
+        ):  # pragma: no mutate -- runtime no-op
+            if (matched := _active_id(entry, expected, author)) is not None:
+                newest = matched
         if len(reviews) < _PAGE_SIZE:
             return newest
         page += 1
@@ -324,7 +335,7 @@ def post(
     if problems := validate(doc):
         raise ReviewError("\n".join(problems))
     path = f"repos/{doc.repo}/pulls/{doc.pr}"
-    match api.request("GET", path):
+    match cast("dict[str, dict[str, object]] | None", api.request("GET", path)):
         case {"head": {"sha": head}} if head == doc.head_sha:
             pass
         case _:
@@ -338,10 +349,11 @@ def post(
         f"{path}/reviews",
         {"commit_id": doc.head_sha, "body": render(doc), "event": "COMMENT"},
     )
-    match result:
+    match cast("ApiObject", result):  # pragma: no mutate -- runtime no-op
         case {"id": int(review_id)}:
             return "posted", review_id
-    return "posted", None
+        case _:
+            return "posted", None
 
 
 def dismiss(
@@ -364,7 +376,7 @@ def dismiss(
         message = "reason must be one line of at most 200 characters without markers"
         raise ReviewError(message)
     path = f"repos/{repo}/pulls/{pr}/reviews/{review_id}"
-    match api.request("GET", path):
+    match cast("ApiObject", api.request("GET", path)):
         case {"body": str(body), "state": ("COMMENTED" | "DISMISSED") as state}:
             key = parse_marker(body)
             if key is not None and (key.repo, key.pr) == (repo, pr):
@@ -374,6 +386,8 @@ def dismiss(
                         "PATCH", path, {"body": f"SUPERSEDED: {reason}\n{body}"}
                     )
                 return
+        case _:
+            pass
     message = "expected a COMMENT review marked for this pull request"
     raise ReviewError(message)
 
@@ -394,15 +408,18 @@ def reply(
     if _MARKER_SYNTAX.search(text):
         message = "reply text must not contain markers"
         raise ReviewError(message)
-    match api.request("GET", f"repos/{repo}/pulls/{pr}/reviews/{review_id}"):
+    review = api.request("GET", f"repos/{repo}/pulls/{pr}/reviews/{review_id}")
+    match cast("ApiObject", review):  # pragma: no mutate -- runtime no-op
         case {"commit_id": str(head)} if _HEAD.fullmatch(head):
             body = f"Re review {review_id} (head {head[:8]}): {text}\n"
         case _:
             message = "review did not return a 40-hex commit ID"
             raise ReviewError(message)
     body += f"<!-- tbhb-reply v1 review={review_id} -->"
-    match api.request("POST", f"repos/{repo}/issues/{pr}/comments", {"body": body}):
+    response = api.request("POST", f"repos/{repo}/issues/{pr}/comments", {"body": body})
+    match cast("ApiObject", response):  # pragma: no mutate -- runtime no-op
         case {"id": int(comment_id)}:
             return comment_id
-    message = "GitHub did not return the reply comment ID"
-    raise ReviewError(message)
+        case _:
+            message = "GitHub did not return the reply comment ID"
+            raise ReviewError(message)
