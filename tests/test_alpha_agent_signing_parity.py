@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import io
 import json
 import shutil
 import subprocess
 import urllib.error
-from typing import TYPE_CHECKING, Self, override
+from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
+import httpx
 import pytest
 from agent_example import LINUX, MACOS, settings
 
@@ -99,10 +99,12 @@ def test_host_main_arguments(argv: list[str], code: int) -> None:
     assert signing_parity.host_main(argv, "p") == code
 
 
-class Reply(io.BytesIO):
-    @override
-    def __enter__(self) -> Self:
-        return self
+def keys_transport(
+    status: int, body: bytes, headers: dict[str, str] | None = None
+) -> httpx.MockTransport:
+    return httpx.MockTransport(
+        lambda _request: httpx.Response(status, content=body, headers=headers)
+    )
 
 
 def test_registered_lists_fingerprints(
@@ -110,13 +112,35 @@ def test_registered_lists_fingerprints(
 ) -> None:
     private, expected = key
     body = json.dumps([{"key": private.with_suffix(".pub").read_text().strip()}])
+    real = signing_parity.public_keys
 
-    def urlopen(_request: object, *, timeout: float) -> Reply:
-        assert timeout > 0
-        return Reply(body.encode())
+    def public_keys(*, timeout: int) -> list[str]:
+        return real(timeout=timeout, transport=keys_transport(200, body.encode()))
 
-    monkeypatch.setattr(signing_parity.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(signing_parity, "public_keys", public_keys)
     assert signing_parity.registered() == {expected}
+
+
+@pytest.mark.parametrize("status", [301, 302, 307, 404, 500])
+def test_public_keys_refuses_any_non_200(status: int) -> None:
+    transport = keys_transport(status, b"[]", {"Location": "http://evil.example/"})
+    with pytest.raises(OSError, match=str(status)):
+        signing_parity.public_keys(timeout=5, transport=transport)
+
+
+def test_public_keys_refuses_an_oversized_body() -> None:
+    body = b"[" + b" " * signing_parity.MAX_KEYS_BYTES + b"]"
+    with pytest.raises(OSError, match="too large"):
+        signing_parity.public_keys(timeout=5, transport=keys_transport(200, body))
+
+
+def test_public_keys_reports_a_failed_request() -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        message = "offline"
+        raise httpx.ConnectError(message, request=request)
+
+    with pytest.raises(OSError, match="ConnectError"):
+        signing_parity.public_keys(timeout=5, transport=httpx.MockTransport(refuse))
 
 
 def test_remote_fingerprint_runs_the_host_command(

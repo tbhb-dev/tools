@@ -7,10 +7,10 @@ import json
 import os
 import subprocess
 import sys
-import urllib.request
 from pathlib import Path
 from unittest.mock import Mock
 
+import httpx
 import pytest
 from fake_tool import pythonpath
 
@@ -421,8 +421,17 @@ def no_ssh_agent(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def signing_key_request(monkeypatch: pytest.MonkeyPatch) -> Mock:
-    request = Mock(return_value=io.BytesIO(b"[]"))
-    monkeypatch.setattr(urllib.request, "urlopen", request)
+    """Answer the GitHub key request from a mock that returns the body bytes."""
+    request = Mock(return_value=b"[]")
+    real = pg.public_keys
+
+    def public_keys(*, timeout: int) -> list[str]:
+        transport = httpx.MockTransport(
+            lambda sent: httpx.Response(200, content=request(sent))
+        )
+        return real(timeout=timeout, transport=transport)
+
+    monkeypatch.setattr(pg, "public_keys", public_keys)
     return request
 
 
@@ -514,19 +523,17 @@ def test_registered_signers_are_accepted_across_refs(
         {"key": key.with_suffix(".pub").read_text().strip()} for key in (first, second)
     ]
     body.insert(0, {"key": "invalid public key"})
-    signing_key_request.configure_mock(
-        return_value=io.BytesIO(json.dumps(body).encode())
-    )
+    signing_key_request.configure_mock(return_value=json.dumps(body).encode())
 
     assert alpha.main(["pre-push-guard", "origin", origin_url()], "p") == 0
     signing_key_request.assert_called_once()
     request = signing_key_request.call_args.args[0]
-    assert request.full_url == (
+    assert str(request.url) == (
         "https://api.github.com/users/tbhb-agent/ssh_signing_keys?per_page=100"
     )
-    assert request.get_method() == "GET"
-    assert request.get_header("Authorization") is None
-    assert signing_key_request.call_args.kwargs == {"timeout": 5}
+    assert request.method == "GET"
+    assert "Authorization" not in request.headers
+    assert request.extensions["timeout"]["read"] == 5
 
 
 @pytest.mark.usefixtures("agent_key")
@@ -540,7 +547,7 @@ def test_an_agent_commit_without_the_agent_key_is_refused(
 ) -> None:
     known = (Path.home() / pg.AGENT_KEY).read_text().strip()
     signing_key_request.configure_mock(
-        return_value=io.BytesIO(json.dumps([{"key": known}]).encode())
+        return_value=json.dumps([{"key": known}]).encode()
     )
     other = make_key(repo.parent, "personal") if signed_by == "other" else None
     head = agent_commit(repo, other)
@@ -582,7 +589,7 @@ def test_failed_key_lookup_falls_back_to_local_key(
 def test_malformed_github_response_is_a_lookup_failure(
     signing_key_request: Mock, body: bytes
 ) -> None:
-    signing_key_request.configure_mock(return_value=io.BytesIO(body))
+    signing_key_request.configure_mock(return_value=body)
     assert pg.SigningKeys().registered is None
 
 
