@@ -23,6 +23,7 @@ from tbhbdev.alpha.agent import (
     shims,
     signing_parity,
     transport,
+    version_heal,
 )
 from tbhbdev.alpha.agent.decisions import driver as rules
 from tbhbdev.alpha.agent.decisions import launcher as launch_rules
@@ -362,8 +363,9 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
     resolve = (
         run.request.profile is Profile.REVIEW and rules.COMMIT.fullmatch(ref) is None
     )
+    local_version = version.line()
     script = (
-        remote.preflight(run.request.repo, ref, version.line(), run.host)
+        remote.preflight(run.request.repo, ref, local_version, run.host)
         if resolve
         else remote.installed(run.host)
     )
@@ -371,7 +373,14 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
         settings, run.host, script, timeout=deadline - time.monotonic()
     )
     host_version, _, refs = preflight.partition("\n")
-    rules.same_version(version.line(), host_version)
+    mismatch = version_heal.check(settings, run.host, local_version, host_version)
+    if mismatch is not None:
+        deadline = time.monotonic() + settings.launch_wait_seconds
+        preflight = transport.shell(
+            settings, run.host, script, timeout=deadline - time.monotonic()
+        )
+        host_version, _, refs = preflight.partition("\n")
+        version_heal.check_retry(local_version, host_version, mismatch)
     if run.request.profile is Profile.REVIEW:
         run.request = replace(run.request, commit=rules.resolve_ref(ref, refs))
     with launch_lock():
