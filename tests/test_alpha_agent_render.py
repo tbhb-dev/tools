@@ -22,13 +22,14 @@ def test_brief_and_launch() -> None:
     )
     assert "including" not in build
     review = render.brief(RunKind.START, "example", profile=Profile.REVIEW)
-    assert review == (
-        "Use the pull request number for N. Run `tbhbdev alpha review draft N`, "
-        "follow the generated draft's guidance and set `event: COMMENT`, "
-        "then run `tbhbdev alpha review check N --no-lint`. "
-        "Leave exactly one `.git/tbhb-alpha/review-N.md` for the run host to post."
-        "\nexample"
-    )
+    assert "`tbhbdev alpha review draft N`" in review
+    assert "set `commit_id` to the run's pinned checkout commit" in review
+    assert "`event: APPROVE` for GO" in review
+    assert "`event: REQUEST_CHANGES` for BLOCK or HOLD" in review
+    assert "non-empty Findings for a change request" in review
+    assert "`tbhbdev alpha review check N --no-lint`" in review
+    assert "exactly one `.git/tbhb-alpha/review-N.md`" in review
+    assert review.endswith("\nexample")
 
 
 def test_unsandboxed_reports_filter_authorization() -> None:

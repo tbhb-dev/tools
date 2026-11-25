@@ -44,6 +44,8 @@ post a COMMENT review instead:
 
 Approval comes only from ``tbhb-approve REPO N SHA``. The commissioning session
 may run it after a separate agent run or subagent reviews the pull request.
+The run host posts a review run's GO as an approval when the head matches the
+pinned commit.
 
 Allowing prints nothing. The hook fails open: unreadable input or any crash
 allows the command and prints nothing, because a broken hook must never stop

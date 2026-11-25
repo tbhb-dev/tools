@@ -82,9 +82,6 @@ def test_render_and_validate(
     lens_text = "\n".join(_resource(lens) for lens in LENSES)
     assert f"\n{lens_text}\n" in prompt
     assert ("The security lens is mandatory" in prompt) == (tier == 2)
-    assert (
-        "This review is read-only. A GO verdict does not constitute approval." in prompt
-    )
     assert "PULL_REQUEST_REVIEW_CHECKLIST.md" not in prompt
     rule_ids = re.findall(r"^- (FE\d+) ", prompt, re.MULTILINE)
     assert rule_ids == ([f"FE{i}" for i in range(1, 10)] if tier == 2 else [])
@@ -139,6 +136,10 @@ def test_final_message_verdict(tier: Tier, delta: bool, variant: Variant) -> Non
     fields = FIELDS | {"base_reviewed": BASE_REVIEWED}
     prompt = review_prompt.render(tier, delta, variant, fields)
     assert "`tbhbdev alpha review draft 385`" in prompt
+    assert f"set `commit_id` to {HEAD}" in prompt
+    assert "`event: APPROVE` for GO" in prompt
+    assert "`event: REQUEST_CHANGES` for BLOCK or HOLD" in prompt
+    assert "For REQUEST_CHANGES, include a BLOCK finding" in prompt
     assert "`tbhbdev alpha review check 385 --no-lint`" in prompt
     assert "exactly one `.git/tbhb-alpha/review-385.md`" in prompt
     prompt_lines = prompt.splitlines()

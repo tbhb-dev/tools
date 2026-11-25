@@ -1,8 +1,7 @@
 """Post a review run's verdict as a GitHub review, host-side, with the run's token.
 
-The sandbox only writes the draft file. Run-host validates it, adds the run's
-identity to the body and posts it after the run ends. A run can comment or
-request changes; approval stays with a human-gated reviewer.
+The sandbox writes the draft file. Run-host validates it, adds the run's
+identity to the body and posts it against the pinned commit after the run ends.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from tbhbdev.alpha.agent.decisions import repo
 if TYPE_CHECKING:
     from tbhbdev.alpha.agent.run_host import Prepared, Run
 
-ALLOWED_EVENTS = frozenset({"COMMENT"})
+ALLOWED_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES", "COMMENT"})
 DRAFT_NAME = re.compile(r"review-(\d+)\.md")
 DRAFT_LIMIT = 64 * 1024
 TIMEOUT = httpx.Timeout(20.0, connect=5.0)
@@ -133,18 +132,19 @@ def create(sub: Submission, token: str) -> int | None:
     """Validate, then post once; return the review id, or None if GitHub sent none.
 
     Raises:
-        PostRefusedError: A check fails, the head moved, or GitHub refuses.
+        PostRefusedError: A check fails, an approval's head moved, or GitHub refuses.
     """
     fields, body = validate(sub)
     _, owner, name = repo.parts(sub.repository)
     base = f"https://api.github.com/repos/{owner}/{name}/pulls/{sub.number}"
-    if pull_head(api("GET", base, token)) != sub.commit:
+    event = str(fields["event"])
+    if event == "APPROVE" and pull_head(api("GET", base, token)) != sub.commit:
         message = "the pull request head moved since the run judged it"
         raise PostRefusedError(message)
     payload = {
         "commit_id": sub.commit,
         "body": f"{body}\n---\n{sub.stamp}\n",
-        "event": str(fields["event"]),
+        "event": event,
     }
     data = api("POST", f"{base}/reviews", token, payload)
     created = data.get("id") if isinstance(data, dict) else None
