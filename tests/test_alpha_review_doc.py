@@ -9,6 +9,7 @@ import pytest
 from tbhbdev import content, cue_runtime
 from tbhbdev.alpha import review_doc as review
 from tbhbdev.alpha.review_doc import Existing, Finding, Marker, ReviewDoc, Run
+from tbhbdev.alpha.review_doc import _metadata as review_metadata
 
 HEAD = "0123456789abcdef0123456789abcdef01234567"
 REPO = "tbhb-dev/tools"
@@ -61,6 +62,16 @@ def test_render_and_parse() -> None:
     assert review.parse(PREAMBLE + body) == DOC
     full = f"---\n{json.dumps(METADATA)}\n---\n\n{body}"
     assert review.parse(full.replace("\n", "\r\n")) == DOC
+
+
+def test_metadata_matches_frontmatter() -> None:
+    assert review_metadata(DOC) == METADATA
+
+
+def test_render_and_parse_multiple_findings() -> None:
+    doc = replace(DOC, findings=(BLOCK, DEBT))
+    body = review.render(doc).removesuffix(f"\n{MARKER}\n")
+    assert review.parse(PREAMBLE + body) == doc
 
 
 def test_render_empty_findings_and_alternate_run() -> None:
