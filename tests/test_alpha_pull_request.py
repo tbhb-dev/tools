@@ -1845,6 +1845,16 @@ def test_create_reuses_the_tools_resolved_at_startup(world: World) -> None:
     assert pr.find_tool("gh") == str(gh)
 
 
+def test_create_needs_gh(world: World) -> None:
+    (world.bin / "gh").unlink()
+    write_draft(world)
+    with pytest.raises(SystemExit) as error:
+        run_main("create")
+    assert str(error.value) == (
+        "missing tools: gh; run `bazelisk run //:bazel_env` or `mise install`"
+    )
+
+
 def test_edit(world: World, capsys: pytest.CaptureFixture[str]) -> None:
     write_draft(
         world, "---\nlabels: [bug, docs]\ndraft: true\nbase: main\n---\n" + BASE
