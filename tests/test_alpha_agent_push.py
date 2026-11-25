@@ -736,11 +736,7 @@ def test_eligible_tips_orders_refs_and_ignores_existing_history(
     start, existing, first, last = (digit * 40 for digit in "1234")
     bases = (start,)
     first_ref, last_ref = "refs/heads/a-first", "refs/heads/z-last"
-    candidates: dict[str, str] = {
-        last_ref: last,
-        "refs/heads/m-existing": existing,
-        first_ref: first,
-    }
+    candidates = {last_ref: last, "refs/heads/m-existing": existing, first_ref: first}
     history = Mock(side_effect=[True, False, False, True])
     monkeypatch.setattr(push, "outside_history", history)
 
@@ -791,14 +787,16 @@ def test_existing_history_does_not_count_as_new_commits(
     assert not run.files.path("log").exists()
 
 
+@pytest.mark.parametrize("start_ref", [None, START_REF])
 @pytest.mark.parametrize(
     "reference",
     ["refs/remotes/origin/topic", "refs/tags/topic", "refs/notes/topic", None],
 )
 def test_starting_fetched_history(
-    local_run: tuple[run_host.Run, run_host.Prepared, Path], reference: str | None
+    local_run: LocalRun, reference: str | None, start_ref: str | None
 ) -> None:
     run, prepared, _target = local_run
+    run.request = replace(run.request, start_ref=start_ref)
     workspace = Path(prepared.paths.worktree)
     base = git(workspace, "rev-parse", "HEAD")
     commit(workspace, "fetched history")
@@ -818,11 +816,15 @@ def test_starting_fetched_history(
         if reference is not None:
             git(workspace, "update-ref", "-d", reference)
         git(workspace, "switch", "--detach", fetched)
+        if start_ref is not None:
+            git(workspace, "branch", "-D", "agent/example")
         return 0
 
     with ExitStack() as stack:
         assert push.run(run, prepared, stack, checkout, None) == 0
-    assert not run.files.path("log").exists()
+    assert_run_file(
+        run, "log", f"start ref: {start_ref} at {base}\n" if start_ref else None
+    )
 
 
 def test_ref_snapshot_reads_packed_branches_and_ignores_locks(
