@@ -274,6 +274,18 @@ def _otel_endpoint(root: _Table, network_domains: tuple[str, ...]) -> str | None
     return endpoint
 
 
+def _worker_path(root: _Table) -> str | None:
+    """The registered worker executable, which has no default."""
+    if "worker" not in root.values:
+        return None
+    table = root.table("worker")
+    table.only("path")
+    path = table.path("path")
+    if not path.startswith("/"):
+        table.fail("path", "must be an absolute path")
+    return path
+
+
 def _sandbox(table: _Table) -> Sandbox:
     table.only(
         "write_roots",
@@ -560,6 +572,7 @@ def parse(agent: dict[str, object]) -> Settings:
         "ssh_keepalive_seconds",
         "ssh_keepalive_count_max",
         "host_tag",  # Another command reads this key.
+        "worker",
     )
     sandbox = _sandbox(root.table("sandbox"))
     run_memory_mib = (
@@ -598,6 +611,7 @@ def parse(agent: dict[str, object]) -> Settings:
         review_memory_mib=root.integer("review_memory_mib")
         if "review_memory_mib" in agent
         else run_memory_mib,
+        worker_path=_worker_path(root),
     )
     _check_host_accounts(settings)
     return settings

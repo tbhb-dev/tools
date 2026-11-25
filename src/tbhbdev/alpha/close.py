@@ -15,7 +15,9 @@ A pull request with no ``Opened-by`` line, such as one opened before the line
 existed, is closed only when its GitHub author is the account this ``gh`` runs
 as or a bot account, such as Renovate's, and the comment records that basis. A
 human's is refused. Any session may
-close an issue with a reason.
+close an issue with a reason. ``issue close --worker-workflow ID`` also lets the
+registered worker, which has no agent session, close one with a
+``Closed-by: worker/ID`` line.
 """
 
 import argparse
@@ -30,10 +32,11 @@ from pathlib import Path
 from textwrap import indent
 from typing import TYPE_CHECKING
 
-from tbhbdev import content, issue_import
+from tbhbdev import content, issue_import, userconfig
 from tbhbdev.alpha import identity as agent_identity
-from tbhbdev.alpha import opened
+from tbhbdev.alpha import opened, worker_identity
 from tbhbdev.alpha import pull_request as pr
+from tbhbdev.alpha.agent import settings as agent_settings
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -92,6 +95,27 @@ def trailer(env: Mapping[str, str]) -> str:
         message = f"invalid LLM trailer: {value}: {why}"
         raise SystemExit(message)
     return f"{agent_identity.KEY_GEN}: {value}"
+
+
+def closer(env: Mapping[str, str], workflow: str | None) -> str:
+    """The trailer line of an issue close: the agent's, else a worker's.
+
+    A recognized agent session writes ``Generated-by`` as always. With none,
+    the registered worker and WORKFLOW write ``Closed-by: worker/<WORKFLOW>``.
+
+    Raises:
+        SystemExit: Neither applies, or the config can't register a worker.
+    """
+    if workflow is None or pr.posting_value(env) is not None:
+        return trailer(env)
+    try:
+        registered = agent_settings.load().worker_path
+    except userconfig.ConfigError as exc:
+        raise SystemExit(str(exc)) from exc
+    if why := worker_identity.refusal(registered):
+        message = f"not closing: --worker-workflow needs the registered worker: {why}"
+        raise SystemExit(message)
+    return f"Closed-by: {worker_identity.name(workflow)}"
 
 
 def ref_of(url: str) -> str:
@@ -388,6 +412,13 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         else:
             closing.add_argument("--reason", required=True, choices=sorted(REASONS))
             closing.add_argument("--comment", type=non_blank)
+            closing.add_argument(
+                "--worker-workflow",
+                type=worker_identity.workflow,
+                metavar="ID",
+                help="with no agent session, close as worker/ID: the caller must "
+                "descend from the executable in the config's [agent.worker] table",
+            )
             add_creation_arguments(one.add_parser("create"))
             for verb in RELATIONSHIP_WRITES:
                 relationship = one.add_parser(verb)
@@ -431,7 +462,7 @@ def main(
     if args.verb != "close":
         return write_relationship(args)
     env = os.environ if env is None else env
-    line = trailer(env)
+    line = closer(env, getattr(args, "worker_workflow", None))
     repo = pr.origin_repository()
     if args.kind == "pr":
         data = view("pr", args.number, repo)
