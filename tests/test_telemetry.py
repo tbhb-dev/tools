@@ -52,7 +52,7 @@ def telemetry_files(
     monkeypatch.setattr(telemetry, "_REPORTED", threading.Lock())
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(user.parent))
     monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
-    for key in (ENDPOINT, ALLOW_HOSTS):
+    for key in (ENDPOINT, ALLOW_HOSTS, "TBHB_TELEMETRY_ENDPOINT"):
         monkeypatch.setenv(key, "")
         monkeypatch.delenv(key)
     return managed, user
