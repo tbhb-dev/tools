@@ -3251,17 +3251,16 @@ def test_main_keeps_account_path_until_request_loaded(
     assert run_host.main(["example"], "example") == 1
 
 
+@pytest.mark.parametrize("error", [OSError, RecursionError])
 def test_late_temporary_cleanup_keeps_finished_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
 ) -> None:
     run = make_run(tmp_path)
-    original = tempfile.TemporaryDirectory
+    cleanup = tempfile.TemporaryDirectory.cleanup
 
-    @contextmanager
-    def directory() -> Generator[str]:
-        with original() as value:
-            yield value
-        raise OSError
+    def fail_cleanup(directory: tempfile.TemporaryDirectory[str]) -> None:
+        cleanup(directory)
+        raise error
 
     def execute(
         _run: run_host.Run,
@@ -3277,7 +3276,7 @@ def test_late_temporary_cleanup_keeps_finished_records(
         run.files.write("rc", "7\n")
         return 7
 
-    monkeypatch.setattr(tempfile, "TemporaryDirectory", directory)
+    monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", fail_cleanup)
     monkeypatch.setattr(run_host, "_files", constant(run.files))
     monkeypatch.setattr(run_host, "_load", constant((run, "task")))
     monkeypatch.setattr(run_host, "execute", execute)
@@ -3288,6 +3287,83 @@ def test_late_temporary_cleanup_keeps_finished_records(
         run.files.path("log").read_text()
         == run_host.build_info.line() + "\nharness log\n"
     )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "rc"), [("success", 0), ("failure", 1), ("timeout", 124), ("exit", 7)]
+)
+def test_exec_removes_its_pytest_tree_after_each_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, rc: int
+) -> None:
+    run = make_run(tmp_path, timeout=1)
+    other_tree = tmp_path / "pytest-of-another-run"
+    other_tree.mkdir()
+    other_file = other_tree / "test-file"
+    other_file.write_text("keep")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    run_dirs: list[Path] = []
+    test = tmp_path / "test_probe.py"
+    test.write_text(
+        "from pathlib import Path\n"
+        "from os import environ\n"
+        "def test_temp(tmp_path):\n"
+        "    assert tmp_path.is_relative_to(Path(environ['TMPDIR']))\n"
+        "    tmp_path.joinpath('test-file').write_text('example')\n"
+    )
+
+    def load(_args: object, directory: Path) -> tuple[run_host.Run, str]:
+        run.tmpdir = runfiles.private_dir(directory / "tools")
+        run_dirs.append(directory)
+        return run, "example task"
+
+    def prepare(*_args: object) -> run_host.Prepared:
+        return preparation(run)
+
+    def launch(spec: process_group.Launch, **kwargs: object) -> Child:
+        assert (
+            spec.env["TMPDIR"] == spec.env["PYTEST_DEBUG_TEMPROOT"] == str(run.tmpdir)
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "--confcutdir",
+                str(tmp_path),
+                str(test),
+            ],
+            env={
+                **os.environ,
+                "TMPDIR": spec.env["TMPDIR"],
+                "PYTEST_DEBUG_TEMPROOT": spec.env["PYTEST_DEBUG_TEMPROOT"],
+                "PYTEST_ADDOPTS": "",
+                "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+            },
+            check=True,
+            capture_output=True,
+        )
+        assert next(run.tmpdir.glob("pytest-of-*/pytest-*/test_temp0/test-file"))
+        (run.tmpdir / "outside").symlink_to(other_tree, target_is_directory=True)
+        if outcome == "failure":
+            raise OSError
+        child = Child(code=rc, timeout=outcome == "timeout")
+        cast("Callable[[Child], None]", kwargs["started"])(child)
+        return child
+
+    monkeypatch.setattr(run_host, "_files", constant(run.files))
+    monkeypatch.setattr(run_host, "_load", load)
+    monkeypatch.setattr(run_host, "preflight", constant(None))
+    monkeypatch.setattr(credentials, "push_token", constant(None))
+    monkeypatch.setattr(process_group, "prepare", prepare)
+    monkeypatch.setattr(process_group, "launch_owned", launch)
+    monkeypatch.setattr(process_group, "record", constant(None))
+    monkeypatch.setattr(process_group, "stop_owned", constant(value=True))
+    assert run_host.main(["example"], "run-host") == rc
+    assert run.files.path("rc").read_text() == f"{rc}\n"
+    assert len(run_dirs) == 1
+    assert not run_dirs[0].exists()
+    assert other_file.read_text() == "keep"
 
 
 def test_signer_stop_denial_keeps_harness_rc(
@@ -4756,12 +4832,11 @@ def test_interrupted_second_admission_leaves_the_completed_run_alone(
     assert files.path("rc").read_text() == "0\n"
 
 
+@pytest.mark.parametrize("expected", [1, 7])
 def test_interrupt_while_releasing_the_lock_keeps_the_recorded_result(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, expected: int
 ) -> None:
-    files = runfiles.RunFiles(
-        runfiles.state_home(Path.home()) / "tbhbdev/agent-runs", "example"
-    )
+    run = make_run(tmp_path)
 
     @contextmanager
     def interrupted_release(_path: Path) -> Generator[None]:
@@ -4770,13 +4845,21 @@ def test_interrupt_while_releasing_the_lock_keeps_the_recorded_result(
         finally:
             raise run_host.RunInterruptedError
 
-    def load(_args: object, _tmpdir: Path) -> None:
-        raise OSError(errno.EIO, "load unavailable")
+    def load(_args: object, _tmpdir: Path) -> tuple[run_host.Run, str]:
+        if expected == 1:
+            raise OSError(errno.EIO, "load unavailable")
+        return run, "example task"
 
+    def execute(*_args: object, **_kwargs: object) -> int:
+        run.files.write("rc", "7\n")
+        return 7
+
+    monkeypatch.setattr(run_host, "_files", constant(run.files))
     monkeypatch.setattr(run_host.runfiles, "locked", interrupted_release)
     monkeypatch.setattr(run_host, "_load", load)
-    assert run_host.main(["example"], "run-host") == 1
-    assert files.path("rc").read_text().strip() == "1"
+    monkeypatch.setattr(run_host, "execute", execute)
+    assert run_host.main(["example"], "run-host") == expected
+    assert run.files.path("rc").read_text() == f"{expected}\n"
 
 
 def test_signal_after_recording_a_failure_keeps_the_recorded_result(
