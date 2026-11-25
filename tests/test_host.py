@@ -20,20 +20,24 @@ import stat
 import subprocess  # nosec B404
 import sys
 import tomllib
+from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from io import StringIO
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast, override
+from unittest.mock import Mock
 
 import httpx
 import pytest
+import stubtool
 from onepasswordconnectsdk.client import Client
 
 from tbhbdev import cli, secrets, userconfig
 from tbhbdev import host as host_tool
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from conftest import FakeConnect, Stubs
 
@@ -1082,6 +1086,99 @@ def test_op_missing_from_path(
 # grant and revoke.
 
 
+def seed_vault_access(
+    stubs: Stubs,
+    host_vaults: dict[str, tuple[str, ...]],
+    *,
+    available: tuple[str, ...] = (),
+    extra_grants: tuple[str, ...] = (),
+    other_tokens: tuple[str, ...] = (),
+) -> list[Json]:
+    grants = set(extra_grants)
+    tokens: list[Json] = []
+    for number, (host, extras) in enumerate(host_vaults.items(), start=1):
+        vaults = sorted({"vault-all", f"vault-{host}", *extras})
+        grants.update(vaults)
+        tokens.append(
+            {
+                "id": f"tok-{number}",
+                "integrationId": "srv-1",
+                "name": name_for(host, *extras),
+                "state": "ACTIVE",
+                "token": f"fake-connect-token-{number}",
+                "vaults": vaults,
+            }
+        )
+    for number, name in enumerate(other_tokens, start=len(tokens) + 1):
+        tokens.append(
+            {
+                **tokens[0],
+                "id": f"tok-{number}",
+                "name": name,
+                "token": f"fake-connect-token-{number}",
+            }
+        )
+    stubs.set(
+        op={
+            "servers": [{"id": "srv-1", "name": "example-connect"}],
+            "vaults": [
+                {"id": f"vlt-{name}", "name": name}
+                for name in sorted(grants.union(available))
+            ],
+            "grants": sorted(grants),
+            "tokens": tokens,
+        }
+    )
+    return tokens
+
+
+def seed_vault_rotation(
+    world: World,
+    host_vaults: dict[str, tuple[str, ...]],
+    *,
+    available: tuple[str, ...] = (),
+) -> None:
+    tokens = seed_vault_access(world.stubs, host_vaults, available=available)
+    for host, token in zip(host_vaults, tokens, strict=True):
+        home = world.stubs.home(HOME_KEY[host])
+        keychain = home / "Library" / "Keychains" / f"{secrets.KEYCHAIN}-db"
+        keychain.parent.mkdir(parents=True)
+        key = f"{secrets.SERVICE}/{secrets.ACCOUNT}"
+        keychain.write_text(
+            json.dumps({"password": "", "items": {key: token["token"]}})
+        )
+        record = token_name_file(world, host)
+        record.parent.mkdir(parents=True)
+        record.write_text(f"{token['name']}\n")
+
+
+@pytest.fixture
+def in_process_vault_access(
+    stubs: Stubs,
+    config: Callable[[list[str] | None], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Stubs:
+    config(None)
+
+    def run_op(
+        argv: Sequence[str], *, stdin: str | None = None, cwd: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        assert argv[0] == "op"
+        assert stdin is cwd is None
+        with redirect_stdout(StringIO()) as stdout:
+            stubtool.op(list(argv[1:]))
+        return subprocess.CompletedProcess(argv, 0, stdout.getvalue(), "")
+
+    monkeypatch.setattr(host_tool, "_run", run_op)
+    monkeypatch.setattr(host_tool, "tailnet", lambda: TAILNET)
+    monkeypatch.setattr(host_tool, "touch_id", Mock())
+    monkeypatch.setattr(host_tool, "now", lambda: T0)
+    monkeypatch.setattr(host_tool, "keychain_held", Mock(return_value=None))
+    monkeypatch.setattr(host_tool, "install", Mock())
+    monkeypatch.setattr(host_tool, "verify", Mock())
+    return stubs
+
+
 def test_grant_needs_a_server(world: World, capfd: pytest.CaptureFixture[str]) -> None:
     assert run(world, capfd, "grant", "--host", "host-a", "ops") == 1
     assert world.err == (
@@ -1100,33 +1197,32 @@ def test_a_list_that_is_not_a_list_lists_nothing(
 
 
 def test_grant_adds_a_vault_to_one_host(
-    world: World, capfd: pytest.CaptureFixture[str]
+    in_process_vault_access: Stubs, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--all") == 0
-    assert run(world, capfd, "grant", "--host", "host-a", "extra") == 1
-    assert world.err == f"{PROG}: no such vault: extra; run bootstrap to create it\n"
-    state = world.stubs.state()
-    vaults = cast("list[Json]", cast("Json", state["op"])["vaults"])
-    vaults.append({"id": "vlt-extra", "name": "extra"})
-    world.stubs.set(**state)
-    others = {h: world.token_of(h)["id"] for h in ("host-b", "host-c")}
-    assert run(world, capfd, "grant", "--host", "host-a", "extra") == 0
-    assert "granted the Connect server the vault extra" in world.out
-    assert world.token_of("host-a")["name"] == name_for("host-a", "extra")
-    assert {h: world.token_of(h)["id"] for h in others} == others
-    assert world.checked == [ENDPOINTS] * (BOOTSTRAP_CHECKS * len(HOSTS) + 1)
-    world.assert_no_token_leaks()
+    stubs = in_process_vault_access
+    initial = seed_vault_access(stubs, dict.fromkeys(HOSTS, ()), available=("extra",))
+    assert host_tool.main(["grant", "--host", "host-a", "extra"], PROG) == 0
+    assert "granted the Connect server the vault extra\n" in capsys.readouterr().out
+    updated = stubtool.rows(stubtool.obj(stubs.state()["op"])["tokens"])
+    active = [t for t in updated if t["state"] == "ACTIVE"]
+    assert active[:-1] == initial[1:]
+    target = host_tool.Host("host-a", "macOS", local=False)
+    name = name_for(target.name, "extra")
+    assert active[-1]["name"] == name
+    cast("Mock", host_tool.install).assert_called_once_with(
+        target, active[-1]["token"], name
+    )
+    cast("Mock", host_tool.verify).assert_called_once_with(
+        active[-1]["token"],
+        frozenset({"vault-all", "vault-host-a", "extra"}),
+        ENDPOINTS,
+    )
 
 
 def test_grant_all_runs_exactly_these_op_commands(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--all") == 0
-    state = world.stubs.state()
-    vaults = cast("list[Json]", cast("Json", state["op"])["vaults"])
-    vaults.append({"id": "vlt-extra", "name": "extra"})
-    world.stubs.set(**state)
-    (world.stubs.dir / "calls.jsonl").unlink()
+    seed_vault_rotation(world, dict.fromkeys(HOSTS, ()), available=("extra",))
     assert run(world, capfd, "grant", "--all", "extra") == 0
     server = ["--server", "srv-1"]
     listed = ["--format", "json", "--account", ACCOUNT]
@@ -1158,10 +1254,17 @@ def test_grant_all_runs_exactly_these_op_commands(
                 *("--vault", f"vault-{host}", "--expires-in", "90d"),
                 *("--account", ACCOUNT),
             ],
-            ["connect", "token", "delete", f"tok-{number}", *server],
+            [
+                "connect",
+                "token",
+                "delete",
+                f"tok-{number}",
+                *server,
+                "--account",
+                ACCOUNT,
+            ],
             tokens,
         ]
-        expected[-2] += ["--account", ACCOUNT]
     assert world.stubs.argvs("op") == expected
     assert world.out == "granted the Connect server the vault extra\n" + "".join(
         f"{host}: the token {name_for(host)} has other vaults; creating a new token\n"
@@ -1169,34 +1272,33 @@ def test_grant_all_runs_exactly_these_op_commands(
         f"{host}: installed the token {name_for(host, 'extra')}\n"
         for host in HOSTS
     )
+    for host in HOSTS:
+        assert world.token_of(host)["name"] == name_for(host, "extra")
+        assert world.installed(host) == world.token_of(host)["token"]
+    assert world.checked == [ENDPOINTS] * len(HOSTS)
     world.assert_no_token_leaks()
 
 
+@pytest.mark.parametrize(
+    ("targets", "vaults", "missing"),
+    [
+        (["--host", "host-a"], ["extra"], "extra"),
+        (["--host", "host-a"], ["x-two", "x-one"], "x-one, x-two"),
+        (["--all"], ["extra", "more"], "extra, more"),
+    ],
+)
 def test_grant_names_every_missing_vault(
-    world: World, capfd: pytest.CaptureFixture[str]
+    in_process_vault_access: Stubs,
+    capsys: pytest.CaptureFixture[str],
+    targets: list[str],
+    vaults: list[str],
+    missing: str,
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
-    assert run(world, capfd, "grant", "--host", "host-a", "x-two", "x-one") == 1
-    assert world.err == (
-        f"{PROG}: no such vault: x-one, x-two; run bootstrap to create it\n"
+    seed_vault_access(in_process_vault_access, dict.fromkeys(HOSTS, ()))
+    assert host_tool.main(["grant", *targets, *vaults], PROG) == 1
+    assert capsys.readouterr().err == (
+        f"{PROG}: no such vault: {missing}; run bootstrap to create it\n"
     )
-
-
-def test_grant_all_adds_a_vault_to_every_host(
-    world: World, capfd: pytest.CaptureFixture[str]
-) -> None:
-    assert run(world, capfd, "bootstrap", "--all") == 0
-    assert run(world, capfd, "grant", "--all", "extra", "more") == 1
-    assert world.err == (
-        f"{PROG}: no such vault: extra, more; run bootstrap to create it\n"
-    )
-    state = world.stubs.state()
-    vaults = cast("list[Json]", cast("Json", state["op"])["vaults"])
-    vaults.append({"id": "vlt-extra", "name": "extra"})
-    world.stubs.set(**state)
-    assert run(world, capfd, "grant", "--all", "extra") == 0
-    for host in HOSTS:
-        assert world.token_of(host)["name"] == name_for(host, "extra")
 
 
 @pytest.mark.parametrize("vault", ["", "a,b"])
@@ -1227,73 +1329,110 @@ def test_revoke_names_every_vault_a_host_keeps(
 
 
 def test_revoke_takes_from_the_server_only_the_vaults_it_names(
-    world: World, capfd: pytest.CaptureFixture[str]
+    in_process_vault_access: Stubs, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--host", "host-a", "ops") == 0
-    state = world.stubs.state()
-    account = cast("Json", state["op"])
-    cast("list[str]", account["grants"]).append("extra")
-    tokens = cast("list[Json]", account["tokens"])
+    stubs = in_process_vault_access
     older = name_for("host-a", "extra", when=T0 - timedelta(days=1))
-    tokens.append({**tokens[0], "id": "tok-stray", "name": older, "token": "fake-x"})
-    world.stubs.set(**state)
-    assert run(world, capfd, "revoke", "--host", "host-a", "ops") == 0
-    assert world.out.endswith(
+    seed_vault_access(
+        stubs, {"host-a": ("ops",)}, extra_grants=("extra",), other_tokens=(older,)
+    )
+    assert host_tool.main(["revoke", "--host", "host-a", "ops"], PROG) == 0
+    assert capsys.readouterr().out.endswith(
         f"host-a: installed the token {name_for('host-a')}\n"
         "revoked the Connect server's access to the vault ops\n"
     )
-    assert world.account()["grants"] == ["vault-all", "vault-host-a", "extra"]
+    account = stubtool.obj(stubs.state()["op"])
+    assert account["grants"] == ["extra", "vault-all", "vault-host-a"]
+    assert [
+        t["name"] for t in stubtool.rows(account["tokens"]) if t["state"] == "ACTIVE"
+    ] == [name_for("host-a")]
 
 
 def test_revoke_of_a_vault_no_token_has_changes_nothing(
-    world: World, capfd: pytest.CaptureFixture[str]
+    in_process_vault_access: Stubs, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--host", "host-a") == 0
-    before = world.op_calls()
-    assert run(world, capfd, "revoke", "--host", "host-a", "ops") == 0
-    assert "connect vault revoke" not in world.op_calls()[len(before) :]
+    stubs = in_process_vault_access
+    seed_vault_access(stubs, {"host-a": ()})
+    monkeypatch.setattr(
+        host_tool, "keychain_held", Mock(return_value=name_for("host-a"))
+    )
+    before = stubs.state()
+    assert host_tool.main(["revoke", "--host", "host-a", "ops"], PROG) == 0
+    assert stubs.state() == before
+    assert all(a[:3] != ["connect", "vault", "revoke"] for a in stubs.argvs("op"))
+    cast("Mock", host_tool.install).assert_not_called()
 
 
 def test_revoke_keeps_server_access_while_another_token_uses_it(
-    world: World, capfd: pytest.CaptureFixture[str]
+    in_process_vault_access: Stubs,
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--all", "ops") == 0
-    assert run(world, capfd, "revoke", "--host", "host-a", "ops") == 0
-    assert world.token_of("host-a")["name"] == name_for("host-a")
-    assert world.token_of("host-b")["name"] == name_for("host-b", "ops")
-    assert "ops" in cast("list[str]", world.account()["grants"])
-    assert "connect vault revoke" not in world.op_calls()
-    world.assert_no_token_leaks()
+    stubs = in_process_vault_access
+    initial = seed_vault_access(stubs, dict.fromkeys(HOSTS, ("ops",)))
+    assert host_tool.main(["revoke", "--host", "host-a", "ops"], PROG) == 0
+    account = stubtool.obj(stubs.state()["op"])
+    active = [t for t in stubtool.rows(account["tokens"]) if t["state"] == "ACTIVE"]
+    assert active[:-1] == initial[1:]
+    assert active[-1]["name"] == name_for("host-a")
+    assert "ops" in cast("list[str]", account["grants"])
+    assert all(a[:3] != ["connect", "vault", "revoke"] for a in stubs.argvs("op"))
 
 
 def test_revoke_everywhere_takes_the_vault_from_the_server(
     world: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--all", "ops") == 0
+    seed_vault_rotation(world, dict.fromkeys(HOSTS, ("ops",)))
     assert run(world, capfd, "revoke", "--all", "ops") == 0
+    server = ["--server", "srv-1"]
+    account = ["--account", ACCOUNT]
+    listed = ["--format", "json", *account]
+    tokens = ["connect", "token", "list", *server, *listed]
+    expected = [["connect", "server", "list", *listed], tokens]
+    for number, host in enumerate(HOSTS, start=1):
+        expected += [
+            [
+                "connect",
+                "token",
+                "create",
+                name_for(host),
+                *server,
+                "--vault",
+                "vault-all",
+                "--vault",
+                f"vault-{host}",
+                "--expires-in",
+                "90d",
+                *account,
+            ],
+            ["connect", "token", "delete", f"tok-{number}", *server, *account],
+            tokens,
+        ]
+    expected.append(["connect", "vault", "revoke", *server, "--vault", "ops", *account])
+    assert world.stubs.argvs("op") == expected
     assert "revoked the Connect server's access to the vault ops" in world.out
     assert "ops" not in cast("list[str]", world.account()["grants"])
     for host in HOSTS:
         assert world.installed(host) == world.token_of(host)["token"]
-    assert world.checked == [ENDPOINTS] * (BOOTSTRAP_CHECKS + 1) * len(HOSTS)
+    assert world.checked == [ENDPOINTS] * len(HOSTS)
     world.assert_no_token_leaks()
 
 
+@pytest.mark.parametrize(
+    "foreign", [("ci",), ("ci", "example-host:x:not-a-time:ops")], ids=["one", "two"]
+)
 def test_revoke_leaves_the_server_alone_beside_other_tokens(
-    world: World, capfd: pytest.CaptureFixture[str]
+    in_process_vault_access: Stubs,
+    capsys: pytest.CaptureFixture[str],
+    foreign: tuple[str, ...],
 ) -> None:
-    assert run(world, capfd, "bootstrap", "--host", "host-a", "ops", "extra") == 0
-    state = world.stubs.state()
-    tokens = cast("list[Json]", cast("Json", state["op"])["tokens"])
-    for name in ("ci", "example-host:x:not-a-time:ops"):
-        tokens.append({**tokens[0], "id": f"tok-{name}", "name": name})
-    world.stubs.set(**state)
-    assert run(world, capfd, "revoke", "--host", "host-a", "ops", "extra") == 0
-    assert world.out.endswith(
+    stubs = in_process_vault_access
+    seed_vault_access(stubs, {"host-a": ("ops", "extra")}, other_tokens=foreign)
+    assert host_tool.main(["revoke", "--host", "host-a", "ops", "extra"], PROG) == 0
+    assert capsys.readouterr().out.endswith(
         "leaving the server's access to extra, ops alone: "
-        "2 token(s) on it aren't agent host tokens\n"
+        f"{len(foreign)} token(s) on it aren't agent host tokens\n"
     )
-    assert "ops" in cast("list[str]", world.account()["grants"])
+    grants = cast("list[str]", stubtool.obj(stubs.state()["op"])["grants"])
+    assert {"extra", "ops"} <= set(grants)
 
 
 # These two call host's functions directly, without bootstrap: on macOS, a
@@ -1337,21 +1476,6 @@ def test_an_account_counts_its_live_foreign_tokens(
     account = host_tool.Account.load("srv-1")
     assert [t.host for t in account.tokens] == ["host-a"]
     assert account.foreign == 2
-
-
-def test_revoke_names_every_vault_it_leaves_alone(
-    world: World, capfd: pytest.CaptureFixture[str]
-) -> None:
-    assert run(world, capfd, "bootstrap", "--host", "host-a", "ops", "extra") == 0
-    state = world.stubs.state()
-    tokens = cast("list[Json]", cast("Json", state["op"])["tokens"])
-    tokens.append({**tokens[0], "id": "tok-ci", "name": "ci"})
-    world.stubs.set(**state)
-    assert run(world, capfd, "revoke", "--host", "host-a", "ops", "extra") == 0
-    assert world.out.endswith(
-        "leaving the server's access to extra, ops alone: "
-        "1 token(s) on it aren't agent host tokens\n"
-    )
 
 
 # status.
