@@ -1366,6 +1366,42 @@ def test_launch_poll_interval_and_budget(
     assert sleeps == [0.5]
 
 
+@pytest.mark.parametrize("launched", [True, False])
+def test_shims_extend_launch_poll_budget(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch, launched: bool
+) -> None:
+    assert launch(remote) == 0
+    run = driver.load(CONFIG, "sample")
+    ticks = iter([119, 120, 121, 720])
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        driver,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks), sleep=sleeps.append),
+    )
+    phases = [
+        transport.Reading("shims", None, launched=False, session=True, text=""),
+        transport.Reading(
+            "running" if launched else "shims",
+            None,
+            launched=launched,
+            session=True,
+            text="",
+        ),
+    ]
+    read = Mock(side_effect=phases)
+    unconfirmed = Mock(return_value=1)
+    monkeypatch.setattr(transport, "read", read)
+    monkeypatch.setattr(driver, "unconfirmed", unconfirmed)
+    assert driver.poll_launch(CONFIG, run, 120) == (0 if launched else 1)
+    assert [call.kwargs["timeout"] for call in read.call_args_list] == [1, 599]
+    assert sleeps == [0.5]
+    if launched:
+        unconfirmed.assert_not_called()
+    else:
+        unconfirmed.assert_called_once_with(CONFIG, run, "shims")
+
+
 def test_metadata_permissions_under_an_open_mask(remote: Remote) -> None:
     args = agent.parser("example agent").parse_args(arguments(remote))
     run = driver.prepare(CONFIG, args)

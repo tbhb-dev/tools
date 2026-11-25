@@ -46,6 +46,7 @@ delenv
 demilestoned
 deptry
 dgst
+direnv
 doas
 docstrings
 dotrepo

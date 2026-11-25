@@ -1233,6 +1233,15 @@ def test_host_limits_default_and_set() -> None:
     assert host.max_concurrent_runs == 0
 
 
+def test_host_builds_shims_by_default() -> None:
+    assert limits_host().build_shims is True
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_host_shim_setting(value: bool) -> None:
+    assert limits_host(build_shims=value).build_shims is value
+
+
 @pytest.mark.parametrize(
     ("key", "value", "why"),
     [
@@ -1240,6 +1249,7 @@ def test_host_limits_default_and_set() -> None:
         ("min_memory_available_percent", 101, "at most 100"),
         ("max_swap_used_percent", 0, "must be a positive integer"),
         ("limits_warn_only", "yes", "must be true or false"),
+        ("build_shims", "yes", "must be true or false"),
         ("max_concurrent_runs", -1, "must be a non-negative integer"),
         ("max_concurrent_runs", False, "must be a non-negative integer"),
     ],

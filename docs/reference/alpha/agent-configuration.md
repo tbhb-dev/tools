@@ -6,6 +6,13 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
+    session: sha-256-64:3bcef7c31b99ccc0
+    at: "2026-11-24T20:38:33Z"
+  - role: generated
+    harness: codex:0.171.0
+    model: openai:gpt-6.2-sol
+    effort: high
+    surface: exec
     at: "2026-11-24T20:38:25Z"
   - role: generated
     harness: codex:0.171.0
@@ -25,9 +32,13 @@ type: Reference
 
 `agent exec --expect-commit` requires a new commit from a build run. If the run would otherwise succeed and the host records no new commit, it returns exit status 6 and logs `no new commit: the brief expected one (--expect-commit)`. The launcher refuses this flag for the review profile.
 
+After workspace preparation, a build run reads the repository’s hook configs for references to Bazel shim directories and executables. If a referenced directory is missing, the host reports phase `shims` and uses `bazelisk` or `bazel` to run the `bazel_env` target for each referenced directory’s package, with a 10-minute timeout per target. The harness can start once the referenced executables exist, or once the directory exists if the hooks reference only the directory, even if Bazel returns a nonzero status. Review runs and preflight checks skip this step.
+
 `agent exec` records the launching session's name and `CLAUDE_CODE_SESSION_ID` in the run record, and `agent status` prints `launcher=NAME`. The name is the tmux pane title of the launching process's pane, without its leading status glyph. Any named session may launch a reviewer-role run, meaning `--role reviewer` or `--profile review`, including for its own repository. A missing `TMUX_PANE` or pane title refuses the launch; set the launching session's tmux pane title to its name. Review tier rules are enforced by briefs.
 
 `agent exec` reads the run host once before it transfers anything. It refuses the launch and prints the numbers when the 1-minute load reaches the host's load limit, when available memory falls under a share of total memory, or when used swap passes a share of total swap. Each `[[agent.host]]` table sets its own values. `load_limit` defaults to the host's logical CPU count, `min_memory_available_percent` defaults to 20 and `max_swap_used_percent` defaults to 80. Set a lower `load_limit` on a host that also runs services. `limits_warn_only = true` prints the same numbers as a warning and lets the launch continue. A failed or unreadable read refuses with `cannot read host limits`. The caller must pass `--ignore-limits` to launch anyway, or the host sets `limits_warn_only = true`, which turns the refusal into a warning. The run record keeps an `--ignore-limits` choice. Older run records without the field load as `false`.
+
+Each `[[agent.host]]` can set `build_shims` to a Boolean. It defaults to `true`. Set it to `false` on hosts that cannot run Bazel. Those hosts refuse builds that need hook shims.
 
 `[agent]` sets the optional memory reservations as positive integers in MiB. `run_memory_mib` sets the build reservation and defaults to 6144 MiB (6 GiB). `review_memory_mib` defaults to the configured build reservation. The launch check also requires available memory to meet the reservation for the requested profile. Linux reads `MemAvailable`. On macOS, the check sums four counts from `vm_stat`, `Pages free`, `Pages inactive`, `Pages speculative`, and `Pages purgeable`, and multiplies the sum by the page size.
 

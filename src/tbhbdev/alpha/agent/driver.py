@@ -20,6 +20,7 @@ from tbhbdev.alpha.agent import (
     launcher,
     render,
     runfiles,
+    shims,
     signing_parity,
     taint_store,
     transport,
@@ -481,15 +482,21 @@ def recover_transfer(settings: Settings, run: Run) -> None:
 
 
 def poll_launch(settings: Settings, run: Run, deadline: float) -> int:
+    poll_deadline = deadline
     while True:
         reading = transport.read(
             settings,
             run.host,
             (run.name, run.owner),
-            timeout=deadline - time.monotonic(),
+            timeout=poll_deadline - time.monotonic(),
+        )
+        poll_deadline = rules.launch_deadline(
+            reading.phase, deadline, shims.SHIM_SECONDS
         )
         action = rules.launch(
-            reading.rc, launched=reading.launched, expired=time.monotonic() >= deadline
+            reading.rc,
+            launched=reading.launched,
+            expired=time.monotonic() >= poll_deadline,
         )
         if action == "finished":
             # The host may still be closing its pane after committing the rc.

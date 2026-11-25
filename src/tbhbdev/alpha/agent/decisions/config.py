@@ -472,6 +472,7 @@ def _host(table: _Table) -> Host:
         "min_memory_available_percent",
         "max_swap_used_percent",
         "limits_warn_only",
+        "build_shims",
         "max_concurrent_runs",
     )
     name = _check_name(table, "name", table.text("name"), HOST_NAME)
@@ -510,6 +511,9 @@ def _host(table: _Table) -> Host:
         limits_warn_only=table.flag("limits_warn_only")
         if "limits_warn_only" in table.values
         else False,
+        build_shims=table.flag("build_shims")
+        if "build_shims" in table.values
+        else True,
         max_concurrent_runs=table.nonnegative(
             "max_concurrent_runs", DEFAULT_MAX_CONCURRENT_RUNS
         ),
