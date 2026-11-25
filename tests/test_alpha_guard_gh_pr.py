@@ -53,6 +53,11 @@ DELETE_BRANCH = (
     "A `gh api` branch delete is blocked. For a closed or merged PR, run "
     "`tbhbdev alpha pr delete-branch {n}` instead."
 )
+THREAD_HINT = (
+    "A `gh api graphql` review thread mutation is blocked. From the repository "
+    "clone, run `tbhbdev alpha review {command} <PR> <THREAD>`. Use "
+    "`tbhbdev alpha review threads <PR>` to find the thread ID."
+)
 MERGE = (
     "`gh pr merge` is blocked. Once the PR is approved, run "
     "`tbhbdev alpha merge {n}` (add `--dry-run` to preview the commit message first)."
@@ -201,6 +206,10 @@ def test_allowed(text: str) -> None:
             "gh api repos/{owner}/{repo}/git/refs/heads/x --method delete",
             DELETE_BRANCH.format(n="<N>"),
         ),
+        (
+            "gh api graphql -f 'query=mutation { resolveReviewThread(input: $input) }'",
+            THREAD_HINT.format(command="resolve"),
+        ),
         ("gh pr ready 399", READY.format(n=399)),
         ("gh pr ready", READY.format(n="<N>")),
         (
@@ -218,6 +227,11 @@ def test_hint(text: str, expected: str) -> None:
     assert guard.hint(found) == expected
 
 
+def test_branch_delete_match_preserves_api_arguments() -> None:
+    args = ["-X", "DELETE", "repos/a/b/git/refs/heads/x"]
+    assert guard.gh_match(["-R", "a/b", "api", *args]) == ("delete-branch", args, "api")
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -229,6 +243,11 @@ def test_hint(text: str, expected: str) -> None:
         "gh api -X GET repos/a/b/git/refs/heads/x",
         "gh api -X DELETE repos/a/b/issues/1",
         "gh api -X DELETE",
+        "gh api",
+        "gh api graphql -f 'query=query { viewer { login } }'",
+        "gh api graphql -f 'query={ search(query: \"resolveReviewThread(a)\") }'",
+        "gh api graphql -f 'input=resolveReviewThread(...)'",
+        "gh api repos/a/b/issues -f 'query=mutation { resolveReviewThread(...) }'",
     ],
 )
 def test_new_hints_leave_other_commands_alone(text: str) -> None:
@@ -248,6 +267,10 @@ def test_new_hints_leave_other_commands_alone(text: str) -> None:
         (
             "gh api -X DELETE repos/a/b/git/refs/heads/x",
             "tbhbdev alpha pr delete-branch",
+        ),
+        (
+            "gh api graphql --field='query=mutation { unresolveReviewThread(a: $i) }'",
+            "tbhbdev alpha review unresolve <PR> <THREAD>",
         ),
     ],
 )

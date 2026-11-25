@@ -11,7 +11,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import pull_request as pr
-from tbhbdev.alpha import review_doc, review_policy
+from tbhbdev.alpha import review_doc, review_policy, review_threads
 
 SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -266,6 +266,20 @@ def edit_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def thread_command(args: argparse.Namespace) -> int:
+    try:
+        target = (GhApi(), pr.origin_repository(), args.number)
+        if args.command == "threads":
+            for row in review_threads.list_rows(*target, unresolved=args.unresolved):
+                print(row)
+        else:
+            print(review_threads.update(*target, args.thread, args.command))
+    except (OSError, SystemExit, review_doc.ReviewError) as exc:
+        print(f"PR {args.number} {args.command}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str], prog: str) -> int:
     """Run a review command."""
     if argv[:1] == ["policy"]:
@@ -287,11 +301,20 @@ def main(argv: list[str], prog: str) -> int:
         edit.add_argument("number", type=int)
         edit.add_argument("review_id", type=int)
         edit.add_argument(option, required=True)
+    threads = sub.add_parser("threads", help="list pull request review threads")
+    threads.add_argument("number", type=int)
+    threads.add_argument("--unresolved", action="store_true")
+    for command in ("resolve", "unresolve"):
+        thread = sub.add_parser(command, help=f"{command} a pull request review thread")
+        thread.add_argument("number", type=int)
+        thread.add_argument("thread", help="thread ID or review comment database ID")
     args = parser.parse_args(argv)
     if args.number < 1:
         parser.error("PR number must be at least 1")
     if args.command == "post":
         return post_draft(args.number, args.author)
+    if args.command in {"threads", "resolve", "unresolve"}:
+        return thread_command(args)
     if args.command in {"dismiss", "reply"}:
         if args.review_id < 1:
             parser.error("review ID must be at least 1")

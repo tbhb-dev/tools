@@ -86,7 +86,7 @@ def test_check_without_lint_accepts_a_filled_comment_draft(
     head(world)
     assert run_main("draft", "7") == 0
     path = Path(capsys.readouterr().out.strip())
-    with patch.object(pr, "lint") as lint:
+    with patch.object(pr, "lint", return_value=[]) as lint:
         assert run_main("check", "7", "--no-lint") == 1
         assert "HTML comment" in capsys.readouterr().err
         text = re.sub(r"<!--.*?-->\n", "", path.read_text(), flags=re.DOTALL)
@@ -99,6 +99,8 @@ def test_check_without_lint_accepts_a_filled_comment_draft(
         )
         assert run_main("check", "7", "--no-lint") == 0
         lint.assert_not_called()
+        assert run_main("check", "7") == 0
+        lint.assert_called_once()
 
 
 def test_existing_draft_is_unchanged_without_fetch(world: World) -> None:
@@ -382,6 +384,27 @@ def test_help_uses_the_program_name(capsys: pytest.CaptureFixture[str]) -> None:
     assert out.startswith("usage: tbhbdev alpha review ")
     assert "Draft and check a pull request review in per-worktree git state." in out
     assert re.search(r"(?m)^ +policy +check a worktree's review policy files$", out)
+    assert re.search(r"(?m)^ +threads +list pull request review threads$", out)
+    for command in ("resolve", "unresolve"):
+        assert re.search(
+            rf"(?m)^ +{command} +{command} a pull request review thread$", out
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "label", "help_text"),
+    [
+        ("check", "--no-lint", "skip prose linters"),
+        ("resolve", "thread", "thread ID or review comment database ID"),
+    ],
+)
+def test_subcommand_help(
+    command: str, label: str, help_text: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as info:
+        run_main(command, "--help")
+    assert info.value.code == 0
+    assert re.search(rf"(?m)^ +{label} +{help_text}$", capsys.readouterr().out)
 
 
 def test_alpha_dispatch(world: World, capsys: pytest.CaptureFixture[str]) -> None:
