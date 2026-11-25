@@ -2737,18 +2737,183 @@ def upgrade_lines(world: World, host: str = "host-b") -> list[str]:
     return [line for line in world.out.splitlines() if line.startswith(f"{host}: ")]
 
 
-@pytest.fixture
-def ready(world: World, config_file: Path, capfd: pytest.CaptureFixture[str]) -> World:
-    """host-b, bootstrapped with a workspace that clones example/app."""
+def ready_workspace(world: World, config_file: Path) -> None:
     with_workspace(config_file, repos=("example/app",))
     remote(world, "example/app", "a1")
-    assert run(world, capfd, "bootstrap", "--host", "host-b") == 0
+
+
+def ready_gitleaks(vaults: list[str]) -> str:
+    """Render the published config from the fixture's facts, without discovery."""
+    facts = host_tool.Facts(
+        repos=tuple((owner, repo) for owner, repos in REPOS.items() for repo in repos),
+        tailnet=host_tool.Tailnet(
+            SUFFIX, "Fake Tailnet (example)", ("host-a", "host-b")
+        ),
+        words=frozenset(WORDS.lower().split()) | host_tool.TECH_WORDS,
+        operators=("operator",),
+        checkout=PurePosixPath("Code"),
+        vaults=tuple(vaults),
+        items=("gitleaks-private",),
+        endpoints=(f"nas-a.{SUFFIX}", f"nas-b.{SUFFIX}"),
+        names=("example-connect", secrets.SERVICE, secrets.KEYCHAIN),
+    )
+    rules, _ = host_tool.gitleaks_rules(facts)
+    return host_tool.render_gitleaks(rules)
+
+
+def seed_ready(world: World) -> None:
+    """Write the persistent state of a host-b bootstrap."""
+    host = "host-b"
+    repo = "example/app"
+    home = world.stubs.home()
+    operator = world.operator_home(host)
+    # Bootstrap probes the other operators to generate the private config.
+    for name in HOSTS:
+        world.operator_home(name).mkdir(parents=True, exist_ok=True)
+    home.mkdir(mode=0o700)
+    agent = {
+        **user(home=str(home)),
+        "UserShell": ["/bin/zsh"],
+        "RealName": ["agent"],
+        "Password": ["*"],
+        "IsHidden": ["1"],
+    }
+    devel = {**group(GID, "operator"), "RealName": ["devel"], "Password": ["*"]}
+    world.seed(host, {"agent": agent}, {"devel": devel})
+
+    value = "fake-connect-token-1"
+    name = name_for(host)
+    vaults = ["vault-all", "vault-host-b"]
+    world.stubs.set(
+        owners={str(home.resolve()): f"{UID}:{GID}"},
+        acls_mac={
+            str(operator.resolve()): ["group:devel allow search"],
+            str((operator / "Code").resolve()): [MAC_DIR],
+        },
+        op={
+            "servers": [{"id": "srv-1", "name": "example-connect"}],
+            "vaults": [
+                {"id": "vlt-1", "name": "vault-all"},
+                {"id": "vlt-2", "name": "vault-host-b"},
+            ],
+            "grants": vaults,
+            "tokens": [
+                {
+                    "id": "tok-1",
+                    "name": name,
+                    "state": "ACTIVE",
+                    "integrationId": "srv-1",
+                    "token": value,
+                    "vaults": vaults,
+                    "expires_in": "90d",
+                }
+            ],
+            "items": {
+                "vault-all": [
+                    {
+                        "id": "itm-1",
+                        "title": "gitleaks-private",
+                        "category": "SECURE_NOTE",
+                        "fields": [
+                            {
+                                "id": "config",
+                                "label": "config",
+                                "type": "CONCEALED",
+                                "value": ready_gitleaks(vaults),
+                            }
+                        ],
+                    }
+                ]
+            },
+        },
+    )
+    (world.stubs.dir / "connect-tokens.json").write_text(json.dumps({value: vaults}))
+    keychain = home / "Library" / "Keychains" / f"{secrets.KEYCHAIN}-db"
+    keychain.parent.mkdir(parents=True)
+    keychain.write_text(
+        json.dumps(
+            {
+                "password": "",
+                "locked": False,
+                "items": {f"{secrets.SERVICE}/{secrets.ACCOUNT}": value},
+                "settings": [],
+            }
+        )
+    )
+
+    copy = copy_of(world, host)
+    copy.parent.parent.mkdir(mode=0o700)
+    copy.parent.mkdir(mode=0o700)
+    copy.write_text(
+        agent_copy_text() + '\n[workspace]\nroot = "Code"\nrepos = ["example/app"]\n'
+    )
+    copy.chmod(0o600)
+    token_name_file(world, host).write_text(f"{name}\n")
+
+    checkout = clone_of(world, host, repo)
+    checkout.parent.mkdir(parents=True)
+    head = sha("a1")
+    checkout.write_text(
+        json.dumps(
+            {
+                "repo": repo,
+                "branch": "main",
+                "head": head,
+                "origin": {"main": head},
+                "dirty": False,
+            }
+        )
+    )
+
+    (operator / ".config").mkdir(mode=0o700)
+    for account in ACCOUNTS:
+        path = private_config(world, account, host)
+        path.parent.mkdir(mode=0o700)
+        path.write_text(GITLEAKS)
+        path.chmod(0o600)
+
+
+@pytest.fixture
+def ready(world: World, config_file: Path) -> World:
+    """host-b, bootstrapped with a workspace that clones example/app."""
+    ready_workspace(world, config_file)
+    seed_ready(world)
     return world
 
 
-def test_bootstrap_ends_by_upgrading(ready: World) -> None:
-    root = ready.operator_home("host-b") / "Code"
-    assert upgrade_lines(ready)[-5:] == [
+def ready_snapshot(world: World) -> tuple[Json, dict[Path, tuple[int, bytes | None]]]:
+    """Compare the persistent state without scratch paths or command logs."""
+    root = world.stubs.dir
+    scratch = json.dumps(str(root))[1:-1]
+    state = cast(
+        "Json", json.loads(json.dumps(world.stubs.state()).replace(scratch, "."))
+    )
+    files = {}
+    for path in root.rglob("*"):
+        relative = path.relative_to(root)
+        if relative.parts[0] in {"bin", "words", "state.json", "calls.jsonl"}:
+            continue
+        files[relative] = (
+            stat.S_IMODE(path.stat().st_mode),
+            path.read_bytes() if path.is_file() else None,
+        )
+    return state, files
+
+
+def test_ready_matches_bootstrap_and_upgrade_changes_nothing(
+    world: World, config_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    ready_workspace(world, config_file)
+    stub_dir = world.stubs.dir.with_name("seeded")
+    stub_dir.mkdir()
+    seeded = dataclasses.replace(
+        world, stubs=dataclasses.replace(world.stubs, dir=stub_dir)
+    )
+    seeded.stubs.set(**world.stubs.state())
+    seed_ready(seeded)
+    assert run(world, capfd, "bootstrap", "--host", "host-b") == 0
+    root = world.operator_home("host-b") / "Code"
+    assert upgrade_lines(world)[-5:] == [
         f"host-b: clone example/app: changed: cloned into {root / 'example/app'}",
         f"host-b: tools: ok: no mise config in {root}",
         (
@@ -2758,11 +2923,21 @@ def test_bootstrap_ends_by_upgrading(ready: World) -> None:
         f"host-b: gitleaks-config agent: changed: wrote {PRIVATE}",
         f"host-b: gitleaks-config operator: changed: wrote {PRIVATE}",
     ]
-    clone = json.loads(clone_of(ready, "host-b", "example/app").read_text())
+    clone = json.loads(clone_of(world, "host-b", "example/app").read_text())
     assert clone["head"] == sha("a1")
+    before = ready_snapshot(world)
+    assert before == ready_snapshot(seeded)
+    assert_upgrade_changes_nothing(world, capfd)
+    assert ready_snapshot(world) == before
 
 
 def test_upgrade_again_changes_nothing(
+    ready: World, capfd: pytest.CaptureFixture[str]
+) -> None:
+    assert_upgrade_changes_nothing(ready, capfd)
+
+
+def assert_upgrade_changes_nothing(
     ready: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
     before = len(ready.stubs.calls())
