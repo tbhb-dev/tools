@@ -1,0 +1,6 @@
+### Security
+- S1 Can changes expose credentials through source, logs, or output?
+- S2 Does the change disclose public IP addresses that need host names?
+- S3 Does it add, remove, or widen anyone's authority?
+- S4 Does it cross a one-way door, such as an irreversible deletion or a public release?
+- S5 Can untrusted input reach a privileged operation without validation?

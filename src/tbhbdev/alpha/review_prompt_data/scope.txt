@@ -1,0 +1,5 @@
+### Scope
+- P1 Does the pull request address one concern?
+- P2 Does every edit follow the surgical-change rule and support the stated task?
+- P3 Does the pull request description match the actual changes?
+- P4 Do tests and data stay within the behavior this change needs?

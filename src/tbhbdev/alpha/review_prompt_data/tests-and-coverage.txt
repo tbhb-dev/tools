@@ -1,0 +1,5 @@
+### Tests and coverage
+- T1 Do the tests exercise the changed behavior through its normal entry points?
+- T2 Does the 100% branch coverage of changed modules include assertions for each outcome?
+- T3 Does mutation testing of changed functions expose any weak assertions?
+- T4 Do regression tests cover the failure that motivated the change?
