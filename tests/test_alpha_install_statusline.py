@@ -16,10 +16,12 @@ from typing import TYPE_CHECKING, override
 import pytest
 
 from tbhbdev.alpha import install
+from tbhbdev.alpha.decisions import install as decisions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+STATUSLINE_BASE = Path("/data/tbhbdev/ccstatusline")
 OLD = install.OLD_STATUSLINES[0]
 BARE = install.OLD_STATUSLINES[1]
 PACKAGE_FILE = "console.log(1)\n"
@@ -118,11 +120,10 @@ def wanted(setup: Setup) -> str:
     return install.statusline_command("/x/node bin/node", script)
 
 
-@pytest.mark.parametrize("old", install.OLD_STATUSLINES)
 def test_pins_the_known_command_and_keeps_every_other_key(
-    setup: Setup, old: str, capsys: pytest.CaptureFixture[str]
+    setup: Setup, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    line = {"type": "command", "command": old, "padding": 0}
+    line = {"type": "command", "command": OLD, "padding": 0}
     before = setup.write({**FOREIGN, "statusLine": line})
     assert setup.go() == 0
     script = install.statusline_script(setup.tools.root)
@@ -146,13 +147,24 @@ def test_pins_the_known_command_and_keeps_every_other_key(
     assert {k: v for k, v in after.items() if k != "statusLine"} == FOREIGN
     assert after["statusLine"] == {**line, "command": wanted(setup)}
     assert wanted(setup).endswith(f"'/x/node bin/node' {script}")
-    expected = before.replace(json.dumps(old), json.dumps(wanted(setup)))
+    expected = before.replace(json.dumps(OLD), json.dumps(wanted(setup)))
     assert setup.path.read_text() == expected
     (backup,) = setup.backups()
     assert backup.read_text() == before
     assert capsys.readouterr().out == (
         f"claude: pinned ccstatusline 2.2.33 in {setup.path}; the old one is {backup}\n"
     )
+
+
+@pytest.mark.parametrize("old", [OLD, BARE])
+def test_pinned_statusline_replaces_only_the_known_command(old: str) -> None:
+    line = {"type": "command", "command": old, "padding": 0}
+    config = {**FOREIGN, "statusLine": line}
+    assert decisions.pinned_statusline(config, STATUSLINE_BASE, "replacement") == {
+        **FOREIGN,
+        "statusLine": {**line, "command": "replacement"},
+    }
+    assert line["command"] == old
 
 
 def test_an_edit_made_during_the_install_survives(setup: Setup) -> None:
@@ -205,51 +217,54 @@ def test_a_moved_node_rewrites_our_own_command(setup: Setup) -> None:
 
 
 @pytest.mark.parametrize("suffix", ["", " --extra"])
-def test_a_command_that_only_resembles_ours_stays(setup: Setup, suffix: str) -> None:
-    script = preinstall(setup.tools.root)
-    other = install.statusline_command("/a b/node x", script).replace(
+def test_a_command_that_only_resembles_ours_stays(suffix: str) -> None:
+    script = decisions.statusline_script(STATUSLINE_BASE / "2.2.33")
+    other = decisions.statusline_command("/a b/node x", script).replace(
         "'/a b/node x'", "node two"
     )
-    before = setup.write({"statusLine": {"type": "command", "command": other + suffix}})
-    assert setup.go() == 0
-    assert setup.path.read_text() == before
+    config: install.Json = {
+        "statusLine": {"type": "command", "command": other + suffix}
+    }
+    assert decisions.pinned_statusline(config, STATUSLINE_BASE, "replacement") is None
 
 
+@pytest.mark.parametrize(
+    ("node", "version"),
+    [("/a b/node", "2.2.33"), ("/a b/node", "2.3.0"), ("/x/bin/node", "2.2.33")],
+)
 def test_ours_is_the_installers_own_command_for_any_node_and_version(
-    setup: Setup,
+    node: str, version: str
 ) -> None:
-    base = setup.tools.root.parent
-    for version in ("2.2.33", "2.3.0"):
-        script = install.statusline_script(base / version)
-        assert install.is_ours(install.statusline_command("/a b/node", script))
-    script = install.statusline_script(setup.tools.root)
-    assert install.is_ours(install.statusline_command("/x/bin/node", script))
+    script = decisions.statusline_script(STATUSLINE_BASE / version)
+    assert decisions.is_ours(
+        decisions.statusline_command(node, script), STATUSLINE_BASE
+    )
 
 
 @pytest.mark.parametrize(
     "node", ["node", "evil-binary", "$MY_STATUS_NODE", "/x/bin/evil", "~/node"]
 )
-def test_a_node_slot_other_than_an_absolute_node_is_not_ours(
-    setup: Setup, node: str
-) -> None:
-    script = install.statusline_script(setup.tools.root)
-    assert not install.is_ours(
-        f"{install.COLUMNS_PREFIX} {node} {shlex.quote(str(script))}"
+def test_a_node_slot_other_than_an_absolute_node_is_not_ours(node: str) -> None:
+    script = decisions.statusline_script(STATUSLINE_BASE / "2.2.33")
+    assert not decisions.is_ours(
+        f"{install.COLUMNS_PREFIX} {node} {shlex.quote(str(script))}", STATUSLINE_BASE
     )
 
 
-def test_a_command_not_in_the_installers_quoting_or_place_is_not_ours(
-    setup: Setup,
-) -> None:
-    script = install.statusline_script(setup.tools.root)
+def test_a_command_not_in_the_installers_quoting_or_place_is_not_ours() -> None:
+    script = decisions.statusline_script(STATUSLINE_BASE / "2.2.33")
+    elsewhere = decisions.statusline_script(Path("/elsewhere/2.2.33"))
     head = f"{install.COLUMNS_PREFIX} "
-    assert not install.is_ours(f"{head}/x/node {script}   ")
-    assert not install.is_ours(f'{head}"/x/node" {shlex.quote(str(script))}')
-    assert not install.is_ours(f"{head}/x/node {shlex.quote(str(script))} --extra")
-    assert not install.is_ours(f"{head}/x/node /elsewhere/dist/ccstatusline.js")
-    other = Path("/elsewhere/2.2.33/node_modules/ccstatusline/dist/ccstatusline.js")
-    assert not install.is_ours(install.statusline_command("/x/node", other))
-    assert not install.is_ours(f"x{head}/x/node {shlex.quote(str(script))}")
+    for command in (
+        f"{head}/x/node {script}   ",
+        f'{head}"/x/node" {shlex.quote(str(script))}',
+        f"{head}/x/node {shlex.quote(str(script))} --extra",
+        f"{head}/x/node /elsewhere/dist/ccstatusline.js",
+        f"{head}/x/node node_modules/ccstatusline/dist/ccstatusline.js",
+        f"{head}/x/node {elsewhere}",
+        f"x{head}/x/node {shlex.quote(str(script))}",
+    ):
+        assert not decisions.is_ours(command, STATUSLINE_BASE)
 
 
 def test_a_version_bump_replaces_the_command_written_for_the_old_version(
@@ -269,12 +284,10 @@ def test_a_version_bump_replaces_the_command_written_for_the_old_version(
     assert len(setup.backups()) == 1
 
 
-def test_a_command_with_an_unbalanced_quote_stays(setup: Setup) -> None:
-    script = preinstall(setup.tools.root)
+def test_a_command_with_an_unbalanced_quote_stays() -> None:
+    script = decisions.statusline_script(STATUSLINE_BASE / "2.2.33")
     other = f"{install.COLUMNS_PREFIX} 'node {shlex.quote(str(script))}"
-    before = setup.write({"statusLine": {"type": "command", "command": other}})
-    assert setup.go() == 0
-    assert setup.path.read_text() == before
+    assert not decisions.is_ours(other, STATUSLINE_BASE)
 
 
 def test_the_settings_and_backup_keep_the_file_mode(setup: Setup) -> None:
@@ -323,15 +336,8 @@ def test_a_rerun_changes_nothing(
         {"statusLine": {"type": "command", "command": "bunx ccstatusline@2.2.0"}},
     ],
 )
-def test_a_custom_or_missing_statusline_stays(
-    setup: Setup, config: object, capsys: pytest.CaptureFixture[str]
-) -> None:
-    before = setup.write(config)
-    assert setup.go() == 0
-    assert setup.path.read_text() == before
-    assert not setup.tools.calls
-    assert not setup.backups()
-    assert capsys.readouterr() == ("", "")
+def test_a_custom_or_missing_statusline_stays(config: install.Json) -> None:
+    assert decisions.pinned_statusline(config, STATUSLINE_BASE, "replacement") is None
 
 
 def test_no_settings_file_is_left_missing(setup: Setup) -> None:
@@ -373,12 +379,17 @@ def test_a_pinned_command_without_its_install_or_bun_says_so(
     assert not setup.tools.calls
 
 
-def test_a_pinned_command_without_node_is_not_ours_to_judge(setup: Setup) -> None:
+def test_a_pinned_command_without_node_is_not_ours_to_judge(
+    setup: Setup, capsys: pytest.CaptureFixture[str]
+) -> None:
     other = "/y/node /y/ccstatusline.js"
     before = setup.write({"statusLine": {"type": "command", "command": other}})
     del setup.tools.found["node"]
     assert setup.go() == 0
     assert setup.path.read_text() == before
+    assert not setup.tools.calls
+    assert not setup.backups()
+    assert capsys.readouterr() == ("", "")
 
 
 def test_our_command_without_node_says_node_is_missing(
@@ -586,8 +597,10 @@ def test_an_unreadable_or_non_text_file_is_no_install_and_a_rerun_repairs_it(
     assert statusline_installed(setup)
 
 
-def test_the_package_lives_in_node_modules_under_the_root(tmp_path: Path) -> None:
-    assert install.statusline_package(tmp_path).relative_to(tmp_path).parts == (
+def test_the_package_lives_in_node_modules_under_the_root() -> None:
+    assert decisions.statusline_package(STATUSLINE_BASE).relative_to(
+        STATUSLINE_BASE
+    ).parts == (
         "node_modules",
         "ccstatusline",
     )
@@ -790,10 +803,16 @@ def test_the_root_follows_xdg_data_home_then_home(
     assert install.statusline_root() == (
         tmp_path / ".local" / "share" / "tbhbdev" / "ccstatusline" / "2.2.33"
     )
+    wanted_from_home = install.statusline_command(
+        "/x/node", install.statusline_script(install.statusline_root())
+    )
+    assert install.is_ours(wanted_from_home)
+    line = {"command": wanted_from_home}
+    assert install.replaceable_line({"statusLine": line}) == line
 
 
 def test_the_command_quotes_its_paths_and_keeps_the_width_fallback() -> None:
-    text = install.statusline_command("/a b/node", Path("/c d/s.js"))
+    text = decisions.statusline_command("/a b/node", Path("/c d/s.js"))
     assert text == f"{install.COLUMNS_PREFIX} '/a b/node' '/c d/s.js'"
     assert BARE == "bunx -y ccstatusline@latest"
     assert (

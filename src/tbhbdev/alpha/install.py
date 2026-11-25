@@ -127,6 +127,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from tbhbdev import plugins
+from tbhbdev.alpha.decisions import install as install_decisions
 from tbhbdev.alpha.gh_shim import bin_dir, wrapper_text
 from tbhbdev.alpha.identity import codex_home
 from tbhbdev.alpha.repo import (
@@ -142,13 +143,30 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping
     from typing import IO
 
-type Json = dict[str, object]
+# Keep the installer names importable for existing callers.
+AGENT_ENVIRONMENT = install_decisions.AGENT_ENVIRONMENT
+BUNX_COMMAND = install_decisions.BUNX_COMMAND
+COLUMNS_PREFIX = install_decisions.COLUMNS_PREFIX
+InstallError = install_decisions.InstallError
+Json = install_decisions.Json
+MARK = install_decisions.MARK
+OLD_STATUSLINES = install_decisions.OLD_STATUSLINES
+POLICY = install_decisions.POLICY
+STATUSLINE_TOKENS = install_decisions.STATUSLINE_TOKENS
+merge_events = install_decisions.merge_events
+merge_groups = install_decisions.merge_groups
+missing_tool = install_decisions.missing_tool
+ours = install_decisions.ours
+statusline_command = install_decisions.statusline_command
+statusline_package = install_decisions.statusline_package
+statusline_script = install_decisions.statusline_script
+strip_ours = install_decisions.strip_ours
+with_environment = install_decisions.with_environment
 
 # Each `cast` below carries `pragma: no mutate`: it is a runtime no-op, so no test
 # could tell a mutated type string from the original.
 
 PROG = "tbhbdev alpha install"
-MARK = "# tbhbdev alpha install"
 SHIM_MARK = "# tbhbdev alpha agent identity hook (tbhbdev alpha install)"
 # The identity shims this command and the old install script write.
 SHIM_MARKS = (
@@ -179,10 +197,6 @@ AGY_EDITS = (
     "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content"
 )
 AGY_TIMEOUT = 30
-# The environment both harnesses give their commands: no SSH agent, so a
-# command can't reach the 1Password SSH agent and prompt the operator.
-AGENT_ENVIRONMENT = {"SSH_AUTH_SOCK": ""}
-POLICY = "shell_environment_policy"
 GH_SHIM_MODE = 0o755
 SSH_SHIM_MARK = "# tbhbdev alpha install: ssh shim"
 # A command-line -o beats the IdentityAgent in the operator's ssh config. The
@@ -287,10 +301,6 @@ if next_hook.is_file():
     status = status or result.returncode
 sys.exit(status)
 """
-
-
-class InstallError(Exception):
-    """A failure that stops the install, with the message to print."""
 
 
 def command(args: str) -> str:
@@ -420,74 +430,6 @@ def config_path(harness: str, env: Mapping[str, str]) -> Path:
 # ------------------------------------------------------------- config merge
 
 
-def ours(entry: object) -> bool:
-    """Whether a hook handler is one this command wrote."""
-    if not isinstance(entry, dict):
-        return False
-    fields = cast("Json", entry)  # pragma: no mutate
-    text = fields.get("command")
-    return isinstance(text, str) and text.endswith(MARK)
-
-
-def strip_ours(groups: list[object]) -> tuple[list[object], int | None]:
-    """The groups without this command's handlers, and where its first one was.
-
-    A group left with no handlers goes. Anything else stays as it was.
-    """
-    kept: list[object] = []
-    first: int | None = None
-    for entry in groups:
-        if not isinstance(entry, dict):
-            kept.append(entry)
-            continue
-        fields = cast("Json", entry)  # pragma: no mutate
-        handlers = fields.get("hooks")
-        if not isinstance(handlers, list):
-            kept.append(entry)
-            continue
-        listed = cast("list[object]", handlers)  # pragma: no mutate
-        rest = [h for h in listed if not ours(h)]
-        if len(rest) == len(listed):
-            kept.append(entry)
-            continue
-        if first is None:
-            first = len(kept)
-        if rest:
-            kept.append({**fields, "hooks": rest})
-    return kept, first
-
-
-def merge_events(config: Json, desired: Mapping[str, list[Json]]) -> Json:
-    """Claude Code and Codex: `config` with its `hooks` events merged.
-
-    This command's groups go where its first old one stood, or at the end.
-    """
-    current = config.get("hooks", {})
-    if not isinstance(current, dict):
-        message = "its hooks key is not an object"
-        raise InstallError(message)
-    hooks = dict(cast("Json", current))  # pragma: no mutate
-    for event in [*hooks, *(e for e in desired if e not in hooks)]:
-        groups = hooks.get(event, [])
-        if not isinstance(groups, list):
-            message = f"its {event} hooks are not a list"
-            raise InstallError(message)
-        listed = cast("list[object]", groups)  # pragma: no mutate
-        kept, first = strip_ours(listed)
-        at = len(kept) if first is None else first
-        merged = [*kept[:at], *desired.get(event, []), *kept[at:]]
-        if merged or first is None:
-            hooks[event] = merged
-        else:
-            del hooks[event]
-    return {**config, "hooks": hooks}
-
-
-def merge_groups(config: Json, desired: Json) -> Json:
-    """Antigravity: `config` with this command's named groups set in place."""
-    return {**config, **desired}
-
-
 def merged_config(harness: str, config: Json) -> Json:
     """A harness config with this command's hooks merged in."""
     if harness == CLAUDE:
@@ -515,25 +457,9 @@ def read_text(path: Path) -> str | None:
 
 
 def read_config(path: Path) -> tuple[str | None, Json]:
-    """A config's text (None when missing) and its object.
-
-    An empty or whitespace-only config is the empty object.
-    """
+    """A config's text (None when missing) and its parsed object."""
     text = read_text(path)
-    if text is None:
-        return None, {}
-    if not text.strip():
-        return text, {}
-    try:
-        loaded = json.loads(text)
-    except ValueError as exc:
-        message = f"it is not valid JSON ({exc})"
-        raise InstallError(message) from exc
-    if not isinstance(loaded, dict):
-        message = "it is not a JSON object"
-        raise InstallError(message)
-    config = cast("Json", loaded)  # pragma: no mutate
-    return text, config
+    return text, install_decisions.parse_config(text)
 
 
 def stamp() -> str:
@@ -651,9 +577,7 @@ def trust_codex_hooks(
     wanted = codex_trust.our_hashes(hooks, merged, ours)
     try:
         old = read_text(path)
-        new = codex_trust.trusted_text(old, hooks, wanted)
-        with suppress(InstallError):
-            new = with_environment(new)
+        new = install_decisions.trusted_config(old, hooks, wanted)
         if old == new:
             print(f"codex: {len(wanted)} hooks already trusted in {path}")
             return 0
@@ -713,21 +637,10 @@ def apply_config(
 # --------------------------------------------------------------- statusline
 
 STATUSLINE_VERSION = "2.2.33"
-COLUMNS_PREFIX = (
-    "COLUMNS=${COLUMNS:-$(tmux display-message -p '#{pane_width}' 2>/dev/null"
-    " || echo 80)}"
-)
-BUNX_COMMAND = "bunx -y ccstatusline@latest"
-# The two forms of the registry-resolving command this installer replaces.
-OLD_STATUSLINES = (
-    f"PATH=/opt/homebrew/bin:$PATH {COLUMNS_PREFIX} {BUNX_COMMAND}",
-    BUNX_COMMAND,
-)
 STATUSLINE_TIMEOUT = 300
 # The pinned package is about 3 MiB, so a package far past this isn't it.
 STATUSLINE_MAX_BYTES = 32 * 1024 * 1024
 STATUSLINE_CHUNK = 1024 * 1024
-STATUSLINE_TOKENS = 2  # the node path and the script
 # Written into a staged install once bun exited cleanly and the package checked out.
 STATUSLINE_MARKER = ".complete"
 # SHA-256 of ccstatusline 2.2.33's files as package_digest reads them. A version
@@ -739,20 +652,6 @@ def statusline_root() -> Path:
     """The directory the pinned ccstatusline is installed in."""
     base = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
     return Path(base) / "tbhbdev" / "ccstatusline" / STATUSLINE_VERSION
-
-
-def statusline_script(root: Path) -> Path:
-    """The package's bin, `dist/ccstatusline.js` in its package.json."""
-    return root / "node_modules" / "ccstatusline" / "dist" / "ccstatusline.js"
-
-
-def statusline_command(node: str, script: Path) -> str:
-    return f"{COLUMNS_PREFIX} {shlex.quote(node)} {shlex.quote(str(script))}"
-
-
-def statusline_package(root: Path) -> Path:
-    """The installed package's directory."""
-    return root / "node_modules" / "ccstatusline"
 
 
 def package_digest(package: Path) -> str | None:
@@ -850,53 +749,14 @@ def add_statusline(root: Path, bun: str | None, run: Callable[..., object]) -> N
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def missing_tool(node: str | None, bun: str | None, *, installed: bool) -> str | None:
-    """Name the tool the pin can't run without, or None when it has both."""
-    if not node:
-        return "node"
-    return "bun" if not installed and not bun else None
-
-
 def is_ours(command: str) -> bool:
-    """Whether COMMAND is exactly what this installer writes, for any node and version.
-
-    The node slot must be an absolute path named `node`, the script the pinned
-    package's bin under a version directory beside the current one, and the
-    quoting the installer's own. So `$MY_STATUS_NODE` and `evil-binary` don't match,
-    and a command written for an older version does.
-    """
-    head = f"{COLUMNS_PREFIX} "
-    if not command.startswith(head):
-        return False
-    try:
-        tokens = shlex.split(command[len(head) :])
-    except ValueError:
-        return False
-    if len(tokens) != STATUSLINE_TOKENS:
-        return False
-    node, script = Path(tokens[0]), Path(tokens[1])
-    return (
-        node.is_absolute()
-        and node.name == "node"
-        and script.is_absolute()
-        # Any root gives the same last four parts, so mutating "/" changes nothing.
-        and script.parts[-4:]
-        == statusline_script(Path("/")).parts[-4:]  # pragma: no mutate
-        and script.parents[3].parent == statusline_root().parent
-        and command == statusline_command(tokens[0], script)
-    )
+    """Whether the command points to a statusline this installer wrote."""
+    return install_decisions.is_ours(command, statusline_root().parent)
 
 
 def replaceable_line(config: Json) -> Json | None:
-    """The `statusLine` object when its command is a known or our own one."""
-    line = config.get("statusLine")
-    if not isinstance(line, dict):
-        return None
-    command = line.get("command")
-    if not isinstance(command, str):
-        return None
-    known = command in OLD_STATUSLINES or is_ours(command)
-    return line if known else None
+    """The status line when this installer can pin its command."""
+    return install_decisions.replaceable_line(config, statusline_root().parent)
 
 
 def pin_statusline(path: Path, wanted: str | None) -> Path | None:
@@ -906,10 +766,11 @@ def pin_statusline(path: Path, wanted: str | None) -> Path | None:
     ran is kept. Raises InstallError when the write can't be read back.
     """
     old, config = read_config(path)
-    line = replaceable_line(config)
-    if line is None:
+    merged = install_decisions.pinned_statusline(
+        config, statusline_root().parent, wanted
+    )
+    if merged is None:
         return None
-    merged = {**config, "statusLine": {**line, "command": wanted}}
     backup = write_config(path, old, json.dumps(merged, indent=2) + "\n")
     if read_config(path)[1] != merged:
         message = f"the written file differs; the old one is {backup}"
@@ -941,7 +802,7 @@ def install_statusline(  # noqa: PLR0911 -- one early return per outcome
         return 1
     root = statusline_root()
     script = statusline_script(root)
-    line = replaceable_line(config)
+    line = install_decisions.replaceable_line(config, root.parent)
     if line is None:
         return 0
     bun, node = which("bun"), which("node")
@@ -1074,38 +935,6 @@ def install_ssh_shim(*, dry_run: bool) -> int:
     scp and sftp call /usr/bin/ssh directly on macOS and Ubuntu, so they skip it.
     """
     return install_shim("ssh", SSH_SHIM_TEXT, dry_run=dry_run, mark=SSH_SHIM_MARK)
-
-
-def with_environment(old: str | None) -> str:
-    """Codex's config.toml text OLD (None when missing) with AGENT_ENVIRONMENT.
-
-    The environment goes in shell_environment_policy.set. tomlkit keeps every
-    other key, comment and the file's layout. It is imported here, so the
-    hooks that import this module don't load it.
-    """
-    import tomlkit  # noqa: PLC0415 -- see the docstring
-    from tomlkit.items import InlineTable  # noqa: PLC0415
-
-    try:
-        document = tomlkit.parse(old or "")
-    except ValueError as exc:
-        message = f"it is not valid TOML ({exc})"
-        raise InstallError(message) from exc
-    if POLICY not in document:
-        document[POLICY] = tomlkit.table()
-    policy = document[POLICY]
-    if not isinstance(policy, dict):
-        message = f"its {POLICY} is not a table"
-        raise InstallError(message)
-    if "set" not in policy:
-        inline = isinstance(policy, InlineTable)
-        policy["set"] = tomlkit.inline_table() if inline else tomlkit.table()
-    values: object = policy["set"]
-    if not isinstance(values, dict):
-        message = f"its {POLICY}.set is not a table"
-        raise InstallError(message)
-    values.update(AGENT_ENVIRONMENT)
-    return document.as_string()
 
 
 def merged_codex_config(path: Path) -> tuple[str | None, str]:

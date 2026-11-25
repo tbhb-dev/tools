@@ -28,6 +28,7 @@ from fake_tool import link_git, write_fake
 from origin_urls import OTHER_URLS, TBHB_DEV_URLS
 
 from tbhbdev.alpha import codex_trust, gh_shim, install, repo
+from tbhbdev.alpha.decisions import install as decisions
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
@@ -206,7 +207,9 @@ def test_a_rerun_drops_the_removed_stop_and_send_message_registrations() -> None
             ],
         }
     }
-    events = cast("dict[str, list[Json]]", install.merge_events(old, desired)["hooks"])
+    events = cast(
+        "dict[str, list[Json]]", decisions.merge_events(old, desired)["hooks"]
+    )
     assert events["Stop"] == [{"hooks": [theirs]}]
     assert {"matcher": "SendMessage", "hooks": [theirs]} in events["PreToolUse"]
     matchers = [g.get("matcher") for g in events["PreToolUse"]]
@@ -280,8 +283,8 @@ def test_the_harness_guards_are_ours_and_a_rerun_replaces_them() -> None:
     desired = install.claude_hooks()
     theirs = {"type": "command", "command": "theirs"}
     old: Json = {"hooks": {"Stop": [{"hooks": [theirs]}]}}
-    once = install.merge_events(old, desired)
-    assert install.merge_events(once, desired) == once
+    once = decisions.merge_events(old, desired)
+    assert decisions.merge_events(once, desired) == once
     events = cast("dict[str, list[Json]]", once["hooks"])
     assert events["Stop"] == [{"hooks": [theirs]}]
     guards = [
@@ -292,7 +295,7 @@ def test_the_harness_guards_are_ours_and_a_rerun_replaces_them() -> None:
         if cast("str", h["command"]).startswith("tbhbdev alpha state-guard")
     ]
     assert len(guards) == 2
-    assert all(install.ours(h) and h["timeout"] == 10 for h in guards)
+    assert all(decisions.ours(h) and h["timeout"] == 10 for h in guards)
 
 
 def test_codex_hooks() -> None:
@@ -457,24 +460,24 @@ THEIRS = {"type": "command", "command": "their-hook"}
     ],
 )
 def test_ours(entry: object, *, expected: bool) -> None:
-    assert install.ours(entry) is expected
+    assert decisions.ours(entry) is expected
 
 
 def test_strip_ours() -> None:
-    assert install.strip_ours([]) == ([], None)
+    assert decisions.strip_ours([]) == ([], None)
     odd: list[object] = ["text", {"matcher": "x"}, {"hooks": "x"}]
-    assert install.strip_ours(odd) == (odd, None)
+    assert decisions.strip_ours(odd) == (odd, None)
     groups: list[object] = [
         {"matcher": "a", "hooks": [THEIRS]},
         {"matcher": "b", "hooks": [MINE]},
         {"matcher": "c", "hooks": [THEIRS, MINE]},
         {"matcher": "d", "hooks": [MINE, MINE]},
     ]
-    assert install.strip_ours(groups) == (
+    assert decisions.strip_ours(groups) == (
         [{"matcher": "a", "hooks": [THEIRS]}, {"matcher": "c", "hooks": [THEIRS]}],
         1,
     )
-    assert install.strip_ours([{"hooks": [MINE]}, {"hooks": [THEIRS]}]) == (
+    assert decisions.strip_ours([{"hooks": [MINE]}, {"hooks": [THEIRS]}]) == (
         [{"hooks": [THEIRS]}],
         0,
     )
@@ -489,7 +492,7 @@ DESIRED: dict[str, list[Json]] = {
 
 
 def test_merge_events_into_an_empty_config() -> None:
-    assert install.merge_events({}, DESIRED) == {"hooks": DESIRED}
+    assert decisions.merge_events({}, DESIRED) == {"hooks": DESIRED}
 
 
 def test_merge_events_is_idempotent_and_keeps_everything_else() -> None:
@@ -501,7 +504,7 @@ def test_merge_events_is_idempotent_and_keeps_everything_else() -> None:
         },
         "permissions": {"allow": []},
     }
-    once = install.merge_events(config, DESIRED)
+    once = decisions.merge_events(config, DESIRED)
     assert once == {
         "model": "x",
         "hooks": {
@@ -512,7 +515,7 @@ def test_merge_events_is_idempotent_and_keeps_everything_else() -> None:
         "permissions": {"allow": []},
     }
     assert list(cast("Json", once["hooks"])) == ["Stop", "Pre", "Start"]
-    assert install.merge_events(once, DESIRED) == once
+    assert decisions.merge_events(once, DESIRED) == once
 
 
 def test_merge_events_replaces_its_own_where_they_stood() -> None:
@@ -528,7 +531,7 @@ def test_merge_events_replaces_its_own_where_they_stood() -> None:
             "Empty": [],
         }
     }
-    assert install.merge_events(config, DESIRED) == {
+    assert decisions.merge_events(config, DESIRED) == {
         "hooks": {
             "Pre": [
                 {"matcher": "A", "hooks": [THEIRS]},
@@ -553,7 +556,7 @@ def test_merge_events_refuses_a_config_it_cannot_read(
     config: Json, message: str
 ) -> None:
     with pytest.raises(install.InstallError, match=f"^{message}$"):
-        install.merge_events(config, DESIRED)
+        decisions.merge_events(config, DESIRED)
 
 
 def test_merge_groups_sets_its_named_groups_and_keeps_the_rest() -> None:
@@ -585,24 +588,18 @@ def test_merged_config_refuses_an_env_that_is_not_an_object() -> None:
 # --------------------------------------------------------- reading, writing
 
 
-def test_read_config(tmp_path: Path) -> None:
-    path = tmp_path / "c.json"
-    assert install.read_config(path) == (None, {})
-    path.write_text('{"a": 1}\n')
-    assert install.read_config(path) == ('{"a": 1}\n', {"a": 1})
-    path.write_text("[]")
+def test_parse_config() -> None:
+    assert decisions.parse_config(None) == {}
+    assert decisions.parse_config('{"a": 1}\n') == {"a": 1}
     with pytest.raises(install.InstallError, match=r"^it is not a JSON object$"):
-        install.read_config(path)
-    path.write_text("{")
+        decisions.parse_config("[]")
     with pytest.raises(install.InstallError, match=r"^it is not valid JSON \("):
-        install.read_config(path)
+        decisions.parse_config("{")
 
 
 @pytest.mark.parametrize("text", ["", " \n\t\n"])
-def test_read_config_empty_is_the_empty_object(tmp_path: Path, text: str) -> None:
-    path = tmp_path / "c.json"
-    path.write_text(text)
-    assert install.read_config(path) == (text, {})
+def test_parse_config_empty_is_the_empty_object(text: str) -> None:
+    assert decisions.parse_config(text) == {}
 
 
 def test_read_config_reports_a_file_it_cannot_read(tmp_path: Path) -> None:
@@ -940,7 +937,11 @@ def trust_hash(label: str, matcher: str | None, text: str) -> str:
 
 
 def trusted_in(path: Path) -> dict[str, str]:
-    state = tomllib.loads(path.read_text())["hooks"]["state"]
+    return trusted_in_text(path.read_text())
+
+
+def trusted_in_text(text: str) -> dict[str, str]:
+    state = tomllib.loads(text)["hooks"]["state"]
     return {key: entry["trusted_hash"] for key, entry in state.items()}
 
 
@@ -1014,29 +1015,22 @@ def test_install_config_codex_keys_use_the_absolute_hooks_path(
     assert all(key.startswith(f"{world.home}/rel/hooks.json:") for key in keys)
 
 
-def test_install_config_codex_trusts_only_its_own_among_foreign_groups(
-    world: World,
-) -> None:
-    env, codex = codex_env(world)
-    hooks = codex / "hooks.json"
+def test_codex_trusts_only_its_own_among_foreign_groups() -> None:
+    hooks = Path("/codex/hooks.json")
     old_ours = {"type": "command", "command": marked("guard-op")}
-    codex.mkdir()
-    hooks.write_text(
-        json.dumps(
-            {
-                "hooks": {
-                    "PreToolUse": [
-                        {"matcher": "^Bash$", "hooks": [THEIRS]},
-                        {"matcher": "x", "hooks": [THEIRS, old_ours, THEIRS]},
-                        {"matcher": "^Bash$", "hooks": [THEIRS]},
-                    ],
-                    "Stop": [{"hooks": [THEIRS]}],
-                }
-            }
-        )
-    )
-    assert install.install_config("codex", env, dry_run=False) == 0
-    written = json.loads(hooks.read_text())["hooks"]["PreToolUse"]
+    config: Json = {
+        "hooks": {
+            "PreToolUse": [
+                {"matcher": "^Bash$", "hooks": [THEIRS]},
+                {"matcher": "x", "hooks": [THEIRS, old_ours, THEIRS]},
+                {"matcher": "^Bash$", "hooks": [THEIRS]},
+            ],
+            "Stop": [{"hooks": [THEIRS]}],
+        }
+    }
+    merged = install.merged_config(install.CODEX, config)
+    hashes = codex_trust.our_hashes(hooks, merged, decisions.ours)
+    written = cast("dict[str, list[Json]]", merged["hooks"])["PreToolUse"]
     assert [g.get("matcher") for g in written] == [
         "^Bash$",
         "^Bash$",
@@ -1083,7 +1077,7 @@ def test_install_config_codex_trusts_only_its_own_among_foreign_groups(
             "pre_tool_use", "^Bash$", "guard-gh-config-dir"
         ),
     }
-    assert trusted_in(codex / "config.toml") == expected
+    assert trusted_in_text(decisions.trusted_config(None, hooks, hashes)) == expected
 
 
 FOREIGN_CONFIG = """# Codex settings
@@ -1173,33 +1167,40 @@ def test_install_config_codex_trusts_again_when_only_config_toml_was_lost(
     assert trusted_in(codex / "config.toml") == our_trust(codex / "hooks.json")
 
 
-def test_install_config_codex_drops_the_entry_of_a_hook_that_moved(
-    world: World,
-) -> None:
-    env, codex = codex_env(world)
-    hooks = codex / "hooks.json"
-    assert install.install_config("codex", env, dry_run=False) == 0
-    config = codex / "config.toml"
-    first = trusted_in(config)
+def test_codex_trust_drops_the_entry_of_a_hook_that_moved() -> None:
+    hooks = Path("/codex/hooks.json")
+    events = install.codex_hooks()
+    config: Json = {"hooks": events}
+    hashes = codex_trust.our_hashes(hooks, config, decisions.ours)
+    first = decisions.trusted_config(None, hooks, hashes)
     # A foreign group lands ahead of ours, so each PreToolUse hook moves down one,
     # and the foreign hook now sits where our first one was.
-    data = json.loads(hooks.read_text())
-    data["hooks"]["PreToolUse"].insert(0, {"matcher": "^Bash$", "hooks": [THEIRS]})
-    hooks.write_text(json.dumps(data))
-    assert install.install_config("codex", env, dry_run=False) == 0
-    moved = trusted_in(config)
+    events["PreToolUse"].insert(0, {"matcher": "^Bash$", "hooks": [THEIRS]})
+    merged = install.merged_config(install.CODEX, config)
+    shifted = codex_trust.our_hashes(hooks, merged, decisions.ours)
+    updated = decisions.trusted_config(first, hooks, shifted)
+    first_hashes = trusted_in_text(first)
+    moved = trusted_in_text(updated)
     assert f"{hooks}:pre_tool_use:0:0" not in moved
-    assert moved[f"{hooks}:pre_tool_use:1:0"] == first[f"{hooks}:pre_tool_use:0:0"]
-    assert moved[f"{hooks}:pre_tool_use:2:0"] == first[f"{hooks}:pre_tool_use:1:0"]
-    assert moved[f"{hooks}:pre_tool_use:3:0"] == first[f"{hooks}:pre_tool_use:2:0"]
-    assert moved[f"{hooks}:pre_tool_use:4:0"] == first[f"{hooks}:pre_tool_use:3:0"]
+    assert (
+        moved[f"{hooks}:pre_tool_use:1:0"] == first_hashes[f"{hooks}:pre_tool_use:0:0"]
+    )
+    assert (
+        moved[f"{hooks}:pre_tool_use:2:0"] == first_hashes[f"{hooks}:pre_tool_use:1:0"]
+    )
+    assert (
+        moved[f"{hooks}:pre_tool_use:3:0"] == first_hashes[f"{hooks}:pre_tool_use:2:0"]
+    )
+    assert (
+        moved[f"{hooks}:pre_tool_use:4:0"] == first_hashes[f"{hooks}:pre_tool_use:3:0"]
+    )
     # The foreign hook's own entry, whatever its hash, is left alone.
-    config.write_text(
-        config.read_text() + f'\n[hooks.state."{hooks}:pre_tool_use:0:0"]\n'
+    with_foreign = (
+        updated + f'\n[hooks.state."{hooks}:pre_tool_use:0:0"]\n'
         'trusted_hash = "sha256:theirs"\n'
     )
-    assert install.install_config("codex", env, dry_run=False) == 0
-    assert trusted_in(config)[f"{hooks}:pre_tool_use:0:0"] == "sha256:theirs"
+    result = decisions.trusted_config(with_foreign, hooks, shifted)
+    assert trusted_in_text(result)[f"{hooks}:pre_tool_use:0:0"] == "sha256:theirs"
 
 
 @pytest.mark.parametrize(
@@ -2932,15 +2933,11 @@ def test_install_ssh_shim_leaves_a_foreign_ssh(
         ),
     ],
 )
-def test_merged_codex_config(tmp_path: Path, before: str | None, after: str) -> None:
-    path = tmp_path / "config.toml"
-    if before is not None:
-        path.write_text(before)
-    assert install.merged_codex_config(path) == (before, after)
+def test_with_environment(before: str | None, after: str) -> None:
+    assert decisions.with_environment(before) == after
     policy = tomllib.loads(after)["shell_environment_policy"]
     assert policy["set"]["SSH_AUTH_SOCK"] == ""
-    path.write_text(after)
-    assert install.merged_codex_config(path) == (after, after)
+    assert decisions.with_environment(after) == after
 
 
 @pytest.mark.parametrize(
@@ -2955,19 +2952,11 @@ def test_merged_codex_config(tmp_path: Path, before: str | None, after: str) -> 
             "its shell_environment_policy.set is not a table",
         ),
         ("[x\n", "it is not valid TOML ("),
-        (b"\xff", "it cannot be read ("),
     ],
 )
-def test_merged_codex_config_refuses_what_it_cannot_merge(
-    tmp_path: Path, text: str | bytes, message: str
-) -> None:
-    path = tmp_path / "config.toml"
-    if isinstance(text, bytes):
-        path.write_bytes(text)
-    else:
-        path.write_text(text)
+def test_with_environment_refuses_what_it_cannot_merge(text: str, message: str) -> None:
     with pytest.raises(install.InstallError) as raised:
-        install.merged_codex_config(path)
+        decisions.with_environment(text)
     assert str(raised.value).startswith(message)
 
 
@@ -3182,24 +3171,19 @@ def test_main_twice_changes_nothing_the_second_time(
     assert codex == {"shell_environment_policy": {"set": {"SSH_AUTH_SOCK": ""}}}
 
 
-def test_main_keeps_existing_settings_and_codex_keys(
-    world: World, capsys: pytest.CaptureFixture[str]
-) -> None:
-    settings = world.home / ".claude" / "settings.json"
-    settings.parent.mkdir()
-    settings.write_text(json.dumps({"env": {"FOO": "1"}, "model": "opus"}))
-    config = world.home / ".codex" / "config.toml"
-    config.parent.mkdir()
-    config.write_text(
+def test_merges_existing_settings_and_codex_keys() -> None:
+    settings: Json = {"env": {"FOO": "1"}, "model": "opus"}
+    config = (
         '# keep me\nmodel = "o3"\n\n[shell_environment_policy]\ninherit = "core"\n'
         '\n[shell_environment_policy.set]\nBAR = "2"\n'
     )
-    assert install.main([], "p") == 0
-    capsys.readouterr()
-    merged = json.loads(settings.read_text())
+    merged = install.merged_config(install.CLAUDE, settings)
     assert merged["env"] == {"FOO": "1", "SSH_AUTH_SOCK": ""}
     assert merged["model"] == "opus"
-    text = config.read_text()
+    hooks = Path("/codex/hooks.json")
+    codex = install.merged_config(install.CODEX, {})
+    hashes = codex_trust.our_hashes(hooks, codex, decisions.ours)
+    text = decisions.trusted_config(config, hooks, hashes)
     assert text.startswith('# keep me\nmodel = "o3"\n')
     parsed = tomllib.loads(text)
     assert parsed.pop("hooks")["state"]
