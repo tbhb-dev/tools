@@ -71,7 +71,6 @@ import socket
 import subprocess  # nosec B404
 import sys
 import tempfile
-import tomllib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -80,6 +79,7 @@ from typing import TYPE_CHECKING, NoReturn
 from urllib.parse import urlsplit
 
 from tbhbdev import gh_agent, runner, secrets, userconfig
+from tbhbdev.decisions import host as decisions
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -88,6 +88,18 @@ type Json = dict[str, object]
 # A finished command. A failed one is its CalledProcessError, which holds the
 # same returncode, stdout and stderr.
 type Done = subprocess.CompletedProcess[str] | subprocess.CalledProcessError
+
+# Keep the original import paths for these names.
+CANARY = decisions.CANARY
+CHANGED = decisions.CHANGED
+FAILED = decisions.FAILED
+GITLEAKS_CANARY = decisions.GITLEAKS_CANARY
+GITLEAKS_EXTENDS = decisions.GITLEAKS_EXTENDS
+OK = decisions.OK
+REPO = decisions.REPO
+HostError = decisions.HostError
+Result = decisions.Result
+Workspace = decisions.Workspace
 
 CREDENTIALS = "1password-credentials.json"
 AGENT = "agent"
@@ -116,7 +128,6 @@ SHELLS = {"macOS": "/bin/zsh", "linux": "/bin/bash"}
 # The exit status of getent for a key it doesn't find.
 GETENT_MISSING = 2
 
-REPO = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*\Z")
 # The gh config of the agent's GitHub identity, which clones and fetches use,
 # and the agent's tbhbdev config. Neither holds a credential; gitleaks flags
 # any path into .config.
@@ -135,16 +146,9 @@ MISE_CONFIGS = (
     ".tool-versions",
 )
 # The private gitleaks config: the field it comes from, which the bootstrap
-# generator writes, and what it must hold. CANARY matches the line
-# tbhb_rules' gitleaks_tool.sh.tpl looks for.
+# generator writes.
 GITLEAKS_ITEM = "gitleaks-private"
 GITLEAKS_FIELD = "config"
-GITLEAKS_EXTENDS = ".gitleaks.toml"
-GITLEAKS_CANARY = "tbhb-private-canary"
-CANARY = re.compile(
-    rf"""^[ \t]*id[ \t]*=[ \t]*["']{GITLEAKS_CANARY}["'][ \t]*(?:#.*)?$""",
-    re.MULTILINE,
-)
 GITLEAKS_FILE = ".config/gitleaks/private.toml"
 # Run as the account that gets the file, with the config on stdin. It prints
 # `ok` when the file is already the config, owned by the account at 0600 in a
@@ -228,11 +232,6 @@ _IPV4 = r"(?:^|[^0-9A-Za-z.]){}(?:[^0-9.]|$)"
 _PATH = r"""[^\s"'`<>()\[\],;=]*"""
 # A path that starts at $HOME or ~ names no one's home.
 GENERIC_HOME = r"^(?:~|\$HOME|\$\{HOME\})/"
-# What an upgrade step reports.
-OK = "ok"
-CHANGED = "changed"
-FAILED = "failed"
-
 # A Touch ID check through LocalAuthentication: exit 0 when it passes, 1 when
 # it fails, 2 when this Mac can't do it.
 TOUCH_ID = """\
@@ -254,10 +253,6 @@ context.evaluatePolicy(
 done.wait()
 exit(passed ? 0 : 1)
 """
-
-
-class HostError(Exception):
-    """A command for agent hosts failed. The message never holds a token."""
 
 
 def now() -> datetime:
@@ -305,7 +300,7 @@ def _str(value: Json, key: str) -> str:
 
 
 def _why(done: Done) -> str:
-    return done.stderr.strip() or f"exit {done.returncode}"
+    return decisions.command_error(done.returncode, done.stderr)
 
 
 def _without(host: Host, exc: HostError) -> str:
@@ -367,36 +362,13 @@ def server_hosts() -> list[str]:
     return names
 
 
-@dataclass(frozen=True)
-class Workspace:
-    """The workspace root, relative to the operator's home, and its clones."""
-
-    root: PurePosixPath
-    repos: tuple[str, ...]
-
-
 def workspace() -> Workspace | None:
     """The user config's [workspace], or None when it has none."""
     try:
         settings = userconfig.table("workspace")
     except userconfig.ConfigError as exc:
         raise HostError(str(exc)) from exc
-    if settings is None:
-        return None
-    root = settings.get("root")
-    path = PurePosixPath(root) if isinstance(root, str) else PurePosixPath("/")
-    if path.is_absolute() or not path.parts or ".." in path.parts:
-        message = (
-            f"{userconfig.path()}: [workspace] root must be a relative path below home"
-        )
-        raise HostError(message)
-    repos = settings.get("repos", [])
-    entries: list[object] = repos if isinstance(repos, list) else [None]
-    names = [e for e in entries if isinstance(e, str) and REPO.match(e)]
-    if len(names) != len(entries):
-        message = f"{userconfig.path()}: [workspace] repos must list owner/name strings"
-        raise HostError(message)
-    return Workspace(path, tuple(names))
+    return decisions.workspace_settings(settings, userconfig.path())
 
 
 # Hosts.
@@ -1441,12 +1413,6 @@ def set_up(host: Host, ws: Workspace | None, *, repair: bool) -> str:
 
 
 @dataclass(frozen=True)
-class Result:
-    status: str
-    message: str
-
-
-@dataclass(frozen=True)
 class Target:
     """The host a step works on, its workspace root there, and the Connect URLs."""
 
@@ -1469,25 +1435,22 @@ def _git(target: Target, path: str, *args: str) -> Done:
 def _left_alone(target: Target, path: str, default: str) -> Result | None:
     """Why the clone at PATH isn't fast-forwarded, or None when it can be."""
     branch = _git(target, path, "symbolic-ref", "--quiet", "--short", "HEAD")
-    name = branch.stdout.strip()
-    if branch.returncode != 0 or name != default:
-        return Result(OK, f"left alone: on {name or 'a detached HEAD'}, not {default}")
+    problem = decisions.clone_branch_problem(branch.stdout, branch.returncode, default)
+    if problem is not None:
+        return problem
     status = _git(target, path, "status", "--porcelain", "--untracked-files=no")
-    if status.returncode != 0:
-        return Result(FAILED, f"git status failed: {_why(status)}")
-    if status.stdout.strip():
-        return Result(OK, "left alone: tracked files are modified or staged")
-    return None
+    return decisions.clone_status_problem(
+        status.stdout, status.stderr, status.returncode
+    )
 
 
 def _fast_forward(target: Target, path: str, default: str) -> Result:
     upstream = f"origin/{default}"
-    heads = _git(target, path, "rev-parse", "HEAD", upstream).stdout.split()
-    if len(heads) != 2:  # noqa: PLR2004
-        return Result(FAILED, f"cannot resolve HEAD and {upstream}")
-    head, tip = heads
-    if head == tip:
-        return Result(OK, f"up to date at {head[:12]}")
+    heads = _git(target, path, "rev-parse", "HEAD", upstream)
+    revisions = decisions.clone_revisions(heads.stdout, upstream)
+    if isinstance(revisions, Result):
+        return revisions
+    head, tip = revisions
     ahead = _git(target, path, "merge-base", "--is-ancestor", "HEAD", upstream)
     if ahead.returncode != 0:
         return Result(OK, f"left alone: {default} has commits {upstream} lacks")
@@ -1511,9 +1474,9 @@ def clone(repo: str, target: Target) -> Result:
             return Result(FAILED, f"the clone failed: {_why(done)}")
         return Result(CHANGED, f"cloned into {full}")
     head = _git(target, path, "rev-parse", "--abbrev-ref", "origin/HEAD")
-    default = head.stdout.strip().removeprefix("origin/")
-    if head.returncode != 0 or not default:
-        return Result(FAILED, f"cannot find the default branch: {_why(head)}")
+    default = decisions.clone_default_branch(head.stdout, head.stderr, head.returncode)
+    if isinstance(default, Result):
+        return default
     held = _left_alone(target, path, default)
     if held is not None:
         return held
@@ -1579,16 +1542,8 @@ def token_health(target: Target) -> Result:
 
 def gitleaks_problem(text: str) -> str | None:
     """Why TEXT isn't the private gitleaks config, or None. It never quotes TEXT."""
-    try:
-        data = tomllib.loads(text)
-    except tomllib.TOMLDecodeError:
-        return f"{gitleaks_ref()} isn't valid TOML"
-    extend = data.get("extend")
-    if not isinstance(extend, dict) or extend.get("path") != GITLEAKS_EXTENDS:
-        return f'{gitleaks_ref()} has no [extend] path = "{GITLEAKS_EXTENDS}"'
-    if not CANARY.search(text):
-        return f"{gitleaks_ref()} has no rule with the id {GITLEAKS_CANARY}"
-    return None
+    reason = decisions.gitleaks_config_problem(text)
+    return f"{gitleaks_ref()} {reason}" if reason is not None else None
 
 
 def private_gitleaks(host: Host, urls: list[str]) -> str:

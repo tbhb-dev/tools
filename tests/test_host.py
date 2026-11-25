@@ -31,6 +31,7 @@ from onepasswordconnectsdk.client import Client
 
 from tbhbdev import cli, secrets, userconfig
 from tbhbdev import host as host_tool
+from tbhbdev.decisions import host as decisions
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -2397,16 +2398,6 @@ def test_a_root_that_cannot_be_made_stops_that_host(
     [
         ("[workspace\n", "cannot parse "),
         ('[workspace]\nroot = "/abs"\n', "must be a relative path below home"),
-        ('[workspace]\nroot = "a/../b"\n', "must be a relative path below home"),
-        ('[workspace]\nroot = "."\n', "must be a relative path below home"),
-        ("[workspace]\nroot = 1\n", "must be a relative path below home"),
-        ("[workspace]\n", "must be a relative path below home"),
-        ('[workspace]\nroot = "c"\nrepos = "o/n"\n', "repos must list owner/name"),
-        ('[workspace]\nroot = "c"\nrepos = ""\n', "repos must list owner/name"),
-        ('[workspace]\nroot = "c"\nrepos = ["o"]\n', "repos must list owner/name"),
-        ('[workspace]\nroot = "c"\nrepos = ["o/n/x"]\n', "repos must list owner/name"),
-        ('[workspace]\nroot = "c"\nrepos = ["o/n", 1]\n', "repos must list owner/"),
-        ('[workspace]\nroot = "c"\nrepos = ["../n"]\n', "repos must list owner/name"),
     ],
 )
 def test_the_workspace_config_is_checked(
@@ -2421,11 +2412,6 @@ def test_the_workspace_config_is_checked(
     assert world.err.startswith(f"{PROG}: ")
     assert error in world.err
     assert world.stubs.calls("ssh") == []
-
-
-def test_a_workspace_needs_no_repos(config_file: Path) -> None:
-    config_file.write_text('[workspace]\nroot = "c"\n')
-    assert host_tool.workspace() == host_tool.Workspace(PurePosixPath("c"), ())
 
 
 def test_a_workspace_that_is_not_a_table_is_refused(
@@ -2595,8 +2581,6 @@ def test_upgrade_fast_forwards_a_clean_clone(
     ("change", "message"),
     [
         ({"branch": "topic"}, "left alone: on topic, not main"),
-        ({"branch": None}, "left alone: on a detached HEAD, not main"),
-        ({"dirty": True}, "left alone: tracked files are modified or staged"),
         ({"head": sha("mine")}, "left alone: main has commits origin/main lacks"),
     ],
 )
@@ -2615,11 +2599,7 @@ def test_upgrade_leaves_other_work_alone(
 @pytest.mark.parametrize(
     ("change", "state", "message"),
     [
-        ({"no_origin_head": True}, {}, "cannot find the default branch: fatal: amb"),
-        ({"origin_head": "origin/"}, {}, "cannot find the default branch: exit 0"),
-        ({"status_broken": True}, {}, "git status failed: fatal: index file corrupt"),
         ({}, {"fetch_fail": ["example/app"]}, "the fetch failed: fatal: could not"),
-        ({"unresolved": True}, {}, "cannot resolve HEAD and origin/main"),
         ({"merge_fail": True}, {}, "the fast-forward failed: fatal: Not possible"),
     ],
 )
@@ -2913,8 +2893,8 @@ def configured(config: Callable[[list[str] | None], None]) -> None:
 
 ACCOUNTS = ("agent", "operator")
 REF = "op://vault-all/gitleaks-private/config"
-CANARY_WHY = f"{REF} has no rule with the id tbhb-private-canary"
-EXTEND_WHY = f'{REF} has no [extend] path = ".gitleaks.toml"'
+CANARY_PROBLEM = "has no rule with the id tbhb-private-canary"
+EXTEND_PROBLEM = 'has no [extend] path = ".gitleaks.toml"'
 CURRENT = f"ok: {PRIVATE} is current"
 WROTE = f"changed: wrote {PRIVATE}"
 
@@ -3025,48 +3005,16 @@ def test_upgrade_puts_each_copy_right(
     assert gitleaks_lines(ready) == dict.fromkeys(ACCOUNTS, CURRENT)
 
 
-@pytest.mark.parametrize(
-    ("text", "why"),
-    [
-        (GITLEAKS, None),
-        (
-            GITLEAKS.replace(
-                'id = "tbhb-private-canary"', "  id='tbhb-private-canary'  # canary"
-            ),
-            None,
-        ),
-        (GITLEAKS.replace('id = "', 'id = "x-'), CANARY_WHY),
-        (GITLEAKS.replace('canary"', 'canary-2"'), CANARY_WHY),
-        (GITLEAKS.replace('id = "', '# id = "'), CANARY_WHY),
-        (GITLEAKS.replace('[extend]\npath = ".gitleaks.toml"\n', ""), EXTEND_WHY),
-        (GITLEAKS.replace('path = ".gitleaks.toml"', 'path = "x.toml"'), EXTEND_WHY),
-        (GITLEAKS.replace("[extend]\npath", "extend"), EXTEND_WHY),
-        (f"{GITLEAKS}[[[\n", f"{REF} isn't valid TOML"),
-    ],
-)
-@pytest.mark.usefixtures("configured")
-def test_the_private_config_check(text: str, why: str | None) -> None:
-    assert host_tool.gitleaks_problem(text) == why
-
-
-@pytest.mark.parametrize(
-    ("text", "why"),
-    [
-        (GITLEAKS.replace('id = "', 'id = "x-'), CANARY_WHY),
-        (GITLEAKS.replace('[extend]\npath = ".gitleaks.toml"\n', ""), EXTEND_WHY),
-        (f"{GITLEAKS}[[[\n", f"{REF} isn't valid TOML"),
-    ],
-)
 def test_a_config_that_fails_its_check_is_not_written(
-    ready: World, capfd: pytest.CaptureFixture[str], text: str, why: str
+    ready: World, capfd: pytest.CaptureFixture[str]
 ) -> None:
     agent, operator = (private_config(ready, a) for a in ACCOUNTS)
     shutil.rmtree(agent.parent)
     operator.write_text("older\n")
-    private_fields(ready)[0]["value"] = text
+    private_fields(ready)[0]["value"] = GITLEAKS.replace('id = "', 'id = "x-')
     assert run(ready, capfd, "upgrade") == 1
     assert gitleaks_lines(ready) == dict.fromkeys(
-        ACCOUNTS, f"failed: {why}; wrote nothing"
+        ACCOUNTS, f"failed: {REF} {CANARY_PROBLEM}; wrote nothing"
     )
     assert not agent.parent.exists()
     assert operator.read_text() == "older\n"
@@ -4241,3 +4189,165 @@ def test_bootstrap_continues_after_a_host_setup_failure(
     assert run(world, capfd, "bootstrap", "--host", "host-a", "--host", "host-b") == 1
     assert world.installed("host-b") == world.token_of("host-b")["token"]
     assert world.err.endswith(f"{PROG}: bootstrap failed on host-a\n")
+
+
+class TestHostDecisions:
+    @pytest.fixture(name="config_file")
+    def _no_config_file(self) -> None:
+        """These tests supply configuration as values."""
+
+    @pytest.fixture(name="no_operator_credentials")
+    def _no_external_tools(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Keep tools and the SSH agent unavailable without writing a stub."""
+        monkeypatch.setenv("PATH", os.devnull)
+        monkeypatch.setenv("SSH_AUTH_SOCK", os.devnull)
+
+    @pytest.mark.parametrize(
+        "settings",
+        [{"root": "/abs"}, {"root": "a/../b"}, {"root": "."}, {"root": 1}, {}],
+    )
+    def test_invalid_workspace_root(self, settings: Json) -> None:
+        with pytest.raises(
+            decisions.HostError,
+            match=r"^config\.toml: \[workspace\] "
+            r"root must be a relative path below home$",
+        ):
+            decisions.workspace_settings(settings, PurePosixPath("config.toml"))
+
+    @pytest.mark.parametrize(
+        "repos", ["o/n", "", ["o"], ["o/n/x"], ["o/n", 1], ["../n"]]
+    )
+    def test_invalid_workspace_repos(self, repos: object) -> None:
+        with pytest.raises(
+            decisions.HostError,
+            match=r"^config\.toml: \[workspace\] repos must list owner/name strings$",
+        ):
+            decisions.workspace_settings(
+                {"root": "c", "repos": repos}, PurePosixPath("config.toml")
+            )
+
+    def test_workspace_settings(self) -> None:
+        source = PurePosixPath("config.toml")
+        assert decisions.workspace_settings(None, source) is None
+        assert decisions.workspace_settings(
+            {"root": "c"}, source
+        ) == decisions.Workspace(PurePosixPath("c"), ())
+        assert decisions.workspace_settings(
+            {"root": "src/work", "repos": ["o/n", "o/two"]}, source
+        ) == decisions.Workspace(PurePosixPath("src/work"), ("o/n", "o/two"))
+
+    @pytest.mark.parametrize(
+        ("stdout", "stderr", "code", "expected"),
+        [
+            ("origin/main\n", "", 0, "main"),
+            (
+                "",
+                "fatal: ambiguous argument\n",
+                1,
+                decisions.Result(
+                    "failed",
+                    "cannot find the default branch: fatal: ambiguous argument",
+                ),
+            ),
+            (
+                "origin/\n",
+                "",
+                0,
+                decisions.Result("failed", "cannot find the default branch: exit 0"),
+            ),
+        ],
+    )
+    def test_clone_default_branch(
+        self, stdout: str, stderr: str, code: int, expected: str | decisions.Result
+    ) -> None:
+        assert decisions.clone_default_branch(stdout, stderr, code) == expected
+
+    @pytest.mark.parametrize(
+        ("stdout", "code", "message"),
+        [
+            ("main\n", 0, None),
+            ("topic\n", 0, "left alone: on topic, not main"),
+            ("", 1, "left alone: on a detached HEAD, not main"),
+        ],
+    )
+    def test_clone_branch(self, stdout: str, code: int, message: str | None) -> None:
+        result = decisions.clone_branch_problem(stdout, code, "main")
+        assert result == (decisions.Result("ok", message) if message else None)
+
+    @pytest.mark.parametrize(
+        ("stdout", "stderr", "code", "expected"),
+        [
+            ("\n", "", 0, None),
+            (
+                " M file\n",
+                "",
+                0,
+                decisions.Result(
+                    "ok", "left alone: tracked files are modified or staged"
+                ),
+            ),
+            (
+                "",
+                "fatal: index file corrupt\n",
+                1,
+                decisions.Result(
+                    "failed", "git status failed: fatal: index file corrupt"
+                ),
+            ),
+        ],
+    )
+    def test_clone_status(
+        self, stdout: str, stderr: str, code: int, expected: decisions.Result | None
+    ) -> None:
+        assert decisions.clone_status_problem(stdout, stderr, code) == expected
+
+    def test_clone_revisions(self) -> None:
+        upstream = "origin/main"
+        head, tip = sha("a1"), sha("a2")
+        assert decisions.clone_revisions(f"{head}\n{tip}\n", upstream) == (head, tip)
+        assert decisions.clone_revisions(
+            f"{head}\n{head}\n", upstream
+        ) == decisions.Result("ok", f"up to date at {head[:12]}")
+        assert decisions.clone_revisions(f"{head}\n", upstream) == decisions.Result(
+            "failed", "cannot resolve HEAD and origin/main"
+        )
+
+    @pytest.mark.parametrize(
+        ("text", "why"),
+        [
+            (GITLEAKS, None),
+            (
+                GITLEAKS.replace(
+                    'id = "tbhb-private-canary"', "  id='tbhb-private-canary'  # canary"
+                ),
+                None,
+            ),
+            (
+                GITLEAKS.replace('id = "', 'id = "x-'),
+                CANARY_PROBLEM,
+            ),
+            (
+                GITLEAKS.replace('canary"', 'canary-2"'),
+                CANARY_PROBLEM,
+            ),
+            (
+                GITLEAKS.replace('id = "', '# id = "'),
+                CANARY_PROBLEM,
+            ),
+            (
+                GITLEAKS.replace('[extend]\npath = ".gitleaks.toml"\n', ""),
+                EXTEND_PROBLEM,
+            ),
+            (
+                GITLEAKS.replace('path = ".gitleaks.toml"', 'path = "x.toml"'),
+                EXTEND_PROBLEM,
+            ),
+            (
+                GITLEAKS.replace("[extend]\npath", "extend"),
+                EXTEND_PROBLEM,
+            ),
+            (f"{GITLEAKS}[[[\n", "isn't valid TOML"),
+        ],
+    )
+    def test_the_private_config_check(self, text: str, why: str | None) -> None:
+        assert decisions.gitleaks_config_problem(text) == why
