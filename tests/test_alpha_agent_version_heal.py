@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
@@ -11,9 +12,10 @@ from unittest.mock import Mock
 import pytest
 from agent_driver_example import execution_arguments
 from agent_example import settings
+from agent_host_example import commit, git
 
 from tbhbdev import version
-from tbhbdev.alpha import agent
+from tbhbdev.alpha import agent, version_check
 from tbhbdev.alpha.agent import driver, transport, version_heal
 from tbhbdev.alpha.agent.decisions import remote
 from tbhbdev.alpha.agent.model import Invalid
@@ -39,6 +41,48 @@ ORIGIN = subprocess.CompletedProcess(GIT, 0, f"{HEAD}\t{REF}\n")
 @pytest.fixture(autouse=True)
 def fresh_launch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(RETRY, raising=False)
+
+
+@pytest.mark.parametrize("scope", ["--local", "--global"])
+def test_read_origin_ignores_git_url_rewrites(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, scope: str
+) -> None:
+    env = {"PATH": os.environ["PATH"], "GIT_CONFIG_NOSYSTEM": "1"}
+    git(isolated_home, "init", "--template=", "--initial-branch=main", env=env)
+    fake_head = commit(isolated_home, "fake main", env=env)
+    key = f"url.{isolated_home.as_uri()}.insteadOf"
+    git(isolated_home, "config", scope, key, URL, env=env)
+    # Disable real HTTPS while still allowing a rewrite to the test repository.
+    command = ["-c", "protocol.https.allow=never", "ls-remote", URL, REF]
+    assert git(isolated_home, *command, env=env) == f"{fake_head}\t{REF}"
+    monkeypatch.chdir(isolated_home)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(isolated_home / ".gitconfig"))
+    status, output = version_heal.read_origin(["git", *command])
+    assert status != 0
+    assert output == ""
+
+
+def test_read_origin_uses_fixed_url_and_clean_git_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GIT_DIR", "/example/.git")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "credential.helper")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "example")
+    run = Mock(return_value=ORIGIN)
+    monkeypatch.setattr(subprocess, "run", run)
+
+    assert version_check.latest(version_heal.read_origin) == HEAD
+    run.assert_called_once()
+    assert run.call_args.args == (GIT,)
+    assert run.call_args.kwargs["cwd"] == "/"
+    assert run.call_args.kwargs["env"] == {
+        "PATH": os.environ["PATH"],
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "/bin/false",
+    }
 
 
 def test_versions_match_without_sync(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -141,6 +185,18 @@ def test_matching_retry_consumes_marker(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv(RETRY, "original mismatch")
     assert version_heal.check(CONFIG, HOST, NEW_LINE, NEW_LINE) is None
     assert RETRY not in os.environ
+
+
+def test_empty_brief_is_refused_after_driver_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompt = tmp_path / "brief.md"
+    prompt.touch()
+    args = argparse.Namespace(name="sample", prompt_file=prompt, fetch_ref=[])
+    assert driver.checked_prompt(args) == ""
+    monkeypatch.setenv(RETRY, "original mismatch")
+    with pytest.raises(Invalid, match="brief is empty after the driver restarted"):
+        driver.checked_prompt(args)
 
 
 def test_module_restart_replays_python_argv(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -30,7 +30,14 @@ def read_origin(argv: list[str]) -> tuple[int, str]:
     try:
         result = subprocess.run(  # nosec B603
             [argv[0], *flags, *argv[1:]],
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/false"},
+            cwd="/",
+            env={
+                "PATH": os.environ.get("PATH", os.defpath),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_ASKPASS": "/bin/false",
+            },
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -41,6 +48,10 @@ def read_origin(argv: list[str]) -> tuple[int, str]:
     except OSError, subprocess.TimeoutExpired:
         return 1, ""
     return result.returncode, result.stdout
+
+
+def retrying() -> bool:
+    return _RETRY in os.environ
 
 
 def restart(mismatch: str) -> NoReturn:

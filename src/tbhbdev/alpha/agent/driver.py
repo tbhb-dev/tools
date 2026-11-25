@@ -316,6 +316,9 @@ def check_limits(
 def checked_prompt(args: argparse.Namespace) -> str:
     """Read the brief, refuse hook conflicts and report warnings locally."""
     prompt = Path(args.prompt_file).read_text()
+    if not prompt and version_heal.retrying():
+        message = f"{args.prompt_file}: brief is empty after the driver restarted"
+        raise Invalid(message)
     problems = brief.check_hooks(prompt)
     if problems:
         telemetry.attributes(**{"tbhb.agent.outcome": "refused"})
