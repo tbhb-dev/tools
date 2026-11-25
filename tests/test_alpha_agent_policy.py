@@ -1216,6 +1216,10 @@ def test_unsandboxed_skips_all_sandbox_checks(
     if isinstance(value.detail, model.ClaudePolicy):
         assert value.detail.settings == {
             "disableAllHooks": True,
+            "env": {
+                "GH_CONFIG_DIR": f"{run_paths.tmpdir}/gh",
+                "DOCKER_CONFIG": f"{run_paths.tmpdir}/docker",
+            },
             "sandbox": {"enabled": False},
         }
     elif isinstance(value.detail, model.AgyPolicy):
