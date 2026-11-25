@@ -114,6 +114,17 @@ def command(verb: str, *options: str) -> int:
     return agent.main([verb, "sample", *options], "example agent")
 
 
+def test_default_launch_sends_unsandboxed_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote = setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(agent.settings, "load", lambda: CONFIG)
+    assert launch(remote) == 0
+    wire = json.loads((remote.state / "sample.request.json").read_text())
+    assert wire["unsandboxed"] is True
+    assert wire["authorized_by"] is None
+
+
 def test_unsandboxed_clean_refuses_a_run_without_a_result(
     remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
