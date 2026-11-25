@@ -7,9 +7,11 @@ import json
 import subprocess
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from unittest.mock import Mock, call
 
 import pytest
 
+from tbhbdev import alpha
 from tbhbdev.alpha import close, opened
 from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha import pull_request as pr
@@ -444,6 +446,328 @@ def test_issue_relationship_reports_refusal(
     monkeypatch.setitem(close.RELATIONSHIP_WRITES, "link-sub", refuse)
     assert close.main(["issue", "link-sub", "example/parent#7", "example/child#9"]) == 1
     assert capsys.readouterr() == ("", f"{message}\n")
+
+
+@pytest.mark.parametrize("case", [({}, True, 0), (None, False, 0), (None, True, 4)])
+@pytest.mark.usefixtures("gh")
+def test_issue_blocks_using_local_references(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    case: tuple[dict[str, int] | None, bool, int],
+) -> None:
+    result, dry_run, code = case
+    error = subprocess.CalledProcessError(code, "gh", stderr="API error\n")
+    write = Mock(return_value=result, side_effect=error if code else None)
+    monkeypatch.setitem(close.RELATIONSHIP_WRITES, "block", write)
+    argv = ["issue", "block", "#7", "--blocking", "#9"]
+    assert close.main([*argv, "--dry-run"] if dry_run else argv) == code
+    expected = ("{}\n" if result is not None else "", error.stderr if code else "")
+    assert capsys.readouterr() == expected
+    write.assert_called_once_with(
+        close.content.IssueRef("tbhb-dev", "tools", 9),
+        close.content.IssueRef("tbhb-dev", "tools", 7),
+        caller="tbhbdev alpha issue",
+        dry_run=dry_run,
+    )
+
+
+ISSUE_REPO = "tbhb-dev/work-private"
+ISSUE_TITLE = "Improve weekly report delivery"
+ISSUE_BODY = "criteria:\n- Reports reach every team\nevidence:\n### Delivery notes\n"
+CREATED_ISSUE = f"https://github.com/{ISSUE_REPO}/issues/9\n9\n"
+
+
+@pytest.fixture
+def issue_args(tmp_path: Path) -> list[str]:
+    body = tmp_path / "body.md"
+    body.write_text(ISSUE_BODY, encoding="utf-8")
+    return [
+        "issue",
+        "create",
+        "--repo",
+        ISSUE_REPO,
+        "--title",
+        ISSUE_TITLE,
+        "--body-file",
+        str(body),
+        "--type",
+        "Chore",
+    ]
+
+
+@pytest.fixture
+def issue_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Mock:
+    repo = f"/repos/{ISSUE_REPO}"
+    other = "/repos/tbhb-dev/tools"
+    responses: dict[tuple[str, str], close.content.Json] = {
+        ("GET", repo): {"full_name": ISSUE_REPO, "visibility": "private"},
+        ("GET", other): {"full_name": "tbhb-dev/tools", "visibility": "public"},
+        ("POST", f"{repo}/issues"): {"number": 9},
+        ("POST", f"{other}/issues"): {"number": 9},
+        ("GET", f"{repo}/issues/9"): {"id": 123, "type": {"name": "Task"}},
+        ("GET", f"{other}/issues/9"): {"id": 123, "type": {"name": "Chore"}},
+        ("GET", f"{repo}/issues/8"): {"type": {"name": "Epic"}},
+        ("GET", f"{other}/issues/8"): {"type": {"name": "Epic"}},
+        ("POST", f"{repo}/issues/8/sub_issues"): {},
+        ("POST", f"{other}/issues/8/sub_issues"): {},
+    }
+
+    def respond(
+        method: str, path: str, _payload: close.content.Json | None = None
+    ) -> close.content.Json:
+        return responses[method, path]
+
+    client = Mock(spec=close.content.Client)
+    client.rest.side_effect = respond
+    monkeypatch.setattr(close.content, "GhClient", lambda: client)
+    monkeypatch.setattr(close.content, "_scan", Mock())
+    monkeypatch.setenv("TBHBDEV_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
+    return client
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("criteria: bad", "criteria and verification must use list items (count 1)"),
+        ("", "criteria must be 1 to 3 (count 0)"),
+        (
+            ISSUE_BODY + "blocked-by: another\n",
+            "unknown blocked-by target (count 1)",
+        ),
+    ],
+)
+@pytest.mark.usefixtures("gh")
+def test_issue_create_refuses_invalid_blocks(
+    issue_args: list[str],
+    issue_client: Mock,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    case: tuple[str, str],
+) -> None:
+    body, finding = case
+    (tmp_path / "body.md").write_text(body, encoding="utf-8")
+    assert close.main([*issue_args, "--parent", "8"], env=ENV) == 1
+    assert capsys.readouterr() == ("", f"Refused issue: {finding}\n")
+    issue_client.rest.assert_not_called()
+
+
+@pytest.mark.parametrize("issue_type", ["Chore", "Research", "Decision"])
+@pytest.mark.usefixtures("gh")
+def test_issue_create_dry_run(
+    issue_args: list[str],
+    issue_client: Mock,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    issue_type: str,
+) -> None:
+    body = ISSUE_BODY if issue_type == "Chore" else "Free-form Markdown\n"
+    (tmp_path / "body.md").write_text(body, encoding="utf-8")
+    assert (
+        close.main([*issue_args, "--type", issue_type, "--parent", "8", "--dry-run"])
+        == 0
+    )
+    out, err = capsys.readouterr()
+    assert json.loads(out) == {
+        "title": ISSUE_TITLE,
+        "body": body,
+        "type": issue_type,
+        "labels": [],
+    }
+    assert err == (
+        "" if issue_type == "Chore" else f"no schema check for type {issue_type}\n"
+    )
+    issue_client.rest.assert_called_once_with("GET", f"/repos/{ISSUE_REPO}")
+    assert not (tmp_path / "audit.jsonl").exists()
+
+
+@pytest.mark.parametrize("parent", [None, "8", "tbhb-dev/tools#8"])
+@pytest.mark.usefixtures("gh")
+def test_issue_create_writes_and_audits(
+    issue_args: list[str],
+    issue_client: Mock,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    parent: str | None,
+) -> None:
+    issue_type = "Chore" if parent is None else "Epic"
+    argv = [*issue_args, "--type", issue_type, "--label", "first", "--label", "second"]
+    if parent is not None:
+        argv.extend(["--parent", parent, "--reason", "Track rollout"])
+    assert close.main(argv, env=ENV) == 0
+    assert capsys.readouterr() == (CREATED_ISSUE, "")
+    rest: Mock = issue_client.rest
+    writes = [entry for entry in rest.call_args_list if entry.args[0] != "GET"]
+    assert writes[0] == call(
+        "POST",
+        f"/repos/{ISSUE_REPO}/issues",
+        {
+            "title": ISSUE_TITLE,
+            "body": ISSUE_BODY,
+            "type": issue_type,
+            "labels": ["first", "second"],
+        },
+    )
+    expected = [("create_issue", "tbhbdev alpha issue create", ISSUE_REPO, 9)]
+    if parent is None:
+        assert writes[1:] == []
+    else:
+        parent_repo = "tbhb-dev/tools" if "#" in parent else ISSUE_REPO
+        assert writes[1:] == [
+            call(
+                "POST",
+                f"/repos/{parent_repo}/issues/8/sub_issues",
+                {"sub_issue_id": 123},
+            )
+        ]
+        caller = "tbhbdev alpha issue create: Track rollout"
+        expected = [
+            ("create_issue", caller, ISSUE_REPO, 9),
+            ("link_sub_issue", caller, parent_repo, 8),
+        ]
+    entries = (tmp_path / "audit.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [
+        (e["verb"], e["caller"], e["repo"], e["number"])
+        for e in map(json.loads, entries)
+    ] == expected
+
+
+@pytest.mark.usefixtures("gh")
+def test_issue_create_reports_issue_before_link_refusal(
+    issue_args: list[str],
+    issue_client: Mock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert (
+        close.main(
+            [*issue_args, "--repo", "tbhb-dev/tools", "--parent", f"{ISSUE_REPO}#8"],
+            env=ENV,
+        )
+        == 1
+    )
+    refusal = (
+        f"Cannot link tbhb-dev/tools#9 under {ISSUE_REPO}#8: "
+        "only a private Feature can have a public leaf child\n"
+    )
+    output = "https://github.com/tbhb-dev/tools/issues/9\n9\n"
+    assert capsys.readouterr() == (output, refusal)
+    rest: Mock = issue_client.rest
+    assert [args for args in rest.call_args_list if args.args[0] != "GET"] == [
+        call(
+            "POST",
+            "/repos/tbhb-dev/tools/issues",
+            {
+                "title": ISSUE_TITLE,
+                "body": ISSUE_BODY,
+                "type": "Chore",
+                "labels": [],
+            },
+        ),
+    ]
+
+
+@pytest.mark.usefixtures("gh")
+def test_issue_create_reports_gh_failure(
+    issue_args: list[str],
+    issue_client: Mock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    issue_client.rest.side_effect = subprocess.CalledProcessError(
+        4, "gh", stderr="API error\n"
+    )
+    assert close.main(issue_args, env=ENV) == 4
+    assert capsys.readouterr() == ("", "API error\n")
+
+
+@pytest.mark.usefixtures("gh")
+def test_issue_create_reports_missing_file(
+    issue_args: list[str],
+    issue_client: Mock,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert (
+        close.main([*issue_args, "--body-file", str(tmp_path / "missing.md")], env=ENV)
+        == 1
+    )
+    out, err = capsys.readouterr()
+    assert not out
+    assert "missing.md" in err
+    issue_client.rest.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("--type", "Other", "invalid choice"),
+        ("--repo", "tools", "expected owner/repo"),
+        ("--parent", "#8", "expected N or owner/repo#N"),
+        ("--parent", "0", "expected owner/repo#N or #N"),
+        ("--reason", "", "must not be blank"),
+    ],
+)
+def test_issue_create_rejects_bad_arguments(
+    issue_args: list[str],
+    capsys: pytest.CaptureFixture[str],
+    case: tuple[str, str, str],
+) -> None:
+    flag, value, diagnostic = case
+    with pytest.raises(SystemExit) as exc:
+        close.main([*issue_args, flag, value], env=ENV)
+    assert exc.value.code == 2
+    assert diagnostic in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--repo", "--type", "--title", "--body-file"])
+def test_issue_create_requires_arguments(
+    issue_args: list[str],
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+) -> None:
+    index = issue_args.index(flag)
+    del issue_args[index : index + 2]
+    with pytest.raises(SystemExit) as exc:
+        close.main(issue_args, env=ENV)
+    assert exc.value.code == 2
+    assert capsys.readouterr().err.endswith(
+        f"the following arguments are required: {flag}\n"
+    )
+
+
+def test_issue_create_help(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        alpha.main(["issue", "create", "--help"], "prog")
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    assert "--repo OWNER/REPO" in output
+    assert "--body-file FILE" in output
+    assert "--parent N|OWNER/REPO#N" in output
+
+
+@pytest.mark.usefixtures("gh")
+def test_issue_create_requires_task_parent(
+    issue_args: list[str],
+    issue_client: Mock,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "body.md").write_text(
+        "verification:\n- Reports arrive on time\n", encoding="utf-8"
+    )
+    assert close.main([*issue_args, "--type", "Task"], env=ENV) == 1
+    assert capsys.readouterr() == (
+        "",
+        "Refused issue: Task requires a parent (count 0)\n",
+    )
+    issue_client.rest.assert_not_called()
+
+
+@pytest.mark.usefixtures("gh")
+def test_issue_create_requires_an_agent(
+    issue_args: list[str], issue_client: Mock
+) -> None:
+    with pytest.raises(SystemExit, match="recognized agent session"):
+        close.main(issue_args, env={})
+    issue_client.rest.assert_not_called()
 
 
 def test_main_reads_the_process_environment_by_default(
