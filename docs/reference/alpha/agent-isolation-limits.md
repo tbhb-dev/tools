@@ -53,7 +53,11 @@ The tmux socket is `-S <sockets_dir>/agents`. The driver creates the configured 
 
 `wait` prefers the final answer and returns the run's exit status. Its poll interval defaults to 30 seconds (`TBHB_AGENT_WAIT_POLL`). Consecutive connection failures stop after 240 seconds (`TBHB_AGENT_WAIT_UNREACHABLE`) with exit status 75. Exit codes 1 and 75 overlap with harness exit codes. Read the first result line to distinguish an unknown or unreachable run from a harness result. Agent text follows that line.
 
+With `--start-ref`, run-host returns exit status 0 when it fast-forwards the selected remote branch.
+
 After a successful build harness run, run-host compares commits reachable from all Git refs and detached `HEAD` with the starting history. It uses these exit statuses for publication.
+
+For a build that opens a pull request, run-host compares local branch tips and detached `HEAD` with the history it recorded before launch, including refs fetched by run-host during preparation. Remote-tracking refs added or changed during the harness run do not change that history. Run-host publishes the checked-out run branch when it contains new commits. If the run branch is checked out and new commits exist only elsewhere, run-host refuses publication. When the run branch is not checked out, run-host can publish a single independent new tip from another branch or detached `HEAD` to the run branch on origin.
 
 | Exit status | Result |
 | --- | --- |
@@ -61,6 +65,8 @@ After a successful build harness run, run-host compares commits reachable from a
 | 4 | Run-host skips or refuses the push, or Git fails to push. The log starts the reason line with `push skipped:`, `push refused:`, or `push failed:`. |
 | 5 | Run-host pushes the branch and can't open the pull request. The log starts the reason line with `pr not opened:`. |
 | 6 | `--expect-commit` required a new commit, and the run produced none. The log starts the reason line with `no new commit:`. |
+
+New tips outside the starting commit's ancestry cause a refusal, and the log lists their count and short commit IDs.
 
 If the harness fails, run-host keeps its exit status. `tbhbdev alpha agent status NAME` shows the last publication reason next to the return code when the run ends with a nonzero status and the log contains a reason.
 
