@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import zipfile
 from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -76,7 +77,8 @@ def test_render_and_validate(
     skeleton = review_prompt.skeleton(tier, delta, variant, fields)
     assert prompt.endswith(skeleton)
     assert _resource(depth) in prompt
-    assert all(_resource(lens) in prompt for lens in LENSES)
+    lens_text = "\n".join(_resource(lens) for lens in LENSES)
+    assert f"\n{lens_text}\n" in prompt
     assert ("The security lens is mandatory" in prompt) == (tier == 2)
     assert ("FE escalation rules in review_data/" in prompt) == (tier == 2)
     if delta:
@@ -84,6 +86,7 @@ def test_render_and_validate(
         assert "Judge only the delta" in prompt
         assert "Keep earlier unresolved findings by reference" in prompt
     else:
+        assert prompt.startswith(_resource(depth))
         assert "Base-reviewed:" not in prompt
     assert not re.search(r"[{}$]", prompt)
 
@@ -130,6 +133,36 @@ def test_installed_lens_ids() -> None:
             seen.add(item_id)
 
 
+def test_archive_preserves_resource_names_and_encoding(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    package = files("tbhbdev.alpha")
+    archive_path = tmp_path / "resources.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for item in package.joinpath("review_prompt_data").iterdir():
+            archive.writestr(f"review_prompt_data/{item.name}", item.read_bytes())
+
+    with zipfile.ZipFile(archive_path) as archive:
+
+        def package_files(package_name: str) -> zipfile.Path:
+            assert package_name == "tbhbdev.alpha"
+            return zipfile.Path(archive)
+
+        read_text = zipfile.Path.read_text
+
+        def read_resource(
+            resource: zipfile.Path, *, encoding: str | None = None
+        ) -> str:
+            assert encoding is not None
+            return read_text(resource, encoding=encoding)
+
+        monkeypatch.setattr(review_prompt, "files", package_files)
+        monkeypatch.setattr(zipfile.Path, "read_text", read_resource)
+        fields = FIELDS | {"base_reviewed": BASE_REVIEWED}
+        prompt = review_prompt.render(2, delta=True, variant="b", fields=fields)
+        assert prompt.startswith(f"Base-reviewed: {BASE_REVIEWED}\n")
+
+
 def test_missing_packaged_lens(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     resources = tmp_path / "review_prompt_data"
     resources.mkdir()
@@ -155,8 +188,9 @@ def test_missing_field(name: str) -> None:
 
 
 def test_delta_requires_base_reviewed() -> None:
-    with pytest.raises(ReviewError, match=r"^Missing review field: base_reviewed$"):
-        review_prompt.render(2, delta=True, variant="b", fields=FIELDS)
+    for renderer in (review_prompt.render, review_prompt.skeleton):
+        with pytest.raises(ReviewError, match=r"^Missing review field: base_reviewed$"):
+            renderer(2, delta=True, variant="b", fields=FIELDS)
 
 
 def test_unknown_fields() -> None:
