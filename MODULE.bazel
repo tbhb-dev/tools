@@ -8,7 +8,7 @@ module(name = "tbhb_dev_tools")
 bazel_dep(name = "tbhb_rules", version = "0.0.0", dev_dependency = True)
 git_override(
     module_name = "tbhb_rules",
-    commit = "26cb9121ab14d20956f26ac0ac74af01a5ae6204",
+    commit = "3d891be4bf5bead2427aed9ae57a0feb49a5b8df",
     remote = "https://github.com/tbhb-dev/rules.git",
 )
 
@@ -18,7 +18,7 @@ git_override(
 bazel_dep(name = "tbhb_rules_python", version = "0.0.0", dev_dependency = True)
 git_override(
     module_name = "tbhb_rules_python",
-    commit = "26cb9121ab14d20956f26ac0ac74af01a5ae6204",
+    commit = "3d891be4bf5bead2427aed9ae57a0feb49a5b8df",
     remote = "https://github.com/tbhb-dev/rules.git",
     strip_prefix = "python",
 )
