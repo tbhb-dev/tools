@@ -80,6 +80,27 @@ def test_draft_prints_path_and_writes_skeleton(
     assert any("HTML comment" in why for _, why in problems)
 
 
+def test_check_without_lint_accepts_a_filled_comment_draft(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    head(world)
+    assert run_main("draft", "7") == 0
+    path = Path(capsys.readouterr().out.strip())
+    with patch.object(pr, "lint") as lint:
+        assert run_main("check", "7", "--no-lint") == 1
+        assert "HTML comment" in capsys.readouterr().err
+        text = re.sub(r"<!--.*?-->\n", "", path.read_text(), flags=re.DOTALL)
+        path.write_text(
+            text.replace("event:", "event: COMMENT")
+            .replace("## Verdict", "## Verdict\n\nGO")
+            .replace("## Findings\n\n\n", "")
+            .replace("## Suggestions\n\n\n", "")
+            .replace("## Verification", "## Verification\n\nRead the diff.")
+        )
+        assert run_main("check", "7", "--no-lint") == 0
+        lint.assert_not_called()
+
+
 def test_existing_draft_is_unchanged_without_fetch(world: World) -> None:
     path = review.draft_path(7)
     path.parent.mkdir()

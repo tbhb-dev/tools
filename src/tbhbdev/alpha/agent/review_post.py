@@ -64,15 +64,18 @@ def find_draft(workspace: Path) -> tuple[int, str]:
 def validate(sub: Submission) -> tuple[dict[str, object], str]:
     """Check the draft host-side and return (frontmatter, body).
 
-    The prose linters aren't on run hosts, so the run's own `review check`
-    stands for them. Everything the schema, the template sections and the
-    frontmatter's key uniqueness cover is checked again here.
+    Check the schema, template sections and frontmatter key uniqueness without
+    the prose linters, which are unavailable on run hosts.
 
     Raises:
         PostRefusedError: The draft fails a check, names another head than the
             run reviewed, or asks for an event a run can't post.
     """
-    problems = review.check_text(sub.text, sub.number, lint=False)
+    try:
+        problems = review.check_text(sub.text, sub.number, lint=False)
+    except RecursionError as exc:
+        message = "the draft frontmatter is nested too deeply"
+        raise PostRefusedError(message) from exc
     if problems:
         line, why = problems[0]
         message = f"the draft fails its checks: line {line}: {why}"
@@ -172,7 +175,7 @@ def posted(run: Run, prepared: Prepared) -> bool:
             run.request.repo, number, text, run.request.commit or "", stamp(run)
         )
         identifier = create(sub, token)
-    except (PostRefusedError, OSError, ValueError) as refusal:
+    except PostRefusedError as refusal:
         run.files.write("log", f"review not posted: {refusal}\n")
         return False
     run.files.write("review", f"{run.request.repo}#{number} {identifier or 'unknown'}")

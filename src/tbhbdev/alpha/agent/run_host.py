@@ -822,7 +822,7 @@ def _execute(
                 and run.request.profile is Profile.REVIEW
                 and not run.files.uncertain
             ):
-                review_post.posted(run, prepared)
+                post_review(run, prepared)
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
     except RunInterruptedError, EOFError:
@@ -837,6 +837,16 @@ def _execute(
         stack.enter_context(process_group.ignore_signals())
         rc = finish(run, prepared, agent, rc)
     return rc
+
+
+def post_review(run: Run, prepared: Prepared) -> None:
+    try:
+        review_post.posted(run, prepared)
+    except RunInterruptedError:
+        # A signal during posting follows the run interrupt path and records 143.
+        raise
+    except Exception as exc:  # noqa: BLE001 -- posting cannot replace the harness result.
+        run.files.write("log", f"review post failed: {type(exc).__name__}\n")
 
 
 def require_commit(run: Run, rc: int) -> int:

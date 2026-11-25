@@ -4243,6 +4243,63 @@ def test_execute_posts_only_after_a_successful_review(  # noqa: PLR0913
 
 
 @pytest.mark.parametrize(
+    ("failure", "rc", "log"),
+    [
+        (None, 0, "review not posted: the draft frontmatter is nested too deeply\n"),
+        (RuntimeError("private"), 0, "review post failed: RuntimeError\n"),
+        (TimeoutError("private"), 0, "review post failed: TimeoutError\n"),
+        (
+            subprocess.TimeoutExpired(["private"], 20),
+            0,
+            "review post failed: TimeoutExpired\n",
+        ),
+        (run_host.RunInterruptedError(), 143, None),
+    ],
+    ids=["nested-yaml", "unexpected", "timeout", "subprocess-timeout", "signal"],
+)
+def test_review_post_failure_preserves_run_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception | None,
+    rc: int,
+    log: str | None,
+) -> None:
+    run = make_run(tmp_path, profile=Profile.REVIEW.value, commit="a" * 40)
+    prepared = preparation(run)
+    monkeypatch.setattr(run_host, "preflight", Mock())
+    monkeypatch.setattr(process_group, "prepare", Mock(return_value=prepared))
+    monkeypatch.setattr(run_host, "run_harness", Mock(return_value=0))
+    if failure is None or isinstance(failure, TimeoutError):
+        directory = Path(prepared.paths.worktree) / ".git" / "tbhb-alpha"
+        directory.mkdir(parents=True)
+        draft = (
+            f"---\npr: 7\ncommit_id: '{run.request.commit}'\nevent: COMMENT\n---\n"
+            "## Verdict\n\nGO\n\n## Verification\n\nRead the diff.\n"
+        )
+        if failure is None:
+            nested_yaml = "[" * 1000 + "]" * 1000
+            draft = draft.replace("pr: 7", f"pr: {nested_yaml}")
+        (directory / "review-7.md").write_text(draft)
+        monkeypatch.setattr(
+            credentials,
+            "review_post_token",
+            Mock(return_value="fake", side_effect=failure),
+        )
+    else:
+        monkeypatch.setattr(run_host.review_post, "posted", Mock(side_effect=failure))
+
+    assert run_host.execute(run, "example") == rc
+    assert run.files.path("rc").read_text() == f"{rc}\n"
+    assert run.files.path("phase").read_text() == "ended"
+    assert runfiles.latest(run.files.root)[run.files.name]["rc"] == rc
+    assert not run.files.path("review").exists()
+    if log is None:
+        assert not run.files.path("log").exists()
+    else:
+        assert run.files.path("log").read_text() == log
+
+
+@pytest.mark.parametrize(
     ("hook_reference", "enabled", "expected"),
     [(True, True, 7), (True, False, 1), (False, False, 7)],
 )

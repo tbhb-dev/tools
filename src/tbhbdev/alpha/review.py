@@ -275,7 +275,9 @@ def main(argv: list[str], prog: str) -> int:
     create = sub.add_parser("draft")
     create.add_argument("number", type=int)
     create.add_argument("--force", action="store_true")
-    sub.add_parser("check").add_argument("number", type=int)
+    check = sub.add_parser("check")
+    check.add_argument("number", type=int)
+    check.add_argument("--no-lint", action="store_true", help="skip prose linters")
     sub.add_parser("policy", help="check a worktree's review policy files")
     post = sub.add_parser("post")
     post.add_argument("number", type=int)
@@ -303,7 +305,7 @@ def main(argv: list[str], prog: str) -> int:
     except (OSError, UnicodeError) as exc:
         problems = [(1, f"cannot read draft: {exc}")]
     else:
-        problems = check_text(text, args.number)
+        problems = check_text(text, args.number, lint=not args.no_lint)
     for line, why in problems:
         print(f"{path}:{line}: {why}", file=sys.stderr)
     return 1 if problems else 0

@@ -147,6 +147,7 @@ APPROVE_THEN_COMMENT = draft("APPROVE").replace(
             "can't post a REQUEST",
         ),
         (APPROVE_THEN_COMMENT, "review-7.md", "duplicate key"),
+        ("---\npr: [\n---\n", "review-7.md", "invalid YAML"),
         (draft(head="b" * 40), "review-7.md", "isn't the commit"),
         ("---\npr: 7\n---\n", "review-7.md", "fails its checks"),
     ],

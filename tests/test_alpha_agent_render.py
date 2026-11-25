@@ -24,8 +24,8 @@ def test_brief_and_launch() -> None:
     review = render.brief(RunKind.START, "example", profile=Profile.REVIEW)
     assert review == (
         "Use the pull request number for N. Run `tbhbdev alpha review draft N`, "
-        "fill the draft with `event: COMMENT` and the judged head as `commit_id`, "
-        "then run `tbhbdev alpha review check N`. "
+        "follow the generated draft's guidance and set `event: COMMENT`, "
+        "then run `tbhbdev alpha review check N --no-lint`. "
         "Leave exactly one `.git/tbhb-alpha/review-N.md` for the run host to post."
         "\nexample"
     )
