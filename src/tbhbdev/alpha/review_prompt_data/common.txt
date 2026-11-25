@@ -6,6 +6,10 @@ Leave Findings empty or write one bullet list of at most eight items. Each item 
 Ground each finding in the cited code and use one or two sentences with terminal punctuation and at most 40 words total. Omit task checkboxes and restatements of CI gates.
 In Verification, use plain paragraphs of at most 100 words total to say what you read, what you checked, and what the evidence showed.
 
+After writing the draft, end your final message with exactly one of these lines, matching the Verdict section. Print nothing after that line.
+VERDICT: GO ${head}
+VERDICT: NO-GO ${head}
+
 ---
 schema: 2
 repo: "${repo}"
