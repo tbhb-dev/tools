@@ -22,21 +22,18 @@ refusal is an error. Nothing here reads a service account or runs `op`. The
 token, the key and the JWT never reach stdout, stderr, an exception message or
 a repr.
 
-The functions down to `Env` are pure. `Env` holds the seams the rest uses: the
-clock, the state root, the secret store, the openssl runner and the HTTP
-transport.
+`Env` supplies the clock, state root, secret store, OpenSSL runner and HTTP
+transport. The `decisions.gh_app` module builds requests and interprets replies.
 """
 
 import argparse
-import base64
-import json
 import os
 import re
 import subprocess  # nosec B404
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn, Protocol, override
@@ -47,13 +44,40 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from tbhbdev import secrets
+from tbhbdev.alpha.decisions import gh_app as decisions
 lazy from tbhbdev.alpha.agent import host_tools
 lazy from tbhbdev.alpha.agent.model import Invalid
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-type Json = dict[str, object]
+# Keep the original import paths for callers.
+HEADER = decisions.HEADER
+JWT_BACKDATE = decisions.JWT_BACKDATE
+JWT_LIFETIME = decisions.JWT_LIFETIME
+PEM_PATTERN = decisions.PEM_PATTERN
+PEM_WIDTH = decisions.PEM_WIDTH
+RSA_HEADER = decisions.RSA_HEADER
+RSA_MODULUS = decisions.RSA_MODULUS
+SECRET_LIKE = decisions.SECRET_LIKE
+TOKEN_PATTERN = decisions.TOKEN_PATTERN
+CachedInstallationMissingError = decisions.CachedInstallationMissingError
+GhAppError = decisions.GhAppError
+InstallationMissingError = decisions.InstallationMissingError
+Json = decisions.Json
+Minted = decisions.Minted
+b64url = decisions.b64url
+claims = decisions.claims
+detail = decisions.detail
+expiry = decisions.expiry
+is_rsa = decisions.is_rsa
+lookup_paths = decisions.lookup_paths
+parse_token = decisions.parse_token
+rebuild_pem = decisions.rebuild_pem
+render_hosts = decisions.render_hosts
+signing_input = decisions.signing_input
+split_repo = decisions.split_repo
+token_body = decisions.token_body
 
 EXIT_FAILURE = 1
 RUN_ENV = "TBHBDEV_AGENT_RUN"  # Set by exec in every run's environment.
@@ -61,7 +85,6 @@ EXIT_USAGE = 2
 EXIT_COOLDOWN = 75
 APP_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*[a-z0-9]")
 REPO_PATTERN = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
-# Eleven digits reach the year 5138, which datetime still formats.
 PERMISSION_PATTERN = re.compile(r"[a-z][a-z_]*:(?:read|write)", re.ASCII)
 # GitHub's repository permission names, so a typo fails before any network call.
 PERMISSION_NAMES = frozenset(
@@ -93,25 +116,12 @@ PERMISSION_NAMES = frozenset(
         "workflows",
     }
 )
-# A run this long of token characters in a failure message may be a credential.
-SECRET_LIKE = re.compile(r"[A-Za-z0-9_.~+/=-]{20,}")
+# Eleven digits reach the year 5138, which datetime still formats.
 EPOCH_PATTERN = re.compile(r"[0-9]{1,11}", re.ASCII)
-TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_.~+/=-]+")
-PEM_PATTERN = re.compile(
-    r"-----BEGIN ([A-Z0-9 ]+)-----(.*?)-----END \1-----", re.DOTALL
-)
 DEFAULT_VAULT = "tbhb-dev"
 API = "https://api.github.com"
 TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 REUSE_MARGIN = 600
-JWT_BACKDATE = 60
-JWT_LIFETIME = 540
-PEM_WIDTH = 64
-# The text of `openssl pkey -noout -text` for an RSA key. Older OpenSSL builds
-# put "RSA " before the header.
-# cspell:words RDONLY
-RSA_HEADER = re.compile(rb"\A(?:RSA )?Private-Key: \(")
-RSA_MODULUS = re.compile(rb"^modulus:", re.MULTILINE)
 ALL_REPOS_DIR = "+all"
 NOT_A_PART = (".", "..")
 # mutmut changes only function bodies, so these file names, which mint and
@@ -120,26 +130,14 @@ HOSTS_FILE = "hosts.yml"
 SLUG_FILE = "app-slug"
 EXPIRES_FILE = "expires-at"
 # ruff wants `check` written out; False is subprocess.run's default.
+# cspell:words RDONLY
 NO_CHECK = False
-HEADER = {"alg": "RS256", "typ": "JWT"}
 MINT_FAILURE = "GitHub App token mint failed"
 USAGE = """usage: {prog} APP OWNER/REPO [--fresh] [--dry-run] [--all-repos] [--vault V]
                                  [--permissions NAME:LEVEL,...]
        {prog} APP --cooldown-until EPOCH
        {prog} APP --cooldown-status
 """
-
-
-class GhAppError(Exception):
-    """A mint failed. The message never holds a token, a key or a JWT."""
-
-
-class InstallationMissingError(GhAppError):
-    """Neither the repository nor its owner has an installation."""
-
-
-class CachedInstallationMissingError(GhAppError):
-    """A supplied installation id returned 404."""
 
 
 class UsageError(Exception):
@@ -171,12 +169,6 @@ class Args:
     cooldown_until: int | None
     cooldown_status: bool
     permissions: tuple[tuple[str, str], ...] = ()
-
-
-@dataclass(frozen=True)
-class Minted:
-    token: str = field(repr=False)
-    expires_at: int
 
 
 class Parser(argparse.ArgumentParser):
@@ -308,11 +300,6 @@ def state_root(environ: dict[str, str], home: Path) -> Path:
     return Path(base) / "gh-app"
 
 
-def split_repo(repo: str) -> tuple[str, str]:
-    owner, _, name = repo.partition("/")
-    return owner, name
-
-
 def out_dir(state: Path, args: Args) -> Path:
     owner, name = split_repo(args.repo)
     # A narrowed token has its own directory: `+` can't appear in a repository name.
@@ -353,113 +340,12 @@ def cooldown_message(until: int) -> str:
     return f"cooldown until {utc(until)}"
 
 
-def rebuild_pem(raw: str) -> str:
-    """A PEM with proper lines from RAW, which a concealed field may flatten.
-
-    Text that holds no BEGIN and END pair comes back unchanged, for openssl to
-    refuse.
-    """
-    found = PEM_PATTERN.search(raw)
-    if found is None:
-        return raw
-    label, body = found.groups()
-    body = "".join(body.split())
-    lines = [body[i : i + PEM_WIDTH] for i in range(0, len(body), PEM_WIDTH)]
-    return "\n".join([f"-----BEGIN {label}-----", *lines, f"-----END {label}-----\n"])
-
-
-def b64url(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-
-def claims(app_id: str, now: int) -> Json:
-    return {"iat": now - JWT_BACKDATE, "exp": now + JWT_LIFETIME, "iss": app_id}
-
-
-def signing_input(app_id: str, now: int) -> bytes:
-    parts = [
-        b64url(json.dumps(part, separators=(",", ":")).encode())
-        for part in (HEADER, claims(app_id, now))
-    ]
-    return ".".join(parts).encode()
-
-
-def lookup_paths(repo: str) -> list[str]:
-    if "/" not in repo:
-        return [f"/orgs/{repo}/installation"]
-    owner, _ = split_repo(repo)
-    return [f"/repos/{repo}/installation", f"/orgs/{owner}/installation"]
-
-
-def token_body(
-    repo: str, *, all_repos: bool, permissions: tuple[tuple[str, str], ...] = ()
-) -> Json:
-    body: Json = {} if all_repos else {"repositories": [split_repo(repo)[1]]}
-    if permissions:
-        body["permissions"] = dict(permissions)
-    return body
-
-
 def json_object(response: httpx.Response) -> Json:
-    try:
-        payload = response.json()
-    except ValueError:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def detail(payload: Json) -> str:
-    """GitHub's own `message` field, minus anything that looks like a credential."""
-    reason = payload.get("message")
-    if not isinstance(reason, str) or not reason:
-        return "no message"
-    return SECRET_LIKE.sub("[redacted]", reason)
+    return decisions.json_object(response.content)
 
 
 def installation_id(response: httpx.Response) -> int | None:
-    found = json_object(response).get("id")
-    if response.status_code != httpx.codes.OK or not isinstance(found, int):
-        return None
-    return found
-
-
-def expiry(value: object) -> int | None:
-    """The epoch an ISO 8601 VALUE with a zone names, or None."""
-    if not isinstance(value, str):
-        return None
-    try:
-        moment = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    return None if moment.tzinfo is None else int(moment.timestamp())
-
-
-def parse_token(payload: Json) -> Minted:
-    """The token and its expiry in GitHub's reply.
-
-    Raises:
-        GhAppError: The reply lacks either. The message quotes GitHub's own
-            `message` field and nothing else.
-    """
-    token = payload.get("token")
-    epoch = expiry(payload.get("expires_at"))
-    if isinstance(token, str) and TOKEN_PATTERN.fullmatch(token) and epoch is not None:
-        return Minted(token, epoch)
-    message = f"GitHub did not return a token: {detail(payload)}"
-    raise GhAppError(message)
-
-
-def render_hosts(app: str, token: str) -> str:
-    user = f'"{app}[bot]"'
-    return (
-        "github.com:\n"
-        "    users:\n"
-        f"        {user}:\n"
-        f"            oauth_token: {token}\n"
-        "    git_protocol: https\n"
-        f"    oauth_token: {token}\n"
-        f"    user: {user}\n"
-    )
+    return decisions.installation_id(response.status_code, json_object(response))
 
 
 @dataclass(frozen=True)
@@ -564,11 +450,6 @@ def read_fields(env: Env, args: Args) -> tuple[str, str]:
     return app_id, rebuild_pem(read_field(store, args, "private_key"))
 
 
-def is_rsa(text: bytes) -> bool:
-    """Whether TEXT, from `openssl pkey -noout -text`, describes an RSA key."""
-    return RSA_HEADER.match(text) is not None and RSA_MODULUS.search(text) is not None
-
-
 def sign(env: Env, app_id: str, key: str) -> str:
     """A signed JWT for APP_ID, from the PEM KEY, which only a 0600 file holds."""
     with tempfile.TemporaryDirectory() as directory:
@@ -600,16 +481,9 @@ def find_installation(client: httpx.Client, repo: str) -> int | None:
     """
     for path in lookup_paths(repo):
         response = client.get(path)
-        if response.status_code == httpx.codes.NOT_FOUND:
-            continue
-        ident = installation_id(response)
-        if ident is None:
-            message = (
-                f"the installation lookup failed with status {response.status_code}: "
-                f"{detail(json_object(response))}"
-            )
-            raise GhAppError(message)
-        return ident
+        ident = decisions.lookup_result(response.status_code, response.content)
+        if ident is not None:
+            return ident
     return None
 
 
@@ -649,9 +523,9 @@ def exchange_token(  # noqa: PLR0913  # Optional installation cache seams.
     except httpx.HTTPError as exc:
         message = f"the GitHub request failed: {type(exc).__name__}"
         raise GhAppError(message) from None
-    if known_installation is not None and reply.status_code == httpx.codes.NOT_FOUND:
-        raise CachedInstallationMissingError
-    return parse_token(json_object(reply))
+    return decisions.exchange_result(
+        reply.status_code, reply.content, cached=known_installation is not None
+    )
 
 
 def request_token(env: Env, args: Args, jwt: str) -> Minted:
@@ -687,11 +561,7 @@ def mint_token(  # noqa: PLR0913  # Explicit credentials and installation cache.
     Raises:
         GhAppError: Permissions, signing or the token exchange failed.
     """
-    if not permissions or any(
-        value not in {"read", "write"} for value in permissions.values()
-    ):
-        message = "permissions must be nonempty and contain only read or write"
-        raise GhAppError(message)
+    decisions.validate_permissions(permissions)
     try:
         key = serialization.load_pem_private_key(
             rebuild_pem(pem).encode(), password=None
@@ -705,9 +575,7 @@ def mint_token(  # noqa: PLR0913  # Explicit credentials and installation cache.
     data = signing_input(app_id, env.now())
     signature = key.sign(data, padding.PKCS1v15(), hashes.SHA256())
     jwt = f"{data.decode()}.{b64url(signature)}"
-    body: Json = {"permissions": dict(permissions)}
-    if "/" in repository:
-        body["repositories"] = [split_repo(repository)[1]]
+    body = decisions.scoped_token_body(repository, permissions)
     try:
         return exchange_token(
             env,

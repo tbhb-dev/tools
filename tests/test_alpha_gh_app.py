@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa as rsa_keys
 
 from tbhbdev import alpha, secrets
 from tbhbdev.alpha import gh_app
+from tbhbdev.alpha.decisions import gh_app as decisions
 
 NOW = 1_800_000_000
 # The token a fake GitHub mints lives an hour past the fake clock.
@@ -318,7 +319,9 @@ def test_permissions_parse_sort_and_split_the_cache_directory() -> None:
     assert gh_app.out_dir(state, replace(args, repo="o/r")) == Path(
         "/s/tbhb-dev/bot/o/r+contents-read+pull-requests-write"
     )
-    assert gh_app.token_body("o/r", all_repos=False, permissions=args.permissions) == {
+    assert decisions.token_body(
+        "o/r", all_repos=False, permissions=args.permissions
+    ) == {
         "repositories": ["r"],
         "permissions": {"contents": "read", "pull_requests": "write"},
     }
@@ -349,11 +352,11 @@ def test_a_repeated_permissions_option_is_refused() -> None:
 
 def test_failure_details_hide_credential_like_text() -> None:
     echoed = "ghs_" + "A1b2" * 10
-    assert gh_app.detail({"message": f"bad token {echoed} here"}) == (
+    assert decisions.detail({"message": f"bad token {echoed} here"}) == (
         "bad token [redacted] here"
     )
-    assert gh_app.detail({"message": "Not Found"}) == "Not Found"
-    assert gh_app.detail({}) == "no message"
+    assert decisions.detail({"message": "Not Found"}) == "Not Found"
+    assert decisions.detail({}) == "no message"
 
 
 def test_a_cooldown_option_refuses_permissions() -> None:
@@ -416,20 +419,21 @@ def test_utc() -> None:
 def test_rebuild_pem_refolds_a_flattened_key() -> None:
     body = "A" * 64 + "B" * 64 + "C" * 3
     flat = f"{BEGIN} {body[:50]}  {body[50:]} \n{END}"
-    assert gh_app.rebuild_pem(flat) == (
+    assert decisions.rebuild_pem(flat) == (
         f"{BEGIN}\n{'A' * 64}\n{'B' * 64}\nCCC\n{END}\n"
     )
 
 
-def test_rebuild_pem_keeps_a_proper_key_and_the_label(rsa: Key) -> None:
-    assert gh_app.rebuild_pem(rsa.pem) == rsa.pem
-    flat = rsa.pem.replace("\n", " ")
-    assert gh_app.rebuild_pem(flat) == rsa.pem
+@pytest.mark.parametrize("label", ["PRIVATE KEY", "RSA PRIVATE KEY"])
+def test_rebuild_pem_keeps_a_proper_key_and_the_label(label: str) -> None:
+    pem = f"-----BEGIN {label}-----\nABC=\n-----END {label}-----\n"
+    assert decisions.rebuild_pem(pem) == pem
+    assert decisions.rebuild_pem(pem.replace("\n", " ")) == pem
 
 
 def test_rebuild_pem_leaves_other_text_to_openssl() -> None:
-    assert gh_app.rebuild_pem("not a key") == "not a key"
-    assert gh_app.rebuild_pem("-----BEGIN A-----x-----END B-----") == (
+    assert decisions.rebuild_pem("not a key") == "not a key"
+    assert decisions.rebuild_pem("-----BEGIN A-----x-----END B-----") == (
         "-----BEGIN A-----x-----END B-----"
     )
 
@@ -441,10 +445,10 @@ def decode(part: str) -> object:
 
 
 def test_signing_input() -> None:
-    header, payload = gh_app.signing_input("123", NOW).decode().split(".")
+    header, payload = decisions.signing_input("123", NOW).decode().split(".")
     assert decode(header) == {"alg": "RS256", "typ": "JWT"}
     assert decode(payload) == {"iat": NOW - 60, "exp": NOW + 540, "iss": "123"}
-    raw = gh_app.signing_input("123", NOW).decode().split(".")
+    raw = decisions.signing_input("123", NOW).decode().split(".")
     assert base64.urlsafe_b64decode(raw[0] + "==") == b'{"alg":"RS256","typ":"JWT"}'
     assert base64.urlsafe_b64decode(raw[1] + "==") == (
         f'{{"iat":{NOW - 60},"exp":{NOW + 540},"iss":"123"}}'.encode()
@@ -452,17 +456,17 @@ def test_signing_input() -> None:
 
 
 def test_b64url_drops_padding_and_uses_the_url_alphabet() -> None:
-    assert gh_app.b64url(b"\xfb\xff") == "-_8"
-    assert gh_app.b64url(b"a") == "YQ"
-    assert gh_app.b64url(b"\x00\x00\x17") == "AAA" + "X"
-    assert gh_app.b64url(b"") == ""
+    assert decisions.b64url(b"\xfb\xff") == "-_8"
+    assert decisions.b64url(b"a") == "YQ"
+    assert decisions.b64url(b"\x00\x00\x17") == "AAA" + "X"
+    assert decisions.b64url(b"") == ""
 
 
 def test_the_owner_is_what_precedes_the_first_slash() -> None:
-    assert gh_app.split_repo("o/r") == ("o", "r")
-    assert gh_app.split_repo("a/b/c") == ("a", "b/c")
-    assert gh_app.lookup_paths("a/b/c")[1] == "/orgs/a/installation"
-    assert gh_app.token_body("a/b/c", all_repos=False) == {"repositories": ["b/c"]}
+    assert decisions.split_repo("o/r") == ("o", "r")
+    assert decisions.split_repo("a/b/c") == ("a", "b/c")
+    assert decisions.lookup_paths("a/b/c")[1] == "/orgs/a/installation"
+    assert decisions.token_body("a/b/c", all_repos=False) == {"repositories": ["b/c"]}
     assert gh_app.out_dir(Path("/s"), replace(BASE, repo="a/b")) == Path(
         "/s/tbhb-dev/bot/a/b"
     )
@@ -500,28 +504,111 @@ def test_usage_errors_say_what_is_wrong(argv: list[str], message: str) -> None:
 
 
 def test_request_paths_and_bodies() -> None:
-    assert gh_app.lookup_paths("o/r") == [
+    assert decisions.lookup_paths("o/r") == [
         "/repos/o/r/installation",
         "/orgs/o/installation",
     ]
-    assert gh_app.token_body("o/r", all_repos=False) == {"repositories": ["r"]}
-    assert gh_app.token_body("o/r", all_repos=True) == {}
+    assert decisions.token_body("o/r", all_repos=False) == {"repositories": ["r"]}
+    assert decisions.token_body("o/r", all_repos=True) == {}
 
 
 @pytest.mark.parametrize(
-    ("response", "ident"),
+    ("content", "payload"),
+    [(b'{"id": 7}', {"id": 7}), (b"[7]", {}), (b"not json", {})],
+)
+def test_json_object(content: bytes, payload: decisions.Json) -> None:
+    assert decisions.json_object(content) == payload
+
+
+@pytest.mark.parametrize(
+    ("status", "payload", "ident"),
     [
-        (httpx.Response(200, json={"id": 7}), 7),
-        (httpx.Response(200, json={"id": "7"}), None),
-        (httpx.Response(200, json={}), None),
-        (httpx.Response(200, json=[7]), None),
-        (httpx.Response(200, content=b"not json"), None),
-        (httpx.Response(404, json={"id": 7}), None),
-        (httpx.Response(201, json={"id": 7}), None),
+        (200, {"id": 7}, 7),
+        (200, {"id": "7"}, None),
+        (200, {}, None),
+        (404, {"id": 7}, None),
+        (201, {"id": 7}, None),
     ],
 )
-def test_installation_id(response: httpx.Response, ident: int | None) -> None:
-    assert gh_app.installation_id(response) == ident
+def test_installation_id(
+    status: int, payload: decisions.Json, ident: int | None
+) -> None:
+    assert decisions.installation_id(status, payload) == ident
+
+
+@pytest.mark.parametrize(
+    ("status", "content", "expected"),
+    [
+        (
+            401,
+            b'{"message":"Bad credentials","x":"' + TOKEN.encode() + b'"}',
+            "401: Bad credentials",
+        ),
+        (403, b'{"message":"Rate limited"}', "403: Rate limited"),
+        (301, b'{"message":"Moved Permanently"}', "301: Moved Permanently"),
+        (500, b"<html>oops", "500: no message"),
+        (429, b'{"message":""}', "429: no message"),
+        (200, b'{"id":"7"}', "200: no message"),
+        (200, b"junk", "200: no message"),
+    ],
+)
+def test_any_lookup_failure_but_a_404_is_an_error(
+    status: int, content: bytes, expected: str
+) -> None:
+    with pytest.raises(decisions.GhAppError) as caught:
+        decisions.lookup_result(status, content)
+    assert str(caught.value) == f"the installation lookup failed with status {expected}"
+    assert TOKEN not in str(caught.value)
+
+
+def test_lookup_result() -> None:
+    assert decisions.lookup_result(404, b'{"id":9}') is None
+    assert decisions.lookup_result(200, b'{"id":9}') == 9
+
+
+@pytest.mark.parametrize(
+    ("status", "reply", "detail"),
+    [
+        (401, b'{"message":"Bad credentials","token":"no"}', "Bad credentials"),
+        (201, json.dumps({"token": TOKEN}).encode(), "no message"),
+        (500, b"<html>oops", "no message"),
+    ],
+)
+def test_a_bad_token_reply_quotes_only_the_message(
+    status: int, reply: bytes, detail: str
+) -> None:
+    with pytest.raises(decisions.GhAppError) as caught:
+        decisions.exchange_result(status, reply, cached=False)
+    assert str(caught.value) == f"GitHub did not return a token: {detail}"
+
+
+def test_exchange_result_uses_404_to_invalidate_only_a_cached_installation() -> None:
+    content = json.dumps({"token": TOKEN, "expires_at": EXPIRES}).encode()
+    expected = decisions.Minted(TOKEN, EXPIRES_EPOCH)
+    with pytest.raises(decisions.CachedInstallationMissingError):
+        decisions.exchange_result(404, content, cached=True)
+    assert decisions.exchange_result(404, content, cached=False) == expected
+    assert decisions.exchange_result(201, content, cached=True) == expected
+
+
+@pytest.mark.parametrize("permissions", [{}, {"contents": "admin"}, {"contents": ""}])
+def test_validate_permissions(permissions: dict[str, str]) -> None:
+    with pytest.raises(decisions.GhAppError) as caught:
+        decisions.validate_permissions(permissions)
+    assert str(caught.value) == (
+        "permissions must be nonempty and contain only read or write"
+    )
+
+
+def test_scoped_token_body() -> None:
+    permissions = {"contents": "read", "pull_requests": "write"}
+    decisions.validate_permissions(permissions)
+    assert decisions.scoped_token_body("o/r", permissions) == {
+        "repositories": ["r"],
+        "permissions": permissions,
+    }
+    assert decisions.scoped_token_body("o", permissions) == {"permissions": permissions}
+    assert decisions.lookup_paths("o") == ["/orgs/o/installation"]
 
 
 @pytest.mark.parametrize(
@@ -529,14 +616,14 @@ def test_installation_id(response: httpx.Response, ident: int | None) -> None:
     ["2026-11-09T11:00:00Z", "2026-11-09T11:00:00+00:00", "2026-11-09T06:00:00-05:00"],
 )
 def test_parse_token(expires: str) -> None:
-    minted = gh_app.parse_token({"token": TOKEN, "expires_at": expires})
+    minted = decisions.parse_token({"token": TOKEN, "expires_at": expires})
     assert minted.token == TOKEN
     assert minted.expires_at == int(datetime(2026, 11, 9, 11, tzinfo=UTC).timestamp())
 
 
 def test_a_minted_token_stays_out_of_its_repr() -> None:
-    assert TOKEN not in repr(gh_app.Minted(TOKEN, 5))
-    assert repr(gh_app.Minted(TOKEN, 5)) == "Minted(expires_at=5)"
+    assert TOKEN not in repr(decisions.Minted(TOKEN, 5))
+    assert repr(decisions.Minted(TOKEN, 5)) == "Minted(expires_at=5)"
 
 
 @pytest.mark.parametrize(
@@ -560,10 +647,10 @@ def test_a_minted_token_stays_out_of_its_repr() -> None:
     ],
 )
 def test_parse_token_quotes_only_the_message_from_github(
-    payload: gh_app.Json, detail: str
+    payload: decisions.Json, detail: str
 ) -> None:
-    with pytest.raises(gh_app.GhAppError) as caught:
-        gh_app.parse_token(payload)
+    with pytest.raises(decisions.GhAppError) as caught:
+        decisions.parse_token(payload)
     assert str(caught.value) == f"GitHub did not return a token: {detail}"
 
 
@@ -576,8 +663,8 @@ def test_parse_token_quotes_only_the_message_from_github(
         ({}, "no message"),
     ],
 )
-def test_detail(payload: gh_app.Json, text: str) -> None:
-    assert gh_app.detail(payload) == text
+def test_detail(payload: decisions.Json, text: str) -> None:
+    assert decisions.detail(payload) == text
 
 
 RSA_TEXT = (
@@ -603,11 +690,11 @@ RSA_TEXT = (
     ],
 )
 def test_is_rsa(text: bytes, rsa_key: bool) -> None:
-    assert gh_app.is_rsa(text) is rsa_key
+    assert decisions.is_rsa(text) is rsa_key
 
 
 def test_render_hosts() -> None:
-    assert gh_app.render_hosts("bot", TOKEN) == (
+    assert decisions.render_hosts("bot", TOKEN) == (
         "github.com:\n"
         "    users:\n"
         '        "bot[bot]":\n'
@@ -619,6 +706,12 @@ def test_render_hosts() -> None:
 
 
 # --- the thin layer ---------------------------------------------------------
+
+
+def test_public_response_adapters() -> None:
+    response = httpx.Response(200, json={"id": 7})
+    assert gh_app.json_object(response) == {"id": 7}
+    assert gh_app.installation_id(response) == 7
 
 
 def test_default_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1020,72 +1113,24 @@ def test_the_installation_falls_back_from_the_repo_to_the_org(
     ]
 
 
-def lookup_routes(
-    repo: httpx.Response, org: httpx.Response | None = None
-) -> dict[tuple[str, str], httpx.Response]:
-    routes = {("GET", f"/repos/{REPO}/installation"): repo}
-    if org is not None:
-        routes[("GET", "/orgs/acme/installation")] = org
-    return routes
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        (
-            httpx.Response(401, json={"message": "Bad credentials", "x": TOKEN}),
-            "401: Bad credentials",
-        ),
-        (httpx.Response(403, json={"message": "Rate limited"}), "403: Rate limited"),
-        (
-            httpx.Response(301, json={"message": "Moved Permanently"}),
-            "301: Moved Permanently",
-        ),
-        (httpx.Response(500, content=b"<html>oops"), "500: no message"),
-        (httpx.Response(429, json={"message": ""}), "429: no message"),
-        (httpx.Response(200, json={"id": "7"}), "200: no message"),
-        (httpx.Response(200, content=b"junk"), "200: no message"),
-    ],
-)
 @pytest.mark.parametrize("where", ["repo", "org"])
-def test_any_lookup_failure_but_a_404_is_an_error(
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-    rsa: Key,
-    case: tuple[httpx.Response, str],
-    where: str,
-) -> None:
-    reply, expected = case
-    routes = (
-        lookup_routes(reply)
-        if where == "repo"
-        else lookup_routes(httpx.Response(404, json={"message": "Not Found"}), reply)
+def test_find_installation_stops_at_the_first_error(where: str) -> None:
+    denied = httpx.Response(403, json={"message": "Rate limited"})
+    missing = httpx.Response(404)
+    github = Github(
+        {
+            ("GET", f"/repos/{REPO}/installation"): denied
+            if where == "repo"
+            else missing,
+            ("GET", "/orgs/acme/installation"): denied,
+        }
     )
-    github = Github(routes)
-    code, out, err = run(
-        capsys, env_for(tmp_path, app_store(rsa.pem), github), "bot", REPO
-    )
-    assert (code, out) == (1, "")
-    assert err == f"the installation lookup failed with status {expected}\n"
-    assert [r.method for r in github.requests] == ["GET"] * (
-        1 if where == "repo" else 2
-    )
-    assert not out_path(tmp_path).exists()
-    assert TOKEN not in err
-
-
-def test_a_404_on_the_repo_falls_through_to_the_org(
-    capsys: pytest.CaptureFixture[str], tmp_path: Path, rsa: Key
-) -> None:
-    routes = lookup_routes(
-        httpx.Response(404, json={"message": "Not Found"}),
-        httpx.Response(200, json={"id": 9}),
-    )
-    routes.update({k: v for k, v in ok_routes(9).items() if k[0] == "POST"})
-    code, _, _ = run(
-        capsys, env_for(tmp_path, app_store(rsa.pem), Github(routes)), "bot", REPO
-    )
-    assert code == 0
+    with (
+        httpx.Client(base_url=gh_app.API, transport=github.transport) as client,
+        pytest.raises(gh_app.GhAppError, match="403: Rate limited"),
+    ):
+        gh_app.find_installation(client, REPO)
+    assert len(github.requests) == (1 if where == "repo" else 2)
 
 
 def test_no_installation_is_an_error(
@@ -1138,35 +1183,6 @@ def test_permissions_narrow_the_token_request_and_use_their_own_dir(
         "permissions": {"contents": "read"},
     }
     assert not out_path(tmp_path, "widget").exists()
-
-
-@pytest.mark.parametrize(
-    ("reply", "detail"),
-    [
-        (
-            httpx.Response(401, json={"message": "Bad credentials", "token": "no"}),
-            "Bad credentials",
-        ),
-        (httpx.Response(201, json={"token": TOKEN}), "no message"),
-        (httpx.Response(500, content=b"<html>oops"), "no message"),
-    ],
-)
-def test_a_bad_token_reply_quotes_only_the_message(
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-    rsa: Key,
-    reply: httpx.Response,
-    detail: str,
-) -> None:
-    github = Github(
-        {**ok_routes(), ("POST", "/app/installations/7/access_tokens"): reply}
-    )
-    code, out, err = run(
-        capsys, env_for(tmp_path, app_store(rsa.pem), github), "bot", REPO
-    )
-    assert (code, out) == (1, "")
-    assert err == f"GitHub did not return a token: {detail}\n"
-    assert not out_path(tmp_path).exists()
 
 
 def test_a_network_failure_names_only_its_type(
@@ -1562,29 +1578,8 @@ def test_the_module_names_no_service_account() -> None:
 MINT_PERMISSIONS = {"contents": "write", "pull_requests": "write"}
 
 
-def test_mint_token_disables_client_environment(
-    tmp_path: Path, rsa: Key, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    enter = httpx.Client.__enter__
-
-    def check_client(client: httpx.Client) -> httpx.Client:
-        assert client.trust_env is False
-        return enter(client)
-
-    monkeypatch.setattr(httpx.Client, "__enter__", check_client)
-    github = Github()
-    assert gh_app.mint_token(
-        env_for(tmp_path, Store({}), github),
-        app_id=APP_ID,
-        pem=rsa.pem,
-        repository=REPO,
-        permissions=MINT_PERMISSIONS,
-    ) == gh_app.Minted(TOKEN, EXPIRES_EPOCH)
-    assert len(github.requests) == 2
-
-
-def test_mint_token_ignores_proxy_environment(
-    tmp_path: Path, rsa: Key, monkeypatch: pytest.MonkeyPatch
+def test_exchange_token_ignores_proxy_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:bad")
     monkeypatch.setattr(
@@ -1598,12 +1593,11 @@ def test_mint_token_ignores_proxy_environment(
         return github(request)
 
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_request)
-    assert gh_app.mint_token(
+    assert gh_app.exchange_token(
         replace(env_for(tmp_path, Store({}), github), transport=None),
-        app_id=APP_ID,
-        pem=rsa.pem,
-        repository=REPO,
-        permissions=MINT_PERMISSIONS,
+        REPO,
+        "fake-jwt",
+        {"permissions": MINT_PERMISSIONS},
     ) == gh_app.Minted(TOKEN, EXPIRES_EPOCH)
     assert len(github.requests) == 2
 
@@ -1668,7 +1662,7 @@ def test_mint_token_narrows_and_signs_without_files(
     assert all(TOKEN not in p.read_text() for p in tmp_path.rglob("*") if p.is_file())
 
 
-@pytest.mark.parametrize("status", [404, 401, 403, 500])
+@pytest.mark.parametrize("status", [404, 403])
 def test_mint_token_lookup_falls_back_only_on_404(
     tmp_path: Path,
     rsa: Key,
@@ -1708,11 +1702,7 @@ def test_mint_token_lookup_falls_back_only_on_404(
         assert len(github.requests) == 1
 
 
-@pytest.mark.parametrize("permissions", [{}, {"contents": "admin"}, {"contents": ""}])
-def test_mint_token_refuses_permissions_before_request(
-    tmp_path: Path,
-    permissions: dict[str, str],
-) -> None:
+def test_mint_token_refuses_permissions_before_request(tmp_path: Path) -> None:
     github = Github()
     with pytest.raises(gh_app.GhAppError, match="permissions") as caught:
         gh_app.mint_token(
@@ -1720,7 +1710,7 @@ def test_mint_token_refuses_permissions_before_request(
             app_id=APP_ID,
             pem="invalid key",
             repository=REPO,
-            permissions=permissions,
+            permissions={},
         )
     assert str(caught.value) == (
         "permissions must be nonempty and contain only read or write"
