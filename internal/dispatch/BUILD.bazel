@@ -1,0 +1,35 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+load(":linters.bzl", "golangci_lint_test")
+
+filegroup(
+    name = "repo_files",
+    srcs = [
+        "BUILD.bazel",
+        "dispatch.go",
+        "dispatch_test.go",
+        "linters.bzl",
+    ],
+    visibility = ["//:__pkg__"],
+)
+
+go_library(
+    name = "dispatch",
+    srcs = ["dispatch.go"],
+    importpath = "go.tbhb.dev/tools/internal/dispatch",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "dispatch_test",
+    size = "small",
+    srcs = ["dispatch_test.go"],
+    embed = [":dispatch"],
+    tags = ["unit"],
+    visibility = ["//:__pkg__"],
+)
+
+golangci_lint_test(
+    name = "depguard_test",
+    size = "small",
+    srcs = [":dispatch_test"],
+)

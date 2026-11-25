@@ -1,0 +1,28 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+filegroup(
+    name = "repo_files",
+    srcs = [
+        "BUILD.bazel",
+        "plugins.go",
+        "plugins_test.go",
+    ],
+    visibility = ["//:__pkg__"],
+)
+
+go_library(
+    name = "plugins",
+    srcs = ["plugins.go"],
+    importpath = "go.tbhb.dev/tools/internal/plugins",
+    visibility = ["//cmd/tbhbdev:__pkg__"],
+    deps = ["//internal/dispatch"],
+)
+
+go_test(
+    name = "plugins_test",
+    size = "small",
+    srcs = ["plugins_test.go"],
+    embed = [":plugins"],
+    tags = ["integration"],
+    visibility = ["//:__pkg__"],
+)

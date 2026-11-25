@@ -1,0 +1,19 @@
+---
+version: 3
+
+allow:
+  depOnAnyVendor: false
+  deepScan: false
+
+components:
+  cmd: {in: cmd/*}
+  adapters: {in: internal/plugins}
+  pure: {in: internal/dispatch}
+
+deps:
+  cmd:
+    mayDependOn: [adapters, pure]
+  adapters:
+    mayDependOn: [pure]
+  pure:
+    mayDependOn: [pure]

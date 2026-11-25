@@ -1,6 +1,7 @@
 load("@bazel_env.bzl", "bazel_env")
 load("@bazelrc-preset.bzl", "bazelrc_preset")
 load("@buildifier_prebuilt//:rules.bzl", "buildifier", "buildifier_test")
+load("@gazelle//:def.bzl", "gazelle")
 load("@tbhb_rules//format:defs.bzl", "format", "format_test")
 load(
     "@tbhb_rules//lint:defs.bzl",
@@ -23,6 +24,7 @@ load(
 )
 load("@tbhb_rules//repo:defs.bzl", "repo_files", "repo_layout_test")
 load("@tbhb_rules//testing:defs.bzl", "expect_failure_test")
+load("@tbhb_rules_go//:defs.bzl", "go_arch_lint_test")
 load(
     "@tbhb_rules_python//:defs.bzl",
     "bandit_test",
@@ -37,6 +39,27 @@ load(
     "python_tool",
     "ruff_test",
     "vulture_test",
+)
+
+# gazelle:prefix go.tbhb.dev/tools
+
+exports_files([
+    ".golangci.yml",
+    "go.mod",
+])
+
+gazelle(name = "gazelle")
+
+go_arch_lint_test(
+    name = "go_arch_lint_test",
+    size = "small",
+    srcs = [
+        "//cmd/tbhbdev",
+        "//internal/dispatch:dispatch_test",
+        "//internal/plugins:plugins_test",
+    ],
+    config = ".go-arch-lint.yml",
+    go_mod = "go.mod",
 )
 
 # Every file of the repository, for the whole-tree checks below. Ignored
@@ -130,7 +153,9 @@ repo_layout_test(
         ".github",
         ".vale",
         "LICENSES",
+        "cmd",
         "docs",
+        "internal",
         "schemas",
         "src",
         "tests",

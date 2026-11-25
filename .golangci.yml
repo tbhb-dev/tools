@@ -1,0 +1,15 @@
+---
+version: "2"
+
+linters:
+  default: none
+  enable: [depguard]
+  settings:
+    depguard:
+      rules:
+        pure:
+          files: ["**/internal/dispatch/*.go"]
+          deny:
+            - pkg: os  # Includes os/exec.
+            - pkg: net
+            - pkg: syscall
