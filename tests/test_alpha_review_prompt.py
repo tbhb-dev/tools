@@ -75,7 +75,9 @@ def test_render_and_validate(
     fields = FIELDS | {"base_reviewed": BASE_REVIEWED} if delta else FIELDS
     prompt = review_prompt.render(tier, delta, variant, fields)
     skeleton = review_prompt.skeleton(tier, delta, variant, fields)
-    assert prompt.endswith(skeleton)
+    assert "schema: 2" not in prompt
+    assert "run header lines" not in prompt
+    assert "Omit Findings if there are no findings." in prompt
     assert _resource(depth) in prompt
     lens_text = "\n".join(_resource(lens) for lens in LENSES)
     assert f"\n{lens_text}\n" in prompt
@@ -135,7 +137,11 @@ def test_render_and_validate(
 )
 def test_final_message_verdict(tier: Tier, delta: bool, variant: Variant) -> None:
     fields = FIELDS | {"base_reviewed": BASE_REVIEWED}
-    prompt_lines = review_prompt.render(tier, delta, variant, fields).splitlines()
+    prompt = review_prompt.render(tier, delta, variant, fields)
+    assert "`tbhbdev alpha review draft 385`" in prompt
+    assert "`tbhbdev alpha review check 385 --no-lint`" in prompt
+    assert "exactly one `.git/tbhb-alpha/review-385.md`" in prompt
+    prompt_lines = prompt.splitlines()
     assert f"VERDICT: GO {HEAD}" in prompt_lines
     assert f"VERDICT: NO-GO {HEAD}" in prompt_lines
     assert "VERDICT" not in review_prompt.skeleton(tier, delta, variant, fields)
@@ -261,5 +267,5 @@ def test_invalid_template_placeholder(
 def test_field_cannot_leave_placeholder(value: str) -> None:
     with pytest.raises(ReviewError, match=r"^Unresolved placeholder in review text$"):
         review_prompt.render(
-            1, delta=False, variant="a", fields=FIELDS | {"provider": value}
+            1, delta=False, variant="a", fields=FIELDS | {"repo": value}
         )

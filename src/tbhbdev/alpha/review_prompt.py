@@ -94,19 +94,18 @@ def render(
     variant: Variant,
     fields: Mapping[str, str | int],
 ) -> str:
-    """Render reviewer instructions, the five lenses, and the draft skeleton.
+    """Render reviewer instructions and the five lenses.
 
-    Pass run, provider, model, host, head, repo, and pr in fields. Delta
-    reviews also require base_reviewed. The arguments supply tier and variant.
+    Pass head, repo, and pr in fields. Delta reviews also require base_reviewed.
     """
     values = _values(tier, variant, fields, delta=delta)
-    instructions, draft = _common()
+    instructions, _ = _common()
     depth = _load(_PROMPTS[tier, variant])
     if tier == 2:  # noqa: PLR2004 -- Escalation rules apply only to tier 2.
         depth += _escalation_rules()
     scope = _load("delta.txt") if delta else ""
     lenses = "\n".join(_load(f"{lens}.txt") for lens in _LENSES)
-    return _fill(f"{scope}{depth}\n{lenses}\n{instructions}\n{draft}", values)
+    return _fill(f"{scope}{depth}\n{lenses}\n{instructions}", values)
 
 
 def skeleton(
