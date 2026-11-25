@@ -172,19 +172,19 @@ def check_range(published: PublishedRange) -> None:
         raise OpenRefusedError(message)
 
 
-NO_BASE_RULES = secret_scan.NO_COMMITTED_CONFIG
-HEAD_RULES = (
-    "no .gitleaks.toml at the base; scanned with the private config and the "
-    "run's .gitleaks.toml"
+NO_BASE_RULES = (
+    f"{secret_scan.NO_COMMITTED_CONFIG}; the run's .gitleaks.toml is ignored"
 )
 
 
 def scan_rules(published: PublishedRange, write: Callable[[str, str], None]) -> bytes:
     """Load secret scan rules from the pre-run commit.
 
-    A pre-run commit without the file falls back to the run's head commit file,
-    or to none, which scans with the private config and gitleaks' defaults. The
-    fallback is logged. A missing commit or an unreadable file still refuses.
+    A pre-run commit without the file falls back to no rules, which scans with
+    the private config and gitleaks' defaults. The run's own ``.gitleaks.toml``
+    is never read: the run controls it, and gitleaks would merge its allowlists
+    and ``[extend]`` table over the host's rules. The fallback is logged. A
+    missing commit or an unreadable file still refuses.
     """
     before = published.before
     if before is None:
@@ -201,11 +201,8 @@ def scan_rules(published: PublishedRange, write: Callable[[str, str], None]) -> 
     if listed.returncode or listed.stdout.strip():
         message = f"cannot load {GITLEAKS_EXTENDS} from the pre-run commit"
         raise OpenRefusedError(message)
-    head = publication_git(
-        published.git_dir, "cat-file", "blob", f"{published.commit}:{GITLEAKS_EXTENDS}"
-    )
-    write("log", f"{NO_BASE_RULES if head.returncode else HEAD_RULES}\n")
-    return b"" if head.returncode else head.stdout
+    write("log", f"{NO_BASE_RULES}\n")
+    return b""
 
 
 # Fixed phrases for scanner failures, chosen by the refusal's kind, so the log

@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from io import BufferedReader, FileIO
 from typing import TYPE_CHECKING, override
 
 import httpx
 import pytest
+from fake_tool import write_private_config
 
 from tbhbdev import gitleaks_check
 from tbhbdev.alpha.agent import host_tools, open_pr
 from tbhbdev.alpha.agent.model import Invalid
+
+# The autouse fixture below replaces this with a stub; one test runs the real one.
+REAL_SCAN_TEXT = gitleaks_check.scan_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -67,6 +72,7 @@ def commit_draft(
     *,
     initial: bool = False,
     policy: bool = True,
+    head_rules: str = "untrusted",
 ) -> open_pr.PublishedRange:
     def git(*args: str) -> str:
         return subprocess.check_output(
@@ -91,7 +97,7 @@ def commit_draft(
     before = commit()
     if text is not None:
         write_draft(directory, text)
-        (directory / ".gitleaks.toml").write_text("untrusted")
+        (directory / ".gitleaks.toml").write_text(head_rules)
     head = commit()
     (directory / open_pr.DRAFT).unlink(missing_ok=True)
     return open_pr.PublishedRange(directory, directory / ".git", before, head)
@@ -553,26 +559,28 @@ def test_a_base_without_rules_falls_back_to_the_defaults(tmp_path: Path) -> None
     assert logged == [("log", f"{open_pr.NO_BASE_RULES}\n")]
     assert open_pr.NO_BASE_RULES == (
         "no .gitleaks.toml at the base; scanned with the private config and "
-        "gitleaks defaults"
+        "gitleaks defaults; the run's .gitleaks.toml is ignored"
     )
 
 
-def test_a_base_without_rules_uses_the_file_the_run_adds(tmp_path: Path) -> None:
+def test_a_base_without_rules_never_reads_the_file_the_run_adds(
+    tmp_path: Path,
+) -> None:
     published = commit_draft(tmp_path, DRAFT, policy=False)
     logged: list[tuple[str, str]] = []
     rules = open_pr.scan_rules(
         published, lambda suffix, text: logged.append((suffix, text))
     )
-    assert rules == b"untrusted"
-    assert logged == [("log", f"{open_pr.HEAD_RULES}\n")]
+    assert rules == b""
+    assert logged == [("log", f"{open_pr.NO_BASE_RULES}\n")]
 
 
-@pytest.mark.parametrize(("adds", "expected"), [(False, b""), (True, b"untrusted")])
+@pytest.mark.parametrize("adds", [False, True])
 def test_opening_without_base_rules_scans_and_says_so(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
     adds: bool,
-    expected: bytes,
 ) -> None:
     published = commit_draft(tmp_path, DRAFT if adds else None, policy=False)
     write_draft(tmp_path, DRAFT)
@@ -599,9 +607,72 @@ def test_opening_without_base_rules_scans_and_says_so(
     assert (
         open_draft(published, lambda suffix, text: logged.append((suffix, text))) == 3
     )
-    assert seen == [expected]
-    line = open_pr.HEAD_RULES if adds else open_pr.NO_BASE_RULES
-    assert logged == [("log", f"{line}\n")]
+    assert seen == [b""]
+    assert logged == [("log", f"{open_pr.NO_BASE_RULES}\n")]
+
+
+# An obviously fake token that the stand-in private config's canary rule flags.
+FAKE_CANARY = "test-canary-0123456789abcdef"
+
+
+@pytest.mark.parametrize(
+    "head_rules",
+    [
+        # A global allowlist and a rule allowlist for the fake token.
+        f"[allowlist]\nregexes = ['''{FAKE_CANARY}''']\n",
+        (
+            "[[rules]]\nid = 'tbhb-private-canary'\nregex = '''x'''\n"
+            f"[rules.allowlist]\nregexes = ['''{FAKE_CANARY}''']\n"
+        ),
+        # An [extend] table that reads a path the run picks and drops the defaults.
+        (
+            "[extend]\npath = '/nonexistent/run-picked.toml'\n"
+            "disabledRules = ['github-pat']\n"
+        ),
+    ],
+)
+def test_a_head_file_cannot_suppress_a_finding_in_the_fallback_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    head_rules: str,
+) -> None:
+    gitleaks = shutil.which("gitleaks")
+    assert gitleaks, "the pinned gitleaks must be on PATH"
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    write_private_config(home)
+    resolve = host_tools.resolve
+
+    def resolve_real_gitleaks(name: str) -> str:
+        return gitleaks if name == "gitleaks" else resolve(name)
+
+    monkeypatch.setattr(host_tools, "resolve", resolve_real_gitleaks)
+    monkeypatch.setattr(gitleaks_check, "scan_text", REAL_SCAN_TEXT)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    published = commit_draft(repository, DRAFT, policy=False, head_rules=head_rules)
+    # The head file is really committed and really names the fake token's rules.
+    committed = subprocess.check_output(
+        ["git", "show", f"{published.commit}:.gitleaks.toml"],
+        cwd=repository,
+        text=True,
+    )
+    assert committed == head_rules
+    logged: list[tuple[str, str]] = []
+    rules = open_pr.scan_rules(
+        published, lambda suffix, text: logged.append((suffix, text))
+    )
+    assert logged == [("log", f"{open_pr.NO_BASE_RULES}\n")]
+    with pytest.raises(open_pr.OpenRefusedError) as captured:
+        open_pr.scan_draft(
+            f"# fix: x\n\nThe value is {FAKE_CANARY}.\n",
+            published.git_dir,
+            rules,
+            "PUBLIC",
+        )
+    assert str(captured.value) == (
+        "PR draft secret scan refused: gitleaks finds a secret on lines: 3"
+    )
 
 
 UNNAMED = "the scanner refused for a reason the log doesn't name"

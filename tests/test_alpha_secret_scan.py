@@ -190,6 +190,31 @@ def test_gitleaks_runs_from_the_root_with_the_private_config(
     assert seen[1:] == (os.path.realpath(root), "text\n", ["1", "yes"])
 
 
+def test_the_fallback_config_extends_only_the_generated_defaults(
+    root: Path, tmp_path: Path
+) -> None:
+    # Nothing at the root's .gitleaks.toml path reaches gitleaks: the private
+    # config's [extend] path points at a host-written file with only the defaults.
+    (root / ".gitleaks.toml").write_text("")
+    fake = tmp_path / "gitleaks"
+    log = tmp_path / "log"
+    body = (
+        "import re, sys\n"
+        "config = open(sys.argv[sys.argv.index('--config') + 1]).read()\n"
+        "extends = re.findall(r'^path\\s*=\\s*(.+)$', config, re.MULTILINE)\n"
+        'base = open(extends[0].strip("\'")).read()\n'
+        f"open({str(log)!r}, 'w').write(repr((extends, base)))\n"
+        "sys.stdout.write('[]')\n"
+    )
+    write_fake(fake, body)
+    scan("text\n", root, str(fake))
+    extends, base = ast.literal_eval(log.read_text())
+    assert len(extends) == 1
+    assert Path(extends[0].strip("'")).name == "committed.toml"
+    assert Path(extends[0].strip("'")).parent != root
+    assert base == "\n[extend]\nuseDefault = true\n"
+
+
 OVERRIDE = (
     "[[rules]]\nid = \"generic-api-key\"\n[[rules.allowlists]]\nregexes = ['fake-ok']\n"
 )
