@@ -221,7 +221,7 @@ class GhApi:
 
 def api_author(api: review_doc.Api) -> str:
     user = api.request("GET", "user")
-    match cast("review_doc.ApiObject", user):  # pragma: no mutate -- runtime no-op
+    match cast("dict[str, object] | None", user):  # pragma: no mutate -- cast
         case {"login": str(login)} if login:
             return login
         case _:

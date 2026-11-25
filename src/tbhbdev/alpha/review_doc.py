@@ -14,7 +14,6 @@ type Tier = Literal[0, 1, 2]
 type Verdict = Literal["GO", "NO-GO"]
 type FindingClass = Literal["BLOCK", "TECH-DEBT", "SECURITY-DEBT"]
 type Variant = Literal["a", "b"]
-type ApiObject = dict[str, object] | None
 type _ReviewRow = dict[str, dict[str, object] | str | int] | None
 type _Pull = dict[str, dict[str, object]] | None
 
@@ -41,7 +40,7 @@ _REASON_LIMIT = 200
 
 
 class ReviewError(ValueError):
-    """The review draft cannot be parsed."""
+    """A review document or operation was refused."""
 
 
 @dataclass(frozen=True)
@@ -356,7 +355,7 @@ def post(
         f"{path}/reviews",
         {"commit_id": doc.head_sha, "body": render(doc), "event": "COMMENT"},
     )
-    match cast("ApiObject", result):  # pragma: no mutate -- runtime no-op
+    match cast("dict[str, object] | None", result):  # pragma: no mutate -- cast
         case {"id": int(review_id)}:
             return "posted", review_id
         case _:
@@ -381,7 +380,7 @@ def dismiss(
         raise ReviewError(message)
     path = f"repos/{repo}/pulls/{pr}/reviews/{review_id}"
     response = api.request("GET", path)
-    match cast("ApiObject", response):  # pragma: no mutate -- runtime no-op
+    match cast("dict[str, object] | None", response):  # pragma: no mutate -- cast
         case {"body": str(body), "state": ("COMMENTED" | "DISMISSED") as state}:
             key = parse_marker(body)
             if key is not None and (key.repo, key.pr) == (repo, pr):
@@ -413,7 +412,7 @@ def reply(
         message = "reply text must not contain markers"
         raise ReviewError(message)
     review = api.request("GET", f"repos/{repo}/pulls/{pr}/reviews/{review_id}")
-    match cast("ApiObject", review):  # pragma: no mutate -- runtime no-op
+    match cast("dict[str, object] | None", review):  # pragma: no mutate -- cast
         case {"commit_id": str(head)} if _HEAD.fullmatch(head):
             body = f"Re review {review_id} (head {head[:8]}): {text}\n"
         case _:
@@ -421,7 +420,7 @@ def reply(
             raise ReviewError(message)
     body += f"<!-- tbhb-reply v1 review={review_id} -->"
     response = api.request("POST", f"repos/{repo}/issues/{pr}/comments", {"body": body})
-    match cast("ApiObject", response):  # pragma: no mutate -- runtime no-op
+    match cast("dict[str, object] | None", response):  # pragma: no mutate -- cast
         case {"id": int(comment_id)}:
             return comment_id
         case _:
