@@ -13,15 +13,15 @@ assignees:
 
 ## Why
 
-Running `tool stamp` on a tree with a read-only file stops partway. The command leaves some files stamped and others not, and prints nothing that says which. See [the issue](https://github.com/tbhb-dev/tools/issues/12).
+Running `tool stamp` on a tree with a file that denies writes stops partway. The command leaves some files stamped and omits the list of paths it skipped. See [the issue](https://github.com/tbhb-dev/tools/issues/12).
 
 ## Behavior change
 
-The command now checks every target before it writes one. A read-only file fails the whole run with an exit code of 1 and a list of the blocked paths. A run that passes the check stamps every file.
+The command now checks every target before it writes one. A file that denies writes fails the whole run with an exit code of 1 and a list of the blocked paths. After the check passes, the command stamps every file.
 
 ## Verification
 
-Ran the new unit tests, then stamped a tree with one read-only file:
+Ran the new unit tests and tried to stamp a tree with one file that denies writes.
 
 ```console
 $ go test ./internal/stamp/...

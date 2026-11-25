@@ -139,6 +139,22 @@ from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha import opened, secret_scan, size_gate
+from tbhbdev.alpha.decisions import pull_request as decisions
+from tbhbdev.alpha.decisions.pull_request import (  # noqa: F401 -- preserve public imports
+    EDIT_DRAFT,
+    NAME_WITH_OWNER,
+    OPENED_KEY,
+    OPENED_LINE,
+    PR_PAGE,
+    PR_URL,
+    REPO,
+    body_of,
+    identity_key,
+    merge_trailers,
+    opened_line,
+    target_of_pr,
+    trailer_lines,
+)
 from tbhbdev.alpha.repo import git, hook_cwd, in_tbhb_dev, read_hook_stdin
 
 if TYPE_CHECKING:
@@ -200,21 +216,11 @@ URL = re.compile(r"<?https?://[^\s>]*>?")
 RUMDL_LINE = re.compile(r"\S+?:(\d+):\d+: (.+)")
 CSPELL_LINE = re.compile(r"\S+?:(\d+):\d+ - (.+)")
 HUMAN_TRAILER = re.compile(r"(?:Signed-off-by|Co-authored-by):", re.IGNORECASE)
-OPENED_KEY = "Opened-by"
-# The line create writes, and any spelling of the key in a draft.
-OPENED_LINE = re.compile(rf"{OPENED_KEY}: ")
+# Any spelling of the Opened-by key in a draft.
 DRAFT_OPENED = re.compile(r"\s*opened-by\s*:", re.IGNORECASE)
 OPENED_MESSAGE = "the script writes Opened-by; remove this line"
-PR_URL = re.compile(r"https://[^/\s]+/([^/\s]+/[^/\s]+)/pull/(\d+)")
-# A repository as ``owner/name``: GitHub's characters for each part, and a name
-# that is not "." or "..". The owner can't begin with "-", so gh can't read it
-# as a flag.
-REPO = r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.+(?:/|\Z))[A-Za-z0-9_.-]+"
-NAME_WITH_OWNER = re.compile(REPO)
-PR_PAGE = re.compile(rf"https://github\.com/({REPO})/pull/[0-9]+")
 REPO_LIMIT = 1000
 PR_LIMIT = 10000
-EDIT_DRAFT = "run `tbhbdev alpha pr edit DRAFT --pr {number}` to apply the draft"
 BACKFILL_KEYS = re.compile(r"(?:Generated-by|Assisted-by|Opened-by):\s*(LLM\b.*)")
 SESSION_ATTR = re.compile(r"(?<![^\s;])session=(sha-256-64:[0-9a-f]{16})(?![^\s;])")
 LIST_ITEM = re.compile(r" *(?:[-*+]|\d+[.)]) +\S")
@@ -858,45 +864,6 @@ def check_text(text: str) -> Checked:
     return Checked(sorted(set(problems)), found[1], rendered, meta)
 
 
-def body_of(rendered: Sequence[str]) -> str:
-    """The description: everything after the title, trimmed."""
-    return "\n".join(rendered[1:]).strip("\n") + "\n"
-
-
-def identity_key(value: str) -> tuple[str, ...]:
-    """Who an LLM trailer value names: harness slug, model, session, subagent."""
-    blob = value.split()[1]
-    attrs = {
-        key: val for key, _, val in (pair.partition("=") for pair in blob.split(";"))
-    }
-    return (
-        attrs["harness"].partition(":")[0],
-        attrs.get("model", ""),
-        attrs.get("session", ""),
-        attrs.get("subagent", ""),
-    )
-
-
-def merge_trailers(
-    found: Sequence[tuple[str, str]], posting: str | None
-) -> list[tuple[str, str]]:
-    """Deduplicate (key, value) trailers by identity; Generated-by wins.
-
-    The posting agent's value is added as Assisted-by when its identity is
-    absent. Generated-by lines come first, as the commit-msg check requires.
-    """
-    roles: dict[tuple[str, ...], tuple[str, str]] = {}
-    for key, value in found:
-        ident = identity_key(value)
-        if ident not in roles or (
-            key == agent_identity.KEY_GEN and roles[ident][0] != key
-        ):
-            roles[ident] = (key, value)
-    if posting is not None and identity_key(posting) not in roles:
-        roles[identity_key(posting)] = (agent_identity.KEY_ASSIST, posting)
-    return sorted(roles.values(), key=lambda pair: pair[0] != agent_identity.KEY_GEN)
-
-
 def branch_trailers(base: str) -> list[tuple[str, str]]:
     """The LLM trailers of the commits on this branch, oldest first.
 
@@ -918,12 +885,6 @@ def branch_trailers(base: str) -> list[tuple[str, str]]:
         message = f"cannot list the commits in {base}..HEAD; is {base} fetched?"
         raise SystemExit(message)
     return trailer_lines(out)
-
-
-def trailer_lines(text: str) -> list[tuple[str, str]]:
-    """Match LLM trailer lines in Git's parsed trailer output."""
-    found = (agent_identity.LINE.match(line) for line in text.splitlines())
-    return [(match[1], match[2]) for match in found if match]
 
 
 def commit_messages(pages: Sequence[object], invalid: str) -> list[str]:
@@ -1022,12 +983,7 @@ def gh_data(
     done: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes],
 ) -> object:
     """The JSON that gh printed, or None when gh failed or printed none."""
-    if done.returncode != 0:
-        return None
-    try:
-        return json.loads(done.stdout)
-    except ValueError:
-        return None
+    return decisions.parse_gh_json(done.returncode, done.stdout)
 
 
 def live_pr(number: int) -> tuple[str | None, object]:
@@ -1050,57 +1006,16 @@ def live_pr(number: int) -> tuple[str | None, object]:
     return line, data.get("url")
 
 
-def opened_line(body: str) -> str | None:
-    """The ``Opened-by`` line of a PR body's final paragraph, or None."""
-    paragraph: list[str] = []
-    for line in reversed(body.splitlines()):
-        if line.strip():
-            paragraph.append(line)
-        elif paragraph:
-            break
-    return next((line for line in paragraph if OPENED_LINE.match(line)), None)
-
-
 def description(
     checked: Checked,
     env: Mapping[str, str],
     found: Sequence[tuple[str, str]],
     opened_by: str | None = None,
 ) -> str:
-    """The final body: the description plus the trailers as its last paragraph.
-
-    ``opened_by``, when given, is the paragraph's first line.
-
-    Raises:
-        SystemExit: A trailer, or the posting agent's, fails the commit-trailer
-            grammar.
-    """
-    posting = posting_value(env)
-    values = [value for _, value in found] + ([posting] if posting else [])
-    errors = [
-        f"{value}: {why}"
-        for value in values
-        if (why := agent_identity.check_value(value))
-    ]
-    if errors:
-        raise SystemExit("invalid LLM trailer: " + "; ".join(errors))
-    merged = [f"{key}: {value}" for key, value in merge_trailers(found, posting)]
-    trailers = ([opened_by] if opened_by else []) + merged
-    body = body_of(checked.rendered)
-    if not trailers:
-        return body
-    return body + "\n" + "\n".join(trailers) + "\n"
-
-
-def target_of_pr(url: object) -> str:
-    """The ``owner/name`` in a pull request's github.com URL, or "".
-
-    The URL must be a string of exactly
-    ``https://github.com/<owner>/<name>/pull/<digits>``; anything else, a
-    missing URL included, names nothing.
-    """
-    found = PR_PAGE.fullmatch(url) if isinstance(url, str) else None
-    return found[1] if found else ""
+    """Resolve the posting identity and build the description with its trailers."""
+    return decisions.render_description(
+        checked.rendered, found, posting_value(env), opened_by
+    )
 
 
 def repo_visibility(target: str) -> str:
@@ -1137,13 +1052,7 @@ def base_visibility() -> str:
     ``owner/name``; a failed or malformed read returns "".
     """
     done = run([find_tool(GH), "repo", "view", "--json", "nameWithOwner,visibility"])
-    data = gh_data(done)
-    if not isinstance(data, dict):
-        return ""
-    name = data.get("nameWithOwner")
-    if not (isinstance(name, str) and NAME_WITH_OWNER.fullmatch(name)):
-        return ""
-    return str(data.get("visibility") or "")
+    return decisions.visibility_of(gh_data(done))
 
 
 def scan_secrets(text: str, what: str, visibility: str) -> None:
@@ -1168,20 +1077,8 @@ def post_text(title: str, body: str, visibility: str) -> None:
 
 
 def gh_args(meta: Mapping[str, object]) -> list[str]:
-    """The gh pr create flags the frontmatter asks for."""
-    args = ["--base", base_of(meta)]
-    if meta.get("draft"):
-        args.append("--draft")
-    for flag, key in (
-        ("--label", "labels"),
-        ("--reviewer", "reviewers"),
-        ("--assignee", "assignees"),
-    ):
-        names = cast("list[str]", meta.get(key, []))  # pragma: no mutate
-        args += [item for name in names for item in (flag, name)]
-    if "milestone" in meta:
-        args += ["--milestone", str(meta["milestone"])]
-    return args
+    """Resolve the base and build the gh pr create flags."""
+    return decisions.create_flags(meta, base_of(meta))
 
 
 def load_checked(path: Path) -> Checked:
@@ -1548,42 +1445,17 @@ def delete_pr_branch(number: int) -> int:
 def create_pr(argv: list[str], body: str, root: str | None, *, dry_run: bool) -> int:
     """Refuse an existing open PR, including a race reported by gh create."""
     done = run([find_tool(GH), "pr", "view", "--json", "number,state,url"])
-    data = gh_data(done)
-    if isinstance(data, dict) and all(
-        type(data.get(key)) is kind
-        for key, kind in (("state", str), ("number", int), ("url", str))
-    ):
-        data = cast("dict[str, object]", data)  # pragma: no mutate
-        if data["state"] == "OPEN":
-            message = (
-                f"error: PR {data['number']} ({data['url']}) is already open; "
-                + EDIT_DRAFT.format(number=data["number"])
-            )
-            print(message, file=sys.stderr)
-            return 1
-    elif not (done.returncode and "no pull requests found" in done.stderr.lower()):
-        output = (done.stderr or done.stdout).rstrip("\n")
-        print(
-            f"cannot check for an open PR: {output}",
-            file=sys.stderr,
-        )
+    refusal = decisions.create_refusal(done.returncode, done.stdout, done.stderr)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
         return 1
     if dry_run:
         return invoke_gh(argv, body, dry_run=True)[0]
     argv[0] = find_tool(GH)
     done = run(argv, stdin=body)
-    output = "\n".join(
-        filter(None, (done.stdout.rstrip("\n"), done.stderr.rstrip("\n")))
-    )
-    if done.returncode or "already exists" in output.lower():
-        print(output, file=sys.stderr)
-        if "already exists" in output.lower():
-            found = PR_URL.search(output)
-            number = found[2] if found else "<n>"
-            print(
-                "gh pr create failed; " + EDIT_DRAFT.format(number=number),
-                file=sys.stderr,
-            )
+    error = decisions.create_error(done.returncode, done.stdout, done.stderr)
+    if error is not None:
+        print(error, file=sys.stderr)
         return 1
     print(done.stdout, end="")
     print(done.stderr, end="", file=sys.stderr)

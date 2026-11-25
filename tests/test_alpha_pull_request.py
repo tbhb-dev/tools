@@ -34,6 +34,7 @@ from jsonschema import Draft202012Validator
 from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha import opened, size_gate
 from tbhbdev.alpha import pull_request as pr
+from tbhbdev.alpha.decisions import pull_request as decisions
 from tbhbdev.alpha.secret_scan import REPO_RULES, without_name_rules
 
 # mutmut runs the tests from a copy of the source tree, so everything resolves
@@ -1179,48 +1180,53 @@ def value(**attrs: str) -> str:
 def test_identity_key_ignores_effort_surface_and_version() -> None:
     one = value(effort="low", harness="claude-code:1.0", model="a:m", surface="cli")
     two = value(effort="high", harness="claude-code:2.0", model="a:m")
-    assert pr.identity_key(one) == pr.identity_key(two)
-    assert pr.identity_key(one) == ("claude-code", "a:m", "", "")
+    assert decisions.identity_key(one) == decisions.identity_key(two)
+    assert decisions.identity_key(one) == ("claude-code", "a:m", "", "")
     full = value(harness="codex", model="a:m", session=SESSION, subagent=SUBAGENT)
-    assert pr.identity_key(full) == ("codex", "a:m", SESSION, SUBAGENT)
-    assert pr.identity_key(value(harness="codex")) == ("codex", "", "", "")
+    assert decisions.identity_key(full) == ("codex", "a:m", SESSION, SUBAGENT)
+    assert decisions.identity_key(value(harness="codex")) == ("codex", "", "", "")
 
 
 def test_merge_dedupes_and_orders() -> None:
     a = value(harness="claude-code", model="a:m1")
     b = value(harness="codex", model="a:m2")
     found = [("Assisted-by", a), ("Generated-by", b), ("Assisted-by", a)]
-    assert pr.merge_trailers(found, None) == [("Generated-by", b), ("Assisted-by", a)]
+    assert decisions.merge_trailers(found, None) == [
+        ("Generated-by", b),
+        ("Assisted-by", a),
+    ]
 
 
 def test_generated_by_wins_whichever_comes_first() -> None:
     low = value(effort="low", harness="claude-code", model="a:m")
     high = value(effort="high", harness="claude-code", model="a:m")
-    assert pr.merge_trailers([("Assisted-by", low), ("Generated-by", high)], None) == [
-        ("Generated-by", high)
-    ]
-    assert pr.merge_trailers([("Generated-by", high), ("Assisted-by", low)], None) == [
-        ("Generated-by", high)
-    ]
-    assert pr.merge_trailers([("Generated-by", high), ("Generated-by", low)], None) == [
-        ("Generated-by", high)
-    ]
-    assert pr.merge_trailers([("Assisted-by", high), ("Assisted-by", low)], None) == [
-        ("Assisted-by", high)
-    ]
+    assert decisions.merge_trailers(
+        [("Assisted-by", low), ("Generated-by", high)], None
+    ) == [("Generated-by", high)]
+    assert decisions.merge_trailers(
+        [("Generated-by", high), ("Assisted-by", low)], None
+    ) == [("Generated-by", high)]
+    assert decisions.merge_trailers(
+        [("Generated-by", high), ("Generated-by", low)], None
+    ) == [("Generated-by", high)]
+    assert decisions.merge_trailers(
+        [("Assisted-by", high), ("Assisted-by", low)], None
+    ) == [("Assisted-by", high)]
 
 
 def test_posting_agent_is_added_as_assisted_once() -> None:
     a = value(harness="claude-code", model="a:m")
     me = value(harness="codex", model="o:m")
-    assert pr.merge_trailers([("Generated-by", a)], me) == [
+    assert decisions.merge_trailers([("Generated-by", a)], me) == [
         ("Generated-by", a),
         ("Assisted-by", me),
     ]
-    assert pr.merge_trailers([], me) == [("Assisted-by", me)]
-    assert pr.merge_trailers([("Generated-by", me)], me) == [("Generated-by", me)]
-    assert pr.merge_trailers([("Assisted-by", me)], me) == [("Assisted-by", me)]
-    assert pr.merge_trailers([], None) == []
+    assert decisions.merge_trailers([], me) == [("Assisted-by", me)]
+    assert decisions.merge_trailers([("Generated-by", me)], me) == [
+        ("Generated-by", me)
+    ]
+    assert decisions.merge_trailers([("Assisted-by", me)], me) == [("Assisted-by", me)]
+    assert decisions.merge_trailers([], None) == []
 
 
 def identity(harness: str, model: str, session: str) -> str:
@@ -1241,16 +1247,16 @@ TRAILERS = st.lists(
 
 @given(TRAILERS, st.none() | IDENTITIES)
 def test_merge_properties(found: list[tuple[str, str]], posting: str | None) -> None:
-    merged = pr.merge_trailers(found, posting)
-    keys = [pr.identity_key(v) for _, v in merged]
+    merged = decisions.merge_trailers(found, posting)
+    keys = [decisions.identity_key(v) for _, v in merged]
     assert len(keys) == len(set(keys))
-    wanted = {pr.identity_key(v) for _, v in found}
+    wanted = {decisions.identity_key(v) for _, v in found}
     if posting is not None:
-        wanted.add(pr.identity_key(posting))
+        wanted.add(decisions.identity_key(posting))
     assert set(keys) == wanted
     roles = [k for k, _ in merged]
     assert roles == sorted(roles, key=lambda role: role != "Generated-by")
-    generated = {pr.identity_key(v) for k, v in found if k == "Generated-by"}
+    generated = {decisions.identity_key(v) for k, v in found if k == "Generated-by"}
     for (role, _), key in zip(merged, keys, strict=True):
         assert (role == "Generated-by") == (key in generated)
     assert not agent_identity.check_message("\n".join(f"{k}: {v}" for k, v in merged))
@@ -1364,9 +1370,8 @@ def checked_for() -> pr.Checked:
     return pr.check_text(BASE)
 
 
-def test_description_without_trailers_is_the_body(world: World) -> None:
-    del world
-    got = pr.description(checked_for(), {}, [])
+def test_description_without_trailers_is_the_body() -> None:
+    got = decisions.render_description(BASE.splitlines(), [], None)
     assert got == "## Why\n\nw\n\n## Behavior change\n\nb\n\n## Verification\n\nv\n"
 
 
@@ -1389,37 +1394,17 @@ def test_description_appends_a_trailer_paragraph(
     assert "raw-session" not in got
 
 
-def test_human_posting_adds_only_branch_trailers(world: World) -> None:
-    world.git("switch", "-q", "-c", "topic")
-    assert pr.description(checked_for(), {}, pr.branch_trailers("main")).endswith("v\n")
-    world.commit(f"one\n\nAssisted-by: {GEN}")
-    got = pr.description(checked_for(), {}, pr.branch_trailers("main"))
+def test_human_posting_adds_only_branch_trailers() -> None:
+    got = decisions.render_description(BASE.splitlines(), [("Assisted-by", GEN)], None)
     assert got.endswith(f"v\n\nAssisted-by: {GEN}\n")
     assert got.count("Assisted-by") == 1
 
 
-def test_posting_agent_already_on_the_branch_is_not_repeated(
-    world: World, agent: dict[str, str]
-) -> None:
-    world.git("switch", "-q", "-c", "topic")
-    world.commit(f"one\n\nGenerated-by: {POSTING}")
-    got = pr.description(checked_for(), agent, pr.branch_trailers("main"))
+def test_posting_agent_already_on_the_branch_is_not_repeated() -> None:
+    got = decisions.render_description(
+        BASE.splitlines(), [("Generated-by", POSTING)], POSTING
+    )
     assert got.endswith(f"v\n\nGenerated-by: {POSTING}\n")
-
-
-def test_a_resolved_posting_value_is_one_line_with_its_commit_trailer(
-    world: World, agent: dict[str, str]
-) -> None:
-    """The session's posting value has model=, so it matches its own commit."""
-    assert "model=anthropic:claude-opus-5-5" in POSTING
-    world.git("switch", "-q", "-c", "topic")
-    world.commit(f"one\n\nGenerated-by: {POSTING}")
-    got = pr.description(checked_for(), agent, pr.branch_trailers("main"))
-    session = f"session={agent_identity.sha256_64('raw-session')}"
-    lines = [line for line in got.splitlines() if session in line]
-    assert lines == [f"Generated-by: {POSTING}"]
-    assert "Assisted-by" not in got
-    assert pr.posting_value(agent) == POSTING
 
 
 def test_the_posting_session_dedupes_against_its_commit_trailer(
@@ -1435,7 +1420,9 @@ def test_the_posting_session_dedupes_against_its_commit_trailer(
     assert "model=anthropic:claude-opus-5-5" in trailer
     world.commit(f"one\n\nGenerated-by: {trailer}")
     assert pr.posting_value(agent) == trailer
-    merged = pr.merge_trailers(pr.branch_trailers("main"), pr.posting_value(agent))
+    merged = decisions.merge_trailers(
+        pr.branch_trailers("main"), pr.posting_value(agent)
+    )
     assert merged == [("Generated-by", trailer)]
     assert run_main("create", env=agent) == 0
     _, call = world.calls("gh")
@@ -1487,18 +1474,15 @@ def test_description_uses_the_frontmatter_base(world: World) -> None:
 @pytest.mark.parametrize(
     "bad", ["LLM model=a:m", "claude-code:opus", "LLM harness=nope"]
 )
-def test_invalid_branch_trailers_stop_the_description(world: World, bad: str) -> None:
-    world.git("switch", "-q", "-c", "topic")
-    world.commit(f"one\n\nGenerated-by: {bad}")
+def test_invalid_branch_trailers_stop_the_description(bad: str) -> None:
     with pytest.raises(SystemExit, match=r"invalid LLM trailer: .*"):
-        pr.description(checked_for(), {}, pr.branch_trailers("main"))
+        decisions.render_description(BASE.splitlines(), [("Generated-by", bad)], None)
 
 
-def test_invalid_trailer_message_names_the_value(world: World) -> None:
-    world.git("switch", "-q", "-c", "topic")
-    world.commit("one\n\nGenerated-by: LLM model=a:m")
+def test_invalid_trailer_message_names_the_value() -> None:
+    found = [("Generated-by", "LLM model=a:m")]
     with pytest.raises(SystemExit) as info:
-        pr.description(checked_for(), {}, pr.branch_trailers("main"))
+        decisions.render_description(BASE.splitlines(), found, None)
     assert str(info.value) == "invalid LLM trailer: LLM model=a:m: harness required"
 
 
@@ -2020,7 +2004,7 @@ def test_a_malformed_target_is_empty_without_a_gh_call(
 )
 def test_a_pr_url_names_its_repository(url: str) -> None:
     assert (
-        pr.target_of_pr(url)
+        decisions.target_of_pr(url)
         == url.removeprefix("https://github.com/").split("/pull/")[0]
     )
 
@@ -2063,7 +2047,7 @@ def test_a_pr_url_names_its_repository(url: str) -> None:
     ],
 )
 def test_a_url_that_is_not_a_github_pr_page_names_nothing(url: object) -> None:
-    assert pr.target_of_pr(url) == ""
+    assert decisions.target_of_pr(url) == ""
 
 
 @pytest.mark.parametrize(
@@ -2087,12 +2071,10 @@ def test_a_url_that_is_not_a_github_pr_page_names_nothing(url: object) -> None:
     ],
 )
 def test_the_base_visibility_counts_only_with_a_parsed_name(
-    world: World, answer: dict[str, object], want: str
+    answer: dict[str, object], want: str
 ) -> None:
-    world.fake("gh", cases={"repo view": answer})
-    assert pr.base_visibility() == want
-    (read,) = world.calls("gh.repo")
-    assert read["argv"] == ["repo", "view", "--json", "nameWithOwner,visibility"]
+    data = decisions.parse_gh_json(cast("int", answer["rc"]), str(answer["stdout"]))
+    assert decisions.visibility_of(data) == want
 
 
 def without_path(config: str) -> str:
@@ -2140,22 +2122,20 @@ def test_create_reads_the_base_repository_once_and_picks_the_config(
     assert (scan_config(world) != full_config()) is reduced
 
 
-@pytest.mark.parametrize("name", ["", None, "o/..", "a/b/c", 5, "not a name"])
 def test_create_without_a_parsed_base_repository_uses_the_full_config(
-    world: World, name: object
+    world: World,
 ) -> None:
-    world.fake("gh", stdout="u\n", cases={"repo view": base_case(name, "PRIVATE")})
+    world.fake("gh", stdout="u\n", cases={"repo view": base_case("o/..", "PRIVATE")})
     write_draft(world)
     assert run_main("create") == 0
     assert len(world.calls("gh.repo")) == 1
     assert scan_config(world) == full_config()
 
 
-@pytest.mark.parametrize("stdout", ["not json", "[]"])
 def test_create_with_an_unreadable_base_repository_uses_the_full_config(
-    world: World, stdout: str
+    world: World,
 ) -> None:
-    answer: dict[str, object] = {"rc": 0, "stdout": stdout, "stderr": ""}
+    answer: dict[str, object] = {"rc": 0, "stdout": "not json", "stderr": ""}
     world.fake("gh", stdout="u\n", cases={"repo view": answer})
     write_draft(world)
     assert run_main("create") == 0
@@ -2252,10 +2232,25 @@ def test_create_with_an_unreadable_path(
     assert "cannot read the draft: Is a directory" in capsys.readouterr().out
 
 
-def test_gh_args_without_metadata(world: World) -> None:
-    del world
-    assert pr.gh_args({}) == ["--base", "main"]
-    assert pr.gh_args({"draft": False}) == ["--base", "main"]
+def test_gh_args_without_metadata() -> None:
+    assert decisions.create_flags({}, "main") == ["--base", "main"]
+    assert decisions.create_flags({"draft": False}, "main") == ["--base", "main"]
+
+
+def test_create_flags_include_frontmatter_options() -> None:
+    meta = {
+        "draft": True,
+        "labels": ["bug", "good first issue"],
+        "reviewers": ["tbhb", "org/team"],
+        "assignees": ["@me"],
+        "milestone": "v1",
+    }
+    assert decisions.create_flags(meta, "dev") == [
+        "--base", "dev", "--draft",
+        "--label", "bug", "--label", "good first issue",
+        "--reviewer", "tbhb", "--reviewer", "org/team",
+        "--assignee", "@me", "--milestone", "v1",
+    ]  # fmt: skip
 
 
 def test_run_gives_the_child_no_terminal(world: World) -> None:
@@ -2365,46 +2360,35 @@ def test_quoted_frontmatter_key_points_at_line_one() -> None:
 
 
 def test_body_of_keeps_spaces_and_edge_letters() -> None:
-    assert pr.body_of(["# T", "", "## Why", "x  ", ""]) == "## Why\nx  \n"
-    assert pr.body_of(["# T", "", "Xylophone X", ""]) == "Xylophone X\n"
-    assert pr.body_of(["# T", "## Why", "x"]) == "## Why\nx\n"
+    assert decisions.body_of(["# T", "", "## Why", "x  ", ""]) == "## Why\nx  \n"
+    assert decisions.body_of(["# T", "", "Xylophone X", ""]) == "Xylophone X\n"
+    assert decisions.body_of(["# T", "## Why", "x"]) == "## Why\nx\n"
 
 
 def test_identity_key_splits_on_the_first_equals() -> None:
     value = "LLM harness=claude-code:1;model=a=b;session=s"
-    assert pr.identity_key(value) == ("claude-code", "a=b", "s", "")
+    assert decisions.identity_key(value) == ("claude-code", "a=b", "s", "")
 
 
-def test_posting_agent_is_added_to_an_empty_branch(
-    world: World, agent: dict[str, str]
-) -> None:
-    world.git("switch", "-q", "-c", "topic")
-    got = pr.description(checked_for(), agent, pr.branch_trailers("main"))
+def test_posting_agent_is_added_to_an_empty_branch() -> None:
+    got = decisions.render_description(BASE.splitlines(), [], POSTING)
     assert got.endswith(f"v\n\nAssisted-by: {POSTING}\n")
 
 
-def test_a_posting_value_without_a_model_is_rejected(
-    world: World, agent: dict[str, str]
-) -> None:
-    seed_session(world, None)
-    world.git("switch", "-q", "-c", "topic")
-    world.commit(f"one\n\nGenerated-by: {GEN}")
+def test_a_posting_value_without_a_model_is_rejected() -> None:
     posting = POSTING.replace("model=anthropic:claude-opus-5-5;", "")
-    assert pr.posting_value(agent) == posting
     with pytest.raises(SystemExit) as info:
-        pr.description(checked_for(), agent, pr.branch_trailers("main"))
+        decisions.render_description(
+            BASE.splitlines(), [("Generated-by", GEN)], posting
+        )
     assert str(info.value) == f"invalid LLM trailer: {posting}: model required"
 
 
-def test_a_bad_branch_trailer_and_posting_value_are_both_listed(
-    world: World, agent: dict[str, str]
-) -> None:
-    seed_session(world, None)
-    world.git("switch", "-q", "-c", "topic")
-    world.commit("one\n\nGenerated-by: LLM harness=nope")
+def test_a_bad_branch_trailer_and_posting_value_are_both_listed() -> None:
     posting = POSTING.replace("model=anthropic:claude-opus-5-5;", "")
+    found = [("Generated-by", "LLM harness=nope")]
     with pytest.raises(SystemExit) as info:
-        pr.description(checked_for(), agent, pr.branch_trailers("main"))
+        decisions.render_description(BASE.splitlines(), found, posting)
     assert str(info.value) == (
         "invalid LLM trailer: LLM harness=nope: unknown harness nope; "
         f"{posting}: model required"
@@ -2448,13 +2432,13 @@ def test_a_missing_baseline_file_exits_without_a_traceback(world: World) -> None
     )
 
 
-def test_every_invalid_trailer_is_listed(world: World) -> None:
-    world.git("switch", "-q", "-c", "topic")
-    world.commit(
-        "one\n\nGenerated-by: LLM harness=nope\nAssisted-by: LLM harness=nope2"
-    )
+def test_every_invalid_trailer_is_listed() -> None:
+    found = [
+        ("Generated-by", "LLM harness=nope"),
+        ("Assisted-by", "LLM harness=nope2"),
+    ]
     with pytest.raises(SystemExit) as info:
-        pr.description(checked_for(), {}, pr.branch_trailers("main"))
+        decisions.render_description(BASE.splitlines(), found, None)
     assert "; " in str(info.value)
     assert str(info.value).count("LLM harness=") == 2
 
@@ -2848,31 +2832,18 @@ def test_branch_trailers_come_from_the_current_repository_not_root(
 
 def test_same_identity_in_commit_and_posting_is_one_generated_by() -> None:
     """Generated-by wins over the posting agent's own Assisted-by."""
-    assert pr.merge_trailers([("Generated-by", FALLBACK)], FALLBACK) == [
+    assert decisions.merge_trailers([("Generated-by", FALLBACK)], FALLBACK) == [
         ("Generated-by", FALLBACK)
     ]
 
 
 def test_generated_by_precedes_assisted_by() -> None:
-    assert pr.merge_trailers([("Assisted-by", OTHER), ("Generated-by", GEN)], None) == [
+    assert decisions.merge_trailers(
+        [("Assisted-by", OTHER), ("Generated-by", GEN)], None
+    ) == [
         ("Generated-by", GEN),
         ("Assisted-by", OTHER),
     ]
-
-
-def test_description_for_one_identity_ends_in_one_generated_by(
-    world: World, agent: dict[str, str]
-) -> None:
-    """Regression: a branch commit and the posting agent share an identity."""
-    posting = pr.posting_value(agent)
-    assert posting is not None
-    world.git("update-ref", "refs/remotes/origin/main", "HEAD")
-    world.git("switch", "-q", "-c", "topic")
-    world.commit(f"feat: x\n\nGenerated-by: {posting}")
-    checked = pr.check_text(BASE)
-    body = pr.description(checked, agent, pr.branch_trailers("main"))
-    assert body.endswith(f"\nGenerated-by: {posting}\n")
-    assert "Assisted-by" not in body
 
 
 @pytest.mark.parametrize(
@@ -3112,11 +3083,17 @@ def live_body(body: object, rc: int = 0, stderr: str = "") -> dict[str, object]:
         (f"## Why\n\nw\n\n{GEN_LINE}\n", None),
         (f"## Why\n\nw\n\n {LIVE}\n", None),
         ("", None),
-        (None, None),
     ],
 )
+def test_opened_line_comes_from_the_final_paragraph(
+    body: str, kept: str | None
+) -> None:
+    assert decisions.opened_line(body) == kept
+
+
+@pytest.mark.parametrize("body", [f"## Why\n\nw\n\n{LIVE}\n{GEN_LINE}\n", None])
 def test_edit_copies_the_live_opened_by_line(
-    world: World, agent: dict[str, str], body: object, kept: str | None
+    world: World, agent: dict[str, str], body: str | None
 ) -> None:
     world.fake("gh", cases={"pr view": live_body(body)})
     write_draft(world)
@@ -3124,7 +3101,7 @@ def test_edit_copies_the_live_opened_by_line(
     view, _, edit = world.calls("gh")
     assert view["argv"] == ["pr", "view", "7", "--json", "body,url"]
     assert cast("list[str]", edit["argv"])[:3] == ["pr", "edit", "7"]
-    opened_by = f"{kept}\n" if kept else ""
+    opened_by = f"{LIVE}\n" if body else ""
     assert str(edit["stdin"]).endswith(f"\nv\n\n{opened_by}Assisted-by: {POSTING}\n")
     assert not ledgers(world).exists()
 
@@ -4584,11 +4561,10 @@ def test_backfill_stops_when_gh_fails_with_a_list(world: World) -> None:
         run_main("backfill-opened", "tbhb-dev")
 
 
-def test_every_invalid_trailer_is_joined_by_semicolons(world: World) -> None:
-    world.git("switch", "-q", "-c", "topic")
-    world.commit("one\n\nGenerated-by: LLM model=a:m\nAssisted-by: LLM model=b:m")
+def test_every_invalid_trailer_is_joined_by_semicolons() -> None:
+    found = [("Generated-by", "LLM model=a:m"), ("Assisted-by", "LLM model=b:m")]
     with pytest.raises(SystemExit) as info:
-        pr.description(checked_for(), {}, pr.branch_trailers("main"))
+        decisions.render_description(BASE.splitlines(), found, None)
     assert str(info.value) == (
         "invalid LLM trailer: LLM model=a:m: harness required; "
         "LLM model=b:m: harness required"
@@ -4736,23 +4712,9 @@ def test_create_refuses_an_open_pr(
 
 
 @pytest.mark.parametrize("state", ["CLOSED", "MERGED"])
-def test_create_after_a_finished_pr(world: World, state: str) -> None:
-    world.fake(
-        "gh",
-        stdout="https://github.com/tbhb-dev/example/pull/18\n",
-        cases={
-            "pr view --json number,state,url": {
-                "rc": 0,
-                "stdout": json.dumps({"number": 17, "state": state, "url": "old"}),
-                "stderr": "",
-            }
-        },
-    )
-    write_draft(world)
-    assert run_main("create") == 0
-    view, create = world.calls("gh")
-    assert view["stdin"] == ""
-    assert cast("list[str]", create["argv"])[:2] == ["pr", "create"]
+def test_create_after_a_finished_pr(state: str) -> None:
+    data = {"number": 17, "state": state, "url": "old"}
+    assert decisions.create_refusal(0, json.dumps(data), "") is None
 
 
 @pytest.mark.parametrize(
@@ -4803,26 +4765,10 @@ def test_create_after_a_finished_pr(world: World, state: str) -> None:
         (0, "", "no pull requests found"),
     ],
 )
-def test_create_stops_when_the_lookup_fails(
-    world: World, capsys: pytest.CaptureFixture[str], rc: int, stdout: str, stderr: str
-) -> None:
-    world.fake(
-        "gh",
-        cases={
-            "pr view --json number,state,url": {
-                "rc": rc,
-                "stdout": stdout,
-                "stderr": stderr,
-            }
-        },
+def test_create_stops_when_the_lookup_fails(rc: int, stdout: str, stderr: str) -> None:
+    assert decisions.create_refusal(rc, stdout, stderr) == (
+        f"cannot check for an open PR: {(stderr or stdout).rstrip(chr(10))}"
     )
-    write_draft(world)
-    assert run_main("create") == 1
-    assert capsys.readouterr() == (
-        "",
-        f"cannot check for an open PR: {(stderr or stdout).rstrip(chr(10))}\n",
-    )
-    assert len(world.calls("gh")) == 1
 
 
 @pytest.mark.parametrize(
@@ -4831,26 +4777,33 @@ def test_create_stops_when_the_lookup_fails(
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
 @pytest.mark.parametrize("url", ["", "https://github.com/tbhb-dev/example/pull/17"])
 def test_create_rejects_already_exists(
-    world: World,
-    capsys: pytest.CaptureFixture[str],
-    result: tuple[int, str],
-    stream: str,
-    url: str,
+    result: tuple[int, str], stream: str, url: str
 ) -> None:
     rc, ending = result
     output = f"a pull request Already Exists {url}{ending}"
-    answer: dict[str, object] = {"rc": rc, "stdout": "", "stderr": "", stream: output}
-    world.fake("gh", cases={"pr create": answer})
-    write_draft(world)
-    assert run_main("create") == 1
+    stdout, stderr = (output, "") if stream == "stdout" else ("", output)
     number = "17" if url else "<n>"
-    assert capsys.readouterr() == (
-        "",
+    assert decisions.create_error(rc, stdout, stderr) == (
         output.rstrip("\n")
         + "\n"
-        + (
-            f"gh pr create failed; run `tbhbdev alpha pr edit DRAFT --pr {number}` "
-            "to apply the draft\n"
+        + f"gh pr create failed; run `tbhbdev alpha pr edit DRAFT --pr {number}` "
+        "to apply the draft"
+    )
+
+
+def test_create_reports_a_race_without_recording(
+    world: World, agent: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    world.fake(
+        "gh", cases={"pr create": {"rc": 0, "stdout": "Already Exists\n", "stderr": ""}}
+    )
+    write_draft(world)
+    assert run_main("create", env=agent) == 1
+    assert capsys.readouterr() == (
+        "",
+        (
+            "Already Exists\ngh pr create failed; "
+            "run `tbhbdev alpha pr edit DRAFT --pr <n>` to apply the draft\n"
         ),
     )
     assert not ledgers(world).exists()
@@ -4866,22 +4819,10 @@ def test_create_passes_success_stderr_through(
 
 
 @pytest.mark.parametrize("ending", ["", "\n", "\n\n"])
-def test_create_joins_error_streams(
-    world: World, capsys: pytest.CaptureFixture[str], ending: str
-) -> None:
-    world.fake(
-        "gh",
-        cases={
-            "pr create": {
-                "rc": 1,
-                "stdout": "request failed" + ending,
-                "stderr": "connection lost" + ending,
-            }
-        },
-    )
-    write_draft(world)
-    assert run_main("create") == 1
-    assert capsys.readouterr() == ("", "request failed\nconnection lost\n")
+def test_create_joins_error_streams(ending: str) -> None:
+    assert decisions.create_error(
+        1, "request failed" + ending, "connection lost" + ending
+    ) == ("request failed\nconnection lost")
 
 
 @pytest.mark.parametrize(
@@ -4899,16 +4840,34 @@ def test_create_joins_error_streams(
     ],
 )
 def test_create_normalizes_empty_error_streams(
-    world: World,
-    capsys: pytest.CaptureFixture[str],
-    stdout: str,
-    stderr: str,
-    expected: str,
+    stdout: str, stderr: str, expected: str
 ) -> None:
-    world.fake("gh", cases={"pr create": {"rc": 1, "stdout": stdout, "stderr": stderr}})
-    write_draft(world)
-    assert run_main("create") == 1
-    assert capsys.readouterr() == ("", expected)
+    assert decisions.create_error(1, stdout, stderr) == expected.removesuffix("\n")
+
+
+def test_successful_create_has_no_error() -> None:
+    assert decisions.create_error(0, "created\n", "warning\n") is None
+
+
+def test_create_refusal_distinguishes_a_missing_pr_from_a_view_failure() -> None:
+    assert decisions.create_refusal(1, "", "No Pull Requests Found") is None
+    url = "https://github.com/tbhb-dev/example/pull/17"
+    data = {"number": 17, "state": "OPEN", "url": url}
+    assert decisions.create_refusal(0, json.dumps(data), "") == (
+        f"error: PR 17 ({url}) is already open; "
+        "run `tbhbdev alpha pr edit DRAFT --pr 17` to apply the draft"
+    )
+
+
+def test_parse_gh_json_ignores_json_from_a_failed_call() -> None:
+    assert decisions.parse_gh_json(1, '{"state":"OPEN"}') is None
+    assert decisions.parse_gh_json(0, b'{"state":"OPEN"}') == {"state": "OPEN"}
+    assert decisions.parse_gh_json(0, "{") is None
+
+
+def test_trailer_lines_ignore_other_git_output() -> None:
+    text = f"Signed-off-by: Example\n{GEN_LINE}\n"
+    assert decisions.trailer_lines(text) == [("Generated-by", GEN)]
 
 
 def test_origin_repository_reads_the_push_url(world: World) -> None:
