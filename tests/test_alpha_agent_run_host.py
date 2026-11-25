@@ -30,6 +30,7 @@ import pytest
 from agent_host_example import (
     build_provenance,
     constant,
+    git,
     host_settings,
     isolate_host_git,
     local_mirror_fetches,
@@ -70,6 +71,7 @@ from tbhbdev.alpha.agent.model import (
 )
 
 RESOLVE = host_tools.resolve
+PUSH_RUN = run_host.push.run
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping
@@ -485,7 +487,10 @@ def test_prepare_uses_one_worktree_and_private_destinations(
 
 
 def otel_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harness: Harness
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    harness: Harness,
+    endpoint: str = "https://otlp.example.net:4318",
 ) -> run_host.Run:
     run = make_run(
         tmp_path,
@@ -493,9 +498,7 @@ def otel_run(
         claude_profile="primary" if harness is Harness.CLAUDE else None,
         reason="example" if harness is Harness.CLAUDE else None,
     )
-    settings = dataclasses.replace(
-        run.settings, otel_endpoint="https://otlp.example.net:4318"
-    )
+    settings = dataclasses.replace(run.settings, otel_endpoint=endpoint)
     run = dataclasses.replace(run, settings=settings)
     runfiles.private_dir(run.home / ".codex")
     monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
@@ -504,10 +507,12 @@ def otel_run(
     return run
 
 
+@pytest.mark.parametrize("scheme", ["http", "https"])
 def test_codex_run_config_holds_the_otel_table(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scheme: str
 ) -> None:
-    run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
+    endpoint = f"{scheme}://otlp.example.net:4318"
+    run = otel_run(tmp_path, monkeypatch, Harness.CODEX, endpoint)
     result = run_host.prepare_workspace(run)
     config_path = Path(result.paths.codex_home) / "config.toml"
     # The macOS filesystem ignores case, so name the file as written.
@@ -516,13 +521,13 @@ def test_codex_run_config_holds_the_otel_table(
         "otel": {
             "trace_exporter": {
                 "otlp-http": {
-                    "endpoint": "https://otlp.example.net:4318/v1/traces",
+                    "endpoint": f"{endpoint}/v1/traces",
                     "protocol": "binary",
                 }
             },
             "metrics_exporter": {
                 "otlp-http": {
-                    "endpoint": "https://otlp.example.net:4318/v1/metrics",
+                    "endpoint": f"{endpoint}/v1/metrics",
                     "protocol": "binary",
                 }
             },
@@ -533,17 +538,15 @@ def test_codex_run_config_holds_the_otel_table(
     assert config_path.stat().st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize(
-    "endpoint", ["https://otlp.example.net/", "https://otlp.example.net"]
-)
-def test_otel_config_derives_signal_paths_from_the_base(endpoint: str) -> None:
-    table = tomllib.loads(run_host.otel_config(endpoint))["otel"]
-    assert table["trace_exporter"]["otlp-http"]["endpoint"] == (
-        "https://otlp.example.net/v1/traces"
-    )
-    assert table["metrics_exporter"]["otlp-http"]["endpoint"] == (
-        "https://otlp.example.net/v1/metrics"
-    )
+@pytest.mark.parametrize("scheme", ["http", "https"])
+@pytest.mark.parametrize("suffix", ["", "/"])
+def test_otel_config_derives_signal_paths_from_the_base(
+    scheme: str, suffix: str
+) -> None:
+    base = f"{scheme}://otlp.example.net"
+    table = tomllib.loads(run_host.otel_config(base + suffix))["otel"]
+    assert table["trace_exporter"]["otlp-http"]["endpoint"] == (f"{base}/v1/traces")
+    assert table["metrics_exporter"]["otlp-http"]["endpoint"] == (f"{base}/v1/metrics")
 
 
 def test_codex_run_without_an_endpoint_writes_no_config(
@@ -4448,6 +4451,68 @@ def test_run_builds_required_shims_before_harness(
 
 
 @pytest.mark.parametrize(
+    ("expect_commit", "push_result", "expected"),
+    [
+        (True, (0, None), 6),
+        (True, (0, "a" * 40), 0),
+        (True, (4, None), 4),
+        (False, (0, None), 0),
+    ],
+)
+def test_execute_requires_a_commit_when_requested(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    expect_commit: bool,
+    push_result: tuple[int, str | None],
+    expected: int,
+) -> None:
+    run = make_run(tmp_path, expect_commit=expect_commit)
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
+    HostRuntime(run, prepared, None).patch(monkeypatch)
+
+    def publish(*_args: object) -> int:
+        push_status, recorded_head = push_result
+        if recorded_head is not None:
+            run.files.write("head", recorded_head)
+        return push_status
+
+    monkeypatch.setattr(run_host.push, "run", publish)
+    assert run_host.execute(run, "example", "unused") == expected
+    assert run.files.path("rc").read_text() == f"{expected}\n"
+    assert runfiles.latest(run.files.root)["example"]["rc"] == expected
+    log = run.files.path("log")
+    message = "no new commit: the brief expected one (--expect-commit)\n"
+    assert (log.exists() and message in log.read_text().splitlines(keepends=True)) is (
+        expected == 6
+    )
+
+
+def test_execute_rejects_a_stale_head_when_requiring_a_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = make_run(tmp_path, expect_commit=True)
+    _, clone = repository(tmp_path / "repo")
+    git(clone, "switch", "-c", "agent/example")
+    prepared = preparation(run)
+    prepared = dataclasses.replace(
+        prepared,
+        paths=dataclasses.replace(prepared.paths, worktree=str(clone)),
+        auth_before="example-before",
+    )
+    HostRuntime(run, prepared, None).patch(monkeypatch)
+    monkeypatch.setattr(run_host, "run_harness", constant(0))
+    monkeypatch.setattr(run_host.push, "run", PUSH_RUN)
+    run.files.write("head", "a" * 40)
+
+    assert run_host.execute(run, "example", "unused") == 6
+    assert run.files.path("rc").read_text() == "6\n"
+    assert "no new commit: the brief expected one (--expect-commit)" in (
+        run.files.path("log").read_text().splitlines()
+    )
+    assert not run.files.path("head").exists()
+
+
+@pytest.mark.parametrize(
     ("given", "result"),
     [
         (None, "minted-value"),
@@ -4495,7 +4560,7 @@ def test_execute_mints_a_push_token_only_when_none_was_given(
 def test_preflight_mints_no_push_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run = make_run(tmp_path)
+    run = make_run(tmp_path, expect_commit=True)
     prepared = dataclasses.replace(preparation(run), auth_before="example-before")
     runtime = HostRuntime(run, prepared, None)
     runtime.patch(monkeypatch)
@@ -5055,17 +5120,21 @@ def test_config_check_protects_the_configured_startup_directory(
             run_host.check_config(configured)
 
 
-def test_resource_attributes_name_host_and_account(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_resource_attributes_name_host_account_and_run(
+    tmp_path: Path, scheme: str
+) -> None:
     run = make_run(tmp_path)
     run = dataclasses.replace(
         run,
         settings=dataclasses.replace(
-            run.settings, otel_endpoint="https://otlp.example.net"
+            run.settings, otel_endpoint=f"{scheme}://otlp.example.net"
         ),
     )
     assert run_host.resource_attributes(run) == {
         "OTEL_RESOURCE_ATTRIBUTES": (
             f"host.name={run.host.name},tbhb.account={run.request.account}"
+            ",tbhb.run.id=example"
         )
     }
 

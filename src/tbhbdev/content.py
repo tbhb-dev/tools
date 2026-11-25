@@ -27,6 +27,9 @@ check_close = content_vet.check_close
 format_refusal = content_vet.format_refusal
 guide = content_vet.guide
 
+_PLANNING_ISSUE_TYPES = frozenset({"Initiative", "Epic", "Feature"})
+_LEAF_ISSUE_TYPES = frozenset({"Task", "Defect", "Chore", "Spike", "Research"})
+
 _RECORD_SECTIONS = ("Context", "Decision", "Consequences")
 _RECORD_OPTIONS = "Options considered"
 _RECORD_SECTION_ORDERS = {
@@ -154,15 +157,21 @@ def check_decision_record(markdown: str) -> list[str]:
     return refusals
 
 
-def check_review(markdown: str) -> list[str]:
+def check_review(markdown: str, *, metadata: Json | None = None) -> list[str]:
     """Return review validation refusals, or an empty list on success."""
+    definition = "#Review"
+    if metadata is None:
+        definition = "#ReviewBody"
+        metadata = {}
     try:
-        draft = normalize(markdown, object="pr-review", variant="review", metadata={})
+        draft = normalize(
+            markdown, object="pr-review", variant="review", metadata=metadata
+        )
     except ValueError as exc:
         return [str(exc)]
     try:
         cue = cue_runtime.resolve()
-        with as_file(files("tbhbdev").joinpath("schemas")) as schemas:
+        with as_file(files().joinpath("schemas")) as schemas:
             # Fixed schema names and pinned executable. Draft JSON goes on stdin.
             done = subprocess.run(  # nosec B603
                 [
@@ -170,7 +179,7 @@ def check_review(markdown: str) -> list[str]:
                     "vet",
                     "-c",
                     "-d",
-                    "#Review",
+                    definition,
                     "core.cue",
                     "issue.cue",
                     "review.cue",
@@ -381,16 +390,67 @@ def close_issue(  # noqa: PLR0913 -- Public plugin interface.
     return None
 
 
+def _issue_type(issue: Json) -> str | None:
+    issue_type = issue.get("type")
+    if isinstance(issue_type, dict):
+        name = issue_type.get("name")
+        if isinstance(name, str):
+            return name
+    return None
+
+
+def _check_link_visibility(
+    parent_type: str | None, parent_vis: str, child_type: str | None, child_vis: str
+) -> None:
+    if parent_vis != "PRIVATE" or child_vis == "PRIVATE":
+        return
+    if child_type in _PLANNING_ISSUE_TYPES:
+        message = f"a private parent cannot have a public {child_type} child"
+    elif child_type not in _LEAF_ISSUE_TYPES:
+        message = "a public child of a private parent must have a recognized issue type"
+    elif parent_type != "Feature":
+        message = "only a private Feature can have a public leaf child"
+    else:
+        return
+    raise Refused(message)
+
+
 def link_sub_issue(
     parent: IssueRef,
     child: IssueRef,
     *,
     client: Client | None = None,
-    caller: str = "tbhbdev",
+    # Mutmut's wrapper binds this default before calling a mutant.
+    caller: str = "tbhbdev",  # pragma: no mutate
     dry_run: bool = False,
 ) -> Json | None:
+    """Add a sub-issue after checking repository visibility, even in a dry run.
+
+    The check allows links with a public parent or a private child. A private
+    parent can have a public child only when the parent is a Feature and the
+    child is a Task, Defect, Chore, Spike, or Research issue. The link cannot
+    check whether the child's text carries private detail. The public child's
+    title and body already pass the public-repository scan at creation.
+    """
     api = client if client is not None else GhClient()
     issue = api.rest("GET", child.path)
+    parent_issue = api.rest("GET", parent.path)
+    parent_repo = f"{parent.owner}/{parent.repo}"
+    child_repo = f"{child.owner}/{child.repo}"
+    parent_vis = _visibility(api, parent_repo)
+    child_vis = (
+        parent_vis if parent_repo == child_repo else _visibility(api, child_repo)
+    )
+    try:
+        _check_link_visibility(
+            _issue_type(parent_issue), parent_vis, _issue_type(issue), child_vis
+        )
+    except Refused as exc:
+        message = (
+            f"Cannot link {child_repo}#{child.number} "
+            f"under {parent_repo}#{parent.number}: {exc}"
+        )
+        raise Refused(message) from exc
     payload = {"sub_issue_id": issue["id"]}
     if dry_run:
         return payload
