@@ -4,7 +4,8 @@ generated:
   - role: generated
     harness: codex:0.166.0
     model: openai:gpt-6.2-sol
-    at: "2026-11-25T20:56:23Z"
+    effort: medium
+    at: "2026-11-25T21:17:18Z"
   - role: assisted
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
@@ -49,6 +50,8 @@ type: Reference
 - `agent precheck CLONE --reference REF [--host HOST]` compares a clone's hooks with a local reference and checks its Git config for risky keys. Paths may be absolute or relative to the home directory. Collection uses one SSH call with `--host` and reads locally otherwise. It never runs Git. Exit codes are 0 for a match, 1 for mismatches, and 2 for usage or collection errors. The Python API `precheck(clone_data, reference)` returns the result for callers.
 - `agent` coordinates runs with `exec`, `wait`, `status`, `log`, `diff`, `kill`, `clean` and `keep`. `signing-parity` checks that each configured host's signing key is a signing key of tbhb-agent. It runs the hidden host command `signing-fingerprint ACCOUNT`, which prints only the SHA256 fingerprint of the key a run would sign with, over the ordinary ssh shell. It then reads tbhb-agent's public signing key list from GitHub and exits 1 when any host's fingerprint is missing or the host is unreachable. A host without the command counts as unreachable until `tbhbdev` syncs there. The package also includes the run request's schema and the repo argument rules.
 - `install` installs the git hooks and the user-level harness hooks. `--hooks-only` installs only this clone's git hooks without writing user-level config.
+
+The pre-push guard requires each newly pushed commit with an agent author or committer to have a valid SSH signature from the local agent key or a signing key registered to `tbhb-agent` on GitHub. The guard accepts local signatures offline. When it needs the registered keys, it makes one request per push with a five-second timeout. If the request fails, the guard accepts the local key alone and explains the fallback when it refuses a commit.
 
 `tbhbdev alpha pr rebase N [N...]` asks Renovate to rebase open pull requests in the repository named by `origin`. It ticks the rebase checkbox only for pull requests from the Renovate bot and preserves the rest of each body. It skips checked boxes and stops at the first failure.
 
