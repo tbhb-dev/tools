@@ -10,6 +10,7 @@ PHASE = ".phase"
 OUT = ".out"
 FINAL = ".out.final"
 LOG = ".log"
+HEAD = ".head"
 RC = ".rc"
 KEEP = ".keep"
 RC_PENDING = ".rc.pending"
@@ -29,6 +30,7 @@ SUFFIXES = (
     OUT,
     FINAL,
     LOG,
+    HEAD,
     KEEP,
     RC_PENDING,
     RUN_LOCK,

@@ -137,6 +137,7 @@ def environment(
         "TMPPREFIX": resolve(paths.tmpdir, "zsh"),
         "DOCKER_CONFIG": resolve(paths.tmpdir, DOCKER_CONFIG_SUBDIR),
         "GH_CONFIG_DIR": resolve(paths.tmpdir, GH_CONFIG_SUBDIR),
+        "PYTEST_DEBUG_TEMPROOT": paths.tmpdir,
         "PYTEST_XDIST_AUTO_NUM_WORKERS": XDIST_WORKERS,
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -275,6 +276,7 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
                     "GH_CONFIG_DIR",
                     "DOCKER_CONFIG",
                     "GIT_NO_LAZY_FETCH",
+                    "PYTEST_DEBUG_TEMPROOT",
                     "PYTEST_XDIST_AUTO_NUM_WORKERS",
                     "SSH_AUTH_SOCK",
                 )

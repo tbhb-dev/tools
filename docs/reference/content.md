@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6.2-sol
-    at: "2026-11-23T07:11:17Z"
+    at: "2026-11-24T22:03:20Z"
 status: stable
 tags: [plugins]
 title: Content writes
@@ -26,29 +26,39 @@ type: Reference
 
 ## Review validation
 
-`tbhbdev.content.check_review(markdown: str) -> list[str]` takes the Markdown body of a pull request review. An empty list means it passed. On refusal, the list contains a diagnostic. The function normalizes the body as object `pr-review`, variant `review`, and checks it against `#Review` with the binary from `tbhbdev cue install`. The caller verifies the commit hash against the pull request head before posting.
+`tbhbdev.content.check_review(markdown, *, metadata=None)` takes the Markdown body of a pull request review and optional parsed frontmatter. An empty list means it passed. On refusal, the list contains a diagnostic. The function normalizes the body as object `pr-review`, variant `review`, and checks it with the binary from `tbhbdev cue install`. It uses `#ReviewBody` when called with only Markdown and `#Review` when given metadata. The caller verifies the commit hash against the pull request head before posting.
 
-Start with one paragraph of five consecutive header lines. Use one token each for the run name, provider, and model. `Head` takes a 40-digit hexadecimal commit hash and `Tier` takes `1`, `2`, or `3`. Follow the header with `Verdict` and `Findings` sections in that order.
+Start with one paragraph of seven consecutive header lines in the order shown below. Use one token each for `Run`, `Provider`, and `Model`. `Variant` is `a` or `b`, `Host` uses lowercase dotted labels, and `Head` takes a 40-character lowercase hexadecimal commit hash. `Tier` is `0`, `1`, or `2`, with `0` for prose-only repositories. Follow the header with the H2 sections `Verdict`, `Findings`, and `Verification` in that order.
 
 ```markdown
 Run: review-build
 Provider: openai
 Model: gpt-6
+Variant: a
+Host: reviewer.example.org
 Head: 0123456789abcdef0123456789abcdef01234567
 Tier: 1
 
 ## Verdict
 
-HOLD
+NO-GO
 
 ## Findings
 
 - BLOCK `src/app.py:4` Return the saved value when the cache is warm.
+
+## Verification
+
+Read the cache implementation and ran the cache tests.
 ```
 
-Each finding is one bullet with a class (`BLOCK`, `TECH-DEBT`, or `SECURITY-DEBT`), a whitespace-free `file:line` reference with a positive line number, and one or two sentences. Use a period, question mark, or exclamation point at the end of each sentence. The checker treats whitespace after that punctuation as a sentence boundary and applies the shared CI restatement check to each sentence. Limits are 40 visible prose words per finding, 8 findings, and 160 visible prose words across all findings. The checker counts prose after the class and reference.
+Each finding is one bullet with a class (`BLOCK`, `TECH-DEBT`, or `SECURITY-DEBT`), a whitespace-free `file:line` reference with a positive line number, and one or two sentences. Use a period, question mark, or exclamation point at the end of each sentence. The checker treats whitespace after that punctuation as a sentence boundary and applies the shared CI restatement check to each sentence. Use at most eight findings and 40 visible prose words per body finding, counted after the class and reference.
 
-Use `HOLD` with at least one `BLOCK` finding. With `GO`, use debt findings or leave `Findings` empty.
+Use `NO-GO` with at least one `BLOCK` finding. With `GO`, use debt findings or leave `Findings` empty. In `Verification`, describe what you read or ran in one or more paragraphs totaling at most 100 visible words.
+
+Metadata requires `schema: 2`, a `repo` in `OWNER/NAME` form, a positive `pr` number, `head_sha`, `tier`, `verdict`, a `run` object with `name`, `provider`, `model`, `variant`, and `host`, and a `findings` list of objects with `class`, `path`, `line`, and `summary`. The objects reject unknown fields. The verdict, head, tier, and run fields must match the body. Findings must also match in order, with each summary equal to the visible prose of its bullet with whitespace collapsed to single spaces.
+
+The seven-line header and `Verification` section are required. The tier range changed to `0`–`2`, and `HOLD` was renamed to `NO-GO`. The 160-word whole-review cap became a per-summary cap on metadata. The body keeps its 40-word limit on each finding, which also limits the matching summary.
 
 ## Caller and dry run
 

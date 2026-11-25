@@ -154,8 +154,8 @@ def read_draft(published: PublishedRange) -> str:
         raise OpenRefusedError(message) from exc
 
 
-def check_range(published: PublishedRange, write: Callable[[str, str], None]) -> bytes:
-    """Warn about draft additions and load the pre-run secret scan rules."""
+def check_range(published: PublishedRange) -> None:
+    """Refuse a run range that adds the PR draft before pushing it."""
     before = published.before
     if before is None:
         message = "cannot check the PR draft without a pre-run commit"
@@ -165,10 +165,19 @@ def check_range(published: PublishedRange, write: Callable[[str, str], None]) ->
         published.git_dir, "diff", *flags.split(), before, published.commit, "--", DRAFT
     )
     if changed.returncode:
-        message = "cannot check whether the pushed range adds the PR draft"
+        message = "cannot check whether the run range adds the PR draft"
         raise OpenRefusedError(message)
     if DRAFT.encode() in changed.stdout.splitlines():
-        write("log", "draft committed: it will merge into main; remove it\n")
+        message = f"the run's commits add {DRAFT}; remove it from the commits"
+        raise OpenRefusedError(message)
+
+
+def scan_rules(published: PublishedRange) -> bytes:
+    """Load secret scan rules from the pre-run commit."""
+    before = published.before
+    if before is None:
+        message = "cannot check the PR draft without a pre-run commit"
+        raise OpenRefusedError(message)
     rules = publication_git(
         published.git_dir, "cat-file", "blob", f"{before}:{GITLEAKS_EXTENDS}"
     )
@@ -312,7 +321,7 @@ def open_pull_request(
         OpenRefusedError: The draft is missing or malformed, or GitHub
             refuses or cannot be reached.
     """
-    rules = check_range(published, write)
+    rules = scan_rules(published)
     text = read_draft(published)
     scan_draft(
         text, published.git_dir, rules, repository_visibility(repository, token, write)

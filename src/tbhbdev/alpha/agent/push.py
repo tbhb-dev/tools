@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from tbhbdev.alpha.agent import host_tools, open_pr, runfiles
 from tbhbdev.alpha.agent.decisions import repo
-from tbhbdev.alpha.agent.model import Profile
+from tbhbdev.alpha.agent.model import Invalid, Profile
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
@@ -58,6 +58,15 @@ def feed(fd: int, token: str) -> None:
 
 
 def send(workspace: Path, target: str, branch: str, token: str) -> tuple[int, str]:
+    status, _, error = git_with_token(
+        workspace, token, "push", "--", target, f"HEAD:refs/heads/{branch}"
+    )
+    return status, error
+
+
+def git_with_token(
+    workspace: Path, token: str, *args: str, capture_output: bool = False
+) -> tuple[int, str, str]:
     with ExitStack() as stack:
         read_fd, write_fd = os.pipe()
         pipe = stack.enter_context(os.fdopen(read_fd))
@@ -78,10 +87,7 @@ def send(workspace: Path, target: str, branch: str, token: str) -> tuple[int, st
             "core.fsmonitor=false",
             "-C",
             str(workspace),
-            "push",
-            "--",
-            target,
-            f"HEAD:refs/heads/{branch}",
+            *args,
         ]
         env = {
             "HOME": str(workspace),
@@ -103,7 +109,7 @@ def send(workspace: Path, target: str, branch: str, token: str) -> tuple[int, st
                     cwd=workspace,
                     pass_fds=(pipe.fileno(),),
                     stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE if capture_output else subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     text=True,
                     errors="replace",
@@ -114,9 +120,9 @@ def send(workspace: Path, target: str, branch: str, token: str) -> tuple[int, st
             raise
         pipe.close()
         writer.start()
-        _, error = child.communicate()
+        output, error = child.communicate()
         writer.join()
-    return child.returncode, error
+    return child.returncode, output or "", error
 
 
 def run(
@@ -133,6 +139,7 @@ def run(
     reference = f"refs/heads/{branch}"
     before, _ = local_refs(workspace)
     base = before.get(reference)
+    start = start_ref_target(run, base)
     rc = harness(run, prepared, stack)
     if run.files.uncertain:
         return rc
@@ -144,6 +151,8 @@ def run(
                 run.files.write("log", f"push skipped: harness exited {rc}\n")
         return rc
     try:
+        if start is not None:
+            return publish_start_ref(run, workspace, before, token, start)
         after, checkout = local_refs(workspace)
         found = new_commits(run, workspace, before, after, checkout)
     except PublicationRefusedError as exc:
@@ -185,17 +194,135 @@ def publish(
         return 4
     try:
         with publication(run.files.root, workspace, commit) as directory:
+            published = open_pr.PublishedRange(workspace, directory, base, commit)
+            # Without a pre-run commit, keep the existing PR refusal after push.
+            if base is not None:
+                open_pr.check_range(published)
             status, error = send(directory, url(run.request.repo), branch, token)
             if not status:
                 run.files.write("branch", branch)
-                published = open_pr.PublishedRange(workspace, directory, base, commit)
                 return 0 if opened(run, published, branch, token) else 5
+    except open_pr.OpenRefusedError as refusal:
+        run.files.write("log", f"push refused: {refusal}\n")
+        return 4
     except subprocess.TimeoutExpired:
         error = "git timed out"
     except OSError, subprocess.SubprocessError:
         error = "git push unavailable"
     text = " ".join(error.replace(token, "[redacted]").split()) or "git push failed"
     run.files.write("log", f"push failed: {text[:PUSH_ERROR_LIMIT]}\n")
+    return 4
+
+
+def start_ref_target(run: Run, base: str | None) -> tuple[str, str] | None:
+    ref = run.request.start_ref
+    if ref is None:
+        return None
+    if base is None:
+        message = f"missing fetched starting commit for {ref}"
+        raise Invalid(message)
+    run.files.write("log", f"start ref: {ref} at {base}\n")
+    return ref, base
+
+
+def publish_start_ref(
+    run: Run,
+    workspace: Path,
+    before: dict[str, str],
+    token: str | PushTokenFailure | None,
+    start: tuple[str, str],
+) -> int:
+    branch = f"agent/{run.files.name}"
+    reference = f"refs/heads/{branch}"
+    after, _ = local_refs(workspace)
+    after.pop("HEAD", None)
+    commit = after.pop(reference, None)
+    if commit is not None:
+        if isinstance(token, str) and head(workspace, branch) is None:
+            after[reference] = commit
+        else:
+            after = {reference: commit, **after}
+    change = first_change(run, workspace, before, after)
+    return (
+        0 if change is None else push_start_branch(run, workspace, change, token, start)
+    )
+
+
+def check_not_moved(
+    directory: Path, target: str, ref: str, base: str, token: str
+) -> None:
+    status, listing, _ = git_with_token(
+        directory, token, "-c", "http.followRedirects=false",
+        "ls-remote", "--symref", "--exit-code", "--", target, "HEAD", ref,
+        capture_output=True,
+    )  # fmt: skip
+    if status:
+        message = f"cannot read remote tip of {ref}"
+        raise Invalid(message)
+    records = {
+        name: value
+        for value, _, name in (line.partition("\t") for line in listing.splitlines())
+    }
+    # HEAD can appear twice, once as a symref and once as a commit.
+    default = re.search(r"^ref: (refs/heads/[^\s]+)\tHEAD$", listing, re.MULTILINE)
+    if default is None or default[1] == ref:
+        message = f"cannot verify {ref} is a non-default branch"
+        raise Invalid(message)
+    if records.get(ref) != base:
+        message = f"remote branch {ref} moved from {base} or no longer exists"
+        raise Invalid(message)
+
+
+def push_start_branch(
+    run: Run,
+    workspace: Path,
+    change: tuple[str, str],
+    token: str | PushTokenFailure | None,
+    start: tuple[str, str],
+) -> int:
+    ref, base = start
+    name, commit = change
+    run_branch = f"agent/{run.files.name}"
+    if name == f"refs/heads/{run_branch}":
+        run.files.write("head", commit)
+    if not isinstance(token, str):
+        reason = token.reason if token is not None else "unavailable"
+        run.files.write(
+            "log", f"push failed: no push token ({reason}) for commit {commit}\n"
+        )
+        return 4
+    try:
+        if name != f"refs/heads/{run_branch}" or head(workspace, run_branch) != commit:
+            run.files.write(
+                "log", f"push failed: commit {commit} needs {run_branch} checked out\n"
+            )
+            return 4
+        target = url(run.request.repo)
+        branch = ref.removeprefix("refs/heads/")
+        with publication(run.files.root, workspace, commit) as directory:
+            if outside_history(directory, base, (commit,)):
+                run.files.write(
+                    "log",
+                    f"push failed: commit {commit} does not fast-forward "
+                    f"{ref} from {base}\n",
+                )
+                return 4
+            check_not_moved(directory, target, ref, base, token)
+            status, error = send(directory, target, branch, token)
+        if not status:
+            run.files.write("branch", branch)
+            run.files.write("log", f"pushed {ref} at {commit}\n")
+            return 0
+        error = (
+            " ".join(error.replace(token, "[redacted]").split()) or "git push failed"
+        )
+    except Invalid as exc:
+        error = str(exc)
+    except subprocess.TimeoutExpired:
+        error = "git timed out"
+    except OSError, ValueError, subprocess.SubprocessError:
+        error = "git push unavailable"
+    run.files.write("log", f"push failed: {error[:PUSH_ERROR_LIMIT]}\n")
     return 4
 
 
@@ -225,6 +352,23 @@ def local_refs(workspace: Path) -> tuple[dict[str, str], str]:
     elif tip := refs.get(current.removeprefix("ref: ")):
         refs["HEAD"] = tip
     return refs, current
+
+
+def first_change(
+    run: Run, workspace: Path, before: dict[str, str], after: dict[str, str]
+) -> tuple[str, str] | None:
+    """Find a commit that no starting ref reaches."""
+    bases = tuple(dict.fromkeys(before.values()))
+    candidates = {name: tip for name, tip in after.items() if tip not in bases}
+    if not candidates:
+        return None
+    with publication(
+        run.files.root, workspace, next(iter(candidates.values()))
+    ) as directory:
+        for name, tip in candidates.items():
+            if commit := outside_history(directory, tip, bases):
+                return name, commit
+    return None
 
 
 def new_commits(
@@ -287,22 +431,13 @@ def eligible_tips(
 
 def outside_history(
     directory: Path, tip: str, bases: tuple[str, ...], start: str | None = None
-) -> bool:
-    """Check for new history, optionally restricted to descendants of the start."""
+) -> str:
+    """Return a new commit SHA, optionally restricted to descendants of the start."""
     revisions = "\n".join((tip, *(f"^{base}" for base in bases))) + "\n"
     # Excluding the start also excludes its ancestors.
     ancestry = (f"--ancestry-path={start}",) if start else ()
-    return bool(
-        history_git(
-            directory,
-            "rev-list",
-            *ancestry,
-            "--max-count=1",
-            "--stdin",
-            "--",
-            revisions=revisions,
-        ).strip()
-    )
+    arguments = ("rev-list", *ancestry, "--max-count=1", "--stdin", "--")
+    return history_git(directory, *arguments, revisions=revisions).strip()
 
 
 def history_git(directory: Path, *args: str, revisions: str | None = None) -> str:
