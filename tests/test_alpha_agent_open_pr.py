@@ -578,7 +578,7 @@ def test_a_missing_scanner_executable_is_labeled(
     published = commit_draft(tmp_path, DRAFT)
 
     def missing(*_args: object, **_kwargs: object) -> None:
-        message = "host executable gitleaks was not found"
+        message = "host executable gitleaks was not found on PATH /usr/bin:/bin"
         raise Invalid(message)
 
     monkeypatch.setattr(gitleaks_check, "scan_text", missing)
