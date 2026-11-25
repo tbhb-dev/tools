@@ -88,7 +88,7 @@ The alpha commands write each worktree's state under `$(git rev-parse --git-dir)
 
 For a build that updates an existing pull request, pass both `--fetch-ref refs/heads/<branch>` and `--start-ref refs/heads/<branch>`. The run starts at the fetched commit and pushes a fast-forward to that branch without opening a pull request. The command refuses the repository's default branch. If the remote tip changes before the push check, the run fails and keeps its worktree.
 
-For a run that opens a pull request, write `.github/PULL_REQUEST_DRAFT.md` in its worktree and keep it out of commits. The driver reads the worktree draft first and uses the pushed commit's draft if the worktree draft is missing. The worktree draft must be an owned regular file of at most 64 KiB. The driver refuses symlinks and scans the draft with the host's secret rules and the pre-run commit's `.gitleaks.toml` before posting it. The driver warns when the pushed changes add the draft.
+For a run that opens a pull request, write `.github/PULL_REQUEST_DRAFT.md` in its worktree and keep it out of commits. The driver reads the worktree draft first and uses the pushed commit's draft if the worktree draft is missing. The worktree draft must be an owned regular file of at most 64 KiB. The driver refuses symlinks and scans the draft with the host's secret rules and the pre-run commit's `.gitleaks.toml` before posting it. The driver refuses to push when the run's commits add the draft, and CI fails a pull request whose diff contains the draft.
 
 ## Identity start time
 

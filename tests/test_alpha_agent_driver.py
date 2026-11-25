@@ -858,6 +858,7 @@ def test_status_reports_an_unreachable_host_with_the_local_record(
     ("rc", "reason"),
     [
         (4, "push failed: rejected"),
+        (4, "push refused: the draft is committed"),
         (5, "pr not opened: no draft"),
         (6, "no new commit: the brief expected one (--expect-commit)"),
     ],
