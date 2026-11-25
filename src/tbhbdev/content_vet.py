@@ -138,18 +138,20 @@ def _issue_warnings(
     return tuple(warnings)
 
 
-def check(
+def check(  # noqa: PLR0913
     draft: Json,
     schemas: Path,
     *,
     variant_schema: Path | Sequence[Path] | None = None,
     definition: str = "#Draft",
     parent_type: str | None = None,
+    verify_parent_type: bool = True,
 ) -> CheckResult:
     """Vet a normalized draft against the shared and optional variant files.
 
     Supply the trusted schema directory and, for a variant, its ordered files and
     CUE definition. The caller looks up the actual parent issue type.
+    Callers that accept external references of unknown type can skip that check.
     CUE must accept the draft before the Python issue rules inspect it.
     """
     binary = cue_runtime.resolve()
@@ -179,7 +181,7 @@ def check(
     if draft["object"] != "issue":
         return CheckResult()
     kind = cast("str", draft["variant"]).casefold()
-    expected = _PARENT_TYPES.get(kind)
+    expected = _PARENT_TYPES.get(kind) if verify_parent_type else None
     refusals = ()
     if expected and (parent_type or "").casefold() != expected.casefold():
         refusals = (

@@ -42,7 +42,7 @@ def pm_dir(tmp_path: Path) -> Path:
         #Variant: {
             metadata: {
                 type: "Defect"
-                area: #AreaLabel
+                area?: #AreaLabel
                 fields: {"work-type": #WorkType, severity: #Severity}
                 ...
             }
@@ -57,15 +57,15 @@ def pm_dir(tmp_path: Path) -> Path:
 @pytest.mark.parametrize(
     "body",
     [
-        "# Title\n",
+        "",
         "Preamble\n",
         "```md\n## Fenced\n```",
         "Setext\n------",
         "### Subheading",
     ],
 )
-def test_requires_atx_section(body: str) -> None:
-    assert "## " in issue_body.check(body, "Defect", None)[0]
+def test_requires_atx_section(body: str, pm_dir: Path) -> None:
+    assert "## " in issue_body.check(f"# Title\n\n{body}", "Defect", pm_dir)[0]
 
 
 def test_requires_title_for_schema(pm_dir: Path) -> None:
@@ -91,6 +91,13 @@ def test_valid_body_ignores_incomplete_metadata(pm_dir: Path) -> None:
     assert issue_body.check(BODY, "defect", pm_dir) == []
 
 
+def test_keeps_incomplete_area(pm_dir: Path) -> None:
+    variant = pm_dir / "schemas/issue.defect.cue"
+    variant.write_text(variant.read_text().replace("area?:", "area:"))
+    (refusal,) = issue_body.check(BODY, "Defect", pm_dir)
+    assert refusal.startswith('metadata.area: incomplete value =~"^area:')
+
+
 def test_bad_block_is_refused(pm_dir: Path) -> None:
     refusals = issue_body.check(
         BODY.replace("## Outcome", "## OutCome"), "Defect", pm_dir
@@ -109,13 +116,17 @@ def test_keeps_concrete_metadata_error(pm_dir: Path) -> None:
 def test_keeps_block_error_alongside_incomplete_metadata(
     pm_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    incomplete = content_vet.Finding("cue", "metadata.area", "incomplete value")
-    block = content_vet.Finding("cue", "blocks.outcome", "Invalid outcome")
+    disjunction = 'incomplete value "Planned" | "Unplanned"'
+    incomplete = content_vet.Finding("cue", 'metadata.fields."work-type"', disjunction)
+    block = content_vet.Finding("cue", "blocks.outcome", disjunction)
+    regex = content_vet.Finding(
+        "cue", "metadata.fields.name", 'incomplete value =~"^a"'
+    )
     warning = content_vet.Finding("defect-title", "blocks.title", "Review the title")
-    result = content_vet.CheckResult((incomplete, block), (warning,))
+    result = content_vet.CheckResult((incomplete, block, regex), (warning,))
     monkeypatch.setattr(content_vet, "check", Mock(return_value=result))
     assert issue_body.check(BODY, "Defect", pm_dir) == [
-        content_vet.format_refusal(block)
+        content_vet.format_refusal(finding) for finding in (block, regex)
     ]
 
 
@@ -135,7 +146,10 @@ def test_pm_examples() -> None:
     if not examples:
         pytest.skip("pm checkout has no issue schema examples")
     for path in examples:
-        refusals = issue_body.check(
-            path.read_text(encoding="utf-8"), path.parent.name, PM_DIR
-        )
+        body = path.read_text(encoding="utf-8")
+        variant = path.parent.name
+        metadata: content_vet.Json = {"area": "area:reports"}
+        if variant in {"task", "feature", "epic"}:
+            metadata["parent"] = "tbhb-dev/tools#8"
+        refusals = issue_body.check(body, variant, PM_DIR, metadata=metadata)
         assert bool(refusals) == path.name.endswith(".invalid.md"), (path, refusals)

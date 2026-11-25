@@ -4,8 +4,10 @@
 """Tests for tbhbdev alpha pr close and alpha issue close, with a stubbed gh."""
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import Mock, call
 
@@ -18,7 +20,6 @@ from tbhbdev.alpha import pull_request as pr
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
 ENV = {"CLAUDE_CODE_SESSION_ID": "raw-session"}
 URL = "https://github.com/tbhb-dev/tools/pull/7"
@@ -473,7 +474,7 @@ def test_issue_blocks_using_local_references(
 
 ISSUE_REPO = "tbhb-dev/work-private"
 ISSUE_TITLE = "Improve weekly report delivery"
-ISSUE_BODY = "criteria:\n- Reports reach every team\nevidence:\n\n## Delivery notes\n"
+ISSUE_BODY = "criteria:\n- Reports reach every team\nevidence:\n### Delivery notes\n"
 CREATED_ISSUE = f"https://github.com/{ISSUE_REPO}/issues/9\n9\n"
 
 
@@ -527,11 +528,8 @@ def issue_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Mock:
 @pytest.mark.parametrize(
     "case",
     [
-        (
-            "criteria: bad\nevidence:\n## Notes",
-            "criteria and verification must use list items (count 1)",
-        ),
-        ("evidence:\n## Notes", "criteria must be 1 to 3 (count 0)"),
+        ("criteria: bad", "criteria and verification must use list items (count 1)"),
+        ("", "criteria must be 1 to 3 (count 0)"),
         (
             ISSUE_BODY + "blocked-by: another\n",
             "unknown blocked-by target (count 1)",
@@ -560,8 +558,8 @@ def test_issue_create_requires_h2(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    (tmp_path / "body.md").write_text("Free-form Markdown\n")
-    assert close.main([*issue_args, "--type", "Research"], env=ENV) == 1
+    (tmp_path / "body.md").write_text("# Deliver weekly reports\n")
+    assert close.main([*issue_args, "--pm-dir", str(tmp_path)], env=ENV) == 1
     assert "## " in capsys.readouterr().err
     issue_client.rest.assert_not_called()
 
@@ -583,7 +581,7 @@ def test_issue_create_with_pm(  # noqa: PLR0913, PLR0917
     assert close.main([*issue_args, "--pm-dir", str(tmp_path)], env=ENV) == bool(
         refusals
     )
-    check.assert_called_once_with(body, "Chore", tmp_path)
+    check.assert_called_once_with(body, "Chore", tmp_path, metadata={})
     if refusals:
         assert capsys.readouterr() == ("", "blocks.outcome: missing\n")
         issue_client.rest.assert_not_called()
@@ -601,7 +599,7 @@ def test_issue_create_dry_run(
     capsys: pytest.CaptureFixture[str],
     issue_type: str,
 ) -> None:
-    body = ISSUE_BODY if issue_type == "Chore" else "## Free-form Markdown\n"
+    body = ISSUE_BODY if issue_type == "Chore" else "Free-form Markdown\n"
     (tmp_path / "body.md").write_text(body, encoding="utf-8")
     assert (
         close.main([*issue_args, "--type", issue_type, "--parent", "8", "--dry-run"])
@@ -619,6 +617,95 @@ def test_issue_create_dry_run(
     )
     issue_client.rest.assert_called_once_with("GET", f"/repos/{ISSUE_REPO}")
     assert not (tmp_path / "audit.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("Chore", "criteria:\n- Reports reach every team\n"),
+        ("Research", "## Notes\n\nFree-form Markdown\n"),
+    ],
+)
+@pytest.mark.usefixtures("gh")
+def test_issue_create_normalizes_crlf_without_pm(
+    issue_args: list[str],
+    issue_client: Mock,
+    tmp_path: Path,
+    case: tuple[str, str],
+) -> None:
+    issue_type, body = case
+    (tmp_path / "body.md").write_bytes(body.replace("\n", "\r\n").encode("utf-8"))
+    assert close.main([*issue_args, "--type", issue_type], env=ENV) == 0
+    assert issue_client.rest.call_args.args[2]["body"] == body
+
+
+PM_TASK = "# Deliver weekly reports\n\n## Verification\n\n- Reports arrive on Monday.\n"
+PM_FEATURE = (
+    "# Analysts can download weekly reports\n\n"
+    "## Outcome\n\nAnalysts can download their reports.\n\n"
+    "## Context\n\nWeekly reports summarize team activity.\n\n"
+    "## Acceptance criteria\n\n- Reports download as CSV.\n- Each report has a date.\n"
+    "\n"
+    "## Verification\n\n- The CSV contains a date column.\n"
+)
+
+
+@pytest.fixture
+def parent_pm_dir(tmp_path: Path) -> Path:
+    if configured := os.environ.get("TBHB_PM_DIR"):
+        return Path(configured)
+    (tmp_path / "templates").mkdir()
+    (tmp_path / "schemas").mkdir()
+    (tmp_path / "schemas/issue-sections.cue").write_text("package content\n")
+    for variant in ("task", "feature", "epic"):
+        (tmp_path / "templates" / f"{variant}.md").touch()
+        (tmp_path / "schemas" / f"issue.{variant}.cue").write_text(
+            "package content\n#Variant: {metadata: {area: #AreaLabel, "
+            "parent: #IssueRef, ...}, ...}\n"
+        )
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("Task", PM_TASK, [], "Task requires a parent (count 0)"),
+        ("Feature", PM_FEATURE, [], "Feature requires a parent of type Epic (count 1)"),
+        ("Task", PM_TASK, ["--parent", "8"], ""),
+        (
+            "Epic",
+            PM_FEATURE.replace(
+                "Analysts can download weekly reports", "Weekly report delivery"
+            ),
+            ["--parent", "TBHB-DEV/TOOLS#8"],
+            "",
+        ),
+    ],
+)
+@pytest.mark.usefixtures("pinned_cue")
+def test_issue_create_with_pm_applies_parent_rules(  # noqa: PLR0913, PLR0917
+    issue_args: list[str],
+    issue_client: Mock,
+    parent_pm_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    case: tuple[str, str, list[str], str],
+) -> None:
+    issue_type, body, parent, refusal = case
+    monkeypatch.setattr(pr, "posting_value", Mock(return_value=POSTING))
+    Path(issue_args[issue_args.index("--body-file") + 1]).write_text(
+        body, encoding="utf-8"
+    )
+    issue_args += ["--type", issue_type, "--title", "Tiny", "--label", "area:reports"]
+    argv = [*issue_args, *parent, "--pm-dir", str(parent_pm_dir), "--dry-run"]
+    assert close.main(argv, env=ENV) == bool(refusal)
+    out, err = capsys.readouterr()
+    if refusal:
+        assert (out, err) == ("", f"Refused issue: {refusal}\n")
+        issue_client.rest.assert_not_called()
+    else:
+        assert err == ""
+        assert json.loads(out)["body"] == body
 
 
 @pytest.mark.parametrize("parent", [None, "8", "tbhb-dev/tools#8"])
@@ -792,8 +879,7 @@ def test_issue_create_requires_task_parent(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     (tmp_path / "body.md").write_text(
-        "verification:\n- Reports arrive on time\nevidence:\n## Notes\n",
-        encoding="utf-8",
+        "verification:\n- Reports arrive on time\n", encoding="utf-8"
     )
     assert close.main([*issue_args, "--type", "Task"], env=ENV) == 1
     assert capsys.readouterr() == (

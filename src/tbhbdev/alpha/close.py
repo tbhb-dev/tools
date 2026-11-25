@@ -264,10 +264,26 @@ def parent_reference(text: str) -> tuple[str, int]:
     return issue_reference(text if "#" in text else f"#{text}")
 
 
-def validate_issue(args: argparse.Namespace, body: str) -> None:
-    if refusals := issue_body.check(body, args.type, args.pm_dir):
+def validate_pm_issue(args: argparse.Namespace, body: str) -> None:
+    metadata: dict[str, object] = {}
+    parent = ""
+    if args.parent is not None:
+        repo, number = args.parent
+        parent = f"{repo or args.repo}#{number}".lower()
+        metadata["parent"] = parent
+    if area := next((label for label in args.label if label.startswith("area:")), ""):
+        metadata["area"] = area
+    # Like the staged importer check below, the referenced issue is external.
+    if findings := issue_import.check_parent("issue", args.type, parent, None):
+        message = f"Refused {findings[0]}"
+        raise content.Refused(message)
+    if refusals := issue_body.check(body, args.type, args.pm_dir, metadata=metadata):
         raise content.Refused("\n".join(refusals))
+
+
+def validate_issue(args: argparse.Namespace, body: str) -> None:
     if args.pm_dir is not None:
+        validate_pm_issue(args, body)
         return
     if args.type not in issue_import.TYPES:
         print(f"no schema check for type {args.type}", file=sys.stderr)
@@ -299,7 +315,11 @@ def write_issue(args: argparse.Namespace) -> int:
     if args.reason is not None:
         caller += f": {args.reason}"
     try:
-        body = args.body_file.read_bytes().decode("utf-8")
+        body = (
+            args.body_file.read_text(encoding="utf-8")
+            if args.pm_dir is None
+            else args.body_file.read_bytes().decode("utf-8")
+        )
         validate_issue(args, body)
         result = content.create_issue(
             args.repo,

@@ -187,16 +187,26 @@ def _check_block(block: Block, blocks: dict[str, Block]) -> list[Finding]:
     if block.type not in TYPES:
         findings.append(Finding(block.id, "unknown type"))
     parent = blocks.get(block.parent)
-    parent_type = parent.type if parent else ""
+    findings.extend(
+        check_parent(block.id, block.type, block.parent, parent.type if parent else "")
+    )
+    return findings
+
+
+def check_parent(
+    id_: str, issue_type: str, parent: str, parent_type: str | None
+) -> list[Finding]:
+    """Check parent rules. None means an external parent whose type is unknown."""
+    findings = []
     if parent_type == "Task":
-        findings.append(Finding(block.id, "parent is a Task"))
-    required = PARENT_TYPES.get(block.type)
-    if required and parent_type != required:
+        findings.append(Finding(id_, "parent is a Task"))
+    required = PARENT_TYPES.get(issue_type)
+    if required and parent_type != required and (not parent or parent_type is not None):
         findings.append(
-            Finding(block.id, f"{block.type} requires a parent of type {required}")
+            Finding(id_, f"{issue_type} requires a parent of type {required}")
         )
-    if block.type == "Task" and not block.parent:
-        findings.append(Finding(block.id, "Task requires a parent", 0))
+    if issue_type == "Task" and not parent:
+        findings.append(Finding(id_, "Task requires a parent", 0))
     return findings
 
 

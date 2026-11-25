@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6
-    at: "2026-11-25T14:23:54Z"
+    at: "2026-11-25T15:47:26Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -54,9 +54,9 @@ type: Reference
 
 `tbhbdev alpha issue create --repo OWNER/REPO --type TYPE --title TEXT --body-file FILE [--pm-dir DIR]` creates a GitHub issue from a recognized agent session. Repeat `--label L` to add labels. Use `--parent N` for a parent in the same repository or `--parent OWNER/REPO#N` for a parent in another repository. `--reason TEXT` adds a note to the local audit caller entry. The command prints the issue URL and number before attempting the parent link. A link refusal leaves the created issue open and exits with an error.
 
-The body must contain a Markdown section heading starting with `## ` outside a code fence. With `--pm-dir DIR`, provide rendered Markdown that starts with a level-one title. The command checks for the issue type's template in the pm checkout and validates the Markdown title and sections against that checkout's CUE schemas.
+With `--pm-dir DIR`, provide rendered Markdown that starts with a level-one title and contains a section heading starting with `## ` outside a code fence. The command checks for the issue type's template in the pm checkout and validates the Markdown title, sections, and metadata against that checkout's CUE schemas. Use `--label area:NAME` to supply an area when the schema requires one. The importer rules for criteria, verification, and parents apply. Tasks, Features, and Epics require `--parent`. As with the staged importer check, the command accepts external parent references without checking their issue type. For `--title`, the command runs only the shared content scan.
 
-Without `--pm-dir`, use staged issue fields such as `criteria:` or `verification:` with list items and `evidence:` for supporting text. Research and Decision skip the importer check. The shared content scans apply to every type. With `--dry-run`, the command prints the creation payload as JSON and skips the write, parent link, and audit entry.
+Without `--pm-dir`, use staged issue fields such as `criteria:` or `verification:` with list items and `evidence:` for supporting text. The level-two heading requirement applies only with `--pm-dir`. Research and Decision skip the staged importer check. The shared content scans apply to every type. With `--dry-run`, the command prints the creation payload as JSON and skips the write, parent link, and audit entry.
 
 `tbhbdev alpha issue link-sub PARENT CHILD` adds a sub-issue, and `unlink-sub PARENT CHILD` removes it. A private issue can have a public sub-issue only when the parent is a Feature and the child is a Task, Defect, Chore, Spike, or Research issue. `block BLOCKED --by BLOCKER` adds a dependency, and `unblock BLOCKED --by BLOCKER` removes it. Use `--blocked-by` as an alias for `--by`, or pass `BLOCKER --blocking BLOCKED` to specify the blocker first.
 

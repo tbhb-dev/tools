@@ -15,18 +15,27 @@ if TYPE_CHECKING:
 ISSUE_TYPES = issue_import.TYPES | {"Research", "Decision"}
 _TYPE_NAMES = {name.lower(): name for name in ISSUE_TYPES}
 _SECTION = re.compile(r"^ {0,3}## ")
+_UNRESOLVED_DISJUNCTION = re.compile(
+    r'incomplete value "(?:[^"\\]|\\.)*"(?: \| "(?:[^"\\]|\\.)*")+'
+)
 
 
-def check(body: str, issue_type: str, pm_dir: Path | None) -> list[str]:
+def check(
+    body: str,
+    issue_type: str,
+    pm_dir: Path,
+    *,
+    metadata: content_vet.Json | None = None,
+) -> list[str]:
     """Return refusals for a missing ATX section or a pm schema violation."""
     variant = issue_type.lower()
     name = _TYPE_NAMES.get(variant)
     try:
         draft = content_model.normalize(
             body,
-            object="issue-comment" if pm_dir is None else "issue",
+            object="issue",
             variant=variant,
-            metadata={"type": name},
+            metadata={**(metadata or {}), "type": name},
         )
     except ValueError as exc:
         return [str(exc)]
@@ -36,8 +45,6 @@ def check(body: str, issue_type: str, pm_dir: Path | None) -> list[str]:
         for block in blocks.values()
     ):
         return ["Issue body must contain a level-two heading starting with '## '"]
-    if pm_dir is None:
-        return []
     if name is None:
         return [f"Unknown issue type: {issue_type}"]
     return _check_schema(draft, pm_dir, variant)
@@ -55,7 +62,11 @@ def _check_schema(draft: content_vet.Json, pm_dir: Path, variant: str) -> list[s
     try:
         with as_file(files("tbhbdev").joinpath("schemas")) as shared:
             result = content_vet.check(
-                draft, shared, variant_schema=variant_files, definition="#Variant"
+                draft,
+                shared,
+                variant_schema=variant_files,
+                definition="#Variant",
+                verify_parent_type=False,
             )
     except (cue_runtime.CueError, OSError, TimeoutExpired) as exc:
         return [str(exc)]
@@ -63,7 +74,7 @@ def _check_schema(draft: content_vet.Json, pm_dir: Path, variant: str) -> list[s
         content_vet.format_refusal(finding)
         for finding in result.refusals
         if not (
-            finding.path.startswith("metadata")
-            and "incomplete value" in finding.message
+            finding.path.startswith("metadata.fields.")
+            and _UNRESOLVED_DISJUNCTION.fullmatch(finding.message)
         )
     ]
