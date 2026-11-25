@@ -9,9 +9,40 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+import pytest
+
+from tbhbdev import cue_runtime
+
 if TYPE_CHECKING:
-    import pytest
     from conftest import Stubs
+
+
+@pytest.mark.parametrize("bazel", [False, True])
+def test_pinned_cue_uses_bazel_binary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    bazel: bool,
+) -> None:
+    local_data = tmp_path / "local"
+    monkeypatch.setenv("XDG_DATA_HOME", str(local_data))
+    binary = tmp_path / "cue"
+    binary.symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    if bazel:
+        monkeypatch.setenv("TEST_TMPDIR", str(tmp_path))
+    else:
+        monkeypatch.delenv("TEST_TMPDIR", raising=False)
+
+    request.getfixturevalue("pinned_cue")
+
+    target = cue_runtime.binary_path()
+    if bazel:
+        assert target.is_relative_to(tmp_path)
+        assert target.readlink() == binary
+    else:
+        assert target.is_relative_to(local_data)
+        assert not target.exists()
 
 
 def test_stub_runs_under_long_interpreter_path(

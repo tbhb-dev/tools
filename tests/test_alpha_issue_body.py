@@ -1,7 +1,8 @@
 """Checks for rendered issue bodies and checkout-provided schemas."""
 
 import os
-import shutil
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -10,19 +11,22 @@ import pytest
 from tbhbdev import content_vet, cue_runtime
 from tbhbdev.alpha import issue_body
 
+pytestmark = pytest.mark.usefixtures("pinned_cue")  # noqa: V107
+
 PM_DIR = Path(os.environ.get("TBHB_PM_DIR") or "/nonexistent")
 BODY = "# Reports vanish when filtered\n\n## Outcome\n\nKeep reports visible.\n"
 
 
-@pytest.fixture(autouse=True)
-def pinned_cue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    if "TEST_TMPDIR" in os.environ:
-        binary = shutil.which("cue")
-        assert binary is not None
-        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-        target = cue_runtime.binary_path()
-        target.parent.mkdir(parents=True)
-        target.symlink_to(binary)
+def test_issue_body_passes_bandit() -> None:
+    pytest.importorskip("bandit")
+    source = Path(__file__).resolve().parents[1] / "src/tbhbdev/alpha/issue_body.py"
+    result = subprocess.run(
+        [sys.executable, "-m", "bandit", "-q", str(source)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout or result.stderr
 
 
 @pytest.fixture

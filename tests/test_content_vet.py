@@ -1,5 +1,3 @@
-import os
-import shutil
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -8,6 +6,8 @@ import pytest
 from tbhbdev import content, content_vet, cue_runtime
 from tbhbdev.content_model import normalize
 
+pytestmark = pytest.mark.usefixtures("pinned_cue")  # noqa: V107
+
 SCHEMAS = Path(__file__).resolve().parents[1] / "schemas"
 CI_HINT = "CI already checks this; state the observable outcome instead"
 TITLE = "Analysts can download reports"
@@ -15,17 +15,6 @@ TITLE = "Analysts can download reports"
 
 def issue(markdown: str, variant: str) -> content_vet.Json:
     return normalize(markdown, object="issue", variant=variant, metadata={})
-
-
-@pytest.fixture(autouse=True)
-def pinned_cue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    if "TEST_TMPDIR" in os.environ:
-        binary = shutil.which("cue")
-        assert binary is not None
-        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
-        target = cue_runtime.binary_path()
-        target.parent.mkdir(parents=True)
-        target.symlink_to(binary)
 
 
 @pytest.fixture

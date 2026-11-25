@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, cast, override
 
 import pytest
 
-from tbhbdev import host, plugins, secrets
+from tbhbdev import cue_runtime, host, plugins, secrets
 from tbhbdev.alpha.agent import credentials, host_tools, launcher, runfiles
 
 if TYPE_CHECKING:
@@ -364,6 +364,18 @@ def plain(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.delenv("FORCE_COLOR", raising=False)
     monkeypatch.setenv("COLUMNS", "80")
+
+
+@pytest.fixture
+def pinned_cue(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use the CUE binary provided by Bazel for tests of the pinned runtime."""
+    if "TEST_TMPDIR" in os.environ:
+        binary = shutil.which("cue")
+        assert binary is not None
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+        target = cue_runtime.binary_path()
+        target.parent.mkdir(parents=True)
+        target.symlink_to(binary)
 
 
 @dataclass

@@ -2,7 +2,9 @@
 
 import re
 from importlib.resources import as_file, files
-from subprocess import TimeoutExpired
+
+# Only the exception type raised by the CUE subprocess is needed here.
+from subprocess import TimeoutExpired  # nosec B404
 from typing import TYPE_CHECKING, cast
 
 from tbhbdev import content_model, content_vet, cue_runtime, issue_import
