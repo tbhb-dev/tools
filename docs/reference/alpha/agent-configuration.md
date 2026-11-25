@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:3821e841b874aee9
-    at: "2026-11-25T11:29:10Z"
+    session: sha-256-64:d11e7afc9627e72d
+    at: "2026-11-25T12:36:06Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -23,6 +23,8 @@ type: Reference
 The launcher warns when the prompt mentions a ref that no `--fetch-ref` option covers.
 
 `agent exec --expect-commit` requires a new commit from a build run. If the run would otherwise succeed and the host records no new commit, it returns exit status 6 and logs `no new commit: the brief expected one (--expect-commit)`. The launcher refuses this flag for the review profile.
+
+Pass `--ref <full sha>` to launch a review and include `--reason` when you use Claude.
 
 After workspace preparation, a build run reads the repository’s hook configs for references to Bazel shim directories and executables. If a referenced directory is missing, the host reports phase `shims` and uses `bazelisk` or `bazel` to run the `bazel_env` target for each referenced directory’s package, with a 10-minute timeout per target. The harness can start once the referenced executables exist, or once the directory exists if the hooks reference only the directory, even if Bazel returns a nonzero status. Review runs and preflight checks skip this step.
 
@@ -54,7 +56,7 @@ Every `tbhb-dev` repository on GitHub runs on any host with no list entry, and a
 
 The ssh verb `preflight NAME` requires a null `push_token` and refuses a request with a token. The local `--preflight` flag ignores any `push_token`. It prepares the workspace and credentials and loads the signing agent. It logs whether the run worktree has `.bazel_env/bin` and warns that commit hooks fail when the directory is missing, without changing the exit status. After checking the policy and harness command, it writes `preflight ok: <executable path>` to the log. It stops the signing agent and records the exit status, phase, and index entry without launching the harness. Use a fresh name for the next run. Preparation errors use `run preparation failed at <step>: <cause>`. The cause keeps the validation message, the operating system error with only the filename's basename, or the first line of git's standard error. It removes control characters, redacts environment values, credentials and URL user information, and limits the cause to 200 characters. Other value errors and git failures without standard error use a generic cause.
 
-A missing hook executable produces `run preparation failed at hook install: host executable prek was not found`. Install `prek` in a fixed directory on the host tools' search path, or add its directory to `host_path`.
+A missing hook executable produces a message such as `run preparation failed at hook install: host executable prek was not found on PATH sbin` after preparation shortens absolute paths. Install `prek` in a fixed directory on the host tools' search path, or add its directory to `host_path`.
 
 The run clone has its own copy of the mirror's object store. The mirror never prunes objects. Run-host installs the identity and pre-commit hooks from its own templates without running code from the checkout. It finishes all git operations before starting the harness. Plain git in a run clone is unsafe for host processes.
 
@@ -131,7 +133,7 @@ Run-host finds harness executables through the account’s PATH, then `$HOME/.lo
 
 Host tools use a fixed search path with optional absolute directories from `host_path`. Harness lookup keeps the `mise/shims` refusal: configure a fixed install directory on the account’s PATH. Remote launch and transfer scripts include the account’s `$HOME/.local/bin`, so they can find tmux there.
 
-Codex uses the account’s existing executable. Runs skip standalone release validation and copying. A missing executable still fails with `host executable codex was not found`. Codex uses full access with its network proxy off. An agy review omits `--sandbox`.
+Codex uses the account’s existing executable. Runs skip standalone release validation and copying. A missing executable still fails with `host executable codex was not found on PATH <directories>`. Codex uses full access with its network proxy off. An agy review omits `--sandbox`.
 
 Run-host announces full access before preparation. Reviews still require reviews App references and refuse token request failures. A review token holds read permissions only (contents, pull requests, checks and statuses). Reviews App credentials can remain configured on any run host.
 

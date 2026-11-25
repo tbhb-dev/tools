@@ -69,9 +69,10 @@ def configured(settings: Settings, os: Os) -> Generator[None]:
 
 
 def resolve(name: str, path: str | None = None, *, follow_symlinks: bool = True) -> str:
-    found = shutil.which(name, path=search() if path is None else path)
+    directories = search() if path is None else path
+    found = shutil.which(name, path=directories)
     if found is None:
-        message = f"host executable {name} was not found"
+        message = f"host executable {name} was not found on PATH {directories}"
         raise Invalid(message)
     aliases = (Path(found), *(Path(p) for p in executable_links(Path(found))))
     if any(

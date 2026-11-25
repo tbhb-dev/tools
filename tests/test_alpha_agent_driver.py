@@ -110,6 +110,13 @@ def test_exec_help_describes_expected_commits(
     )
 
 
+def test_exec_help_lists_model_examples(capsys: pytest.CaptureFixture[str]) -> None:
+    assert agent.main(["exec", "--help"], "example agent") == 0
+    help_text = capsys.readouterr().out
+    assert "gemini-" in help_text
+    assert "claude-opus-5-5" in help_text
+
+
 def command(verb: str, *options: str) -> int:
     return agent.main([verb, "sample", *options], "example agent")
 

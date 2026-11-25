@@ -5005,8 +5005,15 @@ def test_unsandboxed_codex_uses_account_path(
 
     monkeypatch.setattr(codex_install, "prepare", unexpected)
     if missing:
-        with pytest.raises(Invalid, match=r"^host executable codex was not found$"):
+        with pytest.raises(Invalid) as caught:
             run_host.checked_policy(run, run_host.planned_paths(run))
+        search_path = ":".join(
+            (inherited_path, *host_tools.account_path(str(run.home)))
+        )
+        assert (
+            str(caught.value)
+            == f"host executable codex was not found on PATH {search_path}"
+        )
     else:
         value, executable = run_host.checked_policy(run, run_host.planned_paths(run))
         assert executable == str(binary)
