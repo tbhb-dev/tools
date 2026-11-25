@@ -1,0 +1,39 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@tbhb_rules//repo:defs.bzl", "repo_files")
+
+_EXCLUDE = glob(
+    ["**"],
+    allow_empty = True,
+    exclude = [
+        "BUILD.bazel",
+        "dispatch.go",
+        "dispatch_test.go",
+    ],
+)
+
+repo_files(
+    exclude = _EXCLUDE,
+    exclude_subpackages = ["**"],
+)
+
+repo_files(
+    name = "okf_repo_files",
+    exclude = _EXCLUDE,
+    exclude_subpackages = ["**"],
+)
+
+go_library(
+    name = "dispatch",
+    srcs = ["dispatch.go"],
+    importpath = "go.tbhb.dev/tools/internal/dispatch",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "dispatch_test",
+    size = "small",
+    srcs = ["dispatch_test.go"],
+    embed = [":dispatch"],
+    tags = ["unit"],
+    visibility = ["//:__pkg__"],
+)

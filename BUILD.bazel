@@ -39,6 +39,8 @@ load(
     "vulture_test",
 )
 
+exports_files(["go.mod"])
+
 # Every file of the repository, for the whole-tree checks below. Ignored
 # directories are listed in REPO.bazel; these are the gitignored files that
 # can sit at the root of a working checkout.
@@ -130,7 +132,9 @@ repo_layout_test(
         ".github",
         ".vale",
         "LICENSES",
+        "cmd",
         "docs",
+        "internal",
         "schemas",
         "src",
         "tests",

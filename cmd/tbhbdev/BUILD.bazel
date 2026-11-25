@@ -1,0 +1,46 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("@tbhb_rules//repo:defs.bzl", "repo_files")
+
+_EXCLUDE = glob(
+    ["**"],
+    allow_empty = True,
+    exclude = [
+        "BUILD.bazel",
+        "main.go",
+        "main_test.go",
+    ],
+)
+
+repo_files(
+    exclude = _EXCLUDE,
+    exclude_subpackages = ["**"],
+)
+
+repo_files(
+    name = "okf_repo_files",
+    exclude = _EXCLUDE,
+    exclude_subpackages = ["**"],
+)
+
+go_binary(
+    name = "tbhbdev",
+    embed = [":tbhbdev_lib"],
+    visibility = ["//:__pkg__"],
+    x_defs = {"main.bundleVersion": "{STABLE_BUILD_SCM_VERSION}"},
+)
+
+go_library(
+    name = "tbhbdev_lib",
+    srcs = ["main.go"],
+    importpath = "go.tbhb.dev/tools/cmd/tbhbdev",
+    visibility = ["//visibility:private"],
+    deps = ["//internal/dispatch"],
+)
+
+go_test(
+    name = "tbhbdev_test",
+    size = "small",
+    srcs = ["main_test.go"],
+    embed = [":tbhbdev_lib"],
+    tags = ["integration"],
+)
