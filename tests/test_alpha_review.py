@@ -335,8 +335,9 @@ def test_check_reports_unreadable_drafts(
     "argv",
     [
         [],
-        ["post", "7"],
-        ["dismiss", "7"],
+        ["post", "7", "--event", "APPROVE"],
+        ["dismiss", "7", "1"],
+        ["dismiss", "7", "0", "--reason", "stale"],
         ["draft"],
         ["check", "0"],
         ["draft", "-1"],
@@ -344,10 +345,12 @@ def test_check_reports_unreadable_drafts(
         ["check", "7", "--force"],
     ],
 )
-def test_bad_arguments(argv: list[str]) -> None:
-    with pytest.raises(SystemExit) as info:
+def test_bad_arguments(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    with patch.object(review, "edit_review"), pytest.raises(SystemExit) as info:
         run_main(*argv)
     assert info.value.code == 2
+    if argv[:1] == ["dismiss"] and "0" in argv:
+        assert capsys.readouterr().err.endswith("review ID must be at least 1\n")
 
 
 def test_help_uses_the_program_name(capsys: pytest.CaptureFixture[str]) -> None:
@@ -357,6 +360,7 @@ def test_help_uses_the_program_name(capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     assert out.startswith("usage: tbhbdev alpha review ")
     assert "Draft and check a pull request review in per-worktree git state." in out
+    assert re.search(r"(?m)^ +policy +check a worktree's review policy files$", out)
 
 
 def test_alpha_dispatch(world: World, capsys: pytest.CaptureFixture[str]) -> None:
@@ -476,6 +480,9 @@ def test_dispatch_forwards_arguments_program_and_status() -> None:
     with patch.object(review, "main", return_value=3) as run:
         assert alpha.main(["review", "check", "7"], "p") == 3
         run.assert_called_once_with(["check", "7"], prog="p review")
+    with patch.object(review.review_policy, "main", return_value=3) as run:
+        assert review.main(["policy", "check"], "p") == 3
+        run.assert_called_once_with(["check"], "p policy")
 
 
 def test_explicit_empty_sections_do_not_load_the_repository_scheme() -> None:

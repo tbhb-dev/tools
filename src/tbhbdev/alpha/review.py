@@ -1,6 +1,7 @@
 """Draft and check a pull request review in per-worktree git state."""
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -10,7 +11,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import pull_request as pr
-from tbhbdev.alpha import review_policy
+from tbhbdev.alpha import review_doc, review_policy
 
 SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -198,8 +199,75 @@ def findings_problems(lines: list[pr.Line], first: int) -> list[pr.Problem]:
     return [(first, "REQUEST_CHANGES requires non-empty Findings")]
 
 
+class GhApi:
+    # Posts as the agent's own account, separate from the review App in
+    # agent/review_post.py. Run-host does not use these commands.
+    def request(
+        self, method: str, path: str, payload: dict[str, object] | None = None
+    ) -> object:
+        args = [pr.find_tool(pr.GH), "api", "--method", method, path]
+        stdin = ""
+        if payload is not None:
+            args += ["--input", "-"]
+            stdin = json.dumps(payload)
+        if (done := pr.run(args, stdin=stdin)).returncode != 0:
+            raise review_doc.ReviewError(done.stderr.strip())
+        try:
+            return json.loads(done.stdout or "null")
+        except json.JSONDecodeError as exc:
+            message = "GitHub returned invalid JSON"
+            raise review_doc.ReviewError(message) from exc
+
+
+def api_author(api: review_doc.Api) -> str:
+    user = api.request("GET", "user")
+    match cast("dict[str, object] | None", user):  # pragma: no mutate -- cast
+        case {"login": str(login)} if login:
+            return login
+        case _:
+            message = "GitHub did not return a login"
+            raise review_doc.ReviewError(message)
+
+
+def post_draft(number: int, author: str | None) -> int:
+    path = draft_path(number).with_suffix(".doc.md")
+    try:
+        doc = review_doc.parse(path.read_text())
+        if doc.pr != number:
+            message = f"draft must name pull request {number}"
+            raise review_doc.ReviewError(message)
+        repo = pr.origin_repository()
+        if doc.repo != repo:
+            message = f"draft repo {doc.repo} differs from origin repo {repo}"
+            raise review_doc.ReviewError(message)
+        api = GhApi()
+        status, review_id = review_doc.post(api, doc, author=author or api_author(api))
+    except (OSError, SystemExit, ValueError) as exc:
+        for problem in str(exc).splitlines():
+            print(f"{path}: {problem}", file=sys.stderr)
+        return 1
+    print(status if review_id is None else f"{status} {review_id}")
+    return 0
+
+
+def edit_review(args: argparse.Namespace) -> int:
+    try:
+        target = (GhApi(), pr.origin_repository(), args.number, args.review_id)
+        if args.command == "dismiss":
+            review_doc.dismiss(*target, args.reason)
+            result = f"superseded {args.review_id}"
+        else:
+            comment = review_doc.reply(*target, args.text)
+            result = f"replied {comment}"
+    except (OSError, SystemExit, review_doc.ReviewError) as exc:
+        print(f"review {args.review_id}: {exc}", file=sys.stderr)
+        return 1
+    print(result)
+    return 0
+
+
 def main(argv: list[str], prog: str) -> int:
-    """Run the review draft, check or policy command."""
+    """Run a review command."""
     if argv[:1] == ["policy"]:
         return review_policy.main(argv[1:], f"{prog} policy")
     parser = argparse.ArgumentParser(prog=prog, description=__doc__)
@@ -209,9 +277,23 @@ def main(argv: list[str], prog: str) -> int:
     create.add_argument("--force", action="store_true")
     sub.add_parser("check").add_argument("number", type=int)
     sub.add_parser("policy", help="check a worktree's review policy files")
+    post = sub.add_parser("post")
+    post.add_argument("number", type=int)
+    post.add_argument("--author")
+    for command, option in (("dismiss", "--reason"), ("reply", "--text")):
+        edit = sub.add_parser(command)
+        edit.add_argument("number", type=int)
+        edit.add_argument("review_id", type=int)
+        edit.add_argument(option, required=True)
     args = parser.parse_args(argv)
     if args.number < 1:
         parser.error("PR number must be at least 1")
+    if args.command == "post":
+        return post_draft(args.number, args.author)
+    if args.command in {"dismiss", "reply"}:
+        if args.review_id < 1:
+            parser.error("review ID must be at least 1")
+        return edit_review(args)
     if args.command == "draft":
         print(draft(args.number, force=args.force))
         return 0
