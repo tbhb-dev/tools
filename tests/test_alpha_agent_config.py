@@ -29,7 +29,8 @@ PATHS = "must not contain a NUL or '..' part"
 NON_BLANK = "must be a non-blank string"
 STRINGS = "must be a non-empty list of non-blank strings"
 POSITIVE = "must be a positive integer"
-HTTPS = "must be an https URL with no credentials, path, query or fragment"
+OTEL_SHAPE = "must be an http or https URL with no credentials, path, query or fragment"
+OTEL_UNLISTED = "host must be listed in [agent.sandbox] network_domains"
 OTEL_HOST = "otlp.example.net"
 DURATION = "must be bare seconds or a number ending in s, m or h, up to 7 days"
 
@@ -52,6 +53,10 @@ def with_otel(table: Table) -> Table:
 @pytest.mark.parametrize(
     "endpoint",
     [
+        "http://otlp.example.net",
+        "http://otlp.example.net/",
+        "http://otlp.example.net:4318",
+        "http://otlp.example.net:4318/",
         "https://otlp.example.net:4318",
         "https://otlp.example.net/",
         "https://otlp.example.net:65535",
@@ -67,37 +72,42 @@ def test_otel_endpoint(endpoint: str) -> None:
 @pytest.mark.parametrize(
     ("table", "reason"),
     [
-        ({"endpoint": "http://otlp.example.net"}, HTTPS),
-        ({"endpoint": "https://user:pw@otlp.example.net"}, HTTPS),
-        ({"endpoint": "https://user@otlp.example.net"}, HTTPS),
-        ({"endpoint": "https://:pw@otlp.example.net"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net/token"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net/a b"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net/a\x00b"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net/a\x01b"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net/a\x7fb"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net/\u00e9"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net:abc"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net:99999"}, HTTPS),
-        ({"endpoint": 'https://otlp.example.net/a"b'}, HTTPS),
-        ({"endpoint": "https://otlp.example.net/a\\b"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net/?k=v"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net/#f"}, HTTPS),
-        ({"endpoint": "https://u:p@[::1"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net:65536"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net:0"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net:00080"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net:080"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net:"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net:123456"}, HTTPS),
-        ({"endpoint": "https://OTLP.example.net"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net\n"}, HTTPS),
-        ({"endpoint": "https://otlp.example.net//"}, HTTPS),
-        ({"endpoint": " https://otlp.example.net"}, HTTPS),
-        (
-            {"endpoint": "https://other.example.net"},
-            "host must be listed in [agent.sandbox] network_domains",
-        ),
+        ({"endpoint": "ftp://otlp.example.net"}, OTEL_SHAPE),
+        ({"endpoint": "http://user:pw@otlp.example.net"}, OTEL_SHAPE),
+        ({"endpoint": "http://otlp.example.net/token"}, OTEL_SHAPE),
+        ({"endpoint": "http://otlp.example.net/?k=v"}, OTEL_SHAPE),
+        ({"endpoint": "http://otlp.example.net/#f"}, OTEL_SHAPE),
+        ({"endpoint": "http://otlp.example.net:65536"}, OTEL_SHAPE),
+        ({"endpoint": "http://otlp.example.net\n"}, OTEL_SHAPE),
+        ({"endpoint": "http://collector.example"}, OTEL_UNLISTED),
+        ({"endpoint": "http://otlp.example.net.other.example"}, OTEL_UNLISTED),
+        ({"endpoint": "https://user:pw@otlp.example.net"}, OTEL_SHAPE),
+        ({"endpoint": "https://user@otlp.example.net"}, OTEL_SHAPE),
+        ({"endpoint": "https://:pw@otlp.example.net"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net/token"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net/a b"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net/a\x00b"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net/a\x01b"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net/a\x7fb"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net/\u00e9"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net:abc"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net:99999"}, OTEL_SHAPE),
+        ({"endpoint": 'https://otlp.example.net/a"b'}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net/a\\b"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net/?k=v"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net/#f"}, OTEL_SHAPE),
+        ({"endpoint": "https://u:p@[::1"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net:65536"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net:0"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net:00080"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net:080"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net:"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net:123456"}, OTEL_SHAPE),
+        ({"endpoint": "https://OTLP.example.net"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net\n"}, OTEL_SHAPE),
+        ({"endpoint": "https://otlp.example.net//"}, OTEL_SHAPE),
+        ({"endpoint": " https://otlp.example.net"}, OTEL_SHAPE),
+        ({"endpoint": "https://other.example.net"}, OTEL_UNLISTED),
         ({"endpoint": 1}, NON_BLANK),
         ({}, "is required"),
     ],
@@ -108,9 +118,10 @@ def test_otel_endpoint_refuses_invalid_values(table: Table, reason: str) -> None
     assert str(caught.value) == f"[agent.otel] endpoint {reason}"
 
 
-def test_otel_endpoint_error_never_quotes_the_credential() -> None:
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_otel_endpoint_error_never_quotes_the_credential(scheme: str) -> None:
     with pytest.raises(Invalid) as caught:
-        config.parse(with_otel({"endpoint": "https://user:hunter2@[::1"}))
+        config.parse(with_otel({"endpoint": f"{scheme}://user:hunter2@[::1"}))
     assert "hunter2" not in str(caught.value)
 
 
