@@ -100,7 +100,7 @@ TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_.~+/=-]+")
 PEM_PATTERN = re.compile(
     r"-----BEGIN ([A-Z0-9 ]+)-----(.*?)-----END \1-----", re.DOTALL
 )
-DEFAULT_VAULT = "tbhb-dev"
+DEFAULT_VAULT = "host-all"
 API = "https://api.github.com"
 TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 REUSE_MARGIN = 600

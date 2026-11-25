@@ -113,7 +113,7 @@ class Store:
         return self.values[ref]
 
 
-def app_store(key: str, *, app: str = "bot", vault: str = "tbhb-dev") -> Store:
+def app_store(key: str, *, app: str = "bot", vault: str = "host-all") -> Store:
     base = f"op://{vault}/github-app-{app}"
     return Store({f"{base}/app_id": APP_ID, f"{base}/private_key": key})
 
@@ -173,7 +173,7 @@ def run(
     return code, out, err
 
 
-def out_path(tmp_path: Path, *parts: str, vault: str = "tbhb-dev") -> Path:
+def out_path(tmp_path: Path, *parts: str, vault: str = "host-all") -> Path:
     return tmp_path.joinpath("state", vault, "bot", "acme", *parts)
 
 
@@ -190,7 +190,7 @@ BASE = gh_app.Args(
     fresh=False,
     dry_run=False,
     all_repos=False,
-    vault="tbhb-dev",
+    vault="host-all",
     cooldown_until=None,
     cooldown_status=False,
 )
@@ -244,7 +244,7 @@ def test_a_vault_that_cannot_be_one_path_component_is_a_usage_error(
         gh_app.parse_args(["bot", "--cooldown-status", "--vault", vault])
 
 
-@pytest.mark.parametrize("vault", ["tbhb-dev", "My Vault", "a.b", "..a", "a..", "+"])
+@pytest.mark.parametrize("vault", ["host-all", "My Vault", "a.b", "..a", "a..", "+"])
 def test_any_other_vault_is_one_path_component(vault: str) -> None:
     assert gh_app.valid_vault(vault)
     assert gh_app.parse_args(["bot", REPO, "--vault", vault]).vault == vault
@@ -316,7 +316,7 @@ def test_permissions_parse_sort_and_split_the_cache_directory() -> None:
     assert gh_app.parse_args(["bot", REPO]).permissions == ()
     state = Path("/s")
     assert gh_app.out_dir(state, replace(args, repo="o/r")) == Path(
-        "/s/tbhb-dev/bot/o/r+contents-read+pull-requests-write"
+        "/s/host-all/bot/o/r+contents-read+pull-requests-write"
     )
     assert gh_app.token_body("o/r", all_repos=False, permissions=args.permissions) == {
         "repositories": ["r"],
@@ -364,9 +364,9 @@ def test_a_cooldown_option_refuses_permissions() -> None:
 def test_layout() -> None:
     state = Path("/s")
     args = replace(BASE, repo="o/r")
-    assert gh_app.out_dir(state, args) == Path("/s/tbhb-dev/bot/o/r")
+    assert gh_app.out_dir(state, args) == Path("/s/host-all/bot/o/r")
     assert gh_app.out_dir(state, replace(args, all_repos=True)) == Path(
-        "/s/tbhb-dev/bot/o/+all"
+        "/s/host-all/bot/o/+all"
     )
     assert gh_app.out_dir(state, replace(args, vault="v")) == Path("/s/v/bot/o/r")
     assert gh_app.cooldown_path(state, "bot") == Path("/s/cooldown/bot")
@@ -464,7 +464,7 @@ def test_the_owner_is_what_precedes_the_first_slash() -> None:
     assert gh_app.lookup_paths("a/b/c")[1] == "/orgs/a/installation"
     assert gh_app.token_body("a/b/c", all_repos=False) == {"repositories": ["b/c"]}
     assert gh_app.out_dir(Path("/s"), replace(BASE, repo="a/b")) == Path(
-        "/s/tbhb-dev/bot/a/b"
+        "/s/host-all/bot/a/b"
     )
 
 
@@ -738,8 +738,8 @@ def test_a_mint_writes_hosts_yml_and_prints_only_the_dir(
         "hosts.yml",
     ]
     assert store.reads == [
-        "op://tbhb-dev/github-app-bot/app_id",
-        "op://tbhb-dev/github-app-bot/private_key",
+        "op://host-all/github-app-bot/app_id",
+        "op://host-all/github-app-bot/private_key",
     ]
 
 
@@ -800,8 +800,8 @@ def test_the_jwt_is_a_real_rs256_signature(
     github = Github()
     store = Store(
         {
-            "op://tbhb-dev/github-app-bot/app_id": f" {APP_ID}\n",
-            "op://tbhb-dev/github-app-bot/private_key": rsa.pem,
+            "op://host-all/github-app-bot/app_id": f" {APP_ID}\n",
+            "op://host-all/github-app-bot/private_key": rsa.pem,
         }
     )
     run(capsys, env_for(tmp_path, store, github), "bot", REPO)
@@ -946,7 +946,7 @@ def test_a_store_that_cannot_be_built_is_an_unreadable_field(
     env = replace(env_for(tmp_path, app_store("k"), Github()), store=broken)
     code, out, err = run(capsys, env, "bot", REPO)
     assert (code, out) == (1, "")
-    assert err == "cannot read app_id from tbhb-dev/github-app-bot\n"
+    assert err == "cannot read app_id from host-all/github-app-bot\n"
 
 
 @pytest.mark.parametrize("missing", ["app_id", "private_key"])
@@ -959,7 +959,7 @@ def test_an_unreadable_field_is_an_error_that_names_no_value(
     how: str,
 ) -> None:
     store = app_store(rsa.pem)
-    ref = f"op://tbhb-dev/github-app-bot/{missing}"
+    ref = f"op://host-all/github-app-bot/{missing}"
     if how == "absent":
         del store.values[ref]
     else:
@@ -967,7 +967,7 @@ def test_an_unreadable_field_is_an_error_that_names_no_value(
     github = Github()
     code, out, err = run(capsys, env_for(tmp_path, store, github), "bot", REPO)
     assert (code, out) == (1, "")
-    assert err == f"cannot read {missing} from tbhb-dev/github-app-bot\n"
+    assert err == f"cannot read {missing} from host-all/github-app-bot\n"
     assert github.requests == []
     assert not out_path(tmp_path).exists()
 
@@ -981,7 +981,26 @@ def test_the_vault_can_be_overridden(
     assert store.reads[0] == "op://other/github-app-bot/app_id"
     env = env_for(tmp_path, store, Github())
     code, _, err = run(capsys, env, "bot", REPO, "--fresh")
-    assert (code, err) == (1, "cannot read app_id from tbhb-dev/github-app-bot\n")
+    assert (code, err) == (1, "cannot read app_id from host-all/github-app-bot\n")
+
+
+def test_the_default_vault_is_the_one_every_agent_host_reads() -> None:
+    assert gh_app.DEFAULT_VAULT == "host-all"
+    assert gh_app.parse_args(["bot", REPO]).vault == "host-all"
+
+
+def test_a_mint_with_no_vault_reads_the_pull_requests_item_from_host_all(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, rsa: Key
+) -> None:
+    app = "tbhb-dev-agent-pull-requests"
+    store = app_store(rsa.pem, app=app, vault="host-all")
+    env = env_for(tmp_path, store, Github())
+    code, _, _ = run(capsys, env, app, REPO)
+    assert code == 0
+    assert store.reads == [
+        "op://host-all/github-app-tbhb-dev-agent-pull-requests/app_id",
+        "op://host-all/github-app-tbhb-dev-agent-pull-requests/private_key",
+    ]
 
 
 def test_two_vaults_never_share_a_token(
