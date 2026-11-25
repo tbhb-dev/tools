@@ -517,8 +517,7 @@ def issue_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Mock:
     ) -> close.content.Json:
         return responses[method, path]
 
-    client = Mock(spec=close.content.Client)
-    client.rest.side_effect = respond
+    client = Mock(spec=close.content.Client, rest=Mock(side_effect=respond))
     monkeypatch.setattr(close.content, "GhClient", lambda: client)
     monkeypatch.setattr(close.content, "_scan", Mock())
     monkeypatch.setenv("TBHBDEV_AUDIT_LOG", str(tmp_path / "audit.jsonl"))
@@ -671,8 +670,8 @@ def test_issue_create_reports_gh_failure(
     issue_client: Mock,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    issue_client.rest.side_effect = subprocess.CalledProcessError(
-        4, "gh", stderr="API error\n"
+    issue_client.rest = Mock(
+        side_effect=subprocess.CalledProcessError(4, "gh", stderr="API error\n")
     )
     assert close.main(issue_args, env=ENV) == 4
     assert capsys.readouterr() == ("", "API error\n")
