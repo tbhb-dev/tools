@@ -31,7 +31,7 @@ def test_counts(monkeypatch: pytest.MonkeyPatch, failed: str | None) -> None:
         400, 400, 1500, 1500, failed
     )
     assert runner.call_count == 1
-    assert runner.call_args.args == ([*sg.COUNTER, "origin/main", "HEAD"],)
+    assert runner.call_args.args == (["bazelisk", *sg.COUNTER, "origin/main", "HEAD"],)
 
 
 @pytest.mark.parametrize("error", [OSError("no bazelisk"), None])
@@ -137,6 +137,7 @@ def test_review(monkeypatch: pytest.MonkeyPatch, data: object, expected: bool) -
         (sg.SizeCounts(100, 400, 1501, 1500, "raw"), "1501 lines, limit 1500"),
     ],
 )
+@pytest.mark.usefixtures("pr_tools")
 def test_pr_check(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -154,7 +155,9 @@ def test_pr_check(
         argparse.Namespace(command="check", draft="draft.md"), {}
     ) == bool(problem)
     lint.assert_called_once_with("draft.md")
-    counter.assert_called_once_with("refs/remotes/origin/main", "HEAD")
+    counter.assert_called_once_with(
+        "refs/remotes/origin/main", "HEAD", bazelisk="/tools/bazelisk"
+    )
     captured = capsys.readouterr()
     assert captured.err == ""
     assert captured.out.startswith(
@@ -168,6 +171,7 @@ def test_pr_check(
         assert captured.out.endswith("OK: the draft conforms\n")
 
 
+@pytest.mark.usefixtures("pr_tools")
 def test_pr_check_unavailable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -186,6 +190,14 @@ def test_pr_check_unavailable(
 REAL_TARGET_IS_ORIGIN = pr.target_is_origin
 
 
+@pytest.fixture
+def pr_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    def paths(names: tuple[str, ...], **_options: object) -> dict[str, str]:
+        return {name: f"/tools/{name}" for name in names}
+
+    monkeypatch.setattr(pr, "find_tools", Mock(side_effect=paths))
+
+
 @pytest.fixture(autouse=True)
 def gh_targets_origin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pr, "target_is_origin", Mock(return_value=True))
@@ -200,6 +212,7 @@ def git_exits(code: int = 0) -> Mock:
 
 
 @pytest.mark.parametrize("failure", ["count", "over", "base"])
+@pytest.mark.usefixtures("pr_tools")
 def test_pr_create_size(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -231,7 +244,9 @@ def test_pr_create_size(
     fetched = [*FETCH, "origin", "+refs/heads/main:refs/remotes/origin/main"]
     assert call(*fetched) in git.call_args_list
     if failure != "base":
-        counter.assert_called_once_with("refs/remotes/origin/main", "HEAD")
+        counter.assert_called_once_with(
+            "refs/remotes/origin/main", "HEAD", bazelisk="/tools/bazelisk"
+        )
 
 
 def test_the_base_is_refreshed_without_tags_then_counted(
@@ -248,7 +263,9 @@ def test_the_base_is_refreshed_without_tags_then_counted(
     assert git.call_args_list[0] == call(
         *FETCH, "origin", "+refs/heads/topic:refs/remotes/origin/topic"
     )
-    counter.assert_called_once_with("refs/remotes/origin/topic", "HEAD")
+    counter.assert_called_once_with(
+        "refs/remotes/origin/topic", "HEAD", bazelisk="bazelisk"
+    )
 
 
 def test_a_failed_fetch_warns_and_never_counts_a_stale_ref(

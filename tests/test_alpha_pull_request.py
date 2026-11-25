@@ -226,6 +226,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     made.git("update-ref", "refs/remotes/origin/main", "HEAD")
     made.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
     made.fake("cog")
+    made.fake("bazelisk")
     made.fake("vale", stdout="{}")
     made.fake("cspell")
     made.fake("rumdl")
@@ -727,29 +728,63 @@ def test_line_numbers_follow_the_frontmatter() -> None:
 # -------------------------------------------------------------- tool lookup
 
 
+def worktree_tool(
+    world: World,
+    name: str,
+    body: str = "raise SystemExit('unexpected shim invocation')",
+) -> Path:
+    shim = world.root / ".bazel_env" / "bin" / name
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    write_fake(shim, body)
+    return shim
+
+
 def test_find_tool_prefers_path(world: World) -> None:
+    shim = worktree_tool(world, "vale")
+    world.fake("mise", stdout="/mise/vale\n")
     assert pr.find_tool("vale") == str(world.bin / "vale")
+    (world.bin / "vale").unlink()
+    assert pr.find_tool("vale") == str(shim)
+    assert world.calls("mise") == []
+
+
+def test_find_tool_prefers_the_worktree_shim_to_mise(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shim = worktree_tool(world, "cog")
+    (world.bin / "cog").unlink()
+    world.fake("mise", stdout="/mise/cog\n")
+    monkeypatch.chdir(world.root / ".github")
+    assert pr.find_tool("cog") == str(shim)
+    assert world.calls("mise") == []
 
 
 def test_find_tool_can_skip_the_bazel_shims(
-    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    shim = tmp_path / "repo" / ".bazel_env" / "bin"
-    shim.mkdir(parents=True)
-    (shim / "vale").write_text("")
-    (shim / "vale").chmod(0o755)
-    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{world.bin}")
-    assert pr.find_tool("vale") == str(shim / "vale")
+    shim = worktree_tool(world, "vale")
+    path = os.environ["PATH"]
+    monkeypatch.setenv("PATH", f"{shim.parent}{os.pathsep}{path}")
+    assert pr.find_tool("vale") == str(shim)
     assert pr.find_tool("vale", unwrapped=True) == str(world.bin / "vale")
+    (world.bin / "vale").unlink()
+    world.fake("mise", stdout="/mise/vale\n")
+    monkeypatch.setenv("PATH", path)
+    assert pr.find_tool("vale") == str(shim)
+    assert pr.find_tool("vale", unwrapped=True) == "/mise/vale"
 
 
 def test_find_tool_falls_back_to_mise(world: World, tmp_path: Path) -> None:
+    shim = worktree_tool(world, "absent_tool")
+    shim.chmod(0o644)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     (elsewhere / "absent_tool").write_text("")
     world.fake("mise", stdout=f"{elsewhere / 'absent_tool'}\n")
     assert pr.find_tool("absent_tool") == str(elsewhere / "absent_tool")
     assert world.calls("mise")[0]["argv"] == ["which", "absent_tool"]
+    shim.chmod(0o755)
+    assert pr.find_tool("absent_tool") == str(shim)
 
 
 def test_find_tool_missing(world: World) -> None:
@@ -763,6 +798,29 @@ def test_find_tool_missing(world: World) -> None:
     world.fake("mise", rc=0, stdout="\n")
     with pytest.raises(SystemExit, match="absent_tool not found"):
         pr.find_tool("absent_tool")
+
+
+def test_find_tools_returns_each_path(world: World) -> None:
+    shim = worktree_tool(world, "cog")
+    (world.bin / "cog").unlink()
+    worktree_tool(world, "gitleaks")
+    (world.bin / "gitleaks").unlink()
+    world.fake("mise", stdout="/mise/gitleaks\n")
+    assert pr.find_tools(["cog", "vale", "gitleaks"], unwrapped={"gitleaks"}) == {
+        "cog": str(shim),
+        "vale": str(world.bin / "vale"),
+        "gitleaks": "/mise/gitleaks",
+    }
+
+
+@pytest.mark.usefixtures("world")
+def test_find_tools_reports_all_missing_names() -> None:
+    with pytest.raises(SystemExit) as error:
+        pr.find_tools(["first", "vale", "second"])
+    assert str(error.value) == (
+        "missing tools: first, second; "
+        "run `bazelisk run //:bazel_env` or `mise install`"
+    )
 
 
 # ------------------------------------------------------------------- title
@@ -1102,6 +1160,7 @@ def test_sync_that_leaves_styles_missing_is_a_problem(world: World) -> None:
 
 def test_missing_bazelisk_stops_the_check(world: World) -> None:
     styled(world, "project")
+    (world.bin / "bazelisk").unlink()
     with pytest.raises(SystemExit, match="bazelisk not found"):
         lint_checked(world, BASE)
 
@@ -1335,7 +1394,7 @@ def test_branch_trailers_prefer_the_remote_base(world: World) -> None:
     world.git("switch", "-q", "-c", "topic")
     world.commit(f"mine\n\nGenerated-by: {GEN}")
     world.git("branch", "-f", "main", "HEAD~2")
-    with patch.object(agent_identity, "git", wraps=agent_identity.git) as git:
+    with patch.object(pr, "git", wraps=pr.git) as git:
         assert pr.branch_trailers("main") == [("Generated-by", GEN)]
     git.assert_any_call(
         "rev-parse", "--verify", "--quiet", "refs/remotes/origin/main^{commit}"
@@ -1623,7 +1682,9 @@ def test_a_draft_without_a_base_takes_the_default_branch(
     remote_default(world, tmp_path, "trunk")
     write_draft(world, BASE)
     run_main("check")
-    counted.assert_called_once_with("refs/remotes/origin/trunk", "HEAD")
+    counted.assert_called_once_with(
+        "refs/remotes/origin/trunk", "HEAD", bazelisk=str(world.bin / "bazelisk")
+    )
 
 
 def test_the_default_branch_ignores_a_tag_of_the_same_name(
@@ -1742,11 +1803,46 @@ def test_dry_run_prints_argv_and_body(
     assert not ledgers(world).exists()
 
 
-def test_create_needs_gh(world: World) -> None:
-    (world.bin / "gh").unlink()
+@pytest.mark.parametrize(
+    ("verb", "extra"), [("check", ()), ("create", ("gitleaks", "gh"))]
+)
+def test_pr_reports_all_missing_tools_before_reading_the_draft(
+    world: World, verb: str, extra: tuple[str, ...]
+) -> None:
+    missing = ("cog", "bazelisk", "cspell", *extra)
+    for name in missing:
+        (world.bin / name).unlink()
+    worktree_tool(world, "gitleaks")
+    with pytest.raises(SystemExit) as error:
+        run_main(verb)
+    assert str(error.value) == (
+        f"missing tools: {', '.join(missing)}; "
+        "run `bazelisk run //:bazel_env` or `mise install`"
+    )
+
+
+def test_create_reuses_the_tools_resolved_at_startup(world: World) -> None:
+    gh = world.bin / "gh"
+    installed_gh = gh.with_name("installed-gh")
+    gh.rename(installed_gh)
+    git = world.root.parent / "git_dir" / "git"
+    installed_git = git.with_name("installed-git")
+    git.rename(installed_git)
+    world.fake(
+        "mise",
+        cases={
+            "which gh": {"rc": 0, "stdout": f"{installed_gh}\n", "stderr": ""},
+            "which git": {"rc": 0, "stdout": f"{installed_git}\n", "stderr": ""},
+        },
+    )
     write_draft(world)
-    with pytest.raises(SystemExit, match="gh not found"):
-        run_main("create")
+    assert run_main("create", "--dry-run") == 0
+    assert [call["argv"] for call in world.calls("mise")] == [
+        ["which", "git"],
+        ["which", "gh"],
+    ]
+    installed_gh.rename(gh)
+    assert pr.find_tool("gh") == str(gh)
 
 
 def test_edit(world: World, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1910,7 +2006,9 @@ def test_a_missing_gitleaks_stops_before_gh(
 ) -> None:
     (world.bin / "gitleaks").unlink()
     write_draft(world)
-    with pytest.raises(SystemExit, match="gitleaks not found on PATH"):
+    with pytest.raises(
+        SystemExit, match=r"missing tools: gitleaks|gitleaks not found on PATH"
+    ):
         run_main(*argv)
     assert [call["argv"][:2] for call in world.calls("gh")] in (  # type: ignore[index]
         [],
@@ -1928,6 +2026,8 @@ def test_a_missing_private_config_stops_before_gh(world: World) -> None:
 
 
 def test_check_does_not_scan_or_read_the_visibility(world: World) -> None:
+    (world.bin / "gh").unlink()
+    (world.bin / "gitleaks").unlink()
     write_draft(world)
     assert run_main("check") == 0
     assert world.calls("gitleaks") == []
@@ -2281,7 +2381,8 @@ def test_run_uses_the_given_directory(tmp_path: Path) -> None:
 
 def test_runs_as_tbhbdev_alpha_pr(world: World) -> None:
     write_draft(world)
-    write_fake(world.bin / "bazelisk", "raise SystemExit('missing target')")
+    (world.bin / "bazelisk").unlink()
+    worktree_tool(world, "bazelisk", "raise SystemExit('missing target')")
     bare = world.root.parent / "origin.git"
     subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
     world.git("push", "-q", str(bare), "HEAD:refs/heads/main")
@@ -2464,13 +2565,13 @@ def test_branch_git_calls_run_in_the_current_directory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[Path | None] = []
-    real = agent_identity.git
+    real = pr.git
 
     def spy(*args: str, cwd: Path | None = None) -> tuple[int, str]:
         seen.append(cwd)
         return real(*args, cwd=cwd)
 
-    monkeypatch.setattr(agent_identity, "git", spy)
+    monkeypatch.setattr(pr, "git", spy)
     pr.branch_trailers("main")
     assert seen == [None, None]
 
