@@ -1,0 +1,16 @@
+---
+version: 3
+
+allow:
+  depOnAnyVendor: false
+  deepScan: false
+
+components:
+  cmd: {in: cmd/*}
+  pure: {in: internal/dispatch}
+
+deps:
+  cmd:
+    mayDependOn: [pure]
+  pure:
+    mayDependOn: [pure]

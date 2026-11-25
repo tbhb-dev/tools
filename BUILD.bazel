@@ -23,6 +23,7 @@ load(
 )
 load("@tbhb_rules//repo:defs.bzl", "repo_files", "repo_layout_test")
 load("@tbhb_rules//testing:defs.bzl", "expect_failure_test")
+load("@tbhb_rules_go//:defs.bzl", "go_arch_lint_test")
 load(
     "@tbhb_rules_python//:defs.bzl",
     "bandit_test",
@@ -38,37 +39,33 @@ load(
     "ruff_test",
     "vulture_test",
 )
+load(":repo_files.bzl", "REPO_FILE_EXCLUDES")
 
-# Every file of the repository, for the whole-tree checks below. Ignored
-# directories are listed in REPO.bazel; these are the gitignored files that
-# can sit at the root of a working checkout.
-repo_files(
-    exclude = [
-        ".DS_Store",
-        "**/.DS_Store",
-        ".bazelrc.user",
-        ".coverage*",
-        ".env*",
-        ".github/PULL_REQUEST_DRAFT.md",
-        "coverage.*",
-        "mise.local.toml",
+exports_files([
+    ".golangci.yml",
+    "go.mod",
+])
+
+go_arch_lint_test(
+    name = "go_arch_lint_test",
+    size = "small",
+    srcs = [
+        "//cmd/tbhbdev:tbhbdev_test",
+        "//internal/dispatch:dispatch_test",
     ],
+    config = ".go-arch-lint.yml",
+    go_mod = "go.mod",
 )
+
+# Every package contributes its local sources and chains in its subpackages.
+repo_files(exclude = REPO_FILE_EXCLUDES)
 
 # The review template and checklist are package data, not OKF documents.
 repo_files(
     name = "okf_repo_files",
-    exclude = [
+    exclude = REPO_FILE_EXCLUDES + [
         "src/tbhbdev/alpha/review_data/PULL_REQUEST_REVIEW_CHECKLIST.md",
         "src/tbhbdev/alpha/review_data/PULL_REQUEST_REVIEW_TEMPLATE.md",
-        ".DS_Store",
-        "**/.DS_Store",
-        ".bazelrc.user",
-        ".coverage*",
-        ".env*",
-        ".github/PULL_REQUEST_DRAFT.md",
-        "coverage.*",
-        "mise.local.toml",
     ],
 )
 
@@ -130,7 +127,9 @@ repo_layout_test(
         ".github",
         ".vale",
         "LICENSES",
+        "cmd",
         "docs",
+        "internal",
         "schemas",
         "src",
         "tests",

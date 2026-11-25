@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("@tbhb_rules//repo:defs.bzl", "repo_files")
+load("//:repo_files.bzl", "REPO_FILE_EXCLUDES")
+
+repo_files(exclude = REPO_FILE_EXCLUDES)
+
+repo_files(
+    name = "okf_repo_files",
+    exclude = REPO_FILE_EXCLUDES,
+)
+
+go_binary(
+    name = "tbhbdev",
+    embed = [":tbhbdev_lib"],
+)
+
+go_library(
+    name = "tbhbdev_lib",
+    srcs = ["main.go"],
+    importpath = "go.tbhb.dev/tools/cmd/tbhbdev",
+    visibility = ["//visibility:private"],
+    deps = ["//internal/dispatch"],
+)
+
+go_test(
+    name = "tbhbdev_test",
+    size = "small",
+    srcs = ["main_test.go"],
+    embed = [":tbhbdev_lib"],
+    tags = ["integration"],
+    visibility = ["//:__pkg__"],
+)

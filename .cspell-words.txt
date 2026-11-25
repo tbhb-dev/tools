@@ -22,6 +22,7 @@ bged
 bsdinfo
 buildcop
 buildifier
+buildinfo
 bunx
 bxox
 cacheinfo
@@ -45,6 +46,7 @@ cwds
 dbus
 delenv
 demilestoned
+depguard
 deptry
 dgst
 direnv
@@ -86,6 +88,8 @@ getppid
 getproxies
 gitdir
 gitdirs
+gobco
+golangci
 gpgsig
 gpgsign
 hardwrap
@@ -96,6 +100,7 @@ hermeticity
 hostnames
 hprof
 hskey
+importpath
 ionice
 keepalive
 keepends
@@ -208,9 +213,11 @@ statuslines
 strerror
 stubtool
 subagentstart
+subpackages
 surrogateescape
 swapless
 swapusage
+syscall
 syslimits
 tailnet
 tbhb
