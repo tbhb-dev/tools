@@ -26,9 +26,11 @@ import shlex
 import subprocess  # nosec B404
 import sys
 import urllib.parse
+from pathlib import Path
+from textwrap import indent
 from typing import TYPE_CHECKING
 
-from tbhbdev import content
+from tbhbdev import content, issue_import
 from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha import opened
 from tbhbdev.alpha import pull_request as pr
@@ -37,6 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 REASONS = {"completed": "completed", "not-planned": "not planned"}
+ISSUE_TYPES = issue_import.TYPES | {"Research", "Decision"}
 RELATIONSHIP_WRITES = {
     "link-sub": content.link_sub_issue,
     "unlink-sub": content.unlink_sub_issue,
@@ -247,6 +250,95 @@ def issue_reference(text: str) -> tuple[str, int]:
     return repo, int(number)
 
 
+def issue_repository(text: str) -> str:
+    if not pr.NAME_WITH_OWNER.fullmatch(text):
+        message = "expected owner/repo"
+        raise argparse.ArgumentTypeError(message)
+    return text
+
+
+def parent_reference(text: str) -> tuple[str, int]:
+    if text.startswith("#"):
+        message = "expected N or owner/repo#N"
+        raise argparse.ArgumentTypeError(message)
+    return issue_reference(text if "#" in text else f"#{text}")
+
+
+def validate_issue(args: argparse.Namespace, body: str) -> None:
+    if args.type not in issue_import.TYPES:
+        print(f"no schema check for type {args.type}", file=sys.stderr)
+        return
+    title: str = " ".join(args.title.splitlines())
+    # The parent lives on GitHub. The importer can only resolve local blocks.
+    parent_field = ""
+    unresolved = set()
+    if args.parent is not None:
+        repo, number = args.parent
+        parent_field = f"parent: {repo or args.repo}#{number}\n"
+        unresolved.add("unknown parent target")
+        if required := issue_import.PARENT_TYPES.get(args.type):
+            unresolved.add(f"{args.type} requires a parent of type {required}")
+    # Indentation keeps headings in evidence from starting another block.
+    source = (
+        f"### issue\ntype: {args.type}\ntitle: {title}\n"
+        f"{parent_field}{indent(body, ' ')}"
+    )
+    blocks, findings = issue_import.read(source)
+    findings.extend(f for f in issue_import.check(blocks) if f.rule not in unresolved)
+    if findings:
+        message = "\n".join(f"Refused {finding}" for finding in findings)
+        raise content.Refused(message)
+
+
+def write_issue(args: argparse.Namespace) -> int:
+    caller = "tbhbdev alpha issue create"
+    if args.reason is not None:
+        caller += f": {args.reason}"
+    try:
+        body = args.body_file.read_text(encoding="utf-8")
+        validate_issue(args, body)
+        result = content.create_issue(
+            args.repo,
+            args.title,
+            body,
+            issue_type=args.type,
+            labels=args.label,
+            caller=caller,
+            dry_run=args.dry_run,
+        )
+        if not isinstance(result, content.IssueRef):
+            print(json.dumps(result))
+            return 0
+        print(f"https://github.com/{result.owner}/{result.repo}/issues/{result.number}")
+        print(result.number, flush=True)
+        if args.parent is not None:
+            repo, number = args.parent
+            owner, name = (repo or args.repo).split("/")
+            content.link_sub_issue(
+                content.IssueRef(owner, name, number), result, caller=caller
+            )
+    except (OSError, UnicodeError, content.Refused) as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as exc:
+        print(exc.stderr, end="", file=sys.stderr)
+        return exc.returncode
+    return 0
+
+
+def add_creation_arguments(creating: argparse.ArgumentParser) -> None:
+    creating.add_argument(
+        "--repo", required=True, type=issue_repository, metavar="OWNER/REPO"
+    )
+    creating.add_argument("--type", required=True, choices=sorted(ISSUE_TYPES))
+    creating.add_argument("--title", required=True)
+    creating.add_argument("--body-file", required=True, type=Path, metavar="FILE")
+    creating.add_argument("--label", action="append", default=[])
+    creating.add_argument("--parent", type=parent_reference, metavar="N|OWNER/REPO#N")
+    creating.add_argument("--reason", type=non_blank)
+    creating.add_argument("--dry-run", action="store_true")
+
+
 def write_relationship(args: argparse.Namespace) -> int:
     """Resolve both references and send the relationship write to content."""
     if args.blocking is not None:
@@ -296,6 +388,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
         else:
             closing.add_argument("--reason", required=True, choices=sorted(REASONS))
             closing.add_argument("--comment", type=non_blank)
+            add_creation_arguments(one.add_parser("create"))
             for verb in RELATIONSHIP_WRITES:
                 relationship = one.add_parser(verb)
                 relationship.add_argument("--dry-run", action="store_true")
@@ -330,8 +423,11 @@ def main(
     prog: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> int:
-    """Run the close or issue relationship command the arguments name."""
+    """Run the close or issue write the arguments name."""
     args = build_parser(prog).parse_args(argv)
+    if args.verb == "create":
+        trailer(os.environ if env is None else env)
+        return write_issue(args)
     if args.verb != "close":
         return write_relationship(args)
     env = os.environ if env is None else env
