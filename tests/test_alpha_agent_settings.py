@@ -334,3 +334,19 @@ def test_command_dispatches_the_host_runner(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(agent.run_host, "main", run_host)
     assert agent.main(["run-host", "example", "--host", "example-linux"], "agent") == 37
     assert calls == [(["example", "--host", "example-linux"], "agent run-host")]
+
+
+def test_a_relative_worker_path_names_the_config(config_file: Path) -> None:
+    config_file.write_text(EXAMPLE + '\n[agent.worker]\npath = "bin/worker"\n')
+    with pytest.raises(userconfig.ConfigError) as caught:
+        settings.load()
+    assert str(caught.value) == (
+        f"{config_file}: [agent.worker] path must be an absolute path"
+    )
+
+
+def test_the_worker_path_loads_from_the_config(config_file: Path) -> None:
+    config_file.write_text(EXAMPLE + '\n[agent.worker]\npath = "/opt/worker"\n')
+    assert settings.load().worker_path == "/opt/worker"
+    config_file.write_text(EXAMPLE)
+    assert settings.load().worker_path is None

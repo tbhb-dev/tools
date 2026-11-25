@@ -1279,3 +1279,31 @@ def test_profile_memory_reservations(
 def test_profile_memory_reservations_must_be_positive(key: str) -> None:
     with pytest.raises(Invalid, match=rf"{key} must be a positive integer"):
         config.parse(GOOD | {key: 0})
+
+
+def test_a_worker_is_not_registered_by_default() -> None:
+    assert config.parse(GOOD).worker_path is None
+
+
+def test_the_worker_path_is_the_registered_executable() -> None:
+    parsed = config.parse(edited("worker", value={"path": "/opt/worker/bin/worker"}))
+    assert parsed.worker_path == "/opt/worker/bin/worker"
+
+
+@pytest.mark.parametrize(
+    ("worker", "reason"),
+    [
+        ({"path": "bin/worker"}, "[agent.worker] path must be an absolute path"),
+        ({"path": "./worker"}, "[agent.worker] path must be an absolute path"),
+        ({"path": "/opt/../worker"}, f"[agent.worker] path {PATHS}"),
+        ({"path": " "}, f"[agent.worker] path {NON_BLANK}"),
+        ({"path": 3}, f"[agent.worker] path {NON_BLANK}"),
+        ({}, "[agent.worker] path is required"),
+        ({"path": "/w", "user": "agent"}, "[agent.worker] user not recognized"),
+        ("/w", "[agent] worker must be a table"),
+    ],
+)
+def test_the_worker_path_must_be_absolute(worker: object, reason: str) -> None:
+    with pytest.raises(Invalid) as caught:
+        config.parse(edited("worker", value=worker))
+    assert str(caught.value) == reason
