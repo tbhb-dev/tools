@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:6f2e01be74c7daae
-    at: "2026-11-24T23:44:57Z"
+    session: sha-256-64:e4b1d0f412eff203
+    at: "2026-11-24T21:54:14Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -64,9 +64,10 @@ After a successful build harness run, run-host compares commits reachable from a
 
 | Exit status | Result |
 | --- | --- |
-| 0 | The run contains no new commits, or run-host pushes the branch and opens the pull request. |
+| 0 | The run contains no new commits and did not require one, or run-host pushes the branch and opens the pull request. |
 | 4 | Run-host skips the push or Git fails to push. The log starts the reason line with `push skipped:` or `push failed:`. |
 | 5 | Run-host pushes the branch and can't open the pull request. The log starts the reason line with `pr not opened:`. |
+| 6 | `--expect-commit` required a new commit, and the run produced none. The log starts the reason line with `no new commit:`. |
 
 If the harness fails, run-host keeps its exit status. `tbhbdev alpha agent status NAME` shows the last publication reason next to the return code when the run ends with a nonzero status and the log contains a reason.
 

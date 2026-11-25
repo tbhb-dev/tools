@@ -128,6 +128,39 @@ def test_requested_refs_reach_clone_without_changing_checkout(
     assert not (mirror / "FETCH_HEAD").exists()
 
 
+def test_build_starts_at_the_fetched_branch(tmp_path: Path) -> None:
+    seed, clone = repository(tmp_path)
+    default = git(seed, "rev-parse", "HEAD")
+    branch_tip = commit(seed, "PR head")
+    ref = "refs/heads/fix/topic"
+    git(seed, "push", "origin", f"HEAD:{ref}")
+    run = run_request(start_ref=ref, fetch_refs=[ref])
+
+    path = worktree.create(clone, "fix", run)
+
+    assert git(path, "rev-parse", "HEAD", "origin/fetched/heads/fix/topic") == (
+        f"{branch_tip}\n{branch_tip}"
+    )
+    assert git(path, "branch", "--show-current") == "agent/fix"
+    assert git(path, "rev-parse", "origin/main") == default
+
+
+@pytest.mark.parametrize(
+    ("ref", "message"),
+    [
+        ("refs/heads/main", "cannot name the default branch"),
+        ("refs/heads/topic.", "is not a valid Git ref"),
+    ],
+)
+def test_build_refuses_default_and_malformed_start_refs(
+    tmp_path: Path, ref: str, message: str
+) -> None:
+    _, clone = repository(tmp_path)
+    with pytest.raises(Invalid, match=f"--start-ref {message}"):
+        worktree.create(clone, "invalid", run_request(start_ref=ref, fetch_refs=[ref]))
+    assert not (clone / ".worktrees" / "agent-invalid").exists()
+
+
 @pytest.mark.parametrize("ref", ["refs/pull/392/head", "refs/heads/missing"])
 def test_missing_requested_ref_fails_preparation_with_its_name(
     tmp_path: Path, ref: str
