@@ -337,7 +337,7 @@ def test_review_uses_its_own_reservation_at_the_boundary(
         return config
 
     def session() -> tuple[str, None]:
-        return "coord-review-1", None
+        return "tools", None
 
     monkeypatch.setattr(agent.settings, "load", load)
     monkeypatch.setattr(driver.launcher, "session", session)

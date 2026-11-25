@@ -277,3 +277,4 @@ class RunRequest:
     fetch_refs: tuple[str, ...] = ()
     start_ref: str | None = None
     max_concurrent_runs: int | None = None
+    expect_commit: bool = False

@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, NoReturn
 
 from tbhbdev import telemetry, version
+from tbhbdev.alpha import brief
 from tbhbdev.alpha.agent import (
     launcher,
     render,
@@ -133,7 +134,7 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     profile = Profile(args.profile)
     launched_by = launcher.session()
     if launch_rules.is_reviewer(args.role, profile):
-        launch_rules.check(launched_by[0], args.repo, *launcher.load_table())
+        launch_rules.check(launched_by[0])
     rules.check_model(harness, args.model, allow_non_gemini=args.allow_non_gemini)
     # A review's final commit is read remotely after all local checks pass.
     commit = "0" * 40 if profile is Profile.REVIEW else None
@@ -161,6 +162,7 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         fetch_refs=tuple(args.fetch_ref),
         start_ref=args.start_ref,
         max_concurrent_runs=host.max_concurrent_runs,
+        expect_commit=args.expect_commit,
     )
     request.check_start_ref(run)
     run = rules.check(
@@ -361,6 +363,19 @@ def clear_taint(host: str, reason: str) -> int:
     return 0
 
 
+def checked_prompt(args: argparse.Namespace) -> str:
+    """Read the brief, refuse hook conflicts and report branch warnings locally."""
+    prompt = Path(args.prompt_file).read_text()
+    problems = brief.check_hooks(prompt)
+    if problems:
+        telemetry.attributes(**{"tbhb.agent.outcome": "refused"})
+        message = "\n".join(f"{args.prompt_file}: {problem}" for problem in problems)
+        raise Invalid(message)
+    for warning in brief.branch_warnings(prompt, run=args.name):
+        print(f"warning: {args.prompt_file}: {warning}", file=sys.stderr)
+    return prompt
+
+
 def execute(settings: Settings, args: argparse.Namespace) -> int:
     run = prepare(settings, args)
     telemetry.attributes(
@@ -372,7 +387,7 @@ def execute(settings: Settings, args: argparse.Namespace) -> int:
             "tbhb.run.id": run.name,
         }
     )
-    prompt = Path(args.prompt_file).read_text()
+    prompt = checked_prompt(args)
     schema = None if args.schema is None else Path(args.schema).read_text()
     if schema is not None:
         json.loads(schema)

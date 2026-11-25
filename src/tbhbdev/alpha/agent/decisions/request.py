@@ -55,11 +55,17 @@ _FIELDS = frozenset(
         "fetch_refs",
         "start_ref",
         "max_concurrent_runs",
+        "expect_commit",
     }
 )
 
-# Older saved requests can omit these fields.
-_REQUIRED_FIELDS = _FIELDS - {"fetch_refs", "start_ref", "max_concurrent_runs"}
+# Older requests can omit fields with defaults.
+_REQUIRED_FIELDS = _FIELDS - {
+    "fetch_refs",
+    "start_ref",
+    "max_concurrent_runs",
+    "expect_commit",
+}
 
 
 def _fail(field: str, why: str) -> NoReturn:
@@ -110,6 +116,8 @@ def _check_harness(request: RunRequest) -> None:
 
 def _check_commit(request: RunRequest) -> None:
     review = request.profile is Profile.REVIEW
+    if review and request.expect_commit:
+        _fail("expect_commit", "applies only to a build run")
     if review and request.commit is None:
         _fail("commit", "is required for a review run")
     if not review and request.commit is not None:
@@ -207,6 +215,7 @@ def to_dict(request: RunRequest) -> dict[str, object]:
         "startup_deadline_seconds": request.startup_deadline_seconds,
         "fetch_refs": list(request.fetch_refs),
         "max_concurrent_runs": request.max_concurrent_runs,
+        "expect_commit": request.expect_commit,
     }
     if request.start_ref is not None:
         data["start_ref"] = request.start_ref
@@ -236,7 +245,7 @@ def _maybe_number(data: dict[str, object], key: str) -> int | None:
 
 
 def _flag(data: dict[str, object], key: str) -> bool:
-    value = data[key]
+    value = data.get(key, False)
     if not isinstance(value, bool):
         _fail(key, "must be true or false")
     return value
@@ -311,6 +320,7 @@ def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunReque
         fetch_refs=_fetch_refs(data.get("fetch_refs", [])),
         start_ref=_maybe_text(data, "start_ref"),
         max_concurrent_runs=_maybe_number(data, "max_concurrent_runs"),
+        expect_commit=_flag(data, "expect_commit"),
     )
     validate(request, host_allows_unsandboxed=host_allows_unsandboxed)
     return request
