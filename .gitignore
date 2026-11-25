@@ -26,6 +26,7 @@ id_ed25519
 # Local Python environments and test caches.
 /.venv/
 /.pytest_cache/
+/.import_linter_cache/
 
 # Bazel's convenience links and bazel_env's shims, local Bazel flags and
 # coverage output.

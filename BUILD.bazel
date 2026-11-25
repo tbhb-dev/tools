@@ -28,6 +28,7 @@ load(
     "bandit_test",
     "complexipy_test",
     "deptry_test",
+    "import_linter_test",
     "mutmut_test",
     "pip_audit",
     "pip_audit_test",
@@ -195,6 +196,11 @@ deptry_test(
     name = "deptry_test",
     srcs = [":repo_files"],
     roots = ["src"],
+)
+
+import_linter_test(
+    name = "import_linter_test",
+    srcs = [":repo_files"],
 )
 
 pytest_test(

@@ -96,6 +96,7 @@ hermeticity
 hostnames
 hprof
 hskey
+importlinter
 ionice
 keepalive
 keepends

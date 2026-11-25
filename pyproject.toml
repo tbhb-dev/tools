@@ -44,6 +44,7 @@ dev = [
   "bandit>=1.9.4",
   "complexipy>=8.3.0",
   "deptry>=0.25.1",
+  "import-linter==2.16",
   "mutmut>=3.8.1",
   "pip-audit>=2.10.1",
   "pylint>=4.1.3",
@@ -62,6 +63,131 @@ required-version = ">=0.13.0,<0.14"
 # Lock refreshes skip releases younger than 5 days, the same cooldown
 # Renovate applies to version bumps.
 exclude-newer = "5 days"
+
+[tool.importlinter]
+root_packages = ["tbhbdev"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Pure modules do not import I/O"
+type = "forbidden"
+# Match each decisions module individually so argv can also be a forbidden dependency.
+as_packages = false
+source_modules = [
+  "tbhbdev",
+  "tbhbdev.admin.policy",
+  "tbhbdev.adr_decision",
+  "tbhbdev.alpha.agent.decisions",
+  "tbhbdev.alpha.agent.decisions.**",
+  "tbhbdev.alpha.agent.model",
+  "tbhbdev.alpha.agent.render",
+  "tbhbdev.alpha.guard_git_hooks",
+  "tbhbdev.alpha.loop.events",
+  "tbhbdev.alpha.loop.rules",
+  "tbhbdev.alpha.loop.state",
+  "tbhbdev.alpha.repo_settings",
+  "tbhbdev.analytics.decisions",
+  "tbhbdev.analytics.decisions.**",
+  "tbhbdev.analytics.model",
+  "tbhbdev.analytics.render",
+  "tbhbdev.content_model",
+  "tbhbdev.gh_agent",
+  "tbhbdev.issue_import",
+]
+forbidden_modules = [
+  "http",
+  "httpx",
+  "os",
+  "psycopg",
+  "shutil",
+  "socket",
+  "subprocess",
+  "urllib",
+  "tbhbdev.adr",
+  "tbhbdev.agy",
+  "tbhbdev.alpha.agent.admission",
+  "tbhbdev.alpha.agent.bazel_servers",
+  "tbhbdev.alpha.agent.build_info",
+  "tbhbdev.alpha.agent.codex_install",
+  "tbhbdev.alpha.agent.credentials",
+  "tbhbdev.alpha.agent.decisions.argv",
+  "tbhbdev.alpha.agent.driver",
+  "tbhbdev.alpha.agent.host_tools",
+  "tbhbdev.alpha.agent.launcher",
+  "tbhbdev.alpha.agent.open_pr",
+  "tbhbdev.alpha.agent.ownership",
+  "tbhbdev.alpha.agent.precheck",
+  "tbhbdev.alpha.agent.process_group",
+  "tbhbdev.alpha.agent.push",
+  "tbhbdev.alpha.agent.review_post",
+  "tbhbdev.alpha.agent.run_host",
+  "tbhbdev.alpha.agent.runfiles",
+  "tbhbdev.alpha.agent.settings",
+  "tbhbdev.alpha.agent.shims",
+  "tbhbdev.alpha.agent.signing_parity",
+  "tbhbdev.alpha.agent.ssh_serve",
+  "tbhbdev.alpha.agent.transport",
+  "tbhbdev.alpha.agent.worktree",
+  "tbhbdev.alpha.close",
+  "tbhbdev.alpha.gh_app",
+  "tbhbdev.alpha.gh_shim",
+  "tbhbdev.alpha.guard_gh_pr",
+  "tbhbdev.alpha.identity",
+  "tbhbdev.alpha.install",
+  "tbhbdev.alpha.loop.store",
+  "tbhbdev.alpha.pre_push_guard",
+  "tbhbdev.alpha.pull_request",
+  "tbhbdev.alpha.repo",
+  "tbhbdev.alpha.repo_bootstrap",
+  "tbhbdev.alpha.repo_token",
+  "tbhbdev.alpha.secret_scan",
+  "tbhbdev.alpha.session_context",
+  "tbhbdev.alpha.size_gate",
+  "tbhbdev.alpha.verify_range",
+  "tbhbdev.alpha.version_check",
+  "tbhbdev.analytics.catalog",
+  "tbhbdev.analytics.database",
+  "tbhbdev.analytics.settings",
+  "tbhbdev.content",
+  "tbhbdev.content_vet",
+  "tbhbdev.cue_runtime",
+  "tbhbdev.host",
+  "tbhbdev.secrets",
+]
+# Existing dependencies to remove as the I/O modules are split.
+ignore_imports = [
+  "tbhbdev.admin.policy -> urllib",
+  "tbhbdev.adr_decision -> tbhbdev.content",
+  "tbhbdev.alpha.agent.decisions.argv -> shutil",
+  "tbhbdev.alpha.agent.decisions.argv -> socket",
+  "tbhbdev.alpha.agent.decisions.policy -> tbhbdev.alpha.agent.host_tools",
+  "tbhbdev.alpha.agent.decisions.policy -> tbhbdev.secrets",
+  "tbhbdev.alpha.agent.render -> tbhbdev.alpha.agent.transport",
+  "tbhbdev.alpha.guard_git_hooks -> tbhbdev.alpha.guard_gh_pr",
+]
+
+[[tool.importlinter.contracts]]
+name = "Agent I/O depends on decisions and data"
+type = "layers"
+containers = ["tbhbdev.alpha.agent"]
+layers = [
+  """admission : bazel_servers : build_info : codex_install : credentials : \
+  driver : host_tools : launcher : open_pr : ownership : precheck : \
+  process_group : push : review_post : run_host : runfiles : settings : shims : \
+  signing_parity : ssh_serve : transport : worktree""",
+  "decisions : model : render",
+]
+ignore_imports = [
+  "tbhbdev.alpha.agent.decisions.policy -> tbhbdev.alpha.agent.host_tools",
+  "tbhbdev.alpha.agent.decisions.policy -> tbhbdev.secrets",
+  "tbhbdev.alpha.agent.render -> tbhbdev.alpha.agent.transport",
+]
+
+[[tool.importlinter.contracts]]
+name = "Analytics I/O depends on decisions and data"
+type = "layers"
+containers = ["tbhbdev.analytics"]
+layers = ["catalog : database : settings", "decisions : model : render"]
 
 [tool.complexipy]
 paths = ["src"]
