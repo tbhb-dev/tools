@@ -123,6 +123,24 @@ def test_render_and_validate(
     assert content.check_review(body, metadata=review_metadata(doc)) == []
 
 
+@pytest.mark.parametrize(
+    ("tier", "delta", "variant"),
+    [
+        (1, False, "a"),
+        (1, False, "b"),
+        (2, False, "a"),
+        (2, False, "b"),
+        (2, True, "a"),
+    ],
+)
+def test_final_message_verdict(tier: Tier, delta: bool, variant: Variant) -> None:
+    fields = FIELDS | {"base_reviewed": BASE_REVIEWED}
+    prompt_lines = review_prompt.render(tier, delta, variant, fields).splitlines()
+    assert f"VERDICT: GO {HEAD}" in prompt_lines
+    assert f"VERDICT: NO-GO {HEAD}" in prompt_lines
+    assert "VERDICT" not in review_prompt.skeleton(tier, delta, variant, fields)
+
+
 def test_installed_lens_ids() -> None:
     seen = set()
     for name, prefix in LENSES.items():
