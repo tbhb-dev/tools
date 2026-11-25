@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:d11e7afc9627e72d
-    at: "2026-11-25T12:36:06Z"
+    session: sha-256-64:1c20e44b31856e4d
+    at: "2026-11-25T13:35:02Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -56,7 +56,7 @@ Every `tbhb-dev` repository on GitHub runs on any host with no list entry, and a
 
 The ssh verb `preflight NAME` requires a null `push_token` and refuses a request with a token. The local `--preflight` flag ignores any `push_token`. It prepares the workspace and credentials and loads the signing agent. It logs whether the run worktree has `.bazel_env/bin` and warns that commit hooks fail when the directory is missing, without changing the exit status. After checking the policy and harness command, it writes `preflight ok: <executable path>` to the log. It stops the signing agent and records the exit status, phase, and index entry without launching the harness. Use a fresh name for the next run. Preparation errors use `run preparation failed at <step>: <cause>`. The cause keeps the validation message, the operating system error with only the filename's basename, or the first line of git's standard error. It removes control characters, redacts environment values, credentials and URL user information, and limits the cause to 200 characters. Other value errors and git failures without standard error use a generic cause.
 
-A missing hook executable produces a message such as `run preparation failed at hook install: host executable prek was not found on PATH sbin` after preparation shortens absolute paths. Install `prek` in a fixed directory on the host tools' search path, or add its directory to `host_path`.
+Preparation redacts the search path it reports when a hook executable is missing. Check the run log for the failing step and `host_tools.search_path` for the search directories. Install `prek` in a fixed directory on the host tools' search path, or add its directory to `host_path`.
 
 The run clone has its own copy of the mirror's object store. The mirror never prunes objects. Run-host installs the identity and pre-commit hooks from its own templates without running code from the checkout. It finishes all git operations before starting the harness. Plain git in a run clone is unsafe for host processes.
 

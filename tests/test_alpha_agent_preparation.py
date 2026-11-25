@@ -277,6 +277,7 @@ def test_missing_prek_reaches_supervisor(
 ) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("PATH", worktree.host_tools.search())
     monkeypatch.setattr(worktree, "git", constant(""))
     monkeypatch.setattr(worktree, "configure_mirror", constant(None))
     monkeypatch.setattr(worktree, "fetch_commit", constant("a" * 40))
@@ -294,7 +295,7 @@ def test_missing_prek_reaches_supervisor(
         )
     assert str(caught.value) == (
         "run preparation failed at hook install: host executable prek was not found "
-        "on PATH sbin"
+        "on PATH [redacted]"
     )
 
 

@@ -110,9 +110,16 @@ def test_exec_help_describes_expected_commits(
     )
 
 
-def test_exec_help_lists_model_examples(capsys: pytest.CaptureFixture[str]) -> None:
+def test_exec_help_lists_model_examples(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
     assert agent.main(["exec", "--help"], "example agent") == 0
-    help_text = capsys.readouterr().out
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "--harness {codex,claude,agy} harness to launch: Codex, Claude or agy" in (
+        help_text
+    )
+    assert "--allow-non-gemini let agy run a non-Gemini model ID" in help_text
     assert "gemini-" in help_text
     assert "claude-opus-5-5" in help_text
 
