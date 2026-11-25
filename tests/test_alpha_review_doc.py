@@ -350,6 +350,7 @@ def test_post_refuses_moved_head_and_invalid_doc() -> None:
 def draft(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     stem = tmp_path / "review-384"
     monkeypatch.setattr(cli, "draft_path", {384: stem.with_suffix(".md")}.__getitem__)
+    monkeypatch.setattr(cli.pr, "origin_repository", lambda: REPO)
     return stem.with_suffix(".doc.md")
 
 
@@ -413,6 +414,20 @@ def test_post_cli_exists_and_refusals(
     err = capsys.readouterr().err
     assert err.startswith(f"{draft}: GO forbids BLOCK findings\n")
     assert all(line.startswith(f"{draft}: ") for line in err.splitlines())
+
+
+@pytest.mark.usefixtures("use_bazel_cue")
+def test_post_cli_refuses_wrong_repository(
+    draft: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    other = "other/tools"
+    draft.write_text(PREAMBLE.replace(REPO, other) + BODY)
+    api = FakeApi(USER, LIVE, [], {"id": 16})
+    monkeypatch.setattr(cli, "GhApi", lambda: api)
+    assert cli.main(["post", "384"], "review") == 1
+    message = f"draft repo {other} differs from origin repo {REPO}"
+    assert capsys.readouterr() == ("", f"{draft}: {message}\n")
+    assert api.calls == []
 
 
 @pytest.mark.parametrize(
@@ -484,7 +499,7 @@ def test_dismiss_cli_and_idempotence(
         assert cli.main(args, "review") == 0
         assert capsys.readouterr() == ("superseded 942\n", "")
     get = ("GET", f"{REVIEWS}/942", None)
-    assert api.calls == [get, ("PATCH", f"{REVIEWS}/942", {"body": body}), get, get]
+    assert api.calls == [get, ("PUT", f"{REVIEWS}/942", {"body": body}), get, get]
     assert cli.main(args, "review") == 1
     assert capsys.readouterr().err.startswith("review 942: expected a COMMENT review")
 

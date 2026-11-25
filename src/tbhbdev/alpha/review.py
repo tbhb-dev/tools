@@ -236,6 +236,10 @@ def post_draft(number: int, author: str | None) -> int:
         if doc.pr != number:
             message = f"draft must name pull request {number}"
             raise review_doc.ReviewError(message)
+        repo = pr.origin_repository()
+        if doc.repo != repo:
+            message = f"draft repo {doc.repo} differs from origin repo {repo}"
+            raise review_doc.ReviewError(message)
         api = GhApi()
         status, review_id = review_doc.post(api, doc, author=author or api_author(api))
     except (OSError, SystemExit, ValueError) as exc:

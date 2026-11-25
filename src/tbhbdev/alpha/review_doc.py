@@ -385,9 +385,8 @@ def dismiss(
             key = parse_marker(body)
             if key is not None and (key.repo, key.pr) == (repo, pr):
                 if not _dismissed(state, body):
-                    # PATCH to supersede a review is UNVERIFIED against GitHub's API.
                     body = f"SUPERSEDED: {reason}\n{body}"
-                    api.request("PATCH", path, {"body": body})
+                    api.request("PUT", path, {"body": body})
                 return
         case _:  # pragma: no mutate -- falls through to the same refusal
             pass

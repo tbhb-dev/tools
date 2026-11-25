@@ -2,9 +2,12 @@
 description: Drafting, checking, posting, and responding to pull request reviews.
 generated:
   - role: generated
-    harness: codex
+    harness: codex:0.166.0
     model: openai:gpt-6.2-sol
-    at: "2026-11-25T03:03:04Z"
+    effort: high
+    surface: exec
+    session: sha-256-64:6d375ace6e6ad111
+    at: "2026-11-25T07:34:33Z"
 status: stable
 tags: [alpha]
 title: Review drafts
@@ -25,10 +28,10 @@ Create `review-N.doc.md` in the same directory as `review-N.md`. Start with YAML
 
 Leave a blank line after the header. Add `## Verdict`, `## Findings`, and `## Verification` in that order. Write `GO` or `NO-GO` in Verdict and describe what you checked in Verification. Each finding starts with `- BLOCK`, `- TECH-DEBT`, or `- SECURITY-DEBT`. Follow the class with `path:line` in backticks and a summary. `NO-GO` requires a `BLOCK` finding, and `GO` disallows one.
 
-`tbhbdev alpha review post N [--author LOGIN]` validates the document and checks the pull request head against the draft. It submits a `COMMENT` review using the agent's own GitHub account. It looks for an active review with the same run, head, and pull request by that account, or by `LOGIN` if supplied. It prints `posted` or `exists` and the review ID when available. Both statuses exit 0. It reports refusals as `path: problem` on stderr and exits 1. Usage errors exit 2.
+`tbhbdev alpha review post N [--author LOGIN]` requires the draft's repository to match the GitHub repository for the `origin` remote. It validates the document and checks the pull request head against the draft. It submits a `COMMENT` review using the agent's own GitHub account. It looks for an active review with the same run, head, and pull request by that account, or by `LOGIN` if supplied. It prints `posted` or `exists` and the review ID when available. Both statuses exit 0. It reports refusals as `path: problem` on stderr and exits 1. Usage errors exit 2.
 
 ## Supersede or reply to a review
 
-`tbhbdev alpha review dismiss N REVIEW_ID --reason TEXT` prefixes the marked comment review's body with `SUPERSEDED:` and the reason. Write the reason on one line in up to 200 characters and omit review and reply markers. A review already superseded or dismissed succeeds without another edit. GitHub API behavior for this edit is UNVERIFIED.
+`tbhbdev alpha review dismiss N REVIEW_ID --reason TEXT` prefixes the marked comment review's body with `SUPERSEDED:` and the reason. Write the reason on one line in up to 200 characters and omit review and reply markers. A review already superseded or dismissed succeeds without another edit.
 
 `tbhbdev alpha review reply N REVIEW_ID --text TEXT` writes a comment on the pull request with the review ID and the first eight characters of the reviewed commit hash. Omit review and reply markers from the text. On success, the command appends its own marker and prints the new comment ID.
