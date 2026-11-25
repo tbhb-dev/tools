@@ -118,6 +118,7 @@ reaches gh's ``--limit``, since the rest may be missing.
 """
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import os
@@ -129,8 +130,10 @@ import sys
 import tempfile
 import time
 import tomllib
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, cast, override
 from urllib.parse import quote
 
@@ -139,10 +142,11 @@ from jsonschema import Draft202012Validator
 
 from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha import opened, secret_scan, size_gate
-from tbhbdev.alpha.repo import git, hook_cwd, in_tbhb_dev, read_hook_stdin
+from tbhbdev.alpha.repo import git as repo_git
+from tbhbdev.alpha.repo import hook_cwd, in_tbhb_dev, read_hook_stdin
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
 
     from jsonschema.exceptions import ValidationError
 
@@ -160,6 +164,7 @@ CONFIGS = (".vale.ini", ".vale", ".cspell.jsonc", ".cspell-words.txt", ".rumdl.t
 # for a pull request number of up to four digits.
 MAX_TITLE = 72 - len(" (#9999)")
 BAZEL = "bazelisk"
+BAZEL_ENV = ".bazel_env"
 # Module constants, not literals in the functions: macOS file systems ignore
 # case, so a mutant that changes a path's case there would pass every test.
 VALE_INI = ".vale.ini"
@@ -185,6 +190,9 @@ HOOK_FEEDBACK = 2
 COG = "cog"
 GITLEAKS = "gitleaks"
 MISE = "mise"
+_TOOL_PATHS: ContextVar[Mapping[tuple[str, bool], str]] = ContextVar(
+    "_TOOL_PATHS", default=MappingProxyType({})
+)
 # The title is a commit header, so the sentence-case heading rule does not apply
 # to line 1: a finding on it reads (1, "vale project.HeadingTitleCase: ...").
 TITLE_ALERT = (1, "vale project.HeadingTitleCase")
@@ -328,6 +336,11 @@ class Checked:
     title: str = ""
     rendered: list[str] = field(default_factory=list)
     meta: dict[str, object] = field(default_factory=dict)
+
+
+def git(*args: str, cwd: Path | None = None) -> tuple[int, str]:
+    """Run Git with the executable resolved during command startup, if any."""
+    return repo_git(*args, cwd=cwd, executable=_TOOL_PATHS.get().get((GIT, False), GIT))
 
 
 def root(cwd: Path | None = None) -> Path:
@@ -618,26 +631,58 @@ def key_line(error: ValidationError, frontmatter: Sequence[str]) -> int:
 
 
 def find_tool(name: str, *, unwrapped: bool = False) -> str:
-    """Find a tool on PATH, then through mise; exit with a clear message.
+    """Find a tool on PATH, in the worktree's Bazel shims, or through mise.
 
     ``unwrapped`` skips the Bazel shims in ``.bazel_env``. For gitleaks the shim
     is the rules wrapper, which refuses a config with ``[extend]``, and the text
     scan writes one that has it, so the scan needs the real binary.
     """
+    found = _TOOL_PATHS.get().get((name, unwrapped)) or _locate_tool(
+        name, unwrapped=unwrapped
+    )
+    if found:
+        return found
+    message = f"{name} not found on PATH or through `mise which`; run `mise install`"
+    raise SystemExit(message)
+
+
+def _locate_tool(name: str, *, unwrapped: bool) -> str | None:
+    """Return the executable path, or None when all lookups fail."""
     path = None
     if unwrapped:
         entries = os.environ.get("PATH", "").split(os.pathsep)
-        path = os.pathsep.join(e for e in entries if ".bazel_env" not in e)
+        path = os.pathsep.join(e for e in entries if BAZEL_ENV not in e)
     found = shutil.which(name, path=path)
     if found:
         return found
-    mise = shutil.which(MISE)
+    if not unwrapped and (shim := shutil.which(str(root() / BAZEL_ENV / "bin" / name))):
+        return shim
+    mise = shutil.which(MISE, path=path)
     if mise:
         done = run([mise, "which", name])
         if done.returncode == 0 and done.stdout.strip():
             return done.stdout.strip()
-    message = f"{name} not found on PATH or through `mise which`; run `mise install`"
-    raise SystemExit(message)
+    return None
+
+
+def find_tools(
+    names: Sequence[str], *, unwrapped: Collection[str] = ()
+) -> dict[str, str]:
+    """Resolve each tool or report all missing tools together."""
+    paths: dict[str, str] = {}
+    missing: list[str] = []
+    for name in names:
+        if found := _locate_tool(name, unwrapped=name in unwrapped):
+            paths[name] = found
+        else:
+            missing.append(name)
+    if missing:
+        message = (
+            f"missing tools: {', '.join(missing)}; "
+            "run `bazelisk run //:bazel_env` or `mise install`"
+        )
+        raise SystemExit(message)
+    return paths
 
 
 def run(
@@ -907,13 +952,9 @@ def branch_trailers(base: str) -> list[tuple[str, str]]:
     script is run from.
     """
     remote = f"refs/remotes/origin/{base}"
-    code, _ = agent_identity.git(
-        "rev-parse", "--verify", "--quiet", f"{remote}^{{commit}}"
-    )
+    code, _ = git("rev-parse", "--verify", "--quiet", f"{remote}^{{commit}}")
     span = f"{remote if code == 0 else f'refs/heads/{base}'}..HEAD"
-    code, out = agent_identity.git(
-        "log", "--reverse", "--format=%x1e%(trailers:only,unfold)", span
-    )
+    code, out = git("log", "--reverse", "--format=%x1e%(trailers:only,unfold)", span)
     if code != 0:
         message = f"cannot list the commits in {base}..HEAD; is {base} fetched?"
         raise SystemExit(message)
@@ -2029,7 +2070,9 @@ def check_size(args: argparse.Namespace, checked: Checked) -> None:
         print(f"size count unavailable: base branch {base} not found", file=sys.stderr)
         return
     try:
-        counts = size_gate.size_counts(base, "HEAD")
+        counts = size_gate.size_counts(
+            base, "HEAD", bazelisk=_TOOL_PATHS.get().get((BAZEL, False), BAZEL)
+        )
     except size_gate.SizeCountError as exc:
         print(f"size count unavailable: {exc}", file=sys.stderr)
         return
@@ -2051,7 +2094,26 @@ def check_size(args: argparse.Namespace, checked: Checked) -> None:
 
 
 def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
-    """Run the chosen subcommand."""
+    """Resolve the tools for check and create before running the subcommand."""
+    if args.command not in ("check", "create"):
+        return _run_command(args, env)
+    names = (COG, *(name for name, _, _ in LINTERS), GIT)
+    unwrapped = (GITLEAKS,)
+    if args.command == "create":
+        names += (GITLEAKS, GH)
+    paths = find_tools(names, unwrapped=unwrapped)
+    # Not required: without bazelisk the size count only warns.
+    with contextlib.suppress(SystemExit):
+        paths.update(find_tools((BAZEL,)))
+    token = _TOOL_PATHS.set({(name, name in unwrapped): p for name, p in paths.items()})
+    try:
+        return _run_command(args, env)
+    finally:
+        _TOOL_PATHS.reset(token)
+
+
+def _run_command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
+    """Check the draft and carry out the requested action."""
     checked = read_checked(args.draft)
     if args.command in ("check", "create"):
         # One read of the default branch feeds the size count, the trailers, and

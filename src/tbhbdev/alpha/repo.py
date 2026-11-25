@@ -39,7 +39,9 @@ TBHB_DEV_ORIGIN = re.compile(
 )
 
 
-def git(*args: str, cwd: Path | None = None) -> tuple[int, str]:
+def git(
+    *args: str, cwd: Path | None = None, executable: str = "git"
+) -> tuple[int, str]:
     """Run git; return its exit code and stdout without trailing newlines.
 
     A `cwd` that no longer exists is exit 128, git's own status for a
@@ -47,7 +49,7 @@ def git(*args: str, cwd: Path | None = None) -> tuple[int, str]:
     """
     try:
         result = subprocess.run(  # nosec B603 B607
-            ["git", *args],
+            [executable, *args],
             capture_output=True,
             text=True,
             cwd=cwd,

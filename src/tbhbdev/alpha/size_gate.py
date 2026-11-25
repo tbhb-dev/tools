@@ -7,7 +7,7 @@ from typing import cast
 
 from tbhbdev.alpha.repo_bootstrap import gh_api
 
-COUNTER = ("bazelisk", "run", "@tbhb_rules//lint:pr_size_count", "--")
+COUNTER = ("run", "@tbhb_rules//lint:pr_size_count", "--")
 COUNT_KEYS = ("code_lines", "code_limit", "raw_lines", "raw_limit")
 
 
@@ -24,7 +24,7 @@ class SizeCountError(Exception):
     """The counter could not run or returned an invalid result."""
 
 
-def size_counts(base: str, head: str) -> SizeCounts:
+def size_counts(base: str, head: str, *, bazelisk: str = "bazelisk") -> SizeCounts:
     """Count added lines between refs using the rules counter.
 
     Raises:
@@ -32,7 +32,10 @@ def size_counts(base: str, head: str) -> SizeCounts:
     """
     try:
         done = subprocess.run(  # nosec B603
-            [*COUNTER, base, head], capture_output=True, text=True, check=False
+            [bazelisk, *COUNTER, base, head],
+            capture_output=True,
+            text=True,
+            check=False,
         )
     except OSError as exc:
         raise SizeCountError(str(exc)) from exc
