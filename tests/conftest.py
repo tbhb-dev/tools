@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
 
 import pytest
+from fake_tool import pr_git_baseline as pr_git_baseline  # noqa: PLC0414
 
 from tbhbdev import host, plugins, secrets
 from tbhbdev.alpha.agent import credentials, host_tools, launcher, runfiles
