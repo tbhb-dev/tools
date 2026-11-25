@@ -56,6 +56,184 @@ PROG = "example brief"
 SCAN_COMMAND = "scan-outgoing origin/main"
 SCAN_LINE = f"Outgoing scan command: `{SCAN_COMMAND}`"
 PUSH_SECTION = f"## Push\n\n{brief.PUSH_BLOCK}\n{SCAN_LINE}"
+MERGE_CONFLICT = (
+    "hook conflict: merge commits lack the required Generated-by trailer. "
+    "Use git merge --no-commit, then a plain git commit"
+)
+OMISSION_CONFLICT = "hook conflict: let the hooks stamp the identity trailers"
+MANUAL_CONFLICT = (
+    "hook conflict: leave hand-written identity trailers out of the commit message"
+)
+BYPASS_CONFLICT = "hook conflict: hook bypass is forbidden"
+PUSH_CONFLICT = "hook conflict: push to main or master is forbidden"
+INSTALL_CONFLICT = "hook conflict: hook install is forbidden"
+BRANCH_WARNING = "use the launcher branch agent/sample-run instead of "
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        (
+            (
+                "1. Run `git fetch origin main` then "
+                '`git merge --no-ff -m "chore: merge main into the branch" '
+                "origin/main`."
+            ),
+            MERGE_CONFLICT,
+        ),
+        (
+            "Run `git fetch origin main` then `git merge --no-ff origin/main`.",
+            MERGE_CONFLICT,
+        ),
+        ("git merge origin/main; git merge --no-commit origin/main", MERGE_CONFLICT),
+        ("git merge origin/main\nUse --no-commit if needed.", MERGE_CONFLICT),
+        (
+            (
+                "Commit with plain git commit; no Signed-off-by, "
+                "no Generated-by or Co-authored-by trailers."
+            ),
+            OMISSION_CONFLICT,
+        ),
+        ("Commit without an Assisted-by trailer.", OMISSION_CONFLICT),
+        ("Omit the Generated-by line.", OMISSION_CONFLICT),
+        ("Strip Generated-by.", OMISSION_CONFLICT),
+        ('git commit -m "feat: x" -m "Generated-by: LLM model=sol"', MANUAL_CONFLICT),
+        ('git commit --message="Assisted-by: example"', MANUAL_CONFLICT),
+        ("git commit -F 'Generated-by: example'", MANUAL_CONFLICT),
+        ("git commit --file 'Assisted-by: example'", MANUAL_CONFLICT),
+        ('git commit --no-verify -m "x"', BYPASS_CONFLICT),
+        ("git commit -n", BYPASS_CONFLICT),
+        ("git commit -n\ngit status", BYPASS_CONFLICT),
+        ("git push --no-verify", BYPASS_CONFLICT),
+        ("Avoid skipping hooks. Use --no-verify.", BYPASS_CONFLICT),
+        ("git push origin main", PUSH_CONFLICT),
+        ("git push origin main\ngit status", PUSH_CONFLICT),
+        ("git push origin HEAD:main", PUSH_CONFLICT),
+        ("git push master", PUSH_CONFLICT),
+        ("git push origin HEAD:master", PUSH_CONFLICT),
+        ("git push origin refs/heads/main", PUSH_CONFLICT),
+        ("git push origin refs/heads/master", PUSH_CONFLICT),
+        ("Run prek install first.", INSTALL_CONFLICT),
+        ("Run pre-commit install first.", INSTALL_CONFLICT),
+    ],
+)
+def test_check_hooks_refuses_conflict(text: str, problem: str) -> None:
+    assert brief.check_hooks(text) == [problem]
+
+
+@pytest.mark.parametrize(
+    ("text", "branch"),
+    [
+        (
+            (
+                "Create branch feat/graph-baseline from origin/main "
+                "and commit the work there."
+            ),
+            "feat/graph-baseline",
+        ),
+        ("git switch -c feat/graph-baseline", "feat/graph-baseline"),
+        ("git checkout -b fix/other origin/main", "fix/other"),
+        ("git checkout -B fix/other", "fix/other"),
+        ("git checkout fix/other", "fix/other"),
+        ("git switch -C fix/other", "fix/other"),
+        ("git switch fix/other", "fix/other"),
+        ("git branch fix/other", "fix/other"),
+        ("git worktree add .worktrees/other -b fix/other", "fix/other"),
+        ("Commit on branch `fix/other`.", "fix/other"),
+        ("Work on branch fix/other.", "fix/other"),
+        ("git branch agent/other", "agent/other"),
+        ("git switch -c agent/Sample-run", "agent/Sample-run"),
+    ],
+)
+def test_foreign_branch_warns_without_a_hook_conflict(text: str, branch: str) -> None:
+    assert brief.check_hooks(text) == []
+    assert brief.branch_warnings(text, run="sample-run") == [BRANCH_WARNING + branch]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Never use --no-verify.",
+        (
+            "No hook skips (no SKIP=, PREK_SKIP=, --no-verify, hooksPath override); "
+            "a hook failure means stop and report."
+        ),
+        (
+            "Never run `prek install`, `pre-commit install`, `tbhbdev alpha install`, "
+            "or any other hook installer."
+        ),
+        "(never bare `prek install`)",
+        "Never push to main. Push with `git push origin HEAD:docs/some-branch`.",
+        (
+            "git merge --no-ff --no-commit origin/main then finish with a plain "
+            '`git commit -m "chore(o11y): merge main"` (no -F, no --no-verify).'
+        ),
+        "git merge-base --is-ancestor 969da64 HEAD",
+        "git merge --ff-only origin/main",
+        "git merge --squash origin/main",
+        "git merge --abort",
+        "git merge --abort\ngit status",
+        "git merge --continue",
+        "git merge --quit",
+        "Avoid `git merge --no-ff origin/main`.",
+        (
+            "No Signed-off-by, no Co-authored-by. Author and committer must both read "
+            "the agent identity; the hooks stamp the Generated-by trailer."
+        ),
+        (
+            "Commit once (Conventional Commits, no Signed-off-by or Co-authored-by; "
+            "the Generated-by trailer must name harness and model)."
+        ),
+        "Never remove the Generated-by trailer.",
+        'Do not use `git commit -m "Generated-by: example"`.',
+        'git commit -m "feat: x"',
+        "git commit -F msg.txt",
+        "Do not push to main; the driver pushes your agent/sample-run branch.",
+        "Do not run `git push origin HEAD:main`.",
+        "Never create or switch branches.",
+        "Do not create branch fix/other.",
+        "Don't run `git switch -c fix/other`.",
+        "git switch -c agent/sample-run",
+        "git worktree add .worktrees/sample-run -b agent/sample-run origin/main",
+        "git checkout origin/main -- README.md",
+        "git branch --list",
+        "This fixes the main branch build.",
+        "git push origin HEAD:docs/main",
+        "git push origin mainland",
+        "git push origin topic; echo main",
+        "git push origin topic\nmain is the default branch.",
+        brief.COMMITS_BLOCK,
+        brief.PUSH_BLOCK,
+        brief.HARD_RULES_BLOCK,
+    ],
+)
+def test_check_hooks_accepts_clean_text(text: str) -> None:
+    assert brief.check_hooks(text) == []
+    assert brief.branch_warnings(text, run="sample-run") == []
+
+
+@pytest.mark.parametrize("scan_command", [None, SCAN_COMMAND])
+def test_check_hooks_accepts_filled_skeleton(scan_command: str | None) -> None:
+    text = brief.render("sample-run", "other/project", scan_command=scan_command)
+    filled = re.sub(r"\{[^{}]+\}", "Completed", text)
+    assert brief.check_hooks(filled) == []
+    assert brief.branch_warnings(filled, run="sample-run") == []
+    assert brief.branch_warnings(filled) == []
+
+
+def test_check_warns_about_foreign_branch_without_failing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = tmp_path / "brief.md"
+    file.write_text(FILLED + "\ngit branch fix/other\n")
+    assert brief.main(["check", str(file)], PROG) == 0
+    assert capsys.readouterr() == (
+        (
+            f"warning: {file}: use the launcher branch agent/ instead of fix/other\n"
+            f"OK: {file}\n"
+        ),
+        "",
+    )
 
 
 def test_registered() -> None:
@@ -245,9 +423,16 @@ def test_forbidden_in_task(forbidden: str) -> None:
     text = FILLED.replace("## Task\n", f"## Task\nRun {forbidden}.\n")
     # PREK_SKIP= also contains SKIP=; every matching string is reported.
     assert brief.check(text) == [
-        f"forbidden instruction: {item}"
-        for item in brief.FORBIDDEN
-        if brief.normalize(item) in brief.normalize(forbidden)
+        *(
+            f"forbidden instruction: {item}"
+            for item in brief.FORBIDDEN
+            if brief.normalize(item) in brief.normalize(forbidden)
+        ),
+        *{
+            "prek install": [INSTALL_CONFLICT],
+            "pre-commit install": [INSTALL_CONFLICT],
+            "--no-verify": [BYPASS_CONFLICT],
+        }.get(forbidden, []),
     ]
 
 
@@ -274,7 +459,8 @@ def test_check_multiple_files_continues_after_failure(
     assert capsys.readouterr() == (
         (
             f"{bad}: unfilled placeholder: {{REMAINING}}\n"
-            f"{bad}: forbidden instruction: prek install\nOK: {good}\n"
+            f"{bad}: forbidden instruction: prek install\n"
+            f"{bad}: {INSTALL_CONFLICT}\nOK: {good}\n"
         ),
         "",
     )
@@ -314,11 +500,10 @@ def test_help(capsys: pytest.CaptureFixture[str]) -> None:
         (
             "usage: example brief [-h] {new,check} ...\n\n"
             "Render peer-run briefs and check their fixed safeguards. "
-            "The check is textual,\n"
-            "not semantic: outside the fixed text, "
-            "it cannot tell a prohibition from an\n"
-            "instruction. Extra lines in Hard rules are allowed. It guards against\n"
-            "omissions and plain mistakes, not against a hostile author.\n\n"
+            "The checks use text\n"
+            "patterns and recognize common prohibitions. Extra lines in Hard "
+            "rules are\n"
+            "allowed. The checks catch omissions and common mistakes.\n\n"
             "positional arguments:\n"
             "  {new,check}\n"
             "    new        write a peer-run brief skeleton\n"
@@ -398,7 +583,8 @@ def test_subcommand_help(
 )
 def test_normalized_forbidden_instructions(instruction: str) -> None:
     assert brief.check(FILLED + "\nRun " + instruction) == [
-        "forbidden instruction: pre-commit install"
+        "forbidden instruction: pre-commit install",
+        INSTALL_CONFLICT,
     ]
 
 
@@ -429,6 +615,8 @@ def test_forbidden_command_forms(instruction: str, label: str) -> None:
     ]
     if label not in brief.FORBIDDEN:
         expected.append(f"forbidden instruction: {label}")
+    if instruction.endswith(" -n") or "--no-verify" in instruction:
+        expected.append(BYPASS_CONFLICT)
     assert brief.check(FILLED + "\nRun " + instruction) == expected
 
 

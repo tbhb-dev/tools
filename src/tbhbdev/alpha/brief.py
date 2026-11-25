@@ -1,8 +1,7 @@
 """Render peer-run briefs and check their fixed safeguards.
 
-The check is textual, not semantic: outside the fixed text, it cannot tell a
-prohibition from an instruction. Extra lines in Hard rules are allowed. It guards
-against omissions and plain mistakes, not against a hostile author.
+The checks use text patterns and recognize common prohibitions. Extra lines in
+Hard rules are allowed. The checks catch omissions and common mistakes.
 """
 
 import argparse
@@ -84,6 +83,67 @@ FORBIDDEN_REGEX = (
         r"\bgit push\b[^`;&|]*\s(?:--force\b(?!-with-lease\b)|-f\b)",
     ),
 )
+COMMAND_ARGS = r"[^`\n;&|]*"
+ARG_END = r"(?=$|[ \n`;&|\"'(),]|\.(?=$|[ \n]))"
+TRAILER = r"(?:generated-by|assisted-by)"
+NEGATION = re.compile(
+    r"(?<![\w-])(?:never|no|not|don['\u2019]t|without|avoid|forbidden)\b"
+)
+CLAUSE_END = re.compile(r"[.;:\n]")
+PROSE_BREAK = re.compile(r"\n(?=\n|[#>]|```|~~~|[-*+] |\d+[.)] )")
+OTHER_TRAILER_OMISSION = re.compile(
+    r"\b(?:no|without) (?:an? |the )?[`\"']?(?:signed-off-by|co-authored-by)[`\"']?,"
+)
+COMMAND_CONFLICTS = (
+    (
+        (
+            r"\bgit merge(?![-\w])"
+            rf"(?!{COMMAND_ARGS} --(?:no-commit|squash|ff-only|abort|continue|quit)"
+            rf"{ARG_END})"
+        ),
+        (
+            "merge commits lack the required Generated-by trailer. "
+            "Use git merge --no-commit, then a plain git commit"
+        ),
+    ),
+    (
+        (
+            r"\bgit commit(?![-\w])"
+            rf"(?={COMMAND_ARGS} (?:-[mf]|--(?:message|file)(?=[ =])))"
+            rf"{COMMAND_ARGS}\b{TRAILER}:"
+        ),
+        "leave hand-written identity trailers out of the commit message",
+    ),
+    (rf"\bgit commit(?![-\w]){COMMAND_ARGS} -n{ARG_END}", "hook bypass is forbidden"),
+    (
+        (
+            rf"\bgit push(?![-\w]){COMMAND_ARGS} [\"']?\+?(?:head:)?"
+            rf"(?:refs/heads/)?(?:main|master){ARG_END}"
+        ),
+        "push to main or master is forbidden",
+    ),
+)
+PROSE_CONFLICTS = (
+    (
+        (
+            r"\b(?:no|without|omit|strip|remove|drop|skip|exclude|leave out|"
+            r"(?:don['\u2019]t|do not|never) (?:add|include|stamp|write)) "
+            rf"(?:an? |the |any )?[`\"']?{TRAILER}(?![-\w])"
+        ),
+        "let the hooks stamp the identity trailers",
+    ),
+    (r"(?<![\w-])--no-verify(?![-\w])", "hook bypass is forbidden"),
+    (r"(?<![\w-])(?:prek|pre-commit) install(?![-\w])", "hook install is forbidden"),
+)
+BRANCH_INSTRUCTION = re.compile(
+    rf"(?:\bgit (?:checkout(?: -[bB]|(?!{COMMAND_ARGS} --(?: |$)))"
+    r"|switch(?: -[cC])?|branch) "
+    rf"|\bgit worktree add{COMMAND_ARGS}? -[bB] "
+    r"|\b(?:create|switch to|check out|commit on|work on) "
+    r"(?:a |the )?branch (?:named )?)"
+    r"[`\"']?([^\s`\"';&|<>()]+)",
+    re.IGNORECASE,
+)
 FIXED_BY_SECTION = {
     REQUIRED_HEADINGS[0]: (HOOK_RULE,),
     "## Commits": (COMMITS_BLOCK, NO_PUSH_BLOCK),
@@ -95,6 +155,48 @@ FIXED_BY_SECTION = {
 def normalize(text: str) -> str:
     """Fold Unicode, whitespace and case for every textual comparison."""
     return " ".join(unicodedata.normalize("NFKC", text).split()).casefold()
+
+
+def prohibiting(text: str, start: int) -> bool:
+    """Look for a prohibition before the instruction in the same clause."""
+    clause = CLAUSE_END.split(text[:start])[-1]
+    clause = OTHER_TRAILER_OMISSION.sub("", normalize(clause))
+    return NEGATION.search(clause) is not None
+
+
+def check_hooks(text: str) -> list[str]:
+    """Return hook conflicts in a free-form brief."""
+    lines = "\n".join(normalize(line) for line in text.splitlines())
+    # Prose can wrap within a prohibition. Shell commands end at a newline.
+    prose = "\n".join(normalize(block) for block in PROSE_BREAK.split(lines))
+    return [
+        f"hook conflict: {reason}"
+        for content, rules in ((lines, COMMAND_CONFLICTS), (prose, PROSE_CONFLICTS))
+        for pattern, reason in rules
+        for match in re.finditer(pattern, content)
+        if not prohibiting(content, match.start())
+    ]
+
+
+def branch_warnings(text: str, run: str | None = None) -> list[str]:
+    """Return warnings for instructions to use a different branch."""
+    text = "\n".join(
+        " ".join(line.split())
+        for line in unicodedata.normalize("NFKC", text).splitlines()
+    )
+    allowed = "agent/" if run is None else f"agent/{run}"
+    warnings = []
+    for match in BRANCH_INSTRUCTION.finditer(text):
+        branch = match[1].rstrip(".,")
+        if branch.startswith("-") or prohibiting(text, match.start()):
+            continue
+        allowed_branch = (
+            branch.startswith(allowed) if run is None else branch == allowed
+        )
+        if allowed_branch:
+            continue
+        warnings.append(f"use the launcher branch {allowed} instead of {branch}")
+    return warnings
 
 
 def render(
@@ -216,6 +318,7 @@ def check(text: str) -> list[str]:
         for label, pattern in FORBIDDEN_REGEX
         if re.search(normalize(pattern), remaining)
     )
+    problems.extend(check_hooks(text))
     return problems
 
 
@@ -223,9 +326,13 @@ def check_files(files: list[str]) -> int:
     status = 0
     for filename in files:
         try:
-            problems = check(Path(filename).read_bytes().decode())
+            text = Path(filename).read_bytes().decode()
         except (OSError, UnicodeError) as exc:
             problems = [str(exc)]
+        else:
+            problems = check(text)
+            for warning in branch_warnings(text):
+                print(f"warning: {filename}: {warning}")
         if problems:
             status = 1
             for problem in problems:

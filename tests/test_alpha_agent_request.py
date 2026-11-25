@@ -41,6 +41,7 @@ BUILD: Data = {
     "startup_deadline_seconds": 120,
     "fetch_refs": [],
     "max_concurrent_runs": None,
+    "expect_commit": False,
 }
 REVIEW: Data = {**BUILD, "profile": "review", "commit": COMMIT}
 CLAUDE: Data = {
@@ -87,7 +88,7 @@ def refused(data: Data, *, host: bool = True) -> str:
 
 @pytest.mark.parametrize(
     "data",
-    [BUILD, REVIEW, CLAUDE, AGY, FULL, UNSANDBOXED],
+    [BUILD, REVIEW, CLAUDE, AGY, FULL, UNSANDBOXED, BUILD | {"expect_commit": True}],
     ids=lambda d: str(d["kind"]),
 )
 def test_round_trips_through_json(data: Data) -> None:
@@ -156,7 +157,12 @@ def test_missing_fields_are_named() -> None:
 
 
 @pytest.mark.parametrize(
-    "key", [k for k in BUILD if k not in {"v", "fetch_refs", "max_concurrent_runs"}]
+    "key",
+    [
+        k
+        for k in BUILD
+        if k not in {"v", "fetch_refs", "max_concurrent_runs", "expect_commit"}
+    ],
 )
 def test_each_field_is_required(key: str) -> None:
     assert refused(made(BUILD, **{key: MISSING})) == f"request is missing fields: {key}"
@@ -168,6 +174,19 @@ def test_a_request_saved_before_fetch_refs_still_loads() -> None:
     )
     assert parsed.fetch_refs == ()
     assert request.to_dict(parsed)["fetch_refs"] == []
+
+
+def test_a_request_saved_before_expect_commit_still_loads() -> None:
+    parsed = request.parse(
+        made(BUILD, expect_commit=MISSING), host_allows_unsandboxed=False
+    )
+    assert parsed.expect_commit is False
+
+
+def test_expect_commit_requires_a_build() -> None:
+    assert refused(REVIEW | {"expect_commit": True}) == (
+        "request expect_commit applies only to a build run"
+    )
 
 
 def test_unknown_fields_are_named() -> None:
@@ -206,11 +225,10 @@ def test_the_startup_deadline_is_not_optional() -> None:
     )
 
 
+@pytest.mark.parametrize("key", ["unsandboxed", "expect_commit"])
 @pytest.mark.parametrize("bad", ["yes", 1, 0, None, "true"])
-def test_unsandboxed_must_be_a_boolean(bad: object) -> None:
-    assert refused(made(BUILD, unsandboxed=bad)) == (
-        "request unsandboxed must be true or false"
-    )
+def test_flags_must_be_booleans(key: str, bad: object) -> None:
+    assert refused(made(BUILD, **{key: bad})) == f"request {key} must be true or false"
 
 
 @pytest.mark.parametrize(
