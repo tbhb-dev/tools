@@ -28,7 +28,7 @@ _PIDPATH_MAX = 4096  # the libproc path buffer size
 
 @dataclass(frozen=True)
 class Process:
-    """One process: its parent's pid and its executable path, "" when unknown."""
+    """One process: its parent's pid and its executable path."""
 
     ppid: int
     exe: str
@@ -66,10 +66,14 @@ def why_not(registered: str | None, pid: int, read: Reader) -> str | None:
     why = f"no ancestor process runs the registered worker {target}"
     seen = {pid}
     current = read(pid)
-    while current is not None and current.ppid not in seen:
+    if current is None:
+        return f"{why}; process {pid} could not be read"
+    while current.ppid not in seen:
         seen.add(current.ppid)
         parent = read(current.ppid)
-        if parent is not None and parent.exe and os.path.realpath(parent.exe) == target:
+        if parent is None or not parent.exe:
+            return f"{why}; process {current.ppid} could not be read"
+        if os.path.realpath(parent.exe) == target:
             return None
         if current.ppid == _INIT:
             break
@@ -123,14 +127,16 @@ def darwin_reader(
 ) -> Reader:
     """A reader of `ps` for the parent and libproc `proc_pidpath` for the path.
 
-    `ps -o comm=` shows the name as launched, which can be relative.
+    `ps -o comm=` shows the name as launched, which can be relative. A pid
+    whose path can't be read is unreadable, and the walk stops there.
     """
 
     def read(pid: int) -> Process | None:
         parent = ps("ppid", pid)
         if parent is None or not parent.isdecimal():
             return None
-        return Process(int(parent), pidpath(pid) or "")
+        path = pidpath(pid)
+        return Process(int(parent), path) if path else None
 
     return read
 

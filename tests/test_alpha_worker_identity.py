@@ -130,10 +130,14 @@ def test_an_unreadable_grandparent_is_no_match() -> None:
     assert "no ancestor" in why(WORKER, table.get)
 
 
-def test_a_parent_with_an_unknown_exe_is_skipped_not_matched() -> None:
+def test_a_parent_with_an_unknown_exe_stops_the_walk_with_a_reason() -> None:
     read = tree((100, "/x"), (50, ""), (40, WORKER), (1, "/sbin/init"))
-    assert worker_identity.why_not(WORKER, 100, read) is None
+    assert "process 50 could not be read" in why(WORKER, read)
     assert "no ancestor" in why("", read)
+
+
+def test_an_unreadable_process_is_named_in_the_reason() -> None:
+    assert "process 100 could not be read" in why(WORKER, {}.get)
 
 
 @pytest.mark.parametrize("text", ["a", "A.b_c:d-e", "x" * 128, "run:42"])
@@ -213,8 +217,31 @@ def test_the_darwin_reader_takes_the_parent_and_the_pidpath() -> None:
     assert read(7) == Process(42, "/opt/w")
 
 
-def test_the_darwin_reader_leaves_an_unreadable_pidpath_unknown() -> None:
-    assert fake_darwin({("ppid", 7): "42"}, {7: None})(7) == Process(42, "")
+@pytest.mark.parametrize("path", [None, ""])
+def test_the_darwin_reader_fails_closed_on_an_unreadable_pidpath(
+    path: str | None,
+) -> None:
+    assert fake_darwin({("ppid", 7): "42"}, {7: path})(7) is None
+
+
+def test_a_failed_darwin_lookup_in_the_middle_refuses_despite_the_worker_above() -> (
+    None
+):
+    paths = {100: "/x", 50: None, 40: WORKER, 1: "/sbin/init"}
+    parents = {100: "50", 50: "40", 40: "1", 1: "0"}
+    read = worker_identity.darwin_reader(lambda _f, pid: parents.get(pid), paths.get)
+    assert "process 50 could not be read" in why(WORKER, read)
+
+
+def test_a_failed_linux_lookup_in_the_middle_refuses_despite_the_worker_above(
+    tmp_path: Path,
+) -> None:
+    write_proc(tmp_path, 100, "100 (a) S 50\n", exe="/x")
+    write_proc(tmp_path, 50, "50 (a) S 40\n", exe=None)
+    write_proc(tmp_path, 40, "40 (a) S 1\n", exe=WORKER)
+    write_proc(tmp_path, 1, "1 (a) S 0\n", exe="/sbin/init")
+    read = worker_identity.linux_reader(str(tmp_path))
+    assert "process 50 could not be read" in why(WORKER, read)
 
 
 @pytest.mark.parametrize("parent", [None, "", "x1", "-1"])
