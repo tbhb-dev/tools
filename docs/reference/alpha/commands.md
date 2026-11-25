@@ -4,11 +4,7 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6
-    at: "2026-11-25T05:55:25Z"
-  - role: generated
-    harness: codex
-    model: openai:gpt-6
-    at: "2026-11-25T05:59:56Z"
+    at: "2026-11-25T14:38:45Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -93,6 +89,8 @@ The commit check runs without config. The command guard checks arguments for tra
 These user-level hooks run in every repository. Before acting, the identity, pull request, approval guard, and install hooks check that `origin` names a tbhb-dev repository on GitHub. Outside a repository, the identity record hook still writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Both `state-guard` and `session-context` run regardless of origin. At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, which puts the `gh` shim first on PATH for the session's commands and reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, so sessions in two worktrees of one clone keep separate state.
+
+When `tbhbdev alpha agent exec` finds a version mismatch, it looks up the head of `tbhb-dev/tools` on `main` and installs that commit on each side that differs. It logs each successful install to standard error. If it updates the driver, it re-executes the command with the original arguments. The retry reads the host version again. If the versions still differ, it reports the original mismatch with `after one sync` and refuses the launch.
 
 `tbhbdev alpha agent exec --fetch-ref REF` makes `refs/heads/<branch>` available as `origin/fetched/heads/<branch>` and `refs/pull/N/head` as `origin/fetched/pull/N/head`. Repeat `--fetch-ref` up to eight times with either profile.
 
