@@ -66,7 +66,7 @@ commands:
                | consume | check MSGFILE | stamp-docs
   guard-gh-pr  PreToolUse hook: block gh pr create|edit|merge|ready|close,
                gh issue close, gh run rerun, gh api branch deletes and
-               a session's approval of a pull request it opened
+               pull request approvals through gh
   guard-op     PreToolUse hook: require the configured 1Password account
   guard-ssh-agent PreToolUse hook: block ssh-add and paths in the ssh dir (not sessions)
   state-guard  Claude Code hook: block sign-off commits and unchecked open items

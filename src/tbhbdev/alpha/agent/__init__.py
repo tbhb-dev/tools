@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from tbhbdev import telemetry, userconfig
+from tbhbdev.alpha import worker_identity
 from tbhbdev.alpha.agent import driver, precheck, settings
 from tbhbdev.alpha.agent import run_host as run_host
 from tbhbdev.alpha.agent import signing_parity as signing_parity
@@ -89,6 +90,13 @@ def parser(prog: str) -> argparse.ArgumentParser:
     execute.add_argument("--class", dest="class_")
     execute.add_argument("--variant")
     execute.add_argument("--role")
+    execute.add_argument(
+        "--worker-workflow",
+        type=worker_identity.workflow,
+        metavar="ID",
+        help="launch as worker/ID: the caller must descend from the "
+        "executable in the config's [agent.worker] table (no tmux pane)",
+    )
     execute.add_argument("name")
     execute.add_argument("prompt_file")
     for verb in ("wait", "status", "kill", "clean", "keep", "log", "diff"):

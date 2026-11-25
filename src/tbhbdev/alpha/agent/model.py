@@ -169,6 +169,7 @@ class Settings:
     otel_endpoint: str | None = None
     run_memory_mib: int = DEFAULT_RUN_MEMORY_MIB
     review_memory_mib: int = DEFAULT_RUN_MEMORY_MIB
+    worker_path: str | None = None
 
 
 @dataclass(frozen=True)
