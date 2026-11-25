@@ -15,9 +15,12 @@ import re
 import subprocess  # nosec B404
 import sys
 import tempfile
+from functools import cached_property
+from http.client import HTTPException
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from tbhbdev.alpha.agent.signing_parity import public_keys
 from tbhbdev.alpha.identity import AGENT_EMAIL
 from tbhbdev.alpha.repo import git
 
@@ -43,16 +46,57 @@ RANGE_LIMIT = 1000
 SIGNATURE_HEADER = re.compile(rb"gpgsig(-sha256)? ")
 
 
-def agent_fingerprint() -> str:
-    """The fingerprint of the agent's public signing key, or empty if unreadable."""
+def key_fingerprint(path: str, public_key: str | None = None) -> str:
     done = subprocess.run(  # nosec B603 B607
-        ["ssh-keygen", "-l", "-f", str(Path.home() / AGENT_KEY)],
+        ["ssh-keygen", "-l", "-f", path],
+        input=public_key,
         capture_output=True,
         text=True,
         check=False,
     )
     found = FINGERPRINT.search(done.stdout)
     return found[0] if done.returncode == 0 and found else ""
+
+
+def agent_fingerprint() -> str:
+    """The fingerprint of this host's public signing key, or empty if unreadable."""
+    return key_fingerprint(str(Path.home() / AGENT_KEY))
+
+
+class SigningKeys:
+    """Load signing keys on demand, once per push across all refs."""
+
+    @cached_property
+    def local(self) -> str:
+        return agent_fingerprint()
+
+    @cached_property
+    def registered(self) -> set[str] | None:
+        try:
+            return {
+                found
+                for key in public_keys(timeout=5)
+                if (found := key_fingerprint("-", key + "\n"))
+            }
+        except OSError, HTTPException, ValueError, KeyError, TypeError:
+            return None
+
+    def refusal(self, signer: str, ref: str, sha: str) -> str:
+        """Explain why a signature was refused, or return empty when it passed."""
+        if signer and signer == self.local:
+            return ""
+        registered = self.registered
+        if signer in (registered or ()):
+            return ""
+        fallback = (
+            " (could not fetch GitHub signing keys, checked the local key only)"
+            if registered is None
+            else ""
+        )
+        return (
+            f"{ref}: agent commit {sha} lacks a valid agent signature{fallback}; "
+            "push refused"
+        )
 
 
 def signature_fingerprint(raw: bytes) -> str:
@@ -82,7 +126,7 @@ def signature_fingerprint(raw: bytes) -> str:
             check=False,
         )
     found = FINGERPRINT.search((done.stdout + done.stderr).decode(errors="replace"))
-    return found[0] if found else ""
+    return found[0] if done.returncode == 0 and found else ""
 
 
 def remote_tips() -> list[str]:
@@ -128,8 +172,10 @@ def commit_bytes(sha: str) -> bytes:
     return done.stdout
 
 
-def agent_commit_problems(ref: str, local: str, exclude: list[str]) -> list[str]:
-    """Name each agent commit the push adds that the agent key didn't sign.
+def agent_commit_problems(
+    ref: str, local: str, exclude: list[str], keys: SigningKeys
+) -> list[str]:
+    """Name each agent commit the push adds without a trusted signature.
 
     ``exclude`` holds every remote-tracking and tag tip and the old sha git reports. A
     failed listing or a range over RANGE_LIMIT refuses the push.
@@ -140,7 +186,6 @@ def agent_commit_problems(ref: str, local: str, exclude: list[str]) -> list[str]
     if len(shas) > RANGE_LIMIT:
         return [f"{ref}: the push adds over {RANGE_LIMIT} commits; push refused"]
     problems: list[str] = []
-    expected = ""
     for sha in shas:
         raw = commit_bytes(sha)
         idents = [
@@ -150,14 +195,8 @@ def agent_commit_problems(ref: str, local: str, exclude: list[str]) -> list[str]
         ]
         if not any(f"<{AGENT_EMAIL}>".encode() in x for x in idents):
             continue
-        expected = expected or agent_fingerprint()
-        if not expected:
-            return [f"{ref}: agent signing key unreadable; push refused"]
-        if signature_fingerprint(raw) != expected:
-            problems.append(
-                f"{ref}: agent commit {sha} is not signed with the agent key; "
-                "push refused"
-            )
+        if problem := keys.refusal(signature_fingerprint(raw), ref, sha):
+            problems.append(problem)
     return problems
 
 
@@ -176,7 +215,7 @@ def fetched_tip(remote: str, ref: str) -> str:
 
 
 def ref_problems(
-    remote: str, row: tuple[str, str, str], tips: Sequence[str]
+    remote: str, row: tuple[str, str, str], tips: Sequence[str], keys: SigningKeys
 ) -> list[str]:
     """The refusals for one pushed ref: LOCAL, REF, and the remote's OLD value."""
     local, ref, old = row
@@ -189,7 +228,7 @@ def ref_problems(
     if not local.strip("0"):
         return []
     exclude = known_objects([*tips, old] if old.strip("0") else list(tips))
-    problems = agent_commit_problems(ref, local, exclude)
+    problems = agent_commit_problems(ref, local, exclude, keys)
     if old.strip("0") and git(*SAFE, "merge-base", "--is-ancestor", old, local)[0]:
         if fetched_tip(remote, ref) == old:
             print(f"pre-push-guard: {ref} rewritten {old} -> {local}", file=sys.stderr)
@@ -207,7 +246,10 @@ def push_problems(remote: str, lines: Sequence[str]) -> list[str]:
         _, local, ref, old = line.split()  # ValueError: main() refuses the push
         rows.append((local, ref, old))
     tips = remote_tips()
-    return [problem for row in rows for problem in ref_problems(remote, row, tips)]
+    keys = SigningKeys()
+    return [
+        problem for row in rows for problem in ref_problems(remote, row, tips, keys)
+    ]
 
 
 def main(argv: list[str], prog: str) -> int:

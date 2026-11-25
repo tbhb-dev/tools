@@ -17,13 +17,14 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import cast
 
 from tbhbdev.alpha.agent import credentials, host_tools, transport
 from tbhbdev.alpha.agent import settings as agent_settings
 from tbhbdev.alpha.agent.decisions import remote
 from tbhbdev.alpha.agent.model import Host, Invalid, Settings
 
-KEYS_URL = "https://api.github.com/users/tbhb-agent/ssh_signing_keys"
+KEYS_URL = "https://api.github.com/users/tbhb-agent/ssh_signing_keys?per_page=100"
 
 
 def fingerprint(public_key: str) -> str:
@@ -80,14 +81,29 @@ def host_main(argv: list[str], prog: str) -> int:
     return 0
 
 
-def registered() -> set[str]:
-    """The fingerprints of tbhb-agent's public signing keys."""
+def public_keys(*, timeout: int) -> list[str]:
+    """Read tbhb-agent's public signing keys in one GitHub request."""
     request = urllib.request.Request(
         KEYS_URL, headers={"Accept": "application/vnd.github+json"}
     )
-    with urllib.request.urlopen(request, timeout=20) as response:  # noqa: S310  # nosec B310
-        entries = json.load(response)
-    return {fingerprint(entry["key"]) for entry in entries}
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310  # nosec B310
+        entries: object = json.load(response)
+    if not isinstance(entries, list):
+        message = "expected a GitHub signing key list"
+        raise TypeError(message)
+    keys: list[str] = []
+    for entry in cast("list[dict[str, object]]", entries):
+        key = entry["key"]
+        if not isinstance(key, str):
+            message = "expected an OpenSSH public key string"
+            raise TypeError(message)
+        keys.append(key)
+    return keys
+
+
+def registered() -> set[str]:
+    """The fingerprints of tbhb-agent's public signing keys."""
+    return {fingerprint(key) for key in public_keys(timeout=20)}
 
 
 def remote_fingerprint(settings: Settings, host: Host) -> str:

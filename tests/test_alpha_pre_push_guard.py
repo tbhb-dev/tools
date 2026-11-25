@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from fake_tool import pythonpath
@@ -416,6 +419,13 @@ def no_ssh_agent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def signing_key_request(monkeypatch: pytest.MonkeyPatch) -> Mock:
+    request = Mock(return_value=io.BytesIO(b"[]"))
+    monkeypatch.setattr(urllib.request, "urlopen", request)
+    return request
+
+
 def make_key(folder: Path, name: str) -> Path:
     path = folder / name
     subprocess.run(
@@ -478,10 +488,45 @@ def push_agent(monkeypatch: pytest.MonkeyPatch, local: str) -> int:
 
 
 def test_an_agent_commit_signed_with_the_agent_key_passes(
-    repo: Path, monkeypatch: pytest.MonkeyPatch, agent_key: Path
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent_key: Path,
+    signing_key_request: Mock,
 ) -> None:
     head = agent_commit(repo, agent_key)
     assert push_agent(monkeypatch, head) == 0
+    signing_key_request.assert_not_called()
+
+
+def test_registered_signers_are_accepted_across_refs(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    signing_key_request: Mock,
+) -> None:
+    first = make_key(tmp_path, "first")
+    second = make_key(tmp_path, "second")
+    one = agent_commit(repo, first)
+    two = agent_commit(repo, second)
+    rows = f"HEAD {one} refs/heads/one {ZERO}\nHEAD {two} refs/heads/two {ZERO}\n"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(rows))
+    body = [
+        {"key": key.with_suffix(".pub").read_text().strip()} for key in (first, second)
+    ]
+    body.insert(0, {"key": "invalid public key"})
+    signing_key_request.configure_mock(
+        return_value=io.BytesIO(json.dumps(body).encode())
+    )
+
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "p") == 0
+    signing_key_request.assert_called_once()
+    request = signing_key_request.call_args.args[0]
+    assert request.full_url == (
+        "https://api.github.com/users/tbhb-agent/ssh_signing_keys?per_page=100"
+    )
+    assert request.get_method() == "GET"
+    assert request.get_header("Authorization") is None
+    assert signing_key_request.call_args.kwargs == {"timeout": 5}
 
 
 @pytest.mark.usefixtures("agent_key")
@@ -490,16 +535,55 @@ def test_an_agent_commit_without_the_agent_key_is_refused(
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
     signed_by: str,
+    signing_key_request: Mock,
 ) -> None:
-    other = make_key(tmp_path, "personal") if signed_by == "other" else None
+    known = (Path.home() / pg.AGENT_KEY).read_text().strip()
+    signing_key_request.configure_mock(
+        return_value=io.BytesIO(json.dumps([{"key": known}]).encode())
+    )
+    other = make_key(repo.parent, "personal") if signed_by == "other" else None
     head = agent_commit(repo, other)
     assert push_agent(monkeypatch, head) == 1
     assert capsys.readouterr().err == (
-        f"refs/heads/topic: agent commit {head} is not signed with the agent key; "
+        f"refs/heads/topic: agent commit {head} lacks a valid agent signature; "
         "push refused\n"
     )
+
+
+def test_failed_key_lookup_falls_back_to_local_key(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    agent_key: Path,
+    signing_key_request: Mock,
+) -> None:
+    signing_key_request.configure_mock(side_effect=TimeoutError)
+    other = agent_commit(repo, make_key(repo.parent, "other"))
+    local = agent_commit(repo, agent_key)
+    rows = f"HEAD {other} refs/heads/one {ZERO}\nHEAD {local} refs/heads/two {ZERO}\n"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(rows))
+
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "p") == 1
+    signing_key_request.assert_called_once()
+    err = capsys.readouterr().err
+    for ref in ("one", "two"):
+        assert (
+            f"refs/heads/{ref}: agent commit {other} lacks a valid agent signature "
+            "(could not fetch GitHub signing keys, checked the local key only); "
+            "push refused\n"
+        ) in err
+    assert local not in err
+
+
+@pytest.mark.parametrize(
+    "body", [b"invalid JSON", b"{}", b"[{}]", b"[null]", b'[{"key": 1}]']
+)
+def test_malformed_github_response_is_a_lookup_failure(
+    signing_key_request: Mock, body: bytes
+) -> None:
+    signing_key_request.configure_mock(return_value=io.BytesIO(body))
+    assert pg.SigningKeys().registered is None
 
 
 def test_a_bad_signature_is_refused(
@@ -633,7 +717,8 @@ def test_an_unreadable_agent_key_refuses_closed(
     monkeypatch.setenv("HOME", str(tmp_path / "empty"))
     assert push_agent(monkeypatch, head) == 1
     assert capsys.readouterr().err == (
-        "refs/heads/topic: agent signing key unreadable; push refused\n"
+        f"refs/heads/topic: agent commit {head} lacks a valid agent signature; "
+        "push refused\n"
     )
 
 
