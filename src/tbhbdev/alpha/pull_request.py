@@ -44,15 +44,17 @@ with them on stderr so the agent fixes the draft. Other calls exit 0 at once.
 
 ``create`` and ``edit`` run ``check``, then append the ``Generated-by`` and
 ``Assisted-by`` trailers as the body's last paragraph, so a merge carries
-them into the commit. They are the LLM trailers of the commits on the branch,
-deduplicated by identity, plus the posting agent as ``Assisted-by``. They are
-machine-written: a draft that contains one fails ``check``, because a person
-cannot compute the session hashes by hand and a stripped line would hide what
-the author thought they had written. Before gh runs, and in a dry run too, the
-final title and body, trailers included, go through gitleaks under the host's
-private config (see ``tbhbdev.alpha.secret_scan``), and a finding, a missing
-config or a missing gitleaks stops the command. Nothing is pushed: when the
-branch is not on the remote, gh's own error is passed through.
+them into the commit. ``create`` reads the local branch's commits. ``edit``
+reads the pull request's commits on GitHub and refuses the edit if it cannot
+list them. The trailers are deduplicated by identity, plus the posting agent
+as ``Assisted-by``. They are machine-written: a draft that contains one fails
+``check``, because a person cannot compute the session hashes by hand and a
+stripped line would hide what the author thought they had written. Before gh
+posts, and in a dry run too, the final title and body, trailers included, go
+through gitleaks under the host's private config (see
+``tbhbdev.alpha.secret_scan``), and a finding, a missing config or a missing
+gitleaks stops the command. Nothing is pushed: when the branch is not on the
+remote, gh's own error is passed through.
 
 In a private repository, read live with ``gh repo view`` once per command, that
 scan skips the private config's name rules (the ``NAME_RULES`` families). This
@@ -63,11 +65,11 @@ working directory's. ``edit`` takes that repository from the pull request's
 own ``url`` and reads its visibility with ``gh repo view <owner/name>``.
 ``create`` has no pull request yet, so it reads ``gh repo view`` for the base
 repository, which is gh's own resolution and the one ``gh pr create`` uses. A
-target that can't be resolved, such as a URL that isn't a github.com pull
-request page, scans under the full private config. The ``op-*`` rules, the
-address, MAC, endpoint and keychain rules, the canary and .gitleaks.toml still
-apply. Any visibility but ``PRIVATE``, an empty value or a failed read scans
-under the full private config, so the read alone never refuses a command.
+create target that can't be resolved scans under the full private config.
+The ``op-*`` rules, the address, MAC, endpoint and keychain rules, the canary
+and .gitleaks.toml still apply. Any visibility but ``PRIVATE`` or a failed
+read scans under the full private config, so the read alone never refuses a
+command.
 ``check`` makes no gh calls and doesn't scan.
 
 ``create`` also writes ``Opened-by: LLM ...`` as the first line of that
@@ -167,6 +169,7 @@ BUILTIN_STYLE = "Vale"
 # The .vale.ini key that names styles, compared without regard to case.
 BASED_ON = "BasedOnStyles"
 GH = "gh"
+GIT = "git"
 CLAUDE = "claude"
 CODEX = "codex"
 ANTIGRAVITY = "antigravity"
@@ -908,8 +911,60 @@ def branch_trailers(base: str) -> list[tuple[str, str]]:
     if code != 0:
         message = f"cannot list the commits in {base}..HEAD; is {base} fetched?"
         raise SystemExit(message)
-    found = (agent_identity.LINE.match(line) for line in out.splitlines())
+    return trailer_lines(out)
+
+
+def trailer_lines(text: str) -> list[tuple[str, str]]:
+    """Match LLM trailer lines in Git's parsed trailer output."""
+    found = (agent_identity.LINE.match(line) for line in text.splitlines())
     return [(match[1], match[2]) for match in found if match]
+
+
+def commit_messages(pages: Sequence[object], invalid: str) -> list[str]:
+    """Read the commit messages in the order GitHub returned them."""
+    messages: list[str] = []
+    for page in pages:
+        if not isinstance(page, list):
+            raise SystemExit(invalid)
+        for entry in cast("list[object]", page):  # pragma: no mutate
+            item = agent_identity.as_dict(entry) or {}
+            commit = agent_identity.as_dict(item.get("commit")) or {}
+            message = commit.get("message")
+            if not isinstance(message, str):
+                raise SystemExit(invalid)
+            messages.append(message)
+    return messages
+
+
+def pr_trailers(number: int, target: str) -> list[tuple[str, str]]:
+    """The LLM trailers of the commits GitHub lists for the pull request."""
+    problem = f"cannot list the commits of PR {number}"
+    if not target:
+        error = f"{problem}: cannot determine its GitHub repository"
+        raise SystemExit(error)
+    endpoint = f"repos/{target}/pulls/{number}/commits"
+    api = [find_tool(GH), "api", "--hostname", "github.com", "--paginate", "--slurp"]
+    done = run([*api, endpoint])
+    pages = gh_data(done)
+    if not isinstance(pages, list):
+        why = " ".join(done.stderr.split()) or "GitHub returned no commit list"
+        error = f"{problem}: {why}"
+        raise SystemExit(error)
+    pages = cast("list[object]", pages)  # pragma: no mutate
+    invalid = f"{problem}: GitHub returned invalid commit data"
+    messages = commit_messages(pages, invalid)
+    if not messages:
+        error = f"{problem}: GitHub returned no commits"
+        raise SystemExit(error)
+    argv = [find_tool(GIT), "interpret-trailers", "--parse", "--no-divider"]
+    found: list[tuple[str, str]] = []
+    for message in messages:
+        parsed = run(argv, stdin=message)
+        if parsed.returncode != 0:
+            error = f"cannot parse the commit trailers of PR {number}"
+            raise SystemExit(error)
+        found.extend(trailer_lines(parsed.stdout))
+    return found
 
 
 def posting_value(env: Mapping[str, str]) -> str | None:
@@ -999,7 +1054,10 @@ def opened_line(body: str) -> str | None:
 
 
 def description(
-    checked: Checked, env: Mapping[str, str], opened_by: str | None = None
+    checked: Checked,
+    env: Mapping[str, str],
+    found: Sequence[tuple[str, str]],
+    opened_by: str | None = None,
 ) -> str:
     """The final body: the description plus the trailers as its last paragraph.
 
@@ -1009,7 +1067,6 @@ def description(
         SystemExit: A trailer, or the posting agent's, fails the commit-trailer
             grammar.
     """
-    found = branch_trailers(base_of(checked.meta))
     posting = posting_value(env)
     values = [value for _, value in found] + ([posting] if posting else [])
     errors = [
@@ -1892,14 +1949,15 @@ def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
         return 0
     if args.command == "create":
         root, line = opened_by(env)
-        body = description(checked, env, line)
+        body = description(checked, env, branch_trailers(base_of(checked.meta)), line)
         post_text(checked.title, body, base_visibility())
         argv = [GH, "pr", "create", "--title", checked.title, "--body-file", "-"]
         argv += gh_args(checked.meta)
         return create_pr(argv, body, root, dry_run=args.dry_run)
     line, url = live_pr(args.pr)
-    body = description(checked, env, line)
-    post_text(checked.title, body, repo_visibility(target_of_pr(url)))
+    target = target_of_pr(url)
+    body = description(checked, env, pr_trailers(args.pr, target), line)
+    post_text(checked.title, body, repo_visibility(target))
     argv = [
         GH,
         "pr",

@@ -314,12 +314,11 @@ def test_command_help_contract() -> None:
     assert agent.parser("example agent").format_help() == (
         "usage: example agent [-h]\n"
         "                     "
-        "{exec,wait,status,kill,clean,keep,log,diff,signing-parity,clear-taint} ...\n\n"
+        "{exec,wait,status,kill,clean,keep,log,diff,signing-parity} ...\n\n"
         "positional arguments:\n"
-        "  {exec,wait,status,kill,clean,keep,log,diff,signing-parity,clear-taint}\n"
+        "  {exec,wait,status,kill,clean,keep,log,diff,signing-parity}\n"
         "    exec                launch a headless run\n"
-        "    signing-parity      check each host's signing key is registered\n"
-        "    clear-taint         clear local host taint with a reason\n\n"
+        "    signing-parity      check each host's signing key is registered\n\n"
         "options:\n"
         "  -h, --help            show this help message and exit\n"
     )

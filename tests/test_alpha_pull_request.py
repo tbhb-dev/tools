@@ -70,6 +70,10 @@ cases = spec.get("cases", {{}})
 if called == "pr view --json number,state,url":
     missing = {{"rc": 1, "stdout": "", "stderr": "No Pull Requests Found"}}
     spec = cases.get(called, missing)
+elif called.startswith("api --hostname github.com --paginate --slurp "):
+    spec = cases.get(called, {{
+        "rc": 0, "stdout": '[[{{"commit": {{"message": "plain"}}}}]]', "stderr": ""
+    }})
 else:
     spec = next((v for k, v in cases.items() if called.startswith(k)), spec)
 draft = ".github/PULL_REQUEST_DRAFT.md"
@@ -97,6 +101,7 @@ sys.exit(spec["rc"])
 
 
 TARGET = "tbhb-dev/public-target"
+PR_COMMITS_CALL = ["api", "--hostname", "github.com", "--paginate", "--slurp"]
 BRANCH_LOOKUP = (
     "api --hostname github.com repos/tbhb-dev/example/branches/agent%2Ftopic"
 )
@@ -1330,7 +1335,11 @@ def test_branch_trailers_prefer_the_remote_base(world: World) -> None:
     world.git("switch", "-q", "-c", "topic")
     world.commit(f"mine\n\nGenerated-by: {GEN}")
     world.git("branch", "-f", "main", "HEAD~2")
-    assert pr.branch_trailers("main") == [("Generated-by", GEN)]
+    with patch.object(agent_identity, "git", wraps=agent_identity.git) as git:
+        assert pr.branch_trailers("main") == [("Generated-by", GEN)]
+    git.assert_any_call(
+        "rev-parse", "--verify", "--quiet", "refs/remotes/origin/main^{commit}"
+    )
 
 
 def test_branch_trailers_ignore_a_tag_named_like_the_remote_base(
@@ -1351,13 +1360,13 @@ def test_branch_trailers_need_a_known_base(world: World) -> None:
         pr.branch_trailers("nope")
 
 
-def checked_for(text: str = BASE) -> pr.Checked:
-    return pr.check_text(text)
+def checked_for() -> pr.Checked:
+    return pr.check_text(BASE)
 
 
 def test_description_without_trailers_is_the_body(world: World) -> None:
     del world
-    got = pr.description(checked_for(), {})
+    got = pr.description(checked_for(), {}, [])
     assert got == "## Why\n\nw\n\n## Behavior change\n\nb\n\n## Verification\n\nv\n"
 
 
@@ -1366,7 +1375,7 @@ def test_description_appends_a_trailer_paragraph(
 ) -> None:
     world.git("switch", "-q", "-c", "topic")
     world.commit(f"one\n\nGenerated-by: {GEN}")
-    got = pr.description(checked_for(), agent)
+    got = pr.description(checked_for(), agent, pr.branch_trailers("main"))
     assert got.endswith(f"\nv\n\nGenerated-by: {GEN}\nAssisted-by: {POSTING}\n")
     parsed = subprocess.run(
         ["git", "interpret-trailers", "--parse"],
@@ -1382,9 +1391,9 @@ def test_description_appends_a_trailer_paragraph(
 
 def test_human_posting_adds_only_branch_trailers(world: World) -> None:
     world.git("switch", "-q", "-c", "topic")
-    assert pr.description(checked_for(), {}).endswith("v\n")
+    assert pr.description(checked_for(), {}, pr.branch_trailers("main")).endswith("v\n")
     world.commit(f"one\n\nAssisted-by: {GEN}")
-    got = pr.description(checked_for(), {})
+    got = pr.description(checked_for(), {}, pr.branch_trailers("main"))
     assert got.endswith(f"v\n\nAssisted-by: {GEN}\n")
     assert got.count("Assisted-by") == 1
 
@@ -1394,7 +1403,7 @@ def test_posting_agent_already_on_the_branch_is_not_repeated(
 ) -> None:
     world.git("switch", "-q", "-c", "topic")
     world.commit(f"one\n\nGenerated-by: {POSTING}")
-    got = pr.description(checked_for(), agent)
+    got = pr.description(checked_for(), agent, pr.branch_trailers("main"))
     assert got.endswith(f"v\n\nGenerated-by: {POSTING}\n")
 
 
@@ -1405,7 +1414,7 @@ def test_a_resolved_posting_value_is_one_line_with_its_commit_trailer(
     assert "model=anthropic:claude-opus-5-5" in POSTING
     world.git("switch", "-q", "-c", "topic")
     world.commit(f"one\n\nGenerated-by: {POSTING}")
-    got = pr.description(checked_for(), agent)
+    got = pr.description(checked_for(), agent, pr.branch_trailers("main"))
     session = f"session={agent_identity.sha256_64('raw-session')}"
     lines = [line for line in got.splitlines() if session in line]
     assert lines == [f"Generated-by: {POSTING}"]
@@ -1447,8 +1456,14 @@ def test_an_unresolved_posting_model_fails_without_posting(
     with pytest.raises(SystemExit) as info:
         run_main(*argv, env=agent)
     assert info.value.code == f"invalid LLM trailer: {posting}: model required"
-    # edit reads the live body first, for its Opened-by line; nothing is posted.
-    reads = [["pr", "view", "7", "--json", "body,url"]] if argv[0] == "edit" else []
+    reads = (
+        [
+            ["pr", "view", "7", "--json", "body,url"],
+            [*PR_COMMITS_CALL, f"repos/{TARGET}/pulls/7/commits"],
+        ]
+        if argv[0] == "edit"
+        else []
+    )
     assert [call["argv"] for call in world.calls("gh")] == reads
 
 
@@ -1458,10 +1473,13 @@ def test_description_uses_the_frontmatter_base(world: World) -> None:
     world.git("branch", "dev", "main")
     world.git("switch", "-q", "dev")
     world.commit(f"dev\n\nGenerated-by: {OTHER}")
+    world.git("update-ref", "refs/remotes/origin/dev", "HEAD")
     world.git("switch", "-q", "-c", "topic2")
     world.commit(f"two\n\nAssisted-by: {GEN}")
-    text = "---\nbase: dev\n---\n" + BASE
-    got = pr.description(checked_for(text), {})
+    write_draft(world, "---\nbase: dev\n---\n" + BASE)
+    assert run_main("create") == 0
+    _, call = world.calls("gh")
+    got = str(call["stdin"])
     assert got.endswith(f"v\n\nAssisted-by: {GEN}\n")
     assert OTHER not in got
 
@@ -1473,14 +1491,14 @@ def test_invalid_branch_trailers_stop_the_description(world: World, bad: str) ->
     world.git("switch", "-q", "-c", "topic")
     world.commit(f"one\n\nGenerated-by: {bad}")
     with pytest.raises(SystemExit, match=r"invalid LLM trailer: .*"):
-        pr.description(checked_for(), {})
+        pr.description(checked_for(), {}, pr.branch_trailers("main"))
 
 
 def test_invalid_trailer_message_names_the_value(world: World) -> None:
     world.git("switch", "-q", "-c", "topic")
     world.commit("one\n\nGenerated-by: LLM model=a:m")
     with pytest.raises(SystemExit) as info:
-        pr.description(checked_for(), {})
+        pr.description(checked_for(), {}, pr.branch_trailers("main"))
     assert str(info.value) == "invalid LLM trailer: LLM model=a:m: harness required"
 
 
@@ -1736,7 +1754,7 @@ def test_edit(world: World, capsys: pytest.CaptureFixture[str]) -> None:
         world, "---\nlabels: [bug, docs]\ndraft: true\nbase: main\n---\n" + BASE
     )
     assert run_main("edit", str(pr.DRAFT), "--pr", "7") == 0
-    _, call = world.calls("gh")
+    _, _, call = world.calls("gh")
     assert call["argv"] == [
         "pr", "edit", "7", "--title", "fix: x", "--body-file", "-",
         "--add-label", "bug", "--add-label", "docs",
@@ -1753,9 +1771,92 @@ def test_edit_without_labels_and_with_agent(
 ) -> None:
     write_draft(world)
     assert run_main("edit", str(pr.DRAFT), "--pr", "7", env=agent) == 0
-    _, call = world.calls("gh")
+    _, _, call = world.calls("gh")
     assert call["argv"] == ["pr", "edit", "7", "--title", "fix: x", "--body-file", "-"]
     assert str(call["stdin"]).endswith(f"v\n\nAssisted-by: {POSTING}\n")
+
+
+def fake_pr_commits(
+    world: World, number: int, stdout: str, *, rc: int = 0, stderr: str = ""
+) -> list[str]:
+    argv = [*PR_COMMITS_CALL, f"repos/{TARGET}/pulls/{number}/commits"]
+    answer: dict[str, object] = {"rc": rc, "stdout": stdout, "stderr": stderr}
+    view = view_case(pr_page(TARGET, number))
+    world.fake("gh", cases={"pr view": view, " ".join(argv): answer})
+    return argv
+
+
+def test_edit_pr_40_uses_github_commit_trailers(
+    world: World, agent: dict[str, str]
+) -> None:
+    local = (
+        "LLM effort=medium;harness=codex:0.171.0;model=openai:gpt-6.2-sol;"
+        "session=sha-256-64:ae40cbadd8ab72ec;surface=cli"
+    )
+    attrs = (
+        "effort=medium;harness=claude-code;model=anthropic:claude-sonnet-5-5;"
+        "session=sha-256-64:7ff1a5b545107a55;surface=cli"
+    )
+    merged = attrs.replace("7ff1a5b545107a55", "1234567890abcdef")
+    world.git("switch", "-q", "-c", "other-branch")
+    world.commit(f"other PR\n\nGenerated-by: {local}")
+    pages = [
+        [{"commit": {"message": f"one\n\nGenerated-by: LLM {attrs}"}}],
+        [
+            {"commit": {"message": f"two\n\nGenerated-by: LLM {attrs}"}},
+            {
+                "parents": [{"sha": "a" * 40}, {"sha": "b" * 40}],
+                "commit": {"message": f"merge\n\n---\n\nGenerated-by: LLM\n {merged}"},
+            },
+            {"commit": {"message": f"body\n\nGenerated-by: {local}\n\nMore prose."}},
+        ],
+    ]
+    argv = fake_pr_commits(world, 40, json.dumps(pages))
+    write_draft(world)
+    assert run_main("edit", str(pr.DRAFT), "--pr", "40", env=agent) == 0
+    _, commits, edit = world.calls("gh")
+    assert commits["argv"] == argv
+    assert str(edit["stdin"]).split("\n\n")[-1] == (
+        f"Generated-by: LLM {attrs}\nGenerated-by: LLM {merged}\n"
+        f"Assisted-by: {POSTING}\n"
+    )
+    (scan,) = world.calls("gitleaks")
+    assert scan["stdin"] == f"fix: x\n\n{edit['stdin']}"
+
+
+@pytest.mark.parametrize(
+    ("rc", "stdout", "stderr", "why"),
+    [
+        (1, "[[{}]]", "no\naccess", "no access"),
+        (0, "", "", "GitHub returned no commit list"),
+        (0, "[[]]", "", "GitHub returned no commits"),
+        (0, "[{}]", "", "GitHub returned invalid commit data"),
+        (0, "[[1]]", "", "GitHub returned invalid commit data"),
+        (0, '[[{"commit":{"message":1}}]]', "", "GitHub returned invalid commit data"),
+    ],
+)
+def test_edit_refuses_unavailable_commits(
+    world: World, rc: int, stdout: str, stderr: str, why: str
+) -> None:
+    argv = fake_pr_commits(world, 7, stdout, rc=rc, stderr=stderr)
+    draft = write_draft(world)
+    message = f"cannot list the commits of PR 7: {why}"
+    with pytest.raises(SystemExit, match=f"^{re.escape(message)}$"):
+        run_main("edit", str(pr.DRAFT), "--pr", "7")
+    assert draft.read_text() == BASE
+    assert [call["argv"] for call in world.calls("gh")] == [
+        ["pr", "view", "7", "--json", "body,url"],
+        argv,
+    ]
+    assert world.calls("gitleaks") == []
+
+
+def test_edit_refuses_unreadable_trailers(world: World) -> None:
+    world.fake("git", rc=1)
+    write_draft(world)
+    with pytest.raises(SystemExit, match=r"^cannot parse the commit trailers of PR 7$"):
+        run_main("edit", str(pr.DRAFT), "--pr", "7")
+    assert len(world.calls("gh")) == 2
 
 
 def test_create_scans_the_final_title_and_body(
@@ -1775,7 +1876,7 @@ def test_edit_scans_the_final_title_and_body(world: World) -> None:
     write_draft(world)
     assert run_main("edit", str(pr.DRAFT), "--pr", "7") == 0
     (call,) = world.calls("gitleaks")
-    _, gh = world.calls("gh")
+    _, _, gh = world.calls("gh")
     assert call["stdin"] == f"fix: x\n\n{gh['stdin']}"
 
 
@@ -1796,7 +1897,10 @@ def test_a_finding_stops_before_gh(
         "refusing the PR title and body: gitleaks finds a secret: "
         "rule some-rule on line 9"
     )
-    assert [call["argv"][:2] for call in world.calls("gh")] in ([], [["pr", "view"]])  # type: ignore[index]
+    assert [call["argv"][:2] for call in world.calls("gh")] in (  # type: ignore[index]
+        [],
+        [["pr", "view"], ["api", "--hostname"]],
+    )
     assert "gh pr" not in capsys.readouterr().out
 
 
@@ -1808,7 +1912,10 @@ def test_a_missing_gitleaks_stops_before_gh(
     write_draft(world)
     with pytest.raises(SystemExit, match="gitleaks not found on PATH"):
         run_main(*argv)
-    assert [call["argv"][:2] for call in world.calls("gh")] in ([], [["pr", "view"]])  # type: ignore[index]
+    assert [call["argv"][:2] for call in world.calls("gh")] in (  # type: ignore[index]
+        [],
+        [["pr", "view"], ["api", "--hostname"]],
+    )
 
 
 def test_a_missing_private_config_stops_before_gh(world: World) -> None:
@@ -2095,14 +2202,17 @@ def test_a_private_working_directory_posting_to_a_public_repo_gets_the_full_conf
         "https://github.com/o/n/issues/1",
     ],
 )
-def test_edit_with_an_unresolved_target_uses_the_full_config_and_reads_nothing(
+def test_edit_with_an_unresolved_target_refuses_to_post(
     world: World, url: object
 ) -> None:
     world.fake("gh", stdout="u\n", cases=edit_cases(url, "PRIVATE\n"))
     write_draft(world)
-    assert run_main("edit", str(pr.DRAFT), "--pr", "7") == 0
+    with pytest.raises(SystemExit, match="cannot determine its GitHub repository"):
+        run_main("edit", str(pr.DRAFT), "--pr", "7")
+    (view,) = world.calls("gh")
+    assert view["argv"] == ["pr", "view", "7", "--json", "body,url"]
     assert world.calls("gh.repo") == []
-    assert scan_config(world) == full_config()
+    assert world.calls("gitleaks") == []
 
 
 def test_edit_requires_a_draft(world: World) -> None:
@@ -2269,7 +2379,7 @@ def test_posting_agent_is_added_to_an_empty_branch(
     world: World, agent: dict[str, str]
 ) -> None:
     world.git("switch", "-q", "-c", "topic")
-    got = pr.description(checked_for(), agent)
+    got = pr.description(checked_for(), agent, pr.branch_trailers("main"))
     assert got.endswith(f"v\n\nAssisted-by: {POSTING}\n")
 
 
@@ -2282,7 +2392,7 @@ def test_a_posting_value_without_a_model_is_rejected(
     posting = POSTING.replace("model=anthropic:claude-opus-5-5;", "")
     assert pr.posting_value(agent) == posting
     with pytest.raises(SystemExit) as info:
-        pr.description(checked_for(), agent)
+        pr.description(checked_for(), agent, pr.branch_trailers("main"))
     assert str(info.value) == f"invalid LLM trailer: {posting}: model required"
 
 
@@ -2294,7 +2404,7 @@ def test_a_bad_branch_trailer_and_posting_value_are_both_listed(
     world.commit("one\n\nGenerated-by: LLM harness=nope")
     posting = POSTING.replace("model=anthropic:claude-opus-5-5;", "")
     with pytest.raises(SystemExit) as info:
-        pr.description(checked_for(), agent)
+        pr.description(checked_for(), agent, pr.branch_trailers("main"))
     assert str(info.value) == (
         "invalid LLM trailer: LLM harness=nope: unknown harness nope; "
         f"{posting}: model required"
@@ -2344,7 +2454,7 @@ def test_every_invalid_trailer_is_listed(world: World) -> None:
         "one\n\nGenerated-by: LLM harness=nope\nAssisted-by: LLM harness=nope2"
     )
     with pytest.raises(SystemExit) as info:
-        pr.description(checked_for(), {})
+        pr.description(checked_for(), {}, pr.branch_trailers("main"))
     assert "; " in str(info.value)
     assert str(info.value).count("LLM harness=") == 2
 
@@ -2760,7 +2870,7 @@ def test_description_for_one_identity_ends_in_one_generated_by(
     world.git("switch", "-q", "-c", "topic")
     world.commit(f"feat: x\n\nGenerated-by: {posting}")
     checked = pr.check_text(BASE)
-    body = pr.description(checked, agent)
+    body = pr.description(checked, agent, pr.branch_trailers("main"))
     assert body.endswith(f"\nGenerated-by: {posting}\n")
     assert "Assisted-by" not in body
 
@@ -2901,10 +3011,14 @@ def test_pr_commands_report_unresolved_attribution(
             "finishes and its session record is available.\n"
         ),
     )
-    assert all(
-        call["argv"] == ["pr", "view", "1", "--json", "body,url"]
-        for call in world.calls("gh")
-    )
+    reads = [call["argv"] for call in world.calls("gh")]
+    if site == "edit-description":
+        assert reads == [
+            ["pr", "view", "1", "--json", "body,url"],
+            [*PR_COMMITS_CALL, f"repos/{TARGET}/pulls/1/commits"],
+        ]
+    else:
+        assert reads == []
 
 
 def test_a_subagent_opens_under_its_root(world: World, agent: dict[str, str]) -> None:
@@ -3007,7 +3121,7 @@ def test_edit_copies_the_live_opened_by_line(
     world.fake("gh", cases={"pr view": live_body(body)})
     write_draft(world)
     assert run_main("edit", str(pr.DRAFT), "--pr", "7", env=agent) == 0
-    view, edit = world.calls("gh")
+    view, _, edit = world.calls("gh")
     assert view["argv"] == ["pr", "view", "7", "--json", "body,url"]
     assert cast("list[str]", edit["argv"])[:3] == ["pr", "edit", "7"]
     opened_by = f"{kept}\n" if kept else ""
@@ -4239,7 +4353,7 @@ def test_every_invalid_trailer_is_joined_by_semicolons(world: World) -> None:
     world.git("switch", "-q", "-c", "topic")
     world.commit("one\n\nGenerated-by: LLM model=a:m\nAssisted-by: LLM model=b:m")
     with pytest.raises(SystemExit) as info:
-        pr.description(checked_for(), {})
+        pr.description(checked_for(), {}, pr.branch_trailers("main"))
     assert str(info.value) == (
         "invalid LLM trailer: LLM model=a:m: harness required; "
         "LLM model=b:m: harness required"

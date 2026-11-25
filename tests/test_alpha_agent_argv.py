@@ -61,6 +61,8 @@ HANDOFF = (
     "-c",
     f'shell_environment_policy.set.GH_CONFIG_DIR="{TMP}/gh"',
     "-c",
+    f'shell_environment_policy.set.PYTEST_DEBUG_TEMPROOT="{TMP}"',
+    "-c",
     'shell_environment_policy.set.PYTEST_XDIST_AUTO_NUM_WORKERS="4"',
     "-c",
     f'shell_environment_policy.set.TMPDIR="{TMP}"',
@@ -173,7 +175,6 @@ def request(
         unsandboxed=unsandboxed,
         authorized_by="example-org/example-repo#1" if unsandboxed else None,
         startup_deadline_seconds=120,
-        tainted_host=False,
     )
 
 

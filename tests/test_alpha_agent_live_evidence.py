@@ -49,14 +49,6 @@ def fake_codex_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(credentials, "auth_copy", no_auth)
 
 
-def test_host_marker_path_is_common_to_all_accounts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path / "account"))
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    assert run_host.TAINT_DIRECTORY.parts == ("/", "var", "tmp", "tbhbdev-agent-taint")
-
-
 def test_host_mirror_evidence_detects_each_real_operation(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

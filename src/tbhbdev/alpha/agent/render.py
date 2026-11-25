@@ -7,7 +7,9 @@ FINAL_ONLY = (
     "Report results only in your final answer. "
     "Never message Claude sessions, session sockets or other agents directly.\n"
     "If this run should open a pull request, write .github/PULL_REQUEST_DRAFT.md "
-    "in the worktree and keep it out of your commits."
+    "in the worktree and keep it out of your commits. "
+    "Any brief instruction to commit the draft does not apply: "
+    "keep the draft out of commits and report the conflict in your final answer."
 )
 BUILD_PUBLICATION = (
     "Commit your changes locally. "
@@ -33,23 +35,14 @@ def sandbox(authorized_by: str | None) -> str:
     return f" sandbox=none authorized_by={transport.terminal_text(authorized_by)}"
 
 
-def trust(*, tainted_host: bool) -> str:
-    return " untrusted-host" if tainted_host else ""
-
-
 def launched(
     name: str,
     host: str,
     account: str,
     *,
     authorized_by: str | None = None,
-    tainted_host: bool = False,
 ) -> str:
-    return (
-        f"{name}: launched host={host} account={account}"
-        + sandbox(authorized_by)
-        + trust(tainted_host=tainted_host)
-    )
+    return f"{name}: launched host={host} account={account}" + sandbox(authorized_by)
 
 
 def status(
