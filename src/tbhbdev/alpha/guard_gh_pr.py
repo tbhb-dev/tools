@@ -19,6 +19,8 @@ the command to run instead:
     gh run rerun  ->  tbhbdev alpha pr rerun N   (N is the pull request)
     gh api -X DELETE repos/O/R/git/refs/heads/B
                   ->  tbhbdev alpha pr delete-branch N   (closed or merged PRs)
+    gh api graphql -f 'query=mutation { resolveReviewThread(...) { ... } }'
+                  ->  tbhbdev alpha review resolve N THREAD   (also unresolve)
 
 The close commands run from the repository clone and take no ``--repo``.
 
@@ -128,6 +130,9 @@ API_VALUE_FLAGS = {
     "--hostname",
 }  # fmt: skip
 API_FIELD_FLAGS = {"-f", "--raw-field", "-F", "--field"}
+THREAD_MUTATION = re.compile(
+    r"\bmutation\b.*?\b(resolve|unresolve)ReviewThread\s*\(", re.DOTALL
+)
 APPROVE_FIELD = re.compile(r"\s*event\s*=\s*(?i:approve)\s*")
 PR_URL = re.compile(r"https?://[^/\s]+/([^/\s]+/[^/\s]+)/pull/(\d+)\S*")
 REVIEWS = re.compile(
@@ -336,14 +341,32 @@ def deletes_branch(args: list[str]) -> bool:
 
 def gh_match(rest: list[str]) -> Match | None:
     """Match the words after ``gh``: global flags, then a blocked subcommand."""
-    i = 0
-    while i < len(rest) and rest[i].startswith("-"):
-        i += 2 if rest[i] in VALUE_FLAGS else 1
-    group, sub = (rest[i : i + 1] or [""])[0], (rest[i + 1 : i + 2] or [""])[0]
-    if sub in GROUPS.get(group, ()):
-        return Match(sub, rest[i + 2 :], group)
-    if group == "api" and deletes_branch(rest[i + 1 :]):
-        return Match("delete-branch", rest[i + 1 :], group)
+    words = iter(rest)
+    for group in words:
+        if not group.startswith("-"):
+            break
+        if group in VALUE_FLAGS:
+            next(words, None)
+    else:
+        return None
+    args = list(words)
+    if args and args[0] in GROUPS.get(group, ()):
+        return Match(args[0], args[1:], group)
+    if group == "api" and deletes_branch(args):
+        return Match("delete-branch", args, group)
+    if group == "api" and (thread := thread_mutation(args)):
+        return Match(thread, [], "graphql")
+    return None
+
+
+def thread_mutation(args: list[str]) -> str | None:
+    """The review command for a thread mutation in an inline query field."""
+    endpoints = split_args(args, API_VALUE_FLAGS)[1]
+    if not endpoints or endpoints[0] != "graphql":
+        return None
+    for value in flag_values(args, API_FIELD_FLAGS, API_VALUE_FLAGS):
+        if value.startswith("query=") and (match := THREAD_MUTATION.search(value)):
+            return match[1]
     return None
 
 
@@ -590,6 +613,12 @@ def other_hint(found: Match, number: str) -> str | None:
         return (
             "A `gh api` branch delete is blocked. For a closed or merged PR, run "
             f"`tbhbdev alpha pr delete-branch {number}` instead."
+        )
+    if found.group == "graphql":
+        return (
+            "A `gh api graphql` review thread mutation is blocked. From the repository "
+            f"clone, run `tbhbdev alpha review {found.sub} <PR> <THREAD>`. Use "
+            "`tbhbdev alpha review threads <PR>` to find the thread ID."
         )
     blocked = f"`gh {found.group} {found.sub}` is blocked."
     if found.group == "issue":
