@@ -2533,17 +2533,75 @@ def upgrade_lines(world: World, host: str = "host-b") -> list[str]:
 
 
 @pytest.fixture
-def ready(world: World, config_file: Path, capfd: pytest.CaptureFixture[str]) -> World:
-    """host-b, bootstrapped with a workspace that clones example/app."""
-    with_workspace(config_file, repos=("example/app",))
-    remote(world, "example/app", "a1")
-    assert run(world, capfd, "bootstrap", "--host", "host-b") == 0
+def ready(world: World, config_file: Path, ready_state: str) -> World:
+    """Seed a host with the files and stub state that upgrade reads."""
+    host = "host-b"
+    repo = "example/app"
+    state = json.loads(ready_state)
+    token = state["token"]
+    token["name"] = name_for(host)
+    home = world.stubs.home()
+    world.seed(host, {"agent": user(home=str(home))}, {"devel": group(GID, "operator")})
+    world.stubs.set(op={"tokens": [token]})
+    world.fake.tokens[token["token"]] = token["vaults"]
+
+    keychain = home / "Library" / "Keychains" / f"{secrets.KEYCHAIN}-db"
+    keychain.parent.mkdir(parents=True)
+    keychain.write_text(json.dumps(state["keychain"]))
+    name_file = token_name_file(world, host)
+    name_file.parent.mkdir(parents=True)
+    name_file.write_text(f"{token['name']}\n")
+
+    with_workspace(config_file, repos=(repo,))
+    remote(world, repo, "a1")
+    checkout = clone_of(world, host, repo)
+    checkout.parent.mkdir(parents=True)
+    checkout.write_text(json.dumps(state["checkout"]))
+
+    for account in ACCOUNTS:
+        path = private_config(world, account, host)
+        path.parent.mkdir(mode=0o700, parents=True)
+        path.write_text(GITLEAKS)
+        path.chmod(0o600)
     return world
 
 
-def test_bootstrap_ends_by_upgrading(ready: World) -> None:
-    root = ready.operator_home("host-b") / "Code"
-    assert upgrade_lines(ready)[-5:] == [
+@pytest.fixture(scope="module")
+def ready_state() -> str:
+    """Serialize the baseline so each ready host gets its own copy."""
+    token = "fake-connect-token-1"  # noqa: S105
+    head = sha("a1")
+    return json.dumps(
+        {
+            "token": {
+                "state": "ACTIVE",
+                "token": token,
+                "vaults": ["vault-all", "vault-host-b"],
+            },
+            "keychain": {
+                "password": "",
+                "locked": False,
+                "items": {f"{secrets.SERVICE}/{secrets.ACCOUNT}": token},
+            },
+            "checkout": {
+                "repo": "example/app",
+                "branch": "main",
+                "head": head,
+                "origin": {"main": head},
+                "dirty": False,
+            },
+        }
+    )
+
+
+def test_bootstrap_ends_by_upgrading(
+    world: World, config_file: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    with_workspace(config_file, repos=("example/app",))
+    remote(world, "example/app", "a1")
+    assert run(world, capfd, "bootstrap", "--host", "host-b") == 0
+    root = world.operator_home("host-b") / "Code"
+    assert upgrade_lines(world)[-5:] == [
         f"host-b: clone example/app: changed: cloned into {root / 'example/app'}",
         f"host-b: tools: ok: no mise config in {root}",
         (
@@ -2553,7 +2611,7 @@ def test_bootstrap_ends_by_upgrading(ready: World) -> None:
         f"host-b: gitleaks-config agent: changed: wrote {PRIVATE}",
         f"host-b: gitleaks-config operator: changed: wrote {PRIVATE}",
     ]
-    clone = json.loads(clone_of(ready, "host-b", "example/app").read_text())
+    clone = json.loads(clone_of(world, "host-b", "example/app").read_text())
     assert clone["head"] == sha("a1")
 
 
