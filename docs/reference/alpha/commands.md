@@ -3,10 +3,6 @@ description: Interim agent commands, installation, and harness hooks.
 generated:
   - role: generated
     harness: codex
-    model: openai:gpt-6.1-sol
-    at: "2026-11-24T18:47:56Z"
-  - role: generated
-    harness: codex
     model: openai:gpt-6
     at: "2026-11-24T18:05:55Z"
 status: stable
@@ -87,6 +83,10 @@ The commit check runs without config. The command guard checks arguments for tra
 These user-level hooks run in every repository. Before acting, the identity, pull request, approval guard, and install hooks check that `origin` names a tbhb-dev repository on GitHub. Outside a repository, the identity record hook still writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Both `state-guard` and `session-context` run regardless of origin. At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, which puts the `gh` shim first on PATH for the session's commands and reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, so sessions in two worktrees of one clone keep separate state.
+
+`tbhbdev alpha agent exec --fetch-ref REF` makes `refs/heads/<branch>` available as `origin/fetched/heads/<branch>` and `refs/pull/N/head` as `origin/fetched/pull/N/head`. Repeat `--fetch-ref` up to eight times with either profile.
+
+For a build that updates an existing pull request, pass both `--fetch-ref refs/heads/<branch>` and `--start-ref refs/heads/<branch>`. The run starts at the fetched commit and pushes a fast-forward to that branch without opening a pull request. The command refuses the repository's default branch. If the remote tip changes before the push check, the run fails and keeps its worktree.
 
 For a run that opens a pull request, write `.github/PULL_REQUEST_DRAFT.md` in its worktree and keep it out of commits. The driver reads the worktree draft first and uses the pushed commit's draft if the worktree draft is missing. The worktree draft must be an owned regular file of at most 64 KiB. The driver refuses symlinks and scans the draft with the host's secret rules and the pre-run commit's `.gitleaks.toml` before posting it. The driver refuses to push when the run's commits add the draft, and CI fails a pull request whose diff contains the draft.
 

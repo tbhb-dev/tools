@@ -140,7 +140,48 @@ def test_wire_refs_must_be_a_list_of_strings(value: object) -> None:
 
 def test_exec_help_describes_fetch_refs(capsys: pytest.CaptureFixture[str]) -> None:
     assert agent.main(["exec", "--help"], "agent") == 0
-    help_text = capsys.readouterr().out
+    help_text = " ".join(capsys.readouterr().out.split())
     assert "--fetch-ref REF" in help_text
-    assert "origin/fetched/..." in help_text
+    assert "refs/heads/<branch> as origin/fetched/heads/<branch>" in help_text
+    assert "refs/pull/N/head as origin/fetched/pull/N/head" in help_text
     assert "repeat up to 8 times" in help_text
+    assert "--start-ref REF" in help_text
+    assert "also listed with --fetch-ref" in help_text
+    assert "build profile only" in help_text
+
+
+@pytest.mark.parametrize(
+    ("ref", "fetched", "profile", "message"),
+    [
+        ("refs/pull/1/head", True, "build", "must be under refs/heads/"),
+        ("refs/tags/v1", True, "build", "must be under refs/heads/"),
+        ("topic", False, "build", "must be under refs/heads/"),
+        ("refs/heads/topic", False, "build", "must also appear in --fetch-ref"),
+        ("refs/heads/topic", True, "review", "applies only to the build profile"),
+    ],
+)
+def test_invalid_start_ref_is_refused_by_controller_and_host(
+    ref: str, fetched: bool, profile: str, message: str
+) -> None:
+    options = ["--profile", profile, "--start-ref", ref]
+    refs = [ref] if fetched else []
+    for name in refs:
+        options.extend(("--fetch-ref", name))
+    args = agent.parser("agent").parse_args(execution_arguments("brief.md", *options))
+    with pytest.raises(Invalid, match=f"request --start-ref {message}"):
+        driver.prepare(settings(), args)
+    wire = BUILD | {"profile": profile, "start_ref": ref, "fetch_refs": refs}
+    with pytest.raises(Invalid, match=f"request --start-ref {message}"):
+        request.parse(wire, host_allows_unsandboxed=False)
+
+
+def test_start_ref_round_trips() -> None:
+    ref = "refs/heads/fix/topic"
+    args = agent.parser("agent").parse_args(
+        execution_arguments("brief.md", "--start-ref", ref, "--fetch-ref", ref)
+    )
+    run = driver.prepare(settings(), args).request
+    assert run.start_ref == ref
+    wire = json.loads(json.dumps(request.to_dict(run)))
+    assert wire["start_ref"] == ref
+    assert request.parse(wire, host_allows_unsandboxed=False) == run

@@ -53,13 +53,19 @@ _FIELDS = frozenset(
         "authorized_by",
         "startup_deadline_seconds",
         "fetch_refs",
+        "start_ref",
         "max_concurrent_runs",
         "expect_commit",
     }
 )
 
 # Older requests can omit fields with defaults.
-_REQUIRED_FIELDS = _FIELDS - {"fetch_refs", "max_concurrent_runs", "expect_commit"}
+_REQUIRED_FIELDS = _FIELDS - {
+    "fetch_refs",
+    "start_ref",
+    "max_concurrent_runs",
+    "expect_commit",
+}
 
 
 def _fail(field: str, why: str) -> NoReturn:
@@ -132,6 +138,18 @@ def check_fetch_refs(refs: tuple[str, ...]) -> None:
             _fail("fetch_refs", f"contains invalid ref {ref!r}")
 
 
+def check_start_ref(request: RunRequest) -> None:
+    ref = request.start_ref
+    if ref is None:
+        return
+    if request.profile is not Profile.BUILD:
+        _fail("--start-ref", "applies only to the build profile")
+    if not ref.startswith("refs/heads/"):
+        _fail("--start-ref", "must be under refs/heads/")
+    if ref not in request.fetch_refs:
+        _fail("--start-ref", "must also appear in --fetch-ref")
+
+
 def validate(
     request: RunRequest,
     *,
@@ -145,6 +163,7 @@ def validate(
         Invalid: The message names the field.
     """
     repo.parts(request.repo)
+    check_start_ref(request)
     check_fetch_refs(request.fetch_refs)
     _matches("commit", request.commit, _COMMIT)
     _matches("model", request.model, _MODEL)
@@ -174,7 +193,7 @@ def validate(
 
 def to_dict(request: RunRequest) -> dict[str, object]:
     """REQUEST as the JSON object the driver sends."""
-    return {
+    data: dict[str, object] = {
         "v": REQUEST_VERSION,
         "kind": request.kind.value,
         "repo": request.repo,
@@ -198,6 +217,9 @@ def to_dict(request: RunRequest) -> dict[str, object]:
         "max_concurrent_runs": request.max_concurrent_runs,
         "expect_commit": request.expect_commit,
     }
+    if request.start_ref is not None:
+        data["start_ref"] = request.start_ref
+    return data
 
 
 def _text(data: dict[str, object], key: str) -> str:
@@ -208,7 +230,7 @@ def _text(data: dict[str, object], key: str) -> str:
 
 
 def _maybe_text(data: dict[str, object], key: str) -> str | None:
-    return None if data[key] is None else _text(data, key)
+    return None if data.get(key) is None else _text(data, key)
 
 
 def _number(data: dict[str, object], key: str) -> int:
@@ -296,6 +318,7 @@ def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunReque
         authorized_by=_maybe_text(data, "authorized_by"),
         startup_deadline_seconds=_number(data, "startup_deadline_seconds"),
         fetch_refs=_fetch_refs(data.get("fetch_refs", [])),
+        start_ref=_maybe_text(data, "start_ref"),
         max_concurrent_runs=_maybe_number(data, "max_concurrent_runs"),
         expect_commit=_flag(data, "expect_commit"),
     )

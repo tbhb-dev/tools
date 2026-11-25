@@ -22,7 +22,9 @@ import tomllib
 from contextlib import ExitStack, contextmanager
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import Mock
 
 import pytest
 from agent_host_example import (
@@ -54,6 +56,7 @@ from tbhbdev.alpha.agent import (
     render,
     run_host,
     runfiles,
+    shims,
 )
 from tbhbdev.alpha.agent.decisions import policy, request
 from tbhbdev.alpha.agent.decisions.run_state import Group
@@ -4384,6 +4387,70 @@ def test_push_failure_reaches_durable_completion(
 
 
 @pytest.mark.parametrize(
+    ("hook_reference", "enabled", "expected"),
+    [(True, True, 7), (True, False, 1), (False, False, 7)],
+)
+def test_run_builds_required_shims_before_harness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hook_reference: bool,
+    enabled: bool,
+    expected: int,
+) -> None:
+    run = make_run(tmp_path)
+    run.host = dataclasses.replace(run.host, build_shims=enabled)
+    prepared = dataclasses.replace(preparation(run), auth_before="example-before")
+    workspace = Path(prepared.paths.worktree)
+    if hook_reference:
+        (workspace / "prek.toml").write_text(".bazel_env/bin/cog")
+    runtime = HostRuntime(run, prepared, None)
+    runtime.patch(monkeypatch)
+    monkeypatch.setattr(run_host, "preflight", Mock())
+    tool = Mock(return_value="/tools/bazelisk")
+    monkeypatch.setattr(run_host, "_bazel_tool", tool)
+    deadline = run.deadline
+    ticks = iter([100, 130])
+    monkeypatch.setattr(
+        run_host, "time", SimpleNamespace(monotonic=lambda: next(ticks), time=time.time)
+    )
+
+    def build(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        assert runtime.phases == ["check", "workspace", "shims"]
+        assert runtime.events == []
+        cog = workspace / ".bazel_env/bin/cog"
+        cog.parent.mkdir(parents=True)
+        cog.touch()
+        return subprocess.CompletedProcess([], 1, b"", b"")
+
+    call = Mock(side_effect=build)
+    monkeypatch.setattr(shims.subprocess, "run", call)
+    assert run_host.execute(run, "example", "unused") == expected
+    assert run.files.path("rc").read_text() == f"{expected}\n"
+    if enabled:
+        assert runtime.events == ["group-stopped", "auth"]
+        assert runtime.phases == ["check", "workspace", "shims", "ended"]
+        assert run.deadline == deadline + 30
+        assert tool.call_count == 2  # Shim build and Bazel shutdown.
+        assert tool.call_args_list[0].args == (run,)
+        call.assert_called_once()
+    else:
+        assert run.deadline == deadline
+        tool.assert_called_once_with(run)  # Cleanup still looks for Bazel.
+        call.assert_not_called()
+        if hook_reference:
+            assert runtime.events == ["auth"]
+            assert runtime.phases == ["check", "workspace", "ended"]
+            assert (
+                "hook shims: the hooks need Bazel shims and this host has "
+                "build_shims = false; run on another host\n"
+                in run.files.path("log").read_text()
+            )
+        else:
+            assert runtime.events == ["group-stopped", "auth"]
+            assert runtime.phases == ["check", "workspace", "brief", "ended"]
+
+
+@pytest.mark.parametrize(
     ("expect_commit", "push_result", "expected"),
     [
         (True, (0, None), 6),
@@ -4497,6 +4564,7 @@ def test_preflight_mints_no_push_token(
     prepared = dataclasses.replace(preparation(run), auth_before="example-before")
     runtime = HostRuntime(run, prepared, None)
     runtime.patch(monkeypatch)
+    (Path(prepared.paths.worktree) / "prek.toml").write_text(".bazel_env/bin/cog")
 
     def refuse(_request: object, _settings: object) -> str:
         raise AssertionError
@@ -4514,9 +4582,12 @@ def test_preflight_mints_no_push_token(
         assert preflight_only is True
         return 0
 
+    build = Mock()
+    monkeypatch.setattr(run_host, "build_shims", build)
     monkeypatch.setattr(run_host.credentials, "push_token", refuse)
     monkeypatch.setattr(run_host, "run_harness", probe)
     assert run_host.execute(run, "example", preflight_only=True) == 0
+    build.assert_not_called()
 
 
 @pytest.mark.parametrize("claimed", [False, True])
