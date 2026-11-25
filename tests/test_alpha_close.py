@@ -5,13 +5,14 @@
 
 import json
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 from unittest.mock import Mock, call
 
 import pytest
+from agent_example import settings
 
-from tbhbdev import alpha
+from tbhbdev import alpha, userconfig
 from tbhbdev.alpha import close, opened
 from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha import pull_request as pr
@@ -19,6 +20,8 @@ from tbhbdev.alpha import pull_request as pr
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
+
+    from tbhbdev.alpha.agent import model
 
 ENV = {"CLAUDE_CODE_SESSION_ID": "raw-session"}
 URL = "https://github.com/tbhb-dev/tools/pull/7"
@@ -953,3 +956,172 @@ def test_the_refusal_messages_are_exact(gh: Gh) -> None:
     with pytest.raises(SystemExit) as exc:
         close.main(["pr", "close", "7", "--reason", "x"], env={})
     assert exc.value.code == "not closing: the caller isn't a recognized agent session"
+
+
+WORKER = "/opt/worker/bin/worker"
+ISSUE = ["issue", "close", "3", "--reason", "completed", "--comment", "Done."]
+
+
+@dataclass
+class Worker:
+    """A stub worker lookup: what it was asked, and what it answers."""
+
+    why: str | None = None
+    registered: str | None = WORKER
+    asked: list[str | None] = field(default_factory=list)
+
+
+@pytest.fixture
+def worker(monkeypatch: pytest.MonkeyPatch, gh: Gh) -> Worker:
+    stub = Worker()
+    gh.view = {"state": "OPEN", "url": "https://github.com/tbhb-dev/tools/issues/3"}
+
+    def refusal(registered: str | None) -> str | None:
+        stub.asked.append(registered)
+        return stub.why
+
+    def load() -> model.Settings:
+        return replace(settings(), worker_path=stub.registered)
+
+    monkeypatch.setattr(close.worker_identity, "refusal", refusal)
+    monkeypatch.setattr(close.agent_settings, "load", load)
+    return stub
+
+
+def test_a_matched_worker_closes_an_issue_with_a_closed_by_trailer(
+    gh: Gh, worker: Worker
+) -> None:
+    args = [*ISSUE, "--worker-workflow", "run:7"]
+    assert close.main(args, env={}) == 0
+    assert gh.calls[-1] == [
+        "issue",
+        "close",
+        "3",
+        "--repo",
+        "github.com/tbhb-dev/tools",
+        "--reason",
+        "completed",
+        "--comment",
+        "Done.\n\nClosed-by: worker/run:7\n",
+    ]
+    assert worker.asked == [WORKER]
+
+
+def test_the_worker_trailer_is_never_a_generated_by_or_assisted_by(
+    gh: Gh, worker: Worker
+) -> None:
+    close.main([*ISSUE, "--worker-workflow", "w"], env={})
+    comment = gh.calls[-1][-1]
+    assert "Generated-by" not in comment
+    assert "Assisted-by" not in comment
+    assert worker.asked == [WORKER]
+
+
+def test_the_worker_dry_run_prints_the_trailer(
+    gh: Gh, worker: Worker, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert close.main([*ISSUE, "--worker-workflow", "w", "--dry-run"], env={}) == 0
+    assert "Closed-by: worker/w" in capsys.readouterr().out
+    assert [call[:2] for call in gh.calls] == [["issue", "view"]]
+    assert worker.asked == [WORKER]
+
+
+def test_an_unmatched_worker_flag_closes_nothing(gh: Gh, worker: Worker) -> None:
+    worker.why = "no ancestor process runs the registered worker /w"
+    with pytest.raises(SystemExit) as caught:
+        close.main([*ISSUE, "--worker-workflow", "w"], env={})
+    assert str(caught.value) == (
+        "not closing: --worker-workflow needs the registered worker: "
+        "no ancestor process runs the registered worker /w"
+    )
+    assert gh.calls == []
+
+
+def test_an_unregistered_worker_is_asked_with_no_path(gh: Gh, worker: Worker) -> None:
+    worker.registered = None
+    worker.why = "no [agent.worker] path is registered in the config"
+    with pytest.raises(SystemExit, match=r"no \[agent\.worker\] path is registered"):
+        close.main([*ISSUE, "--worker-workflow", "w"], env={})
+    assert worker.asked == [None]
+    assert gh.calls == []
+
+
+def test_an_unreadable_config_closes_nothing(
+    gh: Gh, worker: Worker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def load() -> model.Settings:
+        message = "/cfg/config.toml: [agent] table is required"
+        raise userconfig.ConfigError(message)
+
+    monkeypatch.setattr(close.agent_settings, "load", load)
+    with pytest.raises(SystemExit) as caught:
+        close.main([*ISSUE, "--worker-workflow", "w"], env={})
+    assert str(caught.value) == "/cfg/config.toml: [agent] table is required"
+    assert worker.asked == []
+    assert gh.calls == []
+
+
+def test_no_session_and_no_flag_is_refused_as_before(gh: Gh, worker: Worker) -> None:
+    with pytest.raises(SystemExit, match="isn't a recognized agent session"):
+        close.main(ISSUE, env={})
+    assert worker.asked == []
+    assert gh.calls == []
+
+
+def test_a_harness_session_keeps_its_generated_by_trailer(
+    gh: Gh, worker: Worker
+) -> None:
+    assert close.main([*ISSUE, "--worker-workflow", "w"], env=ENV) == 0
+    assert gh.calls[-1][-1] == f"Done.\n\n{trailer_line()}\n"
+    assert worker.asked == []
+
+
+def test_a_harness_session_without_the_flag_is_unchanged(
+    gh: Gh, worker: Worker
+) -> None:
+    assert close.main(ISSUE, env=ENV) == 0
+    assert gh.calls[-1][-1] == f"Done.\n\n{trailer_line()}\n"
+    assert worker.asked == []
+
+
+def test_a_pr_close_has_no_worker_path(gh: Gh, worker: Worker) -> None:
+    with pytest.raises(SystemExit) as caught:
+        close.build_parser("p").parse_args(
+            ["pr", "close", "7", "--reason", "r", "--worker-workflow", "w"]
+        )
+    assert caught.value.code == 2
+    with pytest.raises(SystemExit, match="isn't a recognized agent session"):
+        close.main(["pr", "close", "7", "--reason", "r"], env={})
+    assert worker.asked == []
+    assert gh.calls == []
+
+
+def test_issue_create_has_no_worker_path() -> None:
+    with pytest.raises(SystemExit) as caught:
+        close.build_parser("p").parse_args(
+            ["issue", "create", "--worker-workflow", "w"]
+        )
+    assert caught.value.code == 2
+
+
+def test_the_parser_reads_the_worker_workflow() -> None:
+    parser = close.build_parser("p")
+    assert parser.parse_args([*ISSUE, "--worker-workflow", "a:b"]).worker_workflow == (
+        "a:b"
+    )
+    assert parser.parse_args(ISSUE).worker_workflow is None
+    with pytest.raises(SystemExit):
+        parser.parse_args([*ISSUE, "--worker-workflow", "a b"])
+
+
+def test_issue_close_help_names_the_flag_and_the_table(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        close.main(["issue", "close", "--help"], prog="prog", env=ENV)
+    text = " ".join(capsys.readouterr().out.split())
+    assert (
+        "--worker-workflow ID with no agent session, close as worker/ID: the "
+        "caller must descend from the executable in the config's [agent.worker] "
+        "table"
+    ) in text
