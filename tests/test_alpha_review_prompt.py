@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import shutil
-from dataclasses import asdict
 from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -14,6 +13,7 @@ import pytest
 from tbhbdev import content, cue_runtime
 from tbhbdev.alpha import review_doc, review_prompt
 from tbhbdev.alpha.review_doc import Finding, ReviewDoc, ReviewError, Run
+from tbhbdev.alpha.review_doc import _metadata as review_metadata
 
 if TYPE_CHECKING:
     from tbhbdev.alpha.review_doc import Tier, Variant
@@ -107,30 +107,12 @@ def test_render_and_validate(
     assert review_doc.parse(draft) == doc
     assert review_doc.validate(doc) == []
     _, frontmatter, body = draft.split("---\n", 2)
-    metadata = {
-        "schema": 2,
-        "repo": doc.repo,
-        "pr": doc.pr,
-        "head_sha": doc.head_sha,
-        "tier": doc.tier,
-        "verdict": doc.verdict,
-        "run": asdict(doc.run),
-        "findings": [
-            {
-                "class": item.class_,
-                "path": item.path,
-                "line": item.line,
-                "summary": item.summary,
-            }
-            for item in doc.findings
-        ],
-    }
     assert frontmatter.splitlines() == [
         "schema: 2",
         'repo: "tbhb-dev/tools"',
         "pr: 385",
     ]
-    assert content.check_review(body, metadata=metadata) == []
+    assert content.check_review(body, metadata=review_metadata(doc)) == []
 
 
 def test_installed_lens_ids() -> None:
@@ -140,7 +122,7 @@ def test_installed_lens_ids() -> None:
         assert heading == f"### {name.replace('-', ' ').capitalize()}"
         assert 4 <= len(items) <= 8
         for index, item in enumerate(items, start=1):
-            match = re.fullmatch(r"- ([CSTDP][1-8]) [^?]+\?", item)
+            match = re.fullmatch(rf"- ({prefix}[1-8]) [^?]+\?", item)
             assert match is not None
             item_id = match[1]
             assert item_id == f"{prefix}{index}"
@@ -153,7 +135,11 @@ def test_missing_packaged_lens(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     resources.mkdir()
     for name in ("common", "tier-1", "correctness"):
         (resources / f"{name}.txt").write_text(_resource(name), encoding="utf-8")
-    monkeypatch.setattr(review_prompt, "files", lambda _package: tmp_path)
+
+    def package_files(_package: str) -> Path:
+        return tmp_path
+
+    monkeypatch.setattr(review_prompt, "files", package_files)
     with pytest.raises(
         ReviewError, match=r"^Missing review prompt resource: security\.txt$"
     ):
@@ -199,7 +185,11 @@ def test_invalid_template_placeholder(
     monkeypatch: pytest.MonkeyPatch, placeholder: str, message: str
 ) -> None:
     common = _resource("common").replace("${provider}", placeholder)
-    monkeypatch.setattr(review_prompt, "_load", lambda _name: common)
+
+    def load(_name: str) -> str:
+        return common
+
+    monkeypatch.setattr(review_prompt, "_load", load)
     with pytest.raises(ReviewError, match=rf"^{message}$"):
         review_prompt.skeleton(1, delta=False, variant="a", fields=FIELDS)
 
