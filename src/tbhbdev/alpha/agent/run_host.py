@@ -8,7 +8,6 @@ import getpass
 import hashlib
 import json
 import os
-import shlex
 import shutil
 import signal
 import socket
@@ -40,6 +39,7 @@ from tbhbdev.alpha.agent import (
     worktree,
 )
 from tbhbdev.alpha.agent.decisions import argv, config, policy, repo, request, run_state
+from tbhbdev.alpha.agent.decisions import run_host as host_decisions
 from tbhbdev.alpha.agent.model import (
     AgyPolicy,
     CodexMode,
@@ -57,6 +57,11 @@ from tbhbdev.alpha.agent.model import (
 )
 from tbhbdev.alpha.agent.ownership import RunExistsError
 from tbhbdev.alpha.identity import RUN_MODEL_ENV
+
+ENV_OVERRIDE = host_decisions.ENV_OVERRIDE
+argv_log_line = host_decisions.argv_log_line
+hook_environment = host_decisions.hook_environment
+otel_config = host_decisions.otel_config
 
 type BazelShutdown = dict[Path, tuple[str, tuple[int, int] | None]]
 
@@ -408,62 +413,18 @@ def preflight(run: Run) -> None:
             c for c in run.settings.credentials if c.account == run.request.account
         )
         credentials.require_reviews_app(references)
-    sandbox = run.settings.sandbox
-    reason = (
-        sandbox.codex_network_proxy_opt_out
-        if run.request.harness is Harness.CODEX
-        else None
+    notice, needs_probe = host_decisions.proxy_preflight(
+        run.request.harness,
+        run.settings.sandbox.codex_network_proxy_opt_out,
+        unsandboxed=run.request.unsandboxed,
     )
-    if reason is not None:
-        notice = f"{run.request.harness} sandbox opt-out: {reason}"
+    if notice is not None:
         print(notice, file=sys.stderr)
         run.files.write("log", notice + "\n")
-    if (
-        run.request.harness is Harness.CODEX
-        and sandbox.codex_network_proxy_opt_out is None
-        and not run.request.unsandboxed
-        and not host_tools.codex_proxy_supported(executable, run.tmpdir)
-    ):
-        message = (
-            "Codex network_proxy support required (minimum 0.164.0); "
-            "upgrade or configure codex_network_proxy_opt_out"
+    if needs_probe:
+        host_decisions.check_proxy_support(
+            supported=host_tools.codex_proxy_supported(executable, run.tmpdir)
         )
-        raise Invalid(message)
-
-
-def otel_config(endpoint: str) -> str:
-    """A Codex config with an `[otel]` table that exports traces and metrics.
-
-    ENDPOINT is a base URL, and each signal gets its own OTLP/HTTP path. The
-    table leaves out the log exporter on purpose: Codex logs tool arguments and
-    an output preview, so `log_user_prompt = false`, which guards only the
-    prompt text, wouldn't keep a credential or a file out of the export.
-    The table has no headers, so it holds no secret.
-    """
-    base = endpoint.removesuffix("/")
-
-    def exporter(signal_path: str) -> str:
-        url = json.dumps(f"{base}/v1/{signal_path}")
-        return f'{{ otlp-http = {{ endpoint = {url}, protocol = "binary" }} }}'
-
-    return (
-        "[otel]\n"
-        f"trace_exporter = {exporter('traces')}\n"
-        f"metrics_exporter = {exporter('metrics')}\n"
-        "log_user_prompt = false\n"
-    )
-
-
-def hook_environment(value: Policy, *, unsandboxed: bool) -> dict[str, str]:
-    """Reflect the shell overrides each harness applies to its launch environment."""
-    if value.harness is Harness.CODEX:
-        shell = {
-            key: val for key, val in value.env.items() if not key.startswith("GIT_")
-        }
-        return shell | {"PATH": value.tool_path, "GIT_CONFIG_COUNT": "0"}
-    if value.harness is Harness.CLAUDE and not unsandboxed:
-        return value.env | {"PATH": value.tool_path}
-    return value.env
 
 
 def prepare_workspace(run: Run) -> Prepared:
@@ -511,39 +472,24 @@ def prepare_workspace(run: Run) -> Prepared:
 def index_entry(
     run: Run, prepared: Prepared | None, rc: int | None
 ) -> dict[str, object]:
-    fields = request.to_dict(run.request)
-    return {
-        key: fields[key]
-        for key in (
-            "v",
-            "kind",
-            "harness",
-            "model",
-            "account",
-            "repo",
-            "class",
-            "variant",
-            "reason",
-            "role",
-            "unsandboxed",
-            "authorized_by",
+    workspace = (
+        host_decisions.IndexWorkspace(
+            prepared.paths.worktree,
+            prepared.delivery.claude_profile,
+            gh_fallback=prepared.delivery.gh_fallback,
         )
-    } | {
-        "run": run.files.name,
-        "host": run.host.name,
-        "worktree": prepared.paths.worktree if prepared is not None else None,
-        "started": run.started,
-        "ended": None if rc is None else time.time(),
-        "rc": rc,
-        "cleaned": None,
-        "kept": False,
-        "claude_profile": prepared.delivery.claude_profile
         if prepared is not None
-        else run.request.claude_profile,
-        "trace_id": None,
-        "state": "running" if rc is None else "ended",
-        "gh_fallback": prepared.delivery.gh_fallback if prepared is not None else False,
-    }
+        else None
+    )
+    return host_decisions.index_entry(
+        run.request,
+        name=run.files.name,
+        host=run.host.name,
+        started=run.started,
+        ended=None if rc is None else time.time(),
+        rc=rc,
+        workspace=workspace,
+    )
 
 
 def _agy_project(run: Run, prepared: Prepared, grants: AgyPolicy) -> str:
@@ -551,13 +497,11 @@ def _agy_project(run: Run, prepared: Prepared, grants: AgyPolicy) -> str:
     path = run.tmpdir / "agy-project.json"
     runfiles.atomic(
         path,
-        json.dumps(
-            {
-                "name": f"agent-{run.files.name}",
-                "path": prepared.paths.worktree,
-                "permissions": list(grants.grants),
-                "timeout": run.settings.agy_timeout_seconds,
-            }
+        host_decisions.agy_project(
+            run.files.name,
+            prepared.paths.worktree,
+            grants.grants,
+            run.settings.agy_timeout_seconds,
         ),
     )
     return str(path)
@@ -585,15 +529,13 @@ def harness_command(
         schema_file=str(schema) if schema_text is not None else None,
         schema_text=schema_text,
     )
-    command = (executable, *command[1:])
-    if run.request.kind is RunKind.EXEC and run.request.harness is Harness.CODEX:
-        command = (
-            *command[:-1],
-            "--output-last-message",
-            str(run.tmpdir / "out.final"),
-            command[-1],
-        )
-    return command
+    return host_decisions.host_arguments(
+        run.request.harness,
+        run.request.kind,
+        command,
+        executable,
+        str(run.tmpdir / "out.final"),
+    )
 
 
 def checked_harness_command(
@@ -615,27 +557,6 @@ def log_hook_tools(run: Run, paths: RunPaths) -> None:
     run.files.write("log", f"preflight: .bazel_env {status}\n")
 
 
-ENV_OVERRIDE = "shell_environment_policy.set."
-
-
-def argv_log_line(command: tuple[str, ...]) -> str:
-    """COMMAND as one log line, without the environment values it sets.
-
-    A Codex run's argv carries the permissions table, which is what a sandbox
-    failure needs, and the brief by path or on stdin. The `-c` overrides that set
-    the run's environment hold credential-adjacent values, so they stay out.
-    """
-    shown: list[str] = []
-    previous = ""
-    for word in command:
-        if previous == "-c" and word.startswith(ENV_OVERRIDE):
-            shown.pop()
-        else:
-            shown.append(word)
-        previous = word
-    return "argv: " + shlex.join(shown)
-
-
 def log_argv(run: Run, command: tuple[str, ...]) -> None:
     if run.request.harness is Harness.CODEX:
         # A failed log write must not stop the run, as with the cleanup notices.
@@ -644,18 +565,9 @@ def log_argv(run: Run, command: tuple[str, ...]) -> None:
 
 
 def resource_attributes(run: Run) -> dict[str, str]:
-    """OpenTelemetry resource attributes that name the host and the account.
-
-    A run without a configured endpoint gets none, so it stays as it was.
-    """
-    if run.settings.otel_endpoint is None:
-        return {}
-    return {
-        "OTEL_RESOURCE_ATTRIBUTES": (
-            f"host.name={run.host.name},tbhb.account={run.request.account}"
-            f",tbhb.run.id={run.files.name}"
-        )
-    }
+    return host_decisions.resource_attributes(
+        run.settings.otel_endpoint, run.host.name, run.request.account, run.files.name
+    )
 
 
 def run_harness(

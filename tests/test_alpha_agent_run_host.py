@@ -431,11 +431,6 @@ def test_prepare_uses_one_worktree_and_private_destinations(
         run, request=dataclasses.replace(run.request, commit=commit)
     )
     run = with_identity_cli(run, ready=True)
-    value, _ = run_host.checked_policy(run, run_host.planned_paths(run))
-    expected_path = value.env["PATH"] if harness is Harness.AGY else value.tool_path
-    assert run_host.hook_environment(value, unsandboxed=False)["PATH"] == expected_path
-    if harness is Harness.CLAUDE:
-        assert run_host.hook_environment(value, unsandboxed=True) == value.env
     source = runfiles.private_dir(run.home / ".codex") / "auth.json"
     source.write_text("example-auth")
     (source.parent / "hooks.json").write_text('{"hooks":{"SessionStart":[]}}')
@@ -502,11 +497,10 @@ def otel_run(
     return run
 
 
-@pytest.mark.parametrize("scheme", ["http", "https"])
 def test_codex_run_config_holds_the_otel_table(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scheme: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    endpoint = f"{scheme}://otlp.example.net:4318"
+    endpoint = "https://otlp.example.net:4318"
     run = otel_run(tmp_path, monkeypatch, Harness.CODEX, endpoint)
     result = run_host.prepare_workspace(run)
     config_path = Path(result.paths.codex_home) / "config.toml"
@@ -531,17 +525,6 @@ def test_codex_run_config_holds_the_otel_table(
     }
     assert "headers" not in config_path.read_text()
     assert config_path.stat().st_mode & 0o777 == 0o600
-
-
-@pytest.mark.parametrize("scheme", ["http", "https"])
-@pytest.mark.parametrize("suffix", ["", "/"])
-def test_otel_config_derives_signal_paths_from_the_base(
-    scheme: str, suffix: str
-) -> None:
-    base = f"{scheme}://otlp.example.net"
-    table = tomllib.loads(run_host.otel_config(base + suffix))["otel"]
-    assert table["trace_exporter"]["otlp-http"]["endpoint"] == (f"{base}/v1/traces")
-    assert table["metrics_exporter"]["otlp-http"]["endpoint"] == (f"{base}/v1/metrics")
 
 
 def test_codex_run_without_an_endpoint_writes_no_config(
@@ -1187,6 +1170,7 @@ def test_tmux_server_and_parent_markers_do_not_reach_a_harness(
 
 
 @pytest.mark.parametrize("phase", ["fetch", "secret"])
+@pytest.mark.parametrize("fake_host_bin", ["regular"], indirect=True)
 def test_startup_deadline_stops_the_recorded_setup_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
 ) -> None:
@@ -1401,54 +1385,6 @@ sys.exit(run_host.main(["example", "--host", "example-linux"], "example run-host
         if supervisor.poll() is None:
             supervisor.terminate()
         supervisor.communicate(timeout=10)
-
-
-@pytest.mark.parametrize("prepared", [False, True])
-@pytest.mark.parametrize("rc", [None, 0, 7])
-def test_index_metadata_records_complete_outcome(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prepared: bool, rc: int | None
-) -> None:
-    run = make_run(
-        tmp_path,
-        harness="claude",
-        claude_profile="primary",
-        reason="example reason",
-        **{"class": "example-class", "variant": "example-variant", "role": "worker"},
-    )
-    workspace = preparation(run)
-    workspace = dataclasses.replace(
-        workspace,
-        delivery=credentials.Delivery(
-            {}, None, gh_fallback=True, claude_profile="secondary"
-        ),
-    )
-    monkeypatch.setattr(time, "time", lambda: 2000)
-    assert run_host.index_entry(run, workspace if prepared else None, rc) == {
-        "v": 2,
-        "kind": "exec",
-        "harness": "claude",
-        "model": run.request.model,
-        "account": "agent",
-        "repo": run.request.repo,
-        "class": "example-class",
-        "variant": "example-variant",
-        "reason": "example reason",
-        "role": "worker",
-        "unsandboxed": False,
-        "authorized_by": None,
-        "run": "example",
-        "host": "example-linux",
-        "worktree": workspace.paths.worktree if prepared else None,
-        "started": 1000,
-        "ended": None if rc is None else 2000,
-        "rc": rc,
-        "cleaned": None,
-        "kept": False,
-        "claude_profile": "secondary" if prepared else "primary",
-        "trace_id": None,
-        "state": "running" if rc is None else "ended",
-        "gh_fallback": prepared,
-    }
 
 
 def test_host_defaults_use_fake_home_and_configured_machine(
@@ -2081,67 +2017,34 @@ def test_planned_paths_ignore_account_git_directory_data(
     )
 
 
-@pytest.mark.parametrize("harness", Harness)
 @pytest.mark.parametrize("opt_out", [False, True])
-def test_preflight_version_and_named_exceptions(
+def test_preflight_reports_proxy_probe_failure_and_opt_out(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    harness: Harness,
     opt_out: bool,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    run = make_run(
-        tmp_path,
-        harness=harness.value,
-        timeout=900,
-        reason="test",
-        claude_profile="primary" if harness is Harness.CLAUDE else None,
-    )
+    run = make_run(tmp_path)
     sandbox = dataclasses.replace(
         run.settings.sandbox,
         codex_network_proxy_opt_out="test exception" if opt_out else None,
-        agy_unsandboxed_opt_out="test exception" if opt_out else None,
     )
     run = dataclasses.replace(
         run, settings=dataclasses.replace(run.settings, sandbox=sandbox)
     )
-    checks: list[tuple[str, Path]] = []
-
-    def supported(executable: str, directory: Path) -> bool:
-        assert executable == str(tmp_path / "host-bin" / "true")
-        assert directory == run.tmpdir
-        checks.append((executable, directory))
-        return False
-
-    monkeypatch.setattr(host_tools, "codex_proxy_supported", supported)
-    if not opt_out and harness is Harness.CODEX:
-        with pytest.raises(Invalid) as caught:
-            run_host.preflight(run)
-        assert str(caught.value) == (
-            "Codex network_proxy support required (minimum 0.164.0); "
-            "upgrade or configure codex_network_proxy_opt_out"
-        )
-    else:
+    probe = Mock(return_value=False)
+    monkeypatch.setattr(host_tools, "codex_proxy_supported", probe)
+    if opt_out:
         run_host.preflight(run)
-        if opt_out and harness is Harness.CODEX:
-            assert (
-                run.files.path("log").read_text()
-                == f"{harness} sandbox opt-out: test exception\n"
-            )
-
-    output = capsys.readouterr()
-    assert output.out == ""
-    assert output.err == (
-        f"{harness} sandbox opt-out: test exception\n"
-        if opt_out and harness is Harness.CODEX
-        else ""
-    )
-
-    assert checks == (
-        [(str(tmp_path / "host-bin" / "true"), run.tmpdir)]
-        if harness is Harness.CODEX and not opt_out
-        else []
-    )
+        probe.assert_not_called()
+        notice = "codex sandbox opt-out: test exception\n"
+        assert capsys.readouterr().err == notice
+        assert run.files.path("log").read_text() == notice
+    else:
+        with pytest.raises(Invalid, match="Codex network_proxy support required"):
+            run_host.preflight(run)
+        probe.assert_called_once_with(str(tmp_path / "host-bin" / "true"), run.tmpdir)
+        assert capsys.readouterr().err == ""
 
 
 def test_mac_host_commands_are_resolved_before_launch(
@@ -2768,53 +2671,6 @@ def test_log_argv_writes_one_complete_line_only_for_codex(
     run_host.log_argv(run, ("codex", "a b"))
     assert writes == (
         [("log", "argv: codex 'a b'\n")] if harness is Harness.CODEX else []
-    )
-
-
-@pytest.mark.parametrize(
-    ("command", "expected"),
-    [
-        ((), "argv: "),
-        (
-            ("shell_environment_policy.set.EXAMPLE=one",),
-            "argv: shell_environment_policy.set.EXAMPLE=one",
-        ),
-        (("-c", "shell_environment_policy.set.EXAMPLE=one"), "argv: "),
-        (
-            ("codex", "shell_environment_policy.set.EXAMPLE=one"),
-            "argv: codex shell_environment_policy.set.EXAMPLE=one",
-        ),
-        (
-            (
-                "-c",
-                "-c",
-                "shell_environment_policy.set.EXAMPLE=one",
-                "shell_environment_policy.set.EXAMPLE=two",
-            ),
-            "argv: -c shell_environment_policy.set.EXAMPLE=two",
-        ),
-    ],
-)
-def test_argv_log_line_drops_only_environment_override_pairs(
-    command: tuple[str, ...], expected: str
-) -> None:
-    assert run_host.argv_log_line(command) == expected
-
-
-def test_argv_log_line_keeps_other_overrides() -> None:
-    command = (
-        "codex",
-        "-c",
-        "shell_environment_policy.set.HOME='x y'",
-        "-c",
-        "model_reasoning_effort='high'",
-        "-c",
-        "shell_environment_policy.set.PATH='p'",
-        "-m",
-        "-c",
-    )
-    assert run_host.argv_log_line(command) == (
-        "argv: codex -c 'model_reasoning_effort='\"'\"'high'\"'\"'' -m -c"
     )
 
 
@@ -4928,31 +4784,6 @@ def test_config_check_protects_the_configured_startup_directory(
             Invalid, match=r"protected host path .* overlaps write root"
         ):
             run_host.check_config(configured)
-
-
-@pytest.mark.parametrize("scheme", ["http", "https"])
-def test_resource_attributes_name_host_account_and_run(
-    tmp_path: Path, scheme: str
-) -> None:
-    run = make_run(tmp_path)
-    run = dataclasses.replace(
-        run,
-        settings=dataclasses.replace(
-            run.settings, otel_endpoint=f"{scheme}://otlp.example.net"
-        ),
-    )
-    assert run_host.resource_attributes(run) == {
-        "OTEL_RESOURCE_ATTRIBUTES": (
-            f"host.name={run.host.name},tbhb.account={run.request.account}"
-            ",tbhb.run.id=example"
-        )
-    }
-
-
-def test_resource_attributes_need_an_endpoint(tmp_path: Path) -> None:
-    run = make_run(tmp_path)
-    assert run.settings.otel_endpoint is None
-    assert run_host.resource_attributes(run) == {}
 
 
 @pytest.mark.parametrize("harness", Harness)
