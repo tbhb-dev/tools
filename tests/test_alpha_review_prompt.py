@@ -80,7 +80,12 @@ def test_render_and_validate(
     lens_text = "\n".join(_resource(lens) for lens in LENSES)
     assert f"\n{lens_text}\n" in prompt
     assert ("The security lens is mandatory" in prompt) == (tier == 2)
-    assert ("FE escalation rules in review_data/" in prompt) == (tier == 2)
+    assert (
+        "This review is read-only. A GO verdict does not constitute approval." in prompt
+    )
+    assert "PULL_REQUEST_REVIEW_CHECKLIST.md" not in prompt
+    rule_ids = re.findall(r"^- (FE\d+) ", prompt, re.MULTILINE)
+    assert rule_ids == ([f"FE{i}" for i in range(1, 10)] if tier == 2 else [])
     if delta:
         assert prompt.startswith(f"Base-reviewed: {BASE_REVIEWED}\n")
         assert "Judge only the delta" in prompt
@@ -141,6 +146,11 @@ def test_archive_preserves_resource_names_and_encoding(
     with zipfile.ZipFile(archive_path, "w") as archive:
         for item in package.joinpath("review_prompt_data").iterdir():
             archive.writestr(f"review_prompt_data/{item.name}", item.read_bytes())
+        archive.writestr(
+            "review_data/PULL_REQUEST_REVIEW_CHECKLIST.md",
+            "---\nescalate:\n  - id: FE9\n"
+            "    reason: Check the release boundary.\n---\n",
+        )
 
     with zipfile.ZipFile(archive_path) as archive:
 
@@ -161,6 +171,7 @@ def test_archive_preserves_resource_names_and_encoding(
         fields = FIELDS | {"base_reviewed": BASE_REVIEWED}
         prompt = review_prompt.render(2, delta=True, variant="b", fields=fields)
         assert prompt.startswith(f"Base-reviewed: {BASE_REVIEWED}\n")
+        assert "- FE9 Check the release boundary.\n" in prompt
 
 
 def test_missing_packaged_lens(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

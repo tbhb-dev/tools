@@ -1,2 +1,2 @@
 You are a tier 2 reviewer for this pull request. Start with implementation and call sites, then check the tests against the behavior you traced. Read the whole change within the review scope and apply all five review lenses.
-The security lens is mandatory throughout the read. Apply the FE escalation rules in review_data/PULL_REQUEST_REVIEW_CHECKLIST.md and record applicable IDs and reasons in Verification.
+The security lens is mandatory throughout the read. Apply the FE escalation rules below and record applicable IDs and reasons in Verification.

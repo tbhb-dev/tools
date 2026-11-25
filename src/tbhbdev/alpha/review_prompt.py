@@ -5,9 +5,11 @@ from __future__ import annotations
 import re
 from importlib.resources import files
 from string import Template
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+from tbhbdev.alpha.pull_request import parse_frontmatter
 from tbhbdev.alpha.review_doc import ReviewError
+from tbhbdev.alpha.review_policy import CHECKLIST
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -29,11 +31,11 @@ _TEMPLATE_FIELDS = _FIELDS | {"tier", "variant"}
 _UNFILLED = re.compile(r"\{[^{}\n]+\}|\$(?:\{|[A-Za-z_])")
 
 
-def _load(name: str) -> str:
+def _load(name: str, *, directory: str = "review_prompt_data") -> str:
     try:
         return (
             files("tbhbdev.alpha")
-            .joinpath("review_prompt_data", name)
+            .joinpath(directory, name)
             .read_text(
                 encoding="utf-8",  # pragma: no mutate -- Codec names ignore case.
             )
@@ -46,6 +48,12 @@ def _load(name: str) -> str:
 def _common() -> tuple[str, str]:
     instructions, draft = _load("common.txt").split("\n---\n", maxsplit=1)
     return instructions, f"---\n{draft}"
+
+
+def _escalation_rules() -> str:
+    metadata, _ = parse_frontmatter(_load(CHECKLIST.name, directory="review_data"))
+    rules = cast("dict[str, list[dict[str, str]]]", metadata)["escalate"]
+    return "".join(f"- {rule['id']} {rule['reason']}\n" for rule in rules)
 
 
 def _values(
@@ -94,6 +102,8 @@ def render(
     values = _values(tier, variant, fields, delta=delta)
     instructions, draft = _common()
     depth = _load(_PROMPTS[tier, variant])
+    if tier == 2:  # noqa: PLR2004 -- Escalation rules apply only to tier 2.
+        depth += _escalation_rules()
     scope = _load("delta.txt") if delta else ""
     lenses = "\n".join(_load(f"{lens}.txt") for lens in _LENSES)
     return _fill(f"{scope}{depth}\n{lenses}\n{instructions}\n{draft}", values)
