@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6
-    at: "2026-11-25T14:32:46Z"
+    at: "2026-11-25T16:57:05Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -41,6 +41,8 @@ type: Reference
 - `agent precheck CLONE --reference REF [--host HOST]` compares a clone's hooks with a local reference and checks its Git config for risky keys. Paths may be absolute or relative to the home directory. Collection uses one SSH call with `--host` and reads locally otherwise. It never runs Git. Exit codes are 0 for a match, 1 for mismatches, and 2 for usage or collection errors. The Python API `precheck(clone_data, reference)` returns the result for callers.
 - `agent` coordinates runs with `exec`, `wait`, `status`, `log`, `diff`, `kill`, `clean` and `keep`. `signing-parity` checks that each configured host's signing key is a signing key of tbhb-agent. It runs the hidden host command `signing-fingerprint ACCOUNT`, which prints only the SHA256 fingerprint of the key a run would sign with, over the ordinary ssh shell. It then reads tbhb-agent's public signing key list from GitHub and exits 1 when any host's fingerprint is missing or the host is unreachable. A host without the command counts as unreachable until `tbhbdev` syncs there. The package also includes the run request's schema and the repo argument rules.
 - `install` installs the git hooks and the user-level harness hooks. `--hooks-only` installs only this clone's git hooks without writing user-level config.
+
+`tbhbdev alpha pr rebase N [N...]` asks Renovate to rebase open pull requests in the repository named by `origin`. It ticks the rebase checkbox only for pull requests from the Renovate bot and preserves the rest of each body. It skips checked boxes and stops at the first failure.
 
 `tbhbdev alpha pr check` and `pr create` run the rules size counter after linting the draft, comparing the draft's base branch on `origin` with `HEAD`. A missing remote-tracking ref is fetched once. It prints the added code and raw line counts with their limits: 400 code lines and 1,500 raw lines. If either count exceeds its limit, the check fails with a message to split the change into stacked pull requests. When both counts exceed their limits, the problem reports the code count. If the counter is unavailable or returns an error or invalid JSON, the command prints `size count unavailable: <reason>` as a warning and continues, and `pr create` still opens the pull request.
 
@@ -87,6 +89,8 @@ The commit check runs without config. The command guard checks arguments for tra
 These user-level hooks run in every repository. Before acting, the identity, pull request, approval guard, and install hooks check that `origin` names a tbhb-dev repository on GitHub. Outside a repository, the identity record hook still writes the session's record to the user's store under `~/.local/state/tbhbdev/tbhb-alpha`. Both `state-guard` and `session-context` run regardless of origin. At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, which puts the `gh` shim first on PATH for the session's commands and reinstalls the git hooks of the worktree the session starts in. Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
 
 The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, so sessions in two worktrees of one clone keep separate state.
+
+When `tbhbdev alpha agent exec` finds a version mismatch, it looks up the head of `tbhb-dev/tools` on `main` and installs that commit on each side that differs. It logs each successful install to standard error. If it updates the driver, it re-executes the command with the original arguments. The retry reads the host version again. If the versions still differ, it reports the original mismatch with `after one sync` and refuses the launch.
 
 `tbhbdev alpha agent exec --fetch-ref REF` makes `refs/heads/<branch>` available as `origin/fetched/heads/<branch>` and `refs/pull/N/head` as `origin/fetched/pull/N/head`. Repeat `--fetch-ref` up to eight times with either profile.
 

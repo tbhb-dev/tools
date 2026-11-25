@@ -298,7 +298,12 @@ def worker_pid(worker: BaseProcess) -> int:
 
 
 def prepare(
-    operation: Callable[[], object], files: RunFiles, deadline: float, grace: float
+    operation: Callable[[], object],
+    files: RunFiles,
+    deadline: float,
+    grace: float,
+    *,
+    clock: Callable[[], float] = time.monotonic,
 ) -> object:
     """Bound all setup, including blocking library reads, by one deadline.
 
@@ -313,13 +318,13 @@ def prepare(
     child.close()
     owned_group: int | None = None
     try:
-        if not parent.poll(max(0, deadline - time.monotonic())):
+        if not parent.poll(max(0, deadline - clock())):
             raise TimeoutError
         parent.recv()
         owned_group = pid
         record(files, pid)
         parent.send(None)
-        if not parent.poll(max(0, deadline - time.monotonic())):
+        if not parent.poll(max(0, deadline - clock())):
             raise TimeoutError
         ok, result = parent.recv()
         if not ok:

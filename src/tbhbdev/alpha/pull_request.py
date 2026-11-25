@@ -13,6 +13,7 @@ Usage, from anywhere in a worktree:
     tbhbdev alpha pr create [DRAFT] [--dry-run]
     tbhbdev alpha pr edit DRAFT --pr N
     tbhbdev alpha pr ready N [N...]
+    tbhbdev alpha pr rebase N [N...]
     tbhbdev alpha pr rerun N [--stuck]
     tbhbdev alpha pr delete-branch N
     tbhbdev alpha pr checks N
@@ -169,6 +170,11 @@ BUILTIN_STYLE = "Vale"
 # The .vale.ini key that names styles, compared without regard to case.
 BASED_ON = "BasedOnStyles"
 GH = "gh"
+RENOVATE_AUTHOR = "tbhb-dev-renovate[bot]"
+RENOVATE_APP = "app/tbhb-dev-renovate"
+REBASE_MARKER = "<!-- rebase-check -->"
+REBASE_UNCHECKED = "- [ ]"
+REBASE_CHECKED = "- [x]"
 GIT = "git"
 CLAUDE = "claude"
 CODEX = "codex"
@@ -1012,7 +1018,9 @@ def base_of(meta: Mapping[str, object], default: str | None = None) -> str:
     return default if default is not None else default_base()
 
 
-def gh_data(done: subprocess.CompletedProcess[str]) -> object:
+def gh_data(
+    done: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes],
+) -> object:
     """The JSON that gh printed, or None when gh failed or printed none."""
     if done.returncode != 0:
         return None
@@ -1193,8 +1201,10 @@ def read_checked(path: Path) -> Checked:
     return checked
 
 
-def invoke_gh(argv: list[str], body: str, *, dry_run: bool = False) -> tuple[int, str]:
-    """Run gh, or show what would run. gh's output and errors pass through.
+def invoke_gh(
+    argv: list[str], body: str, *, dry_run: bool = False, quiet: bool = False
+) -> tuple[int, str]:
+    """Run gh, or show what would run. Pass output and errors through unless quiet.
 
     Returns gh's exit code and its standard output.
     """
@@ -1205,8 +1215,9 @@ def invoke_gh(argv: list[str], body: str, *, dry_run: bool = False) -> tuple[int
         return 0, ""
     argv[0] = find_tool(GH)
     done = run(argv, stdin=body)
-    print(done.stdout, end="")
-    print(done.stderr, end="", file=sys.stderr)
+    if not quiet:
+        print(done.stdout, end="")
+        print(done.stderr, end="", file=sys.stderr)
     return done.returncode, done.stdout
 
 
@@ -1386,6 +1397,111 @@ def ready(numbers: Sequence[int]) -> int:
         status = invoke_gh(words, "")[0]  # pragma: no mutate
         if status:
             return status
+    return 0
+
+
+def renovate_author(login: object, number: int, repo: str) -> bool:
+    """Check the exact login, resolving gh's display name for the App."""
+    if login == RENOVATE_AUTHOR:
+        return True
+    if login != RENOVATE_APP:
+        return False
+    done = run_bytes(
+        [
+            find_tool(GH),
+            "api",
+            "--hostname",
+            "github.com",
+            f"repos/{repo}/pulls/{number}",
+            "--jq",
+            ".user.login",
+        ]
+    )
+    return done.returncode == 0 and done.stdout == RENOVATE_AUTHOR.encode() + b"\n"
+
+
+def tick_rebase_checkbox(body: str, line: str) -> str:
+    """Tick the first checkbox on the unique line containing the marker."""
+    return body.replace(line, line.replace(REBASE_UNCHECKED, REBASE_CHECKED, 1))
+
+
+def rebase_body(number: int, body: str) -> str | None:
+    """Check the marker and verify the rewritten body, including line endings.
+
+    Raises:
+        SystemExit: The checkbox is ambiguous, missing, or unsafe to change.
+    """
+    lines = body.splitlines(keepends=True)
+    matches = [i for i, line in enumerate(lines) if REBASE_MARKER in line]
+    if not matches:
+        msg = f"PR {number}: no Renovate rebase checkbox line"
+        raise SystemExit(msg)
+    if len(matches) > 1:
+        msg = f"PR {number}: multiple Renovate rebase checkbox lines"
+        raise SystemExit(msg)
+    (index,) = matches
+    line = lines[index]
+    if line.startswith(REBASE_CHECKED):
+        return None
+    if not line.startswith(REBASE_UNCHECKED):
+        msg = f"PR {number}: malformed Renovate rebase checkbox line"
+        raise SystemExit(msg)
+    updated = tick_rebase_checkbox(body, line)
+    # The prefix through the changed line and the suffix cover the entire body.
+    prefix = "".join(lines[:index]) + REBASE_CHECKED + line[len(REBASE_UNCHECKED) :]
+    if (
+        len(updated) != len(body)
+        or not updated.startswith(prefix)
+        or not updated.endswith("".join(lines[index + 1 :]))
+    ):
+        msg = f"PR {number}: cannot verify a checkbox-only change"
+        raise SystemExit(msg)
+    return updated
+
+
+def rebase(numbers: Sequence[int]) -> int:
+    """Ask Renovate to rebase each open pull request, stopping at the first failure.
+
+    Raises:
+        SystemExit: The pull request or its checkbox cannot be safely updated.
+    """
+    repo = origin_repository()
+    for number in numbers:
+        target = [str(number), "--repo", f"github.com/{repo}"]
+        data = gh_data(
+            run_bytes(
+                [find_tool(GH), "pr", "view", *target, "--json", "author,state,body"]
+            )
+        )
+        if not isinstance(data, dict):
+            msg = f"PR {number}: cannot read pull request on origin"
+            raise SystemExit(msg)
+        author: object = data.get("author")
+        login: object = author.get("login") if isinstance(author, dict) else None
+        if not renovate_author(login, number, repo):
+            msg = f"PR {number}: author is not {RENOVATE_AUTHOR}"
+            raise SystemExit(msg)
+        if data.get("state") != "OPEN":
+            msg = f"PR {number}: pull request is not open"
+            raise SystemExit(msg)
+        body: object = data.get("body")
+        if not isinstance(body, str):
+            msg = f"PR {number}: cannot read pull request body"
+            raise SystemExit(msg)
+        updated = rebase_body(number, body)
+        if updated is None:
+            print(f"PR {number}: the Renovate rebase checkbox is already ticked")
+            continue
+        status, _ = invoke_gh(
+            [GH, "pr", "edit", *target, "--body-file", "-"], updated, quiet=True
+        )
+        if status:
+            print(
+                f"PR {number}: could not tick the Renovate rebase checkbox",
+                file=sys.stderr,
+            )
+            return status
+        print(f"PR {number}: ticked the Renovate rebase checkbox")
     return 0
 
 
@@ -2027,6 +2143,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     sub.add_parser("hook").add_argument("harness", choices=[CLAUDE, CODEX, ANTIGRAVITY])
     sub.add_parser("backfill-opened").add_argument("owner")
     sub.add_parser("ready").add_argument("pr", type=int, nargs="+")
+    sub.add_parser("rebase").add_argument("pr", type=int, nargs="+")
     again = sub.add_parser("rerun")
     again.add_argument("pr", type=int)
     again.add_argument("--stuck", action="store_true")
@@ -2060,12 +2177,16 @@ def main(
         return hook(args.harness)
     if args.command == "backfill-opened":
         return backfill(args.owner)
-    again = rerun_stuck if getattr(args, "stuck", False) else rerun
-    by_pr = {"rerun": again, "delete-branch": delete_pr_branch, "checks": checks}
+    if args.command == "rerun":
+        return (rerun_stuck if args.stuck else rerun)(args.pr)
+    by_pr = {
+        "delete-branch": delete_pr_branch,
+        "checks": checks,
+        "ready": ready,
+        "rebase": rebase,
+    }
     if args.command in by_pr:
         return by_pr[args.command](args.pr)
-    if args.command == "ready":
-        return ready(args.pr)
     try:
         return command(args, env)
     except agent_identity.AttributionError:

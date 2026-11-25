@@ -307,8 +307,21 @@ def test_prepare_success_and_errors(
 def test_prepare_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(groups, "boot_id", constant("example-boot"))
     files = runfiles.RunFiles(tmp_path, "example")
+    waiting = multiprocessing.get_context("fork").Event()
+    deadline = time.monotonic() + 5
+
+    def block() -> None:
+        waiting.set()
+        signal.pause()
+
+    def clock() -> float:
+        if not files.path("pgid").exists():
+            return time.monotonic()
+        assert waiting.wait(5)
+        return deadline
+
     with pytest.raises(TimeoutError):
-        groups.prepare(lambda: time.sleep(10), files, time.monotonic() + 0.1, 0)
+        groups.prepare(block, files, deadline, 0, clock=clock)
     group = json.loads(files.path("pgid").read_text())["pgid"]
     assert not groups.alive(group)
 
@@ -435,18 +448,21 @@ def test_setup_parent_deadline_and_cleanup(
         events.append("stopped")
 
     monkeypatch.setattr(multiprocessing, "get_context", context)
-    monkeypatch.setattr(time, "monotonic", lambda: 2)
     monkeypatch.setattr(groups, "identity", identity)
     monkeypatch.setattr(groups, "stop_owned", stop)
     files = runfiles.RunFiles(tmp_path, "example")
+    clock = constant(2)
     if outcome == "success":
-        assert groups.prepare(operation, files, 2 + remaining, 0.25) == "prepared"
+        assert (
+            groups.prepare(operation, files, 2 + remaining, 0.25, clock=clock)
+            == "prepared"
+        )
     elif outcome.endswith("timeout"):
         with pytest.raises(TimeoutError):
-            groups.prepare(operation, files, 2 + remaining, 0.25)
+            groups.prepare(operation, files, 2 + remaining, 0.25, clock=clock)
     else:
         with pytest.raises(Invalid) as caught:
-            groups.prepare(operation, files, 2 + remaining, 0.25)
+            groups.prepare(operation, files, 2 + remaining, 0.25, clock=clock)
         assert str(caught.value) == setup_failure_message(outcome)
     assert events == setup_events(reaped, outcome)
     assert files.uncertain is (reaped == "kill-denied")
@@ -620,9 +636,17 @@ def test_launch_foreground_failure_stops_created_group(
 def test_prepare_before_setpgid_is_bounded_and_never_signals_reaped_pid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reaped: bool
 ) -> None:
+    waiting = multiprocessing.get_context("fork").Event()
+    deadline = time.monotonic() + 5
+
     def delayed(_connection: object, _operation: object) -> None:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        time.sleep(30)
+        waiting.set()
+        signal.pause()
+
+    def expire() -> float:
+        assert waiting.wait(5)
+        return deadline
 
     if reaped:
 
@@ -634,8 +658,10 @@ def test_prepare_before_setpgid_is_bounded_and_never_signals_reaped_pid(
         monkeypatch.setattr(groups, "prepare_child", delayed)
     files = runfiles.RunFiles(tmp_path, "example")
     started = time.monotonic()
-    with pytest.raises((TimeoutError, EOFError)):
-        groups.prepare(lambda: None, files, started + 0.1, 0)
+    with pytest.raises(EOFError if reaped else TimeoutError):
+        groups.prepare(
+            lambda: None, files, deadline, 0, clock=time.monotonic if reaped else expire
+        )
     assert time.monotonic() - started < 3
 
 
