@@ -202,6 +202,27 @@ def test_vet_fails_without_a_diagnostic(monkeypatch: pytest.MonkeyPatch) -> None
     assert content.format_refusal(finding).startswith("CUE validation failed.\n")
 
 
+def test_vet_loads_variant_files_in_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    variants = [tmp_path / "sections.cue", tmp_path / "variant.cue"]
+    cue = Mock(return_value=Mock(returncode=1, stderr=""))
+    monkeypatch.setattr(cue_runtime, "resolve", lambda: tmp_path / "cue")
+    monkeypatch.setattr(content_vet, "_cue", cue)
+    content_vet.check({}, SCHEMAS, variant_schema=variants, definition="#Variant")
+    assert cue.call_args_list[0].args == (
+        tmp_path / "cue",
+        "vet",
+        "--all-errors",
+        "-d",
+        "#Draft & (#Variant)",
+        *(str(SCHEMAS / name) for name in ("core.cue", "taxonomy.cue", "issue.cue")),
+        *(str(path) for path in variants),
+        "json:",
+        "-",
+    )
+
+
 def test_vet_requires_pinned_binary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

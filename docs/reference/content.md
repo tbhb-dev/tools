@@ -3,8 +3,8 @@ description: Shared GitHub content validation and writes for plugins.
 generated:
   - role: generated
     harness: codex
-    model: openai:gpt-6.2-sol
-    at: "2026-11-24T22:03:20Z"
+    model: openai:gpt-6
+    at: "2026-11-25T14:30:05Z"
 status: stable
 tags: [plugins]
 title: Content writes
@@ -84,7 +84,7 @@ Write each paragraph on one source line, including paragraphs within bullets. A 
 
 ## Draft validation
 
-`check(draft, schemas, *, variant_schema=None, definition="#Draft", parent_type=None)` takes a normalized draft and the path to the shared `schemas` directory. It runs `cue vet --all-errors` against `#Draft` and the selected definition. A caller can supply one additional CUE file with its variant definition. Install the pinned executable with `tbhbdev cue install`. [Markdown normalization](content-model.md)
+`check(draft, schemas, *, variant_schema=None, definition="#Draft", parent_type=None)` takes a normalized draft and the path to the shared `schemas` directory. It runs `cue vet --all-errors` against `#Draft` and the selected definition. Pass one CUE path or a sequence of paths in `variant_schema`. The check loads them in order after the shared schemas. Install the pinned executable with `tbhbdev cue install`. [Markdown normalization](content-model.md)
 
 The result has `refusals` and `warnings` tuples. Each finding has a `code`, `path`, and `message`. Use `format_refusal(finding)` for the diagnostic with revision guidance or `guide(finding)` for the guidance alone. A criterion or verification item that repeats a CI gate receives a hint to describe its observable outcome.
 

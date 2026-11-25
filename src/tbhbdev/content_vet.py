@@ -4,12 +4,13 @@ import json
 import re
 import subprocess  # nosec B404
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from tbhbdev import cue_runtime
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Sequence
 
 type Json = dict[str, object]
 
@@ -141,22 +142,23 @@ def check(
     draft: Json,
     schemas: Path,
     *,
-    variant_schema: Path | None = None,
+    variant_schema: Path | Sequence[Path] | None = None,
     definition: str = "#Draft",
     parent_type: str | None = None,
 ) -> CheckResult:
-    """Vet a normalized draft against the shared files and one optional variant.
+    """Vet a normalized draft against the shared and optional variant files.
 
-    Supply the trusted schema directory and, for a variant, its file and
+    Supply the trusted schema directory and, for a variant, its ordered files and
     CUE definition. The caller looks up the actual parent issue type.
     CUE must accept the draft before the Python issue rules inspect it.
     """
     binary = cue_runtime.resolve()
     shared = [
         str((schemas / name).resolve())
-        for name in ("core.cue", "issue.cue", "taxonomy.cue")
+        for name in ("core.cue", "taxonomy.cue", "issue.cue")
     ]
-    files = [*shared, str(variant_schema.resolve())] if variant_schema else shared
+    variants = (variant_schema,) if isinstance(variant_schema, Path) else variant_schema
+    files = [*shared, *(str(path.resolve()) for path in variants or ())]
     vet = _cue(
         binary,
         "vet",

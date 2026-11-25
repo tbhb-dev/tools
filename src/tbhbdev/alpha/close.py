@@ -32,14 +32,14 @@ from typing import TYPE_CHECKING
 
 from tbhbdev import content, issue_import
 from tbhbdev.alpha import identity as agent_identity
-from tbhbdev.alpha import opened
+from tbhbdev.alpha import issue_body, opened
 from tbhbdev.alpha import pull_request as pr
+from tbhbdev.alpha.issue_body import ISSUE_TYPES
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
 REASONS = {"completed": "completed", "not-planned": "not planned"}
-ISSUE_TYPES = issue_import.TYPES | {"Research", "Decision"}
 RELATIONSHIP_WRITES = {
     "link-sub": content.link_sub_issue,
     "unlink-sub": content.unlink_sub_issue,
@@ -265,6 +265,10 @@ def parent_reference(text: str) -> tuple[str, int]:
 
 
 def validate_issue(args: argparse.Namespace, body: str) -> None:
+    if refusals := issue_body.check(body, args.type, args.pm_dir):
+        raise content.Refused("\n".join(refusals))
+    if args.pm_dir is not None:
+        return
     if args.type not in issue_import.TYPES:
         print(f"no schema check for type {args.type}", file=sys.stderr)
         return
@@ -295,7 +299,7 @@ def write_issue(args: argparse.Namespace) -> int:
     if args.reason is not None:
         caller += f": {args.reason}"
     try:
-        body = args.body_file.read_text(encoding="utf-8")
+        body = args.body_file.read_bytes().decode("utf-8")
         validate_issue(args, body)
         result = content.create_issue(
             args.repo,
@@ -333,6 +337,7 @@ def add_creation_arguments(creating: argparse.ArgumentParser) -> None:
     creating.add_argument("--type", required=True, choices=sorted(ISSUE_TYPES))
     creating.add_argument("--title", required=True)
     creating.add_argument("--body-file", required=True, type=Path, metavar="FILE")
+    creating.add_argument("--pm-dir", type=Path, metavar="DIR")
     creating.add_argument("--label", action="append", default=[])
     creating.add_argument("--parent", type=parent_reference, metavar="N|OWNER/REPO#N")
     creating.add_argument("--reason", type=non_blank)

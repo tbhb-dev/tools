@@ -89,6 +89,7 @@ commands:
   review       draft N [--force] | check N: the review draft
   issue        close N --reason completed|not-planned: close an issue
                | create --repo OWNER/REPO --type TYPE --title TEXT --body-file FILE
+               [--pm-dir DIR]
                [--label L ...] [--parent N|OWNER/REPO#N] [--reason TEXT] [--dry-run]
                | link-sub PARENT CHILD | unlink-sub PARENT CHILD
                | block BLOCKED --by BLOCKER | unblock BLOCKED --by BLOCKER

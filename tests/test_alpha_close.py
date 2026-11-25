@@ -473,7 +473,7 @@ def test_issue_blocks_using_local_references(
 
 ISSUE_REPO = "tbhb-dev/work-private"
 ISSUE_TITLE = "Improve weekly report delivery"
-ISSUE_BODY = "criteria:\n- Reports reach every team\nevidence:\n### Delivery notes\n"
+ISSUE_BODY = "criteria:\n- Reports reach every team\nevidence:\n\n## Delivery notes\n"
 CREATED_ISSUE = f"https://github.com/{ISSUE_REPO}/issues/9\n9\n"
 
 
@@ -527,8 +527,11 @@ def issue_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Mock:
 @pytest.mark.parametrize(
     "case",
     [
-        ("criteria: bad", "criteria and verification must use list items (count 1)"),
-        ("", "criteria must be 1 to 3 (count 0)"),
+        (
+            "criteria: bad\nevidence:\n## Notes",
+            "criteria and verification must use list items (count 1)",
+        ),
+        ("evidence:\n## Notes", "criteria must be 1 to 3 (count 0)"),
         (
             ISSUE_BODY + "blocked-by: another\n",
             "unknown blocked-by target (count 1)",
@@ -550,6 +553,45 @@ def test_issue_create_refuses_invalid_blocks(
     issue_client.rest.assert_not_called()
 
 
+@pytest.mark.usefixtures("gh")
+def test_issue_create_requires_h2(
+    issue_args: list[str],
+    issue_client: Mock,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "body.md").write_text("Free-form Markdown\n")
+    assert close.main([*issue_args, "--type", "Research"], env=ENV) == 1
+    assert "## " in capsys.readouterr().err
+    issue_client.rest.assert_not_called()
+
+
+@pytest.mark.parametrize("refusals", [[], ["blocks.outcome: missing"]])
+@pytest.mark.usefixtures("gh")
+def test_issue_create_with_pm(  # noqa: PLR0913, PLR0917
+    issue_args: list[str],
+    issue_client: Mock,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    refusals: list[str],
+) -> None:
+    body = "# Deliver reports\r\n\r\n## Outcome\r\n\r\nReports arrive on time.\r\n"
+    (tmp_path / "body.md").write_bytes(body.encode())
+    check = Mock(return_value=refusals)
+    monkeypatch.setattr(close.issue_body, "check", check)
+    assert close.main([*issue_args, "--pm-dir", str(tmp_path)], env=ENV) == bool(
+        refusals
+    )
+    check.assert_called_once_with(body, "Chore", tmp_path)
+    if refusals:
+        assert capsys.readouterr() == ("", "blocks.outcome: missing\n")
+        issue_client.rest.assert_not_called()
+    else:
+        assert capsys.readouterr() == (CREATED_ISSUE, "")
+        assert issue_client.rest.call_args.args[2]["body"] == body
+
+
 @pytest.mark.parametrize("issue_type", ["Chore", "Research", "Decision"])
 @pytest.mark.usefixtures("gh")
 def test_issue_create_dry_run(
@@ -559,7 +601,7 @@ def test_issue_create_dry_run(
     capsys: pytest.CaptureFixture[str],
     issue_type: str,
 ) -> None:
-    body = ISSUE_BODY if issue_type == "Chore" else "Free-form Markdown\n"
+    body = ISSUE_BODY if issue_type == "Chore" else "## Free-form Markdown\n"
     (tmp_path / "body.md").write_text(body, encoding="utf-8")
     assert (
         close.main([*issue_args, "--type", issue_type, "--parent", "8", "--dry-run"])
@@ -750,7 +792,8 @@ def test_issue_create_requires_task_parent(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     (tmp_path / "body.md").write_text(
-        "verification:\n- Reports arrive on time\n", encoding="utf-8"
+        "verification:\n- Reports arrive on time\nevidence:\n## Notes\n",
+        encoding="utf-8",
     )
     assert close.main([*issue_args, "--type", "Task"], env=ENV) == 1
     assert capsys.readouterr() == (
