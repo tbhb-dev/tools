@@ -736,6 +736,7 @@ def test_eligible_tips_orders_refs_and_ignores_existing_history(
     start, existing, first, last = (digit * 40 for digit in "1234")
     bases = (start,)
     first_ref, last_ref = "refs/heads/a-first", "refs/heads/z-last"
+    candidates: dict[str, str]
     candidates = {last_ref: last, "refs/heads/m-existing": existing, first_ref: first}
     history = Mock(side_effect=[True, False, False, True])
     monkeypatch.setattr(push, "outside_history", history)
