@@ -635,31 +635,24 @@ def test_every_harness_config_runs_the_guard(
     assert handler["command"] == "tbhbdev alpha guard-gh-pr # tbhbdev alpha install"
 
 
-# --- no self-approval ------------------------------------------------------
+# --- approval routes -------------------------------------------------------
 
 ROOT = ai.sha256_64("session-raw")
-RULE = "A session can't approve a pull request it or its subagents opened"
 TARGET = "tbhb-dev/tools#7"
-ROUTES = [
+APPROVE = "tbhb-approve tools 7 abc123"
+GH_ROUTES = [
     ("gh pr review 7 --approve -R tbhb-dev/tools", "`gh pr review --approve`"),
     (
         "gh api -X POST repos/tbhb-dev/tools/pulls/7/reviews -f event=APPROVE",
         "a `gh api` APPROVE review",
     ),
-    ("tbhb-approve tools 7 abc123", "`tbhb-approve`"),
 ]
-SCRIPT_ROUTES = ROUTES[2:]
-GH_ROUTES = ROUTES[:2]
 CLAUDE_CHILD = json.loads((DATA / "claude-pretooluse-bash-child.json").read_text())
 
 
-@pytest.fixture(autouse=True)
-def state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """A temp user store, and no harness variables in the guard's environment."""
-    prefixes = ("CLAUDE", "CODEX", "ANTIGRAVITY", "ASCM_")
-    list(map(monkeypatch.delenv, [n for n in os.environ if n.startswith(prefixes)]))
+@pytest.fixture
+def isolated_opened_ledger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    return tmp_path / "state" / "tbhbdev" / "tbhb-alpha" / "opened"
 
 
 def reason(out: str) -> str | None:
@@ -684,9 +677,6 @@ def guard_reason(
     return reason(out)
 
 
-OPENED = f"{RULE}: this session opened {TARGET}, so it can't approve it."
-
-
 GH_DENIED = (
     "An agent can't approve a pull request through gh, whoever opened it. "
     "Approval comes only from `tbhb-approve`, run by the coordinator. "
@@ -694,6 +684,7 @@ GH_DENIED = (
 )
 
 
+@pytest.mark.usefixtures("isolated_opened_ledger")
 @pytest.mark.parametrize(("text", "route"), GH_ROUTES)
 @pytest.mark.parametrize("payload", [CLAUDE_PAYLOAD, CLAUDE_CHILD, CODEX_PAYLOAD])
 def test_no_session_approves_through_gh(
@@ -709,137 +700,26 @@ def test_no_session_approves_through_gh(
     assert guard_reason(monkeypatch, capsys, payload, text) == expected
 
 
-@pytest.mark.parametrize(("text", "route"), SCRIPT_ROUTES)
-@pytest.mark.parametrize("payload", [CLAUDE_PAYLOAD, CLAUDE_CHILD, CODEX_PAYLOAD])
-def test_the_opener_and_its_subagents_cant_approve(
+@pytest.mark.usefixtures("isolated_opened_ledger")
+@pytest.mark.parametrize(
+    "payload",
+    [
+        CLAUDE_PAYLOAD,
+        CLAUDE_CHILD,
+        CODEX_PAYLOAD,
+        AGY_PAYLOAD,
+        {"tool_input": {}},
+    ],
+)
+def test_tbhb_approve_passes_regardless_of_which_session_opened_the_pr(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     payload: dict[str, object],
-    text: str,
-    route: str,
 ) -> None:
-    del route
-    opened.record_opened(ROOT, ["tbhb-dev/other#7", TARGET])
-    assert guard_reason(monkeypatch, capsys, payload, text) == OPENED
-
-
-@pytest.mark.parametrize(("text", "route"), SCRIPT_ROUTES)
-def test_another_root_may_approve(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    text: str,
-    route: str,
-) -> None:
-    del route
-    opened.record_opened(ai.sha256_64("other-raw"), [TARGET])
-    opened.record_opened(ROOT, ["tbhb-dev/tools#8"])
-    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) is None
-
-
-@pytest.mark.parametrize(("text", "route"), SCRIPT_ROUTES)
-def test_no_ledger_allows(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    state: Path,
-    text: str,
-    route: str,
-) -> None:
-    del route
-    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) is None
-    assert not state.exists()
-
-
-@pytest.mark.parametrize(("text", "route"), SCRIPT_ROUTES)
-def test_a_corrupt_ledger_denies(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    state: Path,
-    text: str,
-    route: str,
-) -> None:
-    path = state / f"{ai.hx(ROOT)}.json"
-    state.mkdir(parents=True)
-    path.write_text("{")
-    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) == (
-        f"{RULE}, and the guard can't read this session's ledger, "
-        f"so it refuses {route}: {path} is not JSON"
-    )
-
-
-@pytest.mark.parametrize(("text", "route"), SCRIPT_ROUTES)
-def test_an_unresolvable_root_denies(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    text: str,
-    route: str,
-) -> None:
-    payload = {k: v for k, v in CLAUDE_PAYLOAD.items() if k != "session_id"}
-    assert guard_reason(monkeypatch, capsys, payload, text) == (
-        f"{RULE}, and the guard can't tell which session this is, "
-        f"so it refuses {route}."
-    )
-
-
-@pytest.mark.parametrize(("text", "route"), SCRIPT_ROUTES)
-def test_antigravity_without_a_brain_denies(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    text: str,
-    route: str,
-) -> None:
-    stdin = json.dumps(with_command(AGY_PAYLOAD, text))
-    code, out, err = run_main(monkeypatch, capsys, stdin)
-    assert (code, err) == (0, "")
-    assert json.loads(out) == {
-        "decision": "deny",
-        "reason": (
-            f"{RULE}, and the guard can't tell which session this is, "
-            f"so it refuses {route}."
-        ),
-    }
-
-
-@pytest.mark.parametrize(("text", "route"), SCRIPT_ROUTES)
-def test_an_antigravity_child_of_the_opener_cant_approve(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-    text: str,
-    route: str,
-) -> None:
-    del route
-    brain = tmp_path / "brain"
-    folder = brain / "child-raw" / ".system_generated" / "messages"
-    folder.mkdir(parents=True)
-    (brain / "conv-raw").mkdir()
-    tool = {"toolCall": {"name": "invoke_subagent"}}
-    message = {"recipient": "child-raw", "sender": "conv-raw"}
-    (folder / "1.json").write_text(
-        json.dumps(message | {"sourceMetadata": {"tool": tool}})
-    )
-    opened.record_opened(ai.sha256_64("conv-raw"), [TARGET])
-    payload = {
-        **with_command(AGY_PAYLOAD, text),
-        "conversationId": "child-raw",
-        "artifactDirectoryPath": str(brain / "child-raw"),
-    }
-    code, out, _ = run_main(monkeypatch, capsys, json.dumps(payload))
-    assert code == 0
-    assert json.loads(out) == {"decision": "deny", "reason": OPENED}
-
-
-def test_a_crash_while_checking_an_approval_denies(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    def boom(_root: str) -> set[str]:
-        msg = "boom"
-        raise RuntimeError(msg)
-
-    monkeypatch.setattr(guard, "read_ledger", boom)
-    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, SCRIPT_ROUTES[0][0]) == (
-        f"{RULE}, and the guard failed while checking, "
-        "so it refuses `tbhb-approve`: boom"
-    )
+    stdin = json.dumps(with_command(payload, APPROVE))
+    assert run_main(monkeypatch, capsys, stdin) == (0, "", "")
+    opened.record_opened(ROOT, [TARGET])
+    assert run_main(monkeypatch, capsys, stdin) == (0, "", "")
 
 
 def test_a_crash_while_matching_an_approval_fails_open(
@@ -850,10 +730,7 @@ def test_a_crash_while_matching_an_approval_fails_open(
         raise RuntimeError(msg)
 
     monkeypatch.setattr(guard, "approvals", boom)
-    opened.record_opened(ROOT, [TARGET])
-    assert (
-        guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, SCRIPT_ROUTES[0][0]) is None
-    )
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, GH_ROUTES[0][0]) is None
     assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, "gh pr merge 1") == (
         f"{guard.HINT_LINE}\n{MERGE.format(n=1)}\n{guard.FOOTER}"
     )
@@ -866,27 +743,20 @@ def test_approval_rules_apply_outside_tbhb_dev(
         return False
 
     monkeypatch.setattr(guard, "in_tbhb_dev", in_tbhb_dev)
-    opened.record_opened(ROOT, [TARGET])
-    assert (
-        guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, SCRIPT_ROUTES[0][0]) == OPENED
+    text, route = GH_ROUTES[0]
+    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) == GH_DENIED.format(
+        route=route
     )
     assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, "gh pr merge 1") is None
 
 
-def test_the_ledger_comparison_ignores_case(
+def test_gh_approval_is_denied_alongside_tbhb_approve(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    opened.record_opened(ROOT, ["TBHB-dev/Tools#7"])
-    text = "tbhb-approve tools 7 abc"
-    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) == OPENED
-
-
-def test_the_first_approval_it_refuses_is_named(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    opened.record_opened(ROOT, [TARGET])
-    text = "tbhb-approve tools 6 abc && tbhb-approve tools 7 abc"
-    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) == OPENED
+    text, route = GH_ROUTES[0]
+    assert guard_reason(
+        monkeypatch, capsys, CLAUDE_PAYLOAD, f"{APPROVE} && {text}"
+    ) == GH_DENIED.format(route=route)
 
 
 @pytest.mark.parametrize(
@@ -910,10 +780,6 @@ def test_the_first_approval_it_refuses_is_named(
         "gh api repos/tbhb-dev/tools/issues/7/reviews -f event=APPROVE",
         "gh api graphql -f query=addPullRequestReview",
         "gh -R tbhb-dev/tools api -f event=APPROVE",
-        "tbhb-approve tools",
-        "tbhb-approve tools seven abc",
-        "tbhb-approve",
-        "echo 'tbhb-approve tools 7 abc'",
         "git commit -m 'gh pr review 7 --approve -R tbhb-dev/tools'",
         "gh issue view 7",
         "gh pr",
@@ -922,14 +788,12 @@ def test_the_first_approval_it_refuses_is_named(
 def test_other_review_calls_pass(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], text: str
 ) -> None:
-    opened.record_opened(ROOT, [TARGET])
     assert guard.approvals(text, None) == []
     assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) is None
 
 
 A_REVIEW = "`gh pr review --approve`"
 AN_API = "a `gh api` APPROVE review"
-SCRIPT = "`tbhb-approve`"
 
 
 @pytest.mark.parametrize(
@@ -999,10 +863,6 @@ SCRIPT = "`tbhb-approve`"
             "gh api -X POST repos/tbhb-dev/tools/pulls/$N/reviews -f event=APPROVE",
             (AN_API, None),
         ),
-        ("tbhb-approve tools 7 abc123", (SCRIPT, TARGET)),
-        ("/usr/local/bin/tbhb-approve tools 7", (SCRIPT, TARGET)),
-        ("bash -c 'cd x && tbhb-approve tools 7 abc'", (SCRIPT, TARGET)),
-        ("eval tbhb-approve tools 7 abc", (SCRIPT, TARGET)),
         ("env A=b sudo gh pr review 7 -a -R tbhb-dev/tools", (A_REVIEW, TARGET)),
         ('echo "$(gh pr review 7 -a -R tbhb-dev/tools)"', (A_REVIEW, TARGET)),
     ],
@@ -1202,47 +1062,17 @@ def test_one_placeholder_takes_only_its_own_part_from_origin(tmp_path: Path) -> 
     assert guard.approvals(text, repo) == [guard.Approval(AN_API, "tbhb-dev/x#7")]
 
 
-def test_the_guard_reads_the_payloads_cwd_and_environment(
+def test_the_guard_checks_gh_approval_from_the_payloads_cwd(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
     repo = origin_repo(tmp_path / "repo", "git@github.com:o/r.git")
     (tmp_path / "plain").mkdir()
     monkeypatch.chdir(tmp_path / "plain")
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
-    opened.record_opened(ROOT, ["o/r#7"])
     payload = {**CLAUDE_PAYLOAD, "cwd": str(repo)}
     assert guard_reason(monkeypatch, capsys, payload, "gh pr review 7 -a") == (
         GH_DENIED.format(route=A_REVIEW)
     )
-    (tmp_path / "brain" / "conv-raw").mkdir(parents=True)
-    monkeypatch.setenv("ANTIGRAVITY_APP_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("ANTIGRAVITY_CONVERSATION_ID", "conv-raw")
-    opened.record_opened(ai.sha256_64("conv-raw"), [TARGET])
-    agy = with_command(AGY_PAYLOAD, SCRIPT_ROUTES[0][0])
-    del agy["conversationId"], agy["artifactDirectoryPath"]
-    code, out, _ = run_main(monkeypatch, capsys, json.dumps(agy))
-    assert code == 0
-    assert json.loads(out) == {"decision": "deny", "reason": OPENED}
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "tbhb-approve tools 007 abc",
-    ],
-)
-def test_leading_zeros_are_the_same_pr(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], text: str
-) -> None:
-    opened.record_opened(ROOT, [TARGET])
-    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, text) == OPENED
-
-
-@pytest.mark.parametrize(
-    "text", ["tbhb-approve tools \u00b2 abc", "tbhb-approve tools 7a abc"]
-)
-def test_a_pr_number_must_be_decimal(text: str) -> None:
-    assert guard.approvals(text, None) == []
 
 
 @pytest.mark.parametrize(
@@ -1377,7 +1207,6 @@ def test_a_directory_change_makes_the_origin_unknown(tmp_path: Path, text: str) 
         "cd x; gh pr review 7 -a -R tbhb-dev/tools",
         "cd x; GH_REPO=tbhb-dev/tools gh pr review 7 -a",
         "cd x; gh pr review https://github.com/tbhb-dev/tools/pull/7 -a",
-        "cd x; tbhb-approve tools 7 abc",
     ],
 )
 def test_the_target_stays_known_without_a_move_or_with_a_named_repo(
@@ -1386,18 +1215,6 @@ def test_the_target_stays_known_without_a_move_or_with_a_named_repo(
     repo = origin_repo(tmp_path / "repo", "git@github.com:tbhb-dev/tools.git")
     (found,) = guard.approvals(text, repo)
     assert found.target == TARGET
-
-
-def test_a_non_utf8_ledger_denies(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], state: Path
-) -> None:
-    state.mkdir(parents=True)
-    path = state / f"{ai.hx(ROOT)}.json"
-    path.write_bytes(b'{"prs": ["\xff"]}')
-    assert guard_reason(monkeypatch, capsys, CLAUDE_PAYLOAD, SCRIPT_ROUTES[0][0]) == (
-        f"{RULE}, and the guard can't read this session's ledger, "
-        f"so it refuses `tbhb-approve`: {path} is not UTF-8"
-    )
 
 
 PLACEHOLDERS = {
