@@ -29,17 +29,19 @@ MAC address, the endpoint and keychain rules and the canary. Only the exact
 visibility ``PRIVATE`` skips them. Any other value, ``PUBLIC`` and ``INTERNAL``
 included, an empty one or a failed read, gets the full private config.
 
-There is no public-only fallback. A missing or unreadable private config, one
-without the canary rule, or a missing .gitleaks.toml stops the command, and so
-does any finding or gitleaks error. A finding is reported by its rule ID and
-line only: gitleaks redacts its JSON report, and nothing else it prints about a
-finding is passed on.
+There is no public-only fallback. A missing or unreadable private config or one
+without the canary rule stops the command, and so does any finding or gitleaks
+error. A repository without a .gitleaks.toml is scanned with the private config
+and gitleaks' default rules, and the scan says so on stderr. A finding is
+reported by its rule ID and line only: gitleaks redacts its JSON report, and
+nothing else it prints about a finding is passed on.
 """
 
 import json
 import os
 import re
 import subprocess  # nosec B404
+import sys
 import tempfile
 import tomllib
 from pathlib import Path
@@ -48,6 +50,12 @@ from typing import cast
 import tomlkit
 
 from tbhbdev.host import CANARY, GITLEAKS_CANARY, GITLEAKS_EXTENDS, GITLEAKS_FILE
+
+# What the scan says when the repository has no .gitleaks.toml.
+NO_COMMITTED_CONFIG = (
+    "no .gitleaks.toml at the base; scanned with the private config and gitleaks "
+    "defaults"
+)
 
 # The remedy for a missing private config: the host's provisioning installs it.
 FETCH = "Install it with the host's provisioning tooling."
@@ -215,7 +223,7 @@ def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) ->
 
     Raises:
         SystemExit: (a ScanBlocked or FindingRefusal) The private config or
-            .gitleaks.toml is missing or wrong,
+            .gitleaks.toml is wrong,
             or gitleaks reports a finding or fails.
     """
     config = private_config()
@@ -233,7 +241,9 @@ def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) ->
             f"{GITLEAKS_CANARY}, so it is not the private gitleaks config. {FETCH}"
         )
         raise ScanBlocked(message, "config")
-    if not (root / GITLEAKS_EXTENDS).is_file():
+    committed = root / GITLEAKS_EXTENDS
+    absent = not os.path.lexists(committed)
+    if not absent and not committed.is_file():
         message = (
             f"cannot scan {what} for secrets: {root / GITLEAKS_EXTENDS} does not exist"
         )
@@ -246,7 +256,9 @@ def scan(text: str, what: str, *, root: Path, gitleaks: str, visibility: str) ->
         for path in (base, copy):
             path.touch()
             path.chmod(0o600)  # touch's mode is cut by the umask, chmod's is not
-        base.write_text(with_base((root / GITLEAKS_EXTENDS).read_text()))
+        if absent:
+            print(NO_COMMITTED_CONFIG, file=sys.stderr)
+        base.write_text(with_base("" if absent else committed.read_text()))
         # The copies point at the committed copy by absolute path: the config
         # path stays the root's, and gitleaks runs from there.
         copy.write_text(

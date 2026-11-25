@@ -114,8 +114,22 @@ def test_a_private_config_without_the_canary_is_refused(root: Path) -> None:
     )
 
 
-def test_a_missing_committed_config_is_refused(root: Path) -> None:
+def test_a_missing_committed_config_falls_back_to_the_defaults(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     (root / ".gitleaks.toml").unlink()
+    scan("fix: clean\n", root)
+    assert capsys.readouterr().err == f"{secret_scan.NO_COMMITTED_CONFIG}\n"
+    assert refusal(f"x {CANARY_HIT}\n", root) == (
+        "refusing the text: gitleaks finds a secret: rule tbhb-private-canary on line 1"
+    )
+    token = "ghp_" + "aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5"
+    assert "rule github-pat on line 1" in refusal(f"{token}\n", root)
+
+
+def test_a_committed_config_that_is_not_a_file_is_refused(root: Path) -> None:
+    (root / ".gitleaks.toml").unlink()
+    (root / ".gitleaks.toml").mkdir()
     assert refusal("clean\n", root) == (
         f"cannot scan the text for secrets: {root / '.gitleaks.toml'} does not exist"
     )
@@ -174,6 +188,31 @@ def test_gitleaks_runs_from_the_root_with_the_private_config(
     assert config != secret_scan.private_config()
     assert seen[0][5:] == ["--report-format", "json", "--report-path", "-"]
     assert seen[1:] == (os.path.realpath(root), "text\n", ["1", "yes"])
+
+
+def test_the_fallback_config_extends_only_the_generated_defaults(
+    root: Path, tmp_path: Path
+) -> None:
+    # Nothing at the root's .gitleaks.toml path reaches gitleaks: the private
+    # config's [extend] path points at a host-written file with only the defaults.
+    (root / ".gitleaks.toml").write_text("")
+    fake = tmp_path / "gitleaks"
+    log = tmp_path / "log"
+    body = (
+        "import re, sys\n"
+        "config = open(sys.argv[sys.argv.index('--config') + 1]).read()\n"
+        "extends = re.findall(r'^path\\s*=\\s*(.+)$', config, re.MULTILINE)\n"
+        'base = open(extends[0].strip("\'")).read()\n'
+        f"open({str(log)!r}, 'w').write(repr((extends, base)))\n"
+        "sys.stdout.write('[]')\n"
+    )
+    write_fake(fake, body)
+    scan("text\n", root, str(fake))
+    extends, base = ast.literal_eval(log.read_text())
+    assert len(extends) == 1
+    assert Path(extends[0].strip("'")).name == "committed.toml"
+    assert Path(extends[0].strip("'")).parent != root
+    assert base == "\n[extend]\nuseDefault = true\n"
 
 
 OVERRIDE = (
