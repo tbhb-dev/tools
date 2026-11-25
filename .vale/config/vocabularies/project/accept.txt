@@ -12,6 +12,7 @@ subcommands?
 tailnet
 tbhbdev
 tmux
+unfetched
 uv
 worktrees?
 ccstatusline
