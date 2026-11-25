@@ -1138,6 +1138,47 @@ def test_prompt_with_foreign_branch_warns_and_launches(
     assert driver.metadata_path("sample-run").is_file()
 
 
+@pytest.mark.parametrize(
+    ("prompt", "options", "unfetched"),
+    [
+        ("Use `refs/pull/5/head`.", (), ("refs/pull/5/head",)),
+        ("Use `refs/pull/5/head`.", ("--fetch-ref", "refs/pull/5/head"), ()),
+        (
+            (
+                "See (refs/pull/5/head); refs/heads/foo/bar-1.x, and "
+                "refs/heads/Release_2... Reuse refs/pull/5/head."
+            ),
+            (),
+            ("refs/pull/5/head", "refs/heads/foo/bar-1.x", "refs/heads/Release_2"),
+        ),
+        ("Read the README.", (), ()),
+        ("See refs/tags/x or refs/pull/abc/head.", (), ()),
+        (
+            "See refs/pull/5/heads, refs/pull/5/head.old or refs/pull/5/head/old.",
+            (),
+            (),
+        ),
+    ],
+)
+def test_prompt_warns_about_unfetched_refs_and_launches(
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    prompt: str,
+    options: tuple[str, ...],
+    unfetched: tuple[str, ...],
+) -> None:
+    remote.prompt.write_text(prompt)
+    assert launch(remote, *options) == 0
+    assert capsys.readouterr() == (
+        "sample: launched host=example-linux account=agent\n",
+        "".join(
+            f"warning: the prompt names {ref} but this launch has no "
+            f"--fetch-ref {ref}; a run whose mirror lacks it may end with no work\n"
+            for ref in unfetched
+        ),
+    )
+
+
 def test_metadata_round_trip_and_exclusive_create(remote: Remote) -> None:
     options = ("--ops", "--unsandboxed", "o/r#1")
     assert launch(remote, *options) == 0

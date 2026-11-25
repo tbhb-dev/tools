@@ -313,7 +313,7 @@ def check_limits(
 
 
 def checked_prompt(args: argparse.Namespace) -> str:
-    """Read the brief, refuse hook conflicts and report branch warnings locally."""
+    """Read the brief, refuse hook conflicts and report warnings locally."""
     prompt = Path(args.prompt_file).read_text()
     problems = brief.check_hooks(prompt)
     if problems:
@@ -322,6 +322,12 @@ def checked_prompt(args: argparse.Namespace) -> str:
         raise Invalid(message)
     for warning in brief.branch_warnings(prompt, run=args.name):
         print(f"warning: {args.prompt_file}: {warning}", file=sys.stderr)
+    for ref in rules.unfetched_prompt_refs(prompt, args.fetch_ref):
+        print(
+            f"warning: the prompt names {ref} but this launch has no "
+            f"--fetch-ref {ref}; a run whose mirror lacks it may end with no work",
+            file=sys.stderr,
+        )
     return prompt
 
 

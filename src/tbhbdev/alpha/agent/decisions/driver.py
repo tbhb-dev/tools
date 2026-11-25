@@ -14,6 +14,20 @@ if TYPE_CHECKING:
     from tbhbdev.alpha.agent.model import Host, RunRequest, Settings
 
 COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+# A period can be part of a branch name or punctuation after a ref.
+_PROMPT_REF = re.compile(
+    r"\brefs/(?:pull/[0-9]+/head(?!\.*[A-Za-z0-9_/-])"
+    r"|heads/[A-Za-z0-9._/-]*[A-Za-z0-9_/-])"
+)
+
+
+def unfetched_prompt_refs(prompt: str, fetch_refs: list[str]) -> list[str]:
+    """Return refs missing from the fetch list in order of first mention."""
+    return [
+        ref
+        for ref in dict.fromkeys(_PROMPT_REF.findall(prompt))
+        if ref not in fetch_refs
+    ]
 
 
 def check_name(name: str) -> None:
