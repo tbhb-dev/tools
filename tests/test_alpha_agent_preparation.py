@@ -158,8 +158,8 @@ def test_worktree_failure_names_its_step_and_safe_cause(
     ("error", "cause"),
     [
         (
-            Invalid("host executable prek was not found"),
-            "host executable prek was not found",
+            Invalid("host executable prek was not found on PATH /usr/bin:/bin"),
+            "host executable prek was not found on PATH bin",
         ),
         (
             OSError(13, "Permission denied", "/home/example/private/hooks"),
@@ -277,6 +277,7 @@ def test_missing_prek_reaches_supervisor(
 ) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("PATH", worktree.host_tools.search())
     monkeypatch.setattr(worktree, "git", constant(""))
     monkeypatch.setattr(worktree, "configure_mirror", constant(None))
     monkeypatch.setattr(worktree, "fetch_commit", constant("a" * 40))
@@ -293,7 +294,8 @@ def test_missing_prek_reaches_supervisor(
             0,
         )
     assert str(caught.value) == (
-        "run preparation failed at hook install: host executable prek was not found"
+        "run preparation failed at hook install: host executable prek was not found "
+        "on PATH [redacted]"
     )
 
 

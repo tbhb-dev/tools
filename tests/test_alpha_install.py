@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from unittest.mock import Mock
 
 import pytest
 from fake_tool import link_git, write_fake
@@ -1337,10 +1338,11 @@ def test_lock_timeout() -> None:
 @pytest.fixture
 def live_pid() -> Iterator[int]:
     """A running process that isn't this one, so a stray signal can't hit pytest."""
-    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    yield owner.pid
-    owner.kill()
-    owner.wait()
+    with subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+        stdin=subprocess.PIPE,
+    ) as owner:
+        yield owner.pid
 
 
 def dead_pid() -> int:
@@ -1358,7 +1360,11 @@ def test_dead_owner(
     (lock / "pid").write_text("x\n")
     assert install.dead_owner(lock) is None
     (lock / "pid").write_text(f"{live_pid}\n")
-    assert install.dead_owner(lock) is None
+    with monkeypatch.context() as probing:
+        probe = Mock(wraps=os.kill)
+        probing.setattr(install.os, "kill", probe)
+        assert install.dead_owner(lock) is None
+        probe.assert_called_once_with(live_pid, 0)
     pid = dead_pid()
     (lock / "pid").write_text(f"{pid}\n")
     assert install.dead_owner(lock) == pid
@@ -1368,8 +1374,6 @@ def test_dead_owner(
 
     monkeypatch.setattr(install.os, "kill", denied)
     assert install.dead_owner(lock) is None
-    # Put os.kill back before live_pid's teardown kills the owner with it.
-    monkeypatch.undo()
 
 
 @pytest.mark.parametrize("digits", [30, 5000])
@@ -1393,18 +1397,6 @@ def stale_lock(hooks: Path) -> Path:
     lock.mkdir(parents=True)
     (lock / "pid").write_text(f"{dead_pid()}\n")
     return lock
-
-
-def test_dead_owner_only_probes_a_live_owner(tmp_path: Path) -> None:
-    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-    try:
-        (tmp_path / "pid").write_text(f"{owner.pid}\n")
-        assert install.dead_owner(tmp_path) is None
-        with pytest.raises(subprocess.TimeoutExpired):
-            owner.wait(timeout=0.5)
-    finally:
-        owner.kill()
-        owner.wait()
 
 
 def test_break_stale(

@@ -31,7 +31,7 @@ from agent_example import MARKER, settings
 
 from tbhbdev import version
 from tbhbdev.alpha import agent
-from tbhbdev.alpha.agent import driver, model, render, transport
+from tbhbdev.alpha.agent import driver, model, render, transport, version_heal
 from tbhbdev.alpha.agent.decisions import remote as remote_commands
 from tbhbdev.alpha.agent.decisions import repo, request, runfiles_names
 from tbhbdev.alpha.agent.model import Invalid, Profile, RunKind, RunRequest
@@ -108,6 +108,20 @@ def test_exec_help_describes_expected_commits(
         "--expect-commit return status 6 if a successful build produced no new commit"
         in help_text
     )
+
+
+def test_exec_help_lists_model_examples(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    assert agent.main(["exec", "--help"], "example agent") == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "--harness {codex,claude,agy} harness to launch: Codex, Claude or agy" in (
+        help_text
+    )
+    assert "--allow-non-gemini let agy run a non-Gemini model ID" in help_text
+    assert "gemini-" in help_text
+    assert "claude-opus-5-5" in help_text
 
 
 def command(verb: str, *options: str) -> int:
@@ -360,7 +374,10 @@ def test_bad_name(
     assert capsys.readouterr().err
 
 
-def test_version_mismatch(remote: Remote, capsys: pytest.CaptureFixture[str]) -> None:
+def test_version_mismatch(
+    remote: Remote, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(version_heal, "read_origin", Mock(return_value=(1, "")))
     remote.configure(version="tbhbdev example-other")
     assert launch(remote) == 1
     message = capsys.readouterr().err
@@ -1611,8 +1628,9 @@ def test_explicit_codex_harness(remote: Remote) -> None:
 
 
 def test_review_version_mismatch_precedes_clone_read(
-    remote: Remote, capsys: pytest.CaptureFixture[str]
+    remote: Remote, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(version_heal, "read_origin", Mock(return_value=(1, "")))
     remote.configure(version="tbhbdev example-other")
     assert launch(remote, "--profile", "review", "--ref", "topic") == 1
     message = capsys.readouterr().err

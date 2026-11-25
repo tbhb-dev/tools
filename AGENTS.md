@@ -28,6 +28,8 @@ Before choosing a model for a subagent or peer run, read models/README.md in tbh
 
 `tbhbdev alpha` holds the interim agent tools, such as the agent identity hooks and the pull request commands `tbhbdev alpha pr` and `tbhbdev alpha merge`. Mark a pull request ready with `tbhbdev alpha pr ready N`, because the hooks refuse raw `gh pr ready`. They may change without notice. The harness hooks are user level, not in this repository: install `tbhbdev` with `uv tool install git+https://github.com/tbhb-dev/tools`, then run `tbhbdev alpha install` in a clone. See [Alpha commands](docs/reference/alpha/commands.md) for what it writes.
 
+Ask Renovate to rebase an open pull request with `tbhbdev alpha pr rebase N`.
+
 ## Checks
 
 Run `mise install`, `uv sync` and `bazelisk run //:bazel_env`, which builds the `.bazel_env/bin` shims the git hooks call, then `tbhbdev alpha install`, which runs `prek install` and adds the identity hooks. Every gate is a Bazel test from tbhb-dev/rules, which `bazelisk test //...` runs, and `bazelisk run //:format` rewrites files into their canonical format. The pre-commit hooks run the same gates. To build against a local rules clone, put `common --override_module=tbhb_rules=<path to a rules clone>` and `common --override_module=tbhb_rules_python=<path to a rules clone>/python` in `.bazelrc.user`.

@@ -66,18 +66,23 @@ def test_host_path_is_fixed_and_scoped(
     if os is Os.MACOS:
         entries += ("/opt/homebrew/bin", "/usr/local/bin")
     assert host_tools.search_path(configured, os) == (*entries, "/example/bin")
+    directories = ":".join((*entries, "/example/bin"))
     executable = script(tmp_path / "git", "binary")
 
-    def which(name: str, *, path: str) -> str:
-        assert name == "git"
-        assert path == ":".join((*entries, "/example/bin"))
-        return executable
+    def which(name: str, *, path: str) -> str | None:
+        assert path == directories
+        return executable if name == "git" else None
 
     monkeypatch.setattr(host_tools.shutil, "which", which)
     before = host_tools.search()
     with host_tools.configured(configured, os):
-        assert host_tools.search() == ":".join((*entries, "/example/bin"))
+        assert host_tools.search() == directories
         assert Path(host_tools.resolve("git")).is_absolute()
+        with pytest.raises(Invalid) as caught:
+            host_tools.resolve("missing")
+        assert str(caught.value) == (
+            f"host executable missing was not found on PATH {directories}"
+        )
     assert host_tools.search() == before
 
 
@@ -88,8 +93,11 @@ def test_resolution_follows_symlinks_and_refuses_missing(tmp_path: Path) -> None
     assert host_tools.resolve("tool", str(tmp_path), follow_symlinks=False) == str(
         tmp_path / "tool"
     )
-    with pytest.raises(Invalid, match="host executable missing was not found"):
+    with pytest.raises(Invalid) as caught:
         host_tools.resolve("missing", str(tmp_path))
+    assert (
+        str(caught.value) == f"host executable missing was not found on PATH {tmp_path}"
+    )
 
 
 @pytest.mark.parametrize("indirect", [False, True])

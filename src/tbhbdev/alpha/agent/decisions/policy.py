@@ -227,7 +227,17 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
     full: bool,
 ) -> ClaudePolicy:
     if full:
-        return ClaudePolicy({"disableAllHooks": True, "sandbox": {"enabled": False}})
+        # Claude user settings override the process environment.
+        return ClaudePolicy(
+            {
+                "disableAllHooks": True,
+                "env": {
+                    "GH_CONFIG_DIR": env["GH_CONFIG_DIR"],
+                    "DOCKER_CONFIG": env["DOCKER_CONFIG"],
+                },
+                "sandbox": {"enabled": False},
+            }
+        )
     writes, deny, protected = access
     review = profile is Profile.REVIEW
     # An absolute path in a Claude rule starts with a second slash.

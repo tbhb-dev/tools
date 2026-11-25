@@ -47,9 +47,16 @@ def parser(prog: str) -> argparse.ArgumentParser:
         "(build profile only; excludes the default branch)",
     )
     execute.add_argument(
-        "--harness", choices=("codex", "claude", "agy"), default="codex"
+        "--harness",
+        choices=("codex", "claude", "agy"),
+        default="codex",
+        help="harness to launch: Codex, Claude or agy",
     )
-    execute.add_argument("--allow-non-gemini", action="store_true")
+    execute.add_argument(
+        "--allow-non-gemini",
+        action="store_true",
+        help="let agy run a non-Gemini model ID",
+    )
     execute.add_argument(
         "--ignore-limits",
         action="store_true",
@@ -63,7 +70,12 @@ def parser(prog: str) -> argparse.ArgumentParser:
     accounts = execute.add_mutually_exclusive_group()
     accounts.add_argument("--account")
     accounts.add_argument("--ops", dest="account", action="store_const", const="ops")
-    execute.add_argument("--model", required=True)
+    execute.add_argument(
+        "--model",
+        required=True,
+        help="full model ID. agy requires a gemini-* ID such as gemini-4-argon-high. "
+        "Claude requires a full ID such as claude-opus-5-5",
+    )
     execute.add_argument("--effort", required=True)
     execute.add_argument("--profile", choices=("build", "review"), required=True)
     execute.add_argument("--reason")

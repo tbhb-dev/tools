@@ -37,6 +37,8 @@ jobs:
     name: bazel
     runs-on: ubuntu-26.04
     timeout-minutes: 45
+    env:
+      TEST_STEP_MAX_SECONDS: 300
     # A push to main or a merge_group run uses the main token, a secret
     # of the main-only `cache` environment that no pull request can read.
     # Pull requests use the org's PR token, which writes only their own
@@ -55,7 +57,7 @@ jobs:
       # uploads only the results it runs, never a disk cache hit, so that
       # run runs every action and fills the remote cache.
       - name: Set up Bazel for CI
-        uses: tbhb-dev/rules/.github/actions/setup-bazel-ci@3d891be4bf5bead2427aed9ae57a0feb49a5b8df  # main
+        uses: tbhb-dev/rules/.github/actions/setup-bazel-ci@0b12df1dd60e1f35a45695974d6a074ad47d86e7  # main
         with:
           disk-cache: ${{ github.event_name == 'push' && 'false' || format('{0}-ubuntu-26.04', github.workflow) }}
           cache-save: ${{ github.event_name == 'push' }}
@@ -72,7 +74,36 @@ jobs:
       # the whole tree, the buildifier_test, and the preset.update_test that
       # fails when preset.bazelrc is stale.
       - name: Test
-        run: bazelisk test --config=ci //...
+        id: bazel-test
+        run: |
+          date +%s > "$RUNNER_TEMP/bazel-test-start"
+          test_status=0
+          bazelisk test --config=ci //... || test_status=$?
+          date +%s > "$RUNNER_TEMP/bazel-test-end"
+          exit "$test_status"
+
+      - name: Check Bazel test duration
+        if: ${{ !cancelled() && (steps.bazel-test.outcome == 'success' || steps.bazel-test.outcome == 'failure') }}
+        # TODO(flip_date: TBD): Remove continue-on-error once the full suite meets TEST_STEP_MAX_SECONDS.
+        continue-on-error: true
+        run: |
+          if [[ ! -s "$RUNNER_TEMP/bazel-test-start" || ! -s "$RUNNER_TEMP/bazel-test-end" ]]; then
+            echo '::error::Bazel Test step is missing a start or end timestamp.'
+            exit 1
+          fi
+          started=$(<"$RUNNER_TEMP/bazel-test-start")
+          finished=$(<"$RUNNER_TEMP/bazel-test-end")
+          timestamp_pattern='^[1-9][0-9]{0,11}$'
+          if [[ ! $started =~ $timestamp_pattern || ! $finished =~ $timestamp_pattern ]] || ((finished < started)); then
+            echo '::error::Bazel Test step has invalid timestamps.'
+            exit 1
+          fi
+          elapsed=$((finished - started))
+          if ((elapsed > TEST_STEP_MAX_SECONDS)); then
+            echo "::error::Bazel Test step took ${elapsed} s and exceeded the ${TEST_STEP_MAX_SECONDS} s limit."
+            exit 1
+          fi
+          echo "Bazel Test step took ${elapsed} s within the ${TEST_STEP_MAX_SECONDS} s limit."
 
       # A failed run's test logs, so a failure that does not recur can still
       # be read.
@@ -94,7 +125,7 @@ jobs:
     name: repo
     permissions:
       contents: read
-    uses: tbhb-dev/rules/.github/workflows/repo-checks.yml@3d891be4bf5bead2427aed9ae57a0feb49a5b8df  # main
+    uses: tbhb-dev/rules/.github/workflows/repo-checks.yml@0b12df1dd60e1f35a45695974d6a074ad47d86e7  # main
     with:
       runs-on: ubuntu-26.04
       timeout-minutes: 10
@@ -137,7 +168,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Fail if any needed job did not succeed
-        uses: tbhb-dev/rules/.github/actions/ci-conclusion@3d891be4bf5bead2427aed9ae57a0feb49a5b8df  # main
+        uses: tbhb-dev/rules/.github/actions/ci-conclusion@0b12df1dd60e1f35a45695974d6a074ad47d86e7  # main
         with:
           needs: ${{ toJSON(needs) }}
 
