@@ -22,10 +22,11 @@ MINTED = "minted"
 
 
 def draft(event: str = "COMMENT", head: str = HEAD, *, findings: bool = False) -> str:
+    verdict = "NO-GO" if event == "REQUEST_CHANGES" else "GO"
     extra = "## Findings\n\n- `a.py:1` fix it.\n\n" if findings else ""
     return (
         f"---\npr: 7\ncommit_id: '{head}'\nevent: {event}\n---\n\n"
-        f"## Verdict\n\nLooks fine.\n\n{extra}## Verification\n\nRead the diff.\n"
+        f"## Verdict\n\n{verdict}\n\n{extra}## Verification\n\nRead the diff.\n"
     )
 
 
@@ -95,20 +96,34 @@ class Api:
         return outcome
 
 
-def test_posts_the_comment_with_identity_in_the_body(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("event", "head", "checks"),
+    [
+        ("APPROVE", HEAD, [("GET", BASE)]),
+        ("REQUEST_CHANGES", "b" * 40, []),
+        ("COMMENT", "b" * 40, []),
+    ],
+)
+def test_posts_at_the_pinned_commit_with_identity_in_the_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+    head: str,
+    checks: list[tuple[str, str]],
 ) -> None:
-    run, prepared = make(tmp_path, draft())
+    text = draft(event, HEAD.upper(), findings=event == "REQUEST_CHANGES")
+    run, prepared = make(tmp_path, text)
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
     api = Api(monkeypatch)
+    api.pull = reply(200, {"head": {"sha": head}})
     assert review_post.posted(run, prepared)
     assert [(m, u) for m, u, _ in api.calls] == [
-        ("GET", BASE),
+        *checks,
         ("POST", f"{BASE}/reviews"),
     ]
     payload = api.calls[-1][2]
     assert payload is not None
-    assert payload["event"] == "COMMENT"
+    assert payload["event"] == event
     assert payload["commit_id"] == HEAD
     assert payload["body"].startswith("## Verdict")
     assert payload["body"].endswith(f"\n---\n{STAMP}\n")
@@ -126,7 +141,7 @@ def test_a_run_name_posts_only_once(
     run.files = runfiles.RunFiles(run.files.root, run.files.name)
     monkeypatch.setattr(credentials, "review_post_token", forbidden)
     assert not review_post.posted(run, prepared)
-    assert [method for method, _, _ in api.calls] == ["GET", "POST"]
+    assert [method for method, _, _ in api.calls] == ["POST"]
     assert run.files.path("review").read_text() == "github.com/o/r#7 99"
 
 
@@ -140,12 +155,12 @@ APPROVE_THEN_COMMENT = draft("APPROVE").replace(
     [
         (None, "review-7.md", "found 0"),
         (draft(), "notes.md", "found 0"),
-        (draft("APPROVE"), "review-7.md", "can't post a APPROVE"),
         (
-            draft("REQUEST_CHANGES", findings=True),
+            draft("REQUEST_CHANGES"),
             "review-7.md",
-            "can't post a REQUEST",
+            "REQUEST_CHANGES requires non-empty Findings",
         ),
+        (draft("PENDING"), "review-7.md", "not one of"),
         (APPROVE_THEN_COMMENT, "review-7.md", "duplicate key"),
         ("---\npr: [\n---\n", "review-7.md", "invalid YAML"),
         (draft(head="b" * 40), "review-7.md", "isn't the commit"),
@@ -166,6 +181,17 @@ def test_a_bad_draft_posts_nothing(
     assert message in run.files.path("log").read_text()
 
 
+def test_the_host_can_refuse_a_draft_event_allowed_by_the_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = make(tmp_path, draft("APPROVE"))
+    monkeypatch.setattr(review_post, "ALLOWED_EVENTS", frozenset({"COMMENT"}))
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    monkeypatch.setattr(httpx, "request", forbidden)
+    assert not review_post.posted(run, prepared)
+    assert "can't post a APPROVE" in run.files.path("log").read_text()
+
+
 def test_two_drafts_are_refused(tmp_path: Path) -> None:
     run, prepared = make(tmp_path, draft())
     directory = tmp_path / "ws" / ".git" / "tbhb-alpha"
@@ -178,16 +204,16 @@ def test_two_drafts_are_refused(tmp_path: Path) -> None:
     "pull",
     [reply(200, {"head": {"sha": "b" * 40}}), reply(200, {}), reply(200, [])],
 )
-def test_a_moved_head_blocks_the_post(
+def test_an_approval_requires_one_read_of_the_pinned_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pull: httpx.Response
 ) -> None:
-    run, prepared = make(tmp_path, draft())
+    run, prepared = make(tmp_path, draft("APPROVE"))
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
     api = Api(monkeypatch)
     api.pull = pull
     assert not review_post.posted(run, prepared)
     assert "head moved" in run.files.path("log").read_text()
-    assert all(m == "GET" for m, _, _ in api.calls)
+    assert api.calls == [("GET", BASE, None)]
 
 
 def test_a_missing_token_blocks_the_post(

@@ -40,10 +40,10 @@ post a COMMENT review instead:
                                       -f/-F/--field/--raw-field) whose fields
                                       hold event=APPROVE; also .../reviews/ID/events
 
-Approval comes only from ``tbhb-approve REPO N SHA``, read as tbhb-dev/REPO#N. A
-session can't approve a pull request it or its subagents opened: the guard reads
-the caller's root session from the payload (see ``tbhbdev.alpha.opened``) and
-denies the script when that root's opened ledger lists the target.
+The guard reads ``tbhb-approve REPO N SHA`` as tbhb-dev/REPO#N. It reads the
+caller's root session from the payload (see ``tbhbdev.alpha.opened``) and
+denies the script when that root's opened ledger lists the target. The run
+host can post an approval for a review run's GO verdict.
 
 The ledger check fails closed: a ledger that exists but can't be read, a payload
 whose root session can't be resolved and a crash while checking all deny. A root
@@ -610,9 +610,8 @@ def approvals(text: str, cwd: Path | None) -> list[Approval]:
 def denial(found: list[Approval], data: Json, env: Mapping[str, str]) -> str | None:
     """The deny message for approval routes, or None when the caller may approve.
 
-    Fails closed: an unknown root or an unreadable ledger denies. A gh approval
-    denies for every session, which stops a review run's own GO from becoming
-    an approval.
+    An unknown root or an unreadable ledger denies. Every session's gh
+    approval is denied. The run host posts a review run's GO as an approval.
     """
     for approval in found:
         if approval.route != f"`{APPROVE_SCRIPT}`":

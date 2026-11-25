@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:fd1b5f66325083c3
-    at: "2026-11-25T09:20:33Z"
+    session: sha-256-64:621ba09362617ce8
+    at: "2026-11-25T20:45:00Z"
 status: stable
 tags: [alpha]
 title: Review drafts
@@ -18,7 +18,7 @@ type: Reference
 
 `tbhbdev alpha review draft N` reads the PR's head through `gh` and writes a skeleton to `$(git rev-parse --git-dir)/tbhb-alpha/review-N.md`. It prints the path and keeps an existing draft unchanged. `--force` refreshes only `commit_id`. It keeps the body and the other metadata. Each worktree and PR has its own file.
 
-Pick `REQUEST_CHANGES` or `COMMENT` in the draft's `event` field. A draft can't hold `APPROVE`: approval comes only from `tbhb-approve`, run by the coordinator, so a reviewer's GO is a `COMMENT`. The required frontmatter also holds `pr`, which must match N, and a 40-hex `commit_id`. Reviews have no H1 title. Fill Verdict and Verification, then remove the guidance comments and any unused optional sections. Findings holds blocking issues, one list item each with `path:line` and what must change. A request for changes needs findings. Suggestions holds non-blocking improvements.
+Set `event` to `APPROVE` for GO or `REQUEST_CHANGES` for BLOCK or HOLD. The draft also accepts `COMMENT`. The required frontmatter holds `pr`, which must match N, and a 40-hex `commit_id`. For a review run, set `commit_id` to the run's pinned commit. Reviews have no H1 title. Fill Verdict and Verification, then remove the guidance comments and any unused optional sections. Findings holds blocking issues, one list item each with `path:line` and what must change. A request for changes needs findings. Suggestions holds non-blocking improvements.
 
 `tbhbdev alpha review check N` checks the draft locally, including its frontmatter, section order, word limits, prose wrapping, references, trailers, and the repository's Markdown, spelling, and prose rules. It prints each problem as `path:line: problem` on stderr and exits 1 on failure or 0 on success. The check reads local files and runs local linters. Write plain prose, one line per paragraph, cite code as `path:line`, and leave trailers out.
 
