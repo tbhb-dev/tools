@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import select
 import shutil
 import signal
 import socket
@@ -1194,19 +1195,26 @@ def test_startup_deadline_stops_the_recorded_setup_group(
     _, clone = repository(run.home / "Code" / "github.com" / "tbhb-dev")
     clone.rename(clone.parent / "example-repo")
     local_mirror_fetches(monkeypatch, clone.parent / "origin")
-    run = dataclasses.replace(run, deadline=time.monotonic() + 5)
     original = run_host.worktree.git
-    ready = tmp_path / "setup-child.json"
 
     def hang() -> str:
         code = (
-            "import json, os, signal, sys; from pathlib import Path; "
-            "Path(sys.argv[1]).write_text(json.dumps([os.getpid(), os.getpgrp()])); "
+            "import json, os, signal, sys; "
+            "row = json.dumps([os.getpid(), os.getpgrp()]); "
+            "os.write(int(sys.argv[1]), row.encode() + b'\\n'); "
             "signal.pause()"
         )
         return subprocess.check_output(
-            [sys.executable, "-c", code, str(ready)], text=True
+            [sys.executable, "-c", code, str(ready_write)],
+            pass_fds=(ready_write,),
+            text=True,
         )
+
+    def clock() -> float:
+        if not run.files.path("pgid").exists():
+            return time.monotonic()
+        assert select.select([ready_read], [], [], 5)[0], "setup child did not start"
+        return run.deadline
 
     def git(path: Path, *args: str) -> str:
         return (
@@ -1233,10 +1241,15 @@ def test_startup_deadline_stops_the_recorded_setup_group(
             run_host.worktree, "create", constant(Path(prepared.paths.worktree))
         )
         monkeypatch.setattr(secrets, "read", read)
-    assert run_host.execute(run, "example") == 124
+    ready_read, ready_write = os.pipe()
+    with os.fdopen(ready_read, "rb") as ready, os.fdopen(ready_write, "wb"):
+        monkeypatch.setattr(
+            process_group, "prepare", partial(process_group.prepare, clock=clock)
+        )
+        assert run_host.execute(run, "example") == 124
+        pid, group = json.loads(ready.readline())
     assert run.files.path("rc").read_text() == "124\n"
     assert not run.files.path("launched").exists()
-    pid, group = json.loads(ready.read_text())
     assert json.loads(run.files.path("pgid").read_text())["pgid"] == group
     assert process_group.leader_start(pid) is None
     assert process_group.leader_start(group) is None

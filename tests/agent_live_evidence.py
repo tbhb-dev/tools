@@ -25,7 +25,15 @@ if TYPE_CHECKING:
 
 def run_default_pytest(home: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        (sys.executable, "-m", "pytest", *arguments),
+        # Keep nested runs out of the parent suite's temporary directory rotation.
+        (
+            sys.executable,
+            "-m",
+            "pytest",
+            "--basetemp",
+            str(home / "pytest"),
+            *arguments,
+        ),
         env={
             "HOME": str(home),
             "PATH": os.defpath,
