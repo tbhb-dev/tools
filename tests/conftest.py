@@ -119,7 +119,11 @@ def checked_move(operation: Callable[..., None]) -> Callable[..., None]:
 @pytest.fixture(autouse=True)
 def launching_session(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests run as a named session, whatever pane they run in."""
-    monkeypatch.setattr(launcher, "session", lambda: ("tools", "session-1"))
+
+    def session(*_: object) -> tuple[str, str]:
+        return "tools", "session-1"
+
+    monkeypatch.setattr(launcher, "session", session)
 
 
 @pytest.fixture(autouse=True)

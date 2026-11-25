@@ -333,7 +333,7 @@ def test_review_uses_its_own_reservation_at_the_boundary(
     def load() -> Settings:
         return config
 
-    def session() -> tuple[str, None]:
+    def session(*_: object) -> tuple[str, None]:
         return "tools", None
 
     monkeypatch.setattr(agent.settings, "load", load)

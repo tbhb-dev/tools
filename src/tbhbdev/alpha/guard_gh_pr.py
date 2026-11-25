@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
-"""`tbhbdev alpha guard-gh-pr`: block direct `gh pr` writes and self-approval.
+"""`tbhbdev alpha guard-gh-pr`: block direct `gh pr` writes and `gh` approvals.
 
 A PreToolUse hook, ported from an earlier interim toolset. Outside a tbhb-dev
 repository only the approval rules below apply. Inside one, agents open, edit
@@ -40,16 +40,12 @@ post a COMMENT review instead:
                                       -f/-F/--field/--raw-field) whose fields
                                       hold event=APPROVE; also .../reviews/ID/events
 
-The guard reads ``tbhb-approve REPO N SHA`` as tbhb-dev/REPO#N. It reads the
-caller's root session from the payload (see ``tbhbdev.alpha.opened``) and
-denies the script when that root's opened ledger lists the target. The run
-host can post an approval for a review run's GO verdict.
+Approval comes only from ``tbhb-approve REPO N SHA``. The commissioning session
+may run it after a separate agent run or subagent reviews the pull request.
+The run host posts a review run's GO as an approval when the head matches the
+pinned commit.
 
-The ledger check fails closed: a ledger that exists but can't be read, a payload
-whose root session can't be resolved and a crash while checking all deny. A root
-with no ledger opened nothing, so its ``tbhb-approve`` passes.
-
-Allowing prints nothing. Every other path fails open: unreadable input or any crash
+Allowing prints nothing. The hook fails open: unreadable input or any crash
 allows the command and prints nothing, because a broken hook must never stop
 the agent's work. The permission rules in .claude/settings.json and
 .codex/rules/pull-request.rules stay as backstops.
@@ -78,10 +74,7 @@ Known gaps, none of which the permission rules close either:
   ``submitPullRequestReview`` mutation, ``gh api --input FILE`` and
   ``-F event=@file``, curl, httpx or any client other than gh, a script or
   wrapper outside the list that approves, another host, and a session
-  without the user-level hooks. It reads only this host's ledger, so a pull
-  request opened elsewhere, or before the rollout and not yet backfilled, is
-  not covered, and an edit to the ledger hides an opener. None of this is a
-  security boundary.
+  without the user-level hooks. None of this is a security boundary.
 - False positives: only text the shell itself runs is read as a command, so
   quoted words never match. The remaining case is a deliberate one: a
   ``$(gh pr merge 1)`` inside ``echo`` or a commit message is run by the shell
@@ -89,16 +82,14 @@ Known gaps, none of which the permission rules close either:
 """
 
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
-from tbhbdev.alpha.opened import LedgerError, caller_root, read_ledger
 from tbhbdev.alpha.repo import git, hook_cwd, in_tbhb_dev, read_hook_stdin
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 type Json = dict[str, object]
@@ -125,14 +116,11 @@ SEPARATORS = ";&|"
 DRAFT = ".github/PULL_REQUEST_DRAFT.md"
 TEMPLATE = ".github/PULL_REQUEST_TEMPLATE.md"
 
-RULE = "A session can't approve a pull request it or its subagents opened"
 GH_RULE = (
     "An agent can't approve a pull request through gh, whoever opened it. "
     "Approval comes only from `tbhb-approve`, run by the coordinator. "
     "Post the verdict as a COMMENT review instead"
 )
-APPROVE_SCRIPT = "tbhb-approve"
-APPROVE_OWNER = "tbhb-dev"
 # gh pr review's flags that take a value; the next word is not the PR.
 REVIEW_VALUE_FLAGS = {"-b", "--body", "-F", "--body-file", "-R", "--repo"}
 # gh api's flags that take a value; the next word is not the endpoint.
@@ -557,13 +545,6 @@ def gh_approval(rest: list[str], default: Callable[[], str | None]) -> Approval 
     return None
 
 
-def script_approval(args: list[str]) -> Approval | None:
-    """``tbhb-approve REPO N SHA``, read as ``tbhb-dev/REPO#N``."""
-    if len(args) < 2 or not args[1].isdecimal():  # noqa: PLR2004 -- REPO and N
-        return None
-    return Approval(f"`{APPROVE_SCRIPT}`", f"{APPROVE_OWNER}/{args[0]}#{int(args[1])}")
-
-
 def default_repo(
     prefix: list[str], cwd: Path | None, *, moved: bool
 ) -> Callable[[], str | None]:
@@ -590,53 +571,19 @@ def changes_directory(words: list[str]) -> bool:
 
 
 def approvals(text: str, cwd: Path | None) -> list[Approval]:
-    """Every approval route in a shell command."""
+    """Every gh approval route in a shell command."""
     found: list[Approval] = []
     moved = False  # pragma: no mutate -- None is as falsy as False here
     for prefix, words in simple_commands(text):
         program = program_of(words)
         if program == "gh":
             match = gh_approval(words[1:], default_repo(prefix, cwd, moved=moved))
-        elif program == APPROVE_SCRIPT:
-            match = script_approval(words[1:])
         else:
             moved = moved or changes_directory(words)
             continue
         if match:
             found.append(match)
     return found
-
-
-def denial(found: list[Approval], data: Json, env: Mapping[str, str]) -> str | None:
-    """The deny message for approval routes, or None when the caller may approve.
-
-    An unknown root or an unreadable ledger denies. Every session's gh
-    approval is denied. The run host posts a review run's GO as an approval.
-    """
-    for approval in found:
-        if approval.route != f"`{APPROVE_SCRIPT}`":
-            return f"{GH_RULE}: it refuses {approval.route}."
-    root = caller_root(data, env)
-    if root is None:
-        return (
-            f"{RULE}, and the guard can't tell which session this is, "
-            f"so it refuses {found[0].route}."
-        )
-    try:
-        opened = {ref.lower() for ref in read_ledger(root)}
-    except LedgerError as exc:
-        return (
-            f"{RULE}, and the guard can't read this session's ledger, "
-            f"so it refuses {found[0].route}: {exc}"
-        )
-    for approval in found:
-        # Only `tbhb-approve` reaches here, and it always names its target.
-        if approval.target and approval.target.lower() in opened:
-            return (
-                f"{RULE}: this session opened {approval.target}, "
-                "so it can't approve it."
-            )
-    return None
 
 
 def other_hint(found: Match, number: str) -> str | None:
@@ -721,24 +668,14 @@ def decision(message: str, *, antigravity: bool) -> Json:
 
 
 def approval_message(data: Json, text: str) -> str | None:
-    """The deny message for the approval routes in ``text``, or None.
-
-    Matching fails open with the rest of the guard; once a route matches, a
-    crash denies.
-    """
+    """The deny message for the first gh approval in ``text``, or None."""
     try:
         found = approvals(text, hook_cwd(data))
     except Exception:  # noqa: BLE001  # fail open on any crash
         return None
     if not found:
         return None
-    try:
-        return denial(found, data, os.environ)
-    except Exception as exc:  # noqa: BLE001  # fail closed for an approval
-        return (
-            f"{RULE}, and the guard failed while checking, "
-            f"so it refuses {found[0].route}: {exc}"
-        )
+    return f"{GH_RULE}: it refuses {found[0].route}."
 
 
 def main() -> int:
