@@ -210,8 +210,7 @@ class GhApi:
         if payload is not None:
             args += ["--input", "-"]
             stdin = json.dumps(payload)
-        done = pr.run(args, stdin=stdin)
-        if done.returncode != 0:
+        if (done := pr.run(args, stdin=stdin)).returncode != 0:
             raise review_doc.ReviewError(done.stderr.strip())
         try:
             return json.loads(done.stdout or "null")
@@ -221,7 +220,8 @@ class GhApi:
 
 
 def api_author(api: review_doc.Api) -> str:
-    match cast("review_doc.ApiObject", api.request("GET", "user")):
+    user = api.request("GET", "user")
+    match cast("review_doc.ApiObject", user):  # pragma: no mutate -- runtime no-op
         case {"login": str(login)} if login:
             return login
         case _:
@@ -248,14 +248,12 @@ def post_draft(number: int, author: str | None) -> int:
 
 def edit_review(args: argparse.Namespace) -> int:
     try:
-        api, repo = GhApi(), pr.origin_repository()
+        target = (GhApi(), pr.origin_repository(), args.number, args.review_id)
         if args.command == "dismiss":
-            review_doc.dismiss(api, repo, args.number, args.review_id, args.reason)
+            review_doc.dismiss(*target, args.reason)
             result = f"superseded {args.review_id}"
         else:
-            comment = review_doc.reply(
-                api, repo, args.number, args.review_id, args.text
-            )
+            comment = review_doc.reply(*target, args.text)
             result = f"replied {comment}"
     except (OSError, SystemExit, review_doc.ReviewError) as exc:
         print(f"review {args.review_id}: {exc}", file=sys.stderr)
@@ -277,7 +275,7 @@ def main(argv: list[str], prog: str) -> int:
     sub.add_parser("policy", help="check a worktree's review policy files")
     post = sub.add_parser("post")
     post.add_argument("number", type=int)
-    post.add_argument("--author", help="login to match for duplicate detection")
+    post.add_argument("--author")
     for command, option in (("dismiss", "--reason"), ("reply", "--text")):
         edit = sub.add_parser(command)
         edit.add_argument("number", type=int)

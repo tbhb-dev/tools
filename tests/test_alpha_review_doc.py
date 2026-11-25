@@ -326,27 +326,31 @@ def test_find_existing_uses_latest_active_match_across_pages() -> None:
         ROW | {"body": f"SUPERSEDED: reason\n{MARKER}"},
     ]
     first = [ROW, *ignored, *([None] * 93)]
-    second = [ROW | {"id": 22}, ROW | {"id": 23}, *ignored]
-    api = FakeApi(first, second)
+    api = FakeApi(first, [ROW | {"id": 22}, ROW | {"id": 23}, *ignored])
     assert review.find_existing(api, REPO, 384, HEAD, KEY.run, "Reviews[bot]") == 23
     assert api.calls == [("GET", PAGE + "1", None), ("GET", PAGE + "2", None)]
 
 
 def test_find_existing_refuses_non_list() -> None:
-    with pytest.raises(
-        review.ReviewError, match="expected a list of pull request reviews"
-    ):
+    with pytest.raises(review.ReviewError, match=r"^expected a list of reviews$"):
         review.find_existing(FakeApi({}), REPO, 384, HEAD, KEY.run, EXISTING.author)
 
 
 @pytest.mark.usefixtures("use_bazel_cue")
 def test_post_refuses_moved_head_and_invalid_doc() -> None:
     api = FakeApi({"head": {"sha": "f" * 40}})
-    with pytest.raises(review.ReviewError, match="head no longer matches the draft"):
+    with pytest.raises(review.ReviewError, match=r"^pull request head has moved$"):
         review.post(api, DOC, author=EXISTING.author)
     with pytest.raises(review.ReviewError, match="GO forbids BLOCK findings"):
         review.post(api, replace(DOC, verdict="GO"), author=EXISTING.author)
     assert api.calls == [("GET", PULL, None)]
+
+
+@pytest.fixture
+def draft(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    stem = tmp_path / "review-384"
+    monkeypatch.setattr(cli, "draft_path", {384: stem.with_suffix(".md")}.__getitem__)
+    return stem.with_suffix(".doc.md")
 
 
 @pytest.mark.usefixtures("use_bazel_cue")
@@ -362,7 +366,7 @@ def test_post_and_cli_only_send_comments(  # noqa: PLR0913, PLR0917
     doc: ReviewDoc,
     response: object,
     expected: int | None,
-    tmp_path: Path,
+    draft: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -377,12 +381,7 @@ def test_post_and_cli_only_send_comments(  # noqa: PLR0913, PLR0917
     assert api.calls == calls
     api = FakeApi(USER, LIVE, [], response)
     monkeypatch.setattr(cli, "GhApi", lambda: api)
-    monkeypatch.setattr(
-        cli, "draft_path", {384: tmp_path / "review-384.md"}.__getitem__
-    )
-    (tmp_path / "review-384.doc.md").write_text(
-        PREAMBLE + body.removesuffix(f"\n{MARKER}\n")
-    )
+    draft.write_text(PREAMBLE + body.removesuffix(f"\n{MARKER}\n"))
     assert cli.main(["post", "384"], "review") == 0
     assert api.calls == [("GET", "user", None), *calls]
     output = "posted\n" if expected is None else f"posted {expected}\n"
@@ -391,33 +390,29 @@ def test_post_and_cli_only_send_comments(  # noqa: PLR0913, PLR0917
 
 @pytest.mark.usefixtures("use_bazel_cue")
 def test_post_cli_exists_and_refusals(
-    tmp_path: Path,
+    draft: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    path = tmp_path / "review-384.doc.md"
-    monkeypatch.setattr(
-        cli, "draft_path", {384: tmp_path / "review-384.md"}.__getitem__
-    )
     api = FakeApi(LIVE, [ROW], {})
     monkeypatch.setattr(cli, "GhApi", lambda: api)
     args = ["post", "384", "--author", EXISTING.author]
     assert cli.main(args, "review") == 1
-    assert capsys.readouterr().err.startswith(f"{path}: ")
-    path.write_text(PREAMBLE + BODY)
+    assert capsys.readouterr().err.startswith(f"{draft}: ")
+    draft.write_text(PREAMBLE + BODY)
     assert cli.main(args, "review") == 0
     assert capsys.readouterr() == ("exists 942\n", "")
     assert api.calls == [("GET", PULL, None), ("GET", PAGE + "1", None)]
     assert cli.main(["post", "384"], "review") == 1
-    assert capsys.readouterr() == ("", f"{path}: GitHub did not return a login\n")
-    path.write_text((PREAMBLE + BODY).replace("pr: 384", "pr: 383"))
+    assert capsys.readouterr() == ("", f"{draft}: GitHub did not return a login\n")
+    draft.write_text((PREAMBLE + BODY).replace("pr: 384", "pr: 383"))
     assert cli.main(args, "review") == 1
-    assert capsys.readouterr() == ("", f"{path}: draft must name pull request 384\n")
-    path.write_text((PREAMBLE + BODY).replace("NO-GO", "GO"))
+    assert capsys.readouterr() == ("", f"{draft}: draft must name pull request 384\n")
+    draft.write_text((PREAMBLE + BODY).replace("NO-GO", "GO"))
     assert cli.main(args, "review") == 1
     err = capsys.readouterr().err
-    assert err.startswith(f"{path}: GO forbids BLOCK findings\n")
-    assert all(line.startswith(f"{path}: ") for line in err.splitlines())
+    assert err.startswith(f"{draft}: GO forbids BLOCK findings\n")
+    assert all(line.startswith(f"{draft}: ") for line in err.splitlines())
 
 
 @pytest.mark.parametrize(
@@ -448,15 +443,14 @@ def test_gh_api(
         with pytest.raises(review.ReviewError, match=f"^{error}$"):
             cli.GhApi().request("POST", REVIEWS, payload)
     else:
-        assert cli.GhApi().request("POST", REVIEWS, payload) == json.loads(
-            stdout or "null"
-        )
+        data = cli.GhApi().request("POST", REVIEWS, payload)
+        assert data == json.loads(stdout or "null")
 
 
 @pytest.mark.parametrize("reason", ["x" * 201, "x\ny", "x\r", MARKER, ""])
 def test_dismiss_refuses_invalid_reason(reason: str) -> None:
     api = FakeApi()
-    with pytest.raises(review.ReviewError, match="reason must be one line"):
+    with pytest.raises(review.ReviewError, match=r"^reason must be one line"):
         review.dismiss(api, REPO, DOC.pr, 942, reason)
     assert api.calls == []
 
@@ -511,17 +505,15 @@ def test_reply_cli(
 
 
 @pytest.mark.parametrize(
-    ("text", "responses", "problem", "count"),
+    ("text", "responses", "problem"),
     [
-        ("<!-- tbhb-reply v1 review=12 -->", (), "must not contain markers", 0),
-        ("Retested.", ({"commit_id": "invalid"},), "40-hex commit ID", 1),
-        ("Retested.", ({"commit_id": HEAD}, {}), "reply comment ID", 2),
+        ("<!-- tbhb-reply v1 review=12 -->", (), "reply text must not contain markers"),
+        ("Retested.", ({"commit_id": "invalid"},), "review lacks a 40-hex commit ID"),
+        ("Retested.", ({"commit_id": HEAD}, {}), "missing reply comment ID"),
     ],
 )
-def test_reply_refusals(
-    text: str, responses: tuple[object, ...], problem: str, count: int
-) -> None:
+def test_reply_refusals(text: str, responses: tuple[object, ...], problem: str) -> None:
     api = FakeApi(*responses)
-    with pytest.raises(review.ReviewError, match=problem):
+    with pytest.raises(review.ReviewError, match=f"^{problem}$"):
         review.reply(api, REPO, DOC.pr, 942, text)
-    assert len(api.calls) == count
+    assert len(api.calls) == len(responses)

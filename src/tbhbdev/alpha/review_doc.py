@@ -15,6 +15,8 @@ type Verdict = Literal["GO", "NO-GO"]
 type FindingClass = Literal["BLOCK", "TECH-DEBT", "SECURITY-DEBT"]
 type Variant = Literal["a", "b"]
 type ApiObject = dict[str, object] | None
+type _ReviewRow = dict[str, dict[str, object] | str | int] | None
+type _Pull = dict[str, dict[str, object]] | None
 
 _HEAD = re.compile(r"[0-9a-f]{40}")
 _HEADER = re.compile(
@@ -272,25 +274,30 @@ def parse_marker(body: str) -> Marker | None:
 
 def is_dismissed(existing: Existing) -> bool:
     """Check whether GitHub dismissed the review or the App superseded it."""
-    return existing.state == "DISMISSED" or existing.body.startswith("SUPERSEDED:")
+    return _dismissed(existing.state, existing.body)
+
+
+def _dismissed(state: str, body: str) -> bool:
+    return state == "DISMISSED" or body.startswith("SUPERSEDED:")
 
 
 def _active_id(entry: object, expected: Marker, author: str) -> int | None:
     # The mapping pattern checks the API response at runtime.
-    row = cast(
-        "dict[str, dict[str, object] | str | int] | None", entry
-    )  # pragma: no mutate -- runtime no-op
-    match row:
+    match cast("_ReviewRow", entry):  # pragma: no mutate -- cast is a runtime no-op
         case {
             "id": int(review_id),
             "user": {"login": str(login)},
             "body": str(body),
             "state": str(state),
-        } if parse_marker(body) == expected and login.casefold() == author.casefold():
-            existing = Existing(review_id, login, expected, state, body)
-            return None if is_dismissed(existing) else review_id
-        case _:
-            return None
+        } if (key := parse_marker(body)) is not None:
+            existing = Existing(review_id, login, key, state, body)
+            same_marker = existing.marker == expected
+            same_author = existing.author.casefold() == author.casefold()
+            if same_marker and same_author and not is_dismissed(existing):
+                return existing.id
+        case _:  # pragma: no mutate -- falls through to the same return
+            pass
+    return None
 
 
 def find_existing(  # noqa: PLR0913, PLR0917
@@ -308,12 +315,11 @@ def find_existing(  # noqa: PLR0913, PLR0917
         path = f"repos/{repo}/pulls/{pr}/reviews?per_page={_PAGE_SIZE}&page={page}"
         reviews = api.request("GET", path)
         if not isinstance(reviews, list):
-            message = "expected a list of pull request reviews"
+            message = "expected a list of reviews"
             raise ReviewError(message)
         # GitHub returns reviews in chronological order.
-        for entry in cast(
-            "list[object]", reviews
-        ):  # pragma: no mutate -- runtime no-op
+        entries = cast("list[object]", reviews)  # pragma: no mutate -- runtime no-op
+        for entry in entries:
             if (matched := _active_id(entry, expected, author)) is not None:
                 newest = matched
         if len(reviews) < _PAGE_SIZE:
@@ -335,11 +341,12 @@ def post(
     if problems := validate(doc):
         raise ReviewError("\n".join(problems))
     path = f"repos/{doc.repo}/pulls/{doc.pr}"
-    match cast("dict[str, dict[str, object]] | None", api.request("GET", path)):
+    live = api.request("GET", path)
+    match cast("_Pull", live):  # pragma: no mutate -- runtime no-op
         case {"head": {"sha": head}} if head == doc.head_sha:
             pass
         case _:
-            message = "pull request head no longer matches the draft"
+            message = "pull request head has moved"
             raise ReviewError(message)
     existing = find_existing(api, doc.repo, doc.pr, doc.head_sha, doc.run.name, author)
     if existing is not None:
@@ -368,25 +375,22 @@ def dismiss(
     Require a plain-text reason of at most 200 characters with no markers.
     Preserve the original marker.
     """
-    if (
-        len(reason) > _REASON_LIMIT
-        or reason.splitlines() != [reason]
-        or _MARKER_SYNTAX.search(reason)
-    ):
+    one_line = reason.splitlines() == [reason]
+    if not one_line or len(reason) > _REASON_LIMIT or _MARKER_SYNTAX.search(reason):
         message = "reason must be one line of at most 200 characters without markers"
         raise ReviewError(message)
     path = f"repos/{repo}/pulls/{pr}/reviews/{review_id}"
-    match cast("ApiObject", api.request("GET", path)):
+    response = api.request("GET", path)
+    match cast("ApiObject", response):  # pragma: no mutate -- runtime no-op
         case {"body": str(body), "state": ("COMMENTED" | "DISMISSED") as state}:
             key = parse_marker(body)
             if key is not None and (key.repo, key.pr) == (repo, pr):
-                if not is_dismissed(Existing(review_id, "", key, state, body)):
+                if not _dismissed(state, body):
                     # PATCH to supersede a review is UNVERIFIED against GitHub's API.
-                    api.request(
-                        "PATCH", path, {"body": f"SUPERSEDED: {reason}\n{body}"}
-                    )
+                    body = f"SUPERSEDED: {reason}\n{body}"
+                    api.request("PATCH", path, {"body": body})
                 return
-        case _:
+        case _:  # pragma: no mutate -- falls through to the same refusal
             pass
     message = "expected a COMMENT review marked for this pull request"
     raise ReviewError(message)
@@ -413,7 +417,7 @@ def reply(
         case {"commit_id": str(head)} if _HEAD.fullmatch(head):
             body = f"Re review {review_id} (head {head[:8]}): {text}\n"
         case _:
-            message = "review did not return a 40-hex commit ID"
+            message = "review lacks a 40-hex commit ID"
             raise ReviewError(message)
     body += f"<!-- tbhb-reply v1 review={review_id} -->"
     response = api.request("POST", f"repos/{repo}/issues/{pr}/comments", {"body": body})
@@ -421,5 +425,5 @@ def reply(
         case {"id": int(comment_id)}:
             return comment_id
         case _:
-            message = "GitHub did not return the reply comment ID"
+            message = "missing reply comment ID"
             raise ReviewError(message)
