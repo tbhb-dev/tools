@@ -8,6 +8,7 @@ executable. Any lookup failure or loop means no match.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import re
 import subprocess  # nosec B404
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 _WORKFLOW = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 _INIT = 1
 _PS_TIMEOUT_SECONDS = 5
+_PIDPATH_MAX = 4096  # the libproc path buffer size
 
 
 @dataclass(frozen=True)
@@ -104,22 +106,38 @@ def _ps(field: str, pid: int) -> str | None:
     return done.stdout.strip()
 
 
-def ps_reader(ps: Callable[[str, int], str | None] = _ps) -> Reader:
-    """A reader of `ps` output, for macOS; a relative `comm` leaves the path unknown."""
+def _pidpath(pid: int) -> str | None:
+    """PID's real executable path from libproc, whatever way it was launched."""
+    buffer = ctypes.create_string_buffer(_PIDPATH_MAX)
+    try:
+        libc = ctypes.CDLL("libSystem.dylib", use_errno=True)
+        length = libc.proc_pidpath(pid, buffer, _PIDPATH_MAX)
+    except OSError, AttributeError:
+        return None
+    return os.fsdecode(buffer.raw[:length]) if length > 0 else None
+
+
+def darwin_reader(
+    ps: Callable[[str, int], str | None] = _ps,
+    pidpath: Callable[[int], str | None] = _pidpath,
+) -> Reader:
+    """A reader of `ps` for the parent and libproc `proc_pidpath` for the path.
+
+    `ps -o comm=` shows the name as launched, which can be relative.
+    """
 
     def read(pid: int) -> Process | None:
         parent = ps("ppid", pid)
-        exe = ps("comm", pid)
-        if parent is None or not parent.isdecimal() or exe is None:
+        if parent is None or not parent.isdecimal():
             return None
-        return Process(int(parent), exe if Path(exe).is_absolute() else "")
+        return Process(int(parent), pidpath(pid) or "")
 
     return read
 
 
 def reader() -> Reader:
     """The reader for this platform."""
-    return linux_reader() if sys.platform == "linux" else ps_reader()
+    return linux_reader() if sys.platform == "linux" else darwin_reader()
 
 
 def refusal(registered: str | None) -> str | None:

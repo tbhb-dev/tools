@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from tbhbdev.alpha import worker_identity
 from tbhbdev.alpha.worker_identity import Process
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 WORKER = "/opt/worker/bin/worker"
 
@@ -194,38 +199,92 @@ def test_the_linux_reader_has_no_missing_process(tmp_path: Path) -> None:
     assert worker_identity.linux_reader(str(tmp_path))(7) is None
 
 
-def fake_ps(
-    answers: dict[tuple[str, int], str | None],
+def fake_darwin(
+    answers: dict[tuple[str, int], str | None], paths: dict[int, str | None]
 ) -> worker_identity.Reader:
     def ps(field: str, pid: int) -> str | None:
         return answers.get((field, pid))
 
-    return worker_identity.ps_reader(ps)
+    return worker_identity.darwin_reader(ps, paths.get)
 
 
-def test_the_ps_reader_takes_the_parent_and_the_absolute_comm() -> None:
-    read = fake_ps({("ppid", 7): "42", ("comm", 7): "/opt/w"})
+def test_the_darwin_reader_takes_the_parent_and_the_pidpath() -> None:
+    read = fake_darwin({("ppid", 7): "42"}, {7: "/opt/w"})
     assert read(7) == Process(42, "/opt/w")
 
 
-@pytest.mark.parametrize("comm", ["-bash", "bash", ""])
-def test_the_ps_reader_leaves_a_relative_comm_unknown(comm: str) -> None:
-    read = fake_ps({("ppid", 7): "42", ("comm", 7): comm})
-    assert read(7) == Process(42, "")
+def test_the_darwin_reader_leaves_an_unreadable_pidpath_unknown() -> None:
+    assert fake_darwin({("ppid", 7): "42"}, {7: None})(7) == Process(42, "")
 
 
-@pytest.mark.parametrize(
-    "answers",
-    [
-        {("comm", 7): "/opt/w"},
-        {("ppid", 7): "42"},
-        {("ppid", 7): "", ("comm", 7): "/opt/w"},
-        {("ppid", 7): "x1", ("comm", 7): "/opt/w"},
-        {("ppid", 7): "-1", ("comm", 7): "/opt/w"},
-    ],
-)
-def test_the_ps_reader_fails_closed(answers: dict[tuple[str, int], str | None]) -> None:
-    assert fake_ps(answers)(7) is None
+@pytest.mark.parametrize("parent", [None, "", "x1", "-1"])
+def test_the_darwin_reader_fails_closed(parent: str | None) -> None:
+    assert fake_darwin({("ppid", 7): parent}, {7: "/opt/w"})(7) is None
+
+
+def cdll_of(libc: object) -> Callable[..., object]:
+
+    def cdll(*_args: object, **_kwargs: object) -> object:
+        return libc
+
+    return cdll
+
+
+def test_pidpath_decodes_the_libproc_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Libc:
+        def proc_pidpath(
+            self,
+            pid: int,
+            buffer: worker_identity.ctypes.Array[worker_identity.ctypes.c_char],
+            size: int,
+        ) -> int:
+            assert (pid, size) == (7, 4096)
+            buffer.value = b"/opt/w"
+            return 6
+
+    monkeypatch.setattr(worker_identity.ctypes, "CDLL", cdll_of(Libc()))
+    assert worker_identity._pidpath(7) == "/opt/w"  # noqa: SLF001
+
+
+def test_pidpath_is_unknown_when_libproc_returns_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Libc:
+        def proc_pidpath(self, *_: object) -> int:
+            return 0
+
+    monkeypatch.setattr(worker_identity.ctypes, "CDLL", cdll_of(Libc()))
+    assert worker_identity._pidpath(7) is None  # noqa: SLF001
+
+
+def test_pidpath_is_unknown_without_libproc(monkeypatch: pytest.MonkeyPatch) -> None:
+    def cdll(*_: object, **__: object) -> None:
+        raise OSError
+
+    monkeypatch.setattr(worker_identity.ctypes, "CDLL", cdll)
+    assert worker_identity._pidpath(7) is None  # noqa: SLF001
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="libproc is macOS only")
+@pytest.mark.parametrize("launch", ["path", "relative"])
+def test_live_a_worker_launched_by_path_or_relative_name_resolves_absolute(
+    tmp_path: Path, launch: str
+) -> None:
+    exe = tmp_path / "review-worker"
+    shutil.copy("/bin/sleep", exe)
+    # A copied system binary has an invalid signature and is killed on launch.
+    # cspell:ignore codesign
+    subprocess.run(["/usr/bin/codesign", "--force", "-s", "-", str(exe)], check=True)
+    argv0 = "review-worker" if launch == "path" else "./review-worker"
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+    child = subprocess.Popen([argv0, "30"], cwd=tmp_path, env=env)
+    try:
+        process = worker_identity.darwin_reader()(child.pid)
+        assert process is not None
+        assert os.path.realpath(process.exe) == os.path.realpath(exe)
+    finally:
+        child.kill()
+        child.wait()
 
 
 def test_ps_runs_the_absolute_ps_with_the_field_and_pid(
@@ -257,7 +316,7 @@ def test_ps_runs_the_absolute_ps_with_the_field_and_pid(
     [
         OSError("no ps"),
         subprocess.TimeoutExpired("ps", 5),
-        subprocess.CalledProcessError(1, "ps"),
+        subprocess.CalledProcessError(1, "darwin"),
     ],
 )
 def test_ps_failure_is_no_answer(
@@ -270,16 +329,6 @@ def test_ps_failure_is_no_answer(
     assert worker_identity._ps("comm", 7) is None  # noqa: SLF001
 
 
-def test_the_default_ps_reader_asks_ps(monkeypatch: pytest.MonkeyPatch) -> None:
-    def run(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            argv, 0, "9\n" if argv[2] == "ppid=" else "/opt/w\n", ""
-        )
-
-    monkeypatch.setattr(worker_identity.subprocess, "run", run)
-    assert worker_identity.ps_reader()(7) == Process(9, "/opt/w")
-
-
 def constant(process: Process) -> worker_identity.Reader:
     def read(_pid: int) -> Process:
         return process
@@ -287,7 +336,9 @@ def constant(process: Process) -> worker_identity.Reader:
     return read
 
 
-@pytest.mark.parametrize(("platform", "kind"), [("linux", "linux"), ("darwin", "ps")])
+@pytest.mark.parametrize(
+    ("platform", "kind"), [("linux", "linux"), ("darwin", "darwin")]
+)
 def test_the_reader_follows_the_platform(
     monkeypatch: pytest.MonkeyPatch, platform: str, kind: str
 ) -> None:
@@ -295,7 +346,9 @@ def test_the_reader_follows_the_platform(
     monkeypatch.setattr(
         worker_identity, "linux_reader", lambda: constant(Process(1, "l"))
     )
-    monkeypatch.setattr(worker_identity, "ps_reader", lambda: constant(Process(2, "p")))
+    monkeypatch.setattr(
+        worker_identity, "darwin_reader", lambda: constant(Process(2, "p"))
+    )
     process = worker_identity.reader()(1)
     assert process == (Process(1, "l") if kind == "linux" else Process(2, "p"))
 
