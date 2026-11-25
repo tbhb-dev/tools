@@ -166,6 +166,10 @@ class World:
         self.git("commit", "--allow-empty", "-q", "-m", message)
 
 
+# The world fixture replaces the counter; a test can put this one back.
+REAL_SIZE_COUNTS = size_gate.size_counts
+
+
 @pytest.fixture(autouse=True)
 def host_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the home directory and git identity synthetic for every draft check."""
@@ -1809,7 +1813,7 @@ def test_dry_run_prints_argv_and_body(
 def test_pr_reports_all_missing_tools_before_reading_the_draft(
     world: World, verb: str, extra: tuple[str, ...]
 ) -> None:
-    missing = ("cog", "bazelisk", "cspell", *extra)
+    missing = ("cog", "cspell", *extra)
     for name in missing:
         (world.bin / name).unlink()
     worktree_tool(world, "gitleaks")
@@ -1819,6 +1823,24 @@ def test_pr_reports_all_missing_tools_before_reading_the_draft(
         f"missing tools: {', '.join(missing)}; "
         "run `bazelisk run //:bazel_env` or `mise install`"
     )
+
+
+@pytest.mark.parametrize("verb", ["check", "create"])
+def test_pr_runs_without_bazelisk_and_warns_about_the_size_count(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    verb: str,
+) -> None:
+    # The world fixture stubs the counter; this test needs the real one.
+    monkeypatch.setattr(size_gate, "size_counts", REAL_SIZE_COUNTS)
+    (world.bin / "bazelisk").unlink()
+    write_draft(world)
+    args = ("create", "--dry-run") if verb == "create" else ("check",)
+    assert run_main(*args) == 0
+    captured = capsys.readouterr()
+    assert "missing tools" not in captured.err
+    assert "size count unavailable: " in captured.err
 
 
 def test_create_reuses_the_tools_resolved_at_startup(world: World) -> None:

@@ -118,6 +118,7 @@ reaches gh's ``--limit``, since the rest may be missing.
 """
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import os
@@ -2096,11 +2097,14 @@ def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     """Resolve the tools for check and create before running the subcommand."""
     if args.command not in ("check", "create"):
         return _run_command(args, env)
-    names = (COG, BAZEL, *(name for name, _, _ in LINTERS), GIT)
+    names = (COG, *(name for name, _, _ in LINTERS), GIT)
     unwrapped = (GITLEAKS,)
     if args.command == "create":
         names += (GITLEAKS, GH)
     paths = find_tools(names, unwrapped=unwrapped)
+    # Not required: without bazelisk the size count only warns.
+    with contextlib.suppress(SystemExit):
+        paths.update(find_tools((BAZEL,)))
     token = _TOOL_PATHS.set({(name, name in unwrapped): p for name, p in paths.items()})
     try:
         return _run_command(args, env)
