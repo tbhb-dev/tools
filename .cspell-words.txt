@@ -168,6 +168,7 @@ pretooluse
 procargs
 proname
 pronamespace
+PRRT
 pubout
 purgeable
 pushd
@@ -238,6 +239,7 @@ unkeyed
 unmatch
 unmutated
 unpushed
+unresolve
 unsandboxed
 unsets
 unstampable
