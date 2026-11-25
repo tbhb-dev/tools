@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -15,12 +16,22 @@ from tbhbdev.alpha.agent.decisions import launcher as rules
 from tbhbdev.alpha.agent.model import Invalid, Profile
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+type SessionName = tuple[str | None, str | None]
 
 # The conftest replaces `launcher.session`; these tests read the real one.
 REAL_SESSION = launcher.session
 
 pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
+
+
+def named(name: str | None, session_id: str | None) -> Callable[..., SessionName]:
+    def session(*_: object) -> SessionName:
+        return name, session_id
+
+    return session
 
 
 @pytest.fixture
@@ -79,7 +90,7 @@ def test_a_reviewer_run_without_a_session_name_is_refused() -> None:
 def test_a_named_session_can_launch_reviews_for_any_repo(
     remote: Remote, monkeypatch: pytest.MonkeyPatch, session: str, profile: str
 ) -> None:
-    monkeypatch.setattr(launcher, "session", lambda: (session, "s"))
+    monkeypatch.setattr(launcher, "session", named(session, "s"))
     arguments = execution_arguments(
         remote.prompt, *(("--role", "reviewer") if profile == "build" else ())
     )
@@ -99,7 +110,7 @@ def test_a_reviewer_launch_without_a_session_name_is_refused(
     capsys: pytest.CaptureFixture[str],
     profile: str,
 ) -> None:
-    monkeypatch.setattr(launcher, "session", lambda: (None, "s"))
+    monkeypatch.setattr(launcher, "session", named(None, "s"))
     arguments = execution_arguments(
         remote.prompt, *(("--role", "reviewer") if profile == "build" else ())
     )
@@ -116,7 +127,7 @@ def test_a_reviewer_launch_without_a_session_name_is_refused(
 def test_a_build_launch_without_a_session_name_records_unknown(
     remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(launcher, "session", lambda: (None, None))
+    monkeypatch.setattr(launcher, "session", named(None, None))
     assert agent.main(execution_arguments(remote.prompt), "example agent") == 0
     assert agent.main(["status", "sample"], "example agent") == 0
     assert "launcher=unknown" in capsys.readouterr().out
@@ -182,3 +193,188 @@ def test_the_session_has_no_name_when_tmux_fails(
     monkeypatch.setattr(launcher.subprocess, "run", fail)
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     assert REAL_SESSION() == (None, None)
+
+
+WORKER = "/opt/worker/bin/worker"
+
+
+def matched(monkeypatch: pytest.MonkeyPatch, *, found: bool) -> list[str | None]:
+    """Make the worker match or not, and record the path each lookup was given."""
+    asked: list[str | None] = []
+
+    def refusal(registered: str | None) -> str | None:
+        asked.append(registered)
+        return None if found else "no ancestor process runs the worker"
+
+    monkeypatch.setattr(launcher.worker_identity, "refusal", refusal)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    return asked
+
+
+def test_a_matched_worker_launches_as_worker_slash_the_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked = matched(monkeypatch, found=True)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc")
+    assert REAL_SESSION("run:7", WORKER) == ("worker/run:7", "abc")
+    assert asked == [WORKER]
+
+
+def test_an_unmatched_worker_flag_is_refused_with_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matched(monkeypatch, found=False)
+    with pytest.raises(Invalid) as caught:
+        REAL_SESSION("run:7", WORKER)
+    assert str(caught.value) == (
+        "--worker-workflow needs the registered worker: "
+        "no ancestor process runs the worker"
+    )
+
+
+def test_no_flag_and_no_pane_still_has_no_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked = matched(monkeypatch, found=True)
+    assert REAL_SESSION(None, WORKER) == (None, None)
+    assert asked == []
+
+
+def test_the_tmux_pane_keeps_priority_over_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked = matched(monkeypatch, found=True)
+    assert reading(monkeypatch, title="✳ helper", session_id=None) == (
+        "helper",
+        None,
+    )
+    assert REAL_SESSION("run:7", WORKER) == ("helper", None)
+    assert asked == []
+
+
+def test_the_tmux_pane_keeps_priority_over_an_unmatched_worker_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked = matched(monkeypatch, found=False)
+    reading(monkeypatch, title="✳ helper", session_id=None)
+    assert REAL_SESSION("run:7", None) == ("helper", None)
+    assert asked == []
+
+
+def worker_arguments(remote: Remote, *options: str) -> list[str]:
+    arguments = execution_arguments(remote.prompt, *options)
+    arguments[arguments.index("build")] = "review"
+    arguments[-2:-2] = ["--ref", "a" * 40]
+    return arguments
+
+
+def test_a_review_prepares_for_a_matched_worker(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = matched(monkeypatch, found=True)
+    monkeypatch.setattr(launcher, "session", REAL_SESSION)
+    monkeypatch.setattr(
+        agent.settings,
+        "load",
+        lambda: dataclasses.replace(settings(), worker_path=WORKER),
+    )
+    arguments = worker_arguments(remote, "--worker-workflow", "run:7")
+    assert agent.main(arguments, "example agent") == 0
+    assert driver.load(settings(), "sample").launched_by == ("worker/run:7", None)
+    assert asked == [WORKER]
+
+
+def test_the_worker_launcher_shows_in_the_status(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    matched(monkeypatch, found=True)
+    monkeypatch.setattr(launcher, "session", REAL_SESSION)
+    assert agent.main(worker_arguments(remote, "--worker-workflow", "w1"), "x") == 0
+    assert agent.main(["status", "sample"], "example agent") == 0
+    assert "launcher=worker/w1" in capsys.readouterr().out
+
+
+def test_a_review_flag_without_a_matched_worker_is_refused(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    matched(monkeypatch, found=False)
+    monkeypatch.setattr(launcher, "session", REAL_SESSION)
+    arguments = worker_arguments(remote, "--worker-workflow", "run:7")
+    assert agent.main(arguments, "example agent") == 1
+    assert capsys.readouterr().err == (
+        "example agent: --worker-workflow needs the registered worker: "
+        "no ancestor process runs the worker\n"
+    )
+    assert not driver.metadata_path("sample").exists()
+
+
+def test_a_non_tmux_review_without_the_flag_fails_as_before(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    asked = matched(monkeypatch, found=True)
+    monkeypatch.setattr(launcher, "session", REAL_SESSION)
+    assert agent.main(worker_arguments(remote), "example agent") != 0
+    assert (
+        "name the launching session via the tmux pane title" in capsys.readouterr().err
+    )
+    assert asked == []
+
+
+def test_the_flag_is_refused_for_a_build_without_the_reviewer_role(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    asked = matched(monkeypatch, found=True)
+    monkeypatch.setattr(launcher, "session", REAL_SESSION)
+    arguments = execution_arguments(remote.prompt, "--worker-workflow", "w1")
+    assert agent.main(arguments, "example agent") == 1
+    assert capsys.readouterr().err == (
+        "example agent: --worker-workflow applies to reviewer-role runs only\n"
+    )
+    assert asked == []
+
+
+def test_a_bad_workflow_id_is_a_usage_error(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    arguments = worker_arguments(remote, "--worker-workflow", "a b")
+    assert agent.main(arguments, "example agent") == 2
+    assert "1 to 128 characters" in capsys.readouterr().err
+
+
+def test_exec_help_names_the_flag_and_the_table(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert agent.main(["exec", "--help"], "example agent") == 0
+    text = " ".join(capsys.readouterr().out.split())
+    assert (
+        "--worker-workflow ID launch as worker/ID: the caller must descend from "
+        "the executable in the config's [agent.worker] table (no tmux pane)"
+    ) in text
+
+
+def test_the_session_asks_tmux_for_the_pane_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "helper\n", "")
+
+    monkeypatch.setenv("TMUX_PANE", "%9")
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setattr(launcher.subprocess, "run", run)
+    assert REAL_SESSION() == ("helper", None)
+    assert calls == [
+        (
+            ["tmux", "display-message", "-p", "-t", "%9", "#{pane_title}"],
+            {
+                "capture_output": True,
+                "text": True,
+                "timeout": launcher.TMUX_TIMEOUT_SECONDS,
+                "check": True,
+            },
+        )
+    ]
+    assert launcher.TMUX_TIMEOUT_SECONDS == 5

@@ -134,8 +134,12 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
     host = rules.select_host(settings, args.host, args.account)
     harness = Harness(args.harness)
     profile = Profile(args.profile)
-    launched_by = launcher.session()
-    if launch_rules.is_reviewer(args.role, profile):
+    reviewer = launch_rules.is_reviewer(args.role, profile)
+    if args.worker_workflow and not reviewer:
+        message = "--worker-workflow applies to reviewer-role runs only"
+        raise Invalid(message)
+    launched_by = launcher.session(args.worker_workflow, settings.worker_path)
+    if reviewer:
         launch_rules.check(launched_by[0])
     rules.check_model(harness, args.model, allow_non_gemini=args.allow_non_gemini)
     # A review's final commit is read remotely after all local checks pass.
