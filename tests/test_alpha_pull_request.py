@@ -19,6 +19,7 @@ from typing import cast
 from unittest.mock import Mock, patch
 
 import pytest
+from fake_tool import PR_ORIGIN as ORIGIN
 from fake_tool import (
     PRIVATE_CONFIG,
     RULES_BEYOND_ONE,
@@ -40,7 +41,6 @@ from tbhbdev.alpha.secret_scan import REPO_RULES, without_name_rules
 # against this file: the real repository root, or the mutants/ copy of it.
 REAL = Path(__file__).resolve().parents[1]
 SRC = Path(pr.__file__).parents[2]
-ORIGIN = "git@github.com:tbhb-dev/example.git"
 DATA = Path(__file__).parent / "testdata" / "alpha" / "pull_request"
 FIXTURE = DATA / "passing-draft.md"
 TEMPLATE = REAL / ".github" / "PULL_REQUEST_TEMPLATE.md"
@@ -175,29 +175,17 @@ def host_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
 
 
-@pytest.fixture
-def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
-    """A repository with the real schema and sections and stub configs."""
+def world_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
+    """Give each test its own draft files, fake tools, logs, and home."""
     monkeypatch.setattr(
         size_gate,
         "size_counts",
         Mock(return_value=size_gate.SizeCounts(0, 400, 0, 1500, None)),
     )
-    # The repository's origin is a URL nothing serves, so the size check's fetch
-    # of the base branch is a no-op here and the tracking refs set below stay.
-    real_git = pr.git
-
-    def offline_git(*argv: str, cwd: Path | None = None) -> tuple[int, str]:
-        if argv[:1] == ("fetch",):
-            return 0, ""
-        return real_git(*argv, cwd=cwd)
-
-    monkeypatch.setattr(pr, "git", offline_git)
     monkeypatch.setattr(pr, "target_is_origin", Mock(return_value=True))
     root = tmp_path / "repo"
     tools_dir = tmp_path / "bin"
     tools_dir.mkdir()
-    link_git(tmp_path / "git_dir")
     # One statement, not a loop: under Bazel's clean environment there is
     # nothing to remove, and a loop body that never runs is a missed branch.
     prefixes = ("CLAUDE", "CODEX", "ANTIGRAVITY", "GIT_", "ASCM_")
@@ -208,7 +196,6 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     for who in ("AUTHOR", "COMMITTER"):
         monkeypatch.setenv(f"GIT_{who}_NAME", "T")
         monkeypatch.setenv(f"GIT_{who}_EMAIL", "t@example.com")
-    monkeypatch.setenv("PATH", f"{tools_dir}{os.pathsep}{tmp_path / 'git_dir'}")
     (root / ".github").mkdir(parents=True)
     shutil.copytree(REAL / ".github" / "schemas", root / ".github" / "schemas")
     shutil.copy(REAL / pr.SECTIONS, root / pr.SECTIONS)
@@ -216,15 +203,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
         (root / name).write_text("")
     (root / ".gitleaks.toml").write_text("")
     write_private_config(tmp_path, PRIVATE_CONFIG + RULES_BEYOND_ONE)
-    # The script runs inside the repository whose branch it posts.
-    monkeypatch.chdir(root)
     made = World(root, tools_dir)
-    made.git("init", "-q", "-b", "main")
-    made.git("config", "commit.gpgsign", "false")
-    made.git("remote", "add", "origin", ORIGIN)
-    made.commit("init")
-    made.git("update-ref", "refs/remotes/origin/main", "HEAD")
-    made.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
     made.fake("cog")
     made.fake("vale", stdout="{}")
     made.fake("cspell")
@@ -239,6 +218,54 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
             "repo view --json": base_case(TARGET, "PUBLIC"),
         },
     )
+    return made
+
+
+@pytest.fixture
+def world(
+    pr_git_baseline: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> World:
+    """Copy Git metadata for tests that exercise real refs or worktrees."""
+    made = world_files(tmp_path, monkeypatch)
+    git_dir = tmp_path / "git_dir"
+    link_git(git_dir)
+    monkeypatch.setenv("PATH", f"{made.bin}{os.pathsep}{git_dir}")
+    shutil.copytree(pr_git_baseline, made.root / ".git")
+    monkeypatch.chdir(made.root)
+    real_git = pr.git
+
+    def offline_git(*argv: str, cwd: Path | None = None) -> tuple[int, str]:
+        # Preserve the seeded tracking refs without contacting the fake origin.
+        if argv[:1] == ("fetch",):
+            return 0, ""
+        return real_git(*argv, cwd=cwd)
+
+    monkeypatch.setattr(pr, "git", offline_git)
+    return made
+
+
+@pytest.fixture
+def draft_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
+    """Run draft checks with fake tools and fixed answers for Git lookups."""
+    made = world_files(tmp_path, monkeypatch)
+    monkeypatch.setenv("PATH", str(made.bin))
+    monkeypatch.chdir(made.root)
+    base = "refs/remotes/origin/main"
+    fetch_options = ("--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=")
+    answers: dict[tuple[str, ...], tuple[int, str]] = {
+        ("rev-parse", "--show-toplevel"): (0, str(made.root.resolve())),
+        ("ls-remote", "--symref", "origin", "HEAD"): (128, ""),
+        ("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"): (0, base),
+        ("fetch", *fetch_options, "origin", f"+refs/heads/main:{base}"): (0, ""),
+        ("rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"): (0, ""),
+    }
+
+    def answer_git(*argv: str, **_kwargs: Path | None) -> tuple[int, str]:
+        return answers[argv]
+
+    monkeypatch.setattr(pr, "git", Mock(side_effect=answer_git))
     return made
 
 
@@ -727,40 +754,40 @@ def test_line_numbers_follow_the_frontmatter() -> None:
 # -------------------------------------------------------------- tool lookup
 
 
-def test_find_tool_prefers_path(world: World) -> None:
-    assert pr.find_tool("vale") == str(world.bin / "vale")
+def test_find_tool_prefers_path(draft_world: World) -> None:
+    assert pr.find_tool("vale") == str(draft_world.bin / "vale")
 
 
 def test_find_tool_can_skip_the_bazel_shims(
-    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    draft_world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     shim = tmp_path / "repo" / ".bazel_env" / "bin"
     shim.mkdir(parents=True)
     (shim / "vale").write_text("")
     (shim / "vale").chmod(0o755)
-    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{world.bin}")
+    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{draft_world.bin}")
     assert pr.find_tool("vale") == str(shim / "vale")
-    assert pr.find_tool("vale", unwrapped=True) == str(world.bin / "vale")
+    assert pr.find_tool("vale", unwrapped=True) == str(draft_world.bin / "vale")
 
 
-def test_find_tool_falls_back_to_mise(world: World, tmp_path: Path) -> None:
+def test_find_tool_falls_back_to_mise(draft_world: World, tmp_path: Path) -> None:
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     (elsewhere / "absent_tool").write_text("")
-    world.fake("mise", stdout=f"{elsewhere / 'absent_tool'}\n")
+    draft_world.fake("mise", stdout=f"{elsewhere / 'absent_tool'}\n")
     assert pr.find_tool("absent_tool") == str(elsewhere / "absent_tool")
-    assert world.calls("mise")[0]["argv"] == ["which", "absent_tool"]
+    assert draft_world.calls("mise")[0]["argv"] == ["which", "absent_tool"]
 
 
-def test_find_tool_missing(world: World) -> None:
+def test_find_tool_missing(draft_world: World) -> None:
     with pytest.raises(
         SystemExit, match=r"absent_tool not found on PATH or through `mise which`"
     ):
         pr.find_tool("absent_tool")
-    world.fake("mise", rc=1, stderr="not installed")
+    draft_world.fake("mise", rc=1, stderr="not installed")
     with pytest.raises(SystemExit, match="absent_tool not found"):
         pr.find_tool("absent_tool")
-    world.fake("mise", rc=0, stdout="\n")
+    draft_world.fake("mise", rc=0, stdout="\n")
     with pytest.raises(SystemExit, match="absent_tool not found"):
         pr.find_tool("absent_tool")
 
@@ -768,12 +795,12 @@ def test_find_tool_missing(world: World) -> None:
 # ------------------------------------------------------------------- title
 
 
-def test_title_goes_to_cog_on_stdin(world: World) -> None:
+def test_title_goes_to_cog_on_stdin(draft_world: World) -> None:
     assert pr.title_problems("feat: x") == []
-    call = world.calls("cog")[0]
+    call = draft_world.calls("cog")[0]
     assert call["argv"] == ["verify", "--file", "-"]
     assert call["stdin"] == "feat: x"
-    assert call["cwd"] == str(world.root.resolve())
+    assert call["cwd"] == str(draft_world.root.resolve())
 
 
 MISSING = (
@@ -781,12 +808,12 @@ MISSING = (
 )
 
 
-def test_title_cog_failure_is_reported(world: World) -> None:
-    world.fake("cog", rc=1, stderr="Error: Missing\n\n  commit type\n")
+def test_title_cog_failure_is_reported(draft_world: World) -> None:
+    draft_world.fake("cog", rc=1, stderr="Error: Missing\n\n  commit type\n")
     assert pr.title_problems("Add thing") == [MISSING]
 
 
-@pytest.mark.usefixtures("world")
+@pytest.mark.usefixtures("draft_world")
 def test_title_length() -> None:
     assert pr.MAX_TITLE == 64
     assert pr.title_problems("feat: " + "x" * 58) == []
@@ -795,8 +822,8 @@ def test_title_length() -> None:
     ]
 
 
-def test_title_problem_lands_on_the_title_line(world: World) -> None:
-    world.fake("cog", rc=1, stderr="bad")
+def test_title_problem_lands_on_the_title_line(draft_world: World) -> None:
+    draft_world.fake("cog", rc=1, stderr="bad")
     found = pr.check_text("---\nbase: main\n---\n\n" + BASE).problems
     assert found == [(5, "title is not a Conventional Commit header (cog verify): bad")]
 
@@ -840,9 +867,9 @@ def lint_checked(world: World, text: str) -> list[pr.Problem]:
     return pr.check_text(text).problems
 
 
-def test_lint_runs_each_tool_in_a_mirrored_tree(world: World) -> None:
+def test_lint_runs_each_tool_in_a_mirrored_tree(draft_world: World) -> None:
     text = "---\nbase: main\n---\n\n" + BASE
-    assert lint_checked(world, text) == []
+    assert lint_checked(draft_world, text) == []
     rendered = text.split("---\n\n", 1)[1]
     for name, argv in (
         ("vale", ["--output=JSON", ".github/PULL_REQUEST_DRAFT.md"]),
@@ -858,18 +885,18 @@ def test_lint_runs_each_tool_in_a_mirrored_tree(world: World) -> None:
         ),
         ("rumdl", ["check", ".github/PULL_REQUEST_DRAFT.md"]),
     ):
-        (call,) = world.calls(name)
+        (call,) = draft_world.calls(name)
         assert call["argv"] == argv
         assert call["draft"] == rendered
         assert call["stdin"] == ""
         assert call["links"] == {
-            config: str(world.root / config) for config in pr.CONFIGS
+            config: str(draft_world.root / config) for config in pr.CONFIGS
         }
-        assert call["cwd"] != str(world.root)
+        assert call["cwd"] != str(draft_world.root)
 
 
-def test_lint_maps_lines_back_to_the_draft(world: World) -> None:
-    world.fake(
+def test_lint_maps_lines_back_to_the_draft(draft_world: World) -> None:
+    draft_world.fake(
         "vale",
         rc=1,
         stdout=json.dumps(
@@ -890,12 +917,12 @@ def test_lint_maps_lines_back_to_the_draft(world: World) -> None:
             }
         ),
     )
-    world.fake(
+    draft_world.fake(
         "cspell",
         rc=1,
         stdout=".github/PULL_REQUEST_DRAFT.md:5:2 - Unknown word (zzz)\n",
     )
-    world.fake(
+    draft_world.fake(
         "rumdl",
         rc=1,
         stdout=(
@@ -903,7 +930,7 @@ def test_lint_maps_lines_back_to_the_draft(world: World) -> None:
             "Issues: Found 1 issue\n"
         ),
     )
-    found = lint_checked(world, "---\nbase: main\n---\n\n" + BASE)
+    found = lint_checked(draft_world, "---\nbase: main\n---\n\n" + BASE)
     assert found == [
         (7, "vale Google.We: no we"),
         (9, "cspell: Unknown word (zzz)"),
@@ -927,22 +954,24 @@ def test_cspell_and_rumdl_lines_ignore_other_output() -> None:
     ],
 )
 def test_lint_tool_failure_is_a_problem(
-    world: World, rc: int, stdout: str, stderr: str
+    draft_world: World, rc: int, stdout: str, stderr: str
 ) -> None:
-    world.fake("vale", rc=rc, stdout=stdout, stderr=stderr)
-    found = lint_checked(world, BASE)
+    draft_world.fake("vale", rc=rc, stdout=stdout, stderr=stderr)
+    found = lint_checked(draft_world, BASE)
     message = stderr or stdout
     assert found == [(1, f"vale failed (exit {rc}): {message}")]
 
 
-def test_lint_failure_message_prefers_stderr(world: World) -> None:
-    world.fake("cspell", rc=2, stdout="out", stderr="err  text")
-    assert lint_checked(world, BASE) == [(1, "cspell failed (exit 2): err text")]
+def test_lint_failure_message_prefers_stderr(draft_world: World) -> None:
+    draft_world.fake("cspell", rc=2, stdout="out", stderr="err  text")
+    assert lint_checked(draft_world, BASE) == [(1, "cspell failed (exit 2): err text")]
 
 
-def test_lint_failure_with_findings_reports_the_failure_only(world: World) -> None:
-    world.fake("rumdl", rc=2, stdout="a.md:3:1: [MD001] x\n", stderr="boom")
-    assert lint_checked(world, BASE) == [(1, "rumdl failed (exit 2): boom")]
+def test_lint_failure_with_findings_reports_the_failure_only(
+    draft_world: World,
+) -> None:
+    draft_world.fake("rumdl", rc=2, stdout="a.md:3:1: [MD001] x\n", stderr="boom")
+    assert lint_checked(draft_world, BASE) == [(1, "rumdl failed (exit 2): boom")]
 
 
 def test_vale_parse_handles_bad_json() -> None:
@@ -950,14 +979,14 @@ def test_vale_parse_handles_bad_json() -> None:
     assert pr.parse_vale("{}") == []
 
 
-def test_lint_needs_every_tool_and_config(world: World) -> None:
-    (world.bin / "rumdl").unlink()
+def test_lint_needs_every_tool_and_config(draft_world: World) -> None:
+    (draft_world.bin / "rumdl").unlink()
     with pytest.raises(SystemExit, match="rumdl not found"):
-        lint_checked(world, BASE)
-    world.fake("rumdl")
-    (world.root / ".rumdl.toml").unlink()
+        lint_checked(draft_world, BASE)
+    draft_world.fake("rumdl")
+    (draft_world.root / ".rumdl.toml").unlink()
     with pytest.raises(SystemExit, match=r"missing lint config \.rumdl\.toml in "):
-        lint_checked(world, BASE)
+        lint_checked(draft_world, BASE)
 
 
 VALE_INI = """StylesPath = .vale
@@ -996,22 +1025,27 @@ for name in SYNCED:
 """
 
 
-def test_vale_styles_names_each_style_once(world: World) -> None:
-    styled(world)
-    assert pr.vale_styles(world.root) == ["Google", "extra", "project", "write-good"]
+def test_vale_styles_names_each_style_once(draft_world: World) -> None:
+    styled(draft_world)
+    assert pr.vale_styles(draft_world.root) == [
+        "Google",
+        "extra",
+        "project",
+        "write-good",
+    ]
 
 
-def test_vale_styles_split_at_the_first_equals(world: World) -> None:
+def test_vale_styles_split_at_the_first_equals(draft_world: World) -> None:
     # Vale's ini parser splits a key from its value at the first "=".
-    (world.root / ".vale.ini").write_text("BasedOnStyles = odd=name\n")
-    assert pr.vale_styles(world.root) == ["odd=name"]
+    (draft_world.root / ".vale.ini").write_text("BasedOnStyles = odd=name\n")
+    assert pr.vale_styles(draft_world.root) == ["odd=name"]
 
 
-def test_synced_styles_need_no_sync(world: World) -> None:
-    styled(world, "Google", "extra", "project", "write-good")
-    assert lint_checked(world, BASE) == []
-    assert not (world.bin / "bazelisk.log").exists()
-    assert len(world.calls("vale")) == 1
+def test_synced_styles_need_no_sync(draft_world: World) -> None:
+    styled(draft_world, "Google", "extra", "project", "write-good")
+    assert lint_checked(draft_world, BASE) == []
+    assert not (draft_world.bin / "bazelisk.log").exists()
+    assert len(draft_world.calls("vale")) == 1
 
 
 def test_missing_styles_sync_once_then_lint(
@@ -1033,10 +1067,12 @@ def test_missing_styles_sync_once_then_lint(
 @pytest.mark.parametrize(
     ("rc", "stdout"), [(0, ""), (0, "//:vale_sync_other\n"), (7, "//:vale_sync\n")]
 )
-def test_missing_sync_target_is_one_problem(world: World, rc: int, stdout: str) -> None:
-    styled(world, "project", "extra")
-    world.fake("bazelisk", rc=rc, stdout=stdout)
-    assert lint_checked(world, BASE) == [
+def test_missing_sync_target_is_one_problem(
+    draft_world: World, rc: int, stdout: str
+) -> None:
+    styled(draft_world, "project", "extra")
+    draft_world.fake("bazelisk", rc=rc, stdout=stdout)
+    assert lint_checked(draft_world, BASE) == [
         (
             1,
             (
@@ -1045,11 +1081,11 @@ def test_missing_sync_target_is_one_problem(world: World, rc: int, stdout: str) 
             ),
         )
     ]
-    (call,) = world.calls("bazelisk")
+    (call,) = draft_world.calls("bazelisk")
     assert call["argv"] == ["query", "//:vale_sync"]
-    assert call["cwd"] == str(world.root.resolve())
-    assert world.calls("vale") == []
-    assert len(world.calls("cspell")) == 1
+    assert call["cwd"] == str(draft_world.root.resolve())
+    assert draft_world.calls("vale") == []
+    assert len(draft_world.calls("cspell")) == 1
 
 
 @pytest.mark.parametrize(
@@ -1057,17 +1093,17 @@ def test_missing_sync_target_is_one_problem(world: World, rc: int, stdout: str) 
     [("out", "no  such target", "no such target"), ("out  text", "", "out text")],
 )
 def test_failed_sync_is_one_problem(
-    world: World, stdout: str, stderr: str, why: str
+    draft_world: World, stdout: str, stderr: str, why: str
 ) -> None:
-    styled(world, "project", "extra")
-    world.fake(
+    styled(draft_world, "project", "extra")
+    draft_world.fake(
         "bazelisk",
         rc=3,
         stdout=stdout,
         stderr=stderr,
         cases={"query": {"rc": 0, "stdout": "//:vale_sync\n", "stderr": ""}},
     )
-    found = lint_checked(world, BASE)
+    found = lint_checked(draft_world, BASE)
     assert found == [
         (
             1,
@@ -1077,18 +1113,18 @@ def test_failed_sync_is_one_problem(
             ),
         )
     ]
-    query, call = world.calls("bazelisk")
+    query, call = draft_world.calls("bazelisk")
     assert query["argv"] == ["query", "//:vale_sync"]
     assert call["argv"] == ["run", "//:vale_sync"]
-    assert world.calls("vale") == []
-    assert len(world.calls("cspell")) == 1
+    assert draft_world.calls("vale") == []
+    assert len(draft_world.calls("cspell")) == 1
 
 
-def test_sync_that_leaves_styles_missing_is_a_problem(world: World) -> None:
-    styled(world, "project")
+def test_sync_that_leaves_styles_missing_is_a_problem(draft_world: World) -> None:
+    styled(draft_world, "project")
     # Exit 0, but it only syncs Google.
-    write_fake(world.bin / "bazelisk", SYNCS.replace("SYNCED", '("Google",)'))
-    found = lint_checked(world, BASE)
+    write_fake(draft_world.bin / "bazelisk", SYNCS.replace("SYNCED", '("Google",)'))
+    found = lint_checked(draft_world, BASE)
     assert found == [
         (
             1,
@@ -1100,16 +1136,16 @@ def test_sync_that_leaves_styles_missing_is_a_problem(world: World) -> None:
     ]
 
 
-def test_missing_bazelisk_stops_the_check(world: World) -> None:
-    styled(world, "project")
+def test_missing_bazelisk_stops_the_check(draft_world: World) -> None:
+    styled(draft_world, "project")
     with pytest.raises(SystemExit, match="bazelisk not found"):
-        lint_checked(world, BASE)
+        lint_checked(draft_world, BASE)
 
 
-def test_lint_skipped_without_a_title(world: World) -> None:
-    assert lint_checked(world, "## Why\n\nw\n")
-    assert world.calls("vale") == []
-    assert world.calls("cog") == []
+def test_lint_skipped_without_a_title(draft_world: World) -> None:
+    assert lint_checked(draft_world, "## Why\n\nw\n")
+    assert draft_world.calls("vale") == []
+    assert draft_world.calls("cog") == []
 
 
 def real_lint_ready() -> bool:
@@ -1516,8 +1552,10 @@ def write_draft(world: World, text: str = BASE) -> Path:
     return path
 
 
-def test_check_prints_ok(world: World, capsys: pytest.CaptureFixture[str]) -> None:
-    write_draft(world)
+def test_check_prints_ok(
+    draft_world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_draft(draft_world)
     assert run_main("check") == 0
     assert capsys.readouterr().out == (
         "0 code lines, limit 400\n0 raw lines, limit 1500\nOK: the draft conforms\n"
@@ -1525,9 +1563,9 @@ def test_check_prints_ok(world: World, capsys: pytest.CaptureFixture[str]) -> No
 
 
 def test_check_prints_problems_with_paths(
-    world: World, capsys: pytest.CaptureFixture[str]
+    draft_world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    path = write_draft(world, replace(BASE, "\nw\n", "\nw <!-- c -->\n"))
+    path = write_draft(draft_world, replace(BASE, "\nw\n", "\nw <!-- c -->\n"))
     assert run_main("check", str(path)) == 1
     assert capsys.readouterr().out == (
         f"{path}:5: HTML comment left in the description\n"
@@ -1536,9 +1574,9 @@ def test_check_prints_problems_with_paths(
 
 
 def test_check_defaults_to_the_draft_path(
-    world: World, capsys: pytest.CaptureFixture[str]
+    draft_world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    del world
+    del draft_world
     assert run_main("check") == 1
     out = capsys.readouterr().out
     assert out == (
@@ -1927,11 +1965,11 @@ def test_a_missing_private_config_stops_before_gh(world: World) -> None:
     assert world.calls("gh") == []
 
 
-def test_check_does_not_scan_or_read_the_visibility(world: World) -> None:
-    write_draft(world)
+def test_check_does_not_scan_or_read_the_visibility(draft_world: World) -> None:
+    write_draft(draft_world)
     assert run_main("check") == 0
-    assert world.calls("gitleaks") == []
-    assert world.calls("gh.repo") == []
+    assert draft_world.calls("gitleaks") == []
+    assert draft_world.calls("gh.repo") == []
 
 
 def edit_cases(

@@ -34,6 +34,7 @@ from tbhbdev.alpha.agent import (
     process_group,
     push,
     render,
+    review_post,
     runfiles,
     settings,
     shims,
@@ -745,6 +746,19 @@ def prepared_result(result: object) -> Prepared:
     return result
 
 
+def prepare_brief(
+    run: Run, workspace: Path, text: str, *, preflight_only: bool
+) -> None:
+    needs_shims = not preflight_only and shims.needed(workspace, run.request.profile)
+    if needs_shims:
+        build_shims(run, workspace)
+    run.files.write(
+        "prompt", render.brief(run.request.kind, text, profile=run.request.profile)
+    )
+    if not needs_shims:
+        run.files.write("phase", "brief")
+
+
 def execute(
     run: Run, text: str, push_token: str | None = None, *, preflight_only: bool = False
 ) -> int:
@@ -791,16 +805,7 @@ def _execute(
         runfiles.append(run.files.root, index_entry(run, prepared, None))
         run.files.write("phase", "workspace")
         workspace = Path(prepared.paths.worktree)
-        needs_shims = not preflight_only and shims.needed(
-            workspace, run.request.profile
-        )
-        if needs_shims:
-            build_shims(run, workspace)
-        run.files.write(
-            "prompt", render.brief(run.request.kind, text, profile=run.request.profile)
-        )
-        if not needs_shims:
-            run.files.write("phase", "brief")
+        prepare_brief(run, workspace, text, preflight_only=preflight_only)
         if prepared.delivery.signing is not None:
             agent = credentials.signing_agent(
                 prepared.delivery.signing, run.tmpdir, run.deadline
@@ -812,6 +817,12 @@ def _execute(
         else:
             rc = push.run(run, prepared, stack, run_harness, push_token)
             rc = require_commit(run, rc)
+            if (
+                rc == 0
+                and run.request.profile is Profile.REVIEW
+                and not run.files.uncertain
+            ):
+                post_review(run, prepared)
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
     except RunInterruptedError, EOFError:
@@ -826,6 +837,16 @@ def _execute(
         stack.enter_context(process_group.ignore_signals())
         rc = finish(run, prepared, agent, rc)
     return rc
+
+
+def post_review(run: Run, prepared: Prepared) -> None:
+    try:
+        review_post.posted(run, prepared)
+    except RunInterruptedError:
+        # A signal during posting follows the run interrupt path and records 143.
+        raise
+    except Exception as exc:  # noqa: BLE001 -- posting cannot replace the harness result.
+        run.files.write("log", f"review post failed: {type(exc).__name__}\n")
 
 
 def require_commit(run: Run, rc: int) -> int:
