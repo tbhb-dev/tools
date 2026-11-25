@@ -15,11 +15,19 @@ BUILD_PUBLICATION = (
     "Commit your changes locally. "
     "The driver pushes the build branch and opens the pull request after success."
 )
+REVIEW_PUBLICATION = (
+    "Use the pull request number for N. Run `tbhbdev alpha review draft N`, "
+    "fill the draft with `event: COMMENT` and the judged head as `commit_id`, "
+    "then run `tbhbdev alpha review check N`. "
+    "Leave exactly one `.git/tbhb-alpha/review-N.md` for the run host to post."
+)
 
 
 def brief(kind: RunKind, text: str, *, profile: Profile | None = None) -> str:
     if profile is Profile.BUILD:
         text = f"{BUILD_PUBLICATION}\n{text}"
+    elif profile is Profile.REVIEW:
+        text = f"{REVIEW_PUBLICATION}\n{text}"
     return f"{FINAL_ONLY}\n{text}" if kind is RunKind.EXEC else text
 
 

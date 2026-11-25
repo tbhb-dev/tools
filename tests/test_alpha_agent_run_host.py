@@ -65,6 +65,7 @@ from tbhbdev.alpha.agent.model import (
     Harness,
     Invalid,
     Os,
+    Profile,
     RunKind,
 )
 
@@ -4187,6 +4188,58 @@ def test_push_failure_reaches_durable_completion(
     assert run.files.path("rc").read_text() == "4\n"
     assert run.files.path("phase").read_text() == "ended"
     assert runfiles.latest(run.files.root)["example"]["rc"] == 4
+
+
+@pytest.mark.parametrize(
+    ("profile", "rc", "preflight_only", "uncertain", "posted", "should_post"),
+    [
+        (Profile.REVIEW, 0, False, False, True, True),
+        (Profile.REVIEW, 0, False, False, False, True),
+        (Profile.REVIEW, 7, False, False, True, False),
+        (Profile.REVIEW, 0, True, False, True, False),
+        (Profile.REVIEW, 0, False, True, True, False),
+        (Profile.BUILD, 0, False, False, True, False),
+    ],
+)
+def test_execute_posts_only_after_a_successful_review(  # noqa: PLR0913
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: Profile,
+    rc: int,
+    *,
+    preflight_only: bool,
+    uncertain: bool,
+    posted: bool,
+    should_post: bool,
+) -> None:
+    commit = "a" * 40 if profile is Profile.REVIEW else None
+    run = make_run(tmp_path, profile=profile.value, commit=commit)
+    prepared = preparation(run)
+    monkeypatch.setattr(run_host, "preflight", Mock())
+    monkeypatch.setattr(process_group, "prepare", Mock(return_value=prepared))
+
+    def harness(*_args: object, **_kwargs: object) -> int:
+        run.files.uncertain = uncertain
+        return rc
+
+    finish_harness = Mock(side_effect=harness)
+    monkeypatch.setattr(run_host, "run_harness", finish_harness)
+
+    def record_review(actual: run_host.Run, ready: run_host.Prepared) -> bool:
+        finish_harness.assert_called_once()
+        assert actual is run
+        assert ready is prepared
+        assert Path(ready.paths.worktree).is_dir()
+        assert not run.files.path("rc").exists()
+        return posted
+
+    post = Mock(side_effect=record_review)
+    monkeypatch.setattr(run_host.review_post, "posted", post)
+    assert (
+        run_host.execute(run, "example", "unused", preflight_only=preflight_only) == rc
+    )
+    assert post.call_count == int(should_post)
+    assert run.files.path("rc").read_text() == f"{rc}\n"
 
 
 @pytest.mark.parametrize(

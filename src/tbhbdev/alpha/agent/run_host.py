@@ -34,6 +34,7 @@ from tbhbdev.alpha.agent import (
     process_group,
     push,
     render,
+    review_post,
     runfiles,
     settings,
     shims,
@@ -745,6 +746,19 @@ def prepared_result(result: object) -> Prepared:
     return result
 
 
+def prepare_brief(
+    run: Run, workspace: Path, text: str, *, preflight_only: bool
+) -> None:
+    needs_shims = not preflight_only and shims.needed(workspace, run.request.profile)
+    if needs_shims:
+        build_shims(run, workspace)
+    run.files.write(
+        "prompt", render.brief(run.request.kind, text, profile=run.request.profile)
+    )
+    if not needs_shims:
+        run.files.write("phase", "brief")
+
+
 def execute(
     run: Run, text: str, push_token: str | None = None, *, preflight_only: bool = False
 ) -> int:
@@ -791,16 +805,7 @@ def _execute(
         runfiles.append(run.files.root, index_entry(run, prepared, None))
         run.files.write("phase", "workspace")
         workspace = Path(prepared.paths.worktree)
-        needs_shims = not preflight_only and shims.needed(
-            workspace, run.request.profile
-        )
-        if needs_shims:
-            build_shims(run, workspace)
-        run.files.write(
-            "prompt", render.brief(run.request.kind, text, profile=run.request.profile)
-        )
-        if not needs_shims:
-            run.files.write("phase", "brief")
+        prepare_brief(run, workspace, text, preflight_only=preflight_only)
         if prepared.delivery.signing is not None:
             agent = credentials.signing_agent(
                 prepared.delivery.signing, run.tmpdir, run.deadline
@@ -812,6 +817,12 @@ def _execute(
         else:
             rc = push.run(run, prepared, stack, run_harness, push_token)
             rc = require_commit(run, rc)
+            if (
+                rc == 0
+                and run.request.profile is Profile.REVIEW
+                and not run.files.uncertain
+            ):
+                review_post.posted(run, prepared)
     except TimeoutError, subprocess.TimeoutExpired:
         rc = 124
     except RunInterruptedError, EOFError:

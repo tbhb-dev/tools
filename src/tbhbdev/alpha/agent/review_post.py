@@ -159,6 +159,8 @@ def stamp(run: Run) -> str:
 
 def posted(run: Run, prepared: Prepared) -> bool:
     """Post the run's review and record it; False when it was not posted."""
+    if run.files.path("review").exists():
+        return False
     workspace = Path(prepared.paths.worktree)
     try:
         number, text = find_draft(workspace)

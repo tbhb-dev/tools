@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 import httpx
 import pytest
 
-from tbhbdev.alpha.agent import credentials, review_post
+from tbhbdev.alpha.agent import credentials, review_post, runfiles
 from tbhbdev.alpha.agent.model import Profile
 
 if TYPE_CHECKING:
@@ -31,14 +31,13 @@ def draft(event: str = "COMMENT", head: str = HEAD, *, findings: bool = False) -
 
 def make(
     tmp_path: Path, text: str | None, name: str = "review-7.md"
-) -> tuple[run_host.Run, run_host.Prepared, dict[str, str]]:
+) -> tuple[run_host.Run, run_host.Prepared]:
     workspace = tmp_path / "ws"
     directory = workspace / ".git" / "tbhb-alpha"
     directory.mkdir(parents=True)
     if text is not None:
         (directory / name).write_text(text)
-    written: dict[str, str] = {}
-    files = SimpleNamespace(name="r1", write=written.__setitem__)
+    files = runfiles.RunFiles(tmp_path / "runs", "r1")
     request = SimpleNamespace(
         repo="github.com/o/r",
         commit=HEAD,
@@ -51,7 +50,6 @@ def make(
     return (
         cast("run_host.Run", run),
         cast("run_host.Prepared", prepared),
-        written,
     )
 
 
@@ -100,7 +98,7 @@ class Api:
 def test_posts_the_comment_with_identity_in_the_body(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run, prepared, written = make(tmp_path, draft())
+    run, prepared = make(tmp_path, draft())
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
     api = Api(monkeypatch)
     assert review_post.posted(run, prepared)
@@ -114,7 +112,22 @@ def test_posts_the_comment_with_identity_in_the_body(
     assert payload["commit_id"] == HEAD
     assert payload["body"].startswith("## Verdict")
     assert payload["body"].endswith(f"\n---\n{STAMP}\n")
-    assert written == {"review": "github.com/o/r#7 99"}
+    assert run.files.path("review").read_text() == "github.com/o/r#7 99"
+
+
+def test_a_run_name_posts_only_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = make(tmp_path, draft())
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    assert review_post.posted(run, prepared)
+
+    run.files = runfiles.RunFiles(run.files.root, run.files.name)
+    monkeypatch.setattr(credentials, "review_post_token", forbidden)
+    assert not review_post.posted(run, prepared)
+    assert [method for method, _, _ in api.calls] == ["GET", "POST"]
+    assert run.files.path("review").read_text() == "github.com/o/r#7 99"
 
 
 APPROVE_THEN_COMMENT = draft("APPROVE").replace(
@@ -145,19 +158,19 @@ def test_a_bad_draft_posts_nothing(
     name: str,
     message: str,
 ) -> None:
-    run, prepared, written = make(tmp_path, text, name)
+    run, prepared = make(tmp_path, text, name)
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
     monkeypatch.setattr(httpx, "request", forbidden)
     assert not review_post.posted(run, prepared)
-    assert message in written["log"]
+    assert message in run.files.path("log").read_text()
 
 
 def test_two_drafts_are_refused(tmp_path: Path) -> None:
-    run, prepared, written = make(tmp_path, draft())
+    run, prepared = make(tmp_path, draft())
     directory = tmp_path / "ws" / ".git" / "tbhb-alpha"
     (directory / "review-8.md").write_text(draft())
     assert not review_post.posted(run, prepared)
-    assert "found 2" in written["log"]
+    assert "found 2" in run.files.path("log").read_text()
 
 
 @pytest.mark.parametrize(
@@ -167,23 +180,23 @@ def test_two_drafts_are_refused(tmp_path: Path) -> None:
 def test_a_moved_head_blocks_the_post(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pull: httpx.Response
 ) -> None:
-    run, prepared, written = make(tmp_path, draft())
+    run, prepared = make(tmp_path, draft())
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
     api = Api(monkeypatch)
     api.pull = pull
     assert not review_post.posted(run, prepared)
-    assert "head moved" in written["log"]
+    assert "head moved" in run.files.path("log").read_text()
     assert all(m == "GET" for m, _, _ in api.calls)
 
 
 def test_a_missing_token_blocks_the_post(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run, prepared, written = make(tmp_path, draft())
+    run, prepared = make(tmp_path, draft())
     monkeypatch.setattr(credentials, "review_post_token", no_token)
     monkeypatch.setattr(httpx, "request", forbidden)
     assert not review_post.posted(run, prepared)
-    assert "token unavailable" in written["log"]
+    assert "token unavailable" in run.files.path("log").read_text()
 
 
 @pytest.mark.parametrize(
@@ -199,23 +212,23 @@ def test_post_failures_are_logged(
     outcome: httpx.Response | Exception,
     message: str,
 ) -> None:
-    run, prepared, written = make(tmp_path, draft())
+    run, prepared = make(tmp_path, draft())
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
     api = Api(monkeypatch)
     api.created = outcome
     assert not review_post.posted(run, prepared)
-    assert message in written["log"]
-    assert "review" not in written
+    assert message in run.files.path("log").read_text()
+    assert not run.files.path("review").exists()
 
 
 def test_any_2xx_post_is_a_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    run, prepared, written = make(tmp_path, draft())
+    run, prepared = make(tmp_path, draft())
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
     Api(monkeypatch).created = reply(202, {"id": 8})
     assert review_post.posted(run, prepared)
-    assert written == {"review": "github.com/o/r#7 8"}
+    assert run.files.path("review").read_text() == "github.com/o/r#7 8"
 
 
 @pytest.mark.parametrize(
@@ -233,11 +246,11 @@ def test_any_2xx_post_is_a_success(
 def test_a_2xx_post_without_an_integer_id_counts_as_posted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: httpx.Response
 ) -> None:
-    run, prepared, written = make(tmp_path, draft())
+    run, prepared = make(tmp_path, draft())
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
     Api(monkeypatch).created = outcome
     assert review_post.posted(run, prepared)
-    assert written == {"review": "github.com/o/r#7 unknown"}
+    assert run.files.path("review").read_text() == "github.com/o/r#7 unknown"
 
 
 def request_for(profile: Profile) -> RunRequest:

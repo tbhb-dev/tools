@@ -135,7 +135,11 @@ def test_render_and_validate(
 )
 def test_final_message_verdict(tier: Tier, delta: bool, variant: Variant) -> None:
     fields = FIELDS | {"base_reviewed": BASE_REVIEWED}
-    prompt_lines = review_prompt.render(tier, delta, variant, fields).splitlines()
+    prompt = review_prompt.render(tier, delta, variant, fields)
+    assert "`tbhbdev alpha review draft 385`" in prompt
+    assert "`tbhbdev alpha review check 385`" in prompt
+    assert "exactly one `.git/tbhb-alpha/review-385.md`" in prompt
+    prompt_lines = prompt.splitlines()
     assert f"VERDICT: GO {HEAD}" in prompt_lines
     assert f"VERDICT: NO-GO {HEAD}" in prompt_lines
     assert "VERDICT" not in review_prompt.skeleton(tier, delta, variant, fields)
