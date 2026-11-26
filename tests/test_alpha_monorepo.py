@@ -1138,6 +1138,36 @@ def test_verify_scans_shared_files_for_the_source_repo(
     assert imported.problems()[0].startswith(f"{tree / workflow}: cannot read:")
 
 
+def test_verify_rejects_old_go_module_in_shared_workflow(
+    src: Src, mono: Path, capsys: Capsys
+) -> None:
+    path, _ = src
+    module = "go.example.dev/tools"
+    (path / "go.mod").write_text(f"module {module}\n")
+    commit = commit_all(path)
+    made = make_map((path, commit), mono.parent)
+    mapping = load(made.read_text())
+    mapping.rewrite["go.mod"] = Rewrite(
+        mapping.copy.pop("go.mod"),
+        [(module, "github.com/example/mono/factory/tbhbdev")],
+    )
+    made.write_text(dump(mapping))
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+
+    workflow = ".github/workflows/build.yml"
+    (mono / workflow).parent.mkdir(parents=True)
+    (mono / workflow).write_text(
+        "on: workflow_dispatch\njobs:\n  build:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n"
+        f"      - run: go install {module}/cmd/tool@latest\n"
+    )
+    assert Imported((path, commit), mono, made, capsys).problems() == [
+        f"{workflow}:6: Go path {module}",
+        "verify: 1 problems",
+    ]
+
+
 @pytest.mark.parametrize(
     ("entry", "message"),
     [

@@ -328,7 +328,7 @@ def tree_references(
     for source_only, files_to_check in ((False, scanned), (True, shared)):
         if source_only:
             addresses = re.escape(made.repo.encode())
-            patterns = rules(addresses, set(), set(), source_only=True)
+            patterns = rules(addresses, modules, set(), source_only=True)
             bazel_root = None
         else:
             addresses = old_repositories(made.repo)
