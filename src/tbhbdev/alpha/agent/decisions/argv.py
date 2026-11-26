@@ -193,15 +193,12 @@ def _codex(
         "-c",
         f"web_search={_toml(detail.web_search.value)}",
     ]
-    # A subagent that names no model would run on the run's model. Pin the
-    # configured one, or leave the run no subagents.
-    if detail.subagent_model is None:
-        argv += ["-c", "agents.enabled=false"]
-    else:
-        argv += [
-            "-c",
-            f"agents.default_subagent_model={_toml(detail.subagent_model)}",
-        ]
+    # A spawn that names a model keeps it. One that names none gets this model
+    # and not the run's.
+    argv += [
+        "-c",
+        f"agents.default_subagent_model={_toml(detail.subagent_model)}",
+    ]
     if detail.network_proxy is not None:
         domains = ",".join(
             f'{_toml(d)}="allow"' for d in detail.network_proxy["domains"]

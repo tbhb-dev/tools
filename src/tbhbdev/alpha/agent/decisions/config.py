@@ -17,6 +17,7 @@ from typing import NoReturn
 
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import (
+    DEFAULT_CODEX_SUBAGENT_MODEL,
     DEFAULT_MAX_CONCURRENT_RUNS,
     DEFAULT_RUN_MEMORY_MIB,
     HOST_NAME,
@@ -327,7 +328,11 @@ def _codex(table: _Table | None) -> Codex:
     if table is None:
         return Codex(WebSearch.LIVE, WebSearch.LIVE)
     table.only("web_search", "subagent_model")
-    model = _subagent_model(table)
+    model = (
+        table.text("subagent_model")
+        if "subagent_model" in table.values
+        else DEFAULT_CODEX_SUBAGENT_MODEL
+    )
     if "web_search" not in table.values:
         return Codex(WebSearch.LIVE, WebSearch.LIVE, model)
     search = table.table("web_search")
@@ -405,7 +410,7 @@ def _credentials(table: _Table) -> tuple[Credentials, ...]:
 
 
 def _claude(table: _Table) -> Claude:
-    table.only("default_profile", "profiles", "subagent_model")
+    table.only("default_profile", "profiles")
     default = table.text("default_profile")
     profiles = table.table("profiles")
     if not profiles.values:
@@ -430,16 +435,7 @@ def _claude(table: _Table) -> Claude:
     selected = find_profile(tuple(found), default)
     if selected is None:
         table.fail("default_profile", f"names no profile in {profiles.label}")
-    return Claude(
-        default_profile=selected.name,
-        profiles=tuple(found),
-        subagent_model=_subagent_model(table),
-    )
-
-
-def _subagent_model(table: _Table) -> str | None:
-    """The model a subagent gets when it names none, or None to refuse subagents."""
-    return table.text("subagent_model") if "subagent_model" in table.values else None
+    return Claude(default_profile=selected.name, profiles=tuple(found))
 
 
 def _hosts(root: _Table) -> tuple[Host, ...]:

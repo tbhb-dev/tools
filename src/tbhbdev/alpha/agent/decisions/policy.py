@@ -10,6 +10,7 @@ There are no default lists here: write roots, denied paths and `PATH` come from
 
 from __future__ import annotations
 
+import shlex
 from dataclasses import replace
 from pathlib import PurePosixPath
 
@@ -225,22 +226,24 @@ def _claude_write_denies(profile: Profile, paths: RunPaths) -> tuple[str, ...]:
     return (paths.worktree, *protected_git(paths))
 
 
-def _subagent_env(model: str | None) -> dict[str, str]:
-    """Claude's environment that keeps a subagent off the run's model.
+# Forks always run on the parent's model, so they stay off.
+_CLAUDE_SUBAGENT_ENV = {"CLAUDE_CODE_FORK_SUBAGENT": "0"}
 
-    A call that names no model gets MODEL, and forks, which always run on the
-    parent's model, are off. The settings turn hooks off, so an Agent hook
-    could not enforce this.
+
+def _guard_hooks(command: str) -> dict[str, object]:
+    """The settings' only hook: refuse an Agent launch that names no model.
+
+    A launch may name any model. Hooks stay on for this, so the user's own
+    hooks load too.
     """
-    env = {"CLAUDE_CODE_FORK_SUBAGENT": "0"}
-    if model is not None:
-        env["CLAUDE_CODE_SUBAGENT_MODEL"] = model
-    return env
+    handler = {"type": "command", "command": command}
+    return {"PreToolUse": [{"matcher": "Agent", "hooks": [handler]}]}
 
 
-def _subagent_deny(model: str | None) -> list[str]:
-    """Without a configured model, a run has no subagents at all."""
-    return ["Agent"] if model is None else []
+def _guard_command(host: Host, home: str) -> str:
+    """Run `tbhbdev alpha guard-agent-model` from the host's configured binary."""
+    program = host.tbhbdev or resolve(home, ".local/bin/tbhbdev")
+    return f"{shlex.quote(program)} alpha guard-agent-model"
 
 
 def _claude(  # noqa: PLR0913 -- one value per policy input
@@ -250,20 +253,19 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
     env: dict[str, str],
     domains: tuple[str, ...],
     *,
-    subagent_model: str | None,
+    guard: str,
     full: bool,
 ) -> ClaudePolicy:
     if full:
         # Claude user settings override the process environment.
         return ClaudePolicy(
             {
-                "disableAllHooks": True,
                 "env": {
                     "GH_CONFIG_DIR": env["GH_CONFIG_DIR"],
                     "DOCKER_CONFIG": env["DOCKER_CONFIG"],
-                    **_subagent_env(subagent_model),
+                    **_CLAUDE_SUBAGENT_ENV,
                 },
-                "permissions": {"deny": _subagent_deny(subagent_model)},
+                "hooks": _guard_hooks(guard),
                 "sandbox": {"enabled": False},
             }
         )
@@ -317,11 +319,11 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
             "SSH_AUTH_SOCK",
         )
         if k in env
-    } | _subagent_env(subagent_model)
+    } | _CLAUDE_SUBAGENT_ENV
     return ClaudePolicy(
         {
-            "disableAllHooks": True,
             "env": run_env,
+            "hooks": _guard_hooks(guard),
             "permissions": {
                 "allow": [] if review else [f"Edit(/{p}/**)" for p in writes],
                 "deny": [
@@ -329,7 +331,6 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
                     *denied_tools,
                     "WebFetch",
                     "WebSearch",
-                    *_subagent_deny(subagent_model),
                 ],
             },
             "sandbox": sandbox,
@@ -475,7 +476,7 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
                 ((), (), ()),
                 env,
                 (),
-                subagent_model=settings.claude.subagent_model,
+                guard=_guard_command(host, paths.home),
                 full=True,
             )
         else:
@@ -524,7 +525,7 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
             (writes, deny, protected),
             env | {"PATH": tools_path},
             settings.sandbox.network_domains,
-            subagent_model=settings.claude.subagent_model,
+            guard=_guard_command(host, paths.home),
             full=False,
         )
     else:

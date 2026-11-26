@@ -650,8 +650,7 @@ def _claude_errors() -> list[Case]:
         _add(cases, ("claude", "default_profile"), bad, NON_BLANK, claude)
     _add(cases, ("claude", "profiles"), MISSING, "is required", claude)
     _add(cases, ("claude", "profiles"), "x", "must be a table", claude)
-    for bad in ("", " ", 5):
-        _add(cases, ("claude", "subagent_model"), bad, NON_BLANK, claude)
+    _add(cases, ("claude", "subagent_model"), "x", "not recognized", claude)
     for key in ("token",):
         _add(
             cases,
@@ -1313,18 +1312,17 @@ def test_the_worker_path_must_be_absolute(worker: object, reason: str) -> None:
     assert str(caught.value) == reason
 
 
-def test_subagent_models_are_unset_by_default() -> None:
-    parsed = config.parse(GOOD)
-    assert parsed.claude.subagent_model is None
-    assert parsed.codex.subagent_model is None
+def test_the_codex_subagent_model_defaults_to_the_roster_model() -> None:
+    assert config.parse(GOOD).codex.subagent_model == "gpt-6.1-sol"
 
 
-def test_each_harness_has_its_own_subagent_model() -> None:
-    table = edited("claude", "subagent_model", value="example-claude-small")
-    codex = {"web_search": {"build": "live"}, "subagent_model": "example-codex-small"}
-    table["codex"] = codex
+def test_the_codex_subagent_model_can_be_set_beside_a_web_search_table() -> None:
+    table = copy.deepcopy(GOOD)
+    table["codex"] = {
+        "web_search": {"build": "live"},
+        "subagent_model": "example-codex-small",
+    }
     parsed = config.parse(table)
-    assert parsed.claude.subagent_model == "example-claude-small"
     assert parsed.codex.subagent_model == "example-codex-small"
     assert parsed.codex.web_search_build is model.WebSearch.LIVE
 

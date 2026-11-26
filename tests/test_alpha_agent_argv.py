@@ -94,7 +94,7 @@ CODEX_TAIL = (
     "-c",
     'web_search="live"',
     "-c",
-    "agents.enabled=false",
+    'agents.default_subagent_model="gpt-6.1-sol"',
     "-c",
     'features.network_proxy={enabled=true,mode="limited",domains={},unix_sockets={},dangerously_allow_all_unix_sockets=false,allow_local_binding=false}',
 )
@@ -911,7 +911,7 @@ def test_unsandboxed_argv_skips_harness_sandbox(
 
 
 @pytest.mark.parametrize("kind", RunKind)
-def test_codex_pins_the_configured_subagent_model(kind: RunKind) -> None:
+def test_codex_sets_the_configured_subagent_model_as_a_default(kind: RunKind) -> None:
     codex = model.Codex(model.WebSearch.LIVE, model.WebSearch.LIVE, "example-small")
     result = built(Harness.CODEX, kind, Profile.BUILD, config=settings(codex=codex))
     pin = 'agents.default_subagent_model="example-small"'
@@ -920,7 +920,10 @@ def test_codex_pins_the_configured_subagent_model(kind: RunKind) -> None:
 
 
 @pytest.mark.parametrize("kind", RunKind)
-def test_codex_without_a_subagent_model_disables_subagents(kind: RunKind) -> None:
+def test_codex_without_a_configured_model_keeps_subagents_on_the_default(
+    kind: RunKind,
+) -> None:
     result = built(Harness.CODEX, kind, Profile.BUILD)
-    assert result[result.index("agents.enabled=false") - 1] == "-c"
-    assert not any(a.startswith("agents.default_subagent_model") for a in result)
+    default = 'agents.default_subagent_model="gpt-6.1-sol"'
+    assert result[result.index(default) - 1] == "-c"
+    assert "agents.enabled=false" not in result
