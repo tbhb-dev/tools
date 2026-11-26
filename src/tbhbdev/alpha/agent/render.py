@@ -39,9 +39,9 @@ BUILD_PUBLICATION = (
 REVIEW_PUBLICATION = (
     "Use the pull request number for N. Run `tbhbdev alpha review draft N`, "
     "and set `commit_id` to the run's pinned checkout commit. "
-    "Set `event: APPROVE` for GO or `event: REQUEST_CHANGES` for BLOCK or HOLD, "
-    "with non-empty Findings for a change request. "
-    "In Summary, give one or two sentences of reasons and leave out the verdict. "
+    "Set `event: APPROVE` for GO or `event: REQUEST_CHANGES` for BLOCK, "
+    "with a P0 or P1 whole-PR finding for a change request. "
+    "Keep the commit and run details out of the review body. "
     "Keep the final verdict line in your final answer only. "
     "Follow the generated draft's guidance and run "
     "`tbhbdev alpha review check N --no-lint`. "

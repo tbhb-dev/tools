@@ -772,11 +772,16 @@ def missing_styles(top: Path) -> list[str]:
     return [name for name in vale_styles(top) if not (top / STYLES / name).is_dir()]
 
 
-def style_problem(top: Path) -> str | None:
+def style_problem(top: Path, *, sync: bool = True) -> str | None:
     """Sync missing vale styles once; why vale can't run, or None."""
     missing = missing_styles(top)
     if not missing:
         return None
+    if not sync:
+        return (
+            f"vale styles missing from .vale/: {', '.join(missing)}; "
+            f"run `{BAZEL} run {VALE_SYNC}`"
+        )
     bazel = find_tool(BAZEL)
     target = run([bazel, "query", VALE_SYNC], cwd=top)
     if target.returncode != 0 or VALE_SYNC not in target.stdout.splitlines():
@@ -795,12 +800,14 @@ def style_problem(top: Path) -> str | None:
     )
 
 
-def lint(
+def lint(  # noqa: PLR0913 -- Shared draft lint settings.
     rendered: Sequence[str],
     first: int,
     *,
     path: Path = DRAFT,
     drop: frozenset[tuple[int, str]] = frozenset({TITLE_ALERT}),
+    vale_only: bool = False,
+    worktree: Path | None = None,
 ) -> list[Problem]:
     """Lint the title and description with the repository's own configs.
 
@@ -809,27 +816,31 @@ def lint(
     draft line ``first + N - 1``. ``drop`` matches a line and either a rule
     prefix or its full diagnostic.
     """
-    tools = [(name, find_tool(name), args, parse) for name, args, parse in LINTERS]
-    top = root()
-    for name in CONFIGS:
+    configs = (VALE_INI, STYLES) if vale_only else CONFIGS
+    flags = ("--minAlertLevel=error",) if vale_only else ()
+    top = worktree if worktree is not None else root()
+    for name in configs:
         if not (top / name).exists():
             message = f"missing lint config {name} in {top}"
             raise SystemExit(message)
-    styles = style_problem(top)
+    # A run host must not execute Bazel code from the reviewed checkout.
+    styles = style_problem(top) if worktree is None else style_problem(top, sync=False)
     problems: list[Problem] = []
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
-        for name in CONFIGS:
+        for name in configs:
             (work / name).symlink_to(top / name)
         (work / path).parent.mkdir(parents=True, exist_ok=True)
         (work / path).write_text("\n".join(rendered) + "\n")
-        for name, exe, args, parse in tools:
+        for name, args, parse in LINTERS[:1] if vale_only else LINTERS:
             if name == "vale" and styles:
                 problems.append((first, f"vale: {styles}"))
                 continue
             problems.extend(
                 (first + line - 1, text)
-                for line, text in run_linter(name, [exe, *args], parse, work, path)
+                for line, text in run_linter(
+                    name, [find_tool(name), *args, *flags], parse, work, path
+                )
                 if (line, text.split(":")[0]) not in drop and (line, text) not in drop
             )
     return problems

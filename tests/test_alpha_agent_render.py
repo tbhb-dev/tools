@@ -26,9 +26,9 @@ def test_brief_and_launch() -> None:
     assert "`tbhbdev alpha review draft N`" in review
     assert "set `commit_id` to the run's pinned checkout commit" in review
     assert "`event: APPROVE` for GO" in review
-    assert "`event: REQUEST_CHANGES` for BLOCK or HOLD" in review
-    assert "non-empty Findings for a change request" in review
-    assert "In Summary, give one or two sentences of reasons" in review
+    assert "`event: REQUEST_CHANGES` for BLOCK" in review
+    assert "P0 or P1 whole-PR finding for a change request" in review
+    assert "Keep the commit and run details out of the review body" in review
     assert "Keep the final verdict line in your final answer only" in review
     assert "`tbhbdev alpha review check N --no-lint`" in review
     assert "exactly one `.git/tbhb-alpha/review-N.md`" in review

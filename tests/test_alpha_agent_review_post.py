@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import Mock
 
 import httpx
 import pytest
 
+from tbhbdev.alpha import review_doc
 from tbhbdev.alpha.agent import credentials, review_post, runfiles
-from tbhbdev.alpha.agent.model import Profile, RunKind
+from tbhbdev.alpha.agent.model import Harness, Profile, RunKind
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -17,16 +19,20 @@ if TYPE_CHECKING:
     from tbhbdev.alpha.agent import run_host
     from tbhbdev.alpha.agent.model import RunRequest, Settings
 
+pytestmark = pytest.mark.usefixtures("review_cue")
+
 HEAD = "a" * 40
 MINTED = "minted"
 
 
 def draft(event: str = "COMMENT", head: str = HEAD, *, findings: bool = False) -> str:
-    extra = "## Findings\n\n- BLOCK: `a.py:1` fix it.\n\n" if findings else ""
+    extra = (
+        "## Findings\n\n- F1: P1 correctness Fix the data loss.\n\n" if findings else ""
+    )
     return (
         f"---\npr: 7\ncommit_id: '{head}'\nevent: {event}\n---\n\n"
         "## Summary\n\nThe tests cover the changed path.\n\n"
-        f"{extra}## Verification\n\nRead the diff.\n"
+        f"{extra}## Verification\n\n- Read the diff.\n"
     )
 
 
@@ -43,7 +49,9 @@ def make(
     request = SimpleNamespace(
         repo="github.com/o/r",
         commit=HEAD,
-        harness=SimpleNamespace(value="codex"),
+        harness=Harness.CODEX,
+        effort="low",
+        variant=None,
         model="m1",
         profile=Profile.REVIEW,
         kind=RunKind.EXEC,
@@ -73,7 +81,11 @@ def forbidden(*_args: object, **_options: object) -> httpx.Response:
 
 
 BASE = "https://api.github.com/repos/o/r/pulls/7"
-STAMP = f"Run r1, codex m1, judged head {HEAD}."
+
+
+@pytest.fixture(autouse=True)
+def fake_vale(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(review_doc, "lint_post", Mock(return_value=[]))
 
 
 class Api:
@@ -129,7 +141,12 @@ def test_posts_at_the_pinned_commit_with_identity_in_the_body(
     assert payload["commit_id"] == HEAD
     assert payload["body"].startswith("## Summary")
     assert "VERDICT:" not in payload["body"]
-    assert payload["body"].endswith(f"\n---\n{STAMP}\n")
+    assert HEAD not in payload["body"]
+    assert payload["body"].endswith(f"\n\n{review_post.stamp(run)}\n")
+    assert (
+        "Generated-by: LLM effort=low;harness=codex;launch=sha-256-64:"
+        in payload["body"]
+    )
     assert run.files.path("review").read_text() == "github.com/o/r#7 99"
 
 
@@ -233,9 +250,10 @@ APPROVE_THEN_COMMENT = draft("APPROVE").replace(
         (
             draft("REQUEST_CHANGES"),
             "review-7.md",
-            "REQUEST_CHANGES requires non-empty Findings",
+            "REQUEST_CHANGES requires a P0 or P1 finding",
         ),
         (draft("PENDING"), "review-7.md", "not one of"),
+        (draft(), "review-7.md", "Vale refused"),
         (APPROVE_THEN_COMMENT, "review-7.md", "duplicate key"),
         ("---\npr: [\n---\n", "review-7.md", "invalid YAML"),
         (draft(head="b" * 40), "review-7.md", "isn't the commit"),
@@ -243,7 +261,7 @@ APPROVE_THEN_COMMENT = draft("APPROVE").replace(
         (
             draft("APPROVE") + f"\nVERDICT: GO {HEAD}\n",
             "review-7.md",
-            "keep the final verdict line out of the review body",
+            "blocks.verification",
         ),
     ],
 )
@@ -254,22 +272,13 @@ def test_a_bad_draft_posts_nothing(
     name: str,
     message: str,
 ) -> None:
+    if message == "Vale refused":
+        monkeypatch.setattr(review_doc, "lint_post", Mock(return_value=[message]))
     run, prepared = make(tmp_path, text, name)
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
     monkeypatch.setattr(httpx, "request", forbidden)
     assert not review_post.posted(run, prepared)
     assert message in run.files.path("log").read_text()
-
-
-def test_the_host_can_refuse_a_draft_event_allowed_by_the_schema(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, prepared = make(tmp_path, draft("APPROVE"))
-    monkeypatch.setattr(review_post, "ALLOWED_EVENTS", frozenset({"COMMENT"}))
-    monkeypatch.setattr(credentials, "review_post_token", mint_token)
-    monkeypatch.setattr(httpx, "request", forbidden)
-    assert not review_post.posted(run, prepared)
-    assert "can't post a APPROVE" in run.files.path("log").read_text()
 
 
 def test_two_drafts_are_refused(tmp_path: Path) -> None:
@@ -395,3 +404,15 @@ def test_a_failed_token_request_gives_none(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(credentials, "installation_token", fail)
     request = request_for(Profile.REVIEW)
     assert credentials.review_post_token(request, settings_for_account()) is None
+
+
+def test_review_attribution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run, _ = make(tmp_path, draft())
+    monkeypatch.setattr(run.request, "harness", Harness.AGY)
+    monkeypatch.setattr(run.request, "variant", "a")
+    trailer = review_post.stamp(run)
+    assert "harness=antigravity;" in trailer
+    assert trailer.endswith(";variant=a")
+    monkeypatch.setattr(run.request, "model", "a;b")
+    with pytest.raises(review_post.PostRefusedError, match="invalid LLM trailer"):
+        review_post.stamp(run)

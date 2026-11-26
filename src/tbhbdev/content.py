@@ -157,17 +157,27 @@ def check_decision_record(markdown: str) -> list[str]:
     return refusals
 
 
-def check_review(markdown: str, *, metadata: Json | None = None) -> list[str]:
+def check_review(
+    markdown: str,
+    *,
+    metadata: Json | None = None,
+    event: str = "",
+    posted: bool = False,
+) -> list[str]:
     """Return review validation refusals, or an empty list on success."""
     definition = "#Review"
     if metadata is None:
         definition = "#ReviewBody"
-        metadata = {}
+        metadata = {"event": event} if event else {}
     try:
         draft = normalize(
-            markdown, object="pr-review", variant="review", metadata=metadata
+            markdown,
+            object="pr-review",
+            variant="review",
+            metadata={**metadata, "posted": posted},
         )
-    except ValueError as exc:
+        payload = json.dumps(draft)
+    except (TypeError, ValueError) as exc:
         return [str(exc)]
     try:
         cue = cue_runtime.resolve()
@@ -187,7 +197,7 @@ def check_review(markdown: str, *, metadata: Json | None = None) -> list[str]:
                     "-",
                 ],
                 cwd=schemas,
-                input=json.dumps(draft),
+                input=payload,
                 capture_output=True,
                 encoding="utf-8",
                 check=False,

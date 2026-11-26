@@ -1,4 +1,3 @@
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -6,248 +5,83 @@ import pytest
 
 from tbhbdev import content, cue_runtime
 
-SHA = "0123456789abcdef0123456789abcdef01234567"
-SUMMARY = "The cache preserves the last saved value."
-REVIEW = f"""Run: review-build
-Provider: openai
-Model: gpt-6
-Variant: a
-Host: reviewer.example.org
-Head: {SHA}
-Tier: 1
+pytestmark = pytest.mark.usefixtures("review_cue")
 
-## Summary
-
-{SUMMARY}
-
-## Findings
-
-"""
-VERIFICATION = (
-    "\n## Verification\n\nRead the cache implementation and ran the cache tests.\n"
-)
-BLOCK = "- BLOCK `src/app.py:4` Return the saved value.\n"
-DEBT = "- TECH-DEBT `tests/test_app.py:8` Rename the fixture. It also serves the CLI.\n"
-SECURITY = "- SECURITY-DEBT `src/app.py:12` Narrow the file permissions.\n"
-LONG_FINDING = "- TECH-DEBT `app.py:1` " + "word " * 39 + "word.\n"
-RUN = {
-    "name": "review-build",
-    "provider": "openai",
-    "model": "gpt-6",
-    "variant": "a",
-    "host": "reviewer.example.org",
-}
-BLOCK_METADATA = {
-    "class": "BLOCK",
-    "path": "src/app.py",
-    "line": 4,
-    "summary": "Return the saved value.",
-}
+SUMMARY = "## Summary\n\nThe cache preserves the last saved value.\n"
+VERIFICATION = "\n## Verification\n\n- Read the cache implementation.\n"
+FINDING = "- F1: P1 correctness The cache returns stale values.\n"
+DEBT = "- F1: P2 design Rename the fixture. It also serves the CLI.\n"
 
 
-@pytest.fixture
-def review_metadata() -> content.Json:
-    return {
-        "schema": 2,
-        "repo": "tbhb-dev/tools",
-        "pr": 1,
-        "head_sha": SHA,
-        "tier": 1,
-        "verdict": "GO",
-        "run": RUN.copy(),
-        "findings": [],
-    }
+def body_with(heading: str, text: str) -> str:
+    before = "" if heading == "Summary" else SUMMARY + "\n"
+    after = "" if heading == "Verification" else VERIFICATION
+    return f"{before}## {heading}\n\n{text}\n{after}"
 
 
-@pytest.fixture
-def review_cue(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Bazel supplies the same pinned tool on PATH in the test sandbox.
-    if executable := shutil.which("cue"):
-        monkeypatch.setattr(cue_runtime, "resolve", lambda: Path(executable))
-
-
-@pytest.mark.usefixtures("review_cue")
 @pytest.mark.parametrize(
-    "review",
+    ("heading", "item", "words", "count"),
     [
-        REVIEW + VERIFICATION,
-        REVIEW + DEBT + SECURITY + VERIFICATION,
-        REVIEW.replace("Tier: 1", "Tier: 2") + BLOCK + VERIFICATION,
-        REVIEW.replace("Tier: 1", "Tier: 0") + DEBT * 8 + VERIFICATION,
-        REVIEW + LONG_FINDING * 5 + VERIFICATION,
-        REVIEW + VERIFICATION + "\n" + "word " * 90 + "word.\n",
+        ("Summary", "", 40, 1),
+        ("Findings", "- F{}: P3 docs ", 30, 8),
+        ("Suggestions", "- S{}: ", 25, 5),
+        ("Verification", "- ", 20, 6),
     ],
 )
-def test_check_review_accepts(review: str) -> None:
-    assert content.check_review(review) == []
+def test_review_limits(heading: str, item: str, words: int, count: int) -> None:
+    def body(size: int, items: int) -> str:
+        prose = "word " * (size - 1) + "word."
+        return body_with(
+            heading, "\n".join(item.format(n) + prose for n in range(1, items + 1))
+        )
+
+    assert not content.check_review(body(words, count))
+    assert content.check_review(body(words + 1, 1))
+    if heading != "Summary":
+        assert content.check_review(body(1, count + 1))
 
 
-@pytest.mark.usefixtures("review_cue")
 @pytest.mark.parametrize(
-    ("review", "reason"),
+    ("heading", "items"),
     [
-        (REVIEW.replace(SUMMARY, ""), "blocks.summary.content"),
-        (REVIEW.replace(SUMMARY, "- Read the cache."), "blocks.summary.content"),
-        (REVIEW.replace(SUMMARY, "word " * 60 + "word."), "blocks.summary.metrics"),
-        (REVIEW.replace("## Summary", "## Verdict"), "blockOrder"),
-        (REVIEW + "## Context\n\nMore notes.\n", "blockOrder"),
-        ("# Review\n\n" + REVIEW, "blocks.preamble.content"),
-        (REVIEW.replace("Provider: openai\n", ""), "blocks.preamble.content"),
-        (REVIEW.replace("Run: review-build", "Run:"), "blocks.preamble.content"),
-        (REVIEW.replace("Model: gpt-6", "Model:"), "blocks.preamble.content"),
-        (
-            REVIEW.replace(
-                "Provider: openai\nModel: gpt-6", "Model: gpt-6\nProvider: openai"
-            ),
-            "blocks.preamble.content",
-        ),
-        (REVIEW.replace("Variant: a", "Variant: c"), "blocks.preamble.content"),
-        (
-            REVIEW.replace("reviewer.example.org", "Reviewer.example.org"),
-            "blocks.preamble.content",
-        ),
-        (
-            REVIEW.replace("reviewer.example.org", "reviewer..org"),
-            "blocks.preamble.content",
-        ),
-        (REVIEW.replace("Tier: 1", "Tier: 3"), "blocks.preamble.content"),
-        (REVIEW.replace(SHA, SHA.upper()), "blocks.preamble.content"),
-        (REVIEW.replace("Head: 0", "Head: z"), "blocks.preamble.content"),
-        (REVIEW.replace("Head: 0", "Head: "), "blocks.preamble.content"),
-        (REVIEW.replace("Head: 0", "Head: 00"), "blocks.preamble.content"),
-        (REVIEW + DEBT.replace("TECH-DEBT", "NOTE"), "blocks.findings.content"),
-        (REVIEW + DEBT.replace(":8", ":0"), "_parts"),
-        (REVIEW + DEBT.replace(":8", ""), "_parts"),
-        (REVIEW + "1." + DEBT[1:], "blocks.findings.content"),
-        (REVIEW + "- [ ] " + DEBT[2:], "task checkbox"),
-        (REVIEW + DEBT + "  - Nested item.\n", "blocks.findings.content"),
-        (REVIEW + "Explain the change.\n", "blocks.findings.content"),
-        (REVIEW + "- TECH-DEBT `app.py:1` Missing period\n", "blocks.findings.content"),
-        (REVIEW + DEBT + "  Keep its old name.\n", "blocks.findings.content"),
-        (REVIEW + "- TECH-DEBT `app.py:1` **CI** is  green!\n", "CI gate"),
-        (REVIEW + "- TECH-DEBT `app.py:1` CI is green .\n", "CI gate"),
-        (REVIEW + "- TECH-DEBT `app.py:1` Move the fixture. 12/12 pass.\n", "CI gate"),
-        (REVIEW + "- TECH-DEBT `app.py:1` " + "word " * 40 + "word.\n", "_words"),
-        (REVIEW + DEBT * 9, "items"),
+        ("Findings", "- F1: P0 security Fix it.\n- F3: P2 test Write a test."),
+        ("Findings", "- F1: P1 bug Fix it."),
+        ("Findings", "- F1: P3 docs Fix it at `src/app.py:4`."),
+        ("Findings", "- F1: P2 test **CI** is green."),
+        ("Findings", "- F1: P2 test One. Two. Three."),
+        ("Suggestions", "- S1: Add an example.\n- S3: Improve the label."),
+        ("Suggestions", "- V1: Add an example."),
+        ("Verification", "1. Read the cache."),
+        ("Verification", "- 1. Read the cache."),
+        ("Verification", "- V1: Read the cache."),
+        ("Verification", "- [x] Read the cache."),
+        ("Verification", "- Read the cache.\n\nA paragraph."),
+        ("Verification", "- Read the cache.\nRun: review-build"),
+        ("Verification", "- Read the cache.\n- Checked commit a123456."),
+        ("Verification", "- Read the cache.\n- VERDICT: GO"),
     ],
 )
-def test_check_review_refuses(review: str, reason: str) -> None:
-    refusals = content.check_review(review + VERIFICATION)
-    assert len(refusals) == 1
-    assert reason in refusals[0]
+def test_review_rejects_invalid_items(heading: str, items: str) -> None:
+    assert content.check_review(body_with(heading, items))
 
 
-@pytest.mark.usefixtures("review_cue")
 @pytest.mark.parametrize(
-    ("verification", "reason"),
+    ("event", "item", "refused"),
     [
-        ("", "blockOrder"),
-        ("\n## Verification\n", "blocks.verification.content"),
-        ("\n## Verification\n\n- Read the cache.\n", "blocks.verification.content"),
-        (VERIFICATION + "\n" + "word " * 91 + "word.\n", "blocks.verification.metrics"),
+        ("APPROVE", "", False),
+        ("APPROVE", DEBT, False),
+        ("APPROVE", FINDING, True),
+        ("COMMENT", FINDING, True),
+        ("REQUEST_CHANGES", FINDING, False),
+        ("REQUEST_CHANGES", FINDING.replace("P1", "P0"), False),
+        ("REQUEST_CHANGES", DEBT, True),
+        ("REQUEST_CHANGES", "", True),
     ],
 )
-def test_check_review_verification(verification: str, reason: str) -> None:
-    refusals = content.check_review(REVIEW + verification)
-    assert len(refusals) == 1
-    assert reason in refusals[0]
-
-
-@pytest.mark.usefixtures("review_cue")
-def test_check_review_accepts_metadata(review_metadata: content.Json) -> None:
-    assert content.check_review(REVIEW + VERIFICATION, metadata=review_metadata) == []
-    review_metadata.update(
-        verdict="NO-GO", tier=0, run={**RUN, "variant": "b"}, findings=[BLOCK_METADATA]
-    )
-    header = REVIEW.replace("Tier: 1", "Tier: 0")
-    header = header.replace("Variant: a", "Variant: b")
-    block = BLOCK.replace("saved value", "**saved**\n  value")
-    assert (
-        content.check_review(header + block + VERIFICATION, metadata=review_metadata)
-        == []
-    )
-
-
-@pytest.mark.usefixtures("review_cue")
-@pytest.mark.parametrize(
-    ("field", "value", "reason"),
-    [
-        ("verdict", "NO-GO", "NO-GO verdict requires"),
-        ("head_sha", "f" * 40, "head_sha"),
-        ("head_sha", SHA.upper(), "head_sha"),
-        ("tier", 2, "tier"),
-        ("tier", 3, "tier"),
-        ("run", {**RUN, "name": "other"}, "run.name"),
-        ("run", {**RUN, "provider": "other"}, "run.provider"),
-        ("run", {**RUN, "model": "other"}, "run.model"),
-        ("run", {**RUN, "variant": "b"}, "run.variant"),
-        ("run", {**RUN, "variant": "c"}, "run.variant"),
-        ("run", {**RUN, "host": "other.example.org"}, "run.host"),
-        ("run", {**RUN, "extra": True}, "run.extra"),
-        ("repo", "tools", "repo"),
-        ("pr", 0, "pr"),
-        ("schema", 1, "schema"),
-        ("extra", True, "metadata.extra"),
-        ("findings", [BLOCK_METADATA], "findings"),
-    ],
-)
-def test_check_review_refuses_metadata(
-    review_metadata: content.Json, field: str, value: object, reason: str
-) -> None:
-    review_metadata[field] = value
-    refusals = content.check_review(REVIEW + VERIFICATION, metadata=review_metadata)
-    assert len(refusals) == 1
-    assert reason in refusals[0]
-
-
-@pytest.mark.usefixtures("review_cue")
-def test_check_review_refuses_block_findings_for_go(
-    review_metadata: content.Json,
-) -> None:
-    review_metadata["findings"] = [BLOCK_METADATA]
-    refusals = content.check_review(
-        REVIEW + BLOCK + VERIFICATION, metadata=review_metadata
-    )
-    assert len(refusals) == 1
-    assert "GO verdict forbids BLOCK findings" in refusals[0]
-
-
-@pytest.mark.usefixtures("review_cue")
-def test_check_review_requires_supplied_metadata_fields(
-    review_metadata: content.Json,
-) -> None:
-    assert content.check_review(REVIEW + VERIFICATION, metadata={})
-    del review_metadata["verdict"]
-    assert (
-        "required field missing: verdict"
-        in content.check_review(REVIEW + VERIFICATION, metadata=review_metadata)[0]
-    )
-
-
-@pytest.mark.usefixtures("review_cue")
-@pytest.mark.parametrize(
-    ("findings", "reason"),
-    [
-        ([], "findings"),
-        ([{**BLOCK_METADATA, "class": "TECH-DEBT"}], "findings.0.class"),
-        ([{**BLOCK_METADATA, "path": "src/other.py"}], "findings.0.path"),
-        ([{**BLOCK_METADATA, "line": 5}], "findings.0.line"),
-        (
-            [{**BLOCK_METADATA, "summary": "Return the cached value."}],
-            "findings.0.summary",
-        ),
-        ([{**BLOCK_METADATA, "summary": "word " * 160 + "word."}], "findings.0._words"),
-        ([{**BLOCK_METADATA, "extra": True}], "findings.0.extra"),
-    ],
-)
-def test_check_review_matches_findings(
-    review_metadata: content.Json, findings: list[dict[str, object]], reason: str
-) -> None:
-    review_metadata.update(verdict="NO-GO", findings=findings)
-    body = REVIEW + BLOCK + VERIFICATION
-    refusals = content.check_review(body, metadata=review_metadata)
-    assert len(refusals) == 1
-    assert reason in refusals[0]
+def test_review_event_matches_severity(event: str, item: str, *, refused: bool) -> None:
+    findings = f"\n## Findings\n\n{item}" if item else ""
+    problems = content.check_review(SUMMARY + findings + VERIFICATION, event=event)
+    assert bool(problems) == refused
 
 
 def test_check_review_reports_normalization_refusal() -> None:
@@ -262,7 +96,7 @@ def test_check_review_reports_missing_cue(monkeypatch: pytest.MonkeyPatch) -> No
         raise cue_runtime.CueError(message)
 
     monkeypatch.setattr(cue_runtime, "resolve", missing)
-    assert content.check_review(REVIEW) == [
+    assert content.check_review(SUMMARY + VERIFICATION) == [
         "Review validation could not run: run tbhbdev cue install"
     ]
 
@@ -276,4 +110,4 @@ def test_check_review_reports_silent_failure(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(cue_runtime, "resolve", lambda: Path("cue"))
     monkeypatch.setattr(content.subprocess, "run", quiet)
-    assert content.check_review(REVIEW) == ["Review validation failed"]
+    assert content.check_review(SUMMARY + VERIFICATION) == ["Review validation failed"]

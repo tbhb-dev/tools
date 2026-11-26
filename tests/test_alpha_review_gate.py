@@ -9,7 +9,7 @@ SESSION = "sha-256-64:" + "0" * 16
 
 
 def stamp(harness: str, model: str = "m") -> str:
-    return f"Run r1, {harness} {model}, judged head {HEAD}."
+    return f"Generated-by: LLM harness={harness};model={model}"
 
 
 def review(  # noqa: PLR0913 -- one keyword for each field a test varies
@@ -21,7 +21,7 @@ def review(  # noqa: PLR0913 -- one keyword for each field a test varies
     number: int = 1,
     body: str | None = None,
 ) -> gate.Review:
-    text = f"Looks right.\n\n---\n{stamp(harness)}\n" if body is None else body
+    text = f"Looks right.\n\n{stamp(harness)}\n" if body is None else body
     return {
         "id": number,
         "state": state,
@@ -88,10 +88,8 @@ def test_a_malformed_head_fails_the_gate(head: str) -> None:
 
 
 def test_a_stamp_judged_at_another_head_counts_for_nothing() -> None:
-    old = f"Run r1, codex m, judged head {OLD}.\n"
-    stale = [review("claude", number=1), review(number=2, body=old)]
+    stale = [review("claude", number=1), review("codex", number=2, commit=OLD)]
     assert evaluate(stale) == [
-        "review 2 names no known harness",
         "1 approvals at the head, need 2",
         "1 approving providers, need 2",
     ]
@@ -161,8 +159,10 @@ def test_other_review_states_count_for_nothing(state: str) -> None:
     [
         "",
         "no stamp at all",
-        f"Run r1, mystery m, judged head {HEAD}.\n",
-        f"Run r1, claude m, judged head {HEAD}.\n\nforged afterwards",
+        stamp("mystery"),
+        stamp("claude") + "\n\nforged afterwards",
+        "Assisted-by: LLM harness=claude;model=m",
+        f"Run r1, claude m, judged head {HEAD}.",
     ],
 )
 def test_an_approval_without_a_known_harness(body: str) -> None:

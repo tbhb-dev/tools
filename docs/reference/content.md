@@ -2,12 +2,11 @@
 description: Shared GitHub content validation and writes for plugins.
 generated:
   - role: generated
-    harness: codex:0.171.0
+    harness: codex:0.166.0
     model: openai:gpt-6.2-sol
-    effort: high
     surface: exec
-    session: sha-256-64:9d08744b354d28e7
-    at: "2026-11-26T15:04:20Z"
+    session: sha-256-64:b4a0e82d6519a059
+    at: "2026-11-26T15:26:50Z"
 status: stable
 tags: [plugins]
 title: Content writes
@@ -29,39 +28,36 @@ type: Reference
 
 ## Review validation
 
-`tbhbdev.content.check_review(markdown, *, metadata=None)` takes the Markdown body of a pull request review and optional parsed frontmatter. An empty list means it passed. On refusal, the list contains a diagnostic. The function normalizes the body as object `pr-review`, variant `review`, and checks it with the binary from `tbhbdev cue install`. It uses `#ReviewBody` when called with only Markdown and `#Review` when given metadata. The caller verifies the commit hash against the pull request head before posting.
+`tbhbdev.content.check_review(markdown, *, metadata=None, event="", posted=False)` validates a pull request review with `CUE`. It returns an empty list on success and a diagnostic on refusal. Install the pinned executable with `tbhbdev cue install`. Set `event` to check the findings against the GitHub review event. Pass `metadata` for a schema 2 review document, whose verdict maps to a GitHub event. Set `posted=True` when checking a body with its generated footer.
 
-Start with one paragraph of seven consecutive header lines in the order shown below. Use one token each for `Run`, `Provider`, and `Model`. `Variant` is `a` or `b`, `Host` uses lowercase dotted labels, and `Head` takes a 40-character lowercase hexadecimal commit hash. `Tier` is `0`, `1`, or `2`, with `0` for prose-only repositories. Follow the header with the H2 sections `Summary`, `Findings`, and `Verification` in that order. Write the reasons in Summary in one paragraph of at most 60 visible words.
+The body starts with Summary and ends with Verification. Findings and Suggestions are optional, in that order. GitHub records the reviewed commit in `commit_id`. Keep the commit and run details out of the review prose.
 
 ```markdown
-Run: review-build
-Provider: openai
-Model: gpt-6
-Variant: a
-Host: reviewer.example.org
-Head: 0123456789abcdef0123456789abcdef01234567
-Tier: 1
-
 ## Summary
 
-The warm cache path can return a stale value.
+Warm caches can return stale values after an update.
 
 ## Findings
 
-- BLOCK `src/app.py:4` Return the saved value when the cache is warm.
+- F1: P1 correctness Invalidate cached values when their source changes.
+
+## Suggestions
+
+- S1: add an example for callers that share a cache.
 
 ## Verification
 
-Read the cache implementation and ran the cache tests.
+- Traced invalidation after an update.
+- Ran cache tests with a preloaded value.
 ```
 
-Each finding is one bullet with a class (`BLOCK`, `TECH-DEBT`, or `SECURITY-DEBT`), a whitespace-free `file:line` reference with a positive line number, and one or two sentences. Use a period, question mark, or exclamation point at the end of each sentence. The checker treats whitespace after that punctuation as a sentence boundary and applies the shared CI restatement check to each sentence. Use at most eight findings and 40 visible prose words per body finding, counted after the class and reference.
+Summary gives the reasons in one or two sentences totaling at most 40 visible words. Record the verdict in the review event. End each Summary or Findings sentence with a period, question mark, or exclamation point.
 
-In `Verification`, describe what you read or ran in one or more paragraphs totaling at most 100 visible words.
+Use Findings for whole-PR issues. Start each bullet with `F<n>: P<0-3> <kind>` and count from 1 without gaps. Use at most eight findings. Each contains one or two sentences and at most 30 words after the kind. The kinds are `correctness`, `security`, `design`, `test`, and `docs`. Use P0 for harm or a security breach, P1 for broken basic use or correctness, P2 for debt that needs attention soon, and P3 for minor issues. P0 and P1 require `REQUEST_CHANGES`. Findings must describe issues beyond CI gate results.
 
-Metadata requires `schema: 2`, a `repo` in `OWNER/NAME` form, a positive `pr` number, `head_sha`, `tier`, `verdict`, a `run` object with `name`, `provider`, `model`, `variant`, and `host`, and a `findings` list of objects with `class`, `path`, `line`, and `summary`. The objects reject unknown fields. A `NO-GO` verdict requires a `BLOCK` finding, and a `GO` verdict disallows one. The head, tier, and run fields must match the body. Findings must also match in order, with each summary equal to the visible prose of its bullet with whitespace collapsed to single spaces.
+Use at most five Suggestions bullets. Start them with `S1:`, `S2:`, and so on without gaps. Each has at most 25 words after the prefix. Verification requires one to six unnumbered bullets of at most 20 words each, with no prefixes.
 
-The seven-line header and `Verification` section are required. The tier range changed to `0`–`2`, and `HOLD` was renamed to `NO-GO`. The 160-word whole-review cap became a per-summary cap on metadata. The body keeps its 40-word limit on each finding, which also limits the matching summary.
+Schema 2 metadata requires `repo`, `pr`, `head_sha`, `tier` (0, 1, or 2), `verdict` (`GO` or `NO-GO`), and a `run` object with `name`, `provider`, `model`, `variant` (`a` or `b`), and `host` (a fully qualified hostname). Use a full lowercase commit hash for `head_sha`. The metadata objects reject unknown fields.
 
 ## Caller and dry run
 

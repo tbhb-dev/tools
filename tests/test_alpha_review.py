@@ -14,14 +14,16 @@ from test_alpha_pull_request import world as world  # noqa: PLC0414
 
 from tbhbdev import alpha
 from tbhbdev.alpha import pull_request as pr
-from tbhbdev.alpha import review
+from tbhbdev.alpha import review, review_doc
+
+pytestmark = pytest.mark.usefixtures("review_cue")
 
 HEAD = "a1" * 20
 NEXT = "B2" * 20
 FRONT = f"---\npr: 7\ncommit_id: '{HEAD}'\nevent: COMMENT\n---\n"
 BODY = (
     "## Summary\n\nThe change passes.\n\n## Verification\n\n"
-    "Read the diff and ran the tests. CI passed.\n"
+    "- Read the diff and ran the tests.\n"
 )
 FILLED = FRONT + BODY
 
@@ -39,24 +41,13 @@ def head(world: World, value: str = HEAD) -> None:
     world.fake("gh", stdout=json.dumps({"headRefOid": value}))
 
 
-def test_template_and_sections_agree() -> None:
-    assert "## Summary\n" in review.TEMPLATE
-    assert "## Verdict\n" not in review.TEMPLATE
+def test_template_has_the_review_sections() -> None:
     assert re.findall(r"^## (.+)$", review.TEMPLATE, re.MULTILINE) == [
-        section.heading for section in review.SECTIONS
+        "Summary",
+        "Findings",
+        "Suggestions",
+        "Verification",
     ]
-    guidance = re.findall(
-        r"^## .+\n\n<!-- (Required|Optional), at most (\d+) words",
-        review.TEMPLATE,
-        re.MULTILINE,
-    )
-    assert [(g[0] == "Required", int(g[1])) for g in guidance] == [
-        (section.required, section.max_words) for section in review.SECTIONS
-    ]
-    assert "one line per paragraph" in review.TEMPLATE
-    assert "plain prose" in review.TEMPLATE
-    assert "`path:line`" in review.TEMPLATE
-    assert "no trailers" in review.TEMPLATE
 
 
 def test_schema_is_valid_and_closed() -> None:
@@ -79,7 +70,6 @@ def test_draft_prints_path_and_writes_skeleton(
     ]
     problems = structure(path.read_text())
     assert any(line == 4 and "event" in why for line, why in problems)
-    assert any("HTML comment" in why for _, why in problems)
 
 
 def test_check_without_lint_accepts_a_filled_comment_draft(
@@ -90,15 +80,8 @@ def test_check_without_lint_accepts_a_filled_comment_draft(
     path = Path(capsys.readouterr().out.strip())
     with patch.object(pr, "lint", return_value=[]) as lint:
         assert run_main("check", "7", "--no-lint") == 1
-        assert "HTML comment" in capsys.readouterr().err
-        text = re.sub(r"<!--.*?-->\n", "", path.read_text(), flags=re.DOTALL)
-        path.write_text(
-            text.replace("event:", "event: COMMENT")
-            .replace("## Summary", "## Summary\n\nRead the diff.")
-            .replace("## Findings\n\n\n", "")
-            .replace("## Suggestions\n\n\n", "")
-            .replace("## Verification", "## Verification\n\nRead the diff.")
-        )
+        assert "frontmatter" in capsys.readouterr().err
+        path.write_text(FILLED)
         assert run_main("check", "7", "--no-lint") == 0
         lint.assert_not_called()
         assert run_main("check", "7") == 0
@@ -238,11 +221,10 @@ def test_non_mapping_frontmatter_fails(meta: str) -> None:
 
 @pytest.mark.parametrize("event", ["COMMENT", "REQUEST_CHANGES", "APPROVE"])
 def test_events_and_uppercase_hex_pass(event: str) -> None:
+    severity = "P1" if event == "REQUEST_CHANGES" else "P2"
     body = BODY.replace(
         "## Verification",
-        "## Findings\n\n- BLOCK: `src/file.py:3` must handle empty input.\n"
-        "- TECH-DEBT: `src/file.py:4` simplify the branch.\n"
-        "- SECURITY-DEBT: `src/file.py:5` narrow the file permissions.\n"
+        f"## Findings\n\n- F1: {severity} correctness Handle empty input.\n"
         "\n## Verification",
     )
     assert structure((FRONT + body).replace("COMMENT", event).replace(HEAD, NEXT)) == []
@@ -253,6 +235,7 @@ def test_events_and_uppercase_hex_pass(event: str) -> None:
     "summary",
     [
         "GO because the tests cover retries.",
+        "This change is a NO-GO.",
         "APPROVE",
         "Approved.",
         "**BLOCK.**",
@@ -274,9 +257,7 @@ def test_check_refuses_summary_verdicts(
     path.parent.mkdir()
     path.write_text(FILLED.replace("The change passes.", summary))
     assert run_main("check", "7", "--no-lint") == 1
-    assert capsys.readouterr().err == (
-        f"{path}:8: Summary must give reasons without stating the verdict\n"
-    )
+    assert f"{path}:6:" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -289,70 +270,6 @@ def test_check_refuses_summary_verdicts(
 )
 def test_summary_allows_words_that_do_not_declare_a_verdict(summary: str) -> None:
     assert structure(FILLED.replace("The change passes.", summary)) == []
-
-
-@pytest.mark.parametrize(
-    "body", [BODY, BODY.replace("## Verification", "## Findings\n\n## Verification")]
-)
-def test_request_changes_needs_findings(body: str) -> None:
-    assert (6, "REQUEST_CHANGES requires non-empty Findings") in structure(
-        FRONT.replace("COMMENT", "REQUEST_CHANGES") + body
-    )
-
-
-def test_comments_do_not_count_as_findings() -> None:
-    text = FRONT.replace("COMMENT", "REQUEST_CHANGES") + BODY.replace(
-        "## Verification", "## Findings\n\n<!-- TODO -->\n\n## Verification"
-    )
-    assert (6, "REQUEST_CHANGES requires non-empty Findings") in structure(text)
-
-
-@pytest.mark.parametrize(
-    ("body", "line", "message"),
-    [
-        ("# Title\n\n" + BODY, 6, "a review must not contain an H1 title"),
-        ("stray\n\n" + BODY, 6, "text before the first section"),
-        (BODY.replace("## Summary", "## Other"), 6, "unknown section"),
-        (
-            BODY.replace("## Verification", "## Summary"),
-            10,
-            "duplicated or out of order",
-        ),
-        (
-            BODY.replace("## Summary\n\nThe change passes.\n\n", ""),
-            6,
-            "missing required section 'Summary'",
-        ),
-        ("## Summary\n\nFine.\n", 6, "missing required section 'Verification'"),
-        (BODY.replace("The change passes.", ""), 6, "section 'Summary' is empty"),
-        (BODY.replace("The change passes.", "one\ntwo"), 8, "hard-wrapped"),
-        (BODY + "\nGenerated-by: LLM test\n", 14, "the script writes Generated-by"),
-        (BODY + "\nSigned-off-by: test\n", 14, "Signed-off-by and Co-authored-by"),
-        (BODY.replace("The change passes.", "See #7."), 8, "#7 links"),
-        (BODY + "\n```\n", 14, "code fence is never closed"),
-    ],
-)
-def test_body_checks_are_reused(body: str, line: int, message: str) -> None:
-    assert any(n == line and message in why for n, why in structure(FRONT + body))
-
-
-@pytest.mark.parametrize("section", review.SECTIONS)
-def test_each_section_has_its_word_limit(section: pr.Section) -> None:
-    body = "\n\n".join(f"## {s.heading}\n\nFine." for s in review.SECTIONS) + "\n"
-    assert structure(FRONT + body) == []
-    assert section.max_words is not None
-    text = body.replace(
-        f"## {section.heading}\n\nFine.",
-        f"## {section.heading}\n\n" + "word " * (section.max_words + 1),
-    )
-    assert any(
-        f"limit {section.max_words}" in why for _, why in structure(FRONT + text)
-    )
-    boundary = body.replace(
-        f"## {section.heading}\n\nFine.",
-        f"## {section.heading}\n\n" + "word " * section.max_words,
-    )
-    assert structure(FRONT + boundary) == []
 
 
 @pytest.mark.parametrize(
@@ -491,7 +408,7 @@ def test_lint_uses_review_path_and_drops_only_missing_h1(world: World) -> None:
     ]
     for name in ("rumdl", "vale", "cspell"):
         (call,) = world.calls(name)
-        assert cast("list[str]", call["argv"])[-1] == str(review.LINT_PATH)
+        assert cast("list[str]", call["argv"])[-1] == str(review_doc.LINT_PATH)
         # The existing fake records only the PR draft; the review file is separate.
         assert call["draft"] is None
 
@@ -510,9 +427,9 @@ def test_filled_template_with_real_linters(
     monkeypatch.chdir(REAL)
     replacements = [
         "The change passes.",
-        "- `src/file.py:3` must handle empty input.",
-        "Add an example for empty input.",
-        "Read the diff and ran the tests. CI passed.",
+        "- F1: P2 test Cover the empty input case.",
+        "- S1: add an example for empty input.",
+        "- Read the diff and ran the tests.",
     ]
     filled = re.sub(r"<!--.*?-->\n*", "", review.TEMPLATE, count=1, flags=re.DOTALL)
     for replacement in replacements:
@@ -564,10 +481,6 @@ def test_commit_is_exactly_40_hex_characters(value: str) -> None:
     assert any(line == 3 and "commit_id" in why for line, why in structure(text))
 
 
-def test_a_fenced_h1_is_code() -> None:
-    assert structure(FILLED + "\n```text\n# An example\n```\n") == []
-
-
 def test_dispatch_forwards_arguments_program_and_status() -> None:
     with patch.object(review, "main", return_value=3) as run:
         assert alpha.main(["review", "check", "7"], "p") == 3
@@ -609,14 +522,6 @@ def test_lint_creates_the_requested_relative_path(world: World, path: Path) -> N
         assert cast("list[str]", call["argv"])[-1] == str(path)
 
 
-@pytest.mark.parametrize("body", ["", "\n", " \n\t\n"])
-def test_empty_body_reports_required_sections(body: str) -> None:
-    assert structure(FRONT + body) == [
-        (6, "missing required section 'Summary'"),
-        (6, "missing required section 'Verification'"),
-    ]
-
-
 def test_schema_key_search_stays_in_the_frontmatter() -> None:
     text = FILLED.replace("event: COMMENT", "'event': invalid") + "\nevent: body text\n"
     assert structure(text) == [
@@ -628,20 +533,6 @@ def test_schema_key_search_stays_in_the_frontmatter() -> None:
             ),
         )
     ]
-
-
-def test_h1_diagnostic_is_specific_to_reviews() -> None:
-    assert structure(FRONT + "# Title\n\n" + BODY) == [
-        (6, "a review must not contain an H1 title"),
-        (6, "text before the first section; put it under a heading"),
-    ]
-
-
-def test_request_changes_keeps_other_problems() -> None:
-    text = FILLED.replace("COMMENT", "REQUEST_CHANGES").replace(HEAD, "abc")
-    found = structure(text)
-    assert any(line == 3 and "commit_id" in why for line, why in found)
-    assert (6, "REQUEST_CHANGES requires non-empty Findings") in found
 
 
 def test_force_flag_refreshes_the_draft(
@@ -687,8 +578,25 @@ def test_refresh_fills_an_empty_commit_value(value: str) -> None:
 
 def test_empty_body_skips_external_linters() -> None:
     with patch.object(pr, "lint") as lint:
-        assert review.check_text(FRONT + " \n", 7) == [
-            (6, "missing required section 'Summary'"),
-            (6, "missing required section 'Verification'"),
-        ]
+        assert review.check_text(FRONT + " \n", 7)
         lint.assert_not_called()
+
+
+@pytest.mark.parametrize("check", ["Vale.Spelling", "Vale.Terms", "Google.Passive"])
+def test_review_post_vale_ignores_only_vocabulary(world: World, check: str) -> None:
+    alerts = {"draft": [{"Line": 3, "Check": check, "Message": "alert"}]}
+    world.fake("vale", rc=1, stdout=json.dumps(alerts))
+    assert bool(review_doc.lint_post(BODY, worktree=world.root)) == (
+        check == "Google.Passive"
+    )
+    assert "--minAlertLevel=error" in cast("list[str]", world.calls("vale")[0]["argv"])
+    assert world.calls("cspell") == world.calls("rumdl") == []
+
+
+def test_review_post_vale_refuses_missing_host_styles_and_config(world: World) -> None:
+    config = world.root / ".vale.ini"
+    config.write_text("BasedOnStyles = Google\n")
+    assert "missing from .vale/" in review_doc.lint_post(BODY, worktree=world.root)[0]
+    assert world.calls("vale") == world.calls("bazelisk") == []
+    config.unlink()
+    assert ".vale.ini" in review_doc.lint_post(BODY, worktree=world.root)[0]

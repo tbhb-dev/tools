@@ -3,51 +3,30 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
+from hashlib import sha256
+from pathlib import Path
 from typing import Literal, Protocol, cast
 
 from tbhbdev import content
-from tbhbdev.alpha.pull_request import parse_frontmatter
-from tbhbdev.content_model import normalize
+from tbhbdev.alpha import pull_request as pr
 
 type Tier = Literal[0, 1, 2]
 type Verdict = Literal["GO", "NO-GO"]
-type FindingClass = Literal["BLOCK", "TECH-DEBT", "SECURITY-DEBT"]
 type Variant = Literal["a", "b"]
 type _ReviewRow = dict[str, dict[str, object] | str | int] | None
 type _Pull = dict[str, dict[str, object]] | None
 
 _HEAD = re.compile(r"[0-9a-f]{40}")
-_HEADER = re.compile(
-    r"Run: (\S+)\nProvider: (\S+)\nModel: (\S+)\nVariant: ([ab])\n"
-    r"Host: (\S+)\nHead: (\S+)\nTier: ([012])\n\n"
-)
-_FINDING = re.compile(
-    r"- (BLOCK|TECH-DEBT|SECURITY-DEBT) `([^\s:`]+):([1-9][0-9]*)` (.+)"
-)
-# CUE's strings.Fields splits on the Unicode White_Space property.
-_CUE_FIELDS = re.compile(
-    r"[^\t-\r \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+"
-)
 _MARKER = re.compile(
     r"^<!-- tbhb-review v1 repo=(?u:(\S+)) pr=([1-9][0-9]{0,11}) "
     r"head=([0-9a-f]{40}) run=(?u:(\S+)) -->$",
     re.ASCII | re.MULTILINE,
 )
+_MARKER_V2 = re.compile(r"^<!-- tbhb-review v2 ([0-9a-f]{64}) -->$", re.MULTILINE)
 _PAGE_SIZE = 100
 _MARKER_SYNTAX = re.compile(r"<!--\s*tbhb-(?:review|reply)\b", re.IGNORECASE)
 _REASON_LIMIT = 200
-_VERDICT_WORD = r"(?:NO-GO|GO|APPROVED?|BLOCK|HOLD|REQUEST_CHANGES)"
-_WORD_END = r"(?=$|[\s`*.:!?,;–—]|_+(?!\w))"  # noqa: RUF001
-_LABELED_VERDICT = rf"(?<![^\W_])verdict[`*_]*\s*:[\s`*_]*{_VERDICT_WORD}{_WORD_END}"
-VERDICT_LINE = re.compile(
-    rf"\s*(?:>\s*|[-*+]\s+)?[`*_]*{_LABELED_VERDICT}", re.IGNORECASE
-)
-SUMMARY_VERDICT = re.compile(
-    rf"{_LABELED_VERDICT}|^\s*[`*_]*{_VERDICT_WORD}{_WORD_END}"
-    rf"|[.!?;][`*_]*\s+[`*_]*{_VERDICT_WORD}[`*_]*(?:[ \t]*$|[.:!?–—])",  # noqa: RUF001
-    re.IGNORECASE,
-)
 
 
 class ReviewError(ValueError):
@@ -55,33 +34,14 @@ class ReviewError(ValueError):
 
 
 @dataclass(frozen=True)
-class Run:
-    name: str
-    provider: str
-    model: str
-    variant: Variant
-    host: str
-
-
-@dataclass(frozen=True)
-class Finding:
-    class_: FindingClass
-    path: str
-    line: int
-    summary: str
-
-
-@dataclass(frozen=True)
 class ReviewDoc:
     repo: str
     pr: int
     head_sha: str
-    tier: Tier
+    run: str
     verdict: Verdict
-    summary: str
-    run: Run
-    findings: tuple[Finding, ...]
-    verification: str
+    body: str
+    metadata: content.Json
 
 
 @dataclass(frozen=True)
@@ -98,7 +58,7 @@ class Marker:
 class Existing:
     id: int
     author: str
-    marker: Marker
+    marker: Marker | str
     state: str
     body: str
 
@@ -109,182 +69,74 @@ class Api(Protocol):
     ) -> object: ...
 
 
-def _visible_summary(summary: str) -> str:
-    # The prefix keeps the summary in the same inline context as a finding.
-    draft = normalize(
-        f"Finding: {summary}",
-        object="pr-review",
-        # The variant and metadata have no effect on the normalized body.
-        variant="review",  # pragma: no mutate
-        metadata={},  # pragma: no mutate
-    )
-    blocks = cast("dict[str, content.Json]", draft["blocks"])  # pragma: no mutate
-    visible = cast("str", blocks["preamble"]["visible"])  # pragma: no mutate
-    fields: list[str] = _CUE_FIELDS.findall(visible.removeprefix("Finding:"))
-    return " ".join(fields)
+LINT_PATH = Path(".github") / "PULL_REQUEST_REVIEW_DRAFT.md"
 
 
-def _metadata(doc: ReviewDoc, *, visible: bool = False) -> content.Json:
-    return {
-        "schema": 2,
-        "repo": doc.repo,
-        "pr": doc.pr,
-        "head_sha": doc.head_sha,
-        "tier": doc.tier,
-        "verdict": doc.verdict,
-        "run": asdict(doc.run),
-        "findings": [
-            {
-                "class": item.class_,
-                "path": item.path,
-                "line": item.line,
-                "summary": _visible_summary(item.summary) if visible else item.summary,
-            }
-            for item in doc.findings
-        ],
-    }
-
-
-def _parse_finding(line: str) -> Finding:
-    match = _FINDING.fullmatch(line)
-    if match is None:
-        message = "invalid finding"
-        raise ReviewError(message)
-    class_, path, number, summary = match.groups()
+def lint_post(body: str, *, worktree: Path | None = None) -> list[str]:
+    """Run the repository's Vale rules on the review prose before posting."""
     try:
-        line_number = int(number)
-    except ValueError:
-        message = "invalid finding line number"
-        raise ReviewError(message) from None
-    kind = cast("FindingClass", class_)  # pragma: no mutate -- runtime no-op
-    return Finding(kind, path, line_number, summary)
-
-
-def _parse_body(body: str, repo: str, pr: int, verdict: Verdict) -> ReviewDoc:
-    sections = re.split(r"^## (.*)$", body, flags=re.MULTILINE)
-    if sections[1::2] != ["Summary", "Findings", "Verification"]:
-        message = "expected Summary, Findings, and Verification sections in order"
-        raise ReviewError(message)
-    header, summary, findings, verification = sections[::2]
-    match = _HEADER.fullmatch(header.lstrip("\n"))
-    if match is None:
-        message = "expected the seven run header lines"
-        raise ReviewError(message)
-    name, provider, model, variant, host, head, tier = match.groups()
-    tier_number = int(tier)
-    parsed_tier = cast("Tier", tier_number)  # pragma: no mutate -- runtime no-op
-    run_variant = cast("Variant", variant)  # pragma: no mutate -- runtime no-op
-    return ReviewDoc(
-        repo,
-        pr,
-        head,
-        parsed_tier,
-        verdict,
-        summary.strip("\n"),
-        Run(name, provider, model, run_variant, host),
-        tuple(_parse_finding(line) for line in findings.strip("\n").splitlines()),
-        verification.strip("\n"),
-    )
+        problems = pr.lint(
+            body.splitlines(),
+            1,
+            path=LINT_PATH,
+            vale_only=True,
+            worktree=worktree,
+            drop=frozenset(),
+        )
+    except (OSError, SystemExit) as exc:
+        return [f"Vale could not run: {exc}"]
+    return [
+        f"line {line}: {message}"
+        for line, message in problems
+        if not message.startswith(("vale Vale.Spelling:", "vale Vale.Terms:"))
+    ]
 
 
 def parse(text: str) -> ReviewDoc:
-    """Read a draft with YAML frontmatter and a marker-free Markdown body.
-
-    Raises:
-        ReviewError: The draft is malformed or frontmatter disagrees with the body.
-    """
+    """Read a review document with run details in YAML frontmatter."""
     try:
-        fields, body = parse_frontmatter(text.replace("\r\n", "\n"))
+        fields, body = pr.parse_frontmatter(text.replace("\r\n", "\n"))
     except LookupError, OverflowError, RecursionError, ValueError:
         message = "invalid review frontmatter"
         raise ReviewError(message) from None
-
-    # The mapping pattern checks the YAML value at runtime.
-    mapping = cast("dict[str, object] | None", fields)  # pragma: no mutate -- no-op
-    match mapping:
-        case {"schema": int(2), "repo": str(repo), "pr": int(pr), **supplied} if (
-            type(pr) is int
-        ):
-            verdict = supplied.pop("verdict", None)
-            if verdict not in ("GO", "NO-GO"):
-                message = "expected a GO or NO-GO verdict in frontmatter"
-                raise ReviewError(message)
-            doc = _parse_body(body, repo, pr, verdict)
+    match cast("_ReviewRow", fields):
+        case {
+            "repo": str(repo),
+            "pr": int(number),
+            "head_sha": str(head),
+            "run": {"name": str(run)},
+            "verdict": ("GO" | "NO-GO") as verdict,
+        } if type(number) is int:
+            return ReviewDoc(
+                repo, number, head, run, verdict, body, cast("content.Json", fields)
+            )
         case _:
-            message = "expected schema 2 frontmatter with repo and integer pr"
+            message = "expected repo, integer pr, head_sha, run name, and GO or NO-GO"
             raise ReviewError(message)
-    expected = _metadata(doc)
-    for name, value in supplied.items():
-        if name not in expected or expected[name] != value:
-            message = "unexpected or mismatched review frontmatter field"
-            raise ReviewError(message)
-    return doc
 
 
-def _body(doc: ReviewDoc) -> str:
-    findings = "".join(
-        f"- {item.class_} `{item.path}:{item.line}` {item.summary}\n"
-        for item in doc.findings
-    )
-    if findings:
-        findings = f"\n{findings}"
-    return (
-        f"Run: {doc.run.name}\n"
-        f"Provider: {doc.run.provider}\n"
-        f"Model: {doc.run.model}\n"
-        f"Variant: {doc.run.variant}\n"
-        f"Host: {doc.run.host}\n"
-        f"Head: {doc.head_sha}\n"
-        f"Tier: {doc.tier}\n\n"
-        f"## Summary\n\n{doc.summary.rstrip('\n')}\n\n"
-        f"## Findings\n{findings}\n"
-        f"## Verification\n\n{doc.verification.rstrip('\n')}\n"
-    )
-
-
-def validate(doc: ReviewDoc) -> list[str]:
-    """Return refusals from the document cross-checks and the content schema."""
-    errors: list[str] = []
-    try:
-        if _HEAD.fullmatch(doc.head_sha) is None:
-            errors.append("head_sha must be 40 lowercase hexadecimal characters")
-        has_block = any(item.class_ == "BLOCK" for item in doc.findings)
-        if doc.verdict == "GO" and has_block:
-            errors.append("GO forbids BLOCK findings")
-        if doc.verdict == "NO-GO" and not has_block:
-            errors.append("NO-GO requires at least one BLOCK finding")
-        if any(map(SUMMARY_VERDICT.search, doc.summary.splitlines())):
-            errors.append("Summary must give reasons without stating the verdict")
-        body = _body(doc)
-        if any(map(VERDICT_LINE.match, body.splitlines())):
-            errors.append("keep the final verdict line out of the review body")
-        errors.extend(content.check_review(body, metadata=_metadata(doc, visible=True)))
-    except Exception as exc:  # noqa: BLE001 -- Validation returns diagnostics.
-        errors.append(f"Review validation could not run: {exc}")
-    return errors
+def marker_id(repo: str, number: int, run: str) -> str:
+    """Hash the run key for deduplication within the pull request."""
+    return sha256(f"{repo}#{number} {run}".encode()).hexdigest()
 
 
 def render(doc: ReviewDoc) -> str:
-    """Render the body to post, with the review marker on its last line."""
-    key = marker(doc)
-    return (
-        f"{_body(doc)}\n<!-- tbhb-review v1 repo={key.repo} pr={key.pr} "
-        f"head={key.head_sha} run={key.run} -->\n"
-    )
+    """Render the body to post with its deduplication marker."""
+    marker = marker_id(doc.repo, doc.pr, doc.run)
+    prose = doc.body.strip("\n")
+    return f"{prose}\n\n<!-- tbhb-review v2 {marker} -->\n"
 
 
-def marker(doc: ReviewDoc) -> Marker:
-    """Identify the review by pull request, head, and run name."""
-    return Marker(doc.repo, doc.pr, doc.head_sha, doc.run.name)
-
-
-def parse_marker(body: str) -> Marker | None:
-    """Read the last standalone review marker in a posted body."""
-    matches = list(_MARKER.finditer(body.replace("\r\n", "\n")))
+def parse_marker(body: str) -> Marker | str | None:
+    """Read a current or legacy review marker."""
+    text = body.replace("\r\n", "\n")
+    if matched := _MARKER_V2.fullmatch(text.rstrip().rpartition("\n")[2]):
+        return matched[1]
+    matches = list(_MARKER.finditer(text))
     if not matches:
         return None
-    repo, pr, head, run = matches[-1].groups()
-    return Marker(repo, int(pr), head, run)
+    repo, number, head, run = matches[-1].groups()
+    return Marker(repo, int(number), head, run)
 
 
 def is_dismissed(existing: Existing) -> bool:
@@ -304,9 +156,14 @@ def _active_id(entry: object, expected: Marker, author: str) -> int | None:
             "user": {"login": str(login)},
             "body": str(body),
             "state": str(state),
+            "commit_id": str(head),
         } if (key := parse_marker(body)) is not None:
             existing = Existing(review_id, login, key, state, body)
-            same_marker = existing.marker == expected
+            same_marker = (
+                existing.marker
+                in (expected, marker_id(expected.repo, expected.pr, expected.run))
+                and head == expected.head_sha
+            )
             same_author = existing.author.casefold() == author.casefold()
             if same_marker and same_author and not is_dismissed(existing):
                 return existing.id
@@ -349,11 +206,13 @@ def post(
 
     Return ("exists", id) if the author already posted a matching review. Otherwise
     POST a review with commit_id set to doc.head_sha, body set to render(doc),
-    and event set to COMMENT. Return ("posted", id), with None for an absent ID.
+    and event set from the verdict. Return ("posted", id), with None for an absent ID.
     Accept the race between concurrent posts without a lock.
 
     """
-    if problems := validate(doc):
+    body = render(doc)
+    problems = content.check_review(body, metadata=doc.metadata, posted=True)
+    if problems := problems or lint_post(doc.body):
         raise ReviewError("\n".join(problems))
     path = f"repos/{doc.repo}/pulls/{doc.pr}"
     live = api.request("GET", path)
@@ -363,13 +222,17 @@ def post(
         case _:
             message = "pull request head has moved"
             raise ReviewError(message)
-    existing = find_existing(api, doc.repo, doc.pr, doc.head_sha, doc.run.name, author)
+    existing = find_existing(api, doc.repo, doc.pr, doc.head_sha, doc.run, author)
     if existing is not None:
         return "exists", existing
     result = api.request(
         "POST",
         f"{path}/reviews",
-        {"commit_id": doc.head_sha, "body": render(doc), "event": "COMMENT"},
+        {
+            "commit_id": doc.head_sha,
+            "body": body,
+            "event": "APPROVE" if doc.verdict == "GO" else "REQUEST_CHANGES",
+        },
     )
     match cast("dict[str, object] | None", result):  # pragma: no mutate -- cast
         case {"id": int(review_id)}:
@@ -399,7 +262,9 @@ def dismiss(
     match cast("dict[str, object] | None", response):  # pragma: no mutate -- cast
         case {"body": str(body), "state": ("COMMENTED" | "DISMISSED") as state}:
             key = parse_marker(body)
-            if key is not None and (key.repo, key.pr) == (repo, pr):
+            if isinstance(key, str) or (
+                isinstance(key, Marker) and (key.repo, key.pr) == (repo, pr)
+            ):
                 if not _dismissed(state, body):
                     body = f"SUPERSEDED: {reason}\n{body}"
                     api.request("PUT", path, {"body": body})

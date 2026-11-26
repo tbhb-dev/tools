@@ -4,12 +4,14 @@ import argparse
 import json
 import re
 import sys
+from importlib.resources import files
 from pathlib import Path
 from typing import cast
 
 import yaml
 from jsonschema import Draft202012Validator
 
+from tbhbdev import content
 from tbhbdev.alpha import pull_request as pr
 from tbhbdev.alpha import review_doc, review_policy, review_threads
 
@@ -28,40 +30,14 @@ SCHEMA = {
         "event": {"enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"]},
     },
 }
-LINT_PATH = Path(".github") / "PULL_REQUEST_REVIEW_DRAFT.md"
 # Match rumdl's entire MD041 diagnostic so other line-one alerts stay visible.
 H1_ALERT = "rumdl: [MD041] First line in file should be a level 1 heading"
 HEAD = re.compile(r"[0-9a-fA-F]{40}")
-TEMPLATE = """<!--
-Write plain prose, one line per paragraph and list item. Cite code as `path:line`.
-Remove these guidance comments and any unused optional sections. Write no trailers.
--->
-
-## Summary
-
-<!-- Required, at most 60 words. Give the reasons in one or two sentences.
-The event carries the verdict. -->
-
-## Findings
-
-<!-- Optional, at most 200 words. Blocking issues only, one list item each,
-with `path:line` and what has to change. REQUEST_CHANGES requires findings. -->
-
-## Suggestions
-
-<!-- Optional, at most 120 words. Non-blocking improvements. -->
-
-## Verification
-
-<!-- Required, at most 100 words. What the reviewer read or ran, and the CI
-result it relied on. -->
-"""
-SECTIONS = [
-    pr.Section("Summary", required=True, max_words=60),
-    pr.Section("Findings", required=False, max_words=200),
-    pr.Section("Suggestions", required=False, max_words=120),
-    pr.Section("Verification", required=True, max_words=100),
-]
+TEMPLATE = (
+    files("tbhbdev.alpha")
+    .joinpath("review_data", "PULL_REQUEST_REVIEW_TEMPLATE.md")
+    .read_text(encoding="utf-8")
+)
 
 
 def draft_path(number: int) -> Path:
@@ -144,11 +120,10 @@ def draft(number: int, *, force: bool) -> Path:
     return path
 
 
-def check_text(text: str, number: int, *, lint: bool = True) -> list[pr.Problem]:
-    """Validate review metadata and its title-free body without reading GitHub.
-
-    Run hosts lack the prose linters, so they pass ``lint=False``.
-    """
+def check_text(
+    text: str, number: int, *, lint: bool = True, posted: bool = False
+) -> list[pr.Problem]:
+    """Validate review metadata and its title-free body without reading GitHub."""
     try:
         data, body = pr.parse_frontmatter(text)
     except pr.FrontmatterError as exc:
@@ -158,63 +133,24 @@ def check_text(text: str, number: int, *, lint: bool = True) -> list[pr.Problem]
     offset = text.count("\n") - body.count("\n")
     schema = {**SCHEMA, "allOf": [{"properties": {"pr": {"const": number}}}]}
     problems = pr.meta_problems(data, offset, text, Draft202012Validator(schema))
-    lines, scanned = pr.scan(body.splitlines(), offset + 1)
-    problems += scanned
-    anchor = pr.Line(
-        offset + 1,
-        "",  # pragma: no mutate -- body_problems reads only the anchor's number
-        "",  # pragma: no mutate -- body_problems reads only the anchor's number
-        code=False,  # pragma: no mutate -- body_problems reads only the number
-    )
-    problems += [
-        (line, "a review must not contain an H1 title")
-        if why == "only one H1 is allowed: the title"
-        else (line, why)
-        for line, why in pr.body_problems(lines, anchor, SECTIONS)
+    if problems:
+        return problems
+    fields = cast("dict[str, object]", data)
+    first = offset + 1
+    problems = [
+        (first, why)
+        for why in content.check_review(body, event=str(fields["event"]), posted=posted)
     ]
-    problems += pr.ref_problems(lines)
-    _, blocks, _ = pr.split_blocks(lines)
-    problems += verdict_problems(lines, blocks)
-    if isinstance(data, dict) and data.get("event") == "REQUEST_CHANGES":
-        problems += findings_problems(blocks, anchor.no)
-    rendered = body.splitlines()
-    first_content = next(
-        (index for index, line in enumerate(rendered, 1) if line.strip()), None
-    )
-    if lint and first_content is not None:
-        problems += pr.lint(
+    if lint and not problems:
+        rendered = body.splitlines()
+        first_content = next(i for i, line in enumerate(rendered, 1) if line.strip())
+        problems = pr.lint(
             rendered,
-            offset + 1,
-            path=LINT_PATH,
+            first,
+            path=review_doc.LINT_PATH,
             drop=frozenset({(first_content, H1_ALERT)}),
         )
     return sorted(set(problems))
-
-
-def verdict_problems(lines: list[pr.Line], blocks: list[pr.Block]) -> list[pr.Problem]:
-    """Keep verdict statements out of the Summary and final lines out of the body."""
-    problems = [
-        (line.no, "Summary must give reasons without stating the verdict")
-        for block in blocks
-        if block.heading == "Summary"
-        for line in block.lines
-        if review_doc.SUMMARY_VERDICT.search(line.text)
-    ]
-    return problems + [
-        (line.no, "keep the final verdict line out of the review body")
-        for line in lines
-        if review_doc.VERDICT_LINE.match(line.raw)
-    ]
-
-
-def findings_problems(blocks: list[pr.Block], first: int) -> list[pr.Problem]:
-    """A request for changes needs a non-empty Findings section."""
-    if any(
-        block.heading == "Findings" and not all(map(pr.is_blank, block.lines))
-        for block in blocks
-    ):
-        return []
-    return [(first, "REQUEST_CHANGES requires non-empty Findings")]
 
 
 class GhApi:

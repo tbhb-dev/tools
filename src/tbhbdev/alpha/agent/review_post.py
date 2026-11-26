@@ -13,15 +13,14 @@ from typing import TYPE_CHECKING, cast
 
 import httpx
 
-from tbhbdev.alpha import pull_request, review
+from tbhbdev.alpha import identity, pull_request, review, review_doc
 from tbhbdev.alpha.agent import credentials, runfiles
 from tbhbdev.alpha.agent.decisions import repo
-from tbhbdev.alpha.agent.model import RunKind
+from tbhbdev.alpha.agent.model import Harness, RunKind
 
 if TYPE_CHECKING:
     from tbhbdev.alpha.agent.run_host import Prepared, Run
 
-ALLOWED_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES", "COMMENT"})
 VERDICTS = frozenset({"GO", "BLOCK", "NO-GO"})
 DRAFT_NAME = re.compile(r"review-(\d+)\.md")
 DRAFT_LIMIT = 64 * 1024
@@ -41,6 +40,7 @@ class Submission:
     text: str
     commit: str
     stamp: str
+    workspace: Path
 
 
 def find_draft(workspace: Path) -> tuple[int, str]:
@@ -65,15 +65,14 @@ def find_draft(workspace: Path) -> tuple[int, str]:
 def validate(sub: Submission) -> tuple[dict[str, object], str]:
     """Check the draft host-side and return (frontmatter, body).
 
-    Check the schema, template sections and frontmatter key uniqueness without
-    the prose linters, which are unavailable on run hosts.
-
     Raises:
         PostRefusedError: The draft fails a check, names another head than the
             run reviewed, or asks for an event a run can't post.
     """
+    footer = f"\n\n{sub.stamp}\n"
+    text = sub.text.rstrip("\n") + footer
     try:
-        problems = review.check_text(sub.text, sub.number, lint=False)
+        problems = review.check_text(text, sub.number, lint=False, posted=True)
     except RecursionError as exc:
         message = "the draft frontmatter is nested too deeply"
         raise PostRefusedError(message) from exc
@@ -81,15 +80,16 @@ def validate(sub: Submission) -> tuple[dict[str, object], str]:
         line, why = problems[0]
         message = f"the draft fails its checks: line {line}: {why}"
         raise PostRefusedError(message)
-    meta, body = pull_request.parse_frontmatter(sub.text)
+    meta, body = pull_request.parse_frontmatter(text)
     fields = cast("dict[str, object]", meta)
-    if fields["event"] not in ALLOWED_EVENTS:
-        message = f"a run can't post a {fields['event']} review"
-        raise PostRefusedError(message)
     if str(fields["commit_id"]).lower() != sub.commit.lower():
         message = "the draft's commit_id isn't the commit the run reviewed"
         raise PostRefusedError(message)
-    return fields, body.strip("\n") + "\n"
+    if problems := review_doc.lint_post(
+        body.removesuffix(footer), worktree=sub.workspace
+    ):
+        raise PostRefusedError(problems[0])
+    return fields, body.lstrip("\n")
 
 
 def api(
@@ -145,7 +145,7 @@ def create(sub: Submission, token: str) -> int | None:
         raise PostRefusedError(message)
     payload = {
         "commit_id": sub.commit,
-        "body": f"{body}\n---\n{sub.stamp}\n",
+        "body": body,
         "event": event,
     }
     data = api("POST", f"{base}/reviews", token, payload)
@@ -154,12 +154,26 @@ def create(sub: Submission, token: str) -> int | None:
 
 
 def stamp(run: Run) -> str:
-    """The run's identity and the judged head, as the body's last line."""
+    """Build the host-written attribution for the review."""
     request = run.request
-    return (
-        f"Run {run.files.name}, {request.harness.value} {request.model}, "
-        f"judged head {request.commit}."
+    key = (
+        identity.ANTIGRAVITY
+        if request.harness is Harness.AGY
+        else request.harness.value
     )
+    value = identity.format_value(
+        {
+            "effort": request.effort,
+            "harness": identity.SLUGS[key],
+            "launch": identity.sha256_64(run.files.name),
+            "model": request.model,
+        }
+    )
+    if why := identity.check_value(value):
+        message = f"invalid LLM trailer: {why}"
+        raise PostRefusedError(message)
+    variant = f";variant={request.variant}" if request.variant else ""
+    return f"{identity.KEY_GEN}: {value}{variant}"
 
 
 def check_verdict(run: Run) -> None:
@@ -202,7 +216,12 @@ def posted(run: Run, prepared: Prepared) -> bool:
             message = "reviews App token unavailable"
             raise PostRefusedError(message)  # noqa: TRY301
         sub = Submission(
-            run.request.repo, number, text, run.request.commit or "", stamp(run)
+            run.request.repo,
+            number,
+            text,
+            run.request.commit or "",
+            stamp(run),
+            workspace,
         )
         identifier = create(sub, token)
     except PostRefusedError as refusal:

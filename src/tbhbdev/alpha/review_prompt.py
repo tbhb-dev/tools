@@ -7,6 +7,7 @@ from importlib.resources import files
 from string import Template
 from typing import TYPE_CHECKING, cast
 
+from tbhbdev.alpha import review
 from tbhbdev.alpha.pull_request import parse_frontmatter
 from tbhbdev.alpha.review_doc import ReviewError
 from tbhbdev.alpha.review_policy import CHECKLIST
@@ -117,4 +118,4 @@ def skeleton(
     """Render schema 2 draft frontmatter and the unfilled review sections."""
     values = _values(tier, variant, fields, delta=delta)
     _, draft = _common()
-    return _fill(draft, values)
+    return _fill(draft, values) + review.TEMPLATE

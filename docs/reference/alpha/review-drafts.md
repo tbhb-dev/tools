@@ -2,12 +2,11 @@
 description: Drafting, checking, posting, and responding to pull request reviews.
 generated:
   - role: generated
-    harness: codex:0.171.0
+    harness: codex:0.166.0
     model: openai:gpt-6.2-sol
-    effort: high
     surface: exec
-    session: sha-256-64:9d08744b354d28e7
-    at: "2026-11-26T15:04:20Z"
+    session: sha-256-64:b4a0e82d6519a059
+    at: "2026-11-26T15:26:50Z"
 status: stable
 tags: [alpha]
 title: Review drafts
@@ -18,17 +17,15 @@ type: Reference
 
 `tbhbdev alpha review draft N` reads the PR's head through `gh` and writes a skeleton to `$(git rev-parse --git-dir)/tbhb-alpha/review-N.md`. It prints the path and keeps an existing draft unchanged. `--force` refreshes only `commit_id`. It keeps the body and the other metadata. Each worktree and PR has its own file.
 
-Set `event` to `APPROVE` for GO or `REQUEST_CHANGES` for BLOCK or HOLD. The draft also accepts `COMMENT`. The required frontmatter holds `pr`, which must match N, and a 40-hex `commit_id`. For a review run, set `commit_id` to the run's pinned commit. Reviews have no H1 title. In Summary, give the reasons in one or two sentences. Fill Verification and remove the guidance comments and any unused optional sections. Findings holds blocking issues, one list item each with `path:line` and what must change. A request for changes needs findings. Suggestions holds non-blocking improvements.
+Set `event` to `APPROVE` for `GO` or `REQUEST_CHANGES` for `BLOCK`. The draft also accepts `COMMENT`. The required frontmatter holds `pr`, which must match N, and the full commit hash in `commit_id`. For a run, use its pinned commit. Fill in the body and remove the guidance comments and any empty optional sections. [Review body format and example](../content.md#review-validation)
 
-`tbhbdev alpha review check N` checks the draft locally, including its frontmatter, section order, word limits, prose wrapping, references, trailers, and the repository's Markdown, spelling, and prose rules. It refuses an explicit verdict in Summary or a copied final verdict line anywhere in the body. Finding classes such as `BLOCK`, `TECH-DEBT`, and `SECURITY-DEBT` can still label findings. The check prints each problem as `path:line: problem` on stderr and exits 1 on failure or 0 on success. Write plain prose, one line per paragraph, cite code as `path:line`, and leave trailers out.
+`tbhbdev alpha review check N` checks frontmatter and validates the Markdown body in `CUE`. By default it also runs the repository's Markdown, spelling, and prose checks. `--no-lint` skips the local prose checks. Both posting paths run `CUE` and the repository's Vale configuration before sending a review. They refuse error-level alerts other than `Vale.Spelling` and `Vale.Terms`, and refuse to post when Vale or its styles are missing.
 
 ## Post a review document
 
-Create `review-N.doc.md` in the same directory as `review-N.md`. Start with YAML frontmatter containing `schema: 2`, `repo: OWNER/REPO`, `pr: N`, and `verdict: GO` or `verdict: NO-GO`. Follow it with the seven lines `Run: NAME`, `Provider: PROVIDER`, `Model: MODEL`, `Variant: a` or `Variant: b`, `Host: HOSTNAME`, `Head: SHA`, and `Tier: 0`, `Tier: 1`, or `Tier: 2`. Use the full lowercase commit hash and a fully qualified hostname.
+Create `review-N.doc.md` next to `review-N.md`. Put the schema 2 metadata in YAML frontmatter and follow it with the same Markdown sections as a run draft. [Schema 2 metadata](../content.md#review-validation)
 
-Leave a blank line after the header. Add `## Summary`, `## Findings`, and `## Verification` in that order. Give the reasons in Summary and describe what you checked in Verification. Each finding starts with `- BLOCK`, `- TECH-DEBT`, or `- SECURITY-DEBT`. Follow the class with `path:line` in backticks and a summary. `NO-GO` requires a `BLOCK` finding, and `GO` disallows one.
-
-`tbhbdev alpha review post N [--author LOGIN]` requires the draft's repository to match the GitHub repository for the `origin` remote. It validates the document and checks the pull request head against the draft. It submits a `COMMENT` review using the agent's own GitHub account. It looks for an active review with the same run, head, and pull request by that account, or by `LOGIN` if supplied. It prints `posted` or `exists` and the review ID when available. Both statuses exit 0. It reports refusals as `path: problem` on stderr and exits 1. Usage errors exit 2.
+`tbhbdev alpha review post N [--author LOGIN]` matches the draft repository to the origin remote and the draft commit to the current pull request head. The command submits `APPROVE` for `GO` or `REQUEST_CHANGES` for `NO-GO` using the agent's own GitHub account. It looks for an active review of the same run, head, and pull request by that account, or by `LOGIN` if supplied. Expect `posted` or `exists` and the review ID when available. Both statuses exit 0. Refusals exit 1 and usage errors exit 2.
 
 ## Supersede or reply to a review
 
@@ -42,6 +39,6 @@ The schema 2 prompt renderer uses four templates. Tier 1 uses `tier-1.txt` for t
 
 For a re-review, `delta.txt` supplies the previously reviewed head as Base-reviewed. The reviewer judges changes between that head and the new head, records what changed, and keeps unresolved findings by reference. The renderer can also return the schema 2 draft skeleton on its own.
 
-A review run ends its final message with a `VERDICT: GO`, `VERDICT: BLOCK` or `VERDICT: NO-GO` line for the coordinator. The prompt asks for the full reviewed head after the verdict. The host posts only the draft body and run attribution.
+A review run ends its final message with a `VERDICT: GO`, `VERDICT: BLOCK` or `VERDICT: NO-GO` line for the coordinator. Include the full reviewed head after the verdict. The host appends a `Generated-by: LLM` trailer and sets the GitHub review's `commit_id`.
 
 Every prompt includes the correctness (C), security (S), tests and coverage (T), docs (D), and scope (P) checklists. Each question has a stable numbered ID such as C1 or S1. The review floor retains its R and FE IDs.

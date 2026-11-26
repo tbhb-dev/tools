@@ -2,12 +2,11 @@
 description: Review drafts, threads, policy checks and the run host's review posting.
 generated:
   - role: generated
-    harness: codex:0.171.0
+    harness: codex:0.166.0
     model: openai:gpt-6.2-sol
-    effort: high
     surface: exec
-    session: sha-256-64:9d08744b354d28e7
-    at: "2026-11-26T15:04:20Z"
+    session: sha-256-64:b4a0e82d6519a059
+    at: "2026-11-26T15:26:50Z"
 status: stable
 tags: [alpha]
 title: Review commands
@@ -17,8 +16,8 @@ type: Reference
 # Review commands
 
 `review draft N` and `review check N` create and check a review draft.
-The Summary gives the reasons for the review in one or two sentences. The review event carries the verdict.
-`review post N [--author LOGIN]` submits a review document as a comment.
+The Summary gives the reasons for the review in one or two sentences. The review event records the verdict.
+`review post N [--author LOGIN]` submits the event from a review document.
 `review dismiss N REVIEW_ID --reason TEXT` marks a review as superseded, and `review reply N REVIEW_ID --text TEXT` comments on the pull request.
 See [Review drafts](../review-drafts.md) for the formats and checks.
 
@@ -41,12 +40,13 @@ With `--json`, exit 2 still prints one object, `{"ok": false, "error": KIND, "me
 
 The run host calls `agent/review_post.py` before finishing a review run whose harness stopped with exit status 0.
 The host skips posting if the run name already has a `review` record.
-The step reads the run's one `.git/tbhb-alpha/review-N.md` draft, checks it again with the `review check` rules minus the prose linters (a run host lacks them), and requires `commit_id` to equal the commit the run reviewed.
-It holds the draft to the floor's schema and sections only, and never reads the repository's policy or schema from the writable worktree.
-A draft with a repeated frontmatter key is refused.
+The host reads the run's one `.git/tbhb-alpha/review-N.md` draft and requires its `commit_id` to equal the pinned commit.
+It validates the body with the packaged `CUE` schema and runs Vale with the reviewed repository's configuration.
+If Vale's styles are missing on the host, posting fails with a diagnostic.
 The host posts `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` against the pinned commit.
 Before an approval it reads the pull request head once and refuses if the head differs.
-A request for changes requires non-empty findings.
-The host reads the run's final verdict line separately from the draft body for headless runs without an output schema.
-Any 2xx answer counts as posted.
-The review body ends with the run name, harness, model and judged head.
+P0 and P1 findings require `REQUEST_CHANGES`.
+For headless runs without an output schema, the host reads the final verdict line separately.
+Any 2xx response counts as posted.
+The review ends with the host's `Generated-by: LLM` trailer.
+The review gate reads the commit from GitHub's `commit_id` and the provider from the trailer.
