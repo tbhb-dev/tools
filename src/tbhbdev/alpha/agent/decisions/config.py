@@ -17,6 +17,7 @@ from typing import NoReturn
 
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import (
+    DEFAULT_CODEX_SUBAGENT_MODEL,
     DEFAULT_MAX_CONCURRENT_RUNS,
     DEFAULT_RUN_MEMORY_MIB,
     HOST_NAME,
@@ -326,14 +327,20 @@ def _sandbox(table: _Table) -> Sandbox:
 def _codex(table: _Table | None) -> Codex:
     if table is None:
         return Codex(WebSearch.LIVE, WebSearch.LIVE)
-    table.only("web_search")
+    table.only("web_search", "subagent_model")
+    model = (
+        table.text("subagent_model")
+        if "subagent_model" in table.values
+        else DEFAULT_CODEX_SUBAGENT_MODEL
+    )
     if "web_search" not in table.values:
-        return Codex(WebSearch.LIVE, WebSearch.LIVE)
+        return Codex(WebSearch.LIVE, WebSearch.LIVE, model)
     search = table.table("web_search")
     search.only("build", "review")
     return Codex(
         web_search_build=_search(search, "build"),
         web_search_review=_search(search, "review"),
+        subagent_model=model,
     )
 
 

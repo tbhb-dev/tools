@@ -75,6 +75,15 @@ def made(  # noqa: PLR0913 -- one value per fact the policy depends on
     )
 
 
+def guard_hooks(program: str) -> dict[str, object]:
+    handler = {
+        "type": "command",
+        "command": f"{program} alpha guard-agent-model",
+        "onFailure": "block",
+    }
+    return {"PreToolUse": [{"matcher": "Agent", "hooks": [handler]}]}
+
+
 def claude_settings_of(result: model.Policy) -> dict[str, object]:
     detail = result.detail
     assert isinstance(detail, model.ClaudePolicy)
@@ -485,9 +494,13 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
             "PYTEST_DEBUG_TEMPROOT": tmp,
             "PYTEST_XDIST_AUTO_NUM_WORKERS": "4",
             "GIT_NO_LAZY_FETCH": "1",
+            "CLAUDE_CODE_FORK_SUBAGENT": "0",
         },
-        "disableAllHooks": True,
-        "permissions": {"allow": allow, "deny": [*rules, "WebFetch", "WebSearch"]},
+        "hooks": guard_hooks(f"{home}/.local/bin/tbhbdev"),
+        "permissions": {
+            "allow": allow,
+            "deny": [*rules, "WebFetch", "WebSearch"],
+        },
         "sandbox": {
             "allowUnsandboxedCommands": False,
             "autoAllowBashIfSandboxed": True,
@@ -1215,11 +1228,12 @@ def test_unsandboxed_skips_all_sandbox_checks(
     assert value.env["SSH_AUTH_SOCK"] == "/example/denied"
     if isinstance(value.detail, model.ClaudePolicy):
         assert value.detail.settings == {
-            "disableAllHooks": True,
             "env": {
                 "GH_CONFIG_DIR": f"{run_paths.tmpdir}/gh",
                 "DOCKER_CONFIG": f"{run_paths.tmpdir}/docker",
+                "CLAUDE_CODE_FORK_SUBAGENT": "0",
             },
+            "hooks": guard_hooks(f"{run_paths.home}/.local/bin/tbhbdev"),
             "sandbox": {"enabled": False},
         }
     elif isinstance(value.detail, model.AgyPolicy):
@@ -1799,3 +1813,73 @@ def test_hooks_directory_refuses_extra_write_grants(field: str, suffix: str) -> 
         )
     with pytest.raises(Invalid, match="hooks"):
         policy.protect_host(configured, run, ())
+
+
+@pytest.mark.parametrize("unsandboxed", [False, True])
+@pytest.mark.parametrize("profile", Profile)
+def test_claude_guards_agent_launches_and_pins_no_model(
+    profile: Profile, *, unsandboxed: bool
+) -> None:
+    """Subagents stay on, forks are off, a guard hook runs, and nothing pins a model."""
+    result = made(Os.LINUX, profile, Harness.CLAUDE, "agent", unsandboxed=unsandboxed)
+    value = claude_settings_of(result)
+    assert "disableAllHooks" not in value
+    assert value["hooks"] == guard_hooks("/example/home/agent/.local/bin/tbhbdev")
+    env = dig(value, "env")
+    assert isinstance(env, dict)
+    assert env["CLAUDE_CODE_FORK_SUBAGENT"] == "0"
+    assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
+    permissions = value.get("permissions", {})
+    assert isinstance(permissions, dict)
+    assert "Agent" not in permissions.get("deny", [])
+
+
+@pytest.mark.parametrize("unsandboxed", [False, True])
+@pytest.mark.parametrize("profile", Profile)
+def test_claude_guard_blocks_when_it_cannot_run(
+    profile: Profile, *, unsandboxed: bool
+) -> None:
+    """A guard that fails to start, times out or crashes must refuse the launch."""
+    result = made(Os.LINUX, profile, Harness.CLAUDE, "agent", unsandboxed=unsandboxed)
+    groups = dig(claude_settings_of(result), "hooks", "PreToolUse")
+    assert groups == guard_hooks("/example/home/agent/.local/bin/tbhbdev")["PreToolUse"]
+    assert "'onFailure': 'block'" in str(groups)
+
+
+@pytest.mark.parametrize("unsandboxed", [False, True])
+def test_claude_guard_runs_the_hosts_configured_binary(*, unsandboxed: bool) -> None:
+    host = dataclasses.replace(LINUX, tbhbdev="/example path/bin/tbhbdev")
+    result = policy.build(
+        settings(),
+        host,
+        harness=Harness.CLAUDE,
+        profile=Profile.BUILD,
+        account="agent",
+        unsandboxed=unsandboxed,
+        paths=paths("agent"),
+    )
+    command = dig(claude_settings_of(result), "hooks", "PreToolUse")
+    assert command == guard_hooks("'/example path/bin/tbhbdev'")["PreToolUse"]
+
+
+@pytest.mark.parametrize("unsandboxed", [False, True])
+def test_codex_carries_the_configured_subagent_model(*, unsandboxed: bool) -> None:
+    config = settings(
+        codex=model.Codex(WebSearch.LIVE, WebSearch.LIVE, "example-small")
+    )
+    result = made(
+        Os.LINUX,
+        Profile.BUILD,
+        Harness.CODEX,
+        "agent",
+        unsandboxed=unsandboxed,
+        config=config,
+    )
+    assert isinstance(result.detail, model.CodexPolicy)
+    assert result.detail.subagent_model == "example-small"
+
+
+def test_codex_defaults_to_the_roster_subagent_model() -> None:
+    result = made(Os.LINUX, Profile.BUILD, Harness.CODEX, "agent")
+    assert isinstance(result.detail, model.CodexPolicy)
+    assert result.detail.subagent_model == "gpt-6.1-sol"

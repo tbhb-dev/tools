@@ -184,7 +184,57 @@ def test_unsandboxed_build_diff_inspects_commits(
     ]
 
 
-def test_unsandboxed_clean_of_an_ended_run_only_moves_to_trash(
+@pytest.mark.parametrize("branch", [False, True])
+def test_clean_refuses_unpushed_build_worktree(
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    branch: bool,
+) -> None:
+    monkeypatch.setattr(driver, "prepare", PREPARE)
+    assert launch(remote) == 0
+    remote.configure(session=False, branch=branch)
+    tree = remote.root / (
+        "home/Code/github.com/example-org/example-repo/.worktrees/agent-sample"
+    )
+    git_in(tree, "init", "-b", "agent/sample")
+    git_in(
+        tree,
+        "-c",
+        "user.name=Example",
+        "-c",
+        "user.email=example@example.com",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "unpublished change",
+    )
+    commit = git_in(tree, "rev-parse", "HEAD")
+    remote.file(".rc", "0")
+    remote.file(".out.final", "unread output\n")
+    metadata = driver.metadata_path("sample")
+    before = metadata.read_bytes()
+    capsys.readouterr()
+    assert command("clean") == 1
+    assert capsys.readouterr().err == (
+        "example agent: full-access run may have unpublished commits or unread "
+        "output; pass --force to clean anyway\n"
+    )
+    assert metadata.read_bytes() == before
+    assert git_in(tree, "rev-parse", "HEAD") == commit
+    assert (remote.state / "sample.out.final").read_text() == "unread output\n"
+    assert (remote.state / "sample.owner").is_file()
+    assert not (remote.state / "trash").exists()
+    assert remote.records("git") == []
+    assert command("clean", "--force") == 0
+    assert not metadata.exists()
+    trash = next((remote.state / "trash").iterdir())
+    assert (trash / "worktree").is_dir()
+    assert git_in(trash / "worktree", "rev-parse", "HEAD") == commit
+    assert (trash / "sample.out.final").read_text() == "unread output\n"
+
+
+def test_unsandboxed_force_clean_of_an_ended_run_only_moves_to_trash(
     remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert launch(remote, "--ops", "--unsandboxed", "o/r#1") == 0
@@ -192,7 +242,7 @@ def test_unsandboxed_clean_of_an_ended_run_only_moves_to_trash(
     remote.file(".rc", "0")
     before = {tool: remote.records(tool) for tool in ("ssh", "git", "tmux")}
     capsys.readouterr()
-    assert command("clean") == 0
+    assert command("clean", "--force") == 0
     assert capsys.readouterr() == ("", "")
     assert remote.records("git") == before["git"]
     assert len(remote.records("tmux")) == len(before["tmux"]) + 2
@@ -366,6 +416,43 @@ def test_reused_name(remote: Remote, capsys: pytest.CaptureFixture[str]) -> None
     assert remote.records("ssh") == before
 
 
+@pytest.mark.parametrize("reason", ["policy refused", "host tainted"])
+@pytest.mark.parametrize("full_access", [False, True])
+def test_refused_launch_leaves_no_metadata(
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    full_access: bool,
+) -> None:
+    if full_access:
+        monkeypatch.setattr(driver, "prepare", PREPARE)
+    remote.configure(launch={"rc": "1\n", "log": reason + "\n"})
+    assert launch(remote) == 1
+    assert capsys.readouterr() == (f"sample: rc=1\n{reason}\n", "")
+    assert not driver.metadata_path("sample").exists()
+    assert not (remote.state / "sample.owner").exists()
+    trash = next((remote.state / "trash").iterdir())
+    assert (trash / "sample.log").read_text() == reason + "\n"
+
+    remote.configure(launch={"launched": ""})
+    assert launch(remote) == 0
+    assert driver.metadata_path("sample").exists()
+
+
+@pytest.mark.parametrize(("rc", "launched"), [(0, False), (0, True), (7, True)])
+def test_completed_launch_keeps_metadata(
+    remote: Remote, rc: int, launched: bool
+) -> None:
+    records = {"rc": f"{rc}\n"}
+    if launched:
+        records["launched"] = ""
+    remote.configure(launch=records)
+    assert launch(remote) == rc
+    assert driver.metadata_path("sample").exists()
+    assert (remote.state / "sample.owner").exists()
+
+
 @pytest.mark.parametrize("name", ["../bad", "-bad", "a b", "a" * 65, ""])
 def test_bad_name(
     remote: Remote, capsys: pytest.CaptureFixture[str], name: str
@@ -396,6 +483,15 @@ def test_review_without_ref_starts_nothing(
     assert launch(remote, "--profile", "review") == 1
     assert "a review run needs --ref" in capsys.readouterr().err
     assert remote.records("ssh") == []
+
+
+def test_review_check_refuses_empty_ref(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert launch(remote, "--profile", "review", "--ref", "") == 1
+    assert "a review run needs --ref" in capsys.readouterr().err
+    assert remote.records("ssh") == []
+    assert not driver.metadata_path("sample").exists()
 
 
 OTHER_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
@@ -743,7 +839,7 @@ def test_request_options(
 
 @pytest.mark.parametrize("rc", [0, 7])
 def test_rc_first(remote: Remote, capsys: pytest.CaptureFixture[str], rc: int) -> None:
-    remote.configure(launch={"rc": f"{rc}\n", "log": "setup stopped\n"})
+    remote.configure(launch={"rc": f"{rc}\n", "log": "setup stopped\n", "launched": ""})
     assert launch(remote) == rc
     assert capsys.readouterr() == (f"sample: rc={rc}\nsetup stopped\n", "")
     assert remote.records("tmux")[-1]["args"] == [
