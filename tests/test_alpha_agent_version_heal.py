@@ -104,7 +104,7 @@ def test_host_sync_retries_review_preflight(
     run = Mock(return_value=ORIGIN)
     shell = Mock(
         side_effect=[
-            "0 4 12582912 6291456 0 0",
+            "0 4 12582912 6291456 0 0 -",
             OLD_LINE,
             "",
             f"{host_after}\n{HEAD}\trefs/heads/topic\n",

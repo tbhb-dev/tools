@@ -16,7 +16,7 @@ from agent_example import LINUX, MARKER, settings
 from tbhbdev.alpha import agent
 from tbhbdev.alpha.agent import driver
 from tbhbdev.alpha.agent.decisions import limits, remote
-from tbhbdev.alpha.agent.model import Invalid, Profile, Settings
+from tbhbdev.alpha.agent.model import Invalid, Os, Profile, Settings
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,12 +24,15 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.usefixtures("isolated_home")  # noqa: V107
 
 CONFIG = settings(reference=f"{MARKER}/{MARKER}/{MARKER}")
-FINE = limits.Reading(1.0, 8, 1000, 500, 100, 10)
+FINE = limits.Reading(1.0, 8, 1000, 500, 100, 10, None)
 
 
-def test_parse_reads_six_numbers() -> None:
-    assert limits.parse("0.5 4 1000 900 100 0\n") == limits.Reading(
-        0.5, 4, 1000, 900, 100, 0
+def test_parse_reads_seven_fields() -> None:
+    assert limits.parse("0.5 4 1000 900 100 0 -\n") == limits.Reading(
+        0.5, 4, 1000, 900, 100, 0, None
+    )
+    assert limits.parse("0.5 4 1000 900 100 0 12.5\n") == limits.Reading(
+        0.5, 4, 1000, 900, 100, 0, 12.5
     )
 
 
@@ -38,15 +41,19 @@ def test_parse_reads_six_numbers() -> None:
     [
         "",
         "1 2 3",
-        "x 4 1000 900 100 0",
-        "1 4 1000 900 100 0 7",
-        "nan 4 1000 900 100 0",
-        "-1 4 1000 900 100 0",
-        "1 0 1000 900 100 0",
-        "1 4 0 0 100 0",
-        "1 4 1000 -1 100 0",
-        "1 4 1000 900 -1 0",
-        "1 4 1000 900 100 -1",
+        "1 4 1000 900 100 0",
+        "1 4 1000 900 100 0 x",
+        "1 4 1000 900 100 0 nan",
+        "1 4 1000 900 100 0 -1",
+        "x 4 1000 900 100 0 -",
+        "1 4 1000 900 100 0 - 7",
+        "nan 4 1000 900 100 0 -",
+        "-1 4 1000 900 100 0 -",
+        "1 0 1000 900 100 0 -",
+        "1 4 0 0 100 0 -",
+        "1 4 1000 -1 100 0 -",
+        "1 4 1000 900 -1 0 -",
+        "1 4 1000 900 100 -1 -",
     ],
 )
 def test_parse_refuses_anything_else(text: str) -> None:
@@ -58,7 +65,7 @@ def test_decide_passes_a_quiet_host() -> None:
 
 
 def test_decide_names_every_number_over_a_limit() -> None:
-    busy = limits.Reading(8.0, 8, 1000, 100, 100, 90)
+    busy = limits.Reading(8.0, 8, 1000, 100, 100, 90, None)
     refuse, message = limits.decide(LINUX, busy, 0, ignore=False)
     assert refuse
     assert message == (
@@ -71,14 +78,74 @@ def test_decide_uses_the_configured_limits() -> None:
     host = dataclasses.replace(
         LINUX, load_limit=24, min_memory_available_percent=10, max_swap_used_percent=95
     )
-    reading = limits.Reading(23.9, 32, 1000, 100, 100, 90)
+    reading = limits.Reading(23.9, 32, 1000, 100, 100, 90, None)
     assert limits.decide(host, reading, 0, ignore=False) == (False, "")
     low = dataclasses.replace(host, load_limit=2)
     assert limits.decide(low, reading, 0, ignore=False)[0]
 
 
+FULL_SWAP = limits.Reading(1.0, 8, 1000, 500, 100, 99, 0.5)
+MAC = dataclasses.replace(LINUX, os=Os.MACOS)
+
+
+def test_full_swap_with_low_pressure_launches_with_a_warning() -> None:
+    assert limits.decide(LINUX, FULL_SWAP, 0, ignore=False) == (
+        False,
+        "warning: example-linux: swap used 99% > 80%",
+    )
+
+
+def test_high_pressure_refuses_and_still_names_the_swap() -> None:
+    found = dataclasses.replace(FULL_SWAP, pressure=10.0)
+    expected = (
+        "example-linux: memory pressure avg10 10 >= limit 10; "
+        "swap used 99% > 80%; pass --ignore-limits to launch anyway"
+    )
+    assert limits.decide(LINUX, found, 0, ignore=False) == (True, expected)
+    quiet = dataclasses.replace(FULL_SWAP, swap_used=0, pressure=9.9)
+    assert limits.decide(LINUX, quiet, 0, ignore=False) == (False, "")
+    assert limits.decide(
+        LINUX, dataclasses.replace(quiet, pressure=12), 0, ignore=True
+    )[1].startswith("warning: ")
+
+
+def test_unknown_pressure_keeps_the_swap_refusal() -> None:
+    found = dataclasses.replace(FULL_SWAP, pressure=None)
+    assert limits.decide(LINUX, found, 0, ignore=False) == (
+        True,
+        "example-linux: swap used 99% > 80%; pass --ignore-limits to launch anyway",
+    )
+    assert limits.decide(
+        LINUX, dataclasses.replace(found, swap_used=0), 0, ignore=False
+    ) == (
+        False,
+        "",
+    )
+
+
+@pytest.mark.parametrize(("level", "refuse"), [(1, False), (2, False), (4, True)])
+def test_macos_levels(level: int, refuse: bool) -> None:
+    found = dataclasses.replace(FULL_SWAP, pressure=level)
+    assert limits.decide(MAC, found, 0, ignore=False)[0] is refuse
+    if refuse:
+        assert (
+            "memory pressure level 4 >= limit 4"
+            in limits.decide(MAC, found, 0, ignore=False)[1]
+        )
+
+
+def test_the_pressure_limits_are_per_host() -> None:
+    found = dataclasses.replace(FULL_SWAP, pressure=2)
+    host = dataclasses.replace(MAC, max_memory_pressure_level=2)
+    assert limits.decide(host, found, 0, ignore=False)[0]
+    busy = dataclasses.replace(LINUX, max_memory_pressure_avg10=1)
+    assert limits.decide(busy, dataclasses.replace(found, pressure=1), 0, ignore=False)[
+        0
+    ]
+
+
 def test_decide_allows_swap_of_zero() -> None:
-    reading = limits.Reading(1.0, 8, 1000, 500, 0, 0)
+    reading = limits.Reading(1.0, 8, 1000, 500, 0, 0, None)
     assert limits.decide(LINUX, reading, 0, ignore=False) == (False, "")
 
 
@@ -91,7 +158,9 @@ def test_decide_refuses_a_failed_read() -> None:
     )
 
 
-@pytest.mark.parametrize("found", ["cause", limits.Reading(9, 8, 1000, 500, 0, 0)])
+@pytest.mark.parametrize(
+    "found", ["cause", limits.Reading(9, 8, 1000, 500, 0, 0, None)]
+)
 def test_decide_warns_when_ignored_or_warn_only(found: limits.Reading | str) -> None:
     warn_only = dataclasses.replace(LINUX, limits_warn_only=True)
     for refuse, message in (
@@ -196,26 +265,73 @@ def test_a_swapless_linux_host_with_zero_fields_is_readable(tmp_path: Path) -> N
     assert reading.memory_available == 5
 
 
-def test_macos_available_memory_uses_four_page_counts() -> None:
-    macos = """\
-sysctl() {
+def macos_script(level: str) -> str:
+    fake = f"""\
+sysctl() {{
     case "$2" in
-        vm.loadavg) echo '{ 0.5 1 2 }';;
+        vm.loadavg) echo '{{ 0.5 1 2 }}';;
         hw.logicalcpu) echo '8';;
         hw.memsize) echo '8589934592';;
         vm.swapusage) echo 'total = 4.00M  used = 1.00M  free = 3.00M';;
+        kern.memorystatus_vm_pressure_level) echo '{level}';;
     esac
-}
-vm_stat() {
-    printf '%s\n' 'Mach Virtual Memory Statistics: (page size of 16384 bytes)' \
+}}
+vm_stat() {{
+    printf '%s\\n' 'Mach Virtual Memory Statistics: (page size of 16384 bytes)' \
         'Pages free: 10.' 'Pages inactive: 20.' 'Pages speculative: 3.' \
         'Pages purgeable: 2.' 'Pages active: 100.'
-}
+}}
 """
-    script = remote.limits().replace("$(uname -s)", "Darwin")
-    code, out = run_script(macos + script)
+    return fake + remote.limits().replace("$(uname -s)", "Darwin")
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"), [("2", 2.0), ("4", 4.0), ("", None), ("x", None)]
+)
+def test_macos_reads_four_page_counts_and_the_pressure_level(
+    answer: str, expected: float | None
+) -> None:
+    code, out = run_script(macos_script(answer))
     assert code == 0
-    assert limits.parse(out) == limits.Reading(0.5, 8, 8388608, 560, 4096, 1024)
+    assert limits.parse(out) == limits.Reading(
+        0.5, 8, 8388608, 560, 4096, 1024, expected
+    )
+
+
+PRESSURE = (
+    "some avg10=%s avg60=0.10 avg300=0.00 total=1\n"
+    "full avg10=0.00 avg60=0 avg300=0 total=0\n"
+)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc")
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (PRESSURE % "12.50", 12.5),
+        (PRESSURE % "0.00", 0.0),
+        ("full avg10=3.00 avg60=0 avg300=0 total=0\n", None),
+        ("some garbage\n", None),
+        (None, None),
+    ],
+)
+def test_linux_pressure_is_some_avg10_or_unknown(
+    text: str | None, expected: float | None, tmp_path: Path
+) -> None:
+    (tmp_path / "meminfo").write_text(
+        "".join(f"{name}: {value}\n" for name, value in MEMINFO.items())
+    )
+    script = remote.limits().replace("/proc/meminfo", str(tmp_path / "meminfo"))
+    if text is None:
+        script = script.replace("/proc/pressure/memory", str(tmp_path / "absent"))
+    else:
+        (tmp_path / "pressure").write_text(text)
+        script = script.replace("/proc/pressure/memory", str(tmp_path / "pressure"))
+    code, out = run_script(script)
+    assert code == 0
+    found = limits.parse(out)
+    assert isinstance(found, limits.Reading)
+    assert found.pressure == expected
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="reads sysctl and vm_stat")
@@ -258,7 +374,7 @@ def launch(host: Remote, *options: str) -> int:
 def test_a_busy_host_refuses_before_any_transfer(
     host: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    host.configure(limits="9 4 1000 900 100 0")
+    host.configure(limits="9 4 1000 900 100 0 -")
     assert launch(host) == 1
     assert "load 9 >= limit 4" in capsys.readouterr().err
     assert len(host.records("ssh", limits=True)) == 1
@@ -266,10 +382,21 @@ def test_a_busy_host_refuses_before_any_transfer(
     assert not driver.metadata_path("sample").exists()
 
 
+def test_full_swap_with_low_pressure_launches_with_a_warning_end_to_end(
+    host: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    host.configure(limits="0.5 4 12582912 6291456 8191 8167 0.4")
+    assert launch(host) == 0
+    assert "warning: example-linux: swap used 100% > 80%" in capsys.readouterr().err
+    host.configure(limits="0.5 4 12582912 6291456 8191 8167 -")
+    with pytest.raises(Invalid, match="swap used 100% > 80%"):
+        driver.check_limits(CONFIG, CONFIG.hosts[0], Profile.BUILD, ignore=False)
+
+
 def test_ignore_limits_launches_warns_and_is_recorded(
     host: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    host.configure(limits="9 4 1000 900 100 0")
+    host.configure(limits="9 4 1000 900 100 0 -")
     assert launch(host, "--ignore-limits") == 0
     assert "warning: example-linux: load 9 >= limit 4" in capsys.readouterr().err
     assert json.loads(driver.metadata_path("sample").read_text())["ignore_limits"]
@@ -316,7 +443,7 @@ def test_a_disabled_host_refuses_even_with_limit_overrides(
 def test_build_reservation_uses_available_memory(
     host: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    host.configure(limits="0.5 4 12582912 6291455 0 0")
+    host.configure(limits="0.5 4 12582912 6291455 0 0 -")
     assert launch(host) == 1
     assert (
         "memory available 6291455 KiB < reservation 6144 MiB" in capsys.readouterr().err
@@ -338,17 +465,17 @@ def test_review_uses_its_own_reservation_at_the_boundary(
 
     monkeypatch.setattr(agent.settings, "load", load)
     monkeypatch.setattr(driver.launcher, "session", session)
-    host.configure(limits="0.5 4 4194304 1048575 0 0")
+    host.configure(limits="0.5 4 4194304 1048575 0 0 -")
     with pytest.raises(Invalid, match="reservation 1024 MiB"):
         driver.check_limits(config, config_host, Profile.REVIEW, ignore=False)
-    host.configure(limits="0.5 4 4194304 1048576 0 0")
+    host.configure(limits="0.5 4 4194304 1048576 0 0 -")
     assert launch(host, "--profile", "review", "--ref", "a" * 40) == 0
     with pytest.raises(Invalid, match="reservation 6144 MiB"):
         driver.check_limits(config, config_host, Profile.BUILD, ignore=False)
 
 
 def test_check_limits_runs_without_a_launch(host: Remote) -> None:
-    host.configure(limits="9 4 1000 900 100 0")
+    host.configure(limits="9 4 1000 900 100 0 -")
     config_host = CONFIG.hosts[0]
     with pytest.raises(Invalid, match="load 9"):
         driver.check_limits(CONFIG, config_host, Profile.BUILD, ignore=False)
