@@ -148,6 +148,8 @@ onepasswordconnectsdk
 opam
 oxipng
 passwordless
+pathmap
+pathspecs
 pgid
 PGDATABASE
 PGHOST
