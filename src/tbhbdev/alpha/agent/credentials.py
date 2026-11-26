@@ -27,9 +27,8 @@ if TYPE_CHECKING:
 # Split the spelling because the repository's leak scanner also flags the name.
 CLAUDE_TOKEN_ENV = "CLAUDE_CODE_" + "OAUTH_TOKEN"
 PULL_REQUESTS_PERMISSIONS = {"contents": "read"}
-# A build run pushes its own branch and opens its pull request; run-host holds this
-# token for the push and never puts it in the sandbox. A change under
-# .github/workflows needs workflows: write, which only this token carries.
+# A build run uses these permissions to push its branch and open its PR.
+# Changes under .github/workflows also need workflows: write.
 PUSH_PERMISSIONS = {
     "contents": "write",
     "pull_requests": "write",
@@ -145,7 +144,12 @@ TOKEN_ERRORS = (
 )
 
 
-def github_token(request: RunRequest, references: Credentials) -> str | None:
+def github_token(
+    request: RunRequest,
+    references: Credentials,
+    *,
+    build_permissions: dict[str, str] = PUSH_PERMISSIONS,
+) -> str | None:
     if request.profile is Profile.REVIEW:
         try:
             return installation_token(references, request.repo)
@@ -160,7 +164,7 @@ def github_token(request: RunRequest, references: Credentials) -> str | None:
     ):
         return None
     try:
-        return pull_requests_token(references, request.repo)
+        return pull_requests_token(references, request.repo, build_permissions)
     except TOKEN_ERRORS:
         message = "pull-requests App token unavailable; build refused"
         raise Invalid(message) from None
@@ -198,14 +202,15 @@ def fetch_token(request: RunRequest, settings: Settings) -> str | None:
         and references.reviews_app_client_id is not None
         and references.reviews_app_pem is not None
     ):
-        # A build fetches with the read-only reviews token, so its account needs
-        # no pull-requests App key. Pushes use the account's own ssh key.
+        # A build can fetch with the read-only reviews App token.
         try:
             return installation_token(references, request.repo)
         except TOKEN_ERRORS:
             message = "reviews App token unavailable; build fetch refused"
             raise Invalid(message) from None
-    return github_token(request, references)
+    return github_token(
+        request, references, build_permissions=PULL_REQUESTS_PERMISSIONS
+    )
 
 
 def deliver(request: RunRequest, settings: Settings, tmpdir: Path) -> Delivery:

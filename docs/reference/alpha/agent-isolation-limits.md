@@ -4,10 +4,9 @@ generated:
   - role: generated
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
-    effort: high
     surface: exec
-    session: sha-256-64:e4b1d0f412eff203
-    at: "2026-11-24T21:54:14Z"
+    session: sha-256-64:87816a4d23273d34
+    at: "2026-11-26T00:22:07Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -53,20 +52,17 @@ The tmux socket is `-S <sockets_dir>/agents`. The driver creates the configured 
 
 `wait` prefers the final answer and returns the run's exit status. Its poll interval defaults to 30 seconds (`TBHB_AGENT_WAIT_POLL`). Consecutive connection failures stop after 240 seconds (`TBHB_AGENT_WAIT_UNREACHABLE`) with exit status 75. Exit codes 1 and 75 overlap with harness exit codes. Read the first result line to distinguish an unknown or unreachable run from a harness result. Agent text follows that line.
 
-With `--start-ref`, run-host returns exit status 0 when it fast-forwards the selected remote branch.
+The build harness pushes its branch and opens any new pull request. With `--start-ref`, run-host fast-forwards the selected remote branch after the harness succeeds.
 
-After a successful build harness run, run-host compares commits reachable from all Git refs and detached `HEAD` with the starting history. It uses these exit statuses for publication.
-
-For a build that opens a pull request, run-host compares local branch tips and detached `HEAD` with the history it recorded before launch, including refs fetched by run-host during preparation. Remote-tracking refs added or changed during the harness run do not change that history. Run-host publishes the checked-out run branch when it contains new commits. If the run branch is checked out and new commits exist only elsewhere, run-host refuses publication. When the run branch is not checked out, run-host can publish a single independent new tip from another branch or detached `HEAD` to the run branch on origin.
+For a build using its own branch, run-host checks for new commits after the harness succeeds. It compares local branch tips and detached `HEAD` with the history recorded before launch, including refs fetched during preparation. Remote-tracking refs added or changed during the harness run do not affect that history. Run-host records the new tip for the checked-out run branch when available. When the run branch is not checked out, it can record a new tip from another local branch or detached `HEAD`.
 
 | Exit status | Result |
 | --- | --- |
-| 0 | The run contains no new commits and did not require one, or run-host pushes the branch and opens the pull request. |
-| 4 | Run-host skips or refuses the push, or Git fails to push. The log starts the reason line with `push skipped:`, `push refused:`, or `push failed:`. |
-| 5 | Run-host pushes the branch and can't open the pull request. The log starts the reason line with `pr not opened:`. |
+| 0 | The build succeeds, including the fast-forward when needed for `--start-ref`. |
+| 4 | The commit check or the `--start-ref` push fails. The log starts the reason line with `commit check failed:`, `push skipped:`, or `push failed:`. |
 | 6 | `--expect-commit` required a new commit, and the run produced none. The log starts the reason line with `no new commit:`. |
 
-New tips outside the starting commit's ancestry cause a refusal, and the log lists their count and short commit IDs.
+The commit check refuses new tips outside the starting commit's ancestry and lists their count and short commit IDs in the log. It also refuses a checked-out run branch when new commits exist only on other branches.
 
 If the harness fails, run-host keeps its exit status. `tbhbdev alpha agent status NAME` shows the last publication reason next to the return code when the run ends with a nonzero status and the log contains a reason.
 

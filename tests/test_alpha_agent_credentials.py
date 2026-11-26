@@ -33,6 +33,11 @@ if TYPE_CHECKING:
 
 
 BUILD_TOKEN = "example-build-token"  # noqa: S105  # Stub credential.
+BUILD_PERMISSIONS = {
+    "contents": "write",
+    "pull_requests": "write",
+    "workflows": "write",
+}
 REVIEW_TOKEN = "example-review-token"  # noqa: S105  # Stub credential.
 VALUES = {
     "example/gh/value": "example-gh-credential",
@@ -1006,7 +1011,7 @@ def test_build_without_gh_mints_from_the_pull_requests_app(
             "app_id": VALUES["example/app/client"],
             "pem": VALUES["example/app/pem"],
             "repository": "tbhb-dev/example-repo",
-            "permissions": {"contents": "read"},
+            "permissions": BUILD_PERMISSIONS,
         }
     ]
     assert yaml.safe_load((tmp_path / "gh" / "hosts.yml").read_text()) == {
@@ -1017,7 +1022,7 @@ def test_build_without_gh_mints_from_the_pull_requests_app(
     }
 
 
-def test_build_token_request_names_one_repository_and_contents_read_only(
+def test_build_token_request_names_one_repository_and_write_permissions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -1061,7 +1066,7 @@ def test_build_token_request_names_one_repository_and_contents_read_only(
     credentials.deliver(run_request(), pull_requests_settings(), tmp_path)
     assert [(request.method, request.url.path) for request in requests] == list(replies)
     assert json.loads(requests[1].content) == {
-        "permissions": {"contents": "read"},
+        "permissions": BUILD_PERMISSIONS,
         "repositories": ["example-repo"],
     }
     assert (
@@ -1252,8 +1257,28 @@ def test_fetch_token_without_reviews_refs_reads_the_account_credentials() -> Non
     )
 
 
+def test_build_fetch_fallback_requests_read_only_pull_requests_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = pull_requests_settings()
+    references = dataclasses.replace(
+        original.credentials[0], reviews_app_client_id=None, reviews_app_pem=None
+    )
+    settings = dataclasses.replace(original, credentials=(references,))
+    request = run_request()
+
+    def mint(actual: Credentials, repository: str, permissions: dict[str, str]) -> str:
+        assert actual is references
+        assert repository == request.repo
+        assert permissions == {"contents": "read"}
+        return BUILD_TOKEN
+
+    monkeypatch.setattr(credentials, "pull_requests_token", mint)
+    assert credentials.fetch_token(request, settings) == BUILD_TOKEN
+
+
 @pytest.mark.parametrize("profile", Profile)
-def test_harness_and_driver_mint_distinct_scopes(
+def test_harness_and_driver_mint_permissions_for_the_profile(
     monkeypatch: pytest.MonkeyPatch, profile: Profile
 ) -> None:
     monkeypatch.setitem(VALUES, "example/app/pem", "example-pem")
@@ -1271,13 +1296,9 @@ def test_harness_and_driver_mint_distinct_scopes(
     assert credentials.github_token(request, settings.credentials[0]) == REVIEW_TOKEN
     scopes = [keywords["permissions"] for keywords in seen]
     if profile is Profile.BUILD:
-        assert scopes == [{"contents": "read"}]
+        assert scopes == [BUILD_PERMISSIONS]
         assert credentials.push_token(request, settings) == REVIEW_TOKEN
-        assert seen[-1]["permissions"] == {
-            "contents": "write",
-            "pull_requests": "write",
-            "workflows": "write",
-        }
+        assert seen[-1]["permissions"] == BUILD_PERMISSIONS
     else:
         assert scopes == [
             {
