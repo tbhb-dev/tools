@@ -350,6 +350,7 @@ def claude_hooks() -> dict[str, list[Json]]:
             group("Write|Edit|MultiEdit|NotebookEdit|Bash", handler("guard-scripts")),
             group("Bash|Write|Edit", guard),
             group("Bash", handler("guard-gh-config-dir")),
+            group("Agent", handler("guard-agent-model")),
         ],
         "PostToolUse": [
             group("Write|Edit|MultiEdit|NotebookEdit|Bash", record),
