@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from tbhbdev.alpha.agent.run_host import Prepared, Run
 
 ALLOWED_EVENTS = frozenset({"APPROVE", "REQUEST_CHANGES", "COMMENT"})
+VERDICTS = frozenset({"GO", "BLOCK", "NO-GO"})
 DRAFT_NAME = re.compile(r"review-(\d+)\.md")
 DRAFT_LIMIT = 64 * 1024
 TIMEOUT = httpx.Timeout(20.0, connect=5.0)
@@ -162,7 +163,7 @@ def stamp(run: Run) -> str:
 
 
 def check_verdict(run: Run) -> None:
-    """Require the final verdict line from a headless review."""
+    """Require a final `VERDICT: GO|BLOCK|NO-GO` line, with the run's sha if any."""
     for suffix in ("out.final", "out"):
         try:
             answer = runfiles.read_owned(
@@ -170,13 +171,16 @@ def check_verdict(run: Run) -> None:
             )
         except FileNotFoundError:
             continue
-        last = answer.rstrip().rpartition("\n")[2]
-        if last in {
-            f"VERDICT: {verdict} {run.request.commit}" for verdict in ("GO", "NO-GO")
-        }:
+        label, _, rest = answer.rstrip().rpartition("\n")[2].partition(" ")
+        verdict, _, sha = rest.partition(" ")
+        if (
+            label == "VERDICT:"
+            and verdict in VERDICTS
+            and (not sha or sha == run.request.commit)
+        ):
             return
         break
-    message = "no verdict line for the reviewed head at the end of the final answer"
+    message = "no verdict line at the end of the final answer, or it names another head"
     raise PostRefusedError(message)
 
 

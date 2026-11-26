@@ -147,8 +147,23 @@ def test_a_run_name_posts_only_once(
     assert run.files.path("review").read_text() == "github.com/o/r#7 99"
 
 
+OTHER_HEAD = "b" * 40
+
+
 @pytest.mark.parametrize(
-    "answer", [None, "Review complete.", f"VERDICT: GO {HEAD}\nExtra text."]
+    "answer",
+    [
+        None,
+        "Review complete.",
+        f"VERDICT: GO {HEAD}\nExtra text.",
+        f"VERDICT: GO {OTHER_HEAD}",
+        f"VERDICT: BLOCK {OTHER_HEAD}",
+        f"VERDICT: NO-GO {OTHER_HEAD}",
+        f"VERDICT: HOLD {HEAD}",
+        f"VERDICT: GO {HEAD} extra",
+        "VERDICT:GO",
+        "verdict: GO",
+    ],
 )
 def test_a_review_without_a_final_verdict_does_not_post(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str | None
@@ -160,6 +175,27 @@ def test_a_review_without_a_final_verdict_does_not_post(
     monkeypatch.setattr(credentials, "review_post_token", forbidden)
     assert not review_post.posted(run, prepared)
     assert "review not posted: no verdict line" in run.files.path("log").read_text()
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "VERDICT: GO",
+        "VERDICT: BLOCK",
+        "VERDICT: NO-GO",
+        f"VERDICT: GO {HEAD}",
+        f"VERDICT: BLOCK {HEAD}",
+        f"VERDICT: NO-GO {HEAD}",
+    ],
+)
+def test_a_review_accepts_each_verdict_line_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, line: str
+) -> None:
+    run, prepared = make(tmp_path, draft())
+    run.files.write("out.final", f"Review complete.\n{line}\n")
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    Api(monkeypatch)
+    assert review_post.posted(run, prepared)
 
 
 @pytest.mark.parametrize(
