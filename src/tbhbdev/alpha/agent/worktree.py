@@ -18,7 +18,7 @@ from functools import partial
 from pathlib import Path
 lazy from collections.abc import Callable, Generator, Mapping
 
-from tbhbdev.alpha import install
+from tbhbdev.alpha import install, pre_push_guard
 from tbhbdev.alpha.agent import host_tools, runfiles
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.decisions.request import check_fetch_refs, check_start_ref
@@ -85,8 +85,33 @@ hooks=$({prek} list --hook-stage {stage}) || exit $?
 [ -n "$hooks" ] || exit 0
 exec {prek} hook-impl --hook-type {stage} -- "$@"
 """
+RUN_REFERENCE_TRANSACTION = r"""#!/bin/sh
+[ "$1" = prepared ] || exit 0
+branch={branch}
+start={start}
+while read -r _old new ref; do
+  case "$ref" in
+    "$branch")
+      case "$new" in
+        *[!0]*)
+          if ! git merge-base --is-ancestor "$start" "$new"; then
+            printf 'reference-transaction: %s must descend from %s\n' \
+              "$branch" "$start" >&2
+            exit 1
+          fi
+          ;;
+      esac
+      ;;
+    refs/heads/*)
+      printf 'reference-transaction: %s may only update %s\n' "$ref" "$branch" >&2
+      exit 1
+      ;;
+  esac
+done
+"""
 PREK_STAGES = ("pre-commit", "pre-push", *(name for name, _ in install.IDENTITY_HOOKS))
 REQUIRED_HOOKS = (
+    "reference-transaction",
     *PREK_STAGES,
     *(f"{name}.prek" for name in PREK_STAGES if name != "pre-commit"),
 )
@@ -255,7 +280,7 @@ def fetch_commit(mirror: Path, request: RunRequest, token: str | None = None) ->
     return commit
 
 
-def install_hooks(workspace: Path) -> None:
+def install_hooks(workspace: Path, run_name: str, start: str) -> None:
     hooks = workspace / ".git" / "hooks"
     hooks.mkdir(mode=0o700, exist_ok=True)
     hooks.chmod(hooks.stat().st_mode | stat.S_IWUSR)
@@ -272,6 +297,10 @@ def install_hooks(workspace: Path) -> None:
         python=Path(sys.base_prefix, "bin", "python3"),
         mark=install.SHIM_MARK,
         pattern=TBHB_DEV_ORIGIN.pattern,
+        run_env={pre_push_guard.RUN_NAME_ENV: run_name},
+    )
+    scripts[hooks / "reference-transaction"] = RUN_REFERENCE_TRANSACTION.format(
+        branch=shlex.quote(f"refs/heads/agent/{run_name}"), start=shlex.quote(start)
     )
     for hook, content in scripts.items():
         if hook.exists():
@@ -280,6 +309,15 @@ def install_hooks(workspace: Path) -> None:
     for entry in (*hooks.rglob("*"), hooks):
         executable = entry.is_dir() or entry in scripts or entry.stat().st_mode & 0o111
         entry.chmod(0o555 if executable else 0o444)
+
+
+def verify_hook_files(workspace: Path) -> None:
+    hooks = workspace / ".git" / "hooks"
+    for name in REQUIRED_HOOKS:
+        hook = hooks / name
+        if not hook.is_file() or not os.access(hook, os.X_OK):
+            message = f"run hook {name} is missing or not executable"
+            raise Invalid(message)
 
 
 def verify_run_hooks(workspace: Path, env: Mapping[str, str]) -> None:
@@ -299,11 +337,6 @@ def verify_run_hooks(workspace: Path, env: Mapping[str, str]) -> None:
     if Path(actual).resolve() != hooks.resolve():
         message = "effective core.hooksPath does not select the run's hooks"
         raise Invalid(message)
-    for name in REQUIRED_HOOKS:
-        hook = hooks / name
-        if not hook.is_file() or not os.access(hook, os.X_OK):
-            message = f"run hook {name} is missing or not executable"
-            raise Invalid(message)
     try:
         probe(["tbhbdev", "alpha", "identity", "trailer", "--dry-run"])
     except subprocess.CalledProcessError:
@@ -320,12 +353,14 @@ def discard_unlaunched(workspace: Path) -> None:
         shutil.rmtree(workspace)
 
 
-def prepare_hooks(workspace: Path, env: Mapping[str, str] | None) -> None:
+def prepare_hooks(
+    workspace: Path, name: str, start: str, env: Mapping[str, str] | None
+) -> None:
     with preparation_step("hook install"):
-        install_hooks(workspace)
+        install_hooks(workspace, name, start)
     if env is not None:
         with preparation_step("hook verification"):
-            verify_run_hooks(workspace, env)
+            verify_hook_files(workspace)
 
 
 def _own_common_directory(git_dir: Path) -> bool:
@@ -584,14 +619,13 @@ def create(
     hook_env: Mapping[str, str] | None = None,
 ) -> Path:
     check_fetch_refs(request.fetch_refs)
-    parts = repo.parts(request.repo)
-    if (parts[0], parts[1].lower()) != (repo.DEFAULT_GIT_HOST, repo.DEFAULT_ORG):
+    host, owner, repository = repo.parts(request.repo)
+    if (host, owner.lower()) != (repo.DEFAULT_GIT_HOST, repo.DEFAULT_ORG):
         message = (
             f"repository {request.repo}: agent mirrors fetch only "
             f"{repo.DEFAULT_ORG} repositories"
         )
         raise Invalid(message)
-    _, owner, repository = parts
     url = f"https://github.com/{owner}/{repository}.git"
     ensure_clone_directory(clone)
     worktree = clone / ".worktrees" / f"agent-{name}"
@@ -613,7 +647,9 @@ def create(
             worktree.parent.mkdir(exist_ok=True)
             clone_run(mirror, worktree, url)
         discard.callback(discard_unlaunched, worktree)
-        prepare_hooks(worktree, hook_env)
+        if hook_env is not None:
+            with preparation_step("hook verification"):
+                verify_run_hooks(worktree, hook_env)
         fetch_step = f"mirror fetch ({url})"
         if request.fetch_refs:
             fetch_step += f"; requested refs: {', '.join(request.fetch_refs)}"
@@ -628,6 +664,7 @@ def create(
                 if token is None:
                     raise
                 commit = fetch_commit(mirror, request, token)
+        prepare_hooks(worktree, name, commit, hook_env)
         with preparation_step("checkout"):
             git(
                 worktree, "fetch", "--no-tags", "--no-write-fetch-head",

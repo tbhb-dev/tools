@@ -16,8 +16,8 @@ def test_brief_and_launch() -> None:
     assert render.brief(RunKind.EXEC, "example\n") == final_only + "example\n"
     build = render.brief(RunKind.EXEC, "example\n", profile=Profile.BUILD)
     assert build == (
-        final_only + "Commit your changes locally. "
-        "The driver pushes the build branch and opens the pull request after success."
+        final_only + "Commit on your run branch. The driver pushes it to the PR branch "
+        "after success and opens a pull request for a new branch."
         "\nexample\n"
     )
     assert "including" not in build

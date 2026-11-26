@@ -2,17 +2,11 @@
 description: Interim agent commands, installation, and harness hooks.
 generated:
   - role: generated
-    harness: codex:0.166.0
-    model: openai:gpt-6.2-sol
-    effort: medium
-    at: "2026-11-25T21:17:18Z"
-  - role: assisted
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
-    effort: high
+    effort: medium
     surface: exec
-    session: sha-256-64:621ba09362617ce8
-    at: "2026-11-25T20:45:00Z"
+    at: "2026-11-26T01:24:37Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -25,7 +19,7 @@ type: Reference
 
 `tbhbdev alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`:
 
-- `pre-push-guard REMOTE URL` refuses every push to `main` or `master`, and refuses a non-fast-forward push unless the remote tip git reports is the tip in `refs/remotes/REMOTE/BRANCH` of a branch under `refs/heads/`. It logs `REF rewritten OLD -> NEW` on stderr for each rewrite it allows. The hook cannot see which flag was used, so the command-line guard (`guard-gh-poll`) allows only `git push --force-with-lease` to branches other than `main` and `master`, and denies `--force`, `-f`, `--mirror`, `+REF` refspecs and `--force-if-includes` without a lease. The installed pre-push hook runs it before prek with the same arguments and input. Nonempty `SKIP` or `PREK_SKIP` refuses the push. Install fails when a foreign pre-push hook exists and asks you to move it aside. No setting bypasses the guard. Git’s `--no-verify` skips all hooks. Standing rules prohibit it.
+- `pre-push-guard REMOTE URL` refuses every push to `main` or `master`, and refuses a non-fast-forward push unless the remote tip git reports is the tip in `refs/remotes/REMOTE/BRANCH` of a branch under `refs/heads/`. It logs `REF rewritten OLD -> NEW` on stderr for each rewrite it allows. The hook cannot see which flag was used, so the command-line guard (`guard-gh-poll`) allows only `git push --force-with-lease` to branches other than `main` and `master`, and denies `--force`, `-f`, `--mirror`, `+REF` refspecs and `--force-if-includes` without a lease. The installed pre-push hook runs it before prek with the same arguments and input. In a run clone, the hook sets `TBHBDEV_RUN_NAME` and the guard accepts only `refs/heads/agent/NAME` as a branch destination. Nonempty `SKIP` or `PREK_SKIP` refuses the push. Install fails when a foreign pre-push hook exists and asks you to move it aside. No setting bypasses the guard. Git’s `--no-verify` skips all hooks. Standing rules prohibit it.
 - `identity` records which agent and model made each edit and writes the `Generated-by` trailers.
 - `guard-op` requires the configured `[op] account` flag on shell calls and proposed writes in every directory. `PreToolUse` covers Claude `Bash` and `Write|Edit|MultiEdit|NotebookEdit`, Codex `Bash`/`shell`/`apply_patch` and Antigravity `run_command`/edit tools. The guard scans shell files, Markdown shell fences, Python command expressions, notebook code cells, and YAML command fields. It allows unrelated edits to existing offenders. `OP_ACCOUNT` alone doesn't pass the guard. The module docstring lists the allowed command forms that the scanner misses. Check the Codex `apply_patch` PreToolUse matcher live after install. Its behavior remains unverified against Codex's documentation.
 - `guard-gh-pr` is a PreToolUse hook that blocks `gh pr create`, `gh pr edit`, `gh pr merge`, `gh pr ready`, `gh pr close`, `gh issue close`, `gh run rerun` and a `gh api` DELETE of a branch ref, starts its denial with `tbhbdev hint:`, names the `tbhbdev alpha` command to run instead, and ends with a pointer to `tbhbdev alpha --help`.
@@ -107,7 +101,7 @@ When `tbhbdev alpha agent exec` finds a version mismatch, it looks up the head o
 
 `tbhbdev alpha agent exec --worker-workflow ID` launches a review as the registered worker `worker/ID` when no tmux pane names the caller. See [Agent configuration](agent-configuration.md) for the `[agent.worker]` table that registers it.
 
-For a build that updates an existing pull request, pass both `--fetch-ref refs/heads/<branch>` and `--start-ref refs/heads/<branch>`. The run starts at the fetched commit and pushes a fast-forward to that branch without opening a pull request. The command refuses the repository's default branch. If the remote tip changes before the push check, the run fails and keeps its worktree.
+For a build that updates an existing pull request, pass both `--fetch-ref refs/heads/<branch>` and `--start-ref refs/heads/<branch>`. Commit on the run branch at the fetched start. The driver pushes a fast-forward to the pull request branch. The command refuses the repository's default branch. If the remote tip changes before the push check, the run fails and keeps its worktree.
 
 For a run that opens a pull request, write `.github/PULL_REQUEST_DRAFT.md` in its worktree and keep it out of commits. The driver reads the worktree draft first and uses the pushed commit's draft if the worktree draft is missing. The worktree draft must be an owned regular file of at most 64 KiB. The driver refuses symlinks and scans the draft with the host's secret rules and the pre-run commit's `.gitleaks.toml` before posting it. When the pre-run commit has none, the scan uses exactly the private config and gitleaks' defaults and ignores any `.gitleaks.toml` the run adds, because the run controls that file, and the run log says so. The driver refuses to push when the run's commits add the draft, and CI fails a pull request whose diff contains the draft.
 

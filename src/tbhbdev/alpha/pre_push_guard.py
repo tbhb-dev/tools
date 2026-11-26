@@ -38,6 +38,7 @@ SAFE = (
     "core.pager=cat",
 )
 HOOK_ARGUMENTS = 2
+RUN_NAME_ENV = "TBHBDEV_RUN_NAME"
 PROTECTED = frozenset({"refs/heads/main", "refs/heads/master"})
 AGENT_KEY = Path(".config/tbhbdev/agent-signing-key.pub")
 FINGERPRINT = re.compile(r"SHA256:\S+")
@@ -219,6 +220,10 @@ def ref_problems(
 ) -> list[str]:
     """The refusals for one pushed ref: LOCAL, REF, and the remote's OLD value."""
     local, ref, old = row
+    if (name := os.environ.get(RUN_NAME_ENV)) and ref.startswith("refs/heads/"):
+        branch = f"refs/heads/agent/{name}"
+        if ref != branch:
+            return [f"{ref}: this run may only push {branch}"]
     if ref in PROTECTED:
         message = (
             "push to a protected branch refused; "

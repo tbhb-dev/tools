@@ -12,8 +12,8 @@ FINAL_ONLY = (
     "keep the draft out of commits and report the conflict in your final answer."
 )
 BUILD_PUBLICATION = (
-    "Commit your changes locally. "
-    "The driver pushes the build branch and opens the pull request after success."
+    "Commit on your run branch. The driver pushes it to the PR branch after success "
+    "and opens a pull request for a new branch."
 )
 REVIEW_PUBLICATION = (
     "Use the pull request number for N. Run `tbhbdev alpha review draft N`, "

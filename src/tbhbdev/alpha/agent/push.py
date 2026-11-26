@@ -24,10 +24,7 @@ if TYPE_CHECKING:
 # A remote rejection is on a later stderr line than the URL, so keep all of it.
 PUSH_ERROR_LIMIT = 4000
 HISTORY_TIMEOUT = 30
-
-
-class PublicationRefusedError(ValueError):
-    """The run has new history that cannot be published safely."""
+STRANDED_WORK = 7
 
 
 def url(repository: str) -> str:
@@ -136,9 +133,8 @@ def run(
         return harness(run, prepared, stack)
     workspace = Path(prepared.paths.worktree)
     branch = f"agent/{run.files.name}"
-    reference = f"refs/heads/{branch}"
     before, _ = local_refs(workspace)
-    base = before.get(reference)
+    base = before.get(f"refs/heads/{branch}")
     start = start_ref_target(run, base)
     rc = harness(run, prepared, stack)
     if run.files.uncertain:
@@ -150,41 +146,47 @@ def run(
                 run.files.write("head", commit)
                 run.files.write("log", f"push skipped: harness exited {rc}\n")
         return rc
+    return publish_changes(run, workspace, before, token, start)
+
+
+def publish_changes(
+    run: Run,
+    workspace: Path,
+    before: dict[str, str],
+    token: str | PushTokenFailure | None,
+    start: tuple[str, str] | None,
+) -> int:
+    reference = f"refs/heads/agent/{run.files.name}"
     try:
-        if start is not None:
-            return publish_start_ref(run, workspace, before, token, start)
-        after, checkout = local_refs(workspace)
-        found = new_commits(run, workspace, before, after, checkout)
-    except PublicationRefusedError as exc:
-        run.files.write("log", f"push skipped: {exc}\n")
+        after, _ = local_refs(workspace)
+        commit, stranded = new_commits(run, workspace, before, after, reference)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         run.files.write(
             "log", f"push skipped: cannot check new commits ({type(exc).__name__})\n"
         )
-    else:
-        return publish(run, workspace, found, token, base) if found else 0
-    return 4
+        return 4
+    if stranded:
+        run.files.write("head", "".join(f"{sha} {ref}\n" for sha, ref, _ in stranded))
+        for sha, ref, reason in stranded:
+            run.files.write(
+                "log", f"push skipped: stranded commit {sha} on {ref} {reason}\n"
+            )
+        return STRANDED_WORK
+    if commit is None:
+        return 0
+    if start is not None:
+        return push_start_branch(run, workspace, commit, token, start)
+    return publish(run, workspace, commit, token, before.get(reference))
 
 
 def publish(
     run: Run,
     workspace: Path,
-    found: list[tuple[str, str]],
+    commit: str,
     token: str | PushTokenFailure | None,
     base: str | None,
 ) -> int:
     branch = f"agent/{run.files.name}"
-    commits = dict.fromkeys(commit for _, commit in found)
-    if len(commits) > 1:
-        sources = ", ".join(name.removeprefix("refs/heads/") for name, _ in found)
-        sources = "".join(filter(str.isprintable, sources))
-        run.files.write(
-            "log",
-            f"push skipped: commits {' '.join(commits)} on {sources} "
-            f"need one branch, {branch}\n",
-        )
-        return 4
-    commit = found[0][1]
     run.files.write("head", commit)
     if not isinstance(token, str):
         reason = token.reason if token is not None else "unavailable"
@@ -225,29 +227,6 @@ def start_ref_target(run: Run, base: str | None) -> tuple[str, str] | None:
     return ref, base
 
 
-def publish_start_ref(
-    run: Run,
-    workspace: Path,
-    before: dict[str, str],
-    token: str | PushTokenFailure | None,
-    start: tuple[str, str],
-) -> int:
-    branch = f"agent/{run.files.name}"
-    reference = f"refs/heads/{branch}"
-    after, _ = local_refs(workspace)
-    after.pop("HEAD", None)
-    commit = after.pop(reference, None)
-    if commit is not None:
-        if isinstance(token, str) and head(workspace, branch) is None:
-            after[reference] = commit
-        else:
-            after = {reference: commit, **after}
-    change = first_change(run, workspace, before, after)
-    return (
-        0 if change is None else push_start_branch(run, workspace, change, token, start)
-    )
-
-
 def check_not_moved(
     directory: Path, target: str, ref: str, base: str, token: str
 ) -> None:
@@ -276,15 +255,12 @@ def check_not_moved(
 def push_start_branch(
     run: Run,
     workspace: Path,
-    change: tuple[str, str],
+    commit: str,
     token: str | PushTokenFailure | None,
     start: tuple[str, str],
 ) -> int:
     ref, base = start
-    name, commit = change
-    run_branch = f"agent/{run.files.name}"
-    if name == f"refs/heads/{run_branch}":
-        run.files.write("head", commit)
+    run.files.write("head", commit)
     if not isinstance(token, str):
         reason = token.reason if token is not None else "unavailable"
         run.files.write(
@@ -292,21 +268,9 @@ def push_start_branch(
         )
         return 4
     try:
-        if name != f"refs/heads/{run_branch}" or head(workspace, run_branch) != commit:
-            run.files.write(
-                "log", f"push failed: commit {commit} needs {run_branch} checked out\n"
-            )
-            return 4
         target = url(run.request.repo)
         branch = ref.removeprefix("refs/heads/")
         with publication(run.files.root, workspace, commit) as directory:
-            if outside_history(directory, base, (commit,)):
-                run.files.write(
-                    "log",
-                    f"push failed: commit {commit} does not fast-forward "
-                    f"{ref} from {base}\n",
-                )
-                return 4
             check_not_moved(directory, target, ref, base, token)
             status, error = send(directory, target, branch, token)
         if not status:
@@ -354,79 +318,41 @@ def local_refs(workspace: Path) -> tuple[dict[str, str], str]:
     return refs, current
 
 
-def first_change(
-    run: Run, workspace: Path, before: dict[str, str], after: dict[str, str]
-) -> tuple[str, str] | None:
-    """Find a commit that no starting ref reaches."""
-    bases = tuple(dict.fromkeys(before.values()))
-    candidates = {name: tip for name, tip in after.items() if tip not in bases}
-    if not candidates:
-        return None
-    with publication(
-        run.files.root, workspace, next(iter(candidates.values()))
-    ) as directory:
-        for name, tip in candidates.items():
-            if commit := outside_history(directory, tip, bases):
-                return name, commit
-    return None
-
-
 def new_commits(
     run: Run,
     workspace: Path,
     before: dict[str, str],
     after: dict[str, str],
-    checkout: str,
-) -> list[tuple[str, str]]:
-    """Find independent local branch or detached HEAD tips with new run history."""
-    reference = f"refs/heads/agent/{run.files.name}"
-    # Use the starting tip of the run's branch, falling back to the starting HEAD.
+    reference: str,
+) -> tuple[str | None, list[tuple[str, str, str]]]:
+    """Find the publishable tip and any new work it does not cover."""
     start = before.get(reference) or before.get("HEAD", before.get("detached HEAD"))
-    # Preparation fetches into the clone before the harness can change its refs.
     bases = tuple(dict.fromkeys(before.values()))
     candidates = {
-        name: tip
-        for name, tip in after.items()
+        name: sha
+        for name, sha in after.items()
         if (name.startswith("refs/heads/") or name == "detached HEAD")
-        and tip not in bases
+        and sha not in bases
     }
     if not start or not candidates:
-        return []
+        return None, []
+    commit = None
+    stranded: list[tuple[str, str, str]] = []
     with publication(
         run.files.root, workspace, next(iter(candidates.values()))
     ) as directory:
-        found = eligible_tips(directory, candidates, bases, start)
-        if found and checkout == f"ref: {reference}":
-            if reference in found:
-                return [(reference, found[reference])]
-            message = "checked-out run branch has no new commits"
-            raise PublicationRefusedError(message)
-        if len(found) <= 1:
-            return list(found.items())
-        independent = set(
-            history_git(
-                directory, "merge-base", "--independent", *found.values()
-            ).split()
-        )
-        return [(name, tip) for name, tip in found.items() if tip in independent]
-
-
-def eligible_tips(
-    directory: Path, candidates: dict[str, str], bases: tuple[str, ...], start: str
-) -> dict[str, str]:
-    """Keep tips with new run history and refuse new history outside the start."""
-    found: dict[str, str] = {}
-    dropped: set[str] = set()
-    for name, tip in sorted(candidates.items()):
-        if outside_history(directory, tip, bases, start):
-            found[name] = tip
-        elif outside_history(directory, tip, bases):
-            dropped.add(tip)
-    if dropped:
-        short = " ".join(tip[:12] for tip in sorted(dropped))
-        message = f"{len(dropped)} new tip(s) outside run start ancestry: {short}"
-        raise PublicationRefusedError(message)
-    return found
+        tip = candidates.pop(reference, None)
+        if tip is not None:
+            if outside_history(directory, tip, bases, start):
+                commit = tip
+            elif outside_history(directory, tip, bases):
+                stranded.append((tip, reference, f"outside start ancestry ({start})"))
+            bases = (*bases, tip)
+        for name, sha in sorted(candidates.items()):
+            if outside_history(directory, sha, bases):
+                ref = "".join(filter(str.isprintable, name))
+                stranded.append((sha, ref, f"outside {reference}"))
+    return commit, stranded
 
 
 def outside_history(
