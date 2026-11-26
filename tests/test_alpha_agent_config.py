@@ -605,6 +605,8 @@ def _codex_errors() -> list[Case]:
     cases: list[Case] = []
     codex = "[agent.codex]"
     _add(cases, ("codex", "web_search"), 5, "must be a table", codex)
+    for bad in ("", " ", 5):
+        _add(cases, ("codex", "subagent_model"), bad, NON_BLANK, codex)
     for bad in ("bad", "Live", 5, True, None, ["live"], ""):
         _add(
             cases,
@@ -648,6 +650,7 @@ def _claude_errors() -> list[Case]:
         _add(cases, ("claude", "default_profile"), bad, NON_BLANK, claude)
     _add(cases, ("claude", "profiles"), MISSING, "is required", claude)
     _add(cases, ("claude", "profiles"), "x", "must be a table", claude)
+    _add(cases, ("claude", "subagent_model"), "x", "not recognized", claude)
     for key in ("token",):
         _add(
             cases,
@@ -1314,3 +1317,25 @@ def test_the_worker_path_must_be_absolute(worker: object, reason: str) -> None:
     with pytest.raises(Invalid) as caught:
         config.parse(edited("worker", value=worker))
     assert str(caught.value) == reason
+
+
+def test_the_codex_subagent_model_defaults_to_the_roster_model() -> None:
+    assert config.parse(GOOD).codex.subagent_model == "gpt-6.1-sol"
+
+
+def test_the_codex_subagent_model_can_be_set_beside_a_web_search_table() -> None:
+    table = copy.deepcopy(GOOD)
+    table["codex"] = {
+        "web_search": {"build": "live"},
+        "subagent_model": "example-codex-small",
+    }
+    parsed = config.parse(table)
+    assert parsed.codex.subagent_model == "example-codex-small"
+    assert parsed.codex.web_search_build is model.WebSearch.LIVE
+
+
+def test_a_codex_subagent_model_needs_no_web_search_table() -> None:
+    parsed = config.parse(edited("codex", value={"subagent_model": "example-small"}))
+    assert parsed.codex == model.Codex(
+        model.WebSearch.LIVE, model.WebSearch.LIVE, "example-small"
+    )

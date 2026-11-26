@@ -39,6 +39,7 @@ use_repo(
     "tbhb_rules_gitleaks",
     "tbhb_rules_rumdl",
     "tbhb_rules_ryl",
+    "tbhb_rules_scc",
     "tbhb_rules_shellcheck",
     "tbhb_rules_shfmt",
     "tbhb_rules_tombi",

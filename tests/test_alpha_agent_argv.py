@@ -11,6 +11,7 @@ import json
 import shlex
 import tomllib
 from pathlib import Path, PurePosixPath
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -95,6 +96,8 @@ CODEX_TAIL = (
     "-c",
     'web_search="live"',
     "-c",
+    'agents.default_subagent_model="gpt-6.1-sol"',
+    "-c",
     'features.network_proxy={enabled=true,mode="limited",domains={},unix_sockets={},dangerously_allow_all_unix_sockets=false,allow_local_binding=false}',
 )
 CODEX_BUILD_FS = (
@@ -145,7 +148,9 @@ def claude_settings_of(profile: Profile) -> dict[str, object]:
 def claude_settings(profile: Profile, *, headless: bool) -> str:
     options = claude_settings_of(profile)
     if headless:
-        options.update(disableAllHooks=False, hooks=install.stop_hooks("claude"))
+        own = cast("dict[str, object]", options["hooks"])
+        hooks = {**own, **install.stop_hooks("claude")}
+        options.update(disableAllHooks=False, hooks=hooks)
     return json.dumps(options, separators=(",", ":"), sort_keys=True)
 
 
@@ -908,3 +913,22 @@ def test_unsandboxed_argv_skips_harness_sandbox(
         assert command[0] == "agy"
         assert "--dangerously-skip-permissions" in command
         assert "--sandbox" not in command
+
+
+@pytest.mark.parametrize("kind", RunKind)
+def test_codex_sets_the_configured_subagent_model_as_a_default(kind: RunKind) -> None:
+    codex = model.Codex(model.WebSearch.LIVE, model.WebSearch.LIVE, "example-small")
+    result = built(Harness.CODEX, kind, Profile.BUILD, config=settings(codex=codex))
+    pin = 'agents.default_subagent_model="example-small"'
+    assert result[result.index(pin) - 1] == "-c"
+    assert "agents.enabled=false" not in result
+
+
+@pytest.mark.parametrize("kind", RunKind)
+def test_codex_without_a_configured_model_keeps_subagents_on_the_default(
+    kind: RunKind,
+) -> None:
+    result = built(Harness.CODEX, kind, Profile.BUILD)
+    default = 'agents.default_subagent_model="gpt-6.1-sol"'
+    assert result[result.index(default) - 1] == "-c"
+    assert "agents.enabled=false" not in result

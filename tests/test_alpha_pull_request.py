@@ -210,6 +210,7 @@ def world_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     made = World(root, tools_dir)
     made.fake("cog")
     made.fake("bazelisk")
+    made.fake("scc")
     made.fake("vale", stdout="{}")
     made.fake("cspell")
     made.fake("rumdl")
@@ -1727,7 +1728,10 @@ def test_a_draft_without_a_base_takes_the_default_branch(
     write_draft(world, BASE)
     run_main("check")
     counted.assert_called_once_with(
-        "refs/remotes/origin/trunk", "HEAD", bazelisk=str(world.bin / "bazelisk")
+        "refs/remotes/origin/trunk",
+        "HEAD",
+        scc=str(world.bin / "scc"),
+        git=str(world.root.parent / "git_dir" / "git"),
     )
 
 
@@ -1866,7 +1870,7 @@ def test_pr_reports_all_missing_tools_before_reading_the_draft(
 
 
 @pytest.mark.parametrize("verb", ["check", "create"])
-def test_pr_runs_without_bazelisk_and_warns_about_the_size_count(
+def test_pr_runs_without_scc_and_warns_about_the_size_count(
     world: World,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1874,7 +1878,7 @@ def test_pr_runs_without_bazelisk_and_warns_about_the_size_count(
 ) -> None:
     # The world fixture stubs the counter; this test needs the real one.
     monkeypatch.setattr(size_gate, "size_counts", REAL_SIZE_COUNTS)
-    (world.bin / "bazelisk").unlink()
+    (world.bin / "scc").unlink()
     write_draft(world)
     args = ("create", "--dry-run") if verb == "create" else ("check",)
     assert run_main(*args) == 0
@@ -2454,7 +2458,7 @@ def test_run_uses_the_given_directory(tmp_path: Path) -> None:
 def test_runs_as_tbhbdev_alpha_pr(world: World) -> None:
     write_draft(world)
     (world.bin / "bazelisk").unlink()
-    worktree_tool(world, "bazelisk", "raise SystemExit('missing target')")
+    world.fake("bash", rc=1, stderr="missing counter")
     bare = world.root.parent / "origin.git"
     subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
     world.git("push", "-q", str(bare), "HEAD:refs/heads/main")
@@ -2477,7 +2481,7 @@ def test_runs_as_tbhbdev_alpha_pr(world: World) -> None:
     )
     assert (done.returncode, done.stderr) == (
         0,
-        "size count unavailable: missing target\n",
+        "size count unavailable: missing counter\n",
     )
 
 

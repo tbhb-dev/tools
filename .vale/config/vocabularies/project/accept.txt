@@ -16,3 +16,4 @@ unfetched
 uv
 worktrees?
 ccstatusline
+refspecs

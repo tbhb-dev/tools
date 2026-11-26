@@ -164,6 +164,7 @@ CONFIGS = (".vale.ini", ".vale", ".cspell.jsonc", ".cspell-words.txt", ".rumdl.t
 # A merge appends " (#N)" and the header must fit 72; 64 leaves room
 # for a pull request number of up to four digits.
 MAX_TITLE = 72 - len(" (#9999)")
+SCC = "scc"
 BAZEL = "bazelisk"
 BAZEL_ENV = ".bazel_env"
 # Module constants, not literals in the functions: macOS file systems ignore
@@ -2098,7 +2099,11 @@ def check_size(args: argparse.Namespace, checked: Checked) -> None:
     PR. A dry run reports an excess as a warning and still previews.
     """
     branch = base_of(checked.meta)
-    dry_run = getattr(args, "dry_run", False)
+    dry_run = getattr(
+        args,
+        "dry_run",
+        False,  # pragma: no mutate -- None is also false.
+    )
     base = f"refs/remotes/origin/{branch}"
     verify = ("rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
     if args.command == "create" and not target_is_origin():
@@ -2125,7 +2130,10 @@ def check_size(args: argparse.Namespace, checked: Checked) -> None:
         return
     try:
         counts = size_gate.size_counts(
-            base, "HEAD", bazelisk=_TOOL_PATHS.get().get((BAZEL, False), BAZEL)
+            base,
+            "HEAD",
+            scc=_TOOL_PATHS.get().get((SCC, False), SCC),
+            git=_TOOL_PATHS.get().get((GIT, False), GIT),
         )
     except size_gate.SizeCountError as exc:
         print(f"size count unavailable: {exc}", file=sys.stderr)
@@ -2156,9 +2164,9 @@ def command(args: argparse.Namespace, env: Mapping[str, str]) -> int:
     if args.command == "create":
         names += (GITLEAKS, GH)
     paths = find_tools(names, unwrapped=unwrapped)
-    # Not required: without bazelisk the size count only warns.
+    # Not required: without scc the size count only warns.
     with contextlib.suppress(SystemExit):
-        paths.update(find_tools((BAZEL,)))
+        paths.update(find_tools((SCC,)))
     token = _TOOL_PATHS.set({(name, name in unwrapped): p for name, p in paths.items()})
     try:
         return _run_command(args, env)
