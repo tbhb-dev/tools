@@ -30,7 +30,7 @@ Before choosing a model for a subagent or peer run, read models/README.md in tbh
 
 Ask Renovate to rebase an open pull request with `tbhbdev alpha pr rebase N`.
 
-Document a new or changed command in its own page under `docs/reference/alpha/commands/`, not in the index `docs/reference/alpha/commands.md`.
+Document a new or changed command in its own page under `docs/reference/alpha/commands/`, and add one entry to the index `docs/reference/alpha/commands/index.md`, not to `docs/reference/alpha/commands.md`.
 
 ## Checks
 
