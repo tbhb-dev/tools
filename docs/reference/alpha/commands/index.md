@@ -1,5 +1,7 @@
 # Alpha command pages
 
+`tbhbdev alpha` holds the interim agent tools that the tbhb-dev repositories used to carry in `tools/interim`:
+
 * [Pre-push guard](pre-push-guard.md) - Refusals for pushes to main and history rewrites, and signature requirements.
 * [Identity](identity.md) - Agent and model attribution, the Generated-by trailers, and the identity start time.
 * [Guard op](guard-op.md) - The 1Password account flag that shell calls and proposed writes need.
