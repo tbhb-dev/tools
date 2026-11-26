@@ -2,12 +2,12 @@
 description: Mapping, importing and verifying a public repository's files at one commit.
 generated:
   - role: generated
-    effort: high
     harness: codex:0.171.0
-    model: openai:gpt-6.1-sol
-    session: sha-256-64:c56a06157558b5a6
+    model: openai:gpt-6.2-sol
+    effort: high
     surface: exec
-    at: "2026-11-26T06:41:16Z"
+    session: sha-256-64:f972f0ffab211c20
+    at: "2026-11-26T15:32:33Z"
 status: stable
 tags: [alpha, monorepo]
 title: Monorepo import
@@ -54,7 +54,7 @@ Subjects read `feat(FOLDER): import REPO at SHORT`, with the repository name and
 It checks that:
 
 - The map accounts for every source file and lists none that the commit lacks.
-- Every file under the imported folder is a destination produced by the map. Unexpected files, retained drops, and old paths left after a move fail the check.
+- Every file under the imported folder is a destination produced by the map, with two exceptions. The folder's own `OWNERS` and the file passed to `--map` may be present without a map entry. The map file qualifies only when it is inside the imported folder. If the map writes either file, the usual copy or rewrite checks apply. Unexpected files, retained drops, and old paths left after a move fail the check.
 - The imported folder and its parents contain no symbolic links. The check treats directory links within the folder as files and compares their targets and kind with the map. It doesn't follow them.
 - Each copied file exists in the tree with the source's bytes, executable bit, and link or file kind.
 - Each rewritten file equals the source with the replacements of the map applied.

@@ -371,7 +371,16 @@ def test_verify_rejects_changed_symlink_target(imported: Imported, target: str) 
 
 
 @pytest.mark.parametrize(
-    "extra", ["surprise.txt", "uv.lock", "src/app.py", ".hidden", "nested/stray.txt"]
+    "extra",
+    [
+        "surprise.txt",
+        "uv.lock",
+        "src/app.py",
+        ".hidden",
+        "nested/stray.txt",
+        "src/OWNERS",
+        "IMPORT-MAP.toml",
+    ],
 )
 def test_verify_rejects_files_not_produced_by_the_map(
     mono: Path, imported: Imported, extra: str
@@ -385,6 +394,46 @@ def test_verify_rejects_files_not_produced_by_the_map(
     target.write_bytes(APP)
     assert imported.problems() == [
         f"{DEST}/{extra}: not produced by the map",
+        "verify: 1 problems",
+    ]
+
+
+@pytest.mark.parametrize("name", ["IMPORT-MAP.toml", "src/../project-map.toml"])
+def test_verify_allows_project_owners_and_selected_map(
+    imported: Imported, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    monkeypatch.chdir(imported.tree.parent)
+    tree = Path(imported.tree.name)
+    project = tree / DEST
+    mapping = project / name
+    mapping.write_bytes(imported.mapping.read_bytes())
+    (project / "OWNERS").write_text("tbhb-dev/owners\n")
+    assert verify_exit(imported.source, mapping, tree) == 0
+    assert imported.capsys.readouterr().out.splitlines() == ["verify: 0 problems"]
+
+    (project / "extra.txt").write_text("extra\n")
+    imported.mapping = mapping
+    assert imported.problems() == [
+        f"{DEST}/extra.txt: not produced by the map",
+        "verify: 1 problems",
+    ]
+
+
+def test_verify_compares_mapped_owners(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    path, _ = src
+    (path / "OWNERS").write_text("tbhb-dev/owners\n")
+    updated = path, commit_all(path)
+    made = make_map(updated, tmp_path)
+    assert run_import(f"{path}@{updated[1]}", made, mono) == 0
+    capsys.readouterr()
+    assert verify_exit(updated, made, mono) == 0
+    capsys.readouterr()
+
+    (mono / DEST / "OWNERS").write_text("tbhb-dev/other-owners\n")
+    assert Imported(updated, mono, made, capsys).problems() == [
+        f"{DEST}/OWNERS: differs from OWNERS",
         "verify: 1 problems",
     ]
 
