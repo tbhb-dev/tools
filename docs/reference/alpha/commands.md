@@ -110,6 +110,8 @@ For a build that updates an existing pull request, pass both `--fetch-ref refs/h
 
 A build run that opens a pull request writes `.github/PULL_REQUEST_DRAFT.md` in its worktree and keeps it out of commits. Set `base` in the draft's frontmatter to identify the target branch. The run pushes its `agent/` branch to origin and runs `tbhbdev alpha pr create` from the worktree. The command checks the draft, adds the commit trailers and the opener's identity to the body, and records the pull request in the opened ledger. CI fails a pull request whose diff contains the draft.
 
+A run commits a merge of the base branch with `git merge --no-commit` followed by a plain `git commit`. Git gives the `prepare-commit-msg` hook the source `merge` for every merge commit, and in an agent session the hook stamps the trailers as it does for an ordinary commit, so the run's `TBHBDEV_REQUIRE_IDENTITY=1` check finds `Generated-by`. A merge outside an agent session and a squash get no trailers, and a rebase replay or cherry-pick is handled as before.
+
 ## Identity start time
 
 An identity line can record when its agent started and which launch it belongs to. Both attributes are optional. A line without them is still valid.
