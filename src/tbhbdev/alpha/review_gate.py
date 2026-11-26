@@ -1,14 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Tony Burns
-"""The review-gate check of a pull request, as a pure function.
-
-A pull request passes at its current head when the reviews App approved it
-twice from two providers, never requested changes, every other check run
-finished well, and no approving provider wrote the head commits.
-"""
+"""Evaluate reviews-verified for a pull request at its head."""
 
 import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, TypedDict
 
 from tbhbdev.alpha import identity
@@ -16,13 +12,11 @@ from tbhbdev.alpha import identity
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-CONTEXT = "review-gate"
-MIN_APPROVALS = 2
-MIN_PROVIDERS = 2
+CONTEXT = "reviews-verified"
+APP = "tbhb-dev-agent-reviews[bot]"
+TIER_TWO = 2
+TIER_TWO_APPROVALS = 2
 GOOD_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
-
-# The one table from a harness name, as a review body or a trailer spells it,
-# to the provider that runs it.
 PROVIDERS = {
     "claude": "anthropic",
     "claude-code": "anthropic",
@@ -32,9 +26,10 @@ PROVIDERS = {
     "gemini": "google",
 }
 HEAD_SHA = re.compile(r"[0-9a-f]{40}")
-# The review body's last line, which the run host writes: harness, then model,
-# then the head the run judged.
-STAMP = re.compile(r"Run \S+, (\S+) \S+, judged head ([0-9a-f]{40})\.")
+# The host writes this as the last line. Older stamps omit the variant.
+STAMP = re.compile(
+    r"Run (\S+), (\S+) \S+, judged head ([0-9a-f]{40})(?:, variant (\S+))?\."
+)
 
 
 class Review(TypedDict):
@@ -53,23 +48,37 @@ class Check(TypedDict):
 
 @dataclass(frozen=True)
 class Pull:
-    """What the check reads of a pull request, at its head."""
+    """The facts the check needs about a pull request."""
 
     head: str
     reviews: Sequence[Review]
     checks: Sequence[Check]
     messages: Sequence[str]
+    state: str = "open"
+    draft: bool = False
+    author: str = ""
+    tier: int = 1
+    jobs: Sequence[tuple[str, str | None]] = ()
+
+
+def tier_for(paths: Sequence[str], policy: str) -> int:
+    """Match whole repository-relative paths against the base commit's globs."""
+    globs = list(map(str.strip, policy.splitlines()))
+    return (
+        TIER_TWO
+        if any(
+            PurePosixPath(path).full_match(glob)
+            for path in paths
+            for glob in globs
+            if glob
+        )
+        else 1
+    )
 
 
 def provider_of(harness: str) -> str | None:
     """The provider of a harness name, or None for an unknown one."""
     return PROVIDERS.get(harness.lower().partition(":")[0])
-
-
-def review_provider(body: str, head: str) -> str | None:
-    """The provider the body's last line names for a run judged at head, or None."""
-    stamp = STAMP.fullmatch(body.rstrip().rpartition("\n")[2])
-    return provider_of(stamp[1]) if stamp and stamp[2] == head else None
 
 
 def author_providers(messages: Sequence[str]) -> tuple[set[str], list[str]]:
@@ -89,67 +98,91 @@ def author_providers(messages: Sequence[str]) -> tuple[set[str], list[str]]:
     return found, unknown
 
 
-def approvals_at_head(app: str, pull: Pull) -> tuple[int, set[str], list[str]]:
-    """The approval count, approving providers and reasons of the App's reviews."""
-    reasons: list[str] = []
-    providers: set[str] = set()
-    approvals = 0
+def latest_reviews(
+    reviews: Sequence[Review], head: str
+) -> dict[str, tuple[str, str, str | None]]:
+    """Read the newest state, harness and variant for each stamped run."""
+    return {
+        stamp[1]: (review["state"], stamp[2], stamp[4])
+        for review in sorted(reviews, key=lambda item: item["id"])
+        if (stamp := STAMP.fullmatch(review["body"].rstrip().rpartition("\n")[2]))
+        and stamp[3] == head
+    }
+
+
+def review_reasons(app: str, pull: Pull) -> list[str]:
+    """Any blocking review or shortfall in independent approvals."""
+    authors, unknown = author_providers(pull.messages)
+    reasons = [
+        f"a Generated-by trailer names unknown harness {name}" for name in unknown
+    ]
     login = app.casefold()
-    for review in pull.reviews:
-        if review["login"].casefold() != login or review["commit_id"] != pull.head:
-            continue
-        if review["state"] == "CHANGES_REQUESTED":
-            reasons.append(f"review {review['id']} requests changes at the head")
-        elif review["state"] == "APPROVED":
-            provider = review_provider(review["body"], pull.head)
-            if provider:
-                approvals += 1
-                providers.add(provider)
-            else:
-                reasons.append(f"review {review['id']} names no known harness")
-    return approvals, providers, reasons
+    reviews = [
+        item
+        for item in pull.reviews
+        if item["login"].casefold() == login and item["commit_id"] == pull.head
+    ]
+    reasons.extend(
+        f"review {review['id']} requests changes at the head"
+        for review in reviews
+        if review["state"] == "CHANGES_REQUESTED"
+    )
+    eligible = set(PROVIDERS.values()) - authors
+    variants = [
+        variant
+        for state, harness, variant in latest_reviews(reviews, pull.head).values()
+        if state == "APPROVED" and provider_of(harness) in eligible
+    ]
+    if pull.tier != TIER_TWO:
+        return (
+            reasons if variants else [*reasons, "no independent approval at the head"]
+        )
+    count = len(set(variants) - {None})
+    if count < TIER_TWO_APPROVALS:
+        reasons.append(
+            f"{count} independent approval variants at the head, "
+            f"need {TIER_TWO_APPROVALS}"
+        )
+    return reasons
 
 
 def _outcome(check: Check) -> str:
-    """What a check run is: its conclusion once completed, else its status."""
+    """The conclusion of a completed check, else its status."""
     if check["status"] == "completed":
         return check["conclusion"] or check["status"]
     return check["status"]
 
 
-def check_reasons(pull: Pull, ignore: Sequence[str]) -> list[str]:
-    """The reasons for each check run, bar the gate and ignored ones, not done well."""
-    skipped = {CONTEXT, *ignore}
+def check_reasons(pull: Pull) -> list[str]:
+    """Failures and unfinished check runs other than this check."""
+    if not pull.checks:
+        return ["no check runs at the head"]
     return [
         f"check {check['name']} is {_outcome(check)}"
         for check in pull.checks
-        if check["name"] not in skipped
+        if check["name"] != CONTEXT
         and not (
             check["status"] == "completed" and check["conclusion"] in GOOD_CONCLUSIONS
         )
     ]
 
 
-def author_reasons(pull: Pull, providers: set[str]) -> list[str]:
-    """The reasons the head commits' authors disqualify the approvals."""
-    authors, unknown = author_providers(pull.messages)
-    reasons = [
-        f"approved by {name}, which wrote the head commits"
-        for name in sorted(authors & providers)
-    ]
-    reasons.extend(f"a Generated-by trailer names unknown harness {n}" for n in unknown)
-    return reasons
-
-
-def evaluate(app: str, pull: Pull, ignore: Sequence[str] = ()) -> list[str]:
-    """The reasons a pull request fails at its head; none means it passes."""
+def evaluate(app: str, pull: Pull) -> list[str]:
+    """The reasons a pull request fails at its head. None means it passes."""
     if not HEAD_SHA.fullmatch(pull.head):
         return [f"the pull request head {pull.head!r} is not a full commit SHA"]
-    approvals, providers, reasons = approvals_at_head(app, pull)
-    if approvals < MIN_APPROVALS:
-        reasons.append(f"{approvals} approvals at the head, need {MIN_APPROVALS}")
-    if len(providers) < MIN_PROVIDERS:
-        reasons.append(f"{len(providers)} approving providers, need {MIN_PROVIDERS}")
-    reasons.extend(check_reasons(pull, ignore))
-    reasons.extend(author_reasons(pull, providers))
+    reasons: list[str] = []
+    if pull.state != "open":
+        reasons.append("the pull request is not open")
+    if pull.draft:
+        reasons.append("the pull request is a draft")
+    if pull.author.casefold() in {"tbhb", app.casefold()}:
+        reasons.append(f"the pull request author is {pull.author}")
+    reasons.extend(check_reasons(pull))
+    reasons.extend(review_reasons(app, pull))
+    reasons.extend(
+        f"job {name} ran on runner group {group or '(none)'}"
+        for name, group in pull.jobs
+        if not (group or "").startswith("tbhb-dev-")
+    )
     return reasons

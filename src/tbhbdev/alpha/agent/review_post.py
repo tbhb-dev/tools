@@ -154,12 +154,15 @@ def create(sub: Submission, token: str) -> int | None:
 
 
 def stamp(run: Run) -> str:
-    """The run's identity and the judged head, as the body's last line."""
+    """The run's identity, judged head and variant, as the body's last line."""
     request = run.request
-    return (
+    stamp = (
         f"Run {run.files.name}, {request.harness.value} {request.model}, "
-        f"judged head {request.commit}."
+        f"judged head {request.commit}"
     )
+    if request.variant:
+        stamp += f", variant {request.variant}"
+    return f"{stamp}."
 
 
 def check_verdict(run: Run) -> None:

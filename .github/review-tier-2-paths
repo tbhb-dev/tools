@@ -1,0 +1,14 @@
+.github/review-tier-2-paths
+.github/pull_request_review.toml
+.github/PULL_REQUEST_REVIEW_*.md
+.github/rulesets/**
+.github/workflows/**
+src/tbhbdev/alpha/agent/review_post.py
+src/tbhbdev/alpha/guard_*.py
+src/tbhbdev/alpha/pre_push_guard.py
+src/tbhbdev/alpha/pull_request.py
+src/tbhbdev/alpha/review*.py
+src/tbhbdev/alpha/review_data/**
+src/tbhbdev/alpha/review_prompt_data/**
+src/tbhbdev/alpha/squash_merge.py
+src/tbhbdev/alpha/state_guard.py

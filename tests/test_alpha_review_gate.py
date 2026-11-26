@@ -1,15 +1,17 @@
+from dataclasses import replace
+
 import pytest
 
 from tbhbdev.alpha import review_gate as gate
 
 HEAD = "a" * 40
 OLD = "b" * 40
-APP = "reviews-app[bot]"
+APP = gate.APP
 SESSION = "sha-256-64:" + "0" * 16
 
 
-def stamp(harness: str, model: str = "m") -> str:
-    return f"Run r1, {harness} {model}, judged head {HEAD}."
+def stamp(harness: str, model: str = "m", *, number: int = 1) -> str:
+    return f"Run r{number}, {harness} {model}, judged head {HEAD}."
 
 
 def review(  # noqa: PLR0913 -- one keyword for each field a test varies
@@ -21,7 +23,11 @@ def review(  # noqa: PLR0913 -- one keyword for each field a test varies
     number: int = 1,
     body: str | None = None,
 ) -> gate.Review:
-    text = f"Looks right.\n\n---\n{stamp(harness)}\n" if body is None else body
+    text = (
+        f"Looks right.\n\n---\n{stamp(harness, number=number)}\n"
+        if body is None
+        else body
+    )
     return {
         "id": number,
         "state": state,
@@ -50,7 +56,6 @@ def evaluate(
     reviews: list[gate.Review] | None = None,
     checks: list[gate.Check] | None = None,
     messages: list[str] | None = None,
-    ignore: tuple[str, ...] = (),
 ) -> list[str]:
     pull = gate.Pull(
         HEAD,
@@ -58,15 +63,15 @@ def evaluate(
         [check()] if checks is None else checks,
         BY_AGY if messages is None else messages,
     )
-    return gate.evaluate(APP, pull, ignore)
+    return gate.evaluate(APP, pull)
 
 
 def test_pass() -> None:
     assert evaluate() == []
 
 
-def test_pass_without_trailers_and_checks() -> None:
-    assert evaluate(checks=[], messages=["fix: by hand\n"]) == []
+def test_no_check_runs() -> None:
+    assert evaluate(checks=[]) == ["no check runs at the head"]
 
 
 def test_pass_with_a_third_approval() -> None:
@@ -75,12 +80,11 @@ def test_pass_with_a_third_approval() -> None:
 
 @pytest.mark.parametrize("harness", ["agy", "gemini"])
 def test_antigravity_author_may_not_approve_as_agy_or_gemini(harness: str) -> None:
-    approved = [*GOOD, review(harness, number=3)]
-    assert evaluate(approved) == ["approved by google, which wrote the head commits"]
+    assert evaluate([review(harness)]) == ["no independent approval at the head"]
 
 
 @pytest.mark.parametrize("head", ["", "abc", "A" * 40, "g" * 40, HEAD + "0"])
-def test_a_malformed_head_fails_the_gate(head: str) -> None:
+def test_a_malformed_head_fails_verification(head: str) -> None:
     pull = gate.Pull(head, [review(commit=head, body=stamp("claude"))], [], [])
     assert gate.evaluate(APP, pull) == [
         f"the pull request head {head!r} is not a full commit SHA"
@@ -89,12 +93,7 @@ def test_a_malformed_head_fails_the_gate(head: str) -> None:
 
 def test_a_stamp_judged_at_another_head_counts_for_nothing() -> None:
     old = f"Run r1, codex m, judged head {OLD}.\n"
-    stale = [review("claude", number=1), review(number=2, body=old)]
-    assert evaluate(stale) == [
-        "review 2 names no known harness",
-        "1 approvals at the head, need 2",
-        "1 approving providers, need 2",
-    ]
+    assert evaluate([review(body=old)]) == ["no independent approval at the head"]
 
 
 def test_logins_compare_case_insensitively() -> None:
@@ -103,28 +102,11 @@ def test_logins_compare_case_insensitively() -> None:
 
 
 def test_no_approvals() -> None:
-    assert evaluate([]) == [
-        "0 approvals at the head, need 2",
-        "0 approving providers, need 2",
-    ]
+    assert evaluate([]) == ["no independent approval at the head"]
 
 
 def test_stale_approval_at_an_older_head() -> None:
-    stale = [review("claude", number=1), review("codex", number=2, commit=OLD)]
-    assert evaluate(stale) == [
-        "1 approvals at the head, need 2",
-        "1 approving providers, need 2",
-    ]
-
-
-def test_same_provider_pair() -> None:
-    pair = [review("claude", number=1), review("claude-code", number=2)]
-    assert evaluate(pair) == ["1 approving providers, need 2"]
-
-
-def test_agy_and_gemini_are_one_provider() -> None:
-    pair = [review("agy", number=1), review("gemini", number=2)]
-    assert evaluate(pair, messages=[]) == ["1 approving providers, need 2"]
+    assert evaluate([review(commit=OLD)]) == ["no independent approval at the head"]
 
 
 def test_request_changes_at_the_head() -> None:
@@ -149,11 +131,8 @@ def test_other_authors_are_ignored() -> None:
 
 @pytest.mark.parametrize("state", ["COMMENTED", "DISMISSED", "PENDING"])
 def test_other_review_states_count_for_nothing(state: str) -> None:
-    only = [review("claude", number=1), review("codex", state=state, number=2)]
-    assert evaluate(only) == [
-        "1 approvals at the head, need 2",
-        "1 approving providers, need 2",
-    ]
+    only = [review(), review(state=state, number=2, body=stamp("claude"))]
+    assert evaluate(list(reversed(only))) == ["no independent approval at the head"]
 
 
 @pytest.mark.parametrize(
@@ -166,14 +145,14 @@ def test_other_review_states_count_for_nothing(state: str) -> None:
     ],
 )
 def test_an_approval_without_a_known_harness(body: str) -> None:
-    bad = [*GOOD, review(number=7, body=body)]
-    assert evaluate(bad) == ["review 7 names no known harness"]
+    assert evaluate([review(body=body)]) == ["no independent approval at the head"]
 
 
 @pytest.mark.parametrize(
     ("conclusion", "status", "reason"),
     [
         ("failure", "completed", "check ci is failure"),
+        (None, "completed", "check ci is completed"),
         ("cancelled", "completed", "check ci is cancelled"),
         (None, "in_progress", "check ci is in_progress"),
         ("timed_out", "completed", "check ci is timed_out"),
@@ -191,22 +170,18 @@ def test_checks_that_finished_well() -> None:
     assert evaluate(checks=done) == []
 
 
-def test_the_gate_and_ignored_checks_are_left_out() -> None:
-    running = [check("review-gate", None, "in_progress"), check("job", None, "queued")]
-    assert evaluate(checks=running, ignore=("job",)) == []
-    assert evaluate(checks=running) == ["check job is queued"]
-
-
-def test_an_approving_provider_wrote_the_commits() -> None:
-    assert evaluate(messages=[trailer(harness="codex")]) == [
-        "approved by openai, which wrote the head commits"
+def test_reviews_verified_ignores_its_own_conclusion() -> None:
+    running = [
+        check("reviews-verified", None, "in_progress"),
+        check("job", None, "queued"),
     ]
+    assert evaluate(checks=running) == ["check job is queued"]
 
 
 def test_every_commit_counts() -> None:
     both = [trailer(harness="antigravity"), trailer(harness="claude-code")]
-    assert evaluate(messages=both) == [
-        "approved by anthropic, which wrote the head commits"
+    assert evaluate([review("claude")], messages=both) == [
+        "no independent approval at the head"
     ]
 
 
@@ -225,3 +200,53 @@ def test_a_trailer_with_an_unknown_or_missing_harness() -> None:
 def test_a_versioned_harness_names_its_provider() -> None:
     assert gate.provider_of("Codex:0.171.0") == "openai"
     assert gate.provider_of("nope") is None
+
+
+def test_distinct_variants_can_share_an_independent_provider() -> None:
+    a, b, c = (
+        f"{stamp(harness, number=n)[:-1]}, variant {variant}."
+        for n, harness, variant in [
+            (1, "claude", "a"),
+            (2, "claude", "b"),
+            (3, "codex", "c"),
+        ]
+    )
+    pull = gate.Pull(
+        HEAD, [review(body=a), review(number=2, body=b)], [check()], [trailer()], tier=2
+    )
+    assert gate.evaluate(APP, pull) == []
+    for body in (a.replace("r1", "r2"), c, stamp("claude", number=2)):
+        assert gate.evaluate(
+            APP, replace(pull, reviews=[review(body=a), review(number=2, body=body)])
+        ) == ["1 independent approval variants at the head, need 2"]
+    assert gate.evaluate(APP, replace(pull, tier=0)) == []
+
+
+def test_ineligible_pr_and_runner_groups() -> None:
+    pull = gate.Pull(
+        HEAD,
+        GOOD,
+        [check()],
+        BY_AGY,
+        state="closed",
+        draft=True,
+        author="TBHB",
+        jobs=[("ci", "tbhb-dev-linux"), ("lint", "Default"), ("docs", None)],
+    )
+    assert gate.evaluate(APP, pull) == [
+        "the pull request is not open",
+        "the pull request is a draft",
+        "the pull request author is TBHB",
+        "job lint ran on runner group Default",
+        "job docs ran on runner group (none)",
+    ]
+    assert (
+        gate.evaluate(APP, replace(pull, author=APP))[2]
+        == f"the pull request author is {APP}"
+    )
+
+
+def test_tier_uses_repository_relative_globs() -> None:
+    policy = "\n .github/workflows/** \nsrc/review*.py"
+    assert gate.tier_for(["prefix/src/review.py", "docs/ci.yml"], policy) == 1
+    assert gate.tier_for([".github/workflows/ci.yml"], policy) == 2

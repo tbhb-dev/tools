@@ -45,6 +45,7 @@ def make(
         commit=HEAD,
         harness=SimpleNamespace(value="codex"),
         model="m1",
+        variant=None,
         profile=Profile.REVIEW,
         kind=RunKind.EXEC,
     )
@@ -389,3 +390,11 @@ def test_a_failed_token_request_gives_none(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(credentials, "installation_token", fail)
     request = request_for(Profile.REVIEW)
     assert credentials.review_post_token(request, settings_for_account()) is None
+
+
+def test_stamp_records_the_configured_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, _ = make(tmp_path, draft())
+    monkeypatch.setattr(run.request, "variant", "a")
+    assert review_post.stamp(run) == f"{STAMP[:-1]}, variant a."

@@ -1,13 +1,13 @@
 ---
-description: Review drafts, threads, policy checks and the run host's review posting.
+description: Review verification, drafts, threads, policy checks and the run host's review posting.
 generated:
   - role: generated
-    harness: claude-code:2.1.319
-    model: anthropic:claude-sonnet-5-5
+    harness: codex:0.171.0
+    model: openai:gpt-6.2-sol
     effort: high
-    surface: sdk-cli
-    session: sha-256-64:e23dce32b8825437
-    at: "2026-11-26T03:16:54Z"
+    surface: exec
+    session: sha-256-64:71f96117983525eb
+    at: "2026-11-26T14:44:32Z"
 status: stable
 tags: [alpha]
 title: Review commands
@@ -38,6 +38,20 @@ Output is one `PATH: RULE: MESSAGE` line per finding, or with `--json` an object
 Exit 0 means no findings, 1 means findings, and 2 means PATH isn't a directory or the floor fails to load.
 With `--json`, exit 2 still prints one object, `{"ok": false, "error": KIND, "message": TEXT}`, where KIND is `not-a-directory` or `floor-load`.
 
+## Verify reviews
+
+`tbhbdev alpha review verify N [--repo OWNER/NAME]` reads GitHub with the agent's `gh` account and evaluates the pull request at its current head. The repository defaults to the clone's origin. The pull request must be open, ready for review, and authored by an account other than `tbhb` or the reviews App.
+
+At least one check run must exist at the head. Every check run other than `reviews-verified` must finish as success, skipped, or neutral. In private repositories, every Actions job at the head must have run in a runner group whose name starts with `tbhb-dev-`.
+
+Tier 2 applies when any changed path matches a glob in `.github/review-tier-2-paths` at the base commit. The file holds one repository-relative glob per line, and renames count at both paths. All other pull requests use tier 1.
+
+The reviews App must approve the exact head, and any request for changes from the App at that head fails verification. Each run's latest review counts. Tier 1 needs one approval from a provider other than those named by the commits' `Generated-by` trailers. Tier 2 needs an independent approval in each of two distinct variants. An older review stamp without a variant can count for tier 1.
+
+A pass prints `reviews-verified: pass <sha>` and exits 0. A failure prints one line per unmet condition and exits 1.
+
+## Reviews posted by the run host
+
 The run host calls `agent/review_post.py` before finishing a review run whose harness stopped with exit status 0.
 The host skips posting if the run name already has a `review` record.
 The step reads the run's one `.git/tbhb-alpha/review-N.md` draft, checks it again with the `review check` rules minus the prose linters (a run host lacks them), and requires `commit_id` to equal the commit the run reviewed.
@@ -47,4 +61,4 @@ The host posts `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` against the pinned com
 Before an approval it reads the pull request head once and refuses if the head differs.
 A request for changes requires non-empty findings.
 Any 2xx answer counts as posted.
-The review body ends with the run name, harness, model and judged head.
+The review body ends with the run name, harness, model, judged head and the variant when the run specifies one.
