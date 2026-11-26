@@ -101,14 +101,15 @@ such run is in progress or no job is that old.
 request in origin's repository. Fork heads, main, protected branches and
 unreadable metadata are refused. It doesn't read a draft.
 
-``checks N`` prints pull request N's head SHA, then one line per check
+``checks N`` reads checks from pull request N's head commit, then prints the
+head SHA on the first line and beside each check
 with its name and conclusion. A check run that hasn't COMPLETED reads its
 status, never its conclusion; unfinished checks
 print ``PENDING``. A commit status reads only its state, and only ``SUCCESS``
 is green. Any
 conclusion other than ``SUCCESS``, ``NEUTRAL``, ``SKIPPED`` or ``PENDING``
 exits 1, and so does a check with no name or an unknown value. Pending checks
-alone exit 3, and only all-green checks exit 0.
+alone or a head with no checks exit 3, and only all-green checks exit 0.
 
 ``backfill-opened OWNER`` reads the body of every pull request, open or not,
 in every repository of OWNER, and adds each one to the ledger of every
@@ -1924,43 +1925,93 @@ def check_outcome(job: object) -> tuple[str, str, str]:
     return name, label, "green" if green else "failed"
 
 
+# Query the immutable commit, rather than the PR's potentially stale rollup.
+# gh follows pageInfo with --paginate; --slurp combines all context pages.
+HEAD_CHECKS_QUERY = """
+query($owner: String!, $name: String!, $head: GitObjectID!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    object(oid: $head) {
+      ... on Commit {
+        statusCheckRollup {
+          contexts(first: 100, after: $endCursor) {
+            nodes {
+              __typename
+              ... on CheckRun { name status conclusion }
+              ... on StatusContext { context state }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def check_nodes(page: dict[str, object]) -> list[object]:
+    """Read a page of commit checks; a null rollup means none have started.
+
+    Raises:
+        SystemExit: the response doesn't contain a list of checks.
+    """
+    node: object = page
+    for key in (
+        "data",
+        "repository",
+        "object",
+        "statusCheckRollup",
+        "contexts",
+        "nodes",
+    ):
+        if not isinstance(node, dict):
+            message = "cannot read checks: malformed GraphQL response"
+            raise SystemExit(message)
+        node = cast("dict[str, object]", node).get(key)  # pragma: no mutate
+        if key == "statusCheckRollup" and node is None:
+            return []
+    if not isinstance(node, list):
+        message = "cannot read checks: contexts nodes aren't a list"
+        raise SystemExit(message)
+    return cast("list[object]", node)  # pragma: no mutate
+
+
 def checks(number: int) -> int:
     """Print a PR's head SHA and checks; exit 0 only when all are green.
 
-    Exit 1 for a failed or unknown check or no checks, and 3 when the rest are
+    Exit 1 for a failed or unknown check, and 3 when checks are absent or
     still unfinished.
 
     Raises:
-        SystemExit: gh can't read the pull request, or a check has no name.
+        SystemExit: gh can't read the pull request or checks, or a check has no name.
     """
-    argv = [
-        find_tool(GH),
-        "pr",
-        "view",
-        str(number),
-        "--json",
-        "headRefOid,statusCheckRollup",
-    ]
-    done = run(argv)
-    data = gh_data(done)
-    if not isinstance(data, dict):
-        why = " ".join((done.stderr or done.stdout).split())
-        message = f"cannot read checks of PR {number}: {why}"
-        raise SystemExit(message)
-    data = cast("dict[str, object]", data)  # pragma: no mutate
-    print(data["headRefOid"])
-    rollup: object = data["statusCheckRollup"] or []
-    if not isinstance(rollup, list):
-        message = f"the checks of PR {number} aren't a list: {rollup!r}"
-        raise SystemExit(message)
-    jobs = cast("list[object]", rollup)  # pragma: no mutate
+    head = head_of(number)
+    print(head)
+    pages = gh_json(
+        [
+            "api",
+            "graphql",
+            "--paginate",
+            "--slurp",
+            "--field",
+            "owner={owner}",
+            "--field",
+            "name={repo}",
+            "--raw-field",
+            f"head={head}",
+            "--raw-field",
+            f"query={HEAD_CHECKS_QUERY}",
+        ]
+    )
+    jobs = [job for page in pages for job in check_nodes(page)]
     if not jobs:
-        print(f"no checks on PR {number}", file=sys.stderr)
-        return 1
-    failed = pending = False
+        print(f"no checks on PR {number} at {head}; pending", file=sys.stderr)
+        return PENDING_CODE
+    # None has the same truth value here; its initialization mutant is equivalent.
+    failed = pending = False  # pragma: no mutate
     for job in jobs:
         name, label, kind = check_outcome(job)
-        print(f"{name}: {label}")
+        print(f"{head} {name}: {label}")
         pending = pending or kind == "pending"
         failed = failed or kind == "failed"
     if failed:

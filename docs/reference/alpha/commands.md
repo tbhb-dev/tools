@@ -2,11 +2,12 @@
 description: Interim agent commands, installation, and harness hooks.
 generated:
   - role: generated
-    harness: codex:0.171.0
-    model: openai:gpt-6.2-sol
+    harness: codex:0.166.0
+    model: openai:gpt-6.1-sol
+    effort: high
     surface: exec
-    session: sha-256-64:6e402d15023f0de1
-    at: "2026-11-26T01:38:57Z"
+    session: sha-256-64:aa9632ac6079af29
+    at: "2026-11-26T04:41:19Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -55,7 +56,7 @@ From a detected agent session, every branch creation or update must target a rem
 
 `tbhbdev alpha pr check` and `pr create` run the rules size counter after linting the draft, comparing the draft's base branch on `origin` with `HEAD`. A missing remote-tracking ref is fetched once. It prints the added code and raw line counts with their limits: 400 code lines and 1,500 raw lines. If either count exceeds its limit, the check fails with a message to split the change into stacked pull requests. When both counts exceed their limits, the problem reports the code count. If the counter is unavailable or returns an error or invalid JSON, the command prints `size count unavailable: <reason>` as a warning and continues, and `pr create` still opens the pull request.
 
-`tbhbdev alpha pr checks N` reads pull request N in the current repository. It prints the head commit hash on the first line, then one `name: CONCLUSION` line per check, including commit statuses. Unfinished checks (`PENDING`, `QUEUED`, `IN_PROGRESS`, `WAITING`, `REQUESTED` or a pending commit status) print `PENDING`. Exit code 0 means every check is green: `SUCCESS`, `NEUTRAL` or `SKIPPED`. Exit code 1 means a failed check, any value the command doesn't know (including lowercase ones, a commit status of `EXPECTED`, or a completed check with no conclusion), or no checks at all. Exit code 3 means nothing failed but a check is still unfinished. A check run that hasn't completed reads its status and never its conclusion. A commit status is green only for `SUCCESS`. A missing pull request, a failed read or a check with no name exits nonzero with an error.
+`tbhbdev alpha pr checks N` reads pull request N in the current repository. It reads checks from the head commit by its hash, including all pages of check runs and commit statuses. It prints the head commit hash on the first line, then one `SHA name: CONCLUSION` line per check. Unfinished checks (`PENDING`, `QUEUED`, `IN_PROGRESS`, `WAITING`, `REQUESTED` or a pending commit status) print `PENDING`. Exit code 0 means every check is green: `SUCCESS`, `NEUTRAL` or `SKIPPED`. Exit code 1 means a failed check or any value the command doesn't know (including lowercase ones, a commit status of `EXPECTED`, or a completed check with no conclusion). Exit code 3 means the head has no checks yet, or nothing failed but a check is still unfinished. A check run that hasn't completed reads its status and never its conclusion. A commit status is green only for `SUCCESS`. A missing pull request, a failed read or a check with no name exits nonzero with an error.
 
 `tbhbdev alpha pr-stats OWNER/REPO [--limit N]` prints one JSON row for each merged or closed pull request. The cycle time starts at the earliest of every `started_at` on its identity lines and its earliest commit's committer date, and ends at `mergedAt` or, for a pull request closed without merging, `closedAt`. A row's `start_source` is `started_at` or `commit`, and its `state` is `merged` or `closed`.
 
