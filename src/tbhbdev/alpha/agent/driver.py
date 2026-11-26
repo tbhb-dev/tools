@@ -703,7 +703,13 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
         (run.name, run.owner),
     )
     rules.clean(reading.rc, session=reading.session, force=force or run.cleaning)
-    if not force and not run.request.unsandboxed:
+    if not force and run.request.unsandboxed:
+        message = (
+            "full-access run may have unpublished commits or unread output; "
+            "pass --force to clean anyway"
+        )
+        raise Invalid(message)
+    if not force:
         branch = transport.shell(
             settings,
             run.host,
