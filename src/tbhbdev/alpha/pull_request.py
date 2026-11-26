@@ -1927,6 +1927,16 @@ def check_outcome(job: object) -> tuple[str, str, str]:
 
 # Query the immutable commit, rather than the PR's potentially stale rollup.
 # gh follows pageInfo with --paginate; --slurp combines all context pages.
+HEAD_CHECKS_CALL = (
+    "api",
+    "graphql",
+    "--paginate",
+    "--slurp",
+    "--field",
+    "owner={owner}",
+    "--field",
+    "name={repo}",
+)
 HEAD_CHECKS_QUERY = """
 query($owner: String!, $name: String!, $head: GitObjectID!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
@@ -1989,14 +1999,7 @@ def checks(number: int) -> int:
     print(head)
     pages = gh_json(
         [
-            "api",
-            "graphql",
-            "--paginate",
-            "--slurp",
-            "--field",
-            "owner={owner}",
-            "--field",
-            "name={repo}",
+            *HEAD_CHECKS_CALL,
             "--raw-field",
             f"head={head}",
             "--raw-field",

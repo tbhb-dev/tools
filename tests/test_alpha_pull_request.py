@@ -4077,14 +4077,7 @@ def test_checks_prints_the_head_and_each_job(
     assert call["stdin"] == ""
     assert call["cwd"] == str(world.root)
     assert api["argv"] == [
-        "api",
-        "graphql",
-        "--paginate",
-        "--slurp",
-        "--field",
-        "owner={owner}",
-        "--field",
-        "name={repo}",
+        *pr.HEAD_CHECKS_CALL,
         "--raw-field",
         f"head={sha}",
         "--raw-field",
