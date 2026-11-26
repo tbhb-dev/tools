@@ -27,9 +27,10 @@ PROVIDERS = {
     "gemini": "google",
 }
 HEAD_SHA = re.compile(r"[0-9a-f]{40}")
-# The host writes this as the last line. Older stamps omit the variant.
+# The run stamp precedes the trailer on new posts. Older stamps omit the variant.
 STAMP = re.compile(
-    r"Run (\S+), (\S+) \S+, judged head ([0-9a-f]{40})(?:, variant (\S+))?\."
+    r"(?:^|\n)Run (\S+), (\S+) \S+, judged head ([0-9a-f]{40})(?:, variant (\S+))?\."
+    rf"(?:\n\n{identity.KEY_GEN}: (?P<trailer>LLM [^\n]+))?\Z"
 )
 
 
@@ -104,8 +105,9 @@ def latest_reviews(
     return {
         stamp[1]: (review["state"], stamp[2], stamp[4])
         for review in sorted(reviews, key=lambda item: item["id"])
-        if (stamp := STAMP.fullmatch(review["body"].rstrip().rpartition("\n")[2]))
+        if (stamp := STAMP.search(review["body"].rstrip()))
         and stamp[3] == head
+        and (not stamp["trailer"] or identity.check_value(stamp["trailer"]) is None)
     }
 
 
@@ -130,6 +132,20 @@ def approval_reasons(
         yield "no independent approval at the head"
 
 
+def independent_approvals(
+    reviews: Sequence[Review], pull: Pull, authors: set[str]
+) -> list[tuple[str | None, str | None]]:
+    """Approvals from eligible providers, with variants required in tier 2."""
+    eligible = set(PROVIDERS.values()) - authors
+    return [
+        (provider, variant)
+        for state, harness, variant in latest_reviews(reviews, pull.head).values()
+        if state == "APPROVED"
+        and (provider := provider_of(harness)) in eligible
+        and (pull.tier != TIER_TWO or variant is not None)
+    ]
+
+
 def review_reasons(app: str, pull: Pull) -> Iterator[str]:
     """Any blocking review or shortfall in independent approvals."""
     authors, invalid, unknown = author_providers(pull.messages)
@@ -145,14 +161,7 @@ def review_reasons(app: str, pull: Pull) -> Iterator[str]:
         for item in reviews
         if item["state"] == "CHANGES_REQUESTED"
     )
-    eligible = set(PROVIDERS.values()) - authors
-    approvals = [
-        (provider, variant)
-        for state, harness, variant in latest_reviews(reviews, pull.head).values()
-        if state == "APPROVED"
-        and (provider := provider_of(harness)) in eligible
-        and (pull.tier != TIER_TWO or variant is not None)
-    ]
+    approvals = independent_approvals(reviews, pull, authors)
     yield from approval_reasons(approvals, pull.tier, unknown=unknown)
 
 

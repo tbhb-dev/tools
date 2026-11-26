@@ -2,12 +2,12 @@
 description: Checking, creating, editing, readying, rerunning, closing and rebasing pull requests, and reading their checks.
 generated:
   - role: generated
-    harness: codex:0.171.0
+    harness: codex:0.166.0
     model: openai:gpt-6.1-sol
     effort: high
     surface: exec
-    session: sha-256-64:704794fbfa9dc952
-    at: "2026-11-26T07:15:45Z"
+    session: sha-256-64:cf854dea89e48eea
+    at: "2026-11-26T13:58:50Z"
 status: stable
 tags: [alpha]
 title: Pull request commands
@@ -38,11 +38,12 @@ It skips checked boxes and stops at the first failure.
 Install `scc` with `mise install`; the Bazel tool shims also provide it. The count uses a three-dot diff and the same exemption policy as CI: lockfiles, generated and vendored files, test data, snapshots and prose are exempt; configuration languages count only toward the raw limit. `.github/pr-size-exempt.txt` adds repository path globs.
 
 `tbhbdev alpha pr checks N` reads pull request N in the current repository.
-It prints the head commit hash on the first line, then one `name: CONCLUSION` line per check, including commit statuses.
+It reads checks from the head commit by its hash, including all pages of check runs and commit statuses.
+It prints the head commit hash on the first line, then one `SHA name: CONCLUSION` line per check.
 Unfinished checks (`PENDING`, `QUEUED`, `IN_PROGRESS`, `WAITING`, `REQUESTED` or a pending commit status) print `PENDING`.
 Exit code 0 means every check is green: `SUCCESS`, `NEUTRAL` or `SKIPPED`.
-Exit code 1 means a failed check, any value the command doesn't know (including lowercase ones, a commit status of `EXPECTED`, or a completed check with no conclusion), or no checks at all.
-Exit code 3 means nothing failed but a check is still unfinished.
+Exit code 1 means a failed check or any value the command doesn't know (including lowercase ones, a commit status of `EXPECTED`, or a completed check with no conclusion).
+Exit code 3 means the head has no checks yet, or nothing failed but a check is still unfinished.
 A check run that hasn't completed reads its status and never its conclusion.
 A commit status is green only for `SUCCESS`.
 A missing pull request, a failed read or a check with no name exits nonzero with an error.

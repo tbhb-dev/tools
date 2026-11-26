@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from typing import Literal, Protocol, cast
 
 from tbhbdev import content
+from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha.pull_request import parse_frontmatter
 from tbhbdev.content_model import normalize
 
@@ -327,13 +328,14 @@ def find_existing(  # noqa: PLR0913, PLR0917
 
 
 def post(
-    api: Api, doc: ReviewDoc, *, author: str
+    api: Api, doc: ReviewDoc, *, author: str, identity_value: str | None
 ) -> tuple[Literal["posted", "exists"], int | None]:
     """Validate the document and refuse a moved pull request head.
 
     Return ("exists", id) if the author already posted a matching review. Otherwise
-    POST a review with commit_id set to doc.head_sha, body set to render(doc),
-    and event set to COMMENT. Return ("posted", id), with None for an absent ID.
+    require a valid posting identity and POST a COMMENT at doc.head_sha with
+    an identity trailer after the review marker. Return ("posted", id), with
+    None for an absent ID.
     Accept the race between concurrent posts without a lock.
 
     """
@@ -350,10 +352,17 @@ def post(
     existing = find_existing(api, doc.repo, doc.pr, doc.head_sha, doc.run.name, author)
     if existing is not None:
         return "exists", existing
+    if identity_value is None:
+        message = "posting a review requires a recognized agent session"
+        raise ReviewError(message)
+    if why := agent_identity.check_value(identity_value):
+        message = f"invalid LLM trailer: {why}"
+        raise ReviewError(message)
+    body = f"{render(doc)}\n{agent_identity.KEY_GEN}: {identity_value}\n"
     result = api.request(
         "POST",
         f"{path}/reviews",
-        {"commit_id": doc.head_sha, "body": render(doc), "event": "COMMENT"},
+        {"commit_id": doc.head_sha, "body": body, "event": "COMMENT"},
     )
     match cast("dict[str, object] | None", result):  # pragma: no mutate -- cast
         case {"id": int(review_id)}:

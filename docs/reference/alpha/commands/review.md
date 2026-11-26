@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:f74a623ec82c05d1
-    at: "2026-11-26T16:04:56Z"
+    session: sha-256-64:67790d115297f851
+    at: "2026-11-26T16:28:00Z"
 status: stable
 tags: [alpha]
 title: Review commands
@@ -18,6 +18,7 @@ type: Reference
 
 `review draft N` and `review check N` create and check a review draft.
 `review post N [--author LOGIN]` submits a review document as a comment.
+New posts require a recognized agent session and end with its validated `Generated-by` trailer.
 `review dismiss N REVIEW_ID --reason TEXT` marks a review as superseded, and `review reply N REVIEW_ID --text TEXT` comments on the pull request.
 See [Review drafts](../review-drafts.md) for the formats and checks.
 
@@ -61,4 +62,7 @@ The host posts `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` against the pinned com
 Before an approval it reads the pull request head once and refuses if the head differs.
 A request for changes requires non-empty findings.
 Any 2xx answer counts as posted.
-The review body ends with the run name, harness, model, judged head and the variant when the run specifies one.
+The review body ends with a stamp giving the run name, harness, model, judged head and any variant, then a blank line and a `Generated-by` trailer.
+The host builds the trailer from its run request, using the commit hook's model and effort rules and the run kind (`exec` or `start`) as the surface.
+The request has no session ID, so the trailer omits it.
+An invalid trailer prevents posting.

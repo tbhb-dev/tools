@@ -41,7 +41,7 @@
         "user": {
           "login": "tbhb-dev-agent-reviews[bot]"
         },
-        "body": "Run r, claude m, judged head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, variant a."
+        "body": "Run r, claude m, judged head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, variant a.\n\nGenerated-by: LLM harness=claude-code;model=m"
       }
     ],
     [

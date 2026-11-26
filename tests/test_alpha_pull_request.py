@@ -3844,6 +3844,16 @@ def test_rerun_requires_a_numeric_pr_number(argv: tuple[str, ...]) -> None:
     assert info.value.code == 2
 
 
+def check_page(jobs: object) -> dict[str, object]:
+    return {
+        "data": {
+            "repository": {
+                "object": {"statusCheckRollup": {"contexts": {"nodes": jobs}}}
+            }
+        }
+    }
+
+
 @pytest.mark.parametrize(
     ("jobs", "expected", "code"),
     [
@@ -4078,31 +4088,153 @@ def test_checks_prints_the_head_and_each_job(
 ) -> None:
     sha = "a1b2c3d4" * 5
     data = {"headRefOid": sha, "statusCheckRollup": jobs}
-    world.fake("gh", stdout=json.dumps(data))
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {"rc": 0, "stdout": json.dumps(data), "stderr": ""},
+            "api graphql": {
+                "rc": 0,
+                "stdout": json.dumps([check_page(data["statusCheckRollup"])]),
+                "stderr": "",
+            },
+        },
+    )
     assert run_main("checks", "45") == code
     captured = capsys.readouterr()
-    assert (captured.out, captured.err) == (f"{sha}\n{expected}", "")
-    (call,) = world.calls("gh")
+    lines = "".join(f"{sha} {line}\n" for line in expected.splitlines())
+    assert (captured.out, captured.err) == (f"{sha}\n{lines}", "")
+    call, api = world.calls("gh")
     assert call["argv"] == [
         "pr",
         "view",
         "45",
         "--json",
-        "headRefOid,statusCheckRollup",
+        "headRefOid",
     ]
     assert call["stdin"] == ""
     assert call["cwd"] == str(world.root)
+    assert api["argv"] == [
+        *pr.HEAD_CHECKS_CALL,
+        "--raw-field",
+        f"head={sha}",
+        "--raw-field",
+        f"query={pr.HEAD_CHECKS_QUERY}",
+    ]
+    assert "object(oid: $head)" in pr.HEAD_CHECKS_QUERY
+    assert "contexts(first: 100, after: $endCursor)" in pr.HEAD_CHECKS_QUERY
+    assert "pageInfo { hasNextPage endCursor }" in pr.HEAD_CHECKS_QUERY
+    assert "... on CheckRun { name status conclusion }" in pr.HEAD_CHECKS_QUERY
+    assert "... on StatusContext { context state }" in pr.HEAD_CHECKS_QUERY
 
 
-@pytest.mark.parametrize("jobs", [[], None])
-def test_checks_fails_without_any_check(
-    world: World, capsys: pytest.CaptureFixture[str], jobs: list[object] | None
+def test_checks_waits_without_any_check(
+    world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
     sha = "a1b2c3d4" * 5
-    world.fake("gh", stdout=json.dumps({"headRefOid": sha, "statusCheckRollup": jobs}))
-    assert run_main("checks", "45") == 1
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {
+                "rc": 0,
+                "stdout": json.dumps({"headRefOid": sha}),
+                "stderr": "",
+            },
+            "api graphql": {
+                "rc": 0,
+                "stdout": json.dumps([check_page([])]),
+                "stderr": "",
+            },
+        },
+    )
+    assert run_main("checks", "45") == 3
     captured = capsys.readouterr()
-    assert (captured.out, captured.err) == (f"{sha}\n", "no checks on PR 45\n")
+    assert (captured.out, captured.err) == (
+        f"{sha}\n",
+        f"no checks on PR 45 at {sha}; pending\n",
+    )
+
+
+def test_head_with_no_conclusion_run_exits_pending(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    head = "a" * 40
+    stale = {
+        "name": "tests",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+    }
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {
+                "rc": 0,
+                "stdout": json.dumps(
+                    {"headRefOid": head, "statusCheckRollup": [stale]}
+                ),
+                "stderr": "",
+            },
+            "api graphql": {"rc": 0, "stdout": "[]", "stderr": ""},
+        },
+    )
+    assert run_main("checks", "45") == 3
+    captured = capsys.readouterr()
+    assert captured.out == f"{head}\n"
+    assert "no checks" in captured.err
+    assert f"head={head}" in cast("list[str]", world.calls("gh")[1]["argv"])
+
+
+@pytest.mark.parametrize(
+    "page",
+    [{}, {"data": []}, {"data": {"repository": {"object": None}}}],
+)
+def test_check_nodes_refuses_malformed_graphql(page: dict[str, object]) -> None:
+    with pytest.raises(
+        SystemExit, match=r"^cannot read checks: malformed GraphQL response$"
+    ):
+        pr.check_nodes(page)
+
+
+def test_check_nodes_accepts_a_null_rollup() -> None:
+    page: dict[str, object] = {
+        "data": {"repository": {"object": {"statusCheckRollup": None}}}
+    }
+    assert pr.check_nodes(page) == []
+
+
+def test_checks_includes_failures_from_later_pages(world: World) -> None:
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {"rc": 0, "stdout": '{"headRefOid": "abc"}', "stderr": ""},
+            "api graphql": {
+                "rc": 0,
+                "stdout": json.dumps(
+                    [
+                        check_page(
+                            [
+                                {
+                                    "name": "first",
+                                    "status": "COMPLETED",
+                                    "conclusion": "SUCCESS",
+                                }
+                            ]
+                        ),
+                        check_page(
+                            [
+                                {
+                                    "name": "last",
+                                    "status": "COMPLETED",
+                                    "conclusion": "FAILURE",
+                                }
+                            ]
+                        ),
+                    ]
+                ),
+                "stderr": "",
+            },
+        },
+    )
+    assert run_main("checks", "45") == 1
 
 
 @pytest.mark.parametrize(
@@ -4122,7 +4254,17 @@ def test_checks_names_a_check_without_a_name(
     world: World, job: dict[str, object]
 ) -> None:
     data = {"headRefOid": "a1b2c3d4" * 5, "statusCheckRollup": [job]}
-    world.fake("gh", stdout=json.dumps(data))
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {"rc": 0, "stdout": json.dumps(data), "stderr": ""},
+            "api graphql": {
+                "rc": 0,
+                "stdout": json.dumps([check_page(data["statusCheckRollup"])]),
+                "stderr": "",
+            },
+        },
+    )
     with pytest.raises(
         SystemExit, match=r"^a check of the rollup has no usable name or context"
     ):
@@ -4134,8 +4276,20 @@ def test_checks_refuses_a_rollup_that_is_not_a_list(
     world: World, rollup: object
 ) -> None:
     data = {"headRefOid": "a1b2c3d4" * 5, "statusCheckRollup": rollup}
-    world.fake("gh", stdout=json.dumps(data))
-    with pytest.raises(SystemExit, match=r"^the checks of PR 45 aren't a list"):
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {"rc": 0, "stdout": json.dumps(data), "stderr": ""},
+            "api graphql": {
+                "rc": 0,
+                "stdout": json.dumps([check_page(data["statusCheckRollup"])]),
+                "stderr": "",
+            },
+        },
+    )
+    with pytest.raises(
+        SystemExit, match=r"^cannot read checks: contexts nodes aren't a list$"
+    ):
         run_main("checks", "45")
 
 
@@ -4144,7 +4298,17 @@ def test_checks_refuses_an_entry_that_is_not_an_object(
     world: World, job: object
 ) -> None:
     data = {"headRefOid": "a1b2c3d4" * 5, "statusCheckRollup": [job]}
-    world.fake("gh", stdout=json.dumps(data))
+    world.fake(
+        "gh",
+        cases={
+            "pr view": {"rc": 0, "stdout": json.dumps(data), "stderr": ""},
+            "api graphql": {
+                "rc": 0,
+                "stdout": json.dumps([check_page(data["statusCheckRollup"])]),
+                "stderr": "",
+            },
+        },
+    )
     with pytest.raises(SystemExit, match=r"^a check of the rollup isn't an object"):
         run_main("checks", "45")
 
@@ -4170,7 +4334,7 @@ def test_checks_stops_when_the_pr_cannot_be_read(
 ) -> None:
     world.fake("gh", cases={"pr view": answer})
     with pytest.raises(
-        SystemExit, match=f"^cannot read checks of PR 45: {re.escape(why)}$"
+        SystemExit, match=f"^cannot read the head of PR 45: {re.escape(why)}$"
     ):
         run_main("checks", "45")
     captured = capsys.readouterr()

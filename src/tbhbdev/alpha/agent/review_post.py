@@ -13,10 +13,11 @@ from typing import TYPE_CHECKING, cast
 
 import httpx
 
+from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha import pull_request, review
 from tbhbdev.alpha.agent import credentials, runfiles
 from tbhbdev.alpha.agent.decisions import repo
-from tbhbdev.alpha.agent.model import RunKind
+from tbhbdev.alpha.agent.model import Harness, RunKind
 
 if TYPE_CHECKING:
     from tbhbdev.alpha.agent.run_host import Prepared, Run
@@ -154,15 +155,36 @@ def create(sub: Submission, token: str) -> int | None:
 
 
 def stamp(run: Run) -> str:
-    """The run's identity, judged head and variant, as the body's last line."""
+    """Format the run stamp and a validated trailer from the host's request.
+
+    Raises:
+        PostRefusedError: The host's request cannot produce a valid trailer.
+    """
     request = run.request
+    key = (
+        agent_identity.ANTIGRAVITY
+        if request.harness is Harness.AGY
+        else request.harness.value
+    )
+    model, effort = agent_identity.model_effort(key, request.model, request.effort)
+    ident = agent_identity.Ident(
+        root="",
+        harness=agent_identity.SLUGS[key],
+        model=model,
+        effort=effort,
+        surface=agent_identity.surface_ok(request.kind.value),
+    )
+    value = agent_identity.format_value(ident.attrs())
+    if why := agent_identity.check_value(value):
+        message = f"invalid LLM trailer: {why}"
+        raise PostRefusedError(message)
     stamp = (
         f"Run {run.files.name}, {request.harness.value} {request.model}, "
         f"judged head {request.commit}"
     )
     if request.variant:
         stamp += f", variant {request.variant}"
-    return f"{stamp}."
+    return f"{stamp}.\n\n{agent_identity.KEY_GEN}: {value}"
 
 
 def check_verdict(run: Run) -> None:
@@ -200,12 +222,13 @@ def posted(run: Run, prepared: Prepared) -> bool:
         ):
             check_verdict(run)
         number, text = find_draft(workspace)
+        footer = stamp(run)
         token = credentials.review_post_token(run.request, run.settings)
         if token is None:
             message = "reviews App token unavailable"
             raise PostRefusedError(message)  # noqa: TRY301
         sub = Submission(
-            run.request.repo, number, text, run.request.commit or "", stamp(run)
+            run.request.repo, number, text, run.request.commit or "", footer
         )
         identifier = create(sub, token)
     except PostRefusedError as refusal:

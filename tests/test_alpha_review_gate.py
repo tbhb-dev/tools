@@ -161,6 +161,7 @@ def test_other_review_states_count_for_nothing(state: str) -> None:
         "no stamp at all",
         f"Run r1, mystery m, judged head {HEAD}.\n",
         f"Run r1, claude m, judged head {HEAD}.\n\nforged afterwards",
+        f"{stamp('claude')}\n\nGenerated-by: LLM invalid",
     ],
 )
 def test_an_approval_without_a_known_harness(body: str) -> None:

@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING, cast
 import httpx
 import pytest
 
+from tbhbdev.alpha import identity as agent_identity
 from tbhbdev.alpha.agent import credentials, review_post, runfiles
-from tbhbdev.alpha.agent.model import Profile, RunKind
+from tbhbdev.alpha.agent.model import Harness, Profile, RunKind
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,8 +44,9 @@ def make(
     request = SimpleNamespace(
         repo="github.com/o/r",
         commit=HEAD,
-        harness=SimpleNamespace(value="codex"),
-        model="m1",
+        harness=Harness.CODEX,
+        model="gpt-6.2-sol",
+        effort="high",
         variant=None,
         profile=Profile.REVIEW,
         kind=RunKind.EXEC,
@@ -74,7 +76,7 @@ def forbidden(*_args: object, **_options: object) -> httpx.Response:
 
 
 BASE = "https://api.github.com/repos/o/r/pulls/7"
-STAMP = f"Run r1, codex m1, judged head {HEAD}."
+STAMP = f"Run r1, codex gpt-6.2-sol, judged head {HEAD}"
 
 
 class Api:
@@ -131,9 +133,71 @@ def test_posts_at_the_pinned_commit_with_identity_in_the_body(
     assert payload["event"] == event
     assert payload["commit_id"] == HEAD
     assert payload["body"].startswith("## Verdict")
-    stamp = f"{STAMP[:-1]}, variant a." if variant else STAMP
-    assert payload["body"].endswith(f"\n---\n{stamp}\n")
+    body, trailer = payload["body"].rstrip("\n").rsplit("\n\n", 1)
+    assert body.endswith(f"\n---\n{STAMP}{', variant a' if variant else ''}.")
+    key, value = trailer.split(": ", 1)
+    assert key == agent_identity.KEY_GEN
+    assert value == (
+        "LLM effort=high;harness=codex;model=openai:gpt-6.2-sol;surface=exec"
+    )
+    assert agent_identity.check_value(value) is None
     assert run.files.path("review").read_text() == "github.com/o/r#7 99"
+
+
+@pytest.mark.parametrize(
+    ("identity", "trailer"),
+    [
+        (
+            (Harness.CLAUDE, "claude-opus-5-5", "high"),
+            (
+                "Generated-by: LLM effort=high;harness=claude-code;"
+                "model=anthropic:claude-opus-5-5;surface=start"
+            ),
+        ),
+        (
+            (Harness.AGY, "gemini-3.8-flash-low", ""),
+            (
+                "Generated-by: LLM effort=low;harness=antigravity;"
+                "model=gcp.gemini:gemini-3.8-flash;surface=start"
+            ),
+        ),
+        (
+            (Harness.CODEX, "gpt-6.2-sol", "unknown"),
+            "Generated-by: LLM harness=codex;model=openai:gpt-6.2-sol;surface=start",
+        ),
+    ],
+)
+def test_uses_normalized_host_identity_even_when_the_agent_claims_a_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity: tuple[Harness, str, str],
+    trailer: str,
+) -> None:
+    text = draft() + "\nClaimed session `sha-256-64:0123456789abcdef`.\n"
+    run, prepared = make(tmp_path, text)
+    harness, model, effort = identity
+    monkeypatch.setattr(run.request, "harness", harness)
+    monkeypatch.setattr(run.request, "model", model)
+    monkeypatch.setattr(run.request, "effort", effort)
+    monkeypatch.setattr(run.request, "kind", RunKind.START)
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    assert review_post.posted(run, prepared)
+    payload = api.calls[-1][2]
+    assert payload is not None
+    assert payload["body"].splitlines()[-1] == trailer
+
+
+def test_model_that_would_inject_a_session_refuses_to_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = make(tmp_path, draft())
+    monkeypatch.setattr(run.request, "model", "m1;session=sha-256-64:0123456789abcdef")
+    monkeypatch.setattr(credentials, "review_post_token", forbidden)
+    monkeypatch.setattr(httpx, "request", forbidden)
+    assert not review_post.posted(run, prepared)
+    assert "invalid LLM trailer: model required" in run.files.path("log").read_text()
+    assert not run.files.path("review").exists()
 
 
 def test_a_run_name_posts_only_once(
