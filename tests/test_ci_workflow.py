@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tbhbdev.alpha.agent.open_pr import DRAFT
+from tbhbdev.alpha.pull_request import DRAFT
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
 

@@ -1,4 +1,4 @@
-"""Push a completed run through a one-shot, inherited credential pipe."""
+"""Record build commits and push updates to branches named by --start-ref."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from contextlib import ExitStack, contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from tbhbdev.alpha.agent import host_tools, open_pr, runfiles
+from tbhbdev.alpha.agent import host_tools, runfiles
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import Invalid, Profile
 
@@ -27,7 +27,7 @@ HISTORY_TIMEOUT = 30
 
 
 class PublicationRefusedError(ValueError):
-    """The run has new history that cannot be published safely."""
+    """The run has new history that cannot be recorded as its head."""
 
 
 def url(repository: str) -> str:
@@ -148,7 +148,8 @@ def run(
             commit = head(workspace, branch)
             if commit is not None and commit != base:
                 run.files.write("head", commit)
-                run.files.write("log", f"push skipped: harness exited {rc}\n")
+                if start is not None:
+                    run.files.write("log", f"push skipped: harness exited {rc}\n")
         return rc
     try:
         if start is not None:
@@ -156,61 +157,16 @@ def run(
         after, checkout = local_refs(workspace)
         found = new_commits(run, workspace, before, after, checkout)
     except PublicationRefusedError as exc:
-        run.files.write("log", f"push skipped: {exc}\n")
+        run.files.write("log", f"commit check failed: {exc}\n")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         run.files.write(
-            "log", f"push skipped: cannot check new commits ({type(exc).__name__})\n"
+            "log",
+            f"commit check failed: cannot check new commits ({type(exc).__name__})\n",
         )
     else:
-        return publish(run, workspace, found, token, base) if found else 0
-    return 4
-
-
-def publish(
-    run: Run,
-    workspace: Path,
-    found: list[tuple[str, str]],
-    token: str | PushTokenFailure | None,
-    base: str | None,
-) -> int:
-    branch = f"agent/{run.files.name}"
-    commits = dict.fromkeys(commit for _, commit in found)
-    if len(commits) > 1:
-        sources = ", ".join(name.removeprefix("refs/heads/") for name, _ in found)
-        sources = "".join(filter(str.isprintable, sources))
-        run.files.write(
-            "log",
-            f"push skipped: commits {' '.join(commits)} on {sources} "
-            f"need one branch, {branch}\n",
-        )
-        return 4
-    commit = found[0][1]
-    run.files.write("head", commit)
-    if not isinstance(token, str):
-        reason = token.reason if token is not None else "unavailable"
-        run.files.write(
-            "log", f"push skipped: no push token ({reason}) for commit {commit}\n"
-        )
-        return 4
-    try:
-        with publication(run.files.root, workspace, commit) as directory:
-            published = open_pr.PublishedRange(workspace, directory, base, commit)
-            # Without a pre-run commit, keep the existing PR refusal after push.
-            if base is not None:
-                open_pr.check_range(published)
-            status, error = send(directory, url(run.request.repo), branch, token)
-            if not status:
-                run.files.write("branch", branch)
-                return 0 if opened(run, published, branch, token) else 5
-    except open_pr.OpenRefusedError as refusal:
-        run.files.write("log", f"push refused: {refusal}\n")
-        return 4
-    except subprocess.TimeoutExpired:
-        error = "git timed out"
-    except OSError, subprocess.SubprocessError:
-        error = "git push unavailable"
-    text = " ".join(error.replace(token, "[redacted]").split()) or "git push failed"
-    run.files.write("log", f"push failed: {text[:PUSH_ERROR_LIMIT]}\n")
+        if found:
+            run.files.write("head", found[0][1])
+        return 0
     return 4
 
 
@@ -475,26 +431,6 @@ def history_git(directory: Path, *args: str, revisions: str | None = None) -> st
         check=True,
         timeout=HISTORY_TIMEOUT,
     ).stdout
-
-
-def opened(
-    run: Run, published: open_pr.PublishedRange, branch: str, token: str
-) -> bool:
-    """Open the run's pull request and record it; False when it was not opened."""
-    try:
-        number = open_pr.open_pull_request(
-            published, run.request.repo, branch, token, run.files.write
-        )
-    except (open_pr.OpenRefusedError, OSError) as refusal:
-        reason = (
-            str(refusal)
-            if isinstance(refusal, open_pr.OpenRefusedError)
-            else type(refusal).__name__
-        )
-        run.files.write("log", f"pr not opened: {' '.join(reason.split())}\n")
-        return False
-    run.files.write("pr", f"{run.request.repo}#{number}")
-    return True
 
 
 def head(workspace: Path, branch: str) -> str | None:
