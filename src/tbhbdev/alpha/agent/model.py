@@ -142,6 +142,8 @@ class Host:
     load_limit: int | None = None
     min_memory_available_percent: int = 20
     max_swap_used_percent: int = 80
+    max_memory_pressure_avg10: int = 10
+    max_memory_pressure_level: int = 4
     limits_warn_only: bool = False
     max_concurrent_runs: int = DEFAULT_MAX_CONCURRENT_RUNS
     build_shims: bool = True
@@ -279,3 +281,4 @@ class RunRequest:
     start_ref: str | None = None
     max_concurrent_runs: int | None = None
     expect_commit: bool = False
+    no_commit: bool = False

@@ -187,6 +187,15 @@ def test_expect_commit_requires_a_build() -> None:
     )
 
 
+@pytest.mark.parametrize("value", [REVIEW, BUILD | {"expect_commit": True}])
+def test_no_commit_requires_a_build_without_expect_commit(
+    value: dict[str, object],
+) -> None:
+    assert refused(value | {"no_commit": True}) == (
+        "request no_commit applies only to a build without expect_commit"
+    )
+
+
 def test_unknown_fields_are_named() -> None:
     assert refused(made(BUILD, zeta=1, alpha=2)) == (
         "request has unknown fields: alpha, zeta"

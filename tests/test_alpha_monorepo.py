@@ -211,33 +211,23 @@ def verify_exit(src: Src, made: Path, mono: Path) -> int:
     return run("verify", f"{path}@{commit}", "--map", str(made), "--tree", str(mono))
 
 
-def rewritten(
-    src: Src,
-    tmp_path: Path,
-    old: str = "tbhb-dev/tools",
-    name: str = "AGENTS.md",
-) -> Path:
-    text = make_map(src, tmp_path).read_text()
-    text = text.replace(f'"{name}" = "{DEST}/{name}"\n', "")
-    text = text.replace(
-        "[rewrite]\n",
-        f'[rewrite."{name}"]\ndest = "{DEST}/{name}"\n'
-        f'replace = [["{old}", "tbhb-dev/mono/{DEST}"]]\n',
+def rewritten(src: Src, tmp_path: Path, old: str, name: str) -> Path:
+    entry = f'"{name}" = "{DEST}/{name}"\n'
+    head = f'[rewrite."{name}"]\ndest = "{DEST}/{name}"\n'
+    return make_map(
+        src,
+        tmp_path,
+        edit={entry: "", "[rewrite]\n": f'{head}replace = [["{old}", "x"]]\n'},
     )
-    path = tmp_path / "rewrite.toml"
-    path.write_text(text)
-    return path
 
 
 def test_rewrite_applies_replacements_and_verify_recomputes_them(
     src: Src, mono: Path, tmp_path: Path, capsys: Capsys
 ) -> None:
     path, commit = src
-    made = rewritten(src, tmp_path)
+    made = rewritten(src, tmp_path, "tbhb-dev/tools", "AGENTS.md")
     assert run_import(f"{path}@{commit}", made, mono) == 0
-    assert (mono / DEST / "AGENTS.md").read_bytes() == (
-        b"Read tbhb-dev/mono/factory/tbhbdev for the rules.\n"
-    )
+    assert (mono / DEST / "AGENTS.md").read_bytes() == (b"Read x for the rules.\n")
     assert "rewrote 1" in git(mono, "log", "-1", "--format=%B")
     capsys.readouterr()
     assert verify_exit(src, made, mono) == 0
@@ -309,13 +299,10 @@ def test_import_refuses_a_map_that_misses_files(
     )
 
 
-def test_import_refuses_a_long_subject_and_an_empty_import(
+def test_import_refuses_a_long_subject(
     src: Src, mono: Path, tmp_path: Path, capsys: Capsys
 ) -> None:
-    long = "f" * 60
-    made = make_map(src, tmp_path)
-    text = made.read_text().replace(DEST, f"factory/{long}")
-    made.write_text(text)
+    made = make_map(src, tmp_path, edit={DEST: f"factory/{'f' * 60}"})
     assert "the subject is over 72 characters" in import_error(src, made, mono, capsys)
 
 

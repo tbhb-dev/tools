@@ -10,7 +10,7 @@ Run `tbhbdev alpha review check ${pr} --no-lint` and leave exactly one `.git/tbh
 
 After writing the draft, end your final message with exactly one of these lines, matching the Verdict section. Print nothing after that line.
 VERDICT: GO ${head}
-VERDICT: NO-GO ${head}
+VERDICT: BLOCK ${head}
 
 ---
 schema: 2

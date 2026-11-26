@@ -174,6 +174,7 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         expect_commit=profile is Profile.BUILD
         if expect_commit is None
         else expect_commit,
+        no_commit=expect_commit is False,
     )
     request.check_start_ref(run)
     run = rules.check(
@@ -301,7 +302,7 @@ def check_limits(
     ignore: bool,
     timeout: float = 30,
 ) -> None:
-    """Read HOST's load, memory and swap in one ssh call, then refuse or warn.
+    """Read HOST's load, memory, pressure and swap in one ssh call, then refuse or warn.
 
     Launch calls this first. A later step may call it again.
 

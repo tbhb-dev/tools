@@ -116,6 +116,7 @@ logname
 mcpjson
 mdfile
 meminfo
+memorystatus
 milestoned
 mkfifo
 mktree

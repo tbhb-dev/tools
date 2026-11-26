@@ -353,7 +353,7 @@ def flow(root: Path, monkeypatch: pytest.MonkeyPatch, outcome: str) -> list[str]
     monkeypatch.setattr(agent.settings, "load", settings)
     remote.prompt.write_text("private-prompt-marker")
     if outcome == "refused":
-        remote.configure(limits="1000 4 1000 900 100 0")
+        remote.configure(limits="1000 4 1000 900 100 0 -")
     elif outcome == "failed":
         remote.configure(launch={"rc": "7", "out.final": "private-ssh-output"})
     elif outcome == "exception":
