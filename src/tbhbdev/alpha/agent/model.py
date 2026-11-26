@@ -16,6 +16,10 @@ from typing import TypedDict
 REQUEST_VERSION = 2
 DEFAULT_RUN_MEMORY_MIB = 6 * 1024
 DEFAULT_MAX_CONCURRENT_RUNS = 3
+# The Codex model for a spawned agent that names none: the model that
+# tbhb-dev/wiki `models/README.md` pairs with Sonnet (line 58) and names as the
+# non-trial Codex builder (line 45). Its `gpt-6.2-sol` is unverified (line 73).
+DEFAULT_CODEX_SUBAGENT_MODEL = "gpt-6.1-sol"
 
 # An identifier that reaches a file name, a tmux session name or an argv: run
 # names, accounts, profiles and the run's class, variant and role.
@@ -91,10 +95,15 @@ class Sandbox:
 
 @dataclass(frozen=True)
 class Codex:
-    """Codex's `web_search` setting for each sandbox profile."""
+    """Codex's `web_search` setting for each sandbox profile.
+
+    `subagent_model` is the model Codex gives a spawned agent whose spawn names
+    none. A spawn that names a model keeps it, so this is a default, not a pin.
+    """
 
     web_search_build: WebSearch
     web_search_review: WebSearch
+    subagent_model: str = DEFAULT_CODEX_SUBAGENT_MODEL
 
 
 @dataclass(frozen=True)
@@ -219,6 +228,7 @@ class CodexPolicy:
     approval_policy: str
     web_search: WebSearch
     network_proxy: NetworkProxy | None = None
+    subagent_model: str = DEFAULT_CODEX_SUBAGENT_MODEL
 
 
 @dataclass(frozen=True)

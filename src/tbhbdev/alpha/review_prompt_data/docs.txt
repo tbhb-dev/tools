@@ -1,5 +1,5 @@
 ### Docs
-- D1 Does commands.md describe changes to alpha commands and their options?
+- D1 Does the command's page under docs/reference/alpha/commands/ describe changes to alpha commands and their options?
 - D2 Do README listings reflect tools added, renamed, or removed?
 - D3 Do documented examples work with the current interface?
 - D4 Do the docs explain behavior changes that affect existing users?
