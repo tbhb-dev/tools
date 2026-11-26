@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import Mock
 
+import httpx
 import pytest
 from agent_host_example import (
     build_provenance,
@@ -4276,29 +4277,36 @@ def test_execute_posts_only_after_a_successful_review(  # noqa: PLR0913
 
     post = Mock(side_effect=record_review)
     monkeypatch.setattr(run_host.review_post, "posted", post)
+    expected = 10 if uncertain or (should_post and not posted) else rc
     assert (
-        run_host.execute(run, "example", "unused", preflight_only=preflight_only) == rc
+        run_host.execute(run, "example", "unused", preflight_only=preflight_only)
+        == expected
     )
     assert post.call_count == int(should_post)
-    assert run.files.path("rc").read_text() == f"{rc}\n"
+    assert run.files.path("rc").read_text() == f"{expected}\n"
+    if uncertain:
+        assert (
+            "review not posted: harness shutdown unconfirmed"
+            in run.files.path("log").read_text()
+        )
 
 
 @pytest.mark.parametrize(
     ("failure", "rc", "log"),
     [
-        (None, 0, "review not posted: the draft frontmatter is nested too deeply\n"),
-        (RuntimeError("private"), 0, "review post failed: RuntimeError\n"),
-        (TimeoutError("private"), 0, "review post failed: TimeoutError\n"),
+        (None, 10, "review not posted: the draft frontmatter is nested too deeply\n"),
+        (RuntimeError("private"), 10, "review not posted: RuntimeError\n"),
+        (TimeoutError("private"), 10, "review not posted: TimeoutError\n"),
         (
             subprocess.TimeoutExpired(["private"], 20),
-            0,
-            "review post failed: TimeoutExpired\n",
+            10,
+            "review not posted: TimeoutExpired\n",
         ),
         (run_host.RunInterruptedError(), 143, None),
     ],
     ids=["nested-yaml", "unexpected", "timeout", "subprocess-timeout", "signal"],
 )
-def test_review_post_failure_preserves_run_completion(
+def test_review_post_failure_sets_the_completion_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: Exception | None,
@@ -4310,6 +4318,7 @@ def test_review_post_failure_preserves_run_completion(
     monkeypatch.setattr(run_host, "preflight", Mock())
     monkeypatch.setattr(process_group, "prepare", Mock(return_value=prepared))
     monkeypatch.setattr(run_host, "run_harness", Mock(return_value=0))
+    run.files.write("out.final", f"VERDICT: GO {run.request.commit}\n")
     if failure is None or isinstance(failure, TimeoutError):
         directory = Path(prepared.paths.worktree) / ".git" / "tbhb-alpha"
         directory.mkdir(parents=True)
@@ -4405,26 +4414,39 @@ def test_run_builds_required_shims_before_harness(
 
 
 @pytest.mark.parametrize(
-    ("expect_commit", "push_result", "expected"),
+    ("expect_commit", "push_result", "tips", "start_ref", "expected"),
     [
-        (True, (0, None), 6),
-        (True, (0, "a" * 40), 0),
-        (True, (4, None), 4),
-        (False, (0, None), 0),
+        (True, (0, None), ("",), None, 6),
+        (True, (0, "a" * 40), ("", "a" * 40), None, 0),
+        (True, (0, "a" * 40), ("b" * 40, "a" * 40), None, 0),
+        (True, (0, "a" * 40), ("a" * 40, "a" * 40), None, 9),
+        (True, (0, "a" * 40), ("", ""), None, 9),
+        (True, (0, "a" * 40), ("b" * 40, ""), None, 9),
+        (True, (0, "a" * 40), (None,), None, 9),
+        (True, (0, "a" * 40), ("", None), None, 9),
+        (True, (0, "a" * 40), (), "refs/heads/topic", 0),
+        (True, (4, None), ("",), None, 4),
+        (False, (0, None), (), None, 0),
     ],
 )
-def test_execute_requires_a_commit_when_requested(
+def test_execute_checks_required_build_results(  # noqa: PLR0913, PLR0917
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     expect_commit: bool,
     push_result: tuple[int, str | None],
+    tips: tuple[str | None, ...],
+    start_ref: str | None,
     expected: int,
 ) -> None:
     run = make_run(tmp_path, expect_commit=expect_commit)
+    run.request = dataclasses.replace(run.request, start_ref=start_ref)
     prepared = dataclasses.replace(preparation(run), auth_before="example-before")
     HostRuntime(run, prepared, None).patch(monkeypatch)
+    origin_tip = Mock(side_effect=tips)
+    monkeypatch.setattr(run_host, "origin_tip", origin_tip)
 
     def publish(*_args: object) -> int:
+        assert origin_tip.call_count == int(expect_commit and start_ref is None)
         push_status, recorded_head = push_result
         if recorded_head is not None:
             run.files.write("head", recorded_head)
@@ -4434,11 +4456,56 @@ def test_execute_requires_a_commit_when_requested(
     assert run_host.execute(run, "example", "unused") == expected
     assert run.files.path("rc").read_text() == f"{expected}\n"
     assert runfiles.latest(run.files.root)["example"]["rc"] == expected
+    assert origin_tip.call_count == len(tips)
     log = run.files.path("log")
-    message = "no new commit: the brief expected one (--expect-commit)\n"
+    message = "no new commit: the build required one (--expect-commit)\n"
     assert (log.exists() and message in log.read_text().splitlines(keepends=True)) is (
         expected == 6
     )
+    if expected == 9:
+        reason = "cannot verify" if None in tips else "no new tip for"
+        assert f"push failed: {reason} agent/example on origin" in log.read_text()
+
+
+BRANCH_REF = "refs/heads/agent/example"
+
+
+@pytest.mark.parametrize(
+    ("result", "token", "tip"),
+    [
+        ((200, {"ref": BRANCH_REF, "object": {"sha": "a" * 40}}), "fake", "a" * 40),
+        ((200, {"ref": BRANCH_REF, "object": {"sha": "invalid"}}), None, None),
+        ((200, {"ref": BRANCH_REF}), None, None),
+        ((200, {"ref": f"{BRANCH_REF}-other"}), None, None),
+        ((200, []), None, None),
+        ((404, {}), None, ""),
+        ((403, {}), None, None),
+        (httpx.ConnectError("offline"), None, None),
+    ],
+)
+def test_origin_tip_reads_the_run_branch_over_https(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    result: tuple[int, object] | Exception,
+    token: str | None,
+    tip: str | None,
+) -> None:
+    run = make_run(tmp_path)
+    repository = run.request.repo.removeprefix("github.com/")
+    url = f"https://api.github.com/repos/{repository}/git/ref/heads/agent/example"
+    if isinstance(result, Exception):
+        lookup = Mock(side_effect=result)
+    else:
+        status, body = result
+        response = httpx.Response(status, json=body, request=httpx.Request("GET", url))
+        lookup = Mock(return_value=response)
+    monkeypatch.setattr(httpx, "get", lookup)
+    monkeypatch.setattr(credentials, "fetch_token", Mock(return_value=token))
+    assert run_host.origin_tip(run) == tip
+    headers = {"Accept": "application/vnd.github+json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    lookup.assert_called_once_with(url, headers=headers, timeout=20)
 
 
 def test_execute_rejects_a_stale_head_when_requiring_a_commit(
@@ -4456,11 +4523,12 @@ def test_execute_rejects_a_stale_head_when_requiring_a_commit(
     HostRuntime(run, prepared, None).patch(monkeypatch)
     monkeypatch.setattr(run_host, "run_harness", constant(0))
     monkeypatch.setattr(run_host.push, "run", PUSH_RUN)
+    monkeypatch.setattr(run_host, "origin_tip", constant(""))
     run.files.write("head", "a" * 40)
 
     assert run_host.execute(run, "example", "unused") == 6
     assert run.files.path("rc").read_text() == "6\n"
-    assert "no new commit: the brief expected one (--expect-commit)" in (
+    assert "no new commit: the build required one (--expect-commit)" in (
         run.files.path("log").read_text().splitlines()
     )
     assert not run.files.path("head").exists()

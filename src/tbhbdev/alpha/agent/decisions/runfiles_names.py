@@ -10,6 +10,8 @@ PHASE = ".phase"
 OUT = ".out"
 FINAL = ".out.final"
 LOG = ".log"
+BRANCH = ".branch"
+PR = ".pr"
 HEAD = ".head"
 RC = ".rc"
 KEEP = ".keep"
@@ -30,13 +32,15 @@ SUFFIXES = (
     OUT,
     FINAL,
     LOG,
+    BRANCH,
+    PR,
     HEAD,
     KEEP,
     RC_PENDING,
     RUN_LOCK,
     FALLBACK,
     RC,
-    OWNER,
     AUDIT,
     WOULD_REFUSE,
+    OWNER,  # Keep ownership until every other file is archived.
 )

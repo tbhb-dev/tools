@@ -16,7 +16,7 @@ from tbhbdev.alpha.repo import git, read_hook_stdin
 
 ENV = "TBHBDEV_RUN_STOP"
 MAX_BLOCKS = 3
-VERDICT = re.compile(r"VERDICT:[ \t]+(?:GO|BLOCK)(?:[ \t]+[0-9a-f]{40})?[ \t]*")
+VERDICT = re.compile(r"VERDICT:[ \t]+(?:GO|BLOCK|NO-GO)(?:[ \t]+[0-9a-f]{40})?[ \t]*")
 
 
 class StopRun(TypedDict):
@@ -121,7 +121,10 @@ def main(argv: list[str], prog: str) -> int:
     ):
         reason = None
     else:
-        reason = "Finish the review and include a VERDICT: GO or VERDICT: BLOCK line."
+        reason = (
+            "Finish the review and include a VERDICT: GO, VERDICT: BLOCK or "
+            "VERDICT: NO-GO line."
+        )
     try:
         if reason and retry(run, reason):
             decision = "continue" if harness == "antigravity" else "block"

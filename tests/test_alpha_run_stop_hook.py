@@ -63,7 +63,7 @@ def test_review_uses_current_reply_and_limits_retries(
     stop: Callable[[str, Mapping[str, object]], str],
     run: run_stop_hook.StopRun,
 ) -> None:
-    for verdict in ("GO", "BLOCK " + "a" * 40):
+    for verdict in ("GO", "NO-GO", "BLOCK " + "a" * 40):
         assert (
             stop(
                 harness,
