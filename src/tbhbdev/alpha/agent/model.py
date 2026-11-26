@@ -279,3 +279,4 @@ class RunRequest:
     start_ref: str | None = None
     max_concurrent_runs: int | None = None
     expect_commit: bool = False
+    no_commit: bool = False

@@ -184,7 +184,7 @@ def test_every_command_is_marked_and_runs_tbhbdev_alpha_from_path() -> None:
     agy = cast("dict[str, dict[str, list[Json]]]", install.agy_hooks())
     for events in agy.values():
         for event, entries in events.items():
-            flat = entries if event == "SessionStart" else None
+            flat = entries if event in {"SessionStart", "Stop"} else None
             every += (
                 [cast("str", h["command"]) for h in flat] if flat else commands(entries)
             )
@@ -208,7 +208,7 @@ def test_a_rerun_drops_the_removed_stop_and_send_message_registrations() -> None
         }
     }
     events = cast("dict[str, list[Json]]", install.merge_events(old, desired)["hooks"])
-    assert events["Stop"] == [{"hooks": [theirs]}]
+    assert events["Stop"] == [{"hooks": [theirs]}, *desired["Stop"]]
     assert {"matcher": "SendMessage", "hooks": [theirs]} in events["PreToolUse"]
     matchers = [g.get("matcher") for g in events["PreToolUse"]]
     assert "Bash|SendMessage|Write|Edit" not in matchers
@@ -220,6 +220,17 @@ def test_claude_hooks() -> None:
     guard = {"type": "command", "command": marked("state-guard"), "timeout": 10}
     context = {"type": "command", "command": marked("session-context"), "timeout": 10}
     assert install.claude_hooks() == {
+        "Stop": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": marked("run-stop-hook claude"),
+                        "timeout": 10,
+                    }
+                ]
+            }
+        ],
         "SessionStart": [
             {
                 "hooks": [
@@ -284,7 +295,7 @@ def test_the_harness_guards_are_ours_and_a_rerun_replaces_them() -> None:
     once = install.merge_events(old, desired)
     assert install.merge_events(once, desired) == once
     events = cast("dict[str, list[Json]]", once["hooks"])
-    assert events["Stop"] == [{"hooks": [theirs]}]
+    assert events["Stop"] == [{"hooks": [theirs]}, *desired["Stop"]]
     guards = [
         h
         for groups in events.values()
@@ -302,6 +313,7 @@ def test_codex_hooks() -> None:
 
     record = one("identity record codex")
     assert install.codex_hooks() == {
+        "Stop": [{"hooks": [one("run-stop-hook codex")]}],
         "SessionStart": [{"hooks": [record]}],
         "SubagentStart": [{"hooks": [record]}],
         "PostToolUse": [
@@ -331,6 +343,9 @@ def test_agy_hooks() -> None:
         "timeout": 30,
     }
     assert install.agy_hooks() == {
+        "tbhbdev-alpha-run-stop": {
+            "Stop": [{**record, "command": marked("run-stop-hook antigravity")}],
+        },
         "tbhbdev-alpha-identity": {
             "SessionStart": [
                 {"type": "command", "command": marked("identity record antigravity")}
@@ -764,12 +779,12 @@ def installed_claude_hooks(world: World) -> dict[str, list[Json]]:
     return cast("dict[str, list[Json]]", json.loads(path.read_text())["hooks"])
 
 
-def test_a_fresh_claude_install_has_no_send_message_or_stop_guard(
+def test_a_fresh_claude_install_has_only_the_run_stop_hook_and_no_send_message(
     world: World,
 ) -> None:
     assert install.install_config("claude", {}, dry_run=False) == 0
     events = installed_claude_hooks(world)
-    assert "Stop" not in events
+    assert commands(events["Stop"]) == [marked("run-stop-hook claude")]
     guard = marked("state-guard")
     matchers = [
         g.get("matcher")
@@ -799,7 +814,10 @@ def test_a_claude_install_strips_the_old_send_message_and_stop_guards(
     path.write_text(json.dumps(old))
     assert install.install_config("claude", {}, dry_run=False) == 0
     events = installed_claude_hooks(world)
-    assert events["Stop"] == [{"hooks": [THEIRS]}]
+    assert events["Stop"] == [
+        {"hooks": [THEIRS]},
+        *install.stop_hooks("claude")["Stop"],
+    ]
     pre = events["PreToolUse"]
     assert {"matcher": "SendMessage", "hooks": [THEIRS]} in pre
     matchers = [g.get("matcher") for g in pre]
@@ -825,7 +843,7 @@ def test_install_config_keeps_the_users_settings_and_backs_up(
         "model": "opus",
         "hooks": {
             **install.claude_hooks(),
-            "Stop": [{"hooks": [THEIRS]}],
+            "Stop": [{"hooks": [THEIRS]}, *install.stop_hooks("claude")["Stop"]],
         },
         "env": {"SSH_AUTH_SOCK": ""},
     }
@@ -839,7 +857,7 @@ def test_install_config_codex_trusts_its_hooks(
     assert install.install_config("codex", env, dry_run=False) == 0
     assert capsys.readouterr().out == (
         f"codex: wrote {codex / 'hooks.json'}\n"
-        f"codex: trusted 11 hooks in {codex / 'config.toml'}\n"
+        f"codex: trusted 12 hooks in {codex / 'config.toml'}\n"
     )
 
 
@@ -948,6 +966,7 @@ def trusted_in(path: Path) -> dict[str, str]:
 def our_trust(hooks: Path) -> dict[str, str]:
     """The trust a fresh Codex install earns, spelled out from the hooks."""
     return {
+        f"{hooks}:stop:0:0": trust_hash("stop", None, "run-stop-hook codex"),
         f"{hooks}:session_start:0:0": trust_hash(
             "session_start", None, "identity record codex"
         ),
@@ -1059,9 +1078,10 @@ def test_install_config_codex_trusts_only_its_own_among_foreign_groups(
     expected = {
         key: digest
         for key, digest in our_trust(hooks).items()
-        if ":pre_tool_use:" not in key
+        if ":pre_tool_use:" not in key and ":stop:" not in key
     }
     expected |= {
+        f"{hooks}:stop:1:0": trust_hash("stop", None, "run-stop-hook codex"),
         f"{hooks}:pre_tool_use:1:0": trust_hash(
             "pre_tool_use", "^Bash$", "guard-gh-pr"
         ),
@@ -1114,7 +1134,7 @@ def test_install_config_codex_keeps_everything_else_in_config_toml(
     assert install.install_config("codex", env, dry_run=False) == 0
     backup = codex / "config.toml.tbhbdev-backup.T"
     assert capsys.readouterr().out.endswith(
-        f"codex: trusted 11 hooks in {config}; the old one is {backup}\n"
+        f"codex: trusted 12 hooks in {config}; the old one is {backup}\n"
     )
     assert backup.read_text() == FOREIGN_CONFIG
     assert stat.S_IMODE(config.stat().st_mode) == 0o644
@@ -1143,7 +1163,7 @@ def test_install_config_codex_twice_changes_nothing_the_second_time(
     assert install.install_config("codex", env, dry_run=False) == 0
     assert capsys.readouterr().out == (
         f"codex: {codex / 'hooks.json'} is up to date\n"
-        f"codex: 11 hooks already trusted in {config}\n"
+        f"codex: 12 hooks already trusted in {config}\n"
     )
     assert config.read_bytes() == first
     assert sorted(p.name for p in codex.iterdir()) == [
@@ -1169,7 +1189,7 @@ def test_install_config_codex_trusts_again_when_only_config_toml_was_lost(
     assert install.install_config("codex", env, dry_run=False) == 0
     assert capsys.readouterr().out == (
         f"codex: {codex / 'hooks.json'} is up to date\n"
-        f"codex: trusted 11 hooks in {codex / 'config.toml'}\n"
+        f"codex: trusted 12 hooks in {codex / 'config.toml'}\n"
     )
     assert trusted_in(codex / "config.toml") == our_trust(codex / "hooks.json")
 
@@ -1314,7 +1334,7 @@ def test_install_config_codex_dry_run_with_trust_up_to_date_prints_no_diff(
     assert install.install_config("codex", env, dry_run=True) == 0
     assert capsys.readouterr().out == (
         f"codex: {codex / 'hooks.json'} is up to date\n"
-        f"codex: 11 hooks already trusted in {codex / 'config.toml'}\n"
+        f"codex: 12 hooks already trusted in {codex / 'config.toml'}\n"
     )
 
 
@@ -3276,11 +3296,15 @@ def test_main_twice_trusts_every_codex_hook_and_sets_the_environment(
         for at, group in enumerate(groups)
         for one in group["hooks"]
     ]
-    assert len(ours) == 11
+    assert len(ours) == 12
     state = parsed["hooks"]["state"]
     for event, at, one in ours:
         assert one["timeout"] == install.CODEX_TIMEOUT
-        label = {"SessionStart": "session_start", "SubagentStart": "subagent_start"}
+        label = {
+            "SessionStart": "session_start",
+            "SubagentStart": "subagent_start",
+            "Stop": "stop",
+        }
         label = label.get(event, "post_tool_use" if "Post" in event else "pre_tool_use")
         group = written[event][at]
         body = {
@@ -3324,7 +3348,7 @@ def test_main_twice_trusts_every_codex_hook_and_sets_the_environment(
     }
     assert install.main(["--harness", "codex"], "p") == 0
     out = capsys.readouterr().out
-    assert f"codex: 11 hooks already trusted in {config}\n" in out
+    assert f"codex: 12 hooks already trusted in {config}\n" in out
     assert f"codex: {config} is up to date\n" in out
     assert "wrote" not in out
     assert config.read_bytes() == first

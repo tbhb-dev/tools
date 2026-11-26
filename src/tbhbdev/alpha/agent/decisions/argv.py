@@ -28,6 +28,7 @@ from tbhbdev.alpha.agent.model import (
     RunKind,
     RunRequest,
 )
+from tbhbdev.alpha.install import stop_hooks
 
 # The tmux socket's file name, under the sockets directory.
 SOCKET = "agents"
@@ -244,11 +245,14 @@ def _claude(
         if policy.profile is Profile.BUILD
         else "dontAsk"
     )
-    settings = json.dumps(detail.settings, separators=(",", ":"), sort_keys=True)
+    options = detail.settings
+    if headless:
+        options = options | {"disableAllHooks": False, "hooks": stop_hooks("claude")}
+    settings = json.dumps(options, separators=(",", ":"), sort_keys=True)
     argv = ["claude", *(["-p"] if headless else [])]
     argv += ["--model", request.model, "--effort", request.effort]
     argv += ["--permission-mode", mode, "--settings", settings]
-    argv += ["--setting-sources", "user", "--strict-mcp-config"]
+    argv += ["--setting-sources", "" if headless else "user", "--strict-mcp-config"]
     if not headless:
         argv.append(POINTER.format(path=brief_file))
     return tuple(argv)

@@ -5,6 +5,7 @@
 * [Guard op](guard-op.md) - The 1Password account flag that shell calls and proposed writes need.
 * [Guard GitHub pull request writes](guard-gh-pr.md) - The hook that blocks raw GitHub command-line tool writes and names the tbhbdev alpha command to run instead.
 * [State guard](state-guard.md) - The Claude Code hook that blocks sign-off and co-author trailers and open-note items without decisions.
+* [Run stop hook](run-stop-hook.md) - The Stop hook that asks unfinished builds and reviews to continue in agent exec runs.
 * [Session context](session-context.md) - The SessionStart hook that reports the host, its role, and the top commands.
 * [Guard GitHub polling](guard-gh-poll.md) - The hook that blocks GitHub polling, force pushes, and git hook bypasses.
 * [Guard scripts](guard-scripts.md) - The hook that keeps operator scripts in a fixed directory with fixed names.

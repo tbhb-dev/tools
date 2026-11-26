@@ -313,11 +313,23 @@ def group(matcher: str | None, *handlers: Json) -> Json:
     return entry
 
 
+def stop_hooks(harness: str) -> dict[str, list[Json]]:
+    """The Stop event shared by the user and private run configurations."""
+    timeout = {
+        "claude": HARNESS_TIMEOUT,
+        "codex": CODEX_TIMEOUT,
+        "antigravity": AGY_TIMEOUT,
+    }
+    stop = handler(f"run-stop-hook {harness}", timeout[harness])
+    return {"Stop": [stop if harness == "antigravity" else group(None, stop)]}
+
+
 def claude_hooks() -> dict[str, list[Json]]:
     """Claude Code's hooks, the ones the tbhb-dev repositories used to carry."""
     record = handler("identity record claude")
     guard = handler("state-guard", HARNESS_TIMEOUT)
     return {
+        **stop_hooks("claude"),
         "SessionStart": [
             group(
                 None,
@@ -352,6 +364,7 @@ def codex_hooks() -> dict[str, list[Json]]:
     """Codex's hooks, the ones the tbhb-dev repositories used to carry."""
     record = handler("identity record codex", CODEX_TIMEOUT)
     return {
+        **stop_hooks("codex"),
         "SessionStart": [group(None, record)],
         "SubagentStart": [group(None, record)],
         "PostToolUse": [
@@ -374,6 +387,7 @@ def agy_hooks() -> Json:
     """Antigravity's named hook groups, the ones the repositories used to carry."""
     record = handler("identity record antigravity", AGY_TIMEOUT)
     return {
+        "tbhbdev-alpha-run-stop": stop_hooks("antigravity"),
         "tbhbdev-alpha-identity": {
             "SessionStart": [handler("identity record antigravity")],
             "PreToolUse": [group("run_command", record)],
