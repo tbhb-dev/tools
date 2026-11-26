@@ -1143,6 +1143,8 @@ def test_prompt_hook_conflicts_refuse_launch_before_ssh(
             f"example agent: {remote.prompt}: "
             "hook conflict: push to main or master is forbidden\n"
             f"{remote.prompt}: hook conflict: hook install is forbidden\n"
+            f"{remote.prompt}: the brief targets branch main. "
+            "The driver owns the build branch. Use agent/sample-run\n"
         ),
     )
     assert remote.records("ssh", limits=True) == []
@@ -1160,36 +1162,28 @@ def test_prompt_without_hook_conflicts_launches(remote: Remote) -> None:
 
 
 @pytest.mark.parametrize(
-    "instruction",
+    ("instruction", "branch"),
     [
-        "git checkout -b feat/4-exporter",
-        "git checkout -B feat/4-exporter",
-        "git checkout -b",
-        "git checkout -B",
-        "git checkout agent/other",
-        "git checkout origin/main",
-        "git checkout 'origin/main'",
-        "git checkout agent/sample",
-        "git switch",
-        "git switch feat/4-exporter",
-        "git switch -c feat/4-exporter",
-        "git switch -C feat/4-exporter",
-        "git switch --detach HEAD",
-        "git switch -",
-        "git switch --discard-changes feat/4-exporter",
-        "git switch agent/sample",
-        "create branch feat/4-exporter",
-        "Create a branch",
-        "Create the branch named `feat/4-exporter`.",
-        "Create a\nbranch feat/4-exporter.",
-        "Use a new branch.",
-        "new branch feat/4-exporter",
-        "Create branch refs/heads/agent/sample.",
-        "Work on branch agent/sample. Then create branch feat/4-exporter.",
+        ("git checkout -b feat/4-exporter", "feat/4-exporter"),
+        ("Run `git checkout -B feat/4-exporter`.", "feat/4-exporter"),
+        ("- Use `git switch -c 'feat/4-exporter'`.", "feat/4-exporter"),
+        ("Build the exporter. Then run `git switch -C topic`.", "topic"),
+        ("git switch --no-track -c topic origin/main", "topic"),
+        ("git push origin topic", "topic"),
+        ("Run `git push origin HEAD:other`.", "other"),
+        ("git push -u origin HEAD:refs/heads/agent/Sample", "agent/Sample"),
+        ("git push --set-upstream origin HEAD:refs/heads/topic", "topic"),
+        ("Push to branch topic.", "topic"),
+        ("Push commits to `agent/other`.", "agent/other"),
+        ("Push to `refs/heads/topic`.", "topic"),
+        ("Work on branch feat/4-exporter.", "feat/4-exporter"),
+        ("1. Work on the branch named `topic`.", "topic"),
+        ("Work on\nbranch feat/4-exporter", "feat/4-exporter"),
+        ("Work on branch agent/sample. Then work on branch topic.", "topic"),
     ],
 )
 def test_build_branch_instructions_refuse_before_any_host_work(
-    remote: Remote, capsys: pytest.CaptureFixture[str], instruction: str
+    remote: Remote, capsys: pytest.CaptureFixture[str], instruction: str, branch: str
 ) -> None:
     remote.prompt.write_text(instruction)
     assert launch(remote, "--ignore-limits") == 1
@@ -1197,8 +1191,8 @@ def test_build_branch_instructions_refuse_before_any_host_work(
         "",
         (
             f"example agent: {remote.prompt}: "
-            "the brief asks to create or switch branches; "
-            "the driver owns the build branch. Use agent/sample\n"
+            f"the brief targets branch {branch}. "
+            "The driver owns the build branch. Use agent/sample\n"
         ),
     )
     assert remote.records("ssh", limits=True) == []
@@ -1209,11 +1203,21 @@ def test_build_branch_instructions_refuse_before_any_host_work(
 @pytest.mark.parametrize(
     "prompt",
     [
+        "Implement the retry path. Add a unit test covering the new code path.",
+        "Implement the retry path. Add a unit test covering the new branch.",
+        "Add a regression test asserting that `git checkout -b topic` is refused.",
+        "Write documentation explaining `git switch topic`.",
+        "Document how `git switch -C topic` works.",
+        "Document how `git push origin agent/other` works.",
+        "Work on branch selection logic.",
         "Diff against branch feat/4-exporter.",
         "Base branch feat/4-exporter.",
         "Diff against branch agent/other.",
         "Base branch agent/other.",
         "Never create branch feat/4-exporter.",
+        "Never run `git checkout -b topic`.",
+        "Do not push to branch topic.",
+        "Do not work on branch feat/4-exporter.",
         "Do not\nswitch to branch feat/4-exporter.",
         "Never run `git switch --detach HEAD`.",
         "Do not create a new branch. Restore `git checkout README.md`.",
@@ -1227,20 +1231,33 @@ def test_build_branch_instructions_refuse_before_any_host_work(
         "git checkout ../README.md",
         "git checkout /tmp/README.md",
         "git checkout -- README.md",
+        "git checkout -- -b topic",
         "git checkout HEAD -- README.md",
         "git checkout origin/main -- README.md",
         "git checkout agent/sample -- README.md",
         "git checkout --detach HEAD",
         "git checkout refs/heads/topic",
+        "git checkout origin/main",
+        "git checkout -b",
+        "git switch feat/4-exporter",
+        "git switch --detach HEAD",
+        "Create branch feat/4-exporter.",
         "git branch --show-current",
         "git branch feat/4-exporter",
         "git worktree add .worktrees/exporter -b feat/4-exporter",
         "Switch to the branch named `feat/4-exporter`.",
         "Check out branch 'feat/4-exporter'.",
         'Commit on a branch "feat/4-exporter".',
-        "Work on\nbranch feat/4-exporter",
         "Work on branch agent/sample.",
+        "Work on branch `refs/heads/agent/sample`.",
+        "git switch -C agent/sample",
         "git switch-backup feat/4-exporter",
+        "git push origin",
+        "git push origin HEAD",
+        "git push origin topic:refs/tags/version",
+        "git push origin agent/sample",
+        "git push --set-upstream origin HEAD:refs/heads/agent/sample",
+        "Push commits to `agent/sample`.",
     ],
 )
 def test_build_allows_restores_and_briefs_without_explicit_branch_changes(
@@ -1256,9 +1273,9 @@ def test_build_allows_restores_and_briefs_without_explicit_branch_changes(
     "prompt",
     [
         "git checkout -b feat/4-exporter",
-        "git switch feat/4-exporter",
+        "git switch -c feat/4-exporter",
+        "git push origin feat/4-exporter",
         "Work on branch feat/4-exporter.",
-        "Create branch agent/other.",
     ],
 )
 def test_review_branch_instructions_still_launch(remote: Remote, prompt: str) -> None:
@@ -1268,13 +1285,17 @@ def test_review_branch_instructions_still_launch(remote: Remote, prompt: str) ->
     assert (remote.state / "sample.prompt").read_text() == prompt
 
 
-def test_start_ref_does_not_allow_switching_away_from_driver_branch(
-    remote: Remote, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    "instruction",
+    ["git switch -c agent/other", "git push origin HEAD:refs/heads/agent/other"],
+)
+def test_start_ref_does_not_allow_targeting_a_foreign_branch(
+    remote: Remote, capsys: pytest.CaptureFixture[str], instruction: str
 ) -> None:
-    remote.prompt.write_text("git switch agent/other")
+    remote.prompt.write_text(instruction)
     ref = "refs/heads/agent/other"
     assert launch(remote, "--fetch-ref", ref, "--start-ref", ref) == 1
-    assert "the driver owns the build branch. Use agent/sample" in (
+    assert "The driver owns the build branch. Use agent/sample" in (
         capsys.readouterr().err
     )
     assert remote.records("ssh", limits=True) == []
@@ -1374,8 +1395,8 @@ def test_prompt_refuses_unfetched_exact_refs_before_ssh(
     ("prompt", "target"),
     [
         ("Update the existing PR\nbranch.", "<branch>"),
-        ("Push commits to `agent/topic`.", "agent/topic"),
-        ("Run `git push origin HEAD:refs/heads/agent/topic`.", "agent/topic"),
+        ("Push commits to the PR branch.", "<branch>"),
+        ("Update `agent/topic`.", "agent/topic"),
     ],
 )
 def test_build_prompt_that_updates_a_pr_branch_needs_start_ref(

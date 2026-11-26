@@ -12,6 +12,8 @@ from tbhbdev.alpha.agent.decisions import config, request
 from tbhbdev.alpha.agent.model import NAME, Harness, Invalid, Profile, RunKind
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from tbhbdev.alpha.agent.model import Host, RunRequest, Settings
 
 COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -25,19 +27,30 @@ _REF_USE = re.compile(
     rf"({brief.SHORT_AGENT_REF})"
 )
 _UPDATE = re.compile(
-    r"\b(?:(?i:update|push (?:\w+ )?to) "
+    r"\b(?:(?i:(?P<update>update)|push (?:\w+ )?to) "
     r"(?:(?i:a|the|this|its|current|existing|branch) )*"
     r"|(?i:git push) [^\s`]+ (?:[^\s`:]+:)?)"
-    rf"(?:[`\"']?(refs/heads/{brief.BRANCH_REF}{brief.REF_END}|{brief.SHORT_AGENT_REF})"
+    rf"(?:[`\"']?(?P<ref>refs/heads/{brief.BRANCH_REF}{brief.REF_END}|{brief.SHORT_AGENT_REF})"
     r"|(?i:(?:PR|pull request)(?: #\d+)? (?:head|branch))\b)"
 )
-# Bare checkout targets can be paths; only these forms clearly change branches.
-_BRANCH_CHANGE = re.compile(
-    r"\bgit (?:checkout (?:-[bB]\b|"
-    rf"(?!{brief.COMMAND_ARGS} --(?: |$))[`\"']?(?:agent|origin)/)"
-    r"|switch(?![-\w]))"
-    r"|\b(?:create (?:a |the )?branch|new branch)\b",
-    re.IGNORECASE,
+_INSTRUCTION_START = r"(?:^|(?<=[.!?;]) +)(?:[-*+] |\d+[.)] )?(?:(?i:then) )?"
+_BRANCH_NAME = rf"(?:refs/heads/)?(?!refs/|[-./]){brief.BRANCH_REF}"
+_GIT_OPTIONS = r"(?: --?\w[\w-]*)*"
+# Bare checkout targets can be paths. A bare HEAD push leaves the branch unnamed.
+_BRANCH_COMMAND = re.compile(
+    rf"{_INSTRUCTION_START}(?:(?i:run|use|execute)(?: |: *))?[`\"']?(?i:git) "
+    rf"(?:(?:(?i:checkout){_GIT_OPTIONS} -[bB]|(?i:switch){_GIT_OPTIONS} -[cC]) [`\"']?"
+    rf"|(?i:push){_GIT_OPTIONS} (?!-)[^\s`\"']+ [`\"']?\+?"
+    rf"(?:[^\s`\"':]+:)?(?!HEAD{brief.REF_END}))"
+    rf"({_BRANCH_NAME})(?!:){brief.REF_END}",
+    re.MULTILINE,
+)
+_BRANCH_REQUEST = re.compile(
+    rf"{_INSTRUCTION_START}(?:(?i:work on|push (?:\w+ )?to) "
+    r"(?i:(?:a |the )?branch (?:named )?)[`\"']?"
+    r"|(?i:push (?:\w+ )?to) [`\"']?(?=refs/heads/|agent/))"
+    rf"({_BRANCH_NAME})(?=[`\"']|[.,;!?](?: |$)|$)",
+    re.MULTILINE,
 )
 
 
@@ -50,12 +63,12 @@ def unfetched_prompt_refs(prompt: str, fetch_refs: list[str]) -> list[str]:
     ]
 
 
-def _instructions(pattern: re.Pattern[str], prose: str) -> list[str | None]:
-    return [
-        match[1]
+def _instructions(pattern: re.Pattern[str], prose: str) -> Iterator[re.Match[str]]:
+    return (
+        match
         for match in pattern.finditer(prose)
         if not brief.prohibiting(prose, match.start())
-    ]
+    )
 
 
 def _unfetched_explicit_refs(
@@ -72,19 +85,17 @@ def _unfetched_explicit_refs(
     return [ref for ref in dict.fromkeys(explicit) if ref not in fetch_refs]
 
 
-def prompt_branch_problems(prompt: str, run: str) -> list[str]:
-    """Refuse explicit branch changes without guessing whether a target is a path."""
-    prose = "\n".join(
-        " ".join(block.split()) for block in brief.PROSE_BREAK.split(prompt)
-    )
-    for match in _BRANCH_CHANGE.finditer(prose):
-        if not brief.prohibiting(prose, match.start()):
-            return [
-                (
-                    "the brief asks to create or switch branches; "
-                    f"the driver owns the build branch. Use agent/{run}"
-                )
-            ]
+def _build_branch_problems(prose: str, allowed: str) -> list[str]:
+    for pattern in (_BRANCH_COMMAND, _BRANCH_REQUEST):
+        for match in _instructions(pattern, prose):
+            branch = match[1].removeprefix("refs/heads/")
+            if branch != allowed:
+                return [
+                    (
+                        f"the brief targets branch {branch}. "
+                        f"The driver owns the build branch. Use {allowed}"
+                    )
+                ]
     return []
 
 
@@ -96,18 +107,24 @@ def prompt_launch_problems(
     run: str,
 ) -> list[str]:
     """Check explicit ref uses and branch update instructions in a launch brief."""
-    if profile is Profile.BUILD:
-        branch_problems = prompt_branch_problems(prompt, run)
-        if branch_problems:
-            return branch_problems
-        # The driver creates this branch; it doesn't need fetching.
-        fetch_refs = [*fetch_refs, f"refs/heads/agent/{run}"]
     # Fold line wraps within a paragraph without changing ref case.
     prose = "\n".join(
         " ".join(block.split()) for block in brief.PROSE_BREAK.split(prompt)
     )
-    updates = _instructions(_UPDATE, prose)
-    named_refs = _instructions(_REF_USE, prose) + updates
+    if profile is Profile.BUILD:
+        branch = f"agent/{run}"
+        branch_problems = _build_branch_problems(prose, branch)
+        if branch_problems:
+            return branch_problems
+        # The driver creates this branch; it doesn't need fetching.
+        fetch_refs = [*fetch_refs, f"refs/heads/{branch}"]
+    # Build pushes to named branches already went through the instruction check.
+    updates = [
+        match["ref"]
+        for match in _instructions(_UPDATE, prose)
+        if profile is Profile.REVIEW or match["update"] or match["ref"] is None
+    ]
+    named_refs = [match[1] for match in _instructions(_REF_USE, prose)] + updates
     problems = [
         f"the brief names {ref}. Add `--fetch-ref {ref}`"
         for ref in _unfetched_explicit_refs(prompt, named_refs, fetch_refs)

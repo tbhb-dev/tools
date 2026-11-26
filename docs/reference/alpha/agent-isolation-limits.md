@@ -3,11 +3,11 @@ description: Agent isolation constraints, coordination, and cleanup.
 generated:
   - role: generated
     harness: codex:0.171.0
-    model: openai:gpt-6.1-sol
+    model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:474b1a9611b4330b
-    at: "2026-11-26T04:40:16Z"
+    session: sha-256-64:2a5807cd5db21177
+    at: "2026-11-26T15:18:13Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -43,9 +43,15 @@ tbhbdev alpha agent wait example
 
 Reviews accept `--ref` and resolve it before launch. `--schema` streams a JSON schema beside the prompt. Claude requires `--reason` and accepts `--claude-profile`. Use a `gemini-*` model for agy, or pass `--allow-non-gemini`. `--ops` selects the host's configured `ops` account.
 
-The driver owns the build branch `agent/<run-name>`. Before any host work, `agent exec --profile build` refuses a brief that asks to create or switch to another branch, prints a one-line reason naming the allowed branch, and exits with status 1. This applies with `--start-ref` too: that option selects the starting commit and push destination, while the work stays on the driver branch. Review launches keep their existing checks.
+The driver assigns `agent/<run-name>` to each build. Before contacting the host, `agent exec --profile build` checks the brief for instructions that target another branch. If the driver finds one, it prints the allowed branch and exits with status 1. With `--start-ref`, the host starts from the selected commit and publishes the result to the selected remote branch. The agent still works on `agent/<run-name>`.
 
-The check reuses the brief's case-insensitive text matcher for common forms: `git checkout` with optional `-b` or `-B`, `git switch` with optional `-c` or `-C`, `git branch NAME`, `git worktree add ... -b NAME`, and `create`, `switch to`, `check out`, `commit on`, or `work on` followed by `branch NAME`. It folds line wraps within paragraphs, accepts quoted names, and ignores trailing sentence punctuation. Branch names remain case-sensitive; `refs/heads/` is optional for the driver branch. A prohibition in the same clause, such as `Never create branch X`, passes. Read-only mentions such as `diff against branch X`, `base branch X`, and `git checkout -- FILE` pass. This is a text check for common instructions, not a shell or natural-language parser; computed names and other command forms can escape it.
+The check looks for these forms at the start of a paragraph, sentence, or list item.
+
+- `git checkout -b NAME`, `git checkout -B NAME`, `git switch -c NAME`, and `git switch -C NAME`.
+- `git push origin NAME` and `git push origin HEAD:refs/heads/NAME`, with or without options such as `-u` before `origin`.
+- `work on branch NAME`, `push to branch NAME`, and `push commits to agent/NAME`.
+
+Commands may start with a verb such as `Run`. The check accepts quotes around branch names and ignores the optional `refs/heads/` prefix. Branch names are case-sensitive. Briefs can describe commands in prose or ask to restore files with `git checkout -- FILE`.
 
 Each run gets a private `TMPDIR`. Run-host sets `PYTEST_DEBUG_TEMPROOT` to the same directory for pytest's default base directory. At exit, run-host removes the run's temporary tree without following symlinks. If removal fails, the run keeps its exit status.
 
