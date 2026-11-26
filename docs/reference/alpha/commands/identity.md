@@ -2,12 +2,12 @@
 description: Agent and model attribution, the Generated-by trailers, and the identity start time.
 generated:
   - role: generated
-    harness: claude-code:2.1.319
-    model: anthropic:claude-sonnet-5-5
+    harness: codex:0.171.0
+    model: openai:gpt-6.1-sol
     effort: high
-    surface: sdk-cli
-    session: sha-256-64:e23dce32b8825437
-    at: "2026-11-26T03:16:54Z"
+    surface: exec
+    session: sha-256-64:a2c94d584e371b6e
+    at: "2026-11-26T05:26:48Z"
 status: stable
 tags: [alpha]
 title: Identity
@@ -17,6 +17,8 @@ type: Reference
 # Identity
 
 `identity` records which agent and model made each edit and writes the `Generated-by` trailers.
+
+A run commits a merge of the base branch with `git merge --no-commit` followed by a plain `git commit`. Git gives the `prepare-commit-msg` hook the source `merge` for every merge commit, and in an agent session the hook stamps the trailers as it does for an ordinary commit, so the run's `TBHBDEV_REQUIRE_IDENTITY=1` check finds `Generated-by`. A merge outside an agent session and a squash get no trailers, and a rebase replay or cherry-pick is handled as before.
 
 ## Identity start time
 

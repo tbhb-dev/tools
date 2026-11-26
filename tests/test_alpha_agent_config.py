@@ -1221,6 +1221,9 @@ def test_host_limits_default_and_set() -> None:
     assert (host.load_limit, host.min_memory_available_percent) == (None, 20)
     assert (host.max_swap_used_percent, host.limits_warn_only) == (80, False)
     assert host.max_concurrent_runs == 3
+    assert (host.max_memory_pressure_avg10, host.max_memory_pressure_level) == (10, 4)
+    host = limits_host(max_memory_pressure_avg10=25, max_memory_pressure_level=2)
+    assert (host.max_memory_pressure_avg10, host.max_memory_pressure_level) == (25, 2)
     host = limits_host(
         load_limit=24,
         min_memory_available_percent=30,
@@ -1248,6 +1251,10 @@ def test_host_shim_setting(value: bool) -> None:
         ("load_limit", 0, "must be a positive integer"),
         ("min_memory_available_percent", 101, "at most 100"),
         ("max_swap_used_percent", 0, "must be a positive integer"),
+        ("max_memory_pressure_avg10", 101, "at most 100"),
+        ("max_memory_pressure_avg10", 0, "must be a positive integer"),
+        ("max_memory_pressure_level", 3, "must be 1 \\(normal\\)"),
+        ("max_memory_pressure_level", "x", "must be a positive integer"),
         ("limits_warn_only", "yes", "must be true or false"),
         ("build_shims", "yes", "must be true or false"),
         ("max_concurrent_runs", -1, "must be a non-negative integer"),

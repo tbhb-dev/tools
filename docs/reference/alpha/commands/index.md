@@ -12,6 +12,7 @@
 * [Guard GitHub polling](guard-gh-poll.md) - The hook that blocks GitHub polling, force pushes, and git hook bypasses.
 * [Guard scripts](guard-scripts.md) - The hook that keeps operator scripts in a fixed directory with fixed names.
 * [GitHub command-line tool shim](gh-shim.md) - The GitHub command-line tool wrapper on PATH that budgets agent sessions' calls.
+* [Guard agent model](guard-agent-model.md) - The hook that requires an explicit subagent model and checks the model of a fork.
 * [Guard GitHub config dir](guard-gh-config-dir.md) - The hook that blocks GitHub commands when GH_CONFIG_DIR is unset or empty.
 * [Agent environment](agent-env.md) - Running Codex or Antigravity with the GitHub command-line tool shim first on PATH.
 * [Pull request commands](pr.md) - Checking, creating, editing, readying, rerunning, closing and rebasing pull requests, and reading their checks.
@@ -21,6 +22,7 @@
 * [GitHub installation token](gh-app.md) - GitHub App installation tokens read through Connect.
 * [Repository commands](repo.md) - Repository bootstrap.
 * [Merge](merge.md) - Merging an approved pull request.
+* [Monorepo commands](monorepo.md) - Writing the path map for importing a public repository into the monorepo.
 * [Loop](loop.md) - Configuration validation, the shadow runner, and the store.
 * [Agent](agent.md) - Run coordination, host checks, signing parity, fetch refs, and build run expectations.
 * [Verify range](verify-range.md) - Per-commit attribution and signature checks over a range.
