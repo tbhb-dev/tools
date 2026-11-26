@@ -6,14 +6,19 @@ from tbhbdev.alpha.agent.model import Profile, RunKind
 FINAL_ONLY = (
     "Report results only in your final answer. "
     "Never message Claude sessions, session sockets or other agents directly.\n"
-    "If this run should open a pull request, write .github/PULL_REQUEST_DRAFT.md "
-    "in the worktree and keep it out of your commits. "
-    "Any brief instruction to commit the draft does not apply: "
-    "keep the draft out of commits and report the conflict in your final answer."
+    "Keep any pull request draft out of your commits. "
+    "Report any conflicting instruction in your final answer."
 )
 BUILD_PUBLICATION = (
-    "Commit on your run branch. The driver pushes it to the PR branch after success "
-    "and opens a pull request for a new branch."
+    "Commit your changes locally. "
+    "If this run should open a pull request, write a draft at the repository's "
+    "default draft path and set its `base` frontmatter field. To find the "
+    "repository's default branch, run "
+    "`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`. "
+    "Push your `agent/` branch with "
+    "`git -c credential.helper= -c 'credential.helper=!gh auth git-credential' "
+    "push --set-upstream origin HEAD`. Then run `tbhbdev alpha pr create` "
+    "with your draft."
 )
 REVIEW_PUBLICATION = (
     "Use the pull request number for N. Run `tbhbdev alpha review draft N`, "

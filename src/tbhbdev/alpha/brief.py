@@ -144,6 +144,12 @@ BRANCH_INSTRUCTION = re.compile(
     r"[`\"']?([^\s`\"';&|<>()]+)",
     re.IGNORECASE,
 )
+# A period can be part of a branch name or punctuation after a ref.
+REF_START = r"(?<![\w./@+-])"
+REF_END = r"(?=\.*(?:$|[\s`\"'(),;:<>\]]))"
+BRANCH_REF = r"[A-Za-z0-9._/-]*[A-Za-z0-9_/-]"
+SHORT_AGENT_REF = rf"agent/{BRANCH_REF}{REF_END}"
+AGENT_BRANCH_MENTION = re.compile(rf"{REF_START}{SHORT_AGENT_REF}")
 FIXED_BY_SECTION = {
     REQUIRED_HEADINGS[0]: (HOOK_RULE,),
     "## Commits": (COMMITS_BLOCK, NO_PUSH_BLOCK),
@@ -178,18 +184,29 @@ def check_hooks(text: str) -> list[str]:
     ]
 
 
-def branch_warnings(text: str, run: str | None = None) -> list[str]:
-    """Return warnings for instructions to use a different branch."""
+def branch_warnings(
+    text: str, run: str | None = None, *, fetch_refs: tuple[str, ...] = ()
+) -> list[str]:
+    """Warn about foreign branch instructions and unfetched agent branch mentions."""
     text = "\n".join(
         " ".join(line.split())
         for line in unicodedata.normalize("NFKC", text).splitlines()
     )
     allowed = "agent/" if run is None else f"agent/{run}"
-    warnings = []
+    branches = []
     for match in BRANCH_INSTRUCTION.finditer(text):
         branch = match[1].rstrip(".,")
         if branch.startswith("-") or prohibiting(text, match.start()):
             continue
+        branches.append(branch)
+    if run is not None:
+        branches.extend(
+            branch
+            for branch in AGENT_BRANCH_MENTION.findall(text)
+            if f"refs/heads/{branch}" not in fetch_refs
+        )
+    warnings = []
+    for branch in dict.fromkeys(branches):
         allowed_branch = (
             branch.startswith(allowed) if run is None else branch == allowed
         )

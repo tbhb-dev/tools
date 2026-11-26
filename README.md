@@ -62,7 +62,7 @@ Replace `request` with the complete existing run-host request for a public GitHu
 
 Supply a short-lived push token as `push_token`, or `null` to skip pushing. One SSH connection remains open until the run finishes. It shows run-host's normal output. After the harness exits with a new commit on `agent/NAME`, the host pushes that branch over GitHub HTTPS. A one-shot credential helper reads the token through an inherited pipe. Tokens stay out of arguments, environment variables, config files, and run files. Push disables git hooks. A failed push records one error line and doesn't retry. After a failed harness, nothing pushes. The `preflight` verb takes only a JSON `null` push token and refuses any other value.
 
-`result NAME` prints one JSON object with `v`, `name`, `rc`, `state`, `report`, `log_tail`, `branch`, `head`, `tools_commit` and `wheel_commit`. It reads the existing run files and limits the log to its last 200 lines. While a run continues, `rc` is `null`. Missing output fields use `null`. The `branch` field names only a branch the host pushed. For exit status 7, `head` contains one `SHA REF` line per stranded tip. `tools_commit` and `wheel_commit` identify the tools checkout and installed distribution, and absent provenance prints `unknown`. Run-host records both identities in its log header.
+`result NAME` prints one JSON object with `v`, `name`, `rc`, `state`, `report`, `log_tail`, `branch`, `head`, `tools_commit` and `wheel_commit`. It reads the existing run files and limits the log to its last 200 lines. While a run continues, `rc` is `null`. Missing output fields use `null`. The `branch` field names only a branch the host pushed. `tools_commit` and `wheel_commit` identify the tools checkout and installed distribution, and absent provenance prints `unknown`. Run-host records both identities in its log header.
 
 `kill NAME` stops the recorded process group after checking its identity. A supervisor records the run's completion. For a finished run it prints `already finished` and exits successfully.
 
@@ -72,7 +72,6 @@ Supply a short-lived push token as `push_token`, or `null` to skip pushing. One 
 | 2 | Refused command, account, envelope, or run data. |
 | 3 | Unknown run name. |
 | 4 | Branch push failed. |
-| 7 | The run left stranded commits. The head file and log record their full commit IDs and refs. |
 | Other | The run-host exit status, including 1 for a refused run, 124 for a timeout, and 143 for an interrupted run. |
 
 The GitHub credential (`gh`) is optional. Without it, a build run requests its GitHub token from the pull-requests App when the config sets `pull_requests_app_client_id` and `pull_requests_app_pem`, and otherwise has no GitHub credential. The `signing` setting also accepts an absolute path to an account-owned OpenSSH key file with no group or world access. Sandbox rules deny access to that path.

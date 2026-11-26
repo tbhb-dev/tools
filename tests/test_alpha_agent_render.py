@@ -8,19 +8,20 @@ def test_brief_and_launch() -> None:
     final_only = (
         "Report results only in your final answer. "
         "Never message Claude sessions, session sockets or other agents directly."
-        "\nIf this run should open a pull request, write .github/PULL_REQUEST_DRAFT.md "
-        "in the worktree and keep it out of your commits. "
-        "Any brief instruction to commit the draft does not apply: "
-        "keep the draft out of commits and report the conflict in your final answer.\n"
+        "\nKeep any pull request draft out of your commits. "
+        "Report any conflicting instruction in your final answer.\n"
     )
     assert render.brief(RunKind.EXEC, "example\n") == final_only + "example\n"
     build = render.brief(RunKind.EXEC, "example\n", profile=Profile.BUILD)
-    assert build == (
-        final_only + "Commit on your run branch. The driver pushes it to the PR branch "
-        "after success and opens a pull request for a new branch."
-        "\nexample\n"
-    )
-    assert "including" not in build
+    assert build.startswith(final_only + "Commit your changes locally. ")
+    assert "set its `base` frontmatter field" in build
+    assert "`gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`" in build
+    assert "Push your `agent/` branch" in build
+    assert "push --set-upstream origin HEAD" in build
+    assert "`tbhbdev alpha pr create` with your draft." in build
+    assert ".github/PULL_REQUEST_DRAFT.md" not in build
+    assert "driver" not in build
+    assert build.endswith("\nexample\n")
     review = render.brief(RunKind.START, "example", profile=Profile.REVIEW)
     assert "`tbhbdev alpha review draft N`" in review
     assert "set `commit_id` to the run's pinned checkout commit" in review
@@ -75,8 +76,7 @@ def test_build_brief_overrides_an_instruction_to_commit_the_draft() -> None:
     text = render.brief(
         RunKind.EXEC, "Commit .github/PULL_REQUEST_DRAFT.md.", profile=Profile.BUILD
     )
-    assert "Any brief instruction to commit the draft does not apply: " in text
-    assert (
-        "keep the draft out of commits and report the conflict in your final answer."
-        in text
+    assert text.index("Keep any pull request draft out of your commits.") < text.index(
+        "Commit .github/PULL_REQUEST_DRAFT.md."
     )
+    assert "Report any conflicting instruction in your final answer." in text
