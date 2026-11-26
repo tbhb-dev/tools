@@ -78,7 +78,8 @@ commands:
   guard-gh-config-dir PreToolUse hook: require nonempty GH_CONFIG_DIR for gh
   guard-scripts PreToolUse hook: keep scripts for the operator in
                ~/.local/libexec/tbhb
-  guard-agent-model PreToolUse hook: require a model on Agent launches
+  guard-agent-model PreToolUse hook: require a model on Agent launches, and
+               a fork only on a session model that isn't costly
   gh-shim      budget gh calls made by agent sessions and their scripts
   agent-env    launch a harness with the gh shim first on PATH
   pr           check | create | edit | hook: the pull request draft
