@@ -1,7 +1,7 @@
 """Report text is a pure function of literal facts."""
 
 from tbhbdev.alpha.agent import render
-from tbhbdev.alpha.agent.model import Profile, RunKind
+from tbhbdev.alpha.agent.model import Harness, Profile, RunKind
 
 
 def test_brief_and_launch() -> None:
@@ -80,3 +80,19 @@ def test_build_brief_overrides_an_instruction_to_commit_the_draft() -> None:
         "Commit .github/PULL_REQUEST_DRAFT.md."
     )
     assert "Report any conflicting instruction in your final answer." in text
+
+
+def test_only_agy_gets_the_subagent_rule() -> None:
+    """Only agy, which has no subagent control, is asked for none."""
+    rule = render.AGY_SUBAGENTS
+    for kind, profile in [
+        (RunKind.EXEC, Profile.BUILD),
+        (RunKind.EXEC, Profile.REVIEW),
+        (RunKind.START, Profile.BUILD),
+    ]:
+        text = render.brief(kind, "task", profile=profile, harness=Harness.AGY)
+        assert f"{rule}\ntask" in text
+    for harness in (Harness.CODEX, Harness.CLAUDE, None):
+        assert rule not in render.brief(RunKind.EXEC, "task", harness=harness)
+    assert "`invoke_subagent`" in rule
+    assert "`define_subagent`" in rule

@@ -485,9 +485,13 @@ def claude_expected(os: Os, profile: Profile, account: str) -> dict[str, object]
             "PYTEST_DEBUG_TEMPROOT": tmp,
             "PYTEST_XDIST_AUTO_NUM_WORKERS": "4",
             "GIT_NO_LAZY_FETCH": "1",
+            "CLAUDE_CODE_FORK_SUBAGENT": "0",
         },
         "disableAllHooks": True,
-        "permissions": {"allow": allow, "deny": [*rules, "WebFetch", "WebSearch"]},
+        "permissions": {
+            "allow": allow,
+            "deny": [*rules, "WebFetch", "WebSearch", "Agent"],
+        },
         "sandbox": {
             "allowUnsandboxedCommands": False,
             "autoAllowBashIfSandboxed": True,
@@ -1219,7 +1223,9 @@ def test_unsandboxed_skips_all_sandbox_checks(
             "env": {
                 "GH_CONFIG_DIR": f"{run_paths.tmpdir}/gh",
                 "DOCKER_CONFIG": f"{run_paths.tmpdir}/docker",
+                "CLAUDE_CODE_FORK_SUBAGENT": "0",
             },
+            "permissions": {"deny": ["Agent"]},
             "sandbox": {"enabled": False},
         }
     elif isinstance(value.detail, model.AgyPolicy):
@@ -1799,3 +1805,57 @@ def test_hooks_directory_refuses_extra_write_grants(field: str, suffix: str) -> 
         )
     with pytest.raises(Invalid, match="hooks"):
         policy.protect_host(configured, run, ())
+
+
+@pytest.mark.parametrize("unsandboxed", [False, True])
+@pytest.mark.parametrize("profile", Profile)
+def test_claude_pins_the_configured_subagent_model(
+    profile: Profile, *, unsandboxed: bool
+) -> None:
+    """A subagent that names no model gets the pin, forks are off, and Agent stays."""
+    config = settings(claude_subagent_model="example-small")
+    result = made(
+        Os.LINUX,
+        profile,
+        Harness.CLAUDE,
+        "agent",
+        unsandboxed=unsandboxed,
+        config=config,
+    )
+    value = claude_settings_of(result)
+    assert value["disableAllHooks"] is True
+    env = dig(value, "env")
+    assert isinstance(env, dict)
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "example-small"
+    assert env["CLAUDE_CODE_FORK_SUBAGENT"] == "0"
+    assert "Agent" not in strings(dig(value, "permissions", "deny"))
+
+
+@pytest.mark.parametrize("unsandboxed", [False, True])
+@pytest.mark.parametrize("profile", Profile)
+def test_claude_without_a_subagent_model_has_no_subagents(
+    profile: Profile, *, unsandboxed: bool
+) -> None:
+    result = made(Os.LINUX, profile, Harness.CLAUDE, "agent", unsandboxed=unsandboxed)
+    value = claude_settings_of(result)
+    env = dig(value, "env")
+    assert isinstance(env, dict)
+    assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
+    assert "Agent" in strings(dig(value, "permissions", "deny"))
+
+
+@pytest.mark.parametrize("unsandboxed", [False, True])
+def test_codex_carries_the_configured_subagent_model(*, unsandboxed: bool) -> None:
+    config = settings(
+        codex=model.Codex(WebSearch.LIVE, WebSearch.LIVE, "example-small")
+    )
+    result = made(
+        Os.LINUX,
+        Profile.BUILD,
+        Harness.CODEX,
+        "agent",
+        unsandboxed=unsandboxed,
+        config=config,
+    )
+    assert isinstance(result.detail, model.CodexPolicy)
+    assert result.detail.subagent_model == "example-small"

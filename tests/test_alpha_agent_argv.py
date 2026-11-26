@@ -94,6 +94,8 @@ CODEX_TAIL = (
     "-c",
     'web_search="live"',
     "-c",
+    "agents.enabled=false",
+    "-c",
     'features.network_proxy={enabled=true,mode="limited",domains={},unix_sockets={},dangerously_allow_all_unix_sockets=false,allow_local_binding=false}',
 )
 CODEX_BUILD_FS = (
@@ -906,3 +908,19 @@ def test_unsandboxed_argv_skips_harness_sandbox(
         assert command[0] == "agy"
         assert "--dangerously-skip-permissions" in command
         assert "--sandbox" not in command
+
+
+@pytest.mark.parametrize("kind", RunKind)
+def test_codex_pins_the_configured_subagent_model(kind: RunKind) -> None:
+    codex = model.Codex(model.WebSearch.LIVE, model.WebSearch.LIVE, "example-small")
+    result = built(Harness.CODEX, kind, Profile.BUILD, config=settings(codex=codex))
+    pin = 'agents.default_subagent_model="example-small"'
+    assert result[result.index(pin) - 1] == "-c"
+    assert "agents.enabled=false" not in result
+
+
+@pytest.mark.parametrize("kind", RunKind)
+def test_codex_without_a_subagent_model_disables_subagents(kind: RunKind) -> None:
+    result = built(Harness.CODEX, kind, Profile.BUILD)
+    assert result[result.index("agents.enabled=false") - 1] == "-c"
+    assert not any(a.startswith("agents.default_subagent_model") for a in result)

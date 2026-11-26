@@ -194,7 +194,14 @@ def _codex(
     proxy = network_proxy(settings)
     if full:
         return CodexPolicy(
-            CodexMode.FULL_ACCESS, (), (), deny, APPROVAL_POLICY, search, None
+            CodexMode.FULL_ACCESS,
+            (),
+            (),
+            deny,
+            APPROVAL_POLICY,
+            search,
+            None,
+            codex.subagent_model,
         )
     return CodexPolicy(
         CodexMode.PROFILE,
@@ -204,6 +211,7 @@ def _codex(
         APPROVAL_POLICY,
         search,
         proxy,
+        codex.subagent_model,
     )
 
 
@@ -217,6 +225,24 @@ def _claude_write_denies(profile: Profile, paths: RunPaths) -> tuple[str, ...]:
     return (paths.worktree, *protected_git(paths))
 
 
+def _subagent_env(model: str | None) -> dict[str, str]:
+    """Claude's environment that keeps a subagent off the run's model.
+
+    A call that names no model gets MODEL, and forks, which always run on the
+    parent's model, are off. The settings turn hooks off, so an Agent hook
+    could not enforce this.
+    """
+    env = {"CLAUDE_CODE_FORK_SUBAGENT": "0"}
+    if model is not None:
+        env["CLAUDE_CODE_SUBAGENT_MODEL"] = model
+    return env
+
+
+def _subagent_deny(model: str | None) -> list[str]:
+    """Without a configured model, a run has no subagents at all."""
+    return ["Agent"] if model is None else []
+
+
 def _claude(  # noqa: PLR0913 -- one value per policy input
     profile: Profile,
     paths: RunPaths,
@@ -224,6 +250,7 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
     env: dict[str, str],
     domains: tuple[str, ...],
     *,
+    subagent_model: str | None,
     full: bool,
 ) -> ClaudePolicy:
     if full:
@@ -234,7 +261,9 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
                 "env": {
                     "GH_CONFIG_DIR": env["GH_CONFIG_DIR"],
                     "DOCKER_CONFIG": env["DOCKER_CONFIG"],
+                    **_subagent_env(subagent_model),
                 },
+                "permissions": {"deny": _subagent_deny(subagent_model)},
                 "sandbox": {"enabled": False},
             }
         )
@@ -274,24 +303,25 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
     if paths.signing_socket is not None:
         network["allowUnixSockets"] = [paths.signing_socket]
     sandbox["network"] = network
+    run_env = {
+        k: env[k]
+        for k in (
+            "TMPDIR",
+            "PATH",
+            "TMPPREFIX",
+            "GH_CONFIG_DIR",
+            "DOCKER_CONFIG",
+            "GIT_NO_LAZY_FETCH",
+            "PYTEST_DEBUG_TEMPROOT",
+            "PYTEST_XDIST_AUTO_NUM_WORKERS",
+            "SSH_AUTH_SOCK",
+        )
+        if k in env
+    } | _subagent_env(subagent_model)
     return ClaudePolicy(
         {
             "disableAllHooks": True,
-            "env": {
-                k: env[k]
-                for k in (
-                    "TMPDIR",
-                    "PATH",
-                    "TMPPREFIX",
-                    "GH_CONFIG_DIR",
-                    "DOCKER_CONFIG",
-                    "GIT_NO_LAZY_FETCH",
-                    "PYTEST_DEBUG_TEMPROOT",
-                    "PYTEST_XDIST_AUTO_NUM_WORKERS",
-                    "SSH_AUTH_SOCK",
-                )
-                if k in env
-            },
+            "env": run_env,
             "permissions": {
                 "allow": [] if review else [f"Edit(/{p}/**)" for p in writes],
                 "deny": [
@@ -299,6 +329,7 @@ def _claude(  # noqa: PLR0913 -- one value per policy input
                     *denied_tools,
                     "WebFetch",
                     "WebSearch",
+                    *_subagent_deny(subagent_model),
                 ],
             },
             "sandbox": sandbox,
@@ -438,7 +469,15 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
         if harness is Harness.CODEX:
             detail = _codex(settings, profile, (), (), full=True)
         elif harness is Harness.CLAUDE:
-            detail = _claude(profile, paths, ((), (), ()), env, (), full=True)
+            detail = _claude(
+                profile,
+                paths,
+                ((), (), ()),
+                env,
+                (),
+                subagent_model=settings.claude.subagent_model,
+                full=True,
+            )
         else:
             detail = AgyPolicy(())
         return Policy(harness, profile, env, (), detail, tools_path)
@@ -485,6 +524,7 @@ def build(  # noqa: PLR0913 -- one value per fact the policy depends on
             (writes, deny, protected),
             env | {"PATH": tools_path},
             settings.sandbox.network_domains,
+            subagent_model=settings.claude.subagent_model,
             full=False,
         )
     else:

@@ -6004,3 +6004,20 @@ def bazel_base(run: run_host.Run, worktree: Path) -> Path:
         os.path.realpath(worktree).encode(), usedforsecurity=False
     ).hexdigest()
     return run.home / ".cache/bazel" / f"_bazel_{getpass.getuser()}" / name
+
+
+@pytest.mark.parametrize("harness", Harness)
+def test_the_brief_carries_the_harness_subagent_rule(
+    tmp_path: Path, harness: Harness
+) -> None:
+    """Only agy, which has no subagent control, gets the rule in its brief."""
+    run = make_run(
+        tmp_path,
+        harness=harness,
+        timeout=60 if harness is Harness.AGY else None,
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        reason="example reason" if harness is Harness.CLAUDE else None,
+    )
+    run_host.prepare_brief(run, tmp_path, "example task", preflight_only=True)
+    text = run.files.path("prompt").read_text()
+    assert (render.AGY_SUBAGENTS in text) is (harness is Harness.AGY)

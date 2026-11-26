@@ -759,7 +759,13 @@ def prepare_brief(
     if needs_shims:
         build_shims(run, workspace)
     run.files.write(
-        "prompt", render.brief(run.request.kind, text, profile=run.request.profile)
+        "prompt",
+        render.brief(
+            run.request.kind,
+            text,
+            profile=run.request.profile,
+            harness=run.request.harness,
+        ),
     )
     if not needs_shims:
         run.files.write("phase", "brief")

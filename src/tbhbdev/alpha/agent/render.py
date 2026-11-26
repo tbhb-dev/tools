@@ -1,13 +1,19 @@
 """The brief a harness receives, from literal text and run kind."""
 
 from tbhbdev.alpha.agent import transport
-from tbhbdev.alpha.agent.model import Profile, RunKind
+from tbhbdev.alpha.agent.model import Harness, Profile, RunKind
 
 FINAL_ONLY = (
     "Report results only in your final answer. "
     "Never message Claude sessions, session sockets or other agents directly.\n"
     "Keep any pull request draft out of your commits. "
     "Report any conflicting instruction in your final answer."
+)
+# agy has no setting, permission rule or per-run hook for its subagents, and a
+# subagent defaults to the run's model, so this rule is a request, not enforcement.
+AGY_SUBAGENTS = (
+    "Do not launch subagents: never call `invoke_subagent` or `define_subagent`. "
+    "Do the work yourself."
 )
 BUILD_PUBLICATION = (
     "Commit your changes locally. "
@@ -31,7 +37,15 @@ REVIEW_PUBLICATION = (
 )
 
 
-def brief(kind: RunKind, text: str, *, profile: Profile | None = None) -> str:
+def brief(
+    kind: RunKind,
+    text: str,
+    *,
+    profile: Profile | None = None,
+    harness: Harness | None = None,
+) -> str:
+    if harness is Harness.AGY:
+        text = f"{AGY_SUBAGENTS}\n{text}"
     if profile is Profile.BUILD:
         text = f"{BUILD_PUBLICATION}\n{text}"
     elif profile is Profile.REVIEW:

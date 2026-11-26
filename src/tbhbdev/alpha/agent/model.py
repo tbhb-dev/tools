@@ -91,10 +91,14 @@ class Sandbox:
 
 @dataclass(frozen=True)
 class Codex:
-    """Codex's `web_search` setting for each sandbox profile."""
+    """Codex's `web_search` setting for each sandbox profile.
+
+    `subagent_model` is the model Codex gives a subagent that names none.
+    """
 
     web_search_build: WebSearch
     web_search_review: WebSearch
+    subagent_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +131,7 @@ class Claude:
 
     default_profile: str
     profiles: tuple[ClaudeProfile, ...]
+    subagent_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -217,6 +222,7 @@ class CodexPolicy:
     approval_policy: str
     web_search: WebSearch
     network_proxy: NetworkProxy | None = None
+    subagent_model: str | None = None
 
 
 @dataclass(frozen=True)

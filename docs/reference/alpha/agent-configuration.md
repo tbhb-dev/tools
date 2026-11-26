@@ -65,6 +65,16 @@ Every `agent exec` run has the agent account’s full access. The account suppli
 
 Claude runs load user settings and the run’s generated settings. They ignore project settings and use only server configuration supplied for the run. The generated settings turn off hooks and the sandbox. Claude uses `bypassPermissions`. Codex marks each run clone as untrusted, which skips its project configuration.
 
+A run's own subagents must not inherit the run's model, which wastes a costly model's quota. Each harness gets the strongest control it has:
+
+| Harness | Control | Enforcement |
+| --- | --- | --- |
+| Claude | Settings `env` sets `CLAUDE_CODE_SUBAGENT_MODEL` to `[agent.claude] subagent_model`, which a subagent gets when its call names no model, and `CLAUDE_CODE_FORK_SUBAGENT=0`, which turns off forks, since a fork always runs on the parent's model. Without `subagent_model`, `permissions.deny` holds `Agent`, so the run has no subagents. | Enforced by Claude. |
+| Codex | `-c agents.default_subagent_model=<[agent.codex] subagent_model>`, which a spawned agent gets when its spawn names no model. Without `subagent_model`, `-c agents.enabled=false` turns the subagent tools off. | Enforced by Codex. |
+| agy | The rendered brief tells the run not to call `invoke_subagent` or `define_subagent`. | A prompt rule, not enforcement. |
+
+A subagent call that names a model keeps it, so the pin is a default, not a ceiling. Claude can't use a hook here, because the generated settings turn hooks off. agy has no setting, permission rule or per-run hook for subagents: its hooks load from `~/.gemini/config/hooks.json` or the project's `.agents/hooks.json`, and not from `--settings`. Both subagent keys are optional text and name a model as that harness spells it, an alias for Claude. Leaving one out removes subagents from that harness's runs.
+
 Run-host records phase `unknown` when it can't prove the group stopped and appends cleanup messages to the log. A review with unconfirmed shutdown skips posting.
 
 ```toml
@@ -97,6 +107,7 @@ build_write = [".local/state/mise", ".local/share/mise"]
 
 [agent.codex]
 web_search = { build = "live", review = "live" }
+# subagent_model = "example-model"
 
 [agent.otel]
 endpoint = "http://otlp.example.net:4318"
@@ -115,6 +126,7 @@ signing = "example-vault/example-signing/private_key"
 
 [agent.claude]
 default_profile = "primary"
+# subagent_model = "example-alias"
 
 [agent.claude.profiles.primary]
 token = "example/primary/token"
@@ -157,7 +169,7 @@ During the build probe, the installed identity hook stamps a commit with a `Gene
 
 The settings have these constraints:
 
-- The connection settings default to `ssh_connect_timeout = 15`, `ssh_keepalive_seconds = 30` and `ssh_keepalive_count_max = 3`. Each is a positive integer. Codex's `web_search` also has a default. The `[agent.codex]` table and each of its keys are optional, and each profile, `build` and `review`, defaults to `live`. A key can narrow it to `cached` or `disabled`.
+- The connection settings default to `ssh_connect_timeout = 15`, `ssh_keepalive_seconds = 30` and `ssh_keepalive_count_max = 3`. Each is a positive integer. Codex's `web_search` also has a default. The `[agent.codex]` table and each of its keys are optional, as is `subagent_model` in it and in `[agent.claude]`, and each profile, `build` and `review`, defaults to `live`. A key can narrow it to `cached` or `disabled`.
 - `[agent.otel]` is optional and takes one key, `endpoint`, a base URL with no credentials, path, query or fragment. Use `http` for a private-network collector such as `http://otlp.example.net:4318`, and use `https` elsewhere. For either scheme, the host must appear in `[agent.sandbox] network_domains`. That list matches hosts only, so it limits no port. The parser refuses control characters, a non-numeric, zero, zero-padded or out-of-range port and a malformed authority and quotes nothing from the value in its error. With it set, each Codex run's private `CODEX_HOME` gets a `config.toml` with an `[otel]` table that exports traces to `<endpoint>/v1/traces` and metrics to `<endpoint>/v1/metrics` over `otlp-http`. The table has no headers and sets `log_user_prompt = false`. It leaves the log exporter off, because Codex logs tool arguments and an output preview, which can hold a credential or a file's contents, and `log_user_prompt` guards only the prompt text. Whether to export logs is a later decision. Every run with an endpoint also gets `OTEL_RESOURCE_ATTRIBUTES` with `host.name`, `tbhb.account` and `tbhb.run.id`, and a run without one gets neither the file nor the variable. Tests check the generated file and the variable. A live check against codex-cli 0.167.2 loaded the generated file from a scratch `CODEX_HOME` and accepted it, and the same file with `protocol` set to an invalid value failed with `unknown variant` at `otel.trace_exporter.protocol`, so Codex reads the exporter tables as written. The export itself is unverified end to end, as are two claims about Codex: that it honors the endpoint, and that its traces leave out tool arguments. The private `CODEX_HOME` has mode `0700`. The table contains only the endpoint URL and the prompt flag, so the endpoint's reachability is the boundary.
 - `launch_wait_seconds`, `kill_grace_seconds` and `max_run_minutes` are positive integers. `agy_timeout` and the optional `agy_build_timeout` are bare seconds or a duration ending in `s`, `m` or `h`, up to 7 days. An agy review run uses `agy_timeout`, and an agy build run uses `agy_build_timeout`, which defaults to `3600s`. `--timeout` overrides both.
 - Path settings are non-blank strings without a null byte or a `..` part. The sandbox lists must be non-empty.

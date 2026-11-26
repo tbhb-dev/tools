@@ -68,6 +68,7 @@ def settings(
     *,
     sandbox: model.Sandbox = SANDBOX,
     codex: model.Codex = LIVE,
+    claude_subagent_model: str | None = None,
     reference: str = "example-vault/example-item/field",
 ) -> model.Settings:
     """Settings whose every secret reference is REFERENCE."""
@@ -93,7 +94,9 @@ def settings(
             for account in ("agent", "ops")
         ),
         claude=model.Claude(
-            "primary", (model.ClaudeProfile("primary", reference, reference),)
+            "primary",
+            (model.ClaudeProfile("primary", reference, reference),),
+            claude_subagent_model,
         ),
         hosts=(LINUX, MACOS),
     )

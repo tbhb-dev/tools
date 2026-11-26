@@ -326,14 +326,16 @@ def _sandbox(table: _Table) -> Sandbox:
 def _codex(table: _Table | None) -> Codex:
     if table is None:
         return Codex(WebSearch.LIVE, WebSearch.LIVE)
-    table.only("web_search")
+    table.only("web_search", "subagent_model")
+    model = _subagent_model(table)
     if "web_search" not in table.values:
-        return Codex(WebSearch.LIVE, WebSearch.LIVE)
+        return Codex(WebSearch.LIVE, WebSearch.LIVE, model)
     search = table.table("web_search")
     search.only("build", "review")
     return Codex(
         web_search_build=_search(search, "build"),
         web_search_review=_search(search, "review"),
+        subagent_model=model,
     )
 
 
@@ -403,7 +405,7 @@ def _credentials(table: _Table) -> tuple[Credentials, ...]:
 
 
 def _claude(table: _Table) -> Claude:
-    table.only("default_profile", "profiles")
+    table.only("default_profile", "profiles", "subagent_model")
     default = table.text("default_profile")
     profiles = table.table("profiles")
     if not profiles.values:
@@ -428,7 +430,16 @@ def _claude(table: _Table) -> Claude:
     selected = find_profile(tuple(found), default)
     if selected is None:
         table.fail("default_profile", f"names no profile in {profiles.label}")
-    return Claude(default_profile=selected.name, profiles=tuple(found))
+    return Claude(
+        default_profile=selected.name,
+        profiles=tuple(found),
+        subagent_model=_subagent_model(table),
+    )
+
+
+def _subagent_model(table: _Table) -> str | None:
+    """The model a subagent gets when it names none, or None to refuse subagents."""
+    return table.text("subagent_model") if "subagent_model" in table.values else None
 
 
 def _hosts(root: _Table) -> tuple[Host, ...]:
