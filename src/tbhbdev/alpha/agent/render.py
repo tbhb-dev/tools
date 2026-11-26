@@ -17,8 +17,11 @@ BUILD_PUBLICATION = (
 )
 REVIEW_PUBLICATION = (
     "Use the pull request number for N. Run `tbhbdev alpha review draft N`, "
-    "follow the generated draft's guidance and set `event: COMMENT`, "
-    "then run `tbhbdev alpha review check N --no-lint`. "
+    "and set `commit_id` to the run's pinned checkout commit. "
+    "Set `event: APPROVE` for GO or `event: REQUEST_CHANGES` for BLOCK or HOLD, "
+    "with non-empty Findings for a change request. "
+    "Follow the generated draft's guidance and run "
+    "`tbhbdev alpha review check N --no-lint`. "
     "Leave exactly one `.git/tbhb-alpha/review-N.md` for the run host to post."
 )
 
