@@ -2,9 +2,12 @@
 description: Mapping, importing and verifying a public repository's files at one commit.
 generated:
   - role: generated
-    harness: codex
-    model: openai:gpt-6
-    at: "2026-11-26T04:45:56Z"
+    harness: codex:0.171.0
+    model: openai:gpt-6.1-sol
+    effort: high
+    surface: exec
+    session: sha-256-64:bd4e81ec07b952a8
+    at: "2026-11-26T04:47:39Z"
 status: stable
 tags: [alpha, monorepo]
 title: Monorepo import
