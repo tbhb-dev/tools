@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6
-    at: "2026-11-26T04:41:42Z"
+    at: "2026-11-26T04:45:56Z"
 status: stable
 tags: [alpha, monorepo]
 title: Monorepo import
@@ -40,7 +40,7 @@ Before it writes anything, the command refuses when any of these hold:
 - A destination file already exists in the clone.
 - The commit subject would pass 72 characters.
 
-An import never overwrites a file. `--into` can be any folder of the clone, and destinations are relative to the clone's root. It also refuses a destination that leads outside the map's folder through a symbolic link in the clone. Git runs from the clone's root, not from the folder `--into` names. When a write, `git add`, or `git commit` fails, it unstages and removes the files and folders it created, which leaves the clone as it was. Files keep the source's bytes and executable bit, and a symbolic link in the source stays a symbolic link with the same target. A `replace` pair whose old text isn't in the file is an error, because a stale map would otherwise copy the file unchanged.
+An import never overwrites a file. `--into` can be any folder of the clone, and destinations are relative to the clone's root. It also refuses a destination that leads outside the map's folder through a symbolic link in the clone. Git runs from the clone's root, not from the folder `--into` names. When a write, `git add`, or `git commit` fails, it removes the files it staged from Git's index, then removes the files and folders it created, which leaves the clone as it was. Files keep the source's bytes and executable bit, and a symbolic link in the source stays a symbolic link with the same target. A `replace` pair whose old text isn't in the file is an error, because a stale map would otherwise copy the file unchanged.
 
 Subjects read `feat(FOLDER): import REPO at SHORT`, with the repository name and the first 7 characters of the hash. Its body gives the source repository and the full commit hash, then counts the copied, rewritten, and dropped files. The import makes a plain `git commit`, so any signing comes from the monorepo clone's Git config and the tool doesn't check the signature. Hooks of the monorepo clone run on the commit, which has no parent in the source repository. Exit code 0 is success. Exit code 2 is a refusal or a Git error.
 
@@ -51,9 +51,13 @@ Subjects read `feat(FOLDER): import REPO at SHORT`, with the repository name and
 It checks that:
 
 - The map accounts for every source file and lists none that the commit lacks.
+- Every file under the imported folder is a destination produced by the map. Unexpected files, retained drops, and old paths left after a move fail the check.
+- The imported folder and its parents contain no symbolic links. Directory links within the folder are never followed; they count as files whose link targets and kind must match the map.
 - Each copied file exists in the tree with the source's bytes, executable bit, and link or file kind.
 - Each rewritten file equals the source with the replacements of the map applied.
 - No copied or rewritten file has an executable reference to an old repository.
+
+Map gaps and stale replacements are reported alongside the other findings. Verification continues through the remaining mapped files and exits nonzero after reporting all the problems it found. Files outside the imported folder are excluded from the comparison.
 
 An executable reference is a line of a file that isn't prose. Markdown, reStructuredText, AsciiDoc, and plain text files count as prose, since prose that mentions an old repository is a dated record. A line matches when it has one of these:
 

@@ -6,7 +6,7 @@ import stat
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
-from tbhbdev.alpha.monorepo.pathmap import outputs
+from tbhbdev.alpha.monorepo.pathmap import rewrite_bytes
 from tbhbdev.alpha.monorepo.source import (
     EXECUTABLE,
     LINK,
@@ -85,23 +85,59 @@ def read(path: Path) -> tuple[str, bytes] | None:
     return None
 
 
+def inventory(tree: Path, dest: str) -> set[str]:
+    """Files and links in the imported area, without following directory links.
+
+    Raises:
+        MonorepoError: A component leading to the imported area is a link.
+    """
+    folder = (tree / dest).absolute()
+    for parent in (*reversed(folder.parents), folder):
+        if parent.is_symlink():
+            message = f"{parent}: symbolic link in destination path"
+            raise MonorepoError(message)
+    if folder.is_file():
+        return {dest}
+    return {
+        (root / name).relative_to(tree.absolute()).as_posix()
+        for root, _, names in folder.walk(follow_symlinks=False)
+        for name in names
+    }
+
+
 def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
     """Every problem found, one line each; none means the import is faithful."""
     listing = files(clone, commit)
-    if gaps := made.gaps(listing):
-        return gaps
+    problems = made.gaps(listing)
     patterns = rules(made.repo, go_modules(clone, listing))
-    problems: list[str] = []
+    writes = made.writes()
     try:
-        for src, dest, mode, data in outputs(clone, listing, made):
-            if (got := read(tree / dest)) is None:
-                problems.append(f"{dest}: missing from the tree")
-            elif got[0] != mode:
-                problems.append(f"{dest}: mode {got[0]}, source has {mode}")
-            elif got[1] != data:
-                problems.append(f"{dest}: differs from {src}")
-            elif mode != LINK:
-                problems.extend(references(dest, data, patterns))
+        actual = inventory(tree, made.dest)
     except MonorepoError as exc:
         problems.append(str(exc))
+        actual = set()
+    srcs = sorted(listing.keys() & writes.keys())
+    expected = {writes[src][0] for src in srcs}
+    problems.extend(
+        f"{dest}: not produced by the map" for dest in sorted(actual - expected)
+    )
+    for src, data in zip(
+        srcs, contents(clone, [listing[s].oid for s in srcs]), strict=True
+    ):
+        dest, entry = writes[src]
+        mode = listing[src].mode
+        try:
+            wanted = rewrite_bytes(src, data, entry)
+        except MonorepoError as exc:
+            problems.append(str(exc))
+            continue
+        got = read(tree / dest) if dest in actual else None
+        if got is None:
+            problems.append(f"{dest}: missing from the tree")
+        elif got[0] != mode:
+            problems.append(f"{dest}: mode {got[0]}, source has {mode}")
+        elif got[1] != wanted:
+            problems.append(f"{dest}: differs from {src}")
+        elif mode != LINK:
+            problems.extend(references(dest, wanted, patterns))
     return problems

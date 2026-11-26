@@ -216,6 +216,20 @@ def load(content: str) -> PathMap:
     return made
 
 
+def rewrite_bytes(src: str, data: bytes, entry: Rewrite | None) -> bytes:
+    """Apply the map's replacements to one source file.
+
+    Raises:
+        MonorepoError: A replacement's old text isn't in its file.
+    """
+    for old, new in entry.replace if entry else ():
+        if old.encode() not in data:
+            message = f"{src}: replacement {old!r} isn't in the file"
+            raise MonorepoError(message)
+        data = data.replace(old.encode(), new.encode())
+    return data
+
+
 def outputs(
     clone: str, listing: dict[str, Blob], made: PathMap
 ) -> Iterator[tuple[str, str, str, bytes]]:
@@ -230,10 +244,4 @@ def outputs(
         srcs, contents(clone, [listing[s].oid for s in srcs]), strict=True
     ):
         dest, entry = writes[src]
-        text = data
-        for old, new in entry.replace if entry else ():
-            if old.encode() not in text:
-                message = f"{src}: replacement {old!r} isn't in the file"
-                raise MonorepoError(message)
-            text = text.replace(old.encode(), new.encode())
-        yield src, dest, listing[src].mode, text
+        yield src, dest, listing[src].mode, rewrite_bytes(src, data, entry)

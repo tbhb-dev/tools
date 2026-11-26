@@ -10,7 +10,8 @@ import pytest
 
 from tbhbdev import alpha
 from tbhbdev.alpha import monorepo
-from tbhbdev.alpha.monorepo import pathmap, source, verify
+from tbhbdev.alpha.monorepo import source, verify
+from tbhbdev.alpha.monorepo.pathmap import Rewrite, dump, load
 
 PROG = "tbhbdev alpha monorepo"
 ORIGIN = "https://github.com/tbhb-dev/tools.git"
@@ -125,7 +126,7 @@ def test_map_copies_and_drops(src: Src, capsys: Capsys) -> None:
     dropped = cast("dict[str, str]", data["drop"])
     assert set(dropped) == {"uv.lock", ".github/workflows/ci.yml", "LICENSES/a.txt"}
     assert dropped["uv.lock"] == "root configuration (uv.lock)"
-    assert pathmap.load(out).drop == dropped
+    assert load(out).drop == dropped
 
 
 def test_map_takes_a_repo_and_needs_a_github_origin(src: Src, capsys: Capsys) -> None:
@@ -370,6 +371,149 @@ def test_verify_requires_the_map_to_account_for_every_file(
     assert "ghost: in the map but not in the source" in out
 
 
+@pytest.mark.parametrize(
+    "extra", ["surprise.txt", "uv.lock", "src/app.py", ".hidden", "nested/stray.txt"]
+)
+def test_verify_rejects_files_not_produced_by_the_map(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys, extra: str
+) -> None:
+    path, commit = src
+    made = make_map(
+        src,
+        tmp_path,
+        edit={
+            f'"src/app.py" = "{DEST}/src/app.py"': f'"src/app.py" = "{DEST}/moved.py"'
+        },
+    )
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    target = mono / DEST / extra
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(APP)
+    assert verify_exit(src, made, mono) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        f"{DEST}/{extra}: not produced by the map",
+        "verify: 1 problems",
+    ]
+
+
+@pytest.mark.parametrize("component", [".", "factory", DEST, f"{DEST}/src"])
+def test_verify_rejects_symlinked_destination_folders(
+    src: Src,
+    mono: Path,
+    capsys: Capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    component: str,
+) -> None:
+    path, commit = src
+    tmp_path = mono.parent
+    made = make_map(src, tmp_path)
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    folder = mono / component
+    outside = tmp_path / "outside"
+    folder.rename(outside)
+    folder.symlink_to(outside, target_is_directory=True)
+    reads: list[Path] = []
+    original = Path.read_bytes
+
+    def read_bytes(target: Path) -> bytes:
+        reads.append(target)
+        return original(target)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    assert verify_exit(src, made, mono) == 1
+    assert "verify: 0 problems" not in capsys.readouterr().out
+    assert not any(p.is_relative_to(folder) for p in reads)
+
+
+@pytest.mark.parametrize("missing_table", ["copy", "rewrite", "drop"])
+def test_verify_collects_map_gaps_and_other_differences(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys, missing_table: str
+) -> None:
+    path, commit = src
+    made = make_map(src, tmp_path)
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    mapping = load(made.read_text())
+    del mapping.copy["README.md"]
+    if missing_table == "copy":
+        mapping.copy["ghost"] = f"{DEST}/ghost"
+    elif missing_table == "rewrite":
+        mapping.rewrite["ghost"] = Rewrite(f"{DEST}/ghost", [])
+    else:
+        mapping.drop["ghost"] = "absent"
+    made.write_text(dump(mapping))
+    (mono / DEST / "ghost").write_bytes(b"not in the source\n")
+    (mono / DEST / "src/app.py").write_bytes(b"changed\n")
+    (mono / DEST / "bin/run.sh").unlink()
+    assert verify_exit(src, made, mono) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        "README.md: source file is not in the map",
+        "ghost: in the map but not in the source",
+        f"{DEST}/README.md: not produced by the map",
+        f"{DEST}/ghost: not produced by the map",
+        f"{DEST}/bin/run.sh: missing from the tree",
+        f"{DEST}/src/app.py: differs from src/app.py",
+        "verify: 6 problems",
+    ]
+
+
+def test_verify_collects_stale_rewrites_and_other_differences(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    path, commit = src
+    made = make_map(src, tmp_path)
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    mapping = load(made.read_text())
+    for name in ("AGENTS.md", "README.md"):
+        del mapping.copy[name]
+        mapping.rewrite[name] = Rewrite(f"{DEST}/{name}", [("missing text", "new")])
+    made.write_text(dump(mapping))
+    (mono / DEST / "src/app.py").write_bytes(b"changed\n")
+    (mono / DEST / "bin/run.sh").unlink()
+    (mono / DEST / "extra.txt").write_bytes(b"extra\n")
+    assert verify_exit(src, made, mono) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        f"{DEST}/extra.txt: not produced by the map",
+        "AGENTS.md: replacement 'missing text' isn't in the file",
+        "README.md: replacement 'missing text' isn't in the file",
+        f"{DEST}/bin/run.sh: missing from the tree",
+        f"{DEST}/src/app.py: differs from src/app.py",
+        "verify: 5 problems",
+    ]
+
+
+def test_verify_rejects_file_instead_of_destination_folder(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    made = make_map(src, tmp_path)
+    (mono / DEST).parent.mkdir(parents=True)
+    (mono / DEST).write_bytes(b"file instead of folder\n")
+    assert verify_exit(src, made, mono) == 1
+    out = capsys.readouterr().out
+    assert f"{DEST}: not produced by the map" in out
+    assert "verify: 6 problems" in out
+
+
+def test_verify_rejects_special_files(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    path, commit = src
+    made = make_map(src, tmp_path)
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    target = mono / DEST / "src/app.py"
+    target.unlink()
+    os.mkfifo(target)
+    assert verify_exit(src, made, mono) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        f"{DEST}/src/app.py: missing from the tree",
+        "verify: 1 problems",
+    ]
+
+
 def test_verify_reports_executable_references(
     tmp_path: Path, mono: Path, capsys: Capsys
 ) -> None:
@@ -476,7 +620,7 @@ def test_a_failing_hook_rolls_everything_back(
 
 def load_error(text: str) -> str:
     with pytest.raises(source.MonorepoError) as caught:
-        pathmap.load(text)
+        load(text)
     return str(caught.value)
 
 
@@ -506,8 +650,8 @@ def test_load_refuses_a_malformed_map(text: str, message: str) -> None:
 
 
 def test_load_accepts_a_rewrite_without_replacements() -> None:
-    made = pathmap.load(HEAD + '[rewrite.a]\ndest = "d/a"\n')
-    assert made.rewrite["a"] == pathmap.Rewrite("d/a", [])
+    made = load(HEAD + '[rewrite.a]\ndest = "d/a"\n')
+    assert made.rewrite["a"] == Rewrite("d/a", [])
 
 
 def test_git_reports_a_missing_git_and_a_failed_command(
