@@ -1164,18 +1164,27 @@ def test_prompt_without_hook_conflicts_launches(remote: Remote) -> None:
     [
         "git checkout -b feat/4-exporter",
         "git checkout -B feat/4-exporter",
-        "git checkout feat/4-exporter",
+        "git checkout -b",
+        "git checkout -B",
+        "git checkout agent/other",
+        "git checkout origin/main",
+        "git checkout 'origin/main'",
+        "git checkout agent/sample",
+        "git switch",
         "git switch feat/4-exporter",
         "git switch -c feat/4-exporter",
         "git switch -C feat/4-exporter",
-        "git branch feat/4-exporter",
-        "git worktree add .worktrees/exporter -b feat/4-exporter",
-        "work on branch feat/4-exporter",
+        "git switch --detach HEAD",
+        "git switch -",
+        "git switch --discard-changes feat/4-exporter",
+        "git switch agent/sample",
         "create branch feat/4-exporter",
-        "Switch to the branch named `feat/4-exporter`.",
-        "Check out branch 'feat/4-exporter'.",
-        'Commit on a branch "feat/4-exporter".',
-        "Work on\nbranch feat/4-exporter",
+        "Create a branch",
+        "Create the branch named `feat/4-exporter`.",
+        "Create a\nbranch feat/4-exporter.",
+        "Use a new branch.",
+        "new branch feat/4-exporter",
+        "Create branch refs/heads/agent/sample.",
         "Work on branch agent/sample. Then create branch feat/4-exporter.",
     ],
 )
@@ -1188,7 +1197,7 @@ def test_build_branch_instructions_refuse_before_any_host_work(
         "",
         (
             f"example agent: {remote.prompt}: "
-            "the brief asks to create or switch to branch feat/4-exporter; "
+            "the brief asks to create or switch branches; "
             "the driver owns the build branch. Use agent/sample\n"
         ),
     )
@@ -1206,19 +1215,35 @@ def test_build_branch_instructions_refuse_before_any_host_work(
         "Base branch agent/other.",
         "Never create branch feat/4-exporter.",
         "Do not\nswitch to branch feat/4-exporter.",
+        "Never run `git switch --detach HEAD`.",
+        "Do not create a new branch. Restore `git checkout README.md`.",
+        "Never create branch old. Then create no new branch.",
+        "git checkout README.md",
+        "git checkout src/",
+        "git checkout '*.py'",
+        "git checkout feat/4-exporter",
         "git checkout .",
         "Restore the file with `git checkout ./README.md`.",
         "git checkout ../README.md",
         "git checkout /tmp/README.md",
         "git checkout -- README.md",
         "git checkout HEAD -- README.md",
+        "git checkout origin/main -- README.md",
+        "git checkout agent/sample -- README.md",
+        "git checkout --detach HEAD",
+        "git checkout refs/heads/topic",
         "git branch --show-current",
-        "git switch agent/sample",
+        "git branch feat/4-exporter",
+        "git worktree add .worktrees/exporter -b feat/4-exporter",
+        "Switch to the branch named `feat/4-exporter`.",
+        "Check out branch 'feat/4-exporter'.",
+        'Commit on a branch "feat/4-exporter".',
+        "Work on\nbranch feat/4-exporter",
         "Work on branch agent/sample.",
-        "Create branch refs/heads/agent/sample.",
+        "git switch-backup feat/4-exporter",
     ],
 )
-def test_build_allows_reading_branches_and_its_driver_branch(
+def test_build_allows_restores_and_briefs_without_explicit_branch_changes(
     remote: Remote, prompt: str
 ) -> None:
     remote.prompt.write_text(prompt)

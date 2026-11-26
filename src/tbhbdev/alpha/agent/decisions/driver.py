@@ -31,6 +31,14 @@ _UPDATE = re.compile(
     rf"(?:[`\"']?(refs/heads/{brief.BRANCH_REF}{brief.REF_END}|{brief.SHORT_AGENT_REF})"
     r"|(?i:(?:PR|pull request)(?: #\d+)? (?:head|branch))\b)"
 )
+# Bare checkout targets can be paths; only these forms clearly change branches.
+_BRANCH_CHANGE = re.compile(
+    r"\bgit (?:checkout (?:-[bB]\b|"
+    rf"(?!{brief.COMMAND_ARGS} --(?: |$))[`\"']?(?:agent|origin)/)"
+    r"|switch(?![-\w]))"
+    r"|\b(?:create (?:a |the )?branch|new branch)\b",
+    re.IGNORECASE,
+)
 
 
 def unfetched_prompt_refs(prompt: str, fetch_refs: list[str]) -> list[str]:
@@ -65,25 +73,16 @@ def _unfetched_explicit_refs(
 
 
 def prompt_branch_problems(prompt: str, run: str) -> list[str]:
-    """Refuse the first foreign branch instruction using the brief's text matcher."""
+    """Refuse explicit branch changes without guessing whether a target is a path."""
     prose = "\n".join(
         " ".join(block.split()) for block in brief.PROSE_BREAK.split(prompt)
     )
-    allowed = f"agent/{run}"
-    for match in brief.BRANCH_INSTRUCTION.finditer(prose):
-        branch = match[1]
-        # Options and explicit paths cannot name a branch. Check before stripping
-        # prose punctuation so `git checkout .` remains a file restoration.
-        if branch.startswith(("-", ".", "/")) or brief.prohibiting(
-            prose, match.start()
-        ):
-            continue
-        branch = branch.rstrip(".,")
-        if branch.removeprefix("refs/heads/") != allowed:
+    for match in _BRANCH_CHANGE.finditer(prose):
+        if not brief.prohibiting(prose, match.start()):
             return [
                 (
-                    f"the brief asks to create or switch to branch {branch}; "
-                    f"the driver owns the build branch. Use {allowed}"
+                    "the brief asks to create or switch branches; "
+                    f"the driver owns the build branch. Use agent/{run}"
                 )
             ]
     return []
