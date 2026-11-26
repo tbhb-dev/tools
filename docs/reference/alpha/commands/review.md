@@ -4,10 +4,9 @@ generated:
   - role: generated
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
-    effort: high
     surface: exec
-    session: sha-256-64:71f96117983525eb
-    at: "2026-11-26T14:44:32Z"
+    session: sha-256-64:7ff87802c7781e66
+    at: "2026-11-26T15:06:54Z"
 status: stable
 tags: [alpha]
 title: Review commands
@@ -42,7 +41,7 @@ With `--json`, exit 2 still prints one object, `{"ok": false, "error": KIND, "me
 
 `tbhbdev alpha review verify N [--repo OWNER/NAME]` reads GitHub with the agent's `gh` account and evaluates the pull request at its current head. The repository defaults to the clone's origin. The pull request must be open, ready for review, and authored by an account other than `tbhb` or the reviews App.
 
-At least one check run must exist at the head. Every check run other than `reviews-verified` must finish as success, skipped, or neutral. In private repositories, every Actions job at the head must have run in a runner group whose name starts with `tbhb-dev-`.
+At least one check besides `reviews-verified` must have a run at the head. The latest run of each such check must finish as success, skipped, or neutral. In private repositories, each Actions job attempt at the head with a conclusion other than skipped must have a runner group whose name starts with `tbhb-dev-`.
 
 Tier 2 applies when any changed path matches a glob in `.github/review-tier-2-paths` at the base commit. The file holds one repository-relative glob per line, and renames count at both paths. All other pull requests use tier 1.
 

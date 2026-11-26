@@ -12,7 +12,7 @@ BASE = "b" * 40
 ROOT = "repos/o/r"
 PULL = f"{ROOT}/pulls/7"
 POLICY = f"{ROOT}/contents/.github/review-tier-2-paths?ref={BASE}"
-CHECKS = f"{ROOT}/commits/{HEAD}/check-runs?filter=all&per_page=100"
+CHECKS = f"{ROOT}/commits/{HEAD}/check-runs"
 RUNS = f"{ROOT}/actions/runs?head_sha={HEAD}&per_page=100"
 JOBS = f"{ROOT}/actions/runs/9/jobs?filter=all&per_page=100"
 
@@ -28,7 +28,7 @@ def run(
             return CompletedProcess(argv, 1, "", error)
         return CompletedProcess(argv, 0, "guard.py\n", "")
     if path in {RUNS, JOBS}:
-        assert mode == "private"
+        assert mode in {"private", "skipped job"}
     done = CompletedProcess(argv, 0, json.dumps(responses[path]), "")
     if path == PULL and mode == "changed":
         meta[0] = BASE
@@ -40,6 +40,8 @@ def run(
     [
         ("public", 0, f"reviews-verified: pass {HEAD}"),
         ("private", 1, "job lint ran on runner group Default"),
+        ("skipped job", 0, f"reviews-verified: pass {HEAD}"),
+        ("rerun", 0, f"reviews-verified: pass {HEAD}"),
         ("rename", 1, "1 independent approval variants at the head, need 2"),
         ("missing", 0, f"reviews-verified: pass {HEAD}"),
         ("api error", 1, f"gh could not read {POLICY}: forbidden"),
@@ -60,7 +62,7 @@ def test_verify(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    visibility = "private" if mode == "private" else "public"
+    visibility = "private" if mode in {"private", "skipped job"} else "public"
     meta: list[object] = [HEAD, BASE, "builder", "open", False, visibility, 2, 1]
     files = [{"filename": "doc.md"}, {"filename": "renamed.py"}]
     if mode == "rename":
@@ -75,16 +77,23 @@ def test_verify(
     commit = {"sha": HEAD, "commit": {"message": "fix: x"}}
     check = {"name": "ci", "status": "completed", "conclusion": "success"}
     ghost = {**approval, "id": 2, "user": None, "body": None}
+    job = {"name": "lint", "conclusion": "success", "runner_group_name": "Default"}
+    if mode == "skipped job":
+        job = {"name": "lint", "conclusion": "skipped"}
     responses: dict[str, object] = {
         PULL: meta,
         f"{PULL}/files?per_page=100": [[files[0]], [files[1]]],
         f"{PULL}/commits?per_page=100": [[commit]],
         f"{PULL}/reviews?per_page=100": [[approval], [ghost]],
-        CHECKS: [{"check_runs": [check]}],
+        f"{CHECKS}?filter=latest&per_page=100": [{"check_runs": [check]}],
         RUNS: [{"workflow_runs": [{"id": 9}]}],
-        JOBS: [{"jobs": [{"name": "lint", "runner_group_name": "Default"}]}],
+        JOBS: [{"jobs": [job]}],
         f"{ROOT}/git/commits/{BASE}": {},
     }
+    if mode == "rerun":
+        responses[f"{CHECKS}?filter=all&per_page=100"] = [
+            {"check_runs": [check, {**check, "conclusion": "failure"}]}
+        ]
     if mode == "bad sha":
         meta[0] = "abc"
     if mode == "bad count":

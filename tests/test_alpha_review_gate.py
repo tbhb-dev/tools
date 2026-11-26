@@ -1,4 +1,6 @@
+import subprocess
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -72,6 +74,11 @@ def test_pass() -> None:
 
 def test_no_check_runs() -> None:
     assert evaluate(checks=[]) == ["no check runs at the head"]
+
+
+def test_reviews_verified_needs_another_check_run() -> None:
+    own_run = check("reviews-verified", None, "in_progress")
+    assert evaluate([review()], checks=[own_run]) == ["no check runs at the head"]
 
 
 def test_pass_with_a_third_approval() -> None:
@@ -250,3 +257,27 @@ def test_tier_uses_repository_relative_globs() -> None:
     policy = "\n .github/workflows/** \nsrc/review*.py"
     assert gate.tier_for(["prefix/src/review.py", "docs/ci.yml"], policy) == 1
     assert gate.tier_for([".github/workflows/ci.yml"], policy) == 2
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/CODEOWNERS",
+        "src/tbhbdev/alpha/__init__.py",
+        "src/tbhbdev/alpha/agent/credentials.py",
+        "src/tbhbdev/alpha/agent/model.py",
+        "src/tbhbdev/alpha/agent/review_post.py",
+        "src/tbhbdev/alpha/agent/run_host.py",
+        "src/tbhbdev/alpha/gh_app.py",
+        "src/tbhbdev/alpha/identity.py",
+        "src/tbhbdev/cli.py",
+    ],
+)
+def test_approval_paths_exist_and_require_tier_two(path: str) -> None:
+    root = Path(__file__).resolve().parents[1]
+    policy = (root / ".github/review-tier-2-paths").read_text(encoding="utf-8")
+    assert gate.tier_for([path], policy) == gate.TIER_TWO
+    assert (root / path).is_file()
+    # Bazel runfiles contain the source files without Git metadata.
+    if (root / ".git").exists():
+        subprocess.run(["git", "cat-file", "-e", f"HEAD:{path}"], cwd=root, check=True)

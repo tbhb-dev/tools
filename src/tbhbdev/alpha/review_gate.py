@@ -155,13 +155,13 @@ def _outcome(check: Check) -> str:
 
 def check_reasons(pull: Pull) -> list[str]:
     """Failures and unfinished check runs other than this check."""
-    if not pull.checks:
+    checks = [check for check in pull.checks if check["name"] != CONTEXT]
+    if not checks:
         return ["no check runs at the head"]
     return [
         f"check {check['name']} is {_outcome(check)}"
-        for check in pull.checks
-        if check["name"] != CONTEXT
-        and not (
+        for check in checks
+        if not (
             check["status"] == "completed" and check["conclusion"] in GOOD_CONCLUSIONS
         )
     ]

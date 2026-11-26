@@ -49,7 +49,7 @@ def snapshot(path: str) -> Snapshot:
 
 
 def job_groups(root: str, head: str) -> list[tuple[str, str | None]]:
-    """Read runner group names for all job attempts at the head."""
+    """Read runner group names for non-skipped job attempts at the head."""
     runs = rows(f"{root}/actions/runs?head_sha={head}&per_page=100", "workflow_runs")
     return [
         (str(job["name"]), cast("str | None", job.get("runner_group_name")))
@@ -57,6 +57,7 @@ def job_groups(root: str, head: str) -> list[tuple[str, str | None]]:
         for job in rows(
             f"{root}/actions/runs/{run['id']}/jobs?filter=all&per_page=100", "jobs"
         )
+        if job.get("conclusion") != "skipped"
     ]
 
 
@@ -101,7 +102,7 @@ def inputs(repo: str, number: int) -> gate.Pull:
     ]
     checks = list(
         rows(
-            f"{root}/commits/{head}/check-runs?filter=all&per_page=100",
+            f"{root}/commits/{head}/check-runs?filter=latest&per_page=100",
             "check_runs",
         )
     )
