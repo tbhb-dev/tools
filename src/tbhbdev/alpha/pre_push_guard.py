@@ -1,4 +1,4 @@
-"""Refuse protected-branch pushes and unfetched rewrites.
+"""Refuse protected-branch pushes, unfetched rewrites, and invalid agent branches.
 
 A non-fast-forward update to an unprotected branch is allowed only when the
 remote tip git reports is the tip this clone fetched into
@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tbhbdev.alpha.agent.signing_parity import public_keys
+from tbhbdev.alpha.gh_shim import session_root
 from tbhbdev.alpha.identity import AGENT_EMAIL
 from tbhbdev.alpha.repo import git
 
@@ -39,6 +40,8 @@ SAFE = (
 )
 HOOK_ARGUMENTS = 2
 PROTECTED = frozenset({"refs/heads/main", "refs/heads/master"})
+AGENT_BRANCH_PREFIX = "refs/heads/agent/"
+AGENT_BRANCH_PREFIXES = (AGENT_BRANCH_PREFIX, "refs/heads/renovate/")
 AGENT_KEY = Path(".config/tbhbdev/agent-signing-key.pub")
 FINGERPRINT = re.compile(r"SHA256:\S+")
 RANGE_LIMIT = 1000
@@ -175,7 +178,7 @@ def commit_bytes(sha: str) -> bytes:
 def agent_commit_problems(
     ref: str, local: str, exclude: list[str], keys: SigningKeys
 ) -> list[str]:
-    """Name each agent commit the push adds without a trusted signature.
+    """Check signatures for newly pushed agent commits.
 
     ``exclude`` holds every remote-tracking and tag tip and the old sha git reports. A
     failed listing or a range over RANGE_LIMIT refuses the push.
@@ -215,7 +218,12 @@ def fetched_tip(remote: str, ref: str) -> str:
 
 
 def ref_problems(
-    remote: str, row: tuple[str, str, str], tips: Sequence[str], keys: SigningKeys
+    remote: str,
+    row: tuple[str, str, str],
+    tips: Sequence[str],
+    keys: SigningKeys,
+    *,
+    agent_push: bool,
 ) -> list[str]:
     """The refusals for one pushed ref: LOCAL, REF, and the remote's OLD value."""
     local, ref, old = row
@@ -225,7 +233,13 @@ def ref_problems(
             "push a new branch and open a pull request"
         )
         return [f"{ref}: {message}"]
-    if not local.strip("0"):
+    deleting = not local.strip("0")
+    if agent_push and ref.startswith("refs/heads/"):
+        if deleting and not ref.startswith(AGENT_BRANCH_PREFIX):
+            return [f"{ref}: deletion refused; agents may delete only agent/ branches"]
+        if not ref.startswith(AGENT_BRANCH_PREFIXES):
+            return [f"{ref}: push refused; push to an agent/<name> branch instead"]
+    if deleting:
         return []
     exclude = known_objects([*tips, old] if old.strip("0") else list(tips))
     problems = agent_commit_problems(ref, local, exclude, keys)
@@ -247,8 +261,11 @@ def push_problems(remote: str, lines: Sequence[str]) -> list[str]:
         rows.append((local, ref, old))
     tips = remote_tips()
     keys = SigningKeys()
+    agent_push = session_root(os.environ) is not None
     return [
-        problem for row in rows for problem in ref_problems(remote, row, tips, keys)
+        problem
+        for row in rows
+        for problem in ref_problems(remote, row, tips, keys, agent_push=agent_push)
     ]
 
 
