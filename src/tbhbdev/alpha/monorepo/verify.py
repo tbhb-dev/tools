@@ -39,14 +39,17 @@ OLD_REPOS = (
 WORKFLOW = "workflow uses an old repository"
 
 
-def rules(repo: str, modules: set[str]) -> list[tuple[str, re.Pattern[bytes]]]:
+def rules(
+    repo: str, modules: set[str], local_modules: set[str]
+) -> list[tuple[str, re.Pattern[bytes]]]:
     """The executable references to an old repository, as patterns.
 
     A workflow call or a Renovate preset from any repository of the owner is
     a reference, since the monorepo calls no old repository. Clone addresses
     name any repository in the design's path map or the source repository,
-    which covers Bazel overrides, scripts and Go imports. Go module paths from
-    the source's go.mod files add vanity paths.
+    which covers Bazel overrides, scripts and Go imports. The source's root
+    go.mod adds its vanity path. Modules declared in the imported tree stay
+    local, including nested fixtures and modules under an old module's path.
     """
     owner, _ = (re.escape(part).encode() for part in repo.split("/"))
     addresses = OLD_REPOS + b"|" + re.escape(repo.encode())
@@ -64,7 +67,9 @@ def rules(repo: str, modules: set[str]) -> list[tuple[str, re.Pattern[bytes]]]:
         found[f"Go path {module}"] = (
             rb"(?<![\w.-])" + re.escape(module.encode()) + rb"(?![\w-])"
         )
-    return [(rule, re.compile(pattern)) for rule, pattern in found.items()]
+    local = b"|".join(re.escape(m.encode()) for m in sorted(local_modules))
+    exclude = rb"(?!(?:" + local + rb")(?![\w.-]))" if local else b""
+    return [(rule, re.compile(exclude + pattern)) for rule, pattern in found.items()]
 
 
 def yaml_uses(data: bytes, owner: str) -> Iterator[int]:
@@ -119,13 +124,28 @@ def references(
 
 
 def go_modules(clone: str, listing: dict[str, Blob]) -> set[str]:
-    """The module paths of the source's go.mod files."""
-    mods = [src for src in listing if PurePosixPath(src).name == "go.mod"]
+    """The source repository's module path; nested modules aren't repositories."""
+    mods = [src for src in listing if src == "go.mod"]
     return {
         match.decode()
         for data in contents(clone, [listing[src].oid for src in mods])
         for match in MODULE.findall(data)
     }
+
+
+def tree_references(
+    scanned: list[tuple[str, bytes]], repo: str, modules: set[str]
+) -> Iterator[str]:
+    """Scan faithful files after collecting all imported module declarations."""
+    local_modules = {
+        m.decode()
+        for dest, data in scanned
+        if PurePosixPath(dest).name == "go.mod"
+        for m in MODULE.findall(data)
+    }
+    patterns = rules(repo, modules, local_modules)
+    for dest, data in scanned:
+        yield from references(dest, data, patterns, repo)
 
 
 def read(path: Path) -> tuple[str, bytes] | None:
@@ -190,7 +210,6 @@ def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
     """Every problem found, one line each; none means the import is faithful."""
     listing = files(clone, commit)
     problems = made.gaps(listing)
-    patterns = rules(made.repo, go_modules(clone, listing))
     writes = made.writes()
     try:
         actual = inventory(tree, made.dest, problems)
@@ -205,6 +224,7 @@ def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
     problems.extend(
         f"{dest}: not produced by the map" for dest in sorted(actual - expected)
     )
+    scanned: list[tuple[str, bytes]] = []
     for src, data in zip(
         srcs, contents(clone, [listing[s].oid for s in srcs]), strict=True
     ):
@@ -223,5 +243,6 @@ def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
         elif got[1] != wanted:
             problems.append(f"{dest}: differs from {src}")
         elif mode != LINK:
-            problems.extend(references(dest, wanted, patterns, made.repo))
+            scanned.append((dest, wanted))
+    problems.extend(tree_references(scanned, made.repo, go_modules(clone, listing)))
     return problems

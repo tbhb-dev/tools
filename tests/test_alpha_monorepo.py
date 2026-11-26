@@ -379,7 +379,7 @@ def test_references_parse_yaml_uses(key: str, indicator: str) -> None:
         f"      - {key}: {indicator}\n          o/action@v1\n"
     ).encode()
     assert list(
-        verify.references("ci.yaml", data, verify.rules("o/n", set()), "o/n")
+        verify.references("ci.yaml", data, verify.rules("o/n", set(), set()), "o/n")
     ) == ["ci.yaml:4: workflow uses an old repository"]
 
 
@@ -387,7 +387,7 @@ def test_references_parse_yaml_uses(key: str, indicator: str) -> None:
 def test_references_detect_source_repository_names(address: str) -> None:
     data = f"git clone {address}tbhb-dev/ansible.git\n".encode()
     assert list(
-        verify.references("clone.sh", data, verify.rules("o/n", set()), "o/n")
+        verify.references("clone.sh", data, verify.rules("o/n", set(), set()), "o/n")
     ) == ["clone.sh:1: address of an old repository"]
 
 
@@ -552,6 +552,10 @@ def test_verify_reports_references_to_every_old_repository(
     (path / "link").symlink_to("github.com/tbhb-dev/tools")
     commit = commit_all(path)
     made = make_map((path, commit), mono.parent)
+    mapping = load(made.read_text())
+    del mapping.copy["go.mod"]
+    mapping.drop["go.mod"] = "module moved to the monorepo root"
+    made.write_text(dump(mapping))
     assert run_import(f"{path}@{commit}", made, mono) == 0
     capsys.readouterr()
     assert Imported((path, commit), mono, made, capsys).problems() == [
@@ -559,9 +563,75 @@ def test_verify_reports_references_to_every_old_repository(
         f"{DEST}/ci/a.yml:4: workflow uses an old repository",
         f"{DEST}/ci/renovate.json:1: Renovate preset from an old repository",
         f"{DEST}/deps/MODULE.bazel:1: address of an old repository",
-        f"{DEST}/go.mod:1: Go path go.example.dev/tools",
         f"{DEST}/main.go:1: Go path go.example.dev/tools",
-        "verify: 6 problems",
+        "verify: 5 problems",
+    ]
+
+
+@pytest.mark.parametrize("location", ["go.mod", "testdata/nested/go.mod"])
+@pytest.mark.parametrize(
+    "module",
+    [
+        "example.com/fixture",
+        "github.com/tbhb-dev/tools",
+        "go.example.dev/tools/fixture",
+    ],
+)
+def test_verify_accepts_modules_declared_in_the_imported_tree(
+    src: Src, mono: Path, capsys: Capsys, location: str, module: str
+) -> None:
+    path, _ = src
+    (path / "go.mod").write_text("module go.example.dev/tools\n")
+    mod = path / location
+    mod.parent.mkdir(parents=True, exist_ok=True)
+    mod.write_text(f"module {module}\n")
+    (mod.parent / "main.go").write_text(f'import "{module}/pkg"\n')
+    commit = commit_all(path)
+    made = make_map((path, commit), mono.parent)
+    if location != "go.mod":
+        mapping = load(made.read_text())
+        del mapping.copy["go.mod"]
+        mapping.drop["go.mod"] = "module moved to the monorepo root"
+        made.write_text(dump(mapping))
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    assert verify_exit((path, commit), made, mono) == 0
+    assert capsys.readouterr().out == "verify: 0 problems\n"
+
+
+@pytest.mark.parametrize(
+    "module", ["go.example.dev/tools", "github.com/tbhb-dev/tools"]
+)
+def test_verify_rejects_old_module_imports_beside_local_fixtures(
+    src: Src, mono: Path, capsys: Capsys, module: str
+) -> None:
+    path, _ = src
+    fixture = path / "testdata/nested"
+    fixture.mkdir(parents=True)
+    (path / "go.mod").write_text(f"module {module}\n")
+    (fixture / "go.mod").write_text(f"module {module}/fixture\n")
+    (fixture / "main.go").write_text(
+        f'import "{module}/fixture/pkg"\n'
+        f'import "{module}/fixture-other/pkg"\n'
+        f'import "{module}/pkg"\n'
+    )
+    commit = commit_all(path)
+    made = make_map((path, commit), mono.parent)
+    mapping = load(made.read_text())
+    del mapping.copy["go.mod"]
+    mapping.drop["go.mod"] = "module moved to the monorepo root"
+    made.write_text(dump(mapping))
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    rule = (
+        "address of an old repository"
+        if module.startswith("github.com/")
+        else f"Go path {module}"
+    )
+    assert Imported((path, commit), mono, made, capsys).problems() == [
+        f"{DEST}/testdata/nested/main.go:2: {rule}",
+        f"{DEST}/testdata/nested/main.go:3: {rule}",
+        "verify: 2 problems",
     ]
 
 
@@ -616,15 +686,15 @@ def test_verify_reports_references_to_every_old_repository(
     ],
 )
 def test_references(dest: str, data: bytes, findings: list[tuple[int, str]]) -> None:
-    assert list(verify.references(dest, data, verify.rules("o/n", set()), "o/n")) == [
-        f"{dest}:{line}: {rule}" for line, rule in findings
-    ]
+    assert list(
+        verify.references(dest, data, verify.rules("o/n", set(), set()), "o/n")
+    ) == [f"{dest}:{line}: {rule}" for line, rule in findings]
 
 
 @pytest.mark.parametrize("data", [b"uses: > o/action@v1\n", b"uses: [\n", b"\xff"])
 def test_references_reject_invalid_yaml(data: bytes) -> None:
     findings = list(
-        verify.references("ci.yml", data, verify.rules("o/n", set()), "o/n")
+        verify.references("ci.yml", data, verify.rules("o/n", set(), set()), "o/n")
     )
     assert len(findings) == 1
     assert findings[0].startswith("ci.yml: invalid YAML:")
