@@ -6,14 +6,13 @@ import argparse
 import json
 import os
 import re
-import subprocess  # nosec B404 -- only used for Git exceptions
 import sys
 from pathlib import Path
 from typing import TypedDict, cast
 
-from tbhbdev.alpha.agent import runfiles, worktree
+from tbhbdev.alpha.agent import runfiles
 from tbhbdev.alpha.identity import as_str, parse_line, read_tail
-from tbhbdev.alpha.repo import read_hook_stdin
+from tbhbdev.alpha.repo import git, read_hook_stdin
 
 ENV = "TBHBDEV_RUN_STOP"
 MAX_BLOCKS = 3
@@ -52,31 +51,33 @@ def final_output(harness: str, data: dict[str, object]) -> str:
 def build_reason(run: StopRun) -> str | None:
     """Check the run checkout and the history of its branch."""
     workspace = Path(run["workspace"])
-    try:
-        if worktree.git(
-            workspace,
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=no",
-            "--ignore-submodules=untracked",
-        ):
-            return (
-                "Resolve the uncommitted tracked changes in the run worktree. "
-                "Check git status and commit the intended changes."
-            )
-        start = run["start"]
-        if start is not None and not worktree.git(
-            workspace,
-            "log",
+    status, tracked = git(
+        "-c",
+        "core.fsmonitor=false",
+        "--no-optional-locks",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=no",
+        "--ignore-submodules=dirty",
+        cwd=workspace,
+    )
+    if status:
+        return "Restore the run worktree and branch so Git can check the build."
+    if tracked:
+        return "Check git status and commit the intended tracked changes."
+    start = run["start"]
+    if start is not None:
+        _, commit = git(
+            "--no-replace-objects",
+            "rev-list",
             "-1",
-            "--format=%H",
             f"--ancestry-path={start}",
             f"{start}..{run['reference']}",
             "--",
-        ):
+            cwd=workspace,
+        )
+        if not commit:
             return "Finish the build and commit the result on the run branch."
-    except OSError, subprocess.SubprocessError:
-        return "Restore the run worktree and branch so Git can check the build."
     return None
 
 

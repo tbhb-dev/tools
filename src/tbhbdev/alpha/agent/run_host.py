@@ -522,7 +522,10 @@ def prepare_workspace(run: Run) -> Prepared:
     start = None
     if headless and run.request.profile is Profile.BUILD and not run.request.no_commit:
         with worktree.preparation_step("stop hook baseline"):
-            start = worktree.git(workspace, "rev-parse", "--verify", "HEAD")
+            start = push.head(workspace, f"agent/{run.files.name}")
+            if start is None:
+                message = "stop hook baseline: the run branch must be checked out"
+                raise Invalid(message)
     return Prepared(
         paths, delivery, before, bazel_bases(run.home, str(workspace)), start
     )

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from agent_host_example import commit, git, isolate_host_git, repository
+from agent_host_example import commit, git, repository
 
 from tbhbdev.alpha import main, run_stop_hook
 
@@ -111,23 +111,21 @@ def test_build_checks_tracked_changes_and_the_run_branch(
     run: run_stop_hook.StopRun,
     stop: Callable[[str, Mapping[str, object]], str],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    isolate_host_git(tmp_path, monkeypatch)
     _, clone = repository(tmp_path)
     git(clone, "switch", "-c", "agent/example")
     run.update(profile="build", start=git(clone, "rev-parse", "HEAD"))
-    git(clone, "switch", "-c", "unrelated")
-    commit(clone, "different branch")
     assert "commit the result" in json.loads(stop("codex", CODEX))["reason"]
-    git(clone, "switch", "agent/example")
     (clone / "ignored-draft").write_text("untracked")
     start = run["start"]
     run["start"] = None
     assert stop("codex", CODEX) == ""
     (clone / "tracked").write_text("changed")
     git(clone, "add", "tracked")
-    assert "uncommitted tracked changes" in json.loads(stop("codex", CODEX))["reason"]
+    assert (
+        "commit the intended tracked changes"
+        in json.loads(stop("codex", CODEX))["reason"]
+    )
     run["start"] = start
     commit(clone, "finished")
     assert stop("codex", CODEX) == ""

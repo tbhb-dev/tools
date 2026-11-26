@@ -700,10 +700,9 @@ def test_local_sandbox_commands_use_the_build_policy(
         )
         assert isinstance(value.detail, ClaudePolicy)
         assert command[1] == "-p"
-        assert (
-            json.loads(command[command.index("--settings") + 1])
-            == value.detail.settings
-        )
+        settings = json.loads(command[command.index("--settings") + 1])
+        assert settings.pop("hooks")["Stop"]
+        assert settings | {"disableAllHooks": True} == value.detail.settings
 
 
 def test_socket_listener_records_connections(short_probe_home: Path) -> None:

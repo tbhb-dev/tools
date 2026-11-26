@@ -6,7 +6,7 @@ generated:
     model: openai:gpt-6.2-sol
     surface: exec
     session: sha-256-64:1a6d4168da557dcf
-    at: "2026-11-26T01:58:42Z"
+    at: "2026-11-26T02:12:22Z"
 status: stable
 tags: [alpha]
 title: Agent configuration
@@ -65,7 +65,7 @@ The run clone has its own copy of the mirror's object store. The mirror never pr
 
 Every `agent exec` run has the agent account’s full access. The account supplies the boundary for Codex, Claude and agy, for both build and review profiles. Runs skip sandbox grants, denied-path overlap checks, executable trust checks and write-root audits. The launcher offers no sandboxed mode.
 
-`tbhbdev alpha install` registers Stop alongside the other user-level hooks for Claude, Codex, and Antigravity. Headless Claude runs use their generated settings with the Stop hook enabled and skip user and project settings. Headless Codex runs install and trust the Stop hook in their private configuration. Codex marks each run clone as untrusted, which skips its project configuration. Antigravity runs use the installed user-level Stop hook.
+`tbhbdev alpha install` registers Stop alongside the other user-level hooks for Claude, Codex, and Antigravity. Headless Claude runs use their generated settings with the Stop hook enabled and skip user and project settings. Unsandboxed Claude runs use `bypassPermissions`. Headless Codex runs install and trust the Stop hook in their private configuration. Codex marks each run clone as untrusted, which skips its project configuration. Antigravity runs use the installed user-level Stop hook.
 
 Run-host records phase `unknown` when it can't prove the group stopped. It keeps the harness exit status and appends cleanup messages to the existing log.
 

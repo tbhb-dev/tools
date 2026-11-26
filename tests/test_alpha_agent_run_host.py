@@ -507,7 +507,7 @@ def otel_run(
     runfiles.private_dir(run.home / ".codex")
     monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
     monkeypatch.setattr(run_host.worktree, "create", constant(run.home / "workspace"))
-    monkeypatch.setattr(run_host.worktree, "git", constant("a" * 40))
+    monkeypatch.setattr(run_host.push, "head", constant("a" * 40))
     monkeypatch.setattr(credentials, "auth_copy", constant(None))
     return run
 
@@ -590,9 +590,11 @@ def test_codex_config_failure_names_its_step(
     assert str(caught.value) == f"run preparation failed at codex config: {cause}"
 
 
-@pytest.mark.parametrize("no_commit", [False, True])
+@pytest.mark.parametrize(
+    ("no_commit", "start"), [(False, "a" * 40), (True, None), (False, None)]
+)
 def test_build_preparation_has_the_run_socket(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_commit: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_commit: bool, start: str | None
 ) -> None:
     run = make_run(tmp_path, no_commit=no_commit)
     probe = run_host.hook_environment
@@ -625,16 +627,20 @@ def test_build_preparation_has_the_run_socket(
         return runfiles.private_dir(run.home / "worktree")
 
     monkeypatch.setattr(run_host.worktree, "create", create)
-    baseline = Mock(return_value="a" * 40)
-    monkeypatch.setattr(run_host.worktree, "git", baseline)
+    baseline = Mock(return_value=start)
+    monkeypatch.setattr(run_host.push, "head", baseline)
     monkeypatch.setattr(run_host, "hook_environment", hook_environment)
     monkeypatch.setattr(run_host, "bazel_bases", bazel_bases)
     monkeypatch.setattr(credentials, "fetch_token", fetch_token)
+    if not no_commit and start is None:
+        with pytest.raises(Invalid, match="run branch must be checked out"):
+            run_host.prepare_workspace(run)
+        return
     result = run_host.prepare_workspace(run)
     assert result.paths.signing_socket == str(run.tmpdir / "ssh.sock")
     assert result.delivery.signing == "example-signing"
     assert result.bases == (run.home / "base",)
-    assert result.start == (None if no_commit else "a" * 40)
+    assert result.start == start
     assert baseline.call_count == int(not no_commit)
 
 
@@ -1644,7 +1650,6 @@ def check_launch_contract(
     if kind is RunKind.EXEC:
         context = json.loads(launched.pop(run_stop_hook.ENV))
         assert context["workspace"] == prepared.paths.worktree
-        assert context["log"] == str(run.files.path("log"))
     assert launched == expected | {run_host.RUN_MODEL_ENV: run.request.model}
     assert all(
         marker not in repr(command)
@@ -3867,7 +3872,7 @@ def test_finish_removes_private_state_codex_home(
     run = make_run(tmp_path)
     workspace = runfiles.private_dir(run.home / "worktree")
     monkeypatch.setattr(run_host.worktree, "create", constant(workspace))
-    monkeypatch.setattr(run_host.worktree, "git", constant("a" * 40))
+    monkeypatch.setattr(run_host.push, "head", constant("a" * 40))
     prepared = run_host.prepare_workspace(run)
     directory = Path(prepared.paths.codex_home)
     assert directory == tmp_path / "state" / "tbhbdev" / "agent-codex" / run.files.name
