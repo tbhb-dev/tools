@@ -4029,6 +4029,8 @@ def hook_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     # Mutmut's marker would make the child look up mutmut's config from the
     # temp repo; the child runs the module unmutated.
     env.pop("MUTANT_UNDER_TEST", None)
+    # An inherited model would stamp every child as an agent run.
+    env.pop(ai.RUN_MODEL_ENV, None)
     env.update(extra or {})
     return env
 
@@ -4398,7 +4400,7 @@ def test_e2e_malformed_trailer_is_rejected(wired: Path) -> None:
 @pytest.mark.parametrize(
     ("env", "stamped"),
     [
-        (CLAUDE_E2E, True),
+        (CLAUDE_E2E | {ai.RUN_MODEL_ENV: "claude-opus-5-5"}, True),
         (
             {
                 f"GIT_{role}_{field}": value
