@@ -47,6 +47,8 @@ type: Reference
 
 The pre-push guard requires each newly pushed commit with an agent author or committer to have a valid SSH signature from the local agent key or a signing key registered to `tbhb-agent` on GitHub. The guard accepts local signatures offline. When it needs the registered keys, it makes one request per push with a five-second timeout. If the request fails, the guard accepts the local key alone and explains the fallback when it refuses a commit.
 
+From a detected agent session, every branch creation or update must target a remote branch under `agent/` or `renovate/`, including when the push sends no new commits. Agents may delete only `agent/` branches. The guard names each refused ref.
+
 `tbhbdev alpha pr rebase N [N...]` asks Renovate to rebase open pull requests in the repository named by `origin`. It ticks the rebase checkbox only for pull requests from the Renovate bot and preserves the rest of each body. It skips checked boxes and stops at the first failure.
 
 `tbhbdev alpha pr check` and `pr create` run the rules size counter after linting the draft, comparing the draft's base branch on `origin` with `HEAD`. A missing remote-tracking ref is fetched once. It prints the added code and raw line counts with their limits: 400 code lines and 1,500 raw lines. If either count exceeds its limit, the check fails with a message to split the change into stacked pull requests. When both counts exceed their limits, the problem reports the code count. If the counter is unavailable or returns an error or invalid JSON, the command prints `size count unavailable: <reason>` as a warning and continues, and `pr create` still opens the pull request.

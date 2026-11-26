@@ -15,7 +15,7 @@ import pytest
 from fake_tool import pythonpath
 
 from tbhbdev import alpha
-from tbhbdev.alpha import install
+from tbhbdev.alpha import gh_shim, install
 from tbhbdev.alpha import pre_push_guard as pg
 
 ZERO = "0" * 40
@@ -78,11 +78,17 @@ def origin_url() -> str:
     return git(Path.cwd(), "config", "remote.origin.url")
 
 
-def guard(monkeypatch: pytest.MonkeyPatch, local: str, remote: str = ZERO) -> int:
+def guard(
+    monkeypatch: pytest.MonkeyPatch,
+    local: str,
+    remote: str = ZERO,
+    *,
+    ref: str = "refs/heads/topic",
+) -> int:
     monkeypatch.setattr(
         sys,
         "stdin",
-        io.StringIO(f"refs/heads/topic {local} refs/heads/topic {remote}\n"),
+        io.StringIO(f"refs/heads/topic {local} {ref} {remote}\n"),
     )
     return alpha.main(["pre-push-guard", "origin", origin_url()], "tbhbdev alpha")
 
@@ -414,9 +420,11 @@ AGENT_MAIL = "agent@tonyburns.net"
 
 
 @pytest.fixture(autouse=True)
-def no_ssh_agent(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep every test away from the user's SSH agent."""
+def isolated_agent_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests opt in to agent-session detection and never use an SSH agent."""
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    for name in (*gh_shim.ROOT_IDS, *gh_shim.MARKERS):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -493,18 +501,150 @@ def agent_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def push_agent(monkeypatch: pytest.MonkeyPatch, local: str) -> int:
-    return guard(monkeypatch, local)
+    return guard(monkeypatch, local, ref="refs/heads/agent/topic")
 
 
+@pytest.fixture
+def agent_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEX_SESSION_ID", "test-session")
+
+
+@pytest.mark.usefixtures("agent_session")
+@pytest.mark.parametrize(
+    "ref",
+    ["refs/heads/agent/x", "refs/heads/renovate/x", "refs/tags/x", "refs/notes/x"],
+)
 def test_an_agent_commit_signed_with_the_agent_key_passes(
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
     agent_key: Path,
     signing_key_request: Mock,
+    ref: str,
 ) -> None:
     head = agent_commit(repo, agent_key)
-    assert push_agent(monkeypatch, head) == 0
+    assert guard(monkeypatch, head, ref=ref) == 0
     signing_key_request.assert_not_called()
+
+
+@pytest.mark.usefixtures("agent_session")
+@pytest.mark.parametrize("branch", ["feat/x", "agent", "renovate", "agents/x"])
+def test_an_agent_push_requires_an_allowed_remote_branch_prefix(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    branch: str,
+) -> None:
+    head = commit(repo)
+    inspect_commits = Mock(wraps=pg.pushed_commits)
+    monkeypatch.setattr(pg, "pushed_commits", inspect_commits)
+    ref = f"refs/heads/{branch}"
+    assert guard(monkeypatch, head, ref=ref) == 1
+    assert capsys.readouterr().err == (
+        f"{ref}: push refused; push to an agent/<name> branch instead\n"
+    )
+    inspect_commits.assert_not_called()
+
+
+@pytest.mark.usefixtures("agent_session")
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "refs/heads/agent/x",
+        "refs/heads/feat/x",
+        "refs/heads/renovate/x",
+        "refs/tags/x",
+        "refs/notes/x",
+    ],
+)
+def test_an_agent_can_delete_only_agent_branches(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    ref: str,
+) -> None:
+    old = git(repo, "rev-parse", "origin/main")
+    denied = ref in {"refs/heads/feat/x", "refs/heads/renovate/x"}
+    assert guard(monkeypatch, ZERO, old, ref=ref) == int(denied)
+    err = f"{ref}: deletion refused; agents may delete only agent/ branches\n"
+    assert capsys.readouterr().err == (err if denied else "")
+
+
+@pytest.mark.usefixtures("agent_session")
+@pytest.mark.parametrize("source", ["origin/main", "origin/agent/x", "local-tag"])
+def test_an_agent_cannot_push_an_excluded_tip_to_a_feature_branch(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    agent_key: Path,
+    source: str,
+) -> None:
+    if source == "origin/main":
+        head = git(repo, "rev-parse", source)
+    else:
+        head = agent_commit(repo, agent_key)
+        if source == "origin/agent/x":
+            git(repo, "push", "-q", "origin", "HEAD:refs/heads/agent/x")
+            assert git(repo, "rev-parse", source) == head
+        else:
+            git(repo, "tag", source, head)
+    assert guard(monkeypatch, head, ref="refs/heads/feat/x") == 1
+    assert capsys.readouterr().err == (
+        "refs/heads/feat/x: push refused; push to an agent/<name> branch instead\n"
+    )
+
+
+@pytest.mark.usefixtures("agent_session")
+def test_an_agent_cannot_rewind_a_fetched_feature_branch(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base = git(repo, "rev-parse", "origin/main")
+    old = commit(repo)
+    git(repo, "push", "-q", "origin", "HEAD:refs/heads/feat/x")
+    assert git(repo, "rev-parse", "origin/feat/x") == old
+    assert guard(monkeypatch, base, old, ref="refs/heads/feat/x") == 1
+    assert capsys.readouterr().err == (
+        "refs/heads/feat/x: push refused; push to an agent/<name> branch instead\n"
+    )
+
+
+@pytest.mark.usefixtures("agent_session")
+def test_an_agent_push_checks_every_destination_branch(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    head = commit(repo)
+    rows = (
+        f"HEAD {head} refs/heads/agent/x {ZERO}\nHEAD {head} refs/heads/feat/x {ZERO}\n"
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(rows))
+    assert alpha.main(["pre-push-guard", "origin", origin_url()], "p") == 1
+    assert capsys.readouterr().err == (
+        "refs/heads/feat/x: push refused; push to an agent/<name> branch instead\n"
+    )
+
+
+def test_a_non_agent_commit_can_go_to_a_feature_branch(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert guard(monkeypatch, commit(repo), ref="refs/heads/feat/x") == 0
+
+
+@pytest.mark.parametrize("signed", [True, False])
+def test_a_human_can_push_an_agent_commit_to_a_feature_branch_if_signed(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent_key: Path,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    signed: bool,
+) -> None:
+    agent = agent_commit(repo, agent_key if signed else None)
+    head = commit(repo, "human")
+    assert guard(monkeypatch, head, ref="refs/heads/feat/x") == int(not signed)
+    err = (
+        f"refs/heads/feat/x: agent commit {agent} lacks a valid agent signature; "
+        "push refused\n"
+    )
+    assert capsys.readouterr().err == ("" if signed else err)
 
 
 def test_registered_signers_are_accepted_across_refs(
@@ -517,7 +657,10 @@ def test_registered_signers_are_accepted_across_refs(
     second = make_key(tmp_path, "second")
     one = agent_commit(repo, first)
     two = agent_commit(repo, second)
-    rows = f"HEAD {one} refs/heads/one {ZERO}\nHEAD {two} refs/heads/two {ZERO}\n"
+    rows = (
+        f"HEAD {one} refs/heads/agent/one {ZERO}\n"
+        f"HEAD {two} refs/heads/agent/two {ZERO}\n"
+    )
     monkeypatch.setattr(sys, "stdin", io.StringIO(rows))
     body = [
         {"key": key.with_suffix(".pub").read_text().strip()} for key in (first, second)
@@ -553,7 +696,7 @@ def test_an_agent_commit_without_the_agent_key_is_refused(
     head = agent_commit(repo, other)
     assert push_agent(monkeypatch, head) == 1
     assert capsys.readouterr().err == (
-        f"refs/heads/topic: agent commit {head} lacks a valid agent signature; "
+        f"refs/heads/agent/topic: agent commit {head} lacks a valid agent signature; "
         "push refused\n"
     )
 
@@ -568,7 +711,10 @@ def test_failed_key_lookup_falls_back_to_local_key(
     signing_key_request.configure_mock(side_effect=TimeoutError)
     other = agent_commit(repo, make_key(repo.parent, "other"))
     local = agent_commit(repo, agent_key)
-    rows = f"HEAD {other} refs/heads/one {ZERO}\nHEAD {local} refs/heads/two {ZERO}\n"
+    rows = (
+        f"HEAD {other} refs/heads/agent/one {ZERO}\n"
+        f"HEAD {local} refs/heads/agent/two {ZERO}\n"
+    )
     monkeypatch.setattr(sys, "stdin", io.StringIO(rows))
 
     assert alpha.main(["pre-push-guard", "origin", origin_url()], "p") == 1
@@ -576,7 +722,8 @@ def test_failed_key_lookup_falls_back_to_local_key(
     err = capsys.readouterr().err
     for ref in ("one", "two"):
         assert (
-            f"refs/heads/{ref}: agent commit {other} lacks a valid agent signature "
+            f"refs/heads/agent/{ref}: agent commit {other} "
+            "lacks a valid agent signature "
             "(could not fetch GitHub signing keys, checked the local key only); "
             "push refused\n"
         ) in err
@@ -699,7 +846,7 @@ def test_a_range_over_the_limit_is_refused(
     monkeypatch.setattr(pg, "RANGE_LIMIT", 1)
     assert push_agent(monkeypatch, tip) == 1
     assert capsys.readouterr().err == (
-        "refs/heads/topic: the push adds over 1 commits; push refused\n"
+        "refs/heads/agent/topic: the push adds over 1 commits; push refused\n"
     )
 
 
@@ -710,7 +857,7 @@ def test_a_range_that_cannot_be_listed_is_refused(
 ) -> None:
     assert push_agent(monkeypatch, "f" * 40) == 1
     assert capsys.readouterr().err == (
-        "refs/heads/topic: cannot list the commits to push; push refused\n"
+        "refs/heads/agent/topic: cannot list the commits to push; push refused\n"
     )
 
 
@@ -724,7 +871,7 @@ def test_an_unreadable_agent_key_refuses_closed(
     monkeypatch.setenv("HOME", str(tmp_path / "empty"))
     assert push_agent(monkeypatch, head) == 1
     assert capsys.readouterr().err == (
-        f"refs/heads/topic: agent commit {head} lacks a valid agent signature; "
+        f"refs/heads/agent/topic: agent commit {head} lacks a valid agent signature; "
         "push refused\n"
     )
 
