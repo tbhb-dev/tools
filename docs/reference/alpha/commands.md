@@ -4,7 +4,7 @@ generated:
   - role: generated
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
-    at: "2026-11-25T23:56:19Z"
+    at: "2026-11-26T00:18:24Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -45,7 +45,7 @@ type: Reference
 
 The pre-push guard requires each newly pushed commit with an agent author or committer to have a valid SSH signature from the local agent key or a signing key registered to `tbhb-agent` on GitHub. The guard accepts local signatures offline. When it needs the registered keys, it makes one request per push with a five-second timeout. If the request fails, the guard accepts the local key alone and explains the fallback when it refuses a commit.
 
-A branch update that adds a commit with an agent author or committer must target a remote branch under `agent/` or `renovate/`. The guard names the refused ref and tells the agent to push to an `agent/<name>` branch. Agents can delete branches under `agent/`.
+From a detected agent session, every branch creation or update must target a remote branch under `agent/` or `renovate/`, including when the push sends no new commits. Agents may delete only `agent/` branches. The guard names each refused ref.
 
 `tbhbdev alpha pr rebase N [N...]` asks Renovate to rebase open pull requests in the repository named by `origin`. It ticks the rebase checkbox only for pull requests from the Renovate bot and preserves the rest of each body. It skips checked boxes and stops at the first failure.
 
