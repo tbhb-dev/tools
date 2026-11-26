@@ -169,7 +169,7 @@ def pairs(value: object, name: str) -> list[tuple[str, str]]:
     if not isinstance(value, list) or not all(
         isinstance(item, list)
         and len(item) == PAIR
-        and all(isinstance(t, str) for t in item)
+        and all(isinstance(t, str) for t in cast("list[object]", item))
         for item in cast("list[object]", value)
     ):
         message = f"map value {name} must be a list of [old, new] strings"

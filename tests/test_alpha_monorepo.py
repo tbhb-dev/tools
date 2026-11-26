@@ -10,7 +10,8 @@ import pytest
 
 from tbhbdev import alpha
 from tbhbdev.alpha import monorepo
-from tbhbdev.alpha.monorepo import pathmap, source
+from tbhbdev.alpha.monorepo import source
+from tbhbdev.alpha.monorepo.pathmap import Rewrite, load
 
 PROG = "tbhbdev alpha monorepo"
 
@@ -318,9 +319,61 @@ def test_import_does_not_write_through_a_symlinked_folder(
     assert not list(outside.iterdir())
 
 
+def test_import_into_a_subfolder_commits_the_files(
+    src: Src, mono: Path, tmp_path: Path
+) -> None:
+    path, commit = src
+    (mono / "sub").mkdir()
+    (mono / "sub/keep.txt").write_text("keep\n")
+    commit_all(mono)
+    made = make_map(src, tmp_path)
+    assert run_import(f"{path}@{commit}", made, mono / "sub") == 0
+    listed = git(mono, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+    assert f"{DEST}/src/app.py" in listed
+    assert len([n for n in listed if n.startswith(f"{DEST}/")]) == 5
+    assert git(mono, "status", "--porcelain") == ""
+
+
+def untouched(mono: Path, before: str) -> None:
+    assert git(mono, "rev-parse", "HEAD") == before
+    assert git(mono, "status", "--porcelain") == ""
+    assert git(mono, "diff", "--cached", "--name-only") == ""
+    assert not (mono / "factory").exists()
+
+
+def test_an_ignored_destination_rolls_everything_back(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    path, commit = src
+    (mono / ".gitignore").write_text("factory/\n")
+    commit_all(mono)
+    before = git(mono, "rev-parse", "HEAD")
+    made = make_map(src, tmp_path)
+    assert run_import(f"{path}@{commit}", made, mono) == 2
+    assert "git add failed" in capsys.readouterr().err
+    untouched(mono, before)
+    assert git(mono, "status", "--porcelain", "--ignored") == ""
+
+
+def test_a_failing_hook_rolls_everything_back(
+    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+) -> None:
+    path, commit = src
+    before = git(mono, "rev-parse", "HEAD")
+    hook = mono / ".git/hooks/pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    made = make_map(src, tmp_path)
+    assert run_import(f"{path}@{commit}", made, mono) == 2
+    assert "git commit failed" in capsys.readouterr().err
+    untouched(mono, before)
+    hook.unlink()
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+
+
 def load_error(text: str) -> str:
     with pytest.raises(source.MonorepoError) as caught:
-        pathmap.load(text)
+        load(text)
     return str(caught.value)
 
 
@@ -350,8 +403,8 @@ def test_load_refuses_a_malformed_map(text: str, message: str) -> None:
 
 
 def test_load_accepts_a_rewrite_without_replacements() -> None:
-    made = pathmap.load(HEAD + '[rewrite.a]\ndest = "d/a"\n')
-    assert made.rewrite["a"] == pathmap.Rewrite("d/a", [])
+    made = load(HEAD + '[rewrite.a]\ndest = "d/a"\n')
+    assert made.rewrite["a"] == Rewrite("d/a", [])
 
 
 def test_git_reports_a_missing_git_and_a_failed_command(
