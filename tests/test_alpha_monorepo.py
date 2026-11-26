@@ -428,7 +428,12 @@ def test_verify_rejects_symlinked_destination_folders(
         return original(target)
 
     monkeypatch.setattr(Path, "read_bytes", read_bytes)
-    assert "verify: 0 problems" not in imported.problems()
+    expected = (
+        f"{DEST}/src: not produced by the map"
+        if component == f"{DEST}/src"
+        else f"{folder}: symbolic link in destination path"
+    )
+    assert expected in imported.problems()
 
 
 @pytest.mark.parametrize("missing_table", ["copy", "rewrite", "drop"])
@@ -565,6 +570,17 @@ def test_verify_reports_references_to_every_old_repository(
     [
         ("a.md", b"github.com/o/n\n", []),
         ("a.sh", b"ok\ngithub.com/o/n\n", [(2, "address of an old repository")]),
+        ("a.sh", b"\ngithub.com/o/n\n", [(2, "address of an old repository")]),
+        (
+            "ci.yaml",
+            b"url: https://github.com/o/n\n",
+            [(1, "address of an old repository")],
+        ),
+        (
+            "ci.yaml",
+            b"extends: ['github>o/preset']\n",
+            [(1, "Renovate preset from an old repository")],
+        ),
         ("ci.yml", b"uses: > # folded\r\n\r\n  o/action@v1\r\n", [(1, WORKFLOW)]),
         ("ci.yml", b"uses: |+\n  o/action@v1\n", [(1, WORKFLOW)]),
         ("ci.yml", b"uses:\n  o/action@v1\n", [(1, WORKFLOW)]),
