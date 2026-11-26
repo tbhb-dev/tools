@@ -1,5 +1,5 @@
 ---
-description: Read-only comparison of the installed build on each host.
+description: Comparison of the installed build on each host, without writes.
 generated:
   - role: generated
     harness: claude-code:2.1.319

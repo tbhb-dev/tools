@@ -14,8 +14,8 @@
 * [Agent environment](agent-env.md) - Running Codex or Antigravity with the GitHub command-line tool shim first on PATH.
 * [Pull request commands](pr.md) - Checking, creating, editing, readying, rerunning, closing and rebasing pull requests, and reading their checks.
 * [Pull request stats](pr-stats.md) - One JSON row per merged or closed pull request, with cycle time.
-* [Review commands](review.md) - Review drafts, threads, policy checks and the run host's review posting.
-* [Version check](version-check.md) - Read-only comparison of the installed build on each host.
+* [Review commands](review.md) - Review drafts, threads, policy checks and reviews that the run host posts.
+* [Version check](version-check.md) - Comparison of the installed build on each host, without writes.
 * [GitHub installation token](gh-app.md) - GitHub App installation tokens read through Connect.
 * [Repository commands](repo.md) - Repository bootstrap.
 * [Merge](merge.md) - Merging an approved pull request.

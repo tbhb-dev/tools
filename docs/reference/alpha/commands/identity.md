@@ -43,7 +43,7 @@ The `record` hooks set both fields once in the session record, and a resumed ses
 - A session with no launch file to claim takes `started_at` from its first hook event and omits `launch`.
 - A subagent takes `started_at` from the first hook event with its agent id, and inherits `launch` from its root session.
 
-The `trailer` hook writes both attributes from the session record.
+From the session record, the `trailer` hook writes both attributes.
 Where lines for the same agent meet, on an amend, a rebase, or an interactive squash, the hook merges them.
 Lines with the same key and every attribute except `started_at` become one line, the one with the earliest `started_at`.
 Lines that differ in another attribute, including `effort`, remain distinct.

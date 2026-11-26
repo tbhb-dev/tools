@@ -18,7 +18,7 @@ type: Reference
 
 `pre-push-guard REMOTE URL` refuses every push to `main` or `master`, and refuses a non-fast-forward push unless the remote tip git reports is the tip in `refs/remotes/REMOTE/BRANCH` of a branch under `refs/heads/`.
 It logs `REF rewritten OLD -> NEW` on stderr for each rewrite it allows.
-The hook cannot see which flag was used, so the command-line guard (`guard-gh-poll`) allows only `git push --force-with-lease` to branches other than `main` and `master`, and denies `--force`, `-f`, `--mirror`, `+REF` refspecs and `--force-if-includes` without a lease.
+Because the hook cannot see which flag was used, the command-line guard (`guard-gh-poll`) allows only `git push --force-with-lease` to branches other than `main` and `master`, and denies `--force`, `-f`, `--mirror`, `+REF` refspecs and `--force-if-includes` without a lease.
 The installed pre-push hook runs it before prek with the same arguments and input.
 Nonempty `SKIP` or `PREK_SKIP` refuses the push.
 Install fails when a foreign pre-push hook exists and asks you to move it aside.
