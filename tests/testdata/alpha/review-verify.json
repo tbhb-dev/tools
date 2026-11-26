@@ -1,0 +1,89 @@
+{
+  "repos/o/r/pulls/7": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "builder",
+    "open",
+    false,
+    "public",
+    2,
+    1
+  ],
+  "repos/o/r/pulls/7/files?per_page=100": [
+    [
+      {
+        "filename": "doc.md"
+      }
+    ],
+    [
+      {
+        "filename": "renamed.py",
+        "previous_filename": "guard.py"
+      }
+    ]
+  ],
+  "repos/o/r/pulls/7/commits?per_page=100": [
+    [
+      {
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "commit": {
+          "message": "fix: x\n\nGenerated-by: LLM harness=codex;model=m\n"
+        }
+      }
+    ]
+  ],
+  "repos/o/r/pulls/7/reviews?per_page=100": [
+    [
+      {
+        "id": 1,
+        "state": "APPROVED",
+        "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "user": {
+          "login": "tbhb-dev-agent-reviews[bot]"
+        },
+        "body": "Run r, claude m, judged head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, variant a."
+      }
+    ],
+    [
+      {
+        "id": 2,
+        "state": "APPROVED",
+        "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "user": null,
+        "body": null
+      }
+    ]
+  ],
+  "repos/o/r/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?filter=latest&per_page=100": [
+    {
+      "check_runs": [
+        {
+          "name": "ci",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    }
+  ],
+  "repos/o/r/actions/runs?head_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&per_page=100": [
+    {
+      "workflow_runs": [
+        {
+          "id": 9
+        }
+      ]
+    }
+  ],
+  "repos/o/r/actions/runs/9/jobs?filter=all&per_page=100": [
+    {
+      "jobs": [
+        {
+          "name": "lint",
+          "conclusion": "success",
+          "runner_group_name": "Default"
+        }
+      ]
+    }
+  ],
+  "repos/o/r/git/commits/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {}
+}

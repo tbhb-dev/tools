@@ -116,6 +116,8 @@ def test_posts_at_the_pinned_commit_with_identity_in_the_body(
 ) -> None:
     text = draft(event, HEAD.upper(), findings=event == "REQUEST_CHANGES")
     run, prepared = make(tmp_path, text)
+    variant = "a" if event == "APPROVE" else None
+    monkeypatch.setattr(run.request, "variant", variant)
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
     api = Api(monkeypatch)
     api.pull = reply(200, {"head": {"sha": head}})
@@ -129,7 +131,8 @@ def test_posts_at_the_pinned_commit_with_identity_in_the_body(
     assert payload["event"] == event
     assert payload["commit_id"] == HEAD
     assert payload["body"].startswith("## Verdict")
-    assert payload["body"].endswith(f"\n---\n{STAMP}\n")
+    stamp = f"{STAMP[:-1]}, variant a." if variant else STAMP
+    assert payload["body"].endswith(f"\n---\n{stamp}\n")
     assert run.files.path("review").read_text() == "github.com/o/r#7 99"
 
 
@@ -390,11 +393,3 @@ def test_a_failed_token_request_gives_none(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(credentials, "installation_token", fail)
     request = request_for(Profile.REVIEW)
     assert credentials.review_post_token(request, settings_for_account()) is None
-
-
-def test_stamp_records_the_configured_variant(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run, _ = make(tmp_path, draft())
-    monkeypatch.setattr(run.request, "variant", "a")
-    assert review_post.stamp(run) == f"{STAMP[:-1]}, variant a."

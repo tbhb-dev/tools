@@ -1,17 +1,12 @@
 """Read GitHub data and report the result of reviews-verified."""
 
-import argparse
 import json
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 from tbhbdev.alpha import pull_request as pr
 from tbhbdev.alpha import review_gate as gate
 from tbhbdev.alpha.review_doc import ReviewError
 
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-
-type Row = dict[str, object]
 TIER_PATH = ".github/review-tier-2-paths"
 PR_FIELDS = (
     "[.head.sha,.base.sha,.user.login,.state,.draft,"
@@ -36,11 +31,10 @@ def request(path: str, *options: str, optional: bool = False) -> str:
     return done.stdout
 
 
-def rows(path: str, key: str = "") -> Iterator[Row]:
-    """Yield rows from every page of a GitHub list."""
+def rows(path: str, key: str = "") -> list[dict[str, object]]:
+    """Read rows from every page of a GitHub list."""
     pages = json.loads(request(path, "--paginate", "--slurp"))
-    for page in pages:
-        yield from page[key] if key else page
+    return [item for page in pages for item in (page[key] if key else page)]
 
 
 def snapshot(path: str) -> Snapshot:
@@ -70,8 +64,8 @@ def inputs(repo: str, number: int) -> gate.Pull:
     if not (gate.HEAD_SHA.fullmatch(head) and gate.HEAD_SHA.fullmatch(base)):
         msg = "GitHub returned an invalid head or base SHA"
         raise ReviewError(msg)
-    files = list(rows(f"{path}/files?per_page=100"))
-    commits = list(rows(f"{path}/commits?per_page=100"))
+    files = rows(f"{path}/files?per_page=100")
+    commits = rows(f"{path}/commits?per_page=100")
     if (len(files), len(commits)) != (file_count, commit_count) or (
         not commits or commits[-1]["sha"] != head
     ):
@@ -100,12 +94,8 @@ def inputs(repo: str, number: int) -> gate.Pull:
         )
         for row in rows(f"{path}/reviews?per_page=100")
     ]
-    checks = list(
-        rows(
-            f"{root}/commits/{head}/check-runs?filter=latest&per_page=100",
-            "check_runs",
-        )
-    )
+    endpoint = f"{root}/commits/{head}/check-runs?filter=latest&per_page=100"
+    checks = cast("list[gate.Check]", rows(endpoint, "check_runs"))
     jobs = job_groups(root, head) if visibility == "private" else ()
     if snapshot(path) != info:
         msg = "the pull request changed during verification, run again"
@@ -113,7 +103,7 @@ def inputs(repo: str, number: int) -> gate.Pull:
     return gate.Pull(
         head,
         reviews,
-        cast("list[gate.Check]", checks),
+        checks,
         [cast("dict[str, str]", row["commit"])["message"] for row in commits],
         state=state,
         draft=draft,
@@ -135,20 +125,6 @@ def verify(number: int, repo: str | None) -> int:
     except (OSError, SystemExit, ValueError, KeyError, TypeError) as exc:
         print(" ".join(str(exc).splitlines()))
         return 1
-    for reason in reasons:
-        print(" ".join(reason.splitlines()))
-    if reasons:
-        return 1
-    print(f"{gate.CONTEXT}: pass {pull.head}")
-    return 0
-
-
-def main(argv: list[str], prog: str) -> int:
-    """Run verify for one pull request."""
-    parser = argparse.ArgumentParser(prog=prog, description=__doc__)
-    parser.add_argument("number", type=int)
-    parser.add_argument("--repo", metavar="OWNER/NAME")
-    args = parser.parse_args(argv)
-    if args.number < 1:
-        parser.error("PR number must be at least 1")
-    return verify(args.number, args.repo)
+    lines = reasons or [f"{gate.CONTEXT}: pass {pull.head}"]
+    print("\n".join(" ".join(line.splitlines()) for line in lines))
+    return int(bool(reasons))

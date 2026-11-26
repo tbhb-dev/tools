@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:fd30e431a328ff3e
-    at: "2026-11-26T15:21:17Z"
+    session: sha-256-64:f74a623ec82c05d1
+    at: "2026-11-26T16:04:56Z"
 status: stable
 tags: [alpha]
 title: Review commands
@@ -46,7 +46,7 @@ At least one check besides `reviews-verified` must have a run at the head. The l
 
 Tier 2 applies when any changed path matches a glob in `.github/review-tier-2-paths` at the base commit. The file holds one repository-relative glob per line, and renames count at both paths. All other pull requests use tier 1.
 
-The reviews App must approve the exact head, and any request for changes from the App at that head fails verification. Each run's latest review counts. Approvals must come from providers outside the set identified by the commits' `Generated-by` trailers. With a known builder, tier 1 needs one approval. When no trailer identifies a builder, both tiers require approvals from two different providers. A trailer that names an unknown harness fails verification. Tier 2 also requires approvals in two distinct variants. An older review stamp without a variant can count for tier 1.
+The reviews App must approve the exact head, and any request for changes from the App at that head fails verification. Each run's latest review counts. Approvals must come from providers outside the set identified by the commits' `Generated-by` trailers. Tier 1 needs one approval when every commit identifies a known builder. If any commit lacks a `Generated-by` trailer identifying a known builder, both tiers require approvals from two different providers. A trailer with an unknown harness fails verification. Tier 2 also requires approvals in two distinct variants. An older review stamp without a variant can count for tier 1.
 
 A pass prints `reviews-verified: pass <sha>` and exits 0. A failure prints one line per unmet condition and exits 1.
 

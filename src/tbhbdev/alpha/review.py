@@ -282,9 +282,8 @@ def thread_command(args: argparse.Namespace) -> int:
 
 def main(argv: list[str], prog: str) -> int:
     """Run a review command."""
-    commands = {"policy": review_policy.main, "verify": review_verify.main}
-    if argv and (handler := commands.get(argv[0])):
-        return handler(argv[1:], f"{prog} {argv[0]}")
+    if argv[:1] == ["policy"]:
+        return review_policy.main(argv[1:], f"{prog} policy")
     parser = argparse.ArgumentParser(prog=prog, description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     create = sub.add_parser("draft")
@@ -294,7 +293,9 @@ def main(argv: list[str], prog: str) -> int:
     check.add_argument("number", type=int)
     check.add_argument("--no-lint", action="store_true", help="skip prose linters")
     sub.add_parser("policy", help="check a worktree's review policy files")
-    sub.add_parser("verify", help="verify independent reviews at the pull request head")
+    verify = sub.add_parser("verify", help="verify reviews at the pull request head")
+    verify.add_argument("number", type=int)
+    verify.add_argument("--repo", metavar="OWNER/NAME")
     post = sub.add_parser("post")
     post.add_argument("number", type=int)
     post.add_argument("--author")
@@ -313,8 +314,12 @@ def main(argv: list[str], prog: str) -> int:
     args = parser.parse_args(argv)
     if args.number < 1:
         parser.error("PR number must be at least 1")
-    if args.command == "post":
-        return post_draft(args.number, args.author)
+    if args.command in {"post", "verify"}:
+        return (
+            post_draft(args.number, args.author)
+            if args.command == "post"
+            else review_verify.verify(args.number, args.repo)
+        )
     if args.command in {"threads", "resolve", "unresolve"}:
         return thread_command(args)
     if args.command in {"dismiss", "reply"}:

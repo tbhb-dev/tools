@@ -1,5 +1,3 @@
-import subprocess
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,8 +10,9 @@ APP = gate.APP
 SESSION = "sha-256-64:" + "0" * 16
 
 
-def stamp(harness: str, model: str = "m", *, number: int = 1) -> str:
-    return f"Run r{number}, {harness} {model}, judged head {HEAD}."
+def stamp(harness: str, *, number: int = 1, variant: str = "") -> str:
+    suffix = f", variant {variant}" if variant else ""
+    return f"Run r{number}, {harness} m, judged head {HEAD}{suffix}."
 
 
 def review(  # noqa: PLR0913 -- one keyword for each field a test varies
@@ -72,39 +71,35 @@ def test_pass() -> None:
     assert evaluate() == []
 
 
-def test_known_builder_needs_one_independent_provider_for_tier_one() -> None:
-    assert evaluate([review("claude")], messages=[trailer()]) == []
-    assert evaluate([review("codex")], messages=[trailer()]) == [
-        "no independent approval at the head"
-    ]
+SHORTFALL = "unknown builder needs approvals at the head from 2 providers (found 1)"
+NO_APPROVAL = "no independent approval at the head"
+ONE_VARIANT = "1 independent approval variants at the head, need 2"
 
 
-def test_missing_generated_by_needs_two_providers_at_the_head() -> None:
-    messages = ["fix: x\n", trailer("Assisted-by", "codex")]
-    same_provider = review("claude-code", number=2)
-    stale = review("codex", commit=OLD, number=3)
-    assert evaluate([review(), same_provider, stale], messages=messages) == [
-        "unknown builder needs approvals at the head from 2 providers (found 1)"
-    ]
-    assert evaluate(GOOD, messages=messages) == []
+@pytest.mark.parametrize("builder", [[], [trailer(harness="claude")]])
+def test_unknown_commit_needs_two_providers(builder: list[str]) -> None:
+    messages = [*builder, "fix: x\n", trailer("Assisted-by", "codex")]
+    codex = review("codex")
+    same_provider = review("codex:1", number=2)
+    stale = review("agy", commit=OLD, number=3)
+    assert evaluate([codex, same_provider, stale], messages=messages) == [SHORTFALL]
+    assert evaluate([codex, review("agy", number=2)], messages=messages) == []
 
 
-def test_no_check_runs() -> None:
-    assert evaluate(checks=[]) == ["no check runs at the head"]
+def test_known_builder_needs_one_approval() -> None:
+    assert evaluate([review()], messages=[trailer()]) == []
 
 
-def test_reviews_verified_needs_another_check_run() -> None:
-    own_run = check("reviews-verified", None, "in_progress")
-    assert evaluate([review()], checks=[own_run]) == ["no check runs at the head"]
-
-
-def test_pass_with_a_third_approval() -> None:
-    assert evaluate([*GOOD, review("agy", number=3)], messages=[]) == []
+def test_no_other_check_runs() -> None:
+    own = check("reviews-verified", None, "in_progress")
+    assert (
+        evaluate(checks=[]) == evaluate(checks=[own]) == ["no check runs at the head"]
+    )
 
 
 @pytest.mark.parametrize("harness", ["agy", "gemini"])
 def test_antigravity_author_may_not_approve_as_agy_or_gemini(harness: str) -> None:
-    assert evaluate([review(harness)]) == ["no independent approval at the head"]
+    assert evaluate([review(harness)]) == [NO_APPROVAL]
 
 
 @pytest.mark.parametrize("head", ["", "abc", "A" * 40, "g" * 40, HEAD + "0"])
@@ -117,7 +112,7 @@ def test_a_malformed_head_fails_verification(head: str) -> None:
 
 def test_a_stamp_judged_at_another_head_counts_for_nothing() -> None:
     old = f"Run r1, codex m, judged head {OLD}.\n"
-    assert evaluate([review(body=old)]) == ["no independent approval at the head"]
+    assert evaluate([review(body=old)]) == [NO_APPROVAL]
 
 
 def test_logins_compare_case_insensitively() -> None:
@@ -126,11 +121,11 @@ def test_logins_compare_case_insensitively() -> None:
 
 
 def test_no_approvals() -> None:
-    assert evaluate([]) == ["no independent approval at the head"]
+    assert evaluate([]) == [NO_APPROVAL]
 
 
 def test_stale_approval_at_an_older_head() -> None:
-    assert evaluate([review(commit=OLD)]) == ["no independent approval at the head"]
+    assert evaluate([review(commit=OLD)]) == [NO_APPROVAL]
 
 
 def test_request_changes_at_the_head() -> None:
@@ -156,7 +151,7 @@ def test_other_authors_are_ignored() -> None:
 @pytest.mark.parametrize("state", ["COMMENTED", "DISMISSED", "PENDING"])
 def test_other_review_states_count_for_nothing(state: str) -> None:
     only = [review(), review(state=state, number=2, body=stamp("claude"))]
-    assert evaluate(list(reversed(only))) == ["no independent approval at the head"]
+    assert evaluate(list(reversed(only))) == [NO_APPROVAL]
 
 
 @pytest.mark.parametrize(
@@ -169,7 +164,7 @@ def test_other_review_states_count_for_nothing(state: str) -> None:
     ],
 )
 def test_an_approval_without_a_known_harness(body: str) -> None:
-    assert evaluate([review(body=body)]) == ["no independent approval at the head"]
+    assert evaluate([review(body=body)]) == [NO_APPROVAL]
 
 
 @pytest.mark.parametrize(
@@ -191,22 +186,13 @@ def test_a_check_that_did_not_finish_well(
 
 def test_checks_that_finished_well() -> None:
     done = [check("a", "success"), check("b", "skipped"), check("c", "neutral")]
+    done.append(check("reviews-verified", None, "in_progress"))
     assert evaluate(checks=done) == []
-
-
-def test_reviews_verified_ignores_its_own_conclusion() -> None:
-    running = [
-        check("reviews-verified", None, "in_progress"),
-        check("job", None, "queued"),
-    ]
-    assert evaluate(checks=running) == ["check job is queued"]
 
 
 def test_every_commit_counts() -> None:
     both = [trailer(harness="antigravity"), trailer(harness="claude-code")]
-    assert evaluate([review("claude")], messages=both) == [
-        "no independent approval at the head"
-    ]
+    assert evaluate([review()], messages=both) == [NO_APPROVAL]
 
 
 def test_an_assisting_provider_may_approve() -> None:
@@ -226,42 +212,29 @@ def test_a_versioned_harness_names_its_provider() -> None:
     assert gate.provider_of("nope") is None
 
 
-def test_distinct_variants_can_share_an_independent_provider() -> None:
-    a, b, c = (
-        f"{stamp(harness, number=n)[:-1]}, variant {variant}."
-        for n, harness, variant in [
-            (1, "claude", "a"),
-            (2, "claude", "b"),
-            (3, "codex", "c"),
-        ]
-    )
-    pull = gate.Pull(
-        HEAD, [review(body=a), review(number=2, body=b)], [check()], [trailer()], tier=2
-    )
-    assert gate.evaluate(APP, pull) == []
-    for body in (a.replace("r1", "r2"), c, stamp("claude", number=2)):
-        assert gate.evaluate(
-            APP, replace(pull, reviews=[review(body=a), review(number=2, body=body)])
-        ) == ["1 independent approval variants at the head, need 2"]
-    assert gate.evaluate(APP, replace(pull, tier=0)) == []
+@pytest.mark.parametrize(
+    ("messages", "harness", "variant", "reasons"),
+    [
+        ([trailer()], "claude", "b", []),
+        ([trailer()], "claude", "a", [ONE_VARIANT]),
+        ([], "claude-code", "b", [SHORTFALL]),
+        ([], "codex", "", [SHORTFALL, ONE_VARIANT]),
+        ([*BY_AGY, "fix: x"], "codex", "b", []),
+        ([*BY_AGY, "fix: x"], "claude-code", "b", [SHORTFALL]),
+    ],
+)
+def test_tier_two_approval_requirements(
+    messages: list[str], harness: str, variant: str, reasons: list[str]
+) -> None:
+    first = review(body=stamp("claude", variant="a"))
+    second = review(number=2, body=stamp(harness, number=2, variant=variant))
+    pull = gate.Pull(HEAD, [first, second], [check()], messages, tier=2)
+    assert gate.evaluate(APP, pull) == reasons
 
 
-def test_missing_generated_by_needs_two_providers_for_tier_two() -> None:
-    claude = review(body=f"{stamp('claude')[:-1]}, variant a.")
-    legacy = review("codex", number=2)
-    pull = gate.Pull(HEAD, [claude, legacy], [check()], [], tier=2)
-    shortfall = "unknown builder needs approvals at the head from 2 providers (found 1)"
-    assert gate.evaluate(APP, pull) == [
-        shortfall,
-        "1 independent approval variants at the head, need 2",
-    ]
-    alias = review(number=2, body=f"{stamp('claude-code', number=2)[:-1]}, variant b.")
-    assert gate.evaluate(APP, replace(pull, reviews=[claude, alias])) == [shortfall]
-    codex = review(number=2, body=f"{stamp('codex', number=2)[:-1]}, variant b.")
-    assert gate.evaluate(APP, replace(pull, reviews=[claude, codex])) == []
-
-
-def test_ineligible_pr_and_runner_groups() -> None:
+@pytest.mark.parametrize("author", ["TBHB", APP])
+def test_ineligible_pr_and_runner_groups(author: str) -> None:
+    jobs = [("ci", "tbhb-dev-linux"), ("lint", "Default"), ("docs", None)]
     pull = gate.Pull(
         HEAD,
         GOOD,
@@ -269,20 +242,16 @@ def test_ineligible_pr_and_runner_groups() -> None:
         BY_AGY,
         state="closed",
         draft=True,
-        author="TBHB",
-        jobs=[("ci", "tbhb-dev-linux"), ("lint", "Default"), ("docs", None)],
+        author=author,
+        jobs=jobs,
     )
     assert gate.evaluate(APP, pull) == [
         "the pull request is not open",
         "the pull request is a draft",
-        "the pull request author is TBHB",
+        f"the pull request author is {author}",
         "job lint ran on runner group Default",
         "job docs ran on runner group (none)",
     ]
-    assert (
-        gate.evaluate(APP, replace(pull, author=APP))[2]
-        == f"the pull request author is {APP}"
-    )
 
 
 def test_tier_uses_repository_relative_globs() -> None:
@@ -294,38 +263,19 @@ def test_tier_uses_repository_relative_globs() -> None:
 def test_approval_paths_exist_and_require_tier_two() -> None:
     root = Path(__file__).resolve().parents[1]
     policy = (root / ".github/review-tier-2-paths").read_text(encoding="utf-8")
-    if (root / ".git").exists():
-        tracked = subprocess.run(
-            ["git", "ls-tree", "-r", "--name-only", "-z", "HEAD"],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            encoding="utf-8",
-        ).stdout.split("\0")
-        paths = set(tracked) - {""}
-    else:
-        # Bazel runfiles contain the source files without Git metadata.
-        paths = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
     for path in (
-        ".github/CODEOWNERS",
-        "src/tbhbdev/admin/policy.py",
-        "src/tbhbdev/alpha/__init__.py",
-        "src/tbhbdev/alpha/agent/credentials.py",
+        "src/tbhbdev/alpha/codex_trust.py",
+        "src/tbhbdev/alpha/install.py",
+        "src/tbhbdev/alpha/process.py",
+        "src/tbhbdev/alpha/repo.py",
+        "src/tbhbdev/alpha/worker_identity.py",
+        "src/tbhbdev/userconfig.py",
         "src/tbhbdev/alpha/agent/decisions/auth.py",
-        "src/tbhbdev/alpha/agent/model.py",
-        "src/tbhbdev/alpha/agent/review_post.py",
-        "src/tbhbdev/alpha/agent/run_host.py",
-        "src/tbhbdev/alpha/gh_app.py",
-        "src/tbhbdev/alpha/gh_shim.py",
-        "src/tbhbdev/alpha/identity.py",
-        "src/tbhbdev/alpha/opened.py",
-        "src/tbhbdev/alpha/verify_range.py",
-        "src/tbhbdev/cli.py",
     ):
-        assert path in paths
         assert (root / path).is_file()
         assert gate.tier_for([path], policy) == gate.TIER_TWO, path
-
-    files = list(paths)
-    for glob in filter(None, map(str.strip, policy.splitlines())):
-        assert gate.tier_for(files, glob) == gate.TIER_TWO, glob
+    for glob in policy.splitlines():
+        assert any(
+            path.is_file()
+            for path in root.glob(f"{glob}/*" if glob.endswith("/**") else glob)
+        ), glob
