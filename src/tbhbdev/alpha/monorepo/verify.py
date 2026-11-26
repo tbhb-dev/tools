@@ -1,8 +1,13 @@
 """Check an imported tree against its source commit and path map."""
 
 import os
+import re
 import stat
-from typing import TYPE_CHECKING
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, cast
+
+import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 from tbhbdev.alpha.monorepo.pathmap import rewrite_bytes
 from tbhbdev.alpha.monorepo.source import (
@@ -14,9 +19,113 @@ from tbhbdev.alpha.monorepo.source import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Iterator
 
     from tbhbdev.alpha.monorepo.pathmap import PathMap
+    from tbhbdev.alpha.monorepo.source import Blob
+
+# Prose that names an old repository is a dated record and stays as written.
+PROSE = frozenset({".md", ".mdx", ".rst", ".txt", ".adoc"})
+MODULE = re.compile(rb"^module\s+(\S+)", re.MULTILINE)
+# Repositories in the design's "Where each repository goes" path map
+# (wiki/designs/monorepo/C-layout-and-ownership.md), using the source repository
+# names, not their destination folders. Standalone repos stay out.
+OLD_REPOS = (
+    rb"tbhb-dev/(?:agent-capacity|agent-config|agent-memories|ansible|"
+    rb"bazel-r2-cache|dashboard|design|dotfiles|evals|event-gateway|github-metrics|"
+    rb"go\.tbhb\.dev|ops|pm|renovate-config|research|rules|runner-smoke|sm|spikes|"
+    rb"telemetry|tools|wiki|work)"
+)
+WORKFLOW = "workflow uses an old repository"
+
+
+def rules(repo: str, modules: set[str]) -> list[tuple[str, re.Pattern[bytes]]]:
+    """The executable references to an old repository, as patterns.
+
+    A workflow call or a Renovate preset from any repository of the owner is
+    a reference, since the monorepo calls no old repository. Clone addresses
+    name any repository in the design's path map or the source repository,
+    which covers Bazel overrides, scripts and Go imports. Go module paths from
+    the source's go.mod files add vanity paths.
+    """
+    owner, _ = (re.escape(part).encode() for part in repo.split("/"))
+    addresses = OLD_REPOS + b"|" + re.escape(repo.encode())
+    found = {
+        WORKFLOW: rb"\buses:\s*"
+        rb"(?:[>|][-+]?[ \t]*(?:#[^\r\n]*)?\r?\n\s*)?['\"]?" + owner + rb"/",
+        "Renovate preset from an old repository": rb"['\"](?:github|local)>"
+        + owner
+        + rb"/",
+        "address of an old repository": rb"github\.com[/:](?:"
+        + addresses
+        + rb")(?![\w-])",
+    }
+    for module in sorted(modules):
+        found[f"Go path {module}"] = (
+            rb"(?<![\w.-])" + re.escape(module.encode()) + rb"(?![\w-])"
+        )
+    return [(rule, re.compile(pattern)) for rule, pattern in found.items()]
+
+
+def yaml_uses(data: bytes, owner: str) -> Iterator[int]:
+    """Lines of parsed YAML keys whose uses value names the old owner."""
+    pending = list(
+        cast("Iterator[Node]", yaml.compose_all(data, Loader=yaml.SafeLoader))
+    )
+    seen: set[int] = set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, SequenceNode):
+            pending.extend(node.value)
+        elif isinstance(node, MappingNode):
+            for key, value in node.value:
+                if (
+                    isinstance(key, ScalarNode)
+                    and key.value == "uses"
+                    and isinstance(value, ScalarNode)
+                    and value.value.strip().startswith(f"{owner}/")
+                ):
+                    yield key.start_mark.line + 1
+                pending.append(value)
+
+
+def references(
+    dest: str, data: bytes, patterns: list[tuple[str, re.Pattern[bytes]]], repo: str
+) -> Iterator[str]:
+    """One finding for each line of a non-prose file that matches a rule."""
+    if PurePosixPath(dest).suffix in PROSE:
+        return
+    found: dict[int, str] = {}
+    is_yaml = PurePosixPath(dest).suffix in {".yml", ".yaml"}
+    if is_yaml:
+        try:
+            found.update(
+                (line, WORKFLOW)
+                for line in yaml_uses(data, repo.split("/", maxsplit=1)[0])
+            )
+        except yaml.YAMLError as exc:
+            yield f"{dest}: invalid YAML: {exc}"
+    for rule, pattern in patterns:
+        if is_yaml and rule == WORKFLOW:
+            continue
+        for match in pattern.finditer(data):
+            number = data.count(b"\n", 0, match.start()) + 1
+            found.setdefault(number, rule)
+    for number, rule in sorted(found.items()):
+        yield f"{dest}:{number}: {rule}"
+
+
+def go_modules(clone: str, listing: dict[str, Blob]) -> set[str]:
+    """The module paths of the source's go.mod files."""
+    mods = [src for src in listing if PurePosixPath(src).name == "go.mod"]
+    return {
+        match.decode()
+        for data in contents(clone, [listing[src].oid for src in mods])
+        for match in MODULE.findall(data)
+    }
 
 
 def read(path: Path) -> tuple[str, bytes] | None:
@@ -81,6 +190,7 @@ def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
     """Every problem found, one line each; none means the import is faithful."""
     listing = files(clone, commit)
     problems = made.gaps(listing)
+    patterns = rules(made.repo, go_modules(clone, listing))
     writes = made.writes()
     try:
         actual = inventory(tree, made.dest, problems)
@@ -112,4 +222,6 @@ def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
             problems.append(f"{dest}: mode {got[0]}, source has {mode}")
         elif got[1] != wanted:
             problems.append(f"{dest}: differs from {src}")
+        elif mode != LINK:
+            problems.extend(references(dest, wanted, patterns, made.repo))
     return problems

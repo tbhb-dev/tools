@@ -12,7 +12,7 @@ import pytest
 
 from tbhbdev import alpha
 from tbhbdev.alpha import monorepo
-from tbhbdev.alpha.monorepo import source
+from tbhbdev.alpha.monorepo import source, verify
 from tbhbdev.alpha.monorepo.pathmap import Rewrite, dump, load
 
 if TYPE_CHECKING:
@@ -22,6 +22,7 @@ PROG = "tbhbdev alpha monorepo"
 ORIGIN = "https://github.com/tbhb-dev/tools.git"
 DEST = "factory/tbhbdev"
 APP = b"print('hello')\n"
+WORKFLOW = "workflow uses an old repository"
 AGENTS = b"Read tbhb-dev/tools for the rules.\n"
 SOURCE_FILES: dict[str, bytes] = {
     "README.md": b"Clone https://github.com/tbhb-dev/tools as a record.\n",
@@ -370,6 +371,26 @@ def test_verify_rejects_changed_symlink_target(imported: Imported, target: str) 
     ]
 
 
+@pytest.mark.parametrize("key", ['"uses"', "'uses'", "uses"])
+@pytest.mark.parametrize("indicator", [">2-", "|2-", ">-2", "|+2"])
+def test_references_parse_yaml_uses(key: str, indicator: str) -> None:
+    data = (
+        "jobs:\n  check:\n    steps:\n"
+        f"      - {key}: {indicator}\n          o/action@v1\n"
+    ).encode()
+    assert list(
+        verify.references("ci.yaml", data, verify.rules("o/n", set()), "o/n")
+    ) == ["ci.yaml:4: workflow uses an old repository"]
+
+
+@pytest.mark.parametrize("address", ["https://github.com/", "git@github.com:"])
+def test_references_detect_source_repository_names(address: str) -> None:
+    data = f"git clone {address}tbhb-dev/ansible.git\n".encode()
+    assert list(
+        verify.references("clone.sh", data, verify.rules("o/n", set()), "o/n")
+    ) == ["clone.sh:1: address of an old repository"]
+
+
 @pytest.mark.parametrize(
     "extra", ["surprise.txt", "uv.lock", "src/app.py", ".hidden", "nested/stray.txt"]
 )
@@ -498,6 +519,115 @@ def test_verify_reports_io_errors_and_continues(
         assert f"{folder / 'also-unreadable'}: cannot scan:" in out
     if target != ".":
         assert f"{DEST}/bin/run.sh: mode 100644, source has 100755" in out
+
+
+@pytest.mark.parametrize("indicator", [">", ">-", "|", "|-"])
+@pytest.mark.parametrize("repo", ["tools", "rules", "telemetry", "go.tbhb.dev"])
+def test_verify_reports_references_to_every_old_repository(
+    src: Src, mono: Path, capsys: Capsys, repo: str, indicator: str
+) -> None:
+    path, _ = src
+    tree = {
+        "bin/run.sh": f"git clone git@github.com:tbhb-dev/{repo}.git\n".encode(),
+        "ci/a.yml": (
+            "on: push\njobs:\n  check:\n"
+            f"    uses: {indicator}\n"
+            "      tbhb-dev/rules/.github/workflows/check.yml@v1\n"
+        ).encode(),
+        "ci/renovate.json": b'{"extends": ["github>tbhb-dev/renovate-config"]}\n',
+        "deps/MODULE.bazel": (
+            f'git_override(remote = "https://github.com/tbhb-dev/{repo}")\n'.encode()
+        ),
+        "go.mod": b"module go.example.dev/tools\n",
+        "main.go": b'import "go.example.dev/tools/pkg"\n',
+        "fine.go": b'import "go.example.dev/toolbox"\nuses: actions/checkout@abc\n',
+        "docs/NOTE.md": b"see github.com/tbhb-dev/tools\n",
+        "vendor/tools": b"github.com/tbhb-dev/toolset\n",
+        "skip.sh": b"github.com/other/rules\ngithub.com/tbhb-dev/ascm\n",
+    }
+    for name, data in tree.items():
+        (path / name).parent.mkdir(parents=True, exist_ok=True)
+        (path / name).write_bytes(data)
+    (path / "link").unlink()
+    (path / "link").symlink_to("github.com/tbhb-dev/tools")
+    commit = commit_all(path)
+    made = make_map((path, commit), mono.parent)
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    assert Imported((path, commit), mono, made, capsys).problems() == [
+        f"{DEST}/bin/run.sh:1: address of an old repository",
+        f"{DEST}/ci/a.yml:4: workflow uses an old repository",
+        f"{DEST}/ci/renovate.json:1: Renovate preset from an old repository",
+        f"{DEST}/deps/MODULE.bazel:1: address of an old repository",
+        f"{DEST}/go.mod:1: Go path go.example.dev/tools",
+        f"{DEST}/main.go:1: Go path go.example.dev/tools",
+        "verify: 6 problems",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("dest", "data", "findings"),
+    [
+        ("a.md", b"github.com/o/n\n", []),
+        ("a.sh", b"ok\ngithub.com/o/n\n", [(2, "address of an old repository")]),
+        ("a.sh", b"\ngithub.com/o/n\n", [(2, "address of an old repository")]),
+        (
+            "ci.yaml",
+            b"url: https://github.com/o/n\n",
+            [(1, "address of an old repository")],
+        ),
+        (
+            "ci.yaml",
+            b"extends: ['github>o/preset']\n",
+            [(1, "Renovate preset from an old repository")],
+        ),
+        ("ci.yml", b"uses: > # folded\r\n\r\n  o/action@v1\r\n", [(1, WORKFLOW)]),
+        ("ci.yml", b"uses: |+\n  o/action@v1\n", [(1, WORKFLOW)]),
+        ("ci.yml", b"uses:\n  o/action@v1\n", [(1, WORKFLOW)]),
+        ("ci.yml", b"uses: >-\n  actions/checkout@v1\n", []),
+        ("ci.yml", b"uses: actions/checkout@v1\nname: o/action@v1\n", []),
+        ("ci.yaml", b'"uses": o/action@v1\n', [(1, WORKFLOW)]),
+        ("ci.yaml", b"'uses': o/action@v1\n", [(1, WORKFLOW)]),
+        ("ci.yaml", b'"us\\u0065s": o/action@v1\n', [(1, WORKFLOW)]),
+        ("ci.yaml", b"jobs: {check: {uses: 'o/action@v1'}}\n", [(1, WORKFLOW)]),
+        ("ci.yaml", b"action: &action o/action@v1\nuses: *action\n", [(2, WORKFLOW)]),
+        (
+            "ci.yaml",
+            b"first: &step {uses: o/action@v1}\nsecond: *step\nloop: &loop [*loop]\n",
+            [(1, WORKFLOW)],
+        ),
+        (
+            "ci.yaml",
+            b"uses: o/first@v1\n---\nuses: o/second@v1\n",
+            [(1, WORKFLOW), (3, WORKFLOW)],
+        ),
+        ("ci.yaml", b"uses: [actions/checkout@v1]\n? [uses]\n: 1\n", []),
+        ("ci.yaml", b"run: |\n  uses: o/action@v1\n", []),
+        ("ci.yaml", b"# empty\n", []),
+        ("ci.yaml", b"---\n", []),
+        ("ci.yaml", b"uses: o/action@v1 # github.com/o/n\n", [(1, WORKFLOW)]),
+        ("script.sh", b"uses: o/action@v1\n", [(1, WORKFLOW)]),
+        ("snippet.sh", b"uses: > o/action@v1\n", []),
+        (
+            "snippet.sh",
+            b"github.com/o/n github.com/o/n\nuses: o/action@v1 # github.com/o/n\n",
+            [(1, "address of an old repository"), (2, WORKFLOW)],
+        ),
+    ],
+)
+def test_references(dest: str, data: bytes, findings: list[tuple[int, str]]) -> None:
+    assert list(verify.references(dest, data, verify.rules("o/n", set()), "o/n")) == [
+        f"{dest}:{line}: {rule}" for line, rule in findings
+    ]
+
+
+@pytest.mark.parametrize("data", [b"uses: > o/action@v1\n", b"uses: [\n", b"\xff"])
+def test_references_reject_invalid_yaml(data: bytes) -> None:
+    findings = list(
+        verify.references("ci.yml", data, verify.rules("o/n", set()), "o/n")
+    )
+    assert len(findings) == 1
+    assert findings[0].startswith("ci.yml: invalid YAML:")
 
 
 def test_import_into_a_subfolder_commits_the_files(
