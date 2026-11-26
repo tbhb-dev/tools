@@ -120,7 +120,7 @@ def import_files(args: argparse.Namespace) -> int:
         git(top, "add", "--pathspec-from-file=-", "--pathspec-file-nul", data=paths)
         git(top, "commit", "--quiet", "-F", "-", data=f"{subject}\n\n{body}\n".encode())
     except MonorepoError, OSError:
-        # The clone was clean, so unstaging is a reset. Then delete what this run
+        # The clone was clean, so reset clears the index. Then delete what this run
         # wrote: files first, then the folders it created, deepest first.
         try:
             git(top, "reset", "--quiet")
