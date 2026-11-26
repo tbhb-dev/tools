@@ -124,6 +124,7 @@ def test_map_copies_and_drops(src: Src, capsys: Capsys) -> None:
     assert data["repo"] == "tbhb-dev/tools"
     assert data["commit"] == commit
     assert data["dest"] == DEST
+    assert data["allow"] == []
     assert data["rewrite"] == {}
     copied = cast("dict[str, str]", data["copy"])
     assert copied["src/app.py"] == f"{DEST}/src/app.py"
@@ -371,6 +372,10 @@ def test_verify_rejects_changed_symlink_target(imported: Imported, target: str) 
     ]
 
 
+def scan_references(dest: str, data: bytes) -> list[str]:
+    return list(verify.tree_references([(dest, data)], "o/n", set(), Path.cwd(), []))
+
+
 @pytest.mark.parametrize("key", ['"uses"', "'uses'", "uses"])
 @pytest.mark.parametrize("indicator", [">2-", "|2-", ">-2", "|+2"])
 def test_references_parse_yaml_uses(key: str, indicator: str) -> None:
@@ -378,9 +383,9 @@ def test_references_parse_yaml_uses(key: str, indicator: str) -> None:
         "jobs:\n  check:\n    steps:\n"
         f"      - {key}: {indicator}\n          o/n/action@v1\n"
     ).encode()
-    assert list(
-        verify.references("ci.yaml", data, verify.rules("o/n", set(), set()), "o/n")
-    ) == ["ci.yaml:4: workflow uses an old repository"]
+    assert scan_references("ci.yaml", data) == [
+        "ci.yaml:4: workflow uses an old repository"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -388,9 +393,9 @@ def test_references_parse_yaml_uses(key: str, indicator: str) -> None:
 )
 def test_references_detect_source_repository_names(address: str) -> None:
     data = f"git clone {address}tbhb-dev/ansible.git\n".encode()
-    assert list(
-        verify.references("clone.sh", data, verify.rules("o/n", set(), set()), "o/n")
-    ) == ["clone.sh:1: address of an old repository"]
+    assert scan_references("clone.sh", data) == [
+        "clone.sh:1: address of an old repository"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -817,6 +822,16 @@ def test_verify_ignores_checkout_paths_and_urls_in_ansible_descriptions(
         ("ci.yaml", b"action: &action o/n/action@v1\nuses: *action\n", [(2, WORKFLOW)]),
         (
             "ci.yaml",
+            (
+                b"example: &example # https://github.com/o/n\n"
+                b"  'echo example'\n"
+                b"run: | # https://github.com/o/n\n"
+                b"  git clone https://github.com/o/n\n"
+            ),
+            [(4, "address of an old repository")],
+        ),
+        (
+            "ci.yaml",
             b"first: &step {uses: o/n/action@v1}\nsecond: *step\nloop: &loop [*loop]\n",
             [(1, WORKFLOW)],
         ),
@@ -861,9 +876,9 @@ def test_verify_ignores_checkout_paths_and_urls_in_ansible_descriptions(
     ],
 )
 def test_references(dest: str, data: bytes, findings: list[tuple[int, str]]) -> None:
-    assert list(
-        verify.references(dest, data, verify.rules("o/n", set(), set()), "o/n")
-    ) == [f"{dest}:{line}: {rule}" for line, rule in findings]
+    assert scan_references(dest, data) == [
+        f"{dest}:{line}: {rule}" for line, rule in findings
+    ]
 
 
 @pytest.mark.parametrize(
@@ -907,16 +922,12 @@ def test_references_match_only_mapped_old_repositories(
     repo: str, old: bool, dest: str, template: str, rule: str
 ) -> None:
     data = template.replace("REPO", repo).encode()
-    assert list(
-        verify.references(dest, data, verify.rules("o/n", set(), set()), "o/n")
-    ) == ([f"{dest}:1: {rule}"] if old else [])
+    assert scan_references(dest, data) == ([f"{dest}:1: {rule}"] if old else [])
 
 
 @pytest.mark.parametrize("data", [b"uses: > o/n/action@v1\n", b"uses: [\n", b"\xff"])
 def test_references_reject_invalid_yaml(data: bytes) -> None:
-    findings = list(
-        verify.references("ci.yml", data, verify.rules("o/n", set(), set()), "o/n")
-    )
+    findings = scan_references("ci.yml", data)
     assert len(findings) == 1
     assert findings[0].startswith("ci.yml: invalid YAML:")
 
@@ -1029,3 +1040,328 @@ def test_the_command_line_parses_and_dispatches(
     capsys.readouterr()
     assert alpha.main(["monorepo", "-h"], "tbhbdev alpha") == 0
     assert "monorepo" in alpha.USAGE
+
+
+def test_verify_suppresses_allowed_references(
+    src: Src, mono: Path, capsys: Capsys
+) -> None:
+    path, _ = src
+    (path / "bin/run.sh").write_text(
+        "git clone https://github.com/tbhb-dev/tools.git\n"
+        "git clone https://github.com/tbhb-dev/tools.git "
+        "https://github.com/tbhb-dev/rules.git\n"
+    )
+    (path / "renovate.json5").write_text(
+        '  // "github>tbhb-dev/rules:preset"\n'
+        '{ extends: ["github>tbhb-dev/renovate-config:fixture"] }\n'
+    )
+    commit = commit_all(path)
+    made = make_map((path, commit), mono.parent)
+    mapping = load(made.read_text())
+    mapping.copy["renovate.json5"] = f"{DEST}/renovate.json5"
+    del mapping.drop["renovate.json5"]
+    entries = load(
+        HEAD
+        + f"""
+[[allow]]
+path = "{DEST}/**/*.sh"
+literal = "https://github.com/tbhb-dev/tools.git"
+reason = "The fixture clones this repository."
+
+[[allow]]
+path = "{DEST}/renovate.json5"
+regex = '^github>tbhb-dev/renovate-config:fixture$'
+reason = "The preset is a fixture."
+
+[[allow]]
+path = "{DEST}/renovate.json5"
+literal = "github>tbhb-dev/rules:preset"
+reason = "The example was moved into a comment."
+
+[[allow]]
+path = "{DEST}/*.sh"
+literal = "https://github.com/tbhb-dev/rules.git"
+reason = "The glob skips nested paths."
+"""
+    ).allow
+    mapping.allow = entries
+    made.write_text(dump(mapping))
+    assert load(made.read_text()).allow == entries
+    assert run_import(f"{path}@{commit}", made, mono) == 0
+    capsys.readouterr()
+    assert Imported((path, commit), mono, made, capsys).problems() == [
+        f"{DEST}/bin/run.sh:2: address of an old repository",
+        (
+            f"allow entry 3 ({DEST}/renovate.json5): matches no findings "
+            "(The example was moved into a comment.)"
+        ),
+        (
+            f"allow entry 4 ({DEST}/*.sh): matches no findings "
+            "(The glob skips nested paths.)"
+        ),
+        "verify: 3 problems",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        ("allow = true", "must be a list of tables"),
+        ("allow = [1]", "allow entry 1 must be a table"),
+        (
+            '[[allow]]\npath = "d/**"\nreason = "used"',
+            "exactly one of literal or regex",
+        ),
+        (
+            '[[allow]]\npath = "d/**"\nliteral = "x"\nregex = "y"\nreason = "used"',
+            "exactly one of literal or regex",
+        ),
+        ('[[allow]]\npath = "../d"\nliteral = "x"\nreason = "used"', "bad path"),
+        ('[[allow]]\nliteral = "x"\nreason = "used"', "path must be a string"),
+        ('[[allow]]\npath = "d/**"\nliteral = "x"', "reason must be a string"),
+        (
+            '[[allow]]\npath = "d/**"\nliteral = 1\nreason = "used"',
+            "literal must be a string",
+        ),
+        ('[[allow]]\npath = "d/**"\nliteral = "x"\nreason = " "', "one-line reason"),
+        (
+            '[[allow]]\npath = "d/**"\nliteral = "x"\nreason = "a\\nb"',
+            "one-line reason",
+        ),
+        ('[[allow]]\npath = "d/**"\nliteral = "x"\nreason = "a\\n"', "one-line reason"),
+        ('[[allow]]\npath = "d/**"\nliteral = ""\nreason = "used"', "nonempty literal"),
+        ('[[allow]]\npath = "d/**"\nregex = "["\nreason = "used"', "invalid regex"),
+    ],
+)
+def test_load_rejects_malformed_allow_entries(entry: str, message: str) -> None:
+    assert message in load_error(HEAD + entry + "\n")
+
+
+@pytest.mark.parametrize(
+    ("dest", "data"),
+    [
+        # rules@aa2f970, ansible/MODULE.bazel:19 through the following override.
+        (
+            "lib/rules/ansible/MODULE.bazel",
+            b"\n" * 18 + b'bazel_dep(name = "tbhb_rules", version = "0.0.0")\n\n'
+            b"\n\n"
+            b'local_path_override(\n    module_name = "tbhb_rules",\n'
+            b'    path = "..",\n)\n',
+        ),
+        # rules@aa2f970, go/MODULE.bazel:16.
+        (
+            "lib/rules/go/MODULE.bazel",
+            b"\n" * 15 + b'bazel_dep(name = "tbhb_rules")\n'
+            b'local_path_override(\n    module_name = "tbhb_rules",\n'
+            b'    path = "..",\n)\n',
+        ),
+        # ansible@a6b2606, ansible_collections/tbhb/dsm/galaxy.yml:15.
+        (
+            "lib/ansible/ansible_collections/tbhb/dsm/galaxy.yml",
+            b"\n" * 14 + b"repository: https://github.com/tbhb-dev/ansible\n"
+            b"issues: https://github.com/tbhb-dev/ansible/issues\n",
+        ),
+        # renovate-config@6fc408c, default.json5:10.
+        (
+            "factory/renovate-config/default.json5",
+            b"\n"
+            * 9
+            + b'  //   "github>tbhb-dev/renovate-config//default.json5#<sha>", '
+            b"// v1.0.0\n"
+            b'{ extends: ["config:best-practices"] }\n',
+        ),
+    ],
+)
+def test_references_accept_reviewed_import_files(dest: str, data: bytes) -> None:
+    assert scan_references(dest, data) == []
+
+
+@pytest.mark.parametrize(
+    ("dest", "data", "line", "rule"),
+    [
+        (
+            "default.json5",
+            (
+                b'{\r\n  // "github>o/n" \r\n  /* uses: o/n/action@v1\r\n'
+                b'       "local>o/n:preset" */\r\n'
+                b'  extends: ["github>o/n:preset"],\r\n}\r\n'
+            ),
+            5,
+            "Renovate preset from an old repository",
+        ),
+        (
+            "ci.yml",
+            (
+                b'# uses: o/n/action@v1\n# extends: ["github>o/n"]\n'
+                b"run: 'git clone https://github.com/o/n' # https://github.com/tbhb-dev/rules\n"
+            ),
+            3,
+            "address of an old repository",
+        ),
+        (
+            "collection/galaxy.yml",
+            (
+                b"repository: https://github.com/o/n\nhomepage: https://github.com/o/n\n"
+                b"documentation: https://github.com/o/n\nissues: https://github.com/o/n\n"
+                b"dependencies: {repository: 'https://github.com/o/n'}\n"
+            ),
+            5,
+            "address of an old repository",
+        ),
+        (
+            "package.json",
+            # cspell:ignore epository
+            (
+                b'{\n"\\u0072epository": {"type":"git", "url":"https://github.com/o/n"},\n'
+                b'"homepage":"https://github.com/o/n","documentation":"https://github.com/o/n",'
+                b'"issues":"https://github.com/o/n",\n"dependencies":{"repository":'
+                b'"https://github.com/o/n"}\n}\n'
+            ),
+            4,
+            "address of an old repository",
+        ),
+        (
+            "pyproject.toml",
+            (
+                b'# old example "https://github.com/o/n"\n[project.urls]\n'
+                b'Repository = "https://github.com/o/n"\n'
+                b'"Documentation" = """\nhttps://github.com/o/n\n"""\n'
+                b"Homepage = 'https://github.com/o/n'\n"
+                b'Issues = "https://github.com/o/n"\n'
+                b'[tool.uv.sources]\nrepository = {git = "https://github.com/o/n"}\n'
+            ),
+            10,
+            "address of an old repository",
+        ),
+        (
+            "pyproject.toml",
+            (
+                b'project = { urls = { repository = "https://github.com/o/n" }, '
+                b'dependencies = ["example @ git+https://github.com/o/n"] }\n'
+            ),
+            1,
+            "address of an old repository",
+        ),
+        (
+            "Cargo.toml",
+            (
+                b'workspace.package.documentation = "https://github.com/o/n"\n[package]\n'
+                b'repository = "https://github.com/o/n"\nhomepage = "https://github.com/o/n"\n'
+                b'issues = "https://github.com/o/n"\n'
+                b'[dependencies]\nrepository = {git = "https://github.com/o/n"}\n'
+            ),
+            7,
+            "address of an old repository",
+        ),
+        (
+            "MODULE.bazel",
+            (
+                b'# git_override(remote = "https://github.com/o/n")\n'
+                b'# bazel_dep(name = "tbhb_rules")\n'
+                b"\n"
+                b'git_override(module_name = "tbhb_rules", remote = "https://github.com/o/n")\n'
+            ),
+            4,
+            "address of an old repository",
+        ),
+        (
+            "main.go",
+            (
+                b'// import "github.com/o/n"\n'
+                b'/*\nimport "go.tbhb.dev/event-gateway"\n*/\n'
+                b'import "go.tbhb.dev/event-gateway/internal/filter" // test import\n'
+            ),
+            5,
+            "Go path from an old repository",
+        ),
+        (
+            "go.mod",
+            (
+                b"module github.com/other/new // comment\n"
+                b"// require github.com/o/n v0.0.0\n"
+                b"require go.tbhb.dev/event-gateway v0.0.0\n"
+            ),
+            3,
+            "Go path from an old repository",
+        ),
+        (
+            "test.bzl",
+            b'# "https://github.com/o/n"\nvalue = "# https://github.com/o/n"\n',
+            2,
+            "address of an old repository",
+        ),
+    ],
+)
+def test_comments_and_metadata_leave_live_references(
+    dest: str, data: bytes, line: int, rule: str
+) -> None:
+    assert scan_references(dest, data) == [f"{dest}:{line}: {rule}"]
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        (
+            'local_path_override(path = "../../lib/rules", module_name = "tbhb_rules")',
+            [],
+        ),
+        ('local_path_override(module_name = "other", path = "..")', [1]),
+        ('local_path_override(module_name = "tbhb_rules", path = "../../..")', [1]),
+        ('local_path_override(module_name = "tbhb_rules", path = "../external")', [1]),
+        ('local_path_override(module_name = "tbhb_rules", path = "\\x00")', [1]),
+        ('local_path_override(module_name = "tbhb_rules", path = "")', [1]),
+        ('local_path_override(module_name = "tbhb_rules", path = root)', [1]),
+        ('local_path_override(path = "..")', [1]),
+        ('# local_path_override(module_name = "tbhb_rules", path = "..")', [1]),
+        ('example.local_path_override(module_name = "tbhb_rules", path = "..")', [1]),
+    ],
+)
+def test_bazel_override_must_resolve_inside_the_monorepo(
+    tmp_path: Path, override: str, expected: list[int]
+) -> None:
+    tree = tmp_path / "monorepo"
+    (tree / "lib/rules").mkdir(parents=True)
+    (tree / "lib/external").symlink_to(tmp_path, target_is_directory=True)
+    dest = "lib/rules/MODULE.bazel"
+    data = f'bazel_dep(name = "tbhb_rules")\n{override}\n'.encode()
+    assert list(verify.tree_references([(dest, data)], "o/n", set(), tree, [])) == [
+        f"{dest}:{line}: Bazel dependency from an old repository" for line in expected
+    ]
+
+
+@pytest.mark.parametrize("module", ["tbhb_dev_evals", "tbhb_dev_spikes"])
+def test_verify_reports_old_bazel_module_names(module: str) -> None:
+    dest = "MODULE.bazel"
+    assert scan_references(dest, f'bazel_dep(name = "{module}")\n'.encode()) == [
+        f"{dest}:1: Bazel dependency from an old repository"
+    ]
+
+
+def test_invalid_starlark_still_scans_addresses() -> None:
+    assert scan_references("MODULE.bazel", b"https://github.com/o/n\n") == [
+        "MODULE.bazel:1: address of an old repository"
+    ]
+
+
+def test_starlark_strings_and_assignments_are_not_bazel_calls() -> None:
+    data = b'"""Example:\nbazel_dep(name = "tbhb_rules")\n"""\nvalue = "bazel_dep"\n'
+    assert scan_references("MODULE.bazel", data) == []
+
+
+@pytest.mark.parametrize("data", [b"[]", b"{invalid}", b'{"\\q": "broken"}'])
+def test_nonstandard_package_json_still_scans_addresses(data: bytes) -> None:
+    assert scan_references("package.json", data + b"\nhttps://github.com/o/n\n") == [
+        "package.json:2: address of an old repository"
+    ]
+
+
+def test_toml_inline_metadata_is_ignored() -> None:
+    data = b'project = { urls = { repository = "https://github.com/o/n" } }\n'
+    assert scan_references("pyproject.toml", data) == []
+
+
+def test_verify_keeps_standalone_go_vanity_imports() -> None:
+    data = (
+        b'import "go.tbhb.dev/ascm/pkg"\nimport "go.tbhb.dev/event-gateway.net/pkg"\n'
+    )
+    assert scan_references("main.go", data) == []

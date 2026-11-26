@@ -9,6 +9,7 @@ so each source file appears once:
     [drop]      "uv.lock" = "root configuration"
 """
 
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -67,6 +68,22 @@ class Rewrite:
 
 
 @dataclass
+class Allow:
+    path: str
+    reason: str
+    pattern: re.Pattern[str]
+    expression: str
+    kind: str
+
+    def as_table(self) -> dict[str, str]:
+        return {
+            "path": self.path,
+            self.kind: self.expression,
+            "reason": self.reason,
+        }
+
+
+@dataclass
 class PathMap:
     repo: str
     commit: str
@@ -74,6 +91,7 @@ class PathMap:
     copy: dict[str, str] = field(default_factory=dict[str, str])
     rewrite: dict[str, Rewrite] = field(default_factory=dict[str, Rewrite])
     drop: dict[str, str] = field(default_factory=dict[str, str])
+    allow: list[Allow] = field(default_factory=list[Allow])
 
     def sources(self) -> set[str]:
         return {*self.copy, *self.rewrite, *self.drop}
@@ -119,6 +137,7 @@ def dump(made: PathMap) -> str:
             "repo": made.repo,
             "commit": made.commit,
             "dest": made.dest,
+            "allow": [entry.as_table() for entry in made.allow],
             "copy": made.copy,
             "rewrite": rewrite,
             "drop": made.drop,
@@ -172,6 +191,46 @@ def pairs(value: object, name: str) -> list[tuple[str, str]]:
     return [(old, new) for old, new in cast("list[list[str]]", value)]
 
 
+def allow_entries(value: object) -> list[Allow]:
+    """Read the exceptions that apply to findings in destination files.
+
+    Raises:
+        MonorepoError: An entry is malformed or has an invalid regex.
+    """
+    if not isinstance(value, list):
+        message = "map key 'allow' must be a list of tables"
+        raise MonorepoError(message)
+    found: list[Allow] = []
+    for index, entry in enumerate(cast("list[object]", value), 1):
+        label = f"allow entry {index}"
+        if not isinstance(entry, dict):
+            message = f"{label} must be a table"
+            raise MonorepoError(message)
+        body = cast("dict[str, object]", entry)
+        kind = body.keys() - {"path", "reason"}
+        if kind not in ({"literal"}, {"regex"}):
+            message = (
+                f"{label} must have path, reason and exactly one of literal or regex"
+            )
+            raise MonorepoError(message)
+        key = kind.pop()
+        path = check_path(text(body.get("path"), f"{label} path"))
+        reason = text(body.get("reason"), f"{label} reason")
+        expression = text(body[key], f"{label} {key}")
+        if not reason.strip() or reason.splitlines()[0] != reason or not expression:
+            message = f"{label} must have a one-line reason and a nonempty {key}"
+            raise MonorepoError(message)
+        try:
+            pattern = re.compile(
+                re.escape(expression) if key == "literal" else expression
+            )
+        except (re.error, OverflowError, RecursionError) as exc:
+            message = f"{label} has an invalid regex: {exc}"
+            raise MonorepoError(message) from exc
+        found.append(Allow(path, reason.strip(), pattern, expression, key))
+    return found
+
+
 def load(content: str) -> PathMap:
     """Parse and check a map.
 
@@ -192,6 +251,7 @@ def load(content: str) -> PathMap:
         message = f"map repo {made.repo!r} must be OWNER/NAME"
         raise MonorepoError(message)
     made.copy = {k: text(v, k) for k, v in table(data, "copy").items()}
+    made.allow = allow_entries(data.get("allow", []))
     made.drop = {k: text(v, k) for k, v in table(data, "drop").items()}
     rewrite = table(data, "rewrite")
     for src in rewrite:
