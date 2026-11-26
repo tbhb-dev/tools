@@ -39,6 +39,11 @@ def run(
     ("mode", "result", "output"),
     [
         ("public", 0, f"reviews-verified: pass {HEAD}"),
+        (
+            "no builder trailer",
+            1,
+            "unknown builder needs approvals at the head from 2 providers (found 1)",
+        ),
         ("private", 1, "job lint ran on runner group Default"),
         ("skipped job", 0, f"reviews-verified: pass {HEAD}"),
         ("rerun", 0, f"reviews-verified: pass {HEAD}"),
@@ -74,7 +79,10 @@ def test_verify(
         "user": {"login": APP},
         "body": f"Run r, claude m, judged head {HEAD}, variant a.",
     }
-    commit = {"sha": HEAD, "commit": {"message": "fix: x"}}
+    message = "fix: x"
+    if mode != "no builder trailer":
+        message += "\n\nGenerated-by: LLM harness=codex;model=m\n"
+    commit = {"sha": HEAD, "commit": {"message": message}}
     check = {"name": "ci", "status": "completed", "conclusion": "success"}
     ghost = {**approval, "id": 2, "user": None, "body": None}
     job = {"name": "lint", "conclusion": "success", "runner_group_name": "Default"}

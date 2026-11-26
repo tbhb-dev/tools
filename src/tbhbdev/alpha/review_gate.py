@@ -16,6 +16,7 @@ CONTEXT = "reviews-verified"
 APP = "tbhb-dev-agent-reviews[bot]"
 TIER_TWO = 2
 TIER_TWO_APPROVALS = 2
+UNKNOWN_BUILDER_PROVIDERS = 2
 GOOD_CONCLUSIONS = frozenset({"success", "skipped", "neutral"})
 PROVIDERS = {
     "claude": "anthropic",
@@ -128,16 +129,25 @@ def review_reasons(app: str, pull: Pull) -> list[str]:
         if review["state"] == "CHANGES_REQUESTED"
     )
     eligible = set(PROVIDERS.values()) - authors
-    variants = [
-        variant
+    approvals = [
+        (provider, variant)
         for state, harness, variant in latest_reviews(reviews, pull.head).values()
-        if state == "APPROVED" and provider_of(harness) in eligible
+        if state == "APPROVED"
+        and (provider := provider_of(harness)) in eligible
+        and (pull.tier != TIER_TWO or variant is not None)
     ]
+    if not authors:
+        count = len({provider for provider, _ in approvals})
+        if count < UNKNOWN_BUILDER_PROVIDERS:
+            reasons.append(
+                f"unknown builder needs approvals at the head from "
+                f"{UNKNOWN_BUILDER_PROVIDERS} providers (found {count})"
+            )
     if pull.tier != TIER_TWO:
-        return (
-            reasons if variants else [*reasons, "no independent approval at the head"]
-        )
-    count = len(set(variants) - {None})
+        if authors and not approvals:
+            reasons.append("no independent approval at the head")
+        return reasons
+    count = len({variant for _, variant in approvals})
     if count < TIER_TWO_APPROVALS:
         reasons.append(
             f"{count} independent approval variants at the head, "

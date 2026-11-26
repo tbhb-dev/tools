@@ -72,6 +72,23 @@ def test_pass() -> None:
     assert evaluate() == []
 
 
+def test_known_builder_needs_one_independent_provider_for_tier_one() -> None:
+    assert evaluate([review("claude")], messages=[trailer()]) == []
+    assert evaluate([review("codex")], messages=[trailer()]) == [
+        "no independent approval at the head"
+    ]
+
+
+def test_missing_generated_by_needs_two_providers_at_the_head() -> None:
+    messages = ["fix: x\n", trailer("Assisted-by", "codex")]
+    same_provider = review("claude-code", number=2)
+    stale = review("codex", commit=OLD, number=3)
+    assert evaluate([review(), same_provider, stale], messages=messages) == [
+        "unknown builder needs approvals at the head from 2 providers (found 1)"
+    ]
+    assert evaluate(GOOD, messages=messages) == []
+
+
 def test_no_check_runs() -> None:
     assert evaluate(checks=[]) == ["no check runs at the head"]
 
@@ -229,6 +246,21 @@ def test_distinct_variants_can_share_an_independent_provider() -> None:
     assert gate.evaluate(APP, replace(pull, tier=0)) == []
 
 
+def test_missing_generated_by_needs_two_providers_for_tier_two() -> None:
+    claude = review(body=f"{stamp('claude')[:-1]}, variant a.")
+    legacy = review("codex", number=2)
+    pull = gate.Pull(HEAD, [claude, legacy], [check()], [], tier=2)
+    shortfall = "unknown builder needs approvals at the head from 2 providers (found 1)"
+    assert gate.evaluate(APP, pull) == [
+        shortfall,
+        "1 independent approval variants at the head, need 2",
+    ]
+    alias = review(number=2, body=f"{stamp('claude-code', number=2)[:-1]}, variant b.")
+    assert gate.evaluate(APP, replace(pull, reviews=[claude, alias])) == [shortfall]
+    codex = review(number=2, body=f"{stamp('codex', number=2)[:-1]}, variant b.")
+    assert gate.evaluate(APP, replace(pull, reviews=[claude, codex])) == []
+
+
 def test_ineligible_pr_and_runner_groups() -> None:
     pull = gate.Pull(
         HEAD,
@@ -259,25 +291,41 @@ def test_tier_uses_repository_relative_globs() -> None:
     assert gate.tier_for([".github/workflows/ci.yml"], policy) == 2
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
+def test_approval_paths_exist_and_require_tier_two() -> None:
+    root = Path(__file__).resolve().parents[1]
+    policy = (root / ".github/review-tier-2-paths").read_text(encoding="utf-8")
+    if (root / ".git").exists():
+        tracked = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", "-z", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            encoding="utf-8",
+        ).stdout.split("\0")
+        paths = set(tracked) - {""}
+    else:
+        # Bazel runfiles contain the source files without Git metadata.
+        paths = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+    for path in (
         ".github/CODEOWNERS",
+        "src/tbhbdev/admin/policy.py",
         "src/tbhbdev/alpha/__init__.py",
         "src/tbhbdev/alpha/agent/credentials.py",
+        "src/tbhbdev/alpha/agent/decisions/auth.py",
         "src/tbhbdev/alpha/agent/model.py",
         "src/tbhbdev/alpha/agent/review_post.py",
         "src/tbhbdev/alpha/agent/run_host.py",
         "src/tbhbdev/alpha/gh_app.py",
+        "src/tbhbdev/alpha/gh_shim.py",
         "src/tbhbdev/alpha/identity.py",
+        "src/tbhbdev/alpha/opened.py",
+        "src/tbhbdev/alpha/verify_range.py",
         "src/tbhbdev/cli.py",
-    ],
-)
-def test_approval_paths_exist_and_require_tier_two(path: str) -> None:
-    root = Path(__file__).resolve().parents[1]
-    policy = (root / ".github/review-tier-2-paths").read_text(encoding="utf-8")
-    assert gate.tier_for([path], policy) == gate.TIER_TWO
-    assert (root / path).is_file()
-    # Bazel runfiles contain the source files without Git metadata.
-    if (root / ".git").exists():
-        subprocess.run(["git", "cat-file", "-e", f"HEAD:{path}"], cwd=root, check=True)
+    ):
+        assert path in paths
+        assert (root / path).is_file()
+        assert gate.tier_for([path], policy) == gate.TIER_TWO, path
+
+    files = list(paths)
+    for glob in filter(None, map(str.strip, policy.splitlines())):
+        assert gate.tier_for(files, glob) == gate.TIER_TWO, glob
