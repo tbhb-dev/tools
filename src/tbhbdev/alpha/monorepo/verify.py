@@ -39,29 +39,30 @@ OLD_REPOS = (
 WORKFLOW = "workflow uses an old repository"
 
 
+def old_repositories(repo: str) -> bytes:
+    """Match a repository in the design's path map or the source repository."""
+    return rb"(?:" + OLD_REPOS + b"|" + re.escape(repo.encode()) + rb")"
+
+
 def rules(
     repo: str, modules: set[str], local_modules: set[str]
 ) -> list[tuple[str, re.Pattern[bytes]]]:
     """The executable references to an old repository, as patterns.
 
-    A workflow call or a Renovate preset from any repository of the owner is
-    a reference, since the monorepo calls no old repository. Clone addresses
-    name any repository in the design's path map or the source repository,
-    which covers Bazel overrides, scripts and Go imports. The source's root
+    Workflow calls, Renovate presets and clone addresses name a repository
+    in the design's path map or the source repository. Clone addresses cover
+    Bazel overrides, scripts and Go imports. The source's root
     go.mod adds its vanity path. Modules declared in the imported tree stay
     local, including nested fixtures and modules under an old module's path.
     """
-    owner, _ = (re.escape(part).encode() for part in repo.split("/"))
-    addresses = OLD_REPOS + b"|" + re.escape(repo.encode())
+    addresses = old_repositories(repo)
+    repository = addresses + rb"(?![\w.-])"
     found = {
         WORKFLOW: rb"\buses:\s*"
-        rb"(?:[>|][-+]?[ \t]*(?:#[^\r\n]*)?\r?\n\s*)?['\"]?" + owner + rb"/",
+        rb"(?:[>|][-+]?[ \t]*(?:#[^\r\n]*)?\r?\n\s*)?['\"]?" + repository,
         "Renovate preset from an old repository": rb"['\"](?:github|local)>"
-        + owner
-        + rb"/",
-        "address of an old repository": rb"github\.com[/:](?:"
-        + addresses
-        + rb")(?![\w-])",
+        + repository,
+        "address of an old repository": rb"github\.com[/:]" + addresses + rb"(?![\w-])",
     }
     for module in sorted(modules):
         found[f"Go path {module}"] = (
@@ -72,8 +73,9 @@ def rules(
     return [(rule, re.compile(exclude + pattern)) for rule, pattern in found.items()]
 
 
-def yaml_uses(data: bytes, owner: str) -> Iterator[int]:
-    """Lines of parsed YAML keys whose uses value names the old owner."""
+def yaml_uses(data: bytes, repo: str) -> Iterator[int]:
+    """Lines of parsed YAML keys whose uses value names an old repository."""
+    repository = re.compile(old_repositories(repo) + rb"(?![\w.-])")
     pending = list(
         cast("Iterator[Node]", yaml.compose_all(data, Loader=yaml.SafeLoader))
     )
@@ -91,7 +93,7 @@ def yaml_uses(data: bytes, owner: str) -> Iterator[int]:
                     isinstance(key, ScalarNode)
                     and key.value == "uses"
                     and isinstance(value, ScalarNode)
-                    and value.value.strip().startswith(f"{owner}/")
+                    and repository.match(value.value.strip().encode())
                 ):
                     yield key.start_mark.line + 1
                 pending.append(value)
@@ -107,10 +109,7 @@ def references(
     is_yaml = PurePosixPath(dest).suffix in {".yml", ".yaml"}
     if is_yaml:
         try:
-            found.update(
-                (line, WORKFLOW)
-                for line in yaml_uses(data, repo.split("/", maxsplit=1)[0])
-            )
+            found.update((line, WORKFLOW) for line in yaml_uses(data, repo))
         except yaml.YAMLError as exc:
             yield f"{dest}: invalid YAML: {exc}"
     for rule, pattern in patterns:

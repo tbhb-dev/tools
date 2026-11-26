@@ -2,12 +2,9 @@
 description: Mapping, importing and verifying a public repository's files at one commit.
 generated:
   - role: generated
-    harness: codex:0.171.0
-    model: openai:gpt-6.1-sol
-    effort: high
-    surface: exec
-    session: sha-256-64:a8ac146a38ccbd05
-    at: "2026-11-26T07:20:21Z"
+    harness: codex
+    model: openai:gpt-6
+    at: "2026-11-26T14:01:24Z"
 status: stable
 tags: [alpha, monorepo]
 title: Monorepo import
@@ -64,9 +61,9 @@ After reporting gaps in the map, stale replacements, or paths it can't inspect, 
 
 An executable reference is a line of a file that isn't prose. Markdown, reStructuredText, AsciiDoc, and plain text files count as prose, since prose that mentions an old repository is a dated record. A line matches when it has one of these:
 
-- A workflow `uses:` line for any repository of the source's owner.
-- A Renovate `github>` or `local>` preset from any repository of the owner.
+- A workflow `uses:` line for the source repository or an old repository in the design's repository path map.
+- A Renovate `github>` or `local>` preset from the source repository or an old repository in the design's repository path map.
 - A clone address of any repository in the design's [repository path map](https://github.com/tbhb-dev/wiki/blob/main/designs/monorepo/C-layout-and-ownership.md#where-each-repository-goes), or of the source repository, `github.com/OWNER/NAME` or `github.com:OWNER/NAME`. This covers Bazel overrides, scripts, and Go import paths on GitHub.
 - A module path from one of the source's `go.mod` files, which covers a vanity import path.
 
-Each finding reads `DEST:LINE: RULE`, and a line reports the first rule it matches. Symbolic links aren't scanned. The scan includes the path map's repositories under `tbhb-dev` when the source has another owner. Clone addresses of standalone repositories remain allowed.
+Each finding reads `DEST:LINE: RULE`, and a line reports the first rule it matches. Symbolic links aren't scanned. The scan includes the path map's repositories under `tbhb-dev` when the source has another owner. References to repositories the design keeps or adds, such as `tbhb-dev/tbhbdev`, remain allowed.
