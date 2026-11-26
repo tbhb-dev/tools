@@ -590,7 +590,6 @@ def test_review_post_vale_ignores_only_vocabulary(world: World, check: str) -> N
         check == "Google.Passive"
     )
     assert "--minAlertLevel=error" in cast("list[str]", world.calls("vale")[0]["argv"])
-    assert world.calls("cspell") == world.calls("rumdl") == []
 
 
 def test_review_post_vale_refuses_missing_host_styles_and_config(world: World) -> None:

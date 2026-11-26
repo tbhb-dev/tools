@@ -816,15 +816,18 @@ def lint(  # noqa: PLR0913 -- Shared draft lint settings.
     draft line ``first + N - 1``. ``drop`` matches a line and either a rule
     prefix or its full diagnostic.
     """
-    configs = (VALE_INI, STYLES) if vale_only else CONFIGS
-    flags = ("--minAlertLevel=error",) if vale_only else ()
-    top = worktree if worktree is not None else root()
+    if vale_only:
+        configs = (VALE_INI, STYLES)
+        linters = (("vale", ("--output=JSON", "--minAlertLevel=error"), parse_vale),)
+    else:
+        configs, linters = CONFIGS, LINTERS
+    top = worktree or root()
     for name in configs:
         if not (top / name).exists():
             message = f"missing lint config {name} in {top}"
             raise SystemExit(message)
     # A run host must not execute Bazel code from the reviewed checkout.
-    styles = style_problem(top) if worktree is None else style_problem(top, sync=False)
+    styles = style_problem(top, sync=worktree is None)
     problems: list[Problem] = []
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
@@ -832,14 +835,14 @@ def lint(  # noqa: PLR0913 -- Shared draft lint settings.
             (work / name).symlink_to(top / name)
         (work / path).parent.mkdir(parents=True, exist_ok=True)
         (work / path).write_text("\n".join(rendered) + "\n")
-        for name, args, parse in LINTERS[:1] if vale_only else LINTERS:
+        for name, args, parse in linters:
             if name == "vale" and styles:
                 problems.append((first, f"vale: {styles}"))
                 continue
             problems.extend(
                 (first + line - 1, text)
                 for line, text in run_linter(
-                    name, [find_tool(name), *args, *flags], parse, work, path
+                    name, [find_tool(name), *args], parse, work, path
                 )
                 if (line, text.split(":")[0]) not in drop and (line, text) not in drop
             )

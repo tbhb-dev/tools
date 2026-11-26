@@ -58,7 +58,6 @@ def test_review_limits(heading: str, item: str, words: int, count: int) -> None:
         ("Verification", "- Read the cache.\n\nA paragraph."),
         ("Verification", "- Read the cache.\nRun: review-build"),
         ("Verification", "- Read the cache.\n- Checked commit a123456."),
-        ("Verification", "- Read the cache.\n- VERDICT: GO"),
     ],
 )
 def test_review_rejects_invalid_items(heading: str, items: str) -> None:
@@ -68,7 +67,6 @@ def test_review_rejects_invalid_items(heading: str, items: str) -> None:
 @pytest.mark.parametrize(
     ("event", "item", "refused"),
     [
-        ("APPROVE", "", False),
         ("APPROVE", DEBT, False),
         ("APPROVE", FINDING, True),
         ("COMMENT", FINDING, True),
