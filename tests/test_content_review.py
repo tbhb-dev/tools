@@ -5,7 +5,7 @@ import pytest
 
 from tbhbdev import content, cue_runtime
 
-pytestmark = pytest.mark.usefixtures("review_cue")
+pytestmark = pytest.mark.usefixtures("review_cue")  # noqa: V107
 
 SUMMARY = "## Summary\n\nThe cache preserves the last saved value.\n"
 VERIFICATION = "\n## Verification\n\n- Read the cache implementation.\n"

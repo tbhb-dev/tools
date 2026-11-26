@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from tbhbdev.alpha.agent import run_host
     from tbhbdev.alpha.agent.model import RunRequest, Settings
 
-pytestmark = pytest.mark.usefixtures("review_cue")
+pytestmark = pytest.mark.usefixtures("review_cue")  # noqa: V107
 
 HEAD = "a" * 40
 MINTED = "minted"

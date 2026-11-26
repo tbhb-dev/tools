@@ -16,7 +16,7 @@ from tbhbdev import alpha
 from tbhbdev.alpha import pull_request as pr
 from tbhbdev.alpha import review, review_doc
 
-pytestmark = pytest.mark.usefixtures("review_cue")
+pytestmark = pytest.mark.usefixtures("review_cue")  # noqa: V107
 
 HEAD = "a1" * 20
 NEXT = "B2" * 20
