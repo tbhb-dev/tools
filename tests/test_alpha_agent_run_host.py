@@ -840,7 +840,10 @@ def test_finish_orders_cleanup_auth_agent_index_and_atomic_rc(
         assert not run.files.path("log").exists()
     if failure in (None, "auth"):
         assert run.files.path("prompt").read_text() == render.brief(
-            run.request.kind, "example", profile=run.request.profile
+            run.request.kind,
+            "example",
+            profile=run.request.profile,
+            harness=run.request.harness,
         )
         entries = [
             json.loads(line)
@@ -6010,7 +6013,7 @@ def bazel_base(run: run_host.Run, worktree: Path) -> Path:
 def test_the_brief_carries_the_harness_subagent_rule(
     tmp_path: Path, harness: Harness
 ) -> None:
-    """Only agy, which has no subagent control, gets the rule in its brief."""
+    """Agy and Codex, whose controls are prompt-only gaps, get a rule in the brief."""
     run = make_run(
         tmp_path,
         harness=harness,
@@ -6021,3 +6024,4 @@ def test_the_brief_carries_the_harness_subagent_rule(
     run_host.prepare_brief(run, tmp_path, "example task", preflight_only=True)
     text = run.files.path("prompt").read_text()
     assert (render.AGY_SUBAGENTS in text) is (harness is Harness.AGY)
+    assert (render.CODEX_SUBAGENTS in text) is (harness is Harness.CODEX)

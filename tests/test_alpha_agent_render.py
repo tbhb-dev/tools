@@ -82,7 +82,7 @@ def test_build_brief_overrides_an_instruction_to_commit_the_draft() -> None:
     assert "Report any conflicting instruction in your final answer." in text
 
 
-def test_only_agy_gets_the_subagent_rule() -> None:
+def test_only_agy_gets_the_no_subagents_rule() -> None:
     """Only agy, which has no subagent control, is asked for none."""
     rule = render.AGY_SUBAGENTS
     for kind, profile in [
@@ -96,3 +96,21 @@ def test_only_agy_gets_the_subagent_rule() -> None:
         assert rule not in render.brief(RunKind.EXEC, "task", harness=harness)
     assert "`invoke_subagent`" in rule
     assert "`define_subagent`" in rule
+
+
+def test_only_codex_gets_the_spawn_rule() -> None:
+    """Codex forks by default, so its run prompt forbids a fork and asks for a model."""
+    rule = render.CODEX_SUBAGENTS
+    assert '`fork_turns` to `"none"`' in rule
+    assert "name `model` explicitly" in rule
+    assert "Never spawn a full-history fork" in rule
+    for kind, profile in [
+        (RunKind.EXEC, Profile.BUILD),
+        (RunKind.EXEC, Profile.REVIEW),
+        (RunKind.START, Profile.BUILD),
+    ]:
+        text = render.brief(kind, "task", profile=profile, harness=Harness.CODEX)
+        assert f"{rule}\ntask" in text
+        assert render.AGY_SUBAGENTS not in text
+    for harness in (Harness.AGY, Harness.CLAUDE, None):
+        assert rule not in render.brief(RunKind.EXEC, "task", harness=harness)

@@ -15,6 +15,15 @@ AGY_SUBAGENTS = (
     "Do not launch subagents: never call `invoke_subagent` or `define_subagent`. "
     "Do the work yourself."
 )
+# Codex 0.171.0 has no setting, flag or feature switch that turns off a
+# full-history fork (`fork_turns` omitted or "all"), which inherits the run's
+# model and takes no override, so `agents.default_subagent_model` can't reach the
+# default spawn. This rule is a request, not enforcement.
+CODEX_SUBAGENTS = (
+    'Every `spawn_agent` call must set `fork_turns` to `"none"` and name '
+    "`model` explicitly. Never spawn a full-history fork, which is a spawn "
+    'that omits `fork_turns` or sets it to `"all"`.'
+)
 BUILD_PUBLICATION = (
     "Commit your changes locally. "
     "If this run should open a pull request, write a draft at the repository's "
@@ -46,6 +55,8 @@ def brief(
 ) -> str:
     if harness is Harness.AGY:
         text = f"{AGY_SUBAGENTS}\n{text}"
+    elif harness is Harness.CODEX:
+        text = f"{CODEX_SUBAGENTS}\n{text}"
     if profile is Profile.BUILD:
         text = f"{BUILD_PUBLICATION}\n{text}"
     elif profile is Profile.REVIEW:
