@@ -26,6 +26,7 @@ from agent_example import (
     trusted_executables,
 )
 
+from tbhbdev.alpha import install
 from tbhbdev.alpha.agent import model
 from tbhbdev.alpha.agent.decisions import argv, policy
 from tbhbdev.alpha.agent.model import Harness, Invalid, Os, Profile, RunKind
@@ -143,10 +144,12 @@ def claude_settings_of(profile: Profile) -> dict[str, object]:
     return detail.settings
 
 
-def claude_settings(profile: Profile) -> str:
-    return json.dumps(
-        claude_settings_of(profile), separators=(",", ":"), sort_keys=True
-    )
+def claude_settings(profile: Profile, *, headless: bool) -> str:
+    options = claude_settings_of(profile)
+    if headless:
+        hooks = {**options["hooks"], **install.stop_hooks("claude")}
+        options.update(disableAllHooks=False, hooks=hooks)
+    return json.dumps(options, separators=(",", ":"), sort_keys=True)
 
 
 def request(
@@ -247,9 +250,9 @@ def expected(harness: Harness, kind: RunKind, profile: Profile) -> tuple[str, ..
             "--permission-mode",
             "dontAsk" if review else "auto",
             "--settings",
-            claude_settings(profile),
+            claude_settings(profile, headless=headless),
             "--setting-sources",
-            "user",
+            "" if headless else "user",
             "--strict-mcp-config",
             *(() if headless else (POINTER,)),
         )
@@ -401,7 +404,7 @@ def test_web_search_is_narrowed_per_profile(
 
 @pytest.mark.parametrize("profile", Profile)
 def test_claude_settings_argv_is_the_policy_settings(profile: Profile) -> None:
-    result = built(Harness.CLAUDE, RunKind.EXEC, profile)
+    result = built(Harness.CLAUDE, RunKind.START, profile)
     parsed = json.loads(result[result.index("--settings") + 1])
     assert parsed == claude_settings_of(profile)
     assert parsed["sandbox"]["filesystem"]["denyRead"] == list(DENY_LINUX)

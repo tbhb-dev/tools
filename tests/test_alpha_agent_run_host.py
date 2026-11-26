@@ -47,7 +47,7 @@ from test_alpha_agent_credentials import VALUES
 from test_alpha_agent_settings import EXAMPLE
 
 from tbhbdev import secrets
-from tbhbdev.alpha import agent
+from tbhbdev.alpha import agent, install, run_stop_hook
 from tbhbdev.alpha.agent import (
     admission,
     bazel_servers,
@@ -481,7 +481,14 @@ def test_prepare_uses_one_worktree_and_private_destinations(
     assert copied_auth.exists() is (harness is Harness.CODEX)
     if harness is Harness.CODEX:
         assert copied_auth.read_text() == "example-auth"
-        assert {p.name for p in copied_auth.parent.iterdir()} == {"auth.json"}
+        assert_stop_config(copied_auth.parent)
+
+
+def assert_stop_config(home: Path) -> None:
+    path = home / "hooks.json"
+    assert json.loads(path.read_text()) == {"hooks": install.stop_hooks("codex")}
+    config = tomllib.loads(path.with_name("config.toml").read_text())
+    assert config["hooks"]["state"].keys() == {f"{path}:stop:0:0"}
 
 
 def otel_run(
@@ -501,6 +508,7 @@ def otel_run(
     runfiles.private_dir(run.home / ".codex")
     monkeypatch.setattr(credentials, "deliver", constant(preparation(run).delivery))
     monkeypatch.setattr(run_host.worktree, "create", constant(run.home / "workspace"))
+    monkeypatch.setattr(run_host.push, "head", constant("a" * 40))
     monkeypatch.setattr(credentials, "auth_copy", constant(None))
     return run
 
@@ -515,7 +523,9 @@ def test_codex_run_config_holds_the_otel_table(
     config_path = Path(result.paths.codex_home) / "config.toml"
     # The macOS filesystem ignores case, so name the file as written.
     assert "config.toml" in [p.name for p in config_path.parent.iterdir()]
-    assert tomllib.loads(config_path.read_text()) == {
+    data = tomllib.loads(config_path.read_text())
+    assert data.pop("hooks")["state"]
+    assert data == {
         "otel": {
             "trace_exporter": {
                 "otlp-http": {
@@ -552,7 +562,9 @@ def test_codex_run_without_an_endpoint_writes_no_config(
 ) -> None:
     run = otel_run(tmp_path, monkeypatch, Harness.CODEX)
     run = dataclasses.replace(
-        run, settings=dataclasses.replace(run.settings, otel_endpoint=None)
+        run,
+        request=dataclasses.replace(run.request, kind=RunKind.START),
+        settings=dataclasses.replace(run.settings, otel_endpoint=None),
     )
     result = run_host.prepare_workspace(run)
     assert not (Path(result.paths.codex_home) / "config.toml").exists()
@@ -579,10 +591,13 @@ def test_codex_config_failure_names_its_step(
     assert str(caught.value) == f"run preparation failed at codex config: {cause}"
 
 
+@pytest.mark.parametrize(
+    ("no_commit", "start"), [(False, "a" * 40), (True, None), (False, None)]
+)
 def test_build_preparation_has_the_run_socket(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_commit: bool, start: str | None
 ) -> None:
-    run = make_run(tmp_path)
+    run = make_run(tmp_path, no_commit=no_commit)
     probe = run_host.hook_environment
 
     def hook_environment(value: Policy, *, unsandboxed: bool) -> dict[str, str]:
@@ -613,13 +628,21 @@ def test_build_preparation_has_the_run_socket(
         return runfiles.private_dir(run.home / "worktree")
 
     monkeypatch.setattr(run_host.worktree, "create", create)
+    baseline = Mock(return_value=start)
+    monkeypatch.setattr(run_host.push, "head", baseline)
     monkeypatch.setattr(run_host, "hook_environment", hook_environment)
     monkeypatch.setattr(run_host, "bazel_bases", bazel_bases)
     monkeypatch.setattr(credentials, "fetch_token", fetch_token)
+    if not no_commit and start is None:
+        with pytest.raises(Invalid, match="run branch must be checked out"):
+            run_host.prepare_workspace(run)
+        return
     result = run_host.prepare_workspace(run)
     assert result.paths.signing_socket == str(run.tmpdir / "ssh.sock")
     assert result.delivery.signing == "example-signing"
     assert result.bases == (run.home / "base",)
+    assert result.start == start
+    assert baseline.call_count == int(not no_commit)
 
 
 class Child:
@@ -1627,7 +1650,11 @@ def check_launch_contract(
         )
         | env
     )
-    assert kwargs["env"] == expected | {run_host.RUN_MODEL_ENV: run.request.model}
+    launched = dict(cast("dict[str, str]", kwargs["env"]))
+    if kind is RunKind.EXEC:
+        context = json.loads(launched.pop(run_stop_hook.ENV))
+        assert context["workspace"] == prepared.paths.worktree
+    assert launched == expected | {run_host.RUN_MODEL_ENV: run.request.model}
     assert all(
         marker not in repr(command)
         for marker in (
@@ -3849,6 +3876,7 @@ def test_finish_removes_private_state_codex_home(
     run = make_run(tmp_path)
     workspace = runfiles.private_dir(run.home / "worktree")
     monkeypatch.setattr(run_host.worktree, "create", constant(workspace))
+    monkeypatch.setattr(run_host.push, "head", constant("a" * 40))
     prepared = run_host.prepare_workspace(run)
     directory = Path(prepared.paths.codex_home)
     assert directory == tmp_path / "state" / "tbhbdev" / "agent-codex" / run.files.name

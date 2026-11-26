@@ -174,6 +174,7 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         expect_commit=profile is Profile.BUILD
         if expect_commit is None
         else expect_commit,
+        no_commit=expect_commit is False,
     )
     request.check_start_ref(run)
     run = rules.check(

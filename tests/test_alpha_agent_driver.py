@@ -252,6 +252,7 @@ def test_launch_stream_and_metadata(
             "one",
             "--role",
             "worker",
+            "--no-expect-commit",
             "--fetch-ref",
             "refs/pull/391/head",
             "--fetch-ref",
@@ -272,7 +273,7 @@ def test_launch_stream_and_metadata(
     assert parsed.timeout is None
     assert parsed.startup_deadline_seconds == 120
     assert parsed.fetch_refs == ("refs/pull/391/head", "refs/heads/fix-392")
-    assert parsed.expect_commit is True
+    assert parsed.no_commit
     assert (remote.state / "sample.prompt").read_text() == remote.prompt.read_text()
     assert (remote.state / "sample.schema.json").read_text() == schema.read_text()
     assert remote.state.stat().st_mode & 0o777 == 0o700
