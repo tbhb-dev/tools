@@ -115,6 +115,7 @@ logname
 mcpjson
 mdfile
 meminfo
+memorystatus
 milestoned
 mkfifo
 mktree
@@ -147,6 +148,8 @@ onepasswordconnectsdk
 opam
 oxipng
 passwordless
+pathmap
+pathspecs
 pgid
 PGDATABASE
 PGHOST

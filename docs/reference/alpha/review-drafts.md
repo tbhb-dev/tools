@@ -1,13 +1,12 @@
 ---
 description: Drafting, checking, posting, and responding to pull request reviews.
 generated:
-  - role: assisted
+  - role: generated
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
-    effort: high
     surface: exec
-    session: sha-256-64:621ba09362617ce8
-    at: "2026-11-25T20:45:00Z"
+    session: sha-256-64:1a6d4168da557dcf
+    at: "2026-11-26T01:58:42Z"
 status: stable
 tags: [alpha]
 title: Review drafts

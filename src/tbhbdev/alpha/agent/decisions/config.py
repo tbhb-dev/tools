@@ -17,6 +17,7 @@ from typing import NoReturn
 
 from tbhbdev.alpha.agent.decisions import repo
 from tbhbdev.alpha.agent.model import (
+    DEFAULT_CODEX_SUBAGENT_MODEL,
     DEFAULT_MAX_CONCURRENT_RUNS,
     DEFAULT_RUN_MEMORY_MIB,
     HOST_NAME,
@@ -326,14 +327,20 @@ def _sandbox(table: _Table) -> Sandbox:
 def _codex(table: _Table | None) -> Codex:
     if table is None:
         return Codex(WebSearch.LIVE, WebSearch.LIVE)
-    table.only("web_search")
+    table.only("web_search", "subagent_model")
+    model = (
+        table.text("subagent_model")
+        if "subagent_model" in table.values
+        else DEFAULT_CODEX_SUBAGENT_MODEL
+    )
     if "web_search" not in table.values:
-        return Codex(WebSearch.LIVE, WebSearch.LIVE)
+        return Codex(WebSearch.LIVE, WebSearch.LIVE, model)
     search = table.table("web_search")
     search.only("build", "review")
     return Codex(
         web_search_build=_search(search, "build"),
         web_search_review=_search(search, "review"),
+        subagent_model=model,
     )
 
 
@@ -461,12 +468,25 @@ def _proven_harnesses(table: _Table) -> tuple[Harness, ...]:
     return tuple(Harness(str(name)) for name in entries)
 
 
+_PRESSURE_LEVELS = (1, 2, 4)
+
+
 def _percent(table: _Table, key: str, default: int) -> int:
     if key not in table.values:
         return default
     value = table.integer(key)
     if value > _MAX_PERCENT:
         table.fail(key, "must be a positive integer of at most 100")
+    return value
+
+
+def _pressure_level(table: _Table) -> int:
+    if "max_memory_pressure_level" not in table.values:
+        return 4
+    value = table.integer("max_memory_pressure_level")
+    if value not in _PRESSURE_LEVELS:
+        why = "must be 1 (normal), 2 (warn) or 4 (critical)"
+        table.fail("max_memory_pressure_level", why)
     return value
 
 
@@ -483,6 +503,8 @@ def _host(table: _Table) -> Host:
         "load_limit",
         "min_memory_available_percent",
         "max_swap_used_percent",
+        "max_memory_pressure_avg10",
+        "max_memory_pressure_level",
         "limits_warn_only",
         "build_shims",
         "max_concurrent_runs",
@@ -520,6 +542,8 @@ def _host(table: _Table) -> Host:
             table, "min_memory_available_percent", 20
         ),
         max_swap_used_percent=_percent(table, "max_swap_used_percent", 80),
+        max_memory_pressure_avg10=_percent(table, "max_memory_pressure_avg10", 10),
+        max_memory_pressure_level=_pressure_level(table),
         limits_warn_only=table.flag("limits_warn_only")
         if "limits_warn_only" in table.values
         else False,

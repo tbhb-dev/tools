@@ -17,6 +17,7 @@ from tbhbdev.alpha import (
     agent,
     brief,
     gh_shim,
+    guard_agent_model,
     guard_gh_config_dir,
     guard_gh_poll,
     guard_gh_pr,
@@ -27,6 +28,7 @@ from tbhbdev.alpha import (
     install,
     loop,
     pre_push_guard,
+    run_stop_hook,
     session_context,
     state_guard,
     verify_range,
@@ -40,6 +42,7 @@ __all__ = [
     "agent",
     "brief",
     "gh_shim",
+    "guard_agent_model",
     "guard_gh_config_dir",
     "guard_gh_poll",
     "guard_gh_pr",
@@ -51,6 +54,7 @@ __all__ = [
     "loop",
     "main",
     "pre_push_guard",
+    "run_stop_hook",
     "session_context",
     "state_guard",
     "verify_range",
@@ -76,6 +80,8 @@ commands:
   guard-gh-config-dir PreToolUse hook: require nonempty GH_CONFIG_DIR for gh
   guard-scripts PreToolUse hook: keep scripts for the operator in
                ~/.local/libexec/tbhb
+  guard-agent-model PreToolUse hook: require a model on Agent launches, and
+               a fork only on a session model that isn't costly
   gh-shim      budget gh calls made by agent sessions and their scripts
   agent-env    launch a harness with the gh shim first on PATH
   pr           check | create | edit | hook: the pull request draft
@@ -101,11 +107,14 @@ commands:
   repo         bootstrap [--dry-run] [--create --private|--public] ORG/REPO:
                apply the standard repository settings
   merge        merge an approved pull request
+  monorepo     map CLONE COMMIT --dest FOLDER | import CLONE@COMMIT --map MAP
+               --into CLONE: import a public repository into the monorepo
   verify-range BASE TIP [-C PATH]: check every agent commit in a range
   version-check [--host NAME ...] [--expect SHA|latest] [--json]: compare the
                installed build on each host
   loop         validate loop configuration (runner not yet available)
   agent        exec | wait | status | kill | clean | keep: headless runs
+  run-stop-hook <claude|codex|antigravity>: check whether an exec run can stop
   pre-push-guard REMOTE URL: refuse protected-branch and unfetched-rewrite pushes
   brief        new | check: peer-run briefs with required safeguards
   install      install the git hooks and the user-level harness hooks
@@ -142,6 +151,10 @@ def ssh_agent_command(_argv: list[str], _prog: str) -> int:
 
 def gh_config_dir_command(_argv: list[str], _prog: str) -> int:
     return guard_gh_config_dir.main()
+
+
+def agent_model_command(_argv: list[str], _prog: str) -> int:
+    return guard_agent_model.main()
 
 
 def scripts_command(_argv: list[str], _prog: str) -> int:
@@ -195,6 +208,12 @@ def merge(argv: list[str], prog: str) -> int:
     return squash_merge.main(argv, prog=prog)
 
 
+def monorepo_command(argv: list[str], prog: str) -> int:
+    from tbhbdev.alpha import monorepo  # noqa: PLC0415 -- see the docstring
+
+    return monorepo.main(argv, prog)
+
+
 def install_command(argv: list[str], prog: str) -> int:
     return install.main(argv, prog)
 
@@ -209,6 +228,7 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "guard-gh-config-dir": gh_config_dir_command,
     "guard-ssh-agent": ssh_agent_command,
     "guard-scripts": scripts_command,
+    "guard-agent-model": agent_model_command,
     "gh-shim": gh_shim.main,
     "agent-env": gh_shim.agent_env,
     "pr": pr,
@@ -218,12 +238,14 @@ COMMANDS: dict[str, Callable[[list[str], str], int]] = {
     "gh-app": gh_app_command,
     "repo": repo_command,
     "merge": merge,
+    "monorepo": monorepo_command,
     "verify-range": verify_range.main,
     "version-check": version_check.main,
     "install": install_command,
     "pre-push-guard": pre_push_guard.main,
     "loop": loop.main,
     "agent": agent.main,
+    "run-stop-hook": run_stop_hook.main,
     "brief": brief.main,
 }
 

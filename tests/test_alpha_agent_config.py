@@ -605,6 +605,8 @@ def _codex_errors() -> list[Case]:
     cases: list[Case] = []
     codex = "[agent.codex]"
     _add(cases, ("codex", "web_search"), 5, "must be a table", codex)
+    for bad in ("", " ", 5):
+        _add(cases, ("codex", "subagent_model"), bad, NON_BLANK, codex)
     for bad in ("bad", "Live", 5, True, None, ["live"], ""):
         _add(
             cases,
@@ -648,6 +650,7 @@ def _claude_errors() -> list[Case]:
         _add(cases, ("claude", "default_profile"), bad, NON_BLANK, claude)
     _add(cases, ("claude", "profiles"), MISSING, "is required", claude)
     _add(cases, ("claude", "profiles"), "x", "must be a table", claude)
+    _add(cases, ("claude", "subagent_model"), "x", "not recognized", claude)
     for key in ("token",):
         _add(
             cases,
@@ -1221,6 +1224,9 @@ def test_host_limits_default_and_set() -> None:
     assert (host.load_limit, host.min_memory_available_percent) == (None, 20)
     assert (host.max_swap_used_percent, host.limits_warn_only) == (80, False)
     assert host.max_concurrent_runs == 3
+    assert (host.max_memory_pressure_avg10, host.max_memory_pressure_level) == (10, 4)
+    host = limits_host(max_memory_pressure_avg10=25, max_memory_pressure_level=2)
+    assert (host.max_memory_pressure_avg10, host.max_memory_pressure_level) == (25, 2)
     host = limits_host(
         load_limit=24,
         min_memory_available_percent=30,
@@ -1248,6 +1254,10 @@ def test_host_shim_setting(value: bool) -> None:
         ("load_limit", 0, "must be a positive integer"),
         ("min_memory_available_percent", 101, "at most 100"),
         ("max_swap_used_percent", 0, "must be a positive integer"),
+        ("max_memory_pressure_avg10", 101, "at most 100"),
+        ("max_memory_pressure_avg10", 0, "must be a positive integer"),
+        ("max_memory_pressure_level", 3, "must be 1 \\(normal\\)"),
+        ("max_memory_pressure_level", "x", "must be a positive integer"),
         ("limits_warn_only", "yes", "must be true or false"),
         ("build_shims", "yes", "must be true or false"),
         ("max_concurrent_runs", -1, "must be a non-negative integer"),
@@ -1307,3 +1317,25 @@ def test_the_worker_path_must_be_absolute(worker: object, reason: str) -> None:
     with pytest.raises(Invalid) as caught:
         config.parse(edited("worker", value=worker))
     assert str(caught.value) == reason
+
+
+def test_the_codex_subagent_model_defaults_to_the_roster_model() -> None:
+    assert config.parse(GOOD).codex.subagent_model == "gpt-6.1-sol"
+
+
+def test_the_codex_subagent_model_can_be_set_beside_a_web_search_table() -> None:
+    table = copy.deepcopy(GOOD)
+    table["codex"] = {
+        "web_search": {"build": "live"},
+        "subagent_model": "example-codex-small",
+    }
+    parsed = config.parse(table)
+    assert parsed.codex.subagent_model == "example-codex-small"
+    assert parsed.codex.web_search_build is model.WebSearch.LIVE
+
+
+def test_a_codex_subagent_model_needs_no_web_search_table() -> None:
+    parsed = config.parse(edited("codex", value={"subagent_model": "example-small"}))
+    assert parsed.codex == model.Codex(
+        model.WebSearch.LIVE, model.WebSearch.LIVE, "example-small"
+    )

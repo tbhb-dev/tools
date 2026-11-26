@@ -2,12 +2,11 @@
 description: Agent isolation constraints, coordination, and cleanup.
 generated:
   - role: generated
-    harness: codex:0.171.0
-    model: openai:gpt-6.2-sol
-    effort: medium
+    harness: codex:0.166.0
+    model: openai:gpt-6.1-sol
     surface: exec
-    session: sha-256-64:6e402d15023f0de1
-    at: "2026-11-26T01:38:57Z"
+    session: sha-256-64:bb854b7878737d0a
+    at: "2026-11-26T07:14:41Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -81,7 +80,7 @@ Don't run git inside a run clone: it is agent-written. Use `tbhbdev alpha agent 
 
 `log NAME` shows up to ten pushed commits by default. `log -n 5 NAME` changes that count. When `agent/<name>` exists on origin, `diff NAME` shows changes from the default branch's merge base to that pushed branch. These reads fetch the origin's default branch and `agent/<name>` into the mirror, then inspect those refs. If the branch is absent on origin, `diff NAME` reads the run's own clone through the recorded run account's SSH connection and prints `git format-patch --stdout refs/remotes/origin/<default>..HEAD`. It resolves the default branch name on origin and uses that branch’s ref saved in the run clone at startup. This includes local commits and omits uncommitted changes; no commits produces empty output. The fallback never lets Git read the run's own configuration. It reads `HEAD`, the loose ref files, and `packed-refs` as plain text and checks each value is a 40-digit hash. It then runs `format-patch` in a new empty bare repository in a temporary directory that borrows only the run's object directory, so settings such as `include.path`, `format.from`, `format.signatureFile`, and `commondir` in the run clone have no effect. The fallback refuses a symlink in the clone path, in the git files it reads, and anywhere under `objects` and `refs`, and it refuses an unreadable `objects` or `refs` directory, an `objects/info/alternates` file, and a multi-pack index. The new repository also skips the user's global Git configuration. It passes `--no-signature`, `--no-attach`, `--no-add-header`, and `--no-notes`. The symlink scan and the read aren't atomic, so a run that's still writing can swap a path between them. Both paths disable external diff, text conversion, and color, cap output at 65536 bytes, and filter terminal controls. Neither `wait` nor `status` needs the mirror. The mirror never prunes, so disk use grows with history until a pruning follow-up.
 
-Cleanup refuses an open session. Every new run requires `clean --force`, which moves the run clone and per-run files into dated trash without reading agent-written git state. Cleanup refuses a symlink in place of the run clone. Retries skip completed moves, and removing all files for the run permits name reuse. `keep` succeeds when the marker already exists. `log` prints a full-access run's final output (or its stream) from the host, the same as `wait` does. `diff` does the same for full-access review runs; full-access build runs inspect commits.
+Cleanup refuses an open session. Every full-access run requires `clean --force`, even after it ends, because cleanup cannot verify that all commits reached origin or that the output was read. Read the output and verify pushed commits before forcing cleanup. The command moves the run clone and per-run files into dated trash without reading agent-written git state. Cleanup refuses a symlink in place of the run clone. Retries skip completed moves, and removing all files for the run permits name reuse. `keep` succeeds when the marker already exists. `log` prints a full-access run's final output (or its stream) from the host, the same as `wait` does. `diff` does the same for full-access review runs; full-access build runs inspect commits.
 
 Ref resolution runs outside the clone against the SSH URL from the repository argument. Remote Git uses an empty environment and explicit overrides for hooks, file monitoring, SSH, credentials, prompts, external protocols, paging, submodules, and automatic maintenance. It disables lazy fetching. Remote scripts use the C locale. Run file reads refuse symlinks, bound byte counts, check status fields, replace invalid UTF-8, and remove terminal control characters. Polls wait at least half a second between connections.
 

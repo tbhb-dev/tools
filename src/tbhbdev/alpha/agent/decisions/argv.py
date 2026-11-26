@@ -14,6 +14,7 @@ import shutil
 import socket
 import sys
 from pathlib import Path
+from typing import cast
 
 from tbhbdev.alpha.agent.decisions import policy as policy_module
 from tbhbdev.alpha.agent.model import (
@@ -28,6 +29,7 @@ from tbhbdev.alpha.agent.model import (
     RunKind,
     RunRequest,
 )
+from tbhbdev.alpha.install import stop_hooks
 
 # The tmux socket's file name, under the sockets directory.
 SOCKET = "agents"
@@ -193,6 +195,12 @@ def _codex(
         "-c",
         f"web_search={_toml(detail.web_search.value)}",
     ]
+    # A spawn that names a model keeps it. One that names none gets this model
+    # and not the run's.
+    argv += [
+        "-c",
+        f"agents.default_subagent_model={_toml(detail.subagent_model)}",
+    ]
     if detail.network_proxy is not None:
         domains = ",".join(
             f'{_toml(d)}="allow"' for d in detail.network_proxy["domains"]
@@ -244,11 +252,17 @@ def _claude(
         if policy.profile is Profile.BUILD
         else "dontAsk"
     )
-    settings = json.dumps(detail.settings, separators=(",", ":"), sort_keys=True)
+    options = detail.settings
+    if headless:
+        # Keep the policy's own hooks (the agent-model guard) beside Stop.
+        own = cast("dict[str, object]", options.get("hooks", {}))
+        hooks = {**own, **stop_hooks("claude")}
+        options = options | {"disableAllHooks": False, "hooks": hooks}
+    settings = json.dumps(options, separators=(",", ":"), sort_keys=True)
     argv = ["claude", *(["-p"] if headless else [])]
     argv += ["--model", request.model, "--effort", request.effort]
     argv += ["--permission-mode", mode, "--settings", settings]
-    argv += ["--setting-sources", "user", "--strict-mcp-config"]
+    argv += ["--setting-sources", "" if headless else "user", "--strict-mcp-config"]
     if not headless:
         argv.append(POINTER.format(path=brief_file))
     return tuple(argv)

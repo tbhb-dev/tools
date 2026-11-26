@@ -174,6 +174,7 @@ def prepare(settings: Settings, args: argparse.Namespace) -> Run:
         expect_commit=profile is Profile.BUILD
         if expect_commit is None
         else expect_commit,
+        no_commit=expect_commit is False,
     )
     request.check_start_ref(run)
     run = rules.check(
@@ -301,7 +302,7 @@ def check_limits(
     ignore: bool,
     timeout: float = 30,
 ) -> None:
-    """Read HOST's load, memory and swap in one ssh call, then refuse or warn.
+    """Read HOST's load, memory, pressure and swap in one ssh call, then refuse or warn.
 
     Launch calls this first. A later step may call it again.
 
@@ -702,7 +703,13 @@ def clean(settings: Settings, run: Run, *, force: bool) -> int:
         (run.name, run.owner),
     )
     rules.clean(reading.rc, session=reading.session, force=force or run.cleaning)
-    if not force and not run.request.unsandboxed:
+    if not force and run.request.unsandboxed:
+        message = (
+            "full-access run may have unpublished commits or unread output; "
+            "pass --force to clean anyway"
+        )
+        raise Invalid(message)
+    if not force:
         branch = transport.shell(
             settings,
             run.host,

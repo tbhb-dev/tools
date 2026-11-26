@@ -700,10 +700,15 @@ def test_local_sandbox_commands_use_the_build_policy(
         )
         assert isinstance(value.detail, ClaudePolicy)
         assert command[1] == "-p"
-        assert (
-            json.loads(command[command.index("--settings") + 1])
-            == value.detail.settings
-        )
+        settings = json.loads(command[command.index("--settings") + 1])
+        # The policy writes the guard hook and leaves hooks enabled; the
+        # headless command adds only the Stop hook beside it.
+        expected = dict(value.detail.settings)
+        assert "disableAllHooks" not in expected
+        hooks = settings.pop("hooks")
+        assert hooks.pop("Stop")
+        assert hooks == expected.pop("hooks")
+        assert settings == expected | {"disableAllHooks": False}
 
 
 def test_socket_listener_records_connections(short_probe_home: Path) -> None:

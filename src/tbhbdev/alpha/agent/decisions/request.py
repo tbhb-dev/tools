@@ -55,6 +55,7 @@ _FIELDS = frozenset(
         "start_ref",
         "max_concurrent_runs",
         "expect_commit",
+        "no_commit",
     }
 )
 
@@ -64,6 +65,7 @@ _REQUIRED_FIELDS = _FIELDS - {
     "start_ref",
     "max_concurrent_runs",
     "expect_commit",
+    "no_commit",
 }
 
 
@@ -117,6 +119,8 @@ def _check_commit(request: RunRequest) -> None:
     review = request.profile is Profile.REVIEW
     if review and request.expect_commit:
         _fail("expect_commit", "applies only to a build run")
+    if request.no_commit and (review or request.expect_commit):
+        _fail("no_commit", "applies only to a build without expect_commit")
     if review and request.commit is None:
         _fail("commit", "is required for a review run")
     if not review and request.commit is not None:
@@ -217,6 +221,8 @@ def to_dict(request: RunRequest) -> dict[str, object]:
     }
     if request.start_ref is not None:
         data["start_ref"] = request.start_ref
+    if request.no_commit:
+        data["no_commit"] = True
     return data
 
 
@@ -318,6 +324,7 @@ def parse(data: dict[str, object], *, host_allows_unsandboxed: bool) -> RunReque
         start_ref=_maybe_text(data, "start_ref"),
         max_concurrent_runs=_maybe_number(data, "max_concurrent_runs"),
         expect_commit=_flag(data, "expect_commit"),
+        no_commit=_flag(data, "no_commit"),
     )
     validate(request, host_allows_unsandboxed=host_allows_unsandboxed)
     return request
