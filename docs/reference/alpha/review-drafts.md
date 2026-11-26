@@ -25,7 +25,9 @@ Set `event` to `APPROVE` for `GO` or `REQUEST_CHANGES` for `BLOCK`. The draft al
 
 Create `review-N.doc.md` next to `review-N.md`. Put the schema 2 metadata in YAML frontmatter and follow it with the same Markdown sections as a run draft. [Schema 2 metadata](../content.md#review-validation)
 
-`tbhbdev alpha review post N [--author LOGIN]` matches the draft repository to the origin remote and the draft commit to the current pull request head. The command submits `APPROVE` for `GO` or `REQUEST_CHANGES` for `NO-GO` using the agent's own GitHub account. It looks for an active review of the same run, head, and pull request by that account, or by `LOGIN` if supplied. Expect `posted` or `exists` and the review ID when available. Both statuses exit 0. Refusals exit 1 and usage errors exit 2.
+The posting command reads `review-N.doc.md` when that file exists. It maps `GO` to `APPROVE` and `NO-GO` to `REQUEST_CHANGES`. The command returns `exists` for an active review with the same decision, run, head, and pull request by the current account or the supplied `--author LOGIN`.
+
+Without a schema 2 document, the command reads `review-N.md` and uses its `APPROVE` or `REQUEST_CHANGES` event. The draft repository must match the origin remote, and the commit must match the current pull request head. The command sends the review through the agent's GitHub account and prints `posted` or `exists` with the review ID when available. Both statuses exit 0. Refusals exit 1 and usage errors exit 2.
 
 ## Supersede or reply to a review
 

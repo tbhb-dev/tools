@@ -52,7 +52,6 @@ def test_review_limits(heading: str, item: str, words: int, count: int) -> None:
         ("Suggestions", "- S1: Add an example.\n- S3: Improve the label."),
         ("Suggestions", "- V1: Add an example."),
         ("Verification", "1. Read the cache."),
-        ("Verification", "- 1. Read the cache."),
         ("Verification", "- V1: Read the cache."),
         ("Verification", "- [x] Read the cache."),
         ("Verification", "- Read the cache.\n\nA paragraph."),

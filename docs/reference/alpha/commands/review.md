@@ -17,8 +17,8 @@ type: Reference
 
 `review draft N` and `review check N` create and check a review draft.
 The Summary gives the reasons for the review in one or two sentences. The review event records the verdict.
-`review post N [--author LOGIN]` submits the event from a review document.
-`review dismiss N REVIEW_ID --reason TEXT` marks a review as superseded, and `review reply N REVIEW_ID --text TEXT` comments on the pull request.
+`review post N [--author LOGIN]` submits an approval or a request for changes.
+`review dismiss N REVIEW_ID --reason TEXT` marks a comment review as superseded, and `review reply N REVIEW_ID --text TEXT` comments on the pull request.
 See [Review drafts](../review-drafts.md) for the formats and checks.
 
 `review threads N [--unresolved]` lists thread IDs, file paths and lines, resolution states, and the first comment's author and first line.

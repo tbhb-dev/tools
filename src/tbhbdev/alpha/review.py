@@ -183,20 +183,50 @@ def api_author(api: review_doc.Api) -> str:
             raise review_doc.ReviewError(message)
 
 
+def post_event_draft(text: str, number: int) -> int | None:
+    if problems := check_text(text, number, lint=False):
+        raise review_doc.ReviewError(
+            "\n".join(f"line {n}: {why}" for n, why in problems)
+        )
+    meta, body = pr.parse_frontmatter(text)
+    fields = cast("dict[str, object]", meta)
+    event = str(fields["event"])
+    if event not in {"APPROVE", "REQUEST_CHANGES"}:
+        message = "set event to APPROVE or REQUEST_CHANGES to post a decision"
+        raise review_doc.ReviewError(message)
+    commit = str(fields["commit_id"]).lower()
+    if problems := review_doc.lint_post(body):
+        raise review_doc.ReviewError("\n".join(problems))
+    repo = pr.origin_repository()
+    path = f"repos/{repo}/pulls/{number}"
+    api = GhApi()
+    review_doc.check_head(api, path, commit)
+    return review_doc.send_review(api, path, commit, body.strip("\n") + "\n", event)
+
+
+def post_document(text: str, number: int, author: str | None) -> tuple[str, int | None]:
+    doc = review_doc.parse(text)
+    if doc.pr != number:
+        message = f"draft must name pull request {number}"
+        raise review_doc.ReviewError(message)
+    repo = pr.origin_repository()
+    if doc.repo != repo:
+        message = f"draft repo {doc.repo} differs from origin repo {repo}"
+        raise review_doc.ReviewError(message)
+    api = GhApi()
+    return review_doc.post(api, doc, author=author or api_author(api))
+
+
 def post_draft(number: int, author: str | None) -> int:
-    path = draft_path(number).with_suffix(".doc.md")
+    standard = draft_path(number)
+    path = standard.with_suffix(".doc.md")
     try:
-        doc = review_doc.parse(path.read_text())
-        if doc.pr != number:
-            message = f"draft must name pull request {number}"
-            raise review_doc.ReviewError(message)
-        repo = pr.origin_repository()
-        if doc.repo != repo:
-            message = f"draft repo {doc.repo} differs from origin repo {repo}"
-            raise review_doc.ReviewError(message)
-        api = GhApi()
-        status, review_id = review_doc.post(api, doc, author=author or api_author(api))
-    except (OSError, SystemExit, ValueError) as exc:
+        if not path.exists() and standard.exists():
+            path = standard
+            status, review_id = "posted", post_event_draft(path.read_text(), number)
+        else:
+            status, review_id = post_document(path.read_text(), number, author)
+    except (OSError, RecursionError, SystemExit, ValueError) as exc:
         for problem in str(exc).splitlines():
             print(f"{path}: {problem}", file=sys.stderr)
         return 1

@@ -40,7 +40,7 @@ class Submission:
     text: str
     commit: str
     stamp: str
-    workspace: Path
+    workspace: Path | None = None
 
 
 def find_draft(workspace: Path) -> tuple[int, str]:

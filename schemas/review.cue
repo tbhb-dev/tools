@@ -15,7 +15,7 @@ import (
 #Word:          #"[\p{L}\p{N}_]+"#
 #SentenceEnd:   #"([.!?]+) "#
 #VerdictWord:   #"(NO-GO|GO|APPROVED?|BLOCK|HOLD|REQUEST_CHANGES)"#
-#Verdict:       #"\b\#(#VerdictWord)\b|(?i)(\bverdict\s*:\s*)\#(#VerdictWord)\b|^\s*\#(#VerdictWord)(\s|[.:!?–—]|$)|[.!?]\s+\#(#VerdictWord)([.:!?–—]|$)"#
+#Verdict:       #"\b\#(#VerdictWord)\b|(?i)\bverdict(?:\s*:\s*|\s+is\s+)\#(#VerdictWord)\b|(?i)(^|[.!?]\s+)\#(#VerdictWord)(\s*:|[.!?](\s|$)|\s+because\b|\s*$)"#
 #ReviewStamp:   #"(?i)(\bjudged head\b|\b(commit|head)[ :=]+[0-9a-f]{7,40}\b|\bverdict\s*:\s*\#(#VerdictWord)\b|\b\#(#ReviewSHA)\b|(?m:^(Run|Provider|Model|Variant|Host|Head|Tier):))"#
 
 #ReviewProse: {
@@ -83,9 +83,12 @@ import (
 			heading: "Summary"
 			content: [#Paragraph & #ReviewSentences & {
 				source:  !~#ReviewStamp
-				visible: !~#Verdict & !~#ReviewStamp
-				_text:   strings.Join(strings.Fields(visible), " ")
-				_words:  <=40
+				visible: !~#ReviewStamp
+				if visible =~ #Verdict {
+					_err: error("Summary must give reasons without stating the verdict")
+				}
+				_text:  strings.Join(strings.Fields(visible), " ")
+				_words: <=40
 			}]
 		}
 		findings?: {

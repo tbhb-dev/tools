@@ -81,6 +81,7 @@ def forbidden(*_args: object, **_options: object) -> httpx.Response:
 
 
 BASE = "https://api.github.com/repos/o/r/pulls/7"
+STAMP = "Generated-by: LLM harness=codex;model=m1"
 
 
 @pytest.fixture(autouse=True)
@@ -279,6 +280,41 @@ def test_a_bad_draft_posts_nothing(
     monkeypatch.setattr(httpx, "request", forbidden)
     assert not review_post.posted(run, prepared)
     assert message in run.files.path("log").read_text()
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "My verdict is GO.",
+        "APPROVE.",
+        "The tests pass. GO.",
+        "GO: The tests pass.",
+        "**GO** The tests pass.",
+        "The tests pass. Verdict: GO.",
+    ],
+)
+def test_host_refuses_a_verdict_in_summary(summary: str) -> None:
+    text = draft("APPROVE").replace("The tests cover the changed path.", summary)
+    sub = review_post.Submission("github.com/o/r", 7, text, HEAD, STAMP)
+    with pytest.raises(review_post.PostRefusedError, match="Summary must give reasons"):
+        review_post.validate(sub)
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "Go is the implementation language.",
+        "The tests pass. Go is the implementation language.",
+        "Block sizes stay within existing limits.",
+        "Approved requests retain their original ordering.",
+    ],
+)
+def test_host_accepts_ordinary_prose_in_summary(summary: str) -> None:
+    text = draft("APPROVE").replace("The tests cover the changed path.", summary)
+    sub = review_post.Submission("github.com/o/r", 7, text, HEAD, STAMP)
+    fields, body = review_post.validate(sub)
+    assert fields["event"] == "APPROVE"
+    assert f"## Summary\n\n{summary}\n" in body
 
 
 def test_two_drafts_are_refused(tmp_path: Path) -> None:

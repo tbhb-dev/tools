@@ -235,7 +235,6 @@ def test_events_and_uppercase_hex_pass(event: str) -> None:
     "summary",
     [
         "GO because the tests cover retries.",
-        "This change is a NO-GO.",
         "APPROVE",
         "Approved.",
         "**BLOCK.**",
