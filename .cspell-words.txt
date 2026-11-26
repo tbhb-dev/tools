@@ -1,5 +1,4 @@
 abce
-adoc
 addopts
 afakt
 akia
@@ -58,7 +57,6 @@ elts
 ENOENT
 enoexec
 esac
-evals
 execdir
 execpath
 executescript
