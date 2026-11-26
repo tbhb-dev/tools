@@ -1239,8 +1239,6 @@ def test_prompt_hook_conflicts_refuse_launch_before_ssh(
             f"example agent: {remote.prompt}: "
             "hook conflict: push to main or master is forbidden\n"
             f"{remote.prompt}: hook conflict: hook install is forbidden\n"
-            f"{remote.prompt}: the brief targets branch main. "
-            "The driver owns the build branch. Use agent/sample-run\n"
         ),
     )
     assert remote.records("ssh", limits=True) == []
@@ -1257,53 +1255,46 @@ def test_prompt_without_hook_conflicts_launches(remote: Remote) -> None:
     assert (remote.state / "sample.prompt").read_text() == remote.prompt.read_text()
 
 
-@pytest.mark.parametrize(
-    ("instruction", "branch"),
-    [
-        ("git checkout -b feat/4-exporter", "feat/4-exporter"),
-        ("Run `git checkout -B feat/4-exporter`.", "feat/4-exporter"),
-        ("git checkout feat/4-exporter", "feat/4-exporter"),
-        ("git checkout topic", "topic"),
-        ("git checkout refs/heads/topic.v2", "topic.v2"),
-        ("git checkout origin/main", "origin/main"),
-        ("- Use `git switch -c 'feat/4-exporter'`.", "feat/4-exporter"),
-        ("Build the exporter. Then run `git switch -C topic`.", "topic"),
-        ("git switch --no-track -c topic origin/main", "topic"),
-        ("git switch feat/4-exporter", "feat/4-exporter"),
-        ("Run `git switch --quiet topic.v2`.", "topic.v2"),
-        ("git push origin topic", "topic"),
-        ("Run `git push origin HEAD:other`.", "other"),
-        ("git push -u origin HEAD:refs/heads/agent/Sample", "agent/Sample"),
-        ("git push --set-upstream origin HEAD:refs/heads/topic", "topic"),
-        ("Push to branch topic.", "topic"),
-        ("Push commits to `agent/other`.", "agent/other"),
-        ("Fix the exporter and push commits to `topic/other`.", "topic/other"),
-        ("Fix the exporter and push to branch `topic/other`.", "topic/other"),
-        ("Push to `refs/heads/topic`.", "topic"),
-        ("Work on branch `feat/4-exporter`.", "feat/4-exporter"),
-        ("Switch to the branch named `feat/4-exporter`.", "feat/4-exporter"),
-        ("1. Work on the branch named `topic`.", "topic"),
-        ("Work on\nbranch `feat/4-exporter`", "feat/4-exporter"),
-        ("Work on branch `agent/sample`. Then work on branch `topic`.", "topic"),
-        ("`git checkout -b old` is forbidden. Run `git switch topic`.", "topic"),
-    ],
-)
-def test_build_branch_instructions_refuse_before_any_host_work(
-    remote: Remote, capsys: pytest.CaptureFixture[str], instruction: str, branch: str
+def test_build_branch_instructions_warn_once_per_match(
+    remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    remote.prompt.write_text(instruction)
-    assert launch(remote, "--ignore-limits") == 1
+    instructions = [
+        "git checkout -b feat/4-exporter",
+        "git switch agent/other",
+        "git push -u origin HEAD:refs/heads/agent/other",
+        "git checkout -b feat/4-exporter",
+    ]
+    prompt = "\n".join(instructions)
+    remote.prompt.write_text(prompt)
+
+    assert launch(remote) == 0
     assert capsys.readouterr() == (
-        "",
-        (
-            f"example agent: {remote.prompt}: "
-            f"the brief targets branch {branch}. "
-            "The driver owns the build branch. Use agent/sample\n"
+        "sample: launched host=example-linux account=agent\n",
+        "".join(
+            f"warning: {remote.prompt}: the brief contains {instruction!r}. "
+            "The run works on its own branch agent/sample. "
+            "The agent publishes only that branch.\n"
+            for instruction in instructions
         ),
     )
-    assert remote.records("ssh", limits=True) == []
-    assert remote.records("tmux") == []
-    assert not driver.metadata_path("sample").exists()
+    assert (remote.state / "sample.prompt").read_text() == prompt
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Never run `git checkout -b topic`.",
+        "Never run `git switch refs/heads/agent/other`.",
+        "git checkout -B agent/sample",
+        "git switch refs/heads/agent/sample",
+    ],
+)
+def test_prohibitions_and_assigned_branch_have_no_branch_advice(
+    remote: Remote, capsys: pytest.CaptureFixture[str], prompt: str
+) -> None:
+    remote.prompt.write_text(prompt)
+    assert launch(remote) == 0
+    assert capsys.readouterr().err == ""
 
 
 @pytest.mark.parametrize(
@@ -1314,6 +1305,10 @@ def test_build_branch_instructions_refuse_before_any_host_work(
         "Add a regression test asserting that `git checkout -b topic` is refused.",
         "Improve the tests. Work on branch coverage.",
         "- `git checkout -b topic` must be refused with a clear diagnostic.",
+        "- `git checkout -b topic` should return status 1",
+        "Document the `git checkout -b topic` command.",
+        "Document how to push commits to `topic/other`.",
+        "Restore the directory with `git checkout src/tbhbdev/alpha`.",
         "- `git checkout refs/heads/agent/topic` is forbidden.",
         "- `git switch agent/topic` should be rejected.",
         "- `git push origin agent/topic` is forbidden.",
@@ -1365,9 +1360,7 @@ def test_build_branch_instructions_refuse_before_any_host_work(
         "git push origin topic:refs/tags/version",
     ],
 )
-def test_build_allows_restores_and_briefs_without_explicit_branch_changes(
-    remote: Remote, prompt: str
-) -> None:
+def test_build_brief_text_allows_launch(remote: Remote, prompt: str) -> None:
     remote.prompt.write_text(prompt)
     assert launch(remote) == 0
     assert driver.metadata_path("sample").is_file()
@@ -1392,18 +1385,20 @@ def test_review_branch_instructions_still_launch(remote: Remote, prompt: str) ->
 
 @pytest.mark.parametrize(
     "instruction",
-    ["git switch -c agent/other", "git push origin HEAD:refs/heads/agent/other"],
+    [
+        "git switch -c agent/other",
+        "git push origin HEAD:refs/heads/agent/other",
+        "Switch to branch feat/4-exporter. Then implement the exporter.",
+    ],
 )
-def test_start_ref_does_not_allow_targeting_a_foreign_branch(
+def test_build_branch_instructions_launch_with_start_ref(
     remote: Remote, capsys: pytest.CaptureFixture[str], instruction: str
 ) -> None:
     remote.prompt.write_text(instruction)
     ref = "refs/heads/agent/other"
-    assert launch(remote, "--fetch-ref", ref, "--start-ref", ref) == 1
-    assert "The driver owns the build branch. Use agent/sample" in (
-        capsys.readouterr().err
-    )
-    assert remote.records("ssh", limits=True) == []
+    assert launch(remote, "--fetch-ref", ref, "--start-ref", ref) == 0
+    assert len(capsys.readouterr().err.splitlines()) == 1
+    assert (remote.state / "sample.prompt").read_text() == instruction
 
 
 def test_prompt_with_foreign_branch_warns_and_launches(
@@ -1467,7 +1462,6 @@ def test_prompt_warns_about_unfetched_refs_and_launches(
     [
         ("See (refs/pull/5/head); reuse refs/pull/5/head.", (), "refs/pull/5/head"),
         ("Use refs/heads/agent/topic.", (), "refs/heads/agent/topic"),
-        ("git checkout agent/sample -- README.md", (), "refs/heads/agent/sample"),
         (
             "Use `agent/Topic`.",
             ("--fetch-ref", "refs/heads/agent/topic"),
@@ -1504,8 +1498,7 @@ def test_prompt_refuses_unfetched_exact_refs_before_ssh(
         ("Push commits to the PR branch.", "<branch>"),
         ("Update `agent/topic`.", "agent/topic"),
         ("Fix the exporter and push to the existing agent/topic.", "agent/topic"),
-        ("Document how `git push origin agent/topic` works.", "agent/topic"),
-        ("Publish when ready with `git push origin HEAD:refs/heads/topic`.", "topic"),
+        ("Update refs/heads/topic.", "topic"),
     ],
 )
 def test_build_prompt_that_updates_a_pr_branch_needs_start_ref(

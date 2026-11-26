@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:8dd0118c9e55c445
-    at: "2026-11-26T15:39:21Z"
+    session: sha-256-64:24d8ab14130321e1
+    at: "2026-11-26T16:19:51Z"
 status: stable
 tags: [alpha]
 title: Agent
@@ -47,7 +47,7 @@ Pass `--no-expect-commit` for a research run that can finish without committing 
 After a successful harness exit, `agent wait` returns 6 for a missing commit, 9 for an unchanged or unverifiable run branch on origin, and 10 for a review that the host did not post.
 Use `agent status NAME` to see the reason.
 
-Use `agent/<run-name>` in build briefs that name a working branch. See [Agent isolation limits](../agent-isolation-limits.md) for the launch check.
+Build briefs that appear to target another working branch trigger warnings at launch. See [Agent isolation limits](../agent-isolation-limits.md).
 
 For a build that updates an existing pull request, pass both `--fetch-ref refs/heads/<branch>` and `--start-ref refs/heads/<branch>`.
 The run starts at the fetched commit and pushes a fast-forward to that branch without opening a pull request.

@@ -6,8 +6,8 @@ generated:
     model: openai:gpt-6.2-sol
     effort: high
     surface: exec
-    session: sha-256-64:8dd0118c9e55c445
-    at: "2026-11-26T15:39:21Z"
+    session: sha-256-64:24d8ab14130321e1
+    at: "2026-11-26T16:19:51Z"
 status: stable
 tags: [alpha]
 title: Agent isolation limits
@@ -43,16 +43,9 @@ tbhbdev alpha agent wait example
 
 Reviews accept `--ref` and resolve it before launch. `--schema` streams a JSON schema beside the prompt. Claude requires `--reason` and accepts `--claude-profile`. Use a `gemini-*` model for agy, or pass `--allow-non-gemini`. `--ops` selects the host's configured `ops` account.
 
-The driver assigns `agent/<run-name>` to each build. Before contacting the host, `agent exec --profile build` checks the brief for instructions that target another branch. If the driver finds one, it prints the allowed branch and exits with status 1. With `--start-ref`, the host starts from the selected commit and publishes the result to the selected remote branch. The agent still works on `agent/<run-name>`.
+The driver assigns `agent/<run-name>` to each build. When `agent exec --profile build` finds text such as `git checkout -b topic` that targets another branch, it prints one warning per match to standard error and continues the launch. Each warning quotes the match and names the branch the agent works on and can publish. The text check can flag file restores or quoted examples and miss instructions in prose.
 
-The check looks for these forms at the start of a paragraph, sentence, or list item. Commands can follow a verb such as `Run`.
-
-- `git switch NAME`, `git switch -c NAME`, and `git switch -C NAME`.
-- `git checkout -b NAME` and `git checkout -B NAME`. The check also recognizes `git checkout NAME` with a single target when the name has no period or starts with `refs/heads/`.
-- `git push origin NAME` and `git push origin HEAD:refs/heads/NAME`, with or without options such as `-u` before `origin`.
-- An instruction such as “work on branch `NAME`” with the branch name in a code span.
-
-The check also looks for named pushes in prose, such as “push commits to `topic/other`.” Branch names are case-sensitive. The check skips quoted examples such as “`git checkout -b topic` must be refused.” Use `git checkout -- FILE` to restore files.
+With `--start-ref`, the agent still works on `agent/<run-name>`. The driver starts the run from the selected commit and publishes the result to the selected remote branch.
 
 Each run gets a private `TMPDIR`. Run-host sets `PYTEST_DEBUG_TEMPROOT` to the same directory for pytest's default base directory. At exit, run-host removes the run's temporary tree without following symlinks. If removal fails, the run keeps its exit status.
 

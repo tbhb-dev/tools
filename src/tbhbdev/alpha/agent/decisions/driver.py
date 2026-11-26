@@ -12,8 +12,6 @@ from tbhbdev.alpha.agent.decisions import config, request
 from tbhbdev.alpha.agent.model import NAME, Harness, Invalid, Profile, RunKind
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from tbhbdev.alpha.agent.model import Host, RunRequest, Settings
 
 COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -26,51 +24,20 @@ _REF_USE = re.compile(
     r"|(?i:git fetch) \S+ )[\[(`\"']?"
     rf"({brief.SHORT_AGENT_REF})"
 )
-_PUSH_TO = r"push (?:\w+ )?to"
 _UPDATE = re.compile(
-    rf"\b(?:(?i:update|{_PUSH_TO}) "
+    r"\b(?:(?i:update|push (?:\w+ )?to) "
     r"(?:(?i:a|the|this|its|current|existing|branch) )*"
     r"|(?i:git push) [^\s`]+ (?:[^\s`:]+:)?)"
     rf"(?:[`\"']?(refs/heads/{brief.BRANCH_REF}{brief.REF_END}|{brief.SHORT_AGENT_REF})"
     r"|(?i:(?:PR|pull request)(?: #\d+)? (?:head|branch))\b)"
 )
-_REFUSED_COMMAND_EXAMPLE = re.compile(
-    r"(?P<quote>[`\"'])(?i:git (?:checkout|switch|push)) "
-    r"(?:(?!(?P=quote))[^\n])+(?P=quote)"
-    r"(?=\s+(?i:(?:(?:must|should|will) be|is) (?:refused|forbidden|rejected))\b)"
-)
-_INSTRUCTION_START = r"(?:^|(?<=[.!?;]) +)(?:[-*+] |\d+[.)] )?(?:(?i:then) )?"
-_BRANCH_NAME = rf"(?:refs/heads/)?(?!refs/|[-./]){brief.BRANCH_REF}"
-_BRANCH_PHRASE = r"(?:a |the )?branch (?:named )?"
-_GIT_OPTIONS = r"(?: --?\w[\w-]*)*"
-# A plain checkout can also restore files. Require a single branch name.
-_CHECKOUT_BRANCH = (
-    rf"(?=(?:refs/heads/{brief.BRANCH_REF}|(?!HEAD{brief.REF_END})[\w/-]*[\w-])"
-    r"(?=[`]|[\"']?(?: *[;&|]|[.,!?](?: |$)|$)))"
-)
-_BRANCH_COMMAND = re.compile(
-    rf"{_INSTRUCTION_START}(?:(?i:run|use|execute)(?: |: *))?[`\"']?(?i:git) "
-    rf"(?:(?i:checkout){_GIT_OPTIONS} -[bB] [`\"']?"
-    rf"|(?i:checkout)(?: -q| --quiet)? [`\"']?{_CHECKOUT_BRANCH}"
-    rf"|(?i:switch)(?!{_GIT_OPTIONS} (?:-d|--detach)\b)"
-    rf"{_GIT_OPTIONS}(?: -[cC])?(?: --)? [`\"']?"
-    rf"|(?i:push){_GIT_OPTIONS} (?!-)[^\s`\"']+ [`\"']?\+?"
-    rf"(?:[^\s`\"':]+:)?(?!HEAD{brief.REF_END}))"
-    rf"({_BRANCH_NAME})(?!:){brief.REF_END}",
-    re.MULTILINE,
-)
-_BRANCH_REQUEST = re.compile(
-    rf"{_INSTRUCTION_START}"
-    rf"(?i:(?:create |work on |commit on |check out |switch to |on )"
-    rf"{_BRANCH_PHRASE})`({_BRANCH_NAME})`",
-    re.MULTILINE,
-)
-_PUSH_REQUEST = re.compile(
-    rf"(?:\b(?i:{_PUSH_TO} (?:{_BRANCH_PHRASE})?)(?=`{_BRANCH_NAME}`)"
-    rf"|{_INSTRUCTION_START}(?i:{_PUSH_TO}) "
-    rf"(?:(?i:{_BRANCH_PHRASE})|(?=[`\"']?(?:refs/heads/|agent/))))"
-    rf"[`\"']?({_BRANCH_NAME})(?=[`\"']|[.,;!?](?: |$)|$)",
-    re.MULTILINE,
+_BRANCH_TARGET = re.compile(
+    r"\b(?:(?i:git (?:checkout(?: -[bB])?|switch(?: -[cC])?) "
+    r"|git push (?:-\S+ )*[^\s`]+ (?:[^\s`:\"']+:)?)"
+    r"|(?i:(?:create|work on|commit on|check out|switch to) "
+    r"(?:a |the )?branch (?:named )?|push (?:\w+ )?to (?:branch )?)(?=`))"
+    rf"[`\"']?((?:refs/heads/)?(?!refs/|[-./]|HEAD{brief.REF_END})"
+    rf"{brief.BRANCH_REF})(?!:){brief.REF_END}"
 )
 
 
@@ -83,12 +50,12 @@ def unfetched_prompt_refs(prompt: str, fetch_refs: list[str]) -> list[str]:
     ]
 
 
-def _instructions(pattern: re.Pattern[str], prose: str) -> Iterator[re.Match[str]]:
-    return (
-        match
+def _instructions(pattern: re.Pattern[str], prose: str) -> list[str | None]:
+    return [
+        match[1]
         for match in pattern.finditer(prose)
         if not brief.prohibiting(prose, match.start())
-    )
+    ]
 
 
 def _unfetched_explicit_refs(
@@ -105,40 +72,37 @@ def _unfetched_explicit_refs(
     return [ref for ref in dict.fromkeys(explicit) if ref not in fetch_refs]
 
 
-def _build_branch_problems(prose: str, allowed: str) -> list[str]:
-    for pattern in (_BRANCH_COMMAND, _BRANCH_REQUEST, _PUSH_REQUEST):
-        for match in _instructions(pattern, prose):
-            branch = match[1].removeprefix("refs/heads/")
-            if branch != allowed:
-                return [
-                    (
-                        f"the brief targets branch {branch}. "
-                        f"The driver owns the build branch. Use {allowed}"
-                    )
-                ]
-    return []
+def build_branch_advice(prompt: str, run: str) -> tuple[str, list[str]]:
+    """Return the brief with branch matches removed and one warning per match."""
+    allowed = f"agent/{run}"
+    warnings = []
+
+    def advise(match: re.Match[str]) -> str:
+        branch = match[1].removeprefix("refs/heads/")
+        if branch != allowed and not brief.prohibiting(prompt, match.start()):
+            warnings.append(
+                f"the brief contains {match[0]!r}. "
+                f"The run works on its own branch {allowed}. "
+                "The agent publishes only that branch."
+            )
+        # The ref checks also recognize some branch instructions. A match
+        # here is advisory, so those checks see only the rest of the brief.
+        return " "
+
+    remainder = _BRANCH_TARGET.sub(advise, prompt)
+    return remainder, warnings
 
 
 def prompt_launch_problems(
-    prompt: str,
-    profile: Profile,
-    fetch_refs: list[str],
-    start_ref: str | None,
-    run: str,
+    prompt: str, profile: Profile, fetch_refs: list[str], start_ref: str | None
 ) -> list[str]:
     """Check explicit ref uses and branch update instructions in a launch brief."""
-    if profile is Profile.BUILD:
-        prompt = _REFUSED_COMMAND_EXAMPLE.sub("the example", prompt)
     # Fold line wraps within a paragraph without changing ref case.
     prose = "\n".join(
         " ".join(block.split()) for block in brief.PROSE_BREAK.split(prompt)
     )
-    if profile is Profile.BUILD:
-        branch_problems = _build_branch_problems(prose, f"agent/{run}")
-        if branch_problems:
-            return branch_problems
-    updates = [match[1] for match in _instructions(_UPDATE, prose)]
-    named_refs = [match[1] for match in _instructions(_REF_USE, prose)] + updates
+    updates = _instructions(_UPDATE, prose)
+    named_refs = _instructions(_REF_USE, prose) + updates
     problems = [
         f"the brief names {ref}. Add `--fetch-ref {ref}`"
         for ref in _unfetched_explicit_refs(prompt, named_refs, fetch_refs)
