@@ -22,9 +22,9 @@ from tbhbdev.alpha.monorepo.source import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
-    from tbhbdev.alpha.monorepo.pathmap import Allow, PathMap
+    from tbhbdev.alpha.monorepo.pathmap import PathMap
     from tbhbdev.alpha.monorepo.source import Blob
 
 # Prose that names an old repository is a dated record and stays as written.
@@ -54,7 +54,18 @@ OLD_BAZEL_MODULES = re.compile(
 PRESET = "Renovate preset from an old repository"
 REFERENCE_END = rb"[^\s'\"\x60,\]\)}]*"
 GO_SUFFIX = rb"(?![\w.-])(?:/[\w./-]+)?"
-type Match = tuple[int, str, bytes]
+# cspell:words renovaterc
+ROOT_RENOVATE = (
+    ".renovaterc",
+    ".renovaterc.json",
+    ".renovaterc.json5",
+    "renovate.json",
+    "renovate.json5",
+)
+YAML_LINE_BREAK = re.compile(r"\r\n|[\r\n\x85\u2028\u2029]")
+YAML_SUFFIXES = frozenset({".yml", ".yaml"})
+# The statement and its reference can start on different lines.
+type Match = tuple[int, str, int]
 
 
 def old_repositories(repo: str) -> bytes:
@@ -63,10 +74,9 @@ def old_repositories(repo: str) -> bytes:
 
 
 def rules(
-    repo: str, modules: set[str], local_modules: set[str]
+    addresses: bytes, modules: set[str], local_modules: set[str], *, source_only: bool
 ) -> dict[str, re.Pattern[bytes]]:
     """Match executable references to repositories the monorepo absorbs."""
-    addresses = old_repositories(repo)
     repository = addresses + rb"(?![\w.-])"
     found = {
         WORKFLOW: rb"\buses:\s*"
@@ -86,14 +96,10 @@ def rules(
     go_path = rb"(?<![\w./:-])" + exclude
     for module in sorted(modules):
         found[f"Go path {module}"] = go_path + re.escape(module.encode()) + GO_SUFFIX
-    found[GO_REPOSITORY] = go_path + (
-        rb"(?:github\.com/"
-        + addresses
-        + rb"|go\.tbhb\.dev/"
-        + OLD_REPO_NAMES
-        + rb")"
-        + GO_SUFFIX
-    )
+    go_repos = rb"github\.com/" + addresses
+    if not source_only:
+        go_repos += rb"|go\.tbhb\.dev/" + OLD_REPO_NAMES
+    found[GO_REPOSITORY] = go_path + rb"(?:" + go_repos + rb")" + GO_SUFFIX
     return {rule: re.compile(pattern) for rule, pattern in found.items()}
 
 
@@ -102,14 +108,16 @@ def pattern_references(
 ) -> Iterator[Match]:
     for rule, pattern in patterns.items():
         for match in pattern.finditer(data):
-            target = match["target"] if pattern.groups else match[0]
-            yield start_line + data.count(b"\n", 0, match.start()), rule, target
+            line = start_line + data.count(b"\n", 0, match.start())
+            target_start = match.start("target") if pattern.groups else match.start()
+            yield line, rule, line + data.count(b"\n", match.start(), target_start)
 
 
 def yaml_mapping_references(
     node: MappingNode,
     pending: list[Node],
     repository: re.Pattern[bytes],
+    scalars: dict[int, ScalarToken],
     *,
     galaxy: bool,
 ) -> Iterator[Match]:
@@ -125,28 +133,33 @@ def yaml_mapping_references(
         if key.value == "uses" and isinstance(value, ScalarNode):
             target = value.value.strip().encode()
             if repository.match(target):
-                yield key.start_mark.line + 1, WORKFLOW, target
+                line, raw = yaml_scalar_text(scalars[value.end_mark.index])
+                raw = raw.removeprefix('"').removeprefix("'")
+                target_line = line + raw.count("\n", 0, len(raw) - len(raw.lstrip()))
+                yield key.start_mark.line + 1, WORKFLOW, target_line
 
 
-def yaml_scalar_references(
-    token: ScalarToken, patterns: dict[str, re.Pattern[bytes]]
-) -> Iterator[Match]:
+def yaml_scalar_text(token: ScalarToken) -> tuple[int, str]:
     start = token.start_mark
     raw = cast("str", start.buffer)[start.index : token.end_mark.index]
-    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    raw = YAML_LINE_BREAK.sub("\n", raw)
     line = start.line + 1
     if token.style in {"|", ">"}:
         # The block header can carry a YAML comment beside the style marker.
         _, _, raw = raw.partition("\n")
         line += 1
-    yield from pattern_references(raw.encode(), patterns, line)
+    return line, raw
 
 
 def yaml_references(
-    data: bytes, repo: str, patterns: dict[str, re.Pattern[bytes]], *, galaxy: bool
+    data: bytes,
+    addresses: bytes,
+    patterns: dict[str, re.Pattern[bytes]],
+    *,
+    galaxy: bool,
 ) -> Iterator[Match]:
     """Scan YAML scalar values, with workflow calls identified by their key."""
-    repository = re.compile(old_repositories(repo) + rb"(?![\w.-])")
+    repository = re.compile(addresses + rb"(?![\w.-])")
     pending = list(
         cast("Iterator[Node]", yaml.compose_all(data, Loader=yaml.SafeLoader))
     )
@@ -168,16 +181,17 @@ def yaml_references(
             continue
         if isinstance(node, MappingNode):
             yield from yaml_mapping_references(
-                node, pending, repository, galaxy=galaxy and id(node) in roots
+                node, pending, repository, scalars, galaxy=galaxy and id(node) in roots
             )
             continue
         if token := scalars.get(node.end_mark.index):
-            yield from yaml_scalar_references(token, patterns)
+            line, raw = yaml_scalar_text(token)
+            yield from pattern_references(raw.encode(), patterns, line)
 
 
-def bazel_arguments(call: ast.Call) -> dict[str | None, str]:
+def bazel_arguments(call: ast.Call) -> dict[str | None, tuple[str, int]]:
     return {
-        keyword.arg: keyword.value.value
+        keyword.arg: (keyword.value.value, keyword.value.lineno)
         for keyword in call.keywords
         if isinstance(keyword.value, ast.Constant)
         and isinstance(keyword.value.value, str)
@@ -207,49 +221,50 @@ def bazel_calls(data: bytes) -> Iterator[tuple[str, ast.Call]]:
 def bazel_references(data: bytes, folder: Path, tree: Path) -> Iterator[Match]:
     """Find old Bazel dependencies without a local override in this module."""
     local: set[str] = set()
-    deps: list[tuple[int, str]] = []
+    deps: list[tuple[int, str, int]] = []
     for kind, call in bazel_calls(data):
         if kind == "local_path_override":
             args = bazel_arguments(call)
-            if (name := args.get("module_name")) and inside_tree(
-                tree, folder, args.get("path", "")
-            ):
+            name, _ = args.get("module_name", ("", 0))
+            path, _ = args.get("path", ("", 0))
+            if name and inside_tree(tree, folder, path):
                 local.add(name)
         elif kind == "bazel_dep":
-            name = bazel_arguments(call).get("name", "")
+            name, target_line = bazel_arguments(call).get("name", ("", 0))
             if OLD_BAZEL_MODULES.fullmatch(name):
-                deps.append((call.lineno, name))
-    for line, name in deps:
+                deps.append((call.lineno, name, target_line))
+    for line, name, target_line in deps:
         if name not in local:
-            yield line, BAZEL_DEP, name.encode()
+            yield line, BAZEL_DEP, target_line
 
 
 def references(
     dest: str,
     data: bytes,
     patterns: dict[str, re.Pattern[bytes]],
-    repo: str,
-    tree: Path,
+    addresses: bytes,
+    bazel_root: Path | None,
 ) -> Iterator[Match]:
     path = PurePosixPath(dest)
     if path.suffix in PROSE:
         return
-    is_yaml = path.suffix in {".yml", ".yaml"}
     scoped = patterns.copy()
     if path.suffix != ".go" and path.name not in GO_FILES:
         scoped.pop(GO_REPOSITORY)
-    if is_yaml:
+    if path.suffix in YAML_SUFFIXES:
         scoped.pop(WORKFLOW)
         try:
             yield from yaml_references(
-                data, repo, scoped, galaxy=path.name == "galaxy.yml"
+                data, addresses, scoped, galaxy=path.name == "galaxy.yml"
             )
         except yaml.YAMLError as exc:
-            yield 0, f"invalid YAML: {exc}", b""
+            yield 0, f"invalid YAML: {exc}", 0
         return
     yield from pattern_references(scan_text(path, data), scoped)
-    if path.name == "MODULE.bazel" or path.name.endswith(".MODULE.bazel"):
-        yield from bazel_references(data, tree / path.parent, tree)
+    if bazel_root is not None and (
+        path.name == "MODULE.bazel" or path.name.endswith(".MODULE.bazel")
+    ):
+        yield from bazel_references(data, bazel_root / path.parent, bazel_root)
 
 
 def go_modules(clone: str, listing: dict[str, Blob]) -> set[str]:
@@ -263,16 +278,28 @@ def go_modules(clone: str, listing: dict[str, Blob]) -> set[str]:
 
 
 def file_findings(
-    dest: str, matches: Iterator[Match], allow: list[tuple[int, Allow]], used: set[int]
+    dest: str,
+    data: bytes,
+    matches: Iterator[Match],
+    allow: list[str],
+    used: set[tuple[str, str]],
 ) -> Iterator[str]:
+    allowed = set(allow)
+    lines: list[str] = []
+    if allowed:
+        content = data.decode(errors="surrogateescape")
+        lines = (
+            YAML_LINE_BREAK.split(content)
+            if PurePosixPath(dest).suffix in YAML_SUFFIXES
+            else content.split("\n")
+        )
     found: dict[int, str] = {}
-    for line, rule, match in matches:
+    for line, rule, target_line in matches:
         if not line:
             yield f"{dest}: {rule}"
             continue
-        target = match.decode(errors="replace")
-        if matched := {i for i, entry in allow if entry.pattern.search(target)}:
-            used.update(matched)
+        if allowed and (text := lines[target_line - 1].strip()) in allowed:
+            used.add((dest, text))
         elif rule == WORKFLOW:
             found[line] = rule
         else:
@@ -283,10 +310,11 @@ def file_findings(
 
 def tree_references(
     scanned: list[tuple[str, bytes]],
-    repo: str,
+    made: PathMap,
     modules: set[str],
     tree: Path,
-    allow: list[Allow],
+    *,
+    shared: Iterable[tuple[str, bytes]] = (),
 ) -> Iterator[str]:
     """Scan faithful files and report any exception that suppressed no finding."""
     local_modules = {
@@ -295,20 +323,29 @@ def tree_references(
         if (path := PurePosixPath(dest)).name == "go.mod"
         for m in MODULE.findall(scan_text(path, data))
     }
-    patterns = rules(repo, modules, local_modules)
-    used: set[int] = set()
+    used: set[tuple[str, str]] = set()
     root = tree.resolve()
-    for dest, data in scanned:
-        inside = PurePosixPath(dest)
-        entries = [(i, a) for i, a in enumerate(allow, 1) if inside.full_match(a.path)]
-        yield from file_findings(
-            dest, references(dest, data, patterns, repo, root), entries, used
-        )
-    for i, entry in enumerate(allow, 1):
-        if i not in used:
-            yield (
-                f"allow entry {i} ({entry.path}): matches no findings ({entry.reason})"
+    for source_only, files_to_check in ((False, scanned), (True, shared)):
+        if source_only:
+            addresses = re.escape(made.repo.encode())
+            patterns = rules(addresses, set(), set(), source_only=True)
+            bazel_root = None
+        else:
+            addresses = old_repositories(made.repo)
+            patterns = rules(addresses, modules, local_modules, source_only=False)
+            bazel_root = root
+        for dest, data in files_to_check:
+            yield from file_findings(
+                dest,
+                data,
+                references(dest, data, patterns, addresses, bazel_root),
+                made.allow.get(dest, []),
+                used,
             )
+    for dest, lines in made.allow.items():
+        for line in lines:
+            if (dest, line) not in used:
+                yield f"{dest}: allow entry matches no findings: {line!r}"
 
 
 def read(path: Path) -> tuple[str, bytes] | None:
@@ -347,6 +384,10 @@ def inventory(tree: Path, dest: str, problems: list[str]) -> set[str]:
             raise MonorepoError(message)
     if stat.S_ISREG(folder.lstat().st_mode):
         return {dest}
+    return walk(tree, folder, problems)
+
+
+def walk(tree: Path, folder: Path, problems: list[str]) -> set[str]:
     found: set[str] = set()
     pending = [folder]
     while pending:
@@ -367,6 +408,29 @@ def inventory(tree: Path, dest: str, problems: list[str]) -> set[str]:
                 continue
             found.add(child.relative_to(tree.absolute()).as_posix())
     return found
+
+
+def shared_files(
+    tree: Path, imported: set[str], problems: list[str]
+) -> Iterator[tuple[str, bytes]]:
+    """Read the shared GitHub and Renovate files without following symlinks."""
+    root = tree.absolute()
+    if any(path.is_symlink() for path in (*root.parents, root)):
+        return
+    paths = {
+        dest for dest in ROOT_RENOVATE if (tree / dest).exists(follow_symlinks=False)
+    }
+    github = tree / ".github"
+    if github.is_dir(follow_symlinks=False):
+        paths.update(walk(tree, github.absolute(), problems))
+    for dest in sorted(paths - imported):
+        try:
+            got = read(tree / dest)
+        except MonorepoError as exc:
+            problems.append(str(exc))
+            continue
+        if got is not None and got[0] != LINK:
+            yield dest, got[1]
 
 
 def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
@@ -409,7 +473,11 @@ def check(clone: str, commit: str, made: PathMap, tree: Path) -> list[str]:
             scanned.append((dest, wanted))
     problems.extend(
         tree_references(
-            scanned, made.repo, go_modules(clone, listing), tree, made.allow
+            scanned,
+            made,
+            go_modules(clone, listing),
+            tree,
+            shared=shared_files(tree, actual, problems),
         )
     )
     return problems

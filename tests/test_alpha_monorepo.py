@@ -13,7 +13,7 @@ import pytest
 from tbhbdev import alpha
 from tbhbdev.alpha import monorepo
 from tbhbdev.alpha.monorepo import source, verify
-from tbhbdev.alpha.monorepo.pathmap import Rewrite, dump, load
+from tbhbdev.alpha.monorepo.pathmap import PathMap, Rewrite, dump, load
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -124,7 +124,7 @@ def test_map_copies_and_drops(src: Src, capsys: Capsys) -> None:
     assert data["repo"] == "tbhb-dev/tools"
     assert data["commit"] == commit
     assert data["dest"] == DEST
-    assert data["allow"] == []
+    assert data["allow"] == {}
     assert data["rewrite"] == {}
     copied = cast("dict[str, str]", data["copy"])
     assert copied["src/app.py"] == f"{DEST}/src/app.py"
@@ -373,7 +373,8 @@ def test_verify_rejects_changed_symlink_target(imported: Imported, target: str) 
 
 
 def scan_references(dest: str, data: bytes) -> list[str]:
-    return list(verify.tree_references([(dest, data)], "o/n", set(), Path.cwd(), []))
+    mapping = PathMap("o/n", "", "")
+    return list(verify.tree_references([(dest, data)], mapping, set(), Path.cwd()))
 
 
 @pytest.mark.parametrize("key", ['"uses"', "'uses'", "uses"])
@@ -1042,95 +1043,109 @@ def test_the_command_line_parses_and_dispatches(
     assert "monorepo" in alpha.USAGE
 
 
-def test_verify_suppresses_allowed_references(
+def test_verify_allows_only_exact_reference_lines(
     src: Src, mono: Path, capsys: Capsys
 ) -> None:
     path, _ = src
-    (path / "bin/run.sh").write_text(
-        "git clone https://github.com/tbhb-dev/tools.git\n"
-        "git clone https://github.com/tbhb-dev/tools.git "
-        "https://github.com/tbhb-dev/rules.git\n"
-    )
-    (path / "renovate.json5").write_text(
-        '  // "github>tbhb-dev/rules:preset"\n'
-        '{ extends: ["github>tbhb-dev/renovate-config:fixture"] }\n'
+    meter = 'meter := otel.Meter("go.tbhb.dev/agent-capacity")'
+    data = f"\t{meter}  \n".encode()
+    (path / "meter.go").write_bytes(data)
+    (path / "other.go").write_bytes(data)
+    (path / "main.go").write_text(
+        f'{meter} // alternate\nimport "go.tbhb.dev/agent-capacity/pkg"\n// {meter}\n'
     )
     commit = commit_all(path)
     made = make_map((path, commit), mono.parent)
     mapping = load(made.read_text())
-    mapping.copy["renovate.json5"] = f"{DEST}/renovate.json5"
-    del mapping.drop["renovate.json5"]
-    entries = load(
-        HEAD
-        + f"""
-[[allow]]
-path = "{DEST}/**/*.sh"
-literal = "https://github.com/tbhb-dev/tools.git"
-reason = "The fixture clones this repository."
-
-[[allow]]
-path = "{DEST}/renovate.json5"
-regex = '^github>tbhb-dev/renovate-config:fixture$'
-reason = "The preset is a fixture."
-
-[[allow]]
-path = "{DEST}/renovate.json5"
-literal = "github>tbhb-dev/rules:preset"
-reason = "The example was moved into a comment."
-
-[[allow]]
-path = "{DEST}/*.sh"
-literal = "https://github.com/tbhb-dev/rules.git"
-reason = "The glob skips nested paths."
-"""
-    ).allow
-    mapping.allow = entries
+    mapping.allow = {
+        f"{DEST}/meter.go": [meter],
+        f"{DEST}/main.go": [
+            meter,
+            'import "go.tbhb.dev/agent-capacity/.*"',
+            f"// {meter}",
+        ],
+        f"{DEST}/*.go": [meter],
+    }
     made.write_text(dump(mapping))
-    assert load(made.read_text()).allow == entries
+    assert load(made.read_text()).allow == mapping.allow
     assert run_import(f"{path}@{commit}", made, mono) == 0
     capsys.readouterr()
+    rule = "Go path from an old repository"
     assert Imported((path, commit), mono, made, capsys).problems() == [
-        f"{DEST}/bin/run.sh:2: address of an old repository",
-        (
-            f"allow entry 3 ({DEST}/renovate.json5): matches no findings "
-            "(The example was moved into a comment.)"
+        f"{DEST}/main.go:1: {rule}",
+        f"{DEST}/main.go:2: {rule}",
+        f"{DEST}/other.go:1: {rule}",
+        *(
+            f"{dest}: allow entry matches no findings: {line!r}"
+            for dest in (f"{DEST}/main.go", f"{DEST}/*.go")
+            for line in mapping.allow[dest]
         ),
-        (
-            f"allow entry 4 ({DEST}/*.sh): matches no findings "
-            "(The glob skips nested paths.)"
-        ),
-        "verify: 3 problems",
+        "verify: 7 problems",
     ]
+
+
+def test_verify_scans_shared_files_for_the_source_repo(
+    imported: Imported, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # cspell:words renovaterc
+    tree = imported.tree
+    workflow = ".github/workflows/build.yaml"
+    (tree / workflow).parent.mkdir(parents=True)
+    config = '{"extends": ["github>example/upstream:preset"]}\n'
+    call = "example/upstream/.github/workflows/check.yml@v1"
+    (tree / workflow).write_text(f"jobs:\n  build:\n    uses: >-\n      {call}\n")
+    (tree / ".github/renovate.json5").write_text(config)
+    (tree / "renovate.json").write_text(config)
+    (tree / ".renovaterc").write_text(config)
+    (tree / ".renovaterc.json5").mkdir()
+    (tree / "renovate.json5").symlink_to(".github/renovate.json5")
+    (tree / ".github/linked").symlink_to("workflows", target_is_directory=True)
+    (tree / ".github/other.json").write_text(
+        config.replace("example/upstream", "tbhb-dev/rules")
+    )
+    (tree / ".github/similar.json").write_text(
+        config.replace("example/upstream", "example/upstream-extra")
+    )
+    (tree / "other.json").write_text(config)
+
+    mapping = load(imported.mapping.read_text())
+    mapping.repo = "example/upstream"
+    imported.mapping.write_text(dump(mapping))
+    rule = "Renovate preset from an old repository"
+    assert imported.problems() == [
+        f".github/renovate.json5:1: {rule}",
+        f"{workflow}:3: {WORKFLOW}",
+        f".renovaterc:1: {rule}",
+        f"renovate.json:1: {rule}",
+        "verify: 4 problems",
+    ]
+
+    (tree / "renovate.json").unlink()
+    (tree / ".renovaterc").unlink()
+    mapping.allow = {workflow: [call], ".github/renovate.json5": [config.strip()]}
+    imported.mapping.write_text(dump(mapping))
+    assert verify_exit(imported.source, imported.mapping, tree) == 0
+    assert imported.capsys.readouterr().out == "verify: 0 problems\n"
+
+    original = Path.read_bytes
+
+    def fail(path: Path) -> bytes:
+        if path == tree / workflow:
+            raise PermissionError(path)
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail)
+    assert imported.problems()[0].startswith(f"{tree / workflow}: cannot read:")
 
 
 @pytest.mark.parametrize(
     ("entry", "message"),
     [
-        ("allow = true", "must be a list of tables"),
-        ("allow = [1]", "allow entry 1 must be a table"),
-        (
-            '[[allow]]\npath = "d/**"\nreason = "used"',
-            "exactly one of literal or regex",
-        ),
-        (
-            '[[allow]]\npath = "d/**"\nliteral = "x"\nregex = "y"\nreason = "used"',
-            "exactly one of literal or regex",
-        ),
-        ('[[allow]]\npath = "../d"\nliteral = "x"\nreason = "used"', "bad path"),
-        ('[[allow]]\nliteral = "x"\nreason = "used"', "path must be a string"),
-        ('[[allow]]\npath = "d/**"\nliteral = "x"', "reason must be a string"),
-        (
-            '[[allow]]\npath = "d/**"\nliteral = 1\nreason = "used"',
-            "literal must be a string",
-        ),
-        ('[[allow]]\npath = "d/**"\nliteral = "x"\nreason = " "', "one-line reason"),
-        (
-            '[[allow]]\npath = "d/**"\nliteral = "x"\nreason = "a\\nb"',
-            "one-line reason",
-        ),
-        ('[[allow]]\npath = "d/**"\nliteral = "x"\nreason = "a\\n"', "one-line reason"),
-        ('[[allow]]\npath = "d/**"\nliteral = ""\nreason = "used"', "nonempty literal"),
-        ('[[allow]]\npath = "d/**"\nregex = "["\nreason = "used"', "invalid regex"),
+        ("allow = true", "map key 'allow' must be a table"),
+        ('[[allow]]\npath = "d/a"\nregex = ".*"', "map key 'allow' must be a table"),
+        ('[allow]\n"d/a" = "line"', "must be a list of strings"),
+        ('[allow]\n"d/a" = [1]', "must be a string"),
+        ('[allow]\n"../d/a" = ["line"]', "bad path"),
     ],
 )
 def test_load_rejects_malformed_allow_entries(entry: str, message: str) -> None:
@@ -1324,7 +1339,8 @@ def test_bazel_override_must_resolve_inside_the_monorepo(
     (tree / "lib/external").symlink_to(tmp_path, target_is_directory=True)
     dest = "lib/rules/MODULE.bazel"
     data = f'bazel_dep(name = "tbhb_rules")\n{override}\n'.encode()
-    assert list(verify.tree_references([(dest, data)], "o/n", set(), tree, [])) == [
+    mapping = PathMap("o/n", "", "")
+    assert list(verify.tree_references([(dest, data)], mapping, set(), tree)) == [
         f"{dest}:{line}: Bazel dependency from an old repository" for line in expected
     ]
 

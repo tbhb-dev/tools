@@ -4,8 +4,8 @@ generated:
   - role: generated
     harness: codex
     model: openai:gpt-6.2-sol
-    session: sha-256-64:f0c981acb10c8642
-    at: "2026-11-26T15:32:16Z"
+    session: sha-256-64:e6dbf8f7767d02d3
+    at: "2026-11-26T16:22:35Z"
 status: stable
 tags: [alpha, monorepo]
 title: Monorepo import
@@ -28,16 +28,14 @@ Edit the TOML map before importing. Use the source path as the key in each file 
 
 The default map drops the root configuration that the monorepo's shared roots replace, and gives the matching pattern as the reason. The patterns come from the root of tbhb-dev/tools and sit in the `ROOT_CONFIG` table of the map module. They cover the Bazel and Mise files, lock files, lint, spelling, prose, and editor settings, the Renovate files, the license files, `REUSE.toml`, and the repository's workflows, rulesets, `CODEOWNERS`, and workflow linter settings. A pattern matches the whole path, and `*` stays within one folder. The default map keeps everything else, including the agent instruction files, `pyproject.toml`, and the build files, which a person reviews.
 
-Every destination is a clean relative path under the import folder. An optional `allow` list records exceptions for the verifier. Each entry takes a destination `path` glob and a one-line `reason`. Choose `literal` or `regex` for the match.
+Every copy or rewrite destination is a clean relative path under the import folder. The optional `[allow]` table maps exact paths relative to the monorepo root to lists of full lines that contain references to keep. Paste each line without leading or trailing whitespace. The verifier compares the remaining text exactly, including internal spaces and punctuation.
 
 ```toml
-[[allow]]
-path = "lib/rules/**/tests/*.sh"
-literal = "https://github.com/tbhb-dev/rules.git"
-reason = "The network test clones the public repository."
+[allow]
+"lib/rules/tests/network.sh" = ['git clone https://github.com/tbhb-dev/rules.git']
 ```
 
-Place the `[[allow]]` entries independently of the file tables. The glob matches the full monorepo-relative destination path. `*` matches within one folder and `**` can cross folders. A literal or Python regular expression searches the reference text, such as a URL, workflow target, preset, Go path, or Bazel module name. Verification suppresses each matching reference and reports any entry that matches zero findings.
+Both paths and lines are literal. The verifier reports any listed line that matches no reference in the specified file.
 
 ## Import
 
@@ -66,7 +64,8 @@ The verifier checks the following conditions.
 - Each copied file exists in the tree with the source's bytes, executable bit, and link or file kind.
 - Each rewritten file equals the source with the replacements of the map applied.
 - Every executable reference to an old repository in a copied or rewritten file has a matching `allow` entry.
-- Each `allow` entry matches at least one reference.
+- Every executable reference to the source repository in the root `.github/` directory or a root Renovate configuration file has a matching `allow` entry.
+- Each line listed in `[allow]` matches at least one reference.
 
 After reporting gaps in the map, stale replacements, or paths it can't inspect, verification continues through the remaining files under the imported folder.
 
