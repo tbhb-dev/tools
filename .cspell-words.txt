@@ -58,6 +58,7 @@ elts
 ENOENT
 enoexec
 esac
+evals
 execdir
 execpath
 executescript

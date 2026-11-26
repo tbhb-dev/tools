@@ -24,28 +24,36 @@ if TYPE_CHECKING:
 # Prose that names an old repository is a dated record and stays as written.
 PROSE = frozenset({".md", ".mdx", ".rst", ".txt", ".adoc"})
 MODULE = re.compile(rb"^module\s+(\S+)", re.MULTILINE)
+# Repositories in the design's "Where each repository goes" path map
+# (wiki/designs/monorepo/C-layout-and-ownership.md). Standalone repos stay out.
+OLD_REPOS = (
+    rb"tbhb-dev/(?:agent-capacity|agent-config|agent-memories|ansible-collections|"
+    rb"bazel-r2-cache|dashboard|design|dotfiles|evals|event-gateway|github-metrics|"
+    rb"go\.tbhb\.dev|ops|pm|renovate-config|research|rules|runner-smoke|sm|spikes|"
+    rb"telemetry|tools|wiki|work)"
+)
 
 
 def rules(repo: str, modules: set[str]) -> list[tuple[str, re.Pattern[bytes]]]:
     """The executable references to an old repository, as patterns.
 
     A workflow call or a Renovate preset from any repository of the owner is
-    a reference, since the monorepo calls no old repository. A clone address
-    names the source repository, which covers Bazel overrides, scripts and Go
-    imports. Go module paths from the source's go.mod files add vanity paths.
+    a reference, since the monorepo calls no old repository. Clone addresses
+    name any repository in the design's path map or the source repository,
+    which covers Bazel overrides, scripts and Go imports. Go module paths from
+    the source's go.mod files add vanity paths.
     """
-    owner, name = (re.escape(part).encode() for part in repo.split("/"))
+    owner, _ = (re.escape(part).encode() for part in repo.split("/"))
+    addresses = OLD_REPOS + b"|" + re.escape(repo.encode())
     found = {
         "workflow uses an old repository": rb"\buses:\s*"
         rb"(?:[>|][-+]?[ \t]*(?:#[^\r\n]*)?\r?\n\s*)?['\"]?" + owner + rb"/",
         "Renovate preset from an old repository": rb"['\"](?:github|local)>"
         + owner
         + rb"/",
-        "address of the source repository": rb"github\.com[/:]"
-        + owner
-        + rb"/"
-        + name
-        + rb"(?![\w-])",
+        "address of an old repository": rb"github\.com[/:](?:"
+        + addresses
+        + rb")(?![\w-])",
     }
     for module in sorted(modules):
         found[f"Go path {module}"] = (

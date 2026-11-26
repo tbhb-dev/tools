@@ -1,8 +1,10 @@
 """Small real repositories exercise map, import and verify without a network."""
 
 import os
+import shutil
 import subprocess
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -14,12 +16,13 @@ from tbhbdev.alpha.monorepo import source, verify
 from tbhbdev.alpha.monorepo.pathmap import Rewrite, dump, load
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable
 
 PROG = "tbhbdev alpha monorepo"
 ORIGIN = "https://github.com/tbhb-dev/tools.git"
 DEST = "factory/tbhbdev"
 APP = b"print('hello')\n"
+WORKFLOW = "workflow uses an old repository"
 AGENTS = b"Read tbhb-dev/tools for the rules.\n"
 SOURCE_FILES: dict[str, bytes] = {
     "README.md": b"Clone https://github.com/tbhb-dev/tools as a record.\n",
@@ -319,69 +322,58 @@ def test_import_does_not_write_through_a_symlinked_folder(
     assert not list(outside.iterdir())
 
 
-def test_verify_reports_each_kind_of_difference(
-    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
-) -> None:
+@dataclass
+class Imported:
+    source: Src
+    tree: Path
+    mapping: Path
+    capsys: Capsys
+
+    def problems(self) -> list[str]:
+        assert verify_exit(self.source, self.mapping, self.tree) == 1
+        return self.capsys.readouterr().out.splitlines()
+
+
+@pytest.fixture
+def imported(src: Src, mono: Path, capsys: Capsys) -> Imported:
     path, commit = src
-    made = make_map(src, tmp_path)
+    made = make_map(src, mono.parent)
     assert run_import(f"{path}@{commit}", made, mono) == 0
     capsys.readouterr()
+    return Imported(src, mono, made, capsys)
+
+
+def test_verify_reports_each_kind_of_difference(mono: Path, imported: Imported) -> None:
     folder = mono / DEST
-    (folder / "src/app.py").write_bytes(b"changed\n")
-    (folder / "README.md").unlink()
+    (folder / "src/app.py").unlink()
+    os.mkfifo(folder / "src/app.py")
     (folder / "bin/run.sh").chmod(0o644)
     (folder / "link").unlink()
     (folder / "link").write_text("not a link")
     (folder / "AGENTS.md").unlink()
     (folder / "AGENTS.md").mkdir()
-    assert verify_exit(src, made, mono) == 1
-    out = capsys.readouterr().out
-    assert f"{DEST}/src/app.py: differs from src/app.py" in out
-    assert f"{DEST}/README.md: missing from the tree" in out
+    out = "\n".join(imported.problems())
+    assert f"{DEST}/src/app.py: missing from the tree" in out
     assert f"{DEST}/bin/run.sh: mode 100644, source has 100755" in out
     assert f"{DEST}/link: mode 100644, source has 120000" in out
     assert f"{DEST}/AGENTS.md: missing from the tree" in out
-    assert "verify: 5 problems" in out
-
-
-def test_verify_requires_the_map_to_account_for_every_file(
-    src: Src, tmp_path: Path, capsys: Capsys
-) -> None:
-    made = make_map(
-        src,
-        tmp_path,
-        edit={
-            '"uv.lock" = "root configuration (uv.lock)"\n': "",
-            "[drop]\n": '[drop]\n"ghost" = "never existed"\n',
-        },
-    )
-    assert verify_exit(src, made, tmp_path) == 1
-    out = capsys.readouterr().out
-    assert "uv.lock: source file is not in the map" in out
-    assert "ghost: in the map but not in the source" in out
+    assert "verify: 4 problems" in out
 
 
 @pytest.mark.parametrize(
     "extra", ["surprise.txt", "uv.lock", "src/app.py", ".hidden", "nested/stray.txt"]
 )
 def test_verify_rejects_files_not_produced_by_the_map(
-    src: Src, mono: Path, tmp_path: Path, capsys: Capsys, extra: str
+    mono: Path, imported: Imported, extra: str
 ) -> None:
-    path, commit = src
-    made = make_map(
-        src,
-        tmp_path,
-        edit={
-            f'"src/app.py" = "{DEST}/src/app.py"': f'"src/app.py" = "{DEST}/moved.py"'
-        },
-    )
-    assert run_import(f"{path}@{commit}", made, mono) == 0
-    capsys.readouterr()
+    mapping = load(imported.mapping.read_text())
+    mapping.copy["src/app.py"] = f"{DEST}/moved.py"
+    imported.mapping.write_text(dump(mapping))
+    (mono / DEST / "src/app.py").rename(mono / DEST / "moved.py")
     target = mono / DEST / extra
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(APP)
-    assert verify_exit(src, made, mono) == 1
-    assert capsys.readouterr().out.splitlines() == [
+    assert imported.problems() == [
         f"{DEST}/{extra}: not produced by the map",
         "verify: 1 problems",
     ]
@@ -389,318 +381,175 @@ def test_verify_rejects_files_not_produced_by_the_map(
 
 @pytest.mark.parametrize("component", [".", "factory", DEST, f"{DEST}/src"])
 def test_verify_rejects_symlinked_destination_folders(
-    src: Src,
     mono: Path,
-    capsys: Capsys,
+    imported: Imported,
     monkeypatch: pytest.MonkeyPatch,
     component: str,
 ) -> None:
-    path, commit = src
-    tmp_path = mono.parent
-    made = make_map(src, tmp_path)
-    assert run_import(f"{path}@{commit}", made, mono) == 0
-    capsys.readouterr()
     folder = mono / component
-    outside = tmp_path / "outside"
+    outside = mono.parent / "outside"
     folder.rename(outside)
     folder.symlink_to(outside, target_is_directory=True)
-    reads: list[Path] = []
     original = Path.read_bytes
 
     def read_bytes(target: Path) -> bytes:
-        reads.append(target)
+        assert not target.is_relative_to(folder)
         return original(target)
 
     monkeypatch.setattr(Path, "read_bytes", read_bytes)
-    assert verify_exit(src, made, mono) == 1
-    assert "verify: 0 problems" not in capsys.readouterr().out
-    assert not any(p.is_relative_to(folder) for p in reads)
+    assert "verify: 0 problems" not in imported.problems()
 
 
 @pytest.mark.parametrize("missing_table", ["copy", "rewrite", "drop"])
 def test_verify_collects_map_gaps_and_other_differences(
-    src: Src, mono: Path, tmp_path: Path, capsys: Capsys, missing_table: str
+    mono: Path, imported: Imported, missing_table: str
 ) -> None:
-    path, commit = src
-    made = make_map(src, tmp_path)
-    assert run_import(f"{path}@{commit}", made, mono) == 0
-    capsys.readouterr()
-    mapping = load(made.read_text())
-    del mapping.copy["README.md"]
+    mapping = load(imported.mapping.read_text())
+    del mapping.copy["link"]
+    del mapping.drop["uv.lock"]
     if missing_table == "copy":
         mapping.copy["ghost"] = f"{DEST}/ghost"
     elif missing_table == "rewrite":
         mapping.rewrite["ghost"] = Rewrite(f"{DEST}/ghost", [])
     else:
         mapping.drop["ghost"] = "absent"
-    made.write_text(dump(mapping))
-    (mono / DEST / "ghost").write_bytes(b"not in the source\n")
-    (mono / DEST / "src/app.py").write_bytes(b"changed\n")
-    (mono / DEST / "bin/run.sh").unlink()
-    assert verify_exit(src, made, mono) == 1
-    assert capsys.readouterr().out.splitlines() == [
-        "README.md: source file is not in the map",
-        "ghost: in the map but not in the source",
-        f"{DEST}/README.md: not produced by the map",
-        f"{DEST}/ghost: not produced by the map",
-        f"{DEST}/bin/run.sh: missing from the tree",
-        f"{DEST}/src/app.py: differs from src/app.py",
-        "verify: 6 problems",
-    ]
-
-
-def test_verify_collects_stale_rewrites_and_other_differences(
-    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
-) -> None:
-    path, commit = src
-    made = make_map(src, tmp_path)
-    assert run_import(f"{path}@{commit}", made, mono) == 0
-    capsys.readouterr()
-    mapping = load(made.read_text())
     for name in ("AGENTS.md", "README.md"):
         del mapping.copy[name]
         mapping.rewrite[name] = Rewrite(f"{DEST}/{name}", [("missing text", "new")])
-    made.write_text(dump(mapping))
+    imported.mapping.write_text(dump(mapping))
+    (mono / DEST / "ghost").write_bytes(b"not in the source\n")
     (mono / DEST / "src/app.py").write_bytes(b"changed\n")
     (mono / DEST / "bin/run.sh").unlink()
-    (mono / DEST / "extra.txt").write_bytes(b"extra\n")
-    assert verify_exit(src, made, mono) == 1
-    assert capsys.readouterr().out.splitlines() == [
-        f"{DEST}/extra.txt: not produced by the map",
+    assert imported.problems() == [
+        "link: source file is not in the map",
+        "uv.lock: source file is not in the map",
+        "ghost: in the map but not in the source",
+        f"{DEST}/ghost: not produced by the map",
+        f"{DEST}/link: not produced by the map",
         "AGENTS.md: replacement 'missing text' isn't in the file",
         "README.md: replacement 'missing text' isn't in the file",
         f"{DEST}/bin/run.sh: missing from the tree",
         f"{DEST}/src/app.py: differs from src/app.py",
-        "verify: 5 problems",
+        "verify: 9 problems",
     ]
 
 
 def test_verify_rejects_file_instead_of_destination_folder(
-    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
+    mono: Path, imported: Imported
 ) -> None:
-    made = make_map(src, tmp_path)
-    (mono / DEST).parent.mkdir(parents=True)
+    shutil.rmtree(mono / DEST)
     (mono / DEST).write_bytes(b"file instead of folder\n")
-    assert verify_exit(src, made, mono) == 1
-    out = capsys.readouterr().out
+    out = "\n".join(imported.problems())
     assert f"{DEST}: not produced by the map" in out
     assert "verify: 6 problems" in out
 
 
-def test_verify_rejects_special_files(
-    src: Src, mono: Path, tmp_path: Path, capsys: Capsys
-) -> None:
-    path, commit = src
-    made = make_map(src, tmp_path)
-    assert run_import(f"{path}@{commit}", made, mono) == 0
-    capsys.readouterr()
-    target = mono / DEST / "src/app.py"
-    target.unlink()
-    os.mkfifo(target)
-    assert verify_exit(src, made, mono) == 1
-    assert capsys.readouterr().out.splitlines() == [
-        f"{DEST}/src/app.py: missing from the tree",
-        "verify: 1 problems",
-    ]
-
-
-def test_verify_reports_scan_errors_and_continues(
-    src: Src,
-    mono: Path,
-    tmp_path: Path,
-    capsys: Capsys,
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("iterdir", "unreadable", "cannot scan"),
+        ("lstat", ".", "cannot scan"),
+        ("lstat", "unexpected.txt", "cannot scan"),
+        ("lstat", "src/app.py", "cannot scan"),
+        ("read_bytes", "AGENTS.md", "cannot read"),
+        ("readlink", "link", "cannot read"),
+    ],
+)
+def test_verify_reports_io_errors_and_continues(
+    imported: Imported,
     monkeypatch: pytest.MonkeyPatch,
+    case: tuple[str, str, str],
 ) -> None:
-    path, commit = src
-    made = make_map(src, tmp_path)
-    assert run_import(f"{path}@{commit}", made, mono) == 0
-    capsys.readouterr()
-    blocked = [mono / DEST / name for name in ("unreadable", "also-unreadable")]
-    for folder in blocked:
-        folder.mkdir()
-        (folder / "unexpected.txt").write_bytes(b"hidden\n")
-    original = os.scandir
+    method, target, rule = case
+    folder = imported.tree / DEST
+    for name in ("unreadable", "also-unreadable"):
+        (folder / name).mkdir()
+        (folder / name / "hidden").write_bytes(b"hidden")
+    (folder / "unexpected.txt").write_bytes(b"extra")
+    (folder / "bin/run.sh").chmod(0o644)
+    failed = {folder / target, folder / "also-unreadable"}
+    original = cast("Callable[[Path], object]", getattr(Path, method))
 
-    def scandir(folder: str | os.PathLike[str]) -> Iterator[os.DirEntry[str]]:
-        if Path(folder) in blocked:
-            raise PermissionError(folder)
-        return original(folder)
-
-    monkeypatch.setattr(os, "scandir", scandir)
-    assert verify_exit(src, made, mono) == 1
-    out = capsys.readouterr().out
-    for folder in blocked:
-        assert f"{folder}: cannot scan: {folder}" in out
-    assert "verify: 2 problems" in out
-    (mono / DEST / "src/app.py").write_bytes(b"changed\n")
-    assert verify_exit(src, made, mono) == 1
-    out = capsys.readouterr().out
-    assert f"{DEST}/src/app.py: differs from src/app.py" in out
-    assert "verify: 3 problems" in out
-
-
-@pytest.mark.parametrize("target", [".", "unexpected.txt", "src/app.py"])
-def test_verify_reports_stat_errors(
-    src: Src,
-    mono: Path,
-    capsys: Capsys,
-    monkeypatch: pytest.MonkeyPatch,
-    target: str,
-) -> None:
-    path, commit = src
-    made = make_map(src, mono.parent)
-    assert run_import(f"{path}@{commit}", made, mono) == 0
-    capsys.readouterr()
-    failed = mono / DEST / target
-    (mono / DEST / "unexpected.txt").write_bytes(b"unexpected\n")
-    original = Path.lstat
-
-    def lstat(path: Path) -> os.stat_result:
-        if path == failed:
+    def fail(path: Path) -> object:
+        if path in failed:
             raise PermissionError(path)
         return original(path)
 
-    monkeypatch.setattr(Path, "lstat", lstat)
-    assert verify_exit(src, made, mono) == 1
-    out = capsys.readouterr().out
-    assert "cannot scan:" in out
-    assert str(failed) in out
-
-
-@pytest.mark.parametrize("method", ["read_bytes", "readlink"])
-def test_verify_reports_read_errors_and_continues(
-    src: Src,
-    mono: Path,
-    capsys: Capsys,
-    monkeypatch: pytest.MonkeyPatch,
-    method: str,
-) -> None:
-    path, commit = src
-    made = make_map(src, mono.parent)
-    assert run_import(f"{path}@{commit}", made, mono) == 0
-    capsys.readouterr()
-    original = Path.read_bytes
-
-    def fail(path: Path) -> bytes:
-        if method == "read_bytes" and path.name != "AGENTS.md":
-            return original(path)
-        raise PermissionError(path)
-
     monkeypatch.setattr(Path, method, fail)
-    (mono / DEST / "bin/run.sh").chmod(0o644)
-    assert verify_exit(src, made, mono) == 1
-    out = capsys.readouterr().out
-    assert "cannot read:" in out
-    assert f"{DEST}/bin/run.sh: mode 100644, source has 100755" in out
+    out = "\n".join(imported.problems())
+    assert f"{folder / target}: {rule}:" in out
+    if method == "iterdir":
+        assert f"{folder / 'also-unreadable'}: cannot scan:" in out
+    if target != ".":
+        assert f"{DEST}/bin/run.sh: mode 100644, source has 100755" in out
 
 
-def test_verify_reports_executable_references(
-    tmp_path: Path, mono: Path, capsys: Capsys
+@pytest.mark.parametrize("indicator", [">", ">-", "|", "|-"])
+@pytest.mark.parametrize("repo", ["tools", "rules", "telemetry", "go.tbhb.dev"])
+def test_verify_reports_references_to_every_old_repository(
+    src: Src, mono: Path, capsys: Capsys, repo: str, indicator: str
 ) -> None:
-    path = tmp_path / "old"
-    path.mkdir()
-    git(path, "init", "-q")
-    git(path, "remote", "add", "origin", ORIGIN)
+    path, _ = src
     tree = {
-        "bin/run.sh": b"git clone git@github.com:tbhb-dev/tools.git\n",
-        "ci/a.yml": b"  - uses: 'tbhb-dev/rules/.github/workflows/x.yml@v1'\n",
-        "renovate.json5": b"",
+        "bin/run.sh": f"git clone git@github.com:tbhb-dev/{repo}.git\n".encode(),
+        "ci/a.yml": (
+            "on: push\njobs:\n  check:\n"
+            f"    uses: {indicator}\n"
+            "      tbhb-dev/rules/.github/workflows/check.yml@v1\n"
+        ).encode(),
         "ci/renovate.json": b'{"extends": ["github>tbhb-dev/renovate-config"]}\n',
-        "MODULE.bazel.txt": b"",
-        "deps/MODULE.bazel": b'git_override(remote = "https://github.com/tbhb-dev/tools")\n',
+        "deps/MODULE.bazel": (
+            f'git_override(remote = "https://github.com/tbhb-dev/{repo}")\n'.encode()
+        ),
         "go.mod": b"module go.example.dev/tools\n",
         "main.go": b'import "go.example.dev/tools/pkg"\n',
         "fine.go": b'import "go.example.dev/toolbox"\nuses: actions/checkout@abc\n',
         "docs/NOTE.md": b"see github.com/tbhb-dev/tools\n",
-        "vendor/tools": b"github.com/tbhb-dev/toolset\nx\n",
+        "vendor/tools": b"github.com/tbhb-dev/toolset\n",
+        "skip.sh": b"github.com/other/rules\ngithub.com/tbhb-dev/ascm\n",
     }
     for name, data in tree.items():
         (path / name).parent.mkdir(parents=True, exist_ok=True)
         (path / name).write_bytes(data)
+    (path / "link").unlink()
     (path / "link").symlink_to("github.com/tbhb-dev/tools")
     commit = commit_all(path)
-    made = tmp_path / "map.toml"
-    assert run("map", str(path), commit, "--dest", DEST, "-o", str(made)) == 0
+    made = make_map((path, commit), mono.parent)
     assert run_import(f"{path}@{commit}", made, mono) == 0
     capsys.readouterr()
-    assert (
-        run("verify", f"{path}@{commit}", "--map", str(made), "--tree", str(mono)) == 1
-    )
-    out = capsys.readouterr().out.splitlines()
-    assert out == [
-        f"{DEST}/bin/run.sh:1: address of the source repository",
-        f"{DEST}/ci/a.yml:1: workflow uses an old repository",
+    assert Imported((path, commit), mono, made, capsys).problems() == [
+        f"{DEST}/bin/run.sh:1: address of an old repository",
+        f"{DEST}/ci/a.yml:4: workflow uses an old repository",
         f"{DEST}/ci/renovate.json:1: Renovate preset from an old repository",
-        f"{DEST}/deps/MODULE.bazel:1: address of the source repository",
+        f"{DEST}/deps/MODULE.bazel:1: address of an old repository",
         f"{DEST}/go.mod:1: Go path go.example.dev/tools",
         f"{DEST}/main.go:1: Go path go.example.dev/tools",
         "verify: 6 problems",
     ]
 
 
-@pytest.mark.parametrize("indicator", [">", ">-", "|", "|-"])
-def test_verify_reports_block_scalar_workflow_references(
-    src: Src, mono: Path, capsys: Capsys, indicator: str
-) -> None:
-    path, _ = src
-    workflow = path / "ci/block.yml"
-    workflow.parent.mkdir()
-    workflow.write_text(
-        "on: push\njobs:\n  check:\n"
-        f"    uses: {indicator}\n"
-        "      tbhb-dev/rules/.github/workflows/check.yml@v1\n"
-    )
-    commit = commit_all(path)
-    made = make_map((path, commit), mono.parent)
-    assert run_import(f"{path}@{commit}", made, mono) == 0
-    capsys.readouterr()
-    assert verify_exit((path, commit), made, mono) == 1
-    assert capsys.readouterr().out.splitlines() == [
-        f"{DEST}/ci/block.yml:4: workflow uses an old repository",
-        "verify: 1 problems",
-    ]
-
-
-def test_references_skip_prose_lines_of_other_files_still_count() -> None:
-    patterns = verify.rules("o/n", set())
-    assert list(verify.references("a.md", b"github.com/o/n\n", patterns)) == []
-    assert list(verify.references("a.sh", b"ok\ngithub.com/o/n\n", patterns)) == [
-        "a.sh:2: address of the source repository"
-    ]
-
-
-def test_references_keep_line_order_and_first_rule_per_line() -> None:
-    data = b"github.com/o/n github.com/o/n\nuses: o/action@v1 # github.com/o/n\n"
-    assert list(verify.references("ci.yml", data, verify.rules("o/n", set()))) == [
-        "ci.yml:1: address of the source repository",
-        "ci.yml:2: workflow uses an old repository",
-    ]
-
-
 @pytest.mark.parametrize(
-    "data",
+    ("dest", "data", "findings"),
     [
-        b"uses: > # folded\r\n\r\n  o/action@v1\r\n",
-        b"uses: |+\n  o/action@v1\n",
-        b"uses:\n  o/action@v1\n",
+        ("a.md", b"github.com/o/n\n", []),
+        ("a.sh", b"ok\ngithub.com/o/n\n", [(2, "address of an old repository")]),
+        ("ci.yml", b"uses: > # folded\r\n\r\n  o/action@v1\r\n", [(1, WORKFLOW)]),
+        ("ci.yml", b"uses: |+\n  o/action@v1\n", [(1, WORKFLOW)]),
+        ("ci.yml", b"uses:\n  o/action@v1\n", [(1, WORKFLOW)]),
+        ("ci.yml", b"uses: >-\n  actions/checkout@v1\n", []),
+        ("ci.yml", b"uses: actions/checkout@v1\nname: o/action@v1\n", []),
+        ("ci.yml", b"uses: > o/action@v1\n", []),
+        (
+            "ci.yml",
+            b"github.com/o/n github.com/o/n\nuses: o/action@v1 # github.com/o/n\n",
+            [(1, "address of an old repository"), (2, WORKFLOW)],
+        ),
     ],
 )
-def test_references_allow_multiline_workflow_values(data: bytes) -> None:
-    assert list(verify.references("ci.yml", data, verify.rules("o/n", set()))) == [
-        "ci.yml:1: workflow uses an old repository"
+def test_references(dest: str, data: bytes, findings: list[tuple[int, str]]) -> None:
+    assert list(verify.references(dest, data, verify.rules("o/n", set()))) == [
+        f"{dest}:{line}: {rule}" for line, rule in findings
     ]
-
-
-@pytest.mark.parametrize(
-    "data",
-    [
-        b"uses: >-\n  actions/checkout@v1\n",
-        b"uses: actions/checkout@v1\nname: o/action@v1\n",
-        b"uses: > o/action@v1\n",
-    ],
-)
-def test_references_ignore_other_workflow_values(data: bytes) -> None:
-    assert list(verify.references("ci.yml", data, verify.rules("o/n", set()))) == []
 
 
 def test_import_into_a_subfolder_commits_the_files(
