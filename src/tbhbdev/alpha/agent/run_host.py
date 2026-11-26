@@ -810,11 +810,11 @@ def _execute(
             agent = credentials.signing_agent(
                 prepared.delivery.signing, run.tmpdir, run.deadline
             )
-        if push_token is None and not preflight_only:
-            push_token = credentials.push_token(run.request, run.settings)
         if preflight_only:
             rc = run_harness(run, prepared, stack, preflight_only=True)
         else:
+            if push_token is None and run.request.start_ref is not None:
+                push_token = credentials.push_token(run.request, run.settings)
             rc = push.run(run, prepared, stack, run_harness, push_token)
             rc = require_commit(run, rc)
             if (

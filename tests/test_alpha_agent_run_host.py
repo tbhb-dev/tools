@@ -4439,20 +4439,23 @@ def test_execute_rejects_a_stale_head_when_requiring_a_commit(
 
 
 @pytest.mark.parametrize(
-    ("given", "result"),
+    ("given", "start_ref", "result"),
     [
-        (None, "minted-value"),
-        ("given-value", None),
-        (None, credentials.PushTokenFailure("GhAppError")),
+        (None, None, None),
+        (None, "refs/heads/fix/topic", "minted-value"),
+        ("given-value", "refs/heads/fix/topic", None),
+        (None, "refs/heads/fix/topic", credentials.PushTokenFailure("GhAppError")),
     ],
 )
-def test_execute_mints_a_push_token_only_when_none_was_given(
+def test_execute_mints_a_push_token_only_for_a_start_ref_without_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     given: str | None,
+    start_ref: str | None,
     result: str | credentials.PushTokenFailure | None,
 ) -> None:
     run = make_run(tmp_path)
+    run.request = dataclasses.replace(run.request, start_ref=start_ref)
     prepared = dataclasses.replace(preparation(run), auth_before="example-before")
     runtime = HostRuntime(run, prepared, None)
     runtime.patch(monkeypatch)
@@ -4480,7 +4483,7 @@ def test_execute_mints_a_push_token_only_when_none_was_given(
     monkeypatch.setattr(run_host.push, "run", publish)
     assert run_host.execute(run, "example", given) == 0
     assert tokens == [given or result]
-    assert len(minted) == (0 if given else 1)
+    assert minted == ([run.request] if given is None and start_ref else [])
 
 
 def test_preflight_mints_no_push_token(

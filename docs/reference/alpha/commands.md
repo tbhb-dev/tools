@@ -2,17 +2,11 @@
 description: Interim agent commands, installation, and harness hooks.
 generated:
   - role: generated
-    harness: codex:0.166.0
-    model: openai:gpt-6.2-sol
-    effort: medium
-    at: "2026-11-25T21:17:18Z"
-  - role: assisted
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
-    effort: high
     surface: exec
-    session: sha-256-64:621ba09362617ce8
-    at: "2026-11-25T20:45:00Z"
+    session: sha-256-64:87816a4d23273d34
+    at: "2026-11-26T00:33:53Z"
 status: stable
 tags: [alpha]
 title: Alpha commands
@@ -109,7 +103,7 @@ When `tbhbdev alpha agent exec` finds a version mismatch, it looks up the head o
 
 For a build that updates an existing pull request, pass both `--fetch-ref refs/heads/<branch>` and `--start-ref refs/heads/<branch>`. The run starts at the fetched commit and pushes a fast-forward to that branch without opening a pull request. The command refuses the repository's default branch. If the remote tip changes before the push check, the run fails and keeps its worktree.
 
-For a run that opens a pull request, write `.github/PULL_REQUEST_DRAFT.md` in its worktree and keep it out of commits. The driver reads the worktree draft first and uses the pushed commit's draft if the worktree draft is missing. The worktree draft must be an owned regular file of at most 64 KiB. The driver refuses symlinks and scans the draft with the host's secret rules and the pre-run commit's `.gitleaks.toml` before posting it. When the pre-run commit has none, the scan uses exactly the private config and gitleaks' defaults and ignores any `.gitleaks.toml` the run adds, because the run controls that file, and the run log says so. The driver refuses to push when the run's commits add the draft, and CI fails a pull request whose diff contains the draft.
+A build run that opens a pull request writes `.github/PULL_REQUEST_DRAFT.md` in its worktree and keeps it out of commits. Set `base` in the draft's frontmatter to identify the target branch. The run pushes its `agent/` branch to origin and runs `tbhbdev alpha pr create` from the worktree. The command checks the draft, adds the commit trailers and the opener's identity to the body, and records the pull request in the opened ledger. CI fails a pull request whose diff contains the draft.
 
 ## Identity start time
 
