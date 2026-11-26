@@ -16,9 +16,10 @@ AGY_SUBAGENTS = (
     "Do the work yourself."
 )
 # Codex 0.171.0 has no setting, flag or feature switch that turns off a
-# full-history fork (`fork_turns` omitted or "all"), which inherits the run's
-# model and takes no override, so `agents.default_subagent_model` can't reach the
-# default spawn. This rule is a request, not enforcement.
+# full-history fork (`fork_turns` omitted or "all"). Its source applies a named or
+# configured default model to a fork too, so this rule keeps the history out of a
+# child and names the model; it isn't a model bypass guard. It is a request, not
+# enforcement, and no run has confirmed the source reading.
 CODEX_SUBAGENTS = (
     'Every `spawn_agent` call must set `fork_turns` to `"none"` and name '
     "`model` explicitly. Never spawn a full-history fork, which is a spawn "
