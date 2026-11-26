@@ -65,33 +65,40 @@ def make_map(args: argparse.Namespace) -> int:
     return 0
 
 
-def place(root: Path, folder: Path, dest: str, mode: str, data: bytes) -> Path:
-    """Write one file or link, refusing a path that leaves ``folder``."""
-    target = root / dest
-    if not target.parent.resolve().is_relative_to(folder):
-        message = f"{dest} would leave {folder.relative_to(root.resolve())}"
-        raise MonorepoError(message)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if mode == LINK:
-        target.symlink_to(os.fsdecode(data))
-    else:
-        target.write_bytes(data)
-        target.chmod(0o755 if mode == EXECUTABLE else 0o644)
-    return target
+class Written:
+    """What an import puts in the clone, so a failure can take it back."""
 
+    def __init__(self, root: Path, folder: Path) -> None:
+        self.root = root
+        self.folder = folder
+        self.files: list[Path] = []
+        self.folders: list[Path] = []
 
-def write_files(root: Path, made: pathmap.PathMap, clone: str, commit: str) -> int:
-    """Write each file to the clone; on a failure, remove what was written."""
-    folder = root.resolve() / made.dest
-    written: list[Path] = []
-    try:
-        for _, dest, mode, data in pathmap.outputs(clone, files(clone, commit), made):
-            written.append(place(root, folder, dest, mode, data))
-    except MonorepoError, OSError:
-        for target in written:
-            target.unlink()
-        raise
-    return len(written)
+    def place(self, dest: str, mode: str, data: bytes) -> None:
+        """Write one file or link, refusing a path that leaves the folder."""
+        target = self.root / dest
+        if not target.parent.resolve().is_relative_to(self.folder):
+            message = (
+                f"{dest} would leave {self.folder.relative_to(self.root.resolve())}"
+            )
+            raise MonorepoError(message)
+        chain = [*reversed(target.parent.parents), target.parent]
+        new = [d for d in chain if d.is_relative_to(self.root) and not d.exists()]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.folders.extend(new)
+        if mode == LINK:
+            target.symlink_to(os.fsdecode(data))
+        else:
+            target.write_bytes(data)
+            target.chmod(0o755 if mode == EXECUTABLE else 0o644)
+        self.files.append(target)
+
+    def remove(self) -> None:
+        """Delete the files and then the folders this import created."""
+        for target in self.files:
+            target.unlink(missing_ok=True)
+        for folder in reversed(self.folders):
+            folder.rmdir()
 
 
 def import_files(args: argparse.Namespace) -> int:
@@ -99,8 +106,11 @@ def import_files(args: argparse.Namespace) -> int:
     if problems := made.gaps(files(clone, commit)):
         raise MonorepoError("\n".join(problems))
     into = args.into
-    root = Path(git(into, "rev-parse", "--show-toplevel").decode().strip())
-    if git(into, "status", "--porcelain"):
+    # Git runs from the clone's root, so the root-relative paths below are right
+    # even when --into is a subfolder.
+    top = git(into, "rev-parse", "--show-toplevel").decode().strip()
+    root = Path(top)
+    if git(top, "status", "--porcelain"):
         message = f"{into} has uncommitted changes"
         raise MonorepoError(message)
     targets = [dest for dest, _ in made.writes().values()]
@@ -112,20 +122,36 @@ def import_files(args: argparse.Namespace) -> int:
     if len(subject) > SUBJECT_LIMIT:
         message = f"the subject is over {SUBJECT_LIMIT} characters: {subject}"
         raise MonorepoError(message)
-    count = write_files(root, made, clone, commit)
-    git(
-        into,
-        "add",
-        "--pathspec-from-file=-",
-        "--pathspec-file-nul",
-        data="\0".join(targets).encode(),
-    )
     body = (
         f"Source repository: {made.repo}\nSource commit: {commit}\n\n"
         f"Copied {len(made.copy)} files, rewrote {len(made.rewrite)} and "
         f"dropped {len(made.drop)}."
     )
-    git(into, "commit", "--quiet", "-F", "-", data=f"{subject}\n\n{body}\n".encode())
+    paths = "\0".join(targets).encode()
+    written = Written(root, root.resolve() / made.dest)
+    try:
+        for _, dest, mode, data in pathmap.outputs(clone, files(clone, commit), made):
+            written.place(dest, mode, data)
+        git(top, "add", "--pathspec-from-file=-", "--pathspec-file-nul", data=paths)
+        message = f"{subject}\n\n{body}\n"
+        git(top, "commit", "--quiet", "-F", "-", data=message.encode())
+    except MonorepoError, OSError:
+        # Leave the clone as it was: unstage, then delete what this run wrote.
+        try:
+            git(
+                top,
+                "rm",
+                "--cached",
+                "--quiet",
+                "--ignore-unmatch",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+                data=paths,
+            )
+        finally:
+            written.remove()
+        raise
+    count = len(written.files)
     print(f"imported {count} files from {made.repo} at {commit[:7]}")
     return 0
 
