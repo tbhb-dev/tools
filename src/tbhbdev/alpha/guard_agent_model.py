@@ -12,7 +12,7 @@ tool, and input it can't read, is allowed.
 
 import sys
 
-from tbhbdev.alpha.repo import read_hook_stdin
+from tbhbdev.alpha.repo import Json, read_hook_stdin
 
 TOOL = "Agent"
 FORK = "fork"
@@ -24,13 +24,12 @@ REASON_FORK = (
 )
 
 
-def verdict(data: dict) -> str | None:
+def verdict(data: Json) -> str | None:
     """The refusal reason for a hook payload, or None to allow it."""
     if data.get("tool_name") != TOOL:
         return None
-    tool_input = data.get("tool_input")
-    if not isinstance(tool_input, dict):
-        tool_input = {}
+    raw = data.get("tool_input")
+    tool_input: Json = raw if isinstance(raw, dict) else {}
     if tool_input.get("subagent_type") == FORK:
         return REASON_FORK
     model = tool_input.get("model")
