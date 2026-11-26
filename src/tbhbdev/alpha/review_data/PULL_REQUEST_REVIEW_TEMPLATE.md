@@ -2,8 +2,8 @@
 
 ## Summary
 
-<!-- Required. Give the reasons in one paragraph of at most 250 visible
-characters. Put the verdict in the review event. -->
+<!-- Required. Give the reasons in one paragraph of one or two sentences and
+at most 40 words. Put the verdict in the review event. -->
 
 ## Findings
 

@@ -7,19 +7,32 @@ import (
 	"strings"
 )
 
-#ReviewSHA:     #"[0-9a-f]{40}"#
-#ReviewHost:    #"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+"#
-#ReviewVerdict: "GO" | "NO-GO"
-#ReviewEvent:   "APPROVE" | "REQUEST_CHANGES" | "COMMENT"
-#FindingPrefix: #"^F([1-8]): P([0-3]) (correctness|security|design|test|docs)\s+([\s\S]+)$"#
-#Word:          #"[\p{L}\p{N}_]+"#
-#VerdictLine:   #"(?m)^VERDICT: (GO|BLOCK)\r?$"#
-#ReviewStamp:   #"(?i)(\bjudged head\b|\b(commit|head)[ :=]+[0-9a-f]{7,40}\b|\b\#(#ReviewSHA)\b|(?m:^(Run|Provider|Model|Variant|Host|Head|Tier):))"#
+#ReviewSHA:      #"[0-9a-f]{40}"#
+#ReviewHost:     #"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+"#
+#ReviewVerdict:  "GO" | "NO-GO"
+#ReviewEvent:    "APPROVE" | "REQUEST_CHANGES" | "COMMENT"
+#FindingPrefix:  #"^F([1-8]): P([0-3]) (correctness|security|design|test|docs)\s+([\s\S]+)$"#
+#Word:           #"[\p{L}\p{N}_]+"#
+#VerdictLine:    #"(?m)^VERDICT: (GO|BLOCK)\r?$"#
+#SummaryVerdict: #"(?im)^[\t\p{Z}]*(?:(?:Decision|Verdict)[\t\p{Z}]*:[\t\p{Z}]*)?(?:GO|NO-GO|APPROVE|BLOCK|HOLD|REQUEST_CHANGES)[.!?]*[\t\p{Z}]*\r?$"#
+#Abbreviation:   #"(?i:\b(?:mr|mrs|ms|dr|prof|vs)\.)|\b(?:\p{L}\.){2,}"#
+#SentenceStart:  #"[.!?]["'”’)\]]*[\s\p{Z}]+["'“‘(\[]*\p{Lu}"#
+#ThreeSentences: #"(?s)\#(#SentenceStart).*\#(#SentenceStart)"#
+#ReviewStamp:    #"(?i)(\bjudged head\b|\b(commit|head)[ :=]+[0-9a-f]{7,40}\b|\b\#(#ReviewSHA)\b|(?m:^(Run|Provider|Model|Variant|Host|Head|Tier):))"#
 
 #ReviewProse: {
 	_text:  string
 	_words: len(regexp.FindAll(#Word, _text, -1)) & >=1
 	...
+}
+
+#ReviewSummary: #Paragraph & #ReviewProse & {
+	visible: !~#SummaryVerdict
+	metrics: visible: characters: <=4096
+	_text:  visible
+	_words: <=40
+	// Count clear sentence boundaries after stripping abbreviation punctuation.
+	_sentences: regexp.ReplaceAll(#Abbreviation, visible, "") & !~#ThreeSentences
 }
 
 #ReviewItem: #ListItem & {
@@ -67,7 +80,7 @@ import (
 		summary: {
 			kind:    "section"
 			heading: "Summary"
-			content: [#Paragraph & {metrics: visible: characters: >=1 & <=250}]
+			content: [#ReviewSummary]
 		}
 		findings?: {
 			kind:    "section"
@@ -101,7 +114,8 @@ import (
 				content: [#ReviewVerification]
 			}
 			if metadata.posted {
-				content: [#ReviewVerification, #ReviewAttribution | #ReviewMarker]
+				content: [#ReviewVerification, #ReviewAttribution | #ReviewMarker] |
+					[#ReviewVerification, #ReviewMarker, #ReviewAttribution]
 			}
 		}
 	})

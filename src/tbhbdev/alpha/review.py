@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import re
 import sys
 from importlib.resources import files
@@ -40,18 +41,24 @@ TEMPLATE = (
 )
 
 
-def draft_path(number: int) -> Path:
-    """The review's file under this worktree's git directory."""
+def draft_directory() -> Path:
+    """The directory for reviews in this worktree."""
     code, directory = pr.git("rev-parse", "--git-dir")
     if code != 0:
         message = "review drafts require a git worktree"
         raise SystemExit(message)
-    return Path(directory).resolve() / "tbhb-alpha" / f"review-{number}.md"
+    return Path(directory).resolve() / "tbhb-alpha"
 
 
-def select_draft(number: int) -> tuple[Path, bool]:
+def draft_path(number: int, *, directory: Path | None = None) -> Path:
+    """The standard review file under this worktree's git directory."""
+    top = directory if directory is not None else draft_directory()
+    return top / f"review-{number}.md"
+
+
+def select_draft(number: int, *, directory: Path | None = None) -> tuple[Path, bool]:
     """Return the selected path and whether it uses schema 2 frontmatter."""
-    standard = draft_path(number)
+    standard = draft_path(number, directory=directory)
     document = standard.with_suffix(".doc.md")
     return (document, True) if document.exists() else (standard, False)
 
@@ -127,9 +134,7 @@ def draft(number: int, *, force: bool) -> Path:
     return path
 
 
-def check_text(
-    text: str, number: int, *, lint: bool = True, posted: bool = False
-) -> list[pr.Problem]:
+def check_text(text: str, number: int, *, lint: bool = True) -> list[pr.Problem]:
     """Validate review metadata and its title-free body without reading GitHub."""
     try:
         data, body = pr.parse_frontmatter(text)
@@ -145,8 +150,7 @@ def check_text(
     fields = cast("dict[str, object]", data)
     first = offset + 1
     problems = [
-        (first, why)
-        for why in content.check_review(body, event=str(fields["event"]), posted=posted)
+        (first, why) for why in content.check_review(body, event=str(fields["event"]))
     ]
     return lint_body(body, first) if lint and not problems else problems
 
@@ -214,7 +218,9 @@ def post_event_draft(text: str, number: int) -> int | None:
     path = f"repos/{repo}/pulls/{number}"
     api = GhApi()
     review_doc.check_head(api, path, commit)
-    return review_doc.send_review(api, path, commit, body.strip("\n") + "\n", event)
+    trailer = review_doc.attribution(pr.posting_value(os.environ))
+    prose = body.strip("\n")
+    return review_doc.send_review(api, path, commit, f"{prose}\n\n{trailer}\n", event)
 
 
 def parse_document(text: str, number: int) -> review_doc.ReviewDoc:
@@ -244,7 +250,12 @@ def post_document(text: str, number: int, author: str | None) -> tuple[str, int 
         message = f"draft repo {doc.repo} differs from origin repo {repo}"
         raise review_doc.ReviewError(message)
     api = GhApi()
-    return review_doc.post(api, doc, author=author or api_author(api))
+    return review_doc.post(
+        api,
+        doc,
+        author=author or api_author(api),
+        identity_value=pr.posting_value(os.environ),
+    )
 
 
 def post_draft(number: int, author: str | None) -> int:

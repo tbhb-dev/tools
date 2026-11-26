@@ -2,22 +2,24 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import Mock
 
 import httpx
 import pytest
 
-from tbhbdev.alpha import identity, review_doc
+from tbhbdev import content
+from tbhbdev.alpha import identity, review, review_doc
 from tbhbdev.alpha.agent import credentials, review_post, runfiles
-from tbhbdev.alpha.agent.model import Harness, Profile, RunKind
+from tbhbdev.alpha.agent.decisions import request as requests
+from tbhbdev.alpha.agent.model import Harness, Invalid, Profile, RunKind, RunRequest
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from tbhbdev.alpha.agent import run_host
-    from tbhbdev.alpha.agent.model import RunRequest, Settings
+    from tbhbdev.alpha.agent.model import Settings
 
 pytestmark = pytest.mark.usefixtures("review_cue")  # noqa: V107
 
@@ -46,15 +48,24 @@ def make(
         (directory / name).write_text(text)
     files = runfiles.RunFiles(tmp_path / "runs", "r1")
     files.write("out.final", f"Review complete.\nVERDICT: GO {HEAD}\n")
-    request = SimpleNamespace(
+    request = RunRequest(
         repo="github.com/o/r",
         commit=HEAD,
         harness=Harness.CODEX,
-        effort="low",
+        effort="high",
         variant=None,
-        model="m1",
+        model="gpt-6.2-sol",
         profile=Profile.REVIEW,
         kind=RunKind.EXEC,
+        claude_profile=None,
+        reason=None,
+        account="a",
+        timeout=None,
+        class_=None,
+        role=None,
+        unsandboxed=False,
+        authorized_by=None,
+        startup_deadline_seconds=60,
     )
     run = SimpleNamespace(files=files, request=request, settings=object())
     prepared = SimpleNamespace(paths=SimpleNamespace(worktree=str(workspace)))
@@ -82,11 +93,6 @@ def forbidden(*_args: object, **_options: object) -> httpx.Response:
 
 BASE = "https://api.github.com/repos/o/r/pulls/7"
 STAMP = "Generated-by: LLM harness=codex;model=m1"
-
-
-@pytest.fixture(autouse=True)
-def fake_vale(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(review_doc, "lint_post", Mock(return_value=[]))
 
 
 class Api:
@@ -145,9 +151,10 @@ def test_posts_at_the_pinned_commit_with_identity_in_the_body(
     assert HEAD not in payload["body"]
     assert payload["body"].endswith(f"\n\n{review_post.stamp(run)}\n")
     assert (
-        "Generated-by: LLM effort=low;harness=codex;launch=sha-256-64:"
+        "Generated-by: LLM effort=high;harness=codex;launch=sha-256-64:"
         in payload["body"]
     )
+    assert ";model=openai:gpt-6.2-sol;surface=exec" in payload["body"]
     assert run.files.path("review").read_text() == "github.com/o/r#7 99"
 
 
@@ -231,7 +238,7 @@ def test_review_post_without_a_codex_final_file(
         run.files.write("out", '{"result": "Review complete."}')
     elif kind is RunKind.EXEC:
         run.files.write("out", f"Review complete.\nVERDICT: NO-GO {HEAD}\n")
-    monkeypatch.setattr(run.request, "kind", kind)
+    monkeypatch.setattr(run, "request", replace(run.request, kind=kind))
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
     api = Api(monkeypatch)
     assert review_post.posted(run, prepared)
@@ -254,13 +261,17 @@ APPROVE_THEN_COMMENT = draft("APPROVE").replace(
             "REQUEST_CHANGES requires a P0 or P1 finding",
         ),
         (draft("PENDING"), "review-7.md", "not one of"),
-        (draft(), "review-7.md", "Vale refused"),
         (APPROVE_THEN_COMMENT, "review-7.md", "duplicate key"),
         ("---\npr: [\n---\n", "review-7.md", "invalid YAML"),
         (draft(head="b" * 40), "review-7.md", "isn't the commit"),
         ("---\npr: 7\n---\n", "review-7.md", "fails its checks"),
         (
             draft("APPROVE") + f"\nVERDICT: GO {HEAD}\n",
+            "review-7.md",
+            "Write Verification as one to six unnumbered bullets",
+        ),
+        (
+            draft() + f"\n<!-- tbhb-review v2 {'e' * 64} -->\n",
             "review-7.md",
             "Write Verification as one to six unnumbered bullets",
         ),
@@ -273,8 +284,6 @@ def test_a_bad_draft_posts_nothing(
     name: str,
     message: str,
 ) -> None:
-    if message == "Vale refused":
-        monkeypatch.setattr(review_doc, "lint_post", Mock(return_value=[message]))
     run, prepared = make(tmp_path, text, name)
     monkeypatch.setattr(credentials, "review_post_token", mint_token)
     monkeypatch.setattr(httpx, "request", forbidden)
@@ -316,6 +325,78 @@ def test_two_drafts_are_refused(tmp_path: Path) -> None:
     (directory / "review-8.md").write_text(draft())
     assert not review_post.posted(run, prepared)
     assert "found 2" in run.files.path("log").read_text()
+
+
+def test_posts_from_a_fresh_worktree_without_synced_styles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, prepared = make(tmp_path, draft("APPROVE"))
+    workspace = tmp_path / "ws"
+    (workspace / ".vale.ini").write_text("BasedOnStyles = Google\n")
+    (workspace / ".vale" / "project").mkdir(parents=True)
+    monkeypatch.setattr(review_doc, "lint_post", forbidden)
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    assert review_post.posted(run, prepared)
+    assert [method for method, _, _ in api.calls] == ["GET", "POST"]
+
+
+def document() -> str:
+    _, _, body = draft("APPROVE").rpartition("---\n")
+    return (
+        f"---\nschema: 2\nrepo: o/r\npr: 7\nhead_sha: '{HEAD}'\n"
+        "tier: 2\nverdict: GO\nrun:\n  name: r1\n  provider: openai\n"
+        "  model: gpt-6.2-sol\n  variant: a\n  host: reviewer.example.org\n"
+        f"---\n{body}"
+    )
+
+
+@pytest.mark.parametrize("verdict", ["GO", "NO-GO"])
+def test_host_and_cli_prefer_the_same_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verdict: str
+) -> None:
+    text = document()
+    if verdict == "NO-GO":
+        text = text.replace("verdict: GO", "verdict: NO-GO").replace(
+            "## Verification",
+            "## Findings\n\n- F1: P1 correctness Fix the cache.\n\n## Verification",
+        )
+    run, prepared = make(tmp_path, text, "review-7.doc.md")
+    directory = tmp_path / "ws" / ".git" / "tbhb-alpha"
+    (directory / "review-7.md").write_text("An invalid standard draft.")
+    monkeypatch.setattr(review, "draft_directory", lambda: directory)
+    assert review.main(["check", "7", "--no-lint"], "review") == 0
+    monkeypatch.setattr(credentials, "review_post_token", mint_token)
+    api = Api(monkeypatch)
+    assert review_post.posted(run, prepared)
+    payload = api.calls[-1][2]
+    assert payload is not None
+    assert payload["event"] == ("APPROVE" if verdict == "GO" else "REQUEST_CHANGES")
+    assert payload["commit_id"] == HEAD
+    assert not content.check_review(
+        payload["body"], metadata=review_doc.parse(text).metadata, posted=True
+    )
+    assert review_doc.parse_marker(payload["body"]) == review_doc.marker_id(
+        "o/r", 7, "r1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement", "message"),
+    [
+        ("pr: 7", "pr: 8", "must name pull request 7"),
+        ("repo: o/r", "repo: o/s", "isn't the run's repository"),
+        (HEAD, "b" * 40, "isn't the commit the run reviewed"),
+        ("- Read the diff.", "Read the diff.", "Write Verification"),
+    ],
+)
+def test_host_refuses_invalid_schema_two_drafts(
+    original: str, replacement: str, message: str
+) -> None:
+    text = document().replace(original, replacement)
+    sub = review_post.Submission("github.com/o/r", 7, text, HEAD, STAMP, document=True)
+    with pytest.raises(review_post.PostRefusedError, match=message):
+        review_post.validate(sub)
 
 
 @pytest.mark.parametrize(
@@ -437,16 +518,68 @@ def test_a_failed_token_request_gives_none(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_review_attribution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run, _ = make(tmp_path, draft())
-    monkeypatch.setattr(run.request, "harness", Harness.AGY)
-    monkeypatch.setattr(run.request, "variant", "a")
+    request = replace(run.request, harness=Harness.AGY, variant="a")
+    monkeypatch.setattr(run, "request", request)
     trailer = review_post.stamp(run)
     assert "harness=antigravity;" in trailer
     assert trailer.endswith(";variant=a")
     assert identity.check_message(trailer) == []
-    monkeypatch.setattr(run.request, "variant", "a;b")
+    monkeypatch.setattr(run, "request", replace(request, variant="a;b"))
     with pytest.raises(review_post.PostRefusedError, match="invalid LLM trailer"):
         review_post.stamp(run)
-    monkeypatch.setattr(run.request, "variant", None)
-    monkeypatch.setattr(run.request, "model", "a;b")
+    monkeypatch.setattr(run, "request", replace(request, model="a;b"))
     with pytest.raises(review_post.PostRefusedError, match="invalid LLM trailer"):
         review_post.stamp(run)
+
+
+@pytest.mark.parametrize(
+    ("harness", "model", "effort", "expected"),
+    [
+        (Harness.CODEX, "gpt-6.2-sol", "xhigh", "effort=xhigh;harness=codex;"),
+        (Harness.CLAUDE, "claude-opus-5-5", "high", "effort=high;harness=claude-code;"),
+        (
+            Harness.AGY,
+            "gemini-3.8-flash-low",
+            "auto",
+            "effort=low;harness=antigravity;",
+        ),
+        (
+            Harness.AGY,
+            "gemini-3.8-flash-low",
+            "high",
+            "effort=low;harness=antigravity;",
+        ),
+        (Harness.AGY, "gemini-unknown", "auto", "LLM harness=antigravity;"),
+        (Harness.CODEX, "gpt-6.2-sol", "auto", None),
+        (Harness.CLAUDE, "claude-opus-5-5", "auto", None),
+        (Harness.AGY, "gemini-3.8-flash-low", "typo", None),
+    ],
+)
+def test_review_launch_and_post_share_the_effort_rule(  # noqa: PLR0913, PLR0917
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    harness: Harness,
+    model: str,
+    effort: str,
+    expected: str | None,
+) -> None:
+    run, _ = make(tmp_path, draft())
+    request = replace(
+        run.request,
+        harness=harness,
+        model=model,
+        effort=effort,
+        reason="review",
+        claude_profile="primary" if harness is Harness.CLAUDE else None,
+        timeout=60,
+    )
+    monkeypatch.setattr(run, "request", request)
+    if expected is None:
+        message = f"request effort {effort!r} is unsupported for {harness.value}"
+        with pytest.raises(Invalid, match=message):
+            requests.validate(run.request, host_allows_unsandboxed=False)
+        with pytest.raises(review_post.PostRefusedError, match=message):
+            review_post.stamp(run)
+    else:
+        requests.validate(run.request, host_allows_unsandboxed=False)
+        assert expected in review_post.stamp(run)

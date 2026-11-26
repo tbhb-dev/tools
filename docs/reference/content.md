@@ -5,7 +5,7 @@ generated:
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
     surface: exec
-    at: "2026-11-26T16:28:48Z"
+    at: "2026-11-26T17:04:47Z"
 status: stable
 tags: [plugins]
 title: Content writes
@@ -50,7 +50,7 @@ Warm caches can return stale values after an update.
 - Ran cache tests with a preloaded value.
 ```
 
-Summary gives the reasons in one paragraph of at most 250 visible characters. Record the verdict in the review event. Keep standalone `VERDICT: GO` and `VERDICT: BLOCK` lines out of the body.
+Summary gives the reasons in one paragraph of one or two sentences and at most 40 words. Record the verdict in the review event. Keep standalone verdict lines out of the Summary, including bare verdicts and lines prefixed with `Decision:` or `VERDICT:`.
 
 Use Findings for whole-PR issues. Start each bullet with `F<n>: P<0-3> <kind>` and count from 1 without gaps. Use at most eight findings and at most 30 words after the kind. The kinds are `correctness`, `security`, `design`, `test`, and `docs`. Use P0 for harm or a security breach, P1 for broken basic use or correctness, P2 for debt that needs attention soon, and P3 for minor issues. P0 and P1 require `REQUEST_CHANGES`. Cite a `path:line` in the diff or cite a check and its result. Findings must describe issues beyond CI gate results.
 

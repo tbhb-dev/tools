@@ -158,7 +158,8 @@ def check_decision_record(markdown: str) -> list[str]:
 
 
 _REVIEW_SECTION_FIXES = {
-    "summary": "Write one Summary paragraph of at most 250 visible characters",
+    "summary": "Write one Summary paragraph of one or two sentences "
+    "and at most 40 words",
     "findings": "Use up to eight Findings bullets numbered F1 onward, with a "
     "severity, kind, and up to 30 words of evidence",
     "suggestions": "Use up to five Suggestions bullets numbered S1 onward, "
@@ -184,7 +185,9 @@ def _review_refusal(stderr: str, draft: Json) -> str:
     field, _, rest = path.partition(".")
     if field == "blocks":
         section, _, constraint = rest.partition(".")
-        if constraint == "source":
+        if constraint == "source" or (
+            section == "summary" and constraint == "content.0.visible"
+        ):
             return f"Remove the standalone verdict line from {section.title()}"
         return _REVIEW_SECTION_FIXES.get(section, "Review validation failed")
     if field == "_err":

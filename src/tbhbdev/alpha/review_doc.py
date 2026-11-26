@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal, Protocol, cast
 
 from tbhbdev import content
+from tbhbdev.alpha import identity
 from tbhbdev.alpha import pull_request as pr
 
 type Tier = Literal[0, 1, 2]
@@ -72,7 +73,7 @@ class Api(Protocol):
 LINT_PATH = Path(".github") / "PULL_REQUEST_REVIEW_DRAFT.md"
 
 
-def lint_post(body: str, *, worktree: Path | None = None) -> list[str]:
+def lint_post(body: str) -> list[str]:
     """Run the repository's Vale rules on the review prose before posting."""
     try:
         problems = pr.lint(
@@ -80,7 +81,6 @@ def lint_post(body: str, *, worktree: Path | None = None) -> list[str]:
             1,
             path=LINT_PATH,
             vale_only=True,
-            worktree=worktree,
             drop=frozenset(),
         )
     except (OSError, SystemExit) as exc:
@@ -130,7 +130,10 @@ def render(doc: ReviewDoc) -> str:
 def parse_marker(body: str) -> Marker | str | None:
     """Read a current or legacy review marker."""
     text = body.replace("\r\n", "\n")
-    if matched := _MARKER_V2.fullmatch(text.rstrip().rpartition("\n")[2]):
+    before, _, last = text.rstrip().rpartition("\n")
+    if last.startswith(f"{identity.KEY_GEN}: LLM "):
+        last = before.rstrip().rpartition("\n")[2]
+    if matched := _MARKER_V2.fullmatch(last):
         return matched[1]
     matches = list(_MARKER.finditer(text))
     if not matches:
@@ -224,16 +227,26 @@ def send_review(api: Api, path: str, commit: str, body: str, event: str) -> int 
             return None
 
 
+def attribution(value: str | None) -> str:
+    """Validate the posting session's identity and format its trailer."""
+    if value is None:
+        message = "posting a review requires a recognized agent session"
+        raise ReviewError(message)
+    if why := identity.check_value(value):
+        message = f"invalid LLM trailer: {why}"
+        raise ReviewError(message)
+    return f"{identity.KEY_GEN}: {value}"
+
+
 def post(
-    api: Api, doc: ReviewDoc, *, author: str
+    api: Api, doc: ReviewDoc, *, author: str, identity_value: str | None
 ) -> tuple[Literal["posted", "exists"], int | None]:
     """Post the schema 2 verdict as a GitHub review event after validation.
 
     Return ("exists", id) if the author already posted the matching decision.
     Accept the race between concurrent posts without a lock.
     """
-    body = render(doc)
-    problems = content.check_review(body, metadata=doc.metadata, posted=True)
+    problems = content.check_review(doc.body, metadata=doc.metadata)
     if problems := problems or lint_post(doc.body):
         raise ReviewError("\n".join(problems))
     path = f"repos/{doc.repo}/pulls/{doc.pr}"
@@ -248,7 +261,9 @@ def post(
     )
     if existing is not None:
         return "exists", existing
-    return "posted", send_review(api, path, doc.head_sha, body, event)
+    trailer = attribution(identity_value)
+    body = render(doc)
+    return "posted", send_review(api, path, doc.head_sha, f"{body}\n{trailer}\n", event)
 
 
 def dismiss(

@@ -47,6 +47,8 @@ run:
 DOC = review.parse(PREAMBLE + BODY)
 GO = review.parse(PREAMBLE.replace("NO-GO", "GO") + BODY.replace("P1", "P2"))
 MARKER = f"<!-- tbhb-review v1 repo={REPO} pr=384 head={HEAD} run=review-build -->"
+IDENTITY = "LLM harness=codex;model=openai:gpt-6;session=sha-256-64:0123456789abcdef"
+TRAILER = f"Generated-by: {IDENTITY}"
 KEY = Marker(REPO, 384, HEAD, "review-build")
 EXISTING = Existing(942, "reviews[bot]", KEY, "COMMENTED", f"{BODY}\n{MARKER}\n")
 PULL = f"repos/{REPO}/pulls/384"
@@ -149,7 +151,7 @@ def test_find_existing_uses_latest_active_match_across_pages() -> None:
         first,
         [
             DECISION_ROW | {"id": 22},
-            DECISION_ROW | {"id": 23, "body": review.render(DOC)},
+            DECISION_ROW | {"id": 23, "body": f"{review.render(DOC)}\n{TRAILER}\n"},
             *ignored,
         ],
     )
@@ -173,15 +175,16 @@ def test_find_existing_refuses_non_list() -> None:
 def test_post_refuses_moved_head() -> None:
     api = FakeApi({"head": {"sha": "f" * 40}})
     with pytest.raises(review.ReviewError, match=r"^pull request head has moved$"):
-        review.post(api, DOC, author=EXISTING.author)
+        review.post(api, DOC, author=EXISTING.author, identity_value=IDENTITY)
     assert api.calls == [("GET", PULL, None)]
 
 
 @pytest.fixture
 def draft(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     stem = tmp_path / "review-384"
-    monkeypatch.setattr(cli, "draft_path", {384: stem.with_suffix(".md")}.__getitem__)
+    monkeypatch.setattr(cli, "draft_directory", lambda: tmp_path)
     monkeypatch.setattr(cli.pr, "origin_repository", lambda: REPO)
+    monkeypatch.setattr(cli.pr, "posting_value", Mock(return_value=IDENTITY))
     return stem.with_suffix(".doc.md")
 
 
@@ -201,7 +204,8 @@ def test_post_and_cli_send_the_verdict_as_event(  # noqa: PLR0913, PLR0917
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    body = review.render(doc)
+    body = f"{review.render(doc)}\n{TRAILER}\n"
+    assert review.parse_marker(body) == review.marker_id(REPO, 384, doc.run)
     event = "APPROVE" if doc.verdict == "GO" else "REQUEST_CHANGES"
     calls = [
         ("GET", PULL, None),
@@ -209,10 +213,14 @@ def test_post_and_cli_send_the_verdict_as_event(  # noqa: PLR0913, PLR0917
         ("POST", REVIEWS, {"commit_id": HEAD, "body": body, "event": event}),
     ]
     api = FakeApi(LIVE, [], response)
-    assert review.post(api, doc, author=EXISTING.author) == ("posted", expected)
+    assert review.post(api, doc, author=EXISTING.author, identity_value=IDENTITY) == (
+        "posted",
+        expected,
+    )
     assert api.calls == calls
     api = FakeApi(USER, LIVE, [], response)
     monkeypatch.setattr(cli, "GhApi", lambda: api)
+    draft.with_name("review-384.md").write_text("Invalid standard draft.\n")
     draft.write_text(PREAMBLE.replace("NO-GO", doc.verdict) + doc.body)
     assert cli.main(["check", "384"], "review") == 0
     assert capsys.readouterr() == ("", "")
@@ -240,9 +248,10 @@ def test_post_cli_uses_draft_event(
     monkeypatch.setattr(cli, "GhApi", lambda: api)
     assert cli.main(["post", "384"], "review") == 0
     assert capsys.readouterr() == ("posted 16\n", "")
+    posted_body = f"{body}\n{TRAILER}\n"
     assert api.calls == [
         ("GET", PULL, None),
-        ("POST", REVIEWS, {"commit_id": HEAD, "body": body, "event": event}),
+        ("POST", REVIEWS, {"commit_id": HEAD, "body": posted_body, "event": event}),
     ]
 
 
@@ -274,6 +283,34 @@ def test_post_cli_refuses_a_draft_without_a_valid_decision(  # noqa: PLR0913, PL
     assert cli.main(["post", "384"], "review") == 1
     assert capsys.readouterr().err.startswith(f"{standard}: {problem}")
     assert api.calls == []
+
+
+@pytest.mark.usefixtures("review_cue")
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (None, "posting a review requires a recognized agent session"),
+        ("LLM harness=codex", "invalid LLM trailer: model required"),
+    ],
+)
+def test_post_cli_refuses_an_unavailable_or_invalid_identity(
+    draft: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str | None,
+    message: str,
+) -> None:
+    draft.write_text(PREAMBLE + BODY)
+    api = FakeApi(USER, LIVE, [])
+    monkeypatch.setattr(cli, "GhApi", lambda: api)
+    monkeypatch.setattr(cli.pr, "posting_value", Mock(return_value=value))
+    assert cli.main(["post", "384"], "review") == 1
+    assert capsys.readouterr() == ("", f"{draft}: {message}\n")
+    assert api.calls == [
+        ("GET", "user", None),
+        ("GET", PULL, None),
+        ("GET", PAGE + "1", None),
+    ]
 
 
 @pytest.mark.usefixtures("review_cue")

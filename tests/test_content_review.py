@@ -39,10 +39,31 @@ def test_review_limits(heading: str, item: str, words: int, count: int) -> None:
     assert content.check_review(body(1, count + 1))
 
 
-def test_summary_length_counts_characters() -> None:
-    assert not content.check_review(body_with("Summary", "é" * 250))
-    assert content.check_review(body_with("Summary", "é" * 251)) == [
-        "Write one Summary paragraph of at most 250 visible characters"
+def test_summary_counts_words_instead_of_characters() -> None:
+    long_sentence = (
+        "Independent verification establishes conformance between implementation "
+        "and documented expectations by exercising representative interactions "
+        "across configurations, workloads, operating environments, and deployment "
+        "scenarios before gradual production rollout begins."
+    )
+    assert len(long_sentence.split()) == 26
+    assert len(long_sentence) > 250
+    assert not content.check_review(body_with("Summary", long_sentence))
+    assert not content.check_review(body_with("Summary", "A " + "a " * 38 + "day."))
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "A " + "a " * 39 + "day.",
+        "The tests passed. The cache stays warm. Retries are safe.",
+        'Retries are safe. The handler reports "Saved." The cache keeps the result.',
+        "é" * 4097,
+    ],
+)
+def test_summary_refuses_excess_words_sentences_or_size(summary: str) -> None:
+    assert content.check_review(body_with("Summary", summary)) == [
+        "Write one Summary paragraph of one or two sentences and at most 40 words"
     ]
 
 
@@ -51,14 +72,42 @@ def test_summary_length_counts_characters() -> None:
     [
         "The handler returns the `APPROVE` enum.",
         "The handler checks each result, e.g. a stale value. Retries preserve it.",
-        "Decision: approve.",
-        'Retries are safe. The handler reports "Saved." The cache keeps the result.',
+        "The handler checks labels, e.g. Ready or Saved. Retries preserve them.",
+        'The handler reports "Saved." The cache keeps the result.',
+        "Dr. Lee inspected the cache. It keeps the result.",
         "The handler recognizes `VERDICT: GO`.",
-        "VERDICT: GO.",
+        "Decision: approve the change after the cache check.",
+        "The handler returns HOLD while the cache warms.",
     ],
 )
 def test_summary_accepts_prose_without_interpreting_it(summary: str) -> None:
     assert not content.check_review(body_with("Summary", summary))
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        "GO",
+        "NO-GO",
+        "APPROVE",
+        "BLOCK",
+        "HOLD",
+        "REQUEST_CHANGES",
+        "Decision: approve.",
+        "VERDICT: NO-GO",
+        "Verdict: Go.",
+        "**APPROVE**",
+    ],
+)
+@pytest.mark.parametrize(
+    "surrounding", ["{}", "The tests ran.\n{}\nThe cache was warm."]
+)
+def test_summary_rejects_bare_and_prefixed_verdicts(
+    verdict: str, surrounding: str
+) -> None:
+    assert content.check_review(body_with("Summary", surrounding.format(verdict))) == [
+        "Remove the standalone verdict line from Summary"
+    ]
 
 
 @pytest.mark.parametrize("verdict", ["GO", "BLOCK"])

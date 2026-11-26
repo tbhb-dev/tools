@@ -772,16 +772,11 @@ def missing_styles(top: Path) -> list[str]:
     return [name for name in vale_styles(top) if not (top / STYLES / name).is_dir()]
 
 
-def style_problem(top: Path, *, sync: bool = True) -> str | None:
+def style_problem(top: Path) -> str | None:
     """Sync missing vale styles once; why vale can't run, or None."""
     missing = missing_styles(top)
     if not missing:
         return None
-    if not sync:
-        return (
-            f"vale styles missing from .vale/: {', '.join(missing)}; "
-            f"run `{BAZEL} run {VALE_SYNC}`"
-        )
     bazel = find_tool(BAZEL)
     target = run([bazel, "query", VALE_SYNC], cwd=top)
     if target.returncode != 0 or VALE_SYNC not in target.stdout.splitlines():
@@ -800,14 +795,13 @@ def style_problem(top: Path, *, sync: bool = True) -> str | None:
     )
 
 
-def lint(  # noqa: PLR0913 -- Shared draft lint settings.
+def lint(
     rendered: Sequence[str],
     first: int,
     *,
     path: Path = DRAFT,
     drop: frozenset[tuple[int, str]] = frozenset({TITLE_ALERT}),
     vale_only: bool = False,
-    worktree: Path | None = None,
 ) -> list[Problem]:
     """Lint the title and description with the repository's own configs.
 
@@ -821,13 +815,12 @@ def lint(  # noqa: PLR0913 -- Shared draft lint settings.
         linters = (("vale", ("--output=JSON", "--minAlertLevel=error"), parse_vale),)
     else:
         configs, linters = CONFIGS, LINTERS
-    top = worktree or root()
+    top = root()
     for name in configs:
         if not (top / name).exists():
             message = f"missing lint config {name} in {top}"
             raise SystemExit(message)
-    # A run host must not execute Bazel code from the reviewed checkout.
-    styles = style_problem(top, sync=worktree is None)
+    styles = style_problem(top)
     problems: list[Problem] = []
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)

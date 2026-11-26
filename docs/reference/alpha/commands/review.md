@@ -5,7 +5,7 @@ generated:
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
     surface: exec
-    at: "2026-11-26T16:32:40Z"
+    at: "2026-11-26T17:04:47Z"
 status: stable
 tags: [alpha]
 title: Review commands
@@ -14,11 +14,7 @@ type: Reference
 
 # Review commands
 
-`review draft N` and `review check N` create and check a review draft.
-The Summary gives the reasons for the review in one paragraph of at most 250 visible characters. The review event records the verdict.
-`review post N [--author LOGIN]` submits an approval or a request for changes.
-`review dismiss N REVIEW_ID --reason TEXT` marks a comment review as superseded, and `review reply N REVIEW_ID --text TEXT` comments on the pull request.
-See [Review drafts](../review-drafts.md) for the formats and checks.
+`review draft N` and `review check N` create and check a review draft. The Summary gives the reasons for the review in one or two sentences and at most 40 words. The review event records the verdict. `review post N [--author LOGIN]` submits an approval or a request for changes and adds a `Generated-by` trailer from the posting session. `review dismiss N REVIEW_ID --reason TEXT` marks a comment review as superseded, and `review reply N REVIEW_ID --text TEXT` comments on the pull request. See [Review drafts](../review-drafts.md) for the formats and checks.
 
 `review threads N [--unresolved]` lists thread IDs, file paths and lines, resolution states, and the first comment's author and first line.
 `review resolve N THREAD` and `review unresolve N THREAD` change one thread by its `PRRT_` ID or a review comment's database ID.
@@ -37,14 +33,10 @@ Output is one `PATH: RULE: MESSAGE` line per finding, or with `--json` an object
 Exit 0 means no findings, 1 means findings, and 2 means PATH isn't a directory or the floor fails to load.
 With `--json`, exit 2 still prints one object, `{"ok": false, "error": KIND, "message": TEXT}`, where KIND is `not-a-directory` or `floor-load`.
 
-The run host calls `agent/review_post.py` before finishing a review run whose harness stopped with exit status 0.
-The host skips posting if the run name already has a `review` record.
-The host reads the run's one `.git/tbhb-alpha/review-N.md` draft and requires its `commit_id` to equal the pinned commit.
-It validates the body with the packaged `CUE` schema and runs Vale with the reviewed repository's configuration.
-If Vale's styles are missing on the host, posting fails with a diagnostic.
-The host posts `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` against the pinned commit.
-Before an approval it reads the pull request head once and refuses if the head differs.
-P0 and P1 findings require `REQUEST_CHANGES`.
-For headless runs without an output schema, the host reads the final verdict line separately.
-Any 2xx response counts as posted.
-The review ends with the host's `Generated-by: LLM` trailer, including the run's `variant` when supplied. The review gate reads the commit from GitHub's `commit_id` and the provider from the trailer or the legacy run footer. For legacy reviews, the gate also checks that the footer refers to the same commit.
+The run host calls `agent/review_post.py` before finishing a review run whose harness stopped with exit status 0. The host skips posting if the run name already has a `review` record.
+
+The host selects a draft for one pull request under `.git/tbhb-alpha/`. It checks the body with the packaged `CUE` schema using the pinned executable from `tbhbdev cue install`. Prose linting runs in the local review commands. The host requires `commit_id` or `head_sha` to match the pinned commit, and a schema 2 draft must also name the run's repository.
+
+The host posts `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` against the pinned commit. Before an approval it reads the pull request head once and refuses if the head differs. P0 and P1 findings require `REQUEST_CHANGES`. For headless runs without an output schema, the host reads the final verdict line separately. Any 2xx response counts as posted.
+
+The review ends with the host's `Generated-by: LLM` trailer, which includes the run's `variant` when supplied. Antigravity reviews accept `--effort auto`, and the trailer uses the effort from a known model name. The review gate reads the commit from GitHub's `commit_id` and the provider from the trailer or the legacy run footer. For legacy reviews, the gate checks that the footer refers to the same commit.
