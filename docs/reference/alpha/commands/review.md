@@ -4,10 +4,8 @@ generated:
   - role: generated
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
-    effort: high
-    surface: exec
-    session: sha-256-64:9d08744b354d28e7
-    at: "2026-11-26T15:04:20Z"
+    session: sha-256-64:d1314db489f96e63
+    at: "2026-11-26T15:30:07Z"
 status: stable
 tags: [alpha]
 title: Review commands
@@ -18,8 +16,8 @@ type: Reference
 
 `review draft N` and `review check N` create and check a review draft.
 The Summary gives the reasons for the review in one or two sentences. The review event carries the verdict.
-`review post N [--author LOGIN]` submits a review document as a comment.
-`review dismiss N REVIEW_ID --reason TEXT` marks a review as superseded, and `review reply N REVIEW_ID --text TEXT` comments on the pull request.
+`review post N [--author LOGIN]` submits a draft as an approval or a request for changes.
+`review dismiss N REVIEW_ID --reason TEXT` marks a comment review as superseded, and `review reply N REVIEW_ID --text TEXT` comments on the pull request.
 See [Review drafts](../review-drafts.md) for the formats and checks.
 
 `review threads N [--unresolved]` lists thread IDs, file paths and lines, resolution states, and the first comment's author and first line.

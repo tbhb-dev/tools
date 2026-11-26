@@ -4,10 +4,8 @@ generated:
   - role: generated
     harness: codex:0.171.0
     model: openai:gpt-6.2-sol
-    effort: high
-    surface: exec
-    session: sha-256-64:9d08744b354d28e7
-    at: "2026-11-26T15:04:20Z"
+    session: sha-256-64:d1314db489f96e63
+    at: "2026-11-26T15:30:07Z"
 status: stable
 tags: [alpha]
 title: Review drafts
@@ -28,7 +26,9 @@ Create `review-N.doc.md` in the same directory as `review-N.md`. Start with YAML
 
 Leave a blank line after the header. Add `## Summary`, `## Findings`, and `## Verification` in that order. Give the reasons in Summary and describe what you checked in Verification. Each finding starts with `- BLOCK`, `- TECH-DEBT`, or `- SECURITY-DEBT`. Follow the class with `path:line` in backticks and a summary. `NO-GO` requires a `BLOCK` finding, and `GO` disallows one.
 
-`tbhbdev alpha review post N [--author LOGIN]` requires the draft's repository to match the GitHub repository for the `origin` remote. It validates the document and checks the pull request head against the draft. It submits a `COMMENT` review using the agent's own GitHub account. It looks for an active review with the same run, head, and pull request by that account, or by `LOGIN` if supplied. It prints `posted` or `exists` and the review ID when available. Both statuses exit 0. It reports refusals as `path: problem` on stderr and exits 1. Usage errors exit 2.
+`tbhbdev alpha review post N [--author LOGIN]` reads `review-N.doc.md` when that file exists. For a schema 2 document, it maps `GO` to `APPROVE` and `NO-GO` to `REQUEST_CHANGES`. The document's repository must match `origin`. It returns `exists` if the agent's GitHub account, or `LOGIN` if supplied, already has an active review with the same decision, run, head, and pull request.
+
+If the schema 2 document is absent, the command reads `review-N.md` and uses its `APPROVE` or `REQUEST_CHANGES` event. For either format, it validates the draft, checks that the pull request head matches, and submits the body and event using the agent's GitHub account. It prints `posted` or `exists` and the review ID when available. Both statuses exit 0. It reports refusals as `path: problem` on stderr and exits 1. Usage errors exit 2.
 
 ## Supersede or reply to a review
 

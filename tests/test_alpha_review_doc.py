@@ -49,6 +49,7 @@ PAGE = f"{REVIEWS}?per_page=100&page="
 LIVE = {"head": {"sha": HEAD}}
 USER = {"login": EXISTING.author}
 ROW = {"id": 942, "user": USER, "state": "COMMENTED", "body": MARKER}
+DECISION_ROW = ROW | {"state": "CHANGES_REQUESTED"}
 METADATA = {
     "schema": 2,
     "repo": REPO,
@@ -327,22 +328,33 @@ class FakeApi:
 
 def test_find_existing_uses_latest_active_match_across_pages() -> None:
     ignored = [
-        ROW | {"user": {"login": "other"}},
-        ROW | {"body": ""},
-        ROW | {"body": f"quoted {MARKER}"},
-        ROW | {"body": MARKER.replace("pr=384", "pr=385")},
+        DECISION_ROW | {"user": {"login": "other"}},
+        DECISION_ROW | {"body": ""},
+        DECISION_ROW | {"body": f"quoted {MARKER}"},
+        DECISION_ROW | {"body": MARKER.replace("pr=384", "pr=385")},
         ROW | {"state": "DISMISSED"},
-        ROW | {"body": f"SUPERSEDED: reason\n{MARKER}"},
+        ROW,
+        ROW | {"state": "APPROVED"},
+        DECISION_ROW | {"body": f"SUPERSEDED: reason\n{MARKER}"},
     ]
-    first = [ROW, *ignored, *([None] * 93)]
-    api = FakeApi(first, [ROW | {"id": 22}, ROW | {"id": 23}, *ignored])
-    assert review.find_existing(api, REPO, 384, HEAD, KEY.run, "Reviews[bot]") == 23
+    first = [DECISION_ROW, *ignored, *([None] * 91)]
+    api = FakeApi(
+        first, [DECISION_ROW | {"id": 22}, DECISION_ROW | {"id": 23}, *ignored]
+    )
+    assert (
+        review.find_existing(
+            api, REPO, 384, HEAD, KEY.run, "Reviews[bot]", state="CHANGES_REQUESTED"
+        )
+        == 23
+    )
     assert api.calls == [("GET", PAGE + "1", None), ("GET", PAGE + "2", None)]
 
 
 def test_find_existing_refuses_non_list() -> None:
     with pytest.raises(review.ReviewError, match=r"^expected a list of reviews$"):
-        review.find_existing(FakeApi({}), REPO, 384, HEAD, KEY.run, EXISTING.author)
+        review.find_existing(
+            FakeApi({}), REPO, 384, HEAD, KEY.run, EXISTING.author, state="APPROVED"
+        )
 
 
 @pytest.mark.usefixtures("use_bazel_cue")
@@ -385,15 +397,16 @@ def draft(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 @pytest.mark.usefixtures("use_bazel_cue")
 @pytest.mark.parametrize(
-    ("doc", "response", "expected"),
+    ("doc", "event", "response", "expected"),
     [
-        (DOC, {"id": 16}, 16),
-        (replace(DOC, verdict="GO", findings=(DEBT,)), {}, None),
-        (replace(DOC, verdict="GO", findings=()), None, None),
+        (DOC, "REQUEST_CHANGES", {"id": 16}, 16),
+        (replace(DOC, verdict="GO", findings=(DEBT,)), "APPROVE", {}, None),
+        (replace(DOC, verdict="GO", findings=()), "APPROVE", None, None),
     ],
 )
-def test_post_and_cli_only_send_comments(  # noqa: PLR0913, PLR0917
+def test_post_maps_schema_2_verdict_to_event(  # noqa: PLR0913, PLR0917
     doc: ReviewDoc,
+    event: str,
     response: object,
     expected: int | None,
     draft: Path,
@@ -404,12 +417,12 @@ def test_post_and_cli_only_send_comments(  # noqa: PLR0913, PLR0917
     calls = [
         ("GET", PULL, None),
         ("GET", PAGE + "1", None),
-        ("POST", REVIEWS, {"commit_id": HEAD, "body": body, "event": "COMMENT"}),
+        ("POST", REVIEWS, {"commit_id": HEAD, "body": body, "event": event}),
     ]
-    api = FakeApi(LIVE, [], response)
+    api = FakeApi(LIVE, [ROW], response)
     assert review.post(api, doc, author=EXISTING.author) == ("posted", expected)
     assert api.calls == calls
-    api = FakeApi(USER, LIVE, [], response)
+    api = FakeApi(USER, LIVE, [ROW], response)
     monkeypatch.setattr(cli, "GhApi", lambda: api)
     preamble = PREAMBLE.replace("verdict: NO-GO", f"verdict: {doc.verdict}")
     draft.write_text(preamble + body.removesuffix(f"\n{MARKER}\n"))
@@ -419,13 +432,62 @@ def test_post_and_cli_only_send_comments(  # noqa: PLR0913, PLR0917
     assert capsys.readouterr() == (output, "")
 
 
+@pytest.mark.parametrize("event", ["APPROVE", "REQUEST_CHANGES"])
+def test_post_cli_uses_draft_event(
+    event: str,
+    draft: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    body = BODY[BODY.index("## Summary") :]
+    standard = draft.with_name("review-384.md")
+    standard.write_text(
+        f"---\npr: 384\ncommit_id: {HEAD.upper()}\nevent: {event}\n---\n{body}"
+    )
+    api = FakeApi(LIVE, {"id": 16})
+    monkeypatch.setattr(cli, "GhApi", lambda: api)
+    assert cli.main(["post", "384"], "review") == 0
+    assert capsys.readouterr() == ("posted 16\n", "")
+    assert api.calls == [
+        ("GET", PULL, None),
+        ("POST", REVIEWS, {"commit_id": HEAD, "body": body, "event": event}),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("event", "pr_number", "problem"),
+    [
+        ("COMMENT", 384, "set event to APPROVE or REQUEST_CHANGES"),
+        ("APPROVE", 383, "line 2: frontmatter $.pr: 384 was expected"),
+    ],
+)
+def test_post_cli_refuses_a_draft_without_a_valid_decision(  # noqa: PLR0913, PLR0917
+    event: str,
+    pr_number: int,
+    problem: str,
+    draft: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    body = BODY[BODY.index("## Summary") :]
+    standard = draft.with_name("review-384.md")
+    standard.write_text(
+        f"---\npr: {pr_number}\ncommit_id: {HEAD}\nevent: {event}\n---\n{body}"
+    )
+    api = FakeApi()
+    monkeypatch.setattr(cli, "GhApi", lambda: api)
+    assert cli.main(["post", "384"], "review") == 1
+    assert capsys.readouterr().err.startswith(f"{standard}: {problem}")
+    assert api.calls == []
+
+
 @pytest.mark.usefixtures("use_bazel_cue")
 def test_post_cli_exists_and_refusals(
     draft: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    api = FakeApi(LIVE, [ROW], {})
+    api = FakeApi(LIVE, [DECISION_ROW], {})
     monkeypatch.setattr(cli, "GhApi", lambda: api)
     args = ["post", "384", "--author", EXISTING.author]
     assert cli.main(args, "review") == 1

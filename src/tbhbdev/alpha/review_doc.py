@@ -39,13 +39,17 @@ _MARKER_SYNTAX = re.compile(r"<!--\s*tbhb-(?:review|reply)\b", re.IGNORECASE)
 _REASON_LIMIT = 200
 _VERDICT_WORD = r"(?:NO-GO|GO|APPROVED?|BLOCK|HOLD|REQUEST_CHANGES)"
 _WORD_END = r"(?=$|[\s`*.:!?,;–—]|_+(?!\w))"  # noqa: RUF001
-_LABELED_VERDICT = rf"(?<![^\W_])verdict[`*_]*\s*:[\s`*_]*{_VERDICT_WORD}{_WORD_END}"
+_VERDICT_LABEL = r"(?<![^\W_])verdict[`*_]*"
+_LABELED_VERDICT = rf"{_VERDICT_LABEL}\s*:[\s`*_]*{_VERDICT_WORD}{_WORD_END}"
+_START = r"(?:^\s*(?:>\s*|[-*+]\s+)?|[.!?][`*_]*\s+)"
 VERDICT_LINE = re.compile(
     rf"\s*(?:>\s*|[-*+]\s+)?[`*_]*{_LABELED_VERDICT}", re.IGNORECASE
 )
 SUMMARY_VERDICT = re.compile(
-    rf"{_LABELED_VERDICT}|^\s*[`*_]*{_VERDICT_WORD}{_WORD_END}"
-    rf"|[.!?;][`*_]*\s+[`*_]*{_VERDICT_WORD}[`*_]*(?:[ \t]*$|[.:!?–—])",  # noqa: RUF001
+    rf"{_LABELED_VERDICT}|{_VERDICT_LABEL}\s+is\s+[`*_]*{_VERDICT_WORD}{_WORD_END}"
+    rf"|{_START}(?:\*\*{_VERDICT_WORD}\*\*|__{_VERDICT_WORD}__)(?=\s|$)"
+    rf"|{_START}[`*_]*{_VERDICT_WORD}[`*_]*"
+    r"(?:\s*:|[.!?][`*_]*(?=\s|$)|\s*$|\s+because\b)",
     re.IGNORECASE,
 )
 
@@ -296,15 +300,15 @@ def _dismissed(state: str, body: str) -> bool:
     return state == "DISMISSED" or body.startswith("SUPERSEDED:")
 
 
-def _active_id(entry: object, expected: Marker, author: str) -> int | None:
+def _active_id(entry: object, expected: Marker, author: str, state: str) -> int | None:
     # The mapping pattern checks the API response at runtime.
     match cast("_ReviewRow", entry):  # pragma: no mutate -- cast is a runtime no-op
         case {
             "id": int(review_id),
             "user": {"login": str(login)},
             "body": str(body),
-            "state": str(state),
-        } if (key := parse_marker(body)) is not None:
+            "state": str(actual_state),
+        } if actual_state == state and (key := parse_marker(body)) is not None:
             existing = Existing(review_id, login, key, state, body)
             same_marker = existing.marker == expected
             same_author = existing.author.casefold() == author.casefold()
@@ -316,12 +320,12 @@ def _active_id(entry: object, expected: Marker, author: str) -> int | None:
 
 
 def find_existing(  # noqa: PLR0913, PLR0917
-    api: Api, repo: str, pr: int, head_sha: str, run: str, author: str
+    api: Api, repo: str, pr: int, head_sha: str, run: str, author: str, *, state: str
 ) -> int | None:
     """Page through GET /repos/{repo}/pulls/{pr}/reviews?per_page=100.
 
-    Return the ID of the newest review with the author's login and matching
-    marker whose is_dismissed check is false, or None if none match.
+    Return the ID of the newest active review with the matching author, marker,
+    and decision state, or None if none match.
     """
     expected = Marker(repo, pr, head_sha, run)
     newest = None
@@ -335,47 +339,61 @@ def find_existing(  # noqa: PLR0913, PLR0917
         # GitHub returns reviews in chronological order.
         entries = cast("list[object]", reviews)  # pragma: no mutate -- runtime no-op
         for entry in entries:
-            if (matched := _active_id(entry, expected, author)) is not None:
+            if (matched := _active_id(entry, expected, author, state)) is not None:
                 newest = matched
         if len(reviews) < _PAGE_SIZE:
             return newest
         page += 1
 
 
+def check_head(api: Api, path: str, commit: str) -> None:
+    """Refuse a draft for a head that is no longer current."""
+    live = api.request("GET", path)
+    match cast("_Pull", live):  # pragma: no mutate -- runtime no-op
+        case {"head": {"sha": head}} if head == commit:
+            return
+        case _:
+            message = "pull request head has moved"
+            raise ReviewError(message)
+
+
+def send_review(api: Api, path: str, commit: str, body: str, event: str) -> int | None:
+    """Submit the body with its review event and return the ID if provided."""
+    result = api.request(
+        "POST",
+        f"{path}/reviews",
+        {"commit_id": commit, "body": body, "event": event},
+    )
+    match cast("dict[str, object] | None", result):  # pragma: no mutate -- cast
+        case {"id": int(review_id)}:
+            return review_id
+        case _:
+            return None
+
+
 def post(
     api: Api, doc: ReviewDoc, *, author: str
 ) -> tuple[Literal["posted", "exists"], int | None]:
-    """Validate the document and refuse a moved pull request head.
+    """Post the schema 2 verdict as a GitHub review event after validation.
 
-    Return ("exists", id) if the author already posted a matching review. Otherwise
-    POST a review with commit_id set to doc.head_sha, body set to render(doc),
-    and event set to COMMENT. Return ("posted", id), with None for an absent ID.
+    Return ("exists", id) if the author already posted the matching decision.
     Accept the race between concurrent posts without a lock.
-
     """
     if problems := validate(doc):
         raise ReviewError("\n".join(problems))
     path = f"repos/{doc.repo}/pulls/{doc.pr}"
-    live = api.request("GET", path)
-    match cast("_Pull", live):  # pragma: no mutate -- runtime no-op
-        case {"head": {"sha": head}} if head == doc.head_sha:
-            pass
-        case _:
-            message = "pull request head has moved"
-            raise ReviewError(message)
-    existing = find_existing(api, doc.repo, doc.pr, doc.head_sha, doc.run.name, author)
+    check_head(api, path, doc.head_sha)
+    event, state = (
+        ("APPROVE", "APPROVED")
+        if doc.verdict == "GO"
+        else ("REQUEST_CHANGES", "CHANGES_REQUESTED")
+    )
+    existing = find_existing(
+        api, doc.repo, doc.pr, doc.head_sha, doc.run.name, author, state=state
+    )
     if existing is not None:
         return "exists", existing
-    result = api.request(
-        "POST",
-        f"{path}/reviews",
-        {"commit_id": doc.head_sha, "body": render(doc), "event": "COMMENT"},
-    )
-    match cast("dict[str, object] | None", result):  # pragma: no mutate -- cast
-        case {"id": int(review_id)}:
-            return "posted", review_id
-        case _:
-            return "posted", None
+    return "posted", send_review(api, path, doc.head_sha, render(doc), event)
 
 
 def dismiss(
