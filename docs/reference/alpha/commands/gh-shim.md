@@ -1,5 +1,5 @@
 ---
-description: The gh on PATH that budgets agent sessions' gh calls.
+description: The GitHub command-line tool wrapper on PATH that budgets agent sessions' calls.
 generated:
   - role: generated
     harness: claude-code:2.1.319
@@ -10,11 +10,11 @@ generated:
     at: "2026-11-26T03:16:54Z"
 status: stable
 tags: [alpha]
-title: gh shim
+title: GitHub command-line tool shim
 type: Reference
 ---
 
-# gh shim
+# GitHub command-line tool shim
 
 `gh-shim` is the `gh` that agent sessions find first on PATH.
 It budgets their `gh` calls as a backstop.

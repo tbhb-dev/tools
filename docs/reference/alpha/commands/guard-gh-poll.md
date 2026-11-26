@@ -10,11 +10,11 @@ generated:
     at: "2026-11-26T03:16:54Z"
 status: stable
 tags: [alpha]
-title: Guard gh poll
+title: Guard GitHub polling
 type: Reference
 ---
 
-# Guard gh poll
+# Guard GitHub polling
 
 `guard-gh-poll` is a PreToolUse hook that blocks GitHub polling and unsetting the 1Password service account token's variable.
 It allows `gh run list --limit 1` and a list endpoint with `per_page=1`.

@@ -10,11 +10,11 @@ generated:
     at: "2026-11-26T03:16:54Z"
 status: stable
 tags: [alpha]
-title: GitHub App token
+title: GitHub installation token
 type: Reference
 ---
 
-# GitHub App token
+# GitHub installation token
 
 `gh-app` requests a GitHub App installation token, reading the App's id and RSA key through Connect, and keeps it under `$XDG_STATE_HOME/gh-app/VAULT/APP`.
 `--permissions NAME:read,NAME:write` narrows the token to those permissions, such as `contents:read`, and keeps it in its own directory, so a narrowed token and a full one never replace each other.

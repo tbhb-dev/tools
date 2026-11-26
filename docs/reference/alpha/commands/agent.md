@@ -1,5 +1,5 @@
 ---
-description: Run coordination, host precheck, signing parity, fetch refs and build run expectations.
+description: Run coordination, host checks, signing parity, fetch refs, and build run expectations.
 generated:
   - role: generated
     harness: claude-code:2.1.319

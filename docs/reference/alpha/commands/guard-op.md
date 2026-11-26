@@ -1,5 +1,5 @@
 ---
-description: The 1Password account flag requirement on shell calls and proposed writes.
+description: The 1Password account flag that shell calls and proposed writes need.
 generated:
   - role: generated
     harness: claude-code:2.1.319

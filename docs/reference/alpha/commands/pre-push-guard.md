@@ -30,3 +30,7 @@ The pre-push guard requires each newly pushed commit with an agent author or com
 The guard accepts local signatures offline.
 When it needs the registered keys, it makes one request per push with a five-second timeout.
 If the request fails, the guard accepts the local key alone and explains the fallback when it refuses a commit.
+
+From a detected agent session, every branch creation or update must target a remote branch under `agent/` or `renovate/`, including when the push sends no new commits.
+Agents may delete only `agent/` branches.
+The guard names each refused ref.

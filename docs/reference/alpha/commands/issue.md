@@ -33,7 +33,6 @@ With `--dry-run`, the command prints the creation payload as JSON and skips the 
 A private issue can have a public sub-issue only when the parent is a Feature and the child is a Task, Defect, Chore, Spike, or Research issue.
 `block BLOCKED --by BLOCKER` adds a dependency, and `unblock BLOCKED --by BLOCKER` removes it.
 Use `--blocked-by` as an alias for `--by`, or pass `BLOCKER --blocking BLOCKED` to specify the blocker first.
-
 Use `owner/repo#N` for a qualified issue reference or `'#N'` for an issue in the current repository's origin.
 GitHub requires the same repository owner for the parent and child when adding a sub-issue.
 With `--dry-run`, the command looks up the related issue and prints its numeric ID as JSON.

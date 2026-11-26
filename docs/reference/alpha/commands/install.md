@@ -1,5 +1,5 @@
 ---
-description: Git hooks, user-level harness hooks, the gh shim and the ccstatusline pin.
+description: Git hooks, user-level harness hooks, the GitHub command-line tool shim, and the ccstatusline pin.
 generated:
   - role: generated
     harness: claude-code:2.1.319
@@ -101,3 +101,5 @@ Outside a repository, the identity record hook still writes the session's record
 Both `state-guard` and `session-context` run regardless of origin.
 At SessionStart, Claude Code runs `tbhbdev alpha install --hook`, which puts the `gh` shim first on PATH for the session's commands and reinstalls the git hooks of the worktree the session starts in.
 Its PostModelSwitch hook records a `/model` switch, so a commit in the next turn credits the new model.
+
+The alpha commands write each worktree's state under `$(git rev-parse --git-dir)/tbhb-alpha`, so sessions in two worktrees of one clone keep separate state.

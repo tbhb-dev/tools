@@ -1,5 +1,5 @@
 ---
-description: The hook that blocks gh commands when GH_CONFIG_DIR is unset or empty.
+description: The hook that blocks GitHub commands when GH_CONFIG_DIR is unset or empty.
 generated:
   - role: generated
     harness: claude-code:2.1.319
@@ -10,11 +10,11 @@ generated:
     at: "2026-11-26T03:16:54Z"
 status: stable
 tags: [alpha]
-title: Guard gh config dir
+title: Guard GitHub config dir
 type: Reference
 ---
 
-# Guard gh config dir
+# Guard GitHub config dir
 
 `guard-gh-config-dir` is a PreToolUse hook that blocks `gh` commands when `GH_CONFIG_DIR` is unset or empty in the hook's environment.
 It scans the command string without running `gh` and accepts any nonempty value.
