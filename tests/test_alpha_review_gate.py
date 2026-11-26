@@ -24,16 +24,13 @@ def review(  # noqa: PLR0913 -- one keyword for each field a test varies
     number: int = 1,
     body: str | None = None,
 ) -> gate.Review:
-    text = (
-        f"Looks right.\n\n---\n{stamp(harness, number=number)}\n"
-        if body is None
-        else body
-    )
+    if body is None:
+        body = f"Looks right.\n\n---\n{stamp(harness, number=number)}\n"
     return {
         "id": number,
         "state": state,
         "commit_id": commit,
-        "body": text,
+        "body": body,
         "login": login,
     }
 
@@ -103,7 +100,7 @@ def test_antigravity_author_may_not_approve_as_agy_or_gemini(harness: str) -> No
 
 
 @pytest.mark.parametrize("head", ["", "abc", "A" * 40, "g" * 40, HEAD + "0"])
-def test_a_malformed_head_fails_verification(head: str) -> None:
+def test_a_malformed_head_fails_the_gate(head: str) -> None:
     pull = gate.Pull(head, [review(commit=head, body=stamp("claude"))], [], [])
     assert gate.evaluate(APP, pull) == [
         f"the pull request head {head!r} is not a full commit SHA"
